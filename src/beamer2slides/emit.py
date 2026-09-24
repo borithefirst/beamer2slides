@@ -717,6 +717,167 @@ def box_lines(paras: list[dict], edges: list[str], scale: float, fonts: FontMapp
 LINE_MARGIN = 2.5
 
 
+def justified_right(paras: list[dict], scale: float, widest: float, joins: float) -> float | None:
+    """The right edge (Slides pt) of a measured box's text where its justified paragraphs can be
+    written JUSTIFIED, or None where they cannot and are written ragged (START).
+
+    JUSTIFIED sets every line but a paragraph's last out to the box's edge, so the edge is where
+    the PDF's full lines end - never further: an edge `LINE_MARGIN` past Slides' widest line ran
+    the lines through the panel or frame the PDF's stopped at (visual hunt r7: \\fcolorbox, block
+    and tcolorbox bodies). Slides breaks a justified line as a ragged one, at natural spaces, so
+    the edge must also leave `LINE_MARGIN` past the widest line as Slides sets it (`widest`, a
+    line TeX shrank comes out longer than its PDF extent) and before the next line's first word
+    (`joins`, a narrower substitute pulls a word up). Short of the PDF's edge for the second is
+    fine; where no edge meets both, the words keep their lines and give up justification."""
+    edges = justified_edges(paras, scale)
+    if not edges:
+        return None
+    right = min(min(edges), joins - LINE_MARGIN)
+    return right if right >= widest + LINE_MARGIN else None
+
+
+def justified_edges(paras: list[dict], scale: float) -> list[float]:
+    """Where the full lines of a box's justified paragraphs end (Slides pt)."""
+    return [max(l["x1"] for l in p["lines"][:-1]) * scale for p in paras if p.get("justified") and len(p["lines"]) > 1]
+
+
+def flowed_justified_right(paras: list[dict], scale: float, fonts: "FontMapper") -> float | None:
+    """The right edge (Slides pt) for a box of justified paragraphs whose PDF lines could not be
+    measured one by one (slides_lines: a word TeX hyphenated at a line's end, which Slides
+    will not break, so its lines break elsewhere anyway): their full lines' own edge, when the
+    words flowed into it `LINE_MARGIN` short of it take no more lines than the PDF's (the box
+    would grow over what is under it); else None, and the box is ragged. A ragged paragraph
+    of several lines in the box keeps it ragged: its breaks need room past its lines."""
+    edges = justified_edges(paras, scale)
+    if not edges or any(len(p["lines"]) > 1 and not p.get("justified") for p in paras):
+        return None
+    right = min(edges)
+    for p in paras:
+        n = flowed_lines(p, scale, fonts, right - LINE_MARGIN)
+        if n is None or n > len(p["lines"]):
+            return None
+    return right
+
+
+def paragraph_ends(paras: list[dict], measured: list[tuple[float, float] | None] | None, right: float,
+                   justify_box: bool, scale: float, fonts: "FontMapper") -> list[tuple[bool, float]]:
+    """Per paragraph of a text box whose text ends at `right` (Slides pt): whether it is written
+    JUSTIFIED, and its indentEnd (Slides pt), the room it keeps free before that edge.
+
+    One edge cannot break every paragraph where TeX did when one paragraph's widest line as
+    Slides sets it runs past where another's next word would join its line (visual hunt r7:
+    "Office hours 14:00-15:30" 5.6 pt wider in Lato than in the PDF, and the paragraph beside
+    it pulled a word up to the slide's edge; "Cambridge University / Press."). Such a paragraph
+    ends at its own edge instead: the middle of its own range, at least `LINE_MARGIN` past its
+    widest line. A justified paragraph ends where its full lines do (justified_right), short of
+    it for its next word, and is ragged where no edge fits: over a box of justified paragraphs
+    (`justify_box`) that is the box's own edge. Only a left-to-right box measured line by line
+    (box_lines) has a paragraph edge; any other keeps its box's."""
+    out = []
+    for i, p in enumerate(paras):
+        g = measured[i] if measured else None
+        n = len(p["lines"])
+        justified = bool(p.get("justified")) and hugs(p) == "left" and n > 1
+        if measured is None or p.get("direction") == "rtl":
+            out.append((justified and justify_box, 0.0))
+        elif g is not None and n > 1:
+            widest, joins = g
+            if justified:
+                edge = min(max(l["x1"] for l in p["lines"][:-1]) * scale, joins - LINE_MARGIN, right)
+                if edge >= widest + LINE_MARGIN:
+                    out.append((True, right - edge))
+                    continue
+            if joins - LINE_MARGIN < right - 0.01:
+                own = widest + max((joins - widest) / 2, LINE_MARGIN)
+                out.append((False, max(0.0, right - own)))
+            else:
+                out.append((False, 0.0))
+        elif justified and not justify_box:
+            edge = max(l["x1"] for l in p["lines"][:-1]) * scale
+            lines = flowed_lines(p, scale, fonts, edge - LINE_MARGIN) if edge <= right else None
+            out.append((True, right - edge) if lines is not None and lines <= n else (False, 0.0))
+        else:
+            out.append((justified and justify_box, 0.0))
+    return out
+
+
+def unhyphenated_room(paras: list[dict], measured: list | None, left: float, right: float, justify_box: bool,
+                      scale: float, fonts: "FontMapper") -> float:
+    """How much further right (Slides pt) a box whose text runs from `left` to `right` must end
+    for no paragraph that could not be measured line by line to take more lines than the PDF's -
+    at most an em of its text. Slides hyphenates nothing: a word TeX broke at a line's end moves
+    whole, and a line more grows the box over what is under it (visual hunt: design-v9, 'Robots
+    de-/ployed in 9 sites' in a KPI tile came out on three lines, 'sites' over the tile's edge).
+    A justified paragraph written JUSTIFIED at its own edge (flowed_justified_right) is left as
+    it is; a centred one is measured across the whole box."""
+    grow = 0.0
+    for i, p in enumerate(paras):
+        n = len(p["lines"])
+        if n < 2 or (measured and measured[i] is not None) or (justify_box and p.get("justified")) or \
+                p.get("direction") == "rtl" or hugs(p) not in ("left", "center"):
+            continue
+        centred = hugs(p) == "center"
+
+        def lines_at(extra: float, p=p, centred=centred) -> int | None:
+            if centred:
+                return flowed_lines(p, scale, fonts, right + extra - left - LINE_MARGIN, start=0.0)
+            return flowed_lines(p, scale, fonts, right + extra - LINE_MARGIN)
+
+        now = lines_at(0.0)
+        cap = p["size"] * scale
+        if now is None or now <= n or (lines_at(cap) or n + 1) > n:
+            continue
+        lo, hi = 0.0, cap
+        for _ in range(20):
+            mid = (lo + hi) / 2
+            got = lines_at(mid)
+            lo, hi = (lo, mid) if got is not None and got <= n else (mid, hi)
+        grow = max(grow, hi)
+    return grow
+
+
+def flowed_lines(p: dict, scale: float, fonts: "FontMapper", right: float, start: float | None = None) -> int | None:
+    """How many lines Slides sets a paragraph's words on in a box whose text ends at `right`
+    (Slides pt): as many words on each line as fit, at their natural spaces, the first line
+    starting where the PDF's does (a \\parindent) and the others at the paragraph's text edge -
+    or every line at `start` (a centred paragraph, measured across its box). None when a run's
+    advances are not known."""
+    runs = p["runs"]
+    text = "".join(r["text"] for r in runs)
+
+    def width(a: int, b: int) -> float | None:
+        total = 0.0
+        for run in runs_between(runs, a, b):
+            if run.get("hole_size"):
+                total += len(run["text"]) * HOLE_SPACE_EM * run["hole_size"]
+                continue
+            w = slides_width([run], scale, fonts)
+            if w is None:
+                return None
+            total += w
+        return total
+
+    ends = [i for i, ch in enumerate(text) if ch == " " and i > 0 and text[i - 1] != " "] + [len(text.rstrip())]
+    a, count = len(text) - len(text.lstrip()), 0
+    while a < len(text.rstrip()):
+        x0 = start if start is not None else (p["lines"][0]["x0"] if count == 0 else p["text_x0"]) * scale
+        best = None
+        for b in (e for e in ends if e > a):
+            w = width(a, b)
+            if w is None:
+                return None
+            if x0 + w > right:
+                break
+            best = b
+        if best is None:
+            return None  # (a word longer than the line: Slides breaks it inside)
+        count += 1
+        a = best
+        while a < len(text) and text[a] == " ":
+            a += 1
+    return count
+
+
 def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                       placeholder: dict | None = None, page_slide: dict[int, str] | None = None,
                       bar: list[float] | None = None, right_limit: float | None = None,
@@ -765,6 +926,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     room = (min(limits) - right_pdf) * scale if limits else 0.0
     measured = box_lines(paras, edges, scale, fonts) if multiline else None
     known = [g for g in measured or [] if g is not None]
+    justify_box = False  # whether the box's right edge is its justified paragraphs' own (justified_right)
     if not multiline:
         slack = max(0.15 * inner_w, 2 * max(sizes))
     elif known and len(known) == len(paras):
@@ -777,16 +939,23 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
         inner_w = widest - left_pdf * scale
         room = joins - widest
         slack = max(room / 2, LINE_MARGIN)
-        if all(p.get("justified") for p in paras if len(p["lines"]) > 1):
-            # JUSTIFIED sets every line but the last out to the box's edge: room there would
-            # move the column's right edge, not just leave the next word out.
-            slack = LINE_MARGIN
+        right = justified_right(paras, scale, widest, joins)
+        if right is not None:
+            slack, justify_box = right - widest, True
     else:
         slack = room / 2 if room > 4 else 2 + 0.01 * inner_w
         if known:
             # Some paragraph could not be measured (a thin space, a symbol without CM metrics):
             # the PDF's extent still sizes the box, never narrower than the lines that were.
             slack = max(slack, max(g[0] for g in known) + LINE_MARGIN - left_pdf * scale - inner_w)
+        right = flowed_justified_right(paras, scale, fonts) if measured is not None else None
+        if right is not None:
+            slack, justify_box = right - left_pdf * scale - inner_w, True
+        if not el.get("code"):
+            slack += unhyphenated_room(paras, measured, left_pdf * scale, left_pdf * scale + inner_w + slack,
+                                       justify_box, scale, fonts)
+    ends = paragraph_ends(paras, measured, left_pdf * scale + inner_w + slack, justify_box, scale, fonts) \
+        if multiline and not el.get("code") else [(False, 0.0)] * len(paras)
     x = left_pdf * scale - PAD_X
     aligns = set(edges)
     if aligns == {"center"}:
@@ -893,7 +1062,8 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
 
     # From here on indices refer to the final text, without tabs.
     pos = 0
-    for p, t, ratio, above, cap, edge, zs in zip(paras, texts, ratios, space_above, bullet_caps, edges, sized):
+    for p, t, ratio, above, cap, edge, zs, (justify, indent_end) in zip(paras, texts, ratios, space_above, bullet_caps,
+                                                                       edges, sized, ends):
         p_start, p_end = pos, pos + u16(t)
         pos = p_end + 1
         start = p_start
@@ -963,9 +1133,11 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
                     p["lines"][0]["x0"] > p["text_x0"] + 0.2 * p["size"]:
                 # a first line set in by \parindent (classify.Paragraph.indent)
                 first_indent += (p["lines"][0]["x0"] - p["text_x0"]) * scale
-        # Justified prose stays justified (classify.PageClassifier.is_justified); Slides leaves
-        # the last line ragged, as TeX does.
-        justify = p.get("justified") and edge == start_edge
+        # Justified prose stays justified (classify.PageClassifier.is_justified) where its text
+        # ends at its PDF lines' edge (justified_right, paragraph_ends); Slides leaves the last
+        # line ragged, as TeX does. A paragraph whose breaks need an edge short of the box's
+        # keeps the difference free (indentEnd), written only where there is one.
+        end = round(indent_end, 2)
         reqs.append({"updateParagraphStyle": {
             "objectId": object_id,
             "textRange": {"type": "FIXED_RANGE", "startIndex": p_start, "endIndex": max(p_end, p_start + 1)},
@@ -975,10 +1147,11 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
                 "lineSpacing": round(100 * ratio, 1),
                 "spaceAbove": pt(round(above, 2)), "spaceBelow": pt(0),
                 "indentStart": pt(round(text_indent, 2)), "indentFirstLine": pt(round(first_indent, 2)),
+                **({"indentEnd": pt(end)} if end > 0.01 else {}),
                 **({"direction": "RIGHT_TO_LEFT"} if rtl else {}),
             },
             "fields": "alignment,lineSpacing,spaceAbove,spaceBelow,indentStart,indentFirstLine" +
-                      (",direction" if rtl else ""),
+                      (",indentEnd" if end > 0.01 else "") + (",direction" if rtl else ""),
         }})
     return reqs
 

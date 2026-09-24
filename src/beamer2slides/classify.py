@@ -740,29 +740,46 @@ def first_word_width(span: Span) -> float:
     return span.rect.w * weight(word) / weight(text)
 
 
-def word_gaps(line: "Line") -> list[float]:
-    """The word spaces of a line in ems of its size: gaps between neighbouring words of the
-    line's own size (not a script, a formula's pieces or a \\quad)."""
-    words = [s for s in line.content if s.text.strip() and abs(s.size - line.size) <= 0.5 and s.info.family != "math"]
-    # (TeX takes a space from the font before it - after a bold lead-in it is wider - and
-    # widens it after a sentence's end or a colon)
-    font = max(words, key=lambda s: sum(t.font == s.font for t in words)).font if words else None
-    gaps = [(b.rect.x0 - a.rect.x1) / line.size for a, b in zip(words, words[1:])
-            if a.font == font and a.text.rstrip()[-1:] not in ".?!:;)”’\"'"]
-    return [g for g in gaps if 0.1 <= g <= 0.9]
+def last_word_width(span: Span) -> float:
+    """Width of a span's last word (first_word_width's other end)."""
+    text = span.text.strip()
+    if not text:
+        return span.rect.w
+    weight = lambda t: sum(1000 if cjk(c) else _WIDTHS.get(c, 556) for c in t)
+    return span.rect.w * weight(text.split()[-1]) / weight(text)
+
+
+def line_spaces(line: "Line") -> dict[str, float]:
+    """The word space of each text font on a line (em): the lower median of the gaps between
+    neighbouring spans of that font (font_gaps). TeX gives every interword glue of one font on a
+    line one width; the gaps that differ are not word spaces of that glue - a hanging label's
+    (0.6 em), a gap across a formula or before a relation (0.8 em) - and are wider, so the lower
+    median is the line's space where a mean was pulled up by one of them."""
+    out = {}
+    for font in dict.fromkeys(s.font for s in line.content if s.text.strip() and s.info.family != "math"):
+        gaps = sorted(font_gaps(line, font))
+        if gaps:
+            out[font] = gaps[(len(gaps) - 1) // 2]
+    return out
 
 
 def stretched(lines: list["Line"]) -> bool:
     """Were these lines' word spaces stretched or shrunk to fill the measure? Justified lines each
     get spaces of their own width; ragged lines (and a justified paragraph's last line) keep
-    the font's natural space, the same on every line to a hundredth of an em."""
-    means = [sum(g) / len(g) for g in map(word_gaps, lines) if g]
-    if len(means) >= 2 and max(means) - min(means) > 0.02:
-        return True
+    the font's natural space, the same on every line to a hundredth of an em. Spaces are compared
+    font by font (`line_spaces`): a bold or italic face has a wider space of its own (a bold
+    heading line over a regular one, a reference's italic title over its roman venue), and a
+    line's mean was pulled up by a label's or a formula's gap (visual hunt r7: 13 ragged
+    paragraphs, items and references set JUSTIFIED)."""
+    spaces = [line_spaces(l) for l in lines]
+    for font in {f for s in spaces for f in s}:
+        widths = [s[font] for s in spaces if font in s]
+        if len(widths) >= 2 and max(widths) - min(widths) > 0.02:
+            return True
     # A line held in one span of several words had its spaces under extract's 0.3 em split:
     # beside a line of that font whose words stand at least that far apart, it was shrunk.
     fonts = Counter(s.font for l in lines for s in l.content if s.text.strip() and s.info.family != "math")
-    if not fonts or not means:
+    if not fonts or not any(spaces):
         return False
     font = fonts.most_common(1)[0][0]
     # (not a quantity's thin spaces, see thin_span)
@@ -2913,12 +2930,23 @@ class PageClassifier:
     def is_justified(par: Paragraph) -> bool:
         """Justified prose (beamer's default outside lists, \\justifying, a \\parbox): the lines
         but the last all end together, and their word spaces were stretched to get there. A
-        left-aligned paragraph whose lines end together by chance keeps natural spaces."""
+        left-aligned paragraph whose lines end together by chance keeps natural spaces.
+
+        With two lines only one line ends at the measure, so the shape says little: the last
+        line of justified text is never longer than the full ones (a centred pair's may be), and
+        every line starts at the measure's left edge (the first may be set in by \\parindent;
+        a reference's or a description's hanging label starts left of its wrapped lines)."""
         if par.align != "left" or len(par.lines) < 2 or par.reason is not None or is_mono(par.spans) \
                 or par.direction == "rtl":
             return False
         ends = [l.x1 for l in par.lines[:-1]]
-        return max(ends) - min(ends) <= 0.75 and stretched(par.lines)
+        if max(ends) - min(ends) > 0.75 or par.last.x1 > min(ends) + 0.75:
+            return False
+        starts = [l.x0 for l in par.lines[1:]]
+        indent = par.first.x0 - starts[0]
+        if max(starts) - min(starts) > 0.75 or not (abs(indent) <= 0.75 or indent >= 0.2 * par.size):
+            return False
+        return stretched(par.lines)
 
     def build_paragraphs(self, lines: list[Line]) -> list[Paragraph]:
         self.find_hfill_pieces(lines)
@@ -3120,8 +3148,13 @@ class PageClassifier:
                             sep = ""
                         elif len(tail) >= 2 and tail.endswith(("-", "–", "—")) and not tail[-2].isspace() \
                                 and text[:1].isalnum():
-                            # a compound's hyphen or a range's dash: the words stay joined
-                            sep = chr(11) if par.role == "title" or soft_breaks else ""
+                            # a compound's hyphen or a range's dash: the words stay joined - but
+                            # Slides breaks no line at a hyphen: a compound longer than every line
+                            # TeX set it among keeps its break, or Slides cut it inside a word
+                            # ("Datenschutz-Folgenabsch / ätzung" in a narrow column's heading)
+                            longer = last_word_width(prev) + first_word_width(span) > \
+                                max(l.x1 - l.x0 for l in par.lines) + 0.5
+                            sep = chr(11) if par.role == "title" or soft_breaks or longer else ""
                         elif par.role == "title" or soft_breaks:
                             sep = chr(11)  # titles keep their line breaks (a soft break in Slides)
                         elif cjk(tail.rstrip()[-1:]) and cjk(text.lstrip()[:1]):
