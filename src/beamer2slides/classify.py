@@ -4662,6 +4662,17 @@ class PageClassifier:
         set_justified = {cc for cc in range(n_cols) if col_info[cc]["align"] == "left" and justified_cells(
             [cell_lines[r][c2] for r, c2, _ in wrapped_cells if c2 == cc], columns[cc][1])}
         justified = [[r, cc] for r, cc, _ in wrapped_cells if cc in set_justified]
+        # [row, top, bottom] of a row shaded by a band of its own (\rowcolor, \rowcolors: fills
+        # that hold its baseline and no other row's): emit puts the Slides row's edges there, as on
+        # a rule. Set just above its words instead, a shaded row began ~3 pt below its band and
+        # the words sat at the top of their fill (r2_tables_v1 slide 4).
+        shown = [f for f in fills if f["color"].lower() != page_color]
+        bands = []
+        for rr, b in enumerate(baselines):
+            own = [f["rect"] for f in shown if f["rect"].y0 <= b <= f["rect"].y1
+                   and sum(f["rect"].y0 <= b2 <= f["rect"].y1 for b2 in baselines) == 1]
+            if own:
+                bands.append([rr, round(min(r.y0 for r in own), 2), round(max(r.y1 for r in own), 2)])
         return {
             "id": f"p{self.page['index']}tab{index}", "kind": "table", "role": "table",
             "bbox": c.expand(1.0).as_list(), "frame": frame.as_list(), "size": round(size, 2),
@@ -4691,6 +4702,7 @@ class PageClassifier:
                       for f in fills if f["color"].lower() != page_color
                       for rr, b in enumerate(baselines) if f["rect"].y0 <= b <= f["rect"].y1
                       for cc in range(n_cols) if f["rect"].x0 <= (bounds[cc] + bounds[cc + 1]) / 2 <= f["rect"].x1],
+            **({"bands": bands} if bands else {}),
             "spans": [s.id for s in spans],
         }
 

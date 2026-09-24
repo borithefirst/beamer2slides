@@ -1821,10 +1821,14 @@ def fit_columns(bounds: list[float], cols: list[dict], scale: float, need: list[
             return {**c, "x0": x0, "x1": x0 + n}
         cols = [extent(c, n) for c, n in zip(cols, need)]
     # Text grows away from its alignment edge: room on the right of left-aligned columns, on
-    # the left of right-aligned ones, half on each side of centred ones.
+    # the left of right-aligned ones, half on each side of centred ones. A column whose words
+    # were measured (need) gets what they take past the PDF's and WRAP_MARGIN; only an
+    # unmeasured one keeps 8% for the substitute font. With the 8% on measured columns too, a
+    # table whose words fit its PDF frame grew 2-4 pt past it on each side (r2_tables_v1
+    # slide 4, r2_tables_v2 slide 10).
     width = [c["x1"] - c["x0"] for c in cols]
     room = [(1 + WRAP_MARGIN) / scale if tight and n is not None else
-            max(0.08 * w + 1 / scale, (n - w + (1 + WRAP_MARGIN) / scale) if n is not None else 0.0)
+            max(0.0, n - w) + (1 + WRAP_MARGIN) / scale if n is not None else 0.08 * w + 1 / scale
             for w, n in zip(width, need)]
     capped = capped_columns(cols, scale, need, cap)
     room = [min(r, k - w) if ok else r for r, w, k, ok in zip(room, width, cap, capped)]
@@ -1890,6 +1894,13 @@ def table_rows(el: dict, z: float, scale: float, imported: bool = False, sizes: 
     for rule in el.get("rules", []) + [b for b in el.get("borders", []) if b["position"] in ("TOP", "BOTTOM")]:
         if "y" in rule:
             ruled.setdefault(rule["row"] + (rule["position"] == "BOTTOM"), rule["y"] * scale)
+    # A row shaded by a band of its own (classify `bands`) starts and ends where its band does:
+    # just above its words, a \rowcolor row began ~3 pt below its fill, its words at the top of
+    # the Slides cell's shading (r2_tables_v1 slide 4). A rule still wins.
+    for row, y0, y1 in el.get("bands", []):
+        ruled.setdefault(row, y0 * scale)
+        ruled.setdefault(row + 1, y1 * scale)
+
     def target(i: int) -> float:  # where row i should start
         if i in ruled:
             return ruled[i]
@@ -2013,13 +2024,15 @@ def table_centred(el: dict, page_w: float) -> tuple[float, float] | None:
 
 
 def table_shift(el: dict, bounds: list[float], page_w: float) -> float:
-    """How far (PDF pt) a centred table's Slides columns move left to stay centred where they
-    grew wider than the PDF's (never off the page's left edge); 0 for any other table."""
+    """How far (PDF pt) a centred table's Slides columns move to stay centred where they grew
+    wider than the PDF's (never off the page); 0 for any other table. Mostly left: a column
+    grows away from its alignment edge, to the right. Right when its first column's cell padding
+    took more of the left margin than its words took of the right one."""
     centred = table_centred(el, page_w)
     if centred is None:
         return 0.0
     dx = ((centred[0] + centred[1]) - (bounds[0] + bounds[-1])) / 2
-    return max(dx, -bounds[0]) if dx < 0 else 0.0
+    return max(dx, -bounds[0]) if dx < 0 else min(dx, max(0.0, page_w - bounds[-1]))
 
 
 def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = False,
