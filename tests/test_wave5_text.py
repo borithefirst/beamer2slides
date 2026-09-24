@@ -150,11 +150,12 @@ def written(el: dict) -> tuple[str, list[tuple[str, int, int]]]:
     return text, fonts
 
 
-def test_a_word_space_before_a_hole_is_followed_by_a_zero_width_break():
+def test_a_word_space_before_a_hole_is_followed_by_a_zero_width_break(monkeypatch):
     """r1_math_v2 s6 'but', r3_textfx_v1 s3 'than': Slides keeps a space and the no-break spaces
     after it together, so the word before a formula went down with it. A zero-width space after
-    the word space lets Slides break there; it is set in the word's font, so words typed in front
-    of the hole are too."""
+    the word space would allow a break there (it did not, live: HOLE_BREAK is off); switched on,
+    it is set in the word's font, so words typed in front of the hole are too."""
+    monkeypatch.setattr(emit, "HOLE_BREAK", emit.ZWSP)
     text, fonts = written(holes_box())
     assert text.startswith("A ​\xa0") and text.count("​") == 3, repr(text)
     k = text.index("​")
@@ -164,8 +165,9 @@ def test_a_word_space_before_a_hole_is_followed_by_a_zero_width_break():
     assert written(glued)[0].count("​") == 2
 
 
-def test_the_break_before_a_hole_can_be_switched_off(monkeypatch):
-    monkeypatch.setattr(emit, "HOLE_BREAK", "")
+def test_the_break_before_a_hole_is_off():
+    """Written live (r10), Slides still took 'but' and 'than' down with their holes."""
+    assert emit.HOLE_BREAK == ""
     assert "​" not in written(holes_box())[0]
 
 

@@ -678,9 +678,10 @@ ZWSP = "​"
 # the no-break spaces after it together (UAX #14's old "× GL"), so the word before a formula
 # went down with it to the next line: "pointwise, / but ∫..." in a box 54 pt wider than
 # "... pointwise, but" (r1_math_v2 s6; 'than', r3_textfx_v1 s3). A zero-width space breaks
-# there (LB8, ahead of LB12), as text_layout.wrap models it. deck_ir drops it (pull writes
-# nothing for it), and so does merge.collapse_holes. "" writes none.
-HOLE_BREAK = ZWSP
+# there by UAX #14 (LB8, ahead of LB12), as text_layout.wrap models it - but Slides does not:
+# written live (r10), both words still went down with their holes. So none is written; deck_ir,
+# merge.collapse_holes and the other readers still drop one (pull writes nothing for it).
+HOLE_BREAK = ""
 
 
 def hole_runs(runs: list[dict], scale: float, fonts: FontMapper) -> list[dict]:

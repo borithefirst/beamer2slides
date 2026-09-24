@@ -397,9 +397,9 @@ markers.
   (`emit.line_sizes`, `inner_pitch`). Slides rounds each paragraph step to whole pixels with its
   spaceAbove included (`emit.pitch_between(..., gap)`, 0.07 pt rms on 18 boxes). Slides keeps a
   space and the no-break spaces after it together, so the word before a hole wraps with it
-  (`text_layout.wrap` models it): emit writes a ZWSP after the word space before a hole
-  (`emit.HOLE_BREAK`, `""` turns it off) and every reader (deck_ir, `merge.collapse_holes`, compare,
-  inverse, the fuzzers) reads it as nothing.
+  (`text_layout.wrap` models it). A ZWSP after that space does **not** break there live (r10), so
+  `emit.HOLE_BREAK` is `""`; every reader (deck_ir, `merge.collapse_holes`, compare, inverse, the
+  fuzzers) still reads one as nothing.
 - Title placeholders exist before any other element: bring them to front after adding shapes.
 - Layout pages reject `pageBackgroundFill.propertyState = INHERIT`. Imported layout/master
   placeholders hold "\n" per list level: updateTextStyle works on them, insertText is refused. A

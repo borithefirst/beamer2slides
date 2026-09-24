@@ -4604,3 +4604,7 @@ block all bold, a paragraph broken inside a formula, a footline too heavy at Lat
   word space before a hole, in the word's font, read as nothing by deck_ir, `merge.collapse_holes`,
   compare, inverse, deck_edits, fuzz_sync and sync_check. Re-classifying the 427 hunt decks changed
   structure only on helvet.
+- Live (r10): with the ZWSP written ('but \u200b\xa0...'), Slides still took 'but' (r1_math_v2 s6)
+  and 'than' (r3_textfx_v1 s3) down with their holes, though both lines had room: Slides does not
+  break after U+200B in front of no-break spaces. `HOLE_BREAK` is off (""); the readers keep
+  dropping one. Untried: a breakable space (U+2002) as the hole's first character.
