@@ -343,7 +343,7 @@ def test_a_wide_table_stays_on_the_page():
     reqs = table_requests(el, "s", "b2s_s001_b0", page_scale, FONTS, imported=True)
     written = {pt_of(r["updateTextStyle"]["style"]["fontSize"]) for r in reqs
                if "updateTextStyle" in r and r["updateTextStyle"]["textRange"]["type"] == "FIXED_RANGE"}
-    full = {FONTS(r, page_scale)[1] for row in el["cells"] for c in row for r in c}
+    full = {FONTS({**r, "cell": True}, page_scale)[1] for row in el["cells"] for c in row for r in c}
     assert max(written) < max(full) and min(written) < min(full)
     assert emit.pptx_table(el, page_scale, FONTS)["widths"] == lay["widths"]
     # A table that fits keeps its size and its room.
