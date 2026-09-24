@@ -17,7 +17,7 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 
 from . import bidi
-from .fonts import MATH_ITALIC_RE, FontInfo, font_info
+from .fonts import MATH_ITALIC_RE, FontInfo, font_info, serif_math_letters
 
 BULLET_GLYPHS = set("▶►▸‣•◦▪■□○●★⋆✓∗–")
 PRESET_GLYPHS = set("▶►▸‣•●★⋆")  # glyphs with a close Slides bullet preset (see emit.bullet_preset)
@@ -3245,6 +3245,9 @@ class PageClassifier:
                         gap = x0 - prev.rect.x1
                         if (si == 0 or gap > 0.15 * line.size) and not runs[-1]["text"].endswith(" "):
                             runs[-1]["text"] += " "
+                        if si and gap >= max(0.9, word_space + 0.4) * line.size and not runs[-1].get("hole"):
+                            # a \quad before the graphic keeps its em spaces, as between words
+                            runs[-1]["text"] += EM_SPACE * max(1, round((gap - 0.33 * line.size) / line.size))
                     main = line.main
                     # What precedes the formula on its line, for emit to predict where Slides
                     # will actually leave the gap (substitute fonts are not exactly as wide).
@@ -3355,8 +3358,9 @@ class PageClassifier:
                 family, italic = span.info.family, span.info.italic
                 pieces = [(text, italic)]
                 if family == "math":
-                    # Math fonts carry symbols and variables; show them in the text family.
-                    family = math_family(line, par)
+                    # Math fonts carry symbols and variables; show them in the text family -
+                    # but CM's (Times', Palatino's) math letters are a serif italic among any words.
+                    family = "serif" if serif_math_letters(span.font) else math_family(line, par)
                     pieces = math_pieces(span.font, text)
                 tail = TRAILING_PUNCT.search(text) if span.decor_to is not None and family != "math" else None
                 if script == "super" and not forced and text.strip() in RAISED_MARKS:

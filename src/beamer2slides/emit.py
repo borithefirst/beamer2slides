@@ -16,7 +16,7 @@ import numpy as np
 
 from . import bidi
 from .classify import HOLE_PAD
-from .fonts import font_info, google_font
+from .fonts import cjk_font, font_info, google_font
 from .gapi import HttpError, media_upload, message_of
 from .google_auth import credentials_for_threads, drive_service, fetcher_for_threads, shared_service, slides_service
 from .gslides import EMU_PER_PT, emu, execute, per_thread, pt
@@ -88,9 +88,11 @@ GLYPH_SHAPES = {**dict.fromkeys("▶►▸‣", "triangle"), **dict.fromkeys("�
 
 # Width per em of Computer Modern's optical sizes relative to the 10 pt cut, from the glyph
 # advances of the Type 1 fonts (cmss8.pfb ... cmss17.pfb) over a sample sentence. EC and
-# Latin Modern share these metrics.
+# Latin Modern share these metrics. CM Sans has no cut below 8 pt, EC does (cm-super's
+# sfss0500-sfss0700, beamer's \tiny footlines): without them a 6 pt footline was taken for the
+# 8 pt cut and came out ~10% narrower than the PDF's.
 DESIGN_WIDTH = {
-    "sans": {8: 1.0623, 9: 1.0273, 10: 1.0, 12: 0.9753, 17: 0.9377},
+    "sans": {5: 1.2814, 6: 1.1733, 7: 1.1073, 8: 1.0623, 9: 1.0273, 10: 1.0, 12: 0.9753, 17: 0.9377},
     "serif": {5: 1.3758, 6: 1.2291, 7: 1.1424, 8: 1.0629, 9: 1.0277, 10: 1.0, 12: 0.9786, 17: 0.9136},
     "mono": {8: 1.0114, 9: 1.0, 10: 1.0, 12: 0.979},
 }
@@ -100,6 +102,16 @@ DESIGN_WIDTH = {
 # the small-caps compromise (SMALL_CAPS_WIDTH) and no further: at 5 pt the line comes out ~18%
 # narrower than the PDF's and ~13% taller. 8 and 9 pt cuts (1.03-1.06) are matched in full.
 OPTICAL_WIDTH_MAX = 1.13
+# A small optical cut is heavier per em as well: the stem of CM Sans's l and I, per em, relative to
+# its 10.95 pt cut (cm-super's sfss*.pfb) is 1.99 at 5 pt, 1.38-1.52 at 6 pt, 1.17 at 7 pt, 1.10 at
+# 8 pt, 1.06 at 9 pt and 0.80 at 14.4 pt; Lato Bold's is 1.38-1.39 times its Regular's. A sans cut
+# nearer the Bold than the Regular (6 pt and less: beamer's \tiny footlines, frame counters) is
+# set heavier than regular, so a footline keeps the weight it has against the body text: in Lato
+# Regular, "M. Keller" and "June 2026" read as a lighter face than the PDF's. The weight is 600,
+# which the API keeps "not bold" (bold is 700 and up) and the renderer draws with the nearest
+# heavier face Slides has (Lato has 400 and 700).
+OPTICAL_WEIGHT_DESIGN = {"sans": 6.0}
+OPTICAL_WEIGHT = 600
 
 
 def optical_width(family: str, design: float) -> float:
@@ -276,8 +288,24 @@ class FontMapper:
             return ({"weightedFontFamily": {"fontFamily": google[0], "weight": google[1]},
                      "fontSize": pt(size), "italic": google[2] or run["italic"]},
                     ["weightedFontFamily", "fontSize", "italic"])
+        if self.optical_weight(run):
+            return ({"weightedFontFamily": {"fontFamily": family, "weight": OPTICAL_WEIGHT}, "fontSize": pt(size),
+                     "bold": False, "italic": run["italic"]},
+                    ["weightedFontFamily", "fontSize", "bold", "italic"])
         return ({"fontFamily": family, "fontSize": pt(size), "bold": run["bold"], "italic": run["italic"]},
                 ["fontFamily", "fontSize", "bold", "italic"])
+
+    @staticmethod
+    def optical_weight(run: dict) -> bool:
+        """Whether a regular run is set heavier for its small optical cut (OPTICAL_WEIGHT_DESIGN)."""
+        if run["bold"] or google_font(run["font"]) or run["family"] not in OPTICAL_WEIGHT_DESIGN:
+            return False
+        design = font_info(run["font"]).design_size
+        return design is not None and design <= OPTICAL_WEIGHT_DESIGN[run["family"]]
+
+    def face(self, run: dict) -> str:
+        """The ADVANCES style Slides draws a run in: an optically heavier run takes the bold face."""
+        return STYLE_KEY[(bool(run["bold"]) or self.optical_weight(run), bool(run["italic"]))]
 
     def width_ratio(self, font: str, family: str, bold: bool, italic: bool) -> float:
         """Expected Slides width / PDF width of a run after the size correction: bold and
@@ -338,7 +366,7 @@ class FontMapper:
         if cm is None or not text.strip() or run.get("script") or run.get("hole") or run.get("cell") or \
                 family not in ADVANCES:
             return 1.0
-        slides = ADVANCES[family][STYLE_KEY[(bool(run["bold"]), bool(run["italic"]))]]
+        slides = ADVANCES[family][self.face(run)]
         number = "".join(text.split())
         if any(c in DIGITS for c in number) and all(c in NUMBER_CHARS for c in number):
             s_em = sum(slides.get(c, UNMEASURED_ADVANCE_EM) for c in number)
@@ -596,7 +624,8 @@ def in_sentence(runs: list[dict]) -> list[dict]:
     family's substitute put a Lato-italic β between Carlito words, visibly heavier."""
     if sum(1 for r in runs if r.get("text", "").strip() or r.get("hole")) < 2:
         return runs
-    upright = {r["font"] for r in runs if r.get("text", "").strip() and not r.get("hole")
+    # (a CJK face is not a Latin text face: a math letter among Japanese words keeps its substitute)
+    upright = {r["font"] for r in runs if r.get("text", "").strip() and not r.get("hole") and not cjk_font(r["font"])
                and (google_font(r["font"]) or (None, 0, True))[1:] == (400, False)}
     faces = {google_font(f)[0] for f in upright}
     words = sorted(upright)[0] if len(faces) == 1 else None
@@ -1522,8 +1551,7 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
     total = 0.0
     for run in runs:
         family, size = fonts(run, scale)
-        style = {(False, False): "regular", (True, False): "bold", (False, True): "italic",
-                 (True, True): "bold_italic"}[(bool(run["bold"]), bool(run["italic"]))]
+        style = fonts.face(run)  # (a small optical cut is drawn heavier: FontMapper.optical_weight)
         if family == FONT_FOR_FAMILY["mono"]:
             table = {}
             unmeasured = ROBOTO_MONO_ADVANCE_EM

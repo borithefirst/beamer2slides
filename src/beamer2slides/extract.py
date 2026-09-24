@@ -1,5 +1,6 @@
 """Stage 1: dump each PDF page's text spans, images, drawings and links (raw.json)."""
 
+import dataclasses
 import math
 import re
 import unicodedata
@@ -101,6 +102,120 @@ MONO_JOIN_GAP = 0.5  # in advances of the glyph before
 
 def _mono(font: str) -> bool:
     return font_info(font).family == "mono"
+
+
+# A narrow space TeX sets between two glyphs of one font (a KPI's '18 mo' at 26 pt: 0.14 em; a
+# French « guillemet's thin space: 0.12 em) is below JOIN_GAP. Such a gap is a space when the
+# glyphs on both sides of it touch their neighbours: a kern or an italic correction is no wider
+# than 0.1 em, and letterspaced glyphs (\textls, small caps tracked by microtype) are
+# apart all along the word.
+NARROW_GAP = 0.11
+TOUCHING = 0.06
+# Letterspacing (\textls, soul's \so, fontspec LetterSpace): the glyphs of each word stand apart
+# by the same tracking (0.1 - 0.3 em), a word gap is that plus a space. With JOIN_GAP and
+# WORD_GAP alone every tracked letter gap became a space ('S PA C E D', 'l e s s i s m o r e')
+# and the words' own gaps were lost among them. `tracked_gaps` finds such stretches.
+TRACK_MIN, TRACK_MAX = 0.08, 0.28
+TRACK_BAND = 0.06     # em around the stretch's tracking
+TRACK_WORD = 0.15     # em past the tracking that makes a word gap
+TRACK_LETTERS = 4     # tracked gaps between letters a stretch needs at least
+
+
+def _gaps(chars: list[Char]) -> list[float | None]:
+    """For each character, the pen move from the glyph before it in ems, None where it starts
+    another line or another font, size or colour."""
+    out: list[float | None] = [None]
+    for prev, ch in zip(chars, chars[1:]):
+        if ch.dir != prev.dir or combining_mark(ch.c) or combining_mark(prev.c) or (ch.font, round(ch.size, 3), ch.color) != (prev.font, round(prev.size, 3), prev.color):
+            out.append(None)
+            continue
+        ux, uy = ch.dir
+        px, py = prev.origin[0] + prev.dir[0] * prev.advance, prev.origin[1] + prev.dir[1] * prev.advance
+        size = max(ch.size, 0.01)
+        gap = ((ch.origin[0] - px) * ux + (ch.origin[1] - py) * uy) / size
+        offset = abs((ch.origin[0] - px) * uy - (ch.origin[1] - py) * ux) / size
+        out.append(gap if offset < SAME_BASELINE and BACK_GAP < gap < NEW_LINE_GAP else None)
+    return out
+
+
+def tracked_gaps(chars: list[Char]) -> dict[int, bool]:
+    """Letterspaced stretches: character index -> True where the gap before it is a word gap,
+    False where it is the tracking between two letters of a word (never a space). A stretch is a
+    run of glyphs in one font on one line none of which touch (each gap at least TRACK_MIN): the
+    tracking (within TRACK_BAND of the median), a kern off it, or a word gap (TRACK_WORD more),
+    with at least TRACK_LETTERS tracked gaps between letters. In ordinary words the glyphs touch
+    and only word spaces stand apart. Math and monospaced glyphs are left alone."""
+    gaps = _gaps(chars)
+    out: dict[int, bool] = {}
+    i = 1
+    while i < len(chars):
+        if gaps[i] is None or gaps[i] < TRACK_MIN:
+            i += 1
+            continue
+        j = i
+        while j < len(chars) and gaps[j] is not None and gaps[j] >= TRACK_MIN:
+            j += 1
+        seg = range(i, j)  # gaps[k] is the gap between chars[k - 1] and chars[k]
+        i = j
+        if font_info(chars[seg[0]].font).family in ("math", "mono"):
+            continue
+        near = sorted(gaps[k] for k in seg if TRACK_MIN <= gaps[k] <= TRACK_MAX)
+        if len(near) < TRACK_LETTERS:
+            continue
+        track = near[len(near) // 2]
+        letters = [k for k in seg if abs(gaps[k] - track) <= TRACK_BAND
+                   and chars[k - 1].c.isalpha() and chars[k].c.isalpha()]
+        inner = [k for k in seg if gaps[k] < track + TRACK_WORD]
+        # (ordinary words: most inner gaps touch, only the word spaces are near the median)
+        if len(letters) < TRACK_LETTERS or len(letters) < 0.6 * len(inner):
+            continue
+        for k in seg:
+            out[k] = gaps[k] >= track + TRACK_WORD
+    return out
+
+
+def narrow_spaces(chars: list[Char]) -> set[int]:
+    """Indices of characters after a narrow space (NARROW_GAP .. JOIN_GAP) between glyphs of one
+    text font whose other neighbours touch them, on a stretch of that font where such loose gaps
+    are rare (tracked small caps are loose all along, a kern among them touches)."""
+    gaps = _gaps(chars)
+    segment = [0] * len(gaps)  # which stretch of one font on one line each gap belongs to
+    for k in range(1, len(gaps)):
+        segment[k] = segment[k - 1] + (gaps[k] is None)
+    loose: dict[int, int] = {}
+    total: dict[int, int] = {}
+    for k, g in enumerate(gaps):
+        if g is not None:
+            total[segment[k]] = total.get(segment[k], 0) + 1
+            loose[segment[k]] = loose.get(segment[k], 0) + (TRACK_MIN <= g < 0.2)
+    out = set()
+    for k, g in enumerate(gaps):
+        if g is None or not NARROW_GAP <= g < JOIN_GAP or chars[k].c == " " or chars[k - 1].c == " " \
+                or font_info(chars[k].font).family in ("math", "mono"):
+            continue
+        before = gaps[k - 1] if k > 0 else None
+        after = gaps[k + 1] if k + 1 < len(gaps) else None
+        if all(g2 is None or g2 < TOUCHING for g2 in (before, after)) \
+                and loose[segment[k]] <= max(2, 0.1 * total[segment[k]]):
+            out.add(k)
+    return out
+
+
+def _accent_overhang(page: Page, chars: list[Char]) -> list[Char]:
+    """An accented italic letter's accent can reach past its advance (Calibri Italic's ì), and
+    PDFium's loose box - the advance the text page gives - reaches to the ink: the word space
+    after it shrank below JOIN_GAP ('yì yuè' -> 'yìyuè'). Such a letter takes the font's width."""
+    todo = [k for k, ch in enumerate(chars) if not ch.synthetic and ch.exact_advance and len(ch.c) == 1
+            and ch.dir[0] > 0.999 and len(unicodedata.normalize("NFD", ch.c)) > 1 and font_info(ch.font).italic]
+    if not todo:
+        return chars
+    out = list(chars)
+    for k, width in zip(todo, page.glyph_widths([(chars[k].font_id, chars[k].c, chars[k].size) for k in todo])):
+        ch = chars[k]
+        if width and 0.5 * ch.advance < width < ch.advance - 0.02 * ch.size:
+            out[k] = dataclasses.replace(ch, advance=width, exact_advance=False, box=char_box(
+                ch.origin[0], ch.origin[1], ch.dir[0], ch.dir[1], width, ch.size, ch.ascent, ch.descent))
+    return out
 
 
 def combining_mark(c: str) -> bool:
@@ -283,13 +398,32 @@ def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False
                         "dir": first.dir, "chars": list(run)})
         run.clear()
 
+    # characters outside the page (e.g. the cut-off half of a notes-on-second-screen page)
+    shown = [ch for ch in (page.chars() if chars is None else chars)
+             if not (ch.box[2] <= x0 or ch.box[0] >= x1 or ch.box[3] <= y0 or ch.box[1] >= y1)
+             and visibility.hidden(ch) == hidden]
+    shown = _accent_overhang(page, shown)
+    tracked, narrow = tracked_gaps(shown), narrow_spaces(shown)
     prev: Char | None = None
-    for ch in page.chars() if chars is None else chars:
-        # characters outside the page (e.g. the cut-off half of a notes-on-second-screen page)
-        if ch.box[2] <= x0 or ch.box[0] >= x1 or ch.box[3] <= y0 or ch.box[1] >= y1 or \
-                visibility.hidden(ch) != hidden:
-            continue
+    for k, ch in enumerate(shown):
         space = None
+        if k in tracked and prev is not None and not combining_mark(ch.c):
+            # letterspaced: a tracked gap joins, a word gap is a space (classify reads one between spans)
+            if tracked[k]:
+                flush()
+            run.append(ch)
+            prev = ch
+            continue
+        if k in narrow and prev is not None:
+            ux, uy = ch.dir
+            px, py = prev.origin[0] + ux * prev.advance, prev.origin[1] + uy * prev.advance
+            width = ((ch.origin[0] - px) * ux + (ch.origin[1] - py) * uy)
+            run.append(Char(" ", ch.font, ch.size, ch.color, ch.alpha, (px, py),
+                            char_box(px, py, ux, uy, width, ch.size, ch.ascent, ch.descent),
+                            ch.dir, NO_OBJECT, ch.font_id, width, True, ch.ascent, ch.descent))
+            run.append(ch)
+            prev = ch
+            continue
         if prev is not None:
             ux, uy = ch.dir
             px, py = prev.origin[0] + prev.dir[0] * prev.advance, prev.origin[1] + prev.dir[1] * prev.advance
@@ -372,6 +506,32 @@ def page_chars(page: Page) -> tuple[list[Char], set[int]]:
     return bidi.visual_chars(type3.decode(chars, found) if found else chars), set(found)
 
 
+# U+2010 HYPHEN (Calibri's, fontspec's): the Google substitutes have no glyph for it, and Slides
+# drew it from a fallback font, wide and with room around it.
+HYPHENS = str.maketrans({"‐": "-"})
+# Inferior figures a text font's ToUnicode gives its old-style small-cap figures (Palatino
+# Linotype with Numbers=OldStyle in \textsc: 'Du sublime (1674)' reads 'DU SUBLIME ₍₁₆₇₄₎').
+INFERIORS = str.maketrans("₀₁₂₃₄₅₆₇₈₉₍₎", "0123456789()")
+INFERIOR_RUN = re.compile(r"[₀-₉₍₎]+")
+
+
+def readable(text: str, font: str) -> str:
+    """A span's text as its words: ligatures as letters, U+2010 as '-', and in a text font a
+    run of inferior figures that no letter or closing bracket carries (CO₂ and x₁ keep theirs:
+    '§₂₅', ',₁₈₉₉', '₍₁₆₇₄₎') as the figures they are."""
+    text = text.translate(LIGATURES).translate(HYPHENS)
+    if font_info(font).family == "math" or not INFERIOR_RUN.search(text):
+        return text
+
+    def figures(m: re.Match) -> str:
+        run = m.group()
+        before = text[m.start() - 1] if m.start() else None
+        # (at the span's start the letter may be the span before's: a lone figure stays)
+        carried = before.isalnum() or before in ")]}" if before else len(run) < 2
+        return run if carried and "₍" not in run else run.translate(INFERIORS)
+    return INFERIOR_RUN.sub(figures, text)
+
+
 def extract_page(page: Page, label: str) -> dict:
     n = page.index
     out_spans = []
@@ -383,7 +543,7 @@ def extract_page(page: Page, label: str) -> dict:
         out_spans.append({
             # Ligature code points (xelatex/lualatex text layers) as plain letters, so the
             # text stays searchable and spell-checkable in Slides.
-            "id": f"p{n}s{len(out_spans)}", "text": s["text"].translate(LIGATURES), "font": s["font"],
+            "id": f"p{n}s{len(out_spans)}", "text": readable(s["text"], s["font"]), "font": s["font"],
             "size": round(s["size"], 3), "color": f"#{s['color']:06x}", "alpha": s["alpha"],
             "origin": _r(s["origin"]), "bbox": _r(s["bbox"]), "dir": _r(s["dir"], 3),
             # (a TeX bitmap font's small caps are a font of their own: ECCC1095)
@@ -421,7 +581,7 @@ def extract_page(page: Page, label: str) -> dict:
 
     # The words drawn but not seen are still the frame's: beamer draws what a later overlay step
     # uncovers at alpha 0 (transparent mode), and select_overlays tells steps apart by their words.
-    hidden = [t for s in spans(page, visibility, hidden=True, chars=chars) if (t := s["text"].translate(LIGATURES).strip())]
+    hidden = [t for s in spans(page, visibility, hidden=True, chars=chars) if (t := readable(s["text"], s["font"]).strip())]
 
     return {
         "index": n, "label": label,

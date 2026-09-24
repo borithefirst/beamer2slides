@@ -25,6 +25,15 @@ MATH_PREFIXES = (
 # Math fonts whose letters are italic (math_text): CMMI and its cousins; PazoMath-Italic and
 # the like say so in their name.
 MATH_ITALIC_RE = re.compile(r"^(CMMI|LMMATHITALIC|NEWTXB?MI|NEWPXB?MI|NTXB?MI|TXB?MI|PXB?MI)|ITALIC")
+# Math-letter fonts whose letters are a serif's (Computer Modern's, Times', Palatino's), whatever
+# family the words around them are in: beamer's sans math still takes its Greek from CMMI.
+SERIF_MATH_LETTERS_RE = re.compile(r"^(CMMI|LMMATHITALIC|NEWTXB?MI|NEWPXB?MI|NTXB?MI|TXB?MI|PXB?MI|PAZOMATH)")
+
+
+def serif_math_letters(name: str) -> bool:
+    """Whether a math font draws its letters as a serif italic (`SERIF_MATH_LETTERS_RE`): set
+    among sans words, CMMI's thin β came out in the words' sans italic, visibly heavier."""
+    return bool(SERIF_MATH_LETTERS_RE.match(re.sub(r"[^A-Z0-9]", "", name.split("+", 1)[-1].upper())))
 # Symbol fonts whose glyphs are pictures, not letters (ccicons, fontawesome, pifont, marvosym, ...;
 # LaTeX's picture-mode line and circle pieces: \cancel strokes, \circle)
 ICON_FONT_RE = re.compile(r"CCICONS|FONTAWESOME|DINGBAT|ZAPF|MARVOSYM|WEBDINGS|WINGDINGS|ACADEMICONS|BBDING|"
@@ -118,6 +127,52 @@ TEX_TT_RE = re.compile(r"(T1X|NEWTX|TX|PX)TT[A-Z]*\d*")
 # The libertine package's Type 1 names: LinLibertine / LinBiolinum, a variant (Display, Mono,
 # Initials, Keyboard, C...), T (Type 1) or O (OpenType), then B / Z (bold, semibold), I / O (slant).
 LIBERTINE_RE = re.compile(r"LIN(LIBERTINE|BIOLINUM)(DISPLAY|M|I|K|C)?([TO])([BZ])?([IO])?")
+# CJK faces by the start of their name (lower case, no spaces or hyphens) -> the Google Noto face
+# of their script and class. Behind a Latin substitute (Lato, PT Serif) Slides draws CJK from a
+# fallback face of its own, heavier than the PDF's (every Yu Gothic run of a luatexja deck looked
+# bold) and with proportional full-width brackets: （医療） came out as (医療). Named, the Noto
+# face draws the text in its own weight and full-width forms. CJK advances are the em in both, so
+# the text keeps the PDF's size, as a Google font the PDF uses would (FontMapper).
+CJK_FAMILIES = (
+    # Japanese: Windows, macOS, IPA, Harano Aji (luatexja's default), Source Han / Noto CJK JP
+    # (Source Han Sans without a region is the Japanese-default one)
+    (("yugothic", "msgothic", "mspgothic", "msuigothic", "meiryo", "hiraginokaku", "hirakaku", "hiraginosans",
+      "hiramaru", "ipaexg", "ipagothic", "ipapgothic", "haranoajigothic", "sourcehansans", "sourcehansansjp",
+      "notosanscjkjp", "notosansjp", "kozgo", "takaogothic", "vlgothic"), "Noto Sans JP"),
+    (("yumincho", "msmincho", "mspmincho", "hiraginomin", "hiramin", "hiraginoserif", "ipaexm", "ipamincho",
+      "ipapmincho", "haranoajimincho", "sourcehanserif", "sourcehanserifjp", "notoserifcjkjp", "notoserifjp",
+      "kozmin", "takaomincho"), "Noto Serif JP"),
+    # Simplified and traditional Chinese (ctex's Fandol fonts, Windows, macOS)
+    (("simhei", "microsoftyahei", "fandolhei", "pingfangsc", "stheiti", "heitisc", "sourcehansanssc",
+      "sourcehansanscn", "notosanscjksc", "notosanssc", "dengxian", "wenquanyi"), "Noto Sans SC"),
+    (("simsun", "nsimsun", "fandolsong", "fandolfang", "songti", "stsong", "stfangsong", "fangsong",
+      "sourcehanserifsc", "sourcehanserifcn", "notoserifcjksc", "notoserifsc"), "Noto Serif SC"),
+    (("microsoftjhenghei", "pingfangtc", "pingfanghk", "heititc", "sourcehansanstc", "sourcehansanstw",
+      "notosanscjktc", "notosanstc"), "Noto Sans TC"),
+    (("mingliu", "pmingliu", "sourcehanseriftc", "sourcehanseriftw", "notoserifcjktc", "notoseriftc"),
+     "Noto Serif TC"),
+    # Korean
+    (("malgungothic", "malgun", "applesdgothic", "sourcehansanskr", "sourcehansansk", "notosanscjkkr",
+      "notosanskr", "gulim", "dotum", "undotum"), "Noto Sans KR"),
+    (("batang", "gungsuh", "sourcehanserifkr", "sourcehanserifk", "notoserifcjkkr", "notoserifkr", "unbatang"),
+     "Noto Serif KR"),
+    (("nanumgothic",), "Nanum Gothic"), (("nanummyeongjo",), "Nanum Myeongjo"),
+)
+CJK_PREFIXES = sorted(((p, family) for prefixes, family in CJK_FAMILIES for p in prefixes), key=lambda t: -len(t[0]))
+
+
+def cjk_font(name: str) -> tuple[str, int, bool] | None:
+    """(Google Noto family, weight, italic) for a CJK face (CJK_FAMILIES), e.g. 'ABCDEF+YuGothic-Bold'
+    -> ('Noto Sans JP', 700, False); Hiragino's W3 is regular and W6 and up bold."""
+    key = re.sub(r"[\s_-]", "", name.split("+", 1)[-1]).lower()
+    hit = next(((p, family) for p, family in CJK_PREFIXES if key.startswith(p)), None)
+    if hit is None:
+        return None
+    rest = key[len(hit[0]):]
+    w = re.search(r"w(\d)", rest)
+    weight = (700 if int(w.group(1)) >= 6 else 500 if int(w.group(1)) == 5 else 400) if w else \
+        next((v for word, v in WEIGHTS if word in rest), 400)
+    return hit[1], weight, False
 WEIGHTS = [("thin", 100), ("hairline", 100), ("extralight", 200), ("ultralight", 200), ("light", 300),
            ("book", 400), ("regular", 400), ("medium", 500), ("semibold", 600), ("demibold", 600),
            ("extrabold", 800), ("ultrabold", 800), ("bold", 700), ("black", 900), ("heavy", 900)]
@@ -126,7 +181,10 @@ WEIGHTS = [("thin", 100), ("hairline", 100), ("extralight", 200), ("ultralight",
 @lru_cache(maxsize=None)
 def google_font(name: str) -> tuple[str, int, bool] | None:
     """(Google family, weight, italic) when the PDF font is itself a Google font, e.g.
-    'ABCDEF+FiraSans-LightItalic' -> ('Fira Sans', 300, True)."""
+    'ABCDEF+FiraSans-LightItalic' -> ('Fira Sans', 300, True). A CJK face is its Noto face (cjk_font)."""
+    cjk = cjk_font(name)
+    if cjk:
+        return cjk
     base = name.split("+", 1)[-1]
     base = re.sub(r"-Identity-H$", "", base)
     family_part, _, style = base.partition("-")
