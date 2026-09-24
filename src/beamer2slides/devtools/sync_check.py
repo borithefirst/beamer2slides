@@ -359,7 +359,7 @@ def _evaluate(model: Model, c: dict) -> str | None:
         if "size" in c and max(abs(size[0] - c["size"][0]), abs(size[1] - c["size"][1])) > tol:
             bad.append(f"size {[round(v, 1) for v in size]}")
         return f"{', '.join(bad)}: {what}" if bad else None
-    if kind in ("image", "shape"):
+    if kind in ("image", "shape", "table"):
         found = [e for e in slide.elements if e.kind == kind]
         if kind == "shape":
             found = [e for e in found if e.obj["shape"].get("shapeType") == c["shape_type"]]

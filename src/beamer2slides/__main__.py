@@ -403,8 +403,9 @@ def main() -> None:
                         note, args.backup, args.force_adopted, args.follow_labels, take)
         except FirstSyncRefused as refused:
             raise SystemExit(str(refused)) from None
-        if note and note.result():
-            add_recovery(note.result(), info)
+        # Only a sync that wrote asked for its way back; one that did not is not kept waiting.
+        if note and note.kept():
+            add_recovery(note.kept(), info)
         r = info["report"]
         sent = info["requests"] or {}          # Sync.sent counts them per phase, not in total
         held = r["slides"].get("held") or []

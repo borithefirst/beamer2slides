@@ -91,7 +91,8 @@ VARIANTS = {"v1": [], **{f: [f] for f in FLAGS}, "kitchen": KITCHEN,
 
 # ---------------------------------------------------------------- the frames of v1
 
-TWENTY = {"contains": "Twenty rows, one verdict"}   # the table itself is a picture, see NOTES below
+# The twenty-row table was a picture; since the table work of 2026-09-24 it is a native table.
+TWENTY = {"contains": "Twenty rows, one verdict"}
 REPEAT = {"contains": "Geometry"}
 TWINPICS = {"contains": "The same file twice"}
 NOTES_A = {"contains": "A slide whose speaker notes are shared"}
@@ -222,7 +223,7 @@ CHECKS = {
                      {"check": "text", "slide": BLOCKCOL, "count": 0, "text": "Deck edits win"}],
     "everyrow": [{"check": "text", "slide": REPEAT, "text": "moved", "count": 6},
                  {"check": "text", "slide": REPEAT, "text": "same", "count": 12},
-                 {"check": "image", "slide": TWENTY, "count": 1},
+                 {"check": "table", "slide": TWENTY, "count": 1},
                  {"check": "fresh", "slide": TWENTY}],
     "swappicture": [{"check": "image", "slide": TWINPICS, "count": 2},
                     {"check": "fresh", "slide": TWINPICS}],

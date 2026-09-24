@@ -562,22 +562,27 @@ def test_a_forced_rebuild_in_a_detached_context_keeps_its_way_back_in_drive(prep
 
 
 class Point:
-    """What `record_sync_point` hands `sync`: a way back, collected when asked."""
+    """What `record_sync_point` hands `sync`: a way back, collected when asked. `asked`: the
+    stand-in sync wrote (it reports requests), so it asked for it before its first write."""
 
-    def __init__(self, note):
-        self.note = note
+    def __init__(self, note, asked=True):
+        self.note, self.asked = note, asked
 
     def result(self):
+        self.asked = True
         return self.note
 
+    def kept(self):
+        return self.note if self.asked else None
 
-def sync_world(monkeypatch, *, raises=None, note=None):
+
+def sync_world(monkeypatch, *, raises=None, note=None, asked=True):
     """`sync.sync` and `record_sync_point` replaced; returns what they were handed."""
     seen: dict = {}
 
     def record_sync_point(pdf, deck, out, backup):
         seen["point_backup"] = backup
-        return Point(note)
+        return Point(note, asked)
 
     def run_sync(pdf, deck, out, dry_run, overlays, measure, way_back, backup, **kw):
         seen["sync_backup"] = backup
@@ -659,6 +664,16 @@ def test_a_sync_that_recorded_no_way_back_says_so(tmp_path, monkeypatch):
     assert any(d.where == "backup" and "no way back was recorded" in d.message for d in result.diagnostics)
     dry = deck_sync(sync_ctx(tmp_path / "dry"), pdf="talk.pdf", deck="PID", dry_run=True)
     assert not [d for d in dry.diagnostics if d.where == "backup"], "a dry run keeps none and writes none"
+
+
+def test_a_sync_that_never_asked_for_its_way_back_neither_waits_nor_warns(tmp_path, monkeypatch):
+    """A sync that wrote nothing never reaches `Sync.before_write`: its backup was not needed,
+    and waiting for it cost two minutes a sync on a CJK deck."""
+    sync_world(monkeypatch, note={"out": "x", "entry": {"backup": {"warnings": ["slow"]}}}, asked=False)
+    result = deck_sync(sync_ctx(tmp_path / "ws"), pdf="talk.pdf", deck="PID")
+    assert result.ok, result.summary
+    assert not [d for d in result.diagnostics if d.where == "backup"]
+    assert "recovery" not in result.data
 
 
 def test_auto_means_a_drive_copy_where_the_workspace_goes_away(tmp_path, monkeypatch):

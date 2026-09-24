@@ -574,6 +574,27 @@ def test_the_way_back_is_made_on_a_thread_with_clients_of_its_own(monkeypatch):
     assert made[0][2].startswith("b2s-back")
 
 
+def test_a_way_back_nobody_asked_for_is_not_waited_for(monkeypatch, tmp_path):
+    """A sync that wrote nothing never asks: its caller reads `kept()` without waiting, and the
+    exit does not join the thread (a daemon) - so what the thread writes goes down whole."""
+    a_way_back(monkeypatch, lent=False)
+    release, threads = threading.Event(), []
+
+    def make(slides, drive):
+        threads.append(threading.current_thread())
+        release.wait(10)
+        return {"entry": {}}
+
+    point = guard.WayBack(make)
+    assert point.kept() is None and not point.asked, "not asked, not waited for"
+    release.set()
+    assert point.result() == {"entry": {}} and point.kept() == {"entry": {}}
+    assert threads[0].daemon
+
+    guard.write_whole(tmp_path / "b" / "backups.json", b"[]")
+    assert [p.name for p in (tmp_path / "b").iterdir()] == ["backups.json"], "no .part left"
+
+
 def test_a_lent_client_makes_the_way_back_on_the_asking_thread(monkeypatch):
     """A service object a caller handed over is that caller's, used on one thread at a time
     (`emit.measure_places`' rule): no thread, and the work happens on the first ask."""

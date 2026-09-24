@@ -724,10 +724,12 @@ def deck_sync(
                       f"not convert to fix this - the deck exists, may hold someone's edits, and a "
                       f"conversion would make a second one.",
                       deck=deck, out=j.ctx.workspace.ref(out_dir)) from None
-    if note and note.result():
-        _cli().add_recovery(note.result(), info)
-    if note is not None:
-        _report_way_back(j, note.result())
+    # A sync that wrote nothing never asked for its way back (`guard.WayBack.kept`): nothing to
+    # report, and nothing to wait for.
+    if note is not None and note.asked:
+        if note.kept():
+            _cli().add_recovery(note.kept(), info)
+        _report_way_back(j, note.kept())
 
     report = info["report"]
     for clash in report["conflicts"]:

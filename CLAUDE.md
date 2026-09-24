@@ -440,7 +440,9 @@ markers.
 - **Drive's .pptx export embeds the deck's fonts**: a deck with a Noto Sans SC run took 115 s (TC
   77 s, 6.7 MB; JP/KR ~45 s; Serif CJK faces are not embedded), past the library's 60 s. Every
   .pptx export (backup, picture fallback) runs with `gslides.execute(..., timeout=SLOW_EXPORT)`,
-  a connection of its own (`gapi.patient_http`).
+  a connection of its own (`gapi.patient_http`). A sync's backup is on a daemon thread and waited
+  for only if the sync asked for it before a write (`guard.WayBack.kept`); its files go down whole
+  (`guard.write_whole`).
 - PowerShell 5.1 mangles double quotes inside native-command arguments: keep them out of git
   commit messages. `Get-Content -Raw` reads BOM-less UTF-8 as ANSI: edit text files with the
   editor tools.

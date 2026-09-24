@@ -20,9 +20,11 @@ and/or a Drive copy of the presentation.
 
 import io
 import json
+import os
 import re
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -347,9 +349,18 @@ def export_pptx(drive, pid: str, path: Path) -> int:
     and takes minutes over a deck in a big embedded face (`gslides.SLOW_EXPORT`)."""
     data = execute(drive.files().export_media(fileId=pid, mimeType=PPTX_MIME), retries=3, timeout=SLOW_EXPORT)
     data = data.getvalue() if isinstance(data, io.BytesIO) else data
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
+    write_whole(path, data)
     return len(data)
+
+
+def write_whole(path: Path, data: bytes) -> None:
+    """Write a file so that it is either all there or not there: through a `.part` beside it.
+    A way back no sync asked for is made on a daemon thread (`WayBack`), and the interpreter's
+    exit stops one wherever it is - a half-written backups.json would lose the whole log."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    part = path.with_name(path.name + ".part")
+    part.write_bytes(data)
+    os.replace(part, path)
 
 
 def copy_in_drive(drive, pid: str, name: str | None = None) -> dict:
@@ -415,7 +426,13 @@ class WayBack:
     Where a caller lent its own client there is no thread - a service object is that caller's and
     belongs to one thread at a time (`emit.measure_places`' rule) - and the work happens on the
     first ask, which is the order it always ran in. `result` never raises: a missing recovery note
-    is no reason not to sync, and it is asked for in places that are about to write."""
+    is no reason not to sync, and it is asked for in places that are about to write.
+
+    A sync that writes nothing never asks (`asked` stays False), and its caller does not wait for
+    a way back it did not need (`kept`): on a deck in Noto Sans SC the export alone is two minutes
+    (`gslides.SLOW_EXPORT`), which every no-op sync used to spend. So the thread is a daemon, the
+    interpreter's exit does not join it, and what it writes goes down whole or not at all
+    (`write_whole`)."""
 
     def __init__(self, fn, name: str = "b2s-back"):
         from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
@@ -438,11 +455,21 @@ class WayBack:
                 return fn(slides_service(creds), drive_service(creds))
 
         self.make = make
-        pool = ThreadPoolExecutor(1, thread_name_prefix=name)
-        try:
-            self.job = pool.submit(self.make)
-        finally:
-            pool.shutdown(wait=False)
+        self.job = job = Future()
+
+        def run():
+            if job.set_running_or_notify_cancel():
+                try:
+                    job.set_result(make())
+                except BaseException as e:  # noqa: BLE001 (handed to whoever asks, as a pool would)
+                    job.set_exception(e)
+
+        threading.Thread(target=run, name=name, daemon=True).start()
+
+    def kept(self) -> dict | None:
+        """The recovery note if the sync asked for one - that is, if it wrote - else None, without
+        waiting for a way back nobody needed."""
+        return self.note if self.asked else None
 
     def result(self) -> dict | None:
         """The recovery note, made once and remembered."""
@@ -512,7 +539,7 @@ def record(out: Path, entry: dict) -> Path:
         except ValueError:
             log = []
     log.append(entry)
-    path.write_text(json.dumps(log, indent=1, ensure_ascii=False), encoding="utf-8")
+    write_whole(path, json.dumps(log, indent=1, ensure_ascii=False).encode("utf-8"))
     return path
 
 
