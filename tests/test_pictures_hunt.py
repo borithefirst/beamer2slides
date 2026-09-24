@@ -297,6 +297,78 @@ def test_an_items_formula_wrapped_onto_its_own_line_stays_in_the_item():
     assert "now C = 1.0" in text and "Separator theorems" in text
 
 
+def pie_beside_a_list():
+    """r3_charts_v3 s8, as the page has it: a pgf-pie whose 'Agriculture' pin label ends 8 pt short
+    of a ball-bullet list, on the baseline of the list's fourth line."""
+    from .test_charts_diagrams import Page, lines
+
+    p = Page()
+    p.words("Final energy use by sector, 2025", 8.5, 21.06, 14.35)
+    for x0, y0, x1, y1, fill in ((110.19, 70.99, 201.09, 124.85, "#0072b2"), (88.65, 88.58, 142.5, 159.46, "#e69f00"),
+                                 (101.58, 131.27, 167.93, 185.13, "#009e73"), (148.57, 130.07, 201.38, 178.82, "#cc79a7"),
+                                 (149.28, 128.31, 203.13, 138.84, "#bfbfbf")):
+        p.draw(lines((x0, y1), (x0, y0), (x1, y0), (x1, y1), closed=True), type="fs", fill=fill, stroke="#000000", width=0.8)
+    for a, b in (((170.55, 71.69), (187.42, 58.26)), ((70.32, 118.7), (84.78, 122.33)), ((109.52, 201.49), (130.17, 187.22)),
+                 ((194.34, 165.73), (212.65, 175.09)), ((206.95, 134.1), (221.42, 137.47))):
+        p.draw(lines(a, b), type="s", fill=None, stroke="#808080", width=0.2)
+    for text, x0, baseline in (("Industry", 179.91, 52.3), ("142 TWh", 136.32, 105.71), ("Transport", 22.42, 114.95),
+                               ("88 TWh", 92.19, 128.53), ("Residential", 73.89, 212.9), ("84 TWh", 118.84, 166.98),
+                               ("Services", 209.48, 186.5), ("57 TWh", 159.4, 156.48), ("12 TWh", 173.92, 136.31)):
+        p.text(text, x0, baseline, w={"Industry": 36.78, "Transport": 44.02, "Residential": 49.12,
+                                      "Services": 36.11}.get(text, 36.07))
+    label = p.text("Agriculture", 225.25, 146.94, w=50.24)
+    for k, (line, baseline) in enumerate((("Industry is the largest user; steel", 100.22), ("alone is 16 TWh", 113.77),
+                                          ("Transport fell 9% since 2020 as", 130.31), ("EVs reached 38% of new sales", 143.86),
+                                          ("Heat pumps keep residential", 160.4), ("demand flat", 173.94))):
+        p.words(line, 283.89, baseline)
+    for k, (y0, y1) in enumerate(((94.0, 101.0), (124.0, 131.0), (155.0, 161.0))):
+        p.images.append({"id": f"p0i{k}", "bbox": [273.0, y0, 279.0, y1], "px": [6, 7]})
+    return p, label
+
+
+def test_a_pie_label_beside_a_list_is_the_pies_not_the_lines():
+    """r3_charts_v3 s8: 'Agriculture' joined the list line on its baseline ('Agriculture EVs
+    reached 38%...'), 8 pt apart, and with the words it held the pie had nothing left to be a
+    picture of beside that native line. A label beside a figure, apart from words starting on a
+    column edge other lines share, is the figure's."""
+    from .test_charts_diagrams import deck
+
+    p, label = pie_beside_a_list()
+    slide = deck(p)["slides"][0]
+    lines = [" ".join("".join(r["text"] for r in par["runs"]).split()) for e in slide["elements"] if e["kind"] == "text"
+             for par in e["paragraphs"]]
+    assert not any("Agriculture" in ln for ln in lines)
+    assert any("EVs reached 38% of new sales" in ln for ln in lines)
+    (pie,) = [e for e in slide["elements"] if e["kind"] == "image"]
+    assert label["id"] in pie["spans"] and pie["bbox"][2] >= label["bbox"][2]
+
+
+def test_a_figure_crop_leaves_out_the_ball_bullets_its_box_reaches(tmp_path):
+    """r3_charts_v3 s8: the pie's box ends past its pin label, over the edge of the list's ball
+    bullets: the crop showed slivers of the balls beside the Slides bullets."""
+    path = tmp_path / "bullets.pdf"
+    # the ball bullet an image, as beamer's shaded balls come back
+    content = (b"0 0.45 0.7 rg 20 60 100 100 re f\n"
+               b"q 6 0 0 6 118 54 cm BI /W 1 /H 1 /CS /RGB /BPC 8 ID \x33\x33\xb3 EI Q\n"
+               b"BT /F1 11 Tf 128 54 Td (Item words) Tj ET\n")
+    path.write_bytes(one_page(content))
+    raw = raw_of(path)
+    page = raw["pages"][0]
+    (image,) = page["images"]
+    words = page["spans"]
+    text = {"id": "t0", "kind": "text", "role": "body", "bbox": [128, 136, 200, 150], "spans": [s["id"] for s in words],
+            "paragraphs": [{"bullet": {"kind": "image", "image": image["id"], "bbox": image["bbox"]}, "runs": [], "lines": []}]}
+    figure = {"id": "f0", "kind": "image", "role": "figure", "bbox": [19, 39, 121, 147], "spans": []}
+    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [figure, text], "on_layout": []}]}
+    render_backgrounds(path, raw, deck, tmp_path / "out")
+    crop = np.array(Image.open(tmp_path / "out" / figure["file"]).convert("RGB")).astype(int)
+    zoom = crop.shape[1] / (figure["bbox"][2] - figure["bbox"][0])
+    edge = crop[:, int((image["bbox"][0] - figure["bbox"][0]) * zoom) + 1:]
+    assert image["bbox"][0] < figure["bbox"][2]  # the box reaches the bullet: the case
+    ball = (edge[..., 0] < 90) & (edge[..., 1] < 80) & (edge[..., 2] > 150)  # (the pie is 0, 115, 178)
+    assert not ball.any()  # no piece of the ball
+
+
 def ink(path) -> np.ndarray:
     """Dark opaque pixels of a picture (an anchored one has a transparent ground)."""
     px = np.array(Image.open(path).convert("RGBA")).astype(int)

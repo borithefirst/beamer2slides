@@ -293,7 +293,7 @@ def save_bytes(data: bytes, path: Path) -> None:
 
 
 def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path: Path,
-                transparent: bool = False) -> list[int]:
+                transparent: bool = False, hide: list = ()) -> list[int]:
     x0, y0, x1, y1 = bbox
     width, height = x1 - x0, y1 - y0
     zoom = FIGURE_PX_PER_PT if max(width, height) > 60 else SMALL_FIGURE_PX_PER_PT
@@ -303,9 +303,9 @@ def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path:
         if ix1 > ix0 and _inside(im["bbox"], bbox) and (ix1 - ix0) * (iy1 - iy0) > 0.8 * width * height:
             zoom = max(zoom, im["px"][0] / (ix1 - ix0))
     zoom = min(zoom, FIGURE_MAX_PX / max(width, height))
-    img = eraser.render(zoom, tuple(bbox))
+    img = eraser.render(zoom, tuple(bbox), hide=hide)
     if transparent:
-        img = clear_ground(eraser, bbox, zoom, img)
+        img = clear_ground(eraser, bbox, zoom, img, hide)
     save_png(img, path)
     return [img.shape[1], img.shape[0]]
 
@@ -314,7 +314,7 @@ GROUND_FLAT = 6        # levels: the page under a picture counts as one colour
 GROUND_MATCH = 16      # levels: the transparent crop laid on that colour shows the opaque crop
 
 
-def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndarray) -> np.ndarray:
+def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndarray, hide: list = ()) -> np.ndarray:
     """A picture anchored to text (inline formula, icon, number ball) on a transparent ground, so it
     shows the slide under it when the background colour changes or it is moved onto a shape.
     What stays in the background (paths reaching out of the box as render_backgrounds leaves them,
@@ -324,7 +324,7 @@ def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndar
     ground = [key for key, po in eraser.objects.items() if key not in eraser.removed and (
         (po.type == OBJ_PATH and not _inside(bounds[key], _grow(bbox, 5))) or
         (po.type in (OBJ_IMAGE, OBJ_SHADING) and not _inside(bounds[key], _grow(bbox, 0.5))))]
-    rgba = eraser.render(zoom, tuple(bbox), transparent=True, hide=ground)
+    rgba = eraser.render(zoom, tuple(bbox), transparent=True, hide=ground + list(hide))
     if rgba.shape[:2] != opaque.shape[:2]:
         return opaque
     clear = rgba[..., 3] == 0
@@ -553,6 +553,14 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
         for x0, y0, x1, y1 in (st for el in texts for st in el.get("strokes", [])):
             eraser.remove_paths_inside((x0 - 1.5, y0 - 1.5, x1 + 1.5, y1 + 1.5))  # bars of fractions converted to text
 
+        # A native list's image bullets are the list's, whatever picture box reaches them: a pie's
+        # pin label ending beside a ball-bullet column showed slivers of the balls at its edge,
+        # beside the Slides bullets.
+        bullet_boxes = [_grow(images[p["bullet"]["image"]]["bbox"], 0.5) for el in texts for p in el.get("paragraphs", [])
+                        if p["bullet"] and p["bullet"].get("kind") == "image" and p["bullet"].get("image") in images]
+        bullet_objects = [key for key, po in eraser.objects.items() if po.type in (OBJ_IMAGE, OBJ_SHADING)
+                          and any(_inside(eraser.bounds[key], b) for b in bullet_boxes)]
+
         # Graphics drawn over text first: the other crops must not show them.
         for fig in sorted(figures, key=lambda f: not f.get("overlay")):
             path = out / "figures" / f"{fig['id']}.png"
@@ -566,7 +574,7 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
                     if fig.get("role") == "math":
                         fig["bbox"] = grow_to_ink(eraser, fig["bbox"], [spans[sid] for sid in fig["spans"] if sid in spans])
                     fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path,
-                                            transparent=bool(fig.get("anchor")))
+                                            transparent=bool(fig.get("anchor")), hide=bullet_objects)
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")
         # Native tables leave the background the same way pictures do (text and rules), without a crop.
         figures = [f for f in figures if not f.get("overlay")]

@@ -1739,7 +1739,8 @@ class PageClassifier:
                 # (text colour changes with the panel; a dark number on a light box across the
                 # edge still belongs to its line)
                 if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color) and artwork[i] == artwork[j] \
-                        and not (gap > 0.8 * big and self.gutter(spans, a, b, big)):
+                        and not (gap > 0.8 * big and self.gutter(spans, a, b, big)) \
+                        and not self.figure_label_apart(spans, a, b, gap, big):
                     parent[find(i)] = find(j)
                 elif same_row and panel[i] in listing and panel[i] == panel[j] and gap <= 0.6 * self.panels[panel[i]]["bbox"].w \
                         and not any(s.info.family != "mono" and re.fullmatch(r"\d{1,4}", s.text.strip()) for s in (a, b)):
@@ -1954,6 +1955,25 @@ class PageClassifier:
                 if s.text == bidi.logical_text(s.visual):
                     s.text = text
                 s.reading = (n, rank, base, widths[spaced[i]] if i in spaced else 0.0)
+
+    def figure_label_apart(self, spans: list[Span], a: Span, b: Span, gap: float, size: float) -> bool:
+        """A figure's label beside a column of words right of the figure (a pie's pin label
+        on the baseline of a list item's second line, 0.8 em from it): the label is next to
+        the figure's graphics (its pin), the words well clear of them and starting where the
+        column's other lines start. More than a word space apart, they are no line - joined, the
+        label opened the list's line and the item split there. The label is a word: an item's
+        own label (a dingbat, '1.', '(a)') stands its labelsep (0.5 em) before the same edge."""
+        if gap <= 0.6 * size or not getattr(self, "regions", None):
+            return False
+        left, right = (a, b) if a.rect.x0 < b.rect.x0 else (b, a)
+        if sum(c.isalnum() for c in left.text) < 2 or re.fullmatch(r"\(?\w{1,3}[.):]", left.text.strip()):
+            return False
+        near = lambda s: any(r.distance(s.rect) <= 0.5 * size for r in self.regions)
+        if not near(left) or near(right):
+            return False
+        edge = {round(s.baseline) for s in spans if s is not right and abs(s.rect.x0 - right.rect.x0) <= 1.0
+                and abs(s.baseline - right.baseline) > 0.5 * size}
+        return len(edge) >= 2
 
     @staticmethod
     def gutter(spans: list[Span], a: Span, b: Span, size: float) -> bool:
@@ -3449,6 +3469,21 @@ class PageClassifier:
             return r
 
         text_rects = [ink_rect(e) for e in text_elements]
+
+        def grazed(e: dict, t: Rect, c: Rect) -> bool:
+            """A figure reaching less than an em into a text box's outline, clear of its lines
+            and bullets (a pie's pin label in the margin of the list beside it, between two
+            bullets): no text under it. (Deeper in, a figure is over the text.)"""
+            if min(t.x1, c.x1) - max(t.x0, c.x0) >= self.body and min(t.y1, c.y1) - max(t.y0, c.y0) >= self.body:
+                return False
+            ink = [Rect(l["x0"], l["baseline"] - 0.8 * p["size"], l["x1"], l["baseline"] + 0.25 * p["size"])
+                   for p in e.get("paragraphs", []) for l in p["lines"]]
+            ink += [Rect.of(p["bullet"]["bbox"]) for p in e.get("paragraphs", []) if p["bullet"] and p["bullet"].get("bbox")]
+            # (the figure's own pieces there, not its outline: the label reaches under the
+            # bullets' column between two of them)
+            pieces = [r for r in rects if c.expand(0.1).contains_rect(r) and r.intersects(t)]
+            return bool(ink) and not any(r.intersects(q) for r in ink for q in pieces)
+
         self.bullet_boxes = [Rect.of(p["bullet"]["bbox"]).expand(1) for e in text_elements for p in e["paragraphs"]
                              if p["bullet"] and p["bullet"].get("bbox")]
         out = []
@@ -3480,7 +3515,7 @@ class PageClassifier:
                 continue  # only stray rotated text, no graphics
             if any(h.expand(0.5).contains_rect(c) for h in self.hole_boxes):
                 continue  # the graphic of a hole (a frame around words): in that picture already
-            over_text = any(t.intersects(c) for t in text_rects)
+            over_text = any(t.intersects(c) and not grazed(e, t, c) for e, t in zip(text_elements, text_rects))
             table = None if over_text or not self.fill_grid(c) else self.table_from(c, label_spans, text_rects, len(out))
             if table:
                 out.append(table)  # shaded cells edge to edge: a table, not a diagram of boxes
