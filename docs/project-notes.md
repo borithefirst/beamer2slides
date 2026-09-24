@@ -4576,3 +4576,31 @@ chart bullets, git-graph nicks, the attribution, µs), 14 still (Slides limits a
 weight, one subscript level, the wrapped pitch). 5 new (`out/hunt/r9_regressions.json`): overfull
 table clipped (sev 2), centred Cyrillic affiliation lines run together (sev 2), a small reference
 block all bold, a paragraph broken inside a formula, a footline too heavy at Lato 800.
+
+### Fixes, wave 5 (2026-09-24, three fixers, `out/hunt/WAVE5.md`, merged d9dd415..1c85044)
+- **A (tables)**: wave 4 shrank an overfull table to end where the PDF's does, past the page, and
+  kept its columns at the PDF's places, so shrinking alone never brought it back. Now no table ends
+  past the page: `emit.squeezed_columns` closes each column towards its widest word, text as large
+  as still fits (at the margin when that costs nothing more); one that cannot fit at 0.75x is
+  refused by `classify.table_from` (`emit.table_fits`) and stays a picture. tables_v4 s2 ends at
+  362.8 pt (was 381.8 on a 362.8 pt page) at 0.878; tables_v2 s6 at 362.8 (427) at 0.805; tables_v3
+  s2 at its 348.7 margin at full size. 3 of the 95 r9 tables change. Square bullets sitting low: Slides
+  draws ■ with its bottom on the baseline at any size and the API has no bullet offset.
+- **B (fonts)**: stroke width over 8 footline boxes of the r8/r9 renders: PDF 1.85 px, Lato Regular
+  1.75 (-6%), Lato Bold 2.35 (+27%); Source Sans 3 600 width-matched would be 1.31x Regular, as heavy
+  as Bold. So `OPTICAL_WEIGHT` is 600 again (drawn Regular) and measured in regular widths; deck_ir
+  reads 600 and 800 back as a small cut; a small paragraph's bold runs are heavier than its words
+  again. U+2011 (Caladea and PT Serif lack it) is read as '-'. Not fixed: lstlisting's fixed columns
+  (0.627 em against LMMono's 0.525 em glyphs; the IR has no pitch, sizing up trips pull's 6% font
+  tolerance, added spaces corrupt copied code); the Рунге—Кутты dash (same width, Lato's em dash
+  has more side bearing); H₂ (Slides lowers 0.371 em, the PDF 0.11: classify would have to record
+  the drop).
+- **C (text)**: Slides breaks after a hyphen: ruxe s1's `wrap_limit` 407.93 -> 353.09 pt
+  (`hyphen_cut`, `emit.first_break`). A short inline formula keeps no-break spaces
+  (`formula_groups`, ≤ `FORMULA_GLUE_SHARE` 0.5 of its line; segoe s3). A text italic's lone spaced
+  letters count as math, so helvet s3's formula is one hole (the gap before it depends on the
+  measured place). A crop leaves out glyphs another picture owns when one is a hole
+  (`render.others_glyphs`; math_v2 s5's floating integral hook). `emit.HOLE_BREAK`: a ZWSP after the
+  word space before a hole, in the word's font, read as nothing by deck_ir, `merge.collapse_holes`,
+  compare, inverse, deck_edits, fuzz_sync and sync_check. Re-classifying the 427 hunt decks changed
+  structure only on helvet.

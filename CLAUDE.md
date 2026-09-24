@@ -76,12 +76,16 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   (`line_starts`) so emit measures a paragraph without TeX widths; CJK breaks anywhere and joins with no space (`classify.cjk`). Font names
   map through family tables (`fonts.font_info`: `SANS_FAMILIES`, `TEX_TT_RE`, `LIBERTINE_RE`;
   0.6 em monos -> Roboto Mono; CJK faces -> Noto Sans/Serif JP/SC/TC/KR, `fonts.cjk_font`; a CM sans
-  cut of 6 pt or less is set at weight 800 in bold widths, `FontMapper.optical_weight` (Slides
-  draws 500/600 as Regular, 700/800 as Bold), which deck_ir reads back regular (600 too); CM math
+  cut of 6 pt or less is written at weight 600 (`FontMapper.optical_weight`), drawn Regular: Lato
+  has no served medium and its Bold measured 27% heavier than the PDF's stroke, Regular 6% lighter;
+  deck_ir reads it (and wave 4's 800) back as a small cut, not bold; CM math
   letters stay serif among sans words, `serif_math_letters`);
   extract finds narrow spaces, letterspacing (`tracked_gaps`; tracked by `TRACK_SPACED` 0.14 em or
   more, a no-break space between letters) and accent overhang; a Type 3 font of only codes above
-  0x7F tries TS1/T2A before T1; math letters are styled per piece (`classify.math_pieces`: italic
+  0x7F tries TS1/T2A before T1; U+2010/U+2011 are read as `-` (`extract.HYPHENS`, faces lack them);
+  Slides breaks after a hyphen, so line sizing takes the next word only to it (`hyphen_cut`,
+  `emit.first_break`); a short inline formula (≤ `FORMULA_GLUE_SHARE` of its line) keeps no-break
+  spaces (`formula_groups`); math letters are styled per piece (`classify.math_pieces`: italic
   per glyph, NFKC, script capitals as Unicode); OT1 accents compose (`compose_accents`), `\not`
   negates (`negate`). Every text range emit writes is UTF-16 (`emit.u16`: astral math letters). A
   run inside a sentence keeps its paragraph's size (`emit.in_sentence`); leader dots and ellipses
@@ -120,7 +124,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   a figure label beside a column is no line (`figure_label_apart`), nor one of a row of like
   labels a plot title (`in_label_row`). A list's balls and a photo under a hole stay whole
   whatever box reaches them; a hole's picture on a photo is its glyphs on a clear ground
-  (`render.on_picture_ground`); icons grow to their ink; a line crossing a picture's edge keeps its
+  (`render.on_picture_ground`); a crop leaves out glyphs another picture owns when one of the two
+  is a hole (`render.others_glyphs`); icons grow to their ink; a line crossing a picture's edge keeps its
   crossing rows in the background (`picture_crossings`).
 - `table`: text framed by rules (or rule-less `plain_tables`), with borders, merges, fills. Column
   widths come from measured Slides advances (`emit.slides_width`, `fit_columns`) so no cell wraps
@@ -138,7 +143,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   at their own size (`row_sizes`); a flush merged cell keeps its indent (`merge_x`); only a
   `\multirow` cell loses its top margin (`middle`). Rows shaded by bands of their own sit on
   them (`bands`); a measured column gets its words plus `WRAP_MARGIN` (8% only unmeasured); an
-  overfull table's rules run off the right edge and it shrinks to end where the PDF's does; a
+  overfull table's rules run off the right edge, but no table ends past the page: its columns close
+  up to their words (`emit.squeezed_columns`), text as large as fits down to 0.75x, and one that
+  cannot fit stays a picture (`table_fits`); a
   siunitx dash is a `centred` cell; cell accents compose (`span_runs`).
   Convert brings tables empty in the .pptx with their own cell margins (`emit.pptx_table`) and
   fills them through the API, so rows keep the PDF pitch. The base records those margins
@@ -390,7 +397,9 @@ markers.
   (`emit.line_sizes`, `inner_pitch`). Slides rounds each paragraph step to whole pixels with its
   spaceAbove included (`emit.pitch_between(..., gap)`, 0.07 pt rms on 18 boxes). Slides keeps a
   space and the no-break spaces after it together, so the word before a hole wraps with it
-  (`text_layout.wrap` models it; a ZWSP would break there, unwritten until checked live).
+  (`text_layout.wrap` models it): emit writes a ZWSP after the word space before a hole
+  (`emit.HOLE_BREAK`, `""` turns it off) and every reader (deck_ir, `merge.collapse_holes`, compare,
+  inverse, the fuzzers) reads it as nothing.
 - Title placeholders exist before any other element: bring them to front after adding shapes.
 - Layout pages reject `pageBackgroundFill.propertyState = INHERIT`. Imported layout/master
   placeholders hold "\n" per list level: updateTextStyle works on them, insertText is refused. A
