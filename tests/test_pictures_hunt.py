@@ -108,6 +108,64 @@ def test_an_ultra_thick_arrow_reaches_the_node_its_head_touches():
     assert abs(blue["to"][0] - 201.88) < 0.1  # where the black edge ends, at the node
 
 
+def uline(p, text: str, x0: float, baseline: float, size: float = 10.91) -> None:
+    """Words underlined as ulem's \\uline draws them: a rule under each word and each space,
+    overlapping end to end."""
+    from .test_charts_diagrams import lines
+
+    y = baseline + 3.2
+    words = text.split()
+    for k, word in enumerate(words):
+        s = p.text(word, x0, baseline, size)
+        p.draw(lines((x0 - 0.2, y), (s["bbox"][2] + 0.2, y)), type="s", stroke="#000000", width=0.4)
+        x0 = s["bbox"][2] + 0.33 * size
+        if k < len(words) - 1:
+            p.draw(lines((s["bbox"][2] - 0.2, y), (x0 + 0.2, y)), type="s", stroke="#000000", width=0.4)
+
+
+def test_a_long_uline_wrapped_over_two_lines_is_an_underline():
+    """r3_textfx_v3 s4: an item \\uline{...} over two lines. The first line's pieces join into a
+    rule wider than half the page, taken for a theme hairline, and the short last line under it
+    read as a formula's denominator: the pieces became fraction bars, the item a formula left
+    in the background, and one rule a figure whose box took the words above it off the page."""
+    from .test_charts_diagrams import Page, deck
+
+    p = Page()
+    uline(p, "Please add the sample size and the confidence interval to every chart", 30, 150)
+    uline(p, "results section", 30, 165.5)
+    p.words("as requested in the first round.", 120, 165.5)
+    p.words("Body text that sets the size of the deck", 30, 225)
+    slide = deck(p)["slides"][0]
+    assert not slide["left_in_background"] and all(e["kind"] == "text" for e in slide["elements"])
+    runs = [r for e in slide["elements"] for par in e["paragraphs"] for r in par["runs"]]
+    underlined = "".join(r["text"] for r in runs if r["underline"])
+    assert underlined.split() == "Please add the sample size and the confidence interval to every chart results section".split()
+
+
+def test_words_a_thin_picture_grazes_stay_in_the_background(tmp_path):
+    """A figure only a rule tall under words left in the background (r3_textfx_v3 s4, one
+    underline piece): the words' font boxes reach into the figure's box by their descent, so they
+    went off the background with it while the crop showed only the rule."""
+    from beamer2slides.render import load_png
+
+    content = (b"BT /F1 12 Tf 20 150 Td (Words above the rule) Tj ET\n"
+               b"0 0 0 RG 0.4 w 20 146.5 m 140 146.5 l S\n")
+    path = tmp_path / "grazed.pdf"
+    path.write_bytes(one_page(content))
+    raw = raw_of(path)
+    page = raw["pages"][0]
+    (rule,) = page["drawings"]
+    box = [rule["bbox"][0] - 1, rule["bbox"][1] - 1, rule["bbox"][2] + 1, rule["bbox"][3] + 1]
+    assert all(s["bbox"][3] > box[1] for s in page["spans"])  # the words' boxes reach into it: the case
+    figure = {"id": "f0", "kind": "image", "role": "figure", "bbox": box, "spans": []}
+    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [figure], "on_layout": []}]}
+    [png] = render_backgrounds(path, raw, deck, tmp_path / "out")
+    bg = load_png(png)
+    z = bg.shape[1] / 400
+    words = bg[round(z * 40):round(z * box[1]), round(z * 20):round(z * 140)]
+    assert (words.min(axis=2) < 100).sum() > 200  # the words are still on the background
+
+
 def ink(path) -> np.ndarray:
     """Dark opaque pixels of a picture (an anchored one has a transparent ground)."""
     px = np.array(Image.open(path).convert("RGBA")).astype(int)

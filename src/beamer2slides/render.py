@@ -573,7 +573,14 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
         figures += [e for e in slide["elements"] if e["kind"] in ("table", "diagram")]
         if figures:
             boxes = [tuple(fig["bbox"]) for fig in figures]
-            eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) for b in boxes))
+            # The glyphs a picture holds, not those its box grazes: the words just above a thin
+            # figure (a rule under them) reach into it by their descent, and went from the
+            # background while the crop showed only the rule. (What a grazed glyph has inside the
+            # box the picture shows over it, in place.)
+            held = owned_by([spans[sid] for fig in figures for sid in fig.get("spans", []) if sid in spans])
+            centre = lambda ch: ((ch.box[0] + ch.box[2]) / 2, (ch.box[1] + ch.box[3]) / 2)
+            eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) for b in boxes) and (
+                any(b[0] <= centre(ch)[0] <= b[2] and b[1] <= centre(ch)[1] <= b[3] for b in boxes) or held(ch)))
             for b in boxes:
                 eraser.remove_images_in(b)
                 # Stroked paths reach past the figure box by half their width, arrow tips further.

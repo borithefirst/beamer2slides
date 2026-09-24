@@ -139,8 +139,10 @@ def test_diagram_with_circles_edge_labels_and_stealth_tips():
     free = sorted("".join(r["text"] for r in n["paragraphs"][0]) for n in d["nodes"] if n["shape"] is None)
     assert free == ["build", "parse"]
     assert [l["arrow_to"] for l in d["lines"]] == ["STEALTH_ARROW"] * 2
-    # the lines reach the circle/rectangle outlines, where the tips end
-    assert [round(l["to"][0]) for l in d["lines"]] == [164, 247]
+    # the lines reach the circle/rectangle outlines, where the tips' mitred points end: the outer
+    # edge of the 0.4 pt outline, half its width before the node's path
+    ends = [d["nodes"][1]["bbox"][0], d["nodes"][2]["bbox"][0]]
+    assert all(abs(l["to"][0] - (x - 0.2)) < 0.1 for l, x in zip(d["lines"], ends))
 
 
 def test_flowchart_with_diamond_and_orthogonal_edge():

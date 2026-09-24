@@ -1042,7 +1042,11 @@ class PageClassifier:
 
         for group, r in candidates:
             d = group[0]
-            if self.is_decoration(r) or r.w < 2 or r.w * r.h >= 0.95 * self.W * self.H:
+            # (ulem's pieces under a long underlined line join into a rule wider than half the
+            # page, which is_decoration takes for a theme hairline: the line then read as a
+            # formula over two dozen fraction bars. A theme's hairline is one piece.)
+            chain = len(group) >= 2 and is_rule(d, r)
+            if (self.is_decoration(r) and not chain) or r.w < 2 or r.w * r.h >= 0.95 * self.W * self.H:
                 continue
             ops = d["items"]
             if is_rule(d, r):
@@ -1060,9 +1064,13 @@ class PageClassifier:
                 covered = sum(s.rect.w for s in words)
                 # (a rule over words below it: an overline, a fraction bar; not the next line of
                 # text under a wrapped underline, whose words run on past the rule)
+                # (nor the short last line of a wrapped underlined paragraph, flush with the rule's
+                # start and ending far before its end: a fraction's part is centred on its bar)
+                flush_line = lambda o: abs(run_of(o).x0 - r.x0) <= 1 and r.x1 - run_of(o).x1 > size and o.baseline - r.cy >= 0.9 * size
                 below = not strike and any(s.rect.x0 < r.x1 and r.x0 < s.rect.x1 and s.baseline > r.cy and s.rect.y0 < r.cy + 0.25 * size
                                            and (s.baseline - r.cy < 0.75 * size or r.expand(size).contains(run_of(s).x0, r.cy)
-                                                and r.expand(size).contains(run_of(s).x1, r.cy)) for s in flat)
+                                                and r.expand(size).contains(run_of(s).x1, r.cy) and not flush_line(s))
+                                           for s in flat)
                 if below or covered < 0.8 * r.w or any(g > 0.6 * size for g in gaps) or \
                         (strike and max(s.baseline for s in words) - min(s.baseline for s in words) > 0.1 * size) or \
                         abs(words[0].rect.x0 - r.x0) > 0.3 * size or abs(words[-1].rect.x1 - r.x1) > 0.3 * size:
@@ -3420,6 +3428,11 @@ class PageClassifier:
                 out += bars
                 continue
             spans = [s.id for s in label_spans if c.expand(0.5).contains_rect(s.rect)]
+            if not spans and c.h <= 1.5 and not any(c.expand(0.5).intersects(Rect.of(im["bbox"])) for im in self.page["images"]):
+                # Only a hairline (the pieces of an underline under words left in the background):
+                # a picture adds nothing, and its box took the words above it off the background
+                # while the crop showed only the rule.
+                continue
             el = {"id": f"p{self.page['index']}f{len(out)}", "kind": "image", "role": "figure",
                   "bbox": self.clip_to_bands(c, c.expand(1.0)).as_list(), "spans": spans}
             bare = None if spans else self.bare_image(c)
