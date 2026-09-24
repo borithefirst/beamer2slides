@@ -32,6 +32,25 @@ EQ_NUMBER_RE = re.compile(r"^\(\d+(\.\d+)*[a-z]?\)$")
 # A caption's label: "Figure:", "Figure 3:", "Fig. 2.", "Table IV:" (beamer's caption templates).
 CAPTION_RE = re.compile(r"^\S+\.?(\s+[\dIVXivx]+(\.\d+)*)?\s*[:.](\s|$)")
 MATH_OPERATORS = set("=+−<>≤≥×·/∑∏∫∈∉⊂⊆∪∩→←⇒⇔≈≠±∞")
+RELATIONS = set("=<>≤≥≈≠≡∼≃≅∝⇒⇔→")
+# Operator names set upright inside formulas (\min, \lim, \log, \operatorname{Var}): words of a
+# formula, not of prose around it.
+OPERATOR_NAMES = {
+    "min", "max", "sup", "inf", "lim", "liminf", "limsup", "log", "ln", "lg", "exp", "sin", "cos", "tan",
+    "cot", "sec", "csc", "sinh", "cosh", "tanh", "coth", "arcsin", "arccos", "arctan", "det", "dim", "ker",
+    "deg", "arg", "gcd", "lcm", "Pr", "hom", "tr", "Tr", "rank", "diag", "sgn", "sign", "span", "ess", "argmin",
+    "argmax", "mod", "Var", "Cov", "Corr", "softmax", "erf", "Re", "Im", "id", "supp", "vol", "dist", "div",
+    "grad", "curl", "rot", "Hom", "End", "Aut", "Ker", "KL",
+}
+DELIMITERS = set("|‖∣∥()[]{}⟨⟩⌊⌋⌈⌉")
+# Math extension fonts: big operators, big delimiters, radical signs - glyphs that hang from their
+# origin (Computer Modern's CMEX, Latin Modern's LMMathExtension, txfonts/pxfonts/newtx's).
+EXTENSION_FONT_RE = re.compile(r"^(CMEX|EUEX|ESINT|(NEW)?(N?TX|PX)EX)|MATHEXTENSION")
+
+
+def extension_font(font: str) -> bool:
+    return bool(EXTENSION_FONT_RE.search(re.sub(r"[^A-Z0-9]", "", font.split("+", 1)[-1].upper())))
+DISPLAY_WORD_SHARE = 0.35  # a line with fewer of its characters in words of prose is a formula
 # Lone glyphs of bitmap (Type 3) text companion fonts come back as their TS1 code read as
 # Latin-1 (the glyph names are /aNNN): \textbullet (metropolis' itemize item under pdflatex
 # without cm-super) a control character, \texteuro an inverted question mark. TS1's codes
@@ -181,6 +200,7 @@ class Line:
     tab: Span | None = None  # content after a line label ("4:") starts here, reached by a tab
     holes: list = field(default_factory=list)  # complex inline formulas: pictures over gaps in the text
     hole_pads: list = field(default_factory=list)  # graphics drawn around words of a hole (a circle, a badge)
+    limits: list = field(default_factory=list)  # lines of the limits of a big operator in a hole (∑ with n=1 and ∞)
 
     def hole_rect(self, hole: list) -> "Rect":
         """A hole's extent: its glyphs and the graphics drawn around them."""
@@ -236,7 +256,7 @@ class Line:
         top = max(s.size for s in self.spans)
         # (not a big-operator or brace glyph: it sits off the baseline)
         return max((s for s in self.spans if s.size >= 0.9 * top),
-                   key=lambda s: (not s.font.upper().startswith("CMEX"), len(s.text.strip())))
+                   key=lambda s: (not extension_font(s.font), len(s.text.strip())))
 
     @property
     def baseline(self) -> float:
@@ -631,6 +651,28 @@ def bullet_shape(d: dict | None) -> dict:
     return {"shape": shape, "color": d["fill"] if filled else d.get("stroke") or "#000000"}
 
 
+WORD_RE = re.compile(r"[^\W\d_]{2,}")
+
+
+def prose_share(spans: list[Span]) -> float:
+    """Share of the characters that are words of prose: runs of two or more letters in a text
+    face, operator names (\\min, \\log) not counted. A display formula has few (a \\text{for all},
+    "eigenvalues of" in a set), a line of prose with formulas in it mostly these."""
+    total = sum(len(s.text.replace(" ", "")) for s in spans)
+    # (letters of a word may come as spans of their own: right-to-left text, letterspacing)
+    text, prev = "", None
+    for s in sorted(spans, key=lambda s: s.rect.x0):
+        if s.info.family in ("math", "icon"):
+            text += " "
+        else:
+            text += ("" if prev is not None and s.rect.x0 - prev.rect.x1 <= 0.1 * s.size else " ") + s.text
+        prev = s
+    # (a name right before its parenthesis is a function's, \operatorname{SSIM}(I_t, ...))
+    words = sum(len(m.group()) for m in WORD_RE.finditer(text)
+                if m.group() not in OPERATOR_NAMES and text[m.end():m.end() + 1] != "(")
+    return words / total if total else 0.0
+
+
 def math_content(line: "Line") -> list[Span]:
     """The spans math analysis looks at: a hanging label before a tab ("a)" on a ball) is not math."""
     if line.tab is None:
@@ -967,6 +1009,43 @@ class PageClassifier:
                 out |= {i for i, _ in group}
         return out
 
+    def typeset_fraction(self, r: Rect) -> bool:
+        """A stroke is a fraction's bar, however long, when words sit right on it and right
+        under it, all within its ends, one side running from end to end (TeX makes the bar as
+        long as the wider part) and the other centred on it. As a graphic it became a figure
+        region with the words at it, and the numerator or denominator went with that figure
+        or into the background while the rest of the formula stayed text."""
+        above, below = [], []  # the glyphs of each part, scripts further off the bar too
+        touching = [False, False]
+        for s in self.page["spans"]:
+            x0, y0, x1, y1 = s["bbox"]
+            if x1 <= r.x0 or x0 >= r.x1 or not s["text"].strip():
+                continue
+            if r.y0 - 0.8 * self.body <= y1 <= r.y0 + 0.5:
+                above.append((s["bbox"], s["size"]))
+                on = y1 >= r.y0 - 0.4 * s["size"]
+                touching[0] |= on
+            elif r.y1 - 1 <= y0 <= r.y1 + 0.8 * self.body:
+                below.append((s["bbox"], s["size"]))
+                on = y0 <= r.y1 + 0.4 * s["size"]
+                touching[1] |= on
+            else:
+                continue
+            if on and (x0 < r.x0 - 1 or x1 > r.x1 + 1):
+                return False  # a word across its end: an underline or a rule under a heading
+        if not all(touching):
+            return False
+        for side in (above, below):  # one run of glyphs each, not a table's cells
+            side.sort(key=lambda b: b[0][0])
+            size = max(b[1] for b in side)
+            if any(b[0][0] - max(a[0][2] for a in side[:i + 1]) > 0.7 * size for i, b in enumerate(side[1:])):
+                return False
+        above, below = [b for b, _ in above], [b for b, _ in below]
+        sides = [(min(b[0] for b in side), max(b[2] for b in side)) for side in (above, below)]
+        full = [abs(a - r.x0) <= 1 and abs(b - r.x1) <= 1 for a, b in sides]
+        centred = [abs((a + b) / 2 - r.cx) <= 0.05 * r.w + 1 for a, b in sides]
+        return any(full) and all(centred)
+
     def analyse_graphics(self) -> None:
         graphics = []
         rules: dict[tuple[int, int], list[Rect]] = {}
@@ -992,8 +1071,8 @@ class PageClassifier:
                                     "opacity": d.get("fill_opacity", 1.0), "image": False})
             elif d["type"] == "s" and r.h <= 1.0 and set(d["items"]) <= {"l"} and (r.w <= 3 * self.body or any(
                     abs(s["bbox"][2] - r.x0) <= 1 and s["bbox"][1] - 1 <= r.y0 <= s["bbox"][3]
-                    and (s["font"].split("+")[-1].upper().startswith("CMEX") or "√" in s["text"])
-                    for s in self.page["spans"])):
+                    and (extension_font(s["font"]) or "√" in s["text"])
+                    for s in self.page["spans"]) or self.typeset_fraction(r)):
                 self.bars.append(r)  # fraction bars, radical overbars (long ones start at their radical sign)
                 bar_ids.append((d["id"], r))
             else:
@@ -1146,6 +1225,75 @@ class PageClassifier:
         return self.join_line_labels(lines)
 
     @staticmethod
+    def drop_hanging_glyphs(lines: list[Line]) -> list[Line]:
+        """A glyph hanging from its origin - a \\displaystyle\\int from CMEX, a radical sign -
+        has its box between two lines, nearer the upper one, and line building put it there,
+        over a word of that line ("graphs" under a √ of the line below; "µ-a.e." over the ∫):
+        the upper line's hole picture took it, reaching into the lower line, and the lower
+        line's formula lost its sign. It belongs to the line below when it lies over a word of
+        its line and in a gap of the line below, words right beside it on both sides."""
+        out = list(lines)
+        for a in lines:
+            if a not in out or len(a.spans) < 2:
+                continue  # (a line that took a glyph of the line above is done)
+            for g in [s for s in a.spans if extension_font(s.font) or s.text.strip() == "√"]:
+                size = g.size
+                over = lambda w: min(w.rect.x1, g.rect.x1) - max(w.rect.x0, g.rect.x0) > 1.0
+                if not any(w is not g and w.size >= 0.8 * size and over(w) for w in a.spans):
+                    continue
+                for b in out:
+                    if b is a or not (a.baseline < b.baseline <= a.baseline + 2.5 * size) or any(map(over, b.spans)):
+                        continue
+                    left = any(g.rect.x0 - 1.5 * size <= w.rect.x1 <= g.rect.x0 + 1 for w in b.spans)
+                    right = any(g.rect.x1 - 1 <= w.rect.x0 <= g.rect.x1 + 1.5 * size for w in b.spans)
+                    if left and right:
+                        i, j = out.index(a), out.index(b)
+                        rest, joined = Line([s for s in a.spans if s is not g]), Line(b.spans + [g])
+                        rest.tab, joined.tab = a.tab, b.tab
+                        out[i], out[j] = rest, joined
+                        a = rest
+                        break
+        # A \displaystyle glyph between two lines of prose, alone on a line of its own (its box
+        # touched neither): it hangs into the lower line, where the words leave a gap for it
+        # with prose right beside it ("the total mass ∫X ρ dµ of the body").
+        for g_line in list(out):
+            ext = [s for s in g_line.spans if extension_font(s.font)]
+            if len(ext) != 1 or any(s is not ext[0] and s.size > 0.8 * ext[0].size for s in g_line.spans):
+                continue
+            g, size = ext[0], ext[0].size
+            over = lambda w: min(w.rect.x1, g.rect.x1) - max(w.rect.x0, g.rect.x0) > 1.0
+            for b in out:
+                if b is g_line or not (g.baseline + 0.3 * size < b.baseline <= g.baseline + 2.5 * size) \
+                        or g.rect.y1 < b.rect.y0 - 0.5 * size or any(map(over, b.spans)):
+                    continue
+                before = [w for w in b.spans if g.rect.x0 - 1.5 * size <= w.rect.x1 <= g.rect.x0 + 1]
+                after = [w for w in b.spans if g.rect.x1 - 1 <= w.rect.x0 <= g.rect.x1 + 1.5 * size]
+                if before and after and any(PageClassifier.prose_word(w) for w in before + after):
+                    out.remove(g_line)
+                    joined = Line(b.spans + g_line.spans)
+                    joined.tab = b.tab
+                    out[out.index(b)] = joined
+                    break
+        # A radical sign alone on a line of its own (its box ends above the radicand's baseline):
+        # it goes with the radicand that starts at its right edge, or the hole picture was the
+        # radicand's while the sign stood left of it, over the space before.
+        for g_line in list(out):
+            signs = [s for s in g_line.spans if s.text.strip() == "√"]
+            if len(signs) != 1 or any(s is not signs[0] and s.size > 0.8 * signs[0].size for s in g_line.spans):
+                continue
+            g = signs[0]
+            for host in out:
+                if host is not g_line and any(
+                        abs(w.rect.x0 - g.rect.x1) <= 1 and g.baseline < w.baseline <= g.rect.y1 + g.size
+                        and w.size >= 0.6 * g.size for w in host.spans):
+                    out.remove(g_line)
+                    joined = Line(host.spans + g_line.spans)
+                    joined.tab = host.tab
+                    out[out.index(host)] = joined
+                    break
+        return out
+
+    @staticmethod
     def join_hanging_operators(lines: list[Line]) -> list[Line]:
         """A CMEX glyph hangs from its origin - an inline `\\sum`'s is 8 pt above the baseline
         of the words it stands between - so it comes out a line of its own, which went to the
@@ -1153,29 +1301,64 @@ class PageClassifier:
         and the words moved. A lone CMEX glyph about as tall as a line's words, centred on them,
         with words of that line on both sides of it, is in that line (and becomes part of a
         formula hole there). Not a display operator at the start of its line, nor a radical
-        taller than the line, nor a brace piece under it."""
-        out = list(lines)
-        for g_line in lines:
-            if len(g_line.spans) != 1 or not g_line.spans[0].font.startswith("CMEX"):
+        taller than the line, nor a brace piece under it.
+
+        The glyph may carry its limits (an \\int's small upper bound joins its line); a \\bigl|
+        delimiter may stand up to twice the words' height; and the glyph may start its line when
+        that line is in a paragraph's flow - a line of prose above or below starts where it
+        does ("... pointwise, but / ∫₀¹ fn dx = 1 for all n")."""
+        out = PageClassifier.drop_hanging_glyphs(list(lines))
+        for g_line in list(out):
+            cmex = [s for s in g_line.spans if extension_font(s.font)]
+            if len(cmex) != 1 or any(s is not cmex[0] and s.size > 0.8 * cmex[0].size for s in g_line.spans):
                 continue
-            g = g_line.spans[0]
+            g = cmex[0]
+            # (pdflatex's CMEX delimiters often come back unmapped, as U+FFFD)
+            tall = 2.0 if g.text.strip() and all(c in DELIMITERS or c == "�" for c in g.text.strip()) else 1.5
             for host in out:
                 if host is g_line:
                     continue
-                words = [w for w in host.spans if not w.font.startswith("CMEX")]
-                level = [w for w in words if 0.6 * w.rect.h <= g.rect.h <= 1.5 * w.rect.h
+                words = [w for w in host.spans if not extension_font(w.font)]
+                level = [w for w in words if 0.6 * w.rect.h <= g.rect.h <= tall * w.rect.h
                          and abs(g.rect.cy - w.rect.cy) <= 0.35 * w.size]
                 before = [w for w in words if 0 <= g.rect.x0 - w.rect.x1 <= 1.5 * w.size]
                 after = [w for w in words if 0 <= w.rect.x0 - g.rect.x1 <= 1.5 * w.size]
-                prose = lambda w: w.info.family != "math" and not w.info.italic and not w.font.startswith(("CMSY", "CMMI"))
-                # (next to an upright word of prose: inside a formula - between a relation and a
-                # bracket, or its variables, which beamer's sans math sets in a text italic - it
-                # goes with that formula wherever the formula goes)
-                if level and before and after and any(map(prose, before + after)):
+                # (the words after it may be a line of their own: the operator's box widened the
+                # gap past what build_lines joins - "... add up: ∑ d(v) = 2|E|")
+                other = None
+                if before and not after:
+                    other = next((o for o in out if o is not host and o is not g_line
+                                  and abs(o.baseline - host.baseline) <= 0.2 * host.size
+                                  and any(0 <= w.rect.x0 - g.rect.x1 <= 1.5 * w.size and not extension_font(w.font)
+                                          for w in o.spans)), None)
+                    if other:
+                        after = [w for w in other.spans if 0 <= w.rect.x0 - g.rect.x1 <= 1.5 * w.size]
+                prose = PageClassifier.prose_word
+                # (next to a word of prose: inside a formula - between a relation and a bracket,
+                # or its variables, which beamer's sans math sets in a text italic - it goes with
+                # that formula wherever the formula goes; a theorem's italic words are prose)
+                inside = before and any(map(prose, before + after))
+                starts = not before and words and abs(g.rect.x0 - min(w.rect.x0 for w in words + [g])) <= 0.5 and any(
+                    l is not host and l is not g_line and abs(l.x0 - g.rect.x0) <= 1.5
+                    and 0.8 * host.size <= abs(l.baseline - host.baseline) <= 2.2 * host.size
+                    and prose_share(l.content) >= DISPLAY_WORD_SHARE for l in out)
+                if level and after and (inside or starts):
                     out.remove(g_line)
-                    out[out.index(host)] = Line(host.spans + [g])
+                    if other:
+                        out.remove(other)
+                    joined = Line(host.spans + g_line.spans + (other.spans if other else []))
+                    joined.tab = host.tab
+                    out[out.index(host)] = joined
                     break
         return out
+
+    @staticmethod
+    def prose_word(w: Span) -> bool:
+        """A word of prose, not a formula's: text fonts, and in italic only a word of three or
+        more letters (beamer's sans math sets variables in a text italic; a theorem's italic
+        words are prose)."""
+        return w.info.family != "math" and not w.font.startswith(("CMSY", "CMMI")) and (
+            not w.info.italic or re.fullmatch(r"[^\W\d_]{3,}[,.;:]?", w.text.strip()) is not None)
 
     @staticmethod
     def gutter(spans: list[Span], a: Span, b: Span, size: float) -> bool:
@@ -1308,7 +1491,7 @@ class PageClassifier:
         """\\underbrace / \\overbrace in a line of prose: the brace (big-operator glyphs, a line
         of its own just below or above) and its small label join the line, so the formula
         becomes one hole with them."""
-        cmex = lambda s: s.font.upper().startswith("CMEX")
+        cmex = lambda s: extension_font(s.font)
         words = lambda l: sum(len(s.text.strip()) >= 2 and s.text.strip().isalpha() and s.info.family not in ("math", "icon")
                               for s in l.spans)
         taken: set[int] = set()
@@ -1476,6 +1659,92 @@ class PageClassifier:
                 return True
         return False
 
+    def in_prose_flow(self, line: Line) -> bool:
+        """One of a paragraph's lines: a line of words of the same size a line pitch or two above
+        or below starts where it starts. A display formula is set apart from its paragraph and
+        centred (or indented), never flush with the words around it."""
+        if line.bullet or line.tab is not None:
+            return True
+        size = line.size
+        for o in self.all_lines:
+            if o is line or not o.spans[0].horizontal or o.reason in ("theme", "figure", "rotated") or \
+                    abs(o.size - size) > 0.2 * size:
+                continue
+            # (any of its words: an item's first line starts with its label, "4. Let ...")
+            if 0.8 * size <= abs(o.baseline - line.baseline) <= 2.2 * size \
+                    and any(abs(s.rect.x0 - line.x0) <= 1.5 for s in o.content) \
+                    and prose_share(o.content) >= DISPLAY_WORD_SHARE:
+                return True
+        return False
+
+    def same_formula(self, line: Line, maths: list[Line]) -> bool:
+        """A piece of a display formula whose complex part is a math line: build_lines split
+        it where a big operator hangs from its origin (off the baseline) or at a \\qquad.
+
+        - Beside it on its row ("x⊤Lx =" | ∑ | "(xu − xv)2" | "for all x ∈ ℝn"): the row is where
+          the math line's glyphs cover the line's x-height, not where its baseline is (a CMEX
+          glyph's origin is well above the words'). A formula piece joins up to 4 em away; a few
+          words ("#{eigenvalues of ...}") only right next to it, and only out of a paragraph's flow.
+        - Under or over it, another row of the same display (align*'s "= 1 − 0.9332"): a formula
+          line out of the flow, overlapping it across, no more than half a line apart."""
+        size = line.size
+        share = prose_share(math_content(line))
+        names = WORD_RE.findall(line.text)
+        formula = share < DISPLAY_WORD_SHARE and (line.inline_math or any(
+            ch in MATH_OPERATORS for ch in line.text) or any(s.info.family == "math" for s in line.spans)
+            or bool(names) and all(w in OPERATOR_NAMES for w in names))  # a lone "min" of a display
+        few_words = line.inline_math and len(WORD_RE.findall(line.text)) <= 4
+        # (the full stop a display ends on, right after a big delimiter that hangs from its
+        # origin a line above)
+        if line.text.strip() and set(line.text.replace(" ", "")) <= set(",.;:") and any(
+                line.rect.x0 - size <= s.rect.x1 <= line.rect.x0 + 0.5 and abs(s.rect.cy - line.rect.cy) <= 2 * size
+                for m in maths for s in m.spans if extension_font(s.font)) and not self.in_prose_flow(line):
+            return True
+        if not (formula or few_words):
+            return False
+        # (inside a big delimiter: a cases' rows start at its brace, however much they look like
+        # a paragraph of two lines to each other)
+        if any(s.rect.x1 - 0.5 <= line.rect.x0 <= s.rect.x1 + 0.5 * size and line.rect.y1 > s.rect.y0
+               and line.rect.y0 < s.rect.y1 + 1.2 * s.size and s.rect.h >= 0.8 * size
+               for m in maths for s in m.spans if extension_font(s.font)):
+            return True
+        flow = None
+        core = (line.baseline - 0.5 * size, line.baseline)
+        for m in maths:
+            gap = max(0.0, m.rect.x0 - line.rect.x1, line.rect.x0 - m.rect.x1)
+            level = abs(m.baseline - line.baseline) <= 0.3 * size
+            if level and line.inline_math and gap <= 4 * size:
+                return True  # ("L(θ) =" left of its complex part, on one baseline)
+            # (a big operator or delimiter's box is an em at its origin; its ink hangs another
+            # em below: a display \left( \int of "‖f‖p = (∫ |f|^p dµ)^{1/p}")
+            reach = max((s.rect.y1 + 1.2 * s.size for s in m.spans if extension_font(s.font)), default=m.rect.y1)
+            on_row = level or min(max(m.rect.y1, reach), core[1]) - max(m.rect.y0, core[0]) >= 0.3 * size
+            if on_row:
+                # (words go on from the formula, "... #{eigenvalues of H ≤ E}", "... for all n";
+                # words before it are the sentence leading into the display)
+                if formula and gap <= 4 * size or line.rect.x0 >= m.rect.x1 - 1 and gap <= 1.0 * size:
+                    flow = self.in_prose_flow(line) if flow is None else flow
+                    if not flow:
+                        return True
+                continue
+            across = min(m.rect.x1, line.rect.x1) - max(m.rect.x0, line.rect.x0)
+            # (an align row set on its relation: under one, up to a line apart - align* opens
+            # its rows up to 1.5 lines)
+            aligned = formula and line.text.lstrip()[:1] in RELATIONS and any(
+                abs(s.rect.x0 - line.rect.x0) <= 1.5 and s.text.lstrip()[:1] in RELATIONS for s in m.spans)
+            # (a few words in a column of the display: a cases' "otherwise")
+            if (formula and across >= 0.3 * min(line.rect.w, m.rect.w) or few_words and any(abs(s.rect.x0 - line.rect.x0) <= 1.5 for s in m.spans)) \
+                    and max(line.rect.y0 - m.rect.y1, m.rect.y0 - line.rect.y1) <= (1.0 if aligned else 0.5) * size:
+                flow = self.in_prose_flow(line) if flow is None else flow
+                if not flow:
+                    return True
+        return False
+
+    def display_line(self, line: Line) -> bool:
+        """A line that is a display formula: mostly formula (few words of prose, see prose_share)
+        and set apart from any paragraph's flow."""
+        return prose_share(math_content(line)) < DISPLAY_WORD_SHARE and not self.in_prose_flow(line)
+
     def simple_fraction(self, line: Line, bar: Rect):
         """(bar, numerator spans, denominator spans) for a small inline fraction such as
         \\frac{1}{2}: short text directly above and below a short bar, no radical sign."""
@@ -1492,21 +1761,31 @@ class PageClassifier:
         by_x = lambda group: sorted(group, key=lambda s: s.rect.x0)
         return bar, by_x(above), by_x(below)
 
+    def line_bars(self, line: Line) -> list[Rect]:
+        """Fraction bars and radical overbars at a line - not the overbar of a radical sign set in
+        another line of words (a √ of the line below reaches up into this one; a sign alone on a
+        line of its own is this line's, see formula holes)."""
+        signs = [s for l in self.all_lines if l is not line and sum(o.size >= 0.8 * line.size for o in l.spans) >= 2
+                 for s in l.spans if extension_font(s.font) or "√" in s.text]
+        return [b for b in self.bars if b.expand(1).intersects(line.rect) and not any(
+            abs(s.rect.x1 - b.x0) <= 1 and s.rect.y0 - 1 <= b.y0 <= s.rect.y1 for s in signs)]
+
     def formula_holes(self, line: Line, fractions: list) -> list[list[Span]]:
         """Complex formulas inside a line of prose, as groups of spans; [] if there are none or
         if the line is not mostly prose (a display equation stays one picture)."""
         spans = sorted(math_content(line), key=lambda s: s.rect.x0)
         size = line.size
-        bars = [b for b in self.bars if b.expand(1).intersects(line.rect)]
+        bars = self.line_bars(line)
         simple_bars = [f[0] for f in fractions]
         in_fraction = {id(s) for f in fractions for s in f[1] + f[2]}
 
         def mathish(s: Span) -> bool:
             t = s.text.strip()
-            return (s.info.family == "math" or bool(script_of(s, line)) or s.font.upper().startswith("CMEX")
+            return (s.info.family == "math" or bool(script_of(s, line)) or extension_font(s.font)
+                    or bool(t) and all(w in OPERATOR_NAMES for w in t.split())  # "lim sup" of a formula
                     or "�" in s.text or (s.info.italic and len(t) <= 2)
                     or any(b.expand(0.5).intersects(s.rect) and s.rect.cy > b.cy for b in bars)
-                    or (bool(t) and all(ch in MATH_OPERATORS or ch in "()[]{}|∥,.;:'ˆ˜¯^0123456789" for ch in t)))
+                    or (bool(t) and all(ch in MATH_OPERATORS or ch in "()[]{}|∥,.;:'ˆ˜¯^0123456789 " for ch in t)))
 
         segments: list[list[Span]] = []
         for s in spans:
@@ -1518,13 +1797,21 @@ class PageClassifier:
             else:
                 segments.append([s])
         segments = [seg for seg in segments if seg]
-        words = [s.text.strip() for s in spans if not any(s in seg for seg in segments)]
-        if sum(sum(ch.isalpha() for ch in w) >= 2 for w in words) < 2 and sum(map(len, words)) < 8:
-            return []  # hardly any words ("f(x) = √x if x ≥ 0"): a display equation, one picture
+        # (operator names are the formula's: "ln Q = α + β Reform" has one word)
+        words = [s.text.strip() for s in spans if not any(s in seg for seg in segments) and s.text.strip() not in OPERATOR_NAMES]
+        prose_words = [w for w in WORD_RE.findall(" ".join(words)) if len(w) >= 3 and w not in OPERATOR_NAMES]
+        if sum(sum(ch.isalpha() for ch in w) >= 2 for w in words) < 2 and sum(map(len, words)) < 8 and not (
+                prose_words and self.in_prose_flow(line) and line.tab is None and not line.bullet):
+            # hardly any words ("f(x) = √x if x ≥ 0"): a display equation, one picture - but a
+            # paragraph's line that is mostly formula ("Then / f ∈ L¹(µ) and ∫|fn − f| dµ → 0.")
+            # keeps its words
+            return []
+        if self.display_line(line):
+            return []  # a display with a few words in it (\text{for all}, "#{eigenvalues of ...}")
 
         def complex_segment(seg: list[Span]) -> bool:
             rect = union_all(s.rect for s in seg)
-            if any(s.font.upper().startswith("CMEX") or "�" in s.text for s in seg):
+            if any(extension_font(s.font) or "�" in s.text for s in seg):
                 return True
             if any(b.expand(1).intersects(rect) and not any(abs(b.x0 - sb.x0) < 0.1 and abs(b.y0 - sb.y0) < 0.1
                                                               for sb in simple_bars) for b in bars):
@@ -1599,7 +1886,7 @@ class PageClassifier:
         """None for plain text, 'inline' for math that Slides text can carry (symbols,
         single-level sub/superscripts), 'complex' for anything that must stay a picture."""
         spans = math_content(line)
-        line_bars = [b for b in self.bars if b.expand(1).intersects(line.rect)]  # fractions, radicals
+        line_bars = self.line_bars(line)  # fractions, radicals
         fractions = [f for f in (self.simple_fraction(line, b) for b in line_bars) if f]
         if len(fractions) == len(line_bars):
             line.fractions = fractions  # all bars are simple a/b fractions: text can carry them
@@ -1628,7 +1915,7 @@ class PageClassifier:
             return "complex"
         if formula_like and not self.continues_prose(line):
             return "complex"
-        if any(s.font.upper().startswith("CMEX") for s in spans):
+        if any(extension_font(s.font) for s in spans):
             return "complex"  # big operators, large delimiters
         if any(s.size < 0.6 * line.size or abs(s.baseline - line.baseline) > 0.6 * line.size for s in scripts):
             return "complex"  # second-level scripts, limits
@@ -1696,6 +1983,23 @@ class PageClassifier:
                     line.reason = "math"
                 line.inline_math = kind == "inline"
 
+        # The limits of a big operator in a line's formula hole (an inline \sum\limits, a
+        # \displaystyle one) are lines of their own above and below the line: they go into that
+        # hole's picture, or the lower one stayed text and the upper one in the background.
+        for host in lines:
+            size = host.size
+            for g in (s for h in host.holes for s in h if extension_font(s.font)):
+                for l in lines:
+                    if l is host or l.bullet or l.reason not in (None, "math") or l.size >= 0.85 * size or \
+                            len(l.text.replace(" ", "")) > 24 or any(l in o.limits for o in lines):
+                        continue
+                    # (a lower limit under the host line's scripts too: the glyph's box hangs high)
+                    if g.rect.x0 - 0.5 * size <= l.rect.cx <= g.rect.x1 + 0.5 * size and (
+                            -size <= g.rect.y0 - l.rect.y1 <= 0.5 * size or
+                            -size <= l.rect.y0 - max(g.rect.y1, host.rect.y1) <= 0.75 * size):
+                        l.reason = "math"
+                        host.limits.append(l)
+
         # Pieces of display math: limits, equation numbers, small italic fragments next to math.
         changed = True
         while changed:
@@ -1707,24 +2011,31 @@ class PageClassifier:
                 txt = line.text.replace(" ", "")
                 # Big operators (CMEX) reach further than their glyph boxes: limits sit below them.
                 near = any(m.rect.expand(1.0 * max(m.size, line.size)
-                                         if any(s.font.upper().split("+")[-1].startswith("CMEX") for s in m.spans)
+                                         if any(extension_font(s.font) for s in m.spans)
                                          else 0.6 * line.size).intersects(line.rect) for m in maths)
                 # Numerator or denominator: a short line right at a fraction bar next to a display
                 # formula (a fraction inside prose stays with its line, see formula_holes).
+                # (a line of words beside the bar vetoes: the fraction is inline, in its prose -
+                # words in the next column at the bar's height do not)
                 fraction_part = len(txt) <= 6 and any(
                     b.x0 - 1 <= line.rect.cx <= b.x1 + 1 and min(abs(line.rect.y1 - b.y0), abs(line.rect.y0 - b.y1)) <= 0.6 * line.size
                     and any(m.rect.expand(line.size).intersects(b) for m in maths)
                     and not any(o.reason != "math" and len(o.text.split()) >= 3 and o.rect.y0 - 1 <= b.y0 <= o.rect.y1 + 1
+                                and o.rect.x0 - line.size <= b.x1 and b.x0 <= o.rect.x1 + line.size
                                 for o in lines)
                     for b in self.bars)
                 small = line.size < 0.9 * self.body or all(s.info.italic for s in line.content)
                 eqno = EQ_NUMBER_RE.match(txt) and any(abs(m.baseline - line.baseline) <= 3 for m in maths)
-                # The left-hand side of a display equation ("L(θ) =") split off from its complex part.
-                same_formula = line.inline_math and any(
-                    abs(m.baseline - line.baseline) <= 0.3 * line.size and
-                    max(0.0, m.rect.x0 - line.rect.x1, line.rect.x0 - m.rect.x1) <= 4 * line.size for m in maths)
-                if (near and small and len(txt) <= 6) or eqno or same_formula or fraction_part:
+                # A big operator's limits, however long ("{u,v}∈E", "|y−x|=1"): small, right under
+                # or over the operator's glyph.
+                limit = small and len(txt) <= 24 and any(
+                    g.rect.x0 - 0.5 * line.size <= line.rect.cx <= g.rect.x1 + 0.5 * line.size
+                    and max(line.rect.y0 - m.rect.y1, m.rect.y0 - line.rect.y1) <= 1.0 * max(m.size, line.size)
+                    for m in maths for g in m.spans if extension_font(g.font))
+                if (near and small and len(txt) <= 6) or eqno or limit or self.same_formula(line, maths) or fraction_part:
                     line.reason = "math"
+                    line.inline_math = False
+                    line.holes = []
                     changed = True
 
     def axis_label_column(self, lines: list[Line]) -> list[Line]:
@@ -2056,6 +2367,9 @@ class PageClassifier:
                         continue
                     # A gap as wide as the formula; emit fills it with no-break spaces.
                     extent = line.hole_rect(hole)
+                    # (a big operator's limits are in its picture, and may be wider than its sign)
+                    extent = union_all([extent] + [lim.rect for lim in line.limits
+                                                   if extent.x0 - line.size <= lim.rect.cx <= extent.x1 + line.size])
                     x0, x1 = extent.x0, extent.x1
                     if prev is not None and runs:
                         gap = x0 - prev.rect.x1
@@ -2189,6 +2503,24 @@ class PageClassifier:
             runs[-1]["text"] = runs[-1]["text"].rstrip()
         return runs
 
+    @staticmethod
+    def display_pieces_apart(paragraphs: list[Paragraph]) -> list[Paragraph]:
+        """A big delimiter or operator alone on a line is a piece of a display formula, never a
+        line of a paragraph's words - whatever edge it happens to share with them (a \\left(
+        ending under "The structural similarity is" continued that line right-aligned, and the
+        paragraph, math now, became a picture of the words). It goes to a paragraph of its own."""
+        out = []
+        for par in paragraphs:
+            piece = lambda l: l.reason == "math" and l.content and all(extension_font(s.font) for s in l.content)
+            pieces = [l for l in par.lines if piece(l)]
+            if not pieces or len(pieces) == len(par.lines) or any(l.reason == "math" for l in par.lines if not piece(l)):
+                out.append(par)
+                continue
+            rest = [l for l in par.lines if not piece(l)]
+            out.append(replace(par, lines=rest, reason=None))
+            out += [Paragraph([l], reason="math") for l in pieces]
+        return out
+
     def math_pictures(self, lines: list[Line], paragraphs: list[Paragraph], elements: list[dict]) -> list[dict]:
         """Math that cannot be text (display equations, fractions, and paragraphs containing
         them) becomes movable pictures instead of staying baked into the background."""
@@ -2211,11 +2543,35 @@ class PageClassifier:
                         blocked.append(Rect(b.x0, b.cy - 0.25 * b.h, b.x1, b.cy + 0.25 * b.h))
         out = []
         taken: set[str] = set()
-        for c in cluster_rects([s.rect for s in spans] + list(self.bars), gap=0.6 * self.body):
+        clusters = cluster_rects([s.rect for s in spans] + list(self.bars), gap=0.6 * self.body)
+        # (clusters whose boxes overlap are one formula: a display \sum between the words of its
+        # row is a cluster of its own inside theirs, and became a picture of its glyph's font
+        # box, a chevron, under the picture of the rest)
+        while len(merged := cluster_rects(clusters, gap=3.0)) < len(clusters):
+            clusters = merged
+        # (columns of one display on the same rows - a cases' conditions, an aligned
+        # right-hand side - a little further apart than glyphs; not an equation number)
+        eqno = lambda c: all(EQ_NUMBER_RE.match(s.text.strip()) for s in spans if c.expand(1.5).contains_rect(s.rect))
+        merged = True
+        while merged:
+            merged = False
+            for a in clusters:
+                for b in clusters:
+                    if a is not b and not eqno(a) and not eqno(b) and \
+                            min(a.y1, b.y1) - max(a.y0, b.y0) >= 0.5 * min(a.h, b.h) and \
+                            max(a.x0, b.x0) - min(a.x1, b.x1) <= 1.5 * self.body:
+                        clusters = [c for c in clusters if c is not a and c is not b] + [union_all([a, b])]
+                        merged = True
+                        break
+                if merged:
+                    break
+        for c in clusters:
             box = c.expand(1.5)
             members = [s for s in spans if box.contains_rect(s.rect) and s.id not in taken]
             taken |= {s.id for s in members}
-            if not members or any(b.intersects(box) for b in blocked):
+            # (the glyphs themselves, not the picture's anti-aliasing margin: a display's big
+            # operator box starts a hair under the descenders of the paragraph above)
+            if not members or any(b.intersects(c.expand(0.3)) for b in blocked):
                 continue  # only a stray bar, or tangled with native content: leave it in the background
             if len(members) == 1 and EQ_NUMBER_RE.match(members[0].text.strip()) and members[0].info.family != "math":
                 # An equation number beside its equation is plain text.
@@ -3491,7 +3847,7 @@ class PageClassifier:
         plain_tables = self.plain_tables(lines)
         body_lines = [l for l in lines if l.reason is None and abs(l.size - self.body) < 1]
         self.text_margin = min((l.rect.x0 for l in body_lines), default=0.08 * self.W)
-        paragraphs = self.build_paragraphs(lines)
+        paragraphs = self.display_pieces_apart(self.build_paragraphs(lines))
         boxes = self.build_boxes(paragraphs)
 
         n = self.page["index"]
@@ -3503,6 +3859,8 @@ class PageClassifier:
             rect = line.hole_rect(h)
             # Radical signs and big-operator parts sit off the baseline, in lines of their own.
             h = h + [s for l in lines if l.reason == "math" for s in l.spans if s.rect.intersects(rect.expand(1))]
+            h = h + [s for lim in line.limits for s in lim.spans if s not in h
+                     and rect.x0 - line.size <= lim.rect.cx <= rect.x1 + line.size]  # a big operator's limits
             rect = union_all([rect] + [s.rect for s in h] + [b for b in self.bars if b.expand(1).intersects(rect)])
             hole_pictures.append({"id": f"p{n}h{len(hole_pictures)}", "kind": "image", "role": "math",
                                   "bbox": rect.expand(HOLE_PAD).as_list(), "spans": [s.id for s in h],
