@@ -1,0 +1,131 @@
+\documentclass[aspectratio=169]{beamer}
+% Lines, paragraphs and line breaks (visual hunt fixer G): where one line ends, a paragraph
+% starts, words are spaced apart, a line is justified or pushed right by \hfill.
+\usetheme{default}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\setbeamertemplate{navigation symbols}{}
+\newcommand{\attrib}[1]{\par\hfill\textsc{#1}}
+
+\title{Lines and Paragraphs}
+\author{A. Author}
+\institute{Department of Comparative Literature\\University of Geneva}
+\date{Seminar, 12 March 2026}
+
+\begin{document}
+
+\begin{frame}
+\titlepage
+\end{frame}
+
+\begin{frame}{Quotes and attributions}
+\begin{quote}
+``Upzoning is a supply-side policy that mostly benefits landowners, not renters.''
+\hfill --- Op-ed, \emph{Dagens Nyheter}, 2021
+\end{quote}
+\begin{quote}
+The sublime is that in comparison with which everything else is small.
+\attrib{Kant, Critique of Judgement}
+\end{quote}
+\begin{quotation}
+\footnotesize
+Local opposition is the binding constraint. In our survey of planning officials, 68\% named
+neighbourhood objections as the main reason approved plans were not built within five years,
+far ahead of financing (19\%) or construction costs (13\%).
+\end{quotation}
+\end{frame}
+
+\begin{frame}{Justified columns}
+\parbox[t]{0.47\textwidth}{\textbf{Limitations}\\[1mm]\small
+Streams differ in time of day and lecturer. Self-reported confidence
+may reflect social desirability. We did not observe pairs directly and
+cannot say who typed what.}
+\hfill
+\parbox[t]{0.47\textwidth}{\textbf{Next steps}\\[1mm]\small
+Randomise at the lab-group level next year. Record screen sessions
+of 40 consenting pairs to study who types what, and repeat the survey
+in the second term.}
+\end{frame}
+
+\begin{frame}{Spaces between words}
+\begin{itemize}
+\item A grant of 48\,000\,EUR per year for three years
+\item Used by: PostgreSQL, MySQL \quad vs.\quad RocksDB, Cassandra
+\end{itemize}
+\vfill
+{\small c.okafor@example.org \quad\textbullet\quad +49 431 880 0000}
+\vfill
+\end{frame}
+
+\begin{frame}{Hyphens at line ends}
+\begin{itemize}
+\item Self-\\reported confidence may reflect social desirability
+\item A ring of imidazolidin-\\5-one in the side chain
+\end{itemize}
+\end{frame}
+
+\begin{frame}{Glossary and numbering}
+\begin{description}
+\item[\textsc{hypsos}] height, elevation
+\item[\textsc{ekstasis}] a standing outside oneself
+\item[\textsc{phantasia}] vivid mental imagery
+\end{description}
+\begin{enumerate}
+\item Collect the data
+\begin{enumerate}
+\item[2.1] Clean the survey answers
+\item[2.2] Merge the two waves
+\end{enumerate}
+\item Fit the model
+\end{enumerate}
+\end{frame}
+
+\begin{frame}{}
+\vfill
+\begin{center}
+{\Large\itshape ``The best way to learn to program\\ is to explain your program to someone else.''}
+\end{center}
+\vspace{2mm}
+\begin{flushright}
+--- a teaching assistant, week 9\hspace*{1.5cm}
+\end{flushright}
+\vfill
+\end{frame}
+
+\begin{frame}{Verse with line numbers}
+\begin{columns}[T]
+\column{0.46\textwidth}
+\textbf{Beowulf 1--4}\par\smallskip
+\begin{tabular}{@{}r@{\quad}l@{}}
+1 & Hwaet! We Gardena in geardagum,\\
+  & theodcyninga, thrym gefrunon,\\
+  & hu tha aethelingas ellen fremedon.\\
+4 & Oft Scyld Scefing sceathena threatum\\
+\end{tabular}
+\column{0.5\textwidth}
+\textbf{Translation}\par\smallskip
+\begin{tabular}{@{}l@{}}
+Listen! We have heard of the glory\\
+of the Spear-Danes' kings in days of old,\\
+how those princes did deeds of valour.\\
+Often Scyld Scefing from troops of foes\\
+\end{tabular}
+\end{columns}
+\end{frame}
+
+\section{Sites}
+\section{Experiments}
+\subsection{Technical results}
+\section{Forecasting}
+\begin{frame}{Outline}
+\tableofcontents[currentsection]
+\end{frame}
+
+\begin{frame}{Blocks}
+\begin{block}{Distance effect}
+The further the last back vowel lies from the suffix, the more speakers choose a
+\emph{front} suffix; the effect holds in both corpora.
+\end{block}
+\end{frame}
+
+\end{document}

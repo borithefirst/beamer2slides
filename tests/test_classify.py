@@ -709,7 +709,9 @@ def test_custom_item_labels():
     assert len(icons) == 3 and all(e.get("anchor") for e in icons), "dingbats and the picture move with their item"
     paras = {paragraph_text(p): p for e in texts(slide) for p in e["paragraphs"]}
     assert paras["A pointing hand"]["tab_x0"] is None and paras["A pointing hand"]["text_x0"] > 30
-    assert paras["⋆\tA blue star"]["tab_x0"]
+    star = paras["A blue star"]  # a subitem template glyph with a Slides preset is a real bullet
+    assert star["bullet"]["text"] == "⋆" and star["bullet"]["color"] == "#0000ff" and star["level"] == 1
+    assert paras["⋄\tA diamond"]["tab_x0"]
 
 
 def test_roman_numbers_on_circles_and_label_tabs():
