@@ -51,7 +51,10 @@ decorations) is a picture, or baked into a per-slide background picture.
 Details, measurements and edge cases: docs/project-notes.md "What becomes native".
 - `text`: paragraphs, bullet lists (glyph, number, ball and vector bullets with their PDF colour and
   size, `emit.BULLET_SHAPES`, `emit.bullet_level`; glyph bullets sized and shaped by their PDF ink,
-  `render.glyph_ink` -> bullet `ink`/`fill`, `emit.ink_sized`, capped at the item's body size),
+  `render.glyph_ink` -> bullet `ink`/`fill`, `emit.ink_sized`, capped at the item's body size; a
+  ball keeps its label's parentheses unless they reach its rim, `BALL_RIM`; numbers after nested
+  glyph items are literal, emit making one list per preset; a mark outlined in another colour is
+  a picture),
   inline math as runs with scripts (down from 0.10 em, up from 0.12 em; raised rings and asterisks
   become `°`/`*` at line size) and Unicode,
   links, code. Frame titles use the layout's TITLE placeholder. Hanging labels are `label<TAB>text`.
@@ -59,7 +62,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   mirrored alignment: a line is read whole (`classify.read_lines`, `bidi.logical_line`: the logical
   text whose UAX#9 display is the page, LRM/RLM where needed, the page's direction for mixed
   lines, `bidi.page_direction`), after PDFium's reversal and mirroring are undone
-  (`bidi.visual_chars`). Type 3 EC/LH/TC bitmap fonts are named by their TFM widths (`type3.py`,
+  (`bidi.visual_chars`); an RTL item's bullet hangs right of its words (`detect_rtl_bullet`; lists
+  join, nest and wrap by the right edge); bidi marks take no room (`bidi.MARKS`). Type 3 EC/LH/TC bitmap fonts are named by their TFM widths (`type3.py`,
   `calibration/tex_fonts.json` from `tools/tex_fonts.py`): ligatures, dashes, weights, TS1, T2A. OT1's `\_` is a rule, read back as `_` (`classify.underscores`, span
   `drawn`: no page object); a CMEX glyph hangs from its origin, so an inline `\sum` between words
   is joined to their line (`join_hanging_operators`) and becomes part of its formula hole.
@@ -69,18 +73,27 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   on another line; `column_edge`); a lone line starting where its neighbours start is left-aligned
   (`single_line_align`); CJK breaks anywhere and joins with no space (`classify.cjk`). Font names
   map through family tables (`fonts.font_info`: `SANS_FAMILIES`, `TEX_TT_RE`, `LIBERTINE_RE`;
-  0.6 em monos -> Roboto Mono); math letters are styled per piece (`classify.math_pieces`: italic
+  0.6 em monos -> Roboto Mono; CJK faces -> Noto Sans/Serif JP/SC/TC/KR, `fonts.cjk_font`; a CM sans
+  cut of 6 pt or less is set at weight 600 in bold widths, `FontMapper.optical_weight`, which
+  deck_ir reads back regular; CM math letters stay serif among sans words, `serif_math_letters`);
+  extract finds narrow spaces, letterspacing (`tracked_gaps`) and accent overhang; math letters are styled per piece (`classify.math_pieces`: italic
   per glyph, NFKC, script capitals as Unicode); OT1 accents compose (`compose_accents`), `\not`
   negates (`negate`). Every text range emit writes is UTF-16 (`emit.u16`: astral math letters). A
   run inside a sentence keeps its paragraph's size (`emit.in_sentence`); leader dots and ellipses
   never set `shape_ratio`. A multi-line box is sized from where Slides breaks its lines
   (`emit.slides_lines`, `box_lines` per paragraph), keeping `emit.LINE_MARGIN` (2.5 pt) past its
   widest line; an unmeasured paragraph never makes it narrower than the measured ones. A glyph the
-  page edge cuts stays text (only samples on the page are judged). Justified prose (`is_justified`, `stretched`) is written JUSTIFIED with a
-  `\parindent` first line; `\hfill` pieces are their own right-aligned lines (`find_hfill_pieces`);
+  page edge cuts stays text (only samples on the page are judged). Justified prose (`is_justified`,
+  `stretched`: word spaces compared font by font, the last line never the longest, no hanging
+  label) is written JUSTIFIED with a `\parindent` first line, and never ends past its PDF lines
+  (`justified_right`, else START); a paragraph needing a nearer edge than its box's gets
+  `indentEnd` (`paragraph_ends`, which `text_layout` honours); an unmeasured paragraph may grow its
+  box up to 1 em to keep the PDF's line count (`unhyphenated_room`); `\hfill` pieces are their own right-aligned lines (`find_hfill_pieces`);
   a `\quad` is an em space at max(0.9, word space + 0.4) em; thin-spaced digits keep NBSP
   (`thin_span`). Code keeps its columns: spaces from glyph x over the column pitch (`code_pitch`),
-  line numbers a right-aligned box of their own (`split_line_numbers`, Line `code_number`).
+  line numbers a right-aligned box of their own (`split_line_numbers`, Line `code_number`); a
+  line's baseline is the one most of its letters stand on (`Line.main`); code lines are never
+  formulas.
 - `image`: figure regions (TikZ, plots, raster images with their labels) as pictures. A bare
   `\includegraphics` keeps the author's file byte for byte when it decodes identically
   (`classify.bare_image`, `render.image_file`). A chart's tick rows and centred titles belong to its
@@ -90,7 +103,13 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   (`clip_to_bands`). A display formula is one picture grown to its glyph ink (`render.grow_to_ink`,
   CMEX ink hangs an em below its box); a bar as wide as one part with the other centred is a
   fraction bar (`typeset_fraction`); hanging CMEX/√ signs go to the line below
-  (`drop_hanging_glyphs`); `extension_font` names every math-extension font.
+  (`drop_hanging_glyphs`); `extension_font` names every math-extension font. A glyph a picture
+  owns stays for its crop (`render.owned_by`); a figure takes the glyphs its box holds and ignores
+  words it only grazes; a stroked arrow head reaches its mitred point (`miter_reach`); ulem chains
+  are underlines, and a lone hairline under words stays in the background; overlapped pieces are
+  one symbol (`compose_symbols`); an accent over a Greek letter is a hole (`accent_beside`);
+  adjacent holes are one; icons are never formulas; an item's formula wrapped alone is the item's
+  (`wrapped_formula`); a figure label beside a column is no line (`figure_label_apart`).
 - `table`: text framed by rules (or rule-less `plain_tables`), with borders, merges, fills. Column
   widths come from measured Slides advances (`emit.slides_width`, `fit_columns`) so no cell wraps
   and the table does not grow over its caption; classify cuts a spanning chunk at word gaps when it
@@ -101,7 +120,11 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   edge to edge are a table (`fill_grid`), and a node a rule splits is no diagram node
   (`splits_cells`); a column's head and body keep their own alignments (`head`, `body`); a wrapped
   cell's column stays below its line plus the next line's first word (`wrap_joins`); cell runs are
-  never reshaped (`cell`). Wrapped items of side-by-side lists are not a plain table.
+  never reshaped (`cell`). Wrapped items of side-by-side lists are not a plain table. Wrapped
+  cells take the least width keeping the PDF's line count (`emit.wrap_window`); justified X cells
+  are JUSTIFIED (`justified`); a centred table grows both ways (`table_shift`); rows are laid out
+  at their own size (`row_sizes`); a flush merged cell keeps its indent (`merge_x`); only a
+  `\multirow` cell loses its top margin (`middle`).
   Convert brings tables empty in the .pptx with their own cell margins (`emit.pptx_table`) and
   fills them through the API, so rows keep the PDF pitch. The base records those margins
   (`table_margins`); sync refills such a table in place when its words or place changed, or rows and columns that
@@ -115,7 +138,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
 - `shape`: opaque panels such as beamer blocks (title bar + body built to survive resizing).
   Frames (`frame_of`): a fully framed box (`\fcolorbox`, tcolorbox, `frame=single`) is a panel
   with an outline, a partial or bare frame rule shapes (`rule_frames`); `emit.grown_panels`
-  widens a panel as far as its Slides words run longer than the PDF's. A `\colorbox` alone on
+  widens a panel as far as its Slides words run past min(left pad, PDF right margin, 0.5 em), its
+  frame panel with it. A `\colorbox` alone on
   its line is a panel, inside a line a highlight padded by no-break spaces.
 - Decorations on words: underline/strike/highlight runs; words on small graphics and complex inline
   formulas become **holes** (no-break Roboto Mono spaces) with the picture placed over them by

@@ -4437,3 +4437,52 @@ centred, ragged or two-line text and Slides then stretches gaps and runs past pa
 `grown_panels` widens panels 5-6 pt (3); a frame's right edge lost, a listing's lines squeezed off
 their numbers (J); RTL bullets lost with columns centred (I, sev 3); a picture made a too-wide
 native table; ball labels without parentheses; a heading broken mid-word; two new wraps.
+
+### Fixes, wave 3 (2026-09-24, seven fixers, `out/hunt/WAVE3.md`, merged 20ab078..103b1e7)
+Each fixer took the r7 regressions of one area first, then its still-open findings; all offline.
+- **S, justified and box widths** (`tests/test_justified.py`): `is_justified` compared word
+  spaces across fonts; it now takes the lower median of each line's gaps per font, and refuses a
+  last line longer than the full ones and a hanging label. The 13 regressions are no longer
+  justified; of the r7 justified paragraphs 24 stay JUSTIFIED, 4 go START because Slides' line is
+  wider than their PDF edge (`justified_right`), none ends past it. `paragraph_ends` writes
+  `indentEnd` where a paragraph's breaks need a nearer edge than its box's (21 writes on r7);
+  `text_layout` honours it (82b91c7). A hyphenated compound wider than its column keeps its break
+  (Slides does not break after "-" in "Datenschutz-Folgenabschätzung"). Open: 'but' before a
+  formula hole (Slides breaks nowhere between a space and the hole's no-break spaces), hyphen
+  breaking in Slides (needs a probe).
+- **T, frames and code** (`test_frames_code.py` +5): `grown_panels` grows only past
+  min(left pad, PDF right margin, 0.5 em) and takes a tcolorbox's frame panel along; listings
+  lowers `*`, which moved the line's baseline, so `Line.main` is the baseline most letters stand
+  on; REPL lines (`>>> a + b`) are no formulas; a space at inline code's edge goes to the prose.
+  Open: line numbers drifting against a squeezed columns=fixed listing (code runs would need their
+  column pitch in Roboto Mono at pitch/0.6).
+- **U, right-to-left** (`test_rtl_lists.py`, 8): RTL bullets were never looked for on the right,
+  so balls stayed in the background, two RTL columns became a plain table and 12 pt number balls
+  became holes that merged items (`detect_rtl_bullet`); the box of an RTL bulleted paragraph starts
+  at its words. Bidi marks measure zero. Needs a live look: Slides drawing a RIGHT_TO_LEFT
+  paragraph's bullet on its right.
+- **V, tables** (`test_tables_hunt.py` +6): `wrap_window` (a hyphenated word no longer widens its
+  column), `table_shift`, `row_sizes`, `merge_x`, `middle`; r2_tables_v1 s2 no longer shrinks
+  (0.865 -> 1.0), v2 s3 0.929 -> 1.0. Not writable: double rules, cmidrule trims (a Slides border
+  is one line per whole edge). To probe: per-cell margin overrides, JUSTIFIED in cells.
+- **K2, bullets and scripts** (`test_lists_scripts.py`): ball labels keep parentheses unless
+  they reach the rim (half-widths 0.74/0.89/1.04 of the radius for (i)/(ii)/(iii)); numbers
+  after nested glyph items are literal (emit starts a new Slides list at each preset change, so
+  1. / bullets / 2. came out 1, 1, 2); an outlined legend swatch is a picture. No Slides preset
+  has ▶ (`LEFTTRIANGLE` is ◀), so triangle bullets stay substitutes; to probe: a .pptx
+  `a:buChar ▶` in Noto Sans Symbols 2 through import and a later insertText.
+- **W, pictures and math** (`test_pictures_hunt.py`, 13): render erased glyphs by line bands
+  before cropping, so a picture's own radical or wordmark could vanish (`owned_by`); arrow tips
+  reach their mitre (`miter_reach`); composed symbols, accented Greek, icon glyphs, wrapped item
+  formulas, ulem chains, pie labels beside lists. A hairline with no words on it (a footnote rule)
+  stays a picture (103b1e7: W's "hairline is no figure" had put it in the background by the
+  footnote). Open: arrowhead size (not settable), dash patterns (`pdf/api.py` has no dash).
+- **X, fonts and spacing** (`test_fonts_weights.py`, `test_span_joining.py`): sfss0600's stem is
+  0.105 em against Lato Regular 0.090 and Bold 0.124, so a CM sans cut of 6 pt or less is written
+  at weight 600 (the API keeps it not bold; the renderer takes the nearest heavier face) and
+  measured in bold widths; deck_ir reads our own 600 back regular (5fc7824), or pull would write
+  `\textbf`. CJK faces map to Noto (to verify live: that Slides serves Noto Sans JP by name).
+  Extract finds narrow spaces (18 mo 0.14 em, guillemet 0.124), letterspaced words and accent
+  overhang. Open: astral and small-cap advances in the PDF backend.
+Merge fallout: a formula test assumed a plain space where TeX's 0.28 em relation space is now
+thin (`thin_span` after S made the paragraph ragged); the assertion was loosened.
