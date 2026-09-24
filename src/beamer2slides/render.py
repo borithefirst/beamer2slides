@@ -84,11 +84,11 @@ class Eraser:
             if po.type == OBJ_PATH and key not in self.removed and _inside(self.bounds[key], area):
                 self._remove(key)
 
-    def remove_images_in(self, area: Box) -> None:
+    def remove_images_in(self, area: Box, keep=()) -> None:
         """Images and shadings: switched off inside the area, their pixels there removed when they
-        reach out of it."""
+        reach out of it. What is in `keep` (ids) stays whole."""
         for key, po in self.objects.items():
-            if po.type not in (OBJ_IMAGE, OBJ_SHADING) or key in self.removed:
+            if po.type not in (OBJ_IMAGE, OBJ_SHADING) or key in self.removed or key in keep:
                 continue
             b = self.bounds[key]
             if _inside(b, _grow(area, 0.5)):
@@ -333,11 +333,34 @@ def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndar
     page_px = opaque[clear].astype(int)
     colour = np.median(page_px, axis=0)
     if (np.abs(page_px - colour).max(axis=1) > GROUND_FLAT).mean() > 0.002:
-        return opaque
+        return on_picture_ground(eraser, bbox, zoom, opaque, rgba, ground, hide)
     rgba = unblend_rim(rgba, clear, colour, max(1, round(GROUND_RIM * zoom)))
     alpha = rgba[..., 3:].astype(float) / 255
     laid = rgba[..., :3] * alpha + colour * (1 - alpha)
     if (np.abs(laid - opaque).max(axis=2) > GROUND_MATCH).mean() > 0.002:
+        return opaque
+    return rgba
+
+
+def on_picture_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndarray, rgba: np.ndarray,
+                      ground: list, hide: list = ()) -> np.ndarray:
+    """An anchored picture on a photo or a shading reaching out of its box (a `\\textbar\\quad
+    \\faIcon` hole on a full-bleed title photo, r1_design_v2 s1): the ground is no one colour,
+    but it stays in the background under the picture (render_backgrounds keeps an image that
+    holds an anchored box), so the transparent crop is right wherever Slides sets the words.
+    An opaque crop showed its piece of the photo out of line with the photo behind it, a boxed
+    patch, once the re-set words moved it. Kept when the crop laid on the ground alone shows
+    the opaque crop, and only on a ground of images and shadings."""
+    if not any(eraser.objects[key].type in (OBJ_IMAGE, OBJ_SHADING) and _inside(_grow(bbox, -0.5), eraser.bounds[key])
+               for key in ground):
+        return opaque
+    drawn = [key for key in eraser.objects if key not in eraser.removed and key not in set(ground)]
+    under = eraser.render(zoom, tuple(bbox), hide=drawn + list(hide))
+    if under.shape[:2] != opaque.shape[:2]:
+        return opaque
+    alpha = rgba[..., 3:].astype(float) / 255
+    laid = rgba[..., :3] * alpha + under[..., :3].astype(float) * (1 - alpha)
+    if (np.abs(laid - opaque[..., :3]).max(axis=2) > GROUND_MATCH).mean() > 0.002:
         return opaque
     return rgba
 
@@ -571,7 +594,9 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
                 own = None if fig.get("anchor") or not fig.get("image") else embedded_picture(eraser, fig, path)
                 path = own or path
                 if own is None:
-                    if fig.get("role") == "math":
+                    # (an icon glyph too: FontAwesome's advance box under xelatex is half its
+                    # warning triangle, and the crop of the box cut the '!' off)
+                    if fig.get("role") == "math" or (fig.get("role") == "icon" and fig.get("spans")):
                         fig["bbox"] = grow_to_ink(eraser, fig["bbox"], [spans[sid] for sid in fig["spans"] if sid in spans])
                     fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path,
                                             transparent=bool(fig.get("anchor")), hide=bullet_objects)
@@ -589,8 +614,15 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
             centre = lambda ch: ((ch.box[0] + ch.box[2]) / 2, (ch.box[1] + ch.box[3]) / 2)
             eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) for b in boxes) and (
                 any(b[0] <= centre(ch)[0] <= b[2] and b[1] <= centre(ch)[1] <= b[3] for b in boxes) or held(ch)))
-            for b in boxes:
-                eraser.remove_images_in(b)
+            for fig, b in zip(figures, boxes):
+                # (a native list's ball stays whole for its colour and its patch: a pie's label
+                # widening the figure over the ball column took half of each ball, and the Slides
+                # bullets came out in each item's first word's colour; and a photo under a hole
+                # stays whole, the hole's ground: cut out, it left a white box that showed, over
+                # the next word, wherever Slides set the words off the PDF's place)
+                ground = [key for key, po in eraser.objects.items() if fig.get("anchor") and
+                          po.type in (OBJ_IMAGE, OBJ_SHADING) and _inside(_grow(b, -0.5), eraser.bounds[key])]
+                eraser.remove_images_in(b, keep=bullet_objects + ground)
                 # Stroked paths reach past the figure box by half their width, arrow tips further.
                 eraser.remove_paths_inside(_grow(b, 5))
 
@@ -735,7 +767,13 @@ def paint_out_leftovers(img: np.ndarray, slide: dict, px_per_pt: float) -> None:
         ignore[max(0, int(ry0 * px_per_pt) - 2):int(np.ceil(ry1 * px_per_pt)) + 2,
                max(0, int(rx0 * px_per_pt) - 2):int(np.ceil(rx1 * px_per_pt)) + 2] = True
     colours = [flat_colour(img, area, px_per_pt, ignore=ignore) for area, _, _ in jobs]  # before any painting
-    for (area, rects, el), colour in zip(jobs, colours):
+    # A drawing the background keeps that runs into a picture's box from outside (a git graph's
+    # main line through the branch picture) stays where it crosses: painted out, it stopped a
+    # pixel short of the crop on either side, a white nick in the line in Slides (and under an
+    # anchored picture's transparent ground, which leaves such paths to the background, a gap).
+    crossed = [picture_crossings(img, area, colour, px_per_pt, ignore) if colour is not None and el["kind"] == "image"
+               else (np.zeros(0, int), np.zeros(0, int)) for (area, _, el), colour in zip(jobs, colours)]
+    for (area, rects, el), colour, (rows, cols) in zip(jobs, colours, crossed):
         if colour is None:
             if el["kind"] == "shape":
                 el.pop("shadow", None)  # keep the background's shadow; the strip is under the shapes anyway
@@ -743,7 +781,40 @@ def paint_out_leftovers(img: np.ndarray, slide: dict, px_per_pt: float) -> None:
         for rx0, ry0, rx1, ry1 in rects:
             c0, d0 = max(0, int(np.floor(rx0 * px_per_pt)) - 1), max(0, int(np.floor(ry0 * px_per_pt)) - 1)
             c1, d1 = int(np.ceil(rx1 * px_per_pt)) + 1, int(np.ceil(ry1 * px_per_pt)) + 1
+            keep_rows, keep_cols = rows[(rows >= d0) & (rows < d1)], cols[(cols >= c0) & (cols < c1)]
+            saved_rows, saved_cols = img[keep_rows, c0:c1].copy(), img[d0:d1, keep_cols].copy()
             img[d0:d1, c0:c1] = colour.astype(np.uint8)
+            img[keep_rows, c0:c1] = saved_rows
+            img[d0:d1, keep_cols] = saved_cols
+
+
+def picture_crossings(img: np.ndarray, area: Box, colour: np.ndarray, px_per_pt: float, ignore: np.ndarray,
+                      ring: int = 4) -> tuple[np.ndarray, np.ndarray]:
+    """The pixel rows and columns (image indices) where something drawn in the background runs
+    into `area` across its edge: rows crossed on its left or right, columns on its top or
+    bottom, in the ring `flat_colour` judged (a pixel either side for antialiasing)."""
+    h, w = img.shape[:2]
+    a0, b0 = max(0, int(area[0] * px_per_pt) - 2), max(0, int(area[1] * px_per_pt) - 2)
+    a1, b1 = min(w, int(np.ceil(area[2] * px_per_pt)) + 2), min(h, int(np.ceil(area[3] * px_per_pt)) + 2)
+
+    def drawn(ys: slice, xs: slice) -> np.ndarray:
+        return (np.abs(img[ys, xs, :3].astype(int) - colour[:3]).max(axis=-1) > 6) & ~ignore[ys, xs]
+
+    rows = np.zeros(max(0, b1 - b0), bool)
+    for xs in (slice(max(0, a0 - ring), a0), slice(a1, min(w, a1 + ring))):
+        if xs.stop > xs.start and b1 > b0:
+            rows |= drawn(slice(b0, b1), xs).any(axis=1)
+    cols = np.zeros(max(0, a1 - a0), bool)
+    for ys in (slice(max(0, b0 - ring), b0), slice(b1, min(h, b1 + ring))):
+        if ys.stop > ys.start and a1 > a0:
+            cols |= drawn(ys, slice(a0, a1)).any(axis=0)
+    def grow(m: np.ndarray) -> np.ndarray:
+        out = m.copy()
+        out[1:] |= m[:-1]
+        out[:-1] |= m[1:]
+        return out
+
+    return b0 + np.nonzero(grow(rows))[0], a0 + np.nonzero(grow(cols))[0]
 
 
 def ink_colour(img: np.ndarray, rect_pt: list[float], px_per_pt: float) -> str | None:
