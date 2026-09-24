@@ -1435,11 +1435,27 @@ def _unimportable_runs(mine: dict, live: dict) -> list[tuple[int, int, dict]]:
         for start, end in _gaps(_mask(mine, key, want), _mask(live, key, want),
                                 live["span"][0]):
             out.append((start, end, {api: value}))
+    # And a face or a size the importer did not keep. Drive's importer carries a single
+    # family name verbatim — except when it does not: measured 2026-09-24, three imports
+    # of one file, the third made Consolas and Roboto Mono into Arial. So the plan's face
+    # is written wherever the read-back has another (a name compared without case: the
+    # same import gave back `courier new` for Courier New).
+    for face in {r["font"] for r in mine.get("runs", []) if r.get("font")}:
+        for start, end in _gaps(_mask(mine, "font", face.casefold()),
+                                _mask(live, "font", face.casefold()), live["span"][0]):
+            out.append((start, end, {"weightedFontFamily": {"fontFamily": face}}))
+    for size in {r["fontsize"] for r in mine.get("runs", []) if r.get("fontsize")}:
+        for start, end in _gaps(_mask(mine, "fontsize", size), _mask(live, "fontsize", size),
+                                live["span"][0]):
+            out.append((start, end, {"fontSize": {"magnitude": float(size), "unit": "PT"}}))
     return out
 
 
 def _mask(block: dict, key: str, want) -> list[bool]:
-    return [run.get(key) == want for run in block.get("runs", [])
+    def value(run):
+        got = run.get(key)
+        return got.casefold() if key == "font" and isinstance(got, str) else got
+    return [value(run) == want for run in block.get("runs", [])
             for _ in range(doc_ir.utf16_len(run.get("text", "")))]
 
 

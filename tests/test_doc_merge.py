@@ -1974,6 +1974,23 @@ def test_small_caps_is_only_carried_where_the_words_came_through_whole():
     assert "unimported" not in read["blocks"][0]
 
 
+def test_a_face_the_importer_did_not_keep_is_written_by_the_settle():
+    """Measured 2026-09-24: of three imports of one file, the third made Consolas and
+    Roboto Mono into Arial. The settle writes the plan's face where the read-back has
+    another, and leaves alone one that only came back in other letters."""
+    planned = [{"kind": "paragraph", "key": "p:f", "runs": [
+        styled_run("ab", font="Consolas"), styled_run("cd"), styled_run("ef", font="Courier New"),
+        styled_run("gh", fontsize=18)]}]
+    read = live([{"kind": "paragraph", "key": "p:f", "runs": [
+        styled_run("ab", font="Arial"), styled_run("cd"), styled_run("ef", font="courier new"),
+        styled_run("gh")]}])
+    doc_merge.adopt_keys(read, planned)
+    start = read["blocks"][0]["span"][0]
+    assert read["blocks"][0]["unimported"]["runs"] == [
+        (start, start + 2, {"weightedFontFamily": {"fontFamily": "Consolas"}}),
+        (start + 6, start + 8, {"fontSize": {"magnitude": 18.0, "unit": "PT"}})]
+
+
 def test_a_title_the_importer_flattened_is_put_back_by_the_settle():
     """`class="title"` reaches nothing in Drive's importer, so a pushed file's Title
     and Subtitle come back as body text. The settle writes the named style, exactly

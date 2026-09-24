@@ -208,6 +208,10 @@ def test_a_heading_the_theme_centres_survives_a_source_restyle(request):
 
         OUT.mkdir(parents=True, exist_ok=True)
         path = OUT / f"{request.node.name}.html"
+        # The last run's file names the last run's document, and adopt rightly refuses
+        # to write over it: this test's folder is its own, so it starts clean.
+        path.unlink(missing_ok=True)
+        doc_sync.base_path(path).unlink(missing_ok=True)
         doc_sync.adopt(ident, path)
         paper = Paper(path, ident)
         assert "text-align" not in paper.text   # the file claims none of the theme
