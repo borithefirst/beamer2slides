@@ -2550,34 +2550,60 @@ def pick_word(marks: list[tuple[float, float, float, float]], x0: float, width: 
     return min(fits, key=lambda m: abs(m[0] - x0)) if fits else None
 
 
+# The least room (em of the words' size) grown_panels keeps between a line's last word and its
+# panel's right edge; beamer's block keeps 4 pt at 10.9 pt (0.37 em).
+PANEL_MARGIN_EM = 0.5
+
+
 def grown_panels(slide: dict, scale: float, fonts: FontMapper) -> dict:
     """The slide with each panel shape widened rightwards by as much as the words on it come
     out wider in Slides than in the PDF, so that they keep the PDF's inner margin (a block
     body in Lato runs a few points longer than in LM Sans, and its last word sat on the
     panel's edge or past it). A block's title bar and body grow together, never past the
-    page's right edge; left-aligned text only (centred text grows both ways: its box does)."""
+    page's right edge; left-aligned text only (centred text grows both ways: its box does).
+
+    A panel grows only where a line needs it: as far as the line keeps the panel's inner margin
+    (the least of its words' left margins on it and the PDF's own right margin of that line),
+    never further than the words grew. A short or ragged line with room to spare left the
+    panel wider than the PDF's for nothing (r2_themes_v5 s3, r3_dense_v1 s10)."""
     els = slide["elements"]
     panels = [(i, e) for i, e in enumerate(els) if e["kind"] == "shape" and e.get("role") == "panel"]
     if not panels:
         return slide
-    over: dict[int, float] = {}
+    homes: list[tuple[int, dict, dict]] = []  # (panel index, panel, text element on it)
     for el in els:
         if el["kind"] != "text" or el.get("role") == "title" or el.get("rotation") or not el["paragraphs"]:
             continue
         x0, y0, x1, y1 = el["bbox"]
         cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
         home = [(i, e) for i, e in panels if e["bbox"][0] <= cx <= e["bbox"][2] and e["bbox"][1] <= cy <= e["bbox"][3]]
-        if not home:
-            continue
-        i, panel = home[-1]  # (the topmost: creation order is z-order, and a block's shadow lies under it)
+        if home:
+            homes.append((*home[-1], el))  # (the topmost: creation order is z-order, and a block's shadow lies under it)
+    # (a panel's inner margin: how close its words come to its left edge; a block's title bar and
+    # body are one panel for this)
+    group = {i: (e.get("block") if e.get("block") is not None else ("p", i)) for i, e in panels}
+    pads: dict = {}
+    for i, panel, el in homes:
+        pad = el["bbox"][0] - panel["bbox"][0]
+        if pad >= 0:
+            pads[group[i]] = min(pads.get(group[i], math.inf), pad)
+    over: dict[int, float] = {}
+    for i, panel, el in homes:
         paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in in_sentence(p["runs"])]}
                  for p in el["paragraphs"]]
         measured = box_lines(paras, [hugs(p) for p in paras], scale, fonts)
         if not measured or any(g is None for g in measured):
             continue  # (every paragraph measured: an unmeasured one could be the widest)
         right = max(line["x1"] for p in paras for line in p["lines"])
-        grow = max(g[0] for g in measured) / scale - right
-        if grow > 0.5 and right < panel["bbox"][2]:
+        if right >= panel["bbox"][2]:
+            continue
+        slides_right = max(g[0] for g in measured) / scale
+        # (a list's indent or a tcolorbox's wide padding is no margin the words need: half an em
+        # keeps them off the edge)
+        em = max(p["size"] for p in paras)
+        margin = min(pads.get(group[i], 0.0), panel["bbox"][2] - right, PANEL_MARGIN_EM * em)
+        grow = min(slides_right - right, slides_right + margin - panel["bbox"][2])
+        if grow > 0.5:
             over[i] = max(over.get(i, 0.0), grow)
     blocks: dict[int, float] = {}
     for i, g in over.items():
@@ -2594,6 +2620,14 @@ def grown_panels(slide: dict, scale: float, fonts: FontMapper) -> dict:
             x0, y0, x1, y1 = e["bbox"]
             if e.get("block") is None and i not in over and all(0 <= d <= 5 for d in (x0 - ux0, y0 - uy0, x1 - ux1, y1 - uy1)):
                 over[i] = g
+    # (a panel drawn round a grown one and ending just right of it - a tcolorbox's frame-coloured
+    # panel under its body - grows with it, or the frame's right side is covered: r1_design_v1 s6)
+    for i, g in list(over.items()):
+        ix0, iy0, ix1, iy1 = els[i]["bbox"]
+        for j, e in panels:
+            x0, y0, x1, y1 = e["bbox"]
+            if j not in over and x0 <= ix0 + 0.5 and y0 <= iy0 + 0.5 and iy1 - 0.5 <= y1 and 0 <= x1 - ix1 <= 5:
+                over[j] = g
     if not over:
         return slide
     page_w = slide["size"][0]

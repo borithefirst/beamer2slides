@@ -214,7 +214,6 @@ class Line:
     hole_pads: list = field(default_factory=list)  # graphics drawn around words of a hole (a circle, a badge)
     limits: list = field(default_factory=list)  # lines of the limits of a big operator in a hole (∑ with n=1 and ∞)
     code_number: bool = False  # a listing's line number (split_line_numbers): a paragraph of its own
-
     def hole_rect(self, hole: list) -> "Rect":
         """A hole's extent: its glyphs and the graphics drawn around them."""
         rect = union_all(s.rect for s in hole)
@@ -267,9 +266,18 @@ class Line:
     @property
     def main(self) -> Span:
         top = max(s.size for s in self.spans)
+        big = [s for s in self.spans if s.size >= 0.9 * top]
         # (not a big-operator or brace glyph: it sits off the baseline)
-        return max((s for s in self.spans if s.size >= 0.9 * top),
-                   key=lambda s: (not extension_font(s.font), len(s.text.strip())))
+        main = max(big, key=lambda s: (not extension_font(s.font), len(s.text.strip())))
+        # A span's baseline is its first glyph's: a listing's lowered '*' or raised '_' opening
+        # the longest span ("*)NULL);", "_exit(127);") put the whole line 2 pt off, and
+        # Slides set two code lines almost touching (r2_code_v3 s2). The line's baseline is the
+        # one most of its letters stand on.
+        letters = lambda ss: sum(len(s.text.strip()) for s in ss)
+        on = lambda b: [s for s in big if abs(s.baseline - b) <= 0.05 * top]
+        if 2 * letters(on(main.baseline)) >= letters(big):
+            return main
+        return max(big, key=lambda s: (not extension_font(s.font), letters(on(s.baseline)), len(s.text.strip())))
 
     @property
     def baseline(self) -> float:
@@ -572,9 +580,26 @@ def span_runs(spans: list[Span]) -> list[dict]:
                 runs[-1]["text"] += text
             else:
                 runs.append({"text": text, **style})
+    prose_spaces(runs)
+    runs = [r for r in runs if r["text"]]
     if lead and runs:  # (a right-to-left cell starting with a Latin word says which way it reads)
         runs[0]["text"] = lead + runs[0]["text"]
     return runs
+
+
+def prose_spaces(runs: list[dict]) -> None:
+    """A word space at the edge of inline code belongs to the surrounding text: in a monospaced
+    font it would be twice as wide. (In a table cell too: the span ' __exit__' comes with its
+    space, 'paired with  __exit__', r2_code_v4 s5.)"""
+    for a, b in zip(runs, runs[1:]):
+        if b["family"] == "mono" and a["family"] != "mono" and b["text"].startswith(" ") and not a["script"]:
+            if not a["text"].endswith(" "):
+                a["text"] += " "
+            b["text"] = b["text"][1:]
+        elif a["family"] == "mono" and b["family"] != "mono" and a["text"].endswith(" ") and not b["script"]:
+            a["text"] = a["text"][:-1]
+            if not b["text"].startswith(" "):
+                b["text"] = " " + b["text"]
 
 
 def cell_runs(lines: list[list[Span]]) -> tuple[list[dict], list[int]]:
@@ -2505,7 +2530,8 @@ class PageClassifier:
         chars = "".join(s.text for s in spans).replace(" ", "")
         mathy = sum(len(s.text.strip()) for s in spans if s.info.italic and len(s.text.strip()) <= 2)
         mathy += sum(ch in MATH_OPERATORS for ch in chars)
-        formula_like = len(chars) > 0 and mathy / len(chars) >= 0.4  # a display equation, not prose
+        # (a display equation, not prose; nor code: '>>> a + b' is a REPL line, r2_code_v4 s6)
+        formula_like = len(chars) > 0 and mathy / len(chars) >= 0.4 and not is_code(line.content)
 
         if not (math_font or scripts or bars or fractions or formula_like or "�" in line.text):
             return None
@@ -3309,15 +3335,7 @@ class PageClassifier:
                     else:
                         runs.append({"text": text, **style})
                 prev = span
-        # A word space at the edge of inline code belongs to the surrounding text: in a
-        # monospaced font it would be twice as wide.
-        for a, b in zip(runs, runs[1:]):
-            if b["family"] == "mono" and a["family"] != "mono" and b["text"].startswith(" ") and not a["script"]:
-                a["text"] += " "
-                b["text"] = b["text"][1:]
-            elif a["family"] == "mono" and b["family"] != "mono" and a["text"].endswith(" ") and not b["script"]:
-                a["text"] = a["text"][:-1]
-                b["text"] = " " + b["text"]
+        prose_spaces(runs)
         if not indent:
             runs = [r for r in runs if r["text"]]
         if runs:

@@ -40,6 +40,36 @@ def test_a_numbered_listing_is_one_box_in_its_columns_beside_its_numbers():
                     "    return memo[n] = fib(n - 1) + fib(n - 2);", "}"]
 
 
+def test_a_line_whose_longest_span_opens_with_a_lowered_star_keeps_its_baseline():
+    # (listings lowers '*' and raises '_': "*)NULL);" and "_exit(127);" put r2_code_v3 s2's
+    # lines 6 and 7 2 pt off and Slides set them almost touching)
+    from beamer2slides.classify import Line
+    from .test_columns import span
+    mono = "BeraSansMono-Roman"
+    words = [span("execlp(", 48.0, 125.13, 8.47, font=mono), span('"ls"', 84.0, 125.13, 8.47, font=mono),
+             span("char", 180.8, 125.13, 8.47, font=mono), span("*)NULL);", 206.3, 126.82, 8.47, font=mono)]
+    assert Line(words).baseline == 125.13
+    assert Line([span("_exit(127);", 48.0, 135.08, 8.47, font=mono), span("/*", 180.8, 137.08, 8.47, font=mono),
+                 span("only", 196.0, 137.08, 8.47, font=mono), span("reached", 221.6, 137.08, 8.47, font=mono),
+                 span("failed", 303.1, 137.08, 8.47, font=mono)]).baseline == 137.08
+
+
+def test_a_repl_line_is_code_not_a_formula():
+    slide = deck("28_frames_code")["slides"][9]
+    assert not [e for e in slide["elements"] if e["kind"] == "image"]
+    [code] = [e for e in texts(slide) if e.get("code")]
+    assert [paragraph_text(p) for p in code["paragraphs"]] == [">>> a + b", "Money(12, ’EUR’)"]  # (no upquote)
+
+
+def test_a_cell_s_space_before_code_words_is_the_prose_font_s_when_the_code_span_brings_it():
+    # (Inconsolata's ' __exit__' comes out of the PDF with its space: 'paired with  __exit__')
+    from beamer2slides.classify import span_runs
+    from .test_columns import span
+    runs = span_runs([span("paired with", 226.2, 165.0, 9.96, font="LMSans10-Regular"),
+                      span(" __exit__", 272.3, 165.0, 9.96, font="Inconsolatazi4-Regular")])
+    assert [(r["text"], r["family"]) for r in runs] == [("paired with ", "sans"), ("__exit__", "mono")]
+
+
 def test_rules_above_and_below_a_listing_are_rule_shapes():
     slide = deck("28_frames_code")["slides"][2]
     rules = shapes(slide, "rule")
@@ -117,16 +147,42 @@ def test_a_framed_panel_is_written_with_its_outline():
     assert "outline.weight" in update["fields"]
 
 
-def test_a_block_grows_with_its_shadow_as_far_as_its_words_run_longer_in_slides():
+def test_a_block_whose_words_keep_room_in_slides_keeps_the_pdf_width():
+    # ('Memoised' comes out 3 pt longer in Lato, 290 pt short of the bar's end: r2_themes_v5 s3,
+    # r3_dense_v1 s10 grew every such block 5 pt)
     plan = emit.plan_offline(deck("28_frames_code"))["plan"]
     slide = plan.deck["slides"][5]
+    grown = emit.grown_panels(slide, plan.scale, plan.fonts)
+    assert all(a is b for a, b in zip(slide["elements"], grown["elements"]))
+
+
+def narrowed_block(slide: dict, right: float) -> dict:
+    """Slide 6 of 28_frames_code with its block (title bar, body, shadow) ending at `right` and a
+    frame-coloured panel drawn round it first, 1.4 pt wider, as a tcolorbox draws its frame."""
+    els = []
+    for e in slide["elements"]:
+        if e["kind"] == "shape":
+            x1 = right + (4.0 if e.get("block") is None else 0.0)  # (the shadow lies 4 pt right)
+            e = {**e, "bbox": [e["bbox"][0], e["bbox"][1], x1, e["bbox"][3]]}
+            if e.get("title_bar"):
+                e["title_bar"] = [*e["title_bar"][:2], right, e["title_bar"][3]]
+        els.append(e)
+    frame = {"id": "frame", "kind": "shape", "role": "panel", "bbox": [5.5, 86.0, right + 1.4, 183.0],
+             "fill": "#990000", "shape": "RECTANGLE", "flip": False, "radius": 0.0, "spans": []}
+    return {**slide, "elements": [frame, *els]}
+
+
+def test_a_block_whose_words_reach_its_edge_in_slides_grows_with_its_shadow_and_frame():
+    plan = emit.plan_offline(deck("28_frames_code"))["plan"]
+    [title] = [e for e in plan.deck["slides"][5]["elements"] if e["kind"] == "text"
+               and paragraph_text(e["paragraphs"][0]) == "Memoised"]
+    slide = narrowed_block(plan.deck["slides"][5], title["bbox"][2] + 1.0)  # (1 pt from the bar's end)
     grown = emit.grown_panels(slide, plan.scale, plan.fonts)
     before = {e["id"]: e for e in slide["elements"]}
     after = {e["id"]: e for e in grown["elements"]}
     block = [i for i, e in before.items() if e["kind"] == "shape" and e.get("block") == 0]
-    shadow = [i for i, e in before.items() if e["kind"] == "shape" and e.get("block") is None]
-    growth = {after[i]["bbox"][2] - before[i]["bbox"][2] for i in block}
-    assert len(growth) == 1 and min(growth) > 1.0  # (Roboto Mono runs longer than LM Mono here)
-    assert all(after[i]["bbox"][2] > before[i]["bbox"][2] for i in shadow)
-    assert all(after[i]["bbox"][2] <= slide["size"][0] - 1 + 1e-6 for i in block + shadow)
-    assert all(after[i] is before[i] for i in before if i not in block + shadow)
+    others = [i for i, e in before.items() if e["kind"] == "shape" and e.get("block") is None]  # (shadow, frame)
+    growth = {round(after[i]["bbox"][2] - before[i]["bbox"][2], 6) for i in block + others}
+    assert len(growth) == 1 and 1.0 < min(growth) < 6.0  # (Lato's 'Memoised' is ~3 pt longer)
+    assert all(after[i]["bbox"][2] <= slide["size"][0] - 1 + 1e-6 for i in block + others)
+    assert all(after[i] is before[i] for i in before if i not in block + others)
