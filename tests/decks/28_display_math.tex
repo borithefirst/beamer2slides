@@ -1,0 +1,68 @@
+% Display and inline formulas that came out half text, half picture (visual hunt, family dispmath).
+% One frame per mechanism; tests/test_classify.py pins what each becomes.
+\documentclass{beamer}
+\usepackage{amsmath,amssymb}
+\DeclareMathOperator{\SSIM}{SSIM}
+\newtheorem{claim}{Claim}
+
+\begin{document}
+
+% 1: an inline sum with limits after italic theorem words: its box widens the gap to the
+% formula's words past what build_lines joins
+\begin{frame}{Inline sum with limits}
+\begin{claim}
+In a graph, $\sum\limits_{v \in V} d(v) = 2|E|$ holds for all finite graphs.
+\end{claim}
+\end{frame}
+
+% 2: an inline stacked fraction whose bar is the width of its numerator
+\begin{frame}{Inline fraction}
+The mean of the first six numbers is $\frac{1+2+3+4+5+6}{6}$ which is three and a half.
+\end{frame}
+
+% 3: a display with big delimiters and an integral
+\begin{frame}{Big delimiters}
+The norm is
+\[ \|f\|_p = \left( \int_X |f|^p \, d\mu \right)^{1/p}. \]
+for every measurable function.
+\end{frame}
+
+% 4: a display integral and a radical in the second line, under words of the first
+\begin{frame}{Operators in a paragraph}
+We integrate the density of the measure over the whole space and obtain the total mass
+$\displaystyle\int_X \rho \, d\mu$ of the body, which is finite.
+
+The spectral gap of a random regular graph is close to the Ramanujan bound given by
+$2\sqrt{d-1}$ for large graphs, as Friedman proved.
+
+Hashing into $\sqrt{n}$ buckets balances the two costs.
+\end{frame}
+
+% 5: a display with operator names, a minimum and a fraction
+\begin{frame}{Operator names}
+The structural similarity is
+\[ \SSIM(x, y) = \min\left(1, \frac{(2\mu_x\mu_y + c_1)(2\sigma_{xy} + c_2)}{(\mu_x^2 + \mu_y^2 + c_1)(\sigma_x^2 + \sigma_y^2 + c_2)}\right) \]
+\end{frame}
+
+% 6: aligned rows that start with a relation, and cases with a condition column
+\begin{frame}{Aligned rows and cases}
+\begin{align*}
+(a + b)^2 &= (a + b)(a + b) \\
+&= a^2 + ab + ba + b^2 \\
+&= a^2 + 2ab + b^2
+\end{align*}
+\[ f(x) = \begin{cases} x^2 & \text{if } x \ge 0, \\ -x & \text{otherwise.} \end{cases} \]
+\end{frame}
+
+% 7: a display sum whose limits reach below its box
+\begin{frame}{Display sum}
+\[ \sum_{k=1}^{n} k = \frac{n(n+1)}{2} \]
+\end{frame}
+
+% 8: a display integral with nothing under it: its ink hangs an em below every glyph box
+\begin{frame}{Display integral}
+The mass is
+\[ m = \int \rho \, dV \]
+\end{frame}
+
+\end{document}

@@ -323,6 +323,98 @@ def test_an_inline_sum_between_words_is_part_of_its_formula_hole():
     assert len(holes_in) == 2 and all(e.get("anchor") for e in holes_in)
 
 
+def math_images(slide: dict) -> list[dict]:
+    return [e for e in slide["elements"] if e["kind"] == "image" and e.get("role") == "math"]
+
+
+def body_text(slide: dict) -> str:
+    return " | ".join(paragraph_text(p) for e in texts(slide) if e["role"] != "title" for p in e["paragraphs"])
+
+
+@pytest.fixture(scope="module")
+def display_math():
+    return deck("28_display_math")["slides"]
+
+
+def test_an_inline_sum_at_the_end_of_a_line_is_one_hole_with_its_limits(display_math):
+    # The \sum's box widened the gap past what build_lines joins, so its words were two lines
+    # and the sign a third: the formula became a loose picture beside the words, no hole.
+    slide = display_math[0]
+    (hole,) = math_images(slide)
+    assert hole.get("anchor") and "v ∈ V" in hole["alt"] and "2 | E |" in hole["alt"]
+    assert slide["left_in_background"] == []
+
+
+def test_an_inline_fraction_is_one_hole_with_both_parts(display_math):
+    # The bar is exactly as wide as the numerator: it was no fraction bar, the numerator went
+    # into the hole and the denominator stayed in the background.
+    slide = display_math[1]
+    (hole,) = math_images(slide)
+    assert hole.get("anchor") and hole["alt"].split() == ["1+2+3+4+5+6", "6"]
+    assert slide["left_in_background"] == []
+
+
+def test_a_display_with_big_delimiters_is_one_picture(display_math):
+    slide = display_math[2]
+    (pic,) = math_images(slide)
+    assert pic["alt"].endswith("1 / p .") and body_text(slide) == "The norm is | for every measurable function."
+    assert slide["left_in_background"] == []
+
+
+def test_signs_hanging_between_lines_of_prose_go_to_the_line_below(display_math):
+    # A \displaystyle\int alone between two lines stayed in the background; a radical's box in
+    # the line above took two of that line's words into its hole picture.
+    slide = display_math[3]
+    holes = math_images(slide)
+    assert len(holes) == 3 and all(e.get("anchor") for e in holes)
+    assert [e["alt"] for e in holes] == ["X ρ d µ", "2 √ d − 1", "√ n"]
+    assert "random regular graph" in body_text(slide) and "total mass" in body_text(slide)
+    assert slide["left_in_background"] == []
+
+
+def test_the_sentence_before_a_display_stays_text(display_math):
+    # The \left( ended under the sentence's last word, continued it right-aligned, and the
+    # paragraph, math now, became a picture of the words.
+    slide = display_math[4]
+    (pic,) = math_images(slide)
+    assert pic["alt"].startswith("SSIM( x , y ) = min 1") and body_text(slide) == "The structural similarity is"
+    assert slide["left_in_background"] == []
+
+
+def test_aligned_rows_and_cases_are_whole_pictures(display_math):
+    # The cases' two rows started at the brace, one above the other like a paragraph: they
+    # stayed text, "f(x) =" and the brace in the background.
+    slide = display_math[5]
+    pics = math_images(slide)
+    assert len(pics) == 2 and not body_text(slide)
+    assert pics[1]["alt"].startswith("f ( x ) =") and "otherwise." in pics[1]["alt"]
+    assert slide["left_in_background"] == []
+
+
+def test_a_formula_picture_holds_the_ink_hanging_below_its_glyph_boxes():
+    # A CMEX glyph's box is an em from its origin; a display integral's ink hangs another em
+    # below it: the picture cut the integral off at its box (render.grow_to_ink).
+    import numpy as np
+
+    from beamer2slides import checks
+    pdf = DECKS / "28_display_math-handout.pdf"
+    if not pdf.exists():
+        pytest.skip(f"{pdf.name} not built")
+    r = checks.convert_locally(pdf)
+    for index in (5, 7):
+        slide = r.deck["slides"][index]
+        img, k = r.originals[slide["page"]], r.px_per_pt(slide)
+        for pic in math_images(slide):
+            x0, y0, x1, y1 = pic["bbox"]
+            others = [e["bbox"] for e in slide["elements"] if e is not pic]
+            X0, Y0 = int((x0 - 15) * k), int((y0 - 15) * k)
+            ys, xs = np.nonzero(img[Y0:int((y1 + 15) * k), X0:int((x1 + 15) * k)].min(axis=2) < 128)
+            outside = [(x, y) for x, y in zip((xs + X0 + 0.5) / k, (ys + Y0 + 0.5) / k)
+                       if not (x0 <= x <= x1 and y0 <= y <= y1)
+                       and not any(b[0] - 1 <= x <= b[2] + 1 and b[1] - 1 <= y <= b[3] + 1 for b in others)]
+            assert outside == [], (index, pic["alt"], len(outside))
+
+
 def cell_texts(table: dict) -> list[list[str]]:
     return [[paragraph_text({"runs": c}) for c in row] for row in table["cells"]]
 

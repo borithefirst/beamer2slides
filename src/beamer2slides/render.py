@@ -367,6 +367,47 @@ def crop_overlay(eraser: Eraser, fig: dict, labels: list[dict], path: Path) -> l
     return [img.shape[1], img.shape[0]]
 
 
+INK_ZOOM = 4.0      # px per pt at which a formula's ink is measured
+INK_REACH = 3.0     # em beyond its box that a formula glyph's ink is looked for (a \left( of three rows)
+INK_PAD = 0.75      # pt around the ink found, for anti-aliasing
+
+
+def grow_to_ink(eraser: Eraser, bbox: list[float], members: list[dict]) -> list[float]:
+    """A formula picture's box grown to the ink of its own glyphs. Glyph boxes are font boxes
+    (ascender to descender), not ink: a display \\sum or \\int from CMEX hangs from its origin
+    and reaches an em past its box, a \\left( of a matrix three rows, and a picture of the box
+    cut the sign to a chevron while its switched-off glyph left the background too. The ink is
+    what the text objects holding only the formula's glyphs paint: the page rendered around the
+    box with and without them."""
+    if not members:
+        return bbox
+    rects = [s["bbox"] for s in members]
+    mine = lambda ch: any(r[0] - 0.1 <= (ch.box[0] + ch.box[2]) / 2 <= r[2] + 0.1 and
+                          r[1] - 0.1 <= (ch.box[1] + ch.box[3]) / 2 <= r[3] + 0.1 for r in rects)
+    own = [key for key, chars in eraser.chars.items() if chars and all(map(mine, chars))]
+    if not own:
+        return bbox
+    reach = INK_REACH * max(s["size"] for s in members)
+    page = eraser.page
+    area = (max(0.0, bbox[0] - reach), max(0.0, bbox[1] - reach),
+            min(page.width, bbox[2] + reach), min(page.height, bbox[3] + reach))
+    if area[2] <= area[0] or area[3] <= area[1]:
+        return bbox
+    drawn = eraser.render(INK_ZOOM, area).astype(np.int16)
+    bare = eraser.render(INK_ZOOM, area, hide=own).astype(np.int16)
+    if drawn.shape != bare.shape:
+        return bbox
+    ink = np.abs(drawn - bare).max(axis=2) > 24
+    if not ink.any():
+        return bbox
+    ys, xs = np.nonzero(ink)
+    ox, oy = np.floor(area[0] * INK_ZOOM + 0.001), np.floor(area[1] * INK_ZOOM + 0.001)
+    box = ((xs.min() + ox) / INK_ZOOM - INK_PAD, (ys.min() + oy) / INK_ZOOM - INK_PAD,
+           (xs.max() + 1 + ox) / INK_ZOOM + INK_PAD, (ys.max() + 1 + oy) / INK_ZOOM + INK_PAD)
+    return [round(float(v), 2) for v in (min(bbox[0], box[0]), min(bbox[1], box[1]),
+                                  max(bbox[2], box[2]), max(bbox[3], box[3]))]
+
+
 def crop_region(pdf: Path, page: int, bbox: list[float], path: Path, zoom: float) -> None:
     """A picture of a page region (emit's stand-in for an element the Slides API refused)."""
     doc = Document(pdf)
@@ -482,6 +523,8 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
                 own = None if fig.get("anchor") or not fig.get("image") else embedded_picture(eraser, fig, path)
                 path = own or path
                 if own is None:
+                    if fig.get("role") == "math":
+                        fig["bbox"] = grow_to_ink(eraser, fig["bbox"], [spans[sid] for sid in fig["spans"] if sid in spans])
                     fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path,
                                             transparent=bool(fig.get("anchor")))
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")

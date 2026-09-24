@@ -2115,7 +2115,12 @@ def fit_holes(slide: dict, scale: float, fonts: FontMapper) -> dict:
     widths = {}
     for _, p, run, pic in slide_holes(slide):
         prev_end, next_x0 = hole_neighbours(p, run)
-        if pic is None or next_x0 is None:
+        if pic is None:
+            continue
+        if next_x0 is None:
+            # (render grows a formula picture to its glyphs' ink: an integral's overhang)
+            if pic["bbox"][2] - pic["bbox"][0] > run["hole"]:
+                widths[id(run)] = round(pic["bbox"][2] - pic["bbox"][0], 2)
             continue
         start = prev_end + SYMBOL_ADVANCE_EM[" "] * fonts(run, scale)[1] / scale if prev_end is not None else pic["bbox"][0]
         widths[id(run)] = round(max(pic["bbox"][2] - pic["bbox"][0], next_x0 - start), 2)
