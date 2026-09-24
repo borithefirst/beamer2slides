@@ -1,6 +1,6 @@
 [project]
 name = "beamer2slides"
-version = "0.5.0"
+version = "0.6.0"
 description = "Convert beamer PDFs into editable Google Slides decks"
 readme = "README.md"
 # An SPDX string, not `{text = "MIT"}`: setuptools deprecated the table in 77 and stops building
