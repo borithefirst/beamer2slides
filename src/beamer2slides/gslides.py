@@ -6,7 +6,7 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from .gapi import HttpError, is_transient, status_of
+from .gapi import HttpError, is_transient, patient_http, status_of
 
 EMU_PER_PT = 12700
 
@@ -59,12 +59,17 @@ def _count(by: dict) -> None:
             mine.update(by)
 
 
-def execute(request, retries: int = 6):
-    """Run an API request, backing off on rate limits and transient server errors."""
+SLOW_EXPORT = 300.0   # seconds a .pptx export may take (gapi.patient_http: 115 s measured)
+
+
+def execute(request, retries: int = 6, timeout: float | None = None):
+    """Run an API request, backing off on rate limits and transient server errors. `timeout`: the
+    seconds this one call may wait for its answer, where the library's 60 s is too short."""
+    http = patient_http(request, timeout) if timeout else None
     for attempt in range(retries):
         _count({"calls": 1, f"call {getattr(request, 'methodId', None) or '?'}": 1})
         try:
-            return request.execute()
+            return request.execute(http=http) if http is not None else request.execute()
         except HttpError as e:
             if not is_transient(e) or attempt == retries - 1:
                 raise

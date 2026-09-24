@@ -212,11 +212,11 @@ class LivePictures:
             self.exported = {}
             if self.drive is not None and self.pres.get("presentationId"):
                 from .gapi import HttpError
-                from .gslides import execute
+                from .gslides import SLOW_EXPORT, execute
                 try:
                     self.exports += 1
                     data = execute(self.drive.files().export_media(fileId=self.pres["presentationId"],
-                                                                   mimeType=PPTX_MIME))
+                                                                   mimeType=PPTX_MIME), retries=3, timeout=SLOW_EXPORT)
                     if isinstance(data, (bytes, bytearray)):
                         self.exported = exported_pictures(bytes(data), self.pres)
                 except (HttpError, OSError):

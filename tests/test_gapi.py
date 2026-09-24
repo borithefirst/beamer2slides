@@ -149,6 +149,36 @@ def test_an_error_is_read_through_functions_rather_than_attributes():
     assert gapi.message_of(ValueError("no")) == "no"
 
 
+def test_a_slow_export_waits_on_a_connection_of_its_own():
+    """Drive's .pptx export embeds the deck's fonts and took 115 s over Noto Sans SC: past the
+    library's 60 s, every retry timed out and no backup could be made. The export gets a patient
+    connection for itself; an injected client's request (no library connection) runs as it is."""
+    pytest.importorskip("google_auth_httplib2")
+    from beamer2slides import gslides
+
+    class Creds:
+        def before_request(self, *a):
+            pass
+
+    class Request:
+        methodId = "drive.files.export"
+        http = type("Http", (), {"credentials": Creds()})()
+
+        def execute(self, http=None):
+            self.used = http
+            return b"pptx"
+
+    r = Request()
+    assert gslides.execute(r, timeout=300) == b"pptx"
+    assert r.used.http.timeout == 300 and isinstance(r.used.credentials, Creds)
+
+    class Injected:
+        def execute(self):
+            return b"theirs"
+    assert gapi.patient_http(Injected(), 300) is None
+    assert gslides.execute(Injected(), timeout=300) == b"theirs"
+
+
 # ---------------------------------------------------------------- the builder's credentials
 
 def _builder(seen, made="CLIENT"):

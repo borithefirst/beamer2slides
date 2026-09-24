@@ -28,7 +28,7 @@ from pathlib import Path
 
 from . import merge, snapshot
 from .gapi import HttpError, message_of
-from .gslides import execute
+from .gslides import SLOW_EXPORT, execute
 
 SCRATCH = re.compile(r"b2s_m\d{3}")  # emit.measure_places' scratch slides
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -343,8 +343,9 @@ def backup_dir(out: Path) -> Path:
 
 
 def export_pptx(drive, pid: str, path: Path) -> int:
-    """The live deck as a .pptx next to the output folder. Drive refuses files.export over 10 MB."""
-    data = execute(drive.files().export_media(fileId=pid, mimeType=PPTX_MIME))
+    """The live deck as a .pptx next to the output folder. Drive refuses files.export over 10 MB,
+    and takes minutes over a deck in a big embedded face (`gslides.SLOW_EXPORT`)."""
+    data = execute(drive.files().export_media(fileId=pid, mimeType=PPTX_MIME), retries=3, timeout=SLOW_EXPORT)
     data = data.getvalue() if isinstance(data, io.BytesIO) else data
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)

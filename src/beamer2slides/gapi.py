@@ -80,6 +80,22 @@ def build(api: str, version: str, credentials: Any):
     return _build(api, version, credentials=credentials, cache_discovery=False)
 
 
+def patient_http(request: Any, seconds: float):
+    """An authorised connection that waits `seconds` for an answer, for one call known to be slow,
+    or None when the request is not the library's own (an injected client: it runs as it is).
+    The library waits 60 s; Drive's .pptx export of a deck set in Noto Sans SC took 115 s and TC
+    77 s, since Drive embeds the font (6.7 MB for TC) - measured 2026-09-24."""
+    creds = getattr(getattr(request, "http", None), "credentials", None)
+    if creds is None:
+        return None
+    try:
+        import google_auth_httplib2
+        import httplib2
+    except ImportError:
+        return None
+    return google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=seconds))
+
+
 def media_upload(data: Any, mimetype: str, resumable: bool = False):
     """`MediaIoBaseUpload` over a file-like object, for a request's `media_body`."""
     try:
