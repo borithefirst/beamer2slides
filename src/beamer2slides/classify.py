@@ -1292,8 +1292,11 @@ class PageClassifier:
         rules: dict[tuple[int, int], list[tuple[str, Rect]]] = {}
         for d in self.page["drawings"]:
             r = Rect.of(d["bbox"])
+            # (an overfull table's rules start at its margin and run off the page's right edge,
+            # where TeX lets an overfull line go: r2_tables_v2 slide 6, r2_tables_v3 slide 2 fell
+            # apart into free text; theme hairlines touch the left edge or both)
             if d["id"] in self.decor_ids or r.w < 0.5 * self.W or \
-                    r.x0 <= 1 or r.y0 <= 1 or r.x1 >= self.W - 1 or r.y1 >= self.H - 1:
+                    r.x0 <= 1 or r.y0 <= 1 or r.y1 >= self.H - 1:
                 continue
             if (d["type"] == "s" and d["items"] == "l" and r.h <= 1.0) or \
                     (d["type"] == "f" and d["items"] == "re" and r.h <= 1.5):

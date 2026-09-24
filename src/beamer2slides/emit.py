@@ -2073,9 +2073,13 @@ def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = Fal
             return [[[{**r, "size": r["size"] * s} for r in runs] for runs in row] for row in cells]
 
         least = table_columns(el, shrunk(TABLE_MIN_SHRINK), scale, fonts, tight=True)
-        # The margin if the smallest size reaches it, else the page edge; a table that does not
-        # fit even then keeps its size (smaller words would not bring its last column back).
-        goal = next((g for g in (limit, page_w) if least[0][-1] <= g + 0.01), None)
+        # The margin if the smallest size reaches it, else the page edge, else - an overfull table,
+        # running off the page in the PDF too (r2_tables_v2 slide 6) - where the PDF's ends; a
+        # table that does not fit even then keeps its size (smaller words would not bring its
+        # last column back).
+        pdf_end = max(el["frame"][2], (el.get("bounds") or [0.0])[-1])
+        goal = next((g for g in (limit, page_w, pdf_end if pdf_end > page_w else None)
+                     if g is not None and least[0][-1] <= g + 0.01), None)
         best = None
         if tight[0][-1] > limit + 0.01 and goal is not None:
             lo, hi, best = TABLE_MIN_SHRINK, 1.0, (TABLE_MIN_SHRINK, least)

@@ -7,7 +7,7 @@ import pytest
 from beamer2slides import emit as E
 from beamer2slides.emit import FontMapper
 
-from .test_tables_hunt import Page, shaded_grid, tables
+from .test_tables_hunt import W, Page, shaded_grid, tables
 
 
 def test_a_shaded_row_starts_and_ends_on_its_band():
@@ -67,6 +67,60 @@ def test_measured_columns_that_fit_the_frame_keep_the_pdf_width():
     # an unmeasured column still keeps its 8% for the substitute font
     loose = E.fit_columns(bounds, cols, scale, [None] * 5)
     assert loose[-1] > 338.69 + 4
+
+
+def overfull_table() -> tuple[Page, list[float]]:
+    """A booktabs table of 12 columns, its heads a few points apart, whose rules start at the text
+    margin and run 31 pt off the page's right edge, where TeX lets an overfull box go (r2_tables_v2
+    slide 6)."""
+    page = Page()
+    heads = ["Set", "Layers", "Hidden", "Heads", "Cutoff", "Neighb", "Batches", "LRate", "Decays", "Epochs",
+             "Dropout", "EMA"]
+    body = [[name] + [f"{i}.{j:02}e3" for j in range(11)] for i, name in enumerate(["mp_e", "gap", "jdft"])]
+    xs = [16 + 39 * j for j in range(12)]
+    for y, width in ((58, 0.8), (74, 0.5), (130, 0.8)):
+        page.hline(11, xs[-1] + 40, y, width)
+    for j, word in enumerate(heads):
+        page.text(word, xs[j], 69)
+    for i, row in enumerate(body):
+        for j, word in enumerate(row):
+            page.text(word, xs[j], 88 + 16 * i)
+    return page, xs
+
+
+def test_an_overfull_tables_rules_running_off_the_page_are_its_own():
+    """The rules of a table wider than the page reach past its right edge: table_hairlines took
+    them for theme hairlines, the header's close-set words merged into one drifting text box and
+    the body became a rule-less plain table (r2_tables_v2 slide 6, r2_tables_v3 slide 2). Theme
+    hairlines start at the page's left edge; an overfull table's start at its margin."""
+    page, _ = overfull_table()
+    (t,) = tables(page.elements())
+    assert len(t["cells"]) == 4 and len(t["columns"]) == 12
+    assert t["cells"][0][0][0]["text"] == "Set" and len(t["rules"]) == 3
+    # a rule over the page's whole width is still the theme's
+    page = Page()
+    page.hline(0, W, 58, 0.8)
+    page.hline(0, W, 130, 0.8)
+    page.words("Some words", 40, 80)
+    page.words("more words", 300, 80)
+    page.words("A second line", 40, 100)
+    assert not tables(page.elements())
+
+
+def test_an_overfull_table_is_set_smaller_to_end_where_the_pdfs_does():
+    """Grown by the Slides cell padding of its twelve columns, an overfull table could reach
+    neither the margin nor the page edge at TABLE_MIN_SHRINK and kept its size, running further
+    off the slide than the PDF's; it is set smaller until it ends where the PDF's does."""
+    page, _ = overfull_table()
+    (t,) = tables(page.elements())
+    scale = 720.0 / W
+    fonts = FontMapper()
+    lay = E.table_layout(t, scale, fonts, imported=True, page_w=W)
+    grown = E.table_columns(t, [[[{**r, "cell": True} for r in E.in_sentence(c)] for c in row] for row in t["cells"]],
+                            scale, fonts, tight=True)[0]
+    assert grown[-1] > t["frame"][2] + 5  # (the case: at its size it runs past the PDF's end)
+    assert lay["bounds"][-1] <= t["frame"][2] + 0.01
+    assert E.TABLE_MIN_SHRINK <= lay["shrink"] < 1
 
 
 def google_steps(z: float, space_above: list[float]) -> list[float]:
