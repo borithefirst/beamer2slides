@@ -4343,3 +4343,57 @@ arrowheads, a fraction picture over a word.
   shallower subscripts (a baseline run would read back as a removed subscript and pull would write
   it into the .tex); triangle bullets (no preset); fallback-font glyphs; `\dotfill` dot counts.
   Existing decks with Fira or LM Sans bullets emit differently on their next sync.
+- **H, tables** (`tests/test_tables_hunt.py`, 14): cells shaded edge to edge are a table
+  (`fill_grid`); a node a vertical rule splits is not a diagram node (`splits_cells`) - ruled grids,
+  rowcolor tables and heatmaps had become diagrams; a wrapped cell at a loose pitch, or wrapping in
+  two columns at once, stays one cell; white stripes on an off-white page are kept; a word halfway
+  between rows is a multirow, a double vertical rule one border; wrapped items of side-by-side lists
+  are no table; head and body alignments per column (`head`, `body`). Emit: a wrapped cell's column
+  is capped below its line plus the next line's first word (`wrap_joins`, the `cap` in
+  `fit_columns`: Slides pulled that word up), cell runs are not reshaped (`cell` in
+  `FontMapper.shape_ratio`). Open: `\cmidrule` trims and double rules (a Slides border is one line
+  per whole edge), a dash keeping a siunitx column centred, overfull tables (left on purpose).
+- **F, display math** (`tests/decks/28_display_math.tex`, 7 tests in `test_classify.py`): relation
+  rows, cases rows, the full stop after `\right)` and the sentence before a display now group right;
+  `typeset_fraction` (a bar as wide as one part, the other centred) keeps numerator and denominator
+  with their bar; overlapping formula clusters merge; `render.grow_to_ink` renders the area with and
+  without the formula's own objects at 4x over a reach of 3 em (0.75 pt padding) and grows the
+  picture to the ink: CMEX glyph boxes run an em below the origin and the ink hangs about another em
+  below that (measured: r1_math_v2 +14.2 pt down, a bare display ∫ +6.1 pt, a cases brace +2.1 pt);
+  `drop_hanging_glyphs` moves a hanging sign or √ to the line below; hole widths include limits, and
+  a hole at a line end is never narrower than its picture. `display_pieces_apart` splits a lone
+  `\left(` that `continues` had joined to prose. Open: stacked fractions stay native `a/b` on
+  purpose (`simple_fraction`).
+- **G, line breaks** (`tests/decks/28_line_breaks.tex`, `tests/test_line_breaks.py`, 10): forced
+  breaks stay breaks (verse cells, numbered examples, sources, TOC entries, titlepage `\\`);
+  `\hfill` pieces are right-aligned lines with no label tab (`find_hfill_pieces`), a quote's measure
+  W - x0 (quote environments indent both sides equally); justified prose (`is_justified`: lines end
+  together with stretched spaces) is JUSTIFIED with the `\parindent` first line joined (0.37 em in
+  tablenotes); a `\quad` measures 0.999-1.000 em and never stretches: an em space when the gap is at
+  least max(0.9, word space + 0.4) em; a thin space (about 0.167 em, against a word space of at
+  least 0.3 em: LM 0.333, Cambria 0.22) between digits becomes NBSP (`thin_span`); explicit line-end
+  hyphens stay; block titles, quotes as titles, footnotes, nested enumerate and ⋆ bullets.
+  Description labels sit 0.5 em (`\labelsep`) from their text. Open: labels wider than the label
+  column (a first-line tab Slides can't place), extract's JOIN_GAP 0.15 em eats 0.13-0.14 em word
+  spaces ('18 mo', pinyin), the other GLYPH_SHAPES glyphs as labels.
+- **J, frames and code** (`tests/decks/28_frames_code.tex`, `tests/test_frames_code.py`, 11):
+  `frame_of` makes a fully framed box's rules its outline (`\fcolorbox`, tcolorbox, listings
+  `frame=single`), `rule_frames` a partial or bare frame rule shapes (a fancyvrb frame keeps the gap
+  for its label); a listing is one panel, its line numbers a right-aligned box (`split_line_numbers`);
+  coloured fancyvrb lines once, as text; code columns from glyph x over `code_pitch` (columns=fixed,
+  alignment, indentation); decorations end before trailing punctuation (`TRAILING_PUNCT`); a
+  `\colorbox` alone on its line is a panel, inside a line a highlight padded with NBSP (`BOX_PAD`);
+  `emit.grown_panels` widens panel, block and shadow as far as the Slides words run longer (fonts
+  with advances only: newtx has none). Open: letterspacing, baseline shifts, uwave, highlights across
+  a break, a listing with no panel.
+- **L, diagrams, overlays, logos** (`tests/test_diagrams_overlays.py`, 17): overlay steps are
+  matched by title; see-through drawings (opacity, multiply) keep a diagram a picture; more than
+  `MAX_PLAIN_RECTANGLES` (32) bare rectangles are one picture (QR codes); a panel under a stroke
+  drawn after it stays in the background (merged with J: a frame's own rules excepted, 2fe31d2);
+  rounded-rectangle radius from the path; elbows are always |- (a -| one written from its other
+  end); edge labels stay apart across arrows; a chart's bar series are not panels; `clip_to_bands`
+  ends a figure box at a band drawn after it; wrapped line ends are not figure labels; a turned
+  stamp keeps its letters (a glyph is erased with a native line only if it runs the same way);
+  `artwork_of` keeps logo words out of titles and lines; footline boxes beside band artwork are
+  theme. Open: dashes (the backend contract has no `Drawing.dash`), picture seams (need Google's
+  renderer).

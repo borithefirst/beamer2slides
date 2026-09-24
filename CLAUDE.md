@@ -44,7 +44,8 @@ decorations) is a picture, or baked into a per-slide background picture.
 - **A conversion or a sync is round trips, not work.** Speed comes from having independent calls
   in the air at once (threads only; each falls back to serial when a caller lends its own client).
   Measure A/B **interleaved** in one sitting: Google's latency drifts 2x with the day.
-- Overlays: non-handout PDFs keep the last step of each frame; `--overlays all` keeps every page.
+- Overlays: non-handout PDFs keep the last step of each frame (steps matched by title);
+  `--overlays all` keeps every page.
 
 ## What becomes native (deck.json element kinds)
 Details, measurements and edge cases: docs/project-notes.md "What becomes native".
@@ -69,20 +70,32 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   negates (`negate`). Every text range emit writes is UTF-16 (`emit.u16`: astral math letters). A
   run inside a sentence keeps its paragraph's size (`emit.in_sentence`); leader dots and ellipses
   never set `shape_ratio`. A multi-line box is sized from where Slides breaks its lines
-  (`emit.slides_lines`).
+  (`emit.slides_lines`). Justified prose (`is_justified`, `stretched`) is written JUSTIFIED with a
+  `\parindent` first line; `\hfill` pieces are their own right-aligned lines (`find_hfill_pieces`);
+  a `\quad` is an em space at max(0.9, word space + 0.4) em; thin-spaced digits keep NBSP
+  (`thin_span`). Code keeps its columns: spaces from glyph x over the column pitch (`code_pitch`),
+  line numbers a right-aligned box of their own (`split_line_numbers`, Line `code_number`).
 - `image`: figure regions (TikZ, plots, raster images with their labels) as pictures. A bare
   `\includegraphics` keeps the author's file byte for byte when it decodes identically
   (`classify.bare_image`, `render.image_file`). A chart's tick rows and centred titles belong to its
   picture (`tick_row`, `axis_titles`, `axis_label_column`, `release_stranded_labels`); a caption
   ("Figure:") stays text. A legend box is never a highlight; a drawn frame is a panel
-  (`box_outline`).
+  (`box_outline`); a chart's bar series are not panels. A figure box ends at a band drawn after it
+  (`clip_to_bands`). A display formula is one picture grown to its glyph ink (`render.grow_to_ink`,
+  CMEX ink hangs an em below its box); a bar as wide as one part with the other centred is a
+  fraction bar (`typeset_fraction`); hanging CMEX/√ signs go to the line below
+  (`drop_hanging_glyphs`); `extension_font` names every math-extension font.
 - `table`: text framed by rules (or rule-less `plain_tables`), with borders, merges, fills. Column
   widths come from measured Slides advances (`emit.slides_width`, `fit_columns`) so no cell wraps
   and the table does not grow over its caption; classify cuts a spanning chunk at word gaps when it
   lines up with the other rows. Rules wider than half the page with rows of cells between them are
   a table's, not theme decoration (`table_hairlines`). A wrapped `p{}` cell is one cell of several
   lines (`row_lines`, `wrapped`), its column wide enough for each PDF line (`emit.wrapped_width`).
-  A table wider than the page shrinks to fit, never below 0.75x (`emit.TABLE_MARGIN`).
+  A table wider than the page shrinks to fit, never below 0.75x (`emit.TABLE_MARGIN`). Cells shaded
+  edge to edge are a table (`fill_grid`), and a node a rule splits is no diagram node
+  (`splits_cells`); a column's head and body keep their own alignments (`head`, `body`); a wrapped
+  cell's column stays below its line plus the next line's first word (`wrap_joins`); cell runs are
+  never reshaped (`cell`). Wrapped items of side-by-side lists are not a plain table.
   Convert brings tables empty in the .pptx with their own cell margins (`emit.pptx_table`) and
   fills them through the API, so rows keep the PDF pitch. The base records those margins
   (`table_margins`); sync refills such a table in place when its words or place changed, or rows and columns that
@@ -90,14 +103,22 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
 - `diagram`: node/line/arrow clusters as grouped shapes, connectors and labels (`diagram_from`).
   It refuses (the drawing stays a picture) when a node holds other text, nodes cross, or a label
   has scripts; an ellipse must be upright (`upright_ellipse`), a redrawn node keeps its label on the
-  top copy.
+  top copy. See-through (opacity, blend) drawings and clusters of more than `MAX_PLAIN_RECTANGLES`
+  rectangles stay pictures; elbows are written |- (a -| one from its other end); a panel under a
+  stroke drawn after it stays in the background (a frame's own rules excepted).
 - `shape`: opaque panels such as beamer blocks (title bar + body built to survive resizing).
+  Frames (`frame_of`): a fully framed box (`\fcolorbox`, tcolorbox, `frame=single`) is a panel
+  with an outline, a partial or bare frame rule shapes (`rule_frames`); `emit.grown_panels`
+  widens a panel as far as its Slides words run longer than the PDF's. A `\colorbox` alone on
+  its line is a panel, inside a line a highlight padded by no-break spaces.
 - Decorations on words: underline/strike/highlight runs; words on small graphics and complex inline
   formulas become **holes** (no-break Roboto Mono spaces) with the picture placed over them by
   measurement on scratch slides (`emit.measure_places`); graphics drawn at words (tikzmark arrows,
   braces) are **overlays** anchored to their text and stretched to the words Slides sets.
 - Theme: the most common background goes on the master, shared decoration onto layout pictures,
   layouts' placeholders get the deck's title/body style, frame counters become per-slide text.
+  Words on different theme artwork or logo boxes are different lines (`artwork_of`); footline
+  boxes beside band artwork are theme.
 - Everything else (display math, theme decoration) stays in the background picture.
 
 ## Google side
