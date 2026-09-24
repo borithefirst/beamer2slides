@@ -269,6 +269,34 @@ def test_a_line_opening_with_an_icon_stays_text():
     assert "Next update: 12 January 2027" in texts
 
 
+def test_an_items_formula_wrapped_onto_its_own_line_stays_in_the_item():
+    """r2_tables_v3 s5 '$C = 1.0$', r3_dense_v4 s3 '($O(\\sqrt{n})$)': an item's formula wrapped
+    alone onto the item's second line, flush with its words. Taken for a display, it made the
+    whole item one picture, bullet and words included."""
+    from .test_charts_diagrams import Page, body_text, deck, lines
+
+    p = Page()
+    p.text("•", 29.84, 103.45, font="LMSans10-Regular", w=8.47)
+    p.words("Per-round clipping norm of each client update, fixed across all sites now", 43.77, 103.45, font="LMSans10-Regular")
+    p.text("C", 43.78, 119.03, font="LMSans10-Oblique", w=6.96)
+    p.text("= 1", 54.94, 119.03, font="LMSans10-Regular", w=16.96)
+    p.text(".", 71.9, 119.03, font="LMMathItalic10-Regular", w=3.02)
+    p.text("0", 74.92, 119.03, font="LMSans10-Regular", w=5.46)
+    p.text("•", 29.84, 137.6, font="LMSans10-Regular", w=8.47)
+    p.words("Separator theorems for planar graphs split them in balanced parts ok", 43.77, 137.6, font="LMSans10-Regular")
+    x = p.text("(", 43.77, 153.2, font="LMSans10-Regular", w=4)["bbox"][2]
+    x = p.text("O(", x, 153.2, font="LMSans10-Oblique", w=11)["bbox"][2]
+    p.text("√", x, 146.7, font="LMMathSymbols10-Regular", w=8.6)
+    p.draw(lines((x + 8.6, 146.5), (x + 14, 146.5)), type="s", stroke="#000000", width=0.4)
+    p.text("n))", x + 8.6, 153.2, font="LMSans10-Oblique", w=13)
+    body_text(p)
+    slide = deck(p)["slides"][0]
+    assert not any(e.get("role") == "math" and not e.get("anchor") for e in slide["elements"])
+    text = " / ".join("".join(r["text"] for r in par["runs"]) for e in slide["elements"] if e["kind"] == "text"
+                      for par in e["paragraphs"])
+    assert "now C = 1.0" in text and "Separator theorems" in text
+
+
 def ink(path) -> np.ndarray:
     """Dark opaque pixels of a picture (an anchored one has a transparent ground)."""
     px = np.array(Image.open(path).convert("RGBA")).astype(int)

@@ -2365,6 +2365,21 @@ class PageClassifier:
                     return True
         return False
 
+    def wrapped_formula(self, line: Line) -> bool:
+        """A paragraph's inline formula wrapped onto a line of its own ("(O(√n))" under an item's
+        "Separator theorems"): no bullet or label of its own, one pitch below a line of words in
+        its size, starting where one of that line's words starts. A display formula is centred
+        or indented, never flush with its paragraph. As a display, the item it ended became one
+        picture, bullet and words included."""
+        if line.bullet or line.tab is not None:
+            return False
+        size = line.size
+        return any(o is not line and o.spans[0].horizontal and o.reason not in ("theme", "figure", "rotated", "math")
+                   and abs(o.size - size) <= 0.2 * size
+                   and 0.8 * size <= line.baseline - o.baseline <= 1.6 * size
+                   and any(abs(s.rect.x0 - line.x0) <= 1.5 for s in o.content)
+                   and prose_share(o.content) >= DISPLAY_WORD_SHARE for o in self.all_lines)
+
     def display_line(self, line: Line) -> bool:
         """A line that is a display formula: mostly formula (few words of prose, see prose_share)
         and set apart from any paragraph's flow."""
@@ -2426,7 +2441,8 @@ class PageClassifier:
         words = [s.text.strip() for s in spans if not any(s in seg for seg in segments) and s.text.strip() not in OPERATOR_NAMES]
         prose_words = [w for w in WORD_RE.findall(" ".join(words)) if len(w) >= 3 and w not in OPERATOR_NAMES]
         if sum(sum(ch.isalpha() for ch in w) >= 2 for w in words) < 2 and sum(map(len, words)) < 8 and not (
-                prose_words and self.in_prose_flow(line) and line.tab is None and not line.bullet):
+                prose_words and self.in_prose_flow(line) and line.tab is None and not line.bullet) and \
+                not self.wrapped_formula(line):
             # hardly any words ("f(x) = √x if x ≥ 0"): a display equation, one picture - but a
             # paragraph's line that is mostly formula ("Then / f ∈ L¹(µ) and ∫|fn − f| dµ → 0.")
             # keeps its words
@@ -2543,7 +2559,7 @@ class PageClassifier:
             return "inline"
         if bars or tofu:
             return "complex"
-        if formula_like and not self.continues_prose(line):
+        if formula_like and not (self.continues_prose(line) or self.wrapped_formula(line)):
             return "complex"
         if any(extension_font(s.font) for s in spans):
             return "complex"  # big operators, large delimiters
