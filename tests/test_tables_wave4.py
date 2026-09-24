@@ -7,7 +7,7 @@ import pytest
 from beamer2slides import emit as E
 from beamer2slides.emit import FontMapper
 
-from .test_tables_hunt import W, Page, shaded_grid, tables
+from .test_tables_hunt import W, Page, alignments, ruled_table, shaded_grid, tables
 
 
 def test_a_shaded_row_starts_and_ends_on_its_band():
@@ -67,6 +67,26 @@ def test_measured_columns_that_fit_the_frame_keep_the_pdf_width():
     # an unmeasured column still keeps its 8% for the substitute font
     loose = E.fit_columns(bounds, cols, scale, [None] * 5)
     assert loose[-1] > 338.69 + 4
+
+
+def test_a_dash_siunitx_centres_among_numbers_is_a_centred_cell_of_its_own():
+    """r2_tables_v2 slide 4: an S column, 'Params (M)' centred over it, a dash for a missing
+    value centred on the head's axis and the numbers right of it at their decimal places. The
+    column read 'center' from its cells, and every number came out centred, 7 pt left of the
+    PDF's. Now the numbers are the body (flush right at their edge) and the dash a cell set
+    centred over the column like the head."""
+    page = Page()
+    rows = [[(55, "Model"), (150, "Params (M)")], [(55, "Forest"), (170.05, "–")], [(55, "CGCNN"), (172.2, "0.4")],
+            [(55, "MEGNet"), (172.2, "0.2")], [(55, "ALIGNN"), (172.2, "4.0")]]
+    ruled_table(page, rows, [70, 86, 100, 114, 128], x1=210)
+    (t,) = tables(page.elements())
+    col = t["columns"][1]
+    assert (col["align"], col["head"], col["centred"]) == ("right", "center", [1])
+    assert col["body"] == [172.2, 186.0]
+    got = alignments(t)
+    assert got[(0, 1)][0] == got[(1, 1)][0] == "CENTER"
+    assert {got[(r, 1)][0] for r in (2, 3, 4)} == {"END"}
+    assert got[(1, 1)][1:] == (0.0, 0.0)  # (centred over the whole column, as the head)
 
 
 def overfull_table() -> tuple[Page, list[float]]:

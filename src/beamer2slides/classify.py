@@ -4505,6 +4505,7 @@ class PageClassifier:
         heads: list[list[Span] | None] = [None] * len(columns)  # (each column's cell in the first row)
         extent_of: dict[int, tuple[float, float]] = {}  # (a merged cell's words, by its index in merges)
         merges, covered = [], {}
+        row_of: dict[int, int] = {}  # (a single cell's words, by id: its row)
         for it in items:
             r, rs, ch = it
             x0, x1 = extent(ch)
@@ -4525,6 +4526,7 @@ class PageClassifier:
                 extent_of[len(merges) - 1] = (x0, x1)
             else:
                 placed[c0].append(ch)
+                row_of[id(ch)] = r
                 if r == 0 and rs == 1:
                     heads[c0] = ch
         col_info = []
@@ -4545,6 +4547,22 @@ class PageClassifier:
             # alignment (`head`) and the body its own, to the body's edges (`body`). As one, a
             # centred head took the body's left edge, or every number was centred.
             body = [ch for ch in chunks if ch is not head]
+            # siunitx centres what is no number (a dash for a missing value) on the column, the head's
+            # centre, while its numbers keep their decimal places, off the middle (r2_tables_v2 slide
+            # 4): such a cell is set centred over the column like the head (`centred`, its rows), the
+            # body's alignment is its numbers'.
+            if head is not None:
+                hc = (head[0].rect.x0 + head[-1].rect.x1) / 2
+                numeric = lambda ch: any(c.isdigit() for s in ch for c in s.text)
+                on_axis = lambda ch: abs((ch[0].rect.x0 + ch[-1].rect.x1) / 2 - hc) <= 1
+                odd = [ch for ch in body if not numeric(ch) and on_axis(ch)]
+                rest = [ch for ch in body if not any(ch is o for o in odd)]
+                if odd and len(rest) >= 2 and all(numeric(ch) and not on_axis(ch) for ch in rest):
+                    bx0, bx1 = min(ch[0].rect.x0 for ch in rest), max(ch[-1].rect.x1 for ch in rest)
+                    info.update(align=aligned(rest, bx0, bx1), head="center", body=[round(bx0, 2), round(bx1, 2)],
+                                centred=sorted(row_of[id(ch)] for ch in odd))
+                    col_info.append(info)
+                    continue
             if head is not None and len(body) >= 2:
                 bx0, bx1 = min(ch[0].rect.x0 for ch in body), max(ch[-1].rect.x1 for ch in body)
                 hx0, hx1 = head[0].rect.x0, head[-1].rect.x1

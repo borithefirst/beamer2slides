@@ -2243,7 +2243,7 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
         ex0, ex1 = col.get("body") or (col["x0"], col["x1"])
         ws = [(cell_width.get((r, c)) if cell_width.get((r, c)) is not None else (ex1 - ex0) * scale * lay["shrink"])
               for r, row in enumerate(el["cells"]) if c < len(row) and row[c] and (r, c) not in merged
-              and (r, c) not in hidden and not (r == 0 and "head" in col)]
+              and (r, c) not in hidden and not (r == 0 and "head" in col) and r not in col.get("centred", ())]
         spare.append(max(0.0, widths[c] - 2 * TABLE_CELL_PAD - WRAP_MARGIN - max(ws)) if ws else None)
     for r, row in enumerate(lay["cells"]):
         for c, runs in enumerate(row):
@@ -2287,9 +2287,10 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                 start += u16(piece)
             col = cols[c]
             # A head set otherwise than its column's body (classify `head`): the head row its own
-            # way, the body to the body's own edges.
-            head = r == 0 and "head" in col
-            align = col["head"] if head else col["align"]
+            # way, the body to the body's own edges. A cell siunitx centres on the column (a dash
+            # among numbers, classify `centred`) is set like a centred head.
+            head = (r == 0 and "head" in col) or r in col.get("centred", ())
+            align = "center" if r in col.get("centred", ()) else col["head"] if head else col["align"]
             x0, x1 = (col["x0"], col["x1"]) if head or "body" not in col else col["body"]
             # Line the text up with the original inside the (contiguous) Slides columns.
             left_pad = max(0.0, (x0 - bounds[c]) * scale - PAD_X) if align == "left" else 0.0
