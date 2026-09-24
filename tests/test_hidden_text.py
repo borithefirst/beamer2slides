@@ -84,6 +84,15 @@ def test_a_word_cut_at_the_clip_keeps_the_letters_mostly_inside(backend):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
+def test_a_letter_the_page_edge_cuts_is_still_text(backend):
+    # an overfull table cell at the right edge (r2_code_v2 slide 9): the last "e" of "see"
+    # (398.4 - 405.1 on a 400 pt page) shows its part on the page. Judged by samples off the
+    # page it went, and the word came out "se" with the half letter left in the background.
+    data = one_page(text(20, 100, b"Visible") + text(385, 100, b"see"))
+    assert words(data, backend) == "Visible see"
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
 def test_a_form_bbox_clips_its_text(backend):
     data = one_page(b"/X1 Do\n" + text(20, 150, b"Page"),
                     {"X1": form(text(20, 100, b"Inside") + text(250, 100, b"Outside"), b"0 0 200 200")})

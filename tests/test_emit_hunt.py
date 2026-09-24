@@ -75,6 +75,21 @@ def test_a_run_among_others_keeps_their_size():
     assert cell[0] == prose
 
 
+def test_a_math_letter_among_words_in_a_google_font_takes_that_font():
+    # lang v2 s6 (r6): Calibri moved to the sans family (fonts.font_info), and so the β between
+    # Carlito words came out in Lato Italic, heavier than its words.
+    words = dict(font="ABCDEF+Calibri", family="sans")
+    el = text_element([run_of("The rate ", **words), run_of("β", font="CMMI10", family="sans", italic=True),
+                       run_of(" is fitted per cohort", **words)])
+    got = styled(emit.text_box_requests(el, "b2s_s001", "b2s_s001_t0", SCALE, FONTS))
+    beta = next(style for text, style in got if text == "β")
+    assert beta["weightedFontFamily"]["fontFamily"] == "Carlito" and beta["italic"] is True
+    # Among TeX words it keeps the substitute, as before.
+    el = text_element([run_of("The rate "), run_of("β", font="CMMI10", family="sans", italic=True), run_of(" is fitted")])
+    beta = next(style for text, style in styled(emit.text_box_requests(el, "b2s_s001", "b2s_s001_t0", SCALE, FONTS)) if text == "β")
+    assert beta["fontFamily"] == "Lato"
+
+
 def test_a_small_optical_cut_is_set_no_taller_than_the_small_caps_compromise():
     # dense v2 s1: a Boadilla footline in LMRoman5 at 4.98 pt. CM's 5 pt cut is 1.38 times as wide
     # per em as the 10 pt one; sized to that width, PT Serif's letters filled the footline bar.
@@ -126,6 +141,66 @@ def test_a_wrapped_line_has_room_for_its_words_as_slides_sets_them():
     hyphen = column_list()["paragraphs"][1]
     hyphen["lines"][0]["x1"] = 140.0
     assert emit.pdf_line_breaks(hyphen) is None
+
+
+def box_right(el: dict, scale: float) -> float:
+    """Where the box's text ends (Slides pt): its right edge less the inset."""
+    props = next(r["createShape"] for r in emit.text_box_requests(el, "b2s_s003", "b2s_s003_t1", scale, FONTS)
+                 if "createShape" in r)["elementProperties"]
+    return props["transform"]["translateX"] / EMU_PER_PT + pt_of(props["size"]["width"]) - emit.PAD_X
+
+
+def test_a_full_line_keeps_its_margin_when_a_neighbours_next_word_is_close():
+    # dense v1 s3, themes v4 s4 (r6): another paragraph's next word would join 1 pt past the
+    # widest line, so the box ended 1.0 pt past it (WRAP_MARGIN) - and Slides, which sets a line
+    # up to 0.6 pt wider than slides_width, wrapped "if" over "any." and a TOC entry's "Design".
+    scale = SLIDE_W / 362.83
+    el = column_list()
+    widest, joins = zip(*(emit.slides_lines(p, scale, FONTS) for p in el["paragraphs"]))
+    line = "Mass bleaching in 2016"  # a one-line paragraph ending 1 pt short of the join
+    x0 = (min(joins) - 1.0 - emit.slides_width([run_of(line)], scale, FONTS)) / scale
+    el["paragraphs"].append({**el["paragraphs"][0], "bullet": None, "text_x0": x0, "wrap_limit": None, "runs": [run_of(line)],
+                             "lines": [{"baseline": 170.0, "x0": x0, "x1": x0 + 100.0}]})
+    need = max(max(widest), min(joins) - 1.0)
+    assert box_right(el, scale) >= need + emit.LINE_MARGIN - 0.01
+
+
+def test_an_unmeasured_paragraph_leaves_the_box_as_wide_as_the_measured_lines_need():
+    # figures v1 s2 (r6): one item could not be measured, so the box came from the PDF's
+    # extents and ended 0.01 pt short of a one-line item's words as Slides sets them: it wrapped.
+    scale = SLIDE_W / 362.83
+    el = column_list()
+    digits = "2016, 2017, 2020, 2022 and 2024"  # Lato's digits are wider than CM's
+    wide = run_of(digits)
+    extent = emit.pdf_width([wide])
+    el["paragraphs"][0]["runs"] = [{**run_of(el["paragraphs"][0]["runs"][0]["text"]), "font": "ArialMT"}]
+    assert emit.slides_lines(el["paragraphs"][0], scale, FONTS) is None
+    el["paragraphs"].append({**el["paragraphs"][1], "bullet": None, "wrap_limit": None, "runs": [wide],
+                             "lines": [{"baseline": 170.0, "x0": 34.97, "x1": 34.97 + extent}]})
+    need = 34.97 * scale + emit.slides_width([wide], scale, FONTS)
+    assert need > (el["paragraphs"][0]["lines"][0]["x1"]) * scale  # wider than any PDF line
+    assert box_right(el, scale) >= need + emit.LINE_MARGIN - 0.01
+
+
+def test_a_thin_space_and_a_math_symbol_leave_a_paragraph_measurable():
+    # figures v1 s2: "1\,mM" reaches the text as "1 mM", a word space where TeX put a thin one,
+    # and the line came out 1.8 pt wider than its extent. econ v3 s6: "≈", "×" and a math-italic
+    # "." have no CM advances. Either left the whole paragraph unmeasured, sized from the PDF.
+    gfp = {"lines": [{"x0": 255.1, "x1": 436.88, "baseline": 50.02}, {"x0": 255.1, "x1": 308.89, "baseline": 63.57}],
+           "runs": [run_of("GFP (green): lac reporter, induced with 1 mM IPTG", font="LMSans10-Regular")]}
+    assert emit.pdf_line_breaks(gfp) == [40]
+    sans, oblique = dict(font="LMSans10-Regular", size=9.96), dict(font="LMSans10-Oblique", size=9.96, italic=True)
+    runs = [run_of("ITT; LATE via ", **sans), run_of("D̄", **oblique), run_of("v", **{**oblique, "font": "LMSans8-Oblique"}, script="sub"),
+            run_of(" instrument is ", **sans), run_of("≈", size=9.96, font="LMMathSymbols10-Regular"), run_of(" 1", **sans),
+            run_of(".", size=9.96, font="LMMathItalic10-Regular"), run_of("2", **sans), run_of("× ", size=9.96, font="LMMathSymbols10-Regular"),
+            run_of("larger", **sans)]
+    econ = {"lines": [{"x0": 207.58, "x1": 332.04, "baseline": 180.45}, {"x0": 207.58, "x1": 274.45, "baseline": 192.41}], "runs": runs}
+    scale = SLIDE_W / 362.83
+    assert emit.pdf_line_breaks(econ) is None  # CM advances alone cannot say
+    assert emit.pdf_line_breaks(econ, scale, FONTS) == [29]  # "... instrument " | "is ≈ 1.2× larger"
+    assert emit.slides_lines(econ, scale, FONTS) is not None
+    # (a combining macron has no advance of its own in Slides either)
+    assert emit.slides_width([run_of("D̄", **oblique)], scale, FONTS) == emit.slides_width([run_of("D", **oblique)], scale, FONTS)
 
 
 # ---------------------------------------------------------------- UTF-16 ranges

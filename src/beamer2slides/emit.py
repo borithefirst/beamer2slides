@@ -586,10 +586,25 @@ def in_sentence(runs: list[dict]) -> list[dict]:
     alone (`shape_ratio`). Sized to its own PDF width, a reference's author list ("J. Park, W.
     Zhang, et al. ", 0.905) or a journal abbreviation came out 10% larger than the title beside
     it, and a bullet with it: one size across a line matters more than one run's width. Copies,
-    never the IR (sync diffs it)."""
+    never the IR (sync diffs it).
+
+    A math-font letter among words in a Google font the PDF itself uses (Calibri's Carlito,
+    Fira Sans) is set in that font: classify gives it their family (`math_family`), and that
+    family's substitute put a Lato-italic β between Carlito words, visibly heavier."""
     if sum(1 for r in runs if r.get("text", "").strip() or r.get("hole")) < 2:
         return runs
-    return [r if r.get("in_sentence") else {**r, "in_sentence": True} for r in runs]
+    upright = {r["font"] for r in runs if r.get("text", "").strip() and not r.get("hole")
+               and (google_font(r["font"]) or (None, 0, True))[1:] == (400, False)}
+    faces = {google_font(f)[0] for f in upright}
+    words = sorted(upright)[0] if len(faces) == 1 else None
+    out = []
+    for r in runs:
+        r = r if r.get("in_sentence") else {**r, "in_sentence": True}
+        if words and not r.get("hole") and font_info(r["font"]).family == "math" and not google_font(r["font"]) \
+                and r.get("family") == font_info(words).family:
+            r = {**r, "font": words}
+        out.append(r)
+    return out
 
 
 def hole_run(run: dict, scale: float, fonts: FontMapper) -> dict:
@@ -681,16 +696,22 @@ def hugs(p: dict) -> str:
     return p["align"]
 
 
-def box_lines(paras: list[dict], edges: list[str], scale: float, fonts: FontMapper) -> tuple[float, float] | None:
-    """(right edge of the widest line, the least right edge at which a line would take its next
-    word) in Slides pt over a left-aligned box's paragraphs as Slides sets their PDF lines
-    (slides_lines); None when a paragraph cannot be measured."""
-    if set(edges) != {"left"} or any(p.get("direction") == "rtl" or not p["runs"] for p in paras):
+def box_lines(paras: list[dict], edges: list[str], scale: float, fonts: FontMapper) -> list[tuple[float, float] | None] | None:
+    """Per paragraph of a left-aligned box: (right edge of its widest line, the least right edge
+    at which a line would take its next word) in Slides pt as Slides sets its PDF lines
+    (slides_lines), None for a paragraph that cannot be measured; None for a box whose lines
+    are not drawn from their left edge."""
+    if set(edges) != {"left"} or any(p.get("direction") == "rtl" for p in paras):
         return None
-    got = [slides_lines(p, scale, fonts) for p in paras]
-    if None in got:
-        return None
-    return max(g[0] for g in got), min(g[1] for g in got)
+    return [slides_lines(p, scale, fonts) if "".join(r["text"] for r in p["runs"]).strip() else (0.0, math.inf)
+            for p in paras]
+
+
+# Slides pt a measured box keeps free past its widest line. slides_width sums calibrated
+# advances; Slides sets kerned glyphs and rounds, and on the r6 renders a line came out up to
+# 0.6 pt wider than predicted: of the full lines 1.0 pt from the box's edge half wrapped their
+# last word ("if" over "any."), none 1.55 pt or more from it did.
+LINE_MARGIN = 2.5
 
 
 def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
@@ -740,19 +761,25 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     limits = [p["wrap_limit"] for p in paras if p.get("wrap_limit") and not any(SOFT_BREAK in r["text"] for r in p["runs"])]
     room = (min(limits) - right_pdf) * scale if limits else 0.0
     measured = box_lines(paras, edges, scale, fonts) if multiline else None
+    known = [g for g in measured or [] if g is not None]
     if not multiline:
         slack = max(0.15 * inner_w, 2 * max(sizes))
-    elif measured:
+    elif known and len(known) == len(paras):
         # Each PDF line as Slides sets its words: a TeX-full line in a narrow column comes out a
         # few points wider in Lato, more than the room the PDF leaves before the next word.
-        widest, joins = measured
+        # Where one paragraph's widest line needs more than another's next word leaves (room
+        # < 0), the line keeps its words: a word joined up costs no line, a wrapped one adds
+        # one and the box grows over what is under it.
+        widest, joins = max(g[0] for g in known), min(g[1] for g in known)
         inner_w = widest - left_pdf * scale
         room = joins - widest
-        slack = room / 2 if room > 2 * WRAP_MARGIN else WRAP_MARGIN
-    elif room > 4:
-        slack = room / 2
+        slack = max(room / 2, LINE_MARGIN)
     else:
-        slack = 2 + 0.01 * inner_w
+        slack = room / 2 if room > 4 else 2 + 0.01 * inner_w
+        if known:
+            # Some paragraph could not be measured (a thin space, a symbol without CM metrics):
+            # the PDF's extent still sizes the box, never narrower than the lines that were.
+            slack = max(slack, max(g[0] for g in known) + LINE_MARGIN - left_pdf * scale - inner_w)
     x = left_pdf * scale - PAD_X
     aligns = set(edges)
     if aligns == {"center"}:
@@ -1308,6 +1335,8 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
         if run.get("script"):
             size *= SCRIPT_SIZE
         for ch in run["text"]:
+            if unicodedata.combining(ch):
+                continue  # (a macron over its letter: no advance of its own)
             if run.get("smallcaps") and ch.islower():
                 total += table.get(ch.upper(), unmeasured) * size * SMALL_CAPS_SIZE
             else:
@@ -1369,13 +1398,20 @@ def pdf_width(runs: list[dict]) -> float | None:
 
 
 LINE_FIT_TOL = 0.06  # a PDF line may be this much wider than its words (a justified line's spaces)
+# A line may be narrower than its words set with full word spaces by a thin space ("1\,mM": the
+# extracted text has a space where TeX put 0.167 em), which is 0.17 em less than a word space.
+THIN_SPACE_EM = 0.17
+GUESSED_RUN_CHARS = 2  # a run without CM metrics this short (≈, ×, a math-italic "."): its width is estimated
+GUESSED_TOL = 0.3      # the share an estimated run's width may be off by
 
 
-def pdf_line_breaks(p: dict) -> list[int] | None:
+def pdf_line_breaks(p: dict, scale: float | None = None, fonts: "FontMapper | None" = None) -> list[int] | None:
     """Where each of a paragraph's PDF lines after the first starts (indices into its runs'
     joined text, at a word), found by setting its words with CM's advances into the lines'
     extents; None when the paragraph's words cannot be measured or do not come out as its lines
-    (a hyphenated line end, a font without CM metrics)."""
+    (a hyphenated line end, a font without CM metrics). With `fonts`, a symbol or two in a font
+    without CM metrics (≈, ×, a barred letter) is estimated from its Slides advance, which the
+    calibration makes about as wide as the PDF's: a whole paragraph went unmeasured for one ≈."""
     runs, lines = p["runs"], p["lines"]
     text = "".join(r["text"] for r in runs)
     if any(SOFT_BREAK in r["text"] or "\t" in r["text"] for r in runs):
@@ -1384,23 +1420,44 @@ def pdf_line_breaks(p: dict) -> list[int] | None:
     starts, a = [], 0
     while text[a:a + 1] == " ":
         a += 1
+
+    def width(a: int, b: int) -> tuple[float, float] | None:
+        """(PDF width of the characters a to b, how far off it may be)."""
+        total = guessed = 0.0
+        for run in runs_between(runs, a, b):
+            w = pdf_width([run])
+            if w is None:
+                bare = "".join(ch for ch in run["text"] if not unicodedata.combining(ch))  # (no advance)
+                if fonts is None or run.get("hole") or len(bare.strip()) > GUESSED_RUN_CHARS:
+                    return None
+                w = pdf_width([{**run, "text": bare}])
+                if w is None:
+                    s = slides_width([{**run, "text": bare}], scale, fonts)
+                    if s is None:
+                        return None
+                    w = s / scale
+                    guessed += w
+            total += w
+        return total, GUESSED_TOL * guessed
+
     for k, line in enumerate(lines):
         extent = line["x1"] - line["x0"]
+        thin = THIN_SPACE_EM * max(r["size"] for r in runs)
         if k == len(lines) - 1:
             end = len(text.rstrip())
         else:
             end = None
             for b in (s for s in spaces if s > a):
-                w = pdf_width(runs_between(runs, a, b))
-                if w is None:
+                got = width(a, b)
+                if got is None:
                     return None
-                if w > extent * (1 + 0.01) + 0.5:
+                if got[0] - got[1] > extent * (1 + 0.01) + 0.5 + thin:
                     break
                 end = b
             if end is None:
                 return None
-        w = pdf_width(runs_between(runs, a, end))
-        if w is None or not extent * (1 - LINE_FIT_TOL) - 0.5 <= w <= extent * 1.01 + 0.5:
+        got = width(a, end)
+        if got is None or not extent * (1 - LINE_FIT_TOL) - 0.5 - got[1] <= got[0] <= extent * 1.01 + 0.5 + thin + got[1]:
             return None
         if k < len(lines) - 1:
             a = end
@@ -1419,7 +1476,7 @@ def slides_lines(p: dict, scale: float, fonts: "FontMapper") -> tuple[float, flo
     text = "".join(r["text"] for r in runs)
     if any(r.get("hole") or SOFT_BREAK in r["text"] or "\t" in r["text"] for r in runs) or not text.strip():
         return None
-    starts = [] if len(lines) == 1 else pdf_line_breaks(p)
+    starts = [] if len(lines) == 1 else pdf_line_breaks(p, scale, fonts)
     if starts is None:
         return None
     end = len(text.rstrip())

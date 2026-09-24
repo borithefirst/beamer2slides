@@ -229,14 +229,20 @@ class Visibility:
             return True
         x0, y0, x1, y1 = ch.box
         clip = self.clips.get(ch.obj)
-        hidden = 0
+        # Only what lies on the page is judged: a letter the page edge cuts shows its part on
+        # the page (an overfull table's "see" and line-end hyphen at the right edge). Counted as
+        # hidden, it left the word broken ("se") and a hyphenated word apart ("re source"),
+        # while its visible part stayed in the background next to the native box.
+        on = hidden = 0
         for fx in SAMPLES:
             for fy in SAMPLES:
                 x, y = x0 + (x1 - x0) * fx, y0 + (y1 - y0) * fy
-                if not _in(self.rect, x, y) or clip is not None and not _in(clip, x, y) \
-                        or self._covered(ch.obj, x, y):
+                if not _in(self.rect, x, y):
+                    continue
+                on += 1
+                if clip is not None and not _in(clip, x, y) or self._covered(ch.obj, x, y):
                     hidden += 1
-        return hidden >= HIDDEN_SAMPLES
+        return not on or hidden * len(SAMPLES) ** 2 >= HIDDEN_SAMPLES * on
 
 
 def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False) -> list[dict]:
