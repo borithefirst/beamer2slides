@@ -127,7 +127,8 @@ def test_underline_and_colorbox_become_text_styles():
     slide = deck("11_research_talk")["slides"][6]
     runs = [r for e in texts(slide) for p in e["paragraphs"] for r in p["runs"]]
     assert [r["text"] for r in runs if r["underline"]] == ["underlined"]
-    assert [(r["text"], r["highlight"]) for r in runs if r["highlight"]] == [("Highlighted", "#fff101")]  # CMYK yellow as PDFium converts it
+    # CMYK yellow as PDFium converts it; \colorbox's padding a highlighted no-break space (not at the item's start)
+    assert [(r["text"], r["highlight"]) for r in runs if r["highlight"]] == [("Highlighted\xa0", "#fff101")]
     assert sum(len(e["strokes"]) for e in texts(slide)) == 2  # both drawings leave the background
 
 
@@ -399,7 +400,7 @@ def test_words_on_small_graphics_become_holes():
     assert [r["text"] for r in body[0]["runs"] if not r.get("hole")] == ["A ", "circled number and a ", "two-digit one."]
     assert sum(bool(r.get("hole")) for p in body[:3] for r in p["runs"]) == 6
     struck = [r for r in body[3]["runs"] if r.get("strike")]
-    assert [r["text"].strip() for r in struck] == ["struck out,"]
+    assert [r["text"].strip() for r in struck] == ["struck out"]  # (\sout{struck out}, : not its comma)
     assert any(r.get("underline") and r["text"] == "underlined" for r in body[3]["runs"])
     badge = texts(deck("19_labels_on_graphics")["slides"][11])[2]["paragraphs"][0]
     assert sum(bool(r.get("hole")) for r in badge["runs"]) == 2
@@ -571,7 +572,7 @@ def test_soul_marks_and_wide_frame():
     slide = deck("19_labels_on_graphics")["slides"][8]
     soul, frames = texts(slide)[1]["paragraphs"][:2]
     # soul draws a box or rule per word piece, overlapping: one highlight, strike and underline each
-    assert marked(soul, "highlight") == ["highlighted words,"]
+    assert marked(soul, "highlight") == ["highlighted words"]  # (\hl{highlighted words}, : not its comma)
     assert marked(soul, "strike") == ["soul strike"] and marked(soul, "underline") == ["soul underline"]
     # \framebox[2.5cm] is wider than its words: still one hole with them
     assert len(holes(frames)) == 3 and "wide" not in paragraph_text(frames)
@@ -603,7 +604,7 @@ def test_boxes_next_to_punctuation_and_links():
     assert [len(holes(p)) for p in paras] == [1, 1, 2, 0]
     assert paragraph_text(paras[2]).replace("\xa0", "").startswith("Two words ()")
     link = [r for r in paras[3]["runs"] if r.get("highlight")]
-    assert [r["text"] for r in link] == ["in a box"] and link[0]["link"] == "https://example.com"
+    assert [r["text"] for r in link] == ["\xa0in a box\xa0"] and link[0]["link"] == "https://example.com"
 
 
 def test_braces_join_their_formula():

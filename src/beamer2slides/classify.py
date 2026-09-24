@@ -64,6 +64,9 @@ def type3_symbol(text: str, type3_words: bool) -> str:
 SMALL_IMAGE_PT = 12
 FRAME_RULE_PT = 1.5  # a filled box this thin is a rule (\fcolorbox's \fboxrule, a tcolorbox's frame)
 FRAME_REACH = 1.5    # how far a frame's rule may lie from the edge of the box it frames
+DECOR_SHORT = 0.12 # em a decoration ends before its span's end for its trailing punctuation to be left out
+TRAILING_PUNCT = re.compile(r"(?<=\w)[,.;:!?)\]]+\s*$")
+BOX_PAD = " "   # a padded \colorbox's \fboxsep, highlighted (a no-break space: the box never breaks)
 HOLE_PAD = 1.0  # pt of page around an inline formula picture (antialiasing, italic overhang)
 
 
@@ -170,6 +173,9 @@ class Span:
     strike: bool = False          # \sout
     highlight: str | None = None  # background colour (\colorbox)
     drawn: bool = False           # a character the PDF draws as a rule, not a glyph (underscores)
+    decor_to: float | None = None  # where its underline, strike or highlight ends, when before its end
+    pad_left: bool = False         # the first / last word of a padded \colorbox highlight
+    pad_right: bool = False
 
 
 @dataclass(eq=False)
@@ -895,11 +901,27 @@ class PageClassifier:
                 if any(o not in group and not is_rule(o, ro) and r.contains_rect(ro, tol=0) and not ro.contains_rect(r)
                        for o, ro in drawings):
                     continue  # a box holding marks besides its words: a legend's swatches
+                row = sorted(inside, key=lambda s: s.rect.x0)
+                # \colorbox pads its words by \fboxsep (3 pt), soul's \hl by a quarter point: a
+                # padded box alone on its line is a panel under its words (as a highlight it
+                # shrank to the glyphs), one within a line keeps its padding as highlighted
+                # no-break spaces (runs).
+                padded = min(row[0].rect.x0 - r.x0, r.x1 - row[-1].rect.x1) >= max(1.5, 0.15 * size)
+                if padded and r.w >= 0.25 * self.W and not any(
+                        abs(o.baseline - row[0].baseline) <= 0.1 * size and o not in inside for o in flat):
+                    continue
                 for s in inside:
                     s.highlight = d["fill"]
+                if padded:
+                    row[0].pad_left = row[-1].pad_right = True
                 words = inside
             else:
                 continue
+            for s in words:
+                # (\uline{matches}, and \hl{...}. end before the punctuation their span goes on
+                # with: runs cut it off undecorated, or two phrases joined into one across ", ")
+                if r.x1 < s.rect.x1 - DECOR_SHORT * s.size:
+                    s.decor_to = r.x1
             self.decor_ids |= {g["id"] for g in group}
             for s in words:
                 self.decor_rects.setdefault(s.id, []).append(r)
@@ -2443,14 +2465,19 @@ class PageClassifier:
                     # Math fonts carry symbols and variables; show them in the text family.
                     family = math_family(line, par)
                     pieces = math_pieces(span.font, text)
-                for text, italic in pieces:
+                tail = TRAILING_PUNCT.search(text) if span.decor_to is not None and family != "math" else None
+                if tail:  # (its decoration ends before this punctuation: Span.decor_to)
+                    pieces = [(text[:tail.start()], italic), (text[tail.start():], italic)]
+                for k, (text, italic) in enumerate(pieces):
+                    plain = bool(tail) and k == 1
                     style = {
                         "font": span.font, "family": family,
                         # Slides shrinks sub/superscripts itself: give them the line's size.
                         "size": round(line.size if script else span.size, 2),
                         "bold": span.info.bold, "italic": italic, "smallcaps": span.info.smallcaps,
                         "color": span.color, "link": span.link, "script": script,
-                        "underline": span.underline, "strike": span.strike, "highlight": span.highlight,
+                        "underline": span.underline and not plain, "strike": span.strike and not plain,
+                        "highlight": None if plain else span.highlight,
                     }
                     marks = lambda r: (r["underline"], r.get("strike", False), r["highlight"])
                     if runs and runs[-1]["text"].endswith(" ") and marks(runs[-1]) != marks(style) and any(marks(runs[-1])):
@@ -2459,6 +2486,11 @@ class PageClassifier:
                             runs.append({**runs[-1], "text": " ", "underline": False, "strike": False, "highlight": None})
                         else:
                             text = " " + text
+                    if style["highlight"] and span.pad_left and k == 0:
+                        lead = len(text) - len(text.lstrip(" "))
+                        text = text[:lead] + BOX_PAD + text[lead:]
+                    if style["highlight"] and span.pad_right and k == len(pieces) - 1 - bool(tail):
+                        text = text + BOX_PAD
                     if runs and not runs[-1].get("hole") and all(runs[-1].get(k) == v for k, v in style.items()):
                         runs[-1]["text"] += text
                     else:

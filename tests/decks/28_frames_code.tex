@@ -7,6 +7,8 @@
 \usepackage{fancyvrb}
 \usepackage{xcolor}
 \usepackage{tcolorbox}
+\usepackage[normalem]{ulem}
+\usepackage{soul}
 
 \definecolor{codebg}{RGB}{245,245,245}
 \lstset{
@@ -86,6 +88,18 @@ Call \texttt{fib(n)} twice & slow \\
 Cache in \texttt{memo} & fast \\
 \hline
 \end{tabular}
+\end{frame}
+
+\begin{frame}{Decorations end at their words}
+Accepted: \uline{matches}, \uline{about 30 hours} and \sout{significantly}, then
+\hl{the single claim}. And \uline{under 4 hours on a single GPU}.
+\end{frame}
+
+\begin{frame}{Colour boxes keep their padding}
+Our model reaches \colorbox{green!25}{94.2 \%} accuracy against 87.5 \% for the baseline.
+
+\vspace{1em}
+\centering\colorbox{black!8}{\small Free-text answers from the end-of-term survey, n = 312}
 \end{frame}
 
 \end{document}

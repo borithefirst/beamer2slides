@@ -82,6 +82,29 @@ def test_the_space_before_code_words_in_prose_is_the_prose_font_s():
     assert [(r["text"], r["family"]) for r in runs] == [("Call ", "sans"), ("fib(n)", "mono"), (" twice", "sans")]
 
 
+def test_an_underline_strike_or_highlight_ends_before_the_punctuation_after_it():
+    slide = deck("28_frames_code")["slides"][7]
+    [text] = body(slide)
+    runs = [r for e in texts(slide) if e.get("role") == "body" for p in e["paragraphs"] for r in p["runs"]]
+    marked = [(r["text"], "u" if r["underline"] else "s" if r["strike"] else "h" if r["highlight"] else "")
+              for r in runs]
+    assert [m for m in marked if m[1]] == [("matches", "u"), ("about 30 hours", "u"), ("significantly", "s"),
+                                           ("the single claim", "h"), ("under 4 hours on a single GPU", "u")]
+    assert text == ["Accepted: matches, about 30 hours and significantly, then the single claim. "
+                    "And under 4 hours on a single GPU."]
+
+
+def test_a_colorbox_keeps_its_padding_in_a_line_and_is_a_panel_on_a_line_of_its_own():
+    slide = deck("28_frames_code")["slides"][8]
+    runs = [r for e in texts(slide) if e.get("role") == "body" for p in e["paragraphs"] for r in p["runs"]]
+    [box] = [r for r in runs if r["highlight"]]
+    assert box["text"] == " 94.2 % "  # (\fboxsep either side, highlighted)
+    [panel] = shapes(slide, "panel")
+    assert panel["fill"] == "#ebebeb"
+    [note] = [t for t in texts(slide) if inside(t, panel["bbox"])]
+    assert paragraph_text(note["paragraphs"][0]) == "Free-text answers from the end-of-term survey, n = 312"
+
+
 def test_a_framed_panel_is_written_with_its_outline():
     plan = emit.plan_offline(deck("28_frames_code"))["plan"]
     slide = plan.deck["slides"][0]

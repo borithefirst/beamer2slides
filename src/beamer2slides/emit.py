@@ -1272,6 +1272,7 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
         if run.get("script"):
             size *= SCRIPT_SIZE
         for ch in run["text"]:
+            ch = " " if ch == " " else ch  # (a no-break space, a \colorbox's padding, is a space's width)
             if run.get("smallcaps") and ch.islower():
                 total += table.get(ch.upper(), unmeasured) * size * SMALL_CAPS_SIZE
             else:
