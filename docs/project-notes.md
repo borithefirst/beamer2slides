@@ -4397,3 +4397,18 @@ arrowheads, a fraction picture over a word.
   `artwork_of` keeps logo words out of titles and lines; footline boxes beside band artwork are
   theme. Open: dashes (the backend contract has no `Drawing.dash`), picture seams (need Google's
   renderer).
+- **I, Type 3 and RTL** (`tests/test_type3.py` 20, `tests/test_bidi.py` +19): `type3.py` identifies
+  each bitmap font (EC, LH, TC) from its glyph widths against the TFM widths in
+  `calibration/tex_fonts.json` (made by `tools/tex_fonts.py` from the local TeX tree), which gives
+  the encoding (ligature codes 0x1B-0x1F, dashes 0x15/0x16, TS1 euro, T2A Cyrillic) and the family
+  and weight (bx, tt, ss). The emit crash and refused elements were raw control codes; none are left
+  in the hunt decks. RTL: PDFium's text page reverses RTL segments and mirrors neutral characters,
+  quotes included; XeTeX draws in visual order, LuaTeX in logical order; Arabic without widths gets a
+  fake 0.21 em advance. So the visual order is recovered first (`bidi.visual_chars`) and then the
+  logical text whose Unicode display is the page is searched for (`bidi.logical_line`), a line at a
+  time (`classify.read_lines`), with an LRM where a formula starts with a number or Latin text ends
+  in a full stop; mixed lines take the page's direction; LuaTeX Arabic letters are joined back into
+  words; a cell on a Hebrew line starting with Latin gets an RLM. Not checkable offline: whether
+  Slides' bidi treats the LRM/RLM as intended. Open: U+200E/U+200F should measure zero in
+  `emit.wide_advance`/`slides_width` and `text_layout.advance`; RTL list items merge into one
+  paragraph (already at HEAD before).

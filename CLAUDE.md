@@ -56,7 +56,11 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   become `°`/`*` at line size) and Unicode,
   links, code. Frame titles use the layout's TITLE placeholder. Hanging labels are `label<TAB>text`.
   RTL (Hebrew/Arabic) is turned into logical order (`bidi.py`) and written `RIGHT_TO_LEFT` with
-  mirrored alignment. OT1's `\_` is a rule, read back as `_` (`classify.underscores`, span
+  mirrored alignment: a line is read whole (`classify.read_lines`, `bidi.logical_line`: the logical
+  text whose UAX#9 display is the page, LRM/RLM where needed, the page's direction for mixed
+  lines, `bidi.page_direction`), after PDFium's reversal and mirroring are undone
+  (`bidi.visual_chars`). Type 3 EC/LH/TC bitmap fonts are named by their TFM widths (`type3.py`,
+  `calibration/tex_fonts.json` from `tools/tex_fonts.py`): ligatures, dashes, weights, TS1, T2A. OT1's `\_` is a rule, read back as `_` (`classify.underscores`, span
   `drawn`: no page object); a CMEX glyph hangs from its origin, so an inline `\sum` between words
   is joined to their line (`join_hanging_operators`) and becomes part of its formula hole.
   Text the PDF hides (off the page, outside its clip, under a later opaque fill or image, alpha 0:
