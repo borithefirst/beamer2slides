@@ -43,15 +43,20 @@ CM_VARIANTS = {
     "ITT": ("mono", False, True, False), "SLTT": ("mono", False, True, False),
     "TCSC": ("mono", False, False, True), "VTT": ("mono", False, False, False),
 }
-# EC (T1-encoded CM) names: SF<variant><size*100>
+# EC (T1-encoded CM) names: SF<variant><size*100> (cm-super's Type 1 fonts), and the bitmap
+# fonts' TFM names a Type 3 font is read as (`type3`): EC (T1), TC (TS1), LA (T2A, LH)
 EC_VARIANTS = {
     "RM": ("serif", False, False, False), "BX": ("serif", True, False, False),
     "TI": ("serif", False, True, False), "SL": ("serif", False, True, False),
-    "BI": ("serif", True, True, False), "CC": ("serif", False, False, True),
-    "XC": ("serif", True, False, True), "SS": ("sans", False, False, False),
-    "SX": ("sans", True, False, False), "SI": ("sans", False, True, False),
+    "BI": ("serif", True, True, False), "BL": ("serif", True, True, False),
+    "CC": ("serif", False, False, True), "SC": ("serif", False, True, True),
+    "XC": ("serif", True, False, True), "OC": ("serif", True, True, True),
+    "SS": ("sans", False, False, False), "SX": ("sans", True, False, False),
+    "SI": ("sans", False, True, False), "SO": ("sans", True, True, False),
     "TT": ("mono", False, False, False), "IT": ("mono", False, True, False),
+    "ST": ("mono", False, True, False), "TC": ("mono", False, False, True),
 }
+EC_NAME_RE = re.compile(r"(SF|EC|TC|LA)([A-Z]{2})(\d{4})")
 
 
 # PDF font name prefix (spaces removed) -> Google Fonts family available in Google Slides.
@@ -161,9 +166,9 @@ def font_info(name: str) -> FontInfo:
     m = re.fullmatch(r"CM([A-Z]+)(\d+)", key)
     if m and m.group(1) in CM_VARIANTS:
         return FontInfo(*CM_VARIANTS[m.group(1)], design_size=float(m.group(2)))
-    m = re.fullmatch(r"SF([A-Z]{2})(\d{4})", key)
-    if m and m.group(1) in EC_VARIANTS:
-        return FontInfo(*EC_VARIANTS[m.group(1)], design_size=int(m.group(2)) / 100)
+    m = EC_NAME_RE.fullmatch(key)
+    if m and m.group(2) in EC_VARIANTS:
+        return FontInfo(*EC_VARIANTS[m.group(2)], design_size=int(m.group(3)) / 100)
 
     # Latin Modern (LMSans10-Bold, LMRomanCaps10-Regular, LMMono10-Italic, ...) and
     # anything else: read the class and the style from the name.
