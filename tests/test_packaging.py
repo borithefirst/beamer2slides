@@ -5,7 +5,7 @@ import tomllib
 from importlib import resources
 from pathlib import Path
 
-from beamer2slides import emit, google_auth, paths
+from beamer2slides import emit, google_auth, paths, type3
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -14,7 +14,8 @@ def test_calibration_ships_with_the_package():
     # Reached through the package, so a wheel, a zip import and a build that stages the sources
     # somewhere else all find it; the checkout's own layout never comes into it.
     assert emit.CALIBRATION_DIR == resources.files("beamer2slides") / "calibration"
-    for path in (emit.CALIBRATION, emit.CALIBRATION_DIR / "fonts_serif.json"):
+    assert type3.TABLE_PATH == emit.CALIBRATION_DIR / "tex_fonts.json"   # not beside a resolved __file__
+    for path in (emit.CALIBRATION, emit.CALIBRATION_DIR / "fonts_serif.json", type3.TABLE_PATH):
         assert path.is_file() and json.loads(path.read_text(encoding="utf-8"))
 
 

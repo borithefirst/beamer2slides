@@ -436,7 +436,11 @@ markers.
   built by `tests/decks/build.py [name]` into `tests/decks/out/` (normal and `-handout` variants).
 - Layout rules for Google's monorepo import: `tests/` is a package importing its helpers
   relatively; harness code the tests use lives in `beamer2slides.devtools` with `tools/<name>.py`
-  kept as runpy shims; data is reached through `importlib.resources` or a module's `__file__`,
-  never through `src/` or a checkout path.
+  kept as runpy shims; package data is reached through `importlib.resources` (never a
+  `.resolve()`d `__file__`: runfiles are symlinks into a content store), never through `src/` or a
+  checkout path. Its runner leaves `sys.executable` empty: a child Python is
+  `interpreter.python()` with `interpreter.env()`. `src/` is dropped there, so `tests/` stands
+  among the modules (source scans leave it out); a test reading `tests/decks/` files it may not
+  have is `@pytest.mark.needs_decks(path, ...)` (skipped when one is missing, conftest.py).
 - `themes/google`: a beamer theme reproducing the GDG 2024 template; its fonts are downloaded and
   checked by `themes/google/fonts/build_fonts.py` (no third-party binaries in the tree).

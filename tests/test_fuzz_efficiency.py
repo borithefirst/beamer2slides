@@ -190,6 +190,7 @@ def test_hole_aim_types_in_front_of_the_hole():
     assert {s["edit"] for s in specs if s} == {"insert_before_hole", "replace_word"}
 
 
+@pytest.mark.needs_decks("sync/build.py")
 def test_variant_weights_prefer_reflow_and_stay_uniform_by_default():
     build = F.sync_build()
     uniform = F.variant_weights(build, None)

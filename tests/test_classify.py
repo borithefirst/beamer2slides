@@ -290,6 +290,7 @@ def test_a_long_tick_row_belongs_to_its_chart():
     assert len(figures) == 1 and not figures[0].get("overlay")
 
 
+@pytest.mark.needs_decks("out/03_figures-handout.pdf")
 def test_titles_pushed_off_a_plot_are_the_plots_but_its_caption_is_text():
     raw = select_overlays(extract(DECKS / "03_figures-handout.pdf"), "last")
     slide = classify(raw)["slides"][5]

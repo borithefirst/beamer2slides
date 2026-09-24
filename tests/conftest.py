@@ -12,11 +12,19 @@ that but puts all 53 decks of `test_invariants` on one worker, which is most of 
 
 So: a file is a group unless a test says otherwise, and `test_invariants` says otherwise per deck.
 Run it with `-n auto --dist loadgroup`; without `-n` nothing here changes anything.
+
+`needs_decks(*paths)`: a test that reads files under `tests/decks/` - built PDFs, a build script -
+which a copy of the tests may leave out (Google's import does). It is skipped when one is missing,
+and `-m "not needs_decks"` leaves the lot out.
 """
 
 import contextlib
+from pathlib import Path
 
 import pytest
+
+#: Not `.resolve()`d: under a runfiles tree that would leave the tree for a content store.
+DECKS = Path(__file__).parent / "decks"
 
 
 @pytest.fixture
@@ -33,3 +41,7 @@ def pytest_collection_modifyitems(items):
     for item in items:
         if not any(m.name == "xdist_group" for m in item.iter_markers()):
             item.add_marker(pytest.mark.xdist_group(item.nodeid.split("::")[0]))
+        for mark in item.iter_markers("needs_decks"):
+            absent = [p for p in mark.args if not (DECKS / p).exists()]
+            if absent:
+                item.add_marker(pytest.mark.skip(reason=f"not in this copy of tests/decks: {', '.join(absent)}"))

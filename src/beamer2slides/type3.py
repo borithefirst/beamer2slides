@@ -26,11 +26,13 @@ import struct
 import zlib
 from dataclasses import dataclass
 from functools import lru_cache
-from pathlib import Path
+from importlib import resources
 
 from .fonts import font_info
 
-TABLE_PATH = Path(__file__).resolve().parent / "calibration" / "tex_fonts.json"
+# Through the package, like emit's calibration: under a runfiles tree `__file__.resolve()` is a
+# content store where calibration/ is not beside the module, and every Type 3 deck failed to extract.
+TABLE_PATH = resources.files("beamer2slides") / "calibration" / "tex_fonts.json"
 # Measured advances are the TFM widths to 0.05 % (through PK pixels and PDFium floats, on the
 # archive decks); neighbouring design sizes of one face are 0.6-2 % apart, faces 4-11 %.
 NO_GLYPH = 0.05       # the error of a code the candidate font has no glyph for

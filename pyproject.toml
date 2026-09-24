@@ -77,5 +77,6 @@ markers = ["slides: converts decks on real Google Slides and measures the thumbn
            "sync: sync and pull scenarios with simulated deck edits on real Google Slides (opt-in: python -m pytest -m sync)",
            "inverse: pull's compile loop on source pairs, synthetic deck edits, and the agent benchmark's latex tier (opt-in: python -m pytest -m inverse)",
            "docs: the Google Docs loop on a real document (opt-in: python -m pytest -m docs)",
+           "needs_decks(*paths): reads files under tests/decks (built PDFs, build scripts); skipped when one is missing (tests/conftest.py)",
            "xdist_group: which -n worker a test goes to (pytest-xdist's own; declared so the suite is quiet without it)"]
 addopts = "-m \"not slides and not sync and not inverse and not docs\""

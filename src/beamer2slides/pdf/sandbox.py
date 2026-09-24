@@ -27,6 +27,7 @@ from typing import Sequence
 
 import numpy as np
 
+from .. import interpreter
 from . import wire
 from .api import Box, Char, EmbeddedImage, PageObject, PdfError
 
@@ -51,7 +52,7 @@ class SandboxBackend:
             command = json.loads(command) if command.lstrip().startswith("[") else \
                 shlex.split(command, posix=os.name != "nt")
         self.command = list(command) if command else \
-            [sys.executable, "-m", "beamer2slides.pdf.sandbox", "--backend", inner]
+            [interpreter.python(), "-m", "beamer2slides.pdf.sandbox", "--backend", inner]
         self.timeout = timeout if timeout is not None else float(os.environ.get(ENV_TIMEOUT) or 120)
         self._proc: subprocess.Popen | None = None
         self._generation = 0
@@ -69,7 +70,7 @@ class SandboxBackend:
     def _start(self) -> subprocess.Popen:
         if self._proc is None or self._proc.poll() is not None:
             self._proc = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                          stderr=None, bufsize=0)
+                                          stderr=None, bufsize=0, env=interpreter.env())
             self._generation += 1
         return self._proc
 

@@ -30,12 +30,12 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 import uuid
 from pathlib import Path
 
+from .. import interpreter
 from ..agent.types import Refused
 from ..agent.workspace import LocalWorkspace
 
@@ -482,7 +482,7 @@ class Workbench:
 
     def command(self) -> list[str]:
         """How a journey's process is started. A seam: the tests put a stand-in child here."""
-        return [sys.executable, "-u", "-m", "beamer2slides.playground.runner"]
+        return [interpreter.python(), "-u", "-m", "beamer2slides.playground.runner"]
 
     def _journey(self, session: Session, run: Run, mode: str | None, token: str | None) -> dict:
         job = {"tool": run.tool, "args": run.args, "root": str(session.root),
@@ -491,7 +491,7 @@ class Workbench:
             self.command(),
             cwd=session.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-            env={**os.environ, **FENCE}, **_own_group())
+            env=interpreter.env({**os.environ, **FENCE}), **_own_group())
         stopped: list[str] = []
         noise: list[str] = []
         watchdog = threading.Timer(RUN_TIMEOUT, lambda: (stopped.append("timeout"), kill(proc)))

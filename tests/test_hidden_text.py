@@ -12,8 +12,13 @@ import pytest
 
 from beamer2slides import pdf
 from beamer2slides.extract import Visibility, extract_page, select_overlays
+from beamer2slides.pdf.pure import foxit
 
-BACKENDS = ["pdfium", "pure"]
+# The pages set unembedded Helvetica, which the pure reader draws with PDFium's own faces from
+# their user cache: without them its text is empty, which is no finding about hidden text.
+needs_faces = pytest.mark.skipif(not foxit.available(),
+                                 reason="no PDFium font cache: python -m beamer2slides.pdf.pure.foxit")
+BACKENDS = ["pdfium", pytest.param("pure", marks=needs_faces)]
 HELV = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
 
 
@@ -209,6 +214,7 @@ def test_a_drawing_keeps_the_half_that_shows(backend):
             doc.close()
 
 
+@needs_faces
 def test_clip_boxes_are_pdfiums_on_both_backends():
     # every clip cuts its text (a clip around the whole object is no clip: see the next test)
     content = (b"q 0.5 0 0 0.5 10.3 10.7 cm 0 0 40 200 re W n " + text(20, 100, b"Scaled") + b"Q\n"
@@ -216,7 +222,7 @@ def test_clip_boxes_are_pdfiums_on_both_backends():
                b"q 200 90 m 280 90 l 240 130.3 l h W n " + text(210, 100, b"Triangle") + b"Q\n"
                b"/X1 Do\n" + text(20, 180, b"Free"))
     data = one_page(content, {"X1": form(text(20, 20, b"Form"), b"10 10 35 60")})
-    docs = [pdf.resolve(spec).open(data) for spec in BACKENDS]
+    docs = [pdf.resolve(spec).open(data) for spec in ("pdfium", "pure")]
     try:
         clips = [[po.clip for po in d[0].objects()] for d in docs]
     finally:

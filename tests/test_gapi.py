@@ -13,12 +13,11 @@ Three promises, each tested by breaking it:
 import ast
 import os
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from beamer2slides import gapi, google_auth
+from beamer2slides import gapi, google_auth, interpreter
 
 #: The package as it is laid out *where this test runs*, and deliberately not `.resolve()`d:
 #: these two tests are the only ones that walk the library's own source files, and under a
@@ -32,6 +31,12 @@ GOOGLE = ("googleapiclient", "google_auth_oauthlib", "google.auth", "google.oaut
 
 
 # ---------------------------------------------------------------- the dependency
+
+def _library_sources():
+    """The library's own modules. Where a build drops the `src/` level, `tests/` stands among
+    them, and a test may import the client library at the top: the rule is the library's."""
+    return (p for p in sorted(SRC.rglob("*.py")) if "tests" not in p.relative_to(SRC).parts)
+
 
 def _module_level_imports(path: Path):
     """Every `import x` / `from x import y` at column 0, as dotted names."""
@@ -51,7 +56,7 @@ def test_no_module_but_gapi_reaches_google_at_import_time():
     snapshot -> emit -> gslides, so it could not be *imported* in a sandbox that has neither an
     account nor the package. The import is what the caller hit; this is the rule that keeps it."""
     offenders = {}
-    for path in sorted(SRC.rglob("*.py")):
+    for path in _library_sources():
         if path.name == "gapi.py":
             continue
         named = [m for m in _module_level_imports(path)
@@ -64,7 +69,7 @@ def test_no_module_but_gapi_reaches_google_at_import_time():
 def test_only_gapi_binds_the_error_class():
     """One binding, anywhere in the tree: two would be two different classes, and an `except`
     clause naming the other one would match nothing without ever saying so."""
-    binders = [path.relative_to(SRC).as_posix() for path in sorted(SRC.rglob("*.py"))
+    binders = [path.relative_to(SRC).as_posix() for path in _library_sources()
                if "from googleapiclient.errors import" in path.read_text(encoding="utf-8-sig")]
     assert binders == ["gapi.py"]
 
@@ -114,8 +119,8 @@ def test_the_library_works_with_no_google_client_installed(tmp_path):
     would leave every later test with the crippled copy."""
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(
         [str(SRC.parent)] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])))
-    done = subprocess.run([sys.executable, "-c", _SANDBOX], capture_output=True, text=True,
-                          cwd=tmp_path, env=env)
+    done = subprocess.run([interpreter.python(), "-c", _SANDBOX], capture_output=True, text=True,
+                          cwd=tmp_path, env=interpreter.env(env))
     assert done.returncode == 0, done.stderr[-3000:]
     assert done.stdout.strip().endswith("ok")
 

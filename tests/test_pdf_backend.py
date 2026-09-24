@@ -12,14 +12,13 @@
 import dataclasses
 import json
 import os
-import sys
 import textwrap
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from beamer2slides import pdf
+from beamer2slides import interpreter, pdf
 from beamer2slides.pdf import api, wire
 from beamer2slides.pdf.api import (NO_OBJECT, OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT,
                                    PdfDocument, PdfError, PdfPage, char_box, pixel_bounds)
@@ -338,7 +337,7 @@ def test_a_hanging_worker_is_killed_after_the_timeout(tmp_path):
                 time.sleep(60)
         backend = Slow()
     """))
-    command = [sys.executable, "-c", f"import sys; sys.path.insert(0, {str(tmp_path)!r}); "
+    command = [interpreter.python(), "-c", f"import sys; sys.path.insert(0, {str(tmp_path)!r}); "
                "from beamer2slides.pdf.sandbox import main; main(['--backend', 'slowpdf:backend'])"]
     backend = SandboxBackend(command=command, timeout=3)
     try:

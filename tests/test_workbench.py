@@ -5,7 +5,6 @@ rather than failing - which is the whole point of the agent layer's vocabulary r
 """
 import json
 import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -13,6 +12,7 @@ import urllib.request
 
 import pytest
 
+from beamer2slides import interpreter
 from beamer2slides.playground import server, workbench
 
 from .test_playground import call
@@ -348,7 +348,7 @@ sys.exit(3)
 def child(tmp_path, source):
     path = tmp_path / "child.py"
     path.write_text(source, encoding="utf-8")
-    return [sys.executable, "-u", str(path)]
+    return [interpreter.python(), "-u", str(path)]
 
 
 def test_the_child_streams_its_progress_and_its_result(ws, tmp_path, monkeypatch):
