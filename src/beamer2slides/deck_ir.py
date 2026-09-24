@@ -20,6 +20,7 @@ import re
 import time
 from pathlib import Path
 
+from . import emit
 from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, OPTICAL_WEIGHTS_READ, PAD_X, PPTX_TITLE_DY,
                    SLIDE_W, FontMapper, extra_above, line_size)
 from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_inset, thumbnail_cell_pad,
@@ -346,6 +347,12 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             base = cur["base"]
             tr = te.get("textRun") or te.get("autoText")
             content = tr.get("content", "")
+            if emit.ZWSP in content:
+                # (the break emit writes in front of a hole, emit.HOLE_BREAK: no character of
+                # the text, and pull writes nothing for it)
+                content = content.replace(emit.ZWSP, "")
+                if not content:
+                    continue
             st = tr.get("style", {})
             family = (st.get("weightedFontFamily") or {}).get("fontFamily") or st.get("fontFamily") or base["fontFamily"]
             size = (dim(st.get("fontSize")) or base["fontSize"]) * font_scale

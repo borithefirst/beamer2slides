@@ -128,6 +128,80 @@ def test_a_display_crop_leaves_out_the_hanging_ink_of_a_hole_above(tmp_path):
     assert rows.size and (rows > 200).all(), rows.min()
 
 
+# -- a word space before a hole may break (emit.HOLE_BREAK) -------------------------------------
+
+def holes_box() -> dict:
+    from .test_emit_requests import three_holes
+    el = three_holes()["elements"][-1]
+    el.update({"bbox": [10.91, 92.0, 152.25, 106.0], "role": "body"})
+    for p in el["paragraphs"]:
+        p.update({"size": 10.91, "bullet": None, "text_x0": 10.91})
+    return el
+
+
+def written(el: dict) -> tuple[str, list[tuple[str, int, int]]]:
+    from .test_emit_requests import SCALE
+    reqs = emit.text_box_requests(el, "s", "t", SCALE, FONTS)
+    text = "".join(r["insertText"]["text"] for r in reqs if "insertText" in r)
+    fonts = [(r["updateTextStyle"]["style"]["fontFamily"], r["updateTextStyle"]["textRange"]["startIndex"],
+              r["updateTextStyle"]["textRange"]["endIndex"]) for r in reqs
+             if "updateTextStyle" in r and r["updateTextStyle"]["style"].get("fontFamily")
+             and r["updateTextStyle"]["textRange"]["type"] == "FIXED_RANGE"]
+    return text, fonts
+
+
+def test_a_word_space_before_a_hole_is_followed_by_a_zero_width_break():
+    """r1_math_v2 s6 'but', r3_textfx_v1 s3 'than': Slides keeps a space and the no-break spaces
+    after it together, so the word before a formula went down with it. A zero-width space after
+    the word space lets Slides break there; it is set in the word's font, so words typed in front
+    of the hole are too."""
+    text, fonts = written(holes_box())
+    assert text.startswith("A ​\xa0") and text.count("​") == 3, repr(text)
+    k = text.index("​")
+    assert [f for f, a, b in fonts if a <= k < b][-1] == "Lato", fonts
+    glued = holes_box()
+    glued["paragraphs"][0]["runs"][0]["text"] = "A"  # no word space: no break before its formula
+    assert written(glued)[0].count("​") == 2
+
+
+def test_the_break_before_a_hole_can_be_switched_off(monkeypatch):
+    monkeypatch.setattr(emit, "HOLE_BREAK", "")
+    assert "​" not in written(holes_box())[0]
+
+
+def test_the_word_before_a_hole_stays_on_its_line_in_the_layout_model():
+    """text_layout (sync's and the layout oracle's line model) on the text as written: 'A' stays
+    on the first line, only the formula goes down."""
+    from beamer2slides import text_layout
+    from .test_emit_requests import SCALE
+    el = holes_box()
+    [chars] = emit.slides_texts(el, SCALE, FONTS)
+    runs = emit.hole_runs(el["paragraphs"][0]["runs"], SCALE, FONTS)
+    styles = [{"fontFamily": emit.HOLE_FONT, "fontSize": r["hole_size"]} if r.get("hole") else
+              {"fontFamily": FONTS(r, SCALE)[0], "fontSize": FONTS(r, SCALE)[1]} for r in runs for _ in r["text"]]
+    a = text_layout.advance("A", styles[0], styles[0]["fontSize"]) + text_layout.advance(" ", styles[1], styles[1]["fontSize"])
+    lines = text_layout.wrap(chars, styles, a + 5.0)  # 'A' and its space fit, its formula does not
+    assert chars[lines[0][0]:lines[0][1]].rstrip("​ ") == "A", [chars[s:e] for s, e, _ in lines]
+
+
+def test_pull_and_merge_read_the_break_before_a_hole_as_nothing():
+    """deck_ir drops it (the IR, compare and pull never see it), merge.collapse_holes too (a deck
+    converted before the break and one after say the same), and LaTeX escaping writes nothing."""
+    from beamer2slides import inverse, merge
+    from beamer2slides.deck_ir import deck_ir
+    from beamer2slides.devtools import deck_edits
+    from .test_adopt import pt
+    from .test_adopt_text import box, deck, para, text_of
+    lato, mono = {"fontFamily": "Lato", "fontSize": pt(14)}, {"fontFamily": "Roboto Mono", "fontSize": pt(14)}
+    d = deck(box("s_c", para("x", runs=[("pointwise, but ​", lato), ("\xa0" * 6, mono), (" is finite", lato)])))
+    runs = text_of(deck_ir(d), "s_c")["paragraphs"][0]["runs"]
+    assert "​" not in "".join(r["text"] for r in runs)
+    assert [r["text"] for r in runs if r.get("hole")] == [" "] and runs[0]["text"] == "pointwise, but "
+    assert merge.collapse_holes("but ​\xa0\xa0\xa0 is\n") == merge.collapse_holes("but \xa0\xa0 is\n") == "but \xa0 is\n"
+    assert inverse.latex_escape("but ​~") == r"but \textasciitilde{}"
+    assert deck_edits.HOLE.search("but ​\xa0\xa0 is").start() == 4  # typed in front of the break
+
+
 def test_one_math_letter_among_words_keeps_the_word_spaces_around_it():
     spans = [span("each of", 30.0, 100.0, 11.0, w=40.0), span("c", 73.0, 100.0, 11.0, w=5.0, font=MI),
              span("physicians treats", 81.0, 100.0, 11.0, w=90.0)]

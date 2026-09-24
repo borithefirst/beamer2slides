@@ -450,8 +450,10 @@ def predicted_text(el: dict) -> str:
 
 
 def collapse_holes(text: str) -> str:
-    """Hole runs (no-break spaces sized to a formula) as one no-break space: their count follows the formula width."""
-    return re.sub("\u00a0+", "\u00a0", text)
+    """Hole runs (no-break spaces sized to a formula) as one no-break space: their count follows the formula width.
+    The zero-width space emit writes in front of a hole (emit.HOLE_BREAK) is no character of the
+    text either: a deck converted before it and one after say the same."""
+    return re.sub("\u00a0+", "\u00a0", text.replace("\u200b", ""))
 
 
 def table_grid(text: str | None, dims: list | None) -> list[list[str]] | None:

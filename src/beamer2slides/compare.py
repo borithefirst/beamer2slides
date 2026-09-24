@@ -30,8 +30,8 @@ TOL = {
 }
 IGNORED_ROLES = {"footer", "math", "icon", "overlay", "highlight"}
 NORMALISE = str.maketrans({"\u00a0": " ", "\u2009": " ", "\u202f": " ", "\t": " ", "\x0b": " ", "“": '"', "”": '"',
-                           "‘": "'", "’": "'", "…": "...", "−": "-"})
-HOLE = "\ue000"
+                           "‘": "'", "’": "'", "…": "...", "−": "-", "​": ""})
+HOLE ="\ue000"
 
 
 def norm_text(t: str) -> str:

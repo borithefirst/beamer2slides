@@ -657,7 +657,31 @@ def hole_run(run: dict, scale: float, fonts: FontMapper) -> dict:
     z = fonts(run, scale)[1]
     width = run["hole"] * scale
     n = max(1, math.ceil(width / (HOLE_SPACE_EM * z)))
-    return {**run, "text": " " * n, "hole_size": round(width / (HOLE_SPACE_EM * n), 2)}
+    return {**run, "text":" " * n, "hole_size": round(width / (HOLE_SPACE_EM * n), 2)}
+
+
+ZWSP = "​"
+# Written after the word space in front of a hole, in that word's run. Slides keeps a space and
+# the no-break spaces after it together (UAX #14's old "× GL"), so the word before a formula
+# went down with it to the next line: "pointwise, / but ∫..." in a box 54 pt wider than
+# "... pointwise, but" (r1_math_v2 s6; 'than', r3_textfx_v1 s3). A zero-width space breaks
+# there (LB8, ahead of LB12), as text_layout.wrap models it. deck_ir drops it (pull writes
+# nothing for it), and so does merge.collapse_holes. "" writes none.
+HOLE_BREAK = ZWSP
+
+
+def hole_runs(runs: list[dict], scale: float, fonts: FontMapper) -> list[dict]:
+    """A paragraph's runs as its text box holds them: each hole its no-break spaces (hole_run),
+    and HOLE_BREAK after a word space in front of one."""
+    out: list[dict] = []
+    for r in runs:
+        if r.get("hole"):
+            if HOLE_BREAK and out and not out[-1].get("hole") and out[-1]["text"].endswith(" "):
+                out[-1] = {**out[-1], "text": out[-1]["text"] + HOLE_BREAK}
+            out.append(hole_run(r, scale, fonts))
+        else:
+            out.append(r)
+    return out
 
 
 def vertical_layout(paras: list[dict], baselines: list[list[float]], sizes: list):
@@ -931,8 +955,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     how far a box of unwrapped left-aligned text may extend. `marks` highlights the hole runs,
     one colour each (measure_places)."""
     marks = list(marks or [])
-    paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in in_sentence(p["runs"])]}
-             for p in el["paragraphs"]]
+    paras = [{**p, "runs": hole_runs(in_sentence(p["runs"]), scale, fonts)} for p in el["paragraphs"]]
     # A line is as tall as its largest run, as Slides lays it out (line_size: small caps), and a
     # subscript is no larger than its text (run_sizes).
     sized = [run_sizes(p["runs"], scale, fonts) for p in paras]
@@ -1599,8 +1622,9 @@ def wide_advance(ch: str, unmeasured: float) -> float:
     """The advance (em) of a character the probe did not measure: a CJK ideograph, kana or
     full-width form is a whole em in every fallback font (unicodedata's East Asian Width W / F).
     At 0.6 em a Japanese header came out 40% narrower than Slides sets it and wrapped its cell.
-    A bidi mark (`bidi.MARKS`: the LRM or RLM `bidi.logical_line` writes) draws nothing."""
-    if ch in bidi.MARKS:
+    A bidi mark (`bidi.MARKS`: the LRM or RLM `bidi.logical_line` writes) draws nothing, nor
+    does the zero-width space before a hole (HOLE_BREAK)."""
+    if ch in bidi.MARKS or ch == ZWSP:
         return 0.0
     return 1.0 if unicodedata.east_asian_width(ch) in "WF" else unmeasured
 
@@ -1810,7 +1834,7 @@ def guessed_chars(runs: list[dict], scale: float, fonts: "FontMapper") -> int:
         table = face_advances(family, fonts.face(run))
         count += sum(1 for ch in run["text"] if (ch.upper() if run.get("smallcaps") else ch) not in table
                      and ch not in " " and not unicodedata.combining(ch) and ch not in bidi.MARKS
-                     and unicodedata.east_asian_width(ch) not in "WF")
+                     and ch != ZWSP and unicodedata.east_asian_width(ch) not in "WF")
     return count
 
 
@@ -2950,7 +2974,7 @@ def ink_end(img: np.ndarray, px_per_pt: float, y0: float, y1: float, x0: float, 
 
 def slides_texts(el: dict, scale: float, fonts: FontMapper) -> list[str]:
     """Each paragraph's text as its text box ends up holding it (holes as their no-break spaces)."""
-    return ["".join((hole_run(r, scale, fonts) if r.get("hole") else r)["text"] for r in p["runs"]) for p in el["paragraphs"]]
+    return ["".join(r["text"] for r in hole_runs(p["runs"], scale, fonts)) for p in el["paragraphs"]]
 
 
 def mark_words(overlay: dict, text: dict, scale: float, fonts: FontMapper) -> list[dict]:
@@ -3058,8 +3082,7 @@ def grown_panels(slide: dict, scale: float, fonts: FontMapper) -> dict:
             pads[group[i]] = min(pads.get(group[i], math.inf), pad)
     over: dict[int, float] = {}
     for i, panel, el in homes:
-        paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in in_sentence(p["runs"])]}
-                 for p in el["paragraphs"]]
+        paras = [{**p, "runs": hole_runs(in_sentence(p["runs"]), scale, fonts)} for p in el["paragraphs"]]
         measured = box_lines(paras, [hugs(p) for p in paras], scale, fonts)
         if not measured or any(g is None for g in measured):
             continue  # (every paragraph measured: an unmeasured one could be the widest)
