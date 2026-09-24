@@ -7,7 +7,7 @@ and laid out for a judge who looks at pictures:
     python -m beamer2slides.devtools.visual_hunt compose out/hunt/s1 --pdf <pdf> --into <archive dir>
 
 `run` compiles the .tex beside itself (engine from a `% !engine = xelatex` first line, as
-tests/decks/build.py), copies the PDF to `out/hunt/pdfs/<slot>.pdf`, converts it into
+tests/decks/build.py; a .pdf is taken as built), copies the PDF to `out/hunt/pdfs/<slot>.pdf`, converts it into
 `out/hunt/<slot>` (the same slot is rebuilt in place, so a campaign leaves one Drive deck per slot,
 not one per deck), runs `fidelity` and `text_fit` on it, and writes the archive
 `out/hunt/archive/<deck stem>/`:
@@ -209,14 +209,17 @@ def add_invariants(summary: dict, pdf: Path, into: Path) -> dict:
 def run(tex: Path, slot: str, skip_convert: bool = False) -> int:
     tex = tex.resolve()
     t0 = time.time()
-    built = compile_tex(tex)
+    # A built PDF is taken as it is (an archived one whose fonts today's TeX would not reproduce,
+    # e.g. Type 3 bitmap fonts from before a font map change).
+    built = tex if tex.suffix.lower() == ".pdf" else compile_tex(tex)
     (HUNT / "pdfs").mkdir(parents=True, exist_ok=True)
     pdf = HUNT / "pdfs" / f"{slot}.pdf"
     shutil.copyfile(built, pdf)
     out = HUNT / slot
     into = HUNT / "archive" / tex.stem
     into.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(tex, into / tex.name)
+    if built is not tex:
+        shutil.copyfile(tex, into / tex.name)
     shutil.copyfile(built, into / built.name)
     log = []
     if not skip_convert:
