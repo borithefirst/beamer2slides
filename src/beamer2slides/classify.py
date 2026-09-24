@@ -236,12 +236,23 @@ class Line:
                              (overlap_x(s) >= min(1.0, 0.5 * s.rect.w) and (off_baseline(s) or any(map(off_baseline, h)))))]
                 h += more
                 grown = bool(more)
+        def side_by_side(a: list, b: list) -> bool:
+            """Two holes with no word between them (\\uwave{all benchmarks}: a picture per word,
+            kerned together): Slides' text has one gap there, as wide as both, and each picture
+            was measured into the same gap, one over the other. They are one hole."""
+            ra, rb = sorted((self.hole_rect(a), self.hole_rect(b)), key=lambda r: r.x0)
+            if rb.x0 - ra.x1 > 0.5 * self.size:
+                return False
+            return not any(s not in a and s not in b and s.text.strip() and ra.x1 - 0.5 < s.rect.cx < rb.x0 + 0.5
+                           for s in self.content)
+
         merged = True
         while merged:
             merged = False
             for i, a in enumerate(holes):
                 for b in holes[i + 1:]:
-                    if set(map(id, a)) & set(map(id, b)) or self.hole_rect(a).intersects(self.hole_rect(b)):
+                    if set(map(id, a)) & set(map(id, b)) or self.hole_rect(a).intersects(self.hole_rect(b)) \
+                            or side_by_side(a, b):
                         a += [s for s in b if s not in a]
                         holes.remove(b)
                         merged = True
@@ -421,6 +432,14 @@ NEGATION = "̸"  # TeX's \not: a slash laid over the relation after it (\neq, \n
 ACCENTS = {"¯": "̄", "ˆ": "̂", "˜": "̃", "˙": "̇", "¨": "̈", "´": "́",
            "`": "̀", "ˇ": "̌", "˘": "̆", "˚": "̊", "˝": "̋", "¸": "̧", "˛": "̨"}
 BELOW_ACCENTS = set("¸˛")  # \c{S} is set letter first, then its cedilla (\ooalign)
+# Symbols TeX builds from pieces it overlaps (\cong: ∼ over =; \implies, \longrightarrow,
+# \xrightarrow and mhchem's arrows: relbars kerned under an arrow by \joinrel): one Unicode
+# symbol, since Slides sets the pieces one after the other, apart (−−→, =⇒, ∼=). A pair
+# folds left to right, so a chain of relbars of any length ends as one long arrow.
+COMPOSED = {("−", "−"): "−", ("=", "="): "=", ("−", "→"): "⟶", ("−", "⟶"): "⟶", ("←", "−"): "⟵",
+            ("⟵", "−"): "⟵", ("⟵", "→"): "⟷", ("←", "→"): "⟷", ("←", "⟶"): "⟷",
+            ("=", "⇒"): "⟹", ("=", "⟹"): "⟹", ("⇐", "="): "⟸", ("⟸", "="): "⟸", ("⟸", "⇒"): "⟺",
+            ("⇐", "⇒"): "⟺", ("⇐", "⟹"): "⟺", ("∼", "="): "≅", ("=", "∼"): "≅"}
 
 
 def with_accent(letter: str, mark: str) -> str:
@@ -429,6 +448,26 @@ def with_accent(letter: str, mark: str) -> str:
     if unicodedata.combining(mark) == 230 and letter in "ıȷ":  # a mark above
         letter = "ij"["ıȷ".index(letter)]
     return unicodedata.normalize("NFC", letter + mark)
+
+
+def accent_beside(accent: "Span", base: "Span") -> bool:
+    """True if `accent` is a TeX accent set over a letter of `base` that Slides would set it
+    beside: a letter outside the Latin script with no precomposed form with that mark (\\hat\\beta,
+    \\tilde\\mu). The combining mark comes after the letter, and no Slides face anchors a mark on
+    a Greek letter, so the hat stands to its right, over the next word (r1_econ_v4 s1); such a
+    letter is a formula hole, its picture the page's. (A Latin letter keeps its mark: its faces
+    place one, and x̄ is a precomposed ȳ's neighbour.)"""
+    mark = ACCENTS.get(accent.text.strip())
+    if not mark or not (base.rect.x0 < accent.rect.x1 - 0.2 and accent.rect.x0 < base.rect.x1 - 0.2):
+        return False
+    text = base.text
+    if not text.strip():
+        return False
+    # the letter under the accent's middle (the span's advance shared out evenly)
+    k = int((accent.rect.cx - base.rect.x0) / max(base.rect.w, 1e-6) * len(text))
+    letter = text[min(max(k, 0), len(text) - 1)]
+    return letter.isalpha() and not unicodedata.name(letter, "LATIN").startswith("LATIN") \
+        and letter not in "ıȷ" and len(unicodedata.normalize("NFC", letter + mark)) > 1
 
 
 def compose_accents(text: str, mono: bool = False) -> str:
@@ -464,13 +503,24 @@ def negate(text: str) -> str:
     return re.sub(NEGATION + r"\s*(\S)", lambda m: unicodedata.normalize("NFC", m.group(1) + NEGATION), text)
 
 
+def compose_symbols(text: str) -> str:
+    """The pieces of a composed symbol set in one math font as the symbol: "−−→" -> "⟶",
+    "⇐⇒" -> "⟺" (two relation pieces never stand side by side unspaced in TeX math unless
+    \\joinrel overlapped them). Pieces in two fonts (CMR's =, CMSY's ⇒) are joined where they
+    overlap on the page (`PageClassifier` line runs)."""
+    out = ""
+    for c in text:
+        out = out[:-1] + COMPOSED[(out[-1], c)] if out and (out[-1], c) in COMPOSED else out + c
+    return out
+
+
 def math_pieces(font: str, text: str) -> list[tuple[str, bool]]:
     """Unicode text of a span set in a math font, as pieces with their italic flag. A TeX math
     italic font (CMMI, Latin Modern's LMMathItalic, newtx's NewTXMI...) makes the span italic
     where it has letters; an OpenType math font's span mixes italic letters (𝑥, 𝜆: plain
     letters set italic) with upright operators and digits, piece by piece."""
     key = re.sub(r"[^A-Z0-9]", "", font.split("+", 1)[-1].upper())
-    text = negate(text)
+    text = compose_symbols(negate(text))
     if key.startswith("MSBM"):  # \mathbb
         return [("".join(DOUBLE_STRUCK.get(c, chr(0x1D538 + ord(c) - 65) if "A" <= c <= "Z" else c)
                          for c in text), False)]
@@ -640,6 +690,35 @@ def polygon_shape(points: list, r: "Rect") -> str | None:
                 and any(near(p, r.x1, r.y1) for p in corners):
             return "TRIANGLE"
     return None
+
+
+MITER_LIMIT = 10.0  # PDF's default, and TikZ's
+
+
+def miter_reach(points: list, direction: tuple[float, float], width: float) -> float:
+    """How far an arrow head's outline, stroked `width` wide with mitred joins, reaches past the
+    point of its path furthest along `direction`: half the width over the sine of half the angle
+    at that point (a bevel's half width beyond the miter limit)."""
+    if width <= 0 or len(points) < 3:
+        return 0.0
+    ux, uy = direction
+    along = lambda p: (p[0] * ux + p[1] * uy)
+    corners = [tuple(p) for k, p in enumerate(points) if k == 0 or math.dist(p, points[k - 1]) > 1e-6]
+    if len(corners) > 2 and math.dist(corners[0], corners[-1]) <= 1e-6:
+        corners.pop()
+    if len(corners) < 3:
+        return 0.0
+    k = max(range(len(corners)), key=lambda i: along(corners[i]))
+    apex, a, b = corners[k], corners[k - 1], corners[(k + 1) % len(corners)]
+    va, vb = (a[0] - apex[0], a[1] - apex[1]), (b[0] - apex[0], b[1] - apex[1])
+    na, nb = math.hypot(*va), math.hypot(*vb)
+    if na < 1e-6 or nb < 1e-6:
+        return 0.0
+    cos = max(-1.0, min(1.0, (va[0] * vb[0] + va[1] * vb[1]) / (na * nb)))
+    half = math.acos(cos) / 2
+    if half < 1e-3 or 1 / math.sin(half) > MITER_LIMIT:
+        return width / 2
+    return width / 2 / math.sin(half)
 
 
 def upright_ellipse(path: list, r: Rect) -> bool:
@@ -1091,7 +1170,11 @@ class PageClassifier:
 
         for group, r in candidates:
             d = group[0]
-            if self.is_decoration(r) or r.w < 2 or r.w * r.h >= 0.95 * self.W * self.H:
+            # (ulem's pieces under a long underlined line join into a rule wider than half the
+            # page, which is_decoration takes for a theme hairline: the line then read as a
+            # formula over two dozen fraction bars. A theme's hairline is one piece.)
+            chain = len(group) >= 2 and is_rule(d, r)
+            if (self.is_decoration(r) and not chain) or r.w < 2 or r.w * r.h >= 0.95 * self.W * self.H:
                 continue
             ops = d["items"]
             if is_rule(d, r):
@@ -1109,9 +1192,13 @@ class PageClassifier:
                 covered = sum(s.rect.w for s in words)
                 # (a rule over words below it: an overline, a fraction bar; not the next line of
                 # text under a wrapped underline, whose words run on past the rule)
+                # (nor the short last line of a wrapped underlined paragraph, flush with the rule's
+                # start and ending far before its end: a fraction's part is centred on its bar)
+                flush_line = lambda o: abs(run_of(o).x0 - r.x0) <= 1 and r.x1 - run_of(o).x1 > size and o.baseline - r.cy >= 0.9 * size
                 below = not strike and any(s.rect.x0 < r.x1 and r.x0 < s.rect.x1 and s.baseline > r.cy and s.rect.y0 < r.cy + 0.25 * size
                                            and (s.baseline - r.cy < 0.75 * size or r.expand(size).contains(run_of(s).x0, r.cy)
-                                                and r.expand(size).contains(run_of(s).x1, r.cy)) for s in flat)
+                                                and r.expand(size).contains(run_of(s).x1, r.cy) and not flush_line(s))
+                                           for s in flat)
                 if below or covered < 0.8 * r.w or any(g > 0.6 * size for g in gaps) or \
                         (strike and max(s.baseline for s in words) - min(s.baseline for s in words) > 0.1 * size) or \
                         abs(words[0].rect.x0 - r.x0) > 0.3 * size or abs(words[-1].rect.x1 - r.x1) > 0.3 * size:
@@ -1730,7 +1817,8 @@ class PageClassifier:
                 # (text colour changes with the panel; a dark number on a light box across the
                 # edge still belongs to its line)
                 if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color) and artwork[i] == artwork[j] \
-                        and not (gap > 0.8 * big and self.gutter(spans, a, b, big)):
+                        and not (gap > 0.8 * big and self.gutter(spans, a, b, big)) \
+                        and not self.figure_label_apart(spans, a, b, gap, big):
                     parent[find(i)] = find(j)
                 elif same_row and panel[i] in listing and panel[i] == panel[j] and gap <= 0.6 * self.panels[panel[i]]["bbox"].w \
                         and not any(s.info.family != "mono" and re.fullmatch(r"\d{1,4}", s.text.strip()) for s in (a, b)):
@@ -1945,6 +2033,25 @@ class PageClassifier:
                 if s.text == bidi.logical_text(s.visual):
                     s.text = text
                 s.reading = (n, rank, base, widths[spaced[i]] if i in spaced else 0.0)
+
+    def figure_label_apart(self, spans: list[Span], a: Span, b: Span, gap: float, size: float) -> bool:
+        """A figure's label beside a column of words right of the figure (a pie's pin label
+        on the baseline of a list item's second line, 0.8 em from it): the label is next to
+        the figure's graphics (its pin), the words well clear of them and starting where the
+        column's other lines start. More than a word space apart, they are no line - joined, the
+        label opened the list's line and the item split there. The label is a word: an item's
+        own label (a dingbat, '1.', '(a)') stands its labelsep (0.5 em) before the same edge."""
+        if gap <= 0.6 * size or not getattr(self, "regions", None):
+            return False
+        left, right = (a, b) if a.rect.x0 < b.rect.x0 else (b, a)
+        if sum(c.isalnum() for c in left.text) < 2 or re.fullmatch(r"\(?\w{1,3}[.):]", left.text.strip()):
+            return False
+        near = lambda s: any(r.distance(s.rect) <= 0.5 * size for r in self.regions)
+        if not near(left) or near(right):
+            return False
+        edge = {round(s.baseline) for s in spans if s is not right and abs(s.rect.x0 - right.rect.x0) <= 1.0
+                and abs(s.baseline - right.baseline) > 0.5 * size}
+        return len(edge) >= 2
 
     @staticmethod
     def gutter(spans: list[Span], a: Span, b: Span, size: float) -> bool:
@@ -2410,6 +2517,21 @@ class PageClassifier:
                     return True
         return False
 
+    def wrapped_formula(self, line: Line) -> bool:
+        """A paragraph's inline formula wrapped onto a line of its own ("(O(√n))" under an item's
+        "Separator theorems"): no bullet or label of its own, one pitch below a line of words in
+        its size, starting where one of that line's words starts. A display formula is centred
+        or indented, never flush with its paragraph. As a display, the item it ended became one
+        picture, bullet and words included."""
+        if line.bullet or line.tab is not None:
+            return False
+        size = line.size
+        return any(o is not line and o.spans[0].horizontal and o.reason not in ("theme", "figure", "rotated", "math")
+                   and abs(o.size - size) <= 0.2 * size
+                   and 0.8 * size <= line.baseline - o.baseline <= 1.6 * size
+                   and any(abs(s.rect.x0 - line.x0) <= 1.5 for s in o.content)
+                   and prose_share(o.content) >= DISPLAY_WORD_SHARE for o in self.all_lines)
+
     def display_line(self, line: Line) -> bool:
         """A line that is a display formula: mostly formula (few words of prose, see prose_share)
         and set apart from any paragraph's flow."""
@@ -2471,7 +2593,8 @@ class PageClassifier:
         words = [s.text.strip() for s in spans if not any(s in seg for seg in segments) and s.text.strip() not in OPERATOR_NAMES]
         prose_words = [w for w in WORD_RE.findall(" ".join(words)) if len(w) >= 3 and w not in OPERATOR_NAMES]
         if sum(sum(ch.isalpha() for ch in w) >= 2 for w in words) < 2 and sum(map(len, words)) < 8 and not (
-                prose_words and self.in_prose_flow(line) and line.tab is None and not line.bullet):
+                prose_words and self.in_prose_flow(line) and line.tab is None and not line.bullet) and \
+                not self.wrapped_formula(line):
             # hardly any words ("f(x) = √x if x ≥ 0"): a display equation, one picture - but a
             # paragraph's line that is mostly formula ("Then / f ∈ L¹(µ) and ∫|fn − f| dµ → 0.")
             # keeps its words
@@ -2485,6 +2608,8 @@ class PageClassifier:
                 return True
             if any(b.expand(1).intersects(rect) and not any(abs(b.x0 - sb.x0) < 0.1 and abs(b.y0 - sb.y0) < 0.1
                                                               for sb in simple_bars) for b in bars):
+                return True
+            if any(accent_beside(a, b) for a in seg for b in seg if a is not b):
                 return True
             scripts = [s for s in seg if script_of(s, line) and id(s) not in in_fraction]
             if any(s.size < 0.6 * size or abs(s.baseline - line.baseline) > 0.6 * size for s in scripts):
@@ -2571,8 +2696,11 @@ class PageClassifier:
         mathy += sum(ch in MATH_OPERATORS for ch in chars)
         # (a display equation, not prose; nor code: '>>> a + b' is a REPL line, r2_code_v4 s6)
         formula_like = len(chars) > 0 and mathy / len(chars) >= 0.4 and not is_code(line.content)
+        # (glyphs with no Unicode in what the line says: its icon bullet is no formula - an item
+        # with a \faCheck bullet became one picture of its words, bullet included)
+        tofu = "�" in chars
 
-        if not (math_font or scripts or bars or fractions or formula_like or "�" in line.text):
+        if not (math_font or scripts or bars or fractions or formula_like or tofu):
             return None
         holes = self.formula_holes(line, fractions)
         if holes:
@@ -2582,9 +2710,9 @@ class PageClassifier:
             hole_ids = {id(s) for h in line.holes for s in h}
             line.fractions = [f for f in fractions if not any(id(s) in hole_ids for s in f[1] + f[2])]
             return "inline"
-        if bars or "�" in line.text:
+        if bars or tofu:
             return "complex"
-        if formula_like and not self.continues_prose(line):
+        if formula_like and not (self.continues_prose(line) or self.wrapped_formula(line)):
             return "complex"
         if any(extension_font(s.font) for s in spans):
             return "complex"  # big operators, large delimiters
@@ -3266,6 +3394,16 @@ class PageClassifier:
                     prev, hole_x1 = max(hole, key=lambda s: s.rect.x1), x1
                     continue
                 text = span.text
+                if prev is not None and runs and not runs[-1].get("hole") and text.strip() and \
+                        span.rect.x0 < prev.rect.x1 - 0.2 and prev.rect.x0 < span.rect.x1 and \
+                        (runs[-1]["text"][-1:], text.strip()[0]) in COMPOSED:
+                    # a composed symbol's pieces in two fonts, overlapped (CMSY's ∼ over CMR's =)
+                    tail = runs[-1]["text"]
+                    runs[-1]["text"] = tail[:-1] + COMPOSED[(tail[-1], text.strip()[0])]
+                    text = text.strip()[1:] + text[len(text.rstrip()):]
+                    if not text.strip():
+                        prev = max(prev, span, key=lambda s: s.rect.x1)
+                        continue
                 if text.strip() in ACCENTS and prev is not None and runs and not runs[-1].get("hole") and \
                         span.rect.x0 < prev.rect.x1 - 0.2 and prev.rect.x0 < span.rect.x1:
                     tail = runs[-1]["text"]  # over the letter before it
@@ -3501,6 +3639,21 @@ class PageClassifier:
             return r
 
         text_rects = [ink_rect(e) for e in text_elements]
+
+        def grazed(e: dict, t: Rect, c: Rect) -> bool:
+            """A figure reaching less than an em into a text box's outline, clear of its lines
+            and bullets (a pie's pin label in the margin of the list beside it, between two
+            bullets): no text under it. (Deeper in, a figure is over the text.)"""
+            if min(t.x1, c.x1) - max(t.x0, c.x0) >= self.body and min(t.y1, c.y1) - max(t.y0, c.y0) >= self.body:
+                return False
+            ink = [Rect(l["x0"], l["baseline"] - 0.8 * p["size"], l["x1"], l["baseline"] + 0.25 * p["size"])
+                   for p in e.get("paragraphs", []) for l in p["lines"]]
+            ink += [Rect.of(p["bullet"]["bbox"]) for p in e.get("paragraphs", []) if p["bullet"] and p["bullet"].get("bbox")]
+            # (the figure's own pieces there, not its outline: the label reaches under the
+            # bullets' column between two of them)
+            pieces = [r for r in rects if c.expand(0.1).contains_rect(r) and r.intersects(t)]
+            return bool(ink) and not any(r.intersects(q) for r in ink for q in pieces)
+
         self.bullet_boxes = [Rect.of(p["bullet"]["bbox"]).expand(1) for e in text_elements for p in e["paragraphs"]
                              if p["bullet"] and p["bullet"].get("bbox")]
         out = []
@@ -3532,7 +3685,7 @@ class PageClassifier:
                 continue  # only stray rotated text, no graphics
             if any(h.expand(0.5).contains_rect(c) for h in self.hole_boxes):
                 continue  # the graphic of a hole (a frame around words): in that picture already
-            over_text = any(t.intersects(c) for t in text_rects)
+            over_text = any(t.intersects(c) and not grazed(e, t, c) for e, t in zip(text_elements, text_rects))
             table = None if over_text or not self.fill_grid(c) else self.table_from(c, label_spans, text_rects, len(out))
             if table:
                 out.append(table)  # shaded cells edge to edge: a table, not a diagram of boxes
@@ -3561,6 +3714,11 @@ class PageClassifier:
                 out += bars
                 continue
             spans = [s.id for s in label_spans if c.expand(0.5).contains_rect(s.rect)]
+            if not spans and c.h <= 1.5 and not any(c.expand(0.5).intersects(Rect.of(im["bbox"])) for im in self.page["images"]):
+                # Only a hairline (the pieces of an underline under words left in the background):
+                # a picture adds nothing, and its box took the words above it off the background
+                # while the crop showed only the rule.
+                continue
             el = {"id": f"p{self.page['index']}f{len(out)}", "kind": "image", "role": "figure",
                   "bbox": self.clip_to_bands(c, c.expand(1.0)).as_list(), "spans": spans}
             bare = None if spans else self.bare_image(c)
@@ -3940,7 +4098,7 @@ class PageClassifier:
                 else:
                     style = "STEALTH_ARROW" if ops == "llll" else "FILL_ARROW"
                 points = [p for _, pts in path for p in pts]
-                tips.append((r, style, points))
+                tips.append((r, style, points, d["width"] if "s" in d["type"] and d["width"] else 0.0))
             else:
                 return None
         self.closed_frames(nodes, lines)
@@ -3954,7 +4112,7 @@ class PageClassifier:
                 if overlap(ra, rb) > 0.05 * min(ra.w * ra.h, rb.w * rb.h) and \
                         not ra.contains_rect(rb) and not rb.contains_rect(ra):
                     return None
-        for tip, style, points in tips:
+        for tip, style, points, outline in tips:
             ends = [(ln, end) for ln in lines for end in ("from", "to") if tip.expand(1).contains(*ln[end])]
             if not ends:
                 return None
@@ -3968,6 +4126,10 @@ class PageClassifier:
                 length = (ux * ux + uy * uy) ** 0.5 or 1.0
                 ux, uy = ux / length, uy / length
                 reach = max((px - ln[end][0]) * ux + (py - ln[end][1]) * uy for px, py in points)
+                # A head filled and stroked (ultra thick ->) reaches past its path by its outline's
+                # mitred point: the line stopped that short of the node, the black edge drawn
+                # under it showing as a stub at the tip.
+                reach += miter_reach(points, (ux, uy), outline)
                 if reach > 0:
                     ln[end] = [round(ln[end][0] + reach * ux, 2), round(ln[end][1] + reach * uy, 2)]
 
@@ -3981,7 +4143,9 @@ class PageClassifier:
         area = lambda n: n["rect"].w * n["rect"].h
         seen: list[Span] = []
         for s in spans:
-            if s.info.family == "math" or not s.horizontal:
+            if s.info.family in ("math", "icon") or "�" in s.text or not s.horizontal:
+                # (an icon font's glyph has no Unicode: as a node's label it read U+FFFD, a
+                # diamond with a question mark, where the picture shows the icon)
                 return None
             # A node drawn again on a later overlay step (\node<2->[fill=yellow] at (a) {A})
             # paints its label a second time on the same spot: one label, and it goes to the

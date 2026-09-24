@@ -294,13 +294,14 @@ def test_a_horizontal_first_elbow_is_written_from_its_other_end():
     body_text(p)
     el = diagram_of(p)
     (ln,) = el["lines"]
-    assert ln["bend"] == "vh" and ln["from"] == [140, 100] and ln["via"] == [140, 50] and ln["to"] == [60, 50]
+    # (the head's tip, where its 0.4 pt mitred outline ends: 0.38 pt past its path)
+    assert ln["bend"] == "vh" and ln["from"] == [140, 100.38] and ln["via"] == [140, 50] and ln["to"] == [60, 50]
     assert (ln["arrow_from"], ln["arrow_to"]) == ("STEALTH_ARROW", None)
     assert element_template_keys(el, 1.0)[-1] == ("BENT_CONNECTOR", 0.0, None)
     reqs = diagram_requests(el, "s", "d", 1.0, FontMapper(), template=lambda key: {"id": "tpl", "w": 100, "h": 100})
     move = next(r["updatePageElementTransform"]["transform"] for r in reqs if "updatePageElementTransform" in r)
-    assert (move["translateX"], move["translateY"]) == (140 * 12700, 100 * 12700)
-    assert (move["scaleX"], move["scaleY"]) == (-0.8, -0.5)
+    assert (move["translateX"], move["translateY"]) == (140 * 12700, round(100.38 * 12700))
+    assert move["scaleX"] == -0.8 and abs(move["scaleY"] + 0.5038) < 1e-6
     heads = next(r["updateLineProperties"]["lineProperties"] for r in reqs if "updateLineProperties" in r)
     assert (heads["startArrow"], heads["endArrow"]) == ("STEALTH_ARROW", "NONE")
     ends = [r["updateLineProperties"]["lineProperties"] for r in reqs if "updateLineProperties" in r][-1]

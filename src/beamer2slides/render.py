@@ -146,6 +146,31 @@ def _same_dir(a, b) -> bool:
     return abs(a[0] - b[0]) <= 0.05 and abs(a[1] - b[1]) <= 0.05
 
 
+def owned_by(spans: list[dict]):
+    """A test of whether a drawn glyph is one of these raw spans' own: same font and size, on the
+    span's baseline, between its start and its end along the baseline. (Glyph boxes say nothing
+    of the kind: a hanging radical's box lies in the line above.)"""
+    by_font: dict[tuple, list[dict]] = {}
+    for s in spans:
+        by_font.setdefault((s["font"], round(s["size"], 2)), []).append(s)
+
+    def test(ch) -> bool:
+        for s in by_font.get((ch.font, round(ch.size, 2)), ()):
+            if not _same_dir(ch.dir, s["dir"]):
+                continue
+            dx, dy = s["dir"]
+            rx, ry = ch.origin[0] - s["origin"][0], ch.origin[1] - s["origin"][1]
+            if abs(rx * dy - ry * dx) > 0.05 * s["size"]:
+                continue  # another baseline
+            x0, y0, x1, y1 = s["bbox"]
+            reach = max((cx - s["origin"][0]) * dx + (cy - s["origin"][1]) * dy for cx in (x0, x1) for cy in (y0, y1))
+            if -0.1 <= rx * dx + ry * dy <= reach + 0.1:
+                return True
+        return False
+
+    return test
+
+
 def _span_band(span: dict) -> Box:
     """_band for a raw span, also for text turned by 90° (the x-height lies beside its baseline)."""
     dx, dy = span["dir"]
@@ -268,7 +293,7 @@ def save_bytes(data: bytes, path: Path) -> None:
 
 
 def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path: Path,
-                transparent: bool = False) -> list[int]:
+                transparent: bool = False, hide: list = ()) -> list[int]:
     x0, y0, x1, y1 = bbox
     width, height = x1 - x0, y1 - y0
     zoom = FIGURE_PX_PER_PT if max(width, height) > 60 else SMALL_FIGURE_PX_PER_PT
@@ -278,9 +303,9 @@ def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path:
         if ix1 > ix0 and _inside(im["bbox"], bbox) and (ix1 - ix0) * (iy1 - iy0) > 0.8 * width * height:
             zoom = max(zoom, im["px"][0] / (ix1 - ix0))
     zoom = min(zoom, FIGURE_MAX_PX / max(width, height))
-    img = eraser.render(zoom, tuple(bbox))
+    img = eraser.render(zoom, tuple(bbox), hide=hide)
     if transparent:
-        img = clear_ground(eraser, bbox, zoom, img)
+        img = clear_ground(eraser, bbox, zoom, img, hide)
     save_png(img, path)
     return [img.shape[1], img.shape[0]]
 
@@ -289,7 +314,7 @@ GROUND_FLAT = 6        # levels: the page under a picture counts as one colour
 GROUND_MATCH = 16      # levels: the transparent crop laid on that colour shows the opaque crop
 
 
-def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndarray) -> np.ndarray:
+def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndarray, hide: list = ()) -> np.ndarray:
     """A picture anchored to text (inline formula, icon, number ball) on a transparent ground, so it
     shows the slide under it when the background colour changes or it is moved onto a shape.
     What stays in the background (paths reaching out of the box as render_backgrounds leaves them,
@@ -299,7 +324,7 @@ def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndar
     ground = [key for key, po in eraser.objects.items() if key not in eraser.removed and (
         (po.type == OBJ_PATH and not _inside(bounds[key], _grow(bbox, 5))) or
         (po.type in (OBJ_IMAGE, OBJ_SHADING) and not _inside(bounds[key], _grow(bbox, 0.5))))]
-    rgba = eraser.render(zoom, tuple(bbox), transparent=True, hide=ground)
+    rgba = eraser.render(zoom, tuple(bbox), transparent=True, hide=ground + list(hide))
     if rgba.shape[:2] != opaque.shape[:2]:
         return opaque
     clear = rgba[..., 3] == 0
@@ -513,12 +538,28 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
         # A glyph goes with a native line only when it runs the line's way: a stamp turned 25°
         # across the bullets ("DRAFT", tikz overlay) has glyph boxes far larger than its ink,
         # which met the words' bands and lost letters under them.
-        bands = [(_span_band(s), tuple(s["dir"]))
-                 for s in (spans[sid] for sid in [sid for el in texts for sid in el["spans"]] + slide.get("on_layout", []))]
+        native = [sid for el in texts for sid in el["spans"]] + slide.get("on_layout", [])
+        bands = [(_span_band(s), tuple(s["dir"])) for s in (spans[sid] for sid in native)]
         if bands:
-            eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) and _same_dir(ch.dir, d) for b, d in bands))
+            # A glyph a picture owns stays for its crop, whatever line's band it reaches into: a
+            # radical sign hangs from its origin an em above its formula's baseline, into the
+            # words of the line above, and went with them (neither text nor picture showed it).
+            mine = set(native)
+            pictured = owned_by([spans[sid] for el in figures for sid in el.get("spans", [])
+                                 if sid in spans and sid not in mine])
+            ours = owned_by([spans[sid] for sid in native])
+            eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) and _same_dir(ch.dir, d) for b, d in bands)
+                                and not (pictured(ch) and not ours(ch)))
         for x0, y0, x1, y1 in (st for el in texts for st in el.get("strokes", [])):
             eraser.remove_paths_inside((x0 - 1.5, y0 - 1.5, x1 + 1.5, y1 + 1.5))  # bars of fractions converted to text
+
+        # A native list's image bullets are the list's, whatever picture box reaches them: a pie's
+        # pin label ending beside a ball-bullet column showed slivers of the balls at its edge,
+        # beside the Slides bullets.
+        bullet_boxes = [_grow(images[p["bullet"]["image"]]["bbox"], 0.5) for el in texts for p in el.get("paragraphs", [])
+                        if p["bullet"] and p["bullet"].get("kind") == "image" and p["bullet"].get("image") in images]
+        bullet_objects = [key for key, po in eraser.objects.items() if po.type in (OBJ_IMAGE, OBJ_SHADING)
+                          and any(_inside(eraser.bounds[key], b) for b in bullet_boxes)]
 
         # Graphics drawn over text first: the other crops must not show them.
         for fig in sorted(figures, key=lambda f: not f.get("overlay")):
@@ -533,14 +574,21 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
                     if fig.get("role") == "math":
                         fig["bbox"] = grow_to_ink(eraser, fig["bbox"], [spans[sid] for sid in fig["spans"] if sid in spans])
                     fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path,
-                                            transparent=bool(fig.get("anchor")))
+                                            transparent=bool(fig.get("anchor")), hide=bullet_objects)
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")
         # Native tables leave the background the same way pictures do (text and rules), without a crop.
         figures = [f for f in figures if not f.get("overlay")]
         figures += [e for e in slide["elements"] if e["kind"] in ("table", "diagram")]
         if figures:
             boxes = [tuple(fig["bbox"]) for fig in figures]
-            eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) for b in boxes))
+            # The glyphs a picture holds, not those its box grazes: the words just above a thin
+            # figure (a rule under them) reach into it by their descent, and went from the
+            # background while the crop showed only the rule. (What a grazed glyph has inside the
+            # box the picture shows over it, in place.)
+            held = owned_by([spans[sid] for fig in figures for sid in fig.get("spans", []) if sid in spans])
+            centre = lambda ch: ((ch.box[0] + ch.box[2]) / 2, (ch.box[1] + ch.box[3]) / 2)
+            eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) for b in boxes) and (
+                any(b[0] <= centre(ch)[0] <= b[2] and b[1] <= centre(ch)[1] <= b[3] for b in boxes) or held(ch)))
             for b in boxes:
                 eraser.remove_images_in(b)
                 # Stroked paths reach past the figure box by half their width, arrow tips further.
