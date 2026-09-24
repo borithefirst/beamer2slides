@@ -178,3 +178,33 @@ def test_a_label_of_a_row_centred_over_a_callout_stays_with_its_row():
              if e["kind"] == "text"]
     weeks = sorted(t for t in texts if t.startswith("Week"))
     assert weeks == ["Week 0", "Week 1", "Week 2\u20133", "Week 4", "Week 6"], texts
+
+
+def test_a_hole_on_a_photo_keeps_the_photo_under_it(tmp_path):
+    """r1_design_v2 s1 (design-v5): '|' and icon holes on a full-bleed title photo. The photo's
+    part inside each hole box was cut out of the background (white boxes), and the hole pictures
+    were opaque crops of the photo: once Slides set the words off the PDF's place, each picture
+    showed as a boxed patch and the white box beside it hid a letter of the next word. The photo
+    stays whole in the background and the hole's picture is its glyphs on a transparent ground."""
+    content = (b"q 400 0 0 200 0 0 cm BI /W 2 /H 1 /CS /RGB /BPC 8 ID \x1a\x2a\x3a\x30\x40\x50 EI Q\n"
+               b"1 1 1 rg BT /F1 14 Tf 190 100 Td (W) Tj ET\n"
+               b"BT /F1 12 Tf 40 100 Td (Words before) Tj 200 0 Td (after) Tj ET\n")
+    path = tmp_path / "photo.pdf"
+    path.write_bytes(one_page(content))
+    raw = raw_of(path)
+    glyph = next(s for s in raw["pages"][0]["spans"] if s["text"] == "W")
+    words = [s for s in raw["pages"][0]["spans"] if s is not glyph]
+    x0, y0, x1, y1 = glyph["bbox"]
+    text = {"id": "t0", "kind": "text", "role": "body", "bbox": [40, 90, 300, 110],
+            "spans": [s["id"] for s in words], "paragraphs": []}
+    hole = {"id": "h0", "kind": "image", "role": "math", "anchor": "t0", "bbox": [x0 - 1, y0, x1 + 1, y1],
+            "spans": [glyph["id"]]}
+    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [hole, text], "on_layout": []}]}
+    render_backgrounds(path, raw, deck, tmp_path / "out")
+    bg = np.array(Image.open(tmp_path / "out" / deck["slides"][0]["background"]).convert("RGB")).astype(int)
+    zoom = bg.shape[1] / 400
+    a0, b0, a1, b1 = (int(round(v * zoom)) for v in hole["bbox"])
+    under = bg[b0 + 2:b1 - 2, a0 + 2:a1 - 2]
+    assert (under.max(axis=2) < 120).all()  # the photo's dark pixels, no white box, no glyph
+    crop = np.array(Image.open(tmp_path / "out" / hole["file"]))
+    assert crop.shape[2] == 4 and (crop[..., 3] == 0).mean() > 0.2  # the glyph on a clear ground

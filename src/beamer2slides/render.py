@@ -333,11 +333,34 @@ def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndar
     page_px = opaque[clear].astype(int)
     colour = np.median(page_px, axis=0)
     if (np.abs(page_px - colour).max(axis=1) > GROUND_FLAT).mean() > 0.002:
-        return opaque
+        return on_picture_ground(eraser, bbox, zoom, opaque, rgba, ground, hide)
     rgba = unblend_rim(rgba, clear, colour, max(1, round(GROUND_RIM * zoom)))
     alpha = rgba[..., 3:].astype(float) / 255
     laid = rgba[..., :3] * alpha + colour * (1 - alpha)
     if (np.abs(laid - opaque).max(axis=2) > GROUND_MATCH).mean() > 0.002:
+        return opaque
+    return rgba
+
+
+def on_picture_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndarray, rgba: np.ndarray,
+                      ground: list, hide: list = ()) -> np.ndarray:
+    """An anchored picture on a photo or a shading reaching out of its box (a `\\textbar\\quad
+    \\faIcon` hole on a full-bleed title photo, r1_design_v2 s1): the ground is no one colour,
+    but it stays in the background under the picture (render_backgrounds keeps an image that
+    holds an anchored box), so the transparent crop is right wherever Slides sets the words.
+    An opaque crop showed its piece of the photo out of line with the photo behind it, a boxed
+    patch, once the re-set words moved it. Kept when the crop laid on the ground alone shows
+    the opaque crop, and only on a ground of images and shadings."""
+    if not any(eraser.objects[key].type in (OBJ_IMAGE, OBJ_SHADING) and _inside(_grow(bbox, -0.5), eraser.bounds[key])
+               for key in ground):
+        return opaque
+    drawn = [key for key in eraser.objects if key not in eraser.removed and key not in set(ground)]
+    under = eraser.render(zoom, tuple(bbox), hide=drawn + list(hide))
+    if under.shape[:2] != opaque.shape[:2]:
+        return opaque
+    alpha = rgba[..., 3:].astype(float) / 255
+    laid = rgba[..., :3] * alpha + under[..., :3].astype(float) * (1 - alpha)
+    if (np.abs(laid - opaque[..., :3]).max(axis=2) > GROUND_MATCH).mean() > 0.002:
         return opaque
     return rgba
 
@@ -591,11 +614,15 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
             centre = lambda ch: ((ch.box[0] + ch.box[2]) / 2, (ch.box[1] + ch.box[3]) / 2)
             eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) for b in boxes) and (
                 any(b[0] <= centre(ch)[0] <= b[2] and b[1] <= centre(ch)[1] <= b[3] for b in boxes) or held(ch)))
-            for b in boxes:
+            for fig, b in zip(figures, boxes):
                 # (a native list's ball stays whole for its colour and its patch: a pie's label
                 # widening the figure over the ball column took half of each ball, and the Slides
-                # bullets came out in each item's first word's colour)
-                eraser.remove_images_in(b, keep=bullet_objects)
+                # bullets came out in each item's first word's colour; and a photo under a hole
+                # stays whole, the hole's ground: cut out, it left a white box that showed, over
+                # the next word, wherever Slides set the words off the PDF's place)
+                ground = [key for key, po in eraser.objects.items() if fig.get("anchor") and
+                          po.type in (OBJ_IMAGE, OBJ_SHADING) and _inside(_grow(b, -0.5), eraser.bounds[key])]
+                eraser.remove_images_in(b, keep=bullet_objects + ground)
                 # Stroked paths reach past the figure box by half their width, arrow tips further.
                 eraser.remove_paths_inside(_grow(b, 5))
 
