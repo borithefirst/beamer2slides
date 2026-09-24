@@ -308,16 +308,45 @@ class Paragraph:
         return [s for l in self.lines for s in l.spans]
 
 
+# Slides draws a script run at 2/3 of its size (docs/calibration.md: 0.665): a script smaller
+# than 2/3 of its line (a script's script, 0.55) is given the size that draws it as small.
+SLIDES_SCRIPT = 0.665
+
+
 def script_of(span: Span, line: "Line") -> str | None:
-    """'super' / 'sub' for a smaller span raised / lowered from the line's baseline."""
+    """'super' / 'sub' for a smaller span raised / lowered from the line's baseline.
+
+    TeX lowers a subscript 0.15 em (0.25 beside a superscript) and \\textsubscript in a subtitle
+    0.11 em; it raises a superscript 0.36-0.53 em, a keycap's small letters 0.09-0.11 em (not a
+    script), so a subscript starts at 0.10 em and a superscript at 0.12. listings raises the
+    underscore of an inline `_exit` into a span of its own font's words: that is code, not a
+    superscript."""
     if span.size >= 0.85 * line.size:
         return None
     shift = span.baseline - line.baseline
     if shift < -0.12 * line.size:
-        return "super"
-    if shift > 0.12 * line.size:
+        return None if span.text.lstrip().startswith("_") else "super"
+    if shift > 0.10 * line.size:
         return "sub"
     return None
+
+
+def script_size(span: Span, line: "Line") -> float:
+    """The IR size of a script run: its line's, which Slides draws at 2/3 - or larger than the
+    span by that factor when the span is smaller still (a subscript of a subscript, 0.5-0.55;
+    a script is 0.66-0.73 of its line)."""
+    return line.size if span.size >= 0.6 * line.size else span.size / SLIDES_SCRIPT
+
+
+# A raised ring (^\circ, siunitx's degree) or asterisk (\textsuperscript{*}, x^*) is drawn by the
+# text face's own degree sign and asterisk at the line's size where TeX has it: Lato's ° spans
+# 0.40-0.73 em and * 0.43-0.75, TeX's raised 7 pt ring and star 0.43-0.74 of a 10 pt line. Set
+# as a superscript, Slides shrinks and raises marks that sit high already: a speck.
+RAISED_MARKS = {"°": "°", "∘": "°", "◦": "°", "*": "*", "∗": "*"}
+
+
+def raised_mark(text: str) -> str:
+    return "".join(RAISED_MARKS.get(c, c) for c in text)
 
 
 DOUBLE_STRUCK = {"C": "ℂ", "H": "ℍ", "N": "ℕ", "P": "ℙ", "Q": "ℚ", "R": "ℝ", "Z": "ℤ"}
@@ -476,11 +505,12 @@ def span_runs(spans: list[Span]) -> list[dict]:
         if family == "math":
             family = base_family
             pieces = math_pieces(s.font, text)
-        if s.size < 0.85 * main.size:
-            shift = s.baseline - main.baseline
-            script = "super" if shift < -0.12 * main.size else "sub" if shift > 0.12 * main.size else None
+        script = script_of(s, main)  # (the largest span stands for the line)
+        size = script_size(s, main) if script else s.size
+        if script == "super" and text.strip() in RAISED_MARKS:
+            pieces, script, size = [(raised_mark(text), False)], None, main.size
         for text, italic in pieces:
-            style = {"font": s.font, "family": family, "size": round(main.size if script else s.size, 2),
+            style = {"font": s.font, "family": family, "size": round(size, 2),
                      "bold": s.info.bold, "italic": italic, "smallcaps": s.info.smallcaps, "color": s.color,
                      "link": s.link, "script": script, "underline": s.underline, "strike": s.strike, "highlight": s.highlight}
             if runs and all(runs[-1][k] == v for k, v in style.items()):
@@ -1080,6 +1110,13 @@ class PageClassifier:
                 same_row = abs(a.baseline - b.baseline) <= 0.5 * big and \
                     min(a.rect.y1, b.rect.y1) > max(a.rect.y0, b.rect.y0)
                 small, large = (a, b) if a.size < b.size else (b, a)
+                if not same_row and small.size <= 0.85 * large.size \
+                        and 0.5 * large.size < large.baseline - small.baseline <= 0.8 * large.size \
+                        and -0.1 * large.size <= small.rect.x0 - large.rect.x1 <= 0.15 * large.size \
+                        and min(a.rect.y1, b.rect.y1) > max(a.rect.y0, b.rect.y0):
+                    # a superscript stacked over a subscript (S_n^{(k)}) is raised 0.53 em and
+                    # starts where its base ends: its line's, a script of it, not a box of its own
+                    same_row = True
                 if same_row and small.size <= 0.6 * large.size and small.rect.y0 > large.baseline - 0.1 * large.size \
                         and not {"math", "icon"} & {small.info.family, large.info.family} \
                         and sum(c.isalnum() for c in small.text) >= 2:
@@ -2086,8 +2123,10 @@ class PageClassifier:
                         sep = ""
                         text = text.lstrip()
                     if sep and not runs[-1]["text"].endswith(" ") and not text.startswith(" "):
-                        if runs[-1]["script"] or runs[-1].get("hole"):
-                            text = sep + text  # keep the space out of the raised/lowered run and the gap
+                        if runs[-1]["script"] or runs[-1].get("hole") or prev.size < 0.85 * span.size:
+                            # keep the space out of the raised/lowered run and the gap, and out of
+                            # smaller words (TeX's space after them is the surrounding text's)
+                            text = sep + text
                         else:
                             runs[-1]["text"] += sep
                 if runs and not runs[-1].get("hole") and runs[-1]["text"].rstrip().endswith(NEGATION) and text.strip():
@@ -2096,17 +2135,20 @@ class PageClassifier:
                     runs[-1]["text"] = tail[:-1] + runs[-1]["text"][len(tail):]
                     text = negate(NEGATION + text)
                 script = forced or script_of(span, line)
+                # Slides shrinks sub/superscripts itself: give them the line's size.
+                size = script_size(span, line) if script else span.size
                 family, italic = span.info.family, span.info.italic
                 pieces = [(text, italic)]
                 if family == "math":
                     # Math fonts carry symbols and variables; show them in the text family.
                     family = math_family(line, par)
                     pieces = math_pieces(span.font, text)
+                if script == "super" and not forced and text.strip() in RAISED_MARKS:
+                    pieces, script, size = [(raised_mark(text), False)], None, line.size
                 for text, italic in pieces:
                     style = {
                         "font": span.font, "family": family,
-                        # Slides shrinks sub/superscripts itself: give them the line's size.
-                        "size": round(line.size if script else span.size, 2),
+                        "size": round(size, 2),
                         "bold": span.info.bold, "italic": italic, "smallcaps": span.info.smallcaps,
                         "color": span.color, "link": span.link, "script": script,
                         "underline": span.underline, "strike": span.strike, "highlight": span.highlight,
