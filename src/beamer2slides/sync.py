@@ -1592,9 +1592,10 @@ class Sync:
         pptx = build_pptx(page_w, page_h, [], pages, {"color": "#ffffff"})
         # The marker outlives a killed sync: nothing deletes a staging deck from a file's word, so
         # `tools/drive_usage.py` needs to be able to say which files are certainly leftovers.
-        fid = execute(drive.files().create(body={"name": "beamer2slides sync staging (temporary)",
-                                                 "mimeType": "application/vnd.google-apps.presentation",
-                                                 "appProperties": {"b2sStaging": self.pid}},
+        from .drive_folder import place
+        fid = execute(drive.files().create(body=place({"name": "beamer2slides sync staging (temporary)",
+                                                       "mimeType": "application/vnd.google-apps.presentation",
+                                                       "appProperties": {"b2sStaging": self.pid}}, drive),
                                            media_body=media_upload(pptx, PPTX_MIME), fields="id"))["id"]
         try:
             staged = execute(slides.presentations().get(presentationId=fid))
@@ -1637,7 +1638,11 @@ class Sync:
             if any(h[3] is not None and h[3]["id"] in ids for h in slide_holes(slide)) or \
                     any(e.get("marks") and e["id"] in ids for e in slide["elements"]):
                 slides.append(slide)
+        from . import net
         if not slides:
+            return {}, []
+        if net.downloads_off():
+            print("picture places: predicted (downloads are switched off, so no thumbnail can be measured)")
             return {}, []
         self.before_write()   # it adds scratch slides to the deck (b2s_mNNN)
         live_ids = {s["objectId"] for s in theirs["slides"]}

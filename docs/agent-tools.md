@@ -190,9 +190,25 @@ pools) lets a caller own it. `AgentContext.fetch_google_content` installs it for
 back (`contentUrl`, `lh*.googleusercontent.com`) plus whatever host a person inserted a picture
 from - two egress policies a harness may well want to differ. A fetcher takes a URL and returns
 bytes, or raises: `PermissionError` means "not allowed" and is not retried, anything else is
-retried like a network blip. A signature that cannot be fetched is left out of the base (the
-guard then says it cannot verify that picture); nothing falls back to urllib behind the caller's
-back. Tests: `tests/test_net.py`, `tests/test_base_storage.py`.
+retried like a network blip. Nothing falls back to urllib behind the caller's back. Tests:
+`tests/test_net.py`, `tests/test_base_storage.py`, `tests/test_deck_pictures.py`.
+
+**No download is needed at all.** `fetch_google_content=net.no_downloads` (or `$B2S_NO_DOWNLOADS=1`,
+the CLI's `--no-downloads`) refuses every one: a deck's pictures are signed from the files the run
+uploaded and otherwise read out of a Drive `.pptx` export (`deck_pictures`), and a sync reads only
+the pictures its plan depends on. What it costs: inline formula and overlay pictures keep their
+predicted places (the measuring scratch slides are skipped), `fidelity` cannot run, a picture a
+reader inserted into a Google Doc is not saved beside its canonical file, and fonts come from
+`font_source` or stand-ins. Measured live 2026-09-24: convert and sync of two test decks with every
+download refused, 0 fetches, every picture of the base signed.
+
+**Where Drive files land.** `AgentContext.drive_folder` (`$B2S_DRIVE_FOLDER`, `--drive-folder`) puts
+everything the library creates in Drive - decks, documents, sync bases, `--backup drive` copies,
+the temporary staging files - into one folder: a folder id the app can see (under `drive.file`,
+one it created or was opened with; another is refused by name before anything is created), or
+`"auto"`, a "beamer2slides" folder of the app's own, found by its `b2sHome` appProperty and
+created once. None keeps the old places: new decks and documents in My Drive's root, a base or a
+backup beside its file (`drive_folder.py`, `tests/test_drive_folder.py`).
 
 **Fonts go through the same door, or come from disk.** `deck_adopt` wants the deck's own fonts,
 and `fontfetch` downloads a missing family from google/fonts on GitHub - with `net.download`, so

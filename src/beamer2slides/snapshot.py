@@ -793,8 +793,8 @@ def save_drive(drive, base: dict, title: str | None = None, info: dict | None = 
     if not fid:
         body = {"name": f"{title or info.get('name', pid)} - beamer2slides sync base.json", "mimeType": "application/json",
                 "appProperties": {"b2sBaseOf": pid}}
-        if info.get("parents"):
-            body["parents"] = info["parents"]
+        from .drive_folder import place
+        place(body, drive, info.get("parents"))
         fid = execute(drive.files().create(body=body, fields="id", media_body=media_upload(
             io.BytesIO(data), "application/json")))["id"]
         execute(drive.files().update(fileId=pid, body={"appProperties": {BASE_PROPERTY: fid}}, fields="id"))

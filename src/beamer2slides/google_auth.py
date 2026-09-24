@@ -241,18 +241,21 @@ def use_fetcher(fetch):
     Per context like the other two hooks, and a pool's worker inherits nothing: every pool in the
     library resolves `fetcher_for_threads()` on the calling thread and hands it down, as it does
     credentials. `fetch` says no by raising; a `PermissionError` is taken as "not allowed" and not
-    retried. Installing one that always refuses is not a safe default, only a slower and weaker
-    sync: an unsigned picture is compared by its URL alone, which Google reissues, and sync's
-    picture pairing reads a picture it could not download as a different one.
+    retried. One that always refuses is `net.no_downloads`: the deck's pictures then come from
+    this run's files and a Drive export (`deck_pictures`), and what else it costs is said there.
     """
     return _fetch_hook.use(fetch)
 
 
 def fetcher_for_threads():
-    """The fetcher downloads should go through: the caller's (`use_fetcher`), else `urllib`'s.
-    Resolve it on the calling thread and pass it into a pool (`_Hook`)."""
+    """The fetcher downloads should go through: the caller's (`use_fetcher`), else
+    `net.no_downloads` under `$B2S_NO_DOWNLOADS`, else `urllib`'s. Resolve it on the calling
+    thread and pass it into a pool (`_Hook`)."""
     from . import net
-    return _fetch_hook.get() or net.urllib_fetch
+    installed = _fetch_hook.get()
+    if installed:
+        return installed
+    return net.no_downloads if os.environ.get(net.NO_DOWNLOADS, "") not in ("", "0") else net.urllib_fetch
 
 
 def _service(api: str, version: str, creds):

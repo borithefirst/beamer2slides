@@ -232,8 +232,8 @@ def save_drive(drive, document: str, base: dict, title: str | None = None,
     if not fid:
         body = {"name": f"{title or info.get('name', document)} - beamer2slides docs base.json",
                 "mimeType": JSON_MIME, "appProperties": {"b2sBaseOf": document}}
-        if info.get("parents"):
-            body["parents"] = info["parents"]
+        from .drive_folder import place
+        place(body, drive, info.get("parents"))
         fid = drive.files().create(body=body, fields="id", media_body=media_upload(
             io.BytesIO(data), JSON_MIME)).execute()["id"]
         drive.files().update(fileId=document, fields="id",
@@ -812,8 +812,10 @@ class Stager:
         # name rather than shifting every URL after it onto the wrong picture.
         body = "".join(f'<p>{n}:<img src="{data_uri(self.path.parent / src)}"></p>'
                        for n, src in enumerate(sources))
+        from .drive_folder import place
         ident = self.drive.files().create(
-            body={"name": self.NAME, "mimeType": DOC_MIME, "appProperties": {"b2sStaging": "docs"}},
+            body=place({"name": self.NAME, "mimeType": DOC_MIME, "appProperties": {"b2sStaging": "docs"}},
+                       self.drive),
             media_body=media_upload(io.BytesIO(f"<html><body>{body}</body></html>".encode()),
                                     "text/html"), fields="id").execute()["id"]
         self.files.append(ident)
@@ -1100,8 +1102,9 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
     first = embedded(path, source) | {"document": None}
     first.pop("tabs", None)  # the importer makes one tab of whatever it is given
     html = doc_ir.to_html(first)
+    from .drive_folder import place
     ident = drive.files().create(
-        body={"name": name or source.get("title") or path.stem, "mimeType": DOC_MIME},
+        body=place({"name": name or source.get("title") or path.stem, "mimeType": DOC_MIME}, drive),
         media_body=media_upload(io.BytesIO(html.encode("utf-8")), "text/html"),
         fields="id").execute()["id"]
 

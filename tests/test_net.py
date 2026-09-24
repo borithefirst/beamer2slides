@@ -33,6 +33,29 @@ def test_nothing_installed_is_urllib():
     assert google_auth.fetcher_for_threads() is net.urllib_fetch
 
 
+def test_downloads_can_be_switched_off(monkeypatch):
+    """`$B2S_NO_DOWNLOADS` (the CLI's `--no-downloads`) makes `no_downloads` the default: asked
+    once, never retried. A fetcher a caller installed still wins."""
+    monkeypatch.setenv(net.NO_DOWNLOADS, "0")
+    assert not net.downloads_off()
+    monkeypatch.setenv(net.NO_DOWNLOADS, "1")
+    assert google_auth.fetcher_for_threads() is net.no_downloads and net.downloads_off()
+    with pytest.raises(PermissionError, match="switched off"):
+        net.download("u")
+    with google_auth.use_fetcher(lambda url: b"mine"):
+        assert net.download("u") == b"mine" and not net.downloads_off()
+
+
+def test_with_downloads_off_no_place_is_measured(monkeypatch):
+    """Measuring a hole's place is a thumbnail download: with downloads off not even the scratch
+    slides are made, and every picture keeps its predicted place."""
+    from beamer2slides import emit
+    monkeypatch.setattr(emit, "measure_jobs", lambda *a: ([{"createSlide": {}}], [("job",)]))
+    monkeypatch.setattr(emit, "batch", lambda *a: pytest.fail("scratch slides written"))
+    monkeypatch.setenv(net.NO_DOWNLOADS, "1")
+    assert emit.measure_places(None, "P", {"slides": []}, 1.0, None, {}, {}, None) == ({}, [])
+
+
 def test_a_download_is_retried_and_the_last_failure_raised():
     tries = []
 

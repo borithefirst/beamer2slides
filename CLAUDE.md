@@ -195,7 +195,12 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   changed is `unchecked` and read only when the plan depends on it (`Sync.pictures_in_question`,
   `merge.unchecked`); reads go through `deck_pictures.LivePictures`, download else one Drive
   `.pptx` export paired by page/drawing order and titles. `Sync.plan` is the DeckPlan, the merge
-  is `Sync.merge_plan`.
+  is `Sync.merge_plan`. `--no-downloads` / `$B2S_NO_DOWNLOADS` / `net.no_downloads` refuses every
+  download (places predicted, no `fidelity`); `net.downloads_off` lets a site skip its setup.
+- **Where Drive files land**: every `files.create`/`copy` body goes through `drive_folder.place`
+  (`--drive-folder ID|auto`, `$B2S_DRIVE_FOLDER`, `AgentContext.drive_folder`; `auto` = the app's
+  own "beamer2slides" folder, appProperty `b2sHome`). Unset: root, a base/backup beside its file.
+  A thread that creates files carries the spec over (`guard.WayBack`).
 - **Fonts without internet**: a local google/fonts copy (`$B2S_FONT_SOURCE`, `fontfetch.use_source`,
   `AgentContext.font_source`), or font files handed to adopt (`--fonts`, `deck_adopt(fonts=)`,
   .ttf/.otf/.ttc/.woff/.woff2 named by their name table, `fontfiles.py`, `adopt.use_fonts`).

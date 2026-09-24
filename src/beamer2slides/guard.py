@@ -357,8 +357,8 @@ def copy_in_drive(drive, pid: str, name: str | None = None) -> dict:
     body = {"name": name or f"{info.get('name', 'deck')} (beamer2slides backup "
                             f"{time.strftime('%Y-%m-%d %H:%M')})",
             "appProperties": {"b2sBackupOf": pid}}
-    if info.get("parents"):
-        body["parents"] = info["parents"]
+    from .drive_folder import place
+    place(body, drive, info.get("parents"))
     copy = execute(drive.files().copy(fileId=pid, body=body, fields="id,name"))
     return {"presentationId": copy["id"], "name": copy.get("name"), "url": deck_url(copy["id"])}
 
@@ -429,7 +429,14 @@ class WayBack:
             creds = credentials_for_threads()   # resolved here: a worker inherits no context
         except Exception:  # noqa: BLE001 (no token: the old order, which says so where it fails)
             return
-        self.make = lambda: fn(slides_service(creds), drive_service(creds))
+        from .drive_folder import spec, use_folder
+        where = spec()   # (so is the folder a `--backup drive` copy goes into)
+
+        def make():
+            with use_folder(where):
+                return fn(slides_service(creds), drive_service(creds))
+
+        self.make = make
         pool = ThreadPoolExecutor(1, thread_name_prefix=name)
         try:
             self.job = pool.submit(self.make)

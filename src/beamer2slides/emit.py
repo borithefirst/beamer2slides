@@ -3364,6 +3364,10 @@ def measure_places(slides, pid: str, deck: dict, scale: float, fonts: FontMapper
     reqs, jobs = measure_jobs(deck, scale, fonts, placed, page_slide)
     if not jobs:
         return {}, []
+    from . import net
+    if net.downloads_off():  # (no thumbnail could be read: no scratch slides either)
+        print("picture places: predicted (downloads are switched off, so no thumbnail can be measured)")
+        return {}, []
     try:
         batch(slides, pid, reqs)
     except HttpError as e:
@@ -3458,8 +3462,9 @@ def import_presentation(slides, drive, title: str, page_w: float, page_h: float,
         execute(drive.files().update(fileId=existing, media_body=media, fields="id"))
         pid = existing
     else:
+        from .drive_folder import place
         pid = execute(drive.files().create(
-            body={"name": title, "mimeType": "application/vnd.google-apps.presentation"},
+            body=place({"name": title, "mimeType": "application/vnd.google-apps.presentation"}, drive),
             media_body=media, fields="id"))["id"]
     pres = execute(slides.presentations().get(presentationId=pid))
     got = pres["pageSize"]["height"]["magnitude"] / pres["pageSize"]["width"]["magnitude"]

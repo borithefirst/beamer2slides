@@ -224,6 +224,16 @@ def cmd_docs(args) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(prog="beamer2slides")
+    ap.add_argument("--no-downloads", action="store_true",
+                    help="never download a URL (pictures, thumbnails, fonts): the deck's pictures are "
+                         "signed from this run's files and a Drive export instead; inline formula "
+                         "pictures keep their predicted places and `fidelity` cannot run "
+                         "(= $B2S_NO_DOWNLOADS=1, net.no_downloads)")
+    ap.add_argument("--drive-folder", metavar="ID|auto",
+                    help="put every file this creates in Drive (decks, documents, sync bases, backup "
+                         "copies, temporary staging) into this folder; `auto` = a 'beamer2slides' folder "
+                         "of the app's own (= $B2S_DRIVE_FOLDER, drive_folder.py). Default: new decks in "
+                         "My Drive's root, a base beside its deck")
     sub = ap.add_subparsers(dest="command", required=True)
     for name, help_text in (("classify", "extract + classify a PDF, with debug images"),
                             ("convert", "full conversion into a Google Slides deck"),
@@ -350,6 +360,14 @@ def main() -> None:
     c.add_argument("--host", default="127.0.0.1", help="0.0.0.0 to serve other machines (default: this one only)")
     c.add_argument("--port", type=int, default=7860)
     args = ap.parse_args()
+    if args.no_downloads:
+        import os
+        from .net import NO_DOWNLOADS
+        os.environ[NO_DOWNLOADS] = "1"   # (this process only; `google_auth.fetcher_for_threads`)
+    if args.drive_folder:
+        import os
+        from .drive_folder import FOLDER_ENV
+        os.environ[FOLDER_ENV] = args.drive_folder   # (this process only; worker threads see it too)
     if args.command == "playground":
         from .playground.server import serve
         return serve(args.host, args.port)

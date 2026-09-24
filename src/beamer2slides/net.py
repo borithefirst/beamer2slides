@@ -44,6 +44,31 @@ def urllib_fetch(url: str) -> bytes:
         return reply.read()
 
 
+NO_DOWNLOADS = "B2S_NO_DOWNLOADS"  # set (not "0"): `no_downloads` is the default fetcher
+
+
+def no_downloads(url: str) -> bytes:
+    """The fetcher that fetches nothing: `$B2S_NO_DOWNLOADS=1`, `--no-downloads`, or installed
+    (`google_auth.use_fetcher`, `AgentContext(fetch_google_content=net.no_downloads)`).
+
+    Nothing a conversion or a sync decides needs a download: pictures this run uploaded are signed
+    from their files and the others come out of a Drive export (`deck_pictures`). What it costs:
+    inline formula and overlay pictures keep their predicted places (`emit.measure_places` is
+    skipped, and so are its scratch slides), `fidelity` has no thumbnails, a picture a reader put
+    into a Google Doc is not saved beside its canonical file, and fonts come from
+    `$B2S_FONT_SOURCE` or stand-ins instead of google/fonts."""
+    raise PermissionError(f"downloads are switched off ({NO_DOWNLOADS})")
+
+
+def downloads_off(fetch: Fetch | None = None) -> bool:
+    """Whether `fetch` (None: the one installed for this context) is `no_downloads`, so a site
+    whose whole point is a download can skip the work that leads up to it."""
+    if fetch is None:
+        from .google_auth import fetcher_for_threads
+        fetch = fetcher_for_threads()
+    return fetch is no_downloads
+
+
 def download(url: str, fetch: Fetch | None = None, tries: int = 3) -> bytes:
     """`fetch(url)`, tried up to `tries` times with a growing pause (1, 2, 4... s); raises what
     the last try raised. `fetch` None: the fetcher installed for this context

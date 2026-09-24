@@ -82,6 +82,10 @@ class AgentContext:
     #: None: they are downloaded from GitHub through `fetch_google_content` (or urllib), and a
     #: fetcher that refuses GitHub means the deck is set in stand-ins, which the result names.
     font_source: str | Path | None = None
+    #: Where every file the library creates in Drive goes (`drive_folder`): a folder id the app
+    #: can see, or `"auto"` for a "beamer2slides" folder of the app's own. None: new decks and
+    #: documents in My Drive's root, a base or backup beside its file, as at a terminal.
+    drive_folder: str | None = None
 
     @property
     def ephemeral(self) -> bool:
@@ -248,6 +252,9 @@ def tool(name: str, needs: tuple[str, ...] = (READS,)):
                         if ctx.font_source:
                             from .. import fontfetch
                             hooks.enter_context(fontfetch.use_source(ctx.font_source))
+                        if ctx.drive_folder:
+                            from .. import drive_folder
+                            hooks.enter_context(drive_folder.use_folder(ctx.drive_folder))
                         fn(job, *args, **kw)
                 except Refused as exc:
                     _refuse(job, exc.code, str(exc), exc.data)
