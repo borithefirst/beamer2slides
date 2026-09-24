@@ -1785,17 +1785,30 @@ def label_inside(node: dict) -> bool:
 
 
 def node_template_key(node: dict) -> tuple:
-    return node["shape"], None, None
+    """A node's template: its preset, and for rounded corners of a known radius the preset's
+    adjustment (as `template_key` gives a panel's) - createShape only makes the default."""
+    x0, y0, x1, y1 = node["bbox"]
+    adj = None
+    if node["shape"] == "ROUND_RECTANGLE" and node.get("radius"):
+        adj = min(0.5, round(node["radius"] / max(min(x1 - x0, y1 - y0), 0.01), 2))
+    return node["shape"], adj, None
+
+
+def node_templated(node: dict) -> bool:
+    """A node copied from a template shape: its label fits inside, or its corners have a radius."""
+    return bool(node["shape"]) and (label_inside(node) or node_template_key(node)[1] is not None)
 
 
 def bend_template_key(line: dict) -> tuple:
-    """An elbow connector (bentConnector3) turning at its start (|-, adj 0) or its end (-|)."""
+    """An elbow connector (bentConnector3) turning at its start (|-, adj 0) or its end (-|).
+    classify writes only |- now (at adj 1 Slides drew the turn halfway); an old base's -|
+    lines keep their key, so their live objects are never copied for a |- one."""
     return "BENT_CONNECTOR", 0.0 if line["bend"] == "vh" else 1.0, None
 
 
 def element_template_keys(el: dict, scale: float) -> list[tuple]:
     if el["kind"] == "diagram":
-        return [node_template_key(n) for n in el["nodes"] if n["shape"] and label_inside(n)] + \
+        return [node_template_key(n) for n in el["nodes"] if node_templated(n)] + \
                [bend_template_key(ln) for ln in el["lines"] if ln.get("bend")]
     key = template_key(el, scale)
     return [key] if key else []
@@ -1870,6 +1883,7 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
         text = "\n".join("".join(r["text"] for r in runs).strip() for runs in node["paragraphs"])
         card = node.get("text")  # a card's text: a text box on the PDF baselines (classify.card_text)
         inside = not card and bool(node["shape"]) and label_inside(node) and template is not None
+        copied = template is not None and node_templated(node)
         props = None if node["shape"] is None else {"contentAlignment": "MIDDLE", "autofit": {"autofitType": "NONE"},
                  "shapeBackgroundFill": ({"solidFill": {"color": rgb(node["fill"])["opaqueColor"]}} if node["fill"]
                                          else {"propertyState": "NOT_RENDERED"}),
@@ -1884,7 +1898,7 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
                 fields[fields.index("shapeBackgroundFill")] = "shapeBackgroundFill.propertyState"
             else:
                 fields[fields.index("shapeBackgroundFill")] = "shapeBackgroundFill.solidFill.color"
-            if inside:
+            if copied:
                 tpl = template(node_template_key(node))
                 reqs += [
                     {"duplicateObject": {"objectId": tpl["id"], "objectIds": {tpl["id"]: oid}}},

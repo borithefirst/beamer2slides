@@ -370,6 +370,8 @@ def extract_page(page: Page, label: str) -> dict:
         "bbox": _r(d["rect"]), "fill": _hex(d.get("fill")), "stroke": _hex(d.get("color")),
         "width": round(d["width"], 2) if d.get("width") else None,
         "fill_opacity": round(_opacity(d, "fill_opacity"), 3),
+        "stroke_opacity": round(_opacity(d, "stroke_opacity"), 3),
+        "soft_mask": bool(d.get("soft_mask")),  # a soft mask or a blend mode (multiply)
         "corners": _rounded_corners(d),
         "path": _path(d),
     } for i, d in ((i, _visible(d)) for i, d in enumerate(page_drawings)) if d is not None]
@@ -405,22 +407,36 @@ def select_overlays(raw: dict, mode: str) -> dict:
         return raw
     pages = raw["pages"]
 
-    def heading(p: dict) -> str:  # text in the top fifth of the page: the frame title
-        return " ".join(s["text"].strip() for s in sorted(p["spans"], key=lambda s: s["bbox"][0])
-                        if s["bbox"][3] < 0.2 * p["size"][1])
+    def title(p: dict) -> str:
+        """The frame title: the largest text in the top fifth of the page. (Not all of that
+        band: a subtitle set with \\framesubtitle<n>, or a TikZ label drawn up there on one
+        step, changed the band's text from step to step and split one frame into several.)"""
+        band = [s for s in p["spans"] if s["bbox"][3] < 0.2 * p["size"][1] and s["text"].strip()]
+        if not band:
+            return ""
+        big = max(s["size"] for s in band)
+        return " ".join(s["text"].strip() for s in sorted(band, key=lambda s: (round(s["origin"][1]), s["bbox"][0]))
+                        if s["size"] >= 0.9 * big)
 
     def words(p: dict) -> list[str]:  # what is drawn, seen or not (`hidden_text`)
         return [w for t in [s["text"] for s in p["spans"]] + p.get("hidden_text", []) for w in t.split()]
 
     def same_frame(a: dict, b: dict) -> bool:
-        """Overlay steps share the frame number, the heading and most of their text (a later
-        step shows what the earlier one did). Themes that don't count some frames (title and
-        section pages) share numbers too, but not their text."""
-        if a["label"] != b["label"] or heading(a) != heading(b):
+        """Overlay steps share the frame number, and the title or nearly all of their text (a
+        later step shows what the earlier one did). Themes that don't count some frames (title
+        and section pages) share numbers too, but neither their title nor their text. With
+        another title, only a step that keeps nearly everything ("Quiz" -> "Quiz: answer").
+        With the title the same, \\only<n> may swap most of the words (a block's title and body,
+        an image's caption): a third is enough, title and footline included. (The pages of a
+        frame with allowframebreaks share their number too, but beamer's continuation text
+        gives them another title from the second on; one set to nothing makes them one frame.)"""
+        if a["label"] != b["label"]:
             return False
         wa, wb = words(a), set(words(b))
-        # \only<n> swaps some text between steps, so require a majority, not everything.
-        return not wa or sum(w in wb for w in wa) >= 0.5 * len(wa)
+        if not wa:
+            return title(a) == title(b)
+        share = sum(w in wb for w in wa) / len(wa)
+        return share >= 0.8 or (title(a) == title(b) and share >= 0.3)
 
     kept = [p for i, p in enumerate(pages) if i + 1 == len(pages) or not same_frame(p, pages[i + 1])]
     return {**raw, "pages": kept, "overlays": {"mode": mode, "dropped": len(pages) - len(kept)}}

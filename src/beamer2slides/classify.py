@@ -2549,6 +2549,10 @@ class PageClassifier:
             path = d.get("path")
             if path is None:
                 return None
+            if d.get("soft_mask") or d.get("fill_opacity", 1.0) < 0.99 or d.get("stroke_opacity", 1.0) < 0.99:
+                # A see-through node or line (opacity=0.3 on the steps still to come, a
+                # multiplied fill): native shapes came out opaque, the dimmed step drawn in full.
+                return None
             ops = "".join(op for op, _ in path)
             shape = {"re": "RECTANGLE", "lclclclc": "ROUND_RECTANGLE", "clclclcl": "ROUND_RECTANGLE",
                      "cccc": "ELLIPSE" if upright_ellipse(path, r) else None}.get(ops)
@@ -2558,7 +2562,10 @@ class PageClassifier:
             if shape and r.w > 3 and r.h > 3:
                 nodes.append({"rect": r, "shape": shape, "spans": [],
                               "fill": d["fill"] if "f" in d["type"] else None,
-                              "stroke": d["stroke"] if "s" in d["type"] else None, "width": d["width"]})
+                              "stroke": d["stroke"] if "s" in d["type"] else None, "width": d["width"],
+                              # rounded corners=3pt: without it the node got Slides' default rounding
+                              **({"radius": max(d["corners"].values())}
+                                 if shape == "ROUND_RECTANGLE" and d.get("corners") else {})})
             elif d["type"] == "s" and set(ops) == {"l"} and max(r.w, r.h) > 6:
                 segments = [(tuple(a), tuple(b)) for _, (a, b) in path]
                 style = {"stroke": d["stroke"] or "#000000", "width": d["width"] or 0.4, "arrow_from": None, "arrow_to": None}
@@ -2566,9 +2573,12 @@ class PageClassifier:
                 if p0 and math.dist(p1, p1b) < 0.05 and (abs(p0[0] - p1[0]) < 0.05) != (abs(p0[1] - p1[1]) < 0.05) \
                         and (abs(p1[0] - p2[0]) < 0.05) != (abs(p1[1] - p2[1]) < 0.05) \
                         and (abs(p0[0] - p1[0]) < 0.05) != (abs(p1[0] - p2[0]) < 0.05):
-                    # An orthogonal connector (|- or -|): one elbow line, vertical or horizontal first.
-                    lines.append({"from": list(p0), "via": list(p1), "to": list(p2),
-                                  "bend": "vh" if abs(p0[0] - p1[0]) < 0.05 else "hv", **style})
+                    # An orthogonal connector (|- or -|): one elbow line, vertical first. A -| one
+                    # is written from its other end: Slides drew bentConnector3 at adj 1 (turn at
+                    # the end) with its turn halfway, three segments; adj 0 draws |- right.
+                    if abs(p0[0] - p1[0]) >= 0.05:
+                        p0, p2 = p2, p0
+                    lines.append({"from": list(p0), "via": list(p1), "to": list(p2), "bend": "vh", **style})
                 else:  # straight lines, and other polylines one segment at a time
                     for (x1, y1), (x2, y2) in segments:
                         lines.append({"from": [x1, y1], "to": [x2, y2], **style})
@@ -2637,11 +2647,13 @@ class PageClassifier:
                 [n for n in owners if area(n) <= 1.02 * smallest + 0.01][-1]["spans"].append(s)
             else:
                 free.append(s)  # edge labels and captions: a text box in the group
-        # Free labels on one baseline and close together are one label.
+        # Free labels on one baseline and close together are one label. (Close on both sides:
+        # two edge labels whose baselines round apart sort right to left, and the one-sided gap
+        # joined them across the node between - "connect SYN+ACK" over two arrows.)
         for s in sorted(free, key=lambda s: (round(s.baseline), s.rect.x0)):
             last = nodes[-1] if nodes and nodes[-1]["shape"] is None else None
             if last and abs(last["spans"][-1].baseline - s.baseline) <= 0.3 * s.size and \
-                    s.rect.x0 - last["spans"][-1].rect.x1 <= 0.5 * s.size:
+                    -0.3 * s.size <= s.rect.x0 - last["spans"][-1].rect.x1 <= 0.5 * s.size:
                 last["spans"].append(s)
                 last["rect"] = last["rect"].union(s.rect)
             else:
@@ -2661,6 +2673,7 @@ class PageClassifier:
                 "baselines": [round(row[0].baseline, 2) for row in rows],
                 "label_w": round(max((max(s.rect.x1 for s in row) - min(s.rect.x0 for s in row) for row in rows), default=0.0), 2),
                 "text": card_text(n["rect"], rows) if n["shape"] else None,
+                **({"radius": n["radius"]} if "radius" in n else {}),
             })
         return {"id": f"p{self.page['index']}dg{index}", "kind": "diagram", "role": "figure",
                 "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,
