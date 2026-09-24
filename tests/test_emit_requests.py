@@ -1292,7 +1292,10 @@ def test_a_wrapped_cell_wraps_in_its_column():
     el["row_heights"] = [16.59, 10.96, 32.88, 10.96, 10.96]
     el["frame"][3] = el["rules"][2]["y"] = 177.47
     lay = emit.table_layout(el, TIGHT_SCALE, FONTS, imported=True)
-    widest = emit.slides_width([run_of("A cell set in a paragraph", 8.97, font="CMSS9")], TIGHT_SCALE, FONTS)
+    # (a cell's run is set at the table's size, not shaped: `cell`, FontMapper.shape_ratio; its
+    # numbers, as wide as Lato sets them, shrink this tight table a little)
+    widest = emit.slides_width([{**run_of("A cell set in a paragraph", 8.97 * lay["shrink"], font="CMSS9"), "cell": True}],
+                               TIGHT_SCALE, FONTS)
     assert lay["cell_width"][(2, 1)] == pytest.approx(widest)
     assert widest + 2 * emit.TABLE_CELL_PAD <= lay["widths"][1] < emit.slides_width(el["cells"][2][1], TIGHT_SCALE, FONTS)
     assert lay["heights"][2] >= 3 * emit.LINE_EM * lay["z"] - 1 and lay["ratios"][2] == pytest.approx(1.0)
