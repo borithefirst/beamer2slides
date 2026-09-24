@@ -1,5 +1,6 @@
 """Stage 4: build the Google Slides deck from deck.json and the background images."""
 
+import functools
 import hashlib
 import io
 import json
@@ -1556,7 +1557,10 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
             table = {}
             unmeasured = ROBOTO_MONO_ADVANCE_EM
         elif family in ADVANCES:
-            table, unmeasured = ADVANCES[family][style], UNMEASURED_ADVANCE_EM
+            # (a symbol the face lacks comes from Slides' fallback font, as probe_symbols measured
+            # it: ⊂ is 0.981 em, not 0.6 - a line with '⊂ ℝ' came out 8 pt wider than predicted,
+            # and a box sized to it broke a word early, V-control-16)
+            table, unmeasured = face_advances(family, style), UNMEASURED_ADVANCE_EM
         else:
             return None
         if run.get("script"):
@@ -1570,6 +1574,12 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
             else:
                 total += table.get(ch, wide_advance(ch, unmeasured)) * size
     return total
+
+
+@functools.lru_cache(maxsize=None)
+def face_advances(family: str, style: str) -> dict[str, float]:
+    """A calibrated face's advances (em), with Slides' fallback font's for the symbols it lacks."""
+    return {**SYMBOL_ADVANCE_EM, **ADVANCES[family][style]}
 
 
 def wide_advance(ch: str, unmeasured: float) -> float:
@@ -1755,6 +1765,42 @@ def pdf_line_breaks(p: dict, scale: float | None = None, fonts: "FontMapper | No
     return starts
 
 
+def recorded_starts(p: dict, text: str) -> list[int] | None:
+    """Where classify found the paragraph's lines after the first start in `text`
+    (`classify.line_starts`: each at a word, then the text's length), or None when it said
+    nothing or said it of another text or other lines (merged words, an IR from elsewhere).
+    What the page says wins over setting the words into the lines' extents (pdf_line_breaks),
+    which needs TeX's widths: a Palatino paragraph, or one with a formula's letters, was not
+    measured and Slides re-broke it (V-control-16, V-fonts-8, lang-18)."""
+    got = p.get("line_starts")
+    if not got or len(got) != len(p["lines"]) or got[-1] != len(text):
+        return None
+    starts = got[:-1]
+    if any(not 0 < b < len(text) or text[b - 1] != " " or text[b] == " " for b in starts) or \
+            any(b <= a for a, b in zip(starts, starts[1:])):
+        return None
+    return starts
+
+
+def guessed_chars(runs: list[dict], scale: float, fonts: "FontMapper") -> int:
+    """How many of the runs' characters slides_width guesses (no measured advance: polytonic
+    Greek in PT Serif). Where TeX's widths did not confirm the lines (recorded_starts), a box
+    measured from guesses is no better than the PDF's extents: Greek at 0.6 em came out wider
+    than Slides sets it (r1_lang_v1 s4, 4 lines of 5 either way)."""
+    count = 0
+    for run in runs:
+        family, _ = fonts(run, scale)
+        if family == FONT_FOR_FAMILY["mono"]:
+            continue
+        if family not in ADVANCES:
+            return len(run["text"])
+        table = face_advances(family, fonts.face(run))
+        count += sum(1 for ch in run["text"] if (ch.upper() if run.get("smallcaps") else ch) not in table
+                     and ch not in " " and not unicodedata.combining(ch) and ch not in bidi.MARKS
+                     and unicodedata.east_asian_width(ch) not in "WF")
+    return count
+
+
 def slides_lines(p: dict, scale: float, fonts: "FontMapper") -> tuple[float, float] | None:
     """(right edge of the widest line, the least right edge at which a line's next word would
     join it) in Slides pt, of a left-aligned paragraph's PDF lines as Slides sets their words
@@ -1764,7 +1810,12 @@ def slides_lines(p: dict, scale: float, fonts: "FontMapper") -> tuple[float, flo
     text = "".join(r["text"] for r in runs)
     if any(r.get("hole") or SOFT_BREAK in r["text"] or "\t" in r["text"] for r in runs) or not text.strip():
         return None
-    starts = [] if len(lines) == 1 else pdf_line_breaks(p, scale, fonts)
+    # (a justified paragraph TeX's widths cannot measure keeps its own edge, flowed into it:
+    # flowed_justified_right; measured by its lines, one set a hair wider in Slides than TeX's
+    # shrunk line gave up JUSTIFIED for START)
+    recorded = recorded_starts(p, text) if len(lines) > 1 and not p.get("justified") and \
+        guessed_chars(runs, scale, fonts) <= GUESSED_RUN_CHARS else None
+    starts = [] if len(lines) == 1 else recorded or pdf_line_breaks(p, scale, fonts)
     if starts is None:
         return None
     end = len(text.rstrip())

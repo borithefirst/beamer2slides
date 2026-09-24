@@ -109,6 +109,19 @@ def test_an_attribution_flush_with_the_right_aligned_quote_above_is_right_aligne
     assert got["Body text starts at the left margin"] == "left"
 
 
+def test_a_word_set_in_two_spans_is_one_word_when_it_would_end_the_line_above():
+    """\\textsc{Goldbach}: its capital in one span, its small letters in the next. The capital
+    alone would have fitted at the end of the line above, so the line was taken for one TeX
+    broke by hand, and the paragraph cut in two there (r2_fonts_pazo s5, V-fonts-8)."""
+    from .test_columns import W, paragraphs, span, text
+    size = 11.0
+    spans = [span("Euler writes freely with infinite series and the modern reader", 30.0, 100.0, size, w=W - 60.0),
+             span("must supply the rigour himself. The letters to", 30.0, 113.5, size, w=260.0),
+             span("G", 30.0, 127.0, size, w=7.5), span("OLDBACH are essential context.", 37.5, 127.0, size, w=150.0)]
+    got = [text(p) for p in paragraphs(spans)]
+    assert len(got) == 1 and "letters to GOLDBACH are" in got[0], got
+
+
 def test_nested_numbers_are_labels_like_their_parents():
     """\\item[2.1] under an enumerate item: its label and text are a tab apart like 1. and 2."""
     got = [paragraph_text(p) for p in paras(5) if p["tab_x0"]]

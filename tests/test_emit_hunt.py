@@ -203,6 +203,41 @@ def test_a_thin_space_and_a_math_symbol_leave_a_paragraph_measurable():
     assert emit.slides_width([run_of("D̄", **oblique)], scale, FONTS) == emit.slides_width([run_of("D", **oblique)], scale, FONTS)
 
 
+def palatino_quote(**extra) -> dict:
+    """r1_lang_v1 s3: a Palatino quotation of two lines (no CM metrics: TeX's widths unknown)."""
+    text = "„Erhaben ist, was auch nur denken zu können ein Vermögen des Gemüts beweiset, das jeden Maßstab der Sinne übertrifft.“"
+    return {"id": "p2t1", "kind": "text", "role": "body", "code": False, "bbox": [50.17, 70.43, 403.6, 95.06],
+            "paragraphs": [{"align": "left", "level": 0, "bullet": None, "size": 10.91, "text_x0": 50.17, "tab_x0": None,
+                            "lines": [{"baseline": 78.41, "x0": 50.17, "x1": 403.6}, {"baseline": 91.96, "x0": 50.17, "x1": 227.42}],
+                            "wrap_limit": 422.39, **extra,
+                            "runs": [run_of(text, font="PalatinoLinotype-Italic", family="serif", italic=True)]}]}
+
+
+def test_lines_classify_found_measure_a_paragraph_tex_widths_cannot():
+    # r1_lang_v1 s3 (judge-v1-s3-quote): the box came from the PDF's extents, 589 pt, and PT
+    # Serif, wider than Palatino, broke the first line after 'Gemüts'. Where each line starts
+    # (classify.line_starts) is enough to set its words as Slides will.
+    scale = SLIDE_W / 453.54
+    el = palatino_quote()
+    assert emit.slides_lines(el["paragraphs"][0], scale, FONTS) is None  # (no TeX widths to find the lines with)
+    el = palatino_quote(line_starts=[78, 118])
+    widest, joins = emit.slides_lines(el["paragraphs"][0], scale, FONTS)
+    assert widest + emit.LINE_MARGIN <= box_right(el, scale) < joins
+    # ... and never for another text than the one they were counted in (merged words)
+    edited = palatino_quote(line_starts=[78, 118])
+    edited["paragraphs"][0]["runs"][0]["text"] = "„Erhaben ist, was nur denken zu können ein Vermögen des Gemüts beweiset, das jeden Maßstab der Sinne übertrifft.“"
+    assert emit.slides_lines(edited["paragraphs"][0], scale, FONTS) is None
+
+
+def test_a_symbol_the_face_lacks_is_as_wide_as_slides_fallback_sets_it():
+    # V-control-16: '⊂' at 0.6 em (unmeasured) where Slides' fallback font sets 0.981 em
+    # (probe_symbols): the line came out 8 pt wider than predicted and its last word wrapped.
+    scale = SLIDE_W / 362.83
+    run = run_of("⊂", font="CMSY10", family="math")
+    family, size = FONTS(run, scale)
+    assert emit.slides_width([run], scale, FONTS) == pytest.approx(emit.SYMBOL_ADVANCE_EM["⊂"] * size)
+
+
 # ---------------------------------------------------------------- UTF-16 ranges
 
 def test_text_ranges_count_utf16_units():
