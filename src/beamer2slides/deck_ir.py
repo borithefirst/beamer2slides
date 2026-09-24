@@ -353,9 +353,10 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
             weight = (st.get("weightedFontFamily") or {}).get("weight") or base.get("weight") or 400
             if st.get("bold") is not None and "weightedFontFamily" not in st:
                 weight = 700 if st["bold"] else 400
-            # our own decks write OPTICAL_WEIGHT on a regular small sans cut (FontMapper.optical_weight),
-            # which Slides reads back `bold: true`: that is its regular face, not a bold one pull
-            # would write as \textbf (the converter's own bold is 700; 600 is what older decks wrote)
+            # our own decks write OPTICAL_WEIGHT (600) on a regular small sans cut
+            # (FontMapper.optical_weight); the decks of wave 4 wrote 800, which Slides reads back
+            # `bold: true`: either is a regular 6 pt cut, not a bold one pull would write as \textbf
+            # (the converter's own bold is 700)
             optical = not foreign and weight in OPTICAL_WEIGHTS_READ and FAMILY_FOR_FONT.get(family) == "sans"
             if optical:
                 bold = False

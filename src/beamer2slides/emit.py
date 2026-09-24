@@ -106,18 +106,28 @@ OPTICAL_WIDTH_MAX = 1.13
 # A small optical cut is heavier per em as well: the stem of CM Sans's l and I, per em, relative to
 # its 10.95 pt cut (cm-super's sfss*.pfb) is 1.99 at 5 pt, 1.38-1.52 at 6 pt, 1.17 at 7 pt, 1.10 at
 # 8 pt, 1.06 at 9 pt and 0.80 at 14.4 pt; Lato Bold's is 1.38-1.39 times its Regular's. A sans cut
-# nearer the Bold than the Regular (6 pt and less: beamer's \tiny footlines, frame counters) is
-# set heavier than regular, so a footline keeps the weight it has against the body text: in Lato
-# Regular, "M. Keller" and "June 2026" read as a lighter face than the PDF's. Slides draws Lato
-# 500 and 600 as its Regular and 700-800 as its Bold (tools/probe_font_weights.py, r8: ink per pt
-# 79.0 at 400-600, 106.9 at 700 and 800), so 600 drew the footline as light as before. The weight
-# is 800: drawn Bold, read back `bold: true` with weight 800, which the converter's own bold (700)
-# never writes - deck_ir reads our 800 back regular. It is written without a `bold` field: the
-# API applies `bold` after the weight, and a `bold: false` could take it back to 400.
+# nearer the Bold than the Regular (6 pt and less: beamer's \tiny footlines, frame counters)
+# was set heavier than regular (wave 4: Lato 800, which Slides draws as its Bold). Measured on
+# the r8 (Lato 600, drawn Regular) and r9 (800) renders against the PDF's, stroke width as 2 x ink
+# area / ink perimeter at 1600 px over eight footline boxes of control_a2, control_c1 and sci_v1:
+# PDF 1.85 px, Lato Regular 1.75 (-6%), Lato Bold 2.35 (+27%); body text (CMSS 10.95 against
+# Lato Regular) 0.92 of Lato's. Bold was too heavy on every slide, and a \tiny reference block
+# lost the contrast with its bold volume numbers (sci_v1 s8). No served medium lands between:
+# Slides draws Lato 500/600 as Regular, and Source Sans 3 600, width-matched, is +31% on Lato
+# Regular's stroke (probe_font_weights: 4.52 px at 24 pt against Lato's 3.58, 4% narrower) - as
+# heavy as the Bold. So the cut is drawn Regular, as the nearest face. It is written at 600 all
+# the same: Slides draws that weight as Regular and reads it back as written (`bold: false`,
+# weight 600), which the converter writes nowhere else - deck_ir takes it for a 6 pt sans cut,
+# whose width it inverts as such (OPTICAL_WIDTH_MAX; as CM's 8 pt cut it came back 6% large).
+# Written without a `bold` field: the API applies `bold` after the weight, and a `bold: false`
+# could take it back to 400.
 OPTICAL_WEIGHT_DESIGN = {"sans": 6.0}
-OPTICAL_WEIGHT = 800
-# What converted decks wrote before (drawn Regular): still read back regular.
-OPTICAL_WEIGHTS_READ = (600, OPTICAL_WEIGHT)
+OPTICAL_WEIGHT = 600
+# Weights read back as a small sans cut, not bold: 600 (drawn Regular), and 800 (drawn Bold),
+# which the decks converted between wave 4 and wave 5 wrote.
+OPTICAL_WEIGHTS_READ = (OPTICAL_WEIGHT, 800)
+# The weights Slides draws with Lato's Bold face (probe_font_weights: 500 and 600 are Regular).
+DRAWN_BOLD_WEIGHT = 700
 
 
 def optical_width(family: str, design: float) -> float:
@@ -303,15 +313,18 @@ class FontMapper:
 
     @staticmethod
     def optical_weight(run: dict) -> bool:
-        """Whether a regular run is set heavier for its small optical cut (OPTICAL_WEIGHT_DESIGN)."""
+        """Whether a regular run is written at OPTICAL_WEIGHT for its small optical cut
+        (OPTICAL_WEIGHT_DESIGN)."""
         if run["bold"] or google_font(run["font"]) or run["family"] not in OPTICAL_WEIGHT_DESIGN:
             return False
         design = font_info(run["font"]).design_size
         return design is not None and design <= OPTICAL_WEIGHT_DESIGN[run["family"]]
 
     def face(self, run: dict) -> str:
-        """The ADVANCES style Slides draws a run in: an optically heavier run takes the bold face."""
-        return STYLE_KEY[(bool(run["bold"]) or self.optical_weight(run), bool(run["italic"]))]
+        """The ADVANCES style Slides draws a run in: a run written at OPTICAL_WEIGHT takes the bold
+        face only where Slides draws that weight bold (DRAWN_BOLD_WEIGHT)."""
+        heavy = OPTICAL_WEIGHT >= DRAWN_BOLD_WEIGHT and self.optical_weight(run)
+        return STYLE_KEY[(bool(run["bold"]) or heavy, bool(run["italic"]))]
 
     def width_ratio(self, font: str, family: str, bold: bool, italic: bool) -> float:
         """Expected Slides width / PDF width of a run after the size correction: bold and
@@ -1565,7 +1578,7 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
     total = 0.0
     for run in runs:
         family, size = fonts(run, scale)
-        style = fonts.face(run)  # (a small optical cut is drawn heavier: FontMapper.optical_weight)
+        style = fonts.face(run)  # (the face Slides draws a small optical cut's weight in: FontMapper.face)
         if family == FONT_FOR_FAMILY["mono"]:
             table = {}
             unmeasured = ROBOTO_MONO_ADVANCE_EM
