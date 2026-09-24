@@ -230,6 +230,45 @@ def test_holes_with_no_word_between_them_are_one_hole():
     assert len(line.holes) == 2
 
 
+def test_a_node_labelled_with_an_icon_keeps_its_diagram_a_picture():
+    """r1_design_v2/v3 s4: \\faSearch in a TikZ node. The icon font's glyph has no Unicode, and as
+    a native node's label it read U+FFFD (a diamond with a question mark)."""
+    from .test_charts_diagrams import Page, body_text, elements, lines, rect
+
+    def page(icon: bool) -> Page:
+        p = Page()
+        for x0 in (62, 150):
+            p.draw(rect(x0, 70, x0 + 62, 100), type="fs", fill="#ffffff", stroke="#23373b", width=0.8)
+        if icon:
+            p.text("�", 68, 88, 7.97, font="FontAwesome5Free-Solid", w=7)
+        p.text("Query", 80, 88, 7.97)
+        p.text("Index", 165, 88, 7.97)
+        p.draw(lines((124, 85), (150, 85)), type="s", stroke="#23373b", width=0.8)
+        body_text(p)
+        return p
+
+    assert [e["kind"] for e in elements(page(False)) if e["kind"] in ("diagram", "image")] == ["diagram"]
+    kinds = [e["kind"] for e in elements(page(True))]
+    assert "diagram" not in kinds and "image" in kinds
+
+
+def test_a_line_opening_with_an_icon_stays_text():
+    """r1_design_v1 s9, v2 s7, v3 s6: '\\faEnvelope\\ Next update: 12 January 2027', checklist items
+    with \\faCheckSquare bullets. The icon became the line's bullet, but its U+FFFD still counted
+    in the line's text: the line was 'complex' math, one picture of its words, bullet included."""
+    from .test_charts_diagrams import Page, body_text, deck
+
+    p = Page()
+    p.text("�", 30, 60, 9.96, font="FontAwesome5Free-Solid", w=8.7)
+    p.words("Next update: 12 January 2027", 42.3, 60, 9.96)
+    body_text(p)
+    slide = deck(p)["slides"][0]
+    assert not any(e.get("role") == "math" for e in slide["elements"])
+    texts = [" ".join("".join(r["text"] for r in par["runs"]) for par in e["paragraphs"])
+             for e in slide["elements"] if e["kind"] == "text"]
+    assert "Next update: 12 January 2027" in texts
+
+
 def ink(path) -> np.ndarray:
     """Dark opaque pixels of a picture (an anchored one has a transparent ground)."""
     px = np.array(Image.open(path).convert("RGBA")).astype(int)

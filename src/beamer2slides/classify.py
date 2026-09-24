@@ -2527,8 +2527,11 @@ class PageClassifier:
         mathy = sum(len(s.text.strip()) for s in spans if s.info.italic and len(s.text.strip()) <= 2)
         mathy += sum(ch in MATH_OPERATORS for ch in chars)
         formula_like = len(chars) > 0 and mathy / len(chars) >= 0.4  # a display equation, not prose
+        # (glyphs with no Unicode in what the line says: its icon bullet is no formula - an item
+        # with a \faCheck bullet became one picture of its words, bullet included)
+        tofu = "�" in chars
 
-        if not (math_font or scripts or bars or fractions or formula_like or "�" in line.text):
+        if not (math_font or scripts or bars or fractions or formula_like or tofu):
             return None
         holes = self.formula_holes(line, fractions)
         if holes:
@@ -2538,7 +2541,7 @@ class PageClassifier:
             hole_ids = {id(s) for h in line.holes for s in h}
             line.fractions = [f for f in fractions if not any(id(s) in hole_ids for s in f[1] + f[2])]
             return "inline"
-        if bars or "�" in line.text:
+        if bars or tofu:
             return "complex"
         if formula_like and not self.continues_prose(line):
             return "complex"
@@ -3919,7 +3922,9 @@ class PageClassifier:
         area = lambda n: n["rect"].w * n["rect"].h
         seen: list[Span] = []
         for s in spans:
-            if s.info.family == "math" or not s.horizontal:
+            if s.info.family in ("math", "icon") or "�" in s.text or not s.horizontal:
+                # (an icon font's glyph has no Unicode: as a node's label it read U+FFFD, a
+                # diamond with a question mark, where the picture shows the icon)
                 return None
             # A node drawn again on a later overlay step (\node<2->[fill=yellow] at (a) {A})
             # paints its label a second time on the same spot: one label, and it goes to the
