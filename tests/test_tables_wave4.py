@@ -1,4 +1,4 @@
-﻿"""Tables and code listings, wave 4 of the visual hunt: a shaded row's Slides edges on its band,
+"""Tables and code listings, wave 4 of the visual hunt: a shaded row's Slides edges on its band,
 measured columns that fit the PDF's frame keeping it, and the line numbers of a listing on the
 code's own pitch."""
 
@@ -67,3 +67,34 @@ def test_measured_columns_that_fit_the_frame_keep_the_pdf_width():
     # an unmeasured column still keeps its 8% for the substitute font
     loose = E.fit_columns(bounds, cols, scale, [None] * 5)
     assert loose[-1] > 338.69 + 4
+
+
+def google_steps(z: float, space_above: list[float]) -> list[float]:
+    """Where Google's renderer sets the baselines of single-line paragraphs of size z, relative to
+    the first: each step - the natural pitch and the paragraph's spaceAbove together - on whole
+    CSS pixels (measured on the hunt's r8 renders, see `emit.pitch_between`)."""
+    out = [0.0]
+    for sa in space_above[1:]:
+        out.append(out[-1] + round((E.LINE_EM * z + sa) / E.PX_PT) * E.PX_PT)
+    return out
+
+
+@pytest.mark.parametrize("font, z", [("Lato", 11.6), ("Roboto Mono", 13.4), ("Roboto Mono", 12.5), ("Lato", 8.7)])
+def test_a_listings_numbers_and_code_keep_the_pdf_pitch(font, z):
+    """r2_code_v3 slide 2, r2_code_v4 slides 2 and 6: a listing's line numbers (Lato 11.6 pt, one
+    right-aligned box) and its code (Roboto Mono 12.5-13.4 pt, another box), 20 Slides pt apart
+    in the PDF. The spaceAbove was written against the natural pitch snapped alone (14.25 pt for
+    11.6 pt Lato) while Google snaps the whole step: the numbers climbed 0.5 pt a line (4 pt
+    by line 14), the 13.4 pt code sank 0.5 pt a line, and the two boxes parted. Aimed unsnapped,
+    every line of either box stays within half a pixel of its PDF baseline."""
+    pitch = 12.6 * 720.0 / 453.54  # the PDF's 12.6 pt listing pitch in Slides pt
+    blank = {4, 9}  # empty source lines: a double step
+    targets, y = [], 100.0
+    for k in range(14):
+        targets.append(y)
+        y += pitch * (2 if k in blank else 1)
+    paras = [{"bullet": None, "lines": [{"baseline": t}]} for t in targets]
+    ratios, space_above = E.vertical_layout(paras, [[t] for t in targets], [z] * len(targets))
+    assert set(ratios) == {1.0}
+    landed = [targets[0] + s for s in google_steps(z, space_above)]
+    assert max(abs(a - b) for a, b in zip(landed, targets)) <= E.PX_PT / 2 + 1e-6

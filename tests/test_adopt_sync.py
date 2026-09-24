@@ -327,8 +327,9 @@ def test_the_gap_that_split_the_box_comes_back_out_of_the_baselines():
     baselines = [[l["baseline"] for l in p["lines"]] for p in paras]
     ratios, space_above = emit.vertical_layout(paras, baselines, [14.0, 14.0])
     assert space_above[1] > 0, "the gap is written, not lost"
-    lands = 52 + emit.pitch_between(14.0, ratios[0], 14.0, ratios[1]) + space_above[1]
-    assert abs(lands - 108) < 0.01, "the second paragraph's baseline lands where the PDF has it"
+    # (the step snaps to whole pixels with its space: within half a pixel)
+    lands = 52 + emit.pitch_between(14.0, ratios[0], 14.0, ratios[1], space_above[1])
+    assert abs(lands - 108) <= emit.PX_PT / 2, "the second paragraph's baseline lands where the PDF has it"
 
 
 def test_a_fold_never_turns_a_persons_filled_shape_into_a_text_box():

@@ -596,9 +596,14 @@ def inner_pitch(z1: float, r: float, z2: float) -> float:
     return DESCENT_EM * z1 + ASCENT_EM * z2 + extra_below(r, z1) + extra_above(r, z2)
 
 
-def pitch_between(z1: float, r1: float, z2: float, r2: float) -> float:
-    """Baseline distance from the last line of one paragraph to the first line of the next."""
-    return snap(DESCENT_EM * z1 + ASCENT_EM * z2 + extra_below(r1, z1) + extra_above(r2, z2))
+def pitch_between(z1: float, r1: float, z2: float, r2: float, gap: float = 0.0) -> float:
+    """Baseline distance from the last line of one paragraph to the first line of the next, `gap`
+    (spaceBelow + spaceAbove) apart. The step snaps to whole pixels as a whole, space included:
+    over the hunt's r8 renders (18 boxes of 5-14 single-line paragraphs, Lato, Roboto Mono,
+    Carlito, Fira Sans, 8.7-17.3 pt) snap(natural + gap) is 0.07 pt rms off Google's step, the
+    natural pitch snapped and the gap added 0.30 (a listing's Lato 11.6 pt numbers 0.5 pt short
+    a line, its Roboto Mono 13.4 pt code 0.5 pt long: r2_code_v3/v4)."""
+    return snap(DESCENT_EM * z1 + ASCENT_EM * z2 + extra_below(r1, z1) + extra_above(r2, z2) + gap)
 
 
 def solve_increasing(f, target: float, lo: float = 0.5, hi: float = 3.0) -> float:
@@ -709,9 +714,12 @@ def _vertical_pass(paras, baselines, lines, estimate):
                     # a lineSpacing below 100% moves the next single line up.
                     rn = max(0.5, 1 + gap / (0.75 * LINE_EM * zn))
                     pulled[i + 1] = rn
-                    natural = pitch_between(z, r, zn, rn)
-                space_above[i + 1] = max(0.0, baselines[i + 1][0] - last - natural)
-            first = last + natural + space_above[i + 1]
+                # (aimed unsnapped: the step snaps as a whole, its space included, `pitch_between`)
+                rn = pulled.get(i + 1, next_r)
+                unsnapped = DESCENT_EM * z + ASCENT_EM * zn + extra_below(r, z) + extra_above(rn, zn)
+                space_above[i + 1] = max(0.0, baselines[i + 1][0] - last - unsnapped)
+                natural = pitch_between(z, r, zn, rn, space_above[i + 1])
+            first = last + natural
     return ratios, space_above
 
 
