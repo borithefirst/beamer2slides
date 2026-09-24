@@ -4500,3 +4500,9 @@ table, an attribution overhang. 12 new (`out/hunt/r8_regressions.json`): long ar
 (sev 3), a matrix parenthesis split, formula pieces native beside pictures, a wrapped item's
 formula over its words, verse lines run together, RTL ball bullets flat discs, chart-list bullets
 in their first word's colour, a full-width ？ half-width, white nicks in a git graph.
+
+Probe (`tools/probe_font_weights.py`, 24 pt, ink per pt of line): Lato 300 43.4, 400/500/600 79.0-79.2
+(the same face), 700/800 107.0 (read back bold: true, weight 700 or 800 as written), 900 130.4. Noto
+Sans JP 100-500 all 74.9 (one weight served; Lato's own CJK fallback 74.7, the same face), 700 112.9;
+Noto Serif JP 300 47.0, 400 52.0; SC/KR like JP. Full-width （）？ stay full-width in Noto Sans JP.
+▶ ▸ ► ‣ ■ □ render in Lato (fallback), Noto Sans Symbols and Noto Sans Symbols 2, each its own shape.
