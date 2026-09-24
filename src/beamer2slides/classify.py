@@ -706,6 +706,57 @@ def span_runs(spans: list[Span]) -> list[dict]:
     return runs
 
 
+# An inline formula no wider than this share of its paragraph's widest line is set with no-break
+# spaces inside it (formula_groups): TeX kept it on one line, and Slides, whose substitute runs a
+# little narrower or wider, broke 'W_q = C/(cμ' from '− λ).' (r2_fonts_segoe s3). A longer one
+# keeps its spaces, or Slides would have to cut it inside a word.
+FORMULA_GLUE_SHARE = 0.5
+NBSP = " "
+
+
+def formula_groups(line: "Line", measure: float) -> dict[int, int]:
+    """The line's short inline formulas, as {id(span): formula}: runs of neighbouring spans in
+    reading order that are math (or hold no letter: CMR's '=', '(', digits), at least one of them
+    math, less than a \\quad apart, none in a hole, the whole no wider than FORMULA_GLUE_SHARE of
+    `measure`. The spaces between and inside their spans are written as no-break spaces
+    (PageClassifier.runs)."""
+    held = {id(s) for h in line.holes for s in h}
+    groups: list[list[Span]] = []
+    cur: list[Span] = []
+    for s, _ in reading_order(line):
+        if not isinstance(s, Span) or not s.text.strip() or s.info.family == "icon":
+            continue
+        formulaic = id(s) not in held and (s.info.family == "math" or not any(c.isalpha() for c in s.text))
+        if formulaic and cur and s.rect.x0 - cur[-1].rect.x1 < 0.9 * line.size:
+            cur.append(s)
+            continue
+        if cur:
+            groups.append(cur)
+        cur = [s] if formulaic else []
+    if cur:
+        groups.append(cur)
+    out = {}
+    for i, g in enumerate(groups):
+        if any(s.info.family == "math" for s in g) and \
+                max(s.rect.x1 for s in g) - min(s.rect.x0 for s in g) <= FORMULA_GLUE_SHARE * measure:
+            out.update((id(s), i) for s in g)
+    return out
+
+
+def glued(text: str, lead: bool, trail: bool = False) -> str:
+    """A formula's text with its spaces no-break: those between its characters, with `lead` its
+    leading ones (the space between it and the formula's span or piece before) and with `trail`
+    its trailing ones (a piece the formula's next piece follows)."""
+    text = re.sub(r"(?<=\S) +(?=\S)", lambda m: NBSP * len(m.group()), text)
+    if lead:
+        body = text.lstrip(" ")
+        text = NBSP * (len(text) - len(body)) + body
+    if trail:
+        body = text.rstrip(" ")
+        text = body + NBSP * (len(text) - len(body))
+    return text
+
+
 def prose_spaces(runs: list[dict]) -> None:
     """A word space at the edge of inline code belongs to the surrounding text: in a monospaced
     font it would be twice as wide. (In a table cell too: the span ' __exit__' comes with its
@@ -913,9 +964,20 @@ def cjk(ch: str) -> bool:
     return bool(ch) and script_of(ch) in ("han", "kana")
 
 
-def first_word_width(span: Span) -> float:
+def hyphen_cut(word: str) -> int | None:
+    """Where Slides may break inside `word`: just after its first hyphen that has a letter before
+    it and no digit after it (UAX #14 LB25, as `text_layout.wrap` and `emit.first_break`)."""
+    for i in range(1, len(word) - 1):
+        if word[i] == "-" and not word[i + 1].isdigit():
+            return i + 1
+    return None
+
+
+def first_word_width(span: Span, hyphens: bool = False) -> float:
     """Width of a span's first word: a span can hold one word or a whole line of them. In Chinese
-    or Japanese a line can break after any character, so a word there is one character."""
+    or Japanese a line can break after any character, so a word there is one character. With
+    `hyphens`, the word ends after a hyphen inside it, where Slides may break a line
+    (`hyphen_cut`)."""
     text = span.text.strip()
     if not text:
         return span.rect.w
@@ -924,22 +986,26 @@ def first_word_width(span: Span) -> float:
     cut = next((i for i, c in enumerate(word) if cjk(c)), None)
     if cut is not None:
         word = word[:max(cut, 1)]  # up to the first ideograph, or that one alone
+    elif hyphens and hyphen_cut(word):
+        word = word[:hyphen_cut(word)]
     return span.rect.w * weight(word) / weight(text)
 
 
-def line_word_width(line: "Line") -> float:
+def line_word_width(line: "Line", hyphens: bool = False) -> float:
     """Width of a line's first word, across the spans it is set in: a small-caps word is its
     capital in one span and its small letters in the next ('G' + 'oldbach', r2_fonts_pazo s5),
     and the capital alone looked short enough to have ended the line above - the paragraph was
-    cut in two there (V-fonts-8)."""
+    cut in two there (V-fonts-8). With `hyphens`, up to where Slides may first break it
+    (`first_word_width`): a text element's `wrap_limit`, which Slides is held under."""
     spans = line.content
     head = spans[0]
-    x1 = head.rect.x0 + first_word_width(head)
+    x1 = head.rect.x0 + first_word_width(head, hyphens)
     for a, b in zip(spans, spans[1:]):
         if len(a.text.split()) != 1 or a.text != a.text.rstrip() or b.text[:1].isspace() or \
-                b.rect.x0 - a.rect.x1 > 0.1 * line.size or cjk(a.text[-1:]):
+                b.rect.x0 - a.rect.x1 > 0.1 * line.size or cjk(a.text[-1:]) or \
+                (hyphens and hyphen_cut(a.text.strip()) is not None):
             break
-        x1 = b.rect.x0 + first_word_width(b)
+        x1 = b.rect.x0 + first_word_width(b, hyphens)
     return x1 - head.rect.x0
 
 
@@ -1126,7 +1192,7 @@ def card_text(node: Rect, rows: list[list[Span]]) -> dict | None:
             "text_x0": round(min(l["x0"] for l in lines), 2), "tab_x0": None,
             "lines": [{"baseline": round(l["baseline"], 2), "x0": round(l["x0"], 2), "x1": round(l["x1"], 2)} for l in lines],
             "wrap_limit": round(min(l["x0"] for l in lines) + min(
-                a["x1"] - a["x0"] + 0.25 * a["size"] + first_word_width(rows[i + 1][0])
+                a["x1"] - a["x0"] + 0.25 * a["size"] + first_word_width(rows[i + 1][0], True)
                 for a, i in zip(lines[:-1], idx[:-1])), 2) if len(lines) > 1 and left else None,
             "runs": runs,
         }
@@ -2726,6 +2792,10 @@ class PageClassifier:
             return (s.info.family == "math" or bool(script_of(s, line)) or extension_font(s.font)
                     or bool(t) and all(w in OPERATOR_NAMES for w in t.split())  # "lim sup" of a formula
                     or "�" in s.text or (s.info.italic and len(t) <= 2)
+                    # (a text italic's letters with spaces between, "b N" of helvet's math: the
+                    # formula went on past them, r2_fonts_helvet s3 held "− " in its hole and
+                    # set " b N)" as words, gaps on both sides)
+                    or (s.info.italic and bool(t) and all(len(w) == 1 and w.isalpha() for w in t.split()))
                     or any(b.expand(0.5).intersects(s.rect) and s.rect.cy > b.cy for b in bars)
                     or (bool(t) and all(ch in MATH_OPERATORS or ch in "()[]{}|∥,.;:'ˆ˜¯^0123456789 " for ch in t)))
 
@@ -3595,6 +3665,8 @@ class PageClassifier:
             # (its last line keeps natural spaces)
             word_space = min(gaps) if par.justified and gaps and li < len(par.lines) - 1 else 0.33
             order = reading_order(line)
+            # (not in code, whose spaces are columns)
+            formulas = {} if pitch else formula_groups(line, max(l.x1 - l.x0 for l in par.lines))
             accent = ""  # an accent at the end of a span, for the letter under it in the next one
             for si, (span, forced) in enumerate(order):
                 if span == FRACTION_SLASH:
@@ -3752,6 +3824,15 @@ class PageClassifier:
                     pieces, script, size, tail = [(raised_mark(text), False)], None, line.size, None
                 if tail:  # (its decoration ends before this punctuation: Span.decor_to)
                     pieces = [(text[:tail.start()], italic), (text[tail.start():], italic)]
+                if id(span) in formulas:
+                    # Inside a short inline formula: no line break (formula_groups).
+                    glue = si > 0 and prev is not None and formulas.get(id(prev)) == formulas[id(span)] \
+                        and runs and not runs[-1].get("hole")
+                    if glue:
+                        before = runs[-1]["text"]
+                        runs[-1]["text"] = before.rstrip(" ") + NBSP * (len(before) - len(before.rstrip(" ")))
+                    last = len(pieces) - 1
+                    pieces = [(glued(t, glue if k == 0 else True, k < last), it) for k, (t, it) in enumerate(pieces)]
                 for k, (text, italic) in enumerate(pieces):
                     plain = bool(tail) and k == 1
                     style = {
@@ -5333,8 +5414,10 @@ class PageClassifier:
                           for l in p.lines],
                 # Right edge a wrapped line could grow to before TeX would have pulled up the
                 # next line's first word: a text box narrower than this wraps the same way.
-                # (as a width from the paragraph's left edge, so centred lines count too)
-                "wrap_limit": round(min(l.x0 for l in p.lines) + min(a.x1 - a.x0 + 0.25 * p.size + line_word_width(b)
+                # (as a width from the paragraph's left edge, so centred lines count too; the next
+                # word up to where Slides may break it, after a hyphen: 'Санкт-' of
+                # 'Санкт-Петербургский' was pulled up, r3_scripts_ruxe s1)
+                "wrap_limit": round(min(l.x0 for l in p.lines) + min(a.x1 - a.x0 + 0.25 * p.size + line_word_width(b, True)
                                                                      for a, b in zip(p.lines, p.lines[1:])), 2)
                               if len(p.lines) > 1 and all(l.content for l in p.lines) else None,
                 **({"line_starts": s} if s else {}),

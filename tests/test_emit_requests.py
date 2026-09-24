@@ -52,7 +52,7 @@ def pt_of(dim: dict) -> float:
 
 
 def collapse(text: str) -> str:
-    return re.sub(NBSP + "+", NBSP, text)
+    return re.sub(NBSP + "+", NBSP, text.replace(emit.ZWSP, ""))  # (the break before a hole, HOLE_BREAK)
 
 
 def run_text(runs: list[dict]) -> str:
@@ -502,7 +502,7 @@ def test_bullets_are_styled_before_they_are_created(decks):
                 last = max(i for i, kind in enumerate(kinds) if kind in ("createParagraphBullets", "deleteText"))
                 pos, items = 0, []
                 for p in el["paragraphs"]:
-                    n = len(run_text([hole_run(r, d.plan.scale, d.plan.fonts) if r.get("hole") else r for r in p["runs"]]))
+                    n = len(run_text(emit.hole_runs(p["runs"], d.plan.scale, d.plan.fonts)))
                     if p["bullet"] and n > 1:
                         items.append((pos, pos + n))
                     pos += n + 1

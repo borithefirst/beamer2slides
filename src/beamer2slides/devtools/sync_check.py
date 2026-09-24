@@ -48,7 +48,7 @@ class CheckError(Exception):
 
 
 def norm(s: str | None) -> str:
-    return " ".join((s or "").replace("\xa0", " ").replace("\x0b", " ").split())
+    return " ".join((s or "").replace("\xa0", " ").replace("\x0b", " ").replace("​", "").split())
 
 
 def hex_color(c: dict | None) -> str | None:
@@ -228,7 +228,7 @@ class Model:
 def phrase_span(raw: str, phrase: str) -> tuple[int, int] | None:
     """(start, end) of a phrase in raw text, whitespace-insensitive; code point indices."""
     words = norm(phrase).split(" ")
-    m = re.search(r"[\s\xa0\x0b]+".join(map(re.escape, words)), raw)
+    m = re.search(r"[\s\xa0\x0b​]+".join(map(re.escape, words)), raw)
     return (m.start(), m.end()) if m else None
 
 

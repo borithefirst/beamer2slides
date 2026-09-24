@@ -171,6 +171,33 @@ def owned_by(spans: list[dict]):
     return test
 
 
+def others_glyphs(eraser: "Eraser", figures: list[dict], spans: dict) -> dict[str, list]:
+    """Per picture, the text objects another picture owns, to leave out of its crop when one of
+    the two moves with its words (a hole): a display formula's crop reaching into the line above
+    showed the hanging tail of that line's inline integral at the PDF place, a piece floating
+    under the hole's own integral once Slides set the words elsewhere (r1_math_v2 s5)."""
+    owners = {fig["id"]: owned_by([spans[sid] for sid in fig.get("spans", []) if sid in spans])
+              for fig in figures if fig.get("spans") and not fig.get("overlay")}
+    if len(owners) < 2 or not any(fig.get("anchor") for fig in figures):
+        return {}
+    anchored = {fig["id"] for fig in figures if fig.get("anchor")}
+    out: dict[str, list] = {}
+    for key, chars in eraser.chars.items():
+        if not chars:
+            continue
+        holders = {fid for fid, test in owners.items() if any(map(test, chars))}
+        if len(holders) != 1:
+            continue
+        (owner,) = holders
+        if not all(map(owners[owner], chars)):
+            continue
+        for fig in figures:
+            if fig["id"] != owner and (fig["id"] in anchored or owner in anchored) and \
+                    any(_intersects(ch.box, _grow(fig["bbox"], INK_REACH * ch.size)) for ch in chars):
+                out.setdefault(fig["id"], []).append(key)
+    return out
+
+
 def _span_band(span: dict) -> Box:
     """_band for a raw span, also for text turned by 90° (the x-height lies beside its baseline)."""
     dx, dy = span["dir"]
@@ -584,6 +611,7 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
         bullet_objects = [key for key, po in eraser.objects.items() if po.type in (OBJ_IMAGE, OBJ_SHADING)
                           and any(_inside(eraser.bounds[key], b) for b in bullet_boxes)]
 
+        others = others_glyphs(eraser, figures, spans)
         # Graphics drawn over text first: the other crops must not show them.
         for fig in sorted(figures, key=lambda f: not f.get("overlay")):
             path = out / "figures" / f"{fig['id']}.png"
@@ -599,7 +627,8 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
                     if fig.get("role") == "math" or (fig.get("role") == "icon" and fig.get("spans")):
                         fig["bbox"] = grow_to_ink(eraser, fig["bbox"], [spans[sid] for sid in fig["spans"] if sid in spans])
                     fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path,
-                                            transparent=bool(fig.get("anchor")), hide=bullet_objects)
+                                            transparent=bool(fig.get("anchor")),
+                                            hide=bullet_objects + others.get(fig["id"], []))
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")
         # Native tables leave the background the same way pictures do (text and rules), without a crop.
         figures = [f for f in figures if not f.get("overlay")]

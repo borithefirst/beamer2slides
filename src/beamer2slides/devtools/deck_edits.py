@@ -203,7 +203,7 @@ def add_paragraph(deck: LiveDeck, slide, text: str, paragraph: str) -> dict:
                         {"check": "text", "slide": slide, "text": text, "count": 1}])
 
 
-HOLE = re.compile("\xa0+")
+HOLE = re.compile("​?\xa0+")  # (with the zero-width break emit writes in front of it, emit.HOLE_BREAK)
 
 
 def insert_before_hole(deck: LiveDeck, slide, text: str, words: str) -> dict:

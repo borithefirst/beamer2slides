@@ -1449,7 +1449,7 @@ def _aim_hole(rng, model, s, sel, donor):
     if rng.random() < 0.5:
         return {"edit": "insert_before_hole", "args": {"slide": sel, "text": line,
                                                        "words": f"{rng.choice(('roughly', 'exactly', 'plainly'))} {rng.randrange(1000)}"}}
-    words = line.split("\xa0")[0].split()
+    words = line.split("\xa0")[0].replace("​", "").split()  # (emit.HOLE_BREAK is no word)
     if not words or not words[-1].isalpha():
         return None
     return {"edit": "replace_word", "args": {"slide": sel, "text": line, "old": words[-1],
