@@ -94,6 +94,21 @@ def test_translation_lines_broken_by_hand_stay_apart():
         assert line in got, got
 
 
+def test_an_attribution_flush_with_the_right_aligned_quote_above_is_right_aligned():
+    """A quote set flush right past the margin the page's other text keeps, its attribution alone
+    on the line under it ending where the quote ends: right-aligned like the quote (r1_lang_v2 s3:
+    left-aligned, its words ran out past the text area in Slides)."""
+    from .test_columns import paragraphs, span, text
+    size, right = 11.0, 345.0
+    rows = [("“Whoever wishes to translate word for word,", 100.0), ("will toil greatly.”", 113.0),
+            ("— Maimonides, letter (1199)", 126.0)]
+    spans = [span(t, right - len(t) * 0.5 * size, y, size) for t, y in rows]
+    spans.append(span("Body text starts at the left margin", 30.0, 180.0, size))
+    got = {text(p): p["align"] for p in paragraphs(spans)}
+    assert got["— Maimonides, letter (1199)"] == "right", got
+    assert got["Body text starts at the left margin"] == "left"
+
+
 def test_nested_numbers_are_labels_like_their_parents():
     """\\item[2.1] under an enumerate item: its label and text are a tab apart like 1. and 2."""
     got = [paragraph_text(p) for p in paras(5) if p["tab_x0"]]

@@ -3209,6 +3209,14 @@ class PageClassifier:
                 and abs(l.x1 - line.x1) > 1 and abs(l.rect.cx - self.W / 2) > 2]
         if near:
             return "left"
+        # (ending where a right-aligned paragraph next to it ends: flushed right with it - a quote's
+        # attribution under the quote, set right past the margin the page's other text keeps; left,
+        # its words ran out past the text area in Slides, r1_lang_v2 s3)
+        if line.x0 > margin + line.size and any(
+                p.align == "right" and len(p.lines) > 1 and abs(p.size - line.size) <= 1 and
+                any(0 < abs(l.baseline - line.baseline) <= 2 * line.size and abs(l.x1 - line.x1) <= 1 for l in p.lines)
+                for p in neighbours if p.first is not line):
+            return "right"
         if abs(line.rect.cx - self.W / 2) <= 2 and line.x0 > 0.12 * self.W:
             return "center"
         if abs(line.x1 - (self.W - margin)) <= 2 and line.x0 > self.W / 2:
