@@ -5,7 +5,7 @@ import re
 import unicodedata
 from pathlib import Path
 
-from . import type3
+from . import bidi, type3
 from .pdf import NO_OBJECT, OBJ_IMAGE, Char, Document, Page, char_box
 
 LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
@@ -347,10 +347,11 @@ def _shadow_pieces(drawings: list[dict]) -> list[tuple]:
 
 def page_chars(page: Page) -> tuple[list[Char], set[int]]:
     """The page's characters, those in bitmap TeX fonts (Type 3: pdflatex without cm-super) read
-    as their encoding says and named for their TeX font (`type3`), and the font ids so read."""
+    as their encoding says and named for their TeX font (`type3`), right-to-left lines as the page
+    draws them (`bidi.visual_chars`), and the font ids read as TeX fonts."""
     chars = page.chars()
     found = type3.page_fonts(chars)
-    return (type3.decode(chars, found) if found else chars), set(found)
+    return bidi.visual_chars(type3.decode(chars, found) if found else chars), set(found)
 
 
 def extract_page(page: Page, label: str) -> dict:
