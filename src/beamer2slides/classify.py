@@ -907,8 +907,16 @@ class PageClassifier:
                     (d["type"] == "f" and d["items"] == "re" and r.h <= 1.5):
                 rules.setdefault((round(r.x0), round(r.x1)), []).append((d["id"], r))
         out: set[str] = set()
+        cells = [Rect.of(d["bbox"]) for d in self.page["drawings"] if d["type"] == "f" and d["items"] == "re"
+                 and d.get("fill_opacity", 1.0) >= 0.99 and min(Rect.of(d["bbox"]).w, Rect.of(d["bbox"]).h) > 3
+                 and Rect.of(d["bbox"]).w < 0.5 * self.W]
         for group in rules.values():
-            if len(group) < 2:
+            if len(group) == 1:
+                # One \hline over a row of shaded cells (a heatmap's header rule): the table's.
+                _, r = group[0]
+                row = [f for f in cells if min(abs(f.y0 - r.cy), abs(f.y1 - r.cy)) <= 0.6 and r.x0 - 1 <= f.x0 and f.x1 <= r.x1 + 1]
+                if len(row) >= 2:
+                    out.add(group[0][0])
                 continue
             x0, x1 = min(r.x0 for _, r in group), max(r.x1 for _, r in group)
             y0, y1 = min(r.cy for _, r in group), max(r.cy for _, r in group)
@@ -2228,7 +2236,13 @@ class PageClassifier:
             if any(h.expand(0.5).contains_rect(c) for h in self.hole_boxes):
                 continue  # the graphic of a hole (a frame around words): in that picture already
             over_text = any(t.intersects(c) for t in text_rects)
+            table = None if over_text or not self.fill_grid(c) else self.table_from(c, label_spans, text_rects, len(out))
+            if table:
+                out.append(table)  # shaded cells edge to edge: a table, not a diagram of boxes
+                continue
             diagram = None if over_text else self.diagram_from(c, label_spans, len(out))
+            if diagram and self.splits_cells(diagram, label_spans):
+                diagram = None  # a ruled grid table_from could not read: a picture, not merged rows
             if diagram and any(n.get("text") for n in diagram["nodes"]):
                 out.append(diagram)  # frames around their own text (a framed paragraph), not marks on prose
                 continue
@@ -2666,14 +2680,69 @@ class PageClassifier:
                 "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,
                 "spans": [s.id for s in spans]}
 
+    def fill_grid(self, c: Rect) -> list[Rect]:
+        """Opaque rectangles tiling a grid inside c, edge to edge: the \\cellcolor / \\rowcolor
+        shading of a table that has fewer than two full rules (a heatmap, \\rowcolors stripes).
+        Two or more rows and columns of them; empty when there is no such grid."""
+        box = c.expand(0.5)
+        fills = [Rect.of(d["bbox"]) for d in self.page["drawings"]
+                 if d["type"] == "f" and d["items"] == "re" and d.get("fill_opacity", 1.0) >= 0.99
+                 and d["id"] not in self.decor_ids and box.contains_rect(Rect.of(d["bbox"]))
+                 and Rect.of(d["bbox"]).w * Rect.of(d["bbox"]).h < 0.95 * self.W * self.H
+                 and min(Rect.of(d["bbox"]).w, Rect.of(d["bbox"]).h) > 3]
+        if len(fills) < 4:
+            return []
+
+        def beside(a: Rect, b: Rect) -> bool:
+            side = (abs(a.x1 - b.x0) <= 0.6 or abs(b.x1 - a.x0) <= 0.6) and min(a.y1, b.y1) - max(a.y0, b.y0) > 0.5 * min(a.h, b.h)
+            above = (abs(a.y1 - b.y0) <= 0.6 or abs(b.y1 - a.y0) <= 0.6) and min(a.x1, b.x1) - max(a.x0, b.x0) > 0.5 * min(a.w, b.w)
+            return side or above
+        if not all(any(beside(a, b) for b in fills if b is not a) for a in fills):
+            return []
+        xs = sorted({round(v) for f in fills for v in (f.x0, f.x1)})
+        ys = sorted({round(v) for f in fills for v in (f.y0, f.y1)})
+        return fills if len(xs) >= 3 and len(ys) >= 3 else []
+
+    @staticmethod
+    def splits_cells(diagram: dict, label_spans: list[Span]) -> bool:
+        """A diagram node holding words on both sides of a vertical line that crosses it: the
+        cells of a ruled table row (or the fields of a record node), which one node sets as one
+        paragraph, the words run together across the rules."""
+        verticals = [ln for ln in diagram["lines"] if "via" not in ln and abs(ln["from"][0] - ln["to"][0]) < 0.05]
+        for n in diagram["nodes"]:
+            if not n["shape"]:
+                continue
+            r = Rect.of(n["bbox"])
+            words = [s for s in label_spans if r.contains_rect(s.rect)]
+            for ln in verticals:
+                x, (y0, y1) = ln["from"][0], sorted((ln["from"][1], ln["to"][1]))
+                if r.x0 + 1 < x < r.x1 - 1 and any(y0 <= s.rect.cy <= y1 and s.rect.x1 <= x for s in words) and \
+                        any(y0 <= s.rect.cy <= y1 and s.rect.x0 >= x for s in words):
+                    return True
+        return False
+
     def table_from(self, c: Rect, label_spans: list[Span], text_rects: list[Rect], index: int) -> dict | None:
         """A figure cluster that is really a plain table: text framed by horizontal rules of
         equal extent and nothing else. Returns a native table element, or None."""
         groups = [g for g in self.table_rules if c.expand(1).contains_rect(union_all(r["rect"] for r in g))]
-        if len(groups) != 1:
+        # Fewer than two full rules, but cell shading edge to edge (a heatmap, \rowcolors): the
+        # shading and the rules there are frame the table.
+        grid = [] if groups else self.fill_grid(c)
+        if grid:
+            frame = union_all(grid)
+        elif groups:
+            # \cline{2-3} twice over the same columns is a group of equal-extent rules of its own:
+            # inside the widest group's frame it is one of that table's partial rules, not a second
+            # table (refused, the grid became a diagram with each row's words in one box).
+            outer = max(groups, key=lambda g: (union_all(r["rect"] for r in g).w, len(g)))
+            frame = union_all(r["rect"] for r in outer)
+            if any(g is not outer and not frame.expand(1).contains_rect(union_all(r["rect"] for r in g)) for g in groups):
+                return None
+            if any(g not in groups and union_all(r["rect"] for r in g).expand(1).contains_rect(frame.expand(1))
+                   for g in self.table_rules):
+                return None  # the \cline pieces of a larger table: that table's, whole
+        else:
             return None
-        rules = sorted(groups[0], key=lambda r: r["rect"].y0)
-        frame = union_all(r["rect"] for r in rules)
         box = c.expand(0.5)
         if any(box.contains_rect(Rect.of(im["bbox"])) for im in self.page["images"]):
             return None
@@ -2695,8 +2764,8 @@ class PageClassifier:
                 fills.append({"rect": r, "color": d["fill"]})  # \rowcolor, \cellcolor
             else:
                 return None
-        if vertical:
-            frame = union_all([frame] + [v["rect"] for v in vertical])
+        if vertical or grid:
+            frame = union_all([frame] + [v["rect"] for v in vertical + (horizontal if grid else [])])
         spans = sorted((s for s in label_spans if box.contains_rect(s.rect)), key=lambda s: s.baseline)
         if not spans or any(not s.horizontal or s.font.upper().startswith("CMEX") or "�" in s.text for s in spans) or \
                 any(box.contains_rect(b) for b in self.bars):  # big operators, fractions: keep the picture
@@ -2713,10 +2782,20 @@ class PageClassifier:
             else:
                 rows.append([s])
         base = [statistics.fmean(s.baseline for s in row) for row in rows]
+
+        def halfway(i: int) -> bool:
+            """Row i sits in the middle of its neighbours, which are one row pitch of this
+            table apart (\\arraystretch and \\hline gaps make that pitch well over an em, so
+            the half pitches of a \\multirow are too)."""
+            gaps = (base[i] - base[i - 1], base[i + 1] - base[i])
+            if max(gaps) < 0.75 * size:
+                return True
+            others = [b - a for k, (a, b) in enumerate(zip(base, base[1:])) if k not in (i - 1, i)]
+            return bool(others) and abs(gaps[0] - gaps[1]) <= 0.4 * size and max(gaps) < 1.2 * size and \
+                sum(gaps) <= 1.15 * statistics.median(others)
         between = {i for i in range(1, len(rows) - 1)
-                   if base[i] - base[i - 1] < 0.75 * size and base[i + 1] - base[i] < 0.75 * size
-                   and not any(a.rect.x0 < b.rect.x1 and b.rect.x0 < a.rect.x1
-                               for a in rows[i] for b in rows[i - 1] + rows[i + 1])}
+                   if halfway(i) and not any(a.rect.x0 < b.rect.x1 and b.rect.x0 < a.rect.x1
+                                             for a in rows[i] for b in rows[i - 1] + rows[i + 1])}
         if any(i - 1 in between for i in between):
             return None
         grid_rows = [row for i, row in enumerate(rows) if i not in between]
@@ -2727,46 +2806,97 @@ class PageClassifier:
         # such line is one chunk from the cell's left edge to its right: its words cut into
         # chunks tangled the columns and the table was refused, and as text boxes the cell's
         # first line joined the numbers beside it and reflowed across their column in Slides.
-        wrapped: dict[int, tuple[float, float]] = {}  # row index -> the cell's (x0, x1)
-        continued: set[int] = set()  # rows holding nothing but the next line of the cell above
+        wrapped: dict[int, list[list[float]]] = {}  # row index -> its wrapped cells' [x0, x1]
+        continued: set[int] = set()  # rows holding nothing but the next lines of cells above
+
+        def ruled(a: Span, b: Span) -> bool:
+            """A vertical rule between two words of a row (not one of another row: a
+            \\multicolumn's words run across the rule the rows above and below have there)."""
+            y = b.baseline - 0.3 * b.size
+            return any(a.rect.x1 < v["rect"].cx < b.rect.x0 and v["rect"].y0 <= y <= v["rect"].y1 for v in vertical)
 
         def phrase(spans: list[Span], x0: float) -> list[Span]:
             out = []
             for s in sorted(spans, key=lambda s: s.rect.x0):
-                if not out and abs(s.rect.x0 - x0) <= 0.5 or out and s.rect.x0 - out[-1].rect.x1 <= s.size:
+                if not out and abs(s.rect.x0 - x0) <= 0.5 or out and s.rect.x0 - out[-1].rect.x1 <= s.size and not ruled(out[-1], s):
                     out.append(s)
                 elif out:
                     break
             return out
 
+        def phrases(spans: list[Span]) -> list[list[Span]]:
+            out: list[list[Span]] = []
+            for s in sorted(spans, key=lambda s: s.rect.x0):
+                if out and s.rect.x0 - out[-1][-1].rect.x1 <= s.size and not ruled(out[-1][-1], s):
+                    out[-1].append(s)
+                else:
+                    out.append([s])
+            return out
+
+        def words(spans: list[Span]) -> str:
+            return " ".join(s.text for s in spans).strip()
+
+        def right_end(x0: float) -> float:
+            """Where the longest line starting at x0 ends: a justified cell's full lines."""
+            return max((p[-1].rect.x1 for row in rows for p in [phrase(row, x0)] if p), default=x0)
+
         for i in range(len(rows) - 1):
             j = i + 1
-            if i in between or j in between or base[j] - base[i] > 1.35 * size:
+            pitch = base[j] - base[i]
+            if i in between or j in between or pitch > 1.6 * size:
                 continue
-            x0 = min(s.rect.x0 for s in rows[j])
-            nxt, first = phrase(rows[j], x0), phrase(rows[i], x0)
-            if len(nxt) != len(rows[j]) or not first:
-                continue
-            x1 = max(first[-1].rect.x1, wrapped.get(i, (0, 0))[1])
-            if x1 < nxt[-1].rect.x1 - 0.5:
-                continue  # a paragraph's first line is full; this one ends short of the next
-            wrapped[i] = wrapped[j] = (x0, max(x1, nxt[-1].rect.x1))
-            continued.add(j)
+            parts = phrases(rows[j])
+            if pitch > 1.35 * size:
+                # Rows set as far apart as the lines of a cell (\arraystretch with \linespread):
+                # a line of words running on in lower case from a full (justified) line above.
+                if not all(words(p)[:1].islower() and (f := phrase(rows[i], p[0].rect.x0)) and
+                           f[-1].rect.x1 >= right_end(p[0].rect.x0) - 0.5 for p in parts):
+                    continue
+            if len(parts) > 1:
+                # Several paragraph columns wrapping in one row (|l|X|X|): the next row holds
+                # the next line of each, and nothing in the columns to their left. Each line
+                # runs on from a phrase of the row above (lower case, after two or more words),
+                # which a row of cells in left-aligned columns does not.
+                if min(s.rect.x0 for s in rows[j]) <= min(s.rect.x0 for s in rows[i]) + 1:
+                    continue
+                firsts = [phrase(rows[i], p[0].rect.x0) for p in parts]
+                if not all(f and len(words(f).split()) >= 2 and words(p)[:1].islower() for f, p in zip(firsts, parts)):
+                    continue
+            else:
+                firsts = [phrase(rows[i], parts[0][0].rect.x0)]
+                if not firsts[0]:
+                    continue
+            cells: list[list[float]] = []
+            for p, first in zip(parts, firsts):
+                x0 = p[0].rect.x0
+                prev = next((w for w in wrapped.get(i, []) if abs(w[0] - x0) <= 0.5), None)
+                x1 = max(first[-1].rect.x1, prev[1] if prev else 0)
+                if x1 < p[-1].rect.x1 - 0.5:
+                    break  # a paragraph's first line is full; this one ends short of the next
+                cells.append([x0, max(x1, p[-1].rect.x1)])
+            else:
+                for x0, x1 in cells:
+                    for r in (i, j):
+                        at = next((w for w in wrapped.setdefault(r, []) if abs(w[0] - x0) <= 0.5), None)
+                        if at:
+                            at[1] = max(at[1], x1)
+                        else:
+                            wrapped[r].append([x0, x1])
+                continued.add(j)
 
         def chunks_of(row: list[Span], i: int) -> list[list[Span]]:
             chunks: list[list[Span]] = []
-            cell = []
-            if i in wrapped:
-                x0, x1 = wrapped[i]
+            cells = []
+            for x0, x1 in wrapped.get(i, []):
                 cell = sorted((s for s in row if s.rect.x0 >= x0 - 0.5 and s.rect.x1 <= x1 + 0.5), key=lambda s: s.rect.x0)
                 row = [s for s in row if s not in cell]
+                cells += [cell] if cell else []
             for s in sorted(row, key=lambda s: s.rect.x0):
-                if chunks and s.rect.x0 - chunks[-1][-1].rect.x1 <= 0.5 * size and \
-                        not any(chunks[-1][-1].rect.x1 < v["rect"].cx < s.rect.x0 for v in vertical):
+                if chunks and s.rect.x0 - chunks[-1][-1].rect.x1 <= 0.5 * size and not ruled(chunks[-1][-1], s):
                     chunks[-1].append(s)
                 else:
                     chunks.append([s])
-            return sorted(chunks + [cell], key=lambda ch: ch[0].rect.x0) if cell else chunks
+            return sorted(chunks + cells, key=lambda ch: ch[0].rect.x0) if cells else chunks
 
         # (row index in grid_rows, row span, chunk)
         items = []
@@ -2851,6 +2981,8 @@ class PageClassifier:
         n_rows, n_cols = len(grid_rows), len(columns)
         cells = [[[] for _ in columns] for _ in grid_rows]
         placed: list[list[list[Span]]] = [[] for _ in columns]
+        heads: list[list[Span] | None] = [None] * len(columns)  # (each column's cell in the first row)
+        extent_of: dict[int, tuple[float, float]] = {}  # (a merged cell's words, by its index in merges)
         merges, covered = [], {}
         for it in items:
             r, rs, ch = it
@@ -2869,23 +3001,51 @@ class PageClassifier:
                 mid = (bounds[c0] + bounds[c0 + cs]) / 2
                 align = "center" if abs((x0 + x1) / 2 - mid) <= 2 else "left" if x0 - bounds[c0] < bounds[c0 + cs] - x1 else "right"
                 merges.append({"row": r, "col": c0, "rows": rs, "cols": cs, "align": align})
+                extent_of[len(merges) - 1] = (x0, x1)
             else:
                 placed[c0].append(ch)
+                if r == 0 and rs == 1:
+                    heads[c0] = ch
         col_info = []
-        for (x0, x1), chunks in zip(columns, placed):
+
+        def aligned(chunks: list[list[Span]], x0: float, x1: float) -> str:
             left = all(abs(ch[0].rect.x0 - x0) <= 1 for ch in chunks)
             right = all(abs(ch[-1].rect.x1 - x1) <= 1 for ch in chunks)
             digits = sum(c.isdigit() for ch in chunks for s in ch for c in s.text)
             letters = sum(c.isalpha() for ch in chunks for s in ch for c in s.text)
             if left and right and digits > letters:
-                align = "right"  # equally wide numbers: right-aligned, like a number column
-            elif left:
-                align = "left"
-            elif all(abs(ch[-1].rect.x1 - x1) <= 1 for ch in chunks):
-                align = "right"
-            else:
-                align = "center"
-            col_info.append({"x0": round(x0, 2), "x1": round(x1, 2), "align": align})
+                return "right"  # equally wide numbers: right-aligned, like a number column
+            return "left" if left else "right" if right else "center"
+
+        for (x0, x1), chunks, head in zip(columns, placed, heads):
+            info = {"x0": round(x0, 2), "x1": round(x1, 2), "align": aligned(chunks, x0, x1)}
+            # A column head set otherwise than its body (\thead centred over a left column, an S
+            # column's head centred over numbers set flush right): the head row keeps its own
+            # alignment (`head`) and the body its own, to the body's edges (`body`). As one, a
+            # centred head took the body's left edge, or every number was centred.
+            body = [ch for ch in chunks if ch is not head]
+            if head is not None and len(body) >= 2:
+                bx0, bx1 = min(ch[0].rect.x0 for ch in body), max(ch[-1].rect.x1 for ch in body)
+                hx0, hx1 = head[0].rect.x0, head[-1].rect.x1
+                if abs((hx1 - hx0) - (bx1 - bx0)) <= 2 or \
+                        all(abs(ch[0].rect.x0 - bx0) <= 1 and abs(ch[-1].rect.x1 - bx1) <= 1 for ch in body):
+                    col_info.append(info)  # (a head as wide as its body, or a body of equally wide
+                    continue               # cells - ticks, numbers: set alike every way)
+                how = aligned(body, bx0, bx1)
+                own = "left" if abs(hx0 - bx0) <= 1 else "right" if abs(hx1 - bx1) <= 1 else \
+                    "center" if abs((hx0 + hx1) - (bx0 + bx1)) <= 3 else None
+                if own is not None and (own != how or how != info["align"]):
+                    info.update(align=how, head=own, body=[round(bx0, 2), round(bx1, 2)])
+            col_info.append(info)
+        # A \multirow cell in one column is flush with the column's words or centred among them
+        # (a \thead over a left column): its column says which, not the cell's bounds - a short
+        # word flush left in a narrow column sits near the middle of those either way.
+        for k, (x0, x1) in extent_of.items():
+            m = merges[k]
+            if m["cols"] == 1:
+                cx0, cx1 = col_info[m["col"]].get("body") or (col_info[m["col"]]["x0"], col_info[m["col"]]["x1"])
+                m["align"] = "left" if abs(x0 - cx0) <= 1 else "right" if abs(x1 - cx1) <= 1 else \
+                    "center" if abs((x0 + x1) - (cx0 + cx1)) <= 3 else m["align"]
 
         def line_base(row: list[Span]) -> float:
             return statistics.fmean(s.baseline for s in row if s.size >= 0.9 * max(x.size for x in row))
@@ -2943,6 +3103,11 @@ class PageClassifier:
         for v in vertical:
             k = min(range(len(bounds)), key=lambda i: abs(bounds[i] - v["rect"].cx))
             if abs(bounds[k] - v["rect"].cx) > 1.5:
+                # The second stroke of a double rule (||, \doublerulesep 2 pt beside the first):
+                # a Slides border is one line, the one on the bound is written.
+                if any(u is not v and abs(bounds[k] - u["rect"].cx) <= 1.5 and abs(u["rect"].cx - v["rect"].cx) <= 4
+                       and u["rect"].y0 < v["rect"].y1 and v["rect"].y0 < u["rect"].y1 for u in vertical):
+                    continue
                 return None  # a rule inside a column
             for rr, b in enumerate(baselines):
                 if v["rect"].y0 <= b - 0.5 * size and v["rect"].y1 >= b:
@@ -2971,6 +3136,8 @@ class PageClassifier:
             return None
 
         cell_text = [[cell_runs(lines) for lines in row] for row in cell_lines]
+        page_color = next((d["fill"].lower() for d in self.page["drawings"] if d["type"] == "f" and d["fill"]
+                           and Rect.of(d["bbox"]).w * Rect.of(d["bbox"]).h >= 0.95 * self.W * self.H), "#ffffff")
         # [row, col, where each line after the first starts in the cell's text]: emit makes the
         # column wide enough for every line of the PDF, a hyphenated word whole.
         wrapped_cells = [[r, cc, starts] for r, row in enumerate(cell_text) for cc, (_, starts) in enumerate(row) if starts]
@@ -2989,8 +3156,10 @@ class PageClassifier:
                       for r in rules for k in [row_boundary(r["rect"].cy)]],
             "borders": borders,
             # Shading per cell: the rows whose baseline and the columns whose middle it covers.
+            # (white \rowcolors stripes on an off-white page show: only the page's own colour
+            # is left out)
             "fills": [{"row": rr, "col": cc, "color": f["color"]}
-                      for f in fills if f["color"].lower() != "#ffffff"
+                      for f in fills if f["color"].lower() != page_color
                       for rr, b in enumerate(baselines) if f["rect"].y0 <= b <= f["rect"].y1
                       for cc in range(n_cols) if f["rect"].x0 <= (bounds[cc] + bounds[cc + 1]) / 2 <= f["rect"].x1],
             "spans": [s.id for s in spans],
@@ -3099,6 +3268,18 @@ class PageClassifier:
         """Tabulars without rules, used to align short texts in columns: three or more rows at a
         regular pitch whose cells, separated by wide gaps, keep to the same columns. They
         become borderless native tables; their lines are taken out of the text flow."""
+        # The next lines of a list item start where its text starts, a line below: short words
+        # side by side in four item columns looked like rows of cells, and were cut out of their
+        # items into a table.
+        run_on: set[int] = set()
+        for b in (l for l in lines if l.bullet and l.content):
+            prev = b
+            for l in sorted((l for l in lines if l.baseline > b.baseline and not l.bullet and l.content), key=lambda l: l.baseline):
+                if l.baseline - prev.baseline > 1.6 * prev.size:
+                    break
+                if abs(l.x0 - b.x0) <= 1:
+                    run_on.add(id(l))
+                    prev = l
         candidates = [l for l in lines if l.reason is None and not l.bullet and l.tab is None
                       and l.rect.y0 > 0.15 * self.H and all(s.horizontal for s in l.spans)]
         rows: list[list[Line]] = []
@@ -3121,6 +3302,8 @@ class PageClassifier:
         def extent(chunk):
             return chunk[0].rect.x0, chunk[-1].rect.x1
 
+        # (a tabular set inside an item has cells that start elsewhere too: its rows stay)
+        rows = [row for row in rows if not all(id(l) in run_on and len(cells([l])) == 1 for l in row)]
         split = [(row, cells(row)) for row in rows]
         tables, i = [], 0
         while i < len(split):
