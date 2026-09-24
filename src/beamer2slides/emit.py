@@ -601,9 +601,14 @@ def inner_pitch(z1: float, r: float, z2: float) -> float:
     return DESCENT_EM * z1 + ASCENT_EM * z2 + extra_below(r, z1) + extra_above(r, z2)
 
 
-def pitch_between(z1: float, r1: float, z2: float, r2: float) -> float:
-    """Baseline distance from the last line of one paragraph to the first line of the next."""
-    return snap(DESCENT_EM * z1 + ASCENT_EM * z2 + extra_below(r1, z1) + extra_above(r2, z2))
+def pitch_between(z1: float, r1: float, z2: float, r2: float, gap: float = 0.0) -> float:
+    """Baseline distance from the last line of one paragraph to the first line of the next, `gap`
+    (spaceBelow + spaceAbove) apart. The step snaps to whole pixels as a whole, space included:
+    over the hunt's r8 renders (18 boxes of 5-14 single-line paragraphs, Lato, Roboto Mono,
+    Carlito, Fira Sans, 8.7-17.3 pt) snap(natural + gap) is 0.07 pt rms off Google's step, the
+    natural pitch snapped and the gap added 0.30 (a listing's Lato 11.6 pt numbers 0.5 pt short
+    a line, its Roboto Mono 13.4 pt code 0.5 pt long: r2_code_v3/v4)."""
+    return snap(DESCENT_EM * z1 + ASCENT_EM * z2 + extra_below(r1, z1) + extra_above(r2, z2) + gap)
 
 
 def solve_increasing(f, target: float, lo: float = 0.5, hi: float = 3.0) -> float:
@@ -714,9 +719,12 @@ def _vertical_pass(paras, baselines, lines, estimate):
                     # a lineSpacing below 100% moves the next single line up.
                     rn = max(0.5, 1 + gap / (0.75 * LINE_EM * zn))
                     pulled[i + 1] = rn
-                    natural = pitch_between(z, r, zn, rn)
-                space_above[i + 1] = max(0.0, baselines[i + 1][0] - last - natural)
-            first = last + natural + space_above[i + 1]
+                # (aimed unsnapped: the step snaps as a whole, its space included, `pitch_between`)
+                rn = pulled.get(i + 1, next_r)
+                unsnapped = DESCENT_EM * z + ASCENT_EM * zn + extra_below(r, z) + extra_above(rn, zn)
+                space_above[i + 1] = max(0.0, baselines[i + 1][0] - last - unsnapped)
+                natural = pitch_between(z, r, zn, rn, space_above[i + 1])
+            first = last + natural
     return ratios, space_above
 
 
@@ -1826,10 +1834,14 @@ def fit_columns(bounds: list[float], cols: list[dict], scale: float, need: list[
             return {**c, "x0": x0, "x1": x0 + n}
         cols = [extent(c, n) for c, n in zip(cols, need)]
     # Text grows away from its alignment edge: room on the right of left-aligned columns, on
-    # the left of right-aligned ones, half on each side of centred ones.
+    # the left of right-aligned ones, half on each side of centred ones. A column whose words
+    # were measured (need) gets what they take past the PDF's and WRAP_MARGIN; only an
+    # unmeasured one keeps 8% for the substitute font. With the 8% on measured columns too, a
+    # table whose words fit its PDF frame grew 2-4 pt past it on each side (r2_tables_v1
+    # slide 4, r2_tables_v2 slide 10).
     width = [c["x1"] - c["x0"] for c in cols]
     room = [(1 + WRAP_MARGIN) / scale if tight and n is not None else
-            max(0.08 * w + 1 / scale, (n - w + (1 + WRAP_MARGIN) / scale) if n is not None else 0.0)
+            max(0.0, n - w) + (1 + WRAP_MARGIN) / scale if n is not None else 0.08 * w + 1 / scale
             for w, n in zip(width, need)]
     capped = capped_columns(cols, scale, need, cap)
     room = [min(r, k - w) if ok else r for r, w, k, ok in zip(room, width, cap, capped)]
@@ -1895,6 +1907,13 @@ def table_rows(el: dict, z: float, scale: float, imported: bool = False, sizes: 
     for rule in el.get("rules", []) + [b for b in el.get("borders", []) if b["position"] in ("TOP", "BOTTOM")]:
         if "y" in rule:
             ruled.setdefault(rule["row"] + (rule["position"] == "BOTTOM"), rule["y"] * scale)
+    # A row shaded by a band of its own (classify `bands`) starts and ends where its band does:
+    # just above its words, a \rowcolor row began ~3 pt below its fill, its words at the top of
+    # the Slides cell's shading (r2_tables_v1 slide 4). A rule still wins.
+    for row, y0, y1 in el.get("bands", []):
+        ruled.setdefault(row, y0 * scale)
+        ruled.setdefault(row + 1, y1 * scale)
+
     def target(i: int) -> float:  # where row i should start
         if i in ruled:
             return ruled[i]
@@ -2018,13 +2037,15 @@ def table_centred(el: dict, page_w: float) -> tuple[float, float] | None:
 
 
 def table_shift(el: dict, bounds: list[float], page_w: float) -> float:
-    """How far (PDF pt) a centred table's Slides columns move left to stay centred where they
-    grew wider than the PDF's (never off the page's left edge); 0 for any other table."""
+    """How far (PDF pt) a centred table's Slides columns move to stay centred where they grew
+    wider than the PDF's (never off the page); 0 for any other table. Mostly left: a column
+    grows away from its alignment edge, to the right. Right when its first column's cell padding
+    took more of the left margin than its words took of the right one."""
     centred = table_centred(el, page_w)
     if centred is None:
         return 0.0
     dx = ((centred[0] + centred[1]) - (bounds[0] + bounds[-1])) / 2
-    return max(dx, -bounds[0]) if dx < 0 else 0.0
+    return max(dx, -bounds[0]) if dx < 0 else min(dx, max(0.0, page_w - bounds[-1]))
 
 
 def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = False,
@@ -2057,9 +2078,13 @@ def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = Fal
             return [[[{**r, "size": r["size"] * s} for r in runs] for runs in row] for row in cells]
 
         least = table_columns(el, shrunk(TABLE_MIN_SHRINK), scale, fonts, tight=True)
-        # The margin if the smallest size reaches it, else the page edge; a table that does not
-        # fit even then keeps its size (smaller words would not bring its last column back).
-        goal = next((g for g in (limit, page_w) if least[0][-1] <= g + 0.01), None)
+        # The margin if the smallest size reaches it, else the page edge, else - an overfull table,
+        # running off the page in the PDF too (r2_tables_v2 slide 6) - where the PDF's ends; a
+        # table that does not fit even then keeps its size (smaller words would not bring its
+        # last column back).
+        pdf_end = max(el["frame"][2], (el.get("bounds") or [0.0])[-1])
+        goal = next((g for g in (limit, page_w, pdf_end if pdf_end > page_w else None)
+                     if g is not None and least[0][-1] <= g + 0.01), None)
         best = None
         if tight[0][-1] > limit + 0.01 and goal is not None:
             lo, hi, best = TABLE_MIN_SHRINK, 1.0, (TABLE_MIN_SHRINK, least)
@@ -2223,7 +2248,7 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
         ex0, ex1 = col.get("body") or (col["x0"], col["x1"])
         ws = [(cell_width.get((r, c)) if cell_width.get((r, c)) is not None else (ex1 - ex0) * scale * lay["shrink"])
               for r, row in enumerate(el["cells"]) if c < len(row) and row[c] and (r, c) not in merged
-              and (r, c) not in hidden and not (r == 0 and "head" in col)]
+              and (r, c) not in hidden and not (r == 0 and "head" in col) and r not in col.get("centred", ())]
         spare.append(max(0.0, widths[c] - 2 * TABLE_CELL_PAD - WRAP_MARGIN - max(ws)) if ws else None)
     for r, row in enumerate(lay["cells"]):
         for c, runs in enumerate(row):
@@ -2267,9 +2292,10 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                 start += u16(piece)
             col = cols[c]
             # A head set otherwise than its column's body (classify `head`): the head row its own
-            # way, the body to the body's own edges.
-            head = r == 0 and "head" in col
-            align = col["head"] if head else col["align"]
+            # way, the body to the body's own edges. A cell siunitx centres on the column (a dash
+            # among numbers, classify `centred`) is set like a centred head.
+            head = (r == 0 and "head" in col) or r in col.get("centred", ())
+            align = "center" if r in col.get("centred", ()) else col["head"] if head else col["align"]
             x0, x1 = (col["x0"], col["x1"]) if head or "body" not in col else col["body"]
             # Line the text up with the original inside the (contiguous) Slides columns.
             left_pad = max(0.0, (x0 - bounds[c]) * scale - PAD_X) if align == "left" else 0.0

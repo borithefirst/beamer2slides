@@ -211,7 +211,7 @@ def layout(rb: dict, size: float | None = None) -> dict | None:
             elif li == 0:
                 # Slides ignores the space between two bulleted items
                 gap = 0.0 if ps["bullet"] and bullet_prev else ps["spaceAbove"] + below
-                baseline += emit.pitch_between(previous, r_prev, z, r) + gap
+                baseline += emit.pitch_between(previous, r_prev, z, r, gap)  # (snapped with its gap)
             else:
                 baseline += emit.line_pitch(previous, r, z)
             previous, r_prev = z, r
