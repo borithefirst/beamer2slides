@@ -990,6 +990,18 @@ def occlusion_findings(base: dict, before: dict, after: dict, ours: dict | None 
 
 # ---------------------------------------------------------------- an honest report
 
+def through_theme(before: dict, after: dict, rep: dict) -> bool:
+    """A slide inheriting its background shows the master's and its layout's decoration: the
+    source's new one reaches it by the theme batch (theme_sync), with nothing written on the slide
+    itself - honestly applied when the report writes the master or that very layout."""
+    inherit = {"state": "INHERIT"}
+    if before.get("background") != inherit or after.get("background") != inherit:
+        return False
+    pages = {after.get("layoutObjectId"), before.get("layoutObjectId")}
+    return any(e.get("page") in pages or "master background" in (e.get("fields") or [])
+               for e in rep["applied"] if {"theme decoration", "master background"} & set(e.get("fields") or []))
+
+
 def report_findings(base: dict, before: dict, after: dict, rep: dict) -> list[dict]:
     out = []
     before_by_id = {s["objectId"]: s for s in before["slides"]}
@@ -1007,7 +1019,8 @@ def report_findings(base: dict, before: dict, after: dict, rep: dict) -> list[di
         el = next((x for x in b["elements"] if x["key"] == ekey), None)
         if ekey is None:
             for field in fields:
-                if field == "background" and snapshot.same_background(bs.get("background"), a.get("background")):
+                if (field == "background" and snapshot.same_background(bs.get("background"), a.get("background"))
+                        and not through_theme(bs, a, rep)):
                     out.append(finding("applied_no_change", "report", "the report applies a background that didn't change",
                                        slide=skey))
                 if field == "notes" and norm(bs.get("notes")) == norm(a.get("notes")):

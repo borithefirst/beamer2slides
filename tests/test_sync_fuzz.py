@@ -436,6 +436,22 @@ def test_catches_a_report_that_claims_work_it_did_not_do(clean):
     assert "applied_no_change" in kinds(found)
 
 
+def test_a_background_the_theme_carries_to_an_inheriting_slide_is_applied(clean):
+    """A retheme reaches a slide that inherits its background through its layout's decoration
+    (theme_sync), nothing written on the slide: its `background` entry is honest when the report
+    writes that layout (live seed 0, retheme), and a lie when it writes nothing of the theme."""
+    b = clean["base"]["slides"][1]
+    before, after = copy.deepcopy(clean["before"]), copy.deepcopy(clean["after"])
+    for snap in (before, after):
+        slide_of(snap, b["objectId"]).update(background={"state": "INHERIT"}, layoutObjectId="p13")
+    report = copy.deepcopy(clean["report"])
+    report["applied"].append({"slide": b["key"], "element": None, "fields": ["background"]})
+    assert "applied_no_change" in kinds(checked(clean, before=before, after=after, report=report))
+    report["applied"].append({"slide": "layout Title Only", "element": "p13_i6",
+                              "fields": ["theme decoration"], "page": "p13"})
+    assert "applied_no_change" not in kinds(checked(clean, before=before, after=after, report=report))
+
+
 def test_catches_a_converged_claim_on_an_element_that_changed(clean):
     """`converged` means nothing was written; an element that changed contradicts it."""
     entry = clean["report"]["applied"][0]

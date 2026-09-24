@@ -317,7 +317,7 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
                     "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {
                         "contentUrl": picture_url(side["fill_file"])}}}}})
             out["written"]["master"] = side["fill"]
-            out["applied"].append({"slide": "master", "element": None, "fields": ["master background"]})
+            out["applied"].append({"slide": "master", "element": None, "fields": ["master background"], "page": mid})
 
     # ---- each page: its decoration picture and its placeholders
     for pid, entry in rec["pages"].items():
@@ -345,7 +345,7 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
                         {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "SEND_TO_BACK"}},
                         {"updatePageElementAltText": {"objectId": oid, "description": DECORATION}}]
                     out["written"][oid] = {"page": pid, "picture": now}
-                    out["applied"].append({"slide": where, "element": oid, "fields": ["theme decoration"]})
+                    out["applied"].append({"slide": where, "element": oid, "fields": ["theme decoration"], "page": pid})
                 else:
                     oid = deco["oid"]
                     rb = objects.get(oid)
@@ -368,7 +368,8 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
                     elif now is None:
                         out["cleanup"].append(oid)
                         out["written"][oid] = {"page": pid, "picture": None}
-                        out["applied"].append({"slide": where, "element": oid, "fields": ["theme decoration"], "how": "removed"})
+                        out["applied"].append({"slide": where, "element": oid, "fields": ["theme decoration"], "how": "removed",
+                                               "page": pid})
                     else:
                         out["stage"][now["path"]] = None
                         out["requests"] += [
@@ -376,7 +377,7 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
                                               "imageReplaceMethod": "CENTER_INSIDE"}},
                             {"updatePageElementAltText": {"objectId": oid, "description": DECORATION}}]
                         out["written"][oid] = {"page": pid, "picture": now}
-                        out["applied"].append({"slide": where, "element": oid, "fields": ["theme decoration"]})
+                        out["applied"].append({"slide": where, "element": oid, "fields": ["theme decoration"], "page": pid})
         for oid, ph in entry["placeholders"].items():
             if oid not in live:
                 continue
