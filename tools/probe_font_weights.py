@@ -34,6 +34,11 @@ ROWS = [  # (family, weight, text)
     ("Lato", 400, CJK), ("M PLUS 1p", 400, CJK), ("Noto Sans SC", 400, CJK), ("Noto Sans KR", 400, CJK),
     ("Noto Sans JP", 100, CJK), ("Noto Sans JP", 300, CJK), ("Noto Sans JP", 500, CJK), ("Noto Serif JP", 300, CJK),
     ("Lato", 400, TRIANGLES), ("Noto Sans Symbols 2", 400, TRIANGLES), ("Noto Sans Symbols", 400, TRIANGLES),
+    # families Google Fonts serves with a medium between Regular and Bold (Lato has none: 500/600 draw 400)
+    ("Fira Sans", 400, LATIN), ("Fira Sans", 500, LATIN), ("Roboto", 400, LATIN), ("Roboto", 500, LATIN),
+    ("Source Sans 3", 400, LATIN), ("Source Sans 3", 600, LATIN), ("Open Sans", 400, LATIN), ("Open Sans", 600, LATIN),
+    ("Noto Sans", 400, LATIN), ("Noto Sans", 500, LATIN), ("Noto Sans", 600, LATIN), ("Carlito", 400, LATIN),
+    ("PT Sans", 400, LATIN), ("Inter", 500, LATIN),
 ]
 PER_PAGE = 7
 

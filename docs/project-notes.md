@@ -4555,3 +4555,12 @@ Aimed at the 12 r8 regressions first, then what was left.
   and lang_v3's verse picture). Cell accents compose (`span_runs`: β̂, ȳ). Classified all 89 r8
   archives before/after: 22 slides and 7 tables changed, all as intended. Open: one subscript level
   in Slides (FE_{C2H4}); V-themes-10 'If p' is one span.
+
+Probe, medium weights (`tools/probe_font_weights.py`, same 24 pt line, ink per pt, width in pt):
+Lato has no 500/600 in Google Fonts, so Slides draws them 400. Families with a served medium
+(read back bold: false): Source Sans 3 400 68.8 / 600 92.6 (width 368.1 / 379.8), Noto Sans 400
+83.4 / 500 98.3 / 600 114.2 (416.3 / 423.0 / 430.7), Fira Sans 400 82.0 / 500 109.8, Roboto 400
+84.6 / 500 105.5, Open Sans 400 77.5 / 600 105.1, Inter 500 104.0; Lato 400 79.2 (395.1), 700
+107.0 (402.8), 900 130.4. Carlito 400 69.2, PT Sans 400 70.9. r9 verifiers: Lato 800 on 6 pt
+footlines fixed control_c1 but reads heavier than the PDF on control_a2 and 'M. Keller', and a
+small reference block set 800 lost the contrast with its bold volume numbers.
