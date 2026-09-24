@@ -197,9 +197,10 @@ retried like a network blip. Nothing falls back to urllib behind the caller's ba
 the CLI's `--no-downloads`) refuses every one: a deck's pictures are signed from the files the run
 uploaded and otherwise read out of a Drive `.pptx` export (`deck_pictures`), and a sync reads only
 the pictures its plan depends on. What it costs: inline formula and overlay pictures keep their
-predicted places (the measuring scratch slides are skipped), `fidelity` cannot run, a picture a
-reader inserted into a Google Doc is not saved beside its canonical file, and fonts come from
-`font_source` or stand-ins. Measured live 2026-09-24: convert and sync of two test decks with every
+predicted places (the measuring scratch slides are skipped), `fidelity` cannot run, and fonts
+come from `font_source` or stand-ins. A picture a reader inserted into a Google Doc comes out of
+the document's zip export instead (`doc_sync.exported_pictures`, paired by document order only
+when the count and every size agree). Measured live 2026-09-24: convert and sync of two test decks with every
 download refused, 0 fetches, every picture of the base signed.
 
 **Where Drive files land.** `AgentContext.drive_folder` (`$B2S_DRIVE_FOLDER`, `--drive-folder`) puts

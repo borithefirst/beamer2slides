@@ -838,24 +838,39 @@ class Stager:
         self.files = []
 
 
-def fetch_pictures(path: Path, live: dict) -> int:
+def fetch_pictures(path: Path, live: dict, drive=None, ident: str | None = None) -> int:
     """Put the pictures a reader inserted into the document beside the canonical file.
 
     Their `contentUri` lasts about half an hour and names nothing of ours, so a file
     that pointed there would be broken by tomorrow. Each one is saved once, under its
     object id, in `<stem>.media/`, and from then on the file carries it like any other
     picture — which is what makes a reader's picture something git can keep.
+
+    A `contentUri` is a googleusercontent URL, which a caller may have no way to fetch
+    (downloads switched off, a harness with no public network). With `drive`, what no
+    download brought comes out of the document's own zip export (`exported_pictures`).
     """
     from . import net
 
-    done = 0
-    for run in _pictures(live):
-        if run.get("src") or not run.get("uri") or not run.get("value"):
+    wanted = [run for run in _pictures(live)
+              if not run.get("src") and run.get("uri") and run.get("value")]
+    got, failed = {}, {}
+    for run in wanted:
+        if net.downloads_off():
+            failed[run["value"]] = "downloads are switched off"
             continue
         try:
-            data = net.download(run["uri"])   # through the caller's fetcher, where there is one
+            got[run["value"]] = net.download(run["uri"])   # through the caller's fetcher
         except Exception as err:  # noqa: BLE001 - a harness's fetcher raises its own types
-            print(f"  the picture {run['value']} could not be fetched: {err}")
+            failed[run["value"]] = err
+    if failed and drive is not None and ident:
+        exported = exported_pictures(drive, ident, _pictures(live))
+        got |= {oid: exported[oid] for oid in failed if oid in exported}
+    done = 0
+    for run in wanted:
+        data = got.get(run["value"])
+        if data is None:
+            print(f"  the picture {run['value']} could not be fetched: {failed.get(run['value'])}")
             continue
         # A fetcher hands over bytes and nothing else, so the picture names its own type.
         suffix = net.picture_suffix(data)
@@ -866,6 +881,56 @@ def fetch_pictures(path: Path, live: dict) -> int:
         run["src"], run["sha"] = f"{folder.name}/{name}", digest(data)
         done += 1
     return done
+
+
+# An exported `<img>` and a run are the same picture when their sizes agree this well
+# (CSS px: the export writes 13.33px for a run the IR rounds to 13).
+EXPORT_SIZE_SLACK = 1.5
+
+
+def exported_pictures(drive, ident: str, runs: list[dict]) -> dict[str, bytes]:
+    """The pictures of `runs` (every picture run of the document, in document order) as
+    Drive's zip export of the document carries them, by object id.
+
+    The export is one HTML file of every tab and an `images/` folder; its `<img>` tags
+    come in document order, one per picture (a picture used twice may share one file).
+    Nothing in them names an object, so they are paired by order, and only when the
+    count and every size agree: a mismatch saves nothing rather than the wrong picture.
+    Measured live: tabs in order, a picture inserted later sits where it stands.
+    """
+    import zipfile
+
+    try:
+        data = _read(drive.files().export(fileId=ident, mimeType="application/zip"))
+    except HttpError as err:
+        print(f"  no pictures from the document's export: it was refused ({status_of(err)})")
+        return {}
+    try:
+        archive = zipfile.ZipFile(io.BytesIO(data))
+        page = next(n for n in archive.namelist() if n.endswith(".html"))
+        html = archive.read(page).decode("utf-8")
+    except (zipfile.BadZipFile, StopIteration, UnicodeDecodeError) as err:
+        print(f"  no pictures from the document's export: it could not be read ({err})")
+        return {}
+    tags = re.findall(r"<img\b[^>]*>", html)
+    if len(tags) != len(runs):
+        print(f"  no pictures from the document's export: it holds {len(tags)} and the "
+              f"document {len(runs)}, so they cannot be paired")
+        return {}
+    folder = page.rpartition("/")[0]
+    out = {}
+    for tag, run in zip(tags, runs):
+        src = re.search(r'\bsrc="([^"]+)"', tag)
+        size = [re.search(rf"\b{side}:\s*([\d.]+)px", tag) for side in ("width", "height")]
+        if run.get("size") and all(size) and any(
+                abs(float(m.group(1)) - want) > EXPORT_SIZE_SLACK for m, want in zip(size, run["size"])):
+            print(f"  no pictures from the document's export: the picture {run.get('value')} "
+                  f"is not the size its place in the export says")
+            return {}
+        name = f"{folder}/{src.group(1)}" if src and folder else (src.group(1) if src else None)
+        if run.get("value") and name in archive.namelist():
+            out[run["value"]] = archive.read(name)
+    return out
 
 
 def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
@@ -980,7 +1045,7 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
         equation_latex(drive, ident, doc, live)
     if renamed:
         live["title"] = renamed
-    fetch_pictures(path, live)
+    fetch_pictures(path, live, drive, ident)
     write_file(path, live, ident)
     refused = store_base(path, live, drive, ident, int((base or {}).get("generation", 0)),
                          base_fid=base_fid)

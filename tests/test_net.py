@@ -173,6 +173,64 @@ def test_a_doc_s_inserted_pictures_come_through_the_fetcher(tmp_path, monkeypatc
     assert "src" not in runs[2]
 
 
+def _doc_export(tags, files):
+    """What Drive's zip export of a document holds: one HTML page and its images/."""
+    import zipfile
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("talk.html", "<html><body>" + "".join(
+            f'<p><img alt="" src="{src}" style="width: {w}px; height: {h}px;"></p>'
+            for src, w, h in tags) + "</body></html>")
+        for name, data in files.items():
+            z.writestr(name, data)
+
+    class Request:
+        def execute(self):
+            return buf.getvalue()
+
+    class Files:
+        def export(self, fileId, mimeType):
+            assert mimeType == "application/zip"
+            return Request()
+
+    class Drive:
+        def files(self):
+            return Files()
+
+    return Drive()
+
+
+def test_a_doc_s_pictures_come_out_of_its_export_when_nothing_downloads(tmp_path, monkeypatch):
+    """Downloads off: the pictures pair with the export's `<img>` tags by document order,
+    and only when the count and every size agree (a mismatch saves nothing, not the wrong one)."""
+    from beamer2slides import doc_sync
+
+    red, green = png(colour=(200, 0, 0)), png(colour=(0, 200, 0))
+    monkeypatch.setenv(net.NO_DOWNLOADS, "1")
+
+    def runs():
+        return [{"uri": "https://lh7/a", "value": "kix.a", "size": [13, 9]},
+                {"src": "talk.media/mine.png", "value": "kix.mine", "size": [30, 20]},
+                {"uri": "https://lh7/b", "value": "kix.b", "size": [40, 20]}]
+
+    tags = [("images/image1.png", 13.33, 8.89), ("images/image2.png", 30, 20),
+            ("images/image3.png", 40, 20)]
+    files = {"images/image1.png": red, "images/image2.png": b"not ours", "images/image3.png": green}
+    found = runs()
+    monkeypatch.setattr(doc_sync, "_pictures", lambda live: found)
+    assert doc_sync.fetch_pictures(tmp_path / "talk.html", {}, _doc_export(tags, files), "doc") == 2
+    assert (tmp_path / found[0]["src"]).read_bytes() == red
+    assert (tmp_path / found[2]["src"]).read_bytes() == green
+    assert found[1]["src"] == "talk.media/mine.png", "a picture the file carries is left alone"
+
+    for tags_now in (tags[:2], [tags[0], tags[1], ("images/image3.png", 20, 20)]):
+        found = runs()
+        assert doc_sync.fetch_pictures(tmp_path / "talk.html", {}, _doc_export(tags_now, files),
+                                       "doc") == 0
+        assert "src" not in found[0] and "src" not in found[2]
+
+
 def test_two_contexts_each_download_through_their_own(fetcher):
     """Per context, like credentials: a server with two requests in the air hands each its own."""
     import contextvars

@@ -1050,7 +1050,12 @@ text — that a sync can nevertheless *create*, which is the difference that mat
   (from the document's own copy — its `contentUri` — so nothing is staged).
 - **A picture a reader inserts** comes back as a file: `doc_sync.fetch_pictures` saves
   it once, under its object id, in `<stem>.media/`, because a `contentUri` dies within
-  the hour. From then on git keeps it like any other picture.
+  the hour. From then on git keeps it like any other picture. What no download brings
+  (downloads off, no public network) comes out of Drive's zip export of the document
+  (`exported_pictures`): one HTML page of every tab, its `<img>` tags in document order,
+  paired with the picture runs only when the count and every size agree (measured
+  2026-09-24: two tabs, a picture inserted later where it stands, a picture used twice
+  sharing one file; `test_pictures_go_in...` passes live with `B2S_NO_DOWNLOADS=1`).
 - **Chips:** `insertPerson` (from the email) and `insertDate` (from the timestamp) make
   those two chips, so a new block carrying them is written with them, and one that
   holds them can be moved. `insertRichLink` is refused (measured); an equation, a
