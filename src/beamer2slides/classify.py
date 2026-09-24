@@ -541,6 +541,24 @@ def long_arrow_groups(spans: list["Span"]) -> list[list["Span"]]:
     return merged
 
 
+def unmeasured_symbols(spans: list["Span"]) -> set[str]:
+    """Symbols of math spans Slides was never seen to set in line with its text faces
+    (`emit.SYMBOL_ADVANCE_EM`, tools/probe_symbols.py): a fallback face draws them at its own
+    size and height (\\sqcup's ⊔ half as tall and raised, r1_math_v3 s6). A raised ring or
+    asterisk is not one: it is written ° or * at the line's size (300 °C, r3_scripts_ruxe s4)."""
+    from .emit import SYMBOL_ADVANCE_EM  # (emit imports this module)
+
+    out = set()
+    for s in spans:
+        if s.info.family != "math":
+            continue
+        for c in math_text(s.font, s.text)[0]:
+            if not (c.isascii() or c.isalnum() or c.isspace() or c in SYMBOL_ADVANCE_EM or unicodedata.combining(c)
+                    or c in "◦∘∗°"):
+                out.add(c)
+    return out
+
+
 def math_pieces(font: str, text: str) -> list[tuple[str, bool]]:
     """Unicode text of a span set in a math font, as pieces with their italic flag. A TeX math
     italic font (CMMI, Latin Modern's LMMathItalic, newtx's NewTXMI...) makes the span italic
@@ -2740,6 +2758,21 @@ class PageClassifier:
         if not (math_font or scripts or bars or fractions or formula_like or tofu):
             return None
         holes = self.formula_holes(line, fractions)
+        if (holes or bars or unmeasured_symbols(spans)) and prose_share(spans) == 0.0 \
+                and self.wrapped_formula(line):
+            # A paragraph's formula wrapped onto a line of its own and not flat text ("h(G) =
+            # min" then a picture of its limits and fraction, r1_math_v1 s6; "q₀ x₁ ··· xₙ ⊔"
+            # with Slides' subscripts low and ⊔ from a fallback face, r1_math_v3 s6) is one
+            # hole: its pieces set natively beside pictures of the rest came out in two faces
+            # and at two sizes. It stays in its paragraph (wrapped_formula), as one picture.
+            # Not when a word of prose follows it (", with β = 1 for the plain", r2_fonts_firamath
+            # s3): the words stay text.
+            whole = sorted((s for s in spans if s.text.strip()), key=lambda s: s.rect.x0)
+            while len(whole) > 1 and whole[-1].text.strip() in (",", ".", ";", ":"):
+                whole = whole[:-1]  # (trailing punctuation is prose again)
+            line.add_holes([whole])
+            line.fractions = []
+            return "inline"
         if holes:
             # Prose with a few complex formulas: the words stay text, each formula becomes a
             # picture placed over a gap left in the text.
@@ -2840,10 +2873,14 @@ class PageClassifier:
                             -size <= l.rect.y0 - max(g.rect.y1, host.rect.y1) <= 0.75 * size):
                         l.reason = "math"
                         host.limits.append(l)
-            # An \xrightarrow's or mhchem arrow's labels (120 °C over it, "in vacuo" under it) are
-            # small lines of their own inside the arrow's length: its picture's, or they stayed
-            # text printed over the formula Slides sets at other widths (r1_sci_v3 s3).
-            held = {id(s) for h in host.holes for s in h}
+        # An \xrightarrow's or mhchem arrow's labels (120 °C over it, "in vacuo" under it) are
+        # small lines of their own inside the arrow's length: its picture's, or they stayed text
+        # printed over the formula Slides sets at other widths (r1_sci_v3 s3). A label between
+        # two arrows is the nearer one's (r1_math_v2 s7: Lp over the third line's arrow is also
+        # just under the second's).
+        near: dict[int, tuple[float, Line, Line]] = {}
+        for host in lines:
+            size, held = host.size, {id(s) for h in host.holes for s in h}
             for g in long_arrow_groups(host.content):
                 if not any(id(s) in held for s in g):
                     continue
@@ -2855,8 +2892,12 @@ class PageClassifier:
                     if arrow.x0 - 0.3 * size <= l.rect.x0 and l.rect.x1 <= arrow.x1 + 0.3 * size and (
                             -0.5 * size <= arrow.y0 - l.rect.y1 <= 0.5 * size or
                             -0.5 * size <= l.rect.y0 - arrow.y1 <= 0.5 * size):
-                        l.reason = "math"
-                        host.limits.append(l)
+                        gap = abs(l.rect.cy - arrow.cy)
+                        if id(l) not in near or gap < near[id(l)][0]:
+                            near[id(l)] = (gap, l, host)
+        for _, l, host in near.values():
+            l.reason = "math"
+            host.limits.append(l)
 
         # Pieces of display math: limits, equation numbers, small italic fragments next to math.
         changed = True
@@ -3630,7 +3671,8 @@ class PageClassifier:
             last = par.lines[-1]
             words = [s for s in last.content if s.text.strip()]
             held = {id(s) for h in last.holes for s in h}
-            if len(par.lines) < 2 or par.reason or not words or not all(id(s) in held for s in words) or \
+            if len(par.lines) < 2 or par.reason or not held or \
+                    not all(id(s) in held or s.text.strip() in (",", ".", ";", ":") for s in words) or \
                     abs(last.x0 - par.lines[-2].x0) > 1.5 and abs(last.x0 - (par.lines[-2].tab.rect.x0 if par.lines[-2].tab else -1e9)) > 1.5:
                 out.append(par)
                 continue

@@ -117,6 +117,135 @@ def test_an_items_formula_wrapped_alone_is_a_paragraph_of_its_own():
     assert emit.slides_lines(item, scale, emit.FontMapper()) is not None  # measured: the box can grow
 
 
+def test_a_wrapped_formula_line_of_symbols_is_one_hole():
+    """r1_math_v3 s6: 'q0 x1 · · · xn ⊔ · · · ;' wrapped under '(b) φstart: row 1 is'. Its
+    subscripts were runs and its symbols text: Slides set the ⊔ and the dots at other widths,
+    the line drifted from its picture-free neighbours and the ';' ran into the next item. A
+    wrapped formula line holding a symbol Slides was never measured on is one picture, its
+    trailing punctuation text; a flat continuation ('λ2.', 'legal;') stays words."""
+    p = Page()
+    # (the deck's spans, as PDFium reads them: text, font, size, box, baseline)
+    for text, font, size, bbox, baseline in (
+            ("(b)", "SFRM0600", 5.98, [14.97, 161.09, 24.76, 167.07], 165.76),
+            ("φ", "CMMI10", 10.91, [33.64, 159.29, 40.77, 170.2], 167.82),
+            ("start", "SFRM0800", 7.97, [40.77, 163.23, 58.23, 171.2], 169.45),
+            (":", "SFRM1095", 10.91, [58.73, 159.3, 61.74, 170.21], 167.82),
+            ("row", "SFRM1095", 10.91, [66.56, 159.3, 83.72, 170.21], 167.82),
+            ("1", "CMR10", 10.91, [87.34, 159.29, 92.8, 170.2], 167.82),
+            ("is", "SFRM1095", 10.91, [96.41, 159.3, 103.7, 170.21], 167.82),
+            ("q", "CMMI10", 10.91, [33.64, 172.84, 38.5, 183.75], 181.37),
+            ("0", "CMR8", 7.97, [38.51, 176.77, 42.74, 184.74], 183.0),
+            ("x", "CMMI10", 10.91, [45.06, 172.84, 51.29, 183.75], 181.37),
+            ("1", "CMR8", 7.97, [51.29, 176.77, 55.52, 184.74], 183.0),
+            ("· · ·", "CMSY10", 10.91, [57.84, 172.7, 70.54, 183.61], 181.37),
+            (" x", "CMMI10", 10.91, [70.54, 172.84, 78.59, 183.75], 181.37),
+            ("n", "CMMI8", 7.97, [78.62, 176.77, 83.76, 184.74], 183.0),
+            ("⊔ · · ·", "CMSY10", 10.91, [88.5, 172.7, 110.89, 183.61], 181.37),
+            (" ;", "SFRM1095", 10.91, [110.89, 172.85, 115.72, 183.76], 181.37),
+            ("(c)", "SFRM0600", 5.98, [15.36, 191.18, 24.37, 197.15], 195.85),
+            ("φ", "CMMI10", 10.91, [33.64, 189.38, 40.77, 200.29], 197.9),
+            ("move", "SFRM0800", 7.97, [40.77, 193.32, 59.81, 201.29], 199.54),
+            (":", "SFRM1095", 10.91, [60.32, 189.39, 63.33, 200.3], 197.9),
+            ("every", "SFRM1095", 10.91, [68.15, 189.39, 93.13, 200.3], 197.9),
+            ("2", "CMR10", 10.91, [96.76, 189.38, 102.21, 200.29], 197.9),
+            (" ×", "CMSY10", 10.91, [102.21, 189.24, 113.11, 200.15], 197.9),
+            (" 3", "CMR10", 10.91, [113.11, 189.38, 120.99, 200.29], 197.9),
+            ("window", "SFRM1095", 10.91, [124.61, 189.39, 160.44, 200.3], 197.9),
+            ("is", "SFRM1095", 10.91, [164.05, 189.39, 171.34, 200.3], 197.9),
+            ("legal;", "SFRM1095", 10.91, [33.64, 202.94, 58.34, 213.85], 211.45),
+            ("Cheap", "CMR10", 10.91, [204.8, 132.18, 235.08, 143.09], 140.71),
+            ("cuts", "CMR10", 10.91, [238.72, 132.18, 258.14, 143.09], 140.71),
+            ("force", "CMR10", 10.91, [261.79, 132.18, 284.52, 143.09], 140.71),
+            ("a", "CMR10", 10.91, [288.16, 132.18, 293.61, 143.09], 140.71),
+            ("small", "CMR10", 10.91, [297.24, 132.18, 322.13, 143.09], 140.71),
+            ("λ", "CMMI10", 10.91, [204.8, 145.73, 211.16, 156.64], 154.26),
+            ("2", "CMR8", 7.97, [211.16, 149.66, 215.39, 157.63], 155.89),
+            (".", "CMR10", 10.91, [215.9, 145.73, 218.92, 156.64], 154.26)):
+        s = p.text(text, bbox[0], baseline, size, font=font)
+        s["bbox"] = bbox
+    body_text(p, 250)
+    slide = deck(p)["slides"][0]
+    pars = [par for e in slide["elements"] if e["kind"] == "text" for par in e["paragraphs"]]
+    said = ["".join(r["text"] for r in par["runs"]) for par in pars]
+    [q] = [par for par in pars if any(r.get("hole") for r in par["runs"])]
+    assert [r["text"].strip() for r in q["runs"] if not r.get("hole")] == [";"]
+    assert not any(c in t for t in said for c in "⊔·")
+    assert any("legal;" in t for t in said) and any(t.rstrip().endswith("λ2.") for t in said)
+    [hole] = holes(slide)
+    assert hole["bbox"][0] <= 33.64 and hole["bbox"][2] >= 110.89
+
+
+def test_a_wrapped_formula_line_with_words_after_it_keeps_the_words():
+    """r2_fonts_firamath s3: 'L(θ, φ) = 𝔼_{q_φ}[log p_θ(x | z)] − β KL(q_φ ‖ p), with β = 1 for the
+    plain' wrapped under 'For every x the log-likelihood is bounded by'. Its formula is a hole;
+    the words after it stay text, not one picture of the whole line."""
+    p = Page()
+    light, math = "FiraSans-Light", "FiraMath-Regular"
+    for text, font, size, bbox, baseline in (
+            ("For every", light, 10.91, [28.35, 61.25, 72.46, 74.34], 71.45),
+            (" 𝑥", math, 10.91, [72.46, 62.72, 86.42, 73.63], 71.45),
+            ("the log-likelihood is bounded by", light, 10.91, [84.77, 61.25, 243.22, 74.34], 71.45),
+            ("𝐿(𝜃, 𝜙) = 𝔼", math, 10.91, [28.35, 78.31, 76.43, 89.21], 87.03),
+            ("𝑞", math, 7.86, [76.44, 84.57, 80.96, 92.42], 90.85),
+            ("𝜙", math, 6.33, [80.96, 88.54, 84.89, 94.87], 93.6),
+            ("[", math, 10.91, [85.79, 78.31, 89.3, 89.21], 87.03),
+            ("log", "LMRoman10-Regular", 10.91, [89.3, 74.74, 103.24, 90.2], 87.03),
+            (" 𝑝", math, 10.91, [103.24, 78.31, 111.37, 89.21], 87.03),
+            ("𝜃", math, 7.86, [111.37, 84.57, 115.87, 92.42], 90.85),
+            ("(𝑥∣ 𝑧)] − 𝛽", math, 10.91, [116.48, 78.31, 165.74, 89.21], 87.03),
+            (" KL", "LMRoman10-Regular", 10.91, [165.74, 74.74, 183.09, 90.2], 87.03),
+            ("(𝑞", math, 10.91, [183.09, 78.31, 192.91, 89.21], 87.03),
+            ("𝜙", math, 7.86, [192.91, 84.57, 197.79, 92.42], 90.85),
+            ("‖ 𝑝)", math, 10.91, [200.21, 78.31, 218.17, 89.21], 87.03),
+            (", with", light, 10.91, [218.18, 76.83, 244.06, 89.92], 87.03),
+            (" 𝛽 = 1", math, 10.91, [244.06, 78.31, 271.44, 89.21], 87.03),
+            (" for the plain", light, 10.91, [271.44, 76.83, 334.5, 89.92], 87.03),
+            ("VAE. The reconstruction term rewards sharp images", light, 10.91, [28.35, 94.25, 300.29, 107.34],
+             104.45)):
+        s = p.text(text, bbox[0], baseline, size, font=font)
+        s["bbox"] = bbox
+    body_text(p, 250)
+    text = runs_text(deck(p)["slides"][0])
+    assert "with" in text and "for the plain" in text
+
+
+def test_a_label_between_two_arrows_is_the_nearer_ones():
+    """r1_math_v2 s7: 'fn −µ→ f' over 'fn −Lp→ f', each arrow's label a small line of its own.
+    Lp, over the lower arrow, is also just under the upper one: taken for the upper arrow's
+    label, that arrow's picture reached down over the lower line's."""
+    p = Page()
+    for text, font, size, bbox, baseline in (
+            ("f", "CMMI10", 10.91, [32.73, 101.98, 38.06, 112.89], 110.5),
+            ("n", "CMMI8", 7.97, [38.07, 105.91, 43.2, 113.88], 112.14),
+            ("µ", "CMMI8", 7.97, [49.32, 97.51, 54.41, 105.48], 103.74),
+            ("−", "CMSY10", 10.91, [46.74, 101.84, 55.21, 112.75], 110.5),
+            ("→", "CMSY10", 10.91, [47.5, 101.84, 58.41, 112.75], 110.5),
+            (" f", "CMMI10", 10.91, [58.41, 101.98, 66.78, 112.89], 110.5),
+            ("if", "CMR10", 10.91, [71.59, 101.98, 77.94, 112.89], 110.5),
+            ("it", "CMR10", 10.91, [81.57, 101.98, 88.14, 112.89], 110.5),
+            ("converges", "CMR10", 10.91, [91.8, 101.98, 140.0, 112.89], 110.5),
+            ("in", "CMR10", 10.91, [143.6, 101.98, 152.8, 112.89], 110.5),
+            ("measure;", "CMR10", 10.91, [156.4, 101.98, 200.0, 112.89], 110.5),
+            ("f", "CMMI10", 10.91, [32.73, 122.5, 38.06, 133.41], 131.03),
+            ("n", "CMMI8", 7.97, [38.07, 126.44, 43.2, 134.41], 132.67),
+            ("L", "CMMI8", 7.97, [49.32, 118.62, 55.08, 126.59], 124.85),
+            ("p", "CMMI6", 5.98, [55.08, 117.36, 58.92, 123.34], 122.03),
+            ("−→", "CMSY10", 10.91, [46.74, 122.36, 63.42, 133.27], 131.03),
+            (" f", "CMMI10", 10.91, [63.42, 122.5, 71.77, 133.41], 131.03),
+            ("if", "CMR10", 10.91, [76.58, 122.5, 82.93, 133.41], 131.03),
+            ("it", "CMR10", 10.91, [86.58, 122.5, 93.1, 133.41], 131.03),
+            ("converges", "CMR10", 10.91, [96.7, 122.5, 145.0, 133.41], 131.03),
+            ("in", "CMR10", 10.91, [148.6, 122.5, 157.8, 133.41], 131.03),
+            ("norm.", "CMR10", 10.91, [161.4, 122.5, 190.0, 133.41], 131.03)):
+        s = p.text(text, bbox[0], baseline, size, font=font)
+        s["bbox"] = bbox
+    body_text(p, 250)
+    slide = deck(p)["slides"][0]
+    upper, lower = sorted(holes(slide), key=lambda h: h["bbox"][1])
+    assert upper["bbox"][3] <= lower["bbox"][1] + 1.0  # (no picture over the other's)
+    assert lower["bbox"][1] <= 117.36 + 0.5 and "L" not in runs_text(slide).replace("Body", "")
+
+
 def test_an_arrows_labels_are_in_its_picture():
     """r1_sci_v3 s3: \\ce{->[120 °C][in vacuo]}, r1_sci_v2 s5 'fold' over O2 -> GFP*. The labels
     are small lines of their own over and under the stretched arrow; they stayed text, placed
