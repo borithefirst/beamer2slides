@@ -648,10 +648,34 @@ def span_runs(spans: list[Span]) -> list[dict]:
     runs: list[dict] = []
     main = max(spans, key=lambda s: s.size) if spans else None
     base_family = next((s.info.family for s in spans if s.info.family not in ("math", "icon")), "sans")
-    spans = bidi.logical_spans(spans)
+    spans = list(bidi.logical_spans(spans))
     lead = bidi.lead_mark(spans)
+    over =lambda a, b: b.rect.x0 < a.rect.x1 - 0.2 and a.rect.x0 < b.rect.x1 - 0.2
+    for i in range(len(spans) - 1):  # (an accent reaching left of its letter follows it, as in Line)
+        a, b = spans[i], spans[i + 1]
+        if a.text.strip() in ACCENTS and b.text.strip() not in ACCENTS and \
+                min(a.rect.x1, b.rect.x1) - max(a.rect.x0, b.rect.x0) > 0.5 * a.rect.w:
+            spans[i], spans[i + 1] = b, a
+    accent = ""
     for i, s in enumerate(spans):
         text = s.text
+        if accent:  # (carried from the span before: see below)
+            lead = len(text) - len(text.lstrip())
+            if text[lead:lead + 1].isalpha():
+                text = text[:lead] + with_accent(text[lead], accent) + text[lead + 1:]
+            accent = ""
+        body = text.rstrip()
+        if len(body) >= 2 and body[-1] in ACCENTS and i + 1 < len(spans) and over(s, spans[i + 1]) and \
+                spans[i + 1].text.strip()[:1].isalpha():
+            # "(ˆ" then "β": the accent read with the text before its letter (r1_econ_v3 s7)
+            text, accent = body[:-1] + text[len(body):], ACCENTS[body[-1]]
+        if i and runs and text.strip() in ACCENTS and over(spans[i - 1], s) and runs[-1]["text"].strip():
+            # An accent over the letter before it (a table header's \hat\beta, \bar y: the accent
+            # a span of the text face of its own): the accented letter, not the letter and a
+            # spacing accent beside it ("βˆ", "y¯", r1_econ_v4 s2).
+            tail = runs[-1]["text"].rstrip()
+            runs[-1]["text"] = tail[:-1] + with_accent(tail[-1], ACCENTS[text.strip()]) + runs[-1]["text"][len(tail):]
+            continue
         if i and gap_between(spans[i - 1], s) > 0.15 * s.size and not text.startswith(" "):
             if runs and not runs[-1]["script"] and s.info.family == "mono" and spans[i - 1].info.family != "mono" \
                     and runs[-1]["family"] != "mono" and not runs[-1]["text"].endswith(" "):

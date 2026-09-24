@@ -246,6 +246,66 @@ def test_a_label_between_two_arrows_is_the_nearer_ones():
     assert lower["bbox"][1] <= 117.36 + 0.5 and "L" not in runs_text(slide).replace("Body", "")
 
 
+def test_a_table_cells_accent_is_over_its_letter():
+    """r1_econ_v4 s2: a table header 'β̂ σ̂ ȳ', each accent a span of the text face over its
+    letter. Cell runs put the spacing accent beside its letter: 'βˆ | σˆ | y¯'."""
+    from .test_charts_diagrams import rect
+
+    p = Page()
+    sans, obl, mi = "LMSans10-Regular", "LMSans10-Oblique", "LMMathItalic10-Regular"
+    for text, font, bbox, baseline in (
+            ("Estimator", sans, [82.62, 166.19, 126.55, 177.1], 174.71),
+            ("ˆ", sans, [197.82, 163.46, 203.27, 174.37], 171.99),
+            ("β", mi, [196.26, 166.19, 202.43, 177.1], 174.71),
+            ("ˆ", sans, [233.7, 166.19, 239.16, 177.1], 174.71),
+            ("σ", mi, [233.12, 166.19, 239.35, 177.1], 174.71),
+            ("¯", sans, [267.78, 166.19, 273.24, 177.1], 174.71),
+            ("y", obl, [267.4, 166.19, 272.43, 177.1], 174.71)):
+        s = p.text(text, bbox[0], baseline, font=font)
+        s["bbox"] = bbox
+    for y, cells in ((190.0, ("TWFE", "0.142", "0.041", "3.91")), (203.5, ("Callaway", "0.158", "0.047", "3.91"))):
+        for x, t in zip((82.62, 185.0, 222.0, 260.0), cells):
+            p.text(t, x, y, font=sans, w=5.45 * len(t))
+    for y0, h in ((158.8, 0.8), (180.1, 0.5), (208.0, 0.8)):
+        p.draw(rect(74.64, y0, 288.19, y0 + h), fill="#000000")
+    body_text(p, 250)
+    slide = deck(p)["slides"][0]
+    [table] = [e for e in slide["elements"] if e["kind"] == "table"]
+    head = ["".join(r["text"] for r in c).strip() for c in table["cells"][0]]
+    assert head == ["Estimator", "β̂", "σ̂", "ȳ"]
+
+
+def test_a_table_cells_accent_read_with_the_text_before_it_goes_on_its_letter():
+    """r1_econ_v3 s7: 'Labelled (β̂_L)' in a table, PDFium reading the hat with the parenthesis
+    before it ('(ˆ', then 'β'): the cell said 'Labelled (ˆβL)', a stray caret."""
+    from .test_charts_diagrams import rect
+
+    p = Page()
+    sans, mi = "LMSans8-Regular", "LMMathItalic8-Regular"
+    for text, font, size, bbox, baseline in (
+            ("Enrolled", sans, 7.97, [150.0, 96.0, 180.0, 104.0], 102.2),
+            ("Days", sans, 7.97, [210.0, 96.0, 228.0, 104.0], 102.2),
+            ("Labelled", sans, 7.97, [69.61, 113.64, 98.81, 121.61], 119.86),
+            ("(ˆ", sans, 7.97, [101.63, 111.64, 110.35, 121.61], 119.86),
+            ("β", mi, 7.97, [104.95, 113.64, 109.7, 121.61], 119.86),
+            ("L", "LMSans8-Oblique", 5.98, [109.7, 116.6, 113.16, 122.58], 121.27),
+            (")", sans, 7.97, [113.65, 113.64, 116.95, 121.61], 119.86),
+            ("0.094", sans, 7.97, [150.0, 113.64, 170.0, 121.61], 119.86),
+            ("11.2", sans, 7.97, [210.0, 113.64, 226.0, 121.61], 119.86),
+            ("Controls", sans, 7.97, [69.61, 126.0, 99.0, 134.0], 132.2),
+            ("No", sans, 7.97, [150.0, 126.0, 160.0, 134.0], 132.2),
+            ("Yes", sans, 7.97, [210.0, 126.0, 223.0, 134.0], 132.2)):
+        s = p.text(text, bbox[0], baseline, size, font=font)
+        s["bbox"] = bbox
+    for y0, h in ((92.0, 0.8), (107.0, 0.5), (137.0, 0.8)):
+        p.draw(rect(66.0, y0, 240.0, y0 + h), fill="#000000")
+    body_text(p, 250)
+    slide = deck(p)["slides"][0]
+    [table] = [e for e in slide["elements"] if e["kind"] == "table"]
+    said = ["".join(r["text"] for r in c).strip() for row in table["cells"] for c in row]
+    assert "Labelled (β̂L)" in said
+
+
 def test_an_arrows_labels_are_in_its_picture():
     """r1_sci_v3 s3: \\ce{->[120 °C][in vacuo]}, r1_sci_v2 s5 'fold' over O2 -> GFP*. The labels
     are small lines of their own over and under the stretched arrow; they stayed text, placed
