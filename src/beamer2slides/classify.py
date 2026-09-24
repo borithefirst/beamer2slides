@@ -4960,7 +4960,7 @@ class PageClassifier:
                    and sum(f["rect"].y0 <= b2 <= f["rect"].y1 for b2 in baselines) == 1]
             if own:
                 bands.append([rr, round(min(r.y0 for r in own), 2), round(max(r.y1 for r in own), 2)])
-        return {
+        table = {
             "id": f"p{self.page['index']}tab{index}", "kind": "table", "role": "table",
             "bbox": c.expand(1.0).as_list(), "frame": frame.as_list(), "size": round(size, 2),
             "row_baselines": [round(b, 2) for b in baselines],
@@ -4992,6 +4992,11 @@ class PageClassifier:
             **({"bands": bands} if bands else {}),
             "spans": [s.id for s in spans],
         }
+        # A table Slides cannot set on the page, its columns closed up to their words and its
+        # text at emit.TABLE_MIN_SHRINK (an overfull table far wider than the page), stays a
+        # picture: native, it ran off the slide's edge and lost its last columns.
+        from .emit import table_fits  # (emit imports this module)
+        return table if table_fits(table, self.W) else None
 
     def shapes(self, lines: list[Line], elements: list[dict]) -> list[dict]:
         """Filled panels (beamer blocks and the like) that can become native shapes.

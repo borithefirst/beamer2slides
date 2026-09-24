@@ -2107,7 +2107,9 @@ def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = Fal
     (the runs as they are written: in_sentence, shrunk), "shrink" (the share of its size the text
     is set at), "dx" (PDF pt the columns moved: table_shift), "held" (per column, the text width
     in PDF pt its left-aligned cells are held under, or None: table_columns), "sizes" (per row,
-    the Slides size its lines are laid out at: row_sizes)}. `imported`: the table comes with the .pptx (table_rows). `page_w`: the PDF page's
+    the Slides size its lines are laid out at: row_sizes), "moved" (per column, PDF pt its words
+    moved as its columns closed up: squeezed_columns), "fits" (False: it cannot end on the page
+    at TABLE_MIN_SHRINK, and classify keeps it a picture)}. `imported`: the table comes with the .pptx (table_rows). `page_w`: the PDF page's
     width, by default that of a deck SLIDE_W wide (what every Slides page size is)."""
     page_w = SLIDE_W / scale if page_w is None else page_w
     # (`cell`: set at the table's size, not shaped to the PDF's width: FontMapper.shape_ratio)
@@ -2121,6 +2123,7 @@ def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = Fal
     reach = page_w - TABLE_MARGIN * max(0.0, bounds[0]) if centred is None else \
         centred[1] + 2 * TABLE_MARGIN * centred[0] - (centred[0] - bounds[0])
     limit = min(page_w, max(reach, el["frame"][2], (el.get("bounds") or [0.0])[-1]))
+    fits, moved = True, [0.0] * len(el["columns"])
     if bounds[-1] > limit + 0.01:
         roomy = bounds, cell_width, held
         tight = table_columns(el, cells, scale, fonts, tight=True)
@@ -2129,32 +2132,44 @@ def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = Fal
             return [[[{**r, "size": r["size"] * s} for r in runs] for runs in row] for row in cells]
 
         least = table_columns(el, shrunk(TABLE_MIN_SHRINK), scale, fonts, tight=True)
-        # The margin if the smallest size reaches it, else the page edge, else - an overfull table,
-        # running off the page in the PDF too (r2_tables_v2 slide 6) - where the PDF's ends; a
-        # table that does not fit even then keeps its size (smaller words would not bring its
-        # last column back).
-        pdf_end = max(el["frame"][2], (el.get("bounds") or [0.0])[-1])
-        goal = next((g for g in (limit, page_w, pdf_end if pdf_end > page_w else None)
-                     if g is not None and least[0][-1] <= g + 0.01), None)
-        best = None
-        if tight[0][-1] > limit + 0.01 and goal is not None:
-            lo, hi, best = TABLE_MIN_SHRINK, 1.0, (TABLE_MIN_SHRINK, least)
-            for _ in range(12):
-                mid = (lo + hi) / 2
-                got = table_columns(el, shrunk(mid), scale, fonts, tight=True)
-                if got[0][-1] <= goal + 0.01:
-                    lo, best = mid, (mid, got)
-                else:
-                    hi = mid
-        if tight[0][-1] <= limit + 0.01:
-            bounds, cell_width, held = tight
-        elif best and (best[0] < TABLE_KEEP_SIZE or roomy[0][-1] > page_w + 0.01):
-            shrink, (bounds, cell_width, held) = best[0], best[1]
-            cells = shrunk(shrink)
+        # The margin if the smallest size reaches it, else the page edge - never past the page,
+        # whatever the PDF does: an overfull table (running off the page in the PDF too) set
+        # smaller to end where the PDF's does lost its last columns off the slide (r2_tables_v2
+        # slide 6, r2_tables_v4 slide 2).
+        goal = next((g for g in (limit, page_w) if least[0][-1] <= g + 0.01), None)
+        if goal is None:
+            # Its columns keep the PDF's places (fit_columns), so no size alone brings it back:
+            # they close up towards their words (squeezed_columns), the text kept as large as
+            # still lets the table end on the page, at its margin (`reach`) where that size
+            # allows it. Where even TABLE_MIN_SHRINK cannot, `fits` is False and classify keeps
+            # it a picture (table_fits).
+            packed = squeezed_layout(el, cells, scale, fonts, tuple(sorted({min(reach, page_w), limit, page_w})))
+            if packed is None:
+                # (as before: its size and room, smaller words would not bring its last column back)
+                fits, (bounds, cell_width, held) = False, roomy if roomy[0][-1] <= page_w + 0.01 else tight
+            else:
+                shrink, (bounds, cell_width, held, moved) = packed
+                cells = shrunk(shrink)
         else:
-            # A table on the page that a smaller size would pull back only a little from the
-            # margin keeps its size and its room (every size step is a residual for pull).
-            bounds, cell_width, held = roomy if roomy[0][-1] <= page_w + 0.01 else tight
+            best = None
+            if tight[0][-1] > limit + 0.01:
+                lo, hi, best = TABLE_MIN_SHRINK, 1.0, (TABLE_MIN_SHRINK, least)
+                for _ in range(12):
+                    mid = (lo + hi) / 2
+                    got = table_columns(el, shrunk(mid), scale, fonts, tight=True)
+                    if got[0][-1] <= goal + 0.01:
+                        lo, best = mid, (mid, got)
+                    else:
+                        hi = mid
+            if tight[0][-1] <= limit + 0.01:
+                bounds, cell_width, held = tight
+            elif best and (best[0] < TABLE_KEEP_SIZE or roomy[0][-1] > page_w + 0.01):
+                shrink, (bounds, cell_width, held) = best[0], best[1]
+                cells = shrunk(shrink)
+            else:
+                # A table on the page that a smaller size would pull back only a little from the
+                # margin keeps its size and its room (every size step is a residual for pull).
+                bounds, cell_width, held = roomy if roomy[0][-1] <= page_w + 0.01 else tight
     dx = table_shift(el, bounds, page_w)
     bounds = [b + dx for b in bounds]
     widths = [max(TABLE_MIN_COLUMN_PT, (b - a) * scale) for a, b in zip(bounds, bounds[1:])]
@@ -2164,7 +2179,84 @@ def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = Fal
     y, heights, ratios, insets = table_rows(el, z, scale, imported, sizes)
     return {"x": bounds[0] * scale, "y": y, "widths": widths, "heights": heights, "ratios": ratios, "insets": insets,
             "bounds": bounds, "cell_width": cell_width, "z": z, "first_run": first_run, "cells": cells,
-            "shrink": round(shrink, 3), "dx": dx, "held": held, "sizes": sizes}
+            "shrink": round(shrink, 3), "dx": dx, "held": held, "sizes": sizes, "moved": moved, "fits": fits}
+
+
+def squeezed_columns(el: dict, cells: list[list[list[dict]]], got: tuple, scale: float, goal: float
+                     ) -> tuple[list[float], dict, list[float | None], list[float]] | None:
+    """`got` (table_columns' tight answer for `cells`) with its columns narrowed towards their
+    words until the table ends at `goal` (PDF pt), each by the same share of the room it has
+    past its least - its widest one-column cell in Slides, WRAP_MARGIN and both cell paddings
+    (fit_columns' own), or for a column nothing measured its PDF width and 8%, and never under
+    TABLE_MIN_COLUMN_PT. Also per column how far its words move (PDF pt), on their alignment
+    edge. None if the least widths, or a cell spanning columns, cannot end there."""
+    bounds, cell_width, held = got
+    cols = el["columns"]
+    pad = TABLE_CELL_PAD / scale
+    spanned = {(m["row"], m["col"]) for m in el.get("merges", []) if m["cols"] > 1}
+    least = []
+    for c, col in enumerate(cols):
+        ws = [w for (r, cc), w in cell_width.items() if cc == c and (r, c) not in spanned]
+        text = max(ws) / scale + (1 + WRAP_MARGIN) / scale if ws and None not in ws else \
+            1.08 * (col["x1"] - col["x0"]) + 1 / scale
+        least.append(max(text + 2 * pad, TABLE_MIN_COLUMN_PT / scale))
+    widths = [b - a for a, b in zip(bounds, bounds[1:])]
+    cut = bounds[-1] - goal
+    if cut > 0:
+        slack = [max(0.0, w - k) for w, k in zip(widths, least)]
+        if sum(slack) < cut - 0.01:
+            return None
+        widths = [w - s * cut / sum(slack) for w, s in zip(widths, slack)]
+    out = [bounds[0]]
+    for w in widths:
+        out.append(out[-1] + w)
+    for m in el.get("merges", []):
+        w = cell_width.get((m["row"], m["col"]))
+        if m["cols"] > 1 and w is not None and \
+                out[m["col"] + m["cols"]] - out[m["col"]] < (w + 2 * TABLE_CELL_PAD + 1 + WRAP_MARGIN) / scale - 0.01:
+            return None
+    moved = [(b1 - a1) if col["align"] == "left" else (b2 - a2) if col["align"] == "right" else (b1 + b2 - a1 - a2) / 2
+             for col, a1, a2, b1, b2 in zip(cols, bounds, bounds[1:], out, out[1:])]
+    return out, cell_width, held, moved
+
+
+def squeezed_layout(el: dict, cells: list[list[list[dict]]], scale: float, fonts: FontMapper,
+                    goals: tuple[float, ...]) -> tuple[float, tuple] | None:
+    """(shrink, squeezed_columns' answer) for a table ending at one of `goals` (PDF pt, nearest
+    first), its text as large as any of them allows (TABLE_MIN_SHRINK at least), the nearest of
+    those that allow that; None if it reaches none of them."""
+    def packed(s: float, goal: float):
+        shrunk = [[[{**r, "size": r["size"] * s} for r in runs] for runs in row] for row in cells]
+        return squeezed_columns(el, shrunk, table_columns(el, shrunk, scale, fonts, tight=True), scale, goal)
+
+    best = None
+    for goal in goals:
+        if packed(TABLE_MIN_SHRINK, goal) is None:
+            continue
+        lo, hi = TABLE_MIN_SHRINK, 1.0
+        if packed(1.0, goal) is not None:
+            lo = 1.0
+        else:
+            for _ in range(12):
+                mid = (lo + hi) / 2
+                if packed(mid, goal) is not None:
+                    lo = mid
+                else:
+                    hi = mid
+        if best is None or lo > best[0] + 0.005:
+            best = lo, goal
+    return None if best is None else (best[0], packed(*best))
+
+
+def table_fits(el: dict, page_w: float) -> bool:
+    """Whether a table element can be set on its page in Slides, at TABLE_MIN_SHRINK of its size
+    at the least (table_layout's `fits`), on a deck SLIDE_W wide."""
+    return table_layout(el, SLIDE_W / page_w, _fit_fonts(), imported=True, page_w=page_w)["fits"]
+
+
+@functools.lru_cache(maxsize=1)
+def _fit_fonts() -> "FontMapper":
+    return FontMapper()
 
 
 def row_sizes(el: dict, cells: list[list[list[dict]]], z: float, scale: float, fonts: FontMapper) -> list[float]:
@@ -2220,8 +2312,10 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
     empty and with the cell margins `pptx_table` gave it; else it is made here by createTable."""
     lay = table_layout(el, scale, fonts, imported, page_w)
     dx = lay["dx"]  # (a centred table's columns moved with it: table_shift)
-    cols = [{**c, "x0": c["x0"] + dx, "x1": c["x1"] + dx, **({"body": [b + dx for b in c["body"]]} if "body" in c else {})}
-            for c in el["columns"]]
+    # (and a squeezed column's words with their edge: squeezed_columns)
+    cols = [{**c, "x0": c["x0"] + dx + m, "x1": c["x1"] + dx + m,
+             **({"body": [b + dx + m for b in c["body"]]} if "body" in c else {})}
+            for c, m in zip(el["columns"], lay["moved"])]
     x, y, widths, heights, row_ratio = lay["x"], lay["y"], lay["widths"], lay["heights"], lay["ratios"]
     bounds, cell_width, first_run = lay["bounds"], lay["cell_width"], lay["first_run"]
     n_rows, n_cols = len(el["cells"]), len(cols)
@@ -2355,7 +2449,7 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                 # (a \multirow or \makecell head centred over a flush column stays centred)
                 align, left_pad, right_pad = merged[(r, c)]["align"], 0.0, 0.0
                 if merged[(r, c)]["cols"] > 1 and align != "center" and (r, c) in merge_x:
-                    left_pad, right_pad = merged_pads(merged[(r, c)], merge_x[(r, c)], bounds, dx, scale,
+                    left_pad, right_pad = merged_pads(merged[(r, c)], merge_x[(r, c)], bounds, dx + lay["moved"][c], scale,
                                                       cell_width.get((r, c)))
             if spare[c] is not None and (r, c) not in merged and not head:  # (the column's: see `spare` above)
                 left_pad, right_pad = min(left_pad, spare[c]), min(right_pad, spare[c])
