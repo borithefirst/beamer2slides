@@ -1359,12 +1359,9 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
         if run.get("script"):
             size *= SCRIPT_SIZE
         for ch in run["text"]:
-<<<<<<< HEAD
             ch = " " if ch == " " else ch  # (a no-break space, a \colorbox's padding, is a space's width)
-=======
             if unicodedata.combining(ch):
                 continue  # (a macron over its letter: no advance of its own)
->>>>>>> worktree-agent-a38ff366f86989284
             if run.get("smallcaps") and ch.islower():
                 total += table.get(ch.upper(), unmeasured) * size * SMALL_CAPS_SIZE
             else:
@@ -2573,10 +2570,10 @@ def grown_panels(slide: dict, scale: float, fonts: FontMapper) -> dict:
         paras = [{**p, "runs": [hole_run(r, scale, fonts) if r.get("hole") else r for r in in_sentence(p["runs"])]}
                  for p in el["paragraphs"]]
         measured = box_lines(paras, [hugs(p) for p in paras], scale, fonts)
-        if not measured:
-            continue
+        if not measured or any(g is None for g in measured):
+            continue  # (every paragraph measured: an unmeasured one could be the widest)
         right = max(line["x1"] for p in paras for line in p["lines"])
-        grow = measured[0] / scale - right
+        grow = max(g[0] for g in measured) / scale - right
         if grow > 0.5 and right < panel["bbox"][2]:
             over[i] = max(over.get(i, 0.0), grow)
     blocks: dict[int, float] = {}
