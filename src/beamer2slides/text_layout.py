@@ -20,7 +20,7 @@ recreated for the source's words and then given the person's: where its formula 
 how tall the box and the block panel under it now have to be - `Sync.refit_requests`).
 """
 
-from . import emit
+from . import bidi, emit
 
 INSET_X = emit.PAD_X            # box edge -> text, left and right
 INSET_Y = 7.2                   # Slides' top and bottom text insets
@@ -45,6 +45,8 @@ def advance(ch: str, st: dict, size: float) -> float:
         size *= emit.SCRIPT_SIZE
     if ch == "\t":
         return TAB_EM * size
+    if ch in bidi.MARKS:
+        return 0.0  # (an LRM or RLM draws nothing)
     if family == emit.FONT_FOR_FAMILY["mono"]:
         return emit.ROBOTO_MONO_ADVANCE_EM * size
     table = (emit.ADVANCES.get(family) or emit.ADVANCES["Lato"])[_style_name(st)]

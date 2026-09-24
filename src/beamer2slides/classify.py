@@ -296,6 +296,13 @@ class Line:
         return " ".join(s.text.strip() for s in bidi.logical_spans(self.spans))
 
 
+def reads_rtl(line: Line) -> bool:
+    """The line was read right to left (`PageClassifier.read_lines`: its base direction), so it
+    starts at its right end - where a Hebrew item's bullet hangs."""
+    bases = {s.reading[2] for s in line.spans if s.reading}
+    return bases == {bidi.RIGHT}
+
+
 @dataclass(eq=False)
 class Paragraph:
     lines: list[Line]
@@ -2081,6 +2088,9 @@ class PageClassifier:
         return len(words) >= 2 and len(outside) >= 1
 
     def detect_bullet(self, line: Line) -> None:
+        if reads_rtl(line):
+            self.detect_rtl_bullet(line)
+            return
         spans = line.spans
         if len(spans) < 2:
             first = None
@@ -2155,6 +2165,57 @@ class PageClassifier:
                 if shape and not any(g.contains_rect(o) and not o.contains_rect(g) for o in self.graphics if o is not g):
                     line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True, **shape}
                 else:  # no Slides glyph looks like it (beamer's bibliography icon): a picture
+                    icon = union_all([g] + [ir for _, ir in self.small_images if ir.intersects(g)])
+                    line.bullet = {"kind": "icon", "text": "", "bbox": icon.as_list(), "spans": []}
+                return
+
+    def detect_rtl_bullet(self, line: Line) -> None:
+        """`detect_bullet` for a line read right to left (a Hebrew or Arabic item): its bullet
+        hangs right of its words, where the item starts - a glyph, a ball image (with its
+        number drawn on it) or a vector ball - by the same measures mirrored. Nothing at the
+        left end of such a line is a bullet: that is where its sentence ends. Left alone, the
+        balls stayed in the background, the items of a list ran together, and two columns of
+        them were taken for a table's cells."""
+        spans = line.spans
+        if len(spans) >= 2:
+            last, prev = spans[-1], spans[-2]
+            token = last.text.strip()
+            on_ball = any(ir.contains(last.rect.cx, last.rect.cy) for _, ir in self.small_images)
+            if last.rect.x0 - prev.rect.x1 >= 0.25 * line.size and token in BULLET_GLYPHS - {"–"} and not on_ball:
+                line.bullet = {"kind": "glyph", "text": token, "color": last.color, "bbox": last.rect.as_list(),
+                               "label": label_of([last])}
+                line.bullet_spans = [last]
+                return
+        level = lambda r: line.baseline - 0.9 * line.size <= r.cy <= line.baseline + 0.1 * line.size
+        # (a numbered ball comes out 11 or 12 pt as its image's box is rounded: one of 12 pt is no
+        # small image, and was taken for a graphic around a word, a hole)
+        balls = self.small_images + [(im, r) for im, r in ((im, Rect.of(im["bbox"])) for im in self.page["images"])
+                                     if min(r.w, r.h) >= SMALL_IMAGE_PT and max(r.w, r.h) <= 1.25 * line.size]
+        for im, ir in balls:
+            if not 0.8 <= ir.w / max(ir.h, 0.01) <= 1.25 or \
+                    any(o is not im and max(orr.w, orr.h) <= 20 and (overlap(orr, ir) > 0.2 * ir.w * ir.h or ir.contains_rect(orr))
+                        for o, orr in self.small_images):
+                continue
+            on_image = [s for s in spans if ir.expand(0.5).contains(s.rect.cx, s.rect.cy)]
+            rest = [s for s in spans if s not in on_image]
+            if not rest:
+                continue
+            x1 = max(s.rect.x1 for s in rest)
+            if ir.x0 >= x1 - 0.5 and ir.x0 - x1 <= 1.5 * line.size and level(ir):
+                token = "".join(s.text.strip() for s in sorted(on_image, key=lambda s: s.rect.x0))
+                line.bullet = {"kind": "image", "image": im["id"], "text": token, "bbox": ir.as_list(),
+                               "label": label_of(on_image)}
+                line.bullet_spans = on_image
+                return
+        x1 = max(s.rect.x1 for s in spans)
+        for g in self.graphics:
+            if 0.25 * line.size <= g.w <= 1.3 * line.size and 0.25 * line.size <= g.h <= 1.6 * line.size \
+                    and 0.5 <= g.w / g.h <= 2.0 and g.x0 >= x1 - 0.5 and g.x0 - x1 <= 2.0 * line.size \
+                    and level(g) and self.stands_alone(g, spans[-1].rect):
+                shape = bullet_shape(self.graphic_paths.get(tuple(g.as_list())))
+                if shape and not any(g.contains_rect(o) and not o.contains_rect(g) for o in self.graphics if o is not g):
+                    line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True, **shape}
+                else:
                     icon = union_all([g] + [ir for _, ir in self.small_images if ir.intersects(g)])
                     line.bullet = {"kind": "icon", "text": "", "bbox": icon.as_list(), "spans": []}
                 return
@@ -2399,7 +2460,7 @@ class PageClassifier:
             framed = touched and g.contains_rect(union_all(s.rect for s in touched), tol=0.5) and g.w <= 0.5 * self.W
             if not touched or (g.w > sum(s.rect.w for s in touched) + 2 * size and not framed):
                 continue  # nothing on it, or a rule or frame reaching well past the words
-            if touched == spans[:1]:
+            if touched == (spans[-1:] if reads_rtl(line) else spans[:1]):
                 continue  # a label on a box at the line start: a list number (detect_bullet)
             if self.cuts_words(g, spans):
                 continue  # drawn over the line, not set in it (see overlay)
@@ -2851,6 +2912,15 @@ class PageClassifier:
             left = True
             right = True
             self.join_indent = par.x0 - line.x0
+        if par.bullet and right and reads_rtl(par.first) and reads_rtl(line):
+            # A right-to-left item's next line starts under its words at their right end, as a
+            # left-to-right one's starts at their left (the "left" case below, mirrored): unless
+            # its first word - the rightmost - would have fitted at the end of the line above.
+            col_left = min(l.x0 for l in par.lines + [line])
+            head = max(line.content, key=lambda s: s.rect.x1)
+            if last.x0 - 0.3 * par.size - first_word_width(head) > col_left + 0.5:
+                return None
+            return "right"
         center = abs((line.x0 + line.x1) / 2 - (last.x0 + last.x1) / 2) <= 1.5
         if center and any(abs(s.rect.x0 - last.x0) <= 1.5 and s.rect.x0 - p.rect.x1 >= 0.8 * par.size
                           for p, s in zip(line.content, line.content[1:])):
@@ -2903,6 +2973,10 @@ class PageClassifier:
         its list, the block title above it, the column it is in): then it is left-aligned and
         its centre or end is a coincidence of its length (a centred item puts its bullet
         against its words and leaves its siblings' edge)."""
+        if line.bullet and reads_rtl(line):
+            # A right-to-left item starts at its right end, beside its bullet: its siblings'
+            # edge is there, whatever its length makes of its middle.
+            return "right"
         # (a neighbour as long, or centred itself, says nothing: stacked centred lines of a
         # title page, equation numbers; nor does a formula's limit under it)
         near = [l for p in neighbours if p.first is not line and abs(p.size - line.size) <= 1 for l in p.lines
@@ -3007,6 +3081,14 @@ class PageClassifier:
         if par.align == "center":
             if abs(par.rect.cx - box_rect.cx) > 2:
                 return False
+        elif par.bullet and reads_rtl(par.first) and all(reads_rtl(p.first) for p in box):
+            # (right to left: a nested item's bullet ends left of its parent's words' start - their
+            # right end - but not much further, and the list keeps to its right edge)
+            x = max(par.rect.x1, par.bullet["bbox"][2])
+            if not (min(p.first.x1 for p in box) - 2 * par.size <= x <= box_rect.x1 + 1.5):
+                return False
+            if not (par.rect.x0 < box_rect.x1 and box_rect.x0 < par.rect.x1):
+                return False
         else:
             # A nested item's bullet starts after its parent's text start, but not much further.
             x = min(par.rect.x0, par.bullet["bbox"][0]) if par.bullet else par.rect.x0
@@ -3031,14 +3113,18 @@ class PageClassifier:
             else:
                 boxes.append([par])
         for box in boxes:
-            xs = sorted({round(Rect.of(p.bullet["bbox"]).x0, 0) for p in box if p.bullet})
+            # (a right-to-left list nests leftwards: its level is how far its bullet's right
+            # edge stands in from the list's)
+            start = (lambda b: -Rect.of(b["bbox"]).x1) if all(reads_rtl(p.first) for p in box) else \
+                (lambda b: Rect.of(b["bbox"]).x0)
+            xs = sorted({round(start(p.bullet), 0) for p in box if p.bullet})
             levels: list[float] = []
             for x in xs:
                 if not levels or x - levels[-1] > 2:
                     levels.append(x)
             for p in box:
                 if p.bullet:
-                    bx = Rect.of(p.bullet["bbox"]).x0
+                    bx = start(p.bullet)
                     p.level = min(range(len(levels)), key=lambda i: abs(levels[i] - bx))
         return boxes
 
