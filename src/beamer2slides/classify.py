@@ -3408,6 +3408,18 @@ class PageClassifier:
         }
 
 
+def ball_number(bullet: dict, label: dict) -> str:
+    """The number a ball shows. A ball template draws the whole label on a ball sized for a
+    letter or two: \\begin{enumerate}[(a)] puts white parentheses at the ball's edges, over its
+    white rim and the page, where nobody sees them (r3_dense_v2 s7). In Slides' wider font
+    they came out as white crescents cutting the ball."""
+    text = bullet["text"]
+    white = all(int(label.get("color", "#000000")[i:i + 2], 16) >= 0xE0 for i in (1, 3, 5))
+    if bullet["kind"] == "image" and white and len(text) > 2 and text[0] == "(" and text[-1] == ")":
+        return text[1:-1]
+    return text
+
+
 def literal_list_numbers(slides: list[dict]) -> None:
     """Slides numbers each list from 1, and the API cannot set a start number. A numbered
     item whose number Slides would get wrong (a table of contents split into one box per
@@ -3457,7 +3469,7 @@ def literal_list_numbers(slides: list[dict]) -> None:
                 x0, y0, x1, y1 = b["bbox"]
                 pictures.append({"id": f"{e['id']}b{len(pictures)}", "kind": "image", "role": "icon",
                                  "bbox": [x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5], "spans": [], "anchor": e["id"],
-                                 "number": {"text": b["text"], "center": [(x0 + x1) / 2, (y0 + y1) / 2],
+                                 "number": {"text": ball_number(b, label), "center": [(x0 + x1) / 2, (y0 + y1) / 2],
                                             "height": y1 - y0, **label}})
                 p["bullet"] = None
                 continue

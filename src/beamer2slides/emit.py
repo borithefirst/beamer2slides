@@ -364,13 +364,41 @@ class FontMapper:
 
 
 def bullet_shape(bullet: dict) -> str | None:
-    """The BULLET_SHAPES entry for a bullet; None for numbers."""
+    """The BULLET_SHAPES entry for a bullet; None for numbers. A glyph's is its character's,
+    except a bullet character the PDF draws as a filled square (LM Sans's \\textbullet)."""
     text = bullet.get("text", "")
     if bullet["kind"] == "number" or (bullet["kind"] == "image" and text.isdigit()):
         return None
     if bullet["kind"] == "glyph":
-        return GLYPH_SHAPES.get(text, "disc")
+        shape = GLYPH_SHAPES.get(text, "disc")
+        return "square" if shape == "disc" and inked_square(bullet) else shape
     return bullet.get("shape") if bullet.get("shape") in BULLET_SHAPES else "disc"
+
+
+def inked_square(bullet: dict) -> bool:
+    ink, fill = bullet.get("ink"), bullet.get("fill") or 0.0
+    if not ink or fill < 0.9:  # (a disc fills 0.79 of its box)
+        return False
+    w, h = ink[2] - ink[0], ink[3] - ink[1]
+    return 0.8 <= w / h <= 1.25 if h > 0 else False
+
+
+# A glyph bullet whose ink (render.glyph_ink) would come out this much smaller than a bullet at
+# the label's size is sized by its ink, as vector bullets are. Beamer's own glyphs (MSAM's ▶
+# 0.58 em, CMSY's • 0.39 em against the disc's 0.41) keep the label's size.
+INK_SIZED = 0.75
+
+
+def ink_sized(bullet: dict, size: float, scale: float) -> float | None:
+    """The size that gives a glyph bullet its PDF ink height, when it is to be used."""
+    if bullet["kind"] != "glyph" or not bullet.get("ink"):
+        return None
+    shape = bullet_shape(bullet)
+    label = bullet.get("label") or {}
+    full = min(size, label.get("size", size / scale) * scale)
+    height = (bullet["ink"][3] - bullet["ink"][1]) * scale
+    inked = max(0.3 * size, min(size, height / BULLET_SHAPES[shape][2]))
+    return inked if inked < INK_SIZED * full or shape != GLYPH_SHAPES.get(bullet.get("text", ""), "disc") else None
 
 
 def bullet_preset(bullet: dict) -> str:
@@ -393,8 +421,12 @@ def bullet_level(bullet: dict, level: int) -> int:
 
 def bullet_size(bullet: dict, size: float, scale: float) -> float:
     """Font size giving the bullet its PDF height (at most the text's: a larger bullet would
-    push the line down). Glyph and number boxes are font boxes: their size is the font's."""
+    push the line down). Glyph and number boxes are font boxes: their size is the font's, or
+    their ink's where that is much smaller (`ink_sized`)."""
     shape = bullet_shape(bullet)
+    inked = ink_sized(bullet, size, scale)
+    if inked is not None:
+        return round(inked, 1)
     if bullet["kind"] in ("glyph", "number") or shape is None:
         label = bullet.get("label") or {}
         return round(min(size, label.get("size", size / scale) * scale), 1)
@@ -408,6 +440,15 @@ def bullet_gap(bullet: dict, size: float) -> float:
     if bullet["kind"] in ("glyph", "number") or shape is None:
         return BULLET_GAP
     return BULLET_SHAPES[shape][3] * size
+
+
+def bullet_extent(bullet: dict, size: float, scale: float) -> tuple[float, float, float]:
+    """(PDF x0, PDF x1, gap after it in Slides pt) of what the Slides bullet stands for: the
+    ink of a glyph sized by its ink (then placed as a vector bullet is), else the bullet's box."""
+    z = bullet_size(bullet, size, scale)
+    if ink_sized(bullet, size, scale) is not None:
+        return bullet["ink"][0], bullet["ink"][2], BULLET_SHAPES[bullet_shape(bullet)][3] * z
+    return bullet["bbox"][0], bullet["bbox"][2], bullet_gap(bullet, z)
 
 
 def rgb(hex_color: str) -> dict:
@@ -668,6 +709,9 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     # subscript is no larger than its text (run_sizes).
     sized = [run_sizes(p["runs"], scale, fonts) for p in paras]
     base_sizes = [max(zs) if p["runs"] else p["size"] * scale for p, zs in zip(paras, sized)]
+    # A bullet is no larger than its item's text (`body_size`), not its largest run: one {\Large}
+    # word or a superscript's optical cut grew that item's bullet over its neighbours'.
+    bullet_caps = [body_size(p["runs"], zs) or base for p, zs, base in zip(paras, sized, base_sizes)]
     per_line = [line_sizes(p, zs, scale, fonts) for p, zs in zip(paras, sized)]
     sizes = [max(ls) for ls in per_line]
 
@@ -787,12 +831,12 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
     # A bullet keeps the text style it was created with, unless a later style request covers
     # its whole paragraph. So every paragraph first gets its base family and size, bulleted
     # ones the bullet's size and colour, and the runs are styled below in parts.
-    for i, (p, start, level, size) in enumerate(zip(paras, starts_tabbed, levels, base_sizes)):
+    for i, (p, start, level, size, cap) in enumerate(zip(paras, starts_tabbed, levels, base_sizes, bullet_caps)):
         family = fonts(p["runs"][0], scale)[0] if p["runs"] else "Lato"
         length = level + u16("".join(r["text"] for r in p["runs"]))
         style = {"fontFamily": family, "fontSize": pt(size)}
         if p["bullet"]:
-            style["fontSize"] = pt(bullet_size(p["bullet"], size, scale))
+            style["fontSize"] = pt(bullet_size(p["bullet"], cap, scale))
             color = p["bullet"].get("color") or (p["runs"][0]["color"] if p["runs"] else None)
             if color:
                 style["foregroundColor"] = rgb(color)
@@ -815,7 +859,7 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
 
     # From here on indices refer to the final text, without tabs.
     pos = 0
-    for p, t, ratio, above, base, edge, zs in zip(paras, texts, ratios, space_above, base_sizes, edges, sized):
+    for p, t, ratio, above, cap, edge, zs in zip(paras, texts, ratios, space_above, bullet_caps, edges, sized):
         p_start, p_end = pos, pos + u16(t)
         pos = p_end + 1
         start = p_start
@@ -872,8 +916,9 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
         text_indent = 0.0 if el.get("code") or edge != start_edge else room * scale
         if p["bullet"]:
             # Slides ends the bullet glyph a little before indentFirstLine.
-            side = (right_pdf - p["bullet"]["bbox"][0]) if rtl else (p["bullet"]["bbox"][2] - left_pdf)
-            first_indent = side * scale + bullet_gap(p["bullet"], bullet_size(p["bullet"], base, scale))
+            b_x0, b_x1, gap = bullet_extent(p["bullet"], cap, scale)
+            side = (right_pdf - b_x0) if rtl else (b_x1 - left_pdf)
+            first_indent = side * scale + gap
         elif p.get("tab_x0") and not el.get("code") and not rtl:
             # "label<TAB>content": a tab after the hanging label jumps to indentStart.
             # (a right-to-left label's tab lands where nothing in the PDF says: no hang)

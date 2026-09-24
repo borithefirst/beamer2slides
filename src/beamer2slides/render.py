@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page
+from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page, PdfError
 
 BACKGROUND_WIDTH_PX = 2000
 FIGURE_PX_PER_PT = 8.0     # ~ 4 px per Slides point on a 4:3 deck: sharp on high-DPI screens
@@ -509,6 +509,10 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
         for el in slide["elements"]:
             for p in el.get("paragraphs", []):
                 b = p["bullet"]
+                if b and b["kind"] == "glyph" and "ink" not in b:
+                    measured = glyph_ink(original[slide["page"]], b["bbox"])
+                    if measured:  # (emit sizes and shapes the Slides bullet by it)
+                        b["ink"], b["fill"] = measured
                 if b and b["kind"] == "image":
                     bullets.append(images[b["image"]]["bbox"])
                     b.setdefault("color", ink_colour(img, b["bbox"], px_per_pt))  # the Slides bullet's colour
@@ -646,7 +650,8 @@ def paint_out_leftovers(img: np.ndarray, slide: dict, px_per_pt: float) -> None:
 
 def ink_colour(img: np.ndarray, rect_pt: list[float], px_per_pt: float) -> str | None:
     """Typical colour of what is drawn in a small area (a shaded ball bullet): the median of
-    the pixels that differ from the page around it."""
+    the pixels that differ from what is behind it (`ring_background`: on a picture's edge the
+    picture's pixels in the box are not the ball's), or from the page around it."""
     x0, y0, x1, y1 = rect_pt
     a0, b0 = max(0, int(np.floor(x0 * px_per_pt))), max(0, int(np.floor(y0 * px_per_pt)))
     a1, b1 = int(np.ceil(x1 * px_per_pt)), int(np.ceil(y1 * px_per_pt))
@@ -654,21 +659,97 @@ def ink_colour(img: np.ndarray, rect_pt: list[float], px_per_pt: float) -> str |
     ring = np.concatenate([img[max(0, b0 - 3):b0, a0:a1, :3].reshape(-1, 3), img[b1:b1 + 3, a0:a1, :3].reshape(-1, 3)]).astype(int)
     if not len(area) or not len(ring):
         return None
-    ink = area[np.abs(area - np.median(ring, axis=0)).sum(axis=1) > 60]
+    behind = ring_background(img, a0, b0, a1, b1)
+    behind = np.median(ring, axis=0) if behind is None else behind.reshape(-1, 3)
+    ink = area[np.abs(area - behind).sum(axis=1) > 60]
     if len(ink) < 0.2 * len(area):
         return None
     return "#" + "".join(f"{int(v):02x}" for v in np.median(ink, axis=0))
 
 
+GLYPH_INK_ZOOM = 16  # px per pt: a 0.15 em dot of 11 pt is 26 px tall
+
+
+def glyph_ink(page: Page, box: list[float]) -> tuple[list[float], float] | None:
+    """The ink of a glyph bullet, from the page as the PDF draws it: its box in pt and the share
+    of that box it fills (a disc 0.79, a square 1, a triangle 0.54). A glyph's box is its font's
+    (1-1.2 em tall whatever the glyph): Fira Sans Light's bullet is a 0.15 em dot, LM Sans's
+    \\textbullet a 0.29 em square, where Slides' disc preset is 0.41 em of its size. The blob
+    around the most inked row and column, so a neighbour's descender at the box edge is not
+    counted. None when the backend does not draw or nothing is there."""
+    x0, y0, x1, y1 = box
+    clip = (x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5)
+    try:
+        img = page.render(GLYPH_INK_ZOOM, clip=clip)
+    except PdfError:
+        return None
+    px = img[..., :3].astype(int)
+    border = np.concatenate([px[0], px[-1], px[:, 0], px[:, -1]])
+    distance = np.abs(px - np.median(border, axis=0)).sum(axis=2)
+    if distance.max() <= 60:
+        return None
+    ink = distance > max(60, distance.max() / 2)
+
+    def blob(profile: np.ndarray) -> tuple[int, int]:
+        a = b = int(profile.argmax())
+        while a > 0 and profile[a - 1]:
+            a -= 1
+        while b + 1 < len(profile) and profile[b + 1]:
+            b += 1
+        return a, b + 1
+
+    r0, r1 = blob(ink.sum(axis=1))
+    c0, c1 = blob(ink[r0:r1].sum(axis=0))
+    fill = float(ink[r0:r1, c0:c1].mean())
+    ix0 = np.floor(clip[0] * GLYPH_INK_ZOOM + 0.001) / GLYPH_INK_ZOOM  # (pixel_bounds rounds outwards)
+    iy0 = np.floor(clip[1] * GLYPH_INK_ZOOM + 0.001) / GLYPH_INK_ZOOM
+    return [round(float(ix0 + c0 / GLYPH_INK_ZOOM), 2), round(float(iy0 + r0 / GLYPH_INK_ZOOM), 2),
+            round(float(ix0 + c1 / GLYPH_INK_ZOOM), 2), round(float(iy0 + r1 / GLYPH_INK_ZOOM), 2)], round(fill, 2)
+
+
+def ring_background(img: np.ndarray, a0: int, b0: int, a1: int, b1: int, r: int = 3) -> np.ndarray | None:
+    """What is behind a small rectangle of pixels [b0:b1, a0:a1], from a ring `r` px wide around
+    it: each column running from the strip above to the strip below, each row from the strip on
+    the left to the one on the right, the two weighted by how well their ends agree. A bullet
+    on a picture's edge or on a gradient (a colorbar) takes that edge and gradient through it;
+    a flat median painted a square of the mixed colour there. (h, w, 3) floats, or None when
+    the ring is off the image."""
+    h, w = b1 - b0, a1 - a0
+    if a0 < 0 or b0 < 0 or a1 > img.shape[1] or b1 > img.shape[0] or h <= 0 or w <= 0:
+        return None
+    px = img[..., :3].astype(float)
+    t = (np.arange(h) + 0.5) / h
+    s = (np.arange(w) + 0.5) / w
+    guesses, errors = [], []
+    if b0 >= r and b1 + r <= img.shape[0]:
+        top, bottom = np.median(px[b0 - r:b0, a0:a1], axis=0), np.median(px[b1:b1 + r, a0:a1], axis=0)
+        guesses.append(top[None] * (1 - t)[:, None, None] + bottom[None] * t[:, None, None])
+        errors.append(np.abs(top - bottom).sum(axis=1).mean())
+    if a0 >= r and a1 + r <= img.shape[1]:
+        left, right = np.median(px[b0:b1, a0 - r:a0], axis=1), np.median(px[b0:b1, a1:a1 + r], axis=1)
+        guesses.append(left[:, None] * (1 - s)[None, :, None] + right[:, None] * s[None, :, None])
+        errors.append(np.abs(left - right).sum(axis=1).mean())
+    if not guesses:
+        return None
+    weights = [1.0 / (e + 1.0) ** 2 for e in errors]  # (squared: an edge's 5% ghost showed)
+    return sum(g * wt for g, wt in zip(guesses, weights)) / sum(weights)
+
+
 def patch_rects(img: np.ndarray, rects_pt: list[list[float]], px_per_pt: float) -> None:
-    """Paint rectangles with the median colour of a thin ring around them.
+    """Paint rectangles with what the ring around them says is behind (`ring_background`), or
+    its median colour at the image's edge.
 
     Used for ball bullets: removing those images from the PDF is unreliable (themes draw
-    them with soft masks shared with shadows), but they sit on flat panel colours."""
+    them with soft masks shared with shadows). Most sit on flat panel colours, some on a
+    picture's edge or a gradient."""
     for x0, y0, x1, y1 in rects_pt:
         a0, b0 = int(np.floor(x0 * px_per_pt)) - 1, int(np.floor(y0 * px_per_pt)) - 1
         a1, b1 = int(np.ceil(x1 * px_per_pt)) + 1, int(np.ceil(y1 * px_per_pt)) + 1
         r = 3
+        behind = ring_background(img, a0, b0, a1, b1, r)
+        if behind is not None:
+            img[b0:b1, a0:a1, :3] = np.clip(np.round(behind), 0, 255).astype(np.uint8)
+            continue
         ring = np.concatenate([
             img[max(0, b0 - r):b0, max(0, a0 - r):a1 + r].reshape(-1, 3),
             img[b1:b1 + r, max(0, a0 - r):a1 + r].reshape(-1, 3),
