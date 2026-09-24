@@ -27,6 +27,7 @@ INSET_Y = 7.2                   # Slides' top and bottom text insets
 CAP_EM = 0.72                   # ink above the baseline (Lato's capitals)
 DESC_EM = 0.2                   # ink below it
 NBSP = " "
+ZWSP = "​"                 # zero width, a line may break after it (UAX #14 LB8)
 SOFT_BREAK = emit.SOFT_BREAK
 UNKNOWN_EM = 0.5                # a character nobody measured
 TAB_EM = 2.0
@@ -48,8 +49,8 @@ def advance(ch: str, st: dict, size: float) -> float:
         size *= emit.SCRIPT_SIZE
     if ch == "\t":
         return TAB_EM * size
-    if ch in bidi.MARKS:
-        return 0.0  # (an LRM or RLM draws nothing)
+    if ch in bidi.MARKS or ch == ZWSP:
+        return 0.0  # (an LRM or RLM draws nothing, nor does a zero-width space)
     if family == emit.FONT_FOR_FAMILY["mono"]:
         return emit.ROBOTO_MONO_ADVANCE_EM * size
     table = (emit.ADVANCES.get(family) or emit.ADVANCES["Lato"])[_style_name(st)]
@@ -132,7 +133,12 @@ def upright(rb: dict) -> bool:
 def wrap(chars: str, styles: list[dict], width: float) -> list[tuple[int, int, float]]:
     """Greedy line breaks of one paragraph: (start, end, ink width) per line. Breaks at spaces and
     after hyphens, never at a no-break space; a soft break ends a line; a word wider than the line
-    is cut where it no longer fits, as Slides does."""
+    is cut where it no longer fits, as Slides does.
+
+    Nor before a no-break space: Slides keeps a space and the no-break spaces after it together
+    (UAX #14's old "× GL"), so a word before a formula hole goes down with it (visual hunt r8,
+    r1_math_v2 s6: "pointwise, / but ∫..." in a box 54 pt wider than "... pointwise, but"). A
+    zero-width space breaks anywhere, before a no-break space too (LB8, ahead of LB12)."""
     lines = []
     start, n = 0, len(chars)
     while start <= n:
@@ -146,9 +152,10 @@ def wrap(chars: str, styles: list[dict], width: float) -> list[tuple[int, int, f
                 end, nxt = i, i + 1
                 break
             adv = advance(ch, styles[i], styles[i].get("fontSize") or 0.0)
-            if ch == " ":
+            if ch == " " or ch == ZWSP:
                 w += adv
-                last_break, ink_at_break = i + 1, ink
+                if ch == ZWSP or chars[i + 1:i + 2] != NBSP:
+                    last_break, ink_at_break = i + 1, ink
                 i += 1
                 continue
             if w + adv > width and i > start:

@@ -77,11 +77,49 @@ def test_explicit_hyphen_at_a_line_end_is_kept_without_a_space():
 def test_verse_lines_after_a_line_number_are_not_centred_together():
     """A verse in a tabular {r@{\\quad}l}: the line under an unnumbered one starts with the
     number 4, one \\quad before its words; the two lines are centred on each other only by their
-    lengths. Every verse line is its own paragraph. (The translation's lines beside it, as long
-    as the column is wide and without a tell of their own, still read as one wrapped paragraph.)"""
+    lengths. Every verse line is its own paragraph."""
     got = [paragraph_text(p) for p in paras(7)]
     assert "hu tha aethelingas ellen fremedon." in got
     assert "4 \u2003Oft Scyld Scefing sceathena threatum" in got
+
+
+def test_translation_lines_broken_by_hand_stay_apart():
+    """The translation beside the verse, a tabular {l}: its lines 2 and 3 are too long for the
+    next line's first word, yet short of the measure, under a long first line TeX ended with room
+    to spare. A run of hand-broken lines: each its own paragraph, not one wrapped paragraph whose
+    lines Slides re-wraps into each other (visual hunt r8, r1_lang_v3 s5: 'valour.Often')."""
+    got = [paragraph_text(p) for p in paras(7)]
+    for line in ("of the Spear-Danes\u2019 kings in days of old,", "how those princes did deeds of valour.",
+                 "Often Scyld Scefing from troops of foes"):
+        assert line in got, got
+
+
+def test_an_attribution_flush_with_the_right_aligned_quote_above_is_right_aligned():
+    """A quote set flush right past the margin the page's other text keeps, its attribution alone
+    on the line under it ending where the quote ends: right-aligned like the quote (r1_lang_v2 s3:
+    left-aligned, its words ran out past the text area in Slides)."""
+    from .test_columns import paragraphs, span, text
+    size, right = 11.0, 345.0
+    rows = [("“Whoever wishes to translate word for word,", 100.0), ("will toil greatly.”", 113.0),
+            ("— Maimonides, letter (1199)", 126.0)]
+    spans = [span(t, right - len(t) * 0.5 * size, y, size) for t, y in rows]
+    spans.append(span("Body text starts at the left margin", 30.0, 180.0, size))
+    got = {text(p): p["align"] for p in paragraphs(spans)}
+    assert got["— Maimonides, letter (1199)"] == "right", got
+    assert got["Body text starts at the left margin"] == "left"
+
+
+def test_a_word_set_in_two_spans_is_one_word_when_it_would_end_the_line_above():
+    """\\textsc{Goldbach}: its capital in one span, its small letters in the next. The capital
+    alone would have fitted at the end of the line above, so the line was taken for one TeX
+    broke by hand, and the paragraph cut in two there (r2_fonts_pazo s5, V-fonts-8)."""
+    from .test_columns import W, paragraphs, span, text
+    size = 11.0
+    spans = [span("Euler writes freely with infinite series and the modern reader", 30.0, 100.0, size, w=W - 60.0),
+             span("must supply the rigour himself. The letters to", 30.0, 113.5, size, w=260.0),
+             span("G", 30.0, 127.0, size, w=7.5), span("OLDBACH are essential context.", 37.5, 127.0, size, w=150.0)]
+    got = [text(p) for p in paragraphs(spans)]
+    assert len(got) == 1 and "letters to GOLDBACH are" in got[0], got
 
 
 def test_nested_numbers_are_labels_like_their_parents():

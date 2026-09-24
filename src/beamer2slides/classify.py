@@ -858,6 +858,22 @@ def first_word_width(span: Span) -> float:
     return span.rect.w * weight(word) / weight(text)
 
 
+def line_word_width(line: "Line") -> float:
+    """Width of a line's first word, across the spans it is set in: a small-caps word is its
+    capital in one span and its small letters in the next ('G' + 'oldbach', r2_fonts_pazo s5),
+    and the capital alone looked short enough to have ended the line above - the paragraph was
+    cut in two there (V-fonts-8)."""
+    spans = line.content
+    head = spans[0]
+    x1 = head.rect.x0 + first_word_width(head)
+    for a, b in zip(spans, spans[1:]):
+        if len(a.text.split()) != 1 or a.text != a.text.rstrip() or b.text[:1].isspace() or \
+                b.rect.x0 - a.rect.x1 > 0.1 * line.size or cjk(a.text[-1:]):
+            break
+        x1 = b.rect.x0 + first_word_width(b)
+    return x1 - head.rect.x0
+
+
 def last_word_width(span: Span) -> float:
     """Width of a span's last word (first_word_width's other end)."""
     text = span.text.strip()
@@ -865,6 +881,35 @@ def last_word_width(span: Span) -> float:
         return span.rect.w
     weight = lambda t: sum(1000 if cjk(c) else _WIDTHS.get(c, 556) for c in t)
     return span.rect.w * weight(text.split()[-1]) / weight(text)
+
+
+def line_starts(lines: list["Line"], runs: list[dict]) -> list[int] | None:
+    """Where each of a paragraph's lines after the first starts in its runs' joined text (at the
+    word after a space), then that text's length - or None where a line's first word is not found
+    there (a hyphenated or CJK line end, a hole, a glyph read another way). emit sets each PDF line's
+    words as Slides will to size a wrapped paragraph's box (`emit.slides_lines`); where TeX's
+    widths are not known (Palatino, a formula's letters without CM metrics) it could not find the
+    lines from their extents, the box came from the PDF's and Slides' narrower substitute pulled a
+    word up ('ω.' onto line 1, V-control-16; 'Goldbach', V-fonts-8). The length says the text is
+    still the one the starts count in."""
+    text = "".join(r["text"] for r in runs)
+    if len(lines) < 2 or chr(11) in text or "\t" in text:
+        return None
+    starts, at = [], 0
+    for above, line in zip(lines, lines[1:]):
+        first = next((s for s, _ in reading_order(line) if isinstance(s, Span) and s.text.strip()), None)
+        if first is None:
+            return None
+        word = first.text.split()[0]
+        heads = {word, unicodedata.normalize("NFC", word), unicodedata.normalize("NFKC", word)}
+        # (about where it should be: after the line above's words, a space between spans)
+        guess = at + len(" ".join(s.text.strip() for s in above.content if s.text.strip())) + 1
+        found = [i for i in range(at + 1, len(text)) if text[i - 1] == " " and any(text.startswith(h, i) for h in heads)]
+        if not found:
+            return None
+        at = min(found, key=lambda i: abs(i - guess))
+        starts.append(at)
+    return starts + [len(text)]
 
 
 def line_spaces(line: "Line") -> dict[str, float]:
@@ -3185,8 +3230,11 @@ class PageClassifier:
                 col_right = max([col_right] + [l.x1 for l in self.stacked_above(par, line)])
             # (a span's first word; where its spaces are thin, the whole span: "48 000 EUR")
             head = line.content[0]
-            first_word = head.rect.w if thin_span(head, line, par.lines + [line]) else first_word_width(head)
+            first_word = head.rect.w if thin_span(head, line, par.lines + [line]) else line_word_width(line)
             if not right and last.x1 + 0.3 * par.size + first_word < col_right - 0.5:
+                return None
+            if not right and not par.bullet and par.first.tab is None and col_right - last.x1 > 1.5 and \
+                    self.hand_broken(par, pitch, col_right):
                 return None
             return "left"
         if center and par.align in ("left", "center") and len(par.lines) == 1 and line.main.color == last.main.color \
@@ -3197,6 +3245,34 @@ class PageClassifier:
         if right and (len(par.lines) > 1 or not par.bullet and line.main.color == last.main.color):
             return "right"  # (a TOC section and its first subsection may end together by chance)
         return None
+
+    def hand_broken(self, par: Paragraph, pitch: float, col_right: float) -> bool:
+        """Is `par` in a run of lines broken by hand (a verse, a tabular's `l` column, an
+        address), so that its last line - short of the measure yet too long for the next word -
+        ended at a \\\\ too? The lines stacked above it at its left edge, one pitch apart, reach
+        up to a long line (half the measure or more) that TeX ended with room to spare for the
+        next line's first word: a forced break. Prose TeX wraps in such a run would be justified
+        to the measure (beamer's default), and none of the lines stacked above is: a paragraph
+        of wrapped prose under a heading ended by \\\\ is not a run (a heading is short). A
+        verse's lines joined as one wrapped paragraph ran together in Slides, whose words run
+        longer ("deeds of / valour.Often Scyld", visual hunt r8, r1_lang_v3 s5)."""
+        size = par.size
+        below = par.first
+        for _ in range(12):
+            above = [l for l in self.all_lines if l.reason is None and not l.bullet and l.tab is None and l.content
+                     and abs(l.size - size) <= 0.5 and abs(l.x0 - below.x0) <= 1.5
+                     and abs(below.baseline - l.baseline - pitch) <= 0.1 * size]
+            if not above:
+                return False
+            u = above[0]
+            if col_right - u.x1 <= 1.5:
+                return False  # (flush with the measure: justified prose, wrapped)
+            if any(len(p.lines) > 1 and u in p.lines for p in self.built_paragraphs):
+                return False  # (the end of a wrapped paragraph above: prose, paragraph after paragraph)
+            if u.x1 - u.x0 >= 0.5 * (col_right - u.x0) and u.x1 + 0.3 * size + line_word_width(below) < col_right - 0.5:
+                return True
+            below = u
+        return False
 
     def single_line_align(self, line: Line, margin: float, neighbours: list["Paragraph"] = ()) -> str:
         """A line alone is centred when it is centred on the page, right-aligned when it ends at
@@ -3215,6 +3291,14 @@ class PageClassifier:
                 and abs(l.x1 - line.x1) > 1 and abs(l.rect.cx - self.W / 2) > 2]
         if near:
             return "left"
+        # (ending where a right-aligned paragraph next to it ends: flushed right with it - a quote's
+        # attribution under the quote, set right past the margin the page's other text keeps; left,
+        # its words ran out past the text area in Slides, r1_lang_v2 s3)
+        if line.x0 > margin + line.size and any(
+                p.align == "right" and len(p.lines) > 1 and abs(p.size - line.size) <= 1 and
+                any(0 < abs(l.baseline - line.baseline) <= 2 * line.size and abs(l.x1 - line.x1) <= 1 for l in p.lines)
+                for p in neighbours if p.first is not line):
+            return "right"
         if abs(line.rect.cx - self.W / 2) <= 2 and line.x0 > 0.12 * self.W:
             return "center"
         if abs(line.x1 - (self.W - margin)) <= 2 and line.x0 > self.W / 2:
@@ -3246,6 +3330,7 @@ class PageClassifier:
     def build_paragraphs(self, lines: list[Line]) -> list[Paragraph]:
         self.find_hfill_pieces(lines)
         paragraphs: list[Paragraph] = []
+        self.built_paragraphs = paragraphs  # (so far: hand_broken asks how the lines above were joined)
         for line in lines:
             if line.reason not in (None, "math"):
                 continue
@@ -5075,6 +5160,11 @@ class PageClassifier:
             room = max(widest + 0.5 * p.size, self.free_width(p) - 0.5 * p.size)
             return any(a.x1 - a.x0 + 0.2 * p.size + first_word_width(b.content[0]) <= room
                        for a, b in zip(p.lines, p.lines[1:]))
+        runs = [self.runs(p, code_indent(p, rect.x0, pitch) if code else "", soft_breaks=unbalanced(p),
+                          pitch=pitch, x_ref=rect.x0) for p in box]
+        # (said only where it is known, on a left-aligned wrapped paragraph: line_starts)
+        starts = [line_starts(p.lines, r) if p.align == "left" and not code and not p.direction else None
+                  for p, r in zip(box, runs)]
         return {
             "id": element_id, "kind": "text", "role": box[0].role, "bbox": rect.as_list(),
             "panel": self.panel_of(rect),
@@ -5093,12 +5183,12 @@ class PageClassifier:
                 # Right edge a wrapped line could grow to before TeX would have pulled up the
                 # next line's first word: a text box narrower than this wraps the same way.
                 # (as a width from the paragraph's left edge, so centred lines count too)
-                "wrap_limit": round(min(l.x0 for l in p.lines) + min(a.x1 - a.x0 + 0.25 * p.size + first_word_width(b.content[0])
+                "wrap_limit": round(min(l.x0 for l in p.lines) + min(a.x1 - a.x0 + 0.25 * p.size + line_word_width(b)
                                                                      for a, b in zip(p.lines, p.lines[1:])), 2)
                               if len(p.lines) > 1 and all(l.content for l in p.lines) else None,
-                "runs": self.runs(p, code_indent(p, rect.x0, pitch) if code else "", soft_breaks=unbalanced(p),
-                                  pitch=pitch, x_ref=rect.x0),
-            } for p in box],
+                **({"line_starts": s} if s else {}),
+                "runs": r,
+            } for p, r, s in zip(box, runs, starts)],
             "code": code,
             "spans": [s.id for p in box for s in p.spans if s.info.family != "icon" and not s.drawn
                       and not any(s in h for l in p.lines for h in l.holes)],

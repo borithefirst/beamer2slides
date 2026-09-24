@@ -98,6 +98,19 @@ def test_a_line_that_fits_is_one_line_and_a_long_one_wraps():
     assert long["lines"][1]["box"][3] > 90          # and runs out of its box
 
 
+def test_a_word_before_a_formula_hole_goes_down_with_it_unless_a_zero_width_space_parts_them():
+    """Slides keeps a space and the no-break spaces of a hole after it together (r8, r1_math_v2
+    s6: "but" went down with the integral's hole in a box with room for it). A zero-width space
+    between them is a break opportunity (UAX #14 LB8): the break TeX made, pending a live check."""
+    from beamer2slides import text_layout
+    hole = "\xa0" * 10
+    for gap, first in ((" ", "Then it tends to zero, "), (" ​", "Then it tends to zero, but ​")):
+        text = "Then it tends to zero, but" + gap + hole + " for all n."
+        styles = [MONO if ch == "\xa0" else BODY for ch in text]
+        lines = text_layout.wrap(text, styles, 260.0)
+        assert text[lines[0][0]:lines[0][1]] == first, (gap, lines)
+
+
 def test_each_paragraph_takes_its_own_style_when_the_read_back_can_say_which():
     two = [PARA, {**PARA, "spaceAbove": 10.75}]
     rb = text_rb("text/body/0", [10, 50, 710, 150], "First.\nSecond.", paras=two)
