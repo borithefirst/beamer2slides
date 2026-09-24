@@ -19,7 +19,12 @@ def test_a_six_point_sans_cut_is_set_heavier_than_regular():
     # out in Lato Regular, visibly lighter than CM's 6 pt cut, whose stems are 1.38x the 10.95 pt one's.
     style, fields = FONTS.text_style(run_of("June 2026", 5.98, font="SFSS0600"), SCALE)
     assert style["weightedFontFamily"] == {"fontFamily": "Lato", "weight": emit.OPTICAL_WEIGHT}
-    assert style["bold"] is False and "weightedFontFamily" in fields and "fontFamily" not in fields
+    assert "weightedFontFamily" in fields and "fontFamily" not in fields
+    # r8: Slides draws Lato 500 and 600 as its Regular (probe_font_weights: ink 79.0 per pt at 400
+    # and 600, 106.9 at 700 and 800): the footline came out as light as before. 800 draws Bold,
+    # and reads back as a weight our own bold (700) never writes. No `bold` field: the API
+    # applies it after the weight, and a `bold: false` could take the weight back to 400.
+    assert emit.OPTICAL_WEIGHT == 800 and "bold" not in fields and "bold" not in style
     assert FONTS.text_style(run_of("June 2026", 5.98, font="ECSS0600"), SCALE)[0].get("weightedFontFamily")  # Type 3
     # The body text, an 8 pt cut and a bold footline keep the plain family.
     for run in (run_of("June 2026"), run_of("June 2026", 7.97, font="SFSS0800"), run_of("June 2026", 5.98, font="LMSans8-Regular"),
@@ -35,17 +40,66 @@ def test_an_optically_heavier_run_is_measured_in_the_face_slides_draws():
     assert emit.slides_width([tiny], SCALE, FONTS) == pytest.approx(sum(table[c] for c in tiny["text"]) * size)
 
 
-def test_an_optically_heavier_run_reads_back_regular():
-    # deck_ir counted weight 600 as bold: pull would have written the footline as \textbf
+def read_back_runs(style: dict, foreign: bool = False) -> list[dict]:
     from beamer2slides.deck_ir import StyleResolver, text_paragraphs
-    style = FONTS.text_style(run_of("June 2026", 5.98, font="SFSS0600"), SCALE)[0]
     text = {"textElements": [{"startIndex": 0, "endIndex": 10, "paragraphMarker": {"style": {}}},
                              {"startIndex": 0, "endIndex": 10, "textRun": {"content": "June 2026\n", "style": style}}]}
     pe = {"objectId": "b2s_s001_t0", "shape": {"shapeType": "TEXT_BOX", "text": text}}
-    runs = [r for p in text_paragraphs(pe, text, StyleResolver({}), FONTS, SCALE) for r in p["runs"]]
+    return [r for p in text_paragraphs(pe, text, StyleResolver({}), FONTS, SCALE, foreign=foreign) for r in p["runs"]]
+
+
+def test_an_optically_heavier_run_reads_back_regular():
+    # deck_ir counted weight 600 as bold: pull would have written the footline as \textbf. Slides
+    # reads our 800 back as `bold: true` with the weight as written (probe_font_weights).
+    style = {**FONTS.text_style(run_of("June 2026", 5.98, font="SFSS0600"), SCALE)[0], "bold": True}
+    runs = read_back_runs(style)
     assert runs and not any(r["bold"] for r in runs)
-    runs = [r for p in text_paragraphs(pe, text, StyleResolver({}), FONTS, SCALE, foreign=True) for r in p["runs"]]
-    assert all(r["bold"] for r in runs)     # a semibold someone chose in another deck is bold
+    assert all(r["bold"] for r in read_back_runs(style, foreign=True))   # someone's extra bold in another deck
+    # what decks converted before wrote (600, drawn Regular) stays regular; our own bold (700) is bold
+    legacy = {**style, "weightedFontFamily": {"fontFamily": "Lato", "weight": 600}, "bold": False}
+    assert not any(r["bold"] for r in read_back_runs(legacy))
+    bold = {**style, "weightedFontFamily": {"fontFamily": "Lato", "weight": 700}}
+    assert all(r["bold"] for r in read_back_runs(bold))
+
+
+def test_an_optically_heavier_footline_pulls_back_with_no_residual():
+    # the whole round trip on a deck whose footline is a 6 pt EC sans cut: emit's requests replayed
+    # the way Google stores them (a weight of 700 and up reads back bold), read by deck_ir, compared
+    import copy
+    from beamer2slides.compare import compare
+    from beamer2slides.deck_ir import deck_ir
+    from .slides_sim import simulate
+    from .test_inverse import TEXT_KINDS, built_pdf
+    from beamer2slides.classify import classify
+    from beamer2slides.extract import extract, select_overlays
+    deck = copy.deepcopy(classify(select_overlays(extract(built_pdf("01_basic")), "last")))
+    tiny = 0
+    for s in deck["slides"]:
+        for el in s["elements"]:
+            if el["kind"] == "text" and el.get("role") != "title":
+                for p in el["paragraphs"]:
+                    for r in p["runs"]:
+                        if r["family"] == "sans" and not r["bold"] and not r.get("script"):
+                            r["font"], r["size"] = "SFSI0600" if r["italic"] else "SFSS0600", 5.98
+                            tiny += 1
+    assert tiny
+    pres = simulate(deck)
+    styles = [te["textRun"]["style"] for s in pres["slides"] for pe in s["pageElements"]
+              for te in pe.get("shape", {}).get("text", {}).get("textElements", []) if "textRun" in te]
+    assert any((st.get("weightedFontFamily") or {}).get("weight") == emit.OPTICAL_WEIGHT and st.get("bold")
+               for st in styles)
+    comp = compare(deck, deck_ir(pres, deck["slides"][0]["size"]))
+    assert [r for r in comp.open() if r["kind"] in TEXT_KINDS] == []
+
+
+def test_an_optically_heavier_run_is_laid_out_in_bold_widths():
+    # text_layout (the layout oracle, sync's refit) measures the face Slides draws: a weight of 700
+    # or more is the bold face even where the read-back says nothing of `bold`
+    from beamer2slides import text_layout
+    heavy = {"fontFamily": "Lato", "weight": emit.OPTICAL_WEIGHT}
+    assert text_layout.advance("M", heavy, 10) == pytest.approx(emit.ADVANCES["Lato"]["bold"]["M"] * 10)
+    assert text_layout.advance("M", {"fontFamily": "Lato", "weight": 600}, 10) == \
+        pytest.approx(emit.ADVANCES["Lato"]["regular"]["M"] * 10)
 
 
 def test_cm_sans_cuts_below_eight_points_have_their_own_width():

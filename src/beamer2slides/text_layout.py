@@ -34,8 +34,11 @@ BOX_ROOM = 4.0                  # pt emit leaves under the last line's descent (
 
 
 def _style_name(st: dict) -> str:
+    # (Slides draws a weight of 700 or more with the family's bold face, whatever `bold` says:
+    # emit.OPTICAL_WEIGHT's footlines)
+    bold = bool(st.get("bold")) or (st.get("weight") or 0) >= 700
     return {(False, False): "regular", (True, False): "bold", (False, True): "italic",
-            (True, True): "bold_italic"}[(bool(st.get("bold")), bool(st.get("italic")))]
+            (True, True): "bold_italic"}[(bold, bool(st.get("italic")))]
 
 
 def advance(ch: str, st: dict, size: float) -> float:
