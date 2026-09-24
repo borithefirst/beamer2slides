@@ -62,6 +62,7 @@ def type3_symbol(text: str, type3_words: bool) -> str:
         return text
     return text.replace(glyph, TS1_SYMBOLS[glyph])
 SMALL_IMAGE_PT = 12
+MAX_PLAIN_RECTANGLES = 32  # more rectangles in one cluster (a QR code, a pixel grid) are a picture
 HOLE_PAD = 1.0  # pt of page around an inline formula picture (antialiasing, italic overhang)
 
 
@@ -975,6 +976,41 @@ class PageClassifier:
             graphics.append(p["bbox"])
             self.graphic_drawings[p["id"]] = p["bbox"]
             self.graphic_paths.setdefault(tuple(p["bbox"].as_list()), next(d for d in self.page["drawings"] if d["id"] == p["id"]))
+        # Strips thinner than a line of text, with no words on them, starting at one x, as thick
+        # as each other and three or more (or two abutting), touching a graphic, are the bars of
+        # a chart (xbar: one \addplot per series, a rectangle each): as panels they were cut off
+        # the chart's picture and set on top of it. (Not a listing frame's top and bottom strip.)
+        words = [Rect.of(s["bbox"]) for s in self.page["spans"] if s["text"].strip()]
+        thin = [p for p in self.panels if not p["image"] and p["bbox"].h < 0.6 * self.body
+                and not any(p["bbox"].contains(w.cx, w.cy) for w in words)]
+        bars = []
+        for p in thin:
+            r = p["bbox"]
+            mates = [q["bbox"] for q in thin if q is not p and abs(q["bbox"].x0 - r.x0) <= 0.5 and abs(q["bbox"].h - r.h) <= 0.3]
+            series = len(mates) >= 2 or any(min(abs(q.y0 - r.y1), abs(r.y0 - q.y1)) <= r.h for q in mates)
+            if series and any(r.expand(1.0).intersects(g) for g in graphics):
+                bars.append(p)
+        for p in bars:
+            self.panels.remove(p)
+            graphics.append(p["bbox"])
+            self.graphic_drawings[p["id"]] = p["bbox"]
+            self.graphic_paths.setdefault(tuple(p["bbox"].as_list()), next(d for d in self.page["drawings"] if d["id"] == p["id"]))
+        # A box of a footline or headline made of boxes side by side (author | title | date |
+        # page): on the page's edge, as tall as the band and abutting a piece of it. Too narrow
+        # to be theme artwork alone, it was a figure, and the date in it a label baked into the
+        # background while the words of the boxes beside it were theme text.
+        grown = True
+        while grown:
+            grown = False
+            for i, r in [(i, r) for i, r in self.graphic_drawings.items() if any(r is g for g in graphics)]:
+                edge = r.y0 <= 1 or r.y1 >= self.H - 1
+                if edge and r.h <= 0.1 * self.H and any(
+                        abs(d.y0 - r.y0) <= 1 and abs(d.y1 - r.y1) <= 1 and (abs(d.x0 - r.x1) <= 1 or abs(r.x0 - d.x1) <= 1)
+                        for d in self.decorations):
+                    graphics.remove(r)
+                    del self.graphic_drawings[i]
+                    self.decorations.append(r)
+                    grown = True
         # Two or more horizontal rules of equal extent frame a table: the whole span is one
         # figure (or a native table, see table_from).
         self.table_rules = [g for g in rules.values() if len(g) >= 2]
@@ -1631,7 +1667,7 @@ class PageClassifier:
             changed = False
             for line in lines:
                 if line.reason is not None or line.bullet or line.tab is not None or line.size > 1.15 * self.body or \
-                        not (len(line.text.replace(" ", "")) <= 12 or self.tick_row(line)):
+                        not (len(line.text.replace(" ", "")) <= 12 or self.tick_row(line)) or self.wrapped_end(line, lines):
                     continue
                 words = [s for s in line.content if s.text.strip() and not TICK_NUMBER_RE.fullmatch(s.text.strip())]
                 near = [reg for reg in regions if reg.distance(line.rect) <= 0.8 * line.size]
@@ -2452,6 +2488,16 @@ class PageClassifier:
                     if c.expand(0.1).contains_rect(l.rect):
                         l.reason = None
 
+    @staticmethod
+    def wrapped_end(line: Line, lines: list[Line]) -> bool:
+        """The last words of a paragraph wrapped onto a line of their own ("(no defiers).",
+        "cycles"): one pitch below a line of prose in the same size, starting where one of its
+        words does. Near a list's drawn label they were taken for a figure's label and left in
+        the background, and the native paragraph ended a line early."""
+        return any(o is not line and o.reason is None and len(o.text) >= 20 and abs(o.size - line.size) <= 0.05 * line.size
+                   and 0.9 * line.size <= line.baseline - o.baseline <= 1.6 * line.size
+                   and any(abs(s.rect.x0 - line.rect.x0) <= 1.0 for s in o.content) for o in lines)
+
     def band_ornament(self, r: Rect) -> bool:
         """A small graphic in the header or footer band (navigation symbols, a title's accent
         bar): theme furniture that stays in the background and joins nothing into a figure."""
@@ -2488,6 +2534,10 @@ class PageClassifier:
             out.append({"id": f"p{self.page['index']}r{index + len(out)}", "kind": "shape", "role": "rule",
                         "bbox": r.as_list(), "fill": d["fill"], "shape": "RECTANGLE", "flip": False,
                         "radius": 0.0, "drawing": d["id"], "spans": []})
+        if len(out) > MAX_PLAIN_RECTANGLES:
+            # A QR code or a pixel grid (426 modules): a picture, not hundreds of shapes nobody
+            # would edit one by one, each its own request.
+            return []
         # The track of a progress bar runs across the page like a decoration hairline: it goes
         # along (below the bar) when it has exactly the bar's height and contains it.
         for d in self.page["drawings"]:
@@ -2647,6 +2697,8 @@ class PageClassifier:
                 [n for n in owners if area(n) <= 1.02 * smallest + 0.01][-1]["spans"].append(s)
             else:
                 free.append(s)  # edge labels and captions: a text box in the group
+        if sum(n["shape"] is not None and not n["spans"] for n in nodes) > MAX_PLAIN_RECTANGLES:
+            return None  # a QR code, a pixel grid: modules, not nodes
         # Free labels on one baseline and close together are one label. (Close on both sides:
         # two edge labels whose baselines round apart sort right to left, and the one-sided gap
         # joined them across the node between - "connect SYN+ACK" over two arrows.)
@@ -3023,6 +3075,16 @@ class PageClassifier:
         figures += [Rect.of(p["bullet"]["bbox"]) for e in elements if e["kind"] == "text"
                     for p in e["paragraphs"] if p["bullet"] and p["bullet"].get("patch")]
         loose = [g for g in self.graphics if not any(f.expand(0.5).contains_rect(g) for f in figures)]
+        # Strokes drawn after a panel that reach onto it (a matrix's quadrant dividers on the
+        # panels' shared edges, an axis along their bottom): they stay in the background, and a
+        # native panel over it hid them, halfway or whole.
+        # (Hairlines that long count as theme decoration: any stroke not in a picture counts, but
+        # not one that leaves the background with the text - an underline, a fraction bar.)
+        order = {d["id"]: i for i, d in enumerate(self.page["drawings"])}
+        with_text = {tuple(s) for e in elements for s in e.get("strokes", [])}
+        strokes = [(i, Rect.of(d["bbox"]).expand((d["width"] or 0.4) / 2)) for i, d in enumerate(self.page["drawings"])
+                   if d["type"] == "s" and d["id"] not in self.decor_ids and tuple(Rect.of(d["bbox"]).as_list()) not in with_text
+                   and not any(f.expand(0.5).contains_rect(Rect.of(d["bbox"])) for f in figures)]
         bullet_images = {p["bullet"]["image"] for e in elements if e["kind"] == "text"
                          for p in e["paragraphs"] if p["bullet"] and p["bullet"]["kind"] == "image"}
         out = []
@@ -3043,6 +3105,8 @@ class PageClassifier:
                 continue
             if any(overlap(inner, g) > 0.9 * max(g.w * g.h, 1e-6) for g in loose):
                 continue  # graphics mostly on the panel (edge decorations like shadows are fine)
+            if p["id"] in order and any(k > order[p["id"]] and overlap(r, band) > 0.01 for k, band in strokes):
+                continue
             if any(inner.contains_rect(ir, tol=0) and im["id"] not in bullet_images for im, ir in self.small_images):
                 continue
             corners = set(p["corners"])

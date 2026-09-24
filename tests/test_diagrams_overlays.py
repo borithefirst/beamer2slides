@@ -3,7 +3,7 @@ figures against theme furniture - on synthetic pages."""
 
 from beamer2slides.extract import select_overlays
 
-from .test_charts_diagrams import H, W, Page, body_text, elements, lines, rect
+from .test_charts_diagrams import H, W, Page, body_text, deck, elements, lines, rect
 
 
 # ---------------------------------------------------------------- overlay steps
@@ -105,6 +105,89 @@ def test_see_through_nodes_and_lines_keep_a_diagram_a_picture():
         pipeline(p)[1 if key == "fill_opacity" else 2][key] = value
         els = elements(p)
         assert not any(e["kind"] == "diagram" for e in els) and any(e["kind"] == "image" for e in els), key
+
+
+def test_a_qr_code_is_one_picture_not_hundreds_of_rules():
+    """426 black modules of a QR code became 426 native rectangles, the code no longer scanned
+    as one piece and cost a request each."""
+    p = Page()
+    for i in range(12):
+        for j in range(12):
+            if (i + 2 * j) % 3:
+                p.draw(rect(300 + 4 * j, 80 + 4 * i, 304 + 4 * j, 84 + 4 * i), fill="#000000")
+    body_text(p)
+    els = elements(p)
+    assert not any(e.get("role") == "rule" for e in els) and any(e["kind"] == "image" for e in els)
+    p = Page()  # a few swatches stay shapes
+    for j in range(4):
+        p.draw(rect(300 + 12 * j, 80, 310 + 12 * j, 90), fill="#1f77b4")
+    body_text(p)
+    assert not any(e["kind"] == "image" for e in elements(p))
+
+
+def quadrants(p: Page, dividers_first: bool) -> None:
+    """A 2x2 priority matrix: four tinted quadrants, grey dividers on their shared edges."""
+    def dividers():
+        p.draw(lines((227.85, 45.09), (227.85, 215.17)), type="s", stroke="#808080", width=0.4)
+        p.draw(lines((100.29, 130.13), (355.41, 130.13)), type="s", stroke="#808080", width=0.4)
+    if dividers_first:
+        dividers()
+    for (x0, y0, x1, y1), fill in (((100.29, 45.09, 227.85, 130.13), "#dff1df"), ((227.85, 45.09, 355.41, 130.13), "#e4eff6"),
+                                   ((100.29, 130.13, 227.85, 215.17), "#f0f0f0"), ((227.85, 130.13, 355.41, 215.17), "#fae5e5")):
+        p.draw(lines((x0, y0), (x1, y0), (x1, y1), (x0, y1), closed=True), fill=fill)
+    if not dividers_first:
+        dividers()
+    p.words("Quick wins", 137, 60)
+    p.words("Major projects", 255, 60)
+
+
+def test_a_panel_under_lines_drawn_after_it_stays_in_the_background():
+    """The matrix's dividers run on the quadrants' shared edges, drawn after them: as native
+    panels the quadrants hid them (half each)."""
+    p = Page()
+    quadrants(p, dividers_first=False)
+    assert not any(e["kind"] == "shape" for e in elements(p))
+    p = Page()
+    quadrants(p, dividers_first=True)  # drawn before: under the fills in the PDF too
+    assert sum(e["kind"] == "shape" for e in elements(p)) == 4
+
+
+def test_bars_of_an_xbar_chart_are_part_of_its_picture():
+    """Three series of an xbar chart, one rectangle per bar, the long ones wider than a quarter
+    of the page: they were panels, cut off the chart's picture and set on top of it."""
+    p = Page()
+    p.draw(lines((139.44, 98.3), (139.44, 172.0)), type="s", stroke="#000000", width=0.4)  # the y axis, no x axis
+    for y0, x1 in ((101.1, 303.1), (104.7, 295.4), (108.2, 299.2), (157.8, 233.0)):
+        p.draw(rect(139.4, y0, x1, y0 + 3.55), fill="#1f77b4")
+    p.words("Food", 110, 108)
+    p.words("Rent", 110, 161)
+    body_text(p)
+    slide = deck(p)["slides"][0]
+    els = slide["elements"]
+    assert not slide["panels"] and not any(e["kind"] == "shape" for e in els), [e["kind"] for e in els]
+    fig = next(e for e in els if e["kind"] in ("image", "diagram"))  # (a picture in a real chart, with its ticks)
+    assert fig["bbox"][2] >= 303 and fig["bbox"][3] >= 161
+    p = Page()  # a code listing's frame: its top and bottom strips are no bar series
+    p.draw(rect(12.91, 71.1, 252.43, 74.49), fill="#f5f5f5")
+    p.draw(lines((13.11, 71.1), (13.11, 74.49)), type="s", stroke="#b3b3b3", width=0.4)
+    p.draw(rect(12.91, 184.08, 252.43, 187.47), fill="#f5f5f5")
+    p.draw(lines((13.11, 184.08), (13.11, 187.47)), type="s", stroke="#b3b3b3", width=0.4)
+    body_text(p)
+    assert len(deck(p)["slides"][0]["panels"]) == 2
+
+
+def test_a_box_of_a_footline_of_boxes_is_theme_not_a_figure():
+    """author | title | date | page: the date's box, too narrow to be theme artwork alone,
+    was a figure and the date a label baked into the background."""
+    p = Page()
+    for (x0, x1), fill, text in (((0, 150), "#001f5c", "J. Miller"), ((150, 317.48), "#00307f", "Fatigue of welded joints"),
+                                 ((317.48, 399.11), "#002866", "12 Nov 2026"), ((399.11, W), "#001f5c", "5 / 9")):
+        p.draw(rect(x0, 246.09, x1, H), fill=fill)
+        p.words(text, x0 + 6, 252.3, size=5.98)
+    body_text(p, 120)
+    slide = deck(p)["slides"][0]
+    assert not any(e["kind"] in ("image", "shape") for e in slide["elements"]), [e["kind"] for e in slide["elements"]]
+    assert not any(b["reason"] == "figure" for b in slide["left_in_background"]), slide["left_in_background"]
 
 
 def rounded(x0, y0, x1, y1, r) -> list:
