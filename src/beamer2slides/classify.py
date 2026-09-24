@@ -661,13 +661,20 @@ def label_of(spans: list[Span]) -> dict | None:
             "bold": s.info.bold, "italic": s.info.italic, "color": s.color}
 
 
+OUTLINE_MIN = 0.3  # pt: a stroke this wide around a filled bullet shows as an outline
+
+
 def bullet_shape(d: dict | None) -> dict:
     """Shape and colour of a bullet drawn as a path (emit picks the Slides glyph): a filled
     rectangle is a square, curves are a disc (a circle when only stroked), three corners a
-    triangle."""
+    triangle. A filled mark outlined in another colour (a legend's swatch) has no Slides glyph:
+    none (it becomes a picture beside its text, r3_charts_v1 s9)."""
     if not d:
         return {}
     filled = d["type"] in ("f", "fs") and d.get("fill")
+    if filled and d["type"] == "fs" and d.get("stroke") and d["stroke"] != d["fill"] and \
+            (d.get("width") or 0.0) >= OUTLINE_MIN and (d.get("stroke_opacity") or 0.0) > 0.5:
+        return {}
     ops = set(d["items"])
     points = {(round(x, 1), round(y, 1)) for op, pts in d.get("path", []) for x, y in pts}
     if ops <= {"r", "e", "q", "u"}:

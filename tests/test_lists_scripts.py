@@ -54,3 +54,15 @@ def test_a_numbered_list_nested_in_one_stays_a_slides_list():
                        item("two", 0, number("2."))])
     literal_list_numbers(slides)
     assert all(p["bullet"] for p in slides[0]["elements"][0]["paragraphs"])
+
+
+def test_a_swatch_outlined_in_another_colour_is_no_slides_glyph():
+    """r3_charts_v1 s9: legend swatches, filled squares with a black 0.8 pt outline, became
+    square bullets: no outline, and smaller. With no glyph they become pictures by their text."""
+    from beamer2slides.classify import bullet_shape
+    swatch = {"type": "fs", "items": "re", "fill": "#1f77b4", "stroke": "#000000", "width": 0.8, "stroke_opacity": 1.0,
+              "path": [["re", [[156.43, 88.95], [163.7, 96.22]]]]}
+    assert bullet_shape(swatch) == {}
+    assert bullet_shape({**swatch, "stroke": "#1f77b4"}) == {"shape": "square", "color": "#1f77b4"}
+    assert bullet_shape({**swatch, "width": 0.1}) == {"shape": "square", "color": "#1f77b4"}, "a hairline shows no outline"
+    assert bullet_shape({**swatch, "type": "f"}) == {"shape": "square", "color": "#1f77b4"}
