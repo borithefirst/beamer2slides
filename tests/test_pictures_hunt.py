@@ -186,8 +186,13 @@ def test_symbols_tex_builds_from_overlapped_pieces_are_one_character():
     p.words("iodide and water.", x + 28, 100)
     body_text(p)
     runs = lambda e: "".join(r["text"] for par in e["paragraphs"] for r in par["runs"])
-    text = " / ".join(runs(e) for e in deck(p)["slides"][0]["elements"] if e["kind"] == "text")
-    assert "L ≅ M" in text and "A holds ⟹ B" in text and "acid ⟶ iodide" in text
+    elements = deck(p)["slides"][0]["elements"]
+    text = " / ".join(runs(e) for e in elements if e["kind"] == "text")
+    assert "L ≅ M" in text
+    # (a long arrow is no glyph at all: Slides draws ⟶ and ⟹ short, so it is a formula hole,
+    # tests/test_math_arrows.py - never the pieces set apart)
+    assert "=⇒" not in text and "−−→" not in text and "⟹" not in text and "⟶" not in text
+    assert sum(e["kind"] == "image" and e.get("anchor") is not None for e in elements) == 2
 
 
 def test_an_accent_over_a_greek_letter_is_a_formula_hole():

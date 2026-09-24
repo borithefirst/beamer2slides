@@ -514,6 +514,33 @@ def compose_symbols(text: str) -> str:
     return out
 
 
+# Long arrows (\longrightarrow, \implies, \iff, mhchem's and \xrightarrow's stretched arrows). No
+# Slides face has them at TeX's length: its fallback draws ⟶ about 0.75 em long where TeX's is
+# 1.64 em and mhchem's 2-3.3 em, so as one glyph the arrow came out short and tight, and an
+# \xrightarrow's labels printed over the formula (r1_sci_v3 s3, r1_math_v3 s6).
+LONG_ARROWS = set("⟶⟵⟷⟹⟸⟺⟼")
+
+
+def long_arrow_groups(spans: list["Span"]) -> list[list["Span"]]:
+    """The spans of each long arrow among `spans`: a span whose pieces compose one (CMSY's
+    "−−→", "⇐⇒") or that is one (unicode-math's ⟶), and pieces in two fonts overlapped into one
+    (CMR's = kerned under CMSY's ⇒: \\implies)."""
+    spans = sorted((s for s in spans if s.text.strip()), key=lambda s: s.rect.x0)
+    groups = [[s] for s in spans if LONG_ARROWS & set(compose_symbols(s.text))]
+    for a, b in zip(spans, spans[1:]):
+        if b.rect.x0 < a.rect.x1 - 0.2 and a.rect.x0 < b.rect.x1 and \
+                LONG_ARROWS & set(compose_symbols(a.text.strip()[-1:] + b.text.strip()[:1])):
+            groups.append([a, b])
+    merged: list[list] = []
+    for g in groups:
+        into = next((m for m in merged if any(s in m for s in g)), None)
+        if into is None:
+            merged.append(list(g))
+        else:
+            into += [s for s in g if s not in into]
+    return merged
+
+
 def math_pieces(font: str, text: str) -> list[tuple[str, bool]]:
     """Unicode text of a span set in a math font, as pieces with their italic flag. A TeX math
     italic font (CMMI, Latin Modern's LMMathItalic, newtx's NewTXMI...) makes the span italic
@@ -2520,16 +2547,26 @@ class PageClassifier:
     def wrapped_formula(self, line: Line) -> bool:
         """A paragraph's inline formula wrapped onto a line of its own ("(O(√n))" under an item's
         "Separator theorems"): no bullet or label of its own, one pitch below a line of words in
-        its size, starting where one of that line's words starts. A display formula is centred
-        or indented, never flush with its paragraph. As a display, the item it ended became one
-        picture, bullet and words included."""
+        its size, starting where that line's words start (the paragraph's left edge). A display
+        formula is centred or indented, never flush with its paragraph. As a display, the item
+        it ended became one picture, bullet and words included.
+
+        Not a delimiter's piece alone (a matrix's upper parenthesis hangs on a line of its own
+        under the "For the path P3 on three vertices," above it, and a word of that line started
+        where it does: as the item's formula it became a hole, the parenthesis split from its
+        lower half, r1_math_v1 s2), nor a line starting under a word inside the line above."""
         if line.bullet or line.tab is not None:
             return False
+        if all(extension_font(s.font) for s in line.content if s.text.strip()):
+            return False
         size = line.size
+        # (where the line's words start: its first, or the one after its hanging label)
+        starts = lambda o: [min((s.rect.x0 for s in o.content if s.text.strip()), default=o.rect.x0)] + \
+            ([o.tab.rect.x0] if o.tab is not None else [])
         return any(o is not line and o.spans[0].horizontal and o.reason not in ("theme", "figure", "rotated", "math")
                    and abs(o.size - size) <= 0.2 * size
                    and 0.8 * size <= line.baseline - o.baseline <= 1.6 * size
-                   and any(abs(s.rect.x0 - line.x0) <= 1.5 for s in o.content)
+                   and any(abs(x - line.x0) <= 1.5 for x in starts(o))
                    and prose_share(o.content) >= DISPLAY_WORD_SHARE for o in self.all_lines)
 
     def display_line(self, line: Line) -> bool:
@@ -2706,7 +2743,7 @@ class PageClassifier:
         if holes:
             # Prose with a few complex formulas: the words stay text, each formula becomes a
             # picture placed over a gap left in the text.
-            line.add_holes(holes)
+            line.add_holes(holes + long_arrow_groups(line.content))
             hole_ids = {id(s) for h in line.holes for s in h}
             line.fractions = [f for f in fractions if not any(id(s) in hole_ids for s in f[1] + f[2])]
             return "inline"
@@ -2723,6 +2760,11 @@ class PageClassifier:
                 if a is not b and script_of(a, line) != script_of(b, line) and \
                         a.rect.x0 < b.rect.x1 - 0.5 and b.rect.x0 < a.rect.x1 - 0.5:
                     return "complex"  # sub and superscript stacked (a_1^2)
+        # A long arrow in a line of text Slides carries ("x ∈ A ⟺ f(x) ∈ B", "O₂ ⟶ GFP*") is a
+        # hole of its own: its picture keeps the PDF's length and the thick spaces around it.
+        arrows = long_arrow_groups(line.content)
+        if arrows:
+            line.add_holes(arrows)
         return "inline"
 
     def assign_reasons(self, lines: list[Line]) -> None:
@@ -2796,6 +2838,23 @@ class PageClassifier:
                     if g.rect.x0 - 0.5 * size <= l.rect.cx <= g.rect.x1 + 0.5 * size and (
                             -size <= g.rect.y0 - l.rect.y1 <= 0.5 * size or
                             -size <= l.rect.y0 - max(g.rect.y1, host.rect.y1) <= 0.75 * size):
+                        l.reason = "math"
+                        host.limits.append(l)
+            # An \xrightarrow's or mhchem arrow's labels (120 °C over it, "in vacuo" under it) are
+            # small lines of their own inside the arrow's length: its picture's, or they stayed
+            # text printed over the formula Slides sets at other widths (r1_sci_v3 s3).
+            held = {id(s) for h in host.holes for s in h}
+            for g in long_arrow_groups(host.content):
+                if not any(id(s) in held for s in g):
+                    continue
+                arrow = union_all(s.rect for s in g)
+                for l in lines:
+                    if l is host or l.bullet or l.reason not in (None, "math") or l.size >= 0.85 * size or \
+                            len(l.text.replace(" ", "")) > 24 or any(l in o.limits for o in lines):
+                        continue
+                    if arrow.x0 - 0.3 * size <= l.rect.x0 and l.rect.x1 <= arrow.x1 + 0.3 * size and (
+                            -0.5 * size <= arrow.y0 - l.rect.y1 <= 0.5 * size or
+                            -0.5 * size <= l.rect.y0 - arrow.y1 <= 0.5 * size):
                         l.reason = "math"
                         host.limits.append(l)
 
@@ -3556,6 +3615,27 @@ class PageClassifier:
             rest = [l for l in par.lines if not piece(l)]
             out.append(replace(par, lines=rest, reason=None))
             out += [Paragraph([l], reason="math") for l in pieces]
+        return PageClassifier.wrapped_formulas_apart(out)
+
+    @staticmethod
+    def wrapped_formulas_apart(paragraphs: list[Paragraph]) -> list[Paragraph]:
+        """A paragraph's last line that is nothing but a formula hole (`wrapped_formula`: an
+        item's "(O(√n))" TeX wrapped under its "Separator theorems") goes to a paragraph of its
+        own, where TeX broke. In the item, Slides' wider words wrapped "theorems" onto the
+        formula's line, and a paragraph holding a hole is not measured, so its box did not grow
+        to keep them on one line: the formula's picture printed over "theorems" (r3_dense_v4 s3).
+        Apart, the words are measured and the formula starts its own line, as in the PDF."""
+        out = []
+        for par in paragraphs:
+            last = par.lines[-1]
+            words = [s for s in last.content if s.text.strip()]
+            held = {id(s) for h in last.holes for s in h}
+            if len(par.lines) < 2 or par.reason or not words or not all(id(s) in held for s in words) or \
+                    abs(last.x0 - par.lines[-2].x0) > 1.5 and abs(last.x0 - (par.lines[-2].tab.rect.x0 if par.lines[-2].tab else -1e9)) > 1.5:
+                out.append(par)
+                continue
+            out.append(replace(par, lines=par.lines[:-1]))
+            out.append(Paragraph([last], align=par.align, role=par.role, level=par.level))
         return out
 
     def math_pictures(self, lines: list[Line], paragraphs: list[Paragraph], elements: list[dict]) -> list[dict]:
