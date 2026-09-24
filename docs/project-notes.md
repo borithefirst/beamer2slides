@@ -4564,3 +4564,15 @@ Lato has no 500/600 in Google Fonts, so Slides draws them 400. Families with a s
 107.0 (402.8), 900 130.4. Carlito 400 69.2, PT Sans 400 70.9. r9 verifiers: Lato 800 on 6 pt
 footlines fixed control_c1 but reads heavier than the PDF on control_a2 and 'M. Keller', and a
 small reference block set 800 lost the contrast with its bold volume numbers.
+
+### Waves 1-4 on Google (r9, 2026-09-24)
+Same 89 conversions, five blind verifiers (`out/hunt/VERIFY4.md`, `verified/verify4_y*.json`) on
+the 106 findings still open after r8: 14 FIXED, 42 IMPROVED, 49 SAME, 1 CHANGED (an overfull
+table now native and cut at the page edge), 0 WORSE. Of all 377 findings: 285 fixed. Numbers
+(original -> r8 -> r9): text_fit 822 -> 487 -> 446, invariants 296 -> 142 -> 135, fidelity odd
+1,306 -> 861 -> 845, mean overlap 0.701 -> 0.726 -> 0.733. Known regressions: 17 resolved (long
+arrows, the matrix parenthesis, formula lines, the dense_v4 overprint, listing numbers, row bands,
+chart bullets, git-graph nicks, the attribution, µs), 14 still (Slides limits among them: Japanese
+weight, one subscript level, the wrapped pitch). 5 new (`out/hunt/r9_regressions.json`): overfull
+table clipped (sev 2), centred Cyrillic affiliation lines run together (sev 2), a small reference
+block all bold, a paragraph broken inside a formula, a footline too heavy at Lato 800.
