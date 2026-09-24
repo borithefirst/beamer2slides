@@ -1814,6 +1814,20 @@ def guessed_chars(runs: list[dict], scale: float, fonts: "FontMapper") -> int:
     return count
 
 
+def first_break(text: str, a: int, end: int) -> int:
+    """Where Slides may first end a line that has taken the words from `a` on: at the next
+    space, or after a hyphen inside the word before it (not a leading one, nor one before a
+    digit: UAX #14 LB25), as `text_layout.wrap` breaks. Taken to its space, the next line's
+    first word was 'Санкт-Петербургский', and the box left room for 'Санкт-', which Slides
+    pulled up onto the line above (r3_scripts_ruxe s1)."""
+    space = text.find(" ", a)
+    space = end if space < 0 or space > end else space
+    for i in range(a + 1, space - 1):
+        if text[i] == "-" and not text[i - 1].isspace() and not text[i + 1].isdigit():
+            return i + 1
+    return space
+
+
 def slides_lines(p: dict, scale: float, fonts: "FontMapper") -> tuple[float, float] | None:
     """(right edge of the widest line, the least right edge at which a line's next word would
     join it) in Slides pt, of a left-aligned paragraph's PDF lines as Slides sets their words
@@ -1842,8 +1856,7 @@ def slides_lines(p: dict, scale: float, fonts: "FontMapper") -> tuple[float, flo
             return None
         widest = max(widest, x0 + w)
         if k + 1 < len(lines):
-            nxt = text.find(" ", bounds[k + 1])
-            nxt = end if nxt < 0 or nxt > end else nxt
+            nxt = first_break(text, bounds[k + 1], end)
             j = slides_width(runs_between(runs, a, nxt), scale, fonts)
             if j is None:
                 return None
