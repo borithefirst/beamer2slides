@@ -810,6 +810,28 @@ def stretched(lines: list["Line"]) -> bool:
     return any(map(whole, lines)) and any(len(font_gaps(l, font)) >= 2 for l in lines)
 
 
+def justified_cells(cells: list[list[list[Span]]], right: float) -> bool:
+    """Are a column's wrapped cells (each a list of lines, each line its spans) set justified?
+    Every line but a cell's last ends at the column's right edge `right`, and the lines' word
+    spaces differ (stretched, `stretched`): ragged lines keep the font's natural space. A
+    tabularx X column is justified, and written ragged it read as another table."""
+    ends = [max(s.rect.x1 for s in line if s.text.strip()) for lines in cells for line in lines[:-1]
+            if any(s.text.strip() for s in line)]
+    if not ends or any(abs(e - right) > 0.75 for e in ends):
+        return False
+
+    def gaps(line: list[Span]) -> list[float]:
+        words = sorted((s for s in line if s.text.strip() and s.info.family != "math"), key=lambda s: s.rect.x0)
+        if len(words) < 2:
+            return []
+        size = max(s.size for s in words)
+        font = Counter(s.font for s in words).most_common(1)[0][0]
+        return [g for a, b in zip(words, words[1:]) if a.font == b.font == font and abs(a.size - size) <= 0.5
+                and a.text.rstrip()[-1:] not in ".?!:;)”’\"'" for g in [(b.rect.x0 - a.rect.x1) / size] if 0.1 <= g <= 0.9]
+    means = [sum(g) / len(g) for g in (gaps(line) for lines in cells for line in lines) if g]
+    return len(means) >= 2 and max(means) - min(means) > 0.02
+
+
 def font_gaps(line: "Line", font: str) -> list[float]:
     """Word spaces (em) between neighbouring spans of `line` both in `font` (not after a
     sentence's end or a colon, where TeX widens them)."""
@@ -4433,16 +4455,27 @@ class PageClassifier:
         # [row, col, where each line after the first starts in the cell's text]: emit makes the
         # column wide enough for every line of the PDF, a hyphenated word whole.
         wrapped_cells = [[r, cc, starts] for r, row in enumerate(cell_text) for cc, (_, starts) in enumerate(row) if starts]
+        set_justified = {cc for cc in range(n_cols) if col_info[cc]["align"] == "left" and justified_cells(
+            [cell_lines[r][c2] for r, c2, _ in wrapped_cells if c2 == cc], columns[cc][1])}
+        justified = [[r, cc] for r, cc, _ in wrapped_cells if cc in set_justified]
         return {
             "id": f"p{self.page['index']}tab{index}", "kind": "table", "role": "table",
             "bbox": c.expand(1.0).as_list(), "frame": frame.as_list(), "size": round(size, 2),
             "row_baselines": [round(b, 2) for b in baselines],
             "row_heights": [round(p, 2) for p in heights],
             **({"row_lines": row_lines, "wrapped": wrapped_cells} if wrapped_cells else {}),
+            # [row, col] of wrapped cells set justified (a tabularx X, a p{} column): emit writes
+            # them JUSTIFIED, their lines out to the PDF's edge.
+            **({"justified": justified} if justified else {}),
             "columns": col_info,
             "bounds": [round(b, 2) for b in bounds],
             "cells": [[runs for runs, _ in row] for row in cell_text],
             "merges": merges,
+            # Where each merged cell's words run (by its index in merges): emit indents a flush
+            # cell spanning columns as the PDF does. (Kept out of the merges themselves: sync
+            # compares those with the base's to refill a table in place.)
+            **({"merge_x": [[round(extent_of[k][0], 2), round(extent_of[k][1], 2)] for k in range(len(merges))]}
+               if merges else {}),
             "rules": [{"row": min(k, len(rows) - 1), "position": "TOP" if k < len(rows) else "BOTTOM",
                        "color": r["color"], "weight": round(r["weight"], 2), "y": round(r["rect"].cy, 2)}
                       for r in rules for k in [row_boundary(r["rect"].cy)]],
