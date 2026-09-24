@@ -317,7 +317,7 @@ def stray_labels(rendered: Rendered, slide: dict) -> list[dict]:
     elements = slide["elements"]
     taken = [e["bbox"] for e in elements if e["kind"] in ("image", "table", "diagram")]
     taken += [p["bullet"]["bbox"] for e in elements for p in e.get("paragraphs", []) if p["bullet"] and p["bullet"].get("bbox")]
-    used = {i for e in elements for i in e.get("spans", []) + e.get("drawings", []) + [e.get("drawing")]}
+    used = {i for e in elements for i in e.get("spans", []) + e.get("drawings", []) + [e.get("drawing")] + e.get("tiles", [])}
     used |= set(slide.get("on_layout", []))
     graphics = [(d["id"], d["bbox"]) for d in page["drawings"]] + [(i["id"], i["bbox"]) for i in page["images"]] + \
                [(s["id"], s["bbox"]) for s in page["spans"] if s["text"].strip()]

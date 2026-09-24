@@ -82,6 +82,11 @@ def type3_symbol(text: str, type3_words: bool) -> str:
         return text
     return text.replace(glyph, TS1_SYMBOLS[glyph])
 SMALL_IMAGE_PT = 12
+FRAME_RULE_PT = 1.5  # a filled box this thin is a rule (\fcolorbox's \fboxrule, a tcolorbox's frame)
+FRAME_REACH = 1.5    # how far a frame's rule may lie from the edge of the box it frames
+DECOR_SHORT = 0.12 # em a decoration ends before its span's end for its trailing punctuation to be left out
+TRAILING_PUNCT = re.compile(r"(?<=\w)[,.;:!?)\]]+\s*$")
+BOX_PAD = " "   # a padded \colorbox's \fboxsep, highlighted (a no-break space: the box never breaks)
 HOLE_PAD = 1.0  # pt of page around an inline formula picture (antialiasing, italic overhang)
 
 
@@ -188,6 +193,9 @@ class Span:
     strike: bool = False          # \sout
     highlight: str | None = None  # background colour (\colorbox)
     drawn: bool = False           # a character the PDF draws as a rule, not a glyph (underscores)
+    decor_to: float | None = None  # where its underline, strike or highlight ends, when before its end
+    pad_left: bool = False         # the first / last word of a padded \colorbox highlight
+    pad_right: bool = False
 
 
 @dataclass(eq=False)
@@ -202,6 +210,7 @@ class Line:
     holes: list = field(default_factory=list)  # complex inline formulas: pictures over gaps in the text
     hole_pads: list = field(default_factory=list)  # graphics drawn around words of a hole (a circle, a badge)
     limits: list = field(default_factory=list)  # lines of the limits of a big operator in a hole (∑ with n=1 and ∞)
+    code_number: bool = False  # a listing's line number (split_line_numbers): a paragraph of its own
 
     def hole_rect(self, hole: list) -> "Rect":
         """A hole's extent: its glyphs and the graphics drawn around them."""
@@ -522,7 +531,11 @@ def span_runs(spans: list[Span]) -> list[dict]:
     for i, s in enumerate(spans):
         text = s.text
         if i and gap_between(spans[i - 1], s) > 0.15 * s.size and not text.startswith(" "):
-            text = " " + text
+            if runs and not runs[-1]["script"] and s.info.family == "mono" and spans[i - 1].info.family != "mono" \
+                    and runs[-1]["family"] != "mono" and not runs[-1]["text"].endswith(" "):
+                runs[-1]["text"] += " "  # the word space before \texttt is the prose's, not a monospaced one
+            else:
+                text = " " + text
         family, italic, script = s.info.family, s.info.italic, None
         pieces = [(text, italic)]
         if family == "math":
@@ -849,11 +862,50 @@ def is_mono(spans: list[Span]) -> bool:
     return bool(spans) and all(s.info.family == "mono" for s in spans)
 
 
-def code_indent(par: Paragraph, box_x0: float) -> str:
+def is_code(spans: list[Span]) -> bool:
+    """A code line: monospaced from its start, with at most a few words in another face
+    (listings' escapeinside, "← exponential!" after the code)."""
+    content = sorted((s for s in spans if s.text.strip()), key=lambda s: s.rect.x0)
+    if not content or content[0].info.family != "mono":
+        return False
+    letters = lambda ss: sum(len(s.text.strip()) for s in ss)
+    return letters(s for s in content if s.info.family == "mono") >= 0.6 * letters(content)
+
+
+def mono_advance(spans: list[Span]) -> float:
+    """A monospaced line's advance per character, from its longest monospaced span."""
+    mono = [s for s in spans if s.info.family == "mono" and s.text] or [s for s in spans if s.text]
+    span = max(mono, key=lambda s: len(s.text))
+    return span.rect.w / max(1, len(span.text))
+
+
+def code_pitch(spans: list[Span], x0: float) -> float | None:
+    """The column pitch of a code block: every monospaced span starts a whole number of
+    columns right of the block's left edge `x0`, and a span of n letters is between n - 1 and
+    n columns wide (listings' columns=fixed centres each glyph in a column wider than it:
+    LMMono's 0.525 em glyphs on 0.6 em columns, so a span's width over its letters is no
+    measure of the grid and "fib(n  - 1)" got two spaces). None when nothing fits."""
+    mono = [s for s in spans if s.info.family == "mono" and s.text.strip()]
+    if not mono:
+        return None
+    size = statistics.median(s.size for s in mono)
+    scores = []
+    for k in range(80, 161):  # 0.40 to 0.80 em
+        p = k * 0.005 * size
+        grid = sum(abs((s.rect.x0 - x0) / p - round((s.rect.x0 - x0) / p)) <= 0.15 for s in mono)
+        wide = sum(len(s.text) >= 2 and s.rect.w / len(s.text) - 0.02 <= p <= s.rect.w / (len(s.text) - 1) + 0.02
+                   or len(s.text) == 1 and s.rect.w - 0.02 <= p for s in mono)
+        scores.append((grid + wide, p))
+    top = max(sc for sc, _ in scores)
+    if top < len(mono):
+        return None
+    fits = [p for sc, p in scores if sc == top]
+    return statistics.median(fits)
+
+
+def code_indent(par: Paragraph, box_x0: float, pitch: float | None = None) -> str:
     """Leading spaces that reproduce a code line's indentation (monospace advance per char)."""
-    span = max(par.first.content, key=lambda s: len(s.text))
-    advance = span.rect.w / max(1, len(span.text))
-    return " " * max(0, round((par.x0 - box_x0) / advance))
+    return " " * max(0, round((par.x0 - box_x0) / (pitch or mono_advance(par.first.content))))
 
 
 # A tick label that is a number, or several touching ("1,0001,0501,100"; "10%", "−0.5").
@@ -994,11 +1046,27 @@ class PageClassifier:
                 if any(o not in group and not is_rule(o, ro) and r.contains_rect(ro, tol=0) and not ro.contains_rect(r)
                        for o, ro in drawings):
                     continue  # a box holding marks besides its words: a legend's swatches
+                row = sorted(inside, key=lambda s: s.rect.x0)
+                # \colorbox pads its words by \fboxsep (3 pt), soul's \hl by a quarter point: a
+                # padded box alone on its line is a panel under its words (as a highlight it
+                # shrank to the glyphs), one within a line keeps its padding as highlighted
+                # no-break spaces (runs).
+                padded = min(row[0].rect.x0 - r.x0, r.x1 - row[-1].rect.x1) >= max(1.5, 0.15 * size)
+                if padded and r.w >= 0.25 * self.W and not any(
+                        abs(o.baseline - row[0].baseline) <= 0.1 * size and o not in inside for o in flat):
+                    continue
                 for s in inside:
                     s.highlight = d["fill"]
+                if padded:
+                    row[0].pad_left = row[-1].pad_right = True
                 words = inside
             else:
                 continue
+            for s in words:
+                # (\uline{matches}, and \hl{...}. end before the punctuation their span goes on
+                # with: runs cut it off undecorated, or two phrases joined into one across ", ")
+                if r.x1 < s.rect.x1 - DECOR_SHORT * s.size:
+                    s.decor_to = r.x1
             self.decor_ids |= {g["id"] for g in group}
             for s in words:
                 self.decor_rects.setdefault(s.id, []).append(r)
@@ -1119,6 +1187,219 @@ class PageClassifier:
         centred = [abs((a + b) / 2 - r.cx) <= 0.05 * r.w + 1 for a, b in sides]
         return any(full) and all(centred)
 
+    @staticmethod
+    def thin_rule(d: dict) -> tuple[str, float, str] | None:
+        """A drawing that is a straight rule: ('h' or 'v', its thickness, its colour) - a stroked
+        line, or a filled box thinner than FRAME_RULE_PT."""
+        r = Rect.of(d["bbox"])
+        if d["type"] == "s" and d["items"] == "l" and d.get("stroke") and min(r.w, r.h) <= 0.1:
+            return ("h" if r.w > r.h else "v"), (d.get("width") or 0.4), d["stroke"]
+        if d["type"] == "f" and d["items"] == "re" and d.get("fill") and d.get("fill_opacity", 1.0) >= 0.99 \
+                and min(r.w, r.h) <= FRAME_RULE_PT and max(r.w, r.h) >= 2:
+            return ("h" if r.w > r.h else "v"), min(r.w, r.h), d["fill"]
+        return None
+
+    def frame_of(self, box: Rect, fill: str | None, drawings: list[dict], partial: bool = False) -> dict | None:
+        """The frame drawn around a filled box: rules along all four of its edges, in one colour
+        other than the fill, covering each edge, with no other rule inside (then the box is a
+        table's). \\fcolorbox draws its fill, then four rules on its outer edge; listings'
+        frame=single a rule per line on each side and one above and below. Returns the outline
+        ({"color", "width", "sides", "box": the rules' centre lines}) and the ids of the drawings
+        it takes (with rules in the fill's own colour over it: listings paints the side strips
+        twice). `partial`: some of the sides are enough (listings' frame=lines, leftline)."""
+        by_color: dict[str, dict] = {}  # colour -> {"edges": edge -> pieces, "widths", "ids"}
+        same = []
+        for d in drawings:
+            rule = self.thin_rule(d)
+            if rule is None:
+                continue
+            axis, width, c = rule
+            r = Rect.of(d["bbox"])
+            if not box.expand(FRAME_REACH).contains_rect(r, tol=0):
+                continue  # (a footnote rule reaching out under the box)
+            if c == fill:
+                same.append(d["id"])
+                continue
+            mid = r.cy if axis == "h" else r.cx
+            near = [e for e, at in (("t", box.y0), ("b", box.y1)) if axis == "h" and abs(mid - at) <= FRAME_REACH] + \
+                   [e for e, at in (("l", box.x0), ("r", box.x1)) if axis == "v" and abs(mid - at) <= FRAME_REACH]
+            if not near:
+                return None  # a rule across the box: a table's, or a figure's
+            got = by_color.setdefault(c, {"edges": {"t": [], "b": [], "l": [], "r": []}, "widths": [], "ids": [],
+                                          "edge_of": [], "rects": []})
+            got["edges"][near[0]].append((r.x0, r.x1, mid) if axis == "h" else (r.y0, r.y1, mid))
+            got["widths"].append(width)
+            got["ids"].append(d["id"])
+            got["edge_of"].append(near[0])
+            got["rects"].append(r if min(r.w, r.h) >= width - 0.05 else
+                                (Rect(r.x0, mid - width / 2, r.x1, mid + width / 2) if axis == "h"
+                                 else Rect(mid - width / 2, r.y0, mid + width / 2, r.y1)))
+
+        words = [Rect.of(s["bbox"]) for s in self.page["spans"] if s["text"].strip()]
+
+        def labelled(e: str, a: float, b: float, at: float) -> bool:
+            """A word set in the frame's rule (fancyvrb's label, a titled frame) opens it."""
+            return any(w.y0 < at < w.y1 and a <= w.cx <= b if e in "tb" else w.x0 < at < w.x1 and a <= w.cy <= b
+                       for w in words)
+
+        def sides(edges: dict) -> str:
+            out = ""
+            for e, pieces in edges.items():
+                covered, end = 0.0, None
+                for a, b, m in sorted(pieces):
+                    if end is not None and a > end and labelled(e, end, a, m):
+                        covered += a - end
+                    a = a if end is None else max(a, end)
+                    covered += max(0.0, b - a)
+                    end = b if end is None else max(end, b)
+                if pieces and covered >= 0.9 * (box.w if e in "tb" else box.h):
+                    out += e
+            return out
+        framing = [(c, got, sides(got["edges"])) for c, got in by_color.items()]
+        framing = [f for f in framing if f[2] and (partial or len(f[2]) == 4)]
+        if not framing:
+            return None
+        color, got, drawn = max(framing, key=lambda f: (len(f[2]), len(f[1]["ids"])))
+        at = {e: sorted(m for _, _, m in pieces)[len(pieces) // 2] if pieces else None for e, pieces in got["edges"].items()}
+        at = {"l": at["l"] if "l" in drawn else box.x0, "t": at["t"] if "t" in drawn else box.y0,
+              "r": at["r"] if "r" in drawn else box.x1, "b": at["b"] if "b" in drawn else box.y1}
+        ids = [i for i, e in zip(got["ids"], got["edge_of"]) if e in drawn]
+        rules = []  # each side's pieces joined where they touch (a label's gap stays open)
+        for side in drawn:
+            for r in sorted((r for r, e in zip(got["rects"], got["edge_of"]) if e == side), key=lambda r: (r.x0, r.y0)):
+                if rules and rules[-1][0] == side and rules[-1][1].expand(0.6).intersects(r):
+                    rules[-1][1] = rules[-1][1].union(r)
+                else:
+                    rules.append([side, r])
+        rules = [r.as_list() for _, r in rules]
+        return {"color": color, "width": round(sorted(got["widths"])[len(got["widths"]) // 2], 2), "sides": drawn,
+                "box": [round(at["l"], 2), round(at["t"], 2), round(at["r"], 2), round(at["b"], 2)],
+                "rules": [[round(v, 2) for v in r] for r in rules], "ids": ids + same}
+
+    def panel_frames(self) -> list[dict]:
+        """Filled boxes whose frame is drawn as rules around them (\\fcolorbox, listings'
+        frame=single) and fills of one colour tiling one box (listings paints its background a
+        line at a time, with strips for the frame's separation; a black terminal listing is a
+        stack of bands): the page's drawings with each such stack as one fill, and the frames
+        found in `self.frames` (fill drawing id -> outline) and `self.frame_ids`. Without this a
+        listing was a stack of panels whose shared edges show as seams, its frame and its line
+        numbers were thin pictures under them, and an \\fcolorbox lost the rules the panel
+        removal took from the background."""
+        self.frames: dict[str, dict] = {}
+        self.frame_ids: set[str] = set()
+        drawings = [d for d in self.page["drawings"] if d["id"] not in self.decor_ids]
+        tile = lambda d: d["type"] == "f" and d["items"] == "re" and d.get("fill") and d.get("fill_opacity", 1.0) >= 0.99
+        tiles = [(d, Rect.of(d["bbox"])) for d in drawings if tile(d)
+                 and Rect.of(d["bbox"]).w * Rect.of(d["bbox"]).h < 0.95 * self.W * self.H]
+        parent = list(range(len(tiles)))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+
+        def join(beside):
+            boxes: dict[int, Rect] = {}
+            for i, (_, r) in enumerate(tiles):
+                boxes[find(i)] = boxes[find(i)].union(r) if find(i) in boxes else r
+            keys = list(boxes)
+            for i, a in enumerate(keys):
+                for b in keys[i + 1:]:
+                    ra, rb = boxes[a], boxes[b]
+                    if tiles[a][0]["fill"] == tiles[b][0]["fill"] and beside(ra, rb) and find(a) != find(b):
+                        parent[find(a)] = find(b)
+        # a line's pieces side by side first, then the lines one under the other
+        join(lambda ra, rb: abs(ra.y0 - rb.y0) <= 0.3 and abs(ra.y1 - rb.y1) <= 0.3 and
+             (-0.3 <= rb.x0 - ra.x1 <= 0.3 or -0.3 <= ra.x0 - rb.x1 <= 0.3))
+        join(lambda ra, rb: abs(ra.x0 - rb.x0) <= 0.6 and abs(ra.x1 - rb.x1) <= 0.6 and
+             (-0.3 <= rb.y0 - ra.y1 <= 0.3 or -0.3 <= ra.y0 - rb.y1 <= 0.3))
+        groups: dict[int, list[int]] = {}
+        for i in range(len(tiles)):
+            groups.setdefault(find(i), []).append(i)
+        replaced: dict[str, dict] = {}  # first tile's id -> the stack as one fill
+        gone: set[str] = set()
+        spans = [(Rect.of(s["bbox"]), s) for s in self.page["spans"] if s["text"].strip()]
+        for members in groups.values():
+            if len(members) < 2:
+                continue
+            box = union_all(tiles[i][1] for i in members)
+            if sum(tiles[i][1].w * tiles[i][1].h for i in members) < 0.97 * box.w * box.h or box.w < 0.25 * self.W:
+                continue  # not one box (an L, a staircase of bars)
+            inside = [s for r, s in spans if box.contains(r.cx, r.cy)]
+            code = bool(inside) and all(font_info(s["font"]).family == "mono" for s in inside)
+            first = tiles[min(members)][0]
+            frame = self.frame_of(box, first["fill"], drawings, partial=code)
+            # (a stack is one panel when it is framed, or when what it holds is code: the rows of
+            # a table with its fills stay cells)
+            if frame is None and not code:
+                continue
+            replaced[first["id"]] = {**first, "bbox": box.as_list(), "path": [["re", [box.x0, box.y0, box.x1, box.y1]]],
+                                     "corners": {}, "tiles": [tiles[i][0]["id"] for i in members]}
+            gone |= {tiles[i][0]["id"] for i in members}
+            if frame:
+                self.frames[first["id"]] = frame
+                self.frame_ids |= set(frame["ids"])
+        out = []
+        for d in drawings:
+            if d["id"] in replaced:
+                out.append(replaced[d["id"]])
+            elif d["id"] not in gone:
+                out.append(d)
+        for d in out:
+            r = Rect.of(d["bbox"])
+            if d["id"] in self.frames or d["id"] in self.frame_ids or not (
+                    d["type"] == "f" and set(d["items"]) <= set("relcq") and r.w >= 0.25 * self.W and r.h >= 3 and box_outline(d, r)):
+                continue
+            frame = self.frame_of(r, d["fill"], [o for o in out if o is not d and o["id"] not in self.frame_ids])
+            if frame:
+                self.frames[d["id"]] = frame
+                self.frame_ids |= set(frame["ids"])
+        self.bare_frames = self.rule_frames([d for d in out if d["id"] not in self.frame_ids], spans)
+        return [d for d in out if d["id"] not in self.frame_ids]
+
+    def rule_frames(self, drawings: list[dict], spans: list[tuple[Rect, dict]]) -> list[dict]:
+        """Rules closing a rectangle around code with nothing filled under them (listings'
+        frame=single without a background: a rule piece per line on each side): the frames,
+        their drawings taken into `self.frame_ids`. The sides become rule shapes and the frame
+        a listing's panel; as figures, the side strips were pictures whose ends did not meet
+        the top and bottom rules, which stayed in the background as page-wide hairlines."""
+        rules = [(d, self.thin_rule(d)) for d in drawings]
+        rules = [(d, rule[2]) for d, rule in rules if rule]
+        if len(rules) < 4 or len(rules) > 400:
+            return []  # (a chart's hundreds of ticks frame no code)
+        parent = list(range(len(rules)))
+
+        def find(i):
+            while parent[i] != i:
+                parent[i] = parent[parent[i]]
+                i = parent[i]
+            return i
+        boxes = [Rect.of(d["bbox"]).expand(0.6) for d, _ in rules]
+        for i in range(len(rules)):
+            for j in range(i + 1, len(rules)):
+                if rules[i][1] == rules[j][1] and boxes[i].intersects(boxes[j]):
+                    parent[find(i)] = find(j)
+        rules = [d for d, _ in rules]
+        groups: dict[int, list[dict]] = {}
+        for i, d in enumerate(rules):
+            groups.setdefault(find(i), []).append(d)
+        out = []
+        for group in groups.values():
+            box = union_all(Rect.of(d["bbox"]) for d in group)
+            if len(group) < 4 or box.w < 0.25 * self.W or box.h < 6:
+                continue
+            inside = [s for r, s in spans if box.contains(r.cx, r.cy)]
+            letters = lambda ss: sum(len(s["text"].strip()) for s in ss)
+            if not inside or letters(s for s in inside if font_info(s["font"]).family == "mono") < 0.9 * letters(inside):
+                continue  # (an \fbox around prose is a table's cell, see table_from)
+            frame = self.frame_of(box, None, group)
+            if frame is None:
+                continue
+            out.append({"bbox": box, "frame": frame, "id": group[0]["id"]})
+            self.frame_ids |= set(frame["ids"])
+        return out
+
     def analyse_graphics(self) -> None:
         graphics = []
         rules: dict[tuple[int, int], list[Rect]] = {}
@@ -1127,9 +1408,7 @@ class PageClassifier:
         bar_ids: list[tuple[str, Rect]] = []
         self.graphic_paths: dict[tuple, dict] = {}  # graphic box -> its drawing
         table_rules = self.table_hairlines()
-        for d in self.page["drawings"]:
-            if d["id"] in self.decor_ids:
-                continue
+        for d in self.panel_frames():
             r = Rect.of(d["bbox"])
             if r.w * r.h >= 0.95 * self.W * self.H:
                 continue  # page background
@@ -1141,7 +1420,8 @@ class PageClassifier:
             if panel and box_outline(d, r):
                 self.panels.append({"bbox": r, "fill": d["fill"], "id": d["id"],
                                     "rounded": "c" in d["items"], "corners": d.get("corners", {}),
-                                    "opacity": d.get("fill_opacity", 1.0), "image": False})
+                                    "opacity": d.get("fill_opacity", 1.0), "image": False,
+                                    "frame": self.frames.get(d["id"]), "tiles": d.get("tiles", [])})
             elif d["type"] == "s" and r.h <= 1.0 and set(d["items"]) <= {"l"} and (r.w <= 3 * self.body or any(
                     abs(s["bbox"][2] - r.x0) <= 1 and s["bbox"][1] - 1 <= r.y0 <= s["bbox"][3]
                     and (extension_font(s["font"]) or "√" in s["text"])
@@ -1158,6 +1438,9 @@ class PageClassifier:
                     rules.setdefault((round(r.x0), round(r.x1)), []).append({
                         "rect": r, "color": (d["fill"] if fill_rule else d["stroke"]) or "#000000",
                         "weight": r.h if fill_rule else (d["width"] or 0.4)})
+        for f in self.bare_frames:  # a listing's frame of rules: a panel with nothing filled
+            self.panels.append({"bbox": Rect.of(f["frame"]["box"]), "fill": None, "id": f["id"], "rounded": False,
+                                "corners": {}, "opacity": 1.0, "image": False, "frame": f["frame"]})
         for p in [p for p in self.panels if self.legend_box(p["bbox"], graphics)]:
             # A chart's legend box is part of the chart: as a panel, its swatches became bullets
             # of labels set on a native box, one per line, and the others were lost.
@@ -1258,6 +1541,14 @@ class PageClassifier:
 
         # Words on different panels are different texts (Bergen's label column beside the body).
         panel = [self.panel_of(s.rect) for s in spans]
+        # a listing's panel: monospaced text but for its line numbers (a block with a table of
+        # \texttt cells is not)
+        listing = set()
+        for k in set(panel) - {None}:
+            words = [s for s, p in zip(spans, panel) if p == k and s.text.strip() and not re.fullmatch(r"\d{1,4}", s.text.strip())]
+            mono = sum(len(s.text.strip()) for s in words if s.info.family == "mono")
+            if mono and mono >= 0.9 * sum(len(s.text.strip()) for s in words):
+                listing.add(k)  # (an escaped arrow or word is fine)
         for i in range(n):
             a = spans[i]
             for j in range(i + 1, n):
@@ -1291,6 +1582,9 @@ class PageClassifier:
                 if same_row and gap <= 2.0 * big and (panel[i] == panel[j] or a.color == b.color) \
                         and not (gap > 0.8 * big and self.gutter(spans, a, b, big)):
                     parent[find(i)] = find(j)
+                elif same_row and panel[i] in listing and panel[i] == panel[j] and gap <= 0.6 * self.panels[panel[i]]["bbox"].w \
+                        and not any(s.info.family != "mono" and re.fullmatch(r"\d{1,4}", s.text.strip()) for s in (a, b)):
+                    parent[find(i)] = find(j)  # a listing's line: a comment far right of its code is spaces
         groups: dict[int, list[Span]] = {}
         for i, s in enumerate(spans):
             groups.setdefault(find(i), []).append(s)
@@ -1364,6 +1658,49 @@ class PageClassifier:
                     joined.tab = host.tab
                     out[out.index(host)] = joined
                     break
+        return out
+
+    @staticmethod
+    def split_line_numbers(lines: list[Line]) -> list[Line]:
+        """A listing's line numbers (listings/minted `numbers=left`, fancyvrb `numbers`): a
+        column of numbers ending at one x, counting up line by line, beside monospaced code.
+        Each becomes a line of its own (`code_number`), the column one right-aligned box, and
+        the code lines stay code. Joined to its line a number made the line prose: joined by an
+        em space or a tab, whichever the gap made it, the code moved off its column, and the
+        numbers of lines whose code starts further right were left alone, pictures under the
+        listing's panels (r2_code_v1, r2_code_v4)."""
+        found = []
+        for line in lines:
+            content = sorted(line.content, key=lambda s: s.rect.x0)
+            if not content or line.bullet or not re.fullmatch(r"\d{1,4}", content[0].text.strip()):
+                continue
+            num, rest = content[0], content[1:]
+            if rest and (not is_code(rest) or rest[0].rect.x0 - num.rect.x1 < 0.25 * num.size):
+                continue
+            # (its code may be a line of its own: indented code is further off than a gutter)
+            beside = rest or [s for o in lines if o is not line and is_code(o.content)
+                              and abs(o.baseline - num.baseline) <= 0.3 * num.size for s in o.content if s.rect.x0 > num.rect.x1]
+            found.append((line, num, bool(beside)))
+        columns: list[list[tuple]] = []
+        for item in sorted(found, key=lambda f: f[1].rect.x1):
+            col = next((c for c in columns if abs(c[0][1].rect.x1 - item[1].rect.x1) <= 1.0), None)
+            (col.append(item) if col else columns.append([item]))
+        out = list(lines)
+        for col in columns:
+            col.sort(key=lambda f: f[1].baseline)
+            values = [int(f[1].text.strip()) for f in col]
+            if len(col) < 3 or sum(code for _, _, code in col) < max(2, len(col) / 2) or any(b <= a for a, b in zip(values, values[1:])) \
+                    or len({round(f[1].size, 1) for f in col}) != 1:
+                continue
+            for line, num, code in col:
+                if len(line.content) == 1:
+                    line.code_number = True
+                    continue
+                line.spans.remove(num)
+                line.tab = None  # (the number was the label the code was tabbed from)
+                own = Line([num])
+                own.code_number = True
+                out.insert(out.index(line), own)
         return out
 
     @staticmethod
@@ -2379,8 +2716,8 @@ class PageClassifier:
         last = par.last
         if line.bullet or abs(line.size - par.size) > 0.5:
             return None
-        if is_mono(line.content) or is_mono(last.content):
-            return None  # code: every line is its own paragraph
+        if is_mono(line.content) or is_mono(last.content) or line.code_number or last.code_number:
+            return None  # code (and its line numbers): every line is its own paragraph
         pitch = line.baseline - last.baseline
         if not 0 < pitch <= 1.45 * par.size:  # (Google themes use line spacing 1.15: 1.38 em)
             return None
@@ -2538,13 +2875,28 @@ class PageClassifier:
         head = box[0]
         if par.role != head.role or par.align != head.align:
             return False
-        if self.panel_of(par.rect) != self.panel_of(head.rect):
-            return False
         gap = par.first.baseline - last.last.baseline
-        if not 0 < gap <= 2.6 * max(par.size, last.size):
+        if par.first.code_number or head.first.code_number:
+            # A listing's line numbers: one right-aligned column (a blank line has none), whose
+            # wider numbers may reach out of the listing's panel.
+            return par.first.code_number and head.first.code_number and 0 < gap <= 2.6 * par.size \
+                and abs(par.rect.x1 - max(p.rect.x1 for p in box)) <= 1.0
+        panel = self.panel_of(par.rect)
+        if panel != self.panel_of(head.rect):
             return False
         box_rect = union_all([p.rect for p in box] + [Rect.of(p.bullet["bbox"]) for p in box if p.bullet])
-        if is_mono(par.spans) and all(is_mono(p.spans) for p in box):
+        code = is_code(par.spans) and not par.bullet
+        if code != all(is_code(p.spans) and not p.bullet for p in box):
+            return False  # code and the prose around it are different boxes (a code box keeps its columns)
+        if code and panel is not None and gap > 0 and par.rect.x0 < box_rect.x1 and box_rect.x0 < par.rect.x1:
+            # A listing on its panel is one box, blank lines and dedents too: its indentation
+            # is spaces from one left edge (as boxes cut at its blank lines, the same indent
+            # was spaces in one and the box's own position in the next).
+            between = Rect(box_rect.x0, last.last.baseline + 0.1, box_rect.x1, par.first.baseline - par.size)
+            return not any(b.rect.intersects(between) for b in blockers)
+        if not 0 < gap <= 2.6 * max(par.size, last.size):
+            return False
+        if code:
             # Code block: indentation varies freely, lines follow at normal pitch.
             return par.rect.x0 >= box_rect.x0 - 1.5 and gap <= 1.35 * par.size
         if par.align == "center":
@@ -2588,7 +2940,9 @@ class PageClassifier:
     # -- output -----------------------------------------------------------------
 
     @staticmethod
-    def runs(par: Paragraph, indent: str = "", soft_breaks: bool = False) -> list[dict]:
+    def runs(par: Paragraph, indent: str = "", soft_breaks: bool = False, pitch: float | None = None,
+             x_ref: float = 0.0) -> list[dict]:
+        """`pitch`, `x_ref`: a code block's column grid (`code_pitch`), which its spaces keep."""
         runs: list[dict] = []
         prev: Span | None = None
         hole_x1 = 0.0
@@ -2676,19 +3030,28 @@ class PageClassifier:
                             sep = ""  # Chinese and Japanese break lines between characters, no space
                         else:
                             sep = " "
-                    elif span is line.tab:
+                    elif span is line.tab and not pitch:
                         sep = "\t"
                     else:
                         # (after a hole, from the end of its graphic: a frame wider than its words)
                         gap = (span.rect.x0 - hole_x1) if runs[-1].get("hole") else gap_between(prev, span)
                         sep = " " if gap > 0.15 * line.size else ""
                         mono = prev.info.family == "mono" and span.info.family == "mono" and span.text.strip()
-                        if sep and mono:
+                        if (mono or span is line.tab) and pitch and not runs[-1].get("hole") and not runs[-1]["script"]:
+                            # (a diff's "+" before its code is no hanging label: spaces too)
                             # In a monospaced face every space is one advance (Roboto Mono: 0.600 em,
                             # an em space too), so a \quad is so many plain spaces, as in code_indent;
                             # em spaces there were half of CMTT's \quad each (text_fit, slide 18).
-                            advance = span.rect.w / max(1, len(span.text))
-                            sep = " " * max(1, round(gap / advance))
+                            # In a code block the spaces are the columns between where the span
+                            # before ends and this one starts (listings' columns=fixed sets
+                            # tokens a few tenths of a column apart with no space between).
+                            col = lambda s: round((s.rect.x0 - x_ref) / pitch)
+                            runs[-1]["text"] += " " * max(0, col(span) - col(prev) - len(prev.text))
+                            sep = ""
+                        elif sep and mono:
+                            # (a one-letter span's own box is no measure of the advance)
+                            advance = max(prev, span, key=lambda s: len(s.text))
+                            sep = " " * max(1, round(gap / (advance.rect.w / max(1, len(advance.text)))))
                         elif gap >= max(0.9, word_space + 0.4) * line.size:
                             # \quad and wider (\and between authors): em spaces keep the gap
                             # (a \quad measures 0.999 em between the advance boxes; a justified
@@ -2723,15 +3086,20 @@ class PageClassifier:
                     # Math fonts carry symbols and variables; show them in the text family.
                     family = math_family(line, par)
                     pieces = math_pieces(span.font, text)
+                tail = TRAILING_PUNCT.search(text) if span.decor_to is not None and family != "math" else None
                 if script == "super" and not forced and text.strip() in RAISED_MARKS:
-                    pieces, script, size = [(raised_mark(text), False)], None, line.size
-                for text, italic in pieces:
+                    pieces, script, size, tail = [(raised_mark(text), False)], None, line.size, None
+                if tail:  # (its decoration ends before this punctuation: Span.decor_to)
+                    pieces = [(text[:tail.start()], italic), (text[tail.start():], italic)]
+                for k, (text, italic) in enumerate(pieces):
+                    plain = bool(tail) and k == 1
                     style = {
                         "font": span.font, "family": family,
                         "size": round(size, 2),
                         "bold": span.info.bold, "italic": italic, "smallcaps": span.info.smallcaps,
                         "color": span.color, "link": span.link, "script": script,
-                        "underline": span.underline, "strike": span.strike, "highlight": span.highlight,
+                        "underline": span.underline and not plain, "strike": span.strike and not plain,
+                        "highlight": None if plain else span.highlight,
                     }
                     marks = lambda r: (r["underline"], r.get("strike", False), r["highlight"])
                     if runs and runs[-1]["text"].endswith(" ") and marks(runs[-1]) != marks(style) and any(marks(runs[-1])):
@@ -2740,6 +3108,11 @@ class PageClassifier:
                             runs.append({**runs[-1], "text": " ", "underline": False, "strike": False, "highlight": None})
                         else:
                             text = " " + text
+                    if style["highlight"] and span.pad_left and k == 0:
+                        lead = len(text) - len(text.lstrip(" "))
+                        text = text[:lead] + BOX_PAD + text[lead:]
+                    if style["highlight"] and span.pad_right and k == len(pieces) - 1 - bool(tail):
+                        text = text + BOX_PAD
                     if runs and not runs[-1].get("hole") and all(runs[-1].get(k) == v for k, v in style.items()):
                         runs[-1]["text"] += text
                     else:
@@ -3843,6 +4216,13 @@ class PageClassifier:
             # A translucent fill over text (a highlight behind list items) is a translucent
             # shape under the text it covers, grouped with it.
             covered = Counter(self.line_owner[id(l)][0] for l in lines if id(l) in self.line_owner and l.rect.intersects(r))
+            if not p["image"] and not p["fill"] and p.get("frame") and not any(
+                    Rect.of(e["bbox"]).expand(0.5).contains_rect(r) for e in elements if e["kind"] in ("image", "table", "diagram")):
+                frame, k = p["frame"], len(out)
+                out += [{"id": f"p{self.page['index']}s{k}r{i}", "kind": "shape", "role": "rule", "bbox": rule,
+                         "fill": frame["color"], "shape": "RECTANGLE", "flip": False, "radius": 0.0,
+                         "drawing": p["id"], "spans": []} for i, rule in enumerate(frame["rules"])]
+                continue
             if p["image"] or not p["fill"] or (p["opacity"] < 0.99 and not covered):
                 continue
             if r.x0 <= 1 or r.y0 <= 1 or r.x1 >= self.W - 1 or r.y1 >= self.H - 1:
@@ -3866,11 +4246,54 @@ class PageClassifier:
                 kind, flip = "ROUND_2_SAME_RECTANGLE", True  # same shape rotated 180°
             else:
                 kind, flip = "ROUND_RECTANGLE", False
+            if any(o["bbox"] == r.as_list() and o["fill"] == p["fill"] for o in out):
+                continue  # the same panel painted twice (a tcolorbox's title tab)
             out.append({"id": f"p{self.page['index']}s{len(out)}", "kind": "shape", "role": "panel",
                         "bbox": r.as_list(), "fill": p["fill"], "shape": kind, "flip": flip,
                         "radius": max(p["corners"].values(), default=0.0), "drawing": p["id"], "spans": []})
+            if len(p.get("tiles", [])) > 1:  # (a listing's per-line bands, painted as this one fill)
+                out[-1]["tiles"] = p["tiles"]
+            frame = p.get("frame")
+            if frame and len(frame["sides"]) == 4:
+                out[-1].update(bbox=frame["box"], outline={"color": frame["color"], "width": frame["width"]},
+                               frame_drawings=frame["ids"])
+            elif frame:  # listings' frame=lines, leftline...: the sides drawn are rules over the panel
+                panel = out[-1]
+                panel["frame_drawings"] = frame["ids"]
+                out += [{"id": f"{panel['id']}r{k}", "kind": "shape", "role": "rule", "bbox": rule,
+                         "fill": frame["color"], "shape": "RECTANGLE", "flip": False, "radius": 0.0,
+                         "drawing": panel["drawing"], "spans": []} for k, rule in enumerate(frame["rules"])]
             if p["opacity"] < 0.99:
                 out[-1].update(role="highlight", opacity=round(p["opacity"], 3), anchor=covered.most_common(1)[0][0])
+        return self.framed_panels(out)
+
+    @staticmethod
+    def framed_panels(shapes: list[dict]) -> list[dict]:
+        """A panel painted over a slightly larger one of another colour, inset by the same few
+        tenths of a point on every side, is framed by it: tcolorbox (and themes like it) paints
+        the frame colour's box and the interior over it. The inner panel becomes one shape with
+        that outline, on the frame's centre line; the outer one, which shows only as that ring,
+        is no shape of its own (as one it failed render's fill check and the frame was lost)."""
+        out = list(shapes)
+        for inner in shapes:
+            if inner.get("outline") or inner.get("opacity") or inner not in out:
+                continue
+            ix0, iy0, ix1, iy1 = inner["bbox"]
+            for outer in out:
+                if outer is inner or outer.get("outline") or outer.get("opacity") or outer["fill"] == inner["fill"]:
+                    continue
+                ox0, oy0, ox1, oy1 = outer["bbox"]
+                insets = (ix0 - ox0, iy0 - oy0, ox1 - ix1, oy1 - iy1)
+                if not (0.1 <= min(insets) and max(insets) <= FRAME_RULE_PT and max(insets) - min(insets) <= 0.3):
+                    continue
+                w = sum(insets) / 4
+                inner.update(bbox=[round(ox0 + w / 2, 2), round(oy0 + w / 2, 2), round(ox1 - w / 2, 2), round(oy1 - w / 2, 2)],
+                             outline={"color": outer["fill"], "width": round(w, 2)},
+                             radius=round(max(outer["radius"] - w / 2, inner["radius"]) if outer["radius"] else inner["radius"], 2),
+                             shape=outer["shape"] if outer["shape"] != "RECTANGLE" else inner["shape"],
+                             frame_drawings=[outer["drawing"]])
+                out.remove(outer)
+                break
         return out
 
     def blocks(self, shapes: list[dict]) -> None:
@@ -3884,7 +4307,8 @@ class PageClassifier:
         k = 0
         for head in sorted(shapes, key=lambda s: s["bbox"][1]):
             for body in shapes:
-                if body is head or "block" in body or "block" in head or "opacity" in body or "opacity" in head:
+                if body is head or "block" in body or "block" in head or "opacity" in body or "opacity" in head \
+                        or "rule" in (body.get("role"), head.get("role")):
                     continue
                 hx0, hy0, hx1, hy1 = head["bbox"]
                 bx0, by0, bx1, by1 = body["bbox"]
@@ -3936,8 +4360,11 @@ class PageClassifier:
                 if abs(l.x0 - b.x0) <= 1:
                     run_on.add(id(l))
                     prev = l
+        # (not code: a listing keeps its columns as spaces, and its line numbers are a column of
+        # their own - split_line_numbers - not the first column of a table)
         candidates = [l for l in lines if l.reason is None and not l.bullet and l.tab is None
-                      and l.rect.y0 > 0.15 * self.H and all(s.horizontal for s in l.spans)]
+                      and l.rect.y0 > 0.15 * self.H and all(s.horizontal for s in l.spans)
+                      and not l.code_number and not is_mono(l.content)]
         rows: list[list[Line]] = []
         for l in sorted(candidates, key=lambda l: l.baseline):
             if rows and abs(rows[-1][0].baseline - l.baseline) <= 0.3 * l.size:
@@ -4052,7 +4479,8 @@ class PageClassifier:
 
     def text_element(self, box: list[Paragraph], element_id: str) -> dict:
         rect = union_all([p.rect for p in box] + [Rect.of(p.bullet["bbox"]) for p in box if p.bullet])
-        code = all(is_mono(p.spans) for p in box)
+        code = all(is_code(p.spans) and not p.bullet for p in box)
+        pitch =code_pitch([s for p in box for s in p.spans], rect.x0) if code else None
 
         def unbalanced(p: Paragraph) -> bool:
             """Centred (or right-aligned) lines broken where a greedy wrap would not break, or
@@ -4087,7 +4515,8 @@ class PageClassifier:
                 "wrap_limit": round(min(l.x0 for l in p.lines) + min(a.x1 - a.x0 + 0.25 * p.size + first_word_width(b.content[0])
                                                                      for a, b in zip(p.lines, p.lines[1:])), 2)
                               if len(p.lines) > 1 and all(l.content for l in p.lines) else None,
-                "runs": self.runs(p, code_indent(p, rect.x0) if code else "", soft_breaks=unbalanced(p)),
+                "runs": self.runs(p, code_indent(p, rect.x0, pitch) if code else "", soft_breaks=unbalanced(p),
+                                  pitch=pitch, x_ref=rect.x0),
             } for p in box],
             "code": code,
             "spans": [s.id for p in box for s in p.spans if s.info.family != "icon" and not s.drawn
@@ -4106,7 +4535,7 @@ class PageClassifier:
         self.spans_by_id = {s.id: s for s in spans}
         self.analyse_graphics()
         # (after the braces: a brace's CMEX pieces go with their label, see join_braces)
-        lines = self.join_hanging_operators(self.join_braces(self.build_lines(spans)))
+        lines = self.split_line_numbers(self.join_hanging_operators(self.join_braces(self.build_lines(spans))))
         self.assign_reasons(lines)
         plain_tables = self.plain_tables(lines)
         body_lines = [l for l in lines if l.reason is None and abs(l.size - self.body) < 1]
@@ -4116,6 +4545,9 @@ class PageClassifier:
             # slide number is what is left): the left edge of what text there is.
             self.text_margin = min([l.rect.x0 for l in lines if l.reason is None] + [0.2 * self.W])
         paragraphs = self.display_pieces_apart(self.build_paragraphs(lines))
+        for par in paragraphs:
+            if par.first.code_number:
+                par.align = "right"  # listings sets its numbers flush right against the code
         boxes = self.build_boxes(paragraphs)
 
         n = self.page["index"]

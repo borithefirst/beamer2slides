@@ -30,7 +30,7 @@ KEY_MATCH = 0.5       # least similarity for an element keeping the key it would
 ELEMENT_MATCH = 0.35  # least similarity for an element inheriting another key
 # Render output, not source: "picture" says how a bare image reached its file (raw stream or
 # PDFium's pixels); the bytes themselves are hashed by image_sha1.
-DROP_KEYS = {"id", "spans", "file", "px", "picture", "drawings", "drawing"}
+DROP_KEYS = {"id", "spans", "file", "px", "picture", "drawings", "drawing", "frame_drawings", "tiles"}
 STYLE_KEYS = {"font", "family", "size", "bold", "italic", "smallcaps", "color", "fill", "stroke", "shape", "align",
               "level", "script", "underline", "strike", "highlight", "link", "opacity", "shadow", "radius", "code",
               "flip", "weight", "arrow_from", "arrow_to", "rotation"}
