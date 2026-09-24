@@ -4328,7 +4328,8 @@ class PageClassifier:
         order = {d["id"]: i for i, d in enumerate(self.page["drawings"])}
         with_text = {tuple(s) for e in elements for s in e.get("strokes", [])}
         strokes = [(i, Rect.of(d["bbox"]).expand((d["width"] or 0.4) / 2)) for i, d in enumerate(self.page["drawings"])
-                   if d["type"] == "s" and d["id"] not in self.decor_ids and tuple(Rect.of(d["bbox"]).as_list()) not in with_text
+                   if d["type"] == "s" and d["id"] not in self.decor_ids and d["id"] not in self.frame_ids
+                   and tuple(Rect.of(d["bbox"]).as_list()) not in with_text
                    and not any(f.expand(0.5).contains_rect(Rect.of(d["bbox"])) for f in figures)]
         bullet_images = {p["bullet"]["image"] for e in elements if e["kind"] == "text"
                          for p in e["paragraphs"] if p["bullet"] and p["bullet"]["kind"] == "image"}
