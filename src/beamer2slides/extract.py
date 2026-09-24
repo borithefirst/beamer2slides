@@ -535,8 +535,11 @@ def page_chars(page: Page) -> tuple[list[Char], set[int]]:
 
 
 # U+2010 HYPHEN (Calibri's, fontspec's): the Google substitutes have no glyph for it, and Slides
-# drew it from a fallback font, wide and with room around it.
-HYPHENS = str.maketrans({"‐": "-"})
+# drew it from a fallback font, wide and with room around it. U+2011 NON-BREAKING HYPHEN is what
+# xdvipdfmx's ToUnicode gives fontspec's Cambria and Palatino Linotype for the '-' the source
+# typed (lang_v1, lang_v3 'Spear-Danes'): Caladea and PT Serif lack it too, and Slides drew a
+# short dash raised off the hyphen's height.
+HYPHENS = str.maketrans({"‐": "-", "‑": "-"})
 # Inferior figures a text font's ToUnicode gives its old-style small-cap figures (Palatino
 # Linotype with Numbers=OldStyle in \textsc: 'Du sublime (1674)' reads 'DU SUBLIME ₍₁₆₇₄₎').
 INFERIORS = str.maketrans("₀₁₂₃₄₅₆₇₈₉₍₎", "0123456789()")
@@ -544,7 +547,7 @@ INFERIOR_RUN = re.compile(r"[₀-₉₍₎]+")
 
 
 def readable(text: str, font: str) -> str:
-    """A span's text as its words: ligatures as letters, U+2010 as '-', and in a text font a
+    """A span's text as its words: ligatures as letters, U+2010/U+2011 as '-', and in a text font a
     run of inferior figures that no letter or closing bracket carries (CO₂ and x₁ keep theirs:
     '§₂₅', ',₁₈₉₉', '₍₁₆₇₄₎') as the figures they are."""
     text = text.translate(LIGATURES).translate(HYPHENS)

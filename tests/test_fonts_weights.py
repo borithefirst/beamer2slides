@@ -14,17 +14,16 @@ from .test_emit_requests import FONTS, SCALE, run_of
 
 # ---------------------------------------------------------------- optical weight
 
-def test_a_six_point_sans_cut_is_set_heavier_than_regular():
-    # sci v1, control c1 (r6): beamer's \tiny footline in SFSS0600 ('M. Keller', 'June 2026') came
-    # out in Lato Regular, visibly lighter than CM's 6 pt cut, whose stems are 1.38x the 10.95 pt one's.
+def test_a_six_point_sans_cut_is_written_at_its_marker_weight():
+    # sci v1, control c1 (r6): beamer's \tiny footline in SFSS0600 ('M. Keller', 'June 2026').
     style, fields = FONTS.text_style(run_of("June 2026", 5.98, font="SFSS0600"), SCALE)
     assert style["weightedFontFamily"] == {"fontFamily": "Lato", "weight": emit.OPTICAL_WEIGHT}
     assert "weightedFontFamily" in fields and "fontFamily" not in fields
-    # r8: Slides draws Lato 500 and 600 as its Regular (probe_font_weights: ink 79.0 per pt at 400
-    # and 600, 106.9 at 700 and 800): the footline came out as light as before. 800 draws Bold,
-    # and reads back as a weight our own bold (700) never writes. No `bold` field: the API
-    # applies it after the weight, and a `bold: false` could take the weight back to 400.
-    assert emit.OPTICAL_WEIGHT == 800 and "bold" not in fields and "bold" not in style
+    # Wave 4 wrote 800, which Slides draws Bold: too heavy (r9, test_fonts_wave5). 600 draws
+    # Regular (probe_font_weights) and reads back as written, a weight our own bold (700) never
+    # writes. No `bold` field: the API applies it after the weight, and a `bold: false` could take
+    # the weight back to 400.
+    assert emit.OPTICAL_WEIGHT < emit.DRAWN_BOLD_WEIGHT and "bold" not in fields and "bold" not in style
     assert FONTS.text_style(run_of("June 2026", 5.98, font="ECSS0600"), SCALE)[0].get("weightedFontFamily")  # Type 3
     # The body text, an 8 pt cut and a bold footline keep the plain family.
     for run in (run_of("June 2026"), run_of("June 2026", 7.97, font="SFSS0800"), run_of("June 2026", 5.98, font="LMSans8-Regular"),
@@ -33,9 +32,9 @@ def test_a_six_point_sans_cut_is_set_heavier_than_regular():
         assert "weightedFontFamily" not in style and style["bold"] is run["bold"], run["font"]
 
 
-def test_an_optically_heavier_run_is_measured_in_the_face_slides_draws():
+def test_a_small_optical_cut_is_measured_in_the_face_slides_draws():
     tiny = run_of("Fatigue of Welded Joints", 5.98, font="SFSS0600")
-    table = emit.ADVANCES["Lato"]["bold"]
+    table = emit.ADVANCES["Lato"]["regular"]  # (600 draws Regular)
     size = FONTS(tiny, SCALE)[1]
     assert emit.slides_width([tiny], SCALE, FONTS) == pytest.approx(sum(table[c] for c in tiny["text"]) * size)
 
@@ -48,16 +47,17 @@ def read_back_runs(style: dict, foreign: bool = False) -> list[dict]:
     return [r for p in text_paragraphs(pe, text, StyleResolver({}), FONTS, SCALE, foreign=foreign) for r in p["runs"]]
 
 
-def test_an_optically_heavier_run_reads_back_regular():
+def test_a_small_optical_cut_reads_back_regular():
     # deck_ir counted weight 600 as bold: pull would have written the footline as \textbf. Slides
-    # reads our 800 back as `bold: true` with the weight as written (probe_font_weights).
-    style = {**FONTS.text_style(run_of("June 2026", 5.98, font="SFSS0600"), SCALE)[0], "bold": True}
+    # reads 600 back `bold: false` with the weight as written (probe_font_weights).
+    style = {**FONTS.text_style(run_of("June 2026", 5.98, font="SFSS0600"), SCALE)[0], "bold": False}
     runs = read_back_runs(style)
     assert runs and not any(r["bold"] for r in runs)
-    assert all(r["bold"] for r in read_back_runs(style, foreign=True))   # someone's extra bold in another deck
-    # what decks converted before wrote (600, drawn Regular) stays regular; our own bold (700) is bold
-    legacy = {**style, "weightedFontFamily": {"fontFamily": "Lato", "weight": 600}, "bold": False}
+    # what the decks of wave 4 wrote (800, read back `bold: true`) stays regular too; our own bold
+    # (700) is bold, and so is someone's 800 in a deck we did not write
+    legacy = {**style, "weightedFontFamily": {"fontFamily": "Lato", "weight": 800}, "bold": True}
     assert not any(r["bold"] for r in read_back_runs(legacy))
+    assert all(r["bold"] for r in read_back_runs(legacy, foreign=True))
     bold = {**style, "weightedFontFamily": {"fontFamily": "Lato", "weight": 700}}
     assert all(r["bold"] for r in read_back_runs(bold))
 
@@ -86,19 +86,20 @@ def test_an_optically_heavier_footline_pulls_back_with_no_residual():
     pres = simulate(deck)
     styles = [te["textRun"]["style"] for s in pres["slides"] for pe in s["pageElements"]
               for te in pe.get("shape", {}).get("text", {}).get("textElements", []) if "textRun" in te]
-    assert any((st.get("weightedFontFamily") or {}).get("weight") == emit.OPTICAL_WEIGHT and st.get("bold")
+    assert any((st.get("weightedFontFamily") or {}).get("weight") == emit.OPTICAL_WEIGHT and not st.get("bold")
                for st in styles)
     comp = compare(deck, deck_ir(pres, deck["slides"][0]["size"]))
     assert [r for r in comp.open() if r["kind"] in TEXT_KINDS] == []
 
 
-def test_an_optically_heavier_run_is_laid_out_in_bold_widths():
+def test_a_weight_is_laid_out_in_the_face_slides_draws_it_in():
     # text_layout (the layout oracle, sync's refit) measures the face Slides draws: a weight of 700
-    # or more is the bold face even where the read-back says nothing of `bold`
+    # or more (a wave-4 footline's 800) is the bold face even where the read-back says nothing of
+    # `bold`, and our marker weight is the regular one
     from beamer2slides import text_layout
-    heavy = {"fontFamily": "Lato", "weight": emit.OPTICAL_WEIGHT}
-    assert text_layout.advance("M", heavy, 10) == pytest.approx(emit.ADVANCES["Lato"]["bold"]["M"] * 10)
-    assert text_layout.advance("M", {"fontFamily": "Lato", "weight": 600}, 10) == \
+    assert text_layout.advance("M", {"fontFamily": "Lato", "weight": 800}, 10) == \
+        pytest.approx(emit.ADVANCES["Lato"]["bold"]["M"] * 10)
+    assert text_layout.advance("M", {"fontFamily": "Lato", "weight": emit.OPTICAL_WEIGHT}, 10) == \
         pytest.approx(emit.ADVANCES["Lato"]["regular"]["M"] * 10)
 
 

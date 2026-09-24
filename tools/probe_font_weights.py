@@ -39,6 +39,9 @@ ROWS = [  # (family, weight, text)
     ("Source Sans 3", 400, LATIN), ("Source Sans 3", 600, LATIN), ("Open Sans", 400, LATIN), ("Open Sans", 600, LATIN),
     ("Noto Sans", 400, LATIN), ("Noto Sans", 500, LATIN), ("Noto Sans", 600, LATIN), ("Carlito", 400, LATIN),
     ("PT Sans", 400, LATIN), ("Inter", 500, LATIN),
+    # r9: a 6 pt CM sans footline's stroke is 1.06 of Lato Regular's (1.15 against the body text),
+    # Source Sans 3 600 width-matched 1.31, Lato Bold 1.34: is a served 500 in between?
+    ("Source Sans 3", 500, LATIN), ("Source Sans 3", 700, LATIN),
 ]
 PER_PAGE = 7
 
