@@ -4424,3 +4424,16 @@ arrowheads, a fraction picture over a word.
   Slides' bidi treats the LRM/RLM as intended. Open: U+200E/U+200F should measure zero in
   `emit.wide_advance`/`slides_width` and `text_layout.advance`; RTL list items merge into one
   paragraph (already at HEAD before).
+
+### Waves 1+2 on Google (r7, 2026-09-24)
+Every deck re-converted as `r7_<stem>` (and `r7t3_<stem>`: the archived original Type 3 PDF
+converted as built, where the Type 3 findings are judged); five blind verifiers against the
+original conversion (`out/hunt/VERIFY2.md`, `verified/verify2_w*.json`). Of 377 targeted findings:
+240 FIXED, 40 IMPROVED, 93 SAME, 4 CHANGED, 0 WORSE. Numbers against the original: text_fit
+822 -> 509, invariants 296 -> 176, fidelity odd elements 1,306 -> 918, mean text overlap 0.701 ->
+0.721. Of the 19 r6 regressions 10 are resolved, 9 remain (weights, arrowheads, the ICR wordmark,
+wrapped pitch). 28 new regressions (`out/hunt/r7_regressions.json`): G's `is_justified` fires on
+centred, ragged or two-line text and Slides then stretches gaps and runs past panels and frames (12);
+`grown_panels` widens panels 5-6 pt (3); a frame's right edge lost, a listing's lines squeezed off
+their numbers (J); RTL bullets lost with columns centred (I, sev 3); a picture made a too-wide
+native table; ball labels without parentheses; a heading broken mid-word; two new wraps.
