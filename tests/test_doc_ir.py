@@ -683,6 +683,7 @@ STYLED_LIVE = {
         {"startIndex": 1, "endIndex": 14, "paragraph": {
             "paragraphStyle": {"namedStyleType": "NORMAL_TEXT", "lineSpacing": 150,
                                "indentStart": {"magnitude": 36, "unit": "PT"},
+                               "indentFirstLine": {"magnitude": 36, "unit": "PT"},
                                "spaceAbove": {"magnitude": 12, "unit": "PT"},
                                "shading": {"backgroundColor": {"color": {"rgbColor": {
                                    "red": 1.0, "green": 0.9490196, "blue": 0.8}}}}},
@@ -714,6 +715,54 @@ def test_a_paragraph_reports_only_what_it_sets_itself():
     assert block["space_above"] == 12.0 and block["shading"] == "#fff2cc"
     # Nothing it does not set, and nothing that only repeats the named style.
     assert "indent_first" not in block and "space_below" not in block
+
+
+def test_a_first_line_indent_is_css_s_from_the_margin_left_and_docs_from_the_page():
+    """`text-indent` is from `margin-left`, `indentFirstLine` from the page margin
+    (measured 2026-09-24: `margin-left:36pt; text-indent:18pt` imports as 36 / 54). Read
+    one way and written the other, a pushed file came back saying `text-indent:54pt`."""
+    from beamer2slides import doc_merge
+
+    def read(**style):
+        para = {api: {"magnitude": v, "unit": "PT"} for api, v in style.items()}
+        doc = {"body": {"content": [{"startIndex": 1, "endIndex": 3, "paragraph": {
+            "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"} | para,
+            "elements": [{"startIndex": 1, "endIndex": 3, "textRun": {"content": "a\n"}}]}}]}}
+        block = doc_ir.from_document(doc)["blocks"][0]
+        return block.get("indent"), block.get("indent_first")
+
+    assert read(indentStart=36, indentFirstLine=54) == (36.0, 18.0)
+    assert read(indentStart=36, indentFirstLine=36) == (36.0, None)
+    assert read(indentFirstLine=18) == (None, 18.0)
+    assert read(indentStart=36, indentFirstLine=18) == (36.0, -18.0), "a hanging first line"
+    assert read(indentStart=36) == (36.0, -36.0), "a first line left at the page margin"
+
+    def written(**block):
+        style, _ = doc_merge.paragraph_style({"kind": "paragraph"} | block)
+        return (style.get("indentStart") or {}).get("magnitude"), \
+            (style.get("indentFirstLine") or {}).get("magnitude")
+
+    assert written(indent=36.0, indent_first=18.0) == (36.0, 54.0)
+    assert written(indent=36.0) == (36.0, 36.0)
+    assert written(indent_first=18.0) == (None, 18.0)
+    assert written() == (None, None)
+    assert "indentFirstLine" not in doc_merge.paragraph_style(
+        {"kind": "item", "indent": 36.0, "indent_first": 18.0})[0], "an item's are the preset's"
+
+
+def test_a_hanging_first_line_the_import_dropped_is_written_after_it():
+    """Drive's importer drops a negative `text-indent` (measured: 36 - 18 arrives as
+    36 / 36); the settle writes it, from the page margin."""
+    from beamer2slides import doc_merge
+
+    live = {"blocks": [{"key": "p", "kind": "paragraph", "span": [1, 3], "indent": 36.0,
+                        "runs": [{"text": "a"}]}]}
+    planned = [{"key": "p", "kind": "paragraph", "indent": 36.0, "indent_first": -18.0,
+                "runs": [{"text": "a"}]}]
+    doc_merge.carry_unimported(live, planned)
+    [request] = [r for r in doc_merge.unimported_requests(live) if "updateParagraphStyle" in r]
+    style = request["updateParagraphStyle"]["paragraphStyle"]
+    assert style["indentFirstLine"]["magnitude"] == 18.0 and style["indentStart"]["magnitude"] == 36.0
 
 
 def test_a_heading_the_theme_centres_says_nothing_about_its_alignment():

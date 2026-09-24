@@ -430,6 +430,9 @@ def unimported_requests(live: dict) -> list[dict]:
             style = {api: (doc_ir.TO_ALIGNMENT[want["paragraph"][key]] if key == "align"
                            else _paragraph_value(key, want["paragraph"][key]))
                      for key, api in PARAGRAPH_KEYS if key in want["paragraph"]}
+            if "indent_first" in want["paragraph"]:
+                style["indentFirstLine"] = _paragraph_value(
+                    "indent_first", (want["paragraph"].get("indent") or 0.0) + want["paragraph"]["indent_first"])
             if want.get("named"):
                 style["namedStyleType"] = want["named"]
             out.append({"updateParagraphStyle": {
@@ -1282,6 +1285,14 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
             continue
         missing = {key: mine[key] for key in UNIMPORTABLE
                    if mine.get(key) is not None and mine[key] != block.get(key)}
+        if ("item" not in (mine["kind"], block["kind"]) and (mine.get("indent_first") or 0) < 0
+                and mine["indent_first"] != block.get("indent_first")):
+            # A hanging first line: Drive's importer drops a negative `text-indent`
+            # (measured 2026-09-24: `margin-left:36pt; text-indent:-18pt` arrives as
+            # 36 / 36), and `updateParagraphStyle` writes it. With its start, since
+            # the request's number is from the page margin (`doc_ir._relative_first`).
+            missing["indent_first"] = mine["indent_first"]
+            missing["indent"] = mine.get("indent") or 0.0
         ranges = _unimportable_runs(mine, block)
         # A named style the import could not carry. Compared as the style and not as
         # the kind, so a list item the importer left a plain paragraph — both
@@ -1767,9 +1778,11 @@ def _merge_table(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     """
     key = live.get("key") or "a table"
     out = dict(live)
-    if _hint(was, mine, live) is None and _grid(was) == _grid(mine) == _grid(live):
-        # One shape on all three sides: a cell is its place, so a row the source
-        # rewrote from end to end is still that row.
+    if _hint(was, mine, live) is None and _grid(was) == _grid(mine) == _grid(live) \
+            and _in_place(was, mine) and _in_place(was, live):
+        # One shape on all three sides, and no line whose words moved to another
+        # place: a cell is its place, so a row the source rewrote from end to end is
+        # still that row.
         lines = [[(r, c, r, c, r, c) for c in range(len(row))]
                  for r, row in enumerate(live.get("rows", []))]
     else:
@@ -1858,6 +1871,31 @@ def _merge_cell(was: list, mine: list, live: list, conflicts: list, notes: list,
     # `_pairs` sets this against the live cell read as one block (`_joined`), so the
     # breaks are written as the newlines they are.
     return [{"kind": "paragraph", "joined": True, "runs": [{"text": text}], "origin": "merged"}]
+
+
+def _in_place(was: dict, side: dict) -> bool:
+    """Whether one side's lines are the base's lines where they stand: the words match
+    no better when rows or columns are paired elsewhere (`_align`) than place by place.
+
+    A grid the same size is not a grid in place. The source took the first row out and
+    appended one, the table still three by two, and merged cell by place every row was
+    rewritten with the words of the row below: the picture in a cell that moved up was
+    written over where it had been, and not written where it went, because the reader
+    had put a chip in that cell — so it was nowhere (offline chain-8 seed 7702, shape
+    `ends_on_table`). A tie keeps the place: a row whose twin stands elsewhere is still
+    a row rewritten, not one moved.
+    """
+    then, now = (_texts(b.get("rows", [])) for b in (was, side))
+
+    def pairs_better(here, there, score) -> bool:
+        def total(pairs):
+            return sum(s for s in (score(here[i], there[j]) for i, j in pairs) if s >= ALIKE)
+        return total(_align(here, there, score)) > total(
+            (i, i) for i in range(min(len(here), len(there)))) + 1e-9
+
+    if pairs_better(_columns(then), _columns(now), _column_score):
+        return False
+    return not pairs_better(then, now, _row_score([(c, c) for c in range(len(then[0]))]))
 
 
 def _cell_kept(was: list, live: list) -> bool:
@@ -2510,6 +2548,14 @@ def paragraph_style(block: dict) -> tuple[dict, str]:
     for key, api in PARAGRAPH_FIELDS:
         if api in fields and block.get(key) is not None:
             style[api] = _paragraph_value(key, block[key])
+    if "indentFirstLine" in fields and (block.get("indent") is not None
+                                        or block.get("indent_first") is not None):
+        # The file's `text-indent` is from `margin-left`, Docs' `indentFirstLine` from
+        # the page margin (`doc_ir._relative_first`): a paragraph moved in keeps its
+        # first line where it was *within* it. A named style's own indents count as
+        # none here, which every style this has met says.
+        first = (block.get("indent") or 0.0) + (block.get("indent_first") or 0.0)
+        style["indentFirstLine"] = _paragraph_value("indent_first", first)
     return style, ",".join(fields)
 
 

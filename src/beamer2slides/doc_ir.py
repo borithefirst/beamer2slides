@@ -710,6 +710,7 @@ def _block_of(element: dict, lists: dict, objects: dict | None = None,
     # anybody's choice — writing them back would fight `createParagraphBullets`, and
     # the file would then differ from the document at every sync.
     measured = _paragraph_measures(style)
+    measured["indent_first"] = _relative_first(measured, default)
     for key in PARAGRAPH_CSS | PARAGRAPH_DATA:
         if block["kind"] == "item" and key in ("indent", "indent_first"):
             continue
@@ -718,10 +719,30 @@ def _block_of(element: dict, lists: dict, objects: dict | None = None,
     return block
 
 
+def _relative_first(measured: dict, default: dict) -> float | None:
+    """The first line's indent as CSS says it — from `margin-left` — out of Docs'
+    `indentFirstLine`, which is measured from the page margin like `indentStart`.
+
+    `margin-left:36pt; text-indent:18pt` is a first line at 54 pt, and that is what
+    Drive's importer makes of it (measured 2026-09-24: indentStart 36, indentFirstLine
+    54; it used to copy the 18 across, which hid that the two are not the same number).
+    None when the paragraph sets neither indent: it shows its named style's.
+    """
+    if measured.get("indent") is None and measured.get("indent_first") is None:
+        return None
+    start = measured["indent"] if measured.get("indent") is not None else default.get("indent") or 0.0
+    first = (measured["indent_first"] if measured.get("indent_first") is not None
+             else default.get("indent_first") or 0.0)
+    return round(first - start, 2)
+
+
 def _inherited(key: str, default: dict):
     """What a paragraph that sets nothing shows: its named style's value, or, where
     the style says nothing either, the property's own default — single spacing, no
     indent, no space around it, no shading."""
+    if key == "indent_first":
+        # The named style's own, measured from its own start (`_relative_first`).
+        return round((default.get("indent_first") or 0.0) - (default.get("indent") or 0.0), 2)
     if default.get(key) is not None:
         return default[key]
     return ({"line_spacing": 1.0, "shading": None}

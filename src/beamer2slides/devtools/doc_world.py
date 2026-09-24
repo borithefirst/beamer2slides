@@ -1070,6 +1070,14 @@ def _units_of(blocks: list[dict], tab: Tab, world: World) -> list[dict]:
             para["align"] = doc_ir.TO_ALIGNMENT[block["align"]]
         para["measures"] = {key: block[key] for key, _ in doc_merge.PARAGRAPH_FIELDS
                             if block.get(key) is not None}
+        if block.get("indent") is not None or block.get("indent_first") is not None:
+            # A measure is kept as `documents.get` says it, so the first line is from the
+            # page margin: `margin-left` plus a `text-indent`, a negative one dropped
+            # (measured 2026-09-24: 36 + 18 imports as 54, 36 - 18 as 36).
+            para["measures"].pop("indent_first", None)
+            first = (block.get("indent") or 0.0) + max(block.get("indent_first") or 0.0, 0.0)
+            if first:
+                para["measures"]["indent_first"] = first
         if block["kind"] == "item":
             lid = block.get("list") or "kix.imported"
             para["bullet"] = {"list": lid, "level": block.get("level", 0)}

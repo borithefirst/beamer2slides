@@ -197,6 +197,15 @@ not paragraph shading, so the CSS would be a lie; and no margin property is amon
 survives. A `<li>` carries the same, except its indents, which belong to the list
 preset and would fight `createParagraphBullets`.
 
+`text-indent` is measured from `margin-left`, `indentFirstLine` from the page margin, so
+the file's number is the difference: `doc_ir._relative_first` reads it,
+`doc_merge.paragraph_style` writes the sum. Measured 2026-09-24, the importer now agrees
+(`margin-left:36pt; text-indent:18pt` -> 36 / 54, `margin-left` alone -> 36 / 36); it
+used to copy the 18 across, which hid that the two are different numbers until the live
+suite caught the change. A negative `text-indent` it drops (36 / 36), so a hanging first
+line is written after the import (`carry_unimported`). A paragraph setting only
+`indentStart` has its first line at the page margin and reads as a negative `text-indent`.
+
 A rule is spelled `"<width>pt <solid|dotted|dashed> #rrggbb"` with an optional
 ` pad <n>pt` (`doc_ir.BORDER_RE`), and a rule of no width is no rule at all — that is
 how a reader who took one off reads back, and how the source says to take one off. A

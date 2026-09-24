@@ -144,7 +144,10 @@ REGRESSIONS = ((60, 1), (181, 1), (309, 4), (1031, 8), (1147, 8),
                # had beheaded.
                (600784, 4), (630138, 12), (660085, 4),
                (710370, 4), (720074, 8), (720173, 8), (720270, 8),
-               (730061, 12), (730384, 12), (780188, 10), (790329, 6))
+               (730061, 12), (730384, 12), (780188, 10), (790329, 6),
+               # And 7702, a table whose rows shifted under a grid of the same size,
+               # merged cell by place (`doc_merge._in_place`).
+               (7702, 8))
 
 # And the seeds whose script only exists on one shape, the campaign having been run
 # with `--shape`: a shape-restricted round draws its tables and its readers every
@@ -1751,6 +1754,37 @@ def _table(rows):
 
 def _keys(ir):
     return [b.get("key") for b in ir["blocks"]]
+
+
+def test_a_table_whose_rows_shifted_is_not_merged_cell_by_place():
+    """The source took the first row out and appended one, so the grid kept its size,
+    and the merge took that for a grid in place: every cell was merged with the one at
+    its place, so a row that moved up was written over with the words of the row below.
+    The picture in the moved row was written over where it had been and not written where
+    it went — the reader had put a chip in that cell — so it was nowhere (offline
+    chain-8 seed 7702, shape `ends_on_table`, shrunk to three ops; `_in_place`)."""
+    picture = {"chip": "image", "frozen": True, "text": "", "src": "media/lantern.png",
+               "sha": "sha-lantern"}
+    world, ours, base = _build([_para("Counts."), _table([["year", "count"], ["2024", "7"], ["2025", "9"]])])
+    table = [b for b in ours["blocks"] if b["kind"] == "table"][0]
+    table["rows"][1][1][0]["runs"].append(picture)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+
+    live = doc_world.read_ir(world, ours, base)
+    head = [b for b in live["blocks"] if b["kind"] == "table"][0]["rows"][0][1][0]
+    world.apply([{"insertPerson": {"location": {"index": head["span"][1] - 1},
+                                   "personProperties": {"email": "reader@example.com"}}}])
+    table = [b for b in ours["blocks"] if b["kind"] == "table"][0]
+    table["rows"] = table["rows"][1:] + [[[_para("signal")], [_para("vellum")]]]
+    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+
+    live = doc_world.read_ir(world, ours, base)
+    rows = [b for b in live["blocks"] if b["kind"] == "table"][0]["rows"]
+    shas = [r.get("sha") for row in rows for cell in row for b in cell for r in b["runs"]]
+    assert "sha-lantern" in shas, rows
+    assert [cell[0]["runs"][0]["text"] for cell in (row[0] for row in rows)] == \
+        ["year", "2024", "2025", "signal"]
+    assert any("the document wrote in it or styled it — kept" in n for n in report["notes"]), report
 
 
 def test_a_block_in_front_of_a_table_of_contents_can_be_deleted():
