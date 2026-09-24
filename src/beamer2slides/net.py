@@ -2,9 +2,9 @@
 
 A deck's pictures hang off `contentUrl`s, a slide's thumbnail off another, a Doc's inserted
 picture off a `contentUri`, and a picture inserted by URL keeps the address it came from - a host
-chosen by whoever inserted it, not by Google. Recording the sync base after a conversion downloads
-every picture of the new deck (`snapshot.picture_signatures`), so even a plain `convert` is
-egress from a credentialed process. A harness that must send outbound HTTP through its own
+chosen by whoever inserted it, not by Google. The deck's own pictures need none of it: a picture
+this run uploaded is signed from its file (`snapshot.upload_signatures`), and one that has to be
+read comes out of a Drive export when its download fails (`deck_pictures.LivePictures`). A harness that must send outbound HTTP through its own
 reviewed client - its timeouts, retries and egress policy - installs a `Fetch` with
 `google_auth.use_fetcher`, and every download below goes through it. With none installed it is
 `urllib_fetch`, which is what each site did before, so the CLI is unchanged.

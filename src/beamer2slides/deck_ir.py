@@ -11,7 +11,6 @@ Slide keys: the `b2s:<slide key>/<element key>` alt-text title of our objects, e
 snapshot's object map, else none (compare aligns slides by title and text).
 """
 
-import functools
 import hashlib
 import json
 import math
@@ -1343,8 +1342,24 @@ def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pd
         thumbnails = slide_thumbnails(pid, pres, Path(images).parent / "thumbnails")
     fetch = None
     if images:
-        from .google_auth import fetcher_for_threads
-        fetch = functools.partial(fetch_url, fetch=fetcher_for_threads())
+        # Downloaded where the fetcher allows, else out of one Drive export of the deck
+        # (`deck_pictures`: a harness that may not fetch a contentUrl still reads the pictures).
+        from .deck_pictures import LivePictures
+        from .google_auth import drive_service, fetcher_for_threads
+        live = LivePictures(pres, None, fetcher_for_threads())
+
+        def fetch(url: str) -> bytes:
+            try:
+                return fetch_url(url, live.fetch)
+            except Exception:  # noqa: BLE001 - a harness's fetcher raises its own types
+                oid = next((i for i, u in live.urls.items() if u == url), None)
+                if oid is None:
+                    raise
+                live.drive = live.drive or drive_service()
+                data = live.export().get(oid)
+                if not data:
+                    raise
+                return data
     return deck_ir(pres, pdf_size or (base or {}).get("page_size"), base, fetch, images, foreign, thumbnails)
 
 

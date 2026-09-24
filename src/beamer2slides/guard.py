@@ -88,10 +88,12 @@ def previous_deck(drive, out: Path) -> dict | None:
 # ---------------------------------------------------------------- detection
 
 
-def sign_changed(base: dict, theirs: dict, pres: dict) -> None:
+def sign_changed(base: dict, theirs: dict, pres: dict, drive=None) -> None:
     """Pixel signatures for the live pictures whose contentUrl differs from the base's. Google
     issues new URLs for pictures nobody touched, so only the pixels tell a replaced one apart
-    (sync.Sync.sign_changed does the same before planning)."""
+    (sync.Sync.sign_changed does the same before planning). A rebuild writes over every one of
+    them, so all are read: downloaded, else out of a Drive export through `drive`
+    (`deck_pictures.LivePictures`)."""
     images = {oid: rb["image"] for s in base["slides"] for e in s["elements"]
               for oid, rb in e.get("readback", {}).items() if "image" in rb}
     backgrounds = {s.get("objectId"): s.get("background_readback") or {} for s in base["slides"]}
@@ -104,7 +106,7 @@ def sign_changed(base: dict, theirs: dict, pres: dict) -> None:
         if "picture" in bg and "picture" in old and old["picture"] != bg["picture"]:
             slides.add(s["objectId"])
     if objects or slides:
-        snapshot.sign_pictures(theirs, pres, objects, slides)
+        snapshot.sign_pictures(theirs, pres, objects, slides, drive=drive)
 
 
 UNVERIFIABLE = ("image_unverified", "background_unverified")
@@ -135,15 +137,16 @@ def _snippet(text: str | None, length: int = 40) -> str:
     return text if len(text) <= length else text[:length - 1] + "…"
 
 
-def survey(base: dict, pres: dict, sign: bool = True) -> dict:
-    """What the person changed in the live deck since the base was recorded.
+def survey(base: dict, pres: dict, sign: bool = True, drive=None) -> dict:
+    """What the person changed in the live deck since the base was recorded (`drive`: see
+    `sign_changed`).
 
     {"edited": bool, "revisionId", "counts": {field/kind: n}, "slides": [{"slide", "why", "edits"}],
      "slides_added", "slides_deleted", "reordered", "examples": [readable lines]}"""
     pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(s["objectId"])]}
     theirs = snapshot.read_presentation(pres)
     if sign:
-        sign_changed(base, theirs, pres)
+        sign_changed(base, theirs, pres, drive)
     live = {s["objectId"]: s for s in theirs["slides"]}
     titles = {s.get("objectId"): (s.get("title") or s.get("key")) for s in base["slides"]}
     counts: dict[str, int] = {}
@@ -300,7 +303,7 @@ def check_rebuild(slides, drive, pid: str, out: Path, pdf: Path | str | None = N
     if base is None:
         found["reason"] = "no-base"
     else:
-        found.update(survey(base, pres))
+        found.update(survey(base, pres, drive=drive))
         found["base_generation"] = base.get("generation", 0)
         found["base_source"] = Path(base.get("source", {}).get("pdf") or "").name or None
         if found["edited"]:

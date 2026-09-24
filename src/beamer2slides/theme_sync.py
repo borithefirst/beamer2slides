@@ -232,17 +232,24 @@ def ours_picture(side: dict, group: str) -> dict | None:
 
 # ---------------------------------------------------------------- the merge
 
-def live_signature(url: str | None) -> str | None:
-    data = snapshot._download(url) if url else None
+def live_signature(url: str | None, oid: str | None = None, pictures=None) -> str | None:
+    """The signature of a live picture of the master or a layout (`oid`: its image's id, or the
+    page's for its background): read through `pictures` (`deck_pictures.LivePictures`, which falls
+    back to a Drive export) when given, else downloaded from `url`."""
+    if pictures is not None and oid:
+        data = pictures.get([oid]).get(oid)
+    else:
+        data = snapshot._download(url) if url else None
     return snapshot.signature(data) if data else None
 
 
-def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, new_id) -> dict:
+def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, new_id, pictures=None) -> dict:
     """What to write on the master and the layouts, and what to say about it.
 
     `ours`: build_ours' answer (its slides are paired with the base's); `pres`: the live deck;
     `picture_url(path)`: the staging URL (or its marker) of a local picture; `new_id(page)`: an
-    object id for a decoration picture this sync creates.
+    object id for a decoration picture this sync creates; `pictures`: how a live picture whose URL
+    changed is read (`live_signature`).
 
     Returns {"requests" (sent before any slide's), "cleanup" (object ids deleted last), "stage"
     ({path: None | "background"}), "applied", "conflicts", "warnings", "page_group" (layout page id
@@ -290,7 +297,7 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
         edited = not snapshot.same_background(was, now)
         if edited and "picture" in now and "picture" in was and was.get("signature"):
             url = live_master.get("pageProperties", {}).get("pageBackgroundFill", {}).get("stretchedPictureFill", {}).get("contentUrl")
-            edited = not snapshot.signatures_match(was["signature"], live_signature(url))
+            edited = not snapshot.signatures_match(was["signature"], live_signature(url, live_master["objectId"], pictures))
         converged = side["fill"].startswith("color:") and now.get("color") == side["fill"][6:]
         if converged:
             out["written"]["master"] = side["fill"]
@@ -349,7 +356,7 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
                         theirs = f"moved to {[round(v, 1) for v in rb['box']]}"
                     elif (rb.get("image") or {}).get("contentHash") != deco["readback"].get("contentHash"):
                         # Google hands out new URLs for the same picture: only its pixels tell
-                        sig = live_signature(live[oid]["image"].get("contentUrl"))
+                        sig = live_signature(live[oid]["image"].get("contentUrl"), oid, pictures)
                         if now is not None and snapshot.signatures_match(sig, now.get("signature")):
                             out["written"][oid] = {"page": pid, "picture": now}   # (an interrupted sync wrote it)
                         elif not snapshot.signatures_match(sig, (was or {}).get("signature")):

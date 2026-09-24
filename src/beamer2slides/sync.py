@@ -1048,9 +1048,7 @@ class Sync:
             theirs = snapshot.read_presentation(pres)
             if self.recovery.get("restore"):
                 restore_in_place(theirs, self.recovery["restore"])
-            self.sign_changed(theirs, pres)
-            mplan = merge.plan_merge(self.base, self.ours, theirs, self.picture_adopter(pres),
-                                     follow_labels=self.follow_labels, take_source=self.take_source)
+            mplan = self.merge_plan(theirs, pres)
             if self.check_plan is not None:
                 self.check_plan(mplan, theirs)  # (adopt_sync: an adopted deck this may not be written to)
             self.plan_theme(mplan, pres)
@@ -1258,9 +1256,18 @@ class Sync:
         except RevisionMismatch:  # someone edited the deck meanwhile; the objects are stale either way
             return self.send("cleanup", self.cleanup_requests, None)
 
-    def sign_changed(self, theirs: dict, pres: dict) -> None:
-        """Pixel signatures of the live pictures whose contentUrl differs from the base's (Google
-        issues new URLs for unchanged pictures, so only the pixels tell a replaced one)."""
+    def sign_changed(self, theirs: dict, pres: dict) -> tuple[set[str], set[str]]:
+        """The live pictures whose contentUrl differs from the base's, marked `unchecked` and not
+        yet signed: (image ids, slide ids of background pictures).
+
+        Google issues new URLs for unchanged pictures, so only the pixels tell a replaced one - but
+        the answer only matters where the plan could write over the picture. A unit the source left
+        alone is kept whatever the deck did to it, and so is its slide's background, so its picture
+        is never read (a process that may not fetch a URL reads it out of a Drive export, and most
+        syncs then need neither). `run` plans first and signs what the plan says is in question
+        (`pictures_in_question`), then plans again. An unchecked picture still counts as replaced
+        - the answer that never loses one - but is not reported as the person's edit
+        (`merge.unchecked`)."""
         images = {oid: rb["image"] for s in self.base["slides"] for e in s["elements"]
                   for oid, rb in e.get("readback", {}).items() if "image" in rb}
         backgrounds = {s.get("objectId"): s.get("background_readback") or {} for s in self.base["slides"]}
@@ -1269,11 +1276,72 @@ class Sync:
             for oid, rb in s["objects"].items():
                 if "image" in rb and oid in images and images[oid].get("contentHash") != rb["image"].get("contentHash"):
                     objects.add(oid)
+                    rb["image"]["unchecked"] = True
             bg, old = s.get("background") or {}, backgrounds.get(s["objectId"], {})
             if "picture" in bg and "picture" in old and old["picture"] != bg["picture"]:
                 slides.add(s["objectId"])
-        if objects or slides:
-            snapshot.sign_pictures(theirs, pres, objects, slides)
+                bg["unchecked"] = True
+        return objects, slides
+
+    def pictures_in_question(self, mplan: dict, objects: set[str], slides: set[str]) -> tuple[set[str], set[str]]:
+        """Of the unchecked pictures (`sign_changed`), those whose answer the plan depends on:
+        every one on a slide the plan does anything but update or hold (a slide the source dropped
+        is kept for the person's edits), and on an updated slide every one of a unit the source
+        changed or dropped, and the background when the source changed it. What is left out is a
+        picture of a unit kept with nothing of the source's to write - the same plan whether or not
+        the person replaced it."""
+        ask_objects, ask_slides = set(), set()
+        for p in mplan["slides"]:
+            if p.get("base") is None or p.get("held"):
+                continue
+            b = self.base["slides"][p["base"]]
+            mine = {oid for e in b["elements"] for oid in (e.get("objects") or []) if oid in objects}
+            if p["action"] != "update":
+                ask_objects |= mine
+                if b.get("objectId") in slides:
+                    ask_slides.add(b["objectId"])
+                continue
+            bunits = merge.units(b["elements"])
+            for u in p.get("units", []):
+                if u["action"] == "keep" and not u.get("source") and not u.get("removed"):
+                    continue
+                ask_objects |= {oid for m in bunits.get(u["key"]) or [] for oid in (m.get("objects") or [])
+                                if oid in objects}
+            o = self.ours["slides"][p["ours"]] if p.get("ours") is not None else {}
+            if b.get("objectId") in slides and b.get("background") != o.get("background"):
+                ask_slides.add(b["objectId"])
+        return ask_objects, ask_slides
+
+    def merge_plan(self, theirs: dict, pres: dict) -> dict:
+        """The merge plan, with the pictures it depends on signed (`sign_changed`). (`self.plan`
+        is the new conversion's DeckPlan.)"""
+        objects, slides = self.sign_changed(theirs, pres)
+        adopter = self.picture_adopter(pres)
+        plan = lambda: merge.plan_merge(self.base, self.ours, theirs, adopter,  # noqa: E731
+                                        follow_labels=self.follow_labels, take_source=self.take_source)
+        mplan = plan()
+        asked_objects, asked_slides = set(), set()
+        for _ in range(3):   # (signing can only settle a slide, never put a new one in question)
+            ask_objects, ask_slides = self.pictures_in_question(mplan, objects, slides)
+            ask_objects, ask_slides = ask_objects - asked_objects, ask_slides - asked_slides
+            if not ask_objects and not ask_slides:
+                break
+            asked_objects |= ask_objects
+            asked_slides |= ask_slides
+            snapshot.sign_pictures(theirs, pres, ask_objects, ask_slides, pictures=self.live_pictures(pres))
+            mplan = plan()
+        self.picture_reads = {"unchecked": len(objects) + len(slides), "asked": len(asked_objects) + len(asked_slides)}
+        return mplan
+
+    def live_pictures(self, pres: dict):
+        """The pictures of this read of the deck (`deck_pictures.LivePictures`): one per read, so a
+        Drive export is made at most once for it."""
+        from .deck_pictures import LivePictures
+        from .google_auth import fetcher_for_threads
+        key = (pres.get("presentationId"), pres.get("revisionId"), id(pres))
+        if getattr(self, "_live_pictures", (None, None))[0] != key:
+            self._live_pictures = (key, LivePictures(pres, getattr(self, "drive", None), fetcher_for_threads()))
+        return self._live_pictures[1]
 
     def picture_adopter(self, pres: dict):
         """Finds the live object that already shows a picture the source now draws, for
@@ -1288,10 +1356,8 @@ class Sync:
         from .compare import TOL, picture_differs, picture_hash
         from .inverse import picture_look, same_look
 
-        from .google_auth import fetcher_for_threads
-
         images, _ = snapshot.picture_urls(pres)
-        fetch = fetcher_for_threads()
+        pictures = self.live_pictures(pres)
         base_ids ={oid for s in self.base["slides"] for e in s["elements"] for oid in (e.get("objects") or [])}
         scale = self.scale or merge.deck_scale(self.base) or 1.0
         folder = self.ours["out"] / "deck-pictures"
@@ -1304,7 +1370,7 @@ class Sync:
             """(sha1, look, thumbnail) of a live picture, downloaded once."""
             if oid not in deck:
                 deck[oid] = None
-                data = snapshot._download(images[oid], fetch) if oid in images else None
+                data = pictures.get([oid]).get(oid) if oid in images else None
                 if data:
                     folder.mkdir(parents=True, exist_ok=True)
                     path = folder / f"{oid}.img"
@@ -1374,7 +1440,7 @@ class Sync:
                 report["warnings"].append(why)
             return
         tp = theme_sync.plan(self.base, self.theme_side, self.ours, pres, self.tok, self.picture_url,
-                             lambda page: f"b2s_th_{h6(page)}_{self.tok}")
+                             lambda page: f"b2s_th_{h6(page)}_{self.tok}", pictures=self.live_pictures(pres))
         self.theme_plan = tp
         report["applied"] += tp["applied"]
         report["conflicts"] += tp["conflicts"]
@@ -2138,7 +2204,7 @@ class Sync:
         # read-back of objects as the converter created them, with the new pictures' signatures
         created = {x for w in work["slides"] for oids in (w.get("objects") or {}).values() for x in oids}
         repainted = {w.get("sid") for w in work["slides"] if w["plan"]["action"] == "create" or w["plan"].get("background")}
-        snapshot.sign_pictures(now, raw, created, repainted)
+        snapshot.sign_pictures(now, raw, created, repainted, files=self.written_files(work), drive=self.drive)
         self.created = now
         overrides = self.override_requests(work, theirs, now, raw_objects(pres), raw_objects(raw))
         if overrides:
@@ -2147,6 +2213,25 @@ class Sync:
         self.final_revision = rev
         self.warn_about_overruns(work, theirs)
         return rev
+
+    def written_files(self, work: dict) -> dict[str, Path]:
+        """The file each picture this sync created was made from - an image's objectId, or a
+        slide's for the background picture written on it - so the new base signs them from their
+        bytes (`snapshot.upload_signatures`) instead of downloading what it has just uploaded."""
+        ours_slides, master, files = self.plan.deck["slides"], self.master_key(), {}
+        for w in work["slides"]:
+            p = w["plan"]
+            if p.get("ours") is None or not w.get("sid"):
+                continue
+            slide = ours_slides[p["ours"]]
+            for i in w.get("units") or []:
+                el = slide["elements"][i]
+                if el["kind"] == "image" and el.get("file") and (w.get("new_oid") or {}).get(i):
+                    files[w["new_oid"][i]] = self.ours["out"] / el["file"]
+            key = p.get("background") or (self.ours["slides"][p["ours"]]["background"] if p["action"] == "create" else "")
+            if key.startswith("png:") and key != master and slide.get("background"):
+                files[w["sid"]] = self.ours["out"] / slide["background"]
+        return files
 
     def warn_about_overruns(self, work: dict, theirs: dict) -> None:
         """The person's own objects, which sync never moves, that the source's words or pictures

@@ -214,6 +214,76 @@ def same_background(a: dict | None, b: dict | None) -> bool:
     return a == b
 
 
+ASPECT_AGREES = 0.01  # a live picture has its file's shape when the aspects are this close
+
+
+def local_signature(path: "Path | str", shape: tuple[float, float] | None) -> str | None:
+    """The signature of a picture this run has just put into the deck, from the file it uploaded,
+    so nothing has to be downloaded to record it. Google serves what it was given, re-encoded:
+    measured on two converted decks (probe of 2026-09-24), every one of 22 uploaded pictures signed
+    alike from its file and from its download. That holds while the live picture has the file's
+    shape - `shape` is the element's own size (a stretch is the transform's) or the page's for a
+    background - and a picture Google may have resampled to another is left to be read (None)."""
+    from PIL import Image
+    try:
+        data = Path(path).read_bytes()
+        with Image.open(io.BytesIO(data)) as img:
+            fw, fh = img.size
+    except (OSError, ValueError):
+        return None
+    if not shape or shape[1] <= 0 or fh <= 0:
+        return None
+    a, b = fw / fh, shape[0] / shape[1]
+    if abs(a - b) > ASPECT_AGREES * max(a, b):
+        return None
+    return signature(data)
+
+
+def upload_signatures(pres: dict, files: dict[str, "Path | str"]) -> dict[str, str]:
+    """`local_signature` of each picture of `pres` whose file is known: `files` maps an image's
+    objectId, or a slide's for its background picture, to the file that was uploaded for it."""
+    raw = {}
+
+    def walk(elements):
+        for e in elements:
+            raw[e["objectId"]] = e
+            walk(e.get("elementGroup", {}).get("children", []))
+
+    for s in pres.get("slides", []):
+        walk(s.get("pageElements", []))
+    page = tuple(page_size(pres)) if pres.get("pageSize") else None
+    slides = {s["objectId"] for s in pres.get("slides", [])}
+    out = {}
+    for oid, path in files.items():
+        if oid in slides:
+            shape = page
+        elif "image" in raw.get(oid, {}):
+            size = raw[oid].get("size", {})
+            shape = (_unit(size.get("width")), _unit(size.get("height")))
+        else:
+            continue
+        sig = local_signature(path, shape)
+        if sig:
+            out[oid] = sig
+    return out
+
+
+def converted_files(deck: dict, out: Path, state: dict, pres: dict) -> dict[str, Path]:
+    """What emit uploaded for each picture of the deck it just made: an image element's file, a
+    slide's own background picture (`upload_signatures`' `files`)."""
+    images = picture_urls(pres)[0]
+    files: dict[str, Path] = {}
+    for slide, s in zip(deck.get("slides", []), state.get("slides", [])):
+        objects = s.get("objects") or [[o] for o in s["elements"]]
+        for el, oids in zip(slide["elements"], objects):
+            if el.get("kind") == "image" and el.get("file"):
+                for oid in [o for o in oids if o in images][:1]:
+                    files[oid] = out / el["file"]
+        if s.get("objectId") and slide.get("background") and not slide.get("background_color"):
+            files[s["objectId"]] = out / slide["background"]
+    return files
+
+
 def _download(url: str, fetch=None) -> bytes | None:
     """A picture's bytes, or None: a picture that cannot be downloaded stays unsigned, and is
     compared by its URL alone (`same_picture`). `fetch`: see `net.download`."""
@@ -248,52 +318,69 @@ def _fetcher(fetch):
     return fetcher_for_threads()
 
 
-def picture_signatures(pres: dict, workers: int = 8, fetch=None) -> dict[str, str]:
-    """Every picture of a presentations.get signed by its pixels, by the id that owns it (an
-    image's own objectId, a slide's own for its background picture).
+def picture_signatures(pres: dict, workers: int = 8, fetch=None, skip=(), drive=None) -> dict[str, str]:
+    """Every picture of a presentations.get's slides signed by its pixels, by the id that owns it
+    (an image's own objectId, a slide's own for its background picture); `skip`: ids already
+    signed (`upload_signatures`).
 
     Downloading them costs about as much as a round trip, and a read's contentUrls stay good while
     the deck is being tagged, so `snapshot_after_convert` starts this and writes the tags meanwhile
     (`sign_pictures`' `ready`). `fetch`: what downloads them (`net`); pass it when this runs on a
-    worker thread, which inherits no context."""
+    worker thread, which inherits no context. `drive`: where what was not downloaded is exported
+    from (`deck_pictures.LivePictures`) - on the calling thread only, so None on a worker."""
+    from .deck_pictures import LivePictures
     images, backgrounds = picture_urls(pres)
-    urls = {**images, **backgrounds}
-    if not urls:
+    ids = [i for i in {**images, **backgrounds} if i not in set(skip)]
+    if not ids:
         return {}
-    ids = list(urls)
-    fetch = _fetcher(fetch)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        data = list(pool.map(lambda i: _download(urls[i], fetch), ids))
-    return {i: signature(d) for i, d in zip(ids, data) if d}
+    got = LivePictures(pres, drive, _fetcher(fetch), workers).get(ids)
+    return {i: sig for i, d in got.items() if (sig := signature(d))}
 
 
 def sign_pictures(read: dict, pres: dict, objects=None, slides=None, workers: int = 8,
-                  ready: dict[str, str] | None = None, fetch=None) -> int:
+                  ready: dict[str, str] | None = None, fetch=None, drive=None,
+                  files: dict[str, "Path | str"] | None = None, pictures=None) -> int:
     """Adds pixel signatures to the image read-backs and picture backgrounds of `read`
     (read_presentation of `pres`); `objects` / `slides`: only these ids (None: all). Returns how
-    many pictures were downloaded. `ready`: signatures somebody has already downloaded
-    (`picture_signatures`), so nothing is fetched here. `fetch`: as `picture_signatures`'."""
+    many pictures were signed or asked for. `ready`: signatures somebody has already made
+    (`picture_signatures`), so nothing is fetched here. `files`: the files this run uploaded for
+    some of them, signed from their bytes where the shape allows (`upload_signatures`); the rest are
+    read through `pictures` (a `deck_pictures.LivePictures` of `pres`, made from `fetch` and `drive`
+    when not given): downloaded, else exported. A picture signed neither way stays unsigned. An
+    image read-back signed here loses the `unchecked` mark `Sync.sign_changed` gave it."""
     images, backgrounds = picture_urls(pres)
     jobs = []
     for s in read["slides"]:
         bg = s.get("background") or {}
         if "picture" in bg and s["objectId"] in backgrounds and (slides is None or s["objectId"] in slides):
-            jobs.append((s["objectId"], bg, backgrounds[s["objectId"]]))
+            jobs.append((s["objectId"], bg))
         for oid, rb in s["objects"].items():
             if "image" in rb and oid in images and (objects is None or oid in objects):
-                jobs.append((oid, rb["image"], images[oid]))
+                jobs.append((oid, rb["image"]))
     if not jobs:
         return 0
+
+    def put(target: dict, sig: str) -> None:
+        target["signature"] = sig
+        target.pop("unchecked", None)
+
     if ready is not None:
-        for oid, target, _ in jobs:
+        for oid, target in jobs:
             if oid in ready:
-                target["signature"] = ready[oid]
+                put(target, ready[oid])
         return len(jobs)
-    fetch = _fetcher(fetch)
-    with ThreadPoolExecutor(max_workers=workers) as pool:
-        for (_, target, _), data in zip(jobs, pool.map(lambda j: _download(j[2], fetch), jobs)):
-            if data:
-                target["signature"] = signature(data)
+    local = upload_signatures(pres, {oid: f for oid, f in (files or {}).items()
+                                     if oid in {j[0] for j in jobs}}) if files else {}
+    rest = [oid for oid, _ in jobs if oid not in local]
+    if rest:
+        if pictures is None:
+            from .deck_pictures import LivePictures
+            pictures = LivePictures(pres, drive, _fetcher(fetch), workers)
+        got = pictures.get(rest)
+        local.update({i: sig for i, d in got.items() if (sig := signature(d))})
+    for oid, target in jobs:
+        if oid in local:
+            put(target, local[oid])
     return len(jobs)
 
 
@@ -880,17 +967,26 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
         where_to_put_it = pool.submit(lambda: execute(drive_service(creds).files().get(
             fileId=pid, fields="name,parents,appProperties")))
     pres = execute(slides.presentations().get(presentationId=pid))
-    # The pictures are downloaded (for their signatures) while the tags are written: they hang off
-    # contentUrls, not off a Google client - only the fetcher, resolved here (`net`).
-    signing = pool.submit(picture_signatures, pres, fetch=fetcher_for_threads())
+    # Every picture was uploaded from a file here, so it is signed from that file
+    # (`upload_signatures`); only one Google may have reshaped is downloaded, while the tags are
+    # written: they hang off contentUrls, not off a Google client - only the fetcher, resolved
+    # here (`net`). What no download brought is exported afterwards, on this thread.
+    local = upload_signatures(pres, converted_files(deck, out, state, pres))
+    signing = pool.submit(picture_signatures, pres, fetch=fetcher_for_threads(), skip=local)
     pool.shutdown(wait=False)
     base = build_base(deck, out, pres, state, pdf, overlays=overlays)
     landed, revision = write_tags(slides, pid, tag_requests(base))
     if landed:
         pres = tagged(pres, landed, revision)  # what a second read would say, measured (`tagged`)
-    signatures = None
-    with contextlib.suppress(Exception):  # then build_base downloads them itself
-        signatures = signing.result()
+    signatures = dict(local)
+    with contextlib.suppress(Exception):
+        signatures.update(signing.result())
+    images, backgrounds = picture_urls(pres)
+    unsigned = [i for i in {**images, **backgrounds} if i not in signatures]
+    if unsigned:  # (their downloads failed already: straight to the export)
+        from .deck_pictures import LivePictures
+        exported = LivePictures(pres, drive, fetcher_for_threads()).export()
+        signatures.update({i: sig for i in unsigned if (d := exported.get(i)) and (sig := signature(d))})
     base = build_base(deck, out, pres, state, pdf, sign=True, overlays=overlays, signatures=signatures)
     # What convert wrote on the master and the layouts, so a sync can carry a new theme there and
     # tell a person's layout edits from its own (theme_sync). A deck without it syncs as before.

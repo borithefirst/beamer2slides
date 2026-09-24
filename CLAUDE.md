@@ -190,6 +190,12 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   `AgentContext.fetch_google_content` let a caller own it (resolve with `fetcher_for_threads` on
   the calling thread; a refusing fetcher is no font fetch). No new `urlopen`; tests install a
   fetcher (`fetcher` fixture), not monkeypatches.
+- **A deck's pictures need no URL fetch** (docs/sync.md "signature"): what this run uploaded is
+  signed from its file (`snapshot.upload_signatures`, aspect within 1%); a live picture whose URL
+  changed is `unchecked` and read only when the plan depends on it (`Sync.pictures_in_question`,
+  `merge.unchecked`); reads go through `deck_pictures.LivePictures`, download else one Drive
+  `.pptx` export paired by page/drawing order and titles. `Sync.plan` is the DeckPlan, the merge
+  is `Sync.merge_plan`.
 - **Fonts without internet**: a local google/fonts copy (`$B2S_FONT_SOURCE`, `fontfetch.use_source`,
   `AgentContext.font_source`), or font files handed to adopt (`--fonts`, `deck_adopt(fonts=)`,
   .ttf/.otf/.ttc/.woff/.woff2 named by their name table, `fontfiles.py`, `adopt.use_fonts`).

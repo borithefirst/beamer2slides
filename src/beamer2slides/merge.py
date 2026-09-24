@@ -705,8 +705,9 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
     action = {"key": ukey, "source": sorted(src), "deck": sorted(deck)}
     edited = deck & set(EDIT_FIELDS)
     if not src:
-        if deck - {"z"}:
-            report["overrides"].append({**where, "fields": sorted(deck)})
+        said = deck - {"image"} if "image" in deck and unchecked(slide_read, edits["image"]) else deck
+        if said - {"z"}:
+            report["overrides"].append({**where, "fields": sorted(said)})
         return {**action, "action": "keep"}
     if "deleted" in deck:
         report["conflicts"].append({**where, "field": "deleted", "base": "element", "ours": sorted(src), "theirs": None,
@@ -1192,6 +1193,19 @@ def report_resolutions(res: Resolutions, report: dict) -> None:
             f"take the id from there. Nothing was written on that account and nothing is lost.")
 
 
+def unchecked(read: dict | None, oids: list[str] | None = None) -> bool:
+    """Whether these live pictures (`oids`; None: the slide's background) are ones sync did not
+    read (`sync.Sync.sign_changed`): a new URL, and a plan that is the same whether or not the
+    person replaced the picture. It still counts as replaced - nothing here ever writes over it -
+    but a report must not say the person did something nobody looked at."""
+    if read is None:
+        return False
+    if oids is None:
+        return bool((read.get("background") or {}).get("unchecked"))
+    objects = read.get("objects", {})
+    return bool(oids) and all((objects.get(oid, {}).get("image") or {}).get("unchecked") for oid in oids)
+
+
 def background_edited(b: dict, read: dict) -> bool:
     """The deck changed a base slide's background (a picture compares by its pixels: contentUrls change)."""
     return b.get("background_readback") is not None and not snapshot.same_background(b["background_readback"], read.get("background"))
@@ -1286,7 +1300,7 @@ def plan_slide(b: dict, o: dict, read: dict, report: dict, base: dict, j: int, i
         if write:
             plan["background"] = o["background"]
             report["applied"].append({"slide": skey, "element": None, "fields": ["background"]})
-    elif background_edited(b, read):
+    elif background_edited(b, read) and not unchecked(read):
         report["overrides"].append({"slide": skey, "element": None, "fields": ["background"]})
     # Speaker notes: text rules.
     bn, on, tn = b.get("notes") or "", o.get("notes") or "", read.get("notes") or ""

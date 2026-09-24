@@ -127,9 +127,31 @@ the unit and comes back in `build_ours()["context_unwritten"]`. Read-back
 values are normalised (EMU→pt rounded to 0.01, scale to 1e-4, colours to hex or `theme:NAME`, group
 children composed to absolute transforms, image hash = contentUrl path) so an untouched object
 compares equal. Google issues new contentUrls for unchanged pictures now and then, so pictures and
-picture backgrounds also carry a pixel `signature` (`<w>x<h>:` + 32 × 32 grey levels, downloaded when
-the base is recorded and, at sync, only for live pictures whose URL hash differs): a picture counts
-as replaced when its signature differs (ink-normalised difference ≥ 0.3 or another aspect ratio).
+picture backgrounds also carry a pixel `signature` (`<w>x<h>:` + 32 × 32 grey levels): a picture
+counts as replaced when its signature differs (ink-normalised difference ≥ 0.3 or another aspect
+ratio). Signatures are what pictures are *not* matched by - identity is object ids and titles; a
+signature only answers "did the person replace this picture?".
+
+Where a signature comes from, nearest first, so that nothing needs to fetch a `contentUrl` (a
+googleusercontent capability URL a process at Google may not fetch):
+- **a picture this run uploaded** is signed from its own file (`snapshot.upload_signatures`:
+  convert's figures and backgrounds, `converted_files`; the pictures a sync created or repainted,
+  `Sync.written_files`) while the live element has the file's aspect within 1%
+  (`ASPECT_AGREES`), since Google serves what it was given re-encoded. Measured 2026-09-24: 22 of
+  22 uploaded pictures on two decks signed alike from file and download; a picture a sync
+  created through `createImage` + `letterbox_fix` also keeps its file's shape.
+- **a live picture whose URL changed** is left `unchecked` (`Sync.sign_changed`) and read only if
+  the plan depends on it (`Sync.pictures_in_question`: a unit the source changed or dropped, a slide
+  that is not a plain update, a background the source changed); `Sync.merge_plan` signs those and
+  plans again. A unit kept with nothing of the source's to write is the same plan whether or not
+  the person replaced its picture, so it is never read; an unchecked picture still counts as
+  replaced (never loses one) but is not reported as the person's edit (`merge.unchecked`).
+- **reading** goes through `deck_pictures.LivePictures`: downloaded where the fetcher allows,
+  and whatever did not come out of one Drive `files.export` of the deck as .pptx, paired with the
+  live objects by page order, drawing order and alt-text titles (`exported_pictures`). Measured:
+  23 of 23 exported pictures signed like their downloads; a 10-slide deck exports 469 kB in 1.3 s.
+  Drive refuses exports over ~10 MB; a picture neither route brings stays unsigned.
+`read_deck` (pull, adopt) falls back to the same export for a picture it cannot download.
 The base lists slides in the source's order, not the deck's, so a deck reorder stays a deck edit. Storage: locally in `<out>/sync/base.json`, and in Drive as a JSON file created by
 the app (`drive.file` scope) whose id is kept in the presentation file's `appProperties.b2sBase`;
 Drive is authoritative (anyone with the deck can sync), the local copy is a cache and fallback.
