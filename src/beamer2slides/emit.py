@@ -752,6 +752,10 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
         inner_w = widest - left_pdf * scale
         room = joins - widest
         slack = room / 2 if room > 2 * WRAP_MARGIN else WRAP_MARGIN
+        if all(p.get("justified") for p in paras if len(p["lines"]) > 1):
+            # JUSTIFIED sets every line but the last out to the box's edge: room there would
+            # move the column's right edge, not just leave the next word out.
+            slack = min(slack, 2 * WRAP_MARGIN)
     elif room > 4:
         slack = room / 2
     else:
@@ -928,11 +932,19 @@ def text_box_requests(el: dict, slide_id: str, object_id: str, scale: float, fon
             first_indent, text_indent = text_indent, (p["tab_x0"] - left_pdf) * scale
         else:
             first_indent = text_indent
+            if edge == start_edge and not rtl and not el.get("code") and len(p["lines"]) > 1 and \
+                    p["lines"][0]["x0"] > p["text_x0"] + 0.2 * p["size"]:
+                # a first line set in by \parindent (classify.Paragraph.indent)
+                first_indent += (p["lines"][0]["x0"] - p["text_x0"]) * scale
+        # Justified prose stays justified (classify.PageClassifier.is_justified); Slides leaves
+        # the last line ragged, as TeX does.
+        justify = p.get("justified") and edge == start_edge
         reqs.append({"updateParagraphStyle": {
             "objectId": object_id,
             "textRange": {"type": "FIXED_RANGE", "startIndex": p_start, "endIndex": max(p_end, p_start + 1)},
             "style": {
-                "alignment": "CENTER" if edge == "center" else "START" if (edge == "right") == rtl else "END",
+                "alignment": "JUSTIFIED" if justify else "CENTER" if edge == "center" else
+                             "START" if (edge == "right") == rtl else "END",
                 "lineSpacing": round(100 * ratio, 1),
                 "spaceAbove": pt(round(above, 2)), "spaceBelow": pt(0),
                 "indentStart": pt(round(text_indent, 2)), "indentFirstLine": pt(round(first_indent, 2)),

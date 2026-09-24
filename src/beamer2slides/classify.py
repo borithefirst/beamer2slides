@@ -20,10 +20,11 @@ from . import bidi
 from .fonts import MATH_ITALIC_RE, FontInfo, font_info
 
 BULLET_GLYPHS = set("▶►▸‣•◦▪■□○●★⋆✓∗–")
-PRESET_GLYPHS = set("▶►▸‣•●")  # glyphs with a close Slides bullet preset (see emit.bullet_preset)
+PRESET_GLYPHS = set("▶►▸‣•●★⋆")  # glyphs with a close Slides bullet preset (see emit.bullet_preset)
 LABEL_GLYPHS = BULLET_GLYPHS | set("+✗✘→⇒—♦◆⋄")
 ENUM_RE = re.compile(r"^(\(?\d{1,2}[.)]|\(?[a-z][.)]|\([a-z]\)|\(?[ivx]{1,4}[.)])$")
 LINE_LABEL_RE = re.compile(r"^(\d{1,3}:|\[\d{1,3}\])$")
+NUMBERING_RE = re.compile(r"^\(?(\d{1,2}(\.\d{1,2}){0,3}|[a-z]|[ivx]{1,4})[.)]?$")  # an item's number: 2.1, (b), iv.
 LABEL_SEP_EM = 0.4  # gap after a description label (beamer: 0.5 em; word spaces are about 0.33 em)
 GUTTER_PROSE_EM = 8.0  # a column's line beside a gutter is wider than this; ticks and table cells are not
 EM_SPACE = chr(0x2003)
@@ -290,6 +291,8 @@ class Paragraph:
     reason: str | None = None
     role: str = "body"
     level: int = 0
+    indent: float = 0.0  # a first line set in by \parindent: how far right of the others it starts
+    justified: bool = False
 
     @property
     def first(self) -> Line:
@@ -708,6 +711,76 @@ def first_word_width(span: Span) -> float:
     if cut is not None:
         word = word[:max(cut, 1)]  # up to the first ideograph, or that one alone
     return span.rect.w * weight(word) / weight(text)
+
+
+def word_gaps(line: "Line") -> list[float]:
+    """The word spaces of a line in ems of its size: gaps between neighbouring words of the
+    line's own size (not a script, a formula's pieces or a \\quad)."""
+    words = [s for s in line.content if s.text.strip() and abs(s.size - line.size) <= 0.5 and s.info.family != "math"]
+    # (TeX takes a space from the font before it - after a bold lead-in it is wider - and
+    # widens it after a sentence's end or a colon)
+    font = max(words, key=lambda s: sum(t.font == s.font for t in words)).font if words else None
+    gaps = [(b.rect.x0 - a.rect.x1) / line.size for a, b in zip(words, words[1:])
+            if a.font == font and a.text.rstrip()[-1:] not in ".?!:;)”’\"'"]
+    return [g for g in gaps if 0.1 <= g <= 0.9]
+
+
+def stretched(lines: list["Line"]) -> bool:
+    """Were these lines' word spaces stretched or shrunk to fill the measure? Justified lines each
+    get spaces of their own width; ragged lines (and a justified paragraph's last line) keep
+    the font's natural space, the same on every line to a hundredth of an em."""
+    means = [sum(g) / len(g) for g in map(word_gaps, lines) if g]
+    if len(means) >= 2 and max(means) - min(means) > 0.02:
+        return True
+    # A line held in one span of several words had its spaces under extract's 0.3 em split:
+    # beside a line of that font whose words stand at least that far apart, it was shrunk.
+    fonts = Counter(s.font for l in lines for s in l.content if s.text.strip() and s.info.family != "math")
+    if not fonts or not means:
+        return False
+    font = fonts.most_common(1)[0][0]
+    # (not a quantity's thin spaces, see thin_span)
+    whole = lambda l: not font_gaps(l, font) and any(
+        s.font == font and s.text.strip().count(" ") >= 3 and not any(c.isdigit() for c in s.text) for s in l.content)
+    return any(map(whole, lines)) and any(len(font_gaps(l, font)) >= 2 for l in lines)
+
+
+def font_gaps(line: "Line", font: str) -> list[float]:
+    """Word spaces (em) between neighbouring spans of `line` both in `font` (not after a
+    sentence's end or a colon, where TeX widens them)."""
+    words = [s for s in line.content if s.text.strip()]
+    return [g for a, b in zip(words, words[1:]) if a.font == b.font == font and abs(a.size - line.size) <= 0.5
+            and a.text.rstrip()[-1:] not in ".?!:;)”’\"'" and b is not line.tab  # (a label's gap)
+            for g in [(b.rect.x0 - a.rect.x1) / line.size] if 0.1 <= g <= 0.9]
+
+
+def thin_span(span: Span, line: "Line", lines: list["Line"]) -> bool:
+    """Are the spaces inside this span thin ones - TeX's \\, (siunitx between a number's digit
+    groups and before its unit), kerns no line breaks at? Extract splits spans at gaps of
+    0.3 em, and TeX sets every word space of a line in one font alike: where the span's font
+    stands its words that far apart on this line (or on the paragraph's other lines when they
+    are ragged, with natural spaces), a space kept inside the span is narrower than a word
+    space. (A span holding a whole shrunk line, or phrases of a font with a narrow space such
+    as Cambria, has no such neighbours and is not thin.)"""
+    text = span.text.strip()
+    if not 1 <= text.count(" ") <= 3 or not any(c.isdigit() for c in text) or span.info.family in ("math", "mono"):
+        return False  # (only a quantity's: other thin spaces are rare and line breaks at them harmless)
+    gaps = font_gaps(line, span.font)
+    if len(gaps) < 2 and not stretched(lines):
+        gaps = [g for l in lines for g in font_gaps(l, span.font)]
+    return len(gaps) >= 2 and min(gaps) >= 0.31
+
+
+# Words that open compounds ("self-reported", "well-known") and that TeX's patterns do not split
+# off a longer word: a line ending on one of them and a hyphen broke at the compound's own hyphen.
+COMPOUND_HEADS = {"self", "well", "non", "cross", "half", "state", "peer", "user", "world", "quasi", "pseudo", "real"}
+
+
+def explicit_hyphen(tail: str) -> bool:
+    """Does the hyphen at the end of `tail` (a line's text) belong to the word - a compound broken
+    at its own hyphen - rather than being TeX's hyphenation? TeX hyphenates no word that already
+    holds a hyphen ("state-of-the-" + "art"), and some compound heads are words of their own."""
+    word = tail.rstrip("-").split()[-1] if tail.rstrip("-").split() else ""
+    return "-" in word or word.lstrip("([{“‘\"'").casefold() in COMPOUND_HEADS
 
 
 def card_text(node: Rect, rows: list[list[Span]]) -> dict | None:
@@ -1473,8 +1546,11 @@ class PageClassifier:
                 continue
             if k == 2 and out[i + 1].tab is not None:
                 continue
-            if abs(a.spans[0].rect.x0 - b.spans[0].rect.x0) <= 0.6:
-                continue  # labels start together: ordinary text already lines up the same way
+            if abs(a.spans[0].rect.x0 - b.spans[0].rect.x0) <= 0.6 and \
+                    not (NUMBERING_RE.match(a.spans[0].text.strip()) and NUMBERING_RE.match(b.spans[0].text.strip())):
+                # labels start together: ordinary text already lines up the same way (unless
+                # they are numbers: a nested enumerate's 2.1, 2.2)
+                continue
             if abs(a.rect.cx - b.rect.cx) <= 0.6:
                 continue  # centred lines (a quote): word edges line up only by chance
             sa, sb = splits(a), splits(b)
@@ -1483,6 +1559,29 @@ class PageClassifier:
                            and abs(b.spans[k - 1].rect.x1 - a.spans[ka - 1].rect.x1) <= 0.6), None)
                 if kb is not None and (a.tab is None or a.tab is span_a) and (b.tab is None or b.tab is sb[kb]):
                     a.tab, b.tab = span_a, sb[kb]
+                    break
+        # The other items of a list found that way: labels starting together (left-aligned, or
+        # the widest of right-aligned ones) pair with no neighbour above, but a label ending where
+        # an item's label ends, its text starting at that item's text, hangs the same way - and
+        # so does a label too wide for the label column, its text \labelsep after it.
+        tabbed = [l for l in out if l.tab is not None and any(s.rect.x1 <= l.tab.rect.x0 + 0.5 for s in l.spans)]
+        for line in out:
+            if line.tab is not None or not tabbed:
+                continue
+            for k, span in splits(line).items():
+                end = line.spans[k - 1].rect.x1
+                sep = span.rect.x0 - end
+                for o in tabbed:
+                    if abs(o.size - line.size) > 0.5 or abs(o.baseline - line.baseline) > 6 * line.size:
+                        continue
+                    o_end = max(s.rect.x1 for s in o.spans if s.rect.x1 <= o.tab.rect.x0 + 0.5)
+                    same = abs(span.rect.x0 - o.tab.rect.x0) <= 0.6 and abs(end - o_end) <= 0.6
+                    wide = end > o_end + 0.6 and abs(line.spans[0].rect.x0 - o.spans[0].rect.x0) <= 0.6 and \
+                        abs(sep - (o.tab.rect.x0 - o_end)) <= 0.1 * line.size
+                    if same or wide:
+                        line.tab = span
+                        break
+                if line.tab is not None:
                     break
         return out
 
@@ -1555,12 +1654,16 @@ class PageClassifier:
                 line.bullet_spans, line.tab = [first], None
                 return
             lettered =ENUM_RE.match(token) and not any(ch.isdigit() for ch in token)  # a) (b) iv.
-            if gap >= 0.25 * line.size and ((token in LABEL_GLYPHS - PRESET_GLYPHS) or lettered) and not on_ball:
+            # A dash followed by a word space opens an attribution ("--- Richard Thaler") or a
+            # line of dialogue; an \item[--] label is set off by \labelsep, wider than a space.
+            dash = token in ("—", "–") and gap < LABEL_SEP_EM * line.size
+            if gap >= 0.25 * line.size and ((token in LABEL_GLYPHS - PRESET_GLYPHS) or lettered) and not on_ball \
+                    and not dash:
                 # \item[--], \item[\checkmark]: Slides has no such bullet preset. The glyph stays
                 # literal text, and a tab reaches the item text (hanging indent).
                 line.tab = nxt
                 return
-            if gap >= 0.25 * line.size and (token in BULLET_GLYPHS or ENUM_RE.match(token)) and not on_ball:
+            if gap >= 0.25 * line.size and (token in BULLET_GLYPHS or ENUM_RE.match(token)) and not on_ball and not dash:
                 kind = "glyph" if token in BULLET_GLYPHS else "number"
                 line.bullet = {"kind": kind, "text": token, "color": first.color, "bbox": first.rect.as_list(),
                                "label": label_of([first])}
@@ -2161,12 +2264,76 @@ class PageClassifier:
         others = [l.rect for l in self.all_lines if l is not a and l is not b] + list(self.regions)
         return any(r.y0 < y1 and y0 < r.y1 and r.x0 > x1 + 5 for r in others)
 
-    def column_edge(self, par: Paragraph, line: Line) -> float | None:
-        """The right edge of the column `line` is in - the widest of the lines stacked above it at
-        the paragraph's left edge (a list's items one after another) - when text or a picture
-        stands right of that edge beside one of them; else None: nothing says the text is narrow.
-        (A table's next cells beside its first column start left of the table's wide rows.)"""
-        above = sorted((l for l in self.all_lines if l.baseline < line.baseline and abs(l.x0 - par.x0) <= 1.5
+    def free_width(self, par: Paragraph) -> float:
+        """How wide a line of this centred (or right-aligned) paragraph could have been: the room
+        between the text margins (or the panel it is on) and whatever stands beside it - taken
+        evenly about its centre for centred text, up to its right edge for right-aligned text."""
+        r = par.rect
+        lb, rb = self.text_margin, self.W - self.text_margin
+        panel = self.panel_of(r)
+        if panel is not None:
+            box = self.panels[panel]["bbox"]
+            lb, rb = max(lb, box.x0), min(rb, box.x1)
+        mine = {id(l) for l in par.lines}
+        beside = [l.rect for l in self.all_lines if id(l) not in mine and l.reason != "theme"] + list(self.regions)
+        for o in beside:
+            if o.y0 < r.y1 and r.y0 < o.y1:
+                if o.x1 <= r.x0 + 0.5:
+                    lb = max(lb, o.x1)
+                elif o.x0 >= r.x1 - 0.5:
+                    rb = min(rb, o.x0)
+        if par.align == "center":
+            return max(0.0, 2 * min(r.cx - lb, rb - r.cx))
+        return max(0.0, r.x1 - lb)
+
+    @staticmethod
+    def links_apart(a: Line, b: Line) -> bool:
+        """Two lines each linked as a whole to a different page: two entries of a table of
+        contents (a section and its subsection, two subsections), not one wrapped title."""
+        target = lambda l: {s.link for s in l.content if s.text.strip()}
+        ta, tb = target(a), target(b)
+        return len(ta) == 1 and len(tb) == 1 and ta != tb and None not in ta | tb and \
+            all(t.startswith("#page=") for t in ta | tb)
+
+    def find_hfill_pieces(self, lines: list[Line]) -> None:
+        """`hfill_pieces`: id of a line -> the piece an \\hfill pushed to the right end of its row
+        (an example's source, an item's reference, an attribution), and `hfill_hosts` the other
+        way round. A piece is another line on the same baseline, more than an em further right,
+        short, and ending at the right edge of the text area (the page's text margin, or the
+        panel it is in). TeX ended the row there: nothing on the next line continues the words
+        before the gap - where the piece itself wrapped, its tail opens the next line."""
+        self.hfill_pieces, self.hfill_hosts = {}, {}
+        native = [l for l in lines if l.reason is None and all(s.horizontal for s in l.spans)]
+        for a in native:
+            right = self.W - self.text_margin
+            panel = self.panel_of(a.rect)
+            if panel is not None:
+                box = self.panels[panel]["bbox"]
+                right = min(right, box.x1 - min(max(0.0, a.x0 - box.x0), 1.5 * a.size))
+            # (or, in a quotation set in on both sides, where its left indent mirrors)
+            # (a piece is short: two columns' lines side by side are no host and piece)
+            rights = [(right, 0.4 * (right - self.text_margin))] + \
+                ([(self.W - a.x0, 0.6 * (self.W - 2 * a.x0))] if panel is None and a.x0 > self.text_margin + a.size else [])
+            pieces = [b for b in native if b is not a and not b.bullet and abs(b.baseline - a.baseline) <= 0.25 * a.size
+                      and abs(b.size - a.size) <= 1 and b.x0 >= a.x1 + a.size
+                      and any(abs(b.x1 - r) <= 2 and b.rect.w <= most for r, most in rights)
+                      and self.panel_of(b.rect) == panel]
+            if pieces and id(a) not in self.hfill_hosts:
+                piece = min(pieces, key=lambda b: b.x0)
+                self.hfill_pieces[id(a)] = piece
+                self.hfill_hosts[id(piece)] = a
+
+    def stacked_above(self, par: Paragraph, line: Line) -> list[Line]:
+        """The lines stacked above `line` at the paragraph's left edge, one after another (a
+        list's items, the paragraphs of one column). A line whose words after a tab-wide gap
+        start at that edge counts too: a verse's number cell, an example's number before it."""
+        def at_edge(l: Line) -> bool:
+            if abs(l.x0 - par.x0) <= 1.5:
+                return True
+            words = l.content
+            return any(abs(s.rect.x0 - par.x0) <= 1.5 and k and s.rect.x0 - words[k - 1].rect.x1 >= 0.8 * par.size
+                       for k, s in enumerate(words))
+        above = sorted((l for l in self.all_lines if l.baseline < line.baseline and at_edge(l)
                         and abs(l.size - par.size) <= 0.5 and l.reason is None),  # (not a figure's label)
                        key=lambda l: -l.baseline)
         stack, at = [], line.baseline
@@ -2175,6 +2342,14 @@ class PageClassifier:
                 break
             stack.append(l)
             at = l.baseline
+        return stack
+
+    def column_edge(self, par: Paragraph, line: Line) -> float | None:
+        """The right edge of the column `line` is in - the widest of the lines stacked above it at
+        the paragraph's left edge (a list's items one after another) - when text or a picture
+        stands right of that edge beside one of them; else None: nothing says the text is narrow.
+        (A table's next cells beside its first column start left of the table's wide rows.)"""
+        stack = self.stacked_above(par, line)
         if not stack:
             return None
         edge = max(l.x1 for l in stack)
@@ -2184,8 +2359,23 @@ class PageClassifier:
             return edge
         return None
 
+    def flush_with_others(self, line: Line, last: Line) -> bool:
+        """Does `line` start where other text near it starts (the column's left edge)?"""
+        return any(abs(l.x0 - line.x0) <= 1 for l in self.all_lines if l is not line and l is not last
+                   and l.reason is None and abs(l.baseline - line.baseline) <= 8 * line.size)
+
+    @staticmethod
+    def attribution(last: Line, line: Line) -> bool:
+        """A line opening with a spaced dash after a closing quotation mark: the quote's source
+        ("— Asquith, Mast & Reed"), set on a line of its own."""
+        words = [s.text.strip() for s in line.content if s.text.strip()]
+        return bool(words) and (words[0] in ("—", "–", "---") or words[0][:2] in ("— ", "– ")) and \
+            last.text.rstrip()[-1:] in ("”", "\"", "»", "’")
+
     def continues(self, par: Paragraph, line: Line) -> str | None:
-        """How `line` continues `par` ('left' | 'center' | 'right'), or None."""
+        """How `line` continues `par` ('left' | 'center' | 'right'), or None. `join_indent`
+        says how far a first line was set in, when that is how it continues."""
+        self.join_indent = 0.0
         last = par.last
         if line.bullet or abs(line.size - par.size) > 0.5:
             return None
@@ -2196,13 +2386,35 @@ class PageClassifier:
             return None
         if self.panel_of(line.rect) != self.panel_of(par.rect):
             return None
-        left = abs(line.x0 - par.x0) <= 1.5
+        if self.links_apart(last, line) or self.attribution(last, line):
+            return None
+        if id(last) in self.hfill_pieces or id(last) in self.hfill_hosts or id(line) in self.hfill_hosts:
+            # An \hfill pushed words to the end of the row: TeX ended the line there (a \\ or the
+            # item's end), so the next line starts a paragraph of its own; and flushed pieces on
+            # consecutive rows (an example's sources) are each their own paragraph.
+            return None
+        left = abs(line.x0 - (par.x0 - par.indent)) <= 1.5
+        right = abs(line.x1 - last.x1) <= 1.5
         if par.first.tab is not None:  # hanging label: wrapped lines start under the text
             if line.tab is not None:
                 return None
             left = abs(line.x0 - par.first.tab.rect.x0) <= 1.5
-        right = abs(line.x1 - last.x1) <= 1.5
+        elif len(par.lines) == 1 and not par.bullet and right and par.x0 - line.x0 <= 3 * par.size and \
+                ((par.x0 - line.x0 >= 0.25 * par.size and stretched([last, line])) or
+                 (par.x0 - line.x0 >= 0.5 * par.size and self.flush_with_others(line, last))):
+            # A first line indented by \parindent (quotation, a table's notes), the next one
+            # flush left, both ending at the justified edge: build_paragraphs records the
+            # indent. (Right-aligned lines are ragged on the left: their starts meet no other
+            # text's edge, and their word spaces are the font's own.)
+            left = True
+            right = True
+            self.join_indent = par.x0 - line.x0
         center = abs((line.x0 + line.x1) / 2 - (last.x0 + last.x1) / 2) <= 1.5
+        if center and any(abs(s.rect.x0 - last.x0) <= 1.5 and s.rect.x0 - p.rect.x1 >= 0.8 * par.size
+                          for p, s in zip(line.content, line.content[1:])):
+            # Words after a number cell start under the line above (a verse's line number, an
+            # example's number): stacked at one edge, centred only by the lengths of the lines.
+            center = False
         if left:
             # TeX would have pulled the next word up if it fitted: then this is a new paragraph.
             col_right = max([l.x1 for l in par.lines] + [line.x1])
@@ -2210,19 +2422,34 @@ class PageClassifier:
             # Lines already justified to one edge say where the column ends (a \parbox or
             # minipage narrower than the frame, with nothing beside it).
             justified = len(edges) >= 2 and max(edges) - min(edges) <= 1.5
-            if not self.has_side_content(last, line) and not justified:
+            if justified:
+                pass
+            elif not self.has_side_content(last, line):
                 # Full-width text: beamer's margins are symmetric, so the text block ends
                 # where the left margin mirrors. Short paragraphs never reach col_right.
                 # Unless the lines stacked above at this left edge sat beside a picture or
                 # another column: then this is the column's text below it, as narrow.
+                # A quotation is set in on both sides alike: a line of it ending where its left
+                # indent mirrors says that is the measure.
                 column = self.column_edge(par, line)
-                if column is None or column < col_right - 4 * par.size:  # (a column's lines end a word or so apart)
+                quote = par.x0 > self.text_margin + par.size and abs(col_right - (self.W - par.x0)) <= 1.5
+                if not quote and (column is None or column < col_right - 4 * par.size):  # (a column's lines end a word or so apart)
                     col_right = max(col_right, self.W - self.text_margin)
-            first_word = line.content[0].rect.w
+            else:
+                # Something stands to the right (a column, a picture, the navigation): the column
+                # is at least as wide as the lines stacked above at this edge - a footnote's first
+                # line over the next ones, a verse's first line over the next.
+                col_right = max([col_right] + [l.x1 for l in self.stacked_above(par, line)])
+            # (a span's first word; where its spaces are thin, the whole span: "48 000 EUR")
+            head = line.content[0]
+            first_word = head.rect.w if thin_span(head, line, par.lines + [line]) else first_word_width(head)
             if not right and last.x1 + 0.3 * par.size + first_word < col_right - 0.5:
                 return None
             return "left"
-        if center and par.align in ("left", "center") and len(par.lines) == 1 or par.align == "center" and center:
+        if center and par.align in ("left", "center") and len(par.lines) == 1 and line.main.color == last.main.color \
+                or par.align == "center" and center:
+            # (a line alone in another colour is another entry: a TOC section and its first
+            # subsection may be centred on each other by chance)
             return "center"
         if right and (len(par.lines) > 1 or not par.bullet and line.main.color == last.main.color):
             return "right"  # (a TOC section and its first subsection may end together by chance)
@@ -2247,7 +2474,19 @@ class PageClassifier:
             return "right"
         return "left"
 
+    @staticmethod
+    def is_justified(par: Paragraph) -> bool:
+        """Justified prose (beamer's default outside lists, \\justifying, a \\parbox): the lines
+        but the last all end together, and their word spaces were stretched to get there. A
+        left-aligned paragraph whose lines end together by chance keeps natural spaces."""
+        if par.align != "left" or len(par.lines) < 2 or par.reason is not None or is_mono(par.spans) \
+                or par.direction == "rtl":
+            return False
+        ends = [l.x1 for l in par.lines[:-1]]
+        return max(ends) - min(ends) <= 0.75 and stretched(par.lines)
+
     def build_paragraphs(self, lines: list[Line]) -> list[Paragraph]:
+        self.find_hfill_pieces(lines)
         paragraphs: list[Paragraph] = []
         for line in lines:
             if line.reason not in (None, "math"):
@@ -2260,6 +2499,8 @@ class PageClassifier:
                     break
             if best:
                 par, how = best
+                if self.join_indent:
+                    par.indent = self.join_indent  # (continues: a \parindent)
                 par.lines.append(line)
                 par.align = how
                 if line.reason == "math":
@@ -2269,11 +2510,14 @@ class PageClassifier:
         if not paragraphs:
             return paragraphs
 
-        body_lines = [p.first for p in paragraphs if abs(p.size - self.body) < 1]
-        margin = min((l.x0 for l in body_lines), default=0.08 * self.W)
+        # (a paragraph's own left edge: its first line may be set in by \parindent)
+        margin = min((p.first.x0 - p.indent for p in paragraphs if abs(p.size - self.body) < 1), default=0.08 * self.W)
         for par in paragraphs:
             if len(par.lines) == 1:
                 par.align = self.single_line_align(par.first, margin, paragraphs)
+                if id(par.first) in self.hfill_hosts:
+                    par.align = "right"  # pushed to the measure's end by an \hfill
+            par.justified = self.is_justified(par)
             if any(l.reason == "math" for l in par.lines):
                 par.reason = "math"
             if par.size >= 1.15 * self.body and par.rect.y0 < 0.2 * self.H:
@@ -2349,6 +2593,11 @@ class PageClassifier:
         prev: Span | None = None
         hole_x1 = 0.0
         for li, line in enumerate(par.lines):
+            words = [s for s in line.content if s.text.strip()]
+            gaps = [gap_between(a, b) / line.size for a, b in zip(words, words[1:])]
+            # (a justified line's own word space, stretched; a \quad does not stretch)
+            # (its last line keeps natural spaces)
+            word_space = min(gaps) if par.justified and gaps and li < len(par.lines) - 1 else 0.33
             order = reading_order(line)
             accent = ""  # an accent at the end of a span, for the letter under it in the next one
             for si, (span, forced) in enumerate(order):
@@ -2413,9 +2662,14 @@ class PageClassifier:
                 elif prev is not None:
                     if si == 0:
                         tail = runs[-1]["text"]
-                        if len(tail) >= 2 and tail.endswith("-") and tail[-2].isalpha() and text[:1].islower():
+                        if len(tail) >= 2 and tail.endswith("-") and tail[-2].isalpha() and text[:1].islower() \
+                                and not explicit_hyphen(tail):
                             runs[-1]["text"] = tail[:-1]  # TeX hyphenation at a line break
                             sep = ""
+                        elif len(tail) >= 2 and tail.endswith(("-", "–", "—")) and not tail[-2].isspace() \
+                                and text[:1].isalnum():
+                            # a compound's hyphen or a range's dash: the words stay joined
+                            sep = chr(11) if par.role == "title" or soft_breaks else ""
                         elif par.role == "title" or soft_breaks:
                             sep = chr(11)  # titles keep their line breaks (a soft break in Slides)
                         elif cjk(tail.rstrip()[-1:]) and cjk(text.lstrip()[:1]):
@@ -2435,8 +2689,10 @@ class PageClassifier:
                             # em spaces there were half of CMTT's \quad each (text_fit, slide 18).
                             advance = span.rect.w / max(1, len(span.text))
                             sep = " " * max(1, round(gap / advance))
-                        elif gap >= 1.0 * line.size:
+                        elif gap >= max(0.9, word_space + 0.4) * line.size:
                             # \quad and wider (\and between authors): em spaces keep the gap
+                            # (a \quad measures 0.999 em between the advance boxes; a justified
+                            # line's own stretched spaces stay spaces)
                             sep += EM_SPACE * max(1, round((gap - 0.33 * line.size) / line.size))
                     if si and sep == " " and runs[-1].get("hole"):
                         # The space after a formula becomes part of its gap: TeX's space there
@@ -2456,6 +2712,8 @@ class PageClassifier:
                     tail = runs[-1]["text"].rstrip()
                     runs[-1]["text"] = tail[:-1] + runs[-1]["text"][len(tail):]
                     text = negate(NEGATION + text)
+                if thin_span(span, line, par.lines):
+                    text = re.sub(r"(?<=\S) (?=\S)", " ", text)  # "48 000 EUR" breaks nowhere
                 script = forced or script_of(span, line)
                 # Slides shrinks sub/superscripts itself: give them the line's size.
                 size = script_size(span, line) if script else span.size
@@ -3799,11 +4057,14 @@ class PageClassifier:
         def unbalanced(p: Paragraph) -> bool:
             """Centred (or right-aligned) lines broken where a greedy wrap would not break, or
             nearly would (TeX balances them, or they were broken by hand): no box width
-            reproduces the breaks reliably, so they become soft breaks."""
+            reproduces the breaks reliably, so they become soft breaks. So do lines broken
+            where the room they are centred in would have taken the next word: a title page's
+            \\institute or \\date broken with \\\\ (Slides re-wrapped them mid-affiliation)."""
             if p.align == "left" or len(p.lines) < 2 or not all(l.content for l in p.lines):
                 return False
             widest = max(l.x1 - l.x0 for l in p.lines)
-            return any(a.x1 - a.x0 + 0.2 * p.size + first_word_width(b.content[0]) <= widest + 0.5 * p.size
+            room = max(widest + 0.5 * p.size, self.free_width(p) - 0.5 * p.size)
+            return any(a.x1 - a.x0 + 0.2 * p.size + first_word_width(b.content[0]) <= room
                        for a, b in zip(p.lines, p.lines[1:]))
         return {
             "id": element_id, "kind": "text", "role": box[0].role, "bbox": rect.as_list(),
@@ -3813,7 +4074,10 @@ class PageClassifier:
                 # Said only where it is true, as `deck_ir` says it of a deck that is read
                 # back: a left-to-right paragraph is every deck this project had until now.
                 **({"direction": p.direction} if p.direction else {}),
-                "text_x0": round(p.x0, 2),
+                # (as `deck_ir` reads Slides' JUSTIFIED: a left paragraph, justified)
+                **({"justified": True} if p.justified else {}),
+                # (a first line set in by \parindent starts at lines[0].x0, emit indents it)
+                "text_x0": round(p.x0 - p.indent, 2),
                 "tab_x0": round(p.first.tab.rect.x0, 2) if p.first.tab else None,
                 "lines": [{"baseline": round(l.baseline, 2), "x0": round(l.x0, 2), "x1": round(l.x1, 2)}
                           for l in p.lines],
@@ -3847,6 +4111,10 @@ class PageClassifier:
         plain_tables = self.plain_tables(lines)
         body_lines = [l for l in lines if l.reason is None and abs(l.size - self.body) < 1]
         self.text_margin = min((l.rect.x0 for l in body_lines), default=0.08 * self.W)
+        if self.text_margin > 0.2 * self.W:
+            # Nothing at the body size starts on the left (a frame of smaller items, and the
+            # slide number is what is left): the left edge of what text there is.
+            self.text_margin = min([l.rect.x0 for l in lines if l.reason is None] + [0.2 * self.W])
         paragraphs = self.display_pieces_apart(self.build_paragraphs(lines))
         boxes = self.build_boxes(paragraphs)
 
@@ -4082,7 +4350,10 @@ def mark_big_headings(slides: list[dict], body: float) -> None:
         sizes = sorted((max(p["size"] for p in e["paragraphs"]), i) for i, e in enumerate(texts))
         size, i = sizes[-1]
         runner_up = sizes[-2][0] if len(sizes) > 1 else 0.0
-        if size >= 1.3 * body and size >= 1.15 * runner_up and texts[i]["paragraphs"][0]["size"] == size:
+        # (a quotation set large on a frame of its own is no heading)
+        words = "".join(r["text"] for r in texts[i]["paragraphs"][0]["runs"]).strip()
+        quote = words[:1] in "“„«‘\"" and len(words.split()) >= 4
+        if size >= 1.3 * body and size >= 1.15 * runner_up and texts[i]["paragraphs"][0]["size"] == size and not quote:
             texts[i]["role"] = "title"
 
 
