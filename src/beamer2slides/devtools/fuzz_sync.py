@@ -1731,13 +1731,21 @@ class Template:
         self.pid = json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"]
         return self
 
+    @classmethod
+    def at(cls, out: Path) -> "Template":
+        """A conversion already in `out` (nobody may edit its deck) as the template."""
+        t = cls(out, None)
+        t.pid = json.loads((out / "emit.json").read_text(encoding="utf-8"))["presentationId"]
+        return t
+
     def copy_into(self, out: Path, name: str) -> str:
         """A copy of the template deck, and `out` set up as its convert folder. Returns its id."""
         from beamer2slides import snapshot
+        from beamer2slides.drive_folder import place
         from beamer2slides.google_auth import drive_service
         from beamer2slides.gslides import execute
         drive = drive_service()
-        pid = execute(drive.files().copy(fileId=self.pid, fields="id,appProperties", body={"name": name}))["id"]
+        pid = execute(drive.files().copy(fileId=self.pid, fields="id,appProperties", body=place({"name": name}, drive)))["id"]
         execute(drive.files().update(fileId=pid, fields="id", body={"appProperties": {
             snapshot.BASE_PROPERTY: None, snapshot.CLEANED_PROPERTY: None}}))
         for p in self.out.rglob("*"):

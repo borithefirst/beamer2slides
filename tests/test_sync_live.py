@@ -10,7 +10,8 @@ sync -> check (tools/sync_check.py)`: deck edits survive exactly once, source ch
 conflicts are reported with both versions, no orphans or duplicates, groups intact, slides nobody
 edited match a fresh conversion of vN (elements, thumbnails, alignment), and a second sync writes
 nothing (same revision). Scenario folders are out/sync-tests/<scenario> of the main checkout
-(convert rebuilds the same deck each run), fresh conversions out/sync-tests/_fresh/<variant>.
+(convert rebuilds the same deck each run), fresh conversions out/sync-tests/_fresh/<variant>
+(converted again when the PDF or the converter's code changed).
 Scenarios run PARALLEL at a time. Skipped while `beamer2slides sync` (or `pull`) doesn't exist,
 pdflatex isn't found, or the Google token needs a browser consent.
 Sync hook used by the concurrency scenario: sync runs the command in B2S_SYNC_BEFORE_WRITE once,
@@ -216,7 +217,8 @@ _fresh_guard = threading.Lock()
 
 
 def fresh_conversion(variant: str):
-    """(folder, model) of a fresh conversion of a source version, converted once per session."""
+    """(folder, model) of a fresh conversion of a source version, converted again only when its
+    PDF or the converter changed (`sync_check.converter_stamp`)."""
     from beamer2slides.devtools import sync_check as sc
     with _fresh_guard:
         lock = _fresh_locks.setdefault(variant, threading.Lock())
@@ -224,12 +226,13 @@ def fresh_conversion(variant: str):
         folder = OUT / "_fresh" / variant
         pdf = build(variant)
         done = folder / ".converted"
-        if not done.exists() or done.read_text(encoding="utf-8") != str(pdf.stat().st_mtime):
+        stamp = f"{pdf.stat().st_mtime} {sc.converter_stamp()}"
+        if not done.exists() or done.read_text(encoding="utf-8") != stamp:
             folder.mkdir(parents=True, exist_ok=True)
             with open(OUT / "_fresh" / f"{variant}.log", "w", encoding="utf-8") as log:
                 subprocess.run([sys.executable, "-m", "beamer2slides", "convert", str(pdf), "--out", str(folder)],
                                env=ENV, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=True)
-            done.write_text(str(pdf.stat().st_mtime), encoding="utf-8")
+            done.write_text(stamp, encoding="utf-8")
         pid = json.loads((folder / "emit.json").read_text(encoding="utf-8"))["presentationId"]
         return folder, sc.read(pid)
 

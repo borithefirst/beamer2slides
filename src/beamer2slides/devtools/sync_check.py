@@ -47,6 +47,29 @@ class CheckError(Exception):
     pass
 
 
+NOT_THE_CONVERTER = ("devtools", "agent", "playground", "__pycache__")
+_STAMP: list[str] = []
+
+
+def converter_stamp() -> str:
+    """A hash of the code and data a conversion runs on (the package without its harness, agent
+    and playground). A cached reference conversion is stale when this moved as surely as when its
+    PDF did: one made before a converter change failed six stress scenarios on a box 8 pt narrower
+    than a fresh conversion's (2026-09-24)."""
+    if not _STAMP:
+        import hashlib
+        from importlib import resources
+        root = Path(str(resources.files("beamer2slides")))
+        h = hashlib.sha1()
+        for p in sorted(root.rglob("*")):
+            rel = p.relative_to(root)
+            if p.is_file() and p.suffix in (".py", ".json", ".tex", ".sty") and not set(rel.parts) & set(NOT_THE_CONVERTER):
+                h.update(rel.as_posix().encode())
+                h.update(p.read_bytes())
+        _STAMP.append(h.hexdigest()[:16])
+    return _STAMP[0]
+
+
 def norm(s: str | None) -> str:
     return " ".join((s or "").replace("\xa0", " ").replace("\x0b", " ").replace("​", "").split())
 

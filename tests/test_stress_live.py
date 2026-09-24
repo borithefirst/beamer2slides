@@ -18,8 +18,11 @@ change landed, the slide order follows the source except where the deck moved a 
 orphans or duplicates, untouched slides still equal a fresh conversion, and a second sync writes
 nothing.
 
-Folders: out/stress-tests/<scenario> of the main checkout (the same decks are rebuilt every run),
-fresh conversions out/stress-tests/_fresh/<variant>. Timings land in out/stress-tests/perf.json.
+Folders: out/stress-tests/<scenario> of the main checkout, fresh conversions
+out/stress-tests/_fresh/<variant>, made again only when the PDF or the converter's code changed.
+A scenario starts from a Drive copy of the fresh v1 deck (its previous run's deck is deleted), so
+v1 is converted once for all of them; pull converts its own. The fresh conversions the checks need
+are made while the scenarios run. Timings land in out/stress-tests/perf.json.
 """
 
 import importlib.util
@@ -42,11 +45,26 @@ from .test_slides_alignment import MAIN, google_unavailable
 _spec = importlib.util.spec_from_file_location("stress_build", ROOT / "tests" / "decks" / "stress" / "build.py")
 stress = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(stress)
+_build, _build_lock = stress.build, threading.Lock()
+
+
+def _locked_build(variant: str, force: bool = False) -> Path:
+    """`stress.build`, one at a time: fresh conversions are made while the scenarios run, and two
+    threads compiling one variant would write the same .tex and .pdf (a cache hit costs nothing)."""
+    with _build_lock:
+        return _build(variant, force)
+
+
+stress.build = _locked_build
 
 pytestmark = pytest.mark.sync
 
 OUT = Path(os.environ.get("B2S_STRESS_TESTS_OUT", MAIN / "out" / "stress-tests"))
-PARALLEL = 2  # a 48 frame conversion is heavy; two at a time keeps Drive and the CPU sane
+# Scenarios start from a copy of one conversion, so what runs at once is mostly round trips: four
+# stays under the write quota (as the live fuzz's --parallel does). The conversions themselves
+# (fresh ones, and pull's) are heavy: two at a time.
+PARALLEL = 4
+FRESH_PARALLEL = 2
 MIKTEX = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "MiKTeX" / "miktex" / "bin" / "x64"
 ENV = {**os.environ, "PYTHONPATH": str(ROOT / "src"),
        "PATH": os.pathsep.join([os.environ.get("PATH", "")] + ([str(MIKTEX)] if MIKTEX.exists() else []))}
@@ -438,11 +456,37 @@ class Run:
                 TIMINGS.setdefault(self.name, {}).update(self.times)
                 save_timings()
 
-    def convert(self, pdf: Path) -> None:
+    def clear(self) -> None:
+        """The previous run's deck (with that run's deck edits on it) and folder, gone. Rebuilding
+        it in place took a forced rebuild, and with it a .pptx backup, per scenario."""
+        from beamer2slides.gapi import HttpError
+        from beamer2slides.google_auth import drive_service
+        from beamer2slides.gslides import execute, status_of
+        emitted = self.out / "emit.json"
+        if emitted.exists():
+            try:
+                execute(drive_service().files().delete(
+                    fileId=json.loads(emitted.read_text(encoding="utf-8"))["presentationId"]))
+            except HttpError as e:
+                if status_of(e) != 404:
+                    raise
+        shutil.rmtree(self.out, ignore_errors=True)
+        self.out.mkdir(parents=True, exist_ok=True)
+
+    def start(self) -> None:
+        """The v1 deck, as a Drive copy of the fresh v1 conversion: one conversion for every
+        scenario instead of one each (`fuzz_sync.Template`, the live fuzz's `--reuse`)."""
         from beamer2slides.devtools.deck_edits import LiveDeck
-        # --force-rebuild: the folder holds the deck of the previous run with that run's deck
-        # edits still on it, and the rebuild guard would refuse to replace it (guard.py).
-        self.timed("convert", lambda: self.cli("convert", pdf, "--out", self.out, "--force-rebuild"))
+        from beamer2slides.devtools.fuzz_sync import Template
+        folder, _ = fresh_conversion("v1", read=False)
+        self.clear()
+        pid = self.timed("copy", lambda: Template.at(folder).copy_into(self.out, f"b2s stress: {self.name}"))
+        self.deck = LiveDeck(pid)
+
+    def convert(self, pdf: Path) -> None:
+        """A conversion of its own (after `clear`: the guard refuses to rebuild an edited deck)."""
+        from beamer2slides.devtools.deck_edits import LiveDeck
+        self.timed("convert", lambda: self.cli("convert", pdf, "--out", self.out))
         self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
 
     def edit(self, *specs: dict) -> list[dict]:
@@ -546,8 +590,10 @@ _fresh_locks: dict[str, threading.Lock] = {}
 _fresh_guard = threading.Lock()
 
 
-def fresh_conversion(variant: str):
-    """(folder, model) of a fresh conversion of a source version, converted once per session."""
+def fresh_conversion(variant: str, read: bool = True):
+    """(folder, model) of a fresh conversion of a source version, converted again only when its
+    PDF or the converter changed (`sync_check.converter_stamp`). Nobody edits these decks: `v1`'s
+    is also every scenario's starting deck, as a copy (`Run.start`)."""
     from beamer2slides.devtools import sync_check as sc
     with _fresh_guard:
         lock = _fresh_locks.setdefault(variant, threading.Lock())
@@ -555,23 +601,27 @@ def fresh_conversion(variant: str):
         folder = OUT / "_fresh" / variant
         pdf = stress.build(variant)
         done = folder / ".converted"
-        if not done.exists() or done.read_text(encoding="utf-8") != str(pdf.stat().st_mtime):
+        stamp = f"{pdf.stat().st_mtime} {sc.converter_stamp()}"
+        if not done.exists() or done.read_text(encoding="utf-8") != stamp:
             folder.mkdir(parents=True, exist_ok=True)
             started = time.time()
             with open(OUT / "_fresh" / f"{variant}.log", "w", encoding="utf-8") as log:
                 subprocess.run([sys.executable, "-m", "beamer2slides", "convert", str(pdf), "--out", str(folder)],
                                env=ENV, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT, check=True)
-            done.write_text(str(pdf.stat().st_mtime), encoding="utf-8")
+            done.write_text(stamp, encoding="utf-8")
             with TIMINGS_LOCK:
                 TIMINGS.setdefault("convert", {})[variant] = round(time.time() - started, 1)
                 save_timings()
         pid = json.loads((folder / "emit.json").read_text(encoding="utf-8"))["presentationId"]
-        return folder, sc.read(pid)
+        return folder, (sc.read(pid) if read else None)
 
 
 # ---------------------------------------------------------------- scenarios
 
 SCENARIOS = {}
+# scenario -> the variant its check compares with a fresh conversion (`Run.check`)
+CHECKED = {"ambiguous": "ambiguous", "identity": "identity", "recast-moved": "recastmoved", "churn": "churn",
+           "pictures": "pictures", "kitchen": "kitchen"}
 
 
 def scenario(fn):
@@ -584,7 +634,7 @@ def scenario_ambiguous(run: Run):
     """The hardest identity case: two frames one word apart are swapped, a third frame is
     inserted between them, and a cell changes in every row of a table whose rows all say the same
     - while the deck has edits on exactly those slides and on one of three identical paragraphs."""
-    run.convert(stress.build("v1"))
+    run.start()
     exps = run.edit(
         # The same sentence is on both twins: this edit must stay on the one it was made on.
         E("replace_word", slide=S("twin-a"), text="This bullet is about identity, not about content",
@@ -619,7 +669,7 @@ def scenario_identity(run: Run):
     rewrites half of what it says, which leaves the words too thin for the alignment. It keeps its
     slide - and the person's red word on it - because it is the only slide and the only frame
     between two neighbours that paired (`identity.gap_pairs`)."""
-    run.convert(stress.build("v1"))
+    run.start()
     exps = run.edit(
         E("bold", slide=S("mobile"), word="moves", context="The label on this frame moves"),
         E("replace_word", slide=S("vanishing"), text="so its key falls back to its title", old="key", new="identity"),
@@ -650,7 +700,7 @@ def scenario_recast_moved(run: Run):
     that is what this scenario is for: the report names the slide it could not match and the frame
     that looks like it (`identity.near_misses`), so an AI author reading the report can put a label
     on that frame and have a person move the edits over."""
-    run.convert(stress.build("v1"))
+    run.start()
     old = {"contains": "so only its content can identify it"}   # the sentence only the old slide has
     new = {"contains": "the source has now given it"}           # and the one only the new slide has
     exps = run.edit(
@@ -678,7 +728,7 @@ def scenario_churn(run: Run):
     """Ten frames reordered, the first and the last deleted, every bullet of one frame and the
     whole of one block rewritten - on a deck that has edits on the moved frames and on the very
     bullets the source rewrites."""
-    run.convert(stress.build("v1"))
+    run.start()
     exps = run.edit(
         E("add_text_box", slide=S("results-a"), text="Moved but mine", box=[560, 60, 130, 28]),
         E("set_notes", slide=S("displaymath"), text="Do not read the equation out loud."),
@@ -706,7 +756,7 @@ def scenario_churn(run: Run):
 def scenario_pictures(run: Run):
     """One of two identical pictures is replaced in the source while the person has moved the
     other one and resized the same file on another slide; identical notes change on one frame."""
-    run.convert(stress.build("v1"))
+    run.start()
     model = run.deck.read()
     left = min((e for e in model.one(S("twinpics")).elements if e.kind == "image"), key=lambda e: e.box[0])
     exps = run.edit(
@@ -726,7 +776,7 @@ def scenario_kitchen(run: Run):
     """Everything at once: twins swapped, a frame inserted between them, a label moved, every
     title renamed, ten frames reordered, a frame's bullets rewritten, a cell changed in every
     row, a picture replaced and notes changed - against a deck edited in every way."""
-    run.convert(stress.build("v1"))
+    run.start()
     exps = run.edit(
         E("replace_word", slide=S("twin-b"), text="This bullet is about identity, not about content",
           old="content", new="wording"),
@@ -763,6 +813,7 @@ def scenario_pull(run: Run):
     if reason := cli_missing("pull"):
         pytest.skip(reason)
     from beamer2slides.devtools import sync_check as sc
+    run.clear()
     src = run.out / "src"
     src.mkdir(exist_ok=True)
     stress.write_figures(src / "figures")
@@ -829,8 +880,18 @@ def outcomes(request):
             return e
         finally:
             r.log.close()
-    with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
-        return dict(zip(names, pool.map(run, names)))
+    # The fresh conversions the checks will want are made while the scenarios edit and sync, not
+    # one by one when each check first asks (each is a cache hit when nothing changed). v1's
+    # goes first: every scenario but pull starts from a copy of it.
+    wanted = ["v1"] * any(n != "pull" for n in names) + [CHECKED[n] for n in names if n in CHECKED]
+    with ThreadPoolExecutor(max_workers=FRESH_PARALLEL) as fresh, ThreadPoolExecutor(max_workers=PARALLEL) as pool:
+        warm = [fresh.submit(fresh_conversion, v, False) for v in wanted]
+        if warm:
+            warm[0].result()   # (a failed v1 would fail every scenario the same way: say so once)
+        found = dict(zip(names, pool.map(run, names)))
+        for w in warm:
+            w.result()
+        return found
 
 
 @pytest.mark.parametrize("name", [pytest.param(n, marks=pytest.mark.xfail(reason=XFAIL[n], strict=True)) if n in XFAIL else n
