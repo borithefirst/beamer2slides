@@ -1650,9 +1650,12 @@ def capped_columns(cols: list[dict], scale: float, need: list[float | None], cap
             for c, n, k in zip(cols, need, cap)]
 
 
-def table_rows(el: dict, z: float, scale: float, imported: bool = False
+def table_rows(el: dict, z: float, scale: float, imported: bool = False, sizes: list[float] | None = None
                ) -> tuple[float, list[float], list[float], list[float]]:
     """Table top, row heights, per-row lineSpacing and per-row top cell inset (Slides pt).
+
+    `sizes`: per row, the Slides size of its largest words (row_sizes), which set where its
+    top-anchored baseline falls and how tall its lines are; `z` for every row by default.
 
     A row is at least its top and bottom insets + 1.195·z·lineSpacing tall (+ LINE_EM·z·lineSpacing
     per further line of a wrapped cell, `row_lines`). Row boundaries sit on the PDF's rules where
@@ -1670,12 +1673,14 @@ def table_rows(el: dict, z: float, scale: float, imported: bool = False
     lines = el.get("row_lines") or [1] * n
     pad_top = pad_bottom = 0.0 if imported else TABLE_ROW_PAD / 2
     default = 1.0 if imported else table_line_spacing(min(pitches), z)
+    zs = sizes or [z] * n
 
-    def offset(r: float) -> float:  # row top -> baseline, with the fixed top inset
-        return pad_top + TABLE_TEXT_TOP + ASCENT_EM * z + extra_above(r, z)
+    def offset(r: float, i: int | None = None) -> float:  # row top -> baseline, with the fixed top inset
+        zi = z if i is None or i >= n else zs[i]
+        return pad_top + TABLE_TEXT_TOP + ASCENT_EM * zi + extra_above(r, zi)
 
     def body(i: int) -> float:  # the height of row i's text at lineSpacing 100
-        return (TABLE_ROW_EM + (lines[i] - 1) * LINE_EM) * z
+        return (TABLE_ROW_EM + (lines[i] - 1) * LINE_EM) * zs[i]
 
     ruled: dict[int, float] = {}
     for rule in el.get("rules", []) + [b for b in el.get("borders", []) if b["position"] in ("TOP", "BOTTOM")]:
@@ -1685,8 +1690,8 @@ def table_rows(el: dict, z: float, scale: float, imported: bool = False
         if i in ruled:
             return ruled[i]
         if i < n:
-            return baselines[i] - offset(default)
-        return baselines[-1] - offset(default) + pitches[-1]
+            return baselines[i] - offset(default, i)
+        return baselines[-1] - offset(default, n - 1) + pitches[-1]
 
     def clamp(r: float) -> float:
         return min(1.0, max(TABLE_MIN_SPACING, r))
@@ -1705,8 +1710,9 @@ def table_rows(el: dict, z: float, scale: float, imported: bool = False
         inset = pad_top
         if imported:
             # The inset takes the room above the text, as far as the row's height allows.
-            inset = max(0.0, min(room - offset(1.0), h_target - pad_bottom - body(i)))
-        r_room = clamp(1.0 if room >= offset(1.0) + inset else 1 - (offset(1.0) + inset - room) / (0.75 * LINE_EM * z))
+            inset = max(0.0, min(room - offset(1.0, i), h_target - pad_bottom - body(i)))
+        r_room = clamp(1.0 if room >= offset(1.0, i) + inset else
+                       1 - (offset(1.0, i) + inset - room) / (0.75 * LINE_EM * zs[i]))
         r_fit = clamp((h_target - inset - pad_bottom) / body(i))
         r = r_room if r_room <= r_fit else (r_room + r_fit) / 2
         h = max(h_target, inset + pad_bottom + body(i) * r)
@@ -1761,7 +1767,12 @@ def table_columns(el: dict, cells: list[list[list[dict]]], scale: float, fonts: 
             fits = whole is not None and joins is not None and whole / scale <= 1.08 * w
             exact.append(joins if fits else window[rc][1])
         k = min(exact) / scale - 0.5 / scale
-        cap.append(k if capped_columns([col], scale, [need[-1]], [k])[0] else counted)
+        k = k if capped_columns([col], scale, [need[-1]], [k])[0] else counted
+        if need[-1] is not None and all(list(rc) in el.get("justified", []) for rc, _ in mine):
+            # Justified cells (classify `justified`) are set out to the PDF's edge (table_requests):
+            # the column needs no room past what its words take, which only widened the table.
+            k = min(k, max(w, need[-1]) + (1 + WRAP_MARGIN) / scale)
+        cap.append(k)
     bounds = fit_columns(bounds, cols, scale, need, tight, cap)
     held = [k if ok else None for k, ok in zip(cap, capped_columns(cols, scale, need, cap))]
     # A cell spanning columns wraps as readily as one that does not: the columns it spans grow.
@@ -1814,7 +1825,8 @@ def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = Fal
     "cell_width" ((row, col) -> the text's Slides width where known), "z", "first_run", "cells"
     (the runs as they are written: in_sentence, shrunk), "shrink" (the share of its size the text
     is set at), "dx" (PDF pt the columns moved: table_shift), "held" (per column, the text width
-    in PDF pt its left-aligned cells are held under, or None: table_columns)}. `imported`: the table comes with the .pptx (table_rows). `page_w`: the PDF page's
+    in PDF pt its left-aligned cells are held under, or None: table_columns), "sizes" (per row,
+    the Slides size its lines are laid out at: row_sizes)}. `imported`: the table comes with the .pptx (table_rows). `page_w`: the PDF page's
     width, by default that of a deck SLIDE_W wide (what every Slides page size is)."""
     page_w = SLIDE_W / scale if page_w is None else page_w
     # (`cell`: set at the table's size, not shaped to the PDF's width: FontMapper.shape_ratio)
@@ -1863,10 +1875,32 @@ def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = Fal
     widths = [max(TABLE_MIN_COLUMN_PT, (b - a) * scale) for a, b in zip(bounds, bounds[1:])]
     first_run = next((r for row in cells for cell in row for r in cell), None)
     z = fonts(first_run, scale)[1] if first_run else el["size"] * scale * shrink
-    y, heights, ratios, insets = table_rows(el, z, scale, imported)
+    sizes = row_sizes(el, cells, z, scale, fonts)
+    y, heights, ratios, insets = table_rows(el, z, scale, imported, sizes)
     return {"x": bounds[0] * scale, "y": y, "widths": widths, "heights": heights, "ratios": ratios, "insets": insets,
             "bounds": bounds, "cell_width": cell_width, "z": z, "first_run": first_run, "cells": cells,
-            "shrink": round(shrink, 3), "dx": dx, "held": held}
+            "shrink": round(shrink, 3), "dx": dx, "held": held, "sizes": sizes}
+
+
+def row_sizes(el: dict, cells: list[list[list[dict]]], z: float, scale: float, fonts: FontMapper) -> list[float]:
+    """Per row, the Slides size of its largest words, where its top-anchored lines take their
+    ascent and height from (table_rows): a \\footnotesize note row set at the table's size sat a
+    point above the PDF's baseline (r2_tables_v2 slide 1). Scripts, a \\multirow centred in its
+    rows and the cells a merge covers do not count; a row of no words is `z`. An empty cell holds a
+    space at its row's size (table_requests), which then never makes the row taller."""
+    merges = el.get("merges", [])
+    middle = {(m["row"], m["col"]) for m in merges if m["rows"] > 1}
+    hidden = {(m["row"] + i, m["col"] + j) for m in merges
+              for i in range(m["rows"]) for j in range(m["cols"])} - {(m["row"], m["col"]) for m in merges}
+    out = []
+    for r, row in enumerate(cells):
+        sizes = []
+        for c, runs in enumerate(row):
+            if (r, c) in hidden or (r, c) in middle:
+                continue
+            sizes += [fonts(run, scale)[1] for run in runs if run["text"].strip() and not run.get("script")]
+        out.append(max(sizes) if sizes else z)
+    return out
 
 
 def pptx_table(el: dict, scale: float, fonts: FontMapper, page_w: float | None = None) -> dict:
@@ -1878,6 +1912,21 @@ def pptx_table(el: dict, scale: float, fonts: FontMapper, page_w: float | None =
     return {"x": lay["x"], "y": lay["y"], "widths": lay["widths"], "heights": lay["heights"],
             "margins": [(TABLE_CELL_PAD, round(t, 2), TABLE_CELL_PAD, 0.0) for t in lay["insets"]],
             "middle": [[m["row"], m["col"]] for m in el.get("merges", []) if m["rows"] > 1]}
+
+
+def merged_pads(m: dict, x: list[float], bounds: list[float], dx: float, scale: float,
+                width: float | None) -> tuple[float, float]:
+    """(indentStart, indentEnd) of a flush cell spanning columns: its words where the PDF has them
+    (`merge_x`, moved with the table by `dx`), as a column's are - with none, a full-width
+    \\multicolumn note sat a padding left of the cells above (r2_tables_v2 slide 1) - but never
+    so far that they no longer fit on one line (`width`, their Slides width)."""
+    c0, c1 = m["col"], m["col"] + m["cols"]
+    left = max(0.0, (x[0] + dx - bounds[c0]) * scale - PAD_X) if m["align"] == "left" else 0.0
+    right = max(0.0, (bounds[c1] - x[1] - dx) * scale - PAD_X) if m["align"] == "right" else 0.0
+    if width is not None:
+        spare = max(0.0, (bounds[c1] - bounds[c0]) * scale - 2 * TABLE_CELL_PAD - WRAP_MARGIN - width)
+        left, right = min(left, spare), min(right, spare)
+    return left, right
 
 
 def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
@@ -1941,6 +1990,8 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
             "tableCellProperties": {"tableCellBackgroundFill": {"solidFill": {"color": rgb(f["color"])["opaqueColor"]}}},
             "fields": "tableCellBackgroundFill.solidFill.color"}})
     merged = {(m["row"], m["col"]): m for m in el.get("merges", [])}
+    merge_x = {(m["row"], m["col"]): x for m, x in zip(el.get("merges", []), el.get("merge_x", []))}
+    justified = {(r, c) for r, c in el.get("justified", [])}  # (classify: a tabularx X column's cells)
     for m in merged.values():
         reqs.append({"mergeTableCells": {"objectId": object_id, "tableRange": {
             "location": {"rowIndex": m["row"], "columnIndex": m["col"]}, "rowSpan": m["rows"], "columnSpan": m["cols"]}}})
@@ -1973,8 +2024,10 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                 if (r, c) in hidden or first_run is None:
                     continue
                 # An empty cell still has a line of the default font, which would set the row's
-                # minimum height: give it a space in the table's font and line spacing.
+                # minimum height: give it a space in the table's font, its row's size and line spacing.
                 style, fields = fonts.text_style(first_run, scale)
+                if "fontSize" in style:
+                    style["fontSize"] = pt(round(lay["sizes"][r], 2))
                 reqs += [
                     {"insertText": {"objectId": object_id, "cellLocation": loc, "text": " "}},
                     {"updateTextStyle": {"objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
@@ -2015,6 +2068,9 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
             if (r, c) in merged and (merged[(r, c)]["cols"] > 1 or merged[(r, c)].get("align") == "center"):
                 # (a \multirow or \makecell head centred over a flush column stays centred)
                 align, left_pad, right_pad = merged[(r, c)]["align"], 0.0, 0.0
+                if merged[(r, c)]["cols"] > 1 and align != "center" and (r, c) in merge_x:
+                    left_pad, right_pad = merged_pads(merged[(r, c)], merge_x[(r, c)], bounds, dx, scale,
+                                                      cell_width.get((r, c)))
             if spare[c] is not None and (r, c) not in merged and not head:  # (the column's: see `spare` above)
                 left_pad, right_pad = min(left_pad, spare[c]), min(right_pad, spare[c])
             if lay["held"][c] is not None and align == "left" and (r, c) not in merged and not head:
@@ -2022,14 +2078,25 @@ def table_requests(el: dict, slide_id: str, object_id: str, scale: float, fonts:
                 # there, the rule after the column stays on the PDF's boundary.
                 text_x0 = bounds[c] * scale + TABLE_CELL_PAD + left_pad
                 right_pad = max(right_pad, (bounds[c + 1] * scale - TABLE_CELL_PAD) - (text_x0 + lay["held"][c] * scale))
+            justify = (r, c) in justified and align == "left" and (r, c) not in merged and not head
+            if justify:
+                # A justified cell's lines end where the PDF's do: its text room is the PDF's
+                # column, never less than any of the column's justified cells needs in as many
+                # lines (wrap_window) - one edge for all of them.
+                text_x0 = bounds[c] * scale + TABLE_CELL_PAD + left_pad
+                room = bounds[c + 1] * scale - TABLE_CELL_PAD - right_pad - text_x0
+                want = max([(x1 - x0) * scale * lay["shrink"]] + [cell_width[rc] + WRAP_MARGIN for rc in justified
+                                                                  if rc[1] == c and cell_width.get(rc) is not None])
+                right_pad += max(0.0, room - want)
             # A cell that reads right to left starts at its right edge, so its alignment and
             # its two indents are mirrored (the text element's rule, one cell wide).
             rtl = bidi.reads_rtl(text)
             indent_start, indent_end = (right_pad, left_pad) if rtl else (left_pad, right_pad)
             reqs.append({"updateParagraphStyle": {
                 "objectId": object_id, "cellLocation": loc, "textRange": {"type": "ALL"},
-                "style": {"alignment": ({"left": "END", "center": "CENTER", "right": "START"} if rtl else
-                                        {"left": "START", "center": "CENTER", "right": "END"})[align],
+                "style": {"alignment": "JUSTIFIED" if justify and not rtl else
+                          ({"left": "END", "center": "CENTER", "right": "START"} if rtl else
+                           {"left": "START", "center": "CENTER", "right": "END"})[align],
                           "lineSpacing": round(100 * row_ratio[r], 1), "spaceAbove": pt(0), "spaceBelow": pt(0),
                           "indentStart": pt(round(indent_start, 2)), "indentFirstLine": pt(round(indent_start, 2)),
                           "indentEnd": pt(round(indent_end, 2)),

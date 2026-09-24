@@ -2,7 +2,7 @@
 \\hline, white stripes on an off-white theme, \\multirow heads, double vertical rules, wrapped
 p{} cells (justified, several columns at once), list continuations beside each other that are no
 table, and in emit a wrapped cell's column that keeps the PDF's breaks and number cells kept at
-the table's size."""
+the table's size, justified X cells, centred tables and smaller multicolumn note rows."""
 
 import pytest
 
@@ -283,6 +283,55 @@ def test_a_justified_cell_at_a_loose_pitch_is_one_cell_of_two_lines():
     assert t["row_lines"] == [1, 2, 1]
 
 
+def spread(page: Page, text: str, x0: float, x1: float, baseline: float) -> None:
+    """A justified line: its words' spaces stretched so that it ends at x1."""
+    words = text.split()
+    gap = (x1 - x0 - sum(len(w) * CHAR * SIZE for w in words)) / (len(words) - 1)
+    for w in words:
+        x0 = page.text(w, x0, baseline)["bbox"][2] + gap
+
+
+def x_column(justify: bool) -> dict:
+    page = Page()
+    page.hline(50, 275, 58, 0.8)
+    page.words("Term", 55, 70)
+    page.words("Meaning", 140, 70)
+    page.hline(50, 275, 74, 0.5)
+    for b, (name, first, last) in zip((88.5, 118), (("Reef", "a ridge of rock and coral", "near the surface"),
+                                                    ("Atoll", "a ring shaped reef of coral", "round a lagoon"))):
+        page.words(name, 55, b)
+        if justify:
+            spread(page, first, 140, 265, b)
+        else:
+            page.words(first, 140, b)
+        page.words(last, 140, b + 14.5)
+    page.hline(50, 275, 138, 0.8)
+    (t,) = tables(page.elements())
+    return t
+
+
+def test_a_justified_x_columns_cells_are_written_justified_to_the_pdfs_edge():
+    """tabularx's X cells are justified: their first lines' spaces stretched out to the column's
+    edge. Written START, they came out ragged, the column 8% wider than its words (r2_tables_v1
+    slide 2). JUSTIFIED now, the text room the PDF's column; ragged cells stay START."""
+    t = x_column(justify=True)
+    assert cell_texts(t)[1][1] == "a ridge of rock and coral near the surface"
+    assert t["justified"] == [[1, 1], [2, 1]]
+    fonts, scale = E.FontMapper(), E.SLIDE_W / W
+    lay = E.table_layout(t, scale, fonts, imported=True, page_w=W)
+    got = alignments(t)
+    assert got[(1, 1)][0] == got[(2, 1)][0] == "JUSTIFIED" and got[(0, 1)][0] == "START"
+    # The table no wider than the PDF's (the column's 8% room went into widening it).
+    assert sum(lay["widths"]) <= (275 - 50) * scale + 0.01
+    want = max((265 - 140) * scale, lay["cell_width"][(1, 1)] + E.WRAP_MARGIN, lay["cell_width"][(2, 1)] + E.WRAP_MARGIN)
+    rooms = {cell_room(t, lay, r, 1) for r in (1, 2)}
+    assert len(rooms) == 1 and max(rooms) <= want + 0.01  # (one edge, the PDF's where their breaks allow)
+    for r in (1, 2):
+        assert lines_at(lay["cells"][r][1], max(rooms), scale, fonts) == 2
+    ragged = x_column(justify=False)
+    assert "justified" not in ragged and alignments(ragged)[(1, 1)][0] == "START"
+
+
 def test_cells_wrapping_in_two_columns_at_once_stay_their_rows():
     """Two p{} cells of one row that both wrap: their second lines make a line of two phrases
     with nothing in the first column (r2_tables_v1 slide 2), each lower case under a phrase of
@@ -476,3 +525,29 @@ def test_a_centred_table_grows_into_both_margins_alike():
     text_x = lay["x"] + E.TABLE_CELL_PAD + start
     assert text_x == pytest.approx((el["columns"][0]["x0"] + lay["dx"]) * scale + E.TABLE_CELL_PAD - E.PAD_X, abs=0.05)
     assert lines_at(lay["cells"][1][1], cell_room(el, lay, 1, 1), scale, fonts) == 2
+
+
+def test_a_smaller_multicolumn_note_row_keeps_the_pdfs_baseline_and_indent():
+    """\\multicolumn{3}{l}{\\footnotesize Late work: ...} under the body rows: the note was laid
+    out at the table's size, a point and more above its PDF baseline in its top-anchored cell,
+    and with no indent, a padding left of the words above it (r2_tables_v2 slide 1)."""
+    page = Page()
+    rows = [[(55, "Component"), (150, "Weight"), (300, "Format")],
+            [(55, "Problem sets"), (150, "30 %"), (300, "Notebooks")],
+            [(55, "Final exam"), (150, "20 %"), (300, "Written")]]
+    ruled_table(page, rows, [70, 90, 106])
+    page.words("Late work: ten percent off per day, up to three days.", 55, 122, size=8.0)
+    page.hline(50, 400, 127, 0.8)
+    (t,) = tables(page.elements())
+    assert cell_texts(t)[3][0].startswith("Late work")
+    (m,) = [m for m in t["merges"] if m["row"] == 3]
+    assert m["cols"] > 1 and m["align"] == "left" and t["merge_x"][t["merges"].index(m)][0] == pytest.approx(55)
+    got = alignments(t)
+    assert got[(2, 0)][1] > 0 and got[(3, 0)][1] == pytest.approx(got[(2, 0)][1], abs=0.01)
+    fonts, scale = E.FontMapper(), E.SLIDE_W / W
+    lay = E.table_layout(t, scale, fonts, imported=True, page_w=W)
+    z = fonts(lay["cells"][3][0][0], scale)[1]
+    assert z < lay["z"]
+    top = lay["y"] + sum(lay["heights"][:3]) + lay["insets"][3]
+    baseline = top + E.TABLE_TEXT_TOP + E.ASCENT_EM * z + E.extra_above(lay["ratios"][3], z)
+    assert baseline == pytest.approx(t["row_baselines"][3] * scale, abs=0.2)
