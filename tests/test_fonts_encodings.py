@@ -142,14 +142,27 @@ def test_not_in_one_font_and_its_relation_in_another_are_one_symbol():
 
 
 def test_math_takes_the_family_of_the_words_around_it_not_the_longest_span():
-    # the formula is the line's longest span, the prose around it is sans
-    runs = runs_of([raw_span(0, "z", "CMMI10", 10, 15), raw_span(1, " = μ(x) + σ(x) ⊙ ε", "CMMI10", 15, 95),
+    # the formula is the line's longest span, the prose around it is sans (Fira Math among Fira Sans)
+    runs = runs_of([raw_span(0, "z", "FiraMath-Regular", 10, 15), raw_span(1, " = μ(x) + σ(x) ⊙ ε", "FiraMath-Regular", 15, 95),
                     raw_span(2, " with", "CMSS10", 95, 115)])
     assert {r["family"] for r in runs} == {"sans"}
     # after inline code the formula is not code
     runs = runs_of([raw_span(0, "Use", "CMSS10", 10, 25), raw_span(1, " torch.distributions", "CMTT10", 25, 110),
-                    raw_span(2, " θ", "CMMI10", 112, 118)])
+                    raw_span(2, " θ", "FiraMath-Regular", 112, 118)])
     assert [r["family"] for r in runs if "θ" in r["text"]] == ["sans"]
+
+
+def test_cm_math_letters_are_serif_among_sans_words():
+    # lang v2 s6 (r6, r7): beamer's sans math takes its Greek from CMMI, a thin serif italic; set
+    # in the sans words' italic (Lato, then Carlito) the β came out visibly heavier than the PDF's
+    for font in ("CMMI10", "LMMathItalic10-Regular", "NewTXMI", "ABCDEF+PazoMath-Italic"):
+        runs = runs_of([raw_span(0, "exemplar (", "CMSS10", 10, 60), raw_span(1, "β", font, 60, 66),
+                        raw_span(2, ").", "CMSS10", 66, 72)])
+        assert [r["family"] for r in runs if "β" in r["text"]] == ["serif"], font
+    # its symbols (CMSY) take the words' family, as before
+    runs = runs_of([raw_span(0, "rate", "CMSS10", 10, 40), raw_span(1, " ±", "CMSY10", 40, 50),
+                    raw_span(2, " 2", "CMSS10", 50, 60)])
+    assert {r["family"] for r in runs} == {"sans"}
 
 
 def test_math_family_falls_back_to_the_paragraph_then_serif():
