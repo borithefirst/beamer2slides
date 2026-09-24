@@ -74,7 +74,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   negates (`negate`). Every text range emit writes is UTF-16 (`emit.u16`: astral math letters). A
   run inside a sentence keeps its paragraph's size (`emit.in_sentence`); leader dots and ellipses
   never set `shape_ratio`. A multi-line box is sized from where Slides breaks its lines
-  (`emit.slides_lines`). Justified prose (`is_justified`, `stretched`) is written JUSTIFIED with a
+  (`emit.slides_lines`, `box_lines` per paragraph), keeping `emit.LINE_MARGIN` (2.5 pt) past its
+  widest line; an unmeasured paragraph never makes it narrower than the measured ones. A glyph the
+  page edge cuts stays text (only samples on the page are judged). Justified prose (`is_justified`, `stretched`) is written JUSTIFIED with a
   `\parindent` first line; `\hfill` pieces are their own right-aligned lines (`find_hfill_pieces`);
   a `\quad` is an em space at max(0.9, word space + 0.4) em; thin-spaced digits keep NBSP
   (`thin_span`). Code keeps its columns: spaces from glyph x over the column pitch (`code_pitch`),

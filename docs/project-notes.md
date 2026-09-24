@@ -4397,6 +4397,18 @@ arrowheads, a fraction picture over a word.
   `artwork_of` keeps logo words out of titles and lines; footline boxes beside band artwork are
   theme. Open: dashes (the backend contract has no `Drawing.dash`), picture seams (need Google's
   renderer).
+- **R, wave-1 regressions** (bisected offline over the five merges): D's box ended 1.0 pt past its
+  widest line when another paragraph's next word was near; on the r6 renders half of such lines
+  wrapped and none at 1.55 pt or more: `LINE_MARGIN` 2.5 pt. A paragraph unmeasured (≈, ×, D̄ have no
+  CM metrics: short symbols now take their Slides advance, combining marks zero) made the box fall
+  back to PDF widths, 0.01 pt short of a measured line: never narrower than the measured lines.
+  `in_sentence` gives a math letter its words' Google font (β in Lato Italic among Carlito).
+  `extract.Visibility` judged letters the page edge cuts as hidden ("se" for "see", which also made
+  a rule-less table): only samples on the page count. Live-only: E's bold SFSS0600 footline is
+  native now and Lato has no 500/600 to match its heavier 6 pt cut; C maps YuGothic to sans and
+  Slides' fallback CJK gothic behind Lato is heavier (try Noto Sans JP). Inherent: one paragraph's
+  widest line needing more than another's next word leaves (per-paragraph `indentEnd` would
+  solve it); wrapped-item pitch where Slides ignores spaceAbove between bullets.
 - **I, Type 3 and RTL** (`tests/test_type3.py` 20, `tests/test_bidi.py` +19): `type3.py` identifies
   each bitmap font (EC, LH, TC) from its glyph widths against the TFM widths in
   `calibration/tex_fonts.json` (made by `tools/tex_fonts.py` from the local TeX tree), which gives
