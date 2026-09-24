@@ -5,6 +5,7 @@ import re
 import unicodedata
 from pathlib import Path
 
+from . import bidi, type3
 from .fonts import font_info
 from .pdf import NO_OBJECT, OBJ_IMAGE, Char, Document, Page, char_box
 
@@ -250,9 +251,11 @@ class Visibility:
         return hidden >= HIDDEN_SAMPLES
 
 
-def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False) -> list[dict]:
+def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False,
+          chars: list[Char] | None = None) -> list[dict]:
     """Runs of glyphs on one line with the same font, size and colour, split at word gaps. Only
-    glyphs that show (`Visibility`), or with `hidden` only those on the page that don't."""
+    glyphs that show (`Visibility`), or with `hidden` only those on the page that don't. `chars`:
+    the page's characters as read (`page_chars`), when the caller has them."""
     out = []
     run: list[Char] = []
     x0, y0, x1, y1 = page.rect
@@ -275,7 +278,7 @@ def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False
         run.clear()
 
     prev: Char | None = None
-    for ch in page.chars():
+    for ch in page.chars() if chars is None else chars:
         # characters outside the page (e.g. the cut-off half of a notes-on-second-screen page)
         if ch.box[2] <= x0 or ch.box[0] >= x1 or ch.box[3] <= y0 or ch.box[1] >= y1 or \
                 visibility.hidden(ch) != hidden:
@@ -354,11 +357,21 @@ def _shadow_pieces(drawings: list[dict]) -> list[tuple]:
     return pieces
 
 
+def page_chars(page: Page) -> tuple[list[Char], set[int]]:
+    """The page's characters, those in bitmap TeX fonts (Type 3: pdflatex without cm-super) read
+    as their encoding says and named for their TeX font (`type3`), right-to-left lines as the page
+    draws them (`bidi.visual_chars`), and the font ids read as TeX fonts."""
+    chars = page.chars()
+    found = type3.page_fonts(chars)
+    return bidi.visual_chars(type3.decode(chars, found) if found else chars), set(found)
+
+
 def extract_page(page: Page, label: str) -> dict:
     n = page.index
     out_spans = []
     visibility = Visibility(page)
-    for s in spans(page, visibility):
+    chars, decoded = page_chars(page)
+    for s in spans(page, visibility, chars=chars):
         if not s["text"].strip():
             continue
         out_spans.append({
@@ -367,7 +380,8 @@ def extract_page(page: Page, label: str) -> dict:
             "id": f"p{n}s{len(out_spans)}", "text": s["text"].translate(LIGATURES), "font": s["font"],
             "size": round(s["size"], 3), "color": f"#{s['color']:06x}", "alpha": s["alpha"],
             "origin": _r(s["origin"]), "bbox": _r(s["bbox"]), "dir": _r(s["dir"], 3),
-            "smallcaps": _small_caps(page, s["chars"]),
+            # (a TeX bitmap font's small caps are a font of their own: ECCC1095)
+            "smallcaps": s["chars"][0].font_id not in decoded and _small_caps(page, s["chars"]),
         })
 
     page_drawings = page.drawings()
@@ -401,7 +415,7 @@ def extract_page(page: Page, label: str) -> dict:
 
     # The words drawn but not seen are still the frame's: beamer draws what a later overlay step
     # uncovers at alpha 0 (transparent mode), and select_overlays tells steps apart by their words.
-    hidden = [t for s in spans(page, visibility, hidden=True) if (t := s["text"].translate(LIGATURES).strip())]
+    hidden = [t for s in spans(page, visibility, hidden=True, chars=chars) if (t := s["text"].translate(LIGATURES).strip())]
 
     return {
         "index": n, "label": label,

@@ -197,6 +197,8 @@ class Span:
     decor_to: float | None = None  # where its underline, strike or highlight ends, when before its end
     pad_left: bool = False         # the first / last word of a padded \colorbox highlight
     pad_right: bool = False
+    visual: str | None = None     # the text as the page shows it, left to right (bidi: RTL lines)
+    reading: tuple | None = None  # (line, rank, base, gap before) on a right-to-left line (read_lines)
 
 
 @dataclass(eq=False)
@@ -326,6 +328,9 @@ class Paragraph:
         words as they are now read (`bidi`). Slides has to be told: in a paragraph it takes
         for left-to-right, a Hebrew sentence's full stop lands at the wrong end, a bullet
         hangs on the wrong side and the cursor walks the wrong way."""
+        bases = {s.reading[2] for s in self.lines[0].spans if s.reading} if self.lines else set()
+        if len(bases) == 1:  # the way its first line was read (PageClassifier.read_lines)
+            return "rtl" if bases.pop() == bidi.RIGHT else None
         return "rtl" if bidi.reads_rtl(" ".join(l.text for l in self.lines)) else None
 
     @property
@@ -517,7 +522,12 @@ def reading_order(line: "Line") -> list[tuple]:
 
 def gap_between(a: "Span", b: "Span") -> float:
     """The room between two neighbours on a line, whichever of them the page draws first: on a
-    right-to-left line the next span stands to the *left* of the one before it."""
+    right-to-left line the next span stands to the *left* of the one before it. Two spans read
+    one after the other on such a line need not stand side by side (a formula's first number
+    and the full stop after it, at the line's left end): the room between them is the word space
+    read between them, or none (`PageClassifier.read_lines`)."""
+    if a.reading and b.reading and a.reading[0] == b.reading[0] and b.reading[1] == a.reading[1] + 1:
+        return b.reading[3]
     return max(b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1)
 
 
@@ -529,6 +539,7 @@ def span_runs(spans: list[Span]) -> list[dict]:
     main = max(spans, key=lambda s: s.size) if spans else None
     base_family = next((s.info.family for s in spans if s.info.family not in ("math", "icon")), "sans")
     spans = bidi.logical_spans(spans)
+    lead = bidi.lead_mark(spans)
     for i, s in enumerate(spans):
         text = s.text
         if i and gap_between(spans[i - 1], s) > 0.15 * s.size and not text.startswith(" "):
@@ -554,6 +565,8 @@ def span_runs(spans: list[Span]) -> list[dict]:
                 runs[-1]["text"] += text
             else:
                 runs.append({"text": text, **style})
+    if lead and runs:  # (a right-to-left cell starting with a Latin word says which way it reads)
+        runs[0]["text"] = lead + runs[0]["text"]
     return runs
 
 
@@ -1574,10 +1587,11 @@ class PageClassifier:
             info = font_info(s["font"])
             text = type3_symbol(s["text"], type3_words) if s["font"] == "Type3" else \
                 compose_accents(s["text"], info.family == "mono") if info.family not in ("math", "icon") else s["text"]
-            # The page draws right-to-left text left to right (bidi.py): put its letters back.
-            text = bidi.logical_text(text)
+            # The page draws right-to-left text left to right (bidi.py): put its letters back, on
+            # their own for now and with their line around them once lines are known (read_lines).
+            visual, text = text, bidi.logical_text(text)
             span = Span(s["id"], text, s["font"].split("+", 1)[-1], s["size"], color, r,
-                        s["origin"][1], abs(dy) < 0.01 and dx > 0, info)
+                        s["origin"][1], abs(dy) < 0.01 and dx > 0, info, visual=visual)
             if s.get("smallcaps"):  # OpenType small caps, found from glyph ids (extract.small_caps_spans)
                 span.info = replace(span.info, smallcaps=True)
             span.link = next((uri for lr, uri in links if lr.contains(r.cx, r.cy)), None)
@@ -1827,6 +1841,32 @@ class PageClassifier:
         words are prose)."""
         return w.info.family != "math" and not w.font.startswith(("CMSY", "CMMI")) and (
             not w.info.italic or re.fullmatch(r"[^\W\d_]{3,}[,.;:]?", w.text.strip()) is not None)
+
+    @staticmethod
+    def read_lines(lines: list[Line], spans: list[Span]) -> None:
+        """Each line that holds right-to-left letters read as one (`bidi.logical_line`): its spans'
+        reading order (`Span.reading`, which `bidi.logical_spans` keeps) and their texts, which a
+        span alone cannot say - ':7' in a Hebrew title is '7:', 12-13 is drawn 13-12, a formula
+        starting with a number is one island, and a Hebrew line starting with a Latin name still
+        reads right to left (the page's own direction, `bidi.page_direction`). A span whose text
+        something rewrote since `spans` made it keeps that text."""
+        prior = bidi.page_direction(s.visual or "" for s in spans)
+        for n, line in enumerate(lines):
+            items = sorted(line.spans, key=lambda s: s.rect.x0)
+            if not all(s.visual is not None and s.horizontal for s in items) or \
+                    not any(bidi.has_rtl(s.visual) for s in items):
+                continue
+            texts = [s.visual for s in items]
+            widths = [max(b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1) for a, b in zip(items, items[1:])]
+            joins = [" " if w > 0.15 * b.size and not a.visual.endswith(" ") and not b.visual.startswith(" ")
+                     else "" for w, a, b in zip(widths, items, items[1:])]
+            base = bidi.line_base(texts, prior)
+            spaced = bidi.spaced(texts, base, joins)
+            for rank, (i, text) in enumerate(bidi.logical_line(texts, base, joins)):
+                s = items[i]
+                if s.text == bidi.logical_text(s.visual):
+                    s.text = text
+                s.reading = (n, rank, base, widths[spaced[i]] if i in spaced else 0.0)
 
     @staticmethod
     def gutter(spans: list[Span], a: Span, b: Span, size: float) -> bool:
@@ -4661,6 +4701,7 @@ class PageClassifier:
         self.analyse_graphics()
         # (after the braces: a brace's CMEX pieces go with their label, see join_braces)
         lines = self.split_line_numbers(self.join_hanging_operators(self.join_braces(self.build_lines(spans))))
+        self.read_lines(lines, spans)
         self.assign_reasons(lines)
         plain_tables = self.plain_tables(lines)
         body_lines = [l for l in lines if l.reason is None and abs(l.size - self.body) < 1]
@@ -4741,7 +4782,8 @@ class PageClassifier:
                                     "text_x0": round(line.x0, 2),
                                     "lines": [{"baseline": round(line.baseline, 2), "x0": round(line.x0, 2),
                                                "x1": round(line.x1, 2)}],
-                                    "runs": self.runs(par)}],
+                                    "runs": self.runs(par),
+                                    **({"direction": par.direction} if par.direction else {})}],
                     "spans": [s.id for s in line.spans],
                 })
 
