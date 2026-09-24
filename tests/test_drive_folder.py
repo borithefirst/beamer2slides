@@ -1,6 +1,6 @@
-"""`drive_folder`: where the files beamer2slides creates in Drive go - nowhere new unless asked,
-one folder when asked, the app's own folder for `auto`, and a folder the app cannot use refused
-before anything is created. No Google calls."""
+"""`drive_folder`: where the files beamer2slides creates in Drive go - the app's own folder by
+default (`auto`), the old places for `none`, a folder by id when asked, and a folder the app
+cannot use refused before anything is created. No Google calls."""
 
 import pytest
 
@@ -47,24 +47,38 @@ class Drive:
 
 @pytest.fixture(autouse=True)
 def nothing_set(monkeypatch):
-    monkeypatch.delenv(drive_folder.FOLDER_ENV, raising=False)
+    monkeypatch.delenv(drive_folder.FOLDER_ENV, raising=False)   # (conftest sets `none`)
 
 
-def test_nothing_asked_is_what_it_always_did():
+def test_none_is_what_it_always_did(monkeypatch):
     drive = Drive()
-    assert drive_folder.parents(drive) is None and drive_folder.parents(drive, ["P0"]) == ["P0"]
+    with drive_folder.use_folder("none"):
+        assert drive_folder.parents(drive) is None and drive_folder.parents(drive, ["P0"]) == ["P0"]
+    monkeypatch.setenv(drive_folder.FOLDER_ENV, "none")
+    assert drive_folder.parents(drive) is None
     assert drive.created == []
 
 
-def test_auto_makes_the_apps_folder_once_and_finds_it_again(monkeypatch):
+def test_the_default_makes_the_apps_folder_once_and_finds_it_again():
     drive = Drive()
-    with drive_folder.use_folder("auto"):
-        assert drive_folder.parents(drive, ["P0"]) == ["F1"]
-        assert drive_folder.parents(drive) == ["F1"]
+    assert drive_folder.spec() == "auto"
+    assert drive_folder.parents(drive, ["P0"]) == ["F1"]
+    assert drive_folder.parents(drive) == ["F1"]
     assert [b["mimeType"] for b in drive.created] == [FOLDER_MIME]
     drive.files_["F1"]["name"] = "renamed by the person"
-    monkeypatch.setenv(drive_folder.FOLDER_ENV, "auto")        # (the env var says the same)
     assert drive_folder.parents(drive) == ["F1"] and len(drive.created) == 1
+
+
+def test_a_drive_that_will_not_make_the_folder_costs_no_conversion(capsys):
+    """`auto` is nobody's explicit request: when Drive refuses the list or the folder, the file
+    goes where `none` puts it, and says so."""
+    class Refusing(Drive):
+        def list(self, **kw):
+            return Request(http_error(403, "insufficient scope"))
+
+    drive = Refusing()
+    assert drive_folder.parents(drive, ["P0"]) == ["P0"] and drive_folder.parents(drive) is None
+    assert "no 'beamer2slides' folder" in capsys.readouterr().out
 
 
 def test_a_folder_the_app_cannot_see_is_refused_by_name():
@@ -80,7 +94,8 @@ def test_a_folder_the_app_cannot_see_is_refused_by_name():
 
 def test_the_base_and_a_backup_copy_go_into_the_folder_asked_for():
     drive = Drive({"DECK": {"name": "Talk", "parents": ["P0"]}, "FOLD": {"mimeType": FOLDER_MIME}})
-    snapshot.save_drive(drive, {"presentationId": "DECK"}, info={"name": "Talk", "parents": ["P0"]})
+    with drive_folder.use_folder("none"):
+        snapshot.save_drive(drive, {"presentationId": "DECK"}, info={"name": "Talk", "parents": ["P0"]})
     assert drive.created[-1]["parents"] == ["P0"]                     # beside the deck, as before
     with drive_folder.use_folder("FOLD"):
         snapshot.save_drive(drive, {"presentationId": "DECK"}, info={"name": "Talk", "parents": ["P0"]})
@@ -99,7 +114,8 @@ def test_a_new_deck_goes_into_the_folder_asked_for():
     with drive_folder.use_folder("FOLD"):
         emit.import_presentation(slides, drive, "Talk", 400, 300, io.BytesIO(b"pptx"), None)
     assert drive.created[-1]["parents"] == ["FOLD"] and drive.created[-1]["name"] == "Talk"
-    emit.import_presentation(slides, drive, "Talk", 400, 300, io.BytesIO(b"pptx"), None)
+    with drive_folder.use_folder("none"):
+        emit.import_presentation(slides, drive, "Talk", 400, 300, io.BytesIO(b"pptx"), None)
     assert "parents" not in drive.created[-1]
 
 

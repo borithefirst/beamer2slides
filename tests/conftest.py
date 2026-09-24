@@ -37,6 +37,18 @@ def fetcher():
         yield lambda fn: stack.enter_context(google_auth.use_fetcher(fn))
 
 
+LIVE = {"slides", "sync", "inverse", "docs"}
+
+
+@pytest.fixture(autouse=True)
+def _drive_folder(request, monkeypatch):
+    """The offline fakes of Drive model files, not folders: their `files.create` bodies are
+    compared as they always were, so an offline test runs with `--drive-folder none`. The default,
+    `auto`, is tested in `test_drive_folder.py`, and the live suites run with it."""
+    if not LIVE & {m.name for m in request.node.iter_markers()}:
+        monkeypatch.setenv("B2S_DRIVE_FOLDER", "none")
+
+
 def pytest_collection_modifyitems(items):
     for item in items:
         if not any(m.name == "xdist_group" for m in item.iter_markers()):

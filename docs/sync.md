@@ -153,8 +153,8 @@ googleusercontent capability URL a process at Google may not fetch):
   Drive refuses exports over ~10 MB; a picture neither route brings stays unsigned.
 `read_deck` (pull, adopt) falls back to the same export for a picture it cannot download.
 The base lists slides in the source's order, not the deck's, so a deck reorder stays a deck edit. Storage: locally in `<out>/sync/base.json`, and in Drive as a JSON file created by
-the app (`drive.file` scope; beside the deck, or in the `--drive-folder` when one is set,
-`drive_folder.py`) whose id is kept in the presentation file's `appProperties.b2sBase`;
+the app (`drive.file` scope; in the app's "beamer2slides" folder, or beside the deck with
+`--drive-folder none`, `drive_folder.py`) whose id is kept in the presentation file's `appProperties.b2sBase`;
 Drive is authoritative (anyone with the deck can sync), the local copy is a cache and fallback.
 The base is replaced only when a sync wrote something or adopted converged deck fields (`generation` + 1).
 Two crash-recovery keys live beside the slides: `pending` (a run has started writing) and `cleanup`

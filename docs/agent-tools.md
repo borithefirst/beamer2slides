@@ -204,10 +204,11 @@ download refused, 0 fetches, every picture of the base signed.
 
 **Where Drive files land.** `AgentContext.drive_folder` (`$B2S_DRIVE_FOLDER`, `--drive-folder`) puts
 everything the library creates in Drive - decks, documents, sync bases, `--backup drive` copies,
-the temporary staging files - into one folder: a folder id the app can see (under `drive.file`,
-one it created or was opened with; another is refused by name before anything is created), or
-`"auto"`, a "beamer2slides" folder of the app's own, found by its `b2sHome` appProperty and
-created once. None keeps the old places: new decks and documents in My Drive's root, a base or a
+the temporary staging files - into one folder. The default, `"auto"`, is a "beamer2slides" folder
+of the app's own, found by its `b2sHome` appProperty and created once (a Drive that will not list
+or make it gets the old places, with a warning). A folder id works if the app can see it (under
+`drive.file`, one it created or was opened with; another is refused by name before anything is
+created). `"none"` keeps the old places: new decks and documents in My Drive's root, a base or a
 backup beside its file (`drive_folder.py`, `tests/test_drive_folder.py`).
 
 **Fonts go through the same door, or come from disk.** `deck_adopt` wants the deck's own fonts,

@@ -82,9 +82,9 @@ class AgentContext:
     #: None: they are downloaded from GitHub through `fetch_google_content` (or urllib), and a
     #: fetcher that refuses GitHub means the deck is set in stand-ins, which the result names.
     font_source: str | Path | None = None
-    #: Where every file the library creates in Drive goes (`drive_folder`): a folder id the app
-    #: can see, or `"auto"` for a "beamer2slides" folder of the app's own. None: new decks and
-    #: documents in My Drive's root, a base or backup beside its file, as at a terminal.
+    #: Where every file the library creates in Drive goes (`drive_folder`): `"auto"` for a
+    #: "beamer2slides" folder of the app's own, `"none"` for My Drive's root and a base or backup
+    #: beside its file, or a folder id the app can see. None: `$B2S_DRIVE_FOLDER`, else `"auto"`.
     drive_folder: str | None = None
 
     @property

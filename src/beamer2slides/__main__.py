@@ -229,11 +229,11 @@ def main() -> None:
                          "signed from this run's files and a Drive export instead; inline formula "
                          "pictures keep their predicted places and `fidelity` cannot run "
                          "(= $B2S_NO_DOWNLOADS=1, net.no_downloads)")
-    ap.add_argument("--drive-folder", metavar="ID|auto",
-                    help="put every file this creates in Drive (decks, documents, sync bases, backup "
-                         "copies, temporary staging) into this folder; `auto` = a 'beamer2slides' folder "
-                         "of the app's own (= $B2S_DRIVE_FOLDER, drive_folder.py). Default: new decks in "
-                         "My Drive's root, a base beside its deck")
+    ap.add_argument("--drive-folder", metavar="auto|none|ID",
+                    help="where every file this creates in Drive goes (decks, documents, sync bases, "
+                         "backup copies, temporary staging): auto (default) = a 'beamer2slides' folder of "
+                         "the app's own; none = new decks in My Drive's root and a base beside its deck; "
+                         "or a folder id (= $B2S_DRIVE_FOLDER, drive_folder.py)")
     sub = ap.add_subparsers(dest="command", required=True)
     for name, help_text in (("classify", "extract + classify a PDF, with debug images"),
                             ("convert", "full conversion into a Google Slides deck"),

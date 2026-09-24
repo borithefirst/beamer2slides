@@ -6,15 +6,18 @@ id the deck or document keeps in its appProperties); a copy kept before a destru
 (`guard.backup_deck`, `--backup drive`); and staging files a sync deletes after use (`Sync.stage`,
 `doc_sync`'s picture staging). Rebuilding a deck in place writes over the same file, wherever it is.
 
-With nothing said, new decks and documents land in My Drive's root and a base or a backup copy
-beside the file it belongs to - which is what it always did. `use_folder(spec)` (per context),
-`$B2S_DRIVE_FOLDER`, the CLI's `--drive-folder` or `AgentContext.drive_folder` put every one of them
-into one folder instead:
+Every one of them goes into one folder, so a person's Drive gets one "beamer2slides" folder and
+nothing else. `use_folder(spec)` (per context), `$B2S_DRIVE_FOLDER`, the CLI's `--drive-folder` or
+`AgentContext.drive_folder` say which:
+- `auto` (the default, decided 2026-09-24): the app's own folder, "beamer2slides" in My Drive,
+  found by its `b2sHome` appProperty (so renaming or moving it keeps it) and created the first
+  time. Should Drive refuse to list or make it, the file goes where `none` would put it, with a
+  warning: a conversion is not lost over where its deck lands.
 - a folder id: that folder. Under the `drive.file` scope the app sees only what it created or was
   opened with, so a folder made in the Drive UI by hand is refused here, by name, before anything
-  is created - `auto` is the one that always works.
-- `auto`: the app's own folder, "beamer2slides" in My Drive, found by its `b2sHome` appProperty
-  (so renaming or moving it keeps it) and created the first time.
+  is created.
+- `none`: where files went before there was a folder - new decks and documents in My Drive's
+  root, a base or a backup copy beside the file it belongs to.
 
 A deck found by its URL keeps finding its base wherever either is: the base is looked up by the
 id the deck carries, never by folder.
@@ -31,13 +34,14 @@ FOLDER_MIME = "application/vnd.google-apps.folder"
 HOME_PROPERTY = "b2sHome"
 HOME_NAME = "beamer2slides"
 AUTO = "auto"
+NONE = "none"
 
 _spec: ContextVar[str | None] = ContextVar("beamer2slides.drive_folder", default=None)
 
 
 @contextmanager
 def use_folder(spec: str | None):
-    """Create every Drive file inside this block in `spec` (a folder id, or `auto`)."""
+    """Create every Drive file inside this block in `spec` (a folder id, `auto` or `none`)."""
     token = _spec.set(spec)
     try:
         yield
@@ -45,27 +49,33 @@ def use_folder(spec: str | None):
         _spec.reset(token)
 
 
-def spec() -> str | None:
-    """The folder asked for in this context, else `$B2S_DRIVE_FOLDER`, else None (the defaults)."""
-    return _spec.get() or os.environ.get(FOLDER_ENV) or None
+def spec() -> str:
+    """The folder asked for in this context, else `$B2S_DRIVE_FOLDER`, else `auto`."""
+    return _spec.get() or os.environ.get(FOLDER_ENV) or AUTO
 
 
 def folder_id(drive) -> str | None:
-    """The id of the folder new files go into (None: nobody asked for one). Raises SystemExit
-    when the folder named cannot take them, before anything was created."""
+    """The id of the folder new files go into (None: `none`, or the app's folder could not be had).
+    Raises SystemExit when a folder named by id cannot take them, before anything was created."""
     from .gapi import HttpError, status_of
     from .gslides import execute
     s = spec()
-    if not s:
+    if s == NONE:
         return None
     if s == AUTO:
         q = (f"appProperties has {{ key='{HOME_PROPERTY}' and value='1' }} and mimeType='{FOLDER_MIME}' "
              f"and trashed=false")
-        found = execute(drive.files().list(q=q, spaces="drive", fields="files(id)", pageSize=10)).get("files", [])
-        if found:
-            return found[0]["id"]
-        return execute(drive.files().create(body={"name": HOME_NAME, "mimeType": FOLDER_MIME,
-                                                  "appProperties": {HOME_PROPERTY: "1"}}, fields="id"))["id"]
+        try:
+            found = execute(drive.files().list(q=q, spaces="drive", fields="files(id)",
+                                               pageSize=10)).get("files", [])
+            if found:
+                return found[0]["id"]
+            return execute(drive.files().create(body={"name": HOME_NAME, "mimeType": FOLDER_MIME,
+                                                      "appProperties": {HOME_PROPERTY: "1"}}, fields="id"))["id"]
+        except (HttpError, OSError) as e:
+            print(f"warning: no '{HOME_NAME}' folder in Drive ({type(e).__name__}: {e}); the file goes "
+                  f"where --drive-folder {NONE} puts it")
+            return None
     try:
         info = execute(drive.files().get(fileId=s, fields="id,mimeType,trashed"))
     except HttpError as e:
@@ -78,8 +88,8 @@ def folder_id(drive) -> str | None:
 
 
 def parents(drive, beside: list[str] | None = None) -> list[str] | None:
-    """What a new file's `parents` should be: the folder asked for, else `beside` (the parents of
-    the file it belongs to, for a base or a backup), else None (My Drive's root)."""
+    """What a new file's `parents` should be: the folder (`folder_id`), else `beside` (the parents
+    of the file it belongs to, for a base or a backup), else None (My Drive's root)."""
     fid = folder_id(drive)
     if fid:
         return [fid]
