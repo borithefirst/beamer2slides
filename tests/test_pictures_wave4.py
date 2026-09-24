@@ -146,3 +146,35 @@ def test_a_comma_over_its_listing_frame_edge_stays_on_its_line():
              for par in e["paragraphs"]]
     assert any(ln.rstrip().endswith('"order-service",') for ln in lines), lines
     assert "," not in [ln.strip() for ln in lines]
+
+
+def test_a_label_of_a_row_centred_over_a_callout_stays_with_its_row():
+    """r1_design_v1 s5 (design-v17): a timeline's labels 'Week 0 ... Week 6' stood in a row, and
+    the one centred over a callout box below it ('Median time to go-live: 5.5 weeks') was taken
+    for that box's title and went into its picture, alone of its row: the row's other labels
+    stayed text. A label of a row of like labels that stay text is the row's."""
+    from .test_charts_diagrams import Page, deck, ellipse, lines, rect
+
+    bold = "LMSans10-Bold"
+    p = Page()
+    p.draw(lines((64.6, 127.0), (404.7, 127.0)), type="s", fill=None, stroke="#bfbfbf", width=1.99)
+    for i, (x, name, week) in enumerate([(46.3, "Kick-off", "0"), (131.4, "Survey", "1"), (220.9, "Install", "2\u20133"),
+                                         (306.0, "Pilot", "4"), (388.9, "Go-live", "6")]):
+        cx = 64.55 + 85.05 * i
+        p.draw(ellipse(cx, 127.05, 12.75, 12.75), fill="#1f3a93")
+        p.text(str(i + 1), cx - 3, 130.8, size=10.91, font=bold, w=6.0, color="#ffffff")
+        p.text(name, x, 101.8, size=9.96, font=bold, w=5.0 * len(name), color="#262626")
+        x0 = cx - (15.5 if len(week) == 1 else 20.55)
+        p.text("Week", x0, 159.2, size=9.96, w=22.8, color="#666666")
+        p.text(week, x0 + 26.2, 159.2, size=9.96, w=4.9 * len(week), color="#666666")
+    p.draw(rect(157.9, 184.2, 311.4, 200.3), type="fs", fill="#fef5e7", stroke="#f39c12", width=0.8)
+    x = 161.6
+    for word, font in [("Median", None), ("time", None), ("to", None), ("go-live:", None), ("5.5", bold), ("weeks", bold)]:
+        kw = {"font": font} if font else {}
+        x = p.text(word, x, 194.7, size=9.96, w=4.9 * len(word), color="#262626", **kw)["bbox"][2] + 3.3
+    p.words("Body text that sets the size of the deck and more words", 30, 225, size=9.96)
+    slide = deck(p)["slides"][0]
+    texts = ["".join(r["text"] for par in e["paragraphs"] for r in par["runs"]) for e in slide["elements"]
+             if e["kind"] == "text"]
+    weeks = sorted(t for t in texts if t.startswith("Week"))
+    assert weeks == ["Week 0", "Week 1", "Week 2\u20133", "Week 4", "Week 6"], texts

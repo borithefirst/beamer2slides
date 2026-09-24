@@ -2958,7 +2958,7 @@ class PageClassifier:
             turned = line.reason == "rotated"  # a y axis title, read bottom to top
             if (line.reason is not None and not turned) or line.bullet or line.tab is not None or not text or \
                     len(text.split()) > 6 or line.size > 1.3 * self.body or CAPTION_RE.match(text) or \
-                    (text.endswith(".") and len(text.split()) >= 4):
+                    (text.endswith(".") and len(text.split()) >= 4) or self.in_label_row(line, lines):
                 continue
             r = line.rect
             for reg, box in plots:
@@ -2972,6 +2972,18 @@ class PageClassifier:
                     line.reason = "figure"
                     self.title_bridges.append(union_all([r, box]))
                     break
+
+    @staticmethod
+    def in_label_row(line: Line, lines: list[Line]) -> bool:
+        """One of a row of like short labels two or more of which stay text ('Week 0  Week 1
+        Week 2-3  Week 4' over a timeline): the row's, not the title of a drawing it happens to
+        be centred over (r1_design_v1 s5, the label above a callout box alone went into the
+        callout's picture, its row left text)."""
+        face = (line.spans[0].font, round(line.size, 1))
+        row = [o for o in lines if o is not line and o.reason is None and not o.bullet and o.spans and
+               (o.spans[0].font, round(o.size, 1)) == face and abs(o.baseline - line.baseline) <= 0.25 * line.size
+               and len(o.text.replace(" ", "")) <= 12]
+        return len(row) >= 2
 
     # -- paragraphs -------------------------------------------------------------
 
