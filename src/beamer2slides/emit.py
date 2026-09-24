@@ -107,11 +107,16 @@ OPTICAL_WIDTH_MAX = 1.13
 # 8 pt, 1.06 at 9 pt and 0.80 at 14.4 pt; Lato Bold's is 1.38-1.39 times its Regular's. A sans cut
 # nearer the Bold than the Regular (6 pt and less: beamer's \tiny footlines, frame counters) is
 # set heavier than regular, so a footline keeps the weight it has against the body text: in Lato
-# Regular, "M. Keller" and "June 2026" read as a lighter face than the PDF's. The weight is 600,
-# which the API keeps "not bold" (bold is 700 and up) and the renderer draws with the nearest
-# heavier face Slides has (Lato has 400 and 700).
+# Regular, "M. Keller" and "June 2026" read as a lighter face than the PDF's. Slides draws Lato
+# 500 and 600 as its Regular and 700-800 as its Bold (tools/probe_font_weights.py, r8: ink per pt
+# 79.0 at 400-600, 106.9 at 700 and 800), so 600 drew the footline as light as before. The weight
+# is 800: drawn Bold, read back `bold: true` with weight 800, which the converter's own bold (700)
+# never writes - deck_ir reads our 800 back regular. It is written without a `bold` field: the
+# API applies `bold` after the weight, and a `bold: false` could take it back to 400.
 OPTICAL_WEIGHT_DESIGN = {"sans": 6.0}
-OPTICAL_WEIGHT = 600
+OPTICAL_WEIGHT = 800
+# What converted decks wrote before (drawn Regular): still read back regular.
+OPTICAL_WEIGHTS_READ = (600, OPTICAL_WEIGHT)
 
 
 def optical_width(family: str, design: float) -> float:
@@ -290,8 +295,8 @@ class FontMapper:
                     ["weightedFontFamily", "fontSize", "italic"])
         if self.optical_weight(run):
             return ({"weightedFontFamily": {"fontFamily": family, "weight": OPTICAL_WEIGHT}, "fontSize": pt(size),
-                     "bold": False, "italic": run["italic"]},
-                    ["weightedFontFamily", "fontSize", "bold", "italic"])
+                     "italic": run["italic"]},
+                    ["weightedFontFamily", "fontSize", "italic"])
         return ({"fontFamily": family, "fontSize": pt(size), "bold": run["bold"], "italic": run["italic"]},
                 ["fontFamily", "fontSize", "bold", "italic"])
 
