@@ -119,6 +119,15 @@ TRACK_MIN, TRACK_MAX = 0.08, 0.28
 TRACK_BAND = 0.06     # em around the stretch's tracking
 TRACK_WORD = 0.15     # em past the tracking that makes a word gap
 TRACK_LETTERS = 4     # tracked gaps between letters a stretch needs at least
+# Slides has no letter spacing. Joined, 'S P A C E D' (\textls[200], 0.2 em) came out 'SPACED':
+# the tracking was gone. Its own space is 0.19 em in Lato and 0.24 in PT Serif at the calibrated
+# sizes (calibration/advances.json; the fonts' no-break space is a space's width, not yet probed
+# on Slides' renderer), so a stretch tracked by
+# this much or more has a no-break space between its letters - nearer the PDF's gaps than none,
+# and no line breaks inside its words - and a word gap of a no-break space and a space (the PDF's
+# is the tracking plus a space). Tighter tracking (microtype's small caps, 0.11 em) stays joined.
+TRACK_SPACED = 0.14
+LETTER_SPACE = " "
 
 
 def _gaps(chars: list[Char]) -> list[float | None]:
@@ -138,13 +147,14 @@ def _gaps(chars: list[Char]) -> list[float | None]:
     return out
 
 
-def tracked_gaps(chars: list[Char]) -> dict[int, bool]:
+def tracked_gaps(chars: list[Char], tracks: dict[int, float] | None = None) -> dict[int, bool]:
     """Letterspaced stretches: character index -> True where the gap before it is a word gap,
-    False where it is the tracking between two letters of a word (never a space). A stretch is a
+    False where it is the tracking between two letters of a word (never a word space). A stretch is a
     run of glyphs in one font on one line none of which touch (each gap at least TRACK_MIN): the
     tracking (within TRACK_BAND of the median), a kern off it, or a word gap (TRACK_WORD more),
     with at least TRACK_LETTERS tracked gaps between letters. In ordinary words the glyphs touch
-    and only word spaces stand apart. Math and monospaced glyphs are left alone."""
+    and only word spaces stand apart. Math and monospaced glyphs are left alone. `tracks`, when
+    given, gets each index's stretch tracking (em)."""
     gaps = _gaps(chars)
     out: dict[int, bool] = {}
     i = 1
@@ -171,6 +181,8 @@ def tracked_gaps(chars: list[Char]) -> dict[int, bool]:
             continue
         for k in seg:
             out[k] = gaps[k] >= track + TRACK_WORD
+            if tracks is not None:
+                tracks[k] = track
     return out
 
 
@@ -403,12 +415,28 @@ def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False
              if not (ch.box[2] <= x0 or ch.box[0] >= x1 or ch.box[3] <= y0 or ch.box[1] >= y1)
              and visibility.hidden(ch) == hidden]
     shown = _accent_overhang(page, shown)
-    tracked, narrow = tracked_gaps(shown), narrow_spaces(shown)
+    tracks: dict[int, float] = {}
+    tracked, narrow = tracked_gaps(shown, tracks), narrow_spaces(shown)
+
+    def letter_space(at: Char, width: float) -> Char:
+        """A no-break space `width` pt wide after the glyph `at` (TRACK_SPACED)."""
+        ux, uy = at.dir
+        px, py = at.origin[0] + ux * at.advance, at.origin[1] + uy * at.advance
+        return Char(LETTER_SPACE, at.font, at.size, at.color, at.alpha, (px, py),
+                    char_box(px, py, ux, uy, width, at.size, at.ascent, at.descent),
+                    at.dir, NO_OBJECT, at.font_id, width, True, at.ascent, at.descent)
+
     prev: Char | None = None
     for k, ch in enumerate(shown):
         space = None
         if k in tracked and prev is not None and not combining_mark(ch.c):
-            # letterspaced: a tracked gap joins, a word gap is a space (classify reads one between spans)
+            # letterspaced: a tracked gap joins, a word gap is a space (classify reads one between
+            # spans); a wide tracking is a no-break space between letters, and one more at a word gap
+            spaced = tracks[k] >= TRACK_SPACED and prev.c.strip() and ch.c.strip()
+            if spaced:
+                ux, uy = ch.dir
+                gap = (ch.origin[0] - prev.origin[0]) * ux + (ch.origin[1] - prev.origin[1]) * uy - prev.advance
+                run.append(letter_space(prev, tracks[k] * ch.size if tracked[k] else max(0.0, gap)))
             if tracked[k]:
                 flush()
             run.append(ch)

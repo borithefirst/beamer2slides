@@ -63,15 +63,22 @@ def test_tracked_small_caps_take_no_space_at_a_kern():
 
 
 def test_letterspaced_words_keep_their_word_gaps():
-    # textfx v3 s5: soul's \so{less is more}, letters 0.25 em apart (a kern 0.222), words 0.65
+    # textfx v3 s5: soul's \so{less is more}, letters 0.25 em apart (a kern 0.222), words 0.65:
+    # Slides has no letter spacing, so a no-break space (Lato 0.192 em) stands between letters
+    # and before each word gap (wave 3 had joined them tight: 'less is more')
     so = glyphs([(":", 0), ("l", 0.55), ("e", 0.25), ("s", 0.25), ("s", 0.25), ("i", 0.65), ("s", 0.25),
                  ("m", 0.65), ("o", 0.25), ("r", 0.222), ("e", 0.25)], font="LMSans10-Regular")
-    assert " ".join(texts(so)) == ": less is more"
-    # textfx v1 s8: \textls[200]{SPACED} among ordinary words, P-A kerned to 0.116
+    assert " ".join(texts(so)) == ":  l e s s  i s  m o r e"
+    # textfx v1 s8: \textls[200]{SPACED} among ordinary words, P-A kerned to 0.116; the PDF line
+    # is 361.8 Slides pt, with the spaces 362.2, tight 339.3
     line = glyphs([("The", 0), ("word", 0.33), ("S", 0.5), ("P", 0.2), ("A", 0.116), ("C", 0.173), ("E", 0.2),
                    ("D", 0.2), ("is", 0.5), ("letterspaced", 0.33)], font="LMSans10-Regular")
-    assert " ".join(texts(line)) == "The word SPACED is letterspaced"
-    # before: 'S PA C E D' and 'l e s s i s m o r e'
+    assert " ".join(texts(line)) == "The word  S P A C E D  is letterspaced"
+    # textfx v2 s1: a title tracked by 0.147 em (READABLE SLIDES: PDF 236.8 pt, spaced 235.2, tight 181.5)
+    title = glyphs([("R", 0), ("E", 0.147), ("A", 0.147), ("D", 0.147), ("S", 0.52), ("L", 0.147), ("I", 0.147)],
+                   font="LMSans10-Bold")
+    assert " ".join(texts(title)) == "R E A D  S L I"
+    # before wave 3: 'S PA C E D' and 'l e s s i s m o r e'
 
 
 def test_ordinary_single_letter_words_are_no_letterspacing():
