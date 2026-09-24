@@ -661,13 +661,20 @@ def label_of(spans: list[Span]) -> dict | None:
             "bold": s.info.bold, "italic": s.info.italic, "color": s.color}
 
 
+OUTLINE_MIN = 0.3  # pt: a stroke this wide around a filled bullet shows as an outline
+
+
 def bullet_shape(d: dict | None) -> dict:
     """Shape and colour of a bullet drawn as a path (emit picks the Slides glyph): a filled
     rectangle is a square, curves are a disc (a circle when only stroked), three corners a
-    triangle."""
+    triangle. A filled mark outlined in another colour (a legend's swatch) has no Slides glyph:
+    none (it becomes a picture beside its text, r3_charts_v1 s9)."""
     if not d:
         return {}
     filled = d["type"] in ("f", "fs") and d.get("fill")
+    if filled and d["type"] == "fs" and d.get("stroke") and d["stroke"] != d["fill"] and \
+            (d.get("width") or 0.0) >= OUTLINE_MIN and (d.get("stroke_opacity") or 0.0) > 0.5:
+        return {}
     ops = set(d["items"])
     points = {(round(x, 1), round(y, 1)) for op, pts in d.get("path", []) for x, y in pts}
     if ops <= {"r", "e", "q", "u"}:
@@ -4820,12 +4827,21 @@ def ball_number(bullet: dict, label: dict) -> str:
     """The number a ball shows. A ball template draws the whole label on a ball sized for a
     letter or two: \\begin{enumerate}[(a)] puts white parentheses at the ball's edges, over its
     white rim and the page, where nobody sees them (r3_dense_v2 s7). In Slides' wider font
-    they came out as white crescents cutting the ball."""
+    they came out as white crescents cutting the ball. Only parentheses at the edge are unseen:
+    a label narrower than the ball keeps them on its dark face, where they show ('(i)', '(ii)'
+    on a 10 pt ball, r3_dense_v3 s7, while '(iii)' reaches the rim). The label is centred on
+    the ball, so its half width is the ball's centre less its left edge."""
     text = bullet["text"]
     white = all(int(label.get("color", "#000000")[i:i + 2], 16) >= 0xE0 for i in (1, 3, 5))
     if bullet["kind"] == "image" and white and len(text) > 2 and text[0] == "(" and text[-1] == ")":
-        return text[1:-1]
+        x0, _, x1, _ = bullet["bbox"]
+        half = (x0 + x1) / 2 - label.get("x0", x0)
+        if half >= BALL_RIM * (x1 - x0) / 2:
+            return text[1:-1]
     return text
+
+
+BALL_RIM = 0.95  # of a ball's radius: the bright rim of beamer's ball, where white ink is unseen
 
 
 def literal_list_numbers(slides: list[dict]) -> None:
@@ -4842,12 +4858,25 @@ def literal_list_numbers(slides: list[dict]) -> None:
     def on_graphic(p: dict) -> bool:
         return numbered(p) and (p["bullet"]["kind"] == "image" or bool(p["bullet"].get("patch")))
 
+    def kind(p: dict) -> str | None:
+        """What emit bullets a paragraph with: one createParagraphBullets per run of paragraphs
+        of one preset (emit.bullet_preset), each run a list of its own that Slides numbers
+        from 1. Numbers with a parenthesis have a preset of their own; every glyph another."""
+        b = p["bullet"]
+        if not b:
+            return None
+        return ("number)" if ")" in b.get("text", "") else "number") if numbered(p) else "glyph"
+
     def misnumbered(e: dict) -> bool:
         expected: dict[int, int] = {}
+        previous = None
         for p in e["paragraphs"]:
+            if kind(p) != previous:
+                # The next list in Slides starts again at 1: after a paragraph, and after the
+                # glyph items nested in a numbered one ('1. a . b 2.' came out 1, 1, 2, r1_ml_v1 s3).
+                expected.clear()
+                previous = kind(p)
             if not numbered(p):
-                if not p["bullet"]:
-                    expected.clear()  # the next list in Slides starts again at 1
                 continue
             for deeper in [k for k in expected if k > p["level"]]:
                 del expected[deeper]

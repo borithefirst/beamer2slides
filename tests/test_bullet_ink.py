@@ -137,9 +137,19 @@ def test_a_ball_shows_its_letter_not_the_white_parentheses_at_its_edges():
     """r3_dense_v2 s7: enumerate items [ball] with [(a)]: the white parentheses sit on the ball's
     rim and the page, unseen; set in Slides' font they cut white crescents into the ball."""
     from beamer2slides.classify import ball_number
-    white, blue = {"color": "#ffffff"}, {"color": "#3333b3"}
+    white, blue = {"color": "#ffffff", "x0": 12.88}, {"color": "#3333b3", "x0": 12.88}
     ball = {"kind": "image", "image": "p6i0", "text": "(a)", "bbox": [13, 92, 22, 101]}
     assert ball_number(ball, white) == "a"
     assert ball_number({**ball, "text": "iv"}, white) == "iv"
     assert ball_number(ball, blue) == "(a)", "parentheses one can see stay"
     assert ball_number({**ball, "kind": "number"}, white) == "(a)"
+
+
+def test_parentheses_on_the_balls_face_stay():
+    """r3_dense_v3 s7: [(i)] on 10 pt balls. '(i)' and '(ii)' are narrower than the ball and
+    their parentheses show on its dark face; wave 2 dropped them. '(iii)' reaches the rim."""
+    from beamer2slides.classify import ball_number
+    ball = {"kind": "image", "image": "p6i0", "text": "(i)", "bbox": [15.0, 168.0, 25.0, 178.0]}
+    assert ball_number(ball, {"color": "#ffffff", "x0": 16.3}) == "(i)"
+    assert ball_number({**ball, "text": "(ii)"}, {"color": "#ffffff", "x0": 15.54}) == "(ii)"
+    assert ball_number({**ball, "text": "(iii)"}, {"color": "#ffffff", "x0": 14.78}) == "iii"
