@@ -4608,3 +4608,14 @@ block all bold, a paragraph broken inside a formula, a footline too heavy at Lat
   and 'than' (r3_textfx_v1 s3) down with their holes, though both lines had room: Slides does not
   break after U+200B in front of no-break spaces. `HOLE_BREAK` is off (""); the readers keep
   dropping one. Untried: a breakable space (U+2002) as the hole's first character.
+
+### Waves 1-5 on Google (r10, 2026-09-24)
+Five blind verifiers (`out/hunt/VERIFY5.md`, `verified/verify5_z*.json`) on the 92 findings still
+open after r9: 3 FIXED, 43 IMPROVED, 46 SAME, 0 WORSE. Of all 377: 285 fixed, 43 improved, 46
+open (by severity: sev 3 90 fixed / 9 improved / 0 open; sev 2 118 / 22 / 6). Numbers: text_fit
+447, invariants 135, fidelity odd 847, mean overlap 0.733 (r9: 446, 135, 845, 0.733). Both r9
+sev-2 regressions resolved (the clipped overfull table, the Cyrillic affiliation lines), and the
+bold footlines, the reference block, the segoe formula break and math_v2's integral tail. New, sev 1:
+control_c1's footline now regular and untracked (lighter than the PDF's medium), layout_v2 s9
+'non-destructiv' / 'e' (C's `hyphen_cut` sizing a box narrower than the word after the hyphen?).
+Gallery of all 377 (PDF | first conversion | r10): https://claude.ai/artifact/2M6725PLrnpty854vuLj2w
