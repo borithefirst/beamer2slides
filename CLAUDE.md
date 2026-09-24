@@ -49,7 +49,10 @@ decorations) is a picture, or baked into a per-slide background picture.
 ## What becomes native (deck.json element kinds)
 Details, measurements and edge cases: docs/project-notes.md "What becomes native".
 - `text`: paragraphs, bullet lists (glyph, number, ball and vector bullets with their PDF colour and
-  size, `emit.BULLET_SHAPES`, `emit.bullet_level`), inline math as runs with scripts and Unicode,
+  size, `emit.BULLET_SHAPES`, `emit.bullet_level`; glyph bullets sized and shaped by their PDF ink,
+  `render.glyph_ink` -> bullet `ink`/`fill`, `emit.ink_sized`, capped at the item's body size),
+  inline math as runs with scripts (down from 0.10 em, up from 0.12 em; raised rings and asterisks
+  become `°`/`*` at line size) and Unicode,
   links, code. Frame titles use the layout's TITLE placeholder. Hanging labels are `label<TAB>text`.
   RTL (Hebrew/Arabic) is turned into logical order (`bidi.py`) and written `RIGHT_TO_LEFT` with
   mirrored alignment. OT1's `\_` is a rule, read back as `_` (`classify.underscores`, span

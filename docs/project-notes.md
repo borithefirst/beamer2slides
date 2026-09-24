@@ -4318,3 +4318,28 @@ that fails with the fix reverted, and fixed the mechanism; suite 3,094 passed af
   Open: numbering restarting after a nested list (needs a live probe); `deck_ir.pdf_size` in pull
   should skip the width correction for runs that aren't their paragraph's only run, and a table
   shrunk more than 6% shows as pull size residuals.
+
+### Wave 1 on Google (r6, 2026-09-24)
+All 76 decks with confirmed findings plus the eight controls were re-converted as `r6_<stem>` and
+five blind verifiers compared old and new renderings (`out/hunt/verified/verify_v*.json`, VERIFY.md;
+a deck whose old PDF was Type 3 is compared with its `r5_t1_` rebuild or its Type 3 findings are
+N/A). Of 377 targeted findings: 100 FIXED, 30 IMPROVED, 222 SAME (most on slides pixel-identical to
+before: their families were not in wave 1), 1 WORSE, 2 CHANGED, 22 N/A. Deterministic numbers over
+the 76 decks: text_fit findings 822 -> 586, fidelity odd elements 1,306 -> 1,040, mean text overlap
+0.701 -> 0.722, invariants 296 -> 300. 19 regressions (`out/hunt/r6_regressions.json`): new wraps
+and a looser wrapped-line pitch (7), weight (bold footlines regular, Japanese all bold), missing ink
+(listing line numbers, a wordmark, a radical, a denominator), a large corner radius, smaller
+arrowheads, a fraction picture over a word.
+
+### Fixes, wave 2
+- **K, scripts and bullets** (`tests/test_inline_scripts.py`, `tests/test_bullet_ink.py`): scripts
+  start at 0.10 em down, 0.12 em up (keycaps are raised 0.09-0.11 em); a span opening with `_` is
+  never a superscript; the space after a smaller run goes with the next word; a superscript over a
+  subscript joins its line (a hole there); raised rings and asterisks become `°` and `*` at line size
+  (Lato's sit where TeX's raised ones do); a script's script gets span/0.665. Glyph bullets are
+  sized and shaped by their ink (`render.glyph_ink`, `emit.ink_sized`, a filled one square) and
+  capped at the item's text size; ball patches interpolate the ring behind them
+  (`ring_background`); white `(a)` parentheses on a ball are dropped. Kept: SUBSCRIPT for TeX's
+  shallower subscripts (a baseline run would read back as a removed subscript and pull would write
+  it into the .tex); triangle bullets (no preset); fallback-font glyphs; `\dotfill` dot counts.
+  Existing decks with Fira or LM Sans bullets emit differently on their next sync.
