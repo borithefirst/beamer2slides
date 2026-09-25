@@ -68,6 +68,8 @@ RESHAPING = {"paragraph_missing", "paragraph_extra", "paragraph_order", "bullet"
              "image"}
 ADDITIVE = {"paragraph_missing", "element_missing", "slide_missing"}
 ONCE = {"text", "style", "notes", "element_missing", "slide_missing"}
+REVERTIBLE = {"text", "style"}   # kinds that overwrite existing source text: a rewrite that never
+                                  # converges is reverted rather than left as a garbled mix (converge)
 STYLE_CMDS = {
     "bold": (("textbf", "bfseries", "alert"), "textbf", "textmd"),
     "italic": (("emph", "textit", "itshape", "em", "textsl", "slshape"), "emph", "textup"),
@@ -191,6 +193,7 @@ class Context:
     notes: list[str] = field(default_factory=list)           # what the report must say about pictures
     pictures: dict = field(default_factory=dict)             # (deck file, edits) -> Picture
     index: list[dict] | None = None                          # picture files of the source tree
+    label_notes: list[str] = field(default_factory=list)     # what the report must say about renamed labels
 
 
 @dataclass
@@ -904,6 +907,7 @@ class Planner:
         self.t2c = {j: i for i, j in comp.slides if i is not None and j is not None}
         self.c2t = {i: j for i, j in comp.slides if i is not None and j is not None}
         self.base = body_style(deck)
+        self.used_labels = {f.label for f in cand.source.frames if f.label}
 
     # -- helpers
     def fail(self, r: dict, why: str) -> None:
@@ -958,7 +962,22 @@ class Planner:
                 self.fail(r, "no frame to insert before")
                 return
             file, pos = first.file, self.cand.source.text(first.file).rfind("\n", 0, first.start) + 1
-        self.edit(file, pos, pos, "\n" + frame_latex(ts, self.level_style, self.ctx), r)
+        key = ts.get("key")
+        label = key
+        # two slides carrying the same key (a slide duplicated in the deck) would otherwise get the
+        # same \label{}: hyperref keeps only the first, silently breaking identity for later syncs
+        if is_frame_label(key) and key in self.used_labels:
+            n = 2
+            while f"{key}-{n}" in self.used_labels:
+                n += 1
+            label = f"{key}-{n}"
+            self.ctx.label_notes.append(
+                f"slide {j + 1} ({slide_title(ts) or key}): another slide already carries the label "
+                f"'{key}' (a duplicated slide?) - wrote this frame as '{label}' instead of a repeated "
+                f"\\label{{{key}}}, which hyperref would silently drop")
+        if is_frame_label(label):
+            self.used_labels.add(label)
+        self.edit(file, pos, pos, "\n" + frame_latex(ts, self.level_style, self.ctx, label=label), r)
 
     def slide_extra(self, r: dict) -> None:
         frame = self.cand.frames[r["slide"]]
@@ -1124,7 +1143,10 @@ class Planner:
         el = self.element(cs, r["element"])
         para = el["paragraphs"][r["para"]]
         ptext = norm_text(para_text(para))
-        span = char_span(ptext, r["c0"], r["c1"], loc)
+        # a style command (bold/italic/colour/size) is never wrapped around less than a whole word
+        # by a person; only a character-level diff coincidence would suggest it - so unlike `text`,
+        # a style edit always snaps outward to whole words (char_span, checked by the h6b hunt).
+        span = char_span(ptext, r["c0"], r["c1"], loc, whole_words=True)
         if span is None:
             self.fail(r, "styled words not found in the source")
             return
@@ -2071,9 +2093,12 @@ def widen_delete(src: str, a: int, b: int) -> tuple[int, int]:
     return a, b
 
 
-def char_span(ptext: str, c0: int, c1: int, loc: ParaLoc) -> tuple[int, int] | None:
+def char_span(ptext: str, c0: int, c1: int, loc: ParaLoc, whole_words: bool = False) -> tuple[int, int] | None:
     """Source span of characters c0..c1 of a paragraph's normalised text: whole words when the
-    range covers them, characters inside a word when its source is plain."""
+    range covers them, characters inside a word when its source is plain (`whole_words=True`
+    still lets a trailing/leading run of punctuation - "box by box" out of "box by box." - be left
+    out, but never narrows into a letter or digit: a style command wrapped around less than that is
+    never something a person wrote, only a coincidence of a character-level diff, `style`)."""
     words = [(m.start(), m.end()) for m in re.finditer(r"\S+", ptext)]
     idx = [k for k, (s, e) in enumerate(words) if s < c1 and e > c0]
     if not idx:
@@ -2087,8 +2112,10 @@ def char_span(ptext: str, c0: int, c1: int, loc: ParaLoc) -> tuple[int, int] | N
     if c0 > s0 or c1 < e1:
         va, vb = loc.words.vis[k0][0], loc.words.vis[k1][1]
         if vb - va == e1 - s0 and all(loc.visible.ends[v] - loc.visible.starts[v] == 1 for v in range(va, vb)):
-            a = loc.visible.starts[va + (c0 - s0)] if c0 > s0 else a
-            b = loc.visible.ends[vb - 1 - (e1 - c1)] if c1 < e1 else b
+            if c0 > s0 and (not whole_words or not re.search(r"\w", ptext[s0:c0])):
+                a = loc.visible.starts[va + (c0 - s0)]
+            if c1 < e1 and (not whole_words or not re.search(r"\w", ptext[c1:e1])):
+                b = loc.visible.ends[vb - 1 - (e1 - c1)]
     return a, b
 
 
@@ -2123,6 +2150,13 @@ def signature(r: dict) -> tuple:
             r.get("t0"), r.get("slide") if r["kind"] in ("slide_extra",) else None,
             r.get("element") if r["kind"] in ("paragraph_extra", "element_extra") else None,
             r.get("para") if r["kind"] == "paragraph_extra" else None)
+
+
+def edit_group(sig: tuple) -> tuple:
+    """A residual signature without its character offset (index 5, `t0`): several sub-ranges of the
+    same field of the same paragraph (a colour narrowed to one word at a time, say) are one rewrite
+    in progress, not independent edits, so converge()'s revert undoes a blocked one's whole group."""
+    return sig[:5] + sig[6:]
 
 
 # ---------------------------------------------------------------- generated LaTeX
@@ -2197,10 +2231,15 @@ def textblock_latex(te: dict, style_for, ctx: Context, ind: str, reset: bool = F
             + body + f"\n{ind}\\end{{textblock*}}")
 
 
+def is_frame_label(key: str | None) -> bool:
+    """Whether `key` is a slide's own LaTeX label, not one of sync's synthetic keys for an
+    unlabelled frame (title:..., page:N) - those are never written as `[label=...]`."""
+    return bool(key) and bool(re.fullmatch(r"[A-Za-z][\w:.-]*", key)) and not re.match(r"(title|page):", key)
+
+
 def frame_latex(ts: dict, style_for, ctx: Context, label: str | None = None) -> str:
     key = label or ts.get("key")
-    # sync's own keys for unlabelled frames (title:..., page:N) are not labels
-    label = f"[label={key}]" if key and re.fullmatch(r"[A-Za-z][\w:.-]*", key) and not re.match(r"(title|page):", key) else ""
+    label = f"[label={key}]" if is_frame_label(key) else ""
     title = ""
     body = []
     for e in ts["elements"]:
@@ -2245,6 +2284,7 @@ class Result:
     theme: list[dict] = field(default_factory=list)   # differences the theme owns (titles), not written back
     notes: list[str] = field(default_factory=list)    # pictures: reused files, baked edits, converted formats, replaced figures
     originals: dict[str, str] = field(default_factory=dict)  # source path -> sha1 when the loop copied it (apply checks it)
+    labels: list[str] = field(default_factory=list)   # slide labels renamed to dodge a collision
 
 
 def picture_hashes(cand: Candidate, target: dict, comp_out: Path) -> dict:
@@ -2310,6 +2350,10 @@ def converge(tex: Path, target, work: Path, max_iter: int = 10, handout: bool = 
     blocked: set = set()
     attempts: dict[tuple, list[float]] = {}
     tried: dict[tuple, int] = {}   # residual signature -> rounds with an edit written for it
+    attempted: dict[tuple, list[tuple[tuple, Path, str, str]]] = {}   # a REVERTIBLE edit's group (its
+        # signature without the character offset: sub-ranges of the same field/paragraph are one
+        # rewrite in progress, not independent edits) -> [(signature, file, text before, text
+        # after), ...] in the order they were applied
     last_values: dict = {}
     seen: dict[tuple, int] = {}
     unresolved: list[dict] = []
@@ -2338,7 +2382,11 @@ def converge(tex: Path, target, work: Path, max_iter: int = 10, handout: bool = 
             for r in open_res:
                 unresolved.append({**r, "why": "edits oscillate (the same residuals came back)"})
             break
-        # residuals that keep coming back after edits are given up on
+        # residuals that keep coming back after edits are given up on; a text/style rewrite (the
+        # only kinds that overwrite existing source text) that never converged is reverted below,
+        # so a bad attempt is never left as a garbled mix of the author's words and the failed edit
+        newly_blocked: dict[tuple, dict] = {}
+        blocked_groups: set = set()
         for r in open_res:
             sig = signature(r)
             if sig in blocked:
@@ -2351,46 +2399,75 @@ def converge(tex: Path, target, work: Path, max_iter: int = 10, handout: bool = 
             if (r["kind"] in ONCE and tried.get(sig, 0) >= 1) or (r["kind"] in ADDITIVE and tried.get(sig, 0) >= 2) or \
                     (len(hist) >= 4 and (r["kind"] != "geometry" or hist[-1] >= 0.8 * hist[-3])):
                 blocked.add(sig)
-                unresolved.append({**r, "why": "not converging after repeated edits"})
+                entry = {**r, "why": "not converging after repeated edits"}
+                unresolved.append(entry)
+                group = edit_group(sig)
+                if group in attempted:
+                    newly_blocked[sig] = entry
+                    blocked_groups.add(group)
         planner = Planner(cand, comp, target, ctx, ws, blocked, last_values, hashes)
         edits, failed = planner.plan()
         for f in failed:
             blocked.add(signature(f))
             unresolved.append(f)
-        if not edits:
+        if not edits and not newly_blocked:
             break
-        before = {p: ws.source.text(p) for p in ws.source.order}
-        applied = ws.write(edits)
-        extra = ensure_preamble(ws, ctx)
-        if extra:
-            ws.write(extra)
-        check, err = ws.compile()
-        if check is None:
-            log(f"    the edits break the build:\n{err}")
-            # find the edits that break the build: from the text before the round, keep adding one
-            # edit to those known to be good (offsets stay those of the original text)
-            good: list[Edit] = []
-            for e in applied:
+        if edits:
+            before = {p: ws.source.text(p) for p in ws.source.order}
+            applied = ws.write(edits)
+            extra = ensure_preamble(ws, ctx)
+            if extra:
+                ws.write(extra)
+            check, err = ws.compile()
+            if check is None:
+                log(f"    the edits break the build:\n{err}")
+                # find the edits that break the build: from the text before the round, keep adding one
+                # edit to those known to be good (offsets stay those of the original text)
+                good: list[Edit] = []
+                for e in applied:
+                    restore(ws, before)
+                    ws.write(good + [e])
+                    pre = ensure_preamble(ws, ctx)
+                    if pre:
+                        ws.write(pre)
+                    if ws.compile()[0] is None:
+                        blocked.add(e.signature[:SIG_LEN])
+                        unresolved.append({"kind": e.kind, "why": "the edit breaks compilation", "edit": e.text[:200],
+                                           "signature": list(map(str, e.signature))})
+                    else:
+                        good.append(e)
                 restore(ws, before)
-                ws.write(good + [e])
+                ws.write(good)
                 pre = ensure_preamble(ws, ctx)
                 if pre:
                     ws.write(pre)
-                if ws.compile()[0] is None:
-                    blocked.add(e.signature[:SIG_LEN])
-                    unresolved.append({"kind": e.kind, "why": "the edit breaks compilation", "edit": e.text[:200],
-                                       "signature": list(map(str, e.signature))})
-                else:
-                    good.append(e)
-            restore(ws, before)
-            ws.write(good)
-            pre = ensure_preamble(ws, ctx)
-            if pre:
-                ws.write(pre)
-            log(f"    {len(applied) - len(good)} edit(s) broke the build and were dropped")
-            applied = good
-        for sig in {e.signature[:SIG_LEN] for e in applied}:
-            tried[sig] = tried.get(sig, 0) + 1
+                log(f"    {len(applied) - len(good)} edit(s) broke the build and were dropped")
+                applied = good
+            for e in applied:
+                sig = e.signature[:SIG_LEN]
+                if e.kind in REVERTIBLE:
+                    attempted.setdefault(edit_group(sig), []).append((sig, e.file, before[e.file][e.start:e.end], e.text))
+            for sig in {e.signature[:SIG_LEN] for e in applied}:
+                tried[sig] = tried.get(sig, 0) + 1
+        if blocked_groups:
+            # undo every REVERTIBLE edit a now-blocked group made, most recent first: each of its
+            # sub-ranges (a colour/style command narrowed to less than the group's edits, e.g. one
+            # word at a time) is chased by content, not the offsets it was written at, since a
+            # later sub-range's edit may have grown or nested around an earlier one (h6b) - so an
+            # earlier step's exact text can vanish from the file until its followers are undone too
+            reverted: set = set()
+            for group in blocked_groups:
+                for sig, file, orig, new in reversed(attempted.pop(group, [])):
+                    if not new or new == orig:
+                        continue
+                    text = ws.source.text(file)
+                    at = text.find(new)
+                    if at >= 0 and text.find(new, at + 1) < 0:
+                        ws.write([Edit(file, at, at + len(new), orig, "revert", sig)])
+                        reverted.add(group)
+            for sig, entry in newly_blocked.items():
+                if edit_group(sig) in reverted:
+                    entry["why"] += " (the unconverged rewrite was reverted)"
     open_res = comp.open() if comp else []
     files = {}
     patch = ""
@@ -2418,8 +2495,9 @@ def converge(tex: Path, target, work: Path, max_iter: int = 10, handout: bool = 
     theme = [r for r in comp.residuals if r.get("theme")] if comp else []
     used = lambda n: (m := re.match(r"(\S+\.(png|jpg|pdf)): ", n)) is None or m.group(1) in patch
     notes = list(dict.fromkeys(n for n in ctx.notes if used(n)))
+    labels = list(dict.fromkeys(ctx.label_notes))
     return Result(not open_res, iterations, final_unresolved, open_res, files, patch, ws.work, theme, notes,
-                  ws.originals)
+                  ws.originals, labels)
 
 
 def restore(ws: Workspace, texts: dict[Path, str]) -> None:
@@ -2482,7 +2560,7 @@ def class_pt_option(source: Source) -> int:
 def report(result: Result, target: dict, cand_deck: dict | None = None) -> tuple[dict, str]:
     data = {"converged": result.converged, "iterations": result.iterations,
             "unresolved": [clean(u) for u in result.unresolved], "theme": [clean(u) for u in result.theme],
-            "changed_files": list(result.files), "pictures": result.notes}
+            "changed_files": list(result.files), "pictures": result.notes, "labels": result.labels}
     md = ["# Pull report", "", f"Converged: **{result.converged}** after {len(result.iterations) - 1} edit rounds.", ""]
     md.append("| iteration | open residuals | by kind | geometry error (pt) |")
     md.append("|---|---|---|---|")
@@ -2500,6 +2578,8 @@ def report(result: Result, target: dict, cand_deck: dict | None = None) -> tuple
                 md.append(f"  - source: {u['where']}")
     if result.notes:
         md += ["", "## Pictures", ""] + [f"- {n}" for n in result.notes]
+    if result.labels:
+        md += ["", "## Duplicate labels", ""] + [f"- {n}" for n in result.labels]
     if result.theme:
         md += ["", "## Theme differences (not written to the source)", ""]
         md += [f"- {residual_line(u)}" for u in result.theme]
