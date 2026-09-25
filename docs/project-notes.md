@@ -4533,6 +4533,13 @@ person left it | new PDF | after sync; `pull1/`), `candidates/`, `judgements/`, 
     gained over its base now on one live frame. Once in the hunt's 132 slides, on the real case.
 - **The oracle bug found on the way**: `loss_oracle.deck_placement` fitted text frames to place
   the conversion; a base's recorded `scale` now places it (48f37a4).
+- **h5-5 was no sync defect**: the panel was 810 pt wide on a 720 pt slide *before* the sync (the
+  person's own 1.15x resize), and the sync kept it; its four `geometry_not_carried` were the
+  `deck_placement` bug above - rejudged with the fixed oracle, the round is clean, the corners
+  where the person's move plus the source's puts them (308.56 vs 308.57). All 23 recorded rounds
+  rejudged with today's oracles (the decks as recorded, ours rebuilt offline): every one of the 10
+  `geometry_not_carried` pre-screens (h2b, h2c, h3a, h5b) was that bug; left are h3c's `off_page`
+  (h3-3), h5a's `applied_no_change` (h5-3) and h5c's `text_overflow` (h5-6).
 - **The fuzz world's base was the merged deck** (offline seed 93863 at chain 4,
   `geometry_not_carried`, found by the fuzz run after these fixes and there before them):
   `fuzz_world.rebase` recorded a recreated object from the final deck, overrides and all, where
@@ -4547,8 +4554,7 @@ person left it | new PDF | after sync; `pull1/`), `candidates/`, `judgements/`, 
   `test_the_offline_base_is_what_the_sync_made_not_what_it_left`.
 - **Open, confirmed**: table merge gives up on any dimension change (h4-2, h4-8, h6-1: a row
   added on each side keeps the deck's table whole - a feature, not a fix); diagram node-count
-  changes likewise (h4-10); a panel wider than the slide after
-  a resize and a move composed (h5-5); a title overflowing a panel a theme swap recreated (h5-6,
+  changes likewise (h4-10); a title overflowing a panel a theme swap recreated (h5-6,
   caught by the layout oracle); style reported applied where emit changes nothing (h5-3, caught by
   `applied_no_change`); pull: a CJK subtitle fixed twice (h1-1), `\vspace` hacks on non-converging
   geometry (h4-5), a stray `\small` group (h6-4).
