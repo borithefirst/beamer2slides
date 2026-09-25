@@ -2252,8 +2252,15 @@ class Sync:
                     all(u["action"] in ("keep", "none") for u in p.get("units", [])):
                 continue
             users = {u["objectId"] for u in merge.user_objects(self.base["slides"][p["base"]], b)}
-            if any(tl.ink(b["objects"][u]) for u in users if u in b["objects"]):
-                todo[p["objectId"]] = (p["key"], users)
+            # A unit kept as the deck has it (a conflict the deck's version won) is the deck's too:
+            # a table the person gave a row, kept whole, and the source's figure moved up under it
+            # (edit hunt h2-2, h4-1). Sync does not move it either.
+            kept = {u["key"] for u in p.get("units", []) if u["action"] == "keep" and u.get("deck")}
+            kept_objects = {o for e in self.base["slides"][p["base"]]["elements"]
+                            if e["key"] in kept or e.get("anchor") in kept
+                            for o in e.get("objects", []) if o in b["objects"]}
+            if any(tl.ink(b["objects"][u]) for u in users | kept_objects if u in b["objects"]):
+                todo[p["objectId"]] = (p["key"], users, kept_objects)
         if not todo:
             return
         def say(rb: dict) -> str:
@@ -2264,13 +2271,15 @@ class Sync:
         for s in final["slides"]:
             if s["objectId"] not in todo:
                 continue
-            key, users = todo[s["objectId"]]
-            for o in tl.overruns(before[s["objectId"]], s, users, set(self.cleanup_ids)):
+            key, users, kept_objects = todo[s["objectId"]]
+            for o in tl.overruns(before[s["objectId"]], s, users | kept_objects, set(self.cleanup_ids)):
                 self.overruns.append({"slide": key, **o})
                 mine, theirs_ = before[s["objectId"]]["objects"][o["object"]], s["objects"][o["other"]]
                 self.warnings.append(
                     f"slide {key}: the source's {say(theirs_)} now runs {o['depth']:.0f} pt over your {say(mine)}, "
-                    "which stays where you put it (sync never moves your own objects): move one of them")
+                    + ("which stays where you put it (sync never moves your own objects): move one of them"
+                       if o["object"] in users else
+                       "kept as the deck has it for a conflict, so not where the source would put it: move one of them"))
 
     def refit_jobs(self, work: dict, theirs: dict, created: dict) -> dict[str, list[dict]]:
         """Slide id -> the recreated text units whose deck edits `override_requests` wrote over

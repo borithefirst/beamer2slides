@@ -1164,6 +1164,34 @@ def test_a_moved_unit_that_still_has_its_group_is_moved_once():
     assert [r["updatePageElementTransform"]["objectId"] for r in reqs] == ["new_t1_g"]
 
 
+def test_a_kept_table_the_source_now_runs_into_is_said(monkeypatch):
+    """Edit hunt h2-2, h4-1: the person gave a table a row, the table was kept whole for the conflict,
+    and the source moved the figure below it up into it. Sync moves neither; it says so."""
+    from beamer2slides import snapshot
+    from beamer2slides.sync import Sync
+    table = {"kind": "table", "box": [40, 100, 400, 220], "title": "b2s:s/table/table/0"}
+    fig = lambda box: {"kind": "image", "box": box, "title": "b2s:s/image/figure/0"}
+    before = {"objectId": "S", "objects": {"t1": table, "f1": fig([100, 240, 300, 330])}}
+    after = {"objectId": "S", "objects": {"t1": table, "f2": fig([100, 180, 300, 270])}}
+    base = {"slides": [{"key": "s", "elements": [{"key": "table/table/0", "objects": ["t1"]},
+                                                 {"key": "image/figure/0", "objects": ["f1"]}]}]}
+    plan = {"action": "update", "key": "s", "base": 0, "objectId": "S",
+            "units": [{"key": "table/table/0", "action": "keep", "deck": ["text"]},
+                      {"key": "image/figure/0", "action": "recreate", "deck": []}]}
+    sync = Sync.__new__(Sync)
+    sync.base, sync.cleanup_ids, sync.overruns, sync.warnings = base, [], [], []
+    sync.read = lambda: None
+    monkeypatch.setattr(snapshot, "read_presentation", lambda raw: {"slides": [after]})
+    sync.warn_about_overruns({"slides": [{"plan": plan}]}, {"slides": [before]})
+    assert [(o["object"], o["other"]) for o in sync.overruns] == [("t1", "f2")]
+    assert "kept as the deck has it for a conflict" in sync.warnings[0]
+    # the same table nobody edited is the converter's own layout, not something to warn about
+    plan["units"][0] = {"key": "table/table/0", "action": "recreate", "deck": []}
+    sync.overruns, sync.warnings = [], []
+    sync.warn_about_overruns({"slides": [{"plan": plan}]}, {"slides": [before]})
+    assert sync.overruns == []
+
+
 def test_a_created_shape_stays_under_the_text_the_source_draws_above_it():
     """`Sync.restack` gives a recreated element the deck's place in the z-order (a restack the person
     made survives) and a created one the place the source gives it - right after the element before

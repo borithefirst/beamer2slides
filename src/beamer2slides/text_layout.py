@@ -292,11 +292,11 @@ def text_box(rb: dict) -> bool:
 
 
 def ink(rb: dict) -> list[list[float]] | None:
-    """Where an object puts ink, slide pt: a text box's laid-out lines, a picture's box; None for
-    anything else or what the model cannot lay out."""
+    """Where an object puts ink, slide pt: a text box's laid-out lines, a picture's or a table's box;
+    None for anything else or what the model cannot lay out."""
     if not rb.get("box") or not upright(rb):
         return None
-    if rb.get("kind") == "image":
+    if rb.get("kind") in ("image", "table"):
         return [list(rb["box"])]
     if text_box(rb):
         lay = layout(rb)
