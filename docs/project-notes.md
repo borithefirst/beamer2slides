@@ -4487,6 +4487,60 @@ Each fixer took the r7 regressions of one area first, then its still-open findin
 Merge fallout: a formula test assumed a plain space where TeX's 0.28 em relation space is now
 thin (`thin_span` after S made the paragraph ragged); the assertion was loosened.
 
+## Edit hunt (2026-09-24/25)
+
+The visual hunt's method pointed at the editing flow: a person edits the converted deck, the author
+revises the .tex, sync merges, pull goes back. Data under `out/edithunt/` (git-ignored): `BRIEF.md`,
+`JUDGE.md`, `SKEPTIC.md`, `decks/<journey>/` (v1..v3.tex, edits*.json), `j/<journey>/` (per round:
+base, ours, edits, report, loss/layout/expectations, settle log; `cmp/rN-NNN.png` triptychs: as the
+person left it | new PDF | after sync; `pull1/`), `candidates/`, `judgements/`, `verified/`.
+
+- **Harness** (`devtools/edit_hunt.py`): `start <tex> --journey J --slot S` compiles and converts;
+  `edit --journey J edits.json` applies an edit vocabulary through raw Slides requests (retype,
+  append a sentence, bold a word, insert a table row, move/resize/duplicate/ungroup, add a text box
+  or slide, delete...); `sync --journey J v2.tex`; `pull --journey J`. Every sync is pre-screened by
+  the loss oracle, the layout oracle, integrity, the hunter's own `expectations` and a settle sync
+  (must write nothing).
+- **Roles, by model**: six Sonnet hunters (h1..h6, three journeys each, 19 journeys), a blind Haiku
+  judge per hunter (triptychs only), a Sonnet skeptic per hunter that merges both lists, reads the
+  read-backs and names the mechanism, and Opus triaging and fixing. A **canary** (`canary/c1.png`,
+  planted defects) went to every judge: Haiku caught it 4 times of 6 (h2, h3, h4, h6), and made
+  things up twice (h5's placeholder panels, h1's epsilon claims) - skeptics rejected both. Blind
+  Haiku judging is cheap and finds overlap and overflow; it cannot see a lost edit or a source
+  change that never arrived. Those came from the hunters and the pre-screens.
+- **Result**: 32 hunter candidates plus the judges' own, 28 confirmed, 17 rejected.
+- **Fixed** (each pinned by a test that fails with the fix reverted; offline fuzz 3000 + 2000 adopt
+  + 2000 + 2000 rounds clean after them):
+  - layout header and footer words never synced (h5-1, h5-4): `theme_sync.plan_texts`,
+    `base["theme"]["texts"]`;
+  - a new bullet dropped beside a clash (h6-2, h4-4): `merge.paragraph_merge`, a line diff3 whose
+    unequal replaces are split by word similarity (`SAME_PARAGRAPH`, `_paragraph_hunks`);
+  - block title bars and bodies swapped keys when a block moved (h4-3): `identity.look` (a
+    shape's fill in its fingerprint), `identity.base_items` (old bases: from the recorded IR);
+  - a diagram the source made busier came back a picture, stacked on the kept diagram (h3-3):
+    `identity.FIGURE_KINDS` pair by geometry. Still open: the busier figure reached into the text
+    column and became an *overlay* anchored to it, and anchored elements match only anchored ones;
+  - picture over the person's Ctrl+D copy unwarned (h3-1): `text_layout.overruns` dropped the
+    collage skip, and its title lookup leaves the person's objects out (a copy carries its
+    original's `b2s:` title and was read as the recreated original's old self);
+  - a unit kept whole names the source changes it drops (h3-2, `merge.CONFLICT_COVERS`), and a
+    geometry conflict's base/source boxes are in deck pt (h2-5: the skeptic read `[x, y, w, h]`
+    dumps as corners, but the units really were mixed);
+  - a kept table the source runs into is warned (h2-2, h4-1): `warn_about_overruns` counts units
+    the plan keeps, and a table's ink is its box.
+- **The oracle bug found on the way**: `loss_oracle.deck_placement` fitted text frames to place
+  the conversion; a base's recorded `scale` now places it (48f37a4).
+- **Open, confirmed**: table merge gives up on any dimension change (h4-2, h4-8, h6-1: a row
+  added on each side keeps the deck's table whole - a feature, not a fix); diagram node-count
+  changes likewise (h4-10); a duplicate slide after the source merges two frames (h2-1: any edit
+  protects a slide and `near_misses` looks only at new frames); a panel wider than the slide after
+  a resize and a move composed (h5-5); a title overflowing a panel a theme swap recreated (h5-6,
+  caught by the layout oracle); style reported applied where emit changes nothing (h5-3, caught by
+  `applied_no_change`); pull: a CJK subtitle fixed twice (h1-1), `\vspace` hacks on non-converging
+  geometry (h4-5), a stray `\small` group (h6-4).
+- **What it cannot see**: a hunter's own edit vocabulary (h1-7, h1-9: two harness gaps with CJK
+  and holes); thumbnails, not the editor; one person, one author, three rounds at most.
+
 ### Waves 1-3 on Google (r8, 2026-09-24)
 Same 76 decks and 13 Type 3 originals, five blind verifiers against the original conversion
 (`out/hunt/VERIFY3.md`, `verified/verify3_x*.json`): of 377 findings 271 FIXED, 42 IMPROVED, 60

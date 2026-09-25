@@ -238,7 +238,9 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   Modules: `identity.py` (slide/element keys), `snapshot.py` (read-back, base), `merge.py` (pure
   planning), `sync.py` (writes with `requiredRevisionId`, re-plans on a mismatch; pictures via a
   staging deck deleted after use). Objects carry `b2s:<slide>/<element>` alt-text titles (never
-  on groups).
+  on groups). Element keys pair by text, geometry, a shape's fill (`identity.look`) and a figure
+  across diagram/image (`FIGURE_KINDS`). Text merges paragraph by paragraph, unequal counts through
+  a line diff3 (`merge.paragraph_merge`); only a paragraph both sides rewrote is a conflict.
 - **A sync killed anywhere loses nothing**: deletions last, a `pending` marker records what a run
   creates, the next sync sweeps duplicates. Fault injection: `B2S_FAIL_AT` (`faults.py`).
 - **A decision the base does not record reverses itself**: whatever a sync decided to keep (a unit
@@ -261,8 +263,8 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   written as it is; a picture's move is measured in the converter's box and the person's edit put on
   top (`refit.carried_step`). `text_layout` is also the layout oracle's line model.
 - **Theme sync** (`theme_sync.py`): `base["theme"]` records what convert wrote on the master and
-  layouts (fill, decoration pictures, placeholder styles); sync merges them three ways, the theme
-  batch first. Slides drops a run property equal to the inherited one, so old placeholder styles
+  layouts (fill, decoration pictures, placeholder styles, header/footer words `texts`,
+  `plan_texts`); sync merges them three ways, the theme batch first. Slides drops a run property equal to the inherited one, so old placeholder styles
   are pinned onto converted slides *after* the layout write (`inherited_pins`). An old base leaves
   layouts alone with a warning. Group or placeholder-role changes sync can't write are warnings.
 - **Frame labels** (`\begin{frame}[label=x]`) are the only slide identity that survives compiling.
@@ -374,6 +376,9 @@ markers.
   and `tools/text_fit.py <pdf> --out <folder> [--crops]` after `convert` + `fidelity`: wrap, drift,
   width, crowded, grown, touch, line by line on Google's renderer (`devtools/text_fit.py`,
   `tests/test_text_fit.py` on synthetic pages). Open findings: docs/project-notes.md "Text fit".
+- **Edit hunt** (`devtools/edit_hunt.py start|edit|sync|pull --journey J`): a person's edits, a
+  source revision, sync, judged by the oracles and by eye (Sonnet hunters, Haiku blind judges,
+  Sonnet skeptics) under `out/edithunt/`. Findings and fixes: docs/project-notes.md "Edit hunt".
 - **Visual hunt** (`tools/visual_hunt.py run <tex> --slot S`, `ledger`): compile, convert, fidelity,
   text_fit and invariants, archived as PDF | Slides side by side for hunter / blind judge / skeptic
   campaigns under `out/hunt/`. 377 open findings by family with mechanisms: docs/project-notes.md
