@@ -115,9 +115,13 @@ def text_merge(base: str, ours: str, theirs: str, take=()) -> tuple[str, list[di
     milliseconds full dropped"). That is why a conflicting paragraph is taken whole and never
     spliced.
 
-    Prose in one paragraph still merges word by word, and so does a box whose paragraphs cannot be
-    lined up (the source added or removed one). `safe` is False only when that word-level fallback
-    conflicts: the caller then keeps the deck's text and reports the conflict, as before.
+    Prose in one paragraph still merges word by word. When a side added or removed a paragraph the
+    paragraphs are lined up three ways first (`paragraph_merge`), so a bullet the source appended
+    still arrives beside one both sides reworded: merged as one run of words instead, that one
+    clash kept the deck's whole box and the new bullet never came (edit hunt h6b, twice in a row;
+    h4b). Only a box with a single paragraph merges word by word as a whole. `safe` is False only
+    when that word-level merge conflicts: the caller then keeps the deck's text and reports the
+    conflict, as before.
 
     `take`: paragraph indices a person asked to settle for the source after reading the report
     (`Resolutions`, docs/sync.md "Taking the source's version"). Such a paragraph takes the
@@ -126,26 +130,145 @@ def text_merge(base: str, ours: str, theirs: str, take=()) -> tuple[str, list[di
     planner merges the *predicted* text and sync merges what the deck actually holds, and
     `collapse_holes` is the only difference between them - it never adds or drops a newline."""
     bp, op, tp = base.split("\n"), ours.split("\n"), theirs.split("\n")
-    if len(bp) < 2 or not len(bp) == len(op) == len(tp):
+    if len(bp) < 2:
         merged, clashes = diff3(base, ours, theirs)
         return merged, clashes, not clashes
+    if not len(bp) == len(op) == len(tp):
+        out, conflicts = paragraph_merge(bp, op, tp, take)
+        return "\n".join(out), conflicts, True
     out: list[str] = []
     conflicts: list[dict] = []
     for k, (b, o, t) in enumerate(zip(bp, op, tp)):
-        if b == o or o == t:      # the source left it alone, or both arrived at the same words
-            out.append(t)
-        elif b == t:              # only the source changed it
-            out.append(o)
-        else:
-            merged, clashes = diff3(b, o, t)
-            if not clashes:
-                out.append(merged)
-            elif k in take:
-                out.append(o)
-            else:
-                out.append(t)
-                conflicts.append({"base": b, "ours": o, "theirs": t, "paragraph": k})
+        out.append(_paragraph(b, o, t, k, take, conflicts))
     return "\n".join(out), conflicts, True
+
+
+def _paragraph(b: str, o: str, t: str, k: int, take, conflicts: list[dict]) -> str:
+    """One paragraph of three versions, merged (`k`: its index in the deck's text, the handle a
+    `take` names and a conflict carries)."""
+    if b == o or o == t:      # the source left it alone, or both arrived at the same words
+        return t
+    if b == t:                # only the source changed it
+        return o
+    merged, clashes = diff3(b, o, t)
+    if not clashes:
+        return merged
+    if k in take:
+        return o
+    conflicts.append({"base": b, "ours": o, "theirs": t, "paragraph": k})
+    return t
+
+
+def _clusters(hunks: list[tuple[str, tuple]]) -> list[list]:
+    """Hunks of both sides grouped where they touch (`_clash`), joined until stable."""
+    clusters: list[list] = []
+    for side, h in sorted(hunks, key=lambda s: (s[1][0], s[1][1], s[0])):
+        for c in clusters:
+            if any(_clash(h, other) for _, other in c):
+                c.append((side, h))
+                break
+        else:
+            clusters.append([(side, h)])
+    merged_any = True
+    while merged_any:
+        merged_any = False
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                if any(_clash(x, y) for _, x in clusters[i] for _, y in clusters[j]):
+                    clusters[i] += clusters.pop(j)
+                    merged_any = True
+                    break
+            if merged_any:
+                break
+    return clusters
+
+
+def _version(base: list, c: list, side: str, c0: int, c1: int) -> list:
+    """What one side made of the base's items c0..c1 (a cluster)."""
+    out, pos = [], c0
+    for s, (h0, h1, rep) in sorted(c, key=lambda x: (x[1][0], x[1][1])):
+        if s != side:
+            continue
+        out += base[pos:h0] + rep
+        pos = h1
+    return out + base[pos:c1]
+
+
+SAME_PARAGRAPH = 0.5   # word similarity above which a rewritten paragraph is the old one reworded
+
+
+def _paragraph_hunks(base: list[str], other: list[str]) -> list[tuple[int, int, list[str]]]:
+    """`_hunks` over paragraphs, with a replacement of n by m paragraphs taken apart: a diff reads
+    "rewrote the last bullet, then added one" as one bullet replaced by two, and then a rewording on
+    the other side clashes with the addition too. Each new paragraph is paired with the old one it
+    rewords most (word similarity SAME_PARAGRAPH or more, in order: the best monotone pairing), and
+    the rest are paragraphs added or removed on their own."""
+    out = []
+    sm = SequenceMatcher(None, base, other, autojunk=False)
+    for op, i1, i2, j1, j2 in sm.get_opcodes():
+        if op == "equal":
+            continue
+        if op != "replace" or i2 - i1 == j2 - j1:
+            out.append((i1, i2, other[j1:j2]))
+            continue
+        a, b = base[i1:i2], other[j1:j2]
+        sim = [[SequenceMatcher(None, tokens(x), tokens(y), autojunk=False).ratio() for y in b] for x in a]
+        best = [[0.0] * (len(b) + 1) for _ in range(len(a) + 1)]
+        for i in range(len(a) - 1, -1, -1):
+            for j in range(len(b) - 1, -1, -1):
+                pair = best[i + 1][j + 1] + sim[i][j] if sim[i][j] >= SAME_PARAGRAPH else -1.0
+                best[i][j] = max(best[i + 1][j], best[i][j + 1], pair)
+        i = j = 0
+        while i < len(a) or j < len(b):
+            if i < len(a) and j < len(b) and sim[i][j] >= SAME_PARAGRAPH and \
+                    best[i][j] == best[i + 1][j + 1] + sim[i][j]:
+                out.append((i1 + i, i1 + i + 1, [b[j]]))
+                i, j = i + 1, j + 1
+            elif j < len(b) and (i == len(a) or best[i][j] == best[i][j + 1]):
+                out.append((i1 + i, i1 + i, [b[j]]))          # a paragraph added here
+                j += 1
+            else:
+                out.append((i1 + i, i1 + i + 1, []))          # one removed
+                i += 1
+    return out
+
+
+def paragraph_merge(bp: list[str], op: list[str], tp: list[str], take=()) -> tuple[list[str], list[dict]]:
+    """Three versions of a box's paragraphs lined up as a line-based diff3 does, a paragraph being
+    the unit: what one side alone added, removed or rewrote is taken; where both rewrote the same
+    paragraphs one for one, each merges as `text_merge` merges one (`_paragraph`); any other
+    overlap (both inserted at one place, one rewrote what the other removed) keeps the deck's
+    paragraphs there, whole, as one conflict. A conflict's `paragraph` is where its paragraphs start
+    in the deck's text, which neither side's choices move: the planner and the sync, merging the
+    predicted and the live text, name it alike."""
+    hunks = [("ours", h) for h in _paragraph_hunks(bp, op)] + [("theirs", h) for h in _paragraph_hunks(bp, tp)]
+    spans, conflicts = [], []
+    for c in _clusters(hunks):
+        c0, c1 = min(h[0] for _, h in c), max(h[1] for _, h in c)
+        sides = {s for s, _ in c}
+        if len(sides) == 1:
+            spans.append((c0, c1, _version(bp, c, sides.pop(), c0, c1)))
+            continue
+        o, t = _version(bp, c, "ours", c0, c1), _version(bp, c, "theirs", c0, c1)
+        # where the cluster starts in the deck's paragraphs: the deck's hunks before it shift it
+        k = c0 + sum(len(rep) - (h1 - h0) for side, (h0, h1, rep) in hunks
+                     if side == "theirs" and h1 <= c0 and ("theirs", (h0, h1, rep)) not in c)
+        if o == t:
+            spans.append((c0, c1, t))
+        elif len(o) == len(t) == c1 - c0:
+            spans.append((c0, c1, [_paragraph(b, x, y, k + i, take, conflicts)
+                                   for i, (b, x, y) in enumerate(zip(bp[c0:c1], o, t))]))
+        elif k in take:
+            spans.append((c0, c1, o))
+        else:
+            conflicts.append({"base": "\n".join(bp[c0:c1]), "ours": "\n".join(o), "theirs": "\n".join(t),
+                              "paragraph": k})
+            spans.append((c0, c1, t))
+    out, pos = [], 0
+    for c0, c1, items in sorted(spans, key=lambda s: (s[0], s[1])):
+        out += bp[pos:c0] + items
+        pos = max(pos, c1)
+    return out + bp[pos:], conflicts
 
 
 def _clash(a: tuple, b: tuple) -> bool:
@@ -162,46 +285,16 @@ def diff3(base: str, ours: str, theirs: str) -> tuple[str, list[dict]]:
     "theirs"} pieces); conflicting regions keep theirs (the deck wins)."""
     b = tokens(base)
     hunks = [("ours", h) for h in _hunks(b, tokens(ours))] + [("theirs", h) for h in _hunks(b, tokens(theirs))]
-    hunks.sort(key=lambda s: (s[1][0], s[1][1], s[0]))
-    clusters: list[list] = []
-    for side, h in hunks:
-        for c in clusters:
-            if any(_clash(h, other) for _, other in c):
-                c.append((side, h))
-                break
-        else:
-            clusters.append([(side, h)])
-    # (clusters can touch after growing: join them until stable)
-    merged_any = True
-    while merged_any:
-        merged_any = False
-        for i in range(len(clusters)):
-            for j in range(i + 1, len(clusters)):
-                if any(_clash(x, y) for _, x in clusters[i] for _, y in clusters[j]):
-                    clusters[i] += clusters.pop(j)
-                    merged_any = True
-                    break
-            if merged_any:
-                break
     spans = []
     conflicts = []
-    for c in clusters:
+    for c in _clusters(hunks):
         c0 = min(h[0] for _, h in c)
         c1 = max(h[1] for _, h in c)
-
-        def version(side):
-            out, pos = [], c0
-            for s, (h0, h1, rep) in sorted(c, key=lambda x: (x[1][0], x[1][1])):
-                if s != side:
-                    continue
-                out += b[pos:h0] + rep
-                pos = h1
-            return out + b[pos:c1]
         sides = {s for s, _ in c}
         if len(sides) == 1:
-            text = version(sides.pop())
+            text = _version(b, c, sides.pop(), c0, c1)
         else:
-            o, t = version("ours"), version("theirs")
+            o, t = _version(b, c, "ours", c0, c1), _version(b, c, "theirs", c0, c1)
             text = t
             if o != t:
                 conflicts.append({"base": "".join(b[c0:c1]), "ours": "".join(o), "theirs": "".join(t)})

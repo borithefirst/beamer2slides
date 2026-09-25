@@ -482,12 +482,41 @@ def test_a_paragraph_both_sides_rewrote_is_taken_whole_from_the_deck():
     assert spliced == "Seconds are rounded, milliseconds full dropped"
 
 
-def test_bullets_the_source_added_fall_back_to_the_word_level_merge():
-    """Paragraphs only line up when there are the same number of them; otherwise the old
-    whole-box merge decides, and a clash there still keeps the deck's text."""
-    args = ("one\ntwo\n", "one\nfirst\ntwo\n", "one\ntwo edited\n")
-    merged, conflicts, safe = merge.text_merge(*args)
-    assert (merged, conflicts) == merge.diff3(*args) and safe is (not conflicts)
+def test_a_bullet_the_source_added_arrives_beside_one_both_sides_rewrote():
+    """Edit hunt h6b: the person reworded one bullet, the source reworded it too and appended a
+    new one. Merged as one run of words, the clash kept the deck's whole box and the new bullet
+    never came, at two syncs in a row. Lined up paragraph by paragraph, only the clash is the deck's."""
+    base = "Replay is costly\nMaps are dense\nCan maps be compressed losslessly?\n"
+    ours = "Replay is costly\nMaps are dense\nCan maps be compressed compactly?\nAblation: which layers need it?\n"
+    theirs = "Replay is costly\nMaps are dense\nCan maps be compressed efficiently?\n"
+    merged, conflicts, safe = merge.text_merge(base, ours, theirs)
+    assert safe and merged == ("Replay is costly\nMaps are dense\nCan maps be compressed efficiently?\n"
+                               "Ablation: which layers need it?\n")
+    assert [(c["paragraph"], c["ours"], c["theirs"]) for c in conflicts] == \
+        [(2, "Can maps be compressed compactly?", "Can maps be compressed efficiently?")]
+    # the whole-box word merge it replaces lost the new bullet with the clash
+    assert merge.diff3(base, ours, theirs)[1]
+    # and a person who reads the report can still take the source's words for that one bullet
+    taken, left, _ = merge.text_merge(base, ours, theirs, [2])
+    assert taken == ours and left == []
+
+
+def test_paragraphs_line_up_around_what_either_side_added_or_removed():
+    # the source added a bullet, the deck edited another: both land, no conflict
+    assert merge.text_merge("one\ntwo\n", "one\nfirst\ntwo\n", "one\ntwo edited\n") == \
+        ("one\nfirst\ntwo edited\n", [], True)
+    # the deck added a bullet in front of a clash: the conflict is named by where it is in the deck
+    merged, conflicts, _ = merge.text_merge("a\nb\nc\n", "a\nb\nc source\nd\n", "a\nnew\nb\nc deck\n")
+    assert merged == "a\nnew\nb\nc deck\nd\n" and [c["paragraph"] for c in conflicts] == [3]
+    assert merge.text_merge("a\nb\nc\n", "a\nb\nc source\nd\n", "a\nnew\nb\nc deck\n", [3])[0] == \
+        "a\nnew\nb\nc source\nd\n"
+    # both inserted at one place: the deck's stays, one conflict
+    merged, conflicts, _ = merge.text_merge("a\nb\n", "a\nb\nfrom the source\n", "a\nb\nfrom the deck\n")
+    assert merged == "a\nb\nfrom the deck\n"
+    assert [(c["paragraph"], c["ours"], c["theirs"]) for c in conflicts] == [(2, "from the source", "from the deck")]
+    # the person removed a bullet the source rewrote: the removal stands, as a conflict
+    merged, conflicts, _ = merge.text_merge("a\nb\nc\n", "a\nb rewritten\nc\nd\n", "a\nc\n")
+    assert merged == "a\nc\nd\n" and [c["base"] for c in conflicts] == ["b"]
 
 
 def test_same_text_on_both_sides_converges():
@@ -908,6 +937,18 @@ def test_removed_text_living_on_in_a_conflict_is_kept():
         "Main point of intro\nSecond point of intro\nA closing remark", (20, 60, 200, 130), "p0t1"))
     del ours["slides"][0]["elements"][2]
     edit_text(theirs["slides"][0], "b2s_s000_t1", "Best point of intro\nSecond point of intro\n")
+    mplan = merge.plan_merge(base, ours, theirs)
+    # the paragraphs line up: the deck's rewording stays, the joined remark arrives in the list,
+    # so the box it came from can go - its words live on in what is written
+    u = unit(mplan, "intro", "text/body/0")
+    assert u["action"] == "recreate"
+    merged, _, _ = merge.text_merge(u["overrides"]["text"]["base"], merge.predicted_text(ours["slides"][0]["elements"][1]["ir"]),
+                                    u["overrides"]["text"]["theirs"])
+    assert merged.split("\n")[:3] == ["Best point of intro", "Second point of intro", "A closing remark"]
+    assert unit(mplan, "intro", "text/body/1")["action"] == "delete"
+    # where the list stays the deck's whole (the person added a line where the remark goes), the
+    # remark's own box is kept, or its words would be gone
+    edit_text(theirs["slides"][0], "b2s_s000_t1", "Best point of intro\nSecond point of intro\nMy own closing\n")
     mplan = merge.plan_merge(base, ours, theirs)
     assert unit(mplan, "intro", "text/body/1")["action"] == "keep"
     assert not merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
