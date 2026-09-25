@@ -1873,6 +1873,24 @@ def test_a_slide_the_deck_deleted_keeps_its_place_in_the_new_base():
     assert base_order({"slides": plans}, by_plan, ["b2s_s001"]) == ["gone:deleted_by_the_person", "b2s_s001"]
 
 
+def test_a_kept_slide_whose_words_the_source_moved_elsewhere_is_said():
+    """Edit hunt h2-1: the source folded Background into Approach; the person had resized one
+    phrase on Background, so the slide is kept - and its bullets were in the deck twice, unsaid."""
+    base = many_slides(["background", "approach", "end"])
+    words = "We target search finishing under twenty GPU hours using cheap proxies"
+    base["slides"][0]["text"] = f"Background {words}"
+    ours, theirs = triple(base)
+    folded = {**ours["slides"][1], "title": "Background and Approach", "text": f"Background and Approach {words} then more"}
+    ours3 = {"slides": [folded, ours["slides"][2]], "pairs": {0: 1, 1: 2}}
+    theirs["slides"][0]["objects"]["user_box"] = readback([0, 0, 50, 20], "note")
+    report = merge.plan_merge(base, ours3, theirs)["report"]
+    said, = [w for w in report["warnings"] if w.startswith("slide background:")]
+    assert "'Background and Approach'" in said and "twice" in said
+    # a kept slide whose words went nowhere is only kept
+    ours3["slides"][0] = {**folded, "text": "Background and Approach entirely other sentences about approach methods"}
+    assert not [w for w in merge.plan_merge(base, ours3, theirs)["report"]["warnings"] if w.startswith("slide background:")]
+
+
 def test_a_deleted_slide_in_the_base_does_not_displace_a_kept_one():
     """The two ways a slide can be in the base without being in the deck must not fight. What the
     next conversion aligns against is the entries the source still has, in the source's order: a

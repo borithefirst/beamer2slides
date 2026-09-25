@@ -7,6 +7,7 @@ inherited: snapshot.slide_entries) and theirs (snapshot.read_presentation of the
 import hashlib
 import json
 import re
+from collections import Counter
 from difflib import SequenceMatcher
 
 from . import identity, snapshot
@@ -1032,6 +1033,28 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
 
 # ---------------------------------------------------------------- slides
 
+ABSORBED = 0.6       # share of a dropped slide's words another frame now says, to be told
+ABSORBED_WORDS = 6   # fewer words than this say nothing of where they went
+
+
+def absorbed_by(slide: dict, ours_slides: list[dict], was: dict | None = None) -> dict | None:
+    """The source frame that now says most of what a dropped slide said, in words it did not say
+    before (`was`: ours index -> the base slide it continues), or None. Words of four letters or
+    more, so that "of" and "the" make no two slides alike; and only the frame's new words, because
+    an outline or a summary says the whole talk's vocabulary every time (over the edit hunt's 132
+    slides, counting every word flagged two outlines that were never moved anywhere)."""
+    def words(s):
+        title = set(identity.norm_title(s.get("title") or "").split())
+        return Counter(w for w in identity.norm_title(s.get("text") or "").split() if w not in title and len(w) >= 4)
+    mine = words(slide)
+    if sum(mine.values()) < ABSORBED_WORDS:
+        return None
+    gained = [words(o) - (words((was or {})[n]) if n in (was or {}) else Counter()) for n, o in enumerate(ours_slides)]
+    share, home = max(((sum((mine & g).values()) / sum(mine.values()), n) for n, g in enumerate(gained)),
+                      default=(0.0, None))
+    return ours_slides[home] if home is not None and share >= ABSORBED else None
+
+
 def empty_report() -> dict:
     return {"applied": [], "overrides": [], "conflicts": [], "resolved": [], "converged": [], "user_objects": [],
             "slides": {"created": [], "deleted": [], "moved": [], "kept": [], "held": [], "user_added": []},
@@ -1225,6 +1248,18 @@ def plan_merge(base: dict, ours: dict, theirs: dict, adopt=None, follow_labels: 
             f"{m['title']!r} is new - but the two say much of the same thing. If they are one frame, it was "
             f"retitled, reworded and moved too much in one version to be followed, and {where}. Give that "
             f"frame a label (`beamer2slides label`) and this cannot happen to it again, see docs/labels.md.")
+    near = {m["slide"] for m in ours.get("near_misses") or []}
+    was = {int(j): base_slides[i] for j, i in (ours.get("pairs") or {}).items()}
+    for k in report["slides"]["kept"]:
+        b = next((s for s in base_slides if s["key"] == k["slide"]), None)
+        home = absorbed_by(b, ours["slides"], was) if b is not None and k["slide"] not in near else None
+        if home is not None:
+            # The source folded this frame into another one (edit hunt h2-1): any edit keeps the old
+            # slide, rightly, and then its words are in the deck twice with nothing said.
+            report["warnings"].append(
+                f"slide {k['slide']}: the source dropped this frame, and most of what it said is now on "
+                f"{home['title'] or home['key']!r}. The deck keeps this slide because of your edits on it, so "
+                f"those words are there twice: delete this slide once your edits are where they belong.")
 
     base_ids = {b.get("objectId") for b in base_slides}
     for s in theirs["slides"]:
