@@ -801,11 +801,7 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             src |= identity.source_changes(base_by[k], ours_by[k])
     action = {"key": ukey, "source": sorted(src), "deck": sorted(deck)}
     edited = deck & set(EDIT_FIELDS)
-    # What the write actually does with each of the source's fields: a field the deck's own
-    # re-applied style ends up covering in full is not something this sync wrote (`applied_fields`
-    # discards "style" below when that happens), so the report never claims work that left the
-    # deck exactly as it was.
-    applied_fields = set(src)
+    applied_fields = set(src)   # less what the deck's re-applied edits write over (edit hunt h5-3)
     if not src:
         said = deck - {"image"} if "image" in deck and unchecked(slide_read, edits["image"]) else deck
         if said - {"z"}:
