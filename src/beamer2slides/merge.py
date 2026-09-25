@@ -801,6 +801,11 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             src |= identity.source_changes(base_by[k], ours_by[k])
     action = {"key": ukey, "source": sorted(src), "deck": sorted(deck)}
     edited = deck & set(EDIT_FIELDS)
+    # What the write actually does with each of the source's fields: a field the deck's own
+    # re-applied style ends up covering in full is not something this sync wrote (`applied_fields`
+    # discards "style" below when that happens), so the report never claims work that left the
+    # deck exactly as it was.
+    applied_fields = set(src)
     if not src:
         said = deck - {"image"} if "image" in deck and unchecked(slide_read, edits["image"]) else deck
         if said - {"z"}:
@@ -956,7 +961,9 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         runs = uniform_changes(base_rb.get("text_styles", []), theirs_rb.get("text_styles", []), cut)
         paras = uniform_changes(base_rb.get("paragraph_styles", []), theirs_rb.get("paragraph_styles", []), cut)
         # (a source "style" change can be list levels or sizes; only the same attributes clash)
-        clash = "style" in src and source_style_keys(anchor, first) & deck_style_keys(base_rb, theirs_rb)
+        source_keys = source_style_keys(anchor, first) if "style" in src else set()
+        deck_keys = deck_style_keys(base_rb, theirs_rb)
+        clash = "style" in src and source_keys & deck_keys
         if paras is None or set(edits["text_style"]) != {main} or anchor["kind"] not in ("text", "table"):
             keep = not taken("text_style", "style", sorted(src), "restyled in the deck")
         elif runs is None or anchor["kind"] == "table":
@@ -976,6 +983,11 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             if clash and taken("text_style", "style", "restyled in the source", "restyled in the deck",
                                "deck style re-applied"):
                 overrides.pop("text_style", None)
+            elif clash and source_keys <= deck_keys:
+                # The deck's own re-applied run styles cover every attribute the source changed
+                # (`runs` is the uniform, whole-attribute case, unlike the "ranges" one above): the
+                # write leaves this element exactly as the deck had it, so "style" was not applied.
+                applied_fields.discard("style")
     if "shape_style" in edited and not keep:
         if anchor["kind"] != "shape" or set(edits["shape_style"]) != {main}:
             keep = not taken("shape_style", "style", sorted(src), "restyled in the deck")
@@ -1025,7 +1037,8 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
             report["applied"].append({**where, "fields": ["position"], "how": "deck object moved"})
             return {**action, "action": "move", "delta": list(shift)}
         return {**action, "action": "keep"}
-    report["applied"].append({**where, "fields": sorted(src)})
+    if applied_fields:
+        report["applied"].append({**where, "fields": sorted(applied_fields)})
     if edited:
         report["overrides"].append({**where, "fields": sorted(edited)})
     return {**action, "action": "recreate", "overrides": overrides}

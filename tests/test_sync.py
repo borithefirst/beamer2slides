@@ -2140,6 +2140,31 @@ def test_source_style_change_elsewhere_is_no_style_conflict():
     assert [c["resolution"] for c in mplan["report"]["conflicts"]] == ["deck style re-applied"]
 
 
+def test_style_fully_reapplied_by_the_deck_is_not_applied():
+    """A theme change recolours a title in the source; the person recoloured the same title in the
+    deck, to a different colour, and never asked for the source's version. `deck style re-applied`
+    wins (edit hunt h5-3): the recreated title's colour ends up exactly what the deck already had,
+    nothing else about it changed, so the report must not claim its style was applied - only that
+    the deck's own recolouring was kept."""
+    base = three_slides()
+    title = base["slides"][0]["elements"][0]
+    title["readback"][title["main"]]["text_styles"] = [{"foregroundColor": "#000000"}]
+    title["readback"][title["main"]]["text_style_hash"] = "base style"
+    ours, theirs = triple(base)
+    ours["slides"][0]["elements"][0] = ours_entry(
+        "text/title/0", text_ir("Intro", (10, 10, 100, 24), "p0t0", "title", color="#1a73e8"))
+    obj = theirs["slides"][0]["objects"][title["main"]]
+    obj["text_styles"] = [{"foregroundColor": "#006666"}]
+    obj["text_style_hash"] = "deck recolour"
+    mplan = merge.plan_merge(base, ours, theirs)
+    u = unit(mplan, "intro", "text/title/0")
+    assert u["action"] == "recreate" and u["overrides"]["text_style"]["runs"] == {"foregroundColor": "#006666"}
+    assert [c["resolution"] for c in mplan["report"]["conflicts"]] == ["deck style re-applied"]
+    # the write leaves the title exactly as the deck had it: nothing of the source's style landed
+    assert not [a for a in mplan["report"]["applied"] if a["slide"] == "intro" and a["element"] == "text/title/0"]
+    assert mplan["report"]["overrides"] == [{"slide": "intro", "element": "text/title/0", "fields": ["text_style"]}]
+
+
 def test_deck_move_the_source_reproduces_converges():
     """A deck move written into the source (pull: a \\vspace) gives the same place: adopted, no write."""
     base = three_slides()
