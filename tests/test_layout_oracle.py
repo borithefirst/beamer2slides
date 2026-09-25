@@ -217,6 +217,21 @@ def test_overruns_names_the_persons_object_the_source_now_runs_over():
     assert text_layout.overruns({"objects": was_over}, {"objects": after}, {"u1"}) == []
 
 
+def test_the_sources_picture_grown_over_the_persons_copy_is_an_overrun():
+    """Edit hunt h3-1: the person duplicated a figure (Ctrl+D) and set the copy beside it; the source
+    drew a larger figure and the recreated one now covers the copy. Once skipped as a collage - but a
+    collage overlapped before the sync too, and that one still does not count."""
+    from beamer2slides import text_layout
+    pic = lambda box, title=None: {"kind": "image", "box": box, "title": title}
+    before = {"f1": pic([150, 90, 400, 240], "b2s:ex/image/figure/0"), "u1": pic([420, 250, 620, 310], "b2s:ex/image/figure/0")}
+    after = {"f2": pic([150, 90, 640, 470], "b2s:ex/image/figure/0"), "u1": before["u1"]}
+    found = text_layout.overruns({"objects": before}, {"objects": after}, {"u1"})
+    assert [(o["object"], o["other"]) for o in found] == [("u1", "f2")]
+    # a sticker the person put on the figure: over it as deep before as after
+    collage = {**before, "u1": pic([300, 200, 380, 230])}
+    assert text_layout.overruns({"objects": collage}, {"objects": {**after, "u1": collage["u1"]}}, {"u1"}) == []
+
+
 def test_an_old_deep_overlap_does_not_hide_the_new_one():
     """Live fuzz r7411: the person's note already ran over the frame counter, deeper than the
     paragraph now runs over it; the paragraph's overrun is still this sync's."""

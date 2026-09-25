@@ -323,22 +323,25 @@ OVERRUN_MIN = 2.0   # pt each way before the source's ink counts as over a perso
 def overruns(before: dict, after: dict, users: set[str], skip: set[str] = frozenset()) -> list[dict]:
     """The person's own objects (`users`, untouched by the sync) that the source's text or pictures
     now run over, where they did not before: {"object", "other", "depth"}, the deepest per object.
-    One side is always text (a picture on a picture is a collage, not an accident). `skip`: objects
-    about to be deleted. Each other object is judged against its own meet before (a recreated one
-    found by its b2s title): a note already over the frame counter still counts the paragraph that
-    now reaches it (live fuzz r7411)."""
+    `skip`: objects about to be deleted. Each other object is judged against its own meet before (a
+    recreated one found by its b2s title): a note already over the frame counter still counts the
+    paragraph that now reaches it (live fuzz r7411). That is also what lets a picture on a picture
+    count: a collage the person made overlapped before the sync too, while the source's figure grown
+    over the person's copy of the old one did not (edit hunt h3-1, once skipped as a collage)."""
     out = []
     inks_a = {o: ink(rb) for o, rb in after["objects"].items() if o not in skip}
     inks_b = {o: ink(rb) for o, rb in before["objects"].items()}
-    by_title = {rb["title"]: o for o, rb in before["objects"].items() if (rb.get("title") or "").startswith("b2s:")}
+    # (not the person's own: a Ctrl+D copy carries its original's title, and read as the recreated
+    # original's old self it was "already over" itself)
+    by_title = {rb["title"]: o for o, rb in before["objects"].items()
+                if (rb.get("title") or "").startswith("b2s:") and o not in users}
     for u in sorted(users):
         ua, ub = after["objects"].get(u), before["objects"].get(u)
         if ua is None or ub is None or not inks_a.get(u) or ua.get("box") != ub.get("box"):
             continue
-        picture = ua.get("kind") == "image"
         best = None
         for o, r in inks_a.items():
-            if o == u or o in users or not r or (picture and after["objects"][o].get("kind") == "image"):
+            if o == u or o in users or not r:
                 continue
             now = meet(inks_a[u], r, OVERRUN_MIN)
             if now is None:
