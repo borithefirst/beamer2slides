@@ -4536,7 +4536,13 @@ person left it | new PDF | after sync; `pull1/`), `candidates/`, `judgements/`, 
   - a recreated title never got a refit job (`Sync.refit_jobs` skipped every placeholder), so a
     panel the sync drew under the person's enlarged title was never fitted nor warned (h5-6): the
     job goes out, `refit.plan` leaves a placeholder's own box alone and fits the panel. The two
-    were diagnosed and fixed by Sonnet agents in worktrees, reviewed and merged here.
+    were diagnosed and fixed by Sonnet agents in worktrees, reviewed and merged here;
+  - pull wrote a second `[label=x]` for a duplicated slide, which hyperref drops (h2-3): a free
+    suffix (`x-2`, `Planner.used_labels`), said under "Duplicate labels"; a colour rewrite that
+    never converged was left in the source as `e\alert{fficient}ly...` (h6-3): style commands
+    snap to whole words (`char_span(whole_words=True)`) and `converge` reverts a blocked
+    text/style rewrite with its sibling sub-ranges (`edit_group`, `REVERTIBLE`);
+    `tests/test_pull_hunt.py`.
 - **The oracle bug found on the way**: `loss_oracle.deck_placement` fitted text frames to place
   the conversion; a base's recorded `scale` now places it (48f37a4).
 - **h5-5 was no sync defect**: the panel was 810 pt wide on a 720 pt slide *before* the sync (the
