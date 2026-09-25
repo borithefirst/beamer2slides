@@ -83,10 +83,14 @@ GOOGLE_SLOTS = int(os.environ.get("B2S_HUNT_GOOGLE", "4"))  # runs at Google at 
 
 class google_turn:
     """A lock file per concurrent Google run, so parallel hunters stay under the write quota.
-    A lock whose process is gone is taken over."""
+    A lock whose process is gone is taken over. `folder`: where the locks live (another campaign's
+    own, `edit_hunt`)."""
+
+    def __init__(self, folder: Path | None = None):
+        self.folder = folder
 
     def __enter__(self):
-        locks = HUNT / "locks"
+        locks = self.folder or HUNT / "locks"
         locks.mkdir(parents=True, exist_ok=True)
         while True:
             for k in range(GOOGLE_SLOTS):
