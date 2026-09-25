@@ -195,6 +195,20 @@ def test_a_shifted_block_keeps_its_bar_and_body_apart():
     assert identity.slide_element_keys(v2, None, identity.base_items(old))[0] == want
 
 
+def test_a_diagram_that_became_a_picture_is_still_the_figure():
+    """Edit hunt h3-3: the source added a node and classify refused the busier TikZ figure as a
+    diagram. As two elements, the person's edited diagram was kept and the picture stacked on it."""
+    diagram = {"id": "p0d0", "kind": "diagram", "role": "figure", "bbox": [45, 90, 318, 155],
+               "nodes": [{"paragraphs": [[{"text": "SP tree"}]]}]}
+    keys, fps = identity.slide_element_keys([diagram], None)
+    base = [{"key": keys[0], "kind": "diagram", "role": "figure", "fingerprint": fps[0]}]
+    picture = {"id": "p0f0", "kind": "image", "role": "figure", "bbox": [30, 88, 300, 168]}
+    assert identity.slide_element_keys([picture], None, base)[0] == ["diagram/figure/0"]
+    # ... but a picture somewhere else is a picture the source added
+    elsewhere = {**picture, "bbox": [30, 200, 300, 260]}
+    assert identity.slide_element_keys([elsewhere], None, base)[0] == ["image/figure/0"]
+
+
 def test_anchored_elements_take_their_anchors_key():
     text = text_ir("A formula here and more words", (20, 60, 200, 70), "p0t1")
     pic = {"id": "p0h0", "kind": "image", "role": "math", "bbox": [80, 60, 100, 70], "anchor": "p0t1"}

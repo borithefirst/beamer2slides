@@ -28,6 +28,7 @@ TWIN_TIE = 0.02       # an alignment this close to the best one is a second read
 DROPPED_FRAME = 1e-4  # a tie between a slide the source still describes and one it dropped goes live
 KEY_MATCH = 0.5       # least similarity for an element keeping the key it would get anyway
 ELEMENT_MATCH = 0.35  # least similarity for an element inheriting another key
+FIGURE_KINDS = {"diagram", "image"}  # a figure is one or the other, and may change which
 # Render output, not source: "picture" says how a bare image reached its file (raw stream or
 # PDFium's pixels); the bytes themselves are hashed by image_sha1.
 DROP_KEYS = {"id", "spans", "file", "px", "picture", "drawings", "drawing", "frame_drawings", "tiles"}
@@ -740,9 +741,14 @@ def _geometry(a: list[float], b: list[float]) -> float:
 
 def element_similarity(a: dict, b: dict) -> float:
     """a, b: {"kind", "role", "fingerprint"}."""
-    if a["kind"] != b["kind"]:
-        return 0.0
     fa, fb = a["fingerprint"], b["fingerprint"]
+    if a["kind"] != b["kind"]:
+        if {a["kind"], b["kind"]} == FIGURE_KINDS and a.get("role") == b.get("role") == "figure":
+            # One figure, drawn two ways: a TikZ picture the source made busier is a picture now
+            # rather than a diagram (classify refuses it), and as two elements the person's edited
+            # diagram was kept with the new picture stacked on it (edit hunt h3-3).
+            return 0.8 * _geometry(fa["bbox"], fb["bbox"])
+        return 0.0
     geom = _geometry(fa["bbox"], fb["bbox"])
     role = 1.0 if a.get("role") == b.get("role") else 0.0
     if fa["text"] or fb["text"]:
