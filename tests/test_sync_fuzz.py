@@ -1061,6 +1061,34 @@ def test_the_offline_fuzz_orders_the_page_as_sync_does(monkeypatch):
     assert [f["kind"] for f in found] == ["text_hidden"], loss_oracle.describe(found)
 
 
+def test_the_offline_base_is_what_the_sync_made_not_what_it_left(monkeypatch):
+    """`fuzz_world.rebase` records a recreated object as the sync made it, before the deck's
+    overrides went back on - `Sync.new_base` reads `Sync.created`, docs/sync.md "After writing".
+    It used to record the final deck, so a merged edit became the base's own: the person's move
+    carried onto a recreated box read as unmoved from then on. The next source change to that box
+    put it back at the converter's place and the oracle, judging against that base, saw nothing;
+    and a second move of it was carried twice (converted seed 93863 at chain 4,
+    `geometry_not_carried`). Here: the person moves `p5t2`'s box, then the source rewords it twice
+    with the deck left alone - the box stays where the person put it."""
+    assert not fuzz_sync.offline_chain(93863, 4)["failures"]
+
+    def reword(rng, doc):
+        el = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == "p5t2")
+        el["paragraphs"][0]["runs"][0]["text"] += " again-ours"
+        return "reword p5t2"
+    monkeypatch.setitem(fuzz_sync.SOURCE_OPS, "pinned", reword)
+    monkeypatch.setitem(fuzz_sync.DECK_OPS, "nothing", lambda rng, base, live: None)
+    ops = fuzz_sync.offline_chain(93863, 1)["ops"] + [{"deck": ["nothing"], "source": ["pinned"]}] * 2
+    steps = fuzz_sync.offline_chain(93863, 3, ops)["steps"]
+    moved = [40.0, 140.0, 390.0, 212.0]           # step 0: the person moved it 10, 20 up and left
+    for s in steps[1:]:
+        f5 = next(b for b in s["state"]["next_base"]["slides"] if b["key"] == "f5")
+        el = next(e for e in f5["elements"] if e["key"] == "text/body/1")
+        assert el["readback"][el["main"]]["box"] == [50.0, 160.0, 400.0, 232.0]   # the converter's
+        after = next(a for a in s["state"]["after"]["slides"] if a["objectId"] == f5["objectId"])
+        assert after["objects"][el["main"]]["box"] == moved, f"step {s['step']}"
+
+
 def test_failures_are_the_severities_that_matter():
     made = [loss_oracle.finding("x", "note", "unverified"), loss_oracle.finding("y", "loss", "gone")]
     assert [f["kind"] for f in loss_oracle.failures(made)] == ["y"]

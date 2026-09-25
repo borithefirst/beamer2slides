@@ -4527,13 +4527,27 @@ person left it | new PDF | after sync; `pull1/`), `candidates/`, `judgements/`, 
     geometry conflict's base/source boxes are in deck pt (h2-5: the skeptic read `[x, y, w, h]`
     dumps as corners, but the units really were mixed);
   - a kept table the source runs into is warned (h2-2, h4-1): `warn_about_overruns` counts units
-    the plan keeps, and a table's ink is its box.
+    the plan keeps, and a table's ink is its box;
+  - a slide kept for its edits after the source merged its frame into another is said (h2-1):
+    `merge.absorbed_by`, most (`ABSORBED` 0.6, at least `ABSORBED_WORDS`) of the words the frame
+    gained over its base now on one live frame. Once in the hunt's 132 slides, on the real case.
 - **The oracle bug found on the way**: `loss_oracle.deck_placement` fitted text frames to place
   the conversion; a base's recorded `scale` now places it (48f37a4).
+- **The fuzz world's base was the merged deck** (offline seed 93863 at chain 4,
+  `geometry_not_carried`, found by the fuzz run after these fixes and there before them):
+  `fuzz_world.rebase` recorded a recreated object from the final deck, overrides and all, where
+  `Sync.new_base` records `Sync.created` - the object as made, before the person's edits went back
+  on (docs/sync.md). In that world a merged edit stopped being an edit after one sync: a carried
+  move read as unmoved, the next source change put the box back at the converter's place, and
+  nothing judged against that base could call it a loss; a second move was carried twice. The
+  product was right. The first diagnosis (a Sonnet agent) patched the *product's* keep branch to
+  refresh the base from the live deck, which passed the seed by erasing the person's move from the
+  base - it would have lost exactly what it seemed to fix. `apply_plan` now keeps `as_created` and
+  `rebase` takes the overridden fields from it (`OVERRIDDEN`);
+  `test_the_offline_base_is_what_the_sync_made_not_what_it_left`.
 - **Open, confirmed**: table merge gives up on any dimension change (h4-2, h4-8, h6-1: a row
   added on each side keeps the deck's table whole - a feature, not a fix); diagram node-count
-  changes likewise (h4-10); a duplicate slide after the source merges two frames (h2-1: any edit
-  protects a slide and `near_misses` looks only at new frames); a panel wider than the slide after
+  changes likewise (h4-10); a panel wider than the slide after
   a resize and a move composed (h5-5); a title overflowing a panel a theme swap recreated (h5-6,
   caught by the layout oracle); style reported applied where emit changes nothing (h5-3, caught by
   `applied_no_change`); pull: a CJK subtitle fixed twice (h1-1), `\vspace` hacks on non-converging

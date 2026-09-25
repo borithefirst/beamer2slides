@@ -514,10 +514,11 @@ def _styling_ends(base_rb, live_rb, text) -> bool:
 
 def new_object(skey, o_el, base_el, live, overrides, tok):
     """The object a correct sync creates for one ours element (docs/sync.md: ours content, with the
-    deck's overrides re-applied)."""
+    deck's overrides re-applied), and the read-back of it before they were: what the base records
+    (`as_created`)."""
     ir = o_el["ir"]
     box = [v * SCALE for v in ir["bbox"]]
-    text = element_text(ir)
+    text = plain = element_text(ir)
     ov = (overrides or {}).get("text")
     if ov and text is not None:
         if ov.get("table"):
@@ -542,6 +543,7 @@ def new_object(skey, o_el, base_el, live, overrides, tok):
         rb = readback("shape", box, text=text, parent=parent, fill=panel_fill(ir))
     rb["title"] = snapshot.tag(skey, o_el["key"])
     styled(rb, ir)
+    pre = {**copy.deepcopy(rb), "text": plain}
     live_rb = live["objects"].get(main) if main else None
     base_rb = (base_el or {}).get("readback", {}).get(main, {}) if main else {}
     if live_rb and (overrides or {}).get("text_style"):  # the deck's styling, re-applied
@@ -554,12 +556,21 @@ def new_object(skey, o_el, base_el, live, overrides, tok):
     if live_rb and (overrides or {}).get("shape_style"):
         rb["shape_style_hash"] = live_rb.get("shape_style_hash")
         rb["shape_style"] = copy.deepcopy(live_rb.get("shape_style"))
-    return oid, rb
+    return oid, rb, pre
 
 
 def apply_plan(base, ours, theirs, mplan, tok="2zz") -> dict:
-    """The live deck as a correct sync would leave it after writing `mplan`."""
+    """The live deck as a correct sync would leave it after writing `mplan`.
+
+    `after["as_created"]` holds, per object this sync made, its read-back before the deck's
+    overrides went back on - the text as ours says it, ours' styling, the converter's box. That is
+    what `rebase` records, as `sync.Sync.new_base` does from `Sync.created` (docs/sync.md: the base
+    is converter output). Recorded from the final deck instead, a merged edit became the base's own:
+    the person's move carried onto a recreated box read as unmoved from then on, so the next source
+    change put the box back at the converter's place and nothing called that a loss (and the step
+    after it, the person moving it again, got carried twice: seed 93863 at chain 4)."""
     after = copy.deepcopy(theirs)
+    after["as_created"] = created = {}
     by_id = {s["objectId"]: s for s in after["slides"]}
     made = {}
     dropped = set()
@@ -571,14 +582,14 @@ def apply_plan(base, ours, theirs, mplan, tok="2zz") -> dict:
             sid = f"b2s_{h6(p['key'])}_{tok}"
             objects = {}
             for el in o["elements"]:
-                oid, rb = new_object(o["key"], el, None, {"objects": {}}, None, tok)
+                oid, rb, _ = new_object(o["key"], el, None, {"objects": {}}, None, tok)
                 objects[oid] = rb
             made[f"new:{p['key']}"] = {"objectId": sid, "layoutObjectId": "L",
                                        "background": {"color": o["background"].split(":", 1)[1]},
                                        "notes": o.get("notes") or "", "notes_id": f"{sid}_notes",
                                        "order": list(objects), "objects": objects}
         elif p["action"] == "update":
-            _update_slide(base, ours, by_id[p["objectId"]], p, tok)
+            _update_slide(base, ours, by_id[p["objectId"]], p, tok, created)
     order = []
     for x in mplan["order"]:
         if x.startswith("new:"):
@@ -592,7 +603,7 @@ def apply_plan(base, ours, theirs, mplan, tok="2zz") -> dict:
     return after
 
 
-def _update_slide(base, ours, live, p, tok):
+def _update_slide(base, ours, live, p, tok, created=None):
     b, o = base["slides"][p["base"]], ours["slides"][p["ours"]]
     bu, ou = merge.units(b["elements"]), merge.units(o["elements"])
     # The deck's own version of the objects, read before anything is deleted: that is what the
@@ -633,10 +644,12 @@ def _update_slide(base, ours, live, p, tok):
         base_by = {m["key"]: m for m in members}
         made = []
         for m in ou.get(u["key"], []):
-            oid, rb = new_object(o["key"], m, base_by.get(m["key"]), theirs, overrides if m["key"] == u["key"] else None, tok)
+            oid, rb, pre = new_object(o["key"], m, base_by.get(m["key"]), theirs, overrides if m["key"] == u["key"] else None, tok)
             parent = parents.get(m["key"])
-            rb["parent_group"] = parent if parent in live["objects"] else None
+            rb["parent_group"] = pre["parent_group"] = parent if parent in live["objects"] else None
             live["objects"][oid] = rb
+            if created is not None:
+                created[oid] = pre
             if not (slots.get(m["key"]) and _take_place(live, slots[m["key"]], [oid])):
                 # new: on top (of its group)
                 (live["objects"][rb["parent_group"]].setdefault("children", []) if rb["parent_group"]
@@ -821,9 +834,14 @@ def _not_over_kept(live, at_rank, made, rank):
                 break
 
 
+OVERRIDDEN = ("text", "text_styles", "paragraph_styles", "run_spans", "text_style_hash", "shape_style",
+              "shape_style_hash", "box", "transform", "size")   # what `sync.Sync.override_requests` writes
+
+
 def rebase(base, ours, after, mplan, tok="2zz") -> dict:
     """The base a correct sync records for the next one: ours IR plus the read-back of the objects
-    as it left them (docs/sync.md, "After writing"). Units kept from the deck carry their old base,
+    as it made them, before the deck's overrides went back on (docs/sync.md, "After writing";
+    `apply_plan`'s `as_created`). Units kept from the deck carry their old base,
     so a chain of syncs never forgets what the person's version was."""
     now = {s["objectId"]: s for s in after["slides"]}
     entries: dict[str, dict] = {}
@@ -866,11 +884,17 @@ def rebase(base, ours, after, mplan, tok="2zz") -> dict:
             b = base["slides"][p["base"]]
             bunits, ounits = merge.units(b["elements"]), merge.units(o["elements"])
             index = {e["key"]: e for e in o["elements"]}
+            # what this sync made, as it made it: before the overrides (`apply_plan`)
+            # (only what an override writes: grouping and z-order are the final read's, as
+            # `Sync.created` is read after the content and order phases)
+            pre = after.get("as_created") or {}
+            made = {**read, "objects": {oid: {**rb, **{k: pre[oid][k] for k in OVERRIDDEN if k in pre[oid]}}
+                                        if oid in pre else rb for oid, rb in read["objects"].items()}}
             for u in p["units"]:
                 action = u["action"]
                 if action in ("create", "recreate"):
                     for mk in u["ours_members"]:
-                        elements.append(_rebased_element(index[mk], [f"b2s_{h6(o['key'])}_{h6(mk)}_{tok}"], read))
+                        elements.append(_rebased_element(index[mk], [f"b2s_{h6(o['key'])}_{h6(mk)}_{tok}"], made))
                 elif action == "adopt_object":
                     for mk in u["ours_members"]:
                         elements.append(_rebased_element(index[mk], [u["objectId"]], read))
