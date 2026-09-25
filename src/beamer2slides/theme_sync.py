@@ -122,6 +122,52 @@ def moved(a: list | None, b: list | None) -> bool:
     return a is None or b is None or max(abs(x - y) for x, y in zip(a, b)) > BOX_TOL
 
 
+def texts_digest(texts: list[dict]) -> str:
+    """What classify's `layout_texts` (the header and footer words every slide shares, which
+    `emit.write_layout_texts` puts on every layout) say and look like."""
+    return identity.sha1(json.dumps(identity.normalise_ir(texts), sort_keys=True))[:12]
+
+
+def texts_says(texts: list[dict]) -> list[str]:
+    return [identity.plain_text(t) for t in texts]
+
+
+def live_texts(pres: dict) -> dict[str, dict]:
+    """The layout texts on the deck's layouts: object id -> {page, text, box, style}."""
+    from .emit import LAYOUT_TEXT_PREFIX
+    out = {}
+    for page in pres.get("layouts", []):
+        objects = snapshot.read_slide(page)["objects"]
+        for e in page.get("pageElements", []):
+            if e["objectId"].startswith(LAYOUT_TEXT_PREFIX) and e["objectId"] in objects:
+                rb = objects[e["objectId"]]
+                out[e["objectId"]] = {"page": page["objectId"], "text": rb.get("text") or "", **slim(rb, e)}
+    return out
+
+
+def texts_entry(texts: list[dict], pres: dict) -> dict:
+    """The base's record of the layout texts: what they said and what the deck held after writing them."""
+    return {"digest": texts_digest(texts), "says": texts_says(texts), "objects": live_texts(pres)}
+
+
+def texts_edited(was: dict, now: dict) -> list[str]:
+    """How the deck's layout texts differ from what convert (or the last sync) left there."""
+    out = []
+    for oid in sorted(set(was) | set(now)):
+        a, b = was.get(oid), now.get(oid)
+        if a is None:
+            out.append(f"{oid} added")
+        elif b is None:
+            out.append(f"{oid} deleted")
+        elif a["text"].rstrip("\n") != b["text"].rstrip("\n"):
+            out.append(f"{oid} retyped: {b['text'].strip()!r}")
+        elif moved(a["box"], b["box"]):
+            out.append(f"{oid} moved to {[round(v, 1) for v in b['box']]}")
+        elif a["style"] != b["style"]:
+            out.append(f"{oid} restyled")
+    return out
+
+
 def page_name(page: dict) -> str:
     props = page.get("layoutProperties") or {}
     return props.get("displayName") or props.get("name") or page["objectId"]
@@ -206,7 +252,8 @@ def record(deck: dict, out: Path, pres: dict, state: dict) -> dict | None:
         g = groups[layout["objectId"]]
         pages[layout["objectId"]] = page_entry(layout, g, pictures.get(g, pictures.get(main_group(g))), spec)
     return {"fill": key_text(fill), "shared": key_text(mp["shared"]),
-            "master": {"objectId": master["objectId"], "readback": readback}, "pages": pages}
+            "master": {"objectId": master["objectId"], "readback": readback}, "pages": pages,
+            "texts": texts_entry(deck.get("layout_texts", []), pres)}
 
 
 # ---------------------------------------------------------------- what the new PDF says
@@ -222,7 +269,8 @@ def ours_side(ours: dict) -> dict:
     pictures = {g: ({**picture_id(p), "path": str(p)} if p else None) for g, p in ((theme or {}).get("decorations") or {}).items()}
     groups = {s["page"]: group_of(theme["layouts"][s["page"]] if theme else slide_layout(s)[0]) for s in deck["slides"]}
     return {"fill": key_text(mp["fill"]), "fill_file": str(mp["bg_file"][mp["fill"]]) if mp["fill"] in mp["bg_file"] else None,
-            "shared": key_text(mp["shared"]), "spec": spec, "pictures": pictures, "groups": groups}
+            "shared": key_text(mp["shared"]), "spec": spec, "pictures": pictures, "groups": groups,
+            "texts": deck.get("layout_texts", [])}
 
 
 def ours_picture(side: dict, group: str) -> dict | None:
@@ -403,12 +451,62 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
             out["written"][oid] = {"page": pid, "spec": now}
             out["pending"][oid] = now
             out["applied"].append({"slide": where, "element": oid, "fields": [STYLE_FIELD[ph["kind"]]]})
+    plan_texts(rec, side, ours, pres, pending, out)
     # After the layouts' requests, in the same batch (an interrupted run that restyled did both):
     # Slides drops a run property equal to what the run inherits, so a pin written while the
     # layout still says the same value is gone before the layout changes.
     pins, out["pinned"] = inherited_pins(pres, styling, {s.get("objectId") for s in base["slides"]})
     out["requests"] += pins
     return out
+
+
+TEXTS_FIELD = "header and footer"
+
+
+def plan_texts(rec: dict, side: dict, ours: dict, pres: dict, pending: dict, out: dict) -> None:
+    """The header and footer words every slide shares (`\\author`, `\\title`, `\\date` in a
+    footline), which convert writes once per layout (`emit.write_layout_texts`), merged three ways
+    into `out` (plan's answer). Nothing merged them before: a new `\\date`, or a colour theme that
+    turned the footline's words white, reached the slides' own elements and the layouts' bars but
+    left the words on every slide as they were - the old theme's red on the new theme's navy
+    (edit hunt h5a, 2026-09-25). They are rewritten whole, like convert does, when the source
+    changed them and the deck did not; a deck whose layout texts a person edited keeps them, with a
+    conflict. A base from before they were recorded cannot tell a person's edit from convert's
+    words: they are left alone, with a warning when the source's words differ from the deck's."""
+    new = side.get("texts") or []
+    now = live_texts(pres)
+    says = texts_says(new)
+    texts = rec.get("texts")
+    if texts is None:
+        shown = sorted({t["text"].strip() for t in now.values()})
+        if shown != sorted({s.strip() for s in says}):
+            out["warnings"].append(
+                "the new version's header and footer words (" + ", ".join(repr(s) for s in says if s.strip()) +
+                ") differ from the ones on the deck's layouts, but the deck's sync base is older than their "
+                "sync and does not record what convert wrote there: they were left as they are (edit them in "
+                "Slides with View > Theme builder)")
+        return
+    digest = texts_digest(new)
+    if digest == texts["digest"]:
+        return
+    edits = texts_edited(texts["objects"], now)
+    if edits and pending.get(TEXTS_FIELD) == digest:
+        out["written"][TEXTS_FIELD] = {"digest": digest, "says": says}   # (an interrupted sync wrote them)
+        return
+    if edits:
+        entry, _ = conflict_entry(None, "layouts", None, TEXTS_FIELD, texts["says"], says, edits)
+        out["conflicts"].append(entry)
+        return
+    from .emit import LAYOUT_TEXT_PREFIX, text_box_requests
+    reqs = [{"deleteObject": {"objectId": oid}} for oid in now]
+    for li, layout in enumerate(pres.get("layouts", [])):
+        for ti, el in enumerate(new):
+            reqs += text_box_requests(el, layout["objectId"], f"{LAYOUT_TEXT_PREFIX}{li}_{ti}",
+                                      ours["plan"].scale, ours["plan"].fonts)
+    out["requests"] += reqs
+    out["written"][TEXTS_FIELD] = {"digest": digest, "says": says}
+    out["pending"][TEXTS_FIELD] = digest
+    out["applied"].append({"slide": "layouts", "element": None, "fields": [TEXTS_FIELD]})
 
 
 def _level_runs(e: dict) -> tuple[list[dict], list[dict]]:
@@ -510,8 +608,10 @@ def new_record(rec: dict, side: dict, done: dict, raw: dict | None) -> dict:
                 readback["signature"] = picture_id(Path(side["fill_file"]))["signature"]
             rec["master"]["readback"] = readback
     rec["shared"] = side["shared"]
+    if TEXTS_FIELD in done and rec.get("texts") is not None and raw:
+        rec["texts"] = {**done[TEXTS_FIELD], "objects": live_texts(raw or {})}
     for oid, what in done.items():
-        if oid == "master":
+        if oid in ("master", TEXTS_FIELD):
             continue
         entry = rec["pages"].get(what["page"])
         if entry is None:

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from beamer2slides import emit, snapshot, sync, theme_sync
+from beamer2slides import emit, identity, snapshot, sync, theme_sync
 from beamer2slides.theme_sync import DECORATION
 
 SYNC_DECKS = Path(__file__).resolve().parent / "decks" / "sync" / "out"
@@ -317,6 +317,112 @@ def test_a_placeholder_an_interrupted_sync_wrote_is_its_own(talk):
     p = plan(talk, pres=pres, base=base)
     assert p["conflicts"] == [] and "LO_t" in p["written"]
     assert "LO_t" not in {x[1] for x in ops(p["requests"])}
+
+
+# ---------------------------------------------------------------- the header and footer words
+
+def footer_box(oid, text, x):
+    return {"objectId": oid, "size": size(200, 12), "transform": at(x, 390),
+            "shape": {"shapeType": "TEXT_BOX", "text": {"textElements": [
+                {"startIndex": 0, "endIndex": len(text) + 1, "paragraphMarker": {"style": {}}},
+                {"startIndex": 0, "endIndex": len(text) + 1, "textRun": {"content": text + "\n", "style": {}}}]}}}
+
+
+def with_footers(pres, says):
+    """The deck as convert leaves it: every layout carries the shared words (emit.write_layout_texts)."""
+    pres = copy.deepcopy(pres)
+    for li, lay in enumerate(pres["layouts"]):
+        lay["pageElements"] += [footer_box(f"{emit.LAYOUT_TEXT_PREFIX}{li}_{ti}", s, 240 * ti) for ti, s in enumerate(says)]
+    return pres
+
+
+@pytest.fixture
+def footers(talk):
+    """The sync talk's footline (author, title, date) on the made-up deck's layouts, recorded as
+    convert records it, and a new version whose \\date changed."""
+    old = talk["v1"]["deck"]["layout_texts"]
+    says = theme_sync.texts_says(old)
+    pres = with_footers(talk["pres"], says)
+    base = {**talk["base"], "theme": {**talk["base"]["theme"], "texts": theme_sync.texts_entry(old, pres)}}
+    new = copy.deepcopy(old)
+    date = next(t for t in new if identity.plain_text(t) == "September 2026")
+    date["paragraphs"][0]["runs"][0]["text"] = "October 2026"
+    side = {**talk["side1"], "texts": new}
+    return {"pres": pres, "base": base, "side": side, "says": says}
+
+
+def footer_plan(talk, f, pres=None, base=None, side=None):
+    return plan(talk, pres=pres or f["pres"], base=base or f["base"], side=side or f["side"], ours=talk["v1"])
+
+
+def test_convert_records_the_layouts_footer_words(talk, footers):
+    rec = footers["base"]["theme"]["texts"]
+    assert rec["says"] == ["A. Author (Uni)", "Deck sync", "September 2026"]
+    assert len(rec["objects"]) == 3 * len(footers["pres"]["layouts"]) and \
+        {o["text"] for o in rec["objects"].values()} == {s + "\n" for s in rec["says"]}
+    json.dumps(rec)
+    # and convert's own record carries them (the made-up deck holds none: recorded as none)
+    assert talk["base"]["theme"]["texts"]["says"] == rec["says"] and talk["base"]["theme"]["texts"]["objects"] == {}
+
+
+def test_a_new_date_nobody_edited_rewrites_the_footer_on_every_layout(talk, footers):
+    """The edit hunt's h5a: `\\date` changed, and the footline showed the old date on every slide."""
+    p = footer_plan(talk, footers)
+    assert p["conflicts"] == [] and p["warnings"] == []
+    deleted = {r["deleteObject"]["objectId"] for r in p["requests"] if "deleteObject" in r}
+    assert deleted == set(footers["base"]["theme"]["texts"]["objects"])
+    created = [r["createShape"] for r in p["requests"] if "createShape" in r]
+    assert sorted(c["objectId"] for c in created) == sorted(deleted)   # (convert's ids, one batch)
+    assert {c["elementProperties"]["pageObjectId"] for c in created} == {"LT", "LO", "LB"}
+    inserted = [r["insertText"]["text"] for r in p["requests"] if "insertText" in r]
+    assert inserted.count("October 2026") == 3 and "September 2026" not in inserted
+    assert {"slide": "layouts", "element": None, "fields": ["header and footer"]} in p["applied"]
+    assert p["pending"]["header and footer"] == theme_sync.texts_digest(footers["side"]["texts"])
+
+
+def test_the_same_footer_writes_nothing(talk, footers):
+    p = footer_plan(talk, footers, side={**footers["side"], "texts": talk["v1"]["deck"]["layout_texts"]})
+    assert not any(r.get("deleteObject", {}).get("objectId", "").startswith(emit.LAYOUT_TEXT_PREFIX) for r in p["requests"])
+    assert p["applied"] == [] and p["conflicts"] == []
+
+
+def test_a_footer_the_person_retyped_is_a_conflict_and_stays(talk, footers):
+    pres = copy.deepcopy(footers["pres"])
+    lo = next(l for l in pres["layouts"] if l["objectId"] == "LO")
+    lo["pageElements"][-1] = footer_box(lo["pageElements"][-1]["objectId"], "Draft - do not share", 480)
+    p = footer_plan(talk, footers, pres=pres)
+    assert not any("deleteObject" in r or "createShape" in r for r in p["requests"])
+    [c] = [c for c in p["conflicts"] if c["field"] == "header and footer"]
+    assert c["resolution"] == "deck kept" and "Draft - do not share" in json.dumps(c["theirs"])
+    assert "October 2026" in json.dumps(c["ours"])
+
+
+def test_after_the_write_the_next_sync_writes_no_footer(talk, footers):
+    p = footer_plan(talk, footers)
+    after = with_footers(talk["pres"], theme_sync.texts_says(footers["side"]["texts"]))
+    rec = theme_sync.new_record(footers["base"]["theme"], footers["side"], p["written"], after)
+    assert rec["texts"]["says"][2] == "October 2026"
+    again = footer_plan(talk, footers, pres=after, base={**footers["base"], "theme": rec})
+    assert again["conflicts"] == [] and not any("createShape" in r for r in again["requests"])
+
+
+def test_a_footer_an_interrupted_sync_wrote_is_its_own(talk, footers):
+    after = with_footers(talk["pres"], theme_sync.texts_says(footers["side"]["texts"]))
+    digest = theme_sync.texts_digest(footers["side"]["texts"])
+    base = {**footers["base"], "pending": {"theme": {"header and footer": digest}}}
+    p = footer_plan(talk, footers, pres=after, base=base)
+    assert p["conflicts"] == [] and "header and footer" in p["written"]
+    assert not any("createShape" in r for r in p["requests"])
+
+
+def test_a_base_older_than_footer_sync_leaves_them_and_says_so(talk, footers):
+    theme = {k: v for k, v in footers["base"]["theme"].items() if k != "texts"}
+    p = footer_plan(talk, footers, base={**footers["base"], "theme": theme})
+    assert not any("createShape" in r for r in p["requests"])
+    assert any("header and footer" in w and "'October 2026'" in w for w in p["warnings"])
+    same = footer_plan(talk, footers, base={**footers["base"], "theme": theme},
+                       side={**footers["side"], "texts": talk["v1"]["deck"]["layout_texts"]})
+    assert not any("header and footer" in w for w in same["warnings"])
 
 
 # ---------------------------------------------------------------- slides and old bases
