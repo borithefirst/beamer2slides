@@ -420,7 +420,15 @@ def deck_placement(base: dict) -> tuple[float, float, float] | None:
 
     Pictures, when there are three, are asked alone: emit draws a picture at its bbox, but a text
     box is wider than its words (up to the mirror of the slide's leftmost text) and taller (insets),
-    and with them in the median a real deck read 3.09 for 1.59 (archived live fuzz, 2026-09-23)."""
+    and with them in the median a real deck read 3.09 for 1.59 (archived live fuzz, 2026-09-23).
+
+    A base that records the scale emit drew with (`scale`, every convert since the sync base had one)
+    is taken at its word: the fit was the only guess left, and a deck of two pictures still fitted
+    its text boxes - the edit hunt's talks read 3.08 and 4.61 for 1.98, and three syncs that carried
+    a person's move exactly were accused of `geometry_not_carried` by 26, 37 and 8 pt."""
+    if base.get("scale"):
+        return float(base["scale"]), 0.0, 0.0
+
     def measured(only_pictures: bool):
         for sl in base["slides"]:
             for el in sl.get("elements", []):

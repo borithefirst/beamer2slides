@@ -621,6 +621,21 @@ def test_catches_a_picture_the_person_chose_being_overwritten():
     assert loss_oracle.picture_findings(base, before, after, said) == []
 
 
+def test_the_placement_is_the_scale_the_base_recorded():
+    """A deck with fewer than three pictures was placed by its text boxes, which are wider and
+    taller than their words: the edit hunt's talks (720 pt deck of a 362.8 pt PDF) read 3.08 and
+    4.61 for 1.98, and three syncs that carried the person's move exactly were accused of
+    `geometry_not_carried`. A base that says what emit drew with is taken at its word."""
+    text = {"key": "text/body/0", "main": "o", "fingerprint": {"bbox": [40, 116, 325, 160]},
+            "readback": {"o": {"box": [72, 221, 736, 323]}}}              # a frame far wider than its words
+    title = {"key": "text/title/0", "main": "t", "fingerprint": {"bbox": [10, 5, 200, 20]},
+             "readback": {"t": {"box": [10, 11, 698, 54]}}}
+    base = {"scale": 1.9844, "slides": [{"key": "f", "elements": [text, title, dict(text, key="text/body/1")]}]}
+    assert loss_oracle.deck_placement(base) == (1.9844, 0.0, 0.0)
+    del base["scale"]
+    assert loss_oracle.deck_placement(base)[0] > 2.2, "the fit a base without a scale falls back to"
+
+
 def test_catches_an_element_put_back_at_the_converters_box():
     """The person moved the element, the source moved it too, and the sync left it at the box the
     base recorded. `deck_placement` says where the rewritten element belongs - the conversion's new
