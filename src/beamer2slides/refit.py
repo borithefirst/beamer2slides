@@ -231,18 +231,23 @@ def plan(jobs: list[dict], pre: dict, final: dict, page: list[float] | None, bef
             slack = max(slack, tl.needed_bottom(t_lay) - theirs["box"][3])   # the person's own overflow stays theirs
         grow = tl.needed_bottom(f_lay) - bottom - slack
         top = f_rb["box"][1]
-        if page and grow > GROW_MIN and bottom + grow > page[1]:
-            warnings.append(f"{where}: the words as merged need {grow:.1f} pt more than the box has, and the page "
-                            f"ends {max(0.0, page[1] - bottom):.1f} pt below it")
-            grow = page[1] - bottom       # (a box is not made to reach off the page)
-        if grow > GROW_MIN and align in (None, "TOP") and bottom - top > 1:
-            k_ = (bottom - top + grow) / (bottom - top)
-            step = [1, 0, 0, k_, 0, top * (1 - k_)]
-            reqs.append(_step_request(t, step))
-            reshaped[t] = (step, list(f_rb["transform"]))
-        elif grow > GROW_MIN and align not in (None, "TOP"):
-            warnings.append(f"{where}: the words as merged need {grow:.1f} pt more than the box has; it is anchored "
-                            f"{align.lower()}, so growing it would move them - not resized")
+        # A recreated title goes back into its live placeholder, at the box already found there
+        # (`sync.update_slide`'s `in_place`) - that box may be the person's own resize, never the
+        # converter's to grow (module docstring, house rule: never change the person's own
+        # geometry). Only the panel below it, the converter's own object, is fitted.
+        if grow > GROW_MIN and not f_rb.get("placeholder"):
+            if page and bottom + grow > page[1]:
+                warnings.append(f"{where}: the words as merged need {grow:.1f} pt more than the box has, and the page "
+                                f"ends {max(0.0, page[1] - bottom):.1f} pt below it")
+                grow = page[1] - bottom       # (a box is not made to reach off the page)
+            if grow > GROW_MIN and align in (None, "TOP") and bottom - top > 1:
+                k_ = (bottom - top + grow) / (bottom - top)
+                step = [1, 0, 0, k_, 0, top * (1 - k_)]
+                reqs.append(_step_request(t, step))
+                reshaped[t] = (step, list(f_rb["transform"]))
+            elif grow > GROW_MIN and align not in (None, "TOP"):
+                warnings.append(f"{where}: the words as merged need {grow:.1f} pt more than the box has; it is anchored "
+                                f"{align.lower()}, so growing it would move them - not resized")
 
         # -- the panel under it
         panels = [(oid, rb) for oid, rb in final["objects"].items()

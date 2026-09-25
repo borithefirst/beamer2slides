@@ -2388,6 +2388,39 @@ def _table_sync(tmp_path, variant: str):
 # (a text box a new neighbour narrowed: tests/test_emitted_diff.py)
 
 
+def test_refit_jobs_reaches_a_recreated_title_in_its_placeholder():
+    """A recreated title goes back into its live placeholder (`update_slide`'s `in_place`): the
+    guard used to skip it on `rb.get("placeholder")` alone, shutting it out of `refit.plan`
+    altogether, so a panel a theme swap drew under it was never fitted to the person's larger font
+    and nothing was said (edit hunt h5-6). Only a table refilled in place is excluded now; `refit.plan`
+    itself leaves a placeholder's own box alone."""
+    from beamer2slides.sync import Sync
+    rb = {"kind": "shape", "shape_style": {"type": "TEXT_BOX", "align": "MIDDLE"},
+          "placeholder": "CENTERED_TITLE", "text": "Thermal Drift in Compact Sensors\n",
+          "run_spans": [[0, 32, {"fontFamily": "Lato", "fontSize": 34.0, "bold": True}]],
+          "paragraph_styles": [{"lineSpacing": 100, "alignment": "CENTER"}],
+          "box": [80.0, 80.0, 480.0, 120.0], "transform": [1.0, 0.0, 0.0, 1.0, 80.0, 80.0],
+          "size": [400.0, 40.0], "parent_group": None, "z": 2}
+    s = Sync.__new__(Sync)
+    s.ours = {"slides": [{"key": "title", "elements": [{"key": "text/title/0"}]}]}
+    s.base = {"slides": [{"key": "title", "elements": [{"key": "text/title/0", "main": "TITLE_PH"}]}]}
+    plan = {"action": "update", "key": "title", "base": 0, "ours": 0, "objectId": "SID", "units": [
+        {"key": "text/title/0", "action": "recreate", "overrides": {"text_style": ["style"]}}]}
+    w = {"plan": plan, "new_oid": {0: "TITLE_PH"}, "objects": {0: ["TITLE_PH"]},
+         "in_place": {0: {"id": "TITLE_PH", "size": [400.0, 40.0], "text": rb["text"].strip()}}, "doomed": set()}
+    work = {"slides": [w]}
+    created = {"slides": [{"objectId": "SID", "objects": {"TITLE_PH": rb}}]}
+    theirs = {"slides": [{"objectId": "SID", "objects": {"TITLE_PH": rb}}]}
+    jobs = s.refit_jobs(work, theirs, created)
+    assert jobs == {"SID": [{"key": "slide title: text/title/0", "slide": "title",
+                             "names": {"TITLE_PH": "text/title/0"}, "text": "TITLE_PH", "pictures": [],
+                             "own": {"TITLE_PH"}, "doomed": set(), "theirs": rb}]}
+
+    # A table refilled in place stays excluded: it is not a recreated box either.
+    w2 = {**w, "in_place": {0: {"id": "TITLE_PH", "table": True}}}
+    assert s.refit_jobs({"slides": [w2]}, theirs, created) == {}
+
+
 def test_a_table_whose_words_changed_is_refilled_in_place(tmp_path):
     """The source changed one cell of a table convert brought with the .pptx: the table keeps its
     object (and the cell margins the API can't set) and only its cells are rewritten; a table

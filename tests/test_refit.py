@@ -243,6 +243,26 @@ def test_a_larger_font_grows_them_too():
     assert grown["panel"]["box"][3] > tl.layout(grown["t"])["bottom"]
 
 
+def test_a_placeholder_titles_own_box_never_grows_but_its_panel_does():
+    """A recreated title goes back into its live placeholder, at the box already found there - it
+    may be the person's own resize, never the converter's to grow (sync.py's `refit_jobs`,
+    `in_place`). The panel a theme swap drew under it is the converter's own object, and still
+    grows to the person's larger font (edit hunt h5-6: a title enlarged in the deck, then a theme
+    swap that added a panel under it, left the title's second line hanging 29.8 pt below the panel
+    with nothing said)."""
+    pre = block(SHORT)
+    pre["objects"]["t"] = {**pre["objects"]["t"], "placeholder": "CENTERED_TITLE"}
+    fin_t = {**text_rb(SHORT, pre["objects"]["t"]["box"], size=30), "placeholder": "CENTERED_TITLE"}
+    fin = {"objects": {**pre["objects"], "t": fin_t}}
+    _, reshaped, warnings = refit.plan([job()], pre, fin, [720, 405])
+    assert "t" not in reshaped
+    assert not warnings
+    assert "panel" in reshaped
+    grown = apply_all(fin, reshaped)["objects"]
+    assert grown["t"]["box"] == fin_t["box"]                       # its own box untouched
+    assert grown["panel"]["box"][3] > tl.layout(grown["t"])["bottom"]
+
+
 def test_a_panel_stops_short_of_the_words_below_it_and_the_report_says_so():
     pre = block(SHORT, below="Both versions go into the report.")
     fin = {"objects": {**pre["objects"], "t": text_rb(LONG * 2, pre["objects"]["t"]["box"])}}

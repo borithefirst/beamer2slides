@@ -2284,7 +2284,11 @@ class Sync:
     def refit_jobs(self, work: dict, theirs: dict, created: dict) -> dict[str, list[dict]]:
         """Slide id -> the recreated text units whose deck edits `override_requests` wrote over
         them (`refit.plan`'s jobs). Only text boxes the layout model can read (explicit sizes: what
-        emit makes); placeholders and tables refilled in place are not recreated boxes."""
+        emit makes); a table refilled in place is not a recreated box. A recreated title goes back
+        into its live placeholder at the box it already had there (`update_slide`'s `in_place`) -
+        that box may be the person's own resize, so `refit.plan` leaves it alone - but a job still
+        goes out for it: a panel the sync drew or grew under it is the converter's own object, and
+        was never fitted to the person's enlarged font otherwise (edit hunt h5-6)."""
         from . import text_layout as tl
         pre = {s["objectId"]: s for s in created["slides"]}
         before = {s["objectId"]: s for s in theirs["slides"]}
@@ -2303,7 +2307,8 @@ class Sync:
                 i = index[u["key"]]
                 main = w["new_oid"].get(i)
                 rb = s["objects"].get(main)
-                if (w.get("in_place") or {}).get(i) or not rb or not tl.text_box(rb) or rb.get("placeholder") \
+                in_place = (w.get("in_place") or {}).get(i)
+                if (in_place and in_place.get("table")) or not rb or not tl.text_box(rb) \
                         or tl.layout(rb) is None:
                     continue
                 members = [m for m in ounits.get(u["key"], []) if m["key"] in index]
