@@ -645,8 +645,7 @@ def ours_from_folder(folder: Path, base: dict) -> dict | None:
     keys, pairs_ = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos, moves, weak)
     ekeys, fps = [], []
     for j, slide in enumerate(deck["slides"]):
-        matched = [{"key": e["key"], "kind": e["kind"], "role": e.get("role"), "fingerprint": e["fingerprint"]}
-                   for e in base["slides"][pairs_[j]]["elements"]] if j in pairs_ else None
+        matched = identity.base_items(base["slides"][pairs_[j]]["elements"]) if j in pairs_ else None
         k, f = identity.slide_element_keys(slide["elements"], folder, matched)
         ekeys.append(k)
         fps.append(f)

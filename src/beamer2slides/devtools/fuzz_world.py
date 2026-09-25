@@ -461,8 +461,7 @@ def build_ours(doc, base, out: Path) -> dict:
         m["title"] = infos[m["ours"]]["title"]
     ekeys, fps = [], []
     for j, s in enumerate(doc["slides"]):
-        matched = [{"key": e["key"], "kind": e["kind"], "role": e.get("role"), "fingerprint": e["fingerprint"]}
-                   for e in base["slides"][pairs[j]]["elements"]] if j in pairs else None
+        matched = identity.base_items(base["slides"][pairs[j]]["elements"]) if j in pairs else None
         k, f = identity.slide_element_keys(s["elements"], out, matched)
         ekeys.append(k)
         fps.append(f)

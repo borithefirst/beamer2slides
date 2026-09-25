@@ -175,6 +175,26 @@ def test_element_keys_follow_content():
     assert got == ["text/title/0", "text/body/2", "text/body/0", "text/body/1"]
 
 
+def test_a_shifted_block_keeps_its_bar_and_body_apart():
+    """Edit hunt h4-3: the source added a block and every block moved up 17 pt. By geometry alone
+    the new body (which reaches up under its bar, emit.merge_blocks) was nearer the old title bar
+    than its own old body, so bars and bodies swapped keys and the bars came back under the bodies."""
+    def panel(bbox, fill, pid):
+        return {"id": pid, "kind": "shape", "role": "panel", "bbox": list(bbox), "fill": fill}
+    v1 = [panel((24, 128.7, 338, 171.9), "#f9e6e6", "a"), panel((24, 84.4, 338, 116.7), "#e9e9f3", "b"),
+          panel((24, 84.4, 338, 99.0), "#262686", "c"), panel((24, 128.7, 338, 142.7), "#bf0000", "d")]
+    keys, fps = identity.slide_element_keys(v1, None)
+    records = [{"key": k, "kind": "shape", "role": "panel", "fingerprint": f, "ir": e} for k, e, f in zip(keys, v1, fps)]
+    v2 = [panel((24, 111.0, 338, 154.1), "#f9e6e6", "a"), panel((24, 166.1, 338, 198.5), "#e6efe6", "n"),
+          panel((24, 66.6, 338, 99.0), "#e9e9f3", "b"), panel((24, 66.6, 338, 81.3), "#262686", "c"),
+          panel((24, 166.1, 338, 180.8), "#006000", "m"), panel((24, 111.0, 338, 125.0), "#bf0000", "d")]
+    want = ["shape/panel/0", "shape/panel/4", "shape/panel/1", "shape/panel/2", "shape/panel/5", "shape/panel/3"]
+    assert identity.slide_element_keys(v2, None, identity.base_items(records))[0] == want
+    # a base written before fingerprints had a look: the fill its IR records tells them apart
+    old = [{**r, "fingerprint": {k: v for k, v in r["fingerprint"].items() if k != "look"}} for r in records]
+    assert identity.slide_element_keys(v2, None, identity.base_items(old))[0] == want
+
+
 def test_anchored_elements_take_their_anchors_key():
     text = text_ir("A formula here and more words", (20, 60, 200, 70), "p0t1")
     pic = {"id": "p0h0", "kind": "image", "role": "math", "bbox": [80, 60, 100, 70], "anchor": "p0t1"}

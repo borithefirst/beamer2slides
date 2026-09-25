@@ -368,8 +368,7 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
         m["title"] = infos[m["ours"]]["title"]
     ekeys, fps = [], []
     for j, slide in enumerate(deck["slides"]):
-        matched = [{"key": e["key"], "kind": e["kind"], "role": e.get("role"), "fingerprint": e["fingerprint"]}
-                   for e in base["slides"][pairs[j]]["elements"]] if j in pairs else None
+        matched = identity.base_items(base["slides"][pairs[j]]["elements"]) if j in pairs else None
         k, f = identity.slide_element_keys(slide["elements"], work, matched)
         ekeys.append(k)
         fps.append(f)

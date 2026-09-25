@@ -692,9 +692,31 @@ def image_sha1(el: dict, out: Path | None) -> str | None:
     return sha1(path.read_bytes()) if path.exists() else None
 
 
+def look(el: dict) -> str | None:
+    """What a panel looks like apart from where it is: its fill. A block's title bar and its body
+    overlap and move together, so when the source shifts a block, geometry alone pairs the new body
+    with the old title bar (edit hunt h4-3: the recreated bars landed under the bodies)."""
+    return el.get("fill") if el["kind"] == "shape" else None
+
+
 def fingerprint(el: dict, out: Path | None = None, anchor_key: str | None = None) -> dict:
-    return {"text": plain_text(el), "bbox": [round(v, 2) for v in el["bbox"]], "image_sha1": image_sha1(el, out),
-            "anchor": anchor_key}
+    fp = {"text": plain_text(el), "bbox": [round(v, 2) for v in el["bbox"]], "image_sha1": image_sha1(el, out),
+          "anchor": anchor_key}
+    if look(el):
+        fp["look"] = look(el)
+    return fp
+
+
+def base_items(elements: list[dict]) -> list[dict]:
+    """A matched base slide's elements as `match_elements` takes them. A base older than `look`
+    fingerprints still records the IR, so its panels are told apart as well."""
+    out = []
+    for e in elements:
+        fp = e["fingerprint"]
+        if "look" not in fp and e.get("kind") == "shape" and look({"kind": "shape", **(e.get("ir") or {})}):
+            fp = {**fp, "look": look({"kind": "shape", **e["ir"]})}
+        out.append({"key": e["key"], "kind": e["kind"], "role": e.get("role"), "fingerprint": fp})
+    return out
 
 
 def default_keys(elements: list[dict]) -> list[str]:
@@ -733,6 +755,8 @@ def element_similarity(a: dict, b: dict) -> float:
         same = 1.0 if fa["image_sha1"] and fa["image_sha1"] == fb["image_sha1"] else 0.0
         anchor = 1.0 if fa.get("anchor") == fb.get("anchor") else 0.0
         return 0.4 * same + 0.3 * geom + 0.2 * anchor + 0.1 * role
+    if fa.get("look") and fb.get("look"):
+        return 0.5 * geom + 0.2 * role + 0.3 * (fa["look"] == fb["look"])
     return 0.7 * geom + 0.3 * role
 
 
