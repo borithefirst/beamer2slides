@@ -25,6 +25,9 @@ TAKEABLE_FIELDS = ("text", "text_style", "shape_style", "image", "geometry", "ba
 # How a unit both sides moved is written (`plan_unit`): the person's move and resize, carried to where
 # the source now has it. The loss oracle holds sync to this wording's promise.
 GEOMETRY_CARRIED = "the deck's move and size kept, on top of the source's move"
+# The source's changed fields (identity.source_changes) a unit's conflict on each field is about.
+CONFLICT_COVERS = {"text": {"text"}, "text_style": {"style"}, "shape_style": {"style"},
+                   "geometry": {"position", "size"}, "image": {"image"}}
 
 
 # ---------------------------------------------------------------- conflicts a person can settle
@@ -893,6 +896,11 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         edited.discard(field)
         return True
 
+    def on_deck(box):
+        """A converter box in deck pt, as the deck's own box beside it is (edit hunt h2-5: three boxes
+        in two units read as a wrong size)."""
+        return [round(v * scale, 2) for v in box] if scale else box
+
     keep = False
     # What the object will say once this unit is written: the source's new text, or the merge of it
     # with the deck's. `styling_lost` needs it to see whether the styled words are still in there.
@@ -977,7 +985,7 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
                 overrides.pop("shape_style", None)
     if "geometry" in edited and not keep and not geometry_writable(base_members, slide_read):
         # The person moved something inside the unit; a rewritten unit can't be put back that way.
-        keep = not taken("geometry", anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"],
+        keep = not taken("geometry", on_deck(anchor["fingerprint"]["bbox"]), on_deck(first["fingerprint"]["bbox"]),
                          theirs_rb.get("box"), "deck kept (the deck moved a part of the element on its own)")
     if "geometry" in edited and not keep:
         # The person's move and resize (base -> theirs) go on top of wherever the source now puts the
@@ -988,9 +996,19 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
         # the one the person had moved, an equation came down onto the paragraph the person had moved;
         # docs/project-notes.md "Both-moved geometry").
         overrides["geometry"] = {"mode": "delta"}
-        if "position" in src and taken("geometry", anchor["fingerprint"]["bbox"], first["fingerprint"]["bbox"],
-                                       theirs_rb.get("box"), GEOMETRY_CARRIED):
+        if "position" in src and taken("geometry", on_deck(anchor["fingerprint"]["bbox"]),
+                                       on_deck(first["fingerprint"]["bbox"]), theirs_rb.get("box"), GEOMETRY_CARRIED):
             overrides.pop("geometry", None)
+    moving = keep and "position" in src and "geometry" not in edited and shift
+    if keep and conflicts:
+        # A unit kept whole drops every change the source made to it, not only the one the conflict
+        # is about: a moved-apart group member kept the list, and the source's new fourth item with
+        # it, while the report named only "geometry" (edit hunt h3-2).
+        named = set().union(*(CONFLICT_COVERS.get(c["field"], {c["field"]}) for c in conflicts))
+        lost = sorted(set(src) - named - ({"position"} if moving else set()))
+        if lost:
+            c = next((c for c in reversed(conflicts) if c["resolution"] != TAKEN_SAYS), conflicts[-1])
+            c["resolution"] += f"; the source's change to its {', '.join(lost)} was not written either"
     report["conflicts"] += conflicts
     # `edited` can be empty by now: `taken` takes a field out of it when the person asked for the
     # source's version of it, and an entry here says "the deck's version of these fields was kept",
@@ -998,7 +1016,7 @@ def plan_unit(skey: str, ukey: str, base_members: list[dict] | None, ours_member
     if keep:
         if edited:
             report["overrides"].append({**where, "fields": sorted(edited)})
-        if "position" in src and "geometry" not in edited and shift:
+        if moving:
             # The deck's version of what the unit says stands, but where it stands is the source's
             # alone to change: the source moved the table the person had added a row to, and the
             # unit kept in place left the source's new caption over it (live fuzz r8006,

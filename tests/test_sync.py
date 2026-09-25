@@ -414,6 +414,12 @@ def test_both_moved_carries_the_person_move_onto_the_source_place():
     assert unit(mplan, "intro", "text/body/0")["overrides"] == {"geometry": {"mode": "delta"}}
     clash, = mplan["report"]["conflicts"]
     assert clash["field"] == "geometry" and clash["resolution"] == merge.GEOMETRY_CARRIED
+    # the three boxes in one unit, the deck's (edit hunt h2-5: base and source were in PDF pt)
+    s = base["scale"] = 2.0
+    scaled, = merge.plan_merge(base, ours, theirs)["report"]["conflicts"]
+    fp = base["slides"][0]["elements"][1]["fingerprint"]["bbox"]
+    assert scaled["base"] == [v * s for v in fp] and scaled["ours"] == [20 * s, 100 * s, 200 * s, 130 * s]
+    del base["scale"]
     # --take-source on it: the source's place and size, nothing of the person's written.
     again = merge.plan_merge(base, ours, theirs, take_source=[clash["id"]])
     assert unit(again, "intro", "text/body/0")["overrides"] == {}
@@ -1061,6 +1067,9 @@ def test_picture_the_deck_moved_inside_its_unit_is_kept_not_recreated():
     assert unit(mplan, "results", "text/body/0")["action"] == "keep"
     clash, = [c for c in mplan["report"]["conflicts"] if c["field"] == "geometry"]
     assert clash["element"] == "text/body/0" and "on its own" in clash["resolution"]
+    # ... and the rewording that is not written either is named (edit hunt h3-2: a list's new item
+    # never arrived while the report spoke only of geometry)
+    assert clash["resolution"].endswith("the source's change to its text was not written either")
 
 
 def test_unit_the_deck_moved_as_a_whole_is_still_recreated():
