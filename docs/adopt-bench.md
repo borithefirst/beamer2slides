@@ -1814,3 +1814,134 @@ exactly. Blind, the 8 still below are rounds the residuals really do score bette
 the read-back found the element after the edit, in the wrong place. Nothing without a picture can
 tell those apart; the read-back's misreadings above are what to fix, and the guard is what keeps them
 from costing a slide meanwhile.
+
+## Read-back from marks (2026-09-26: `micro-base` -> `marks`, `base` -> `marks-full`, bench `marks`)
+
+Round 0 no longer guesses what is on an adopted page. Before this, it classified the compiled PDF like any
+beamer deck. Now it reads what adopt wrote. `slides.sty` (lualatex, `\pdfextension literal page`) wraps
+everything it draws in marked content, and the read-back takes those marks as the page's structure.
+
+**The marks.** `slides.sty` writes these:
+
+- `/B2S <</k key /n N /t kind ...>> BDC ... EMC` around each element.
+  - `k` is the target's key (`adopt.mark_key`).
+  - `n` is its drawing order, with the layout template last.
+  - `t` is the kind: text, shape, image, table, line.
+  - A text box and a shape also say `/box (x y w h)`: the box adopt set them in.
+  - A line says `/line (x1 y1 x2 y2)`: its two points.
+  - A table says its `/rows` and `/cols`.
+- `/B2Sp <</i /a /l>>` around each paragraph: its index, align and level.
+- `/B2Sb` around each bullet.
+- `/B2Sc <</r /c>>` around each table cell.
+- `/B2Su` and `/B2Ss` around the words `\uline` and `\sout` decorate. They wrap ulem's own commands at
+  `\AtBeginDocument`, only when those commands exist.
+
+**Reading the marks.** The PDF layer gives each page object its marked-content stack (both backends,
+`pdf/api.py`). `extract` puts `marks` on spans, drawings and images, and `extract.page_marks(page)`
+maps object id to marks.
+
+`marked.py` splits a page by element mark, then reads each group:
+
+- A text group is classified alone. Its paragraphs come from `/B2Sp`, not from line gaps, and its
+  bullets from `/B2Sb`.
+- A shape takes its `/box` when the drawn bbox fits inside that box, grown by half the widest stroke
+  plus 1.5 pt. Otherwise a traced outline would be read as a smaller box.
+- A line takes its two `/line` points.
+- A table takes its grid from `/rows`, `/cols` and the cell marks.
+- Underline and strike come from their marks, not from rules found under the words.
+
+An unmarked page, meaning any deck adopt did not write, takes the old path unchanged.
+
+A text box's `/box` is kept only as data (`mark_box`). `\slidetext` places its box at the target's text
+anchor, not at the target's bbox. Using `mark_box` as the element's edge made geometry worse
+(ap-bio-stats:40 dx -4.25), so that change was reverted.
+
+**Words a later picture hides.** extract drops text under a later opaque image, which is right for a
+beamer deck. On an adopted page, though, those words are the person's own: in Slides they sit under a
+picture too. On a page with marks, `extract` now keeps such runs as `hidden_spans` (ids `p{n}h{i}`).
+`marked.split` gives them to their element's group, and `text_elements` moves them from `spans` into
+`hidden_spans`, because render erases whatever `spans` names.
+
+**Compare.**
+
+- A candidate element pairs with a target element by key (`compare.target_key`, `keyed_elements`,
+  `keyed_paragraphs`) before any text or geometry pairing.
+- A target placed off the page is `parked`: it is not reported as missing.
+- Paragraph order is checked within each marked box. The boxes themselves are not reordered against
+  each other: two stacked boxes are two elements, not one element's paragraphs out of order.
+
+**Note pages.** `notes.prepare` took some adopted slides for beamer note pages: a band across the top
+with small words at its right end (drawing-workshop 28 and 50). That changed the page count, 61 != 63.
+Now:
+
+- a page that carries marks is always a frame;
+- a note page whose thumbnail is an empty quarter-size canvas still counts as a note page
+  (`_thumbnail_canvas`). textpos blocks never reach `\insertslideintonotes`, so the canvas is all
+  such a note page shows.
+
+**Replay, micro-corpus** (`--micro --against micro-base`, open / suspect):
+
+| step | open | suspect |
+|---|---|---|
+| `micro-base` | 2023 | 1903 |
+| elements, paragraphs, bullets, cells from marks | 648 | 601 |
+| key pairing, off-page | 206 | 175 |
+| shape `/box` | 191 | 160 |
+| `/line`, underline and strike marks | 150 | 119 |
+| hidden words, per-box order (`marks`) | 123 | 95 |
+
+0 slides lost ink against `micro-base`. The 95 suspects by kind: geometry 24, text 22, style 21,
+shape 19, element_missing 7, paragraph_missing 1, align 1.
+
+**Replay, whole corpus** (`--against base`, saved `marks-full`).
+
+| | open | suspect |
+|---|---|---|
+| `base` | 16569 | 12743 |
+| `marks-full` | 1449 | 779 |
+
+- 31 decks were replayed. firebase-jam still fails to compile, as it did in `base` (main.tex:617,
+  "There's no line here to end").
+- Ink is 0.962.
+- No deck's page count differs any more. `base` had 7 such decks; drawing-workshop 61 != 63 is still
+  in it.
+- The 779 suspects by kind: geometry 251, text 140, style 100, element_missing 84, shape 73,
+  paragraph_missing 41, element_extra 34, paragraph_extra 22, align 15, notes 8, table 6, bullet 4,
+  image 1.
+
+The diff against `base` shows three gdg24 slides losing ink: 52 went 0.910 -> 0.904; 53 and 56 went
+0.982 -> 0.981. These drops are not caused by the marks. A worktree at 65383aa, before the marks,
+compiled today gives the same ink as the new code on all 99 gdg24 slides. The difference is `base`'s
+older compile.
+
+**The loop** (`adopt_bench run --micro --iter 2 --tag marks --jobs 12`):
+
+| | before (`guard3`) | `marks` |
+|---|---|---|
+| boxes | 0.9847 | 0.9847 |
+| converged | 1/36 | 11/36 |
+| open residuals | 2022 -> 2022 | 123 -> 123 |
+| loop ink | 0.9847 -> 0.9847 | 0.9847 -> 0.9847 |
+| slides below / above their first draft | 0 / 0 | 0 / 0 |
+| frames the guard put back | 25 | 11 |
+
+First-draft ink did not drop on any slide. The loop now stops on its own where the page is already
+right, where before it had to be stopped. Still, no round raised any slide's ink.
+
+**What the read-back still reports wrongly, by family:**
+
+- **Bold in a face with no bold cut.** NTR in sc-functions:8 and :11, 30 style residuals. The PDF is
+  regular; Slides fakes the bold. This is a typesetting limit, not a misreading.
+- **Style on drawing-workshop**, 57 residuals. Examples: a bold "Create a"; "Curved" coloured #00aeef
+  where the target has #00ffff.
+- **Geometry.**
+  - gdg24 57, cs161-tls 34, cs161-net 27, supercharge-slides 26.
+  - Arc shapes, and rotated or flipped shapes. The marks give the unrotated box, not the transform.
+- **Text.**
+  - cs161-tls 35.
+  - sc-functions reads "- 1" for "-1".
+  - sc-dark-modern:17 reads "AdditionalResources": mono spacing laid out by code pitch.
+- **element_missing.** devfest2020 35.
+- **Shape.** cs161-net 32. Its targets are outline-only, and adopt draws them as filled traced rings:
+  fill #00882b where the target has none.
+- **arabic-training.** RTL text and paragraph residuals.
