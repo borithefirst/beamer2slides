@@ -658,15 +658,21 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
         if i not in t_of_c:
             add("paragraph_extra", **where, element=cp.el["id"], para=cp.pi, text=cp.text)
 
-    # paragraph order within the slide (reading order of the matched pairs)
-    order = sorted((j, i) for i, j, _ in pmatch)
-    lis = longest_increasing([i for _, i in order])
-    kept = {order[k][0]: order[k][1] for k in lis}
-    for k, (j, i) in enumerate(order):
-        if k not in lis:
-            add("paragraph_order", **where, element=cps[i].el["id"], para=cps[i].pi,
-                target_element=tps[j].el["id"], target_para=tps[j].pi, text=tps[j].text,
-                after=_previous_match(j, kept, cps))
+    # paragraph order within the slide (reading order of the matched pairs); a marked box's
+    # paragraphs only among themselves: which box reads first is where each stands, and a box
+    # a key paired is compared where it stands (geometry), not again by reading order
+    by_box: dict = {}
+    for i, j, _ in pmatch:
+        by_box.setdefault(id(cps[i].el) if cps[i].el.get("mark") else None, []).append((j, i))
+    for pairs in by_box.values():
+        order = sorted(pairs)
+        lis = longest_increasing([i for _, i in order])
+        kept = {order[k][0]: order[k][1] for k in lis}
+        for k, (j, i) in enumerate(order):
+            if k not in lis:
+                add("paragraph_order", **where, element=cps[i].el["id"], para=cps[i].pi,
+                    target_element=tps[j].el["id"], target_para=tps[j].pi, text=tps[j].text,
+                    after=_previous_match(j, kept, cps))
 
     for i, j, r in pmatch:
         cp, tp = cps[i], tps[j]

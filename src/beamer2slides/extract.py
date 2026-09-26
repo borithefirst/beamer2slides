@@ -610,19 +610,22 @@ def extract_page(page: Page, label: str) -> dict:
     chars, decoded = page_chars(page)
     marks = page_marks(page)
     marked = lambda obj: {"marks": _marks_json(marks[obj])} if obj in marks else {}
-    for s in spans(page, visibility, chars=chars, marks=marks):
-        if not s["text"].strip():
-            continue
-        out_spans.append({
+
+    def span_json(s: dict, sid: str) -> dict:
+        return {
             # Ligature code points (xelatex/lualatex text layers) as plain letters, so the
             # text stays searchable and spell-checkable in Slides.
-            "id": f"p{n}s{len(out_spans)}", "text": readable(s["text"], s["font"]), "font": s["font"],
+            "id": sid, "text": readable(s["text"], s["font"]), "font": s["font"],
             "size": round(s["size"], 3), "color": f"#{s['color']:06x}", "alpha": s["alpha"],
             "origin": _r(s["origin"]), "bbox": _r(s["bbox"]), "dir": _r(s["dir"], 3),
             # (a TeX bitmap font's small caps are a font of their own: ECCC1095)
             "smallcaps": s["chars"][0].font_id not in decoded and _small_caps(page, s["chars"]),
             **({"marks": _marks_json(s["marks"])} if "marks" in s else {}),
-        })
+        }
+
+    for s in spans(page, visibility, chars=chars, marks=marks):
+        if s["text"].strip():
+            out_spans.append(span_json(s, f"p{n}s{len(out_spans)}"))
 
     page_drawings = page.drawings()
     found = [(info["bbox"], [info["width"], info["height"]], marked(info["object"])) for info in page.images()]
@@ -656,13 +659,19 @@ def extract_page(page: Page, label: str) -> dict:
 
     # The words drawn but not seen are still the frame's: beamer draws what a later overlay step
     # uncovers at alpha 0 (transparent mode), and select_overlays tells steps apart by their words.
-    hidden = [t for s in spans(page, visibility, hidden=True, chars=chars) if (t := readable(s["text"], s["font"]).strip())]
+    hidden_runs = spans(page, visibility, hidden=True, chars=chars, marks=marks)
+    hidden = [t for s in hidden_runs if (t := readable(s["text"], s["font"]).strip())]
+    # On a page whose elements say what they are (adopt's marks), a marked element's words the page
+    # hides (under a picture drawn after them) are still that element's, hidden in the deck as here.
+    hidden_spans = [span_json(s, f"p{n}h{i}") for i, s in enumerate(r for r in hidden_runs if "marks" in r
+                                                                   and r["text"].strip() and inside(r["bbox"]))]
 
     return {
         "index": n, "label": label,
         "size": _r((page.width, page.height)),
         "spans": out_spans, "images": images, "drawings": drawings, "links": links,
         **({"hidden_text": hidden} if hidden else {}),
+        **({"hidden_spans": hidden_spans} if hidden_spans else {}),
     }
 
 

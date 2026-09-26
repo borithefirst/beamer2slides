@@ -191,6 +191,25 @@ def test_a_page_without_marks_is_classified_as_before(tmp_path, backend):
     assert json.dumps(slide, sort_keys=True) == json.dumps(classify.PageClassifier(page, body).classify(), sort_keys=True)
 
 
+def test_words_a_later_picture_hides_are_still_the_box_words(tmp_path, backend):
+    """A picture drawn over the middle of a box hides its words on the page as in the deck; the
+    box still says them (extract keeps a marked element's hidden spans), and names only what shows
+    as its page text (render erases what `spans` names)."""
+    words = text(10, 100, b"This image does not have transparency.", 8)
+    cover = b"q 60 0 0 20 50 92 cm " + INLINE_IMAGE + b"Q "
+    page = element(b"t", b"text", paragraph(0, words)) + element(b"pic", b"picture", cover)
+    raw = raw_of(tmp_path, [page])
+    assert raw["pages"][0]["hidden_spans"]
+    assert all(s["id"].startswith("p0h") for s in raw["pages"][0]["hidden_spans"])
+    slide = classify.classify_page(raw["pages"][0], classify.body_size(raw))
+    assert texts(slide)["t"] == ["This image does not have transparency."]
+    box = next(e for e in slide["elements"] if e.get("mark") == "t")
+    shown = {s["id"] for s in raw["pages"][0]["spans"]}
+    assert box["hidden_spans"] and set(box["spans"]) <= shown
+    plain = raw_of(tmp_path, [words + cover], name="plain.pdf")["pages"][0]
+    assert "hidden_spans" not in plain and plain["hidden_text"]
+
+
 # ---------------------------------------------------------------------------------------- compare
 
 def test_compare_pairs_marked_elements_by_their_key():
@@ -211,6 +230,28 @@ def test_compare_pairs_marked_elements_by_their_key():
     for e in cur["slides"][s]["elements"]:
         e["mark"] = {"p2t1": "p2t9", "p2t9": "p2t1"}.get(e["id"], e["id"])
     assert geometry(cur) == [-60, 60]  # one per box: each stands where the other object is
+
+
+def test_marked_boxes_are_not_in_reading_order_again():
+    """A box moved above another reads first: by reading order a paragraph_order residual, though
+    the move is the box's place. Paired by key, the move is its geometry and nothing else."""
+    from beamer2slides.compare import compare
+    from .inverse_edits import move
+    from .test_inverse import fixture_deck, slide_of
+    deck = fixture_deck()
+    s = slide_of(deck, "method")
+    body = next(e for e in deck["slides"][s]["elements"] if e["id"] == "p2t1")
+    twin = {**copy.deepcopy(body), "id": "p2t9"}
+    twin["paragraphs"] = twin["paragraphs"][:1]
+    twin["paragraphs"][0]["runs"] = [{**twin["paragraphs"][0]["runs"][0], "text": "A second box says other things"}]
+    deck["slides"][s]["elements"].append(twin)
+    tgt = move(deck, s, twin, 0, 60)
+    cur = move(tgt, s, twin, 0, -120)
+    kinds = lambda c: sorted(r["kind"] for r in compare(c, tgt).open())
+    assert "paragraph_order" in kinds(cur)
+    for e in cur["slides"][s]["elements"]:
+        e["mark"] = e["id"]
+    assert kinds(cur) == ["geometry"]
 
 
 def test_a_target_object_off_the_page_is_no_missing_element():

@@ -79,6 +79,10 @@ def split(page: dict) -> tuple[dict, list[Group]]:
                 continue
             g = groups.setdefault(group_id(p), Group(group_id(p), p))
             g.items[kind].append(item)
+    for item in page.get("hidden_spans", ()):  # (words a picture drawn later covers: `extract`)
+        p = element_of(item)
+        if p is not None and group_id(p) in groups:
+            groups[group_id(p)].items["spans"].append(item)
     order = sorted(groups.values(), key=lambda g: (not isinstance(g.n, int), g.n if isinstance(g.n, int) else 0, str(g.n)))
     return {**page, **rest}, order
 
@@ -243,6 +247,13 @@ def text_elements(g: Group, page: dict, body: float) -> tuple[list[dict], dict]:
         for e in res["elements"]:
             e["rotation"] = turn
     texts = [e for e in res["elements"] if e["kind"] == "text"]
+    hidden = {s["id"] for s in page.get("hidden_spans", ())}
+    for e in res["elements"]:
+        # words the page hides are the box's words, but no object of the page's text: they stay
+        # out of `spans` (render erases what `spans` names)
+        if hidden.intersection(e.get("spans", ())):
+            e["hidden_spans"] = [i for i in e["spans"] if i in hidden]
+            e["spans"] = [i for i in e["spans"] if i not in hidden]
     if not texts:
         return [], res
     main = max(texts, key=lambda e: len(e["spans"]))
