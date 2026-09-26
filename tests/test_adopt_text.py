@@ -131,6 +131,62 @@ def test_the_vertical_alignment_a_box_inherits_is_read():
     assert text_of(deck_ir(d), "s_l")["box"]["valign"] == "top", "pull keeps reading the slide only"
 
 
+def title_slide(title: list[dict], subtitle: list[dict]) -> dict:
+    """A new Slides deck's first slide (Simple Light's title layout): the title bottom-aligned by its
+    layout at 52 pt, the subtitle top-aligned at 28 pt, both placeholders as Slides made them."""
+    layout = [box("L_t", para("", runs=[("", {"fontSize": pt(52)})]), x=24.54, y=58.63, w=670.91, h=161.62,
+                  placeholder={"type": "CENTERED_TITLE"}, contentAlignment="BOTTOM"),
+              box("L_s", para("", runs=[("", {"fontSize": pt(28)})]), x=24.54, y=223.16, w=670.91, h=62.41,
+                  placeholder={"type": "SUBTITLE"})]
+    return deck(box("s_t", title, x=24.54, y=58.63, w=670.91, h=161.62, autofit={"autofitType": "NONE"},
+                    placeholder={"type": "CENTERED_TITLE", "parentObjectId": "L_t"}),
+                box("s_s", subtitle, x=24.54, y=223.16, w=670.91, h=62.41, autofit={"autofitType": "NONE"},
+                    placeholder={"type": "SUBTITLE", "parentObjectId": "L_s"}),
+                layout_elements=layout)
+
+
+def test_a_bottom_aligned_title_stands_where_slides_draws_it():
+    """Adopt's loop never converged on a new deck's title slide ("Hello" over a subtitle, v0.7.0):
+    the target put the bottom-aligned title's first baseline where a top-aligned one stands (70.26
+    pt, 56.8 pt high), and the subtitle 2.46 pt high by the converter's own pptx placeholder shift.
+    Google's thumbnail has "Hello" on 127.0 and the subtitle on 161.7, where adopt's TeX sets them."""
+    el = deck_ir(title_slide(para("Hello"), para("A simple deck")), foreign=True)
+    title, sub = text_of(el, "s_t"), text_of(el, "s_s")
+    assert title["box"]["valign"] == "bottom" and title["anchor"][1] == pytest.approx(127.0, abs=0.3)
+    assert title["box"]["span"] == 0
+    assert sub["box"]["valign"] == "top" and sub["anchor"][1] == pytest.approx(161.7, abs=0.3)
+
+
+def test_a_bottom_aligned_box_says_where_its_last_line_stands():
+    """Two paragraphs: the first baseline is a pitch higher, the last where one paragraph's was."""
+    one = text_of(deck_ir(title_slide(para("Hello"), para("x")), foreign=True), "s_t")
+    two = text_of(deck_ir(title_slide(para("Hello") + para("World"), para("x")), foreign=True), "s_t")
+    assert two["box"]["span"] > 0.9 * 52 / two["box"]["scale"]
+    assert two["anchor"][1] + two["box"]["span"] == pytest.approx(one["anchor"][1], abs=0.02)
+
+
+def test_a_middle_aligned_line_stands_where_it_always_did():
+    """One line, single-spaced: `stacked_baseline` gives the calibrated MIDDLE_BASELINE_EM place."""
+    from beamer2slides.emit import MIDDLE_BASELINE_EM
+    el = text_of(deck_ir(deck(box("s_m", para("Middle", runs=[("Middle", {"fontSize": pt(20)})]),
+                                  x=100, y=100, w=200, h=80, contentAlignment="MIDDLE")), foreign=True), "s_m")
+    scale = el["box"]["scale"]
+    assert el["anchor"][1] == pytest.approx((140 + MIDDLE_BASELINE_EM * 20) / scale, abs=0.02)
+
+
+def test_the_loop_measures_a_bottom_or_middle_box_where_its_box_holds_it():
+    """A line TeX wraps and Slides did not (or the other way round) moves the first baseline, not
+    the last one of a bottom-aligned box nor the middle of a middle-aligned one."""
+    from beamer2slides.compare import stacked_y
+    tgt = {"anchor": [10.0, 100.0], "box": {"valign": "bottom", "span": 0.0}}
+    cur = {"paragraphs": [{"lines": [{"baseline": 80.0}, {"baseline": 100.0}]}]}
+    assert stacked_y(cur, tgt) == (100.0, 100.0)
+    tgt["box"]["valign"] = "middle"
+    assert stacked_y(cur, tgt) == (90.0, 100.0)
+    assert stacked_y(cur, {"anchor": [10.0, 100.0], "box": {"valign": "top", "span": 0.0}}) is None
+    assert stacked_y(cur, {"anchor": [10.0, 100.0], "box": {"valign": "bottom"}}) is None, "pull's own decks"
+
+
 # ---------------------------------------------------------------- the LaTeX it writes
 
 def source(tmp_path, d: dict) -> str:

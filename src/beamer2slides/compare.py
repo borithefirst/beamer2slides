@@ -626,6 +626,12 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
         if mine[0] not in c_of_t:
             continue  # its first paragraph is missing: placed once that is there
         (cx, cy), (tx, ty) = text_anchor_for(ce, first.pi), text_anchor(te)
+        # a middle- or bottom-aligned box of a foreign deck: where its lines' middle or bottom stand,
+        # which the box fixes however they wrap (when the current element is this box's alone)
+        own = [k for k, p in enumerate(cps) if p.el is ce]
+        stacked = stacked_y(ce, te) if first.pi == 0 and all(t_of_c.get(k) in mine for k in own) else None
+        if stacked:
+            cy, ty = stacked
         dx, dy = tx - cx, ty - cy
         # frame titles sit where the theme puts them: a moved title is noted, not written back
         theme = te.get("role") == "title" and ce.get("role") == "title"
@@ -681,6 +687,24 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
             if h is not None and h > tol["inline_phash"]:  # the mean alone: they are transparent
                 add("image", **where, element=cm[a]["id"], target_element=tm[b]["id"], distance=round(h, 3),
                     role=cm[a]["role"], file=tm[b].get("file"))
+
+
+def stacked_y(cur: dict, tgt: dict) -> tuple[float, float] | None:
+    """(current, target) y to compare for a target box aligned to its middle or bottom that says the
+    span of its lines (`deck_ir.stacked_baseline`): the last baseline of a bottom-aligned box, the
+    one halfway between the first and the last of a middle-aligned one. Its first baseline moves
+    with every line Slides wraps that TeX does not, or the other way round; these do not. None for
+    anything else."""
+    box = tgt.get("box") if isinstance(tgt.get("box"), dict) else {}
+    span, valign = box.get("span"), box.get("valign")
+    if span is None or valign not in ("middle", "bottom") or not tgt.get("anchor"):
+        return None
+    lines = [ln["baseline"] for p in cur["paragraphs"] for ln in p.get("lines", []) if ln.get("baseline") is not None]
+    if not lines:
+        return None
+    if valign == "bottom":
+        return lines[-1], tgt["anchor"][1] + span
+    return (lines[0] + lines[-1]) / 2, tgt["anchor"][1] + span / 2
 
 
 def text_anchor_for(el: dict, pi: int) -> tuple[float, float]:

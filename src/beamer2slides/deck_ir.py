@@ -572,11 +572,18 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
     bare = foreign and autofit.get("autofitType") == "SHAPE_AUTOFIT" and \
         (zero_insets(paragraphs, y1 - y0) or (resolver.bare_imports and imported(shape)))
     pad_x, top = (0.0, 0.0) if bare else (PAD_X, BASELINE_A)
-    if content == "MIDDLE":
+    span = None
+    snap = foreign and page_w * scale <= SNAP_PAGE
+    if foreign and content in ("MIDDLE", "BOTTOM"):
+        baseline, span = stacked_baseline(paragraphs, content, y0, y1, top, snap, shape.get("shapeType"),
+                                          autofit.get("autofitType") == "SHAPE_AUTOFIT")
+    elif content == "MIDDLE":
         baseline = (y0 + y1) / 2 + MIDDLE_BASELINE_EM * z
     else:
         baseline = y0 + top + ASCENT_EM * z + extra_above(first["line_spacing"], z) + first["space_above"]
-        if placeholder in ("TITLE", "CENTERED_TITLE", "SUBTITLE") and not bare:
+        # (the converter's own placeholders, which pull reads: a foreign deck's stand where Slides'
+        # insets put them, as adopt lays them out - the thumbnails agree)
+        if placeholder in ("TITLE", "CENTERED_TITLE", "SUBTITLE") and not bare and not foreign:
             baseline -= PPTX_TITLE_DY
     # emit puts the box PAD_X left of the text's (or bullet's) left edge; centred and right-aligned
     # boxes are widened symmetrically / to the left
@@ -610,7 +617,46 @@ def text_element(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontM
             "box": {"valign": {"MIDDLE": "middle", "BOTTOM": "bottom"}.get(content, "top"), "scale": scale,
                     "font_scale": font_scale, "grows": autofit.get("autofitType") == "SHAPE_AUTOFIT",
                     **({"insets": 0} if bare else {}),
-                    **({"snap": True} if foreign and page_w * scale <= SNAP_PAGE else {})}}
+                    **({"span": round(span / scale, 2)} if span is not None else {}),
+                    **({"snap": True} if snap else {})}}
+
+
+def stacked_baseline(paragraphs: list[dict], content: str, y0: float, y1: float, inset: float, snap: bool,
+                     shape_type: str | None, grows: bool) -> tuple[float, float]:
+    """(first baseline, span to the last) of a middle- or bottom-aligned box's lines, Slides pt, laid
+    out as adopt's `slidebox` stacks them (`adopt.box_parts`: its line boxes, the space between
+    paragraphs, the last one's depth and `trailing_space`). The span counts each paragraph's lines
+    as they are typed; a paragraph that wraps adds lines the box does not say, so the first
+    baseline is only as good as that - but the stack's bottom (a bottom-aligned box) and its middle
+    (a middle-aligned one) stand where the box puts them whatever the wrapping, and `compare`
+    measures those: the first baseline plus the span, the first baseline plus half of it."""
+    from .adopt import WIDE_SPACING, line_box, snapped_line_box
+    paras = [p for p in paragraphs if p["runs"]]
+    span, prev, above0 = 0.0, None, None
+    for p in paras:
+        z = max(line_size(r, r["slides_size"]) for r in p["runs"])
+        r = p["line_spacing"] or 1.0
+        above, below = snapped_line_box(z, r, 1.0, snap)
+        if prev is None:
+            above0 = above
+        else:
+            # between two list items each side collapses by its own spacingMode, and the bigger wins
+            listed = bool(prev[0]["bullet"] and p["bullet"])
+            gap_below = 0 if listed and prev[0]["spacing_mode"] != "NEVER_COLLAPSE" else prev[0]["space_below"] or 0
+            gap_above = 0 if listed and p["spacing_mode"] != "NEVER_COLLAPSE" else p["space_above"] or 0
+            span += prev[1] + max(gap_below, gap_above) + above
+        breaks = sum(x["text"].count(emit.SOFT_BREAK) for x in p["runs"])
+        span += breaks * (above + below)
+        prev = (p, below, z, r)
+    last, _, z, r = prev
+    depth = line_box(z, 1.0 if r >= WIDE_SPACING else r)[1]
+    tail = 0.0 if shape_type == "ELLIPSE" else float(last["space_below"] or 0.0)
+    if content == "BOTTOM":
+        return y1 - inset - tail - depth - span, span
+    # centred: the stack from the first paragraph's space above (not in a box that grows to fit its
+    # text) and its first line's ascent to the last line's depth and tail
+    lead = 0.0 if grows else float(paras[0]["space_above"] or 0.0)
+    return (y0 + y1) / 2 - (lead + above0 + span + depth + tail) / 2 + lead + above0, span
 
 
 def page_background(page: dict, resolver_pages: dict[str, dict], scheme: dict) -> tuple[str | None, str | None]:

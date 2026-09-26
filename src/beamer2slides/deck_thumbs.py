@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import unicodedata
 
-from .emit import BASELINE_A, PAD_X, PPTX_TITLE_DY
+from .emit import BASELINE_A, PAD_X
 
 
 ROW_LINE_SHARE = 0.5     # a row boundary is read when its borders cover this share of the table's width
@@ -363,8 +363,7 @@ def thumbnail_insets(elements: list[dict], thumb, px: float) -> None:
             # first line's tops must stand where no top inset puts them too
             rows = inset_rows(e, elements, paras, thumb, px)
             if rows is None and box_.get("valign", "top") == "top":
-                dy = (BASELINE_A - (PPTX_TITLE_DY if e.get("placeholder") in
-                                    ("TITLE", "CENTERED_TITLE", "SUBTITLE") else 0.0)) / scale
+                dy = BASELINE_A / scale
                 rows = np.nonzero(mark.sum(axis=1) >= 2)[0]
                 z = max(r.get("size") or 0 for r in paras[0]["runs"])
                 if not len(rows) or (Y0 + rows[0]) / px - (e["anchor"][1] - CAP_EM * z) > -dy / 2:
