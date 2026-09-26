@@ -56,6 +56,27 @@ def test_drawings_and_form_children_carry_marks(tmp_path):
     assert marks == [[["B2S", {"k": "s1", "t": "shape"}]], [["B2S", {"k": "pic", "t": "picture"}]], None]
 
 
+def test_adopt_names_each_mark_after_its_deck_object():
+    """slides-keys.tex lists, frame by frame, the objectId behind each mark in drawing order: a text
+    box's panel is `<id>+shape`, a layout's object `layout/object`, an id TeX cannot carry nothing."""
+    from beamer2slides import adopt
+    assert adopt.mark_key("layout~p3_i2") == "layout/p3_i2"
+    assert adopt.mark_key("has space") is None
+    box = {"id": "g1_0_5", "kind": "text"}
+    panelled = "\\slideshape{rect}{..}\n\\begin{slidebox}{..}"
+    assert adopt.piece_keys(box, panelled) == ["g1_0_5+shape", "g1_0_5"]
+    assert adopt.piece_keys({"id": "p2", "kind": "image"}, "\\slidepicture{..}") == ["p2"]
+    assert adopt.piece_keys({"id": "a b", "kind": "shape"}, "\\sliderect{..}") == [""]
+
+    class Plan:
+        drawn = {1}
+    target = {"slides": [{"elements": [box, {"id": "logo", "kind": "image"}, {"id": "t", "kind": "table"}]},
+                         {"elements": [{"id": None, "kind": "text"}]}]}
+    pieces = [[panelled, "\\slidepicture{..}", "\\begin{slidetable}"], ["\\begin{slidebox}"]]
+    got = adopt.keys_file(target, pieces, [Plan(), None], ["s1", "s2"]).splitlines()
+    assert [line for line in got if not line.startswith("%")] == ["\\slidekeys{s1}{g1_0_5+shape,g1_0_5,t}"]
+
+
 def test_a_page_without_marks_extracts_as_before(tmp_path):
     """Marks add a key and split spans at their edges, nothing else: the same page with one mark
     around everything reads the same once the key is taken away."""

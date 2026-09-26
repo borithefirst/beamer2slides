@@ -561,10 +561,10 @@ SHAPE_MACRO = r"""% --- Shapes -------------------------------------------------
     #1,shift={(\slides@mcx,\slides@mcy)}]#3\end{scope}}\fi
   \slides@shape{\slides@x bp}{\slides@y bp}{\slides@w bp}{\slides@h bp}{\slides@body}}
 \def\slides@shape#1#2#3#4#5{%
-  \edef\slides@block{\noexpand\begin{textblock*}{#3}(#1,#2)}\slides@block
+  \edef\slides@block{\noexpand\begin{textblock*}{#3}(#1,#2)}\slides@block\slides@open{shape}%
   \begin{tikzpicture}[baseline=(current bounding box.north),inner sep=0pt,outer sep=0pt]
   \edef\slides@bb{\noexpand\useasboundingbox (0bp,0bp) rectangle (#3,-#4);}\slides@bb
-  #5\end{tikzpicture}\end{textblock*}}
+  #5\end{tikzpicture}\par\slides@shut\end{textblock*}}
 % the centre of a w by h box, from its top left corner: (\slides@cx,\slides@cy), and minus that
 \def\slides@centre#1#2{\edef\slides@cx{\the\dimexpr(#1)/2\relax}\edef\slides@mcx{\the\dimexpr0pt-(#1)/2\relax}%
   \edef\slides@cy{\the\dimexpr0pt-(#2)/2\relax}\edef\slides@mcy{\the\dimexpr(#2)/2\relax}}
