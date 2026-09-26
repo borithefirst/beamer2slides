@@ -758,7 +758,12 @@ def test_text_after_a_tab_starts_at_the_next_default_stop(tmp_path):
     assert frame.count("\\slidestab{22.68pt}") == 2, "36 pt of Slides is 22.68 pt of the page"
     assert "\\global\\slidesx=0.00pt" in frame
     broken = frame_of(source(tmp_path / "b", deck(box("s_t", para("x", runs=[("Revenue\t12\x0bup", {})])))))
-    assert "\\slidestab" not in broken, "a soft break restarts the line: no stop to count from"
+    assert broken.count("\\slidestab{22.68pt}") == 1 and "\\slidesx=0.00pt" in broken.split("\\slidebreak")[1], \
+        "a soft break starts the pen again at the text edge"
+    # journey-maps: "Cost to develop: 1x<VT><TAB>Market potential" - the tab after the break is a stop,
+    # not a space, and TeX keeps its glue at the line start only after \null
+    indented = frame_of(source(tmp_path / "c", deck(box("s_t", para("x", runs=[("Cost\x0b\tMarket", {})])))))
+    assert "\\slidebreak \\null\\global\\slidesx=0.00pt\\slidestab{22.68pt}{}Market" in indented
 
 
 def test_empty_lines_at_the_end_of_a_middle_aligned_box_are_height(tmp_path):

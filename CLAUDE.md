@@ -305,7 +305,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   per failure family, 4 s warm, also for `adopt_bench run --micro --iter N`), counting residuals on slides whose ink already matches
   (`suspect`: the read-back's blindness, edits the loop would write into a right page). A one-slide
   replay picks the main and switch fonts from that slide's letters alone: check a font finding on
-  the whole deck (docs/adopt-bench.md "saudi-cats"). The public gallery
+  the whole deck (docs/adopt-bench.md "saudi-cats"). **Which kind of defect, where**:
+  `devtools/slide_metrics.py run|calibrate|flag|compare|show` (drift/missing/extra, local ink,
+  colour, worst tile; torch ones lazily, own venv), calibrated on the judges' `hunt0` verdicts in
+  `out/adopt-corpus/judged/` (docs/adopt-bench.md "Metrics"); `page` is blind to colour. The public gallery
   (borithefirst.github.io/beamer2slides, branch `gh-pages`) shows adopt on six decks we made and
   own, never corpus decks (no licence to republish): `tools/showcase.py`, docs/showcase.md.
 - **Occlusion**: nothing a sync creates may end up over words only the deck has

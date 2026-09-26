@@ -2123,3 +2123,69 @@ more). Each is right where it used to be wrong.
   face Slides uses, so a paragraph wraps one line more (slide 3, 0.583 -> 0.562 while fixed).
 - **A table row's height below a spanning header** (cs161-tls 41: "Elinor Mills" 10 px low), older
   than this hunt.
+
+## Metrics for kinds of defect (2026-09-26: `devtools/slide_metrics.py`)
+
+The bench's `page` is one number with two blind spots. It has a cliff: ink two pixels off counts as
+gone, so a paragraph that wraps one line differently loses every line after it. And it has no colour:
+a heading in the wrong colour scores 1.000. `slide_metrics` measures every slide many ways, each meant
+for a kind of defect a person would name. The judges' 386 verdicts on `hunt0` (97 slides with a
+trusted finding, 289 judged identical; `out/adopt-corpus/judged/hunt0`) say which metric sees which
+kind.
+
+```
+python -m beamer2slides.devtools.slide_metrics run TAG [DECK...] [--gpu]   # runs/TAG/metrics.json
+python -m beamer2slides.devtools.slide_metrics calibrate TAG out/adopt-corpus/judged/hunt0 --json cal.json
+python -m beamer2slides.devtools.slide_metrics flag TAG cal.json      # each slide's metrics past threshold
+python -m beamer2slides.devtools.slide_metrics compare BEFORE AFTER   # cmpdeck, metric by metric
+python -m beamer2slides.devtools.slide_metrics show DECK:N TAG        # where: missing red, extra blue, moved orange
+```
+
+A run's PDF is the bench's own; a cached run keeps none, so `run` compiles the run's tree (0.8 s a
+slide after that). Every metric is larger-is-worse.
+
+**The metrics** (the module docstring has each one's definition):
+
+- `graded`, `drift`, `missing`, `extra`: distances from each side's ink to the other's, capped at
+  16 px. A shift is `drift`, not ink lost; words with nothing within 16 px are `missing`/`extra`.
+- `local_*`: the same on **local ink**, a morphological top-hat of either polarity, taking whichever
+  of opening and closing the neighbourhood's mean is nearer as the ground. Words on a panel, a photo
+  or a gradient are words; a panel is not ink. `page`'s ink is measured against the page's one colour,
+  so on gdg24 54 the yellow card is ink and the captions moved on it are invisible.
+- `ink_de`, `local_ink_de`, `ground_de`: CIE76 colour differences where both sides have ink, and
+  where neither has.
+- `tile_*`: the worst 100 px tile of a metric: one wrong word on a full page.
+- Written, not yet calibrated: optimal transport of local ink (unbalanced log-domain Sinkhorn on an
+  8 px grid: `ot_shift`, `ot_missing`, `ot_extra`), SSIM, LPIPS, DINOv2 (the whole page and its
+  least alike patch) and CLIP. They need torch, which the package never imports: a separate venv with
+  `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126`, then `lpips
+  transformers`, and `run --gpu`.
+
+**What each kind of defect is seen by** (ROC AUC against the identical slides; 0.5 is chance, n
+small below 10):
+
+| category | n | `page` (1 - overlap) | best |
+|---|---|---|---|
+| any | 97 | 0.70 | `tile_pixels` 0.83, `local_graded` 0.78, `pixels` 0.77 |
+| background | 32 | 0.82 | `ground_de` 0.95 |
+| shape | 21 | 0.63 | `tile_pixels` 0.80, `local_missing` 0.76 |
+| line_breaks | 20 | 0.86 | `missing`, `extra` 0.92 |
+| text_size | 15 | 0.80 | `tile_ink_de` 0.82 |
+| text_colour | 14 | 0.52 | `tile_ink_de`, `tile_pixels` 0.99, `pixels` 0.95 |
+| overlap | 7 | 0.85 | `pixels`, `missing`, `tile_pixels` 0.94 |
+| font_face | 7 | 0.75 | `tile_pixels` 0.99, `tile_ink_de` 0.98, `local_missing` 0.97 |
+| text_position | 5 | 0.71 | `local_missing` 0.91 |
+
+`page` is at chance on text colour. It keeps its place as the bench's number, and it is good at line
+breaks and overlaps, but it was always going to miss half of what the judges name.
+
+**Found by it.** The first `compare hunt0 fix8` listed journey-maps 20 as worse on `local_ink_de`
+and `tile_graded` 0.999: every "Market potential" line had lost its indent, in both runs, and neither
+the judges nor `page` (0.925) had named it. The text is `Cost to develop: 1x<VT><TAB>Market
+potential`. `tabbed_tex` gave up on any paragraph with a soft break and wrote the tab as a space;
+Slides sets it on its default stop, 36 pt from the text edge, which the second line's pen starts
+from again at indentStart. Now each line after a break starts its pen at indentStart, on `\null`
+(TeX drops glue after a break): journey-maps 20 0.925 -> 0.981, pycon-2019's four such paragraphs
++0.001 to +0.003, nothing else moved (`tabs1`). `flag` also names, at the top of `hunt0`, jruby-ja's
+gradient masters (`ground_de` x11, deferred above), sc-dark-minimal 11's title set on one line where
+Slides breaks it in two, and firebase-jam 23's teal page drawn pale.

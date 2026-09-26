@@ -1558,27 +1558,41 @@ SLIDES_TABS = (
     "\\global\\slidesx=\\slidestabn\\dimexpr#1\\relax}")
 
 
-def tabbed_tex(runs: list[dict], base: dict, ctx: Context, brk: str, start: float, stop: float) -> str | None:
+def tabbed_tex(runs: list[dict], base: dict, ctx: Context, brk: str, start: float, stop: float,
+               restart: float | None = None) -> str:
     """A paragraph with tabs set on Slides' default stops (`stop` pt apart, the pen `start` pt from the
-    text edge where the line begins), or None when a soft break would move the pen elsewhere."""
-    if any("\x0b" in r["text"] for r in runs):
-        return None
-    segments: list[list[dict]] = [[]]
+    text edge where the paragraph begins). A soft break starts the pen again at `restart` (indentStart:
+    journey-maps' "Cost to develop: 1x<VT><TAB>Market potential" stands its second line a stop in, under
+    the first line's indentFirstLine); the line after it opens on \\null, or TeX would drop the tab's
+    glue at the break."""
+    lines: list[list[dict]] = [[]]
     for r in runs:
-        for k, piece in enumerate(r["text"].split("\t")):
+        for k, piece in enumerate(r["text"].split("\x0b")):
             if k:
-                segments.append([])
+                lines.append([])
             if piece:
-                segments[-1].append({**r, "text": piece})
+                lines[-1].append({**r, "text": piece})
     ctx.packages.add(SLIDES_TABS)
-    out = [f"\\global\\slidesx={start:.2f}pt"]
-    for seg in segments[:-1]:
-        text = runs_tex(seg, base, ctx, brk) if seg else ""
-        trail = len("".join(r["text"] for r in seg)) - len("".join(r["text"] for r in seg).rstrip(" "))
-        spaces = "\\ " * trail                  # the spaces before a tab move the pen too
-        out.append(f"\\slidestab{{{stop:.2f}pt}}{{{text}{spaces}}}")
-    # a paragraph ending on a tab keeps the tab's glue: a space after it is what \par takes away
-    out.append((runs_tex(segments[-1], base, ctx, brk) if segments[-1] else "") or " ")
+    out = []
+    for i, line in enumerate(lines):
+        if i:
+            out.append(f"{brk}\\null")
+        segments: list[list[dict]] = [[]]
+        for r in line:
+            for k, piece in enumerate(r["text"].split("\t")):
+                if k:
+                    segments.append([])
+                if piece:
+                    segments[-1].append({**r, "text": piece})
+        out.append(f"\\global\\slidesx={(start if not i or restart is None else restart):.2f}pt")
+        for seg in segments[:-1]:
+            text = runs_tex(seg, base, ctx, brk) if seg else ""
+            trail = len("".join(r["text"] for r in seg)) - len("".join(r["text"] for r in seg).rstrip(" "))
+            spaces = "\\ " * trail                  # the spaces before a tab move the pen too
+            out.append(f"\\slidestab{{{stop:.2f}pt}}{{{text}{spaces}}}")
+        last = runs_tex(segments[-1], base, ctx, brk) if segments[-1] else ""
+        # a paragraph ending on a tab keeps the tab's glue: a space after it is what \par takes away
+        out.append(last or (" " if i == len(lines) - 1 else ""))
     return "".join(out)
 
 
@@ -1967,7 +1981,7 @@ def box_parts(el: dict, ctx: Context) -> dict:
             # count from the text edge like any other: creandum-board's "DD/MM/YY XX am<TAB><TAB>Other
             # important date" items stand their second column at 180 pt, not one space after "am"
             pen = max(left, first) if glyph else first
-            body = tabbed_tex(p["runs"], base, ctx, brk, pen, TAB_STOP / scale) or body
+            body = tabbed_tex(p["runs"], base, ctx, brk, pen, TAB_STOP / scale, restart=left)
         ctx.line_struts = None
         # a right-to-left paragraph is set in its language (scripts.py: babel's bidi, shaping)
         if rtl:
