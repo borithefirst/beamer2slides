@@ -1687,3 +1687,34 @@ is pinned offline instead (`tests/test_adopt_shapes.py`):
   by construction, and "nothing is on top of it" is a fact about the whole paint order - layout
   decoration, pictures, the deck's own background - which the writer does not model per pixel. A
   line saved against a proof that holds for one deck's thumbnail is not a line saved.
+
+## The loop, measured at last (2026-09-26: `vb-before` -> `vb-after` -> `vb-pair`, `base` replay)
+
+Three decks people brought from inside Google (a one-word title slide, the saudi-cats deck, a third)
+failed to converge, and the bench explained why nobody had seen it: `run` scored the bootstrap only
+(`iters 0`), so the loop had never run on a corpus deck. With `--iter 2` (now reported per deck:
+`CONVERGED` or `open a -> b -> c`, and a summary of how many decks ended worse):
+
+- **0 of 30 decks converged; 16 ended worse than their first draft** (open residuals 6907 -> 8387;
+  sc-memphis boxes 0.994 -> 0.118, sc-dark-modern 0.993 -> 0.030). Cause: a foreign deck's slides
+  have no keys, so `compare.match_slides` paired adopt's frames by title and text only; untitled or
+  look-alike slides found no mate (jeb-arch 6/7, sc-memphis 19/20) and the loop deleted their frames
+  and wrote a bare flow frame for each (sc-memphis lost 3382 of its source lines). Fixed:
+  `compare.target_keys` gives such a slide the label `adopt.frame_labels` wrote. Ten small decks
+  after it (`vb-pair`): no collapse (sc-memphis 0.988, jeb-arch 0.928), still 0/10 converged, open
+  5314 -> 5242, and sc-functions 0.985 -> 0.788, plain-fonts 0.957 -> 0.831.
+- Two more before it: a BOTTOM/MIDDLE-aligned box's first baseline was read as if top-aligned (the
+  default theme's title slide, 57 pt off; `deck_ir.stacked_baseline`, `compare.stacked_y`), and every
+  face `fontfetch` cut from a variable font called itself by the default instance (Montserrat-Thin:
+  bold headings read back as not bold; `fontfetch.rename`, `repair_names`).
+
+**Replay** (`devtools/adopt_replay.py`, tag `base`): round 0 alone, over all 32 decks, with the
+compile and the target cached (4 min cold, 17 s warm). Of 16,569 open residuals, **12,743 are on
+slides whose ink already scores >= 0.97**: `element_missing` 7,000, `paragraph_missing` 1,929,
+`paragraph_extra` 769, `geometry` 756. They are the read-back's, not the source's: classify was made
+for beamer PDFs, and on an adopted page a full-page picture takes every box drawn over it into a
+figure (drawing-workshop slide 1: 2 of 23 elements read back), shapes are background, and stacked
+text boxes merge. Seven decks read back with another page count (notes pages kept as slides:
+saudi-cats 14 pages for 7 slides, cs161-net 88 for 61). What the loop does with those residuals is
+the damage above. Next: tag every element `slides.sty` draws in the PDF (marked content, which PDFium
+reads per page object) so the read-back of an adopted page lists what adopt wrote, not a guess.
