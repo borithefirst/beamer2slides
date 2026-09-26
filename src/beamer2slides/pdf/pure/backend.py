@@ -132,7 +132,8 @@ class Page:
             for k, o in enumerate(pobjs):
                 parent = ids[id(o.parent)] if o.parent is not None else None
                 container = out[parent].matrix if parent is not None else self.to_page
-                out.append(PageObject(k, o.type, mul(o.matrix, container), parent))
+                out.append(PageObject(k, o.type, mul(o.matrix, container), parent,
+                                      marks=tuple(item.info() for item in o.marks)))
                 if parent is not None:
                     out[parent].children.append(k)
             self._ids = ids

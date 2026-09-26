@@ -204,10 +204,36 @@ class MarkItem:
     """CPDF_ContentMarkItem: BMC's (no parameters), BDC's with a dictionary written in the content
     stream, or BDC's naming one in /Properties - which GetParam looks up again on every call."""
 
-    __slots__ = ("direct", "holder", "name", "doc")
+    __slots__ = ("direct", "holder", "name", "doc", "tag")
 
-    def __init__(self, direct: dict | None = None, holder: dict | None = None, name: str = "", doc=None):
-        self.direct, self.holder, self.name, self.doc = direct, holder, name, doc
+    def __init__(self, direct: dict | None = None, holder: dict | None = None, name: str = "", doc=None,
+                 tag: bytes = b""):
+        self.direct, self.holder, self.name, self.doc, self.tag = direct, holder, name, doc, tag
+
+    @staticmethod
+    def operand_string(value) -> bytes:
+        """CPDF_StreamContentParser::GetString: a name's bytes, a string object's, else nothing."""
+        if isinstance(value, Name):
+            return str(value).encode("latin-1", "replace")
+        if isinstance(value, String):
+            return bytes(value)
+        return b""
+
+    def info(self) -> tuple[str, dict]:
+        """(tag, {key: value}) as FPDFPageObjMark_GetName / GetParamKey / GetParamStringValue /
+        GetParamIntValue answer: text is the bytes read as UTF-8 (WideString::FromUTF8: invalid
+        bytes dropped), a number its C int, keys in the dictionary's (sorted) order; any other
+        value (a name, a reference, an array...) is left out, as api.PageObject.marks says."""
+        params = {}
+        d = self.param()
+        if isinstance(d, dict):
+            for key in sorted(d, key=lambda k: str(k).encode("latin-1", "replace")):
+                v = d[key]
+                if isinstance(v, String):
+                    params[_utf8(str(key).encode("latin-1", "replace"))] = _utf8(bytes(v))
+                elif isinstance(v, (int, float)) and not isinstance(v, bool):
+                    params[_utf8(str(key).encode("latin-1", "replace"))] = _c_int(v)
+        return _utf8(self.tag), params
 
     @staticmethod
     def dict_for(doc, holder: dict, name: str) -> dict | None:
@@ -225,6 +251,20 @@ class MarkItem:
         if self.holder is not None:
             return self.dict_for(self.doc, self.holder, self.name)
         return None
+
+
+def _utf8(b: bytes) -> str:
+    return b.decode("utf-8", "ignore")
+
+
+def _c_int(v) -> int:
+    """CPDF_Number::GetInteger: an integer as it is, a real truncated (saturated to int32)."""
+    if isinstance(v, int):
+        return max(-2 ** 31, min(2 ** 31 - 1, v))
+    if v != v:
+        return 0
+    return int(max(-2 ** 31, min(2 ** 31 - 1, math.trunc(v)))) if math.isfinite(v) else \
+        (2 ** 31 - 1 if v > 0 else -2 ** 31)
 
 
 # ---------------------------------------------------------------------- graphics state
@@ -533,20 +573,21 @@ class _Run:
         self.state.dash_phase = self.number(args, 0)
 
     def op_BMC(self, args):
-        self.marks.append(self.marks[-1] + (MarkItem(),))
+        self.marks.append(self.marks[-1] + (MarkItem(tag=MarkItem.operand_string(args[-1]) if args else b""),))
 
     def op_BDC(self, args):
         """Handle_BeginMarkedContent_Dictionary: a dictionary written here, or a name in the
         /Properties resources; anything else (or a name not there) opens nothing, so the EMC that
         follows closes the enclosing sequence."""
         prop = args[-1] if args else None
+        tag = MarkItem.operand_string(args[-2]) if len(args) >= 2 else b""
         if isinstance(prop, Name):
             holder = self.resource_holder("Properties")
             if holder is None or MarkItem.dict_for(self.doc, holder, str(prop)) is None:
                 return
-            item = MarkItem(holder=holder, name=str(prop), doc=self.doc)
+            item = MarkItem(holder=holder, name=str(prop), doc=self.doc, tag=tag)
         elif isinstance(prop, dict):
-            item = MarkItem(direct=prop)
+            item = MarkItem(direct=prop, tag=tag)
         else:
             return
         self.marks.append(self.marks[-1] + (item,))

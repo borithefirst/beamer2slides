@@ -91,6 +91,53 @@ def _buffer(getter, *args) -> bytes:
     return buf.raw[:n]
 
 
+def _wide(getter, *args) -> str | None:
+    """A PDFium UTF-16 getter that reports the length it needs through its last argument (bytes,
+    terminating NUL included); None when it refuses."""
+    need = ctypes.c_ulong()
+    if not getter(*args, None, 0, ctypes.byref(need)):
+        return None
+    if need.value < 2:
+        return ""
+    buf = ctypes.create_string_buffer(need.value)
+    if not getter(*args, ctypes.cast(buf, ctypes.POINTER(ctypes.c_ushort)), need.value, ctypes.byref(need)):
+        return None
+    return join_surrogates(buf.raw[:need.value].decode("utf-16-le", "surrogatepass")[:-1])
+
+
+def _marks(obj) -> tuple:
+    """api.PageObject.marks: FPDFPageObj_GetMark, outermost first, with each mark's string and
+    number parameters."""
+    n = R.FPDFPageObj_CountMarks(obj)
+    if n <= 0:
+        return ()
+    out = []
+    for m in range(n):
+        mark = R.FPDFPageObj_GetMark(obj, m)
+        if not mark:
+            continue
+        params = {}
+        for p in range(max(0, R.FPDFPageObjMark_CountParams(mark))):
+            need = ctypes.c_ulong()
+            if not R.FPDFPageObjMark_GetParamKey(mark, p, None, 0, ctypes.byref(need)):
+                continue
+            key = _wide(R.FPDFPageObjMark_GetParamKey, mark, p)
+            if key is None:
+                continue
+            kb = key.encode("utf-8")
+            kind = R.FPDFPageObjMark_GetParamValueType(mark, kb)
+            if kind == R.FPDF_OBJECT_STRING:
+                value = _wide(R.FPDFPageObjMark_GetParamStringValue, mark, kb)
+                if value is not None:
+                    params[key] = value
+            elif kind == R.FPDF_OBJECT_NUMBER:
+                v = ctypes.c_int()
+                if R.FPDFPageObjMark_GetParamIntValue(mark, kb, ctypes.byref(v)):
+                    params[key] = v.value
+        out.append((_wide(R.FPDFPageObjMark_GetName, mark) or "", params))
+    return tuple(out)
+
+
 def _intersect(box: tuple, clip: tuple) -> tuple:
     return max(box[0], clip[0]), max(box[1], clip[1]), min(box[2], clip[2]), min(box[3], clip[3])
 
@@ -137,7 +184,7 @@ class Page:
                     obj = get(i)
                     kind = R.FPDFPageObj_GetType(obj)
                     matrix = mul(_obj_matrix(obj), parent_matrix)
-                    po = PageObject(len(out), kind, matrix, parent.id if parent else None)
+                    po = PageObject(len(out), kind, matrix, parent.id if parent else None, marks=_marks(obj))
                     out.append(po)
                     self._handles.append(obj)
                     if parent is not None:

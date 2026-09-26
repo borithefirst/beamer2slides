@@ -66,6 +66,14 @@ when nothing clips it. PDFium drops a single-rectangle clip that holds the whole
 uses it with the opaque fills and images painted later to leave out the text nobody sees
 (outside its clip, under a later opaque cover, at alpha 0); `pure` answers the same boxes.
 
+Every `PageObject` also carries its `marks`: the marked-content sequences open around it (`BMC`
+/ `BDC` ... `EMC`), outermost first, as `(tag, {key: value})`. As PDFium exposes them
+(`FPDFPageObj_GetMark`): the tag is the operator's name (a string operand's bytes, else ""),
+params in key order, only strings (UTF-8, invalid bytes dropped) and numbers (a C int, truncated);
+names, arrays, dicts and booleans are left out; a `BDC` naming a missing `/Properties` entry opens
+nothing; a form's contents start with no marks (the marks around the `Do` are the form's own).
+`extract` reads the `B2S` marks slides.sty writes around each element (adopted pages).
+
 The requests are batched where the pipeline would otherwise make one call per item:
 `object_bounds()` gives every object's box at once (render's eraser looks at all of them) and
 `glyph_widths` takes a list (small-caps detection asks per character).

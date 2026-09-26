@@ -141,6 +141,56 @@ def test_a_hyphen_ending_a_line_is_a_hyphen(backend):
         doc.close()
 
 
+# Marked content as adopt's slides.sty writes it (/B2S <<...>> BDC ... EMC around an element), and
+# every way a mark can be opened: a dictionary in the stream, a name in /Properties, BMC, one that
+# names nothing (no mark: its EMC closes the enclosing one), a form inside a mark (its contents
+# start afresh), parameters that are no string or number (left out), a string as the tag.
+MARKED = (b"/B2S <</k (t1) /n 7 /r 2.5 /nm /text /u <FEFF00e90041> /a [1 2] /d << /x 1 >> /t true>> BDC "
+          b"0 0 1 rg 10 10 50 50 re f "
+          b"/Inner /P0 BDC 1 0 0 rg 20 20 10 10 re f EMC "
+          b"/Tagonly BMC 30 30 10 10 re f EMC "
+          b"/X0 Do "
+          b"/Missing /Nope BDC 35 35 5 5 re f EMC "
+          b"40 40 5 5 re f EMC "
+          b"(notname) <</k (x)>> BDC 45 45 5 5 re f BT /F0 12 Tf 10 100 Td (Hi) Tj ET EMC 50 50 5 5 re f")
+MARKED_FORMS = [(b"/BBox [0 0 200 150]", b"/Form <</k (f)>> BDC 0 1 0 rg 60 60 10 10 re f EMC 70 70 5 5 re f")]
+MARKED_RESOURCES = (b" /Properties << /P0 << /k (named) /z 3 >> >>"
+                    b" /Font << /F0 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>")
+
+
+def marked_pdf() -> bytes:
+    from beamer2slides.devtools.render_torture import pdf_bytes
+    return pdf_bytes([MARKED], MARKED_FORMS, extra_resources=MARKED_RESOURCES)
+
+
+def test_page_objects_carry_their_marked_content(backend):
+    """What PDFium says (FPDFPageObj_GetMark): the marks open around each object, outermost first,
+    their string and number parameters; the /Missing mark opens nothing, so the EMC after it
+    closes B2S and the rectangle after that EMC is unmarked."""
+    doc = backend.open(marked_pdf())
+    try:
+        objs = doc[0].objects()
+        b2s = ("B2S", {"k": "t1", "n": 7, "r": 2, "u": "\x00\x00A"})
+        assert [(o.type, o.parent, o.marks) for o in objs] == [
+            (OBJ_PATH, None, (b2s,)),
+            (OBJ_PATH, None, (b2s, ("Inner", {"k": "named", "z": 3}))),
+            (OBJ_PATH, None, (b2s, ("Tagonly", {}))),
+            (OBJ_FORM, None, (b2s,)),
+            (OBJ_PATH, 3, (("Form", {"k": "f"}),)),
+            (OBJ_PATH, 3, ()),
+            (OBJ_PATH, None, (b2s,)),
+            (OBJ_PATH, None, ()),
+            (OBJ_PATH, None, (("notname", {"k": "x"}),)),
+            (OBJ_TEXT, None, (("notname", {"k": "x"}),)),
+            (OBJ_PATH, None, ()),
+        ]
+        chars = doc[0].chars()
+        assert "".join(c.c for c in chars) == "Hi"
+        assert all(objs[c.obj].marks == (("notname", {"k": "x"}),) for c in chars)
+    finally:
+        doc.close()
+
+
 @built
 def test_render_follows_pixel_bounds_and_active_objects(backend):
     if not api.renders(backend):
