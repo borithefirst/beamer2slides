@@ -316,8 +316,11 @@ def run_one(name: str, iters: int = 0, flow: bool = False, slides: str | None = 
                          "full_s": round(time.perf_counter() - t0, 1)})
         if iters:
             result = converge(tex, target, run / "loop", max_iter=iters, log=lambda *_: None)
+            # the promise is convergence, so say it per deck: did it, and did the rounds bring the
+            # open residuals down or up (the saudi-cats deck went 127 -> 138 and nothing said so)
             res["loop"] = {"iterations": result.iterations, "converged": result.converged,
-                           "unresolved": len(result.unresolved)}
+                           "unresolved": len(result.unresolved),
+                           "open": [i["open"] for i in result.iterations]}
             final = run / "loop" / "build" / "main.pdf"
             if final.exists():
                 res["converged"] = score_pdf(final, folder_view, target, run / "sheets-loop")
@@ -423,6 +426,9 @@ def line(res: dict) -> str:
     else:
         broken = ""
     tail = f"  loop -> boxes {c['boxes']:.3f} page {c['page']:.3f} pixels {c['pixels']:.3f}" if c else ""
+    loop = res.get("loop")
+    if loop and loop.get("open"):
+        tail += "  " + ("CONVERGED" if loop["converged"] else "open " + " -> ".join(map(str, loop["open"])))
     return (f"{res['deck']:<24} {res['tag']:<14} {res.get('n', 0):3} slides {res['seconds']:6.1f}s  "
             f"boxes {b.get('boxes', 0):.3f} page {b.get('page', 0):.3f} pixels {b.get('pixels', 0):.3f}{tail}{broken}")
 
@@ -556,6 +562,12 @@ def main(argv=None) -> None:
             mean = {m: sum(r["bootstrap_mean"][m] * r["n"] for r in ok) / n for m in ("boxes", "page", "pixels")}
             print(f"\n{len(ok)}/{len(done)} decks, {n} slides ({sum(1 for r in done if r.get('cached'))} cached): "
                   f"boxes {mean['boxes']:.4f} page {mean['page']:.4f} pixels {mean['pixels']:.4f}")
+        loops = [r["loop"] for r in done if r.get("loop", {}).get("open")]
+        if loops:
+            worse = sum(1 for lo in loops if lo["open"][-1] > lo["open"][0])
+            print(f"converged {sum(1 for lo in loops if lo['converged'])}/{len(loops)}; open residuals "
+                  f"{sum(lo['open'][0] for lo in loops)} -> {sum(lo['open'][-1] for lo in loops)}; "
+                  f"{worse} deck(s) worse after the loop")
     elif args.cmd == "losses":
         losses(args.tag, args.top)
     else:

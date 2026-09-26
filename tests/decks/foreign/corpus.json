@@ -419,5 +419,25 @@
    "tables7",
    "pictureBg"
   ]
+ },
+ {
+  "name": "plain-layouts",
+  "id": "1pZwfkVYDKN6NDfm_xINuUCBSFdPN9RtAtGgj76yfEuI",
+  "title": "b2s plain deck: layouts",
+  "features": [
+   "16:9",
+   "plain",
+   "made"
+  ]
+ },
+ {
+  "name": "plain-fonts",
+  "id": "1GTlGg5D2-9R5YAdFU-lJXMESSjdIjKxLaxVT0eR1C0w",
+  "title": "b2s plain deck: Google Fonts",
+  "features": [
+   "16:9",
+   "plain",
+   "made"
+  ]
  }
 ]
