@@ -50,6 +50,17 @@ def test_the_hash_is_the_sources_bytes_and_whether_notes_are_shown(tmp_path):
     assert adopt_replay.tree_hash(tmp_path, False) != one
 
 
+def test_the_micro_corpus_names_only_manifest_decks_once_each():
+    import json
+    from beamer2slides.devtools import adopt_bench
+    public = {d["name"] for d in json.loads(adopt_bench.MANIFEST.read_text(encoding="utf-8"))}
+    assert len(set(adopt_bench.MICRO)) == len(adopt_bench.MICRO)
+    for spec in adopt_bench.MICRO:
+        name, _, slides = spec.partition(":")
+        assert name in public, spec                 # never a deck someone sent us privately
+        assert slides.replace("-", "").isdigit(), spec
+
+
 def test_old_compiles_are_pruned(tmp_path):
     import os
     for k in range(adopt_replay.KEEP + 2):

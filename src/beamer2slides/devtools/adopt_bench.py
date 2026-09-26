@@ -8,7 +8,8 @@ the deck's own slide images from Google's renderer.
   capture ID NAME        presentations.get + thumbnails + the foreign IR with its pictures, once
                          (out/adopt-corpus/NAME); everything after that is offline
   run [NAME...]          adopt's bootstrap -> compile -> score, per deck in parallel (--jobs);
-                         --iter N also runs pull's loop N rounds and scores what it leaves
+                         --iter N also runs pull's loop N rounds and scores what it leaves;
+                         NAME:a-b a slide range of one deck, --micro the MICRO slides
   report                 the latest result of every deck, worst slides first
 
 Scores per slide (1.0 = the deck reproduced):
@@ -41,6 +42,55 @@ from beamer2slides.paths import CHECKOUT
 # different experiments stay apart by --tag.
 CORPUS = Path(os.environ.get("B2S_ADOPT_CORPUS") or CHECKOUT / "out" / "adopt-corpus")
 MANIFEST = CHECKOUT / "tests" / "decks" / "foreign" / "corpus.json"
+
+# The micro-corpus: one slide per way the loop's round 0 went wrong on 2026-09-26 (a slide the first
+# draft already inked >= 0.97 that the read-back still found tens to hundreds of residuals on). A
+# one-frame source compiles in seconds, so `--micro` runs them all in a minute or two; a family
+# someone fixes should drop out of every slide named for it. Only decks the manifest names.
+MICRO = (
+    "sc-memphis:2",            # 150 shapes, 40 pictures: shapes read back as background
+    "sc-memphis:9",            # a table among shapes
+    "sc-memphis:16",           # 290 shapes over a full-page picture
+    "devfest2020:35",          # a full-page picture, 47 middle-anchored boxes over it
+    "devfest2020:39",          # 43 pictures, 46 boxes
+    "gdg24:4",
+    "gdg24:84",                # stacked text boxes over shapes
+    "drawing-workshop:1",      # a full-page picture swallows the words on it
+    "drawing-workshop:6",
+    "drawings-basics:13",
+    "cs161-net:15",            # speaker notes: notes pages read back as slides
+    "cs161-tls:9",             # notes, few elements
+    "intro-lecture:33",        # notes
+    "arabic-training:6",       # right-to-left
+    "hebrew-lesson:9",         # right-to-left in a table
+    "journey-maps:15",         # one table, four elements, 60 residuals
+    "journey-maps:2",
+    "sc-functions:8",          # a table over a full-page picture
+    "sc-functions:11",
+    "sc-dark-modern:17",       # three tables
+    "sc-dark-modern:18",
+    "sc-aesthetic-school:21",
+    "sc-dark-minimal:3",
+    "supercharge-slides:31",
+    "jruby-ja:16",             # Japanese
+    "apps-edu-zh:9",           # Chinese
+    "ap-bio-stats:40",
+    "creandum-board:22",
+    "comic-strips:7",
+    "jeb-arch:3",
+    "sc-river-a4:2",           # A4 page
+    "instagram:2",
+    "solidity-survey:34",
+    "ds-lecture:13",
+    "plain-layouts:6",         # Slides' own layouts, a bottom-anchored title
+    "plain-fonts:5",           # a variable font's weights
+)
+
+
+def micro_specs() -> list[str]:
+    """The MICRO slides of the decks this corpus holds."""
+    held = set(decks())
+    return [s for s in MICRO if s.partition(":")[0] in held]
 
 
 # ------------------------------------------------------------------------------------------ capture
@@ -516,7 +566,8 @@ def main(argv=None) -> None:
     t = sub.add_parser("target", help="rebuild target.json from the cached presentation (after a deck_ir change)")
     t.add_argument("names", nargs="*")
     r = sub.add_parser("run")
-    r.add_argument("names", nargs="*")
+    r.add_argument("names", nargs="*", help="decks, or NAME:a-b for a slide range of one")
+    r.add_argument("--micro", action="store_true", help="the micro-corpus (MICRO): one slide per failure family")
     r.add_argument("--iter", type=int, default=0)
     r.add_argument("--flow", action="store_true")
     r.add_argument("--slides", help="a-b, 1-based")
@@ -547,12 +598,18 @@ def main(argv=None) -> None:
             write_target(CORPUS / name)
             print(f"{name}: target.json rebuilt")
     elif args.cmd == "run":
-        names = args.names or decks()
+        names = args.names + (micro_specs() if args.micro else []) or decks()
         # the slowest decks first, or the last one started alone decides the wall clock
-        names = sorted(names, key=lambda n: -last_seconds(n))
+        names = sorted(names, key=lambda n: -last_seconds(n.partition(":")[0]))
         done = []
+
+        def job(spec: str) -> tuple:
+            name, _, sl = spec.partition(":")
+            tag = f"{args.tag}-s{sl}" if args.tag and sl else args.tag
+            return name, args.iter, args.flow, sl or args.slides, tag, not args.no_cache
+
         with ProcessPoolExecutor(max(1, min(args.jobs, len(names)))) as pool:
-            futs = [pool.submit(run_one, n, args.iter, args.flow, args.slides, args.tag, not args.no_cache) for n in names]
+            futs = [pool.submit(run_one, *job(n)) for n in names]
             for f in as_completed(futs):
                 done.append(f.result())
                 print(line(done[-1]), flush=True)

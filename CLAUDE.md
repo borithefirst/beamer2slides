@@ -284,8 +284,9 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   duplicated (`merge.ADOPTED`, `field: unpaired`); layout-drawn and in-table elements are named as
   such. Benchmark: `devtools/adopt_bench.py` (29 public decks + `tools/plain_decks.py`'s two made
   in Slides; `run --iter N` says whether the loop converged, and it is slow). **Iterate with
-  `devtools/adopt_replay.py run [deck[:a-b]] --save/--against`**: the loop's round 0 over the corpus
-  (compiles and targets cached, 17 s warm), counting residuals on slides whose ink already matches
+  `devtools/adopt_replay.py run [deck[:a-b]] [--micro] --save/--against`**: the loop's round 0 over
+  the corpus (compiles and targets cached, 17 s warm; `--micro` = `adopt_bench.MICRO`, 36 slides, one
+  per failure family, 4 s warm, also for `adopt_bench run --micro --iter N`), counting residuals on slides whose ink already matches
   (`suspect`: the read-back's blindness, edits the loop would write into a right page). The public gallery
   (borithefirst.github.io/beamer2slides, branch `gh-pages`) shows adopt on six decks we made and
   own, never corpus decks (no licence to republish): `tools/showcase.py`, docs/showcase.md.

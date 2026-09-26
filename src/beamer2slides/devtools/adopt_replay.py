@@ -9,6 +9,7 @@ bytes), read it back as the loop does (`Workspace.build`, with notes when the lo
 compare it with the deck (`compare`). A change to classify, compare or the read-back costs no TeX.
 
   run [DECK[:a-b] ...]    every corpus deck (or those named, a slide range after a colon)
+      --micro             the micro-corpus: one slide per failure family (adopt_bench.MICRO)
       --save NAME         keep the result as out/adopt-replay/NAME.json
       --against NAME      and print each deck's change against a saved one
       --fresh             rebuild every target (kept under a hash of deck_ir's modules otherwise)
@@ -35,7 +36,7 @@ from collections import Counter
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-from beamer2slides.devtools.adopt_bench import CORPUS, decks, load_target, score_pdf
+from beamer2slides.devtools.adopt_bench import CORPUS, decks, load_target, micro_specs, score_pdf
 from beamer2slides.paths import CHECKOUT
 
 SUSPECT_INK = 0.97
@@ -213,12 +214,13 @@ def main(argv=None) -> None:
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
     r.add_argument("specs", nargs="*")
+    r.add_argument("--micro", action="store_true", help="the micro-corpus (adopt_bench.MICRO)")
     r.add_argument("--jobs", type=int, default=8)
     r.add_argument("--save")
     r.add_argument("--against")
     r.add_argument("--fresh", action="store_true", help="rebuild every target (deck_ir) whatever its key says")
     args = ap.parse_args(argv)
-    specs = args.specs or decks()
+    specs = args.specs + (micro_specs() if args.micro else []) or decks()
     before = {}
     if args.against:
         before = {x["deck"]: x for x in json.loads((OUT / f"{args.against}.json").read_text(encoding="utf-8"))}

@@ -1718,3 +1718,12 @@ text boxes merge. Seven decks read back with another page count (notes pages kep
 saudi-cats 14 pages for 7 slides, cs161-net 88 for 61). What the loop does with those residuals is
 the damage above. Next: tag every element `slides.sty` draws in the PDF (marked content, which PDFium
 reads per page object) so the read-back of an adopted page lists what adopt wrote, not a guess.
+
+**Micro-corpus** (`adopt_bench.MICRO`, `run --micro` in both tools): 36 single slides, one per
+family the replay found, each a slide the first draft already inks well that the read-back still
+finds tens to hundreds of residuals on (shapes over pictures, a full-page picture, stacked boxes,
+notes, right-to-left, tables, CJK, an A4 page, Slides' layouts, variable-font weights). Replay tag
+`micro-base`: 2023 open, 1903 suspect, three slides read back as two pages (cs161-net:15,
+cs161-tls:9, instagram:2: the notes page); 133 s cold (a one-frame compile of sc-functions or
+devfest2020 still takes ~100 s, all preamble and pictures), **3.7 s warm**. `adopt_bench run
+--micro --iter N --tag T` runs the loop on the same slides (`NAME:a-b` per deck, tagged `T-sa-b`).
