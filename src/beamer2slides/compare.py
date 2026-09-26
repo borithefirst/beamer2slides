@@ -165,14 +165,27 @@ def slide_similarity(a: dict, b: dict) -> float:
     return 0.45 * title + 0.4 * body + 0.15 * shape
 
 
+def target_keys(tgt: list[dict]) -> list[str | None]:
+    """Each target slide's key, and for a slide of a deck nobody converted (no key: `deck_ir`
+    reads one only from alt-text tags or a base) the label `adopt.frame_labels` gave its frame.
+    Without it a foreign deck's slides paired by title and text alone: jeb-arch's six untitled
+    slides and 19 of sc-memphis' 20 found no mate, and the loop deleted every one of those frames
+    and wrote a bare flow frame for each slide it thought missing."""
+    keys = [s.get("key") for s in tgt]
+    if all(keys) or not any(s.get("objectId") for s in tgt):
+        return keys
+    from .adopt import frame_labels
+    return [k or label for k, label in zip(keys, frame_labels({"slides": tgt}))]
+
+
 def match_slides(cur: list[dict], tgt: list[dict]) -> list[tuple[int | None, int | None]]:
     """Pairs (current index, target index): equal keys first, the rest by an order-preserving
     alignment of title and text similarity."""
     pairs: dict[int, int] = {}
     ckeys = {s.get("key"): i for i, s in enumerate(cur) if s.get("key")}
-    for j, s in enumerate(tgt):
-        if s.get("key") and s["key"] in ckeys and ckeys[s["key"]] not in pairs:
-            pairs[ckeys[s["key"]]] = j
+    for j, key in enumerate(target_keys(tgt)):
+        if key and key in ckeys and ckeys[key] not in pairs:
+            pairs[ckeys[key]] = j
     free_c = [i for i in range(len(cur)) if i not in pairs]
     free_t = [j for j in range(len(tgt)) if j not in pairs.values()]
     for a, b in align_sequences([cur[i] for i in free_c], [tgt[j] for j in free_t], slide_similarity, 0.45):

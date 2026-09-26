@@ -132,6 +132,16 @@ def test_slide_matching_by_key_and_content():
     assert pairs[1] == 2 and pairs[2] == 1
 
 
+def test_an_adopted_frame_pairs_with_its_slide_by_the_label_adopt_gave_it():
+    """A deck nobody converted has no slide keys; adopt labels each frame from the slide's objectId.
+    Untitled slides alike in words (jeb-arch: a footer and a diagram each) paired by nothing else,
+    and the loop deleted their frames and wrote a bare one per slide it took for missing."""
+    footer = lambda: {"kind": "text", "role": "body", "paragraphs": [{"runs": [{"text": "JEB PNF Software"}]}]}  # noqa: E731
+    tgt = [{"objectId": oid, "key": None, "elements": [footer()]} for oid in ("g6f3c_0_9", "p5", "gbd4_1_0")]
+    cur = [{"key": key, "elements": [footer()]} for key in ("gbd4-1-0", "g6f3c-0-9", "p5")]
+    assert sorted((j, i) for i, j in match_slides(cur, tgt)) == [(0, 1), (1, 2), (2, 0)]
+
+
 def test_word_and_style_diffs():
     assert word_diff("a b c", "a x c") == [{"op": "replace", "cur": "b", "tgt": "x", "c": [1, 2], "t": [1, 2]}]
     run = {"text": "one two", "size": 10.9, "color": "#000000"}
