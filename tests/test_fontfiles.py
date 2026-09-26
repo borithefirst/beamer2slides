@@ -255,6 +255,7 @@ def fake_adopt(monkeypatch, seen: dict, missing=(), skipped=()):
         seen["source"] = fontfetch.source_root()
         found["supplied"] = {"families": {"Tiny Sans": {"styles": ["Regular"]}}, "skipped": list(skipped)}
         found["missing"] = [dict(m) for m in missing]
+        found["pictures_missing"] = [{"slide": 3, "alt": "a cat", "why": "downloads are off"}]
         return SimpleNamespace(converged=True, iterations=[], residuals=[], unresolved=[], files=[],
                                notes=[], theme=[])
     monkeypatch.setattr("beamer2slides.adopt.cmd_adopt", cmd_adopt)
@@ -293,6 +294,9 @@ def test_deck_adopt_takes_fonts_as_refs_or_content_and_names_what_it_lacked(tmp_
     assert any("not used" in d.message for d in fonts)
     assert any("fonts=[...]" in s for s in res.next_steps)
     assert fontfetch.source_root() is None, "and not after it"
+    assert res.data["pictures_missing"] == [{"slide": 3, "alt": "a cat", "why": "downloads are off"}]
+    assert any(d.where == "pictures" and "slide 3" in d.message and "a cat" in d.message
+               for d in res.diagnostics)
 
 
 def test_deck_adopt_refuses_a_font_ref_that_is_not_there(tmp_path, monkeypatch):

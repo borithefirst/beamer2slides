@@ -1945,3 +1945,50 @@ right, where before it had to be stopped. Still, no round raised any slide's ink
 - **Shape.** cs161-net 32. Its targets are outline-only, and adopt draws them as filled traced rings:
   fill #00882b where the target has none.
 - **arabic-training.** RTL text and paragraph residuals.
+
+## saudi-cats, one defect family at a time (2026-09-26)
+
+saudi-cats is a private deck someone reported. It is Montserrat and Roboto, with Arabic, curly
+quotes, speaker notes and photos, and it was adopted with `--no-downloads`. It is kept out of the
+public manifest and out of MICRO. Each defect was isolated on a one-slide replay
+(`adopt_replay run saudi-cats:N-N`, seconds), fixed, and then checked on the whole deck and the
+corpus.
+
+| defect | cause | fix |
+|---|---|---|
+| `"` and `--` became curly quotes and an en dash | fontspec's default `Ligatures=TeX` | `adopt.TEX_LIGATURES_OFF` (25ab88f) |
+| Arabic drawn as tofu | the deck's second typeface (a `\newfontfamily` switch) lacks Arabic, and babel's `onchar=ids fonts` only swaps families it knows | `scripts.switch_font_lines`: a `\babelfont{<switch>}` with a per-language face, only for languages the face lacks (b499a72) |
+| notes pages read as slides | the note template's header band and thumbnail canvas | marked pages are frames (`notes._thumbnail_canvas`, the marks merge) |
+| a note hyphenated at a line end was a residual | LuaTeX breaks after an explicit `-` in `\note` whatever the penalties | `compare.norm_notes` (5f97834) |
+| paragraphs merged in the read-back | the classifier joined boxes | marks (`/B2Sp`) |
+| Roboto table cells set in Montserrat | the font census in `font_preamble` looked at text boxes only, not cells or group children | the census walks `text_elements` |
+| 11 photos missing, and nothing said so | `--no-downloads` refused both the fetch and the Drive export; `element_latex` wrote nothing | `adopt.pictures_missing`: logged, agent `data["pictures_missing"]`, a `% picture left out` comment where each one went |
+
+The whole-deck replay after the marks merge: open residuals 136 -> 0, suspects 105 -> 0, ink 0.989.
+
+The Arabic fix itself broke drawing-workshop: in `font_preamble` the switch branch's set of
+languages took the name `lacking`, which is the recorder of missing fonts, and the recorder was
+called again for the next font ('set' object is not callable). The corpus baseline at 193e6e0
+showed it as an ERROR row. With the rename, drawing-workshop replays at ink 0.989, open 363, 63 of
+63 pages (`base`: 0.853, 962, 61 pages). The census and pictures changes left every other corpus
+source byte for byte as it was (`census` vs `head-193e6e0`: every compile cached, open 1076 ->
+1076).
+
+**The one-slide trap.** A one-slide replay makes font decisions from that slide's letters alone.
+The main font and the switch fonts are chosen by letter counts over the deck. So a slide replayed
+alone can be set in a different main face than it gets in the whole deck. This hid the Arabic bug
+(on its own the slide's Arabic went to the main font, which has Arabic). It also misled a table
+diagnosis. Before believing a one-slide result about fonts, check it on the whole deck.
+
+**Model calibration for this work.** Each model was tested on a known answer before it was trusted.
+- Haiku is good for triage only: which slides, which residual kinds. It misdiagnosed a "7" bug that
+  had a known cause.
+- Sonnet passed a scoped diagnosis: one defect, the files named, a written hypothesis to check.
+
+**Open findings, not fixed:**
+- Slides breaks a line after "°" ("70°" / "C"). TeX does not. That line then breaks elsewhere in
+  the source.
+- A Montserrat Bold header is set slightly wider than Slides sets it. The cause is not isolated.
+- The first Arabic fix, which also sent Arabic from faces that have it to babel's font, raised ink
+  a little on arabic-training slides 1-3, 11 and 21. That suggests a font there draws Arabic
+  differently from Slides. It was not pursued.

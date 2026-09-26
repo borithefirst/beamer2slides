@@ -311,6 +311,35 @@ def test_a_second_typeface_that_draws_all_its_letters_is_a_plain_newfontfamily(f
     assert not any(l.startswith("\\babelfont") for l in lines)
 
 
+def test_a_font_missing_after_a_second_typeface_is_still_named(font_folder):
+    """drawing-workshop crashed in `font_preamble` ('set' object is not callable): the switch branch's
+    set of languages had taken the name of the recorder of missing fonts, called for the next font."""
+    latin = "Welcome to the kingdom of cats and coral stone alleys "
+    make_font(font_folder, "Arial", "".join(sorted(set(latin))))
+    make_font(font_folder, "Montserrat", "".join(sorted(set("Shukran |"))))
+    adopt._FAMILIES.clear()
+    t = deck_ir(deck(paragraph(latin * 3), paragraph("Shukran | " * 8, font="Montserrat"),
+                     paragraph("Nowhere to be found " * 2, font="Nowhere")), foreign=True)
+    ctx = adopt.Context()
+    adopt.font_preamble(t, None, ctx)
+    assert "Montserrat" in ctx.font_switches
+    assert "Nowhere" in [m["font"] for m in ctx.missing_fonts]
+
+
+def test_a_font_only_a_table_is_set_in_gets_its_switch(font_folder):
+    """saudi-cats slide 5: the table's Roboto went uncounted (cells hold their paragraphs under
+    `table_cells`), and every cell was set in the document's Montserrat."""
+    make_font(font_folder, "Montserrat", "Felinspcy ")
+    make_font(font_folder, "Roboto", "Densfurpadwk ")
+    adopt._FAMILIES.clear()
+    run = lambda text, font: {"paragraphs": [{"runs": [{"text": text, "font": font, "family": "sans", "size": 10}]}]}
+    title = {"kind": "text", **run("Feline species " * 3, "Montserrat")}
+    table = {"kind": "table", "table_cells": [run("Dense fur padded paws ", "Roboto") for _ in range(4)]}
+    ctx = adopt.Context()
+    lines = adopt.font_preamble({"slides": [{"elements": [title, table]}]}, None, ctx)
+    assert "Roboto" in ctx.font_switches or any(l.startswith("\\setsansfont{Roboto}") for l in lines)
+
+
 def test_the_deck_s_own_hebrew_font_is_fetched_before_one_is_picked(font_folder, monkeypatch):
     """The showcase's water-cycle deck types its Hebrew and Arabic in Noto Sans Hebrew and Arabic. On
     the first run neither was in the font folders yet: CJK fetched its font first, these letters did

@@ -569,7 +569,9 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
     letters: dict[str, dict[str, int]] = {}
     weights: dict[str, dict[tuple[int, bool], int]] = {}
     for s in target["slides"]:
-        for e in s["elements"]:
+        # tables' cells and groups' children too: a font only a table was set in went uncounted, and
+        # its cells took the document's (saudi-cats slide 5 alone: Roboto cells in Montserrat)
+        for e in text_elements(s["elements"]):
             for p in e.get("paragraphs", []):
                 for r in p["runs"]:
                     k = (r.get("family") or "sans", r.get("font") or "")
@@ -675,11 +677,12 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
             faces = weight_faces(font, files, weights.get(font, {}), tree, font_weights)
             options = f"{font_files_latex(files, tree)}{faces}{stretch(font, stem, files, target)}"
             from .scripts import language_letters, plan, switch_font_lines
-            lacking = {lang for lang, seen in language_letters(target, font).items()
-                       if font_coverage(files["UprightFont"], seen, files.get("FontIndex") or 0) < 1.0}
-            if lacking and script_plan is None:
+            # (not `lacking`: that name is the missing-font recorder above, called again next font)
+            no_script = {lang for lang, seen in language_letters(target, font).items()
+                         if font_coverage(files["UprightFont"], seen, files.get("FontIndex") or 0) < 1.0}
+            if no_script and script_plan is None:
                 script_plan = plan(target)
-            lines += switch_font_lines(target, tree, command, fam, options, stem, lacking, script_plan) or \
+            lines += switch_font_lines(target, tree, command, fam, options, stem, no_script, script_plan) or \
                 [f"\\newfontfamily{command}{{{stem}}}[{options}]"]
         ctx.font_switches = switches
         ctx.missing_fonts = missing
@@ -838,6 +841,62 @@ def font_coverage(path: Path, letters: dict[str, int], index: int = 0, strict: b
     return sum(n for c, n in letters.items() if ord(c) in cmap) / total
 
 
+UNINCLUDABLE = (".svg", ".emf", ".wmf", ".img")
+
+
+def pictures_missing(target: dict) -> list[dict]:
+    """The deck's pictures the source is written without, {slide, alt, why} each: the deck would
+    not give the file (`--no-downloads`, a harness whose fetcher refuses and a Drive export that
+    failed too: `deck_ir.stash_picture`'s `error`) or LaTeX cannot include it. Such a frame simply
+    lacks the picture, which nothing but this list would say (saudi-cats: 11 photos gone quietly)."""
+    def images(node):
+        if isinstance(node, dict):
+            if node.get("kind") == "image" and not node.get("video"):
+                yield node
+            for v in node.values():
+                if isinstance(v, (dict, list)):
+                    yield from images(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from images(v)
+
+    out, seen = [], set()
+    for n, s in enumerate(target["slides"], 1):
+        pictures = list(images(s.get("elements", [])))
+        if "background_file" in s:
+            pictures.append({"file": s["background_file"], "alt": "slide background"})
+        for el in pictures:
+            path = Path(el["file"]) if el.get("file") else None
+            if path is None or not path.exists():
+                why = el.get("error") or "the deck gave no file for it"
+            elif path.suffix.lower() in UNINCLUDABLE:
+                why = f"LaTeX can't include {path.suffix[1:].upper()} pictures"
+            else:
+                continue
+            miss = {"slide": n, "alt": el.get("alt") or "", "why": why}
+            if el.get("inherited"):
+                # a master's or layout's picture is on every slide of it: said once, as the theme's
+                key = (el["inherited"], json.dumps(el.get("bbox")), miss["alt"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                miss["layout"] = el["inherited"]
+            out.append(miss)
+    return out
+
+
+def missing_pictures_lines(missing: list[dict]) -> list[str]:
+    """What a log says of `pictures_missing`."""
+    if not missing:
+        return []
+    lines = [f"{len(missing)} picture(s) are not in the source (their frames lack them):"]
+    for m in missing:
+        alt = f" {m['alt']!r}" if m["alt"] else ""
+        theme = f" (its layout's or master's {m['layout']}, on every slide of it)" if m.get("layout") else ""
+        lines.append(f"  slide {m['slide']}{alt}{theme}: {m['why']}")
+    return lines
+
+
 def picture_of(el: dict, tree: Path | None):
     """The `Picture` for an element whose file the deck gave us, copied into the source tree so the
     tree stands on its own (the download sits in the work folder, which is scratch). None when the
@@ -851,7 +910,7 @@ def picture_of(el: dict, tree: Path | None):
     if suffix not in LATEX_PICTURES:
         # GIF, WebP, BMP, TIFF: what graphicx cannot read becomes a PNG of its first frame, as
         # `pull` does; SVG and the Windows metafiles Pillow cannot draw are left out and said so
-        if suffix in (".svg", ".emf", ".wmf", ".img"):
+        if suffix in UNINCLUDABLE:
             print(f"  {path.name}: {suffix[1:].upper()} pictures can't be included by LaTeX; left out")
             return None
         suffix = ".png"
@@ -3283,6 +3342,10 @@ def element_latex(el: dict, ctx: Context, tree: Path | None = None, ind: str = "
         if pic is not None:
             ctx.packages.add(TEXTPOS)
             out.append(slide_picture(el, pic, ctx, ind).rstrip("\n"))
+        else:
+            # where it goes, for the person who puts it back (`pictures_missing` says why)
+            alt = " ".join((el.get("alt") or "").split())[:60]
+            out.append(f"{ind}% picture left out{': ' + alt if alt else ''} (at {', '.join(f'{v:.0f}' for v in el['bbox'])} pt)")
     elif el["kind"] == "text" and el.get("paragraphs"):
         ctx.packages.add(TEXTPOS)
         # A node of a flow chart is one element: its box, then its label on top.
@@ -3767,12 +3830,14 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
 
     `fonts`: font files or folders of them a person supplied (.ttf .otf .ttc .woff .woff2), laid
     out in `<work>/fonts-supplied` (`fontfiles.install`) and preferred to any other. `found`, when
-    given, is filled with `supplied` (what was made of those files) and `missing` (the fonts the
-    deck names that were set in something else, `font_preamble`)."""
+    given, is filled with `supplied` (what was made of those files), `missing` (the fonts the
+    deck names that were set in something else, `font_preamble`) and `pictures_missing` (the
+    pictures the source is written without, `pictures_missing`)."""
     tex = Path(tex).resolve()
     work = Path(work).resolve() if work else tex.parent / "out" / "adopt"
     found = {} if found is None else found
     found.setdefault("missing", [])
+    found.setdefault("pictures_missing", [])
     roots = []
     if fonts:
         from . import fontfiles
@@ -3784,11 +3849,11 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
         roots.append(work / "fonts-supplied")
     with use_fonts(*roots):
         return _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base,
-                      base_in_drive, log, found["missing"])
+                      base_in_drive, log, found["missing"], found["pictures_missing"])
 
 
 def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base, base_in_drive, log,
-           missing: list):
+           missing: list, pictures: list):
     from .inverse import run_pull
     pres = None
     if target_path is not None:
@@ -3805,6 +3870,9 @@ def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, bas
     bootstrap(target, tex, flow, missing)
     log(f"wrote {tex} ({len(target['slides'])} frames)")
     for line in missing_fonts_lines(missing):
+        log(line)
+    pictures.extend(pictures_missing(target))
+    for line in missing_pictures_lines(pictures):
         log(line)
     result = run_pull(target, tex, work, apply, out, max_iter, False, engine, log=log)
     if base:

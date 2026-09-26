@@ -173,6 +173,10 @@ per attempt. Say so before you start one; do not start two.
   a file only the person has: ask for the fonts named there (.ttf, .otf, .ttc, .woff or .woff2,
   any file names) and adopt again with `fonts=[...]` into a new `tex` path. Do not look for the
   fonts on the web yourself. A file that could not be used is a warning at `where: "fonts"`.
+* A picture the deck would not give (downloads refused, or a format LaTeX cannot include) is left
+  out of the source, its frame marked with a `% picture left out` comment where it went. They are
+  in `data["pictures_missing"]` (slide, alt text, why) and warnings at `where: "pictures"`: tell
+  the person which slides lack a picture; never report such a source as complete.
 * Slide order is merged, not taken wholesale: a slide a person dragged stays where they put it.
 * A sync killed halfway loses nothing — the next one sweeps up — so a timeout is not a reason to
   force anything.

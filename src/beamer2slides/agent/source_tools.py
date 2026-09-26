@@ -174,7 +174,7 @@ def deck_adopt(
     per slide** (60 such reads a minute, a 429 sleeps 20-60 s: minutes for a big deck), writes a
     source tree, then **compiles it in a loop** like pull. `data["readability"]`: how keepable
     that source is (sources people wrote: 0.6-1.0). A `.json` deck is read locally, but credentials
-    are fetched anyway. Fonts it had no file for are in `data["fonts_missing"]` - ask for them.
+    are fetched anyway. Missing fonts (ask for them) and pictures: `data["fonts_missing"]`, `["pictures_missing"]`.
     """
     from ..adopt import written_already
 
@@ -250,6 +250,11 @@ def _fonts_report(j: Job, found: dict) -> None:
     if missing:
         j.suggest("ask the person for the files of the fonts in data['fonts_missing'] and adopt again "
                   "with fonts=[...] (into a new tex path), if the deck's line breaks matter")
+    # A picture the deck would not give is a frame without it: said, never left to be noticed.
+    pictures = found.get("pictures_missing") or []
+    j.data["pictures_missing"] = [dict(p) for p in pictures]
+    for p in pictures:
+        j.warn(f"slide {p['slide']}: picture {p['alt']!r} is not in the source ({p['why']})", where="pictures")
 
 
 def _existing(j: Job, ref: str, what: str) -> Path:

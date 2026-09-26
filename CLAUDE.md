@@ -205,7 +205,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
 - **Fonts without internet**: a local google/fonts copy (`$B2S_FONT_SOURCE`, `fontfetch.use_source`,
   `AgentContext.font_source`), or font files handed to adopt (`--fonts`, `deck_adopt(fonts=)`,
   .ttf/.otf/.ttc/.woff/.woff2 named by their name table, `fontfiles.py`, `adopt.use_fonts`).
-  What adopt still stood in for is reported (`ctx.missing_fonts`, agent `data["fonts_missing"]`).
+  What adopt still stood in for is reported (`ctx.missing_fonts`, agent `data["fonts_missing"]`),
+  and so are pictures the deck would not give (`adopt.pictures_missing`, `data["pictures_missing"]`,
+  a `% picture left out` comment in the frame).
 - `presentations.create` ignores `pageSize` (always 16:9), hence the .pptx route. `createImage`
   needs a fetchable URL and letterboxes. Object ids are 5-50 chars. `getThumbnail` LARGE = 1600 px.
 - Emit robustness: a refused batch is retried per slide, then per element, then the deck is rebuilt
@@ -290,7 +292,9 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   `devtools/adopt_replay.py run [deck[:a-b]] [--micro] --save/--against`**: the loop's round 0 over
   the corpus (compiles and targets cached, 17 s warm; `--micro` = `adopt_bench.MICRO`, 36 slides, one
   per failure family, 4 s warm, also for `adopt_bench run --micro --iter N`), counting residuals on slides whose ink already matches
-  (`suspect`: the read-back's blindness, edits the loop would write into a right page). The public gallery
+  (`suspect`: the read-back's blindness, edits the loop would write into a right page). A one-slide
+  replay picks the main and switch fonts from that slide's letters alone: check a font finding on
+  the whole deck (docs/adopt-bench.md "saudi-cats"). The public gallery
   (borithefirst.github.io/beamer2slides, branch `gh-pages`) shows adopt on six decks we made and
   own, never corpus decks (no licence to republish): `tools/showcase.py`, docs/showcase.md.
 - **Occlusion**: nothing a sync creates may end up over words only the deck has

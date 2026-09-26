@@ -87,6 +87,24 @@ def test_a_linked_chart_is_the_picture_slides_keeps_of_it(tmp_path):
     assert not own(deck_ir(deck_with(chart))), "pull still leaves charts alone"
 
 
+def test_a_picture_the_deck_would_not_give_is_named_and_marked_where_it_went(tmp_path):
+    """saudi-cats adopted with --no-downloads: 11 photos simply were not in the source, unsaid."""
+    photo = element("p1", 60, 80, 200, 150, description="Sand cat",
+                    image={"contentUrl": "https://example.invalid/cat.png"})
+    kept = element("p2", 300, 80, 100, 100, image={"contentUrl": "https://example.invalid/ok.png"})
+    fetch = Fetcher({"https://example.invalid/ok.png": png_bytes(10, 10)})
+    ir = deck_ir(deck_with(photo, kept), foreign=True, fetch=fetch, images=tmp_path / "images")
+    ir["slides"].append(json.loads(json.dumps(ir["slides"][0])))
+    theme, missing, again = adopt.pictures_missing(ir)
+    assert missing["slide"] == 1 and missing["alt"] == "Sand cat" and "404" in missing["why"]
+    assert theme["layout"] == "m1" and again["slide"] == 2, "the master's picture said once, not per slide"
+    ir["slides"].pop()
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    assert "% picture left out: Sand cat (at " in text
+    assert text.count("\\slidepicture") == 1, "the picture it has is still drawn"
+    assert any("slide 1 'Sand cat'" in line for line in adopt.missing_pictures_lines([missing]))
+
+
 # ---------------------------------------------------------------- videos
 
 def youtube(oid="v1", w=320.0, h=180.0) -> dict:
