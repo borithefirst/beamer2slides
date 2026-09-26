@@ -1727,3 +1727,14 @@ notes, right-to-left, tables, CJK, an A4 page, Slides' layouts, variable-font we
 cs161-tls:9, instagram:2: the notes page); 133 s cold (a one-frame compile of sc-functions or
 devfest2020 still takes ~100 s, all preamble and pictures), **3.7 s warm**. `adopt_bench run
 --micro --iter N --tag T` runs the loop on the same slides (`NAME:a-b` per deck, tagged `T-sa-b`).
+
+The loop on the micro-corpus (`adopt_bench run --micro --iter 2 --tag micro`, 6.4 min at 12 jobs, the
+~350 s devfest2020/gdg24 slides setting the wall clock): 1/36 converged, open 2023 -> 1985, 7 slides
+worse. The one that converged was the worst: plain-fonts:5 (a big "7" over a line) went 0.979 ->
+0.267, because `compare.counts_as_text` took any lone number for a frame counter, so the target's
+title "7" was never compared; the read-back merged it into the line's box, the loop deleted the
+"extra" 7 and nothing missed it. A title is no longer a counter (0.979 kept, converged). Still
+collapsing on the planner's side, from read-back misreadings: plain-layouts:6 0.993 -> 0.501 (a
+wrapped paragraph read as several; the box emptied and a fragment written in a textblock),
+ds-lecture:13 0.988 -> 0.439 (`\slidebreak` rewritten as `\\`, an item copied out of its list),
+sc-functions:8 0.984 -> 0.372, ap-bio-stats:40 0.989 -> 0.627, drawing-workshop:6 0.999 -> 0.574.

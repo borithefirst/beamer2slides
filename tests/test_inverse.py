@@ -142,6 +142,23 @@ def test_an_adopted_frame_pairs_with_its_slide_by_the_label_adopt_gave_it():
     assert sorted((j, i) for i, j in match_slides(cur, tgt)) == [(0, 1), (1, 2), (2, 0)]
 
 
+def test_a_title_that_is_a_number_is_compared_not_taken_for_a_frame_counter():
+    """plain-fonts slide 5 is a big "7" over a line: left out as a counter, the loop deleted it from
+    the source and called the slide converged."""
+    d = fixture_deck()
+    s = slide_of(d, "method")
+    title = next(e for e in d["slides"][s]["elements"] if e["kind"] == "text" and e.get("role") == "title")
+    title["paragraphs"] = [{**title["paragraphs"][0], "runs": [{**title["paragraphs"][0]["runs"][0], "text": "7"}]}]
+    gone = copy.deepcopy(d)
+    gone["slides"][s]["elements"] = [e for e in gone["slides"][s]["elements"] if e.get("role") != "title"]
+    assert "paragraph_missing" in residual_kinds_between(gone, d)
+
+
+def residual_kinds_between(cur: dict, tgt: dict) -> dict:
+    from collections import Counter
+    return dict(Counter(r["kind"] for r in compare(cur, tgt).open()))
+
+
 def test_word_and_style_diffs():
     assert word_diff("a b c", "a x c") == [{"op": "replace", "cur": "b", "tgt": "x", "c": [1, 2], "t": [1, 2]}]
     run = {"text": "one two", "size": 10.9, "color": "#000000"}

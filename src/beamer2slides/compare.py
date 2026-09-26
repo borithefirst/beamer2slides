@@ -221,10 +221,11 @@ class Para:
 
 def counts_as_text(el: dict) -> bool:
     """Text elements that are compared: not footers (frame counters "3 / 9" included, which a live
-    deck without keys can't tell apart), formulas or overlays."""
+    deck without keys can't tell apart), formulas or overlays. A title is never a counter: a slide
+    whose title is a big "7" had it left out, so the loop deleted it and called the slide converged."""
     if el["kind"] != "text" or el.get("role") in IGNORED_ROLES:
         return False
-    return not FRAME_COUNTER_RE.match(norm_text(element_text(el)))
+    return el.get("role") == "title" or not FRAME_COUNTER_RE.match(norm_text(element_text(el)))
 
 
 def reading_order(slide: dict) -> list[int]:
