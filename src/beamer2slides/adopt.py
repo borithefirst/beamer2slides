@@ -3833,7 +3833,8 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
     out in `<work>/fonts-supplied` (`fontfiles.install`) and preferred to any other. `pptx`: a
     .pptx of the deck a person downloaded (File > Download), whose pictures are used before any
     download (`deck_ir.read_deck`; a saved target needs its presentation.json beside it,
-    `deck_ir.pictures_from_pptx`). `found`, when given, is filled with `supplied` (what was made
+    `deck_ir.pictures_from_pptx`). `target_path` may also be a saved `presentations.get` answer,
+    read here with no Google call (`deck_ir.read_presentation`). `found`, when given, is filled with `supplied` (what was made
     of those files), `missing` (the fonts the deck names that were set in something else,
     `font_preamble`), `pictures_missing` (the pictures the source is written without,
     `pictures_missing`) and, with a `pptx`, `pptx_pictures` (how many pictures of the deck it held)."""
@@ -3860,12 +3861,22 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
 
 def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base, base_in_drive, log,
            missing: list, pictures: list, pptx: Path | None = None, found: dict | None = None):
+    from .deck_ir import is_presentation
     from .inverse import run_pull
     pres = None
     data = Path(pptx).read_bytes() if pptx else None
     held = None
-    if target_path is not None:
-        target = json.loads(Path(target_path).read_text(encoding="utf-8"))
+    doc = json.loads(Path(target_path).read_text(encoding="utf-8")) if target_path is not None else None
+    if is_presentation(doc):
+        # the deck as Google describes it, saved by whoever may call the Slides API: read here,
+        # its pictures out of the .pptx, with no Google call (`deck_ir.read_presentation`)
+        from .deck_ir import read_presentation
+        kept: dict = {}
+        target = read_presentation(doc, work / "target-images", data, kept)
+        pres = doc
+        held = kept.get("pptx_pictures")
+    elif doc is not None:
+        target = doc
         pres = presentation_beside(target_path)
         if data is not None and pres is None:
             log(f"{Path(pptx).name} is not used: a saved target pairs its pictures through the "

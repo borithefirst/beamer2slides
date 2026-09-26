@@ -143,6 +143,41 @@ def test_a_live_read_takes_the_pptx_it_is_given_before_any_download(tmp_path, mo
     assert theme.get("layout") == "m1", "the master's picture was not in this .pptx: still said"
 
 
+def test_a_saved_presentation_is_read_with_no_google(tmp_path, monkeypatch, fetcher):
+    """A sandbox handed the deck as files: Google's own answer for it and its download. The reader
+    runs here; the photo comes out of the .pptx; Drive is never asked."""
+    from beamer2slides.deck_ir import is_presentation, read_presentation
+    fetcher(lambda url: (_ for _ in ()).throw(PermissionError(url)))
+    monkeypatch.setattr("beamer2slides.google_auth.drive_service", lambda *a, **k: pytest.fail("Drive"))
+    pres, cat, data = cat_deck()
+    assert is_presentation(pres) and not is_presentation(deck_ir(pres, foreign=True))
+    kept: dict = {}
+    ir = read_presentation(pres, tmp_path / "images", data, kept)
+    [el] = own(ir)
+    assert Path(el["file"]).read_bytes() == cat and el["object"] == "p1"
+    assert kept["pptx_pictures"] == 1 and kept["presentation"] is pres
+    assert ir["layouts"], "the layouts and masters are read as from the live deck"
+
+
+def test_adopt_reads_a_saved_presentation_and_its_pptx(tmp_path, monkeypatch, fetcher):
+    fetcher(lambda url: (_ for _ in ()).throw(PermissionError(url)))
+    pres, cat, data = cat_deck()
+    (tmp_path / "deck.json").write_text(json.dumps(pres), encoding="utf-8")
+    (tmp_path / "deck.pptx").write_bytes(data)
+    seen = {}
+    monkeypatch.setattr("beamer2slides.inverse.run_pull", lambda target, *a, **k: seen.setdefault("target", target))
+    monkeypatch.setattr(adopt, "record_base", lambda target, pres, *a, **k: seen.setdefault("pres", pres))
+    found: dict = {}
+    adopt.cmd_adopt("deck.json", tmp_path / "tree" / "main.tex", tmp_path / "work", False, None, 1, None,
+                    False, tmp_path / "deck.json", log=lambda *a: None, found=found, pptx=tmp_path / "deck.pptx")
+    [el] = own(seen["target"])
+    assert Path(el["file"]).read_bytes() == cat
+    assert seen["pres"]["presentationId"] == "P", "a base is recorded from the answer's object ids"
+    assert found["pptx_pictures"] == 1
+    assert [m for m in found["pictures_missing"] if not m.get("layout")] == []
+    assert "\\slidepicture" in (tmp_path / "tree" / "main.tex").read_text(encoding="utf-8")
+
+
 def test_a_saved_target_takes_its_pictures_from_the_decks_pptx(tmp_path):
     """A target read with downloads off, then the .pptx beside it: paired through the
     presentations.get it was read from."""

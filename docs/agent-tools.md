@@ -234,7 +234,17 @@ without (`data["pictures_missing"]`). `deck_adopt(pptx=...)` (CLI: `adopt --pptx
 as the person downloaded it (File > Download > Microsoft PowerPoint), a ref or content: its
 pictures are paired with the read deck page by page as an export's are (`deck_pictures`), used
 before any download is tried, and no Drive export is made. A `.json` deck pairs them through the
-`presentation.json` beside it (`deck_ir.pictures_from_pptx`), and such a call needs no Google at
+`presentation.json` beside it (`deck_ir.pictures_from_pptx`).
+
+**Or the whole deck comes as files.** A sandbox with no Google gets two: the Slides API's
+`presentations.get` answer, saved whole by whatever outside may call Google (one request,
+`GET https://slides.googleapis.com/v1/presentations/{id}`, no `fields` mask: the layouts and masters
+are needed), and the `.pptx`. `deck_adopt(deck=<that .json>, pptx=...)` runs adopt's reader on it
+inside the sandbox (`deck_ir.read_presentation`, told from a target by its `pageSize`): words,
+layout and theme from the first, pictures from the second, never a Drive export. Google's slide
+thumbnails are not there, so what only they show (gradients, some table-style colours, measured
+insets: `deck_fills`) is read as with `$B2S_ADOPT_THUMBNAILS=0`. The answer holds the object ids,
+so the sync base is recorded as for a live read. Every `.json` deck needs no Google at
 all: `@tool(..., local=)` drops the Google actions from the gate for it, fetches no credentials and
 installs a provider that refuses, so a context with no account (`AgentContext.offline`) adopts a
 saved deck, and a Google call slipped into that path is an `offline` refusal, never the machine's

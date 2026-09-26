@@ -1396,31 +1396,53 @@ def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pd
     thumbnails = None
     if foreign and images is not None and os.environ.get("B2S_ADOPT_THUMBNAILS", "1") != "0":
         thumbnails = slide_thumbnails(pid, pres, Path(images).parent / "thumbnails")
-    fetch = None
-    if images:
-        # Downloaded where the fetcher allows, else out of one Drive export of the deck
-        # (`deck_pictures`: a harness that may not fetch a contentUrl still reads the pictures).
-        from .deck_pictures import LivePictures
-        from .google_auth import drive_service, fetcher_for_threads
-        live = LivePictures(pres, None, fetcher_for_threads(), pptx=pptx)
-        if pptx is not None and keep is not None:
-            keep["pptx_pictures"] = len(live.exported or {})
-
-        def fetch(url: str) -> bytes:
-            oid = next((i for i, u in live.urls.items() if u == url), None)
-            if live.supplied and oid in live.exported:
-                return live.exported[oid]
-            try:
-                return fetch_url(url, live.fetch)
-            except Exception:  # noqa: BLE001 - a harness's fetcher raises its own types
-                if oid is None or live.supplied:
-                    raise  # (a supplied .pptx is the export: Drive is not asked for another)
-                live.drive = live.drive or drive_service()
-                data = live.export().get(oid)
-                if not data:
-                    raise
-                return data
+    fetch = picture_fetch(pres, pptx, keep) if images else None
     return deck_ir(pres, pdf_size or (base or {}).get("page_size"), base, fetch, images, foreign, thumbnails)
+
+
+def picture_fetch(pres: dict, pptx: bytes | None = None, keep: dict | None = None, drive: bool = True):
+    """`fetch(url) -> bytes` for the pictures of `pres`: out of a supplied .pptx first, else
+    downloaded where the fetcher allows, else out of one Drive export of the deck (`deck_pictures`:
+    a harness that may not fetch a contentUrl still reads the pictures). `drive=False`: no export
+    (a read that has no Google, `read_presentation`). `keep["pptx_pictures"]`: what the .pptx held."""
+    from .deck_pictures import LivePictures
+    from .google_auth import drive_service, fetcher_for_threads
+    live = LivePictures(pres, None, fetcher_for_threads(), pptx=pptx)
+    if pptx is not None and keep is not None:
+        keep["pptx_pictures"] = len(live.exported or {})
+
+    def fetch(url: str) -> bytes:
+        oid = next((i for i, u in live.urls.items() if u == url), None)
+        if live.supplied and oid in live.exported:
+            return live.exported[oid]
+        try:
+            return fetch_url(url, live.fetch)
+        except Exception:  # noqa: BLE001 - a harness's fetcher raises its own types
+            if oid is None or live.supplied or not drive:
+                raise  # (a supplied .pptx is the export: Drive is not asked for another)
+            live.drive = live.drive or drive_service()
+            data = live.export().get(oid)
+            if not data:
+                raise
+            return data
+    return fetch
+
+
+def is_presentation(doc) -> bool:
+    """Whether a JSON document is a raw `presentations.get` answer rather than an IR (whose page
+    size is `page_size`, in points)."""
+    return isinstance(doc, dict) and "pageSize" in doc and isinstance(doc.get("slides"), list)
+
+
+def read_presentation(pres: dict, images: Path, pptx: bytes | None = None, keep: dict | None = None) -> dict:
+    """A foreign deck's IR from a `presentations.get` answer someone saved, with no Google call:
+    what `adopt` reads in a sandbox that was handed the deck as files. Its pictures come from the
+    .pptx given (else a download, where the fetcher allows one; never a Drive export). What Google's
+    slide thumbnails would have told - gradients, table-style colours, measured insets
+    (`deck_fills`) - is not there, as with `$B2S_ADOPT_THUMBNAILS=0`."""
+    if keep is not None:
+        keep["presentation"] = pres
+    return deck_ir(pres, None, None, picture_fetch(pres, pptx, keep, drive=False), images, True, None)
 
 
 def pictures_from_pptx(target: dict, pres: dict, data: bytes, images: Path) -> tuple[int, int]:

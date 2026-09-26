@@ -70,6 +70,27 @@ def test_a_saved_deck_is_adopted_with_no_google_at_all(tmp_path, monkeypatch):
     assert deck_adopt(ctx, deck="someid", tex="other.tex").code == "offline", "a live deck still needs it"
 
 
+def test_a_sandbox_adopts_the_deck_it_was_handed_as_files(tmp_path, monkeypatch, fetcher):
+    """Google's answer for the deck and its .pptx, both as content, in a context with no account:
+    the reader runs in the sandbox and the picture comes out of the .pptx."""
+    import base64
+
+    from .test_adopt_media import cat_deck
+    fetcher(lambda url: (_ for _ in ()).throw(PermissionError(url)))
+    seen = {}
+    monkeypatch.setattr("beamer2slides.inverse.run_pull", lambda target, *a, **k: seen.setdefault("target", target))
+    monkeypatch.setattr("beamer2slides.adopt.record_base", lambda *a, **k: None)
+    monkeypatch.setattr("beamer2slides.agent.source_tools._finish", lambda *a, **k: None)
+    pres, cat, data = cat_deck()
+    res = deck_adopt(AgentContext.offline(tmp_path), tex="main.tex",
+                     deck={"name": "cats.json", "text": json.dumps(pres)},
+                     pptx={"name": "cats.pptx", "base64": base64.b64encode(data).decode()})
+    assert res.ok, res.json()
+    assert res.data["pptx_pictures"] == 1 and res.data["slides"] == 1
+    [photo] = [e for e in seen["target"]["slides"][0]["elements"] if e.get("object") == "p1"]
+    assert Path(photo["file"]).read_bytes() == cat
+
+
 def test_a_google_call_in_a_local_adopt_is_refused_not_made(tmp_path, monkeypatch):
     """Run as needing no Google, it gets none: not even the token this machine has on disk."""
     from beamer2slides import google_auth

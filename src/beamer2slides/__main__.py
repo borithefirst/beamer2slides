@@ -303,7 +303,10 @@ def main() -> None:
         c.add_argument("--handout", action="store_true", help="compile in handout mode (one page per frame)")
         c.add_argument("--engine", help="pdflatex, xelatex or lualatex (default: from the source)")
     c = sub.add_parser("adopt", help="write a beamer source for a deck nobody converted, then converge it")
-    c.add_argument("--deck", required=True, help="deck URL, presentation id, or a deck.json-shaped target file")
+    c.add_argument("--deck", required=True,
+                   help="deck URL, presentation id, or a .json file read with no Google call: a "
+                        "deck.json-shaped target, or the Slides API's presentations.get answer saved "
+                        "whole (its pictures then come from --pptx)")
     c.add_argument("--tex", required=True, type=Path, help="the source to write (it must not exist yet)")
     c.add_argument("--flow", action="store_true",
                    help="write frame titles and body text in the flow instead of a textblock per element: "

@@ -209,7 +209,10 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   and so are pictures the deck would not give (`adopt.pictures_missing`, `data["pictures_missing"]`,
   a `% picture left out` comment in the frame). A .pptx the person downloaded brings them with no
   download (`adopt --pptx`, `deck_adopt(pptx=)`, `LivePictures(pptx=)` taken first, no Drive
-  export; a saved target through its presentation.json, `deck_ir.pictures_from_pptx`).
+  export; a saved target through its presentation.json, `deck_ir.pictures_from_pptx`). A sandbox
+  with no Google adopts a saved `presentations.get` answer plus the .pptx (`--deck x.json`,
+  `deck_ir.read_presentation`, no thumbnails); every `.json` deck runs with no credentials
+  (`@tool(local=)`, a refusing provider).
 - `presentations.create` ignores `pageSize` (always 16:9), hence the .pptx route. `createImage`
   needs a fetchable URL and letterboxes. Object ids are 5-50 chars. `getThumbnail` LARGE = 1600 px.
 - Emit robustness: a refused batch is retried per slide, then per element, then the deck is rebuilt

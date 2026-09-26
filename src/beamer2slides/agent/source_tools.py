@@ -145,9 +145,10 @@ def tex_converge(
       local=lambda kw: str(kw.get("deck") or "").lower().endswith(".json"))
 def deck_adopt(
     j: Job,
-    deck: Annotated[str, "The deck to adopt: a Slides URL, a presentation id, or a workspace ref to "
-                         "a deck.json-shaped file (ending .json), which is read locally with no "
-                         "Google call at all."],
+    deck: Annotated[str, "The deck to adopt: a Slides URL, a presentation id, or a .json file (a "
+                         "workspace ref or content) read with no Google call at all: the Slides "
+                         "API's presentations.get answer for the deck, saved whole (give its "
+                         "pictures as pptx), or a deck.json-shaped target."],
     tex: Annotated[str, "Workspace ref of the main .tex to write. It must NOT exist: adopt writes a "
                         "new source tree beside it (slides.sty, the recovered theme, figures/)."],
     work: Annotated[str | None, "Workspace ref of the loop's scratch folder. Default: "
@@ -171,7 +172,8 @@ def deck_adopt(
                                 "Microsoft PowerPoint), a workspace ref or the file itself as content. "
                                 "Its pictures are used first, so a harness that may not download "
                                 "still gets them. Ask for it when data['pictures_missing'] is not "
-                                "empty. A .json deck needs its presentation.json beside it."] = None,
+                                "empty. (A deck.json target pairs it through the presentation.json "
+                                "beside it.)"] = None,
 ) -> None:
     """Write the LaTeX source a foreign deck never had, then converge it onto that deck.
 

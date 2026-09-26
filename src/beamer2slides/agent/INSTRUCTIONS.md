@@ -181,6 +181,11 @@ per attempt. Say so before you start one; do not start two.
   `pptx=` (a ref or the file as content) and adopt again into a new `tex` path. Its pictures need
   no download; `data["pptx_pictures"]` says how many of the deck's it held (0: another deck, or a
   deck changed since - ask for a fresh download).
+* `deck_adopt` needs no Google when the deck comes as files: `deck=` the Slides API's
+  `presentations.get` answer for it, saved whole as a `.json` (a ref or content), and `pptx=` its
+  download for the pictures. The words, layout and theme come from the first, the pictures from
+  the second. What only Google's slide thumbnails show (gradients, some table colours) is missing
+  from such a read, and the sync base is recorded as usual.
 * Slide order is merged, not taken wholesale: a slide a person dragged stays where they put it.
 * A sync killed halfway loses nothing — the next one sweeps up — so a timeout is not a reason to
   force anything.
