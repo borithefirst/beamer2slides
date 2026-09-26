@@ -45,9 +45,11 @@ jobs:
           B2S_TEST_FETCH_FONTS: ${{ matrix.fonts == 'fetched' && '1' || '' }}
           B2S_REQUIRE_TEX: "1"
         run: |
-          /opt/venv/bin/python -m pytest -q -n auto -rs tests/test_adopt_compiles.py tests/test_adopt_macros.py \
-            tests/test_adopt_tables.py tests/test_adopt_scripts.py > /tmp/pytest.txt 2>&1; status=$?
+          status=0   # (bash -e: a failing pytest would end the script before its summary)
+          /opt/venv/bin/python -m pytest -q -n auto -rfEs tests/test_adopt_compiles.py tests/test_adopt_macros.py \
+            tests/test_adopt_tables.py tests/test_adopt_scripts.py > /tmp/pytest.txt 2>&1 || status=$?
           cat /tmp/pytest.txt
-          # the summary where anyone can read it (a job's log needs admin rights to fetch)
+          # the summary and each failure where anyone can read them (a job's log needs admin rights)
           echo "::notice title=adopt tests (${{ matrix.texlive }}, fonts ${{ matrix.fonts }})::$(tail -n 1 /tmp/pytest.txt)"
+          grep '^FAILED' /tmp/pytest.txt | cut -c1-300 | while read -r line; do echo "::error title=failed::$line"; done
           exit $status
