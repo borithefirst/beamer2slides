@@ -37,6 +37,9 @@ import numpy as np
 from PIL import Image
 
 from beamer2slides.paths import CHECKOUT
+# The scores live in the package: pull's frame guard (`frame_guard`) scores its rounds with them too,
+# and the package never imports devtools.
+from beamer2slides.page_score import covered_mask, element_boxes, ink_scores, overlap, page_ground  # noqa: F401
 
 # $B2S_ADOPT_CORPUS points a worktree at the main checkout's corpus (out/ is not shared); runs of
 # different experiments stay apart by --tag.
@@ -172,39 +175,6 @@ def write_target(folder: Path, pres: dict | None = None, fetch=None) -> dict:
 
 # -------------------------------------------------------------------------------------------- score
 
-def page_ground(a: np.ndarray) -> np.ndarray:
-    """The colour the page mostly is, as the background ink is measured against."""
-    flat = a.reshape(-1, 3).astype(np.int32)
-    packed = (flat[:, 0] << 16) | (flat[:, 1] << 8) | flat[:, 2]   # np.unique(axis=0) took ~0.5 s a page
-    top = int(np.bincount(packed, minlength=1 << 24).argmax())
-    return np.broadcast_to(np.array([top >> 16, (top >> 8) & 255, top & 255], dtype=a.dtype), a.shape)
-
-
-def element_boxes(slide: dict, w: int, h: int) -> list[tuple[int, tuple[int, int, int, int]]]:
-    """(element index, pixel box) of the slide's elements, with room around them, on the reference's
-    pixel grid; boxes wholly off the page left out."""
-    out = []
-    px = w / slide["size"][0]
-    for k, el in enumerate(slide["elements"]):
-        size = max((r.get("size") or 4) for p in el.get("paragraphs", []) for r in p["runs"]) \
-            if el.get("paragraphs") and any(p["runs"] for p in el["paragraphs"]) else 4.0
-        x0, y0, x1, y1 = el["bbox"]
-        a0, b0 = max(0, int((x0 - size) * px)), max(0, int((y0 - size) * px))
-        a1, b1 = min(w, int((x1 + 2 * size) * px)), min(h, int((y1 + size) * px))
-        if a1 > a0 and b1 > b0:                        # a box off the page: a negative end would
-            out.append((k, (a0, b0, a1, b1)))          # count from the far edge
-    return out
-
-
-def covered_mask(slide: dict, w: int, h: int) -> np.ndarray:
-    """The slide's element boxes, with room around them. Scoring only the whole page would let one
-    unreproduced backdrop hide everything else; `page` reports that."""
-    m = np.zeros((h, w), dtype=bool)
-    for _, (a0, b0, a1, b1) in element_boxes(slide, w, h):
-        m[b0:b1, a0:a1] = True
-    return m
-
-
 def element_losses(m_ref: np.ndarray, m_got: np.ndarray, slide: dict, top: int = 6) -> list[dict]:
     """Where a slide's `boxes` score went: every pixel `overlap` counts against it (ink of the deck
     with none of ours near it = `miss`, ours with none of the deck's near it = `extra`) is charged to
@@ -238,23 +208,10 @@ def element_losses(m_ref: np.ndarray, m_got: np.ndarray, slide: dict, top: int =
     return out
 
 
-def overlap(m_ref: np.ndarray, m_got: np.ndarray) -> float:
-    from beamer2slides.fidelity import dilate
-    inter = (dilate(m_ref) & m_got).sum() + (m_ref & dilate(m_got)).sum()
-    total = m_ref.sum() + m_got.sum()
-    return float(inter / total) if total else 1.0
-
-
 def score_page(ref: np.ndarray, got: np.ndarray, slide: dict) -> tuple[dict, np.ndarray]:
-    from beamer2slides.fidelity import text_mask
     h, w = ref.shape[:2]
-    ground = page_ground(ref)
-    m_ref, m_got = text_mask(ref, ground), text_mask(got, ground)
-    covered = covered_mask(slide, w, h)
-    scores = {"boxes": round(overlap(m_ref & covered, m_got & covered), 3),
-              "page": round(overlap(m_ref, m_got), 3),
-              "pixels": round(1 - float(np.abs(ref - got).mean()) / 255, 3),
-              "losses": element_losses(m_ref, m_got, slide)}
+    scores, m_ref, m_got = ink_scores(ref, got, slide)
+    scores["losses"] = element_losses(m_ref, m_got, slide)
     d = np.full((h, w, 3), 255, dtype=np.uint8)
     d[m_ref & ~m_got] = (220, 40, 40)
     d[m_got & ~m_ref] = (30, 110, 230)
@@ -313,9 +270,13 @@ def load_target(folder: Path, slides: str | None, run: Path | None = None) -> di
 
 
 def run_one(name: str, iters: int = 0, flow: bool = False, slides: str | None = None,
-            tag: str | None = None, cache: bool = True) -> dict:
+            tag: str | None = None, cache: bool = True, guard: bool = True, blind: bool = False) -> dict:
     """Bootstrap (and optionally converge) one corpus deck and score it. Never raises: a crash or a
-    compile error is the result, since finding those is half the point."""
+    compile error is the result, since finding those is half the point.
+
+    The loop gets the thumbnails as a live adopt does (the target carries their paths, `deck_ir`), so
+    its frame guard scores by ink; `blind` hides them (the guard falls back to residuals and words,
+    as pull without thumbnails), `guard=False` runs the loop with no guard at all."""
     from beamer2slides import adopt
     from beamer2slides.inverse import Workspace, converge
     folder = CORPUS / name
@@ -365,12 +326,14 @@ def run_one(name: str, iters: int = 0, flow: bool = False, slides: str | None = 
         store(hit, run, {**{k: res[k] for k in ("bootstrap", "frame_errors") if k in res},
                          "full_s": round(time.perf_counter() - t0, 1)})
         if iters:
-            result = converge(tex, target, run / "loop", max_iter=iters, log=lambda *_: None)
+            result = converge(tex, target, run / "loop", max_iter=iters, log=lambda *_: None, guard=guard,
+                              thumbnails=False if blind else None)
             # the promise is convergence, so say it per deck: did it, and did the rounds bring the
             # open residuals down or up (the saudi-cats deck went 127 -> 138 and nothing said so)
             res["loop"] = {"iterations": result.iterations, "converged": result.converged,
                            "unresolved": len(result.unresolved),
-                           "open": [i["open"] for i in result.iterations]}
+                           "open": [i["open"] for i in result.iterations],
+                           "open_final": len(result.residuals), "restored": result.restored}
             final = run / "loop" / "build" / "main.pdf"
             if final.exists():
                 res["converged"] = score_pdf(final, folder_view, target, run / "sheets-loop")
@@ -391,8 +354,8 @@ def cache_key(tree: Path, target: dict) -> str:
     for p in sorted(q for q in tree.rglob("*") if q.is_file()):
         h.update(p.relative_to(tree).as_posix().encode() + b"\0" + hashlib.sha256(p.read_bytes()).digest())
     h.update(json.dumps(target, sort_keys=True, default=str).encode())
-    from beamer2slides import fidelity
-    for code in (Path(__file__), Path(fidelity.__file__)):
+    from beamer2slides import fidelity, page_score
+    for code in (Path(__file__), Path(fidelity.__file__), Path(page_score.__file__)):
         h.update(code.read_bytes())
     return h.hexdigest()[:24]
 
@@ -479,6 +442,8 @@ def line(res: dict) -> str:
     loop = res.get("loop")
     if loop and loop.get("open"):
         tail += "  " + ("CONVERGED" if loop["converged"] else "open " + " -> ".join(map(str, loop["open"])))
+        if loop.get("restored"):
+            tail += f"  guard put back {len(loop['restored'])} (open {loop.get('open_final')})"
     return (f"{res['deck']:<24} {res['tag']:<14} {res.get('n', 0):3} slides {res['seconds']:6.1f}s  "
             f"boxes {b.get('boxes', 0):.3f} page {b.get('page', 0):.3f} pixels {b.get('pixels', 0):.3f}{tail}{broken}")
 
@@ -574,6 +539,9 @@ def main(argv=None) -> None:
     r.add_argument("--jobs", type=int, default=4)
     r.add_argument("--tag")
     r.add_argument("--no-cache", action="store_true", help="compile every deck, even one whose source is unchanged")
+    r.add_argument("--no-guard", action="store_true", help="--iter without the loop's frame guard")
+    r.add_argument("--blind", action="store_true", help="--iter with the thumbnails hidden from the loop: "
+                                                        "the frame guard judges by residuals and words")
     p = sub.add_parser("report")
     p.add_argument("--tag", default="abs")
     lo = sub.add_parser("losses", help="where the boxes score goes, by element, deck, kind and font")
@@ -606,7 +574,7 @@ def main(argv=None) -> None:
         def job(spec: str) -> tuple:
             name, _, sl = spec.partition(":")
             tag = f"{args.tag}-s{sl}" if args.tag and sl else args.tag
-            return name, args.iter, args.flow, sl or args.slides, tag, not args.no_cache
+            return name, args.iter, args.flow, sl or args.slides, tag, not args.no_cache, not args.no_guard, args.blind
 
         with ProcessPoolExecutor(max(1, min(args.jobs, len(names)))) as pool:
             futs = [pool.submit(run_one, *job(n)) for n in names]
@@ -621,10 +589,20 @@ def main(argv=None) -> None:
                   f"boxes {mean['boxes']:.4f} page {mean['page']:.4f} pixels {mean['pixels']:.4f}")
         loops = [r["loop"] for r in done if r.get("loop", {}).get("open")]
         if loops:
-            worse = sum(1 for lo in loops if lo["open"][-1] > lo["open"][0])
+            # what the loop left, after the guard put frames back (the last round's count before it)
+            end = [lo.get("open_final", lo["open"][-1]) if lo.get("restored") else lo["open"][-1] for lo in loops]
+            worse = sum(1 for lo, e in zip(loops, end) if e > lo["open"][0])
             print(f"converged {sum(1 for lo in loops if lo['converged'])}/{len(loops)}; open residuals "
-                  f"{sum(lo['open'][0] for lo in loops)} -> {sum(lo['open'][-1] for lo in loops)}; "
+                  f"{sum(lo['open'][0] for lo in loops)} -> {sum(end)}; "
                   f"{worse} deck(s) worse after the loop")
+        # what the objective asks: did the loop leave any slide's ink below its first draft's
+        pairs = [(b["boxes"], c["boxes"]) for r in done if r.get("converged")
+                 for b, c in zip(r["bootstrap"], r["converged"])]
+        if pairs:
+            print(f"loop ink: boxes {sum(b for b, _ in pairs) / len(pairs):.4f} -> {sum(c for _, c in pairs) / len(pairs):.4f} "
+                  f"over {len(pairs)} slides; {sum(1 for b, c in pairs if c < b)} slide(s) below their "
+                  f"first draft, {sum(1 for b, c in pairs if c > b)} above; guard put back "
+                  f"{sum(len(r['loop'].get('restored') or []) for r in done if r.get('loop'))} frame(s)")
     elif args.cmd == "losses":
         losses(args.tag, args.top)
     else:

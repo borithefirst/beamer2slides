@@ -348,6 +348,14 @@ def _finish(j: Job, result: Any, work: Path, out: Path | None, apply: bool, max_
         "applied": bool(apply),
         "work": j.ctx.workspace.ref(work),
     })
+    restored = list(getattr(result, "restored", None) or [])
+    if restored:
+        # The loop's own view said these got better or no worse; the page said otherwise, so the
+        # frame has its best round's text. An agent must not "fix" it again from the residuals.
+        j.data["restored"] = [dict(r) for r in restored]
+        for r in restored:
+            j.note("note", f"slide {', '.join(str(k + 1) for k in r['target_slides'])}: {r['why']}",
+                   where=str(r.get("where") or ""))
     if result.notes:
         j.data["pictures"] = list(result.notes)
     if result.theme:

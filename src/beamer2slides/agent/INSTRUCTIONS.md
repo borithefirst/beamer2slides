@@ -124,7 +124,7 @@ by name if not - nothing here opens a socket to a host you chose.
 | `offline` | This workspace has no Google account at all. | Say so plainly. `tex_converge`, `tex_label` and `deck_inspect` still work. Nobody here can grant it; do not retry. |
 | `forbidden` | There is an account, but this context does not allow what you asked. | The permission is the operator's to change, not the deck's. A `dry_run` of the same journey is usually still allowed. |
 | `compile_failed` | LaTeX did not build the source. | Read the error in `data`; fix the source; retry. |
-| `not_converged` | The loop ran out of iterations. | The residuals are in `data` and `edits.md`. Act on them or hand them over. |
+| `not_converged` | The loop ran out of iterations. | The residuals are in `data` and `edits.md`. Act on them or hand them over. A frame the loop made worse was already put back to its best text (`data["restored"]`, one note each): do not write that edit again by hand. |
 | `outside_workspace` | A path climbed out of the workspace. | Use a path inside it. |
 | `rate_limited` | Google said no for quota reasons. | Wait. Do not hammer. |
 

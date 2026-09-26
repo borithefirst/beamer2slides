@@ -1738,3 +1738,79 @@ collapsing on the planner's side, from read-back misreadings: plain-layouts:6 0.
 wrapped paragraph read as several; the box emptied and a fragment written in a textblock),
 ds-lecture:13 0.988 -> 0.439 (`\slidebreak` rewritten as `\\`, an item copied out of its list),
 sc-functions:8 0.984 -> 0.372, ap-bio-stats:40 0.989 -> 0.627, drawing-workshop:6 0.999 -> 0.574.
+
+## The frame guard (2026-09-26: `noguard` -> `guard3`, `blind3`)
+
+Pull's loop now never leaves a frame worse than it found it (`frame_guard.py`, called by
+`inverse.converge`). Every round it remembers each frame's text and scores the page it made; when the
+loop stops, each frame ends at its **best round**, and the rest of the source (the preamble's added
+colours and packages) stays as the loop left it. A frame is one unit: its target slides are the ones
+compare paired with its pages, and it is known across rounds by its label. Best means:
+
+- **ink** when the target carries Google's own picture of the slide (a foreign read keeps its
+  thumbnail's path, `deck_ir`; the bench hands the corpus's `slides/NNN.png`): the page's `boxes`
+  score against it, moved from the bench into the package (`page_score.py`; the bench imports it).
+  Rounds within 0.0005 of the best tie. It needs nothing from the read-back, which is the point.
+- then the **fewest weighted residuals** (`RESIDUAL_WEIGHT`: words 3, elements 2, places 0.5) plus one
+  per word the page has wrong (the page's words as extract reads them). Pull has no picture, so this
+  is its whole score.
+- then the **earliest round**: a round has to earn its edits. The first cut only put back frames
+  worse than their best by a margin, and that missed the commonest case: sc-functions:8 read the
+  same 66 residuals after round 1 while its ink fell from 0.984 to 0.912, arabic-training:6 read 29
+  and 29 from 0.960 to 0.805. A 0.005 ink margin also let five slides keep rounds that cost a
+  thousandth or two of ink and bought nothing (apps-edu-zh:9, creandum-board:22).
+
+What was put back and why is in the result (`restored`, with the source lines) and in `edits.md`
+("Frames put back"); the agent tools add one note per frame. `adopt_bench run --no-guard` runs the
+loop without it, `--blind` hides the thumbnails so the residual score is measured alone.
+
+The micro-corpus, `--iter 2`: first draft, the loop without the guard, with it, and blind. The 25
+slides the loop changed:
+
+| slide | first draft | no guard | guard | blind | open, no guard | blind ends at |
+|---|---|---|---|---|---|---|
+| plain-layouts:6 | 0.993 | 0.501 | 0.993 | 0.993 | 5 -> 2 -> 5 | 5 |
+| ds-lecture:13 | 0.988 | 0.439 | 0.988 | 0.988 | 15 -> 12 -> 14 | 15 |
+| sc-functions:8 | 0.984 | 0.372 | 0.984 | 0.984 | 66 -> 66 -> 67 | 66 |
+| sc-functions:11 | 0.973 | 0.530 | 0.973 | 0.973 | 78 -> 78 -> 80 | 78 |
+| ap-bio-stats:40 | 0.989 | 0.627 | 0.989 | 0.989 | 44 -> 53 -> 46 | 44 |
+| drawing-workshop:6 | 0.999 | 0.574 | 0.999 | 0.999 | 62 -> 64 -> 64 | 62 |
+| drawing-workshop:1 | 0.948 | 0.886 | 0.948 | 0.948 | 36 -> 34 -> 34 | 36 |
+| arabic-training:6 | 0.960 | 0.805 | 0.960 | 0.960 | 29 -> 29 | 29 |
+| sc-dark-modern:17 | 0.971 | 0.904 | 0.971 | 0.904 | 25 -> 21 | 21 |
+| sc-dark-modern:18 | 0.993 | 0.980 | 0.993 | 0.980 | 46 -> 44 | 44 |
+| sc-memphis:16 | 0.999 | 0.974 | 0.999 | 0.999 | 297 -> 297 -> 298 | 297 |
+| sc-memphis:9 | 1.000 | 0.992 | 1.000 | 0.992 | 82 -> 82 -> 82 | 82 |
+| sc-memphis:2 | 0.987 | 0.978 | 0.987 | 0.987 | 210 -> 210 -> 210 | 210 |
+| comic-strips:7 | 0.974 | 0.960 | 0.974 | 0.974 | 26 -> 28 -> 28 | 26 |
+| drawings-basics:13 | 0.983 | 0.969 | 0.983 | 0.969 | 30 -> 30 -> 29 | 29 |
+| journey-maps:15 | 0.953 | 0.939 | 0.953 | 0.939 | 55 -> 10 -> 6 | 6 |
+| journey-maps:2 | 0.982 | 0.976 | 0.982 | 0.976 | 34 -> 30 | 30 |
+| sc-aesthetic-school:21 | 1.000 | 0.993 | 1.000 | 0.993 | 44 -> 44 | 44 |
+| sc-river-a4:2 | 0.991 | 0.986 | 0.991 | 0.991 | 55 -> 55 -> 55 | 55 |
+| devfest2020:35 | 0.984 | 0.970 | 0.984 | 0.984 | 126 -> 126 -> 145 | 126 |
+| gdg24:4 | 0.999 | 0.997 | 0.999 | 0.997 | 67 -> 64 -> 64 | 64 |
+| supercharge-slides:31 | 0.982 | 0.980 | 0.982 | 0.982 | 27 -> 27 | 27 |
+| apps-edu-zh:9 | 0.987 | 0.986 | 0.987 | 0.987 | 13 -> 13 -> 13 | 13 |
+| creandum-board:22 | 0.971 | 0.970 | 0.971 | 0.971 | 22 -> 22 | 22 |
+| devfest2020:39 | 0.998 | 0.997 | 0.998 | 0.998 | 86 -> 86 -> 86 | 86 |
+
+- no guard: `loop ink: boxes 0.9847 -> 0.8930 over 36 slides; 19 slide(s) below their first draft`
+  (by more than 0.005; all 25 are below), open 2022 -> 1985.
+- guard: `loop ink: boxes 0.9847 -> 0.9847 over 36 slides; 0 slide(s) below their first draft, 0
+  above; guard put back 25 frame(s)`, open 2022 -> 2022. The five named slides alone (`guard3`,
+  `--jobs 5`): 0.9906 -> 0.9906, 0 below, 5 put back.
+- blind: `loop ink: boxes 0.9847 -> 0.9811 over 36 slides; 8 slide(s) below their first draft, 0
+  above; guard put back 17 frame(s)`, open 2022 -> 1959 (before the earliest-round rule: 0.9758 and 15
+  below).
+
+**No round of the loop raised any slide's ink.** The two gains it was credited with are losses by the
+deck's own picture: journey-maps:15 open 55 -> 6 went 0.953 -> 0.939, sc-dark-modern:17 25 -> 21 went
+0.971 -> 0.904. The loop cleared `paragraph_extra`/`element_extra` residuals by deleting or merging what
+the read-back called extra. So with a picture the guard puts all 25 back, and the open count after it
+is the first draft's to the residual (2022), which also says a put-back rebuilds the first draft
+exactly. Blind, the 8 still below are rounds the residuals really do score better, most often by an
+`element_missing` turning into a `geometry` (sc-memphis:9, sc-aesthetic-school:21: 2 weight for 0.5):
+the read-back found the element after the edit, in the wrong place. Nothing without a picture can
+tell those apart; the read-back's misreadings above are what to fix, and the guard is what keeps them
+from costing a slide meanwhile.

@@ -220,6 +220,7 @@ class Candidate:
     frames: list[Frame | None]            # per deck slide
     locs: dict[int, dict] = field(default_factory=dict)
     text_masked: dict[Path, str] = field(default_factory=dict)
+    words: dict[int, list[str]] = field(default_factory=dict)   # PDF page -> the words it shows (extract, not classify)
 
     def masked(self, path: Path) -> str:
         if path not in self.text_masked:
@@ -400,7 +401,8 @@ class Workspace:
             frames.append(frame)
             slide["key"] = frame.label if frame and frame.label else None
             slide["frame_index"] = frame.index if frame else None
-        return Candidate(self.source, prepared.pdf, deck, frames)
+        words = {p["index"]: [w for s in p["spans"] for w in s["text"].split()] for p in selected["pages"]}
+        return Candidate(self.source, prepared.pdf, deck, frames, words=words)
 
 
 def original_pages(pdf: Path, prepared) -> list[int]:
@@ -2285,6 +2287,7 @@ class Result:
     notes: list[str] = field(default_factory=list)    # pictures: reused files, baked edits, converted formats, replaced figures
     originals: dict[str, str] = field(default_factory=dict)  # source path -> sha1 when the loop copied it (apply checks it)
     labels: list[str] = field(default_factory=list)   # slide labels renamed to dodge a collision
+    restored: list[dict] = field(default_factory=list)  # frames the guard put back to a better round (`put_back`)
 
 
 def picture_hashes(cand: Candidate, target: dict, comp_out: Path) -> dict:
@@ -2331,9 +2334,14 @@ class Later:
 
 
 def converge(tex: Path, target, work: Path, max_iter: int = 10, handout: bool = False,
-             engine: str | None = None, tol: dict | None = None, log=print) -> Result:
+             engine: str | None = None, tol: dict | None = None, log=print, guard: bool = True,
+             thumbnails=None) -> Result:
     """`target`: the deck to converge to, or a `Later` fetching it - which is read on a thread of
-    its own while the first compile runs, the two needing nothing of each other."""
+    its own while the first compile runs, the two needing nothing of each other.
+
+    `guard`: put back every frame the rounds left worse than its best round (`frame_guard`), scored
+    against `thumbnails(j)` (Google's picture of target slide j: a path, image or array) - by default
+    the ones the target carries, False for none (then by weighted residuals and words)."""
     ws = Workspace(tex, work, handout, engine)
     ready = None
     if callable(target):
@@ -2359,6 +2367,10 @@ def converge(tex: Path, target, work: Path, max_iter: int = 10, handout: bool = 
     unresolved: list[dict] = []
     comp = None
     cand = None
+    fg = None
+    if guard:
+        from .frame_guard import FrameGuard, target_thumbnails
+        fg = FrameGuard(target, target_thumbnails(target) if thumbnails is None else thumbnails or None, log)
     for it in range(max_iter + 1):
         built = ws.build(work / "classify", has_notes, compiled=ready)
         ready = None
@@ -2372,7 +2384,11 @@ def converge(tex: Path, target, work: Path, max_iter: int = 10, handout: bool = 
         iterations.append({"iteration": it, "open": len(open_res), "by_kind": summary,
                            "geometry_error": round(sum(math.hypot(r.get("dx", 0), r.get("dy", 0))
                                                        for r in open_res if r["kind"] == "geometry"), 1)})
-        log(f"  iteration {it}: {len(open_res)} open residuals {summary}")
+        ink = fg.observe(it, cand, comp) if fg else None
+        if ink is not None:
+            iterations[-1]["ink"] = round(ink, 3)
+        log(f"  iteration {it}: {len(open_res)} open residuals {summary}"
+            + (f", ink {ink:.3f}" if ink is not None else ""))
         if not open_res or it == max_iter:
             break
         state = tuple(sorted(residual_line(r) for r in open_res))
@@ -2468,6 +2484,23 @@ def converge(tex: Path, target, work: Path, max_iter: int = 10, handout: bool = 
             for sig, entry in newly_blocked.items():
                 if edit_group(sig) in reverted:
                     entry["why"] += " (the unconverged rewrite was reverted)"
+    restored: list[dict] = []
+    if fg is not None and cand is not None:
+        restored = put_back(ws, fg, log)
+        if restored:
+            # what the report says (residuals, converged) must be of the source it hands over
+            built = ws.build(work / "classify", has_notes, compiled=(ws.build_dir / f"{ws.main.stem}.pdf", ""))
+            if isinstance(built, str):
+                raise RuntimeError(f"the source does not compile:\n{built}")
+            cand = built
+            hashes = picture_hashes(cand, target, work)
+            comp = compare(cand.deck, target, tol, hashes)
+            fg.observe(len(iterations), cand, comp)
+            for r in restored:
+                now = fg.score_now(r.pop("_final"))
+                if now is not None:
+                    r["score_now"] = round(now, 3)
+            log(f"  after the frame guard: {len(comp.open())} open residuals {comp.summary()}")
     open_res = comp.open() if comp else []
     files = {}
     patch = ""
@@ -2492,12 +2525,59 @@ def converge(tex: Path, target, work: Path, max_iter: int = 10, handout: bool = 
         if frame is not None:
             u["where"] = f"{(ws.root / frame.file.relative_to(ws.src)).as_posix()}:{frame.begin_line}-{frame.end_line}"
             u["frame_label"] = frame.label
+    shown = {tj: ci for ci, tj in comp.slides if ci is not None and tj is not None} if comp else {}
+    for r in restored:
+        # where the frame stands now, in the author's tree
+        ci = next((shown[j] for j in r["target_slides"] if j in shown), None)
+        frame = cand.frames[ci] if cand and ci is not None and ci < len(cand.frames) else None
+        r["where"] = (ws.root / Path(r.pop("file")).relative_to(ws.src)).as_posix() + \
+            (f":{frame.begin_line}-{frame.end_line}" if frame else "")
     theme = [r for r in comp.residuals if r.get("theme")] if comp else []
     used = lambda n: (m := re.match(r"(\S+\.(png|jpg|pdf)): ", n)) is None or m.group(1) in patch
     notes = list(dict.fromkeys(n for n in ctx.notes if used(n)))
     labels = list(dict.fromkeys(ctx.label_notes))
     return Result(not open_res, iterations, final_unresolved, open_res, files, patch, ws.work, theme, notes,
-                  ws.originals, labels)
+                  ws.originals, labels, restored)
+
+
+def put_back(ws: Workspace, fg, log=print) -> list[dict]:
+    """Write back every frame the guard found worse than at its best round (`FrameGuard.plan`), and
+    compile. Frames put back together come from different rounds; should they not compile together,
+    they go back one at a time and a frame that breaks the build stays as the loop left it. Returns
+    one entry per frame put back, for the report (`file` is the work tree's, `_final` the guard's
+    record of the frame as the loop left it)."""
+    from .frame_guard import why
+    plan = fg.plan()
+    if not plan:
+        return []
+    edits = [Edit(final.file, final.span[0], final.span[1], best.text, "restore", ("restore", final.file, final.span[0]))
+             for final, best in plan]
+    before = {p: ws.source.text(p) for p in ws.source.order}
+    ws.write(edits)
+    kept = list(range(len(plan)))
+    if ws.compile()[0] is None:
+        kept = []
+        for k, e in enumerate(edits):
+            restore(ws, before)
+            ws.write([edits[i] for i in kept] + [e])
+            if ws.compile()[0] is not None:
+                kept.append(k)
+        restore(ws, before)
+        ws.write([edits[i] for i in kept])
+        if ws.compile()[0] is None:          # cannot happen: the last good set compiled
+            restore(ws, before)
+            ws.compile()
+            return []
+    out = []
+    for k in kept:
+        final, best = plan[k]
+        out.append({"target_slides": list(final.slides), "frame_label": final.label, "iteration": best.round,
+                    "mode": final.mode, "score_left": round(final.score, 3), "score_best": round(best.score, 3),
+                    "penalty_left": final.penalty, "penalty_best": best.penalty,
+                    "why": why(final, best), "file": str(final.file), "_final": final})
+    log(f"  frame guard: {len(out)} frame(s) put back to their best round"
+        + (f", {len(plan) - len(kept)} not (they break the build together)" if len(kept) < len(plan) else ""))
+    return out
 
 
 def restore(ws: Workspace, texts: dict[Path, str]) -> None:
@@ -2560,12 +2640,22 @@ def class_pt_option(source: Source) -> int:
 def report(result: Result, target: dict, cand_deck: dict | None = None) -> tuple[dict, str]:
     data = {"converged": result.converged, "iterations": result.iterations,
             "unresolved": [clean(u) for u in result.unresolved], "theme": [clean(u) for u in result.theme],
-            "changed_files": list(result.files), "pictures": result.notes, "labels": result.labels}
+            "changed_files": list(result.files), "pictures": result.notes, "labels": result.labels,
+            "restored": [clean(r) for r in getattr(result, "restored", [])]}
     md = ["# Pull report", "", f"Converged: **{result.converged}** after {len(result.iterations) - 1} edit rounds.", ""]
     md.append("| iteration | open residuals | by kind | geometry error (pt) |")
     md.append("|---|---|---|---|")
     for it in result.iterations:
         md.append(f"| {it['iteration']} | {it['open']} | {json.dumps(it['by_kind'])} | {it['geometry_error']} |")
+    if getattr(result, "restored", None):
+        md += ["", "## Frames put back", "",
+               "The loop's edits made these frames worse than they had been, so each has its best round's text:", ""]
+        for r in result.restored:
+            slides = ", ".join(str(j + 1) for j in r["target_slides"])
+            label = f" ({r['frame_label']})" if r.get("frame_label") else ""
+            md.append(f"- slide {slides}{label}: {r['why']}")
+            if r.get("where"):
+                md.append(f"  - source: {r['where']}")
     if result.unresolved:
         md += ["", "## Left for the author", ""]
         for u in result.unresolved:

@@ -767,7 +767,8 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
 
     `thumbnails(n)`: the picture Google renders of slide n (0-based; a path, PIL image or array, or
     None), with which a foreign read fills in what the API leaves out of fills (`deck_fills`).
-    Without it those fills stay unknown, and shapes with nothing else to draw are left out."""
+    Without it those fills stay unknown, and shapes with nothing else to draw are left out. A
+    thumbnail given as a path is kept as the slide's `thumbnail`, for pull's frame guard."""
     page_w, page_h, scale = page_size_for(pres, pdf_size, foreign)
     fonts = FontMapper()
     resolver = StyleResolver(pres)
@@ -833,6 +834,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             from . import deck_fills
             thumb = thumbnails(n) if thumbnails else None
             px = 0.0
+            shown = str(thumb) if isinstance(thumb, (str, Path)) else None
             if thumb is not None:
                 thumb = deck_fills.load(thumb)
                 px = thumb.shape[1] / page_w
@@ -853,6 +855,10 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                        "background_picture": picture, "elements": elements})
         if foreign:
             slides[-1]["layout"] = slide.get("slideProperties", {}).get("layoutObjectId")
+            if shown:
+                # Google's own picture of the slide, where it was saved: `frame_guard` scores the
+                # loop's pages against it, since the read-back can be wrong about a right page
+                slides[-1]["thumbnail"] = shown
         if foreign and picture and fetch and images is not None:
             # adopt draws it (a stretched picture fill is the whole page); pull never does, the
             # source it refines already draws whatever the converter baked into it
