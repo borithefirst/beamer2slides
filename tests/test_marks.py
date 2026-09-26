@@ -280,9 +280,14 @@ def test_a_note_page_whose_thumbnail_is_empty_is_still_a_note_page(tmp_path, bac
     header = b"0.8 g 0 112 200 38 re f 0 g " + text(10, 130, b"Frame title", 9)
     canvas = b"1 g 150 112.5 50 37.5 re f 0 g "
     note = text(10, 80, b"Say this slowly")
-    for with_canvas, want in ((True, {0: "Say this slowly"}), (False, {})):
-        path = tmp_path / f"notes-{with_canvas}.pdf"
-        path.write_bytes(pdf_bytes([slide, header + (canvas if with_canvas else b"") + note], extra_resources=FONT))
-        out = tmp_path / f"out-{with_canvas}"
+    marked = element(b"k", b"text", paragraph(0, note))  # a frame of adopt's says what it holds
+    for name, second, want in (("canvas", header + canvas + note, {0: "Say this slowly"}),
+                               ("bare", header + note, {}),
+                               ("marked", header + canvas + marked, {})):
+        path = tmp_path / f"notes-{name}.pdf"
+        path.write_bytes(pdf_bytes([slide, second], extra_resources=FONT))
+        out = tmp_path / f"out-{name}"
         out.mkdir()
-        assert notes.prepare(path, out).notes == want
+        prepared = notes.prepare(path, out)
+        assert prepared.notes == want
+        assert (prepared.pdf == path) == (not want)  # no note page: the PDF as it is

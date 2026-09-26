@@ -12,7 +12,7 @@ from typing import NamedTuple
 
 from pathlib import Path
 
-from .extract import spans as page_spans
+from .extract import page_marks, spans as page_spans
 from .pdf import Document, Page
 
 Box = tuple[float, float, float, float]
@@ -136,8 +136,12 @@ def _prepare(doc: Document, pdf: Path, out: Path) -> tuple:
 
     keep: list[int] = []
     for page in doc:
-        spans = page_spans(page) if page.index else []
-        header = _note_header(page, spans, page.rect) if page.index else None
+        # a page whose objects say what they are (adopt's marks) is a frame: a note page's words are
+        # the note's, unmarked, and a slide with a band across its top and small words at its right
+        # end (drawing-workshop 28 and 50) read as the note template
+        note = page.index and not page_marks(page)
+        spans = page_spans(page) if note else []
+        header = _note_header(page, spans, page.rect) if note else None
         if header is None:
             keep.append(page.index)
             continue
