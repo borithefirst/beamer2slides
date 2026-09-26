@@ -34,7 +34,13 @@ python tools/showcase.py capture [NAME...]  # adopt_bench capture into out/showc
 python tools/showcase.py run                # adopt_bench run, tag `showcase` (MiKTeX on PATH)
 python tools/showcase.py gallery out/showcase/site
 python tools/showcase.py swipe out/showcase/site  # the README's docs/media/adopt-swipe.gif
+python tools/showcase.py fixture            # the targets into tests/decks/foreign/showcase
 ```
+
+`fixture` copies each captured target, with its pictures shrunk to 64 px, into the repository.
+`tests/test_adopt_compiles.py` adopts and compiles every one of them. CI runs that test on TeX Live
+2022 and on the current TeX Live (`.github/workflows/texlive.yml`), with no fonts and with the decks'
+own fetched fonts. Run `fixture` again after a `capture`.
 
 The page opens in Swipe view: Google's render left of a divider, the adopted PDF right of it, and
 each divider sweeps across once when its slide scrolls into view (not with reduced motion), because

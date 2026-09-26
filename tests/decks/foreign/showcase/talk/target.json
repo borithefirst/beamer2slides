@@ -1,0 +1,3561 @@
+{
+ "version": 1,
+ "source": {
+  "title": "Shipping calm software"
+ },
+ "page_size": [
+  453.54,
+  255.12
+ ],
+ "scale": 1.5875115756052387,
+ "slides": [
+  {
+   "page": 0,
+   "frame": "1",
+   "size": [
+    453.54,
+    255.12
+   ],
+   "objectId": "p1",
+   "key": null,
+   "notes": "Open with the pager story: three alerts on a Friday deploy.",
+   "background_color": "#16213e",
+   "background_picture": null,
+   "elements": [
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      0.0,
+      245.04,
+      453.54,
+      255.12
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#16213e",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g1",
+     "object": "p6_g1",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      0.0,
+      245.04,
+      94.49,
+      255.12
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#e94560",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g2",
+     "object": "p6_g2",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      430.86,
+      11.34,
+      439.68,
+      20.16
+     ],
+     "shape": "ellipse",
+     "shape_type": "ELLIPSE",
+     "fill": "#f5b971",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g3",
+     "object": "p6_g3",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      296.06,
+      245.04,
+      444.72,
+      255.12
+     ],
+     "anchor": [
+      440.5,
+      251.93
+     ],
+     "wrap_width": 140.22,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": null,
+       "size": 5.04,
+       "text_x0": 300.28,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 251.93,
+         "x0": 300.28,
+         "x1": 440.5
+        }
+       ],
+       "runs": [
+        {
+         "text": "Lumen Summit 2026 · Lisbon",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 5.04,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 8.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p6~p6_g4",
+     "object": "p6_g4",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "image",
+     "role": "figure",
+     "bbox": [
+      302.36,
+      0.0,
+      453.54,
+      226.77
+     ],
+     "alt": null,
+     "box": [
+      302.36,
+      0.0,
+      453.54,
+      226.77
+     ],
+     "file": "images/d5d1c87b12e3e61e.png",
+     "sha1": "d5d1c87b12e3e61e74bd5e3ca885c4a809931443",
+     "format": "png",
+     "id": "p7~p7_i7",
+     "object": "p7_i7",
+     "group": null,
+     "key": null,
+     "inherited": "p7"
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      25.2,
+      157.48,
+      62.99,
+      160.63
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#e94560",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p7~p7_i8",
+     "object": "p7_i8",
+     "group": null,
+     "key": null,
+     "inherited": "p7"
+    },
+    {
+     "kind": "text",
+     "role": "title",
+     "bbox": [
+      25.2,
+      69.29,
+      289.76,
+      138.58
+     ],
+     "anchor": [
+      29.42,
+      113.21
+     ],
+     "wrap_width": 256.12,
+     "placeholder": "CENTERED_TITLE",
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 25.2,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 113.21,
+         "x0": 29.42,
+         "x1": 285.54
+        }
+       ],
+       "runs": [
+        {
+         "text": "Shipping calm software",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 25.2,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 0.95,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 40.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p1_i2",
+     "object": "p1_i2",
+     "group": null,
+     "key": null,
+     "ink_width": 184.82
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      25.2,
+      168.82,
+      277.16,
+      219.21
+     ],
+     "anchor": [
+      29.42,
+      179.59
+     ],
+     "wrap_width": 243.53,
+     "placeholder": "SUBTITLE",
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 9.45,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 179.59,
+         "x0": 29.42,
+         "x1": 272.94
+        }
+       ],
+       "runs": [
+        {
+         "text": "Small batches, feature flags and the numbers that told us to slow down",
+         "font": "Inter",
+         "family": "sans",
+         "size": 9.45,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#e6e8ef",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 15.0
+       }
+      },
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 7.56,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 29.42,
+         "x1": 272.94
+        }
+       ],
+       "runs": [
+        {
+         "text": "A. Rivera · platform team",
+         "font": "Inter",
+         "family": "sans",
+         "size": 7.56,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#f5b971",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 10.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 12.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p1_i3",
+     "object": "p1_i3",
+     "group": null,
+     "key": null,
+     "ink_width": 240.09
+    }
+   ],
+   "layout": "p7"
+  },
+  {
+   "page": 1,
+   "frame": "2",
+   "size": [
+    453.54,
+    255.12
+   ],
+   "objectId": "p2",
+   "key": null,
+   "notes": null,
+   "background_color": "#ffffff",
+   "background_picture": null,
+   "elements": [
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      0.0,
+      245.04,
+      453.54,
+      255.12
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#16213e",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g1",
+     "object": "p6_g1",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      0.0,
+      245.04,
+      94.49,
+      255.12
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#e94560",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g2",
+     "object": "p6_g2",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      430.86,
+      11.34,
+      439.68,
+      20.16
+     ],
+     "shape": "ellipse",
+     "shape_type": "ELLIPSE",
+     "fill": "#f5b971",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g3",
+     "object": "p6_g3",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      296.06,
+      245.04,
+      444.72,
+      255.12
+     ],
+     "anchor": [
+      440.5,
+      251.93
+     ],
+     "wrap_width": 140.22,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": null,
+       "size": 5.04,
+       "text_x0": 300.28,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 251.93,
+         "x0": 300.28,
+         "x1": 440.5
+        }
+       ],
+       "runs": [
+        {
+         "text": "Lumen Summit 2026 · Lisbon",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 5.04,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 8.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p6~p6_g4",
+     "object": "p6_g4",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "text",
+     "role": "title",
+     "bbox": [
+      25.2,
+      18.9,
+      428.34,
+      50.39
+     ],
+     "anchor": [
+      29.42,
+      41.14
+     ],
+     "wrap_width": 394.71,
+     "placeholder": "TITLE",
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 17.64,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 41.14,
+         "x0": 29.42,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "Agenda",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 17.64,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#16213e",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 28.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p2_i2",
+     "object": "p2_i2",
+     "group": null,
+     "key": null,
+     "ink_width": 70.3
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      30.24,
+      62.99,
+      408.19,
+      220.47
+     ],
+     "anchor": [
+      34.46,
+      78.05
+     ],
+     "wrap_width": 369.51,
+     "placeholder": "BODY",
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "1.",
+        "color": "#e94560",
+        "size": 11.34,
+        "font_family": "sans",
+        "bold": true,
+        "bbox": null
+       },
+       "size": 11.34,
+       "text_x0": 46.93,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 78.05,
+         "x0": 46.93,
+         "x1": 403.97
+        }
+       ],
+       "runs": [
+        {
+         "text": "Why deploys feel scary",
+         "font": "Inter",
+         "family": "sans",
+         "size": 11.34,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        },
+        {
+         "text": " — a short history of our worst Friday",
+         "font": "Inter",
+         "family": "sans",
+         "size": 11.34,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#5c6378",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 19.799999237060547,
+        "indent_first": 9.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 18.0
+       }
+      },
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "2.",
+        "color": "#e94560",
+        "size": 11.34,
+        "font_family": "sans",
+        "bold": true,
+        "bbox": null
+       },
+       "size": 11.34,
+       "text_x0": 46.93,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 46.93,
+         "x1": 403.97
+        }
+       ],
+       "runs": [
+        {
+         "text": "Small batches",
+         "font": "Inter",
+         "family": "sans",
+         "size": 11.34,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        },
+        {
+         "text": " — one idea per pull request",
+         "font": "Inter",
+         "family": "sans",
+         "size": 11.34,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#5c6378",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 19.799999237060547,
+        "indent_first": 9.0,
+        "line_spacing": 1.0,
+        "space_above": 15.600000381469727,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 18.0
+       }
+      },
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "3.",
+        "color": "#e94560",
+        "size": 11.34,
+        "font_family": "sans",
+        "bold": true,
+        "bbox": null
+       },
+       "size": 11.34,
+       "text_x0": 46.93,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 46.93,
+         "x1": 403.97
+        }
+       ],
+       "runs": [
+        {
+         "text": "Feature flags",
+         "font": "Inter",
+         "family": "sans",
+         "size": 11.34,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        },
+        {
+         "text": " — ship dark, turn on slowly",
+         "font": "Inter",
+         "family": "sans",
+         "size": 11.34,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#5c6378",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 19.799999237060547,
+        "indent_first": 9.0,
+        "line_spacing": 1.0,
+        "space_above": 15.600000381469727,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 18.0
+       }
+      },
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "4.",
+        "color": "#e94560",
+        "size": 11.34,
+        "font_family": "sans",
+        "bold": true,
+        "bbox": null
+       },
+       "size": 11.34,
+       "text_x0": 46.93,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 46.93,
+         "x1": 403.97
+        }
+       ],
+       "runs": [
+        {
+         "text": "What we measure now",
+         "font": "Inter",
+         "family": "sans",
+         "size": 11.34,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        },
+        {
+         "text": " — and what we stopped measuring",
+         "font": "Inter",
+         "family": "sans",
+         "size": 11.34,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#5c6378",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 19.799999237060547,
+        "indent_first": 9.0,
+        "line_spacing": 1.0,
+        "space_above": 15.600000381469727,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 18.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p2_i3",
+     "object": "p2_i3",
+     "group": null,
+     "key": null
+    }
+   ],
+   "layout": "p8"
+  },
+  {
+   "page": 2,
+   "frame": "3",
+   "size": [
+    453.54,
+    255.12
+   ],
+   "objectId": "p3",
+   "key": null,
+   "notes": null,
+   "background_color": "#ffffff",
+   "background_picture": null,
+   "elements": [
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      0.0,
+      245.04,
+      453.54,
+      255.12
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#16213e",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g1",
+     "object": "p6_g1",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      0.0,
+      245.04,
+      94.49,
+      255.12
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#e94560",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g2",
+     "object": "p6_g2",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      430.86,
+      11.34,
+      439.68,
+      20.16
+     ],
+     "shape": "ellipse",
+     "shape_type": "ELLIPSE",
+     "fill": "#f5b971",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g3",
+     "object": "p6_g3",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      296.06,
+      245.04,
+      444.72,
+      255.12
+     ],
+     "anchor": [
+      440.5,
+      251.93
+     ],
+     "wrap_width": 140.22,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": null,
+       "size": 5.04,
+       "text_x0": 300.28,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 251.93,
+         "x0": 300.28,
+         "x1": 440.5
+        }
+       ],
+       "runs": [
+        {
+         "text": "Lumen Summit 2026 · Lisbon",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 5.04,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 8.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p6~p6_g4",
+     "object": "p6_g4",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "text",
+     "role": "title",
+     "bbox": [
+      25.2,
+      18.9,
+      428.34,
+      50.39
+     ],
+     "anchor": [
+      29.42,
+      40.67
+     ],
+     "wrap_width": 394.71,
+     "placeholder": "TITLE",
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 16.38,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 40.67,
+         "x0": 29.42,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "Three numbers that changed our mind",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 16.38,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#16213e",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 26.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i2",
+     "object": "p3_i2",
+     "group": null,
+     "key": null,
+     "ink_width": 324.28
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      25.2,
+      69.29,
+      152.44,
+      195.27
+     ],
+     "shape": "round_rectangle",
+     "shape_type": "ROUND_RECTANGLE",
+     "fill": "#f4f5f9",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p3_i3",
+     "object": "p3_i3",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      25.2,
+      69.29,
+      152.44,
+      73.07
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#e94560",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p3_i4",
+     "object": "p3_i4",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      35.28,
+      85.04,
+      142.36,
+      129.13
+     ],
+     "anchor": [
+      39.5,
+      115.95
+     ],
+     "wrap_width": 98.64,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 27.72,
+       "text_x0": 39.5,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 115.95,
+         "x0": 39.5,
+         "x1": 138.14
+        }
+       ],
+       "runs": [
+        {
+         "text": "14 min",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 27.72,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#e94560",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 44.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i5",
+     "object": "p3_i5",
+     "group": null,
+     "key": null,
+     "ink_width": 89.01
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      35.28,
+      135.43,
+      142.36,
+      185.83
+     ],
+     "anchor": [
+      39.5,
+      148.05
+     ],
+     "wrap_width": 98.64,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 8.82,
+       "text_x0": 39.5,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 148.05,
+         "x0": 39.5,
+         "x1": 138.14
+        }
+       ],
+       "runs": [
+        {
+         "text": "median time from merge to production",
+         "font": "Inter",
+         "family": "sans",
+         "size": 8.82,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 14.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i6",
+     "object": "p3_i6",
+     "group": null,
+     "key": null,
+     "ink_width": 72.85
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      162.52,
+      69.29,
+      289.76,
+      195.27
+     ],
+     "shape": "round_rectangle",
+     "shape_type": "ROUND_RECTANGLE",
+     "fill": "#f4f5f9",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p3_i7",
+     "object": "p3_i7",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      162.52,
+      69.29,
+      289.76,
+      73.07
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#0f3460",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p3_i8",
+     "object": "p3_i8",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      172.6,
+      85.04,
+      279.68,
+      129.13
+     ],
+     "anchor": [
+      176.82,
+      115.95
+     ],
+     "wrap_width": 98.64,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 27.72,
+       "text_x0": 176.82,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 115.95,
+         "x0": 176.82,
+         "x1": 275.46
+        }
+       ],
+       "runs": [
+        {
+         "text": "92%",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 27.72,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#0f3460",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 44.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i9",
+     "object": "p3_i9",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      172.6,
+      135.43,
+      279.68,
+      185.83
+     ],
+     "anchor": [
+      176.82,
+      148.05
+     ],
+     "wrap_width": 98.64,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 8.82,
+       "text_x0": 176.82,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 148.05,
+         "x0": 176.82,
+         "x1": 275.46
+        }
+       ],
+       "runs": [
+        {
+         "text": "of deploys paged nobody",
+         "font": "Inter",
+         "family": "sans",
+         "size": 8.82,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 14.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i10",
+     "object": "p3_i10",
+     "group": null,
+     "key": null,
+     "ink_width": 71.72
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      299.84,
+      69.29,
+      427.08,
+      195.27
+     ],
+     "shape": "round_rectangle",
+     "shape_type": "ROUND_RECTANGLE",
+     "fill": "#f4f5f9",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p3_i11",
+     "object": "p3_i11",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      299.84,
+      69.29,
+      427.08,
+      73.07
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#53354a",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p3_i12",
+     "object": "p3_i12",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      309.92,
+      85.04,
+      417.0,
+      129.13
+     ],
+     "anchor": [
+      314.14,
+      115.95
+     ],
+     "wrap_width": 98.64,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 27.72,
+       "text_x0": 314.14,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 115.95,
+         "x0": 314.14,
+         "x1": 412.78
+        }
+       ],
+       "runs": [
+        {
+         "text": "3×",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 27.72,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#53354a",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 44.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i13",
+     "object": "p3_i13",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      309.92,
+      135.43,
+      417.0,
+      185.83
+     ],
+     "anchor": [
+      314.14,
+      148.05
+     ],
+     "wrap_width": 98.64,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 8.82,
+       "text_x0": 314.14,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 148.05,
+         "x0": 314.14,
+         "x1": 412.78
+        }
+       ],
+       "runs": [
+        {
+         "text": "more releases per week than last year",
+         "font": "Inter",
+         "family": "sans",
+         "size": 8.82,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 14.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i14",
+     "object": "p3_i14",
+     "group": null,
+     "key": null,
+     "ink_width": 74.27
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      25.2,
+      207.87,
+      428.34,
+      226.77
+     ],
+     "anchor": [
+      29.42,
+      218.05
+     ],
+     "wrap_width": 394.71,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 6.3,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 218.05,
+         "x0": 29.42,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "Source: our deploy log, January to August. ",
+         "font": "Inter",
+         "family": "sans",
+         "size": 6.3,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#8a8fa3",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        },
+        {
+         "text": "How we count",
+         "font": "Inter",
+         "family": "sans",
+         "size": 6.3,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#0000ff",
+         "link": "https://example.com/deploy-metrics",
+         "script": null,
+         "underline": true,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 10.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i15",
+     "object": "p3_i15",
+     "group": null,
+     "key": null,
+     "ink_width": 170.93
+    }
+   ],
+   "layout": "p9"
+  },
+  {
+   "page": 3,
+   "frame": "4",
+   "size": [
+    453.54,
+    255.12
+   ],
+   "objectId": "p4",
+   "key": null,
+   "notes": null,
+   "background_color": "#ffffff",
+   "background_picture": null,
+   "elements": [
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      0.0,
+      245.04,
+      453.54,
+      255.12
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#16213e",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g1",
+     "object": "p6_g1",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      0.0,
+      245.04,
+      94.49,
+      255.12
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#e94560",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g2",
+     "object": "p6_g2",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      430.86,
+      11.34,
+      439.68,
+      20.16
+     ],
+     "shape": "ellipse",
+     "shape_type": "ELLIPSE",
+     "fill": "#f5b971",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g3",
+     "object": "p6_g3",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      296.06,
+      245.04,
+      444.72,
+      255.12
+     ],
+     "anchor": [
+      440.5,
+      251.93
+     ],
+     "wrap_width": 140.22,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": null,
+       "size": 5.04,
+       "text_x0": 300.28,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 251.93,
+         "x0": 300.28,
+         "x1": 440.5
+        }
+       ],
+       "runs": [
+        {
+         "text": "Lumen Summit 2026 · Lisbon",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 5.04,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 8.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p6~p6_g4",
+     "object": "p6_g4",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "text",
+     "role": "title",
+     "bbox": [
+      25.2,
+      18.9,
+      428.34,
+      50.39
+     ],
+     "anchor": [
+      29.42,
+      40.67
+     ],
+     "wrap_width": 394.71,
+     "placeholder": "TITLE",
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 16.38,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 40.67,
+         "x0": 29.42,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "A week of small batches",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 16.38,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#16213e",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 26.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i2",
+     "object": "p4_i2",
+     "group": null,
+     "key": null,
+     "ink_width": 202.11
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      37.8,
+      125.98,
+      422.04,
+      125.98
+     ],
+     "from": [
+      37.8,
+      125.98
+     ],
+     "to": [
+      422.04,
+      125.98
+     ],
+     "outline": "#c3c7d4",
+     "weight": 1.89,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       384.249,
+       0.0
+      ],
+      "origin": [
+       37.795,
+       125.983
+      ],
+      "matrix": [
+       1.0,
+       -0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       37.795,
+       125.983,
+       422.044,
+       125.983
+      ]
+     },
+     "id": "p4_i3",
+     "object": "p4_i3",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      42.83,
+      112.13,
+      70.55,
+      139.84
+     ],
+     "anchor": [
+      56.69,
+      128.53
+     ],
+     "wrap_width": 19.28,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 47.05,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 128.53,
+         "x0": 47.05,
+         "x1": 66.33
+        }
+       ],
+       "runs": [
+        {
+         "text": "Mon",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "fill": "#0f3460",
+     "weight": 0.472,
+     "shape_type": "ELLIPSE",
+     "outline_color": null,
+     "id": "p4_i4",
+     "object": "p4_i4",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      18.9,
+      69.29,
+      94.49,
+      104.57
+     ],
+     "anchor": [
+      56.69,
+      81.3
+     ],
+     "wrap_width": 67.15,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 8.19,
+       "text_x0": 23.12,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 81.3,
+         "x0": 23.12,
+         "x1": 90.27
+        }
+       ],
+       "runs": [
+        {
+         "text": "Design review",
+         "font": "Inter",
+         "family": "sans",
+         "size": 8.19,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 13.0
+       }
+      },
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 23.12,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 23.12,
+         "x1": 90.27
+        }
+       ],
+       "runs": [
+        {
+         "text": "one page, one owner",
+         "font": "Inter",
+         "family": "sans",
+         "size": 6.93,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#5c6378",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "bottom",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i5",
+     "object": "p4_i5",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      125.98,
+      112.13,
+      153.7,
+      139.84
+     ],
+     "anchor": [
+      139.84,
+      128.53
+     ],
+     "wrap_width": 19.28,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 130.2,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 128.53,
+         "x0": 130.2,
+         "x1": 149.48
+        }
+       ],
+       "runs": [
+        {
+         "text": "Tue",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "fill": "#0f3460",
+     "weight": 0.472,
+     "shape_type": "ELLIPSE",
+     "outline_color": null,
+     "id": "p4_i6",
+     "object": "p4_i6",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      102.05,
+      149.92,
+      177.64,
+      185.2
+     ],
+     "anchor": [
+      139.84,
+      161.93
+     ],
+     "wrap_width": 67.15,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 8.19,
+       "text_x0": 106.27,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 161.93,
+         "x0": 106.27,
+         "x1": 173.42
+        }
+       ],
+       "runs": [
+        {
+         "text": "Flag off",
+         "font": "Inter",
+         "family": "sans",
+         "size": 8.19,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 13.0
+       }
+      },
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 106.27,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 106.27,
+         "x1": 173.42
+        }
+       ],
+       "runs": [
+        {
+         "text": "code merged dark",
+         "font": "Inter",
+         "family": "sans",
+         "size": 6.93,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#5c6378",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i7",
+     "object": "p4_i7",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      209.13,
+      112.13,
+      236.85,
+      139.84
+     ],
+     "anchor": [
+      222.99,
+      128.53
+     ],
+     "wrap_width": 19.28,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 213.35,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 128.53,
+         "x0": 213.35,
+         "x1": 232.63
+        }
+       ],
+       "runs": [
+        {
+         "text": "Wed",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "fill": "#0f3460",
+     "weight": 0.472,
+     "shape_type": "ELLIPSE",
+     "outline_color": null,
+     "id": "p4_i8",
+     "object": "p4_i8",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      185.2,
+      69.29,
+      260.79,
+      104.57
+     ],
+     "anchor": [
+      222.99,
+      81.3
+     ],
+     "wrap_width": 67.15,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 8.19,
+       "text_x0": 189.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 81.3,
+         "x0": 189.42,
+         "x1": 256.57
+        }
+       ],
+       "runs": [
+        {
+         "text": "5% of users",
+         "font": "Inter",
+         "family": "sans",
+         "size": 8.19,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 13.0
+       }
+      },
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 189.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 189.42,
+         "x1": 256.57
+        }
+       ],
+       "runs": [
+        {
+         "text": "watch the error budget",
+         "font": "Inter",
+         "family": "sans",
+         "size": 6.93,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#5c6378",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "bottom",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i9",
+     "object": "p4_i9",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      292.28,
+      112.13,
+      320.0,
+      139.84
+     ],
+     "anchor": [
+      306.14,
+      128.53
+     ],
+     "wrap_width": 19.28,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 296.5,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 128.53,
+         "x0": 296.5,
+         "x1": 315.78
+        }
+       ],
+       "runs": [
+        {
+         "text": "Thu",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "fill": "#0f3460",
+     "weight": 0.472,
+     "shape_type": "ELLIPSE",
+     "outline_color": null,
+     "id": "p4_i10",
+     "object": "p4_i10",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      268.34,
+      149.92,
+      343.93,
+      185.2
+     ],
+     "anchor": [
+      306.14,
+      161.93
+     ],
+     "wrap_width": 67.15,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 8.19,
+       "text_x0": 272.56,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 161.93,
+         "x0": 272.56,
+         "x1": 339.71
+        }
+       ],
+       "runs": [
+        {
+         "text": "50%",
+         "font": "Inter",
+         "family": "sans",
+         "size": 8.19,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 13.0
+       }
+      },
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 272.56,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 272.56,
+         "x1": 339.71
+        }
+       ],
+       "runs": [
+        {
+         "text": "compare cohorts",
+         "font": "Inter",
+         "family": "sans",
+         "size": 6.93,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#5c6378",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i11",
+     "object": "p4_i11",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      375.43,
+      112.13,
+      403.15,
+      139.84
+     ],
+     "anchor": [
+      389.29,
+      128.53
+     ],
+     "wrap_width": 19.28,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 379.65,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 128.53,
+         "x0": 379.65,
+         "x1": 398.93
+        }
+       ],
+       "runs": [
+        {
+         "text": "Fri",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "fill": "#e94560",
+     "weight": 0.472,
+     "shape_type": "ELLIPSE",
+     "outline_color": null,
+     "id": "p4_i12",
+     "object": "p4_i12",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      351.49,
+      69.29,
+      427.08,
+      104.57
+     ],
+     "anchor": [
+      389.29,
+      81.3
+     ],
+     "wrap_width": 67.15,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 8.19,
+       "text_x0": 355.71,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 81.3,
+         "x0": 355.71,
+         "x1": 422.86
+        }
+       ],
+       "runs": [
+        {
+         "text": "100%",
+         "font": "Inter",
+         "family": "sans",
+         "size": 8.19,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 13.0
+       }
+      },
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 355.71,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 355.71,
+         "x1": 422.86
+        }
+       ],
+       "runs": [
+        {
+         "text": "delete the flag",
+         "font": "Inter",
+         "family": "sans",
+         "size": 6.93,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#5c6378",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "bottom",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i13",
+     "object": "p4_i13",
+     "group": null,
+     "key": null
+    }
+   ],
+   "layout": "p9"
+  },
+  {
+   "page": 4,
+   "frame": "5",
+   "size": [
+    453.54,
+    255.12
+   ],
+   "objectId": "p5",
+   "key": null,
+   "notes": "Close on the quote, then the link.",
+   "background_color": "#ffffff",
+   "background_picture": null,
+   "elements": [
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      0.0,
+      245.04,
+      453.54,
+      255.12
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#16213e",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g1",
+     "object": "p6_g1",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      0.0,
+      245.04,
+      94.49,
+      255.12
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#e94560",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g2",
+     "object": "p6_g2",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      430.86,
+      11.34,
+      439.68,
+      20.16
+     ],
+     "shape": "ellipse",
+     "shape_type": "ELLIPSE",
+     "fill": "#f5b971",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p6~p6_g3",
+     "object": "p6_g3",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      296.06,
+      245.04,
+      444.72,
+      255.12
+     ],
+     "anchor": [
+      440.5,
+      251.93
+     ],
+     "wrap_width": 140.22,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": null,
+       "size": 5.04,
+       "text_x0": 300.28,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 251.93,
+         "x0": 300.28,
+         "x1": 440.5
+        }
+       ],
+       "runs": [
+        {
+         "text": "Lumen Summit 2026 · Lisbon",
+         "font": "Poppins",
+         "family": "sans",
+         "size": 5.04,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Poppins",
+        "size": 8.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p6~p6_g4",
+     "object": "p6_g4",
+     "group": null,
+     "key": null,
+     "inherited": "p6"
+    },
+    {
+     "kind": "image",
+     "role": "figure",
+     "bbox": [
+      0.0,
+      0.0,
+      207.87,
+      245.04
+     ],
+     "alt": "dusk.png",
+     "box": [
+      0.0,
+      0.0,
+      207.87,
+      245.04
+     ],
+     "crop": {
+      "l": 0.25,
+      "t": 0.0,
+      "r": 0.25,
+      "b": 0.0
+     },
+     "file": "images/605917ccf07b0039.png",
+     "sha1": "605917ccf07b0039523ed22e26aa4c26d84434de",
+     "format": "png",
+     "id": "p5_i2",
+     "object": "p5_i2",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      233.07,
+      56.69,
+      428.34,
+      151.18
+     ],
+     "anchor": [
+      237.29,
+      76.63
+     ],
+     "wrap_width": 186.83,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 16.38,
+       "text_x0": 237.29,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 76.63,
+         "x0": 237.29,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "“The calmest deploy is the one nobody noticed.”",
+         "font": "Lora",
+         "family": "serif",
+         "size": 16.38,
+         "bold": false,
+         "italic": true,
+         "smallcaps": false,
+         "color": "#1f2433",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.05,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Lora",
+        "size": 26.0
+       }
+      },
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 8.19,
+       "text_x0": 237.29,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 237.29,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "— the on-call rota, mid-August",
+         "font": "Inter",
+         "family": "sans",
+         "size": 8.19,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#5c6378",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 13.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p5_i3",
+     "object": "p5_i3",
+     "group": null,
+     "key": null,
+     "ink_width": 161.57
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      233.07,
+      176.38,
+      352.75,
+      201.57
+     ],
+     "anchor": [
+      292.91,
+      191.52
+     ],
+     "wrap_width": 111.24,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 237.29,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 191.52,
+         "x0": 237.29,
+         "x1": 348.53
+        }
+       ],
+       "runs": [
+        {
+         "text": "Slides + notes: lumen.example/calm",
+         "font": "Inter",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Inter",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "middle",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": false,
+      "snap": true
+     },
+     "fill": "#e94560",
+     "weight": 0.472,
+     "shape_type": "ROUND_RECTANGLE",
+     "outline_color": null,
+     "id": "p5_i4",
+     "object": "p5_i4",
+     "group": null,
+     "key": null
+    }
+   ],
+   "layout": "p10"
+  }
+ ],
+ "layouts": {
+  "p7": {
+   "name": "Title Slide",
+   "master": "p6",
+   "background_color": "#16213e",
+   "background_picture": null
+  },
+  "p8": {
+   "name": "Title and Content",
+   "master": "p6",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p9": {
+   "name": "Title Only",
+   "master": "p6",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p10": {
+   "name": "Blank",
+   "master": "p6",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p11": {
+   "name": "Section Header",
+   "master": "p6",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p12": {
+   "name": "Two Content",
+   "master": "p6",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p13": {
+   "name": "Comparison",
+   "master": "p6",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p14": {
+   "name": "Content with Caption",
+   "master": "p6",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p15": {
+   "name": "Picture with Caption",
+   "master": "p6",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p16": {
+   "name": "Title and Vertical Text",
+   "master": "p6",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p17": {
+   "name": "Vertical Title and Text",
+   "master": "p6",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p6": {
+   "name": "Office Theme",
+   "master": null,
+   "background_color": "#ffffff",
+   "background_picture": null
+  }
+ }
+}

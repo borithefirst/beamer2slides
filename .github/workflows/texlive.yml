@@ -1,0 +1,46 @@
+# What `adopt` writes, compiled on the TeX Live people have: TeX Live 2022 (Debian 12's, and what the
+# v0.7.0 reporters ran) and the current one. TeX Live 2022's l3kernel lacked e-variants slides.sty used, and every
+# slidetable stopped on them (reported with v0.7.0); tests/test_adopt_compiles.py adopts the six
+# showcase decks and compiles each, and the adopt tests that compile run with it. Fonts: none (TeX
+# Gyre and the scripts' stand-ins) or the decks' own, fetched from google/fonts.
+name: texlive
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+  push:
+    branches: [main]
+    paths: ["src/beamer2slides/adopt*.py", "src/beamer2slides/scripts.py", "src/beamer2slides/inverse.py",
+            "src/beamer2slides/fontfetch.py", "src/beamer2slides/fontfiles.py", "tests/test_adopt*.py",
+            "tests/decks/foreign/showcase/**", ".github/workflows/texlive.yml"]
+
+jobs:
+  adopt:
+    strategy:
+      fail-fast: false
+      matrix:
+        texlive: ["TL2022-historic", "latest"]
+        fonts: ["none", "fetched"]
+    runs-on: ubuntu-latest
+    container: texlive/texlive:${{ matrix.texlive }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python 3.12 (uv; the image's Python is its Debian's)
+        run: |
+          command -v python3 || (apt-get update && apt-get install -y --no-install-recommends python3 ca-certificates)
+          python3 - <<'EOF'
+          import io, tarfile, urllib.request
+          url = "https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-unknown-linux-gnu.tar.gz"
+          tarfile.open(fileobj=io.BytesIO(urllib.request.urlopen(url).read())).extractall("/opt/uv")
+          EOF
+          /opt/uv/uv-x86_64-unknown-linux-gnu/uv venv -p 3.12 /opt/venv
+          /opt/uv/uv-x86_64-unknown-linux-gnu/uv pip install -p /opt/venv -c .github/constraints.txt -e ".[dev]"
+      - name: TeX
+        run: |
+          lualatex --version | head -n 1
+          kpsewhich expl3-code.tex | xargs grep -m 1 "l3kernel" || true
+      - name: Adopt tests
+        env:
+          B2S_TEST_FETCH_FONTS: ${{ matrix.fonts == 'fetched' && '1' || '' }}
+        run: /opt/venv/bin/python -m pytest -q -n auto -rs tests/test_adopt_compiles.py tests/test_adopt_macros.py tests/test_adopt_tables.py tests/test_adopt_scripts.py

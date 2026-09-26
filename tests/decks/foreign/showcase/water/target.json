@@ -1,0 +1,7922 @@
+{
+ "version": 1,
+ "source": {
+  "title": "The water cycle in four languages"
+ },
+ "page_size": [
+  453.54,
+  255.12
+ ],
+ "scale": 1.5875115756052387,
+ "slides": [
+  {
+   "page": 0,
+   "frame": "1",
+   "size": [
+    453.54,
+    255.12
+   ],
+   "objectId": "p1",
+   "key": null,
+   "notes": null,
+   "background_color": "#eaf4f4",
+   "background_picture": null,
+   "elements": [
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      275.15,
+      38.58,
+      427.1,
+      100.0
+     ],
+     "shape": "custom",
+     "shape_type": "CUSTOM",
+     "fill": "#ffffff",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p1_i2",
+     "object": "p1_i2",
+     "group": null,
+     "key": null,
+     "trace": {
+      "rings": [
+       [
+        [
+         339.48,
+         38.69
+        ],
+        [
+         339.73,
+         38.5
+        ],
+        [
+         347.95,
+         38.5
+        ],
+        [
+         348.52,
+         38.76
+        ],
+        [
+         350.78,
+         38.79
+        ],
+        [
+         351.07,
+         39.01
+        ],
+        [
+         353.05,
+         39.07
+        ],
+        [
+         353.62,
+         39.33
+        ],
+        [
+         354.75,
+         39.35
+        ],
+        [
+         355.04,
+         39.59
+        ],
+        [
+         356.45,
+         39.64
+        ],
+        [
+         356.74,
+         39.89
+        ],
+        [
+         357.87,
+         39.92
+        ],
+        [
+         358.15,
+         40.18
+        ],
+        [
+         359.01,
+         40.2
+        ],
+        [
+         359.29,
+         40.46
+        ],
+        [
+         361.27,
+         40.77
+        ],
+        [
+         361.56,
+         41.02
+        ],
+        [
+         362.69,
+         41.05
+        ],
+        [
+         363.54,
+         41.34
+        ],
+        [
+         364.96,
+         41.34
+        ],
+        [
+         365.52,
+         41.61
+        ],
+        [
+         368.08,
+         41.59
+        ],
+        [
+         368.64,
+         41.34
+        ],
+        [
+         371.19,
+         41.28
+        ],
+        [
+         371.48,
+         41.05
+        ],
+        [
+         383.67,
+         41.05
+        ],
+        [
+         384.23,
+         41.31
+        ],
+        [
+         386.78,
+         41.34
+        ],
+        [
+         387.35,
+         41.61
+        ],
+        [
+         388.49,
+         41.62
+        ],
+        [
+         388.77,
+         41.87
+        ],
+        [
+         391.6,
+         42.19
+        ],
+        [
+         391.89,
+         42.46
+        ],
+        [
+         393.59,
+         42.76
+        ],
+        [
+         393.87,
+         43.03
+        ],
+        [
+         394.44,
+         43.04
+        ],
+        [
+         394.72,
+         43.29
+        ],
+        [
+         396.14,
+         43.61
+        ],
+        [
+         397.56,
+         44.38
+        ],
+        [
+         398.12,
+         44.46
+        ],
+        [
+         398.41,
+         44.73
+        ],
+        [
+         399.82,
+         45.31
+        ],
+        [
+         402.94,
+         47.57
+        ],
+        [
+         404.26,
+         48.9
+        ],
+        [
+         405.49,
+         50.68
+        ],
+        [
+         405.78,
+         50.69
+        ],
+        [
+         406.06,
+         50.96
+        ],
+        [
+         406.63,
+         50.98
+        ],
+        [
+         406.91,
+         51.25
+        ],
+        [
+         407.48,
+         51.26
+        ],
+        [
+         408.33,
+         51.75
+        ],
+        [
+         409.18,
+         51.83
+        ],
+        [
+         409.46,
+         52.08
+        ],
+        [
+         411.73,
+         52.39
+        ],
+        [
+         412.01,
+         52.63
+        ],
+        [
+         413.15,
+         52.68
+        ],
+        [
+         413.43,
+         52.94
+        ],
+        [
+         415.13,
+         53.24
+        ],
+        [
+         415.41,
+         53.51
+        ],
+        [
+         415.98,
+         53.53
+        ],
+        [
+         416.26,
+         53.75
+        ],
+        [
+         417.12,
+         53.81
+        ],
+        [
+         417.4,
+         54.08
+        ],
+        [
+         417.97,
+         54.09
+        ],
+        [
+         418.25,
+         54.37
+        ],
+        [
+         419.38,
+         54.66
+        ],
+        [
+         420.23,
+         55.18
+        ],
+        [
+         420.8,
+         55.23
+        ],
+        [
+         424.2,
+         57.21
+        ],
+        [
+         426.37,
+         59.39
+        ],
+        [
+         426.94,
+         60.8
+        ],
+        [
+         427.23,
+         61.09
+        ],
+        [
+         427.23,
+         63.35
+        ],
+        [
+         426.95,
+         63.64
+        ],
+        [
+         426.09,
+         65.62
+        ],
+        [
+         423.07,
+         68.65
+        ],
+        [
+         422.17,
+         69.31
+        ],
+        [
+         422.78,
+         69.68
+        ],
+        [
+         426.09,
+         72.99
+        ],
+        [
+         427.23,
+         75.26
+        ],
+        [
+         427.23,
+         77.53
+        ],
+        [
+         426.94,
+         77.81
+        ],
+        [
+         426.37,
+         79.23
+        ],
+        [
+         424.2,
+         81.4
+        ],
+        [
+         423.35,
+         81.76
+        ],
+        [
+         421.37,
+         83.1
+        ],
+        [
+         420.8,
+         83.16
+        ],
+        [
+         419.95,
+         83.67
+        ],
+        [
+         418.82,
+         83.97
+        ],
+        [
+         417.97,
+         84.52
+        ],
+        [
+         417.12,
+         84.58
+        ],
+        [
+         416.83,
+         84.8
+        ],
+        [
+         416.26,
+         84.82
+        ],
+        [
+         415.98,
+         85.09
+        ],
+        [
+         414.28,
+         85.4
+        ],
+        [
+         414.0,
+         85.65
+        ],
+        [
+         413.15,
+         85.7
+        ],
+        [
+         412.86,
+         85.94
+        ],
+        [
+         412.01,
+         85.95
+        ],
+        [
+         411.45,
+         86.22
+        ],
+        [
+         410.6,
+         86.25
+        ],
+        [
+         410.31,
+         86.5
+        ],
+        [
+         409.18,
+         86.56
+        ],
+        [
+         408.89,
+         86.79
+        ],
+        [
+         408.33,
+         86.83
+        ],
+        [
+         408.04,
+         87.07
+        ],
+        [
+         405.78,
+         87.71
+        ],
+        [
+         405.15,
+         88.3
+        ],
+        [
+         405.12,
+         88.58
+        ],
+        [
+         404.31,
+         89.43
+        ],
+        [
+         404.26,
+         89.72
+        ],
+        [
+         401.52,
+         92.17
+        ],
+        [
+         401.24,
+         92.19
+        ],
+        [
+         400.67,
+         92.74
+        ],
+        [
+         400.39,
+         92.75
+        ],
+        [
+         399.26,
+         93.59
+        ],
+        [
+         398.41,
+         93.87
+        ],
+        [
+         398.12,
+         94.16
+        ],
+        [
+         397.56,
+         94.2
+        ],
+        [
+         396.14,
+         95.01
+        ],
+        [
+         394.72,
+         95.3
+        ],
+        [
+         394.44,
+         95.57
+        ],
+        [
+         392.74,
+         95.88
+        ],
+        [
+         392.45,
+         96.14
+        ],
+        [
+         391.6,
+         96.2
+        ],
+        [
+         391.32,
+         96.42
+        ],
+        [
+         390.19,
+         96.46
+        ],
+        [
+         389.9,
+         96.71
+        ],
+        [
+         388.49,
+         96.75
+        ],
+        [
+         388.2,
+         96.99
+        ],
+        [
+         386.78,
+         97.05
+        ],
+        [
+         386.5,
+         97.27
+        ],
+        [
+         383.95,
+         97.31
+        ],
+        [
+         383.38,
+         97.56
+        ],
+        [
+         372.04,
+         97.56
+        ],
+        [
+         371.76,
+         97.33
+        ],
+        [
+         368.93,
+         97.27
+        ],
+        [
+         368.36,
+         97.02
+        ],
+        [
+         365.24,
+         97.0
+        ],
+        [
+         364.67,
+         97.27
+        ],
+        [
+         363.26,
+         97.28
+        ],
+        [
+         362.69,
+         97.56
+        ],
+        [
+         361.56,
+         97.57
+        ],
+        [
+         359.86,
+         98.13
+        ],
+        [
+         359.01,
+         98.18
+        ],
+        [
+         358.72,
+         98.41
+        ],
+        [
+         357.87,
+         98.47
+        ],
+        [
+         357.59,
+         98.69
+        ],
+        [
+         356.45,
+         98.74
+        ],
+        [
+         356.17,
+         98.98
+        ],
+        [
+         355.04,
+         99.0
+        ],
+        [
+         354.47,
+         99.26
+        ],
+        [
+         353.34,
+         99.29
+        ],
+        [
+         353.05,
+         99.54
+        ],
+        [
+         351.35,
+         99.54
+        ],
+        [
+         350.78,
+         99.6
+        ],
+        [
+         350.5,
+         99.83
+        ],
+        [
+         347.95,
+         99.89
+        ],
+        [
+         347.67,
+         100.11
+        ],
+        [
+         340.3,
+         100.11
+        ],
+        [
+         340.01,
+         99.89
+        ],
+        [
+         336.9,
+         99.83
+        ],
+        [
+         336.33,
+         99.57
+        ],
+        [
+         332.93,
+         99.26
+        ],
+        [
+         332.64,
+         99.02
+        ],
+        [
+         331.79,
+         98.98
+        ],
+        [
+         331.51,
+         98.75
+        ],
+        [
+         330.66,
+         98.69
+        ],
+        [
+         330.09,
+         98.42
+        ],
+        [
+         329.24,
+         98.41
+        ],
+        [
+         328.96,
+         98.15
+        ],
+        [
+         328.39,
+         98.13
+        ],
+        [
+         327.26,
+         97.6
+        ],
+        [
+         325.84,
+         97.27
+        ],
+        [
+         325.56,
+         97.02
+        ],
+        [
+         324.99,
+         96.99
+        ],
+        [
+         324.14,
+         96.5
+        ],
+        [
+         323.57,
+         96.42
+        ],
+        [
+         323.29,
+         96.14
+        ],
+        [
+         323.01,
+         96.14
+        ],
+        [
+         322.72,
+         95.87
+        ],
+        [
+         320.17,
+         94.72
+        ],
+        [
+         318.19,
+         93.38
+        ],
+        [
+         311.95,
+         93.31
+        ],
+        [
+         311.67,
+         93.08
+        ],
+        [
+         308.27,
+         93.02
+        ],
+        [
+         307.98,
+         92.8
+        ],
+        [
+         304.01,
+         92.46
+        ],
+        [
+         303.73,
+         92.23
+        ],
+        [
+         302.31,
+         92.17
+        ],
+        [
+         302.03,
+         91.92
+        ],
+        [
+         301.18,
+         91.89
+        ],
+        [
+         300.61,
+         91.62
+        ],
+        [
+         299.76,
+         91.61
+        ],
+        [
+         299.48,
+         91.35
+        ],
+        [
+         298.63,
+         91.32
+        ],
+        [
+         298.34,
+         91.1
+        ],
+        [
+         294.38,
+         89.9
+        ],
+        [
+         291.82,
+         88.49
+        ],
+        [
+         291.54,
+         88.49
+        ],
+        [
+         290.69,
+         87.7
+        ],
+        [
+         290.41,
+         87.64
+        ],
+        [
+         288.23,
+         85.46
+        ],
+        [
+         288.2,
+         85.18
+        ],
+        [
+         287.38,
+         84.05
+        ],
+        [
+         287.31,
+         83.2
+        ],
+        [
+         287.1,
+         82.91
+        ],
+        [
+         287.1,
+         80.08
+        ],
+        [
+         286.5,
+         78.66
+        ],
+        [
+         286.16,
+         78.28
+        ],
+        [
+         285.87,
+         78.28
+        ],
+        [
+         285.02,
+         77.78
+        ],
+        [
+         284.45,
+         77.72
+        ],
+        [
+         283.6,
+         77.19
+        ],
+        [
+         283.04,
+         77.15
+        ],
+        [
+         281.9,
+         76.37
+        ],
+        [
+         280.49,
+         75.73
+        ],
+        [
+         280.2,
+         75.4
+        ],
+        [
+         279.92,
+         75.4
+        ],
+        [
+         278.22,
+         73.98
+        ],
+        [
+         277.93,
+         73.98
+        ],
+        [
+         276.38,
+         72.42
+        ],
+        [
+         276.38,
+         72.14
+        ],
+        [
+         275.53,
+         71.29
+        ],
+        [
+         275.53,
+         70.44
+        ],
+        [
+         275.24,
+         70.16
+        ],
+        [
+         275.24,
+         68.17
+        ],
+        [
+         275.53,
+         67.89
+        ],
+        [
+         275.53,
+         67.32
+        ],
+        [
+         276.38,
+         66.47
+        ],
+        [
+         276.38,
+         66.19
+        ],
+        [
+         278.22,
+         64.35
+        ],
+        [
+         278.5,
+         64.35
+        ],
+        [
+         279.35,
+         63.5
+        ],
+        [
+         280.77,
+         62.93
+        ],
+        [
+         281.34,
+         62.36
+        ],
+        [
+         281.62,
+         62.36
+        ],
+        [
+         283.04,
+         61.51
+        ],
+        [
+         283.6,
+         61.51
+        ],
+        [
+         285.02,
+         60.66
+        ],
+        [
+         285.59,
+         60.66
+        ],
+        [
+         285.87,
+         60.38
+        ],
+        [
+         286.16,
+         60.38
+        ],
+        [
+         286.58,
+         59.95
+        ],
+        [
+         286.58,
+         59.67
+        ],
+        [
+         286.86,
+         59.39
+        ],
+        [
+         286.86,
+         58.82
+        ],
+        [
+         287.15,
+         58.54
+        ],
+        [
+         287.15,
+         55.42
+        ],
+        [
+         287.43,
+         55.13
+        ],
+        [
+         287.43,
+         54.57
+        ],
+        [
+         287.71,
+         54.28
+        ],
+        [
+         287.71,
+         54.0
+        ],
+        [
+         288.28,
+         53.43
+        ],
+        [
+         288.28,
+         53.15
+        ],
+        [
+         288.85,
+         52.58
+        ],
+        [
+         288.85,
+         52.3
+        ],
+        [
+         289.27,
+         52.16
+        ],
+        [
+         290.69,
+         50.74
+        ],
+        [
+         290.97,
+         50.74
+        ],
+        [
+         291.54,
+         50.17
+        ],
+        [
+         291.82,
+         50.17
+        ],
+        [
+         294.94,
+         48.47
+        ],
+        [
+         295.51,
+         48.47
+        ],
+        [
+         295.79,
+         48.19
+        ],
+        [
+         296.36,
+         48.19
+        ],
+        [
+         296.64,
+         47.91
+        ],
+        [
+         297.21,
+         47.91
+        ],
+        [
+         297.49,
+         47.62
+        ],
+        [
+         298.06,
+         47.62
+        ],
+        [
+         298.34,
+         47.34
+        ],
+        [
+         299.48,
+         47.34
+        ],
+        [
+         299.76,
+         47.05
+        ],
+        [
+         300.61,
+         47.05
+        ],
+        [
+         300.9,
+         46.77
+        ],
+        [
+         302.03,
+         46.77
+        ],
+        [
+         302.31,
+         46.49
+        ],
+        [
+         303.45,
+         46.49
+        ],
+        [
+         303.73,
+         46.2
+        ],
+        [
+         305.71,
+         46.2
+        ],
+        [
+         306.0,
+         45.92
+        ],
+        [
+         307.7,
+         45.92
+        ],
+        [
+         307.98,
+         45.64
+        ],
+        [
+         311.38,
+         45.64
+        ],
+        [
+         311.67,
+         45.35
+        ],
+        [
+         317.9,
+         45.25
+        ],
+        [
+         319.04,
+         44.7
+        ],
+        [
+         319.6,
+         44.17
+        ],
+        [
+         323.29,
+         42.46
+        ],
+        [
+         323.57,
+         42.19
+        ],
+        [
+         323.86,
+         42.19
+        ],
+        [
+         324.14,
+         41.91
+        ],
+        [
+         326.41,
+         41.26
+        ],
+        [
+         327.26,
+         40.77
+        ],
+        [
+         327.82,
+         40.76
+        ],
+        [
+         328.11,
+         40.49
+        ],
+        [
+         330.09,
+         40.17
+        ],
+        [
+         330.38,
+         39.92
+        ],
+        [
+         331.23,
+         39.9
+        ],
+        [
+         331.51,
+         39.64
+        ],
+        [
+         332.36,
+         39.63
+        ],
+        [
+         332.64,
+         39.35
+        ],
+        [
+         336.33,
+         39.01
+        ],
+        [
+         336.61,
+         38.79
+        ]
+       ]
+      ],
+      "fill": "#ffffff",
+      "alpha": null,
+      "stroke": null,
+      "weight": null,
+      "source": "thumbnail"
+     }
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      0.0,
+      207.87,
+      453.54,
+      255.12
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#4cc9f0",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p1_i3",
+     "object": "p1_i3",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      25.2,
+      37.8,
+      314.96,
+      75.59
+     ],
+     "anchor": [
+      29.42,
+      64.0
+     ],
+     "wrap_width": 281.32,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 25.2,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 66.27,
+         "x0": 29.42,
+         "x1": 310.74
+        }
+       ],
+       "runs": [
+        {
+         "text": "The water cycle",
+         "font": "Nunito",
+         "family": "sans",
+         "size": 25.2,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Nunito",
+        "size": 40.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p1_i4",
+     "object": "p1_i4",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      25.2,
+      94.49,
+      157.48,
+      122.2
+     ],
+     "anchor": [
+      153.26,
+      112.15
+     ],
+     "wrap_width": 123.84,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": null,
+       "direction": "rtl",
+       "size": 16.38,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 114.42,
+         "x0": 29.42,
+         "x1": 153.26
+        }
+       ],
+       "runs": [
+        {
+         "text": "מחזור המים",
+         "font": "NotoSansHebrew",
+         "family": "sans",
+         "size": 16.38,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#2a6f97",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Hebrew",
+        "size": 26.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p1_i5",
+     "object": "p1_i5",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      170.08,
+      94.49,
+      302.36,
+      122.2
+     ],
+     "anchor": [
+      298.14,
+      112.15
+     ],
+     "wrap_width": 123.84,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": null,
+       "direction": "rtl",
+       "size": 16.38,
+       "text_x0": 174.3,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 114.42,
+         "x0": 174.3,
+         "x1": 298.14
+        }
+       ],
+       "runs": [
+        {
+         "text": "دورة الماء",
+         "font": "NotoSansArabic",
+         "family": "sans",
+         "size": 16.38,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#2a6f97",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Arabic",
+        "size": 26.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p1_i6",
+     "object": "p1_i6",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      25.2,
+      132.28,
+      157.48,
+      160.0
+     ],
+     "anchor": [
+      29.42,
+      149.95
+     ],
+     "wrap_width": 123.84,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 16.38,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 152.22,
+         "x0": 29.42,
+         "x1": 153.26
+        }
+       ],
+       "runs": [
+        {
+         "text": "水の循環",
+         "font": "NotoSansJP",
+         "family": "sans",
+         "size": 16.38,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#2a6f97",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans JP",
+        "size": 26.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p1_i7",
+     "object": "p1_i7",
+     "group": null,
+     "key": null,
+     "ink_width": 64.35
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      170.08,
+      132.28,
+      302.36,
+      160.0
+     ],
+     "anchor": [
+      174.3,
+      149.95
+     ],
+     "wrap_width": 123.84,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 16.38,
+       "text_x0": 174.3,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 152.22,
+         "x0": 174.3,
+         "x1": 298.14
+        }
+       ],
+       "runs": [
+        {
+         "text": "水循环",
+         "font": "NotoSansSC",
+         "family": "sans",
+         "size": 16.38,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#2a6f97",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans SC",
+        "size": 26.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p1_i8",
+     "object": "p1_i8",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      25.2,
+      217.32,
+      428.34,
+      242.52
+     ],
+     "anchor": [
+      29.42,
+      227.67
+     ],
+     "wrap_width": 394.71,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 8.82,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 229.94,
+         "x0": 29.42,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "A four-language lesson for a mixed classroom",
+         "font": "Nunito",
+         "family": "sans",
+         "size": 8.82,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#ffffff",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Nunito",
+        "size": 14.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p1_i9",
+     "object": "p1_i9",
+     "group": null,
+     "key": null,
+     "ink_width": 180.85
+    }
+   ],
+   "layout": "p8"
+  },
+  {
+   "page": 1,
+   "frame": "2",
+   "size": [
+    453.54,
+    255.12
+   ],
+   "objectId": "p2",
+   "key": null,
+   "notes": null,
+   "background_color": "#f7fbfc",
+   "background_picture": null,
+   "elements": [
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      226.77,
+      15.12,
+      428.34,
+      46.61
+     ],
+     "anchor": [
+      424.12,
+      35.22
+     ],
+     "wrap_width": 193.13,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": null,
+       "direction": "rtl",
+       "size": 18.9,
+       "text_x0": 230.99,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 37.49,
+         "x0": 230.99,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "מחזור המים",
+         "font": "NotoSansHebrew",
+         "family": "sans",
+         "size": 18.9,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Hebrew",
+        "size": 30.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p2_i2",
+     "object": "p2_i2",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      226.77,
+      56.69,
+      428.34,
+      220.47
+     ],
+     "anchor": [
+      424.12,
+      68.26
+     ],
+     "wrap_width": 193.13,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "1.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "direction": "rtl",
+       "size": 10.08,
+       "text_x0": 242.08,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 70.53,
+         "x0": 242.08,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "אידוי: השמש מחממת את המים באוקיינוס",
+         "font": "NotoSansHebrew",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Hebrew",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "2.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "direction": "rtl",
+       "size": 10.08,
+       "text_x0": 242.08,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 242.08,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "עיבוי: אדי המים מתקררים ויוצרים עננים",
+         "font": "NotoSansHebrew",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Hebrew",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "3.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "direction": "rtl",
+       "size": 10.08,
+       "text_x0": 242.08,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 242.08,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "משקעים: גשם ושלג יורדים אל האדמה",
+         "font": "NotoSansHebrew",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Hebrew",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "4.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "direction": "rtl",
+       "size": 10.08,
+       "text_x0": 242.08,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 242.08,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "איסוף: המים זורמים חזרה אל הים",
+         "font": "NotoSansHebrew",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Hebrew",
+        "size": 16.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p2_i3",
+     "object": "p2_i3",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      25.2,
+      157.48,
+      214.17,
+      195.27
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#4cc9f0",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p2_i4",
+     "object": "p2_i4",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      25.2,
+      153.8,
+      214.17,
+      165.04
+     ],
+     "shape": "custom",
+     "shape_type": "CUSTOM",
+     "fill": "#4cc9f0",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p2_i5",
+     "object": "p2_i5",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      173.23,
+      44.09,
+      204.72,
+      75.59
+     ],
+     "shape": "ellipse",
+     "shape_type": "ELLIPSE",
+     "fill": "#ffb703",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p2_i6",
+     "object": "p2_i6",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      47.27,
+      43.15,
+      126.84,
+      76.53
+     ],
+     "shape": "custom",
+     "shape_type": "CUSTOM",
+     "fill": "#ffffff",
+     "outline": "#a8dadc",
+     "weight": 0.945,
+     "id": "p2_i7",
+     "object": "p2_i7",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      100.79,
+      80.63,
+      105.83,
+      99.53
+     ],
+     "from": [
+      100.79,
+      80.63
+     ],
+     "to": [
+      105.83,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       100.787,
+       80.629
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       100.787,
+       80.629,
+       105.826,
+       99.527
+      ]
+     },
+     "id": "p2_i8",
+     "object": "p2_i8",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      88.19,
+      80.63,
+      93.23,
+      99.53
+     ],
+     "from": [
+      88.19,
+      80.63
+     ],
+     "to": [
+      93.23,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       88.188,
+       80.629
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       88.188,
+       80.629,
+       93.228,
+       99.527
+      ]
+     },
+     "id": "p2_i9",
+     "object": "p2_i9",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      75.59,
+      80.63,
+      80.63,
+      99.53
+     ],
+     "from": [
+      75.59,
+      80.63
+     ],
+     "to": [
+      80.63,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       75.59,
+       80.629
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       75.59,
+       80.629,
+       80.629,
+       99.527
+      ]
+     },
+     "id": "p2_i10",
+     "object": "p2_i10",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      125.98,
+      88.19,
+      170.08,
+      151.18
+     ],
+     "from": [
+      170.08,
+      151.18
+     ],
+     "to": [
+      125.98,
+      88.19
+     ],
+     "outline": "#e76f51",
+     "weight": 1.575,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       44.094,
+       62.992
+      ],
+      "origin": [
+       170.078,
+       151.18
+      ],
+      "matrix": [
+       -1.0,
+       0.0,
+       0.0,
+       -1.0
+      ],
+      "rotation": -180.0,
+      "flip": false,
+      "box": [
+       125.983,
+       88.188,
+       170.078,
+       151.18
+      ]
+     },
+     "id": "p2_i11",
+     "object": "p2_i11",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      56.69,
+      113.39,
+      56.69,
+      151.18
+     ],
+     "from": [
+      56.69,
+      113.39
+     ],
+     "to": [
+      56.69,
+      151.18
+     ],
+     "outline": "#457b9d",
+     "weight": 1.575,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       0.0,
+       37.795
+      ],
+      "origin": [
+       56.693,
+       113.385
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       -0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       56.693,
+       113.385,
+       56.693,
+       151.18
+      ]
+     },
+     "id": "p2_i12",
+     "object": "p2_i12",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      56.69,
+      157.48,
+      151.18,
+      168.82
+     ],
+     "from": [
+      56.69,
+      157.48
+     ],
+     "to": [
+      151.18,
+      168.82
+     ],
+     "outline": "#1d3557",
+     "weight": 1.26,
+     "arrow": false,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "NONE",
+     "line_type": null,
+     "category": null,
+     "frame": {
+      "size": [
+       94.488,
+       11.338
+      ],
+      "origin": [
+       56.693,
+       157.479
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       56.693,
+       157.479,
+       151.18,
+       168.818
+      ]
+     },
+     "id": "p2_i13",
+     "object": "p2_i13",
+     "group": null,
+     "key": null,
+     "trace": {
+      "rings": [
+       [
+        [
+         56.94,
+         157.18
+        ],
+        [
+         57.12,
+         156.91
+        ],
+        [
+         59.95,
+         157.67
+        ],
+        [
+         81.78,
+         164.44
+        ],
+        [
+         119.76,
+         161.91
+        ],
+        [
+         149.81,
+         167.86
+        ],
+        [
+         151.23,
+         168.16
+        ],
+        [
+         151.31,
+         168.52
+        ],
+        [
+         150.94,
+         169.4
+        ],
+        [
+         119.76,
+         163.23
+        ],
+        [
+         93.97,
+         164.95
+        ],
+        [
+         79.23,
+         164.98
+        ],
+        [
+         56.83,
+         158.15
+        ],
+        [
+         56.65,
+         157.75
+        ]
+       ]
+      ],
+      "fill": "#1d3557",
+      "alpha": null,
+      "stroke": null,
+      "weight": null,
+      "source": "thumbnail"
+     }
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      154.33,
+      113.39,
+      223.62,
+      127.24
+     ],
+     "anchor": [
+      188.98,
+      121.9
+     ],
+     "wrap_width": 60.85,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 158.55,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 124.17,
+         "x0": 158.55,
+         "x1": 219.4
+        }
+       ],
+       "runs": [
+        {
+         "text": "אידוי",
+         "font": "NotoSansHebrew",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Hebrew",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p2_i14",
+     "object": "p2_i14",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      62.99,
+      17.64,
+      132.28,
+      31.5
+     ],
+     "anchor": [
+      97.64,
+      28.43
+     ],
+     "wrap_width": 60.85,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 67.21,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 28.43,
+         "x0": 67.21,
+         "x1": 128.06
+        }
+       ],
+       "runs": [
+        {
+         "text": "עיבוי",
+         "font": "NotoSansHebrew",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Hebrew",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p2_i15",
+     "object": "p2_i15",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      72.44,
+      119.68,
+      141.73,
+      133.54
+     ],
+     "anchor": [
+      107.09,
+      128.2
+     ],
+     "wrap_width": 60.85,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 76.66,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 130.47,
+         "x0": 76.66,
+         "x1": 137.51
+        }
+       ],
+       "runs": [
+        {
+         "text": "משקעים",
+         "font": "NotoSansHebrew",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Hebrew",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p2_i16",
+     "object": "p2_i16",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      34.65,
+      165.04,
+      103.94,
+      178.9
+     ],
+     "anchor": [
+      69.29,
+      173.56
+     ],
+     "wrap_width": 60.85,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 38.87,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 175.83,
+         "x0": 38.87,
+         "x1": 99.72
+        }
+       ],
+       "runs": [
+        {
+         "text": "איסוף",
+         "font": "NotoSansHebrew",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Hebrew",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p2_i17",
+     "object": "p2_i17",
+     "group": null,
+     "key": null
+    }
+   ],
+   "layout": "p8"
+  },
+  {
+   "page": 2,
+   "frame": "3",
+   "size": [
+    453.54,
+    255.12
+   ],
+   "objectId": "p3",
+   "key": null,
+   "notes": null,
+   "background_color": "#f7fbfc",
+   "background_picture": null,
+   "elements": [
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      226.77,
+      15.12,
+      428.34,
+      46.61
+     ],
+     "anchor": [
+      424.12,
+      35.22
+     ],
+     "wrap_width": 193.13,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": null,
+       "direction": "rtl",
+       "size": 18.9,
+       "text_x0": 230.99,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 37.49,
+         "x0": 230.99,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "دورة الماء",
+         "font": "NotoSansArabic",
+         "family": "sans",
+         "size": 18.9,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Arabic",
+        "size": 30.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i2",
+     "object": "p3_i2",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      226.77,
+      56.69,
+      428.34,
+      220.47
+     ],
+     "anchor": [
+      424.12,
+      68.26
+     ],
+     "wrap_width": 193.13,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "1.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "direction": "rtl",
+       "size": 10.08,
+       "text_x0": 242.08,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 70.53,
+         "x0": 242.08,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "التبخر: تسخن الشمس مياه المحيط",
+         "font": "NotoSansArabic",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Arabic",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "2.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "direction": "rtl",
+       "size": 10.08,
+       "text_x0": 242.08,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 242.08,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "التكاثف: يبرد بخار الماء فتتكون السحب",
+         "font": "NotoSansArabic",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Arabic",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "3.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "direction": "rtl",
+       "size": 10.08,
+       "text_x0": 242.08,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 242.08,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "الهطول: يسقط المطر والثلج على الأرض",
+         "font": "NotoSansArabic",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Arabic",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "right",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "4.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "direction": "rtl",
+       "size": 10.08,
+       "text_x0": 242.08,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 242.08,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "التجمع: تعود المياه إلى البحر",
+         "font": "NotoSansArabic",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Arabic",
+        "size": 16.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i3",
+     "object": "p3_i3",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      25.2,
+      157.48,
+      214.17,
+      195.27
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#4cc9f0",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p3_i4",
+     "object": "p3_i4",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      25.2,
+      153.8,
+      214.17,
+      165.04
+     ],
+     "shape": "custom",
+     "shape_type": "CUSTOM",
+     "fill": "#4cc9f0",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p3_i5",
+     "object": "p3_i5",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      173.23,
+      44.09,
+      204.72,
+      75.59
+     ],
+     "shape": "ellipse",
+     "shape_type": "ELLIPSE",
+     "fill": "#ffb703",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p3_i6",
+     "object": "p3_i6",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      47.27,
+      43.15,
+      126.84,
+      76.53
+     ],
+     "shape": "custom",
+     "shape_type": "CUSTOM",
+     "fill": "#ffffff",
+     "outline": "#a8dadc",
+     "weight": 0.945,
+     "id": "p3_i7",
+     "object": "p3_i7",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      100.79,
+      80.63,
+      105.83,
+      99.53
+     ],
+     "from": [
+      100.79,
+      80.63
+     ],
+     "to": [
+      105.83,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       100.787,
+       80.629
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       100.787,
+       80.629,
+       105.826,
+       99.527
+      ]
+     },
+     "id": "p3_i8",
+     "object": "p3_i8",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      88.19,
+      80.63,
+      93.23,
+      99.53
+     ],
+     "from": [
+      88.19,
+      80.63
+     ],
+     "to": [
+      93.23,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       88.188,
+       80.629
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       88.188,
+       80.629,
+       93.228,
+       99.527
+      ]
+     },
+     "id": "p3_i9",
+     "object": "p3_i9",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      75.59,
+      80.63,
+      80.63,
+      99.53
+     ],
+     "from": [
+      75.59,
+      80.63
+     ],
+     "to": [
+      80.63,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       75.59,
+       80.629
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       75.59,
+       80.629,
+       80.629,
+       99.527
+      ]
+     },
+     "id": "p3_i10",
+     "object": "p3_i10",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      125.98,
+      88.19,
+      170.08,
+      151.18
+     ],
+     "from": [
+      170.08,
+      151.18
+     ],
+     "to": [
+      125.98,
+      88.19
+     ],
+     "outline": "#e76f51",
+     "weight": 1.575,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       44.094,
+       62.992
+      ],
+      "origin": [
+       170.078,
+       151.18
+      ],
+      "matrix": [
+       -1.0,
+       0.0,
+       0.0,
+       -1.0
+      ],
+      "rotation": -180.0,
+      "flip": false,
+      "box": [
+       125.983,
+       88.188,
+       170.078,
+       151.18
+      ]
+     },
+     "id": "p3_i11",
+     "object": "p3_i11",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      56.69,
+      113.39,
+      56.69,
+      151.18
+     ],
+     "from": [
+      56.69,
+      113.39
+     ],
+     "to": [
+      56.69,
+      151.18
+     ],
+     "outline": "#457b9d",
+     "weight": 1.575,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       0.0,
+       37.795
+      ],
+      "origin": [
+       56.693,
+       113.385
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       -0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       56.693,
+       113.385,
+       56.693,
+       151.18
+      ]
+     },
+     "id": "p3_i12",
+     "object": "p3_i12",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      56.69,
+      157.48,
+      151.18,
+      168.82
+     ],
+     "from": [
+      56.69,
+      157.48
+     ],
+     "to": [
+      151.18,
+      168.82
+     ],
+     "outline": "#1d3557",
+     "weight": 1.26,
+     "arrow": false,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "NONE",
+     "line_type": null,
+     "category": null,
+     "frame": {
+      "size": [
+       94.488,
+       11.338
+      ],
+      "origin": [
+       56.693,
+       157.479
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       56.693,
+       157.479,
+       151.18,
+       168.818
+      ]
+     },
+     "id": "p3_i13",
+     "object": "p3_i13",
+     "group": null,
+     "key": null,
+     "trace": {
+      "rings": [
+       [
+        [
+         56.94,
+         157.18
+        ],
+        [
+         57.12,
+         156.91
+        ],
+        [
+         59.95,
+         157.67
+        ],
+        [
+         81.78,
+         164.44
+        ],
+        [
+         119.76,
+         161.91
+        ],
+        [
+         149.81,
+         167.86
+        ],
+        [
+         151.23,
+         168.16
+        ],
+        [
+         151.31,
+         168.52
+        ],
+        [
+         150.94,
+         169.4
+        ],
+        [
+         119.76,
+         163.23
+        ],
+        [
+         93.97,
+         164.95
+        ],
+        [
+         79.23,
+         164.98
+        ],
+        [
+         56.83,
+         158.15
+        ],
+        [
+         56.65,
+         157.75
+        ]
+       ]
+      ],
+      "fill": "#1d3557",
+      "alpha": null,
+      "stroke": null,
+      "weight": null,
+      "source": "thumbnail"
+     }
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      154.33,
+      113.39,
+      223.62,
+      127.24
+     ],
+     "anchor": [
+      188.98,
+      121.9
+     ],
+     "wrap_width": 60.85,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 158.55,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 124.17,
+         "x0": 158.55,
+         "x1": 219.4
+        }
+       ],
+       "runs": [
+        {
+         "text": "التبخر",
+         "font": "NotoSansArabic",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Arabic",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i14",
+     "object": "p3_i14",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      62.99,
+      17.64,
+      132.28,
+      31.5
+     ],
+     "anchor": [
+      97.64,
+      28.43
+     ],
+     "wrap_width": 60.85,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 67.21,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 28.43,
+         "x0": 67.21,
+         "x1": 128.06
+        }
+       ],
+       "runs": [
+        {
+         "text": "التكاثف",
+         "font": "NotoSansArabic",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Arabic",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i15",
+     "object": "p3_i15",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      72.44,
+      119.68,
+      141.73,
+      133.54
+     ],
+     "anchor": [
+      107.09,
+      128.2
+     ],
+     "wrap_width": 60.85,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 76.66,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 130.47,
+         "x0": 76.66,
+         "x1": 137.51
+        }
+       ],
+       "runs": [
+        {
+         "text": "الهطول",
+         "font": "NotoSansArabic",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Arabic",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i16",
+     "object": "p3_i16",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      34.65,
+      165.04,
+      103.94,
+      178.9
+     ],
+     "anchor": [
+      69.29,
+      173.56
+     ],
+     "wrap_width": 60.85,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 38.87,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 175.83,
+         "x0": 38.87,
+         "x1": 99.72
+        }
+       ],
+       "runs": [
+        {
+         "text": "التجمع",
+         "font": "NotoSansArabic",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans Arabic",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p3_i17",
+     "object": "p3_i17",
+     "group": null,
+     "key": null
+    }
+   ],
+   "layout": "p8"
+  },
+  {
+   "page": 3,
+   "frame": "4",
+   "size": [
+    453.54,
+    255.12
+   ],
+   "objectId": "p4",
+   "key": null,
+   "notes": null,
+   "background_color": "#f7fbfc",
+   "background_picture": null,
+   "elements": [
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      25.2,
+      15.12,
+      226.77,
+      46.61
+     ],
+     "anchor": [
+      29.42,
+      35.22
+     ],
+     "wrap_width": 193.13,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 18.9,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 37.49,
+         "x0": 29.42,
+         "x1": 222.55
+        }
+       ],
+       "runs": [
+        {
+         "text": "水の循環",
+         "font": "NotoSansJP",
+         "family": "sans",
+         "size": 18.9,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans JP",
+        "size": 30.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i2",
+     "object": "p4_i2",
+     "group": null,
+     "key": null,
+     "ink_width": 74.27
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      25.2,
+      56.69,
+      226.77,
+      220.47
+     ],
+     "anchor": [
+      29.42,
+      68.26
+     ],
+     "wrap_width": 193.13,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "1.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "size": 10.08,
+       "text_x0": 40.5,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 70.53,
+         "x0": 40.5,
+         "x1": 222.55
+        }
+       ],
+       "runs": [
+        {
+         "text": "蒸発：太陽が海の水をあたためます",
+         "font": "NotoSansJP",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans JP",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "2.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "size": 10.08,
+       "text_x0": 40.5,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 40.5,
+         "x1": 222.55
+        }
+       ],
+       "runs": [
+        {
+         "text": "凝結：水蒸気が冷えて雲になります",
+         "font": "NotoSansJP",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans JP",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "3.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "size": 10.08,
+       "text_x0": 40.5,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 40.5,
+         "x1": 222.55
+        }
+       ],
+       "runs": [
+        {
+         "text": "降水：雨や雪が地面に降ります",
+         "font": "NotoSansJP",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans JP",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "4.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "size": 10.08,
+       "text_x0": 40.5,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 40.5,
+         "x1": 222.55
+        }
+       ],
+       "runs": [
+        {
+         "text": "集水：水は川を通って海にもどります",
+         "font": "NotoSansJP",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans JP",
+        "size": 16.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i3",
+     "object": "p4_i3",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      226.77,
+      157.48,
+      415.75,
+      195.27
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#4cc9f0",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p4_i4",
+     "object": "p4_i4",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      226.77,
+      153.8,
+      415.75,
+      165.04
+     ],
+     "shape": "custom",
+     "shape_type": "CUSTOM",
+     "fill": "#4cc9f0",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p4_i5",
+     "object": "p4_i5",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      236.22,
+      44.09,
+      267.71,
+      75.59
+     ],
+     "shape": "ellipse",
+     "shape_type": "ELLIPSE",
+     "fill": "#ffb703",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p4_i6",
+     "object": "p4_i6",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      311.83,
+      43.15,
+      391.4,
+      76.53
+     ],
+     "shape": "custom",
+     "shape_type": "CUSTOM",
+     "fill": "#ffffff",
+     "outline": "#a8dadc",
+     "weight": 0.945,
+     "id": "p4_i7",
+     "object": "p4_i7",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      335.12,
+      80.63,
+      340.16,
+      99.53
+     ],
+     "from": [
+      340.16,
+      80.63
+     ],
+     "to": [
+      335.12,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       340.155,
+       80.629
+      ],
+      "matrix": [
+       -1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": true,
+      "box": [
+       335.116,
+       80.629,
+       340.155,
+       99.527
+      ]
+     },
+     "id": "p4_i8",
+     "object": "p4_i8",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      347.71,
+      80.63,
+      352.75,
+      99.53
+     ],
+     "from": [
+      352.75,
+      80.63
+     ],
+     "to": [
+      347.71,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       352.753,
+       80.629
+      ],
+      "matrix": [
+       -1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": true,
+      "box": [
+       347.714,
+       80.629,
+       352.753,
+       99.527
+      ]
+     },
+     "id": "p4_i9",
+     "object": "p4_i9",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      360.31,
+      80.63,
+      365.35,
+      99.53
+     ],
+     "from": [
+      365.35,
+      80.63
+     ],
+     "to": [
+      360.31,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       365.352,
+       80.629
+      ],
+      "matrix": [
+       -1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": true,
+      "box": [
+       360.312,
+       80.629,
+       365.352,
+       99.527
+      ]
+     },
+     "id": "p4_i10",
+     "object": "p4_i10",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      270.86,
+      88.19,
+      314.96,
+      151.18
+     ],
+     "from": [
+      270.86,
+      151.18
+     ],
+     "to": [
+      314.96,
+      88.19
+     ],
+     "outline": "#e76f51",
+     "weight": 1.575,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       44.094,
+       62.992
+      ],
+      "origin": [
+       270.864,
+       151.18
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       -1.0
+      ],
+      "rotation": -180.0,
+      "flip": true,
+      "box": [
+       270.864,
+       88.188,
+       314.958,
+       151.18
+      ]
+     },
+     "id": "p4_i11",
+     "object": "p4_i11",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      384.25,
+      113.39,
+      384.25,
+      151.18
+     ],
+     "from": [
+      384.25,
+      113.39
+     ],
+     "to": [
+      384.25,
+      151.18
+     ],
+     "outline": "#457b9d",
+     "weight": 1.575,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       0.0,
+       37.795
+      ],
+      "origin": [
+       384.249,
+       113.385
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       -0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       384.249,
+       113.385,
+       384.249,
+       151.18
+      ]
+     },
+     "id": "p4_i12",
+     "object": "p4_i12",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      289.76,
+      157.48,
+      384.25,
+      168.82
+     ],
+     "from": [
+      289.76,
+      157.48
+     ],
+     "to": [
+      384.25,
+      168.82
+     ],
+     "outline": "#1d3557",
+     "weight": 1.26,
+     "arrow": false,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "NONE",
+     "line_type": null,
+     "category": null,
+     "frame": {
+      "size": [
+       94.488,
+       11.338
+      ],
+      "origin": [
+       289.762,
+       157.479
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       289.762,
+       157.479,
+       384.249,
+       168.818
+      ]
+     },
+     "id": "p4_i13",
+     "object": "p4_i13",
+     "group": null,
+     "key": null,
+     "trace": {
+      "rings": [
+       [
+        [
+         383.0,
+         157.18
+        ],
+        [
+         383.95,
+         156.91
+        ],
+        [
+         384.42,
+         157.75
+        ],
+        [
+         384.23,
+         158.15
+        ],
+        [
+         361.56,
+         164.98
+        ],
+        [
+         347.38,
+         164.98
+        ],
+        [
+         321.3,
+         163.23
+        ],
+        [
+         290.12,
+         169.4
+        ],
+        [
+         289.76,
+         168.52
+        ],
+        [
+         289.84,
+         168.16
+        ],
+        [
+         291.26,
+         167.86
+        ],
+        [
+         321.3,
+         161.91
+        ],
+        [
+         359.01,
+         164.44
+        ]
+       ]
+      ],
+      "fill": "#1d3557",
+      "alpha": null,
+      "stroke": null,
+      "weight": null,
+      "source": "thumbnail"
+     }
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      217.32,
+      113.39,
+      286.61,
+      127.24
+     ],
+     "anchor": [
+      251.97,
+      120.09
+     ],
+     "wrap_width": 69.29,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 221.54,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 124.17,
+         "x0": 221.54,
+         "x1": 282.39
+        }
+       ],
+       "runs": [
+        {
+         "text": "蒸発",
+         "font": "NotoSansJP",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans JP",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "insets": 0
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i14",
+     "object": "p4_i14",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      308.66,
+      17.64,
+      377.95,
+      31.5
+     ],
+     "anchor": [
+      343.3,
+      24.35
+     ],
+     "wrap_width": 69.29,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 312.88,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 28.43,
+         "x0": 312.88,
+         "x1": 373.73
+        }
+       ],
+       "runs": [
+        {
+         "text": "凝結",
+         "font": "NotoSansJP",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans JP",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "insets": 0
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i15",
+     "object": "p4_i15",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      299.21,
+      119.68,
+      368.5,
+      133.54
+     ],
+     "anchor": [
+      333.86,
+      126.39
+     ],
+     "wrap_width": 69.29,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 303.43,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 130.47,
+         "x0": 303.43,
+         "x1": 364.28
+        }
+       ],
+       "runs": [
+        {
+         "text": "降水",
+         "font": "NotoSansJP",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans JP",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "insets": 0
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i16",
+     "object": "p4_i16",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      337.01,
+      165.04,
+      406.3,
+      178.9
+     ],
+     "anchor": [
+      371.65,
+      173.56
+     ],
+     "wrap_width": 60.85,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 341.23,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 175.83,
+         "x0": 341.23,
+         "x1": 402.08
+        }
+       ],
+       "runs": [
+        {
+         "text": "集水",
+         "font": "NotoSansJP",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans JP",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p4_i17",
+     "object": "p4_i17",
+     "group": null,
+     "key": null
+    }
+   ],
+   "layout": "p8"
+  },
+  {
+   "page": 4,
+   "frame": "5",
+   "size": [
+    453.54,
+    255.12
+   ],
+   "objectId": "p5",
+   "key": null,
+   "notes": null,
+   "background_color": "#f7fbfc",
+   "background_picture": null,
+   "elements": [
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      25.2,
+      15.12,
+      226.77,
+      46.61
+     ],
+     "anchor": [
+      29.42,
+      35.22
+     ],
+     "wrap_width": 193.13,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 18.9,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 37.49,
+         "x0": 29.42,
+         "x1": 222.55
+        }
+       ],
+       "runs": [
+        {
+         "text": "水循环",
+         "font": "NotoSansSC",
+         "family": "sans",
+         "size": 18.9,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans SC",
+        "size": 30.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p5_i2",
+     "object": "p5_i2",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      25.2,
+      56.69,
+      226.77,
+      220.47
+     ],
+     "anchor": [
+      29.42,
+      68.26
+     ],
+     "wrap_width": 193.13,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "1.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "size": 10.08,
+       "text_x0": 40.5,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 70.53,
+         "x0": 40.5,
+         "x1": 222.55
+        }
+       ],
+       "runs": [
+        {
+         "text": "蒸发：太阳加热海洋中的水",
+         "font": "NotoSansSC",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans SC",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "2.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "size": 10.08,
+       "text_x0": 40.5,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 40.5,
+         "x1": 222.55
+        }
+       ],
+       "runs": [
+        {
+         "text": "凝结：水蒸气冷却后形成云",
+         "font": "NotoSansSC",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans SC",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "3.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "size": 10.08,
+       "text_x0": 40.5,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 40.5,
+         "x1": 222.55
+        }
+       ],
+       "runs": [
+        {
+         "text": "降水：雨和雪落到地面",
+         "font": "NotoSansSC",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans SC",
+        "size": 16.0
+       }
+      },
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": {
+        "kind": "number",
+        "text": "4.",
+        "color": "#e76f51",
+        "size": 10.08,
+        "font_family": "sans",
+        "bold": false,
+        "bbox": null
+       },
+       "size": 10.08,
+       "text_x0": 40.5,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": null,
+         "x0": 40.5,
+         "x1": 222.55
+        }
+       ],
+       "runs": [
+        {
+         "text": "汇集：水沿着河流流回大海",
+         "font": "NotoSansSC",
+         "family": "sans",
+         "size": 10.08,
+         "bold": false,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 17.600000381469727,
+        "indent_first": 8.0,
+        "line_spacing": 1.0,
+        "space_above": 14.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans SC",
+        "size": 16.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p5_i3",
+     "object": "p5_i3",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      226.77,
+      157.48,
+      415.75,
+      195.27
+     ],
+     "shape": "rectangle",
+     "shape_type": "RECTANGLE",
+     "fill": "#4cc9f0",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p5_i4",
+     "object": "p5_i4",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      226.77,
+      153.8,
+      415.75,
+      165.04
+     ],
+     "shape": "custom",
+     "shape_type": "CUSTOM",
+     "fill": "#4cc9f0",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p5_i5",
+     "object": "p5_i5",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      236.22,
+      44.09,
+      267.71,
+      75.59
+     ],
+     "shape": "ellipse",
+     "shape_type": "ELLIPSE",
+     "fill": "#ffb703",
+     "outline": null,
+     "weight": 0.472,
+     "id": "p5_i6",
+     "object": "p5_i6",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "panel",
+     "bbox": [
+      311.83,
+      43.15,
+      391.4,
+      76.53
+     ],
+     "shape": "custom",
+     "shape_type": "CUSTOM",
+     "fill": "#ffffff",
+     "outline": "#a8dadc",
+     "weight": 0.945,
+     "id": "p5_i7",
+     "object": "p5_i7",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      335.12,
+      80.63,
+      340.16,
+      99.53
+     ],
+     "from": [
+      340.16,
+      80.63
+     ],
+     "to": [
+      335.12,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       340.155,
+       80.629
+      ],
+      "matrix": [
+       -1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": true,
+      "box": [
+       335.116,
+       80.629,
+       340.155,
+       99.527
+      ]
+     },
+     "id": "p5_i8",
+     "object": "p5_i8",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      347.71,
+      80.63,
+      352.75,
+      99.53
+     ],
+     "from": [
+      352.75,
+      80.63
+     ],
+     "to": [
+      347.71,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       352.753,
+       80.629
+      ],
+      "matrix": [
+       -1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": true,
+      "box": [
+       347.714,
+       80.629,
+       352.753,
+       99.527
+      ]
+     },
+     "id": "p5_i9",
+     "object": "p5_i9",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      360.31,
+      80.63,
+      365.35,
+      99.53
+     ],
+     "from": [
+      365.35,
+      80.63
+     ],
+     "to": [
+      360.31,
+      99.53
+     ],
+     "outline": "#457b9d",
+     "weight": 0.945,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       5.039,
+       18.898
+      ],
+      "origin": [
+       365.352,
+       80.629
+      ],
+      "matrix": [
+       -1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": true,
+      "box": [
+       360.312,
+       80.629,
+       365.352,
+       99.527
+      ]
+     },
+     "id": "p5_i10",
+     "object": "p5_i10",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      270.86,
+      88.19,
+      314.96,
+      151.18
+     ],
+     "from": [
+      270.86,
+      151.18
+     ],
+     "to": [
+      314.96,
+      88.19
+     ],
+     "outline": "#e76f51",
+     "weight": 1.575,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       44.094,
+       62.992
+      ],
+      "origin": [
+       270.864,
+       151.18
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       -1.0
+      ],
+      "rotation": -180.0,
+      "flip": true,
+      "box": [
+       270.864,
+       88.188,
+       314.958,
+       151.18
+      ]
+     },
+     "id": "p5_i11",
+     "object": "p5_i11",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      384.25,
+      113.39,
+      384.25,
+      151.18
+     ],
+     "from": [
+      384.25,
+      113.39
+     ],
+     "to": [
+      384.25,
+      151.18
+     ],
+     "outline": "#457b9d",
+     "weight": 1.575,
+     "arrow": true,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "FILL_ARROW",
+     "line_type": "STRAIGHT_CONNECTOR_1",
+     "category": "STRAIGHT",
+     "frame": {
+      "size": [
+       0.0,
+       37.795
+      ],
+      "origin": [
+       384.249,
+       113.385
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       -0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       384.249,
+       113.385,
+       384.249,
+       151.18
+      ]
+     },
+     "id": "p5_i12",
+     "object": "p5_i12",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "shape",
+     "role": "line",
+     "shape": "line",
+     "bbox": [
+      289.76,
+      157.48,
+      384.25,
+      168.82
+     ],
+     "from": [
+      289.76,
+      157.48
+     ],
+     "to": [
+      384.25,
+      168.82
+     ],
+     "outline": "#1d3557",
+     "weight": 1.26,
+     "arrow": false,
+     "arrow_start": false,
+     "fill": null,
+     "start_arrow": "NONE",
+     "end_arrow": "NONE",
+     "line_type": null,
+     "category": null,
+     "frame": {
+      "size": [
+       94.488,
+       11.338
+      ],
+      "origin": [
+       289.762,
+       157.479
+      ],
+      "matrix": [
+       1.0,
+       0.0,
+       0.0,
+       1.0
+      ],
+      "rotation": 0.0,
+      "flip": false,
+      "box": [
+       289.762,
+       157.479,
+       384.249,
+       168.818
+      ]
+     },
+     "id": "p5_i13",
+     "object": "p5_i13",
+     "group": null,
+     "key": null,
+     "trace": {
+      "rings": [
+       [
+        [
+         383.0,
+         157.18
+        ],
+        [
+         383.95,
+         156.91
+        ],
+        [
+         384.42,
+         157.75
+        ],
+        [
+         384.23,
+         158.15
+        ],
+        [
+         361.56,
+         164.98
+        ],
+        [
+         347.38,
+         164.98
+        ],
+        [
+         321.3,
+         163.23
+        ],
+        [
+         290.12,
+         169.4
+        ],
+        [
+         289.76,
+         168.52
+        ],
+        [
+         289.84,
+         168.16
+        ],
+        [
+         291.26,
+         167.86
+        ],
+        [
+         321.3,
+         161.91
+        ],
+        [
+         359.01,
+         164.44
+        ]
+       ]
+      ],
+      "fill": "#1d3557",
+      "alpha": null,
+      "stroke": null,
+      "weight": null,
+      "source": "thumbnail"
+     }
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      217.32,
+      113.39,
+      286.61,
+      127.24
+     ],
+     "anchor": [
+      251.97,
+      120.09
+     ],
+     "wrap_width": 69.29,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 221.54,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 124.17,
+         "x0": 221.54,
+         "x1": 282.39
+        }
+       ],
+       "runs": [
+        {
+         "text": "蒸发",
+         "font": "NotoSansSC",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans SC",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "insets": 0
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p5_i14",
+     "object": "p5_i14",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      308.66,
+      17.64,
+      377.95,
+      31.5
+     ],
+     "anchor": [
+      343.3,
+      24.35
+     ],
+     "wrap_width": 69.29,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 312.88,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 28.43,
+         "x0": 312.88,
+         "x1": 373.73
+        }
+       ],
+       "runs": [
+        {
+         "text": "凝结",
+         "font": "NotoSansSC",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans SC",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "insets": 0
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p5_i15",
+     "object": "p5_i15",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      299.21,
+      119.68,
+      368.5,
+      133.54
+     ],
+     "anchor": [
+      333.86,
+      126.39
+     ],
+     "wrap_width": 69.29,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 303.43,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 130.47,
+         "x0": 303.43,
+         "x1": 364.28
+        }
+       ],
+       "runs": [
+        {
+         "text": "降水",
+         "font": "NotoSansSC",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans SC",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "insets": 0
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p5_i16",
+     "object": "p5_i16",
+     "group": null,
+     "key": null
+    },
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      337.01,
+      165.04,
+      406.3,
+      178.9
+     ],
+     "anchor": [
+      371.65,
+      173.56
+     ],
+     "wrap_width": 60.85,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "center",
+       "level": 0,
+       "bullet": null,
+       "size": 6.93,
+       "text_x0": 341.23,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 175.83,
+         "x0": 341.23,
+         "x1": 402.08
+        }
+       ],
+       "runs": [
+        {
+         "text": "汇集",
+         "font": "NotoSansSC",
+         "family": "sans",
+         "size": 6.93,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Noto Sans SC",
+        "size": 11.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p5_i17",
+     "object": "p5_i17",
+     "group": null,
+     "key": null
+    }
+   ],
+   "layout": "p8"
+  },
+  {
+   "page": 5,
+   "frame": "6",
+   "size": [
+    453.54,
+    255.12
+   ],
+   "objectId": "p6",
+   "key": null,
+   "notes": "Pairs quiz each other: one reads a word, the other points at the picture.",
+   "background_color": "#f7fbfc",
+   "background_picture": null,
+   "elements": [
+    {
+     "kind": "text",
+     "role": "body",
+     "bbox": [
+      25.2,
+      15.12,
+      428.34,
+      42.83
+     ],
+     "anchor": [
+      29.42,
+      35.22
+     ],
+     "wrap_width": 394.71,
+     "placeholder": null,
+     "paragraphs": [
+      {
+       "align": "left",
+       "level": 0,
+       "bullet": null,
+       "size": 18.9,
+       "text_x0": 29.42,
+       "tab_x0": null,
+       "lines": [
+        {
+         "baseline": 37.49,
+         "x0": 29.42,
+         "x1": 424.12
+        }
+       ],
+       "runs": [
+        {
+         "text": "Glossary",
+         "font": "Nunito",
+         "family": "sans",
+         "size": 18.9,
+         "bold": true,
+         "italic": false,
+         "smallcaps": false,
+         "color": "#1d3557",
+         "link": null,
+         "script": null,
+         "underline": false,
+         "strike": false,
+         "highlight": null
+        }
+       ],
+       "slides": {
+        "indent_start": 0.0,
+        "indent_first": 0.0,
+        "line_spacing": 1.0,
+        "space_above": 0.0,
+        "space_below": 0.0,
+        "indent_end": 0.0,
+        "spacing_mode": "NEVER_COLLAPSE",
+        "justified": false,
+        "font": "Nunito",
+        "size": 30.0
+       }
+      }
+     ],
+     "box": {
+      "valign": "top",
+      "scale": 1.5875115756052387,
+      "font_scale": 1,
+      "grows": true,
+      "snap": true,
+      "inset_y": 3.6
+     },
+     "weight": 0.472,
+     "shape_type": "TEXT_BOX",
+     "outline_color": null,
+     "id": "p6_i2",
+     "object": "p6_i2",
+     "group": null,
+     "key": null,
+     "ink_width": 76.25
+    },
+    {
+     "kind": "table",
+     "role": "table",
+     "bbox": [
+      25.2,
+      56.69,
+      428.34,
+      188.98
+     ],
+     "rows": [
+      [
+       "English",
+       "עברית",
+       "العربية",
+       "日本語",
+       "中文"
+      ],
+      [
+       "evaporation",
+       "אידוי",
+       "التبخر",
+       "蒸発",
+       "蒸发"
+      ],
+      [
+       "condensation",
+       "עיבוי",
+       "التكاثف",
+       "凝結",
+       "凝结"
+      ],
+      [
+       "precipitation",
+       "משקעים",
+       "الهطول",
+       "降水",
+       "降水"
+      ],
+      [
+       "collection",
+       "איסוף",
+       "التجمع",
+       "集水",
+       "汇集"
+      ]
+     ],
+     "cell_pad": [
+      3.713,
+      2.268
+     ],
+     "col_widths": [
+      94.488,
+      75.59,
+      81.889,
+      75.59,
+      75.59
+     ],
+     "row_heights": [
+      26.457,
+      26.457,
+      26.457,
+      26.457,
+      26.457
+     ],
+     "table_cells": [
+      {
+       "row": 0,
+       "col": 0,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#1d3557",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "left",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "English",
+           "font": "Nunito",
+           "family": "sans",
+           "size": 9.45,
+           "bold": true,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#ffffff",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 0,
+       "col": 1,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#1d3557",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "right",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "direction": "rtl",
+         "runs": [
+          {
+           "text": "עברית",
+           "font": "NotoSansHebrew",
+           "family": "sans",
+           "size": 9.45,
+           "bold": true,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#ffffff",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 0,
+       "col": 2,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#1d3557",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "right",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "direction": "rtl",
+         "runs": [
+          {
+           "text": "العربية",
+           "font": "NotoSansArabic",
+           "family": "sans",
+           "size": 9.45,
+           "bold": true,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#ffffff",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 0,
+       "col": 3,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#1d3557",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "center",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "日本語",
+           "font": "NotoSansJP",
+           "family": "sans",
+           "size": 9.45,
+           "bold": true,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#ffffff",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 0,
+       "col": 4,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#1d3557",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "center",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "中文",
+           "font": "NotoSansSC",
+           "family": "sans",
+           "size": 9.45,
+           "bold": true,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#ffffff",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 1,
+       "col": 0,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#e3f2f7",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "left",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "evaporation",
+           "font": "Nunito",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 1,
+       "col": 1,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#e3f2f7",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "right",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "direction": "rtl",
+         "runs": [
+          {
+           "text": "אידוי",
+           "font": "NotoSansHebrew",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 1,
+       "col": 2,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#e3f2f7",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "right",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "direction": "rtl",
+         "runs": [
+          {
+           "text": "التبخر",
+           "font": "NotoSansArabic",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 1,
+       "col": 3,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#e3f2f7",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "center",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "蒸発",
+           "font": "NotoSansJP",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 1,
+       "col": 4,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#e3f2f7",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "center",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "蒸发",
+           "font": "NotoSansSC",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 2,
+       "col": 0,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#ffffff",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "left",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "condensation",
+           "font": "Nunito",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 2,
+       "col": 1,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#ffffff",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "right",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "direction": "rtl",
+         "runs": [
+          {
+           "text": "עיבוי",
+           "font": "NotoSansHebrew",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 2,
+       "col": 2,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#ffffff",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "right",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "direction": "rtl",
+         "runs": [
+          {
+           "text": "التكاثف",
+           "font": "NotoSansArabic",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 2,
+       "col": 3,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#ffffff",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "center",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "凝結",
+           "font": "NotoSansJP",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 2,
+       "col": 4,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#ffffff",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "center",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "凝结",
+           "font": "NotoSansSC",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 3,
+       "col": 0,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#e3f2f7",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "left",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "precipitation",
+           "font": "Nunito",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 3,
+       "col": 1,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#e3f2f7",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "right",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "direction": "rtl",
+         "runs": [
+          {
+           "text": "משקעים",
+           "font": "NotoSansHebrew",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 3,
+       "col": 2,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#e3f2f7",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "right",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "direction": "rtl",
+         "runs": [
+          {
+           "text": "الهطول",
+           "font": "NotoSansArabic",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 3,
+       "col": 3,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#e3f2f7",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "center",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "降水",
+           "font": "NotoSansJP",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 3,
+       "col": 4,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#e3f2f7",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "center",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "降水",
+           "font": "NotoSansSC",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 4,
+       "col": 0,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#ffffff",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "left",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "collection",
+           "font": "Nunito",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 4,
+       "col": 1,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#ffffff",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "right",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "direction": "rtl",
+         "runs": [
+          {
+           "text": "איסוף",
+           "font": "NotoSansHebrew",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 4,
+       "col": 2,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#ffffff",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "right",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "direction": "rtl",
+         "runs": [
+          {
+           "text": "التجمع",
+           "font": "NotoSansArabic",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 4,
+       "col": 3,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#ffffff",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "center",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "集水",
+           "font": "NotoSansJP",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      },
+      {
+       "row": 4,
+       "col": 4,
+       "rowspan": 1,
+       "colspan": 1,
+       "fill": "#ffffff",
+       "fill_alpha": 1,
+       "valign": "middle",
+       "paragraphs": [
+        {
+         "align": "center",
+         "level": 0,
+         "bullet": null,
+         "size": 9.45,
+         "line_spacing": 1.0,
+         "runs": [
+          {
+           "text": "汇集",
+           "font": "NotoSansSC",
+           "family": "sans",
+           "size": 9.45,
+           "bold": false,
+           "italic": false,
+           "smallcaps": false,
+           "color": "#1d3557",
+           "link": null,
+           "script": null,
+           "underline": false,
+           "strike": false,
+           "highlight": null
+          }
+         ]
+        }
+       ]
+      }
+     ],
+     "table_borders": [
+      {
+       "dir": "h",
+       "row": 0,
+       "col": 0,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 0,
+       "col": 1,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 0,
+       "col": 2,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 0,
+       "col": 3,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 0,
+       "col": 4,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 1,
+       "col": 0,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 1,
+       "col": 1,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 1,
+       "col": 2,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 1,
+       "col": 3,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 1,
+       "col": 4,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 2,
+       "col": 0,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 2,
+       "col": 1,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 2,
+       "col": 2,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 2,
+       "col": 3,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 2,
+       "col": 4,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 3,
+       "col": 0,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 3,
+       "col": 1,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 3,
+       "col": 2,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 3,
+       "col": 3,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 3,
+       "col": 4,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 4,
+       "col": 0,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 4,
+       "col": 1,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 4,
+       "col": 2,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 4,
+       "col": 3,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 4,
+       "col": 4,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 5,
+       "col": 0,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 5,
+       "col": 1,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 5,
+       "col": 2,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 5,
+       "col": 3,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "h",
+       "row": 5,
+       "col": 4,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 0,
+       "col": 0,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 0,
+       "col": 1,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 0,
+       "col": 2,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 0,
+       "col": 3,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 0,
+       "col": 4,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 0,
+       "col": 5,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 1,
+       "col": 0,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 1,
+       "col": 1,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 1,
+       "col": 2,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 1,
+       "col": 3,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 1,
+       "col": 4,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 1,
+       "col": 5,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 2,
+       "col": 0,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 2,
+       "col": 1,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 2,
+       "col": 2,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 2,
+       "col": 3,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 2,
+       "col": 4,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 2,
+       "col": 5,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 3,
+       "col": 0,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 3,
+       "col": 1,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 3,
+       "col": 2,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 3,
+       "col": 3,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 3,
+       "col": 4,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 3,
+       "col": 5,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 4,
+       "col": 0,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 4,
+       "col": 1,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 4,
+       "col": 2,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 4,
+       "col": 3,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 4,
+       "col": 4,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      },
+      {
+       "dir": "v",
+       "row": 4,
+       "col": 5,
+       "color": "#bcd9e3",
+       "alpha": 1,
+       "weight": 0.472,
+       "dash": "SOLID"
+      }
+     ],
+     "id": "p6_i3",
+     "object": "p6_i3",
+     "group": null,
+     "key": null,
+     "rows_fixed": [
+      0,
+      1,
+      2,
+      3,
+      4
+     ]
+    }
+   ],
+   "layout": "p8"
+  }
+ ],
+ "layouts": {
+  "p8": {
+   "name": "Blank",
+   "master": "p7",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p9": {
+   "name": "Title Slide",
+   "master": "p7",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p10": {
+   "name": "Title and Content",
+   "master": "p7",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p11": {
+   "name": "Section Header",
+   "master": "p7",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p12": {
+   "name": "Two Content",
+   "master": "p7",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p13": {
+   "name": "Comparison",
+   "master": "p7",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p14": {
+   "name": "Title Only",
+   "master": "p7",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p15": {
+   "name": "Content with Caption",
+   "master": "p7",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p16": {
+   "name": "Picture with Caption",
+   "master": "p7",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p17": {
+   "name": "Title and Vertical Text",
+   "master": "p7",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p18": {
+   "name": "Vertical Title and Text",
+   "master": "p7",
+   "background_color": "#ffffff",
+   "background_picture": null
+  },
+  "p7": {
+   "name": "Office Theme",
+   "master": null,
+   "background_color": "#ffffff",
+   "background_picture": null
+  }
+ }
+}

@@ -398,6 +398,9 @@ markers.
   campaigns under `out/hunt/`. 377 open findings by family with mechanisms: docs/project-notes.md
   "Visual hunt".
 - Theme robustness: `tests/themes/sweep.py` (28 beamer themes, classify only).
+- **What adopt writes compiles on old TeX**: `tests/test_adopt_compiles.py` adopts and compiles the
+  six showcase decks (`tests/decks/foreign/showcase`, from `tools/showcase.py fixture`); CI runs it
+  on TeX Live 2022 and latest, fonts none/fetched (`.github/workflows/texlive.yml`).
 
 ## Pitfalls found so far
 - PDFium (`pdf/pdfium_backend.py` handles these): soft-mask contents are not page objects (beamer's
