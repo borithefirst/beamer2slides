@@ -38,9 +38,16 @@ jobs:
           /opt/uv/uv-x86_64-unknown-linux-gnu/uv pip install -p /opt/venv -c .github/constraints.txt -e ".[dev]"
       - name: TeX
         run: |
-          lualatex --version | head -n 1
-          kpsewhich expl3-code.tex | xargs grep -m 1 "l3kernel" || true
+          echo "::notice title=TeX (${{ matrix.texlive }})::$(lualatex --version | head -n 1); l3kernel $(grep -m 1 -o 'ExplFileDate{[0-9-]*' $(kpsewhich expl3-code.tex) | cut -d{ -f2)"
       - name: Adopt tests
+        shell: bash
         env:
           B2S_TEST_FETCH_FONTS: ${{ matrix.fonts == 'fetched' && '1' || '' }}
-        run: /opt/venv/bin/python -m pytest -q -n auto -rs tests/test_adopt_compiles.py tests/test_adopt_macros.py tests/test_adopt_tables.py tests/test_adopt_scripts.py
+          B2S_REQUIRE_TEX: "1"
+        run: |
+          /opt/venv/bin/python -m pytest -q -n auto -rs tests/test_adopt_compiles.py tests/test_adopt_macros.py \
+            tests/test_adopt_tables.py tests/test_adopt_scripts.py > /tmp/pytest.txt 2>&1; status=$?
+          cat /tmp/pytest.txt
+          # the summary where anyone can read it (a job's log needs admin rights to fetch)
+          echo "::notice title=adopt tests (${{ matrix.texlive }}, fonts ${{ matrix.fonts }})::$(tail -n 1 /tmp/pytest.txt)"
+          exit $status

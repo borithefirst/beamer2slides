@@ -75,7 +75,8 @@ def test_the_source_adopt_writes_compiles(name, tmp_path, fonts):
     text = adopt.bootstrap(target, main)
     program = shutil.which(engine(text), path=tex_env()["PATH"])
     if program is None:
-        pytest.skip(f"{engine(text)} not found")
+        # CI says it has TeX (`$B2S_REQUIRE_TEX`): a job that skipped every compile would pass
+        (pytest.fail if os.environ.get("B2S_REQUIRE_TEX") else pytest.skip)(f"{engine(text)} not found")
     r = subprocess.run([program, "-interaction=nonstopmode", "-halt-on-error", main.name], cwd=main.parent,
                        capture_output=True, text=True, errors="replace", env=tex_env(), timeout=900)
     log = main.with_suffix(".log")
