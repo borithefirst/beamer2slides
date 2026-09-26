@@ -68,13 +68,15 @@ def test_adopt_names_each_mark_after_its_deck_object():
     assert adopt.piece_keys({"id": "p2", "kind": "image"}, "\\slidepicture{..}") == ["p2"]
     assert adopt.piece_keys({"id": "a b", "kind": "shape"}, "\\sliderect{..}") == [""]
 
-    class Plan:
-        drawn = {1}
-    target = {"slides": [{"elements": [box, {"id": "logo", "kind": "image"}, {"id": "t", "kind": "table"}]},
+    class Plan:  # the layout draws the logo and the title, at shipout: after the frame's own
+        layout, drawn = "title-only", {0, 1}
+    title = {"id": "t0", "kind": "text", "placeholder": "TITLE"}
+    target = {"slides": [{"layout": "L", "elements": [title, {"id": "logo", "kind": "image", "inherited": "L"},
+                                                      box, {"id": "t", "kind": "table"}]},
                          {"elements": [{"id": None, "kind": "text"}]}]}
-    pieces = [[panelled, "\\slidepicture{..}", "\\begin{slidetable}"], ["\\begin{slidebox}"]]
+    pieces = [["\\begin{slidebox}", "\\slidepicture{..}", panelled, "\\begin{slidetable}"], ["\\begin{slidebox}"]]
     got = adopt.keys_file(target, pieces, [Plan(), None], ["s1", "s2"]).splitlines()
-    assert [line for line in got if not line.startswith("%")] == ["\\slidekeys{s1}{g1_0_5+shape,g1_0_5,t}"]
+    assert [line for line in got if not line.startswith("%")] == ["\\slidekeys{s1}{g1_0_5+shape,g1_0_5,t,logo,t0}"]
 
 
 def test_a_page_without_marks_extracts_as_before(tmp_path):

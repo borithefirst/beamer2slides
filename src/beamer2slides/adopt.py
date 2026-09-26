@@ -1090,8 +1090,8 @@ SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out -----
 \def\slides@finish{\ifslides@open\global\slides@openfalse\baselineskip=\slides@pitch bp\par\slides@shut\slides@noteend\fi}
 \def\slides@itemclose{\slides@finish\egroup\ifx\slides@lang\@empty\else\end{otherlanguage}\fi\endgroup}
 \def\slides@marker{\ifx\slides@mark\@empty\ifx\slides@label\@empty\else
-    \slidelabel{\slides@labelstyle}{\slides@labelbody}{\slides@gap}\fi
-  \else\slidebullet{\slides@mark}{\slides@gap}\fi}
+    \slides@literal{/B2Sb BMC}\slidelabel{\slides@labelstyle}{\slides@labelbody}{\slides@gap}\slides@shut\fi
+  \else\slides@literal{/B2Sb BMC}\slidebullet{\slides@mark}{\slides@gap}\slides@shut\fi}
 \def\slides@labelbody{\let\arabic\slides@arabic\let\alph\slides@alph\let\Alph\slides@Alph
   \let\roman\slides@roman\let\Roman\slides@Roman\slides@label}
 \def\slides@arabic*{\number\slides@n}
@@ -2389,7 +2389,8 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
 \def\slides@t@fill#1#2#3#4#5{\fill[#1] (#2bp,{-\slides@t@y{#3}}) rectangle (#4bp,{-\slides@t@y{#5}});}
 \def\slides@t@hdraw#1#2#3#4{\draw[line cap=rect,#1] (#2bp,{-\slides@t@y{#4}}) -- (#3bp,{-\slides@t@y{#4}});}
 \def\slides@t@vdraw#1#2#3#4{\draw[line cap=rect,#1] (#2bp,{-\slides@t@y{#3}}) -- (#2bp,{-\slides@t@y{#4}});}
-\def\slides@t@node#1#2#3#4{\node[anchor=#1] at (#2bp,{#3}) {\copy\csname slides@t@box@#4\endcsname};}
+\def\slides@t@node#1#2#3#4{\node[anchor=#1] at (#2bp,{#3}) {\slides@literal{/B2Sc <</r \csname slides@t@#4@row\endcsname
+  \space/c \csname slides@t@#4@col\endcsname>> BDC}\copy\csname slides@t@box@#4\endcsname\slides@shut};}
 \ExplSyntaxOn
 \tl_new:N \l__slides_t_ix_tl
 \tl_new:N \l__slides_t_iy_tl
@@ -2555,11 +2556,18 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
         \exp_not:N \begin { textblock* } { \tl_use:c { slides@t@X@ \int_use:N \l__slides_t_m_int } bp }
           ( \clist_item:Nn \l__slides_t_xy_clist { 1 } bp , \clist_item:Nn \l__slides_t_xy_clist { 2 } bp )
       }
-    \slides@open{table}
     % rows holding one cell grow first, so a merged cell only adds what they left it short of
     \int_step_inline:nn { \g__slides_t_rs_int }
       { \int_step_inline:nn { \g__slides_t_n_int } { \__slides_t_grow:nn {##1} {####1} } }
     \slides@t@tops { \int_use:N \g__slides_t_r_int }
+    % (its mark says its grid and its box: x y w in bp, its height in pt)
+    \tl_set:Ne \slides@more
+      {
+        ~ /rows ~ \int_use:N \g__slides_t_r_int ~ /cols ~ \int_use:N \l__slides_t_m_int ~ /box ~
+        ( \clist_item:Nn \l__slides_t_xy_clist { 1 } ~ \clist_item:Nn \l__slides_t_xy_clist { 2 } ~
+          \tl_use:c { slides@t@X@ \int_use:N \l__slides_t_m_int } ~ \slides@t@y { \int_use:N \g__slides_t_r_int } )
+      }
+    \slides@open{table}
     \use:e
       {
         \exp_not:N \slides@t@picture { \tl_use:c { slides@t@X@ \int_use:N \l__slides_t_m_int } }
@@ -3308,15 +3316,33 @@ def piece_keys(el: dict, piece: str) -> list[str]:
     return out
 
 
+def drawing_order(s: dict, pieces: list[str], plan) -> list[int]:
+    """The slide's elements in the order its page typesets them: the frame's own pieces
+    (`slide_latex`), then what its layout's background template draws at shipout (`adopt_theme.sty`:
+    the master's decoration, the layout's, then the title, subtitle and number slots the frame
+    handed over, in `SLOTS` order)."""
+    els = s["elements"]
+    drawn = plan.drawn if plan else set()
+    body = [k for k, p in enumerate(pieces) if p and k not in drawn]
+    if not plan or not plan.layout:
+        return body
+    from .adopt_theme import SLOTS
+    lid = s.get("layout")
+    master = [k for k in sorted(drawn) if pieces[k] and els[k].get("inherited") and els[k]["inherited"] != lid]
+    own = [k for k in sorted(drawn) if pieces[k] and els[k].get("inherited") == lid]
+    slots = [k for types, *_ in SLOTS.values() for k in sorted(drawn)
+             if pieces[k] and not els[k].get("inherited") and els[k].get("placeholder") in types]
+    return body + master + own + slots
+
+
 def keys_file(target: dict, pieces: list[list[str]], plans: list, names: list[str]) -> str:
     """slides-keys.tex: for each frame, the deck object each of its marks came from (`\\slidekeys`),
-    in the order the frame draws them (`slide_latex`: its pieces, less what its layout draws)."""
-    lines = ["% Which deck object each element of a frame came from, in the order the frame draws them:",
+    in the order the page draws them (`drawing_order`)."""
+    lines = ["% Which deck object each element of a frame came from, in the order the page draws them:",
              "% written by beamer2slides adopt, for the tools that read the PDF back. Frames that say nothing",
              "% here are numbered instead; nothing on the page depends on this file."]
     for s, ps, plan, name in zip(target["slides"], pieces, plans, names):
-        keys = [k for el, p, idx in zip(s["elements"], ps, range(len(ps)))
-                if p and not (plan and idx in plan.drawn) for k in piece_keys(el, p)]
+        keys = [key for k in drawing_order(s, ps, plan) for key in piece_keys(s["elements"][k], ps[k])]
         if name and any(keys):
             lines.append(f"\\slidekeys{{{name}}}{{{','.join(keys)}}}")
     return "\n".join(lines) + "\n"
@@ -3515,7 +3541,9 @@ SLIDES_STY_HEAD = r"""%% slides.sty - written by beamer2slides adopt, with main.
 % Every element below tells the PDF what it is, for the tools that read the page back (it draws nothing):
 %   /B2S <</k (key) /n N /t (kind)>> BDC ... EMC  around the element, N counting the page's elements,
 %     the key the deck object it came from (\slidekeys: slides-keys.tex, which adopt writes);
-%   /B2Sp <</i N /a (align) /l level>> BDC ... EMC  around each paragraph of a text box (/l: a list item's).
+%   /B2Sp <</i N /a (align) /l level>> BDC ... EMC  around each paragraph of a text box (/l: a list item's),
+%   /B2Sb BMC ... EMC  around its bullet or number;
+%   a table's own says /rows and /cols, and /B2Sc <</r row /c column>> BDC ... EMC is around each cell's text.
 \newcount\slides@elt
 \newcount\slides@parn
 \AddToHook{shipout/after}{\global\slides@elt\z@}
@@ -3527,7 +3555,8 @@ SLIDES_STY_HEAD = r"""%% slides.sty - written by beamer2slides adopt, with main.
   \else\let\slides@key\relax\fi
   \ifx\slides@key\relax\let\slides@key\@empty\fi
   \slides@literal{/B2S <<\ifx\slides@key\@empty\else/k (\slides@key)\space\fi
-    /n \the\slides@elt\space/t (#1)>> BDC}}
+    /n \the\slides@elt\space/t (#1)\slides@more>> BDC}}
+\let\slides@more\@empty
 \def\slides@shut{\slides@literal{EMC}}
 \let\slides@pl\@empty
 \def\slides@popen{\global\advance\slides@parn\@ne
