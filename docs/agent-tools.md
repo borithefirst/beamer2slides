@@ -234,7 +234,11 @@ without (`data["pictures_missing"]`). `deck_adopt(pptx=...)` (CLI: `adopt --pptx
 as the person downloaded it (File > Download > Microsoft PowerPoint), a ref or content: its
 pictures are paired with the read deck page by page as an export's are (`deck_pictures`), used
 before any download is tried, and no Drive export is made. A `.json` deck pairs them through the
-`presentation.json` beside it (`deck_ir.pictures_from_pptx`). `data["pptx_pictures"]` is how many
+`presentation.json` beside it (`deck_ir.pictures_from_pptx`), and such a call needs no Google at
+all: `@tool(..., local=)` drops the Google actions from the gate for it, fetches no credentials and
+installs a provider that refuses, so a context with no account (`AgentContext.offline`) adopts a
+saved deck, and a Google call slipped into that path is an `offline` refusal, never the machine's
+own token. `data["pptx_pictures"]` is how many
 of the deck's pictures it held: 0 means another deck, or one changed since (a page whose object
 count or titles no longer match gives nothing rather than a wrong picture). Tests:
 `tests/test_adopt_media.py`.

@@ -141,7 +141,8 @@ def tex_converge(
     _finish(j, result, work_path, out_path, apply, max_iter, "tex_converge")
 
 
-@tool("deck_adopt", needs=(READS, WRITES, READS_GOOGLE))
+@tool("deck_adopt", needs=(READS, WRITES, READS_GOOGLE),
+      local=lambda kw: str(kw.get("deck") or "").lower().endswith(".json"))
 def deck_adopt(
     j: Job,
     deck: Annotated[str, "The deck to adopt: a Slides URL, a presentation id, or a workspace ref to "
@@ -178,8 +179,8 @@ def deck_adopt(
     source to refine. It reads every slide, its layouts and masters and **one LARGE thumbnail
     per slide** (60 such reads a minute, a 429 sleeps 20-60 s: minutes for a big deck), writes a
     source tree, then **compiles it in a loop** like pull. `data["readability"]`: how keepable
-    that source is (sources people wrote: 0.6-1.0). A `.json` deck is read locally, but credentials
-    are fetched anyway. Missing fonts (ask for them) and pictures: `data["fonts_missing"]`, `["pictures_missing"]`.
+    that source is (sources people wrote: 0.6-1.0). A `.json` deck needs no Google access at
+    all. Missing fonts (ask for them) and pictures: `data["fonts_missing"]`, `["pictures_missing"]`.
     """
     from ..adopt import written_already
 

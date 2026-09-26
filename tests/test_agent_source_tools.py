@@ -54,6 +54,32 @@ def test_an_offline_workspace_refuses_the_google_journeys(tmp_path):
     assert list(tmp_path.iterdir()) == []
 
 
+def test_a_saved_deck_is_adopted_with_no_google_at_all(tmp_path, monkeypatch):
+    """A sandbox handed the deck as files - a saved .json deck and its .pptx, as content - with no
+    account and no Google allowed: nothing asks for credentials."""
+    import base64
+
+    from .test_fontfiles import fake_adopt
+    seen: dict = {}
+    fake_adopt(monkeypatch, seen)
+    ctx = AgentContext.offline(tmp_path)
+    res = deck_adopt(ctx, deck={"name": "deck.json", "text": json.dumps({"slides": []})}, tex="main.tex",
+                     pptx={"name": "deck.pptx", "base64": base64.b64encode(b"PK").decode()})
+    assert res.ok, res.json()
+    assert seen["pptx"].name == "deck.pptx"
+    assert deck_adopt(ctx, deck="someid", tex="other.tex").code == "offline", "a live deck still needs it"
+
+
+def test_a_google_call_in_a_local_adopt_is_refused_not_made(tmp_path, monkeypatch):
+    """Run as needing no Google, it gets none: not even the token this machine has on disk."""
+    from beamer2slides import google_auth
+    monkeypatch.setattr("beamer2slides.adopt.cmd_adopt", lambda *a, **k: google_auth.credentials())
+    (tmp_path / "deck.json").write_text(json.dumps({"slides": []}), encoding="utf-8")
+    res = deck_adopt(AgentContext(workspace=LocalWorkspace(tmp_path), google=FakeGoogle(), allow=ALL_ACTIONS),
+                     deck="deck.json", tex="main.tex")
+    assert not res.ok and res.code == "offline" and "without Google" in res.summary, res.json()
+
+
 def test_a_context_that_allows_no_google_refuses_even_holding_an_account(tmp_path):
     ctx = AgentContext(workspace=LocalWorkspace(tmp_path), google=FakeGoogle(), allow=LOCAL_ONLY)
     res = deck_pull(ctx, deck="someid", tex="main.tex")
@@ -143,16 +169,6 @@ def test_pull_refuses_a_source_that_is_not_there_before_reading_the_deck(tmp_pat
     res = deck_pull(with_google(tmp_path), deck="someid", tex="main.tex")
     assert not res.ok and res.code == "not_found" and "main.tex" in res.summary
     assert list(tmp_path.iterdir()) == []
-
-
-def test_adopt_reads_a_local_json_target_without_google(tmp_path):
-    """A .json deck is a local target - but `needs` is static, so the credentials are still asked
-    for, which is why an offline context refuses this tool either way (the docstring says so)."""
-    (tmp_path / "deck.json").write_text(json.dumps({"slides": []}), encoding="utf-8")
-    res = deck_adopt(AgentContext.offline(tmp_path, allow=ALL_ACTIONS),
-                     deck="deck.json", tex="new.tex")
-    assert not res.ok and res.code == "offline", res.json()
-    assert not (tmp_path / "new.tex").exists()
 
 
 # ---------------------------------------------------------------- the schema the model reads
