@@ -276,6 +276,41 @@ def test_arabic_is_set_whole_in_a_font_of_its_own_with_harfbuzz(font_folder):
     assert not any("add_fallback" in l for l in lines)
 
 
+def test_arabic_in_the_decks_second_typeface_is_sent_to_a_font_that_has_it(font_folder):
+    """saudi-cats' Montserrat title "Shukran | شكراً": babel's `onchar=ids fonts` only swaps the
+    families it was told about, so in a `\\newfontfamily` switch the Arabic drew as empty boxes."""
+    latin = "Welcome to the kingdom of cats and coral stone alleys "
+    make_font(font_folder, "Arial", "".join(sorted(set(latin + "Shukran|"))) + "شكراً")
+    make_font(font_folder, "Montserrat", "".join(sorted(set("Shukran | " * 8))))
+    adopt._FAMILIES.clear()
+    t = deck_ir(deck(paragraph(latin * 3), paragraph("Shukran | " * 8 + "شكراً", font="Montserrat")),
+                foreign=True)
+    ctx = adopt.Context()
+    lines = adopt.font_preamble(t, None, ctx)
+    command = ctx.font_switches["Montserrat"]
+    assert f"\\babelfont{{{command[1:]}}}[" in "\n".join(lines)
+    assert any(l.startswith(f"\\babelfont[arabic]{{{command[1:]}}}") and l.endswith("{Arial-Regular.ttf}")
+               for l in lines)
+    assert f"\\newcommand{command}{{\\{command[1:]}family}}" in lines
+    assert not any(l.startswith("\\newfontfamily") for l in lines)
+
+
+@pytest.mark.parametrize("arabic", ["", "شكراً"])
+def test_a_second_typeface_that_draws_all_its_letters_is_a_plain_newfontfamily(font_folder, arabic):
+    """arabic-training's Tahoma has Arabic of its own: sent to the sans family's Arabic face its slides
+    lost up to 0.05 ink."""
+    latin = "Welcome to the kingdom of cats and coral stone alleys "
+    make_font(font_folder, "Arial", "".join(sorted(set(latin))) + "شكراً")
+    make_font(font_folder, "Montserrat", "".join(sorted(set("Shukran |"))) + arabic)
+    adopt._FAMILIES.clear()
+    t = deck_ir(deck(paragraph(latin * 3), paragraph("Shukran | " * 8 + arabic, font="Montserrat")),
+                foreign=True)
+    ctx = adopt.Context()
+    lines = adopt.font_preamble(t, None, ctx)
+    assert any(l.startswith(f"\\newfontfamily{ctx.font_switches['Montserrat']}{{Montserrat}}") for l in lines)
+    assert not any(l.startswith("\\babelfont") for l in lines)
+
+
 def test_the_deck_s_own_hebrew_font_is_fetched_before_one_is_picked(font_folder, monkeypatch):
     """The showcase's water-cycle deck types its Hebrew and Arabic in Noto Sans Hebrew and Arabic. On
     the first run neither was in the font folders yet: CJK fetched its font first, these letters did

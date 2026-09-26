@@ -558,7 +558,8 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
     machine keeps its substitute, which is what the loop reports as a style it cannot close.
 
     The most used font of each kind is the document's (\\setsansfont, ...). Every other font the deck
-    uses enough of and that exists here gets a `\\newfontfamily` switch, recorded in
+    uses enough of and that exists here gets a `\\newfontfamily` switch (a babel family when babel
+    sends letters to fonts by script, `scripts.switch_font_lines`), recorded in
     `ctx.font_switches` (deck font name -> command); `base_lead` puts it at the top of each text box
     whose letters are mostly in that font. A deck has a heading face and a body face more often than
     not (journey-maps: Montserrat titles over Open Sans text), and one family per kind set both in
@@ -645,6 +646,7 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
     if ctx is not None:
         ctx.font_weights = font_weights
         switches: dict[str, str] = {}
+        script_plan = None
         main = set(wanted.values())
         for (fam, font), n in sorted(counts.items(), key=lambda kv: -kv[1]):
             if not font or font in main or font in switches or len(switches) >= EXTRA_FONTS_MAX or \
@@ -671,8 +673,14 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
             command = "\\adoptfont" + "".join(chr(ord("A") + int(d)) for d in str(len(switches)))
             switches[font] = command
             faces = weight_faces(font, files, weights.get(font, {}), tree, font_weights)
-            lines.append(f"\\newfontfamily{command}{{{stem}}}[{font_files_latex(files, tree)}{faces}"
-                         f"{stretch(font, stem, files, target)}]")
+            options = f"{font_files_latex(files, tree)}{faces}{stretch(font, stem, files, target)}"
+            from .scripts import language_letters, plan, switch_font_lines
+            lacking = {lang for lang, seen in language_letters(target, font).items()
+                       if font_coverage(files["UprightFont"], seen, files.get("FontIndex") or 0) < 1.0}
+            if lacking and script_plan is None:
+                script_plan = plan(target)
+            lines += switch_font_lines(target, tree, command, fam, options, stem, lacking, script_plan) or \
+                [f"\\newfontfamily{command}{{{stem}}}[{options}]"]
         ctx.font_switches = switches
         ctx.missing_fonts = missing
     return ["\\usepackage{fontspec}", TEX_LIGATURES_OFF] + lines

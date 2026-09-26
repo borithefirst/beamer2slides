@@ -410,6 +410,40 @@ def babelfont_line(lang: str, key: str, regular: Face, bold: Face | None, tree: 
     return f"\\babelfont[{lang}]{{{key}}}[{','.join(opts)}]{{{name}}}"
 
 
+def language_letters(target: dict, font: str) -> dict[str, dict[str, int]]:
+    """The letters of each babel-font language (Hebrew, Arabic) the deck types in `font`."""
+    out: dict[str, dict[str, int]] = {}
+    for text, f, _fam in deck_text(target):
+        if f != font:
+            continue
+        for ch in text:
+            sc = script_of(ch)
+            lang = SCRIPT_LANGUAGES.get(group_of(sc)) if sc else None
+            if lang:
+                seen = out.setdefault(lang, {})
+                seen[ch] = seen.get(ch, 0) + 1
+    return out
+
+
+def switch_font_lines(target: dict, tree: Path | None, command: str, fam: str, options: str,
+                      name: str, lacking: set[str], plan_: Plan | None = None) -> list[str] | None:
+    """The deck's second typeface (`adopt.font_preamble`'s `command`) as a babel family, when the deck
+    types letters of a `lacking` language in it that it has no glyphs for: `onchar=ids fonts` only
+    swaps the families babel was told about, so Arabic in a `\\newfontfamily` font stayed in it and
+    drew as empty boxes (saudi-cats' Montserrat "Shukran | شكراً"). Only the lacking languages get a
+    face of their own: arabic-training's Tahoma draws its own Arabic, and sending that to the sans
+    family's face cost its slides up to 0.05 ink. None when the plain `\\newfontfamily` does."""
+    if os.environ.get("B2S_NO_SCRIPTS") or not lacking:
+        return None
+    p = plan_ or plan(target)
+    key = command.lstrip("\\")
+    langs = [babelfont_line(lang, key, *faces, tree) for lang, fams in p.languages.items() if lang in lacking
+             for faces in [fams.get(FAMILY_KEYS.get(fam, "sf")) or fams.get("sf")] if faces]
+    if not langs:
+        return None
+    return [f"\\babelfont{{{key}}}[{options}]{{{name}}}", *langs, f"\\newcommand{command}{{\\{key}family}}"]
+
+
 def script_preamble(target: dict, tree: Path | None) -> list[str]:
     """Preamble lines for the deck's scripts, to go before `adopt.font_preamble`'s font lines
     (`\\defaultfontfeatures` applies to the fonts declared after it). Empty for a Latin deck."""
