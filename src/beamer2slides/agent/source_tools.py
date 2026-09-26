@@ -166,6 +166,11 @@ def deck_adopt(
                                        ".woff2), each a workspace ref (a folder: every font in it) or "
                                        "the file itself as content. Preferred to any other copy. "
                                        "Give the ones a previous adopt listed in data['fonts_missing']."] = None,
+    pptx: Annotated[str | None, "The deck as a .pptx the person downloaded (File > Download > "
+                                "Microsoft PowerPoint), a workspace ref or the file itself as content. "
+                                "Its pictures are used first, so a harness that may not download "
+                                "still gets them. Ask for it when data['pictures_missing'] is not "
+                                "empty. A .json deck needs its presentation.json beside it."] = None,
 ) -> None:
     """Write the LaTeX source a foreign deck never had, then converge it onto that deck.
 
@@ -179,6 +184,7 @@ def deck_adopt(
     from ..adopt import written_already
 
     font_paths = [_existing(j, ref, "fonts") for ref in fonts or []]
+    pptx_path = _existing(j, pptx, "pptx") if pptx else None
     tex_path = j.path(tex, write=True)
     if written_already(tex_path):
         # adopt's own refusal, made before the minutes of thumbnails rather than after them.
@@ -211,7 +217,7 @@ def deck_adopt(
     try:
         result = _loop(lambda: cmd_adopt(target_ref, tex_path, work_path, apply, out_path,
                                          max_iter, engine, flow, target_path, log=watch,
-                                         fonts=font_paths, found=found))
+                                         fonts=font_paths, found=found, pptx=pptx_path))
     except ForeignFolder as exc:
         raise Refused("bad_request", str(exc), work=j.ctx.workspace.ref(work_path)) from None
     _fonts_report(j, found)
@@ -255,6 +261,11 @@ def _fonts_report(j: Job, found: dict) -> None:
     j.data["pictures_missing"] = [dict(p) for p in pictures]
     for p in pictures:
         j.warn(f"slide {p['slide']}: picture {p['alt']!r} is not in the source ({p['why']})", where="pictures")
+    if "pptx_pictures" in found:
+        j.data["pptx_pictures"] = found["pptx_pictures"]
+    if any(not p["why"].startswith("LaTeX can't") for p in pictures) and not found.get("pptx_pictures"):
+        j.suggest("ask the person to download the deck as .pptx (File > Download > Microsoft PowerPoint) "
+                  "and adopt again with pptx=... (into a new tex path): its pictures need no download")
 
 
 def _existing(j: Job, ref: str, what: str) -> Path:

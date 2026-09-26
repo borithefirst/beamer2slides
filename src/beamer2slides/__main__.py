@@ -323,6 +323,10 @@ def main() -> None:
                    help="font files the deck is written in (.ttf .otf .ttc .woff .woff2), or a folder of them; "
                         "preferred to this machine's and to google/fonts. Repeatable. A local copy of "
                         "google/fonts is $B2S_FONT_SOURCE instead")
+    c.add_argument("--pptx", type=Path, metavar="FILE",
+                   help="the deck downloaded as .pptx (File > Download > Microsoft PowerPoint): its "
+                        "pictures are used before any download, so --no-downloads still gets them. "
+                        "Download it from the deck as it is now")
     c = sub.add_parser("docs", help="a Google Doc from a canonical HTML file, and back (docs/google-docs.md)")
     docs_sub = c.add_subparsers(dest="docs_command", required=True)
     d = docs_sub.add_parser("push", help="create the document from the file and anchor its blocks")
@@ -379,7 +383,7 @@ def main() -> None:
         from .adopt import cmd_adopt
         target = Path(args.deck) if Path(args.deck).suffix == ".json" else None
         cmd_adopt(args.deck, args.tex, args.work, args.apply, args.out, args.max_iter, args.engine,
-                  args.flow, target, args.base, args.base_in_drive, fonts=args.fonts)
+                  args.flow, target, args.base, args.base_in_drive, fonts=args.fonts, pptx=args.pptx)
         return
     if args.command in ("pull", "converge"):
         from .inverse import cmd_converge, cmd_pull

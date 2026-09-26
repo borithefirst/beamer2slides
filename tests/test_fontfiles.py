@@ -250,12 +250,16 @@ def test_a_fetcher_that_refuses_github_is_no_fetch_and_no_error(fetcher):
 
 def fake_adopt(monkeypatch, seen: dict, missing=(), skipped=()):
     def cmd_adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, log=print,
-                  fonts=None, found=None):
+                  fonts=None, found=None, pptx=None):
         seen["fonts"] = list(fonts or [])
         seen["source"] = fontfetch.source_root()
+        seen["pptx"] = pptx
         found["supplied"] = {"families": {"Tiny Sans": {"styles": ["Regular"]}}, "skipped": list(skipped)}
         found["missing"] = [dict(m) for m in missing]
-        found["pictures_missing"] = [{"slide": 3, "alt": "a cat", "why": "downloads are off"}]
+        if pptx is None:
+            found["pictures_missing"] = [{"slide": 3, "alt": "a cat", "why": "downloads are off"}]
+        else:
+            found["pptx_pictures"] = 1
         return SimpleNamespace(converged=True, iterations=[], residuals=[], unresolved=[], files=[],
                                notes=[], theme=[])
     monkeypatch.setattr("beamer2slides.adopt.cmd_adopt", cmd_adopt)
@@ -297,6 +301,24 @@ def test_deck_adopt_takes_fonts_as_refs_or_content_and_names_what_it_lacked(tmp_
     assert res.data["pictures_missing"] == [{"slide": 3, "alt": "a cat", "why": "downloads are off"}]
     assert any(d.where == "pictures" and "slide 3" in d.message and "a cat" in d.message
                for d in res.diagnostics)
+    assert any("pptx=" in s for s in res.next_steps), "the fix for them: the deck as a .pptx"
+
+
+def test_deck_adopt_takes_the_decks_pptx_as_content(tmp_path, monkeypatch):
+    """The harness hands the deck's download along with the deck: no path, just its bytes."""
+    from beamer2slides.agent.source_tools import deck_adopt
+    seen: dict = {}
+    fake_adopt(monkeypatch, seen)
+    (tmp_path / "deck.json").write_text(json.dumps({"slides": []}), encoding="utf-8")
+    ctx = AgentContext(workspace=LocalWorkspace(tmp_path), google=FakeGoogle(), allow=ALL_ACTIONS)
+    res = deck_adopt(ctx, deck="deck.json", tex="new.tex",
+                     pptx={"name": "cats.pptx", "base64": base64.b64encode(b"PK-zip").decode()})
+    assert res.ok, res.json()
+    assert seen["pptx"].name == "cats.pptx" and seen["pptx"].read_bytes() == b"PK-zip"
+    assert res.data["pptx_pictures"] == 1 and res.data["pictures_missing"] == []
+    assert not any("pptx=" in s for s in res.next_steps)
+    res = deck_adopt(ctx, deck="deck.json", tex="new2.tex", pptx="nosuch.pptx")
+    assert not res.ok and res.code == "not_found" and "nosuch.pptx" in res.summary
 
 
 def test_deck_adopt_refuses_a_font_ref_that_is_not_there(tmp_path, monkeypatch):

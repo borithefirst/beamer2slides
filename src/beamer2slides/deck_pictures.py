@@ -185,9 +185,13 @@ class LivePictures:
 
     `fetch`: the fetcher (`net`), resolved on the calling thread (`google_auth.fetcher_for_threads`)
     when not given. `drive`: the Drive client an export goes through (None: no export). The export
-    is made on the thread that asks - a client is one connection."""
+    is made on the thread that asks - a client is one connection.
 
-    def __init__(self, pres: dict, drive=None, fetch=None, workers: int = 8):
+    `pptx`: the bytes of a .pptx of this deck a person downloaded (File > Download), which stands
+    for the export: no Drive call is made, and a caller may read it before any download
+    (`supplied`)."""
+
+    def __init__(self, pres: dict, drive=None, fetch=None, workers: int = 8, pptx: bytes | None = None):
         self.pres, self.drive, self.workers = pres, drive, workers
         if fetch is None:
             from .google_auth import fetcher_for_threads
@@ -195,7 +199,8 @@ class LivePictures:
         self.fetch = fetch
         self.urls = picture_urls(pres)
         self.got: dict[str, bytes | None] = {}
-        self.exported: dict[str, bytes] | None = None
+        self.exported: dict[str, bytes] | None = None if pptx is None else exported_pictures(pptx, pres)
+        self.supplied = pptx is not None
         self.downloads = 0    # how many were asked of the fetcher
         self.exports = 0      # how many exports were made (0 or 1)
 

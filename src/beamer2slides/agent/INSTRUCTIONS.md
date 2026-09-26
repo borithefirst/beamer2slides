@@ -176,7 +176,11 @@ per attempt. Say so before you start one; do not start two.
 * A picture the deck would not give (downloads refused, or a format LaTeX cannot include) is left
   out of the source, its frame marked with a `% picture left out` comment where it went. They are
   in `data["pictures_missing"]` (slide, alt text, why) and warnings at `where: "pictures"`: tell
-  the person which slides lack a picture; never report such a source as complete.
+  the person which slides lack a picture; never report such a source as complete. The fix is the
+  deck as a .pptx the person downloads (File > Download > Microsoft PowerPoint): pass it as
+  `pptx=` (a ref or the file as content) and adopt again into a new `tex` path. Its pictures need
+  no download; `data["pptx_pictures"]` says how many of the deck's it held (0: another deck, or a
+  deck changed since - ask for a fresh download).
 * Slide order is merged, not taken wholesale: a slide a person dragged stays where they put it.
 * A sync killed halfway loses nothing — the next one sweeps up — so a timeout is not a reason to
   force anything.

@@ -105,6 +105,62 @@ def test_a_picture_the_deck_would_not_give_is_named_and_marked_where_it_went(tmp
     assert any("slide 1 'Sand cat'" in line for line in adopt.missing_pictures_lines([missing]))
 
 
+def cat_deck():
+    """A deck of one photo, and the .pptx a person downloads of it (File > Download)."""
+    from .test_deck_pictures import pic, pptx
+    photo = element("p1", 60, 80, 200, 150, description="Sand cat",
+                    image={"contentUrl": "https://example.invalid/cat.png"})
+    pres = deck_with(photo)
+    pres["presentationId"] = "P"
+    cat = png_bytes(20, 15)
+    return pres, cat, pptx([(pic(rid="r1"), {"r1": cat}, None)])
+
+
+def test_a_live_read_takes_the_pptx_it_is_given_before_any_download(tmp_path, monkeypatch, fetcher):
+    """A sandbox that may fetch nothing is handed the deck's download with the deck: the photo
+    comes out of it, no download is tried for it, and Drive is not asked for an export."""
+    from beamer2slides.deck_ir import read_deck
+
+    from .test_guard import Request
+    monkeypatch.setenv("B2S_ADOPT_THUMBNAILS", "0")
+    pres, cat, data = cat_deck()
+    asked = []
+
+    def refuse(url):
+        asked.append(url)
+        raise PermissionError(url)
+    fetcher(refuse)
+    monkeypatch.setattr("beamer2slides.google_auth.drive_service",
+                        lambda *a, **k: pytest.fail("a supplied .pptx is the export"))
+    slides = type("S", (), {"presentations": lambda self: self,
+                            "get": lambda self, presentationId: Request(pres)})()
+    kept: dict = {}
+    ir = read_deck("P", images=tmp_path / "images", slides=slides, foreign=True, keep=kept, pptx=data)
+    [el] = own(ir)
+    assert Path(el["file"]).read_bytes() == cat and kept["pptx_pictures"] == 1
+    assert "https://example.invalid/cat.png" not in asked
+    [theme] = adopt.pictures_missing(ir)
+    assert theme.get("layout") == "m1", "the master's picture was not in this .pptx: still said"
+
+
+def test_a_saved_target_takes_its_pictures_from_the_decks_pptx(tmp_path):
+    """A target read with downloads off, then the .pptx beside it: paired through the
+    presentations.get it was read from."""
+    from beamer2slides.deck_ir import pictures_from_pptx
+    pres, cat, data = cat_deck()
+    ir = deck_ir(pres, foreign=True, fetch=Fetcher({}), images=tmp_path / "images")
+    [el] = own(ir)
+    assert "error" in el and not el.get("file")
+    assert pictures_from_pptx(ir, pres, data, tmp_path / "images") == (1, 1)
+    assert Path(el["file"]).read_bytes() == cat and "error" not in el
+    assert not [m for m in adopt.pictures_missing(ir) if not m.get("layout")]
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    assert "picture left out: Sand cat" not in text
+    # another deck's download pairs nothing and fills nothing
+    other = deck_with()
+    assert pictures_from_pptx(deck_ir(other, foreign=True), other, data, tmp_path / "images")[0] == 0
+
+
 # ---------------------------------------------------------------- videos
 
 def youtube(oid="v1", w=320.0, h=180.0) -> dict:

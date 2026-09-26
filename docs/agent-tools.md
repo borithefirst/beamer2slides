@@ -227,6 +227,18 @@ knows which files to ask for; what was given and used is `data["fonts_supplied"]
 needs none of this: adopt copies the fonts it set into the source tree's `fonts/`. Tests:
 `tests/test_fontfiles.py`.
 
+**Pictures can come with the deck too.** A foreign deck's pictures are its `contentUrl`s, and the
+Drive export that stands in for them needs a `drive.file` token the deck was opened with, which a
+deck adopt is only pointed at rarely has. With downloads refused both fail and the frames go
+without (`data["pictures_missing"]`). `deck_adopt(pptx=...)` (CLI: `adopt --pptx`) takes the deck
+as the person downloaded it (File > Download > Microsoft PowerPoint), a ref or content: its
+pictures are paired with the read deck page by page as an export's are (`deck_pictures`), used
+before any download is tried, and no Drive export is made. A `.json` deck pairs them through the
+`presentation.json` beside it (`deck_ir.pictures_from_pptx`). `data["pptx_pictures"]` is how many
+of the deck's pictures it held: 0 means another deck, or one changed since (a page whose object
+count or titles no longer match gives nothing rather than a wrong picture). Tests:
+`tests/test_adopt_media.py`.
+
 ### `allow` - what the agent may do
 
 Four actions: `reads`, `writes`, `reads_google`, `writes_google`. A context lists what it

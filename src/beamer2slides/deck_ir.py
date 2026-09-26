@@ -1368,13 +1368,17 @@ def presentation_id(ref: str) -> str:
 
 
 def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pdf_size: list[float] | None = None,
-              slides=None, foreign: bool = False, keep: dict | None = None) -> dict:
+              slides=None, foreign: bool = False, keep: dict | None = None, pptx: bytes | None = None) -> dict:
     """Fetch a live deck and return its IR (pictures downloaded into `images`). `foreign`: read it as
     a deck nobody converted (`deck_ir`) - what `adopt` asks for and `pull` does not.
 
     `keep`: a dict the raw `presentations.get` answer is put into under "presentation". The IR says
     where things are, not which object they are; `adopt_sync` needs the read-back (object ids, text
-    runs, transforms) to record a sync base, and this is how it gets it without a second fetch."""
+    runs, transforms) to record a sync base, and this is how it gets it without a second fetch.
+
+    `pptx`: a .pptx of this deck a person downloaded (File > Download). Its pictures are taken
+    before any download is tried, and no Drive export is made: a process that may fetch nothing
+    (`--no-downloads`, a sandbox) still gets them. `keep["pptx_pictures"]`: how many it held."""
     from .google_auth import slides_service
     from .gslides import execute
     slides = slides or slides_service()
@@ -1398,21 +1402,66 @@ def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pd
         # (`deck_pictures`: a harness that may not fetch a contentUrl still reads the pictures).
         from .deck_pictures import LivePictures
         from .google_auth import drive_service, fetcher_for_threads
-        live = LivePictures(pres, None, fetcher_for_threads())
+        live = LivePictures(pres, None, fetcher_for_threads(), pptx=pptx)
+        if pptx is not None and keep is not None:
+            keep["pptx_pictures"] = len(live.exported or {})
 
         def fetch(url: str) -> bytes:
+            oid = next((i for i, u in live.urls.items() if u == url), None)
+            if live.supplied and oid in live.exported:
+                return live.exported[oid]
             try:
                 return fetch_url(url, live.fetch)
             except Exception:  # noqa: BLE001 - a harness's fetcher raises its own types
-                oid = next((i for i, u in live.urls.items() if u == url), None)
-                if oid is None:
-                    raise
+                if oid is None or live.supplied:
+                    raise  # (a supplied .pptx is the export: Drive is not asked for another)
                 live.drive = live.drive or drive_service()
                 data = live.export().get(oid)
                 if not data:
                     raise
                 return data
     return deck_ir(pres, pdf_size or (base or {}).get("page_size"), base, fetch, images, foreign, thumbnails)
+
+
+def pictures_from_pptx(target: dict, pres: dict, data: bytes, images: Path) -> tuple[int, int]:
+    """Give a saved IR the pictures it was read without, out of a .pptx of the same deck (File >
+    Download): an image element by the object it was read from (`object`, a layout's own for an
+    inherited one), a slide's background picture by its URL. `pres` is the `presentations.get`
+    the IR was read from - the .pptx is paired with it page by page (`exported_pictures`), so a
+    download of another revision gives only the pages that still pair. -> (filled, held)."""
+    from .deck_pictures import exported_pictures, picture_urls
+    exported = exported_pictures(data, pres)
+    by_url = {u: oid for oid, u in picture_urls(pres).items()}
+
+    def lacks(file) -> bool:
+        return not file or not Path(file).exists()
+
+    def put(oid: str | None) -> dict:
+        return stash_picture(oid or "", lambda _: exported[oid], images) if oid in exported else {}
+
+    def fill(node) -> int:
+        n = 0
+        if isinstance(node, dict):
+            if node.get("kind") == "image" and not node.get("video") and lacks(node.get("file")):
+                got = put(node.get("object"))
+                if got.get("file"):
+                    node.pop("error", None)
+                    node.update(got)
+                    n += 1
+            n += sum(fill(v) for v in node.values() if isinstance(v, (dict, list)))
+        elif isinstance(node, list):
+            n += sum(fill(v) for v in node)
+        return n
+
+    filled = 0
+    for s in target.get("slides", []):
+        filled += fill(s.get("elements", []))
+        if s.get("background_picture") and lacks(s.get("background_file")):
+            got = put(by_url.get(s["background_picture"]))
+            if got.get("file"):
+                s["background_file"] = got["file"]
+                filled += 1
+    return filled, len(exported)
 
 
 def slide_thumbnails(pid: str, pres: dict, folder: Path):

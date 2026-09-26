@@ -3825,19 +3825,25 @@ def written_already(tex: Path) -> bool:
 
 def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
               engine: str | None, flow: bool, target_path: Path | None = None, base: bool = True,
-              base_in_drive: bool = False, log=print, fonts=None, found: dict | None = None):
+              base_in_drive: bool = False, log=print, fonts=None, found: dict | None = None,
+              pptx: Path | None = None):
     """Read a foreign deck, write a source for it, then converge that source onto the deck.
 
     `fonts`: font files or folders of them a person supplied (.ttf .otf .ttc .woff .woff2), laid
-    out in `<work>/fonts-supplied` (`fontfiles.install`) and preferred to any other. `found`, when
-    given, is filled with `supplied` (what was made of those files), `missing` (the fonts the
-    deck names that were set in something else, `font_preamble`) and `pictures_missing` (the
-    pictures the source is written without, `pictures_missing`)."""
+    out in `<work>/fonts-supplied` (`fontfiles.install`) and preferred to any other. `pptx`: a
+    .pptx of the deck a person downloaded (File > Download), whose pictures are used before any
+    download (`deck_ir.read_deck`; a saved target needs its presentation.json beside it,
+    `deck_ir.pictures_from_pptx`). `found`, when given, is filled with `supplied` (what was made
+    of those files), `missing` (the fonts the deck names that were set in something else,
+    `font_preamble`), `pictures_missing` (the pictures the source is written without,
+    `pictures_missing`) and, with a `pptx`, `pptx_pictures` (how many pictures of the deck it held)."""
     tex = Path(tex).resolve()
     work = Path(work).resolve() if work else tex.parent / "out" / "adopt"
     found = {} if found is None else found
     found.setdefault("missing", [])
     found.setdefault("pictures_missing", [])
+    if pptx is not None and not Path(pptx).is_file():
+        raise SystemExit(f"no .pptx at {pptx}")
     roots = []
     if fonts:
         from . import fontfiles
@@ -3849,21 +3855,39 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
         roots.append(work / "fonts-supplied")
     with use_fonts(*roots):
         return _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base,
-                      base_in_drive, log, found["missing"], found["pictures_missing"])
+                      base_in_drive, log, found["missing"], found["pictures_missing"], pptx, found)
 
 
 def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base, base_in_drive, log,
-           missing: list, pictures: list):
+           missing: list, pictures: list, pptx: Path | None = None, found: dict | None = None):
     from .inverse import run_pull
     pres = None
+    data = Path(pptx).read_bytes() if pptx else None
+    held = None
     if target_path is not None:
         target = json.loads(Path(target_path).read_text(encoding="utf-8"))
         pres = presentation_beside(target_path)
+        if data is not None and pres is None:
+            log(f"{Path(pptx).name} is not used: a saved target pairs its pictures through the "
+                f"presentation.json beside it, and there is none")
+        elif data is not None:
+            from .deck_ir import pictures_from_pptx
+            filled, held = pictures_from_pptx(target, pres, data, work / "target-images")
+            log(f"{Path(pptx).name}: {filled} picture(s) the target lacked")
     else:
         from .deck_ir import read_deck
         kept: dict = {}
-        target = read_deck(deck, images=work / "target-images", foreign=True, keep=kept)
+        target = read_deck(deck, images=work / "target-images", foreign=True, keep=kept, pptx=data)
         pres = kept.get("presentation")
+        held = kept.get("pptx_pictures")
+    if held is not None:
+        log(f"{Path(pptx).name}: {held} picture(s) of this deck")
+        from .deck_pictures import picture_urls
+        if held == 0 and pres and picture_urls(pres):
+            log("  none: it is not a .pptx of this deck, or its pages no longer pair with the deck as "
+                "read (download it again)")
+        if found is not None:
+            found["pptx_pictures"] = held
     log(f"deck: {len(target['slides'])} slides read")
     if written_already(tex):
         raise SystemExit(f"{tex} exists already: adopt writes a new source tree (use `pull` to refine one)")
