@@ -366,6 +366,18 @@ def test_line_rounded_turned_and_freeform_shapes_draw_the_paths_they_stand_for(t
 
 
 @pytest.mark.skipif(not lualatex(), reason="lualatex not found")
+def test_straight_quotes_and_double_hyphens_reach_the_pdf_as_typed(tmp_path):
+    """saudi-cats' 'Bissas' came out curly: fontspec's TeX ligatures turn ' " ` -- into ’ ” ‘ – whatever
+    spelling reaches the font, so adopt's escapes alone never kept them (`TEX_LIGATURES_OFF`)."""
+    text, _ = written(tmp_path)
+    words = "it's \"objects\" `a' a--b"
+    main = tmp_path / "tree" / "main.tex"
+    main.write_text(with_frames(text, adopt.text_escape(words)), encoding="utf-8")
+    got = "".join(ch.c for ch in compiled(main)[0].chars())
+    assert re.sub(r"\s", "", got) == words.replace(" ", "")
+
+
+@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
 def test_a_slidetable_puts_its_cells_fills_and_borders_where_the_deck_has_them(tmp_path):
     """test_adopt_tables' table (a header over two columns, a first cell over two rows, a fill Slides
     does not draw, a border inside a merge) compiled: every word, fill and rule where Slides has it."""

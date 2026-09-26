@@ -675,7 +675,14 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
                          f"{stretch(font, stem, files, target)}]")
         ctx.font_switches = switches
         ctx.missing_fonts = missing
-    return ["\\usepackage{fontspec}"] + lines
+    return ["\\usepackage{fontspec}", TEX_LIGATURES_OFF] + lines
+
+
+# fontspec gives the roman and sans families TeX's ligatures (' -> ’, " -> ”, -- -> –), whatever
+# spelling reaches the font: \symbol{39} and -{}- came out curly and as a dash all the same
+# (saudi-cats' 'Bissas'). A deck's characters are the source's; a plain \defaultfontfeatures loses to
+# fontspec's own per-family default, so the families are named. \newfontfamily fonts have none.
+TEX_LIGATURES_OFF = "\\defaultfontfeatures[\\rmfamily,\\sffamily]{Ligatures=TeXOff}"
 
 
 def stood_in(font: str, files: dict) -> str | None:
@@ -1185,8 +1192,9 @@ def mixed_sizes(p: dict) -> bool:
 
 def text_escape(text: str) -> str:
     """LaTeX for plain text as Slides shows it: runs of spaces are kept (Slides does not fold them),
-    and straight quotes, backquotes and double hyphens stay what they are - fontspec's TeX ligatures
-    would turn ds-lecture's "objects" into curly quotes and -- into an en dash."""
+    and straight quotes, backquotes and double hyphens stay what they are. These spellings keep
+    texmap's reading of the source literal; what stops the font turning ds-lecture's "objects" into
+    curly quotes and -- into an en dash is `TEX_LIGATURES_OFF` in the preamble."""
     from .inverse import latex_escape
     out = latex_escape(text.replace("\t", " ").replace("\x0b", " "))
     out = out.replace('"', "\\symbol{34}").replace("'", "\\symbol{39}").replace("`", "\\symbol{96}")
