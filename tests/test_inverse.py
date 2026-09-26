@@ -154,6 +154,18 @@ def test_a_title_that_is_a_number_is_compared_not_taken_for_a_frame_counter():
     assert "paragraph_missing" in residual_kinds_between(gone, d)
 
 
+def test_a_note_hyphenated_at_a_line_end_is_the_same_note():
+    """saudi-cats' note page reads "hyper- modern" and "cul- tural" where Slides has neither break."""
+    d = fixture_deck()
+    s = slide_of(d, "method")
+    d["slides"][s]["notes"] = "an ancient and hyper-modern cultural kingdom"
+    cur = copy.deepcopy(d)
+    cur["slides"][s]["notes"] = "an ancient and hyper- modern cul- tural kingdom"
+    assert "notes" not in residual_kinds_between(cur, d)
+    cur["slides"][s]["notes"] = "an ancient and modern cultural kingdom"
+    assert "notes" in residual_kinds_between(cur, d)
+
+
 def residual_kinds_between(cur: dict, tgt: dict) -> dict:
     from collections import Counter
     return dict(Counter(r["kind"] for r in compare(cur, tgt).open()))

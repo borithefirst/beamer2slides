@@ -575,9 +575,19 @@ def compare(cur: dict, tgt: dict, tol: dict | None = None, hashes: dict | None =
     return comp
 
 
+# A hyphen between letters, and the line break after it: TeX breaks a note's lines where Slides
+# breaks none, and a note page reads "cul- tural" and "hyper- modern" (saudi-cats). Neither
+# \hyphenpenalty nor \automatichyphenmode in the note page's template kept LuaTeX from breaking there.
+NOTE_HYPHEN_RE = re.compile(r"(?<=[^\W\d_])-\s*(?=[^\W\d_])")
+
+
+def norm_notes(text: str) -> str:
+    return norm_text(NOTE_HYPHEN_RE.sub("", text))
+
+
 def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comparison, hashes) -> None:
     where = {"slide": ci, "target_slide": ti}
-    cn, tn = norm_text(c.get("notes") or ""), norm_text(t.get("notes") or "")
+    cn, tn = norm_notes(c.get("notes") or ""), norm_notes(t.get("notes") or "")
     if cn != tn:
         add("notes", **where, cur=c.get("notes"), tgt=t.get("notes"))
     if t.get("background_color") and c.get("background_color") and \
