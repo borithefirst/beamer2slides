@@ -128,12 +128,15 @@ def source_zip(tree: Path, dest: Path, deck: dict) -> None:
               for f in families]
     lines += ["", "Files expected in fonts/:"] + [f"  {f}" for f in fonts]
     dest.parent.mkdir(parents=True, exist_ok=True)
+    # one fixed date, so a rebuild changes gh-pages only where a source changed
+    def put(z, name, data):
+        z.writestr(zipfile.ZipInfo(f"{dest.stem}/{name}", (2026, 1, 1, 0, 0, 0)), data, zipfile.ZIP_DEFLATED)
     with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(tree.rglob("*")):
             rel = p.relative_to(tree)
             if p.is_file() and rel.parts[0] != "fonts":
-                z.write(p, f"{dest.stem}/{rel.as_posix()}")
-        z.writestr(f"{dest.stem}/FONTS.txt", "\n".join(lines) + "\n")
+                put(z, rel.as_posix(), p.read_bytes())
+        put(z, "FONTS.txt", "\n".join(lines) + "\n")
 
 
 def write(out: Path, tag: str = "showcase") -> Path:
