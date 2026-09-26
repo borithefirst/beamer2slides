@@ -240,6 +240,63 @@ def test_a_pie_takes_the_angles_its_thumbnail_shows():
     assert "end angle=-" in block and "270" not in block
 
 
+def draw_rounded(a, x0, y0, x1, y1, r, colour):
+    """A rounded box painted into `a` (float), 4x4 supersampled as a renderer's antialiasing draws it."""
+    yy, xx = np.mgrid[0:a.shape[0], 0:a.shape[1]] + 0.5
+    cover = np.zeros(a.shape[:2])
+    for sy in (-0.375, -0.125, 0.125, 0.375):
+        for sx in (-0.375, -0.125, 0.125, 0.375):
+            x, y = xx + sx, yy + sy
+            cx, cy = np.clip(x, x0 + r, x1 - r), np.clip(y, y0 + r, y1 - r)
+            cover += ((x - cx) ** 2 + (y - cy) ** 2 <= r * r) & (x >= x0) & (x <= x1) & (y >= y0) & (y <= y1)
+    cover = (cover / 16)[..., None]
+    a[:] = a * (1 - cover) + np.array(colour) * cover
+
+
+def test_a_rounded_rectangle_takes_the_corners_its_thumbnail_shows():
+    """journey-maps' title bars are ROUND_RECTANGLEs whose corners were dragged square; the API gives
+    no adjustment, and the preset's default drew them a sixth of their height round. A pill keeps
+    its half-height corners, and a corner hidden under another shape says nothing."""
+    a = page().astype(float)
+
+    def rounded(*args):
+        draw_rounded(a, *args)
+    rounded(0, 0, 720, 45, 0, [204, 255, 0])
+    rounded(100, 100, 400, 160, 30, [66, 133, 244])
+    rounded(450, 100, 650, 200, 16, [219, 68, 55])
+    rounded(0, 250, 200, 330, 12, [15, 157, 88])                    # on the page's left edge
+    tab = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [0, 250, 200, 330], "fill": "#0f9d58", "id": "t", "object": "t"}
+    assert abs(deck_fills.corner_radius(a.astype(np.int16), tab, [], 1.0) - 12) < 1
+    bar ={"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [0, 0, 720, 45], "fill": "#ccff00", "id": "b", "object": "b"}
+    pill = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [100, 100, 400, 160], "fill": "#4285f4", "id": "p", "object": "p"}
+    card = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [450, 100, 650, 200], "fill": "#db4437", "id": "c", "object": "c"}
+    lid = {"kind": "shape", "shape_type": "RECTANGLE", "bbox": [440, 90, 720, 300], "fill": "#db4437", "id": "l", "object": "l"}
+    out = {e["id"]: e for e in deck_fills.settle([bar, pill, card], a.astype(np.int16), 1.0, "#ffffff")}
+    assert out["b"]["corner_radius"] < 0.5 and abs(out["p"]["corner_radius"] - 30) < 1 and abs(out["c"]["corner_radius"] - 16) < 1
+    assert "rounded" not in adopt_shapes.shape_block(out["b"], Context(), "")
+    assert "rounded=30" in adopt_shapes.shape_block(out["p"], Context(), "")
+    card.pop("corner_radius")
+    hidden = {e["id"]: e for e in deck_fills.settle([card, lid], a.astype(np.int16), 1.0, "#ffffff")}
+    assert "corner_radius" not in hidden["c"]
+
+
+def test_an_outlined_box_is_read_by_its_outline_and_not_on_another_ones():
+    """gdg24 54: a pale pink card outlined in black on a grey page, standing on a yellow card's black
+    outline. The pink is too near the grey to see an edge in, but its outline is not; and the corner
+    on the yellow card's outline is no edge at all - it read as square, the only corner read."""
+    a = np.full((405, 720, 3), 238.0)
+    for box, r, fill in (((200, 200, 400, 330), 30, [251, 188, 4]), ((260, 60, 460, 200), 30, [248, 216, 216])):
+        x0, y0, x1, y1 = box
+        draw_rounded(a, x0 - 2, y0 - 2, x1 + 2, y1 + 2, r + 2, [0, 0, 0])      # a 4 px outline on the edge
+        draw_rounded(a, x0 + 2, y0 + 2, x1 - 2, y1 - 2, r - 2, fill)
+    yellow = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [200, 200, 400, 330], "fill": "#fbbc04",
+              "outline": "#000000", "weight": 4, "id": "y", "object": "y"}
+    pink = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [260, 60, 460, 200], "fill": "#f8d8d8",
+            "outline": "#000000", "weight": 4, "id": "p", "object": "p"}
+    out = {e["id"]: e for e in deck_fills.settle([yellow, pink], a.astype(np.int16), 1.0, "#eeeeee")}
+    assert abs(out["p"]["corner_radius"] - 30) < 1.5 and abs(out["y"]["corner_radius"] - 30) < 1.5
+
+
 def test_a_drive_videos_poster_frame_is_read_off_the_thumbnail(tmp_path):
     """No API gives a Drive video's poster frame (a play panel stood in); the slide's thumbnail shows it."""
     a = np.random.default_rng(1).integers(0, 256, (405, 720, 3)).astype(np.int16)

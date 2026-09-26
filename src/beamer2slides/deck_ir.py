@@ -24,6 +24,7 @@ from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, O
                    SLIDE_W, FontMapper, extra_above, line_size)
 from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_inset, thumbnail_cell_pad,
                           thumbnail_cell_text, thumbnail_insets, thumbnail_rows, thumbnail_weights, top_drift)
+from .fonts import cjk_font
 from .gslides import EMU_PER_PT
 
 FAMILY_FOR_FONT = {v: k for k, v in FONT_FOR_FAMILY.items()}
@@ -142,6 +143,10 @@ def family_of(font: str) -> str:
     """Which of classify's three families a Slides font name belongs to."""
     if font in FAMILY_FOR_FONT:
         return FAMILY_FOR_FONT[font]
+    # a Mincho, Song, Ming or Batang face is a serif (ja-schedule's MS Mincho read as sans)
+    cjk = cjk_font(font)
+    if cjk:
+        return "serif" if "Serif" in cjk[0] or "Myeongjo" in cjk[0] else "sans"
     low = font.lower()
     if any(w in low for w in MONO_WORDS):
         return "mono"
@@ -183,10 +188,43 @@ class StyleResolver:
         for page in pres.get("layouts", []) + pres.get("masters", []):
             for pe in walk_elements(page.get("pageElements", [])):
                 self.by_id[pe["objectId"]] = pe
+        # Each master has its own colour scheme, and a theme colour means what the scheme of the
+        # page's own master says (a foreign deck can carry several masters that disagree: a dark
+        # variant, a template's leftover). `scheme` is the current page's (`use_page`); until a
+        # page is chosen it is the first master's, filled in by the others where it has no colour.
+        self.schemes: dict[str, dict] = {}
         self.scheme = {}
         for master in pres.get("masters", []):
-            for c in master.get("pageProperties", {}).get("colorScheme", {}).get("colors", []):
-                self.scheme.setdefault(c["type"], rgb_hex({"rgbColor": c.get("color", {})}, {}))
+            own = {c["type"]: rgb_hex({"rgbColor": c.get("color", {})}, {})
+                   for c in master.get("pageProperties", {}).get("colorScheme", {}).get("colors", [])}
+            self.schemes[master["objectId"]] = own
+            for k, v in own.items():
+                self.scheme.setdefault(k, v)
+        self.default = self.scheme
+        self.master_of = {p["objectId"]: (p.get("layoutProperties") or {}).get("masterObjectId")
+                          for p in pres.get("layouts", [])}
+
+    def scheme_for(self, page: dict) -> dict:
+        """The colour scheme of the master a slide, layout or master page descends from."""
+        oid = page.get("objectId")
+        if oid not in self.schemes:
+            layout = (page.get("slideProperties") or {}).get("layoutObjectId") or oid
+            oid = (page.get("slideProperties") or {}).get("masterObjectId") or self.master_of.get(layout)
+        own = self.schemes.get(oid)
+        return {**self.default, **own} if own else self.default
+
+    def use_page(self, page: dict) -> None:
+        self.scheme = self.scheme_for(page)
+
+    def inherited_fill(self, pe: dict) -> dict | None:
+        """A placeholder's fill whose `propertyState` is INHERIT, as its layout (else master) sets
+        it; None when no parent sets one. pycon-2019's body boxes are grey and ml-vs-stats' titles
+        sit on a dark bar only through their layout's placeholder."""
+        for parent in reversed(self.chain(pe)):
+            fill = parent.get("shape", {}).get("shapeProperties", {}).get("shapeBackgroundFill")
+            if fill is not None and fill.get("propertyState") != "INHERIT":
+                return fill
+        return None
 
     def chain(self, pe: dict) -> list[dict]:
         """The placeholder's parents, nearest last (master, then layout)."""
@@ -422,6 +460,7 @@ def text_paragraphs(pe: dict, text: dict, resolver: StyleResolver, fonts: FontMa
                 "size": round(first["size"] * bsize / first["slides_size"], 2) if bsize and first["slides_size"]
                 else first["size"],
                 "font_family": family_of(family) if family else first["family"],
+                "font": family or first.get("font"),
                 "bold": bool(bstyle.get("bold", first["bold"]))})
         text = "".join(r["text"] for r in p["runs"])
         if "\t" in text and not p["bullet"]:
@@ -813,6 +852,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
     for n, slide in enumerate(pres.get("slides", [])):
         tags: list = []
         under: list[dict] = []
+        resolver.use_page(slide)
         if foreign:
             for page in inherited_chain(slide, pages):
                 for el in read_page(page, []):
@@ -869,17 +909,17 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
            "page_size": [page_w, page_h], "scale": scale, "slides": slides}
     if foreign:
         pptx_insets(slides, drifts, sides)
-        out["layouts"] = layouts_of(pres, pages, resolver.scheme)
+        out["layouts"] = layouts_of(pres, pages, resolver)
     return out
 
 
-def layouts_of(pres: dict, pages: dict[str, dict], scheme: dict) -> dict:
+def layouts_of(pres: dict, pages: dict[str, dict], resolver: StyleResolver) -> dict:
     """The deck's layouts and masters by object id: display name, master, and the page background a
     slide inherits from it (`page_background`) - what adopt's recovered theme names and draws."""
     out = {}
     for page in pres.get("layouts", []) + pres.get("masters", []):
         props = page.get("layoutProperties") or page.get("masterProperties") or {}
-        colour, picture = page_background(page, pages, scheme)
+        colour, picture = page_background(page, pages, resolver.scheme_for(page))
         out[page["objectId"]] = {"name": props.get("displayName") or props.get("name") or "",
                                  "master": (page.get("layoutProperties") or {}).get("masterObjectId"),
                                  "background_color": colour, "background_picture": picture}
@@ -961,7 +1001,8 @@ def unread_fill(fill: dict | None) -> bool:
 
 
 def foreign_shape(pe: dict, m: list[float], w: float, h: float, bbox: list[float], fill_hex: str | None,
-                  resolver: StyleResolver, fonts: FontMapper, scale: float, page_w: float) -> dict | None:
+                  resolver: StyleResolver, fonts: FontMapper, scale: float, page_w: float,
+                  inherited: dict | None = None) -> dict | None:
     """A shape of a deck nobody converted, as adopt draws it: its preset (`shape_type`; a freeform,
     which the API gives no geometry for, is CUSTOM), fill and outline with their transparency, dashes
     and weight, and - when it is turned, mirrored or sheared - its own `frame`, which is what a turned
@@ -978,11 +1019,13 @@ def foreign_shape(pe: dict, m: list[float], w: float, h: float, bbox: list[float
         fr = frame(m, w, h, 1.0)
         x0, y0 = fr["box"][:2]
         upright = [fr["size"][0] / w if w else 1.0, 0.0, x0, 0.0, fr["size"][1] / h if h else 1.0, y0]
-    solid = props.get("shapeBackgroundFill", {}).get("solidFill", {})
+    # `inherited`: a placeholder's INHERIT fill as its layout or master sets it (`inherited_fill`)
+    fill = inherited or props.get("shapeBackgroundFill")
+    solid = (fill or {}).get("solidFill", {})
     if solid.get("alpha", 1.0) <= 0.004:
         fill_hex = None  # a fill at alpha 0 draws nothing (sc-memphis' rings: black at alpha 0)
     style: dict = {"fill": fill_hex}
-    if unread_fill(props.get("shapeBackgroundFill")) and not shape.get("placeholder"):
+    if unread_fill(fill) and (inherited or not shape.get("placeholder")):
         style["fill_unread"] = True      # drawn, but not as anything the API says: `deck_fills`
     if fill_hex and solid.get("alpha", 1.0) < 1.0:
         style["fill_alpha"] = round(solid["alpha"], 4)
@@ -1013,10 +1056,14 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
         shape = pe["shape"]
         props = shape.get("shapeProperties", {})
         fill = props.get("shapeBackgroundFill", {})
+        inherited = None
+        if foreign and shape.get("placeholder") and fill.get("propertyState") == "INHERIT":
+            inherited = resolver.inherited_fill(pe)
+            fill = inherited or fill
         fill_hex = rgb_hex(fill.get("solidFill", {}).get("color"), resolver.scheme) \
             if fill.get("propertyState", "RENDERED") == "RENDERED" and "solidFill" in fill else None
         if foreign:
-            return foreign_shape(pe, m, w, h, bbox, fill_hex, resolver, fonts, scale, page_w)
+            return foreign_shape(pe, m, w, h, bbox, fill_hex, resolver, fonts, scale, page_w, inherited)
         el = text_element(pe, m, resolver, fonts, scale, page_w, foreign) if shape.get("text") else None
         if el is not None:
             el["shape_type"] = shape.get("shapeType")

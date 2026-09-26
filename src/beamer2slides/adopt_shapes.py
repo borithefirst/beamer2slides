@@ -189,10 +189,11 @@ def callout_tail(w: float, h: float):
     return w / 2 - w * 0.20833, h / 2 + h * 0.625
 
 
-def preset(kind: str, w: float, h: float) -> list[tuple[str, str]] | None:
+def preset(kind: str, w: float, h: float, corner: float | None = None) -> list[tuple[str, str]] | None:
     """[(TikZ path in the shape's frame, mode)] for a Slides shapeType, mode "fs" (fill and stroke),
     "f" (fill only), "s" (stroke only), or "shade+"/"shade-" (the fill lightened/darkened, as OOXML
-    draws a cube's top or a folded corner). None when the preset is not known here."""
+    draws a cube's top or a folded corner). None when the preset is not known here. `corner`: a
+    rounded rectangle's radius as the thumbnail shows it (`deck_fills.corner_radius`)."""
     ss = min(w, h)
     rect = [(0, 0), (w, 0), (w, h), (0, h)]
     if kind in ("RECTANGLE", "FLOW_CHART_PROCESS", "TEXT_BOX", "HORIZONTAL_SCROLL", "VERTICAL_SCROLL",
@@ -200,6 +201,10 @@ def preset(kind: str, w: float, h: float) -> list[tuple[str, str]] | None:
         return [(poly(rect), "fs")]
     rounded = {"ROUND_RECTANGLE": (1, 1, 1, 1), "ROUND_1_RECTANGLE": (0, 1, 0, 0),
                "ROUND_2_SAME_RECTANGLE": (1, 1, 0, 0), "ROUND_2_DIAGONAL_RECTANGLE": (1, 0, 1, 0)}
+    if corner is not None and (kind in rounded or kind == "FLOW_CHART_ALTERNATE_PROCESS"):
+        if corner < SQUARE_CORNER:
+            return [(poly(rect), "fs")]
+        return [(rounded_poly(rect, [c * min(corner, ss / 2) for c in rounded.get(kind, (1, 1, 1, 1))]), "fs")]
     if kind in rounded:
         return [(rounded_poly(rect, [c * ss * 0.16667 for c in rounded[kind]]), "fs")]
     if kind == "FLOW_CHART_ALTERNATE_PROCESS":
@@ -396,9 +401,15 @@ def preset(kind: str, w: float, h: float) -> list[tuple[str, str]] | None:
     return None
 
 
-def rounded_radius(kind: str, w: float, h: float) -> float | None:
+SQUARE_CORNER = 0.3     # pt: a corner read rounder than this is none
+
+
+def rounded_radius(kind: str, w: float, h: float, corner: float | None = None) -> float | None:
     """The corner radius of a preset that is a rectangle with all four corners rounded alike (what
-    `\\sliderect[rounded=r]` draws with TikZ's rounded corners), else None."""
+    `\\sliderect[rounded=r]` draws with TikZ's rounded corners), else None - a square corner read
+    off the thumbnail (`corner`) included."""
+    if corner is not None and kind in ("ROUND_RECTANGLE", "FLOW_CHART_ALTERNATE_PROCESS"):
+        return min(corner, min(w, h) / 2) if corner >= SQUARE_CORNER else None
     if kind == "ROUND_RECTANGLE":
         return min(w, h) * 0.16667
     if kind == "FLOW_CHART_ALTERNATE_PROCESS":
@@ -898,7 +909,8 @@ def shape_block(el: dict, ctx, ind: str, tree=None) -> str:
         paths = [(ellipse(w / 2, h / 2, w / 2, h / 2), "fs")] if sweep >= 359.5 else \
             [(f"{P(w / 2, h / 2)} -- {arc(w / 2, h / 2, w / 2, h / 2, start, sweep)} -- cycle", "fs")]
     else:
-        paths = preset(kind, w, h) or preset("RECTANGLE", w, h)
+        # a rounded rectangle's corners as the thumbnail shows them (`deck_fills.corner_radius`)
+        paths = preset(kind, w, h, el.get("corner_radius")) or preset("RECTANGLE", w, h)
     ctx.packages.add("\\usepackage{tikz}")
     x0, y0, x1, y1 = el["bbox"]
     where = transform_option(fr, x0, y0)
@@ -940,7 +952,7 @@ def shape_block(el: dict, ctx, ind: str, tree=None) -> str:
     if not drawn:
         return ""
     one = one and len(drawn) == 1
-    radius = rounded_radius(kind, w, h)
+    radius = rounded_radius(kind, w, h, el.get("corner_radius"))
     turn = turn_options(fr) if where.startswith("cm=") else None
     if one and turn is not None:
         # turned or mirrored: the shape in its upright box, turned about the centre

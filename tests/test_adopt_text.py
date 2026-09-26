@@ -230,6 +230,19 @@ def test_list_items_are_itemize_drawn_with_slides_bullets(tmp_path):
     assert "\\llap{\\csname slides@m@" in macros(tmp_path)
 
 
+def test_an_arial_bullet_on_words_of_another_face_is_arials_disc():
+    """sc-functions' • bullets are Arial on News Gothic words: typed in the words' face, they came out
+    as its six-point star. Drawn as Arial's disc; on Arial words, typed as they are."""
+    from beamer2slides.inverse import Context
+    para = lambda font: {"bullet": {"text": "•", "font": "Arial", "size": 20.0, "color": "#000000"},
+                         "runs": [{"text": "x", "font": font, "size": 20.0}]}
+    spec = adopt.bullet_spec(para("News Gothic MT"), Context(), 1.0, 0.0)
+    assert spec["mark"] and spec["label"] == ""
+    assert "radius=2.48pt" in spec["mark"][1] and "baseline=-4.53pt" in spec["mark"][1]
+    typed = adopt.bullet_spec(para("Arial"), Context(), 1.0, 0.0)
+    assert not typed["mark"] and typed["label"] == "•"
+
+
 def test_a_bullet_is_followed_by_no_word_space(tmp_path):
     """The line end after a bullet's \\llap{...} was a space: every bulleted line of the corpus began
     one word space right of Slides' (cs161-tls 0.869 -> 0.989). An item draws its bullet and then
@@ -819,6 +832,14 @@ def test_a_soft_break_anywhere_is_a_line_break_that_compiles(tmp_path):
     assert "\\newcommand\\slidebreak{\\unskip\\break}" in macros(tmp_path)
     # most of the words are bold, so bold is the box's base and the regular word says so
     assert "\\slidebreak \\textmd{opening}bold\\slidebreak word" in frame
+
+
+def test_a_lines_indent_after_a_soft_break_is_kept(tmp_path):
+    """web-forward-tokyo's code is one paragraph of soft-broken lines: TeX discards the glue after a
+    break, so its indents were lost and its long lines stopped wrapping where the deck's do."""
+    d = deck(box("s_s", para("x", runs=[("if (a) {\x0b  return b;\x0b}", {})])))
+    frame = frame_of(source(tmp_path, d))
+    assert "\\slidebreak \\null\\ \\ return b;\\slidebreak \\}" in frame
 
 
 def test_straight_quotes_and_double_hyphens_stay_as_typed():

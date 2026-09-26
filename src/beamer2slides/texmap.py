@@ -398,7 +398,7 @@ ARGS = {
     "setlength": "mm", "addtolength": "mm", "setcounter": "mm", "tikz": "om", "textblockcolour": "m",
     "column": "om", "item": "<o", "caption": "oM", "section": "soM", "subsection": "soM",
     "usetheme": "om", "usecolortheme": "om", "usefonttheme": "om", "graphicspath": "m",
-    "againframe": "<om", "circled": "M", "newline": "", "linebreak": "o", "hfill": "", "vfill": "",
+    "againframe": "<om", "circled": "M", "newline": "", "linebreak": "o", "hfill": "", "vfill": "", "null": "",
     # adopt's vocabulary (adopt.SLIDES_TEXT, adopt_shapes.SHAPE_MACRO: slides.sty)
     "slidepar": "oM", "setslidepar": "m", "setslidelist": "mmm", "slidetext": "ommM", "slidelabel": "mMm", "slidebullet": "mm", "slidestrut": "mm", "slidesize": "m",
     "slidestyle": "mm", "slidemark": "mm", "setslideinset": "m", "slideshape": "omm", "sliderect": "om", "slideellipse": "om", "slidestab": "mM", "slidebreak": "", "slidefillbreak": "",

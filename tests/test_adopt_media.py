@@ -112,7 +112,7 @@ def cat_deck():
                     image={"contentUrl": "https://example.invalid/cat.png"})
     pres = deck_with(photo)
     pres["presentationId"] = "P"
-    cat = png_bytes(20, 15)
+    cat = png_bytes(40, 30)                   # (not tiny: `adopt.TINY_PICTURE` would enlarge it)
     return pres, cat, pptx([(pic(rid="r1"), {"r1": cat}, None)])
 
 
@@ -476,6 +476,20 @@ def test_adopt_sets_the_deck_in_a_fetched_family(monkeypatch, tmp_path):
     assert fonts == ["TinyFlex-Bold.ttf", "TinyFlex-LICENSE.txt", "TinyFlex-Regular.ttf"]
 
 
+def test_ligatures_are_drawn_only_from_slides_own_copy_of_a_font(tmp_path):
+    """Slides joins Google Sans' t_t (gdg24's "little"), a google/fonts file as Slides has it; it
+    draws Calibri's words in a stand-in with none of the ti/tt joins this machine's Calibri makes,
+    and its Lato is older than google/fonts' 2.015, whose ti it does not join (ml-vs-stats). A
+    google/fonts stand-in is not what Slides draws: Droid Serif set in Noto Serif (ap-bio-stats)."""
+    cache = fontfetch.cache_dir()
+    assert adopt.ligatures({"UprightFont": cache / "googlesans" / "GoogleSans-Regular.ttf"}) == ""
+    assert adopt.ligatures({"UprightFont": cache / "lato" / "Lato-Regular.ttf"}) == adopt.ONLY_F_LIGATURES
+    assert adopt.ligatures({"UprightFont": tmp_path / "Windows" / "Fonts" / "calibri.ttf"}) == adopt.NO_LIGATURES
+    noto = {"UprightFont": cache / "notoserif" / "NotoSerif-Regular.ttf"}
+    assert adopt.ligatures(noto) == ""
+    assert adopt.ligatures(noto, standin="NotoSerif") == adopt.NO_LIGATURES
+
+
 def flex_font(name: str, axes: list[tuple]) -> bytes:
     from fontTools.ttLib import TTFont
     font = TTFont(io.BytesIO(tiny_font(name, variable=True)))
@@ -705,3 +719,23 @@ def test_a_dimmed_picture_is_baked_into_its_file(tmp_path):
     assert Image.open(plain.path).convert("RGB").getpixel((3, 3)) == (200, 100, 40)
     bright = adopt.picture_of({"file": str(src), "alt": "Hall", "sha1": "ab" * 20, "brightness": 0.5}, tree)
     assert Image.open(bright.path).convert("RGB").getpixel((3, 3)) == (255, 200, 80)
+
+
+def test_a_tiny_picture_is_drawn_smooth_at_its_size(tmp_path):
+    """vi-slides' background is a 5x5 px photo Slides stretches smoothed over the page; a PDF viewer
+    drew its pixels as squares. It is enlarged, blended, and still the size graphicx gives it."""
+    from PIL import Image
+    from beamer2slides.inverse import natural_size
+    src = tmp_path / "bg.png"
+    img = Image.new("RGB", (5, 5), (0, 0, 0))
+    img.putpixel((0, 0), (255, 255, 255))
+    img.save(src)
+    pic = adopt.picture_of({"file": str(src), "alt": "background", "sha1": "cd" * 20}, tmp_path / "src")
+    out = Image.open(pic.path).convert("RGB")
+    assert max(out.size) == adopt.SMOOTH_PICTURE
+    assert natural_size(pic.path) == pytest.approx((5, 5), abs=0.05)
+    edge = out.getpixel((adopt.SMOOTH_PICTURE // 5, 10))[0]
+    assert 0 < edge < 255, "the pixels blend into each other"
+    big = tmp_path / "big.png"
+    Image.new("RGB", (64, 64), (9, 9, 9)).save(big)
+    assert Image.open(adopt.picture_of({"file": str(big), "alt": "x", "sha1": "ef" * 20}, tmp_path / "src").path).size == (64, 64)

@@ -2175,9 +2175,12 @@ def paragraphs_latex(paragraphs: list[dict], style_for, ctx: Context, ind: str) 
             # takes a line of its own. Only a foreign deck has them (`deck_ir.text_paragraphs`
             # keeps them for `adopt`; classify cannot see one, a PDF having only the gap it
             # leaves), and TeX would drop a paragraph whose entire content is a space - so the
-            # line is a `\strut` at the size the person's Return left room for.
+            # line is a `\strut` at the size the person's Return left room for. The size stays
+            # inside a group ended by the line's own `\par` (so the line keeps its pitch): what
+            # follows is written against the base style and must find it still in effect.
             size = p["runs"][0].get("size")
-            runs = (size_switch(size, ctx.pt_option) if size else "") + "\\strut"
+            switch = size_switch(size, ctx.pt_option) if size else ""
+            runs = "{" + switch + "\\strut\\par}" if switch else "\\strut"
         elif not runs:
             continue
         if "".join(r["text"] for r in p["runs"]).startswith("\x0b"):

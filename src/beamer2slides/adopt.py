@@ -29,6 +29,7 @@ from pathlib import Path
 
 from . import labels as labels_mod
 from . import snapshot
+from .fonts import cjk_font
 from .adopt_shapes import SHAPE_MACRO, shape_style_definitions, survey_styles, turned_text
 from .inverse import (Context, TEXTPOS, body_style, colour_name, frame_latex, paragraphs_latex,
                       picture_block)
@@ -329,6 +330,13 @@ def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
                 if got and flatten(got["match"]) == flatten(sub):
                     # the deck's font, in all but its files (`standin` says whose)
                     return {**got, "match": name, "standin": got["stem"]}
+        # a Windows or Mac CJK face stands in as its Noto face: ja-schedule's MS Mincho address
+        # otherwise fell to the fallback chain's Gothic
+        cjk = cjk_font(name)
+        if cjk and (_have(cjk[0]) or _fetch(cjk[0])):
+            got = _font_family(cjk[0], want)
+            if got and flatten(got["match"]) == flatten(cjk[0]):
+                return {**got, "match": name, "standin": got["stem"]}
     return _font_family(name, want, near)
 
 
@@ -651,7 +659,7 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
                 continue
             gyre = main_stem[fam] = GYRE[fam]
             lines.append(f"\\{command}{{{gyre}}}[Extension=.otf,UprightFont=*-regular,BoldFont=*-bold,"
-                         "ItalicFont=*-italic,BoldItalicFont=*-bolditalic]")
+                         f"ItalicFont=*-italic,BoldItalicFont=*-bolditalic{NO_LIGATURES}]")
             continue
         instead = stood_in(wanted[fam], files)
         if instead:
@@ -667,7 +675,7 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
         else:
             faces = weight_faces(wanted[fam], files, weights.get(wanted[fam], {}), tree, font_weights)
         lines.append(f"\\{command}{{{stem}}}[{font_files_latex(files, tree)}{faces}"
-                     f"{stretch(wanted[fam], stem, files, target)}]")
+                     f"{stretch(wanted[fam], stem, files, target)}{ligatures(files, instead)}]")
     if ctx is not None:
         ctx.font_weights = font_weights
         switches: dict[str, str] = {}
@@ -698,18 +706,27 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
             command = "\\adoptfont" + "".join(chr(ord("A") + int(d)) for d in str(len(switches)))
             switches[font] = command
             faces = weight_faces(font, files, weights.get(font, {}), tree, font_weights)
-            options = f"{font_files_latex(files, tree)}{faces}{stretch(font, stem, files, target)}"
-            from .scripts import language_letters, plan, switch_font_lines
+            options = f"{font_files_latex(files, tree)}{faces}{stretch(font, stem, files, target)}{ligatures(files, instead)}"
+            from .scripts import fontspec_script, language_letters, plan, switch_font_lines
             # (not `lacking`: that name is the missing-font recorder above, called again next font)
-            no_script = {lang for lang, seen in language_letters(target, font).items()
+            shaped = language_letters(target, font)
+            no_script = {lang for lang, seen in shaped.items()
                          if font_coverage(files["UprightFont"], seen, files.get("FontIndex") or 0) < 1.0}
             if no_script and script_plan is None:
                 script_plan = plan(target)
+            # a font that draws its own Arabic or Hebrew must shape it: LuaTeX's node renderer set
+            # arabic-training's Tahoma and Arial words letter by letter, unjoined and wider, and
+            # HarfBuzz without the script joined only some of them (the language most typed in it)
+            own = ""
+            if shaped and not os.environ.get("B2S_NO_SCRIPTS"):
+                most = max(shaped, key=lambda lang: sum(shaped[lang].values()))
+                own = f",Renderer=HarfBuzz,Script={fontspec_script(most)}"
             lines += switch_font_lines(target, tree, command, fam, options, stem, no_script, script_plan) or \
-                [f"\\newfontfamily{command}{{{stem}}}[{options}]"]
+                [f"\\newfontfamily{command}{{{stem}}}[{options}{own}]"]
         ctx.font_switches = switches
         ctx.missing_fonts = missing
-    return ["\\usepackage{fontspec}", TEX_LIGATURES_OFF] + lines
+    only_f = [F_LIGATURES] if any(ONLY_F_LIGATURES in line for line in lines) else []
+    return ["\\usepackage{fontspec}", TEX_LIGATURES_OFF, *only_f] + lines
 
 
 # fontspec gives the roman and sans families TeX's ligatures (' -> ’, " -> ”, -- -> –), whatever
@@ -717,6 +734,43 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
 # (saudi-cats' 'Bissas'). A deck's characters are the source's; a plain \defaultfontfeatures loses to
 # fontspec's own per-family default, so the families are named. \newfontfamily fonts have none.
 TEX_LIGATURES_OFF = "\\defaultfontfeatures[\\rmfamily,\\sffamily]{Ligatures=TeXOff}"
+
+# Slides draws a font's ligatures - from its own copy of the font. gdg24's "little" is Google Sans'
+# t_t (its quote slides 1.000 with luaotfload's default `liga`, 0.96 without), a google/fonts file
+# as Slides has it. A face from this machine is not Slides' copy: Calibri is drawn in a stand-in with
+# none of the ti, tt, ct joins luaotfload made of Calibri's own `liga`/`calt` (ap-bio-stats'
+# "Interaction", "Statistics", "Utterly"). And a stand-in is not the font Slides draws: ap-bio-stats'
+# Droid Serif, set in Noto Serif, lost "fi" joins Slides' Droid Serif never made ("Scientific").
+# Those faces set every letter on its own; required ligatures (`rlig`, Arabic's lam-alef) stay.
+# Nor is every google/fonts file Slides' copy: its Lato is 2.015, whose `liga` joins ti, tt and tf
+# as well; Google's Lato is 1.x, which joins only the f's (ml-vs-stats' "prediction" apart, "Caffo"
+# joined): Lato keeps just the five Unicode f-ligatures (`F_LIGATURES`; all off cost ml-vs-stats
+# 0.03, a title one line short). Hunt 2026-09-26.
+NO_LIGATURES = ",Ligatures={NoCommon,NoContextual}"
+ONLY_F_LIGATURES = ",Ligatures=NoCommon,RawFeature=+b2sfliga"
+F_LIGATURES = ("\\directlua{fonts.handlers.otf.addfeature{name = \"b2sfliga\", type = \"ligature\", data = {"
+               "[0xFB00] = {0x66, 0x66}, [0xFB01] = {0x66, 0x69}, [0xFB02] = {0x66, 0x6C}, "
+               "[0xFB03] = {0x66, 0x66, 0x69}, [0xFB04] = {0x66, 0x66, 0x6C}}}}")
+NEWER_THAN_SLIDES = {"lato"}
+
+
+def ligatures(files: dict, standin: str | None = None) -> str:
+    """The fontspec option that turns a family's ligatures off (or all but the f's, `F_LIGATURES`),
+    or "" when Slides draws them. `standin`: `stood_in`'s answer for the deck's font (the files are
+    another family's)."""
+    if standin:
+        return NO_LIGATURES
+    from .fontfetch import cache_dir
+    upright, cache = Path(files["UprightFont"]), cache_dir()
+    # as written and as resolved: a packaged app's %LOCALAPPDATA% resolves a file into its own
+    # redirected folder but not the folder itself
+    try:
+        google = any(f.is_relative_to(c) for f in (upright, upright.resolve()) for c in (cache, cache.resolve()))
+    except OSError:
+        google = upright.is_relative_to(cache)
+    if not google:
+        return NO_LIGATURES
+    return ONLY_F_LIGATURES if flatten(upright.stem.partition("-")[0]) in NEWER_THAN_SLIDES else ""
 
 
 def stood_in(font: str, files: dict) -> str | None:
@@ -920,6 +974,16 @@ def missing_pictures_lines(missing: list[dict]) -> list[str]:
     return lines
 
 
+TINY_PICTURE = 32      # px: a picture smaller than this each way is drawn enlarged, smoothed
+SMOOTH_PICTURE = 512   # px: the longer side it is enlarged to
+
+
+def pixel_size(path: Path) -> tuple[int, int]:
+    from PIL import Image
+    with Image.open(path) as img:
+        return img.size
+
+
 def picture_of(el: dict, tree: Path | None):
     """The `Picture` for an element whose file the deck gave us, copied into the source tree so the
     tree stands on its own (the download sits in the work folder, which is scratch). None when the
@@ -942,6 +1006,10 @@ def picture_of(el: dict, tree: Path | None):
     bake = {k: el[k] for k in ("brightness", "contrast", "recolor") if el.get(k)}
     if bake and suffix not in (".png", ".jpg", ".jpeg"):
         bake = {}
+    # Slides draws a picture smoothed, a PDF viewer a few pixels as squares: vi-slides' 5x5 px
+    # background photo came out a checkerboard. A tiny picture is enlarged the way Slides draws it.
+    if suffix in (".png", ".jpg", ".jpeg") and max(pixel_size(path)) < TINY_PICTURE:
+        bake = {**bake, "smooth": SMOOTH_PICTURE}
     if tree is None and not bake:
         return Picture(path.name, path, natural_size(path))
     tag = hashlib.sha1(json.dumps(bake, sort_keys=True).encode()).hexdigest()[:4] if bake else ""
@@ -954,11 +1022,18 @@ def picture_of(el: dict, tree: Path | None):
             from .compare import adjusted_picture
             with Image.open(path) as img:
                 img.seek(0)
-                out = adjusted_picture(img, bake)
+                out = adjusted_picture(img, bake) if bake.keys() - {"smooth"} else img.convert("RGBA")
+                dpi = img.info.get("dpi")
+            dpi = tuple(float(d) for d in dpi) if dpi and all(float(d) > 1 for d in dpi) else (72.0, 72.0)
+            if bake.get("smooth"):
+                # enlarged, at a resolution that keeps the size graphicx gives it (`natural_size`)
+                k = bake["smooth"] / max(out.size)
+                out = out.resize((round(out.width * k), round(out.height * k)), Image.BICUBIC)
+                dpi = (dpi[0] * k, dpi[1] * k)
             if suffix == ".png":
-                out.save(dest, "PNG")
+                out.save(dest, "PNG", dpi=dpi)
             else:
-                out.convert("RGB").save(dest, "JPEG", quality=92)
+                out.convert("RGB").save(dest, "JPEG", quality=92, dpi=dpi)
         elif suffix == path.suffix.lower():
             shutil.copyfile(path, dest)
         else:
@@ -1010,6 +1085,36 @@ SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out -----
 \newif\ifslidesspace
 \AddToHook{selectfont}{\ifslidesspace\spaceskip=\fontdimen2\font plus\fontdimen3\font\relax\fi}
 \newcommand{\slidesize}[1]{\fontsize{#1bp}{#1bp}\selectfont\spaceskip=\fontdimen2\font plus\fontdimen3\font\relax}
+% A justified paragraph (\slidesjustifying=1) is broken as a ragged one and each line but its last
+%   then spread to the box's width, as Slides sets it. TeX's own justification chose other breaks:
+%   a line needing more stretch than its spaces had was refused and the line before it ran past the
+%   page (ua-space), and with that allowed, "The ... board" was as good a first line as a full one
+%   (creandum-board 23). A line ended by \slidefillbreak keeps its \hfil and so stays ragged.
+\newcount\slidesjustifying
+\directlua{
+  local hlist, glue = node.id("hlist"), node.id("glue")
+  local rightskip, parfillskip
+  for k, v in pairs(node.subtypes("glue")) do
+    if v == "rightskip" then rightskip = k elseif v == "parfillskip" then parfillskip = k end
+  end
+  luatexbase.add_to_callback("post_linebreak_filter", function(head)
+    if not (tex.count.slidesjustifying == 1) then return true end
+    for line in node.traverse_id(hlist, head) do
+      local last, skip = false, nil
+      for n in node.traverse_id(glue, line.head) do
+        if n.subtype == parfillskip then last = true elseif n.subtype == rightskip then skip = n end
+      end
+      if skip and not last then
+        skip.stretch, skip.stretch_order = 0, 0
+        local box = node.hpack(line.head, line.width, "exactly")
+        line.glue_set, line.glue_sign, line.glue_order = box.glue_set, box.glue_sign, box.glue_order
+        box.head = nil
+        node.free(box)
+      end
+    end
+    return true
+  end, "slides.justify")
+}
 \newcommand{\slidesbox}{\slidesspacetrue\parindent=0pt\parskip=0pt\lineskip=0pt\lineskiplimit=-\maxdimen\hyphenpenalty=10000\exhyphenpenalty=50\tolerance=9999\emergencystretch=0pt\frenchspacing\hbadness=10000\hfuzz=\maxdimen\vbadness=10000\vfuzz=\maxdimen}
 %
 % \slidestyle{name}{size=, family=mono|serif, face=\fontswitch, weight=bold|w<NNN>, italic, color=,
@@ -1127,10 +1232,10 @@ SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out -----
   \let\slides@space\@empty\let\slides@prevdepth\@empty\slides@mixedfalse\let\slides@lang\@empty
   \let\slides@style\@empty\let\slides@mark\@empty\let\slides@label\@empty\let\slides@labelstyle\@empty
   \def\slides@gap{0}}
-\def\slides@align@left{\def\slides@lfil{}\def\slides@rfil{ plus 1fil}\def\slides@pfil{}}
-\def\slides@align@center{\def\slides@lfil{ plus 1fil}\def\slides@rfil{ plus 1fil}\def\slides@pfil{}}
-\def\slides@align@right{\def\slides@lfil{ plus 1fil}\def\slides@rfil{}\def\slides@pfil{}}
-\def\slides@align@justify{\def\slides@lfil{}\def\slides@rfil{}\def\slides@pfil{ plus 1fil}}
+\def\slides@align@left{\def\slides@lfil{}\def\slides@rfil{ plus 1fil}\def\slides@pfil{}\slidesjustifying=0 }
+\def\slides@align@center{\def\slides@lfil{ plus 1fil}\def\slides@rfil{ plus 1fil}\def\slides@pfil{}\slidesjustifying=0 }
+\def\slides@align@right{\def\slides@lfil{ plus 1fil}\def\slides@rfil{}\def\slides@pfil{}\slidesjustifying=0 }
+\def\slides@align@justify{\slides@align@left\slidesjustifying=1 }
 \newcommand\slidepar[1][]{%
   \slides@reset\slides@keys\slides@deckpar\slides@keys\slides@boxpar\setkeys{slidepar}{#1}%
   \slides@parstart
@@ -1239,6 +1344,11 @@ TIKZ = "\\usepackage{tikz}"
 # indentFirstLine, bottom above the baseline). Drawn rather than typed, because the deck's typeface
 # may not have ● ○ ■ at all and a missing glyph in lualatex is nothing on the page.
 BULLET_INK = {"●": (0.413, 0.08, 0.06), "○": (0.43, 0.08, 0.07), "■": (0.45, 0.07, 0.0)}
+# A typed • in Arial, as its glyph draws it (fontTools, arial.ttf): (diameter, side bearing after
+# it, bottom above the baseline) per em. Typed in the paragraph's face it was that face's bullet:
+# sc-functions' News Gothic draws • as a six-point star.
+ARIAL_BULLET = (0.2476, 0.0493, 0.2266)
+ARIAL_LIKE = ("arial", "arimo", "helvetica", "liberationsans")
 RING_EM = 0.06              # ○'s stroke
 GLYPH_GAP = 1.9             # a typed bullet's box ends this far before indentFirstLine (emit.BULLET_GAP)
 WIDE_SPACING = 1.25         # lineSpacing from which the last line's extra space is not in the stack
@@ -1412,8 +1522,11 @@ def runs_tex(runs: list[dict], base: dict, ctx: Context, brk: str) -> str:
             out.append(brk)
         else:
             tex = run_tex(item[1], base, item[2], ctx)
-            if tex.startswith(" ") and out and out[-1].endswith(" ") and out[-1] != brk \
-                    and not out[-1].endswith("\\ "):
+            if tex.startswith(" ") and out and out[-1] == brk:
+                # a line's indent after a soft break: TeX discards glue after a break, so the spaces
+                # stand on an empty box (web-forward-tokyo's code lost every leading space)
+                tex = "\\null\\" + tex
+            elif tex.startswith(" ") and out and out[-1].endswith(" ") and not out[-1].endswith("\\ "):
                 tex = "\\" + tex            # "a " + " b": two spaces, which TeX would fold into one
             out.append(tex)
     text = "".join(out)
@@ -1579,7 +1692,7 @@ def bullet_mark(ctx: Context, glyph: str, z: float, colour: str | None, code: st
     marks = ctx.__dict__.setdefault("bullet_marks", {})
     if code in marks:
         return marks[code]
-    words = [{"●": "dot", "○": "ring", "■": "square"}[glyph]]
+    words = [{"●": "dot", "○": "ring", "■": "square", "•": "bullet"}[glyph]]
     if colour and colour.lower() != (getattr(ctx, "main_colour", None) or "").lower():
         words.append(NAMED_WORDS.get(colour.lower()) or colour_word(colour).lower())
     name = "-".join(words)
@@ -1633,6 +1746,15 @@ def bullet_spec(p: dict, ctx: Context, scale: float, right: float) -> dict | Non
         bullet_mark(ctx, glyph, z, b.get("color"), code)
         return {"mark": ("M", code), "label": "", "labelstyle": "", "gap": num(-right), "literal": ""}
     right -= GLYPH_GAP / scale
+    runs = p.get("runs") or [{}]
+    if glyph == "•" and flatten(b.get("font") or "") in ARIAL_LIKE \
+            and flatten(runs[0].get("font") or "") not in ARIAL_LIKE:
+        ctx.packages.add(TIKZ)
+        d, after, lift = (v * z for v in ARIAL_BULLET)
+        pic = f"\\tikz[baseline={-lift:.2f}pt]\\path[{fill}] ({d / 2:.2f}pt,{d / 2:.2f}pt) circle[radius={d / 2:.2f}pt];"
+        code = to_bp(pic)
+        bullet_mark(ctx, "•", z, b.get("color"), code)
+        return {"mark": ("M", code), "label": "", "labelstyle": "", "gap": num(-(right - after)), "literal": ""}
     family = b.get("font_family") if b.get("font_family") in ("mono", "serif") else ""
     text_style(ctx, float(f"{z:.2f}"), family, "", "bold" if b.get("bold") else "", False, b.get("color"))
     literal = text_escape(glyph)

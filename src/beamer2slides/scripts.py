@@ -44,10 +44,27 @@ RANGES = [
     ("han", 0x3400, 0x4DBF), ("han", 0x4E00, 0x9FFF), ("han", 0xF900, 0xFAFF), ("han", 0xFE30, 0xFE4F),
     ("han", 0xFF00, 0xFF65), ("han", 0xFFE0, 0xFFEF), ("han", 0x20000, 0x3FFFF),
 ]
+# The Brahmic scripts, each named by babel's language for it: their vowel signs reorder and their
+# conjuncts form in the font, so a run is set whole (tamil-wiki's Tamil from the fallback chain came
+# out with dotted circles and dropped signs, hunt 2026-09-26)
+INDIC = [("hindi", 0x0900, 0x097F), ("bengali", 0x0980, 0x09FF), ("punjabi", 0x0A00, 0x0A7F),
+         ("gujarati", 0x0A80, 0x0AFF), ("odia", 0x0B00, 0x0B7F), ("tamil", 0x0B80, 0x0BFF),
+         ("telugu", 0x0C00, 0x0C7F), ("kannada", 0x0C80, 0x0CFF), ("malayalam", 0x0D00, 0x0D7F),
+         ("sinhala", 0x0D80, 0x0DFF)]
+INDIC_FONTS = {"hindi": "Devanagari", "punjabi": "Gurmukhi", "odia": "Oriya"}   # fontspec's and Noto's name
+INDIC_NAMES = {name for name, _, _ in INDIC}
+
+
+def fontspec_script(lang: str) -> str:
+    """fontspec's `Script=` for a babel-font language of `SCRIPT_LANGUAGES`."""
+    return INDIC_FONTS.get(lang, lang.title())
+
+
+RANGES += INDIC
 RTL_SCRIPTS = ("hebrew", "arabic")
 # Scripts whose letters change shape with their neighbours or carry marks placed by the font:
 # node mode leaves Arabic letters unjoined, so these are set with HarfBuzz.
-COMPLEX = ("hebrew", "arabic", "indic")
+COMPLEX = ("hebrew", "arabic", *(name for name, _, _ in INDIC))
 
 
 def script_of(ch: str) -> str | None:
@@ -58,8 +75,6 @@ def script_of(ch: str) -> str | None:
     for name, lo, hi in RANGES:
         if lo <= o <= hi:
             return name
-    if 0x0900 <= o <= 0x0DFF:
-        return "indic"
     if 0x2000 <= o <= 0x206F:                     # general punctuation: dashes, quotes, bullets
         return None if o <= 0x2027 or 0x2030 <= o <= 0x203A else "other"
     return "other"
@@ -103,7 +118,7 @@ FALLBACKS = {
                "Arial Hebrew"],
     "arabic": ["Arial", "Segoe UI", "Tahoma", "Times New Roman", "Noto Naskh Arabic", "Noto Sans Arabic",
                "DejaVu Sans", "Geeza Pro"],
-    "indic": ["Nirmala UI", "Noto Sans Devanagari", "Mangal"],
+    **{name: ["Nirmala UI", f"Noto Sans {fontspec_script(name)}", "Mangal"] for name, _, _ in INDIC},
     "other": ["Segoe UI Symbol", "Cambria Math", "Segoe UI", "Arial", "Noto Sans Symbols 2",
               "Noto Sans Symbols", "Noto Sans Math", "DejaVu Sans", "Symbola", "Apple Symbols"],
 }
@@ -245,7 +260,7 @@ class Plan:
 # babel's language for a script whose letters join or reorder: its runs are set in a font of their
 # own (`onchar=ids fonts`), whole, because a glyph-by-glyph fallback shapes each letter on its own -
 # measured, Arabic from the fallback chain came out half joined.
-SCRIPT_LANGUAGES = {"hebrew": "hebrew", "arabic": "arabic"}
+SCRIPT_LANGUAGES = {"hebrew": "hebrew", "arabic": "arabic", **{name: name for name, _, _ in INDIC}}
 FAMILY_KEYS = {"sans": "sf", "serif": "rm", "mono": "tt"}
 FAMILY_FALLBACKS = {"rm": ["Times New Roman"], "tt": ["Courier New"], "sf": []}
 
@@ -456,8 +471,12 @@ def script_preamble(target: dict, tree: Path | None) -> list[str]:
         lines.append("\\babelprovide[import,main]{english}")
         for lang, fams in p.languages.items():
             # onchar=ids fonts: the language and its fonts follow the letters, so a Hebrew word in
-            # an English line is set in a Hebrew font without the source saying so
-            lines.append(f"\\babelprovide[import{',onchar=ids fonts' if fams else ''}]{{{lang}}}")
+            # an English line is set in a Hebrew font without the source saying so. An Indic
+            # language takes only its fonts: with `ids` its hyphenation patterns came along and
+            # babel's marks inside their discretionaries stopped LuaTeX's line breaker (tamil-wiki:
+            # "invalid node with type whatsit"); adopt never hyphenates anyway
+            onchar = "fonts" if lang in INDIC_NAMES else "ids fonts"
+            lines.append(f"\\babelprovide[import{f',onchar={onchar}' if fams else ''}]{{{lang}}}")
             lines += [babelfont_line(lang, key, *faces_, tree) for key, faces_ in sorted(fams.items())]
         if p.cjk:
             # onchar=ids: the locale follows the characters, so its line breaking applies to every CJK

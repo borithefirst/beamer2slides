@@ -377,6 +377,46 @@ def test_straight_quotes_and_double_hyphens_reach_the_pdf_as_typed(tmp_path):
     assert re.sub(r"\s", "", got) == words.replace(" ", "")
 
 
+def lines_of(page) -> list[str]:
+    """The page's words line by line, top to bottom."""
+    rows: dict[float, list] = {}
+    for ch in page.chars():
+        if ch.c.strip():
+            rows.setdefault(round(ch.origin[1], 1), []).append(ch)
+    return ["".join(ch.c for ch in sorted(row, key=lambda ch: ch.origin[0])) for _, row in sorted(rows.items())]
+
+
+JUSTIFIED = ("The board does not make operational, product feature prioritization decisions, but when "
+             "it comes to shifting resources, or cutting offerings, discussions are often held on the "
+             "board level.")
+
+
+@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
+def test_a_justified_paragraph_breaks_where_its_ragged_twin_breaks(tmp_path):
+    """Slides fills a justified line as it fills a ragged one and only then spreads its spaces. TeX's
+    `\\tolerance` broke that both ways: at 9999 a line that needed more stretch than its spaces had was
+    refused and the one before it ran overfull, past the page (ua-space's hand-indented Ukrainian); at
+    10000 a line a hair too wide for TeX was pulled back to "The ... board", its one space stretched
+    across the box (creandum-board 23). A justified space stretches without limit instead: every line
+    is as good as any, and the lines are the ragged paragraph's."""
+    text, _ = written(tmp_path)
+    style = re.search(r"^\\slidestyle\{([^}]+)\}", text, re.M).group(1)
+    bodies = []
+    for w in range(150, 290, 6):
+        par = f"\\slidepar[style={style}]{{\\ \\ \\ {JUSTIFIED}}}"
+        bodies.append(f"\\begin{{slidebox}}[justify]{{10,10,{w},120}}{par}\\end{{slidebox}}")
+        bodies.append(f"\\begin{{slidebox}}{{10,10,{w},120}}{par}\\end{{slidebox}}")
+    main = tmp_path / "tree" / "main.tex"
+    main.write_text(with_frames(text, *bodies), encoding="utf-8")
+    doc = compiled(main)
+    for k in range(0, len(doc), 2):
+        w = 150 + 3 * k
+        justified, ragged = lines_of(doc[k]), lines_of(doc[k + 1])
+        assert justified == ragged, (w, justified, ragged)
+        right = 10 + w + 1
+        assert all(ch.box[2] <= right for ch in doc[k].chars()), (w, "past the box")
+
+
 @pytest.mark.skipif(not lualatex(), reason="lualatex not found")
 def test_a_slidetable_puts_its_cells_fills_and_borders_where_the_deck_has_them(tmp_path):
     """test_adopt_tables' table (a header over two columns, a first cell over two rows, a fill Slides

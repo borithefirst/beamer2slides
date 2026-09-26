@@ -118,6 +118,45 @@ def test_a_slide_is_given_what_its_layout_and_master_draw():
     assert [e["id"] for e in ir["slides"][0]["elements"]][:1] == ["m1~m1_bg"]
 
 
+def test_a_theme_colour_means_what_the_slides_own_master_says():
+    """applied-ml carries two masters: the first says DARK1 is orange, the one most slides sit on
+    says black. The schemes were merged first-master-wins, and 60 slides of black words came out
+    orange (hunt 2026-09-26; gdg24, apps-edu-zh, firebase-jam alike)."""
+    def scheme(dark1: str) -> dict:
+        return {"colorScheme": {"colors": [{"type": "DARK1", "color": {
+            "red": int(dark1[0:2], 16) / 255, "green": int(dark1[2:4], 16) / 255,
+            "blue": int(dark1[4:6], 16) / 255}}]}}
+
+    pres = presentation()
+    pres["masters"][0]["pageProperties"] = scheme("F46524")
+    pres["masters"].append({"objectId": "m2", "pageProperties": scheme("000000"), "pageElements": []})
+    pres["layouts"].append({"objectId": "L2", "layoutProperties": {"masterObjectId": "m2"}, "pageElements": []})
+    for n, s in enumerate(pres["slides"]):
+        s["slideProperties"] = {"layoutObjectId": "L2" if n else "L1"}
+        run = s["pageElements"][0]["shape"]["text"]["textElements"][1]["textRun"]
+        run["style"]["foregroundColor"] = {"opaqueColor": {"themeColor": "DARK1"}}
+    ir = deck_ir(pres, foreign=True)
+    colours = [next(e for e in s["elements"] if e["kind"] == "text")["paragraphs"][0]["runs"][0]["color"]
+               for s in ir["slides"]]
+    assert [c.upper() for c in colours] == ["#F46524", "#000000", "#000000"]
+
+
+def test_a_placeholder_that_inherits_its_fill_is_drawn_on_its_layouts_panel():
+    """pycon-2019: every body box is grey only through its layout's placeholder (the slide's own
+    fill says INHERIT), and adopt set the dark words on the dark blue page (hunt 2026-09-26)."""
+    pres = presentation()
+    layout_ph = text_shape("L1_body", "", 100, 100, 400, 60, placeholder={"type": "BODY"})
+    layout_ph["shape"]["shapeProperties"] = {"shapeBackgroundFill": solid("F0F0F0")}
+    pres["layouts"][0]["pageElements"].append(layout_ph)
+    for s in pres["slides"]:
+        ph = s["pageElements"][0]["shape"]
+        ph["placeholder"] = {"type": "BODY", "parentObjectId": "L1_body"}
+        ph["shapeProperties"] = {"shapeBackgroundFill": {"propertyState": "INHERIT"}}
+    ir = deck_ir(pres, foreign=True)
+    text = next(e for e in ir["slides"][0]["elements"] if e["kind"] == "text" and not e.get("inherited"))
+    assert text["fill"].upper() == "#F0F0F0"
+
+
 def test_the_layouts_own_placeholder_is_not_drawn():
     """It is the slide's to fill, and holds the layout's prompt - printing it would put the
     template's words under the person's."""

@@ -184,6 +184,11 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
             angles = pie_angles(a, el, elements[k + 1:], px)
             if angles is not None:
                 el["pie"] = list(angles)
+        if a is not None and el["kind"] == "shape" and not el.get("fill_unread") \
+                and (el.get("shape_type") or "").upper() in ROUNDED_CORNERS:
+            r = corner_radius(a, el, elements[k + 1:], px)
+            if r is not None:
+                el["corner_radius"] = r
         if a is not None and pictures is not None and el.get("video") and not el.get("file"):
             # a Drive video's poster frame, which no API gives, is on the slide's thumbnail
             pic = thumbnail_picture(a, el, elements[k + 1:], px, None, pictures)
@@ -286,6 +291,114 @@ def pie_angles(a: np.ndarray, el: dict, above: list[dict], px: float):
     if absent[inside].sum() * PIE_STEP > PIE_STRAY:
         return None
     return (round(float(first * PIE_STEP), 2) % 360.0, round(span * PIE_STEP, 2))
+
+
+# The corners each rounded preset rounds (top left, top right, bottom right, bottom left)
+ROUNDED_CORNERS = {"ROUND_RECTANGLE": (1, 1, 1, 1), "FLOW_CHART_ALTERNATE_PROCESS": (1, 1, 1, 1),
+                   "ROUND_1_RECTANGLE": (0, 1, 0, 0), "ROUND_2_SAME_RECTANGLE": (1, 1, 0, 0),
+                   "ROUND_2_DIAGONAL_RECTANGLE": (1, 0, 1, 0)}
+CORNER_MIN_PX = 12       # a rounded box's shorter side must be this many thumbnail pixels
+# the corners read must give radii this close to each other, or this share of the radius: a big
+# corner's shallow arc reads looser (drawing-workshop 5's 75 px corners read 70, 74 and 80)
+CORNER_AGREE_PX = 2.5
+CORNER_AGREE_SHARE = 0.15
+
+
+def corner_radius(a: np.ndarray, el: dict, above: list[dict], px: float) -> float | None:
+    """The corner radius (IR pt) a rounded rectangle is drawn with, read from the thumbnail: the API
+    gives the preset, not the corner a person dragged, and the preset's default of a sixth of the
+    shorter side rounded journey-maps' square title bars. Along each rounded corner's diagonal the
+    shape's colour begins r(sqrt 2 - 1) in from the box's corner; where it crosses half way from the
+    ground outside is read to a fraction of a pixel. None when unreadable: a turned or mirrored
+    frame, no own opaque colour, a small box, a corner a shape above may hide or on ground of the
+    shape's own colour, or corners that disagree."""
+    corners = ROUNDED_CORNERS.get((el.get("shape_type") or "").upper())
+    fr = el.get("frame") or {}
+    if corners is None or (fr.get("rotation") or 0) % 360 or fr.get("flip") or el.get("fill_gradient"):
+        return None
+    col = rgb(el.get("fill"))
+    if col is None or (el.get("fill_alpha") or 1.0) < 0.99:
+        return None
+    line = rgb(el.get("outline"))
+    h, w = a.shape[:2]
+    x0, y0, x1, y1 = (v * px for v in el["bbox"])
+    if min(x1 - x0, y1 - y0) < CORNER_MIN_PX:
+        return None
+    reach = int(min(x1 - x0, y1 - y0) / 2)
+    # an outline's outer edge is its arc's radius plus half its width round the same centre: on the
+    # diagonal that many pixels / sqrt 2 nearer the box's corner (gdg24's 1.42 pt outlines read 1.7 pt small)
+    rim = (el.get("weight") or 0.75) / 2 * px / 2 ** 0.5 if line is not None else 0.0
+    radii = []
+    for on, (cx, cy, dx, dy) in zip(corners, ((x0, y0, 1, 1), (x1, y0, -1, 1), (x1, y1, -1, -1), (x0, y1, 1, -1))):
+        xa, xb = sorted((cx - 2 * dx, cx + reach * dx))
+        ya, yb = sorted((cy - 2 * dy, cy + reach * dy))
+        if not on or any(overlaps(e, {"bbox": [xa / px, ya / px, xb / px, yb / px]})
+                         for e in above if e["kind"] != "text"):
+            continue                       # (a text's letters stand inside its box, off the corner)
+        steps = np.arange(-2, reach)
+        xs = np.floor(cx + dx * (steps + 0.5)).astype(int)
+        ys = np.floor(cy + dy * (steps + 0.5)).astype(int)
+        if 0 <= xs[0] < w and 0 <= ys[0] < h:
+            # along the diagonal: pixel s's centre is s + 0.5 in from the corner each way, and the arc
+            # crosses the diagonal r (1 - 1/sqrt 2) in
+            e = crossing(a[np.clip(ys, 0, h - 1), np.clip(xs, 0, w - 1)], steps, col, line)
+            if e is not None:
+                radii.append(max(0.0, e + rim) / (1 - 2 ** -0.5))
+            continue
+        # a corner on the page's edge (journey-maps' full-width bars) has no ground outside it along
+        # the diagonal: along the box's first row (column) in from its edge on the page instead,
+        # where the arc is u in from the corner at half a pixel in, r = u + 0.5 + sqrt u
+        steps = np.arange(-1, reach)
+        if 0 <= ys[0] < h:                 # the page's edge is to the side: along the top/bottom row
+            rx = np.clip(np.floor(cx + dx * (steps + 0.5)).astype(int), 0, w - 1)
+            ry = np.full(len(steps), int(np.floor(cy + dy * 0.5)))
+            ry[0] = int(np.floor(cy - dy * 1.5))           # the ground: outside the box's edge
+        elif 0 <= xs[0] < w:
+            ry = np.clip(np.floor(cy + dy * (steps + 0.5)).astype(int), 0, h - 1)
+            rx = np.full(len(steps), int(np.floor(cx + dx * 0.5)))
+            rx[0] = int(np.floor(cx - dx * 1.5))
+        else:
+            continue
+        if not (0 <= rx[0] < w and 0 <= ry[0] < h):
+            continue
+        u = crossing(a[np.clip(ry, 0, h - 1), np.clip(rx, 0, w - 1)], np.r_[-1, steps[1:]], col, line, edge=True)
+        if u is not None:
+            u = max(0.0, u)
+            radii.append(u + 0.5 + u ** 0.5 if u > 0 else 0.0)
+    if not radii or max(radii) - min(radii) > max(CORNER_AGREE_PX, CORNER_AGREE_SHARE * float(np.median(radii))):
+        return None
+    return round(float(np.median(radii)) / px, 2)
+
+
+def crossing(p: np.ndarray, steps: np.ndarray, col, line, edge: bool = False) -> float | None:
+    """Where along a run of pixels (the first the ground outside a shape, the others at `steps` + 0.5
+    in from its corner) the shape's colour or outline covers half a pixel, to a fraction of one; None
+    when the ground is the shape's colour or no three pixels in a row are covered. `edge`: the run
+    starts inside the box, so its first covered pixel may be the first one."""
+    p = p.astype(float)
+    ground = p[0]
+    span = np.abs(ground - col).max()
+    rim = np.abs(ground - line).max() if line is not None else 0.0
+    if line is not None and rim <= 2 * TOL:
+        # on its outline's colour: gdg24 54's pink box stands on the yellow one's black outline, and
+        # that corner read as covered from its first pixel: square, the only corner read (the pink was
+        # too near the page's grey for the others, below)
+        return None
+    if span <= 2 * TOL and not rim:
+        return None                        # on its own colour: no edge to see
+    # (a fill as pale as its ground - the same pink box on gdg24's grey - is edged by its outline)
+    mine = 1 - np.abs(p - col).max(axis=1) / span if span > 2 * TOL else np.zeros(len(p))
+    if line is not None:
+        mine = np.maximum(mine, 1 - np.abs(p - line).max(axis=1) / rim)
+    mine[0] = 0.0
+    inside = np.nonzero(mine >= 0.5)[0]
+    if len(inside) == 0 or mine[inside[0]:inside[0] + 3].min() < 0.5:
+        return None
+    i = inside[0]
+    if edge and i == 1:
+        return 0.0                         # covered from the page's edge on: a square corner
+    t = (0.5 - mine[i - 1]) / max(1e-6, mine[i] - mine[i - 1])     # how far past pixel i - 1
+    return float(steps[i - 1] + 0.5 + t)
 
 
 PICTURE_MIN_PX = 12      # a thumbnail picture's box must be at least this many pixels each way

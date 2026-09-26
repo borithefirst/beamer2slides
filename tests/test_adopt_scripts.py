@@ -142,6 +142,15 @@ def test_left_to_right_paragraphs_are_written_as_before():
     assert out == "a\n\n\\raggedleft b\n\n\\centering c"
 
 
+def test_a_blank_lines_size_ends_with_it():
+    """cs161-tls slide 41: a 9 pt spacer line between 14 pt paragraphs left its `\\fontsize` on, and
+    both paragraphs after it came out at 9 pt (runs are written against the base style)."""
+    spacer = {"runs": [{"text": " ", "size": 7.0}], "align": "left", "bullet": None, "level": 0}
+    out = paragraphs_latex([ltr("a"), spacer, ltr("b")], lambda p: {"size": 18.0}, Context(), "")
+    blank = out.split("\n\n")[1]
+    assert blank.startswith("{\\fontsize") and blank.endswith("\\strut\\par}")
+
+
 def test_a_soft_break_is_never_inside_a_style():
     """`\\underline{a\\\\ b}` stops the build ("Not allowed in LR mode", jruby-ja slide 10)."""
     out = runs_latex([{"text": "10000\x0bmatcher", "underline": True}], {}, Context())
@@ -265,6 +274,17 @@ def test_a_cjk_font_slides_has_or_a_latin_one_is_drawn_as_itself(font_folder, go
     assert adopt.font_family("MS PGothic", "sans")["UprightFont"].name == "MSPGothic-Regular.ttf"
 
 
+def test_a_mincho_face_is_a_serif_that_its_noto_face_stands_in_for(font_folder, google_says_no):
+    """ja-schedule's address is MS Mincho, on no machine here: it read as a sans and fell to the
+    fallback chain's Gothic. It is a serif, set in Noto Serif JP."""
+    from beamer2slides.deck_ir import family_of
+    make_font(font_folder, "Noto Serif JP", "住所です")
+    adopt._FAMILIES.clear()
+    assert family_of("MS Mincho") == "serif" and family_of("MS PGothic") == "sans"
+    files = adopt.font_family("MS Mincho", family_of("MS Mincho"))
+    assert files["UprightFont"].name == "NotoSerifJP-Regular.ttf" and files["match"] == "MS Mincho"
+
+
 def test_arabic_is_set_whole_in_a_font_of_its_own_with_harfbuzz(font_folder):
     """A glyph-by-glyph fallback shapes each letter alone: Arabic goes through babel's fonts."""
     make_font(font_folder, "Arial", "مرحبا ")
@@ -274,6 +294,19 @@ def test_arabic_is_set_whole_in_a_font_of_its_own_with_harfbuzz(font_folder):
     sf = next(l for l in lines if l.startswith("\\babelfont[arabic]{sf}"))
     assert "Renderer=HarfBuzz" in sf and sf.endswith("{Arial-Regular.ttf}")
     assert not any("add_fallback" in l for l in lines)
+
+
+def test_tamil_is_set_whole_in_a_font_of_its_own(font_folder):
+    """tamil-wiki's Tamil came from the glyph-by-glyph fallback chain: vowel signs on dotted circles,
+    conjuncts without theirs. A Brahmic script is a babel language with a font of its own - its
+    fonts only: `onchar=ids` brought Tamil's hyphenation, and LuaTeX's line breaker stopped on
+    babel's marks inside the discretionaries ("invalid node with type whatsit")."""
+    make_font(font_folder, "Nirmala UI", "".join(sorted(set("இணையத்தொழில்நுட்பங்கள்"))))
+    lines = scripts.script_preamble(target_with("இணையத் தொழில்நுட்பங்கள்"), None)
+    assert "\\babelprovide[import,onchar=fonts]{tamil}" in lines
+    sf = next(l for l in lines if l.startswith("\\babelfont[tamil]{sf}"))
+    assert "Renderer=HarfBuzz" in sf and sf.endswith("{NirmalaUI-Regular.ttf}")
+    assert scripts.fontspec_script("hindi") == "Devanagari" and scripts.fontspec_script("tamil") == "Tamil"
 
 
 def test_arabic_in_the_decks_second_typeface_is_sent_to_a_font_that_has_it(font_folder):
@@ -307,8 +340,11 @@ def test_a_second_typeface_that_draws_all_its_letters_is_a_plain_newfontfamily(f
                 foreign=True)
     ctx = adopt.Context()
     lines = adopt.font_preamble(t, None, ctx)
-    assert any(l.startswith(f"\\newfontfamily{ctx.font_switches['Montserrat']}{{Montserrat}}") for l in lines)
+    line = next(l for l in lines if l.startswith(f"\\newfontfamily{ctx.font_switches['Montserrat']}{{Montserrat}}"))
     assert not any(l.startswith("\\babelfont") for l in lines)
+    # and it shapes its own Arabic: LuaTeX's node renderer drew arabic-training's Tahoma unjoined
+    # (and HarfBuzz left to guess the script joined only some letters)
+    assert line.endswith(",Renderer=HarfBuzz,Script=Arabic]") == bool(arabic)
 
 
 def test_a_font_missing_after_a_second_typeface_is_still_named(font_folder):

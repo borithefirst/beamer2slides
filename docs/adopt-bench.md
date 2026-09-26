@@ -1992,3 +1992,134 @@ diagnosis. Before believing a one-slide result about fonts, check it on the whol
 - The first Arabic fix, which also sent Arabic from faces that have it to babel's font, raised ink
   a little on arabic-training slides 1-3, 11 and 21. That suggests a font there draws Arabic
   differently from Slides. It was not pursued.
+
+## A defect hunt on 30 more decks (2026-09-26: `hunt0` -> `fix8`)
+
+The corpus had stopped finding new defects, so a second corpus was gathered: 30 public decks in
+`out/adopt-hunt` (`$B2S_ADOPT_CORPUS=out\adopt-hunt`), picked for what the first corpus lacks:
+Tamil, Thai, Korean, Persian, Ukrainian, Russian, Vietnamese, Japanese, big .pptx imports (200
+slides), posters, gradients and old 4:3 .ppt decks. Like the first corpus, they are other people's
+decks: they stay under `out/`, and nothing from them is published.
+
+The hunt was run by cheaper models, each checked before it was trusted (the saudi-cats calibration
+above):
+1. **Haiku, blind judges.** Each judge got ORIGINAL | COPY crops and nothing else, and listed every
+   difference a person would notice, in a closed set of categories.
+2. **Sonnet, one diagnosis per defect.** Each got one confirmed finding, the deck's files and a
+   fixed brief: confirm it, find the root cause in the code, count its scope over both corpora, and
+   propose a fix. Sonnet never edited `src/` or `tests/`. Each note went to the session's scratch
+   folder.
+3. **The main session** read each note, checked the cause itself, and made the fix with a test.
+
+Every fix was then measured on both corpora (`cmpdeck`: per deck, per slide, worst and best).
+Two of the notes' own fixes were wrong, and only that measurement showed it (see "Fixes the bench
+corrected" below).
+
+### Fixed
+
+| defect | decks | cause | fix |
+|---|---|---|---|
+| body text in the wrong master's colours (orange for black, a brown page, link colour) | applied-ml, ja-schedule, and any deck with several masters | one colour scheme merged across every master | a scheme per master (`deck_ir.scheme_for`, `use_page`) |
+| placeholder panels lost their fill (pycon-2019's grey body panel, 27 slides) | pycon-2019 | a fill inherited from the layout's placeholder was never read | `deck_ir.inherited_fill`, `foreign_shape(inherited=)` |
+| Arabic letters isolated from the second run on | arabic-training | the switch font shaped with HarfBuzz but no `Script=`, which joins only some runs | `Renderer=HarfBuzz,Script=<most typed>` on a font that draws its own script |
+| Tamil vowel signs on dotted circles, conjuncts broken | tamil-wiki | Indic letters went through the glyph-by-glyph fallback chain | Indic scripts are babel languages with a font of their own (`scripts.INDIC`, `fontspec_script`), with `onchar=fonts` only (see below) |
+| an MS Mincho address in a Gothic face | ja-schedule | a Windows CJK face not on google/fonts fell to the fallback chain, and Mincho read as sans | `font_family` stands its Noto face in (`fonts.cjk_font`); `deck_ir.family_of` reads Mincho/Myeongjo/Serif as serif |
+| a code line's indent after Shift+Enter lost | web-forward-tokyo | TeX discards glue after `\break` | `\null` before leading spaces after `\slidebreak` (texmap reads it as nothing) |
+| a blank line's size leaked into the next paragraph | cs161-tls 41 | the blank line's size switch was not grouped | `{<size>\strut\par}` (`inverse.paragraphs_latex`) |
+| a tiny picture drawn as a coarse checkerboard | vi-slides | Slides smooths a stretched picture, the PDF viewer does not | a picture under 32 px is baked smooth at 512 px, same natural size (`adopt.TINY_PICTURE`) |
+| rounded title bars with corners Slides never drew | journey-maps; round rectangles in devfest2020, gdg24, intro-lecture, drawing-workshop, jeb-arch, jruby-ja (~290) | a round rectangle always got the preset's default radius | the radius read off the thumbnail per corner (`deck_fills.corner_radius`; the arc crosses the diagonal at r(1-1/sqrt2)) |
+| `*` bullets where Slides drew `•` | sc-functions 4, 6, 15 | the bullet's own font (Arial) was dropped; the run's face has no `•` | the bullet keeps its font; an Arial `•` on another face is drawn as Arial's disc (`ARIAL_BULLET`) |
+| a justified line past the page edge | ua-space 10, 11, 14 | `\tolerance=9999` refused a line needing more stretch than its spaces had, so the line before it ran overfull | justified paragraphs are broken as ragged ones and each full line is spread (a `post_linebreak_filter` in slides.sty) |
+| Calibri's ti/tt joined | ap-bio-stats, jeb-arch | luaotfload applies `liga`/`calt`; Slides draws Calibri in a stand-in with no joins | `Ligatures={NoCommon,NoContextual}` for faces Slides does not have as ours: a machine face, a stand-in, a newer google/fonts file (`adopt.ligatures`) |
+
+### Fixes the bench corrected
+
+- **Ligatures.** The note concluded that "Slides never ligates", and the first fix turned ligatures
+  off for every font. That moved gdg24's quote slides from 1.000 to 0.957: Google Sans' `liga` has
+  a `t_t`, and Slides draws it ("little"). Slides draws the ligatures of *its own copy* of a font.
+  So ligatures now stay on for a google/fonts file and go off for a face from this machine
+  (Calibri), and for Lato: google/fonts has Lato 2.015, whose `liga` joins "ti", and Slides' Lato
+  (1.x) does not. The note's cross-check was Arial's "fi", but Arial has no fi ligature at all.
+  The next run cost ap-bio-stats 2, 6 and 10 about 0.006 each: their Droid Serif is set in Noto
+  Serif, a google/fonts file, but Slides draws Droid Serif, which does not join "fi"
+  ("Scientific"). So a stand-in also has its ligatures off. The first run had hidden both of these
+  behind a third bug: under the packaged app, a font cache file resolves into the app's redirected
+  folder and the cache folder does not, so every face had its ligatures off.
+  Lato itself was the last case. Google's thumbnail joins Lato's "ff" ("Caffo") and draws "ti" apart
+  ("prediction"), so neither all-on nor all-off is right. Lato now keeps only the five Unicode
+  f-ligatures (`adopt.F_LIGATURES`, a luaotfload feature). All-on still scored best on ml-vs-stats
+  (0.786 against 0.759), and only by luck: its "ti" ligature widens slide 2's title to Slides' four
+  lines. Lato 2.015 sets that deck's one measurable line 3% narrower than Slides' Lato does (below).
+- **Rounded corners.** The hunt's corner reading squared gdg24 54's pink card (0.982 -> 0.976). The
+  pink is too near the page's grey for an edge to show, so only the corner standing on the yellow
+  card's black outline was read, as square. Now an outline edges a pale fill, and a corner standing
+  on its outline's own colour is not read. An outline's outer edge also read every outlined box
+  (weight / 2) x (sqrt 2 + 1) too small, 1.7 pt on gdg24. With every corner now readable,
+  drawing-workshop 5's 75 px corners read 70, 74 and 80 px. A fixed 2.5 px agreement refused them,
+  and the preset's default drew the panel round (0.951 -> 0.941). Corners now agree within 2.5 px or
+  15% of the radius (0.953).
+- **Justify.** The note proposed `\tolerance=10000`. It argued that this could only change lines
+  that were already overfull. It changed more than that: once a badness-10000 line was allowed, it
+  was as good as any other line, and creandum-board 23 came out as "The ... board", a first line
+  with one stretched space (0.817 -> 0.614). TeX's total-fit cannot model Slides, which fills each
+  line as a ragged one and then spreads it. The filter does exactly that.
+  `test_a_justified_paragraph_breaks_where_its_ragged_twin_breaks` fails at both 9999 and 10000.
+- **Tamil.** `onchar=ids fonts` also brought in Tamil's hyphenation patterns. Two frames in, LuaTeX's
+  line breaker stopped on "invalid node with type whatsit ... in discretionary" (babel's marks
+  inside a discretionary). Indic languages now take `onchar=fonts`; adopt never hyphenates anyway.
+
+### Scores
+
+Page scores for `hunt0` -> `fix8` (`page`, bootstrap round 0):
+
+| corpus | slides | page | pixels |
+|---|---|---|---|
+| adopt-hunt (30 decks) | 987 | 0.8842 -> 0.8953 | 0.9519 -> 0.9606 |
+| adopt-corpus (32 decks) | 950 | 0.9718 -> 0.9729 | 0.9850 -> 0.9854 |
+
+The biggest gains:
+
+| deck | page |
+|---|---|
+| pycon-2019 | 0.750 -> 0.954 (panel fills) |
+| ja-schedule | 0.847 -> 0.939 (master colours, Mincho) |
+| ua-space | 0.658 -> 0.737 (justify) |
+| vi-slides | 0.902 -> 0.954 (tiny picture) |
+| tamil-wiki | 0.556 -> 0.580 (shaping) |
+| creandum-board | 0.958 -> 0.974 |
+| ru-street | 0.856 -> 0.872 |
+| arabic-training | 0.942 -> 0.956 |
+
+One deck lost: ml-vs-stats, 0.786 -> 0.759. Its glyphs are now right, and its slide 2 title takes
+three lines where Slides takes four (Lato's widths, below).
+
+Slides that lost less than 0.03 and were each looked at: tamil-wiki 3, vi-slides 11 (the smoothing
+kernel is not Slides'), and cs161-tls 40-41 (the text is now its size, so an older row offset shows
+more). Each is right where it used to be wrong.
+
+### Deferred (with scope)
+
+- **Bullet and run highlights** are not written (jruby-ja's highlighted bullets).
+- **Built-in gradient masters** (`light-gradient`/`dark-gradient`) read as their flat
+  `solidFill`: jruby-ja, web-forward-tokyo.
+- **Korean width**: HarfBuzz without `+palt` sets Korean wider than Slides does (wow-korea,
+  korea-pptx).
+- **Proxima Nova** (yc-seed-*) and **Helvetica Neue** have no stand-in: they fall to the deck's
+  nearest face.
+- **greece-ppt**: CUSTOM background artwork that fails to trace draws as straight rectangles. A
+  6 pt `spaceAbove` on the first paragraph needs a probe.
+- **Text in ellipses and hexagons** keeps a rectangle's inset. The shape's own text rectangle
+  (ECMA-376 presets) is not modelled (vi-slides 8, 15, 30).
+- **A line that overflows a box** is also baked into Slides' thumbnail-derived background, so it
+  shows twice (sc-functions 6).
+- **An empty `{}` fill on a placeholder** (china-pptx, korea-pptx) is read as no fill.
+- WordArt, icon fonts, and a transparent picture shown on a checkerboard (gdg24).
+- BENT_ARROW falls back to a rectangle.
+- **Lato's widths.** google/fonts has Lato 2.015; Slides draws Lato 1.x, which set ml-vs-stats'
+  one lone line 3% wider. There is one sample, too few for `font_widths` (which is only for
+  stand-ins anyway). Lato 1.x from Google's font service would close the gap. Until then
+  ml-vs-stats 2's title fits on three lines in TeX by 0.2 pt and takes four in Slides.
+- **Tamil's face**: tamil-wiki's letters are shaped right now, but set wider and lighter than the
+  face Slides uses, so a paragraph wraps one line more (slide 3, 0.583 -> 0.562 while fixed).
+- **A table row's height below a spanning header** (cs161-tls 41: "Elinor Mills" 10 px low), older
+  than this hunt.

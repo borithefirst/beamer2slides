@@ -239,7 +239,7 @@ def test_recorded_pictures_come_before_the_pptx(tmp_path, monkeypatch, fetcher):
     folder.mkdir()
     (folder / "presentation.json").write_text(json.dumps(pres), encoding="utf-8")
     rec = Recording(folder / "pictures")
-    served = png_bytes(20, 15, colour=(10, 200, 10))
+    served = png_bytes(40, 30, colour=(10, 200, 10))
     rec.put("https://example.invalid/cat.png", served)
     rec.save()
     (folder / "deck.pptx").write_bytes(data)
