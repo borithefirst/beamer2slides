@@ -2189,3 +2189,15 @@ from again at indentStart. Now each line after a break starts its pen at indentS
 +0.001 to +0.003, nothing else moved (`tabs1`). `flag` also names, at the top of `hunt0`, jruby-ja's
 gradient masters (`ground_de` x11, deferred above), sc-dark-minimal 11's title set on one line where
 Slides breaks it in two, and firebase-jam 23's teal page drawn pale.
+
+`flag fix8` on adopt-hunt, open (most of its top 25 are the deferred Tamil face, Korean width,
+gradients and Lato):
+
+- **thai-drive 1-2: every Thai letter is tofu** (`missing` x18-25). The deck's face is Trebuchet, a
+  file from this machine without Thai, and no babel language or fallback font is written for the
+  script (the log: "Missing character: There is no ค (U+0E04) in font trebuc.ttf"). Its blue side
+  artwork is flattened too.
+- **china-pptx 42-43**: a radial gradient page drawn as its pale flat fill (`missing` x60: the green
+  title and the white question read as nothing on it). The gradient family above.
+- **applied-ml 26, 37**: worse from `hunt0` to `fix8` on `pixels` (0.0668 on 37): the body box
+  stands about 3 px lower, and `→` is drawn from another face.
