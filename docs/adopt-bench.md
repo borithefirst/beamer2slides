@@ -2155,29 +2155,40 @@ slide after that). Every metric is larger-is-worse.
 - `ink_de`, `local_ink_de`, `ground_de`: CIE76 colour differences where both sides have ink, and
   where neither has.
 - `tile_*`: the worst 100 px tile of a metric: one wrong word on a full page.
-- Written, not yet calibrated: optimal transport of local ink (unbalanced log-domain Sinkhorn on an
-  8 px grid: `ot_shift`, `ot_missing`, `ot_extra`), SSIM, LPIPS, DINOv2 (the whole page and its
-  least alike patch) and CLIP. They need torch, which the package never imports: a separate venv with
-  `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu126`, then `lpips
-  transformers`, and `run --gpu`.
+- With torch (`--gpu`): optimal transport of local ink (unbalanced log-domain Sinkhorn on an 8 px
+  grid: `ot_shift`, `ot_missing`, `ot_extra`), SSIM, LPIPS (AlexNet), DINOv2-small (`dino`: the
+  pooled page, `dino_worst`: its least alike of 21 x 37 patches) and CLIP B/32, each as 1 - similarity.
+  The package never imports torch: a venv of its own (`out/metrics-venv`), `pip install torch
+  torchvision --index-url https://download.pytorch.org/whl/cu126`, then `lpips transformers` and
+  `-e .[dev]`. On the 4090 the ten take 0.2 s a slide warm; a run is about 2 s a slide in all. The
+  entropy smears any transport plan over about a cell, so a page against itself had `ot_shift` 10 px:
+  it is debiased like a Sinkhorn divergence (the two self-transport costs' mean taken off).
+  Transport moves a line sideways by its ends only, so a horizontal shift reads short, and a lost line
+  within 48 px of another reads as ink carried to it (`ot_shift`) more than lost.
 
-**What each kind of defect is seen by** (ROC AUC against the identical slides; 0.5 is chance, n
-small below 10):
+**What each kind of defect is seen by** (ROC AUC against the identical slides; 0.5 is chance).
+Counted over all pairs, a metric also scores a deck's style: 28 of the 32 background slides are
+hebrew-lesson's and jruby-ja's, 12 of the 14 colour ones drawing-workshop's, and `dino`'s 0.91 on
+text size is 0.55 within decks. `calibrate` prints both; the within-deck AUC (each defect slide
+against the identical slides of its own deck) is the one to believe, and its pairs say how much:
 
-| category | n | `page` (1 - overlap) | best |
-|---|---|---|---|
-| any | 97 | 0.70 | `tile_pixels` 0.83, `local_graded` 0.78, `pixels` 0.77 |
-| background | 32 | 0.82 | `ground_de` 0.95 |
-| shape | 21 | 0.63 | `tile_pixels` 0.80, `local_missing` 0.76 |
-| line_breaks | 20 | 0.86 | `missing`, `extra` 0.92 |
-| text_size | 15 | 0.80 | `tile_ink_de` 0.82 |
-| text_colour | 14 | 0.52 | `tile_ink_de`, `tile_pixels` 0.99, `pixels` 0.95 |
-| overlap | 7 | 0.85 | `pixels`, `missing`, `tile_pixels` 0.94 |
-| font_face | 7 | 0.75 | `tile_pixels` 0.99, `tile_ink_de` 0.98, `local_missing` 0.97 |
-| text_position | 5 | 0.71 | `local_missing` 0.91 |
+| category | n | pairs | `page` all / within | best within one deck |
+|---|---|---|---|---|
+| any | 97 | 491 | 0.70 / 0.69 | `dino`, `dino_worst`, `tile_lpips` 0.77, `local_missing` 0.76, `ot_shift` 0.75, `tile_pixels` 0.74 |
+| background | 32 | 32 | 0.82 / 0.62 | `lpips`, `dino` 0.97 (all pairs 0.95, 0.99), `ground_de` 0.72 (all 0.95) |
+| shape | 21 | 123 | 0.63 / 0.82 | `dino` 0.93, `tile_pixels` 0.87, `local_graded`, `tile_ssim` 0.86 |
+| line_breaks | 20 | 115 | 0.86 / 0.88 | `tile_lpips` 0.97, `dino_worst` 0.95, `graded` 0.93, `tile_pixels` 0.92 |
+| text_size | 15 | 69 | 0.80 / 0.68 | nothing better than `page` but `ink_de` 0.77: the pooled 0.8-0.9s were decks |
+| text_colour | 14 | 40 | 0.52 / 0.38 | `tile_ink_de`, `tile_pixels` 0.97, `ot_missing` 0.93 |
+| overlap | 7 | 53 | 0.85 / 0.68 | `tile_ssim` 0.94, `dino_worst` 0.91, `pixels`, `ground_de` 0.89 |
+| font_face | 7 | 29 | 0.75 / 0.52 | `tile_pixels` 1.00, `dino_worst` 0.97, `local_missing` 0.93 |
+| text_position | 5 | 45 | 0.71 / 0.51 | `ot_missing` 0.89, `local_missing`, `dino_worst` 0.87 |
 
 `page` is at chance on text colour. It keeps its place as the bench's number, and it is good at line
-breaks and overlaps, but it was always going to miss half of what the judges name.
+breaks, but it was always going to miss half of what the judges name. For "is anything wrong here",
+`dino` and `tile_lpips` are the best single numbers; for "what is wrong", the numpy metrics a slide
+trips still say it better (colour: `tile_ink_de`; words: `local_missing`; a line: `graded`). Page-wide
+SSIM and CLIP add nothing (`ssim` ranks background slides *below* identical ones, 0.19).
 
 **Found by it.** The first `compare hunt0 fix8` listed journey-maps 20 as worse on `local_ink_de`
 and `tile_graded` 0.999: every "Market potential" line had lost its indent, in both runs, and neither

@@ -246,7 +246,9 @@ class Gpu:
         """Unbalanced entropic optimal transport (squared distance, KL marginals) of the deck's ink onto
         ours, on a grid of OT_CELL px cells. Mass moves when that is cheaper than destroying it and
         creating it anew, which it is up to about OT_REACH cells: `ot_shift` is how far the moved mass
-        went (RMS, px), `ot_missing`/`ot_extra` the shares of each side's ink left unmatched."""
+        went (RMS, px), `ot_missing`/`ot_extra` the shares of each side's ink left unmatched. The
+        entropy smears every plan over about a cell (a page against itself costs ~10 px), so the shift
+        is debiased as a Sinkhorn divergence: the mean of the two self-transport costs taken off."""
         t = self.torch
         dev, dt = self.device, t.float64
 
@@ -271,23 +273,28 @@ class Gpu:
             # log sum_j K_ij v_j with K = ky (x) kx, as two log-sum-exps
             s = t.logsumexp(log_v[:, None, :] + kx[None], dim=2)            # over x: (h, w)
             return t.logsumexp(s[None, :, :] + ky[:, :, None], dim=1)        # over y: (h, w)
-        la, lb = t.log(a), t.log(b)
-        f = t.zeros_like(a)                     # log u
-        g = t.zeros_like(b)                     # log v
-        for _ in range(OT_ITERS):
-            f = fi * (la - apply(g))
-            g = fi * (lb - apply(f))
-        f = t.where(a > 0, f, t.full_like(f, -float("inf")))
-        g = t.where(b > 0, g, t.full_like(g, -float("inf")))
-        moved_ref = t.exp(f + apply(g))         # the plan's marginal on the deck's side
-        moved_got = t.exp(g + apply(f))
-        # sum_ij pi_ij C_ij, C = dy^2 + dx^2: the kernels weighted by each term apart
-        with t.no_grad():
-            wy = t.where(cy > 0, ly + t.log(cy.clamp_min(1e-300)), t.full_like(cy, -float("inf")))
-            wx = t.where(cx > 0, lx + t.log(cx.clamp_min(1e-300)), t.full_like(cx, -float("inf")))
+        wy = t.where(cy > 0, ly + t.log(cy.clamp_min(1e-300)), t.full_like(cy, -float("inf")))
+        wx = t.where(cx > 0, lx + t.log(cx.clamp_min(1e-300)), t.full_like(cx, -float("inf")))
+
+        def plan(a, b):
+            """The plan's two marginals and its cost per unit of mass moved (cells^2)."""
+            la, lb = t.log(a), t.log(b)
+            f = t.zeros_like(a)                 # log u
+            g = t.zeros_like(b)                 # log v
+            for _ in range(OT_ITERS):
+                f = fi * (la - apply(g))
+                g = fi * (lb - apply(f))
+            f = t.where(a > 0, f, t.full_like(f, -float("inf")))
+            g = t.where(b > 0, g, t.full_like(g, -float("inf")))
+            moved_a, moved_b = t.exp(f + apply(g)), t.exp(g + apply(f))
+            # sum_ij pi_ij C_ij, C = dy^2 + dx^2: the kernels weighted by each term apart
             cost = t.exp(f + apply(g, ky=wy)).sum() + t.exp(f + apply(g, kx=wx)).sum()
-        moved = float(moved_ref.sum())
-        return {"ot_shift": round(float(t.sqrt(cost / max(moved, 1e-12))) * OT_CELL, 3),
+            return moved_a, moved_b, float(cost) / max(float(moved_a.sum()), 1e-12)
+        with t.no_grad():
+            moved_ref, moved_got, c_ab = plan(a, b)
+            c_aa, c_bb = plan(a, a)[2], plan(b, b)[2]
+        shift = max(c_ab - (c_aa + c_bb) / 2, 0.0) ** 0.5
+        return {"ot_shift": round(shift * OT_CELL, 3),
                 "ot_missing": round(float((a - moved_ref).clamp_min(0).sum()) / (sa / scale), 5),
                 "ot_extra": round(float((b - moved_got).clamp_min(0).sum()) / (sb / scale), 5)}
 
@@ -462,6 +469,22 @@ def auc(pos: list[float], neg: list[float]) -> float | None:
     return float((r_pos - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
 
 
+def auc_within(pos: list[tuple[str, int]], neg: list[tuple[str, int]], score) -> tuple[float | None, int]:
+    """The AUC counted only over pairs from one deck, and how many pairs there were. A category's
+    slides are often most of one or two decks (jruby-ja's gradients, drawing-workshop's colours), and
+    across decks a metric can rank a deck's style rather than the defect."""
+    by_deck: dict[str, list[float]] = {}
+    for k in neg:
+        by_deck.setdefault(k[0], []).append(score(k))
+    wins = pairs = 0
+    for k in pos:
+        s = score(k)
+        for v in by_deck.get(k[0], ()):
+            wins += 1.0 if s > v else 0.5 if s == v else 0.0
+            pairs += 1
+    return (wins / pairs if pairs else None), pairs
+
+
 def judged(verdicts: Path) -> dict[tuple[str, int], set[str]]:
     """(deck, slide) -> the categories the blind judges found there ({} = judged identical), from a
     judging folder: judging/<deck>/verdict-*.json, findings.json ("trusted": the findings that held up)
@@ -509,8 +532,12 @@ def calibrate(tag: str, verdicts: Path) -> dict:
              "thresholds": {m: float(np.quantile([rows[k][m] for k in neg], 1 - FLAG_SHARE)) for m in names}}
     for cat in ["any", *cats]:
         pos = [k for k in keys if labels[k] and (cat == "any" or cat in labels[k])]
-        table["categories"][cat] = {"n": len(pos), "auc": {m: auc([rows[k][m] for k in pos], [rows[k][m] for k in neg])
-                                                          for m in names}}
+        within = {m: auc_within(pos, neg, lambda k, m=m: rows[k][m]) for m in names}
+        table["categories"][cat] = {"n": len(pos), "decks": len({k[0] for k in pos}),
+                                    "pairs": next(iter(within.values()))[1] if within else 0,
+                                    "auc": {m: auc([rows[k][m] for k in pos], [rows[k][m] for k in neg])
+                                            for m in names},
+                                    "within": {m: w[0] for m, w in within.items()}}
     return table
 
 
@@ -518,14 +545,16 @@ def print_calibration(table: dict) -> None:
     cats = table["categories"]
     names = list(next(iter(cats.values()))["auc"])
     print(f"{table['n']} judged slides, {table['identical']} identical. ROC AUC per defect category "
-          f"(1 = the metric ranks every such slide above every identical one, 0.5 = chance)\n")
-    print(f"{'category':<16}{'n':>4}  " + " ".join(f"{m[:10]:>10}" for m in names))
-    for cat, row in cats.items():
-        cells = []
-        for m in names:
-            v = row["auc"][m]
-            cells.append(f"{v:>10.2f}" if v is not None else f"{'-':>10}")
-        print(f"{cat:<16}{row['n']:>4}  " + " ".join(cells))
+          f"(1 = the metric ranks every such slide above every identical one, 0.5 = chance)")
+    for key, title, count in (("auc", "all pairs", "n"),
+                              ("within", "pairs from one deck only (a deck's style can't score)", "pairs")):
+        print(f"\n{title}\n{'category':<16}{count:>6}  " + " ".join(f"{m[:10]:>10}" for m in names))
+        for cat, row in cats.items():
+            cells = []
+            for m in names:
+                v = row[key][m]
+                cells.append(f"{v:>10.2f}" if v is not None else f"{'-':>10}")
+            print(f"{cat:<16}{row[count]:>6}  " + " ".join(cells))
 
 
 def flag(tag: str, thresholds: dict, n: int) -> None:

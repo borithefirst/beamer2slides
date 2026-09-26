@@ -1,8 +1,9 @@
 """The numpy slide metrics each see their own kind of defect (devtools/slide_metrics.py)."""
 
 import numpy as np
+import pytest
 
-from beamer2slides.devtools.slide_metrics import auc, distance_to, numpy_metrics
+from beamer2slides.devtools.slide_metrics import auc, auc_within, distance_to, numpy_metrics
 
 W, H = 400, 225
 SLIDE = {"size": [W, H], "elements": [{"bbox": [0, 0, W, H]}]}
@@ -80,8 +81,30 @@ def test_the_worst_tile_finds_one_wrong_word():
     assert s["tile_overlap"] > 3 * s["overlap"]
 
 
+def test_transport_is_debiased_so_the_same_page_has_moved_nowhere():
+    """Entropy alone smears a page onto itself by about a cell; the shift takes that off."""
+    pytest.importorskip("torch")
+    from beamer2slides.devtools.slide_metrics import Gpu
+    gpu = Gpu(device="cpu")
+    ink = page()[..., 0] < 128
+    same = gpu.ot(ink, ink)
+    assert same == {"ot_shift": 0.0, "ot_missing": 0.0, "ot_extra": 0.0}
+    down = gpu.ot(ink, page(((40, 56), (40, 116), (40, 176)))[..., 0] < 128)
+    assert 10 < down["ot_shift"] < 22 and down["ot_missing"] < 0.01
+
+
 def test_auc_ranks_positives_above_negatives():
     assert auc([3, 4], [1, 2]) == 1.0
     assert auc([1, 2], [3, 4]) == 0.0
     assert auc([1, 1], [1, 1]) == 0.5
     assert auc([], [1]) is None
+
+
+def test_auc_within_decks_does_not_score_a_decks_style():
+    """Deck b's slides all score high, its defects included: across decks that looks like skill."""
+    score = {("a", 1): 1, ("a", 2): 2, ("a", 3): 3, ("b", 1): 9, ("b", 2): 8, ("b", 3): 9}.get
+    pos, neg = [("b", 1), ("a", 3)], [("a", 1), ("a", 2), ("b", 2)]
+    assert auc([score(k) for k in pos], [score(k) for k in neg]) > 0.8
+    assert auc_within([("b", 2)], [("b", 1), ("b", 3), ("a", 1)], score) == (0.0, 2)
+    assert auc_within(pos, neg, score) == (1.0, 3)
+    assert auc_within([("c", 1)], neg, lambda k: 0) == (None, 0)

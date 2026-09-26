@@ -307,7 +307,7 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   replay picks the main and switch fonts from that slide's letters alone: check a font finding on
   the whole deck (docs/adopt-bench.md "saudi-cats"). **Which kind of defect, where**:
   `devtools/slide_metrics.py run|calibrate|flag|compare|show` (drift/missing/extra, local ink,
-  colour, worst tile; torch ones lazily, own venv), calibrated on the judges' `hunt0` verdicts in
+  colour, worst tile; OT/LPIPS/DINOv2 lazily in `out/metrics-venv`), calibrated within decks on the judges' `hunt0` verdicts in
   `out/adopt-corpus/judged/` (docs/adopt-bench.md "Metrics"); `page` is blind to colour. The public gallery
   (borithefirst.github.io/beamer2slides, branch `gh-pages`) shows adopt on six decks we made and
   own, never corpus decks (no licence to republish): `tools/showcase.py`, docs/showcase.md.
