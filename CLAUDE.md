@@ -282,7 +282,9 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   theme, a label per frame from the slide's objectId, and a base so the source can be synced back
   into that same deck (`adopt_sync.py`). An element tied to no object of the person's is kept, not
   duplicated (`merge.ADOPTED`, `field: unpaired`); layout-drawn and in-table elements are named as
-  such. Benchmark: `devtools/adopt_bench.py` (29 public decks).
+  such. Benchmark: `devtools/adopt_bench.py` (29 public decks). The public gallery
+  (borithefirst.github.io/beamer2slides, branch `gh-pages`) shows adopt on six decks we made and
+  own, never corpus decks (no licence to republish): `tools/showcase.py`, docs/showcase.md.
 - **Occlusion**: nothing a sync creates may end up over words only the deck has
   (`sync.would_hide`, `Sync.restack`); the fuzz applier mirrors it and must be fixed together.
   The person's own objects are never moved: when the source's words or pictures now run over one,

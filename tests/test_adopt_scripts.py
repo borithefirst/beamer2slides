@@ -276,6 +276,21 @@ def test_arabic_is_set_whole_in_a_font_of_its_own_with_harfbuzz(font_folder):
     assert not any("add_fallback" in l for l in lines)
 
 
+def test_the_deck_s_own_hebrew_font_is_fetched_before_one_is_picked(font_folder, monkeypatch):
+    """The showcase's water-cycle deck types its Hebrew and Arabic in Noto Sans Hebrew and Arabic. On
+    the first run neither was in the font folders yet: CJK fetched its font first, these letters did
+    not, and they were set in Arial (smaller, other shapes)."""
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Arial", "שלום ")
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family",
+                        lambda name, log=print: {"Regular": make_font(font_folder, name, "שלום ")})
+    lines = scripts.script_preamble(target_with("שלום", font="Noto Sans Hebrew", direction="RIGHT_TO_LEFT"),
+                                    None)
+    sf = next(l for l in lines if l.startswith("\\babelfont[hebrew]{sf}"))
+    assert sf.endswith("{NotoSansHebrew-Regular.ttf}")
+
+
 def test_the_adopted_preamble_puts_script_lines_before_the_fonts(font_folder, tmp_path):
     make_font(font_folder, "Yu Gothic", "日本")
     t = target_with("日本")

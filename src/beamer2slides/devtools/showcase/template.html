@@ -1,0 +1,329 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Adopted Decks</title>
+<meta name="description" content="Google Slides decks turned into editable beamer sources by beamer2slides adopt, side by side with the originals.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=STIX+Two+Text:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+:root {
+  --bg: #f4f5f8;
+  --surface: #ffffff;
+  --ink: #1a1d29;
+  --muted: #596077;
+  --line: #dcdfe8;
+  --code-bg: #f7f8fb;
+  --beamer: #3333b2;
+  --beamer-soft: #e6e6f7;
+  --slides-dot: #f4b400;
+  --cmd: #3333b2;
+  --num: #9a4b00;
+  --comment: #7a8196;
+  --brace: #8a1f5c;
+  --display: "STIX Two Text", "Latin Modern Roman", Georgia, serif;
+  --body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, "Noto Sans Mono", monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #11131a; --surface: #1a1d27; --ink: #e5e7ef; --muted: #9aa0b5; --line: #2c3040;
+    --code-bg: #151822; --beamer: #9c9cff; --beamer-soft: #26264a;
+    --cmd: #a9a9ff; --num: #f0a868; --comment: #7c8298; --brace: #ec8fc1;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #11131a; --surface: #1a1d27; --ink: #e5e7ef; --muted: #9aa0b5; --line: #2c3040;
+  --code-bg: #151822; --beamer: #9c9cff; --beamer-soft: #26264a;
+  --cmd: #a9a9ff; --num: #f0a868; --comment: #7c8298; --brace: #ec8fc1;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--body); margin: 0; padding-inline: 16px; padding-block: 0 64px; }
+.wrap { max-width: 1180px; margin: 0 auto; }
+a { color: var(--beamer); }
+a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--beamer); outline-offset: 2px; }
+code { font: 13px var(--mono); background: var(--code-bg); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; color: var(--ink); }
+
+header { padding-block: 48px 28px; display: grid; gap: 18px; }
+.eyebrow { font: 500 12px/1 var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.eyebrow a { color: inherit; }
+h1 { font: 600 clamp(34px, 5.4vw, 56px)/1.05 var(--display); margin: 0; text-wrap: balance; letter-spacing: -.01em; }
+h1 .arrow { color: var(--muted); font-weight: 400; }
+.lede { max-width: 70ch; margin: 0; color: var(--muted); font-size: 16px; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 4px 0 0; padding: 0; list-style: none; font-variant-numeric: tabular-nums; }
+.stats li { display: grid; }
+.stats b { font: 600 22px/1.2 var(--display); }
+.stats span { font-size: 12.5px; color: var(--muted); }
+
+h2.sec { font: 600 24px/1.2 var(--display); margin: 8px 0 14px; }
+.decks { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; margin-bottom: 44px; }
+.deck { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; display: grid; grid-template-rows: auto 1fr; }
+.deck img { display: block; width: 100%; height: auto; aspect-ratio: 16 / 9; border-bottom: 1px solid var(--line); }
+.deck .body { padding: 12px 14px 14px; display: grid; gap: 6px; align-content: start; }
+.deck h3 { font: 600 17px/1.25 var(--display); margin: 0; }
+.deck p { margin: 0; font-size: 13.5px; color: var(--muted); }
+.deck .nums { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.deck .links { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13.5px; font-weight: 500; margin-top: 2px; }
+
+.bar { position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 92%, transparent); backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); padding-block: 10px; margin-bottom: 28px; display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; justify-content: space-between; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { font: 500 13px/1 var(--body); border: 1px solid var(--line); background: var(--surface); color: var(--ink); border-radius: 999px; padding: 7px 12px; cursor: pointer; }
+.chip[aria-pressed="true"] { background: var(--ink); color: var(--bg); border-color: var(--ink); }
+.chip .n { color: var(--muted); margin-left: 4px; font-variant-numeric: tabular-nums; }
+.chip[aria-pressed="true"] .n { color: inherit; opacity: .7; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--surface); }
+.seg button { font: 500 13px/1 var(--body); border: 0; background: transparent; color: var(--muted); padding: 8px 12px; cursor: pointer; }
+.seg button[aria-pressed="true"] { background: var(--beamer-soft); color: var(--ink); }
+
+.list { display: grid; gap: 40px; }
+.ex { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.ex-head { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; justify-content: space-between; padding: 18px 20px 12px; }
+.ex-head h3 { font: 600 21px/1.25 var(--display); margin: 0; text-wrap: balance; }
+.ex-head h3 .slide { font: 400 14px var(--mono); color: var(--muted); margin-left: 6px; white-space: nowrap; }
+.meta { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.meta .score b { color: var(--ink); font-weight: 600; }
+.note { padding: 0 20px 16px; margin: 0; max-width: 90ch; }
+.tags { display: flex; flex-wrap: wrap; gap: 6px; padding: 0 20px 16px; }
+.tag { font: 500 11.5px/1 var(--mono); letter-spacing: .03em; color: var(--muted); border: 1px solid var(--line); border-radius: 4px; padding: 4px 6px; }
+
+.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: var(--line); border-block: 1px solid var(--line); }
+.pane { background: var(--surface); display: grid; }
+.pane figcaption { display: flex; align-items: center; gap: 8px; font: 500 12px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 10px 14px; }
+.dot { width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.dot.s { background: var(--slides-dot); }
+.dot.b { background: var(--beamer); }
+.pane img { display: block; width: 100%; height: auto; }
+figure { margin: 0; }
+
+.swipe { position: relative; border-block: 1px solid var(--line); background: var(--surface); }
+.swipe .stack { position: relative; line-height: 0; }
+.swipe img { display: block; width: 100%; height: auto; }
+.swipe .top { position: absolute; inset: 0; clip-path: inset(0 0 0 var(--cut, 50%)); }
+.swipe .handle { position: absolute; top: 0; bottom: 0; left: var(--cut, 50%); width: 2px; background: var(--beamer); transform: translateX(-1px); pointer-events: none; }
+.swipe .labels { display: flex; justify-content: space-between; font: 500 12px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 10px 14px; }
+.swipe .labels span { display: inline-flex; gap: 8px; align-items: center; }
+.swipe input[type=range] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: ew-resize; margin: 0; }
+
+.src { display: grid; }
+.tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 10px 14px 0; border-bottom: 1px solid var(--line); }
+.tabs button.t { font: 500 13px/1 var(--body); border: 0; background: none; color: var(--muted); padding: 9px 10px 11px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tabs button.t[aria-selected="true"] { color: var(--ink); border-bottom-color: var(--beamer); }
+.tabs .t small { font: 12px var(--mono); color: var(--muted); margin-left: 3px; }
+.tabs .spacer { flex: 1; }
+.tool { font: 500 12px/1 var(--body); border: 1px solid var(--line); background: var(--surface); color: var(--muted); border-radius: 6px; padding: 6px 9px; cursor: pointer; margin-bottom: 8px; }
+.tool + .tool { margin-left: 6px; }
+pre { margin: 0; padding: 16px 20px 20px; background: var(--code-bg); font: 13px/1.6 var(--mono); overflow-x: auto; max-height: 460px; overflow-y: auto; tab-size: 2; }
+pre.wrap-on { white-space: pre-wrap; word-break: break-word; }
+.c { color: var(--cmd); }
+.n { color: var(--num); }
+.k { color: var(--comment); font-style: italic; }
+.b { color: var(--brace); }
+.empty { color: var(--muted); font: 13px var(--body); padding: 16px 20px; background: var(--code-bg); margin: 0; }
+
+.howto { margin-top: 56px; display: grid; gap: 14px; max-width: 76ch; color: var(--muted); }
+.howto h2 { font: 600 24px/1.2 var(--display); color: var(--ink); margin: 0; }
+.howto p { margin: 0; }
+footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+
+.ex { scroll-margin-top: 72px; }
+@media (max-width: 760px) {
+  .pair { grid-template-columns: 1fr; }
+  header { padding-block: 32px 20px; }
+  .bar { flex-wrap: nowrap; gap: 10px; }
+  .chips { flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; min-width: 0; }
+  .chip { white-space: nowrap; }
+  .seg { flex: none; }
+  .seg button { padding: 8px 9px; white-space: nowrap; }
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="eyebrow"><a href="https://github.com/borithefirst/beamer2slides">beamer2slides</a> &middot; adopt</div>
+    <h1>Google Slides <span class="arrow">&rarr;</span> Beamer</h1>
+    <p class="lede">We made six decks in Google Slides and ran each one through <code>beamer2slides adopt</code>, which writes a beamer source a person can edit. Every example shows the slide as Google renders it, the page the adopted <code>main.tex</code> compiles to, and the frame that draws it. The originals are open to anyone, view only, so you can compare them for yourself.</p>
+    <ul class="stats" id="stats"></ul>
+  </header>
+
+  <h2 class="sec">The decks</h2>
+  <section class="decks" id="decks" aria-label="The six decks"></section>
+
+  <h2 class="sec">Slide by slide</h2>
+  <div class="bar">
+    <div class="chips" id="chips" role="group" aria-label="Filter examples"></div>
+    <div class="seg" role="group" aria-label="Comparison view">
+      <button type="button" id="v-side" aria-pressed="true">Side by side</button>
+      <button type="button" id="v-swipe" aria-pressed="false">Swipe</button>
+    </div>
+  </div>
+
+  <main class="list" id="list"></main>
+
+  <section class="howto">
+    <h2>How these were made</h2>
+    <p>The decks are written by <code>devtools/showcase/decks.py</code>. The lecture is built with the Slides API alone. The other five are .pptx files imported by Drive, which is how most shared decks are made. Every picture in them is drawn from a seed by <code>devtools/showcase/art.py</code>, and every word was written for this page.</p>
+    <p>The left image is Google's own <code>getThumbnail</code> of the slide. The right image is the compiled adopted PDF, rendered at the same width. Neither was retouched. <b>Match</b> is the adopt benchmark's <code>boxes</code> score for that slide: of the ink inside the deck's element boxes, the share that lands in the same place in both renders. The examples include the slides where adopt falls short, and each caption says where.</p>
+    <p>A frame's <code>\slidestyle</code>, <code>\slideshapestyle</code> and colour names are declared once in the preamble. The <b>Preamble</b> tab lists only the ones that frame uses. <code>layout=</code> selects a <code>background</code> template from the recovered theme, shown under <b>Theme layout</b>. Pictures and traced outlines are files in the tree (<code>figures/</code>, <code>shapes/</code>). Each deck's <b>adopted source</b> is the whole tree except <code>fonts/</code>. Its <code>FONTS.txt</code> lists the Google Fonts it expects there.</p>
+  </section>
+  <footer>Made with <a href="https://github.com/borithefirst/beamer2slides">beamer2slides</a>. Rebuild this page with <code>python tools/showcase.py gallery</code>.</footer>
+</div>
+
+<script id="data" type="application/json">__DATA__</script>
+<script>
+(function () {
+  const ALL = JSON.parse(document.getElementById("data").textContent);
+  const DATA = ALL.items;
+  const FILTERS = [["all", "All"], ["theme", "Theme layouts"], ["text", "Text"], ["lists", "Lists"], ["tables", "Tables"], ["shapes", "Shapes"], ["pictures", "Pictures"], ["fonts", "Fonts"], ["code", "Code"], ["rtl", "Right to left"], ["cjk", "CJK"]];
+
+  const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  function hl(src) {
+    let out = "", i = 0;
+    const re = /(%[^\n]*)|(\\[A-Za-z@]+\*?|\\.)|(-?\d+(?:\.\d+)?)|([{}\[\]])/g;
+    let m;
+    while ((m = re.exec(src))) {
+      out += esc(src.slice(i, m.index));
+      const t = esc(m[0]);
+      if (m[1]) out += '<span class="k">' + t + "</span>";
+      else if (m[2]) out += '<span class="c">' + t + "</span>";
+      else if (m[3]) out += '<span class="n">' + t + "</span>";
+      else out += '<span class="b">' + t + "</span>";
+      i = re.lastIndex;
+    }
+    return out + esc(src.slice(i));
+  }
+  const layoutName = f => (f.match(/layout=([^,\]]+)/) || [])[1];
+  const pct = v => (v * 100).toFixed(1) + "%";
+  const lines = s => s.split("\n").filter(l => l.trim()).length;
+
+  document.getElementById("stats").innerHTML = [
+    [ALL.decks.length, "decks"], [ALL.slides, "slides adopted"], [DATA.length, "examples below"], [pct(ALL.mean), "mean match, all slides"]
+  ].map(([b, s]) => `<li><b>${b}</b><span>${s}</span></li>`).join("");
+
+  document.getElementById("decks").innerHTML = ALL.decks.map(d => `
+    <article class="deck">
+      <img loading="lazy" src="img/${esc(d.deck)}-cover.jpg" alt="First slide of ${esc(d.title)}">
+      <div class="body">
+        <h3>${esc(d.title)}</h3>
+        <p>${esc(d.made)}</p>
+        <div class="nums">${d.slides} slides &middot; match ${pct(d.boxes)}</div>
+        <div class="links">
+          <a href="${esc(d.url)}" target="_blank" rel="noopener">Open in Google Slides &#8599;</a>
+          <a href="${esc(d.zip)}" download>Adopted source (.zip)</a>
+        </div>
+      </div>
+    </article>`).join("");
+
+  const list = document.getElementById("list");
+  DATA.forEach((d, k) => {
+    const key = d.deck + "-" + d.slide;
+    const deckImg = `img/${key}-deck.jpg`, texImg = `img/${key}-tex.jpg`;
+    const alt = `slide ${d.slide} of ${d.title}`;
+    const art = document.createElement("article");
+    art.className = "ex";
+    art.id = key;
+    art.dataset.tags = d.tags.join(" ");
+    const ar = `${d.size[0]} / ${d.size[1]}`;
+    art.innerHTML = `
+      <div class="ex-head">
+        <h3>${esc(d.title)}<span class="slide">slide ${d.slide}</span></h3>
+        <div class="meta">
+          <span class="score">match <b>${pct(d.boxes)}</b></span>
+          <a href="${esc(d.url)}" target="_blank" rel="noopener">this slide in Google Slides &#8599;</a>
+        </div>
+      </div>
+      <p class="note">${d.note}</p>
+      <div class="tags">${d.tags.map(t => `<span class="tag">${t}</span>`).join("")}</div>
+      <div class="pair">
+        <figure class="pane"><figcaption><span class="dot s"></span>Google Slides</figcaption><img loading="lazy" src="${deckImg}" alt="Google Slides render of ${esc(alt)}" style="aspect-ratio:${ar}"></figure>
+        <figure class="pane"><figcaption><span class="dot b"></span>Adopted beamer PDF</figcaption><img loading="lazy" src="${texImg}" alt="Compiled beamer page of ${esc(alt)}" style="aspect-ratio:${ar}"></figure>
+      </div>
+      <div class="swipe" hidden>
+        <div class="stack">
+          <img loading="lazy" src="${deckImg}" alt="Google Slides render of ${esc(alt)}" style="aspect-ratio:${ar}">
+          <img class="top" loading="lazy" src="${texImg}" alt="Compiled beamer page of ${esc(alt)}" style="aspect-ratio:${ar}">
+          <div class="handle"></div>
+          <input type="range" min="0" max="100" value="50" aria-label="Move the divider between the Google Slides render and the beamer page">
+        </div>
+        <div class="labels"><span><span class="dot s"></span>Google Slides</span><span>Adopted beamer PDF<span class="dot b"></span></span></div>
+      </div>
+      <div class="src">
+        <div class="tabs" role="tablist">
+          <button type="button" class="t" role="tab" aria-selected="true" data-p="frame">Frame <small>${lines(d.frame)} lines</small></button>
+          <button type="button" class="t" role="tab" aria-selected="false" data-p="pre">Preamble it uses <small>${d.preamble.length}</small></button>
+          <button type="button" class="t" role="tab" aria-selected="false" data-p="lay">Theme layout${d.layout ? "" : " <small>none</small>"}</button>
+          <span class="spacer"></span>
+          <button type="button" class="tool" data-a="wrap" aria-pressed="true">Wrap lines</button>
+          <button type="button" class="tool" data-a="copy">Copy</button>
+        </div>
+        <pre class="wrap-on" data-p="frame">${hl(d.frame)}</pre>
+        ${d.preamble.length ? `<pre class="wrap-on" data-p="pre" hidden>${hl(d.preamble.join("\n"))}</pre>` : `<p class="empty" data-p="pre" hidden>This frame names no style, shape style or colour of its own.</p>`}
+        ${d.layout ? `<pre class="wrap-on" data-p="lay" hidden>${hl("% beamertheme" + d.theme + ".sty\n" + d.layout)}</pre>` : `<p class="empty" data-p="lay" hidden>${layoutName(d.frame) ? `Layout <code>${esc(layoutName(d.frame))}</code> draws nothing, so the theme has no template for it.` : "This slide inherits nothing from a master or layout. Everything it draws is in the frame."}</p>`}
+      </div>`;
+    list.appendChild(art);
+
+    const tabs = art.querySelectorAll(".t"), panes = art.querySelectorAll("[data-p]:not(.t)");
+    tabs.forEach(b => b.addEventListener("click", () => {
+      tabs.forEach(x => x.setAttribute("aria-selected", x === b ? "true" : "false"));
+      panes.forEach(p => p.hidden = p.dataset.p !== b.dataset.p);
+    }));
+    art.querySelector('[data-a="wrap"]').addEventListener("click", e => {
+      const on = e.currentTarget.getAttribute("aria-pressed") !== "true";
+      e.currentTarget.setAttribute("aria-pressed", on);
+      art.querySelectorAll("pre").forEach(p => p.classList.toggle("wrap-on", on));
+    });
+    art.querySelector('[data-a="copy"]').addEventListener("click", e => {
+      const btn = e.currentTarget;
+      const shown = [...panes].find(p => !p.hidden);
+      const done = () => { btn.textContent = "Copied"; setTimeout(() => btn.textContent = "Copy", 1400); };
+      try {
+        navigator.clipboard.writeText(shown.textContent).then(done, () => selectIn(shown));
+      } catch (_) { selectIn(shown); }
+    });
+    const rng = art.querySelector("input[type=range]"), sw = art.querySelector(".swipe");
+    rng.addEventListener("input", () => sw.style.setProperty("--cut", rng.value + "%"));
+  });
+  function selectIn(el) {
+    const r = document.createRange(); r.selectNodeContents(el);
+    const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+  }
+
+  const chips = document.getElementById("chips");
+  FILTERS.forEach(([id, label]) => {
+    const n = id === "all" ? DATA.length : DATA.filter(d => d.tags.includes(id)).length;
+    if (!n) return;
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "chip"; b.dataset.f = id;
+    b.setAttribute("aria-pressed", id === "all");
+    b.innerHTML = `${label}<span class="n">${n}</span>`;
+    b.addEventListener("click", () => {
+      chips.querySelectorAll(".chip").forEach(c => c.setAttribute("aria-pressed", c.dataset.f === id));
+      list.querySelectorAll(".ex").forEach(a => a.hidden = id !== "all" && !a.dataset.tags.split(" ").includes(id));
+      try { localStorage.setItem("b2s-filter", id); } catch (_) {}
+    });
+    chips.appendChild(b);
+  });
+  const vs = document.getElementById("v-side"), vw = document.getElementById("v-swipe");
+  function view(swipe) {
+    vs.setAttribute("aria-pressed", !swipe); vw.setAttribute("aria-pressed", swipe);
+    list.querySelectorAll(".pair").forEach(p => p.hidden = swipe);
+    list.querySelectorAll(".swipe").forEach(p => p.hidden = !swipe);
+    try { localStorage.setItem("b2s-view", swipe ? "swipe" : "side"); } catch (_) {}
+  }
+  vs.addEventListener("click", () => view(false));
+  vw.addEventListener("click", () => view(true));
+  try {
+    if (localStorage.getItem("b2s-view") === "swipe") view(true);
+    const f = localStorage.getItem("b2s-filter");
+    const c = f && chips.querySelector(`[data-f="${f}"]`);
+    if (c) c.click();
+  } catch (_) {}
+})();
+</script>
+</body>
+</html>

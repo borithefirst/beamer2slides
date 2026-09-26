@@ -309,6 +309,10 @@ def plan(target: dict) -> Plan:
                 own = [n for n, _ in fonts.get((g, family), Counter()).most_common() if n]
                 if key != "sf" and not own:
                     continue
+                # the deck's own face may still be on google/fonts only, as CJK's is below: a first
+                # run set the showcase's Noto Sans Hebrew and Arabic words in Arial
+                if [n for n in own if _fetch(n)]:
+                    _FACES.clear()
                 face = _pick(own + FAMILY_FALLBACKS[key] + FALLBACKS[g], need)
                 if face is not None:
                     fams[key] = _with_bold(face)

@@ -1,0 +1,69 @@
+{
+ "hashing": {
+  "id": "1pbe6z-Fm25CZSK7CIZirbphENjHlqhyk6Mr5Oi6F4rQ",
+  "title": "Hash tables — lecture 7",
+  "pages": [
+   "hash01",
+   "hash02",
+   "hash03",
+   "hash04",
+   "hash05",
+   "hash06"
+  ]
+ },
+ "talk": {
+  "id": "10eOuOAD3J1WFP6DlJyjWdz2IhHu_A3uJgIhFC-McDHU",
+  "title": "Shipping calm software",
+  "pages": [
+   "p1",
+   "p2",
+   "p3",
+   "p4",
+   "p5"
+  ]
+ },
+ "review": {
+  "id": "1pQ3d5-bKsabA-vssmJxbf4Sc7GXLaaveu6PhAU0lpNQ",
+  "title": "Harbor & Pine — Q3 review",
+  "pages": [
+   "p1",
+   "p2",
+   "p3",
+   "p4",
+   "p5"
+  ]
+ },
+ "bees": {
+  "id": "1PYgdv1nJpMrYsUGtDFx1U01syOhHV8GZRE6w7YMNXXs",
+  "title": "How bees build hexagons",
+  "pages": [
+   "p1",
+   "p2",
+   "p3",
+   "p4"
+  ]
+ },
+ "water": {
+  "id": "1RcS62cP5X-73SNAVYcS-xppyjteSmGPdZgSHYpHnbvw",
+  "title": "The water cycle in four languages",
+  "pages": [
+   "p1",
+   "p2",
+   "p3",
+   "p4",
+   "p5",
+   "p6"
+  ]
+ },
+ "portfolio": {
+  "id": "1njQvqnwJc6rTErFIQiMUIUHCrmeobrpHUFdqHoqWgYs",
+  "title": "Field Notes in Code",
+  "pages": [
+   "p1",
+   "p2",
+   "p3",
+   "p4",
+   "p5"
+  ]
+ }
+}
