@@ -163,6 +163,25 @@ def test_shapes_take_the_box_adopt_drew_them_in(tmp_path, backend):
     assert [round(v) for v in shapes["l"]["bbox"]] == [20, 90, 100, 130]
 
 
+def test_a_line_runs_to_the_points_its_mark_says(tmp_path, backend):
+    """TikZ stops an arrow's shaft at its head's base; `\\slideline`'s mark says where the line
+    ends (its arrow's tip), and so where the deck's line ends."""
+    shaft_and_head = b"0 0 0 RG 1 w 20 130 m 20 66 l S 0 0 0 rg 17 66 m 23 66 l 20 60 l h f"
+    page = element(b"l", b"shape", shaft_and_head, b" /box (20bp 20bp 0.01bp 0.01bp) /line (20 20 20 90)")
+    line = next(e for e in read_back(tmp_path, page)["elements"] if e.get("mark") == "l")
+    assert (line["role"], line["bbox"]) == ("line", [20, 20, 20, 90])
+
+
+def test_underlined_words_are_underlined_whatever_their_rules(tmp_path, backend):
+    """ulem's rules end under a word inside a span; `\\uline`'s mark cuts the span there and says
+    the words are underlined."""
+    words = b"/B2Su BMC " + text(20, 100, b"Insert Line:") + b"EMC " + text(88, 100, b"click here")
+    page = element(b"u", b"text", paragraph(0, words))
+    box = next(e for e in read_back(tmp_path, page)["elements"] if e.get("mark") == "u")
+    runs = [(r["text"].strip(), r["underline"]) for r in box["paragraphs"][0]["runs"] if r["text"].strip()]
+    assert runs == [("Insert Line:", True), ("click here", False)]
+
+
 def test_a_page_without_marks_is_classified_as_before(tmp_path, backend):
     """No mark, no marked read-back: the slide is `PageClassifier`'s."""
     raw = raw_of(tmp_path, [text(20, 100, b"First box words") + text(20, 86, b"Second box words")])

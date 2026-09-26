@@ -1,7 +1,8 @@
 """The read-back of a page that says what it is: `adopt`'s slides.sty opens a /B2S marked-content
 sequence around every element it draws (its kind, its number on the page and, from slides-keys.tex,
 the deck object it came from), a /B2Sp one around each paragraph of a text box (its alignment and
-list level), /B2Sb around a list item's bullet and /B2Sc around each table cell. `extract` carries
+list level), /B2Sb around a list item's bullet, /B2Sc around each table cell, /B2Su and /B2Ss around
+underlined and struck words; a shape's says the box it was drawn in, a line's its two points. `extract` carries
 those marks into raw.json (`marks` on spans, drawings and images); here they become the page's
 elements (docs/adopt-bench.md, 2026-09-26).
 
@@ -24,7 +25,7 @@ from collections import Counter
 from . import classify as cl
 from .classify import Line, PageClassifier, Paragraph, Rect, label_of, span_runs, union_all
 
-ELEMENT, PARAGRAPH, BULLET, CELL = "B2S", "B2Sp", "B2Sb", "B2Sc"
+ELEMENT, PARAGRAPH, BULLET, CELL, UNDERLINE, STRIKE = "B2S", "B2Sp", "B2Sb", "B2Sc", "B2Su", "B2Ss"
 KINDS = ("spans", "drawings", "images")
 # deck_ir reads a Slides glyph as a number like this
 NUMBERED = re.compile(r"\d|[a-z]\.|[ivx]+\.")
@@ -109,6 +110,17 @@ class MarkedText(PageClassifier):
 
     def detect_bullet(self, line):
         """(the marks say which spans are the bullet: `assign_reasons`)"""
+
+    def text_decorations(self, spans):
+        """The classifier's rules under and through words, and what the marks say: words `\\uline`
+        or `\\sout` set are underlined or struck whatever their rules look like."""
+        super().text_decorations(spans)
+        for s in spans:
+            raw = self._raw_spans.get(s.id) or {}
+            if params(raw, UNDERLINE) is not None:
+                s.underline = True
+            if params(raw, STRIKE) is not None:
+                s.strike = True
 
     def assign_reasons(self, lines):
         super().assign_reasons(lines)
@@ -281,7 +293,14 @@ def shape_element(g: Group, pid: str) -> dict:
     reach = max((math.hypot(d["bbox"][2] - d["bbox"][0], d["bbox"][3] - d["bbox"][1]) for d in shafts), default=0.0)
     line = bool(shafts) and not ims and all(
         max(d["bbox"][2] - d["bbox"][0], d["bbox"][3] - d["bbox"][1]) <= max(0.25 * reach, 12.0) for d in fills)
-    if line:
+    ends = points_of(g.params.get("line"))
+    if ends:
+        # `\slideline` says its two points: the line runs to them, to its arrows' tips (the shaft
+        # TikZ draws stops at a head's base)
+        line = True
+        (ax, ay), (bx, by) = ends
+        bbox = [min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)]
+    elif line:
         bbox = union_box(shafts)
     elif fills or ims:
         bbox = union_box(fills + ims)
@@ -349,6 +368,15 @@ def box_of(text) -> list[float] | None:
         return None
     x, y, w, h = (float(v) * (72 / 72.27 if unit == "pt" else 1.0) for v, unit in parts)
     return [round(x, 2), round(y, 2), round(x + w, 2), round(y + h, 2)]
+
+
+def points_of(text) -> list[tuple[float, float]] | None:
+    """A line mark's `/line (x1 y1 x2 y2)`: its two points, bp from the page's top left."""
+    parts = BOX_PART.findall(str(text or ""))
+    if len(parts) != 4:
+        return None
+    x1, y1, x2, y2 = (float(v) * (72 / 72.27 if unit == "pt" else 1.0) for v, unit in parts)
+    return [(x1, y1), (x2, y2)]
 
 
 # ----------------------------------------------------------------------------------------------- page

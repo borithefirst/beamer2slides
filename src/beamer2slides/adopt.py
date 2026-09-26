@@ -3545,7 +3545,9 @@ SLIDES_STY_HEAD = r"""%% slides.sty - written by beamer2slides adopt, with main.
 %   /B2Sp <</i N /a (align) /l level>> BDC ... EMC  around each paragraph of a text box (/l: a list item's),
 %   /B2Sb BMC ... EMC  around its bullet or number;
 %   a table's own says /rows and /cols, and /B2Sc <</r row /c column>> BDC ... EMC is around each cell's text;
-%   a text box's, a shape's and a table's say /box (x y w h): the box they were set in, from the page's top left.
+%   a text box's, a shape's and a table's say /box (x y w h): the box they were set in, from the page's top left;
+%   a line's says /line (x1 y1 x2 y2): its two points;
+%   /B2Su BMC ... EMC  around words \uline underlines, /B2Ss around words \sout strikes.
 \newcount\slides@elt
 \newcount\slides@parn
 \AddToHook{shipout/after}{\global\slides@elt\z@}
@@ -3566,6 +3568,11 @@ SLIDES_STY_HEAD = r"""%% slides.sty - written by beamer2slides adopt, with main.
     \ifx\slides@pl\@empty\else\space/l \slides@pl\fi>> BDC}}
 % \slidekeys{frame label}{key 1,key 2,...}: the deck object each marked element of that frame came from,
 %   in the order the frame draws them (an empty key: none)
+% ulem's words, marked: its rules are one per word and space, under words a span may run past
+\AtBeginDocument{\@ifundefined{uline}{}{\let\slides@uline\uline
+    \protected\def\uline#1{\slides@literal{/B2Su BMC}\slides@uline{#1}\slides@shut}}%
+  \@ifundefined{sout}{}{\let\slides@sout\sout
+    \protected\def\sout#1{\slides@literal{/B2Ss BMC}\slides@sout{#1}\slides@shut}}}
 \newcommand\slidekeys[2]{\@tempcnta\z@\@for\slides@k:=#2\do{\advance\@tempcnta\@ne
   \global\expandafter\let\csname slides@K@#1@\the\@tempcnta\endcsname\slides@k}}
 \InputIfFileExists{slides-keys.tex}{}{}
