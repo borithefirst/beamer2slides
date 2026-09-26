@@ -561,7 +561,8 @@ SHAPE_MACRO = r"""% --- Shapes -------------------------------------------------
     #1,shift={(\slides@mcx,\slides@mcy)}]#3\end{scope}}\fi
   \slides@shape{\slides@x bp}{\slides@y bp}{\slides@w bp}{\slides@h bp}{\slides@body}}
 \def\slides@shape#1#2#3#4#5{%
-  \edef\slides@block{\noexpand\begin{textblock*}{#3}(#1,#2)}\slides@block\slides@open{shape}%
+  \edef\slides@block{\noexpand\begin{textblock*}{#3}(#1,#2)}\slides@block
+  \edef\slides@more{\space/box (#1 #2 #3 #4)}\slides@open{shape}\let\slides@more\@empty
   \begin{tikzpicture}[baseline=(current bounding box.north),inner sep=0pt,outer sep=0pt]
   \edef\slides@bb{\noexpand\useasboundingbox (0bp,0bp) rectangle (#3,-#4);}\slides@bb
   #5\end{tikzpicture}\par\slides@shut\end{textblock*}}

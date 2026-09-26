@@ -235,6 +235,11 @@ def text_elements(g: Group, page: dict, body: float) -> tuple[list[dict], dict]:
         return [], res
     main = max(texts, key=lambda e: len(e["spans"]))
     main["mark"] = g.mark
+    box = box_of(g.params.get("box"))
+    if box:
+        # the box adopt set the words in: `\slidetext` puts it at the target's text anchor, `\slidebox`
+        # at the target's box, so it is data for a reader who knows which, not the target's bbox
+        main["mark_box"] = box
     ids = {e["id"] for e in texts}
     keep = texts + [e for e in res["elements"] if e.get("anchor") in ids]
     return keep, res
@@ -284,6 +289,14 @@ def shape_element(g: Group, pid: str) -> dict:
             bbox = union_box(strokes + ims)
     else:
         bbox = union_box(ds) or union_box(g.items["spans"])
+    box = None if line else box_of(g.params.get("box"))
+    if box and bbox and box[2] - box[0] > 0.5 and box[3] - box[1] > 0.5:
+        # The box adopt drew the shape in, unless what it drew stands out of it (a shape turned):
+        # a curve's ink falls short of its box, the page's edge cuts one off, a shadow shows it only
+        # in part; none of them is another box.
+        reach = max([d.get("width") or 0.0 for d in ds] + [0.0]) / 2 + 1.5
+        if Rect.of(box).expand(reach).contains_rect(Rect.of(bbox)):
+            bbox = box
     el = {"id": pid, "kind": "shape", "role": "line" if line else "panel", "bbox": bbox,
           "fill": None if line or not fills else fills[0]["fill"],
           "outline": next((d["stroke"] for d in strokes if d.get("stroke")), None),
@@ -325,14 +338,16 @@ def table_element(g: Group, page: dict, body: float, pid: str) -> dict:
             "mark": g.mark}
 
 
+BOX_PART = re.compile(r"(-?\d*\.?\d+)\s*(bp|pt)?")
+
+
 def box_of(text) -> list[float] | None:
-    """A table mark's `/box (x y w h)`: x, y and w in bp from the page's top left, h in TeX pt."""
-    try:
-        x, y, w, h = str(text).split()
-        x, y, w = float(x), float(y), float(w)
-        h = float(h[:-2]) * 72 / 72.27 if h.endswith("pt") else float(h)
-    except (TypeError, ValueError):
+    """A mark's `/box (x y w h)`: the box adopt put the element in, from the page's top left, each
+    in bp unless it says pt (TeX points: a dimension TeX computed)."""
+    parts = BOX_PART.findall(str(text or ""))
+    if len(parts) != 4:
         return None
+    x, y, w, h = (float(v) * (72 / 72.27 if unit == "pt" else 1.0) for v, unit in parts)
     return [round(x, 2), round(y, 2), round(x + w, 2), round(y + h, 2)]
 
 

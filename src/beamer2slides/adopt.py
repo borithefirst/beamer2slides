@@ -992,7 +992,8 @@ SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out -----
   \let\itemize\slides@itemize\let\enditemize\slides@listend
   \let\enumerate\slides@enumerate\let\endenumerate\slides@listend
   \edef\slides@block{\noexpand\begin{textblock*}{\slides@w bp}(\slides@x bp,\slides@y bp)}\slides@block
-  \slides@open{text}\vbox to\slides@h bp\bgroup\slidesbox
+  \edef\slides@more{\space/box (\slides@x\space\slides@y\space\slides@w\space\slides@h)}%
+  \slides@open{text}\let\slides@more\@empty\vbox to\slides@h bp\bgroup\slidesbox
   \if t\slides@valign\vskip\slides@inset bp\relax\else\vss\fi}{%
   \slides@end
   \ifx\slides@tail\@empty\else\vskip\slides@tail bp\relax\fi
@@ -3543,7 +3544,8 @@ SLIDES_STY_HEAD = r"""%% slides.sty - written by beamer2slides adopt, with main.
 %     the key the deck object it came from (\slidekeys: slides-keys.tex, which adopt writes);
 %   /B2Sp <</i N /a (align) /l level>> BDC ... EMC  around each paragraph of a text box (/l: a list item's),
 %   /B2Sb BMC ... EMC  around its bullet or number;
-%   a table's own says /rows and /cols, and /B2Sc <</r row /c column>> BDC ... EMC is around each cell's text.
+%   a table's own says /rows and /cols, and /B2Sc <</r row /c column>> BDC ... EMC is around each cell's text;
+%   a text box's, a shape's and a table's say /box (x y w h): the box they were set in, from the page's top left.
 \newcount\slides@elt
 \newcount\slides@parn
 \AddToHook{shipout/after}{\global\slides@elt\z@}
