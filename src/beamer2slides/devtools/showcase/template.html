@@ -105,6 +105,7 @@ figure { margin: 0; }
 .swipe img { display: block; width: 100%; height: auto; }
 .swipe .top { position: absolute; inset: 0; clip-path: inset(0 0 0 var(--cut, 50%)); }
 .swipe .handle { position: absolute; top: 0; bottom: 0; left: var(--cut, 50%); width: 2px; background: var(--beamer); transform: translateX(-1px); pointer-events: none; }
+.swipe .handle::after { content: "\2194"; position: absolute; top: 50%; left: 50%; width: 34px; height: 34px; margin: -17px 0 0 -17px; border-radius: 50%; background: var(--beamer); color: #fff; font: 600 18px/34px var(--mono); text-align: center; box-shadow: 0 1px 6px rgb(0 0 0 / .35); }
 .swipe .labels { display: flex; justify-content: space-between; font: 500 12px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); padding: 10px 14px; }
 .swipe .labels span { display: inline-flex; gap: 8px; align-items: center; }
 .swipe input[type=range] { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: ew-resize; margin: 0; }
@@ -158,8 +159,8 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
   <div class="bar">
     <div class="chips" id="chips" role="group" aria-label="Filter examples"></div>
     <div class="seg" role="group" aria-label="Comparison view">
-      <button type="button" id="v-side" aria-pressed="true">Side by side</button>
-      <button type="button" id="v-swipe" aria-pressed="false">Swipe</button>
+      <button type="button" id="v-swipe" aria-pressed="true">Swipe</button>
+      <button type="button" id="v-side" aria-pressed="false">Side by side</button>
     </div>
   </div>
 
@@ -168,7 +169,7 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
   <section class="howto">
     <h2>How these were made</h2>
     <p>The decks are written by <code>devtools/showcase/decks.py</code>. The lecture is built with the Slides API alone. The other five are .pptx files imported by Drive, which is how most shared decks are made. Every picture in them is drawn from a seed by <code>devtools/showcase/art.py</code>, and every word was written for this page.</p>
-    <p>The left image is Google's own <code>getThumbnail</code> of the slide. The right image is the compiled adopted PDF, rendered at the same width. Neither was retouched. <b>Match</b> is the adopt benchmark's <code>boxes</code> score for that slide: of the ink inside the deck's element boxes, the share that lands in the same place in both renders. The examples include the slides where adopt falls short, and each caption says where.</p>
+    <p>Left of the divider (or the left image, side by side) is Google's own <code>getThumbnail</code> of the slide. Right of it is the compiled adopted PDF, rendered at the same width. Neither was retouched. <b>Match</b> is the adopt benchmark's <code>boxes</code> score for that slide: of the ink inside the deck's element boxes, the share that lands in the same place in both renders. The examples include the slides where adopt falls short, and each caption says where.</p>
     <p>A frame's <code>\slidestyle</code>, <code>\slideshapestyle</code> and colour names are declared once in the preamble. The <b>Preamble</b> tab lists only the ones that frame uses. <code>layout=</code> selects a <code>background</code> template from the recovered theme, shown under <b>Theme layout</b>. Pictures and traced outlines are files in the tree (<code>figures/</code>, <code>shapes/</code>). Each deck's <b>adopted source</b> is the whole tree except <code>fonts/</code>. Its <code>FONTS.txt</code> lists the Google Fonts it expects there.</p>
   </section>
   <footer>Made with <a href="https://github.com/borithefirst/beamer2slides">beamer2slides</a>. Rebuild this page with <code>python tools/showcase.py gallery</code>.</footer>
@@ -220,6 +221,7 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
     </article>`).join("");
 
   const list = document.getElementById("list");
+  const sweeps = watch();
   DATA.forEach((d, k) => {
     const key = d.deck + "-" + d.slide;
     const deckImg = `img/${key}-deck.jpg`, texImg = `img/${key}-tex.jpg`;
@@ -239,11 +241,11 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
       </div>
       <p class="note">${d.note}</p>
       <div class="tags">${d.tags.map(t => `<span class="tag">${t}</span>`).join("")}</div>
-      <div class="pair">
+      <div class="pair" hidden>
         <figure class="pane"><figcaption><span class="dot s"></span>Google Slides</figcaption><img loading="lazy" src="${deckImg}" alt="Google Slides render of ${esc(alt)}" style="aspect-ratio:${ar}"></figure>
         <figure class="pane"><figcaption><span class="dot b"></span>Adopted beamer PDF</figcaption><img loading="lazy" src="${texImg}" alt="Compiled beamer page of ${esc(alt)}" style="aspect-ratio:${ar}"></figure>
       </div>
-      <div class="swipe" hidden>
+      <div class="swipe">
         <div class="stack">
           <img loading="lazy" src="${deckImg}" alt="Google Slides render of ${esc(alt)}" style="aspect-ratio:${ar}">
           <img class="top" loading="lazy" src="${texImg}" alt="Compiled beamer page of ${esc(alt)}" style="aspect-ratio:${ar}">
@@ -286,8 +288,29 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
       } catch (_) { selectIn(shown); }
     });
     const rng = art.querySelector("input[type=range]"), sw = art.querySelector(".swipe");
-    rng.addEventListener("input", () => sw.style.setProperty("--cut", rng.value + "%"));
+    rng.addEventListener("input", () => { sw.dataset.touched = "1"; sw.style.setProperty("--cut", rng.value + "%"); });
+    sweeps.observe(sw);
   });
+  // each divider sweeps across once when its slide first comes into view: the two renders differ
+  // so little that a still divider looks like one picture
+  function sweep(sw) {
+    const rng = sw.querySelector("input[type=range]"), t0 = performance.now(), T = 1800;
+    (function step(now) {
+      if (sw.dataset.touched) return;
+      const u = Math.min(1, (now - t0) / T);
+      const v = 50 + 40 * Math.sin(u * 2 * Math.PI) * (1 - u);
+      sw.style.setProperty("--cut", v + "%"); rng.value = v;
+      if (u < 1) requestAnimationFrame(step);
+    })(t0);
+  }
+  function watch() {
+    const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    return "IntersectionObserver" in window && !still
+      ? new IntersectionObserver(es => es.forEach(e => {
+          if (e.isIntersecting && e.target.offsetParent) { sweeps.unobserve(e.target); sweep(e.target); }
+        }), { threshold: 0.6 })
+      : { observe() {}, unobserve() {} };
+  }
   function selectIn(el) {
     const r = document.createRange(); r.selectNodeContents(el);
     const s = getSelection(); s.removeAllRanges(); s.addRange(r);
@@ -318,7 +341,7 @@ footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid var(--line);
   vs.addEventListener("click", () => view(false));
   vw.addEventListener("click", () => view(true));
   try {
-    if (localStorage.getItem("b2s-view") === "swipe") view(true);
+    if (localStorage.getItem("b2s-view") === "side") view(false);
     const f = localStorage.getItem("b2s-filter");
     const c = f && chips.querySelector(`[data-f="${f}"]`);
     if (c) c.click();

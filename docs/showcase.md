@@ -33,7 +33,14 @@ python tools/showcase.py decks [NAME...]    # build or rebuild in Drive, share, 
 python tools/showcase.py capture [NAME...]  # adopt_bench capture into out/showcase-corpus
 python tools/showcase.py run                # adopt_bench run, tag `showcase` (MiKTeX on PATH)
 python tools/showcase.py gallery out/showcase/site
+python tools/showcase.py swipe out/showcase/site  # the README's docs/media/adopt-swipe.gif
 ```
+
+The page opens in Swipe view: Google's render left of a divider, the adopted PDF right of it, and
+each divider sweeps across once when its slide scrolls into view (not with reduced motion), because
+a divider standing still over two near-identical renders looks like one picture.
+`gallery.SWIPES` picks the README animation's slides: flat colours keep the GIF under 1 MB (one
+palette per slide, so a frame stores only the strip around the divider).
 
 `gallery.PICKS` chooses the slides and holds each caption. The captions say what adopt wrote and
 where it falls short, so re-read them against the new frames after an adopt change. The site is

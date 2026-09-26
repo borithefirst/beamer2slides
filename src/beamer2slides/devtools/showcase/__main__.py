@@ -4,6 +4,7 @@
   capture   adopt_bench capture of each deck into out/showcase-corpus
   run       adopt_bench run over that corpus (tag `showcase` unless --tag)
   gallery   the site: OUT/index.html + OUT/img/ (+ each deck's adopted source as a .zip)
+  swipe     the README's GIF from a built site: SITE [DEST, default docs/media/adopt-swipe.gif]
 """
 
 import argparse
@@ -24,6 +25,9 @@ def main(argv=None) -> None:
     g = sub.add_parser("gallery")
     g.add_argument("out")
     g.add_argument("--tag", default="showcase")
+    s = sub.add_parser("swipe")
+    s.add_argument("site")
+    s.add_argument("dest", nargs="?", default="docs/media/adopt-swipe.gif")
     a = ap.parse_args(argv)
     # the adopt bench reads its corpus folder at import
     os.environ["B2S_ADOPT_CORPUS"] = str(CORPUS)
@@ -41,6 +45,11 @@ def main(argv=None) -> None:
     elif a.cmd == "run":
         from beamer2slides.devtools import adopt_bench
         adopt_bench.main(["run", *a.names, "--tag", a.tag, "--jobs", str(a.jobs)])
+    elif a.cmd == "swipe":
+        from pathlib import Path
+
+        from beamer2slides.devtools.showcase.gallery import swipe_gif
+        swipe_gif(Path(a.site), Path(a.dest))
     else:
         from pathlib import Path
 

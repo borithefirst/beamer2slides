@@ -1,13 +1,44 @@
 # beamer2slides
 
-**Turn a beamer PDF into a Google Slides deck people can actually edit.** Not one picture per
-slide: real text boxes, real bullet lists, real tables, real shapes — in the same places, in
-matching fonts, to within a point or two.
+**Beamer and Google Slides, both ways.** Hand it the PDF of your LaTeX talk and get a Google
+Slides deck where every word, bullet, table and shape is a real object people can edit — in the
+same place, in matching fonts, to within a point or two. Merge your next draft into the deck they
+edited without losing a keystroke of theirs, pull their fixes back into your `.tex`, or start from a
+deck someone built in Slides and get a beamer source that compiles back to the same slides.
+
+**[Try it in your browser →](https://beamer2slides-playground-702466108736.europe-west1.run.app)**
+&nbsp;·&nbsp; **[The adopt gallery: six decks, slide by slide →](https://borithefirst.github.io/beamer2slides/)**
+&nbsp;·&nbsp; [Install](#setup)
 
 ![The same slide as pdflatex printed it and as Google Slides renders it after conversion](docs/media/hero.png)
 
-Only what cannot be rebuilt faithfully — display math, TikZ/pgfplots figures, theme decoration —
-becomes a picture, and even those stay objects you can move rather than paint on the background.
+## Why it is different
+
+- **Nothing is a screenshot.** Text boxes, bullet lists, tables, TikZ diagrams as grouped shapes,
+  beamer blocks as panels. Only display math, complex figures and theme decoration become
+  pictures, and even those stay objects you can move. [Every object, outlined ↓](#nothing-is-a-screenshot)
+- **Fidelity is measured on Google's own renderer.** Every slide comes back through
+  `getThumbnail` and is diffed against the PDF page; the font substitutes are calibrated character
+  by character. [A diff ↓](#fidelity-is-measured-not-eyeballed)
+- **Nobody's edits are lost.** `sync` is a three-way merge: the deck's edits win, conflicts are
+  reported, a rebuild of an edited deck is refused, and a sync killed at any point loses nothing.
+  The claim is [fuzzed against a loss oracle](docs/sync.md#proving-nothing-is-lost-fuzzing-toolsloss_oraclepy--toolsfuzz_syncpy).
+- **It runs backwards.** `pull` brings a typo fixed in Slides back into the `.tex`, as the edit a
+  person would have made. `adopt` turns any deck into an editable beamer source:
+  [drag the divider in the gallery](https://borithefirst.github.io/beamer2slides/) and try to tell
+  them apart.
+- **Any script.** Hebrew and Arabic come out right to left in logical order, Chinese, Japanese and
+  Korean wrap anywhere, code keeps its columns.
+- **Your Drive stays private.** Its only Drive scope is `drive.file` (the files it creates itself),
+  and pictures travel inside an imported .pptx, never behind a public link.
+- **Google Docs and agents too.** The same three-way loop keeps an HTML file and a Google Doc in
+  sync ([`docs push|sync|adopt`](docs/google-docs.md)), and eleven [agent tools](docs/agent-tools.md)
+  with an MCP server (`beamer2slides-mcp`) offer every journey with typed results and refusals.
+
+![Google's render of four slides left of a moving divider, the page adopt's beamer source compiles to right of it](docs/media/adopt-swipe.gif)
+
+<sub>Left of the divider, Google Slides' own render of a deck; right of it, the page that `adopt`'s
+beamer source for that deck compiles to. More in the [gallery](https://borithefirst.github.io/beamer2slides/).</sub>
 
 ## Nothing is a screenshot
 
@@ -47,6 +78,10 @@ every shape, box and word gets its own place in the new source, and the source c
 slide.
 
 ![A slide in Google Slides and the beamer source adopt wrote for it, compiled](docs/media/adopt.png)
+
+The [gallery](https://borithefirst.github.io/beamer2slides/) does the same for six decks built in
+Slides — right to left, CJK, tables, theme layouts, pictures — with the originals open to view, the
+frame behind every slide, and each deck's adopted source to download.
 
 ## What you get
 - **Text boxes** with colours, bold/italic/small caps and links. Fonts that are Google fonts in

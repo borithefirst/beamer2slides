@@ -174,3 +174,59 @@ def write(out: Path, tag: str = "showcase") -> Path:
     (out / ".nojekyll").write_text("", encoding="utf-8")
     print(f"{len(items)} examples from {len(deck_rows)} decks -> {out / 'index.html'}")
     return out / "index.html"
+
+
+# the README's animation: the divider sweeping across slides where the two renders are hardest to tell
+# apart, flat colours so the GIF stays small
+SWIPES = [("talk", 1), ("review", 3), ("hashing", 3), ("water", 6)]
+
+
+def swipe_gif(site: Path, dest: Path, width: int = 800) -> Path:
+    """Google's render left of a moving divider, the adopted PDF right of it, from a built site's img/."""
+    import math
+
+    from PIL import Image, ImageDraw, ImageFont
+    blue, frames, durations = (51, 51, 178), [], []
+    try:
+        font = ImageFont.truetype("arialbd.ttf", 15)
+    except OSError:
+        font = ImageFont.load_default()
+
+    def tag(d, xy, words, anchor):
+        box = d.textbbox(xy, words, font=font, anchor=anchor)
+        d.rounded_rectangle((box[0] - 8, box[1] - 5, box[2] + 8, box[3] + 5), 6, fill=(20, 22, 30))
+        d.text(xy, words, font=font, fill=(255, 255, 255), anchor=anchor)
+
+    for name, n in SWIPES:
+        a, b = (Image.open(site / "img" / f"{name}-{n}-{k}.jpg").convert("RGB") for k in ("deck", "tex"))
+        size = (width, round(width * a.height / a.width))
+        a, b = a.resize(size, Image.LANCZOS), b.resize(size, Image.LANCZOS)
+        steps, first = 30, len(frames)
+        for i in range(steps + 1):
+            u = i / steps
+            cut = round(size[0] * (0.5 + 0.42 * math.sin(u * 2 * math.pi)))
+            im = a.copy()
+            im.paste(b.crop((cut, 0, size[0], size[1])), (cut, 0))
+            d = ImageDraw.Draw(im)
+            d.rectangle((cut - 1, 0, cut + 1, size[1]), fill=blue)
+            y = size[1] // 2
+            d.ellipse((cut - 16, y - 16, cut + 16, y + 16), fill=blue)
+            d.polygon([(cut - 10, y), (cut - 3, y - 6), (cut - 3, y + 6)], fill="white")
+            d.polygon([(cut + 10, y), (cut + 3, y - 6), (cut + 3, y + 6)], fill="white")
+            tag(d, (14, 14), "Google Slides", "lt")
+            tag(d, (size[0] - 14, 14), "adopted beamer PDF", "rt")
+            frames.append(im)
+            durations.append(700 if i in (0, steps) else 50)
+        # one palette per slide, so a frame differs from the last only around the divider and the GIF
+        # stores just that strip
+        both = Image.new("RGB", (size[0], size[1] * 2))
+        both.paste(a, (0, 0)); both.paste(b, (0, size[1]))
+        ImageDraw.Draw(both).rectangle((0, 0, 40, size[1]), fill=blue)  # the divider's colour survives
+        tag(ImageDraw.Draw(both), (14, 14), "Google Slides", "lt")
+        palette = both.quantize(colors=96, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+        frames[first:] = [f.quantize(palette=palette, dither=Image.Dither.NONE) for f in frames[first:]]
+    pal = frames
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    pal[0].save(dest, save_all=True, append_images=pal[1:], duration=durations, loop=0, optimize=True)
+    print(f"{len(frames)} frames -> {dest} ({dest.stat().st_size // 1024} KB)")
+    return dest
