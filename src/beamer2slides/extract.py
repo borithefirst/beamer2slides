@@ -384,15 +384,39 @@ class Visibility:
         return not on or hidden * len(SAMPLES) ** 2 >= HIDDEN_SAMPLES * on
 
 
+MARK_PREFIX = "B2S"  # the marked-content tags slides.sty writes around an adopted element
+
+
+def page_marks(page: Page) -> dict[int, tuple]:
+    """The B2S marks around each page object that has any, outermost first, as (tag, params):
+    slides.sty's own (`adopt.SLIDES_MARKS`), others (a tagged PDF's /P, /Span) left out. A form's
+    children are inside the marks around the form, which PDFium lists as the form's only."""
+    objects = page.objects()
+    found: dict[int, tuple] = {}
+    for po in objects:  # a form comes before what it holds
+        own = tuple(m for m in getattr(po, "marks", ()) if m[0].startswith(MARK_PREFIX))
+        outer = found.get(po.parent, ()) if po.parent is not None else ()
+        if outer or own:
+            found[po.id] = outer + own
+    return found
+
+
+def _marks_json(marks: tuple) -> list:
+    return [[tag, dict(params)] for tag, params in marks]
+
+
 def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False,
-          chars: list[Char] | None = None) -> list[dict]:
+          chars: list[Char] | None = None, marks: dict[int, tuple] | None = None) -> list[dict]:
     """Runs of glyphs on one line with the same font, size and colour, split at word gaps. Only
     glyphs that show (`Visibility`), or with `hidden` only those on the page that don't. `chars`:
-    the page's characters as read (`page_chars`), when the caller has them."""
+    the page's characters as read (`page_chars`), when the caller has them. `marks`
+    (`page_marks`): a span never crosses from one B2S mark to another, and carries its own."""
     out = []
     run: list[Char] = []
     x0, y0, x1, y1 = page.rect
     visibility = visibility or Visibility(page)
+    marks = marks or {}
+    mark_of = lambda ch: marks.get(ch.obj, ())
 
     def flush():
         if run and any(not ch.synthetic for ch in run):
@@ -405,9 +429,13 @@ def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False
             bx1 = max(ch.box[2] for ch in boxed)
             by1 = max(ch.box[3] for ch in boxed)
             first = run[0]
-            out.append({"text": text, "font": first.font, "size": first.size, "color": first.color,
-                        "alpha": first.alpha, "origin": first.origin, "bbox": (bx0, by0, bx1, by1),
-                        "dir": first.dir, "chars": list(run)})
+            span = {"text": text, "font": first.font, "size": first.size, "color": first.color,
+                    "alpha": first.alpha, "origin": first.origin, "bbox": (bx0, by0, bx1, by1),
+                    "dir": first.dir, "chars": list(run)}
+            mark = next((mark_of(ch) for ch in run if not ch.synthetic), ())
+            if mark:
+                span["marks"] = mark
+            out.append(span)
         run.clear()
 
     # characters outside the page (e.g. the cut-off half of a notes-on-second-screen page)
@@ -427,8 +455,20 @@ def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False
                     at.dir, NO_OBJECT, at.font_id, width, True, at.ascent, at.descent)
 
     prev: Char | None = None
+    last_mark: tuple = ()
     for k, ch in enumerate(shown):
         space = None
+        # Another element's (or paragraph's) glyphs: its own span, whatever the gap. A space
+        # between the two is read by classify from the gap, as between any spans.
+        if marks and not ch.synthetic:
+            mark = mark_of(ch)
+            if prev is not None and mark != last_mark:
+                last_mark = mark
+                flush()
+                run.append(ch)
+                prev = ch
+                continue
+            last_mark = mark
         if k in tracked and prev is not None and not combining_mark(ch.c):
             # letterspaced: a tracked gap joins, a word gap is a space (classify reads one between
             # spans); a wide tracking is a no-break space between letters, and one more at a word gap
@@ -568,7 +608,9 @@ def extract_page(page: Page, label: str) -> dict:
     out_spans = []
     visibility = Visibility(page)
     chars, decoded = page_chars(page)
-    for s in spans(page, visibility, chars=chars):
+    marks = page_marks(page)
+    marked = lambda obj: {"marks": _marks_json(marks[obj])} if obj in marks else {}
+    for s in spans(page, visibility, chars=chars, marks=marks):
         if not s["text"].strip():
             continue
         out_spans.append({
@@ -579,12 +621,13 @@ def extract_page(page: Page, label: str) -> dict:
             "origin": _r(s["origin"]), "bbox": _r(s["bbox"]), "dir": _r(s["dir"], 3),
             # (a TeX bitmap font's small caps are a font of their own: ECCC1095)
             "smallcaps": s["chars"][0].font_id not in decoded and _small_caps(page, s["chars"]),
+            **({"marks": _marks_json(s["marks"])} if "marks" in s else {}),
         })
 
     page_drawings = page.drawings()
-    found = [(info["bbox"], [info["width"], info["height"]]) for info in page.images()]
-    found += [(b, [b[2] - b[0], b[3] - b[1]]) for b in _shadow_pieces(page_drawings)]
-    images = [{"id": f"p{n}i{i}", "bbox": _r(b), "px": px} for i, (b, px) in enumerate(found)]
+    found = [(info["bbox"], [info["width"], info["height"]], marked(info["object"])) for info in page.images()]
+    found += [(b, [b[2] - b[0], b[3] - b[1]], {}) for b in _shadow_pieces(page_drawings)]
+    images = [{"id": f"p{n}i{i}", "bbox": _r(b), "px": px, **m} for i, (b, px, m) in enumerate(found)]
 
     # ids are indices into page.drawings() (render.crop_overlay finds the objects by them), so a
     # drawing that does not show leaves a gap
@@ -597,6 +640,7 @@ def extract_page(page: Page, label: str) -> dict:
         "soft_mask": bool(d.get("soft_mask")),  # a soft mask or a blend mode (multiply)
         "corners": _rounded_corners(d),
         "path": _path(d),
+        **marked(d["object"]),
     } for i, d in ((i, _visible(d)) for i, d in enumerate(page_drawings)) if d is not None]
 
     links = [{"bbox": _r(link["bbox"]), **({"uri": link["uri"]} if "uri" in link else {"page": link["page"]})}
