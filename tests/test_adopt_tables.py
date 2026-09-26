@@ -509,3 +509,16 @@ def test_a_measured_inset_places_a_cell_by_its_first_or_last_baseline(tmp_path):
     assert len(bottom) == 1 and f"baseline={last:.2f}" in bottom[0]
     middle = [c for c in cells if "valign=middle" in c]
     assert len(middle) == 1 and "baseline" not in middle[0], "a middle cell is placed as before"
+
+
+def test_every_e_variant_the_table_macros_use_is_generated():
+    """TeX Live 2022's l3kernel (2023-01-16) has no \\tl_set:Ne, \\tl_set:ce nor \\tl_gset:ce: a
+    slidetable stopped on "Undefined control sequence" there (reported with v0.7.0). Generating a
+    variant the kernel has already changes nothing, so each e-type one used is generated."""
+    tex = adopt.TABLE_MACROS
+    generated = {(name, sig) for name, sigs in re.findall(r"\\cs_generate_variant:Nn\s*\\(\w+):\w+\s*\{([^}]*)\}", tex)
+                 for sig in (s.strip() for s in sigs.split(","))}
+    # (\use:e and \exp_args:NNe are the kernel's own, TeX Live 2022's among them)
+    used = {(name, sig) for name, sig in re.findall(r"\\(\w+):(\w+)", tex)
+            if "e" in sig and name not in ("exp_args", "use")}
+    assert used and used <= generated, sorted(used - generated)

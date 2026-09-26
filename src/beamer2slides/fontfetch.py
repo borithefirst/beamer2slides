@@ -186,6 +186,8 @@ def cached(family: str) -> dict[str, Path]:
     """The static files of a family already in the cache, by style name (Regular, Bold, ...)."""
     folder = cache_dir() / folder_name(family)
     stem = stem_name(family)
+    if (folder / f"{stem}-Regular.ttf").exists():
+        repair_names(folder)
     return {s: folder / f"{stem}-{s}.ttf" for s in STYLES if (folder / f"{stem}-{s}.ttf").exists()}
 
 
@@ -293,8 +295,7 @@ def _build(family: str, folder: str, lic: str | None, meta: dict, axes: dict | N
                 loc["ital"] = have["ital"].maxValue
             font = instancer.instantiateVariableFont(vf, loc)
             font["OS/2"].usWeightClass = int(loc.get("wght", weight))
-            if axes:
-                rename(font, family, style)
+            rename(font, family, style)
             dest.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=dest) as tmp:
                 part = Path(tmp) / target.name
@@ -306,6 +307,8 @@ def _build(family: str, folder: str, lic: str | None, meta: dict, axes: dict | N
                 continue
             _write_atomic(target, download(best["filename"]).read_bytes())
         out[style] = target
+    if out and any("[" in f["filename"] for f in meta["fonts"]):
+        (dest / NAMED).touch()
     return out if "Regular" in out else {}
 
 
@@ -328,6 +331,7 @@ def weight_file(upright: Path, weight: int, italic: bool = False) -> Path | None
         return None
     stem = upright.stem.partition("-")[0]
     target = dest / f"{stem}-W{weight}{'Italic' if italic else ''}.ttf"
+    repair_names(dest)
     if target.exists():
         return target
     base, axes = OPTICAL.get(dest.name, (None, {}))
@@ -352,6 +356,7 @@ def weight_file(upright: Path, weight: int, italic: bool = False) -> Path | None
             loc["ital"] = have["ital"].maxValue
         font = instancer.instantiateVariableFont(vf, loc)
         font["OS/2"].usWeightClass = int(weight)
+        rename(font, family_of(upright), "Italic" if italic else "Regular", weight)
         with tempfile.TemporaryDirectory(dir=dest) as tmp:
             part = Path(tmp) / target.name
             font.save(part)
@@ -361,16 +366,99 @@ def weight_file(upright: Path, weight: int, italic: bool = False) -> Path | None
     return target
 
 
-def rename(font, family: str, style: str) -> None:
-    """Give an instance cut for an OPTICAL name that name in its own name table, which is what
-    `adopt.font_candidates` also reads: left as it was, Google Sans Text's files would call themselves
-    Google Sans and could be taken for the display cut."""
+#: Written into a family folder once its instances are named for what they are (`repair_names`).
+NAMED = ".b2s-named"
+
+WEIGHT_NAMES = {100: "Thin", 200: "ExtraLight", 300: "Light", 400: "Regular", 500: "Medium",
+                600: "SemiBold", 700: "Bold", 800: "ExtraBold", 900: "Black"}
+
+
+def rename(font, family: str, style: str, weight: int | None = None) -> None:
+    """Name an instance cut from a variable font for the family and style it is. The instancer keeps
+    the default instance's names, and Montserrat's default is its Thin: every Montserrat face cut
+    here called itself Montserrat-Thin, the compiled PDF named its bold headings so, and pull read
+    the saudi-cats deck's bold headings back as thin ones. A weight none of the four styles is
+    (`weight_file`) is its own family ("Montserrat Medium") in the typographic family. An OPTICAL
+    cut takes its own name the same way: left as it was, Google Sans Text's files would call
+    themselves Google Sans and could be taken for the display cut."""
+    italic = style in ("Italic", "BoldItalic")
+    if weight in (400, 700):
+        style, weight = ("Bold" if weight == 700 else "Regular") + ("Italic" if italic else ""), None
     name = font["name"]
-    words = {"Regular": "Regular", "Bold": "Bold", "Italic": "Italic", "BoldItalic": "Bold Italic"}[style]
-    for rec in list(name.names):
-        if rec.nameID in (16, 17, 21, 22, 25):              # typographic names would still say the base
-            name.removeNames(nameID=rec.nameID)
-    for nid, value in ((1, family), (2, words), (4, f"{family} {words}"),
-                       (6, f"{stem_name(family)}-{style}")):
+    stem = stem_name(family)
+    for nid in (1, 2, 3, 4, 6, 16, 17, 21, 22, 25):         # the base's names, whatever language
+        name.removeNames(nameID=nid)
+    if weight is None:
+        words = {"Regular": "Regular", "Bold": "Bold", "Italic": "Italic", "BoldItalic": "Bold Italic"}[style]
+        ps, bold = f"{stem}-{style}", style.startswith("Bold")
+        names = [(1, family), (2, words), (4, f"{family} {words}")]
+    else:
+        wname = WEIGHT_NAMES.get(weight, f"W{weight}")
+        words = wname + (" Italic" if italic else "")
+        ps, bold = f"{stem}-{wname}{'Italic' if italic else ''}", False
+        names = [(1, f"{family} {wname}"), (2, "Italic" if italic else "Regular"), (4, f"{family} {words}"),
+                 (16, family), (17, words)]
+    for nid, value in names + [(3, f"{ps};beamer2slides"), (6, ps)]:
         name.setName(value, nid, 3, 1, 0x409)
         name.setName(value, nid, 1, 0, 0)
+    os2 = font["OS/2"]
+    os2.fsSelection = (os2.fsSelection & ~0x61) | (0x01 if italic else 0) | (0x20 if bold else 0) \
+        | (0x40 if not (italic or bold) else 0)
+    font["head"].macStyle = (font["head"].macStyle & ~0x03) | (0x01 if bold else 0) | (0x02 if italic else 0)
+
+
+def family_of(path: Path) -> str:
+    """The family a static file of this cache belongs to, from its name table (the typographic
+    family first: name 1 of a medium cut says "Montserrat Medium")."""
+    from fontTools.ttLib import TTFont
+    with TTFont(path, lazy=True) as font:
+        name = font["name"]
+        return (name.getDebugName(16) or name.getDebugName(1) or Path(path).stem.partition("-")[0]).strip()
+
+
+def repair_names(dest: Path) -> None:
+    """Name the instances in a family folder cut before `rename` named every one of them (they call
+    themselves by the variable font's default instance, Montserrat's Thin), once: the folder is
+    marked `NAMED` afterwards. Nothing is downloaded; a folder that cannot be repaired is left."""
+    dest = Path(dest)
+    if (dest / NAMED).exists():
+        return
+    base, _ = OPTICAL.get(dest.name, (None, {}))
+    src = dest.parent / (folder_name(base) if base else dest.name) / "src"
+    if not (src.is_dir() and any(src.glob("*[[]*].ttf"))):
+        return                                          # static files: google/fonts named them
+    regular = sorted(dest.glob("*-Regular.ttf"))
+    if not regular:
+        return
+    try:
+        from fontTools.ttLib import TTFont
+        family = family_of(regular[0])
+        for f in sorted(dest.glob("*.ttf")):
+            suffix = f.stem.partition("-")[2]
+            cut = re.fullmatch(r"W(\d+)(Italic)?", suffix)
+            if suffix not in STYLES and not cut:
+                continue
+            font = TTFont(f)
+            if cut:
+                rename(font, family, "Italic" if cut.group(2) else "Regular", int(cut.group(1)))
+            else:
+                rename(font, family, suffix)
+            with tempfile.TemporaryDirectory(dir=dest) as tmp:
+                part = Path(tmp) / f.name
+                font.save(part)
+                font.close()
+                os.replace(part, f)
+        (dest / NAMED).touch()
+    except (OSError, ValueError, ImportError, KeyError, AssertionError):
+        return
+
+
+def repair_cache(root: Path | None = None) -> None:
+    """`repair_names` for every family folder under the cache (or `root`)."""
+    root = cache_dir() if root is None else Path(root)
+    try:
+        folders = [p for p in root.iterdir() if p.is_dir()] if root.is_dir() else []
+    except OSError:
+        return
+    for folder in folders:
+        repair_names(folder)

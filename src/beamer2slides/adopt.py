@@ -222,6 +222,10 @@ def font_candidates() -> dict[str, dict[str, Path]]:
     dirs = tuple(font_dirs())
     if dirs not in _FAMILIES:
         groups: dict[str, dict[str, Path]] = {}
+        if fetching():
+            from .fontfetch import cache_dir, repair_cache
+            if cache_dir() in dirs:
+                repair_cache()                          # instances cut before they were named
         for folder in dirs:
             for f in sorted(list(folder.glob("*.tt[fc]")) + list(folder.glob("*.otf"))
                             + list(folder.glob("*/*.tt[fc]")) + list(folder.glob("*/*.otf"))):
@@ -2432,6 +2436,10 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
 \clist_new:N \l__slides_t_xy_clist
 \clist_new:N \l__slides_t_aligns_clist
 \cs_generate_variant:Nn \seq_set_split_keep_spaces:Nnn { NnV }
+% TeX Live 2022's l3kernel (2023-01-16) has none of these, newer ones do; generating a variant the
+% kernel already has changes nothing
+\cs_generate_variant:Nn \tl_set:Nn { Ne , ce }
+\cs_generate_variant:Nn \tl_gset:Nn { ce }
 \keys_define:nn { slides/table }
   {
     inset .code:n = { \tl_set:Nn \l__slides_t_ix_tl {#1} \tl_set:Nn \l__slides_t_iy_tl {#1} } ,

@@ -429,6 +429,69 @@ def test_a_weight_between_regular_and_bold_is_cut_when_the_family_is_variable(mo
     assert fontfetch.weight_file(elsewhere, 600) is None, "only families this cache fetched"
 
 
+def thin_default_font() -> bytes:
+    """A variable font whose default instance is its Thin, named so, as Montserrat's is."""
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.ttLib import TTFont
+    font = TTFont(io.BytesIO(tiny_font("Tiny Flex", variable=True)))
+    fb = FontBuilder(font=font)
+    fb.setupNameTable({"familyName": "Tiny Flex Thin", "styleName": "Regular", "typographicFamily": "Tiny Flex",
+                       "typographicSubfamily": "Thin", "psName": "TinyFlex-Thin"})
+    fb.setupFvar(axes=[("wght", 100, 100, 900, "Weight")], instances=[])
+    buf = io.BytesIO()
+    fb.save(buf)
+    return buf.getvalue()
+
+
+def names(path) -> tuple:
+    from fontTools.ttLib import TTFont
+    with TTFont(path) as font:
+        n = font["name"]
+        return n.getDebugName(1), n.getDebugName(2), n.getDebugName(6), n.getDebugName(16), n.getDebugName(17)
+
+
+def test_an_instance_is_named_for_its_weight_not_the_variable_fonts_default(monkeypatch):
+    """Montserrat's default instance is its Thin, and every face cut from it kept that name: the
+    saudi-cats deck compiled with bold headings called Montserrat-Thin, and pull read them back as
+    not bold. Every instance is named for the style or weight it was cut at."""
+    pytest.importorskip("fontTools")
+    hub = GitHub({"ofl/tinyflex/METADATA.pb": VARIABLE_META.encode(),
+                  "ofl/tinyflex/TinyFlex%5Bwght%5D.ttf": thin_default_font()})
+    monkeypatch.setattr(fontfetch, "get", hub)
+    got = fontfetch.fetch_family("Tiny Flex", log=lambda *_: None)
+    assert names(got["Regular"]) == ("Tiny Flex", "Regular", "TinyFlex-Regular", None, None)
+    assert names(got["Bold"]) == ("Tiny Flex", "Bold", "TinyFlex-Bold", None, None)
+    assert names(fontfetch.weight_file(got["Regular"], 500)) == (
+        "Tiny Flex Medium", "Regular", "TinyFlex-Medium", "Tiny Flex", "Medium")
+    assert names(fontfetch.weight_file(got["Regular"], 450))[2] == "TinyFlex-W450"
+    from beamer2slides.fonts import font_info
+    assert font_info("ABCDEF+TinyFlex-Bold").bold and not font_info("ABCDEF+TinyFlex-Regular").bold
+
+
+def test_instances_cut_before_they_were_named_are_named_once(monkeypatch):
+    """A cache filled by an older version holds faces that call themselves Thin: they are named in
+    place, from the files already there, with nothing downloaded."""
+    pytest.importorskip("fontTools")
+    from fontTools.varLib import instancer
+    from fontTools.ttLib import TTFont
+    folder = fontfetch.cache_dir() / "tinyflex"
+    (folder / "src").mkdir(parents=True)
+    (folder / "src" / "TinyFlex[wght].ttf").write_bytes(thin_default_font())
+    for file, weight in (("TinyFlex-Regular.ttf", 400), ("TinyFlex-Bold.ttf", 700), ("TinyFlex-W300.ttf", 300)):
+        font = instancer.instantiateVariableFont(TTFont(folder / "src" / "TinyFlex[wght].ttf"), {"wght": weight})
+        font.save(folder / file)
+    assert names(folder / "TinyFlex-Bold.ttf")[2] == "TinyFlex-Thin"
+    monkeypatch.setattr(fontfetch, "get", lambda url: pytest.fail(f"asked for {url}"))
+    got = fontfetch.fetch_family("Tiny Flex", log=lambda *_: None)
+    assert names(got["Bold"])[2] == "TinyFlex-Bold" and names(got["Regular"])[:3] == (
+        "Tiny Flex", "Regular", "TinyFlex-Regular")
+    assert names(folder / "TinyFlex-W300.ttf")[2:] == ("TinyFlex-Light", "Tiny Flex", "Light")
+    assert (folder / fontfetch.NAMED).exists()
+    before = (folder / "TinyFlex-Bold.ttf").stat().st_mtime_ns
+    fontfetch.repair_cache()
+    assert (folder / "TinyFlex-Bold.ttf").stat().st_mtime_ns == before, "named once"
+
+
 def test_a_run_in_weight_600_is_set_in_its_own_face(monkeypatch, tmp_path):
     """gdg24's headings are Google Sans 600, which fontspec's four styles do not have: bold stood in,
     2.4% too wide. The weight gets a FontFace of its own and the box selects its series."""
