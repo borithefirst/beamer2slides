@@ -276,7 +276,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
 - **Pull** (deck -> `.tex`): `deck_ir.py` reads the deck, the loop compiles, classifies, compares
   (`compare.py`) and translates residuals (`inverse.py`, `texmap.py`) until the source's conversion
   matches; unresolved residuals go to `<out>/pull/edits.md`. Compiles stop when the aux files
-  stop moving (`inverse.aux_state`).
+  stop moving (`inverse.aux_state`). **The loop's own view is no judge**: `frame_guard.py` ends
+  each frame at its best round, by ink against Google's thumbnail when the target carries one
+  (`page_score.py`), else weighted residuals plus extract's words; `Result.restored`, report
+  "Frames put back". On foreign decks no round has yet raised any slide's ink.
 - **Adopt** (a deck a person built in Slides -> a beamer source, `adopt*.py`,
   docs/adopt-bench.md): absolute-first `slidebox` frames in a `slides.sty` vocabulary, a recovered
   theme, a label per frame from the slide's objectId, and a base so the source can be synced back
