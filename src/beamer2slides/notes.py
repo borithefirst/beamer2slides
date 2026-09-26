@@ -45,9 +45,24 @@ def _note_header(page: Page, spans: list[dict], area: Box) -> float | None:
         if not sizes:
             return None
         tiny = [s for s in inside if s["size"] < 0.45 * sizes[len(sizes) // 2] and _contains(header, s["bbox"])]
-        if len(tiny) >= 1:  # the frame thumbnail
+        if len(tiny) >= 1 or _thumbnail_canvas(page, area, r[3]):  # the frame thumbnail
             return r[3]
     return None
+
+
+def _thumbnail_canvas(page: Page, area: Box, header_bottom: float) -> bool:
+    """The note template's frame thumbnail painted empty: `\\insertslideintonotes{0.25}` fills a
+    quarter-size canvas at the header's right end and draws the frame's own box into it - which
+    holds nothing when a frame's content is placed at shipout (textpos' absolute blocks: every
+    frame `adopt` writes). Its words never reach the thumbnail, so only the canvas says so."""
+    x0, y0, x1, y1 = area
+    w, h = 0.25 * (x1 - x0), 0.25 * (y1 - y0)
+    for d in page.drawings():
+        r = d["rect"]
+        if d.get("fill") is not None and abs(r[2] - r[0] - w) <= 1 and abs(r[3] - r[1] - h) <= 1 and \
+                r[2] >= x1 - 0.1 * w and r[1] >= y0 - 1 and r[3] <= header_bottom + 1:
+            return True
+    return False
 
 
 def _note_text(spans: list[dict], area: Box, header_bottom: float) -> str:
