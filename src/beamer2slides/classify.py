@@ -5719,7 +5719,15 @@ def mark_big_headings(slides: list[dict], body: float) -> None:
 
 
 def classify_page(page: dict, body: float) -> dict:
-    """One page's slide; a page the classifier trips over stays a picture as a whole."""
+    """One page's slide; a page the classifier trips over stays a picture as a whole. A page whose
+    objects say what they are (adopt's slides.sty marks) is read from its marks (`marked.py`)."""
+    from . import marked
+    if marked.has_marks(page):
+        try:
+            return marked.classify_marked(page, body)
+        except Exception as e:  # the marks are a hint: the page still reads as before
+            print(f"warning: page {page['index'] + 1}: marked read-back failed ({type(e).__name__}: {e}); "
+                  f"classified without marks")
     try:
         return PageClassifier(page, body).classify()
     except Exception as e:  # never lose a whole deck to one odd page

@@ -553,12 +553,13 @@ def verify_and_remove_shapes(original: Page, eraser: Eraser, slide: dict, raw_pa
 
 
 def keep_visible_shapes(original: Page, slide: dict, raw_page: dict) -> None:
-    """Drop shape candidates whose fill doesn't show on the page."""
+    """Drop shape candidates whose fill doesn't show on the page. (A shape the page marks as one -
+    adopt's slides.sty, `marked.py` - is one whatever covers it.)"""
     avoid = [s["bbox"] for s in raw_page["spans"]] + [i["bbox"] for i in raw_page["images"]] + \
             [e["bbox"] for e in slide["elements"] if e["kind"] == "image"]
     keep = []
     for i, el in enumerate(slide["elements"]):
-        if el["kind"] != "shape":
+        if el["kind"] != "shape" or el.get("mark"):
             keep.append(el)
             continue
         probe = _probe(el)

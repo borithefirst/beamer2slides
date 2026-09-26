@@ -562,9 +562,10 @@ SHAPE_MACRO = r"""% --- Shapes -------------------------------------------------
   \slides@shape{\slides@x bp}{\slides@y bp}{\slides@w bp}{\slides@h bp}{\slides@body}}
 \def\slides@shape#1#2#3#4#5{%
   \edef\slides@block{\noexpand\begin{textblock*}{#3}(#1,#2)}\slides@block
+  \edef\slides@more{\space/box (#1 #2 #3 #4)\slides@also}\slides@open{shape}\let\slides@more\@empty
   \begin{tikzpicture}[baseline=(current bounding box.north),inner sep=0pt,outer sep=0pt]
   \edef\slides@bb{\noexpand\useasboundingbox (0bp,0bp) rectangle (#3,-#4);}\slides@bb
-  #5\end{tikzpicture}\end{textblock*}}
+  #5\end{tikzpicture}\par\slides@shut\end{textblock*}}
 % the centre of a w by h box, from its top left corner: (\slides@cx,\slides@cy), and minus that
 \def\slides@centre#1#2{\edef\slides@cx{\the\dimexpr(#1)/2\relax}\edef\slides@mcx{\the\dimexpr0pt-(#1)/2\relax}%
   \edef\slides@cy{\the\dimexpr0pt-(#2)/2\relax}\edef\slides@mcy{\the\dimexpr(#2)/2\relax}}
@@ -605,7 +606,9 @@ SHAPE_MACRO = r"""% --- Shapes -------------------------------------------------
   \edef\slides@rect{\noexpand\slides@shape{\slides@mx bp}{\slides@my bp}{0.01bp}{0.01bp}%
     {\noexpand\path[#1] (\fpeval{\slides@ax-\slides@mx}bp,\fpeval{\slides@my-\slides@ay}bp)
       -- (\fpeval{\slides@x-\slides@mx}bp,\fpeval{\slides@my-\slides@y}bp);}}%
-  \slides@rect}
+  \edef\slides@also{\space/line (\slides@ax\space\slides@ay\space\slides@x\space\slides@y)}%
+  \slides@rect\let\slides@also\@empty}
+\let\slides@also\@empty
 \def\slides@xy#1,#2\@nil{\def\slides@x{#1}\def\slides@y{#2}}
 % \slidepath[options]{file}: inside a \slideshape, one path drawn with those options whose points are
 %   in `file` (TikZ coordinates relative to the box's top left corner, y pointing up, no semicolon).

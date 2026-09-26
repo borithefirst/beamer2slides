@@ -254,11 +254,57 @@ def slide_paragraphs(slide: dict) -> list[Para]:
     return out
 
 
+def target_key(el: dict) -> str | None:
+    """The mark a target (`deck_ir`) element's object carries on an adopted page (`adopt.mark_key`)."""
+    from .adopt import mark_key
+    return mark_key(el.get("id"))
+
+
+def keyed_elements(cur: list[dict], tgt: list[dict]) -> list[tuple[int, int]]:
+    """(current, target) index pairs of elements that are one deck object by its key: an adopted
+    page's element says which object it was written from (`marked.py`: `mark`), so no guess pairs it."""
+    by_key: dict = {}
+    for j, e in enumerate(tgt):
+        k = target_key(e)
+        if k:
+            by_key.setdefault(k, j)
+    out, used = [], set()
+    for i, e in enumerate(cur):
+        j = by_key.get(e.get("mark")) if e.get("mark") else None
+        if j is not None and j not in used:
+            used.add(j)
+            out.append((i, j))
+    return out
+
+
+def keyed_paragraphs(cur: list[Para], tgt: list[Para]) -> list[tuple[int, int, float]]:
+    """Paragraph pairs inside keyed element pairs: the element's paragraphs aligned in order, on
+    a low bar (they are one box's; only what the text shares decides which is which)."""
+    c_els = list({id(p.el): p.el for p in cur}.values())
+    t_els = list({id(p.el): p.el for p in tgt}.values())
+    out = []
+    for a, b in keyed_elements(c_els, t_els):
+        ce, te = c_els[a], t_els[b]
+        ci = [i for i, p in enumerate(cur) if p.el is ce]
+        ti = [j for j, p in enumerate(tgt) if p.el is te]
+        for x, y in align_sequences(ci, ti, lambda i, j: similarity(cur[i].text, tgt[j].text), 0.2):
+            if x is not None and y is not None:
+                out.append((ci[x], ti[y], similarity(cur[ci[x]].text, tgt[ti[y]].text)))
+    return out
+
+
 def match_paragraphs(cur: list[Para], tgt: list[Para]) -> list[tuple[int, int, float]]:
-    """Greedy assignment by word similarity (ties: same title role, reading order, position)."""
+    """Paragraphs of keyed elements by their key (`keyed_paragraphs`), the rest by greedy
+    assignment by word similarity (ties: same title role, reading order, position)."""
+    fixed = keyed_paragraphs(cur, tgt)
+    done_c, done_t = {i for i, _, _ in fixed}, {j for _, j, _ in fixed}
     cands = []
     for i, a in enumerate(cur):
+        if i in done_c:
+            continue
         for j, b in enumerate(tgt):
+            if j in done_t:
+                continue
             r = similarity(a.text, b.text)
             if r < 0.34 and not (a.text and b.text and len(a.text.split()) <= 3 and
                                  difflib.SequenceMatcher(None, a.text, b.text).ratio() >= 0.6):
@@ -267,7 +313,7 @@ def match_paragraphs(cur: list[Para], tgt: list[Para]) -> list[tuple[int, int, f
             order = 0.05 * (1 - min(1.0, abs(a.order / max(1, len(cur)) - b.order / max(1, len(tgt))) * 2))
             cands.append((r + role + order, i, j, r))
     cands.sort(reverse=True)
-    used_c, used_t, out = set(), set(), []
+    used_c, used_t, out = set(done_c), set(done_t), list(fixed)
     for score, i, j, r in cands:
         if i in used_c or j in used_t:
             continue
@@ -358,9 +404,15 @@ def bullet_sig(p: dict, el: dict | None = None) -> tuple:
 # ---------------------------------------------------------------- pictures and shapes
 
 def match_boxes(cur: list[dict], tgt: list[dict], hashes: dict | None = None) -> list[tuple[int, int]]:
+    """Keyed elements by their key (`keyed_elements`), the rest by box, aspect, picture and fill."""
+    fixed = keyed_elements(cur, tgt)
     cands = []
     for i, a in enumerate(cur):
+        if any(i == x for x, _ in fixed):
+            continue
         for j, b in enumerate(tgt):
+            if any(j == y for _, y in fixed):
+                continue
             d = sum(abs(x - y) for x, y in zip(a["bbox"], b["bbox"])) / 4
             aw, ah = a["bbox"][2] - a["bbox"][0], a["bbox"][3] - a["bbox"][1]
             bw, bh = b["bbox"][2] - b["bbox"][0], b["bbox"][3] - b["bbox"][1]
@@ -374,7 +426,7 @@ def match_boxes(cur: list[dict], tgt: list[dict], hashes: dict | None = None) ->
                 score += 0.3 * (colour_distance(a["fill"], b["fill"]) <= TOL["color"])
             cands.append((score, i, j))
     cands.sort(reverse=True)
-    used_c, used_t, out = set(), set(), []
+    used_c, used_t, out = {x for x, _ in fixed}, {y for _, y in fixed}, list(fixed)
     for score, i, j in cands:
         if score < 0.45 or i in used_c or j in used_t:
             continue
@@ -585,8 +637,18 @@ def norm_notes(text: str) -> str:
     return norm_text(NOTE_HYPHEN_RE.sub("", text))
 
 
+def off_page(el: dict, size) -> bool:
+    """A target element wholly outside the page (a deck object parked beside its slide): no PDF
+    shows it, so its absence is no difference a source could make up."""
+    if not size or not el.get("bbox"):
+        return False
+    x0, y0, x1, y1 = el["bbox"]
+    return x0 >= size[0] or x1 <= 0 or y0 >= size[1] or y1 <= 0
+
+
 def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comparison, hashes) -> None:
     where = {"slide": ci, "target_slide": ti}
+    parked = lambda el: {"within": True, "off_page": True} if off_page(el, c.get("size")) else {}
     cn, tn = norm_notes(c.get("notes") or ""), norm_notes(t.get("notes") or "")
     if cn != tn:
         add("notes", **where, cur=c.get("notes"), tgt=t.get("notes"))
@@ -601,20 +663,26 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
     for j, tp in enumerate(tps):
         if j not in c_of_t:
             add("paragraph_missing", **where, target_element=tp.el["id"], target_para=tp.pi, text=tp.text,
-                after=_previous_match(j, c_of_t, cps))
+                after=_previous_match(j, c_of_t, cps), **parked(tp.el))
     for i, cp in enumerate(cps):
         if i not in t_of_c:
             add("paragraph_extra", **where, element=cp.el["id"], para=cp.pi, text=cp.text)
 
-    # paragraph order within the slide (reading order of the matched pairs)
-    order = sorted((j, i) for i, j, _ in pmatch)
-    lis = longest_increasing([i for _, i in order])
-    kept = {order[k][0]: order[k][1] for k in lis}
-    for k, (j, i) in enumerate(order):
-        if k not in lis:
-            add("paragraph_order", **where, element=cps[i].el["id"], para=cps[i].pi,
-                target_element=tps[j].el["id"], target_para=tps[j].pi, text=tps[j].text,
-                after=_previous_match(j, kept, cps))
+    # paragraph order within the slide (reading order of the matched pairs); a marked box's
+    # paragraphs only among themselves: which box reads first is where each stands, and a box
+    # a key paired is compared where it stands (geometry), not again by reading order
+    by_box: dict = {}
+    for i, j, _ in pmatch:
+        by_box.setdefault(id(cps[i].el) if cps[i].el.get("mark") else None, []).append((j, i))
+    for pairs in by_box.values():
+        order = sorted(pairs)
+        lis = longest_increasing([i for _, i in order])
+        kept = {order[k][0]: order[k][1] for k in lis}
+        for k, (j, i) in enumerate(order):
+            if k not in lis:
+                add("paragraph_order", **where, element=cps[i].el["id"], para=cps[i].pi,
+                    target_element=tps[j].el["id"], target_para=tps[j].pi, text=tps[j].text,
+                    after=_previous_match(j, kept, cps))
 
     for i, j, r in pmatch:
         cp, tp = cps[i], tps[j]
@@ -642,7 +710,7 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
         hits = [cps[c_of_t[j]] for j in mine if j in c_of_t]
         if not hits:
             add("element_missing", **where, target_element=te["id"], el_kind="text", text=element_text(te),
-                role=te.get("role"))
+                role=te.get("role"), **parked(te))
             continue
         first = cps[c_of_t[mine[0]]] if mine[0] in c_of_t else hits[0]
         ce = first.el
@@ -699,7 +767,8 @@ def compare_slide(c: dict, t: dict, ci: int, ti: int, tol: dict, add, comp: Comp
                     add("table", **where, element=ce["id"], target_element=te["id"], cur=ct, tgt=tt_)
         for b, te in enumerate(tt):
             if b not in {y for _, y in got}:
-                add("element_missing", **where, target_element=te["id"], el_kind=kind, bbox=te["bbox"], file=te.get("file"))
+                add("element_missing", **where, target_element=te["id"], el_kind=kind, bbox=te["bbox"], file=te.get("file"),
+                    **parked(te))
         for a, ce in enumerate(cc):
             if a not in {x for x, _ in got}:
                 add("element_extra", **where, element=ce["id"], el_kind=kind, bbox=ce["bbox"])

@@ -1007,12 +1007,13 @@ SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out -----
   \let\itemize\slides@itemize\let\enditemize\slides@listend
   \let\enumerate\slides@enumerate\let\endenumerate\slides@listend
   \edef\slides@block{\noexpand\begin{textblock*}{\slides@w bp}(\slides@x bp,\slides@y bp)}\slides@block
-  \vbox to\slides@h bp\bgroup\slidesbox
+  \edef\slides@more{\space/box (\slides@x\space\slides@y\space\slides@w\space\slides@h)}%
+  \slides@open{text}\let\slides@more\@empty\vbox to\slides@h bp\bgroup\slidesbox
   \if t\slides@valign\vskip\slides@inset bp\relax\else\vss\fi}{%
   \slides@end
   \ifx\slides@tail\@empty\else\vskip\slides@tail bp\relax\fi
   \if b\slides@valign\vskip\slides@inset bp\relax\else\vss\fi
-  \egroup\end{textblock*}}
+  \egroup\slides@shut\end{textblock*}}
 %
 % \slidepar[options]{words}: a paragraph of a slidebox. Options: style= (a \slidestyle), left, center,
 %   right, justify; indent=, rindent= (bp from the box's left and right edges), first= (bp the first
@@ -1063,11 +1064,11 @@ SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out -----
   \global\slides@topfalse
   \ifx\slides@lang\@empty\else
     \edef\slides@begin{\noexpand\begin{otherlanguage}{\slides@lang}}\expandafter\slides@begin\fi
-  \bgroup\leftskip=\slides@indent bp\slides@lfil\relax\rightskip=\slides@rindent bp\slides@rfil\relax
+  \slides@popen\bgroup\leftskip=\slides@indent bp\slides@lfil\relax\rightskip=\slides@rindent bp\slides@rfil\relax
   \parfillskip=0bp\slides@pfil\relax\ifslides@mixed\lineskiplimit=0bp\relax\fi
   \noindent\slides@lead\vrule width0bp height\slides@ascent bp depth0bp\relax
   \ifx\slides@first\@empty\else\hskip\slides@first bp\relax\fi}
-\def\slides@close{\baselineskip=\slides@pitch bp\par\egroup
+\def\slides@close{\baselineskip=\slides@pitch bp\par\slides@shut\egroup
   \ifx\slides@lang\@empty\else\end{otherlanguage}\fi
   \slides@noteend\slides@after}
 % what the next paragraph and the box's end take from this one: its line box under the baseline
@@ -1099,14 +1100,14 @@ SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out -----
   \begingroup\slides@reset\slides@keys\slides@deckpar\slides@keys\slides@boxpar
   \@ifundefined{slides@L@\slides@env @\the\slides@level}{}%
     {\expandafter\slides@keys\csname slides@L@\slides@env @\the\slides@level\endcsname}%
-  \slides@keys\slides@envopts\setkeys{slidepar}{#1}%
+  \slides@keys\slides@envopts\setkeys{slidepar}{#1}\edef\slides@pl{\the\slides@level}%
   \slides@parstart\global\slides@opentrue\slides@marker\ignorespaces}
 % an item's paragraph ends at the next \item, at \end of its list, or where a list nested in it begins
-\def\slides@finish{\ifslides@open\global\slides@openfalse\baselineskip=\slides@pitch bp\par\slides@noteend\fi}
+\def\slides@finish{\ifslides@open\global\slides@openfalse\baselineskip=\slides@pitch bp\par\slides@shut\slides@noteend\fi}
 \def\slides@itemclose{\slides@finish\egroup\ifx\slides@lang\@empty\else\end{otherlanguage}\fi\endgroup}
 \def\slides@marker{\ifx\slides@mark\@empty\ifx\slides@label\@empty\else
-    \slidelabel{\slides@labelstyle}{\slides@labelbody}{\slides@gap}\fi
-  \else\slidebullet{\slides@mark}{\slides@gap}\fi}
+    \slides@literal{/B2Sb BMC}\slidelabel{\slides@labelstyle}{\slides@labelbody}{\slides@gap}\slides@shut\fi
+  \else\slides@literal{/B2Sb BMC}\slidebullet{\slides@mark}{\slides@gap}\slides@shut\fi}
 \def\slides@labelbody{\let\arabic\slides@arabic\let\alph\slides@alph\let\Alph\slides@Alph
   \let\roman\slides@roman\let\Roman\slides@Roman\slides@label}
 \def\slides@arabic*{\number\slides@n}
@@ -2189,8 +2190,9 @@ PICTURE_MACRO = r"""% --- Pictures ---------------------------------------------
   \ifx\slides@p@flip\@empty\let\slides@p@mirror\@firstofone\else\let\slides@p@mirror\reflectbox\fi
   \ifx\slides@p@node\@empty\let\slides@p@frame\@firstofone\else\let\slides@p@frame\slides@p@tikz\fi
   \edef\slides@block{\noexpand\begin{textblock*}{\slides@w bp}(\slides@x bp,\slides@y bp)}\slides@block
+  \slides@open{picture}%
   \slides@p@turn{\slides@p@frame{\slides@p@mirror{\expandafter\includegraphics\expandafter[\slides@p@opts]{#3}}}}%
-  \end{textblock*}}
+  \par\slides@shut\end{textblock*}}
 \def\slides@p@tikz#1{\edef\slides@p@go{\noexpand\tikz\noexpand\node[inner sep=0bp\slides@p@node]}\slides@p@go{#1};}
 \def\slides@xywh#1,#2,#3,#4\@nil{\def\slides@x{#1}\def\slides@y{#2}\def\slides@w{#3}\def\slides@h{#4}}"""
 
@@ -2404,7 +2406,8 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
 \def\slides@t@fill#1#2#3#4#5{\fill[#1] (#2bp,{-\slides@t@y{#3}}) rectangle (#4bp,{-\slides@t@y{#5}});}
 \def\slides@t@hdraw#1#2#3#4{\draw[line cap=rect,#1] (#2bp,{-\slides@t@y{#4}}) -- (#3bp,{-\slides@t@y{#4}});}
 \def\slides@t@vdraw#1#2#3#4{\draw[line cap=rect,#1] (#2bp,{-\slides@t@y{#3}}) -- (#2bp,{-\slides@t@y{#4}});}
-\def\slides@t@node#1#2#3#4{\node[anchor=#1] at (#2bp,{#3}) {\copy\csname slides@t@box@#4\endcsname};}
+\def\slides@t@node#1#2#3#4{\node[anchor=#1] at (#2bp,{#3}) {\slides@literal{/B2Sc <</r \csname slides@t@#4@row\endcsname
+  \space/c \csname slides@t@#4@col\endcsname>> BDC}\copy\csname slides@t@box@#4\endcsname\slides@shut};}
 \ExplSyntaxOn
 \tl_new:N \l__slides_t_ix_tl
 \tl_new:N \l__slides_t_iy_tl
@@ -2574,6 +2577,14 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
     \int_step_inline:nn { \g__slides_t_rs_int }
       { \int_step_inline:nn { \g__slides_t_n_int } { \__slides_t_grow:nn {##1} {####1} } }
     \slides@t@tops { \int_use:N \g__slides_t_r_int }
+    % (its mark says its grid and its box: x y w in bp, its height in pt)
+    \tl_set:Ne \slides@more
+      {
+        ~ /rows ~ \int_use:N \g__slides_t_r_int ~ /cols ~ \int_use:N \l__slides_t_m_int ~ /box ~
+        ( \clist_item:Nn \l__slides_t_xy_clist { 1 } ~ \clist_item:Nn \l__slides_t_xy_clist { 2 } ~
+          \tl_use:c { slides@t@X@ \int_use:N \l__slides_t_m_int } ~ \slides@t@y { \int_use:N \g__slides_t_r_int } )
+      }
+    \slides@open{table}
     \use:e
       {
         \exp_not:N \slides@t@picture { \tl_use:c { slides@t@X@ \int_use:N \l__slides_t_m_int } }
@@ -2584,6 +2595,7 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
     \int_step_inline:nnn { 0 } { \l__slides_t_m_int } { \__slides_t_line:nn { v } {##1} }
     \int_step_inline:nn { \g__slides_t_n_int } { \__slides_t_node:n {##1} }
     \end{tikzpicture}
+    \par \slides@shut
     \end{textblock*}
     \group_end:
   }
@@ -3282,6 +3294,77 @@ def element_latex(el: dict, ctx: Context, tree: Path | None = None, ind: str = "
     return "\n".join(x for x in out if x.strip())
 
 
+# What opens a /B2S mark (SLIDES_STY_HEAD's \slides@open), as a frame spells it: one mark per call.
+MARKED_MACROS = re.compile(r"\\(?:begin\{(slidebox|slidetable)\}|(slidetext|slidepicture|slideshape|sliderect|"
+                           r"slideellipse|slideline|slidefreeform)(?![A-Za-z@]))")
+MARKED_KIND = {"slidebox": "text", "slidetext": "text", "slidetable": "table", "slidepicture": "image"}
+KEYS_FILE = "slides-keys.tex"
+MARK_KEY = re.compile(r"[A-Za-z0-9_.:/-]+")
+
+
+def mark_key(element_id) -> str | None:
+    """The key a deck object's element is marked with in the PDF: its id (`deck_ir`: the objectId,
+    `layout/object` for one a layout draws: TeX reads a ~ as a space), when a TeX argument and a PDF
+    string carry it as it is."""
+    if element_id is None:
+        return None
+    key = str(element_id).replace("~", "/")
+    return key if MARK_KEY.fullmatch(key) else None
+
+
+def piece_keys(el: dict, piece: str) -> list[str]:
+    """The key of each mark `piece` (`element_latex(el)`) opens, in order: the element's own for
+    the call drawing what it is (the text box of a text element, the picture of an image), its
+    other calls named after it (`<id>+shape`: a text box's panel)."""
+    key = mark_key(el.get("id"))
+    want = "shape" if el["kind"] in ("shape", "diagram") else el["kind"]
+    out, seen = [], set()
+    for m in MARKED_MACROS.finditer(piece):
+        kind = MARKED_KIND.get(m.group(1) or m.group(2), "shape")
+        if key is None:
+            out.append("")
+            continue
+        k = key if kind == want and key not in seen else f"{key}+{kind}"
+        n = 2
+        while k in seen:
+            k, n = f"{key}+{kind}{n}", n + 1
+        seen.add(k)
+        out.append(k)
+    return out
+
+
+def drawing_order(s: dict, pieces: list[str], plan) -> list[int]:
+    """The slide's elements in the order its page typesets them: the frame's own pieces
+    (`slide_latex`), then what its layout's background template draws at shipout (`adopt_theme.sty`:
+    the master's decoration, the layout's, then the title, subtitle and number slots the frame
+    handed over, in `SLOTS` order)."""
+    els = s["elements"]
+    drawn = plan.drawn if plan else set()
+    body = [k for k, p in enumerate(pieces) if p and k not in drawn]
+    if not plan or not plan.layout:
+        return body
+    from .adopt_theme import SLOTS
+    lid = s.get("layout")
+    master = [k for k in sorted(drawn) if pieces[k] and els[k].get("inherited") and els[k]["inherited"] != lid]
+    own = [k for k in sorted(drawn) if pieces[k] and els[k].get("inherited") == lid]
+    slots = [k for types, *_ in SLOTS.values() for k in sorted(drawn)
+             if pieces[k] and not els[k].get("inherited") and els[k].get("placeholder") in types]
+    return body + master + own + slots
+
+
+def keys_file(target: dict, pieces: list[list[str]], plans: list, names: list[str]) -> str:
+    """slides-keys.tex: for each frame, the deck object each of its marks came from (`\\slidekeys`),
+    in the order the page draws them (`drawing_order`)."""
+    lines = ["% Which deck object each element of a frame came from, in the order the page draws them:",
+             "% written by beamer2slides adopt, for the tools that read the PDF back. Frames that say nothing",
+             "% here are numbered instead; nothing on the page depends on this file."]
+    for s, ps, plan, name in zip(target["slides"], pieces, plans, names):
+        keys = [key for k in drawing_order(s, ps, plan) for key in piece_keys(s["elements"][k], ps[k])]
+        if name and any(keys):
+            lines.append(f"\\slidekeys{{{name}}}{{{','.join(keys)}}}")
+    return "\n".join(lines) + "\n"
+
+
 def frame_labels(target: dict) -> list[str]:
     r"""A `label=` for every frame the bootstrap writes, one per deck slide (docs/labels.md).
 
@@ -3471,6 +3554,44 @@ SLIDES_STY_HEAD = r"""%% slides.sty - written by beamer2slides adopt, with main.
 \NeedsTeXFormat{LaTeX2e}
 \ProvidesPackage{slides}
 \RequirePackage{keyval}
+""" + r"""% --- Marks ------------------------------------------------------------------------------------
+% Every element below tells the PDF what it is, for the tools that read the page back (it draws nothing):
+%   /B2S <</k (key) /n N /t (kind)>> BDC ... EMC  around the element, N counting the page's elements,
+%     the key the deck object it came from (\slidekeys: slides-keys.tex, which adopt writes);
+%   /B2Sp <</i N /a (align) /l level>> BDC ... EMC  around each paragraph of a text box (/l: a list item's),
+%   /B2Sb BMC ... EMC  around its bullet or number;
+%   a table's own says /rows and /cols, and /B2Sc <</r row /c column>> BDC ... EMC is around each cell's text;
+%   a text box's, a shape's and a table's say /box (x y w h): the box they were set in, from the page's top left;
+%   a line's says /line (x1 y1 x2 y2): its two points;
+%   /B2Su BMC ... EMC  around words \uline underlines, /B2Ss around words \sout strikes.
+\newcount\slides@elt
+\newcount\slides@parn
+\AddToHook{shipout/after}{\global\slides@elt\z@}
+\def\slides@literal#1{\ifdefined\pdfextension\pdfextension literal page{#1}%
+  \else\ifdefined\pdfliteral\pdfliteral page{#1}\fi\fi}
+\def\slides@open#1{\global\advance\slides@elt\@ne\global\slides@parn\z@
+  \ifdefined\beamer@againname
+    \expandafter\let\expandafter\slides@key\csname slides@K@\beamer@againname @\the\slides@elt\endcsname
+  \else\let\slides@key\relax\fi
+  \ifx\slides@key\relax\let\slides@key\@empty\fi
+  \slides@literal{/B2S <<\ifx\slides@key\@empty\else/k (\slides@key)\space\fi
+    /n \the\slides@elt\space/t (#1)\slides@more>> BDC}}
+\let\slides@more\@empty
+\def\slides@shut{\slides@literal{EMC}}
+\let\slides@pl\@empty
+\def\slides@popen{\global\advance\slides@parn\@ne
+  \slides@literal{/B2Sp <</i \the\slides@parn\space/a (\slides@align)%
+    \ifx\slides@pl\@empty\else\space/l \slides@pl\fi>> BDC}}
+% \slidekeys{frame label}{key 1,key 2,...}: the deck object each marked element of that frame came from,
+%   in the order the frame draws them (an empty key: none)
+% ulem's words, marked: its rules are one per word and space, under words a span may run past
+\AtBeginDocument{\@ifundefined{uline}{}{\let\slides@uline\uline
+    \protected\def\uline#1{\slides@literal{/B2Su BMC}\slides@uline{#1}\slides@shut}}%
+  \@ifundefined{sout}{}{\let\slides@sout\sout
+    \protected\def\sout#1{\slides@literal{/B2Ss BMC}\slides@sout{#1}\slides@shut}}}
+\newcommand\slidekeys[2]{\@tempcnta\z@\@for\slides@k:=#2\do{\advance\@tempcnta\@ne
+  \global\expandafter\let\csname slides@K@#1@\the\@tempcnta\endcsname\slides@k}}
+\InputIfFileExists{slides-keys.tex}{}{}
 """
 
 
@@ -3522,6 +3643,7 @@ def bootstrap(target: dict, tex: Path, flow: bool = False, missing: list | None 
             plans = theme[1] if theme else [None] * len(pieces)
             frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg, p, plan, name))
                       for n, (s, p, plan, name) in enumerate(zip(target["slides"], pieces, plans, names), 1)]
+            (tex.parent / KEYS_FILE).write_text(keys_file(target, pieces, plans, names), encoding="utf-8")
     finally:
         inverse.GUARD_UNITS = False
     head = preamble(target, ctx, flow, tex.parent)

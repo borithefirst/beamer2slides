@@ -86,6 +86,11 @@ class PageObject:
     # boxes of the clip paths (their points), intersected, page space; None when nothing clips it.
     # An empty box (x1 <= x0 or y1 <= y0): nothing of the object shows.
     clip: Box | None = None
+    # The marked-content sequences open around it (BMC / BDC ... EMC), outermost first, as
+    # (tag, {key: value}): only string values (UTF-8, invalid bytes dropped) and numbers (as C int,
+    # truncated) of the property dictionary, the rest left out. A form's contents start afresh:
+    # the marks around the form are its own, not its children's (FPDFPageObj_GetMark).
+    marks: tuple = ()
 
 
 @dataclass

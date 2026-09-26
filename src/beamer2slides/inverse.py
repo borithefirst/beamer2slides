@@ -2314,11 +2314,33 @@ def picture_hashes(cand: Candidate, target: dict, comp_out: Path) -> dict:
                 x0, y0, x1, y1 = e["bbox"]
                 if x1 - x0 < 1 or y1 - y0 < 1:
                     continue
-                img = page.render(4.0, (x0, y0, x1, y1))
+                off = others_than(page, e["mark_n"]) if e.get("mark_n") is not None else []
+                page.set_active(off, False)
+                try:
+                    img = page.render(4.0, (x0, y0, x1, y1))
+                finally:
+                    page.set_active(off, True)
                 hashes[id(e)] = grey16(Image.fromarray(img))
     finally:
         doc.close()
     return hashes
+
+
+def others_than(page, n) -> list[int]:
+    """The page's objects that are not marked element `n`'s (`marked.py`), and hold none of its:
+    a picture adopt wrote is judged by what it drew alone - a layout's picture over the slide's own
+    full-page one showed both, and neither matched its file."""
+    from .extract import page_marks
+    marks = page_marks(page)
+    objects = page.objects()
+    top = lambda po: next((p.get("n") for t, p in marks.get(po.id, ()) if t == "B2S"), None)
+    keep = {po.id for po in objects if top(po) == n}
+    parent = {po.id: po.parent for po in objects}
+    for k in list(keep):
+        while parent.get(k) is not None:
+            k = parent[k]
+            keep.add(k)
+    return [po.id for po in objects if po.id not in keep]
 
 
 class Later:
