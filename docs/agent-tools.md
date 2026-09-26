@@ -253,6 +253,50 @@ of the deck's pictures it held: 0 means another deck, or one changed since (a pa
 count or titles no longer match gives nothing rather than a wrong picture). Tests:
 `tests/test_adopt_media.py`.
 
+**Everything, preloaded: `deck-files`** (`deck_files.py`). An offline adopt should be as good as
+a live one, so the side that can reach Google and the web saves everything a live read takes:
+
+```
+python -m beamer2slides deck-files --deck <id> --out files/ [--zip] [--pptx deck.pptx]
+```
+
+| part | folder | what it adds (`deck_files.PARTS`, the same words in `--help` and the tool's schema) |
+|---|---|---|
+| presentation | `presentation.json` | the deck: words, styles, places, layouts and master, and the object ids a sync pairs with. Required |
+| thumbnails | `thumbnails/NNN.png` | fills the API does not report (gradients, table-style colours), measured insets and line weights, and the page `frame_guard` scores each frame against |
+| pictures | `pictures/` (recording) | the exact bytes of slide pictures, backgrounds, chart renders, video poster frames, and the originals of pictures inserted by URL |
+| google_fonts | `google-fonts/` (recording) | the deck's own typefaces, so lines break where the deck's do |
+| pptx | `deck.pptx` | pictures, where no recording could be made |
+| fonts | (`--fonts`) | typefaces google/fonts does not carry |
+
+A **recording** (`Recording`) is `index.json` (URL -> file, plus the URLs that were a 404) and
+the files, named by their bytes. It is made by fetching through a recording fetcher
+(`recording`) while the producer runs the reader and `bootstrap`. Three details make it
+complete:
+- The font choice runs under `adopt.no_machine_fonts()` with an empty google/fonts cache and
+  `$B2S_FONTS` / `$B2S_FONT_FETCH` cleared. Every family a machine with no fonts would fetch is
+  then fetched, not found installed here.
+- `fontfetch.watching` records what a local google/fonts copy gave as well.
+- Drive's export fallback is recorded under the picture's URL.
+
+`adopt --deck files/` (or `files.zip`, unpacked with no member outside `<work>/deck-files`) or
+`deck_adopt(deck=...)` installs `replaying(files)` over the context's fetcher for the whole run.
+- A URL the recording holds is answered from it.
+- A URL recorded as absent is a 404 again (so google/fonts' `ofl/` before `apache/` search ends
+  where it did).
+- Anything else goes on to the harness's fetcher.
+
+Recorded pictures come before a `.pptx` (`picture_fetch(pptx_first=False)`): they are the
+bytes Google serves. `found["offline"]` (the tool's `data["offline"]`, a log block) gives, per
+part, whether it was given, what it adds, a count, and what its absence cost (`WITHOUT`).
+
+Each part can also be given alone: `--thumbnails`, `--pictures`, `--google-fonts`, `--pptx`,
+`--fonts`, and the tool's `thumbnails=`, `pictures=`, `google_fonts=`. Thumbnails are matched
+to slides by number (`001.png`) or objectId, else in order, and a picture of the wrong aspect is
+dropped (`deck_ir.given_thumbnails`). `tests/test_deck_files.py` saves a faked deck and adopts it
+with every fetch refused, from the folder and from the zip. The result is the live adopt's
+`main.tex`, figures and fonts, with no download asked for.
+
 ### `allow` - what the agent may do
 
 Four actions: `reads`, `writes`, `reads_google`, `writes_google`. A context lists what it

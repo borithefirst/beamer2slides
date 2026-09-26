@@ -77,6 +77,7 @@ _SUFFIX = {
     "application/json": ".json", "text/x-tex": ".tex", "application/x-tex": ".tex",
     "image/png": ".png", "image/jpeg": ".jpg", "text/markdown": ".md",
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/zip": ".zip", "application/x-zip-compressed": ".zip",
 }
 #: Where inline content lands. Named so an agent reading a ref back can tell what it is.
 INBOX = "inbox"
@@ -266,8 +267,8 @@ def _sniff(raw: bytes) -> str:
         return ".png"
     if raw[:3] == b"\xff\xd8\xff":
         return ".jpg"
-    if raw[:2] == b"PK":                                        # .pptx, .docx, any zip
-        return ".pptx"
+    if raw[:2] == b"PK":                                        # .pptx, or a zip of files
+        return ".pptx" if b"ppt/" in raw[:65536] or b"[Content_Types].xml" in raw[:65536] else ".zip"
     head = raw[:512].lstrip().lower()
     if head.startswith(b"<!doctype html") or head.startswith(b"<html"):
         return ".html"

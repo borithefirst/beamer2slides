@@ -135,7 +135,7 @@ def install(paths, root: Path) -> dict:
                                                   "variable": False})["files"].append(f.name)
             continue
         try:
-            font = TTFont(io.BytesIO(data))
+            font = TTFont(io.BytesIO(data), recalcTimestamp=False)   # (the same file every run)
             if kind in ("woff", "woff2"):
                 font.flavor = None                      # the sfnt inside, as lualatex reads it
                 buf = io.BytesIO()

@@ -1400,11 +1400,14 @@ def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pd
     return deck_ir(pres, pdf_size or (base or {}).get("page_size"), base, fetch, images, foreign, thumbnails)
 
 
-def picture_fetch(pres: dict, pptx: bytes | None = None, keep: dict | None = None, drive: bool = True):
+def picture_fetch(pres: dict, pptx: bytes | None = None, keep: dict | None = None, drive: bool = True,
+                  pptx_first: bool = True):
     """`fetch(url) -> bytes` for the pictures of `pres`: out of a supplied .pptx first, else
     downloaded where the fetcher allows, else out of one Drive export of the deck (`deck_pictures`:
     a harness that may not fetch a contentUrl still reads the pictures). `drive=False`: no export
-    (a read that has no Google, `read_presentation`). `keep["pptx_pictures"]`: what the .pptx held."""
+    (a read that has no Google, `read_presentation`). `pptx_first=False`: the fetcher is asked
+    before the .pptx (it replays recorded downloads, `deck_files`: the bytes Google serves, where a
+    .pptx may hold a re-encoded copy). `keep["pptx_pictures"]`: what the .pptx held."""
     from .deck_pictures import LivePictures
     from .google_auth import drive_service, fetcher_for_threads
     live = LivePictures(pres, None, fetcher_for_threads(), pptx=pptx)
@@ -1413,11 +1416,13 @@ def picture_fetch(pres: dict, pptx: bytes | None = None, keep: dict | None = Non
 
     def fetch(url: str) -> bytes:
         oid = next((i for i, u in live.urls.items() if u == url), None)
-        if live.supplied and oid in live.exported:
+        if live.supplied and oid in live.exported and pptx_first:
             return live.exported[oid]
         try:
             return fetch_url(url, live.fetch)
         except Exception:  # noqa: BLE001 - a harness's fetcher raises its own types
+            if live.supplied and oid in live.exported:
+                return live.exported[oid]
             if oid is None or live.supplied or not drive:
                 raise  # (a supplied .pptx is the export: Drive is not asked for another)
             live.drive = live.drive or drive_service()
@@ -1434,15 +1439,68 @@ def is_presentation(doc) -> bool:
     return isinstance(doc, dict) and "pageSize" in doc and isinstance(doc.get("slides"), list)
 
 
-def read_presentation(pres: dict, images: Path, pptx: bytes | None = None, keep: dict | None = None) -> dict:
+def read_presentation(pres: dict, images: Path, pptx: bytes | None = None, keep: dict | None = None,
+                      thumbnails=None, pptx_first: bool = True) -> dict:
     """A foreign deck's IR from a `presentations.get` answer someone saved, with no Google call:
     what `adopt` reads in a sandbox that was handed the deck as files. Its pictures come from the
-    .pptx given (else a download, where the fetcher allows one; never a Drive export). What Google's
-    slide thumbnails would have told - gradients, table-style colours, measured insets
-    (`deck_fills`) - is not there, as with `$B2S_ADOPT_THUMBNAILS=0`."""
+    .pptx given (else a download, where the fetcher allows one; never a Drive export; with
+    `pptx_first=False` the fetcher first, `picture_fetch`).
+    `thumbnails`: the slides' LARGE thumbnails someone saved (`given_thumbnails`); without them
+    what only they show - gradients, table-style colours, measured insets (`deck_fills`) - is not
+    read, as with `$B2S_ADOPT_THUMBNAILS=0`."""
     if keep is not None:
         keep["presentation"] = pres
-    return deck_ir(pres, None, None, picture_fetch(pres, pptx, keep, drive=False), images, True, None)
+    fetch = picture_fetch(pres, pptx, keep, drive=False, pptx_first=pptx_first)
+    return deck_ir(pres, None, None, fetch, images, True, thumbnails)
+
+
+THUMBNAIL_SUFFIXES = (".png", ".jpg", ".jpeg")
+THUMBNAIL_ASPECT = 0.02   # a slide picture of another page shape is another deck's
+
+
+def given_thumbnails(pres: dict, files, log=print):
+    """`deck_ir`'s `thumbnails` callback over slide pictures someone saved - Google's LARGE
+    thumbnails as `slide_thumbnails` saves them - and how many slides got one.
+
+    `files`: pictures or folders of them. A picture is a slide's by its name - the slide's objectId,
+    or its number (`003.png`, `slide_thumbnails`' names) - and when no picture is named either way
+    and there is one per slide, by order. One whose shape is not the page's is left out: a wrong
+    picture would be read as the slide's fills."""
+    slides = pres.get("slides", [])
+    ids = {s["objectId"]: i for i, s in enumerate(slides)}
+    found: list[Path] = []
+    for f in map(Path, files or []):
+        found += sorted(p for p in f.iterdir() if p.suffix.lower() in THUMBNAIL_SUFFIXES) if f.is_dir() else [f]
+    paths: list[Path | None] = [None] * len(slides)
+    loose = []
+    for f in found:
+        if f.stem in ids:
+            paths[ids[f.stem]] = f
+        elif f.stem.isdigit() and 1 <= int(f.stem) <= len(slides):
+            paths[int(f.stem) - 1] = f
+        else:
+            loose.append(f)
+    if loose and len(loose) == len(found) == len(slides):
+        paths = list(loose)
+    elif loose:
+        log(f"thumbnails: {len(loose)} picture(s) named for no slide were left out "
+            f"(name them 001.png... or by the slide's objectId)")
+    page = dim(pres["pageSize"]["width"]) / dim(pres["pageSize"]["height"])
+    from PIL import Image
+    for n, p in enumerate(paths):
+        if p is None:
+            continue
+        try:
+            with Image.open(p) as img:
+                w, h = img.size
+        except Exception as exc:  # noqa: BLE001 - whatever a person hands over
+            log(f"thumbnails: slide {n + 1}'s {p.name} is not a picture ({str(exc)[:60]})")
+            paths[n] = None
+            continue
+        if abs(w / h - page) > THUMBNAIL_ASPECT * page:
+            log(f"thumbnails: slide {n + 1}'s {p.name} is {w}x{h}, not the deck's page shape: left out")
+            paths[n] = None
+    return (lambda n: paths[n] if 0 <= n < len(paths) else None), sum(p is not None for p in paths)
 
 
 def pictures_from_pptx(target: dict, pres: dict, data: bytes, images: Path) -> tuple[int, int]:

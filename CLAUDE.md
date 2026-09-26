@@ -209,10 +209,15 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   and so are pictures the deck would not give (`adopt.pictures_missing`, `data["pictures_missing"]`,
   a `% picture left out` comment in the frame). A .pptx the person downloaded brings them with no
   download (`adopt --pptx`, `deck_adopt(pptx=)`, `LivePictures(pptx=)` taken first, no Drive
-  export; a saved target through its presentation.json, `deck_ir.pictures_from_pptx`). A sandbox
-  with no Google adopts a saved `presentations.get` answer plus the .pptx (`--deck x.json`,
-  `deck_ir.read_presentation`, no thumbnails); every `.json` deck runs with no credentials
-  (`@tool(local=)`, a refusing provider).
+  export; a saved target through its presentation.json, `deck_ir.pictures_from_pptx`).
+- **Offline adopt = live adopt** (`deck_files.py`, docs/agent-tools.md "Everything, preloaded"):
+  `deck-files --deck ID --out DIR [--zip]` saves presentation.json, thumbnails/ and recordings
+  of every download (pictures/, google-fonts/ incl. 404s, made under `adopt.no_machine_fonts`
+  with a fresh font cache and `fontfetch.watching`). `adopt --deck DIR|ZIP` replays them over the
+  fetcher (`replaying`), recorded pictures before a .pptx. Each part is also its own argument
+  (`--thumbnails/--pictures/--google-fonts`, tool params), labelled by `deck_files.PARTS`; the
+  report is `found["offline"]` / `data["offline"]`. A deck given as files runs with no credentials
+  (`@tool(local=(job, kw))`, a refusing provider). Keep the parts' words in `PARTS` only.
 - `presentations.create` ignores `pageSize` (always 16:9), hence the .pptx route. `createImage`
   needs a fetchable URL and letterboxes. Object ids are 5-50 chars. `getThumbnail` LARGE = 1600 px.
 - Emit robustness: a refused batch is retried per slide, then per element, then the deck is rebuilt
@@ -231,7 +236,8 @@ python -m beamer2slides convert  deck.pdf   # + backgrounds/, figures/, Slides d
 python -m beamer2slides fidelity deck.pdf   # thumbnails vs PDF: fidelity.json, fidelity/diff-NNN.png
 python -m beamer2slides sync new.pdf --deck <url|id|out folder> [--dry-run] [--take-source ID]
 python -m beamer2slides pull --deck <...> --tex main.tex [--apply]
-python -m beamer2slides adopt --deck <...> --tex main.tex
+python -m beamer2slides adopt --deck <...|files dir|.zip> --tex main.tex
+python -m beamer2slides deck-files --deck <url|id> --out DIR [--zip]   # everything adopt reads, for offline
 python -m beamer2slides label main.tex [--apply]
 python -m beamer2slides docs push|sync|adopt ...
 python -m beamer2slides playground

@@ -181,11 +181,20 @@ per attempt. Say so before you start one; do not start two.
   `pptx=` (a ref or the file as content) and adopt again into a new `tex` path. Its pictures need
   no download; `data["pptx_pictures"]` says how many of the deck's it held (0: another deck, or a
   deck changed since - ask for a fresh download).
-* `deck_adopt` needs no Google when the deck comes as files: `deck=` the Slides API's
-  `presentations.get` answer for it, saved whole as a `.json` (a ref or content), and `pptx=` its
-  download for the pictures. The words, layout and theme come from the first, the pictures from
-  the second. What only Google's slide thumbnails show (gradients, some table colours) is missing
-  from such a read, and the sync base is recorded as usual.
+* `deck_adopt` needs no Google and no network when the deck comes as files. Best: `deck=` the
+  folder or `.zip` that `python -m beamer2slides deck-files --deck <id> --out <dir> --zip` saved
+  where Google can be reached (a ref, or the .zip as content). It holds everything a live adopt
+  reads, so the source is the one a live adopt writes. Each part can also come alone, with
+  `deck=` a saved `presentations.get` `.json`:
+  - `thumbnails=` for the fills the API does not report (gradients, table colours), the measured
+    insets, and the page each frame is scored against;
+  - `pictures=` and `google_fonts=` (the saved recordings) for the pictures' bytes and the
+    deck's own typefaces;
+  - `pptx=` for the pictures when there is no recording.
+
+  `data["offline"]` lists each part: whether it was given, what it adds, and what its absence
+  cost. Tell the person which parts were missing and what that cost. The sync base is recorded as
+  usual.
 * Slide order is merged, not taken wholesale: a slide a person dragged stays where they put it.
 * A sync killed halfway loses nothing — the next one sweeps up — so a timeout is not a reason to
   force anything.

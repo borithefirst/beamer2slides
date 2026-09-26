@@ -218,7 +218,7 @@ class _Tee(io.TextIOBase):
             self.write("\n")
 
 
-def tool(name: str, needs: tuple[str, ...] = (READS,), local: Callable[[dict], bool] | None = None):
+def tool(name: str, needs: tuple[str, ...] = (READS,), local: Callable[["Job", dict], bool] | None = None):
     """Make a journey out of a function that takes a `Job` and fills it in.
 
     The decorated function is called `f(ctx, **arguments)` and returns a `Result`; it never
@@ -227,8 +227,8 @@ def tool(name: str, needs: tuple[str, ...] = (READS,), local: Callable[[dict], b
     both **before** the body runs, so a forbidden or unauthenticated journey does no work at
     all rather than stopping halfway through someone's deck.
 
-    `local(arguments)`: True for a call that makes no Google call at all (`deck_adopt` of a saved
-    `.json` deck). Such a call is gated on `needs` without the Google actions, fetches no
+    `local(job, arguments)`: True for a call that makes no Google call at all (`deck_adopt` of a
+    deck handed over as files). Such a call is gated on `needs` without the Google actions, fetches no
     credentials, and runs with a provider that refuses, so a Google call it did make would be a
     refusal, not a quiet use of whatever token the machine has.
     """
@@ -245,7 +245,7 @@ def tool(name: str, needs: tuple[str, ...] = (READS,), local: Callable[[dict], b
                     # and idempotent: a call whose arguments are all plain strings walks the
                     # dict once, and a ref that has already been materialised is one.
                     kw = _take_in(job, kw)
-                    offline = local is not None and local(kw)
+                    offline = local is not None and local(job, kw)
                     wanted = tuple(a for a in needs if a not in (READS_GOOGLE, WRITES_GOOGLE)) if offline else needs
                     _gate(job, wanted)
                     creds = job.credentials() if _wants_google(wanted) else None

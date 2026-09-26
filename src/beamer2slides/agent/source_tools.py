@@ -19,10 +19,13 @@ by `functools.wraps` and `typing.get_type_hints(fn, include_extras=True)` reads 
 
 import json
 import re
+import zipfile
 from collections import Counter
 from pathlib import Path
 from typing import Annotated, Any, Callable
 
+from ..deck_files import FOLDERS as DECK_FILES
+from ..deck_files import PARTS
 from .context import Job, tool
 from .types import READS, READS_GOOGLE, WRITES, Refused
 
@@ -141,14 +144,27 @@ def tex_converge(
     _finish(j, result, work_path, out_path, apply, max_iter, "tex_converge")
 
 
-@tool("deck_adopt", needs=(READS, WRITES, READS_GOOGLE),
-      local=lambda kw: str(kw.get("deck") or "").lower().endswith(".json"))
+def _reads_files(j: Job, kw: dict) -> bool:
+    """Whether `deck_adopt` was handed the deck as files, and so makes no Google call at all."""
+    deck = str(kw.get("deck") or "")
+    if deck.lower().endswith((".json", ".zip")):
+        return True
+    try:
+        path = j.path(deck)
+    except Exception:  # noqa: BLE001 - a URL or an id is no path
+        return False
+    return path.is_dir() and (path / DECK_FILES["presentation"]).is_file()
+
+
+@tool("deck_adopt", needs=(READS, WRITES, READS_GOOGLE), local=_reads_files)
 def deck_adopt(
     j: Job,
-    deck: Annotated[str, "The deck to adopt: a Slides URL, a presentation id, or a .json file (a "
-                         "workspace ref or content) read with no Google call at all: the Slides "
-                         "API's presentations.get answer for the deck, saved whole (give its "
-                         "pictures as pptx), or a deck.json-shaped target."],
+    deck: Annotated[str, "The deck to adopt. Live: a Slides URL or presentation id (needs Google). "
+                         "As files, with no Google call and no network at all: the folder or .zip "
+                         "`deck-files` saved (a workspace ref, or the .zip as content) - everything a "
+                         "live read takes, so the source is as faithful as a live adopt's; or a "
+                         "presentations.get answer saved as .json (" + PARTS["presentation"] + "), "
+                         "with the parts below; or a deck.json-shaped target."],
     tex: Annotated[str, "Workspace ref of the main .tex to write. It must NOT exist: adopt writes a "
                         "new source tree beside it (slides.sty, the recovered theme, figures/)."],
     work: Annotated[str | None, "Workspace ref of the loop's scratch folder. Default: "
@@ -169,11 +185,20 @@ def deck_adopt(
                                        "the file itself as content. Preferred to any other copy. "
                                        "Give the ones a previous adopt listed in data['fonts_missing']."] = None,
     pptx: Annotated[str | None, "The deck as a .pptx the person downloaded (File > Download > "
-                                "Microsoft PowerPoint), a workspace ref or the file itself as content. "
-                                "Its pictures are used first, so a harness that may not download "
-                                "still gets them. Ask for it when data['pictures_missing'] is not "
-                                "empty. (A deck.json target pairs it through the presentation.json "
-                                "beside it.)"] = None,
+                                "Microsoft PowerPoint), a workspace ref or the file itself as content: "
+                                + PARTS["pptx"] + ". Used before any download, so a harness that may "
+                                "not download still gets them. Ask for it when data['pictures_missing'] "
+                                "is not empty. (A deck.json target pairs it through the "
+                                "presentation.json beside it.)"] = None,
+    thumbnails: Annotated[list[str] | None, "With a deck given as files: " + PARTS["thumbnails"] + ". "
+                                            "Pictures (refs or content) or folders of them, named by "
+                                            "slide number (001.png) or objectId. Default: the "
+                                            "folder's thumbnails/."] = None,
+    pictures: Annotated[str | None, "With a deck given as files: " + PARTS["pictures"] + ". Workspace "
+                                    "ref of the recording folder (deck-files' pictures/, its default)."] = None,
+    google_fonts: Annotated[str | None, "With a deck given as files: " + PARTS["google_fonts"] + ". "
+                                        "Workspace ref of the recording folder (deck-files' "
+                                        "google-fonts/, its default)."] = None,
 ) -> None:
     """Write the LaTeX source a foreign deck never had, then converge it onto that deck.
 
@@ -181,13 +206,16 @@ def deck_adopt(
     source to refine. It reads every slide, its layouts and masters and **one LARGE thumbnail
     per slide** (60 such reads a minute, a 429 sleeps 20-60 s: minutes for a big deck), writes a
     source tree, then **compiles it in a loop** like pull. `data["readability"]`: how keepable
-    that source is (sources people wrote: 0.6-1.0). A `.json` deck needs no Google access at
-    all. Missing fonts (ask for them) and pictures: `data["fonts_missing"]`, `["pictures_missing"]`.
+    it is (people's: 0.6-1.0). A deck as files needs no Google (`data["offline"]`: what each part
+    added or its lack cost). Missing: `data["fonts_missing"]` (ask for them), `["pictures_missing"]`.
     """
     from ..adopt import written_already
 
     font_paths = [_existing(j, ref, "fonts") for ref in fonts or []]
     pptx_path = _existing(j, pptx, "pptx") if pptx else None
+    thumb_paths = [_existing(j, ref, "thumbnails") for ref in thumbnails or []]
+    pictures_path = _existing(j, pictures, "pictures") if pictures else None
+    google_fonts_path = _existing(j, google_fonts, "google_fonts") if google_fonts else None
     tex_path = j.path(tex, write=True)
     if written_already(tex_path):
         # adopt's own refusal, made before the minutes of thumbnails rather than after them.
@@ -197,11 +225,16 @@ def deck_adopt(
                       f"source tree. Use deck_pull to refine the source you have, or name a path "
                       f"nothing is at.", tex=j.ctx.workspace.ref(tex_path))
     target_ref, folder = _deck_argument(j, deck, allow_json=True)
-    target_path = Path(target_ref) if target_ref.lower().endswith(".json") else None
     work_path = _work_dir(j, work, tex_path.parent / "out" / "adopt")
     out_path = j.path(out, write=True) if out else None
+    from ..deck_files import gather
+    try:
+        files = gather(target_ref, work_path / "deck-files", thumb_paths, pictures_path, google_fonts_path)
+    except (SystemExit, OSError, ValueError, zipfile.BadZipFile) as exc:
+        raise Refused("bad_request", str(exc), deck=deck) from None
+    target_path = Path(target_ref) if files is None and target_ref.lower().endswith(".json") else None
     j.data["deck"] = target_ref
-    j.data["local_target"] = target_path is not None
+    j.data["local_target"] = target_path is not None or files is not None
 
     from ..adopt import cmd_adopt
 
@@ -220,10 +253,12 @@ def deck_adopt(
     try:
         result = _loop(lambda: cmd_adopt(target_ref, tex_path, work_path, apply, out_path,
                                          max_iter, engine, flow, target_path, log=watch,
-                                         fonts=font_paths, found=found, pptx=pptx_path))
+                                         fonts=font_paths, found=found, pptx=pptx_path, files=files))
     except ForeignFolder as exc:
         raise Refused("bad_request", str(exc), work=j.ctx.workspace.ref(work_path)) from None
     _fonts_report(j, found)
+    if "offline" in found:
+        j.data["offline"] = found["offline"]
     if tex_path.exists():
         j.artifact(tex_path, "tex", "the bootstrapped source adopt wrote")
         _readability(j, tex_path)
@@ -301,7 +336,7 @@ def _deck_argument(j: Job, deck: str, allow_json: bool = False) -> tuple[str, Pa
     if path.exists():
         if path.is_dir():
             return str(path), path
-        if path.suffix.lower() == ".json" and allow_json:
+        if path.suffix.lower() in (".json", ".zip") and allow_json:
             return str(path), None
         if path.suffix.lower() == ".json":
             raise Refused("bad_request",
@@ -309,7 +344,7 @@ def _deck_argument(j: Job, deck: str, allow_json: bool = False) -> tuple[str, Pa
                           f"out/<deck> folder of a conversion. Use tex_converge for a local "
                           f"deck.json target.", deck=deck)
         raise Refused("bad_request", f"{deck} is not a deck folder.", deck=deck)
-    if "/" in deck or "\\" in deck or deck.lower().endswith(".json"):
+    if "/" in deck or "\\" in deck or deck.lower().endswith((".json", ".zip")):
         raise Refused("not_found", f"No deck at {deck} (looked in {path}).", deck=deck)
     return deck, None                     # a bare presentation id
 

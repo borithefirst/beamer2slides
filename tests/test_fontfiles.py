@@ -250,8 +250,9 @@ def test_a_fetcher_that_refuses_github_is_no_fetch_and_no_error(fetcher):
 
 def fake_adopt(monkeypatch, seen: dict, missing=(), skipped=()):
     def cmd_adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, log=print,
-                  fonts=None, found=None, pptx=None):
+                  fonts=None, found=None, pptx=None, files=None):
         seen["fonts"] = list(fonts or [])
+        seen["files"] = files
         seen["source"] = fontfetch.source_root()
         seen["pptx"] = pptx
         found["supplied"] = {"families": {"Tiny Sans": {"styles": ["Regular"]}}, "skipped": list(skipped)}

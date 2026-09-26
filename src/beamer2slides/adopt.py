@@ -170,6 +170,24 @@ def use_fonts(*roots):
         forget_fonts()
 
 
+_MACHINE: contextvars.ContextVar[bool] = contextvars.ContextVar("beamer2slides.machine_fonts", default=True)
+
+
+@contextmanager
+def no_machine_fonts():
+    """Look in no folder of this machine's (its own fonts, the repository's themes) for the length
+    of the block: only supplied fonts and the google/fonts cache. What `deck_files.save` runs
+    adopt's font choice under, so every family a machine without fonts would fetch is fetched and
+    recorded, not found installed here and left out."""
+    token = _MACHINE.set(False)
+    forget_fonts()
+    try:
+        yield
+    finally:
+        _MACHINE.reset(token)
+        forget_fonts()
+
+
 def forget_fonts() -> None:
     """Drop what was read of the font folders: a folder of supplied fonts is refilled per run."""
     from . import scripts
@@ -190,6 +208,11 @@ def font_dirs() -> list[Path]:
     if only:
         return supplied + [p for p in only if p.is_dir()]
     out: list[Path] = supplied
+    if not _MACHINE.get():
+        if fetching():
+            from .fontfetch import cache_dir
+            out.append(cache_dir())
+        return [p for p in out if p.is_dir()]
     themes = Path(__file__).resolve().parents[2] / "themes"
     if themes.is_dir():                                 # not in an installed wheel
         out += sorted(p for p in themes.glob("*/fonts") if p.is_dir())
@@ -3826,8 +3849,13 @@ def written_already(tex: Path) -> bool:
 def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
               engine: str | None, flow: bool, target_path: Path | None = None, base: bool = True,
               base_in_drive: bool = False, log=print, fonts=None, found: dict | None = None,
-              pptx: Path | None = None):
+              pptx: Path | None = None, files=None):
     """Read a foreign deck, write a source for it, then converge that source onto the deck.
+
+    `files`: the deck handed over as files (`deck_files.DeckFiles`, what `deck-files` saves; a
+    `deck` naming such a folder or .zip is read as one): its presentation read with no Google call,
+    its thumbnails read for the fills only they show, and every download the run makes answered
+    from its recordings first - as faithful as a live read, with no network at all.
 
     `fonts`: font files or folders of them a person supplied (.ttf .otf .ttc .woff .woff2), laid
     out in `<work>/fonts-supplied` (`fontfiles.install`) and preferred to any other. `pptx`: a
@@ -3843,6 +3871,14 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
     found = {} if found is None else found
     found.setdefault("missing", [])
     found.setdefault("pictures_missing", [])
+    from . import deck_files
+    files = files or (deck_files.at(deck, work / "deck-files") if target_path is None and deck else None)
+    if files is not None:
+        import dataclasses
+        target_path = target_path or files.presentation
+        pptx = pptx or files.pptx
+        fonts = [*(fonts or []), *files.fonts] or None
+        files = dataclasses.replace(files, pptx=pptx, fonts=list(fonts or []))   # (what the report says was given)
     if pptx is not None and not Path(pptx).is_file():
         raise SystemExit(f"no .pptx at {pptx}")
     roots = []
@@ -3854,25 +3890,43 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
         for line in fontfiles.summary(report) or ["  none of the files was a font"]:
             log(line)
         roots.append(work / "fonts-supplied")
-    with use_fonts(*roots):
-        return _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base,
-                      base_in_drive, log, found["missing"], found["pictures_missing"], pptx, found)
+    with use_fonts(*roots), deck_files.replaying(files) as stores:
+        result = _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base,
+                        base_in_drive, log, found["missing"], found["pictures_missing"], pptx, found,
+                        files)
+    if files is not None:
+        counts = {"thumbnails": found.pop("thumbnails_read", 0), "pptx": found.get("pptx_pictures", 0),
+                  "fonts": len((found.get("supplied") or {}).get("families") or []),
+                  **{k: len(s.answered) for k, s in stores.items()}}
+        lines, found["offline"] = deck_files.report(files, counts)
+        for line in lines:
+            log(line)
+    return result
 
 
 def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base, base_in_drive, log,
-           missing: list, pictures: list, pptx: Path | None = None, found: dict | None = None):
+           missing: list, pictures: list, pptx: Path | None = None, found: dict | None = None, files=None):
     from .deck_ir import is_presentation
     from .inverse import run_pull
     pres = None
     data = Path(pptx).read_bytes() if pptx else None
     held = None
     doc = json.loads(Path(target_path).read_text(encoding="utf-8")) if target_path is not None else None
+    if files is not None and files.thumbnails and not is_presentation(doc):
+        log("thumbnails are not used: they are read with a presentations.get answer, not a saved target")
     if is_presentation(doc):
         # the deck as Google describes it, saved by whoever may call the Slides API: read here,
         # its pictures out of the .pptx, with no Google call (`deck_ir.read_presentation`)
-        from .deck_ir import read_presentation
+        from .deck_ir import given_thumbnails, read_presentation
         kept: dict = {}
-        target = read_presentation(doc, work / "target-images", data, kept)
+        thumbnails = None
+        if files is not None and files.thumbnails:
+            thumbnails, shots = given_thumbnails(doc, files.thumbnails, log)
+            log(f"thumbnails: {shots} of {len(doc.get('slides', []))} slides")
+            if found is not None:
+                found["thumbnails_read"] = shots
+        target = read_presentation(doc, work / "target-images", data, kept, thumbnails,
+                                   pptx_first=files is None or files.pictures is None)
         pres = doc
         held = kept.get("pptx_pictures")
     elif doc is not None:

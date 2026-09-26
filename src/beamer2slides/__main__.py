@@ -8,6 +8,8 @@
       edit the source until its conversion matches the (edited) deck: WORK/pull.patch, edits.md/json
   python -m beamer2slides converge --target deck.json --tex main.tex [...]
       the same against a deck.json-shaped target, offline
+  python -m beamer2slides deck-files --deck URL|ID --out DIR [--zip]
+      everything adopt reads of a deck, saved for `adopt --deck DIR|DIR.zip` with no Google or internet
   python -m beamer2slides docs push|sync doc.html [--dry-run]
       a Google Doc from a canonical HTML file, and the merge that keeps both in step
   python -m beamer2slides docs adopt --doc URL|ID [doc.html]
@@ -302,11 +304,27 @@ def main() -> None:
         c.add_argument("--max-iter", type=int, default=10)
         c.add_argument("--handout", action="store_true", help="compile in handout mode (one page per frame)")
         c.add_argument("--engine", help="pdflatex, xelatex or lualatex (default: from the source)")
+    from .deck_files import PARTS
+    c = sub.add_parser("deck-files", help="save everything adopt reads of a deck, for an adopt with no Google "
+                                          "and no internet (adopt --deck FOLDER|ZIP)")
+    c.add_argument("--deck", required=True, help="deck URL or presentation id")
+    c.add_argument("--out", required=True, type=Path, help="the folder to write (new or empty): "
+                   "presentation.json, thumbnails/, pictures/, google-fonts/, deck-files.json")
+    c.add_argument("--zip", action="store_true", help="also pack the folder as <out>.zip: one file to hand over")
+    c.add_argument("--pptx", type=Path, metavar="FILE", help="a .pptx of the deck to put in with them: " + PARTS["pptx"])
     c = sub.add_parser("adopt", help="write a beamer source for a deck nobody converted, then converge it")
     c.add_argument("--deck", required=True,
-                   help="deck URL, presentation id, or a .json file read with no Google call: a "
-                        "deck.json-shaped target, or the Slides API's presentations.get answer saved "
-                        "whole (its pictures then come from --pptx)")
+                   help="deck URL or presentation id (read live); or the deck as files, read with no "
+                        "Google call: the folder or .zip `deck-files` wrote (as faithful as a live "
+                        "read, with no network), a saved presentations.get .json (" + PARTS["presentation"]
+                        + "; add the parts below), or a deck.json-shaped target")
+    c.add_argument("--thumbnails", type=Path, action="append", default=[], metavar="FILE|FOLDER",
+                   help="with a deck read from files: " + PARTS["thumbnails"] + ". Pictures named by slide "
+                        "number (001.png) or objectId. Repeatable")
+    c.add_argument("--pictures", type=Path, metavar="FOLDER",
+                   help="with a deck read from files: " + PARTS["pictures"] + " (deck-files' pictures/)")
+    c.add_argument("--google-fonts", type=Path, metavar="FOLDER",
+                   help="with a deck read from files: " + PARTS["google_fonts"] + " (deck-files' google-fonts/)")
     c.add_argument("--tex", required=True, type=Path, help="the source to write (it must not exist yet)")
     c.add_argument("--flow", action="store_true",
                    help="write frame titles and body text in the flow instead of a textblock per element: "
@@ -323,13 +341,12 @@ def main() -> None:
                    help="also store the base in the deck's own appProperties, as convert does. This WRITES to "
                         "the presentation, which adopt otherwise never does: ask for it only for a deck you own")
     c.add_argument("--fonts", type=Path, action="append", default=[], metavar="FILE|FOLDER",
-                   help="font files the deck is written in (.ttf .otf .ttc .woff .woff2), or a folder of them; "
+                   help=PARTS["fonts"] + " (.ttf .otf .ttc .woff .woff2, or a folder of them); "
                         "preferred to this machine's and to google/fonts. Repeatable. A local copy of "
                         "google/fonts is $B2S_FONT_SOURCE instead")
     c.add_argument("--pptx", type=Path, metavar="FILE",
-                   help="the deck downloaded as .pptx (File > Download > Microsoft PowerPoint): its "
-                        "pictures are used before any download, so --no-downloads still gets them. "
-                        "Download it from the deck as it is now")
+                   help=PARTS["pptx"] + ". Used before any download, so --no-downloads still gets them "
+                        "(after --pictures, whose bytes are Google's own). Download it from the deck as it is now")
     c = sub.add_parser("docs", help="a Google Doc from a canonical HTML file, and back (docs/google-docs.md)")
     docs_sub = c.add_subparsers(dest="docs_command", required=True)
     d = docs_sub.add_parser("push", help="create the document from the file and anchor its blocks")
@@ -382,11 +399,21 @@ def main() -> None:
         return cmd_label(args.tex, args.apply)
     if args.command == "docs":
         return cmd_docs(args)
+    if args.command == "deck-files":
+        from .deck_files import save, zip_folder
+        save(args.deck, args.out, args.pptx)
+        if args.zip:
+            print(f"wrote {zip_folder(args.out, args.out.with_suffix('.zip'))}")
+        return
     if args.command == "adopt":
         from .adopt import cmd_adopt
-        target = Path(args.deck) if Path(args.deck).suffix == ".json" else None
+        from .deck_files import gather
+        work = args.work or args.tex.resolve().parent / "out" / "adopt"
+        files = gather(args.deck, work / "deck-files", args.thumbnails, args.pictures, args.google_fonts)
+        target = Path(args.deck) if files is None and Path(args.deck).suffix == ".json" else None
         cmd_adopt(args.deck, args.tex, args.work, args.apply, args.out, args.max_iter, args.engine,
-                  args.flow, target, args.base, args.base_in_drive, fonts=args.fonts, pptx=args.pptx)
+                  args.flow, target, args.base, args.base_in_drive, fonts=args.fonts, pptx=args.pptx,
+                  files=files)
         return
     if args.command in ("pull", "converge"):
         from .inverse import cmd_converge, cmd_pull

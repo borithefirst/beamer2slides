@@ -105,11 +105,40 @@ class FetchFailed(OSError):
     network, a fetcher that may not reach GitHub, whatever a harness's client raises."""
 
 
+_WATCH: contextvars.ContextVar = contextvars.ContextVar("beamer2slides.font_watch", default=None)
+
+
+@contextmanager
+def watching(seen):
+    """Call `seen(url, data)` for every file `get` gives in this block, and `seen(url, None)` for
+    one that is not there, wherever it came from (a download or the local copy): how
+    `deck_files.save` records the files a machine with no copy and no internet will need."""
+    token = _WATCH.set(seen)
+    try:
+        yield
+    finally:
+        _WATCH.reset(token)
+
+
 def get(url: str) -> bytes:
     """One file of google/fonts by its raw URL: from the local copy when there is one, else
     downloaded through the context's fetcher (one try: a blip costs a stand-in, as it always did).
     A file that is not there raises `FileNotFoundError` (or the `HTTPError` 404 urllib gives);
     any other failure is `FetchFailed`."""
+    seen = _WATCH.get()
+    if seen is None:
+        return _get(url)
+    try:
+        data = _get(url)
+    except Exception as e:
+        if _absent(e):
+            seen(url, None)
+        raise
+    seen(url, data)
+    return data
+
+
+def _get(url: str) -> bytes:
     root = source_root()
     if root is not None and url.startswith(RAW):
         path = root / urllib.parse.unquote(url[len(RAW):])
@@ -280,7 +309,9 @@ def _build(family: str, folder: str, lic: str | None, meta: dict, axes: dict | N
         if variable:
             from fontTools.ttLib import TTFont
             from fontTools.varLib import instancer
-            vf = TTFont(download(variable[0]["filename"]))
+            # the variable font's own date, not the hour it was cut: the same bytes every run
+            # (`deck_files` compares an offline adopt with a live one file by file)
+            vf = TTFont(download(variable[0]["filename"]), recalcTimestamp=False)
             have = {a.axisTag: a for a in vf["fvar"].axes}
             loc = {tag: a.defaultValue for tag, a in have.items()}
             for tag, value in (axes or {}).items():
@@ -342,7 +373,7 @@ def weight_file(upright: Path, weight: int, italic: bool = False) -> Path | None
     try:
         from fontTools.ttLib import TTFont
         from fontTools.varLib import instancer
-        vf = TTFont(variable[0])
+        vf = TTFont(variable[0], recalcTimestamp=False)
         have = {a.axisTag: a for a in vf["fvar"].axes}
         w = have.get("wght")
         if w is None or not w.minValue <= weight <= w.maxValue:
@@ -438,7 +469,7 @@ def repair_names(dest: Path) -> None:
             cut = re.fullmatch(r"W(\d+)(Italic)?", suffix)
             if suffix not in STYLES and not cut:
                 continue
-            font = TTFont(f)
+            font = TTFont(f, recalcTimestamp=False)
             if cut:
                 rename(font, family, "Italic" if cut.group(2) else "Regular", int(cut.group(1)))
             else:
