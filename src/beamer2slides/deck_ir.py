@@ -23,7 +23,8 @@ from . import emit
 from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, OPTICAL_WEIGHTS_READ, PAD_X, PPTX_TITLE_DY,
                    FontMapper, extra_above, line_size)
 from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_inset, thumbnail_cell_pad,
-                          thumbnail_cell_text, thumbnail_insets, thumbnail_rows, thumbnail_weights, top_drift)
+                          thumbnail_cell_text, thumbnail_insets, thumbnail_picture_places, thumbnail_rows,
+                          thumbnail_weights, top_drift)
 from .fonts import cjk_font
 from .gslides import EMU_PER_PT
 
@@ -1057,6 +1058,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                        if d is not None]
             sides += [side_inset(e, g) for e, g in ((e, side_gap(e, elements, thumb, px)) for e in elements)
                       if g is not None]
+            thumbnail_picture_places(elements, thumb, px)
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
                        "key": key, "notes": notes_text(slide), "background_color": color,

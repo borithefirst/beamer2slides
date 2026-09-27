@@ -907,3 +907,252 @@ def pptx_insets(slides: list[dict], drifts: list[tuple[dict, float]], sides: lis
             if e.get("anchor") and box_.get("valign", "top") in ("top", "bottom"):
                 dy = -want / (box_.get("scale") or 1.0) * (1 if box_.get("valign", "top") == "bottom" else -1)
                 e["anchor"] = [e["anchor"][0], round(e["anchor"][1] + dy, 2)]
+
+
+PLACE_MIN_PX = 24        # a frame smaller than this in either dimension is not worth searching
+PLACE_GRID = 32          # canonical side (px) the frame's crop and the file are both resampled to
+PLACE_MIN_VISIBLE = 0.35 # a candidate box must keep at least this share of its grid cells visible
+PLACE_STRETCHED_OK = 0.55  # a stretch that already correlates this well is left alone
+PLACE_MIN_SCORE = 0.5      # the found box must correlate at least this well (a real chart thumbnail,
+                           # softened by JPEG/antialiasing and a label painted over part of it, reads
+                           # nowhere near a synthetic pattern's ~0.98 even at its true box: applied-ml's
+                           # own chart peaks at 0.606)
+PLACE_MIN_GAIN = 0.2       # ... and clearly better than the stretch it replaces (applied-ml: 0.22 -> 0.61)
+PLACE_MIN_SPAN = 0.25      # never shrink a side to less than this share of the frame
+PLACE_COARSE = (0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45)
+PLACE_FINE = (-0.02, -0.01, 0.0, 0.01, 0.02)
+PLACE_TIGHT = tuple(round(i * 0.01, 2) for i in range(-6, 7))  # +-0.06 at 0.01, around a coarse seed
+
+
+def _place_resize(arr, gh: int, gw: int):
+    """`arr` resampled to `(gh, gw)`: a box average (an integral image, so every grid cell is exact)
+    when shrinking - a chart's gridlines and a checkerboard test pattern alike alias badly under
+    nearest-neighbour sampling, which once turned a clean single peak at the true box into noise a
+    coordinate descent could wander off into - and nearest neighbour only for the rare case of
+    upsampling a crop smaller than the grid itself."""
+    import numpy as np
+    h, w = arr.shape[:2]
+    if h == 0 or w == 0:
+        return np.zeros((gh, gw), dtype=np.float64)
+    if h < gh or w < gw:
+        ys = np.clip(np.arange(gh) * h // gh, 0, h - 1)
+        xs = np.clip(np.arange(gw) * w // gw, 0, w - 1)
+        return arr[ys][:, xs].astype(np.float64)
+    integral = np.zeros((h + 1, w + 1), dtype=np.float64)
+    integral[1:, 1:] = arr.astype(np.float64).cumsum(0).cumsum(1)
+    ys = np.linspace(0, h, gh + 1).round().astype(int)
+    xs = np.linspace(0, w, gw + 1).round().astype(int)
+    total = (integral[ys[1:]][:, xs[1:]] - integral[ys[:-1]][:, xs[1:]]
+             - integral[ys[1:]][:, xs[:-1]] + integral[ys[:-1]][:, xs[:-1]])
+    counts = np.outer(np.diff(ys), np.diff(xs)).astype(np.float64)
+    counts[counts <= 0] = 1.0
+    return total / counts
+
+
+def _place_ncc(a, b, visible) -> float | None:
+    """Normalised cross-correlation of `a` against `b` over the pixels `visible` marks, or None where
+    too little of the grid is visible or either side is flat (no ink to match at all)."""
+    import numpy as np
+    n = int(visible.sum())
+    if n < max(16, PLACE_MIN_VISIBLE * visible.size):
+        return None
+    av, bv = a[visible].astype(np.float64), b[visible].astype(np.float64)
+    av -= av.mean()
+    bv -= bv.mean()
+    da, db = float((av * av).sum()), float((bv * bv).sum())
+    if da < 1e-6 or db < 1e-6:
+        return None
+    return float((av * bv).sum() / (da * db) ** 0.5)
+
+
+def _place_score(frame_gray, visible, src_grid, l: float, t: float, r: float, b: float) -> float | None:
+    """How well the file (already resampled once to `src_grid`, the whole picture, never a crop of it)
+    matches the thumbnail's own pixels inside the box `(l, t, r, b)` cuts from the frame - insets as a
+    share of the frame's own width (`l`, `r`) and height (`t`, `b`). Both sides are resampled to the
+    same small grid before comparing, so the candidate box's own pixel size never matters, only where
+    it falls inside the frame."""
+    fh, fw = frame_gray.shape
+    x0, x1 = int(round(l * fw)), fw - int(round(r * fw))
+    y0, y1 = int(round(t * fh)), fh - int(round(b * fh))
+    if x1 - x0 < 6 or y1 - y0 < 6:
+        return None
+    grid = _place_resize(frame_gray[y0:y1, x0:x1], PLACE_GRID, PLACE_GRID)
+    vgrid = _place_resize(visible[y0:y1, x0:x1], PLACE_GRID, PLACE_GRID) >= 0.5
+    return _place_ncc(grid, src_grid, vgrid)
+
+
+def _place_search(frame_gray, visible, src_grid, base: float):
+    """Coordinate descent over the four insets, coarse then fine, each held against the others: cheap
+    enough to run only when the plain stretch (`base`) already reads poorly, and general enough for
+    padding on one side, two opposite sides, or all four - a diagonal or rotated placement is not
+    modelled and is left to the rotation/flip guard in the caller.
+
+    Seeded first from the two symmetric hypotheses (equal padding on both sides of one axis, the
+    other axis untouched) - centred content, the overwhelmingly common case for a .pptx's negative
+    `srcRect`. A one-sided move alone can cross a false trough before it reaches the true box (a
+    chart's own gridlines and ticks correlate with themselves at more than one offset), where the
+    two matched sides together are read against a single, unambiguous width or height."""
+    l = t = r = b = 0.0
+    best = base
+    for m in PLACE_COARSE:
+        s = _place_score(frame_gray, visible, src_grid, m, 0.0, m, 0.0)
+        if s is not None and s > best:
+            best, l, r = s, m, m
+    # PLACE_COARSE's 0.05 steps can straddle a real, narrow correlation peak (a chart's own axis and
+    # gridlines are thin) without ever landing on it - applied-ml's true ~18% inset scores 0.94 at
+    # 0.18 but only 0.43 at the nearest coarse step, 0.20 - so refine the symmetric seed at 0.01
+    # resolution around whichever coarse step won before the four sides are ever allowed to move apart.
+    for m in [round(l + step, 3) for step in PLACE_TIGHT if 0.0 <= l + step <= 0.45]:
+        s = _place_score(frame_gray, visible, src_grid, m, 0.0, m, 0.0)
+        if s is not None and s > best:
+            best, l, r = s, m, m
+    for m in PLACE_COARSE:
+        s = _place_score(frame_gray, visible, src_grid, l, m, r, m)
+        if s is not None and s > best:
+            best, t, b = s, m, m
+    for m in [round(t + step, 3) for step in PLACE_TIGHT if 0.0 <= t + step <= 0.45]:
+        s = _place_score(frame_gray, visible, src_grid, l, m, r, m)
+        if s is not None and s > best:
+            best, t, b = s, m, m
+    for steps in (PLACE_COARSE, PLACE_FINE, PLACE_FINE):
+        improved = False
+        for axis in ("l", "t", "r", "b"):
+            cur = {"l": l, "t": t, "r": r, "b": b}
+            for step in steps:
+                v = step if steps is PLACE_COARSE else max(0.0, min(0.45, cur[axis] + step))
+                trial = dict(cur, **{axis: v})
+                if trial["l"] + trial["r"] > 0.7 or trial["t"] + trial["b"] > 0.7:
+                    continue
+                s = _place_score(frame_gray, visible, src_grid, **trial)
+                if s is not None and s > best:
+                    best, cur[axis] = s, v
+                    improved = True
+            l, t, r, b = cur["l"], cur["t"], cur["r"], cur["b"]
+        if not improved and steps is not PLACE_COARSE:
+            break
+    l, t, r, b, best = _place_trim(frame_gray, visible, src_grid, l, t, r, b, best)
+    return l, t, r, b, best
+
+
+PLACE_TRIM_TOL = 0.05    # widening a side back towards 0 is taken even at a small cost in score - a
+                         # side of the frame no picture in the corpus actually needed can still read a
+                         # little better empty than full of the wrong pixels (a chart's own gridlines
+                         # correlate with themselves at more than one width), so the hill climb above
+                         # keeps drifting a side past the picture's true edge for a marginal gain
+
+
+def _place_trim(frame_gray, visible, src_grid, l: float, t: float, r: float, b: float, best: float):
+    """Each inset walked back towards 0 (finer, then coarser, steps) as long as the match stays within
+    `PLACE_TRIM_TOL` of the best score the coordinate descent found: undoes the drift above, which can
+    cross a false trough on its way past the picture's real edge and settle a side deeper than the
+    picture needs (applied-ml's chart: descent alone left the right inset at 0.29, over the visible
+    plot box's real ~0.2; trimmed back to where the score is still within tolerance)."""
+    cur = {"l": l, "t": t, "r": r, "b": b}
+    floor = best - PLACE_TRIM_TOL       # fixed reference: trimming one side never borrows tolerance
+                                         # a later side has already spent, or four small trims could
+                                         # add up to a box no better than the plain stretch
+    for axis in ("l", "r", "t", "b"):
+        candidates = sorted({round(v, 3) for v in (0.0, *PLACE_FINE, *PLACE_COARSE) if 0 <= v < cur[axis]})
+        for v in candidates:
+            trial = dict(cur, **{axis: v})
+            s = _place_score(frame_gray, visible, src_grid, **trial)
+            if s is not None and s >= floor:
+                cur[axis] = v
+                break
+    final = _place_score(frame_gray, visible, src_grid, **cur)
+    return cur["l"], cur["t"], cur["r"], cur["b"], final if final is not None else best
+
+
+def _place_visible(above: list[dict], frame_px: tuple, px: float, w: int, h: int):
+    """The frame's own pixels (`frame_px`, image coordinates), less whatever an element above it
+    (`thumbnail_picture`'s `above`) actually draws there - a rotated or off-colour text box included,
+    however it is filled, since none of its ink is the picture's to match. An element with nothing to
+    draw (a bare text placeholder, an unfilled unoutlined shape) is not in the way at all."""
+    import numpy as np
+    from .deck_fills import px_box
+    a0, b0, a1, b1 = frame_px
+    vis = np.ones((b1 - b0, a1 - a0), dtype=bool)
+    for e in above:
+        if e.get("kind") == "text" and not e.get("paragraphs"):
+            continue
+        if e.get("kind") == "shape" and not e.get("fill") and not e.get("fill_gradient") and not e.get("outline"):
+            continue
+        if not e.get("bbox"):
+            continue
+        c0, d0, c1, d1 = px_box(e["bbox"], px, w, h)
+        if c1 <= a0 or c0 >= a1 or d1 <= b0 or d0 >= b1:
+            continue
+        vis[max(0, d0 - b0):max(0, d1 - b0), max(0, c0 - a0):max(0, c1 - a0)] = False
+    return vis
+
+
+def thumbnail_picture_places(elements: list[dict], thumb, px: float) -> None:
+    """A picture the API draws smaller than its own frame - a .pptx's negative `srcRect` (padding),
+    which `imageProperties.cropProperties` never carries, so `picture_props` never sees it - found from
+    the slide's own thumbnail: the file is never cropped (the whole image is shown, just not stretched
+    over the whole frame), so some inset box of the frame matches the thumbnail's pixels there far
+    better than the frame itself does. That box becomes the element's own `bbox` (and `box`, kept
+    equal to it as `picture_props` leaves them for an unrotated picture): the frame's own margin is
+    left blank around it, exactly where Slides already draws nothing.
+
+    Conservative throughout: a plain stretch that already reads well (`PLACE_STRETCHED_OK`) is left
+    exactly as it was; the found box must read clearly better (`PLACE_MIN_SCORE`, `PLACE_MIN_GAIN`)
+    and keep a sane share of the frame (`PLACE_MIN_SPAN`) to be taken at all; pixels an element drawn
+    above the picture actually covers (`_place_visible`) are left out of the comparison, so a caption
+    or a label crossing the frame cannot be mistaken for the picture's own ink. A rotated, flipped or
+    already-cropped picture is left alone - only an axis-aligned box is searched for."""
+    if thumb is None or not px:
+        return
+    import numpy as np
+    from PIL import Image
+    from .deck_fills import px_box
+    H, W = thumb.shape[:2]
+    for k, el in enumerate(elements):
+        if el.get("kind") != "image" or not el.get("file") or el.get("video") or el.get("chart") \
+                or el.get("wordArt") or el.get("rotation") or el.get("flip") or el.get("crop"):
+            continue
+        a0, b0, a1, b1 = px_box(el["bbox"], px, W, H)
+        fw, fh = a1 - a0, b1 - b0
+        if fw < PLACE_MIN_PX or fh < PLACE_MIN_PX:
+            continue
+        try:
+            with Image.open(el["file"]) as im:
+                if "A" in im.getbands():
+                    # A transparent PNG (an icon or a badge drawn to fill its own square canvas,
+                    # e.g. a circular flag with its corners cut by alpha) reads its raw RGB under
+                    # the transparent pixels as if it were content: those corners are usually
+                    # black or garbage, never the slide's white, so a plain greyscale conversion
+                    # makes an already-correct 1:1 frame score as a bad stretch and sends the
+                    # search hunting for a smaller box that was never really there (devfest2020
+                    # slide 39's flag badges: alpha_transp_frac ~0.22, a circle inscribed in its
+                    # square, shrunk into ovals before this fix). Composite onto white first, the
+                    # colour Slides itself shows through a transparent PNG's alpha
+                    # (CLAUDE.md "Layout pages reject ... transparent PNG ... shows white").
+                    rgba = np.asarray(im.convert("RGBA"), dtype=np.float32)
+                    alpha = rgba[:, :, 3:4] * (1.0 / 255.0)
+                    rgb = rgba[:, :, :3] * alpha + 255.0 * (1.0 - alpha)
+                    src = (rgb * np.array([0.299, 0.587, 0.114], dtype=np.float32)).sum(axis=2)
+                else:
+                    src = np.asarray(im.convert("L"), dtype=np.float32)
+        except (OSError, ValueError):
+            continue
+        if src.size == 0:
+            continue
+        frame_gray = (thumb[b0:b1, a0:a1].astype(np.float32)
+                      * np.array([0.299, 0.587, 0.114], dtype=np.float32)).sum(axis=2)
+        visible = _place_visible(elements[k + 1:], (a0, b0, a1, b1), px, W, H)
+        src_grid = _place_resize(src, PLACE_GRID, PLACE_GRID)
+        base = _place_score(frame_gray, visible, src_grid, 0.0, 0.0, 0.0, 0.0)
+        if base is None or base >= PLACE_STRETCHED_OK:
+            continue
+        l, t, r, b, score = _place_search(frame_gray, visible, src_grid, base)
+        if score < PLACE_MIN_SCORE or score - base < PLACE_MIN_GAIN:
+            continue
+        if 1 - l - r < PLACE_MIN_SPAN or 1 - t - b < PLACE_MIN_SPAN:
+            continue
+        x0, y0, x1, y1 = el["bbox"]
+        w, h = x1 - x0, y1 - y0
+        nb = [round(x0 + l * w, 2), round(y0 + t * h, 2), round(x1 - r * w, 2), round(y1 - b * h, 2)]
+        el["bbox"] = nb
+        el["box"] = list(nb)
+        el["picture_place"] = "thumbnail"
