@@ -524,6 +524,70 @@ def test_a_formal_script_the_machine_lacks_is_set_in_its_google_fonts_stand_in(t
     assert adopt.stood_in("Corsiva", dict(files)) == "Tinos"
 
 
+def test_screen_and_office_fonts_stand_in_by_measured_width():
+    """Tahoma, Verdana, Trebuchet MS, Consolas, Corbel, Helvetica Neue, Proxima Nova, Book Antiqua
+    and Palatino Linotype are all proprietary and off google/fonts by their own names (the offline
+    corpus's missing-font census): each maps to a fetchable family, picked by comparing the Windows
+    original's advance widths (an English-frequency-weighted sample of letters) against the
+    candidates' - not merely the first plausible name. Book Antiqua and Palatino Linotype are the
+    same design (the former is Microsoft's licensed Palatino) and neither is on google/fonts, so
+    both take the same stand-in rather than one naming the other, which used to fail twice over
+    (hebrew-lesson's census)."""
+    for flat, standin in [
+        ("tahoma", "PT Sans"), ("verdana", "Noto Sans"), ("trebuchetms", "Fira Sans"),
+        ("consolas", "Inconsolata"), ("corbel", "Carlito"), ("helveticaneue", "Arimo"),
+        ("proximanova", "Figtree"), ("bookantiqua", "PT Serif"), ("palatinolinotype", "PT Serif"),
+    ]:
+        assert adopt.SUBSTITUTES[flat] == [standin]
+    # Verdana is drawn noticeably wider than any of its google/fonts stand-ins, Consolas noticeably
+    # narrower than Inconsolata: both measured over 3% off and get a `DESIGN_WIDTHS` correction for
+    # a deck whose own thumbnails are too few to measure it (`font_widths`, `stretch`).
+    assert adopt.DESIGN_WIDTHS["verdana"] > 1.0
+    assert adopt.DESIGN_WIDTHS["consolas"] > 1.0
+    # neither Tahoma nor the rest measured 3% off their stand-in, so none of them needs one
+    for flat in ("tahoma", "trebuchetms", "corbel", "helveticaneue", "proximanova", "bookantiqua",
+                 "palatinolinotype"):
+        assert flat not in adopt.DESIGN_WIDTHS
+
+
+def test_verdana_is_set_wide_and_consolas_narrow_with_too_few_lines_to_measure(tmp_path):
+    """`stretch` falls back to `DESIGN_WIDTHS` when a deck has no (or too few) lines of its own font
+    to measure (`font_widths` needs at least two): Verdana's stand-in is stretched out to match its
+    screen-legible width, Consolas' the other way, same as Arial Narrow's 82% (ua-space, offline)."""
+    noto = {"UprightFont": tmp_path / "NotoSans-Regular.ttf"}
+    assert adopt.stretch("Verdana", "NotoSans", noto, {"slides": []}) == ",FakeStretch=1.07"
+    inconsolata = {"UprightFont": tmp_path / "Inconsolata-Regular.ttf"}
+    assert adopt.stretch("Consolas", "Inconsolata", inconsolata, {"slides": []}) == ",FakeStretch=1.1"
+    # the deck's own font is never stretched against itself
+    assert adopt.stretch("Verdana", "Verdana", noto, {"slides": []}) == ""
+
+
+def test_verdana_stands_in_as_noto_sans_when_the_machine_lacks_it(tmp_path, monkeypatch):
+    """End to end through `font_family`: a deck in Verdana with no Verdana on the machine is set in
+    Noto Sans, reported as a stand-in (`stood_in`), the way Corsiva stands in as Tinos above."""
+    from beamer2slides import fontfetch
+    from .test_adopt_media import tiny_font
+    folder = tmp_path / "fonts"
+    folder.mkdir()
+    monkeypatch.setenv("B2S_FONTS", str(folder))
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+
+    def fetch(name, log=print):
+        if name != "Noto Sans":
+            return None
+        path = folder / "NotoSans-Regular.ttf"
+        path.write_bytes(tiny_font("Noto Sans"))
+        return {"UprightFont": path}
+    monkeypatch.setattr(fontfetch, "fetch_family", fetch)
+    adopt._FAMILIES.clear()
+    try:
+        files = adopt.font_family("Verdana", "sans")
+    finally:
+        adopt._FAMILIES.clear()
+    assert files and files["standin"] == "NotoSans"
+    assert adopt.stood_in("Verdana", dict(files)) == "NotoSans"
+
+
 def test_adopt_refuses_to_write_over_a_source(tmp_path):
     (tmp_path / "main.tex").write_text("\\documentclass{beamer}\n", encoding="utf-8")
     target = deck_ir(presentation(), foreign=True)

@@ -376,7 +376,7 @@ SUBSTITUTES = {
     "couriernew": ["Cousine"], "courier": ["Cousine"], "calibri": ["Carlito"], "cambria": ["Caladea"],
     "georgia": ["Gelasio"], "arialblack": ["Archivo Black"], "bodoni": ["Libre Bodoni", "Bodoni Moda"],
     "droidsans": ["Noto Sans"], "droidserif": ["Noto Serif"], "droidsansmono": ["Noto Sans Mono"],
-    "bookantiqua": ["Palatino Linotype"], "googlesansmono": ["Google Sans Code"],
+    "googlesansmono": ["Google Sans Code"],
     # Monotype Corsiva is a Windows-only chancery italic with no metric twin (korea-pptx: Slides
     # itself calls the font "Corsiva"): a serif's italic (`SLANTED`) reads as it and sets its words
     # about as wide. Petit Formal Script, a copperplate, set them a third wider and wrapped each title.
@@ -385,13 +385,49 @@ SUBSTITUTES = {
     # renamed in google/fonts, still offered by Slides under the old name: en-flowchart's Source Sans
     # Pro was set in Arimo offline, every body line wrapping a word early
     "sourcesanspro": ["Source Sans 3"], "sourceserifpro": ["Source Serif 4"], "baloo": ["Baloo 2"],
+    # Book Antiqua *is* Palatino under Microsoft's licence, and Palatino Linotype is not on
+    # google/fonts either (neither could be fetched, hebrew-lesson's census): PT Serif measured
+    # 0.1% off both (Windows' BKANT.TTF/pala.ttf against PT Serif, English-frequency-weighted
+    # advances) - the closest width of any old-style serif on google/fonts, though its ductus is
+    # sturdier than Palatino's calligraphic one.
+    "bookantiqua": ["PT Serif"], "palatinolinotype": ["PT Serif"],
+    # Verdana is drawn wide for screen legibility (measured 7% wider than Noto Sans, 18% wider than
+    # PT Sans - ka-project, ru-street): Noto Sans is the closer humanist width, corrected the rest
+    # of the way by DESIGN_WIDTHS. Tahoma is narrower and closer to plain (measured 3%, jruby-ja,
+    # arabic-training): PT Sans wins there without a width correction.
+    "verdana": ["Noto Sans"], "tahoma": ["PT Sans"],
+    # Trebuchet MS' open, humanist-grotesque proportions measured within 1-2% of both Fira Sans and
+    # Ubuntu (intro-git, ru-street, thai-drive); Fira Sans keeps its warmth without Ubuntu's more
+    # idiosyncratic curves.
+    "trebuchetms": ["Fira Sans"],
+    # Consolas is a humanist monospace (ClearType), not a slab like Courier: Inconsolata shares that
+    # lineage and is the usual free stand-in for it, measured 10% narrower (ap-bio-stats) and
+    # corrected by DESIGN_WIDTHS - Cousine (a Courier New clone) was a similar distance the other
+    # way and the wrong shape.
+    "consolas": ["Inconsolata"],
+    # Corbel is Calibri's sans sibling (same ClearType Font Collection design, by the same hand):
+    # Carlito, Calibri's metric clone, measured within 0.5% of it (fa-parsinlu) - closer than
+    # Source Sans 3 and no width correction needed.
+    "corbel": ["Carlito"],
+    # Helvetica Neue is a neo-grotesque redrawn from Helvetica with Helvetica's own widths; Arimo
+    # (Arial's metric clone, and Arial was itself drawn to Helvetica's widths) is the nearer design
+    # and width than Inter's more idiosyncratic grotesque (applied-ml).
+    "helveticaneue": ["Arimo"],
+    # Montserrat is the usual free "Proxima Nova alternative", but its geometric caps and wide bold
+    # wrapped yc-seed-dark/white's headings onto different lines than the deck's own (bench: boxes
+    # 0.681 -> 0.499, every slide worse). Figtree's proportions tracked the original line breaks
+    # and raised it to 0.766.
+    "proximanova": ["Figtree"],
 }
 # Fonts whose upright is itself an italic: their stand-in is set in its italic faces throughout
 SLANTED = {"corsiva", "monotypecorsiva"}
 # A stand-in for a font that is its twin drawn narrower by design is set that much narrower when the
 # deck's thumbnails measure too few lines to say (`font_widths`): Arial Narrow is Arial at 82%
-# (ua-space's and arabic-training's titles, set in plain Arimo, ran off their slides).
-DESIGN_WIDTHS = {"arialnarrow": 0.82}
+# (ua-space's and arabic-training's titles, set in plain Arimo, ran off their slides). Verdana and
+# Consolas get the same correction against their nearer stand-ins (Noto Sans, Inconsolata), rounded
+# from the Windows font's advance over its stand-in's, English letters weighted by frequency - not
+# from a deck's own thumbnails, which `font_widths` measures and prefers when there are enough of them.
+DESIGN_WIDTHS = {"arialnarrow": 0.82, "verdana": 1.07, "consolas": 1.10}
 
 
 # What Slides draws a CJK font in when it does not have it: apps-edu-zh's Microsoft JhengHei (a .pptx
