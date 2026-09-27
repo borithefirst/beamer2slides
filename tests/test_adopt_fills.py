@@ -2,6 +2,8 @@
 deck_ir(foreign=True, thumbnails=...)). Offline: hand-made `presentations.get` answers and numpy
 thumbnails 720 px wide, so a thumbnail pixel is a Slides point."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -386,6 +388,119 @@ def test_without_a_thumbnail_the_background_is_unchanged():
     assert s["background_color"] == "#336699" and s["background_gradient"] is None
     s = slide0(pres, None, foreign=False)
     assert s["background_color"] == "#336699" and s["background_gradient"] is None
+
+
+def test_a_fine_texture_is_never_drawn_as_a_smooth_gradient():
+    """en-flowchart's layout: a fine striped, gold-on-cream texture no picture URL exists for at all
+    (the API's only witness for the whole chain is the master's own flat `pageBackgroundFill`). A
+    plain affine fit still explains most of it within `PAGE_GRAD_TOL` - the stripe (+-15) rides on a
+    real left-to-right trend spanning far more than that - so without a check for the fine grain
+    itself `page_gradient` would draw it as a clean ramp; `page_textured` catches grain a real
+    gradient never has, and `deck_ir` falls back to the thumbnail's own picture instead of either the
+    already-wrong flat colour or a smoothed-over lie."""
+    yy, xx = np.mgrid[0:405, 0:720]
+    t = xx / 719
+    c0, c1 = np.array([200.0, 180.0, 120.0]), np.array([120.0, 90.0, 40.0])
+    base = c0 + (c1 - c0) * t[..., None]
+    stripe = np.where((xx // 4) % 2 == 0, 15.0, -15.0)
+    thumb = np.clip(base + stripe[..., None], 0, 255).astype(np.uint8)
+    assert deck_fills.page_textured(thumb, np.ones((405, 720), dtype=bool))
+
+
+def test_page_gradient_refuses_that_texture_and_a_picture_is_kept_instead(tmp_path):
+    yy, xx = np.mgrid[0:405, 0:720]
+    t = xx / 719
+    c0, c1 = np.array([200.0, 180.0, 120.0]), np.array([120.0, 90.0, 40.0])
+    base = c0 + (c1 - c0) * t[..., None]
+    stripe = np.where((xx // 4) % 2 == 0, 15.0, -15.0)
+    thumb = np.clip(base + stripe[..., None], 0, 255).astype(np.uint8)
+    s = slide0(bg_deck(solid("FFFFFF")), thumb, images=tmp_path)
+    assert s["background_gradient"] is None
+    assert s.get("background_file") and Path(s["background_file"]).exists()
+
+
+def test_a_clean_gradient_still_a_gradient_past_the_texture_check():
+    """The texture guard must not swallow the genuine ramps the two tests above it already prove:
+    ordinary JPEG-ish noise (a few levels) is not `PAGE_TEXTURE_STD` of grain."""
+    yy, xx = np.mgrid[0:405, 0:720]
+    t = (xx + yy) / (719 + 404)
+    c0, c1 = np.array([10.0, 10.0, 10.0]), np.array([240.0, 80.0, 30.0])
+    thumb = (c0 + (c1 - c0) * t[..., None]).round().astype(np.uint8)
+    assert not deck_fills.page_textured(thumb, np.ones((405, 720), dtype=bool))
+    s = slide0(bg_deck(solid("808080")), thumb)
+    assert s["background_gradient"] is not None
+
+
+# ---------------------------------------------------------------- inherited elements
+
+def group(oid: str, *children) -> dict:
+    return {"objectId": oid, "transform": at(0, 0), "elementGroup": {"children": list(children)}}
+
+
+def multi(master_elements, n_slides: int, layout_elements=()) -> dict:
+    """An `n_slides`-slide 720x405 deck whose every slide shares one layout and master, the master
+    (and optionally the layout) carrying `master_elements`/`layout_elements` - `deck_ir`'s `foreign`
+    path (`inherited_chain`) adds these to every slide with no check of its own; the tests below are
+    that check (`deck_ir.vote_inherited`, `decide_drops`)."""
+    return {"presentationId": "p", "title": "t", "pageSize": {"width": pt(720), "height": pt(405)},
+            "masters": [{"objectId": "m", "pageElements": list(master_elements),
+                         "pageProperties": {"pageBackgroundFill": solid("FFFFFF")}}],
+            "layouts": [{"objectId": "L", "layoutProperties": {"masterObjectId": "m"},
+                        "pageElements": list(layout_elements)}],
+            "slides": [{"objectId": f"s{i}", "slideProperties": {"layoutObjectId": "L"},
+                       "pageElements": []} for i in range(n_slides)]}
+
+
+def inherited_ids(slides: list[dict]) -> set[str]:
+    return {e["id"] for s in slides for e in s["elements"] if e.get("inherited")}
+
+
+def test_an_inherited_element_never_shown_is_dropped_everywhere():
+    """ua-space: a master group (here, one band shape) the API says every slide draws, but Google's
+    own thumbnail never once shows it - a `showMasterSp` off in the source .pptx, which the API
+    cannot say at all. Checked on both slides, confirmed shown on neither: dropped from both, not
+    left standing because any one slide's own read was inconclusive."""
+    band = shape("band", "RECTANGLE", 0, 0, 720, 60, solid("CC9966"))
+    pres = multi([band], 2)
+    slides = deck_ir(pres, foreign=True, thumbnails=lambda n: page())["slides"]
+    assert inherited_ids(slides) == set()
+
+
+def test_an_inherited_element_shown_on_one_slide_is_kept_on_all():
+    """The same band, but Google's thumbnail draws it plainly on one of two slides - what a deck a
+    person actually built in Slides usually looks like. One slide that shows it settles it for both:
+    the other, where nothing but a mismatch would otherwise be read, keeps it rather than being
+    guessed missing from a single slide's own vote."""
+    band = shape("band", "RECTANGLE", 0, 0, 720, 60, solid("CC9966"))
+    pres = multi([band], 2)
+    thumbs = [page((0, 0, 720, 60, "#CC9966")), page()]
+    slides = deck_ir(pres, foreign=True, thumbnails=lambda n: thumbs[n])["slides"]
+    assert len(inherited_ids(slides)) == 1
+    assert all(any(e.get("inherited") for e in s["elements"]) for s in slides)
+
+
+def test_a_group_is_dropped_or_kept_as_one_piece():
+    """Two master shapes sharing one group - a coloured band and a thin accent line - where a text
+    box on every slide happens to sit exactly over the line, so the line's own box never stands clear
+    of it and never casts a vote of its own. The band alone reads confidently absent on both slides;
+    the group is one decision, not two, so the never-checkable line leaves with it."""
+    band = shape("band", "RECTANGLE", 0, 0, 720, 60, solid("CC9966"))
+    thin = shape("line", "RECTANGLE", 0, 0, 720, 4, solid("112233"))
+    pres = multi([group("g1", band, thin)], 2)
+    cover = shape("cover", "RECTANGLE", 0, 0, 720, 4, solid("336699"))
+    for s in pres["slides"]:
+        s["pageElements"] = [cover]
+    slides = deck_ir(pres, foreign=True, thumbnails=lambda n: page((0, 0, 720, 4, "#336699")))["slides"]
+    assert inherited_ids(slides) == set()
+
+
+def test_an_inconclusive_element_is_never_dropped():
+    """Without a thumbnail at all, `vote_inherited` never runs - nothing casts a vote, so nothing can
+    be dropped, whatever `inherited_chain` found."""
+    odd = shape("odd", "RECTANGLE", 0, 0, 720, 60, solid("445566"))
+    pres = multi([odd], 1)
+    slides = deck_ir(pres, foreign=True, thumbnails=None)["slides"]
+    assert len(inherited_ids(slides)) == 1
 
 
 def test_a_solid_the_thumbnail_disagrees_with_falls_through_to_the_layout_picture(tmp_path):

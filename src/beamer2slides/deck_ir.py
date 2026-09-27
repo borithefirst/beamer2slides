@@ -805,6 +805,69 @@ def inherited_chain(slide: dict, pages: dict[str, dict]) -> list[dict]:
     return [p for p in (master, layout) if p]
 
 
+def vote_inherited(elements: list[dict], thumb, px: float, votes: dict[str, list[int, int]]) -> None:
+    """One slide's word on every inherited (master/layout) element it carries: did its own thumbnail
+    show that element's own appearance, past whatever this slide itself draws over it?
+
+    `inherited_chain` adds master and layout elements to every slide unchecked - right for a deck a
+    person built in Slides, wrong the moment the master or layout itself does not draw one of them on
+    a given slide (a `showMasterSp` off in the source .pptx, which the API does not expose at all:
+    ua-space's master map-band group is never drawn by Google on any of its 16 slides, yet was always
+    added). `votes[id] = [seen, absent]` tallies each element's id (`page~element`, the same on every
+    slide that shares the page) so `decide_drops` can judge it on the whole deck's worth of evidence
+    rather than one slide's - a mis-read here and there does not move a vote most slides agree on, the
+    way one slide's guess would.
+
+    An element only casts a vote when `deck_fills.element_appearance_share` can characterise its
+    appearance at all (a flat fill or its own picture, not a gradient or an unread fill) and enough of
+    it stood clear of whatever the slide itself draws on top (`deck_fills.masks`, `INHERITED_MIN_PX`)
+    - a group partly covered on every slide, or an element this cannot judge, simply never votes and
+    so is never dropped on suspicion alone."""
+    from . import deck_fills
+    h, w = thumb.shape[:2]
+    for k, el in enumerate(elements):
+        if not el.get("inherited"):
+            continue
+        box = deck_fills.px_box(el["bbox"], px, w, h, deck_fills.MARGIN_PX)
+        if box[2] - box[0] < 4 or box[3] - box[1] < 4:
+            continue
+        sub, region, _ = deck_fills.masks(thumb, box, elements[k + 1:], px, False)
+        if int(region.sum()) < deck_fills.INHERITED_MIN_PX:
+            continue
+        share = deck_fills.element_appearance_share(sub, region, el)
+        if share is None:
+            continue
+        vote = votes.setdefault(el["id"], [0, 0])
+        if share >= deck_fills.INHERITED_VISIBLE:
+            vote[0] += 1
+        elif share <= deck_fills.INHERITED_ABSENT_MAX:
+            vote[1] += 1
+        # else: too ambiguous a reading to vote either way
+
+
+def decide_drops(votes: dict[str, list[int, int]], groups: dict[str, tuple]) -> set[str]:
+    """Ids of inherited elements the whole deck's thumbnails agree are never actually drawn: never
+    once confirmed shown, and confirmed absent on at least one slide that could judge them.
+
+    Decided per `(page, source group)` - `groups[id]`, a singleton of its own id when the element was
+    not part of one - not per element: a group is dropped or kept as one piece, because a decorative
+    cluster's pieces are meant to be judged together (`deck_ir`'s docstring on `foreign` not folding
+    groups) and a picture close to the page's own colour, or a piece another element happens to cover
+    on every single slide, should not be split off from siblings that plainly are or are not there.
+    One member ever shown clears the whole group; only a group with no such witness at all, but some
+    confirmed absent, is dropped whole."""
+    by_group: dict[tuple, list[str]] = {}
+    for eid, key in groups.items():
+        by_group.setdefault(key, []).append(eid)
+    drop: set[str] = set()
+    for ids in by_group.values():
+        seen = any(votes.get(i, (0, 0))[0] > 0 for i in ids)
+        absent = any(votes.get(i, (0, 0))[1] > 0 for i in ids)
+        if absent and not seen:
+            drop.update(ids)
+    return drop
+
+
 def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None = None,
             fetch=None, images: Path | None = None, foreign: bool = False, thumbnails=None) -> dict:
     """IR of a presentation. `pdf_size`: the PDF page size the deck came from (else beamer's
@@ -839,6 +902,8 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
     slides = []
     drifts: list = []                 # (box, `top_drift`) of every measurable box, for `pptx_insets`
     sides: list = []                  # `side_inset` of every box whose words' start edge could be read
+    inherited_votes: dict[str, list[int, int]] = {}    # `vote_inherited`, tallied over every slide
+    inherited_groups: dict[str, tuple] = {}            # element id -> `(page, source group)` for `decide_drops`
 
     def read_page(page: dict, tags: list) -> list[dict]:
         out: list[dict] = []
@@ -882,11 +947,13 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                     # heuristic that reads a picture beside one short paragraph as an icon
                     # (`fold_groups`) would otherwise call the full-page backdrop one.
                     role = "figure" if el["kind"] == "image" else el.get("role")
-                    under.append({**el, "role": role, "inherited": page["objectId"],
-                                  "id": f"{page['objectId']}~{el['id']}"})
+                    new_id = f"{page['objectId']}~{el['id']}"
+                    under.append({**el, "role": role, "inherited": page["objectId"], "id": new_id})
+                    inherited_groups[new_id] = (page["objectId"], el.get("group") or new_id)
         elements = under + read_page(slide, tags)
         color, picture = page_background(slide, pages, resolver.scheme)
         gradient = None
+        bg_file = None
         if foreign:
             from . import deck_fills
             thumb = thumbnails(n) if thumbnails else None
@@ -895,6 +962,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             if thumb is not None:
                 thumb = deck_fills.load(thumb)
                 px = thumb.shape[1] / page_w
+                vote_inherited(elements, thumb, px, inherited_votes)
             if thumb is not None and not picture and color:
                 # `pageBackgroundFill` can be wrong two ways: a solid the thumbnail simply is not
                 # (a gradient the API has no type for, `deck_fills.page_gradient`), or a solid that
@@ -923,6 +991,16 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                         color = pcolor
                     else:
                         gradient = deck_fills.page_gradient(thumb, bg_mask, color, px)
+                        if gradient is None and images is not None:
+                            # Neither a flat colour, a picture the API can point to, nor a clean
+                            # ramp explains it - a texture no reference exists for at all
+                            # (en-flowchart's fine gold stripes), or any other backdrop
+                            # `page_gradient` was right to refuse. The thumbnail's own pixels, with
+                            # whatever stands on the page painted back in, beat drawing the flat
+                            # colour already shown to be wrong.
+                            got = deck_fills.page_texture_picture(thumb, bg_mask, images)
+                            if got:
+                                color, bg_file = None, got["file"]
             elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture), images)
             thumbnail_insets(elements, thumb, px)
             thumbnail_rows(elements, thumb, px)
@@ -938,6 +1016,8 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
                        "key": key, "notes": notes_text(slide), "background_color": color,
                        "background_picture": picture, "background_gradient": gradient, "elements": elements})
+        if bg_file:
+            slides[-1]["background_file"] = bg_file
         if foreign:
             slides[-1]["layout"] = slide.get("slideProperties", {}).get("layoutObjectId")
             if shown:
@@ -949,6 +1029,11 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             # source it refines already draws whatever the converter baked into it
             got = stash_picture(picture, fetch, images)
             slides[-1]["background_file"] = got.get("file")
+    if foreign:
+        drop_ids = decide_drops(inherited_votes, inherited_groups)
+        if drop_ids:
+            for s in slides:
+                s["elements"] = [e for e in s["elements"] if e.get("id") not in drop_ids]
     out = {"version": 1, "source": {"presentationId": pres.get("presentationId"), "title": pres.get("title"),
                                     "revisionId": pres.get("revisionId")},
            "page_size": [page_w, page_h], "scale": scale, "slides": slides}

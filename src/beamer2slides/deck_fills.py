@@ -610,6 +610,46 @@ def sample_element(a, el: dict, above: list[dict], px: float, background: str | 
         el["fill_source"] = "thumbnail"
 
 
+INHERITED_MIN_PX = 300       # an inherited element's own visible part must reach this many thumbnail
+                              # pixels before a slide's thumbnail is trusted to vote on it at all
+INHERITED_VISIBLE = FLAT     # share of that visible part matching its own appearance to vote "shown"
+INHERITED_ABSENT_MAX = 0.35  # ... at or below this, "not shown" (between the two: too ambiguous
+                              # to vote either way - a partial cover or a near-miss colour, not the
+                              # confident either/or a whole deck's worth of slides should decide on)
+
+
+def element_appearance_share(sub: np.ndarray, region: np.ndarray, el: dict) -> float | None:
+    """Share of an inherited (master/layout) element's own visible pixels (`sub`, `region`: `masks`'
+    box-local view of it, whatever another element draws over it already excluded) that match its
+    own known appearance - a flat `fill`, or its own downloaded picture stretched to its box, the way
+    Slides draws a picture element. None when its appearance is not something this can characterise
+    at all (no `file` yet, no plain opaque `fill`, a gradient, a fill the thumbnail has not settled) -
+    such an element casts no vote in `deck_ir.vote_inherited` and is never judged missing on
+    suspicion alone (ua-space: a master picture never drawn on any of 16 slides votes confidently
+    absent on every one that can judge it; a layout element only ever partly covered stays
+    unjudged rather than guessed at)."""
+    n = int(region.sum())
+    if n == 0:
+        return None
+    if el["kind"] == "image" and el.get("file") and not el.get("video"):
+        try:
+            from PIL import Image
+            h, w = sub.shape[:2]
+            cand = np.asarray(Image.open(el["file"]).convert("RGB").resize((w, h))).astype(np.int16)
+        except Exception:  # noqa: BLE001 - an unreadable download casts no vote
+            return None
+        close = np.abs(sub - cand).max(axis=2) <= TOL
+        return float((close & region).sum() / n)
+    if el["kind"] in ("shape", "text") and el.get("fill") and not el.get("fill_gradient") \
+            and not el.get("fill_unread") and (el.get("fill_alpha") or 1.0) >= 0.99:
+        col = rgb(el["fill"])
+        if col is None:
+            return None
+        close = np.abs(sub - col).max(axis=2) <= TOL
+        return float((close & region).sum() / n)
+    return None
+
+
 PAGE_GRAD_MIN_SHARE = 0.08   # share of the page that must be visible past every element's box
 PAGE_GRAD_MIN_PIXELS = 3000  # ... and at least this many pixels, so a sliver never fits a "ramp"
 PAGE_GRAD_FIT = 0.85         # share of the visible background pixels a model must explain
@@ -756,6 +796,74 @@ def _fit_share(X: np.ndarray, pix: np.ndarray, tol: float):
     return coef, pred, share, span
 
 
+PAGE_TEXTURE_PATCH = 24      # side (px) of a small square sampled to test for fine grain a ramp's
+                              # own smoothness never has
+PAGE_TEXTURE_STD = 9.0       # a patch's own std, its local mean taken out, past this many channel
+                              # levels is a printed texture's grain, not a clean ramp's JPEG-ish
+                              # noise (en-flowchart's fine gold stripes: patches std ~13-18 against a
+                              # real gradient's ~2-4)
+PAGE_TEXTURE_PATCHES = 14    # patches drawn from the region before giving up on finding `TEXTURE_PATCH`
+                              # of them wholly inside it
+PAGE_TEXTURE_MIN_HITS = 6    # ... at least this many must land to say anything either way
+
+
+def page_textured(a: np.ndarray, region: np.ndarray) -> bool:
+    """Is the page's own visible background (`region`) a fine printed texture - stripes, a weave,
+    fine noise - rather than the smooth ramp `page_gradient` fits affine or radial models to? A
+    handful of small squares spread across `region` (wholly inside it, so an element's edge is never
+    mistaken for the page's own grain) have their local mean taken out; a real gradient leaves each
+    square within a few channel levels of flat (a straight or radial ramp barely curves over
+    `PATCH` pixels), while a woven or striped backdrop still swings by ten or more. Too few whole
+    squares to sample says nothing either way (a small or heavily obstructed region)."""
+    h, w = a.shape[:2]
+    ys, xs = np.nonzero(region)
+    if len(ys) == 0:
+        return False
+    rng = np.random.default_rng(0)
+    order = rng.permutation(len(ys))
+    worst = 0.0
+    hits = 0
+    for i in order[: max(200, PAGE_TEXTURE_PATCHES * 12)]:
+        y0, x0 = int(ys[i]), int(xs[i])
+        y1, x1 = y0 + PAGE_TEXTURE_PATCH, x0 + PAGE_TEXTURE_PATCH
+        if y1 > h or x1 > w or not region[y0:y1, x0:x1].all():
+            continue
+        block = a[y0:y1, x0:x1].astype(np.float64).reshape(-1, 3)
+        worst = max(worst, float(block.std(axis=0).max()))
+        hits += 1
+        if hits >= PAGE_TEXTURE_PATCHES:
+            break
+    return hits >= PAGE_TEXTURE_MIN_HITS and worst >= PAGE_TEXTURE_STD
+
+
+def page_texture_picture(a: np.ndarray, region: np.ndarray, folder) -> dict | None:
+    """The page's own background where nothing describes it - no flat colour, no picture the API can
+    point to, and (`page_textured`) too fine a grain for `page_gradient`'s ramp - as the one picture
+    of it there is: the thumbnail's own pixels, with whatever elements stand on the page painted back
+    in from what surrounds them (`inpaint`, `thumbnail_picture`'s own trick) so the picture covers the
+    whole page, not just what stood clear of every element. None when there is too little of the page
+    to go on. Same file whenever the same pixels come up twice (`sha1`-named)."""
+    import hashlib
+    from pathlib import Path
+    from PIL import Image
+    n = int(region.sum())
+    if n < PAGE_GRAD_MIN_PIXELS or n < PAGE_GRAD_MIN_SHARE * region.size:
+        return None
+    filled = inpaint(a.astype(np.float32), ~region)
+    im = Image.fromarray(np.clip(filled + 0.5, 0, 255).astype(np.uint8), "RGB")
+    import io
+    buf = io.BytesIO()
+    im.save(buf, "PNG", optimize=False)
+    data = buf.getvalue()
+    sha = hashlib.sha1(data).hexdigest()
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"thumb-{sha[:16]}.png"
+    if not path.exists():
+        path.write_bytes(data)
+    return {"file": str(path), "sha1": sha, "format": "png"}
+
+
 def page_gradient(a: np.ndarray, region: np.ndarray, flat_colour: str | None, px: float):
     """A linear (any angle) or radial gradient the page's own pixels (`region`, `page_visible_mask`)
     fit better than the flat colour Slides' API reported for the page background
@@ -784,6 +892,9 @@ def page_gradient(a: np.ndarray, region: np.ndarray, flat_colour: str | None, px
     flat_share = region_flat_share(a, region, flat_colour)
     if flat_share >= FLAT:
         return None                        # the reported colour already explains what shows
+    if page_textured(a, region):
+        return None                        # a fine grain, not a ramp (en-flowchart's gold stripes):
+                                            # deck_ir falls back to `page_texture_picture` instead
     xs, ys, pix = _page_regression(region, a, PAGE_GRAD_SUBSAMPLE)
     if len(xs) < 200:
         return None
