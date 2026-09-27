@@ -56,8 +56,9 @@ PICKS = [
                 "the preset puts it by default (below the box, not at the bee), and the card corners are "
                 "rounder.", ["shapes", "fonts"]),
     ("water", 2, "Hebrew, right to left. The numbered list is an <code>enumerate</code> in a "
-                 "<code>lang=hebrew</code> box, set in the deck's Noto Sans Hebrew. The diagram shows where "
-                 "tracing fails: the outlined cloud became a rectangle, and the wavy sea edge a flat strip.",
+                 "<code>lang=hebrew</code> box, set in the deck's Noto Sans Hebrew. The white cloud on a "
+                 "near-white page is traced by its outline. Tracing still fails on the wavy sea edge, drawn "
+                 "over a rectangle of its own colour: it becomes a flat strip.",
      ["rtl", "lists", "shapes"]),
     ("water", 4, "Japanese. Babel follows the characters (<code>onchar=ids</code>), so the list is set in Noto "
                  "Sans JP with Slides' proportional punctuation.", ["cjk", "lists", "shapes"]),
