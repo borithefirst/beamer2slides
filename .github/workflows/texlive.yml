@@ -50,6 +50,8 @@ jobs:
             tests/test_adopt_tables.py tests/test_adopt_scripts.py > /tmp/pytest.txt 2>&1 || status=$?
           cat /tmp/pytest.txt
           # the summary and each failure where anyone can read them (a job's log needs admin rights)
-          echo "::notice title=adopt tests (${{ matrix.texlive }}, fonts ${{ matrix.fonts }})::$(tail -n 1 /tmp/pytest.txt)"
-          grep '^FAILED' /tmp/pytest.txt | cut -c1-300 | while read -r line; do echo "::error title=failed::$line"; done
+          # (a comma ends a workflow command's property: %2C; and under pipefail a grep that finds no
+          # failure fails the step, so it may find none)
+          echo "::notice title=adopt tests (${{ matrix.texlive }}%2C fonts ${{ matrix.fonts }})::$(tail -n 1 /tmp/pytest.txt)"
+          { grep '^FAILED' /tmp/pytest.txt || true; } | cut -c1-300 | while read -r line; do echo "::error title=failed::$line"; done
           exit $status
