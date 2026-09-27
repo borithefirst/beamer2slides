@@ -21,3 +21,6 @@ examples/*/*
 .claude/worktrees/
 build/
 dist/
+# a session's own experiments: never part of the tree
+scratchpad/
+/scratchpad_*

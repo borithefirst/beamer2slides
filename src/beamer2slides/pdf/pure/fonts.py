@@ -28,7 +28,7 @@ from typing import Callable
 
 from . import crt, sfnt
 from .encodings import NAMES, UNICODES
-from .syntax import Name, Stream, String, float32, operations
+from .syntax import Name, Stream, float32, operations
 
 # PDFium's FontEncoding values, by the table names in encodings.py
 BUILTIN, STANDARD, WINANSI, MACROMAN, MACEXPERT, PDFDOC, SYMBOL, ZAPF, MSSYMBOL = (

@@ -13,7 +13,7 @@ from pathlib import Path
 from googleapiclient.errors import HttpError
 
 from beamer2slides.google_auth import slides_service
-from beamer2slides.gslides import EMU_PER_PT, emu, execute, pt, save_thumbnail
+from beamer2slides.gslides import EMU_PER_PT, execute, pt, save_thumbnail
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 

@@ -58,7 +58,6 @@ from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from beamer2slides.agent.context import AgentContext
 from beamer2slides.agent.types import Artifact, Diagnostic, Result
-from beamer2slides.agent.workspace import LocalWorkspace
 from beamer2slides.paths import out_root
 
 HARM_PREFIX = "HARM: "

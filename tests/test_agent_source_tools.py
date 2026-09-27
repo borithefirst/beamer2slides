@@ -15,7 +15,7 @@ import inspect
 import json
 import shutil
 from pathlib import Path
-from typing import Annotated, get_type_hints
+from typing import get_type_hints
 
 import pytest
 
@@ -376,7 +376,7 @@ def test_adopt_says_how_much_of_the_source_a_later_sync_can_write(tmp_path):
     assert j.data["sync_base"] == {"path": ref, "slides": 3, "elements": 19, "paired": 12,
                                    "unpaired": 5, "from_layout": 2}
     assert j.summary.startswith("Converged after 2 edit round(s).")
-    assert f"12 of 19 element(s) are tied to an object of the deck" in j.summary and ref in j.summary
+    assert "12 of 19 element(s) are tied to an object of the deck" in j.summary and ref in j.summary
     said = [d.message for d in j.diagnostics]
     assert all(d.level == "warning" for d in j.diagnostics)
     assert any("5 of 19 element(s) are tied to no object of this deck" in m and

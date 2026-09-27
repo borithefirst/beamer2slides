@@ -1012,7 +1012,7 @@ class Sync:
                     from .emit import api_error
                     message = api_error(e)
                     if status_of(e) == 400 and "revision" in message.lower() and n == 0:
-                        raise RevisionMismatch(message)
+                        raise RevisionMismatch(message) from e
                     if status_of(e) == 400 and PICTURE_FETCH in message and attempt < len(FETCH_RETRY):
                         # Google could not fetch a staged picture this time (live fuzz seed 2603: the
                         # same sync run again went through). A refused batch applied nothing - a
@@ -1798,7 +1798,6 @@ class Sync:
             reqs += out
             objects[i] = list(dict.fromkeys([new_oid[i]] + [x for x in created_ids(rs) if x != new_oid[i]]))
         extras = []
-        index = {vid: i for i, vid in enumerate(element_ids)}
         for _, rs in parts[1 + len(element_ids):]:
             for r in rename(rs, order):
                 if "groupObjects" in r:
@@ -1871,7 +1870,7 @@ class Sync:
         layout = self.new_layout(slide, layout_name, layouts, pres)
         if layout is None:
             raise RuntimeError(f"the deck has no {layout_name} layout for new slide {o['key']}")
-        mappings, in_place, unused = [], {}, []
+        mappings, in_place = [], {}
         title_idx = title_element(slide)
         sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
         for k, e in enumerate(layout.get("pageElements", [])):
@@ -2675,7 +2674,6 @@ class Sync:
     def new_base(self, result: dict) -> dict:
         mplan, work, theirs = result["plan"], result["work"], result["theirs"]
         now = {s["objectId"]: s for s in self.created["slides"]}
-        before = {s["objectId"]: s for s in theirs["slides"]}
         by_plan = {id(w["plan"]): w for w in work["slides"]}
         entries = {}
         for p in mplan["slides"]:

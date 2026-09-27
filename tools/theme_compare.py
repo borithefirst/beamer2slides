@@ -78,7 +78,6 @@ def template_lines(slide: dict) -> list[tuple[str, float, float, float]]:
                 continue
             size = next(r for r in runs if r["content"].strip())["style"].get("fontSize", {}).get("magnitude", 14)
             text = "".join(r["content"] for r in runs).strip().split("\n")[0].replace("\x0b", " ")
-            h = el["size"]["height"]["magnitude"] / EMU * m[3]
             valign = el["shape"].get("shapeProperties", {}).get("contentAlignment", "TOP")
             y = m[5] + 6.48 + 0.968 * size
             if valign != "TOP":

@@ -453,7 +453,7 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
                 return "unread-under"
         if any(ink is not None and np.abs(ink - paint).max() <= 3 * TOL for ink in inks):
             return "unread-ink"                           # the letters of a text above (they overflow its box)
-        fill, fill_alpha = F.hexcolour(paint), 1.0
+        fill = F.hexcolour(paint)
         paints = [paint]
     elif unread:
         return "flat-read"                               # settled by `deck_fills` as a flat box: it is one

@@ -50,7 +50,7 @@ def flate(data: bytes) -> bytes:
 def lzw(data: bytes, early: int = 1) -> bytes:
     out = bytearray()
     table = [bytes([i]) for i in range(256)] + [b"", b""]
-    bits, pos, nbits = 0, 0, 9
+    bits, nbits = 0, 9
     buf = 0
     prev = b""
     n = len(data)

@@ -28,7 +28,6 @@ Only the app's own files are reachable (drive.file scope): a deck this tool made
 import argparse
 import json
 import sys
-import time
 from pathlib import Path
 
 from beamer2slides import guard

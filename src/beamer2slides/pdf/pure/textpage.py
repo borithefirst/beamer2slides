@@ -882,7 +882,6 @@ class TextPage:
 
     # ---- ProcessTextObjectItems
     def _items(self, obj: PObj, form_matrix, matrix) -> None:
-        font = obj.font
         n = len(obj.items)
         fsh = font_size_h(obj)
         base_space = 0.0

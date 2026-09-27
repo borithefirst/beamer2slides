@@ -677,7 +677,7 @@ def get_dib(ctx, obj, dev):
         try:
             dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), need, std_cs=std, group_cmyk=gc)
         except DI.Unsupported as e:
-            raise PdfError(f"the pure reader cannot render {e} yet")
+            raise PdfError(f"the pure reader cannot render {e} yet") from e
     cache[key] = (obj.stream, dib, need[0] != 0 and need[1] != 0)
     return dib
 

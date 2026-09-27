@@ -432,7 +432,7 @@ class Page:
         try:
             dib = DI.load(self.doc.pdf, o.stream, None, (0, 0), with_mask=False)
         except DI.Unsupported as e:
-            raise PdfError(f"the pure reader cannot decode {e} yet")
+            raise PdfError(f"the pure reader cannot decode {e} yet") from e
         if dib is None:
             return None
         if dib.fmt in ("mask1", "rgb1") and not (dib.fmt == "rgb1" and dib.palette):

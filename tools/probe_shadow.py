@@ -9,7 +9,6 @@ properties the API reports, and saves a thumbnail to out/probe_shadow.png.
 Usage: python tools/probe_shadow.py
 """
 
-import copy
 import io
 import json
 from pathlib import Path
@@ -21,7 +20,7 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Emu, Pt
 
 from beamer2slides.google_auth import drive_service, slides_service
-from beamer2slides.gslides import EMU_PER_PT, emu, execute, save_thumbnail
+from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"

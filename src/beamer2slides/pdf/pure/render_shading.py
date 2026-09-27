@@ -22,7 +22,6 @@ drawn depends on history)."""
 
 from __future__ import annotations
 
-import ctypes
 import re
 from fractions import Fraction
 

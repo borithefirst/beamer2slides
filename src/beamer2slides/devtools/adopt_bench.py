@@ -102,7 +102,7 @@ def micro_specs() -> list[str]:
 def capture(pid: str, name: str, refresh: bool = False) -> Path:
     """Read deck `pid` once: presentation.json, slides/NNN.png (Google's LARGE thumbnails), and
     target.json = `deck_ir(foreign=True)` with its pictures in images/. Nothing is written to the deck."""
-    from beamer2slides.deck_ir import deck_ir, fetch_url
+    from beamer2slides.deck_ir import fetch_url
     from beamer2slides.google_auth import credentials, slides_service
     from beamer2slides.gslides import execute, save_thumbnail
     folder = CORPUS / name

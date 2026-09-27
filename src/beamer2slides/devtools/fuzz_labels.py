@@ -1,4 +1,4 @@
-﻿"""How often a moved label sends a slide's identity to the wrong frame, and how often the check
+"""How often a moved label sends a slide's identity to the wrong frame, and how often the check
 that catches it cries wolf (`identity.label_moves`, docs/sync.md "When a label moved").
 
 The loss oracle cannot judge this: following a label onto the wrong frame deletes nothing and

@@ -22,7 +22,6 @@ import math
 import re
 from collections import Counter
 
-from . import classify as cl
 from .classify import Line, PageClassifier, Paragraph, Rect, label_of, span_runs, union_all
 
 ELEMENT, PARAGRAPH, BULLET, CELL, UNDERLINE, STRIKE = "B2S", "B2Sp", "B2Sb", "B2Sc", "B2Su", "B2Ss"

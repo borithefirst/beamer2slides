@@ -46,6 +46,7 @@ woff2 = ["brotli>=1.0"]
 # What the tests need beyond the package itself. pytest-xdist is what makes `-n auto` work;
 # the suite runs without it, one worker, about three times slower (tests/conftest.py).
 dev = ["pytest>=8", "pytest-xdist>=3",
+       "ruff>=0.16",       # `ruff check`, the rules in [tool.ruff] below (CI: .github/workflows/lint.yml)
        "fonttools>=4.40",  # themes/google/fonts/build_fonts.py cuts the theme's fonts
        "brotli>=1.0",      # tests/test_fontfiles.py writes and reads a .woff2
        # The offline suite runs without the client library (tests/test_gapi.py proves it in a
@@ -72,6 +73,21 @@ beamer2slides = ["calibration/*.json",   # the measured font substitutes emit ne
                  "playground/static/*",  # the playground's page (docs/playground.md)
                  "agent/*.md",           # the guide that travels with the agent tools
                  "devtools/showcase/template.html", "devtools/showcase/decks.json"]  # the public gallery
+
+[tool.ruff]
+target-version = "py312"
+src = ["src", "tests", "tools"]
+extend-exclude = ["examples", "themes", "calibration"]
+
+[tool.ruff.lint]
+# Names that are unused or undefined (pyflakes), syntax errors, and bugbear's likely bugs (an
+# exception re-raised without its cause, a loop variable shadowing its iterable, a mutable default).
+# Not style: the code's own idiom stands. Off: B905 (zip without strict=; most zips pair lists built
+# to the same length), B007 (an unused loop variable is a name, not a bug), and B023 (a closure over
+# a loop variable: all 32 sites were read on 2026-09-27 and every one is called within its
+# iteration - key= functions, predicates handed to any()/sorted(), Eraser.remove_chars).
+select = ["F", "E9", "B"]
+ignore = ["B905", "B007", "B023"]
 
 [tool.pytest.ini_options]
 markers = ["slides: converts decks on real Google Slides and measures the thumbnails (opt-in: python -m pytest -m slides)",

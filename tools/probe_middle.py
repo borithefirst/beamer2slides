@@ -11,7 +11,7 @@ import numpy as np
 from PIL import Image
 
 from beamer2slides.google_auth import slides_service
-from beamer2slides.gslides import EMU_PER_PT, execute, pt, save_thumbnail, text_box
+from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 SIZES = [10, 16, 22, 30, 40]

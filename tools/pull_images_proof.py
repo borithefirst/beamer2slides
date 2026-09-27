@@ -15,13 +15,11 @@ fetch, and the staging file is deleted again right after. Re-running replaces wh
 """
 
 import argparse
-import io
 import json
 import math
 import sys
 from pathlib import Path
 
-import numpy as np
 from googleapiclient.http import MediaIoBaseUpload
 from PIL import Image, ImageDraw
 
@@ -109,13 +107,11 @@ def main() -> None:
     args = ap.parse_args()
     folder = args.folder.resolve()
     pid = json.loads((folder / "emit.json").read_text(encoding="utf-8"))["presentationId"]
-    deck = json.loads((folder / "deck.json").read_text(encoding="utf-8"))
     work = folder / "proof-images"
     work.mkdir(parents=True, exist_ok=True)
     creds = credentials()
     slides, drive = slides_service(creds), drive_service(creds)
     pres = execute(slides.presentations().get(presentationId=pid))
-    scale = pres["pageSize"]["width"]["magnitude"] / EMU_PER_PT / deck["slides"][0]["size"][0]
 
     keys, objects = {}, {}
     for s in pres["slides"]:

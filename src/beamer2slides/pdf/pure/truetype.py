@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import struct
 
-from .ftoutline import GlyphError, Unported, _glyph_path, divfix, i32, mulfix
+from .ftoutline import Unported, _glyph_path, divfix, i32, mulfix
 from . import ttinterp as T
 
 TRICKY_NAMES = ("cpop", "DFGirl-W6-WIN-BF", "DFGothic-EB", "DFGyoSho-Lt", "DFHei", "DFHSGothic-W5",

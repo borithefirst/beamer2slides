@@ -1551,7 +1551,7 @@ def backup_document(drive, document: str, path: Path) -> Path:
         raise SystemExit(
             f"the document could not be exported as a backup ({status_of(err)}), and\n"
             f"  --assume-base source-wins writes the file over it with no base to merge\n"
-            f"  against. Nothing was written. Pass --no-backup to ask for that anyway.")
+            f"  against. Nothing was written. Pass --no-backup to ask for that anyway.") from err
     out.write_bytes(data if isinstance(data, bytes) else str(data).encode("utf-8"))
     return out
 

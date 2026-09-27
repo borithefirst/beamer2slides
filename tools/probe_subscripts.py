@@ -222,7 +222,6 @@ def run(slides, pres: dict) -> dict:
 
 def run_pptx(slides, drive, made: list) -> dict:
     """Runs with an arbitrary baseline offset, imported from a .pptx."""
-    from lxml import etree
     from pptx import Presentation
     from pptx.util import Pt
 

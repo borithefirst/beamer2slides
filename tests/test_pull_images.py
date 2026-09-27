@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from beamer2slides.compare import Comparison, compare, displayed_picture, grey16, hash_distance, picture_hash
+from beamer2slides.compare import compare, displayed_picture, grey16, hash_distance, picture_hash
 from beamer2slides.deck_ir import element_of, image_format, picture_props
 from beamer2slides.inverse import (Candidate, Context, Picture, Planner, Workspace, ensure_preamble, picture_latex,
                                    picture_slug, picture_sources, reading_order)

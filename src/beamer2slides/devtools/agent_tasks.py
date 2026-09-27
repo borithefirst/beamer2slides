@@ -1525,7 +1525,7 @@ def _docs_fixture(ws, parts: list[dict], **kw) -> DocsFixture:
     try:
         import beamer2slides.doc_sync  # noqa: F401 - google-api-python-client is a hard import
     except Exception as exc:                                       # noqa: BLE001
-        raise Skip(f"the Docs journeys need google-api-python-client ({type(exc).__name__}: {exc})")
+        raise Skip(f"the Docs journeys need google-api-python-client ({type(exc).__name__}: {exc})") from exc
     return DocsFixture(ws, parts, **kw)
 
 

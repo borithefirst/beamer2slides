@@ -3,7 +3,6 @@ leaders and runs inside a sentence sized like their neighbours, small optical cu
 the small-caps compromise, text ranges in UTF-16 units, XML-safe alt texts, table indents per
 column and tables kept on the page."""
 
-import io
 
 import numpy as np
 import pytest

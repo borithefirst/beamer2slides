@@ -159,7 +159,7 @@ def test_alignment(deck, reports):
                  if name in old.get(key, {}) and value > old[key][name] + GROWTH]
     fixed = sorted(set(known) - {k for k, _, _ in current})
     if fixed:
-        warnings.warn(f"{deck}: known failures no longer fail, update the baseline: {fixed}")
+        warnings.warn(f"{deck}: known failures no longer fail, update the baseline: {fixed}", stacklevel=2)
     if problems:
         pytest.fail(f"{deck} ({report['url']}):\n  " + "\n  ".join(problems), pytrace=False)
 
@@ -185,7 +185,7 @@ def test_text_fit(deck, reports):
         return
     fixed = sorted(set(known) - set(current))
     if fixed:
-        warnings.warn(f"{deck}: known text-fit findings are gone, update the baseline: {fixed}")
+        warnings.warn(f"{deck}: known text-fit findings are gone, update the baseline: {fixed}", stacklevel=2)
     new = [f"{k}: {json.dumps(f, ensure_ascii=False)}" for k, f in current.items() if k not in known]
     if new:
         pytest.fail(f"{deck} (crops in {OUT / deck / 'text_fit'}):\n  " + "\n  ".join(new), pytrace=False)

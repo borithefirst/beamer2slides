@@ -497,7 +497,7 @@ def test_a_tab_stop_forgives_a_small_overshoot_but_not_a_real_crossing():
     that box's stop - and \\slidestab jumped a whole stop further right for text that was never that
     wide. TAB_TOLERANCE is chosen with room above that measurement (docs in adopt.py, "Tab stops")."""
     assert 0 < adopt.TAB_TOLERANCE < 0.3, "well under a half: never eats a stop a wider prefix earns"
-    stop, tol = adopt.TAB_STOP, adopt.TAB_STOP * adopt.TAB_TOLERANCE
+    tol = adopt.TAB_STOP * adopt.TAB_TOLERANCE
     assert tol > 2.34, "covers the jruby-ja measurement with room to spare"
 
 

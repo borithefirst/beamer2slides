@@ -19,10 +19,10 @@ from pathlib import Path
 import pytest
 
 from . import inverse_edits as ed
-from beamer2slides.compare import HOLE, bullet_sig, compare, match_slides, style_diffs, word_diff
+from beamer2slides.compare import bullet_sig, compare, match_slides, style_diffs, word_diff
 from beamer2slides.inverse import (Candidate, Context, Planner, Workspace, balance_span, colour_name, enclosing_group,
                                    ensure_preamble, frame_latex, latex_escape, runs_latex, size_switch)
-from beamer2slides.texmap import (OPAQUE, PARA, Source, build_visible, locate_words, mask_comments, page_frames,
+from beamer2slides.texmap import (OPAQUE, Source, build_visible, locate_words, mask_comments, page_frames,
                                   read_args, synctex_pages, visible_text)
 
 TESTS = Path(__file__).resolve().parent

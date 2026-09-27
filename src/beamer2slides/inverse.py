@@ -41,7 +41,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .compare import (HOLE, TOL, Comparison, Para, PicHash, char_styles, compare, grey16, norm_text, para_text,
+from .compare import (HOLE, TOL, Comparison, Para, PicHash, compare, grey16, norm_text, para_text,
                       picture_hash, residual_line, slide_paragraphs, slide_title, text_anchor)
 from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, frame_visible,
                      line_of, locate_words, mask_comments, match_group, norm_word, page_frames, read_args, skip_space,
@@ -832,7 +832,7 @@ def picture_sources(text: str, frame: Frame) -> list[PictureSource]:
         if any(a <= m.start() < b for a, b, _ in envs):
             continue
         name = re.escape(m.group(1))
-        depth, pos, end = 1, m.end(), None
+        depth, end = 1, None
         for t in re.finditer(r"\\(begin|end)\s*\{" + name + r"\}", text[m.end():hi]):
             depth += 1 if t.group(1) == "begin" else -1
             if depth == 0:
@@ -1183,12 +1183,10 @@ class Planner:
                     if name == "alert":
                         self.edit(loc.file, cmd_start, g_end, f"\\textcolor{{{colour_name(tgt, self.ctx.colours)}}}{{{src[c_start:c_end]}}}", r)
                     else:
-                        m = re.match(r"\\(textcolor|color)\s*(<[^>]*>)?\s*(\[[^\]]*\])?\s*\{([^}]*)\}", src[cmd_start:] if name == "textcolor" else src[cmd_start:])
                         mm = re.search(r"\\(textcolor|color)\s*(<[^>]*>)?\s*(\[[^\]]*\])?\s*\{([^}]*)\}", src[cmd_start:c_end])
                         if mm:
                             s = cmd_start + mm.start(4)
                             self.edit(loc.file, s, s + len(mm.group(4)), colour_name(tgt, self.ctx.colours), r)
-                            src_model = src[:s]
                         else:
                             self.fail(r, "colour command not understood")
                     return
@@ -1208,7 +1206,6 @@ class Planner:
                 if abs(r["tgt"] - base_size) <= 0.06 * base_size:
                     self.unwrap(loc.file, src, g, a, b, r)
                 else:
-                    m = re.match(r"\\(" + "|".join(SIZE_TABLES[11]) + r")\b", src[g[0] + 1:])
                     k = skip_space(src, g[0] + 1)
                     mm = re.match(r"\\(?:[A-Za-z]+size|tiny|small|large|Large|LARGE|huge|Huge)\b|\\fontsize\{[^}]*\}\{[^}]*\}\\selectfont",
                                   src[k:])
@@ -1251,7 +1248,6 @@ class Planner:
         locs = self.cand.paragraph_locations(si)
         ti = r["target_slide"]
         ts = self.tgt_slides[ti]
-        cs = self.cur_slides[si]
         # the list environment concerned
         lst = None
         if r["kind"] in ("paragraph_extra", "paragraph_order", "bullet"):
@@ -1408,7 +1404,6 @@ class Planner:
                 own = text[it.start:it.end].rstrip()
                 own = re.sub(r"\s*\n\s*", " ", own) if "\n\n" not in own and "\\begin" not in own and "%" not in own else own
             else:
-                label = ""
                 runs = tp.p["runs"]
                 if env == "description":
                     joined = runs_latex(runs, self.level_style(tp.p), self.ctx)
@@ -1858,7 +1853,7 @@ class Planner:
             self.fail(r, "element source not isolated")
             return
         size = max((run.get("size") or 10) for p in el["paragraphs"] for run in p["runs"])
-        x, y = te_anchor = text_anchor(te)
+        x, y = text_anchor(te)
         align = r.get("align", "left")
         left = text_anchor({**el, "anchor": None})[0]
         right = max(l["x1"] for p in el["paragraphs"] for l in p["lines"])

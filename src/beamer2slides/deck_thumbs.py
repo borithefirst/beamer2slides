@@ -33,7 +33,6 @@ def thumbnail_rows(elements: list[dict], thumb, px: float) -> None:
     rows under it could have grown by any amount."""
     if thumb is None or not px:
         return
-    import numpy as np
     H, W = thumb.shape[:2]
     for e in elements:
         heights, widths = e.get("row_heights"), e.get("col_widths")

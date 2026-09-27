@@ -1,0 +1,20 @@
+# ruff over the whole tree, with the rules pyproject.toml's [tool.ruff] chooses: unused and undefined
+# names, syntax errors and bugbear's likely bugs. Seconds, so on every push and pull request.
+name: lint
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install ruff==0.16.9
+      - run: ruff check --output-format github

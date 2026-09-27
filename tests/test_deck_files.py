@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from beamer2slides import adopt, deck_files, fontfetch
-from beamer2slides.deck_files import DeckFiles, Recording, gather, replay
+from beamer2slides.deck_files import Recording, gather, replay
 
 from .test_adopt import text_shape
 from .test_adopt_media import VARIABLE_META, cat_deck, png_bytes, tiny_font

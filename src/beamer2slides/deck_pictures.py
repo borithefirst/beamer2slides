@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import io
 import posixpath
-import re
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from xml.etree import ElementTree as ET

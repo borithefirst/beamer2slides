@@ -430,7 +430,6 @@ def briefing_json(task, session: Session) -> dict:
 def briefing(task, session: Session) -> str:
     """The whole prompt, as text an operator pastes into a harness. This is the product."""
     b = briefing_json(task, session)
-    folder = b["run_dir"]
     rule = "\n".join("  " + line for line in _wrap(b["one_rule"], 88))
     lines = [
         "=" * 92,

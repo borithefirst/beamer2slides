@@ -1,7 +1,6 @@
 """Tables, wave 5 of the visual hunt: an overfull table - running off the page in the PDF too -
 never ends past the slide's right edge; one that cannot fit even set smaller stays a picture."""
 
-import pytest
 
 from beamer2slides import emit as E
 from beamer2slides.emit import FontMapper

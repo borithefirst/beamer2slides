@@ -126,7 +126,7 @@ def longest_increasing(values: list[int]) -> set[int]:
     """Indices (into values) of one longest strictly increasing subsequence."""
     if not values:
         return set()
-    tails, prev, idx = [], [-1] * len(values), []
+    tails, prev = [], [-1] * len(values)
     import bisect
     for i, v in enumerate(values):
         k = bisect.bisect_left([values[t] for t in tails], v)

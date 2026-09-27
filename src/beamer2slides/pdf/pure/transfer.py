@@ -35,7 +35,7 @@ def _call(f, x: float, out: list) -> None:
     try:
         f.call([x], out, 0)
     except (IndexError, ValueError, ZeroDivisionError, OverflowError, RecursionError) as e:
-        raise Unsupported(f"a transfer function PDFium would read past its outputs ({type(e).__name__})")
+        raise Unsupported(f"a transfer function PDFium would read past its outputs ({type(e).__name__})") from e
 
 
 def create(doc, obj) -> Transfer | None:

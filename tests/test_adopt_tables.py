@@ -12,7 +12,7 @@ import pytest
 from beamer2slides import adopt
 from beamer2slides.deck_ir import cell_pad, deck_ir, guess_lines
 
-from .test_adopt import EMU, at, pt, presentation
+from .test_adopt import at, pt, presentation
 
 SCALE = 720 / 453.54          # Slides pt per PDF pt on a 16:9 deck
 

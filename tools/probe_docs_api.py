@@ -92,7 +92,7 @@ def stage0(drive, docs) -> str | None:
             print("     google_auth.SCOPES, delete token.json and re-consent.")
         drive.files().delete(fileId=doc_id).execute()
         return None
-    print(f"  documents.get works on the narrow drive.file scope — no `documents` scope needed")
+    print("  documents.get works on the narrow drive.file scope — no `documents` scope needed")
     print(f"  revisionId {doc.get('revisionId')!r}, {len(text_of(doc))} chars of body")
     return doc_id
 

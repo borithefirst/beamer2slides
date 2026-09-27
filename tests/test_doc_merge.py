@@ -249,7 +249,6 @@ def test_a_mark_the_source_took_away_is_named_so_it_goes_away():
 
 
 def test_styling_a_second_sync_writes_nothing():
-    base = live([styled("p:s", {"text": "one two three"})])
     ours = live([styled("p:s", {"text": "one "}, {"text": "two", "bold": True},
                         {"text": " three"})])
     # The document now says what the source says: the same run layout, read back.

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import emit
 from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, OPTICAL_WEIGHTS_READ, PAD_X, PPTX_TITLE_DY,
-                   SLIDE_W, FontMapper, extra_above, line_size)
+                   FontMapper, extra_above, line_size)
 from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_inset, thumbnail_cell_pad,
                           thumbnail_cell_text, thumbnail_insets, thumbnail_rows, thumbnail_weights, top_drift)
 from .fonts import cjk_font

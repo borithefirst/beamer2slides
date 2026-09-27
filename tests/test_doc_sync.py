@@ -169,8 +169,9 @@ def test_a_read_is_made_again_through_a_blip_and_a_write_never_is(monkeypatch):
     assert doc_sync._read(flaky(ssl.SSLEOFError("EOF"), _http(503))) == {"ok": True}
     assert len(calls) == 3                        # two blips, then the answer
     calls.clear()
-    with pytest.raises(Exception):
-        doc_sync._read(flaky(_http(403)))         # not transient: asked once, and out
+    forbidden = _http(403)
+    with pytest.raises(type(forbidden)):
+        doc_sync._read(flaky(forbidden))          # not transient: asked once, and out
     assert len(calls) == 1
     calls.clear()
     with pytest.raises(ssl.SSLEOFError):

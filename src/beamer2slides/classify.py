@@ -2364,7 +2364,7 @@ class PageClassifier:
                     and spans[k - 1].rect.x1 - spans[0].rect.x0 <= 0.45 * width}
 
         # (an item without a label may sit between two labelled ones)
-        for k, i in [(k, i) for k in (1, 2) for i in range(len(out) - k)]:
+        for k, i in [(step, i) for step in (1, 2) for i in range(len(out) - step)]:
             a, b = out[i], out[i + k]
             if a.tab is not None and b.tab is not None:
                 continue
@@ -5631,7 +5631,7 @@ def literal_list_numbers(slides: list[dict]) -> None:
             continue
         # All numbers on the slide the same way, so the items still look alike.
         pictures = []
-        for e, p in ((e, p) for e in texts for p in e["paragraphs"] if numbered(p)):
+        for e, p in ((t, q) for t in texts for q in t["paragraphs"] if numbered(q)):
             b, label = p["bullet"], p["bullet"].get("label")
             if not label or not p["runs"]:
                 continue

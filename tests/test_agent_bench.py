@@ -218,7 +218,6 @@ def test_a_recorded_transcript_from_an_outside_harness_needs_only_tool_and_argum
 
 
 def _priced(record: dict, **cost) -> dict:
-    task = tasks.BY_ID["read-the-conflict"]
     steps = [{"tool": "deck_sync", "arguments": {"deck": tasks.DECK, "dry_run": True}}]
     return {"steps": steps, "answer": record["answer"], **cost}
 

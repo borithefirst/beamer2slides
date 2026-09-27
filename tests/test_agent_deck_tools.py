@@ -164,7 +164,7 @@ def test_a_google_journey_with_no_credentials_refuses_with_offline(fn, tmp_path)
 def test_a_dry_run_sync_is_reachable_without_permission_to_write_google(tmp_path):
     """The whole point of `needs=(READS, WRITES, READS_GOOGLE)`: an agent that may look at a deck
     but not change it can still plan the merge and show the person what it would do."""
-    from beamer2slides.agent import ALL_ACTIONS, NoGoogle
+    from beamer2slides.agent import NoGoogle
 
     root = tmp_path / "ws"
     root.mkdir(parents=True)

@@ -1,4 +1,4 @@
-﻿"""Identity for sync: slide keys, element keys, fingerprints and IR hashes (docs/sync.md).
+"""Identity for sync: slide keys, element keys, fingerprints and IR hashes (docs/sync.md).
 
 Slides are keyed by their beamer frame label, else `title:<normalised title>#<occurrence>`,
 else `page:<n>`. Elements within a slide are keyed `kind/role/ordinal`. A new conversion (ours)

@@ -9,7 +9,7 @@ import pytest
 
 from beamer2slides import extract, type3
 from beamer2slides.fonts import font_info
-from beamer2slides.pdf import NO_OBJECT, Char, char_box
+from beamer2slides.pdf import Char, char_box
 
 X0, Y = 30.0, 100.0
 WORD_SPACE = 3.6

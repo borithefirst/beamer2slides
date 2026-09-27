@@ -44,7 +44,6 @@ import re
 import sys
 import time
 from collections import Counter
-from difflib import SequenceMatcher
 
 from .. import doc_ir, doc_merge
 from . import doc_loss_oracle as oracle

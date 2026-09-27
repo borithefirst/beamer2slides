@@ -15,7 +15,6 @@ from __future__ import annotations
 import io
 import math
 import struct
-import zlib
 
 import numpy as np
 
@@ -375,7 +374,7 @@ def _jpeg(data: bytes, params: dict, r, width: int, height: int, comps: int, dev
     except Unsupported:
         raise
     except Exception as e:  # noqa: BLE001 - libjpeg errors: PDFium's own recovery is not ported
-        raise Unsupported(f"a JPEG libjpeg complains about ({type(e).__name__})")
+        raise Unsupported(f"a JPEG libjpeg complains about ({type(e).__name__})") from e
 
 
 def image_bytes(doc, d: dict, raw: bytes, bpc: int, comps: int, width: int, height: int, dev_size):
@@ -422,8 +421,8 @@ def image_bytes(doc, d: dict, raw: bytes, bpc: int, comps: int, width: int, heig
                 raise Unsupported(f"{name} images")
         except Unsupported:
             raise
-        except Exception:  # noqa: BLE001
-            raise Unsupported("a filter that fails")
+        except Exception as e:  # noqa: BLE001
+            raise Unsupported("a filter that fails") from e
     if codec == "RunLengthDecode" and not _rl_dest_size_ok(data, bpc, comps, width, height):
         return None
     if not data:

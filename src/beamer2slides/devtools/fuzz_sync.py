@@ -1211,7 +1211,7 @@ def describe_chain(result: dict) -> str:
     lines = []
     for s in result["steps"]:
         lines.append(f"  step {s['step']}: deck:   " + "; ".join(s["deck"]))
-        lines.append(f"          source: " + "; ".join(s["source"]))
+        lines.append("          source: " + "; ".join(s["source"]))
         if s.get("refused"):
             lines.append("          refused: " + ", ".join(s["refused"]) + " (nothing written)")
         if s["failures"]:
@@ -1918,7 +1918,6 @@ class LiveRound:
         return done
 
     def step(self, step: int, specs: list[dict], variant: str, build):
-        from beamer2slides import snapshot
         folder = self.out / f"step{step}"
         folder.mkdir(exist_ok=True)
         base = json.loads((self.out / "sync" / "base.json").read_text(encoding="utf-8"))
@@ -2126,7 +2125,7 @@ def summary(records: list[dict], wall: float, parallel: int) -> str:
             f"{total['rate_limited']:.0f} rate-limited, {total['backoff_s']:.0f} s backing off, "
             f"{60 * total[WRITE] / max(wall, 1):.0f} batchUpdates/min\n"
             f"  reach (steps): " + ", ".join(f"{p} {reach[p]}" for p in PRECONDITIONS) + "\n"
-            f"  layout oracle (steps with a finding): " + (", ".join(f"{k} {n}" for k, n in sorted(layout.items())) or "none"))
+            "  layout oracle (steps with a finding): " + (", ".join(f"{k} {n}" for k, n in sorted(layout.items())) or "none"))
 
 
 def run_live(rounds: int, seed0: int, parallel: int, chain: int, keep_decks: bool, out_root: Path, shrink: bool,

@@ -1,4 +1,4 @@
-﻿"""How much slower the pure reader is than PDFium, per page, on the built test decks.
+"""How much slower the pure reader is than PDFium, per page, on the built test decks.
 
 The two numbers CLAUDE.md records: extraction (the raw.json path - `extract.extract`, which asks
 for objects, chars, drawings, images and links) and whole-page rendering (`page.render(zoom)`).

@@ -12,7 +12,7 @@ from pathlib import Path
 from . import navigation
 from .filters import decode as decode_filters
 from .navigation import NOTHING, array_for, dict_at, integer_for, name_for, pdf_decode_text, text
-from .syntax import END, Lexer, Name, Op, PdfSyntaxError, Ref, Stream, String, _literal_string, _name, _number
+from .syntax import END, Name, PdfSyntaxError, Ref, Stream, String, _literal_string, _name, _number
 
 _WHITE_OR_DELIM = frozenset(b"\x00\t\n\x0c\r ()<>[]{}/%")
 _INHERITED = ("Resources", "MediaBox", "CropBox", "Rotate")

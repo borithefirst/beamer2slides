@@ -272,7 +272,6 @@ INTENDED = {  # classification_diff(v1, variant) items per flag
                "#27: text- This third slide called Results has no label at all, so only its content can identify it.",
                "#27: text+ This third slide called Results has no label at all, and the source has now given it "
                "another title and rewritten the rest of what it says about itself."],
-    "fourthree": [],
 }
 # 4:3 is a page size, not an edit: every paragraph rewraps, so its classification diff is not
 # something to pin down - the variant only has to build and convert.

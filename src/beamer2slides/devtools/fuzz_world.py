@@ -15,7 +15,6 @@ Element IR is the converter's (classify) shape, cut down to what identity and me
 import copy
 import json
 import random
-import re
 from difflib import SequenceMatcher
 from pathlib import Path
 
