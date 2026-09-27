@@ -538,17 +538,42 @@ def calibrate(tag: str, verdicts: Path) -> dict:
     names = [m for m in (*NUMPY_METRICS, *TORCH_METRICS) if all(m in rows[k] for k in keys)]
     cats = sorted({c for k in keys for c in labels[k]}, key=lambda c: -sum(c in labels[k] for k in keys))
     neg = [k for k in keys if not labels[k]]
+    thresholds = {m: float(np.quantile([rows[k][m] for k in neg], 1 - FLAG_SHARE)) for m in names}
+    # how much more MISSING_METRICS should count than the rest of SEVERITY: fit once, against whether
+    # severity ranks a CONTENT_LOST slide (words or a picture gone) above one with some other judged
+    # defect - the ordering the bug is actually about, not merely "past a threshold at all".
+    weight, weight_auc, weight_pairs = fit_missing_weight(rows, keys, labels, thresholds)
+    severity_weights = {m: weight for m in MISSING_METRICS}
+    content_pos, content_neg = content_lost_split(keys, labels)
+    before_auc, before_pairs = content_lost_auc(rows, content_pos, content_neg, thresholds, None)
     table = {"n": len(keys), "identical": len(neg), "categories": {},
              # what only FLAG_SHARE of the slides the judges called identical exceed
-             "thresholds": {m: float(np.quantile([rows[k][m] for k in neg], 1 - FLAG_SHARE)) for m in names}}
+             "thresholds": thresholds,
+             "severity_weights": severity_weights,
+             # does severity rank a slide with words or a picture gone over one with some other
+             # judged defect - the ordering this weight exists for, before and after fitting it
+             "severity_weight_calibration": {
+                 "note": "CONTENT_LOST slides ranked over other-defect slides (never vs identical)",
+                 "n_content_lost": len(content_pos), "n_other_defect": len(content_neg),
+                 "before": {"weight": 1.0, "auc": before_auc, "pairs": before_pairs},
+                 "after": {"weight": weight, "auc": weight_auc, "pairs": weight_pairs}}}
     for cat in ["any", *cats]:
         pos = [k for k in keys if labels[k] and (cat == "any" or cat in labels[k])]
         within = {m: auc_within(pos, neg, lambda k, m=m: rows[k][m]) for m in names}
+        sev_before = lambda k: severity(rows[k], thresholds)[0]                        # noqa: E731
+        sev_after = lambda k: severity(rows[k], thresholds, severity_weights)[0]       # noqa: E731
         table["categories"][cat] = {"n": len(pos), "decks": len({k[0] for k in pos}),
                                     "pairs": next(iter(within.values()))[1] if within else 0,
                                     "auc": {m: auc([rows[k][m] for k in pos], [rows[k][m] for k in neg])
                                             for m in names},
-                                    "within": {m: w[0] for m, w in within.items()}}
+                                    "within": {m: w[0] for m, w in within.items()},
+                                    "severity": {
+                                        "before": {"auc": auc([sev_before(k) for k in pos],
+                                                             [sev_before(k) for k in neg]),
+                                                   "within": auc_within(pos, neg, sev_before)[0]},
+                                        "after": {"auc": auc([sev_after(k) for k in pos],
+                                                            [sev_after(k) for k in neg]),
+                                                  "within": auc_within(pos, neg, sev_after)[0]}}}
     return table
 
 
@@ -566,6 +591,26 @@ def print_calibration(table: dict) -> None:
                 v = row[key][m]
                 cells.append(f"{v:>10.2f}" if v is not None else f"{'-':>10}")
             print(f"{cat:<16}{row[count]:>6}  " + " ".join(cells))
+    def sev_cell(v: dict) -> str:
+        return f"{v['auc']:.2f}/{v['within']:.2f}" if v["auc"] is not None else "-/-"
+
+    w = table.get("severity_weights", {})
+    one = next(iter(w.values()), 1.0) if w else 1.0
+    calib = table.get("severity_weight_calibration", {})
+    print(f"\nseverity, judged-bad vs judged-identical (the coarse check: does the sum still find a "
+          f"defect at all): all pairs / within-deck, before -> after {', '.join(MISSING_METRICS)} x{one:g}")
+    for cat, row in cats.items():
+        s = row["severity"]
+        print(f"{cat:<16}{row['n']:>6}  {sev_cell(s['before']):>12} -> {sev_cell(s['after']):<12}")
+    if calib.get("before", {}).get("auc") is not None:
+        b, a = calib["before"], calib["after"]
+        print(f"\nseverity, CONTENT_LOST slides (words/a picture gone) vs other-defect slides (the fix's "
+              f"own target - never vs identical): {calib['n_content_lost']} content-lost, "
+              f"{calib['n_other_defect']} other-defect")
+        print(f"  before (1x):   AUC {b['auc']:.3f} over {b['pairs']} pairs")
+        print(f"  after  ({a['weight']:g}x): AUC {a['auc']:.3f} over {a['pairs']} pairs")
+    else:
+        print("\nseverity, CONTENT_LOST vs other-defect: not enough judged CONTENT_LOST slides to calibrate against")
 
 
 def flag(tag: str, thresholds: dict, n: int) -> None:
@@ -616,23 +661,84 @@ SEVERITY = {"tile_pixels": "a region wrong", "local_missing": "words or pictures
             "dino": "looks different", "tile_lpips": "a region looks different"}
 SEVERITY_CAP = 10.0     # one metric counts at most ten thresholds: a gradient's ground_de x60 is one defect
 
+#: local_missing / missing name the one defect a person always ranks worst - Google's ink with none
+#: of ours within REACH, words or whole pictures gone - so `calibrate` may count them for more than
+#: one threshold each: ink two pixels off (graded) or a stray glyph (extra) is never as bad as ink
+#: that just is not there. `fit_missing_weight` picks how much more from the judges' verdicts.
+MISSING_METRICS = ("missing", "local_missing")
+#: candidates for that multiplier: a grid, not a search, because AUC moves in ties on this few a
+#: point, not smoothly - gradient descent would chase noise.
+MISSING_WEIGHT_GRID = (1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 6.0)
+#: the judged categories that *are* the defect MISSING_METRICS name (docs/adopt-grind.md "Judge,
+#: trace, fix"): a slide labelled one of these is words or a picture gone, not drift or a wrong
+#: colour, so this is the ordering severity is actually for - not "bad" vs "identical" (that one a
+#: sum of thresholds already separates decently; see `calibrate`'s "any" AUC) but *whose* bad ranks
+#: worse. `fit_missing_weight` is calibrated against it, never against a number picked by fiat.
+CONTENT_LOST = frozenset({"text_missing", "picture_missing"})
 
-def severity(r: dict, thresholds: dict) -> tuple[float, dict]:
+
+def severity(r: dict, thresholds: dict, weights: dict | None = None) -> tuple[float, dict]:
     """How far past what identical slides reach a slide is: each SEVERITY metric over its threshold,
-    capped, summed. Returns the sum and {metric: ratio} of those past theirs."""
-    over = {m: min(r[m] / thresholds[m], SEVERITY_CAP) for m in SEVERITY
-            if m in r and thresholds.get(m, 0) > 0 and r[m] > thresholds[m]}
+    scaled by its calibrated `weights` (default 1x, i.e. unweighted), capped, summed. Returns the sum
+    and {metric: weighted ratio} of those past their threshold."""
+    over = {}
+    for m in SEVERITY:
+        t = thresholds.get(m, 0)
+        if m not in r or t <= 0 or r[m] <= t:
+            continue
+        w = weights.get(m, 1.0) if weights else 1.0
+        over[m] = min(w * r[m] / t, SEVERITY_CAP)
     return sum(over.values()), over
 
 
-def rank(tag: str, thresholds: dict, corpora: list[Path]) -> list[dict]:
+def content_lost_split(keys: list, labels: dict) -> tuple[list, list]:
+    """CONTENT_LOST slides (words or a picture gone) and slides with some other judged defect (drift,
+    colour, a wrong shape...) - never the judged-identical ones, which a threshold already separates."""
+    pos = [k for k in keys if labels[k] & CONTENT_LOST]
+    neg = [k for k in keys if labels[k] and not (labels[k] & CONTENT_LOST)]
+    return pos, neg
+
+
+def content_lost_auc(rows: dict, pos: list, neg: list, thresholds: dict,
+                     weights: dict | None) -> tuple[float | None, int]:
+    """How well `severity(..., weights)` ranks CONTENT_LOST slides over other-defect ones: by
+    within-deck AUC where any such pair exists (a deck's own style cannot win it), else over every
+    pair (too few decks carry a CONTENT_LOST verdict to keep to one deck at a time)."""
+    if not pos or not neg:
+        return None, 0
+    score = lambda k: severity(rows[k], thresholds, weights)[0]  # noqa: E731
+    a, pairs = auc_within(pos, neg, score)
+    if not pairs:                                      # no same-deck pair: fall back to every pair
+        a, pairs = auc(list(map(score, pos)), list(map(score, neg))), len(pos) * len(neg)
+    return a, pairs
+
+
+def fit_missing_weight(rows: dict, keys: list, labels: dict, thresholds: dict) -> tuple[float, float | None, int]:
+    """The MISSING_METRICS weight (>=1x) whose severity ranks CONTENT_LOST slides over other-defect
+    ones best (`content_lost_auc`) - the ordering the flagged-content-missing bug is actually about,
+    not the coarser "past a threshold at all" one `calibrate`'s per-metric AUCs already answer. Ties
+    go to the smallest weight that reaches the best AUC: a bigger one buys nothing more and only makes
+    one slide's missing ink count for an unearned multiple of another's drift. Returns (weight, its
+    AUC, pairs it was judged on); (1.0, None, 0) with nothing to calibrate against."""
+    pos, neg = content_lost_split(keys, labels)
+    if not pos or not neg:
+        return 1.0, None, 0
+    best_w, best_auc, best_pairs = 1.0, -1.0, 0
+    for w in MISSING_WEIGHT_GRID:
+        a, pairs = content_lost_auc(rows, pos, neg, thresholds, {m: w for m in MISSING_METRICS})
+        if a is not None and a > best_auc + 1e-9:
+            best_w, best_auc, best_pairs = w, a, pairs
+    return best_w, (best_auc if best_auc >= 0 else None), best_pairs
+
+
+def rank(tag: str, thresholds: dict, corpora: list[Path], weights: dict | None = None) -> list[dict]:
     """Every slide of run `tag` in `corpora`, worst first."""
     out = []
     for corpus in corpora:
         for p in corpus.glob(f"*/runs/{tag}/metrics.json"):
             d = json.loads(p.read_text(encoding="utf-8"))
             for r in d["slides"]:
-                sev, over = severity(r, thresholds)
+                sev, over = severity(r, thresholds, weights)
                 out.append({"corpus": corpus.name, "deck": d["deck"], "slide": r["slide"], "severity": round(sev, 2),
                             "over": {m: round(v, 1) for m, v in sorted(over.items(), key=lambda kv: -kv[1])},
                             "sheet": str(p.parent / "sheets" / f"{r['slide']:03}.png")})
@@ -641,15 +747,17 @@ def rank(tag: str, thresholds: dict, corpora: list[Path]) -> list[dict]:
 
 
 def gallery(tag: str, thresholds: dict, corpora: list[Path], n: int, out: Path,
-            previous: Path | None = None, per_deck: int = 2) -> Path:
+            previous: Path | None = None, per_deck: int = 2, weights: dict | None = None) -> Path:
     """The `n` worst slides of run `tag` as one self-contained HTML page (their sheets inlined:
     the deck | our page | the ink diff), with what each trips, the kind of defect that names, and
     against `previous` (an earlier gallery's .json) which slides are new to the list. The corpora
-    are other people's decks: the page is for looking at here, never for publishing."""
+    are other people's decks: the page is for looking at here, never for publishing. `weights`
+    scales SEVERITY metrics (a `calibrate --json`'s "severity_weights"; omitted, every metric counts
+    1x as before)."""
     import base64
     import html
     import io
-    ranked = rank(tag, thresholds, corpora)
+    ranked = rank(tag, thresholds, corpora, weights)
     before = set()
     if previous and previous.exists():
         before = {(s["deck"], s["slide"]) for s in json.loads(previous.read_text(encoding="utf-8"))["worst"]}
@@ -804,8 +912,9 @@ def main(argv: list[str] | None = None) -> None:
     g.add_argument("--per-deck", type=int, default=2, help="at most this many slides of one deck")
     a = ap.parse_args(argv)
     if a.cmd == "gallery":
-        print(gallery(a.tag, json.loads(a.calibration.read_text(encoding="utf-8"))["thresholds"],
-                      a.corpus or [corpus_dir()], a.n, a.out, a.previous, a.per_deck))
+        cal = json.loads(a.calibration.read_text(encoding="utf-8"))
+        print(gallery(a.tag, cal["thresholds"], a.corpus or [corpus_dir()], a.n, a.out, a.previous, a.per_deck,
+                      weights=cal.get("severity_weights")))
     elif a.cmd == "compare":
         compare(a.before, a.after, a.n)
     elif a.cmd == "flag":

@@ -185,8 +185,8 @@ def show(tag: str | None, corpora: list[Path], n: int = 20, per_deck: int = 2) -
     t0 = time.perf_counter()
     old = pages()
     previous = old[-1] if old else None
-    thresholds = json.loads(CALIBRATION.read_text(encoding="utf-8"))["thresholds"]
-    path = gallery(tag, thresholds, corpora, n, OUT, previous, per_deck)
+    cal = json.loads(CALIBRATION.read_text(encoding="utf-8"))
+    path = gallery(tag, cal["thresholds"], corpora, n, OUT, previous, per_deck, cal.get("severity_weights"))
     now = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
     was = json.loads(previous.read_text(encoding="utf-8")) if previous else {"worst": [], "tag": None}
     key = lambda s: f"{s['deck']}:{s['slide']}"                          # noqa: E731

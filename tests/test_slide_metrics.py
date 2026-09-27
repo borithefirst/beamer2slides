@@ -1,9 +1,13 @@
 """The numpy slide metrics each see their own kind of defect (devtools/slide_metrics.py)."""
 
+import json
+
 import numpy as np
 import pytest
 
-from beamer2slides.devtools.slide_metrics import SEVERITY_CAP, auc, auc_within, distance_to, numpy_metrics, severity
+from beamer2slides.devtools.slide_metrics import (SEVERITY, SEVERITY_CAP, auc, auc_within, content_lost_auc,
+                                                   content_lost_split, distance_to, fit_missing_weight,
+                                                   numpy_metrics, severity)
 
 
 def test_severity_counts_what_passes_its_threshold_each_capped():
@@ -13,6 +17,125 @@ def test_severity_counts_what_passes_its_threshold_each_capped():
     total, over = severity({"ground_de": 60.0, "missing": 0.3, "dino": 0.1, "unrelated": 9.0}, th)
     assert over == {"ground_de": SEVERITY_CAP, "missing": pytest.approx(3.0)}
     assert total == pytest.approx(SEVERITY_CAP + 3.0)
+
+
+def test_severity_weights_scale_a_ratio_before_its_cap():
+    """weights=None (the default) is exactly the unweighted 1x sum; a weight on one metric scales its
+    ratio before SEVERITY_CAP, so a big enough weight can push it past the cap while an unweighted
+    metric elsewhere is unaffected."""
+    th = {"missing": 0.1, "graded": 0.1}
+    r = {"missing": 0.3, "graded": 0.3}                        # each 3x its threshold, unweighted
+    total0, over0 = severity(r, th)
+    assert over0 == {"missing": pytest.approx(3.0), "graded": pytest.approx(3.0)}
+    total1, over1 = severity(r, th, {"missing": 4.0})
+    assert over1 == {"missing": SEVERITY_CAP, "graded": pytest.approx(3.0)}       # 3 x 4 = 12, capped
+    assert total1 > total0
+
+
+def test_content_lost_split_separates_words_or_a_picture_gone_from_other_defects_and_identical():
+    """CONTENT_LOST (text_missing, picture_missing) slides are `pos`; some other named defect is `neg`;
+    a judged-identical slide (an empty category set) is neither - a threshold already separates those."""
+    labels = {("d", 1): {"text_missing"}, ("d", 2): {"picture_missing", "shape"},
+              ("d", 3): {"line_breaks"}, ("d", 4): set()}
+    pos, neg = content_lost_split(list(labels), labels)
+    assert set(pos) == {("d", 1), ("d", 2)}
+    assert neg == [("d", 3)]
+
+
+def test_fit_missing_weight_ranks_a_content_lost_slide_over_a_drift_one():
+    """Two slides cross their thresholds by the same total at 1x - one because words are gone
+    (missing, local_missing), the other only from drift (graded, extra). Unweighted, severity ranks
+    the drift one worse (`SEVERITY`'s plain sum has no opinion about which metric it came from);
+    `fit_missing_weight` should find a weight that flips this, since that ordering is exactly what it
+    is calibrated on."""
+    thresholds = {"missing": 0.1, "local_missing": 0.1, "graded": 0.1, "extra": 0.1}
+    rows = {("a", 1): {"missing": 0.4, "local_missing": 0.4, "graded": 0.0, "extra": 0.0},
+            ("b", 1): {"missing": 0.0, "local_missing": 0.0, "graded": 0.5, "extra": 0.5}}
+    labels = {("a", 1): {"text_missing"}, ("b", 1): {"line_breaks"}}
+    assert severity(rows[("a", 1)], thresholds)[0] < severity(rows[("b", 1)], thresholds)[0]     # before: loses
+
+    weight, auc_after, pairs = fit_missing_weight(rows, list(rows), labels, thresholds)
+    assert weight > 1.0
+    assert auc_after == pytest.approx(1.0)
+    assert pairs == 1                                    # no same-deck pair: fell back to the one pair there is
+
+    weighted = {m: weight for m in ("missing", "local_missing")}
+    assert severity(rows[("a", 1)], thresholds, weighted)[0] > severity(rows[("b", 1)], thresholds, weighted)[0]
+
+
+def test_fit_missing_weight_needs_a_content_lost_example_to_calibrate_against():
+    """With no CONTENT_LOST-labelled slide (or nothing to rank it over) there is nothing to fit: the
+    weight stays 1x rather than guessed."""
+    thresholds = {"missing": 0.1}
+    rows = {("a", 1): {"missing": 0.5}, ("b", 1): {"missing": 0.5}}
+    weight, a, pairs = fit_missing_weight(rows, list(rows), {("a", 1): {"line_breaks"}, ("b", 1): {"shape"}},
+                                          thresholds)
+    assert (weight, a, pairs) == (1.0, None, 0)
+    weight, a, pairs = fit_missing_weight(rows, list(rows), {("a", 1): {"text_missing"}, ("b", 1): set()},
+                                          thresholds)
+    assert (weight, a, pairs) == (1.0, None, 0)               # ("b", 1) is identical, not "some other defect"
+
+
+def test_content_lost_auc_falls_back_to_every_pair_without_a_same_deck_one():
+    thresholds = {"missing": 0.1}
+    rows = {("a", 1): {"missing": 1.0}, ("b", 1): {"missing": 0.0}}
+    a, pairs = content_lost_auc(rows, [("a", 1)], [("b", 1)], thresholds, None)
+    assert a == 1.0 and pairs == 1
+
+
+def _write_metrics(root, deck, tag, slides):
+    d = root / deck / "runs" / tag
+    d.mkdir(parents=True)
+    (d / "metrics.json").write_text(json.dumps({"deck": deck, "tag": tag, "slides": slides}), encoding="utf-8")
+
+
+def _write_verdict(root, deck, sheets):
+    d = root / "judging" / deck
+    d.mkdir(parents=True)
+    (d / "verdict-1.json").write_text(json.dumps({"sheets": sheets}), encoding="utf-8")
+
+
+def test_calibrate_fits_a_missing_weight_and_reports_before_and_after(tmp_path, monkeypatch):
+    """A miniature corpus: one deck's worst slide is real content loss (heavy missing/local_missing,
+    nothing else off), another's is pure drift (graded/extra, no missing), and a handful of identical
+    decks to set thresholds near zero. `calibrate` should learn a MISSING_METRICS weight from the
+    judges' verdicts (persian-lit:20's own shape) and report the content-lost-vs-other-defect AUC
+    improving, without needing to know anything about persian-lit itself."""
+    from beamer2slides.devtools import slide_metrics as sm
+
+    # identical decks sit at 0.01 on every SEVERITY metric, so each threshold lands there too (a
+    # constant array's 95th percentile is the constant); the two defect rows cross it 5x on their own
+    # metrics only, a tie at 1x (10 + 10) that a weight on missing/local_missing alone should break.
+    zero = {m: 0.01 for m in SEVERITY}
+    corpus = tmp_path / "corpus"
+    _write_metrics(corpus, "content-lost", "t", [{"slide": 1, **zero, "missing": 0.05, "local_missing": 0.05}])
+    _write_metrics(corpus, "drift-only", "t", [{"slide": 1, **zero, "graded": 0.05, "extra": 0.05}])
+    for i in range(6):
+        _write_metrics(corpus, f"identical{i}", "t", [{"slide": 1, **zero}])
+
+    verdicts = tmp_path / "verdicts"
+    _write_verdict(verdicts, "content-lost", [{"sheet": 1, "same": False}])
+    _write_verdict(verdicts, "drift-only", [{"sheet": 1, "same": False}])
+    for i in range(6):
+        _write_verdict(verdicts, f"identical{i}", [{"sheet": 1, "same": True}])
+    (verdicts / "findings.json").write_text(json.dumps({"trusted": [
+        {"deck": "content-lost", "sheet": 1, "category": "text_missing"},
+        {"deck": "drift-only", "sheet": 1, "category": "line_breaks"}]}), encoding="utf-8")
+
+    monkeypatch.setattr(sm, "corpus_dir", lambda: corpus)
+    table = sm.calibrate("t", verdicts)
+
+    assert table["severity_weights"]["missing"] > 1.0
+    assert table["severity_weights"]["local_missing"] > 1.0
+    calib = table["severity_weight_calibration"]
+    assert calib["n_content_lost"] == 1 and calib["n_other_defect"] == 1
+    assert calib["after"]["auc"] > calib["before"]["auc"]
+    assert calib["before"]["auc"] == pytest.approx(0.5)        # unweighted, a tie (10 + 10 either way)
+    assert calib["after"]["auc"] == pytest.approx(1.0)         # weighted, content-lost now clearly wins
+
+    # and the "any" judged-bad vs judged-identical check (the coarser one) did not fall apart:
+    any_cat = table["categories"]["any"]
+    assert any_cat["severity"]["after"]["auc"] >= any_cat["severity"]["before"]["auc"] - 1e-9
 
 W, H = 400, 225
 SLIDE = {"size": [W, H], "elements": [{"bbox": [0, 0, W, H]}]}
