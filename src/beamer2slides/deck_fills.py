@@ -165,6 +165,32 @@ def read_region(a: np.ndarray, region: np.ndarray, allow: np.ndarray, gradient_o
     return None
 
 
+def bake_shared_cluster(elements: list[dict], members: list[int], a: np.ndarray, px: float,
+                        background: str | None, picture: bool, pictures) -> list[dict]:
+    """Replace a `deck_freeforms.shared_boxes` cluster - freeform siblings that all declare the same
+    box - with one picture of the thumbnail's own pixels in that box (`thumbnail_picture`), in place
+    of tracing each alone into an opaque rectangle the size of the whole group. The picture goes
+    where the cluster's *source group* begins, under every one of its own siblings (labels, an inner
+    picture) still drawn natively above it, and their letters are painted out of it so nothing is
+    printed twice. Left as it was when the crop refuses (too small, or nothing but the page)."""
+    group_id = elements[members[0]].get("group")
+    box = elements[members[0]]["bbox"]
+    member_set = set(members)
+    start = min((i for i, e in enumerate(elements) if e.get("group") == group_id), default=members[0])
+    bottom = not picture and not any(overlaps(e, {"bbox": box})
+                                     for i, e in enumerate(elements) if i < start)
+    above = [e for i, e in enumerate(elements) if i >= start and i not in member_set]
+    pic = thumbnail_picture(a, {"bbox": box}, above, px, background if bottom else None, pictures)
+    if pic is None:
+        return elements
+    pic["id"] = f"{group_id}~arrows" if group_id else pic.get("id")
+    if group_id:
+        pic["group"] = group_id
+    rest = [e for i, e in enumerate(elements) if i not in member_set]
+    insert_at = sum(1 for i in range(start) if i not in member_set)
+    return rest[:insert_at] + [pic] + rest[insert_at:]
+
+
 def settle(elements: list[dict], image, px: float, background: str | None, picture: bool = False,
            pictures=None) -> list[dict]:
     """Give the slide's unread fills what its thumbnail shows (see the module docstring), and drop
@@ -174,6 +200,9 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
     of it (`thumbnail_picture`); without one such shapes are dropped."""
     from . import deck_freeforms
     a = load(image)
+    if a is not None and pictures is not None:
+        for members in deck_freeforms.shared_boxes(elements):
+            elements = bake_shared_cluster(elements, members, a, px, background, picture, pictures)
     out = []
     # top down: an element settled above another hides it from the looking, so what a squiggle
     # tile under an unread wave shows is the wave's colour, never taken for the tile's own

@@ -6,7 +6,7 @@ thumbnails 720 px wide, so a thumbnail pixel is a Slides point."""
 import numpy as np
 import pytest
 
-from beamer2slides import adopt, adopt_shapes, deck_freeforms
+from beamer2slides import adopt, adopt_shapes, deck_fills, deck_freeforms
 from beamer2slides.inverse import Context
 
 from .test_adopt_fills import UNREAD, deck, elements, page, pt, shape, solid
@@ -154,6 +154,65 @@ def test_a_fill_the_page_shows_with_no_outline_still_falls_back_to_the_box():
     [el] = elements(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("FFFFFF")), bg="F7FBFC"),
                     page(bg="F7FBFC"))
     assert "trace" not in el
+
+
+def test_shared_boxes_finds_freeform_siblings_at_one_box():
+    """A PowerPoint SmartArt diagram's freeform pieces (a water-cycle's five curved arrows) all keep
+    the diagram's own canvas box in the API's answer - the geometry that tells them apart is a path
+    the API never gives. Two or more shapes of the same source group declaring the exact same box
+    is that, not a coincidence; a lone shape, or shapes in different groups, is not a cluster."""
+    els = [
+        {"kind": "shape", "shape_type": "CUSTOM", "group": "g1", "bbox": [10, 10, 50, 50]},
+        {"kind": "shape", "shape_type": "TEXT_BOX", "group": "g1", "bbox": [15, 15, 45, 25]},
+        {"kind": "shape", "shape_type": "CUSTOM", "group": "g1", "bbox": [10, 10, 50, 50]},
+        {"kind": "shape", "shape_type": "CUSTOM", "group": "g2", "bbox": [10, 10, 50, 50]},
+        {"kind": "shape", "shape_type": "CUSTOM", "group": "g1", "bbox": [200, 200, 40, 40]},
+    ]
+    assert deck_freeforms.shared_boxes(els) == [[0, 2]]
+
+
+def test_a_box_two_freeforms_share_is_baked_as_one_picture_not_two_rectangles(tmp_path):
+    """en-smartart's water-cycle diagram: two (of the real deck's five) curved arrows report the
+    identical box. Tracing each alone reads the other as an opaque shape covering that whole shared
+    box (`deck_fills.opaque`), so both used to fall back to "the box, solid" - two identical, stacked,
+    opaque rectangles hiding the label between them. Baked once instead, under the diagram's own
+    picture behind its label, which stays native and keeps its words."""
+    thumb = page()
+    thumb[100:300, 100:300] = [191, 162, 42]                   # the two arrows' ink, painted as one
+    thumb[120:140, 150:250] = [126, 225, 255]                  # a label's words, inside the shared box
+    arrow_a = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
+              "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a1", "object": "a1"}
+    label = {"kind": "text", "role": "body", "group": "dia", "bbox": [140, 120, 260, 150], "id": "lbl",
+             "object": "lbl", "paragraphs": [{"runs": [{"text": "Precipitacion", "color": "#7ee1ff"}]}]}
+    arrow_b = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
+              "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a2", "object": "a2"}
+    got = deck_fills.settle([dict(arrow_a), dict(label), dict(arrow_b)], thumb, 1.0, "#ffffff", False, tmp_path)
+    assert [e["kind"] for e in got] == ["image", "text"]
+    assert got[0]["id"] == "dia~arrows" and got[0]["group"] == "dia" and got[0]["bbox"] == [100, 100, 300, 300]
+    assert got[1]["id"] == "lbl" and got[1]["paragraphs"] == label["paragraphs"]   # untouched
+
+
+def test_a_lone_freeform_that_fills_its_box_is_still_left_a_rectangle(tmp_path):
+    """A single freeform at its own true box (no sibling sharing it) is not this cluster: the old
+    "the box, solid" fallback still applies, and the new bake path leaves it alone."""
+    el = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
+          "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a1", "object": "a1"}
+    thumb = page((100, 100, 200, 200, "2AA2BF"))
+    got = deck_fills.settle([dict(el)], thumb, 1.0, "#ffffff", False, tmp_path)
+    assert len(got) == 1 and got[0]["kind"] == "shape" and "trace" not in got[0]
+
+
+def test_without_a_pictures_folder_a_shared_box_cluster_is_left_for_tracing():
+    """Offline reads with no folder to write to (`pull`) never bake a picture: the cluster is left as
+    it was, exactly as any other unread fill would be without one."""
+    thumb = page()
+    thumb[100:300, 100:300] = [191, 162, 42]
+    arrow_a = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
+              "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a1", "object": "a1"}
+    arrow_b = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
+              "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a2", "object": "a2"}
+    got = deck_fills.settle([dict(arrow_a), dict(arrow_b)], thumb, 1.0, "#ffffff")
+    assert [e["id"] for e in got] == ["a1", "a2"]
 
 
 def test_an_outline_in_another_colour_is_drawn_inside_the_traced_edge():

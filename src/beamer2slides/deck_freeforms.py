@@ -57,6 +57,44 @@ def freeform(el: dict) -> bool:
     return (el.get("shape_type") or "").upper() in ("CUSTOM", "FREEFORM")
 
 
+SAME_BOX = 0.5            # pt: siblings this close in every edge are called "the same declared box"
+
+
+def shared_boxes(elements: list[dict]) -> list[list[int]]:
+    """Indices of two or more sibling freeform shapes (same source group, not a line) that declare
+    the exact same box - proof the API gave back the group's own canvas, not this piece's true
+    extent (a PowerPoint SmartArt diagram's freeform pieces keep the whole diagram frame's off/ext;
+    the one geometry that tells them apart is a path the API never returns). Tracing each alone then
+    reads every other member as an opaque shape covering the *entire* shared box (`deck_fills.opaque`),
+    so each is left "the box, solid" - as many stacked, identical, opaque rectangles as there are
+    pieces, hiding the labels and picture a diagram draws inside that same box. Two distinct shapes
+    sharing a box by coincidence is not a thing this converter draws; every group with two or more
+    freeforms at one box is this."""
+    by_group: dict[str, list[int]] = {}
+    for i, el in enumerate(elements):
+        if el.get("group") and el.get("role") != "line" and freeform(el):
+            by_group.setdefault(el["group"], []).append(i)
+    clusters = []
+    for idxs in by_group.values():
+        if len(idxs) < 2:
+            continue
+        used: set = set()
+        for a_i, i in enumerate(idxs):
+            if i in used:
+                continue
+            box = elements[i]["bbox"]
+            same = [i]
+            for j in idxs[a_i + 1:]:
+                if j in used:
+                    continue
+                if all(abs(x - y) <= SAME_BOX for x, y in zip(box, elements[j]["bbox"])):
+                    same.append(j)
+            if len(same) >= 2:
+                used.update(same)
+                clusters.append(same)
+    return clusters
+
+
 # ------------------------------------------------------------------------------ pixel machinery
 
 def components(mask: np.ndarray, conn8: bool = True) -> tuple[np.ndarray, int]:
