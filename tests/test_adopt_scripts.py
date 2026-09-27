@@ -194,6 +194,16 @@ def test_a_japanese_deck_breaks_lines_between_any_two_characters_and_gets_a_fall
     assert lines[-1].startswith("\\defaultfontfeatures{RawFeature={fallback=b2sscripts}")
 
 
+def test_a_korean_deck_is_set_proportionally_too(font_folder, tmp_path):
+    """HarfBuzz without `+palt` sets Korean wider than Slides does (wow-korea, korea-pptx): Korean
+    gets the same proportional metrics as Japanese and Chinese (`adopt_bench --tag fontfix`)."""
+    make_font(font_folder, "Malgun Gothic", "한국어입니다")
+    lines = scripts.script_preamble(target_with("한국어입니다"), tmp_path / "tree")
+    assert "\\babelprovide[import,onchar=ids]{korean}" in lines
+    chain = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
+    assert "[fonts/MalgunGothic-Regular.ttf]:mode=node;+palt;" in chain
+
+
 def test_the_decks_own_font_wins_when_it_covers_the_letters(font_folder):
     make_font(font_folder, "Microsoft JhengHei", "這是中文")
     make_font(font_folder, "Microsoft YaHei", "這是中文")
@@ -389,6 +399,23 @@ def test_the_deck_s_own_hebrew_font_is_fetched_before_one_is_picked(font_folder,
                                     None)
     sf = next(l for l in lines if l.startswith("\\babelfont[hebrew]{sf}"))
     assert sf.endswith("{NotoSansHebrew-Regular.ttf}")
+
+
+def test_hebrew_fetches_heebo_before_noto_sans_hebrew(font_folder, monkeypatch):
+    """Heebo is measured closest to what Slides itself draws for a deck whose font lacks Hebrew (IoU
+    0.337 against Noto Sans Hebrew's 0.173, out\\grind\\arabic-face\\): it is tried first."""
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Montserrat", "Thanks ")
+    fetched = []
+
+    def fetch(name, log=print):
+        fetched.append(name)
+        return {"Regular": make_font(font_folder, name, "שלום ")}
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family", fetch)
+    lines = scripts.script_preamble(target_with("שלום", font="Montserrat", direction="RIGHT_TO_LEFT"), None)
+    assert fetched == ["Heebo"]
+    assert any(l.startswith("\\babelfont[hebrew]{sf}") and "Heebo" in l for l in lines)
 
 
 def test_a_machine_with_no_font_for_a_script_fetches_one(font_folder, monkeypatch):

@@ -125,8 +125,11 @@ FALLBACKS = {
     "chinese-simplified": ["Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", "PingFang SC",
                            "SimSun", "Microsoft JhengHei", "Yu Gothic"],
     "korean": ["Malgun Gothic", "Noto Sans CJK KR", "Noto Sans KR", "Apple SD Gothic Neo"],
-    "hebrew": ["Arial", "Segoe UI", "Tahoma", "Times New Roman", "Noto Sans Hebrew", "DejaVu Sans",
-               "Arial Hebrew"],
+    # Heebo is measured closest to what Slides itself draws for a font that lacks Hebrew (IoU 0.337
+    # against Noto Sans Hebrew's 0.173, out\grind\arabic-face\), so it is tried first of the fonts
+    # this machine is unlikely to have
+    "hebrew": ["Arial", "Segoe UI", "Tahoma", "Times New Roman", "Heebo", "Noto Sans Hebrew",
+               "DejaVu Sans", "Arial Hebrew"],
     "arabic": ["Arial", "Segoe UI", "Tahoma", "Times New Roman", "Noto Naskh Arabic", "Noto Sans Arabic",
                "DejaVu Sans", "Geeza Pro"],
     **{name: ["Nirmala UI", f"Noto Sans {fontspec_script(name)}", "Mangal"] for name, _, _ in INDIC},
@@ -314,7 +317,7 @@ def _fetch(name: str) -> bool:
 # What google/fonts gives a script when no font in the folders covers its letters - a sandbox has no
 # Arial or Nirmala UI, and its Arabic came out as boxes (plain-fonts, offline, 2026-09-27). Fetched
 # only then, so a machine with the fonts sets what it did before.
-FETCHABLE = {"hebrew": ["Noto Sans Hebrew"], "arabic": ["Noto Naskh Arabic", "Noto Sans Arabic"],
+FETCHABLE = {"hebrew": ["Heebo", "Noto Sans Hebrew"], "arabic": ["Noto Naskh Arabic", "Noto Sans Arabic"],
              "thai": ["Noto Sans Thai"],
              **{name: [f"Noto Sans {fontspec_script(name)}"] for name, _, _ in INDIC},
              "other": ["Noto Sans Symbols 2", "Noto Sans Symbols", "Noto Sans Math"]}
@@ -542,8 +545,9 @@ def script_preamble(target: dict, tree: Path | None) -> list[str]:
     if p.chain:
         # Slides sets Japanese kana and brackets proportionally: `palt` (measured on jruby-ja, 0.469
         # -> 0.478 ink overlap, lines ending where the deck's do), and Chinese too (apps-edu-zh's
-        # Traditional Chinese: its full-width ：and 、 are drawn half wide)
-        extra = "+palt;" if p.cjk in ("japanese", "chinese-traditional", "chinese-simplified") else ""
+        # Traditional Chinese: its full-width ：and 、 are drawn half wide). HarfBuzz without `palt`
+        # sets Korean wider than Slides too (wow-korea, korea-pptx: `adopt_bench --tag fontfix`).
+        extra = "+palt;" if p.cjk in ("japanese", "chinese-traditional", "chinese-simplified", "korean") else ""
         regular = ", ".join(f'"{font_spec(f, tree, mode, extra)}"' for f, _ in p.chain)
         bold = ", ".join(f'"{font_spec(b or f, tree, mode, extra)}"' for f, b in p.chain)
         lines.append(f"\\directlua{{luaotfload.add_fallback(\"b2sscripts\", {{{regular}}})}}")

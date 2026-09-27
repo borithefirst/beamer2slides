@@ -35,7 +35,11 @@ FAMILY_FOR_FONT = {v: k for k, v in FONT_FOR_FAMILY.items()}
 MONO_WORDS = ("mono", "code", "courier", "consol", "typewriter", "cousine")
 SERIF_WORDS = ("serif", "times", "georgia", "garamond", "playfair", "slab", "libre baskerville",
                "book", "crimson", "lora", "spectral", "cormorant", "eb garamond", "bodoni", "tinos",
-               "caladea", "gelasio", "cambria", "palatino", "antiqua", "merriweather")
+               "caladea", "gelasio", "cambria", "palatino", "antiqua", "merriweather",
+               # a formal script has no family of classify's own, and reads nearer a serif's
+               # proportions than a grotesque sans (korea-pptx's "Monotype Corsiva"); its google/fonts
+               # stand-in (`adopt.SUBSTITUTES`) must read the same way under its own, spaceless stem
+               "corsiva", "petitformalscript")
 TAG_RE = re.compile(r"^b2s:(?P<slide>[^/]*)/(?P<element>.+)$")
 BEAMER_SIZES = {(4, 3): (362.83, 272.13), (16, 9): (453.54, 255.12), (16, 10): (453.54, 283.46)}
 DEFAULT_STYLE = {"fontFamily": "Arial", "fontSize": 18.0, "bold": False, "italic": False, "color": "#000000"}

@@ -107,6 +107,9 @@ def test_a_font_is_known_by_its_name():
     assert family_of("Playfair Display") == "serif"
     assert family_of("EB Garamond") == "serif"
     assert family_of("Google Sans") == "sans"
+    # Slides itself drops "Monotype" and calls the font "Corsiva" (korea-pptx's presentation.json):
+    # a formal script reads nearer a serif's proportions than a grotesque sans
+    assert family_of("Corsiva") == "serif"
 
 
 def test_a_slide_is_given_what_its_layout_and_master_draw():
@@ -458,6 +461,67 @@ def test_a_typeface_the_machine_lacks_takes_the_nearest_of_its_kind(tmp_path, mo
         tmp_path, "GoogleSansFlex-Regular.ttf", "GoogleSansCode-Regular.ttf", "Cousine-Regular.ttf")))
     text = adopt.bootstrap(deck_ir(pres, foreign=True), tmp_path / "tree" / "main.tex")
     assert "\\setmonofont{GoogleSansCode}" in text, "the nearest kin of the face the deck is set in"
+
+
+def test_a_trailing_width_qualifier_is_a_different_narrower_font(tmp_path):
+    """"Arial Narrow" merely starts with "Arial", but it is not Arial: taken for the machine's own
+    font, it was set too wide and unreported (ua-space:1's title ran off the slide). A trailing
+    qualifier now makes it a stand-in, so `stood_in` reports it and `stretch` can narrow it back -
+    while a genuine alias ("Arial MT") still merges."""
+    from .test_adopt_media import tiny_font
+    path = tmp_path / "Arial-Regular.ttf"
+    path.write_bytes(tiny_font("Arial"))
+    files = {"UprightFont": path, "stem": "Arial", "match": "Arial"}
+    assert adopt.same_font_name("arial", "arial")
+    assert adopt.same_font_name("arial", "arialmt"), "a name-table alias stays merged"
+    assert not adopt.same_font_name("arial", "arialnarrow")
+    assert adopt.stood_in("Arial Narrow", dict(files)) == "Arial"
+    assert adopt.stood_in("Arial MT", dict(files)) is None, "a genuine alias, not a stand-in"
+
+    def sample(width, text="AAAAA"):
+        return {"ink_width": width,
+                "paragraphs": [{"runs": [{"text": text, "size": 10.0, "font": "Arial Narrow"}]}]}
+    # 5 "A"s at 10 pt is 29 pt of ink at this machine's Arial (600 advance, 100 right bearing); the
+    # deck's own thumbnails show Arial Narrow's words about 10% narrower than that
+    target = {"slides": [{"elements": [sample(26.1), sample(26.2), sample(15.0)]}]}
+    assert adopt.stretch("Arial Narrow", "Arial", files, target) == ",FakeStretch=0.902"
+    assert adopt.stretch("Arial", "Arial", files, target) == "", "the deck's own font is never stretched"
+    # too few lines measured: Arial Narrow is Arial at 82% by design (offline, ua-space's title)
+    assert adopt.stretch("Arial Narrow", "Arimo", files, {"slides": []}) == ",FakeStretch=0.82"
+    assert adopt.same_font_name("calibri", "calibrilight"), "a weight is the same family, not a stand-in"
+
+
+def test_a_formal_script_the_machine_lacks_is_set_in_its_google_fonts_stand_in(tmp_path, monkeypatch):
+    """korea-pptx types slide titles in "Monotype Corsiva" (Slides itself renames the run's font to
+    "Corsiva"): a Windows-only chancery italic with no metric twin. A serif's italic stands in for
+    it (`adopt.SUBSTITUTES`, `SLANTED`: its upright is the italic), reported as a stand-in rather
+    than silently falling to an upright sans."""
+    from beamer2slides import fontfetch
+    from .test_adopt_media import tiny_font
+    assert family_of("Corsiva") == "serif"
+    folder = tmp_path / "fonts"
+    folder.mkdir()
+    monkeypatch.setenv("B2S_FONTS", str(folder))
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+
+    def fetch(name, log=print):
+        if name != "Tinos":
+            return None
+        got = {}
+        for style, key in (("Regular", "UprightFont"), ("Italic", "ItalicFont")):
+            path = folder / f"Tinos-{style}.ttf"
+            path.write_bytes(tiny_font("Tinos"))
+            got[key] = path
+        return got
+    monkeypatch.setattr(fontfetch, "fetch_family", fetch)
+    adopt._FAMILIES.clear()
+    try:
+        files = adopt.font_family("Corsiva", "serif")
+    finally:
+        adopt._FAMILIES.clear()
+    assert files and files["standin"] == "Tinos"
+    assert files["UprightFont"].name == "Tinos-Italic.ttf"
+    assert adopt.stood_in("Corsiva", dict(files)) == "Tinos"
 
 
 def test_adopt_refuses_to_write_over_a_source(tmp_path):

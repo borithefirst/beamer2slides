@@ -298,6 +298,28 @@ def flatten(name: str) -> str:
     return "".join(c for c in name.lower() if c.isalnum())
 
 
+# A trailing width qualifier makes a flattened name a different, narrower or wider font, never an
+# alias to merge with its base the way "Arial" / "Arial MT" are one font under two name-table
+# spellings. A weight ("Calibri Light", "Roboto Black") is not one: its base family sets the same
+# words far closer than any stand-in would.
+NARROW_QUALIFIERS = ("narrow", "condensed", "compressed", "extended", "expanded", "semicondensed",
+                     "semiexpanded")
+
+
+def same_font_name(low: str, flat: str) -> bool:
+    """Whether the flattened names `low` and `flat` say the same font family: identical, or one is
+    an alias of the other (a name-table spelling such as "Arial" / "Arial MT"), never when the
+    longer only adds one of `NARROW_QUALIFIERS` - "Arial Narrow" is not Arial, a narrower font whose
+    words this machine's Arial set too wide (`stood_in`, `stretch`; ua-space:1's title ran off the
+    slide when it was silently taken for Arial itself)."""
+    if low == flat:
+        return True
+    shorter, longer = (low, flat) if len(low) <= len(flat) else (flat, low)
+    if not shorter or not longer.startswith(shorter):
+        return False
+    return not any(longer[len(shorter):].startswith(q) for q in NARROW_QUALIFIERS)
+
+
 def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
     """The files of the family a deck font names, keyed by fontspec's style, or {}.
 
@@ -328,6 +350,10 @@ def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
             if _have(sub) or _fetch(sub):
                 got = _font_family(sub, want)
                 if got and flatten(got["match"]) == flatten(sub):
+                    if flatten(name) in SLANTED:
+                        got = {**got, "UprightFont": got.get("ItalicFont") or got["UprightFont"],
+                               "BoldFont": got.get("BoldItalicFont") or got.get("BoldFont")}
+                        got = {k: v for k, v in got.items() if v}
                     # the deck's font, in all but its files (`standin` says whose)
                     return {**got, "match": name, "standin": got["stem"]}
         # a Windows or Mac CJK face stands in as its Noto face: ja-schedule's MS Mincho address
@@ -351,7 +377,18 @@ SUBSTITUTES = {
     "georgia": ["Gelasio"], "arialblack": ["Archivo Black"], "bodoni": ["Libre Bodoni", "Bodoni Moda"],
     "droidsans": ["Noto Sans"], "droidserif": ["Noto Serif"], "droidsansmono": ["Noto Sans Mono"],
     "bookantiqua": ["Palatino Linotype"], "googlesansmono": ["Google Sans Code"],
+    # Monotype Corsiva is a Windows-only chancery italic with no metric twin (korea-pptx: Slides
+    # itself calls the font "Corsiva"): a serif's italic (`SLANTED`) reads as it and sets its words
+    # about as wide. Petit Formal Script, a copperplate, set them a third wider and wrapped each title.
+    "corsiva": ["Tinos"], "monotypecorsiva": ["Tinos"],
+    "arialnarrow": ["Arimo"],
 }
+# Fonts whose upright is itself an italic: their stand-in is set in its italic faces throughout
+SLANTED = {"corsiva", "monotypecorsiva"}
+# A stand-in for a font that is its twin drawn narrower by design is set that much narrower when the
+# deck's thumbnails measure too few lines to say (`font_widths`): Arial Narrow is Arial at 82%
+# (ua-space's and arabic-training's titles, set in plain Arimo, ran off their slides).
+DESIGN_WIDTHS = {"arialnarrow": 0.82}
 
 
 # What Slides draws a CJK font in when it does not have it: apps-edu-zh's Microsoft JhengHei (a .pptx
@@ -405,7 +442,7 @@ def _font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
         low = flatten(stem)
         if family_of(stem) != want:
             continue
-        if flat and (low.startswith(flat) or flat.startswith(low)) and abs(len(low) - len(flat)) < asked[0]:
+        if flat and same_font_name(low, flat) and abs(len(low) - len(flat)) < asked[0]:
             asked = (abs(len(low) - len(flat)), stem, files)
         # The nearest name of the same kind: to the family already found for the rest of the deck, or
         # else to the one asked for ("Google Sans Text" -> GoogleSansFlex, not helvet). Four letters
@@ -782,7 +819,7 @@ def stood_in(font: str, files: dict) -> str | None:
     if files.get("standin"):
         return files["standin"]
     low, asked = flatten(files["match"]), flatten(font)
-    return None if low.startswith(asked) or asked.startswith(low) else files["stem"]
+    return None if same_font_name(low, asked) else files["stem"]
 
 
 def missing_fonts_lines(missing: list[dict]) -> list[str]:
@@ -873,9 +910,9 @@ def stretch(font: str, stem: str, files: dict, target: dict) -> str:
     thumbnails show of it differs from its advances by its kerning alone - Pacifico's script
     measured 3% narrow, and condensed by that it set sc-aesthetic-school's titles longer, not shorter."""
     asked, have = flatten(font), flatten(stem)
-    if have.startswith(asked) or asked.startswith(have) or files.get("FontIndex"):
+    if same_font_name(have, asked) or files.get("FontIndex"):
         return ""                               # (a collection's face is found by its own name)
-    ratio = font_widths(font, files, target)
+    ratio = font_widths(font, files, target) or DESIGN_WIDTHS.get(asked)
     if ratio is None:
         return ""
     print(f"  {font}: set {ratio:.3f} wide to match the deck's slides")
