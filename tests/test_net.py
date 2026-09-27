@@ -136,6 +136,115 @@ def test_a_read_deck_s_pictures_come_through_the_fetcher(tmp_path, fetcher):
     assert "egress denied" in deck_ir.stash_picture("https://lh3/pic=s0", deck_ir.fetch_url, tmp_path)["error"]
 
 
+def _s15f16(x: float) -> bytes:
+    import struct
+    return struct.pack(">i", int(round(x * 65536)))
+
+
+def _xyztype(x: float, y: float, z: float) -> bytes:
+    return b"XYZ " + b"\x00" * 4 + _s15f16(x) + _s15f16(y) + _s15f16(z)
+
+
+def _curv_gamma(gamma: float) -> bytes:
+    import struct
+    data = b"curv" + b"\x00" * 4 + struct.pack(">I", 1) + struct.pack(">H", int(round(gamma * 256)))
+    while len(data) % 4:
+        data += b"\x00"
+    return data
+
+
+def icc_gamma_profile(gamma: float) -> bytes:
+    """A minimal, valid ICC v2 RGB matrix/TRC profile (lcms2 loads it) whose channels are a plain
+    `gamma`, not sRGB's own curve - just enough to prove a picture's embedded profile is applied and
+    not silently ignored (deck_ir.srgb_bytes, defect A: firebase-jam slide 23's washed-out teal
+    background - a Google-served picture's own "Display" ICC profile, applied, is the saturated
+    colour the live thumbnail shows)."""
+    import struct
+
+    def desc_type(text: bytes) -> bytes:
+        text = text + b"\x00"
+        out = b"desc" + b"\x00" * 4 + struct.pack(">I", len(text)) + text
+        out += struct.pack(">III", 0, 0, 0)[:8] + struct.pack(">H", 0) + struct.pack(">B", 0) + b"\x00" * 67
+        while len(out) % 4:
+            out += b"\x00"
+        return out
+
+    def text_type(text: bytes) -> bytes:
+        out = b"text" + b"\x00" * 4 + text + b"\x00"
+        while len(out) % 4:
+            out += b"\x00"
+        return out
+
+    curve = _curv_gamma(gamma)
+    tags = {
+        "desc": desc_type(b"test"), "cprt": text_type(b"public domain"),
+        "wtpt": _xyztype(0.9642, 1.0, 0.8249),
+        "rXYZ": _xyztype(0.4360, 0.2225, 0.0139), "gXYZ": _xyztype(0.3851, 0.7169, 0.0971),
+        "bXYZ": _xyztype(0.1431, 0.0606, 0.7139),
+        "rTRC": curve, "gTRC": curve, "bTRC": curve,
+    }
+    order = ["desc", "cprt", "wtpt", "rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC"]
+    offset = 128 + 4 + 12 * len(order)
+    entries, blob, written = [], b"", {}
+    for name in order:
+        data = tags[name]
+        if data in written:
+            off, sz = written[data]
+        else:
+            off, sz = offset, len(data)
+            written[data] = (off, sz)
+            blob += data
+            offset += sz
+        entries.append((name.encode(), off, sz))
+    header = bytearray(128)
+    struct.pack_into(">I", header, 0, 128 + 4 + 12 * len(order) + len(blob))
+    header[8:12] = struct.pack(">I", 0x02100000)
+    header[12:16], header[16:20], header[20:24], header[36:40] = b"mntr", b"RGB ", b"XYZ ", b"acsp"
+    header[68:80] = _s15f16(0.9642) + _s15f16(1.0) + _s15f16(0.8249)
+    table = struct.pack(">I", len(order))
+    for sig, off, sz in entries:
+        table += sig + struct.pack(">II", off, sz)
+    return bytes(header) + table + blob
+
+
+def png_with_icc(colour, icc: bytes) -> bytes:
+    from PIL import Image
+    buf = io.BytesIO()
+    Image.new("RGB", (8, 8), colour).save(buf, format="PNG", icc_profile=icc)
+    return buf.getvalue()
+
+
+def test_a_picture_s_embedded_colour_profile_is_applied_and_dropped(tmp_path, fetcher):
+    """firebase-jam slide 23's page-background picture (a `stretchedPictureFill`) carries a
+    "Display" ICC profile: read raw, its teal is (94, 204, 209); colour-managed, Google's own
+    saturated (16, 207, 211) - the live thumbnail's colour. LaTeX/PDF only ever draws the raw bytes
+    of whatever `stash_picture` saves, so the conversion has to happen once, here, at fetch time
+    (deck_ir.srgb_bytes)."""
+    from beamer2slides import deck_ir
+
+    icc = icc_gamma_profile(1.0)  # a plain gamma of 1.0: sRGB's own curve is not gamma 1.0
+    data = png_with_icc((128, 128, 128), icc)
+
+    fetcher(lambda url: data)
+    got = deck_ir.stash_picture("https://lh3/pic=s0", deck_ir.fetch_url, tmp_path)
+    saved = (tmp_path / got["file"]).read_bytes()
+    from PIL import Image
+    import numpy as np
+    out = Image.open(io.BytesIO(saved))
+    assert out.info.get("icc_profile") is None                 # no profile left to (mis)apply again
+    px = tuple(np.array(out.convert("RGB"))[0, 0])
+    assert px != (128, 128, 128)                                # the profile was actually used
+    assert px == (188, 188, 188)                                # deterministic: lcms2's own transform
+
+
+def test_a_picture_with_no_colour_profile_is_untouched(tmp_path, fetcher):
+    from beamer2slides import deck_ir
+
+    fetcher(lambda url: png())
+    got = deck_ir.stash_picture("https://lh3/pic=s0", deck_ir.fetch_url, tmp_path)
+    assert (tmp_path / got["file"]).read_bytes() == png()
+
+
 def test_a_picture_s_source_url_on_any_host_goes_through_the_fetcher(tmp_path, fetcher):
     """The original of a picture inserted by URL: a host chosen by whoever inserted it, which is
     exactly the egress a backend has to see."""

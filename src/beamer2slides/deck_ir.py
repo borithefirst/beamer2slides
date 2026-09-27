@@ -739,14 +739,57 @@ def parent_background(page: dict, pages: dict[str, dict], resolver: "StyleResolv
     return page_background(pages[parent], pages, resolver.scheme_for(pages[parent]))
 
 
+def srgb_bytes(data: bytes, fmt: str) -> bytes:
+    """`data` with any embedded (non-sRGB) ICC profile applied and dropped, for a PNG or JPEG.
+
+    A picture or a full-page `stretchedPictureFill` background Slides serves through `contentUrl`
+    can carry a "Display" ICC profile whose colours are meant to be colour-managed on the way to
+    the screen; LaTeX/PDF only ever draws the raw bytes, so left alone the page comes out visibly
+    washed out next to Google's own thumbnail (firebase-jam slide 23's NDK background: raw
+    (94, 204, 209) reads, once this profile is applied, as (16, 207, 211) - Google's own colour).
+    Converting once here, at fetch time, means every downstream reader can keep assuming sRGB."""
+    if fmt not in ("png", "jpeg"):
+        return data
+    try:
+        import io
+        from PIL import Image, ImageCms
+        img = Image.open(io.BytesIO(data))
+        icc = img.info.get("icc_profile")
+        if not icc:
+            return data
+        src_profile = ImageCms.ImageCmsProfile(io.BytesIO(icc))
+        if "srgb" in ImageCms.getProfileDescription(src_profile).lower().replace(" ", ""):
+            return data                   # already what PDF assumes: a JPEG is not re-encoded for nothing
+        srgb_profile = ImageCms.createProfile("sRGB")
+        has_alpha = "A" in img.getbands()
+        alpha = img.getchannel("A") if has_alpha else None
+        converted = ImageCms.profileToProfile(img.convert("RGB"), src_profile, srgb_profile)
+        if has_alpha:
+            converted = converted.convert("RGBA")
+            converted.putalpha(alpha)
+        # `profileToProfile` embeds the *target* profile's bytes in the result's own info so a
+        # naive save would keep tagging it - every downstream reader here already assumes sRGB with
+        # no tag at all, so drop it rather than pass it on unasked.
+        converted.info.pop("icc_profile", None)
+        buf = io.BytesIO()
+        if fmt == "jpeg":
+            converted.convert("RGB").save(buf, format="JPEG", quality=95)
+        else:
+            converted.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001 - a picture with a profile PIL can't read stays as fetched
+        return data
+
+
 def stash_picture(url: str, fetch, images: Path) -> dict:
     """Download a picture into `images`, sha1-named: {file, sha1, format}, or {error}."""
     try:
         # contentUrl (=s2048) gives the stored picture byte for byte, as the .pptx export does;
         # crop, transparency, rotation and outline are not baked into it (tools/probe_images.py)
         data = fetch(url)
-        sha = hashlib.sha1(data).hexdigest()
         fmt = image_format(data)
+        data = srgb_bytes(data, fmt)
+        sha = hashlib.sha1(data).hexdigest()
         images.mkdir(parents=True, exist_ok=True)
         path = images / f"{sha[:16]}.{FORMAT_EXT.get(fmt, 'img')}"
         if not path.exists():
