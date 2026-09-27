@@ -56,6 +56,21 @@ def test_a_solid_freeform_is_traced_as_its_outline_not_its_box():
     assert "_traced" not in el
 
 
+def test_a_ring_of_one_noisy_colour_is_that_colour():
+    """drawing-workshop 52: JPEG noise split the purple page around an icon over several 8-wide
+    buckets, none holding half the ring, so `ring_colour` said nothing and the icon's hole was
+    filled. The colour is taken where most of the ring lies within TOL of the busiest bucket."""
+    rng = np.random.default_rng(0)
+    a = np.full((60, 60, 3), (147, 11, 144), np.int16) + rng.integers(-5, 6, (60, 60, 3))
+    a = np.clip(a, 0, 255).astype(np.uint8)
+    got = deck_freeforms.ring_colour(a, (20, 20, 40, 40))
+    assert got is not None and np.abs(np.asarray(got, float) - (147, 11, 144)).max() <= 2
+    a[:, :33] = (0, 200, 0)                                 # mostly green: purple lost the ring
+    assert np.abs(np.asarray(deck_freeforms.ring_colour(a, (20, 20, 40, 40)), float) - (0, 200, 0)).max() <= 2
+    a[:28] = (230, 230, 230)                              # three colours: none has half of it
+    assert deck_freeforms.ring_colour(a, (20, 20, 40, 40)) is None
+
+
 def test_without_thumbnails_nothing_is_traced():
     [el] = elements(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC"))))
     assert "trace" not in el

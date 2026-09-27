@@ -350,7 +350,13 @@ def blend(colour, alpha: float, ground):
 
 
 def ring_colour(a: np.ndarray, region, width: int = 4):
-    """The colour most of a ring just around `region` is (None when there is too little of it)."""
+    """The colour most of a ring just around `region` is (None when there is too little of it). The
+    majority vote is taken twice - a coarse 8-wide bucket first to guess near which colour the votes
+    cluster, then every pixel within `TOL` of that guess (as `unread_paint` already does) - because a
+    ring thin enough to sit hard against a neighbour (a check mark's ring against its own drop
+    shadow's crescent, drawing-workshop 52) is mostly one true flat colour that JPEG noise and antialiasing
+    still split across several adjacent buckets, none reaching the coarse bucket's own 50% on its
+    own even though the colour they all approximate does."""
     h, w = a.shape[:2]
     a0, b0, a1, b1 = region
     o0, p0, o1, p1 = max(0, a0 - width), max(0, b0 - width), min(w, a1 + width), min(h, b1 + width)
@@ -362,10 +368,11 @@ def ring_colour(a: np.ndarray, region, width: int = 4):
     q = (px_ // 8).astype(np.int32)
     packed = (q[:, 0] << 10) | (q[:, 1] << 5) | q[:, 2]
     top = int(np.bincount(packed).argmax())
-    near = px_[packed == top]
-    if len(near) < 0.5 * len(px_):
+    guess = np.median(px_[packed == top], axis=0)
+    close = np.abs(px_.astype(np.int16) - guess).max(axis=1) <= TOL
+    if close.sum() < 0.5 * len(px_):
         return None
-    return np.median(near, axis=0)
+    return np.median(px_[close], axis=0)
 
 
 def unread_paint(sub: np.ndarray, visible: np.ndarray, ground):
@@ -511,8 +518,16 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
         explained = hidden | lettered | (wordy & (cov > 0.1)) | unsaid(a, region, above, px)
         # what a hole of the shape's own shows is what lies under it: the page, or an element under
         # it. A hole showing anything else is something above that the deck did not tell (sc-memphis'
-        # Canva art on its yellow panel), and the shape goes on under it
-        grounds = [page] if page is not None else under_colours(a, region, el, under)
+        # Canva art on its yellow panel), and the shape goes on under it. The page's own colour is a
+        # ground even when something else also lies under the element somewhere in its box (drawing-
+        # workshop 52's check mark: a black drop-shadow copy of the same ring sits almost on top of it, so `page` is
+        # None and only that shadow's own colour was asked for before - but the ring's true interior is
+        # the slide's own background, not the shadow's, wherever the shadow itself does not reach it)
+        if page is not None:
+            grounds = [page]
+        else:
+            bg = F.rgb(background)
+            grounds = ([bg] if bg is not None else []) + under_colours(a, region, el, under)
         shows_ground = np.zeros_like(inside)
         for g in grounds:
             shows_ground |= np.abs(sub - g).max(axis=2) <= TOL
