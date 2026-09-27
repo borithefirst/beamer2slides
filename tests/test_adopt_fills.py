@@ -431,6 +431,45 @@ def test_a_radial_gradient_is_recovered():
     assert np.abs(got_in - inner).max() <= 14 and np.abs(got_out - outer).max() <= 14
 
 
+def test_a_sliver_beside_a_full_width_picture_still_fits_a_gradient():
+    """china-pptx slide 47: a full-width title strip across the top and a picture almost as wide as
+    the page below it leave only two thin vertical slivers of the page's own radial background
+    visible - 5.3% of the page here, matching the real slide. `page_gradient` must still fit it
+    (`PAGE_GRAD_MIN_SHARE` was 0.08, too high for that; it is now 0.03) - the two slivers alone gave
+    the right centre and colours on the live deck, confirmed against a sibling slide sharing the same
+    layout with 22% of the page visible. Painted at 1600x900 (Google's own `getThumbnail` LARGE
+    width, not this file's usual 720): at 720 the slivers are physically too few pixels wide for
+    `_radial_centre`'s fixed step to triangulate at all, which is a resolution artefact of the test,
+    not a real slide's - `getThumbnail` never comes back narrower than this."""
+    W, H = 1600, 900
+    SCALE = W / 720
+    title = shape("title", "TEXT_BOX", 0, 0, 720, 108, solid("ffffff"))
+    picture = shape("pic", "CUSTOM", 30, 108, 665, 297, solid("ffffff"))
+    pres = bg_deck(solid("ddebcf"), title, picture)
+    page_w, page_h, _ = page_size_for(pres, None, True)
+    px = W / page_w
+    title_h = round(108 * SCALE)
+    pic_x0, pic_x1 = round(30 * SCALE), round(695 * SCALE)
+    bboxes = [{"bbox": [0.0, 0.0, page_w, 108 * page_w / 720]},
+              {"bbox": [30 * page_w / 720, 108 * page_w / 720, 695 * page_w / 720, page_h]}]
+    mask = deck_fills.page_visible_mask(bboxes, px, W, H)
+    cx, cy = page_w * 0.5, page_h * 0.5                 # IR pt, the page's own centre
+    yy, xx = np.mgrid[0:H, 0:W]
+    r_full = np.hypot(xx - cx * px, yy - cy * px)
+    r_out = r_full[mask].max()                          # scaled to the radius the slivers themselves
+    inner, outer = np.array([255.0, 255.0, 201.0]), np.array([22.0, 107.0, 19.0])
+    thumb = (inner + (outer - inner) * np.clip(r_full / r_out, 0, 1)[..., None]).round().astype(np.uint8)
+    thumb[0:title_h, 0:W] = [255, 255, 255]             # the title's own white box
+    thumb[title_h:H, pic_x0:pic_x1] = [255, 255, 255]   # the picture's own white box
+    s = slide0(pres, thumb)
+    assert s["background_color"] is None or s["background_color"] == "#ddebcf"
+    g = s["background_gradient"]
+    assert g is not None and g["type"] == "radial"
+    assert abs(g["center"][0] - cx) <= 15 and abs(g["center"][1] - cy) <= 15
+    got_in, got_out = deck_fills.rgb(g["colors"][0]), deck_fills.rgb(g["colors"][1])
+    assert np.abs(got_in - inner).max() <= 25 and np.abs(got_out - outer).max() <= 25
+
+
 def test_a_matching_flat_colour_is_left_alone():
     """The ordinary case - almost every slide's: nothing is fitted when the reported colour already
     explains the thumbnail's background."""

@@ -769,7 +769,14 @@ def element_appearance_share(sub: np.ndarray, region: np.ndarray, el: dict) -> f
     return None
 
 
-PAGE_GRAD_MIN_SHARE = 0.08   # share of the page that must be visible past every element's box
+PAGE_GRAD_MIN_SHARE = 0.03   # share of the page that must be visible past every element's box - low
+                              # enough that a page mostly covered by its own title and a full-bleed
+                              # picture still gets a fit from the two thin strips beside it
+                              # (china-pptx slide 47: two vertical slivers are 5.3% of the page and
+                              # alone fit the same radial model - centre, radius and stops all within
+                              # a few percent - that a sibling slide sharing the same layout fits from
+                              # 22% of it; `_fit_share`'s own 85%-explained bar and margin over the
+                              # flat colour, not this share, are what keep a small region honest)
 PAGE_GRAD_MIN_PIXELS = 3000  # ... and at least this many pixels, so a sliver never fits a "ramp"
 PAGE_GRAD_FIT = 0.85         # share of the visible background pixels a model must explain
 PAGE_GRAD_MARGIN = 0.15      # a model must beat the flat colour's own fit by at least this much
