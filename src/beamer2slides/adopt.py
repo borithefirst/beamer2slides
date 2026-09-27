@@ -382,6 +382,9 @@ SUBSTITUTES = {
     # about as wide. Petit Formal Script, a copperplate, set them a third wider and wrapped each title.
     "corsiva": ["Tinos"], "monotypecorsiva": ["Tinos"],
     "arialnarrow": ["Arimo"],
+    # renamed in google/fonts, still offered by Slides under the old name: en-flowchart's Source Sans
+    # Pro was set in Arimo offline, every body line wrapping a word early
+    "sourcesanspro": ["Source Sans 3"], "sourceserifpro": ["Source Serif 4"], "baloo": ["Baloo 2"],
 }
 # Fonts whose upright is itself an italic: their stand-in is set in its italic faces throughout
 SLANTED = {"corsiva", "monotypecorsiva"}
