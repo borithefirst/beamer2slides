@@ -168,7 +168,7 @@ def default_rings(kind: str, w: float, h: float,
     """Every ring of `adopt_shapes.preset`'s fill paths ("fs", "f" or an "-eo" fill mode) for
     `kind` in its own w by h frame - the silhouette the *default* adjustment draws - or None when
     the preset is unknown, or draws no fill at all (stroke-only: brackets, braces)."""
-    from . import adopt_shapes
+    from .. import adopt_shapes
     paths = adopt_shapes.preset(kind, w, h, corner)
     if not paths:
         return None
@@ -216,7 +216,7 @@ def match_score(a: np.ndarray, el: dict, above: list[dict], px: float, own_words
     its face - `deck_fills.sample_element` skips these for the same reason), or too little of the
     box visible (`deck_fills.SEEN`, mirroring "skip shapes under text or pictures") or too little
     fill-coloured ink to call it either way (`MIN_TRUE_PX`)."""
-    from . import deck_fills
+    from .. import deck_fills
     kind = (el.get("shape_type") or "").upper()
     if kind not in ADJUSTABLE_PRESETS:
         return None
