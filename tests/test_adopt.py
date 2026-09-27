@@ -598,3 +598,63 @@ def test_adopt_reads_every_slide_thumbnail_and_gives_up_on_one_quietly(monkeypat
     get = ir.slide_thumbnails("pid", pres, tmp_path / "thumbnails")
     assert get(0) == tmp_path / "thumbnails" / "001.png" and get(1) is None
     assert get(2).read_bytes() == b"png of https://thumbs/c" and get(3) is None
+
+
+def test_a_right_to_left_one_line_box_is_measured_too():
+    """hebrew-lesson's Hebrew paragraphs are flush right, direction rtl (`deck_ir` mirrors a
+    right-to-left paragraph's own START to align=right): that is its equivalent of a left-to-right
+    paragraph's align=left, not a paragraph to exclude - `ink_widths`' pixel scan is blind to which
+    edge the words sit against. Before this, no right-to-left box was ever measured, so `font_widths`
+    always answered None for a deck's Hebrew or Arabic text and no stand-in was ever stretched to it."""
+    import numpy as np
+
+    from beamer2slides.deck_thumbs import ink_widths
+    px = 4.0
+    im = np.full((int(100 * px), int(200 * px), 3), 240, dtype=np.int16)
+    im[int(24 * px):int(30 * px), int(120 * px):int(180 * px)] = 20   # flush right, not left
+
+    def element(align: str, direction: str | None):
+        p = {"align": align, "bullet": None, "runs": [{"text": "מוסר השכל", "size": 8.0}]}
+        if direction:
+            p["direction"] = direction
+        return {"kind": "text", "bbox": [10.0, 10.0, 190.0, 60.0], "anchor": [16.7, 30.0],
+                "box": {"scale": 1.0}, "paragraphs": [p]}
+
+    rtl = element("right", "rtl")
+    ink_widths([rtl], im, px)
+    assert rtl["ink_width"] == pytest.approx(60.0, abs=0.3)
+
+    # a left-to-right paragraph that merely happens to be right-aligned is unrelated and still
+    # excluded (this is not a blanket relaxation of the alignment check)
+    plain_right = element("right", None)
+    ink_widths([plain_right], im, px)
+    assert "ink_width" not in plain_right
+
+    # a right-to-left paragraph flush with its OWN start (align=right) is measured, but one written
+    # centered, or mistakenly left, is not - only the mirrored equivalent of "left" qualifies
+    off_start = element("left", "rtl")
+    ink_widths([off_start], im, px)
+    assert "ink_width" not in off_start
+
+
+def test_font_widths_ignores_bidi_marks_in_a_right_to_left_line(tmp_path):
+    """A right-to-left line's logical text carries LRM/RLM marks where `bidi.logical_line` needed to
+    hold a direction island together (`bidi.MARKS`): they draw nothing and take no room, and are not
+    on any real machine font's cmap - so a mark anywhere in the measured line, not only at an edge,
+    used to cost `font_widths` the whole line (`None in names`), or its first/last glyph having no
+    outline to bound. hebrew-lesson mixes Hebrew and Latin: "1. <hebrew words>" needs an LRM to keep
+    the digit's run together with the right-to-left line around it."""
+    from beamer2slides.bidi import LRM, RLM
+    from .test_adopt_media import tiny_font
+    path = tmp_path / "TinySans-Regular.ttf"
+    path.write_bytes(tiny_font("Tiny Sans"))    # covers ASCII only: no glyph for LRM/RLM
+    files = {"UprightFont": path}
+
+    def sample(width, text):
+        return {"ink_width": width, "paragraphs": [{"runs": [{"text": text, "size": 10.0, "font": "Deck Serif"}]}]}
+    # 5 "A"s at 10 pt is 29 pt of ink (600 advance, 100 right bearing); marks add no glyph and no width
+    plain = {"slides": [{"elements": [sample(26.1, "AAAAA"), sample(26.2, "AAAAA")]}]}
+    marked = {"slides": [{"elements": [
+        sample(26.1, f"{RLM}AA{LRM}AAA"), sample(26.2, f"{LRM}{RLM}AAAAA{RLM}")]}]}
+    assert adopt.font_widths("Deck Serif", files, marked) == adopt.font_widths("Deck Serif", files, plain)
+    assert adopt.font_widths("Deck Serif", files, marked) == pytest.approx(0.9, abs=0.005)

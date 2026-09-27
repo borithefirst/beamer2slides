@@ -857,6 +857,7 @@ def font_widths(font: str, files: dict, target: dict) -> float | None:
         from fontTools.ttLib import TTFont
     except ImportError:
         return None
+    from .bidi import MARKS
     loaded: dict = {}
     ratios = []
     for s in target["slides"]:
@@ -879,7 +880,13 @@ def font_widths(font: str, files: dict, target: dict) -> float | None:
             if loaded[path] is None:
                 continue
             f, cmap, glyphs, hmtx, upem = loaded[path]
-            text = "".join(r["text"] for r in runs).strip()
+            # an RTL line's logical text carries LRM/RLM marks where bidi.logical_line needed to hold
+            # a direction island together (bidi.MARKS): they draw nothing and take no room, but have
+            # no outline to bound and often no cmap entry, so a mark anywhere in the line - not only
+            # at an edge - would otherwise cost the whole line's measurement
+            text = "".join(c for c in "".join(r["text"] for r in runs) if c not in MARKS).strip()
+            if not text:
+                continue
             names = [cmap.get(ord(c)) for c in text]
             if None in names:
                 continue

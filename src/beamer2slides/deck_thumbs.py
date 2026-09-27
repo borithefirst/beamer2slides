@@ -575,8 +575,10 @@ def ink_widths(elements: list[dict], thumb, px: float) -> None:
     """How wide the thumbnail shows the first line of each text box's first paragraph (`ink_width`,
     page pt, first ink column to last): `adopt.font_widths` holds them against the stand-in a deck's
     font is set in when this machine does not have it, for the paragraphs that fit on one line.
-    Only a paragraph in one font, size and style, left-aligned, with no bullet, whose line nothing
-    else crosses and whose words do not touch the box's sides."""
+    Only a paragraph in one font, size and style, flush with its own reading direction's start (left
+    for a left-to-right paragraph, right for a right-to-left one - the pixel scan itself does not
+    care which edge the words sit against), with no bullet, whose line nothing else crosses and whose
+    words do not touch the box's sides."""
     if thumb is None or not px:
         return
     import numpy as np
@@ -588,7 +590,11 @@ def ink_widths(elements: list[dict], thumb, px: float) -> None:
         p = paras[0]
         runs = [r for r in p["runs"] if r["text"].strip()]
         text = "".join(r["text"] for r in p["runs"])
-        if not runs or p.get("bullet") or p.get("align", "left") != "left" or p.get("direction") == "rtl" \
+        # a right-to-left paragraph's own "flush start" is written align=right (deck_ir mirrors
+        # START/END for it): that is its equivalent of a left-to-right paragraph's align=left, not
+        # something to exclude - the column scan below reads pixels, blind to reading direction.
+        start_align = "right" if p.get("direction") == "rtl" else "left"
+        if not runs or p.get("bullet") or p.get("align", "left") != start_align \
                 or any(c in text for c in "\x0b\n\t") or len(text.strip()) < 4 \
                 or len({(r.get("font"), bool(r.get("bold")), bool(r.get("italic")), r.get("size"),
                          r.get("script")) for r in runs}) != 1:
