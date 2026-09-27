@@ -440,13 +440,23 @@ def run(tag: str, names: list[str], gpu: bool, jobs: int) -> None:
     # is not thread-safe, and the GPU is one)
     with ThreadPoolExecutor(jobs) as pool:
         list(pool.map(lambda d: run_pdf(corpus_dir() / d / "runs" / tag), decks))
-    g = Gpu() if gpu else None
-    for deck in decks:
-        rows = measure_deck(deck, tag, g)
+    def save(deck, rows):
         out = corpus_dir() / deck / "runs" / tag / "metrics.json"
         out.write_text(json.dumps({"deck": deck, "tag": tag, "reach": REACH, "slides": rows}, indent=0),
                        encoding="utf-8")
         print(f"{deck:<24} {len(rows):>4} slides", flush=True)
+    if gpu:
+        g = Gpu()
+        for deck in decks:
+            save(deck, measure_deck(deck, tag, g))
+        return
+    # without the GPU a deck per process: each has its own PDFium (one thread took 21 minutes over
+    # the 1,937 slides of round off1)
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    with ProcessPoolExecutor(max(1, jobs)) as pool:
+        futures = {pool.submit(measure_deck, deck, tag, None): deck for deck in decks}
+        for f in as_completed(futures):
+            save(futures[f], f.result())
 
 
 # ------------------------------------------------------------------------------------------ judged

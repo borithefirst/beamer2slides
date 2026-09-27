@@ -730,10 +730,13 @@ def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -
             if instead:
                 lacking(font, fam, instead if files.get("standin") else None)
             stem, match = files.pop("stem"), files.pop("match")
-            files.pop("standin", None)
+            twin = files.pop("standin", None)
             low, asked = flatten(match), flatten(font)
-            if not (low.startswith(asked) or asked.startswith(low)):
-                continue                                # a stand-in: the kind's main font already is one
+            # the nearest face of the kind is what the kind's main font already is; a metric twin
+            # is not: offline, arabic-training's Arial words (Arimo) had lost their switch to the
+            # document's font
+            if not (twin or low.startswith(asked) or asked.startswith(low)):
+                continue
             if font_coverage(files["UprightFont"], letters.get(font, {}), files.get("FontIndex") or 0) < MIN_COVERAGE:
                 # Slides draws what the font lacks in a fallback of its own: Hebrew typed "in" Noto
                 # Sans Symbols, Japanese "in" Arial. Switching to the font would set nothing at all
