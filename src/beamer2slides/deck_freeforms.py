@@ -119,6 +119,20 @@ def dilate(mask: np.ndarray, r: int) -> np.ndarray:
     return out
 
 
+def enclosed(wall: np.ndarray) -> np.ndarray:
+    """What a closed ring (`wall`, its ink) keeps in: the ring itself, plus every pixel that a walk
+    from the region's own edge cannot reach without crossing it. A gap in the ring lets the outside
+    in, so it is no longer enclosed - as with a hand-drawn outline that never quite closes."""
+    free = ~wall
+    labels, n = components(free, conn8=False)
+    if not n:
+        return np.ones_like(wall)
+    border = np.unique(np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]]))
+    border = border[border != 0]
+    outside = np.isin(labels, border) if border.size else np.zeros_like(free)
+    return ~outside
+
+
 def max_filter(v: np.ndarray, r: int) -> np.ndarray:
     out = v.copy()
     h, w = v.shape
@@ -379,6 +393,7 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
     hidden, wordy, inks = unknowns(a, region, above, px)
     page = F.rgb(background) if bottom else None
     ground = page
+    ring_field = None
     if unread and not fill:
         ground = page if page is not None else ring_colour(a, region)
         paint = unread_paint(sub, ~hidden & ~wordy, ground)
@@ -413,8 +428,23 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
             return "no-paint"
         if page is not None and all(np.abs(p - page).max() <= TOL for p in paints):
             return "page-colour"                           # the page's own colour: its edges cannot be seen
-    cov = np.max([coverage(sub, p, ground) for p in paints], axis=0)
-    inside = (cov >= 0.5) & ~hidden
+        # a fill the ground already shows draws no edge of its own (a white cloud on a near-white
+        # page): the outline is the only ink marching squares can key on, so what is asked for is
+        # not the fill's colour but what that ring encloses
+        if fill and stroke and page is not None:
+            fill_paint, stroke_paint = F.rgb(fill).astype(np.float32), F.rgb(stroke).astype(np.float32)
+            if np.abs(fill_paint - page).max() <= TOL and np.abs(stroke_paint - page).max() > TOL:
+                ring_field = (fill_paint, stroke_paint)
+    if ring_field is not None:
+        fill_paint, stroke_paint = ring_field
+        ring_cov = coverage(sub, stroke_paint, page)
+        wall = dilate(ring_cov >= 0.5, 1)
+        inside = enclosed(wall) & ~hidden
+        cov = np.where(wall, np.clip(ring_cov, 0.51, 1.0), np.where(inside, 1.0, 0.0))
+        paints = [fill_paint, stroke_paint]
+    else:
+        cov = np.max([coverage(sub, p, ground) for p in paints], axis=0)
+        inside = (cov >= 0.5) & ~hidden
     if any(ink is not None and np.abs(ink - p).max() <= 3 * TOL for ink in inks for p in paints):
         inside &= ~wordy                     # letters in the shape's own colour are not the shape
     # a piece with no pixel that is the paint itself is a texture's speck or an antialiased edge

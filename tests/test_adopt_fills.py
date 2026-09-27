@@ -43,19 +43,20 @@ def shape(oid, kind, x, y, w, h, fill) -> dict:
     return pe
 
 
-def deck(*elements) -> dict:
-    """A 720 x 405 pt deck, white background, one slide holding `elements`."""
+def deck(*elements, bg: str = "FFFFFF") -> dict:
+    """A 720 x 405 pt deck, `bg` background (white by default), one slide holding `elements`."""
     return {"presentationId": "p", "title": "t", "pageSize": {"width": pt(720), "height": pt(405)},
             "masters": [{"objectId": "m", "pageElements": [],
-                         "pageProperties": {"pageBackgroundFill": solid("FFFFFF")}}],
+                         "pageProperties": {"pageBackgroundFill": solid(bg)}}],
             "layouts": [{"objectId": "L", "layoutProperties": {"masterObjectId": "m"}, "pageElements": []}],
             "slides": [{"objectId": "s", "slideProperties": {"layoutObjectId": "L"},
                         "pageElements": list(elements)}]}
 
 
-def page(*rects) -> np.ndarray:
-    """A white 720 x 405 thumbnail with (x, y, w, h, colour) rectangles painted in order."""
-    a = np.full((405, 720, 3), 255, dtype=np.uint8)
+def page(*rects, bg: str = "FFFFFF") -> np.ndarray:
+    """A `bg`-coloured (white by default) 720 x 405 thumbnail with (x, y, w, h, colour) rectangles
+    painted in order."""
+    a = np.full((405, 720, 3), [int(bg[i:i + 2], 16) for i in (0, 2, 4)], dtype=np.uint8)
     for x, y, w, h, c in rects:
         a[y:y + h, x:x + w] = [int(c[i:i + 2], 16) for i in (1, 3, 5)]
     return a

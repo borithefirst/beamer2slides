@@ -131,6 +131,31 @@ def test_a_traced_path_keeps_its_points_below_the_top_edge():
     assert adopt_shapes.P(1, 0.5) == "(1pt,-0.5pt)"
 
 
+def test_a_fill_the_page_already_shows_is_traced_by_its_outline_not_left_a_rectangle():
+    """A white cloud on a near-white page (showcase's `water`, blob() with an #a8dadc outline): the
+    fill gives marching squares no edge of its own, so without an outline to key on it used to fall
+    back to the whole box (a visible rectangle). Traced from the ring instead, a disc - whose corners
+    are page colour too - comes out a disc, not its 80 x 80 box."""
+    ring = disc(140, 140, 41) & ~disc(140, 140, 38)
+    pe = outlined(shape("a", "CUSTOM", 100, 100, 80, 80, solid("FFFFFF")), "A8DADC", 1.5)
+    [el] = elements(deck(pe, bg="F7FBFC"), paint(page(bg="F7FBFC"), ring, "#a8dadc"))
+    tr = el["trace"]
+    assert tr["fill"].lower() == "#ffffff" and tr["stroke"].lower() == "#a8dadc"
+    assert len(tr["rings"]) == 1
+    assert abs(ring_area(tr["rings"]) - np.pi * 40 ** 2) < 0.25 * np.pi * 40 ** 2
+    out = adopt_shapes.shape_block(el, Context(), "")
+    assert "rectangle (80" not in out and "cycle" in out
+
+
+def test_a_fill_the_page_shows_with_no_outline_still_falls_back_to_the_box():
+    """No outline at all (the title slide's own cloud, drawn with `line=None`): there is nothing left
+    to trace an edge from, so the shape is refused as before - a real limit, not a regression."""
+    deck_freeforms.REFUSED.clear()
+    [el] = elements(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("FFFFFF")), bg="F7FBFC"),
+                    page(bg="F7FBFC"))
+    assert "trace" not in el
+
+
 def test_an_outline_in_another_colour_is_drawn_inside_the_traced_edge():
     el = {"kind": "shape", "bbox": [10, 10, 30, 30], "trace": {
         "rings": [[[10, 10], [30, 10], [30, 30], [10, 30]]], "fill": "#ffffff", "alpha": None,
