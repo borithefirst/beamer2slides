@@ -1125,9 +1125,16 @@ def line_element(pe: dict, m: list[float], scale: float, scheme: dict) -> dict |
 
 def unread_fill(fill: dict | None) -> bool:
     """A fill Slides draws that the API does not describe: `{}` with no `propertyState` (a gradient,
-    picture or texture fill - the API only has words for a solid one). `deck_fills` reads it back
-    from the slide's thumbnail when there is one."""
-    return fill is not None and fill.get("propertyState", "RENDERED") == "RENDERED" and "solidFill" not in fill
+    picture or texture fill - the API only has words for a solid one), or `NOT_RENDERED` (a .pptx
+    gradient or theme fill on a shape or text box, the same as a table cell's colour from a .pptx
+    table style - "the style is nowhere in the answer at all"; china-pptx's tall text panel is a
+    NOT_RENDERED fill with a bogus white `solidFill` alongside it, not a real one). `deck_fills`
+    reads either back from the slide's thumbnail when there is one; a shape truly left unfilled
+    reads as its background and is dropped there (`worth`), same as the `{}` case always was."""
+    if fill is None:
+        return False
+    state = fill.get("propertyState", "RENDERED")
+    return state == "NOT_RENDERED" or (state == "RENDERED" and "solidFill" not in fill)
 
 
 def foreign_shape(pe: dict, m: list[float], w: float, h: float, bbox: list[float], fill_hex: str | None,

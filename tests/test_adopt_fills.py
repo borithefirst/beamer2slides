@@ -117,6 +117,44 @@ def test_a_picture_fill_becomes_the_thumbnails_picture_of_it(tmp_path):
     assert yellow < 0.05                                                    # the words are painted out
 
 
+def test_a_not_rendered_fill_with_a_bogus_solid_colour_is_unread_too():
+    """china-pptx: a .pptx gradient or theme fill on a shape can come back `NOT_RENDERED` with a
+    default `solidFill` alongside it that is not what is drawn (deck_ir.unread_fill) - the same
+    "nowhere in the answer" state a .pptx table style's cell colour comes back in."""
+    fill = {"propertyState": "NOT_RENDERED",
+            "solidFill": {"color": {"rgbColor": {"red": 1, "green": 1, "blue": 1}}}}
+    els = elements(deck(shape("a", "RECTANGLE", 100, 100, 200, 100, fill)),
+                   page((100, 100, 200, 100, "#3366cc")))
+    assert len(els) == 1 and els[0]["fill"] == "#3366cc" and els[0]["fill_source"] == "thumbnail"
+    assert no_marks_left(els)
+
+
+def test_a_text_boxs_own_fill_no_ramp_fits_is_baked_behind_it(tmp_path):
+    """china-pptx's tall panel: a `NOT_RENDERED` fill behind a text box's own words, shaded in a way
+    `read_region`'s single-axis ramp cannot fit at all (neither "x" nor "y" reaches half its pixels
+    there). The text stays native with no fill of its own; what is behind it becomes a picture of the
+    thumbnail, its own words - not just an element drawn above it - painted out, under its own id
+    (`<id>~fill`) so it never collides with the text box it sits behind."""
+    from PIL import Image
+    rng = np.random.default_rng(2)
+    thumb = page()
+    thumb[100:300, 100:300] = rng.integers(0, 256, (200, 200, 3))            # neither flat nor a ramp
+    thumb[150:160, 120:280] = [255, 225, 126]                                # its own word, drawn on top
+    panel = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [90, 90, 310, 310],
+             "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
+             "paragraphs": [{"runs": [{"text": "Word", "color": "#ffe17e"}]}]}
+    assert deck_fills.settle([dict(panel)], thumb, 1.0, "#ffffff")[0]["id"] == "t"    # no folder: unchanged
+    got = deck_fills.settle([dict(panel)], thumb, 1.0, "#ffffff", False, tmp_path)
+    assert [e["kind"] for e in got] == ["image", "text"]
+    pic, text = got
+    assert pic["id"] == "t~fill" and text["id"] == "t"
+    assert not text.get("fill") and not text.get("fill_gradient")
+    assert "object" not in pic and "key" not in pic
+    im = np.asarray(Image.open(pic["file"]))
+    yellow = (np.abs(im[50:70, 20:180, :3].astype(int) - [255, 225, 126]).max(axis=2) <= 14).mean()
+    assert yellow < 0.05                                                      # its own words painted out
+
+
 def test_a_placeholder_is_never_a_candidate():
     pe = shape("a", "RECTANGLE", 100, 100, 200, 100, UNREAD)
     pe["shape"]["placeholder"] = {"type": "BODY"}

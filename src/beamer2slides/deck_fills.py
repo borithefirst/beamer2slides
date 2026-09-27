@@ -215,6 +215,28 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
             around = outside(a, el["bbox"], px) if cells else None
             for c in cells:
                 sample_cell(a, el, c, above, px, background, around)
+        if el["kind"] == "text" and el.pop("_no_ramp", False) and el.get("paragraphs"):
+            # china-pptx's tall panel: a rectangular/diagonal .pptx shading `read_region`'s single-axis
+            # ramp cannot fit at all (neither "x" nor "y" reaches half its pixels). Only this - no flat
+            # colour and no ramp explain the box at all - is a candidate: a box that read as flat but
+            # matched the background (`worth`), or mostly hidden or bare page, is left exactly as before,
+            # or every ordinary transparent text box would get a needless picture behind it (comps-
+            # analysis: NOT_RENDERED with a bogus white `solidFill` is *also* how a placeholder with no
+            # fill at all comes back). The text stays native and keeps no fill of its own; its background
+            # is a picture of the thumbnail's own pixels behind it, with its own words (not just an
+            # element drawn above it) painted out - the same trick `thumbnail_picture` uses for a
+            # shape's letters, pointed at itself.
+            if a is not None and pictures is not None:
+                bottom = not picture and not any(overlaps(e, el) for e in elements[:k])
+                pic = thumbnail_picture(a, el, elements[k + 1:] + [el], px,
+                                        background if bottom else None, pictures)
+                if pic is not None:
+                    pic.pop("object", None)
+                    pic.pop("key", None)
+                    pic["id"] = f"{el['id']}~fill" if el.get("id") else pic.get("id")
+                    out.append(el)
+                    out.append(pic)         # the panel behind its own words (appended after: out is
+                    continue                # built top-down and reversed at the end, so this is under it
         if el["kind"] == "shape" and unread and not el.get("fill") and not el.get("fill_gradient"):
             el["_unsaid"] = True           # drawn in the picture as nothing we can say: see deck_freeforms
             if a is not None and pictures is not None and not el.get("trace"):
@@ -231,6 +253,7 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
     for el in elements:
         el.pop("_traced", None)            # the traced pixels, kept only while settling
         el.pop("_unsaid", None)
+        el.pop("_no_ramp", None)
     return out[::-1]
 
 
@@ -599,6 +622,7 @@ def sample_element(a, el: dict, above: list[dict], px: float, background: str | 
     got = read_region(sub, region, allow, kind in ("RECTANGLE", "TEXT_BOX", "CUSTOM", ""),
                       FLAT_WORDS if wordy(el) else FLAT)
     if got is None:
+        el["_no_ramp"] = True     # neither flat nor a ramp explains it: a candidate for `thumbnail_picture`
         return
     if got[0] == "solid":
         if worth(got[1], background) and edges_show(a, el["bbox"], px, got[1]):
