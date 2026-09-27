@@ -1604,15 +1604,49 @@ def runs_tex(runs: list[dict], base: dict, ctx: Context, brk: str) -> str:
 # on a line it is, so the text before each tab is boxed and measured (\slidesx: the pen, from the box's
 # text edge) and the tab is the glue to the next multiple of the stop.
 TAB_STOP = 36.0             # Slides pt
+# A script's fallback chain (scripts.py: CJK, Hebrew, Arabic, Indic, Thai...) hands offline a bundled
+# stand-in face, never the one an online run fetches or Google's own thumbnail draws in: jruby-ja
+# slide 2's "余暇のOSS開発:", measured against NotoSansJP offline, came out with \slidesx 2.34pt into
+# the stop after the one an online run (real fonts) lands it on - 13% of that box's 18.14pt stop - and
+# \slidestab jumped a whole stop further right for text that was never that wide. A deck's own Latin
+# text is set in the same font file online and offline (bundled in tree/fonts/), so its width is not
+# in question: creandum-board's plain "ESOP #" measures 14.7% into its own next stop and genuinely
+# needs it - forgiving that swaps its column with "Strike Price"'s (measured: adopt_bench --offline,
+# out/adopt-corpus/creandum-board, boxes 0.974 -> 0.967 on slide 22 once tried on every tab alike).
+# \slidestabf, used only for a segment scripts.script_of says needs a fallback face, forgives an
+# overshoot up to TAB_TOLERANCE's share of the stop: such a pen still targets the stop it was short
+# of, landing a hair short of (never past) the words after it; \slidestab, unchanged, still advances
+# on any overshoot at all, which is right wherever the width behind it is not in question.
+TAB_TOLERANCE = 0.2
 SLIDES_TABS = (
     "\\newdimen\\slidesx\n"
     "\\newcount\\slidestabn\n"
+    "\\newdimen\\slidestabtol\n"
     "\\newcommand\\slidestab[2]{\\setbox0\\hbox{#2}\\global\\advance\\slidesx\\wd0 \\unhbox0 "
     "\\slidestabn=\\numexpr\\slidesx/\\dimexpr#1\\relax\\relax"
     "\\ifdim\\slidestabn\\dimexpr#1\\relax>\\slidesx \\advance\\slidestabn-1 \\fi"
     "\\advance\\slidestabn1 "
     "\\hskip\\dimexpr\\slidestabn\\dimexpr#1\\relax-\\slidesx\\relax"
+    "\\global\\slidesx=\\slidestabn\\dimexpr#1\\relax}"
+    "\\newcommand\\slidestabf[2]{\\setbox0\\hbox{#2}\\global\\advance\\slidesx\\wd0 \\unhbox0 "
+    "\\slidestabn=\\numexpr\\slidesx/\\dimexpr#1\\relax\\relax"
+    "\\ifdim\\slidestabn\\dimexpr#1\\relax>\\slidesx \\advance\\slidestabn-1 \\fi"
+    f"\\slidestabtol={TAB_TOLERANCE}\\dimexpr#1\\relax"
+    "\\ifdim\\slidesx>\\slidestabn\\dimexpr#1\\relax"
+    "\\ifdim\\slidesx>\\dimexpr\\slidestabn\\dimexpr#1\\relax+\\slidestabtol\\relax \\advance\\slidestabn1 \\fi"
+    "\\else\\advance\\slidestabn1 \\fi"
+    "\\hskip\\dimexpr\\slidestabn\\dimexpr#1\\relax-\\slidesx\\relax"
     "\\global\\slidesx=\\slidestabn\\dimexpr#1\\relax}")
+
+
+def tab_segment_needs_tolerance(text: str) -> bool:
+    """Does this tab segment's own text call on scripts' fallback chain (CJK, Hebrew, Arabic, Indic,
+    Thai...)? Such a script's offline face is a bundled stand-in, never the one online (or Google's
+    own thumbnail) draws it in, so its measured width is only ever approximate - see SLIDES_TABS."""
+    if os.environ.get("B2S_NO_SCRIPTS"):
+        return False
+    from .scripts import script_of
+    return any(script_of(c) is not None for c in text)
 
 
 def tabbed_tex(runs: list[dict], base: dict, ctx: Context, brk: str, start: float, stop: float,
@@ -1643,10 +1677,12 @@ def tabbed_tex(runs: list[dict], base: dict, ctx: Context, brk: str, start: floa
                     segments[-1].append({**r, "text": piece})
         out.append(f"\\global\\slidesx={(start if not i or restart is None else restart):.2f}pt")
         for seg in segments[:-1]:
+            raw = "".join(r["text"] for r in seg)
             text = runs_tex(seg, base, ctx, brk) if seg else ""
-            trail = len("".join(r["text"] for r in seg)) - len("".join(r["text"] for r in seg).rstrip(" "))
+            trail = len(raw) - len(raw.rstrip(" "))
             spaces = "\\ " * trail                  # the spaces before a tab move the pen too
-            out.append(f"\\slidestab{{{stop:.2f}pt}}{{{text}{spaces}}}")
+            macro = "slidestabf" if tab_segment_needs_tolerance(raw) else "slidestab"
+            out.append(f"\\{macro}{{{stop:.2f}pt}}{{{text}{spaces}}}")
         last = runs_tex(segments[-1], base, ctx, brk) if segments[-1] else ""
         # a paragraph ending on a tab keeps the tab's glue: a space after it is what \par takes away
         out.append(last or (" " if i == len(lines) - 1 else ""))

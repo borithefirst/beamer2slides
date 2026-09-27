@@ -489,3 +489,71 @@ def test_a_slidetable_puts_its_cells_fills_and_borders_where_the_deck_has_them(t
     assert red and all(dr["rect"][0] == pytest.approx(xs[1], abs=0.06) for dr in red)
     assert min(dr["rect"][1] for dr in red) == pytest.approx(ys[0], abs=0.1)
     assert max(dr["rect"][3] for dr in red) == pytest.approx(ys[3], abs=0.1), "down all three rows, dashed"
+
+
+def test_a_tab_stop_forgives_a_small_overshoot_but_not_a_real_crossing():
+    """jruby-ja slide 2, offline (no machine fonts): NotoSansJP set "余暇のOSS開発:" \\slidesx 2.34 pt
+    past the 18.14 pt stop an online run (real fonts) and Google's own thumbnail land it on - 13% of
+    that box's stop - and \\slidestab jumped a whole stop further right for text that was never that
+    wide. TAB_TOLERANCE is chosen with room above that measurement (docs in adopt.py, "Tab stops")."""
+    assert 0 < adopt.TAB_TOLERANCE < 0.3, "well under a half: never eats a stop a wider prefix earns"
+    stop, tol = adopt.TAB_STOP, adopt.TAB_STOP * adopt.TAB_TOLERANCE
+    assert tol > 2.34, "covers the jruby-ja measurement with room to spare"
+
+
+def test_only_a_script_s_own_fallback_face_asks_the_tab_macro_to_forgive_it():
+    """`tabbed_tex` picks `\\slidestabf` (the forgiving macro) only for a segment scripts.script_of
+    says needs a fallback face (CJK, Hebrew, Arabic...): such a face is a bundled stand-in offline,
+    never what an online run or Google's own thumbnail sets it in. A deck's own Latin text is the
+    same font file online and offline, so `\\slidestab` (the original, unforgiving macro) still
+    decides it - creandum-board's plain "ESOP #" genuinely earns its next stop (docs in adopt.py,
+    "Tab stops"; the offline bench regression this pins: boxes 0.974 -> 0.967 without the split)."""
+    assert adopt.tab_segment_needs_tolerance("余暇のOSS開発:")
+    assert adopt.tab_segment_needs_tolerance("mixed 開発 words")
+    assert not adopt.tab_segment_needs_tolerance("ESOP #")
+    assert not adopt.tab_segment_needs_tolerance("")
+    tex = adopt.text_box_latex(T.prose({"runs": [T.words("ESOP #\t余暇\tRole")], "slides": {}}), adopt.Context(), "")
+    assert "\\slidestab{36.00pt}{ESOP \\#}" in tex, tex
+    assert "\\slidestabf{36.00pt}{" in tex and "余暇" in tex, tex
+
+
+@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
+def test_the_forgiving_tab_macro_snaps_a_small_overshoot_back_but_the_plain_one_never_does(tmp_path):
+    """Direct probes of `\\slidestab` and `\\slidestabf`'s own arithmetic (`adopt.SLIDES_TABS`), the
+    widths they see stood in for by `\\hbox to`, so the result depends on nothing but the macros: a
+    pen already on a stop (two tabs back to back, `TAB0`/`PLAIN0`) always advances a full stop for
+    both; an overshoot of less than TAB_TOLERANCE's share of the stop (`TAB1`, jruby-ja's ~13%
+    measurement) still lands `\\slidestabf` on the near stop (a hair of overlap, never a stray extra
+    stop) but still advances `\\slidestab` (`PLAIN1`) as it always did - creandum-board's "ESOP #"
+    measures a similar 14.7% into its own next stop and must not be snapped back; one genuinely past
+    tolerance (`TAB2`) advances both macros alike."""
+    text = adopt.bootstrap(deck_ir(T.deck(T.box("s_t", T.para("x", runs=[("A\tB", {})]))), foreign=True),
+                           tmp_path / "tree" / "main.tex")
+    stop = adopt.TAB_STOP
+    tol = stop * adopt.TAB_TOLERANCE
+
+    def probe(name, macro, width, tag):
+        return (f"\\global\\slidesx=0pt\\leavevmode\\hbox{{\\{macro}{{{stop:.2f}pt}}"
+                f"{{\\hbox to {width:.2f}pt{{}}}}}}\\typeout{{{tag}=\\the\\slidesx}}")
+
+    lines = [
+        f"\\global\\slidesx=0pt\\leavevmode\\hbox{{\\slidestabf{{{stop:.2f}pt}}{{\\hbox to 0.00pt{{}}}}}}"
+        f"\\hbox{{\\slidestabf{{{stop:.2f}pt}}{{\\hbox to 0.00pt{{}}}}}}\\typeout{{TAB0=\\the\\slidesx}}",
+        probe("TAB1", "slidestabf", stop + tol - 0.5, "TAB1"),
+        probe("TAB2", "slidestabf", stop + tol + 3.0, "TAB2"),
+        f"\\global\\slidesx=0pt\\leavevmode\\hbox{{\\slidestab{{{stop:.2f}pt}}{{\\hbox to 0.00pt{{}}}}}}"
+        f"\\hbox{{\\slidestab{{{stop:.2f}pt}}{{\\hbox to 0.00pt{{}}}}}}\\typeout{{PLAIN0=\\the\\slidesx}}",
+        probe("PLAIN1", "slidestab", stop + tol - 0.5, "PLAIN1"),
+    ]
+    main = tmp_path / "tree" / "main.tex"
+    main.write_text(with_frames(text, "\n".join(lines)), encoding="utf-8")
+    r = subprocess.run([lualatex(), "-interaction=nonstopmode", "-halt-on-error", "main.tex"], cwd=main.parent,
+                       capture_output=True, text=True, errors="replace", env=tex_env(), timeout=300)
+    assert r.returncode == 0, r.stdout[-3000:]
+    got = dict(re.findall(r"(TAB\d|PLAIN\d)=([\d.]+)pt", r.stdout))
+    assert float(got["TAB0"]) == pytest.approx(2 * stop), "two tabs from a landed stop advance two stops"
+    assert float(got["TAB1"]) == pytest.approx(stop), "an overshoot within tolerance still lands on the near stop"
+    assert float(got["TAB2"]) == pytest.approx(2 * stop), "one past tolerance is a real crossing"
+    assert float(got["PLAIN0"]) == pytest.approx(2 * stop), "the plain macro still always advances an exact stop"
+    assert float(got["PLAIN1"]) == pytest.approx(2 * stop), \
+        "the plain macro never forgives - a Latin prefix's own width is not in question"
