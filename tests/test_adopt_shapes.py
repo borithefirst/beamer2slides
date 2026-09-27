@@ -203,6 +203,17 @@ def test_a_preset_is_drawn_inside_its_box(kind):
         assert all(-slack <= x <= 120 + slack and -60 - slack <= y <= slack for x, y in nums), (kind, path)
 
 
+def test_known_preset_tells_a_real_geometry_from_the_rectangle_fallback():
+    """`deck_fills.shape_fallback_picture` uses this to draw Google's own pixels instead of
+    `shape_block`'s silent RECTANGLE fallback for a preset `preset` has no geometry for."""
+    assert adopt_shapes.known_preset("RECTANGLE")
+    assert adopt_shapes.known_preset("CUSTOM")
+    assert adopt_shapes.known_preset("star_5")     # case-insensitive
+    assert not adopt_shapes.known_preset("CURVED_UP_ARROW")
+    assert not adopt_shapes.known_preset("NOT_A_SHAPE")
+    assert adopt_shapes.known_preset(None)         # no name at all: shape_block's own RECTANGLE default
+
+
 def test_an_unknown_preset_is_a_rectangle():
     assert adopt_shapes.preset("NOT_A_SHAPE", 10, 10) is None
     out = adopt_shapes.shape_block({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "NOT_A_SHAPE",

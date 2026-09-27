@@ -117,6 +117,35 @@ def test_a_picture_fill_becomes_the_thumbnails_picture_of_it(tmp_path):
     assert yellow < 0.05                                                    # the words are painted out
 
 
+def test_a_preset_adopt_cannot_draw_becomes_the_thumbnails_picture(tmp_path):
+    """en-mos: a rotated CURVED_UP_ARROW has no geometry in `adopt_shapes.preset`, and drawing it as
+    a plain rectangle (`shape_block`'s fallback) turns a curled arrow icon into a solid diamond. With
+    a folder to write to, `deck_fills.settle` bakes it as the thumbnail's own pixels in its (already
+    rotated) bounding box instead, so the arrow's true outline survives."""
+    from PIL import Image
+    thumb = page((100, 100, 80, 80, "#3366cc"))
+    arrow = {"kind": "shape", "role": "panel", "shape_type": "CURVED_UP_ARROW", "bbox": [100, 100, 180, 180],
+             "fill": "#3366cc", "outline": None, "id": "ar", "object": "ar", "group": None}
+    assert deck_fills.settle([dict(arrow)], thumb, 1.0, "#ffffff") == [arrow]
+    got = deck_fills.settle([dict(arrow)], thumb, 1.0, "#ffffff", False, tmp_path)
+    assert [e["kind"] for e in got] == ["image"]
+    pic = got[0]
+    assert pic["id"] == "ar~shape" and pic["fill_source"] == "thumbnail" and pic["bbox"] == [100, 100, 180, 180]
+    im = np.asarray(Image.open(pic["file"]))
+    assert im.shape[:2] == (80, 80)
+
+
+def test_a_known_preset_is_never_replaced_by_a_picture(tmp_path):
+    """A shape `adopt_shapes.preset` already knows how to draw (a plain RECTANGLE) is left as a shape
+    even with a pictures folder handed in - the fallback is only for a name `preset` returns None
+    for, never a chance to lose an editable shape's geometry."""
+    thumb = page((100, 100, 80, 80, "#3366cc"))
+    rect = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [100, 100, 180, 180],
+            "fill": "#3366cc", "outline": None, "id": "rc", "object": "rc", "group": None}
+    got = deck_fills.settle([dict(rect)], thumb, 1.0, "#ffffff", False, tmp_path)
+    assert [e["kind"] for e in got] == ["shape"]
+
+
 def test_a_not_rendered_fill_with_a_bogus_solid_colour_is_unread_too():
     """china-pptx: a .pptx gradient or theme fill on a shape can come back `NOT_RENDERED` with a
     default `solidFill` alongside it that is not what is drawn (deck_ir.unread_fill) - the same

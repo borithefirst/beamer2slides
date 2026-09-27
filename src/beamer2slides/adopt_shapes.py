@@ -401,6 +401,18 @@ def preset(kind: str, w: float, h: float, corner: float | None = None) -> list[t
     return None
 
 
+def known_preset(kind: str) -> bool:
+    """Whether `preset` (or `shape_block`'s own special-casing of freeforms) can draw this Slides
+    shapeType at all - never the silent RECTANGLE fallback `shape_block` reaches for a name `preset`
+    returns None for (a curved or bent block arrow, a preset never seen in the corpora): callers
+    that can instead show Google's own pixels of the shape (`deck_fills.shape_fallback_picture`)
+    use this to tell the two apart."""
+    kind = (kind or "RECTANGLE").upper()
+    if kind in ("CUSTOM", "?", "FREEFORM"):
+        return True
+    return preset(kind, 100.0, 60.0) is not None
+
+
 SQUARE_CORNER = 0.3     # pt: a corner read rounder than this is none
 
 

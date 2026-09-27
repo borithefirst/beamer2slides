@@ -191,6 +191,31 @@ def bake_shared_cluster(elements: list[dict], members: list[int], a: np.ndarray,
     return rest[:insert_at] + [pic] + rest[insert_at:]
 
 
+def shape_fallback_picture(a: np.ndarray, el: dict, above: list[dict], px: float,
+                           background: str | None, pictures):
+    """A shape whose Slides shapeType `adopt_shapes.preset` has no geometry for (a curved or bent
+    block arrow, or any other preset the corpora have not yet needed) drawn as the thumbnail's own
+    pixels in its box, rather than `shape_block`'s silent RECTANGLE fallback (a rotated
+    CURVED_UP_ARROW came out a solid blue diamond: the rotated rectangle). The box is already the
+    shape's rotated bounding box (`bbox`), so the crop needs no un-rotating - it is pasted back
+    axis-aligned, exactly where the thumbnail showed it. Words drawn above it are painted out of the
+    crop like any other thumbnail fill (`thumbnail_picture`); refused (too small, or the shape
+    turned out to show nothing of its own) leaves the element to `shape_block`'s own fallback."""
+    kind = el.get("shape_type")
+    if not kind or el.get("role") == "line":
+        return None
+    from . import adopt_shapes
+    if adopt_shapes.known_preset(kind.upper()):
+        return None
+    pic = thumbnail_picture(a, el, above, px, background, pictures)
+    if pic is None:
+        return None
+    pic["id"] = f"{el['id']}~shape" if el.get("id") else pic.get("id")
+    if el.get("group"):
+        pic["group"] = el["group"]
+    return pic
+
+
 def settle(elements: list[dict], image, px: float, background: str | None, picture: bool = False,
            pictures=None) -> list[dict]:
     """Give the slide's unread fills what its thumbnail shows (see the module docstring), and drop
@@ -208,6 +233,12 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
     # tile under an unread wave shows is the wave's colour, never taken for the tile's own
     for k in range(len(elements) - 1, -1, -1):
         el = elements[k]
+        if a is not None and pictures is not None and el["kind"] == "shape":
+            bottom = not picture and not any(overlaps(e, el) for e in elements[:k])
+            pic = shape_fallback_picture(a, el, elements[k + 1:], px, background if bottom else None, pictures)
+            if pic is not None:
+                out.append(pic)
+                continue
         if a is not None and el["kind"] == "shape" and (el.get("shape_type") or "").upper() == "PIE" \
                 and not el.get("fill_unread"):
             angles = pie_angles(a, el, elements[k + 1:], px)
