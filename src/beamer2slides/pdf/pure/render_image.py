@@ -19,6 +19,7 @@ import numpy as np
 from ..api import PdfError
 from . import decode_image as DI
 from . import raster as R
+from .crt import rect_valid, roundf
 from .raster import F
 from .render_shading import outer, fx_intersect
 
@@ -383,13 +384,7 @@ def closest_rect(rect):
     return min(l, r), min(t, b), max(l, r), max(t, b)
 
 
-def _valid(rect) -> bool:
-    """FX_RECT::Valid: width and height fit an int32."""
-    return -2147483648 <= rect[2] - rect[0] <= 2147483647 and -2147483648 <= rect[3] - rect[1] <= 2147483647
-
-
 def _fixed256(v: float) -> int:
-    from .render_shading import roundf
     return roundf(F(v * 256.0))
 
 
@@ -436,7 +431,7 @@ def transform(dib, m, clip_box, bilinear):
     d2s = R.inverse(s2d)
     rl, rt, rr, rb = result
     sclip = outer(R.transform_rect(d2s, (float(rl), float(rt), float(rr), float(rb))))
-    if not _valid(sclip):
+    if not rect_valid(sclip):
         return None
     sclip = fx_intersect(sclip, (0, 0, sw, sh))
     if sclip[2] <= sclip[0] or sclip[3] <= sclip[1]:
@@ -494,7 +489,6 @@ def transform(dib, m, clip_box, bilinear):
 def _compose_transformed(dev, dkind, block, sfmt, box, alpha: float, mask_argb: int) -> None:
     """CFX_AggImageRenderer::Continue after a transform: CompositeMask with the alpha in the mask
     colour, or MultiplyAlpha then CompositeBitmap; the clip region's mask as the clip scan."""
-    from .render_shading import roundf
     l, t, r, b = box
     clip = None
     cl = dev.clip
@@ -541,7 +535,7 @@ def _compose_at(dev, block, sfmt, pal, box, alpha: float, mask_argb: int) -> Non
         if clip is not None:
             clip = (clip.astype(np.float32) * np.float32(alpha)).astype(np.int64)
         else:
-            clip = np.full((b - t, r - l), DI.roundf(F(alpha * 255)), np.int64)
+            clip = np.full((b - t, r - l), roundf(F(alpha * 255)), np.int64)
     # the device keeps only its window
     wl, wt = max(l, dev.ox), max(t, dev.oy)
     wr, wb = min(r, dev.ox + dev.bgra.shape[1]), min(b, dev.oy + dev.bgra.shape[0])
@@ -589,7 +583,7 @@ def bitmap_alpha(dev, dib, alpha: float, m) -> None:
     from .render import FILL_WINDING, PT_LINE, PT_MOVE
     if dib.fmt not in ("rgb1", "rgb8", "bgr"):
         raise PdfError("the pure reader cannot render this image in an alpha soft mask yet")
-    a = DI.roundf(F(alpha * 255))
+    a = roundf(F(alpha * 255))
     corners = ((0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0))
     pts = [R.transform(m, x, y) for x, y in corners]
     path = [(p[0], p[1], PT_MOVE if i == 0 else PT_LINE, i == 4) for i, p in enumerate(pts)]

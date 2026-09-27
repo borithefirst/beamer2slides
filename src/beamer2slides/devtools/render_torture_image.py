@@ -36,6 +36,7 @@ from pathlib import Path
 import numpy as np
 
 from .render_torture import EXTGS
+from .torture_kit import compare_renders, drop_lines
 
 MEDIA = (0, 0, 200, 150)
 # render_torture's ExtGStates plus overprint ones (PDFium draws a CMYK image under fill overprint
@@ -402,22 +403,8 @@ def case(seed: int, level: int = 8):
 def compare(content: bytes, objects, xobjects, zoom: float, transparent: bool, extgs=()):
     """(pixels that differ or None when the pure reader refuses, PDFium's render, pure's render,
     per-pixel difference or the refusal)."""
-    from ..pdf.api import PdfError
-    from ..pdf.pdfium_backend import PdfiumBackend
-    from ..pdf.pure.backend import PureBackend
-    data = pdf_bytes(content, objects, xobjects, extgs=extgs)
-    docs = PdfiumBackend().open(data), PureBackend().open(data)
-    try:
-        a = docs[0][0].render(zoom, transparent=transparent)
-        try:
-            b = docs[1][0].render(zoom, transparent=transparent)
-        except PdfError as e:
-            return None, a, None, str(e)
-    finally:
-        for doc in docs:
-            doc.close()
-    d = np.abs(a.astype(int) - b.astype(int)).max(axis=2)
-    return int((d > 0).sum()), a, b, d
+    return compare_renders(pdf_bytes(content, objects, xobjects, extgs=extgs), zoom, transparent,
+                           refusals=True)
 
 
 def shrink(content: bytes, objects, xobjects, zoom: float, transparent: bool, extgs=()):
@@ -427,18 +414,8 @@ def shrink(content: bytes, objects, xobjects, zoom: float, transparent: bool, ex
             return (compare(c, objects, xobjects, zoom, transparent, extgs)[0] or 0) > 0
         except Exception:
             return False
-    lines = content.split(b"\n")
-    changed = True
-    while changed:
-        changed = False
-        for i in range(len(lines)):
-            if lines[i] in (b"q", b"Q") or lines[i].startswith(b"BI ") or lines[i] == b"EI":
-                continue
-            trial = lines[:i] + lines[i + 1:]
-            if fails(b"\n".join(trial)):
-                lines, changed = trial, True
-                break
-    return b"\n".join(lines)
+    return drop_lines(content, fails,
+                      keep=lambda line: line in (b"q", b"Q", b"EI") or line.startswith(b"BI "))
 
 
 def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, level: int = 8) -> dict:

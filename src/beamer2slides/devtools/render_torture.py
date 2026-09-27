@@ -20,6 +20,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .torture_kit import compare_renders, drop_form_lines
+
 EXTGS = b"/ExtGState << " + b" ".join(
     b"/A%d << /ca %s /CA %s >>" % (k, v, v) for k, v in enumerate([b"0.5", b"0.25", b"0.8", b"0.0", b"1"])) + \
     b" /D0 << /D [[3 2] 1] >> /L0 << /LW 3 /LJ 1 /LC 2 >> >>"
@@ -206,49 +208,23 @@ def case(seed: int, forms: bool, page: bool = False, mutated: bool = False) -> t
 def compare(content: bytes, zoom: float, transparent: bool, forms=(), geometry=None):
     """(pixels that differ, PDFium's render, pure's render, per-pixel max difference).
     `geometry`: media, page_entries, clip (random_geometry)."""
-    from ..pdf.pdfium_backend import PdfiumBackend
-    from ..pdf.pure.backend import PureBackend
     g = dict(geometry or {})
     clip = g.pop("clip", None)
-    data = pdf_bytes([content], forms=forms, **g)
-    a = PdfiumBackend().open(data)[0].render(zoom, clip, transparent=transparent)
-    b = PureBackend().open(data)[0].render(zoom, clip, transparent=transparent)
-    if a.shape != b.shape:
-        raise AssertionError(f"shapes {a.shape} != {b.shape}")
-    d = np.abs(a.astype(int) - b.astype(int)).max(axis=2)
-    return int((d > 0).sum()), a, b, d
+    return compare_renders(pdf_bytes([content], forms=forms, **g), zoom, transparent, clip)
 
 
 def shrink(content: bytes, zoom: float, transparent: bool, forms=(), geometry=None, words: bool = False):
     """Drop lines (the page's, then each form's) while the difference remains; `words`: then
     single tokens too (for mutated pages, where the culprit is one token in a line)."""
-    forms = list(forms)
-
     def fails(c, fs):
         try:
             return compare(c, zoom, transparent, fs, geometry)[0] > 0
         except Exception:
             return False
 
-    def cut(text, test, sep=b"\n"):
-        lines = text.split(sep) if sep != b" " else text.split()
-        changed = True
-        while changed:
-            changed = False
-            for i in range(len(lines)):
-                if sep == b"\n" and lines[i] in (b"q", b"Q"):
-                    continue
-                trial = lines[:i] + lines[i + 1:]
-                if test(sep.join(trial)):
-                    lines, changed = trial, True
-                    break
-        return sep.join(lines)
-
+    forms = list(forms)
     for sep in (b"\n", b" ") if words else (b"\n",):
-        content = cut(content, lambda c: fails(c, forms), sep)
-        for k in range(len(forms)):
-            entries = forms[k][0]
-            forms[k] = (entries, cut(forms[k][1], lambda c: fails(content, forms[:k] + [(entries, c)] + forms[k + 1:]), sep))
+        content, forms = drop_form_lines(content, forms, fails, sep)
     return content, forms
 
 

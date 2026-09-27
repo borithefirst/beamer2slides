@@ -19,6 +19,7 @@ from pathlib import Path
 import numpy as np
 
 from .render_torture import EXTGS, num, random_cm, random_geometry, random_path
+from .torture_kit import compare_renders, drop_lines
 
 
 BLENDS = (b"Normal", b"Multiply", b"Screen", b"Overlay", b"Darken", b"Lighten", b"ColorDodge",
@@ -172,17 +173,9 @@ def case(seed: int, page: bool = False):
 
 def compare(content: bytes, zoom: float, transparent: bool, items=(), geometry=None):
     """(pixels that differ, PDFium's render, pure's render, per-pixel max difference)."""
-    from ..pdf.pdfium_backend import PdfiumBackend
-    from ..pdf.pure.backend import PureBackend
     g = dict(geometry or {})
     clip = g.pop("clip", None)
-    data = pdf_bytes(content, items, **g)
-    a = PdfiumBackend().open(data)[0].render(zoom, clip, transparent=transparent)
-    b = PureBackend().open(data)[0].render(zoom, clip, transparent=transparent)
-    if a.shape != b.shape:
-        raise AssertionError(f"shapes {a.shape} != {b.shape}")
-    d = np.abs(a.astype(int) - b.astype(int)).max(axis=2)
-    return int((d > 0).sum()), a, b, d
+    return compare_renders(pdf_bytes(content, items, **g), zoom, transparent, clip)
 
 
 def shrink(content: bytes, zoom: float, transparent: bool, items=(), geometry=None):
@@ -195,27 +188,13 @@ def shrink(content: bytes, zoom: float, transparent: bool, items=(), geometry=No
         except Exception:
             return False
 
-    def cut(text, test):
-        lines = text.split(b"\n")
-        changed = True
-        while changed:
-            changed = False
-            for i in range(len(lines)):
-                if lines[i] in (b"q", b"Q"):
-                    continue
-                trial = lines[:i] + lines[i + 1:]
-                if test(b"\n".join(trial)):
-                    lines, changed = trial, True
-                    break
-        return b"\n".join(lines)
-
-    content = cut(content, lambda c: fails(c, items))
+    content = drop_lines(content, lambda c: fails(c, items))
     for k in range(len(items)):
         def test(c, k=k):
             trial = [list(i) for i in items]
             trial[k][2] = c
             return fails(content, trial)
-        items[k][2] = cut(items[k][2], test)
+        items[k][2] = drop_lines(items[k][2], test)
     return content, [tuple(i) for i in items]
 
 

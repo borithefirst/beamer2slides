@@ -31,6 +31,7 @@ from pathlib import Path
 import numpy as np
 
 from .render_torture_text import FontSpec, pdf_bytes, random_text
+from .torture_kit import compare_renders, drop_lines
 
 UNKNOWN = ["Foo", "Qwerty-Bold", "Blorp,Italic", "Zed-BoldItalic", "Nimbus-Oblique", "Frobnitz-Light",
            "Wibble-Black", "AAAA+Gloop", "Serifish-Roman", "Sansy,BoldItalic", "Monoid-Regular", "X"]
@@ -208,20 +209,9 @@ def generic_blends() -> str:
 def compare(content: bytes, fonts, zoom: float, transparent: bool):
     """(pixels that differ, PDFium's render, pure's render, per-pixel max difference)."""
     global LAST_BLENDS
-    from ..pdf.pdfium_backend import PdfiumBackend
-    from ..pdf.pure.backend import PureBackend
     resync()
     LAST_BLENDS = generic_blends()
-    data = pdf_bytes(content, fonts)
-    da, db = PdfiumBackend().open(data), PureBackend().open(data)
-    try:
-        a = da[0].render(zoom, transparent=transparent)
-        b = db[0].render(zoom, transparent=transparent)
-    finally:
-        da.close()
-        db.close()
-    d = np.abs(a.astype(int) - b.astype(int)).max(axis=2)
-    return int((d > 0).sum()), a, b, d
+    return compare_renders(pdf_bytes(content, fonts), zoom, transparent)
 
 
 def faces(content: bytes, fonts) -> list[str]:
@@ -491,19 +481,7 @@ def shrink(content: bytes, fonts, zoom: float, transparent: bool) -> bytes:
             return compare(c, fonts, zoom, transparent)[0] > 0
         except Exception:  # noqa: BLE001
             return False
-
-    lines = content.split(b"\n")
-    changed = True
-    while changed:
-        changed = False
-        for i in range(len(lines)):
-            if lines[i] in (b"q", b"Q", b"BT", b"ET"):
-                continue
-            trial = lines[:i] + lines[i + 1:]
-            if fails(b"\n".join(trial)):
-                lines, changed = trial, True
-                break
-    return b"\n".join(lines)
+    return drop_lines(content, fails, keep=(b"q", b"Q", b"BT", b"ET"))
 
 
 _USER_FONT_PATHS = None          # PDFium reads the paths later: the buffer has to stay alive

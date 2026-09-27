@@ -20,6 +20,7 @@ import numpy as np
 
 from . import filters as FL
 from .colors import adobe_cmyk_to_srgb_array, icc_openable, icc_srgb
+from .crt import roundf
 from .syntax import Name, Stream
 
 F32 = np.float32
@@ -31,19 +32,6 @@ class Unsupported(Exception):
 
 def F(v: float) -> float:
     return struct.unpack("f", struct.pack("f", v))[0]
-
-
-def roundf(v: float) -> int:
-    """FXSYS_roundf: NaN is 0 and the int range saturates (an unclamped sRGB component can leave
-    the 0..255 range images usually stay in)."""
-    if v != v:
-        return 0
-    if v < -2147483648.0:
-        return -2147483648
-    if v >= 2147483648.0:
-        return 2147483647
-    r = int(math.floor(abs(v) + 0.5)) if abs(v) < 4503599627370496.0 else int(abs(v))
-    return r if v >= 0 else -r
 
 
 def argb(a: int, r: int, g: int, b: int) -> int:

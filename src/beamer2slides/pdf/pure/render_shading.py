@@ -30,7 +30,7 @@ import numpy as np
 from . import cie
 from . import raster as R
 from .colors import adobe_cmyk_to_srgb
-from .crt import float_fn, i32, i32_array, u32  # noqa: F401 - i32 is imported from here too
+from .crt import cdiv, cmod, float_fn, i32, i32_array, roundf, u32  # noqa: F401 - i32 is imported from here too
 from .raster import F
 from .syntax import Name, Stream, String
 
@@ -61,18 +61,6 @@ def sat_int(v: float) -> int:
     if v <= -2147483648.0:
         return INT_MIN
     return int(v)
-
-
-def roundf(v: float) -> int:
-    """FXSYS_roundf."""
-    if v != v:
-        return 0
-    if v < -2147483648.0:
-        return INT_MIN
-    if v >= 2147483648.0:
-        return INT_MAX
-    r = int(abs(v) + 0.5) if abs(v) < 4503599627370496.0 else int(abs(v))
-    return r if v >= 0 else -r
 
 
 def clamp(v: float, lo: float, hi: float) -> float:
@@ -652,16 +640,6 @@ def _ps_execute(ops: list, stack: list) -> bool:
     return True
 
 
-def _cdiv(a: int, b: int) -> int:
-    q = abs(a) // abs(b)
-    return q if (a < 0) == (b < 0) else -q
-
-
-def _cmod(a: int, b: int) -> int:
-    r = abs(a) % abs(b)
-    return r if a >= 0 else -r
-
-
 def _ps_operator(op: str, st: list) -> None:
     pop, push, pop_int = _pop, _push, _pop_int
     with np.errstate(all="ignore"):
@@ -687,7 +665,7 @@ def _ps_operator(op: str, st: list) -> None:
             if not i2 or (i1 == INT_MIN and i2 == -1):
                 push(st, 0.0)
             else:
-                push(st, F(float(_cdiv(i1, i2) if op == "idiv" else _cmod(i1, i2))))
+                push(st, F(float(cdiv(i1, i2) if op == "idiv" else cmod(i1, i2))))
         elif op == "neg":
             push(st, -pop(st))
         elif op == "abs":
@@ -786,7 +764,7 @@ def _ps_operator(op: str, st: list) -> None:
                 return
             if n < 0 or n > len(st):
                 return
-            j = _cmod(j, n)
+            j = cmod(j, n)
             if j > 0:
                 j -= n
             seg = st[len(st) - n:]

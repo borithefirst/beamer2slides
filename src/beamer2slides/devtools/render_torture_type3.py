@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from .render_torture import EXTGS
+from .torture_kit import drop_lines, pixel_diff
 
 MEDIA = (0, 0, 200, 150)
 
@@ -353,8 +354,8 @@ def compare(content: bytes, objects, fonts, zoom: float, transparent: bool):
     finally:
         for doc in docs:
             doc.close()
-    d = np.abs(a.astype(int) - b.astype(int)).max(axis=2)
-    return int((d > 0).sum()), a, b, d
+    n, d = pixel_diff(a, b)
+    return n, a, b, d
 
 
 def shrink(content: bytes, objects, fonts, zoom: float, transparent: bool):
@@ -364,18 +365,7 @@ def shrink(content: bytes, objects, fonts, zoom: float, transparent: bool):
             return (compare(c, objects, fonts, zoom, transparent)[0] or 0) != 0
         except Exception:
             return False
-    lines = content.split(b"\n")
-    changed = True
-    while changed:
-        changed = False
-        for i in range(len(lines)):
-            if lines[i] in (b"q", b"Q", b"BT", b"ET"):
-                continue
-            trial = lines[:i] + lines[i + 1:]
-            if fails(b"\n".join(trial)):
-                lines, changed = trial, True
-                break
-    return b"\n".join(lines)
+    return drop_lines(content, fails, keep=(b"q", b"Q", b"BT", b"ET"))
 
 
 def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True) -> dict:

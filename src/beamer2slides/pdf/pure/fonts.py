@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import crt, sfnt
+from .crt import cdiv
 from .encodings import NAMES, UNICODES
 from .syntax import Name, Stream, float32, operations
 
@@ -45,12 +46,6 @@ FLAG_USE_EXTERN_ATTR = 0x80000   # kFontUseExternAttr: the descriptor's weight a
 NOTDEF = ".notdef"
 NO_GLYPH = None   # PDFium's 0xffff: no glyph at all (not even .notdef)
 INVALID_CODE = 0xFFFFFFFF  # CPDF_Font::kInvalidCharCode
-
-
-def _cdiv(a: int, b: int) -> int:
-    """C++ integer division (towards zero)."""
-    q = abs(a) // abs(b)
-    return q if (a < 0) == (b < 0) else -q
 
 
 def normalize_metric(value: float, upem: int) -> int:
@@ -695,7 +690,7 @@ class Program:
         a = self._advance_units(index)
         if a is None:
             return 0
-        return int(a) if not self.upem else _cdiv(int(a) * 1000, self.upem)
+        return int(a) if not self.upem else cdiv(int(a) * 1000, self.upem)
 
 
 def _upem_from_matrix(matrix) -> int:
@@ -1511,7 +1506,7 @@ class SimpleFont(Font):
             elif tt and not self.embedded:
                 # a substitute face's box is stretched to the width the font says (C++ int division)
                 w = self.widths[code]
-                box = (_cdiv(box[0] * w, tt), box[1], _cdiv(box[2] * w, tt), box[3])
+                box = (cdiv(box[0] * w, tt), box[1], cdiv(box[2] * w, tt), box[3])
         self._boxes[code] = box
 
     def char_width(self, code: int) -> int:

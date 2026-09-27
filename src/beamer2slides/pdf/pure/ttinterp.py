@@ -10,6 +10,7 @@ needs no stretching and MPPEM is 64. Arithmetic is on 32-bit FT_Long (Windows), 
 """
 from __future__ import annotations
 
+from .crt import cdiv
 from .ftoutline import Unported, i32, mulfix, divfix
 
 TOUCH_X, TOUCH_Y = 0x08, 0x10
@@ -23,11 +24,6 @@ UNKNOWN_OPS = frozenset([0x28, 0x7B, 0x83, 0x84, 0x8F, 0x90, 0x91, 0x92] + list(
 
 
 # ------------------------------------------------------------------ arithmetic (32-bit longs)
-
-
-def cdiv(a: int, b: int) -> int:
-    q = abs(a) // abs(b)
-    return q if (a < 0) == (b < 0) else -q
 
 
 def muldiv(a: int, b: int, c: int) -> int:

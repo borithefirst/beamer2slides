@@ -13,7 +13,8 @@
 
 from __future__ import annotations
 
-from .render_shading import Unsupported, _Access, load_function, roundf
+from .crt import roundf
+from .render_shading import Unsupported, _Access, load_function
 from .syntax import Stream
 from .syntax import float32 as F
 

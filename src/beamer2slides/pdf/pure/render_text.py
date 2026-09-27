@@ -45,6 +45,7 @@ import numpy as np
 from ..api import PdfError
 from . import ftgrays, ftoutline
 from . import raster as R
+from .crt import cdiv, roundf
 from .raster import F
 
 IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
@@ -291,11 +292,6 @@ def _uses_font(font, glyph: int) -> bool:
 # ---------------------------------------------------------------------- substitutes
 
 
-def _cdiv(a: int, b: int) -> int:
-    q = abs(a) // abs(b)
-    return q if (a >= 0) == (b >= 0) else -q
-
-
 class _SubstFace:
     """A substituted font's face as CFX_Font draws it: the CFX_SubstFont's skew (the italic angle),
     the multiple master blend at the font's weight and each glyph's /Widths width
@@ -331,7 +327,7 @@ class _SubstFace:
             xy = 0
             skew = s.skew()
             if skew:
-                xy = ftoutline.i32(xy - _cdiv(0x10000 * skew, 100))
+                xy = ftoutline.i32(xy - cdiv(0x10000 * skew, 100))
             if s.flag_mm:
                 self.face.adjust_variation(glyph, dest_width, s.weight)
             matrix = (0x10000, xy, 0, 0x10000)
@@ -558,17 +554,6 @@ def clip_text_path(obj, matrix, out: list) -> None:
 # ---------------------------------------------------------------------- DrawNormalText
 
 
-def _roundf(v: float) -> int:
-    """FXSYS_roundf."""
-    if v != v:
-        return 0
-    if v < -2147483648.0:
-        return -2147483648
-    if v >= 2147483647.0:
-        return 2147483647
-    return int(math.copysign(math.floor(abs(v) + 0.5), v))
-
-
 def _floor_int(v: float) -> int:
     """static_cast<int>(floor(v)), saturated."""
     if v != v:
@@ -611,7 +596,7 @@ def render_glyph(face, glyph: int, matrix, subst=None, dest_width: int = 0, is_c
     if subst is not None:
         skew = subst.effective_skew(is_cid)
         if skew:
-            xy = ftoutline.i32(xy - _cdiv(ftoutline.i32(xx * skew), 100))
+            xy = ftoutline.i32(xy - cdiv(ftoutline.i32(xx * skew), 100))
         if subst.flag_mm:
             face.adjust_variation(glyph, dest_width, subst.weight)
     outline = face.outline(glyph, (xx, xy, yx, yy))
@@ -649,7 +634,7 @@ def draw_normal_text(dev, face, chars, size, text2device, fill_argb: int) -> Non
             bm = face.bitmap(glyph, matrix, dest_width)
         else:
             bm = load_glyph_bitmap(face, glyph, matrix)
-        glyphs.append((ox, _floor_int(ox), _roundf(oy), bm))
+        glyphs.append((ox, _floor_int(ox), roundf(oy), bm))
     # GetGlyphsBBox
     rect = None
     for _dx, gx, gy, bm in glyphs:

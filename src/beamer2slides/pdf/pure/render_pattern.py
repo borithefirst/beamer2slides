@@ -17,6 +17,7 @@ import math
 import numpy as np
 
 from . import raster as R
+from .crt import cdiv, roundf
 from .raster import F
 from .syntax import Stream
 
@@ -146,11 +147,6 @@ def _checked_int(v: float):
     return int(v) if _int_range(v) else None
 
 
-def _cdiv(a: int, b: int) -> int:
-    """C integer division (towards zero); `b` is positive here."""
-    return a // b if a >= 0 else -((-a) // b)
-
-
 def _match_rect(dest, src) -> tuple:
     """CFX_Matrix::MatchRect of (left, bottom, right, top) rects."""
     diff = F(src[0] - src[2])
@@ -185,7 +181,6 @@ def draw(status, obj, matrix, rec, stroke: bool) -> None:
 def _screen(status, obj, matrix, rec, clip_box):
     """CPDF_RenderTiling::Draw: the BGRA bitmap over the clip box the tiles are stamped into, or
     None when the tiles were drawn onto the device one by one (or nothing is to be drawn)."""
-    from .render_shading import roundf
     from .render_transparency import composite_bitmap
     cel = cell(rec, obj, status.ctx)
     p2d = R.concat(rec.pattern_to_form, matrix)
@@ -218,10 +213,10 @@ def _screen(status, obj, matrix, rec, clip_box):
                and (_is_scaled(p2d) or _is_90_rotated(p2d)))
     if aligned:
         orig_x, orig_y = roundf(p2d[4]), roundf(p2d[5])
-        min_col = _cdiv(clip_box[0] - orig_x, width) - (1 if clip_box[0] < orig_x else 0)
-        max_col = _cdiv(clip_box[2] - orig_x, width) - (1 if clip_box[2] <= orig_x else 0)
-        min_row = _cdiv(clip_box[1] - orig_y, height) - (1 if clip_box[1] < orig_y else 0)
-        max_row = _cdiv(clip_box[3] - orig_y, height) - (1 if clip_box[3] <= orig_y else 0)
+        min_col = cdiv(clip_box[0] - orig_x, width) - (1 if clip_box[0] < orig_x else 0)
+        max_col = cdiv(clip_box[2] - orig_x, width) - (1 if clip_box[2] <= orig_x else 0)
+        min_row = cdiv(clip_box[1] - orig_y, height) - (1 if clip_box[1] < orig_y else 0)
+        max_row = cdiv(clip_box[3] - orig_y, height) - (1 if clip_box[3] <= orig_y else 0)
     left_offset = F(cell_bbox[0] - p2d[4])
     top_offset = F(cell_bbox[1] - p2d[5])
     if width * height < 16:

@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 
 from .render_torture import EXTGS, num, random_cm, random_path
+from .torture_kit import compare_renders, drop_form_lines
 
 MEDIA = (0, 0, 200, 150)
 
@@ -965,53 +966,18 @@ def case(seed: int, mode: str = "classic"):
 def compare(content: bytes, objects, resources, zoom: float, transparent: bool, forms=()):
     """(pixels that differ or None when the pure reader refuses, PDFium's render, pure's render,
     per-pixel difference or the refusal)."""
-    from ..pdf.api import PdfError
-    from ..pdf.pdfium_backend import PdfiumBackend
-    from ..pdf.pure.backend import PureBackend
-    data = pdf_bytes([content], objects, resources, forms=forms)
-    ref, pure = PdfiumBackend().open(data), PureBackend().open(data)
-    try:
-        a = ref[0].render(zoom, transparent=transparent)
-        try:
-            b = pure[0].render(zoom, transparent=transparent)
-        except PdfError as e:
-            return None, a, None, str(e)
-    finally:
-        ref.close()
-        pure.close()
-    d = np.abs(a.astype(int) - b.astype(int)).max(axis=2)
-    return int((d > 0).sum()), a, b, d
+    return compare_renders(pdf_bytes([content], objects, resources, forms=forms), zoom, transparent,
+                           refusals=True)
 
 
 def shrink(content: bytes, objects, resources, zoom: float, transparent: bool, forms=()):
     """Drop lines (the page's, then each form's) while the difference remains."""
-    forms = list(forms)
-
     def fails(c, fs):
         try:
             return (compare(c, objects, resources, zoom, transparent, fs)[0] or 0) > 0
         except Exception:
             return False
-
-    def cut(text, test):
-        lines = text.split(b"\n")
-        changed = True
-        while changed:
-            changed = False
-            for i in range(len(lines)):
-                if lines[i] in (b"q", b"Q"):
-                    continue
-                trial = lines[:i] + lines[i + 1:]
-                if test(b"\n".join(trial)):
-                    lines, changed = trial, True
-                    break
-        return b"\n".join(lines)
-
-    content = cut(content, lambda c: fails(c, forms))
-    for k in range(len(forms)):
-        entries = forms[k][0]
-        forms[k] = (entries, cut(forms[k][1], lambda c: fails(content, forms[:k] + [(entries, c)] + forms[k + 1:])))
-    return content, forms
+    return drop_form_lines(content, forms, fails)
 
 
 def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, mode: str = "classic") -> dict:

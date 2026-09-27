@@ -51,6 +51,7 @@ import sys
 from dataclasses import dataclass, field
 
 from . import foxit
+from .crt import cdiv
 
 # pdfium::kFontStyle* (core/fxge/fx_font.h) and CPDF_Font's own flag
 STYLE_NORMAL = 0
@@ -741,12 +742,6 @@ _ANGLE_SKEW = (0, -2, -3, -5, -7, -9, -11, -12, -14, -16, -18, -19, -21, -23, -2
 CHARSET_SHIFT_JIS = 128
 
 
-def _cdiv(a: int, b: int) -> int:
-    """C integer division (truncates toward zero)."""
-    q = abs(a) // abs(b)
-    return q if (a >= 0) == (b >= 0) else -q
-
-
 def skew_from_angle(angle: int) -> int:
     """GetSkewFromAngle."""
     if angle > 0 or angle == -0x80000000 or -angle >= len(_ANGLE_SKEW):
@@ -767,7 +762,7 @@ class SubstFont:
     flag_mm: bool = False                  # IsBuiltInGenericFont: drawn with a multiple master face
 
     def use_chrome_serif(self) -> None:
-        self.weight = _cdiv(self.weight * 4, 5)
+        self.weight = cdiv(self.weight * 4, 5)
         self.family = "Chrome Serif"
 
     def skew(self) -> int:
@@ -788,19 +783,19 @@ class SubstFont:
         weight = self.effective_weight(is_cid)
         if weight <= 400:
             return 0
-        index = _cdiv(weight - 400, 10)
+        index = cdiv(weight - 400, 10)
         if index >= len(_WEIGHT_POW_11):
             return -1
         level = (_WEIGHT_POW_SHIFT_JIS if self.charset == CHARSET_SHIFT_JIS else _WEIGHT_POW_11)[index]
-        v = _cdiv(level * (abs(xx) + abs(xy)), 36655)
+        v = cdiv(level * (abs(xx) + abs(xy)), 36655)
         return v if -0x80000000 <= v <= 0x7FFFFFFF else 0            # ValueOrDefault(0)
 
     def embolden_level_for_load(self) -> int:
         if self.flag_mm or self.weight <= 400:
             return 0
-        index = min(_cdiv(self.weight - 400, 10), len(_WEIGHT_POW) - 1)
+        index = min(cdiv(self.weight - 400, 10), len(_WEIGHT_POW) - 1)
         if self.charset == CHARSET_SHIFT_JIS:
-            return _cdiv(_WEIGHT_POW_SHIFT_JIS[index] * 65536, 36655)
+            return cdiv(_WEIGHT_POW_SHIFT_JIS[index] * 65536, 36655)
         return _WEIGHT_POW[index]
 
     def configure_external(self, face_name: str, charset: int, weight: int, is_italic: bool, italic_angle: int,

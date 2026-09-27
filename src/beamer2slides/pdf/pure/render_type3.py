@@ -33,6 +33,7 @@ import numpy as np
 
 from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT, PdfError
 from . import raster as R
+from .crt import rect_valid, roundf
 from .raster import F
 
 MAX_BLUES = 16                     # kType3MaxBlues
@@ -40,11 +41,6 @@ MODE_INVISIBLE = 3
 HUGE = 1 << 26                     # pixels: a bigger scratch bitmap is refused, not allocated
 DEVICE_SPACES = ("DeviceGray", "DeviceRGB", "DeviceCMYK", "G", "RGB", "CMYK", "Pattern")
 ANYWHERE = (-2147483648, -2147483648, 2147483647, 2147483647)
-
-
-def _roundf(v: float) -> int:
-    from .render_text import _roundf as roundf
-    return roundf(v)
 
 
 # ---------------------------------------------------------------------- CPDF_Type3Char
@@ -249,7 +245,7 @@ class _GlyphMap:
                 closest = i
         if closest >= 0:
             return blues[closest]
-        new_pos = _roundf(pos)
+        new_pos = roundf(pos)
         if len(blues) < MAX_BLUES:
             blues.append(new_pos)
         return new_pos
@@ -278,7 +274,7 @@ class _Cache:
 
     def load(self, code: int, m) -> _Glyph | None:
         """LoadGlyphBitmap."""
-        key = tuple(_roundf(F(v * 10000)) for v in m[:4])
+        key = tuple(roundf(F(v * 10000)) for v in m[:4])
         gm = self.maps.get(key)
         if gm is None:
             gm = self.maps[key] = _GlyphMap()
@@ -313,7 +309,7 @@ class _Cache:
                     raise PdfError("the pure reader cannot render Type 3 glyphs this wide yet")
                 res = _stretch_to(dib, int(a), height)
                 top = top_line
-                left = _roundf(F(e + a)) if a < 0 else _roundf(e)
+                left = roundf(F(e + a)) if a < 0 else roundf(e)
         if res is None:
             res, left, top = _transform_to(dib, (a, b, c, d, e, f))
             if res is None:
@@ -434,11 +430,6 @@ def _composite_into(mask: np.ndarray, g: _Glyph, x: int, y: int, alpha: int) -> 
 # ---------------------------------------------------------------------- ProcessType3Text
 
 
-def _valid(rect) -> bool:
-    return -2147483648 <= rect[2] - rect[0] <= 2147483647 and \
-        -2147483648 <= rect[3] - rect[1] <= 2147483647
-
-
 def _form_status(status, dev, ch: Char, fill_argb: int, key):
     from .render import Status
     sub = Status(dev, (False, False), False, 1.0, status.ctx, None)
@@ -500,7 +491,7 @@ def process_type3_text(status, obj, matrix) -> None:
             box = (min(q[0] for q in rects), min(q[1] for q in rects),
                    max(q[2] for q in rects), max(q[3] for q in rects))
             rect = R.outer_rect(R.transform_rect(m, box))
-            if not _valid(rect):
+            if not rect_valid(rect):
                 continue
             w, h = rect[2] - rect[0], rect[3] - rect[1]
             if w <= 0 or h <= 0:
@@ -520,7 +511,7 @@ def process_type3_text(status, obj, matrix) -> None:
         if glyph is None:
             continue
         kept = cache
-        origin = (_roundf(m[4]), _roundf(m[5]))
+        origin = (roundf(m[4]), roundf(m[5]))
         if not listing:
             set_bit_mask(dev, glyph.kind, glyph.mask, origin[0] + glyph.left,
                          origin[1] - glyph.top, fill_argb)

@@ -1,11 +1,13 @@
 """The C runtime PDFium's float functions come from, per platform: ucrtbase on Windows, glibc's libm
 on Linux, libSystem on macOS. powf, sinf and friends are not correctly rounded and each library
-rounds its own way, so matching PDFium to the bit means calling the one it links."""
+rounds its own way, so matching PDFium to the bit means calling the one it links. Also C's own
+integer arithmetic where Python's differs (casts, division, %, FXSYS_roundf), one copy for the port."""
 
 from __future__ import annotations
 
 import ctypes
 import ctypes.util
+import math
 import platform
 import sys
 
@@ -108,6 +110,35 @@ def u32(v: float) -> int:
     if v != v or v >= 9223372036854775808.0 or v < -9223372036854775808.0:
         return 0
     return int(v) & U32
+
+
+def cdiv(a: int, b: int) -> int:
+    """C's integer division, truncating towards zero (Python's // floors)."""
+    q = abs(a) // abs(b)
+    return q if (a < 0) == (b < 0) else -q
+
+
+def cmod(a: int, b: int) -> int:
+    """C's %: the remainder takes the dividend's sign."""
+    r = abs(a) % abs(b)
+    return r if a >= 0 else -r
+
+
+def roundf(v: float) -> int:
+    """FXSYS_roundf: half away from zero, NaN is 0, and the int range saturates. The upper bound is
+    static_cast<float>(INT_MAX), which is 2^31, so a float32 from 2^31 - 1 up is INT_MAX."""
+    if v != v:
+        return 0
+    if v < -2147483648.0:
+        return INT_MIN
+    if v >= 2147483647.0:
+        return INT_MAX
+    return int(math.copysign(math.floor(abs(v) + 0.5), v))
+
+
+def rect_valid(rect) -> bool:
+    """FX_RECT::Valid: the width and height of (left, top, right, bottom) fit an int32."""
+    return INT_MIN <= rect[2] - rect[0] <= INT_MAX and INT_MIN <= rect[3] - rect[1] <= INT_MAX
 
 
 def i32_array(t):

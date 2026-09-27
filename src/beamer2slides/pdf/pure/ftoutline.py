@@ -19,6 +19,7 @@ from __future__ import annotations
 import io
 import math
 
+from .crt import cdiv
 from .ftgrays import CUBIC, ON
 
 MASK32 = 0xFFFFFFFF
@@ -252,7 +253,7 @@ class Face:
         """FT_Set_MM_Design_Coordinates = T1_Set_MM_Design, then t1_set_mm_blend."""
         blends_out = []
         for n, (designs, blends) in enumerate(self.design_map):
-            design = coords[n] if n < len(coords) else _cdiv(designs[-1] - designs[0], 2)
+            design = coords[n] if n < len(coords) else cdiv(designs[-1] - designs[0], 2)
             before = after = -1
             the_blend = None
             for p, p_design in enumerate(designs):
@@ -293,18 +294,18 @@ class Face:
         var = self.mm_var()
         if var is None:
             return
-        c0 = _cdiv(var[0][2], 65536) if weight == 0 else weight
+        c0 = cdiv(var[0][2], 65536) if weight == 0 else weight
         if dest_width == 0:
-            c1 = _cdiv(var[1][2], 65536)
+            c1 = cdiv(var[1][2], 65536)
         else:
-            min_param, max_param = _cdiv(var[1][0], 65536), _cdiv(var[1][1], 65536)
+            min_param, max_param = cdiv(var[1][0], 65536), cdiv(var[1][1], 65536)
             self.set_mm_design([c0, min_param])
-            min_width = _cdiv(self._horiadvance(glyph) * 1000, self.upem)
+            min_width = cdiv(self._horiadvance(glyph) * 1000, self.upem)
             self.set_mm_design([c0, max_param])
-            max_width = _cdiv(self._horiadvance(glyph) * 1000, self.upem)
+            max_width = cdiv(self._horiadvance(glyph) * 1000, self.upem)
             if max_width == min_width:
                 return
-            c1 = i32(min_param + _cdiv(i32((max_param - min_param) * (dest_width - min_width)),
+            c1 = i32(min_param + cdiv(i32((max_param - min_param) * (dest_width - min_width)),
                                        max_width - min_width))
         self.set_mm_design([c0, c1])
 
@@ -370,11 +371,6 @@ class Face:
         return path
 
 
-def _cdiv(a: int, b: int) -> int:
-    q = abs(a) // abs(b)
-    return q if (a >= 0) == (b >= 0) else -q
-
-
 # --------------------------------------------------------------- FT_Outline_Embolden (ftoutln.c)
 # Synthetic bold, which PDFium applies to a system substitute heavier than its face. Ported line by
 # line from FreeType, but PDFium never reaches it with the Foxit faces (their weight goes into the
@@ -416,14 +412,14 @@ def vector_normlen(x_: int, y_: int) -> tuple[int, int, int]:
     while True:
         u = _u32(xs + (i32(xs * b) >> 16))
         v = _u32(ys + (i32(ys * b) >> 16))
-        z = _cdiv(-i32(u * u + v * v), 0x200)
-        z = _cdiv(i32(z * ((0x10000 + b) >> 8)), 0x10000)
+        z = cdiv(-i32(u * u + v * v), 0x200)
+        z = cdiv(i32(z * ((0x10000 + b) >> 8)), 0x10000)
         b = i32(b + z)
         if z <= 0:
             break
     vx = -u if sx < 0 else u
     vy = -v if sy < 0 else v
-    ln = _u32(0x10000 + _cdiv(i32(u * x + v * y), 0x10000))
+    ln = _u32(0x10000 + cdiv(i32(u * x + v * y), 0x10000))
     ln = (ln + (1 << (shift - 1))) >> shift if shift > 0 else _u32(ln << -shift)
     return vx, vy, ln
 
@@ -445,7 +441,7 @@ def _orientation(outline) -> int:
 
 def embolden(outline, strength: int):
     """FT_Outline_Embolden(outline, strength) on 26.6 contours [(points, tags)]: a new outline."""
-    xs = ys = _cdiv(strength, 2)
+    xs = ys = cdiv(strength, 2)
     if xs == 0 and ys == 0:
         return outline
     orient = _orientation(outline)
@@ -562,10 +558,10 @@ def _glyph_path(outline):
 
     def conic_to(c, p):
         cx, cy = cur
-        pts.append([*pt(i32(cx + _cdiv(i32(i32(c[0] - cx) * 2), 3)),
-                        i32(cy + _cdiv(i32(i32(c[1] - cy) * 2), 3))), BEZIER, False])
-        pts.append([*pt(i32(c[0] + _cdiv(i32(p[0] - c[0]), 3)),
-                        i32(c[1] + _cdiv(i32(p[1] - c[1]), 3))), BEZIER, False])
+        pts.append([*pt(i32(cx + cdiv(i32(i32(c[0] - cx) * 2), 3)),
+                        i32(cy + cdiv(i32(i32(c[1] - cy) * 2), 3))), BEZIER, False])
+        pts.append([*pt(i32(c[0] + cdiv(i32(p[0] - c[0]), 3)),
+                        i32(c[1] + cdiv(i32(p[1] - c[1]), 3))), BEZIER, False])
         pts.append([*pt(*p), BEZIER, False])
         cur[:] = p
 
@@ -584,12 +580,6 @@ def _glyph_path(outline):
     _check_empty(pts)
     close()
     return pts
-
-
-def _cdiv(a: int, b: int) -> int:
-    """C's integer division (truncating towards 0)."""
-    q = abs(a) // abs(b)
-    return q if (a < 0) == (b < 0) else -q
 
 
 def _check_empty(pts: list) -> None:

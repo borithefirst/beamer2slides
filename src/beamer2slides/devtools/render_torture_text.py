@@ -28,6 +28,8 @@ from pathlib import Path
 
 import numpy as np
 
+from .torture_kit import compare_renders, drop_lines
+
 ROOT = Path(__file__).resolve().parents[3]
 DECKS = Path(os.environ.get("B2S_TEST_DECKS") or ROOT / "tests" / "decks" / "out")
 
@@ -551,18 +553,7 @@ def case(seed: int, kind: str = "any", simple: int = 2):
 
 def compare(content: bytes, fonts, zoom: float, transparent: bool):
     """(pixels that differ, PDFium's render, pure's render, per-pixel max difference)."""
-    from ..pdf.pdfium_backend import PdfiumBackend
-    from ..pdf.pure.backend import PureBackend
-    data = pdf_bytes(content, fonts)
-    da, db = PdfiumBackend().open(data), PureBackend().open(data)
-    try:
-        a = da[0].render(zoom, transparent=transparent)
-        b = db[0].render(zoom, transparent=transparent)
-    finally:
-        da.close()
-        db.close()
-    d = np.abs(a.astype(int) - b.astype(int)).max(axis=2)
-    return int((d > 0).sum()), a, b, d
+    return compare_renders(pdf_bytes(content, fonts), zoom, transparent)
 
 
 def shrink(content: bytes, fonts, zoom: float, transparent: bool) -> bytes:
@@ -572,19 +563,7 @@ def shrink(content: bytes, fonts, zoom: float, transparent: bool) -> bytes:
             return compare(c, fonts, zoom, transparent)[0] > 0
         except Exception:  # noqa: BLE001
             return False
-
-    lines = content.split(b"\n")
-    changed = True
-    while changed:
-        changed = False
-        for i in range(len(lines)):
-            if lines[i] in (b"q", b"Q", b"BT", b"ET"):
-                continue
-            trial = lines[:i] + lines[i + 1:]
-            if fails(b"\n".join(trial)):
-                lines, changed = trial, True
-                break
-    return b"\n".join(lines)
+    return drop_lines(content, fails, keep=(b"q", b"Q", b"BT", b"ET"))
 
 
 def main(argv=None) -> int:
