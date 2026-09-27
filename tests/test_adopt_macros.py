@@ -58,6 +58,29 @@ def test_the_macros_are_a_package_beside_main_tex(tmp_path):
     assert not re.search(r"^\\slidestyle\{", sty, re.M), "the deck's own styles are in main.tex"
 
 
+def test_a_nested_list_resets_through_babel_s_own_family_selectors(tmp_path):
+    """`\\slides@list` resets a list nested in an open item back to the box's own font and colour
+    (`\\slides@basefont`) so an item's own style does not leak into it (`slidebox`'s comment: "a list
+    nested in an item starts from the box's own font and colour, not its item's"). Under babel's
+    `onchar=ids fonts` script switching (Arabic, Hebrew: `scripts.py`), a raw `\\fontfamily{\\f@family}`
+    reselect desyncs which family babel thinks is active, and the next script run loses its joining
+    and its \\babelfont (persian-lit:34: Arabic after a neutral colon came out unjoined, LuaTeX loading
+    the system's own copy of the font instead of the deck's). Replaying the symbolic selector
+    (`\\rmfamily`/`\\sffamily`/`\\ttfamily`) that matches the box's family, instead of the raw NFSS
+    family key, keeps babel's own font-switching commands - which patch those very selectors - in the
+    loop; series, shape and colour still reset exactly as they did before."""
+    _, sty = written(tmp_path)
+    basefont = re.search(r"\\edef\\slides@basefont\{(.*?)\\let\\slides@basecolor", sty, re.S)[1]
+    assert "\\fontfamily{\\f@family}" not in basefont, "bypasses babel's rm/sf/tt tracking: " + basefont
+    for selector in ("\\rmfamily", "\\sffamily", "\\ttfamily"):
+        assert selector in basefont, basefont
+    assert "\\fontseries{\\f@series}" in basefont and "\\fontshape{\\f@shape}" in basefont, basefont
+    assert basefont.rstrip().rstrip("}").endswith("\\selectfont"), basefont
+    # the reset still only fires for a list nested inside an open item
+    list_def = sty[sty.index("\\def\\slides@list#1[#2]"):sty.index("\\def\\slides@listend")]
+    assert "\\ifslides@item\\slides@basefont" in list_def, list_def
+
+
 def test_a_frame_reads_as_boxes_styles_and_words(tmp_path):
     text, _ = written(tmp_path)
     frame = T.frame_of(text)

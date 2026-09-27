@@ -1189,8 +1189,15 @@ SLIDES_TEXT = r"""% --- Text boxes laid out as Google Slides lays them out -----
   \def\slides@valign{t}\let\slides@inset\slidesinset\let\slides@tail\@empty\let\slides@boxpar\@empty
   \setkeys{slidebox}{#1}\slides@xywh#2\@nil
   \global\let\slides@end\@empty\global\slides@toptrue\global\slides@openfalse
-  \edef\slides@basefont{\noexpand\fontfamily{\f@family}\noexpand\fontseries{\f@series}%
-    \noexpand\fontshape{\f@shape}\noexpand\selectfont}\let\slides@basecolor\current@color
+  % a raw \fontfamily{\f@family} reselect desyncs babel's onchar font switching (a script's own
+  % \babelfont is keyed to which of rm/sf/tt is current, tracked through \rmfamily/\sffamily/
+  % \ttfamily, not through the resolved NFSS family): replay the symbolic selector the box's own
+  % family matches, so babel's per-script switching keeps working after the reset.
+  \edef\slides@rm{\rmdefault}\edef\slides@tt{\ttdefault}% \ifx: a \long default never equals \f@family
+  \edef\slides@basefont{%
+    \ifx\f@family\slides@rm\noexpand\rmfamily\else\ifx\f@family\slides@tt\noexpand\ttfamily%
+    \else\noexpand\sffamily\fi\fi
+    \noexpand\fontseries{\f@series}\noexpand\fontshape{\f@shape}\noexpand\selectfont}\let\slides@basecolor\current@color
   \let\itemize\slides@itemize\let\enditemize\slides@listend
   \let\enumerate\slides@enumerate\let\endenumerate\slides@listend
   \edef\slides@block{\noexpand\begin{textblock*}{\slides@w bp}(\slides@x bp,\slides@y bp)}\slides@block
