@@ -391,6 +391,47 @@ def test_the_deck_s_own_hebrew_font_is_fetched_before_one_is_picked(font_folder,
     assert sf.endswith("{NotoSansHebrew-Regular.ttf}")
 
 
+def test_a_machine_with_no_font_for_a_script_fetches_one(font_folder, monkeypatch):
+    """plain-fonts offline (2026-09-27): a sandbox has no Arial, and Montserrat's Arabic came out
+    as boxes - the fallback chain named only fonts a machine has. Now google/fonts gives one."""
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Montserrat", "Thanks ")
+    fetched = []
+
+    def fetch(name, log=print):
+        fetched.append(name)
+        return {"Regular": make_font(font_folder, name, "شكرا ")}
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family", fetch)
+    lines = scripts.script_preamble(target_with("شكرا", font="Montserrat", direction="RIGHT_TO_LEFT"), None)
+    assert fetched == [scripts.FETCHABLE["arabic"][0]]
+    assert any(l.startswith("\\babelfont[arabic]{sf}") and "NotoNaskhArabic" in l for l in lines)
+
+
+def test_a_machine_with_a_font_for_the_script_fetches_nothing(font_folder, monkeypatch):
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Arial", "شكرا ")
+    make_font(font_folder, "Montserrat", "Thanks ")
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family", lambda name, log=print: pytest.fail(f"fetched {name}"))
+    lines = scripts.script_preamble(target_with("شكرا", font="Montserrat", direction="RIGHT_TO_LEFT"), None)
+    assert any(l.startswith("\\babelfont[arabic]{sf}") and "{Arial" in l for l in lines)
+
+
+def test_thai_letters_fetch_a_thai_face_first(font_folder, monkeypatch):
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Roboto", "Hi ")
+    fetched = []
+
+    def fetch(name, log=print):
+        fetched.append(name)
+        return {"Regular": make_font(font_folder, name, "".join(sorted(set("สวัสดี"))) if "Thai" in name else "→")}
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family", fetch)
+    scripts.script_preamble(target_with("สวัสดี", font="Roboto"), None)
+    assert fetched == ["Noto Sans Thai"]
+
+
 def test_the_adopted_preamble_puts_script_lines_before_the_fonts(font_folder, tmp_path):
     make_font(font_folder, "Yu Gothic", "日本")
     t = target_with("日本")

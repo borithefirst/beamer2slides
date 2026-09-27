@@ -288,8 +288,7 @@ def save(ref: str, out: Path, pptx: Path | None = None, log=print) -> dict:
     deck's typefaces, and that pick is made as a machine without fonts would make it - from an
     empty google/fonts cache, looking at nothing installed - so the files hold what the machine
     that reads them could need; one with the fonts installed uses those, like a live read there."""
-    from . import adopt, fontfetch, google_auth
-    from .deck_ir import deck_ir, fetch_url, picture_fetch, presentation_id, slide_thumbnails
+    from .deck_ir import picture_fetch, presentation_id, slide_thumbnails
     from .google_auth import slides_service
     from .gslides import execute
 
@@ -302,6 +301,16 @@ def save(ref: str, out: Path, pptx: Path | None = None, log=print) -> dict:
     (out / FOLDERS["presentation"]).write_text(json.dumps(pres, ensure_ascii=False), encoding="utf-8")
     log(f"presentation: {len(pres.get('slides', []))} slides")
     thumbs = slide_thumbnails(pid, pres, out / FOLDERS["thumbnails"])
+    return record(out, pres, thumbs, picture_fetch(pres), pptx, log)
+
+
+def record(out: Path, pres: dict, thumbs, fetch_pictures, pptx: Path | None = None, log=print) -> dict:
+    """The recordings and manifest `save` writes beside a presentation.json and thumbnails/ already
+    in `out`: the pictures `fetch_pictures(url)` gives while the deck is read, and the google/fonts
+    files adopt's font choice fetches as a machine without fonts makes it. The bench's captures go
+    through here too (`devtools/grind.py files`), their pictures from what they cached."""
+    from . import adopt, fontfetch, google_auth
+    from .deck_ir import deck_ir, fetch_url
     shots = sum(thumbs(n) is not None for n in range(len(pres.get("slides", []))))
     log(f"thumbnails: {shots} of {len(pres.get('slides', []))}")
 
@@ -318,7 +327,7 @@ def save(ref: str, out: Path, pptx: Path | None = None, log=print) -> dict:
         with _environ(B2S_FONT_CACHE=str(Path(tmp) / "font-cache"), B2S_FONTS=None, B2S_FONT_FETCH=None), \
                 google_auth.use_fetcher(recording(google_auth.fetcher_for_threads(), pick)), \
                 fontfetch.watching(seen), adopt.no_machine_fonts():
-            fetch = recording(picture_fetch(pres), lambda url: pictures)   # (a Drive export's too)
+            fetch = recording(fetch_pictures, lambda url: pictures)   # (a Drive export's too)
             target = deck_ir(pres, None, None, fetch, Path(tmp) / "images", True, thumbs)
             for el in _images(target):
                 if el.get("source_url"):

@@ -120,7 +120,7 @@ FALLBACKS = {
                "DejaVu Sans", "Geeza Pro"],
     **{name: ["Nirmala UI", f"Noto Sans {fontspec_script(name)}", "Mangal"] for name, _, _ in INDIC},
     "other": ["Segoe UI Symbol", "Cambria Math", "Segoe UI", "Arial", "Noto Sans Symbols 2",
-              "Noto Sans Symbols", "Noto Sans Math", "DejaVu Sans", "Symbola", "Apple Symbols"],
+              "Noto Sans Symbols", "Noto Sans Math", "DejaVu Sans", "Symbola", "Apple Symbols", "Noto Sans Thai"],
 }
 
 
@@ -295,6 +295,35 @@ def _fetch(name: str) -> bool:
     return bool(fetch_family(name))
 
 
+# What google/fonts gives a script when no font in the folders covers its letters - a sandbox has no
+# Arial or Nirmala UI, and its Arabic came out as boxes (plain-fonts, offline, 2026-09-27). Fetched
+# only then, so a machine with the fonts sets what it did before.
+FETCHABLE = {"hebrew": ["Noto Sans Hebrew"], "arabic": ["Noto Naskh Arabic", "Noto Sans Arabic"],
+             **{name: [f"Noto Sans {fontspec_script(name)}"] for name, _, _ in INDIC},
+             "other": ["Noto Sans Symbols 2", "Noto Sans Symbols", "Noto Sans Math"]}
+
+
+def _fetch_fallback(g: str, names: list[str], need: set[int]) -> None:
+    """Fetch `FETCHABLE[g]` in turn until some font of `names` (they are on it) covers `need`."""
+    def covered() -> bool:
+        if g == "other":                               # symbols come one by one from several fonts
+            got = set()
+            for n in names:
+                f = find_face(n)
+                got |= need & coverage(f) if f else set()
+            return need <= got
+        face = _pick(names, need)
+        return face is not None and need <= coverage(face)
+    fetchable = FETCHABLE.get(g, [])
+    if g == "other" and any(0x0E00 <= c <= 0x0E7F for c in need):
+        fetchable = ["Noto Sans Thai", *fetchable]
+    for n in fetchable:
+        if covered():
+            return
+        if _fetch(n):
+            _FACES.clear()
+
+
 def plan(target: dict) -> Plan:
     chars: dict[str, Counter] = {}
     fonts: dict[tuple, Counter] = {}                     # (group, family) -> deck font names
@@ -328,6 +357,7 @@ def plan(target: dict) -> Plan:
                 # run set the showcase's Noto Sans Hebrew and Arabic words in Arial
                 if [n for n in own if _fetch(n)]:
                     _FACES.clear()
+                _fetch_fallback(g, own + FAMILY_FALLBACKS[key] + FALLBACKS[g], need)
                 face = _pick(own + FAMILY_FALLBACKS[key] + FALLBACKS[g], need)
                 if face is not None:
                     fams[key] = _with_bold(face)
@@ -346,6 +376,8 @@ def plan(target: dict) -> Plan:
             # thumbnails show Noto's shapes, not Yu Gothic's or Microsoft YaHei's), ahead of the
             # machine's own fallbacks
             names.insert(len(names) - len(FALLBACKS[cjk]), RENDERER_CJK[cjk])
+        else:
+            _fetch_fallback(g, names, need)
         if g == "other":
             # symbols come one by one from whichever font has each
             for n in names:

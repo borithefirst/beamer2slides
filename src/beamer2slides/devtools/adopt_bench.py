@@ -31,6 +31,7 @@ import sys
 import time
 import traceback
 from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor, as_completed
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 
 import numpy as np
@@ -252,10 +253,39 @@ def score_pdf(pdf: Path, folder: Path, target: dict, sheets: Path | None) -> lis
 
 # ---------------------------------------------------------------------------------------------- run
 
-def load_target(folder: Path, slides: str | None, run: Path | None = None) -> dict:
+OFFLINE = "deck-files"          # a capture as `deck-files` saves a deck (devtools/grind.py files)
+
+
+def refuse(url: str) -> bytes:
+    raise PermissionError(f"offline: no download ({url})")
+
+
+@contextmanager
+def sandbox(folder: Path):
+    """What a sandbox handed the deck's files has, for the block: the recordings of `folder`'s
+    deck-files answering every download and nothing else (no network), no font of this machine's,
+    and a google/fonts cache only those recordings ever filled (kept per deck, so a second run does
+    not cut the same variable fonts again)."""
+    from beamer2slides import adopt, deck_files, google_auth
+    files = deck_files.DeckFiles.load(folder / OFFLINE)
+    with deck_files._environ(B2S_FONT_CACHE=str(folder / "offline-font-cache"), B2S_FONTS=None,
+                             B2S_FONT_FETCH=None, B2S_FONT_SOURCE=None), \
+            google_auth.use_fetcher(refuse), deck_files.replaying(files), adopt.no_machine_fonts():
+        yield files
+
+
+def load_target(folder: Path, slides: str | None, run: Path | None = None, files=None) -> dict:
     """The IR as *this* code reads the cached presentation (so a deck_ir change shows in the run),
-    pictures from the capture's cache; written to the run folder, never over the corpus."""
-    if (folder / "presentation.json").exists():
+    pictures from the capture's cache; written to the run folder, never over the corpus. With
+    `files` (inside `sandbox`), read as `adopt --deck DIR` reads them: pictures from the recording."""
+    if files is not None:
+        from beamer2slides.deck_ir import given_thumbnails, read_presentation
+        pres = json.loads(files.presentation.read_text(encoding="utf-8"))
+        thumbs, _ = given_thumbnails(pres, files.thumbnails, lambda *_: None)
+        target = read_presentation(pres, (run or folder) / "target-images", None, None, thumbs, pptx_first=False)
+        if run is not None:
+            (run / "target.json").write_text(json.dumps(target, indent=1), encoding="utf-8")
+    elif (folder / "presentation.json").exists():
         target = build_target(folder)
         if run is not None:
             (run / "target.json").write_text(json.dumps(target, indent=1), encoding="utf-8")
@@ -270,24 +300,35 @@ def load_target(folder: Path, slides: str | None, run: Path | None = None) -> di
 
 
 def run_one(name: str, iters: int = 0, flow: bool = False, slides: str | None = None,
-            tag: str | None = None, cache: bool = True, guard: bool = True, blind: bool = False) -> dict:
+            tag: str | None = None, cache: bool = True, guard: bool = True, blind: bool = False,
+            offline: bool = False) -> dict:
     """Bootstrap (and optionally converge) one corpus deck and score it. Never raises: a crash or a
     compile error is the result, since finding those is half the point.
 
     The loop gets the thumbnails as a live adopt does (the target carries their paths, `deck_ir`), so
     its frame guard scores by ink; `blind` hides them (the guard falls back to residuals and words,
-    as pull without thumbnails), `guard=False` runs the loop with no guard at all."""
-    from beamer2slides import adopt
-    from beamer2slides.inverse import Workspace, converge
+    as pull without thumbnails), `guard=False` runs the loop with no guard at all. `offline` reads the
+    deck's files (`OFFLINE`) in a `sandbox`: no network, no font of this machine's, as a harness does."""
     folder = CORPUS / name
-    tag = tag or ("flow" if flow else "abs") + (f"-it{iters}" if iters else "") + (f"-s{slides}" if slides else "")
+    tag = tag or ("flow" if flow else "abs") + (f"-it{iters}" if iters else "") + (f"-s{slides}" if slides else "") \
+        + ("-off" if offline else "")
     run = folder / "runs" / tag
     shutil.rmtree(run, ignore_errors=True)
     run.mkdir(parents=True)
-    res: dict = {"deck": name, "tag": tag, "iters": iters, "flow": flow, "slides": slides}
+    res: dict = {"deck": name, "tag": tag, "iters": iters, "flow": flow, "slides": slides, "offline": offline}
     t0 = time.perf_counter()
+    if offline and not (folder / OFFLINE / "presentation.json").exists():
+        res["error"] = f"offline: no {OFFLINE}/ in {folder} (devtools/grind.py files {name})"
+        return finish(run, res, t0)
+    with sandbox(folder) if offline else nullcontext() as files:
+        return _run(name, folder, run, res, t0, iters, flow, slides, cache, guard, blind, files)
+
+
+def _run(name, folder, run, res, t0, iters, flow, slides, cache, guard, blind, files) -> dict:
+    from beamer2slides import adopt
+    from beamer2slides.inverse import Workspace, converge
     try:
-        target = load_target(folder, slides, run)
+        target = load_target(folder, slides, run, files)
         res["n"] = len(target["slides"])
         tex = run / "tree" / "main.tex"
         adopt.bootstrap(target, tex, flow)
@@ -542,6 +583,8 @@ def main(argv=None) -> None:
     r.add_argument("--no-guard", action="store_true", help="--iter without the loop's frame guard")
     r.add_argument("--blind", action="store_true", help="--iter with the thumbnails hidden from the loop: "
                                                         "the frame guard judges by residuals and words")
+    r.add_argument("--offline", action="store_true", help="read each deck's deck-files/ as a sandbox does: no "
+                                                          "network, no font of this machine's (devtools/grind.py files)")
     p = sub.add_parser("report")
     p.add_argument("--tag", default="abs")
     lo = sub.add_parser("losses", help="where the boxes score goes, by element, deck, kind and font")
@@ -574,7 +617,8 @@ def main(argv=None) -> None:
         def job(spec: str) -> tuple:
             name, _, sl = spec.partition(":")
             tag = f"{args.tag}-s{sl}" if args.tag and sl else args.tag
-            return name, args.iter, args.flow, sl or args.slides, tag, not args.no_cache, not args.no_guard, args.blind
+            return (name, args.iter, args.flow, sl or args.slides, tag, not args.no_cache, not args.no_guard, args.blind,
+                    args.offline)
 
         with ProcessPoolExecutor(max(1, min(args.jobs, len(names)))) as pool:
             futs = [pool.submit(run_one, *job(n)) for n in names]

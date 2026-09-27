@@ -3,7 +3,16 @@
 import numpy as np
 import pytest
 
-from beamer2slides.devtools.slide_metrics import auc, auc_within, distance_to, numpy_metrics
+from beamer2slides.devtools.slide_metrics import SEVERITY_CAP, auc, auc_within, distance_to, numpy_metrics, severity
+
+
+def test_severity_counts_what_passes_its_threshold_each_capped():
+    """A gradient's ground_de sixty times its threshold is one defect, not sixty: each metric counts
+    at most SEVERITY_CAP, and one below its threshold counts nothing."""
+    th = {"ground_de": 1.0, "missing": 0.1, "dino": 0.2}
+    total, over = severity({"ground_de": 60.0, "missing": 0.3, "dino": 0.1, "unrelated": 9.0}, th)
+    assert over == {"ground_de": SEVERITY_CAP, "missing": pytest.approx(3.0)}
+    assert total == pytest.approx(SEVERITY_CAP + 3.0)
 
 W, H = 400, 225
 SLIDE = {"size": [W, H], "elements": [{"bbox": [0, 0, W, H]}]}

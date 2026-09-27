@@ -307,10 +307,17 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   replay picks the main and switch fonts from that slide's letters alone: check a font finding on
   the whole deck (docs/adopt-bench.md "saudi-cats"). **Which kind of defect, where**:
   `devtools/slide_metrics.py run|calibrate|flag|compare|show` (drift/missing/extra, local ink,
-  colour, worst tile; OT/LPIPS/DINOv2 lazily in `out/metrics-venv`), calibrated within decks on the judges' `hunt0` verdicts in
+  colour, worst tile; OT/LPIPS/DINOv2 lazily in `out/metrics-venv`; `gallery` = the worst slides by
+  `severity`), calibrated within decks on the judges' `hunt0` verdicts in
   `out/adopt-corpus/judged/` (docs/adopt-bench.md "Metrics"); `page` is blind to colour. The public gallery
   (borithefirst.github.io/beamer2slides, branch `gh-pages`) shows adopt on six decks we made and
   own, never corpus decks (no licence to republish): `tools/showcase.py`, docs/showcase.md.
+- **The adopt grind** (`devtools/grind.py`, docs/adopt-grind.md): rounds through the *sandbox's*
+  path. `grind files` saves each capture as deck-files (`deck_files.record`), and
+  `adopt_bench run --offline` adopts them in `adopt_bench.sandbox` (recordings only, no machine
+  fonts). Then metrics, the worst-slides page (`grind show`), blind judges on two-panel sheets
+  (never the diff panel: judges read its red/blue as text colour), and a time/token ledger
+  (`out/grind/ledger.jsonl`). A script no installed font covers fetches `scripts.FETCHABLE`.
 - **Occlusion**: nothing a sync creates may end up over words only the deck has
   (`sync.would_hide`, `Sync.restack`); the fuzz applier mirrors it and must be fixed together.
   The person's own objects are never moved: when the source's words or pictures now run over one,

@@ -49,6 +49,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -597,6 +598,98 @@ def worst(tag: str, metric: str, n: int) -> None:
         print(f"{r.get(metric, float('nan')):>9.4f}  {deck}:{slide}  {sheet}")
 
 
+#: The metrics a slide's severity adds up, each with the kind of defect it names when it dominates:
+#: the ones that held up within decks on the judges' verdicts (docs/adopt-bench.md "Metrics").
+SEVERITY = {"tile_pixels": "a region wrong", "local_missing": "words or pictures missing",
+            "missing": "ink missing", "extra": "extra ink", "graded": "moved or broken lines",
+            "local_graded": "moved on a panel", "tile_ink_de": "text colour", "ground_de": "background or fill",
+            "dino": "looks different", "tile_lpips": "a region looks different"}
+SEVERITY_CAP = 10.0     # one metric counts at most ten thresholds: a gradient's ground_de x60 is one defect
+
+
+def severity(r: dict, thresholds: dict) -> tuple[float, dict]:
+    """How far past what identical slides reach a slide is: each SEVERITY metric over its threshold,
+    capped, summed. Returns the sum and {metric: ratio} of those past theirs."""
+    over = {m: min(r[m] / thresholds[m], SEVERITY_CAP) for m in SEVERITY
+            if m in r and thresholds.get(m, 0) > 0 and r[m] > thresholds[m]}
+    return sum(over.values()), over
+
+
+def rank(tag: str, thresholds: dict, corpora: list[Path]) -> list[dict]:
+    """Every slide of run `tag` in `corpora`, worst first."""
+    out = []
+    for corpus in corpora:
+        for p in corpus.glob(f"*/runs/{tag}/metrics.json"):
+            d = json.loads(p.read_text(encoding="utf-8"))
+            for r in d["slides"]:
+                sev, over = severity(r, thresholds)
+                out.append({"corpus": corpus.name, "deck": d["deck"], "slide": r["slide"], "severity": round(sev, 2),
+                            "over": {m: round(v, 1) for m, v in sorted(over.items(), key=lambda kv: -kv[1])},
+                            "sheet": str(p.parent / "sheets" / f"{r['slide']:03}.png")})
+    out.sort(key=lambda s: -s["severity"])
+    return out
+
+
+def gallery(tag: str, thresholds: dict, corpora: list[Path], n: int, out: Path,
+            previous: Path | None = None, per_deck: int = 2) -> Path:
+    """The `n` worst slides of run `tag` as one self-contained HTML page (their sheets inlined:
+    the deck | our page | the ink diff), with what each trips, the kind of defect that names, and
+    against `previous` (an earlier gallery's .json) which slides are new to the list. The corpora
+    are other people's decks: the page is for looking at here, never for publishing."""
+    import base64
+    import html
+    import io
+    ranked = rank(tag, thresholds, corpora)
+    before = set()
+    if previous and previous.exists():
+        before = {(s["deck"], s["slide"]) for s in json.loads(previous.read_text(encoding="utf-8"))["worst"]}
+    top, shown = [], {}
+    for s in ranked:                       # a deck's family of defect once or twice, not the whole list
+        if len(top) < n and shown.get(s["deck"], 0) < per_deck:
+            top.append(s)
+            shown[s["deck"]] = shown.get(s["deck"], 0) + 1
+    stamp = time.strftime("%Y-%m-%d %H:%M")
+    rows = []
+    for i, s in enumerate(top, 1):
+        img = ""
+        if Path(s["sheet"]).exists():
+            im = Image.open(s["sheet"]).convert("RGB")
+            im.thumbnail((1500, 1500))
+            buf = io.BytesIO()
+            im.save(buf, "JPEG", quality=80)
+            img = f'<img src="data:image/jpeg;base64,{base64.b64encode(buf.getvalue()).decode()}">'
+        kinds = sorted({SEVERITY[m] for m in list(s["over"])[:3]}, key=list(SEVERITY.values()).index)
+        new = before and (s["deck"], s["slide"]) not in before
+        trips = " ".join(f"<code>{m}</code>&nbsp;x{v}" for m, v in s["over"].items())
+        rows.append(f'<section><h2>{i}. {html.escape(s["deck"])}:{s["slide"]}'
+                    f'{" <span class=new>new</span>" if new else ""}<small>{s["corpus"]} · severity {s["severity"]}'
+                    f'</small></h2><p class=kind>{html.escape(", ".join(kinds))}</p><p>{trips}</p>{img}</section>')
+    total = len(ranked)
+    flagged = sum(s["severity"] > 0 for s in ranked)
+    page = f"""<!doctype html><html><head><meta charset="utf-8"><title>Worst adopted slides</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root {{ --bg:#fff; --fg:#1b1b1b; --muted:#666; --line:#e3e3e3; --accent:#b3261e; }}
+@media (prefers-color-scheme: dark) {{ :root:not([data-theme="light"]) {{ --bg:#161616; --fg:#eee; --muted:#aaa; --line:#333; --accent:#ff8a80; }} }}
+body {{ background:var(--bg); color:var(--fg); font:15px/1.45 system-ui,sans-serif; margin:0 auto; max-width:1500px; padding:16px; }}
+h1 {{ font-size:22px; margin:0 0 4px; }} header p {{ color:var(--muted); margin:0 0 16px; }}
+section {{ border-top:1px solid var(--line); padding:14px 0; }}
+h2 {{ font-size:17px; margin:0; }} h2 small {{ color:var(--muted); font-weight:400; margin-left:10px; }}
+.kind {{ color:var(--accent); margin:4px 0; }} code {{ font-size:13px; }}
+.new {{ background:var(--accent); color:var(--bg); border-radius:4px; font-size:12px; padding:1px 6px; }}
+img {{ max-width:100%; height:auto; border:1px solid var(--line); margin-top:6px; }}
+</style></head><body><header><h1>Worst adopted slides - run {html.escape(tag)}</h1>
+<p>{stamp} · {flagged} of {total} slides past what judged-identical slides reach · each sheet: the deck |
+the adopted source | ink (red only in the deck, blue only in ours) · x = times the threshold, capped at
+{SEVERITY_CAP:g}</p></header>{"".join(rows)}</body></html>"""
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"worst-{tag}-{time.strftime('%Y%m%d-%H%M')}.html"
+    path.write_text(page, encoding="utf-8")
+    path.with_suffix(".json").write_text(json.dumps({"tag": tag, "when": stamp, "slides": total, "flagged": flagged,
+                                                     "worst": top}, indent=1), encoding="utf-8")
+    return path
+
+
 def heat(values: np.ndarray, size: tuple[int, int], top: float) -> Image.Image:
     """A map as white (0) to dark red (`top` and over), resized to `size`."""
     v = np.clip(np.nan_to_num(values.astype(np.float32)) / top, 0, 1)
@@ -691,8 +784,19 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("tag")
     s.add_argument("--out", type=Path, default=Path("out") / "metrics")
     s.add_argument("--gpu", action="store_true")
+    g = sub.add_parser("gallery", help="the worst slides of a run as one HTML page")
+    g.add_argument("tag")
+    g.add_argument("calibration", type=Path, help="a calibrate --json file")
+    g.add_argument("--corpus", type=Path, action="append", help="a corpus folder (repeat); default the bench's")
+    g.add_argument("-n", type=int, default=20)
+    g.add_argument("--out", type=Path, default=Path("out") / "grind")
+    g.add_argument("--previous", type=Path, help="an earlier gallery's .json: mark slides new to the list")
+    g.add_argument("--per-deck", type=int, default=2, help="at most this many slides of one deck")
     a = ap.parse_args(argv)
-    if a.cmd == "compare":
+    if a.cmd == "gallery":
+        print(gallery(a.tag, json.loads(a.calibration.read_text(encoding="utf-8"))["thresholds"],
+                      a.corpus or [corpus_dir()], a.n, a.out, a.previous, a.per_deck))
+    elif a.cmd == "compare":
         compare(a.before, a.after, a.n)
     elif a.cmd == "flag":
         flag(a.tag, json.loads(a.calibration.read_text(encoding="utf-8"))["thresholds"], a.n)
