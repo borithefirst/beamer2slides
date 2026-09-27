@@ -747,17 +747,18 @@ def rank(tag: str, thresholds: dict, corpora: list[Path], weights: dict | None =
 
 
 def gallery(tag: str, thresholds: dict, corpora: list[Path], n: int, out: Path,
-            previous: Path | None = None, per_deck: int = 2, weights: dict | None = None) -> Path:
+            previous: Path | None = None, per_deck: int = 2, weights: dict | None = None,
+            decks: set[str] | None = None) -> Path:
     """The `n` worst slides of run `tag` as one self-contained HTML page (their sheets inlined:
     the deck | our page | the ink diff), with what each trips, the kind of defect that names, and
     against `previous` (an earlier gallery's .json) which slides are new to the list. The corpora
     are other people's decks: the page is for looking at here, never for publishing. `weights`
     scales SEVERITY metrics (a `calibrate --json`'s "severity_weights"; omitted, every metric counts
-    1x as before)."""
+    1x as before). `decks` keeps only those decks."""
     import base64
     import html
     import io
-    ranked = rank(tag, thresholds, corpora, weights)
+    ranked = [s for s in rank(tag, thresholds, corpora, weights) if decks is None or s["deck"] in decks]
     before = set()
     if previous and previous.exists():
         before = {(s["deck"], s["slide"]) for s in json.loads(previous.read_text(encoding="utf-8"))["worst"]}

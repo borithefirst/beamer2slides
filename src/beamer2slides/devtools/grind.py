@@ -18,6 +18,7 @@ Everything lands under out/grind/ (git-ignored): the corpora are other people's 
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -175,9 +176,30 @@ def latest_tag() -> str | None:
     return json.loads(old[-1].read_text(encoding="utf-8"))["tag"] if old else None
 
 
-def show(tag: str | None, corpora: list[Path], n: int = 20, per_deck: int = 2) -> Path:
+ENGLISH_WORDS = {"the", "and", "of", "to", "is", "in", "for", "with", "you", "that", "are", "on", "this", "it"}
+
+
+def english(folder: Path) -> bool:
+    """Whether a capture's words are English: Latin letters, and common English words among them
+    (a deck of few words, a diagram's labels, is let through on its letters alone)."""
+    def texts(o):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                yield from [v] if k == "content" and isinstance(v, str) else texts(v)
+        elif isinstance(o, list):
+            for v in o:
+                yield from texts(v)
+    s = " ".join(texts(json.loads((folder / "presentation.json").read_text(encoding="utf-8"))))
+    letters = [c for c in s if c.isalpha()]
+    words = re.findall(r"[a-z]+", s.lower())
+    latin = sum(c.isascii() for c in letters) / max(1, len(letters))
+    common = sum(w in ENGLISH_WORDS for w in words) / max(1, len(words))
+    return latin >= 0.9 and (common >= 0.03 or len(letters) < 1500)
+
+
+def show(tag: str | None, corpora: list[Path], n: int = 20, per_deck: int = 2, english_only: bool = False) -> Path:
     """The worst-slides page of `tag` (else the newest round's), against the newest page before it;
-    prints what came onto the list and what left it."""
+    prints what came onto the list and what left it. `english_only`: only decks in English."""
     from beamer2slides.devtools.slide_metrics import gallery
     tag = tag or latest_tag()
     if tag is None:
@@ -186,7 +208,8 @@ def show(tag: str | None, corpora: list[Path], n: int = 20, per_deck: int = 2) -
     old = pages()
     previous = old[-1] if old else None
     cal = json.loads(CALIBRATION.read_text(encoding="utf-8"))
-    path = gallery(tag, cal["thresholds"], corpora, n, OUT, previous, per_deck, cal.get("severity_weights"))
+    decks = {p.name for p in captures(corpora, []) if english(p)} if english_only else None
+    path = gallery(tag, cal["thresholds"], corpora, n, OUT, previous, per_deck, cal.get("severity_weights"), decks)
     now = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
     was = json.loads(previous.read_text(encoding="utf-8")) if previous else {"worst": [], "tag": None}
     key = lambda s: f"{s['deck']}:{s['slide']}"                          # noqa: E731
@@ -220,6 +243,7 @@ def main(argv: list[str] | None = None) -> None:
     s.add_argument("--tag")
     s.add_argument("-n", type=int, default=20)
     s.add_argument("--per-deck", type=int, default=2)
+    s.add_argument("--english", action="store_true", help="only decks in English")
     lg = sub.add_parser("log")
     lg.add_argument("stage")
     lg.add_argument("--tag")
@@ -236,7 +260,7 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd == "round":
         round_(a.tag, corpora, a.jobs, a.gpu, a.names, a.python)
     elif a.cmd == "show":
-        show(a.tag, corpora, a.n, a.per_deck)
+        show(a.tag, corpora, a.n, a.per_deck, a.english)
     elif a.cmd == "log":
         print(log(a.stage, **{k: v for k, v in vars(a).items() if k in ("tag", "seconds", "tokens", "agents", "model", "note")
                              and v is not None}))
