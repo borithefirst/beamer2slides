@@ -47,6 +47,8 @@ RANGES = [
     ("han", 0x2E80, 0x2FDF), ("han", 0x3000, 0x303F), ("han", 0x3190, 0x31EF), ("han", 0x3200, 0x33FF),
     ("han", 0x3400, 0x4DBF), ("han", 0x4E00, 0x9FFF), ("han", 0xF900, 0xFAFF), ("han", 0xFE30, 0xFE4F),
     ("han", 0xFF00, 0xFF65), ("han", 0xFFE0, 0xFFEF), ("han", 0x20000, 0x3FFFF),
+    ("georgian", 0x10A0, 0x10FF), ("georgian", 0x1C90, 0x1CBF), ("georgian", 0x2D00, 0x2D2F),
+    ("armenian", 0x0530, 0x058F),
 ]
 # The Brahmic scripts, each named by babel's language for it: their vowel signs reorder and their
 # conjuncts form in the font, so a run is set whole (tamil-wiki's Tamil from the fallback chain came
@@ -76,6 +78,12 @@ RTL_SCRIPTS = ("hebrew", "arabic")
 # Scripts whose letters change shape with their neighbours or carry marks placed by the font:
 # node mode leaves Arabic letters unjoined, so these are set with HarfBuzz.
 COMPLEX = ("hebrew", "arabic", *(name for name, _, _ in INDIC))
+# Groups whose letters come from `plan()`'s fallback chain whatever font the deck names for them
+# (`adopt.chain_letter`): a deck rarely owns a face with Georgian or Armenian any more than it owns
+# one with CJK, so counting those letters against the deck's declared Latin font's coverage rejects
+# it outright (ka-project's Georgian, typed "in" Times New Roman and Arial, sent both to bundled TeX
+# Gyre - MIN_MAIN_COVERAGE never clears with a third of the document uncovered by either).
+CHAIN_GROUPS = {"cjk", "georgian", "armenian"}
 
 
 def script_of(ch: str) -> str | None:
@@ -137,6 +145,12 @@ FALLBACKS = {
     # Noto Sans Thai's shapes (compared against its thumbnail), so it is tried ahead of the Windows
     # Thai faces even where one is installed.
     "thai": ["Noto Sans Thai", "Leelawadee UI", "Leelawadee", "Angsana New", "Cordia New", "Tahoma"],
+    # Windows' old Georgian/Armenian coverage (Sylfaen) predates Mtavruli and most of Unicode's
+    # Armenian ligatures; Segoe UI has both scripts since Windows 10. Slides' own substitute for a
+    # font with neither (ka-project's Times New Roman and Arial) reads as a plain sans on its
+    # thumbnails (even strokes, no serifs), so Noto Sans, not Noto Serif, is tried first.
+    "georgian": ["Segoe UI", "Sylfaen", "Noto Sans Georgian", "Noto Serif Georgian", "DejaVu Sans"],
+    "armenian": ["Segoe UI", "Sylfaen", "Noto Sans Armenian", "Noto Serif Armenian", "DejaVu Sans"],
     "other": ["Segoe UI Symbol", "Cambria Math", "Segoe UI", "Arial", "Noto Sans Symbols 2",
               "Noto Sans Symbols", "Noto Sans Math", "DejaVu Sans", "Symbola", "Apple Symbols"],
 }
@@ -273,6 +287,7 @@ class Plan:
     languages: dict             # babel language with its own font -> {"rm"|"sf"|"tt": (Face, bold Face | None)}
     bidi: bool                  # any right-to-left letters or paragraphs at all
     complex: bool               # HarfBuzz for the whole document (a shaped script in the chain)
+    uncovered: dict             # script -> letter count with no font anywhere to draw it (silent tofu)
 
 
 # babel's language for a script whose letters join or reorder: its runs are set in a font of their
@@ -303,6 +318,13 @@ def _pick(names: list[str], need: set[int]) -> Face | None:
 
 RENDERER_CJK = {"japanese": "Noto Sans JP", "korean": "Noto Sans KR", "chinese-traditional": "Noto Sans TC",
                 "chinese-simplified": "Noto Sans SC"}
+# Paired with Times New Roman instead, when Slides draws the deck's own CJK font in neither
+# (`RENDERER_CJK_SERIF`'s companion for `adopt.SLIDES_DEFAULT`): apps-edu-zh's Microsoft JhengHei is
+# itself sans, but Slides' substitute for a font it cannot draw at all is serif throughout, Latin and
+# ideographs alike (thumbnails, hunt 2026-09-27) - unlike a plain Latin font standing in for a missing
+# one (jruby-ja's Arial), which keeps a sans companion of its own kind.
+RENDERER_CJK_SERIF = {"japanese": "Noto Serif JP", "korean": "Noto Serif KR",
+                      "chinese-traditional": "Noto Serif TC", "chinese-simplified": "Noto Serif SC"}
 
 
 def _fetch(name: str) -> bool:
@@ -318,7 +340,7 @@ def _fetch(name: str) -> bool:
 # Arial or Nirmala UI, and its Arabic came out as boxes (plain-fonts, offline, 2026-09-27). Fetched
 # only then, so a machine with the fonts sets what it did before.
 FETCHABLE = {"hebrew": ["Heebo", "Noto Sans Hebrew"], "arabic": ["Noto Naskh Arabic", "Noto Sans Arabic"],
-             "thai": ["Noto Sans Thai"],
+             "thai": ["Noto Sans Thai"], "georgian": ["Noto Sans Georgian"], "armenian": ["Noto Sans Armenian"],
              **{name: [f"Noto Sans {fontspec_script(name)}"] for name, _, _ in INDIC},
              "other": ["Noto Sans Symbols 2", "Noto Sans Symbols", "Noto Sans Math"]}
 
@@ -355,6 +377,7 @@ def plan(target: dict) -> Plan:
     rtl_paras = [p for p in paragraphs(target) if p.get("direction") == "rtl"]
     cjk = cjk_language(chars["cjk"]) if "cjk" in chars else None
     chain: list = []
+    uncovered: dict[str, int] = {}
     languages: dict = {lang: {} for lang in sorted({rtl_language(p) for p in rtl_paras})}
     for g in sorted(chars, key=lambda g: -sum(chars[g].values())):
         need = {ord(c) for c in chars[g]}
@@ -366,6 +389,7 @@ def plan(target: dict) -> Plan:
             # a font per family the letters are written in, the deck's own first
             lang = SCRIPT_LANGUAGES[g]
             fams = languages.setdefault(lang, {})
+            got_face = False
             for family, key in FAMILY_KEYS.items():
                 own = [n for n, _ in fonts.get((g, family), Counter()).most_common() if n]
                 if key != "sf" and not own:
@@ -384,21 +408,31 @@ def plan(target: dict) -> Plan:
                 face = _pick(own + FAMILY_FALLBACKS[key] + FALLBACKS[g], need)
                 if face is not None:
                     fams[key] = _with_bold(face)
+                    got_face = True
+            if not got_face:
+                uncovered[g] = len(need)
             continue
-        if g == "cjk" and _fetch(RENDERER_CJK[cjk]):
-            _FACES.clear()
         own = [n for n, _ in deck.most_common() if n]
+        renderer = RENDERER_CJK.get(cjk)
         if g == "cjk":
-            # a CJK face Slides does not have draws nothing: its letters come from the renderer's
-            # Noto (apps-edu-zh's Microsoft JhengHei, `adopt.slides_lacks_cjk`)
+            # A CJK face Slides does not have draws nothing: its letters come from the renderer's
+            # Noto (apps-edu-zh's Microsoft JhengHei, `adopt.slides_lacks_cjk`) - the serif one
+            # (`RENDERER_CJK_SERIF`) when the group's most-typed font is one Slides draws in Times
+            # New Roman throughout, sans when the deck's own font is usable as itself or a plain
+            # Latin font stands in for it (jruby-ja's Arial). One chain for the whole document, so
+            # its commonest font decides, as `own`'s order already does.
             from .adopt import slides_lacks_cjk
+            if own and slides_lacks_cjk(own[0]) and cjk in RENDERER_CJK_SERIF:
+                renderer = RENDERER_CJK_SERIF[cjk]
             own = [n for n in own if not slides_lacks_cjk(n)]
+            if _fetch(renderer):
+                _FACES.clear()
         names = own + FALLBACKS.get(cjk if g == "cjk" else g, FALLBACKS["other"])
         if g == "cjk":
             # the face Slides' renderer draws a CJK letter in when the deck's font has none (its
             # thumbnails show Noto's shapes, not Yu Gothic's or Microsoft YaHei's), ahead of the
             # machine's own fallbacks
-            names.insert(len(names) - len(FALLBACKS[cjk]), RENDERER_CJK[cjk])
+            names.insert(len(names) - len(FALLBACKS[cjk]), renderer)
         else:
             _fetch_fallback(g, names, need)
         if g == "other":
@@ -413,10 +447,13 @@ def plan(target: dict) -> Plan:
                     break
             continue
         face = _pick(names, need)
-        if face is not None and all(face != c for c, _ in chain):
-            chain.append(_with_bold(face))
+        if face is not None:
+            if all(face != c for c, _ in chain):
+                chain.append(_with_bold(face))
+        else:
+            uncovered[g] = len(need)
     return Plan(chain, cjk, languages, bool(rtl_paras) or any(g in RTL_SCRIPTS for g in chars),
-                any(g in COMPLEX and g not in SCRIPT_LANGUAGES for g in chars))
+                any(g in COMPLEX and g not in SCRIPT_LANGUAGES for g in chars), uncovered)
 
 
 def paragraphs(target: dict):
@@ -514,12 +551,22 @@ def switch_font_lines(target: dict, tree: Path | None, command: str, fam: str, o
     return [f"\\babelfont{{{key}}}[{options}]{{{name}}}", *langs, f"\\newcommand{command}{{\\{key}family}}"]
 
 
-def script_preamble(target: dict, tree: Path | None) -> list[str]:
+def script_preamble(target: dict, tree: Path | None, missing: list | None = None) -> list[str]:
     """Preamble lines for the deck's scripts, to go before `adopt.font_preamble`'s font lines
-    (`\\defaultfontfeatures` applies to the fonts declared after it). Empty for a Latin deck."""
+    (`\\defaultfontfeatures` applies to the fonts declared after it). Empty for a Latin deck.
+
+    A script no font on this machine (nor google/fonts, offline) covers at all draws nothing -
+    LuaTeX warns "Missing character" and stops there, silently to adopt's own log (Georgian on
+    ka-project, sandboxed with no `Segoe UI`/`Sylfaen` and no recorded Noto Georgian, hunt
+    2026-09-27). `missing` (`adopt.bootstrap`'s list, `adopt.missing_fonts_lines`) is given one
+    entry per such script so the report says so instead of a page of blank text."""
     if os.environ.get("B2S_NO_SCRIPTS"):
         return []
     p = plan(target)
+    if missing is not None:
+        for g, n in p.uncovered.items():
+            if all(m.get("kind") != g or not m.get("script") for m in missing):
+                missing.append({"font": "", "kind": g, "letters": n, "set_in": "", "script": True})
     lines: list[str] = []
     if p.bidi or p.cjk or p.languages:
         lines.append("\\usepackage[bidi=basic,layout=lists]{babel}" if p.bidi else "\\usepackage{babel}")

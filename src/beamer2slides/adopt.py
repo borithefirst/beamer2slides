@@ -405,20 +405,26 @@ _LACKS: dict[str, bool] = {}
 
 def slides_lacks_cjk(name: str) -> bool:
     """Whether `name` is a CJK font Slides cannot draw: not one of its own (`SLIDES_CJK`), not on
-    google/fonts (fetching must be on to tell), not a font `SUBSTITUTES` stands in for, and a face on
-    this machine that has ideographs. Only CJK faces: a Latin font Slides lacks is drawn otherwise
-    (intro-lecture's CMTT9 in a monospace)."""
+    google/fonts (fetching must be on to tell), not a font `SUBSTITUTES` stands in for, and known to
+    have ideographs - a face on this machine that does, or (offline, with no machine fonts at all: a
+    sandbox has no Microsoft JhengHei to measure) a name `fonts.cjk_font` already recognises as a real
+    Windows or Mac CJK face. Without the second way this never fired offline, so apps-edu-zh's
+    Microsoft JhengHei fell to its plain Noto stand-in (`font_family`'s `cjk_font` branch) for the
+    *whole* family - Latin drawn sans, not Slides' own Times New Roman (hunt 2026-09-27). Only CJK
+    faces: a Latin font Slides lacks is drawn otherwise (intro-lecture's CMTT9 in a monospace)."""
     flat = flatten(name or "")
     if not flat or flat in SLIDES_CJK or flat in SUBSTITUTES or not fetching():
         return False
     if flat not in _LACKS:
         from .deck_ir import family_of
         from .fontfetch import _missing, fetch_family, folder_name
-        files = _font_family(name, family_of(name))
+        has_cjk = cjk_font(name) is not None
+        if not has_cjk:
+            files = _font_family(name, family_of(name))
+            has_cjk = bool(files) and flatten(files["match"]) == flat and \
+                font_coverage(files["UprightFont"], {"中": 1, "文": 1}, files.get("FontIndex") or 0, strict=True) == 1.0
         # google/fonts must have said no (a fetch that failed for want of a network says nothing)
-        _LACKS[flat] = bool(files) and flatten(files["match"]) == flat and \
-            font_coverage(files["UprightFont"], {"中": 1, "文": 1}, files.get("FontIndex") or 0, strict=True) == 1.0 \
-            and not fetch_family(name, log=lambda *a: None) and folder_name(name) in _missing()
+        _LACKS[flat] = has_cjk and not fetch_family(name, log=lambda *a: None) and folder_name(name) in _missing()
     return _LACKS[flat]
 
 
@@ -829,13 +835,26 @@ def stood_in(font: str, files: dict) -> str | None:
 
 
 def missing_fonts_lines(missing: list[dict]) -> list[str]:
-    """What a log says of `ctx.missing_fonts`: which fonts, how much of the deck, set in what."""
+    """What a log says of `ctx.missing_fonts`: which fonts, how much of the deck, set in what - and,
+    from `scripts.script_preamble`'s own entries (`m["script"]`), which scripts had no font at all
+    to draw them (no substitute, not even a fallback: the letters are simply missing, `scripts.plan`
+    "uncovered")."""
     if not missing:
         return []
-    lines = ["fonts the deck is written in that are not here (give their files with --fonts, or a "
-             "local copy of google/fonts with $B2S_FONT_SOURCE, and adopt again):"]
-    for m in sorted(missing, key=lambda m: -m["letters"]):
-        lines.append(f"  {m['font']} ({m['kind']}, {m['letters']:,} letters): set in {m['set_in']}")
+    fonts_m = [m for m in missing if not m.get("script")]
+    scripts_m = [m for m in missing if m.get("script")]
+    lines = []
+    if fonts_m:
+        lines.append("fonts the deck is written in that are not here (give their files with --fonts, or a "
+                     "local copy of google/fonts with $B2S_FONT_SOURCE, and adopt again):")
+        for m in sorted(fonts_m, key=lambda m: -m["letters"]):
+            lines.append(f"  {m['font']} ({m['kind']}, {m['letters']:,} letters): set in {m['set_in']}")
+    if scripts_m:
+        lines.append("scripts with no font anywhere to draw them (nothing on this machine or google/fonts "
+                     "covers them; a local copy of google/fonts with $B2S_FONT_SOURCE and adopt again may "
+                     "fix it, or run online once so the font gets fetched and recorded):")
+        for m in sorted(scripts_m, key=lambda m: -m["letters"]):
+            lines.append(f"  {m['kind']} ({m['letters']:,} letters): drawn nowhere, missing from the deck")
     return lines
 
 
@@ -942,16 +961,19 @@ MAIN_CANDIDATES = 3
 
 
 def chain_letter(c: str) -> bool:
-    """Whether a letter comes from `scripts`' fallback chain whatever font sets it: CJK. Such letters
-    say nothing about the font they are typed in - jruby-ja's Arial runs are mostly Japanese, and
-    counting them sent its Arial title words to Tahoma, 4% wider (measured: `InvokeDynamic` in the
-    deck's thumbnails has Arial Bold's widths). A font whose own letters are all such ones still
-    compiles: the chain sets them and the font is embedded as it is."""
+    """Whether a letter comes from `scripts`' fallback chain whatever font sets it: CJK, Georgian,
+    Armenian (`scripts.CHAIN_GROUPS`). Such letters say nothing about the font they are typed in -
+    jruby-ja's Arial runs are mostly Japanese, and counting them sent its Arial title words to
+    Tahoma, 4% wider (measured: `InvokeDynamic` in the deck's thumbnails has Arial Bold's widths);
+    ka-project's Georgian, typed "in" Times New Roman and Arial the same way, sent both to bundled
+    TeX Gyre for want of a font any deck is likely to own with those letters. A font whose own
+    letters are all such ones still compiles: the chain sets them and the font is embedded as it
+    is."""
     if os.environ.get("B2S_NO_SCRIPTS"):
         return False
-    from .scripts import group_of, script_of
+    from .scripts import group_of, script_of, CHAIN_GROUPS
     sc = script_of(c)
-    return sc is not None and group_of(sc) == "cjk"
+    return sc is not None and group_of(sc) in CHAIN_GROUPS
 
 
 def font_coverage(path: Path, letters: dict[str, int], index: int = 0, strict: bool = False) -> float:
@@ -3907,7 +3929,7 @@ def preamble(target: dict, ctx: Context, flow: bool, tree: Path | None = None,
              "\\setbeamercolor{background canvas}{bg=}",
              # languages, fallback fonts and shaping for scripts other than Latin: before the font
              # lines, whose fonts then carry the fallback chain (scripts.py)
-             *script_preamble(target, tree),
+             *script_preamble(target, tree, missing),
              *fonts,
              "\\renewcommand{\\familydefault}{\\sfdefault}"]
     if not flow:
@@ -4089,7 +4111,7 @@ def bootstrap(target: dict, tex: Path, flow: bool = False, missing: list | None 
             (tex.parent / KEYS_FILE).write_text(keys_file(target, pieces, plans, names), encoding="utf-8")
     finally:
         inverse.GUARD_UNITS = False
-    head = preamble(target, ctx, flow, tex.parent)
+    head = preamble(target, ctx, flow, tex.parent, missing)
     uses, macros = split_packages(ctx.packages)
     extra = list(uses)
     if macros:

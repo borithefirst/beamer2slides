@@ -259,19 +259,20 @@ def google_says_no(monkeypatch):
 
 def test_a_cjk_font_slides_lacks_is_drawn_in_times_and_the_renderers_noto(font_folder, google_says_no):
     """apps-edu-zh's Microsoft JhengHei: Slides draws its Latin in Times New Roman and its ideographs
-    in Noto Sans TC, proportionally (palt)."""
+    in Noto Serif TC, proportionally (palt) - Slides' own substitute for a face it cannot draw at all
+    is serif throughout, not just its Latin (hunt 2026-09-27)."""
     make_font(font_folder, "Microsoft JhengHei", "這是中文Gogle")
     make_font(font_folder, "Times New Roman", "Gogle")
-    make_font(font_folder, "Noto Sans TC", "這是中文")
+    make_font(font_folder, "Noto Serif TC", "這是中文")
     adopt._FAMILIES.clear()
     assert adopt.slides_lacks_cjk("Microsoft JhengHei")
     files = adopt.font_family("Microsoft JhengHei", "sans")
     assert files["UprightFont"].name == "TimesNewRoman-Regular.ttf" and files["match"] == "Microsoft JhengHei"
     t = target_with("Google 這是中文", font="Microsoft JhengHei")
     p = scripts.plan(t)
-    assert [f.families for f, _ in p.chain] == [("notosanstc",)]
+    assert [f.families for f, _ in p.chain] == [("notoseriftc",)]
     chain = next(l for l in scripts.script_preamble(t, None) if "add_fallback(\"b2sscripts\"" in l)
-    assert "NotoSansTC-Regular.ttf]:mode=node;+palt;" in chain
+    assert "NotoSerifTC-Regular.ttf]:mode=node;+palt;" in chain
 
 
 def test_a_cjk_font_slides_has_or_a_latin_one_is_drawn_as_itself(font_folder, google_says_no):
@@ -541,3 +542,69 @@ def test_a_machine_without_fonttools_loses_the_fallback_chain_and_not_the_source
     monkeypatch.setattr(builtins, "__import__", refuse)
     assert scripts.script_preamble(target_with("go \u2192 on"), tmp_path / "tree") == []
     assert "fontTools is not installed" in capsys.readouterr().out
+
+
+def test_georgian_letters_get_their_own_group_and_a_fetched_face(font_folder, monkeypatch):
+    """ka-project: Georgian was `script_of`'s "other" catch-all before, and typed "in" Times New
+    Roman and Arial like every deck's Georgian is, its letters counted against those fonts'
+    coverage and rejected them outright (`adopt.chain_letter`, `MIN_MAIN_COVERAGE`). It is its own
+    group now, fetched like Thai/Hebrew when nothing on the machine has it."""
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Times New Roman", "".join(sorted(set("Hello "))))
+    fetched = []
+
+    def fetch(name, log=print):
+        fetched.append(name)
+        return {"Regular": make_font(font_folder, name, "\u10d2\u10d4\u10dd")}
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family", fetch)
+    lines = scripts.script_preamble(target_with("\u10d2\u10d4\u10dd", font="Times New Roman"), None)
+    assert fetched == ["Noto Sans Georgian"]
+    chain = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
+    assert "NotoSansGeorgian-Regular.ttf" in chain
+
+
+def test_armenian_letters_get_their_own_group_too(font_folder, monkeypatch):
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Arial", "".join(sorted(set("Hello "))))
+    fetched = []
+
+    def fetch(name, log=print):
+        fetched.append(name)
+        return {"Regular": make_font(font_folder, name, "\u0561\u0562\u0563")}
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family", fetch)
+    lines = scripts.script_preamble(target_with("\u0561\u0562\u0563", font="Arial"), None)
+    assert fetched == ["Noto Sans Armenian"]
+    chain = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
+    assert "NotoSansArmenian-Regular.ttf" in chain
+
+
+def test_georgian_and_armenian_do_not_count_against_the_deck_s_main_font(font_folder):
+    """The same letters, counted by `adopt.chain_letter`: a deck typed "in" Times New Roman with a
+    third of it Georgian must not reject Times New Roman as the document's serif face for it, any
+    more than a mostly-Japanese Arial title does (`test_cjk_letters_do_not_count_against_the_font_
+    they_are_typed_in`)."""
+    assert adopt.chain_letter("\u10d2")            # georgian
+    assert adopt.chain_letter("\u0561")            # armenian
+    assert not adopt.chain_letter("A")
+
+
+def test_a_script_with_no_font_anywhere_is_reported_not_silent(font_folder, monkeypatch):
+    """Georgian on ka-project's sandbox before this fix: nothing on the machine and nothing fetched
+    covered it, so lualatex warned "Missing character" for every letter and adopt's own log said
+    nothing (the coordinator's "silent tofu" - hunt 2026-09-27). A script `plan()` never finds a
+    single font for goes into `missing` like a substituted font does, so the report says so."""
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Times New Roman", "".join(sorted(set("Hello "))))
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family", lambda name, log=print: None)   # google/fonts gives nothing
+    t = target_with("\u10d2\u10d4\u10dd", font="Times New Roman")
+    p = scripts.plan(t)
+    assert p.uncovered == {"georgian": 3}
+    missing: list = []
+    scripts.script_preamble(t, None, missing)
+    assert missing == [{"font": "", "kind": "georgian", "letters": 3, "set_in": "", "script": True}]
+    lines = adopt.missing_fonts_lines(missing)
+    assert any("no font anywhere" in l for l in lines)
+    assert any(l.strip().startswith("georgian (3 letters)") for l in lines)
