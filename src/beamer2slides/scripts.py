@@ -283,11 +283,26 @@ def deck_text(target: dict):
 class Plan:
     """What the deck's scripts need."""
     chain: list                 # [(regular Face, bold Face | None)] luaotfload tries for a missing glyph
+    chain_groups: list          # the script group (`group_of`) each `chain` entry was picked for
     cjk: str | None             # babel locale for CJK line breaking
     languages: dict             # babel language with its own font -> {"rm"|"sf"|"tt": (Face, bold Face | None)}
     bidi: bool                  # any right-to-left letters or paragraphs at all
     complex: bool               # HarfBuzz for the whole document (a shaped script in the chain)
     uncovered: dict             # script -> letter count with no font anywhere to draw it (silent tofu)
+
+
+# Georgian has no font of its own on a deck typed "in" Arial or Times New Roman
+# (`CHAIN_GROUPS`), so every letter comes from Noto Sans Georgian regardless of the run's
+# declared font - and Noto's own advances are drawn noticeably wider than whatever face Slides
+# actually substitutes: two clean, unwrapped lines of ka-project (measured against its own
+# thumbnails, one Arial-declared body line and one Times-New-Roman-declared title, hunt
+# 2026-09-27) came out 1.203x and 1.224x as wide as Slides drew them, agreeing to 2% - wide enough
+# that a paragraph wraps a line later than Slides did and drifts down the whole box.
+# Corrected with the raw luaotfload spec's own `extend=` (confirmed narrower without touching the
+# font's vertical metrics, unlike fontspec's `Scale=`; `adopt.stretch`'s `FakeStretch` is the same
+# idea for a deck's own main font, but this fallback chain is built outside fontspec entirely).
+# Armenian stays unstretched until a deck with Armenian in its thumbnails measures it.
+CHAIN_STRETCH = {"georgian": 0.82}
 
 
 # babel's language for a script whose letters join or reorder: its runs are set in a font of their
@@ -377,6 +392,7 @@ def plan(target: dict) -> Plan:
     rtl_paras = [p for p in paragraphs(target) if p.get("direction") == "rtl"]
     cjk = cjk_language(chars["cjk"]) if "cjk" in chars else None
     chain: list = []
+    chain_groups: list = []
     uncovered: dict[str, int] = {}
     languages: dict = {lang: {} for lang in sorted({rtl_language(p) for p in rtl_paras})}
     for g in sorted(chars, key=lambda g: -sum(chars[g].values())):
@@ -442,6 +458,7 @@ def plan(target: dict) -> Plan:
                 got = need & coverage(f) if f else set()
                 if got and all(f != c for c, _ in chain):
                     chain.append(_with_bold(f))
+                    chain_groups.append(g)
                     need -= got
                 if not need:
                     break
@@ -450,9 +467,10 @@ def plan(target: dict) -> Plan:
         if face is not None:
             if all(face != c for c, _ in chain):
                 chain.append(_with_bold(face))
+                chain_groups.append(g)
         else:
             uncovered[g] = len(need)
-    return Plan(chain, cjk, languages, bool(rtl_paras) or any(g in RTL_SCRIPTS for g in chars),
+    return Plan(chain, chain_groups, cjk, languages, bool(rtl_paras) or any(g in RTL_SCRIPTS for g in chars),
                 any(g in COMPLEX and g not in SCRIPT_LANGUAGES for g in chars), uncovered)
 
 
@@ -595,8 +613,13 @@ def script_preamble(target: dict, tree: Path | None, missing: list | None = None
         # Traditional Chinese: its full-width ：and 、 are drawn half wide). HarfBuzz without `palt`
         # sets Korean wider than Slides too (wow-korea, korea-pptx: `adopt_bench --tag fontfix`).
         extra = "+palt;" if p.cjk in ("japanese", "chinese-traditional", "chinese-simplified", "korean") else ""
-        regular = ", ".join(f'"{font_spec(f, tree, mode, extra)}"' for f, _ in p.chain)
-        bold = ", ".join(f'"{font_spec(b or f, tree, mode, extra)}"' for f, b in p.chain)
+        # a group in CHAIN_STRETCH draws wider than Slides at the same size: `extend=` (the raw
+        # request's own primitive, confirmed narrower without touching line height, unlike
+        # fontspec's `Scale=`) corrects it per entry, since only some scripts of a mixed chain need it
+        chain_extra = [extra + (f"extend={CHAIN_STRETCH[g]};" if g in CHAIN_STRETCH else "")
+                       for g in p.chain_groups]
+        regular = ", ".join(f'"{font_spec(f, tree, mode, e)}"' for (f, _), e in zip(p.chain, chain_extra))
+        bold = ", ".join(f'"{font_spec(b or f, tree, mode, e)}"' for (f, b), e in zip(p.chain, chain_extra))
         lines.append(f"\\directlua{{luaotfload.add_fallback(\"b2sscripts\", {{{regular}}})}}")
         lines.append(f"\\directlua{{luaotfload.add_fallback(\"b2sscriptsbold\", {{{bold}}})}}")
         feats += ["RawFeature={fallback=b2sscripts}", "BoldFeatures={RawFeature={fallback=b2sscriptsbold}}"]

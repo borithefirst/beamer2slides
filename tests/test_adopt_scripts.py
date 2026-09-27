@@ -608,3 +608,38 @@ def test_a_script_with_no_font_anywhere_is_reported_not_silent(font_folder, monk
     lines = adopt.missing_fonts_lines(missing)
     assert any("no font anywhere" in l for l in lines)
     assert any(l.strip().startswith("georgian (3 letters)") for l in lines)
+
+
+def test_georgian_chain_letters_are_stretched_narrower_to_match_slides(font_folder, monkeypatch):
+    """ka-project: Noto Sans Georgian, the only offline fallback for Georgian typed "in" Arial or
+    Times New Roman (`CHAIN_GROUPS`), sets its letters 1.20-1.22x as wide as Slides actually draws
+    them (two clean lines measured against the deck's own thumbnails, hunt 2026-09-27) - a mismatch
+    that wraps a line later than Slides did and drifts the rest of the box down. `CHAIN_STRETCH`'s
+    ratio must reach the raw luaotfload request as its own `extend=` (confirmed offline: narrower
+    glyphs, unchanged line height), for both the regular and the bold fallback face, whichever font
+    the deck declared."""
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Arial", "".join(sorted(set("Hello "))))
+    make_font(font_folder, "Noto Sans Georgian", "გეო")
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family", lambda name, log=print: None)  # already on the machine
+    lines = scripts.script_preamble(target_with("გეო", font="Arial"), None)
+    regular = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
+    bold = next(l for l in lines if "add_fallback(\"b2sscriptsbold\"" in l)
+    ratio = scripts.CHAIN_STRETCH["georgian"]
+    assert f"extend={ratio};" in regular
+    assert f"extend={ratio};" in bold
+
+
+def test_a_script_with_no_stretch_entry_keeps_a_plain_chain_spec(font_folder, monkeypatch):
+    """Only a group named in `CHAIN_STRETCH` (georgian) gets an `extend=`: the symbol
+    fallback group "other" (`\\rightarrow` here) is never stretched, so the chain spec luaotfload
+    sees for it is unchanged from before this fix."""
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Arial", "".join(sorted(set("Hello "))))
+    make_font(font_folder, "Noto Sans Symbols 2", "→")
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family", lambda name, log=print: None)
+    lines = scripts.script_preamble(target_with("go → on", font="Arial"), None)
+    regular = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
+    assert "extend=" not in regular
