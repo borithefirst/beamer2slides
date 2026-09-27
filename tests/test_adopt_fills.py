@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from beamer2slides import adopt, adopt_shapes, deck_fills
-from beamer2slides.deck_ir import deck_ir
+from beamer2slides.deck_ir import deck_ir, page_size_for
 from beamer2slides.inverse import Context
 
 from .test_adopt_tables import table
@@ -297,6 +297,155 @@ def test_an_outlined_box_is_read_by_its_outline_and_not_on_another_ones():
     assert abs(out["p"]["corner_radius"] - 30) < 1.5 and abs(out["y"]["corner_radius"] - 30) < 1.5
 
 
+# ---------------------------------------------------------------- the page background
+
+def picture_fill(url: str) -> dict:
+    return {"stretchedPictureFill": {"contentUrl": url}}
+
+
+def bg_deck(slide_fill, *elements, layout_fill=None, master_fill=None) -> dict:
+    """Like `deck`, but the slide (and optionally its layout or master) carries its own
+    `pageBackgroundFill`, so a mismatch between what the API reports and what the thumbnail shows
+    can be built without depending on the master's default white."""
+    pres = deck(*elements)
+    pres["slides"][0]["pageProperties"] = {"pageBackgroundFill": slide_fill}
+    if layout_fill is not None:
+        pres["layouts"][0]["pageProperties"] = {"pageBackgroundFill": layout_fill}
+    if master_fill is not None:
+        pres["masters"][0]["pageProperties"] = {"pageBackgroundFill": master_fill}
+    return pres
+
+
+def slide0(pres: dict, thumb=None, foreign: bool = True, fetch=None, images=None) -> dict:
+    return deck_ir(pres, foreign=foreign, fetch=fetch, images=images,
+                   thumbnails=(lambda n: thumb) if thumb is not None else None)["slides"][0]
+
+
+def test_a_linear_gradient_at_an_angle_is_recovered():
+    """A .pptx `<a:gradFill>` (or a radial fill) always comes back as one flat `solidFill` -
+    `pageBackgroundFill` has no gradient type at all. Here the reported colour is plain grey and the
+    thumbnail is a diagonal ramp: neither axis, so the fit has to find the angle itself."""
+    yy, xx = np.mgrid[0:405, 0:720]
+    t = (xx + yy) / (719 + 404)
+    c0, c1 = np.array([10.0, 10.0, 10.0]), np.array([240.0, 80.0, 30.0])
+    thumb = (c0 + (c1 - c0) * t[..., None]).round().astype(np.uint8)
+    s = slide0(bg_deck(solid("808080")), thumb)
+    assert s["background_color"] == "#808080"                  # the API's own (wrong) answer, kept
+    g = s["background_gradient"]
+    assert g["type"] == "linear"
+    assert abs(g["angle"] - (-45.0)) < 5
+    got0, got1 = deck_fills.rgb(g["colors"][0]), deck_fills.rgb(g["colors"][1])
+    assert np.abs(got0 - c0).max() <= 12 and np.abs(got1 - c1).max() <= 12
+
+
+def test_a_radial_gradient_is_recovered():
+    """`page_gradient` reports its centre and radius in IR pt (`center`, `bbox`'s own unit), not
+    thumbnail pixels - a foreign deck's IR page is beamer's own size, not the Slides page's, so the
+    two differ by the deck's `scale` even for this 720 px wide thumbnail. The centre is chosen in IR
+    pt and only turned into pixels to paint the thumbnail, exactly as `adopt`'s px_box math does the
+    other way round for every other candidate in this file."""
+    pres = bg_deck(solid("406090"))
+    page_w, _, _ = page_size_for(pres, None, True)
+    px = 720 / page_w
+    cx, cy = page_w * 0.55, page_w * 0.3         # IR pt, comfortably inside the page either way
+    yy, xx = np.mgrid[0:405, 0:720]
+    r = np.hypot(xx - cx * px, yy - cy * px)
+    r_out = r.max()
+    inner, outer = np.array([250.0, 240.0, 200.0]), np.array([30.0, 30.0, 60.0])
+    thumb = (inner + (outer - inner) * np.clip(r / r_out, 0, 1)[..., None]).round().astype(np.uint8)
+    s = slide0(pres, thumb)
+    g = s["background_gradient"]
+    assert g["type"] == "radial"
+    assert abs(g["center"][0] - cx) <= 10 and abs(g["center"][1] - cy) <= 10
+    got_in, got_out = deck_fills.rgb(g["colors"][0]), deck_fills.rgb(g["colors"][1])
+    assert np.abs(got_in - inner).max() <= 14 and np.abs(got_out - outer).max() <= 14
+
+
+def test_a_matching_flat_colour_is_left_alone():
+    """The ordinary case - almost every slide's: nothing is fitted when the reported colour already
+    explains the thumbnail's background."""
+    thumb = page()
+    thumb[:, :] = [0x33, 0x66, 0x99]
+    s = slide0(bg_deck(solid("336699")), thumb)
+    assert s["background_gradient"] is None and s["background_color"] == "#336699"
+
+
+def test_artwork_fits_no_gradient():
+    """greece-ppt's swirl artwork: the page is genuinely not flat, but it is not a ramp either -
+    neither model may explain more than noise, and the flat (wrong) colour is left standing rather
+    than drawn as a false gradient."""
+    checker = (np.indices((405, 720)).sum(axis=0) // 20) % 2
+    thumb = np.where(checker[..., None].astype(bool), [20, 20, 20], [230, 90, 40]).astype(np.uint8)
+    s = slide0(bg_deck(solid("808080")), thumb)
+    assert s["background_gradient"] is None and s["background_color"] == "#808080"
+
+
+def test_without_a_thumbnail_the_background_is_unchanged():
+    pres = bg_deck(solid("336699"))
+    s = slide0(pres, None)
+    assert s["background_color"] == "#336699" and s["background_gradient"] is None
+    s = slide0(pres, None, foreign=False)
+    assert s["background_color"] == "#336699" and s["background_gradient"] is None
+
+
+def test_a_solid_the_thumbnail_disagrees_with_falls_through_to_the_layout_picture(tmp_path):
+    """china-pptx: the slide's own solidFill sits over the layout's radial picture, which Slides
+    actually draws instead of it. The picture is taken only once confirmed on the page's own pixels
+    (fetched and resampled to the page) - offered on its say-so alone, the layout's or master's
+    *shared* picture wrongly overrode other slides whose real background was a gradient of their
+    own, unrelated to it (thai-history, found live in the corpus)."""
+    from PIL import Image
+    import io
+    thumb = page()
+    thumb[:, :] = [23, 108, 20]                     # the picture's own green, nothing like the fill
+    green = io.BytesIO()
+    Image.new("RGB", (8, 8), (23, 108, 20)).save(green, format="PNG")
+    url = "https://example.test/green.png"
+    pres = bg_deck(solid("ddebcf"), layout_fill=picture_fill(url))
+    s = slide0(pres, thumb, fetch=lambda u: green.getvalue(), images=tmp_path)
+    assert s["background_picture"] == url
+    assert s["background_color"] is None and s["background_gradient"] is None
+
+
+def test_a_layout_picture_that_does_not_match_is_left_for_the_gradient_fit(tmp_path):
+    """A layout's or master's picture shared across slides that do not actually draw it (a different
+    layout's own gradient, thai-history's real defect): the picture is confirmed against the page's
+    own pixels and, failing that, the mismatch still goes to `page_gradient` rather than painting a
+    wrong picture over it."""
+    from PIL import Image
+    import io
+    yy, xx = np.mgrid[0:405, 0:720]
+    t = yy / 404
+    c0, c1 = np.array([0.0, 0.0, 130.0]), np.array([0.0, 70.0, 255.0])
+    thumb = (c0 + (c1 - c0) * t[..., None]).round().astype(np.uint8)
+    grey = io.BytesIO()
+    Image.new("RGB", (8, 8), (150, 150, 150)).save(grey, format="PNG")   # unrelated shared photo
+    pres = bg_deck(solid("000082"), layout_fill=picture_fill("https://example.test/shared.jpg"))
+    s = slide0(pres, thumb, fetch=lambda u: grey.getvalue(), images=tmp_path)
+    assert s["background_picture"] is None
+    g = s["background_gradient"]
+    assert g is not None and g["type"] == "linear"
+
+
+def test_a_solid_the_thumbnail_disagrees_with_falls_through_to_the_layout_colour():
+    thumb = page()
+    thumb[:, :] = [0x11, 0x22, 0x33]
+    pres = bg_deck(solid("ddebcf"), layout_fill=solid("112233"))
+    s = slide0(pres, thumb)
+    assert s["background_color"] == "#112233" and s["background_gradient"] is None
+    assert s["background_picture"] is None
+
+
+def test_the_gradient_is_drawn_as_a_clipped_shading():
+    linear = {"type": "linear", "angle": -30.0, "colors": ["#0a0a0a", "#f05014"]}
+    out = adopt.background_gradient_latex(linear, [720, 405], Context(), "TEXT")
+    assert "setbeamertemplate{background canvas}" in out and "shade[left color=" in out
+    assert "rotate=-30" in out and "\\clip" in out and "TEXT" in out
+    radial = {"type": "radial", "center": [300, 200], "radius": 350, "colors": ["#faf0c8", "#1e1e3c"]}
+    out2 = adopt.background_gradient_latex(radial, [720, 405], Context(), "TEXT")
+    assert "shading=radial" in out2 and "inner color=" in out2 and "outer color=" in out2
+
+
 def test_a_drive_videos_poster_frame_is_read_off_the_thumbnail(tmp_path):
     """No API gives a Drive video's poster frame (a play panel stood in); the slide's thumbnail shows it."""
     a = np.random.default_rng(1).integers(0, 256, (405, 720, 3)).astype(np.int16)
@@ -309,3 +458,27 @@ def test_a_drive_videos_poster_frame_is_read_off_the_thumbnail(tmp_path):
     from PIL import Image
     assert (np.asarray(Image.open(v["file"]).convert("RGB")) == a[100:220, 100:300]).all()
     assert "poster" not in next(e for e in out if e["id"] == "y"), "YouTube's own thumbnail stays"
+
+
+def test_a_themed_frame_takes_its_gradient_as_its_own_backdrop_option():
+    """A recovered theme re-arms its canvas every frame, outvoting a canvas the frame's body sets
+    (korea-pptx): the ramp goes in as the frame's `backdrop=`, replacing the layout's own."""
+    assert adopt.with_option("[plain,label=p60,background=Teal]", "backdrop", "figures/g.png") == \
+        "[plain,label=p60,background=Teal,backdrop=figures/g.png]"
+    opts = adopt.with_option(adopt.without_options("[label=p6,backdrop=figures/a.png,background=Teal]",
+                                                   "background", "backdrop"), "backdrop", "figures/g.png")
+    assert opts == "[label=p6,backdrop=figures/g.png]"
+
+
+def test_a_gradient_backdrop_is_drawn_from_the_fitted_model(tmp_path):
+    from PIL import Image
+    linear = {"type": "linear", "angle": 90.0, "colors": ["#ff0000", "#0000ff"]}
+    rel = adopt.gradient_backdrop(linear, (720.0, 405.0), tmp_path)
+    img = np.asarray(Image.open(tmp_path / rel).convert("RGB")).astype(int)
+    top, bottom = img[0, img.shape[1] // 2], img[-1, img.shape[1] // 2]
+    assert top[2] > 200 and bottom[0] > 200, "90 degrees runs up the page: colour 0 at the bottom"
+    assert adopt.gradient_backdrop(linear, (720.0, 405.0), tmp_path) == rel     # one file per ramp
+    radial = {"type": "radial", "center": [360.0, 202.5], "radius": 400.0, "colors": ["#ffffff", "#000000"]}
+    img = np.asarray(Image.open(tmp_path / adopt.gradient_backdrop(radial, (720.0, 405.0), tmp_path)))
+    assert img[img.shape[0] // 2, img.shape[1] // 2].min() > 250 and img[0, 0].max() < 160
+    assert adopt.gradient_backdrop(linear, (720.0, 405.0), None) is None

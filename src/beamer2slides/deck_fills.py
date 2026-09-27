@@ -610,6 +610,220 @@ def sample_element(a, el: dict, above: list[dict], px: float, background: str | 
         el["fill_source"] = "thumbnail"
 
 
+PAGE_GRAD_MIN_SHARE = 0.08   # share of the page that must be visible past every element's box
+PAGE_GRAD_MIN_PIXELS = 3000  # ... and at least this many pixels, so a sliver never fits a "ramp"
+PAGE_GRAD_FIT = 0.85         # share of the visible background pixels a model must explain
+PAGE_GRAD_MARGIN = 0.15      # a model must beat the flat colour's own fit by at least this much
+PAGE_GRAD_SUBSAMPLE = 20000  # pixels drawn from the region for the regression (it is not free)
+PAGE_GRAD_TOL = 20           # max channel distance for a *regression's* own residual, not a flat
+                              # match: a live thumbnail's JPEG-ish banding sits a few units wider off
+                              # an honest affine/radial ramp than off one constant colour (korea-pptx
+                              # slide 28's own green-to-cream ramp: 79% of it within `TOL`, 94% within
+                              # this - `TOL` stays the flat-colour and picture-verification bar)
+PAGE_GRAD_TRIM = 0.12        # worst-explained share of the sample a plain fit short of `PAGE_GRAD_FIT`
+                              # gets refit without, once: a large CJK title's antialiased rim leaks a
+                              # sliver of near-black/near-white through the mask (its box grown only
+                              # `MARGIN_PX`, not that big a glyph's true ink), dragging an honest ramp's
+                              # least squares down (jruby-ja: a white-to-grey radial fits 0.83 raw,
+                              # 0.96 with the worst 12% dropped and rescored against *every* sampled
+                              # point). An artwork backdrop's error sits over most of its pixels, not a
+                              # worst-percentile tail, so a photo or swirl is not rescued by this.
+
+
+def page_visible_mask(elements: list[dict], px: float, w: int, h: int) -> np.ndarray:
+    """The page's own pixels: everywhere no element's box (grown by `MARGIN_PX` for its antialiased
+    rim) reaches. Conservative like the rest of the module - an element that turns out see-through or
+    unfilled still keeps its box out of the reading, so a plain page is never blamed for what stands
+    on it."""
+    mask = np.ones((h, w), dtype=bool)
+    for e in elements:
+        bbox = e.get("bbox")
+        if not bbox:
+            continue
+        a0, b0, a1, b1 = px_box(bbox, px, w, h, -MARGIN_PX)
+        mask[max(0, b0):max(0, b1), max(0, a0):max(0, a1)] = False
+    return mask
+
+
+def region_flat_share(a: np.ndarray, region: np.ndarray, colour: str | None) -> float:
+    """The share of `region`'s pixels within `TOL` of `colour` - 0 when there is nothing to compare
+    or nothing visible."""
+    col = rgb(colour)
+    n = int(region.sum())
+    if col is None or n == 0:
+        return 0.0
+    close = np.abs(a - col).max(axis=2) <= TOL
+    return float((close & region).sum() / n)
+
+
+def region_matches(a: np.ndarray, region: np.ndarray, colour: str | None) -> bool:
+    """Does a flat `colour` explain what a region of the page's own pixels shows?"""
+    return region_flat_share(a, region, colour) >= FLAT
+
+
+def picture_region_share(a: np.ndarray, region: np.ndarray, path: str, w: int, h: int) -> float:
+    """Does a candidate picture - stretched to the page, as `stretchedPictureFill` draws it - explain
+    a region of the page's own pixels? The same question `region_flat_share` asks of a flat colour,
+    for the layout's or master's own picture `parent_background` offers instead of one (china-pptx:
+    a slide-level solid sits over the layout's radial picture, which several *other* layouts do not
+    share - a picture is only worth taking over a flat colour that clearly is not one when the
+    picture is confirmed on these same pixels, never on its say-so alone)."""
+    n = int(region.sum())
+    if n == 0:
+        return 0.0
+    try:
+        from PIL import Image
+        cand = np.asarray(Image.open(path).convert("RGB").resize((w, h))).astype(np.int16)
+    except Exception:  # noqa: BLE001 - a truncated or unreadable download is simply no match
+        return 0.0
+    close = np.abs(a - cand).max(axis=2) <= TOL
+    return float((close & region).sum() / n)
+
+
+def _page_regression(region: np.ndarray, a: np.ndarray, n: int):
+    """`n` pixels drawn from `region` (all of it when smaller): (x, y, colour) in pixel coordinates,
+    float64, for the least-squares fits below."""
+    ys, xs = np.nonzero(region)
+    if len(xs) > n:
+        idx = np.linspace(0, len(xs) - 1, n).astype(int)
+        ys, xs = ys[idx], xs[idx]
+    pix = a[ys, xs].astype(np.float64)
+    return xs.astype(np.float64), ys.astype(np.float64), pix
+
+
+RADIAL_STEP_MAX = 16     # pixel spacing of the grid a radial centre is triangulated on
+RADIAL_STEPS_MIN = 24    # ... at least this many steps each way, so a small region still has some
+RADIAL_KEEP_PCTL = 60    # only the steeper half or so of gradients: near the centre they are noise
+
+
+def _radial_centre(a: np.ndarray, region: np.ndarray):
+    """Where a radial fill's centre is, from the *direction* of the thumbnail's own colour gradient
+    rather than its shape: a radial fill is some function of the distance to its centre alone, so at
+    every point its steepest change points straight along the line to (or from) that centre, whatever
+    the function - linear in the radius (what a real radial shading draws), its square, or anything
+    else monotonic. Each such point gives one line the centre must lie on; least squares finds the
+    point closest to all of them. None when there is too little of the region to grid, or its colour
+    barely changes at all (no gradient anywhere to point)."""
+    h, w = a.shape[:2]
+    step = max(4, min(RADIAL_STEP_MAX, min(w, h) // RADIAL_STEPS_MIN))
+    ys = np.arange(step, h - step, step)
+    xs = np.arange(step, w - step, step)
+    if len(ys) < 3 or len(xs) < 3:
+        return None
+    Y, X = np.meshgrid(ys, xs, indexing="ij")
+    valid = region[Y, X] & region[Y, X + step] & region[Y, X - step] & region[Y + step, X] & region[Y - step, X]
+    if valid.sum() < 8:
+        return None
+    seen = a[region].astype(np.float64)
+    ch = int(np.argmax(seen.max(axis=0) - seen.min(axis=0)))            # the channel that varies the most
+    gx = (a[Y, X + step, ch].astype(np.float64) - a[Y, X - step, ch].astype(np.float64)) / (2 * step)
+    gy = (a[Y + step, X, ch].astype(np.float64) - a[Y - step, X, ch].astype(np.float64)) / (2 * step)
+    mag = np.hypot(gx, gy)
+    if not valid.any() or mag[valid].max() < 1e-6:
+        return None
+    keep = valid & (mag >= np.percentile(mag[valid], RADIAL_KEEP_PCTL))
+    if keep.sum() < 8:
+        return None
+    px_, py_, gx, gy = X[keep].astype(np.float64), Y[keep].astype(np.float64), gx[keep], gy[keep]
+    # each point (px, py) with gradient (gx, gy) puts the centre on the line through it in that
+    # direction: (centre - p) parallel to g, i.e. cx*gy - cy*gx = px*gy - py*gx
+    A = np.stack([gy, -gx], axis=1)
+    bvec = px_ * gy - py_ * gx
+    sol, *_ = np.linalg.lstsq(A, bvec, rcond=None)
+    return float(sol[0]), float(sol[1])
+
+
+def _fit_share(X: np.ndarray, pix: np.ndarray, tol: float):
+    """Least squares `pix` against `X`, retried once on the worst `PAGE_GRAD_TRIM` share of points
+    dropped when the plain fit's own share is short of `PAGE_GRAD_FIT` (`PAGE_GRAD_TRIM`). Either way
+    the returned `share`/`span` are scored against *every* point `X`/`pix` holds, refit coefficients
+    included - a fit only rescued this way when the ramp explains the outliers too, not merely the
+    points kept for it. Returns `(coef, pred, share, span)`."""
+    coef, *_ = np.linalg.lstsq(X, pix, rcond=None)
+    pred = X @ coef
+    err = np.abs(pred - pix).max(axis=1)
+    share = float((err <= tol).mean())
+    if share < PAGE_GRAD_FIT:
+        cut = np.quantile(err, 1 - PAGE_GRAD_TRIM)
+        keep = err <= cut
+        if 0 < int(keep.sum()) < len(err):
+            coef2, *_ = np.linalg.lstsq(X[keep], pix[keep], rcond=None)
+            pred2 = X @ coef2
+            share2 = float((np.abs(pred2 - pix).max(axis=1) <= tol).mean())
+            if share2 > share:
+                coef, pred, share = coef2, pred2, share2
+    span = float(np.abs(pred.max(axis=0) - pred.min(axis=0)).max())
+    return coef, pred, share, span
+
+
+def page_gradient(a: np.ndarray, region: np.ndarray, flat_colour: str | None, px: float):
+    """A linear (any angle) or radial gradient the page's own pixels (`region`, `page_visible_mask`)
+    fit better than the flat colour Slides' API reported for the page background
+    (`deck_ir.page_background`): `pageBackgroundFill` has no gradient type at all, so a .pptx
+    `<a:gradFill>` or a radial fill always comes back as one `solidFill`. None when there is too
+    little of the page to judge, the flat colour already explains it, or nothing fits clearly better
+    - an artwork backdrop (swirls, a photo) is meant to fail here, not be drawn as a ramp.
+
+    A linear ramp's colour is affine in page position for *any* axis - not just horizontal or
+    vertical - so each channel is fit against (1, x, y) directly; the strongest of the three
+    channels' (x, y) gradients gives the axis, and the colour at the page's two extreme corners
+    along it gives the stops. A radial one is fit in two passes: `_radial_centre` triangulates the
+    centre from the direction of the thumbnail's own colour gradient (radial from every point,
+    whatever the profile), then colour against radius alone from that centre - a radial shading's
+    own model - gives the stops and the fit to judge.
+
+    Returns `{"type": "linear", "angle": degrees, "colors": [c0, c1]}` (0 degrees: left to right,
+    turning counter-clockwise - `adopt.gradient_tikz`'s `rotate`) or `{"type": "radial", "center":
+    [x, y], "radius": r, "colors": [inner, outer]}` (page pt from the top left), else None."""
+    if a is None or not flat_colour:
+        return None
+    h, w = a.shape[:2]
+    n = int(region.sum())
+    if n < PAGE_GRAD_MIN_PIXELS or n < PAGE_GRAD_MIN_SHARE * region.size:
+        return None
+    flat_share = region_flat_share(a, region, flat_colour)
+    if flat_share >= FLAT:
+        return None                        # the reported colour already explains what shows
+    xs, ys, pix = _page_regression(region, a, PAGE_GRAD_SUBSAMPLE)
+    if len(xs) < 200:
+        return None
+    best = None
+    # linear
+    X = np.stack([np.ones_like(xs), xs, ys], axis=1)
+    coef, pred, share, span = _fit_share(X, pix, PAGE_GRAD_TOL)
+    if share >= PAGE_GRAD_FIT and share >= flat_share + PAGE_GRAD_MARGIN and span >= GRAD_SPAN:
+        b, c = coef[1], coef[2]
+        k = int(np.argmax(np.hypot(b, c)))
+        dx, dy = float(b[k]), float(c[k])
+        norm = (dx ** 2 + dy ** 2) ** 0.5
+        if norm > 1e-6:
+            dx, dy = dx / norm, dy / norm
+            angle = float(np.degrees(np.arctan2(-dy, dx)))
+            corners = np.array([[0, 0], [w, 0], [0, h], [w, h]], dtype=np.float64)
+            t = corners @ np.array([dx, dy])
+            lo, hi = corners[int(np.argmin(t))], corners[int(np.argmax(t))]
+            c0 = coef[0] + lo[0] * coef[1] + lo[1] * coef[2]
+            c1 = coef[0] + hi[0] * coef[1] + hi[1] * coef[2]
+            best = (share, {"type": "linear", "angle": round(angle, 1),
+                            "colors": [hexcolour(np.clip(c0, 0, 255)), hexcolour(np.clip(c1, 0, 255))]})
+    # radial
+    centre = _radial_centre(a, region)
+    if centre is not None:
+        cx, cy = centre
+        if -0.5 * w <= cx <= 1.5 * w and -0.5 * h <= cy <= 1.5 * h:
+            r = np.hypot(xs - cx, ys - cy)
+            Xr = np.stack([np.ones_like(r), r], axis=1)
+            coefr, predr, sharer, spanr = _fit_share(Xr, pix, PAGE_GRAD_TOL)
+            if sharer >= PAGE_GRAD_FIT and sharer >= flat_share + PAGE_GRAD_MARGIN and spanr >= GRAD_SPAN \
+                    and (best is None or sharer > best[0]):
+                r_out = float(r.max())
+                inner, outer = coefr[0], coefr[0] + coefr[1] * r_out
+                best = (sharer, {"type": "radial", "center": [round(cx / px, 2), round(cy / px, 2)],
+                                "radius": round(r_out / px, 2),
+                                "colors": [hexcolour(np.clip(inner, 0, 255)), hexcolour(np.clip(outer, 0, 255))]})
+    return best[1] if best else None
+
+
 def sample_cell(a, table: dict, cell: dict, above: list[dict], px: float, background: str | None,
                 around=None) -> None:
     h, w = a.shape[:2]

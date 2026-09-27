@@ -3690,8 +3690,25 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
         return frame_latex(s, style_for, ctx, label)
     if pieces is None:
         pieces = [element_latex(el, ctx, tree) for el in s["elements"]]
-    out = ["\\begin{frame}" + (plan.options(label) if plan else
-                               f"[plain,label={label}]" if label else "[plain]")]
+    opts = plan.options(label) if plan else (f"[plain,label={label}]" if label else "[plain]")
+    if plan and s.get("background_gradient"):
+        # A recovered theme applies its `background=`/`backdrop=`/`layout=` frame options as one of
+        # beamer's own per-frame mechanisms, re-armed for every frame by an `env/frame/before` hook
+        # that resets the canvas to the deck's flat colour first (so one frame's `background=` never
+        # leaks into the next) - and, empirically, a plain `\setbeamertemplate{background canvas}`
+        # written as the frame's own *body* text loses to that machinery regardless of where in the
+        # body it sits (korea-pptx: a `.tex` correct on paper, and reliably outvoted, never once
+        # painting the ramp on the compiled page - `background=Teal`/`backdrop=<file>` on other
+        # slides of this same deck are never outvoted, being options of the same kind). So the
+        # gradient is rendered to a picture and reaches the page the one way this theme's own
+        # pictures do: as its own `backdrop=` option, replacing whichever of the two this plan's
+        # shared layout carried (plan membership was decided from `background_color`/
+        # `background_picture`, still the deck-common value for a slide whose thumbnail is a ramp -
+        # china-pptx's `p60`).
+        rel = gradient_backdrop(s["background_gradient"], s.get("size"), tree)
+        if rel is not None:
+            opts = with_option(without_options(opts, "background", "backdrop"), "backdrop", rel)
+    out = ["\\begin{frame}" + opts]
     if plan:
         out += plan.header()
     # The deck lists a page's elements in z-order, and a textblock written later is drawn on top:
@@ -3705,7 +3722,11 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
     out.append("\\end{frame}")
     text = "\n".join(x for x in out if x.strip()) + "\n"
     if plan:
-        return text                    # the page's background is the frame's `layout`/`background`/`backdrop`
+        # The gradient, if any, is already folded into the frame's own opening `backdrop=` option
+        # above - a recovered plan's shared layout never draws it (plan membership is decided from
+        # `background_color`/`background_picture`, which this slide still reports the deck-common
+        # value for).
+        return text
     backdrop = picture_of({"file": s.get("background_file"), "alt": "background"}, tree) \
         if s.get("background_file") else None
     if backdrop is not None:
@@ -3714,6 +3735,11 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
         ctx.packages.add("\\usepackage{graphicx}")
         return ("{\\setbeamertemplate{background canvas}{\\includegraphics[width=\\paperwidth,"
                 f"height=\\paperheight]{{{backdrop.rel}}}}}\n" + text + "}\n")
+    if s.get("background_gradient"):
+        # No theme here to re-arm a canvas template every frame (`plan`'s own branch above, where
+        # that machinery exists, handles its gradient differently - see there): an outer group wraps
+        # the whole frame reliably on plain beamer.
+        return background_gradient_latex(s["background_gradient"], s.get("size"), ctx, text)
     if s.get("background_color") and s["background_color"] != deck_bg:
         # The colour this one slide sits on, in a group so it ends with the frame - the same shape
         # the loop's own `background` translator writes. A deck's decoration is often a picture with
@@ -3724,7 +3750,109 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
     return text
 
 
-def preamble(target: dict, ctx: Context, flow: bool, tree: Path | None = None) -> str:
+def without_options(opts: str, *keys: str) -> str:
+    """A bracketed beamer option list (`plan.options`'s `[plain,label=p60,...,background=Name]`) with
+    any `key=value` or bare `key` token in `keys` dropped - so a frame whose own canvas is about to be
+    set to a fitted gradient never also carries the theme's `background=`/`backdrop=` option, which
+    would set the same template again from inside the frame and silently win."""
+    body = opts.strip("[]")
+    kept = [t for t in body.split(",") if t and t.split("=", 1)[0] not in keys]
+    return "[" + ",".join(kept) + "]"
+
+
+def gradient_tikz(gradient: dict, w: float, h: float, ctx: Context) -> str:
+    """A tikzpicture drawing `gradient` (`deck_fills.page_gradient`) full bleed over a `w` by `h` bp
+    page, y down like every other page position in the IR: `\\setbeamertemplate{background canvas}`
+    can only ever be given a flat colour or a picture, so this stands in for a gradient exactly as a
+    `background_file` picture stands in for a picture fill. A linear ramp of any angle is drawn as an
+    ordinary left-to-right shading, rotated about the page's centre and oversized (its own diagonal,
+    twice what a rotation ever needs) so its corners always clear the page once clipped to it; a
+    radial one is TikZ's own `shading=radial` at the fitted centre and radius."""
+    from .adopt_shapes import pt
+    if gradient["type"] == "radial":
+        cx, cy = gradient["center"]
+        r = gradient.get("radius") or (cx ** 2 + cy ** 2) ** 0.5
+        inner, outer = (colour_name(c, ctx.colours) for c in gradient["colors"])
+        return (f"\\begin{{tikzpicture}}\\clip (0bp,0bp) rectangle ({pt(w)}bp,{pt(-h)}bp);"
+                f"\\shade[shading=radial,inner color={inner},outer color={outer}] "
+                f"({pt(cx)}bp,{pt(-cy)}bp) circle ({pt(r)}bp);\\end{{tikzpicture}}")
+    c0, c1 = (colour_name(c, ctx.colours) for c in gradient["colors"])
+    diag = pt((w ** 2 + h ** 2) ** 0.5)
+    return (f"\\begin{{tikzpicture}}\\clip (0bp,0bp) rectangle ({pt(w)}bp,{pt(-h)}bp);"
+            f"\\begin{{scope}}[shift={{({pt(w / 2)}bp,{pt(-h / 2)}bp)}},rotate={gradient['angle']:.1f}]"
+            f"\\shade[left color={c0},right color={c1}] (-{diag}bp,-{diag}bp) rectangle ({diag}bp,{diag}bp);"
+            f"\\end{{scope}}\\end{{tikzpicture}}")
+
+
+def background_canvas_command(gradient: dict, size, ctx: Context) -> str:
+    """The bare `\\setbeamertemplate{background canvas}{...}` assignment drawing `gradient`, for a
+    plain frame with no theme options of its own to race against (`background_gradient_latex`)."""
+    ctx.packages.add(TIKZ)
+    w, h = size or (0.0, 0.0)
+    return "\\setbeamertemplate{background canvas}{" + gradient_tikz(gradient, w, h, ctx) + "}"
+
+
+def background_gradient_latex(gradient: dict, size, ctx: Context, text: str) -> str:
+    """`text` (typically a whole frame), in a group of its own on a background canvas drawn as
+    `gradient` instead of the flat colour the API reported for a page whose thumbnail is not that
+    colour at all: `pageBackgroundFill` has no gradient type, so a .pptx `<a:gradFill>` or a radial
+    fill always comes back as one `solidFill` (`deck_fills.page_gradient`). A recovered theme's own
+    frame options reliably outvote this (`gradient_backdrop`, used for a `plan` frame instead - see
+    `slide_latex`); a plain frame has no such thing to lose to."""
+    return "{" + background_canvas_command(gradient, size, ctx) + "\n" + text + "}\n"
+
+
+def with_option(opts: str, key: str, value: str) -> str:
+    """`opts` (`without_options`'s bracketed list) with `key=value` set, replacing any existing token
+    for `key` first so a caller setting its own never ends up with the key twice."""
+    body = without_options(opts, key).strip("[]")
+    tokens = [t for t in body.split(",") if t] + [f"{key}={value}"]
+    return "[" + ",".join(tokens) + "]"
+
+
+def gradient_backdrop(gradient: dict, size, tree: Path | None) -> str | None:
+    """`gradient` (`deck_fills.page_gradient`) rendered to a page-sized PNG under `tree/figures/` and
+    returned as the relative path a `backdrop=` frame option takes: unlike `gradient_tikz`'s TikZ
+    rotate-and-shift approximation of a linear ramp, every pixel is placed straight from the fitted
+    model itself (`page_gradient`'s own corner/radius maths - see `deck_fills.page_gradient`'s
+    docstring). None when there is nowhere to write it (`tree`), leaving the caller to fall back."""
+    if tree is None:
+        return None
+    import numpy as np
+    from PIL import Image
+    from .deck_fills import rgb
+    w, h = size or (720.0, 405.0)
+    w, h = max(float(w), 1.0), max(float(h), 1.0)
+    tag = hashlib.sha1(json.dumps([gradient, w, h], sort_keys=True).encode()).hexdigest()[:10]
+    rel = f"figures/gradient-{tag}.png"
+    dest = tree / rel
+    if not dest.exists():
+        scale = max(1, min(4, int(1600 // max(w, h)) or 1))
+        W, H = max(int(round(w * scale)), 1), max(int(round(h * scale)), 1)
+        ys, xs = np.mgrid[0:H, 0:W].astype(np.float64)
+        xs, ys = xs / scale, ys / scale
+        c0 = np.asarray(rgb(gradient["colors"][0]), dtype=np.float64)
+        c1 = np.asarray(rgb(gradient["colors"][1]), dtype=np.float64)
+        if gradient["type"] == "radial":
+            cx, cy = gradient["center"]
+            radius = max(float(gradient.get("radius") or 1.0), 1e-6)
+            t = np.clip(np.hypot(xs - cx, ys - cy) / radius, 0.0, 1.0)
+        else:
+            angle = np.radians(gradient["angle"])
+            dx, dy = np.cos(angle), -np.sin(angle)
+            proj = xs * dx + ys * dy
+            corners = np.array([[0.0, 0.0], [w, 0.0], [0.0, h], [w, h]])
+            ends = corners @ np.array([dx, dy])
+            lo, hi = float(ends.min()), float(ends.max())
+            t = np.clip((proj - lo) / max(hi - lo, 1e-6), 0.0, 1.0)
+        img = np.clip(c0[None, None, :] + (c1 - c0)[None, None, :] * t[:, :, None], 0, 255)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(img.astype(np.uint8), "RGB").save(dest, "PNG")
+    return rel
+
+
+def preamble(target: dict, ctx: Context, flow: bool, tree: Path | None = None,
+             missing: list | None = None) -> str:
     """A theme that draws nothing. A foreign deck carries its own decoration in its elements, so
     anything beamer adds by itself (navigation bar, headline, footline, frame title style) is ink
     the deck does not have, and every pixel of it is a residual the loop cannot remove."""

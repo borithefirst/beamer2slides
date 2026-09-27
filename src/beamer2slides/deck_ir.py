@@ -727,6 +727,18 @@ def page_background(page: dict, resolver_pages: dict[str, dict], scheme: dict) -
     return None, None
 
 
+def parent_background(page: dict, pages: dict[str, dict], resolver: "StyleResolver") -> tuple[str | None, str | None]:
+    """The background `page`'s own layout (or its master) would draw on its own, ignoring `page`'s
+    own `pageBackgroundFill` - what a slide falls through to when its own reported fill turns out not
+    to be what the thumbnail shows (china-pptx: a slide-level solidFill sits over the layout's own
+    radial picture, which Slides draws instead of it)."""
+    parent = page.get("slideProperties", {}).get("layoutObjectId") or \
+        (page.get("layoutProperties") or {}).get("masterObjectId")
+    if not parent or parent not in pages:
+        return None, None
+    return page_background(pages[parent], pages, resolver.scheme_for(pages[parent]))
+
+
 def stash_picture(url: str, fetch, images: Path) -> dict:
     """Download a picture into `images`, sha1-named: {file, sha1, format}, or {error}."""
     try:
@@ -874,6 +886,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                                   "id": f"{page['objectId']}~{el['id']}"})
         elements = under + read_page(slide, tags)
         color, picture = page_background(slide, pages, resolver.scheme)
+        gradient = None
         if foreign:
             from . import deck_fills
             thumb = thumbnails(n) if thumbnails else None
@@ -882,6 +895,34 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             if thumb is not None:
                 thumb = deck_fills.load(thumb)
                 px = thumb.shape[1] / page_w
+            if thumb is not None and not picture and color:
+                # `pageBackgroundFill` can be wrong two ways: a solid the thumbnail simply is not
+                # (a gradient the API has no type for, `deck_fills.page_gradient`), or a solid that
+                # sits on the slide's own level while the layout's or master's own fill - a picture
+                # included - is what Slides actually draws (china-pptx: a slide-level solidFill over
+                # a layout's radial picture). Both are read from the same mismatch, cheaply: most
+                # slides' own colour explains their background and neither check goes further.
+                bg_mask = deck_fills.page_visible_mask(elements, px, thumb.shape[1], thumb.shape[0])
+                if not deck_fills.region_matches(thumb, bg_mask, color):
+                    # A candidate is only taken once confirmed on these pixels: offered on its say-so
+                    # alone, the layout's or master's *shared* picture wrongly overrode slides whose
+                    # real background was a gradient of their own, unrelated to it (thai-history and
+                    # china-pptx's other layouts do not draw the `p5` layout's green radial at all).
+                    pcolor, ppicture = parent_background(slide, pages, resolver)
+                    picture_share = 0.0
+                    if ppicture and ppicture != picture and fetch and images is not None:
+                        got = stash_picture(ppicture, fetch, images)
+                        if got.get("file"):
+                            picture_share = deck_fills.picture_region_share(
+                                thumb, bg_mask, got["file"], thumb.shape[1], thumb.shape[0])
+                    pcolor_share = (deck_fills.region_flat_share(thumb, bg_mask, pcolor)
+                                    if pcolor and pcolor != color else 0.0)
+                    if picture_share >= deck_fills.FLAT and picture_share >= pcolor_share:
+                        color, picture = None, ppicture
+                    elif pcolor_share >= deck_fills.FLAT:
+                        color = pcolor
+                    else:
+                        gradient = deck_fills.page_gradient(thumb, bg_mask, color, px)
             elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture), images)
             thumbnail_insets(elements, thumb, px)
             thumbnail_rows(elements, thumb, px)
@@ -896,7 +937,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
                        "key": key, "notes": notes_text(slide), "background_color": color,
-                       "background_picture": picture, "elements": elements})
+                       "background_picture": picture, "background_gradient": gradient, "elements": elements})
         if foreign:
             slides[-1]["layout"] = slide.get("slideProperties", {}).get("layoutObjectId")
             if shown:
