@@ -3977,8 +3977,6 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, measure: boo
     `new_deck`; that replaces the deck's whole content, so `guard.check_rebuild` refuses when
     the deck was edited in Slides (`force_rebuild` goes ahead, after a backup). `checked`: what
     the preflight found (`preflight_rebuild`), which saves the second ask a read of the deck."""
-    from . import guard
-
     slides, drive = slides_service(), drive_service()
     deck = {**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]}
     existing, previous_entry = plan_rebuild(slides, drive, out, new_deck, force_rebuild, backup, source_pdf, checked)

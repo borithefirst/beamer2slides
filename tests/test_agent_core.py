@@ -11,7 +11,7 @@ import sys
 import pytest
 
 from beamer2slides import google_auth
-from beamer2slides.agent import (ALL_ACTIONS, LOCAL_ONLY, READS, READS_GOOGLE, WRITES,
+from beamer2slides.agent import (ALL_ACTIONS, LOCAL_ONLY, READS, READS_GOOGLE,
                                  WRITES_GOOGLE, AgentContext, LocalWorkspace, NoGoogle, Refused,
                                  Result, TokenFile)
 from beamer2slides.agent.context import tool
