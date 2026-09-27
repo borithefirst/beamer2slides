@@ -1044,6 +1044,8 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
                             got = deck_fills.page_texture_picture(thumb, bg_mask, images)
                             if got:
                                 color, bg_file = None, got["file"]
+            if thumb is not None and images is not None:
+                deck_fills.recover_pictures(elements, thumb, px, images)
             elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture), images)
             thumbnail_insets(elements, thumb, px)
             thumbnail_rows(elements, thumb, px)

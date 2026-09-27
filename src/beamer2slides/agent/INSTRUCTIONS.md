@@ -181,6 +181,11 @@ per attempt. Say so before you start one; do not start two.
   `pptx=` (a ref or the file as content) and adopt again into a new `tex` path. Its pictures need
   no download; `data["pptx_pictures"]` says how many of the deck's it held (0: another deck, or a
   deck changed since - ask for a fresh download).
+* A picture whose own download gave nothing usable (a sign-in page, a dead link's error page, not
+  a decodable image at all) still made it into the source when a thumbnail was read: a crop of
+  Google's own render of the slide, in `data["pictures_from_thumbnail"]` (slide, alt text) and
+  warnings at `where: "pictures"`. Say so - it may be lower-resolution or slightly cropped, not the
+  deck's own file - but it is not missing, and `pictures_missing` does not list it.
 * `deck_adopt` needs no Google and no network when the deck comes as files. Best: `deck=` the
   folder or `.zip` that `python -m beamer2slides deck-files --deck <id> --out <dir> --zip` saved
   where Google can be reached (a ref, or the .zip as content). It holds everything a live adopt

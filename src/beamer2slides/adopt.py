@@ -1082,6 +1082,39 @@ def missing_pictures_lines(missing: list[dict]) -> list[str]:
     return lines
 
 
+def pictures_from_thumbnail(target: dict) -> list[dict]:
+    """The deck's pictures the source carries only as a crop of Google's thumbnail
+    (`deck_fills.recover_pictures`): their own download gave nothing usable - a network refusal,
+    an expired signed URL, a sign-in or error page instead of the bytes - and the slide's own render
+    stood in for it. Reported honestly (`pictures_missing` would otherwise have left them out
+    silently), {slide, alt} each."""
+    def images(node):
+        if isinstance(node, dict):
+            if node.get("kind") == "image" and node.get("picture_source") == "thumbnail":
+                yield node
+            for v in node.values():
+                if isinstance(v, (dict, list)):
+                    yield from images(v)
+        elif isinstance(node, list):
+            for v in node:
+                yield from images(v)
+
+    return [{"slide": n, "alt": el.get("alt") or ""}
+            for n, s in enumerate(target["slides"], 1) for el in images(s.get("elements", []))]
+
+
+def thumbnail_pictures_lines(recovered: list[dict]) -> list[str]:
+    """What a log says of `pictures_from_thumbnail`."""
+    if not recovered:
+        return []
+    lines = [f"{len(recovered)} picture(s) came from Google's thumbnail, not their own download "
+             f"(the deck gave no usable bytes for them):"]
+    for r in recovered:
+        alt = f" {r['alt']!r}" if r["alt"] else ""
+        lines.append(f"  slide {r['slide']}{alt}")
+    return lines
+
+
 TINY_PICTURE = 32      # px: a picture smaller than this each way is drawn enlarged, smoothed
 SMOOTH_PICTURE = 512   # px: the longer side it is enlarged to
 
@@ -4280,7 +4313,9 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
     read here with no Google call (`deck_ir.read_presentation`). `found`, when given, is filled with `supplied` (what was made
     of those files), `missing` (the fonts the deck names that were set in something else,
     `font_preamble`), `pictures_missing` (the pictures the source is written without,
-    `pictures_missing`) and, with a `pptx`, `pptx_pictures` (how many pictures of the deck it held)."""
+    `pictures_missing`), `pictures_from_thumbnail` (pictures drawn from Google's thumbnail because
+    their own download gave nothing usable, `pictures_from_thumbnail`) and, with a `pptx`,
+    `pptx_pictures` (how many pictures of the deck it held)."""
     tex = Path(tex).resolve()
     work = Path(work).resolve() if work else tex.parent / "out" / "adopt"
     found = {} if found is None else found
@@ -4377,6 +4412,11 @@ def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, bas
         log(line)
     pictures.extend(pictures_missing(target))
     for line in missing_pictures_lines(pictures):
+        log(line)
+    recovered = pictures_from_thumbnail(target)
+    if found is not None:
+        found["pictures_from_thumbnail"] = recovered
+    for line in thumbnail_pictures_lines(recovered):
         log(line)
     result = run_pull(target, tex, work, apply, out, max_iter, False, engine, log=log)
     if base:

@@ -304,6 +304,15 @@ def _fonts_report(j: Job, found: dict) -> None:
     if any(not p["why"].startswith("LaTeX can't") for p in pictures) and not found.get("pptx_pictures"):
         j.suggest("ask the person to download the deck as .pptx (File > Download > Microsoft PowerPoint) "
                   "and adopt again with pptx=... (into a new tex path): its pictures need no download")
+    # A picture whose own download gave nothing usable (a sign-in page, a dead link) still made it
+    # in, cropped from Google's thumbnail instead: said, so a lower-resolution or slightly cropped
+    # picture is not mistaken for a faithful one.
+    recovered = found.get("pictures_from_thumbnail") or []
+    if recovered:
+        j.data["pictures_from_thumbnail"] = [dict(p) for p in recovered]
+        for p in recovered:
+            j.warn(f"slide {p['slide']}: picture {p['alt']!r} came from Google's thumbnail, not its own "
+                   f"download", where="pictures")
 
 
 def _existing(j: Job, ref: str, what: str) -> Path:

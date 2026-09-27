@@ -76,6 +76,11 @@ FOLDERS = {"presentation": "presentation.json", "thumbnails": "thumbnails", "pic
 
 # ---------------------------------------------------------------- recordings
 
+def _looks_like_html(data: bytes) -> bool:
+    head = data[:512].lstrip().lower()
+    return head.startswith(b"<!doctype html") or head.startswith(b"<html")
+
+
 class Recording:
     """URLs and what fetching them gave, in a folder: `index.json` ({"files": {url: name},
     "absent": [url]}) and the files, named by their bytes."""
@@ -93,7 +98,13 @@ class Recording:
 
     def put(self, url: str, data: bytes) -> None:
         from .deck_ir import FORMAT_EXT, image_format
-        ext = FORMAT_EXT.get(image_format(data)) or Path(url.split("?")[0]).suffix.lstrip(".")[:8] or "bin"
+        ext = FORMAT_EXT.get(image_format(data))
+        if ext is None:
+            # a URL that looks like a picture can still answer with a page - a Google sign-in
+            # screen for a link that needed one, a site's own 404/error page for a moved asset -
+            # and naming it by the URL's own suffix (".jpg") would call that page a picture; only a
+            # download with no recognisable bytes at all (fonts, mainly) falls back to it
+            ext = "html" if _looks_like_html(data) else Path(url.split("?")[0]).suffix.lstrip(".")[:8] or "bin"
         name = f"{hashlib.sha1(data).hexdigest()[:16]}.{ext}"
         self.folder.mkdir(parents=True, exist_ok=True)
         if not (self.folder / name).exists():

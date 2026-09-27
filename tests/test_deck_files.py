@@ -56,6 +56,19 @@ def test_a_recording_answers_what_it_holds_and_404s_what_was_absent(tmp_path):
     assert below == ["https://a/other.png"], "what it does not hold goes on to the fetcher underneath"
 
 
+def test_a_page_fetched_in_place_of_a_picture_is_not_named_like_one(tmp_path):
+    """octopus.energy's dead asset link, fosdem-green-web: a URL ending `.jpg` that actually answers
+    with a Next.js error page (or a Google sign-in page for a Drive link) is recorded as `.html`, not
+    `.jpg` - naming it a picture would let it be mistaken for one later."""
+    rec = Recording(tmp_path / "rec")
+    rec.put("https://octopus.energy/static/banner.jpg", b"<!DOCTYPE html><html><title>Not found</title></html>")
+    rec.put("https://accounts.google.com/signin", b"<!doctype html><html><body>sign in</body></html>")
+    assert all(name.endswith(".html") for name in rec.files.values())
+    # a real font file, whose bytes `image_format` also can't read, still falls back to the URL
+    rec.put("https://fonts.gstatic.com/s/tiny/v1/tiny.woff2", tiny_font("Tiny"))
+    assert rec.files["https://fonts.gstatic.com/s/tiny/v1/tiny.woff2"].endswith(".woff2")
+
+
 def test_font_files_read_from_a_local_copy_are_seen_too(tmp_path):
     """A producer with a google/fonts checkout reads files from disk: they are recorded all the same."""
     (tmp_path / "gf" / "ofl" / "tiny").mkdir(parents=True)

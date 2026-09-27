@@ -492,6 +492,41 @@ def thumbnail_picture(a: np.ndarray, el: dict, above: list[dict], px: float, pag
             "fill_source": "thumbnail"}
 
 
+#: a download that is not a decodable image at all - a Google sign-in page for a picture that
+#: needed one, a site's own 404/Next.js error page instead of the asset, an expired signed URL:
+#: `deck_ir.image_format` calling it "unknown" is never something LaTeX could show
+BROKEN_FORMATS = {"unknown"}
+
+
+def recover_pictures(elements: list[dict], a, px: float, folder) -> None:
+    """A picture element whose download gave nothing usable - `deck_ir.stash_picture`'s `error`
+    (the fetch failed or was refused outright), or bytes that came back but are not a decodable
+    picture at all (`BROKEN_FORMATS`) - is drawn instead from Google's own thumbnail: the pixels of
+    its own box (`thumbnail_picture`), which is always closer to the deck than the hole
+    `pictures_missing` would otherwise report. Whatever crop, recolour, brightness or contrast the
+    API described applied to the file that never arrived, so none of it applies to the thumbnail's
+    own pixels, which already show the picture as the slide draws it; the outline and place are
+    untouched. Left alone (and still `pictures_missing`) without a thumbnail to crop, for a video's
+    poster frame or a linked chart (each has its own fallback already), or a rotated or flipped
+    picture: `thumbnail_picture`'s crop is axis-aligned, so only an upright one is safe this way."""
+    if a is None:
+        return
+    for el in elements:
+        if el.get("kind") != "image" or el.get("video") or el.get("chart") or el.get("wordArt"):
+            continue
+        if el.get("rotation") or el.get("flip") or not el.get("bbox"):
+            continue
+        if not (el.get("error") or el.get("format") in BROKEN_FORMATS):
+            continue
+        pic = thumbnail_picture(a, el, [], px, None, folder)
+        if pic is None:
+            continue
+        for k in ("error", "crop", "crop_angle", "opacity", "brightness", "contrast", "recolor"):
+            el.pop(k, None)
+        el["file"], el["sha1"], el["format"] = pic["file"], pic["sha1"], pic["format"]
+        el["picture_source"] = "thumbnail"
+
+
 def inpaint(sub: np.ndarray, hole: np.ndarray) -> np.ndarray:
     """`sub` with the pixels `hole` filled in from their neighbours, ring by ring inwards."""
     out = sub.copy()
