@@ -1,9 +1,10 @@
 """Text in scripts other than Latin, for sources written from a deck (`adopt`).
 
 A foreign deck is written in whatever the person typed: Japanese in Arial, Hebrew in Book Antiqua,
-Arabic in Calibri. Slides draws every letter a font lacks from a fallback of its own; TeX draws
-nothing ("Missing character: There is no 成 in font arial.ttf"), lays Hebrew and Arabic out left to
-right with the letters unjoined, and never breaks a line of Japanese that has no spaces. So:
+Arabic in Calibri, Thai in Calibri. Slides draws every letter a font lacks from a fallback of its
+own; TeX draws nothing ("Missing character: There is no 成 in font arial.ttf"), lays Hebrew and
+Arabic out left to right with the letters unjoined, drops a Thai vowel or tone mark it has nowhere
+to place, and never breaks a line of Japanese or Thai that has no spaces. So:
 
 - **Glyphs** (`script_preamble`): the characters the deck uses are sorted into scripts by their
   Unicode block; each script gets a font that has all of them - the deck's own font for those
@@ -12,14 +13,17 @@ right with the letters unjoined, and never breaks a line of Japanese that has no
   so the deck's own font lines stay what `adopt.font_preamble` writes). A glyph the main font has is
   never taken from the chain. The files are copied into `fonts/` beside the source, like the deck's
   own fonts, so the tree compiles elsewhere.
-- **Shaping**: a deck with Hebrew, Arabic or another complex script is set with `Renderer=HarfBuzz`,
-  which joins Arabic letters and places marks.
+- **Shaping**: a deck with Hebrew, Arabic, Thai or another complex script is set with
+  `Renderer=HarfBuzz`, which joins Arabic letters and places Thai's and an Indic conjunct's marks.
 - **Direction**: `babel` with `bidi=basic` orders every mixed run (Latin words and numbers inside
   Arabic, Arabic inside English) by the Unicode algorithm; a right-to-left paragraph is set in an
   `otherlanguage` environment of an RTL language (`paragraphs_direction`), and `layout=lists` puts
   its bullets on the right, as Slides does.
 - **Line breaking**: babel's CJK locales (`onchar=ids`, chosen by the characters themselves) break
   between any two ideographs or kana, with the kinsoku rules (no 。 opening a line), as Slides does.
+  Thai is a babel language with a font of its own like the Brahmic scripts (`SCRIPT_LANGUAGES`), but
+  keeps `onchar`'s `ids`: babel's `hyph-th` patterns give it real word breaks (Indic dropped `ids`
+  over a LuaTeX crash on its conjunct marks; Thai's marks did not reproduce it, hunt 2026-09-27).
 
 Measured choices and what did not work are in the commit that added this module.
 """
@@ -53,6 +57,13 @@ INDIC = [("hindi", 0x0900, 0x097F), ("bengali", 0x0980, 0x09FF), ("punjabi", 0x0
          ("sinhala", 0x0D80, 0x0DFF)]
 INDIC_FONTS = {"hindi": "Devanagari", "punjabi": "Gurmukhi", "odia": "Oriya"}   # fontspec's and Noto's name
 INDIC_NAMES = {name for name, _, _ in INDIC}
+# Thai's vowel and tone marks stack above and below the consonant they belong to, placed by the
+# font's own GPOS the way an Indic conjunct is, and it has no spaces between words: a babel language
+# with a font of its own (thai-history's Arial and Calibri "Thai" have none, and the glyph-by-glyph
+# fallback drew nothing at all - `_fetch_fallback`'s old "other"-group special case, now unreachable
+# since Thai gets its own group here). Unlike Indic, babel's `hyph-th` patterns give it real word
+# breaks with no crash seen, so it keeps `onchar=ids fonts` (`SCRIPT_LANGUAGES`'s default).
+THAI = [("thai", 0x0E00, 0x0E7F)]
 
 
 def fontspec_script(lang: str) -> str:
@@ -60,7 +71,7 @@ def fontspec_script(lang: str) -> str:
     return INDIC_FONTS.get(lang, lang.title())
 
 
-RANGES += INDIC
+RANGES += INDIC + THAI
 RTL_SCRIPTS = ("hebrew", "arabic")
 # Scripts whose letters change shape with their neighbours or carry marks placed by the font:
 # node mode leaves Arabic letters unjoined, so these are set with HarfBuzz.
@@ -119,8 +130,12 @@ FALLBACKS = {
     "arabic": ["Arial", "Segoe UI", "Tahoma", "Times New Roman", "Noto Naskh Arabic", "Noto Sans Arabic",
                "DejaVu Sans", "Geeza Pro"],
     **{name: ["Nirmala UI", f"Noto Sans {fontspec_script(name)}", "Mangal"] for name, _, _ in INDIC},
+    # Arial and Calibri (thai-history's own fonts) have no Thai on Windows; Slides' own Thai reads as
+    # Noto Sans Thai's shapes (compared against its thumbnail), so it is tried ahead of the Windows
+    # Thai faces even where one is installed.
+    "thai": ["Noto Sans Thai", "Leelawadee UI", "Leelawadee", "Angsana New", "Cordia New", "Tahoma"],
     "other": ["Segoe UI Symbol", "Cambria Math", "Segoe UI", "Arial", "Noto Sans Symbols 2",
-              "Noto Sans Symbols", "Noto Sans Math", "DejaVu Sans", "Symbola", "Apple Symbols", "Noto Sans Thai"],
+              "Noto Sans Symbols", "Noto Sans Math", "DejaVu Sans", "Symbola", "Apple Symbols"],
 }
 
 
@@ -252,7 +267,7 @@ class Plan:
     """What the deck's scripts need."""
     chain: list                 # [(regular Face, bold Face | None)] luaotfload tries for a missing glyph
     cjk: str | None             # babel locale for CJK line breaking
-    languages: dict             # RTL babel language -> {"rm"|"sf"|"tt": (Face, bold Face | None)}
+    languages: dict             # babel language with its own font -> {"rm"|"sf"|"tt": (Face, bold Face | None)}
     bidi: bool                  # any right-to-left letters or paragraphs at all
     complex: bool               # HarfBuzz for the whole document (a shaped script in the chain)
 
@@ -260,7 +275,8 @@ class Plan:
 # babel's language for a script whose letters join or reorder: its runs are set in a font of their
 # own (`onchar=ids fonts`), whole, because a glyph-by-glyph fallback shapes each letter on its own -
 # measured, Arabic from the fallback chain came out half joined.
-SCRIPT_LANGUAGES = {"hebrew": "hebrew", "arabic": "arabic", **{name: name for name, _, _ in INDIC}}
+SCRIPT_LANGUAGES = {"hebrew": "hebrew", "arabic": "arabic", "thai": "thai",
+                    **{name: name for name, _, _ in INDIC}}
 FAMILY_KEYS = {"sans": "sf", "serif": "rm", "mono": "tt"}
 FAMILY_FALLBACKS = {"rm": ["Times New Roman"], "tt": ["Courier New"], "sf": []}
 
@@ -299,6 +315,7 @@ def _fetch(name: str) -> bool:
 # Arial or Nirmala UI, and its Arabic came out as boxes (plain-fonts, offline, 2026-09-27). Fetched
 # only then, so a machine with the fonts sets what it did before.
 FETCHABLE = {"hebrew": ["Noto Sans Hebrew"], "arabic": ["Noto Naskh Arabic", "Noto Sans Arabic"],
+             "thai": ["Noto Sans Thai"],
              **{name: [f"Noto Sans {fontspec_script(name)}"] for name, _, _ in INDIC},
              "other": ["Noto Sans Symbols 2", "Noto Sans Symbols", "Noto Sans Math"]}
 
@@ -314,10 +331,7 @@ def _fetch_fallback(g: str, names: list[str], need: set[int]) -> None:
             return need <= got
         face = _pick(names, need)
         return face is not None and need <= coverage(face)
-    fetchable = FETCHABLE.get(g, [])
-    if g == "other" and any(0x0E00 <= c <= 0x0E7F for c in need):
-        fetchable = ["Noto Sans Thai", *fetchable]
-    for n in fetchable:
+    for n in FETCHABLE.get(g, []):
         if covered():
             return
         if _fetch(n):
@@ -356,6 +370,12 @@ def plan(target: dict) -> Plan:
                 # the deck's own face may still be on google/fonts only, as CJK's is below: a first
                 # run set the showcase's Noto Sans Hebrew and Arabic words in Arial
                 if [n for n in own if _fetch(n)]:
+                    _FACES.clear()
+                if g == "thai" and _pick(own, need) is None and _fetch("Noto Sans Thai"):
+                    # Slides draws Thai the deck's own font has none of in Noto Sans Thai's shapes
+                    # (thai-history's thumbnail), ahead of whatever Thai face the machine happens to
+                    # carry (Leelawadee UI, Tahoma): fetched before either is even looked up, so it
+                    # is the first name `_pick` finds covering, as `RENDERER_CJK` is for CJK
                     _FACES.clear()
                 _fetch_fallback(g, own + FAMILY_FALLBACKS[key] + FALLBACKS[g], need)
                 face = _pick(own + FAMILY_FALLBACKS[key] + FALLBACKS[g], need)

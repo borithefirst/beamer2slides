@@ -55,6 +55,20 @@ After a round:
      other.
 
    Only sheets whose metrics moved are judged again.
+
+   Judges see two panels only, the deck and ours, never the ink diff. In round r0 on fix8, Haiku
+   shown the diff panel read its red and blue as coloured text on most sheets, and those 260k
+   tokens were wasted.
+
+   Calibration on 38 of the worst fix8 sheets, Haiku against Sonnet:
+   - Haiku caught 16 of Sonnet's 17 severity-3 sheets.
+   - It called 8 of Sonnet's 35 flagged sheets identical, mostly lost background artwork and
+     gradients.
+   - Tokens per sheet: 6.8k for Haiku at 10 a batch, 5.8k for Sonnet at 20 a batch, because
+     each agent's fixed overhead dominates.
+
+   So Haiku screens in batches of 20. Sonnet judges only where Haiku and the metrics disagree:
+   Haiku calls a sheet identical that `severity` ranks high.
 2. **Trace.** A stronger model (Sonnet) traces the families that recur across decks to a
    mechanism: file, function and the IR field. A skeptic reruns the claim on the slide
    (`slide_metrics show DECK:N TAG`) before anyone fixes it.

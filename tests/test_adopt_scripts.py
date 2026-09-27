@@ -432,6 +432,50 @@ def test_thai_letters_fetch_a_thai_face_first(font_folder, monkeypatch):
     assert fetched == ["Noto Sans Thai"]
 
 
+def test_thai_letters_are_their_own_script_not_a_symbol():
+    """thai-history: Thai fell in `script_of`'s "other" catch-all, glyph by glyph like a math symbol,
+    and the glyph-by-glyph fallback drew none of it at all (no font in the chain covered every
+    character it needed at once). It is its own script now, like the Brahmic ones."""
+    assert scripts.script_of("ก") == "thai" and scripts.script_of("๙") == "thai"
+    assert scripts.fontspec_script("thai") == "Thai"
+
+
+def test_thai_is_set_whole_in_a_font_of_its_own_with_word_breaks(font_folder, monkeypatch):
+    """thai-history's Arial and Calibri have no Thai on this machine: fetched a face of its own,
+    not the "other" group's glyph-by-glyph chain (which drew nothing - no single fallback font
+    covered the run). `onchar=ids fonts`, unlike the Brahmic scripts, gives it babel's `hyph-th`
+    word breaks - Thai has no spaces between words - with no line-breaker crash seen."""
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Arial", "".join(sorted(set("Hello "))))
+    fetched = []
+
+    def fetch(name, log=print):
+        fetched.append(name)
+        chars = "".join(sorted(set("สวัสดีครับ")))
+        return {"Regular": make_font(font_folder, name, chars),
+                "Bold": make_font(font_folder, name, chars, bold=True)}
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family", fetch)
+    lines = scripts.script_preamble(target_with("สวัสดีครับ"), None)
+    assert "\\babelprovide[import,onchar=ids fonts]{thai}" in lines
+    sf = next(l for l in lines if l.startswith("\\babelfont[thai]{sf}"))
+    assert "Renderer=HarfBuzz" in sf and sf.endswith("{NotoSansThai-Regular.ttf}")
+    assert fetched == ["Noto Sans Thai"]
+    assert not any("add_fallback" in l for l in lines)      # set whole, not glyph by glyph
+
+
+def test_the_decks_own_thai_font_wins_when_it_covers_the_letters(font_folder, monkeypatch):
+    """A deck already set in a face that has Thai (unlike thai-history's Arial and Calibri) keeps
+    it, and fetches nothing."""
+    from beamer2slides import fontfetch
+    make_font(font_folder, "Angsana New", "".join(sorted(set("สวัสดีครับ"))))
+    monkeypatch.setattr(adopt, "fetching", lambda: True)
+    monkeypatch.setattr(fontfetch, "fetch_family", lambda name, log=print: pytest.fail(f"fetched {name}"))
+    lines = scripts.script_preamble(target_with("สวัสดีครับ", font="Angsana New"), None)
+    sf = next(l for l in lines if l.startswith("\\babelfont[thai]{sf}"))
+    assert sf.endswith("{AngsanaNew-Regular.ttf}")
+
+
 def test_the_adopted_preamble_puts_script_lines_before_the_fonts(font_folder, tmp_path):
     make_font(font_folder, "Yu Gothic", "日本")
     t = target_with("日本")
