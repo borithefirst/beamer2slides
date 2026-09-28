@@ -197,6 +197,91 @@ def bake_shared_cluster(elements: list[dict], members: list[int], a: np.ndarray,
     return rest[:insert_at] + [pic] + rest[insert_at:]
 
 
+SEAM_GAP = 2       # px each side of a box's edge compared across it
+SEAM_RATIO = 1.5   # an edge is no edge while the step across it is at most this times the step beside it
+
+
+def seamless(a: np.ndarray, el: dict, above: list[dict], px: float) -> bool:
+    """Whether what shows in `el`'s box runs on across its edges unbroken: a see-through text box on a
+    photo (china-pptx 183's bullets over the Qing gate), whose `{}`/NOT_RENDERED fill is nothing of
+    its own, rather than a panel (173's shaded caption panel has an edge on every side). On each side
+    the step between the row `SEAM_GAP` px inside and the one `SEAM_GAP` px outside is set against the
+    step between two rows that far apart outside; letters of the texts drawn there are left out,
+    unless they would be most of the side: then they are the picture in the letters' colour (183's
+    dark pines under black words), and the median sees past the few real letters."""
+
+    def kept(keep):
+        return keep if keep.mean() >= 0.25 else np.ones_like(keep)
+
+    h, w = a.shape[:2]
+    a0, b0, a1, b1 = px_box(el["bbox"], px, w, h)
+    g = SEAM_GAP
+    if a1 - a0 < 4 * g or b1 - b0 < 4 * g:
+        return False
+    f = a.astype(np.float32)
+    letters = np.zeros((h, w), dtype=bool)
+    lo = letters_of(f, 0, 0, above, px, w, h)
+    from .deck_freeforms import dilate
+    letters |= dilate(lo, 2)
+    across, beside = [], []
+    for inner, outer, far in ((b0 + g, b0 - g, b0 - 3 * g), (b1 - 1 - g, b1 - 1 + g, b1 - 1 + 3 * g)):
+        if far < 0 or far >= h:
+            continue
+        keep = kept(~(letters[inner, a0:a1] | letters[outer, a0:a1] | letters[far, a0:a1]))
+        if keep.sum() < 8:
+            continue
+        across.append(np.abs(f[inner, a0:a1] - f[outer, a0:a1]).max(axis=1)[keep])
+        beside.append(np.abs(f[outer, a0:a1] - f[far, a0:a1]).max(axis=1)[keep])
+    for inner, outer, far in ((a0 + g, a0 - g, a0 - 3 * g), (a1 - 1 - g, a1 - 1 + g, a1 - 1 + 3 * g)):
+        if far < 0 or far >= w:
+            continue
+        keep = kept(~(letters[b0:b1, inner] | letters[b0:b1, outer] | letters[b0:b1, far]))
+        if keep.sum() < 8:
+            continue
+        across.append(np.abs(f[b0:b1, inner] - f[b0:b1, outer]).max(axis=1)[keep])
+        beside.append(np.abs(f[b0:b1, outer] - f[b0:b1, far]).max(axis=1)[keep])
+    if len(across) < 2:
+        return False
+    step, calm = float(np.median(np.concatenate(across))), float(np.median(np.concatenate(beside)))
+    return step <= max(TOL, SEAM_RATIO * calm)
+
+
+def shown_through(pic: dict, a: np.ndarray, below: list[dict], px: float) -> None:
+    """Make a text box's thumbnail fill (`pic`) transparent wherever the thumbnail shows a picture
+    under the box as that picture is: the box's fill is nothing there. china-pptx 138: a page-sized
+    text box on the gold page took the portrait beside the poem into its picture, the hat's black
+    painted out as if it were the poem's letters, and drew that over the portrait."""
+    from PIL import Image
+    from .compare import displayed_picture
+    from pathlib import Path
+    h, w = a.shape[:2]
+    p0, q0, p1, q1 = (round(v * px) for v in pic["bbox"])      # the crop's own pixels (`thumbnail_picture`)
+    clear = np.zeros((q1 - q0, p1 - p0), dtype=bool)
+    for e in below:
+        if e.get("kind") != "image" or not e.get("file") or e.get("rotation") or not overlaps(e, pic):
+            continue
+        a0, b0, a1, b1 = px_box(e.get("box") or e["bbox"], px, w, h)
+        if a1 - a0 < 8 or b1 - b0 < 8:
+            continue
+        img = displayed_picture(e)
+        if img is None:
+            continue
+        shown = np.asarray(img.convert("RGB").resize((a1 - a0, b1 - b0)), dtype=np.int16)
+        same = np.abs(a[b0:b1, a0:a1, :3].astype(np.int16) - shown).max(axis=2) <= TOL
+        x0, y0, x1, y1 = max(a0, p0), max(b0, q0), min(a1, p1), min(b1, q1)
+        if x1 > x0 and y1 > y0:
+            clear[y0 - q0:y1 - q0, x0 - p0:x1 - p0] |= same[y0 - b0:y1 - b0, x0 - a0:x1 - a0]
+    if clear.sum() < 64:
+        return
+    with Image.open(pic["file"]) as im:
+        rgba = np.array(im.convert("RGBA"))
+    if rgba.shape[:2] != clear.shape:
+        return
+    rgba[clear, 3] = 0
+    path, sha = save_png(Image.fromarray(rgba, "RGBA"), Path(pic["file"]).parent)
+    pic.update(file=str(path), sha1=sha)
+
+
 def ground_below(el: dict, below: list[dict], tol: float = 1.0) -> bool:
     """Whether a filled or unread shape among `below` has `el`'s box (within `tol` pt each side)."""
     box = el.get("bbox")
@@ -313,11 +398,12 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
             # is a picture of the thumbnail's own pixels behind it, with its own words (not just an
             # element drawn above it) painted out - the same trick `thumbnail_picture` uses for a
             # shape's letters, pointed at itself.
-            if a is not None and pictures is not None:
+            if a is not None and pictures is not None and not seamless(a, el, elements[k + 1:] + [el], px):
                 bottom = not picture and not any(overlaps(e, el) for e in elements[:k])
                 pic = thumbnail_picture(a, el, elements[k + 1:] + [el], px,
                                         background if bottom else None, pictures)
                 if pic is not None:
+                    shown_through(pic, a, elements[:k], px)
                     pic.pop("object", None)
                     pic.pop("key", None)
                     pic["id"] = f"{el['id']}~fill" if el.get("id") else pic.get("id")

@@ -145,13 +145,21 @@ def child(module: str, *args: str, corpus: Path) -> float:
     return round(time.perf_counter() - t0, 1)
 
 
+def corpus_decks(corpora: list[Path], names: list[str]) -> dict[Path, list[str]]:
+    """Which of `names` each corpus benches: its own decks only (metrics stops on a name the corpus
+    has no folder for), where the deck-files are when it has a folder in two (sc-dark-minimal: in
+    both, recorded in one), else where the folder is, so the error names the missing recordings. No
+    names: every corpus benches all its decks ([])."""
+    recorded = {n: [c for c in corpora if (c / n / "deck-files").is_dir()] for n in names}
+    return {c: [n for n in names if c in recorded[n] or not recorded[n] and (c / n).is_dir()] for c in corpora}
+
+
 def round_(tag: str, corpora: list[Path], jobs: int, gpu: bool, names: list[str], python: str | None) -> Path:
+    decks = corpus_decks(corpora, names)
     for corpus in corpora:
-        # only this corpus's own decks: metrics stops on a name the corpus has no folder for
-        mine = [n for n in names if (corpus / n).is_dir()]
-        if names and not mine:
+        names_ = decks[corpus]
+        if names and not names_:
             continue
-        names_ = mine
         sec = child("adopt_bench", "run", *names_, "--offline", "--tag", tag, "--jobs", str(jobs), corpus=corpus)
         results = [json.loads(p.read_text(encoding="utf-8")) for p in corpus.glob(f"*/runs/{tag}/result.json")]
         log("bench", tag=tag, corpus=corpus.name, seconds=sec, decks=len(results),

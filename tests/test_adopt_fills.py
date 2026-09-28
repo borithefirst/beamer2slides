@@ -167,7 +167,7 @@ def test_a_text_boxs_own_fill_no_ramp_fits_is_baked_behind_it(tmp_path):
     from PIL import Image
     rng = np.random.default_rng(2)
     thumb = page()
-    thumb[100:300, 100:300] = rng.integers(0, 256, (200, 200, 3))            # neither flat nor a ramp
+    thumb[90:310, 90:310] = rng.integers(0, 256, (220, 220, 3))              # neither flat nor a ramp
     thumb[150:160, 120:280] = [255, 225, 126]                                # its own word, drawn on top
     panel = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [90, 90, 310, 310],
              "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
@@ -911,6 +911,52 @@ def test_a_picture_google_shows_round_is_masked_to_its_ellipse(tmp_path):
 
     assert shown(True) == "ellipse"
     assert shown(False) is None, "a picture shown whole is a rectangle"
+
+
+def test_a_see_through_text_box_on_a_photo_takes_no_picture_of_it(tmp_path):
+    """china-pptx 183: a full-width NOT_RENDERED text box over the Qing gate's photo shows the photo
+    running on across its edges, so its fill is nothing; baked, it smeared the words' band. The dark
+    pines along its edges are nearer the words' black than the sky is, so the seam test must not take
+    them all for letters and be left with no side to judge."""
+    yy, xx = np.mgrid[0:405, 0:720].astype(float)
+    wave = np.sin(xx / 6 + yy / 5)
+    a = np.dstack([150 + 20 * wave, 190 + 20 * wave, 230 + 15 * wave])                 # sky
+    pines = ((yy >= 80) & (yy < 112)) | ((yy >= 148) & (yy < 180))
+    a[pines] = np.dstack([25 + 15 * wave, 45 + 15 * wave, 25 + 15 * wave])[pines]
+    a = a.round().astype(np.uint8)
+    a[125:135, 200:520] = 0                                                              # its words
+    words = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [0, 100, 720, 160],
+             "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
+             "paragraphs": [{"runs": [{"text": "European spheres", "color": "#000000"}]}]}
+    got = deck_fills.settle([dict(words)], a, 1.0, "#ffffff", False, tmp_path)
+    assert [e["id"] for e in got] == ["t"], "no `t~fill`"
+
+
+def test_a_text_boxs_fill_picture_leaves_a_picture_under_it_showing(tmp_path):
+    """china-pptx 138: a page-sized text box whose fill is baked took the portrait beside the poem
+    into its picture (its black hat painted out as a letter) and drew that over the portrait. Where
+    the thumbnail shows a picture under the box as that picture is, the fill picture is clear."""
+    from PIL import Image
+    yy, xx = np.mgrid[0:80, 0:80]
+    photo = np.dstack([xx * 3, yy * 3, 128 + 100 * np.sin(xx / 10.0)]).astype(np.uint8)
+    photo[5:20, 20:60] = 0                                                              # the hat
+    file = tmp_path / "portrait.png"
+    Image.fromarray(photo).save(file)
+    rng = np.random.default_rng(2)
+    a = page()
+    a[90:310, 90:310] = rng.integers(0, 256, (220, 220, 3))                        # its panel, edge to edge
+    a[150:160, 120:200] = 0                                                            # the poem
+    a[200:280, 210:290] = photo
+    portrait = {"kind": "image", "bbox": [210, 200, 290, 280], "file": str(file), "id": "p", "object": "p"}
+    poem = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [90, 90, 310, 310],
+            "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
+            "paragraphs": [{"runs": [{"text": "A cup of wine", "color": "#000000"}]}]}
+    got = deck_fills.settle([dict(portrait), dict(poem)], a, 1.0, "#ffffff", False, tmp_path)
+    pic = next(e for e in got if e["id"] == "t~fill")
+    im = np.asarray(Image.open(pic["file"]))
+    assert (im[110:190, 120:200, 3] == 0).mean() > 0.95, "the portrait shows through"
+    assert (im[117:128, 142:178, 3] == 0).all(), "the hat too, not painted out as a letter"
+    assert (im[20:40, 20:100, 3] == 255).all(), "the rest is the fill"
 
 
 def test_pull_writes_a_round_picture_clipped_and_outlined_round():
