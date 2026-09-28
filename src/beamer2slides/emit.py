@@ -4301,10 +4301,15 @@ class DeckPlan:
         n = slide["page"]
         slide = grown_panels(slide, scale, fonts)
         slide_id = f"b2s_s{n:03}"
+        # The title (and title page subtitle) is refilled in its placeholder only when the slide
+        # holds one: sync demotes a title with no live placeholder, and on an adopted slide the
+        # next title-role box (`marked.py` gives the role per box) is a box like any other.
+        live = {e["objectId"] for e in page_elements.get(slide_id, [])}
         title_idx = title_element(slide)
         title_oid = f"{slide_id}_t{title_idx}" if title_idx is not None else None
         sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
         subtitle_oid = f"{slide_id}_t{sub_idx}" if sub_idx is not None else None
+        title_oid, subtitle_oid = (oid if oid in live else None for oid in (title_oid, subtitle_oid))
         ours = (f"{slide_id}_k", f"{slide_id}_f", f"{slide_id}_tab")  # template shapes, pictures, tables from the .pptx
         parts: list[tuple[dict | None, list[dict]]] = [(None, [
             {"deleteObject": {"objectId": e["objectId"]}}

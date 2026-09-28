@@ -214,6 +214,20 @@ def test_a_refusal_carries_its_data(tmp_path):
     assert says_no(_ctx(tmp_path)).data["url"] == "https://x"
 
 
+@tool("stops", needs=(READS,))
+def stops(j):
+    next(iter(()))
+
+
+def test_an_unforeseen_failure_says_where_it_happened(tmp_path):
+    """A bare StopIteration once reached a caller as "StopIteration: " and nothing else."""
+    r = stops(_ctx(tmp_path))
+    assert r.code == "failed" and "test_agent_core.py" in r.data["where"] and "in stops" in r.data["where"]
+    assert r.data["where"] in r.summary and "next(iter(()))" in r.data["traceback"]
+    assert ":\\" not in r.data["traceback"] and not r.data["traceback"].startswith("/")   # no machine paths
+    assert "where" not in guarded(_ctx(tmp_path)).data                 # a known refusal stays plain
+
+
 def test_a_body_that_fails_halfway_keeps_what_it_had_said(tmp_path):
     r = breaks(_ctx(tmp_path))
     assert r.summary.startswith("got halfway")

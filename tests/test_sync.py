@@ -2271,6 +2271,23 @@ def test_retitled_frame_and_right_limits_on_the_sync_talk(tmp_path):
     placeholder = {title: {"id": "LIVE_title", "size": [680.0, 36.0], "text": "The sync algorithm"}}
     assert body_box({}) == body_box(placeholder)
 
+    # Two title boxes and no live placeholder (an adopted slide: `marked.py` gives the title role
+    # per box): once the first is demoted, the second is no placeholder either. It was looked up
+    # in the slide's placeholders with a bare next(), and an apply died on "StopIteration: ".
+    slide = first["plan"].deck["slides"][j]
+    second = {**copy.deepcopy(elements[title]), "id": "second-title"}
+    second["bbox"] = [second["bbox"][0], second["bbox"][3] + 2, second["bbox"][2], 2 * second["bbox"][3] - second["bbox"][1] + 2]
+    first["plan"].deck["slides"][j] = {**slide, "elements": [*elements, second]}
+    first["slides"][j] = {**first["slides"][j], "elements": [*first["slides"][j]["elements"],
+                                                             {**first["slides"][j]["elements"][title], "key": "text/title/1"}]}
+    try:
+        both = len(elements)
+        reqs, _, new_oid, _ = s.slide_requests({"plan": {"ours": j}, "units": [title, both]}, "LIVE", {}, {}, {}, False)
+        made = {r["createShape"]["objectId"] for r in reqs if "createShape" in r}
+        assert {new_oid[title], new_oid[both]} <= made          # both made as boxes of their own
+    finally:
+        first["plan"].deck["slides"][j], first["slides"][j]["elements"] = slide, first["slides"][j]["elements"][:-1]
+
     # A unit whose group the deck took apart is rebuilt without its group.
     base_slide_ = copy.deepcopy(first["slides"][j])
     read = {"objects": {}, "notes": "", "notes_id": None}

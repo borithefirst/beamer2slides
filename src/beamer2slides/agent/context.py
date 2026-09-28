@@ -276,11 +276,16 @@ def tool(name: str, needs: tuple[str, ...] = (READS,), local: Callable[["Job", d
                     said = str(exc.code) if exc.code not in (0, None) else "the library refused"
                     _refuse(job, "refused", said, {})
                 except TypeError as exc:
-                    _refuse(job, "bad_request" if "argument" in str(exc) else "failed",
-                            f"{type(exc).__name__}: {exc}", {})
+                    if "argument" in str(exc):
+                        _refuse(job, "bad_request", f"{type(exc).__name__}: {exc}", {})
+                    else:
+                        _refuse(job, "failed", *_unforeseen(exc))
                 except Exception as exc:
                     code = "rate_limited" if _is_quota(exc) else _library_code(exc)
-                    _refuse(job, code, f"{type(exc).__name__}: {exc}", {})
+                    if code == "failed":
+                        _refuse(job, code, *_unforeseen(exc))
+                    else:
+                        _refuse(job, code, f"{type(exc).__name__}: {exc}", {})
                 finally:
                     job.seconds = time.time() - started
             return _deliver(job.result, ctx)
@@ -361,6 +366,31 @@ def _refuse(job: Job, code: str, message: str, data: dict) -> None:
     job.code = code
     job.summary = message if not job.summary else f"{job.summary}\n{message}"
     job.data.update(data)
+
+
+TRACEBACK_LIMIT = 8000
+
+
+def _unforeseen(exc: BaseException) -> tuple[str, dict]:
+    """A failure nobody foresaw, said with where it happened: `data["where"]` is the innermost
+    frame, `data["traceback"]` the stack (paths from the package down, capped). A bare
+    `StopIteration` would otherwise reach the caller as "StopIteration: " and nothing else."""
+    import traceback
+
+    def short(path: str) -> str:
+        path = path.replace("\\", "/")
+        cut = path.rfind("/beamer2slides/")
+        return path[cut + 1:] if cut >= 0 else path.rsplit("/", 1)[-1]
+
+    frames = traceback.extract_tb(exc.__traceback__)
+    where = f"{short(frames[-1].filename)}:{frames[-1].lineno} in {frames[-1].name}" if frames else ""
+    lines = [f"{short(f.filename)}:{f.lineno} in {f.name}" + (f"\n    {f.line}" if f.line else "") for f in frames]
+    lines.append("".join(traceback.format_exception_only(type(exc), exc)).strip())
+    stack = "\n".join(lines)
+    if len(stack) > TRACEBACK_LIMIT:
+        stack = "...\n" + stack[-TRACEBACK_LIMIT:]
+    said = str(exc) or (f"(no message, at {where})" if where else "(no message)")
+    return f"{type(exc).__name__}: {said}", {"where": where, "traceback": stack}
 
 
 def _library_code(exc: Exception) -> str:
