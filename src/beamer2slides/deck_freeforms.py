@@ -465,6 +465,12 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
             alpha = 1.0 if alpha is None else alpha
             if alpha < 0.99:
                 if page is None:
+                    if colour == fill and stroke and (el.get("outline_alpha") or 1.0) >= 0.99:
+                        # a see-through fill over other shapes, inside an opaque outline (en-smartart's
+                        # funnel, white at 0.4 over its balls): the ring is what is traced, and what it
+                        # encloses is the shape
+                        ring_field = (None, F.rgb(stroke).astype(np.float32))
+                        continue
                     return "alpha-over"                   # what it is seen as depends on what is under it
                 paints.append(blend(F.rgb(colour), alpha, page))
             else:
@@ -486,7 +492,7 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
         wall = dilate(ring_cov >= 0.5, 1)
         inside = enclosed(wall) & ~hidden
         cov = np.where(wall, np.clip(ring_cov, 0.51, 1.0), np.where(inside, 1.0, 0.0))
-        paints = [fill_paint, stroke_paint]
+        paints = [stroke_paint] if fill_paint is None else [fill_paint, stroke_paint]
     else:
         cov = np.max([coverage(sub, p, ground) for p in paints], axis=0)
         inside = (cov >= 0.5) & ~hidden

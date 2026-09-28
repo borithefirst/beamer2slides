@@ -2587,7 +2587,9 @@ PICTURE_MACRO = r"""% --- Pictures ---------------------------------------------
 %   flip           mirrored left to right;
 %   opacity=o      see-through, 0..1;
 %   outline=colour, outline width=bp, dash=dotted|dashed: a line drawn on the picture's edge; x,y is then
-%                  the line's outer corner, half its width up and left of the picture's.
+%                  the line's outer corner, half its width up and left of the picture's;
+%   oval           shown only inside the ellipse its w by h box inscribes, the outline drawn round too.
+\define@key{slidepicture}{oval}[]{\def\slides@p@oval{1}}
 \define@key{slidepicture}{trim}{\def\slides@p@trim{trim=#1,clip,}}
 \define@key{slidepicture}{angle}{\def\slides@p@angle{#1}}
 \define@key{slidepicture}{flip}[]{\def\slides@p@flip{1}}
@@ -2597,12 +2599,13 @@ PICTURE_MACRO = r"""% --- Pictures ---------------------------------------------
 \define@key{slidepicture}{dash}{\def\slides@p@dash{,#1}}
 \newcommand\slidepicture[3][]{\slides@xywh#2\@nil
   \let\slides@p@trim\@empty\let\slides@p@angle\@empty\let\slides@p@flip\@empty\let\slides@p@opacity\@empty
-  \let\slides@p@outline\@empty\def\slides@p@weight{0.75}\let\slides@p@dash\@empty
+  \let\slides@p@outline\@empty\def\slides@p@weight{0.75}\let\slides@p@dash\@empty\let\slides@p@oval\@empty
   \setkeys{slidepicture}{#1}%
-  \let\slides@p@node\@empty
+  \let\slides@p@node\@empty\let\slides@p@line\@empty
   \ifx\slides@p@opacity\@empty\else\edef\slides@p@node{,text opacity=\slides@p@opacity}\fi
   \ifx\slides@p@outline\@empty\else
-    \edef\slides@p@node{\slides@p@node,draw=\slides@p@outline,line width=\slides@p@weight bp\slides@p@dash}\fi
+    \edef\slides@p@line{,draw=\slides@p@outline,line width=\slides@p@weight bp\slides@p@dash}\fi
+  \ifx\slides@p@oval\@empty\edef\slides@p@node{\slides@p@node\slides@p@line}\else\def\slides@p@node{,oval}\fi
   % turned by graphicx itself unless a node or a mirror wraps the picture: then by \rotatebox
   \let\slides@p@turn\@firstofone\let\slides@p@gangle\@empty
   \ifx\slides@p@angle\@empty\else
@@ -2611,11 +2614,18 @@ PICTURE_MACRO = r"""% --- Pictures ---------------------------------------------
   \edef\slides@p@opts{\slides@p@trim width=\slides@w bp,height=\slides@h bp\slides@p@gangle}%
   \ifx\slides@p@flip\@empty\let\slides@p@mirror\@firstofone\else\let\slides@p@mirror\reflectbox\fi
   \ifx\slides@p@node\@empty\let\slides@p@frame\@firstofone\else\let\slides@p@frame\slides@p@tikz\fi
+  \ifx\slides@p@oval\@empty\else\let\slides@p@frame\slides@p@ellipse\fi
   \edef\slides@block{\noexpand\begin{textblock*}{\slides@w bp}(\slides@x bp,\slides@y bp)}\slides@block
   \slides@open{picture}%
   \slides@p@turn{\slides@p@frame{\slides@p@mirror{\expandafter\includegraphics\expandafter[\slides@p@opts]{#3}}}}%
   \par\slides@shut\end{textblock*}}
 \def\slides@p@tikz#1{\edef\slides@p@go{\noexpand\tikz\noexpand\node[inner sep=0bp\slides@p@node]}\slides@p@go{#1};}
+\def\slides@p@ellipse#1{\edef\slides@p@radii{ellipse [x radius=\slides@w bp/2,y radius=\slides@h bp/2]}%
+  \ifx\slides@p@opacity\@empty\let\slides@p@see\@empty\else\edef\slides@p@see{,text opacity=\slides@p@opacity}\fi
+  \edef\slides@p@go{\noexpand\begin{scope}\noexpand\clip (0bp,0bp) \slides@p@radii;%
+    \noexpand\node[inner sep=0bp\slides@p@see]}%
+  \edef\slides@p@ring{\ifx\slides@p@line\@empty\else\noexpand\draw[\slides@p@line] (0bp,0bp) \slides@p@radii;\fi}%
+  \tikz{\slides@p@go{#1};\end{scope}\slides@p@ring}}
 \def\slides@xywh#1,#2,#3,#4\@nil{\def\slides@x{#1}\def\slides@y{#2}\def\slides@w{#3}\def\slides@h{#4}}"""
 
 
@@ -2646,7 +2656,9 @@ def slide_picture(te: dict, pic, ctx: Context, ind: str) -> str:
             opts.append(f"outline width={num(outline['weight'])}")
         if outline.get("dash", "SOLID") != "SOLID":
             opts.append("dash=" + ("dotted" if "DOT" in outline["dash"] and "DASH" not in outline["dash"] else "dashed"))
-    if outline or te.get("opacity") is not None and te["opacity"] < 0.995:
+    if te.get("mask") == "ellipse":
+        opts.append("oval")
+    if outline or te.get("mask") or te.get("opacity") is not None and te["opacity"] < 0.995:
         ctx.packages.add(TIKZ)
     ctx.packages.add("\\usepackage{graphicx}")
     ctx.packages.add(TEXTPOS)

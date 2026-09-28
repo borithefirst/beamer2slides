@@ -389,6 +389,32 @@ def test_line_rounded_turned_and_freeform_shapes_draw_the_paths_they_stand_for(t
 
 
 @pytest.mark.skipif(not lualatex(), reason="lualatex not found")
+def test_an_oval_picture_shows_only_its_inscribed_ellipse_and_is_outlined_round(tmp_path):
+    """yc-seed-white's round portraits (`deck_thumbs.thumbnail_picture_masks`): `oval` clips the
+    picture to the ellipse its box inscribes and draws the outline on that ellipse, not the box."""
+    from PIL import Image
+    text, sty = written(tmp_path)
+    sty = sty.replace("\\endinput", "\\RequirePackage{graphicx}\n" + adopt.PICTURE_MACRO + "\n\\endinput")
+    (tmp_path / "tree" / "slides.sty").write_text(sty, encoding="utf-8")
+    Image.new("RGB", (50, 30), (255, 0, 0)).save(tmp_path / "tree" / "red.png")
+    main = tmp_path / "tree" / "main.tex"
+    main.write_text(with_frames(text, "\\slidepicture[outline=black,outline width=4,oval]{38,28,104,64}{red.png}\n"
+                                      "\\slidepicture{200,30,100,60}{red.png}"), encoding="utf-8")
+    im = np.asarray(compiled(main)[0].render(2.0)).astype(int)
+
+    def at(x, y):
+        return im[int(y * 2), int(x * 2), :3]
+
+    red = lambda p: p[0] > 200 and p[1] < 60 and p[2] < 60
+    # the picture is 104 x 64 from (40, 30), x,y being the outline's outer corner: centre (92, 62)
+    assert red(at(92, 62)), "the middle shows the picture"
+    assert (at(44, 34) > 240).all(), "a corner of the box is the page"
+    assert (at(40, 62) < 60).all(), "the outline runs round the ellipse's left end"
+    assert (at(92, 30) < 60).all(), "and over its top"
+    assert red(at(202, 32)) and red(at(298, 88)), "without `oval` the picture fills its box"
+
+
+@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
 def test_straight_quotes_and_double_hyphens_reach_the_pdf_as_typed(tmp_path):
     """saudi-cats' 'Bissas' came out curly: fontspec's TeX ligatures turn ' " ` -- into ’ ” ‘ – whatever
     spelling reaches the font, so adopt's escapes alone never kept them (`TEX_LIGATURES_OFF`)."""

@@ -147,13 +147,18 @@ def child(module: str, *args: str, corpus: Path) -> float:
 
 def round_(tag: str, corpora: list[Path], jobs: int, gpu: bool, names: list[str], python: str | None) -> Path:
     for corpus in corpora:
-        sec = child("adopt_bench", "run", *names, "--offline", "--tag", tag, "--jobs", str(jobs), corpus=corpus)
+        # only this corpus's own decks: metrics stops on a name the corpus has no folder for
+        mine = [n for n in names if (corpus / n).is_dir()]
+        if names and not mine:
+            continue
+        names_ = mine
+        sec = child("adopt_bench", "run", *names_, "--offline", "--tag", tag, "--jobs", str(jobs), corpus=corpus)
         results = [json.loads(p.read_text(encoding="utf-8")) for p in corpus.glob(f"*/runs/{tag}/result.json")]
         log("bench", tag=tag, corpus=corpus.name, seconds=sec, decks=len(results),
             cached=sum(1 for r in results if r.get("cached")), errors=sum(1 for r in results if r.get("error")))
         t0 = time.perf_counter()
         # the torch metrics live in their own venv (docs/adopt-bench.md "Metrics")
-        cmd = [python or sys.executable, "-m", "beamer2slides.devtools.slide_metrics", "run", tag, *names,
+        cmd = [python or sys.executable, "-m", "beamer2slides.devtools.slide_metrics", "run", tag, *names_,
                "--jobs", str(jobs)] + (["--gpu"] if gpu else [])
         from beamer2slides import interpreter
         subprocess.run(cmd, env={**interpreter.env(), "B2S_ADOPT_CORPUS": str(corpus)}, check=False,

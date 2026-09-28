@@ -753,7 +753,8 @@ def find_picture(index: list[dict], sha: str, look) -> dict | None:
 
 
 def picture_edits(te: dict) -> bool:
-    return any(te.get(k) for k in ("crop", "rotation", "flip", "opacity", "outline", "brightness", "contrast", "recolor"))
+    return any(te.get(k) for k in ("crop", "rotation", "flip", "opacity", "outline", "brightness", "contrast", "recolor",
+                                   "mask"))
 
 
 def picture_latex(te: dict, pic: Picture, ctx: "Context", size: list[str] | None = None) -> str:
@@ -778,13 +779,22 @@ def picture_latex(te: dict, pic: Picture, ctx: "Context", size: list[str] | None
         node += [f"draw={colour_name(outline['color'], ctx.colours)}", f"line width={outline['weight']:.2f}pt"]
         if outline.get("dash", "SOLID") != "SOLID":
             node.append("dotted" if "DOT" in outline["dash"] and "DASH" not in outline["dash"] else "dashed")
-    wrapped = bool(node or te.get("flip"))
+    wrapped = bool(node or te.get("flip") or te.get("mask"))
     if angle and not wrapped:
         opts.append(f"angle={angle:g}")
     cmd = f"\\includegraphics[{','.join(opts)}]{{{pic.rel}}}"
     if te.get("flip"):
         cmd = f"\\reflectbox{{{cmd}}}"
-    if node:
+    if te.get("mask") == "ellipse":
+        # shown only inside the ellipse its frame inscribes, the outline drawn round it too
+        ctx.packages.add(TIKZ)
+        radii = f"ellipse [x radius={(x1 - x0) / 2:.2f}pt,y radius={(y1 - y0) / 2:.2f}pt]"
+        fill = [n for n in node if n.startswith("text opacity")]
+        line = [n for n in node if not n.startswith("text opacity")]
+        cmd = (f"\\tikz{{\\begin{{scope}}\\clip (0pt,0pt) {radii};"
+               f"\\node[inner sep=0pt{''.join(',' + n for n in fill)}]{{{cmd}}};\\end{{scope}}"
+               + (f"\\draw[{','.join(line)}] (0pt,0pt) {radii};" if line else "") + "}")
+    elif node:
         ctx.packages.add(TIKZ)
         cmd = f"\\tikz\\node[inner sep=0pt,{','.join(node)}]{{{cmd}}};"
     if angle and wrapped:

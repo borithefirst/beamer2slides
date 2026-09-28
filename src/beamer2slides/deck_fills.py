@@ -75,26 +75,32 @@ def px_box(bbox, px: float, w: int, h: int, margin: int = 0) -> tuple[int, int, 
     return a0, b0, max(a0, a1), max(b0, b1)
 
 
-_SEE_THROUGH: dict[str, bool] = {}
+_SEE_THROUGH: dict[tuple, bool] = {}
 
 
-def see_through(file: str | None) -> bool:
+def see_through(file: str | None, crop: dict | None = None) -> bool:
     """A picture with transparent pixels (hebrew-lesson's ornamental frame over its paper backdrop):
-    what is under it shows, so it is ink above a candidate rather than a cover. Unknown = opaque."""
+    what is under it shows, so it is ink above a candidate rather than a cover. Unknown = opaque.
+    Only the part its `crop` shows counts: instagram's master cuts six pieces out of one screenshot
+    whose middle is 56% transparent, and the opaque bottom bar drawn over the bar under it was read
+    as see-through ink, so the bar under it was judged on pixels it never shows and dropped."""
     if not file:
         return False
-    if file not in _SEE_THROUGH:
+    key = (file, tuple(sorted((crop or {}).items())))
+    if key not in _SEE_THROUGH:
         try:
             from PIL import Image
+
+            from .compare import cropped_picture
             with Image.open(file) as im:
                 if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
-                    alpha = np.asarray(im.convert("RGBA"))[..., 3]
-                    _SEE_THROUGH[file] = bool((alpha < 250).mean() > 0.01)
+                    alpha = np.asarray(cropped_picture(im.convert("RGBA"), crop))[..., 3]
+                    _SEE_THROUGH[key] = bool((alpha < 250).mean() > 0.01)
                 else:
-                    _SEE_THROUGH[file] = False
+                    _SEE_THROUGH[key] = False
         except OSError:
-            _SEE_THROUGH[file] = False
-    return _SEE_THROUGH[file]
+            _SEE_THROUGH[key] = False
+    return _SEE_THROUGH[key]
 
 
 def opaque(el: dict) -> bool:
@@ -104,7 +110,7 @@ def opaque(el: dict) -> bool:
     if el.get("fill_gradient") and el.get("role") != "line":
         return True
     if el["kind"] == "image":
-        return not see_through(el.get("file"))
+        return not see_through(el.get("file"), el.get("crop"))
     if el["kind"] == "table":
         return True
     if el["kind"] in ("shape", "text") and el.get("fill") and (el.get("fill_alpha") or 1.0) >= 0.99:
@@ -115,7 +121,7 @@ def opaque(el: dict) -> bool:
 def wordy(el: dict) -> bool:
     """Ink above a candidate that may be anywhere in its box: words, a table, a see-through picture."""
     return (el["kind"] == "text" and bool(el.get("paragraphs")) or el["kind"] == "table"
-            or el["kind"] == "image" and see_through(el.get("file")))
+            or el["kind"] == "image" and see_through(el.get("file"), el.get("crop")))
 
 
 def read_region(a: np.ndarray, region: np.ndarray, allow: np.ndarray, gradient_ok: bool, flat: float = FLAT):
@@ -189,6 +195,21 @@ def bake_shared_cluster(elements: list[dict], members: list[int], a: np.ndarray,
     rest = [e for i, e in enumerate(elements) if i not in member_set]
     insert_at = sum(1 for i in range(start) if i not in member_set)
     return rest[:insert_at] + [pic] + rest[insert_at:]
+
+
+def ground_below(el: dict, below: list[dict], tol: float = 1.0) -> bool:
+    """Whether a filled or unread shape among `below` has `el`'s box (within `tol` pt each side)."""
+    box = el.get("bbox")
+    if not box:
+        return False
+    for e in below:
+        if e.get("kind") != "shape" or not e.get("bbox"):
+            continue
+        if not (e.get("fill") or e.get("fill_gradient") or e.get("fill_unread")):
+            continue
+        if all(abs(u - v) <= tol for u, v in zip(e["bbox"], box)):
+            return True
+    return False
 
 
 def shape_fallback_picture(a: np.ndarray, el: dict, above: list[dict], px: float,
@@ -265,6 +286,12 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
             out.append(el)
             continue
         unread = el.pop("fill_unread", False)
+        if unread and el["kind"] == "text" and not cells and ground_below(el, elements[:k]):
+            # a SmartArt node's words: a NOT_RENDERED text box on a shape of exactly its box. What
+            # shows in it is that shape (en-smartart's gradient balls), which a square picture of it
+            # here would hide, corners and all
+            out.append(el)
+            continue
         if a is not None:
             above = elements[k + 1:]
             if unread:
@@ -501,20 +528,70 @@ def thumbnail_picture(a: np.ndarray, el: dict, above: list[dict], px: float, pag
     if a1 - a0 < PICTURE_MIN_PX or b1 - b0 < PICTURE_MIN_PX:
         return None
     sub = painted_out(a[b0:b1, a0:a1].astype(np.float32), a0, b0, above, px, w, h)
+    sub = unblended(sub, a0, b0, above, px)
     alpha = np.full(sub.shape[:2], 255, dtype=np.uint8)
     ground = rgb(page)
     if ground is not None:
         alpha[np.abs(sub - ground).max(axis=2) <= TOL] = 0
         if (alpha > 0).mean() < 0.02:
             return None                    # nothing but the page: it shows nothing of its own
+    oval = el.get("shape_type") == "ELLIPSE"
+    if oval:
+        # an ellipse's fill is only what its box inscribes: the corners are whatever lies under it
+        # (en-smartart's gradient balls over a funnel, cut square without this)
+        alpha = np.minimum(alpha, ellipse_alpha(*alpha.shape))
     im = Image.fromarray(np.dstack([np.clip(sub + 0.5, 0, 255).astype(np.uint8), alpha]), "RGBA")
-    if ground is None:
+    if ground is None and not oval:
         im = im.convert("RGB")
     path, sha = save_png(im, folder)
     keep = {k: el[k] for k in ("id", "object", "group", "key", "inherited") if k in el}
     return {"kind": "image", "role": "figure", "alt": "picture fill", **keep,
             "bbox": [a0 / px, b0 / px, a1 / px, b1 / px], "file": str(path), "sha1": sha, "format": "png",
             "fill_source": "thumbnail"}
+
+
+def unblended(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float) -> np.ndarray:
+    """`sub` (thumbnail pixels from column `a0`, row `b0`) with the see-through fills of the shapes
+    `above` taken back out where they lie - their traced outline (`deck_freeforms`), their ellipse or
+    their box: the crop goes under them, and would otherwise show their tint twice (en-smartart's
+    balls under a funnel white at 0.4 came out washed pale)."""
+    from PIL import Image, ImageDraw
+    sh, sw = sub.shape[:2]
+    for e in above:
+        c, al = rgb(e.get("fill")), e.get("fill_alpha")
+        if e.get("kind") != "shape" or c is None or al is None or not 0.02 < al < 0.9 or not e.get("bbox"):
+            continue
+        if e.get("rotation") or e.get("frame"):
+            continue
+        cover = Image.new("L", (sw, sh), 0)
+        draw = ImageDraw.Draw(cover)
+        rings = (e.get("trace") or {}).get("rings") if isinstance(e.get("trace"), dict) else None
+        x0, y0, x1, y1 = (e["bbox"][0] * px - a0, e["bbox"][1] * px - b0, e["bbox"][2] * px - a0, e["bbox"][3] * px - b0)
+        if rings:
+            for ring in rings:
+                draw.polygon([(x * px - a0, y * px - b0) for x, y in ring], fill=255)
+        elif (e.get("shape_type") or "").upper() == "ELLIPSE":
+            draw.ellipse([x0, y0, x1, y1], fill=255)
+        elif (e.get("shape_type") or "").upper() in ("RECTANGLE", "TEXT_BOX"):
+            draw.rectangle([x0, y0, x1, y1], fill=255)
+        else:
+            continue
+        m = np.asarray(cover) > 127
+        if m.any():
+            sub = sub.copy()
+            sub[m] = np.clip((sub[m] - al * c) / (1 - al), 0, 255)
+    return sub
+
+
+def ellipse_alpha(h: int, w: int, samples: int = 4) -> np.ndarray:
+    """The alpha of the ellipse an `h` by `w` box inscribes, its rim antialiased (`samples`² points
+    a pixel)."""
+    s = (np.arange(samples) + 0.5) / samples
+    ys = (np.arange(h)[:, None] + s[None, :]).reshape(-1)
+    xs = (np.arange(w)[:, None] + s[None, :]).reshape(-1)
+    inside = ((xs[None, :] - w / 2) / (w / 2)) ** 2 + ((ys[:, None] - h / 2) / (h / 2)) ** 2 <= 1
+    cover = inside.reshape(h, samples, w, samples).mean(axis=(1, 3))
+    return np.round(cover * 255).astype(np.uint8)
 
 
 def letters_of(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float, w: int, h: int) -> np.ndarray:

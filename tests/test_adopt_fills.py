@@ -642,6 +642,49 @@ def test_an_inherited_picture_is_judged_by_its_cropped_piece(tmp_path):
     assert all(any(e.get("inherited") for e in s["elements"]) for s in slides)
 
 
+def test_a_piece_drawn_over_is_judged_by_what_its_own_crop_shows(tmp_path):
+    """instagram: the master's bottom bar is one piece of a screenshot whose middle is transparent,
+    and another opaque piece of the same sheet is drawn over the bar's middle. Read as the whole
+    sheet, that cover was see-through ink, the bar was judged under it, voted absent and dropped:
+    the deck lost the ends of its bottom bar on every slide."""
+    from PIL import Image
+    import io
+    sheet = Image.new("RGBA", (100, 300), (0, 0, 0, 0))            # the middle: transparent
+    sheet.paste((40, 40, 40, 255), (0, 0, 100, 100))              # the bar
+    sheet.paste((0, 90, 160, 255), (0, 200, 100, 300))            # the cover
+    png = io.BytesIO()
+    sheet.save(png, format="PNG")
+    url = "https://example.test/sheet.png"
+
+    def piece(oid, x, w, crop):
+        return {"objectId": oid, "size": {"width": pt(w), "height": pt(60)}, "transform": at(x, 300),
+                "image": {"contentUrl": url, "imageProperties": {"cropProperties": crop}}}
+
+    bar = piece("bar", 0, 720, {"bottomOffset": 2 / 3})
+    cover = piece("cover", 100, 520, {"topOffset": 2 / 3})
+    thumb = page((0, 300, 720, 60, "#282828"), (100, 300, 520, 60, "#005aa0"))
+    slides = deck_ir(multi([bar, cover], 2), foreign=True, fetch=lambda u: png.getvalue(), images=tmp_path,
+                     thumbnails=lambda n: thumb)["slides"]
+    assert all(inherited_ids([s]) == {"m~bar", "m~cover"} for s in slides)
+
+
+def test_a_layouts_unsaid_placeholder_fill_is_read_from_the_thumbnail():
+    """ml-vs-stats: every title stands on a dark bar that only the layout's title placeholder draws,
+    and the API gives that fill as `{}` (a gradient or picture fill). The slide's placeholder says
+    INHERIT; the `{}` it inherits was taken for no fill at all, and white words stood on white."""
+    lay = shape("lt", "TEXT_BOX", 200, 0, 520, 30, UNREAD)
+    lay["shape"]["placeholder"] = {"type": "TITLE"}
+    title = shape("t", "TEXT_BOX", 200, 0, 520, 30, {"propertyState": "INHERIT"})
+    title["shape"]["placeholder"] = {"type": "TITLE", "parentObjectId": "lt"}
+    title["shape"]["text"] = {"textElements": [{"paragraphMarker": {"style": {}}},
+                                               {"textRun": {"content": "Contrasting analyses\n",
+                                                            "style": {"fontSize": pt(14)}}}]}
+    pres = deck(title)
+    pres["layouts"][0]["pageElements"] = [lay]
+    el = next(e for e in elements(pres, page((200, 0, 520, 30, "#434343"))) if e.get("id") == "t")
+    assert el.get("fill") == "#434343" and el.get("fill_source") == "thumbnail"
+
+
 def test_an_inconclusive_element_is_never_dropped():
     """Without a thumbnail at all, `vote_inherited` never runs - nothing casts a vote, so nothing can
     be dropped, whatever `inherited_chain` found."""
@@ -745,3 +788,136 @@ def test_a_gradient_backdrop_is_drawn_from_the_fitted_model(tmp_path):
     img = np.asarray(Image.open(tmp_path / adopt.gradient_backdrop(radial, (720.0, 405.0), tmp_path)))
     assert img[img.shape[0] // 2, img.shape[1] // 2].min() > 250 and img[0, 0].max() < 160
     assert adopt.gradient_backdrop(linear, (720.0, 405.0), None) is None
+
+
+# ---------------------------------------------------------------- round things (en-smartart, yc-seed-white)
+
+def noisy(a: np.ndarray, x: int, y: int, w: int, h: int, seed: int = 3, oval: bool = False) -> None:
+    """Paint noise (neither a flat colour nor a ramp) into `a`'s (x, y, w, h), only inside the
+    inscribed ellipse when `oval`."""
+    rng = np.random.default_rng(seed)
+    patch = rng.integers(0, 256, (h, w, 3)).astype(np.uint8)
+    if oval:
+        yy, xx = np.mgrid[0:h, 0:w]
+        keep = ((xx + 0.5 - w / 2) / (w / 2)) ** 2 + ((yy + 0.5 - h / 2) / (h / 2)) ** 2 <= 1
+        a[y:y + h, x:x + w][keep] = patch[keep]
+    else:
+        a[y:y + h, x:x + w] = patch
+
+
+def ball(oid="b", box=(200, 100, 300, 200)) -> dict:
+    return {"kind": "shape", "role": "panel", "shape_type": "ELLIPSE", "bbox": list(box), "fill": None,
+            "outline": None, "fill_unread": True, "id": oid, "object": oid, "group": None}
+
+
+def panel_under(box=(150, 50, 350, 250)) -> dict:
+    return {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": list(box), "fill": "#3366cc",
+            "outline": None, "id": "u", "object": "u", "group": None}
+
+
+def test_a_gradient_ellipse_is_a_picture_of_only_its_ellipse(tmp_path):
+    """en-smartart's balls: an ELLIPSE with a `{}` fill over another shape was cut square from the
+    thumbnail, its corners printing the panel under it over whatever else was there."""
+    from PIL import Image
+    a = page((150, 50, 200, 200, "#3366cc"))
+    noisy(a, 200, 100, 100, 100, oval=True)
+    got = deck_fills.settle([panel_under(), ball()], a, 1.0, "#ffffff", False, tmp_path)
+    pic, = (e for e in got if e["kind"] == "image")
+    im = np.asarray(Image.open(pic["file"]))
+    assert im.shape == (100, 100, 4)
+    assert im[2, 2, 3] == 0 and im[97, 97, 3] == 0, "the corners are not the ball's"
+    assert im[50, 50, 3] == 255 and im[50, 1, 3] > 0, "its middle and rim are"
+
+
+def test_a_nodes_see_through_text_box_on_its_shape_is_no_picture_of_it(tmp_path):
+    """A SmartArt node is a shape and a NOT_RENDERED text box of exactly its box: the text box's
+    unread fill is the shape under it, and a picture of it would hide the ball square."""
+    a = page((150, 50, 200, 200, "#3366cc"))
+    noisy(a, 200, 100, 100, 100, oval=True)
+    words = {"kind": "text", "role": "body", "bbox": [200, 100, 300, 200], "id": "t", "object": "t",
+             "fill_unread": True, "paragraphs": [{"runs": [{"text": "Facebook", "color": "#ffffff"}]}]}
+    got = deck_fills.settle([panel_under(), ball(), words], a, 1.0, "#ffffff", False, tmp_path)
+    assert [e["id"] for e in got if e["kind"] == "image"] == ["b"], "the ball's picture, no `t~fill`"
+    assert not next(e for e in got if e["id"] == "t").get("fill")
+
+
+def test_a_picture_under_a_see_through_shape_does_not_take_its_tint_twice(tmp_path):
+    """en-smartart's funnel is white at 0.4 over the balls: the thumbnail shows the balls through it,
+    and the funnel is drawn again above their picture, so the crop has that tint taken back out."""
+    from PIL import Image
+    a = page((150, 50, 200, 200, "#3366cc"))
+    noisy(a, 200, 100, 100, 100)
+    truth = a[100:200, 200:300].astype(float).copy()
+    a[100:150, 200:300] = np.round(0.6 * a[100:150, 200:300] + 0.4 * 255).astype(np.uint8)
+    blob = {**ball(), "shape_type": "CUSTOM"}
+    veil = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [180, 90, 320, 150],
+            "fill": "#ffffff", "fill_alpha": 0.4, "outline": None, "id": "v", "object": "v", "group": None}
+    got = deck_fills.settle([panel_under(), blob, veil], a, 1.0, "#ffffff", False, tmp_path)
+    pic, = (e for e in got if e["kind"] == "image")
+    im = np.asarray(Image.open(pic["file"]).convert("RGB")).astype(float)
+    assert np.abs(im[5:45, 5:95] - truth[5:45, 5:95]).max() <= 2, "under the veil: the picture itself"
+    assert np.abs(im[55:95] - truth[55:95]).max() <= 1, "outside it: untouched"
+
+
+def test_a_see_through_freeform_is_traced_by_its_opaque_outline():
+    """en-smartart's funnel: white at 0.4 over other shapes, so its fill has no one colour to key on
+    ("alpha-over"); its red outline does, and what that encloses is the shape."""
+    from PIL import Image, ImageDraw
+    img = Image.fromarray(page((100, 50, 300, 250, "#3366cc")))
+    tri = [(150, 100), (350, 100), (250, 250)]
+    inner = Image.new("L", img.size, 0)
+    ImageDraw.Draw(inner).polygon(tri, fill=255)
+    arr = np.asarray(img).astype(float)
+    m = np.asarray(inner) > 0
+    arr[m] = 0.6 * arr[m] + 0.4 * 255
+    img = Image.fromarray(arr.round().astype(np.uint8))
+    ImageDraw.Draw(img).polygon(tri, outline=(218, 28, 39), width=2)
+    funnel = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [150, 100, 350, 250],
+              "fill": "#ffffff", "fill_alpha": 0.4, "outline": "#da1c27", "weight": 2.0, "id": "f",
+              "object": "f", "group": None}
+    got = deck_fills.settle([panel_under((100, 50, 400, 300)), funnel], np.asarray(img), 1.0, "#ffffff")
+    f = next(e for e in got if e["id"] == "f")
+    assert f.get("trace"), "traced"
+    xs = [x for ring in f["trace"]["rings"] for x, _ in ring]
+    ys = [y for ring in f["trace"]["rings"] for _, y in ring]
+    assert min(xs) == pytest.approx(150, abs=3) and max(xs) == pytest.approx(350, abs=3)
+    assert max(ys) == pytest.approx(250, abs=4), "down to the point, not the box's corners"
+    assert f["trace"]["fill"] == "#ffffff" and f["trace"]["alpha"] == 0.4
+
+
+def test_a_picture_google_shows_round_is_masked_to_its_ellipse(tmp_path):
+    """yc-seed-white slide 10: a .pptx picture with an ellipse geometry comes through the API as a
+    plain picture; its thumbnail shows it only inside the ellipse, the page in the corners."""
+    from PIL import Image
+    from beamer2slides.deck_thumbs import thumbnail_picture_masks
+    yy, xx = np.mgrid[0:100, 0:100]
+    photo = np.dstack([xx * 2.5, yy * 2.5, 128 + 100 * np.sin(xx / 10.0)])      # smooth, as a photo is
+    file = tmp_path / "p.png"
+    Image.fromarray(photo.astype(np.uint8)).save(file)
+    src = np.asarray(Image.open(file).convert("RGB"))
+
+    def shown(oval):
+        a = page()
+        patch = a[100:200, 200:300]
+        if oval:
+            yy, xx = np.mgrid[0:100, 0:100]
+            keep = ((xx + 0.5 - 50) / 50) ** 2 + ((yy + 0.5 - 50) / 50) ** 2 <= 1
+            patch[keep] = src[keep]
+        else:
+            patch[:] = src
+        el = {"kind": "image", "bbox": [200, 100, 300, 200], "file": str(file), "id": "p"}
+        thumbnail_picture_masks([el], a, 1.0)
+        return el.get("mask")
+
+    assert shown(True) == "ellipse"
+    assert shown(False) is None, "a picture shown whole is a rectangle"
+
+
+def test_pull_writes_a_round_picture_clipped_and_outlined_round():
+    from types import SimpleNamespace
+    from beamer2slides.inverse import picture_edits, picture_latex
+    te = {"bbox": [10, 20, 110, 80], "mask": "ellipse", "outline": {"color": "#000000", "weight": 2.0}}
+    assert picture_edits(te)
+    tex = picture_latex(te, SimpleNamespace(natural=(50, 30), rel="p.png"), Context())
+    assert "\\clip (0pt,0pt) ellipse [x radius=50.00pt,y radius=30.00pt]" in tex, tex
+    assert "\\draw[draw=" in tex and tex.count("ellipse [") == 2, tex

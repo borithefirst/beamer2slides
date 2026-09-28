@@ -678,9 +678,15 @@ def crossing(e: dict, elements: list[dict], strip: tuple, first: bool = False) -
     x0, y0, x1, y1 = e["bbox"]
     below = True
     found = []
+    own = f"{e['id']}~fill" if e.get("id") else None
     for o in elements:
         if o is e:
             below = False
+            continue
+        if own and o.get("id") == own:
+            # the box's own ground, a picture of the thumbnail behind its words (`deck_fills`): it
+            # stands exactly under the box, so no panel test passes, and devfest2020's titles, which all
+            # have one, were never read (their zero insets wrapped "Full screen slide" onto two lines)
             continue
         b = o.get("bbox")
         if not b or len(b) != 4 or b[2] <= strip[0] or b[0] >= strip[2] or b[3] <= strip[1] or b[1] >= strip[3]:
@@ -1156,3 +1162,69 @@ def thumbnail_picture_places(elements: list[dict], thumb, px: float) -> None:
         el["bbox"] = nb
         el["box"] = list(nb)
         el["picture_place"] = "thumbnail"
+
+
+# `thumbnail_picture_masks`: the ring either side of the inscribed ellipse's edge that is judged
+# neither way (an outline, anti-aliasing), the pixels each side must hold, and the shares that decide
+MASK_BAND = 0.12
+MASK_MIN_PX = 150
+MASK_TOL = 14
+MASK_INNER_MATCH = 0.8
+MASK_CORNER_PAGE = 0.6
+
+
+def thumbnail_picture_masks(elements: list[dict], thumb, px: float) -> None:
+    """A picture Google shows only inside the ellipse its frame inscribes, found from the thumbnail:
+    a .pptx's `prstGeom prst="ellipse"` on a `p:pic` survives the import as a mask the API never
+    mentions (yc-seed-white slide 10's three round portraits, each with a 3 pt outline that Slides
+    draws round too). Inside the ellipse the thumbnail is the picture; in the frame's corners outside
+    it the thumbnail is the page around the frame and not the picture. Both have to hold on most of
+    their pixels (`MASK_INNER_MATCH`, `MASK_CORNER_PAGE`), and the corners must differ from the page
+    at all, so a picture whose own corners are the page colour stays a rectangle, which draws the
+    same. Pixels an element above covers are left out (`_place_visible`); a turned picture is left
+    alone."""
+    if thumb is None or not px:
+        return
+    import numpy as np
+    from .compare import displayed_picture
+    from .deck_fills import px_box
+    H, W = thumb.shape[:2]
+    for k, el in enumerate(elements):
+        if el.get("kind") != "image" or not el.get("file") or el.get("video") or el.get("chart") \
+                or el.get("rotation"):
+            continue
+        a0, b0, a1, b1 = px_box(el["bbox"], px, W, H)
+        fw, fh = a1 - a0, b1 - b0
+        if fw < PLACE_MIN_PX or fh < PLACE_MIN_PX:
+            continue
+        img = displayed_picture(el)
+        if img is None:
+            continue
+        pic = np.asarray(img.convert("RGB").resize((fw, fh)), dtype=np.int16)
+        sub = thumb[b0:b1, a0:a1, :3].astype(np.int16)
+        g = 4
+        ring = np.concatenate([thumb[max(0, b0 - g):b0, a0:a1, :3].reshape(-1, 3),
+                               thumb[b1:b1 + g, a0:a1, :3].reshape(-1, 3),
+                               thumb[b0:b1, max(0, a0 - g):a0, :3].reshape(-1, 3),
+                               thumb[b0:b1, a1:a1 + g, :3].reshape(-1, 3)]).astype(np.int16)
+        if len(ring) < MASK_MIN_PX:
+            continue
+        page = np.median(ring, axis=0)
+        vis = _place_visible(elements[k + 1:], (a0, b0, a1, b1), px, W, H)
+        yy, xx = np.mgrid[0:fh, 0:fw]
+        r = ((xx + 0.5 - fw / 2) / (fw / 2)) ** 2 + ((yy + 0.5 - fh / 2) / (fh / 2)) ** 2
+        inner = (r < (1 - MASK_BAND) ** 2) & vis
+        corner = (r > (1 + MASK_BAND) ** 2) & vis
+        if inner.sum() < MASK_MIN_PX or corner.sum() < MASK_MIN_PX:
+            continue
+        is_pic = np.abs(sub - pic).max(axis=2) <= MASK_TOL
+        is_page = np.abs(sub - page).max(axis=2) <= MASK_TOL
+        pic_is_page = np.abs(pic - page).max(axis=2) <= MASK_TOL
+        if is_pic[inner].mean() < MASK_INNER_MATCH:
+            continue
+        # the corners where the picture itself would show something other than the page
+        telling = corner & ~pic_is_page
+        if telling.sum() < MASK_MIN_PX:
+            continue
+        if (is_page & ~is_pic)[telling].mean() >= MASK_CORNER_PAGE:
+            el["mask"] = "ellipse"

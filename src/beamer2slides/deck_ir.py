@@ -23,8 +23,8 @@ from . import emit
 from .emit import (ASCENT_EM, BASELINE_A, FONT_FOR_FAMILY, MIDDLE_BASELINE_EM, OPTICAL_WEIGHTS_READ, PAD_X, PPTX_TITLE_DY,
                    FontMapper, extra_above, line_size)
 from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_inset, thumbnail_cell_pad,
-                          thumbnail_cell_text, thumbnail_insets, thumbnail_picture_places, thumbnail_rows,
-                          thumbnail_weights, top_drift)
+                          thumbnail_cell_text, thumbnail_insets, thumbnail_picture_masks,
+                          thumbnail_picture_places, thumbnail_rows, thumbnail_weights, top_drift)
 from .fonts import cjk_font
 from .gslides import EMU_PER_PT
 
@@ -1059,6 +1059,7 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             sides += [side_inset(e, g) for e, g in ((e, side_gap(e, elements, thumb, px)) for e in elements)
                       if g is not None]
             thumbnail_picture_places(elements, thumb, px)
+            thumbnail_picture_masks(elements, thumb, px)
         key = slide_keys.get(slide["objectId"]) or (max(set(tags), key=tags.count) if tags else None)
         slides.append({"page": n, "frame": str(n + 1), "size": [page_w, page_h], "objectId": slide["objectId"],
                        "key": key, "notes": notes_text(slide), "background_color": color,
@@ -1210,7 +1211,7 @@ def foreign_shape(pe: dict, m: list[float], w: float, h: float, bbox: list[float
         x0, y0 = fr["box"][:2]
         upright = [fr["size"][0] / w if w else 1.0, 0.0, x0, 0.0, fr["size"][1] / h if h else 1.0, y0]
     # `inherited`: a placeholder's INHERIT fill as its layout or master sets it (`inherited_fill`)
-    fill = inherited or props.get("shapeBackgroundFill")
+    fill = props.get("shapeBackgroundFill") if inherited is None else inherited
     solid = (fill or {}).get("solidFill", {})
     if solid.get("alpha", 1.0) <= 0.004:
         fill_hex = None  # a fill at alpha 0 draws nothing (sc-memphis' rings: black at alpha 0)
@@ -1219,7 +1220,7 @@ def foreign_shape(pe: dict, m: list[float], w: float, h: float, bbox: list[float
     # ending there; its own `{}` is a gradient or picture fill Slides draws (china-pptx 173's white
     # panel under a caption on a photo; 10 in the corpora)
     own_unsaid = fill is not None and fill.get("propertyState", "RENDERED") == "RENDERED" and "solidFill" not in fill
-    if unread_fill(fill) and (inherited or not shape.get("placeholder") or own_unsaid):
+    if unread_fill(fill) and (inherited is not None or not shape.get("placeholder") or own_unsaid):
         style["fill_unread"] = True      # drawn, but not as anything the API says: `deck_fills`
     if fill_hex and solid.get("alpha", 1.0) < 1.0:
         style["fill_alpha"] = round(solid["alpha"], 4)
@@ -1253,7 +1254,8 @@ def element_of(pe: dict, m: list[float], resolver: StyleResolver, fonts: FontMap
         inherited = None
         if foreign and shape.get("placeholder") and fill.get("propertyState") == "INHERIT":
             inherited = resolver.inherited_fill(pe)
-            fill = inherited or fill
+            # `{}` is a fill too (a gradient the layout's placeholder draws): not `inherited or fill`
+            fill = fill if inherited is None else inherited
         fill_hex = rgb_hex(fill.get("solidFill", {}).get("color"), resolver.scheme) \
             if fill.get("propertyState", "RENDERED") == "RENDERED" and "solidFill" in fill else None
         if foreign:

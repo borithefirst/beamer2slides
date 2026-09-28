@@ -287,6 +287,12 @@ def test_the_thumbnail_tells_a_fixed_box_with_no_insets():
     el = element()
     thumbnail_insets([el, ground], *thumb(50.6, 54.2))
     assert "insets" not in el["box"], "a picture over the box hides what it would show"
+    # devfest2020's titles: each stands on its own ground, a picture of the thumbnail behind its words
+    # at exactly its box (`deck_fills`, "<id>~fill"), which no panel test lets through
+    el = {**element(), "id": "t"}
+    thumbnail_insets([{"kind": "image", "id": "t~fill", "bbox": [50.0, 50.0, 200.0, 100.0]}, el],
+                     *thumb(50.6, 54.2))
+    assert el["box"].get("insets") == 0, "a box's own ground is not something crossing it"
 
     # gdg24's stat grids: a caption box overlaps the heading box's lower rows. Those rows are not read,
     # the rest still are - either way round.
