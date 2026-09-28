@@ -12,7 +12,10 @@ fly) as a **new** presentation and prints its URL; `--in-place` puts it back int
 instead (the same `files.update` a rebuild uses, so the current content becomes a revision of its
 own) - which brings the deck's content back at its own URL, links and embeds included, but not its
 object ids: Drive's import numbers every page `p1`...`pN` of its own (measured 2026-09-22), so a
-sync base older than the restore describes none of the deck and `sync` refuses it.
+sync base older than the restore describes none of the deck and `sync` refuses it. A deck too
+large to export whole was backed up in parts (`...-slides-001-004.pptx`, `guard.export_parts`):
+each part restores on its own with `--from`, and Slides' File > Import slides joins them;
+`tools/deck_export.py` exports any deck that way.
 
 `prune` is the only destructive action here: every sync of a deck writes a .pptx of it, so a folder
 that is synced often grows without end. It keeps the newest `--keep` backups (and everything newer
@@ -188,6 +191,9 @@ def main() -> None:
                 if k in ("file", "drive"):
                     print(f"      {k}: {v['url'] if isinstance(v, dict) else v}"
                           f"{'  (deleted)' if k == 'file' and not Path(v).exists() else ''}")
+            for p in (b.get("backup") or {}).get("parts", []):   # a deck too large to export whole
+                print(f"      part, slides {p['slides'][0]}-{p['slides'][1]}: {p['file']}"
+                      f"{'  (deleted)' if not Path(p['file']).exists() else ''}")
         files = guard.backup_files(entries)
         if files:
             size = sum(p.stat().st_size for p, _ in files) / 1e6

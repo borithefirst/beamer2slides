@@ -18,7 +18,6 @@ Before a destructive write the deck's `revisionId` is recorded (`<out>/backups/b
 and/or a Drive copy of the presentation.
 """
 
-import io
 import json
 import os
 import re
@@ -30,7 +29,7 @@ from pathlib import Path
 
 from . import merge, snapshot
 from .gapi import HttpError, message_of
-from .gslides import SLOW_EXPORT, execute
+from .gslides import execute
 
 SCRATCH = re.compile(r"b2s_m\d{3}")  # emit.measure_places' scratch slides
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -346,11 +345,35 @@ def backup_dir(out: Path) -> Path:
 
 def export_pptx(drive, pid: str, path: Path) -> int:
     """The live deck as a .pptx next to the output folder. Drive refuses files.export over 10 MB,
-    and takes minutes over a deck in a big embedded face (`gslides.SLOW_EXPORT`)."""
-    data = execute(drive.files().export_media(fileId=pid, mimeType=PPTX_MIME), retries=3, timeout=SLOW_EXPORT)
-    data = data.getvalue() if isinstance(data, io.BytesIO) else data
+    and takes minutes over a deck in a big embedded face (`gslides.SLOW_EXPORT`); a timeout is
+    not tried again (`deck_export.export_bytes`)."""
+    from .deck_export import export_bytes
+    data = export_bytes(drive, pid)
     write_whole(path, data)
     return len(data)
+
+
+def export_parts(drive, slides, pid: str, path: Path) -> dict:
+    """The live deck as .pptx parts beside `path` (`<stem>-slides-001-004.pptx`), for a deck Drive
+    will not export whole (`deck_export`): halves first, since the whole was just refused, each
+    halved again while it is. Returns {"parts": [{"file", "slides": [first, last], "bytes"}],
+    "missing": [...]} - a slide no part brought is in `missing`, and then the parts are no way
+    back to the whole deck (`way_back_kept`)."""
+    from .deck_export import export_deck
+    pres = execute(slides.presentations().get(presentationId=pid, fields="presentationId,slides.objectId"))
+    n = len(pres.get("slides", []))
+    if n < 2:
+        return {"parts": [], "missing": [{"slides": [1, n], "reason": "a deck of one slide has no parts"}]}
+    done = export_deck(drive, slides, pres, per_part=(n + 1) // 2)
+    parts = []
+    for part in done.parts:
+        file = path.with_name(f"{path.stem}-{part.name}.pptx")
+        write_whole(file, part.data)
+        parts.append({"file": str(file), "slides": [part.first + 1, part.end], "bytes": len(part.data)})
+    kept = {"parts": parts, "missing": [{k: m[k] for k in ("slides", "reason")} for m in done.missing]}
+    if done.leftovers:
+        kept["leftovers"] = done.leftovers
+    return kept
 
 
 def write_whole(path: Path, data: bytes) -> None:
@@ -375,11 +398,15 @@ def copy_in_drive(drive, pid: str, name: str | None = None) -> dict:
     return {"presentationId": copy["id"], "name": copy.get("name"), "url": deck_url(copy["id"])}
 
 
-def backup_deck(drive, pid: str, out: Path, mode: str, note: str = "", fallback: bool = True) -> dict:
+def backup_deck(drive, pid: str, out: Path, mode: str, note: str = "", fallback: bool = True,
+                slides=None) -> dict:
     """Keep a way back before a destructive write. mode: none | file | drive | both.
-    `fallback`: a refused .pptx export (the 10 MB limit) is answered with a Drive copy - what a
-    rebuild wants, while a sync, which only ever rewrites parts, settles for the warning.
-    Returns {"file", "drive", "warnings"} (paths/ids as strings)."""
+    `slides`: a Slides client, with which a deck Drive will not export whole (its size, a timeout)
+    is kept in .pptx parts instead (`export_parts`; `parts` in the result, no `file`).
+    `fallback`: a refused .pptx export (the 10 MB limit) that no parts made up for is answered
+    with a Drive copy - what a rebuild wants, while a sync, which only ever rewrites parts, settles
+    for the warning. Returns {"file" | "parts", "drive", "warnings"} (paths/ids as strings)."""
+    from .deck_export import too_large
     result: dict = {"mode": mode, "warnings": []}
     if mode in ("none", None):
         return result
@@ -390,10 +417,33 @@ def backup_deck(drive, pid: str, out: Path, mode: str, note: str = "", fallback:
             size = export_pptx(drive, pid, path)
             result["file"] = str(path)
             result["bytes"] = size
-        except HttpError as e:
-            result["warnings"].append(f"could not export the deck as .pptx ({api_message(e)}; {EXPORT_LIMIT_NOTE})")
+        except (HttpError, TimeoutError) as e:
+            why = api_message(e) if isinstance(e, HttpError) else "the export timed out"
+            kept = None
+            if slides is not None and too_large(e):
+                try:
+                    kept = export_parts(drive, slides, pid, path)
+                except (HttpError, OSError) as err:
+                    result["warnings"].append(f"could not export the deck in parts either ({type(err).__name__}: {err})")
+            if kept and kept["parts"]:
+                result["parts"] = kept["parts"]
+                result["bytes"] = sum(p["bytes"] for p in kept["parts"])
+                if kept["missing"]:
+                    result["parts_missing"] = [m["slides"] for m in kept["missing"]]
+            if kept and kept["parts"] and not kept["missing"]:
+                result["warnings"].append(f"the deck is too large to export whole ({why}); it was kept in "
+                                          f"{len(kept['parts'])} .pptx parts, each one restorable on its own")
+            else:
+                result["warnings"].append(f"could not export the deck as .pptx ({why}; {EXPORT_LIMIT_NOTE})")
+                for m in (kept or {}).get("missing", []):
+                    result["warnings"].append(f"slides {m['slides'][0]}-{m['slides'][1]} are in no part ({m['reason']})")
             if mode == "file" and fallback:
-                mode = "drive"  # never replace a deck's content without any way back
+                # never replace a deck's content without a way back to it whole: parts come back as
+                # separate presentations, a Drive copy as the deck itself
+                mode = "drive"
+            if kept and kept.get("leftovers"):
+                result["warnings"].append(f"temporary copies Drive would not delete: {', '.join(kept['leftovers'])} "
+                                          f"(tools/drive_usage.py --delete-staging)")
     if mode in ("drive", "both"):
         try:
             result["drive"] = copy_in_drive(drive, pid)
@@ -490,11 +540,17 @@ class WayBack:
 
 def way_back_kept(backup: dict) -> bool:
     """Whether this backup can actually be put back: a .pptx file that is there and not empty, or
-    a Drive copy. `backup_deck` only warns when Drive refuses the export or the copy."""
+    .pptx parts that are all there and hold every slide (`export_parts`), or a Drive copy.
+    `backup_deck` only warns when Drive refuses the export or the copy."""
     if backup.get("drive"):
         return True
-    path = Path(backup["file"]) if backup.get("file") else None
-    return bool(path and path.exists() and path.stat().st_size > 0)
+
+    def there(name) -> bool:
+        path = Path(name) if name else None
+        return bool(path and path.exists() and path.stat().st_size > 0)
+    if backup.get("parts") and not backup.get("parts_missing"):
+        return all(there(p.get("file")) for p in backup["parts"])
+    return there(backup.get("file"))
 
 
 def demand_way_back(pid: str, out: Path, pdf: Path | str | None, entry: dict, mode: str) -> None:
@@ -557,9 +613,10 @@ def backup_files(entries: list[dict]) -> list[tuple[Path, dict]]:
     else in the folder is ever a candidate for deletion: a file someone put there is theirs."""
     found = []
     for e in entries:
-        name = (e.get("backup") or {}).get("file")
-        if name and Path(name).exists():
-            found.append((Path(name), e))
+        backup = e.get("backup") or {}
+        for name in [backup.get("file")] + [p.get("file") for p in backup.get("parts", [])]:
+            if name and Path(name).exists():
+                found.append((Path(name), e))
     return found
 
 
@@ -573,7 +630,9 @@ def prune_backups(out: Path, keep: int = 10, older_than_days: float | None = Non
     when, is worth keeping as evidence even when the way back is not."""
     entries = read_log(out)
     files = backup_files(entries)
-    doomed = files[:-keep] if keep else list(files)
+    kept_entries = list({id(e): e for _, e in files}.values())   # (a backup in parts is one backup)
+    kept_entries = {id(e) for e in (kept_entries[-keep:] if keep else [])}
+    doomed = [(p, e) for p, e in files if id(e) not in kept_entries]
     if older_than_days is not None:
         cutoff = time.time() - older_than_days * 86400
         doomed = [(p, e) for p, e in doomed if p.stat().st_mtime < cutoff]
@@ -646,11 +705,16 @@ def restore_hint(entry: dict, what: str = "rebuild") -> list[str]:
         lines.append(f"  backup: {backup['file']}")
         lines.append(f"    put it back with: python tools/deck_backup.py restore --deck {entry.get('out', '<out folder>')} "
                      f"--from \"{backup['file']}\"")
+    if backup.get("parts"):
+        lines.append(f"  backup in {len(backup['parts'])} parts (the deck was too large to export whole):")
+        lines += [f"    slides {p['slides'][0]}-{p['slides'][1]}: {p['file']}" for p in backup["parts"]]
+        lines.append("    each one restores as a presentation of its own (python tools/deck_backup.py restore "
+                     "--deck ... --from PART); Slides' File > Import slides puts them together")
     if backup.get("drive"):
         lines.append(f"  backup copy in Drive: {backup['drive']['url']}")
     for w in backup.get("warnings", []):
         lines.append(f"  warning: {w}")
-    if pid and not backup.get("file") and not backup.get("drive"):
+    if pid and not backup.get("file") and not backup.get("parts") and not backup.get("drive"):
         lines.append("  no backup file was kept (--backup file|drive|both keeps one); Drive's version history "
                      "cannot be read back through the API (docs/sync.md)")
     return lines

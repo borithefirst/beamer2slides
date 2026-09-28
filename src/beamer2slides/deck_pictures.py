@@ -17,8 +17,10 @@ do not pair up that way falls back to the titles alone. A picture it cannot plac
 which is what a failed download is: its signature is missing and the picture is compared by its
 URL alone - a new URL then reads as a replaced picture, the answer that never loses one.
 
-Drive refuses an export over its size limit (about 10 MB), and a `drive.file` token only reaches
-decks this app made or was shown; either is the same missing picture.
+Drive refuses an export over its size limit (about 10 MB), and a slow one can outlast the
+connection; with a Slides client at hand the deck is then exported in parts (`deck_export`: Drive
+copies cut down to some of the slides, each paired with its own slides of the read). A `drive.file`
+token only reaches decks this app made or was shown, and that refusal is the same missing picture.
 """
 
 from __future__ import annotations
@@ -188,10 +190,17 @@ class LivePictures:
 
     `pptx`: the bytes of a .pptx of this deck a person downloaded (File > Download), which stands
     for the export: no Drive call is made, and a caller may read it before any download
-    (`supplied`)."""
+    (`supplied`).
 
-    def __init__(self, pres: dict, drive=None, fetch=None, workers: int = 8, pptx: bytes | None = None):
-        self.pres, self.drive, self.workers = pres, drive, workers
+    `slides`: a Slides client (or a function making one, called only then), which lets a deck
+    Drive will not export whole (its size, a timeout) come out in parts
+    (`deck_export.export_deck`); None: the whole export or nothing. What it took
+    is counted for reports: `exports` (export calls), `copies` (temporary copies made),
+    `parts` (exports that came back), `unexported` (slide ids no export brought)."""
+
+    def __init__(self, pres: dict, drive=None, fetch=None, workers: int = 8, pptx: bytes | None = None,
+                 slides=None):
+        self.pres, self.drive, self.workers, self.slides = pres, drive, workers, slides
         if fetch is None:
             from .google_auth import fetcher_for_threads
             fetch = fetcher_for_threads()
@@ -201,7 +210,10 @@ class LivePictures:
         self.exported: dict[str, bytes] | None = None if pptx is None else exported_pictures(pptx, pres)
         self.supplied = pptx is not None
         self.downloads = 0    # how many were asked of the fetcher
-        self.exports = 0      # how many exports were made (0 or 1)
+        self.exports = 0      # how many exports were asked of Drive (1, or one per part tried)
+        self.copies = 0
+        self.parts = 0
+        self.unexported: list[str] = []
 
     def _download(self, oid: str) -> bytes | None:
         from . import net
@@ -211,20 +223,18 @@ class LivePictures:
             return None
 
     def export(self) -> dict[str, bytes]:
-        """Every picture of the deck out of one .pptx export ({} when Drive would not give one)."""
+        """Every picture of the deck out of one .pptx export, else out of its parts where there is
+        a Slides client ({} when Drive would give neither)."""
         if self.exported is None:
             self.exported = {}
             if self.drive is not None and self.pres.get("presentationId"):
-                from .gapi import HttpError
-                from .gslides import SLOW_EXPORT, execute
-                try:
-                    self.exports += 1
-                    data = execute(self.drive.files().export_media(fileId=self.pres["presentationId"],
-                                                                   mimeType=PPTX_MIME), retries=3, timeout=SLOW_EXPORT)
-                    if isinstance(data, (bytes, bytearray)):
-                        self.exported = exported_pictures(bytes(data), self.pres)
-                except (HttpError, OSError):
-                    pass
+                from .deck_export import export_deck
+                done = export_deck(self.drive, self.slides, self.pres)
+                self.exports += done.exports
+                self.copies += done.copies
+                self.parts += len(done.parts)
+                self.unexported = [i for m in done.missing for i in m["ids"]]
+                self.exported = done.pictures(self.pres)
         return self.exported
 
     def get(self, ids) -> dict[str, bytes]:

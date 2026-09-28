@@ -126,7 +126,7 @@ def sync_point(pdf: Path, deck: str, out: Path | None, backup: str, slides, driv
                  "modifiedTime": info.get("modifiedTime"), "out": str(out),
                  "checked": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": f"sync {pdf.name}",
                  "backup": backup_deck(drive, pid, Path(out), "file" if backup == "auto" else backup,
-                                       fallback=False)}
+                                       fallback=False, slides=slides)}
         record(Path(out), entry)
         return {"out": str(out), "entry": entry}
     except Exception as e:  # noqa: BLE001 (a missing recovery note is no reason not to sync)

@@ -1640,7 +1640,7 @@ def picture_fetch(pres: dict, pptx: bytes | None = None, keep: dict | None = Non
     before the .pptx (it replays recorded downloads, `deck_files`: the bytes Google serves, where a
     .pptx may hold a re-encoded copy). `keep["pptx_pictures"]`: what the .pptx held."""
     from .deck_pictures import LivePictures
-    from .google_auth import drive_service, fetcher_for_threads
+    from .google_auth import drive_service, fetcher_for_threads, slides_service
     live = LivePictures(pres, None, fetcher_for_threads(), pptx=pptx)
     if pptx is not None and keep is not None:
         keep["pptx_pictures"] = len(live.exported or {})
@@ -1657,6 +1657,7 @@ def picture_fetch(pres: dict, pptx: bytes | None = None, keep: dict | None = Non
             if oid is None or live.supplied or not drive:
                 raise  # (a supplied .pptx is the export: Drive is not asked for another)
             live.drive = live.drive or drive_service()
+            live.slides = live.slides or slides_service  # (made only if the deck needs parts)
             data = live.export().get(oid)
             if not data:
                 raise

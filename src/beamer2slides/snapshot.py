@@ -985,7 +985,7 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
     unsigned = [i for i in {**images, **backgrounds} if i not in signatures]
     if unsigned:  # (their downloads failed already: straight to the export)
         from .deck_pictures import LivePictures
-        exported = LivePictures(pres, drive, fetcher_for_threads()).export()
+        exported = LivePictures(pres, drive, fetcher_for_threads(), slides=slides).export()
         signatures.update({i: sig for i in unsigned if (d := exported.get(i)) and (sig := signature(d))})
     base = build_base(deck, out, pres, state, pdf, sign=True, overlays=overlays, signatures=signatures)
     # What convert wrote on the master and the layouts, so a sync can carry a new theme there and

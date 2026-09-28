@@ -1339,7 +1339,8 @@ class Sync:
         from .google_auth import fetcher_for_threads
         key = (pres.get("presentationId"), pres.get("revisionId"), id(pres))
         if getattr(self, "_live_pictures", (None, None))[0] != key:
-            self._live_pictures = (key, LivePictures(pres, getattr(self, "drive", None), fetcher_for_threads()))
+            self._live_pictures = (key, LivePictures(pres, getattr(self, "drive", None), fetcher_for_threads(),
+                                                     slides=getattr(self, "slides", None)))
         return self._live_pictures[1]
 
     def picture_adopter(self, pres: dict):

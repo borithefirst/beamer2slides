@@ -3960,7 +3960,7 @@ def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, 
     if found["reason"]:
         print(f"WARNING: rebuilding a deck that {'was edited in Slides' if found['reason'] == 'edited' else found['reason']} "
               f"(--force-rebuild): {entry['summary']}")
-    entry["backup"] = guard.backup_deck(drive, pid, out, mode, entry["reason"])
+    entry["backup"] = guard.backup_deck(drive, pid, out, mode, entry["reason"], slides=slides)
     guard.record(out, entry)  # the attempt belongs in the log even when it failed, and what follows
     if found["reason"]:
         guard.demand_way_back(pid, out, source_pdf, entry, mode)  # no backup, no forced rebuild

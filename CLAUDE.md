@@ -485,7 +485,11 @@ markers.
   .pptx export (backup, picture fallback) runs with `gslides.execute(..., timeout=SLOW_EXPORT)`,
   a connection of its own (`gapi.patient_http`). A sync's backup is on a daemon thread and waited
   for only if the sync asked for it before a write (`guard.WayBack.kept`); its files go down whole
-  (`guard.write_whole`).
+  (`guard.write_whole`). A deck too large to export whole (403 `exportSizeLimitExceeded`, or a
+  timeout; never a permission refusal) comes out in parts where a Slides client is at hand
+  (`deck_export.export_deck`: Drive copies, which keep every objectId, cut to half the slides and
+  halved again, deleted in a `finally`, tagged `b2sStaging`): `LivePictures(slides=)`, backups in
+  parts (a rebuild still also gets its Drive copy), `tools/deck_export.py`.
 - PowerShell 5.1 mangles double quotes inside native-command arguments: keep them out of git
   commit messages. `Get-Content -Raw` reads BOM-less UTF-8 as ANSI: edit text files with the
   editor tools.
