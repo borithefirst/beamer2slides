@@ -495,20 +495,39 @@ def thumbnail_picture(a: np.ndarray, el: dict, above: list[dict], px: float, pag
     the picture and once by their own text box a little apart; opaque elements above cover their
     part anyway. `page`: the page colour when nothing but the page lies under the shape - pixels of
     that colour are then made transparent, so the picture is the shape's own outline."""
-    import hashlib
-    from pathlib import Path
     from PIL import Image
     h, w = a.shape[:2]
     a0, b0, a1, b1 = px_box(el["bbox"], px, w, h)
     if a1 - a0 < PICTURE_MIN_PX or b1 - b0 < PICTURE_MIN_PX:
         return None
-    sub = a[b0:b1, a0:a1].astype(np.float32)
-    letters = np.zeros(sub.shape[:2], dtype=bool)
+    sub = painted_out(a[b0:b1, a0:a1].astype(np.float32), a0, b0, above, px, w, h)
+    alpha = np.full(sub.shape[:2], 255, dtype=np.uint8)
+    ground = rgb(page)
+    if ground is not None:
+        alpha[np.abs(sub - ground).max(axis=2) <= TOL] = 0
+        if (alpha > 0).mean() < 0.02:
+            return None                    # nothing but the page: it shows nothing of its own
+    im = Image.fromarray(np.dstack([np.clip(sub + 0.5, 0, 255).astype(np.uint8), alpha]), "RGBA")
+    if ground is None:
+        im = im.convert("RGB")
+    path, sha = save_png(im, folder)
+    keep = {k: el[k] for k in ("id", "object", "group", "key", "inherited") if k in el}
+    return {"kind": "image", "role": "figure", "alt": "picture fill", **keep,
+            "bbox": [a0 / px, b0 / px, a1 / px, b1 / px], "file": str(path), "sha1": sha, "format": "png",
+            "fill_source": "thumbnail"}
+
+
+def letters_of(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float, w: int, h: int) -> np.ndarray:
+    """Where in `sub` (the thumbnail's pixels from column `a0`, row `b0` on; the thumbnail is `w` x
+    `h`) the words of the text elements `above` are drawn: a pixel nearer a run's colour than its
+    box's ground. Not grown: the antialiased rims are the caller's to take (`dilate`)."""
+    sh, sw = sub.shape[:2]
+    letters = np.zeros((sh, sw), dtype=bool)
     for e in above:
         if e["kind"] != "text" or not e.get("paragraphs"):
             continue
         c0, d0, c1, d1 = px_box(e["bbox"], px, w, h, -2 * MARGIN_PX)
-        if c1 <= a0 or c0 >= a1 or d1 <= b0 or d0 >= b1:
+        if c1 <= a0 or c0 >= a0 + sw or d1 <= b0 or d0 >= b0 + sh:
             continue
         box = (slice(max(0, d0 - b0), max(0, d1 - b0)), slice(max(0, c0 - a0), max(0, c1 - a0)))
         part = sub[box]
@@ -521,22 +540,28 @@ def thumbnail_picture(a: np.ndarray, el: dict, above: list[dict], px: float, pag
                 c = rgb(r.get("color"))
                 if c is not None and r.get("text", "").strip() and np.abs(c - ground).max() > TOL:
                     # a letter's pixel is nearer its colour than the ground's (antialiased rims are
-                    # taken by the dilation below)
+                    # taken by the dilation)
                     letters[box] |= (np.abs(part - c).max(axis=2) < off) & (off > TOL)
+    return letters
+
+
+def painted_out(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float, w: int, h: int) -> np.ndarray:
+    """`sub` with the letters of the texts `above` (`letters_of`, grown over their rims) filled in
+    from the pixels around them: what a thumbnail crop keeps of what lies under those words, so a
+    text box drawn again above the crop does not print its words twice a little apart."""
+    letters = letters_of(sub, a0, b0, above, px, w, h)
     if letters.any():
         from .deck_freeforms import dilate
-        letters = dilate(letters, 2)
-        sub = inpaint(sub, letters)
-    alpha = np.full(sub.shape[:2], 255, dtype=np.uint8)
-    ground = rgb(page)
-    if ground is not None:
-        alpha[np.abs(sub - ground).max(axis=2) <= TOL] = 0
-        if (alpha > 0).mean() < 0.02:
-            return None                    # nothing but the page: it shows nothing of its own
-    im = Image.fromarray(np.dstack([np.clip(sub + 0.5, 0, 255).astype(np.uint8), alpha]), "RGBA")
-    if ground is None:
-        im = im.convert("RGB")
+        sub = inpaint(sub, dilate(letters, 2))
+    return sub
+
+
+def save_png(im, folder) -> tuple:
+    """(path, sha1) of a PIL image written into `folder` as `thumb-<sha1>.png`: the same file
+    whenever the same pixels come up twice."""
+    import hashlib
     import io
+    from pathlib import Path
     buf = io.BytesIO()
     im.save(buf, "PNG", optimize=False)
     data = buf.getvalue()
@@ -546,44 +571,129 @@ def thumbnail_picture(a: np.ndarray, el: dict, above: list[dict], px: float, pag
     path = folder / f"thumb-{sha[:16]}.png"
     if not path.exists():
         path.write_bytes(data)
-    keep = {k: el[k] for k in ("id", "object", "group", "key", "inherited") if k in el}
-    return {"kind": "image", "role": "figure", "alt": "picture fill", **keep,
-            "bbox": [a0 / px, b0 / px, a1 / px, b1 / px], "file": str(path), "sha1": sha, "format": "png",
-            "fill_source": "thumbnail"}
+    return path, sha
 
 
 #: a download that is not a decodable image at all - a Google sign-in page for a picture that
 #: needed one, a site's own 404/Next.js error page instead of the asset, an expired signed URL:
 #: `deck_ir.image_format` calling it "unknown" is never something LaTeX could show
 BROKEN_FORMATS = {"unknown"}
+#: ... and formats that decode but that LaTeX cannot include (`adopt.UNINCLUDABLE`): an SVG or a
+#: Windows metafile a .pptx export can hand over in place of the bitmap Slides draws
+UNUSABLE_FORMATS = BROKEN_FORMATS | {"svg", "emf", "wmf"}
+UNUSABLE_SUFFIXES = (".svg", ".emf", ".wmf", ".img")
+#: what the crop replaces: the missing file and every property that described how the slide draws
+#: that file (all of it already applied in the thumbnail's pixels), kept under `thumbnail_of` so a
+#: file that arrives later (`deck_ir.pictures_from_pptx`) is drawn with them again
+THUMBNAIL_REPLACES = ("file", "sha1", "format", "error", "crop", "crop_angle", "opacity", "brightness",
+                      "contrast", "recolor", "rotation", "flip", "bbox", "box", "outline")
+RIGHT_ANGLE = 0.5        # degrees: a turn this close to a quarter is cut out of the thumbnail as it stands
+
+
+def picture_unusable(el: dict) -> bool:
+    """Whether an image element has no file adopt can draw: none came (no fetch at all, `--no-downloads`,
+    a refused fetch and export - `deck_ir.stash_picture`'s `error`), the file is gone, or its bytes
+    are no picture LaTeX can include (`UNUSABLE_FORMATS`)."""
+    from pathlib import Path
+    file = el.get("file")
+    if el.get("error") or not file or not Path(file).exists():
+        return True
+    return el.get("format") in UNUSABLE_FORMATS or Path(file).suffix.lower() in UNUSABLE_SUFFIXES
+
+
+def picture_from_thumbnail(a: np.ndarray, el: dict, above: list[dict], px: float, folder) -> dict | None:
+    """A picture element as the thumbnail shows it: {file, sha1, format, bbox, box, rotation?} to
+    put in place of the file that never arrived, or None when too little of it is on the page.
+
+    At the thumbnail's resolution (LARGE: 1600 px across the page, 2.2 px per pt of a 720 pt page,
+    about 160 dpi), so a photo loses whatever finer detail its own file had, and it is the picture
+    as the slide composites it: whatever lies under a transparent part of it is in it. Letters of
+    texts drawn above it are painted out (`painted_out`), as for any thumbnail crop; opaque
+    elements above cover their part again anyway.
+
+    Upright or a quarter turn (`RIGHT_ANGLE`): the pixels of its box on the page, which is then its
+    box, unturned; a picture partly off the page is the part on it, placed there. Turned any other
+    way, the turned rectangle is sampled back upright and the element keeps its turn: an
+    axis-aligned cut would carry the page's corners around it, and the element would no longer be
+    the deck object's box and turn, which is what `adopt_sync` pairs it by. A flip is in the
+    pixels either way, so it goes."""
+    from PIL import Image
+    h, w = a.shape[:2]
+    rot = float(el.get("rotation") or 0.0)
+    if abs(rot / 90 - round(rot / 90)) * 90 <= RIGHT_ANGLE:
+        x0, y0, x1, y1 = el["bbox"]
+        a0, b0, a1, b1 = px_box(el["bbox"], px, w, h)
+        if a1 - a0 < 2 or b1 - b0 < 2:
+            return None
+        sub = painted_out(a[b0:b1, a0:a1].astype(np.float32), a0, b0, above, px, w, h)
+        path, sha = save_png(Image.fromarray(np.clip(sub + 0.5, 0, 255).astype(np.uint8), "RGB"), folder)
+        # on the page: its own box (the crop is under a pixel short of it); cut by the page's edge
+        # (by more than a pixel): the part the page shows, where the thumbnail shows it
+        cut = min(x0, y0) < -1 / px or x1 > (w + 1) / px or y1 > (h + 1) / px
+        box = [a0 / px, b0 / px, a1 / px, b1 / px] if cut else list(el["bbox"])
+        return {"file": str(path), "sha1": sha, "format": "png", "bbox": box, "box": list(box), "cut": cut}
+    bx0, by0, bx1, by1 = el.get("box") or el["bbox"]
+    bw, bh = bx1 - bx0, by1 - by0
+    ow, oh = int(round(bw * px)), int(round(bh * px))
+    a0, b0, a1, b1 = px_box(el["bbox"], px, w, h, -MARGIN_PX)
+    if ow < 2 or oh < 2 or a1 - a0 < 2 or b1 - b0 < 2:
+        return None
+    sub = painted_out(a[b0:b1, a0:a1].astype(np.float32), a0, b0, above, px, w, h)
+    rgba = np.dstack([np.clip(sub + 0.5, 0, 255).astype(np.uint8),
+                      np.full(sub.shape[:2], 255, dtype=np.uint8)])
+    # output pixel (X, Y) of the upright picture -> the point of the page the turned one puts it at,
+    # in pixels of `sub` (PIL's AFFINE: continuous coordinates, pixel i spanning [i, i + 1])
+    t = np.radians(rot)
+    c, s = float(np.cos(t)), float(np.sin(t))
+    cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+    sx, sy = ow / bw, oh / bh
+    coeffs = (px * c / sx, -px * s / sy, px * (cx - c * bw / 2 + s * bh / 2) - a0,
+              px * s / sx, px * c / sy, px * (cy - s * bw / 2 - c * bh / 2) - b0)
+    im = Image.fromarray(rgba, "RGBA").transform((ow, oh), Image.Transform.AFFINE, coeffs,
+                                                  resample=Image.Resampling.BICUBIC, fillcolor=(0, 0, 0, 0))
+    alpha = np.asarray(im)[..., 3]
+    if (alpha > 0).mean() < 0.02:
+        return None
+    if alpha.min() == 255:
+        im = im.convert("RGB")             # all of it on the page: nothing to see through
+    path, sha = save_png(im, folder)
+    return {"file": str(path), "sha1": sha, "format": "png", "bbox": list(el["bbox"]),
+            "box": [bx0, by0, bx1, by1], "rotation": rot}
 
 
 def recover_pictures(elements: list[dict], a, px: float, folder) -> None:
-    """A picture element whose download gave nothing usable - `deck_ir.stash_picture`'s `error`
-    (the fetch failed or was refused outright), or bytes that came back but are not a decodable
-    picture at all (`BROKEN_FORMATS`) - is drawn instead from Google's own thumbnail: the pixels of
-    its own box (`thumbnail_picture`), which is always closer to the deck than the hole
-    `pictures_missing` would otherwise report. Whatever crop, recolour, brightness or contrast the
-    API described applied to the file that never arrived, so none of it applies to the thumbnail's
-    own pixels, which already show the picture as the slide draws it; the outline and place are
-    untouched. Left alone (and still `pictures_missing`) without a thumbnail to crop, for a video's
-    poster frame or a linked chart (each has its own fallback already), or a rotated or flipped
-    picture: `thumbnail_picture`'s crop is axis-aligned, so only an upright one is safe this way."""
+    """A picture element adopt has no drawable file for (`picture_unusable`: downloads refused or
+    failed and no export or .pptx gave it, a sign-in or error page instead of the bytes, an SVG) is
+    drawn instead from Google's own thumbnail (`picture_from_thumbnail`), which is always closer to
+    the deck than the hole `adopt.pictures_missing` would otherwise report. Whatever crop, recolour,
+    brightness, contrast, transparency or flip the API described applied to the file that never
+    arrived, so none of it applies to the thumbnail's own pixels, which already show the picture as
+    the slide draws it; what the crop replaced is kept under `thumbnail_of`, and the element says
+    `picture_source: "thumbnail"` (`adopt.pictures_from_thumbnail` reports it, the frame says so).
+    The outline stays (the crop holds only its inner half) unless the page's edge cut the picture.
+
+    Left alone (and still `pictures_missing`) without a thumbnail to crop, and for a video, whose
+    poster frame `settle` already takes from the thumbnail. A linked chart is a picture here like
+    any other: Slides keeps its render the same way. Only for adopt's read of a foreign deck: a
+    sync never signs a picture by such a crop (it never signs like the file)."""
     if a is None:
         return
-    for el in elements:
-        if el.get("kind") != "image" or el.get("video") or el.get("chart") or el.get("wordArt"):
+    for k, el in enumerate(elements):
+        if el.get("kind") != "image" or el.get("video") or el.get("wordArt") or not el.get("bbox"):
             continue
-        if el.get("rotation") or el.get("flip") or not el.get("bbox"):
+        if not picture_unusable(el):
             continue
-        if not (el.get("error") or el.get("format") in BROKEN_FORMATS):
-            continue
-        pic = thumbnail_picture(a, el, [], px, None, folder)
+        pic = picture_from_thumbnail(a, el, elements[k + 1:], px, folder)
         if pic is None:
             continue
-        for k in ("error", "crop", "crop_angle", "opacity", "brightness", "contrast", "recolor"):
-            el.pop(k, None)
-        el["file"], el["sha1"], el["format"] = pic["file"], pic["sha1"], pic["format"]
+        clipped = pic.pop("cut", False)
+        el["thumbnail_of"] = {key: el[key] for key in THUMBNAIL_REPLACES if key in el}
+        outline = el.get("outline")
+        for key in THUMBNAIL_REPLACES:
+            el.pop(key, None)
+        el.update(pic)
+        if outline and not clipped:
+            el["outline"] = outline
         el["picture_source"] = "thumbnail"
 
 
@@ -992,6 +1102,32 @@ def page_texture_picture(a: np.ndarray, region: np.ndarray, folder) -> dict | No
     if not path.exists():
         path.write_bytes(data)
     return {"file": str(path), "sha1": sha, "format": "png"}
+
+
+def background_from_thumbnail(a: np.ndarray, elements: list[dict], px: float, folder) -> dict | None:
+    """A slide's background picture (`stretchedPictureFill`) that never arrived, as the thumbnail
+    shows the page: `page_texture_picture` over what the elements leave of it. The page under every
+    element but a see-through text box is painted back in from around it - an opaque element hides
+    it again anyway, and nothing is left behind twice when one is moved in the source. A text box
+    with no fill is kept but for its letters (`letters_of`, grown over their rims), so the picture
+    behind words is the photo itself, not a smear; painting every element out is not to be had (a
+    full-page picture leaves nothing to paint from). None when too little of the page shows."""
+    from .deck_freeforms import dilate
+    h, w = a.shape[:2]
+    hole = np.zeros((h, w), dtype=bool)
+    texts = []
+    for e in elements:
+        if not e.get("bbox"):
+            continue
+        if e["kind"] == "text" and not e.get("fill") and not e.get("fill_gradient") and not e.get("wordart"):
+            texts.append(e)
+            continue
+        a0, b0, a1, b1 = px_box(e["bbox"], px, w, h, -MARGIN_PX)
+        hole[b0:b1, a0:a1] = True
+    letters = letters_of(a.astype(np.float32), 0, 0, texts, px, w, h)
+    if letters.any():
+        hole |= dilate(letters, 2)
+    return page_texture_picture(a, ~hole, folder)
 
 
 def page_gradient(a: np.ndarray, region: np.ndarray, flat_colour: str | None, px: float):

@@ -229,8 +229,14 @@ needs none of this: adopt copies the fonts it set into the source tree's `fonts/
 
 **Pictures can come with the deck too.** A foreign deck's pictures are its `contentUrl`s, and the
 Drive export that stands in for them needs a `drive.file` token the deck was opened with, which a
-deck adopt is only pointed at rarely has. With downloads refused both fail and the frames go
-without (`data["pictures_missing"]`). `deck_adopt(pptx=...)` (CLI: `adopt --pptx`) takes the deck
+deck adopt is only pointed at rarely has. With downloads refused both fail, and each picture is
+drawn from its slide's thumbnail instead (`deck_fills.recover_pictures`: the displayed box cut at
+the thumbnail's 1600 px, a turned picture sampled back upright and keeping its turn, one partly off
+the page cut to the part on it, words drawn over it painted out; a background picture is the page
+around what stands on it, `deck_fills.background_from_thumbnail`), its frame saying
+`% picture from the slide thumbnail` and the report `data["pictures_from_thumbnail"]`. Only a slide
+with no thumbnail goes without (`% picture left out`, `data["pictures_missing"]`). A sync never
+signs a picture by such a crop: adopt's base carries no picture signatures. `deck_adopt(pptx=...)` (CLI: `adopt --pptx`) takes the deck
 as the person downloaded it (File > Download > Microsoft PowerPoint), a ref or content: its
 pictures are paired with the read deck page by page as an export's are (`deck_pictures`), used
 before any download is tried, and no Drive export is made. A `.json` deck pairs them through the

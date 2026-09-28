@@ -173,19 +173,23 @@ per attempt. Say so before you start one; do not start two.
   a file only the person has: ask for the fonts named there (.ttf, .otf, .ttc, .woff or .woff2,
   any file names) and adopt again with `fonts=[...]` into a new `tex` path. Do not look for the
   fonts on the web yourself. A file that could not be used is a warning at `where: "fonts"`.
-* A picture the deck would not give (downloads refused, or a format LaTeX cannot include) is left
-  out of the source, its frame marked with a `% picture left out` comment where it went. They are
-  in `data["pictures_missing"]` (slide, alt text, why) and warnings at `where: "pictures"`: tell
-  the person which slides lack a picture; never report such a source as complete. The fix is the
-  deck as a .pptx the person downloads (File > Download > Microsoft PowerPoint): pass it as
-  `pptx=` (a ref or the file as content) and adopt again into a new `tex` path. Its pictures need
-  no download; `data["pptx_pictures"]` says how many of the deck's it held (0: another deck, or a
-  deck changed since - ask for a fresh download).
-* A picture whose own download gave nothing usable (a sign-in page, a dead link's error page, not
-  a decodable image at all) still made it into the source when a thumbnail was read: a crop of
-  Google's own render of the slide, in `data["pictures_from_thumbnail"]` (slide, alt text) and
-  warnings at `where: "pictures"`. Say so - it may be lower-resolution or slightly cropped, not the
-  deck's own file - but it is not missing, and `pictures_missing` does not list it.
+* A picture the deck would not give a usable file for (downloads refused and no export, a sign-in
+  or error page instead of the bytes, a format LaTeX cannot include) is drawn from Google's own
+  render of the slide when that slide's thumbnail was read: a crop at the thumbnail's resolution
+  (1600 px across the page, so a photo is softer than the deck's), with words drawn over it painted
+  out; a turned one keeps its turn, one partly off the page is the part on it, and a slide's
+  background picture is the page around what stands on it. Its frame says
+  `% picture from the slide thumbnail` (`% background from the slide thumbnail`). They are in
+  `data["pictures_from_thumbnail"]` (slide, alt text; `slide background` for a background) and
+  warnings at `where: "pictures"`: say so - not the deck's own file - but they are not missing.
+* Only with no thumbnail for its slide is a picture left out of the source, its frame marked with a
+  `% picture left out` comment where it went. They are in `data["pictures_missing"]` (slide, alt
+  text, why) and warnings at `where: "pictures"`: tell the person which slides lack a picture;
+  never report such a source as complete. For both lists the fix is the deck as a .pptx the person
+  downloads (File > Download > Microsoft PowerPoint): pass it as `pptx=` (a ref or the file as
+  content) and adopt again into a new `tex` path. Its pictures need no download;
+  `data["pptx_pictures"]` says how many of the deck's it held (0: another deck, or a deck changed
+  since - ask for a fresh download).
 * `deck_adopt` needs no Google and no network when the deck comes as files. Best: `deck=` the
   folder or `.zip` that `python -m beamer2slides deck-files --deck <id> --out <dir> --zip` saved
   where Google can be reached (a ref, or the .zip as content). It holds everything a live adopt

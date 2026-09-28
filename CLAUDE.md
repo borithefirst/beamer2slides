@@ -206,8 +206,10 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   `AgentContext.font_source`), or font files handed to adopt (`--fonts`, `deck_adopt(fonts=)`,
   .ttf/.otf/.ttc/.woff/.woff2 named by their name table, `fontfiles.py`, `adopt.use_fonts`).
   What adopt still stood in for is reported (`ctx.missing_fonts`, agent `data["fonts_missing"]`),
-  and so are pictures the deck would not give (`adopt.pictures_missing`, `data["pictures_missing"]`,
-  a `% picture left out` comment in the frame). A .pptx the person downloaded brings them with no
+  and so are pictures the deck would not give: cropped from the slide's thumbnail
+  (`deck_fills.recover_pictures`, turned ones sampled upright; a lost background picture
+  `background_from_thumbnail`; `picture_source`, `data["pictures_from_thumbnail"]`, a `% picture
+  from the slide thumbnail` comment), left out only with no thumbnail (`adopt.pictures_missing`). A .pptx the person downloaded brings them with no
   download (`adopt --pptx`, `deck_adopt(pptx=)`, `LivePictures(pptx=)` taken first, no Drive
   export; a saved target through its presentation.json, `deck_ir.pictures_from_pptx`).
 - **Offline adopt = live adopt** (`deck_files.py`, docs/agent-tools.md "Everything, preloaded"):

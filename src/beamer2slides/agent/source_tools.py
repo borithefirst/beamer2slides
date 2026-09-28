@@ -188,7 +188,7 @@ def deck_adopt(
                                 "Microsoft PowerPoint), a workspace ref or the file itself as content: "
                                 + PARTS["pptx"] + ". Used before any download, so a harness that may "
                                 "not download still gets them. Ask for it when data['pictures_missing'] "
-                                "is not empty. (A deck.json target pairs it through the "
+                                "or data['pictures_from_thumbnail'] is not empty. (A deck.json target pairs it through the "
                                 "presentation.json beside it.)"] = None,
     thumbnails: Annotated[list[str] | None, "With a deck given as files: " + PARTS["thumbnails"] + ". "
                                             "Pictures (refs or content) or folders of them, named by "
@@ -301,13 +301,13 @@ def _fonts_report(j: Job, found: dict) -> None:
         j.warn(f"slide {p['slide']}: picture {p['alt']!r} is not in the source ({p['why']})", where="pictures")
     if "pptx_pictures" in found:
         j.data["pptx_pictures"] = found["pptx_pictures"]
-    if any(not p["why"].startswith("LaTeX can't") for p in pictures) and not found.get("pptx_pictures"):
+    # A picture whose own file never came (downloads refused, a sign-in page, a dead link) still
+    # made it in, cropped from Google's thumbnail instead: said, so a lower-resolution or slightly
+    # cropped picture is not mistaken for a faithful one. A .pptx brings the files of both kinds.
+    recovered = found.get("pictures_from_thumbnail") or []
+    if (recovered or any(not p["why"].startswith("LaTeX can't") for p in pictures)) and not found.get("pptx_pictures"):
         j.suggest("ask the person to download the deck as .pptx (File > Download > Microsoft PowerPoint) "
                   "and adopt again with pptx=... (into a new tex path): its pictures need no download")
-    # A picture whose own download gave nothing usable (a sign-in page, a dead link) still made it
-    # in, cropped from Google's thumbnail instead: said, so a lower-resolution or slightly cropped
-    # picture is not mistaken for a faithful one.
-    recovered = found.get("pictures_from_thumbnail") or []
     if recovered:
         j.data["pictures_from_thumbnail"] = [dict(p) for p in recovered]
         for p in recovered:

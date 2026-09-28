@@ -66,7 +66,7 @@ PARTS = {
 WITHOUT = {
     "thumbnails": "fills the API does not report are not read (flat colours instead of gradients) and "
                   "frames are scored by residuals alone",
-    "pictures": "pictures come from the .pptx or a download, else are left out",
+    "pictures": "pictures come from the .pptx or a download, else are cropped from the thumbnails",
     "google_fonts": "typefaces come from this machine, a font_source or a download, else stand-ins "
                     "(lines break elsewhere)",
 }

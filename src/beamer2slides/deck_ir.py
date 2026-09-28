@@ -1075,6 +1075,12 @@ def deck_ir(pres: dict, pdf_size: list[float] | None = None, base: dict | None =
             # adopt draws it (a stretched picture fill is the whole page); pull never does, the
             # source it refines already draws whatever the converter baked into it
             got = stash_picture(picture, fetch, images)
+            if thumb is not None and deck_fills.picture_unusable(got):
+                # none came: the page as the thumbnail shows it around what stands on it
+                page = deck_fills.background_from_thumbnail(thumb, elements, px, images)
+                if page:
+                    got = page
+                    slides[-1]["background_source"] = "thumbnail"
             slides[-1]["background_file"] = got.get("file")
     if foreign:
         drop_ids = decide_drops(inherited_votes, inherited_groups)
@@ -1740,11 +1746,13 @@ def given_thumbnails(pres: dict, files, log=print):
 
 
 def pictures_from_pptx(target: dict, pres: dict, data: bytes, images: Path) -> tuple[int, int]:
-    """Give a saved IR the pictures it was read without, out of a .pptx of the same deck (File >
-    Download): an image element by the object it was read from (`object`, a layout's own for an
+    """Give a saved IR the pictures it was read without - or read only as a crop of the slide's
+    thumbnail (`picture_source`/`background_source` "thumbnail", `deck_fills.recover_pictures`) -
+    out of a .pptx of the same deck (File > Download): an image element by the object it was read from (`object`, a layout's own for an
     inherited one), a slide's background picture by its URL. `pres` is the `presentations.get`
     the IR was read from - the .pptx is paired with it page by page (`exported_pictures`), so a
     download of another revision gives only the pages that still pair. -> (filled, held)."""
+    from . import deck_fills
     from .deck_pictures import exported_pictures, picture_urls
     exported = exported_pictures(data, pres)
     by_url = {u: oid for oid, u in picture_urls(pres).items()}
@@ -1758,9 +1766,17 @@ def pictures_from_pptx(target: dict, pres: dict, data: bytes, images: Path) -> t
     def fill(node) -> int:
         n = 0
         if isinstance(node, dict):
-            if node.get("kind") == "image" and not node.get("video") and lacks(node.get("file")):
+            stand_in = node.get("picture_source") == "thumbnail"
+            if node.get("kind") == "image" and not node.get("video") and (lacks(node.get("file")) or stand_in):
                 got = put(node.get("object"))
                 if got.get("file"):
+                    if stand_in:
+                        # the thumbnail's crop gives way to the file, drawn as the deck draws it again
+                        # (its crop, turn, outline: `deck_fills.recover_pictures` kept them)
+                        for key in deck_fills.THUMBNAIL_REPLACES:
+                            node.pop(key, None)
+                        node.update(node.pop("thumbnail_of", {}))
+                        node.pop("picture_source", None)
                     node.pop("error", None)
                     node.update(got)
                     n += 1
@@ -1772,10 +1788,11 @@ def pictures_from_pptx(target: dict, pres: dict, data: bytes, images: Path) -> t
     filled = 0
     for s in target.get("slides", []):
         filled += fill(s.get("elements", []))
-        if s.get("background_picture") and lacks(s.get("background_file")):
+        if s.get("background_picture") and (lacks(s.get("background_file")) or s.get("background_source")):
             got = put(by_url.get(s["background_picture"]))
             if got.get("file"):
                 s["background_file"] = got["file"]
+                s.pop("background_source", None)
                 filled += 1
     return filled, len(exported)
 

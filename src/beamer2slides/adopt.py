@@ -1032,8 +1032,9 @@ UNINCLUDABLE = (".svg", ".emf", ".wmf", ".img")
 def pictures_missing(target: dict) -> list[dict]:
     """The deck's pictures the source is written without, {slide, alt, why} each: the deck would
     not give the file (`--no-downloads`, a harness whose fetcher refuses and a Drive export that
-    failed too: `deck_ir.stash_picture`'s `error`) or LaTeX cannot include it. Such a frame simply
-    lacks the picture, which nothing but this list would say (saudi-cats: 11 photos gone quietly)."""
+    failed too: `deck_ir.stash_picture`'s `error`) or LaTeX cannot include it, and no thumbnail of
+    its slide stood in (`pictures_from_thumbnail` lists those). Such a frame simply lacks the
+    picture, which nothing but this list would say (saudi-cats: 11 photos gone quietly)."""
     def images(node):
         if isinstance(node, dict):
             if node.get("kind") == "image" and not node.get("video"):
@@ -1082,12 +1083,18 @@ def missing_pictures_lines(missing: list[dict]) -> list[str]:
     return lines
 
 
+#: the comments a frame carries where a picture is a crop of the slide's thumbnail
+THUMBNAIL_PICTURE_NOTE = "% picture from the slide thumbnail"
+THUMBNAIL_BACKGROUND_NOTE = "% background from the slide thumbnail"
+
+
 def pictures_from_thumbnail(target: dict) -> list[dict]:
     """The deck's pictures the source carries only as a crop of Google's thumbnail
-    (`deck_fills.recover_pictures`): their own download gave nothing usable - a network refusal,
-    an expired signed URL, a sign-in or error page instead of the bytes - and the slide's own render
-    stood in for it. Reported honestly (`pictures_missing` would otherwise have left them out
-    silently), {slide, alt} each."""
+    (`deck_fills.recover_pictures`, a background `deck_fills.background_from_thumbnail`): no file
+    for them could be had - downloads refused and no export or .pptx gave it, a sign-in or error
+    page instead of the bytes, a format LaTeX cannot include - and the slide's own render stood in
+    at its resolution. Reported honestly next to `pictures_missing` (which no longer lists them),
+    {slide, alt} each; a layout's or master's picture once, with its `layout`, as there."""
     def images(node):
         if isinstance(node, dict):
             if node.get("kind") == "image" and node.get("picture_source") == "thumbnail":
@@ -1099,8 +1106,20 @@ def pictures_from_thumbnail(target: dict) -> list[dict]:
             for v in node:
                 yield from images(v)
 
-    return [{"slide": n, "alt": el.get("alt") or ""}
-            for n, s in enumerate(target["slides"], 1) for el in images(s.get("elements", []))]
+    out, seen = [], set()
+    for n, s in enumerate(target["slides"], 1):
+        if s.get("background_source") == "thumbnail":
+            out.append({"slide": n, "alt": "slide background"})
+        for el in images(s.get("elements", [])):
+            got = {"slide": n, "alt": el.get("alt") or ""}
+            if el.get("inherited"):
+                key = (el["inherited"], json.dumps((el.get("thumbnail_of") or el).get("bbox")), got["alt"])
+                if key in seen:
+                    continue
+                seen.add(key)
+                got["layout"] = el["inherited"]
+            out.append(got)
+    return out
 
 
 def thumbnail_pictures_lines(recovered: list[dict]) -> list[str]:
@@ -1108,10 +1127,11 @@ def thumbnail_pictures_lines(recovered: list[dict]) -> list[str]:
     if not recovered:
         return []
     lines = [f"{len(recovered)} picture(s) came from Google's thumbnail, not their own download "
-             f"(the deck gave no usable bytes for them):"]
+             f"(the deck gave no usable bytes for them; a .pptx of the deck, --pptx, brings the files):"]
     for r in recovered:
         alt = f" {r['alt']!r}" if r["alt"] else ""
-        lines.append(f"  slide {r['slide']}{alt}")
+        theme = f" (its layout's or master's {r['layout']})" if r.get("layout") else ""
+        lines.append(f"  slide {r['slide']}{alt}{theme}")
     return lines
 
 
@@ -3684,6 +3704,11 @@ def element_latex(el: dict, ctx: Context, tree: Path | None = None, ind: str = "
         pic = picture_of(el, tree)
         if pic is not None:
             ctx.packages.add(TEXTPOS)
+            if el.get("picture_source") == "thumbnail":
+                # its own file never came: a crop of Google's render of the slide stands in
+                # (`deck_fills.recover_pictures`; `pictures_from_thumbnail` says it in the report)
+                alt = " ".join((el.get("alt") or "").split())[:60]
+                out.append(f"{ind}{THUMBNAIL_PICTURE_NOTE}{': ' + alt if alt else ''}")
             out.append(slide_picture(el, pic, ctx, ind).rstrip("\n"))
         else:
             # where it goes, for the person who puts it back (`pictures_missing` says why)
@@ -3838,6 +3863,9 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
     out = ["\\begin{frame}" + opts]
     if plan:
         out += plan.header()
+    if s.get("background_source") == "thumbnail":
+        # said where a person reading the source looks (`pictures_from_thumbnail` says it in the report)
+        out.append(f"  {THUMBNAIL_BACKGROUND_NOTE}")
     # The deck lists a page's elements in z-order, and a textblock written later is drawn on top:
     # in reading order a block's body panel, starting 2 pt under its title, was painted over it.
     for k, piece in enumerate(pieces):
@@ -4314,7 +4342,7 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
     of those files), `missing` (the fonts the deck names that were set in something else,
     `font_preamble`), `pictures_missing` (the pictures the source is written without,
     `pictures_missing`), `pictures_from_thumbnail` (pictures drawn from Google's thumbnail because
-    their own download gave nothing usable, `pictures_from_thumbnail`) and, with a `pptx`,
+    no usable file for them could be had, `pictures_from_thumbnail`) and, with a `pptx`,
     `pptx_pictures` (how many pictures of the deck it held)."""
     tex = Path(tex).resolve()
     work = Path(work).resolve() if work else tex.parent / "out" / "adopt"
