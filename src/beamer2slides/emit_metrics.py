@@ -1,0 +1,494 @@
+"""Slides' measures as emit uses them: calibrated font substitutes and their advances (FontMapper),
+a text box's line geometry, and bullets.
+"""
+
+import json
+import re
+import unicodedata
+from importlib import resources
+
+from .fonts import font_info, google_font
+from .gslides import pt
+
+
+# Found through the package, never through the checkout: an installed wheel, a zip import and
+# a build that stages sources elsewhere all keep the data beside the module, not beside __file__.
+CALIBRATION_DIR = resources.files("beamer2slides") / "calibration"
+CALIBRATION = CALIBRATION_DIR / "fonts.json"
+SLIDE_W = 720.0
+# Slides text box model, measured by tools/calibrate.py and the spacing probes
+# (docs/calibration.md).
+BASELINE_A = 6.48    # box top -> first baseline = A + ASCENT_EM * size
+ASCENT_EM = 0.968
+LINE_EM = 1.2        # baseline pitch at lineSpacing 100 (before pixel snapping)
+PX_PT = 0.75         # Slides snaps line pitches to whole CSS pixels
+DESCENT_EM = LINE_EM - ASCENT_EM
+PAD_X = 6.7          # box edge -> text start
+BULLET_GAP = 1.9     # bullet glyph's right edge sits this far before indentFirstLine
+PPTX_TITLE_DY = 3.9  # title placeholders of pptx-imported decks have a smaller top inset
+MIDDLE_BASELINE_EM = ASCENT_EM - LINE_EM / 2  # contentAlignment MIDDLE: baseline below the box middle (tools/probe_middle.py: 0.362)
+SOFT_BREAK = chr(11)  # vertical tab: a line break inside a paragraph
+
+FONT_FOR_FAMILY = {"sans": "Lato", "serif": "PT Serif", "mono": "Roboto Mono"}
+# Advance widths in Slides text (Lato and its fallback fonts), measured by tools/probe_symbols.py.
+SYMBOL_ADVANCE_EM = {
+    "=": 0.58, "+": 0.58, "−": 0.58, "<": 0.58, ">": 0.58, "≤": 0.58, "≥": 0.58, "×": 0.58, "·": 0.271,
+    "/": 0.313, "∑": 0.682, "∏": 0.682, "∫": 0.397, "∈": 0.984, "∉": 0.492, "⊂": 0.981, "⊆": 0.981,
+    "∪": 0.981, "∩": 0.717, "→": 0.998, "←": 0.998, "⇒": 0.981, "⇔": 0.981, "≈": 0.577, "≠": 0.577,
+    "±": 0.577, "∞": 0.682, "ℝ": 0.633, "ℕ": 0.65, "ℤ": 0.534, "ℚ": 0.65, "ℂ": 0.65, "α": 0.573,
+    "β": 0.57, "γ": 0.496, "δ": 0.552, "ε": 0.443, "θ": 0.552, "λ": 0.496, "μ": 0.573, "π": 0.615,
+    "σ": 0.612, "φ": 0.643, "ω": 0.777, "Δ": 0.664, "Σ": 0.615, "Ω": 0.742, "∂": 0.577, "∇": 0.981,
+    "′": 0.186, "∀": 0.981, "∃": 0.981, "∧": 0.981, "∨": 0.981, "⊥": 0.981, "∥": 0.981, "∘": 0.489,
+    "…": 0.724, " ": 0.19,
+}
+MATH_SPACE_EM = 0.278  # TeX's \thickmuskip (5 mu) around relations
+CMTT_ADVANCE_EM, ROBOTO_MONO_ADVANCE_EM = 0.525, 0.6
+
+BULLET_PRESETS = {
+    "number": "NUMBERED_DIGIT_ALPHA_ROMAN",
+    "number_parens": "NUMBERED_DIGIT_ALPHA_ROMAN_PARENS",
+}
+# A preset's three glyphs are those of nesting levels 0, 1, 2; deeper levels repeat ● ○ ■
+# whatever the preset. A bullet shape is a preset plus the level showing it (bullet_level).
+# Ink height and the gap between ink and indentFirstLine are per em of the bullet's size
+# (tools/probe_bullets.py).
+BULLET_SHAPES = {  # shape: (preset, level, ink height em, gap em)
+    "disc": ("BULLET_DISC_CIRCLE_SQUARE", 0, 0.413, 0.08),
+    "circle": ("BULLET_DISC_CIRCLE_SQUARE", 1, 0.43, 0.08),
+    "square": ("BULLET_DISC_CIRCLE_SQUARE", 2, 0.45, 0.07),
+    "open_square": ("BULLET_CHECKBOX", 0, 0.69, 0.155),  # ❏
+    "triangle": ("BULLET_ARROW3D_CIRCLE_SQUARE", 0, 0.525, 0.07),  # ➢: presets have no ▶
+    "star": ("BULLET_STAR_CIRCLE_SQUARE", 0, 0.81, 0.07),
+    "diamond": ("BULLET_DIAMOND_CIRCLE_SQUARE", 0, 0.81, 0.08),
+    "open_diamond": ("BULLET_DIAMONDX_HOLLOWDIAMOND_SQUARE", 1, 0.87, 0.06),
+}
+GLYPH_SHAPES = {**dict.fromkeys("▶►▸‣", "triangle"), **dict.fromkeys("•●", "disc"), **dict.fromkeys("◦○", "circle"),
+                **dict.fromkeys("■▪", "square"), "□": "open_square", **dict.fromkeys("★⋆", "star"),
+                **dict.fromkeys("◆♦", "diamond"), **dict.fromkeys("◇⋄", "open_diamond")}
+
+
+# Width per em of Computer Modern's optical sizes relative to the 10 pt cut, from the glyph
+# advances of the Type 1 fonts (cmss8.pfb ... cmss17.pfb) over a sample sentence. EC and
+# Latin Modern share these metrics. CM Sans has no cut below 8 pt, EC does (cm-super's
+# sfss0500-sfss0700, beamer's \tiny footlines): without them a 6 pt footline was taken for the
+# 8 pt cut and came out ~10% narrower than the PDF's.
+DESIGN_WIDTH = {
+    "sans": {5: 1.2814, 6: 1.1733, 7: 1.1073, 8: 1.0623, 9: 1.0273, 10: 1.0, 12: 0.9753, 17: 0.9377},
+    "serif": {5: 1.3758, 6: 1.2291, 7: 1.1424, 8: 1.0629, 9: 1.0277, 10: 1.0, 12: 0.9786, 17: 0.9136},
+    "mono": {8: 1.0114, 9: 1.0, 10: 1.0, 12: 0.979},
+}
+# A small optical cut is wider per em than the 10 pt one, not taller (cmr5's x-height is cmr10's
+# per em), so a substitute sized to its width grows its letters as much: a 5 pt LMRoman5 footline
+# (1.38x) came out 1.4 times as tall as the PDF's and filled its bar. The width is matched up to
+# the small-caps compromise (SMALL_CAPS_WIDTH) and no further: at 5 pt the line comes out ~18%
+# narrower than the PDF's and ~13% taller. 8 and 9 pt cuts (1.03-1.06) are matched in full.
+OPTICAL_WIDTH_MAX = 1.13
+# A small optical cut is heavier per em as well: the stem of CM Sans's l and I, per em, relative to
+# its 10.95 pt cut (cm-super's sfss*.pfb) is 1.99 at 5 pt, 1.38-1.52 at 6 pt, 1.17 at 7 pt, 1.10 at
+# 8 pt, 1.06 at 9 pt and 0.80 at 14.4 pt; Lato Bold's is 1.38-1.39 times its Regular's. A sans cut
+# nearer the Bold than the Regular (6 pt and less: beamer's \tiny footlines, frame counters)
+# was set heavier than regular (wave 4: Lato 800, which Slides draws as its Bold). Measured on
+# the r8 (Lato 600, drawn Regular) and r9 (800) renders against the PDF's, stroke width as 2 x ink
+# area / ink perimeter at 1600 px over eight footline boxes of control_a2, control_c1 and sci_v1:
+# PDF 1.85 px, Lato Regular 1.75 (-6%), Lato Bold 2.35 (+27%); body text (CMSS 10.95 against
+# Lato Regular) 0.92 of Lato's. Bold was too heavy on every slide, and a \tiny reference block
+# lost the contrast with its bold volume numbers (sci_v1 s8). No served medium lands between:
+# Slides draws Lato 500/600 as Regular, and Source Sans 3 600, width-matched, is +31% on Lato
+# Regular's stroke (probe_font_weights: 4.52 px at 24 pt against Lato's 3.58, 4% narrower) - as
+# heavy as the Bold. So the cut is drawn Regular, as the nearest face. It is written at 600 all
+# the same: Slides draws that weight as Regular and reads it back as written (`bold: false`,
+# weight 600), which the converter writes nowhere else - deck_ir takes it for a 6 pt sans cut,
+# whose width it inverts as such (OPTICAL_WIDTH_MAX; as CM's 8 pt cut it came back 6% large).
+# Written without a `bold` field: the API applies `bold` after the weight, and a `bold: false`
+# could take it back to 400.
+OPTICAL_WEIGHT_DESIGN = {"sans": 6.0}
+OPTICAL_WEIGHT = 600
+# Weights read back as a small sans cut, not bold: 600 (drawn Regular), and 800 (drawn Bold),
+# which the decks converted between wave 4 and wave 5 wrote.
+OPTICAL_WEIGHTS_READ = (OPTICAL_WEIGHT, 800)
+# The weights Slides draws with Lato's Bold face (probe_font_weights: 500 and 600 are Regular).
+DRAWN_BOLD_WEIGHT = 700
+
+
+def optical_width(family: str, design: float) -> float:
+    """How much wider per em than its 10 pt cut the size factor takes a run's optical size to be."""
+    return min(OPTICAL_WIDTH_MAX, design_width(DESIGN_WIDTH.get(family, DESIGN_WIDTH["sans"]), design))
+
+
+def u16(text: str) -> int:
+    """Length in UTF-16 code units, which is what every Slides text index counts: an astral
+    character (𝔼 U+1D53C from amssymb's \\mathbb, 𝛽 U+1D6FD) is two. Counting code points put
+    every style range after one a unit early and split the next one's surrogate pair (two tofu)."""
+    return len(text.encode("utf-16-le", "surrogatepass")) // 2
+
+
+# XML 1.0 refuses C0 controls other than tab, newline and return, lone surrogates and U+FFFE/F:
+# a Type 3 T1 font's raw glyph codes (quotes, dashes, ligatures at 0x10-0x1d) reach alt texts.
+XML_REFUSED = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
+
+
+def xml_text(text: str) -> str:
+    """A string lxml accepts as an attribute value (build_pptx): refused characters dropped."""
+    return XML_REFUSED.sub("", text)
+
+
+# Small caps (tools/probe_text_fit_fonts.py): Slides draws a smallCaps lowercase letter as its
+# capital at 0.70 of the size (PT Serif and Lato alike, advance and ink height), where TeX's
+# CMCSC10 draws it at 0.755 - and CMCSC is an extended face, its capitals 8% wider than CMR's,
+# while PT Serif's are 11% narrower. A CMCSC line came out 0.777 of the PDF's width; at the
+# serif size these substitute small caps are 1.27-1.30 times too narrow over any sentence
+# (probe advances + CMCSC10.afm), so the size makes up the width, as the size factors do for
+# every other face. (Only for Computer Modern / EC / Latin Modern small caps, the ones measured.)
+# The full 1.28 made the capitals ~30% taller than CMCSC's; 1.13 (about the square root) is the
+# chosen compromise: the line comes out ~12% narrower than the PDF's and ~13% taller.
+SMALL_CAPS_WIDTH = {"serif": 1.13}
+
+# Computer Modern's own advance widths, kerning pairs and interword spaces (em; the AFM and TFM
+# files, tools/cm_advances.py; EC and Latin Modern share them), per 10 pt face. With Slides'
+# advances (ADVANCES) they predict how wide a run comes out in Slides against the PDF - within
+# 0.5% of Google's renderer on the calibration rows and the text-fit torture lines.
+CM_ADVANCES = json.loads((CALIBRATION_DIR / "cm_advances.json").read_text(encoding="utf-8"))["fonts"]
+CM_FACE = {("sans", False, False): "cmss10", ("sans", True, False): "cmssbx10", ("sans", False, True): "cmssi10",
+           ("sans", True, True): "cmssbx10",  # beamer's bold italic sans is CMSSBX
+           ("serif", False, False): "cmr10", ("serif", True, False): "cmbx10", ("serif", False, True): "cmti10",
+           ("serif", True, True): "cmbxti10"}
+CM_LIGATURES = (("ffi", "ﬃ"), ("ffl", "ﬄ"), ("ff", "ﬀ"), ("fi", "ﬁ"), ("fl", "ﬂ"))
+# TeX's space factor codes (plain/LaTeX \nonfrenchspacing): a space after a factor of 2000 or
+# more gets the font's extra space; a capital (999) keeps "A." from ending a sentence.
+SPACE_FACTOR = {".": 3000, "?": 3000, "!": 3000, ":": 2000, ";": 1500, ",": 1250}
+KEEPS_SPACE_FACTOR = ")]'’”"
+# Numbers: Computer Modern's digits are 0.5 em where Slides' Lato draws tabular digits at
+# 0.577 em, 13% wider after the size correction, which is calibrated on sentences (and they
+# stand at cap height, 7% taller than CM's). A run that is only a number - a table cell, a
+# number column, a frame counter - is set at the size that gives it the PDF's width
+# (FontMapper.shape_ratio); a number inside a sentence keeps the sentence's size.
+DIGITS = "0123456789"
+NUMBER_CHARS = DIGITS + ",.:%/-()+"
+# Any other run: the calibrated factor makes an average sentence as wide as the PDF's, and a
+# text whose letters are unlike a sentence's is off by what its own advances say (serif capitals
+# 0.87-0.92, a line of w 1.10). Short texts vary the most - across the 84 test PDFs, a word or a
+# label of under 10 letters spreads over 0.92-1.14 - so only a run of at least SHAPE_MIN_CHARS
+# counted characters whose width is predicted off by more than SHAPE_TOL is resized: no run of
+# 15 characters or more in the test decks is (the widest ordinary one is 6.3% off, "Somewhere
+# University"), and text_fit calls a line off at 8%. Ordinary prose keeps the deck-wide size.
+SHAPE_MIN_CHARS = 15
+SHAPE_TOL = 0.07
+# The sentences the size factors were calibrated on (tools/calibrate.py WIDTH_ROWS): a run is
+# judged against them in its own face, so bold and italic keep their half correction.
+SHAPE_REFERENCE = ("The quick brown fox jumps over the lazy dog",
+                   "Another first level item that is long enough to wrap",
+                   "Lorem ipsum dolor sit amet, consectetur adipiscing elit")
+SHAPE_TITLE_REFERENCE = ("Itemize, nested and frame titles",)  # the title factor's row (CMSS12)
+# Dots set apart from words: \dotfill and \dots leaders, \ldots (". . ." in the text layer) and
+# "...". TeX sets them as fixed boxes or thin spaces, not as sentence ends; read as periods with
+# interword and sentence spaces they made a leader line look 30-40% too wide for Slides, and the
+# run was set 1.3-1.7 times too large. Their width is neither the PDF's letters' nor a sentence's,
+# so they count on neither side, with the spaces around them (advance_widths).
+LEADER = re.compile(r"[   ]*\.(?:[   ]*\.)+[   ]*")
+STYLE_KEY = {(False, False): "regular", (True, False): "bold", (False, True): "italic", (True, True): "bold_italic"}
+SLANTED = re.compile(r"CMB?X?SL\d|SFSL\d|SFBL\d|LMROMANSLANT")  # slanted roman: upright widths
+
+
+def cm_face(run: dict) -> str | None:
+    """The CM_ADVANCES face a Computer Modern (EC, Latin Modern) run is set in, or None."""
+    if font_info(run["font"]).design_size is None:
+        return None
+    slanted = bool(SLANTED.match(re.sub(r"[^A-Z0-9]", "", run["font"].split("+", 1)[-1].upper())))
+    return CM_FACE.get((run["family"], bool(run["bold"]), bool(run["italic"]) and not slanted))
+
+
+def _advance(table: dict, ch: str) -> float | None:
+    """A character's advance in a table, or its base letter's (é -> e: an accent adds no width)."""
+    w = table.get(ch)
+    if w is None and ch.isalpha():
+        w = table.get(unicodedata.normalize("NFD", ch)[0])
+    return w
+
+
+def advance_widths(text: str, cm: dict, slides: dict) -> tuple[float, float, int, int]:
+    """(Slides em, PDF em, characters counted, characters skipped) of a text set in a Computer
+    Modern face (`cm`, a CM_ADVANCES entry) and in its Slides substitute (`slides`, an ADVANCES
+    entry). The PDF side is what TeX set: ligatures, kerning pairs, interword space and the extra
+    space after a sentence. A character either table lacks counts on neither side, and so do dot
+    leaders and ellipses (LEADER): each of their dots is a skipped character."""
+    for seq, lig in CM_LIGATURES:
+        if lig in cm["advances"]:
+            text = text.replace(seq, lig)
+    text = LEADER.sub(lambda m: "\0" * m.group().count("."), text)
+    s_em = p_em = 0.0
+    counted = skipped = 0
+    factor, prev = 1000, None
+    for ch in text:
+        if ch == "\0":  # a leader's dot
+            skipped += 1
+            factor, prev = 1000, None
+            continue
+        if ch in "  ":
+            s_em += slides.get(" ", 0.0)
+            p_em += cm["space"] + (cm["extra_space"] if factor >= 2000 else 0.0)
+            factor, prev = 1000, None
+            continue
+        parts = next((seq for seq, lig in CM_LIGATURES if lig == ch), ch)  # Slides sets no ligature
+        p = _advance(cm["advances"], ch)
+        ws = [_advance(slides, c) for c in parts]
+        if p is None or None in ws:
+            skipped += len(parts)
+            prev = None
+            continue
+        p_em += p + (cm["kerns"].get(prev + ch, 0.0) if prev else 0.0)
+        s_em += sum(ws)
+        counted += len(parts)
+        prev = ch
+        if ch.isupper():
+            factor = 999
+        elif ch in SPACE_FACTOR:
+            factor = SPACE_FACTOR[ch] if factor >= 1000 else 1000
+        elif ch not in KEEPS_SPACE_FACTOR:
+            factor = 1000
+    return s_em, p_em, counted, skipped
+
+
+def design_width(table: dict[int, float], design: float) -> float:
+    keys = sorted(table)
+    if design <= keys[0]:
+        return table[keys[0]]
+    if design >= keys[-1]:
+        return table[keys[-1]]
+    hi = next(k for k in keys if k >= design)
+    lo = max(k for k in keys if k <= design)
+    if hi == lo:
+        return table[lo]
+    t = (design - lo) / (hi - lo)
+    return table[lo] + t * (table[hi] - table[lo])
+
+
+class FontMapper:
+    """TeX font + size -> Slides font family + size with calibrated width correction."""
+
+    def __init__(self):
+        self.factors = {}  # family -> (running text factor, title factor)
+        self.style = {}    # family -> {"bold": ratio, "italic": ratio} relative to running text
+        self._reference = {}  # reference_ratio's answers
+        for family, path in (("sans", CALIBRATION), ("serif", CALIBRATION_DIR / "fonts_serif.json")):
+            cal = json.loads(path.read_text(encoding="utf-8"))["fonts"]
+            ratios = cal[FONT_FOR_FAMILY[family]]["width_ratio"]
+            self.factors[family] = (ratios["text_mean"], ratios["by_row"]["title"])
+            self.style[family] = {k: ratios["relative_to_text"][k] for k in ("bold", "italic")}
+
+    def text_style(self, run: dict, scale: float) -> tuple[dict, list[str]]:
+        """Font part of a Slides TextStyle. Google fonts used by the PDF itself keep their
+        family and weight (e.g. Fira Sans Light); TeX fonts get a calibrated substitute."""
+        family, size = self(run, scale)
+        google = google_font(run["font"])
+        if google:
+            return ({"weightedFontFamily": {"fontFamily": google[0], "weight": google[1]},
+                     "fontSize": pt(size), "italic": google[2] or run["italic"]},
+                    ["weightedFontFamily", "fontSize", "italic"])
+        if self.optical_weight(run):
+            return ({"weightedFontFamily": {"fontFamily": family, "weight": OPTICAL_WEIGHT}, "fontSize": pt(size),
+                     "italic": run["italic"]},
+                    ["weightedFontFamily", "fontSize", "italic"])
+        return ({"fontFamily": family, "fontSize": pt(size), "bold": run["bold"], "italic": run["italic"]},
+                ["fontFamily", "fontSize", "bold", "italic"])
+
+    @staticmethod
+    def optical_weight(run: dict) -> bool:
+        """Whether a regular run is written at OPTICAL_WEIGHT for its small optical cut
+        (OPTICAL_WEIGHT_DESIGN)."""
+        if run["bold"] or google_font(run["font"]) or run["family"] not in OPTICAL_WEIGHT_DESIGN:
+            return False
+        design = font_info(run["font"]).design_size
+        return design is not None and design <= OPTICAL_WEIGHT_DESIGN[run["family"]]
+
+    def face(self, run: dict) -> str:
+        """The ADVANCES style Slides draws a run in: a run written at OPTICAL_WEIGHT takes the bold
+        face only where Slides draws that weight bold (DRAWN_BOLD_WEIGHT)."""
+        heavy = OPTICAL_WEIGHT >= DRAWN_BOLD_WEIGHT and self.optical_weight(run)
+        return STYLE_KEY[(bool(run["bold"]) or heavy, bool(run["italic"]))]
+
+    def width_ratio(self, font: str, family: str, bold: bool, italic: bool) -> float:
+        """Expected Slides width / PDF width of a run after the size correction: bold and
+        italic are only half corrected (see __call__)."""
+        if google_font(font) or family not in self.style:
+            return 1.0
+        ratio = 1.0
+        for key, on in (("bold", bold), ("italic", italic)):
+            if on:
+                rel = self.style[family][key]
+                ratio *= rel / (1 + (rel - 1) / 2)
+        return ratio
+
+    def __call__(self, run: dict, scale: float) -> tuple[str, float]:
+        google = google_font(run["font"])
+        if google:  # same font in Slides: no width correction
+            return google[0], round(run["size"] * scale, 1)
+        info = font_info(run["font"])
+        family = FONT_FOR_FAMILY.get(run["family"], "Lato")
+        design = info.design_size or 10
+        if run["family"] == "mono":
+            factor = ROBOTO_MONO_ADVANCE_EM / (CMTT_ADVANCE_EM * design_width(DESIGN_WIDTH["mono"], design))
+        else:
+            text, title = self.factors.get(run["family"], self.factors["sans"])
+            if run["family"] != "serif" and 11.5 <= design < 14:
+                factor = title  # calibrated directly on CMSS12 titles
+            else:
+                # Other optical sizes: CM's small cuts are wider per em (up to OPTICAL_WIDTH_MAX),
+                # its large ones narrower.
+                factor = text / optical_width(run["family"], design)
+            # Bold and italic substitutes run 4-8% narrower than CM's; correct half of that, so
+            # widths come closer without emphasised words looking visibly larger.
+            style = self.style.get(run["family"], self.style["sans"])
+            for key in ("bold", "italic"):
+                if run[key]:
+                    factor *= 1 + (style[key] - 1) / 2
+            if info.design_size is not None:  # Computer Modern metrics (CM, EC, Latin Modern)
+                if run.get("smallcaps"):
+                    factor /= SMALL_CAPS_WIDTH.get(run["family"], 1.0)
+                else:
+                    factor *= self.shape_ratio(run, family, factor, design)
+        return family, round(run["size"] * scale / factor, 1)
+
+    def shape_ratio(self, run: dict, family: str, factor: float, design: float) -> float:
+        """How much wider than the PDF's Slides sets this run for its letters, beyond what the
+        size factor corrects; 1.0 when that is within tolerance (ordinary prose, a word), not
+        known (a character neither table has) or not this run's to fix (scripts, holes).
+
+        A run that is only a number (a digit, nothing but digits and a number's punctuation)
+        gets the whole ratio at the size `factor` gives it, when it comes out wider. Any other
+        run of SHAPE_MIN_CHARS counted characters or more is judged against the calibration
+        sentences in its own face and gets the ratio when it is off by more than SHAPE_TOL, unless
+        it shares its paragraph with other runs (`in_sentence`: sized like them)."""
+        text = run.get("text", "")
+        cm = CM_ADVANCES.get(cm_face(run) or "")
+        # (a table cell's run keeps the table's size: its column is made as wide as Slides sets
+        # it (fit_columns), and a number set smaller rode high in its top-anchored cell)
+        if cm is None or not text.strip() or run.get("script") or run.get("hole") or run.get("cell") or \
+                family not in ADVANCES:
+            return 1.0
+        slides = ADVANCES[family][self.face(run)]
+        number = "".join(text.split())
+        if any(c in DIGITS for c in number) and all(c in NUMBER_CHARS for c in number):
+            s_em = sum(slides.get(c, UNMEASURED_ADVANCE_EM) for c in number)
+            p_em = sum(cm["advances"][c] for c in number)
+            return max(1.0, s_em / factor / (p_em * optical_width(run["family"], design)))
+        if run.get("in_sentence"):  # (a run among others keeps their size: in_sentence)
+            return 1.0
+        s_em, p_em, counted, skipped = advance_widths(text, cm, slides)
+        if counted < SHAPE_MIN_CHARS or skipped > 0.1 * counted or p_em <= 0:
+            return 1.0
+        title = run["family"] != "serif" and 11.5 <= design < 14  # sized by the title factor
+        ratio = s_em / p_em / self.reference_ratio(cm_face(run), slides, title)
+        return ratio if abs(ratio - 1) > SHAPE_TOL else 1.0
+
+    def reference_ratio(self, face: str, slides: dict, title: bool) -> float:
+        """Slides em / PDF em of the calibration sentences in a face: where its size factor
+        puts the widths of ordinary text."""
+        key = (face, id(slides), title)  # `slides` is one of ADVANCES' tables, which live as long
+        if key not in self._reference:
+            s_em = p_em = 0.0
+            for sentence in SHAPE_TITLE_REFERENCE if title else SHAPE_REFERENCE:
+                s, p, _, _ = advance_widths(sentence, CM_ADVANCES[face], slides)
+                s_em, p_em = s_em + s, p_em + p
+            self._reference[key] = s_em / p_em
+        return self._reference[key]
+
+
+def bullet_shape(bullet: dict) -> str | None:
+    """The BULLET_SHAPES entry for a bullet; None for numbers. A glyph's is its character's,
+    except a bullet character the PDF draws as a filled square (LM Sans's \\textbullet)."""
+    text = bullet.get("text", "")
+    if bullet["kind"] == "number" or (bullet["kind"] == "image" and text.isdigit()):
+        return None
+    if bullet["kind"] == "glyph":
+        shape = GLYPH_SHAPES.get(text, "disc")
+        return "square" if shape == "disc" and inked_square(bullet) else shape
+    return bullet.get("shape") if bullet.get("shape") in BULLET_SHAPES else "disc"
+
+
+def inked_square(bullet: dict) -> bool:
+    ink, fill = bullet.get("ink"), bullet.get("fill") or 0.0
+    if not ink or fill < 0.9:  # (a disc fills 0.79 of its box)
+        return False
+    w, h = ink[2] - ink[0], ink[3] - ink[1]
+    return 0.8 <= w / h <= 1.25 if h > 0 else False
+
+
+# A glyph bullet whose ink (render.glyph_ink) would come out this much smaller than a bullet at
+# the label's size is sized by its ink, as vector bullets are. Beamer's own glyphs (MSAM's ▶
+# 0.58 em, CMSY's • 0.39 em against the disc's 0.41) keep the label's size.
+INK_SIZED = 0.75
+
+
+def ink_sized(bullet: dict, size: float, scale: float) -> float | None:
+    """The size that gives a glyph bullet its PDF ink height, when it is to be used."""
+    if bullet["kind"] != "glyph" or not bullet.get("ink"):
+        return None
+    shape = bullet_shape(bullet)
+    label = bullet.get("label") or {}
+    full = min(size, label.get("size", size / scale) * scale)
+    height = (bullet["ink"][3] - bullet["ink"][1]) * scale
+    inked = max(0.3 * size, min(size, height / BULLET_SHAPES[shape][2]))
+    return inked if inked < INK_SIZED * full or shape != GLYPH_SHAPES.get(bullet.get("text", ""), "disc") else None
+
+
+def bullet_preset(bullet: dict) -> str:
+    shape = bullet_shape(bullet)
+    if shape is None:
+        return BULLET_PRESETS["number_parens" if ")" in bullet.get("text", "") else "number"]
+    return BULLET_SHAPES[shape][0]
+
+
+def bullet_level(bullet: dict, level: int) -> int:
+    """Slides nesting level: numbers count by depth (1., a., i.), glyphs pick their shape.
+    ● ○ ■ keep the depth (they repeat every 3 levels); other glyphs exist at one level only.
+    (Indents are set explicitly, so the level only decides the glyph and what Tab does.)"""
+    shape = bullet_shape(bullet)
+    if shape is None:
+        return level
+    preset, first = BULLET_SHAPES[shape][:2]
+    return 3 * min(level, 2) + first if preset == "BULLET_DISC_CIRCLE_SQUARE" else first
+
+
+def bullet_size(bullet: dict, size: float, scale: float) -> float:
+    """Font size giving the bullet its PDF height (at most the text's: a larger bullet would
+    push the line down). Glyph and number boxes are font boxes: their size is the font's, or
+    their ink's where that is much smaller (`ink_sized`)."""
+    shape = bullet_shape(bullet)
+    inked = ink_sized(bullet, size, scale)
+    if inked is not None:
+        return round(inked, 1)
+    if bullet["kind"] in ("glyph", "number") or shape is None:
+        label = bullet.get("label") or {}
+        return round(min(size, label.get("size", size / scale) * scale), 1)
+    height = (bullet["bbox"][3] - bullet["bbox"][1]) * scale
+    return round(max(0.3 * size, min(size, height / BULLET_SHAPES[shape][2])), 1)
+
+
+def bullet_gap(bullet: dict, size: float) -> float:
+    """Distance from the bullet box's right edge to indentFirstLine."""
+    shape = bullet_shape(bullet)
+    if bullet["kind"] in ("glyph", "number") or shape is None:
+        return BULLET_GAP
+    return BULLET_SHAPES[shape][3] * size
+
+
+def bullet_extent(bullet: dict, size: float, scale: float) -> tuple[float, float, float]:
+    """(PDF x0, PDF x1, gap after it in Slides pt) of what the Slides bullet stands for: the
+    ink of a glyph sized by its ink (then placed as a vector bullet is), else the bullet's box."""
+    z = bullet_size(bullet, size, scale)
+    if ink_sized(bullet, size, scale) is not None:
+        return bullet["ink"][0], bullet["ink"][2], BULLET_SHAPES[bullet_shape(bullet)][3] * z
+    return bullet["bbox"][0], bullet["bbox"][2], bullet_gap(bullet, z)
+
+
+def rgb(hex_color: str) -> dict:
+    h = hex_color.lstrip("#")
+    return {"opaqueColor": {"rgbColor": {k: int(h[i:i + 2], 16) / 255 for k, i in
+                                         (("red", 0), ("green", 2), ("blue", 4))}}}
+
+
+# Advance widths (em) of text characters on Slides' own renderer, per substitute font and
+# style (tools/probe_advances.py). Slides' Lato is not the Lato on google/fonts (its space is
+# 0.19 em, its slash 0.31), so these are measured, not read out of a font file.
+ADVANCES = json.loads((CALIBRATION_DIR / "advances.json").read_text(encoding="utf-8"))["fonts"]
+UNMEASURED_ADVANCE_EM = 0.6  # a character the probe did not measure: as wide as the widest digits

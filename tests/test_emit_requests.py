@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from beamer2slides import emit
+from beamer2slides import emit, emit_holes
 from beamer2slides.classify import HOLE_PAD, classify
 from beamer2slides.emit import (EMU_PER_PT, HOLE_FONT, HOLE_SPACE_EM, SLIDE_W, FontMapper, find_marks, fit_holes,
                                 formula_shifts, hole_offset, hole_run, mark_alpha, number_box_requests,
@@ -708,7 +708,7 @@ def overlay(marks_x: list[float], bbox=(100.0, 50.0, 200.0, 60.0)) -> dict:
 def test_overlay_boxes_drift_and_clamped_stretch(monkeypatch, drifts, expected):
     def fake(probe, scale, fonts):  # the drift of the mark at the probe's gap
         return {"gap": HOLE_PAD + drifts[probe["elements"][0]["paragraphs"][0]["runs"][0]["hole_x0"]]}
-    monkeypatch.setattr(emit, "formula_shifts", fake)
+    monkeypatch.setattr(emit_holes, "formula_shifts", fake)
     x0, x1 = overlay_boxes(overlay(list(drifts)), SCALE, FONTS)["p0o0"]
     assert (x0, x1) == pytest.approx(expected, abs=1e-6)
 

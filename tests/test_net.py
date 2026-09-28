@@ -49,9 +49,9 @@ def test_downloads_can_be_switched_off(monkeypatch):
 def test_with_downloads_off_no_place_is_measured(monkeypatch):
     """Measuring a hole's place is a thumbnail download: with downloads off not even the scratch
     slides are made, and every picture keeps its predicted place."""
-    from beamer2slides import emit
-    monkeypatch.setattr(emit, "measure_jobs", lambda *a: ([{"createSlide": {}}], [("job",)]))
-    monkeypatch.setattr(emit, "batch", lambda *a: pytest.fail("scratch slides written"))
+    from beamer2slides import emit, emit_places
+    monkeypatch.setattr(emit_places, "measure_jobs", lambda *a: ([{"createSlide": {}}], [("job",)]))
+    monkeypatch.setattr(emit_places, "batch",lambda *a: pytest.fail("scratch slides written"))
     monkeypatch.setenv(net.NO_DOWNLOADS, "1")
     assert emit.measure_places(None, "P", {"slides": []}, 1.0, None, {}, {}, None) == ({}, [])
 

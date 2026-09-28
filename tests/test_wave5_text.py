@@ -1,6 +1,6 @@
 """Wave 5, fixer C (text, formulas, layout): the regressions wave 4 brought and two open ones."""
 
-from beamer2slides import emit
+from beamer2slides import emit, emit_text
 from beamer2slides.emit import SLIDE_W
 
 from .test_columns import paragraphs, span, text
@@ -155,7 +155,7 @@ def test_a_word_space_before_a_hole_is_followed_by_a_zero_width_break(monkeypatc
     after it together, so the word before a formula went down with it. A zero-width space after
     the word space would allow a break there (it did not, live: HOLE_BREAK is off); switched on,
     it is set in the word's font, so words typed in front of the hole are too."""
-    monkeypatch.setattr(emit, "HOLE_BREAK", emit.ZWSP)
+    monkeypatch.setattr(emit_text, "HOLE_BREAK", emit.ZWSP)
     text, fonts = written(holes_box())
     assert text.startswith("A ​\xa0") and text.count("​") == 3, repr(text)
     k = text.index("​")

@@ -87,8 +87,9 @@ def prune(folder: Path) -> None:
 # What `deck_ir` reads a presentation with. The target is kept per deck under a hash of these and the
 # presentation, so a change to the read-back or the comparison costs no deck_ir; `--fresh` rebuilds
 # it anyway, for a change elsewhere that reaches it.
-TARGET_MODULES = ("deck_ir", "deck_fills", "deck_freeforms", "deck_thumbs", "emit", "fonts", "fontfetch",
-                  "bidi", "scripts", "gslides", "identity", "snapshot", "labels", "paths")
+TARGET_MODULES = ("deck_ir", "deck_fills", "deck_freeforms", "deck_thumbs", "emit", "emit_metrics", "emit_widths",
+                  "emit_text", "emit_pptx", "emit_tables", "emit_diagrams", "emit_holes", "emit_places", "emit_theme",
+                  "fonts", "fontfetch", "bidi", "scripts", "gslides", "identity", "snapshot", "labels", "paths")
 
 
 def target_for(folder: Path, slides: str | None, fresh: bool) -> dict:
