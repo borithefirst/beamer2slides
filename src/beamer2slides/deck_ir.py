@@ -1222,6 +1222,10 @@ def foreign_shape(pe: dict, m: list[float], w: float, h: float, bbox: list[float
     own_unsaid = fill is not None and fill.get("propertyState", "RENDERED") == "RENDERED" and "solidFill" not in fill
     if unread_fill(fill) and (inherited is not None or not shape.get("placeholder") or own_unsaid):
         style["fill_unread"] = True      # drawn, but not as anything the API says: `deck_fills`
+        if fill.get("propertyState") == "NOT_RENDERED":
+            # a gradient or theme fill, or no fill at all (Slides' "transparent"): only the thumbnail
+            # tells, and an outlined freeform may yet be its outline alone (`deck_fills.outline_only`)
+            style["_not_rendered"] = True
     if fill_hex and solid.get("alpha", 1.0) < 1.0:
         style["fill_alpha"] = round(solid["alpha"], 4)
     style.update(outline_props(props.get("outline", {}), scale, resolver.scheme))

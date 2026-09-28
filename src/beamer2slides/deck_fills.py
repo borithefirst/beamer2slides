@@ -15,7 +15,8 @@ thumbnail of the slide, and `deck_ir(foreign=True, thumbnails=...)` asks it:
 - anything else - a photo cut to a freeform, a texture - is written, when the caller gives a folder,
   as the thumbnail's own picture of the box (`thumbnail_picture`: letters of texts above painted out,
   the page colour round it transparent); without a folder a shape with neither fill nor outline is
-  dropped as before.
+  dropped as before. A freeform whose NOT_RENDERED fill reads as nothing of that is first traced
+  by its outline alone (`outline_only`): NOT_RENDERED is also Slides' "no fill".
 
 A false fill is worse than a missing one - it paints over whatever lies under the element - so the
 reading is conservative. Pixels under opaque elements drawn above (pictures, filled shapes, tables)
@@ -371,6 +372,7 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
             out.append(el)
             continue
         unread = el.pop("fill_unread", False)
+        bare = False                       # its outline alone (`outline_only`): no fill at all
         if unread and el["kind"] == "text" and not cells and ground_below(el, elements[:k]):
             # a SmartArt node's words: a NOT_RENDERED text box on a shape of exactly its box. What
             # shows in it is that shape (en-smartart's gradient balls), which a square picture of it
@@ -384,6 +386,9 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
                 sample_element(a, el, above, px, background, bottom)
                 if free:
                     deck_freeforms.trace(a, el, above, elements[:k], px, background, bottom, True)
+                    if el.get("_not_rendered") and el.get("outline") and not (
+                            el.get("fill") or el.get("fill_gradient") or el.get("trace")):
+                        bare = outline_only(a, el, above, elements[:k], px, background, bottom)
             around = outside(a, el["bbox"], px) if cells else None
             for c in cells:
                 sample_cell(a, el, c, above, px, background, around)
@@ -410,14 +415,17 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
                     out.append(el)
                     out.append(pic)         # the panel behind its own words (appended after: out is
                     continue                # built top-down and reversed at the end, so this is under it
-        if el["kind"] == "shape" and unread and not el.get("fill") and not el.get("fill_gradient"):
+        if el["kind"] == "shape" and unread and not bare and not el.get("fill") and not el.get("fill_gradient"):
             el["_unsaid"] = True           # drawn in the picture as nothing we can say: see deck_freeforms
             if a is not None and pictures is not None and not el.get("trace"):
                 bottom = not picture and not any(overlaps(e, el) for e in elements[:k])
                 pic = thumbnail_picture(a, el, elements[k + 1:], px, background if bottom else None, pictures)
                 if pic is not None:
-                    if el.get("outline"):
-                        out.append({**el, "fill": None})   # its outline, drawn above the picture
+                    if el.get("outline") and not free:
+                        # a preset's outline, drawn above the picture (its geometry is its preset's).
+                        # A freeform's is not: untraced, it would be drawn as its box (`CUSTOM_AS`),
+                        # a straight line across en-mos' wavy header, and the picture holds it anyway
+                        out.append({**el, "fill": None})
                     out.append(pic)
                     continue
         if el["kind"] == "shape" and not el.get("fill") and not el.get("fill_gradient") and not el.get("outline"):
@@ -427,7 +435,47 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
         el.pop("_traced", None)            # the traced pixels, kept only while settling
         el.pop("_unsaid", None)
         el.pop("_no_ramp", None)
+        el.pop("_not_rendered", None)
     return out[::-1]
+
+
+ENCLOSES = 0.5           # pixels an outline-only trace may enclose, per pixel of its ink
+THICK = 0.1              # share of that ink allowed to survive an erosion by half the stroke and a pixel
+
+
+def outline_only(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: float,
+                 background: str | None, bottom: bool) -> bool:
+    """Trace an outlined freeform whose NOT_RENDERED fill the thumbnail could not read as any colour,
+    ramp or one paint, with its outline as the only paint: NOT_RENDERED is also what Slides says of a
+    shape with no fill at all. en-mos' master draws two thin curves (outline only) over its wavy
+    header; read as an unsaid fill they became a picture of their whole box, the header's colours
+    and all, with the box's rectangle drawn round it on every slide of the layout.
+
+    Taken only when the traced ink is a line, as NOT_RENDERED may just as well be a real fill no
+    reading explained (china-pptx's .pptx gradients): no thicker than the stroke (`THICK`) - the
+    trace takes in the holes of its ring that show neither the ground nor what lies under it, so
+    such a fill comes out a blob - and enclosing nothing (`ENCLOSES`): where no ground is known (a
+    picture under it, a background picture) a hole may be that fill too, and a ring is no line
+    anyway. The stroke's colour under words of that colour closes a ring as well: the trace leaves
+    it out as their letters (cs161-net 13: its rings, each cut by a caption in its colour, came out
+    open lines, and the wires only their crops held went with them). Either is left to the
+    thumbnail's picture, as before."""
+    from . import deck_freeforms as FF
+    if not FF.trace(a, el, above, under, px, background, bottom, False):
+        return False
+    x0, y0, ink = el["_traced"]
+    y1, x1 = y0 + ink.shape[0], x0 + ink.shape[1]
+    _, wordy, _ = FF.unknowns(a, (x0, y0, x1, y1), above, px)
+    stroke = np.abs(a[y0:y1, x0:x1] - rgb(el["outline"])).max(axis=2) <= TOL
+    r = int(np.ceil((el.get("weight") or 0.75) * px / 2)) + 1
+    thick = (~FF.dilate(~ink, r)).sum() > THICK * ink.sum()
+    wall = ink | FF.dilate(stroke & wordy & ~ink, 1)
+    encloses = (FF.enclosed(wall) & ~wall).sum() > ENCLOSES * ink.sum()
+    if thick or encloses:
+        el.pop("trace", None)
+        el.pop("_traced", None)
+        return False
+    return True
 
 
 PIE_STEP = 0.25          # degrees between the rays a pie's angles are read on
@@ -613,7 +661,7 @@ def thumbnail_picture(a: np.ndarray, el: dict, above: list[dict], px: float, pag
     a0, b0, a1, b1 = px_box(el["bbox"], px, w, h)
     if a1 - a0 < PICTURE_MIN_PX or b1 - b0 < PICTURE_MIN_PX:
         return None
-    sub = painted_out(a[b0:b1, a0:a1].astype(np.float32), a0, b0, above, px, w, h)
+    sub = painted_out(a[b0:b1, a0:a1].astype(np.float32), a0, b0, above, px, w, h, el.get("outline"))
     sub = unblended(sub, a0, b0, above, px)
     alpha = np.full(sub.shape[:2], 255, dtype=np.uint8)
     ground = rgb(page)
@@ -680,12 +728,19 @@ def ellipse_alpha(h: int, w: int, samples: int = 4) -> np.ndarray:
     return np.round(cover * 255).astype(np.uint8)
 
 
-def letters_of(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float, w: int, h: int) -> np.ndarray:
+def letters_of(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float, w: int, h: int,
+               keep: str | None = None) -> np.ndarray:
     """Where in `sub` (the thumbnail's pixels from column `a0`, row `b0` on; the thumbnail is `w` x
     `h`) the words of the text elements `above` are drawn: a pixel nearer a run's colour than its
-    box's ground. Not grown: the antialiased rims are the caller's to take (`dilate`)."""
+    box's ground. Not grown: the antialiased rims are the caller's to take (`dilate`).
+
+    `keep`: the colour of the cropped shape's own outline, whose pixels are no letters of another
+    colour: nearer a grey run than the white ground, cs161-net 10's red frame came out of its crop
+    with a gap wherever a text box lay on it."""
     sh, sw = sub.shape[:2]
     letters = np.zeros((sh, sw), dtype=bool)
+    k = rgb(keep)
+    own = None if k is None else np.abs(sub - k).max(axis=2) <= TOL
     for e in above:
         if e["kind"] != "text" or not e.get("paragraphs"):
             continue
@@ -704,15 +759,20 @@ def letters_of(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float, 
                 if c is not None and r.get("text", "").strip() and np.abs(c - ground).max() > TOL:
                     # a letter's pixel is nearer its colour than the ground's (antialiased rims are
                     # taken by the dilation)
-                    letters[box] |= (np.abs(part - c).max(axis=2) < off) & (off > TOL)
+                    hit = (np.abs(part - c).max(axis=2) < off) & (off > TOL)
+                    if own is not None and np.abs(c - k).max() > TOL:
+                        hit &= ~own[box]
+                    letters[box] |= hit
     return letters
 
 
-def painted_out(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float, w: int, h: int) -> np.ndarray:
+def painted_out(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float, w: int, h: int,
+                keep: str | None = None) -> np.ndarray:
     """`sub` with the letters of the texts `above` (`letters_of`, grown over their rims) filled in
     from the pixels around them: what a thumbnail crop keeps of what lies under those words, so a
-    text box drawn again above the crop does not print its words twice a little apart."""
-    letters = letters_of(sub, a0, b0, above, px, w, h)
+    text box drawn again above the crop does not print its words twice a little apart. `keep`: the
+    crop's own outline colour (`letters_of`)."""
+    letters = letters_of(sub, a0, b0, above, px, w, h, keep)
     if letters.any():
         from .deck_freeforms import dilate
         sub = inpaint(sub, dilate(letters, 2))

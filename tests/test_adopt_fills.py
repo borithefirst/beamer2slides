@@ -885,6 +885,144 @@ def test_a_see_through_freeform_is_traced_by_its_opaque_outline():
     assert f["trace"]["fill"] == "#ffffff" and f["trace"]["alpha"] == 0.4
 
 
+NO_FILL = {"propertyState": "NOT_RENDERED", "solidFill": {"color": {"rgbColor": {"red": 1, "green": 1, "blue": 1}}}}
+TEAL = (51, 183, 191)
+
+
+def outlined(pe: dict, colour=TEAL, weight: float = 2.0) -> dict:
+    r, g, b = (v / 255 for v in colour)
+    pe["shape"]["shapeProperties"]["outline"] = {
+        "outlineFill": {"solidFill": {"color": {"rgbColor": {"red": r, "green": g, "blue": b}}}}, "weight": pt(weight)}
+    return pe
+
+
+def striped(a: np.ndarray, x: int, y: int, w: int, h: int, one=(140, 20, 40), two=(240, 192, 32)) -> None:
+    """Stripes 3 px wide in `a`'s (x, y, w, h), dark red and yellow unless told: neither one colour, a
+    ramp nor a single paint over a ground, like the many colours of en-mos' wavy header."""
+    cols = (np.arange(w) // 3) % 2
+    a[y:y + h, x:x + w] = np.where(cols[None, :, None] == 0, one, two)
+
+
+def test_an_outline_only_freeform_is_traced_as_its_line(tmp_path):
+    """en-mos' master: two thin curves over the wavy header, outline only, whose fill comes back
+    NOT_RENDERED - which is also how Slides says "no fill". The box holds the header's many colours,
+    so no fill reads; it was a picture of the whole box with the box's rectangle drawn round it (a
+    straight line across the header on 80 slides). Its outline alone is what is traced."""
+    from PIL import Image, ImageDraw
+    a = page()
+    striped(a, 0, 40, 720, 50)
+    img = Image.fromarray(a)
+    xs = np.linspace(100, 600, 200)
+    ImageDraw.Draw(img).line([(x, 80 + 20 * np.sin((x - 100) / 500 * 4 * np.pi)) for x in xs], fill=TEAL, width=2)
+    pres = deck(shape("wave", "CUSTOM", 0, 40, 720, 50, UNREAD),
+                outlined(shape("curve", "CUSTOM", 100, 60, 500, 40, NO_FILL)))
+    els = deck_ir(pres, foreign=True, thumbnails=lambda n: np.asarray(img), images=tmp_path)["slides"][0]["elements"]
+    mine = [e for e in els if e["id"].startswith("curve")]
+    assert [e["kind"] for e in mine] == ["shape"], "no picture of its box, no rectangle round it"
+    tr = mine[0]["trace"]
+    assert tr["fill"] == "#33b7bf" and not mine[0].get("fill")
+    ys = [y for ring in tr["rings"] for _, y in ring]
+    x0, y0, x1, y1 = mine[0]["bbox"]                                    # IR pt: 453.54 across
+    assert min(ys) == pytest.approx(y0, abs=1.5) and max(ys) == pytest.approx(y1, abs=1.5)
+    assert no_marks_left(els) and not any("_not_rendered" in e for e in els)
+
+
+def test_an_outlined_freeform_round_an_unread_fill_keeps_its_picture_and_no_box(tmp_path):
+    """A NOT_RENDERED freeform whose outline goes round what no reading explains (a .pptx gradient,
+    china-pptx) is no outline-only line: traced with its outline as the paint, what it holds is taken
+    in with the ring (thicker than any stroke), so it stays the thumbnail's picture, which holds its
+    outline too - and not also its box's rectangle, all an untraced freeform's outline could draw."""
+    from PIL import Image, ImageDraw
+    a = page()
+    striped(a, 200, 100, 200, 100)
+    yy, xx = np.mgrid[0:405, 0:720]
+    a[((xx - 300) / 100) ** 2 + ((yy - 150) / 50) ** 2 > 1] = 255        # an oval blob, not its box
+    img = Image.fromarray(a)
+    ImageDraw.Draw(img).ellipse([200, 100, 399, 199], outline=TEAL, width=2)
+    pres = deck(outlined(shape("blob", "CUSTOM", 200, 100, 200, 100, NO_FILL)))
+    els = deck_ir(pres, foreign=True, thumbnails=lambda n: np.asarray(img), images=tmp_path)["slides"][0]["elements"]
+    assert [e["kind"] for e in els] == ["image"] and not els[0].get("trace")
+
+
+def test_an_outline_ring_on_a_picture_is_no_line(tmp_path):
+    """On a slide with a background picture, over a picture, any colour may show: what a thin ring
+    holds may be what is under it or a fill of its own no reading explained, which tracing leaves a
+    hole. A ring that encloses something is left to the thumbnail's picture."""
+    from PIL import Image, ImageDraw
+    ramp = np.linspace(0, 1, 400)[None, :, None]
+    a = page()
+    a[50:350, 100:500] = np.round((1 - ramp) * [30, 40, 120] + ramp * [120, 30, 60]).astype(np.uint8)
+    photo = Image.fromarray(a[50:350, 100:500].copy())
+    photo.save(tmp_path / "photo.png")
+    striped(a, 200, 100, 200, 100, (240, 192, 32), (250, 180, 200))
+    img = Image.fromarray(a)
+    ImageDraw.Draw(img).ellipse([200, 100, 399, 199], outline=TEAL, width=2)
+    under = {"kind": "image", "role": "figure", "bbox": [100, 50, 500, 350], "file": str(tmp_path / "photo.png"),
+             "id": "p", "object": "p", "group": None}
+    ring = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [200, 100, 400, 200], "fill": None,
+            "outline": "#33b7bf", "weight": 2.0, "fill_unread": True, "_not_rendered": True, "id": "r",
+            "object": "r", "group": None}
+    got = deck_fills.settle([under, ring], np.asarray(img), 1.0, None, True, tmp_path)
+    assert [(e["kind"], e["id"]) for e in got] == [("image", "p"), ("image", "r")]
+
+
+def test_a_ring_cut_by_a_caption_in_its_colour_is_still_a_ring(tmp_path):
+    """cs161-net 13: a red ring round the houses and their wires, a caption in the same red across its
+    rim. The trace leaves the rim under those words out (they may be the letters), which opened the
+    ring into a line: drawn so, the wires only its crop held were gone. Under words of its colour the
+    stroke still closes the ring, and a ring is left to the thumbnail's picture."""
+    from PIL import Image, ImageDraw
+    red = (200, 30, 50)
+    a = page()
+    noisy(a, 260, 120, 80, 40)
+    house = Image.fromarray(a[120:160, 260:340].copy())
+    house.save(tmp_path / "house.png")
+    img = Image.fromarray(a)
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([200, 100, 399, 209], radius=20, outline=red, width=2)
+    for x in range(262, 340, 9):                         # the caption's letters, over the rim
+        draw.rectangle([x, 200, x + 5, 214], fill=red)
+    ring = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [200, 100, 400, 210], "fill": None,
+            "outline": "#c81e32", "weight": 2.0, "fill_unread": True, "_not_rendered": True, "id": "r",
+            "object": "r", "group": None}
+    pic = {"kind": "image", "role": "figure", "bbox": [260, 120, 340, 160], "file": str(tmp_path / "house.png"),
+           "id": "h", "object": "h", "group": None}
+    caption = {"kind": "text", "role": "body", "bbox": [255, 196, 350, 218], "id": "t", "object": "t",
+               "paragraphs": [{"runs": [{"text": "local network", "color": "#c81e32"}]}]}
+    got = deck_fills.settle([ring, pic, caption], np.asarray(img), 1.0, "#ffffff", False, tmp_path)
+    r = next(e for e in got if e["id"].startswith("r"))
+    assert r["kind"] == "image" and not r.get("trace"), "the ring's picture, not an open line"
+
+
+def test_a_crop_keeps_its_own_outline_where_words_of_another_colour_lie(tmp_path):
+    """cs161-net 10: a red frame round a box of grey words, its crop taken from the thumbnail. A
+    pixel nearer the words' grey than their white ground was taken for a letter and painted out of
+    the crop, rims and all, which left the frame with gaps wherever a text box lay on it."""
+    from PIL import Image
+    a = page()
+    a[100:103, 100:200:4] = 34                           # grey letters
+    a[104:106, 90:210] = (200, 30, 50)                   # the frame's rim, across their box, 2 px below
+    words = {"kind": "text", "role": "body", "bbox": [95, 95, 205, 117], "id": "t", "object": "t",
+             "paragraphs": [{"runs": [{"text": "words", "color": "#222222"}]}]}
+    frame = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [80, 60, 220, 140],
+             "outline": "#c81e32", "id": "f", "object": "f", "group": None}
+    pic = deck_fills.thumbnail_picture(a, frame, [words], 1.0, None, tmp_path)
+    im = np.asarray(Image.open(pic["file"]).convert("RGB")).astype(int)
+    assert np.abs(im[44:46, 20:120] - (200, 30, 50)).max() <= 1, "the frame is no letter"
+    assert np.abs(im[40:43, 20:120:4] - 34).min() > 100, "the letters are painted out"
+
+
+def test_a_presets_outline_is_drawn_above_its_picture(tmp_path):
+    """A preset whose `{}` fill is a picture keeps its outline, drawn above the thumbnail's picture of
+    it: the preset's geometry is known, unlike a freeform's."""
+    a = page()
+    noisy(a, 200, 100, 200, 100, oval=True)
+    pres = deck(outlined(shape("o", "ELLIPSE", 200, 100, 200, 100, UNREAD)))
+    els = deck_ir(pres, foreign=True, thumbnails=lambda n: a, images=tmp_path)["slides"][0]["elements"]
+    assert [e["kind"] for e in els] == ["image", "shape"]
+    assert els[1]["outline"] == "#33b7bf" and not els[1].get("fill")
+
+
 def test_a_picture_google_shows_round_is_masked_to_its_ellipse(tmp_path):
     """yc-seed-white slide 10: a .pptx picture with an ellipse geometry comes through the API as a
     plain picture; its thumbnail shows it only inside the ellipse, the page in the corners."""

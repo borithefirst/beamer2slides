@@ -339,7 +339,7 @@ def test_a_background_picture_that_never_came_is_the_page_the_thumbnail_shows(tm
     pres["slides"][0]["pageProperties"] = {"pageBackgroundFill": {"stretchedPictureFill": {
         "contentUrl": "https://lh7-rt.googleusercontent.com/backdrop=s2048"}}}
     from .test_adopt import text_shape
-    pres["slides"][0]["pageElements"] = [text_shape("t", "Welcome", 100, 100, 300, 60)]
+    pres["slides"][0]["pageElements"] = [text_shape("t", "Welcome", 100, 100, 300, 60, colour="000000")]
     yy, xx = np.mgrid[0:405, 0:720]
     thumb = np.dstack([xx * 255 // 720, yy * 255 // 405, 255 - xx * 255 // 720]).astype(np.uint8)
     thumb[120:140, 120:300] = 0                        # the words, in black
