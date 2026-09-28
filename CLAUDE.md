@@ -492,7 +492,9 @@ markers.
 
 ## Environment
 - Windows, PowerShell 5.1. Python 3.12 venv in `.venv` (`.venv\Scripts\python.exe`);
-  `pip install -e .[dev]` brings pytest-xdist.
+  `pip install -e .[dev]` brings pytest-xdist. **The package runs on 3.10** (Google's monorepo):
+  no 3.11+ syntax, stdlib or regex (`(?>` is `(?=(X))\1`); `tests/test_python310.py`, ruff at
+  py310, workflow `python310`.
 - MiKTeX (pdflatex / xelatex / lualatex, on-demand packages) for the test decks: `tests/decks/*.tex`,
   built by `tests/decks/build.py [name]` into `tests/decks/out/` (normal and `-handout` variants).
 - Layout rules for Google's monorepo import: `tests/` is a package importing its helpers

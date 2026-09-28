@@ -6,7 +6,8 @@ readme = "README.md"
 # An SPDX string, not `{text = "MIT"}`: setuptools deprecated the table in 77 and stops building
 # it in February 2027, which is why the build requirement below is 77 and not 69.
 license = "MIT"
-requires-python = ">=3.12"
+# 3.10: Google's monorepo builds some targets with it (tests/test_python310.py, workflow python310)
+requires-python = ">=3.10"
 dependencies = [
     "pypdfium2>=5.0",
     "numpy>=2.0",
@@ -75,7 +76,7 @@ beamer2slides = ["calibration/*.json",   # the measured font substitutes emit ne
                  "devtools/showcase/template.html", "devtools/showcase/decks.json"]  # the public gallery
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py310"   # the oldest Python the package runs on: ruff flags newer syntax
 src = ["src", "tests", "tools"]
 extend-exclude = ["examples", "themes", "calibration"]
 

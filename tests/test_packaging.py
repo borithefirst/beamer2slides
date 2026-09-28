@@ -1,9 +1,10 @@
 """What an installed (pip) beamer2slides needs: package data and credential/output paths."""
 
 import json
-import tomllib
 from importlib import resources
 from pathlib import Path
+
+import pytest
 
 from beamer2slides import emit, google_auth, paths, type3
 
@@ -20,6 +21,7 @@ def test_calibration_ships_with_the_package():
 
 
 def test_the_wheel_declares_the_calibration_and_the_command():
+    tomllib = pytest.importorskip("tomllib")   # (3.11: the 3.10 job has no reader of its own)
     meta = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
     data = meta["tool"]["setuptools"]["package-data"]["beamer2slides"]
     assert any(emit.CALIBRATION.name in pattern or pattern.endswith("*.json") for pattern in data)

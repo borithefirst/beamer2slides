@@ -348,10 +348,11 @@ _WORD = re.compile(
     rb"(?:[\x00\t\n\x0c\r ]|%[^\r\n]*)*"
     rb"(/[^\x00\t\n\x0c\r ()<>\[\]{}/%]*|<<|>>|[()<>\[\]{}]|[^\x00\t\n\x0c\r ()<>\[\]{}/%]+)?")
 _NUMERIC = re.compile(rb"[0-9+\-.]+\Z")
-# `_WORD` when the word is a number (1), a name (2) or another regular word (3); no match for a
-# delimiter or the end, which `_StreamParser.element` handles
+# `_WORD` when the word is a number (2), a name (3) or another regular word (4), after an atomic
+# gap (1: `(?=(gap))\1`, `document._WORD`'s 3.10 form of `(?>gap)`); no match for a delimiter or
+# the end, which `_StreamParser.element` handles
 _FAST = re.compile(
-    rb"(?>(?:[\x00\t\n\x0c\r ]|%[^\r\n]*)*)"
+    rb"(?=((?:[\x00\t\n\x0c\r ]|%[^\r\n]*)*))\1"
     rb"(?:([0-9+\-.]+)(?![^\x00\t\n\x0c\r ()<>\[\]{}/%])|(/[^\x00\t\n\x0c\r ()<>\[\]{}/%]*)"
     rb"|([^\x00\t\n\x0c\r ()<>\[\]{}/%]+))")
 _NUMBERS: dict = {}   # `_number` of a word: a pure function, and content streams repeat their numbers
@@ -498,7 +499,7 @@ def operations(data: bytes, components=None) -> Iterator[tuple[str, list]]:
             w = m.group(g)
             parser.pos = m.end()
             parser.word = w
-            if g == 1:
+            if g == 2:
                 v = numbers.get(w)
                 if v is None:
                     if len(numbers) >= _NUMBERS_MAX:
@@ -506,7 +507,7 @@ def operations(data: bytes, components=None) -> Iterator[tuple[str, list]]:
                     v = numbers[w] = _number(w)
                 operands.append(v)
                 continue
-            if g == 2:
+            if g == 3:
                 operands.append(_name(w))
                 continue
             if w == b"true" or w == b"false" or w == b"null":

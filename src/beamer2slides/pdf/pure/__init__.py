@@ -13,4 +13,12 @@ Layers, each a port of the PDFium code it names:
 - `backend`: api.PdfBackend over all of it (`B2S_PDF_BACKEND=pure`). It does not render.
 """
 
-from .backend import PureBackend  # noqa: F401
+
+
+def __getattr__(name: str):
+    """`PureBackend` on first use: `bidi` reads `unicode_data` alone, and importing a submodule
+    runs this file, which must not load the whole reader for a table."""
+    if name == "PureBackend":
+        from .backend import PureBackend
+        return PureBackend
+    raise AttributeError(name)
