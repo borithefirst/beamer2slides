@@ -14,13 +14,14 @@ matter enough to be pinned:
 
 import shutil
 from pathlib import Path
-from typing import Annotated, get_args, get_origin, get_type_hints
+from typing import Annotated, get_args, get_origin
 
 import pytest
 
 from beamer2slides.agent import READS, READS_GOOGLE, WRITES, AgentContext, LocalWorkspace
 from beamer2slides.agent.deck_tools import (deck_convert, deck_inspect, deck_prepare, deck_sync,
                                             deck_upload, tex_label)
+from beamer2slides.agent.schema import type_hints
 
 TESTS = Path(__file__).resolve().parent
 DECKS = TESTS / "decks" / "out"
@@ -797,7 +798,7 @@ def test_tex_label_refuses_a_file_that_is_not_a_beamer_document(source):
 def test_every_parameter_is_annotated_with_a_description(fn):
     """`schema.py` turns these annotations into JSON Schema, so an undescribed parameter is an
     undocumented one - the model would have to guess what it means from its name."""
-    hints = get_type_hints(fn.body, include_extras=True)
+    hints = type_hints(fn.body)
     names = [n for n in fn.body.__code__.co_varnames[:fn.body.__code__.co_argcount] if n != "j"]
     assert names, f"{fn.tool_name} takes no arguments"
     for name in names:
@@ -813,7 +814,7 @@ def test_the_annotations_resolve_through_the_wrapper_too(fn):
     """`functools.wraps` copies `__annotations__` but not `__globals__`, so a module using
     `from __future__ import annotations` would hand the schema generator unresolvable strings."""
     for target in (fn, fn.body):
-        hints = get_type_hints(target, include_extras=True)
+        hints = type_hints(target)
         assert all(get_origin(h) is Annotated for n, h in hints.items() if n not in ("j", "return"))
 
 

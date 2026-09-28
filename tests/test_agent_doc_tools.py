@@ -13,7 +13,7 @@ context's credentials, which nothing here ever looks at.
 
 import inspect
 import json
-from typing import get_origin, get_type_hints
+from typing import get_origin
 
 import pytest
 
@@ -22,6 +22,7 @@ from beamer2slides import doc_sync as docs
 from beamer2slides.agent import ALL_ACTIONS, AgentContext, LocalWorkspace, NoGoogle
 from beamer2slides.agent import doc_tools
 from beamer2slides.agent.context import Job
+from beamer2slides.agent.schema import type_hints
 from beamer2slides.devtools import doc_world, fuzz_docs
 
 from .test_doc_sync import _Reply, _Storage
@@ -140,7 +141,7 @@ def _reword(path, was: str, now: str) -> None:
 def test_every_parameter_says_what_it_is_for_and_the_hints_resolve():
     """`schema.py` reads these annotations; a bare `str` would publish a nameless field."""
     for journey in doc_tools.TOOLS:
-        hints = get_type_hints(journey.body, include_extras=True)
+        hints = type_hints(journey.body)
         params = list(inspect.signature(journey.body).parameters)
         assert params[0] == "j"
         for name in params[1:]:

@@ -34,7 +34,7 @@ from typing import Annotated, Any, Callable, Mapping, get_args, get_origin
 from .types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Refused
 
 __all__ = ["SchemaError", "tool_schema", "describe", "all_schemas", "anthropic_tools",
-           "openai_tools", "validate", "registry", "effects", "needs_of"]
+           "openai_tools", "validate", "registry", "effects", "needs_of", "type_hints"]
 
 
 class SchemaError(Exception):
@@ -74,10 +74,24 @@ def _description(fn: Callable) -> str:
     return doc.strip()
 
 
+def type_hints(obj: Callable) -> dict[str, Any]:
+    """`typing.get_type_hints(obj, include_extras=True)` as 3.11 and later answer it. Python 3.10
+    still wraps a parameter defaulting to None in Optional, so `Annotated[str | None, "..."] = None`
+    comes back as `Optional[Annotated[...]]`, its description one level down: unwrapped here."""
+    hints = typing.get_type_hints(obj, include_extras=True)
+    for name, hint in hints.items():
+        args = get_args(hint) if get_origin(hint) in (typing.Union, _pytypes.UnionType) else ()
+        if len(args) == 2 and type(None) in args:
+            inner = args[0] if args[1] is type(None) else args[1]
+            if get_origin(inner) is Annotated:
+                hints[name] = inner
+    return hints
+
+
 def _hints(fn: Callable) -> dict[str, Any]:
     body = _body(fn)
     try:
-        return typing.get_type_hints(body, include_extras=True)
+        return type_hints(body)
     except Exception as exc:                                   # a forward reference that moved
         raise SchemaError(f"{_name(fn)}: its annotations cannot be resolved "
                           f"({type(exc).__name__}: {exc}).") from None

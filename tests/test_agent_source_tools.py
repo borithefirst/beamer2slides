@@ -15,11 +15,11 @@ import inspect
 import json
 import shutil
 from pathlib import Path
-from typing import get_type_hints
 
 import pytest
 
 from beamer2slides.agent import ALL_ACTIONS, LOCAL_ONLY, AgentContext, LocalWorkspace
+from beamer2slides.agent.schema import type_hints
 from beamer2slides.agent.source_tools import SOURCE_TOOLS, deck_adopt, deck_pull, tex_converge
 
 TESTS = Path(__file__).resolve().parent
@@ -196,7 +196,7 @@ def test_pull_refuses_a_source_that_is_not_there_before_reading_the_deck(tmp_pat
 
 def test_every_parameter_carries_a_description():
     for fn in SOURCE_TOOLS:
-        hints = get_type_hints(fn.body, include_extras=True)
+        hints = type_hints(fn.body)
         params = list(inspect.signature(fn.body).parameters)
         assert params[0] == "j", fn.tool_name
         for name in params[1:]:
@@ -211,7 +211,7 @@ def test_type_hints_resolve_on_the_wrappers(tmp_path):
     """`@tool` returns a function defined in context.py, so string annotations would not resolve
     there; `functools.wraps` copies the real `Annotated` objects over and these do."""
     for fn in SOURCE_TOOLS:
-        hints = get_type_hints(fn, include_extras=True)
+        hints = type_hints(fn)
         assert set(hints) >= {"j", "tex"}
         assert hints["tex"].__metadata__[0]
 
