@@ -190,6 +190,27 @@ def test_a_placeholder_is_never_a_candidate():
     assert elements(deck(pe), page((100, 100, 200, 100, "#3366cc"))) == []
 
 
+def test_a_placeholders_own_unsaid_fill_is_read_from_the_thumbnail():
+    """china-pptx 173: a caption placeholder's own fill is a gradient panel over a photo, and the
+    API says of it only `{}` (RENDERED, no solidFill) - unlike the 772 placeholders whose own
+    NOT_RENDERED is no fill at all. Read as nothing, the caption stood on the bare photo."""
+    pe = shape("cap", "RECTANGLE", 0, 100, 720, 120, UNREAD)
+    pe["shape"]["placeholder"] = {"type": "BODY"}
+    pe["shape"]["text"] = {"textElements": [{"paragraphMarker": {"style": {}}},
+                                            {"textRun": {"content": "Why is this city relevant?\n",
+                                                         "style": {"fontSize": pt(28)}}}]}
+    thumb = page()
+    t = (np.arange(720) + 0.5) / 720
+    ramp = np.array([250, 250, 245]) + (np.array([190, 205, 235]) - np.array([250, 250, 245])) * t[:, None]
+    thumb[100:220] = ramp.round().astype(np.uint8)[None]
+    el = next(e for e in elements(deck(pe), thumb) if e.get("id") == "cap")
+    assert el.get("fill_gradient") or el.get("fill_source") == "thumbnail"
+    none = shape("none", "RECTANGLE", 0, 100, 720, 120, {"propertyState": "NOT_RENDERED"})
+    none["shape"]["placeholder"], none["shape"]["text"] = pe["shape"]["placeholder"], pe["shape"]["text"]
+    kept = next(e for e in elements(deck(none), thumb) if e.get("id") == "none")
+    assert not kept.get("fill_gradient") and not kept.get("fill")        # its own NOT_RENDERED: no fill
+
+
 def test_a_gradient_bar_becomes_an_axis_shading():
     """cs161's header bar: black to red along x, which TikZ draws as left/middle/right colours."""
     thumb = page()
@@ -599,6 +620,26 @@ def test_a_group_is_dropped_or_kept_as_one_piece():
         s["pageElements"] = [cover]
     slides = deck_ir(pres, foreign=True, thumbnails=lambda n: page((0, 0, 720, 4, "#336699")))["slides"]
     assert inherited_ids(slides) == set()
+
+
+def test_an_inherited_picture_is_judged_by_its_cropped_piece(tmp_path):
+    """instagram: the master draws six pieces of one screenshot, each through its own
+    `cropProperties`. The thumbnail shows only the piece; the whole sheet squeezed into the box
+    matched a quarter of it, so every piece voted absent and was dropped from every slide."""
+    from PIL import Image
+    import io
+    sheet = Image.new("RGB", (400, 100))
+    for i, c in enumerate([(255, 0, 0), (0, 160, 0), (255, 220, 0), (0, 0, 255)]):
+        sheet.paste(c, (100 * i, 0, 100 * i + 100, 100))
+    png = io.BytesIO()
+    sheet.save(png, format="PNG")
+    url = "https://example.test/sheet.png"
+    piece = {"objectId": "piece", "size": {"width": pt(200), "height": pt(100)}, "transform": at(0, 0),
+             "image": {"contentUrl": url, "imageProperties": {"cropProperties": {"leftOffset": 0.75}}}}
+    pres = multi([piece], 2)
+    slides = deck_ir(pres, foreign=True, fetch=lambda u: png.getvalue(), images=tmp_path,
+                     thumbnails=lambda n: page((0, 0, 200, 100, "#0000FF")))["slides"]
+    assert all(any(e.get("inherited") for e in s["elements"]) for s in slides)
 
 
 def test_an_inconclusive_element_is_never_dropped():

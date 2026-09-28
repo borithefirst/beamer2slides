@@ -740,8 +740,10 @@ INHERITED_ABSENT_MAX = 0.35  # ... at or below this, "not shown" (between the tw
 def element_appearance_share(sub: np.ndarray, region: np.ndarray, el: dict) -> float | None:
     """Share of an inherited (master/layout) element's own visible pixels (`sub`, `region`: `masks`'
     box-local view of it, whatever another element draws over it already excluded) that match its
-    own known appearance - a flat `fill`, or its own downloaded picture stretched to its box, the way
-    Slides draws a picture element. None when its appearance is not something this can characterise
+    own known appearance - a flat `fill`, or its own downloaded picture cropped and stretched to its
+    box, the way Slides draws a picture element (instagram's master draws six pieces of one 1154x2048
+    screenshot, each by its own crop: the whole sheet squeezed into each box matched nowhere, and every
+    piece voted absent and was dropped from all its slides). None when its appearance is not something this can characterise
     at all (no `file` yet, no plain opaque `fill`, a gradient, a fill the thumbnail has not settled) -
     such an element casts no vote in `deck_ir.vote_inherited` and is never judged missing on
     suspicion alone (ua-space: a master picture never drawn on any of 16 slides votes confidently
@@ -753,8 +755,10 @@ def element_appearance_share(sub: np.ndarray, region: np.ndarray, el: dict) -> f
     if el["kind"] == "image" and el.get("file") and not el.get("video"):
         try:
             from PIL import Image
+            from .compare import cropped_picture
             h, w = sub.shape[:2]
-            cand = np.asarray(Image.open(el["file"]).convert("RGB").resize((w, h))).astype(np.int16)
+            img = cropped_picture(Image.open(el["file"]).convert("RGB"), el.get("crop"))
+            cand = np.asarray(img.resize((w, h))).astype(np.int16)
         except Exception:  # noqa: BLE001 - an unreadable download casts no vote
             return None
         close = np.abs(sub - cand).max(axis=2) <= TOL

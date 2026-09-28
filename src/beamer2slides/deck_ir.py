@@ -1209,7 +1209,11 @@ def foreign_shape(pe: dict, m: list[float], w: float, h: float, bbox: list[float
     if solid.get("alpha", 1.0) <= 0.004:
         fill_hex = None  # a fill at alpha 0 draws nothing (sc-memphis' rings: black at alpha 0)
     style: dict = {"fill": fill_hex}
-    if unread_fill(fill) and (inherited or not shape.get("placeholder")):
+    # A placeholder's own NOT_RENDERED is no fill (772 in the corpora), as is every INHERIT chain
+    # ending there; its own `{}` is a gradient or picture fill Slides draws (china-pptx 173's white
+    # panel under a caption on a photo; 10 in the corpora)
+    own_unsaid = fill is not None and fill.get("propertyState", "RENDERED") == "RENDERED" and "solidFill" not in fill
+    if unread_fill(fill) and (inherited or not shape.get("placeholder") or own_unsaid):
         style["fill_unread"] = True      # drawn, but not as anything the API says: `deck_fills`
     if fill_hex and solid.get("alpha", 1.0) < 1.0:
         style["fill_alpha"] = round(solid["alpha"], 4)
