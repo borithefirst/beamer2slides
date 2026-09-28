@@ -22,6 +22,10 @@ decorations) is a picture, or baked into a per-slide background picture.
   images, drawings) -> `classify` (lines, paragraphs, lists; native vs background -> deck.json) ->
   `render` (background PNG per slide with converted objects switched off; figure crops) -> `emit`
   (one python-pptx upload carrying all pictures, imported by Drive, then the Slides API).
+  `classify.py` and `emit.py` are each stage's face; the code lives by topic in `classify_*`
+  (PageClassifier's mixins, `classify_model`, `classify_text`) and `emit_*` (layered, no import
+  cycle; each module's docstring says what it holds). Callers keep importing from the face; a
+  test that monkeypatches a name patches the module that reads it.
 - **The PDF library is a swappable backend** (`src/beamer2slides/pdf/`, docs/pdf-backend.md).
   Nothing outside that package imports pypdfium2; answers are plain data, page objects are named
   by id. `api.py` is the contract, `pdfium_backend.py` the reference, `sandbox.py` runs any backend
