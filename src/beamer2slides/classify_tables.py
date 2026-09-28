@@ -1,6 +1,7 @@
 """PageClassifier's tables: ruled, shaded and rule-less grids of text that become native tables."""
 
 import statistics
+from dataclasses import dataclass, field
 
 from .classify_model import Line, Rect, Span, union_all
 from .classify_text import cell_runs, is_mono, justified_cells, span_runs
@@ -102,7 +103,107 @@ class TablesMixin:
 
     def table_from(self, c: Rect, label_spans: list[Span], text_rects: list[Rect], index: int) -> dict | None:
         """A figure cluster that is really a plain table: text framed by horizontal rules of
-        equal extent and nothing else. Returns a native table element, or None."""
+        equal extent and nothing else. Returns a native table element, or None.
+
+        In steps: the rules and shading that frame it (`table_ruling`); its words by row, with
+        its \\multirow rows and wrapped cells (`TableRows`), and the columns their chunks fall
+        into; cells and merges (`place_cells`) and each column's alignment (`column_info`); a
+        wrapped cell's lines joined into one cell (`TableCells.join_wrapped`); borders
+        (`table_borders`) and row heights (`row_heights`); and last whether Slides can set the
+        table where it stands."""
+        ruling = self.table_ruling(c)
+        if ruling is None:
+            return None
+        frame, horizontal, vertical, fills = ruling
+        box = c.expand(0.5)
+        spans = sorted((s for s in label_spans if box.contains_rect(s.rect)), key=lambda s: s.baseline)
+        if not spans or any(not s.horizontal or s.font.upper().startswith("CMEX") or "�" in s.text for s in spans) or \
+                any(box.contains_rect(b) for b in self.bars):  # big operators, fractions: keep the picture
+            return None
+        rows = TableRows(spans, vertical)
+        if any(i - 1 in rows.between for i in rows.between):
+            return None
+        size = rows.size
+        rows.find_wrapped()
+        items, columns = rows.chunks()
+        if not columns:
+            return None
+        if any(f["rect"].x0 < frame.x0 - 1.5 or f["rect"].x1 > frame.x1 + 1.5 for f in fills):
+            return None  # shading beyond the table: a coloured box around it
+        bounds = column_bounds(frame, columns, vertical, fills)
+        cells = place_cells(items, bounds, rows.grid_rows())
+        if cells is None:
+            return None
+        n_cols = len(columns)
+        col_info = column_info(columns, cells)
+        align_merges(cells, col_info)
+        cells.join_wrapped({sum(1 for j in range(i) if j not in rows.between) for i in rows.continued})
+        n_rows = len(cells.rows)
+        baselines = [line_base(row) for row in cells.rows]
+        ruled = table_borders(horizontal, vertical, frame, bounds, columns, baselines, size)
+        if ruled is None:
+            return None
+        rules, borders = ruled
+        heights = row_heights(baselines, cells.last_line, cells.row_lines, size)
+        bottom = slides_bottom(baselines, heights, cells.row_lines, size, self.W)
+        grown = Rect(frame.x0, frame.y1, frame.x1, bottom)
+        if bottom > self.H - 2 or any(t.intersects(grown) for t in text_rects) or \
+                any(reg.intersects(grown) and not c.expand(0.5).contains_rect(reg) for reg in self.regions):
+            return None
+
+        cell_text = [[cell_runs(lines) for lines in row] for row in cells.cell_lines]
+        page_color = next((d["fill"].lower() for d in self.page["drawings"] if d["type"] == "f" and d["fill"]
+                           and Rect.of(d["bbox"]).w * Rect.of(d["bbox"]).h >= 0.95 * self.W * self.H), "#ffffff")
+        # [row, col, where each line after the first starts in the cell's text]: emit makes the
+        # column wide enough for every line of the PDF, a hyphenated word whole.
+        wrapped_cells = [[r, cc, starts] for r, row in enumerate(cell_text) for cc, (_, starts) in enumerate(row) if starts]
+        set_justified = {cc for cc in range(n_cols) if col_info[cc]["align"] == "left" and justified_cells(
+            [cells.cell_lines[r][c2] for r, c2, _ in wrapped_cells if c2 == cc], columns[cc][1])}
+        justified = [[r, cc] for r, cc, _ in wrapped_cells if cc in set_justified]
+        bands = row_bands([f for f in fills if f["color"].lower() != page_color], baselines)
+        merges, extent_of = cells.merges, cells.extent_of
+        table = {
+            "id": f"p{self.page['index']}tab{index}", "kind": "table", "role": "table",
+            "bbox": c.expand(1.0).as_list(), "frame": frame.as_list(), "size": round(size, 2),
+            "row_baselines": [round(b, 2) for b in baselines],
+            "row_heights": [round(p, 2) for p in heights],
+            **({"row_lines": cells.row_lines, "wrapped": wrapped_cells} if wrapped_cells else {}),
+            # [row, col] of wrapped cells set justified (a tabularx X, a p{} column): emit writes
+            # them JUSTIFIED, their lines out to the PDF's edge.
+            **({"justified": justified} if justified else {}),
+            "columns": col_info,
+            "bounds": [round(b, 2) for b in bounds],
+            "cells": [[runs for runs, _ in row] for row in cell_text],
+            "merges": merges,
+            # Where each merged cell's words run (by its index in merges): emit indents a flush
+            # cell spanning columns as the PDF does. (Kept out of the merges themselves: sync
+            # compares those with the base's to refill a table in place.)
+            **({"merge_x": [[round(extent_of[k][0], 2), round(extent_of[k][1], 2)] for k in range(len(merges))]}
+               if merges else {}),
+            "rules": [{"row": min(k, n_rows - 1), "position": "TOP" if k < n_rows else "BOTTOM",
+                       "color": r["color"], "weight": round(r["weight"], 2), "y": round(r["rect"].cy, 2)}
+                      for r in rules for k in [row_boundary(baselines, r["rect"].cy)]],
+            "borders": borders,
+            # Shading per cell: the rows whose baseline and the columns whose middle it covers.
+            # (white \rowcolors stripes on an off-white page show: only the page's own colour
+            # is left out)
+            "fills": [{"row": rr, "col": cc, "color": f["color"]}
+                      for f in fills if f["color"].lower() != page_color
+                      for rr, b in enumerate(baselines) if f["rect"].y0 <= b <= f["rect"].y1
+                      for cc in range(n_cols) if f["rect"].x0 <= (bounds[cc] + bounds[cc + 1]) / 2 <= f["rect"].x1],
+            **({"bands": bands} if bands else {}),
+            "spans": [s.id for s in spans],
+        }
+        # A table Slides cannot set on the page, its columns closed up to their words and its
+        # text at emit.TABLE_MIN_SHRINK (an overfull table far wider than the page), stays a
+        # picture: native, it ran off the slide's edge and lost its last columns.
+        from .emit import table_fits  # (emit imports this module)
+        return table if table_fits(table, self.W) else None
+
+    def table_ruling(self, c: Rect) -> tuple[Rect, list[dict], list[dict], list[dict]] | None:
+        """The rules and shading that make the cluster c a table: (its frame, horizontal rules,
+        vertical rules, fills), each rule {rect, color, weight} and fill {rect, color}. None
+        when there are no such rules, or c holds an image or any other drawing."""
         groups = [g for g in self.table_rules if c.expand(1).contains_rect(union_all(r["rect"] for r in g))]
         # Fewer than two full rules, but cell shading edge to edge (a heatmap, \rowcolors): the
         # shading and the rules there are frame the table.
@@ -145,450 +246,7 @@ class TablesMixin:
                 return None
         if vertical or grid:
             frame = union_all([frame] + [v["rect"] for v in vertical + (horizontal if grid else [])])
-        spans = sorted((s for s in label_spans if box.contains_rect(s.rect)), key=lambda s: s.baseline)
-        if not spans or any(not s.horizontal or s.font.upper().startswith("CMEX") or "�" in s.text for s in spans) or \
-                any(box.contains_rect(b) for b in self.bars):  # big operators, fractions: keep the picture
-            return None
-        size = max(s.size for s in spans)
-
-        # Rows by baseline. A row sitting halfway between its neighbours is a \multirow cell
-        # spanning both of them.
-        rows: list[list[Span]] = []
-        for s in spans:
-            anchor = max(rows[-1], key=lambda x: x.size) if rows else None  # the row's normal-size text
-            if rows and abs(s.baseline - anchor.baseline) <= 0.5 * max(s.size, anchor.size):
-                rows[-1].append(s)
-            else:
-                rows.append([s])
-        base = [statistics.fmean(s.baseline for s in row) for row in rows]
-
-        def halfway(i: int) -> bool:
-            """Row i sits in the middle of its neighbours, which are one row pitch of this
-            table apart (\\arraystretch and \\hline gaps make that pitch well over an em, so
-            the half pitches of a \\multirow are too)."""
-            gaps = (base[i] - base[i - 1], base[i + 1] - base[i])
-            if max(gaps) < 0.75 * size:
-                return True
-            others = [b - a for k, (a, b) in enumerate(zip(base, base[1:])) if k not in (i - 1, i)]
-            return bool(others) and abs(gaps[0] - gaps[1]) <= 0.4 * size and max(gaps) < 1.2 * size and \
-                sum(gaps) <= 1.15 * statistics.median(others)
-        between = {i for i in range(1, len(rows) - 1)
-                   if halfway(i) and not any(a.rect.x0 < b.rect.x1 and b.rect.x0 < a.rect.x1
-                                             for a in rows[i] for b in rows[i - 1] + rows[i + 1])}
-        if any(i - 1 in between for i in between):
-            return None
-        grid_rows = [row for i, row in enumerate(rows) if i not in between]
-
-        # A cell set in a paragraph column (p{3cm}) wraps: its next lines are rows of their own
-        # holding nothing but words in that column, starting where the cell starts, and its lines
-        # are justified, their word spaces stretched past the half em that parts two cells. Each
-        # such line is one chunk from the cell's left edge to its right: its words cut into
-        # chunks tangled the columns and the table was refused, and as text boxes the cell's
-        # first line joined the numbers beside it and reflowed across their column in Slides.
-        wrapped: dict[int, list[list[float]]] = {}  # row index -> its wrapped cells' [x0, x1]
-        continued: set[int] = set()  # rows holding nothing but the next lines of cells above
-
-        def ruled(a: Span, b: Span) -> bool:
-            """A vertical rule between two words of a row (not one of another row: a
-            \\multicolumn's words run across the rule the rows above and below have there)."""
-            y = b.baseline - 0.3 * b.size
-            return any(a.rect.x1 < v["rect"].cx < b.rect.x0 and v["rect"].y0 <= y <= v["rect"].y1 for v in vertical)
-
-        def phrase(spans: list[Span], x0: float) -> list[Span]:
-            out = []
-            for s in sorted(spans, key=lambda s: s.rect.x0):
-                if not out and abs(s.rect.x0 - x0) <= 0.5 or out and s.rect.x0 - out[-1].rect.x1 <= s.size and not ruled(out[-1], s):
-                    out.append(s)
-                elif out:
-                    break
-            return out
-
-        def phrases(spans: list[Span]) -> list[list[Span]]:
-            out: list[list[Span]] = []
-            for s in sorted(spans, key=lambda s: s.rect.x0):
-                if out and s.rect.x0 - out[-1][-1].rect.x1 <= s.size and not ruled(out[-1][-1], s):
-                    out[-1].append(s)
-                else:
-                    out.append([s])
-            return out
-
-        def words(spans: list[Span]) -> str:
-            return " ".join(s.text for s in spans).strip()
-
-        def right_end(x0: float) -> float:
-            """Where the longest line starting at x0 ends: a justified cell's full lines."""
-            return max((p[-1].rect.x1 for row in rows for p in [phrase(row, x0)] if p), default=x0)
-
-        for i in range(len(rows) - 1):
-            j = i + 1
-            pitch = base[j] - base[i]
-            if i in between or j in between or pitch > 1.6 * size:
-                continue
-            parts = phrases(rows[j])
-            if pitch > 1.35 * size:
-                # Rows set as far apart as the lines of a cell (\arraystretch with \linespread):
-                # a line of words running on in lower case from a full (justified) line above.
-                if not all(words(p)[:1].islower() and (f := phrase(rows[i], p[0].rect.x0)) and
-                           f[-1].rect.x1 >= right_end(p[0].rect.x0) - 0.5 for p in parts):
-                    continue
-            if len(parts) > 1:
-                # Several paragraph columns wrapping in one row (|l|X|X|): the next row holds
-                # the next line of each, and nothing in the columns to their left. Each line
-                # runs on from a phrase of the row above (lower case, after two or more words),
-                # which a row of cells in left-aligned columns does not.
-                if min(s.rect.x0 for s in rows[j]) <= min(s.rect.x0 for s in rows[i]) + 1:
-                    continue
-                firsts = [phrase(rows[i], p[0].rect.x0) for p in parts]
-                if not all(f and len(words(f).split()) >= 2 and words(p)[:1].islower() for f, p in zip(firsts, parts)):
-                    continue
-            else:
-                firsts = [phrase(rows[i], parts[0][0].rect.x0)]
-                if not firsts[0]:
-                    continue
-            cells: list[list[float]] = []
-            for p, first in zip(parts, firsts):
-                x0 = p[0].rect.x0
-                prev = next((w for w in wrapped.get(i, []) if abs(w[0] - x0) <= 0.5), None)
-                x1 = max(first[-1].rect.x1, prev[1] if prev else 0)
-                if x1 < p[-1].rect.x1 - 0.5:
-                    break  # a paragraph's first line is full; this one ends short of the next
-                cells.append([x0, max(x1, p[-1].rect.x1)])
-            else:
-                for x0, x1 in cells:
-                    for r in (i, j):
-                        at = next((w for w in wrapped.setdefault(r, []) if abs(w[0] - x0) <= 0.5), None)
-                        if at:
-                            at[1] = max(at[1], x1)
-                        else:
-                            wrapped[r].append([x0, x1])
-                continued.add(j)
-
-        def chunks_of(row: list[Span], i: int) -> list[list[Span]]:
-            chunks: list[list[Span]] = []
-            cells = []
-            for x0, x1 in wrapped.get(i, []):
-                cell = sorted((s for s in row if s.rect.x0 >= x0 - 0.5 and s.rect.x1 <= x1 + 0.5), key=lambda s: s.rect.x0)
-                row = [s for s in row if s not in cell]
-                cells += [cell] if cell else []
-            for s in sorted(row, key=lambda s: s.rect.x0):
-                if chunks and s.rect.x0 - chunks[-1][-1].rect.x1 <= 0.5 * size and not ruled(chunks[-1][-1], s):
-                    chunks[-1].append(s)
-                else:
-                    chunks.append([s])
-            return sorted(chunks + cells, key=lambda ch: ch[0].rect.x0) if cells else chunks
-
-        # (row index in grid_rows, row span, chunk)
-        items = []
-        for i, row in enumerate(rows):
-            r = sum(1 for j in range(i) if j not in between)
-            for ch in chunks_of(row, i):
-                items.append((r - 1, 2, ch) if i in between else (r, 1, ch))
-
-        def extent(ch):
-            return ch[0].rect.x0, ch[-1].rect.x1
-
-        # A chunk overlapping two separate chunks of another row (\multicolumn), or crossing a
-        # vertical rule, spans several columns; columns come from the other chunks.
-        def spanning(item) -> bool:
-            r, _, ch = item
-            x0, x1 = extent(ch)
-            if any(x0 + 1 < v["rect"].cx < x1 - 1 for v in vertical):
-                return True
-            for r2 in {it[0] for it in items if it[0] != r}:
-                under = sorted(extent(it[2]) for it in items if it[0] == r2 and extent(it[2])[0] < x1 and x0 < extent(it[2])[1])
-                if any(b[0] > a[1] for a, b in zip(under, under[1:])):
-                    return True
-            return False
-
-        # Columns set closer than half an em (\tabcolsep cut down, @{\hspace{4pt}}) join a row's
-        # cells into one chunk as if they were words of one phrase, and that chunk spans the
-        # table - in Slides one merged cell, too narrow for its words, which wraps. Cut such a
-        # chunk between two words where no other row has anything, and every other row reaching
-        # both sides has a gap there, when every piece lines up with the cell under it in every
-        # other row (left, right or centre edge: a \multicolumn header centred over two columns has
-        # its word gap on the column gap too, and its words line up with nothing - or with one
-        # cell somewhere by chance, which is why it is every row) and no piece spans anything.
-        def cut(item) -> list:
-            r, rs, ch = item
-            others = [extent(it[2]) for it in items if it[0] != r]
-            rows_of = [[extent(it[2]) for it in items if it[0] == r2] for r2 in {it[0] for it in items if it[0] != r}]
-            pieces, start = [], 0
-            for k in range(1, len(ch)):
-                a, b = ch[k - 1].rect.x1, ch[k].rect.x0
-                x = (a + b) / 2
-                if not any(x0 - 0.5 < x < x1 + 0.5 for x0, x1 in others) and \
-                        any(x1 <= a for x0, x1 in others) and any(x0 >= b for x0, x1 in others):
-                    pieces.append(ch[start:k])
-                    start = k
-            pieces.append(ch[start:])
-
-            def lined_up(p) -> bool:
-                x0, x1 = extent(p)
-                under = [(o0, o1) for row in rows_of for o0, o1 in row if o0 < x1 and x0 < o1]
-                return bool(under) and all(abs(x0 - o0) <= 0.5 or abs(x1 - o1) <= 0.5 or abs(x0 + x1 - o0 - o1) <= 1
-                                           for o0, o1 in under)
-            return [(r, rs, p) for p in pieces] if all(map(lined_up, pieces)) else [item]
-
-        for it in [it for it in items if len(it[2]) > 1 and spanning(it)]:
-            parts = cut(it)
-            if len(parts) > 1:
-                at = items.index(it)
-                items[at:at + 1] = parts
-                if any(spanning(p) for p in parts):
-                    items[at:at + len(parts)] = [it]
-        wide = [it for it in items if spanning(it)]
-        intervals = sorted(extent(it[2]) for it in items if it not in wide)
-        columns: list[list[float]] = []
-        for x0, x1 in intervals:
-            if columns and x0 < columns[-1][1] + 1 and not any(columns[-1][1] - 1 < v["rect"].cx < x0 + 1 for v in vertical):
-                columns[-1][1] = max(columns[-1][1], x1)
-            else:
-                columns.append([x0, x1])
-        if not columns:
-            return None
-        if any(f["rect"].x0 < frame.x0 - 1.5 or f["rect"].x1 > frame.x1 + 1.5 for f in fills):
-            return None  # shading beyond the table: a coloured box around it
-        bounds = [frame.x0]
-        # Cell shading starts exactly at TeX's column edges.
-        fill_edges = sorted({round(f["rect"].x0, 2) for f in fills})
-        for a, b in zip(columns, columns[1:]):
-            rule = [v["rect"].cx for v in vertical if a[1] - 1 <= v["rect"].cx <= b[0] + 1] or \
-                [x for x in fill_edges if a[1] - 1 <= x <= b[0] + 1]
-            bounds.append(rule[0] if rule else (a[1] + b[0]) / 2)
-        bounds.append(frame.x1)
-
-        n_rows, n_cols = len(grid_rows), len(columns)
-        cells = [[[] for _ in columns] for _ in grid_rows]
-        placed: list[list[list[Span]]] = [[] for _ in columns]
-        heads: list[list[Span] | None] = [None] * len(columns)  # (each column's cell in the first row)
-        extent_of: dict[int, tuple[float, float]] = {}  # (a merged cell's words, by its index in merges)
-        merges, covered = [], {}
-        row_of: dict[int, int] = {}  # (a single cell's words, by id: its row)
-        for it in items:
-            r, rs, ch = it
-            x0, x1 = extent(ch)
-            cols = [i for i in range(n_cols) if bounds[i] < x1 - 0.5 and x0 + 0.5 < bounds[i + 1]]
-            if not cols:
-                return None
-            c0, cs = cols[0], len(cols)
-            for rr in range(r, r + rs):
-                for cc in range(c0, c0 + cs):
-                    if covered.get((rr, cc), it) is not it:
-                        return None  # overlapping cells: not a grid we understand
-                    covered[(rr, cc)] = it
-            cells[r][c0].extend(ch)
-            if rs > 1 or cs > 1:
-                mid = (bounds[c0] + bounds[c0 + cs]) / 2
-                align = "center" if abs((x0 + x1) / 2 - mid) <= 2 else "left" if x0 - bounds[c0] < bounds[c0 + cs] - x1 else "right"
-                merges.append({"row": r, "col": c0, "rows": rs, "cols": cs, "align": align})
-                extent_of[len(merges) - 1] = (x0, x1)
-            else:
-                placed[c0].append(ch)
-                row_of[id(ch)] = r
-                if r == 0 and rs == 1:
-                    heads[c0] = ch
-        col_info = []
-
-        def aligned(chunks: list[list[Span]], x0: float, x1: float) -> str:
-            left = all(abs(ch[0].rect.x0 - x0) <= 1 for ch in chunks)
-            right = all(abs(ch[-1].rect.x1 - x1) <= 1 for ch in chunks)
-            digits = sum(c.isdigit() for ch in chunks for s in ch for c in s.text)
-            letters = sum(c.isalpha() for ch in chunks for s in ch for c in s.text)
-            if left and right and digits > letters:
-                return "right"  # equally wide numbers: right-aligned, like a number column
-            return "left" if left else "right" if right else "center"
-
-        for (x0, x1), chunks, head in zip(columns, placed, heads):
-            info = {"x0": round(x0, 2), "x1": round(x1, 2), "align": aligned(chunks, x0, x1)}
-            # A column head set otherwise than its body (\thead centred over a left column, an S
-            # column's head centred over numbers set flush right): the head row keeps its own
-            # alignment (`head`) and the body its own, to the body's edges (`body`). As one, a
-            # centred head took the body's left edge, or every number was centred.
-            body = [ch for ch in chunks if ch is not head]
-            # siunitx centres what is no number (a dash for a missing value) on the column, the head's
-            # centre, while its numbers keep their decimal places, off the middle (r2_tables_v2 slide
-            # 4): such a cell is set centred over the column like the head (`centred`, its rows), the
-            # body's alignment is its numbers'.
-            if head is not None:
-                hc = (head[0].rect.x0 + head[-1].rect.x1) / 2
-                numeric = lambda ch: any(c.isdigit() for s in ch for c in s.text)
-                on_axis = lambda ch: abs((ch[0].rect.x0 + ch[-1].rect.x1) / 2 - hc) <= 1
-                odd = [ch for ch in body if not numeric(ch) and on_axis(ch)]
-                rest = [ch for ch in body if not any(ch is o for o in odd)]
-                if odd and len(rest) >= 2 and all(numeric(ch) and not on_axis(ch) for ch in rest):
-                    bx0, bx1 = min(ch[0].rect.x0 for ch in rest), max(ch[-1].rect.x1 for ch in rest)
-                    info.update(align=aligned(rest, bx0, bx1), head="center", body=[round(bx0, 2), round(bx1, 2)],
-                                centred=sorted(row_of[id(ch)] for ch in odd))
-                    col_info.append(info)
-                    continue
-            if head is not None and len(body) >= 2:
-                bx0, bx1 = min(ch[0].rect.x0 for ch in body), max(ch[-1].rect.x1 for ch in body)
-                hx0, hx1 = head[0].rect.x0, head[-1].rect.x1
-                if abs((hx1 - hx0) - (bx1 - bx0)) <= 2 or \
-                        all(abs(ch[0].rect.x0 - bx0) <= 1 and abs(ch[-1].rect.x1 - bx1) <= 1 for ch in body):
-                    col_info.append(info)  # (a head as wide as its body, or a body of equally wide
-                    continue               # cells - ticks, numbers: set alike every way)
-                how = aligned(body, bx0, bx1)
-                own = "left" if abs(hx0 - bx0) <= 1 else "right" if abs(hx1 - bx1) <= 1 else \
-                    "center" if abs((hx0 + hx1) - (bx0 + bx1)) <= 3 else None
-                if own is not None and (own != how or how != info["align"]):
-                    info.update(align=how, head=own, body=[round(bx0, 2), round(bx1, 2)])
-            col_info.append(info)
-        # A \multirow cell in one column is flush with the column's words or centred among them
-        # (a \thead over a left column): its column says which, not the cell's bounds - a short
-        # word flush left in a narrow column sits near the middle of those either way.
-        for k, (x0, x1) in extent_of.items():
-            m = merges[k]
-            if m["cols"] == 1:
-                cx0, cx1 = col_info[m["col"]].get("body") or (col_info[m["col"]]["x0"], col_info[m["col"]]["x1"])
-                m["align"] = "left" if abs(x0 - cx0) <= 1 else "right" if abs(x1 - cx1) <= 1 else \
-                    "center" if abs((x0 + x1) - (cx0 + cx1)) <= 3 else m["align"]
-
-        def line_base(row: list[Span]) -> float:
-            return statistics.fmean(s.baseline for s in row if s.size >= 0.9 * max(x.size for x in row))
-
-        # A wrapped cell's next lines were rows of their own up to here (columns, merges and
-        # alignments are found line by line); now they join the cell they continue, one cell of
-        # several lines that Slides wraps in its column as TeX did - and wraps again when a person
-        # types into it. Not across a merged cell: that grid is not one we understand line by line.
-        row_lines = [1] * n_rows
-        last_line = [line_base(row) for row in grid_rows]  # a row's last baseline
-        cell_lines = [[[cell] if cell else [] for cell in row] for row in cells]
-        cont = {sum(1 for j in range(i) if j not in between) for i in continued}
-        merged_rows = {g for m in merges for g in range(m["row"], m["row"] + m["rows"])}
-        if cont and not cont & merged_rows and 0 not in cont:
-            keep, head_of = [], {}
-            for g in range(n_rows):
-                if g in cont:
-                    head_of[g] = keep[-1]
-                else:
-                    keep.append(g)
-            for g, h in sorted(head_of.items()):
-                row_lines[h] += 1
-                last_line[h] = last_line[g]
-                for cc in range(n_cols):
-                    if cells[g][cc]:
-                        cell_lines[h][cc].append(cells[g][cc])
-            at = {g: k for k, g in enumerate(keep)}
-            merges = [{**m, "row": at[m["row"]]} for m in merges]
-            grid_rows, cell_lines = [grid_rows[g] for g in keep], [cell_lines[g] for g in keep]
-            row_lines, last_line = [row_lines[g] for g in keep], [last_line[g] for g in keep]
-            n_rows = len(keep)
-        rows = grid_rows
-
-        baselines = [line_base(row) for row in rows]
-
-        # Borders: rules across the whole table stay row rules; partial rules (\cline,
-        # \cmidrule) and vertical rules become the borders of the cells they run along.
-        def row_boundary(y: float) -> int:
-            return sum(b < y for b in baselines)
-
-        borders = []
-        full = [h for h in horizontal if h["rect"].x0 <= frame.x0 + 1.5 and h["rect"].x1 >= frame.x1 - 1.5]
-        rules = full
-        for h in horizontal:
-            if h in full:
-                continue
-            k = row_boundary(h["rect"].cy)
-            for cc in range(n_cols):
-                # (\cmidrule(l) is trimmed by half an em at its left end: it still underlines
-                # every word of the column)
-                if (h["rect"].x0 <= bounds[cc] + 2.5 or h["rect"].x0 <= columns[cc][0] + 1) and \
-                        (h["rect"].x1 >= bounds[cc + 1] - 2.5 or h["rect"].x1 >= columns[cc][1] - 1):
-                    borders.append({"row": min(k, n_rows - 1), "col": cc, "position": "TOP" if k < n_rows else "BOTTOM",
-                                    "color": h["color"], "weight": round(h["weight"], 2), "y": round(h["rect"].cy, 2)})
-        for v in vertical:
-            k = min(range(len(bounds)), key=lambda i: abs(bounds[i] - v["rect"].cx))
-            if abs(bounds[k] - v["rect"].cx) > 1.5:
-                # The second stroke of a double rule (||, \doublerulesep 2 pt beside the first):
-                # a Slides border is one line, the one on the bound is written.
-                if any(u is not v and abs(bounds[k] - u["rect"].cx) <= 1.5 and abs(u["rect"].cx - v["rect"].cx) <= 4
-                       and u["rect"].y0 < v["rect"].y1 and v["rect"].y0 < u["rect"].y1 for u in vertical):
-                    continue
-                return None  # a rule inside a column
-            for rr, b in enumerate(baselines):
-                if v["rect"].y0 <= b - 0.5 * size and v["rect"].y1 >= b:
-                    borders.append({"row": rr, "col": min(k, n_cols - 1), "position": "LEFT" if k < n_cols else "RIGHT",
-                                    "color": v["color"], "weight": round(v["weight"], 2)})
-        pitches = [b - a for a, b in zip(baselines, baselines[1:])] or [1.4 * size]
-        # The last row: as tall as the one before it (as a line of a wrapped cell, when that one
-        # wraps), plus its own further lines.
-        lead = min([(e - b) / (k - 1) for b, e, k in zip(baselines, last_line, row_lines) if k > 1] or pitches)
-        last = (pitches[-1] if n_rows < 2 or row_lines[-2] == 1 else lead) + last_line[-1] - baselines[-1]
-        heights = pitches + [last] if n_rows > 1 else [last]
-        # A Slides row is at least its lines, 1.195 em x lineSpacing for the first and 1.2 em for
-        # each further one: emit's tables come with the .pptx, without the 7.2 pt of padding above
-        # and below an API-made table has (emit.table_rows). Refuse if the table would grow into
-        # content below all the same.
-        scale = 720.0 / self.W
-        z = size * scale / 1.02
-        body = [(1.195 + (k - 1) * 1.2) * z for k in row_lines]
-        ratio = min(1.0, max(0.5, min(h * scale / b for h, b in zip(heights, body))))
-        row_h = [max(h * scale, b * ratio) / scale for h, b in zip(heights, body)]
-        top = baselines[0] - (0.968 * z - 0.72 - (1 - ratio) * 0.9 * z) / scale
-        bottom = top + sum(row_h)
-        grown = Rect(frame.x0, frame.y1, frame.x1, bottom)
-        if bottom > self.H - 2 or any(t.intersects(grown) for t in text_rects) or \
-                any(reg.intersects(grown) and not c.expand(0.5).contains_rect(reg) for reg in self.regions):
-            return None
-
-        cell_text = [[cell_runs(lines) for lines in row] for row in cell_lines]
-        page_color = next((d["fill"].lower() for d in self.page["drawings"] if d["type"] == "f" and d["fill"]
-                           and Rect.of(d["bbox"]).w * Rect.of(d["bbox"]).h >= 0.95 * self.W * self.H), "#ffffff")
-        # [row, col, where each line after the first starts in the cell's text]: emit makes the
-        # column wide enough for every line of the PDF, a hyphenated word whole.
-        wrapped_cells = [[r, cc, starts] for r, row in enumerate(cell_text) for cc, (_, starts) in enumerate(row) if starts]
-        set_justified = {cc for cc in range(n_cols) if col_info[cc]["align"] == "left" and justified_cells(
-            [cell_lines[r][c2] for r, c2, _ in wrapped_cells if c2 == cc], columns[cc][1])}
-        justified = [[r, cc] for r, cc, _ in wrapped_cells if cc in set_justified]
-        # [row, top, bottom] of a row shaded by a band of its own (\rowcolor, \rowcolors: fills
-        # that hold its baseline and no other row's): emit puts the Slides row's edges there, as on
-        # a rule. Set just above its words instead, a shaded row began ~3 pt below its band and
-        # the words sat at the top of their fill (r2_tables_v1 slide 4).
-        shown = [f for f in fills if f["color"].lower() != page_color]
-        bands = []
-        for rr, b in enumerate(baselines):
-            own = [f["rect"] for f in shown if f["rect"].y0 <= b <= f["rect"].y1
-                   and sum(f["rect"].y0 <= b2 <= f["rect"].y1 for b2 in baselines) == 1]
-            if own:
-                bands.append([rr, round(min(r.y0 for r in own), 2), round(max(r.y1 for r in own), 2)])
-        table = {
-            "id": f"p{self.page['index']}tab{index}", "kind": "table", "role": "table",
-            "bbox": c.expand(1.0).as_list(), "frame": frame.as_list(), "size": round(size, 2),
-            "row_baselines": [round(b, 2) for b in baselines],
-            "row_heights": [round(p, 2) for p in heights],
-            **({"row_lines": row_lines, "wrapped": wrapped_cells} if wrapped_cells else {}),
-            # [row, col] of wrapped cells set justified (a tabularx X, a p{} column): emit writes
-            # them JUSTIFIED, their lines out to the PDF's edge.
-            **({"justified": justified} if justified else {}),
-            "columns": col_info,
-            "bounds": [round(b, 2) for b in bounds],
-            "cells": [[runs for runs, _ in row] for row in cell_text],
-            "merges": merges,
-            # Where each merged cell's words run (by its index in merges): emit indents a flush
-            # cell spanning columns as the PDF does. (Kept out of the merges themselves: sync
-            # compares those with the base's to refill a table in place.)
-            **({"merge_x": [[round(extent_of[k][0], 2), round(extent_of[k][1], 2)] for k in range(len(merges))]}
-               if merges else {}),
-            "rules": [{"row": min(k, len(rows) - 1), "position": "TOP" if k < len(rows) else "BOTTOM",
-                       "color": r["color"], "weight": round(r["weight"], 2), "y": round(r["rect"].cy, 2)}
-                      for r in rules for k in [row_boundary(r["rect"].cy)]],
-            "borders": borders,
-            # Shading per cell: the rows whose baseline and the columns whose middle it covers.
-            # (white \rowcolors stripes on an off-white page show: only the page's own colour
-            # is left out)
-            "fills": [{"row": rr, "col": cc, "color": f["color"]}
-                      for f in fills if f["color"].lower() != page_color
-                      for rr, b in enumerate(baselines) if f["rect"].y0 <= b <= f["rect"].y1
-                      for cc in range(n_cols) if f["rect"].x0 <= (bounds[cc] + bounds[cc + 1]) / 2 <= f["rect"].x1],
-            **({"bands": bands} if bands else {}),
-            "spans": [s.id for s in spans],
-        }
-        # A table Slides cannot set on the page, its columns closed up to their words and its
-        # text at emit.TABLE_MIN_SHRINK (an overfull table far wider than the page), stays a
-        # picture: native, it ran off the slide's edge and lost its last columns.
-        from .emit import table_fits  # (emit imports this module)
-        return table if table_fits(table, self.W) else None
+        return frame, horizontal, vertical, fills
 
     def plain_tables(self, lines: list[Line]) -> list[dict]:
         """Tabulars without rules, used to align short texts in columns: three or more rows at a
@@ -688,3 +346,464 @@ class TablesMixin:
                 "merges": [], "rules": [], "borders": [], "spans": [s.id for s in spans],
             })
         return tables
+
+
+class TableRows:
+    """A table's words by row, the rows of its \\multirow cells (`between`) and of its wrapped
+    cells' further lines (`wrapped`, `continued`), and the chunks the rows fall into."""
+
+    def __init__(self, spans: list[Span], vertical: list[dict]):
+        self.size = max(s.size for s in spans)
+        self.vertical = vertical
+        # Rows by baseline. A row sitting halfway between its neighbours is a \multirow cell
+        # spanning both of them.
+        rows: list[list[Span]] = []
+        for s in spans:
+            anchor = max(rows[-1], key=lambda x: x.size) if rows else None  # the row's normal-size text
+            if rows and abs(s.baseline - anchor.baseline) <= 0.5 * max(s.size, anchor.size):
+                rows[-1].append(s)
+            else:
+                rows.append([s])
+        self.rows = rows
+        self.base = [statistics.fmean(s.baseline for s in row) for row in rows]
+        self.between = {i for i in range(1, len(rows) - 1)
+                        if self.halfway(i) and not any(a.rect.x0 < b.rect.x1 and b.rect.x0 < a.rect.x1
+                                                       for a in rows[i] for b in rows[i - 1] + rows[i + 1])}
+        self.wrapped: dict[int, list[list[float]]] = {}  # row index -> its wrapped cells' [x0, x1]
+        self.continued: set[int] = set()  # rows holding nothing but the next lines of cells above
+
+    def halfway(self, i: int) -> bool:
+        """Row i sits in the middle of its neighbours, which are one row pitch of this
+        table apart (\\arraystretch and \\hline gaps make that pitch well over an em, so
+        the half pitches of a \\multirow are too)."""
+        base, size = self.base, self.size
+        gaps = (base[i] - base[i - 1], base[i + 1] - base[i])
+        if max(gaps) < 0.75 * size:
+            return True
+        others = [b - a for k, (a, b) in enumerate(zip(base, base[1:])) if k not in (i - 1, i)]
+        return bool(others) and abs(gaps[0] - gaps[1]) <= 0.4 * size and max(gaps) < 1.2 * size and \
+            sum(gaps) <= 1.15 * statistics.median(others)
+
+    def grid_rows(self) -> list[list[Span]]:
+        """The rows of the grid: every row but the \\multirow cells between two."""
+        return [row for i, row in enumerate(self.rows) if i not in self.between]
+
+    def ruled(self, a: Span, b: Span) -> bool:
+        """A vertical rule between two words of a row (not one of another row: a
+        \\multicolumn's words run across the rule the rows above and below have there)."""
+        y = b.baseline - 0.3 * b.size
+        return any(a.rect.x1 < v["rect"].cx < b.rect.x0 and v["rect"].y0 <= y <= v["rect"].y1 for v in self.vertical)
+
+    def phrase(self, spans: list[Span], x0: float) -> list[Span]:
+        out = []
+        for s in sorted(spans, key=lambda s: s.rect.x0):
+            if not out and abs(s.rect.x0 - x0) <= 0.5 or out and s.rect.x0 - out[-1].rect.x1 <= s.size and not self.ruled(out[-1], s):
+                out.append(s)
+            elif out:
+                break
+        return out
+
+    def phrases(self, spans: list[Span]) -> list[list[Span]]:
+        out: list[list[Span]] = []
+        for s in sorted(spans, key=lambda s: s.rect.x0):
+            if out and s.rect.x0 - out[-1][-1].rect.x1 <= s.size and not self.ruled(out[-1][-1], s):
+                out[-1].append(s)
+            else:
+                out.append([s])
+        return out
+
+    @staticmethod
+    def words(spans: list[Span]) -> str:
+        return " ".join(s.text for s in spans).strip()
+
+    def right_end(self, x0: float) -> float:
+        """Where the longest line starting at x0 ends: a justified cell's full lines."""
+        return max((p[-1].rect.x1 for row in self.rows for p in [self.phrase(row, x0)] if p), default=x0)
+
+    def find_wrapped(self) -> None:
+        """A cell set in a paragraph column (p{3cm}) wraps: its next lines are rows of their own
+        holding nothing but words in that column, starting where the cell starts, and its lines
+        are justified, their word spaces stretched past the half em that parts two cells. Each
+        such line is one chunk from the cell's left edge to its right: its words cut into
+        chunks tangled the columns and the table was refused, and as text boxes the cell's
+        first line joined the numbers beside it and reflowed across their column in Slides."""
+        rows, base, size, between = self.rows, self.base, self.size, self.between
+        phrase, phrases, words, wrapped = self.phrase, self.phrases, self.words, self.wrapped
+        for i in range(len(rows) - 1):
+            j = i + 1
+            pitch = base[j] - base[i]
+            if i in between or j in between or pitch > 1.6 * size:
+                continue
+            parts = phrases(rows[j])
+            if pitch > 1.35 * size:
+                # Rows set as far apart as the lines of a cell (\arraystretch with \linespread):
+                # a line of words running on in lower case from a full (justified) line above.
+                if not all(words(p)[:1].islower() and (f := phrase(rows[i], p[0].rect.x0)) and
+                           f[-1].rect.x1 >= self.right_end(p[0].rect.x0) - 0.5 for p in parts):
+                    continue
+            if len(parts) > 1:
+                # Several paragraph columns wrapping in one row (|l|X|X|): the next row holds
+                # the next line of each, and nothing in the columns to their left. Each line
+                # runs on from a phrase of the row above (lower case, after two or more words),
+                # which a row of cells in left-aligned columns does not.
+                if min(s.rect.x0 for s in rows[j]) <= min(s.rect.x0 for s in rows[i]) + 1:
+                    continue
+                firsts = [phrase(rows[i], p[0].rect.x0) for p in parts]
+                if not all(f and len(words(f).split()) >= 2 and words(p)[:1].islower() for f, p in zip(firsts, parts)):
+                    continue
+            else:
+                firsts = [phrase(rows[i], parts[0][0].rect.x0)]
+                if not firsts[0]:
+                    continue
+            cells: list[list[float]] = []
+            for p, first in zip(parts, firsts):
+                x0 = p[0].rect.x0
+                prev = next((w for w in wrapped.get(i, []) if abs(w[0] - x0) <= 0.5), None)
+                x1 = max(first[-1].rect.x1, prev[1] if prev else 0)
+                if x1 < p[-1].rect.x1 - 0.5:
+                    break  # a paragraph's first line is full; this one ends short of the next
+                cells.append([x0, max(x1, p[-1].rect.x1)])
+            else:
+                for x0, x1 in cells:
+                    for r in (i, j):
+                        at = next((w for w in wrapped.setdefault(r, []) if abs(w[0] - x0) <= 0.5), None)
+                        if at:
+                            at[1] = max(at[1], x1)
+                        else:
+                            wrapped[r].append([x0, x1])
+                self.continued.add(j)
+
+    def chunks_of(self, row: list[Span], i: int) -> list[list[Span]]:
+        chunks: list[list[Span]] = []
+        cells = []
+        for x0, x1 in self.wrapped.get(i, []):
+            cell = sorted((s for s in row if s.rect.x0 >= x0 - 0.5 and s.rect.x1 <= x1 + 0.5), key=lambda s: s.rect.x0)
+            row = [s for s in row if s not in cell]
+            cells += [cell] if cell else []
+        for s in sorted(row, key=lambda s: s.rect.x0):
+            if chunks and s.rect.x0 - chunks[-1][-1].rect.x1 <= 0.5 * self.size and not self.ruled(chunks[-1][-1], s):
+                chunks[-1].append(s)
+            else:
+                chunks.append([s])
+        return sorted(chunks + cells, key=lambda ch: ch[0].rect.x0) if cells else chunks
+
+    def chunks(self) -> tuple[list[tuple[int, int, list[Span]]], list[list[float]]]:
+        """The rows' chunks as (row index in grid_rows, row span, chunk), and the columns
+        [x0, x1] the chunks that span no other fall into."""
+        rows, between, vertical = self.rows, self.between, self.vertical
+        items = []
+        for i, row in enumerate(rows):
+            r = sum(1 for j in range(i) if j not in between)
+            for ch in self.chunks_of(row, i):
+                items.append((r - 1, 2, ch) if i in between else (r, 1, ch))
+
+        # A chunk overlapping two separate chunks of another row (\multicolumn), or crossing a
+        # vertical rule, spans several columns; columns come from the other chunks.
+        def spanning(item) -> bool:
+            r, _, ch = item
+            x0, x1 = extent(ch)
+            if any(x0 + 1 < v["rect"].cx < x1 - 1 for v in vertical):
+                return True
+            for r2 in {it[0] for it in items if it[0] != r}:
+                under = sorted(extent(it[2]) for it in items if it[0] == r2 and extent(it[2])[0] < x1 and x0 < extent(it[2])[1])
+                if any(b[0] > a[1] for a, b in zip(under, under[1:])):
+                    return True
+            return False
+
+        # Columns set closer than half an em (\tabcolsep cut down, @{\hspace{4pt}}) join a row's
+        # cells into one chunk as if they were words of one phrase, and that chunk spans the
+        # table - in Slides one merged cell, too narrow for its words, which wraps. Cut such a
+        # chunk between two words where no other row has anything, and every other row reaching
+        # both sides has a gap there, when every piece lines up with the cell under it in every
+        # other row (left, right or centre edge: a \multicolumn header centred over two columns has
+        # its word gap on the column gap too, and its words line up with nothing - or with one
+        # cell somewhere by chance, which is why it is every row) and no piece spans anything.
+        def cut(item) -> list:
+            r, rs, ch = item
+            others = [extent(it[2]) for it in items if it[0] != r]
+            rows_of = [[extent(it[2]) for it in items if it[0] == r2] for r2 in {it[0] for it in items if it[0] != r}]
+            pieces, start = [], 0
+            for k in range(1, len(ch)):
+                a, b = ch[k - 1].rect.x1, ch[k].rect.x0
+                x = (a + b) / 2
+                if not any(x0 - 0.5 < x < x1 + 0.5 for x0, x1 in others) and \
+                        any(x1 <= a for x0, x1 in others) and any(x0 >= b for x0, x1 in others):
+                    pieces.append(ch[start:k])
+                    start = k
+            pieces.append(ch[start:])
+
+            def lined_up(p) -> bool:
+                x0, x1 = extent(p)
+                under = [(o0, o1) for row in rows_of for o0, o1 in row if o0 < x1 and x0 < o1]
+                return bool(under) and all(abs(x0 - o0) <= 0.5 or abs(x1 - o1) <= 0.5 or abs(x0 + x1 - o0 - o1) <= 1
+                                           for o0, o1 in under)
+            return [(r, rs, p) for p in pieces] if all(map(lined_up, pieces)) else [item]
+
+        for it in [it for it in items if len(it[2]) > 1 and spanning(it)]:
+            parts = cut(it)
+            if len(parts) > 1:
+                at = items.index(it)
+                items[at:at + 1] = parts
+                if any(spanning(p) for p in parts):
+                    items[at:at + len(parts)] = [it]
+        wide = [it for it in items if spanning(it)]
+        intervals = sorted(extent(it[2]) for it in items if it not in wide)
+        columns: list[list[float]] = []
+        for x0, x1 in intervals:
+            if columns and x0 < columns[-1][1] + 1 and not any(columns[-1][1] - 1 < v["rect"].cx < x0 + 1 for v in vertical):
+                columns[-1][1] = max(columns[-1][1], x1)
+            else:
+                columns.append([x0, x1])
+        return items, columns
+
+
+def extent(ch: list[Span]) -> tuple[float, float]:
+    return ch[0].rect.x0, ch[-1].rect.x1
+
+
+def column_bounds(frame: Rect, columns: list[list[float]], vertical: list[dict], fills: list[dict]) -> list[float]:
+    """Where the table's columns part: on a vertical rule between them, else where cell
+    shading starts (exactly at TeX's column edges), else halfway; the frame at both ends."""
+    bounds = [frame.x0]
+    fill_edges = sorted({round(f["rect"].x0, 2) for f in fills})
+    for a, b in zip(columns, columns[1:]):
+        rule = [v["rect"].cx for v in vertical if a[1] - 1 <= v["rect"].cx <= b[0] + 1] or \
+            [x for x in fill_edges if a[1] - 1 <= x <= b[0] + 1]
+        bounds.append(rule[0] if rule else (a[1] + b[0]) / 2)
+    bounds.append(frame.x1)
+    return bounds
+
+
+@dataclass
+class TableCells:
+    """A table's chunks set in its grid: `cells[row][col]` the words of the cell starting there,
+    `merges` the cells spanning several rows or columns (`extent_of`: where their words run, by
+    index in merges), `placed` each column's single cells, `heads` its cell in the first row and
+    `row_of` a single cell's row (by id). `join_wrapped` makes a wrapped cell's lines one cell:
+    `rows` the grid's rows, `cell_lines` each cell's lines, `row_lines` and `last_line` each
+    row's number of lines and last baseline."""
+    rows: list[list[Span]]
+    cells: list[list[list[Span]]]
+    placed: list[list[list[Span]]]
+    heads: list[list[Span] | None]
+    merges: list[dict]
+    extent_of: dict[int, tuple[float, float]]
+    row_of: dict[int, int]
+    row_lines: list[int] = field(default_factory=list)
+    last_line: list[float] = field(default_factory=list)
+    cell_lines: list[list[list[list[Span]]]] = field(default_factory=list)
+
+    def join_wrapped(self, cont: set[int]) -> None:
+        """A wrapped cell's next lines were rows of their own up to here (columns, merges and
+        alignments are found line by line); now they join the cell they continue, one cell of
+        several lines that Slides wraps in its column as TeX did - and wraps again when a person
+        types into it. Not across a merged cell: that grid is not one we understand line by
+        line. cont: the grid rows holding a wrapped cell's further lines."""
+        n_rows, n_cols = len(self.rows), len(self.placed)
+        cells = self.cells
+        row_lines = [1] * n_rows
+        last_line = [line_base(row) for row in self.rows]  # a row's last baseline
+        cell_lines = [[[cell] if cell else [] for cell in row] for row in cells]
+        merged_rows = {g for m in self.merges for g in range(m["row"], m["row"] + m["rows"])}
+        if cont and not cont & merged_rows and 0 not in cont:
+            keep, head_of = [], {}
+            for g in range(n_rows):
+                if g in cont:
+                    head_of[g] = keep[-1]
+                else:
+                    keep.append(g)
+            for g, h in sorted(head_of.items()):
+                row_lines[h] += 1
+                last_line[h] = last_line[g]
+                for cc in range(n_cols):
+                    if cells[g][cc]:
+                        cell_lines[h][cc].append(cells[g][cc])
+            at = {g: k for k, g in enumerate(keep)}
+            self.merges = [{**m, "row": at[m["row"]]} for m in self.merges]
+            self.rows, cell_lines = [self.rows[g] for g in keep], [cell_lines[g] for g in keep]
+            row_lines, last_line = [row_lines[g] for g in keep], [last_line[g] for g in keep]
+        self.row_lines, self.last_line, self.cell_lines = row_lines, last_line, cell_lines
+
+
+def place_cells(items: list[tuple[int, int, list[Span]]], bounds: list[float],
+                grid_rows: list[list[Span]]) -> TableCells | None:
+    """Each chunk (row, row span, words) in the cells its words cover, or None when a chunk
+    covers no column or two chunks the same cell."""
+    n_cols = len(bounds) - 1
+    cells = [[[] for _ in range(n_cols)] for _ in grid_rows]
+    placed: list[list[list[Span]]] = [[] for _ in range(n_cols)]
+    heads: list[list[Span] | None] = [None] * n_cols  # (each column's cell in the first row)
+    extent_of: dict[int, tuple[float, float]] = {}  # (a merged cell's words, by its index in merges)
+    merges, covered = [], {}
+    row_of: dict[int, int] = {}  # (a single cell's words, by id: its row)
+    for it in items:
+        r, rs, ch = it
+        x0, x1 = extent(ch)
+        cols = [i for i in range(n_cols) if bounds[i] < x1 - 0.5 and x0 + 0.5 < bounds[i + 1]]
+        if not cols:
+            return None
+        c0, cs = cols[0], len(cols)
+        for rr in range(r, r + rs):
+            for cc in range(c0, c0 + cs):
+                if covered.get((rr, cc), it) is not it:
+                    return None  # overlapping cells: not a grid we understand
+                covered[(rr, cc)] = it
+        cells[r][c0].extend(ch)
+        if rs > 1 or cs > 1:
+            mid = (bounds[c0] + bounds[c0 + cs]) / 2
+            align = "center" if abs((x0 + x1) / 2 - mid) <= 2 else "left" if x0 - bounds[c0] < bounds[c0 + cs] - x1 else "right"
+            merges.append({"row": r, "col": c0, "rows": rs, "cols": cs, "align": align})
+            extent_of[len(merges) - 1] = (x0, x1)
+        else:
+            placed[c0].append(ch)
+            row_of[id(ch)] = r
+            if r == 0 and rs == 1:
+                heads[c0] = ch
+    return TableCells(grid_rows, cells, placed, heads, merges, extent_of, row_of)
+
+
+def aligned(chunks: list[list[Span]], x0: float, x1: float) -> str:
+    left = all(abs(ch[0].rect.x0 - x0) <= 1 for ch in chunks)
+    right = all(abs(ch[-1].rect.x1 - x1) <= 1 for ch in chunks)
+    digits = sum(c.isdigit() for ch in chunks for s in ch for c in s.text)
+    letters = sum(c.isalpha() for ch in chunks for s in ch for c in s.text)
+    if left and right and digits > letters:
+        return "right"  # equally wide numbers: right-aligned, like a number column
+    return "left" if left else "right" if right else "center"
+
+
+def column_info(columns: list[list[float]], cells: TableCells) -> list[dict]:
+    """Each column's extent and alignment, its head's and body's when they differ."""
+    col_info = []
+    for (x0, x1), chunks, head in zip(columns, cells.placed, cells.heads):
+        info = {"x0": round(x0, 2), "x1": round(x1, 2), "align": aligned(chunks, x0, x1)}
+        # A column head set otherwise than its body (\thead centred over a left column, an S
+        # column's head centred over numbers set flush right): the head row keeps its own
+        # alignment (`head`) and the body its own, to the body's edges (`body`). As one, a
+        # centred head took the body's left edge, or every number was centred.
+        body = [ch for ch in chunks if ch is not head]
+        # siunitx centres what is no number (a dash for a missing value) on the column, the head's
+        # centre, while its numbers keep their decimal places, off the middle (r2_tables_v2 slide
+        # 4): such a cell is set centred over the column like the head (`centred`, its rows), the
+        # body's alignment is its numbers'.
+        if head is not None:
+            hc = (head[0].rect.x0 + head[-1].rect.x1) / 2
+            numeric = lambda ch: any(c.isdigit() for s in ch for c in s.text)
+            on_axis = lambda ch: abs((ch[0].rect.x0 + ch[-1].rect.x1) / 2 - hc) <= 1
+            odd = [ch for ch in body if not numeric(ch) and on_axis(ch)]
+            rest = [ch for ch in body if not any(ch is o for o in odd)]
+            if odd and len(rest) >= 2 and all(numeric(ch) and not on_axis(ch) for ch in rest):
+                bx0, bx1 = min(ch[0].rect.x0 for ch in rest), max(ch[-1].rect.x1 for ch in rest)
+                info.update(align=aligned(rest, bx0, bx1), head="center", body=[round(bx0, 2), round(bx1, 2)],
+                            centred=sorted(cells.row_of[id(ch)] for ch in odd))
+                col_info.append(info)
+                continue
+        if head is not None and len(body) >= 2:
+            bx0, bx1 = min(ch[0].rect.x0 for ch in body), max(ch[-1].rect.x1 for ch in body)
+            hx0, hx1 = head[0].rect.x0, head[-1].rect.x1
+            if abs((hx1 - hx0) - (bx1 - bx0)) <= 2 or \
+                    all(abs(ch[0].rect.x0 - bx0) <= 1 and abs(ch[-1].rect.x1 - bx1) <= 1 for ch in body):
+                col_info.append(info)  # (a head as wide as its body, or a body of equally wide
+                continue               # cells - ticks, numbers: set alike every way)
+            how = aligned(body, bx0, bx1)
+            own = "left" if abs(hx0 - bx0) <= 1 else "right" if abs(hx1 - bx1) <= 1 else \
+                "center" if abs((hx0 + hx1) - (bx0 + bx1)) <= 3 else None
+            if own is not None and (own != how or how != info["align"]):
+                info.update(align=how, head=own, body=[round(bx0, 2), round(bx1, 2)])
+        col_info.append(info)
+    return col_info
+
+
+def align_merges(cells: TableCells, col_info: list[dict]) -> None:
+    """A \\multirow cell in one column is flush with the column's words or centred among them
+    (a \\thead over a left column): its column says which, not the cell's bounds - a short
+    word flush left in a narrow column sits near the middle of those either way."""
+    for k, (x0, x1) in cells.extent_of.items():
+        m = cells.merges[k]
+        if m["cols"] == 1:
+            cx0, cx1 = col_info[m["col"]].get("body") or (col_info[m["col"]]["x0"], col_info[m["col"]]["x1"])
+            m["align"] = "left" if abs(x0 - cx0) <= 1 else "right" if abs(x1 - cx1) <= 1 else \
+                "center" if abs((x0 + x1) - (cx0 + cx1)) <= 3 else m["align"]
+
+
+def line_base(row: list[Span]) -> float:
+    return statistics.fmean(s.baseline for s in row if s.size >= 0.9 * max(x.size for x in row))
+
+
+def row_boundary(baselines: list[float], y: float) -> int:
+    return sum(b < y for b in baselines)
+
+
+def table_borders(horizontal: list[dict], vertical: list[dict], frame: Rect, bounds: list[float],
+                  columns: list[list[float]], baselines: list[float], size: float) -> tuple[list[dict], list[dict]] | None:
+    """Borders: rules across the whole table stay row rules; partial rules (\\cline,
+    \\cmidrule) and vertical rules become the borders of the cells they run along. Returns
+    (row rules, cell borders), or None for a vertical rule inside a column."""
+    n_rows, n_cols = len(baselines), len(columns)
+    borders = []
+    full = [h for h in horizontal if h["rect"].x0 <= frame.x0 + 1.5 and h["rect"].x1 >= frame.x1 - 1.5]
+    for h in horizontal:
+        if h in full:
+            continue
+        k = row_boundary(baselines, h["rect"].cy)
+        for cc in range(n_cols):
+            # (\cmidrule(l) is trimmed by half an em at its left end: it still underlines
+            # every word of the column)
+            if (h["rect"].x0 <= bounds[cc] + 2.5 or h["rect"].x0 <= columns[cc][0] + 1) and \
+                    (h["rect"].x1 >= bounds[cc + 1] - 2.5 or h["rect"].x1 >= columns[cc][1] - 1):
+                borders.append({"row": min(k, n_rows - 1), "col": cc, "position": "TOP" if k < n_rows else "BOTTOM",
+                                "color": h["color"], "weight": round(h["weight"], 2), "y": round(h["rect"].cy, 2)})
+    for v in vertical:
+        k = min(range(len(bounds)), key=lambda i: abs(bounds[i] - v["rect"].cx))
+        if abs(bounds[k] - v["rect"].cx) > 1.5:
+            # The second stroke of a double rule (||, \doublerulesep 2 pt beside the first):
+            # a Slides border is one line, the one on the bound is written.
+            if any(u is not v and abs(bounds[k] - u["rect"].cx) <= 1.5 and abs(u["rect"].cx - v["rect"].cx) <= 4
+                   and u["rect"].y0 < v["rect"].y1 and v["rect"].y0 < u["rect"].y1 for u in vertical):
+                continue
+            return None  # a rule inside a column
+        for rr, b in enumerate(baselines):
+            if v["rect"].y0 <= b - 0.5 * size and v["rect"].y1 >= b:
+                borders.append({"row": rr, "col": min(k, n_cols - 1), "position": "LEFT" if k < n_cols else "RIGHT",
+                                "color": v["color"], "weight": round(v["weight"], 2)})
+    return full, borders
+
+
+def row_heights(baselines: list[float], last_line: list[float], row_lines: list[int], size: float) -> list[float]:
+    """Each row's height: the pitch to the next row's baseline. The last row: as tall as the
+    one before it (as a line of a wrapped cell, when that one wraps), plus its own further
+    lines."""
+    n_rows = len(baselines)
+    pitches = [b - a for a, b in zip(baselines, baselines[1:])] or [1.4 * size]
+    lead = min([(e - b) / (k - 1) for b, e, k in zip(baselines, last_line, row_lines) if k > 1] or pitches)
+    last = (pitches[-1] if n_rows < 2 or row_lines[-2] == 1 else lead) + last_line[-1] - baselines[-1]
+    return pitches + [last] if n_rows > 1 else [last]
+
+
+def slides_bottom(baselines: list[float], heights: list[float], row_lines: list[int], size: float,
+                  page_w: float) -> float:
+    """Where the table ends in Slides. A Slides row is at least its lines, 1.195 em x
+    lineSpacing for the first and 1.2 em for each further one: emit's tables come with the
+    .pptx, without the 7.2 pt of padding above and below an API-made table has
+    (emit.table_rows)."""
+    scale = 720.0 / page_w
+    z = size * scale / 1.02
+    body = [(1.195 + (k - 1) * 1.2) * z for k in row_lines]
+    ratio = min(1.0, max(0.5, min(h * scale / b for h, b in zip(heights, body))))
+    row_h = [max(h * scale, b * ratio) / scale for h, b in zip(heights, body)]
+    top = baselines[0] - (0.968 * z - 0.72 - (1 - ratio) * 0.9 * z) / scale
+    return top + sum(row_h)
+
+
+def row_bands(shown: list[dict], baselines: list[float]) -> list[list[float]]:
+    """[row, top, bottom] of a row shaded by a band of its own (\\rowcolor, \\rowcolors: fills
+    that hold its baseline and no other row's): emit puts the Slides row's edges there, as on
+    a rule. Set just above its words instead, a shaded row began ~3 pt below its band and
+    the words sat at the top of their fill (r2_tables_v1 slide 4)."""
+    bands = []
+    for rr, b in enumerate(baselines):
+        own = [f["rect"] for f in shown if f["rect"].y0 <= b <= f["rect"].y1
+               and sum(f["rect"].y0 <= b2 <= f["rect"].y1 for b2 in baselines) == 1]
+        if own:
+            bands.append([rr, round(min(r.y0 for r in own), 2), round(max(r.y1 for r in own), 2)])
+    return bands
