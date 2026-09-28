@@ -25,7 +25,7 @@ workspace answers the same question the same way everywhere.
 from __future__ import annotations
 
 import shutil
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Protocol, runtime_checkable
 
 from .types import Refused
@@ -73,9 +73,12 @@ class LocalWorkspace:
         """An absolute path for `ref`, or `Refused("outside_workspace")`."""
         raw = Path(ref)
         path = (raw if raw.is_absolute() else self.root / raw).resolve()
-        if _inside(path, self.root):
+        # (a drive or share was meant as a place of its own; on Linux it would name a folder `C:`
+        # in the workspace, so the boundary would say one thing on Windows and another there)
+        foreign = not raw.is_absolute() and bool(PureWindowsPath(ref).drive)
+        if _inside(path, self.root) and not foreign:
             return path
-        if not write:
+        if not write and not foreign:
             for folder in self.readable:
                 if _inside(path, folder):
                     return path

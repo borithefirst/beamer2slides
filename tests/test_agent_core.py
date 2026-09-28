@@ -53,6 +53,15 @@ def test_a_path_cannot_climb_out_of_the_workspace(tmp_path):
         ws.resolve(str(tmp_path / "elsewhere.pdf"))
 
 
+@pytest.mark.parametrize("ref", ["C:/Windows/win.ini", "D:talk.tex", "//server/share/talk.tex"])
+def test_a_drive_or_share_is_outside_on_every_platform(tmp_path, ref):
+    """On Linux `C:/Windows/win.ini` is a relative path, a folder named `C:` in the workspace:
+    the playground's server said yes there to what it refused on Windows."""
+    with pytest.raises(Refused) as exc:
+        LocalWorkspace(tmp_path / "work").resolve(ref)
+    assert exc.value.code == "outside_workspace"
+
+
 def test_a_readable_folder_may_be_read_but_never_written(tmp_path):
     outside = tmp_path / "library"
     outside.mkdir()
