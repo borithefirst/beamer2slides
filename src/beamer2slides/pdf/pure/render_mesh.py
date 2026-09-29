@@ -9,20 +9,30 @@ overwritten, as the C++ does. Float32 one operation at a time, x86 conversions."
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from typing import TypeAlias
+
 import numpy as np
 
+from ...arrays import Floats32, Ints, UInt32
+from ..api import Matrix
 from . import raster as R
-from .raster import F
 from .crt import i32_array
-from .render_shading import INT_MAX, INT_MIN, U32, argb, i32
+from .raster import F, FloatRect, PathPoint, Point
+from .render import FILL_WINDING, Device
+from .render_shading import INT_MAX, INT_MIN, U32, Record, Rgb, Shading, _steps, argb, i32
+from .syntax import Stream
+
+Vertex: TypeAlias = "list[float]"
+"""A mesh vertex on the device: [x, y, r, g, b] (r the shading index when functions colour it)."""
 
 
 # ---------------------------------------------------------------------- type 1
 
 
-def draw_function(bitmap, final, rec, alpha: int) -> None:
+def draw_function(bitmap: UInt32, final: Matrix, sh: Shading, alpha: int) -> None:
     """DrawFuncShading."""
-    cs, funcs, a, d = rec.cs, rec.funcs, rec.a, rec.dict
+    cs, funcs, a, d = sh.cs, sh.funcs, sh.a, sh.sd
     total = sum(f.outputs for f in funcs if f is not None)
     if total > U32:
         total = 0
@@ -45,7 +55,9 @@ def draw_function(bitmap, final, rec, alpha: int) -> None:
         skip = (px < np.float32(xmin)) | (px > np.float32(xmax)) | (py < np.float32(ymin)) | (py > np.float32(ymax))
     for row in range(h):
         line = bitmap[row]
-        xs, ys, sk = px[row].tolist(), py[row].tolist(), skip[row].tolist()
+        xs: list[float] = px[row].tolist()
+        ys: list[float] = py[row].tolist()
+        sk: list[bool] = skip[row].tolist()
         for col in range(w):
             if sk[col]:
                 continue
@@ -70,7 +82,7 @@ _FLAG_BITS = (2, 4, 8)
 class _Bits:
     """CFX_BitStream."""
 
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes) -> None:
         self.data, self.size, self.pos = data, len(data) * 8, 0
 
     def eof(self) -> bool:
@@ -103,13 +115,30 @@ def shading_index(c: float, lo: float, hi: float) -> float:
 class MeshStream:
     """CPDF_MeshStream: `load()` then the readers; vertices are (x, y, r, g, b)."""
 
-    def __init__(self, rec, stype: int):
-        self.rec, self.type = rec, stype
+    bits: _Bits
+    coord_bits: int
+    comp_bits: int
+    flag_bits: int
+    components: int
+    xmin: float
+    xmax: float
+    ymin: float
+    ymax: float
+    cmin: list[float]
+    cmax: list[float]
+    coord_max: int
+    comp_max: int
+
+    def __init__(self, sh: Shading, stype: int) -> None:
+        self.sh, self.type = sh, stype
 
     def load(self) -> bool:
-        rec, a = self.rec, self.rec.a
-        d = rec.dict
-        self.bits = _Bits(bytes(a.doc.stream_data(rec.shading)))
+        """CPDF_MeshStream::Load (false as well when the shading is no stream)."""
+        sh, a = self.sh, self.sh.a
+        d = sh.sd
+        if not isinstance(sh.obj, Stream):
+            return False
+        self.bits = _Bits(a.doc.stream_data(sh.obj))
         self.coord_bits = a.integer_for(d, "BitsPerCoordinate") & U32
         self.comp_bits = a.integer_for(d, "BitsPerComponent") & U32
         if self.coord_bits not in _COORD_BITS or self.comp_bits not in _COMP_BITS:
@@ -117,10 +146,10 @@ class MeshStream:
         self.flag_bits = a.integer_for(d, "BitsPerFlag") & U32
         if self.type != 5 and self.flag_bits not in _FLAG_BITS:
             return False
-        n = rec.cs.n
+        n = sh.cs.n
         if n > 8:
             return False
-        self.components = 1 if rec.funcs else n
+        self.components = 1 if sh.funcs else n
         dec = a.array_for(d, "Decode")
         if dec is None or len(dec) != 4 + 2 * self.components:
             return False
@@ -143,7 +172,7 @@ class MeshStream:
     def flag(self) -> int:
         return self.bits.get(self.flag_bits) & 3
 
-    def raw_coords(self) -> tuple:
+    def raw_coords(self) -> Point:
         """ReadCoords."""
         get, n = self.bits.get, self.coord_bits
         if n == 32:
@@ -156,20 +185,21 @@ class MeshStream:
             y = F(self.ymin + F(F(F(float(get(n))) * F(self.ymax - self.ymin)) / cm))
         return x, y
 
-    def coords(self, matrix) -> tuple:
-        return R.transform(matrix, *self.raw_coords())
+    def coords(self, matrix: Matrix) -> Point:
+        x, y = self.raw_coords()
+        return R.transform(matrix, x, y)
 
-    def color(self) -> tuple:
+    def color(self) -> Rgb:
         vals = list(self.cmin)
         cm = float(self.comp_max)
         for i in range(self.components):
             lo, hi = self.cmin[i], self.cmax[i]
             vals[i] = F(lo + F(F(float(self.bits.get(self.comp_bits)) * F(hi - lo)) / cm))
-        if not self.rec.funcs:
-            return self.rec.cs.rgb_or_zeros(vals)
+        if not self.sh.funcs:
+            return self.sh.cs.rgb_or_zeros(vals)
         return vals[0], 0.0, 0.0
 
-    def vertex(self, matrix):
+    def vertex(self, matrix: Matrix) -> tuple[Vertex, int] | None:
         """ReadVertex: (vertex, flag), or None."""
         if not self.can_flag():
             return None
@@ -183,9 +213,9 @@ class MeshStream:
         self.bits.align()
         return [x, y, r, g, b], flag
 
-    def row(self, matrix, count: int) -> list:
+    def row(self, matrix: Matrix, count: int) -> list[Vertex]:
         """ReadVertexRow (empty on any shortfall)."""
-        out = []
+        out: list[Vertex] = []
         for _ in range(count):
             if self.bits.eof() or not self.can_coords():
                 return []
@@ -198,21 +228,26 @@ class MeshStream:
         return out
 
 
-def shading_bbox(rec, matrix) -> tuple:
+_PATCH_POINTS = {7: 16, 6: 12}
+
+
+def shading_bbox(rec: Record, matrix: Matrix) -> FloatRect:
     """GetShadingBBox (the content parser's box of an `sh` mesh): every point the stream holds,
     colours skipped, through the object's matrix. The point and colour counts of a patch shrink
     for good with each patch that shares an edge, as the C++ has it."""
-    from .syntax import Stream
-    stream = MeshStream(rec, rec.type)
-    if not isinstance(rec.shading, Stream) or not stream.load():
+    sh = rec.shade
+    if sh is None:          # a mesh type was read: never
         return 0.0, 0.0, 0.0, 0.0
-    gouraud_ = rec.type in (4, 5)
-    points = {7: 16, 6: 12}.get(rec.type, 1)
-    colors = 4 if rec.type in (6, 7) else 1
-    rect = None
+    stream = MeshStream(sh, sh.type)
+    if not stream.load():
+        return 0.0, 0.0, 0.0, 0.0
+    gouraud_ = sh.type in (4, 5)
+    points = _PATCH_POINTS.get(sh.type, 1)
+    colors = 4 if sh.type in (6, 7) else 1
+    rect: FloatRect | None = None
     while not stream.bits.eof():
         flag = 0
-        if rec.type != 5:
+        if sh.type != 5:
             if not stream.can_flag():
                 break
             flag = stream.flag()
@@ -224,24 +259,23 @@ def shading_bbox(rec, matrix) -> tuple:
                 break
             x, y = stream.raw_coords()
             if rect is None:
-                rect = [x, y, x, y]
+                rect = (x, y, x, y)
             else:
-                rect = [min(rect[0], x), min(rect[1], y), max(rect[2], x), max(rect[3], y)]
+                rect = (min(rect[0], x), min(rect[1], y), max(rect[2], x), max(rect[3], y))
         n = stream.components * stream.comp_bits * colors
         if n < 0 or n > U32:
             break
         stream.bits.pos += n
         if gouraud_:
             stream.bits.align()
-    return R.transform_rect(matrix, tuple(rect) if rect is not None else (0.0, 0.0, 0.0, 0.0))
+    return R.transform_rect(matrix, rect if rect is not None else (0.0, 0.0, 0.0, 0.0))
 
 
-def _mesh_steps(rec, stream, alpha: int):
+def _mesh_steps(sh: Shading, stream: MeshStream, alpha: int) -> tuple[UInt32 | None, bool]:
     """(steps or None, ok): GetShadingSteps over the first component's decode range."""
-    from .render_shading import _steps
-    if not rec.funcs:
+    if not sh.funcs:
         return None, True
-    steps = _steps(rec, stream.cmin[0], stream.cmax[0], alpha)
+    steps = _steps(sh, stream.cmin[0], stream.cmax[0], alpha)
     return steps, steps is not None
 
 
@@ -266,7 +300,7 @@ def _div(a: float, b: float) -> float:
         return float(np.float32(a) / np.float32(b))
 
 
-def _intersect(y: int, p, q):
+def _intersect(y: int, p: Vertex, q: Vertex) -> float | None:
     """GetScanlineIntersect."""
     fy, sy = p[1], q[1]
     if fy == sy:
@@ -280,7 +314,7 @@ def _intersect(y: int, p, q):
     return F(p[0] + _div(F(F(q[0] - p[0]) * F(yf - fy)), F(sy - fy)))
 
 
-def gouraud(bitmap, alpha: int, tri, steps) -> None:
+def gouraud(bitmap: UInt32, alpha: int, tri: Sequence[Vertex], steps: UInt32 | None) -> None:
     """DrawGouraud."""
     min_y = max_y = tri[0][1]
     for i in (1, 2):
@@ -298,7 +332,10 @@ def gouraud(bitmap, alpha: int, tri, steps) -> None:
         max_yi = h - 1
     f32 = np.float32
     for y in range(min_yi, max_yi + 1):
-        xs, rs, gs, bs = [], [], [], []
+        xs: list[float] = []
+        rs: list[float] = []
+        gs: list[float] = []
+        bs: list[float] = []
         for i in range(3):
             p, q = tri[i], tri[(i + 1) % 3]
             x = _intersect(y, p, q)
@@ -322,7 +359,7 @@ def gouraud(bitmap, alpha: int, tri, steps) -> None:
         diff = float(f32(_clamp_sub(start_x, min_x)))
         n = end_x - start_x
 
-        def run(c):
+        def run(c: list[float]) -> Floats32:
             unit = _div(F(c[e] - c[s]), span)
             first = F(c[s] + F(diff * unit))
             seq = np.empty(n + 1, np.float32)
@@ -339,26 +376,26 @@ def gouraud(bitmap, alpha: int, tri, steps) -> None:
                 bitmap[y, start_x:end_x] = _encode(alpha, _trunc255(r), _trunc255(g), _trunc255(b))
 
 
-def _trunc255(v):
+def _trunc255(v: Floats32) -> Ints:
     """static_cast<int>(v * 255) over an array."""
     return i32_array(v * np.float32(255))
 
 
-def _encode(alpha: int, r, g, b):
+def _encode(alpha: int, r: Ints, g: Ints, b: Ints) -> UInt32:
     m = 0xFFFFFFFF
     return ((((alpha & m) << 24) | ((r & m) << 16) | ((g & m) << 8) | (b & m)) & m).astype(np.uint32)
 
 
-def draw_free(bitmap, final, rec, alpha: int) -> None:
+def draw_free(bitmap: UInt32, final: Matrix, sh: Shading, alpha: int) -> None:
     """DrawFreeGouraudShading."""
-    stream = MeshStream(rec, 4)
+    stream = MeshStream(sh, 4)
     if not stream.load():
         return
-    steps, ok = _mesh_steps(rec, stream, alpha)
+    steps, ok = _mesh_steps(sh, stream, alpha)
     if not ok:
         return
     lo, hi = stream.cmin[0], stream.cmax[0]
-    funcs = bool(rec.funcs)
+    funcs = bool(sh.funcs)
     blank = [0.0, 0.0, 0.0, 0.0, 0.0]
     tri = [list(blank), list(blank), list(blank)]
     while not stream.bits.eof():
@@ -385,20 +422,20 @@ def draw_free(bitmap, final, rec, alpha: int) -> None:
         gouraud(bitmap, alpha, tri, steps)
 
 
-def draw_lattice(bitmap, final, rec, alpha: int) -> None:
+def draw_lattice(bitmap: UInt32, final: Matrix, sh: Shading, alpha: int) -> None:
     """DrawLatticeGouraudShading."""
-    per_row = rec.a.integer_for(rec.dict, "VerticesPerRow")
+    per_row = sh.a.integer_for(sh.sd, "VerticesPerRow")
     if per_row < 2:
         return
-    stream = MeshStream(rec, 5)
+    stream = MeshStream(sh, 5)
     if not stream.load():
         return
-    steps, ok = _mesh_steps(rec, stream, alpha)
+    steps, ok = _mesh_steps(sh, stream, alpha)
     if not ok:
         return
     lo, hi = stream.cmin[0], stream.cmax[0]
-    funcs = bool(rec.funcs)
-    rows = [stream.row(final, per_row), []]
+    funcs = bool(sh.funcs)
+    rows: list[list[Vertex]] = [stream.row(final, per_row), []]
     if not rows[0]:
         return
     if funcs:
@@ -423,31 +460,42 @@ def draw_lattice(bitmap, final, rec, alpha: int) -> None:
 
 _HALF = F(0.5)
 _NINTH = F(1.0 / 9.0)
+_ORIGIN: Point = (0.0, 0.0)
+
+Quad: TypeAlias = "tuple[Point, Point, Point, Point]"
+"""A cubic bezier's four control points."""
+Grid: TypeAlias = "Sequence[Sequence[Point]]"
+"""A patch's 4 x 4 control points, [x][y]."""
 
 
-def _mid(p, q):
+def _mid(p: Point, q: Point) -> Point:
     """0.5f * (p + q) on CFX_PointF."""
     return F(_HALF * F(p[0] + q[0])), F(_HALF * F(p[1] + q[1]))
 
 
-def _split(c0, c1, c2, c3):
-    l1 = (_mid(c0, c1), _mid(c1, c2), _mid(c2, c3))
-    l2 = (_mid(l1[0], l1[1]), _mid(l1[1], l1[2]))
-    l3 = _mid(l2[0], l2[1])
-    return (c0, l1[0], l2[0], l3), (l3, l2[1], l1[2], c3)
+def _split(c0: Point, c1: Point, c2: Point, c3: Point) -> tuple[Quad, Quad]:
+    l10, l11, l12 = _mid(c0, c1), _mid(c1, c2), _mid(c2, c3)
+    l20, l21 = _mid(l10, l11), _mid(l11, l12)
+    l3 = _mid(l20, l21)
+    return (c0, l10, l20, l3), (l3, l21, l12, c3)
 
 
-def _vertical(p):
+def _vertical(p: Grid) -> tuple[list[Quad], list[Quad]]:
     """SubdivideVertical: along the second index."""
-    top, bottom = [None] * 4, [None] * 4
+    top: list[Quad] = []
+    bottom: list[Quad] = []
     for x in range(4):
-        top[x], bottom[x] = _split(*p[x])
+        q = p[x]
+        t, b = _split(q[0], q[1], q[2], q[3])
+        top.append(t)
+        bottom.append(b)
     return top, bottom
 
 
-def _horizontal(p):
+def _horizontal(p: Grid) -> tuple[list[list[Point]], list[list[Point]]]:
     """SubdivideHorizontal: along the first index."""
-    left, right = [[None] * 4 for _ in range(4)], [[None] * 4 for _ in range(4)]
+    left = [[_ORIGIN] * 4 for _ in range(4)]
+    right = [[_ORIGIN] * 4 for _ in range(4)]
     for y in range(4):
         a, b = _split(p[0][y], p[1][y], p[2][y], p[3][y])
         for x in range(4):
@@ -455,7 +503,7 @@ def _horizontal(p):
     return left, right
 
 
-def _is_small(p) -> bool:
+def _is_small(p: Grid) -> bool:
     """CFX_FloatRect::GetBBox of the 16 points: width and height under 2."""
     pts = [q for row in p for q in row]
     l = r = pts[0][0]
@@ -466,15 +514,17 @@ def _is_small(p) -> bool:
     return F(r - l) < 2.0 and F(t - b) < 2.0
 
 
-def _interpolate(p1: int, p2: int, d1: int, d2: int, over: list) -> int:
+def _in_int(v: int) -> bool:
+    return INT_MIN <= v <= INT_MAX
+
+
+def _interpolate(p1: int, p2: int, d1: int, d2: int, over: list[bool]) -> int:
     """Interpolate over FX_SAFE_INT32 (an invalid step taints the rest, then 0)."""
-    def ok(v):
-        return INT_MIN <= v <= INT_MAX
     p = p2 - p1
-    valid = ok(p)
+    valid = _in_int(p)
     if valid:
         p *= d1
-        valid = ok(p)
+        valid = _in_int(p)
     if valid:
         if d2 == 0 or (p == INT_MIN and d2 == -1):
             valid = False
@@ -483,15 +533,15 @@ def _interpolate(p1: int, p2: int, d1: int, d2: int, over: list) -> int:
             p = q if (p >= 0) == (d2 > 0) else -q
     if valid:
         p += p1
-        valid = ok(p)
+        valid = _in_int(p)
     if not valid:
         over[0] = True
         return 0
     return p
 
 
-def _bi(colors, x: int, y: int, xs: int, ys: int, over: list) -> list:
-    out = []
+def _bi(colors: list[list[int]], x: int, y: int, xs: int, ys: int, over: list[bool]) -> list[int]:
+    out: list[int] = []
     for i in range(3):
         x1 = _interpolate(colors[0][i], colors[3][i], x, xs, over)
         x2 = _interpolate(colors[1][i], colors[2][i], x, xs, over)
@@ -499,7 +549,7 @@ def _bi(colors, x: int, y: int, xs: int, ys: int, over: list) -> list:
     return out
 
 
-def _dist(a, b) -> int:
+def _dist(a: list[int], b: list[int]) -> int:
     return max(abs(a[0] - b[0]), abs(a[1] - b[1]), abs(a[2] - b[2]))
 
 
@@ -508,17 +558,14 @@ def _wrap(v: int) -> int:
     return v - (1 << 32) if v & 0x80000000 else v
 
 
-FILL_WINDING = 2        # render.FILL_WINDING (render imports this module's caller)
-
-
 class _PatchDrawer:
     THRESHOLD = 4
 
-    def __init__(self, device, alpha: int, steps):
+    def __init__(self, device: Device, alpha: int, steps: UInt32 | None) -> None:
         self.dev, self.alpha, self.steps = device, alpha, steps
         self.colors = [[0, 0, 0] for _ in range(4)]
 
-    def draw(self, xs: int, ys: int, left: int, bottom: int, p) -> None:
+    def draw(self, xs: int, ys: int, left: int, bottom: int, p: Grid) -> None:
         small = _is_small(p)
         over = [False]
         c0 = _bi(self.colors, left, bottom, xs, ys, over)
@@ -540,13 +587,13 @@ class _PatchDrawer:
         if small or (db < T and dl < T and dt < T and dr < T):
             bnd = [p[0][0], p[0][1], p[0][2], p[0][3], p[1][3], p[2][3], p[3][3],
                    p[3][2], p[3][1], p[3][0], p[2][0], p[1][0], p[0][0]]
-            points = [(bnd[0][0], bnd[0][1], R.PT_MOVE, False)] + \
+            points: list[PathPoint] = [(bnd[0][0], bnd[0][1], R.PT_MOVE, False)] + \
                 [(x, y, R.PT_BEZIER, False) for x, y in bnd[1:]]
             if self.steps is not None:
                 color = int(self.steps[max(0, min(c0[0], 255))])
             else:
                 color = argb(self.alpha, c0[0], c0[1], c0[2])
-            self.dev.draw_path(points, None, None, color, 0, FILL_WINDING, False, full_cover=True)
+            self.dev.draw_path(points, None, None, color, 0, FILL_WINDING, False, False, True, False)
             return
         if db < T and dt < T:
             top, bot = _vertical(p)
@@ -569,23 +616,22 @@ class _PatchDrawer:
             self.draw(xs, ys, _wrap(left + 1), _wrap(bottom + 1), br)
 
 
-def _lin(terms):
+def _lin(terms: list[tuple[float, Point]]) -> Point:
     """sum of k * point in order, float32 per operation (CFX_PointF arithmetic)."""
-    x = y = None
-    for k, (px, py) in terms:
-        tx, ty = F(k * px), F(k * py)
-        if x is None:
-            x, y = tx, ty
-        else:
-            x, y = F(x + tx), F(y + ty)
+    k, (px, py) = terms[0]
+    x, y = F(k * px), F(k * py)
+    for i in range(1, len(terms)):
+        k, (px, py) = terms[i]
+        x, y = F(x + F(k * px)), F(y + F(k * py))
     return x, y
 
 
-def _padd(p, q):
+def _padd(p: Point, q: Point) -> Point:
     return F(p[0] + q[0]), F(p[1] + q[1])
 
 
-def _inner(p00, p01, p10, p03, p30, p31, p13, p33):
+def _inner(p00: Point, p01: Point, p10: Point, p03: Point, p30: Point, p31: Point, p13: Point,
+           p33: Point) -> Point:
     """(1/9) * (-4 p00 + 6 (p01 + p10) - 2 (p03 + p30) + 3 (p31 + p13) - 1 p33)."""
     s = _lin([(F(-4.0), p00), (F(6.0), _padd(p01, p10))])
     t = _lin([(F(2.0), _padd(p03, p30))])
@@ -597,22 +643,21 @@ def _inner(p00, p01, p10, p03, p30, p31, p13, p33):
     return F(_NINTH * s[0]), F(_NINTH * s[1])
 
 
-def draw_patches(bitmap, final, rec, alpha: int) -> None:
+def draw_patches(bitmap: UInt32, final: Matrix, sh: Shading, alpha: int) -> None:
     """DrawCoonPatchMeshes (types 6 and 7)."""
-    from .render import Device
-    stream = MeshStream(rec, rec.type)
+    stream = MeshStream(sh, sh.type)
     if not stream.load():
         return
-    steps, ok = _mesh_steps(rec, stream, alpha)
+    steps, ok = _mesh_steps(sh, stream, alpha)
     if not ok:
         return
     h, w = bitmap.shape
-    dev = Device(w, h, True)
+    dev = Device(w, h, True, None)
     dev.bgra = bitmap.view(np.uint8).reshape(h, w, 4)
     lo, hi = stream.cmin[0], stream.cmax[0]
     drawer = _PatchDrawer(dev, alpha, steps)
-    coords = [(0.0, 0.0)] * 16
-    count = 16 if rec.type == 7 else 12
+    coords = [_ORIGIN] * 16
+    count = 16 if sh.type == 7 else 12
     while not stream.bits.eof():
         if not stream.can_flag():
             break
@@ -631,7 +676,7 @@ def draw_patches(bitmap, final, rec, alpha: int) -> None:
             if not stream.can_color():
                 break
             r, g, b = stream.color()
-            if not rec.funcs:
+            if not sh.funcs:
                 drawer.colors[i] = [i32(F(r * 255.0)), i32(F(g * 255.0)), i32(F(b * 255.0))]
             else:
                 drawer.colors[i] = [i32(shading_index(r, lo, hi)), 0, 0]
@@ -645,12 +690,13 @@ def draw_patches(bitmap, final, rec, alpha: int) -> None:
         if right <= 0 or left >= float(w) or top <= 0 or bottom >= float(h):
             continue
         c = coords
-        p = [[None] * 4 for _ in range(4)]
+        # every one of the 16 points is set below
+        p = [[_ORIGIN] * 4 for _ in range(4)]
         p[0] = [c[0], c[1], c[2], c[3]]
         p[1][3], p[2][3], p[3][3] = c[4], c[5], c[6]
         p[3][2], p[3][1], p[3][0] = c[7], c[8], c[9]
         p[2][0], p[1][0] = c[10], c[11]
-        if rec.type == 7:
+        if sh.type == 7:
             p[1][1], p[1][2], p[2][2], p[2][1] = c[12], c[13], c[14], c[15]
         else:
             p[1][1] = _inner(p[0][0], p[0][1], p[1][0], p[0][3], p[3][0], p[3][1], p[1][3], p[3][3])

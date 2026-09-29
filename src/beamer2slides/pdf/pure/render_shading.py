@@ -23,17 +23,30 @@ drawn depends on history)."""
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from fractions import Fraction
+from typing import TYPE_CHECKING, Literal, Protocol, TypeAlias, Union
+from weakref import WeakKeyDictionary
 
 import numpy as np
 
-from ...arrays import UInt32
+from ...arrays import Floats, Floats32, Int32, Ints, Mask, UInt32
+from ...typing_compat import assert_never, override
+from ..api import Matrix
 from . import cie
 from . import raster as R
 from .colors import adobe_cmyk_to_srgb
 from .crt import cdiv, cmod, float_fn, i32, i32_array, roundf, u32  # noqa: F401 - i32 is imported from here too
-from .raster import F
-from .syntax import Name, Stream, String
+from .raster import F, FloatRect, IntRect, PathPoint
+from .render import IDENTITY, Clip, Device, Status, _set_clip_mask, stroke_bbox
+from .syntax import Name, PdfDict, Ref, Stream, String
+
+if TYPE_CHECKING:
+    from .content import PObj
+    from .document import PdfFile
+    from .render_pattern import Cell, General, Tiling
+    from .render_transparency import Context
 
 FILL_NONE, FILL_EVENODD, FILL_WINDING = 0, 1, 2
 INT_MIN, INT_MAX = -(1 << 31), (1 << 31) - 1
@@ -42,8 +55,13 @@ FLT_MAX = float(np.finfo(np.float32).max)
 PI_F = F(3.1415926535897932384626433832795)     # FXSYS_PI
 
 _cfun = float_fn
-_powf, _hypotf, _atan2f = _cfun("powf", 2), _cfun("_hypotf", 2), _cfun("atan2f", 2)
-_sinf, _cosf, _logf, _log10f = _cfun("sinf", 1), _cfun("cosf", 1), _cfun("logf", 1), _cfun("log10f", 1)
+_powf: Callable[[float, float], float] = _cfun("powf", 2)
+_hypotf: Callable[[float, float], float] = _cfun("_hypotf", 2)
+_atan2f: Callable[[float, float], float] = _cfun("atan2f", 2)
+_sinf: Callable[[float], float] = _cfun("sinf", 1)
+_cosf: Callable[[float], float] = _cfun("cosf", 1)
+_logf: Callable[[float], float] = _cfun("logf", 1)
+_log10f: Callable[[float], float] = _cfun("log10f", 1)
 
 
 class Unsupported(Exception):
@@ -74,20 +92,22 @@ def argb(a: int, r: int, g: int, b: int) -> int:
     return (((a & U32) << 24) | ((r & U32) << 16) | ((g & U32) << 8) | (b & U32)) & U32
 
 
-def outer(rect) -> tuple:
+def _floor_sat(v: float) -> int:
+    return 0 if v != v else INT_MIN if v <= -2147483648.0 else INT_MAX if v >= 2147483647.0 else int(np.floor(v))
+
+
+def _ceil_sat(v: float) -> int:
+    return 0 if v != v else INT_MIN if v <= -2147483648.0 else INT_MAX if v >= 2147483647.0 else int(np.ceil(v))
+
+
+def outer(rect: FloatRect) -> IntRect:
     """CFX_FloatRect::GetOuterRect, NaN and infinity included (saturated_cast)."""
-    def fl(v):
-        return 0 if v != v else INT_MIN if v <= -2147483648.0 else INT_MAX if v >= 2147483647.0 else int(np.floor(v))
-
-    def ce(v):
-        return 0 if v != v else INT_MIN if v <= -2147483648.0 else INT_MAX if v >= 2147483647.0 else int(np.ceil(v))
-
     l, b, r, t = rect
-    x0, y0, x1, y1 = fl(l), fl(b), ce(r), ce(t)
+    x0, y0, x1, y1 = _floor_sat(l), _floor_sat(b), _ceil_sat(r), _ceil_sat(t)
     return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
 
 
-def fx_intersect(a, b) -> tuple:
+def fx_intersect(a: IntRect, b: IntRect) -> IntRect:
     """FX_RECT::Intersect (both normalised; an empty result is all zeros)."""
     a = (min(a[0], a[2]), min(a[1], a[3]), max(a[0], a[2]), max(a[1], a[3]))
     b = (min(b[0], b[2]), min(b[1], b[3]), max(b[0], b[2]), max(b[1], b[3]))
@@ -97,7 +117,7 @@ def fx_intersect(a, b) -> tuple:
     return l, t, r, bt
 
 
-def float_intersect(a, b) -> tuple:
+def float_intersect(a: FloatRect, b: FloatRect) -> FloatRect:
     """CFX_FloatRect::Intersect (both normalised)."""
     a = (min(a[0], a[2]), min(a[1], a[3]), max(a[0], a[2]), max(a[1], a[3]))
     b = (min(b[0], b[2]), min(b[1], b[3]), max(b[0], b[2]), max(b[1], b[3]))
@@ -113,32 +133,33 @@ def float_intersect(a, b) -> tuple:
 class _Access:
     """CPDF_Dictionary / CPDF_Array getters over the pure reader's objects."""
 
-    def __init__(self, doc):
+    def __init__(self, doc: PdfFile) -> None:
         self.doc = doc
 
-    def r(self, v):
-        return self.doc.resolve(v)
+    def r(self, v: object) -> object:
+        """The object a value stands for (only a reference stands for another)."""
+        return self.doc.resolve(v) if isinstance(v, Ref) else v
 
     @staticmethod
-    def dict_of(obj):
+    def dict_of(obj: object) -> PdfDict | None:
         """GetDict: a dictionary, or a stream's."""
         if isinstance(obj, Stream):
             return obj.dict
         return obj if isinstance(obj, dict) else None
 
-    def number(self, v) -> float:
+    def number(self, v: object) -> float:
         """GetNumber of a direct object (0 for anything but a number)."""
         if isinstance(v, bool) or not isinstance(v, (int, float)):
             return 0.0
         return F(float(v))
 
-    def float_at(self, arr, i: int) -> float:
+    def float_at(self, arr: object, i: int) -> float:
         """CPDF_Array::GetFloatAt."""
         if not isinstance(arr, list) or i >= len(arr):
             return 0.0
         return self.number(self.r(arr[i]))
 
-    def integer(self, v) -> int:
+    def integer(self, v: object) -> int:
         """GetInteger of a direct object."""
         if isinstance(v, bool):
             return int(v)
@@ -148,38 +169,40 @@ class _Access:
             return sat_int(F(v))
         return 0
 
-    def integer_for(self, d, key) -> int:
+    def integer_for(self, d: PdfDict | None, key: str) -> int:
         return self.integer(self.r(d.get(key))) if isinstance(d, dict) else 0
 
-    def integer_at(self, arr, i: int) -> int:
+    def integer_at(self, arr: object, i: int) -> int:
         return self.integer(self.r(arr[i])) if isinstance(arr, list) and i < len(arr) else 0
 
-    def array_for(self, d, key):
+    def array_for(self, d: PdfDict | None, key: str) -> list[object] | None:
         v = self.r(d.get(key)) if isinstance(d, dict) else None
         return v if isinstance(v, list) else None
 
-    def boolean_at(self, arr, i: int, default: bool) -> bool:
+    def boolean_at(self, arr: object, i: int, default: bool) -> bool:
         if not isinstance(arr, list) or i >= len(arr):
             return default
         v = self.r(arr[i])
-        return bool(v) if isinstance(v, bool) else default
+        return v if isinstance(v, bool) else default
 
-    def matrix_for(self, d, key) -> tuple:
+    def matrix_for(self, d: PdfDict | None, key: str) -> Matrix:
         """GetMatrixFor: exactly six numbers, else the identity."""
         a = self.array_for(d, key)
         if a is None or len(a) != 6:
             return (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
-        return tuple(self.float_at(a, i) for i in range(6))
+        f = self.float_at
+        return f(a, 0), f(a, 1), f(a, 2), f(a, 3), f(a, 4), f(a, 5)
 
-    def rect_for(self, d, key) -> tuple:
+    def rect_for(self, d: PdfDict | None, key: str) -> FloatRect:
         """GetRectFor: exactly four numbers, else zeros; not normalised."""
         a = self.array_for(d, key)
         if a is None or len(a) != 4:
             return 0.0, 0.0, 0.0, 0.0
-        return tuple(self.float_at(a, i) for i in range(4))
+        f = self.float_at
+        return f(a, 0), f(a, 1), f(a, 2), f(a, 3)
 
     @staticmethod
-    def string(v) -> str:
+    def string(v: object) -> str:
         """GetString of a direct object, for a colour space family."""
         if isinstance(v, Name):
             return str(v)
@@ -191,7 +214,7 @@ class _Access:
 # ---------------------------------------------------------------------- functions
 
 
-def interpolate(x, xmin, xmax, ymin, ymax) -> float:
+def interpolate(x: float, xmin: float, xmax: float, ymin: float, ymax: float) -> float:
     """CPDF_Function::Interpolate."""
     divisor = F(xmax - xmin)
     if divisor != 0.0:      # a NaN divides too
@@ -203,13 +226,13 @@ class Function:
     """CPDF_Function: Init's domains and ranges, Call's clamping."""
 
     inputs = outputs = 0
-    domains: list
-    ranges: list
+    domains: list[float]
+    ranges: list[float]
 
-    def call(self, inputs: list, results: list, off: int) -> int | None:
+    def call(self, inputs: list[float], results: list[float], off: int) -> int | None:
         if len(inputs) != self.inputs:
             return None
-        clamped = []
+        clamped: list[float] = []
         for i in range(self.inputs):
             d1, d2 = self.domains[2 * i], self.domains[2 * i + 1]
             if d1 > d2:
@@ -226,12 +249,23 @@ class Function:
             results[off + i] = clamp(results[off + i], r1, r2)
         return self.outputs
 
-    def v_call(self, x: list, results: list, off: int) -> bool:
+    def v_init(self, a: _Access, obj: object, d: PdfDict, visited: set[int]) -> bool:
+        """The type's own half of CPDF_Function::Init (`d` is `obj`'s dictionary)."""
+        raise NotImplementedError
+
+    def v_call(self, x: list[float], results: list[float], off: int) -> bool:
         raise NotImplementedError
 
 
 class ExpInt(Function):
-    def v_init(self, a: _Access, obj, d, visited) -> bool:
+    exponent: float
+    begin: list[float]
+    end: list[float]
+    diff: list[float]
+    orig: int
+
+    @override
+    def v_init(self, a: _Access, obj: object, d: PdfDict, visited: set[int]) -> bool:
         n = d.get("N")                      # GetNumberFor: not resolved
         if isinstance(n, bool) or not isinstance(n, (int, float)):
             return False
@@ -251,7 +285,8 @@ class ExpInt(Function):
         self.outputs = total
         return True
 
-    def v_call(self, x, results, off) -> bool:
+    @override
+    def v_call(self, x: list[float], results: list[float], off: int) -> bool:
         for i in range(self.inputs):
             p = _powf(x[i], self.exponent)
             for j in range(self.orig):
@@ -274,7 +309,17 @@ def _fits(v: int) -> bool:
 
 
 class Sampled(Function):
-    def v_init(self, a: _Access, obj, d, visited) -> bool:
+    bps: int
+    sizes: list[int]
+    emin: list[float]
+    emax: list[float]
+    sample_max: float
+    data: bytes
+    dmin: list[float]
+    dmax: list[float]
+
+    @override
+    def v_init(self, a: _Access, obj: object, d: PdfDict, visited: set[int]) -> bool:
         if not isinstance(obj, Stream):
             return False
         size = a.array_for(d, "Size")
@@ -286,7 +331,9 @@ class Sampled(Function):
         total = self.bps * self.outputs
         ok = total <= U32
         encode = a.array_for(d, "Encode")
-        self.sizes, self.emin, self.emax = [], [], []
+        self.sizes = []
+        self.emin = []
+        self.emax = []
         for i in range(self.inputs):
             s = a.integer_at(size, i)
             if s <= 0:
@@ -304,11 +351,12 @@ class Sampled(Function):
         if not ok or total + 7 > U32 or nbytes == 0:
             return False
         self.sample_max = F(float(0xFFFFFFFF >> (32 - self.bps)))
-        self.data = bytes(a.doc.stream_data(obj))
+        self.data = a.doc.stream_data(obj)
         if nbytes > len(self.data):
             return False
         decode = a.array_for(d, "Decode")
-        self.dmin, self.dmax = [], []
+        self.dmin = []
+        self.dmax = []
         for i in range(self.outputs):
             if decode is not None:
                 self.dmin.append(a.float_at(decode, 2 * i))
@@ -318,9 +366,12 @@ class Sampled(Function):
                 self.dmax.append(self.ranges[2 * i + 1])
         return True
 
-    def v_call(self, x, results, off) -> bool:
+    @override
+    def v_call(self, x: list[float], results: list[float], off: int) -> bool:
         pos = 0
-        enc, index, block = [], [], []
+        enc: list[float] = []
+        index: list[int] = []
+        block: list[int] = []
         for i in range(self.inputs):
             block.append(1 if i == 0 else (block[i - 1] * self.sizes[i - 1]) & U32)
             e = interpolate(x[i], self.domains[2 * i], self.domains[2 * i + 1], self.emin[i], self.emax[i])
@@ -368,15 +419,20 @@ class Sampled(Function):
                     b2 *= self.bps
                     if not _fits(b2) or b2 < 0:
                         return False
-                    s2 = _get_bits(data, b2, self.bps)
-                    s2 = F(float(s2 or 0))
+                    bits2 = _get_bits(data, b2, self.bps)
+                    s2 = F(float(bits2 or 0))
                     encoded = F(encoded + F(F(enc[j] - F(float(index[j]))) * F(s2 - fs)))
             results[off + i] = interpolate(encoded, 0.0, self.sample_max, self.dmin[i], self.dmax[i])
         return True
 
 
 class Stitch(Function):
-    def v_init(self, a: _Access, obj, d, visited) -> bool:
+    subs: list[Function]
+    bounds: list[float]
+    encode: list[float]
+
+    @override
+    def v_init(self, a: _Access, obj: object, d: PdfDict, visited: set[int]) -> bool:
         if self.inputs != 1:
             return False
         funcs, bounds, encode = a.array_for(d, "Functions"), a.array_for(d, "Bounds"), a.array_for(d, "Encode")
@@ -386,7 +442,7 @@ class Stitch(Function):
         if n == 0 or len(bounds) < n - 1 or len(encode) < 2 * n:
             return False
         self.subs = []
-        outputs = None
+        outputs = 0         # none yet: every sub-function has outputs
         for i in range(n):
             sub = a.r(funcs[i])
             if sub is obj:
@@ -394,7 +450,7 @@ class Stitch(Function):
             f = load_function(a, sub, visited)
             if f is None or f.inputs != 1 or f.outputs == 0:
                 return False
-            if outputs is not None and outputs != f.outputs:
+            if outputs != 0 and outputs != f.outputs:
                 return False
             outputs = f.outputs
             self.subs.append(f)
@@ -403,7 +459,8 @@ class Stitch(Function):
         self.encode = [a.float_at(encode, i) for i in range(2 * n)]
         return True
 
-    def v_call(self, x, results, off) -> bool:
+    @override
+    def v_call(self, x: list[float], results: list[float], off: int) -> bool:
         v = x[0]
         i = 0
         while i + 1 < len(self.subs):
@@ -415,14 +472,21 @@ class Stitch(Function):
 
 
 class PostScript(Function):
-    def v_init(self, a: _Access, obj, d, visited) -> bool:
+    proc: PsProc
+
+    @override
+    def v_init(self, a: _Access, obj: object, d: PdfDict, visited: set[int]) -> bool:
         if not isinstance(obj, Stream):
             raise Unsupported("PostScript functions without a stream")
-        self.proc = _ps_parse(bytes(a.doc.stream_data(obj)))
-        return self.proc is not None
+        proc = _ps_parse(a.doc.stream_data(obj))
+        if proc is None:
+            return False
+        self.proc = proc
+        return True
 
-    def v_call(self, x, results, off) -> bool:
-        stack: list = []
+    @override
+    def v_call(self, x: list[float], results: list[float], off: int) -> bool:
+        stack: list[float] = []
         for v in x:
             _push(stack, v)
         _ps_execute(self.proc, stack)
@@ -433,17 +497,19 @@ class PostScript(Function):
         return True
 
 
-_TYPES = {0: Sampled, 2: ExpInt, 3: Stitch, 4: PostScript}
+_TYPES: dict[int, type[Function]] = {0: Sampled, 2: ExpInt, 3: Stitch, 4: PostScript}
 
 
-def load_function(a: _Access, obj, visited: set) -> Function | None:
+def load_function(a: _Access, obj: object, visited: set[int]) -> Function | None:
     """CPDF_Function::Load of a direct object, `visited` holding the ids being loaded."""
     if obj is None or id(obj) in visited:
         return None
     visited.add(id(obj))
     try:
         d = _Access.dict_of(obj)
-        kind = a.integer_for(d, "FunctionType") if d is not None else -1
+        if d is None:
+            return None
+        kind = a.integer_for(d, "FunctionType")
         cls = _TYPES.get(kind)
         if cls is None:
             return None
@@ -479,11 +545,16 @@ _OPS = ("abs add and atan bitshift ceiling copy cos cvi cvr div dup eq exch exp 
 _NUMBER = re.compile(rb"-?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?")
 _PROC = "proc"
 
+PsOp: TypeAlias = Union[str, float, "list[PsOp]"]
+"""One CPDF_PSOP: an operator (its name), a constant, or a procedure."""
+PsProc: TypeAlias = "list[PsOp]"
+"""CPDF_PSProc: its operators in order."""
+
 
 class _Words:
     """CPDF_SimpleParser::GetWord."""
 
-    def __init__(self, data: bytes):
+    def __init__(self, data: bytes) -> None:
         self.data, self.pos = data, 0
 
     def word(self) -> bytes:
@@ -555,7 +626,7 @@ def _decimal_f32(text: bytes) -> float:
     c = np.float32(d)
     if not np.isfinite(c) or abs(float(c)) < 1.1754943508222875e-38:
         raise Unsupported("a PostScript number out of float range")
-    best = None
+    best: tuple[Fraction, float] | None = None
     for k in (np.nextafter(c, np.float32(-np.inf)), c, np.nextafter(c, np.float32(np.inf))):
         if not np.isfinite(k):
             continue
@@ -563,6 +634,8 @@ def _decimal_f32(text: bytes) -> float:
         even = (int(np.array(k, np.float32).view(np.uint32)) & 1) == 0
         if best is None or err < best[0] or (err == best[0] and even):
             best = (err, float(k))
+    if best is None:        # c itself is finite: never
+        raise Unsupported("a PostScript number out of float range")
     return best[1]
 
 
@@ -579,7 +652,7 @@ def _string_to_float(word: bytes) -> float:
     return _decimal_f32(body)
 
 
-def _ps_parse(data: bytes):
+def _ps_parse(data: bytes) -> PsProc | None:
     """CPDF_PSEngine::Parse: a list of operators (str), constants (float), procedures (lists)."""
     words = _Words(data)
     if words.word() != b"{":
@@ -587,10 +660,10 @@ def _ps_parse(data: bytes):
     return _ps_proc(words, 0)
 
 
-def _ps_proc(words: _Words, depth: int):
+def _ps_proc(words: _Words, depth: int) -> PsProc | None:
     if depth > 128:
         return None
-    ops: list = []
+    ops: PsProc = []
     while True:
         w = words.word()
         if not w:
@@ -607,20 +680,20 @@ def _ps_proc(words: _Words, depth: int):
         ops.append(name if name in _OPS else _string_to_float(w))
 
 
-def _push(stack: list, v: float) -> None:
+def _push(stack: list[float], v: float) -> None:
     if len(stack) < 100:
         stack.append(v)
 
 
-def _pop(stack: list) -> float:
+def _pop(stack: list[float]) -> float:
     return stack.pop() if stack else 0.0
 
 
-def _pop_int(stack: list) -> int:
+def _pop_int(stack: list[float]) -> int:
     return sat_int(_pop(stack))
 
 
-def _ps_execute(ops: list, stack: list) -> bool:
+def _ps_execute(ops: PsProc, stack: list[float]) -> bool:
     for i, op in enumerate(ops):
         if isinstance(op, list):
             continue
@@ -628,20 +701,23 @@ def _ps_execute(ops: list, stack: list) -> bool:
             _push(stack, op)
             continue
         if op == "if":
-            if i == 0 or not isinstance(ops[i - 1], list):
+            then = ops[i - 1] if i > 0 else None
+            if not isinstance(then, list):
                 return False
             if _pop_int(stack):
-                _ps_execute(ops[i - 1], stack)
+                _ps_execute(then, stack)
         elif op == "ifelse":
-            if i < 2 or not isinstance(ops[i - 1], list) or not isinstance(ops[i - 2], list):
+            then = ops[i - 2] if i >= 2 else None
+            other = ops[i - 1] if i >= 2 else None
+            if not isinstance(then, list) or not isinstance(other, list):
                 return False
-            _ps_execute(ops[i - 2] if _pop_int(stack) else ops[i - 1], stack)
+            _ps_execute(then if _pop_int(stack) else other, stack)
         else:
             _ps_operator(op, stack)
     return True
 
 
-def _ps_operator(op: str, st: list) -> None:
+def _ps_operator(op: str, st: list[float]) -> None:
     pop, push, pop_int = _pop, _push, _pop_int
     with np.errstate(all="ignore"):
         if op == "add":
@@ -775,26 +851,55 @@ def _ps_operator(op: str, st: list) -> None:
 # ---------------------------------------------------------------------- colour spaces
 
 
+Rgb: TypeAlias = "tuple[float, float, float]"
+"""GetRGB's (r, g, b), each from 0 to 1."""
+Family: TypeAlias = Literal["DeviceGray", "DeviceRGB", "DeviceCMYK", "Pattern", "CalGray", "CalRGB", "Lab",
+                            "Indexed", "Separation", "DeviceN"]
+"""The CPDF_ColorSpace families shadings read (ICCBased is refused)."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class CalRGBParams:
+    """CPDF_CalRGB's WhitePoint, Gamma and Matrix (None: not given)."""
+    white: cie.Vector3
+    gamma: cie.Vector3 | None
+    matrix: cie.Matrix3 | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class IndexedTable:
+    """CPDF_IndexedCS's lookup table, highest index and its base components' (min, span)."""
+    lookup: bytes
+    hival: int
+    ranges: list[tuple[float, float]]
+
+
+@dataclass(frozen=True, kw_only=True, eq=False)
 class ColorSpace:
-    """CPDF_ColorSpace for what shadings read: family, component count, GetRGB."""
+    """CPDF_ColorSpace for what shadings read: family, component count, GetRGB. What a family
+    holds beyond these is its own field: `base` (Indexed, Separation, DeviceN), `func`
+    (Separation, DeviceN), `none` (a Separation named None), `calrgb`, `lab_ranges`, `indexed`."""
+    family: Family
+    n: int
+    base: ColorSpace | None
+    func: Function | None
+    none: bool
+    calrgb: CalRGBParams | None
+    lab_ranges: tuple[float, ...] | None
+    indexed: IndexedTable | None
 
-    def __init__(self, family: str, n: int, base=None, func=None, none=False, params=None):
-        self.family, self.n, self.base, self.func, self.none = family, n, base, func, none
-        self.params = params
-
-    def default_range(self, i: int) -> tuple:
+    def default_range(self, i: int) -> tuple[float, float]:
         """GetDefaultValue's (min, max) of component i."""
-        if self.family == "Lab":
-            ranges = self.params
-            assert ranges is not None, "a Lab space always carries its /Range (_lab)"
-            return cie.lab_default(ranges, i)[1:]
+        if self.family == "Lab" and self.lab_ranges is not None:
+            _, lo, hi = cie.lab_default(self.lab_ranges, i)
+            return lo, hi
         return 0.0, 1.0
 
     @property
     def special(self) -> bool:
         return self.family in ("Pattern", "Indexed", "Separation", "DeviceN")
 
-    def rgb(self, buf: list):
+    def rgb(self, buf: list[float]) -> Rgb | None:
         f = self.family
         if f == "DeviceGray":
             g = clamp(buf[0], 0.0, 1.0)
@@ -802,26 +907,34 @@ class ColorSpace:
         if f == "DeviceRGB":
             return clamp(buf[0], 0.0, 1.0), clamp(buf[1], 0.0, 1.0), clamp(buf[2], 0.0, 1.0)
         if f == "DeviceCMYK":
-            q = [clamp(v, 0.0, 1.0) for v in buf[:4]]
-            ints = [i32(F(F(v * 255.0) + 0.49999997)) & 0xFF for v in q]
+            c, m, y, kk = (i32(F(F(clamp(v, 0.0, 1.0) * 255.0) + 0.49999997)) & 0xFF for v in buf[:4])
             k = F(1.0 / 255)
-            return tuple(F(v * k) for v in adobe_cmyk_to_srgb(*ints))
+            r, g, b = adobe_cmyk_to_srgb(c, m, y, kk)
+            return F(r * k), F(g * k), F(b * k)
         if f == "CalGray":
             return buf[0], buf[0], buf[0]
         if f == "CalRGB":
-            return cie.calrgb(*self.params, buf)
+            p = self.calrgb
+            if p is None:
+                return None
+            r, g, b = cie.calrgb(p.white, p.gamma, p.matrix, buf)
+            return r, g, b
         if f == "Lab":
-            return cie.lab(buf)
+            r, g, b = cie.lab(buf)
+            return r, g, b
         if f == "Indexed":
             index = i32(buf[0])
-            lookup, hival, ranges = self.params
-            if index < 0 or index > hival:
+            table, base = self.indexed, self.base
+            if table is None or base is None:
+                return None
+            lookup, ranges = table.lookup, table.ranges
+            if index < 0 or index > table.hival:
                 return None
             k = len(ranges)
             if (index + 1) * k > len(lookup):
                 return None
             comps = [F(lo + F(F(span * lookup[index * k + i]) / 255.0)) for i, (lo, span) in enumerate(ranges)]
-            return self.base.rgb(comps)
+            return base.rgb(comps)
         if f == "Separation":
             if self.none:
                 return None
@@ -834,35 +947,44 @@ class ColorSpace:
                 return None
             return self.base.rgb(results) if self.base is not None else None
         if f == "DeviceN":
-            if self.func is None:
+            if self.func is None or self.base is None:
                 return None
             results = [0.0] * max(self.func.outputs, 16)
             if not self.func.call(buf[:self.n], results, 0):
                 return None
             return self.base.rgb(results)
-        return None
+        if f == "Pattern":
+            return None
+        assert_never(f)
 
-    def rgb_or_zeros(self, buf: list):
+    def rgb_or_zeros(self, buf: list[float]) -> Rgb:
         v = self.rgb(buf)
         return (0.0, 0.0, 0.0) if v is None else v
 
 
-_STOCK = {"DeviceRGB": ("DeviceRGB", 3), "RGB": ("DeviceRGB", 3), "DeviceGray": ("DeviceGray", 1),
-          "G": ("DeviceGray", 1), "DeviceCMYK": ("DeviceCMYK", 4), "CMYK": ("DeviceCMYK", 4),
-          "Pattern": ("Pattern", 1)}
+def _space(family: Family, n: int, base: ColorSpace | None, func: Function | None) -> ColorSpace:
+    """A colour space of no parameters but its base and function."""
+    return ColorSpace(family=family, n=n, base=base, func=func, none=False, calrgb=None, lab_ranges=None,
+                      indexed=None)
+
+
+_STOCK: dict[str, tuple[Family, int]] = {
+    "DeviceRGB": ("DeviceRGB", 3), "RGB": ("DeviceRGB", 3), "DeviceGray": ("DeviceGray", 1),
+    "G": ("DeviceGray", 1), "DeviceCMYK": ("DeviceCMYK", 4), "CMYK": ("DeviceCMYK", 4),
+    "Pattern": ("Pattern", 1)}
 
 
 def _stock(name: str) -> ColorSpace | None:
     s = _STOCK.get(name)
-    return ColorSpace(*s) if s else None
+    return _space(s[0], s[1], None, None) if s else None
 
 
-def get_colorspace(a: _Access, obj) -> ColorSpace | None:
+def get_colorspace(a: _Access, obj: object) -> ColorSpace | None:
     """CPDF_DocPageData::GetColorSpace(obj, nullptr)."""
     return _cs_internal(a, obj, set(), set())
 
 
-def _cs_internal(a: _Access, obj, visited: set, internal: set):
+def _cs_internal(a: _Access, obj: object, visited: set[int], internal: set[int]) -> ColorSpace | None:
     if obj is None or id(obj) in internal:
         return None
     internal.add(id(obj))
@@ -878,7 +1000,7 @@ def _cs_internal(a: _Access, obj, visited: set, internal: set):
         internal.discard(id(obj))
 
 
-def _cs_load(a: _Access, obj, visited: set):
+def _cs_load(a: _Access, obj: object, visited: set[int]) -> ColorSpace | None:
     """CPDF_ColorSpace::Load."""
     if obj is None or id(obj) in visited:
         return None
@@ -920,41 +1042,45 @@ def _cs_load(a: _Access, obj, visited: set):
         visited.discard(id(obj))
 
 
-def _white(a: _Access, d):
-    def floats():
+def _white(a: _Access, d: PdfDict) -> cie.Vector3 | None:
+    def floats() -> list[float] | None:
         wp = a.array_for(d, "WhitePoint")
         return None if wp is None else [a.float_at(wp, i) for i in range(len(wp))]
     return cie.white_point(floats)
 
 
-def _calgray(a: _Access, obj):
+def _calgray(a: _Access, obj: list[object]) -> ColorSpace | None:
     d = _Access.dict_of(a.r(obj[1]))
     if d is None or _white(a, d) is None:
         return None
-    return ColorSpace("CalGray", 1)
+    return _space("CalGray", 1, None, None)
 
 
-def _calrgb(a: _Access, obj):
+def _calrgb(a: _Access, obj: list[object]) -> ColorSpace | None:
     d = _Access.dict_of(a.r(obj[1]))
     white = None if d is None else _white(a, d)
     if white is None:
         return None
     g, m = a.array_for(d, "Gamma"), a.array_for(d, "Matrix")
-    gamma = None if g is None else tuple(a.float_at(g, i) for i in range(3))
-    matrix = None if m is None else tuple(a.float_at(m, i) for i in range(9))
-    return ColorSpace("CalRGB", 3, params=(white, gamma, matrix))
+    gamma = None if g is None else (a.float_at(g, 0), a.float_at(g, 1), a.float_at(g, 2))
+    matrix = None if m is None else (a.float_at(m, 0), a.float_at(m, 1), a.float_at(m, 2),
+                                     a.float_at(m, 3), a.float_at(m, 4), a.float_at(m, 5),
+                                     a.float_at(m, 6), a.float_at(m, 7), a.float_at(m, 8))
+    return ColorSpace(family="CalRGB", n=3, base=None, func=None, none=False,
+                      calrgb=CalRGBParams(white=white, gamma=gamma, matrix=matrix), lab_ranges=None, indexed=None)
 
 
-def _lab(a: _Access, obj):
+def _lab(a: _Access, obj: list[object]) -> ColorSpace | None:
     d = _Access.dict_of(a.r(obj[1]))
     if d is None or _white(a, d) is None:
         return None
     r = a.array_for(d, "Range")
     ranges = (-100.0, 100.0, -100.0, 100.0) if r is None else tuple(a.float_at(r, i) for i in range(4))
-    return ColorSpace("Lab", 3, params=ranges)
+    return ColorSpace(family="Lab", n=3, base=None, func=None, none=False, calrgb=None, lab_ranges=ranges,
+                      indexed=None)
 
 
-def _indexed(a: _Access, obj, visited):
+def _indexed(a: _Access, obj: list[object], visited: set[int]) -> ColorSpace | None:
     """CPDF_IndexedCS::v_Load."""
     if len(obj) < 4:
         return None
@@ -964,7 +1090,7 @@ def _indexed(a: _Access, obj, visited):
     base = _cs_internal(a, base_obj, visited, set())
     if base is None or base.family in ("Indexed", "Pattern"):
         return None
-    ranges = []
+    ranges: list[tuple[float, float]] = []
     for i in range(base.n):
         lo, hi = base.default_range(i)
         ranges.append((lo, F(hi - lo)))
@@ -973,18 +1099,20 @@ def _indexed(a: _Access, obj, visited):
     if table is None:
         return None
     if isinstance(table, Stream):
-        lookup = bytes(a.doc.stream_data(table))
+        lookup = a.doc.stream_data(table)
     elif isinstance(table, (String, bytes)):
         lookup = bytes(table)
     else:
         lookup = b""
-    return ColorSpace("Indexed", 1, base, params=(lookup, hival, ranges))
+    return ColorSpace(family="Indexed", n=1, base=base, func=None, none=False, calrgb=None, lab_ranges=None,
+                      indexed=IndexedTable(lookup=lookup, hival=hival, ranges=ranges))
 
 
-def _separation(a: _Access, obj, visited):
+def _separation(a: _Access, obj: list[object], visited: set[int]) -> ColorSpace | None:
     name = a.r(obj[1])
     if _Access.string(name) == "None" and isinstance(name, (Name, String, bytes)):
-        return ColorSpace("Separation", 1, none=True)
+        return ColorSpace(family="Separation", n=1, base=None, func=None, none=True, calrgb=None,
+                          lab_ranges=None, indexed=None)
     alt = a.r(obj[2]) if len(obj) > 2 else None
     if alt is obj:
         return None
@@ -997,10 +1125,10 @@ def _separation(a: _Access, obj, visited):
         f = load_function(a, fobj, set())
         if f is not None and f.outputs >= base.n:
             func = f
-    return ColorSpace("Separation", 1, base, func)
+    return _space("Separation", 1, base, func)
 
 
-def _devicen(a: _Access, obj, visited):
+def _devicen(a: _Access, obj: list[object], visited: set[int]) -> ColorSpace | None:
     names = a.r(obj[1])
     if not isinstance(names, list):
         return None
@@ -1013,33 +1141,76 @@ def _devicen(a: _Access, obj, visited):
         return None
     if not names:
         return None
-    return ColorSpace("DeviceN", len(names), base, func)
+    return _space("DeviceN", len(names), base, func)
 
 
 # ---------------------------------------------------------------------- shading patterns
 
 
+@dataclass(frozen=True, kw_only=True)
+class Shading:
+    """A shading CPDF_ShadingPattern::Load read: its object (a dictionary, or a stream for the
+    mesh types) and dictionary, colour space, functions (None for one that failed to load) and
+    type, 1 to 7."""
+    a: _Access
+    obj: object
+    sd: PdfDict
+    cs: ColorSpace
+    funcs: list[Function | None]
+    type: int
+
+
+RecordKind: TypeAlias = Literal["shading", "pattern", "tiling", "?"]
+"""What a Record is: an `sh` shading, a shading pattern (PatternType 2), a tiling pattern
+(PatternType 1), or a pattern state PDFium's parser keeps differently (refused)."""
+_PATTERN_KINDS: dict[int, RecordKind] = {1: "tiling", 2: "pattern"}
+
+
+def _functions(a: _Access, sd: PdfDict) -> list[Function | None]:
+    """A shading's /Function: one, or up to four of an array."""
+    f = a.r(sd.get("Function"))
+    if f is None:
+        return []
+    if isinstance(f, list):
+        return [load_function(a, a.r(f[i]), set()) for i in range(min(len(f), 4))]
+    return [load_function(a, f, set())]
+
+
 class Record:
     """A CPDF_ShadingPattern (`sh` resource or PatternType 2) or a tiling pattern, as the
-    document's pattern cache holds it."""
+    document's pattern cache holds it: once loaded, a shading's `shade`, a tiling pattern's
+    `tiling` (and the cells drawn of it, `render_pattern.cell`)."""
 
-    def __init__(self, doc, obj, kind: str, parent_matrix: tuple):
+    def __init__(self, doc: PdfFile, obj: object, kind: RecordKind, parent_matrix: Matrix) -> None:
         self.a = _Access(doc)
-        self.obj, self.kind, self.parent_matrix = obj, kind, parent_matrix
-        self._loaded = None
+        self.obj = obj
+        self.kind: RecordKind = kind
+        self.parent_matrix = parent_matrix
+        self._loaded: bool | None = None
+        self._typed = False
         self.reason: str | None = None
-        self.pattern_to_form = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+        self.shade: Shading | None = None
+        self.tiling: Tiling | None = None
+        self.cells: dict[General, Cell] = {}
+        self.pattern_to_form: Matrix = IDENTITY
         if kind in ("pattern", "tiling"):     # SetPatternToFormMatrix, in both constructors
             self.pattern_to_form = R.concat(self.a.matrix_for(_Access.dict_of(obj), "Matrix"), parent_matrix)
 
+    @property
+    def type(self) -> int:
+        """The shading type once one was read (0 before, and for a tiling pattern)."""
+        return self.shade.type if self.shade is not None else 0
+
     def load(self) -> bool:
         """CPDF_ShadingPattern::Load (true: drawn; false: nothing; a refusal sets `reason`)."""
-        if self._loaded is None:
+        loaded = self._loaded
+        if loaded is None:
             try:
-                self._loaded = self._load()
+                loaded = self._load()
             except Unsupported as e:
-                self.reason, self._loaded = str(e), False
-        return self._loaded
+                self.reason, loaded = str(e), False
+            self._loaded = loaded
+        return loaded
 
     def _load(self) -> bool:
         a = self.a
@@ -1048,18 +1219,15 @@ class Record:
             return render_pattern.load(self)
         if self.kind == "?":
             raise Unsupported("a pattern state PDFium's parser keeps differently")
-        sobj = self.obj if self.kind == "shading" else a.r(_Access.dict_of(self.obj).get("Shading"))
+        if self.kind == "shading":
+            sobj = self.obj
+        else:
+            pd = _Access.dict_of(self.obj)
+            sobj = a.r(pd.get("Shading")) if pd is not None else None
         sd = _Access.dict_of(sobj)
         if sd is None:
             return False
-        self.shading, self.dict = sobj, sd
-        funcs = []
-        f = a.r(sd.get("Function"))
-        if f is not None:
-            if isinstance(f, list):
-                funcs = [load_function(a, a.r(f[i]), set()) for i in range(min(len(f), 4))]
-            else:
-                funcs = [load_function(a, f, set())]
+        funcs = _functions(a, sd)
         cs_obj = a.r(sd.get("ColorSpace"))
         if cs_obj is None:
             return False
@@ -1069,8 +1237,8 @@ class Record:
         stype = a.integer_for(sd, "ShadingType")
         if not 1 <= stype <= 7:
             return False
-        self.cs, self.funcs, self.type = cs, funcs, stype
-        if not self._validate():
+        sh = self.shade = Shading(a=a, obj=sobj, sd=sd, cs=cs, funcs=funcs, type=stype)
+        if not _validate(sh):
             raise Unsupported("a shading that fails validation (PDFium draws it on a second Load only)")
         return True
 
@@ -1080,19 +1248,13 @@ class Record:
         then Validate. Once the type was read, Load answers true without validating again, and
         the document keeps the pattern: a shading that fails Validate is drawn from its second
         `sh` on (measured on a mutated beamer ball)."""
-        if getattr(self, "_typed", False):
+        if self._typed:
             return True
         a = self.a
         sd = _Access.dict_of(self.obj)
         if sd is None:
             return False
-        funcs = []
-        f = a.r(sd.get("Function"))
-        if f is not None:
-            if isinstance(f, list):
-                funcs = [load_function(a, a.r(f[i]), set()) for i in range(min(len(f), 4))]
-            else:
-                funcs = [load_function(a, f, set())]
+        funcs = _functions(a, sd)
         cs_obj = a.r(sd.get("ColorSpace"))
         if cs_obj is None:
             return False
@@ -1114,34 +1276,49 @@ class Record:
         if not 1 <= stype <= 7:
             return False
         self._typed = True
-        self.shading, self.dict, self.cs, self.funcs, self.type = self.obj, sd, cs, funcs, stype
-        return self._validate()
-
-    def _validate(self) -> bool:
-        if self.type >= 4 and not isinstance(self.shading, Stream):
-            return False
-        if self.cs.family == "Indexed" and (self.type <= 3 or self.funcs):
-            return False
-        n = self.cs.n
-
-        def ok(count, inputs, outputs):
-            return len(self.funcs) == count and all(
-                f is not None and f.inputs == inputs and f.outputs == outputs for f in self.funcs)
-        if self.type == 1:
-            return ok(1, 2, n) or ok(n, 2, 1)
-        if self.type in (2, 3):
-            return ok(1, 1, n) or ok(n, 1, 1)
-        return not self.funcs or ok(1, 1, n) or ok(n, 1, 1)
+        sh = self.shade = Shading(a=a, obj=self.obj, sd=sd, cs=cs, funcs=funcs, type=stype)
+        return _validate(sh)
 
 
-def _cache(parser) -> dict:
-    c = getattr(parser, "shading_cache", None)
+def _validate(sh: Shading) -> bool:
+    """CPDF_ShadingPattern::Validate."""
+    funcs = sh.funcs
+    if sh.type >= 4 and not isinstance(sh.obj, Stream):
+        return False
+    if sh.cs.family == "Indexed" and (sh.type <= 3 or funcs):
+        return False
+    n = sh.cs.n
+
+    def ok(count: int, inputs: int, outputs: int) -> bool:
+        return len(funcs) == count and all(
+            f is not None and f.inputs == inputs and f.outputs == outputs for f in funcs)
+    if sh.type == 1:
+        return ok(1, 2, n) or ok(n, 2, 1)
+    if sh.type in (2, 3):
+        return ok(1, 1, n) or ok(n, 1, 1)
+    return not funcs or ok(1, 1, n) or ok(n, 1, 1)
+
+
+class ParserLike(Protocol):
+    """What the pattern cache needs of content.Parser: its document."""
+
+    @property
+    def doc(self) -> PdfFile: ...
+
+
+_CACHES: WeakKeyDictionary[ParserLike, dict[int, Record]] = WeakKeyDictionary()
+"""The document's pattern cache, per parser (it lives as long as the parser does)."""
+
+
+def _cache(parser: ParserLike) -> dict[int, Record]:
+    c = _CACHES.get(parser)
     if c is None:
-        c = parser.shading_cache = {}
+        c = {}
+        _CACHES[parser] = c
     return c
 
 
-def find_shading(parser, obj, parent_matrix) -> Record:
+def find_shading(parser: ParserLike, obj: object, parent_matrix: Matrix) -> Record:
     """FindShading for `sh`: the document's cache keeps one pattern per object."""
     c = _cache(parser)
     rec = c.get(id(obj))
@@ -1152,12 +1329,12 @@ def find_shading(parser, obj, parent_matrix) -> Record:
     return rec
 
 
-def find_pattern(parser, obj, parent_matrix):
+def find_pattern(parser: ParserLike, obj: object, parent_matrix: Matrix) -> Record | None:
     """FindPattern: None when PDFium finds nothing (its colour state stays as it was)."""
     if not isinstance(obj, (dict, Stream)):
         return None
     a = _Access(parser.doc)
-    kind = {1: "tiling", 2: "pattern"}.get(a.integer_for(_Access.dict_of(obj), "PatternType"))
+    kind = _PATTERN_KINDS.get(a.integer_for(_Access.dict_of(obj), "PatternType"))
     if kind is None:
         return None
     c = _cache(parser)
@@ -1173,9 +1350,9 @@ def find_pattern(parser, obj, parent_matrix):
 # ---------------------------------------------------------------------- drawing
 
 
-def _steps(rec: Record, t_min: float, t_max: float, alpha: int):
+def _steps(sh: Shading, t_min: float, t_max: float, alpha: int) -> UInt32 | None:
     """GetShadingSteps: 256 ARGB values, or None."""
-    cs, funcs = rec.cs, rec.funcs
+    cs, funcs = sh.cs, sh.funcs
     total = sum(f.outputs for f in funcs if f is not None)
     if total > U32:
         total = 0
@@ -1199,7 +1376,7 @@ def _steps(rec: Record, t_min: float, t_max: float, alpha: int):
     return out
 
 
-def _grid(final, w: int, h: int):
+def _grid(final: Matrix, w: int, h: int) -> tuple[Floats32, Floats32]:
     """inverse(final).Transform(column, row) for every pixel, in float."""
     a, b, c, d, e, f = (np.float32(v) for v in R.inverse(final))
     cols = np.arange(w, dtype=np.float32)[None, :]
@@ -1207,12 +1384,13 @@ def _grid(final, w: int, h: int):
     return (a * cols + c * rows) + e, (b * cols + d * rows) + f
 
 
-def _index(s):
-    """static_cast<int32_t>(s * 255) on an array."""
+def _index(s: Floats32 | Floats) -> Ints:
+    """static_cast<int32_t>(s * 255) on an array (float32 when it runs: numpy's stubs widen a
+    float32 array times a float32 scalar to float64)."""
     return i32_array(s * np.float32(255))
 
 
-def _paint(bitmap, idx, steps, start_ext: bool, end_ext: bool, live=None):
+def _paint(bitmap: UInt32, idx: Ints, steps: UInt32, start_ext: bool, end_ext: bool, live: Mask | None) -> None:
     ok = np.ones(idx.shape, bool) if live is None else live
     lo, hi = idx < 0, idx >= 256
     ok = ok & (~lo | start_ext) & (~hi | end_ext)
@@ -1220,30 +1398,30 @@ def _paint(bitmap, idx, steps, start_ext: bool, end_ext: bool, live=None):
     bitmap[ok] = steps[k[ok]]
 
 
-def _coords(rec: Record, n: int):
-    a = rec.a
-    coords = a.array_for(rec.dict, "Coords")
+def _coords(sh: Shading, n: int) -> tuple[list[float], float, float, bool, bool] | None:
+    a, sd = sh.a, sh.sd
+    coords = a.array_for(sd, "Coords")
     if coords is None:
         return None
     vals = [a.float_at(coords, i) for i in range(n)]
     t_min, t_max = 0.0, 1.0
-    dom = a.array_for(rec.dict, "Domain")
+    dom = a.array_for(sd, "Domain")
     if dom is not None:
         t_min, t_max = a.float_at(dom, 0), a.float_at(dom, 1)
-    ext = a.array_for(rec.dict, "Extend")
+    ext = a.array_for(sd, "Extend")
     start_ext = ext is not None and a.boolean_at(ext, 0, False)
     end_ext = ext is not None and a.boolean_at(ext, 1, False)
     return vals, t_min, t_max, start_ext, end_ext
 
 
-def _axial(bitmap, final, rec: Record, alpha: int) -> None:
-    got = _coords(rec, 4)
+def _axial(bitmap: UInt32, final: Matrix, sh: Shading, alpha: int) -> None:
+    got = _coords(sh, 4)
     if got is None:
         return
     (sx, sy, ex, ey), t_min, t_max, s_ext, e_ext = got
     xs, ys = F(ex - sx), F(ey - sy)
     als = F(F(xs * xs) + F(ys * ys))
-    steps = _steps(rec, t_min, t_max, alpha)
+    steps = _steps(sh, t_min, t_max, alpha)
     if steps is None:
         return
     h, w = bitmap.shape
@@ -1251,15 +1429,15 @@ def _axial(bitmap, final, rec: Record, alpha: int) -> None:
         px, py = _grid(final, w, h)
         f32 = np.float32
         scale = ((px - f32(sx)) * f32(xs) + (py - f32(sy)) * f32(ys)) / f32(als)
-        _paint(bitmap, _index(scale), steps, s_ext, e_ext)
+        _paint(bitmap, _index(scale), steps, s_ext, e_ext, None)
 
 
-def _radial(bitmap, final, rec: Record, alpha: int) -> None:
-    got = _coords(rec, 6)
+def _radial(bitmap: UInt32, final: Matrix, sh: Shading, alpha: int) -> None:
+    got = _coords(sh, 6)
     if got is None:
         return
     (sx, sy, sr, ex, ey, er), t_min, t_max, s_ext, e_ext = got
-    steps = _steps(rec, t_min, t_max, alpha)
+    steps = _steps(sh, t_min, t_max, alpha)
     if steps is None:
         return
     dx, dy, dr = F(ex - sx), F(ey - sy), F(er - sr)
@@ -1296,11 +1474,12 @@ def _radial(bitmap, final, rec: Record, alpha: int) -> None:
         _paint(bitmap, _index(s), steps, s_ext, e_ext, live)
 
 
-def draw(dev, rec: Record, matrix, clip_rect, alpha: int) -> None:
-    """CPDF_RenderShading::Draw on the AGG device, through a CPDF_DeviceBuffer."""
-    cs, d, a = rec.cs, rec.dict, rec.a
+def draw(dev: Device, sh: Shading, pattern: bool, matrix: Matrix, clip_rect: IntRect, alpha: int) -> None:
+    """CPDF_RenderShading::Draw on the AGG device, through a CPDF_DeviceBuffer (`pattern`: a
+    shading pattern's, whose /Background is painted)."""
+    cs, d, a = sh.cs, sh.sd, sh.a
     background = 0
-    if rec.kind == "pattern" and "Background" in d:
+    if pattern and "Background" in d:
         back = a.array_for(d, "Background")
         if back is not None and len(back) >= cs.n:
             r, g, b = cs.rgb_or_zeros([a.float_at(back, i) for i in range(cs.n)])
@@ -1318,20 +1497,25 @@ def draw(dev, rec: Record, matrix, clip_rect, alpha: int) -> None:
     if background:
         bitmap[...] = background
     final = R.concat(matrix, buf_m)
-    if rec.type == 2:
-        _axial(bitmap, final, rec, alpha)
-    elif rec.type == 3:
-        _radial(bitmap, final, rec, alpha)
+    if sh.type == 2:
+        _axial(bitmap, final, sh, alpha)
+    elif sh.type == 3:
+        _radial(bitmap, final, sh, alpha)
     else:
         from . import render_mesh as M
-        if rec.type == 1:
-            M.draw_function(bitmap, final, rec, alpha)
-        elif isinstance(rec.shading, Stream):
-            {4: M.draw_free, 5: M.draw_lattice}.get(rec.type, M.draw_patches)(bitmap, final, rec, alpha)
+        if sh.type == 1:
+            M.draw_function(bitmap, final, sh, alpha)
+        elif isinstance(sh.obj, Stream):
+            if sh.type == 4:
+                M.draw_free(bitmap, final, sh, alpha)
+            elif sh.type == 5:
+                M.draw_lattice(bitmap, final, sh, alpha)
+            else:
+                M.draw_patches(bitmap, final, sh, alpha)
     set_dibits(dev, bitmap, l, t)
 
 
-def set_dibits(dev, bitmap: UInt32, left: int, top: int) -> None:
+def set_dibits(dev: Device, bitmap: UInt32, left: int, top: int) -> None:
     """SetDIBitsWithBlend (Normal) -> CFX_AggDeviceDriver::SetDIBits -> CompositeBitmap of a
     BGRA bitmap under the clip region."""
     h, w = bitmap.shape
@@ -1348,7 +1532,7 @@ def set_dibits(dev, bitmap: UInt32, left: int, top: int) -> None:
     s = np.stack([src & 0xFF, (src >> 8) & 0xFF, (src >> 16) & 0xFF, src >> 24], -1).astype(np.int32)
     dst = dev.bgra[t - dev.oy:b - dev.oy, l - dev.ox:r - dev.ox]
     d = dst.astype(np.int32)
-    mask = None
+    mask: Int32 | None = None
     if dev.clip is not None and dev.clip.mask is not None:
         mask = dev.clip.mask[t - cb[1]:b - cb[1], l - cb[0]:r - cb[0]].astype(np.int32)
     sa = s[..., 3] if mask is None else s[..., 3] * mask // 255
@@ -1372,7 +1556,7 @@ def set_dibits(dev, bitmap: UInt32, left: int, top: int) -> None:
 # ---------------------------------------------------------------------- render status
 
 
-def _point_box(points) -> tuple:
+def _point_box(points: Sequence[PathPoint]) -> FloatRect:
     """CFX_Path::GetBoundingBox (CFX_ClipPath's paths too)."""
     if not points:
         return 0.0, 0.0, 0.0, 0.0
@@ -1391,10 +1575,11 @@ def _point_box(points) -> tuple:
     return l, b, r, t
 
 
-def shading_rect(obj) -> tuple:
+def shading_rect(obj: PObj) -> FloatRect:
     """A shading object's GetRect: the clip path's box (CPDF_ClipPath::GetClipBox), in float."""
     if not obj.clip_paths:
-        return tuple(F(v) for v in obj.rect)
+        l, b, r, t = obj.rect
+        return F(l), F(b), F(r), F(t)
     rect = _point_box(obj.clip_paths[0][0])
     for points, _ in obj.clip_paths[1:]:
         rect = float_intersect(rect, _point_box(points))
@@ -1402,9 +1587,8 @@ def shading_rect(obj) -> tuple:
     return rect if mesh is None else float_intersect(rect, mesh)
 
 
-def path_rect(obj) -> tuple:
+def path_rect(obj: PObj) -> FloatRect:
     """CPDF_PathObject::CalcBoundingBox, in float."""
-    from .render import stroke_bbox
     width = F(obj.line_width)
     if obj.stroked and width != 0:
         rect = stroke_bbox(obj.points, width)
@@ -1421,10 +1605,13 @@ def _alpha(value: float) -> int:
     return roundf(F(255.0 * F(value)))
 
 
-def process_shading(status, obj, matrix) -> None:
+def process_shading(status: Status, obj: PObj, matrix: Matrix) -> None:
     """CPDF_RenderStatus::ProcessShading."""
     rec = obj.shading_record
-    if rec is None or not rec.load():
+    if not isinstance(rec, Record) or not rec.load():
+        return
+    sh = rec.shade
+    if sh is None:          # loaded: never
         return
     dev = status.dev
     with np.errstate(all="ignore"):
@@ -1432,25 +1619,25 @@ def process_shading(status, obj, matrix) -> None:
         if R.rect_empty(rect):
             return
         m = R.concat(obj.shading_matrix, matrix)
-        draw(dev, rec, m, rect, _alpha(obj.fill_alpha))
+        draw(dev, sh, rec.kind == "pattern", m, rect, _alpha(obj.fill_alpha))
 
 
-def path_pattern(status, obj, matrix) -> tuple:
+def path_pattern(status: Status, obj: PObj, matrix: Matrix) -> tuple[int, bool]:
     """ProcessPathPattern: draws the pattern fill and stroke, returns what is left to paint."""
     fill_type, stroke = obj.fill_type, obj.stroked
-    if fill_type != FILL_NONE and getattr(obj, "fill_pattern", None) is not None:
+    if fill_type != FILL_NONE and obj.fill_pattern is not None:
         _draw_pattern(status, obj, matrix, obj.fill_pattern, False)
         fill_type = FILL_NONE
-    if stroke and getattr(obj, "stroke_pattern", None) is not None:
+    if stroke and obj.stroke_pattern is not None:
         _draw_pattern(status, obj, matrix, obj.stroke_pattern, True)
         stroke = False
     return fill_type, stroke
 
 
-def _draw_pattern(status, obj, matrix, rec, stroke: bool) -> None:
+def _draw_pattern(status: Status, obj: PObj, matrix: Matrix, rec: object, stroke: bool) -> None:
     """DrawPathWithPattern -> DrawTilingPattern / DrawShadingPattern (both clip to the path
     first: ClipPattern -> SelectClipPath)."""
-    if rec is False or not isinstance(rec, Record) or not rec.load():
+    if not isinstance(rec, Record) or not rec.load():
         return
     dev = status.dev
     dev.save()
@@ -1458,9 +1645,9 @@ def _draw_pattern(status, obj, matrix, rec, stroke: bool) -> None:
         with np.errstate(all="ignore"):
             pm = R.concat(obj.matrix, matrix)
             if stroke:
-                if dev.clip is None:
-                    from .render import Clip
-                    dev.clip = Clip((0, 0, dev.w, dev.h))
+                clip = dev.clip
+                if clip is None:
+                    clip = dev.clip = Clip((0, 0, dev.w, dev.h), None)
                 if F(R.x_unit(pm) + R.y_unit(pm)) == 0.0:
                     # RasterizeStroke's unit would be 1 / 0: a stroke of infinite width through a
                     # matrix that maps everything to one point, NaN vertices in AGG
@@ -1470,31 +1657,34 @@ def _draw_pattern(status, obj, matrix, rec, stroke: bool) -> None:
                 rz.add_path(R.stroke_vertices(R.build_path(obj.points, None), pm, F(obj.line_width), obj.line_cap,
                                               obj.line_join, F(obj.miter), tuple(F(v) for v in obj.dash),
                                               F(obj.dash_phase), 1.0))
-                dev._set_clip_mask(rz, False)
+                _set_clip_mask(clip, rz, False)
             else:
                 dev.set_clip_fill(obj.points, pm, obj.fill_type == FILL_EVENODD)
             if rec.kind == "tiling":
                 from . import render_pattern
                 render_pattern.draw(status, obj, matrix, rec, stroke)
                 return
+            sh = rec.shade
+            if sh is None:      # a loaded shading pattern: never
+                return
             rect = fx_intersect(outer(R.transform_rect(matrix, path_rect(obj))), dev.clip_box())
             if R.rect_empty(rect):
                 return
             m = R.concat(rec.pattern_to_form, matrix)
-            draw(dev, rec, m, rect, _alpha(obj.stroke_alpha if stroke else obj.fill_alpha))
+            draw(dev, sh, rec.kind == "pattern", m, rect, _alpha(obj.stroke_alpha if stroke else obj.fill_alpha))
     finally:
         dev.restore(False)
 
 
-def refusal(obj, ctx=None) -> str | None:
+def refusal(obj: PObj, ctx: Context | None) -> str | None:
     """What of a shading object or a pattern-painted path is not drawn exactly, if anything
     (`ctx` is render_transparency.Context: a tiling pattern's cell is looked into with it)."""
-    recs = []
-    if getattr(obj, "shading_record", None) is not None:
+    recs: list[object] = []
+    if obj.shading_record is not None:
         recs.append(obj.shading_record)
-    if getattr(obj, "fill_type", FILL_NONE) != FILL_NONE and getattr(obj, "fill_pattern", None) is not None:
+    if obj.fill_type != FILL_NONE and obj.fill_pattern is not None:
         recs.append(obj.fill_pattern)
-    if getattr(obj, "stroked", False) and getattr(obj, "stroke_pattern", None) is not None:
+    if obj.stroked and obj.stroke_pattern is not None:
         recs.append(obj.stroke_pattern)
     for rec in recs:
         if rec is False:

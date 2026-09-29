@@ -13,32 +13,55 @@ backdrop colour (luminosity: FXRGB2GRAY of each pixel) or into an 8-bit mask (al
 
 from __future__ import annotations
 
+from collections.abc import Callable, Sequence
+from typing import TYPE_CHECKING, Literal, TypeAlias, Union
+
 import numpy as np
 
-from ...arrays import BGRA, Ints
-from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT
+from ...arrays import BGRA, Gray, Int32, Ints
+from ...typing_compat import override
+from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT, Matrix
 from . import raster as R
-from .colors import load_colorspace
-from .raster import F
-from .syntax import Stream
+from .colors import ColorSpace, load_colorspace
+from .raster import F, IntRect, PathPoint
+from .render import IDENTITY, Device, Graph, Status
+from .syntax import InlineImage, PdfDict, Stream
 
-SEPARABLE = ("Multiply", "Screen", "Overlay", "Darken", "Lighten", "ColorDodge", "ColorBurn",
-             "HardLight", "SoftLight", "Difference", "Exclusion")
-NON_SEPARABLE = ("Hue", "Saturation", "Color", "Luminosity")
+if TYPE_CHECKING:
+    from .content import PObj
+    from .document import PdfFile
+    from .fonts import Font
+    from .render_image import ImageCache, Probe
+
+Separable: TypeAlias = Literal["Multiply", "Screen", "Overlay", "Darken", "Lighten", "ColorDodge",
+                               "ColorBurn", "HardLight", "SoftLight", "Difference", "Exclusion"]
+NonSeparable: TypeAlias = Literal["Hue", "Saturation", "Color", "Luminosity"]
+BlendMode: TypeAlias = Union[Literal["Normal"], Separable, NonSeparable]
+"""CPDF_GeneralState's BlendMode."""
+BitmapKind: TypeAlias = Literal["bgra", "bgrx", "mask"]
+"""A bitmap's format: (h, w, 4) bytes as "bgra", "bgrx" (the fourth byte unused) or "mask"
+(k8bppMask, the value in bytes 0-2)."""
+FontCache: TypeAlias = "dict[int | str, Font | None]"
+"""The document's fonts by dictionary (fonts.doc_fonts), which content.Parser fills."""
+
+SEPARABLE: tuple[Separable, ...] = ("Multiply", "Screen", "Overlay", "Darken", "Lighten", "ColorDodge",
+                                    "ColorBurn", "HardLight", "SoftLight", "Difference", "Exclusion")
+NON_SEPARABLE: tuple[NonSeparable, ...] = ("Hue", "Saturation", "Color", "Luminosity")
+_BLEND_MODES: dict[str, BlendMode] = {m: m for m in (*SEPARABLE, *NON_SEPARABLE)}
 MAX_MASK_DEPTH = 8
 
 
-def blend_mode(name: str) -> str:
+def blend_mode(name: str) -> BlendMode:
     """CPDF_GeneralState's GetBlendTypeFromString: an unknown name is Normal."""
-    return name if name in SEPARABLE or name in NON_SEPARABLE else "Normal"
+    return _BLEND_MODES.get(name, "Normal")
 
 
-def _merge(back, src, alpha):
+def _merge(back: Ints, src: Ints, alpha: Ints) -> Ints:
     """AlphaMerge on int arrays."""
     return (back * (255 - alpha) + src * alpha) // 255
 
 
-def _union(dest, src):
+def _union(dest: Ints, src: Ints) -> Ints:
     """AlphaUnion (uint8 result)."""
     return (dest + src - dest * src // 255) & 0xFF
 
@@ -46,31 +69,43 @@ def _union(dest, src):
 # ---------------------------------------------------------------------- context
 
 
+MaskState: TypeAlias = "tuple[bool, bool, frozenset[int]]"
+"""What a soft mask's render status carries: (mask_lum, mask_group_cmyk, mask_top)."""
+
+
 class Context:
     """What a render status reaches through CPDF_RenderContext: the document, the page's
     resources (a soft mask's /G is a CPDF_Form over them) and the page's transparency."""
 
-    def __init__(self, doc, page_resources, fonts: dict, page_group: bool):
+    def __init__(self, doc: PdfFile, page_resources: object, fonts: FontCache, page_group: bool) -> None:
         self.doc = doc
-        self.page_resources = page_resources if isinstance(page_resources, dict) else {}
+        self.page_resources: PdfDict = page_resources if isinstance(page_resources, dict) else {}
         self.fonts = fonts
         self.page_group = page_group
-        self._forms: dict = {}
+        self._forms: dict[int, tuple[list[PObj], list[PObj], Stream]] = {}
         self.depth = 0
         # what a soft mask's own render status carries (meaningful while depth > 0): SetLoadMask's
         # luminosity, whether SetGroupFamily got kDeviceCMYK, and which objects that status draws
         # itself (a form's children go through ProcessForm, which starts a status with none of it)
         self.mask_lum = True
         self.mask_group_cmyk = False
-        self.mask_top: frozenset = frozenset()
+        self.mask_top: frozenset[int] = frozenset()
+        # the page's top-level objects and matrix, for GetBackdrop's re-render (render_page)
+        self.page_objects: list[PObj] = []
+        self.page_matrix: Matrix = IDENTITY
+        # CPDF_PageImageCache (render_image.get_dib), the bitmaps `render_image.refusal` loaded,
+        # and the tiling patterns being drawn (render_pattern's recursion guard)
+        self.images: ImageCache = {}
+        self.image_probes: dict[int, Probe] = {}
+        self.tiling: set[int] = set()
 
-    def form(self, stream: Stream):
+    def form(self, stream: Stream) -> tuple[list[PObj], list[PObj]]:
         """CPDF_Form(doc, page resources, G).ParseContent() with no parent states: (top-level
         objects, every object) of G's content."""
         key = id(stream)
         if key not in self._forms:
             from .content import Parser, _Run, initial_state
-            objs: list = []
+            objs: list[PObj] = []
             parser = Parser(self.doc, self.page_resources, objs, self.fonts, {})
             run = _Run(parser, self.page_resources, initial_state(), (0.0, 0.0, 0.0, 0.0), None)
             try:
@@ -78,17 +113,19 @@ class Context:
             except RecursionError:
                 pass
             holder = objs[0] if objs else None
-            children = list(holder.children) if holder is not None else []
+            children: list[PObj] = list(holder.children) if holder is not None else []
             self._forms[key] = (children, [o for o in objs if o is not holder], stream)
         children, every, _ = self._forms[key]
         return children, every
 
 
-def form_transparency(obj, ctx) -> tuple[bool, bool]:
+def form_transparency(obj: PObj, ctx: Context) -> tuple[bool, bool]:
     """CPDF_Form::GetTransparency (LoadTransparencyInfo): (group, isolated)."""
     stream = obj.stream
-    r = ctx.doc.resolve if ctx is not None else (lambda v: v)
-    group = r(stream.get("Group")) if isinstance(stream, Stream) else None
+    if not isinstance(stream, Stream):
+        return False, False
+    r = ctx.doc.resolve
+    group = r(stream.get("Group"))
     if not isinstance(group, dict) or str(r(group.get("S"))) != "Transparency":
         return False, False
     iso = r(group.get("I"))       # GetIntegerFor: a boolean or a number, anything else 0
@@ -100,43 +137,47 @@ def form_transparency(obj, ctx) -> tuple[bool, bool]:
 # ---------------------------------------------------------------------- 8-bit mask device
 
 
-def mask_device(width: int, height: int):
+class MaskDevice(Device):
     """CFX_DefaultRenderDevice over a k8bppMask bitmap (the AGG driver): spans are
     CompositeSpanGray with gray 255, so the colour's alpha is all that counts; a clipped FillRect
     is CompositeMask (ByteMask2Mask), and DrawFillStrokePath puts its sub-bitmap back with colour
     0, which CompositeMask ignores: a translucent-stroke fill-and-stroke draws nothing."""
-    from .render import Device
 
-    class MaskDevice(Device):
-        def _blend(self, dest, src, color, span):
-            Device._blend(self, dest, src, color | 0xFFFFFF, span)
+    def __init__(self, width: int, height: int) -> None:
+        super().__init__(width, height, False, None)
+        self.mask_format = True
 
-        def draw_fill_stroke(self, *args, **kw):
+    @override
+    def _blend(self, dest: BGRA, src: Int32, color: int, span: bool) -> None:
+        Device._blend(self, dest, src, color | 0xFFFFFF, span)
+
+    @override
+    def draw_fill_stroke(self, points: Sequence[PathPoint], matrix: Matrix | None, graph: Graph | None,
+                         fill_argb: int, stroke_argb: int, fill_type: int) -> None:
+        return
+
+    @override
+    def fill_rect(self, rect: IntRect, color: int) -> None:
+        clip = self.clip
+        mask = clip.mask if clip is not None else None
+        if mask is None:
+            Device.fill_rect(self, rect, color | 0xFFFFFF)
             return
-
-        def fill_rect(self, rect, color):
-            if self.clip is None or self.clip.mask is None:
-                Device.fill_rect(self, rect, color | 0xFFFFFF)
-                return
-            cb = self.clip_box()
-            draw = R.rect_intersect(cb, _norm(rect))
-            alpha = color >> 24
-            if R.rect_empty(draw) or alpha == 0:
-                return
-            l, t, r, b = draw
-            dest = self.bgra[t - self.oy:b - self.oy, l - self.ox:r - self.ox]
-            m = self.clip.mask[t - cb[1]:b - cb[1], l - cb[0]:r - cb[0]].astype(np.int32)
-            src = alpha * m // 255
-            d = dest[..., 0].astype(np.int32)
-            out = np.where(d == 0, src, np.where(src > 0, _union(d, src), d)).astype(np.uint8)
-            dest[..., :3] = out[..., None]
-
-    dev = MaskDevice(width, height, False)
-    dev.mask_format = True
-    return dev
+        cb = self.clip_box()
+        draw = R.rect_intersect(cb, _norm(rect))
+        alpha = color >> 24
+        if R.rect_empty(draw) or alpha == 0:
+            return
+        l, t, r, b = draw
+        dest = self.bgra[t - self.oy:b - self.oy, l - self.ox:r - self.ox]
+        m = mask[t - cb[1]:b - cb[1], l - cb[0]:r - cb[0]].astype(np.int64)
+        src = alpha * m // 255
+        d = dest[..., 0].astype(np.int64)
+        out = np.where(d == 0, src, np.where(src > 0, _union(d, src), d)).astype(np.uint8)
+        dest[..., :3] = out[..., None]
 
 
-def _norm(r):
+def _norm(r: IntRect) -> IntRect:
     l, t, rt, b = r
     return min(l, rt), min(t, b), max(l, rt), max(t, b)
 
@@ -144,34 +185,33 @@ def _norm(r):
 # ---------------------------------------------------------------------- ProcessTransparency
 
 
-def effective_smask(obj):
+def effective_smask(obj: PObj) -> PdfDict | None:
     """The graphics state's soft mask as ProcessTransparency reads it: an image with an /SMask of
     its own drops it (`pSMaskDict = nullptr`), so that mask is never rendered at all."""
     smask = obj.smask
     if smask is not None and obj.type == OBJ_IMAGE:
-        d = getattr(getattr(obj, "stream", None), "dict", None)
-        if isinstance(d, dict) and "SMask" in d:
+        stream = obj.stream
+        if isinstance(stream, (Stream, InlineImage)) and isinstance(stream.dict, dict) and "SMask" in stream.dict:
             return None
     return smask
 
 
-def transparency_status(obj) -> bool:
+def transparency_status(obj: PObj) -> bool:
     """Whether ProcessTransparency draws `obj` into a bitmap of its own, whose CPDF_RenderStatus
     has SetStdCS(true) and neither the load-mask flag nor a group family. Asked about images, whose
     fill alpha and group flags never reach that test (they are a form object's)."""
     return effective_smask(obj) is not None or blend_mode(obj.blend) != "Normal"
 
 
-def alpha_mode(ctx) -> bool:
+def alpha_mode(ctx: Context | None) -> bool:
     """CPDF_RenderOptions::ColorModeIs(kAlpha): set by LoadSMask for an alpha mask and inherited by
     every status under it (ProcessForm and ProcessTransparency both copy the options), until a
     luminosity mask inside it renders with kNormal again."""
     return ctx is not None and ctx.depth > 0 and not ctx.mask_lum
 
 
-def process_transparency(status, obj, matrix) -> bool:
+def process_transparency(status: Status, obj: PObj, matrix: Matrix) -> bool:
     """CPDF_RenderStatus::ProcessTransparency: True when the object was drawn here."""
-    from .render import Device, Status
     blend = blend_mode(obj.blend)
     smask = effective_smask(obj)
     group_alpha = 1.0
@@ -192,7 +232,7 @@ def process_transparency(status, obj, matrix) -> bool:
         return True
     left, top = rect[0], rect[1]
     width, height = rect[2] - left, rect[3] - top
-    sub = Device(width, height, True)
+    sub = Device(width, height, True, None)
     if not transparency[1]:
         # CreateForNewBitmapWithBackdrop: what the device holds under the box (GetDIBits)
         sub.group_backdrop = (get_dibits(dev, rect), kind(dev))
@@ -202,7 +242,7 @@ def process_transparency(status, obj, matrix) -> bool:
     status.stopped = bitmap_render.stopped
     if smask is not None:
         smask_matrix = R.concat(obj.smask_matrix, matrix)
-        mask = load_smask(status, smask, rect, smask_matrix)
+        mask = load_smask(status.ctx, smask, rect, smask_matrix)
         if mask is not None:
             a = sub.bgra[..., 3].astype(np.int32)
             sub.bgra[..., 3] = (a * mask.astype(np.int32) // 255).astype(np.uint8)
@@ -226,19 +266,15 @@ def multiply_alpha(bgra: BGRA, alpha: float) -> None:
 # ---------------------------------------------------------------------- compositing
 
 
-# Bitmaps are (h, w, 4) uint8 arrays of one of three formats: "bgra", "bgrx" (the fourth byte
-# unused) and "mask" (k8bppMask, the value in bytes 0-2).
-
-
-def kind(dev) -> str:
+def kind(dev: Device) -> BitmapKind:
     """The format of a device's bitmap."""
-    if getattr(dev, "mask_format", False):
+    if dev.mask_format:
         return "mask"
     return "bgra" if dev.alpha else "bgrx"
 
 
-def composite_dibitmap(status, obj, bitmap: BGRA, left: int, top: int, blend: str,
-                       transparency) -> None:
+def composite_dibitmap(status: Status, obj: PObj, bitmap: BGRA, left: int, top: int, blend: BlendMode,
+                       transparency: tuple[bool, bool]) -> None:
     """CPDF_RenderStatus::CompositeDIBitmap of a BGRA bitmap (`transparency`: the status's
     (group, isolated), a form making it a group)."""
     dev = status.dev
@@ -254,7 +290,7 @@ def composite_dibitmap(status, obj, bitmap: BGRA, left: int, top: int, blend: st
             return
         h, w = bitmap.shape[:2]
         rect = R.rect_intersect((left, top, left + w, top + h), dev.clip_box())
-        backdrop = getattr(dev, "group_backdrop", None)
+        backdrop = dev.group_backdrop
         if backdrop is None:
             set_dibits(dev, bitmap, "bgra", rect[0], rect[1], blend)
             return
@@ -263,41 +299,41 @@ def composite_dibitmap(status, obj, bitmap: BGRA, left: int, top: int, blend: st
         if R.rect_empty(cr):
             return                                       # ClipTo gives nothing
         clone = barr[cr[1]:cr[3], cr[0]:cr[2]].copy()
-        composite_bitmap(clone, bkind, 0, 0, dev.bgra, dkind, rect[0], rect[1], "Normal")
-        composite_bitmap(clone, bkind, 0, 0, bitmap, "bgra", min(left, 0), min(top, 0), blend)
+        ch, cw = clone.shape[:2]
+        composite_bitmap(clone, bkind, 0, 0, dev.bgra, dkind, rect[0], rect[1], "Normal", cw, ch)
+        composite_bitmap(clone, bkind, 0, 0, bitmap, "bgra", min(left, 0), min(top, 0), blend, cw, ch)
         set_dibits(dev, clone, bkind, rect[0], rect[1], "Normal")
         return
     # GetBackdrop: the page drawn again up to this object, on a clear BGRA bitmap
     h, w = bitmap.shape[:2]
     bbox = R.rect_intersect((left, top, left + w, top + h), dev.clip_box())
-    backdrop = render_backdrop(status, obj, bbox)
-    if backdrop is None:
+    backdrop_bgra = render_backdrop(status, obj, bbox)
+    if backdrop_bgra is None:
         return
-    composite_bitmap(backdrop, "bgra", left - bbox[0], top - bbox[1], bitmap, "bgra", 0, 0, blend,
-                     width=w, height=h)
-    white = np.full(backdrop.shape, 255, np.uint8)
-    composite_bitmap(white, "bgrx", 0, 0, backdrop, "bgra", 0, 0, "Normal")
+    composite_bitmap(backdrop_bgra, "bgra", left - bbox[0], top - bbox[1], bitmap, "bgra", 0, 0, blend, w, h)
+    white = np.full(backdrop_bgra.shape, 255, np.uint8)
+    wh, ww = white.shape[:2]
+    composite_bitmap(white, "bgrx", 0, 0, backdrop_bgra, "bgra", 0, 0, "Normal", ww, wh)
     set_dibits(dev, white, "bgrx", bbox[0], bbox[1], "Normal")
 
 
-def render_backdrop(status, obj, bbox):
+def render_backdrop(status: Status, obj: PObj, bbox: IntRect) -> BGRA | None:
     """GetBackdrop with a backdrop needing alpha on a device without alpha output: a BGRA bitmap
     over `bbox` holding the page drawn up to `obj` (CPDF_RenderContext::Render, stop object)."""
-    from .render import Device, Status
     width, height = bbox[2] - bbox[0], bbox[3] - bbox[1]
     if width <= 0 or height <= 0:
         return None
     ctx = status.ctx
-    dev = Device(width, height, True)
+    dev = Device(width, height, True, None)
     matrix = R.concat(ctx.page_matrix, (1.0, 0.0, 0.0, 1.0, float(-bbox[0]), float(-bbox[1])))
     dev.save()
-    page = Status(dev, (bool(ctx.page_group), True), ctx=ctx, stop=obj)
+    page = Status(dev, (ctx.page_group, True), False, 1.0, ctx, obj)
     page.render_list(ctx.page_objects, matrix)
     dev.restore(False)
     return dev.bgra
 
 
-def get_dibits(dev, rect) -> BGRA:
+def get_dibits(dev: Device, rect: IntRect) -> BGRA:
     """CFX_AggDeviceDriver::GetDIBits into a new bitmap of the device's format over `rect`: over
     a group backdrop, the device's bitmap composited onto the backdrop's piece (from the bitmap's
     origin, as PDFium does), else the device's pixels; a format change keeps the new bitmap's
@@ -305,14 +341,15 @@ def get_dibits(dev, rect) -> BGRA:
     l, t, r, b = rect
     dkind = kind(dev)
     out = np.zeros((b - t, r - l, 4), np.uint8)
-    backdrop = getattr(dev, "group_backdrop", None)
+    backdrop = dev.group_backdrop
+    pkind: BitmapKind
     if backdrop is not None:
         barr, pkind = backdrop
         cr = R.rect_intersect(rect, (0, 0, barr.shape[1], barr.shape[0]))
         if R.rect_empty(cr):
             return out
         piece = barr[cr[1]:cr[3], cr[0]:cr[2]].copy()
-        composite_bitmap(piece, pkind, 0, 0, dev.bgra, dkind, 0, 0, "Normal")
+        composite_bitmap(piece, pkind, 0, 0, dev.bgra, dkind, 0, 0, "Normal", piece.shape[1], piece.shape[0])
     else:
         wh, ww = dev.bgra.shape[:2]
         cr = R.rect_intersect(rect, (dev.ox, dev.oy, dev.ox + ww, dev.oy + wh))
@@ -334,7 +371,7 @@ def get_dibits(dev, rect) -> BGRA:
     return out
 
 
-def set_dibits(dev, src: BGRA, skind: str, left: int, top: int, blend: str) -> None:
+def set_dibits(dev: Device, src: BGRA, skind: BitmapKind, left: int, top: int, blend: BlendMode) -> None:
     """CFX_RenderDevice::SetDIBitsWithBlend (the AGG driver's SetDIBits): the part inside the
     clip box, composited through the clip mask."""
     h, w = src.shape[:2]
@@ -349,21 +386,19 @@ def set_dibits(dev, src: BGRA, skind: str, left: int, top: int, blend: str) -> N
     l, t, r, b = dr
     s = src[t - top:b - top, l - left:r - left]
     dest = dev.bgra[t - dev.oy:b - dev.oy, l - dev.ox:r - dev.ox]
-    clip = None
+    clip: Ints | None = None
     if dev.clip is not None and dev.clip.mask is not None:
         clip = dev.clip.mask[t - cb[1]:b - cb[1], l - cb[0]:r - cb[0]].astype(np.int64)
     blit(dest, kind(dev), s, skind, blend, clip)
 
 
-def composite_bitmap(dest: BGRA, dkind: str, dest_left: int, dest_top: int, src: BGRA,
-                     skind: str, src_left: int, src_top: int, blend: str, width=None,
-                     height=None) -> None:
-    """CFX_DIBitmap::CompositeBitmap with no clip (GetOverlapRect, then the row compositor);
-    `width`, `height` default to the destination's."""
+def composite_bitmap(dest: BGRA, dkind: BitmapKind, dest_left: int, dest_top: int, src: BGRA,
+                     skind: BitmapKind, src_left: int, src_top: int, blend: BlendMode, width: int,
+                     height: int) -> None:
+    """CFX_DIBitmap::CompositeBitmap of a `width` x `height` piece with no clip (GetOverlapRect,
+    then the row compositor)."""
     dh, dw = dest.shape[:2]
     sh, sw = src.shape[:2]
-    width = dw if width is None else width
-    height = dh if height is None else height
     if width == 0 or height == 0 or dest_left > dw or dest_top > dh:
         return
     sr = R.rect_intersect((src_left, src_top, src_left + width, src_top + height), (0, 0, sw, sh))
@@ -375,7 +410,7 @@ def composite_bitmap(dest: BGRA, dkind: str, dest_left: int, dest_top: int, src:
     blit(dest[t:b, l:r], dkind, src[t - yo:b - yo, l - xo:r - xo], skind, blend, None)
 
 
-def blit(d: BGRA, dkind: str, s: BGRA, skind: str, blend: str, clip: Ints | None) -> None:
+def blit(d: BGRA, dkind: BitmapKind, s: BGRA, skind: BitmapKind, blend: BlendMode, clip: Ints | None) -> None:
     """CFX_ScanlineCompositor's rows over aligned pixels `d` (written) and `s`; `clip` the clip
     mask's values or None."""
     D = d.astype(np.int64)
@@ -394,7 +429,7 @@ def blit(d: BGRA, dkind: str, s: BGRA, skind: str, blend: str, clip: Ints | None
             d[..., :3] = out.astype(np.uint8)[..., None]
             return
         drgb, srgb = D[..., :3], S[..., :3]
-        if dkind == "bgrx":                              # CompositeRowBgra2Bgr
+        if dkind == "bgrx":                              # CompositeRow_Bgra2Bgr
             k = sa[..., None]
             if blend == "Normal":
                 out = np.where(k == 255, srgb, np.where(k > 0, _merge(drgb, srgb, k), drgb))
@@ -489,21 +524,21 @@ _COLOR_SQRT = np.array([
     0xFD, 0xFE, 0xFE, 0xFF], np.int64)                  # blend.cpp's kColorSqrt
 
 
-def _cdiv(a, b):
+def _cdiv(a: Ints, b: Ints | int) -> Ints:
     """C's integer division (truncating toward zero); a zero divisor gives 0 (never used)."""
-    a = np.asarray(a, np.int64)
-    b = np.asarray(b, np.int64)
-    safe = np.where(b == 0, 1, b)
-    q = np.abs(a) // np.abs(safe)
-    return np.where((a < 0) != (safe < 0), -q, q)
+    num = np.asarray(a, np.int64)
+    den = np.asarray(b, np.int64)
+    safe = np.where(den == 0, 1, den)
+    q = np.abs(num) // np.abs(safe)
+    return np.where((num < 0) != (safe < 0), -q, q)
 
 
-def _mergec(back, src, alpha):
+def _mergec(back: Ints, src: Ints, alpha: Ints) -> Ints:
     """AlphaMerge on ints that may leave 0..255 (a blend result)."""
     return _cdiv(back * (255 - alpha) + src * alpha, 255)
 
 
-def blend_channel(mode: str, b, s):
+def blend_channel(mode: Separable | Literal["Normal"], b: Ints, s: Ints) -> Ints:
     """fxge::Blend(mode, back, src) on int arrays, a separable mode."""
     if mode == "Multiply":
         return s * b // 255
@@ -533,11 +568,14 @@ def blend_channel(mode: str, b, s):
     return s
 
 
-def _lum(r, g, b):
+def _lum(r: Ints, g: Ints, b: Ints) -> Ints:
     return _cdiv(r * 30 + g * 59 + b * 11, 100)
 
 
-def _clip_color(r, g, b):
+RGBInts: TypeAlias = "tuple[Ints, Ints, Ints]"
+
+
+def _clip_color(r: Ints, g: Ints, b: Ints) -> RGBInts:
     """ClipColor (the second test reads the first one's max, as PDFium does)."""
     lum = _lum(r, g, b)
     n = np.minimum(r, np.minimum(g, b))
@@ -545,29 +583,32 @@ def _clip_color(r, g, b):
     low = n < 0
     r, g, b = (np.where(low, lum + _cdiv((c - lum) * lum, lum - n), c) for c in (r, g, b))
     high = x > 255
-    return tuple(np.where(high, lum + _cdiv((c - lum) * (255 - lum), x - lum), c) for c in (r, g, b))
+    return (np.where(high, lum + _cdiv((r - lum) * (255 - lum), x - lum), r),
+            np.where(high, lum + _cdiv((g - lum) * (255 - lum), x - lum), g),
+            np.where(high, lum + _cdiv((b - lum) * (255 - lum), x - lum), b))
 
 
-def _set_lum(r, g, b, lum):
+def _set_lum(r: Ints, g: Ints, b: Ints, lum: Ints) -> RGBInts:
     d = lum - _lum(r, g, b)
     return _clip_color(r + d, g + d, b + d)
 
 
-def _sat(r, g, b):
+def _sat(r: Ints, g: Ints, b: Ints) -> Ints:
     return np.maximum(r, np.maximum(g, b)) - np.minimum(r, np.minimum(g, b))
 
 
-def _set_sat(r, g, b, s):
+def _set_sat(r: Ints, g: Ints, b: Ints, s: Ints) -> RGBInts:
     lo = np.minimum(r, np.minimum(g, b))
     hi = np.maximum(r, np.maximum(g, b))
     flat = lo == hi
     span = np.where(flat, 1, hi - lo)
-    return tuple(np.where(flat, 0, (c - lo) * s // span) for c in (r, g, b))
+    return (np.where(flat, 0, (r - lo) * s // span), np.where(flat, 0, (g - lo) * s // span),
+            np.where(flat, 0, (b - lo) * s // span))
 
 
-def blended(mode: str, back, src):
+def blended(mode: BlendMode, back: Ints, src: Ints) -> Ints:
     """The blended colour of BGR int arrays: Blend per channel, or RgbBlend (non-separable)."""
-    if mode not in NON_SEPARABLE:
+    if mode != "Hue" and mode != "Saturation" and mode != "Color" and mode != "Luminosity":
         return blend_channel(mode, back, src)
     sr, sg, sb = src[..., 2], src[..., 1], src[..., 0]
     br, bg, bb = back[..., 2], back[..., 1], back[..., 0]
@@ -585,26 +626,26 @@ def blended(mode: str, back, src):
 # ---------------------------------------------------------------------- LoadSMask
 
 
-def _smask_parts(doc, smask: dict):
+def _smask_parts(doc: PdfFile, smask: PdfDict) -> tuple[Stream | None, bool]:
     r = doc.resolve
     g = r(smask.get("G"))
     lum = str(r(smask.get("S"))) != "Alpha"
     return (g if isinstance(g, Stream) else None), lum
 
 
-def _srgb_backdrop(doc, smask: dict, cs) -> bool:
+def _srgb_backdrop(doc: PdfFile, smask: PdfDict, cs: ColorSpace) -> bool:
     """A backdrop in an sRGB ICCBased space is DeviceRGB without the clamp (GetBackgroundColor
     takes it because IsNormal() is true for such a profile, and GetRGB hands the components back):
     exact while each one lands in a byte, refused when one does not."""
-    if not getattr(cs, "srgb", False):
+    if not cs.srgb:
         return False
     bc = doc.resolve(smask.get("BC"))
-    vals = [doc.resolve(v) for v in bc[:3]] if isinstance(bc, list) else []
-    vals = [v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0 for v in vals]
+    read: list[object] = [doc.resolve(v) for v in bc[:3]] if isinstance(bc, list) else []
+    vals = [v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0 for v in read]
     return all(0.0 <= float(v) <= 1.0 for v in vals)
 
 
-def group_cs(doc, smask: dict, g: Stream):
+def group_cs(doc: PdfFile, smask: PdfDict, g: Stream) -> ColorSpace | None:
     """The colour space GetBackgroundColor reads /BC in, or None where it takes the default colour
     and leaves *pCSFamily at kUnknown (no /BC, a space that doesn't load, Lab, a special one or an
     ICC profile that is not sRGB). That family is what TransMask() later asks about."""
@@ -621,17 +662,17 @@ def group_cs(doc, smask: dict, g: Stream):
     return cs
 
 
-def background_color(doc, smask: dict, g: Stream) -> int:
+def background_color(doc: PdfFile, smask: PdfDict, g: Stream) -> int:
     """GetBackgroundColor: /BC in the group's /CS, as 0xAARRGGBB (black when anything is off)."""
     default = 0xFF000000
     r = doc.resolve
     bc = r(smask.get("BC"))
     cs = group_cs(doc, smask, g)
-    if cs is None:
+    if cs is None or not isinstance(bc, list):
         return default
-    vals = []
-    for v in bc[:8]:
-        v = r(v)
+    vals: list[float] = []
+    for item in bc[:8]:
+        v = r(item)
         vals.append(float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0)
     vals += [0.0] * (max(8, cs.n) - len(vals))
     rgb = cs.rgb([F(v) for v in vals])
@@ -641,7 +682,7 @@ def background_color(doc, smask: dict, g: Stream) -> int:
     return 0xFF000000 | (cr << 16) | (cg << 8) | cb
 
 
-def _enter_mask(ctx, doc, smask: dict, g: Stream, lum: bool):
+def _enter_mask(ctx: Context, doc: PdfFile, smask: PdfDict, g: Stream, lum: bool) -> MaskState:
     """The mask's own CPDF_RenderStatus: SetLoadMask(bLuminosity), SetGroupFamily(nCSFamily) and
     SetStdCS(true). Not sticky - a luminosity mask inside an alpha one is a kNormal status again,
     and only the objects this status draws itself (the group's top-level ones) carry its flags."""
@@ -655,15 +696,13 @@ def _enter_mask(ctx, doc, smask: dict, g: Stream, lum: bool):
     return keep
 
 
-def _leave_mask(ctx, keep) -> None:
+def _leave_mask(ctx: Context, keep: MaskState) -> None:
     ctx.depth -= 1
     ctx.mask_lum, ctx.mask_group_cmyk, ctx.mask_top = keep
 
 
-def load_smask(status, smask: dict, rect, smask_matrix):
+def load_smask(ctx: Context, smask: PdfDict, rect: IntRect, smask_matrix: Matrix) -> Gray | None:
     """CPDF_RenderStatus::LoadSMask: the 8-bit mask over `rect`, or None."""
-    from .render import Device, Status
-    ctx = status.ctx
     doc = ctx.doc
     g, lum = _smask_parts(doc, smask)
     if g is None:
@@ -671,16 +710,17 @@ def load_smask(status, smask: dict, rect, smask_matrix):
     matrix = smask_matrix[:4] + (F(smask_matrix[4] + float(-rect[0])), F(smask_matrix[5] + float(-rect[1])))
     children, _ = ctx.form(g)
     width, height = rect[2] - rect[0], rect[3] - rect[1]
+    dev: Device
     if lum:
-        dev = Device(width, height, False)
+        dev = Device(width, height, False, None)
         bg = background_color(doc, smask, g)
         dev.bgra[..., 0], dev.bgra[..., 1], dev.bgra[..., 2] = bg & 0xFF, (bg >> 8) & 0xFF, (bg >> 16) & 0xFF
         dev.bgra[..., 3] = 255
     else:
-        dev = mask_device(width, height)
+        dev = MaskDevice(width, height)
     keep = _enter_mask(ctx, doc, smask, g, lum)
     try:
-        Status(dev, (False, False), False, 1.0, ctx).render_list(children, matrix)
+        Status(dev, (False, False), False, 1.0, ctx, None).render_list(children, matrix)
     finally:
         _leave_mask(ctx, keep)
     px = dev.bgra.astype(np.int32)
@@ -691,14 +731,18 @@ def load_smask(status, smask: dict, rect, smask_matrix):
     from .transfer import smask_table
     table = smask_table(doc, doc.resolve(smask.get("TR")))
     if table is not None:
-        out = np.asarray(table, dtype=np.uint8)[out]
+        return np.asarray(table, dtype=np.uint8)[out].astype(np.uint8)
     return out.astype(np.uint8)
 
 
 # ---------------------------------------------------------------------- what is refused
 
 
-def unsupported(obj, ctx, check) -> str | None:
+Checker: TypeAlias = "Callable[[Sequence[PObj], Context], str | None]"
+"""render.unported: what a list of objects needs that is not ported."""
+
+
+def unsupported(obj: PObj, ctx: Context | None, check: Checker) -> str | None:
     """What `obj`'s transparency needs that is not ported, if anything; `check(objects, ctx)` is
     render.unported, run over a soft mask's contents."""
     from . import transfer
@@ -713,7 +757,7 @@ def unsupported(obj, ctx, check) -> str | None:
         if t is not None and not t.identity and obj.type not in (OBJ_PATH, OBJ_TEXT, OBJ_FORM, OBJ_SHADING):
             return "transfer functions on images"
         if (t is not None and not t.identity and obj.type == OBJ_TEXT
-                and getattr(getattr(obj, "font", None), "is_type3", False)):
+                and obj.font is not None and obj.font.is_type3):
             return "transfer functions on Type 3 text"     # the glyphs' own colours: not checked
     smask = effective_smask(obj)
     if smask is None:

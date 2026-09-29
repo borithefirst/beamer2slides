@@ -32,9 +32,12 @@ import json
 import statistics
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Literal, TypedDict
 
 from beamer2slides import pdf
+from beamer2slides.json_types import Json
 from beamer2slides.pdf.api import PdfError
 
 # the decks test_pure_pdf.py renders, plus a few the sweep found slow (figures, tables, a long talk)
@@ -42,7 +45,26 @@ DEFAULT = ("04_theme_blocks", "23_raster_images", "01_basic", "14_misc", "12_met
            "13_inline_math", "22_overlays_on_text", "03_figures", "16_colored_table",
            "11_research_talk", "26_truetype_fonts")
 ZOOM = 1.37                                  # test_whole_beamer_pages_render_as_pdfium_renders_them
-clock = time.process_time                    # --wall swaps in time.perf_counter
+Clock = Callable[[], float]
+"""`time.process_time`, or `time.perf_counter` under --wall."""
+
+
+class Timing(TypedDict):
+    best: float
+    runs: list[float]
+
+
+class Row(TypedDict, total=False):
+    """A deck's row (`pages`, a `Timing` per backend timed, `ratio` when both were), or the
+    total's (no `pages`)."""
+    pages: int
+    pure: Timing
+    pdfium: Timing
+    ratio: float
+
+
+Rows = dict[str, Row]
+Spec = Literal["pure", "pdfium"]
 
 
 def decks_dir() -> Path:
@@ -54,7 +76,7 @@ def decks_dir() -> Path:
     raise SystemExit("no tests/decks/out (build the test decks)")
 
 
-def time_extract(spec: str, path: Path) -> tuple[float, int]:
+def time_extract(spec: str, path: Path, clock: Clock) -> tuple[float, int]:
     """Seconds for `extract` over the whole file, and how many pages that was.
 
     One clock reading for the whole file, never one per page: `process_time` on Windows moves in
@@ -70,7 +92,7 @@ def refused(path: Path) -> set[int]:
     """Pages the pure reader cannot draw: PDFium must not be charged for them either."""
     doc = pdf.resolve("pure").open(path)
     try:
-        out = set()
+        out: set[int] = set()
         for i in range(len(doc)):
             try:
                 doc[i].render(ZOOM)
@@ -94,15 +116,17 @@ def draw_pages(spec: str, path: Path, skip: set[int]) -> int:
         doc.close()
 
 
-def bench(what: str, decks: list[Path], repeat: int, only: str | None) -> dict:
+def bench(what: str, decks: list[Path], repeat: int, only: Spec | None, clock: Clock) -> Rows:
     """One clock reading per pass over the *whole* deck set, `repeat` passes, the shortest kept.
 
     A pass is about two seconds, so the clock's 15.6 ms step is under 1%; a per-deck reading is a
     tenth of that and mostly quantisation. Per-deck seconds are the median of the same passes and
     are there to say where the time goes, not to be compared at a few percent."""
-    specs = [only] if only else ["pure", "pdfium"]
-    skips = {p: refused(p) if what == "render" else set() for p in decks}
-    rows: dict[str, dict] = {p.stem: {"pages": 0} for p in decks}
+    specs: list[Spec] = [only] if only else ["pure", "pdfium"]
+    skips = {p: refused(p) if what == "render" else set[int]() for p in decks}
+    pages = {p.stem: 0 for p in decks}
+    timed: dict[str, dict[Spec, Timing]] = {p.stem: {} for p in decks}
+    totals: dict[Spec, Timing] = {}
     for spec in specs:
         passes: list[float] = []
         each: dict[str, list[float]] = {p.stem: [] for p in decks}
@@ -113,23 +137,32 @@ def bench(what: str, decks: list[Path], repeat: int, only: str | None) -> dict:
                 if what == "extract":
                     with pdf.use_backend(spec):
                         from beamer2slides.extract import extract
-                        rows[p.stem]["pages"] = len(extract(p, None)["pages"])
+                        pages[p.stem] = len(extract(p, None)["pages"])
                 else:
-                    rows[p.stem]["pages"] = draw_pages(spec, p, skips[p])
+                    pages[p.stem] = draw_pages(spec, p, skips[p])
                 each[p.stem].append(clock() - t)
             passes.append(clock() - t0)
         for p in decks:
-            rows[p.stem][spec] = {"best": statistics.median(each[p.stem]), "runs": each[p.stem]}
-        rows.setdefault("_total", {})[spec] = {"best": min(passes), "runs": passes}
-    total = rows["_total"]
+            timed[p.stem][spec] = {"best": statistics.median(each[p.stem]), "runs": each[p.stem]}
+        totals[spec] = {"best": min(passes), "runs": passes}
+    rows: Rows = {}
+    for p in decks:
+        row: Row = {"pages": pages[p.stem]}
+        for spec in specs:
+            row[spec] = timed[p.stem][spec]
+        if len(specs) == 2:
+            row["ratio"] = timed[p.stem]["pure"]["best"] / max(1e-9, timed[p.stem]["pdfium"]["best"])
+        rows[p.stem] = row
+    total: Row = {}
+    for spec in specs:
+        total[spec] = totals[spec]
     if len(specs) == 2:
-        total["ratio"] = total["pure"]["best"] / total["pdfium"]["best"]
-        for p in decks:
-            rows[p.stem]["ratio"] = rows[p.stem]["pure"]["best"] / max(1e-9, rows[p.stem]["pdfium"]["best"])
+        total["ratio"] = totals["pure"]["best"] / totals["pdfium"]["best"]
+    rows["_total"] = total
     return rows
 
 
-def report(what: str, rows: dict, baseline: dict | None) -> None:
+def report(what: str, rows: Rows, baseline: Json) -> None:
     head = f"{'deck':<22}{'pages':>6}{'pure ms/pg':>12}{'pdfium ms/pg':>14}{'ratio':>8}"
     if baseline:
         head += f"{'was':>10}{'change':>9}"
@@ -138,17 +171,19 @@ def report(what: str, rows: dict, baseline: dict | None) -> None:
     print("-" * len(head))
     for name, row in rows.items():
         total = name == "_total"
-        n = 1 if total else max(1, row["pages"])
-        pure = row.get("pure", {}).get("best")
-        ref = row.get("pdfium", {}).get("best")
+        n = 1 if total else max(1, row.get("pages", 0))
+        pure_t, ref_t = row.get("pure"), row.get("pdfium")
+        pure = pure_t["best"] if pure_t is not None else None
+        ref = ref_t["best"] if ref_t is not None else None
         if total:
             print("-" * len(head))
-        line = f"{('total' if total else name):<22}{('' if total else row['pages']):>6}"
+        line = f"{('total' if total else name):<22}{('' if total else row.get('pages', 0)):>6}"
         line += f"{pure / n * 1000:>12.2f}" if pure is not None else f"{'-':>12}"
         line += f"{ref / n * 1000:>14.2f}" if ref is not None else f"{'-':>14}"
-        line += f"{row['ratio']:>8.2f}" if "ratio" in row else f"{'-':>8}"
+        ratio = row.get("ratio")
+        line += f"{ratio:>8.2f}" if ratio is not None else f"{'-':>8}"
         if baseline:
-            old = baseline.get(name, {}).get("pure", {}).get("best")
+            old = _best(baseline, name)
             if old is not None and pure is not None:
                 line += f"{old / n * 1000:>10.2f}{(pure / old - 1) * 100:>8.1f}%"
             else:
@@ -156,7 +191,15 @@ def report(what: str, rows: dict, baseline: dict | None) -> None:
         print(line + ("   (ms, whole pass)" if total else ""))
 
 
-def main(argv: list[str] | None = None) -> int:
+def _best(baseline: Json, name: str) -> float | None:
+    """The pure reader's best seconds for `name` in an earlier run's rows, if it has them."""
+    row = baseline.get(name) if isinstance(baseline, dict) else None
+    pure = row.get("pure") if isinstance(row, dict) else None
+    best = pure.get("best") if isinstance(pure, dict) else None
+    return float(best) if isinstance(best, (int, float)) else None
+
+
+def main(argv: list[str] | None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--what", choices=("extract", "render", "both"), default="both")
     ap.add_argument("--decks", nargs="*", default=list(DEFAULT))
@@ -166,8 +209,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--baseline", type=Path, help="an earlier --json file to compare against")
     ap.add_argument("--wall", action="store_true", help="wall clock instead of this process's CPU")
     args = ap.parse_args(argv)
-    if args.wall:
-        globals()["clock"] = time.perf_counter
+    clock: Clock = time.perf_counter if args.wall else time.process_time
 
     out = decks_dir()
     decks = [out / f"{n}.pdf" for n in args.decks]
@@ -175,12 +217,12 @@ def main(argv: list[str] | None = None) -> int:
     if missing:
         raise SystemExit(f"no such decks in {out}: {', '.join(missing)}")
 
-    base = json.loads(args.baseline.read_text()) if args.baseline else {}
-    result = {}
+    base: Json = json.loads(args.baseline.read_text()) if args.baseline else {}
+    result: dict[str, Rows] = {}
     for what in (("extract", "render") if args.what == "both" else (args.what,)):
-        rows = bench(what, decks, args.repeat, args.only)
+        rows = bench(what, decks, args.repeat, args.only, clock)
         result[what] = rows
-        report(what, rows, base.get(what))
+        report(what, rows, base.get(what) if isinstance(base, dict) else None)
     if args.json:
         args.json.write_text(json.dumps(result, indent=1))
         print(f"\n-> {args.json}")
@@ -188,4 +230,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

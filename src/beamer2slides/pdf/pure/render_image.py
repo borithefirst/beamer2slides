@@ -15,19 +15,94 @@ modes on images, pattern-filled stencils) raises PdfError: an image comes out ex
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol, TypeAlias
 
 import numpy as np
 
 from ...arrays import BGRA, Floats32, Ints, Pixels, UInt32
-from ..api import PdfError
+from ..api import Matrix, PdfError
 from . import decode_image as DI
 from . import raster as R
 from .crt import rect_valid, roundf
-from .raster import F
-from .render_shading import outer, fx_intersect
+from .raster import F, FloatRect, IntRect, PathPoint
+from .render import FILL_WINDING, PT_LINE, PT_MOVE, Device, Status, _argb
+from .render_shading import fx_intersect, outer
+from .render_transparency import Context, alpha_mode, kind, multiply_alpha, set_dibits, transparency_status
+from .syntax import InlineImage, PdfDict, Stream
+
+if TYPE_CHECKING:
+    from .content import PObj
 
 M32 = 0xFFFFFFFF
 HUGE_IMAGE = 60000000
+
+StretchFormat: TypeAlias = Literal["mask8", "rgb8", "bgr", "bgra"]
+"""What CFX_ImageStretcher hands ComposeScanline: an 8-bit mask, 8-bit gray or palette indices,
+BGR, or BGRA."""
+BlockFormat: TypeAlias = Literal["mask8", "rgb8", "bgr", "bgra", "T:bgra", "T:mask8"]
+"""A block's format; "T:" is CFX_ImageTransformer's result (BGRA or an 8-bit mask)."""
+
+
+class Stretchable(Protocol):
+    """What the stretcher reads of a bitmap (decode_image.DIB, a rendered tiling cell)."""
+
+    @property
+    def fmt(self) -> str: ...
+
+    @property
+    def rows(self) -> Pixels: ...
+
+    @property
+    def palette(self) -> Sequence[int] | None: ...
+
+    @property
+    def w(self) -> int: ...
+
+    @property
+    def h(self) -> int: ...
+
+
+class Stretched(NamedTuple):
+    """CFX_ImageStretcher's result: the (clip height, clip width, channels) pixels, their format
+    and palette."""
+    pixels: Pixels
+    fmt: StretchFormat
+    palette: Sequence[int] | None
+
+
+class Block(NamedTuple):
+    """An image stretched, turned or transformed to the device pixels it covers: the pixels, their
+    format and palette, and the device box they cover."""
+    pixels: Pixels
+    fmt: BlockFormat
+    palette: Sequence[int] | None
+    box: IntRect
+
+
+@dataclass(frozen=True, kw_only=True)
+class CachedImage:
+    """An entry of CPDF_PageImageCache, keyed by id(stream): the stream it was loaded for (the key
+    is checked against it), the bitmap, and whether it was loaded for a device size."""
+    stream: object
+    dib: DI.DIB | None
+    set_max: bool
+
+
+ImageCache = dict[int, CachedImage]
+"""A page's CPDF_PageImageCache: `Context.images`, which a page keeps across renders."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class Probe:
+    """What `refusal` found loading an image at no device size, keyed by id(stream): why it is
+    refused (or None), whether it is a stencil, the bitmap, and the status flags it was loaded
+    with (None once `get_dib` has taken the bitmap for the page cache)."""
+    stream: object
+    why: str | None
+    stencil: bool
+    dib: DI.DIB | None
+    flags: tuple[bool, bool] | None
 
 
 # ---------------------------------------------------------------------- CStretchEngine
@@ -44,7 +119,8 @@ def _fixed(d: float) -> int:
     return r & M32
 
 
-def weights(dest_len, dmin, dmax, src_len, smin, smax, bilinear):
+def weights(dest_len: int, dmin: int, dmax: int, src_len: int, smin: int, smax: int,
+            bilinear: bool) -> tuple[Ints, Ints]:
     """WeightTable::CalculateWeights: (starts, weight matrix) for dest pixels dmin..dmax-1."""
     scale = float(src_len) / dest_len
     base = float(src_len) if dest_len < 0 else 0.0
@@ -115,25 +191,26 @@ def _gather(src: Pixels, starts: Ints, table: Ints, axis_len: int) -> UInt32:
     return out
 
 
-def _pixel(v):
+def _pixel(v: UInt32) -> Pixels:
     return ((v >> 16) & 255).astype(np.uint8)
 
 
-def stretch(dib, dest_w: int, dest_h: int, clip, bilinear_opt: bool):
-    """CFX_ImageStretcher::Start + CStretchEngine: (block, format, palette) with block the
-    (clip height, clip width, channels) pixels handed to ComposeScanline, or None."""
+def stretch(dib: Stretchable, dest_w: int, dest_h: int, clip: IntRect, bilinear_opt: bool) -> Stretched | None:
+    """CFX_ImageStretcher::Start + CStretchEngine: the (clip height, clip width, channels) pixels
+    handed to ComposeScanline with their format and palette, or None."""
     if dest_w == 0 or dest_h == 0:
         return None
     fmt, rows, pal = dib.fmt, dib.rows, dib.palette
     has_alpha = False
+    out_fmt: StretchFormat
     if fmt in ("mask1", "rgb1"):
         src = (rows * 255).astype(np.uint8)[..., None]
         out_fmt = "mask8" if fmt == "mask1" else "rgb8"
         if fmt == "rgb1" and pal is not None:
             c0, c1 = pal
-            out_pal = []
+            out_pal: list[int] = []
             for i in range(256):
-                ch = []
+                ch: list[int] = []
                 for sh in (16, 8, 0):
                     a, b = (c0 >> sh) & 255, (c1 >> sh) & 255
                     q = abs((b - a) * i) // 255
@@ -196,8 +273,7 @@ def stretch(dib, dest_w: int, dest_h: int, clip, bilinear_opt: bool):
     vs, vw = weights(dest_h, t, b, sh, sc[1], sc[3], bilinear)
     vs = vs - sc[1]
     if not has_alpha:
-        block = _pixel(_gather(inter, vs, vw, inter.shape[0]))
-        return block, out_fmt, pal
+        return Stretched(_pixel(_gather(inter, vs, vw, inter.shape[0])), out_fmt, pal)
     idx = np.clip(vs[:, None] + np.arange(vw.shape[1])[None, :], 0, inter.shape[0] - 1)
     sums = np.zeros((len(vs), inter.shape[1], 4), np.uint32)
     for k in range(vw.shape[1]):
@@ -217,22 +293,22 @@ def stretch(dib, dest_w: int, dest_h: int, clip, bilinear_opt: bool):
             line[nz] = np.clip(q, 0, 255).astype(np.uint8)
         block[y, :, :3] = line
         block[y, :, 3] = _pixel(a)
-    return block, out_fmt, pal
+    return Stretched(block, out_fmt, pal)
 
 
 # ---------------------------------------------------------------------- compositing
 
 
-def _union(d, s):
+def _union(d: Ints, s: Ints) -> Ints:
     return d + s - d * s // 255
 
 
-def _merge(back, src, alpha):
+def _merge(back: Ints, src: Ints, alpha: Ints) -> Ints:
     return (back * (255 - alpha) + src * alpha) // 255
 
 
-def compose(dest: BGRA, dkind: str, block: Pixels, sfmt: str, pal: Sequence[int] | None,
-            clip: Ints | None, mask_argb: int):
+def compose(dest: BGRA, dkind: Literal["bgra", "bgrx"], block: Pixels, sfmt: StretchFormat,
+            pal: Sequence[int] | None, clip: Ints | None, mask_argb: int) -> None:
     """CFX_ScanlineCompositor's row functions (no blending) over a whole block: `dest` (h, w, 4)
     uint8 view, `clip` (h, w) int array or None (after the composer's alpha)."""
     d = dest.astype(np.int64)
@@ -256,6 +332,7 @@ def compose(dest: BGRA, dkind: str, block: Pixels, sfmt: str, pal: Sequence[int]
             d[..., 3] = np.where(fresh, sa, np.where(upd, da, back))
         dest[...] = d.astype(np.uint8)
         return
+    sa: Ints | None
     if sfmt == "rgb8":
         if pal is not None:
             p = np.array(pal, np.int64)[block[..., 0]]
@@ -305,22 +382,17 @@ def compose(dest: BGRA, dkind: str, block: Pixels, sfmt: str, pal: Sequence[int]
     dest[...] = d.astype(np.uint8)
 
 
-def _kind(dev) -> str:
-    from .render_transparency import kind
-    return kind(dev)
-
-
-def start_dibits(dev, dib, alpha: float, mask_argb: int, m, bilinear: bool) -> None:
+def start_dibits(dev: Device, dib: DI.DIB, alpha: float, mask_argb: int, m: Matrix, bilinear: bool) -> None:
     """CPDF_ImageRenderer::StartDIBBase -> CFX_AggDeviceDriver::StartDIBits ->
     CFX_AggImageRenderer: stretch (or turn a quarter), then compose through the clip."""
     got = _block(dib, m, dev.clip_box(), bilinear)
     if got is not None:
-        _compose_at(dev, got[0], got[1], got[2], got[3], alpha, mask_argb)
+        _compose_at(dev, got, alpha, mask_argb)
 
 
-def _block(dib, m, device_clip, bilinear):
+def _block(dib: DI.DIB, m: Matrix, device_clip: IntRect, bilinear: bool) -> Block | None:
     """The image stretched (or turned a quarter) to the device pixels it covers inside
-    `device_clip`: (block, format, palette, box) or None."""
+    `device_clip`, or None."""
     if dib.bpp > 1 and dib.bpp // 8 * dib.w * dib.h > HUGE_IMAGE:
         bilinear = True
     a, b, c, d = m[:4]
@@ -357,7 +429,7 @@ def _block(dib, m, device_clip, bilinear):
         if got is None:
             return None
         block, sfmt, pal = got
-    return block, sfmt, pal, clip_box
+    return Block(block, sfmt, pal, clip_box)
 
 
 # ---------------------------------------------------------------------- CFX_ImageTransformer
@@ -367,7 +439,7 @@ def _i32(v: float) -> bool:
     return v == v and -2147483648.0 <= v <= 2147483647.0
 
 
-def _match_range(f1: float, f2: float):
+def _match_range(f1: float, f2: float) -> tuple[int, int]:
     """MatchFloatRange (float32)."""
     with np.errstate(invalid="ignore", over="ignore"):
         length = F(float(np.ceil(F(f2 - f1))))
@@ -381,7 +453,7 @@ def _match_range(f1: float, f2: float):
     return int(start), int(end)
 
 
-def closest_rect(rect):
+def closest_rect(rect: FloatRect) -> IntRect:
     """CFX_FloatRect::GetClosestRect of (left, bottom, right, top) -> FX_RECT (l, t, r, b)."""
     l, r = _match_range(rect[0], rect[2])
     t, b = _match_range(rect[1], rect[3])
@@ -392,7 +464,7 @@ def _fixed256(v: float) -> int:
     return roundf(F(v * 256.0))
 
 
-def _fix_split(val: Floats32):
+def _fix_split(val: Floats32) -> tuple[Ints, Ints]:
     """CFX_BilinearMatrix::Transform's integer part (saturated) and remainder (0..255)."""
     with np.errstate(invalid="ignore", over="ignore"):
         q = np.trunc(val / np.float32(256)).astype(np.float64)
@@ -405,11 +477,11 @@ def _fix_split(val: Floats32):
     return whole, res
 
 
-def transform(dib, m, clip_box, bilinear):
+def transform(dib: Stretchable, m: Matrix, clip_box: IntRect, bilinear: bool) -> Block | None:
     """CFX_ImageTransformer for an image neither upright nor a quarter turn: the image stretched
     to its unit vectors' lengths, then sampled for every result pixel through the inverse matrix in
-    8.8 fixed point (BilinearInterpolate, whose weights are 255 - r and r). Returns (block, "T:bgra"
-    or "T:mask8", None, result box) or None."""
+    8.8 fixed point (BilinearInterpolate, whose weights are 255 - r and r). Returns the block
+    ("T:bgra" or "T:mask8", no palette, over the result box) or None."""
     a, b, c, d, e, f = m
     result_rect = closest_rect(R.transform_rect(m, (0.0, 0.0, 1.0, 1.0)))
     result = fx_intersect(result_rect, clip_box)
@@ -471,7 +543,7 @@ def transform(dib, m, clip_box, bilinear):
     val = ((r0 * iry + r1 * ry) >> 8) & 255
     val = np.where(inside[..., None], val, 0)
     if sfmt == "mask8":
-        return val.astype(np.uint8), "T:mask8", None, result
+        return Block(val.astype(np.uint8), "T:mask8", None, result)
     out = np.zeros((H, W, 4), np.uint8)
     if sfmt == "rgb8":
         idx = val[..., 0]
@@ -487,18 +559,20 @@ def transform(dib, m, clip_box, bilinear):
     else:
         out[...] = val
     out[~inside] = 0
-    return out, "T:bgra", None, result
+    return Block(out, "T:bgra", None, result)
 
 
-def _compose_transformed(dev, dkind, block, sfmt, box, alpha: float, mask_argb: int) -> None:
+def _compose_transformed(dev: Device, dkind: Literal["bgra", "bgrx"], block: Pixels, sfmt: BlockFormat,
+                         box: IntRect, alpha: float, mask_argb: int) -> None:
     """CFX_AggImageRenderer::Continue after a transform: CompositeMask with the alpha in the mask
     colour, or MultiplyAlpha then CompositeBitmap; the clip region's mask as the clip scan."""
     l, t, r, b = box
-    clip = None
+    clip: Ints | None = None
     cl = dev.clip
     if cl is not None and cl.mask is not None:
         cb = cl.box
         clip = cl.mask[t - cb[1]:b - cb[1], l - cb[0]:r - cb[0]].astype(np.int64)
+    fmt: StretchFormat
     if sfmt == "T:mask8":
         if alpha != 1.0:
             k = roundf(F(alpha * 255))
@@ -521,16 +595,17 @@ def _compose_transformed(dev, dkind, block, sfmt, box, alpha: float, mask_argb: 
     compose(dest, dkind, block[sub], fmt, None, clip[sub] if clip is not None else None, mask_argb)
 
 
-def _compose_at(dev, block, sfmt, pal, box, alpha: float, mask_argb: int) -> None:
+def _compose_at(dev: Device, got: Block, alpha: float, mask_argb: int) -> None:
     """CFX_AggBitmapComposer over `box` of the device (clip mask and constant alpha)."""
-    dkind = _kind(dev)
+    block, sfmt, pal, box = got
+    dkind = kind(dev)
     if dkind == "mask":
         raise PdfError("the pure reader cannot render images onto 8-bit masks yet")
-    if sfmt.startswith("T:"):
+    if sfmt == "T:bgra" or sfmt == "T:mask8":
         _compose_transformed(dev, dkind, block, sfmt, box, alpha, mask_argb)
         return
     l, t, r, b = box
-    clip = None
+    clip: Ints | None = None
     cl = dev.clip
     if cl is not None and cl.mask is not None:
         cb = cl.box
@@ -553,9 +628,8 @@ def _compose_at(dev, block, sfmt, pal, box, alpha: float, mask_argb: int) -> Non
 # ---------------------------------------------------------------------- CPDF_ImageRenderer
 
 
-def draw(status, obj, matrix) -> None:
+def draw(status: Status, obj: PObj, matrix: Matrix) -> None:
     """CPDF_RenderStatus::ProcessImage -> CPDF_ImageRenderer::Start."""
-    from .render import _argb
     dev = status.dev
     m = R.concat(obj.matrix, matrix)
     rect = outer(R.transform_rect(m, (0.0, 0.0, 1.0, 1.0)))
@@ -563,56 +637,57 @@ def draw(status, obj, matrix) -> None:
     if dib is None:
         return
     alpha = F(obj.fill_alpha)
-    from .render_transparency import alpha_mode
     if alpha_mode(status.ctx) and dib.mask is None:
         bitmap_alpha(dev, dib, alpha, m)      # kAlpha: the image is drawn as its own alpha
         return
     mask_argb = 0
     if dib.fmt == "mask1":
         # GetFillArgb: in a Type 3 glyph the text's colour unless a d0 glyph set its own
-        typed3 = obj.fill is None or getattr(status, "type3_char", None) is not None
-        mask_argb = status.fill_argb(obj) if typed3 else _argb(obj.fill, obj.fill_alpha)
-    if dib.mask is not None:
-        draw_masked(dev, dib, alpha, m, rect)
+        fill = obj.fill
+        if fill is None or status.type3_char is not None:
+            mask_argb = status.fill_argb(obj)
+        else:
+            mask_argb = _argb(fill, obj.fill_alpha, None)
+    smask = dib.mask
+    if smask is not None:
+        draw_masked(dev, dib, smask, alpha, m, rect)
         return
     start_dibits(dev, dib, alpha, mask_argb, m, dib.interpolate)
 
 
-def bitmap_alpha(dev, dib, alpha: float, m) -> None:
+def bitmap_alpha(dev: Device, dib: DI.DIB, alpha: float, m: Matrix) -> None:
     """CPDF_ImageRenderer::StartBitmapAlpha, the kAlpha colour mode an alpha soft mask renders in:
     an opaque image is its unit square filled with ArgbEncode(255, a, a, a) for a = roundf(alpha
     * 255) - on the 8-bit mask device the gray is forced to 255 and the colour's own alpha is all
     that counts, so the fill is opaque whatever the image's constant alpha was. A mask-format or
     alpha-format bitmap goes on as its alpha channel instead, which `refusal` refuses."""
-    from .render import FILL_WINDING, PT_LINE, PT_MOVE
     if dib.fmt not in ("rgb1", "rgb8", "bgr"):
         raise PdfError("the pure reader cannot render this image in an alpha soft mask yet")
     a = roundf(F(alpha * 255))
     corners = ((0.0, 0.0), (0.0, 1.0), (1.0, 1.0), (1.0, 0.0), (0.0, 0.0))
     pts = [R.transform(m, x, y) for x, y in corners]
-    path = [(p[0], p[1], PT_MOVE if i == 0 else PT_LINE, i == 4) for i, p in enumerate(pts)]
-    dev.draw_path(path, None, None, DI.argb(255, a, a, a), 0, FILL_WINDING, False)
+    path: list[PathPoint] = [(p[0], p[1], PT_MOVE if i == 0 else PT_LINE, i == 4) for i, p in enumerate(pts)]
+    dev.draw_path(path, None, None, DI.argb(255, a, a, a), 0, FILL_WINDING, False, False, False, False)
 
 
-def draw_masked(dev, dib, alpha: float, m, rect) -> None:
-    """DrawMaskedImage: the image on a white BGRx bitmap, its mask on a gray one, the mask as
-    alpha, then SetDIBitsWithBlend."""
-    from .render import Device
-    from .render_transparency import multiply_alpha, set_dibits
+def draw_masked(dev: Device, dib: DI.DIB, smask: DI.DIB, alpha: float, m: Matrix, rect: IntRect) -> None:
+    """DrawMaskedImage: the image on a white BGRx bitmap, its mask (`smask`, the image's own
+    /SMask or /Mask) on a gray one, the mask as alpha, then SetDIBitsWithBlend."""
     rect = fx_intersect(rect, dev.clip_box())
     if rect[2] <= rect[0] or rect[3] <= rect[1]:
         return
     w, h = rect[2] - rect[0], rect[3] - rect[1]
     nm = m[:4] + (F(m[4] + float(-rect[0])), F(m[5] + float(-rect[1])))
-    img = Device(w, h, False)
+    img = Device(w, h, False, None)
     img.bgra[...] = 255
     start_dibits(img, dib, 1.0, 0, nm, dib.interpolate)
-    gray = Device(w, h, False)
-    got = _stretch_for(gray, dib.mask, nm, dib.interpolate)
+    gray = Device(w, h, False, None)
+    got = _stretch_for(gray, smask, nm, dib.interpolate)
     mask = np.zeros((h, w), np.int64)
     if got is not None:
         block, sfmt, pal, box = got
-        if sfmt in ("mask8", "T:mask8"):
+        v: Ints
+        if sfmt == "mask8" or sfmt == "T:mask8":
             # a stencil /Mask drawn in white (0xffffffff) onto black: its coverage
             v = block[..., 0].astype(np.int64)
         elif sfmt == "T:bgra":
@@ -645,45 +720,42 @@ def draw_masked(dev, dib, alpha: float, m, rect) -> None:
     set_dibits(dev, out, "bgra", rect[0], rect[1], "Normal")
 
 
-def _stretch_for(dev, dib, m, bilinear):
-    """The mask drawn onto CalculateDrawImage's 8bppRgb bitmap: (block, format, palette, box) in
-    that bitmap, or None. Composited onto a zeroed gray bitmap without a clip, it is set as is."""
+def _stretch_for(dev: Device, dib: DI.DIB, m: Matrix, bilinear: bool) -> Block | None:
+    """The mask drawn onto CalculateDrawImage's 8bppRgb bitmap: its block in that bitmap, or None.
+    Composited onto a zeroed gray bitmap without a clip, it is set as is."""
     return _block(dib, m, (0, 0, dev.w, dev.h), bilinear)
 
 
 # ---------------------------------------------------------------------- loading, refusing
 
 
-def get_dib(ctx, obj, dev):
+def get_dib(ctx: Context, obj: PObj, dev: Device) -> DI.DIB | None:
     """CPDF_ImageLoader through the page's CPDF_PageImageCache (a JPEG is decoded at 1/2, 1/4 or
     1/8 of its size when the device is that much smaller, and the cached bitmap is reused while it
     is at least the device's size)."""
-    cache = getattr(ctx, "images", None)
-    if cache is None:
-        cache = ctx.images = {}
+    cache = ctx.images
     key = id(obj.stream)
     need = (dev.w, dev.h)
     hit = cache.get(key)
     if hit is not None:
-        dib, set_max = hit[1], hit[2]
-        if dib is None or not set_max or (dib.w >= need[0] and dib.h >= need[1]):
-            if hit[0] is obj.stream:
+        dib = hit.dib
+        if dib is None or not hit.set_max or (dib.w >= need[0] and dib.h >= need[1]):
+            if hit.stream is obj.stream:
                 return dib
-    dib = _probed(ctx, obj, need)
-    if dib is _NOT_PROBED:
+    probe = _probed(ctx, obj, need)
+    if probe is not None:
+        dib = probe.dib
+    else:
         std, gc = status_flags(obj, ctx)
         try:
-            dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), need, std_cs=std, group_cmyk=gc)
+            dib = DI.load(ctx.doc, _image_stream(obj), _resources(ctx, obj), need, std_cs=std, group_cmyk=gc)
         except DI.Unsupported as e:
             raise PdfError(f"the pure reader cannot render {e} yet") from e
-    cache[key] = (obj.stream, dib, need[0] != 0 and need[1] != 0)
+    cache[key] = CachedImage(stream=obj.stream, dib=dib, set_max=need[0] != 0 and need[1] != 0)
     return dib
 
 
-_NOT_PROBED = object()
-
-
-def status_flags(obj, ctx) -> tuple[bool, bool]:
+def status_flags(obj: PObj, ctx: Context) -> tuple[bool, bool]:
     """(bStdCS, TransMask's group half) of the CPDF_RenderStatus that draws this image. Three
     statuses set them and none of them inherits: LoadSMask's (SetStdCS(true), SetLoadMask and
     SetGroupFamily, so a luminosity mask with a DeviceCMYK group makes TransMask's half true) draws
@@ -691,73 +763,82 @@ def status_flags(obj, ctx) -> tuple[bool, bool]:
     the one object that needed it, wherever it stands - a page-level image under a /SMask gs is
     loaded with std conversion on; and ProcessForm's starts from nothing, so a form's children are
     loaded as the page's are, inside a soft mask as well."""
-    if ctx is None:
-        return False, False
-    from .render_transparency import transparency_status
     if transparency_status(obj):
         return True, False
     if id(obj) in ctx.mask_top:
-        return True, bool(ctx.mask_group_cmyk)
+        return True, ctx.mask_group_cmyk
     return False, False
 
 
-def _probed(ctx, obj, need):
-    """The bitmap `refusal` loaded for this image (at no device size), when loading it for `need`
-    gives the same: the device size only picks a JPEG's scale, and only for a DCT image at least
-    twice the device's size both ways (decode_image._jpeg; masks load at no size either way). The
-    probe is kept only for a draw whose colour conversion is the one it was loaded with."""
-    probes = getattr(ctx, "image_probes", None)
-    got = probes.get(id(obj.stream)) if probes else None
-    if got is None or got[0] is not obj.stream or got[1] is not None or len(got) < 5:
-        return _NOT_PROBED
-    if got[4] != status_flags(obj, ctx):
-        return _NOT_PROBED
-    d = obj.stream.dict
+def _probed(ctx: Context, obj: PObj, need: tuple[int, int]) -> Probe | None:
+    """The probe whose bitmap `refusal` loaded for this image (at no device size), when loading
+    it for `need` gives the same: the device size only picks a JPEG's scale, and only for a DCT
+    image at least twice the device's size both ways (decode_image._jpeg; masks load at no size
+    either way). The probe is kept only for a draw whose colour conversion is the one it was
+    loaded with. Taking it hands the bitmap on: the probe keeps only its verdict."""
+    probes = ctx.image_probes
+    stream = obj.stream
+    got = probes.get(id(stream))
+    if got is None or got.stream is not stream or got.why is not None or got.flags is None:
+        return None
+    if got.flags != status_flags(obj, ctx):
+        return None
+    if not isinstance(stream, (Stream, InlineImage)):
+        return None
+    d = stream.dict
     r = ctx.doc.resolve
     w, h = r(d.get("Width")), r(d.get("Height"))
     if need[0] and need[1] and isinstance(w, int) and isinstance(h, int) and w >= 2 * need[0] and h >= 2 * need[1]:
         # a DCTDecode anywhere in the chain is where decode_image.image_bytes goes to `_jpeg`
         decoders = DI.FL.decoder_array(d, r)
         if decoders is None or any(DI.FL.ABBREVIATIONS.get(n, n) == "DCTDecode" for n, _p in decoders):
-            return _NOT_PROBED
-    probes[id(obj.stream)] = got[:3]      # handed on: the page cache holds the bitmap now
-    return got[3]
+            return None
+    probes[id(stream)] = replace(got, dib=None, flags=None)      # the page cache holds the bitmap now
+    return got
 
 
-def _resources(ctx, obj):
-    res = getattr(obj, "resources", None)
+def _resources(ctx: Context, obj: PObj) -> PdfDict:
+    res = obj.resources
     return res if isinstance(res, dict) else ctx.page_resources
 
 
-def refusal(obj, ctx) -> str | None:
+def _image_stream(obj: PObj) -> Stream | InlineImage:
+    """The image an image object draws (the content parser gives every one its stream)."""
+    stream = obj.stream
+    if isinstance(stream, (Stream, InlineImage)):
+        return stream
+    raise PdfError("an image object without an image stream")
+
+
+def refusal(obj: PObj, ctx: Context | None) -> str | None:
     """What drawing this image object needs that is not ported, if anything."""
     if ctx is None:
         return "images"
     if obj.blend != "Normal":
         return "images with blend modes"
-    if not getattr(obj.stream, "exact", True):
+    if isinstance(obj.stream, InlineImage) and not obj.stream.exact:
         return "inline images whose codec's end is not found as PDFium finds it (DCT, CCITT)"
-    probes = ctx.__dict__.setdefault("image_probes", {})
+    probes = ctx.image_probes
     key = id(obj.stream)
-    if key not in probes:
-        why = None
+    probe = probes.get(key)
+    if probe is None:
+        why: str | None = None
         stencil = False
-        dib = None
+        dib: DI.DIB | None = None
         flags = status_flags(obj, ctx)
         try:
-            dib = DI.load(ctx.doc, obj.stream, _resources(ctx, obj), (0, 0),
+            dib = DI.load(ctx.doc, _image_stream(obj), _resources(ctx, obj), (0, 0),
                           std_cs=flags[0], group_cmyk=flags[1])
             stencil = dib is not None and dib.fmt == "mask1"
-            if stencil and dib.mask is not None:
+            if stencil and dib is not None and dib.mask is not None:
                 why = "image masks with masks"
         except DI.Unsupported as e:
             why = str(e)
         # the bitmap too, for `get_dib` to take instead of loading the image again (`_probed`)
-        probes[key] = (obj.stream, why, stencil, dib, flags)
-    _, why, stencil, dib = probes[key][:4]
+        probe = probes[key] = Probe(stream=obj.stream, why=why, stencil=stencil, dib=dib, flags=flags)
+    why, stencil, dib = probe.why, probe.stencil, probe.dib
     if why is None and stencil and obj.fill_pattern is not None:
         return "pattern-filled image masks"
-    from .render_transparency import alpha_mode
     if why is None and alpha_mode(ctx) and dib is not None and dib.mask is None:
         # StartBitmapAlpha draws an opaque image as its unit square; a stencil or a see-through
         # one goes on as its alpha through SetBitMask/StretchBitMask, which is not ported

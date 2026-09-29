@@ -518,7 +518,7 @@ def draw_text_path(dev, face, chars, size, text2user, user2device, graph, fill_a
             tx, ty = R.transform(m, px, py)
             points.append((tx, ty, _KINDS[kind], close))
         dev.draw_path(points, user2device, graph, fill_argb, stroke_argb, fill_type, stroke,
-                      text_mode=True)
+                      text_mode=True, full_cover=False, rect_aa=False)
 
 
 def clip_text_path(obj, matrix, out: list) -> None:

@@ -18,37 +18,47 @@ from __future__ import annotations
 
 import argparse
 import random
+from collections.abc import Iterable, Sequence
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 
-from .render_torture import EXTGS, num, random_cm, random_path
-from .torture_kit import compare_renders, drop_form_lines
+from ..pdf.api import Box
+from .render_torture import EXTGS, MEDIA, Form, num, random_cm, random_path
+from .torture_kit import Compared, Refused, Stats, compare_refusing, drop_form_lines, outcome
 
-MEDIA = (0, 0, 200, 150)
+Resources = bytes | tuple[bytes, bytes]
+"""Entries added to every resource dictionary, or (those, ExtGState entries added to
+render_torture's)."""
+Mode = Literal["classic", "cie", "func", "mesh", "transfer", "tiling"]
+Ranges = list[tuple[float, float]]
 
 
-def pdf_bytes(pages: list[bytes], objects: list[bytes], resources: bytes, forms=(), media=MEDIA) -> bytes:
+def pdf_bytes(pages: list[bytes], objects: list[bytes], resources: Resources, forms: Sequence[Form],
+              media: Box) -> bytes:
     """`render_torture.pdf_bytes` with `objects` numbered 1.. in front (the resources refer to
     them) and `resources` added to every resource dictionary; `resources` may be a pair (entries,
     ExtGState entries added to render_torture's)."""
     objs: list[bytes] = list(objects)
     extgs = EXTGS
     if isinstance(resources, tuple):
-        resources, more = resources
+        entries, more = resources
         extgs = EXTGS[:-2] + more + b" >>"
+    else:
+        entries = resources
 
     def add(b: bytes) -> int:
         objs.append(b)
         return len(objs)
 
     xids: list[int] = []
-    for entries, content in forms:
-        sub = b"<< " + extgs + resources + b" /XObject << " + \
+    for form_entries, content in forms:
+        sub = b"<< " + extgs + entries + b" /XObject << " + \
             b" ".join(b"/X%d %d 0 R" % (j, x) for j, x in enumerate(xids)) + b" >> >>"
         xids.append(add(b"<< /Type /XObject /Subtype /Form /Resources %s %s /Length %d >>\nstream\n"
-                        % (sub, entries, len(content)) + content + b"\nendstream"))
-    res = b"<< " + extgs + resources + b" /XObject << " + \
+                        % (sub, form_entries, len(content)) + content + b"\nendstream"))
+    res = b"<< " + extgs + entries + b" /XObject << " + \
         b" ".join(b"/X%d %d 0 R" % (j, x) for j, x in enumerate(xids)) + b" >> >>"
     content_ids = [add(b"<< /Length %d >>\nstream\n" % len(c) + c + b"\nendstream") for c in pages]
     pages_obj = len(objs) + 1 + len(pages)
@@ -59,7 +69,7 @@ def pdf_bytes(pages: list[bytes], objects: list[bytes], resources: bytes, forms=
                + b"] /Count %d >>" % len(kids)) == pages_obj
     cat = add(b"<< /Type /Catalog /Pages %d 0 R >>" % pages_obj)
     out = bytearray(b"%PDF-1.7\n")
-    offs = []
+    offs: list[int] = []
     for i, o in enumerate(objs, 1):
         offs.append(len(out))
         out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
@@ -77,8 +87,9 @@ def pdf_bytes(pages: list[bytes], objects: list[bytes], resources: bytes, forms=
 class _Bits:
     """A big-endian bit writer (mesh shading streams)."""
 
-    def __init__(self):
-        self.v, self.n = 0, 0
+    def __init__(self) -> None:
+        self.v = 0
+        self.n = 0
 
     def put(self, value: int, bits: int) -> None:
         self.v = (self.v << bits) | (value & ((1 << bits) - 1))
@@ -95,8 +106,10 @@ class _Bits:
 class Builder:
     """Indirect objects (functions, shadings, patterns) and the resource entries naming them."""
 
-    def __init__(self, r: random.Random, mode: str = "classic"):
+    def __init__(self, r: random.Random, mode: Mode) -> None:
         self.r, self.mode = r, mode
+        self.cs_ranges: Ranges | None = None
+        """The last colour space's component ranges, when they are not [0 1]."""
         self.objects: list[bytes] = []
         self.shadings: list[bytes] = []
         self.patterns: list[bytes] = []
@@ -106,7 +119,7 @@ class Builder:
         self.objects.append(b)
         return b"%d 0 R" % len(self.objects)
 
-    def resources(self) -> bytes:
+    def resources(self) -> Resources:
         out = b""
         if self.shadings:
             out += b" /Shading << " + b" ".join(b"/Sh%d %s" % (i, s) for i, s in enumerate(self.shadings)) + b" >>"
@@ -122,15 +135,15 @@ class Builder:
         r = self.r
         k = r.random()
         if k < 0.45:
-            return self.function(r.choice([1, 1, 1, 1, 2, 3, 17]))
+            return self.function(r.choice([1, 1, 1, 1, 2, 3, 17]), 0, None)
         if k < 0.8:
-            fs = [self.function(r.choice([1, 1, 1, 2])) for _ in range(3)]
+            fs = [self.function(r.choice([1, 1, 1, 2]), 0, None) for _ in range(3)]
             if r.random() < 0.1:
                 fs[r.randrange(3)] = b"/Identity"
             if r.random() < 0.08:
                 fs = fs[:2]
             if r.random() < 0.08:
-                fs.append(self.function(1))
+                fs.append(self.function(1, 0, None))
             return self.arr(fs)
         return r.choice([b"/Identity", b"/Default", b"null", b"3", b"[/Identity /Identity /Identity]",
                          b"<< /FunctionType 2 /Domain [0 1] /N 1 >>", b"<< /FunctionType 2 /Domain [0 1 0 1] /N 1 >>"])
@@ -141,13 +154,13 @@ class Builder:
         ops = []
         t0 = b""
         if r.random() < 0.3:
-            t0 = b" /t0 << /TR %s >>" % self.function(1)
+            t0 = b" /t0 << /TR %s >>" % self.function(1, 0, None)
             ops.append(b"/t0 gs")
         for _ in range(r.randint(1, 4)):
             if r.random() < 0.3:
                 ops.append(b"/a%d gs" % r.randrange(2))
             ops.append(r.choice([b"%.3f g" % r.random(), b"%.3f %.3f %.3f rg" % (r.random(), r.random(), r.random())]))
-            ops.append(b"%s %s %s %s re f" % (num(r), num(r), num(r), num(r)))
+            ops.append(b"%s %s %s %s re f" % (num(r, 1.0), num(r, 1.0), num(r, 1.0), num(r, 1.0)))
         body = b"\n".join(ops)
         cs = r.choice([b"", b" /CS /DeviceRGB", b" /CS /DeviceGray"])
         return self.add(b"<< /Type /XObject /Subtype /Form /BBox [-50 -50 250 200] /Group << /S /Transparency%s >> "
@@ -171,7 +184,7 @@ class Builder:
             if lum and r.random() < 0.4:
                 e += b" /BC [%.3f %.3f %.3f]" % (r.random(), r.random(), r.random())
             if r.random() < 0.8:
-                e += b" /TR " + (self.function(r.choice([1, 1, 1, 2])) if r.random() < 0.85
+                e += b" /TR " + (self.function(r.choice([1, 1, 1, 2]), 0, None) if r.random() < 0.85
                                  else r.choice([b"/Identity", b"[/Identity]", b"1"]))
             e += b" >>"
             if r.random() < 0.3:
@@ -182,7 +195,7 @@ class Builder:
         return len(self.extgs) - 1
 
     # ---- numbers
-    def f(self, lo=0.0, hi=1.0) -> bytes:
+    def f(self, lo: float, hi: float) -> bytes:
         r = self.r
         if r.random() < 0.02:
             return r.choice([b"0", b"-0", b"0.0000001", b"100000", b"-100000", b"340000000000000000000000000000000000000",
@@ -191,7 +204,7 @@ class Builder:
                       r.uniform(lo - 0.5, hi + 0.5)])
         return (b"%.4f" % v).rstrip(b"0").rstrip(b".") if r.random() < 0.8 else b"%.5g" % v
 
-    def arr(self, vals) -> bytes:
+    def arr(self, vals: Iterable[bytes]) -> bytes:
         return b"[" + b" ".join(vals) + b"]"
 
     def domain(self) -> tuple[bytes, float, float]:
@@ -200,7 +213,7 @@ class Builder:
         return b"[%g %g]" % (d0, d1), d0, d1
 
     # ---- functions (one input, n outputs)
-    def function(self, n: int, depth: int = 0, domain=None) -> bytes:
+    def function(self, n: int, depth: int, domain: bytes | None) -> bytes:
         r = self.r
         kind = r.choice([2, 2, 3, 3, 0, 4]) if depth == 0 else r.choice([2, 2, 2, 0, 4, 3 if depth < 2 else 2])
         dom = domain if domain is not None else r.choice([b"[0 1]", b"[0 1]", b"[0 1]", b"[-1 2]", b"[0.2 0.8]"])
@@ -208,8 +221,8 @@ class Builder:
         if r.random() < 0.2 or kind in (0, 4):
             rng = b" /Range " + self.arr([b"%s %s" % (self.f(-0.2, 0.3), self.f(0.7, 1.2)) for _ in range(n)])
         if kind == 2:
-            c0 = b" /C0 " + self.arr([self.f() for _ in range(n)]) if r.random() < 0.9 or n != 1 else b""
-            c1 = b" /C1 " + self.arr([self.f() for _ in range(n)]) if r.random() < 0.9 or n != 1 else b""
+            c0 = b" /C0 " + self.arr([self.f(0.0, 1.0) for _ in range(n)]) if r.random() < 0.9 or n != 1 else b""
+            c1 = b" /C1 " + self.arr([self.f(0.0, 1.0) for _ in range(n)]) if r.random() < 0.9 or n != 1 else b""
             nn = r.choice([b"1", b"1", b"2", b"0.5", b"3.3", b"0", b"1.0"])
             body = b"<< /FunctionType 2 /Domain %s%s%s%s /N %s >>" % (dom, rng, c0, c1, nn)
             return self.add(body) if r.random() < 0.5 else body
@@ -222,7 +235,7 @@ class Builder:
             subs = [self.function(n, depth + 1, b"[0 1]") for _ in range(k)]
             enc = []
             for _ in range(k):
-                enc.append(r.choice([b"0 1", b"1 0", b"0 1", b"%s %s" % (self.f(), self.f())]))
+                enc.append(r.choice([b"0 1", b"1 0", b"0 1", b"%s %s" % (self.f(0.0, 1.0), self.f(0.0, 1.0))]))
             body = b"<< /FunctionType 3 /Domain %s%s /Functions [%s] /Bounds [%s] /Encode [%s] >>" % (
                 dom, rng, b" ".join(subs), b" ".join(b"%.4f" % c for c in cuts), b" ".join(enc))
             return self.add(body) if r.random() < 0.5 else body
@@ -235,7 +248,7 @@ class Builder:
             if r.random() < 0.3:
                 extra += b" /Encode [%s %s]" % (self.f(0, size), self.f(0, size))
             if r.random() < 0.3:
-                extra += b" /Decode " + self.arr([b"%s %s" % (self.f(), self.f()) for _ in range(n)])
+                extra += b" /Decode " + self.arr([b"%s %s" % (self.f(0.0, 1.0), self.f(0.0, 1.0)) for _ in range(n)])
             return self.add(b"<< /FunctionType 0 /Domain %s%s /Size [%d] /BitsPerSample %d%s /Length %d >>\nstream\n"
                             % (dom, rng, size, bps, extra, len(data)) + data + b"\nendstream")
         # PostScript: output i from `i index` (x is at the bottom) through a random expression
@@ -282,14 +295,14 @@ class Builder:
             return b"[/CalGray << /WhitePoint [0.9505 1 1.089] >>]", 1
         if k < 0.85:
             base, n = r.choice([(b"/DeviceRGB", 3), (b"/DeviceCMYK", 4), (b"/DeviceGray", 1)])
-            return b"[/Separation /Spot %s %s]" % (base, self.function(n, 1)), 1
+            return b"[/Separation /Spot %s %s]" % (base, self.function(n, 1, None)), 1
         base, n = r.choice([(b"/DeviceRGB", 3), (b"/DeviceCMYK", 4)])
         m = r.choice([1, 2, 3])
         names = b"[" + b" ".join(b"/C%d" % i for i in range(m)) + b"]"
         fn = self.nfunction(m, n)
         return b"[/DeviceN %s %s %s]" % (names, base, fn), m
 
-    def cie_colorspace(self, indexed: float = 0.2) -> tuple[bytes, int]:
+    def cie_colorspace(self, indexed: float) -> tuple[bytes, int]:
         """CalRGB, CalGray, Lab, Indexed, or Separation/DeviceN over a CIE space; `cs_ranges` is set
         to the components' ranges when they are not [0 1]."""
         r = self.r
@@ -361,14 +374,14 @@ class Builder:
                 d += b" /Gamma " + r.choice([b"1", b"2.2", self.f(0.3, 3)])
             return b"[/CalGray << %s >>]" % d, 1
         d = b"/WhitePoint " + self._white()
-        rng = (-100.0, 100.0, -100.0, 100.0)
+        rng: tuple[float, float, float, float] = (-100.0, 100.0, -100.0, 100.0)
         if r.random() < 0.5:
             rng = r.choice([(-128, 127, -128, 127), (-50, 50, -20, 80), (0, 0, -100, 100), (20, -20, 0, 50)])
             d += b" /Range [%g %g %g %g]" % rng
         self.cs_ranges = [(0, 100), (rng[0], rng[1]), (rng[2], rng[3])]
         return b"[/Lab << %s >>]" % d, 3
 
-    def scaled_function(self, ranges, dom: bytes) -> bytes:
+    def scaled_function(self, ranges: Ranges, dom: bytes) -> bytes:
         """A 1-in function whose outputs span `ranges` (Lab's L*a*b*, an Indexed space's indices)."""
         r = self.r
         n = len(ranges)
@@ -401,7 +414,7 @@ class Builder:
                 ranges = [(0, 1)] * n
             rng = b"[" + b" ".join(b"%g %g" % rg for rg in ranges) + b"]"
             if r.random() < 0.3 and self.cs_ranges is None:
-                extra += b" /Decode " + self.arr([b"%s %s" % (self.f(), self.f()) for _ in range(n)])
+                extra += b" /Decode " + self.arr([b"%s %s" % (self.f(0.0, 1.0), self.f(0.0, 1.0)) for _ in range(n)])
             elif self.cs_ranges is not None:
                 extra += b" /Decode " + rng
             return self.add(b"<< /FunctionType 0 /Domain %s /Range %s /Size [%d %d] /BitsPerSample %d%s /Length %d >>"
@@ -468,6 +481,7 @@ class Builder:
         y0, y1 = r.uniform(-60, 40), r.uniform(110, 210)
         if r.random() < 0.1:
             x0, x1 = x1, x0
+        cr: Ranges
         if funcs:
             cr = [r.choice([(0, 1), (0, 1), (-1, 2), (1, 0), (0.25, 0.5)])]
         elif self.cs_ranges and len(self.cs_ranges) == comps:
@@ -478,16 +492,16 @@ class Builder:
         w = _Bits()
         cmax, kmax = (1 << bpc) - 1, (1 << bpcomp) - 1
 
-        def coord(x, y):
+        def coord(x: float, y: float) -> None:
             for v, lo, hi in ((x, x0, x1), (y, y0, y1)):
                 t = (v - lo) / (hi - lo) if hi != lo else 0
-                w.put(max(0, min(cmax, int(round(t * cmax)))), bpc)
+                w.put(max(0, min(cmax, round(t * cmax))), bpc)
 
-        def color():
+        def color() -> None:
             for _ in range(comps):
                 w.put(r.randrange(kmax + 1), bpcomp)
 
-        def point(cx, cy, spread):
+        def point(cx: float, cy: float, spread: float) -> tuple[float, float]:
             return cx + r.uniform(-spread, spread), cy + r.uniform(-spread, spread)
         spread = r.choice([5, 20, 60, 150])
         entries = b""
@@ -565,7 +579,7 @@ class Builder:
         for j in range(n):
             terms = []
             for i in range(m):
-                terms.append(b"%d index %s mul" % (i + len(terms) + j, self.f()))
+                terms.append(b"%d index %s mul" % (i + len(terms) + j, self.f(0.0, 1.0)))
             prog.append(b" ".join(terms) + b" add" * (m - 1))
         prog.append(b"%d %d roll" % (m + n, n) + b" pop" * m)
         text = b"{ " + b" ".join(prog) + b" }"
@@ -581,8 +595,9 @@ class Builder:
                 return self.new_style_shading(pattern)
         stype = r.choice([2, 2, 3, 3, 3])
         cs, n = self.colorspace()
-        if self.cs_ranges is not None and not cs.startswith(b"[/Indexed") and r.random() < 0.8:
-            return self._scaled_axial(stype, cs, pattern)
+        ranges = self.cs_ranges
+        if ranges is not None and not cs.startswith(b"[/Indexed") and r.random() < 0.8:
+            return self._scaled_axial(stype, cs, pattern, ranges)
         dom, d0, d1 = self.domain()
         if stype == 2:
             coords = [self.f(-40, 240) for _ in range(4)]
@@ -632,7 +647,7 @@ class Builder:
             body += b" /Function %s" % self.function(outs, 0, fdom)
         if r.random() < 0.25:
             k = n - 1 if wild and r.random() < 0.3 else n
-            body += b" /Background " + self.arr([self.f() for _ in range(k)])
+            body += b" /Background " + self.arr([self.f(0.0, 1.0) for _ in range(k)])
         if r.random() < 0.25:
             k = 3 if wild and r.random() < 0.3 else 4
             body += b" /BBox " + self.arr([self.f(-20, 220) for _ in range(k)])
@@ -645,12 +660,12 @@ class Builder:
         r = self.r
         body = b""
         if r.random() < 0.2:
-            body += b" /Background " + self.arr([self.f() for _ in range(n)])
+            body += b" /Background " + self.arr([self.f(0.0, 1.0) for _ in range(n)])
         if r.random() < 0.2:
             body += b" /BBox " + self.arr([self.f(-20, 220) for _ in range(4)])
         return body
 
-    def _scaled_axial(self, stype: int, cs: bytes, pattern: bool) -> bytes:
+    def _scaled_axial(self, stype: int, cs: bytes, pattern: bool, ranges: Ranges) -> bytes:
         """An axial or radial shading over Lab (functions spanning L*a*b*)."""
         r = self.r
         if stype == 2:
@@ -661,7 +676,7 @@ class Builder:
         body = b"<< /ShadingType %d /ColorSpace %s /Coords %s" % (stype, cs, self.arr(coords))
         if r.random() < 0.6:
             body += b" /Extend [%s %s]" % (r.choice([b"true", b"false"]), r.choice([b"true", b"false"]))
-        body += b" /Function %s" % self.scaled_function(self.cs_ranges, b"[0 1]") + self._extras(3) + b" >>"
+        body += b" /Function %s" % self.scaled_function(ranges, b"[0 1]") + self._extras(3) + b" >>"
         return self.add(body) if pattern or r.random() < 0.7 else body
 
     def new_style_shading(self, pattern: bool) -> bytes:
@@ -692,19 +707,19 @@ class Builder:
         return len(self.patterns) - 1
 
     # ---- tiling patterns
-    def cell_path(self, bbox) -> bytes:
+    def cell_path(self, bbox: Box) -> bytes:
         """A path around a cell's /BBox (it reaches out of it, so the cell's clip counts)."""
         r = self.r
         x0, y0, x1, y1 = bbox
         w, h = max(x1 - x0, 0.5), max(y1 - y0, 0.5)
 
-        def x():
+        def x() -> float:
             return x0 + r.uniform(-0.3, 1.3) * w
 
-        def y():
+        def y() -> float:
             return y0 + r.uniform(-0.3, 1.3) * h
 
-        parts = []
+        parts: list[bytes] = []
         for _ in range(r.randint(1, 3)):
             if r.random() < 0.45:
                 parts.append(b"%.3f %.3f %.3f %.3f re" % (x(), y(), r.uniform(-1, 1.2) * w, r.uniform(-1, 1.2) * h))
@@ -746,10 +761,10 @@ class Builder:
         return self.add(b"<< /Type /XObject /Subtype /Image /Width %d /Height %d %s /Length %d >>\n"
                         b"stream\n" % (w, h, entries, len(rows)) + rows + b"\nendstream")
 
-    def cell_form(self, bbox, nested: int) -> bytes:
+    def cell_form(self, bbox: Box, nested: int) -> bytes:
         """A form XObject inside a cell (its own resources, maybe a transparency group)."""
         r = self.r
-        content, res = self.tiling_cell(bbox, nested, form=True)
+        content, res = self.tiling_cell(bbox, nested, True)
         entries = b"/BBox [%.3f %.3f %.3f %.3f]" % (bbox[0] - 5, bbox[1] - 5, bbox[2] + 5, bbox[3] + 5)
         if r.random() < 0.5:
             vals = [r.choice([1, 1, 0.5, -1, r.uniform(-1.5, 1.5)]) for _ in range(4)] + \
@@ -760,7 +775,7 @@ class Builder:
         return self.add(b"<< /Type /XObject /Subtype /Form %s /Resources %s /Length %d >>\nstream\n"
                         % (entries, res, len(content)) + content + b"\nendstream")
 
-    def tiling_cell(self, bbox, nested: int, form: bool = False) -> tuple[bytes, bytes]:
+    def tiling_cell(self, bbox: Box, nested: int, form: bool) -> tuple[bytes, bytes]:
         """(a cell's content, its own /Resources): the page's resources never reach it, so every
         name it uses is written into a dictionary of its own."""
         r = self.r
@@ -776,7 +791,7 @@ class Builder:
             if r.random() < 0.25:
                 g.append(self.cell_path(bbox) + r.choice([b" W n", b" W* n"]))
             if r.random() < 0.3:
-                e = b"/ca %s /CA %s" % (self.f(), self.f())
+                e = b"/ca %s /CA %s" % (self.f(0.0, 1.0), self.f(0.0, 1.0))
                 if r.random() < 0.3:
                     e += b" /BM /" + r.choice([b"Multiply", b"Screen", b"Darken", b"Difference", b"Luminosity"])
                 gs.append(b"<< " + e + b" >>")
@@ -822,7 +837,7 @@ class Builder:
             res += b" /XObject << " + b" ".join(b"/X%d %s" % (i, s) for i, s in enumerate(xobj)) + b" >>"
         return b"\n".join(ops), res + b" >>"
 
-    def tiling_object(self, nested: int = 1) -> bytes:
+    def tiling_object(self, nested: int) -> bytes:
         """A PatternType 1 pattern: cell sizes from a pixel to bigger than the page, steps that
         tile, overlap or leave gaps, and a /Matrix that is often the aligned case (a scaled or
         90-rotated matrix over a /BBox of [0 0 XStep YStep])."""
@@ -841,7 +856,7 @@ class Builder:
         xstep = w if r.random() < 0.55 else w * r.choice([1.5, 2.0, 0.6, 0.35, -1.0])
         ystep = h if r.random() < 0.55 else h * r.choice([1.5, 2.0, 0.6, 0.35, -1.0])
         sx = sy = 1.0
-        vals = None
+        vals: list[float] | None = None
         k = r.random()
         if k < 0.3:
             pass                                    # no /Matrix: the identity
@@ -866,7 +881,7 @@ class Builder:
         if r.random() < 0.03:
             xstep = r.choice([0.0, 1e30])
         m = b"" if vals is None else b" /Matrix [" + b" ".join(b"%.4f" % v for v in vals) + b"]"
-        content, res = self.tiling_cell(bbox, nested)
+        content, res = self.tiling_cell(bbox, nested, False)
         paint = 1 if r.random() < 0.93 else 2       # 2 is uncoloured: refused, not drawn
         return self.add(b"<< /PatternType 1 /PaintType %d /TilingType %d /BBox [%.4f %.4f %.4f %.4f] "
                         b"/XStep %.4f /YStep %.4f%s /Resources %s /Length %d >>\nstream\n"
@@ -874,7 +889,7 @@ class Builder:
                            xstep, ystep, m, res, len(content)) + content + b"\nendstream")
 
     def new_tiling(self) -> int:
-        self.patterns.append(self.tiling_object())
+        self.patterns.append(self.tiling_object(1))
         return len(self.patterns) - 1
 
     def any_pattern(self, in_form: bool) -> int:
@@ -883,7 +898,7 @@ class Builder:
         return self.new_pattern()
 
 
-def random_group(r: random.Random, b: Builder, nforms: int, in_form: bool = False) -> bytes:
+def random_group(r: random.Random, b: Builder, nforms: int, in_form: bool) -> bytes:
     g = [b"q"]
     if r.random() < 0.4:
         g.append(random_cm(r))
@@ -930,18 +945,18 @@ def random_group(r: random.Random, b: Builder, nforms: int, in_form: bool = Fals
     return b"\n".join(g)
 
 
-MODES = ("classic", "cie", "func", "mesh", "transfer", "tiling")
+MODES: tuple[Mode, ...] = ("classic", "cie", "func", "mesh", "transfer", "tiling")
 
 
-def case(seed: int, mode: str = "classic"):
+def case(seed: int, mode: Mode) -> tuple[bytes, list[Form], list[bytes], Resources, float, bool]:
     """(content, forms, objects, resources, zoom, transparent) for `seed`. `mode`: classic (axial and
     radial), cie (CalRGB, CalGray, Lab, Indexed), func (type 1), mesh (types 4-7), transfer (/TR),
     tiling (PatternType 1)."""
     r = random.Random(seed if mode == "classic" else f"{mode}:{seed}")
     b = Builder(r, mode)
-    forms = []
+    forms: list[Form] = []
     for k in range(r.choice([0, 0, 0, 0, 1] if mode == "tiling" else [0, 0, 0, 1, 2])):
-        entries = b"/BBox [%s %s %s %s]" % (num(r), num(r), num(r), num(r))
+        entries = b"/BBox [%s %s %s %s]" % (num(r, 1.0), num(r, 1.0), num(r, 1.0), num(r, 1.0))
         if r.random() < 0.7:
             m = [r.choice([1, 0, -1, r.uniform(-2, 2)]) for _ in range(4)] + [r.uniform(-60, 60), r.uniform(-60, 60)]
             if mode == "tiling" and abs(m[0] * m[3] - m[1] * m[2]) < 1e-3:
@@ -954,7 +969,7 @@ def case(seed: int, mode: str = "classic"):
             entries += r.choice([b" /Group << /S /Transparency >>", b" /Group << /S /Transparency /I true >>",
                                  b" /Group << /S /Transparency /K true >>"])
         forms.append((entries, b"\n".join(random_group(r, b, k, True) for _ in range(r.randint(1, 3)))))
-    content = b"\n".join(random_group(r, b, len(forms)) for _ in range(r.randint(1, 4)))
+    content = b"\n".join(random_group(r, b, len(forms), False) for _ in range(r.randint(1, 4)))
     zoom = r.choice([0.5, 1, 1.37, 2, 3.1])
     if mode == "func":
         zoom = min(zoom, 1.37)          # a Python function call per pixel
@@ -963,38 +978,40 @@ def case(seed: int, mode: str = "classic"):
     return content, forms, b.objects, b.resources(), zoom, r.random() < 0.3
 
 
-def compare(content: bytes, objects, resources, zoom: float, transparent: bool, forms=()):
+def compare(content: bytes, objects: list[bytes], resources: Resources, zoom: float, transparent: bool,
+            forms: Sequence[Form]) -> Compared | Refused:
     """(pixels that differ or None when the pure reader refuses, PDFium's render, pure's render,
     per-pixel difference or the refusal)."""
-    return compare_renders(pdf_bytes([content], objects, resources, forms=forms), zoom, transparent,
-                           refusals=True)
+    return compare_refusing(pdf_bytes([content], objects, resources, forms, MEDIA), zoom, transparent)
 
 
-def shrink(content: bytes, objects, resources, zoom: float, transparent: bool, forms=()):
+def shrink(content: bytes, objects: list[bytes], resources: Resources, zoom: float, transparent: bool,
+           forms: Sequence[Form]) -> tuple[bytes, list[Form]]:
     """Drop lines (the page's, then each form's) while the difference remains."""
-    def fails(c, fs):
+    def fails(c: bytes, fs: list[Form]) -> bool:
         try:
             return (compare(c, objects, resources, zoom, transparent, fs)[0] or 0) > 0
         except Exception:
             return False
-    return drop_form_lines(content, forms, fails)
+    return drop_form_lines(content, forms, fails, False)
 
 
-def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, mode: str = "classic") -> dict:
-    """{'failed': [seeds], 'refused': {reason: count}, 'drawn': count}."""
-    stats = {"failed": [], "refused": {}, "drawn": 0}
+def run(seed0: int, n: int, out: Path | None, verbose: bool, mode: Mode) -> Stats:
+    """The seeds apart, the refusals by reason, the pages drawn exactly (`Stats`)."""
+    stats: Stats = {"failed": [], "refused": {}, "drawn": 0}
     for seed in range(seed0, seed0 + n):
         content, forms, objects, resources, zoom, transparent = case(seed, mode)
         try:
-            npx, a, b, d = compare(content, objects, resources, zoom, transparent, forms)
+            got = outcome(compare(content, objects, resources, zoom, transparent, forms))
         except Exception as e:
             if verbose:
                 print("seed", seed, "EXC", type(e).__name__, e)
             stats["failed"].append(seed)
             continue
-        if b is None:               # the pure reader refused (npx is None, d its message)
-            stats["refused"][d] = stats["refused"].get(d, 0) + 1
+        if isinstance(got, str):    # the pure reader refused, saying why
+            stats["refused"][got] = stats["refused"].get(got, 0) + 1
             continue
+        npx, a, b, d = got
         if not npx:
             stats["drawn"] += 1
             continue
@@ -1002,26 +1019,29 @@ def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, mode:
         if not verbose:
             if out is not None:     # what another platform's PDFium drew, to study where it is
                 out.mkdir(parents=True, exist_ok=True)
-                (out / f"{mode}-{seed}.pdf").write_bytes(pdf_bytes([content], objects, resources, forms=forms))
+                (out / f"{mode}-{seed}.pdf").write_bytes(pdf_bytes([content], objects, resources, forms, MEDIA))
                 np.savez_compressed(out / f"{mode}-{seed}.npz", pdfium=a, pure=b, zoom=zoom,
                                     transparent=transparent)
             continue
         small, sforms = shrink(content, objects, resources, zoom, transparent, forms)
-        npx, a, b, d = compare(small, objects, resources, zoom, transparent, sforms)
-        print(f"seed {seed} zoom {zoom} transparent {transparent}: {npx} px, max {d.max() if npx else 0}")
+        final = outcome(compare(small, objects, resources, zoom, transparent, sforms))
+        shown = None if isinstance(final, str) else final[0]
+        print(f"seed {seed} zoom {zoom} transparent {transparent}: {shown} px, "
+              f"max {final[3].max() if not isinstance(final, str) and final[0] else 0}")
         for k, (e, c) in enumerate(sforms):
             print(f"-- X{k} {e.decode()}\n{c.decode()}")
         print("-- page\n" + small.decode())
-        if out is not None and npx:
+        if out is not None and not isinstance(final, str) and final[0]:
+            _, a, b, d = final
             out.mkdir(parents=True, exist_ok=True)
             from PIL import Image
             vis = np.concatenate([a[..., :3], b[..., :3], np.stack([np.where(d > 0, 255, 0)] * 3, -1)], 1)
             Image.fromarray(vis.astype(np.uint8)).save(out / f"seed{seed}.png")
-            (out / f"seed{seed}.pdf").write_bytes(pdf_bytes([small], objects, resources, forms=sforms))
+            (out / f"seed{seed}.pdf").write_bytes(pdf_bytes([small], objects, resources, sforms, MEDIA))
     return stats
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
@@ -1036,4 +1056,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(None))

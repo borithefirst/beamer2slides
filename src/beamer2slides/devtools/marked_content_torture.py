@@ -29,7 +29,7 @@ STRINGS = [b"(Hi)", b"()", b"<FEFF062A0631>", b"<FEFF05D005D1>", b"(a\\001b)", b
 TEXTS = [b"(Hello)", b"(ABC)", b"(abc)", b"(0A0)", b"(Wo rld)", b"(A)", b"(-)", b"(a-)", b"(J)"]
 
 
-def objects_pdf(objs: dict) -> bytes:
+def objects_pdf(objs: dict[int, bytes]) -> bytes:
     out = [b"%PDF-1.7\n"]
     offsets = {}
     for num in sorted(objs):

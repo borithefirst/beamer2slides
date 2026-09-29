@@ -14,12 +14,19 @@ from __future__ import annotations
 
 import argparse
 import random
+from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
 
-from .render_torture import EXTGS, num, random_cm, random_geometry, random_path
-from .torture_kit import compare_renders, drop_lines
+from ..pdf.api import Box
+from .render_torture import EXTGS, PLAIN, Geometry, num, random_cm, random_geometry, random_path
+from .torture_kit import QQ, Compared, compare_clipped, drop_lines
+
+Item = tuple[str, bytes, bytes, bytes]
+"""(kind, entries, content, smask): kind "X" is a form (/X<k>), "S" a soft mask (its /G form;
+`smask` = b"/S /Luminosity /BC [...]" entries)."""
 
 
 BLENDS = (b"Normal", b"Multiply", b"Screen", b"Overlay", b"Darken", b"Lighten", b"ColorDodge",
@@ -27,9 +34,8 @@ BLENDS = (b"Normal", b"Multiply", b"Screen", b"Overlay", b"Darken", b"Lighten", 
           b"Saturation", b"Color", b"Luminosity", b"Compatible")
 
 
-def pdf_bytes(page: bytes, items=(), media=(0, 0, 200, 150), page_entries: bytes = b"") -> bytes:
-    """A one-page PDF. `items`: [(kind, entries, content, smask)] with kind "X" (a form, /X<k>)
-    or "S" (a soft mask: its /G form; `smask` = b"/S /Luminosity /BC [...]" entries)."""
+def pdf_bytes(page: bytes, items: Sequence[Item], media: Box, page_entries: bytes) -> bytes:
+    """A one-page PDF with `items` (`Item`) as /X<k> forms and /S<k> soft masks."""
     objs: list[bytes] = []
     n_items = len(items)
     ids = list(range(1, n_items + 1))           # item k is object k + 1
@@ -54,7 +60,7 @@ def pdf_bytes(page: bytes, items=(), media=(0, 0, 200, 150), page_entries: bytes
     objs.append(b"<< /Type /Pages /Kids [%d 0 R] /Count 1 >>" % page_id)
     objs.append(b"<< /Type /Catalog /Pages %d 0 R >>" % pages_id)
     out = bytearray(b"%PDF-1.7\n")
-    offs = []
+    offs: list[int] = []
     for i, o in enumerate(objs, 1):
         offs.append(len(out))
         out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
@@ -75,17 +81,17 @@ def _colour(r: random.Random) -> bytes:
     return b"%.3f %.3f %.3f rg %.3f %.3f %.3f RG" % tuple(r.random() for _ in range(6))
 
 
-def random_content(r: random.Random, items, upto: int) -> bytes:
+def random_content(r: random.Random, items: Sequence[Item], upto: int) -> bytes:
     """A few `q ... Q` groups: paths as in render_torture, soft masks and alphas set before
     painting or calling a form."""
     forms = [k for k in range(upto) if items[k][0] == "X"]
     masks = [k for k in range(upto) if items[k][0] == "S"]
-    out = []
+    out: list[bytes] = []
     if r.random() < 0.5:
         # something under what follows: a blend over nothing drawn (the page's white is the
         # caller's fill, not content) is a plain copy
         out.append(b"q\n%s\n%s %s %s %s re f\nQ" % (_colour(r), num(r, 0.3), num(r, 0.3),
-                                                   num(r), num(r)))
+                                                   num(r, 1.0), num(r, 1.0)))
     for _ in range(r.randint(1, 5)):
         g = [b"q"]
         if r.random() < 0.3:
@@ -111,7 +117,7 @@ def random_content(r: random.Random, items, upto: int) -> bytes:
             if r.random() < 0.1:
                 g.append(b"[3 2] 0 d")
             if r.random() < 0.3 and r.random() < 0.5:
-                g.append(b"%s %s %s %s re f" % (num(r), num(r), num(r, 0.5), num(r, 0.5)))
+                g.append(b"%s %s %s %s re f" % (num(r, 1.0), num(r, 1.0), num(r, 0.5), num(r, 0.5)))
             else:
                 g.append(random_path(r) + b" " + r.choice([b"f", b"f*", b"S", b"s", b"B", b"B*", b"b", b"F"]))
         g.append(b"Q")
@@ -122,7 +128,7 @@ def random_content(r: random.Random, items, upto: int) -> bytes:
 def _bbox(r: random.Random) -> bytes:
     if r.random() < 0.3:
         return b"/BBox [0 0 200 150]"
-    return b"/BBox [%s %s %s %s]" % (num(r), num(r), num(r), num(r))
+    return b"/BBox [%s %s %s %s]" % (num(r, 1.0), num(r, 1.0), num(r, 1.0), num(r, 1.0))
 
 
 def _matrix(r: random.Random) -> bytes:
@@ -132,8 +138,8 @@ def _matrix(r: random.Random) -> bytes:
     return b" /Matrix [" + b" ".join(b"%.4f" % v for v in m) + b"]"
 
 
-def random_items(r: random.Random) -> list:
-    items: list = []
+def random_items(r: random.Random) -> list[Item]:
+    items: list[Item] = []
     for k in range(r.choice([1, 2, 2, 3, 4, 5])):
         if r.random() < 0.5:
             entries = _bbox(r) + _matrix(r)
@@ -144,7 +150,7 @@ def random_items(r: random.Random) -> list:
                 entries += b" /Group << /S /Transparency /I true%s >>" % r.choice([b"", b" /K true", b" /CS /DeviceRGB"])
             elif k2 < 0.6:
                 entries += b" /Group << /I true >>"
-            items.append(["X", entries, b"", b""])
+            kind, sm = "X", b""
         else:
             lum = r.random() < 0.6
             cs = r.choice([b"/DeviceGray", b"/DeviceRGB", b"/DeviceCMYK", b"/DeviceGray"])
@@ -155,50 +161,50 @@ def random_items(r: random.Random) -> list:
             if lum and r.random() < 0.4:
                 n = {b"/DeviceGray": 1, b"/DeviceRGB": 3, b"/DeviceCMYK": 4}[cs]
                 sm += b" /BC [" + b" ".join(b"%.3f" % r.random() for _ in range(r.choice([n, n, 1, 5]))) + b"]"
-            items.append(["S", entries, b"", sm])
-        items[-1][2] = random_content(r, items, k)
-    return [tuple(it) for it in items]
+            kind = "S"
+        items.append((kind, entries, random_content(r, items, k), sm))
+    return items
 
 
-def case(seed: int, page: bool = False):
+def case(seed: int, page: bool) -> tuple[bytes, list[Item], float, bool, Geometry]:
     r = random.Random(seed)
     items = random_items(r)
     content = random_content(r, items, len(items))
     zoom, transparent = r.choice([0.5, 1, 1.37, 2]), r.random() < 0.3
-    geometry = random_geometry(r) if page else {}
+    geometry = random_geometry(r) if page else PLAIN
     if r.random() < 0.3:
-        geometry["page_entries"] = geometry.get("page_entries", b"") + b" /Group << /S /Transparency /CS /DeviceRGB >>"
+        geometry = replace(geometry, page_entries=geometry.page_entries + b" /Group << /S /Transparency /CS /DeviceRGB >>")
     return content, items, zoom, transparent, geometry
 
 
-def compare(content: bytes, zoom: float, transparent: bool, items=(), geometry=None):
+def compare(content: bytes, zoom: float, transparent: bool, items: Sequence[Item], geometry: Geometry) -> Compared:
     """(pixels that differ, PDFium's render, pure's render, per-pixel max difference)."""
-    g = dict(geometry or {})
-    clip = g.pop("clip", None)
-    return compare_renders(pdf_bytes(content, items, **g), zoom, transparent, clip)
+    data = pdf_bytes(content, items, geometry.media, geometry.page_entries)
+    return compare_clipped(data, zoom, transparent, geometry.clip)
 
 
-def shrink(content: bytes, zoom: float, transparent: bool, items=(), geometry=None):
+def shrink(content: bytes, zoom: float, transparent: bool, items: Sequence[Item],
+           geometry: Geometry) -> tuple[bytes, list[Item]]:
     """Drop lines (the page's, then each item's) while the difference remains."""
-    items = [list(it) for it in items]
+    shrunk = list(items)
 
-    def fails(c, its):
+    def fails(c: bytes, its: list[Item]) -> bool:
         try:
-            return compare(c, zoom, transparent, [tuple(i) for i in its], geometry)[0] > 0
+            return compare(c, zoom, transparent, its, geometry)[0] > 0
         except Exception:
             return False
 
-    content = drop_lines(content, lambda c: fails(c, items))
-    for k in range(len(items)):
-        def test(c, k=k):
-            trial = [list(i) for i in items]
-            trial[k][2] = c
-            return fails(content, trial)
-        items[k][2] = drop_lines(items[k][2], test)
-    return content, [tuple(i) for i in items]
+    content = drop_lines(content, lambda c: fails(c, shrunk), QQ)
+    for k in range(len(shrunk)):
+        kind, entries, body, smask = shrunk[k]
+
+        def test(c: bytes) -> bool:
+            return fails(content, shrunk[:k] + [(kind, entries, c, smask)] + shrunk[k + 1:])
+        shrunk[k] = (kind, entries, drop_lines(body, test, QQ), smask)
+    return content, shrunk
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
@@ -237,11 +243,10 @@ def main(argv=None) -> int:
         from PIL import Image
         vis = np.concatenate([a[..., :3], b[..., :3], np.stack([np.where(d > 0, 255, 0)] * 3, -1)], 1)
         Image.fromarray(vis.astype(np.uint8)).save(out / f"seed{seed}.png")
-        g = {k: v for k, v in geometry.items() if k != "clip"}
-        (out / f"seed{seed}.pdf").write_bytes(pdf_bytes(small, sitems, **g))
+        (out / f"seed{seed}.pdf").write_bytes(pdf_bytes(small, sitems, geometry.media, geometry.page_entries))
     print(f"seeds {args.seed0}..{args.seed0 + args.n - 1}: {fails} failed, {refused} refused")
     return 1 if fails else 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(None))

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Iterator, Mapping, Sequence
 
 import numpy as np
 
@@ -31,6 +31,9 @@ from .document import PdfFile, read, write_file
 from .filters import ABBREVIATIONS, decode
 from .syntax import InlineImage, Name, PdfDict, PdfObject, Stream, String, float32
 from .textpage import GENERATED, HYPHEN, NOT_UNICODE, TextPage
+
+if TYPE_CHECKING:
+    from .render_image import ImageCache
 
 _CS_ABBREVIATIONS = {"G": "DeviceGray", "RGB": "DeviceRGB", "CMYK": "DeviceCMYK", "I": "Indexed"}
 _CS_CODES = {name: code for code, name in COLOR_SPACES.items()}
@@ -120,7 +123,7 @@ class Page:
         self._fonts: list[Font] = []             # font_id -> Font
         self._font_info: dict[int, FontInfo] = {}   # id(Font) -> (font_id, name, ascent, descent)
         # CPDF_PageImageCache lives as long as the page: a JPEG decoded smaller stays so
-        self._image_cache: dict[int, object] = {}
+        self._image_cache: ImageCache = {}
 
     @property
     def rect(self) -> Box:
@@ -493,8 +496,8 @@ class Page:
         min_x, min_y = float32(e + min(a, c)), float32(f + min(b, d))
         flip = (1.0, 0.0, 0.0, -1.0, 0.0, float(h))
         m = (1.0, 0.0, 0.0, -1.0, float32(-min_x), float32(h + min_y))
-        dev = Device(w, h, True)
-        status = Status(dev, ctx=ctx)
+        dev = Device(w, h, True, None)
+        status = Status(dev, (False, False), False, 1.0, ctx, None)
         if o.clip_paths or o.clip_texts:
             l, bt, rt, t = R.transform_rect(o.matrix, (0.0, 0.0, 1.0, 1.0))
             # CFX_Matrix::MatchRect((0, 0, w, h), the unit square's box), then the flip

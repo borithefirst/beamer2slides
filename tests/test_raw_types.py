@@ -119,11 +119,11 @@ def test_a_page_alone_names_where_it_came_from():
 def test_a_marked_page_parses_back_to_what_extract_made(tmp_path):
     """Marks and path pieces are pairs in JSON and tuples in memory: the parser gives back the
     tuples extract builds."""
-    from beamer2slides.devtools.render_torture import pdf_bytes
+    from beamer2slides.devtools.render_torture import MEDIA, pdf_bytes
     page = element(b"a", b"text", paragraph(0, text(10, 100, b"Left"))) + \
         element(b"s", b"shape", b"1 0 0 rg 10 10 20 20 re f") + text(10, 50, b"Loose")
     path = tmp_path / "p.pdf"
-    path.write_bytes(pdf_bytes([page], (), extra_resources=FONT))
+    path.write_bytes(pdf_bytes([page], (), MEDIA, FONT, b""))
     raw = extract(path, None)
     assert parse_raw(json.loads(json.dumps(raw)), "p.pdf") == raw
 

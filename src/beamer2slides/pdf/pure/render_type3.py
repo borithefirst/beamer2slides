@@ -473,8 +473,8 @@ def process_type3_text(status, obj, matrix) -> None:
             continue
         if ch.why is not None:
             raise PdfError(f"the pure reader cannot render {ch.why} yet")
-        m = char_matrix[:4] + (F(char_matrix[4] + F(x)), char_matrix[5])
-        m = R.concat(R.concat(m, text_matrix), matrix)
+        ca, cb, cc, cd, ce, cf = char_matrix
+        m = R.concat(R.concat((ca, cb, cc, cd, F(ce + F(x)), cf), text_matrix), matrix)
         if not sole_image(font, ch):
             if listing:
                 for g in glyphs[:i]:
@@ -501,7 +501,7 @@ def process_type3_text(status, obj, matrix) -> None:
                 return                  # CreateForNewBitmap fails: the rest is not drawn
             if w * h > HUGE:
                 raise PdfError("the pure reader cannot render Type 3 glyphs this big yet")
-            bd = Device(w, h, True)
+            bd = Device(w, h, True, None)
             sub = _form_status(status, bd, ch, fill_argb, key)
             sub.render_list(ch.objects, m[:4] + (F(m[4] + float(-rect[0])),
                                                  F(m[5] + float(-rect[1]))))

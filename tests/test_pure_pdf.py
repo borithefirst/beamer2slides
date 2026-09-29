@@ -23,6 +23,7 @@ from beamer2slides.arrays import Pixels
 from beamer2slides.pdf.api import OBJ_IMAGE, Box, Char, PdfError, PdfPage
 
 if TYPE_CHECKING:
+    from beamer2slides.devtools.render_torture_shading import Mode
     from beamer2slides.devtools.render_torture_text import FontSpec
 
 HERE = Path(__file__).parent
@@ -147,10 +148,11 @@ def test_extract_and_classify_on_the_pure_reader_write_pdfiums_deck():
 
 def test_the_pure_reader_refuses_a_page_it_cannot_draw_exactly():
     """JPEG 2000 is not decoded: the page raises instead of coming back without the image."""
+    from beamer2slides.devtools.render_torture import MEDIA
     from beamer2slides.devtools.render_torture_image import pdf_bytes
     image = (b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8"
              b" /Filter /JPXDecode /Length 4 >>\nstream\njunk\nendstream")
-    data = pdf_bytes(b"q 100 0 0 80 20 20 cm /Im0 Do Q", [image], [(b"Im0", 1)])
+    data = pdf_bytes(b"q 100 0 0 80 20 20 cm /Im0 Do Q", [image], [(b"Im0", 1)], MEDIA, ())
     doc = pdf.resolve("pure").open(data)
     with pytest.raises(PdfError, match="JPXDecode"):
         doc[0].render(1.0)
@@ -216,9 +218,9 @@ RENDER_CASES: dict[str, tuple[bytes, list[tuple[bytes, bytes]], float, bool]] = 
 
 @pytest.mark.parametrize("name", RENDER_CASES)
 def test_the_pure_renderer_draws_pdfiums_pixels(name: str) -> None:
-    from beamer2slides.devtools.render_torture import compare
+    from beamer2slides.devtools.render_torture import PLAIN, compare
     content, forms, zoom, transparent = RENDER_CASES[name]
-    assert compare(content, zoom, transparent, forms)[0] == 0
+    assert compare(content, zoom, transparent, forms, PLAIN)[0] == 0
 
 
 @pytest.mark.parametrize("forms,page,mutated", [(False, False, False), (True, False, False), (False, True, False),
@@ -282,9 +284,10 @@ TRANSPARENCY_CASES: dict[str, tuple[bytes, list[tuple[str, bytes, bytes, bytes]]
 
 @pytest.mark.parametrize("name", TRANSPARENCY_CASES)
 def test_the_pure_renderer_draws_pdfiums_transparency(name: str) -> None:
+    from beamer2slides.devtools.render_torture import PLAIN
     from beamer2slides.devtools.render_torture_transparency import compare
     content, items, zoom, transparent = TRANSPARENCY_CASES[name]
-    assert compare(content, zoom, transparent, items)[0] == 0
+    assert compare(content, zoom, transparent, items, PLAIN)[0] == 0
 
 
 @pytest.mark.parametrize("page", [False, True], ids=["pages", "geometry"])
@@ -314,11 +317,12 @@ def test_the_pure_renderer_draws_soft_mask_transfer_functions():
     """A soft mask's /TR maps its luminosity (LoadSMask's `transfers`), sampled as PDFium samples it."""
     import numpy as np
 
+    from beamer2slides.devtools.render_torture import MEDIA
     from beamer2slides.devtools.render_torture_transparency import pdf_bytes
     mask = [("S", b"/BBox [0 0 200 150] /Group << /S /Transparency /CS /DeviceGray >>",
              b"0.5 g 0 0 100 100 re f 0.2 g 60 40 120 90 re f",
              b"/S /Luminosity /TR << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1.6 >>")]
-    data = pdf_bytes(b"q /S0 gs 0 0 1 rg 0 0 200 150 re f Q", mask)
+    data = pdf_bytes(b"q /S0 gs 0 0 1 rg 0 0 200 150 re f Q", mask, MEDIA, b"")
     a, b = (_render_with(name, data, 1.37) for name in ("pdfium", "pure"))
     assert np.array_equal(a, b)
     assert len({tuple(p) for p in a.reshape(-1, 4)}) >= 3
@@ -329,6 +333,7 @@ def test_the_pure_renderer_draws_transfer_functions_as_pdfium_does():
     CreateTransferFunc's tables - an array's first function lands on blue - and never shadings."""
     import numpy as np
 
+    from beamer2slides.devtools.render_torture import MEDIA
     from beamer2slides.devtools.render_torture_shading import pdf_bytes
     inv = b"<< /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1 >>"
     sq = b"<< /FunctionType 2 /Domain [0 1] /C0 [0.1] /C1 [0.9] /N 2 >>"
@@ -338,7 +343,7 @@ def test_the_pure_renderer_draws_transfer_functions_as_pdfium_does():
                b" q /T1 gs 0.9 0.3 0.1 rg 100 10 90 60 re f 0.3 0.1 0.7 0.2 k 30 80 60 60 re f Q"
                b" q /T2 gs 0.1 0.8 0.4 rg 120 80 60 60 re f Q q /T0 gs 1 0 0 1 0 60 cm /S0 sh Q")
     shading = b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 200 0] /Function 3 0 R >>"
-    data = pdf_bytes([content], _SHADING_OBJECTS, (_shading_resources({b"S0": shading}, None), gs))
+    data = pdf_bytes([content], _SHADING_OBJECTS, (_shading_resources({b"S0": shading}, None), gs), (), MEDIA)
     a, b = (_render_with(name, data, 1.37) for name in ("pdfium", "pure"))
     assert np.array_equal(a, b)
     assert len({tuple(p) for p in a.reshape(-1, 4)}) > 10
@@ -428,7 +433,7 @@ def test_the_pure_renderer_survives_shading_torture_seeds():
     """A slice of the random shading pages the renderer was made exact on (12,000 seeds when it
     was written, 8% of them refused): any pixel apart fails."""
     from beamer2slides.devtools.render_torture_shading import run
-    stats = run(0, 60, verbose=False)
+    stats = run(0, 60, None, False, "classic")
     assert not stats["failed"], f"seeds apart (python tools/render_torture_shading.py SEED 1): {stats['failed']}"
     assert stats["drawn"] >= 50
 
@@ -436,7 +441,7 @@ def test_the_pure_renderer_survives_shading_torture_seeds():
 # seeds that exercise a feature each: CalRGB/Lab over Coons (t6), Lab over tensor patches (t7),
 # lattice + Coons (t5, t6), free triangles + tensor (t4, t7), function-based over CIE (t1), and
 # /TR, /TR arrays and soft-mask /TR together
-_SHADING_SEEDS = [("cie", 5), ("cie", 48), ("mesh", 21), ("mesh", 35), ("mesh", 64), ("func", 22),
+_SHADING_SEEDS: list[tuple[Mode, int]] = [("cie", 5), ("cie", 48), ("mesh", 21), ("mesh", 35), ("mesh", 64), ("func", 22),
                   ("transfer", 7), ("transfer", 100),
                   # a cell taller than the clip (the tiles are drawn one by one, not stamped from
                   # a bitmap) holding a form, under a path whose fill alpha the tiles inherit
@@ -448,18 +453,21 @@ _SHADING_SEEDS = [("cie", 5), ("cie", 48), ("mesh", 21), ("mesh", 35), ("mesh", 
 
 
 @pytest.mark.parametrize("mode, seed", _SHADING_SEEDS)
-def test_the_pure_renderer_draws_these_shading_torture_seeds(mode: str, seed: int) -> None:
+def test_the_pure_renderer_draws_these_shading_torture_seeds(mode: Mode, seed: int) -> None:
     from beamer2slides.devtools.render_torture_shading import run
-    stats = run(seed, 1, verbose=False, mode=mode)
+    stats = run(seed, 1, None, False, mode)
     assert stats["drawn"] == 1, stats
 
 
-@pytest.mark.parametrize("mode", ["cie", "func", "mesh", "transfer"])
-def test_the_pure_renderer_survives_new_shading_torture_modes(mode: str) -> None:
+_NEW_SHADING_MODES: list[Mode] = ["cie", "func", "mesh", "transfer"]
+
+
+@pytest.mark.parametrize("mode", _NEW_SHADING_MODES)
+def test_the_pure_renderer_survives_new_shading_torture_modes(mode: Mode) -> None:
     """CIE colour spaces, function-based and mesh shadings, transfer functions: a slice of the
     random pages each mode was made exact on (1,200+ seeds per mode when it was written, none apart)."""
     from beamer2slides.devtools.render_torture_shading import run
-    stats = run(0, 25, verbose=False, mode=mode)
+    stats = run(0, 25, None, False, mode)
     assert not stats["failed"], (f"seeds apart (python tools/render_torture_shading.py SEED 1 --mode {mode}): "
                                  f"{stats['failed']}")
     assert stats["drawn"] >= 18
@@ -470,7 +478,7 @@ def test_the_pure_renderer_survives_tiling_pattern_torture_seeds():
     and the tile walk were made exact on (4,000 seeds when it was written, none apart; a third of
     them refused for an uncoloured cell or a pattern inside a form)."""
     from beamer2slides.devtools.render_torture_shading import run
-    stats = run(0, 30, verbose=False, mode="tiling")
+    stats = run(0, 30, None, False, "tiling")
     assert not stats["failed"], ("seeds apart (python tools/render_torture_shading.py SEED 1 "
                                  f"--mode tiling): {stats['failed']}")
     assert stats["drawn"] >= 18
@@ -504,7 +512,7 @@ def test_the_pure_renderer_survives_image_torture_seeds():
     """A slice of the random image pages (level 6: any angle, masks, every filter and colour
     space the renderer draws): any pixel apart fails."""
     from beamer2slides.devtools.render_torture_image import run
-    stats = run(0, 60, verbose=False, level=6)
+    stats = run(0, 60, None, False, 6)
     assert not stats["failed"], f"seeds apart (python tools/render_torture_image.py SEED 1): {stats['failed']}"
     assert stats["drawn"] >= 55
 
@@ -542,9 +550,10 @@ _FAILS_VALIDATION = b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 200 
     (_FAILS_VALIDATION, "fails validation"),
 ])
 def test_the_pure_renderer_refuses_shadings_it_cannot_draw_exactly(shading: bytes, reason: str) -> None:
+    from beamer2slides.devtools.render_torture import MEDIA
     from beamer2slides.devtools.render_torture_shading import pdf_bytes
     from beamer2slides.pdf.pure.backend import PureBackend
-    data = pdf_bytes([b"/S0 sh /S0 sh"], _SHADING_OBJECTS, _shading_resources({b"S0": shading}, None))
+    data = pdf_bytes([b"/S0 sh /S0 sh"], _SHADING_OBJECTS, _shading_resources({b"S0": shading}, None), (), MEDIA)
     with pytest.raises(PdfError, match=reason):
         PureBackend().open(data)[0].render(1.0)
 
@@ -553,10 +562,11 @@ def test_a_shading_that_fails_validation_is_dropped_at_its_first_sh_only():
     """CPDF_ShadingPattern::Load sets the shading type before Validate, and the document keeps the
     pattern: the first `sh` of a shading that fails Validate makes no page object, the second does
     (found by the whole-file fuzz on a mutated beamer ball, seed 437)."""
+    from beamer2slides.devtools.render_torture import MEDIA
     from beamer2slides.devtools.render_torture_shading import pdf_bytes
     from beamer2slides.pdf.api import OBJ_SHADING
     for content, count in ((b"/S0 sh", 0), (b"/S0 sh /S0 sh", 1), (b"/S0 sh /S0 sh /S0 sh", 2)):
-        data = pdf_bytes([content], _SHADING_OBJECTS, _shading_resources({b"S0": _FAILS_VALIDATION}, None))
+        data = pdf_bytes([content], _SHADING_OBJECTS, _shading_resources({b"S0": _FAILS_VALIDATION}, None), (), MEDIA)
         for name in ("pdfium", "pure"):
             doc = pdf.resolve(name).open(data)
             objs = doc[0].objects()
@@ -1113,8 +1123,7 @@ def test_mutated_pages_read_as_pdfium_reads_them():
     from beamer2slides.devtools.render_torture import case, pdf_bytes
     for seed in [*range(30), 202, 244, 288, 442, 462]:
         content, forms, _, _, geometry = case(seed, seed % 2 == 0, seed % 3 == 0, True)
-        g = {k: v for k, v in geometry.items() if k != "clip"}
-        data = pdf_bytes([content], forms=forms, **g)
+        data = pdf_bytes([content], forms, geometry.media, b"", geometry.page_entries)
         a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
         where = f"seed {seed}"
         close([dataclasses.astuple(o) for o in a.objects()], [dataclasses.astuple(o) for o in b.objects()], where)

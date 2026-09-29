@@ -55,7 +55,11 @@ decorations) is a picture, or baked into a per-slide background picture.
   `$B2S_PDF_BACKEND`. The contract is typed (api's `Metadata`/`Link`/`ImageInfo`, `DrawingKind`;
   sandbox ops Literals, `wire.Reader`/`Writer` parse at the boundary, a malformed answer is a
   `PdfError`); pure's content parser starts every graphics state from `content.initial_state()`
-  (`State` has no defaults), a different one being its `dataclasses.replace`. **PDFium is not thread-safe**: every PDF read stays on the main thread.
+  (`State` has no defaults), a different one being its `dataclasses.replace`. The render
+  tortures share `torture_kit`: `compare_renders`/`compare_clipped` return `Compared`,
+  `compare_refusing` `Compared | Refused` read through `outcome()`; a page's geometry is
+  `render_torture.Geometry` (`PLAIN`). **PDFium is not thread-safe**: every PDF read stays on the
+  main thread.
 - **No public links**: pictures reach Slides inside the imported .pptx, never as shared Drive files.
 - **Fidelity is measured on Google's own renderer** (`getThumbnail` vs the PDF page), never a local
   preview. Font substitutes are calibrated (`tools/calibrate.py`, `calibration/fonts.json`,

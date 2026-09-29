@@ -3,7 +3,7 @@
 import numpy as np
 import pytest
 
-from beamer2slides.devtools.torture_kit import drop_form_lines, drop_lines, pixel_diff
+from beamer2slides.devtools.torture_kit import QQ, drop_form_lines, drop_lines, drop_tokens, pixel_diff
 
 
 def culprit(*needles):
@@ -12,7 +12,7 @@ def culprit(*needles):
 
 def test_lines_drop_down_to_the_culprit_and_the_kept_pairs():
     page = b"q\n1 0 0 RG\nBAD\n0 0 m\nQ"
-    assert drop_lines(page, culprit(b"BAD")) == b"q\nBAD\nQ"
+    assert drop_lines(page, culprit(b"BAD"), QQ) == b"q\nBAD\nQ"
 
 
 def test_kept_lines_can_be_a_predicate():
@@ -22,12 +22,12 @@ def test_kept_lines_can_be_a_predicate():
 
 
 def test_tokens_mode_drops_single_tokens_and_keeps_nothing():
-    assert drop_lines(b"q 1 0 0 RG\nBAD w Q", culprit(b"BAD"), sep=b" ") == b"BAD"
+    assert drop_tokens(b"q 1 0 0 RG\nBAD w Q", culprit(b"BAD")) == b"BAD"
 
 
 def test_a_drop_that_loses_the_difference_is_undone():
     # two lines needed together: neither goes
-    assert drop_lines(b"A\nx\nB", culprit(b"A", b"B")) == b"A\nB"
+    assert drop_lines(b"A\nx\nB", culprit(b"A", b"B"), QQ) == b"A\nB"
 
 
 def test_forms_shrink_after_the_page_with_the_whole_page_judging():
@@ -37,7 +37,7 @@ def test_forms_shrink_after_the_page_with_the_whole_page_judging():
         seen.append(len(forms))
         return b"P" in content and all(b"F" in body for _, body in forms)
 
-    content, forms = drop_form_lines(b"x\nP\ny", [("one", b"a\nF"), ("two", b"F\nb")], fails)
+    content, forms = drop_form_lines(b"x\nP\ny", [("one", b"a\nF"), ("two", b"F\nb")], fails, False)
     assert content == b"P"
     assert forms == [("one", b"F"), ("two", b"F")]
     assert set(seen) == {2}

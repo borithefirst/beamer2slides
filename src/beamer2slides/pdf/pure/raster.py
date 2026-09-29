@@ -13,11 +13,27 @@ C++ evaluates it; integer divisions follow C's truncation."""
 from __future__ import annotations
 
 import math
+from collections.abc import Iterable, Sequence
+from typing import TypeAlias
 
 import numpy as np
 
+from ...arrays import Gray, Ints
+from ..api import Matrix
 from .syntax import F32X1, F32X2, F32X4, F32X6, F32X8
 from .syntax import float32 as F
+
+Point: TypeAlias = tuple[float, float]
+FloatRect: TypeAlias = tuple[float, float, float, float]
+"""CFX_FloatRect: (left, bottom, right, top)."""
+IntRect: TypeAlias = tuple[int, int, int, int]
+"""FX_RECT: (left, top, right, bottom), y down, in pixels."""
+PathPoint: TypeAlias = tuple[float, float, int, bool]
+"""A CFX_Path point: x, y, PT_*, whether it closes its figure."""
+Vertex: TypeAlias = tuple[float, float, int]
+"""A path_storage vertex: x, y, an AGG command."""
+Coverage: TypeAlias = tuple[int, int, Gray]
+"""What the rasteriser covers: the left and top cell of its box and the alpha over the box."""
 
 _p1, _u1 = F32X1.pack, F32X1.unpack
 _p2, _u2, _p4, _u4, _p6, _u6 = F32X2.pack, F32X2.unpack, F32X4.pack, F32X4.unpack, F32X6.pack, F32X6.unpack
@@ -64,7 +80,7 @@ def is_end_poly(c: int) -> bool:
 # ---------------------------------------------------------------------- CFX_Matrix
 
 
-def transform(m, x, y):
+def transform(m: Matrix, x: float, y: float) -> Point:
     """CFX_Matrix::Transform, in float."""
     a, b, c, d, e, f = m
     try:        # the same roundings, several per C call (syntax.F32X*)
@@ -75,7 +91,7 @@ def transform(m, x, y):
         return F(F(F(a * x) + F(c * y)) + e), F(F(F(b * x) + F(d * y)) + f)
 
 
-def concat(m, n):
+def concat(m: Matrix, n: Matrix) -> Matrix:
     """m * n (CFX_Matrix::operator*: m first, then n)."""
     a, b, c, d, e, f = m
     A, B, C, D, E, G = n
@@ -91,7 +107,7 @@ def concat(m, n):
                 F(F(F(e * A) + F(f * C)) + E), F(F(F(e * B) + F(f * D)) + G))
 
 
-def inverse(m):
+def inverse(m: Matrix) -> Matrix:
     a, b, c, d, e, f = m
     i = F(F(a * d) - F(b * c))
     if i == 0:
@@ -101,11 +117,11 @@ def inverse(m):
             F(F(F(c * f) - F(d * e)) / i), F(F(F(a * f) - F(b * e)) / j))
 
 
-def _hypotf(x, y):
+def _hypotf(x: float, y: float) -> float:
     return F(math.hypot(x, y))
 
 
-def x_unit(m):
+def x_unit(m: Matrix) -> float:
     a, b = m[0], m[1]
     if b == 0:
         return abs(a)
@@ -114,7 +130,7 @@ def x_unit(m):
     return _hypotf(a, b)
 
 
-def y_unit(m):
+def y_unit(m: Matrix) -> float:
     c, d = m[2], m[3]
     if c == 0:
         return abs(d)
@@ -123,7 +139,7 @@ def y_unit(m):
     return _hypotf(c, d)
 
 
-def transform_rect(m, rect):
+def transform_rect(m: Matrix, rect: FloatRect) -> FloatRect:
     """CFX_Matrix::TransformRect of (left, bottom, right, top)."""
     l, b, r, t = rect
     pts = [transform(m, l, t), transform(m, l, b), transform(m, r, t), transform(m, r, b)]
@@ -132,11 +148,11 @@ def transform_rect(m, rect):
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def is_identity(m) -> bool:
+def is_identity(m: Matrix) -> bool:
     return m == (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
 
-def outer_rect(rect):
+def outer_rect(rect: FloatRect) -> IntRect:
     """CFX_FloatRect::GetOuterRect -> FX_RECT (left, top, right, bottom), y down."""
     l, b, r, t = rect
     x0, x1 = _sat(math.floor(l)), _sat(math.ceil(r))
@@ -144,13 +160,13 @@ def outer_rect(rect):
     return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
 
 
-def _sat(v) -> int:
+def _sat(v: float) -> int:
     if v != v:
         return 0
     return int(max(-2147483648, min(2147483647, v)))
 
 
-def rect_intersect(a, b):
+def rect_intersect(a: IntRect, b: IntRect) -> IntRect:
     """FX_RECT::Intersect."""
     l, t, r, bt = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
     if l > r or t > bt:
@@ -158,14 +174,14 @@ def rect_intersect(a, b):
     return l, t, r, bt
 
 
-def rect_empty(r) -> bool:
+def rect_empty(r: IntRect) -> bool:
     return r[2] <= r[0] or r[3] <= r[1]
 
 
 # ---------------------------------------------------------------------- CFX_Path helpers
 
 
-def _pre_rect(points) -> bool:
+def _pre_rect(points: Sequence[PathPoint]) -> bool:
     """IsRectPreTransform."""
     n = len(points)
     if n not in (4, 5):
@@ -178,15 +194,15 @@ def _pre_rect(points) -> bool:
     return all(p[2] == PT_LINE for p in points[1:])
 
 
-def _both_differ(p, q) -> bool:
+def _both_differ(p: Sequence[float], q: Sequence[float]) -> bool:
     return p[0] != q[0] and p[1] != q[1]
 
 
-def _normalized(points):
+def _normalized(points: Sequence[PathPoint]) -> Sequence[PathPoint]:
     """GetNormalizedPoints (only called with more than 5 points)."""
     if (points[0][0], points[0][1]) != (points[-1][0], points[-1][1]):
         return []
-    out = [points[0]]
+    out: list[PathPoint] = [points[0]]
     n = len(points)
     for k in range(1, n):
         if len(out) + (n - k) == 5:
@@ -202,7 +218,7 @@ def _normalized(points):
     return out
 
 
-def path_is_rect(points) -> bool:
+def path_is_rect(points: Sequence[PathPoint]) -> bool:
     """CFX_Path::IsRect."""
     pts = _normalized(points) if len(points) > 5 else points
     if not _pre_rect(pts):
@@ -213,9 +229,11 @@ def path_is_rect(points) -> bool:
     return not _both_differ(pts[0], pts[3])
 
 
-def path_get_rect(points, matrix=None):
+def path_get_rect(points: Sequence[PathPoint], matrix: Matrix | None) -> FloatRect | None:
     """CFX_Path::GetRect: the (normalised) float rectangle, or None."""
     pts = _normalized(points) if len(points) > 5 else points
+    p0: Sequence[float]
+    p2: Sequence[float]
     if matrix is None:
         if not path_is_rect(pts):
             return None
@@ -223,7 +241,7 @@ def path_get_rect(points, matrix=None):
     else:
         if not _pre_rect(pts):
             return None
-        tp = []
+        tp: list[Point] = []
         for i, p in enumerate(pts):
             q = transform(matrix, p[0], p[1])
             if i and _both_differ(q, tp[-1]):
@@ -235,7 +253,7 @@ def path_get_rect(points, matrix=None):
     return min(p0[0], p2[0]), min(p0[1], p2[1]), max(p0[0], p2[0]), max(p0[1], p2[1])
 
 
-def rect_path(l, b, r, t):
+def rect_path(l: float, b: float, r: float, t: float) -> list[PathPoint]:
     """CFX_Path::AppendRect."""
     return [(l, b, PT_MOVE, False), (l, t, PT_LINE, False), (r, t, PT_LINE, False),
             (r, b, PT_LINE, False), (l, b, PT_LINE, True)]
@@ -244,13 +262,13 @@ def rect_path(l, b, r, t):
 # ---------------------------------------------------------------------- BuildAggPath
 
 
-def _hard(v):
+def _hard(v: float) -> float:
     return -MAX_POS if v < -MAX_POS else (MAX_POS if v > MAX_POS else v)
 
 
-def build_path(points, matrix=None) -> list:
+def build_path(points: Sequence[PathPoint], matrix: Matrix | None) -> list[Vertex]:
     """BuildAggPath: CFX_Path points -> path_storage vertices [(x, y, cmd)]."""
-    out: list = []
+    out: list[Vertex] = []
     n = len(points)
     i = 0
     while i < n:
@@ -289,14 +307,14 @@ def build_path(points, matrix=None) -> list:
     return out
 
 
-def end_poly(out: list) -> None:
+def end_poly(out: list[Vertex]) -> None:
     if out and is_vertex(out[-1][2]):
         out.append((0.0, 0.0, CLOSE))
 
 
-def curve4(x1, y1, x2, y2, x3, y3, x4, y4) -> list:
+def curve4(x1: float, y1: float, x2: float, y2: float, x3: float, y3: float, x4: float, y4: float) -> list[Point]:
     """curve4_div: the flattened points, start and end included."""
-    pts = [(x1, y1)]
+    pts: list[Point] = [(x1, y1)]
     try:
         _bezier_fast(pts, x1, y1, x2, y2, x3, y3, x4, y4, 0)
     except OverflowError:
@@ -306,7 +324,8 @@ def curve4(x1, y1, x2, y2, x3, y3, x4, y4) -> list:
     return pts
 
 
-def _bezier_fast(pts, x1, y1, x2, y2, x3, y3, x4, y4, level):
+def _bezier_fast(pts: list[Point], x1: float, y1: float, x2: float, y2: float, x3: float, y3: float,
+                 x4: float, y4: float, level: int) -> None:
     """`_bezier` with its roundings done several per C call: the same operations on the same
     values (raises OverflowError where `_bezier` would meet an infinity)."""
     if level > 16:
@@ -350,7 +369,8 @@ def _bezier_fast(pts, x1, y1, x2, y2, x3, y3, x4, y4, level):
     _bezier_fast(pts, x1234, y1234, x234, y234, x34, y34, x4, y4, level + 1)
 
 
-def _bezier(pts, x1, y1, x2, y2, x3, y3, x4, y4, level):
+def _bezier(pts: list[Point], x1: float, y1: float, x2: float, y2: float, x3: float, y3: float,
+            x4: float, y4: float, level: int) -> None:
     if level > 16:
         return
     x12 = F(F(x1 + x2) / 2)
@@ -395,7 +415,7 @@ def _bezier(pts, x1, y1, x2, y2, x3, y3, x4, y4, level):
 # ---------------------------------------------------------------------- stroke math
 
 
-def _dist(x1, y1, x2, y2):
+def _dist(x1: float, y1: float, x2: float, y2: float) -> float:
     try:        # the same roundings, several per C call (syntax.F32X*); the scalar form below
         dx, dy = _u2(_p2(x2 - x1, y2 - y1))
         a, b = _u2(_p2(dx * dx, dy * dy))
@@ -406,20 +426,20 @@ def _dist(x1, y1, x2, y2):
         return F(math.sqrt(F(F(dx * dx) + F(dy * dy))))
 
 
-class _Seq(list):
+class _Seq(list[list[float]]):
     """vertex_sequence of [x, y, dist] (or [x, y, dist, cmd]) lists."""
 
     @staticmethod
-    def _ok(v, w) -> bool:
+    def _ok(v: list[float], w: list[float]) -> bool:
         v[2] = _dist(v[0], v[1], w[0], w[1])
         return v[2] > VERTEX_DIST_EPS
 
-    def add(self, val) -> None:
+    def add(self, val: list[float]) -> None:
         if len(self) > 1 and not self._ok(self[-2], self[-1]):
             self.pop()
         self.append(val)
 
-    def modify_last(self, val) -> None:
+    def modify_last(self, val: list[float]) -> None:
         if self:
             self.pop()
         self.add(val)
@@ -437,11 +457,11 @@ class _Seq(list):
                 self.pop()
 
 
-def _acos_da(width, approx):
+def _acos_da(width: float, approx: float) -> float:
     return F(F(math.acos(F(width / F(width + F(0.125 / approx))))) * 2)
 
 
-def _arc_point(x, y, width, a1):
+def _arc_point(x: float, y: float, width: float, a1: float) -> Point:
     """`F(x + F(width * F(cos(a1))))`, `F(y + F(width * F(sin(a1))))`, batched (syntax.F32X*)."""
     try:
         c, s = _u2(_p2(math.cos(a1), math.sin(a1)))
@@ -451,7 +471,8 @@ def _arc_point(x, y, width, a1):
         return F(x + F(width * F(math.cos(a1)))), F(y + F(width * F(math.sin(a1))))
 
 
-def calc_arc(out, x, y, dx1, dy1, dx2, dy2, width, approx):
+def calc_arc(out: list[Point], x: float, y: float, dx1: float, dy1: float, dx2: float, dy2: float,
+             width: float, approx: float) -> None:
     a1 = F(math.atan2(dy1, dx1))
     a2 = F(math.atan2(dy2, dx2))
     da = F(a1 - a2)
@@ -480,7 +501,8 @@ def calc_arc(out, x, y, dx1, dy1, dx2, dy2, width, approx):
     out.append((F(x + dx2), F(y + dy2)))
 
 
-def _intersection(ax, ay, bx, by, cx, cy, dx, dy):
+def _intersection(ax: float, ay: float, bx: float, by: float, cx: float, cy: float, dx: float,
+                  dy: float) -> Point | None:
     try:        # the same roundings, several per C call (syntax.F32X*); the scalar form below.
         # The differences each appear twice in the C (num and den, den and the result): one
         # rounding of one expression, so computing them once is the same value.
@@ -501,7 +523,8 @@ def _intersection(ax, ay, bx, by, cx, cy, dx, dy):
     return F(ax + F(F(F(bx - ax) * num) / den)), F(ay + F(F(F(by - ay) * num) / den))
 
 
-def calc_miter(out, v0, v1, v2, dx1, dy1, dx2, dy2, width, join, limit, approx):
+def calc_miter(out: list[Point], v0: Sequence[float], v1: Sequence[float], v2: Sequence[float], dx1: float,
+               dy1: float, dx2: float, dy2: float, width: float, join: int, limit: float, approx: float) -> None:
     exceeded = True
     # the two offset segments, (v0, v1) shifted by d1 and (v1, v2) by d2: the eight roundings
     # the C writes out one by one, in one C call (syntax.F32X*)
@@ -542,7 +565,8 @@ def calc_miter(out, v0, v1, v2, dx1, dy1, dx2, dy2, width, join, limit, approx):
             out.append((F(F(v1[0] + dx2) - F(dy2 * limit)), F(F(v1[1] - dy2) - F(dx2 * limit))))
 
 
-def calc_cap(out, v0, v1, length, cap, width, approx):
+def calc_cap(out: list[Point], v0: Sequence[float], v1: Sequence[float], length: float, cap: int, width: float,
+             approx: float) -> None:
     out.clear()
     try:        # the same roundings, several per C call (syntax.F32X*)
         d = _u2(_p2(v1[1] - v0[1], v1[0] - v0[0]))
@@ -574,7 +598,8 @@ def calc_cap(out, v0, v1, length, cap, width, approx):
         out.append((F(v0[0] + dx1), F(v0[1] - dy1)))
 
 
-def calc_join(out, v0, v1, v2, len1, len2, width, join, miter_limit, approx):
+def calc_join(out: list[Point], v0: Sequence[float], v1: Sequence[float], v2: Sequence[float], len1: float,
+              len2: float, width: float, join: int, miter_limit: float, approx: float) -> None:
     try:        # the same roundings, several per C call (syntax.F32X*); the four differences
         # are one rounded expression each, whether the C writes them for the d's or for `loc`
         e = _u4(_p4(v1[1] - v0[1], v1[0] - v0[0], v2[1] - v1[1], v2[0] - v1[0]))
@@ -607,7 +632,7 @@ def calc_join(out, v0, v1, v2, len1, len2, width, join, miter_limit, approx):
 class StrokeGen:
     """vcgen_stroke."""
 
-    def __init__(self, width, cap, join, miter_limit):
+    def __init__(self, width: float, cap: int, join: int, miter_limit: float) -> None:
         self.width = F(width / 2)
         self.cap = cap
         self.join = join
@@ -616,11 +641,11 @@ class StrokeGen:
         self.src = _Seq()
         self.closed = 0
 
-    def remove_all(self):
+    def remove_all(self) -> None:
         self.src = _Seq()
         self.closed = 0
 
-    def add_vertex(self, x, y, cmd):
+    def add_vertex(self, x: float, y: float, cmd: int) -> None:
         if cmd & ~0x80 == MOVE_TO:
             self.src.modify_last([x, y, 0.0, cmd])
         elif is_vertex(cmd):
@@ -628,7 +653,7 @@ class StrokeGen:
         else:
             self.closed = cmd & FLAG_CLOSE
 
-    def generate(self):
+    def generate(self) -> list[Vertex]:
         """rewind + vertex() until stop, as (x, y, cmd)."""
         src = self.src
         src.close(self.closed != 0)
@@ -639,14 +664,14 @@ class StrokeGen:
         if n < 2 + (1 if closed else 0):
             return []
         w, approx = self.width, self.approx
-        res: list = []
-        tmp: list = []
+        res: list[Vertex] = []
+        tmp: list[Point] = []
 
-        def emit(first_cmd):
+        def emit(first_cmd: int) -> None:
             for k, (x, y) in enumerate(tmp):
                 res.append((x, y, first_cmd if k == 0 else LINE_TO))
 
-        def join(i_prev, i_curr, i_next, len1, len2):
+        def join(i_prev: int, i_curr: int, i_next: int, len1: float, len2: float) -> None:
             calc_join(tmp, src[i_prev], src[i_curr], src[i_next], len1, len2, w, self.join, self.miter, approx)
 
         pending = MOVE_TO
@@ -681,8 +706,8 @@ class StrokeGen:
 class DashGen:
     """vcgen_dash."""
 
-    def __init__(self, dashes, start):
-        self.dashes: list = []
+    def __init__(self, dashes: Sequence[float], start: float) -> None:
+        self.dashes: list[float] = []
         self.total = 0.0
         for d in dashes:
             if len(self.dashes) < 32:
@@ -694,9 +719,12 @@ class DashGen:
         self.dash_start = start
         self.src = _Seq()
         self.closed = 0
+        self.cur = 0                # set by _calc_start
+        self.cur_start = 0.0
+        self.is_dash = True
         self._calc_start(start)
 
-    def _calc_start(self, ds):
+    def _calc_start(self, ds: float) -> None:
         cycle = self.total
         if len(self.dashes) % 2 == 1:
             cycle = F(cycle * 2)
@@ -713,17 +741,17 @@ class DashGen:
                 self.cur_start = ds
                 ds = 0.0
 
-    def _next(self):
+    def _next(self) -> None:
         self.cur += 1
         if self.cur >= len(self.dashes):
             self.cur = 0
         self.is_dash = not self.is_dash
 
-    def remove_all(self):
+    def remove_all(self) -> None:
         self.src = _Seq()
         self.closed = 0
 
-    def add_vertex(self, x, y, cmd):
+    def add_vertex(self, x: float, y: float, cmd: int) -> None:
         if cmd & ~0x80 == MOVE_TO:
             self.src.modify_last([x, y, 0.0])
         elif is_vertex(cmd):
@@ -731,13 +759,13 @@ class DashGen:
         else:
             self.closed = cmd & FLAG_CLOSE
 
-    def generate(self):
+    def generate(self) -> list[Vertex]:
         src = self.src
         src.close(self.closed != 0)
         n = len(src)
         if n < 2:
             return []
-        res: list = []
+        res: list[Vertex] = []
         sv = 1
         v1, v2 = src[0], src[1]
         rest = v1[2]
@@ -775,9 +803,9 @@ class DashGen:
                 return res
 
 
-def adapt(source: list, gen) -> list:
+def adapt(source: Sequence[Vertex], gen: StrokeGen | DashGen) -> list[Vertex]:
     """conv_adaptor_vcgen: feed `source` vertices to the generator one subpath at a time."""
-    out: list = []
+    out: list[Vertex] = []
     n = len(source)
     if not n:
         return out
@@ -807,7 +835,8 @@ def adapt(source: list, gen) -> list:
         out.extend(gen.generate())
 
 
-def stroke_vertices(path: list, matrix, line_width, cap, join, miter_limit, dash, dash_phase, scale):
+def stroke_vertices(path: list[Vertex], matrix: Matrix | None, line_width: float, cap: int, join: int,
+                    miter_limit: float, dash: Sequence[float], dash_phase: float, scale: float) -> list[Vertex]:
     """RasterizeStroke's geometry: the stroke outline of `path` (already in the stroke's space),
     transformed by `matrix` (None: none), as rasterizer vertices."""
     width = F(line_width * scale)
@@ -843,10 +872,10 @@ def stroke_vertices(path: list, matrix, line_width, cap, join, miter_limit, dash
 class Rasterizer:
     """rasterizer_scanline_aa + outline_aa, clip box always set (as PDFium does)."""
 
-    def __init__(self, width: int, height: int):
+    def __init__(self, width: int, height: int) -> None:
         x1, y1, x2, y2 = 0, 0, int(F(width * 256.0)), int(F(height * 256.0))
-        self.clip = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
-        self.cells: dict = {}
+        self.clip: IntRect = (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+        self.cells: dict[tuple[int, int], list[int]] = {}       # (cy, cx) -> [cover, area]
         self.min_x = self.min_y = 0x7FFFFFFF
         self.max_x = self.max_y = -0x7FFFFFFF
         self.cx = self.cy = 0x7FFF
@@ -859,7 +888,7 @@ class Rasterizer:
         self.clipped_start = (0, 0)
 
     # ---- outline_aa
-    def _add_cur(self):
+    def _add_cur(self) -> None:
         if self.area | self.cov:
             key = (self.cy, self.cx)
             c = self.cells.get(key)
@@ -869,7 +898,7 @@ class Rasterizer:
                 c[0] += self.cov
                 c[1] += self.area
 
-    def _set_cell(self, x, y):
+    def _set_cell(self, x: int, y: int) -> None:
         if self.cx != x or self.cy != y:
             self._add_cur()
             self.cx, self.cy, self.cov, self.area = x, y, 0, 0
@@ -882,7 +911,7 @@ class Rasterizer:
             if y > self.max_y:
                 self.max_y = y
 
-    def _hline(self, ey, x1, y1, x2, y2):
+    def _hline(self, ey: int, x1: int, y1: int, x2: int, y2: int) -> None:
         ex1, ex2 = x1 >> 8, x2 >> 8
         fx1, fx2 = x1 & 255, x2 & 255
         if y1 == y2:
@@ -926,7 +955,7 @@ class Rasterizer:
         self.cov += delta
         self.area += (fx2 + 256 - first) * delta
 
-    def _line(self, x1, y1, x2, y2):
+    def _line(self, x1: int, y1: int, x2: int, y2: int) -> None:
         dx = x2 - x1
         if dx >= 16384 << 8 or dx <= -(16384 << 8):
             cx = int((x1 + x2) / 2)     # C: truncating division
@@ -997,37 +1026,37 @@ class Rasterizer:
                 self._set_cell(x_from >> 8, ey1)
         self._hline(ey1, x_from, 256 - first, x2, fy2)
 
-    def _o_move(self, x, y):
+    def _o_move(self, x: int, y: int) -> None:
         self._set_cell(x >> 8, y >> 8)
         self.cur_x, self.cur_y = x, y
 
-    def _o_line(self, x, y):
+    def _o_line(self, x: int, y: int) -> None:
         self._line(self.cur_x, self.cur_y, x, y)
         self.cur_x, self.cur_y = x, y
 
     # ---- rasterizer_scanline_aa (clipping on)
-    def _flags(self, x, y):
+    def _flags(self, x: int, y: int) -> int:
         c = self.clip
         return (x > c[2]) | ((y > c[3]) << 1) | ((x < c[0]) << 2) | ((y < c[1]) << 3)
 
-    def _move_no_clip(self, x, y):
+    def _move_no_clip(self, x: int, y: int) -> None:
         if self.status == 1:
             self._close_no_clip()
         self._o_move(x, y)
         self.clipped_start = (x, y)
         self.status = 1
 
-    def _line_no_clip(self, x, y):
+    def _line_no_clip(self, x: int, y: int) -> None:
         if self.status != 0:
             self._o_line(x, y)
             self.status = 1
 
-    def _close_no_clip(self):
+    def _close_no_clip(self) -> None:
         if self.status == 1:
             self._o_line(*self.clipped_start)
             self.status = 2
 
-    def move_to(self, x, y):
+    def move_to(self, x: int, y: int) -> None:
         if self.status == 1:
             self.close_polygon()
         self.prev = self.start = (x, y)
@@ -1036,16 +1065,16 @@ class Rasterizer:
         if self.prev_flags == 0:
             self._move_no_clip(x, y)
 
-    def line_to(self, x, y):
+    def line_to(self, x: int, y: int) -> None:
         self._clip_segment(x, y)
 
-    def close_polygon(self):
+    def close_polygon(self) -> None:
         if self.status != 1:
             return
         self._clip_segment(*self.start)
         self._close_no_clip()
 
-    def _clip_segment(self, x, y):
+    def _clip_segment(self, x: int, y: int) -> None:
         flags = self._flags(x, y)
         if self.prev_flags == flags:
             if flags == 0:
@@ -1062,7 +1091,7 @@ class Rasterizer:
         self.prev_flags = flags
         self.prev = (x, y)
 
-    def add_vertex(self, x, y, cmd):
+    def add_vertex(self, x: float, y: float, cmd: int) -> None:
         if is_close(cmd):
             self.close_polygon()
         elif cmd & ~0x80 == MOVE_TO:
@@ -1070,12 +1099,12 @@ class Rasterizer:
         elif is_vertex(cmd):
             self.line_to(int(F(x * 256.0)), int(F(y * 256.0)))
 
-    def add_path(self, vertices):
+    def add_path(self, vertices: Iterable[Vertex]) -> None:
         for x, y, cmd in vertices:
             self.add_vertex(x, y, cmd)
 
     # ---- sweep
-    def coverage(self, even_odd: bool, no_smooth: bool = False):
+    def coverage(self, even_odd: bool, no_smooth: bool) -> Coverage | None:
         """rewind_scanlines + sweep_scanline for every row: (x0, y0, alpha) with alpha a uint8
         array over the cells' bounding box [min_x, max_x] x [min_y, max_y], or None."""
         self.close_polygon()
@@ -1125,7 +1154,7 @@ def _int32(v: int) -> bool:
     return -2147483648 <= v <= 2147483647
 
 
-def _alpha(area, even_odd: bool, no_smooth: bool):
+def _alpha(area: Ints, even_odd: bool, no_smooth: bool) -> Ints:
     """calculate_alpha on an array."""
     cover = np.abs(area >> 9)
     if even_odd:
@@ -1136,13 +1165,13 @@ def _alpha(area, even_odd: bool, no_smooth: bool):
     return np.minimum(cover, 255)
 
 
-def _liang_barsky(x1, y1, x2, y2, box):
+def _liang_barsky(x1: int, y1: int, x2: int, y2: int, box: IntRect) -> list[tuple[int, int]]:
     """clip_liang_barsky on ints, float arithmetic as in agg."""
     bx1, by1, bx2, by2 = box
     fx1, fy1 = F(float(x1)), F(float(y1))
     deltax = F(F(float(x2)) - fx1)
     deltay = F(F(float(y2)) - fy1)
-    out = []
+    out: list[tuple[int, int]] = []
     if deltax == 0:
         deltax = -EPS30 if x1 > bx1 else EPS30
     if deltax > 0:

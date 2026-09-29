@@ -165,8 +165,8 @@ MARKED_RESOURCES = (b" /Properties << /P0 << /k (named) /z 3 >> >>"
 
 
 def marked_pdf() -> bytes:
-    from beamer2slides.devtools.render_torture import pdf_bytes
-    return pdf_bytes([MARKED], MARKED_FORMS, extra_resources=MARKED_RESOURCES)
+    from beamer2slides.devtools.render_torture import MEDIA, pdf_bytes
+    return pdf_bytes([MARKED], MARKED_FORMS, MEDIA, MARKED_RESOURCES, b"")
 
 
 def test_page_objects_carry_their_marked_content(backend: PdfBackend) -> None:
@@ -243,7 +243,7 @@ def test_a_turned_page_renders_where_its_geometry_says(backend: PdfBackend, rota
     page space: a render must stay there too, or backgrounds and crops miss their elements (the
     PDFium backend drew a /Rotate 90 page turned into a bitmap of the unturned size)."""
     from beamer2slides.devtools.render_torture import pdf_bytes
-    data = pdf_bytes([b"1 0 0 rg 10 10 50 20 re f"], media=(5, 7, 205, 157), page_entries=b"/Rotate %d" % rotate)
+    data = pdf_bytes([b"1 0 0 rg 10 10 50 20 re f"], (), (5, 7, 205, 157), b"", b"/Rotate %d" % rotate)
     doc = backend.open(data)
     try:
         page = doc[0]

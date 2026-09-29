@@ -51,9 +51,9 @@ BASELINE = ROOT / "typecheck" / "baseline.json"
 TESTS_BASELINE = ROOT / "typecheck" / "tests_baseline.json"
 
 # The legacy errors typecheck/baseline.json holds: lower it with every prune, never raise it.
-CEILING = 4238
+CEILING = 3315
 # The same for the tests (typecheck/tests_baseline.json, admitted whole on 2026-09-29).
-TESTS_CEILING = 12384
+TESTS_CEILING = 12383
 
 TYPED_DICT_KINDS = {"bad-typed-dict", "bad-typed-dict-key", "not-required-key-access"}
 

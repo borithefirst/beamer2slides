@@ -59760,13 +59760,6 @@
       "severity": "error"
     },
     {
-      "column": 51,
-      "path": "tests/test_pure_pdf.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `tuple[bytes, bytes]` is not assignable to parameter `resources` with type `bytes` in function `beamer2slides.devtools.render_torture_shading.pdf_bytes`",
-      "severity": "error"
-    },
-    {
       "column": 15,
       "path": "tests/test_raster_images.py",
       "name": "implicit-any-parameter",

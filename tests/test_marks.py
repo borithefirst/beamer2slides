@@ -11,7 +11,7 @@ import json
 import pytest
 
 from beamer2slides import classify, extract, pdf
-from beamer2slides.devtools.render_torture import pdf_bytes
+from beamer2slides.devtools.render_torture import MEDIA, pdf_bytes
 
 FONT = b" /Font << /F0 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
 
@@ -37,7 +37,7 @@ def backend(request):
 
 def raw_of(tmp_path, pages: list[bytes], forms=(), name="p.pdf") -> dict:
     path = tmp_path / name
-    path.write_bytes(pdf_bytes(pages, forms, extra_resources=FONT))
+    path.write_bytes(pdf_bytes(pages, forms, MEDIA, FONT, b""))
     return extract.extract(path, None)
 
 
@@ -390,7 +390,7 @@ def test_a_note_page_whose_thumbnail_is_empty_is_still_a_note_page(tmp_path, bac
                                ("bare", header + note, {}),
                                ("marked", header + canvas + marked, {})):
         path = tmp_path / f"notes-{name}.pdf"
-        path.write_bytes(pdf_bytes([slide, second], extra_resources=FONT))
+        path.write_bytes(pdf_bytes([slide, second], (), MEDIA, FONT, b""))
         out = tmp_path / f"out-{name}"
         out.mkdir()
         prepared = notes.prepare(path, out)

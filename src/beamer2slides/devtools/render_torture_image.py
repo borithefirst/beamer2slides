@@ -31,15 +31,18 @@ import io
 import math
 import random
 import zlib
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 
-from ..arrays import Bytes
-from .render_torture import EXTGS
-from .torture_kit import compare_renders, drop_lines
+from ..arrays import Bytes, Ints
+from ..pdf.api import Box, Matrix
+from .render_torture import EXTGS, MEDIA
+from .torture_kit import Compared, Refused, Stats, compare_refusing, drop_lines, outcome
 
-MEDIA = (0, 0, 200, 150)
+XObject = tuple[bytes, int]
+"""An image's /XObject entry: (name, object number)."""
 # render_torture's ExtGStates plus overprint ones (PDFium draws a CMYK image under fill overprint
 # with /OPM 0 in Darken)
 IMAGE_EXTGS = EXTGS[:-2] + (b"/OP0 << /OP true >> /OP1 << /op true /OPM 1 >> /OP2 << /OP true /op false >> "
@@ -62,8 +65,8 @@ def _srgb_profile() -> bytes:
 SRGB_PROFILE = _srgb_profile()
 
 
-def pdf_bytes(content: bytes, objects: list[bytes], xobjects: list[tuple[bytes, int]], media=MEDIA,
-              extgs=()) -> bytes:
+def pdf_bytes(content: bytes, objects: list[bytes], xobjects: Sequence[XObject], media: Box,
+              extgs: Sequence[bytes]) -> bytes:
     """One page of `content`, with `objects` numbered 1.. in front and `xobjects` (name, object
     number) in its /XObject dictionary; the ExtGStates are `render_torture.EXTGS` (/A0../A4) plus
     `extgs` (entries of the same dictionary, e.g. the soft-mask states level 8 builds)."""
@@ -78,7 +81,7 @@ def pdf_bytes(content: bytes, objects: list[bytes], xobjects: list[tuple[bytes, 
     objs.append(b"<< /Type /Pages /Kids [%d 0 R] /Count 1 >>" % (cid + 1))
     objs.append(b"<< /Type /Catalog /Pages %d 0 R >>" % pages)
     out = bytearray(b"%PDF-1.7\n")
-    offs = []
+    offs: list[int] = []
     for i, o in enumerate(objs, 1):
         offs.append(len(out))
         out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
@@ -117,7 +120,7 @@ def _png(rows: Bytes, bpp: int, r: random.Random) -> bytes:
     width = rows.shape[1]
     prev = np.zeros(width, np.int64)
 
-    def shift(a):
+    def shift(a: Ints) -> Ints:
         return np.concatenate([np.zeros(bpp, np.int64), a[:-bpp]])[:width] if width > bpp else np.zeros(width, np.int64)
 
     for row in rows.astype(np.int64):
@@ -141,11 +144,11 @@ def _png(rows: Bytes, bpp: int, r: random.Random) -> bytes:
 
 
 class Builder:
-    def __init__(self, r: random.Random, level: int = 8):
+    def __init__(self, r: random.Random, level: int) -> None:
         self.r = r
         self.level = level
         self.objects: list[bytes] = []
-        self.xobjects: list[tuple[bytes, int]] = []
+        self.xobjects: list[XObject] = []
         self.gstates: list[bytes] = []
         self.srgb = False
 
@@ -170,7 +173,7 @@ class Builder:
             data = data[:r.randint(0, len(data))]
         return data
 
-    def encode(self, data: bytes, w: int, h: int, comps: int, bpc: int, jpeg_ok: bool):
+    def encode(self, data: bytes, w: int, h: int, comps: int, bpc: int, jpeg_ok: bool) -> tuple[bytes, bytes]:
         """(filter entries, encoded data)."""
         r = self.r
         if self.level < 4:
@@ -208,7 +211,7 @@ class Builder:
             return b"/Filter [/ASCIIHexDecode /FlateDecode]", _hex(zlib.compress(data))
         return b"", data
 
-    def colorspace(self):
+    def colorspace(self) -> tuple[bytes, int, bool]:
         """(entry, components, is indexed); `self.srgb` says whether it is an sRGB ICCBased one."""
         r = self.r
         self.srgb = False
@@ -242,7 +245,7 @@ class Builder:
         sid = self.stream(b"/N %d%s" % (n, alt), profile)
         return b"[/ICCBased %d 0 R]" % sid, n, False
 
-    def image(self, inline: bool):
+    def image(self, inline: bool) -> tuple[bytes, bytes, bool]:
         """(dictionary entries without /Length, data, is a stencil) of a random image."""
         r = self.r
         lv = self.level
@@ -266,7 +269,7 @@ class Builder:
                    and len(data) == ((w * comps * 8 + 7) // 8) * h)
         filt, enc = self.encode(data, w, h, comps, bpc, jpeg_ok)
         if lv >= 4 and r.random() < (0.6 if lv >= 7 and self.srgb else 0.2):
-            vals = []
+            vals: list[float] = []
             for _ in range(comps):
                 if indexed:
                     vals += [r.randint(0, 3), r.randint(0, (1 << bpc) - 1)]
@@ -275,13 +278,13 @@ class Builder:
             extra += b" /Decode [" + b" ".join(b"%.4g" % v for v in vals) + b"]"
         if lv >= 4 and r.random() < 0.15:
             mx = (1 << bpc) - 1
-            vals = []
+            keys: list[int] = []
             for _ in range(comps):
                 a = r.randint(0, mx)
-                vals += [a, min(mx, a + r.randint(0, max(1, mx // 3)))]
+                keys += [a, min(mx, a + r.randint(0, max(1, mx // 3)))]
             if r.random() < 0.2:
-                vals = vals[:r.randint(0, len(vals))]
-            extra += b" /Mask [" + b" ".join(b"%d" % v for v in vals) + b"]"
+                keys = keys[:r.randint(0, len(keys))]
+            extra += b" /Mask [" + b" ".join(b"%d" % v for v in keys) + b"]"
         elif lv >= 4 and not inline and r.random() < 0.25:
             mw, mh = (w, h) if r.random() < 0.5 else (r.randint(1, 30), r.randint(1, 30))
             mbpc = r.choice([8, 8, 1, 4])
@@ -305,7 +308,7 @@ class Builder:
         return (b"/Width %d /Height %d /ColorSpace %s /BitsPerComponent %d%s %s"
                 % (w, h, cs, bpc, extra, filt)), enc, False
 
-    def matrix(self):
+    def matrix(self) -> Matrix:
         r = self.r
         lv = self.level
         if lv == 0:
@@ -373,7 +376,7 @@ class Builder:
         fid = self.stream(b"/Type /XObject /Subtype /Form /BBox [0 0 200 150] " + group + b" >>", inner)
         bc = b""
         if r.random() < 0.8:      # without /BC the group family stays kUnknown: no TransMask
-            n = {b"/DeviceGray": 1, b"/DeviceCMYK": 4}.get(cs, 3)
+            n = 3 if cs is None else {b"/DeviceGray": 1, b"/DeviceCMYK": 4}.get(cs, 3)
             bc = b" /BC [" + b" ".join(b"%.3g" % r.choice([0, 1, r.random()]) for _ in range(n)) + b"]"
         name = b"Sm%d" % len(self.gstates)
         self.gstates.append(b"/%s << /SMask << /S %s /G %d 0 R%s >> >>"
@@ -389,7 +392,7 @@ class Builder:
         return b"\n".join(ops)
 
 
-def case(seed: int, level: int = 8):
+def case(seed: int, level: int) -> tuple[bytes, list[bytes], list[XObject], float, bool, list[bytes]]:
     """(content, objects, xobjects, zoom, transparent, extgs) for `seed`."""
     r = random.Random(seed)
     b = Builder(r, level)
@@ -401,39 +404,41 @@ def case(seed: int, level: int = 8):
     return content, b.objects, b.xobjects, zoom, transparent, b.gstates
 
 
-def compare(content: bytes, objects, xobjects, zoom: float, transparent: bool, extgs=()):
+def compare(content: bytes, objects: list[bytes], xobjects: Sequence[XObject], zoom: float, transparent: bool,
+            extgs: Sequence[bytes]) -> Compared | Refused:
     """(pixels that differ or None when the pure reader refuses, PDFium's render, pure's render,
     per-pixel difference or the refusal)."""
-    return compare_renders(pdf_bytes(content, objects, xobjects, extgs=extgs), zoom, transparent,
-                           refusals=True)
+    return compare_refusing(pdf_bytes(content, objects, xobjects, MEDIA, extgs), zoom, transparent)
 
 
-def shrink(content: bytes, objects, xobjects, zoom: float, transparent: bool, extgs=()):
+def shrink(content: bytes, objects: list[bytes], xobjects: Sequence[XObject], zoom: float, transparent: bool,
+           extgs: Sequence[bytes]) -> bytes:
     """Drop lines of the page while the difference remains."""
-    def fails(c):
+    def fails(c: bytes) -> bool:
         try:
             return (compare(c, objects, xobjects, zoom, transparent, extgs)[0] or 0) > 0
         except Exception:
             return False
     return drop_lines(content, fails,
-                      keep=lambda line: line in (b"q", b"Q", b"EI") or line.startswith(b"BI "))
+                      lambda line: line in (b"q", b"Q", b"EI") or line.startswith(b"BI "))
 
 
-def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, level: int = 8) -> dict:
-    """{'failed': [seeds], 'refused': {reason: count}, 'drawn': count}."""
-    stats = {"failed": [], "refused": {}, "drawn": 0}
+def run(seed0: int, n: int, out: Path | None, verbose: bool, level: int) -> Stats:
+    """The seeds apart, the refusals by reason, the pages drawn exactly (`Stats`)."""
+    stats: Stats = {"failed": [], "refused": {}, "drawn": 0}
     for seed in range(seed0, seed0 + n):
         content, objects, xobjects, zoom, transparent, extgs = case(seed, level)
         try:
-            npx, a, b, d = compare(content, objects, xobjects, zoom, transparent, extgs)
+            got = outcome(compare(content, objects, xobjects, zoom, transparent, extgs))
         except Exception as e:
             if verbose:
                 print("seed", seed, "EXC", type(e).__name__, e)
             stats["failed"].append(seed)
             continue
-        if npx is None:
-            stats["refused"][d] = stats["refused"].get(d, 0) + 1
+        if isinstance(got, str):    # the pure reader refused, saying why
+            stats["refused"][got] = stats["refused"].get(got, 0) + 1
             continue
+        npx = got[0]
         if not npx:
             stats["drawn"] += 1
             continue
@@ -441,19 +446,22 @@ def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, level
         if not verbose:
             continue
         small = shrink(content, objects, xobjects, zoom, transparent, extgs)
-        npx, a, b, d = compare(small, objects, xobjects, zoom, transparent, extgs)
-        print(f"seed {seed} zoom {zoom} transparent {transparent}: {npx} px, max {d.max() if npx else 0}")
+        final = outcome(compare(small, objects, xobjects, zoom, transparent, extgs))
+        shown = None if isinstance(final, str) else final[0]
+        print(f"seed {seed} zoom {zoom} transparent {transparent}: {shown} px, "
+              f"max {final[3].max() if not isinstance(final, str) and final[0] else 0}")
         print("-- page\n" + small.decode("latin-1")[:1500])
-        if out is not None and npx:
+        if out is not None and not isinstance(final, str) and final[0]:
+            _, a, b, d = final
             out.mkdir(parents=True, exist_ok=True)
             from PIL import Image
             vis = np.concatenate([a[..., :3], b[..., :3], np.stack([np.where(d > 0, 255, 0)] * 3, -1)], 1)
             Image.fromarray(vis.astype(np.uint8)).save(out / f"seed{seed}.png")
-            (out / f"seed{seed}.pdf").write_bytes(pdf_bytes(small, objects, xobjects, extgs=extgs))
+            (out / f"seed{seed}.pdf").write_bytes(pdf_bytes(small, objects, xobjects, MEDIA, extgs))
     return stats
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
@@ -461,11 +469,11 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default="out/render-torture-image")
     ap.add_argument("-q", "--quiet", action="store_true", help="no shrinking, only the counts")
     args = ap.parse_args(argv)
-    stats = run(args.seed0, args.n, Path(args.out), verbose=not args.quiet, level=args.level)
+    stats = run(args.seed0, args.n, Path(args.out), not args.quiet, args.level)
     print(f"seeds {args.seed0}..{args.seed0 + args.n - 1}: {stats['drawn']} exact, "
           f"{len(stats['failed'])} failed {stats['failed'][:30]}, refused {stats['refused']}")
     return 1 if stats["failed"] else 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(None))
