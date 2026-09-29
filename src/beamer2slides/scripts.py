@@ -33,8 +33,16 @@ from __future__ import annotations
 import os
 import shutil
 from collections import Counter
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
+
+from .json_types import Json, JsonArray, JsonObject, as_array, as_objects, as_str
+
+if TYPE_CHECKING:
+    from .adopt import FontFace
+    from .adopt_context import MissingFont
 
 # ------------------------------------------------------------------------------------------ scripts
 
@@ -110,7 +118,11 @@ TRADITIONAL = set("們個這說國來時會對學發開關書長門問間見車�
 SIMPLIFIED = set("们个这说国来时会对学发开关书长门问间见车东体与后过还样经点无现实电话语资讯网页练习师课")
 
 
-def cjk_language(chars: Counter) -> str:
+CjkLanguage = Literal["japanese", "korean", "chinese-traditional", "chinese-simplified"]
+"""babel's locales for CJK text (`cjk_language`)."""
+
+
+def cjk_language(chars: Mapping[str, int]) -> CjkLanguage:
     """babel's locale for the deck's CJK text, from its characters."""
     kana = sum(n for c, n in chars.items() if script_of(c) == "kana")
     hangul = sum(n for c, n in chars.items() if script_of(c) == "hangul")
@@ -158,17 +170,17 @@ FALLBACKS = {
 
 # -------------------------------------------------------------------------------------------- faces
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class Face:
     path: Path
-    index: int              # the face's number in a .ttc collection
-    families: tuple         # every family name the font gives itself, flattened
+    index: int                  # the face's number in a .ttc collection
+    families: tuple[str, ...]   # every family name the font gives itself, flattened
     weight: int
     italic: bool
 
 
-_FACES: dict[tuple, list[Face]] = {}
-_CMAPS: dict[tuple, frozenset] = {}
+_FACES: dict[tuple[Path, ...], list[Face]] = {}
+_CMAPS: dict[tuple[Path, int], frozenset[int]] = {}
 _SAID = False
 
 
@@ -195,6 +207,7 @@ def faces() -> list[Face]:
     chain is a source of lesser fidelity, while raising here loses the source tree altogether,
     after the minutes of thumbnails adopt has already spent."""
     from .adopt import font_dirs
+    from .fontfetch import table_int
     dirs = tuple(font_dirs())
     if dirs in _FACES:
         return _FACES[dirs]
@@ -216,10 +229,10 @@ def faces() -> list[Face]:
             for i, font in enumerate(fonts):
                 try:
                     names = {flatten(str(r)) for r in font["name"].names if r.nameID in (1, 16)}
-                    os2 = font["OS/2"] if "OS/2" in font else None
-                    out.append(Face(f, i, tuple(sorted(n for n in names if n)),
-                                    os2.usWeightClass if os2 else 400,
-                                    bool(os2.fsSelection & 1) if os2 else False))
+                    os2 = "OS/2" in font
+                    out.append(Face(path=f, index=i, families=tuple(sorted(n for n in names if n)),
+                                    weight=table_int(font, "OS/2", "usWeightClass") if os2 else 400,
+                                    italic=bool(table_int(font, "OS/2", "fsSelection") & 1) if os2 else False))
                 except Exception:                               # noqa: BLE001
                     continue
             # once, after every face: a collection's faces share one file, and closing the first
@@ -229,7 +242,7 @@ def faces() -> list[Face]:
     return out
 
 
-def coverage(face: Face) -> frozenset:
+def coverage(face: Face) -> frozenset[int]:
     key = (face.path, face.index)
     if key not in _CMAPS:
         try:
@@ -242,7 +255,7 @@ def coverage(face: Face) -> frozenset:
     return _CMAPS[key]
 
 
-def find_face(name: str, bold: bool = False) -> Face | None:
+def find_face(name: str, bold: bool) -> Face | None:
     """The upright face of a family, regular or bold, or None when the machine does not have it."""
     want = flatten(name)
     found = [f for f in faces() if want in f.families and not f.italic]
@@ -255,40 +268,55 @@ def find_face(name: str, bold: bool = False) -> Face | None:
 
 # --------------------------------------------------------------------------------------------- deck
 
-def deck_text(target: dict):
+def _said(value: Json, default: str) -> str:
+    """A run's font or family as the deck says it, `default` where it says none."""
+    return value if isinstance(value, str) and value else default
+
+
+def deck_text(target: JsonObject) -> Iterator[tuple[str, str, str]]:
     """(text, font, family) of every run of the deck, tables and nested groups included."""
-    def walk(o):
+    def walk(o: Json) -> Iterator[tuple[str, str, str]]:
         if isinstance(o, dict):
-            if isinstance(o.get("runs"), list):
-                for r in o["runs"]:
-                    if isinstance(r, dict) and r.get("text"):
-                        yield r["text"], r.get("font") or "", r.get("family") or "sans"
+            runs = o.get("runs")
+            if isinstance(runs, list):
+                for r in runs:
+                    text = r.get("text") if isinstance(r, dict) else None
+                    if isinstance(r, dict) and isinstance(text, str) and text:
+                        yield text, _said(r.get("font"), ""), _said(r.get("family"), "sans")
                 b = o.get("bullet")
-                if isinstance(b, dict) and b.get("text") and b["text"] not in "●○■" and o["runs"]:
+                mark = b.get("text") if isinstance(b, dict) else None
+                if isinstance(mark, str) and mark and mark not in "●○■" and runs:
                     # a glyph bullet is set in its paragraph's face: supercharge-slides' ➔, which
                     # Alegreya lacks, came out as its .notdef cross with no fallback to draw it
-                    r = o["runs"][0]
-                    yield b["text"], r.get("font") or "", r.get("family") or "sans"
+                    r = as_objects(runs, "paragraph runs")[0]
+                    yield mark, _said(r.get("font"), ""), _said(r.get("family"), "sans")
             for k, v in o.items():
                 if k != "runs":
                     yield from walk(v)
         elif isinstance(o, list):
             for v in o:
                 yield from walk(v)
-    for s in target.get("slides", []):
+    for s in as_objects(target.get("slides", []), "target slides"):
         yield from walk(s.get("elements", []))
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class Plan:
     """What the deck's scripts need."""
-    chain: list                 # [(regular Face, bold Face | None)] luaotfload tries for a missing glyph
-    chain_groups: list          # the script group (`group_of`) each `chain` entry was picked for
-    cjk: str | None             # babel locale for CJK line breaking
-    languages: dict             # babel language with its own font -> {"rm"|"sf"|"tt": (Face, bold Face | None)}
-    bidi: bool                  # any right-to-left letters or paragraphs at all
-    complex: bool               # HarfBuzz for the whole document (a shaped script in the chain)
-    uncovered: dict             # script -> letter count with no font anywhere to draw it (silent tofu)
+    chain: list[tuple[Face, Face | None]]
+    """(regular, bold) faces luaotfload tries for a missing glyph."""
+    chain_groups: list[str]
+    """The script group (`group_of`) each `chain` entry was picked for."""
+    cjk: CjkLanguage | None
+    """babel locale for CJK line breaking."""
+    languages: dict[str, dict[str, tuple[Face, Face | None]]]
+    """babel language with its own font -> {"rm"|"sf"|"tt": (regular, bold)}."""
+    bidi: bool
+    """Any right-to-left letters or paragraphs at all."""
+    complex: bool
+    """HarfBuzz for the whole document (a shaped script in the chain)."""
+    uncovered: dict[str, int]
+    """script -> letter count with no font anywhere to draw it (silent tofu)."""
 
 
 # Georgian has no font of its own on a deck typed "in" Arial or Times New Roman
@@ -314,16 +342,16 @@ FAMILY_KEYS = {"sans": "sf", "serif": "rm", "mono": "tt"}
 FAMILY_FALLBACKS = {"rm": ["Times New Roman"], "tt": ["Courier New"], "sf": []}
 
 
-def _with_bold(face: Face) -> tuple:
-    return face, next((b for fam in face.families for b in [find_face(fam, bold=True)] if b), None)
+def _with_bold(face: Face) -> tuple[Face, Face | None]:
+    return face, next((b for fam in face.families for b in [find_face(fam, True)] if b), None)
 
 
 def _pick(names: list[str], need: set[int]) -> Face | None:
     """The first font of `names` this machine has that covers every character, else the one that
     covers most of them; None when none covers any."""
-    candidates = []
+    candidates: list[Face] = []
     for n in names:
-        f = find_face(n)
+        f = find_face(n, False)
         if f and f not in candidates:
             candidates.append(f)
     full = next((f for f in candidates if need <= coverage(f)), None)
@@ -331,24 +359,26 @@ def _pick(names: list[str], need: set[int]) -> Face | None:
     return best if best is not None and need & coverage(best) else None
 
 
-RENDERER_CJK = {"japanese": "Noto Sans JP", "korean": "Noto Sans KR", "chinese-traditional": "Noto Sans TC",
-                "chinese-simplified": "Noto Sans SC"}
+RENDERER_CJK: dict[CjkLanguage, str] = {
+    "japanese": "Noto Sans JP", "korean": "Noto Sans KR", "chinese-traditional": "Noto Sans TC",
+    "chinese-simplified": "Noto Sans SC"}
 # Paired with Times New Roman instead, when Slides draws the deck's own CJK font in neither
 # (`RENDERER_CJK_SERIF`'s companion for `adopt.SLIDES_DEFAULT`): apps-edu-zh's Microsoft JhengHei is
 # itself sans, but Slides' substitute for a font it cannot draw at all is serif throughout, Latin and
 # ideographs alike (thumbnails, hunt 2026-09-27) - unlike a plain Latin font standing in for a missing
 # one (jruby-ja's Arial), which keeps a sans companion of its own kind.
-RENDERER_CJK_SERIF = {"japanese": "Noto Serif JP", "korean": "Noto Serif KR",
-                      "chinese-traditional": "Noto Serif TC", "chinese-simplified": "Noto Serif SC"}
+RENDERER_CJK_SERIF: dict[CjkLanguage, str] = {
+    "japanese": "Noto Serif JP", "korean": "Noto Serif KR", "chinese-traditional": "Noto Serif TC",
+    "chinese-simplified": "Noto Serif SC"}
 
 
 def _fetch(name: str) -> bool:
     """Whether google/fonts gave a family not in the font folders before (`adopt.fetching` rules)."""
     from .adopt import fetching
-    if not fetching() or find_face(name) is not None:
+    if not fetching() or find_face(name, False) is not None:
         return False
     from .fontfetch import fetch_family
-    return bool(fetch_family(name))
+    return bool(fetch_family(name, print))
 
 
 # What google/fonts gives a script when no font in the folders covers its letters - a sandbox has no
@@ -364,9 +394,9 @@ def _fetch_fallback(g: str, names: list[str], need: set[int]) -> None:
     """Fetch `FETCHABLE[g]` in turn until some font of `names` (they are on it) covers `need`."""
     def covered() -> bool:
         if g == "other":                               # symbols come one by one from several fonts
-            got = set()
+            got: set[int] = set()
             for n in names:
-                f = find_face(n)
+                f = find_face(n, False)
                 got |= need & coverage(f) if f else set()
             return need <= got
         face = _pick(names, need)
@@ -378,9 +408,9 @@ def _fetch_fallback(g: str, names: list[str], need: set[int]) -> None:
             _FACES.clear()
 
 
-def plan(target: dict) -> Plan:
-    chars: dict[str, Counter] = {}
-    fonts: dict[tuple, Counter] = {}                     # (group, family) -> deck font names
+def plan(target: JsonObject) -> Plan:
+    chars: dict[str, Counter[str]] = {}
+    fonts: dict[tuple[str, str], Counter[str]] = {}      # (group, family) -> deck font names
     for text, font, family in deck_text(target):
         for ch in text:
             sc = script_of(ch)
@@ -391,13 +421,14 @@ def plan(target: dict) -> Plan:
             fonts.setdefault((g, family), Counter())[font] += 1
     rtl_paras = [p for p in paragraphs(target) if p.get("direction") == "rtl"]
     cjk = cjk_language(chars["cjk"]) if "cjk" in chars else None
-    chain: list = []
-    chain_groups: list = []
+    chain: list[tuple[Face, Face | None]] = []
+    chain_groups: list[str] = []
     uncovered: dict[str, int] = {}
-    languages: dict = {lang: {} for lang in sorted({rtl_language(p) for p in rtl_paras})}
+    languages: dict[str, dict[str, tuple[Face, Face | None]]] = {
+        lang: {} for lang in sorted({rtl_language(p) for p in rtl_paras})}
     for g in sorted(chars, key=lambda g: -sum(chars[g].values())):
         need = {ord(c) for c in chars[g]}
-        deck = Counter()
+        deck: Counter[str] = Counter()
         for (gg, _fam), c in fonts.items():
             if gg == g:
                 deck.update(c)
@@ -429,8 +460,7 @@ def plan(target: dict) -> Plan:
                 uncovered[g] = len(need)
             continue
         own = [n for n, _ in deck.most_common() if n]
-        renderer = RENDERER_CJK.get(cjk)
-        if g == "cjk":
+        if g == "cjk" and cjk is not None:
             # A CJK face Slides does not have draws nothing: its letters come from the renderer's
             # Noto (apps-edu-zh's Microsoft JhengHei, `adopt.slides_lacks_cjk`) - the serif one
             # (`RENDERER_CJK_SERIF`) when the group's most-typed font is one Slides draws in Times
@@ -438,25 +468,23 @@ def plan(target: dict) -> Plan:
             # Latin font stands in for it (jruby-ja's Arial). One chain for the whole document, so
             # its commonest font decides, as `own`'s order already does.
             from .adopt import slides_lacks_cjk
-            if own and slides_lacks_cjk(own[0]) and cjk in RENDERER_CJK_SERIF:
-                renderer = RENDERER_CJK_SERIF[cjk]
+            renderer = RENDERER_CJK_SERIF[cjk] if own and slides_lacks_cjk(own[0]) else RENDERER_CJK[cjk]
             own = [n for n in own if not slides_lacks_cjk(n)]
             if _fetch(renderer):
                 _FACES.clear()
-        names = own + FALLBACKS.get(cjk if g == "cjk" else g, FALLBACKS["other"])
-        if g == "cjk":
             # the face Slides' renderer draws a CJK letter in when the deck's font has none (its
             # thumbnails show Noto's shapes, not Yu Gothic's or Microsoft YaHei's), ahead of the
             # machine's own fallbacks
-            names.insert(len(names) - len(FALLBACKS[cjk]), renderer)
+            names = [*own, renderer, *FALLBACKS[cjk]]
         else:
+            names = own + FALLBACKS.get(g, FALLBACKS["other"])
             _fetch_fallback(g, names, need)
         if g == "other":
             # symbols come one by one from whichever font has each
             for n in names:
-                f = find_face(n)
-                got = need & coverage(f) if f else set()
-                if got and all(f != c for c, _ in chain):
+                f = find_face(n, False)
+                got: set[int] = need & coverage(f) if f is not None else set()
+                if f is not None and got and all(f != c for c, _ in chain):
                     chain.append(_with_bold(f))
                     chain_groups.append(g)
                     need -= got
@@ -470,12 +498,13 @@ def plan(target: dict) -> Plan:
                 chain_groups.append(g)
         else:
             uncovered[g] = len(need)
-    return Plan(chain, chain_groups, cjk, languages, bool(rtl_paras) or any(g in RTL_SCRIPTS for g in chars),
-                any(g in COMPLEX and g not in SCRIPT_LANGUAGES for g in chars), uncovered)
+    return Plan(chain=chain, chain_groups=chain_groups, cjk=cjk, languages=languages,
+                bidi=bool(rtl_paras) or any(g in RTL_SCRIPTS for g in chars),
+                complex=any(g in COMPLEX and g not in SCRIPT_LANGUAGES for g in chars), uncovered=uncovered)
 
 
-def paragraphs(target: dict):
-    def walk(o):
+def paragraphs(target: JsonObject) -> Iterator[JsonObject]:
+    def walk(o: Json) -> Iterator[JsonObject]:
         if isinstance(o, dict):
             if isinstance(o.get("runs"), list) and "align" in o:
                 yield o
@@ -484,7 +513,7 @@ def paragraphs(target: dict):
         elif isinstance(o, list):
             for v in o:
                 yield from walk(v)
-    for s in target.get("slides", []):
+    for s in as_objects(target.get("slides", []), "target slides"):
         yield from walk(s.get("elements", []))
 
 
@@ -500,7 +529,7 @@ def font_file(face: Face, tree: Path | None) -> tuple[str, str]:
     return face.path.parent.as_posix().rstrip("/") + "/", face.path.name
 
 
-def font_spec(face: Face, tree: Path | None, mode: str, extra: str = "") -> str:
+def font_spec(face: Face, tree: Path | None, mode: str, extra: str) -> str:
     """luaotfload's name for a face (`[path](index)`, measured: `[path(index)]` is refused)."""
     folder, name = font_file(face, tree)
     return f"[{folder}{name}]" + (f"({face.index})" if face.index else "") + f":mode={mode};{extra}"
@@ -521,7 +550,8 @@ def babelfont_line(lang: str, key: str, regular: Face, bold: Face | None, tree: 
     opts = [f"Path={folder}", "Renderer=HarfBuzz"]
     if regular.index:
         opts.append(f"FontIndex={regular.index}")
-    files, index = {"UprightFont": name}, {"UprightFont": regular.index}
+    files: dict[FontFace, str] = {"UprightFont": name}
+    index: dict[FontFace, int] = {"UprightFont": regular.index}
     if bold is not None:
         bfolder, bname = font_file(bold, tree)
         if bfolder == folder:
@@ -530,12 +560,13 @@ def babelfont_line(lang: str, key: str, regular: Face, bold: Face | None, tree: 
             if bold.index != regular.index:
                 opts.append(f"BoldFeatures={{FontIndex={bold.index}}}")
     # a face of a collection keeps its own index wherever it stands in for a style it is not
-    opts += fake_faces(files, files.__getitem__,
-                       lambda k: [f"FontIndex={index[k]}"] if index[k] != regular.index else [])
+    def own_index(k: FontFace) -> list[str]:
+        return [f"FontIndex={index[k]}"] if index[k] != regular.index else []
+    opts += fake_faces(files.keys(), files.__getitem__, own_index)
     return f"\\babelfont[{lang}]{{{key}}}[{','.join(opts)}]{{{name}}}"
 
 
-def language_letters(target: dict, font: str) -> dict[str, dict[str, int]]:
+def language_letters(target: JsonObject, font: str) -> dict[str, dict[str, int]]:
     """The letters of each babel-font language (Hebrew, Arabic) the deck types in `font`."""
     out: dict[str, dict[str, int]] = {}
     for text, f, _fam in deck_text(target):
@@ -550,8 +581,8 @@ def language_letters(target: dict, font: str) -> dict[str, dict[str, int]]:
     return out
 
 
-def switch_font_lines(target: dict, tree: Path | None, command: str, fam: str, options: str,
-                      name: str, lacking: set[str], plan_: Plan | None = None) -> list[str] | None:
+def switch_font_lines(target: JsonObject, tree: Path | None, command: str, fam: str, options: str,
+                      name: str, lacking: set[str], plan_: Plan | None) -> list[str] | None:
     """The deck's second typeface (`adopt.font_preamble`'s `command`) as a babel family, when the deck
     types letters of a `lacking` language in it that it has no glyphs for: `onchar=ids fonts` only
     swaps the families babel was told about, so Arabic in a `\\newfontfamily` font stayed in it and
@@ -560,16 +591,17 @@ def switch_font_lines(target: dict, tree: Path | None, command: str, fam: str, o
     family's face cost its slides up to 0.05 ink. None when the plain `\\newfontfamily` does."""
     if os.environ.get("B2S_NO_SCRIPTS") or not lacking:
         return None
-    p = plan_ or plan(target)
+    p = plan_ if plan_ is not None else plan(target)
     key = command.lstrip("\\")
-    langs = [babelfont_line(lang, key, *faces, tree) for lang, fams in p.languages.items() if lang in lacking
-             for faces in [fams.get(FAMILY_KEYS.get(fam, "sf")) or fams.get("sf")] if faces]
+    langs = [babelfont_line(lang, key, regular, bold, tree) for lang, fams in p.languages.items() if lang in lacking
+             for faces_ in [fams.get(FAMILY_KEYS.get(fam, "sf")) or fams.get("sf")] if faces_
+             for regular, bold in [faces_]]
     if not langs:
         return None
     return [f"\\babelfont{{{key}}}[{options}]{{{name}}}", *langs, f"\\newcommand{command}{{\\{key}family}}"]
 
 
-def script_preamble(target: dict, tree: Path | None, missing: list | None = None) -> list[str]:
+def script_preamble(target: JsonObject, tree: Path | None, missing: list[MissingFont] | None) -> list[str]:
     """Preamble lines for the deck's scripts, to go before `adopt.font_preamble`'s font lines
     (`\\defaultfontfeatures` applies to the fonts declared after it). Empty for a Latin deck.
 
@@ -597,7 +629,7 @@ def script_preamble(target: dict, tree: Path | None, missing: list | None = None
             # "invalid node with type whatsit"); adopt never hyphenates anyway
             onchar = "fonts" if lang in INDIC_NAMES else "ids fonts"
             lines.append(f"\\babelprovide[import{f',onchar={onchar}' if fams else ''}]{{{lang}}}")
-            lines += [babelfont_line(lang, key, *faces_, tree) for key, faces_ in sorted(fams.items())]
+            lines += [babelfont_line(lang, key, regular, bold, tree) for key, (regular, bold) in sorted(fams.items())]
         if p.cjk:
             # onchar=ids: the locale follows the characters, so its line breaking applies to every CJK
             # run without the source having to say which runs are Chinese or Japanese
@@ -631,28 +663,29 @@ def script_preamble(target: dict, tree: Path | None, missing: list | None = None
 
 # ---------------------------------------------------------------------------------------- direction
 
-def is_rtl(p: dict) -> bool:
+def is_rtl(p: JsonObject) -> bool:
     return p.get("direction") == "rtl"
 
 
-def rtl_language(p: dict) -> str:
+def rtl_language(p: JsonObject) -> str:
     """The babel language a right-to-left paragraph is set in: its direction is what matters, the
     letters decide which (a paragraph of Latin only, marked RTL, is still set right to left)."""
-    text = "".join(r.get("text", "") for r in p.get("runs", []))
+    text = "".join(as_str(r.get("text", ""), "run text") for r in as_objects(p.get("runs", []), "paragraph runs"))
     return "arabic" if any(script_of(c) == "arabic" for c in text) else "hebrew"
 
 
-def align_switch(p: dict) -> str:
+def align_switch(p: JsonObject) -> str:
     """The switch that puts a paragraph's lines where the deck has them. `align` is where they sit
     on the page (left/center/right, `deck_ir.text_paragraphs`); LuaTeX's skips are logical, so in a
     right-to-left paragraph `\\raggedright` is flush right - the paragraph's start."""
-    a = p.get("align")
+    said = p.get("align")
+    a = said if isinstance(said, str) else ""
     if is_rtl(p):
         return {"center": "\\centering ", "left": "\\raggedleft "}.get(a, "\\raggedright ")
     return {"center": "\\centering ", "right": "\\raggedleft "}.get(a, "")
 
 
-def paragraph_direction(p: dict, latex: str, block_rtl: bool) -> str:
+def paragraph_direction(p: JsonObject, latex: str, block_rtl: bool) -> str:
     """One paragraph's LaTeX in its direction. Inside a block that is right to left as a whole
     (`block_direction`) there is nothing to add; a right-to-left paragraph among left-to-right ones
     gets a language group of its own, ended by `\\par` inside it so its alignment still holds when
@@ -663,15 +696,16 @@ def paragraph_direction(p: dict, latex: str, block_rtl: bool) -> str:
     return f"\\begin{{otherlanguage}}{{{lang}}}{latex}\\par\\end{{otherlanguage}}"
 
 
-def block_rtl(paragraphs: list[dict]) -> bool:
+def block_rtl(paragraphs: Sequence[JsonObject]) -> bool:
     ps = [p for p in paragraphs if p.get("runs")]
     return bool(ps) and all(is_rtl(p) for p in ps)
 
 
-def block_direction(paragraphs: list[dict], latex: str, ind: str) -> str:
+def block_direction(paragraphs: Sequence[JsonObject], latex: str, ind: str) -> str:
     """A text's LaTeX (paragraphs, lists) in an RTL language when every paragraph is right to left,
     which is how a Hebrew or Arabic deck is written: lists then open on the right too."""
     if not block_rtl(paragraphs):
         return latex
-    lang = rtl_language({"runs": [r for p in paragraphs for r in p.get("runs", [])]})
+    runs: JsonArray = [r for p in paragraphs for r in as_array(p.get("runs", []), "paragraph runs")]
+    lang = rtl_language({"runs": runs})
     return f"{ind}\\begin{{otherlanguage}}{{{lang}}}\n{latex}\\par\n{ind}\\end{{otherlanguage}}"

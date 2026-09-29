@@ -24,28 +24,37 @@ import json
 import os
 import re
 import shutil
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Generator, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from decimal import ROUND_HALF_EVEN, Decimal
 from pathlib import Path
-from typing import TypeVar, Union
+from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar, Union
 
 from . import labels as labels_mod
 from . import snapshot
+from .fontfetch import table_int
 from .fonts import cjk_font
 from .adopt_shapes import SHAPE_MACRO, Drawn, shape_style_definitions, survey_styles, turned_text
-from .adopt_context import AdoptContext, Metrics, StyleRef, adopt_context
+from .adopt_context import AdoptContext, Metrics, MissingFont, StyleRef, adopt_context
 from .adopt_theme import FramePlan
 from .deck_ir_types import (Absent, CellParagraph, PageGradient, TableBorder, TableCell, TargetDeck, TargetDiagram,
                             TargetElement, TargetImage, TargetParagraph, TargetRun, TargetShape, TargetSlide,
                             TargetTable, TargetText, TextBox, Video, page_gradient_json, parse_target,
                             recolor_json)
 from .ir_types import Point
-from .inverse import (TEXTPOS, Picture, TextStyle, colour_name, common_style, frame_latex, paragraphs_latex,
-                      picture_block, script_paragraph, target_picture)
-from .json_types import JsonObject
+from .inverse import (TEXTPOS, Picture, Result, TextStyle, colour_name, common_style, frame_latex,
+                      paragraphs_latex, picture_block, script_paragraph, target_picture)
+from .json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
 from .typing_compat import assert_never
+
+if TYPE_CHECKING:
+    from fontTools.ttLib import TTFont
+    from fontTools.ttLib.tables._h_m_t_x import table__h_m_t_x
+    from fontTools.ttLib.ttGlyphSet import _TTGlyphSet
+    from .deck_files import DeckFiles
+    from .deck_ir import Thumbnails
+    from .scripts import Plan
 
 # beamer's own page sizes, by the class option that asks for them (`deck_ir.BEAMER_SIZES`).
 ASPECTS = {(453.54, 255.12): "aspectratio=169", (453.54, 283.46): "aspectratio=1610",
@@ -174,14 +183,44 @@ def base_lead(style: TextStyle, ctx: AdoptContext) -> str:
     return "".join(out)
 
 
+FontFace = Literal["UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont"]
+"""fontspec's key for one style of a family."""
+
+FACES: tuple[FontFace, ...] = ("UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont")
+
 # fontspec's key for a style, by the suffix a font file's name ends in.
-FONT_STYLES = {"regular": "UprightFont", "": "UprightFont", "bold": "BoldFont",
-               "italic": "ItalicFont", "oblique": "ItalicFont",
-               "bolditalic": "BoldItalicFont", "boldoblique": "BoldItalicFont"}
+FONT_STYLES: dict[str, FontFace] = {"regular": "UprightFont", "": "UprightFont", "bold": "BoldFont",
+                                    "italic": "ItalicFont", "oblique": "ItalicFont",
+                                    "bolditalic": "BoldItalicFont", "boldoblique": "BoldItalicFont"}
 
 
-WINDOWS_STYLES = {"bi": "BoldItalicFont", "bd": "BoldFont", "z": "BoldItalicFont", "b": "BoldFont",
-                  "i": "ItalicFont"}
+WINDOWS_STYLES: dict[str, FontFace] = {"bi": "BoldItalicFont", "bd": "BoldFont", "z": "BoldItalicFont",
+                                       "b": "BoldFont", "i": "ItalicFont"}
+
+
+@dataclass(frozen=True, kw_only=True)
+class FontFiles:
+    """The files of one family, by fontspec's style (in the order they were found: the first one's
+    folder holds the licence `font_files_latex` copies), always with an `UprightFont`. `index` is
+    the face's number in a collection (fontspec's `FontIndex`; 0 is a file's first or only face)."""
+    faces: Mapping[FontFace, Path]
+    index: int
+
+    @property
+    def upright(self) -> Path:
+        return self.faces["UprightFont"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class FontFamily:
+    """`font_family`'s answer: the files a deck font is set in. `stem` is the family name fontspec
+    is given (the files' own stem), `match` the name the family was found under (a name-table alias
+    for cour.ttf is "couriernew"; the deck's own font where another stands in), `standin` the
+    family standing in for the deck's font (a metric twin or a CJK face's Noto), else None."""
+    stem: str
+    match: str
+    standin: str | None
+    files: FontFiles
 
 
 _SUPPLIED: contextvars.ContextVar[tuple[Path, ...]] = contextvars.ContextVar("beamer2slides.supplied_fonts",
@@ -189,7 +228,7 @@ _SUPPLIED: contextvars.ContextVar[tuple[Path, ...]] = contextvars.ContextVar("be
 
 
 @contextmanager
-def use_fonts(*roots):
+def use_fonts(*roots: str | Path | None) -> Generator[None, None, None]:
     """Look in `roots` (folders `fontfiles.install` laid out) before anywhere else, for the length
     of the block and in this context only: the fonts a person handed over win over the machine's
     and over a fetch. The folders' contents are read afresh on the way in and out."""
@@ -206,7 +245,7 @@ _MACHINE: contextvars.ContextVar[bool] = contextvars.ContextVar("beamer2slides.m
 
 
 @contextmanager
-def no_machine_fonts():
+def no_machine_fonts() -> Generator[None, None, None]:
     """Look in no folder of this machine's (its own fonts, the repository's themes) for the length
     of the block: only supplied fonts and the google/fonts cache. What `deck_files.save` runs
     adopt's font choice under, so every family a machine without fonts would fetch is fetched and
@@ -268,19 +307,19 @@ def fetching() -> bool:
     return enabled() and not os.environ.get("B2S_FONTS", "").strip()
 
 
-_FAMILIES: dict[tuple, dict[str, dict[str, Path]]] = {}
+_FAMILIES: dict[tuple[Path, ...], dict[str, FontFiles]] = {}
 
 
-def font_candidates() -> dict[str, dict[str, Path]]:
+def font_candidates() -> dict[str, FontFiles]:
     """Every family the folders offer, by the stem its files share, each keyed by fontspec's name
     for the style. Read once per set of folders: they are large and the answer does not change."""
     dirs = tuple(font_dirs())
     if dirs not in _FAMILIES:
-        groups: dict[str, dict[str, Path]] = {}
+        groups: dict[str, dict[FontFace, Path]] = {}
         if fetching():
             from .fontfetch import cache_dir, repair_cache
             if cache_dir() in dirs:
-                repair_cache()                          # instances cut before they were named
+                repair_cache(cache_dir())               # instances cut before they were named
         for folder in dirs:
             for f in sorted(list(folder.glob("*.tt[fc]")) + list(folder.glob("*.otf"))
                             + list(folder.glob("*/*.tt[fc]")) + list(folder.glob("*/*.otf"))):
@@ -299,29 +338,30 @@ def font_candidates() -> dict[str, dict[str, Path]]:
                         and set(groups[stem]) == {"UprightFont"}:
                     groups[root].setdefault(style, groups.pop(stem)["UprightFont"])
                     break
-        groups = {k: v for k, v in groups.items() if "UprightFont" in v}
+        families = {k: FontFiles(faces=v, index=0) for k, v in groups.items() if "UprightFont" in v}
         # Windows' own files are named by abbreviation (cour.ttf is Courier New, ariblk.ttf Arial
         # Black, pala.ttf Palatino Linotype): the family a deck names is only in the font's name
         # table. Unknown by it, comps-analysis's Courier New was fetched as Courier Prime and
         # ap-bio-stats' Arial Black was set in Arial. The group is also listed under each family
         # name it gives itself that no file stem already spells (`_font_family` sets it in the
         # group's own file stem, which is what fontspec's `*` expands to).
-        uprights = {v["UprightFont"]: v for v in groups.values()}
-        flat_stems = {flatten(k) for k in groups}
+        uprights = {v.upright: v for v in families.values()}
+        flat_stems = {flatten(k) for k in families}
         # A collection's other faces are families of their own, set by their number in the file
         # (`FontIndex`): "MS PGothic" is face 2 of msgothic.ttc, and apps-edu-zh's English lines in
         # it were set in Arial, 5% wider than the proportional Gothic Slides draws them in.
+        from .scripts import Face, faces
+        named: list[Face]
         try:
-            from .scripts import faces
             named = sorted((f for f in faces() if f.path in uprights), key=lambda f: f.index)
         except ImportError:                             # no fontTools: file stems only
             named = []
         for face in named:
             for fam in face.families:
                 if fam not in flat_stems:
-                    groups.setdefault(fam, uprights[face.path] if face.index == 0 else
-                                      {"UprightFont": face.path, "FontIndex": face.index})
-        _FAMILIES[dirs] = groups
+                    families.setdefault(fam, uprights[face.path] if face.index == 0 else
+                                        FontFiles(faces={"UprightFont": face.path}, index=face.index))
+        _FAMILIES[dirs] = families
     return _FAMILIES[dirs]
 
 
@@ -351,8 +391,8 @@ def same_font_name(low: str, flat: str) -> bool:
     return not any(longer[len(shorter):].startswith(q) for q in NARROW_QUALIFIERS)
 
 
-def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
-    """The files of the family a deck font names, keyed by fontspec's style, or {}.
+def font_family(name: str, want: str, near: str) -> FontFamily | None:
+    """The files of the family a deck font names, keyed by fontspec's style, or None.
 
     A family is the one the deck asked for when its stem is the deck's font name with something
     after it (the deck says "Google Sans", the files are `GoogleSansFlex-*.ttf`) **and** its own
@@ -373,28 +413,37 @@ def font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
     A CJK face Slides does not have is not drawn in it at all (`slides_lacks_cjk`): its Latin is set
     in Times New Roman, which is what the family is then given."""
     if name and slides_lacks_cjk(name):
-        got = font_family(SLIDES_DEFAULT, "serif")
-        if got:
-            return {**got, "match": name}
+        got = font_family(SLIDES_DEFAULT, "serif", "")
+        if got is not None:
+            return replace(got, match=name)
     if name and not _have(name) and not _fetch(name):
         for sub in SUBSTITUTES.get(flatten(name), []):
             if _have(sub) or _fetch(sub):
-                got = _font_family(sub, want)
-                if got and flatten(got["match"]) == flatten(sub):
+                got = _font_family(sub, want, "")
+                if got is not None and flatten(got.match) == flatten(sub):
                     if flatten(name) in SLANTED:
-                        got = {**got, "UprightFont": got.get("ItalicFont") or got["UprightFont"],
-                               "BoldFont": got.get("BoldItalicFont") or got.get("BoldFont")}
-                        got = {k: v for k, v in got.items() if v}
+                        got = replace(got, files=slanted(got.files))
                     # the deck's font, in all but its files (`standin` says whose)
-                    return {**got, "match": name, "standin": got["stem"]}
+                    return replace(got, match=name, standin=got.stem)
         # a Windows or Mac CJK face stands in as its Noto face: ja-schedule's MS Mincho address
         # otherwise fell to the fallback chain's Gothic
         cjk = cjk_font(name)
         if cjk and (_have(cjk[0]) or _fetch(cjk[0])):
-            got = _font_family(cjk[0], want)
-            if got and flatten(got["match"]) == flatten(cjk[0]):
-                return {**got, "match": name, "standin": got["stem"]}
+            got = _font_family(cjk[0], want, "")
+            if got is not None and flatten(got.match) == flatten(cjk[0]):
+                return replace(got, match=name, standin=got.stem)
     return _font_family(name, want, near)
+
+
+def slanted(files: FontFiles) -> FontFiles:
+    """A family set in its italic faces throughout (`SLANTED`): the italic as its upright, the bold
+    italic as its bold (each only where the family has one; a style keeps its place in the order)."""
+    faces = dict(files.faces)
+    faces["UprightFont"] = faces.get("ItalicFont") or faces["UprightFont"]
+    bold = faces.get("BoldItalicFont") or faces.get("BoldFont")
+    if bold is not None:
+        faces["BoldFont"] = bold
+    return replace(files, faces=faces)
 
 
 # Families drawn to the same metrics as a font the machine does not have and google/fonts does not
@@ -487,12 +536,16 @@ def slides_lacks_cjk(name: str) -> bool:
         from .fontfetch import _missing, fetch_family, folder_name
         has_cjk = cjk_font(name) is not None
         if not has_cjk:
-            files = _font_family(name, family_of(name))
-            has_cjk = bool(files) and flatten(files["match"]) == flat and \
-                font_coverage(files["UprightFont"], {"中": 1, "文": 1}, files.get("FontIndex") or 0, strict=True) == 1.0
+            got = _font_family(name, family_of(name), "")
+            has_cjk = got is not None and flatten(got.match) == flat and \
+                font_coverage(got.files.upright, {"中": 1, "文": 1}, got.files.index, True) == 1.0
         # google/fonts must have said no (a fetch that failed for want of a network says nothing)
-        _LACKS[flat] = has_cjk and not fetch_family(name, log=lambda *a: None) and folder_name(name) in _missing()
+        _LACKS[flat] = has_cjk and not fetch_family(name, quiet) and folder_name(name) in _missing()
     return _LACKS[flat]
+
+
+def quiet(message: str) -> None:
+    """A log that says nothing."""
 
 
 def _have(name: str) -> bool:
@@ -503,17 +556,17 @@ def _fetch(name: str) -> bool:
     if not fetching():
         return False
     from .fontfetch import fetch_family
-    if fetch_family(name):
+    if fetch_family(name, print):
         _FAMILIES.clear()                               # the cache folder has a new family in it
         return True
     return False
 
 
-def _font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
+def _font_family(name: str, want: str, near: str) -> FontFamily | None:
     from .deck_ir import family_of
     flat, kin = flatten(name), flatten(near)
-    asked: tuple[int, str, dict] = (10 ** 6, "", {})
-    fallback: tuple[int, str, dict] = (0, "", {})
+    asked: tuple[int, str, FontFiles | None] = (10 ** 6, "", None)
+    fallback: tuple[int, str, FontFiles | None] = (0, "", None)
     for stem, files in font_candidates().items():
         low = flatten(stem)
         if family_of(stem) != want:
@@ -527,15 +580,12 @@ def _font_family(name: str, want: str, near: str = "") -> dict[str, Path]:
                      len(os.path.commonprefix([low, flat])) if flat else 0)
         if shared >= 4 and shared > fallback[0]:
             fallback = (shared, stem, files)
-    _, stem, files = asked if asked[2] else fallback
-    if not files:
-        return {}
+    _, stem, files = asked if asked[2] is not None else fallback
+    if files is None:
+        return None
     # `stem` is what the family was found under (a name-table alias for cour.ttf is "couriernew"),
     # `match` that, and the family name fontspec is given is the files' own stem
-    return {"stem": files["UprightFont"].stem.partition("-")[0], "match": stem, **files}
-
-
-FACES = ("UprightFont", "BoldFont", "ItalicFont", "BoldItalicFont")
+    return FontFamily(stem=files.upright.stem.partition("-")[0], match=stem, standin=None, files=files)
 
 # What fontspec is asked to synthesise for a style the family has no file for: emboldening (a stroke
 # round every glyph) and slant (a shear). Calibrated against the one thing that can judge them, which
@@ -559,10 +609,16 @@ FAKE_BOLD = 2.5
 FAKE_SLANT = 0.2
 
 
-def fake_faces(files: dict, spelling, extra=None) -> list[str]:
-    """fontspec options for the styles a family has no file of its own for: the nearest face it does
-    have, emboldened and/or slanted by fontspec (`spelling` writes a face's file the way the rest of
-    the options do; `extra` gives the features a base face needs besides, such as its `FontIndex`).
+FAKED: tuple[FontFace, ...] = ("BoldFont", "ItalicFont", "BoldItalicFont")
+NEAREST: tuple[FontFace, ...] = ("BoldFont", "ItalicFont", "UprightFont")
+
+
+def fake_faces(files: Collection[FontFace], spelling: Callable[[FontFace], str],
+               extra: Callable[[FontFace], Sequence[str]] | None) -> list[str]:
+    """fontspec options for the styles a family has no file of its own for (`files`: the styles it
+    has): the nearest face it does have, emboldened and/or slanted by fontspec (`spelling` writes a
+    face's file the way the rest of the options do; `extra` gives the features a base face needs
+    besides, such as its `FontIndex`).
 
     **A style a deck says is bold must come out bold.** With `Path`, `Extension` and `UprightFont`
     given and no `BoldFont`, fontspec looks for no other file at all, so the bold series *is* the
@@ -580,16 +636,16 @@ def fake_faces(files: dict, spelling, extra=None) -> list[str]:
     bold italic unslanted - it makes the `it` shape from the upright and never touches `bx/it`.
     A family-level `BoldFeatures` does *not* clobber the one `scripts.script_preamble` puts in
     `\\defaultfontfeatures` (measured: a CJK fallback still draws under `BoldFeatures={FakeBold=..}`)."""
-    out = []
-    for style in ("BoldFont", "ItalicFont", "BoldItalicFont"):
+    out: list[str] = []
+    for style in FAKED:
         if style in files:
             continue
         bold, italic = "Bold" in style, "Italic" in style
         # the closest face the family has: a bold italic is slanted off the real bold where there is
         # one, emboldened off the real italic otherwise, and both off the upright when that is all
-        base = next(k for k in ("BoldFont", "ItalicFont", "UprightFont")
+        base = next(k for k in NEAREST
                     if k in files and k != style and ("Bold" in k) <= bold and ("Italic" in k) <= italic)
-        feats = (list(extra(base)) if extra else []) + \
+        feats = (list(extra(base)) if extra is not None else []) + \
                 ([f"FakeBold={FAKE_BOLD}"] if bold and "Bold" not in base else []) + \
                 ([f"FakeSlant={FAKE_SLANT}"] if italic and "Italic" not in base else [])
         out.append(f"{style}={spelling(base)}")
@@ -597,17 +653,17 @@ def fake_faces(files: dict, spelling, extra=None) -> list[str]:
     return out
 
 
-def font_files_latex(files: dict, tree: Path | None) -> str:
-    """fontspec's options for a family's files (`font_family`'s answer, without its stem), the files
-    copied into `<tree>/fonts/` with the licence that came with them. A style with no file of its own
-    is named all the same, synthesised from the nearest one (`fake_faces`)."""
-    index = files.get("FontIndex")
-    if index:
+def font_files_latex(family: FontFiles, tree: Path | None) -> str:
+    """fontspec's options for a family's files (`font_family`'s `files`), the files copied into
+    `<tree>/fonts/` with the licence that came with them. A style with no file of its own is named
+    all the same, synthesised from the nearest one (`fake_faces`)."""
+    if family.index:
         # One face of a collection, the only one of its family (MS PGothic): every other style is
         # faked off it. FontIndex is a family-wide key, so it holds for those faces too (measured:
         # the faked bold keeps face 2's proportional widths, not face 0's monospaced ones).
-        return f"FontIndex={index}," + font_files_latex({"UprightFont": files["UprightFont"]}, tree)
-    files = {k: v for k, v in files.items() if isinstance(v, Path)}
+        return f"FontIndex={family.index}," + \
+            font_files_latex(FontFiles(faces={"UprightFont": family.upright}, index=0), tree)
+    files = family.faces
     # Windows' own files have no dash and a name per style (arialbd.ttf beside arial.ttf)
     upright = files["UprightFont"].stem
     if tree is not None:
@@ -621,18 +677,24 @@ def font_files_latex(files: dict, tree: Path | None) -> str:
     where = "Path=fonts/," if tree is not None else \
         "Path=" + next(iter(files.values())).parent.as_posix().rstrip("/") + "/,"
     exts = {f.suffix for f in files.values()}
+
+    def full_name(k: FontFace) -> str:
+        return files[k].name
+
+    def after_stem(k: FontFace) -> str:
+        stem = files[k].stem
+        return f"*-{stem.partition('-')[2]}" if "-" in stem else "*" if stem == upright else stem
+
+    spelling: Callable[[FontFace], str]
     if len(exts) > 1:
         # one family in two formats (Windows' cambria.ttc beside cambriab.ttf): every file by its
         # full name, since fontspec's Extension is one for all
-        def spelling(k):
-            return files[k].name
+        spelling = full_name
         head = where
     else:
-        def spelling(k):
-            stem = files[k].stem
-            return f"*-{stem.partition('-')[2]}" if "-" in stem else "*" if stem == upright else stem
+        spelling = after_stem
         head = f"{where}Extension={exts.pop()},"
-    opts = [f"{k}={spelling(k)}" for k in FACES if k in files] + fake_faces(files, spelling)
+    opts = [f"{k}={spelling(k)}" for k in FACES if k in files] + fake_faces(files.keys(), spelling, None)
     return head + ",".join(opts)
 
 
@@ -640,7 +702,12 @@ def font_files_latex(files: dict, tree: Path | None) -> str:
 WEIGHT_MIN_LETTERS = 20
 
 
-def weight_faces(font: str, files: dict, used: dict, tree: Path | None, font_weights: dict) -> str:
+WeightKey = tuple[int, bool]
+"""(weight, italic): a cut of a family a deck sets runs in."""
+
+
+def weight_faces(font: str, files: FontFiles, used: Mapping[WeightKey, int], tree: Path | None,
+                 font_weights: dict[str, set[WeightKey]]) -> str:
     """fontspec `FontFace` options for the weights a deck sets `font` in besides 400 and 700 (`used`:
     (weight, italic) -> letters), each an instance `fontfetch.weight_file` cuts from the variable
     font the family was fetched as, under the NFSS series `w<weight>` (`series`). Slides draws a
@@ -648,11 +715,12 @@ def weight_faces(font: str, files: dict, used: dict, tree: Path | None, font_wei
     the bold that stood in for it) and 500, journey-maps' text Montserrat 300 and 500, sc-dark-minimal's
     Inter 300. What cannot be cut (a family on the machine, a static one, a weight off its axis)
     keeps `bold`'s rounding. The (weight, italic) pairs given faces go into `font_weights[font]`."""
-    upright = files.get("UprightFont")
-    if not upright or not used or any(f.suffix.lower() != ".ttf" for f in files.values() if isinstance(f, Path)):
+    upright = files.upright
+    if not used or any(f.suffix.lower() != ".ttf" for f in files.faces.values()):
         return ""
     from .fontfetch import weight_file
-    opts, got = [], set()
+    opts: list[str] = []
+    got: set[WeightKey] = set()
     for (w, italic), n in sorted(used.items()):
         if n < WEIGHT_MIN_LETTERS:
             continue
@@ -719,7 +787,7 @@ def font_preamble(deck: TargetDeck, target: JsonObject, tree: Path | None, ctx: 
     counts: dict[tuple[str, str], int] = {}
     area: dict[tuple[str, str], float] = {}
     letters: dict[str, dict[str, int]] = {}
-    weights: dict[str, dict[tuple[int, bool], int]] = {}
+    weights: dict[str, dict[WeightKey, int]] = {}
     for s in deck.slides:
         # tables' cells and groups' children too: a font only a table was set in went uncounted, and
         # its cells took the document's (saudi-cats slide 5 alone: Roboto cells in Montserrat)
@@ -742,9 +810,10 @@ def font_preamble(deck: TargetDeck, target: JsonObject, tree: Path | None, ctx: 
         if font:
             ranked.setdefault(fam, []).append(font)
     wanted: dict[str, str] = {fam: fonts[0] for fam, fonts in ranked.items()}
-    lines, found = [], ""
-    font_weights: dict[str, set[tuple[int, bool]]] = {}
-    missing: list[dict] = []
+    lines: list[str] = []
+    found = ""
+    font_weights: dict[str, set[WeightKey]] = {}
+    missing: list[MissingFont] = []
     main_stem: dict[str, str] = {}
 
     def lacking(font: str, fam: str, set_in: str | None) -> None:
@@ -754,22 +823,24 @@ def font_preamble(deck: TargetDeck, target: JsonObject, tree: Path | None, ctx: 
                             "set_in": set_in or main_stem.get(fam) or GYRE.get(fam, "")})
 
     for fam, command in (("sans", "setsansfont"), ("serif", "setmainfont"), ("mono", "setmonofont")):
-        files: dict = {}
-        tried: dict[str, dict] = {}
+        got: FontFamily | None = None
+        tried: dict[str, FontFamily | None] = {}
         # The kind's most used font, unless it has glyphs for few of the letters set in it: the letters
         # are then in a script Slides draws with a fallback of its own (hebrew-lesson's Hebrew typed
         # "in" Noto Sans Symbols, jruby-ja's Japanese "in" Arial, 7%), and a frame whose words are all
         # such letters embeds the font with no glyph, which lualatex refuses. The next font of the
         # kind is tried, then the stand-in as before.
         for font in ranked.get(fam, [])[:MAIN_CANDIDATES]:
-            files = tried[font] = font_family(font, fam, found)
-            if files and font_coverage(files["UprightFont"], letters.get(font, {}), files.get("FontIndex") or 0) >= MIN_MAIN_COVERAGE:
+            candidate = tried[font] = font_family(font, fam, found)
+            if candidate is not None and font_coverage(candidate.files.upright, letters.get(font, {}),
+                                                       candidate.files.index, False) >= MIN_MAIN_COVERAGE:
                 wanted[fam] = font
+                got = candidate
                 break
-            files = {}
-        if not files:
+        if got is None:
             top = (ranked.get(fam) or [""])[0]
-            if top and (not tried.get(top) or stood_in(top, tried[top])):
+            top_got = tried.get(top)
+            if top and (top_got is None or stood_in(top, top_got)):
                 lacking(top, fam, GYRE[fam])            # (not a font too few of whose letters are drawn in it)
             # Always fontspec, so the source is lualatex and Unicode throughout (a deck's text is
             # any script; pdflatex stops at the first letter it has no definition for): what the
@@ -782,11 +853,10 @@ def font_preamble(deck: TargetDeck, target: JsonObject, tree: Path | None, ctx: 
             lines.append(f"\\{command}{{{gyre}}}[Extension=.otf,UprightFont=*-regular,BoldFont=*-bold,"
                          f"ItalicFont=*-italic,BoldItalicFont=*-bolditalic{NO_LIGATURES}]")
             continue
-        instead = stood_in(wanted[fam], files)
+        instead = stood_in(wanted[fam], got)
         if instead:
             lacking(wanted[fam], fam, instead)
-        stem, match = files.pop("stem"), files.pop("match")
-        files.pop("standin", None)
+        stem, match, files = got.stem, got.match, got.files
         main_stem[fam] = stem
         found = found or match                          # what the rest of the deck is set in
         low, asked = flatten(match), flatten(wanted[fam])
@@ -800,28 +870,27 @@ def font_preamble(deck: TargetDeck, target: JsonObject, tree: Path | None, ctx: 
     if ctx is not None:
         ctx.font_weights = font_weights
         switches: dict[str, str] = {}
-        script_plan = None
+        script_plan: Plan | None = None
         main = set(wanted.values())
         for (fam, font), n in sorted(counts.items(), key=lambda kv: -kv[1]):
             if not font or font in main or font in switches or len(switches) >= EXTRA_FONTS_MAX or \
                     n < EXTRA_FONT_MIN and area.get((fam, font), 0.0) < EXTRA_FONT_MIN:
                 continue
-            files = font_family(font, fam)
-            if not files:
+            extra = font_family(font, fam, "")
+            if extra is None:
                 lacking(font, fam, None)                # in the kind's main font, as it is
                 continue
-            instead = stood_in(font, files)
+            instead = stood_in(font, extra)
             if instead:
-                lacking(font, fam, instead if files.get("standin") else None)
-            stem, match = files.pop("stem"), files.pop("match")
-            twin = files.pop("standin", None)
+                lacking(font, fam, instead if extra.standin else None)
+            stem, match, twin, files = extra.stem, extra.match, extra.standin, extra.files
             low, asked = flatten(match), flatten(font)
             # the nearest face of the kind is what the kind's main font already is; a metric twin
             # is not: offline, arabic-training's Arial words (Arimo) had lost their switch to the
             # document's font
             if not (twin or low.startswith(asked) or asked.startswith(low)):
                 continue
-            if font_coverage(files["UprightFont"], letters.get(font, {}), files.get("FontIndex") or 0) < MIN_COVERAGE:
+            if font_coverage(files.upright, letters.get(font, {}), files.index, False) < MIN_COVERAGE:
                 # Slides draws what the font lacks in a fallback of its own: Hebrew typed "in" Noto
                 # Sans Symbols, Japanese "in" Arial. Switching to the font would set nothing at all
                 # (and lualatex refuses a font it embeds with no glyph), so those boxes keep the
@@ -835,7 +904,7 @@ def font_preamble(deck: TargetDeck, target: JsonObject, tree: Path | None, ctx: 
             # (not `lacking`: that name is the missing-font recorder above, called again next font)
             shaped = language_letters(target, font)
             no_script = {lang for lang, seen in shaped.items()
-                         if font_coverage(files["UprightFont"], seen, files.get("FontIndex") or 0) < 1.0}
+                         if font_coverage(files.upright, seen, files.index, False) < 1.0}
             if no_script and script_plan is None:
                 script_plan = plan(target)
             # a font that draws its own Arabic or Hebrew must shape it: LuaTeX's node renderer set
@@ -878,14 +947,14 @@ F_LIGATURES = ("\\directlua{fonts.handlers.otf.addfeature{name = \"b2sfliga\", t
 NEWER_THAN_SLIDES = {"lato"}
 
 
-def ligatures(files: dict, standin: str | None = None) -> str:
+def ligatures(files: FontFiles, standin: str | None) -> str:
     """The fontspec option that turns a family's ligatures off (or all but the f's, `F_LIGATURES`),
     or "" when Slides draws them. `standin`: `stood_in`'s answer for the deck's font (the files are
     another family's)."""
     if standin:
         return NO_LIGATURES
     from .fontfetch import cache_dir
-    upright, cache = Path(files["UprightFont"]), cache_dir()
+    upright, cache = files.upright, cache_dir()
     # as written and as resolved: a packaged app's %LOCALAPPDATA% resolves a file into its own
     # redirected folder but not the folder itself
     try:
@@ -897,19 +966,17 @@ def ligatures(files: dict, standin: str | None = None) -> str:
     return ONLY_F_LIGATURES if flatten(upright.stem.partition("-")[0]) in NEWER_THAN_SLIDES else ""
 
 
-def stood_in(font: str, files: dict) -> str | None:
+def stood_in(font: str, family: FontFamily) -> str | None:
     """The family a deck's `font` is set in when `font_family` found another (a metric twin from
     `SUBSTITUTES`, or the nearest of the same kind), or None when the files are the font itself.
     A CJK face Slides draws in Times New Roman is set in it on purpose and is not reported."""
-    if not files:
-        return None
-    if files.get("standin"):
-        return files["standin"]
-    low, asked = flatten(files["match"]), flatten(font)
-    return None if same_font_name(low, asked) else files["stem"]
+    if family.standin:
+        return family.standin
+    low, asked = flatten(family.match), flatten(font)
+    return None if same_font_name(low, asked) else family.stem
 
 
-def missing_fonts_lines(missing: list[dict]) -> list[str]:
+def missing_fonts_lines(missing: Sequence[MissingFont]) -> list[str]:
     """What a log says of `ctx.missing_fonts`: which fonts, how much of the deck, set in what - and,
     from `scripts.script_preamble`'s own entries (`m["script"]`), which scripts had no font at all
     to draw them (no substitute, not even a fallback: the letters are simply missing, `scripts.plan`
@@ -940,7 +1007,17 @@ WIDTH_LIMIT = 0.15
 WIDTH_SPREAD = 0.04
 
 
-def font_widths(font: str, files: dict, deck: TargetDeck) -> float | None:
+@dataclass(frozen=True, kw_only=True)
+class _Measured:
+    """One face's tables, as `font_widths` measures words with them (`font` held open for them)."""
+    font: "TTFont"
+    cmap: Mapping[int, str]
+    glyphs: "_TTGlyphSet"
+    hmtx: "table__h_m_t_x"
+    upem: int
+
+
+def font_widths(font: str, files: FontFiles, deck: TargetDeck) -> float | None:
     """How much wider or narrower the deck's thumbnails show words in `font` than `files` set them
     (the median of measured / predicted over its lone one-line boxes, `deck_ir.ink_widths`), or None
     when that is within WIDTH_TOLERANCE, measured fewer than twice, or the measures disagree.
@@ -955,8 +1032,8 @@ def font_widths(font: str, files: dict, deck: TargetDeck) -> float | None:
     except ImportError:
         return None
     from .bidi import MARKS
-    loaded: dict = {}
-    ratios = []
+    loaded: dict[Path, _Measured | None] = {}
+    ratios: list[float] = []
     for s in deck.slides:
         for e in s.elements:
             if not isinstance(e, TargetText) or not e.ink_width:
@@ -966,18 +1043,21 @@ def font_widths(font: str, files: dict, deck: TargetDeck) -> float | None:
             r0 = next(r for r in runs if r.text.strip())
             if (r0.font or "") != font:
                 continue
-            style = ("BoldItalicFont" if r0.italic else "BoldFont") if r0.bold else \
+            style: FontFace = ("BoldItalicFont" if r0.italic else "BoldFont") if r0.bold else \
                 ("ItalicFont" if r0.italic else "UprightFont")
-            path = files.get(style) or files["UprightFont"]
+            path = files.faces.get(style) or files.upright
             if path not in loaded:
                 try:
-                    f = TTFont(path, fontNumber=files.get("FontIndex") or 0, lazy=True)
-                    loaded[path] = (f, f.getBestCmap(), f.getGlyphSet(), f["hmtx"], f["head"].unitsPerEm)
+                    f = TTFont(path, fontNumber=files.index, lazy=True)
+                    # (a font with no Unicode cmap - a symbol font's - measures no word)
+                    loaded[path] = _Measured(font=f, cmap=f.getBestCmap() or {}, glyphs=f.getGlyphSet(),
+                                             hmtx=f["hmtx"], upem=table_int(f, "head", "unitsPerEm"))
                 except Exception:
                     loaded[path] = None
-            if loaded[path] is None:
+            measured = loaded[path]
+            if measured is None:
                 continue
-            f, cmap, glyphs, hmtx, upem = loaded[path]
+            cmap, glyphs, hmtx, upem = measured.cmap, measured.glyphs, measured.hmtx, measured.upem
             # an RTL line's logical text carries LRM/RLM marks where bidi.logical_line needed to hold
             # a direction island together (bidi.MARKS): they draw nothing and take no room, but have
             # no outline to bound and often no cmap entry, so a mark anywhere in the line - not only
@@ -985,11 +1065,12 @@ def font_widths(font: str, files: dict, deck: TargetDeck) -> float | None:
             text = "".join(c for c in "".join(r.text for r in runs) if c not in MARKS).strip()
             if not text:
                 continue
-            names = [cmap.get(ord(c)) for c in text]
-            if None in names:
+            mapped = [cmap.get(ord(c)) for c in text]
+            names = [g for g in mapped if g is not None]
+            if len(names) < len(mapped):
                 continue
 
-            def bounds(g):
+            def bounds(g: str):
                 pen = BoundsPen(glyphs)
                 glyphs[g].draw(pen)
                 return pen.bounds
@@ -1012,13 +1093,13 @@ def font_widths(font: str, files: dict, deck: TargetDeck) -> float | None:
     return round(mid, 3)
 
 
-def stretch(font: str, stem: str, files: dict, deck: TargetDeck) -> str:
+def stretch(font: str, stem: str, files: FontFiles, deck: TargetDeck) -> str:
     """fontspec's FakeStretch for `font_widths`, or nothing. Only for a stand-in (`stem`, the files'
     family, is not the deck's `font`): a deck's own font is set as Slides sets it, and what the
     thumbnails show of it differs from its advances by its kerning alone - Pacifico's script
     measured 3% narrow, and condensed by that it set sc-aesthetic-school's titles longer, not shorter."""
     asked, have = flatten(font), flatten(stem)
-    if same_font_name(have, asked) or files.get("FontIndex"):
+    if same_font_name(have, asked) or files.index:
         return ""                               # (a collection's face is found by its own name)
     ratio = font_widths(font, files, deck) or DESIGN_WIDTHS.get(asked)
     if ratio is None:
@@ -1052,7 +1133,7 @@ def chain_letter(c: str) -> bool:
     return sc is not None and group_of(sc) in CHAIN_GROUPS
 
 
-def font_coverage(path: Path, letters: dict[str, int], index: int = 0, strict: bool = False) -> float:
+def font_coverage(path: Path, letters: Mapping[str, int], index: int, strict: bool) -> float:
     """The share of `letters` (character -> count) the font file has a glyph for: 1.0 when it cannot
     be told (no fontTools, a file fontTools cannot read), 0.0 then if `strict`."""
     total = sum(letters.values())
@@ -1069,49 +1150,84 @@ def font_coverage(path: Path, letters: dict[str, int], index: int = 0, strict: b
 UNINCLUDABLE = (".svg", ".emf", ".wmf", ".img")
 
 
-def pictures_missing(target: dict) -> list[dict]:
+class _PictureMissingKeys(TypedDict):
+    slide: int
+    alt: str
+    why: str
+
+
+class PictureMissing(_PictureMissingKeys, total=False):
+    """A picture the source is written without (`pictures_missing`): its slide (from 1), alt text
+    and why; a layout's or master's picture once, with the `layout` it is on. Serialised as it is
+    (`cmd_adopt`'s `found["pictures_missing"]`, the agent's `pictures_missing`)."""
+    layout: str
+
+
+class _ThumbnailPictureKeys(TypedDict):
+    slide: int
+    alt: str
+
+
+class ThumbnailPicture(_ThumbnailPictureKeys, total=False):
+    """A picture the source carries as a crop of the slide's thumbnail (`pictures_from_thumbnail`),
+    as `PictureMissing` says one, with no `why`."""
+    layout: str
+
+
+def _text_or(value: Json, default: str) -> str:
+    """A JSON field's words, `default` where it says none."""
+    return value if isinstance(value, str) and value else default
+
+
+def _images_where(node: Json, keep: Callable[[JsonObject], bool]) -> Iterator[JsonObject]:
+    """Every image element under `node` (groups and tables included) that `keep` keeps."""
+    if isinstance(node, dict):
+        if node.get("kind") == "image" and keep(node):
+            yield node
+        for v in node.values():
+            if isinstance(v, (dict, list)):
+                yield from _images_where(v, keep)
+    elif isinstance(node, list):
+        for v in node:
+            yield from _images_where(v, keep)
+
+
+def pictures_missing(target: JsonObject) -> list[PictureMissing]:
     """The deck's pictures the source is written without, {slide, alt, why} each: the deck would
     not give the file (`--no-downloads`, a harness whose fetcher refuses and a Drive export that
     failed too: `deck_ir.stash_picture`'s `error`) or LaTeX cannot include it, and no thumbnail of
     its slide stood in (`pictures_from_thumbnail` lists those). Such a frame simply lacks the
     picture, which nothing but this list would say (saudi-cats: 11 photos gone quietly)."""
-    def images(node):
-        if isinstance(node, dict):
-            if node.get("kind") == "image" and not node.get("video"):
-                yield node
-            for v in node.values():
-                if isinstance(v, (dict, list)):
-                    yield from images(v)
-        elif isinstance(node, list):
-            for v in node:
-                yield from images(v)
-
-    out, seen = [], set()
-    for n, s in enumerate(target["slides"], 1):
-        pictures = list(images(s.get("elements", [])))
+    out: list[PictureMissing] = []
+    seen: set[tuple[str, str, str]] = set()
+    for n, s in enumerate(as_objects(target["slides"], "the target's slides"), 1):
+        pictures = list(_images_where(s.get("elements", []), lambda el: not el.get("video")))
         if "background_file" in s:
             pictures.append({"file": s["background_file"], "alt": "slide background"})
         for el in pictures:
-            path = Path(el["file"]) if el.get("file") else None
+            file = el.get("file")
+            path = Path(as_str(file, "a picture's file")) if file else None
             if path is None or not path.exists():
-                why = el.get("error") or "the deck gave no file for it"
+                why = _text_or(el.get("error"), "the deck gave no file for it")
             elif path.suffix.lower() in UNINCLUDABLE:
                 why = f"LaTeX can't include {path.suffix[1:].upper()} pictures"
             else:
                 continue
-            miss = {"slide": n, "alt": el.get("alt") or "", "why": why}
-            if el.get("inherited"):
+            miss: PictureMissing = {"slide": n, "alt": _text_or(el.get("alt"), ""), "why": why}
+            inherited = el.get("inherited")
+            if inherited:
                 # a master's or layout's picture is on every slide of it: said once, as the theme's
-                key = (el["inherited"], json.dumps(el.get("bbox")), miss["alt"])
+                layout = as_str(inherited, "a picture's layout")
+                key = (layout, json.dumps(el.get("bbox")), miss["alt"])
                 if key in seen:
                     continue
                 seen.add(key)
-                miss["layout"] = el["inherited"]
+                miss["layout"] = layout
             out.append(miss)
     return out
 
 
-def missing_pictures_lines(missing: list[dict]) -> list[str]:
+def missing_pictures_lines(missing: Sequence[PictureMissing]) -> list[str]:
     """What a log says of `pictures_missing`."""
     if not missing:
         return []
@@ -1128,41 +1244,35 @@ THUMBNAIL_PICTURE_NOTE = "% picture from the slide thumbnail"
 THUMBNAIL_BACKGROUND_NOTE = "% background from the slide thumbnail"
 
 
-def pictures_from_thumbnail(target: dict) -> list[dict]:
+def pictures_from_thumbnail(target: JsonObject) -> list[ThumbnailPicture]:
     """The deck's pictures the source carries only as a crop of Google's thumbnail
     (`deck_fills.recover_pictures`, a background `deck_fills.background_from_thumbnail`): no file
     for them could be had - downloads refused and no export or .pptx gave it, a sign-in or error
     page instead of the bytes, a format LaTeX cannot include - and the slide's own render stood in
     at its resolution. Reported honestly next to `pictures_missing` (which no longer lists them),
     {slide, alt} each; a layout's or master's picture once, with its `layout`, as there."""
-    def images(node):
-        if isinstance(node, dict):
-            if node.get("kind") == "image" and node.get("picture_source") == "thumbnail":
-                yield node
-            for v in node.values():
-                if isinstance(v, (dict, list)):
-                    yield from images(v)
-        elif isinstance(node, list):
-            for v in node:
-                yield from images(v)
-
-    out, seen = [], set()
-    for n, s in enumerate(target["slides"], 1):
+    out: list[ThumbnailPicture] = []
+    seen: set[tuple[str, str, str]] = set()
+    for n, s in enumerate(as_objects(target["slides"], "the target's slides"), 1):
         if s.get("background_source") == "thumbnail":
             out.append({"slide": n, "alt": "slide background"})
-        for el in images(s.get("elements", [])):
-            got = {"slide": n, "alt": el.get("alt") or ""}
-            if el.get("inherited"):
-                key = (el["inherited"], json.dumps((el.get("thumbnail_of") or el).get("bbox")), got["alt"])
+        for el in _images_where(s.get("elements", []), lambda el: el.get("picture_source") == "thumbnail"):
+            got: ThumbnailPicture = {"slide": n, "alt": _text_or(el.get("alt"), "")}
+            inherited = el.get("inherited")
+            if inherited:
+                layout = as_str(inherited, "a picture's layout")
+                of = el.get("thumbnail_of")
+                key = (layout, json.dumps((as_object(of, "a picture's thumbnail_of") if of else el).get("bbox")),
+                       got["alt"])
                 if key in seen:
                     continue
                 seen.add(key)
-                got["layout"] = el["inherited"]
+                got["layout"] = layout
             out.append(got)
     return out
 
 
-def thumbnail_pictures_lines(recovered: list[dict]) -> list[str]:
+def thumbnail_pictures_lines(recovered: Sequence[ThumbnailPicture]) -> list[str]:
     """What a log says of `pictures_from_thumbnail`."""
     if not recovered:
         return []
@@ -1248,7 +1358,7 @@ def picture_file(file: str | None, alt: str | None, sha1: str | None, bake: Json
             if smooth:
                 # enlarged, at a resolution that keeps the size graphicx gives it (`natural_size`)
                 k = smooth / max(out.size)
-                out = out.resize((round(out.width * k), round(out.height * k)), Image.BICUBIC)
+                out = out.resize((round(out.width * k), round(out.height * k)), Image.Resampling.BICUBIC)
                 dpi = (dpi[0] * k, dpi[1] * k)
             if suffix == ".png":
                 out.save(dest, "PNG", dpi=dpi)
@@ -2669,7 +2779,7 @@ def letterboxed(src: Path, w: float, h: float, dest: Path) -> Path:
         out_w = 960
         out_h = max(1, round(out_w * h / max(w, 0.1)))
         k = min(out_w / cw, out_h / ch)
-        frame = img.resize((max(1, round(cw * k)), max(1, round(ch * k))), Image.LANCZOS)
+        frame = img.resize((max(1, round(cw * k)), max(1, round(ch * k))), Image.Resampling.LANCZOS)
         canvas = Image.new("RGB", (out_w, out_h), (0, 0, 0))
         canvas.paste(frame, ((out_w - frame.width) // 2, (out_h - frame.height) // 2))
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -4041,7 +4151,7 @@ def keys_file(deck: TargetDeck, pieces: list[list[str]], plans: Sequence[FramePl
     return "\n".join(lines) + "\n"
 
 
-def frame_labels(target: dict) -> list[str]:
+def frame_labels(target: JsonObject) -> list[str]:
     r"""A `label=` for every frame the bootstrap writes, one per deck slide (docs/labels.md).
 
     A frame's label is the only piece of a slide's identity that survives compiling, and without one
@@ -4068,8 +4178,8 @@ def frame_labels(target: dict) -> list[str]:
     deck.
     """
     taken: set[str] = set()
-    out = []
-    for n, s in enumerate(target.get("slides") or [], 1):
+    out: list[str] = []
+    for n, s in enumerate(as_objects(target.get("slides") or [], "the target's slides"), 1):
         name = s.get("objectId") or s.get("key") or f"slide-{n}"
         out.append(labels_mod.slug(str(name), taken, fallback=f"slide-{n}"))
         taken.add(out[-1])
@@ -4278,7 +4388,7 @@ def gradient_backdrop(gradient: PageGradient, size: tuple[float, float], tree: P
 
 
 def preamble(deck: TargetDeck, target: JsonObject, ctx: AdoptContext, flow: bool, tree: Path | None,
-             missing: list[dict[str, object]] | None) -> str:
+             missing: list[MissingFont] | None) -> str:
     """A theme that draws nothing. A foreign deck carries its own decoration in its elements, so
     anything beamer adds by itself (navigation bar, headline, footline, frame title style) is ink
     the deck does not have, and every pixel of it is a residual the loop cannot remove. `target` is
@@ -4366,11 +4476,11 @@ def rename_colours(text: str, colours: dict[str, str]) -> str:
     """The converter's `b2sRRGGBB` colours under names a person would give them (`Blue`, `DarkGrey`,
     `Blue2` for a second blue), the most used colour of a name taking it bare."""
     found = re.findall(r"(?<![A-Za-z0-9_])b2s([0-9A-F]{6})(?![A-Za-z0-9])", text)
-    uses: dict = {}
+    uses: dict[str, int] = {}
     for h in found:
         uses[h] = uses.get(h, 0) + 1
-    names: dict = {}
-    taken: set = set()
+    names: dict[str, str] = {}
+    taken: set[str] = set()
     for h in sorted(uses, key=lambda h: (-uses[h], h)):
         word, k = colour_word(h), 2
         name = word
@@ -4446,7 +4556,7 @@ def sty_block(block: str) -> str:
     return "\n".join(lines)
 
 
-def bootstrap(target: JsonObject, tex: Path, flow: bool, missing: list[dict[str, object]] | None) -> str:
+def bootstrap(target: JsonObject, tex: Path, flow: bool, missing: list[MissingFont] | None) -> str:
     """Write `tex` (and return it): a compilable beamer source with a frame per deck slide, and the
     `slides.sty` beside it that its frames' vocabulary comes from. The fonts the deck names that
     were set in something else are added to `missing` (`font_preamble`'s `ctx.missing_fonts`).
@@ -4503,7 +4613,7 @@ def bootstrap(target: JsonObject, tex: Path, flow: bool, missing: list[dict[str,
         extra += styles
     # (only where slides.sty carries the shapes: a name with nothing to draw it on is not worth a line)
     # `to_bp` as the frames' own lines get it, or a named `line width` would be 0.4% off the inline one
-    shape_styles = [to_bp(s) for s in shape_style_definitions(ctx)] if SHAPE_MACRO in ctx.packages else []
+    shape_styles: list[str] = [to_bp(s) for s in shape_style_definitions(ctx)] if SHAPE_MACRO in ctx.packages else []
     if shape_styles:
         extra += ["% the deck's shape styles: a fill, outline, opacity and dash pattern its shapes draw in again",
                   "% and again. A shape names one where its options go, and a key after the name still wins."]
@@ -4550,18 +4660,18 @@ def recovered_theme(deck: TargetDeck, pieces: list[list[str]], ctx: AdoptContext
                             lambda c: colour_name(c, ctx.colours), picture, deck_bg)
 
 
-def presentation_beside(target_path: Path) -> dict | None:
+def presentation_beside(target_path: Path) -> JsonObject | None:
     """The raw `presentations.get` answer stored next to an offline target (the adopt corpus keeps
     `presentation.json` beside `target.json`). Without it there is no read-back and so no base."""
     for name in ("presentation.json", Path(target_path).stem + ".presentation.json"):
         p = Path(target_path).resolve().parent / name
         if p.exists():
-            return json.loads(p.read_text(encoding="utf-8"))
+            return as_object(json.loads(p.read_text(encoding="utf-8")), str(p))
     return None
 
 
-def record_base(target: dict, pres: dict | None, tex: Path, work: Path, engine: str | None,
-                base_in_drive: bool = False, log=print) -> dict | None:
+def record_base(target: JsonObject, pres: JsonObject | None, tex: Path, work: Path, engine: str | None,
+                base_in_drive: bool, log: Callable[[str], None]) -> JsonObject | None:
     """Record the sync base for the deck just adopted, in `<work>/sync/base.json`.
 
     Why the folder and not Drive: `convert` keeps its base in the deck's own `appProperties` because
@@ -4576,7 +4686,7 @@ def record_base(target: dict, pres: dict | None, tex: Path, work: Path, engine: 
         log("no sync base recorded: the deck was read from a file with no presentation beside it "
             "(a base needs the deck's own object ids)")
         return None
-    base, why = adopt_sync.record(tex, work / "sync-base", target, pres, engine, log=log)
+    base, why = adopt_sync.record(tex, work / "sync-base", target, pres, engine, "last", log=log)
     if base is None:
         log(f"no sync base recorded: {why}")
         log("  `sync --deck <this folder>` will say there is none; `convert` would make a second deck.")
@@ -4603,8 +4713,9 @@ def written_already(tex: Path) -> bool:
 
 def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
               engine: str | None, flow: bool, target_path: Path | None = None, base: bool = True,
-              base_in_drive: bool = False, log=print, fonts=None, found: dict | None = None,
-              pptx: Path | None = None, files=None):
+              base_in_drive: bool = False, log: Callable[[str], None] = print,
+              fonts: Sequence[Path] | None = None, found: dict[str, object] | None = None,
+              pptx: Path | None = None, files: "DeckFiles | None" = None) -> Result:
     """Read a foreign deck, write a source for it, then converge that source onto the deck.
 
     `files`: the deck handed over as files (`deck_files.DeckFiles`, what `deck-files` saves; a
@@ -4626,93 +4737,109 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
     tex = Path(tex).resolve()
     work = Path(work).resolve() if work else tex.parent / "out" / "adopt"
     found = {} if found is None else found
-    found.setdefault("missing", [])
-    found.setdefault("pictures_missing", [])
+    # what the run reports, filled as it goes (a run that fails part way still says what it found)
+    missing: list[MissingFont] = []
+    pictures: list[PictureMissing] = []
+    found["missing"] = missing
+    found["pictures_missing"] = pictures
     from . import deck_files
-    files = files or (deck_files.at(deck, work / "deck-files") if target_path is None and deck else None)
+    if files is None:
+        files = deck_files.at(deck, work / "deck-files") if target_path is None and deck else None
     if files is not None:
         import dataclasses
-        target_path = target_path or files.presentation
-        pptx = pptx or files.pptx
+        target_path = target_path if target_path is not None else files.presentation
+        pptx = pptx if pptx is not None else files.pptx
         fonts = [*(fonts or []), *files.fonts] or None
         files = dataclasses.replace(files, pptx=pptx, fonts=list(fonts or []))   # (what the report says was given)
     if pptx is not None and not Path(pptx).is_file():
         raise SystemExit(f"no .pptx at {pptx}")
-    roots = []
+    roots: list[Path] = []
+    supplied = 0
     if fonts:
         from . import fontfiles
         report = fontfiles.install(fonts, work / "fonts-supplied")
         found["supplied"] = report
+        supplied = len(report["families"])
         log("fonts supplied:")
         for line in fontfiles.summary(report) or ["  none of the files was a font"]:
             log(line)
         roots.append(work / "fonts-supplied")
     with use_fonts(*roots), deck_files.replaying(files) as stores:
-        result = _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base,
-                        base_in_drive, log, found["missing"], found["pictures_missing"], pptx, found,
-                        files)
+        adopted = _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base,
+                         base_in_drive, log, missing, pictures, pptx, found, files)
     if files is not None:
-        counts = {"thumbnails": found.pop("thumbnails_read", 0), "pptx": found.get("pptx_pictures", 0),
-                  "fonts": len((found.get("supplied") or {}).get("families") or []),
-                  **{k: len(s.answered) for k, s in stores.items()}}
+        counts = {"thumbnails": adopted.thumbnails_read,
+                  "pptx": adopted.pptx_pictures if adopted.pptx_pictures is not None else 0,
+                  "fonts": supplied, **{k: len(s.answered) for k, s in stores.items()}}
         lines, found["offline"] = deck_files.report(files, counts)
         for line in lines:
             log(line)
-    return result
+    return adopted.result
 
 
-def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base, base_in_drive, log,
-           missing: list, pictures: list, pptx: Path | None = None, found: dict | None = None, files=None):
+@dataclass(frozen=True, kw_only=True)
+class Adopted:
+    """What `_adopt` did besides writing the source: the loop's result, how many slides' thumbnails
+    were read from the deck's files (0: none given), and how many pictures of the deck a .pptx held
+    (None: no .pptx was read)."""
+    result: Result
+    thumbnails_read: int
+    pptx_pictures: int | None
+
+
+def _adopt(deck: str, tex: Path, work: Path, apply: bool, out: Path | None, max_iter: int, engine: str | None,
+           flow: bool, target_path: Path | None, base: bool, base_in_drive: bool, log: Callable[[str], None],
+           missing: list[MissingFont], pictures: list[PictureMissing], pptx: Path | None, found: dict[str, object],
+           files: "DeckFiles | None") -> Adopted:
     from .deck_ir import is_presentation
     from .deck_ir_types import target_json
     from .inverse import run_pull
-    from .json_types import as_array
-    pres = None
-    data = Path(pptx).read_bytes() if pptx else None
-    held = None
-    doc = json.loads(Path(target_path).read_text(encoding="utf-8")) if target_path is not None else None
+    pres: JsonObject | None = None
+    data = pptx.read_bytes() if pptx is not None else None
+    named = pptx.name if pptx is not None else ""
+    held: int | None = None
+    shots = 0
+    doc: Json = json.loads(target_path.read_text(encoding="utf-8")) if target_path is not None else None
     if files is not None and files.thumbnails and not is_presentation(doc):
         log("thumbnails are not used: they are read with a presentations.get answer, not a saved target")
     if is_presentation(doc):
         # the deck as Google describes it, saved by whoever may call the Slides API: read here,
         # its pictures out of the .pptx, with no Google call (`deck_ir.read_presentation`)
         from .deck_ir import given_thumbnails, read_presentation
-        kept: dict = {}
-        thumbnails = None
+        kept: dict[str, Json] = {}
+        thumbnails: Thumbnails | None = None
         if files is not None and files.thumbnails:
             thumbnails, shots = given_thumbnails(doc, files.thumbnails, log)
             log(f"thumbnails: {shots} of {len(as_array(doc['slides'], 'the slides'))} slides")
-            if found is not None:
-                found["thumbnails_read"] = shots
         target = target_json(read_presentation(doc, work / "target-images", data, kept, thumbnails,
                                                files is None or files.pictures is None))
         pres = doc
-        held = kept.get("pptx_pictures")
-    elif doc is not None:
-        target = doc
+        held = _kept_count(kept)
+    elif target_path is not None:
+        target = as_object(doc, str(target_path))
         pres = presentation_beside(target_path)
         if data is not None and pres is None:
-            log(f"{Path(pptx).name} is not used: a saved target pairs its pictures through the "
+            log(f"{named} is not used: a saved target pairs its pictures through the "
                 f"presentation.json beside it, and there is none")
         elif data is not None and pres is not None:
             from .deck_ir import pictures_from_pptx
             filled, held = pictures_from_pptx(target, pres, data, work / "target-images")
-            log(f"{Path(pptx).name}: {filled} picture(s) the target lacked")
+            log(f"{named}: {filled} picture(s) the target lacked")
     else:
         from .deck_ir import read_deck
-        kept: dict = {}
+        kept = {}
         target = target_json(read_deck(deck, work / "target-images", None, None, None, True, kept, data))
-        pres = kept.get("presentation")
-        held = kept.get("pptx_pictures")
+        read = kept.get("presentation")
+        pres = as_object(read, "the deck's presentations.get") if read is not None else None
+        held = _kept_count(kept)
     if held is not None:
-        log(f"{Path(pptx).name}: {held} picture(s) of this deck")
+        log(f"{named}: {held} picture(s) of this deck")
         from .deck_pictures import picture_urls
         from .google_types import presentation
         if held == 0 and pres and picture_urls(presentation(pres, "the deck's presentations.get")):
             log("  none: it is not a .pptx of this deck, or its pages no longer pair with the deck as "
                 "read (download it again)")
-        if found is not None:
-            found["pptx_pictures"] = held
+        found["pptx_pictures"] = held
     slide_count = len(as_array(target["slides"], "the target's slides"))
     log(f"deck: {slide_count} slides read")
     if written_already(tex):
@@ -4725,11 +4852,17 @@ def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, bas
     for line in missing_pictures_lines(pictures):
         log(line)
     recovered = pictures_from_thumbnail(target)
-    if found is not None:
-        found["pictures_from_thumbnail"] = recovered
+    found["pictures_from_thumbnail"] = recovered
     for line in thumbnail_pictures_lines(recovered):
         log(line)
     result = run_pull(target, tex, work, apply, out, max_iter, False, engine, log=log)
     if base:
-        record_base(target, pres, tex, work, engine, base_in_drive, log=log)
-    return result
+        record_base(target, pres, tex, work, engine, base_in_drive, log)
+    return Adopted(result=result, thumbnails_read=shots, pptx_pictures=held)
+
+
+def _kept_count(kept: Mapping[str, Json]) -> int | None:
+    """How many pictures of the deck the .pptx a read was given held (`deck_ir`'s `keep`), or None
+    when it was given none."""
+    held = kept.get("pptx_pictures")
+    return as_int(held, "the .pptx's picture count") if held is not None else None

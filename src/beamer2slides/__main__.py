@@ -498,7 +498,7 @@ def main() -> None:
         return cmd_docs(args)
     if args.command == "deck-files":
         from .deck_files import save, zip_folder
-        save(args.deck, args.out, args.pptx)
+        save(args.deck, args.out, args.pptx, print)
         if args.zip:
             print(f"wrote {zip_folder(args.out, args.out.with_suffix('.zip'))}")
         return

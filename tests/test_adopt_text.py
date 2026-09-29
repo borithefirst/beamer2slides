@@ -7,11 +7,13 @@ the LaTeX `adopt.bootstrap` writes from it.
 """
 
 import re
+from pathlib import Path
 
 import pytest
 
 from beamer2slides import adopt
 from beamer2slides.deck_ir_types import TargetText, TextBox
+from beamer2slides.json_types import JsonObject
 from .irs import deck_ir
 
 from beamer2slides.inverse import TextStyle
@@ -990,14 +992,15 @@ def test_a_windows_font_is_found_by_the_family_its_file_names(tmp_path, monkeypa
     from beamer2slides import scripts
     scripts._FACES.clear()
     try:
-        mono = adopt.font_family("Courier New", "mono")
-        black = adopt.font_family("Arial Black", "sans")
+        mono = adopt.font_family("Courier New", "mono", "")
+        black = adopt.font_family("Arial Black", "sans", "")
     finally:
         adopt._FAMILIES.clear()
         scripts._FACES.clear()
-    assert mono["stem"] == "cour" and mono["BoldFont"].name == "courbd.ttf"
-    assert black["stem"] == "ariblk", "not Arial, whose name it begins with"
-    assert adopt.flatten(black["match"]) == "arialblack"
+    assert mono is not None and black is not None
+    assert mono.stem == "cour" and mono.files.faces["BoldFont"].name == "courbd.ttf"
+    assert black.stem == "ariblk", "not Arial, whose name it begins with"
+    assert adopt.flatten(black.match) == "arialblack"
 
 
 def test_a_family_in_two_file_formats_names_every_file():
@@ -1005,8 +1008,9 @@ def test_a_family_in_two_file_formats_names_every_file():
     fontspec look for cambriab.ttc, and ap-bio-stats stopped compiling."""
     from pathlib import Path
 
-    from beamer2slides.adopt import font_files_latex
-    opts = font_files_latex({"UprightFont": Path("c/cambria.ttc"), "BoldFont": Path("c/cambriab.ttf")}, None)
+    from beamer2slides.adopt import FontFiles, font_files_latex
+    opts = font_files_latex(FontFiles(faces={"UprightFont": Path("c/cambria.ttc"), "BoldFont": Path("c/cambriab.ttf")},
+                                      index=0), None)
     assert "Extension" not in opts
     assert "UprightFont=cambria.ttc" in opts and "BoldFont=cambriab.ttf" in opts
     # the two styles with no file of their own are slanted off the two that have one, by file name too
@@ -1021,9 +1025,9 @@ def test_a_family_in_two_file_formats_names_every_file():
 # no warning, the slide looks finished and the emphasis is gone. What a family has no file for is
 # said out loud instead, synthesised from the nearest face it does have.
 
-def faces(*names: str) -> dict:
+def faces(*names: adopt.FontFace) -> adopt.FontFiles:
     from pathlib import Path
-    return {n: Path(f"f/Fam-{n[:-4]}.ttf") for n in names}
+    return adopt.FontFiles(faces={n: Path(f"f/Fam-{n[:-4]}.ttf") for n in names}, index=0)
 
 
 def test_a_family_with_every_face_fakes_nothing():
@@ -1063,7 +1067,7 @@ def test_a_lone_face_of_a_collection_keeps_its_index_in_every_style():
     """apps-edu-zh's MS PGothic is face 2 of msgothic.ttc and the only one of its family. FontIndex
     is family-wide, so the faked faces are that face too - not face 0, which is monospaced."""
     from pathlib import Path
-    opts = adopt.font_files_latex({"FontIndex": 2, "UprightFont": Path("w/msgothic.ttc")}, None)
+    opts = adopt.font_files_latex(adopt.FontFiles(faces={"UprightFont": Path("w/msgothic.ttc")}, index=2), None)
     assert opts.startswith("FontIndex=2,")
     assert f"BoldFont=*,BoldFeatures={{FakeBold={adopt.FAKE_BOLD}}}" in opts
     assert f"BoldItalicFont=*,BoldItalicFeatures={{FakeBold={adopt.FAKE_BOLD},FakeSlant={adopt.FAKE_SLANT}}}" in opts
@@ -1087,8 +1091,8 @@ def test_a_babel_language_font_names_every_style_too(tmp_path):
     from pathlib import Path
 
     from beamer2slides.scripts import Face, babelfont_line
-    regular = Face(Path("w/times.ttf"), 0, ("timesnewroman",), 400, False)
-    bold = Face(Path("w/timesbd.ttf"), 0, ("timesnewroman",), 700, False)
+    regular = Face(path=Path("w/times.ttf"), index=0, families=("timesnewroman",), weight=400, italic=False)
+    bold = Face(path=Path("w/timesbd.ttf"), index=0, families=("timesnewroman",), weight=700, italic=False)
     line = babelfont_line("hebrew", "rm", regular, bold, None)
     assert line.startswith("\\babelfont[hebrew]{rm}[Path=w/,Renderer=HarfBuzz,BoldFont=timesbd.ttf,")
     assert f"ItalicFont=times.ttf,ItalicFeatures={{FakeSlant={adopt.FAKE_SLANT}}}" in line
@@ -1096,7 +1100,8 @@ def test_a_babel_language_font_names_every_style_too(tmp_path):
     assert line.endswith("]{times.ttf}")
     # a bold in another folder cannot share the family's one Path: it is faked, not dropped
     far = babelfont_line("hebrew", "rm", regular,
-                         Face(Path("o/timesbd.ttf"), 0, ("timesnewroman",), 700, False), None)
+                         Face(path=Path("o/timesbd.ttf"), index=0, families=("timesnewroman",), weight=700,
+                              italic=False), None)
     assert "BoldFont=timesbd.ttf" not in far
     assert f"BoldFont=times.ttf,BoldFeatures={{FakeBold={adopt.FAKE_BOLD}}}" in far
 
@@ -1197,7 +1202,7 @@ def test_a_stand_in_is_condensed_to_the_widths_the_thumbnails_show(tmp_path):
     from .test_adopt_media import tiny_font
     path = tmp_path / "TinySans-Regular.ttf"
     path.write_bytes(tiny_font("Tiny Sans"))
-    files = {"UprightFont": path}
+    files = adopt.FontFiles(faces={"UprightFont": path}, index=0)
     # five "A"s at 10 pt: 3000 units of advance less the last one's 100 of right bearing = 29 pt of ink
 
     def sample(width, text="AAAAA"):
@@ -1211,6 +1216,28 @@ def test_a_stand_in_is_condensed_to_the_widths_the_thumbnails_show(tmp_path):
     assert adopt.font_widths("Deck Serif", files, near) is None, "within 2%"
     lone = deck_of({"slides": [{"elements": [sample(26.1)]}]})
     assert adopt.font_widths("Deck Serif", files, lone) is None, "one measure is not enough"
+
+
+def test_a_stand_in_with_no_unicode_cmap_measures_no_word(tmp_path: Path) -> None:
+    """A symbol font's only cmap is (3, 0), which fontTools' getBestCmap does not read: it answers
+    None, and `font_widths` used to call .get on that and crash the adopt."""
+    import io
+    from fontTools.ttLib import TTFont
+    from .test_adopt_media import tiny_font
+    font = TTFont(io.BytesIO(tiny_font("Tiny Symbol")))
+    cmap = font["cmap"]
+    cmap.tables = cmap.tables[:1]
+    cmap.tables[0].platformID, cmap.tables[0].platEncID = 3, 0
+    path = tmp_path / "TinySymbol-Regular.ttf"
+    font.save(str(path))
+    assert TTFont(str(path)).getBestCmap() is None
+    files = adopt.FontFiles(faces={"UprightFont": path}, index=0)
+
+    def sample(width: float) -> JsonObject:
+        return {"kind": "text", "bbox": [0, 0, 100, 20], "ink_width": width,
+                "paragraphs": [{"runs": [{"text": "AAAAA", "size": 10.0, "font": "Deck Serif"}]}]}
+    target = deck_of({"slides": [{"elements": [sample(26.1), sample(26.2)]}]})
+    assert adopt.font_widths("Deck Serif", files, target) is None
 
 
 def test_a_paragraph_of_two_sizes_is_spaced_line_by_line():

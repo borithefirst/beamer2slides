@@ -802,7 +802,7 @@ def labels_match(conv_deck: JsonMap, target: JsonObject) -> str | None:
     return None
 
 
-def record(tex: Path, work: Path, target: JsonObject, pres: JsonObject, engine: str | None, overlays: str = "last",
+def record(tex: Path, work: Path, target: JsonObject, pres: JsonObject, engine: str | None, overlays: str,
            *, log: Callable[[str], None]) -> tuple[JsonObject | None, str | None]:
     """The whole of it: compile the source adopt wrote, pair its conversion with the deck it was
     written from, and return (base, None) or (None, why there is none). Never writes to Google."""
@@ -911,7 +911,7 @@ def touches_deck(mplan: JsonMap, theirs: JsonMap) -> bool:
 
 def touches_deck_of(mplan: merge.MergePlan, theirs: JsonMap) -> bool:
     """`touches_deck` of a typed plan."""
-    if _has_writes_of(mplan, _live_order(theirs)):
+    if merge.has_writes_of(mplan, _live_order(theirs)):
         return True
     return any(isinstance(u.decision, merge.KeepUnit | merge.Recreate | merge.AdoptUnit | merge.MoveUnit)
                and u.decision.source
@@ -920,22 +920,6 @@ def touches_deck_of(mplan: merge.MergePlan, theirs: JsonMap) -> bool:
 
 def _live_order(theirs: JsonMap) -> list[str]:
     return [as_str(s["objectId"], "the deck's slide objectId") for s in as_objects(theirs["slides"], "the deck.slides")]
-
-
-def _has_writes_of(mplan: merge.MergePlan, live_order: Sequence[str]) -> bool:
-    """`merge.has_writes` of a typed plan: a slide created or deleted, a unit created, recreated,
-    deleted or moved, a background or notes written, or the slides put in another order."""
-    for p in mplan.slides:
-        if isinstance(p, merge.CreateSlide | merge.DeleteSlide):
-            return True
-        if isinstance(p, merge.UpdateSlide) and (
-                any(isinstance(u.decision, merge.CreateUnit | merge.Recreate | merge.DeleteUnit | merge.MoveUnit)
-                    for u in p.units)
-                or (p.background_written and p.background) or p.notes is not None):
-            return True
-    final = [x for x in mplan.order if not x.startswith("new:")]
-    current = [s for s in live_order if s in final]
-    return current != [s for s in final if s in current]
 
 
 def problems(base: JsonObject, mplan: JsonMap, theirs: JsonMap, way_back: JsonObject | None,
@@ -1134,6 +1118,34 @@ def load_of(path: Path) -> JsonObject:
     return as_object(json.loads(Path(path).read_text(encoding="utf-8")), str(path))
 
 
+@dataclass(frozen=True, kw_only=True)
+class AdoptSummary:
+    """What an adopt base says of its ties to the deck (`build_base`'s `adopt`), as the agent's
+    `deck_adopt` reports it: slides recorded (None when the base does not say), elements tied to an
+    object of the deck, tied to none, drawn by the deck's layouts."""
+    slides: int | None
+    paired: int
+    unpaired: int
+    from_layout: int
+
+
+def adopt_summary_of(base: JsonMap) -> AdoptSummary:
+    """The `AdoptSummary` of a base read; an empty one when it is not an adopt base."""
+    adopt = base.get("adopt")
+    info: JsonObject = as_object(adopt, "base.adopt") if adopt else {}
+    slides = info.get("slides")
+    return AdoptSummary(slides=None if slides is None else as_int(slides, "base.adopt.slides"),
+                        paired=as_int(info.get("paired", 0), "base.adopt.paired"),
+                        unpaired=len(as_array(info.get("unpaired") or [], "base.adopt.unpaired")),
+                        from_layout=len(as_array(info.get("from_layout") or [], "base.adopt.from_layout")))
+
+
+def adopt_summary(path: Path) -> AdoptSummary:
+    """`adopt_summary_of` the base.json at `path`: the typed read of what `load(path)["adopt"]` holds."""
+    return adopt_summary_of(load_of(path))
+
+
 def load(path: Path) -> dict:
-    """`load_of` untyped, for agent/source_tools.py, which does arithmetic on what it reads."""
+    """`load_of` untyped, for agent/source_tools.py, which does arithmetic on what it reads (its
+    typed counterpart is `adopt_summary`)."""
     return json.loads(Path(path).read_text(encoding="utf-8"))

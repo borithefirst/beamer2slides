@@ -25,9 +25,15 @@ from __future__ import annotations
 import io
 import re
 import shutil
+from collections.abc import Iterable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, TypedDict
 
 from . import fontfetch
+
+if TYPE_CHECKING:
+    from fontTools.ttLib import TTFont
 
 SUFFIXES = (".ttf", ".otf", ".ttc", ".woff", ".woff2")
 NOT_A_FONT = "not a font file (.ttf, .otf, .ttc, .woff or .woff2)"
@@ -40,7 +46,7 @@ def kind_of(data: bytes) -> str | None:
             b"wOFF": "woff", b"wOF2": "woff2"}.get(head)
 
 
-def expand(paths) -> list[Path]:
+def expand(paths: Iterable[str | Path] | None) -> list[Path]:
     """The files among `paths`, a folder standing for every font file under it."""
     out: list[Path] = []
     for p in paths or ():
@@ -52,18 +58,59 @@ def expand(paths) -> list[Path]:
     return out
 
 
-def describe(font) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class Described:
+    """A font as its own tables give it (`describe`): family, weight (1-1000), italic, and the tags
+    of its variation axes (none for a static font)."""
+    family: str
+    weight: int
+    italic: bool
+    axes: list[str]
+
+
+def describe(font: TTFont) -> Described:
     """Family, weight, italic and variation axes, as the font's own tables give them. The
     typographic family (name 16) first: name 1 of a medium cut is often "Montserrat Medium"."""
     name = font["name"]
     family = (name.getDebugName(16) or name.getDebugName(1) or "").strip()
     sub = (name.getDebugName(17) or name.getDebugName(2) or "").lower()
-    os2 = font["OS/2"] if "OS/2" in font else None
-    weight = int(os2.usWeightClass) if os2 else (700 if "bold" in sub else 400)
-    italic = bool(os2.fsSelection & 1) if os2 else False
-    axes = [a.axisTag for a in font["fvar"].axes] if "fvar" in font else []
-    return {"family": family, "weight": max(1, min(weight, 1000)),
-            "italic": italic or "italic" in sub or "oblique" in sub, "axes": axes}
+    os2 = "OS/2" in font
+    weight = fontfetch.table_int(font, "OS/2", "usWeightClass") if os2 else (700 if "bold" in sub else 400)
+    italic = bool(fontfetch.table_int(font, "OS/2", "fsSelection") & 1) if os2 else False
+    axes: list[str] = [a.axisTag for a in font["fvar"].axes] if "fvar" in font else []
+    return Described(family=family, weight=max(1, min(weight, 1000)),
+                     italic=italic or "italic" in sub or "oblique" in sub, axes=axes)
+
+
+@dataclass(frozen=True, kw_only=True)
+class _Given:
+    """One usable file of a family: what it says it is, its bytes (a web font's unwrapped), the
+    suffix those bytes take and the name it was given under."""
+    info: Described
+    data: bytes
+    suffix: str
+    file: str
+
+
+class FamilyReport(TypedDict):
+    """A family `install` made: the fontspec styles cut for it ("collection" for a .ttc's), the
+    weights between them given as static files, the files it came from, whether one was variable."""
+    styles: list[str]
+    weights: list[str]
+    files: list[str]
+    variable: bool
+
+
+class Skipped(TypedDict):
+    """A file `install` could not use, and why."""
+    file: str
+    reason: str
+
+
+class InstallReport(TypedDict):
+    """What `install` made of the files (`found["supplied"]`, the agent's `fonts_supplied`)."""
+    families: dict[str, FamilyReport]
+    skipped: list[Skipped]
 
 
 class ForeignFolder(ValueError):
@@ -85,7 +132,7 @@ def _safe(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.") or "font"
 
 
-def install(paths, root: Path) -> dict:
+def install(paths: Iterable[str | Path] | None, root: Path) -> InstallReport:
     """Lay the fonts among `paths` out under `root` (emptied first) as families adopt can use.
 
     Returns `{"families": {family: {"styles", "weights", "files", "variable"}}, "skipped":
@@ -93,7 +140,7 @@ def install(paths, root: Path) -> dict:
     between them that were given as static files, and the files it came from; a file that could
     not be used says why. Nothing here raises for a bad file."""
     root = Path(root)
-    report: dict = {"families": {}, "skipped": []}
+    report: InstallReport = {"families": {}, "skipped": []}
     files = expand(paths)
     if not files:
         return report
@@ -110,7 +157,7 @@ def install(paths, root: Path) -> dict:
     _fresh(root)
     (root / fontfetch.MANAGED).write_text("font files a person supplied, laid out by beamer2slides.fontfiles\n",
                                           encoding="utf-8")
-    groups: dict[str, list[dict]] = {}
+    groups: dict[str, list[_Given]] = {}
     for f in files:
         try:
             data = f.read_bytes()
@@ -123,8 +170,8 @@ def install(paths, root: Path) -> dict:
             continue
         if kind == "ttc":
             try:
-                faces = TTCollection(io.BytesIO(data)).fonts
-                names = sorted({describe(face)["family"] for face in faces} - {""})
+                faces: list[TTFont] = TTCollection(io.BytesIO(data)).fonts
+                names = sorted({describe(face).family for face in faces} - {""})
             except Exception as e:  # noqa: BLE001 - a broken file is no font, not a failed run
                 skip(f.name, f"unreadable ({type(e).__name__}: {e})")
                 continue
@@ -149,63 +196,65 @@ def install(paths, root: Path) -> dict:
                 else f"unreadable ({type(e).__name__}: {e})"
             skip(f.name, why)
             continue
-        if not fontfetch.folder_name(info["family"]):
+        if not fontfetch.folder_name(info.family):
             skip(f.name, "its name table gives no family name")
             continue
-        groups.setdefault(info["family"], []).append({**info, "data": data, "suffix": "." + kind, "file": f.name})
+        groups.setdefault(info.family, []).append(_Given(info=info, data=data, suffix="." + kind, file=f.name))
 
     for family, entries in groups.items():
         folder, stem = fontfetch.folder_name(family), fontfetch.stem_name(family)
         src = root / folder / "src"
-        meta: dict = {"name": family, "fonts": [], "axes": {}}
-        used, statics = [], []
+        made: list[fontfetch.FontFile] = []
+        used: list[_Given] = []
+        statics: list[tuple[_Given, str]] = []
         for e in entries:
-            if e["axes"]:
-                name = f"{stem}{'-Italic' if e['italic'] else ''}[{','.join(e['axes'])}]{e['suffix']}"
+            if e.info.axes:
+                name = f"{stem}{'-Italic' if e.info.italic else ''}[{','.join(e.info.axes)}]{e.suffix}"
             else:
-                name = f"{stem}-{e['weight']}{'Italic' if e['italic'] else ''}{e['suffix']}"
+                name = f"{stem}-{e.info.weight}{'Italic' if e.info.italic else ''}{e.suffix}"
             if (src / name).exists():
-                skip(e["file"], f"{family} {e['weight']}{' italic' if e['italic'] else ''} was given twice; "
-                                f"the first file is used")
+                skip(e.file, f"{family} {e.info.weight}{' italic' if e.info.italic else ''} was given twice; "
+                             f"the first file is used")
                 continue
-            fontfetch._write_atomic(src / name, e["data"])
+            fontfetch._write_atomic(src / name, e.data)
             used.append(e)
             # a variable font with an ital axis is its own italic
-            for italic in ((False, True) if "ital" in e["axes"] else (e["italic"],)):
-                meta["fonts"].append({"filename": name, "style": "italic" if italic else "normal",
-                                      "weight": e["weight"]})
-            if not e["axes"]:
+            for italic in ((False, True) if "ital" in e.info.axes else (e.info.italic,)):
+                made.append(fontfetch.FontFile(filename=name, style="italic" if italic else "normal",
+                                               weight=e.info.weight))
+            if not e.info.axes:
                 statics.append((e, name))
+        meta = fontfetch.Metadata(name=family, fonts=made, axes={})
         try:
-            styles = fontfetch._build(family, folder, None, meta, root=root)
+            styles = fontfetch._build(family, folder, None, meta, {}, root)
         except Exception as e:  # noqa: BLE001
             for x in used:
-                skip(x["file"], f"{family} could not be made into styles ({type(e).__name__}: {e})")
+                skip(x.file, f"{family} could not be made into styles ({type(e).__name__}: {e})")
             continue
         if not styles:
             for x in used:
-                skip(x["file"], f"{family} has no upright face among the files given, and a family needs one")
+                skip(x.file, f"{family} has no upright face among the files given, and a family needs one")
             continue
         # A static weight that is none of the four styles is kept as `weight_file` names what it
         # cuts, so a run set in it gets a face of its own (`adopt.weight_faces`)
-        weights = []
+        weights: list[str] = []
         for e, name in statics:
-            if e["weight"] not in (400, 700) and e["suffix"] == ".ttf":
-                target = root / folder / f"{stem}-W{e['weight']}{'Italic' if e['italic'] else ''}.ttf"
+            if e.info.weight not in (400, 700) and e.suffix == ".ttf":
+                target = root / folder / f"{stem}-W{e.info.weight}{'Italic' if e.info.italic else ''}.ttf"
                 fontfetch._write_atomic(target, (src / name).read_bytes())
-                weights.append(f"{e['weight']}{' italic' if e['italic'] else ''}")
+                weights.append(f"{e.info.weight}{' italic' if e.info.italic else ''}")
         report["families"][family] = {"styles": sorted(styles), "weights": sorted(weights),
-                                      "files": [x["file"] for x in used],
-                                      "variable": any(x["axes"] for x in used)}
+                                      "files": [x.file for x in used],
+                                      "variable": any(x.info.axes for x in used)}
     return report
 
 
-def summary(report: dict) -> list[str]:
+def summary(report: InstallReport) -> list[str]:
     """What `install` made of the files, a line each, for a log."""
-    lines = []
-    for family, got in sorted(report.get("families", {}).items()):
-        extra = f", weights {', '.join(got['weights'])}" if got.get("weights") else ""
+    lines: list[str] = []
+    for family, got in sorted(report["families"].items()):
+        extra = f", weights {', '.join(got['weights'])}" if got["weights"] else ""
         lines.append(f"  {family}: {', '.join(got['styles'])}{extra} (from {', '.join(got['files'])})")
-    for s in report.get("skipped", []):
+    for s in report["skipped"]:
         lines.append(f"  {s['file']}: not used - {s['reason']}")
     return lines

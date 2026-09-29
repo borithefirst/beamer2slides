@@ -661,7 +661,7 @@ def test_a_source_whose_frames_are_not_the_decks_slides_gets_no_base(adopted):
 
 def test_a_deck_read_without_its_presentation_gets_no_base(tmp_path, adopted):
     base, why = adopt_sync.record(tmp_path / "main.tex", tmp_path, adopted["target"], {"slides": []},
-                                  None, log=print)
+                                  None, "last", log=print)
     assert base is None
     assert why == "the deck was read without its presentation (no read-back to record)"
 

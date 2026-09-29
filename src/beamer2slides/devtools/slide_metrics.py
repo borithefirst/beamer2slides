@@ -49,14 +49,23 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 import numpy as np
 from PIL import Image
 
 from beamer2slides.arrays import RGB, Floats32, Int16, Mask, SignedRGB
+from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_int, as_object, as_objects, as_str
 from beamer2slides.page_score import covered_mask, ink_masks, overlap
+
+Row = dict[str, float]
+"""A slide's metrics as metrics.json holds them, its "slide" number among them: larger is worse."""
+Key = tuple[str, int]
+"""(deck, slide number)."""
 
 REACH = 16          # px on the thumbnail grid (1600 wide): about a line of body text
 TILE = 100          # px: the tile the tile_* metrics take the worst of
@@ -80,7 +89,7 @@ TORCH_METRICS = ("ot_shift", "ot_missing", "ot_extra", "ssim", "tile_ssim", "lpi
 
 # ------------------------------------------------------------------------------------------ numpy
 
-def distance_to(mask: Mask, reach: int = REACH) -> Int16:
+def distance_to(mask: Mask, reach: int) -> Int16:
     """Every pixel's distance to the nearest set pixel of `mask`, up to `reach` (reach + 1 beyond):
     dilations alternating 4- and 8-neighbour, an octagon within 8% of the Euclidean distance."""
     d = np.full(mask.shape, reach + 1, dtype=np.int16)
@@ -112,7 +121,7 @@ def lab(a: SignedRGB) -> Floats32:
     return np.stack([116 * f[..., 1] - 16, 500 * (f[..., 0] - f[..., 1]), 200 * (f[..., 1] - f[..., 2])], -1)
 
 
-def tiles(h: int, w: int, size: int = TILE):
+def tiles(h: int, w: int, size: int) -> Iterator[tuple[slice, slice]]:
     for y in range(0, h, size):
         for x in range(0, w, size):
             yield slice(y, min(h, y + size)), slice(x, min(w, x + size))
@@ -127,7 +136,7 @@ def box_mean(a: RGB | Mask, k: int) -> Floats32:
     return (c[k:k + h, k:k + w] - c[:h, k:k + w] - c[k:k + h, :w] + c[:h, :w]) / (k * k)
 
 
-def rank_filter(a: RGB, k: int, fn) -> RGB:
+def rank_filter(a: RGB, k: int, fn: Callable[[RGB, RGB], RGB]) -> RGB:
     """A k x k min or max filter (fn = np.minimum / np.maximum), separable, edges clamped: windows
     doubled 1, 2, 4 ... then two overlapping ones make k."""
     r = k // 2
@@ -163,33 +172,66 @@ def local_ink(a: SignedRGB) -> Mask:
     return m & (box_mean(m[..., None], 3)[..., 0] * 9 >= 4.5)     # itself and 4 of its 8 neighbours
 
 
-def ink_pair(m_ref: Mask, m_got: Mask) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class InkPair:
+    """Where each side's ink has the other's (`ink_pair`): each side's distance to the other's ink,
+    each ink pixel's capped distance over REACH, and the four metrics read from them."""
+    d_ref: Int16
+    d_got: Int16
+    dist: Floats32
+    graded: float
+    drift: float
+    missing: float
+    extra: float
+
+
+def ink_pair(m_ref: Mask, m_got: Mask) -> InkPair:
     """Where each side's ink has the other's: capped distances both ways."""
-    d_ref, d_got = distance_to(m_got), distance_to(m_ref)
+    d_ref, d_got = distance_to(m_got, REACH), distance_to(m_ref, REACH)
     cap = np.float32(REACH)
     near_ref, near_got = m_ref & (d_ref <= REACH), m_got & (d_got <= REACH)
     dist = np.minimum(np.where(m_ref, d_ref, 0), cap).astype(np.float32) + \
         np.minimum(np.where(m_got, d_got, 0), cap).astype(np.float32)   # each ink pixel's capped distance
     n_ref, n_got = int(m_ref.sum()), int(m_got.sum())
     ink = n_ref + n_got
-    return {"d_ref": d_ref, "d_got": d_got, "dist": dist / cap,
-            "graded": float(dist.sum() / cap / ink) if ink else 0.0,
-            "drift": float((d_ref[near_ref].sum() + d_got[near_got].sum()) / max(1, near_ref.sum() + near_got.sum())),
-            "missing": float((m_ref & ~near_ref).sum() / n_ref) if n_ref else 0.0,
-            "extra": float((m_got & ~near_got).sum() / n_got) if n_got else 0.0}
+    return InkPair(d_ref=d_ref, d_got=d_got, dist=(dist / cap).astype(np.float32),
+                   graded=float(dist.sum() / cap / ink) if ink else 0.0,
+                   drift=float((d_ref[near_ref].sum() + d_got[near_got].sum())
+                               / max(1, near_ref.sum() + near_got.sum())),
+                   missing=float((m_ref & ~near_ref).sum() / n_ref) if n_ref else 0.0,
+                   extra=float((m_got & ~near_got).sum() / n_got) if n_got else 0.0)
 
 
 def worst_tile(dist: Floats32, m_ref: Mask, m_got: Mask) -> float:
     h, w = dist.shape
     out = 0.0
-    for ys, xs in tiles(h, w):
+    for ys, xs in tiles(h, w, TILE):
         n = int(m_ref[ys, xs].sum() + m_got[ys, xs].sum())
         if n >= TILE_INK:
             out = max(out, float(dist[ys, xs].sum() / n))
     return out
 
 
-def numpy_metrics(ref: SignedRGB, got: SignedRGB, slide: dict) -> tuple[dict, dict]:
+@dataclass(frozen=True, kw_only=True)
+class Maps:
+    """What `numpy_metrics` read its metrics from, for heat maps: the capped distances (`graded`,
+    `local_graded`), the colour differences where both sides have local ink and where neither has
+    ink, each side's ink and local ink, and each side's distance to the other's."""
+    graded: Floats32
+    local_graded: Floats32
+    ink_de: Floats32
+    ground_de: Floats32
+    m_ref: Mask
+    m_got: Mask
+    d_ref: Int16
+    d_got: Int16
+    l_ref: Mask
+    l_got: Mask
+    ld_ref: Int16
+    ld_got: Int16
+
+
+def numpy_metrics(ref: SignedRGB, got: SignedRGB, slide: JsonObject) -> tuple[Row, Maps]:
     """The numpy metrics of `got` against `ref` (int16 RGB arrays of one size), and the maps they were
     read from (for heat maps)."""
     h, w = ref.shape[:2]
@@ -201,20 +243,21 @@ def numpy_metrics(ref: SignedRGB, got: SignedRGB, slide: dict) -> tuple[dict, di
     neither = ~m_ref & ~m_got
     de = np.sqrt(((lab(ref) - lab(got)) ** 2).sum(-1))
     diff = np.abs(ref - got).mean(-1) / 255
-    out = {
+    out: Row = {
         "overlap": 1 - overlap(m_ref, m_got),
         "boxes": 1 - overlap(m_ref & covered, m_got & covered),
         "pixels": float(diff.mean()),
-        **{k: page[k] for k in ("graded", "drift", "missing", "extra")},
-        **{"local_" + k: local[k] for k in ("graded", "drift", "missing", "extra")},
+        "graded": page.graded, "drift": page.drift, "missing": page.missing, "extra": page.extra,
+        "local_graded": local.graded, "local_drift": local.drift, "local_missing": local.missing,
+        "local_extra": local.extra,
         "ink_de": float(de[both].mean()) if both.any() else 0.0,
         "local_ink_de": float(de[l_both].mean()) if l_both.any() else 0.0,
         "ground_de": float(de[neither].mean()) if neither.any() else 0.0,
-        "tile_graded": worst_tile(page["dist"], m_ref, m_got),
-        "tile_local_graded": worst_tile(local["dist"], l_ref, l_got),
+        "tile_graded": worst_tile(page.dist, m_ref, m_got),
+        "tile_local_graded": worst_tile(local.dist, l_ref, l_got),
     }
-    worst = {"tile_overlap": 0.0, "tile_ink_de": 0.0, "tile_pixels": 0.0}
-    for ys, xs in tiles(h, w):
+    worst: Row = {"tile_overlap": 0.0, "tile_ink_de": 0.0, "tile_pixels": 0.0}
+    for ys, xs in tiles(h, w, TILE):
         a, b = m_ref[ys, xs], m_got[ys, xs]
         worst["tile_pixels"] = max(worst["tile_pixels"], float(diff[ys, xs].mean()))
         if int(a.sum() + b.sum()) >= TILE_INK:
@@ -223,10 +266,10 @@ def numpy_metrics(ref: SignedRGB, got: SignedRGB, slide: dict) -> tuple[dict, di
         if bt.sum() >= TILE_INK / 4:
             worst["tile_ink_de"] = max(worst["tile_ink_de"], float(de[ys, xs][bt].mean()))
     out.update(worst)
-    maps = {"graded": page["dist"], "local_graded": local["dist"], "ink_de": np.where(l_both, de, 0),
-            "ground_de": np.where(neither, de, 0),
-            "m_ref": m_ref, "m_got": m_got, "d_ref": page["d_ref"], "d_got": page["d_got"],
-            "l_ref": l_ref, "l_got": l_got, "ld_ref": local["d_ref"], "ld_got": local["d_got"]}
+    maps = Maps(graded=page.dist, local_graded=local.dist, ink_de=np.where(l_both, de, 0),
+                ground_de=np.where(neither, de, 0),
+                m_ref=m_ref, m_got=m_got, d_ref=page.d_ref, d_got=page.d_got,
+                l_ref=l_ref, l_got=l_got, ld_ref=local.d_ref, ld_got=local.d_got)
     return {k: round(v, 5) for k, v in out.items()}, maps
 
 
@@ -236,14 +279,14 @@ class Gpu:
     """The torch metrics, their models loaded once. Needs torch (and, for lpips/dino/clip, the
     `lpips` and `transformers` packages): see docs/adopt-bench.md "Metrics"."""
 
-    def __init__(self, device: str | None = None):
+    def __init__(self, device: str | None) -> None:
         import torch
         self.torch = torch
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self._lpips = self._dino = self._clip = None
 
     # -- unbalanced optimal transport of ink mass, log-domain Sinkhorn on a separable grid
-    def ot(self, m_ref: Mask, m_got: Mask) -> dict:
+    def ot(self, m_ref: Mask, m_got: Mask) -> dict[str, float]:
         """Unbalanced entropic optimal transport (squared distance, KL marginals) of the deck's ink onto
         ours, on a grid of OT_CELL px cells. Mass moves when that is cheaper than destroying it and
         creating it anew, which it is up to about OT_REACH cells: `ot_shift` is how far the moved mass
@@ -253,7 +296,7 @@ class Gpu:
         t = self.torch
         dev, dt = self.device, t.float64
 
-        def pool(m):
+        def pool(m: Mask):
             x = t.as_tensor(m, dtype=dt, device=dev)[None, None]
             return t.nn.functional.avg_pool2d(x, OT_CELL, ceil_mode=True)[0, 0]
         a, b = pool(m_ref), pool(m_got)
@@ -300,10 +343,11 @@ class Gpu:
                 "ot_extra": round(float((b - moved_got).clamp_min(0).sum()) / (sb / scale), 5)}
 
     # -- structural similarity
-    def ssim(self, ref: SignedRGB, got: SignedRGB) -> dict:
+    def ssim(self, ref: SignedRGB, got: SignedRGB) -> tuple[dict[str, float], Floats32]:
         t = self.torch
-        y = lambda a: t.as_tensor(a[..., :3] @ np.array([0.299, 0.587, 0.114]), dtype=t.float32,  # noqa: E731
-                                  device=self.device)[None, None] / 255
+        def y(a: SignedRGB):
+            return t.as_tensor(a[..., :3] @ np.array([0.299, 0.587, 0.114]), dtype=t.float32,
+                               device=self.device)[None, None] / 255
         x1, x2 = y(ref), y(got)
         k = t.exp(-(t.arange(11, device=self.device, dtype=t.float32) - 5) ** 2 / (2 * 1.5 ** 2))
         k = (k / k.sum())
@@ -318,20 +362,20 @@ class Gpu:
         return {"ssim": round(float(loss.mean()), 5), "tile_ssim": round(float(tiled.max()), 5)}, loss.cpu().numpy()
 
     # -- learned perceptual distance
-    def lpips(self, ref: SignedRGB, got: SignedRGB) -> dict:
+    def lpips(self, ref: SignedRGB, got: SignedRGB) -> tuple[dict[str, float], Floats32]:
         t = self.torch
         if self._lpips is None:
             import lpips
             self._lpips = lpips.LPIPS(net="alex", spatial=True, verbose=False).to(self.device).eval()
-        im = lambda a: (t.as_tensor(a[..., :3], dtype=t.float32, device=self.device).permute(2, 0, 1)[None]  # noqa: E731
-                        / 127.5 - 1)
+        def im(a: SignedRGB):
+            return t.as_tensor(a[..., :3], dtype=t.float32, device=self.device).permute(2, 0, 1)[None] / 127.5 - 1
         with t.no_grad():
             d = self._lpips(im(ref), im(got))[0, 0]
         tiled = t.nn.functional.avg_pool2d(d[None, None], TILE, ceil_mode=True)
         return {"lpips": round(float(d.mean()), 5), "tile_lpips": round(float(tiled.max()), 5)}, d.cpu().numpy()
 
     # -- embeddings
-    def dino(self, ref: SignedRGB, got: SignedRGB) -> dict:
+    def dino(self, ref: SignedRGB, got: SignedRGB) -> tuple[dict[str, float], Floats32]:
         """DINOv2 (small) at 37 x 21 patches: 1 - cosine of the pooled embeddings, and of the least
         alike patch."""
         t = self.torch
@@ -341,7 +385,7 @@ class Gpu:
         mean = t.tensor([0.485, 0.456, 0.406], device=self.device)[:, None, None]
         std = t.tensor([0.229, 0.224, 0.225], device=self.device)[:, None, None]
 
-        def feats(a):
+        def feats(a: SignedRGB):
             x = t.as_tensor(a[..., :3], dtype=t.float32, device=self.device).permute(2, 0, 1) / 255
             x = t.nn.functional.interpolate(x[None], size=(294, 518), mode="bilinear", antialias=True, align_corners=False)
             with t.no_grad():
@@ -354,7 +398,7 @@ class Gpu:
         return {"dino": round(float(1 - cos(c1, c2, dim=0)), 5), "dino_worst": round(float(patch.max()), 5)}, \
             patch.reshape(21, 37).cpu().numpy()
 
-    def clip(self, ref: SignedRGB, got: SignedRGB) -> dict:
+    def clip(self, ref: SignedRGB, got: SignedRGB) -> dict[str, float]:
         t = self.torch
         if self._clip is None:
             from transformers import CLIPModel, CLIPProcessor
@@ -369,7 +413,7 @@ class Gpu:
             e = e.pooler_output
         return {"clip": round(float(1 - t.nn.functional.cosine_similarity(e[0], e[1], dim=0)), 5)}
 
-    def metrics(self, ref: SignedRGB, got: SignedRGB, m_ref: Mask, m_got: Mask) -> dict:
+    def metrics(self, ref: SignedRGB, got: SignedRGB, m_ref: Mask, m_got: Mask) -> dict[str, float]:
         out = dict(self.ot(m_ref, m_got))
         for fn in (self.ssim, self.lpips, self.dino):
             out.update(fn(ref, got)[0])
@@ -394,20 +438,20 @@ def run_pdf(run: Path) -> Path | None:
     return pdf
 
 
-def pages(deck: str, tag: str):
+def pages(deck: str, tag: str) -> Iterator[tuple[int, SignedRGB, SignedRGB, JsonObject]]:
     """(slide number, deck thumbnail, our page on its grid, the slide's IR) for a bench run's slides."""
     from beamer2slides.fidelity import rgb_array
     from beamer2slides.pdf import Document
     folder = corpus_dir() / deck
     run = folder / "runs" / tag
-    target = json.loads(((run / "target.json") if (run / "target.json").exists() else folder / "target.json")
-                        .read_text(encoding="utf-8"))
+    path = (run / "target.json") if (run / "target.json").exists() else folder / "target.json"
+    target = as_object(json.loads(path.read_text(encoding="utf-8")), str(path))
     pdf = run_pdf(run)
     if pdf is None:
         return
     doc = Document(pdf)
     try:
-        for i, slide in enumerate(target["slides"]):
+        for i, slide in enumerate(as_objects(target["slides"], f"{path}: slides")):
             ref_path = folder / "slides" / f"{i + 1:03}.png"
             if i >= len(doc) or not ref_path.exists():
                 continue
@@ -419,12 +463,12 @@ def pages(deck: str, tag: str):
         doc.close()
 
 
-def measure_deck(deck: str, tag: str, gpu: Gpu | None) -> list[dict]:
-    rows = []
+def measure_deck(deck: str, tag: str, gpu: Gpu | None) -> list[Row]:
+    rows: list[Row] = []
     for n, ref, got, slide in pages(deck, tag):
         row, maps = numpy_metrics(ref, got, slide)
         if gpu is not None:
-            row.update(gpu.metrics(ref, got, maps["l_ref"], maps["l_got"]))
+            row.update(gpu.metrics(ref, got, maps.l_ref, maps.l_got))
         rows.append({"slide": n, **row})
     return rows
 
@@ -438,15 +482,18 @@ def run(tag: str, names: list[str], gpu: bool, jobs: int) -> None:
     decks = decks_of(tag, names)
     # PDFs first, in parallel (a compile is a subprocess); the measuring after, on this thread (PDFium
     # is not thread-safe, and the GPU is one)
+    def compiled(deck: str) -> Path | None:
+        return run_pdf(corpus_dir() / deck / "runs" / tag)
     with ThreadPoolExecutor(jobs) as pool:
-        list(pool.map(lambda d: run_pdf(corpus_dir() / d / "runs" / tag), decks))
-    def save(deck, rows):
+        list(pool.map(compiled, decks))
+
+    def save(deck: str, rows: list[Row]) -> None:
         out = corpus_dir() / deck / "runs" / tag / "metrics.json"
         out.write_text(json.dumps({"deck": deck, "tag": tag, "reach": REACH, "slides": rows}, indent=0),
                        encoding="utf-8")
         print(f"{deck:<24} {len(rows):>4} slides", flush=True)
     if gpu:
-        g = Gpu()
+        g = Gpu(None)
         for deck in decks:
             save(deck, measure_deck(deck, tag, g))
         return
@@ -461,11 +508,11 @@ def run(tag: str, names: list[str], gpu: bool, jobs: int) -> None:
 
 # ------------------------------------------------------------------------------------------ judged
 
-def auc(pos: list[float], neg: list[float]) -> float | None:
+def auc(pos: Sequence[float], neg: Sequence[float]) -> float | None:
     """P(a positive scores above a negative), ties half: the ROC AUC (Mann-Whitney)."""
     if not pos or not neg:
         return None
-    allv = np.array(neg + pos)
+    allv = np.array([*neg, *pos])
     order = allv.argsort(kind="mergesort")
     ranks = np.empty(len(allv))
     sv = allv[order]
@@ -480,7 +527,7 @@ def auc(pos: list[float], neg: list[float]) -> float | None:
     return float((r_pos - len(pos) * (len(pos) + 1) / 2) / (len(pos) * len(neg)))
 
 
-def auc_within(pos: list[tuple[str, int]], neg: list[tuple[str, int]], score) -> tuple[float | None, int]:
+def auc_within(pos: Sequence[Key], neg: Sequence[Key], score: Callable[[Key], float]) -> tuple[float | None, int]:
     """The AUC counted only over pairs from one deck, and how many pairs there were. A category's
     slides are often most of one or two decks (jruby-ja's gradients, drawing-workshop's colours), and
     across decks a metric can rank a deck's style rather than the defect."""
@@ -500,19 +547,24 @@ def judged(verdicts: Path) -> dict[tuple[str, int], set[str]]:
     """(deck, slide) -> the categories the blind judges found there ({} = judged identical), from a
     judging folder: judging/<deck>/verdict-*.json, findings.json ("trusted": the findings that held up)
     and judging-key.json (the planted control sheets, left out)."""
-    planted = set()
+    planted: set[Key] = set()
     key = verdicts / "judging-key.json"
     if key.exists():
-        for deck, items in json.loads(key.read_text(encoding="utf-8")).items():
-            planted |= {(deck, int(it["sheet"].split(".")[0])) for it in items}
-    trusted: dict[tuple[str, int], set[str]] = {}
-    for f in json.loads((verdicts / "findings.json").read_text(encoding="utf-8"))["trusted"]:
-        trusted.setdefault((f["deck"], int(f["sheet"])), set()).add(f["category"])
-    out = {}
+        for deck, items in as_object(json.loads(key.read_text(encoding="utf-8")), str(key)).items():
+            planted |= {(deck, int(as_str(it["sheet"], f"{key}: {deck}").split(".")[0]))
+                        for it in as_objects(items, f"{key}: {deck}")}
+    trusted: dict[Key, set[str]] = {}
+    findings = verdicts / "findings.json"
+    for f in as_objects(as_object(json.loads(findings.read_text(encoding="utf-8")), str(findings))["trusted"],
+                        f"{findings}: trusted"):
+        trusted.setdefault((as_str(f["deck"], str(findings)), _int(f["sheet"], str(findings))),
+                           set()).add(as_str(f["category"], str(findings)))
+    out: dict[Key, set[str]] = {}
     for path in (verdicts / "judging").glob("*/verdict-*.json"):
         deck = path.parent.name
-        for s in json.loads(path.read_text(encoding="utf-8"))["sheets"]:
-            k = (deck, int(s["sheet"]))
+        for s in as_objects(as_object(json.loads(path.read_text(encoding="utf-8")), str(path))["sheets"],
+                            f"{path}: sheets"):
+            k = (deck, _int(s["sheet"], str(path)))
             if k in planted:
                 continue
             if s["same"]:
@@ -522,16 +574,108 @@ def judged(verdicts: Path) -> dict[tuple[str, int], set[str]]:
     return out
 
 
-def load_metrics(tag: str) -> dict[tuple[str, int], dict]:
-    rows = {}
+def _int(value: Json, where: str) -> int:
+    """A sheet number as a judge wrote it: a number, or its digits as a string."""
+    if isinstance(value, (str, int, float)):
+        return int(value)
+    raise JsonShapeError(f"{where}: a sheet number was expected, found {type(value).__name__}")
+
+
+def _number(value: Json, where: str) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    raise JsonShapeError(f"{where}: a number was expected, found {type(value).__name__}")
+
+
+def numbers(o: Json, where: str) -> dict[str, float]:
+    """A JSON object of numbers (a metrics row, thresholds, weights), each kept as it was read."""
+    return {k: _number(v, f"{where}: {k}") for k, v in as_object(o, where).items()}
+
+
+@dataclass(frozen=True, kw_only=True)
+class MetricsFile:
+    """A bench run's metrics.json (`run`): the deck, and each slide's number and row."""
+    deck: str
+    slides: list[tuple[int, Row]]
+
+
+def metrics_file(path: Path) -> MetricsFile:
+    d = as_object(json.loads(path.read_text(encoding="utf-8")), str(path))
+    where = f"{path}: slides"
+    return MetricsFile(deck=as_str(d["deck"], f"{path}: deck"),
+                       slides=[(as_int(r["slide"], where), numbers(r, where)) for r in as_objects(d["slides"], where)])
+
+
+def load_metrics(tag: str) -> dict[Key, Row]:
+    rows: dict[Key, Row] = {}
     for p in corpus_dir().glob(f"*/runs/{tag}/metrics.json"):
-        d = json.loads(p.read_text(encoding="utf-8"))
-        for r in d["slides"]:
-            rows[(d["deck"], r["slide"])] = r
+        d = metrics_file(p)
+        for slide, r in d.slides:
+            rows[(d.deck, slide)] = r
     return rows
 
 
-def calibrate(tag: str, verdicts: Path) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class Calibration:
+    """What a `calibrate --json` file says `flag`, `rank` and `gallery` need: each metric's flag
+    threshold, and the SEVERITY weights (None in a file from before they were fitted)."""
+    thresholds: dict[str, float]
+    weights: dict[str, float] | None
+
+
+def calibration(path: Path) -> Calibration:
+    cal = as_object(json.loads(path.read_text(encoding="utf-8")), str(path))
+    weights = cal.get("severity_weights")
+    return Calibration(thresholds=numbers(cal["thresholds"], f"{path}: thresholds"),
+                       weights=None if weights is None else numbers(weights, f"{path}: severity_weights"))
+
+
+class AucPair(TypedDict):
+    auc: float | None
+    within: float | None
+
+
+class SeverityAucs(TypedDict):
+    before: AucPair
+    after: AucPair
+
+
+class Category(TypedDict):
+    """How well each metric, and severity before and after its weights, tells one judged category
+    from the slides judged identical."""
+    n: int
+    decks: int
+    pairs: int
+    auc: dict[str, float | None]
+    within: dict[str, float | None]
+    severity: SeverityAucs
+
+
+class WeightFit(TypedDict):
+    weight: float
+    auc: float | None
+    pairs: int
+
+
+class WeightCalibration(TypedDict):
+    note: str
+    n_content_lost: int
+    n_other_defect: int
+    before: WeightFit
+    after: WeightFit
+
+
+class CalibrationTable(TypedDict):
+    """`calibrate`'s answer, as `--json` writes it."""
+    n: int
+    identical: int
+    categories: dict[str, Category]
+    thresholds: dict[str, float]
+    severity_weights: dict[str, float]
+    severity_weight_calibration: WeightCalibration
+
+
+def calibrate(tag: str, verdicts: Path) -> CalibrationTable:
     labels = judged(verdicts)
     rows = load_metrics(tag)
     keys = [k for k in labels if k in rows]
@@ -546,38 +690,44 @@ def calibrate(tag: str, verdicts: Path) -> dict:
     severity_weights = {m: weight for m in MISSING_METRICS}
     content_pos, content_neg = content_lost_split(keys, labels)
     before_auc, before_pairs = content_lost_auc(rows, content_pos, content_neg, thresholds, None)
-    table = {"n": len(keys), "identical": len(neg), "categories": {},
-             # what only FLAG_SHARE of the slides the judges called identical exceed
-             "thresholds": thresholds,
-             "severity_weights": severity_weights,
-             # does severity rank a slide with words or a picture gone over one with some other
-             # judged defect - the ordering this weight exists for, before and after fitting it
-             "severity_weight_calibration": {
-                 "note": "CONTENT_LOST slides ranked over other-defect slides (never vs identical)",
-                 "n_content_lost": len(content_pos), "n_other_defect": len(content_neg),
-                 "before": {"weight": 1.0, "auc": before_auc, "pairs": before_pairs},
-                 "after": {"weight": weight, "auc": weight_auc, "pairs": weight_pairs}}}
+    categories: dict[str, Category] = {}
+    table: CalibrationTable = {
+        "n": len(keys), "identical": len(neg), "categories": categories,
+        # what only FLAG_SHARE of the slides the judges called identical exceed
+        "thresholds": thresholds,
+        "severity_weights": severity_weights,
+        # does severity rank a slide with words or a picture gone over one with some other
+        # judged defect - the ordering this weight exists for, before and after fitting it
+        "severity_weight_calibration": {
+            "note": "CONTENT_LOST slides ranked over other-defect slides (never vs identical)",
+            "n_content_lost": len(content_pos), "n_other_defect": len(content_neg),
+            "before": {"weight": 1.0, "auc": before_auc, "pairs": before_pairs},
+            "after": {"weight": weight, "auc": weight_auc, "pairs": weight_pairs}}}
+
+    def metric(m: str) -> Callable[[Key], float]:
+        return lambda k: rows[k][m]
+
+    def sev_before(k: Key) -> float:
+        return severity(rows[k], thresholds, None)[0]
+
+    def sev_after(k: Key) -> float:
+        return severity(rows[k], thresholds, severity_weights)[0]
     for cat in ["any", *cats]:
         pos = [k for k in keys if labels[k] and (cat == "any" or cat in labels[k])]
-        within = {m: auc_within(pos, neg, lambda k, m=m: rows[k][m]) for m in names}
-        sev_before = lambda k: severity(rows[k], thresholds)[0]                        # noqa: E731
-        sev_after = lambda k: severity(rows[k], thresholds, severity_weights)[0]       # noqa: E731
-        table["categories"][cat] = {"n": len(pos), "decks": len({k[0] for k in pos}),
-                                    "pairs": next(iter(within.values()))[1] if within else 0,
-                                    "auc": {m: auc([rows[k][m] for k in pos], [rows[k][m] for k in neg])
-                                            for m in names},
-                                    "within": {m: w[0] for m, w in within.items()},
-                                    "severity": {
-                                        "before": {"auc": auc([sev_before(k) for k in pos],
-                                                             [sev_before(k) for k in neg]),
-                                                   "within": auc_within(pos, neg, sev_before)[0]},
-                                        "after": {"auc": auc([sev_after(k) for k in pos],
-                                                            [sev_after(k) for k in neg]),
-                                                  "within": auc_within(pos, neg, sev_after)[0]}}}
+        within = {m: auc_within(pos, neg, metric(m)) for m in names}
+        categories[cat] = {"n": len(pos), "decks": len({k[0] for k in pos}),
+                           "pairs": next(iter(within.values()))[1] if within else 0,
+                           "auc": {m: auc([rows[k][m] for k in pos], [rows[k][m] for k in neg]) for m in names},
+                           "within": {m: w[0] for m, w in within.items()},
+                           "severity": {
+                               "before": {"auc": auc([sev_before(k) for k in pos], [sev_before(k) for k in neg]),
+                                          "within": auc_within(pos, neg, sev_before)[0]},
+                               "after": {"auc": auc([sev_after(k) for k in pos], [sev_after(k) for k in neg]),
+                                         "within": auc_within(pos, neg, sev_after)[0]}}}
     return table
 
 
-def print_calibration(table: dict) -> None:
+def print_calibration(table: CalibrationTable) -> None:
     cats = table["categories"]
     names = list(next(iter(cats.values()))["auc"])
     print(f"{table['n']} judged slides, {table['identical']} identical. ROC AUC per defect category "
@@ -586,23 +736,25 @@ def print_calibration(table: dict) -> None:
                               ("within", "pairs from one deck only (a deck's style can't score)", "pairs")):
         print(f"\n{title}\n{'category':<16}{count:>6}  " + " ".join(f"{m[:10]:>10}" for m in names))
         for cat, row in cats.items():
-            cells = []
+            values = row["auc"] if key == "auc" else row["within"]
+            cells: list[str] = []
             for m in names:
-                v = row[key][m]
+                v = values[m]
                 cells.append(f"{v:>10.2f}" if v is not None else f"{'-':>10}")
-            print(f"{cat:<16}{row[count]:>6}  " + " ".join(cells))
-    def sev_cell(v: dict) -> str:
+            print(f"{cat:<16}{row['n'] if count == 'n' else row['pairs']:>6}  " + " ".join(cells))
+
+    def sev_cell(v: AucPair) -> str:
         return f"{v['auc']:.2f}/{v['within']:.2f}" if v["auc"] is not None else "-/-"
 
-    w = table.get("severity_weights", {})
+    w = table["severity_weights"]
     one = next(iter(w.values()), 1.0) if w else 1.0
-    calib = table.get("severity_weight_calibration", {})
+    calib = table["severity_weight_calibration"]
     print(f"\nseverity, judged-bad vs judged-identical (the coarse check: does the sum still find a "
           f"defect at all): all pairs / within-deck, before -> after {', '.join(MISSING_METRICS)} x{one:g}")
     for cat, row in cats.items():
         s = row["severity"]
         print(f"{cat:<16}{row['n']:>6}  {sev_cell(s['before']):>12} -> {sev_cell(s['after']):<12}")
-    if calib.get("before", {}).get("auc") is not None:
+    if calib["before"]["auc"] is not None:
         b, a = calib["before"], calib["after"]
         print(f"\nseverity, CONTENT_LOST slides (words/a picture gone) vs other-defect slides (the fix's "
               f"own target - never vs identical): {calib['n_content_lost']} content-lost, "
@@ -613,11 +765,11 @@ def print_calibration(table: dict) -> None:
         print("\nseverity, CONTENT_LOST vs other-defect: not enough judged CONTENT_LOST slides to calibrate against")
 
 
-def flag(tag: str, thresholds: dict, n: int) -> None:
+def flag(tag: str, thresholds: Mapping[str, float], n: int) -> None:
     """Each slide's metrics past their thresholds (from `calibrate --json`), the slides with the most
     first: which metrics a slide trips says what kind of defect to look for."""
     rows = load_metrics(tag)
-    hits = []
+    hits: list[tuple[int, float, Key, dict[str, float]]] = []
     for key, r in rows.items():
         over = {m: r[m] / t for m, t in thresholds.items() if m in r and t > 0 and r[m] > t}
         if over:
@@ -677,11 +829,12 @@ MISSING_WEIGHT_GRID = (1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0, 3.5, 4.0, 4.5, 5.0, 
 CONTENT_LOST = frozenset({"text_missing", "picture_missing"})
 
 
-def severity(r: dict, thresholds: dict, weights: dict | None = None) -> tuple[float, dict]:
+def severity(r: Mapping[str, float], thresholds: Mapping[str, float],
+             weights: Mapping[str, float] | None) -> tuple[float, dict[str, float]]:
     """How far past what identical slides reach a slide is: each SEVERITY metric over its threshold,
-    scaled by its calibrated `weights` (default 1x, i.e. unweighted), capped, summed. Returns the sum
+    scaled by its calibrated `weights` (None: 1x, i.e. unweighted), capped, summed. Returns the sum
     and {metric: weighted ratio} of those past their threshold."""
-    over = {}
+    over: dict[str, float] = {}
     for m in SEVERITY:
         t = thresholds.get(m, 0)
         if m not in r or t <= 0 or r[m] <= t:
@@ -691,7 +844,7 @@ def severity(r: dict, thresholds: dict, weights: dict | None = None) -> tuple[fl
     return sum(over.values()), over
 
 
-def content_lost_split(keys: list, labels: dict) -> tuple[list, list]:
+def content_lost_split(keys: Sequence[Key], labels: Mapping[Key, set[str]]) -> tuple[list[Key], list[Key]]:
     """CONTENT_LOST slides (words or a picture gone) and slides with some other judged defect (drift,
     colour, a wrong shape...) - never the judged-identical ones, which a threshold already separates."""
     pos = [k for k in keys if labels[k] & CONTENT_LOST]
@@ -699,21 +852,26 @@ def content_lost_split(keys: list, labels: dict) -> tuple[list, list]:
     return pos, neg
 
 
-def content_lost_auc(rows: dict, pos: list, neg: list, thresholds: dict,
-                     weights: dict | None) -> tuple[float | None, int]:
+def content_lost_auc(rows: Mapping[Key, Mapping[str, float]], pos: Sequence[Key], neg: Sequence[Key],
+                     thresholds: Mapping[str, float],
+                     weights: Mapping[str, float] | None) -> tuple[float | None, int]:
     """How well `severity(..., weights)` ranks CONTENT_LOST slides over other-defect ones: by
     within-deck AUC where any such pair exists (a deck's own style cannot win it), else over every
     pair (too few decks carry a CONTENT_LOST verdict to keep to one deck at a time)."""
     if not pos or not neg:
         return None, 0
-    score = lambda k: severity(rows[k], thresholds, weights)[0]  # noqa: E731
+
+    def score(k: Key) -> float:
+        return severity(rows[k], thresholds, weights)[0]
     a, pairs = auc_within(pos, neg, score)
     if not pairs:                                      # no same-deck pair: fall back to every pair
         a, pairs = auc(list(map(score, pos)), list(map(score, neg))), len(pos) * len(neg)
     return a, pairs
 
 
-def fit_missing_weight(rows: dict, keys: list, labels: dict, thresholds: dict) -> tuple[float, float | None, int]:
+def fit_missing_weight(rows: Mapping[Key, Mapping[str, float]], keys: Sequence[Key],
+                       labels: Mapping[Key, set[str]],
+                       thresholds: Mapping[str, float]) -> tuple[float, float | None, int]:
     """The MISSING_METRICS weight (>=1x) whose severity ranks CONTENT_LOST slides over other-defect
     ones best (`content_lost_auc`) - the ordering the flagged-content-missing bug is actually about,
     not the coarser "past a threshold at all" one `calibrate`'s per-metric AUCs already answer. Ties
@@ -731,44 +889,59 @@ def fit_missing_weight(rows: dict, keys: list, labels: dict, thresholds: dict) -
     return best_w, (best_auc if best_auc >= 0 else None), best_pairs
 
 
-def rank(tag: str, thresholds: dict, corpora: list[Path], weights: dict | None = None) -> list[dict]:
+class Ranked(TypedDict):
+    """A slide as `rank` places it (and a gallery's .json lists it under "worst")."""
+    corpus: str
+    deck: str
+    slide: int
+    severity: float
+    over: dict[str, float]
+    sheet: str
+
+
+def rank(tag: str, thresholds: Mapping[str, float], corpora: list[Path],
+         weights: Mapping[str, float] | None) -> list[Ranked]:
     """Every slide of run `tag` in `corpora`, worst first."""
-    out = []
+    out: list[Ranked] = []
     for corpus in corpora:
         for p in corpus.glob(f"*/runs/{tag}/metrics.json"):
-            d = json.loads(p.read_text(encoding="utf-8"))
-            for r in d["slides"]:
+            d = metrics_file(p)
+            for slide, r in d.slides:
                 sev, over = severity(r, thresholds, weights)
-                out.append({"corpus": corpus.name, "deck": d["deck"], "slide": r["slide"], "severity": round(sev, 2),
+                out.append({"corpus": corpus.name, "deck": d.deck, "slide": slide, "severity": round(sev, 2),
                             "over": {m: round(v, 1) for m, v in sorted(over.items(), key=lambda kv: -kv[1])},
-                            "sheet": str(p.parent / "sheets" / f"{r['slide']:03}.png")})
+                            "sheet": str(p.parent / "sheets" / f"{slide:03}.png")})
     out.sort(key=lambda s: -s["severity"])
     return out
 
 
-def gallery(tag: str, thresholds: dict, corpora: list[Path], n: int, out: Path,
-            previous: Path | None = None, per_deck: int = 2, weights: dict | None = None,
-            decks: set[str] | None = None) -> Path:
+def gallery(tag: str, thresholds: Mapping[str, float], corpora: list[Path], n: int, out: Path,
+            previous: Path | None, per_deck: int, weights: Mapping[str, float] | None,
+            decks: set[str] | None) -> Path:
     """The `n` worst slides of run `tag` as one self-contained HTML page (their sheets inlined:
     the deck | our page | the ink diff), with what each trips, the kind of defect that names, and
     against `previous` (an earlier gallery's .json) which slides are new to the list. The corpora
     are other people's decks: the page is for looking at here, never for publishing. `weights`
-    scales SEVERITY metrics (a `calibrate --json`'s "severity_weights"; omitted, every metric counts
-    1x as before). `decks` keeps only those decks."""
+    scales SEVERITY metrics (a `calibrate --json`'s "severity_weights"; None, every metric counts
+    1x as before). `decks` keeps only those decks (None: every one)."""
     import base64
     import html
     import io
     ranked = [s for s in rank(tag, thresholds, corpora, weights) if decks is None or s["deck"] in decks]
-    before = set()
+    before: set[Key] = set()
     if previous and previous.exists():
-        before = {(s["deck"], s["slide"]) for s in json.loads(previous.read_text(encoding="utf-8"))["worst"]}
-    top, shown = [], {}
+        where = f"{previous}: worst"
+        before = {(as_str(s["deck"], where), as_int(s["slide"], where))
+                  for s in as_objects(as_object(json.loads(previous.read_text(encoding="utf-8")), str(previous))["worst"],
+                                      where)}
+    top: list[Ranked] = []
+    shown: dict[str, int] = {}
     for s in ranked:                       # a deck's family of defect once or twice, not the whole list
         if len(top) < n and shown.get(s["deck"], 0) < per_deck:
             top.append(s)
             shown[s["deck"]] = shown.get(s["deck"], 0) + 1
     stamp = time.strftime("%Y-%m-%d %H:%M")
-    rows = []
+    rows: list[str] = []
     for i, s in enumerate(top, 1):
         img = ""
         if Path(s["sheet"]).exists():
@@ -813,14 +986,14 @@ def heat(values: Floats32, size: tuple[int, int], top: float) -> Image.Image:
     """A map as white (0) to dark red (`top` and over), resized to `size`."""
     v = np.clip(np.nan_to_num(values.astype(np.float32)) / top, 0, 1)
     rgb = np.stack([255 - 115 * v, 255 - 255 * v, 255 - 255 * v], -1).astype(np.uint8)
-    return Image.fromarray(rgb).resize(size, Image.NEAREST)
+    return Image.fromarray(rgb).resize(size, Image.Resampling.NEAREST)
 
 
-def ink_map(maps: dict, local: bool = False) -> Image.Image:
+def ink_map(maps: Maps, local: bool) -> Image.Image:
     """Where the ink went: the deck's ink with none of ours near it red, ours with none of the deck's
-    blue, ink that has a counterpart grey (on the spot) to orange (REACH away)."""
-    m_ref, m_got, d_ref, d_got = (maps[k] for k in (("l_ref", "l_got", "ld_ref", "ld_got") if local else
-                                                     ("m_ref", "m_got", "d_ref", "d_got")))
+    blue, ink that has a counterpart grey (on the spot) to orange (REACH away). `local`: of local ink."""
+    m_ref, m_got, d_ref, d_got = ((maps.l_ref, maps.l_got, maps.ld_ref, maps.ld_got) if local else
+                                  (maps.m_ref, maps.m_got, maps.d_ref, maps.d_got))
     out = np.full(m_ref.shape + (3,), 255, np.uint8)
     for m, d in ((m_got, d_got), (m_ref, d_ref)):
         near = m & (d <= REACH)
@@ -840,12 +1013,12 @@ def show(deck: str, slide: int, tag: str, out: Path, gpu: bool) -> Path:
         h, w = ref.shape[:2]
         scores, maps = numpy_metrics(ref, got, ir)
         panels = [("deck", Image.fromarray(ref.astype(np.uint8))), ("adopted", Image.fromarray(got.astype(np.uint8))),
-                  ("ink: red missing, blue extra, orange moved", ink_map(maps)),
-                  ("local ink: red missing, blue extra, orange moved", ink_map(maps, local=True)),
-                  ("local_ink_de", heat(maps["ink_de"], (w, h), 40.0)),
-                  ("ground_de", heat(maps["ground_de"], (w, h), 20.0))]
+                  ("ink: red missing, blue extra, orange moved", ink_map(maps, False)),
+                  ("local ink: red missing, blue extra, orange moved", ink_map(maps, True)),
+                  ("local_ink_de", heat(maps.ink_de, (w, h), 40.0)),
+                  ("ground_de", heat(maps.ground_de, (w, h), 20.0))]
         if gpu:
-            g = Gpu()
+            g = Gpu(None)
             (s, m) = g.ssim(ref, got)
             scores.update(s)
             panels.append(("ssim", heat(m, (w, h), 0.5)))
@@ -855,7 +1028,7 @@ def show(deck: str, slide: int, tag: str, out: Path, gpu: bool) -> Path:
             (s, m) = g.dino(ref, got)
             scores.update(s)
             panels.append(("dino patches", heat(m, (w, h), 0.5)))
-            scores.update(g.ot(maps["l_ref"], maps["l_got"]))
+            scores.update(g.ot(maps.l_ref, maps.l_got))
         cols, pw, ph = 3, w // 2, h // 2
         rows = -(-len(panels) // cols)
         sheet = Image.new("RGB", (cols * (pw + 8), rows * (ph + 26) + 60), "white")
@@ -874,7 +1047,7 @@ def show(deck: str, slide: int, tag: str, out: Path, gpu: bool) -> Path:
     raise SystemExit(f"{deck} has no slide {slide} in run {tag}")
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None) -> None:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run")
@@ -913,13 +1086,13 @@ def main(argv: list[str] | None = None) -> None:
     g.add_argument("--per-deck", type=int, default=2, help="at most this many slides of one deck")
     a = ap.parse_args(argv)
     if a.cmd == "gallery":
-        cal = json.loads(a.calibration.read_text(encoding="utf-8"))
-        print(gallery(a.tag, cal["thresholds"], a.corpus or [corpus_dir()], a.n, a.out, a.previous, a.per_deck,
-                      weights=cal.get("severity_weights")))
+        cal = calibration(a.calibration)
+        print(gallery(a.tag, cal.thresholds, a.corpus or [corpus_dir()], a.n, a.out, a.previous, a.per_deck,
+                      cal.weights, None))
     elif a.cmd == "compare":
         compare(a.before, a.after, a.n)
     elif a.cmd == "flag":
-        flag(a.tag, json.loads(a.calibration.read_text(encoding="utf-8"))["thresholds"], a.n)
+        flag(a.tag, calibration(a.calibration).thresholds, a.n)
     elif a.cmd == "show":
         deck, _, n = a.slide.rpartition(":")
         print(show(deck, int(n), a.tag, a.out, a.gpu))
@@ -935,4 +1108,4 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

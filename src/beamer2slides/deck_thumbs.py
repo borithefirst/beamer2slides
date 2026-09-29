@@ -470,17 +470,19 @@ def face_glyphs(font: str, bold: bool, italic: bool) -> Glyphs | None:
     try:
         from fontTools.pens.boundsPen import BoundsPen
         from fontTools.ttLib import TTFont
-        from .adopt import font_family
+        from .adopt import FontFace, font_family
+        from .fontfetch import table_int
         from .deck_ir import family_of
-        files = font_family(font, family_of(font))
-        if not files:
+        got = font_family(font, family_of(font), "")
+        if got is None:
             return None
-        have = flatten(str(files.get("match") or ""))
-        if not (have.startswith(key[0]) or key[0].startswith(have)) or files.get("FontIndex"):
+        have = flatten(got.match)
+        if not (have.startswith(key[0]) or key[0].startswith(have)) or got.files.index:
             return None
-        style = ("BoldItalicFont" if italic else "BoldFont") if bold else ("ItalicFont" if italic else "UprightFont")
-        f = TTFont(files.get(style) or files["UprightFont"], lazy=True)
-        cmap, glyphs, hmtx, upem = f.getBestCmap(), f.getGlyphSet(), f["hmtx"], f["head"].unitsPerEm
+        style: FontFace = ("BoldItalicFont" if italic else "BoldFont") if bold else \
+            ("ItalicFont" if italic else "UprightFont")
+        f = TTFont(got.files.faces.get(style) or got.files.upright, lazy=True)
+        cmap, glyphs, hmtx, upem = f.getBestCmap(), f.getGlyphSet(), f["hmtx"], table_int(f, "head", "unitsPerEm")
     except Exception:                                   # noqa: BLE001 - no metrics is an answer
         return None
     if cmap is None:

@@ -473,12 +473,13 @@ def test_a_trailing_width_qualifier_is_a_different_narrower_font(tmp_path):
     from .test_adopt_media import tiny_font
     path = tmp_path / "Arial-Regular.ttf"
     path.write_bytes(tiny_font("Arial"))
-    files = {"UprightFont": path, "stem": "Arial", "match": "Arial"}
+    files = adopt.FontFiles(faces={"UprightFont": path}, index=0)
+    family = adopt.FontFamily(stem="Arial", match="Arial", standin=None, files=files)
     assert adopt.same_font_name("arial", "arial")
     assert adopt.same_font_name("arial", "arialmt"), "a name-table alias stays merged"
     assert not adopt.same_font_name("arial", "arialnarrow")
-    assert adopt.stood_in("Arial Narrow", dict(files)) == "Arial"
-    assert adopt.stood_in("Arial MT", dict(files)) is None, "a genuine alias, not a stand-in"
+    assert adopt.stood_in("Arial Narrow", family) == "Arial"
+    assert adopt.stood_in("Arial MT", family) is None, "a genuine alias, not a stand-in"
 
     def sample(width, text="AAAAA"):
         return {"kind": "text", "bbox": [0, 0, 100, 20], "ink_width": width,
@@ -518,12 +519,12 @@ def test_a_formal_script_the_machine_lacks_is_set_in_its_google_fonts_stand_in(t
     monkeypatch.setattr(fontfetch, "fetch_family", fetch)
     adopt._FAMILIES.clear()
     try:
-        files = adopt.font_family("Corsiva", "serif")
+        got = adopt.font_family("Corsiva", "serif", "")
     finally:
         adopt._FAMILIES.clear()
-    assert files and files["standin"] == "Tinos"
-    assert files["UprightFont"].name == "Tinos-Italic.ttf"
-    assert adopt.stood_in("Corsiva", dict(files)) == "Tinos"
+    assert got is not None and got.standin == "Tinos"
+    assert got.files.upright.name == "Tinos-Italic.ttf"
+    assert adopt.stood_in("Corsiva", got) == "Tinos"
 
 
 def test_screen_and_office_fonts_stand_in_by_measured_width():
@@ -556,9 +557,9 @@ def test_verdana_is_set_wide_and_consolas_narrow_with_too_few_lines_to_measure(t
     """`stretch` falls back to `DESIGN_WIDTHS` when a deck has no (or too few) lines of its own font
     to measure (`font_widths` needs at least two): Verdana's stand-in is stretched out to match its
     screen-legible width, Consolas' the other way, same as Arial Narrow's 82% (ua-space, offline)."""
-    noto = {"UprightFont": tmp_path / "NotoSans-Regular.ttf"}
+    noto = adopt.FontFiles(faces={"UprightFont": tmp_path / "NotoSans-Regular.ttf"}, index=0)
     assert adopt.stretch("Verdana", "NotoSans", noto, deck({"slides": []})) == ",FakeStretch=1.07"
-    inconsolata = {"UprightFont": tmp_path / "Inconsolata-Regular.ttf"}
+    inconsolata = adopt.FontFiles(faces={"UprightFont": tmp_path / "Inconsolata-Regular.ttf"}, index=0)
     assert adopt.stretch("Consolas", "Inconsolata", inconsolata, deck({"slides": []})) == ",FakeStretch=1.1"
     # the deck's own font is never stretched against itself
     assert adopt.stretch("Verdana", "Verdana", noto, deck({"slides": []})) == ""
@@ -583,11 +584,11 @@ def test_verdana_stands_in_as_noto_sans_when_the_machine_lacks_it(tmp_path, monk
     monkeypatch.setattr(fontfetch, "fetch_family", fetch)
     adopt._FAMILIES.clear()
     try:
-        files = adopt.font_family("Verdana", "sans")
+        got = adopt.font_family("Verdana", "sans", "")
     finally:
         adopt._FAMILIES.clear()
-    assert files and files["standin"] == "NotoSans"
-    assert adopt.stood_in("Verdana", dict(files)) == "NotoSans"
+    assert got is not None and got.standin == "NotoSans"
+    assert adopt.stood_in("Verdana", got) == "NotoSans"
 
 
 def test_adopt_refuses_to_write_over_a_source(tmp_path):
@@ -711,7 +712,7 @@ def test_font_widths_ignores_bidi_marks_in_a_right_to_left_line(tmp_path):
     from .test_adopt_media import tiny_font
     path = tmp_path / "TinySans-Regular.ttf"
     path.write_bytes(tiny_font("Tiny Sans"))    # covers ASCII only: no glyph for LRM/RLM
-    files = {"UprightFont": path}
+    files = adopt.FontFiles(faces={"UprightFont": path}, index=0)
 
     def sample(width, text):
         return {"kind": "text", "bbox": [0, 0, 100, 20], "ink_width": width,
@@ -722,3 +723,15 @@ def test_font_widths_ignores_bidi_marks_in_a_right_to_left_line(tmp_path):
         sample(26.1, f"{RLM}AA{LRM}AAA"), sample(26.2, f"{LRM}{RLM}AAAAA{RLM}")]}]})
     assert adopt.font_widths("Deck Serif", files, marked) == adopt.font_widths("Deck Serif", files, plain)
     assert adopt.font_widths("Deck Serif", files, marked) == pytest.approx(0.9, abs=0.005)
+
+
+def test_the_adopt_summary_reads_what_the_agent_reports(tmp_path: Path) -> None:
+    """`adopt_sync.adopt_summary` is the typed read of a base's `adopt` ties, the numbers
+    `deck_adopt` reports: counts of the lists, 0 where a base says nothing."""
+    from beamer2slides import adopt_sync
+    path = tmp_path / "base.json"
+    path.write_text(json.dumps({"adopt": {"slides": 3, "paired": 5, "unpaired": ["a", "b"], "from_layout": ["c"]}}),
+                    encoding="utf-8")
+    assert adopt_sync.adopt_summary(path) == adopt_sync.AdoptSummary(slides=3, paired=5, unpaired=2, from_layout=1)
+    path.write_text(json.dumps({"slides": []}), encoding="utf-8")
+    assert adopt_sync.adopt_summary(path) == adopt_sync.AdoptSummary(slides=None, paired=0, unpaired=0, from_layout=0)

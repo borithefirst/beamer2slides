@@ -5524,34 +5524,6 @@
       "severity": "error"
     },
     {
-      "column": 12,
-      "path": "tests/test_adopt_bench.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`slide` is missing an annotation for parameter `boxes`",
-      "severity": "error"
-    },
-    {
-      "column": 54,
-      "path": "tests/test_adopt_bench.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`test_the_cache_key_follows_the_source_and_the_ir` is missing an annotation for parameter `tmp_path`",
-      "severity": "error"
-    },
-    {
-      "column": 22,
-      "path": "tests/test_adopt_bench.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 22,
-      "path": "tests/test_adopt_bench.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 11,
       "path": "tests/test_adopt_compiles.py",
       "name": "implicit-any-parameter",
@@ -8037,62 +8009,6 @@
       "severity": "error"
     },
     {
-      "column": 36,
-      "path": "tests/test_adopt_replay.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`test_a_source_is_compiled_once` is missing an annotation for parameter `tmp_path`",
-      "severity": "error"
-    },
-    {
-      "column": 60,
-      "path": "tests/test_adopt_replay.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`test_a_source_that_did_not_compile_fails_again_at_once` is missing an annotation for parameter `tmp_path`",
-      "severity": "error"
-    },
-    {
-      "column": 34,
-      "path": "tests/test_adopt_replay.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`test_old_compiles_are_pruned` is missing an annotation for parameter `tmp_path`",
-      "severity": "error"
-    },
-    {
-      "column": 68,
-      "path": "tests/test_adopt_replay.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`test_the_hash_is_the_sources_bytes_and_whether_notes_are_shown` is missing an annotation for parameter `tmp_path`",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "tests/test_adopt_replay.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `read_bytes`",
-      "severity": "error"
-    },
-    {
-      "column": 33,
-      "path": "tests/test_adopt_scripts.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `dict[str, int]` is not assignable to parameter `chars` with type `Counter[Unknown]` in function `beamer2slides.scripts.cjk_language`",
-      "severity": "error"
-    },
-    {
-      "column": 33,
-      "path": "tests/test_adopt_scripts.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `dict[str, int]` is not assignable to parameter `chars` with type `Counter[Unknown]` in function `beamer2slides.scripts.cjk_language`",
-      "severity": "error"
-    },
-    {
-      "column": 33,
-      "path": "tests/test_adopt_scripts.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `dict[str, int]` is not assignable to parameter `chars` with type `Counter[Unknown]` in function `beamer2slides.scripts.cjk_language`",
-      "severity": "error"
-    },
-    {
       "column": 24,
       "path": "tests/test_adopt_scripts.py",
       "name": "implicit-any-lambda",
@@ -8731,13 +8647,6 @@
     },
     {
       "column": 25,
-      "path": "tests/test_adopt_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `list[_T]`",
-      "severity": "error"
-    },
-    {
-      "column": 29,
       "path": "tests/test_adopt_scripts.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_T` for generic class `list[_T]`",
@@ -14946,13 +14855,6 @@
       "severity": "error"
     },
     {
-      "column": 97,
-      "path": "tests/test_adopt_text.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 13,
       "path": "tests/test_adopt_text.py",
       "name": "implicit-any-type-argument",
@@ -15164,13 +15066,6 @@
     },
     {
       "column": 96,
-      "path": "tests/test_adopt_text.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 97,
       "path": "tests/test_adopt_text.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
@@ -23129,13 +23024,6 @@
       "severity": "error"
     },
     {
-      "column": 126,
-      "path": "tests/test_deck_files.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
       "column": 55,
       "path": "tests/test_deck_files.py",
       "name": "implicit-any-lambda",
@@ -23189,13 +23077,6 @@
       "path": "tests/test_deck_files.py",
       "name": "implicit-any-lambda",
       "concise_description": "Type of lambda parameter `a` is unknown",
-      "severity": "error"
-    },
-    {
-      "column": 80,
-      "path": "tests/test_deck_files.py",
-      "name": "implicit-any-lambda",
-      "concise_description": "Type of lambda parameter `data` is unknown",
       "severity": "error"
     },
     {
@@ -23287,13 +23168,6 @@
       "path": "tests/test_deck_files.py",
       "name": "implicit-any-lambda",
       "concise_description": "Type of lambda parameter `target` is unknown",
-      "severity": "error"
-    },
-    {
-      "column": 75,
-      "path": "tests/test_deck_files.py",
-      "name": "implicit-any-lambda",
-      "concise_description": "Type of lambda parameter `url` is unknown",
       "severity": "error"
     },
     {
@@ -45739,27 +45613,6 @@
       "severity": "error"
     },
     {
-      "column": 14,
-      "path": "tests/test_fontfiles.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `list[_T]`",
-      "severity": "error"
-    },
-    {
-      "column": 14,
-      "path": "tests/test_fontfiles.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `list[_T]`",
-      "severity": "error"
-    },
-    {
-      "column": 14,
-      "path": "tests/test_fontfiles.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `list[_T]`",
-      "severity": "error"
-    },
-    {
       "column": 11,
       "path": "tests/test_fontfiles.py",
       "name": "implicit-any-type-argument",
@@ -45827,13 +45680,6 @@
       "path": "tests/test_fontfiles.py",
       "name": "unsupported-operation",
       "concise_description": "Cannot set item in `None`",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "tests/test_fontfiles.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
       "severity": "error"
     },
     {
@@ -60187,27 +60033,6 @@
       "severity": "error"
     },
     {
-      "column": 41,
-      "path": "tests/test_slide_metrics.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `list[int | None]` is not assignable to parameter `neg` with type `list[float]` in function `beamer2slides.devtools.slide_metrics.auc`",
-      "severity": "error"
-    },
-    {
-      "column": 16,
-      "path": "tests/test_slide_metrics.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `list[int | None]` is not assignable to parameter `pos` with type `list[float]` in function `beamer2slides.devtools.slide_metrics.auc`",
-      "severity": "error"
-    },
-    {
-      "column": 47,
-      "path": "tests/test_slide_metrics.py",
-      "name": "implicit-any-lambda",
-      "concise_description": "Type of lambda parameter `k` is unknown",
-      "severity": "error"
-    },
-    {
       "column": 26,
       "path": "tests/test_slide_metrics.py",
       "name": "implicit-any-parameter",
@@ -60296,13 +60121,6 @@
       "path": "tests/test_slide_metrics.py",
       "name": "implicit-any-parameter",
       "concise_description": "`test_calibrate_fits_a_missing_weight_and_reports_before_and_after` is missing an annotation for parameter `tmp_path`",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "tests/test_slide_metrics.py",
-      "name": "unsupported-operation",
-      "concise_description": "`>` is not supported between `None` and `float`",
       "severity": "error"
     },
     {

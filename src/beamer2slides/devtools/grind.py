@@ -23,10 +23,12 @@ import shutil
 import subprocess
 import sys
 import time
-from collections import defaultdict
+from collections.abc import Iterator
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 
+from beamer2slides.json_types import Json, JsonObject, as_object, as_objects, as_str
 from beamer2slides.paths import CHECKOUT
 
 OUT = CHECKOUT / "out" / "grind"
@@ -37,32 +39,48 @@ CALIBRATION = CHECKOUT / "out" / "adopt-corpus" / "judged" / "hunt0" / "calibrat
 
 # ------------------------------------------------------------------------------------------ ledger
 
-def log(stage: str, **fields) -> dict:
+def log(stage: str, **fields: Json) -> JsonObject:
     """One line of the ledger: what a stage cost (seconds, tokens, agents) and what it found."""
-    entry = {"when": time.strftime("%Y-%m-%dT%H:%M:%S"), "stage": stage, **fields}
+    entry: JsonObject = {"when": time.strftime("%Y-%m-%dT%H:%M:%S"), "stage": stage, **fields}
     OUT.mkdir(parents=True, exist_ok=True)
     with LEDGER.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry) + "\n")
     return entry
 
 
-def entries() -> list[dict]:
+@dataclass(frozen=True, kw_only=True)
+class Entry:
+    """What `summary` and `latest_tag` read of a ledger line: its stage, its round (None: work done
+    outside one), and what it cost (0 where the line says nothing)."""
+    stage: str
+    tag: str | None
+    seconds: float
+    tokens: int
+
+
+def entry(o: JsonObject) -> Entry:
+    tag, seconds, tokens = o.get("tag"), o.get("seconds"), o.get("tokens")
+    return Entry(stage=as_str(o["stage"], "ledger: stage"), tag=tag if isinstance(tag, str) else None,
+                 seconds=seconds if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else 0,
+                 tokens=tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else 0)
+
+
+def entries() -> list[Entry]:
     if not LEDGER.exists():
         return []
-    return [json.loads(line) for line in LEDGER.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [entry(as_object(json.loads(line), "ledger"))
+            for line in LEDGER.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def summary() -> None:
-    by_stage: dict = defaultdict(lambda: [0, 0.0, 0])
-    by_round: dict = defaultdict(lambda: [0.0, 0])
+    by_stage: dict[str, tuple[int, float, int]] = {}
+    by_round: dict[str, tuple[float, int]] = {}
     for e in entries():
-        s = by_stage[e["stage"]]
-        s[0] += 1
-        s[1] += e.get("seconds") or 0
-        s[2] += e.get("tokens") or 0
-        if e.get("tag"):
-            by_round[e["tag"]][0] += e.get("seconds") or 0
-            by_round[e["tag"]][1] += e.get("tokens") or 0
+        n, sec, tok = by_stage.get(e.stage, (0, 0.0, 0))
+        by_stage[e.stage] = (n + 1, sec + e.seconds, tok + e.tokens)
+        if e.tag:
+            sec, tok = by_round.get(e.tag, (0.0, 0))
+            by_round[e.tag] = (sec + e.seconds, tok + e.tokens)
     print(f"{'stage':<18} {'runs':>5} {'minutes':>8} {'tokens':>10}")
     for k, (n, sec, tok) in sorted(by_stage.items(), key=lambda kv: -kv[1][1]):
         print(f"{k:<18} {n:>5} {sec / 60:8.1f} {tok:>10}")
@@ -74,7 +92,7 @@ def summary() -> None:
 
 # ------------------------------------------------------------------------------------------- files
 
-def make_files(folder: Path, refresh: bool = False) -> str:
+def make_files(folder: Path, refresh: bool) -> str:
     """A bench capture as the files `deck-files` saves, in <capture>/deck-files/. The pictures are
     the capture's cache (the URLs it saw); the fonts are fetched now, as `deck_files.save` does."""
     from beamer2slides import deck_files
@@ -89,17 +107,18 @@ def make_files(folder: Path, refresh: bool = False) -> str:
     shutil.copyfile(folder / "presentation.json", part / deck_files.FOLDERS["presentation"])
     if (folder / "slides").is_dir():
         shutil.copytree(folder / "slides", part / deck_files.FOLDERS["thumbnails"])
-    pres = json.loads((folder / "presentation.json").read_text(encoding="utf-8"))
-    known = json.loads((folder / "urls.json").read_text(encoding="utf-8")) if (folder / "urls.json").exists() else {}
+    pres = as_object(json.loads((folder / "presentation.json").read_text(encoding="utf-8")), "presentation.json")
+    known: JsonObject = as_object(json.loads((folder / "urls.json").read_text(encoding="utf-8")), "urls.json") \
+        if (folder / "urls.json").exists() else {}
     cache = {p.stem: p for p in (folder / "images").glob("*")} if (folder / "images").is_dir() else {}
 
     def fetch(url: str) -> bytes:
         sha = known.get(url)
-        if sha and sha[:16] in cache:
+        if isinstance(sha, str) and sha and sha[:16] in cache:
             return cache[sha[:16]].read_bytes()
         raise OSError("not captured")
 
-    def thumbs(n: int):
+    def thumbs(n: int) -> Path | None:
         p = part / deck_files.FOLDERS["thumbnails"] / f"{n + 1:03d}.png"
         return p if p.exists() else None
 
@@ -114,7 +133,7 @@ def make_files(folder: Path, refresh: bool = False) -> str:
 
 
 def captures(corpora: list[Path], names: list[str]) -> list[Path]:
-    out = []
+    out: list[Path] = []
     for corpus in corpora:
         for p in sorted(corpus.iterdir()) if corpus.is_dir() else []:
             if (p / "presentation.json").exists() and (not names or p.name in names):
@@ -172,7 +191,7 @@ def round_(tag: str, corpora: list[Path], jobs: int, gpu: bool, names: list[str]
         subprocess.run(cmd, env={**interpreter.env(), "B2S_ADOPT_CORPUS": str(corpus)}, check=False,
                        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
         log("metrics", tag=tag, corpus=corpus.name, seconds=round(time.perf_counter() - t0, 1), gpu=gpu)
-    return show(tag, corpora)
+    return show(tag, corpora, 20, 2, False)
 
 
 # -------------------------------------------------------------------------------------------- show
@@ -182,11 +201,12 @@ def pages() -> list[Path]:
 
 
 def latest_tag() -> str | None:
-    rounds = [e["tag"] for e in entries() if e["stage"] == "metrics" and e.get("tag")]
+    rounds = [e.tag for e in entries() if e.stage == "metrics" and e.tag]
     if rounds:
         return rounds[-1]
     old = pages()
-    return json.loads(old[-1].read_text(encoding="utf-8"))["tag"] if old else None
+    return as_str(as_object(json.loads(old[-1].read_text(encoding="utf-8")), str(old[-1]))["tag"], str(old[-1])) \
+        if old else None
 
 
 ENGLISH_WORDS = {"the", "and", "of", "to", "is", "in", "for", "with", "you", "that", "are", "on", "this", "it"}
@@ -195,7 +215,7 @@ ENGLISH_WORDS = {"the", "and", "of", "to", "is", "in", "for", "with", "you", "th
 def english(folder: Path) -> bool:
     """Whether a capture's words are English: Latin letters, and common English words among them
     (a deck of few words, a diagram's labels, is let through on its letters alone)."""
-    def texts(o):
+    def texts(o: Json) -> Iterator[str]:
         if isinstance(o, dict):
             for k, v in o.items():
                 yield from [v] if k == "content" and isinstance(v, str) else texts(v)
@@ -210,24 +230,28 @@ def english(folder: Path) -> bool:
     return latin >= 0.9 and (common >= 0.03 or len(letters) < 1500)
 
 
-def show(tag: str | None, corpora: list[Path], n: int = 20, per_deck: int = 2, english_only: bool = False) -> Path:
+def show(tag: str | None, corpora: list[Path], n: int, per_deck: int, english_only: bool) -> Path:
     """The worst-slides page of `tag` (else the newest round's), against the newest page before it;
     prints what came onto the list and what left it. `english_only`: only decks in English."""
-    from beamer2slides.devtools.slide_metrics import gallery
+    from beamer2slides.devtools.slide_metrics import calibration, gallery
     tag = tag or latest_tag()
     if tag is None:
         raise SystemExit("no round yet: grind round TAG")
     t0 = time.perf_counter()
     old = pages()
     previous = old[-1] if old else None
-    cal = json.loads(CALIBRATION.read_text(encoding="utf-8"))
+    cal = calibration(CALIBRATION)
     decks = {p.name for p in captures(corpora, []) if english(p)} if english_only else None
-    path = gallery(tag, cal["thresholds"], corpora, n, OUT, previous, per_deck, cal.get("severity_weights"), decks)
-    now = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
-    was = json.loads(previous.read_text(encoding="utf-8")) if previous else {"worst": [], "tag": None}
-    key = lambda s: f"{s['deck']}:{s['slide']}"                          # noqa: E731
-    came = [key(s) for s in now["worst"] if key(s) not in {key(t) for t in was["worst"]}]
-    left = [key(s) for s in was["worst"] if key(s) not in {key(t) for t in now["worst"]}]
+    path = gallery(tag, cal.thresholds, corpora, n, OUT, previous, per_deck, cal.weights, decks)
+    now = as_object(json.loads(path.with_suffix(".json").read_text(encoding="utf-8")), str(path))
+    was: JsonObject = as_object(json.loads(previous.read_text(encoding="utf-8")), str(previous)) if previous \
+        else {"worst": [], "tag": None}
+
+    def key(s: JsonObject) -> str:
+        return f"{s['deck']}:{s['slide']}"
+    worst_now, worst_was = as_objects(now["worst"], f"{path}: worst"), as_objects(was["worst"], f"{previous}: worst")
+    came = [key(s) for s in worst_now if key(s) not in {key(t) for t in worst_was}]
+    left = [key(s) for s in worst_was if key(s) not in {key(t) for t in worst_now}]
     print(path)
     print(f"run {tag}: {now['flagged']} of {now['slides']} slides flagged"
           + (f" (was {was['flagged']} of {was['slides']} in {was['tag']})" if previous else ""))
@@ -238,7 +262,7 @@ def show(tag: str | None, corpora: list[Path], n: int = 20, per_deck: int = 2, e
     return path
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--corpus", type=Path, action="append", help="a bench corpus (repeat); default both")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -275,11 +299,12 @@ def main(argv: list[str] | None = None) -> None:
     elif a.cmd == "show":
         show(a.tag, corpora, a.n, a.per_deck, a.english)
     elif a.cmd == "log":
-        print(log(a.stage, **{k: v for k, v in vars(a).items() if k in ("tag", "seconds", "tokens", "agents", "model", "note")
-                             and v is not None}))
+        fields: JsonObject = {k: v for k, v in vars(a).items()
+                              if k in ("tag", "seconds", "tokens", "agents", "model", "note") and v is not None}
+        print(log(a.stage, **fields))
     else:
         summary()
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

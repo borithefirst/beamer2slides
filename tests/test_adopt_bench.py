@@ -1,16 +1,19 @@
 """The adopt benchmark's own arithmetic (offline, no corpus)."""
 
+from pathlib import Path
+
 import numpy as np
 
 from beamer2slides.devtools import adopt_bench
+from beamer2slides.json_types import Json, JsonObject
 
 
-def slide(*boxes) -> dict:
-    return {"size": [100, 50], "elements": [{"kind": "shape", "id": f"e{k}", "bbox": list(b)}
-                                            for k, b in enumerate(boxes)]}
+def slide(*boxes: tuple[int, int, int, int]) -> JsonObject:
+    elements: list[Json] = [{"kind": "shape", "id": f"e{k}", "bbox": list(b)} for k, b in enumerate(boxes)]
+    return {"size": [100, 50], "elements": elements}
 
 
-def test_element_losses_split_one_minus_boxes_among_the_elements():
+def test_element_losses_split_one_minus_boxes_among_the_elements() -> None:
     """Each pixel the score counts against a slide is charged to the smallest box holding it, so the
     losses add up to 1 - boxes and the element that set its ink wrong carries it."""
     s = slide((0, 0, 100, 50), (10, 10, 30, 20))          # a backdrop and a small box on it
@@ -22,13 +25,13 @@ def test_element_losses_split_one_minus_boxes_among_the_elements():
     got[40:45, 60:90] = True
     cov = adopt_bench.covered_mask(s, 100, 50)
     boxes = adopt_bench.overlap(ref & cov, got & cov)
-    out = adopt_bench.element_losses(ref, got, s)
+    out = adopt_bench.element_losses(ref, got, s, 6)
     assert [e["id"] for e in out] == ["e1"]
     assert abs(sum(e["loss"] for e in out) - (1 - boxes)) < 1e-3
     assert out[0]["miss"] > 0 and out[0]["extra"] > 0
 
 
-def test_the_cache_key_follows_the_source_and_the_ir(tmp_path):
+def test_the_cache_key_follows_the_source_and_the_ir(tmp_path: Path) -> None:
     (tmp_path / "main.tex").write_text("a", encoding="utf-8")
     k = adopt_bench.cache_key(tmp_path, {"slides": []})
     assert k == adopt_bench.cache_key(tmp_path, {"slides": []})

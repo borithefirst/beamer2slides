@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from beamer2slides import adopt, fontfetch, fontfiles, net
+from beamer2slides.adopt_context import MissingFont
 from beamer2slides.agent import ALL_ACTIONS, AgentContext, LocalWorkspace
 from .irs import deck_ir
 
@@ -106,7 +107,7 @@ def test_a_variable_font_is_cut_into_styles_and_weights_between(tmp_path):
     assert got["styles"] == ["Bold", "Regular"] and got["variable"]
     regular = tmp_path / "laid" / "tinyflex" / "TinyFlex-Regular.ttf"
     assert "fvar" not in TTFont(regular)
-    w600 = fontfetch.weight_file(regular, 600)
+    w600 = fontfetch.weight_file(regular, 600, False)
     assert w600 == regular.with_name("TinyFlex-W600.ttf") and TTFont(w600)["OS/2"].usWeightClass == 600
 
 
@@ -117,8 +118,8 @@ def test_static_weights_become_the_styles_and_the_faces_between(tmp_path):
     assert report["families"]["Tiny Sans"]["styles"] == ["Bold", "Italic", "Regular"]
     assert report["families"]["Tiny Sans"]["weights"] == ["500"]
     regular = tmp_path / "laid" / "tinysans" / "TinySans-Regular.ttf"
-    assert fontfetch.weight_file(regular, 500) == regular.with_name("TinySans-W500.ttf")
-    assert fontfetch.weight_file(regular, 300) is None, "nothing to cut a static family's 300 from"
+    assert fontfetch.weight_file(regular, 500, False) == regular.with_name("TinySans-W500.ttf")
+    assert fontfetch.weight_file(regular, 300, False) is None, "nothing to cut a static family's 300 from"
 
 
 def test_a_family_with_no_upright_is_no_family(tmp_path):
@@ -144,17 +145,18 @@ def test_the_folder_is_emptied_only_when_it_is_ours(tmp_path):
 def test_supplied_fonts_are_found_first_and_set_the_deck(tmp_path):
     root = tmp_path / "laid"
     fontfiles.install([given(tmp_path / "given", r_ttf=tiny_font("Tiny Sans"), b_ttf=tiny_font("Tiny Sans", 700))], root)
-    assert adopt.font_family("Tiny Sans", "sans") == {}, "not before it is supplied"
+    assert adopt.font_family("Tiny Sans", "sans", "") is None, "not before it is supplied"
     ir = deck_ir(deck_with(text_shape("t", "Words in a supplied face", 10, 10, 300, 40, font="Tiny Sans")),
                  foreign=True)
-    missing: list = []
+    missing: list[MissingFont] = []
     with adopt.use_fonts(root):
-        assert adopt.font_family("Tiny Sans", "sans")["UprightFont"].parent == root / "tinysans"
+        got = adopt.font_family("Tiny Sans", "sans", "")
+        assert got is not None and got.files.upright.parent == root / "tinysans"
         text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, missing)
     assert "\\setsansfont{TinySans}[Path=fonts/,Extension=.ttf,UprightFont=*-Regular,BoldFont=*-Bold," in text
     assert (tmp_path / "tree" / "fonts" / "TinySans-Regular.ttf").exists()
     assert missing == []
-    assert adopt.font_family("Tiny Sans", "sans") == {}, "only for the length of the block"
+    assert adopt.font_family("Tiny Sans", "sans", "") is None, "only for the length of the block"
 
 
 # ---------------------------------------------------------------- what adopt says it lacked
@@ -162,7 +164,7 @@ def test_supplied_fonts_are_found_first_and_set_the_deck(tmp_path):
 def test_a_font_that_is_nowhere_is_named_with_what_it_was_set_in(tmp_path):
     ir = deck_ir(deck_with(text_shape("t", "Words in a face nobody has", 10, 10, 300, 40, font="Nowhere Sans")),
                  foreign=True)
-    missing: list = []
+    missing: list[MissingFont] = []
     adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, missing)
     # (by the name the IR carries it under: the family's name without its spaces)
     assert [(m["font"], m["kind"], m["set_in"]) for m in missing] == [("NowhereSans", "sans", "texgyreheros")]
@@ -177,7 +179,7 @@ def test_a_metric_twin_is_still_a_font_the_deck_lacks(tmp_path):
     root = tmp_path / "laid"
     fontfiles.install([given(tmp_path / "given", r_ttf=tiny_font("Arimo"))], root)
     ir = deck_ir(deck_with(text_shape("t", "Words in Arial", 10, 10, 300, 40, font="Arial")), foreign=True)
-    missing: list = []
+    missing: list[MissingFont] = []
     with adopt.use_fonts(root):
         text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, missing)
     assert "\\setsansfont{Arimo}" in text
@@ -228,7 +230,8 @@ def test_github_is_reached_through_the_callers_fetcher(tmp_path, fetcher):
         return path.read_bytes()
 
     fetcher(serve)
-    assert fontfetch.fetch_family("Tiny Flex", log=lambda *_: None)["Bold"].exists()
+    got = fontfetch.fetch_family("Tiny Flex", log=lambda *_: None)
+    assert got is not None and got["Bold"].exists()
     assert asked and all(u.startswith(fontfetch.RAW) for u in asked)
     assert fontfetch.fetch_family("Calibri", log=lambda *_: None) is None
     assert "calibri" in json.loads((fontfetch.cache_dir() / "missing.json").read_text())

@@ -5,6 +5,8 @@ import json
 import numpy as np
 import pytest
 
+from beamer2slides.json_types import JsonObject
+
 from beamer2slides.devtools.slide_metrics import (SEVERITY, SEVERITY_CAP, auc, auc_within, content_lost_auc,
                                                    content_lost_split, distance_to, fit_missing_weight,
                                                    numpy_metrics, severity)
@@ -14,18 +16,18 @@ def test_severity_counts_what_passes_its_threshold_each_capped():
     """A gradient's ground_de sixty times its threshold is one defect, not sixty: each metric counts
     at most SEVERITY_CAP, and one below its threshold counts nothing."""
     th = {"ground_de": 1.0, "missing": 0.1, "dino": 0.2}
-    total, over = severity({"ground_de": 60.0, "missing": 0.3, "dino": 0.1, "unrelated": 9.0}, th)
+    total, over = severity({"ground_de": 60.0, "missing": 0.3, "dino": 0.1, "unrelated": 9.0}, th, None)
     assert over == {"ground_de": SEVERITY_CAP, "missing": pytest.approx(3.0)}
     assert total == pytest.approx(SEVERITY_CAP + 3.0)
 
 
 def test_severity_weights_scale_a_ratio_before_its_cap():
-    """weights=None (the default) is exactly the unweighted 1x sum; a weight on one metric scales its
+    """weights=None is exactly the unweighted 1x sum; a weight on one metric scales its
     ratio before SEVERITY_CAP, so a big enough weight can push it past the cap while an unweighted
     metric elsewhere is unaffected."""
     th = {"missing": 0.1, "graded": 0.1}
     r = {"missing": 0.3, "graded": 0.3}                        # each 3x its threshold, unweighted
-    total0, over0 = severity(r, th)
+    total0, over0 = severity(r, th, None)
     assert over0 == {"missing": pytest.approx(3.0), "graded": pytest.approx(3.0)}
     total1, over1 = severity(r, th, {"missing": 4.0})
     assert over1 == {"missing": SEVERITY_CAP, "graded": pytest.approx(3.0)}       # 3 x 4 = 12, capped
@@ -52,7 +54,7 @@ def test_fit_missing_weight_ranks_a_content_lost_slide_over_a_drift_one():
     rows = {("a", 1): {"missing": 0.4, "local_missing": 0.4, "graded": 0.0, "extra": 0.0},
             ("b", 1): {"missing": 0.0, "local_missing": 0.0, "graded": 0.5, "extra": 0.5}}
     labels = {("a", 1): {"text_missing"}, ("b", 1): {"line_breaks"}}
-    assert severity(rows[("a", 1)], thresholds)[0] < severity(rows[("b", 1)], thresholds)[0]     # before: loses
+    assert severity(rows[("a", 1)], thresholds, None)[0] < severity(rows[("b", 1)], thresholds, None)[0]     # before: loses
 
     weight, auc_after, pairs = fit_missing_weight(rows, list(rows), labels, thresholds)
     assert weight > 1.0
@@ -129,16 +131,18 @@ def test_calibrate_fits_a_missing_weight_and_reports_before_and_after(tmp_path, 
     assert table["severity_weights"]["local_missing"] > 1.0
     calib = table["severity_weight_calibration"]
     assert calib["n_content_lost"] == 1 and calib["n_other_defect"] == 1
-    assert calib["after"]["auc"] > calib["before"]["auc"]
+    after, before = calib["after"]["auc"], calib["before"]["auc"]
+    assert after is not None and before is not None and after > before
     assert calib["before"]["auc"] == pytest.approx(0.5)        # unweighted, a tie (10 + 10 either way)
     assert calib["after"]["auc"] == pytest.approx(1.0)         # weighted, content-lost now clearly wins
 
     # and the "any" judged-bad vs judged-identical check (the coarser one) did not fall apart:
     any_cat = table["categories"]["any"]
-    assert any_cat["severity"]["after"]["auc"] >= any_cat["severity"]["before"]["auc"] - 1e-9
+    after, before = any_cat["severity"]["after"]["auc"], any_cat["severity"]["before"]["auc"]
+    assert after is not None and before is not None and after >= before - 1e-9
 
 W, H = 400, 225
-SLIDE = {"size": [W, H], "elements": [{"bbox": [0, 0, W, H]}]}
+SLIDE: JsonObject = {"size": [W, H], "elements": [{"bbox": [0, 0, W, H]}]}
 
 
 def page(words=((40, 40), (40, 100), (40, 160)), colour=(0, 0, 0), ground=(255, 255, 255)):
@@ -234,9 +238,13 @@ def test_auc_ranks_positives_above_negatives():
 
 def test_auc_within_decks_does_not_score_a_decks_style():
     """Deck b's slides all score high, its defects included: across decks that looks like skill."""
-    score = {("a", 1): 1, ("a", 2): 2, ("a", 3): 3, ("b", 1): 9, ("b", 2): 8, ("b", 3): 9}.get
+    scores = {("a", 1): 1, ("a", 2): 2, ("a", 3): 3, ("b", 1): 9, ("b", 2): 8, ("b", 3): 9}
+
+    def score(k: tuple[str, int]) -> float:
+        return scores[k]
     pos, neg = [("b", 1), ("a", 3)], [("a", 1), ("a", 2), ("b", 2)]
-    assert auc([score(k) for k in pos], [score(k) for k in neg]) > 0.8
+    across = auc([score(k) for k in pos], [score(k) for k in neg])
+    assert across is not None and across > 0.8
     assert auc_within([("b", 2)], [("b", 1), ("b", 3), ("a", 1)], score) == (0.0, 2)
     assert auc_within(pos, neg, score) == (1.0, 3)
     assert auc_within([("c", 1)], neg, lambda k: 0) == (None, 0)

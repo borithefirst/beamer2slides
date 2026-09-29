@@ -100,7 +100,7 @@ def test_a_picture_the_deck_would_not_give_is_named_and_marked_where_it_went(tmp
     ir["slides"].append(json.loads(json.dumps(ir["slides"][0])))
     theme, missing, again = adopt.pictures_missing(ir)
     assert missing["slide"] == 1 and missing["alt"] == "Sand cat" and "404" in missing["why"]
-    assert theme["layout"] == "m1" and again["slide"] == 2, "the master's picture said once, not per slide"
+    assert theme.get("layout") == "m1" and again["slide"] == 2, "the master's picture said once, not per slide"
     ir["slides"].pop()
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert "% picture left out: Sand cat (at " in text
@@ -401,11 +401,11 @@ class GitHub:
 
 def test_metadata_says_which_file_is_which_style():
     meta = fontfetch.parse_metadata(STATIC_META + VARIABLE_META.split("\n", 1)[1])
-    assert meta["name"] == "Tiny Sans"
-    assert [(f["filename"], f["style"], f["weight"]) for f in meta["fonts"]][:3] == [
+    assert meta.name == "Tiny Sans"
+    assert [(f.filename, f.style, f.weight) for f in meta.fonts][:3] == [
         ("TinySans-Regular.ttf", "normal", 400), ("TinySans-Bold.ttf", "normal", 700),
         ("TinySans-Italic.ttf", "italic", 400)]
-    assert meta["axes"] == {"wght": (100.0, 900.0)}
+    assert meta.axes == {"wght": (100.0, 900.0)}
 
 
 def test_a_static_family_is_fetched_once(monkeypatch):
@@ -459,13 +459,13 @@ def test_offline_is_no_font_and_no_error(monkeypatch):
 def test_fetching_can_be_turned_off(monkeypatch):
     monkeypatch.setenv("B2S_FONT_FETCH", "0")
     monkeypatch.setattr(fontfetch, "get", lambda url: pytest.fail("fetched with fetching off"))
-    assert fontfetch.fetch_family("Open Sans") is None
+    assert fontfetch.fetch_family("Open Sans", print) is None
 
 
 def test_b2s_fonts_means_those_folders_and_no_fetching(monkeypatch):
     monkeypatch.setattr(fontfetch, "fetch_family", lambda *a, **k: pytest.fail("fetched under $B2S_FONTS"))
     assert not adopt.fetching()
-    assert adopt.font_family("Open Sans", "sans") == {}
+    assert adopt.font_family("Open Sans", "sans", "") is None
 
 
 def test_adopt_sets_the_deck_in_a_fetched_family(monkeypatch, tmp_path):
@@ -495,12 +495,14 @@ def test_ligatures_are_drawn_only_from_slides_own_copy_of_a_font(tmp_path):
     and its Lato is older than google/fonts' 2.015, whose ti it does not join (ml-vs-stats). A
     google/fonts stand-in is not what Slides draws: Droid Serif set in Noto Serif (ap-bio-stats)."""
     cache = fontfetch.cache_dir()
-    assert adopt.ligatures({"UprightFont": cache / "googlesans" / "GoogleSans-Regular.ttf"}) == ""
-    assert adopt.ligatures({"UprightFont": cache / "lato" / "Lato-Regular.ttf"}) == adopt.ONLY_F_LIGATURES
-    assert adopt.ligatures({"UprightFont": tmp_path / "Windows" / "Fonts" / "calibri.ttf"}) == adopt.NO_LIGATURES
-    noto = {"UprightFont": cache / "notoserif" / "NotoSerif-Regular.ttf"}
-    assert adopt.ligatures(noto) == ""
-    assert adopt.ligatures(noto, standin="NotoSerif") == adopt.NO_LIGATURES
+    def files(path: Path) -> adopt.FontFiles:
+        return adopt.FontFiles(faces={"UprightFont": path}, index=0)
+    assert adopt.ligatures(files(cache / "googlesans" / "GoogleSans-Regular.ttf"), None) == ""
+    assert adopt.ligatures(files(cache / "lato" / "Lato-Regular.ttf"), None) == adopt.ONLY_F_LIGATURES
+    assert adopt.ligatures(files(tmp_path / "Windows" / "Fonts" / "calibri.ttf"), None) == adopt.NO_LIGATURES
+    noto = files(cache / "notoserif" / "NotoSerif-Regular.ttf")
+    assert adopt.ligatures(noto, None) == ""
+    assert adopt.ligatures(noto, "NotoSerif") == adopt.NO_LIGATURES
 
 
 def flex_font(name: str, axes: list[tuple]) -> bytes:
@@ -542,7 +544,7 @@ def test_google_sans_text_is_google_sans_at_its_text_optical_size(monkeypatch):
     assert font["name"].getDebugName(1) == "Google Sans Text" and font["name"].getDebugName(16) is None
     assert not any("googlesanstext" in u for u in hub.asked), "nothing is asked for under the name Slides uses"
     # and the weights Slides sets per run are cut at the same optical size
-    w600 = fontfetch.weight_file(got["Regular"], 600)
+    w600 = fontfetch.weight_file(got["Regular"], 600, False)
     assert w600 == got["Regular"].with_name("GoogleSansText-W600.ttf")
     assert TTFont(w600)["OS/2"].usWeightClass == 600
 
@@ -555,14 +557,14 @@ def test_a_weight_between_regular_and_bold_is_cut_when_the_family_is_variable(mo
     monkeypatch.setattr(fontfetch, "get", hub)
     regular = fontfetch.fetch_family("Tiny Flex", log=lambda *_: None)["Regular"]
     for weight in (300, 500, 600):
-        path = fontfetch.weight_file(regular, weight)
+        path = fontfetch.weight_file(regular, weight, False)
         assert path.name == f"TinyFlex-W{weight}.ttf" and TTFont(path)["OS/2"].usWeightClass == weight
-    assert fontfetch.weight_file(regular, 950) is None, "off the axis"
-    assert fontfetch.weight_file(regular, 600, italic=True) is None, "no italic to cut it from"
+    assert fontfetch.weight_file(regular, 950, False) is None, "off the axis"
+    assert fontfetch.weight_file(regular, 600, True) is None, "no italic to cut it from"
     elsewhere = tmp_path / "shelf" / "TinyFlex-Regular.ttf"
     elsewhere.parent.mkdir()
     elsewhere.write_bytes(regular.read_bytes())
-    assert fontfetch.weight_file(elsewhere, 600) is None, "only families this cache fetched"
+    assert fontfetch.weight_file(elsewhere, 600, False) is None, "only families this cache fetched"
 
 
 def thin_default_font() -> bytes:
@@ -597,9 +599,9 @@ def test_an_instance_is_named_for_its_weight_not_the_variable_fonts_default(monk
     got = fontfetch.fetch_family("Tiny Flex", log=lambda *_: None)
     assert names(got["Regular"]) == ("Tiny Flex", "Regular", "TinyFlex-Regular", None, None)
     assert names(got["Bold"]) == ("Tiny Flex", "Bold", "TinyFlex-Bold", None, None)
-    assert names(fontfetch.weight_file(got["Regular"], 500)) == (
+    assert names(fontfetch.weight_file(got["Regular"], 500, False)) == (
         "Tiny Flex Medium", "Regular", "TinyFlex-Medium", "Tiny Flex", "Medium")
-    assert names(fontfetch.weight_file(got["Regular"], 450))[2] == "TinyFlex-W450"
+    assert names(fontfetch.weight_file(got["Regular"], 450, False))[2] == "TinyFlex-W450"
     from beamer2slides.fonts import font_info
     assert font_info("ABCDEF+TinyFlex-Bold").bold and not font_info("ABCDEF+TinyFlex-Regular").bold
 
@@ -624,7 +626,7 @@ def test_instances_cut_before_they_were_named_are_named_once(monkeypatch):
     assert names(folder / "TinyFlex-W300.ttf")[2:] == ("TinyFlex-Light", "Tiny Flex", "Light")
     assert (folder / fontfetch.NAMED).exists()
     before = (folder / "TinyFlex-Bold.ttf").stat().st_mtime_ns
-    fontfetch.repair_cache()
+    fontfetch.repair_cache(fontfetch.cache_dir())
     assert (folder / "TinyFlex-Bold.ttf").stat().st_mtime_ns == before, "named once"
 
 
@@ -708,7 +710,7 @@ def test_a_face_without_the_letters_set_in_it_gets_no_switch(monkeypatch, tmp_pa
                                       font="Noto Sans Symbols")), foreign=True)
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert "\\setsansfont{OpenSans}" in text and "NotoSansSymbols" not in text
-    assert adopt.font_coverage(shelf / "NotoSansSymbols-Regular.ttf", {"A": 3, "B": 1}) == 0.75
+    assert adopt.font_coverage(shelf / "NotoSansSymbols-Regular.ttf", {"A": 3, "B": 1}, 0, False) == 0.75
     # and when it is the deck's most used font, it is not the document's either
     only = deck_ir(deck_with(text_shape("t1", "שלום " * 20, 10, 200, 600, 60,
                                         font="Noto Sans Symbols"),

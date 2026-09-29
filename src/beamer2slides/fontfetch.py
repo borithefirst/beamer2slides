@@ -39,10 +39,16 @@ import re
 import tempfile
 import urllib.error
 import urllib.parse
+from collections.abc import Callable, Generator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import net
+
+if TYPE_CHECKING:
+    from fontTools.ttLib import TTFont
 
 RAW = "https://raw.githubusercontent.com/google/fonts/main/"
 LICENCE_DIRS = ("ofl", "apache", "ufl")
@@ -72,7 +78,7 @@ def source_root() -> Path | None:
 
 
 @contextmanager
-def use_source(root):
+def use_source(root: str | Path | None) -> Generator[None, None, None]:
     """Read google/fonts from `root` (a checkout: `ofl/`, `apache/`, `ufl/`) for the length of the
     block, in this context only; None leaves things as they were."""
     token = _SOURCE.set(Path(root)) if root else None
@@ -105,11 +111,14 @@ class FetchFailed(OSError):
     network, a fetcher that may not reach GitHub, whatever a harness's client raises."""
 
 
-_WATCH: contextvars.ContextVar = contextvars.ContextVar("beamer2slides.font_watch", default=None)
+Seen = Callable[[str, bytes | None], None]
+"""`seen(url, data)`: a file `get` gave, or (data None) one that is not there (`watching`)."""
+
+_WATCH: contextvars.ContextVar[Seen | None] = contextvars.ContextVar("beamer2slides.font_watch", default=None)
 
 
 @contextmanager
-def watching(seen):
+def watching(seen: Seen) -> Generator[None, None, None]:
     """Call `seen(url, data)` for every file `get` gives in this block, and `seen(url, None)` for
     one that is not there, wherever it came from (a download or the local copy): how
     `deck_files.save` records the files a machine with no copy and no internet will need."""
@@ -146,7 +155,7 @@ def _get(url: str) -> bytes:
             raise FileNotFoundError(path)
         return path.read_bytes()
     try:
-        return net.download(url, tries=1)
+        return net.download(url, None, 1)
     except OSError:
         raise
     except Exception as e:  # noqa: BLE001 - a harness's fetcher raises its own types
@@ -158,22 +167,59 @@ def _absent(e: Exception) -> bool:
     return isinstance(e, FileNotFoundError) or (isinstance(e, urllib.error.HTTPError) and e.code == 404)
 
 
-def parse_metadata(text: str) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class FontFile:
+    """One font file of a family: its file name, style ("normal" or "italic", as METADATA.pb says
+    it) and weight."""
+    filename: str
+    style: str
+    weight: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class Metadata:
+    """What `_build` needs of a family: its name (None when METADATA.pb gives none), its font files
+    and, for a variable font, its axes (tag -> (min, max))."""
+    name: str | None
+    fonts: list[FontFile]
+    axes: dict[str, tuple[float, float]]
+
+
+def _fields(block: str) -> dict[str, str]:
+    """A protobuf text block's `key: value` lines (a value's quotes dropped)."""
+    return {k: v for k, v in re.findall(r'^\s*(\w+):\s*"?([^"\n]*)"?\s*$', block, re.M)}
+
+
+def parse_metadata(text: str) -> Metadata:
     """The parts of a METADATA.pb (protobuf text format) this needs: name, the font files with their
     style and weight, and the axes of a variable font."""
     name = re.search(r'^name:\s*"([^"]*)"', text, re.M)
-    fonts = []
+    fonts: list[FontFile] = []
     for block in re.findall(r"^fonts\s*\{(.*?)^\}", text, re.M | re.S):
-        f = dict(re.findall(r'^\s*(\w+):\s*"?([^"\n]*)"?\s*$', block, re.M))
+        f = _fields(block)
         if f.get("filename"):
-            fonts.append({"filename": f["filename"], "style": f.get("style", "normal"),
-                          "weight": int(f.get("weight", "400") or 400)})
-    axes = {}
+            fonts.append(FontFile(filename=f["filename"], style=f.get("style", "normal"),
+                                  weight=int(f.get("weight", "400") or 400)))
+    axes: dict[str, tuple[float, float]] = {}
     for block in re.findall(r"^axes\s*\{(.*?)^\}", text, re.M | re.S):
-        a = dict(re.findall(r'^\s*(\w+):\s*"?([^"\n]*)"?\s*$', block, re.M))
+        a = _fields(block)
         if a.get("tag"):
             axes[a["tag"]] = (float(a.get("min_value", 0)), float(a.get("max_value", 0)))
-    return {"name": name.group(1) if name else None, "fonts": fonts, "axes": axes}
+    return Metadata(name=name.group(1) if name else None, fonts=fonts, axes=axes)
+
+
+def table_int(font: "TTFont", table: str, field: str) -> int:
+    """An integer field of one of a font's tables (`head`'s unitsPerEm, `OS/2`'s usWeightClass):
+    fontTools sets them from the table's binary format, so its classes do not declare them."""
+    value: object = getattr(font[table], field)
+    if not isinstance(value, int):
+        raise TypeError(f"{table}.{field} is {value!r}, not an integer")
+    return value
+
+
+def set_table_int(font: "TTFont", table: str, field: str, value: int) -> None:
+    """Set an integer field `table_int` reads."""
+    setattr(font[table], field, value)
 
 
 def _missing_path() -> Path:
@@ -224,10 +270,16 @@ def cached(family: str) -> dict[str, Path]:
 # another family's variable font: "Google Sans Text" is Google Sans at opsz 17 (the text cut, looser
 # and wider: gdg24's bold 50 pt "Statistics" sets 3.2% wider there, as the deck's thumbnail shows it,
 # than in the opsz 18 default that stood in for it). Folder name -> (family, axis location).
-OPTICAL = {"googlesanstext": ("Google Sans", {"opsz": 17.0})}
+OPTICAL: dict[str, tuple[str, dict[str, float]]] = {"googlesanstext": ("Google Sans", {"opsz": 17.0})}
 
 
-def fetch_family(family: str, log=print) -> dict[str, Path] | None:
+def _optical(folder: str) -> tuple[str | None, dict[str, float]]:
+    """(the family an OPTICAL name is cut from, at which axis location), else (None, no axes)."""
+    got = OPTICAL.get(folder)
+    return got if got is not None else (None, {})
+
+
+def fetch_family(family: str, log: Callable[[str], None]) -> dict[str, Path] | None:
     """The family's static files by style name, fetched into the cache if they are not there yet;
     None when google/fonts has no such family or it cannot be fetched (no network, no fontTools)."""
     if not family or not enabled():
@@ -236,13 +288,14 @@ def fetch_family(family: str, log=print) -> dict[str, Path] | None:
     if "Regular" in have:
         return have
     folder = folder_name(family)
-    base, axes = OPTICAL.get(folder, (None, {}))
+    base, axes = _optical(folder)
     if base is not None:
         folder = folder_name(base)
     local = source_root() is not None
     if not folder or (not local and folder in _missing()):
         return None
-    meta, lic = None, None
+    meta: Metadata | None = None
+    lic: str | None = None
     try:
         for licence in LICENCE_DIRS:
             try:
@@ -252,13 +305,13 @@ def fetch_family(family: str, log=print) -> dict[str, Path] | None:
             except OSError as e:
                 if not _absent(e):
                     raise
-        if meta is None or not meta["fonts"]:
+        if meta is None or not meta.fonts:
             if not local:                               # a partial copy on disk says nothing of GitHub
                 _remember_missing(folder)
             return None
-        if base is not None and not any("[" in f["filename"] for f in meta["fonts"]):
+        if base is not None and not any("[" in f.filename for f in meta.fonts):
             return None                                 # no variable font to cut the optical size from
-        out = _build(family, folder, lic, meta, axes)
+        out = _build(family, folder, lic, meta, axes, cache_dir())
     except (OSError, ValueError, ImportError, KeyError) as e:     # offline, GitHub down, a broken font
         log(f"  {family}: could not fetch it from google/fonts ({type(e).__name__}: {str(e)[:80]})")
         return None
@@ -267,13 +320,12 @@ def fetch_family(family: str, log=print) -> dict[str, Path] | None:
     return out or None
 
 
-def _build(family: str, folder: str, lic: str | None, meta: dict, axes: dict | None = None,
-           root: Path | None = None) -> dict[str, Path]:
+def _build(family: str, folder: str, lic: str | None, meta: Metadata, axes: Mapping[str, float],
+           root: Path) -> dict[str, Path]:
     """The four static instances of `family` from google/fonts' `folder` (its own, or the family an
     OPTICAL name is cut from, at the axis location `axes`), into the family's own folder under
-    `root` (the cache by default). A file already in `<root>/<folder>/src/` is not asked for again,
+    `root` (the cache, for a fetch). A file already in `<root>/<folder>/src/` is not asked for again,
     which is also how `fontfiles` builds a family from files nobody downloaded (`lic` None)."""
-    root = cache_dir() if root is None else root
     dest = root / folder_name(family)
     src = root / folder / "src"
     stem = stem_name(family)
@@ -297,24 +349,24 @@ def _build(family: str, folder: str, lic: str | None, meta: dict, axes: dict | N
                 raise
     out: dict[str, Path] = {}
     for style, (weight, italic) in STYLES.items():
-        files = [f for f in meta["fonts"] if (f["style"] == "italic") == italic]
+        files = [f for f in meta.fonts if (f.style == "italic") == italic]
         if not files:
             continue
-        variable = [f for f in files if "[" in f["filename"]]
+        variable = [f for f in files if "[" in f.filename]
         # google/fonts is all TrueType; a person's files may be CFF, which keeps its .otf
-        suffix = Path((variable or files)[0]["filename"]).suffix.lower() or ".ttf"
+        suffix = Path((variable or files)[0].filename).suffix.lower() or ".ttf"
         if not variable:
-            suffix = Path(min(files, key=lambda f: abs(f["weight"] - weight))["filename"]).suffix.lower() or ".ttf"
+            suffix = Path(min(files, key=lambda f: abs(f.weight - weight)).filename).suffix.lower() or ".ttf"
         target = dest / f"{stem}-{style}{suffix}"
         if variable:
             from fontTools.ttLib import TTFont
             from fontTools.varLib import instancer
             # the variable font's own date, not the hour it was cut: the same bytes every run
             # (`deck_files` compares an offline adopt with a live one file by file)
-            vf = TTFont(download(variable[0]["filename"]), recalcTimestamp=False)
+            vf = TTFont(download(variable[0].filename), recalcTimestamp=False)
             have = {a.axisTag: a for a in vf["fvar"].axes}
             loc = {tag: a.defaultValue for tag, a in have.items()}
-            for tag, value in (axes or {}).items():
+            for tag, value in axes.items():
                 if tag in have:
                     loc[tag] = min(max(value, have[tag].minValue), have[tag].maxValue)
             if "wght" in have:
@@ -326,24 +378,24 @@ def _build(family: str, folder: str, lic: str | None, meta: dict, axes: dict | N
                 loc["ital"] = have["ital"].maxValue
             font = instancer.instantiateVariableFont(vf, loc)
             font["OS/2"].usWeightClass = int(loc.get("wght", weight))
-            rename(font, family, style)
+            rename(font, family, style, None)
             dest.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(dir=dest) as tmp:
                 part = Path(tmp) / target.name
                 font.save(part)
                 os.replace(part, target)
         else:
-            best = min(files, key=lambda f: abs(f["weight"] - weight))
-            if weight == 700 and best["weight"] < 600:
+            best = min(files, key=lambda f: abs(f.weight - weight))
+            if weight == 700 and best.weight < 600:
                 continue
-            _write_atomic(target, download(best["filename"]).read_bytes())
+            _write_atomic(target, download(best.filename).read_bytes())
         out[style] = target
-    if out and any("[" in f["filename"] for f in meta["fonts"]):
+    if out and any("[" in f.filename for f in meta.fonts):
         (dest / NAMED).touch()
     return out if "Regular" in out else {}
 
 
-def weight_file(upright: Path, weight: int, italic: bool = False) -> Path | None:
+def weight_file(upright: Path, weight: int, italic: bool) -> Path | None:
     """A static instance at `weight` of a family this cache holds (`upright` is its Regular file),
     cut from the variable font it was made from - Slides sets a weight per run (gdg24's headings are
     Google Sans 600 and 500, journey-maps' text Montserrat 300 and 500) where fontspec's four styles
@@ -365,9 +417,10 @@ def weight_file(upright: Path, weight: int, italic: bool = False) -> Path | None
     repair_names(dest)
     if target.exists():
         return target
-    base, axes = OPTICAL.get(dest.name, (None, {}))
+    base, axes = _optical(dest.name)
     src = root / (folder_name(base) if base else dest.name) / "src"
-    variable = [f for f in sorted(src.glob("*[[]*].ttf")) if ("Italic" in f.name) == italic] if src.is_dir() else []
+    variable: list[Path] = ([f for f in sorted(src.glob("*[[]*].ttf")) if ("Italic" in f.name) == italic]
+                            if src.is_dir() else [])
     if not variable:
         return None
     try:
@@ -386,7 +439,7 @@ def weight_file(upright: Path, weight: int, italic: bool = False) -> Path | None
         if italic and "ital" in have:
             loc["ital"] = have["ital"].maxValue
         font = instancer.instantiateVariableFont(vf, loc)
-        font["OS/2"].usWeightClass = int(weight)
+        font["OS/2"].usWeightClass = weight
         rename(font, family_of(upright), "Italic" if italic else "Regular", weight)
         with tempfile.TemporaryDirectory(dir=dest) as tmp:
             part = Path(tmp) / target.name
@@ -404,7 +457,7 @@ WEIGHT_NAMES = {100: "Thin", 200: "ExtraLight", 300: "Light", 400: "Regular", 50
                 600: "SemiBold", 700: "Bold", 800: "ExtraBold", 900: "Black"}
 
 
-def rename(font, family: str, style: str, weight: int | None = None) -> None:
+def rename(font: "TTFont", family: str, style: str, weight: int | None) -> None:
     """Name an instance cut from a variable font for the family and style it is. The instancer keeps
     the default instance's names, and Montserrat's default is its Thin: every Montserrat face cut
     here called itself Montserrat-Thin, the compiled PDF named its bold headings so, and pull read
@@ -432,10 +485,10 @@ def rename(font, family: str, style: str, weight: int | None = None) -> None:
     for nid, value in names + [(3, f"{ps};beamer2slides"), (6, ps)]:
         name.setName(value, nid, 3, 1, 0x409)
         name.setName(value, nid, 1, 0, 0)
-    os2 = font["OS/2"]
-    os2.fsSelection = (os2.fsSelection & ~0x61) | (0x01 if italic else 0) | (0x20 if bold else 0) \
-        | (0x40 if not (italic or bold) else 0)
-    font["head"].macStyle = (font["head"].macStyle & ~0x03) | (0x01 if bold else 0) | (0x02 if italic else 0)
+    set_table_int(font, "OS/2", "fsSelection", (table_int(font, "OS/2", "fsSelection") & ~0x61)
+                  | (0x01 if italic else 0) | (0x20 if bold else 0) | (0x40 if not (italic or bold) else 0))
+    set_table_int(font, "head", "macStyle", (table_int(font, "head", "macStyle") & ~0x03)
+                  | (0x01 if bold else 0) | (0x02 if italic else 0))
 
 
 def family_of(path: Path) -> str:
@@ -454,7 +507,7 @@ def repair_names(dest: Path) -> None:
     dest = Path(dest)
     if (dest / NAMED).exists():
         return
-    base, _ = OPTICAL.get(dest.name, (None, {}))
+    base, _ = _optical(dest.name)
     src = dest.parent / (folder_name(base) if base else dest.name) / "src"
     if not (src.is_dir() and any(src.glob("*[[]*].ttf"))):
         return                                          # static files: google/fonts named them
@@ -473,7 +526,7 @@ def repair_names(dest: Path) -> None:
             if cut:
                 rename(font, family, "Italic" if cut.group(2) else "Regular", int(cut.group(1)))
             else:
-                rename(font, family, suffix)
+                rename(font, family, suffix, None)
             with tempfile.TemporaryDirectory(dir=dest) as tmp:
                 part = Path(tmp) / f.name
                 font.save(part)
@@ -484,9 +537,9 @@ def repair_names(dest: Path) -> None:
         return
 
 
-def repair_cache(root: Path | None = None) -> None:
-    """`repair_names` for every family folder under the cache (or `root`)."""
-    root = cache_dir() if root is None else Path(root)
+def repair_cache(root: Path) -> None:
+    """`repair_names` for every family folder under `root` (the cache, `cache_dir()`)."""
+    root = Path(root)
     try:
         folders = [p for p in root.iterdir() if p.is_dir()] if root.is_dir() else []
     except OSError:

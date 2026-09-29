@@ -128,7 +128,7 @@ def _quiet(_: str) -> None:
 def survey_deck(deck_dir: Path, images_dir: Path) -> list[Judged]:
     """Every adjustable-preset shape `preset_geometry.match_score` could judge, across every slide
     of the deck at `deck_dir` (its `deck-files/`), scored against that slide's own thumbnail."""
-    files = DeckFiles.load(deck_dir / "deck-files", None)
+    files = DeckFiles.load(deck_dir / "deck-files")
     where = str(files.presentation)
     pres = as_object(json.loads(files.presentation.read_text(encoding="utf-8")), where)
     thumbnails, shots = given_thumbnails(pres, files.thumbnails, _quiet)

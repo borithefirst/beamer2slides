@@ -6,8 +6,25 @@ list levels and the deck's usual size, colour and inset, on top of what inverse'
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TypedDict
 
 from .inverse import Context
+
+
+class _MissingFontKeys(TypedDict):
+    font: str
+    kind: str
+    letters: int
+    set_in: str
+
+
+class MissingFont(_MissingFontKeys, total=False):
+    """A font the deck names that is set in something else (`adopt.font_preamble`): which, its kind
+    (sans/serif/mono), how many letters of the deck, what they are set in instead. With `script`
+    (`scripts.script_preamble`), `kind` is a script no font anywhere draws, `font`/`set_in` empty.
+    Serialised as it is (`adopt.cmd_adopt`'s `found["missing"]`, the agent's `fonts_missing`)."""
+    script: bool
+
 
 Metrics = tuple[str, str, str]
 """A paragraph's line box as `\\slidestyle` says it: ascent, pitch, depth (bp)."""
@@ -26,7 +43,7 @@ class AdoptContext(Context):
     """The deck's second typefaces: font -> the `\\newfontfamily` command `font_preamble` made."""
     font_weights: dict[str, set[tuple[int, bool]]]
     """font -> the (weight, italic) faces `weight_faces` declared besides regular and bold."""
-    missing_fonts: list[dict[str, object]]
+    missing_fonts: list[MissingFont]
     """The fonts the deck names that were set in something else (`font_preamble`)."""
     font_lines: list[str] | None
     """The preamble's fontspec lines, once `bootstrap` has made them."""

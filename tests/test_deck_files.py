@@ -73,8 +73,11 @@ def test_font_files_read_from_a_local_copy_are_seen_too(tmp_path):
     """A producer with a google/fonts checkout reads files from disk: they are recorded all the same."""
     (tmp_path / "gf" / "ofl" / "tiny").mkdir(parents=True)
     (tmp_path / "gf" / "ofl" / "tiny" / "METADATA.pb").write_bytes(b"name: \"Tiny\"")
-    seen = {}
-    with fontfetch.use_source(tmp_path / "gf"), fontfetch.watching(lambda url, data: seen.setdefault(url, data)):
+    seen: dict[str, bytes | None] = {}
+
+    def see(url: str, data: bytes | None) -> None:
+        seen.setdefault(url, data)
+    with fontfetch.use_source(tmp_path / "gf"), fontfetch.watching(see):
         fontfetch.get(f"{fontfetch.RAW}ofl/tiny/METADATA.pb")
         with pytest.raises(FileNotFoundError):
             fontfetch.get(f"{fontfetch.RAW}apache/tiny/METADATA.pb")
@@ -89,20 +92,20 @@ def test_the_parts_come_from_the_folder_or_each_on_its_own(tmp_path):
     (folder / "thumbnails").mkdir(parents=True)
     (folder / "pictures").mkdir()
     (folder / "presentation.json").write_text("{}", encoding="utf-8")
-    files = gather(folder)
+    files = gather(folder, None, (), None, None)
     assert files.presentation == folder / "presentation.json" and files.thumbnails == [folder / "thumbnails"]
     assert files.pictures == folder / "pictures" and files.google_fonts is None
     assert files.given() == {"presentation": True, "thumbnails": True, "pictures": True,
                              "google_fonts": False, "pptx": False, "fonts": False}
     (tmp_path / "gf").mkdir()
-    assert gather(folder, google_fonts=tmp_path / "gf").google_fonts == tmp_path / "gf"
-    assert gather("1AbCdEf") is None, "a live deck"
+    assert gather(folder, None, (), None, tmp_path / "gf").google_fonts == tmp_path / "gf"
+    assert gather("1AbCdEf", None, (), None, None) is None, "a live deck"
     (tmp_path / "deck.json").write_text("{}", encoding="utf-8")
-    assert gather(tmp_path / "deck.json", thumbnails=[tmp_path / "t"]).thumbnails == [tmp_path / "t"]
+    assert gather(tmp_path / "deck.json", None, [tmp_path / "t"], None, None).thumbnails == [tmp_path / "t"]
     with pytest.raises(SystemExit, match="deck read from files"):
-        gather("1AbCdEf", pictures=tmp_path / "gf")
+        gather("1AbCdEf", None, (), tmp_path / "gf", None)
     with pytest.raises(SystemExit, match="not a folder"):
-        gather(folder, pictures=tmp_path / "nothing")
+        gather(folder, None, (), tmp_path / "nothing", None)
 
 
 def test_a_zip_is_unpacked_and_never_outside_its_folder(tmp_path):
@@ -110,14 +113,14 @@ def test_a_zip_is_unpacked_and_never_outside_its_folder(tmp_path):
     folder.mkdir()
     (folder / "presentation.json").write_text("{}", encoding="utf-8")
     deck_files.zip_folder(folder, tmp_path / "files.zip")
-    files = gather(tmp_path / "files.zip", tmp_path / "unpacked")
+    files = gather(tmp_path / "files.zip", tmp_path / "unpacked", (), None, None)
     assert files.presentation == tmp_path / "unpacked" / "presentation.json"
     evil = tmp_path / "evil.zip"
     with zipfile.ZipFile(evil, "w") as z:
         z.writestr("../outside.txt", "x")
         z.writestr("presentation.json", "{}")
     with pytest.raises(ValueError, match="outside"):
-        gather(evil, tmp_path / "evil")
+        gather(evil, tmp_path / "evil", (), None, None)
     assert not (tmp_path / "outside.txt").exists()
 
 
@@ -209,7 +212,7 @@ def test_an_adopt_from_the_saved_files_is_the_live_adopt(tmp_path, monkeypatch, 
     fake_google(monkeypatch, pres)
     fetcher(fetch)
     live = adopted(monkeypatch, tmp_path, "live", "P")
-    manifest = deck_files.save("P", tmp_path / "files", log=lambda *a: None)
+    manifest = deck_files.save("P", tmp_path / "files", None, lambda *a: None)
     assert manifest["counts"] == {"slides": 1, "thumbnails": 1, "pictures": 2, "google_fonts": 3}
     assert set(manifest["parts"]) == {"presentation", "thumbnails", "pictures", "google_fonts"}
     deck_files.zip_folder(tmp_path / "files", tmp_path / "files.zip")
@@ -278,7 +281,7 @@ def test_a_deck_is_not_saved_over_other_files(tmp_path):
     (tmp_path / "busy").mkdir()
     (tmp_path / "busy" / "x").write_text("x")
     with pytest.raises(SystemExit, match="not empty"):
-        deck_files.save("P", tmp_path / "busy")
+        deck_files.save("P", tmp_path / "busy", None, print)
 
 
 def test_the_agent_adopts_the_files_as_one_zip_with_no_google(tmp_path, monkeypatch, fetcher):

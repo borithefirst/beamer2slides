@@ -237,7 +237,7 @@ def main(argv: list[str] | None) -> None:
     manifest = as_array(json.loads(MANIFEST.read_text(encoding="utf-8")), str(MANIFEST))
     for name in names or list(DECKS):
         pid = make(name)
-        capture(pid, name)
+        capture(pid, name, False)
         manifest = [d for d in manifest if as_object(d, str(MANIFEST))["name"] != name] + [
             {"name": name, "id": pid, "title": DECKS[name].title, "features": list[Json](["16:9", "plain", "made"])}]
         print(f"{name}: https://docs.google.com/presentation/d/{pid}/edit", flush=True)

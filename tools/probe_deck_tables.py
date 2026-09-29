@@ -106,7 +106,7 @@ def look(name: str, tag: str, work: Path, tally: Counter, detail: bool) -> None:
     tex = cache / "runs" / tag / "tree" / "main.tex"
     if not tex.exists() or not (cache / "presentation.json").exists():
         return
-    target = build_target(cache)
+    target = build_target(cache, None, None)
     if not has_table(target):
         return
     pres = json.loads((cache / "presentation.json").read_text(encoding="utf-8"))

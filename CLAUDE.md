@@ -405,7 +405,9 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   colour (`closed_under_words`) and under what hides it (`hidden_at`);
   an untraced freeform's crop gets no box outline, and a crop's letters never take its own outline
   colour (`letters_of(keep=)`). Benchmark: `devtools/adopt_bench.py` (29 public decks + `tools/plain_decks.py`'s two made
-  in Slides; `run --iter N` says whether the loop converged, and it is slow). **Iterate with
+  in Slides; `run --iter N` says whether the loop converged, and it is slow; its results are
+  `BenchResult`/`SlideScore` read by `read_result`, replay's round 0 a `Round0`, an adopt base's
+  counts `adopt_sync.adopt_summary`, `load` kept for source_tools until it moves). **Iterate with
   `devtools/adopt_replay.py run [deck[:a-b]] [--micro] --save/--against`**: the loop's round 0 over
   the corpus (compiles and targets cached, 17 s warm; `--micro` = `adopt_bench.MICRO`, 36 slides, one
   per failure family, 4 s warm, also for `adopt_bench run --micro --iter N`), counting residuals on slides whose ink already matches

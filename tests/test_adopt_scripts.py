@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 
 from beamer2slides import adopt, scripts
+from beamer2slides.adopt_context import MissingFont
+from beamer2slides.json_types import JsonObject
 from .irs import deck_ir
 from beamer2slides.deck_ir_types import parse_target
 from beamer2slides.inverse import Context, TextStyle, loop_paragraph, loop_run, paragraphs_latex, runs_latex
@@ -197,13 +199,13 @@ def target_with(words: str, font: str = "Arial", direction: str | None = None) -
 
 
 def test_a_latin_deck_gets_nothing():
-    assert scripts.script_preamble(target_with("Hello world"), None) == []
+    assert scripts.script_preamble(target_with("Hello world"), None, None) == []
 
 
 def test_a_japanese_deck_breaks_lines_between_any_two_characters_and_gets_a_fallback(font_folder, tmp_path):
     make_font(font_folder, "Yu Gothic", "日本語です")
     make_font(font_folder, "Yu Gothic", "日本語です", bold=True)
-    lines = scripts.script_preamble(target_with("日本語です"), tmp_path / "tree")
+    lines = scripts.script_preamble(target_with("日本語です"), tmp_path / "tree", None)
     assert "\\babelprovide[import,onchar=ids]{japanese}" in lines
     chain = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
     assert "[fonts/YuGothic-Regular.ttf]:mode=node;+palt;" in chain
@@ -216,7 +218,7 @@ def test_a_korean_deck_is_set_proportionally_too(font_folder, tmp_path):
     """HarfBuzz without `+palt` sets Korean wider than Slides does (wow-korea, korea-pptx): Korean
     gets the same proportional metrics as Japanese and Chinese (`adopt_bench --tag fontfix`)."""
     make_font(font_folder, "Malgun Gothic", "한국어입니다")
-    lines = scripts.script_preamble(target_with("한국어입니다"), tmp_path / "tree")
+    lines = scripts.script_preamble(target_with("한국어입니다"), tmp_path / "tree", None)
     assert "\\babelprovide[import,onchar=ids]{korean}" in lines
     chain = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
     assert "[fonts/MalgunGothic-Regular.ttf]:mode=node;+palt;" in chain
@@ -244,15 +246,15 @@ def test_every_face_of_a_collection_is_found(font_folder):
         p.unlink()
     scripts._FACES.clear()
     adopt._FAMILIES.clear()
-    assert scripts.find_face("MS PGothic").index == 1
-    files = adopt.font_family("MS PGothic", "sans")
-    assert files["FontIndex"] == 1
-    opts = adopt.font_files_latex({k: v for k, v in files.items() if k not in ("stem", "match")}, None)
+    assert scripts.find_face("MS PGothic", False).index == 1
+    got = adopt.font_family("MS PGothic", "sans", "")
+    assert got is not None and got.files.index == 1
+    opts = adopt.font_files_latex(got.files, None)
     # FontIndex is family-wide, so it comes first and holds for the faces the family has no file of
     # its own for (measured: the faked bold keeps face 1's widths, not face 0's)
     assert opts.startswith("FontIndex=1,")
     assert "Extension=.ttc,UprightFont=*," in opts and "BoldFont=*,BoldFeatures={FakeBold=" in opts
-    assert files["stem"] == "msgothic"
+    assert got.stem == "msgothic"
 
 
 def test_cjk_letters_do_not_count_against_the_font_they_are_typed_in(font_folder):
@@ -285,12 +287,13 @@ def test_a_cjk_font_slides_lacks_is_drawn_in_times_and_the_renderers_noto(font_f
     make_font(font_folder, "Noto Serif TC", "這是中文")
     adopt._FAMILIES.clear()
     assert adopt.slides_lacks_cjk("Microsoft JhengHei")
-    files = adopt.font_family("Microsoft JhengHei", "sans")
-    assert files["UprightFont"].name == "TimesNewRoman-Regular.ttf" and files["match"] == "Microsoft JhengHei"
+    got = adopt.font_family("Microsoft JhengHei", "sans", "")
+    assert got is not None
+    assert got.files.upright.name == "TimesNewRoman-Regular.ttf" and got.match == "Microsoft JhengHei"
     t = target_with("Google 這是中文", font="Microsoft JhengHei")
     p = scripts.plan(t)
     assert [f.families for f, _ in p.chain] == [("notoseriftc",)]
-    chain = next(l for l in scripts.script_preamble(t, None) if "add_fallback(\"b2sscripts\"" in l)
+    chain = next(l for l in scripts.script_preamble(t, None, None) if "add_fallback(\"b2sscripts\"" in l)
     assert "NotoSerifTC-Regular.ttf]:mode=node;+palt;" in chain
 
 
@@ -301,7 +304,8 @@ def test_a_cjk_font_slides_has_or_a_latin_one_is_drawn_as_itself(font_folder, go
     adopt._FAMILIES.clear()
     assert not adopt.slides_lacks_cjk("MS PGothic")
     assert not adopt.slides_lacks_cjk("CMTT9")
-    assert adopt.font_family("MS PGothic", "sans")["UprightFont"].name == "MSPGothic-Regular.ttf"
+    got = adopt.font_family("MS PGothic", "sans", "")
+    assert got is not None and got.files.upright.name == "MSPGothic-Regular.ttf"
 
 
 def test_a_mincho_face_is_a_serif_that_its_noto_face_stands_in_for(font_folder, google_says_no):
@@ -311,14 +315,15 @@ def test_a_mincho_face_is_a_serif_that_its_noto_face_stands_in_for(font_folder, 
     make_font(font_folder, "Noto Serif JP", "住所です")
     adopt._FAMILIES.clear()
     assert family_of("MS Mincho") == "serif" and family_of("MS PGothic") == "sans"
-    files = adopt.font_family("MS Mincho", family_of("MS Mincho"))
-    assert files["UprightFont"].name == "NotoSerifJP-Regular.ttf" and files["match"] == "MS Mincho"
+    got = adopt.font_family("MS Mincho", family_of("MS Mincho"), "")
+    assert got is not None
+    assert got.files.upright.name == "NotoSerifJP-Regular.ttf" and got.match == "MS Mincho"
 
 
 def test_arabic_is_set_whole_in_a_font_of_its_own_with_harfbuzz(font_folder):
     """A glyph-by-glyph fallback shapes each letter alone: Arabic goes through babel's fonts."""
     make_font(font_folder, "Arial", "مرحبا ")
-    lines = scripts.script_preamble(target_with("مرحبا", direction="RIGHT_TO_LEFT"), None)
+    lines = scripts.script_preamble(target_with("مرحبا", direction="RIGHT_TO_LEFT"), None, None)
     assert lines[0] == "\\usepackage[bidi=basic,layout=lists]{babel}"
     assert "\\babelprovide[import,onchar=ids fonts]{arabic}" in lines
     sf = next(l for l in lines if l.startswith("\\babelfont[arabic]{sf}"))
@@ -332,7 +337,7 @@ def test_tamil_is_set_whole_in_a_font_of_its_own(font_folder):
     fonts only: `onchar=ids` brought Tamil's hyphenation, and LuaTeX's line breaker stopped on
     babel's marks inside the discretionaries ("invalid node with type whatsit")."""
     make_font(font_folder, "Nirmala UI", "".join(sorted(set("இணையத்தொழில்நுட்பங்கள்"))))
-    lines = scripts.script_preamble(target_with("இணையத் தொழில்நுட்பங்கள்"), None)
+    lines = scripts.script_preamble(target_with("இணையத் தொழில்நுட்பங்கள்"), None, None)
     assert "\\babelprovide[import,onchar=fonts]{tamil}" in lines
     sf = next(l for l in lines if l.startswith("\\babelfont[tamil]{sf}"))
     assert "Renderer=HarfBuzz" in sf and sf.endswith("{NirmalaUI-Regular.ttf}")
@@ -418,7 +423,7 @@ def test_the_deck_s_own_hebrew_font_is_fetched_before_one_is_picked(font_folder,
     monkeypatch.setattr(fontfetch, "fetch_family",
                         lambda name, log=print: {"Regular": make_font(font_folder, name, "שלום ")})
     lines = scripts.script_preamble(target_with("שלום", font="Noto Sans Hebrew", direction="RIGHT_TO_LEFT"),
-                                    None)
+                                    None, None)
     sf = next(l for l in lines if l.startswith("\\babelfont[hebrew]{sf}"))
     assert sf.endswith("{NotoSansHebrew-Regular.ttf}")
 
@@ -435,7 +440,7 @@ def test_hebrew_fetches_heebo_before_noto_sans_hebrew(font_folder, monkeypatch):
         return {"Regular": make_font(font_folder, name, "שלום ")}
     monkeypatch.setattr(adopt, "fetching", lambda: True)
     monkeypatch.setattr(fontfetch, "fetch_family", fetch)
-    lines = scripts.script_preamble(target_with("שלום", font="Montserrat", direction="RIGHT_TO_LEFT"), None)
+    lines = scripts.script_preamble(target_with("שלום", font="Montserrat", direction="RIGHT_TO_LEFT"), None, None)
     assert fetched == ["Heebo"]
     assert any(l.startswith("\\babelfont[hebrew]{sf}") and "Heebo" in l for l in lines)
 
@@ -452,7 +457,7 @@ def test_a_machine_with_no_font_for_a_script_fetches_one(font_folder, monkeypatc
         return {"Regular": make_font(font_folder, name, "شكرا ")}
     monkeypatch.setattr(adopt, "fetching", lambda: True)
     monkeypatch.setattr(fontfetch, "fetch_family", fetch)
-    lines = scripts.script_preamble(target_with("شكرا", font="Montserrat", direction="RIGHT_TO_LEFT"), None)
+    lines = scripts.script_preamble(target_with("شكرا", font="Montserrat", direction="RIGHT_TO_LEFT"), None, None)
     assert fetched == [scripts.FETCHABLE["arabic"][0]]
     assert any(l.startswith("\\babelfont[arabic]{sf}") and "NotoNaskhArabic" in l for l in lines)
 
@@ -463,7 +468,7 @@ def test_a_machine_with_a_font_for_the_script_fetches_nothing(font_folder, monke
     make_font(font_folder, "Montserrat", "Thanks ")
     monkeypatch.setattr(adopt, "fetching", lambda: True)
     monkeypatch.setattr(fontfetch, "fetch_family", lambda name, log=print: pytest.fail(f"fetched {name}"))
-    lines = scripts.script_preamble(target_with("شكرا", font="Montserrat", direction="RIGHT_TO_LEFT"), None)
+    lines = scripts.script_preamble(target_with("شكرا", font="Montserrat", direction="RIGHT_TO_LEFT"), None, None)
     assert any(l.startswith("\\babelfont[arabic]{sf}") and "{Arial" in l for l in lines)
 
 
@@ -477,7 +482,7 @@ def test_thai_letters_fetch_a_thai_face_first(font_folder, monkeypatch):
         return {"Regular": make_font(font_folder, name, "".join(sorted(set("สวัสดี"))) if "Thai" in name else "→")}
     monkeypatch.setattr(adopt, "fetching", lambda: True)
     monkeypatch.setattr(fontfetch, "fetch_family", fetch)
-    scripts.script_preamble(target_with("สวัสดี", font="Roboto"), None)
+    scripts.script_preamble(target_with("สวัสดี", font="Roboto"), None, None)
     assert fetched == ["Noto Sans Thai"]
 
 
@@ -505,7 +510,7 @@ def test_thai_is_set_whole_in_a_font_of_its_own_with_word_breaks(font_folder, mo
                 "Bold": make_font(font_folder, name, chars, bold=True)}
     monkeypatch.setattr(adopt, "fetching", lambda: True)
     monkeypatch.setattr(fontfetch, "fetch_family", fetch)
-    lines = scripts.script_preamble(target_with("สวัสดีครับ"), None)
+    lines = scripts.script_preamble(target_with("สวัสดีครับ"), None, None)
     assert "\\babelprovide[import,onchar=ids fonts]{thai}" in lines
     sf = next(l for l in lines if l.startswith("\\babelfont[thai]{sf}"))
     assert "Renderer=HarfBuzz" in sf and sf.endswith("{NotoSansThai-Regular.ttf}")
@@ -520,7 +525,7 @@ def test_the_decks_own_thai_font_wins_when_it_covers_the_letters(font_folder, mo
     make_font(font_folder, "Angsana New", "".join(sorted(set("สวัสดีครับ"))))
     monkeypatch.setattr(adopt, "fetching", lambda: True)
     monkeypatch.setattr(fontfetch, "fetch_family", lambda name, log=print: pytest.fail(f"fetched {name}"))
-    lines = scripts.script_preamble(target_with("สวัสดีครับ", font="Angsana New"), None)
+    lines = scripts.script_preamble(target_with("สวัสดีครับ", font="Angsana New"), None, None)
     sf = next(l for l in lines if l.startswith("\\babelfont[thai]{sf}"))
     assert sf.endswith("{AngsanaNew-Regular.ttf}")
 
@@ -536,9 +541,9 @@ def test_the_adopted_preamble_puts_script_lines_before_the_fonts(font_folder, tm
 def test_a_glyph_bullet_is_text_its_face_must_draw():
     """supercharge-slides' ➔ bullets, which Alegreya lacks, came out as its .notdef cross: a bullet
     glyph counts among the deck's text, so a fallback is found for it (● ○ ■ are drawn, not set)."""
-    para = {"runs": [{"text": "Click", "font": "Alegreya", "family": "sans"}],
+    para: JsonObject = {"runs": [{"text": "Click", "font": "Alegreya", "family": "sans"}],
             "bullet": {"kind": "glyph", "text": "\u2794"}}
-    dot = {**para, "bullet": {"kind": "glyph", "text": "\u25cf"}}
+    dot: JsonObject = {**para, "bullet": {"kind": "glyph", "text": "\u25cf"}}
     got = list(scripts.deck_text({"slides": [{"elements": [{"paragraphs": [para, dot]}]}]}))
     assert ("\u2794", "Alegreya", "sans") in got and not any(t == "\u25cf" for t, _, _ in got)
 
@@ -561,7 +566,7 @@ def test_a_machine_without_fonttools_loses_the_fallback_chain_and_not_the_source
     scripts._FACES.clear()
     scripts._SAID = False
     monkeypatch.setattr(builtins, "__import__", refuse)
-    assert scripts.script_preamble(target_with("go \u2192 on"), tmp_path / "tree") == []
+    assert scripts.script_preamble(target_with("go \u2192 on"), tmp_path / "tree", None) == []
     assert "fontTools is not installed" in capsys.readouterr().out
 
 
@@ -579,7 +584,7 @@ def test_georgian_letters_get_their_own_group_and_a_fetched_face(font_folder, mo
         return {"Regular": make_font(font_folder, name, "\u10d2\u10d4\u10dd")}
     monkeypatch.setattr(adopt, "fetching", lambda: True)
     monkeypatch.setattr(fontfetch, "fetch_family", fetch)
-    lines = scripts.script_preamble(target_with("\u10d2\u10d4\u10dd", font="Times New Roman"), None)
+    lines = scripts.script_preamble(target_with("\u10d2\u10d4\u10dd", font="Times New Roman"), None, None)
     assert fetched == ["Noto Sans Georgian"]
     chain = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
     assert "NotoSansGeorgian-Regular.ttf" in chain
@@ -595,7 +600,7 @@ def test_armenian_letters_get_their_own_group_too(font_folder, monkeypatch):
         return {"Regular": make_font(font_folder, name, "\u0561\u0562\u0563")}
     monkeypatch.setattr(adopt, "fetching", lambda: True)
     monkeypatch.setattr(fontfetch, "fetch_family", fetch)
-    lines = scripts.script_preamble(target_with("\u0561\u0562\u0563", font="Arial"), None)
+    lines = scripts.script_preamble(target_with("\u0561\u0562\u0563", font="Arial"), None, None)
     assert fetched == ["Noto Sans Armenian"]
     chain = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
     assert "NotoSansArmenian-Regular.ttf" in chain
@@ -623,7 +628,7 @@ def test_a_script_with_no_font_anywhere_is_reported_not_silent(font_folder, monk
     t = target_with("\u10d2\u10d4\u10dd", font="Times New Roman")
     p = scripts.plan(t)
     assert p.uncovered == {"georgian": 3}
-    missing: list = []
+    missing: list[MissingFont] = []
     scripts.script_preamble(t, None, missing)
     assert missing == [{"font": "", "kind": "georgian", "letters": 3, "set_in": "", "script": True}]
     lines = adopt.missing_fonts_lines(missing)
@@ -644,7 +649,7 @@ def test_georgian_chain_letters_are_stretched_narrower_to_match_slides(font_fold
     make_font(font_folder, "Noto Sans Georgian", "გეო")
     monkeypatch.setattr(adopt, "fetching", lambda: True)
     monkeypatch.setattr(fontfetch, "fetch_family", lambda name, log=print: None)  # already on the machine
-    lines = scripts.script_preamble(target_with("გეო", font="Arial"), None)
+    lines = scripts.script_preamble(target_with("გეო", font="Arial"), None, None)
     regular = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
     bold = next(l for l in lines if "add_fallback(\"b2sscriptsbold\"" in l)
     ratio = scripts.CHAIN_STRETCH["georgian"]
@@ -661,6 +666,6 @@ def test_a_script_with_no_stretch_entry_keeps_a_plain_chain_spec(font_folder, mo
     make_font(font_folder, "Noto Sans Symbols 2", "→")
     monkeypatch.setattr(adopt, "fetching", lambda: True)
     monkeypatch.setattr(fontfetch, "fetch_family", lambda name, log=print: None)
-    lines = scripts.script_preamble(target_with("go → on", font="Arial"), None)
+    lines = scripts.script_preamble(target_with("go → on", font="Arial"), None, None)
     regular = next(l for l in lines if "add_fallback(\"b2sscripts\"" in l)
     assert "extend=" not in regular
