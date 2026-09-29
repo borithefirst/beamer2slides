@@ -69,7 +69,7 @@ def talk(tmp_path_factory):
     deck, and the retheme's side."""
     need("v1", "retheme")
     tmp = tmp_path_factory.mktemp("theme")
-    v1 = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp / "v1", {"slides": []}, "last", SLIDE_W, ())
+    v1 = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
     side1 = theme_sync.ours_side(v1)
     out = Path(v1["out"])
     pres = made_up_deck(len(v1["deck"]["slides"]))
@@ -82,14 +82,15 @@ def talk(tmp_path_factory):
     for i, s in enumerate(slides):
         s["objectId"], s["layoutObjectId"] = f"S{i}", "LT" if i == 0 else "LO"
     base = {"slides": slides, "theme": rec, "master_background": side1["shared"]}
-    retheme = sync.build_ours(SYNC_DECKS / "retheme.pdf", tmp / "retheme", {"slides": slides}, "last", SLIDE_W, ())
+    retheme = sync.build_ours(SYNC_DECKS / "retheme.pdf", tmp / "retheme", {"slides": slides}, "last", SLIDE_W, snapshot.NO_PICTURES)
     return {"v1": v1, "side1": side1, "pres": pres, "base": base, "retheme": retheme,
             "side2": theme_sync.ours_side(retheme)}
 
 
 def plan(talk, pres=None, side=None, ours=None, base=None):
     return theme_sync.plan(base or talk["base"], side or talk["side2"], ours or talk["retheme"],
-                           pres or talk["pres"], "1ab", lambda p: f"url:{Path(p).name}", lambda page: f"new_{page}")
+                           pres or talk["pres"], "1ab", lambda p: f"url:{Path(p).name}", lambda page: f"new_{page}",
+                           None)
 
 
 def ops(reqs):
@@ -437,12 +438,12 @@ def test_a_slide_showing_the_new_shared_background_inherits_the_master(talk):
     s = FakeSync(talk["base"], talk["side2"])
     key = talk["side2"]["shared"]
     pres = copy.deepcopy(talk["pres"])
-    assert s.background_requests("S2", key, {}, pres) == []   # (it inherits already)
+    assert s.background_requests("S2", key, {}, pres, False) == []   # (it inherits already)
     pres["slides"][2]["pageProperties"] = {"pageBackgroundFill": {"solidFill": {"color": {"rgbColor": {"red": 1}}}}}
-    assert s.background_requests("S2", key, {}, pres) == [{"updatePageProperties": {
+    assert s.background_requests("S2", key, {}, pres, False) == [{"updatePageProperties": {
         "objectId": "S2", "fields": "pageBackgroundFill.propertyState",
         "pageProperties": {"pageBackgroundFill": {"propertyState": "INHERIT"}}}}]
-    assert s.background_requests("S9", key, {}, pres, created=True) == []
+    assert s.background_requests("S9", key, {}, pres, True) == []
 
 
 def test_an_old_base_leaves_the_layouts_alone_and_says_so(talk):
@@ -457,3 +458,38 @@ def test_an_old_base_leaves_the_layouts_alone_and_says_so(talk):
                                          ("TITLE_ONLY_V2", "*_V2"), ("TITLE_V1", "TITLE_V1")])
 def test_groups_follow_emits_layout_names(name, group):
     assert theme_sync.group_of(name) == group
+
+
+def placeholder_shape(oid, parent, runs):
+    """A placeholder element whose text is `runs` (text, style) with a paragraph marker first."""
+    elements = [{"startIndex": 0, "endIndex": 0, "paragraphMarker": {"style": {}}}]
+    at_index = 0
+    for text, style in runs:
+        elements.append({"startIndex": at_index, "endIndex": at_index + len(text),
+                         "textRun": {"content": text, "style": style}})
+        at_index += len(text)
+    ph = {"type": "TITLE"} if parent is None else {"type": "TITLE", "parentObjectId": parent}
+    return {"objectId": oid, "shape": {"placeholder": ph, "text": {"textElements": elements}}}
+
+
+def test_placeholders_whose_parents_name_each_other_end_the_chain():
+    """theme_sync.inherited_pins (placeholder_chain): the old loop stopped on `parent not in chain`,
+    an id looked for among element dicts, so it never stopped. A layout and a master placeholder
+    naming each other as parent hung the sync forever; each is now taken once."""
+    import threading
+    pres = {"presentationId": "P", "slides": [{"objectId": "S1", "pageElements": [
+                placeholder_shape("s1_title", "l_title", [("Title\n", {})])]}],
+            "layouts": [{"objectId": "L1", "pageElements": [
+                placeholder_shape("l_title", "m_title", [("\n", {"fontSize": {"magnitude": 30, "unit": "PT"}})])]}],
+            "masters": [{"objectId": "M1", "pageElements": [
+                placeholder_shape("m_title", "l_title", [("\n", {"fontSize": {"magnitude": 20, "unit": "PT"}})])]}]}
+    answer = []
+    worker = threading.Thread(target=lambda: answer.append(
+        theme_sync.inherited_pins(pres, {"m_title": {"fields": "fontSize"}}, {"S1"})), daemon=True)
+    worker.start()
+    worker.join(10)
+    assert answer, "inherited_pins went round the placeholders' cycle"
+    reqs, touched = answer[0]
+    assert touched == ["s1_title"]
+    # The nearest placeholder's size, as the slide showed it before the sync.
+    assert reqs[0]["updateTextStyle"]["style"] == {"fontSize": {"magnitude": 30, "unit": "PT"}}

@@ -138,7 +138,7 @@ def test_a_deck_too_large_to_export_whole_gives_every_picture_from_its_parts():
     ids, and every copy is gone afterwards."""
     world = World(n=5, limit=2)
     with google_auth.use_services({"drive": world, "slides": world}):
-        live = LivePictures(world.pres(), world, refuse, slides=world)
+        live = LivePictures(world.pres(), world, refuse, 8, None, world)
         assert live.get([f"iS{k}" for k in range(1, 6)]) == every_picture(world)
     # whole (5) refused; (1-3) refused, (4-5) out; (1-2) and (3) out
     assert live.copies == 4 and live.parts == 3 and live.exports == 5 and live.unexported == []
@@ -154,7 +154,7 @@ def test_parts_are_exported_on_threads_three_at_a_time():
                                    clients=lambda: made.append(threading.get_ident()) or (world, world))
     assert 1 < len(made) <= 3, "a client pair per thread"
     assert done.complete and [p.first for p in done.parts] == list(range(9))
-    assert done.pictures(world.pres()) == every_picture(world)
+    assert done.pictures(world.pres(), None) == every_picture(world)
     assert 1 < world.most <= 3 and world.left() == []
 
 
@@ -174,7 +174,7 @@ def test_a_permission_refusal_makes_no_copy():
     world = World(n=4)
     world.export_media = lambda fileId, mimeType: Request(not_allowed())
     with google_auth.use_services({"drive": world, "slides": world}):
-        live = LivePictures(world.pres(), world, refuse, slides=world)
+        live = LivePictures(world.pres(), world, refuse, 8, None, world)
         assert live.get(["iS1"]) == {}
     assert world.copies() == [] and live.exports == 1 and live.copies == 0
     assert live.unexported == ["S1", "S2", "S3", "S4"]
@@ -188,7 +188,7 @@ def test_a_slide_too_large_alone_is_reported_and_the_rest_come_out():
         done = deck_export.export_deck(world, world, world.pres())
     assert [(p.first, p.end) for p in done.parts] == [(0, 2), (3, 4)]
     assert done.missing == [{"slides": [3, 3], "ids": ["S3"], "reason": "HTTP 403: This file is too large to be exported."}]
-    got = done.pictures(world.pres())
+    got = done.pictures(world.pres(), None)
     assert got == {k: v for k, v in every_picture(world).items() if k != "iS3"}
     assert world.left() == [] and done.deleted == done.copies == 4   # (1-2, 3-4, 3, 4)
 
@@ -209,7 +209,7 @@ def test_copies_are_deleted_even_when_their_export_raises():
 
 def test_no_slides_client_is_the_whole_export_or_nothing():
     world = World(n=3, limit=2)
-    live = LivePictures(world.pres(), world, refuse)
+    live = LivePictures(world.pres(), world, refuse, 8, None, None)
     assert live.get(["iS1"]) == {} and world.copies() == [] and live.exports == 1
     # a function that cannot make one is no client either
     done = deck_export.export_deck(world, lambda: 1 / 0, world.pres())
@@ -220,7 +220,7 @@ def test_a_copy_with_ids_of_its_own_is_cut_by_place():
     world = World(n=3, limit=2, renumber=True)
     with google_auth.use_services({"drive": world, "slides": world}):
         done = deck_export.export_deck(world, world, world.pres())
-    assert done.complete and done.pictures(world.pres()) == every_picture(world)
+    assert done.complete and done.pictures(world.pres(), None) == every_picture(world)
     assert world.left() == []
 
 

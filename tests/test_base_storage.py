@@ -83,13 +83,13 @@ def drive_with_base(stored: dict, pid: str = PID) -> FakeDrive:
 def test_drive_wins_over_an_older_local_cache(tmp_path):
     """The other checkout synced and stored generation 2; ours still caches generation 0."""
     snapshot.save_local(base(generation=0), tmp_path)
-    got, where = snapshot.load_base(PID, tmp_path, drive_with_base(base(generation=2)))
+    got, where = snapshot.load_base(PID, tmp_path, drive_with_base(base(generation=2)), None, None)
     assert (where, got["generation"]) == ("drive", 2)
 
 
 def test_the_local_cache_is_used_when_drive_has_no_base(tmp_path):
     snapshot.save_local(base(generation=3), tmp_path)
-    got, where = snapshot.load_base(PID, tmp_path, FakeDrive(props={PID: {}}))
+    got, where = snapshot.load_base(PID, tmp_path, FakeDrive(props={PID: {}}), None, None)
     assert (where, got["generation"]) == ("local", 3)
 
 
@@ -97,29 +97,29 @@ def test_a_deleted_drive_base_falls_back_to_the_cache(tmp_path):
     """The pointer survives a Drive cleanup that removed the file itself."""
     drive = FakeDrive(props={PID: {snapshot.BASE_PROPERTY: "base-0"}})  # (no blob)
     snapshot.save_local(base(generation=1), tmp_path)
-    got, where = snapshot.load_base(PID, tmp_path, drive)
+    got, where = snapshot.load_base(PID, tmp_path, drive, None, None)
     assert (where, got["generation"]) == ("local", 1)
 
 
 def test_a_cache_belonging_to_another_deck_is_refused(tmp_path):
     """A folder reused for a different deck: syncing against that base would rewrite this one."""
     snapshot.save_local(base(pid="other-deck"), tmp_path)
-    assert snapshot.load_base(PID, tmp_path, FakeDrive(props={PID: {}})) == (None, "none")
+    assert snapshot.load_base(PID, tmp_path, FakeDrive(props={PID: {}}), None, None) == (None, "none")
 
 
 def test_a_drive_base_naming_another_deck_is_refused(tmp_path):
     snapshot.save_local(base(generation=5), tmp_path)
-    got, where = snapshot.load_base(PID, tmp_path, drive_with_base(base(pid="other-deck", generation=9)))
+    got, where = snapshot.load_base(PID, tmp_path, drive_with_base(base(pid="other-deck", generation=9)), None, None)
     assert (where, got["generation"]) == ("local", 5)
 
 
 def test_no_base_anywhere(tmp_path):
-    assert snapshot.load_base(PID, tmp_path, FakeDrive(props={PID: {}})) == (None, "none")
+    assert snapshot.load_base(PID, tmp_path, FakeDrive(props={PID: {}}), None, None) == (None, "none")
 
 
 def test_without_a_drive_client_the_cache_still_works(tmp_path):
     snapshot.save_local(base(generation=7), tmp_path)
-    got, where = snapshot.load_base(PID, tmp_path, None)
+    got, where = snapshot.load_base(PID, tmp_path, None, None, None)
     assert (where, got["generation"]) == ("local", 7)
 
 
@@ -135,7 +135,7 @@ def test_a_cleanup_the_deck_says_is_done_is_not_read_again(tmp_path):
     again (`mark_cleaned`): a media update costs about 1.8 s whatever it carries."""
     drive = drive_with_base(cleaning(4))
     drive.props[PID][snapshot.CLEANED_PROPERTY] = "4"
-    got, where = snapshot.load_base(PID, tmp_path, drive)
+    got, where = snapshot.load_base(PID, tmp_path, drive, None, None)
     assert (where, "cleanup" in got) == ("drive", False)
 
 
@@ -143,14 +143,14 @@ def test_a_cleanup_of_another_generation_still_names_its_leftovers(tmp_path):
     """The flag is about one generation: a sync that died after this one left real leftovers."""
     drive = drive_with_base(cleaning(5))
     drive.props[PID][snapshot.CLEANED_PROPERTY] = "4"
-    got, _ = snapshot.load_base(PID, tmp_path, drive)
+    got, _ = snapshot.load_base(PID, tmp_path, drive, None, None)
     assert got["cleanup"] == ["b2s_old1", "b2s_old2"]
 
 
 def test_the_cache_is_read_by_the_same_flag(tmp_path):
     snapshot.save_local(cleaning(2), tmp_path)
     drive = FakeDrive(props={PID: {snapshot.CLEANED_PROPERTY: "2"}})
-    got, where = snapshot.load_base(PID, tmp_path, drive)
+    got, where = snapshot.load_base(PID, tmp_path, drive, None, None)
     assert (where, "cleanup" in got) == ("local", False)
 
 
@@ -182,26 +182,26 @@ def test_a_flag_drive_will_not_take_is_said_so_the_base_can_go_up_instead(tmp_pa
 
 def test_saving_updates_the_file_the_deck_points_at(tmp_path):
     drive = drive_with_base(base(generation=1))
-    fid = snapshot.save_drive(drive, base(generation=2))
+    fid = snapshot.save_drive(drive, base(generation=2), None, None)
     assert (fid, drive.created) == ("base-0", [])
     assert json.loads(drive.blobs["base-0"])["generation"] == 2
-    assert snapshot.load_base(PID, None, drive)[0]["generation"] == 2
+    assert snapshot.load_base(PID, None, drive, None, None)[0]["generation"] == 2
 
 
 def test_saving_creates_the_file_and_points_the_deck_at_it(tmp_path):
     drive = FakeDrive(props={PID: {}})
-    fid = snapshot.save_drive(drive, base(generation=1))
+    fid = snapshot.save_drive(drive, base(generation=1), None, None)
     assert drive.created and drive.created[0]["parents"] == ["folder-1"]  # (beside the presentation)
     assert drive.props[PID][snapshot.BASE_PROPERTY] == fid
-    assert snapshot.load_base(PID, None, drive)[0]["generation"] == 1
+    assert snapshot.load_base(PID, None, drive, None, None)[0]["generation"] == 1
 
 
 def test_a_vanished_base_file_is_replaced_not_lost(tmp_path):
     """The recorded file was deleted: the save makes a new one and repoints the presentation."""
     drive = FakeDrive(props={PID: {snapshot.BASE_PROPERTY: "base-gone"}}, update_fails=True)
-    fid = snapshot.save_drive(drive, base(generation=4))
+    fid = snapshot.save_drive(drive, base(generation=4), None, None)
     assert fid != "base-gone" and drive.props[PID][snapshot.BASE_PROPERTY] == fid
-    assert snapshot.load_base(PID, None, drive)[0]["generation"] == 4
+    assert snapshot.load_base(PID, None, drive, None, None)[0]["generation"] == 4
 
 
 def test_the_local_copy_round_trips(tmp_path):
@@ -244,7 +244,7 @@ def test_convert_records_the_mode_in_the_base(monkeypatch, tmp_path):
                                                                  "page_size": [720, 405], "layouts": {},
                                                                  "master_background": None, "slides": []})
     built = snap.build_base({"slides": []}, tmp_path, {"presentationId": PID}, {"slides": []},
-                            tmp_path / "talk.pdf", overlays="all")
+                            tmp_path / "talk.pdf", 0, False, "all", None)
     assert built["overlays"] == "all"
 
 
@@ -254,15 +254,15 @@ def test_convert_records_the_mode_in_the_base(monkeypatch, tmp_path):
 def test_a_base_file_that_vanished_is_worth_a_warning(tmp_path):
     """The pointer is still there, the file is not: another checkout may have synced since."""
     drive = FakeDrive(props={PID: {snapshot.BASE_PROPERTY: "base-gone"}})
-    assert "may be older than the deck" in snapshot.stale_base_warning("local", drive, PID)
+    assert "may be older than the deck" in snapshot.stale_base_warning("local", drive, PID, None)
 
 
 def test_a_deck_that_never_had_a_drive_base_is_no_warning(tmp_path):
-    assert snapshot.stale_base_warning("local", FakeDrive(props={PID: {}}), PID) is None
+    assert snapshot.stale_base_warning("local", FakeDrive(props={PID: {}}), PID, None) is None
 
 
 def test_no_warning_when_the_base_came_from_drive(tmp_path):
-    assert snapshot.stale_base_warning("drive", drive_with_base(base()), PID) is None
+    assert snapshot.stale_base_warning("drive", drive_with_base(base()), PID, None) is None
 
 
 def test_no_warning_when_the_deck_itself_cannot_be_read(tmp_path):
@@ -271,7 +271,7 @@ def test_no_warning_when_the_deck_itself_cannot_be_read(tmp_path):
         def get(self, fileId, fields=None):
             raise http_error(403)
 
-    assert snapshot.stale_base_warning("local", Broken(), PID) is None
+    assert snapshot.stale_base_warning("local", Broken(), PID, None) is None
 
 
 @pytest.mark.parametrize("status", [403, 404, 500])
@@ -281,7 +281,7 @@ def test_a_drive_that_refuses_everything_leaves_the_cache_in_charge(tmp_path, st
             raise http_error(status)
 
     snapshot.save_local(base(generation=2), tmp_path)
-    got, where = snapshot.load_base(PID, tmp_path, Broken())
+    got, where = snapshot.load_base(PID, tmp_path, Broken(), None, None)
     assert (where, got["generation"]) == ("local", 2)
 
 
@@ -293,7 +293,7 @@ def test_a_drive_that_refuses_everything_leaves_the_cache_in_charge(tmp_path, st
 
 
 def element(oid: str, title: str | None = None) -> dict:
-    return {"objectId": oid, "title": title,
+    return {"objectId": oid, **({} if title is None else {"title": title}),
             "size": {"width": {"magnitude": 100, "unit": "PT"}, "height": {"magnitude": 20, "unit": "PT"}},
             "transform": {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0, "unit": "PT"},
             "shape": {"shapeType": "TEXT_BOX", "text": {"textElements": []}}}
@@ -383,7 +383,7 @@ def picture_deck() -> tuple[dict, dict]:
 def test_pictures_signed_while_the_tags_were_written_are_not_fetched_again(fetcher):
     read, pres = picture_deck()
     fetcher(lambda url: pytest.fail(f"downloaded {url} again"))
-    assert snapshot.sign_pictures(read, pres, ready={"a": "sig-a", "s1": "sig-bg"}) == 2
+    assert snapshot.sign_pictures(read, pres, None, None, 8, {"a": "sig-a", "s1": "sig-bg"}, None, None, None, None) == 2
     assert read["slides"][0]["objects"]["a"]["image"]["signature"] == "sig-a"
     assert read["slides"][0]["background"]["signature"] == "sig-bg"
 
@@ -393,7 +393,7 @@ def test_a_picture_the_download_missed_is_simply_unsigned(fetcher):
     is what a failed download has always left (sync then compares the contentHash alone)."""
     read, pres = picture_deck()
     fetcher(lambda url: pytest.fail(f"downloaded {url} again"))
-    snapshot.sign_pictures(read, pres, ready={"a": "sig-a"})
+    snapshot.sign_pictures(read, pres, None, None, 8, {"a": "sig-a"}, None, None, None, None)
     assert "signature" not in read["slides"][0]["background"]
 
 
@@ -401,7 +401,7 @@ def test_the_signatures_are_by_the_id_that_owns_the_picture(monkeypatch, fetcher
     _, pres = picture_deck()
     fetcher(lambda url: url.encode())
     monkeypatch.setattr(snapshot, "signature", lambda data: f"sig({data.decode()})")
-    assert snapshot.picture_signatures(pres) == {"a": "sig(u-a)", "s1": "sig(u-bg)"}
+    assert snapshot.picture_signatures(pres, 8, None, (), None) == {"a": "sig(u-a)", "s1": "sig(u-bg)"}
 
 
 def test_the_installed_fetcher_reaches_the_worker_threads(monkeypatch, fetcher):
@@ -421,10 +421,10 @@ def test_the_installed_fetcher_reaches_the_worker_threads(monkeypatch, fetcher):
     fetcher(fetch)
     monkeypatch.setattr(snapshot, "signature", lambda data: f"sig({data.decode()})")
     _, pres = picture_deck()
-    assert snapshot.picture_signatures(pres) == {"a": "sig(u-a)", "s1": "sig(u-bg)"}
+    assert snapshot.picture_signatures(pres, 8, None, (), None) == {"a": "sig(u-a)", "s1": "sig(u-bg)"}
     assert threading.current_thread().name not in threads, "the downloads ran on the pool"
     read, pres = picture_deck()
-    assert snapshot.sign_pictures(read, pres) == 2
+    assert snapshot.sign_pictures(read, pres, None, None, 8, None, None, None, None, None) == 2
     assert read["slides"][0]["objects"]["a"]["image"]["signature"] == "sig(u-a)"
 
 
@@ -445,7 +445,7 @@ def test_a_fetcher_that_raises_leaves_the_pictures_unsigned_and_the_base_whole(m
 
     fetcher(refuse)
     _, pres = picture_deck()
-    assert snapshot.picture_signatures(pres) == {}
+    assert snapshot.picture_signatures(pres, 8, None, (), None) == {}
     assert sorted(asked) == ["u-a", "u-a", "u-a", "u-bg", "u-bg", "u-bg"]  # (three tries each)
 
     asked.clear()
@@ -456,7 +456,7 @@ def test_a_fetcher_that_raises_leaves_the_pictures_unsigned_and_the_base_whole(m
 
     fetcher(forbid)
     read, pres = picture_deck()
-    assert snapshot.sign_pictures(read, pres) == 2
+    assert snapshot.sign_pictures(read, pres, None, None, 8, None, None, None, None, None) == 2
     assert "signature" not in read["slides"][0]["objects"]["a"]["image"]
     assert sorted(asked) == ["u-a", "u-bg"]
 

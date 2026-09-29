@@ -21,6 +21,7 @@ import sys
 from collections.abc import Mapping
 
 from beamer2slides.devtools.adopt_bench import MANIFEST, capture
+from beamer2slides.google_types import as_json
 from beamer2slides.json_types import JsonObject, as_int, as_object, as_objects, as_str
 
 # a slide: (predefined layout, {(placeholder type, index): paragraphs}); a paragraph is a string or
@@ -129,7 +130,7 @@ def make(name: str) -> str:
         reqs.append({"createTable": {"objectId": "b2s_plain_tbl", "rows": 3, "columns": 3,
                                      "elementProperties": {"pageObjectId": "b2s_plain_table"}}})
     execute(s.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
-    pres = execute(s.presentations().get(presentationId=pid))
+    pres = as_json(execute(s.presentations().get(presentationId=pid)), pid)
     reqs = []
     font_of = {}
     if name == "plain-fonts":

@@ -95,10 +95,10 @@ def test_a_folder_the_app_cannot_see_is_refused_by_name():
 def test_the_base_and_a_backup_copy_go_into_the_folder_asked_for():
     drive = Drive({"DECK": {"name": "Talk", "parents": ["P0"]}, "FOLD": {"mimeType": FOLDER_MIME}})
     with drive_folder.use_folder("none"):
-        snapshot.save_drive(drive, {"presentationId": "DECK"}, info={"name": "Talk", "parents": ["P0"]})
+        snapshot.save_drive(drive, {"presentationId": "DECK"}, None, {"name": "Talk", "parents": ["P0"]})
     assert drive.created[-1]["parents"] == ["P0"]                     # beside the deck, as before
     with drive_folder.use_folder("FOLD"):
-        snapshot.save_drive(drive, {"presentationId": "DECK"}, info={"name": "Talk", "parents": ["P0"]})
+        snapshot.save_drive(drive, {"presentationId": "DECK"}, None, {"name": "Talk", "parents": ["P0"]})
         assert drive.created[-1]["parents"] == ["FOLD"]
         guard.copy_in_drive(drive, "DECK")
         assert drive.created[-1]["parents"] == ["FOLD"] and "backup" in drive.created[-1]["name"]

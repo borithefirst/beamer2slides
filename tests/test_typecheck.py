@@ -47,7 +47,7 @@ PYPROJECT = ROOT / "pyproject.toml"
 BASELINE = ROOT / "typecheck" / "baseline.json"
 
 # The legacy errors typecheck/baseline.json holds: lower it with every prune, never raise it.
-CEILING = 12312
+CEILING = 12113
 
 TYPED_DICT_KINDS = {"bad-typed-dict", "bad-typed-dict-key", "not-required-key-access"}
 

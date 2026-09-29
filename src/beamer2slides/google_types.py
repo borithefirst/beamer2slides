@@ -23,23 +23,24 @@ Nested parts nobody reads through a typed client yet (a shape's text, a table's 
 body) are `JsonObject` (`json_types`): JSON the checker follows no further until someone models it
 here, read with `json_types`' narrowings.
 
-One rule decides between the two for a whole answer: a TypedDict is not assignable to a parameter
-annotated `dict`, and a `JsonObject` is. An answer that code annotated `dict` still receives -
-`presentations.get` (snapshot's readers, `Sync.first_read`), `files.get` (`snapshot.store_base`),
-`documents.get` (doc_ir) - is a `JsonObject` until those parameters say its TypedDict; the
-TypedDict is here already (`Presentation`, `DriveFile`, `Document`), and switching the method's
-answer to it is the one-line change of that later wave.
+A TypedDict is not assignable to a parameter annotated `dict`, and a `JsonObject` is. So
+`presentations.get` answers a `Presentation` and `files.get` a `DriveFile`, and their readers
+(snapshot, sync, theme_sync, guard, deck_pictures) say so; a reader not typed yet takes a
+presentation.json it loaded through `presentation` (checked against the TypedDict, as far as it is
+modelled) and hands an answer on as JSON through `as_json` (checked all the way down).
 
 Nothing here imports the client library: `gapi` builds the real clients and says they are these.
-The one function here, `file_id`, is the boundary read every `files.create`/`copy` caller needs.
+The functions here are boundary reads: `file_id` for every `files.create`/`copy` caller, and the
+walk of a presentation (`object_id`, `children`, `all_elements`, `background_url`, `image_url`),
+where an id a `fields=` mask left out, or a group's child that is no page element, is said once.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, TypeVar, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, TypeGuard, TypeVar, runtime_checkable
 
-from .json_types import JsonObject
+from .json_types import Json, JsonObject, JsonShapeError, as_objects
 
 if TYPE_CHECKING:
     from typing_extensions import Required, Unpack
@@ -169,6 +170,186 @@ class Thumbnail(TypedDict, total=False):
     height: int
 
 
+# ------------------------------------------------------------------------------ Slides: walking an answer
+
+UNITS = ("EMU", "PT", "UNIT_UNSPECIFIED")
+TRANSFORM_NUMBERS = ("scaleX", "scaleY", "shearX", "shearY", "translateX", "translateY")
+ELEMENT_PARTS = ("shape", "image", "table", "line", "elementGroup", "sheetsChart", "video", "wordArt",
+                 "speakerSpotlight")
+
+
+def object_id(o: PageElement | Page) -> str:
+    """The id of a page or page element. Google answers one for each, and only a `fields=` mask
+    that did not ask for it leaves it out: every key of an answer is optional to the type, this one
+    is not to its reader, so its absence is said here once rather than as a KeyError."""
+    oid = o.get("objectId")
+    if oid is None:
+        raise JsonShapeError("a page or page element without its objectId (a fields= mask that left it out?)")
+    return oid
+
+
+def presentation_id(p: Presentation) -> str:
+    """The id of a presentation read with `presentations.get` (as `object_id`)."""
+    pid = p.get("presentationId")
+    if pid is None:
+        raise JsonShapeError("a presentation without its presentationId (a fields= mask that left it out?)")
+    return pid
+
+
+def _number(v: Json) -> bool:
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _is_dimension(v: Json) -> bool:
+    return isinstance(v, dict) and ("magnitude" not in v or _number(v["magnitude"])) and v.get("unit", "EMU") in UNITS
+
+
+def _is_size(v: Json) -> bool:
+    return isinstance(v, dict) and all(_is_dimension(v[k]) for k in ("width", "height") if k in v)
+
+
+def _is_transform(v: Json) -> bool:
+    return isinstance(v, dict) and all(_number(v[k]) for k in TRANSFORM_NUMBERS if k in v) \
+        and v.get("unit", "EMU") in UNITS
+
+
+def is_page_element(o: JsonObject) -> TypeGuard[PageElement]:
+    """Whether `o` holds what `PageElement` says of each key it has - the object itself, not a copy,
+    so what a walker writes into it lands in the answer it came from."""
+    return all(isinstance(o[k], str) for k in ("objectId", "title", "description") if k in o) \
+        and ("size" not in o or _is_size(o["size"])) and ("transform" not in o or _is_transform(o["transform"])) \
+        and all(isinstance(o[k], dict) for k in ELEMENT_PARTS if k in o)
+
+
+def children(e: PageElement, where: str) -> list[PageElement]:
+    """A group's own elements (none for any other element). `elementGroup` is JSON to the type, as
+    every nested part nobody models, but its children are page elements: checked as such here,
+    where a walker steps into them, so a child of another shape is an error naming the group."""
+    group = e.get("elementGroup")
+    kids = None if group is None else group.get("children")
+    if kids is None:
+        return []
+    out: list[PageElement] = []
+    for i, kid in enumerate(as_objects(kids, f"{where}.children")):
+        if not is_page_element(kid):
+            raise JsonShapeError(f"{where}.children[{i}]: not a page element")
+        out.append(kid)
+    return out
+
+
+PAGE_TYPES = ("SLIDE", "MASTER", "LAYOUT", "NOTES", "NOTES_MASTER")
+
+
+def _strings(o: JsonObject, keys: Sequence[str]) -> bool:
+    return all(isinstance(o[k], str) for k in keys if k in o)
+
+
+def _is_page(v: Json) -> bool:
+    if not isinstance(v, dict):
+        return False
+    elements = v.get("pageElements", [])
+    slide = v.get("slideProperties", {})
+    layout = v.get("layoutProperties", {})
+    return _strings(v, ("objectId", "revisionId")) and v.get("pageType", "SLIDE") in PAGE_TYPES \
+        and isinstance(elements, list) and all(isinstance(e, dict) and is_page_element(e) for e in elements) \
+        and all(isinstance(v[k], dict) for k in ("pageProperties", "notesProperties", "masterProperties") if k in v) \
+        and isinstance(slide, dict) and _strings(slide, ("layoutObjectId", "masterObjectId")) \
+        and isinstance(slide.get("isSkipped", False), bool) and ("notesPage" not in slide or _is_page(slide["notesPage"])) \
+        and isinstance(layout, dict) and _strings(layout, ("masterObjectId", "name", "displayName"))
+
+
+def is_presentation(o: JsonObject) -> TypeGuard[Presentation]:
+    """Whether `o` - a `presentations.get` kept as JSON (a deck-files presentation.json, a reader
+    not typed yet) - holds what `Presentation` says, pages and page elements included, as far as
+    they are modelled. The object itself, not a copy."""
+    for key in ("slides", "masters", "layouts"):
+        pages = o.get(key)
+        if pages is not None and not (isinstance(pages, list) and all(_is_page(p) for p in pages)):
+            return False
+    return ("notesMaster" not in o or _is_page(o["notesMaster"])) \
+        and _strings(o, ("presentationId", "title", "locale", "revisionId")) \
+        and ("pageSize" not in o or _is_size(o["pageSize"]))
+
+
+def presentation(o: JsonObject, where: str) -> Presentation:
+    """`o` as the `presentations.get` it was read from (`is_presentation`), or an error naming `where`."""
+    if not is_presentation(o):
+        raise JsonShapeError(f"{where}: not a presentation as presentations.get answers one")
+    return o
+
+
+def _is_json(v: object) -> bool:
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return True
+    if isinstance(v, list):
+        return all(_is_json(x) for x in v)
+    if isinstance(v, dict):
+        return all(isinstance(k, str) and _is_json(x) for k, x in v.items())
+    return False
+
+
+def _is_json_object(v: object) -> TypeGuard[JsonObject]:
+    return isinstance(v, dict) and _is_json(v)
+
+
+def as_json(answer: Presentation | Page | PageElement | DriveFile, where: str) -> JsonObject:
+    """An answer, or a part of one, handed to a reader that still reads it as JSON (deck_ir, the
+    devtools) or put back into JSON (a group's children): what it is, checked all the way down (no
+    copy), since a TypedDict is not assignable to a `dict` parameter nor a `Json` value."""
+    value: object = answer
+    if not _is_json_object(value):
+        raise JsonShapeError(f"{where}: not JSON")
+    return value
+
+
+def part(value: Json, where: str) -> JsonObject:
+    """A nested object of an answer, which Google leaves out when it is empty: absent is `{}`."""
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise JsonShapeError(f"{where}: an object was expected, found {type(value).__name__}")
+    return value
+
+
+def parts(value: Json, where: str) -> list[JsonObject]:
+    """A nested list of objects of an answer (absent: none)."""
+    return [] if value is None else as_objects(value, where)
+
+
+def _url(value: Json, where: str) -> str | None:
+    if value is not None and not isinstance(value, str):
+        raise JsonShapeError(f"{where}: a string was expected, found {type(value).__name__}")
+    return value or None
+
+
+def background_fill(page: Page) -> JsonObject:
+    """A page's `pageBackgroundFill` (`{}`: the page says none)."""
+    return part(part(page.get("pageProperties"), "pageProperties").get("pageBackgroundFill"),
+                 "pageProperties.pageBackgroundFill")
+
+
+def background_url(page: Page) -> str | None:
+    """The contentUrl of a page's background picture (None: it has none)."""
+    picture = part(background_fill(page).get("stretchedPictureFill"), "pageBackgroundFill.stretchedPictureFill")
+    return _url(picture.get("contentUrl"), "stretchedPictureFill.contentUrl")
+
+
+def image_url(e: PageElement) -> str | None:
+    """The contentUrl of an image element (None: another element, or no picture)."""
+    image = e.get("image")
+    return None if image is None else _url(image.get("contentUrl"), "image.contentUrl")
+
+
+def all_elements(elements: Sequence[PageElement], where: str) -> list[PageElement]:
+    """`elements` and everything in their groups, depth first, a group before its children (the
+    order a .pptx export draws them in)."""
+    out: list[PageElement] = []
+    for e in elements:
+        out.append(e)
+        out += all_elements(children(e, where), f"{where}/{e.get('objectId')}")
+    return out
+
+
 # ------------------------------------------------------------------------------ Slides: calls
 
 
@@ -213,10 +394,7 @@ class Pages(Protocol):
 
 
 class Presentations(Protocol):
-    # A `JsonObject`, not a `Presentation`, for now: the read is handed to parameters annotated
-    # `dict` (snapshot's, sync's `first_read`), which a TypedDict is not assignable to. When they
-    # say `Presentation` (or parse it), this says so too - see the module docstring.
-    def get(self, **kw: Unpack[GetPresentation]) -> Request[JsonObject]: ...
+    def get(self, **kw: Unpack[GetPresentation]) -> Request[Presentation]: ...
     def create(self, **kw: Unpack[CreatePresentation]) -> Request[Presentation]: ...
     def batchUpdate(self, **kw: Unpack[UpdatePresentation]) -> Request[BatchUpdateResponse]: ...
     def pages(self) -> Pages: ...
@@ -305,8 +483,7 @@ class ExportFile(TypedDict, total=False):
 
 class Files(Protocol):
     def list(self, **kw: Unpack[ListFiles]) -> Request[FileList]: ...
-    # (a `JsonObject` for now, as `Presentations.get`: snapshot's `store_base(info=)` takes a `dict`)
-    def get(self, **kw: Unpack[GetFile]) -> Request[JsonObject]: ...
+    def get(self, **kw: Unpack[GetFile]) -> Request[DriveFile]: ...
     def create(self, **kw: Unpack[CreateFile]) -> Request[DriveFile]: ...
     def update(self, **kw: Unpack[UpdateFile]) -> Request[DriveFile]: ...
     def copy(self, **kw: Unpack[CopyFile]) -> Request[DriveFile]: ...

@@ -31,9 +31,9 @@ from typing import TypedDict
 
 from . import merge, snapshot
 from .gapi import HttpError, message_of
-from .google_types import DriveFile, DriveService, FileBody, SlidesService, file_id
+from .deck_pictures import WORKERS
+from .google_types import DriveFile, DriveService, FileBody, Presentation, SlidesService, file_id, object_id
 from .gslides import execute
-from .json_types import Json
 
 SCRATCH = re.compile(r"b2s_m\d{3}")  # emit.measure_places' scratch slides
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -93,7 +93,7 @@ def previous_deck(drive: DriveService, out: Path) -> dict | None:
 # ---------------------------------------------------------------- detection
 
 
-def sign_changed(base: dict, theirs: dict, pres: dict, drive=None) -> None:
+def sign_changed(base: dict, theirs: dict, pres: Presentation, drive: DriveService | None) -> None:
     """Pixel signatures for the live pictures whose contentUrl differs from the base's. Google
     issues new URLs for pictures nobody touched, so only the pixels tell a replaced one apart
     (sync.Sync.sign_changed does the same before planning). A rebuild writes over every one of
@@ -111,7 +111,7 @@ def sign_changed(base: dict, theirs: dict, pres: dict, drive=None) -> None:
         if "picture" in bg and "picture" in old and old["picture"] != bg["picture"]:
             slides.add(s["objectId"])
     if objects or slides:
-        snapshot.sign_pictures(theirs, pres, objects, slides, drive=drive)
+        snapshot.sign_pictures(theirs, pres, objects, slides, WORKERS, None, None, drive, None, None)
 
 
 UNVERIFIABLE = ("image_unverified", "background_unverified")
@@ -142,13 +142,13 @@ def _snippet(text: str | None, length: int = 40) -> str:
     return text if len(text) <= length else text[:length - 1] + "…"
 
 
-def survey(base: dict, pres: dict, sign: bool = True, drive=None) -> dict:
+def survey(base: dict, pres: Presentation, sign: bool, drive: DriveService | None) -> dict:
     """What the person changed in the live deck since the base was recorded (`drive`: see
     `sign_changed`).
 
     {"edited": bool, "revisionId", "counts": {field/kind: n}, "slides": [{"slide", "why", "edits"}],
      "slides_added", "slides_deleted", "reordered", "examples": [readable lines]}"""
-    pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(s["objectId"])]}
+    pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(object_id(s))]}
     theirs = snapshot.read_presentation(pres)
     if sign:
         sign_changed(base, theirs, pres, drive)
@@ -297,7 +297,7 @@ def check_rebuild(slides: SlidesService, drive: DriveService, pid: str, out: Pat
         # on a thread of its own while the live deck comes down here. One client per thread, which
         # is all a service object asks - these two are different services.
         with ThreadPoolExecutor(1, thread_name_prefix="b2s-guard") as pool:
-            loading = pool.submit(snapshot.load_base, pid, out, drive)
+            loading = pool.submit(snapshot.load_base, pid, out, drive, None, None)
             pres = execute(slides.presentations().get(presentationId=pid))
             base, where = loading.result()
     else:
@@ -309,7 +309,7 @@ def check_rebuild(slides: SlidesService, drive: DriveService, pid: str, out: Pat
     if base is None:
         found["reason"] = "no-base"
     else:
-        found.update(survey(base, pres, drive=drive))
+        found.update(survey(base, pres, True, drive))
         found["base_generation"] = base.get("generation", 0)
         found["base_source"] = Path(base.get("source", {}).get("pdf") or "").name or None
         if found["edited"]:
@@ -413,11 +413,6 @@ def write_whole(path: Path, data: bytes) -> None:
     os.replace(part, path)
 
 
-def _strings(value: Json) -> list[str] | None:
-    """A JSON list of strings (a file's `parents`), or None where it is none."""
-    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else None
-
-
 def copy_in_drive(drive: DriveService, pid: str, name: str | None = None) -> dict:
     """A Drive copy of the presentation, which stays a full deck with its own URL."""
     info = execute(drive.files().get(fileId=pid, fields="name,parents"))
@@ -425,7 +420,7 @@ def copy_in_drive(drive: DriveService, pid: str, name: str | None = None) -> dic
                                       f"{time.strftime('%Y-%m-%d %H:%M')})",
                       "appProperties": {"b2sBackupOf": pid}}
     from .drive_folder import place
-    place(body, drive, _strings(info.get("parents")))
+    place(body, drive, info.get("parents"))
     copy = execute(drive.files().copy(fileId=pid, body=body, fields="id,name"))
     cid = file_id(copy, f"its copy of {pid}")
     return {"presentationId": cid, "name": copy.get("name"), "url": deck_url(cid)}

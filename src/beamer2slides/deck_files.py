@@ -301,6 +301,7 @@ def save(ref: str, out: Path, pptx: Path | None = None, log=print) -> dict:
     that reads them could need; one with the fonts installed uses those, like a live read there."""
     from .deck_ir import picture_fetch, presentation_id, slide_thumbnails
     from .google_auth import slides_service
+    from .google_types import as_json
     from .gslides import execute
     from .json_types import as_array
 
@@ -309,7 +310,8 @@ def save(ref: str, out: Path, pptx: Path | None = None, log=print) -> dict:
         raise SystemExit(f"{out} is not empty: deck files go into a folder of their own")
     out.mkdir(parents=True, exist_ok=True)
     pid = presentation_id(ref)
-    pres = execute(slides_service().presentations().get(presentationId=pid))
+    # Saved and read on as JSON, like a presentation.json read back from disk.
+    pres = as_json(execute(slides_service().presentations().get(presentationId=pid)), pid)
     (out / FOLDERS["presentation"]).write_text(json.dumps(pres, ensure_ascii=False), encoding="utf-8")
     log(f"presentation: {len(as_array(pres.get('slides', []), 'the presentation slides'))} slides")
     thumbs = slide_thumbnails(pid, pres, out / FOLDERS["thumbnails"])

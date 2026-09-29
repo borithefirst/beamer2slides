@@ -206,7 +206,9 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
 - **`googleapiclient` is imported by `gapi.py` only** (extra `[google]`); `HttpError` is bound there
   once. Never import the client library at module scope anywhere else (`tests/test_gapi.py`).
   The calls we make are Protocols in `google_types.py` (keywords checked, `execute(Request[T]) -> T`);
-  a new call is added there first (docs/typing.md).
+  a new call is added there first (docs/typing.md). `presentations.get` answers a `Presentation`,
+  walked with `object_id`/`children`/`all_elements`/`part`; JSON becomes one only through
+  `presentation(o, where)`, and a reader still typed `dict` gets `as_json(answer, where)`.
 - `google_auth.use_provider` / `use_services` inject credentials or ready clients **per context**
   (ContextVar); a worker thread inherits nothing, so resolve credentials on the calling thread
   (`credentials_for_threads`).
@@ -293,6 +295,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   on groups). Element keys pair by text, geometry, a shape's fill (`identity.look`) and a figure
   across diagram/image (`FIGURE_KINDS`). Text merges paragraph by paragraph, unequal counts through
   a line diff3 (`merge.paragraph_merge`); only a paragraph both sides rewrote is a conflict.
+- **A base's picture is its bytes, not its name**: every sync renders into `<out>/sync/ours` under
+  the same names, so base pictures are found by the hash the base read (`snapshot.BasePictures`
+  over `picture_folders(out)`) and held out of the next render's way first (`hold_base_pictures`);
+  one found nowhere reads as changed, never refreshed.
 - **A sync killed anywhere loses nothing**: deletions last, a `pending` marker records what a run
   creates, the next sync sweeps duplicates. Fault injection: `B2S_FAIL_AT` (`faults.py`).
 - **A decision the base does not record reverses itself**: whatever a sync decided to keep (a unit

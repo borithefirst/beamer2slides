@@ -178,8 +178,9 @@ def compile_tex(tex: Path) -> Path:
 def deck_texts(creds, ident: str) -> list[tuple[str, str, str]]:
     """(slide objectId, element objectId, text) for every shape on the deck that holds text."""
     from beamer2slides.google_auth import slides_service
+    from beamer2slides.google_types import as_json
 
-    deck = slides_service(creds).presentations().get(presentationId=ident).execute()
+    deck = as_json(slides_service(creds).presentations().get(presentationId=ident).execute(), ident)
     out: list[tuple[str, str, str]] = []
     for slide in as_objects(deck.get("slides", []), "the deck's slides"):
         for element in as_objects(slide.get("pageElements", []), "a slide's elements"):

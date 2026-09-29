@@ -67,13 +67,13 @@ def pptx(slides: list[tuple[str, dict[str, bytes], bytes | None]]) -> bytes:
 
 
 def image(oid, title=None, size=(40, 20), url=None):
-    return {"objectId": oid, "title": title, "image": {"contentUrl": url or f"u-{oid}"},
+    return {"objectId": oid, **({} if title is None else {"title": title}), "image": {"contentUrl": url or f"u-{oid}"},
             "size": {"width": {"magnitude": size[0] * EMU, "unit": "EMU"},
                      "height": {"magnitude": size[1] * EMU, "unit": "EMU"}}}
 
 
 def shape(oid, title=None):
-    return {"objectId": oid, "title": title, "shape": {}}
+    return {"objectId": oid, **({} if title is None else {"title": title}), "shape": {}}
 
 
 def page(sid, elements, background=False):
@@ -93,8 +93,8 @@ def test_an_export_pairs_its_objects_with_the_live_ones_in_order():
     pres = {"slides": [page("S1", [shape("t"), image("a"), group], background=True), page("S2", [image("b")])]}
     tree1 = sp() + pic(rid="r1") + f'<p:grpSp><p:nvGrpSpPr><p:cNvPr id="4" name="g"/></p:nvGrpSpPr>{pic(rid="r2")}</p:grpSp>'
     data = pptx([(tree1, {"r1": one, "r2": two}, bg), (pic(rid="r1"), {"r1": two}, None)])
-    assert exported_pictures(data, pres) == {"a": one, "inner": two, "S1": bg, "b": two}
-    assert exported_pictures(data, pres, wanted={"b"}) == {"b": two}
+    assert exported_pictures(data, pres, None) == {"a": one, "inner": two, "S1": bg, "b": two}
+    assert exported_pictures(data, pres, {"b"}) == {"b": two}
 
 
 def test_a_page_whose_objects_do_not_line_up_is_paired_by_title():
@@ -103,19 +103,19 @@ def test_a_page_whose_objects_do_not_line_up_is_paired_by_title():
     one, two = png(mark=(1, 1, 9, 9)), png(mark=(20, 2, 38, 18))
     pres = {"slides": [page("S1", [image("a", "b2s:s/image/0"), image("b"), image("c", "b2s:s/image/2")])]}
     tree = pic("b2s:s/image/2", "r2") + pic(None, "r1") + sp() + pic("b2s:s/image/0", "r1")
-    got = exported_pictures(pptx([(tree, {"r1": one, "r2": two}, None)]), pres)
+    got = exported_pictures(pptx([(tree, {"r1": one, "r2": two}, None)]), pres, None)
     assert got == {"a": one, "c": two}
     # a title twice on either side proves nothing
     pres["slides"][0]["pageElements"][1]["title"] = "b2s:s/image/0"
-    assert exported_pictures(pptx([(tree, {"r1": one, "r2": two}, None)]), pres) == {"c": two}
+    assert exported_pictures(pptx([(tree, {"r1": one, "r2": two}, None)]), pres, None) == {"c": two}
 
 
 def test_pages_that_do_not_pair_up_give_nothing():
     """A slide added since the read shifts every page: none of them is trusted."""
     pres = {"slides": [page("S1", [image("a")])]}
     data = pptx([(pic(rid="r1"), {"r1": png()}, None), (pic(rid="r1"), {"r1": png()}, None)])
-    assert exported_pictures(data, pres) == {}
-    assert exported_pictures(b"not a zip", pres) == {}
+    assert exported_pictures(data, pres, None) == {}
+    assert exported_pictures(b"not a zip", pres, None) == {}
 
 
 class ExportingDrive:
@@ -139,22 +139,22 @@ def test_what_no_download_brought_comes_out_of_one_export():
     one, two = png(mark=(1, 1, 9, 9)), png(mark=(20, 2, 38, 18))
     pres = {"presentationId": "P", "slides": [page("S1", [image("a"), image("b")])]}
     drive = ExportingDrive(pptx([(pic(rid="r1") + pic(rid="r2"), {"r1": one, "r2": two}, None)]))
-    live = LivePictures(pres, drive, refuse)
+    live = LivePictures(pres, drive, refuse, 8, None, None)
     assert live.get(["a"]) == {"a": one}
     assert live.get(["b", "a"]) == {"b": two, "a": one}
     assert drive.exports == 1 and live.exports == 1 and live.downloads == 2
     # where the downloads are allowed, no export is made
     drive.exports = 0
-    live = LivePictures(pres, drive, lambda url: {"u-a": one, "u-b": two}[url])
+    live = LivePictures(pres, drive, lambda url: {"u-a": one, "u-b": two}[url], 8, None, None)
     assert live.get(["a", "b"]) == {"a": one, "b": two} and drive.exports == 0
 
 
 def test_an_export_drive_refuses_is_a_missing_picture():
     pres = {"presentationId": "P", "slides": [page("S1", [image("a")])]}
     drive = ExportingDrive(http_error(403))
-    live = LivePictures(pres, drive, refuse)
+    live = LivePictures(pres, drive, refuse, 8, None, None)
     assert live.get(["a"]) == {} and live.get(["a"]) == {} and live.exports == 1
-    assert LivePictures(pres, None, refuse).get(["a"]) == {}
+    assert LivePictures(pres, None, refuse, 8, None, None).get(["a"]) == {}
 
 
 # ---------------------------------------------------------------- pictures this run uploaded
@@ -190,7 +190,8 @@ def test_convert_signs_what_it_uploaded_without_downloading_it(monkeypatch, tmp_
     asked = []
     fetcher(lambda url: asked.append(url) or png(size=(80, 50)))
     seen = {}
-    monkeypatch.setattr(snapshot, "build_base", lambda *a, **k: seen.update(k) or {"slides": [], "generation": 0,
+    # (signatures: build_base's last argument)
+    monkeypatch.setattr(snapshot, "build_base", lambda *a: seen.update(signatures=a[-1]) or {"slides": [], "generation": 0,
                                                                             "presentationId": pres["presentationId"]})
     monkeypatch.setattr(snapshot, "write_tags", lambda *a: ([], None))
     monkeypatch.setattr("beamer2slides.theme_sync.record", lambda *a: None)

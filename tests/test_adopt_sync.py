@@ -36,7 +36,7 @@ def live_shape(oid: str, box, text: str | None = None) -> dict:
         shape["text"] = {"textElements": [{"paragraphMarker": {"style": {"alignment": "START"}}},
                                           {"textRun": {"content": text + "\n",
                                                        "style": {"fontFamily": "Roboto", "fontSize": pt(14)}}}]}
-    return {"objectId": oid, "title": None, "description": None,
+    return {"objectId": oid,   # (no alt text: Google leaves the keys out)
             "size": {"width": pt(x1 - x0), "height": pt(y1 - y0)},
             "transform": {"scaleX": 1, "scaleY": 1, "translateX": x0 * EMU, "translateY": y0 * EMU, "unit": "EMU"},
             "shape": shape}
@@ -47,7 +47,7 @@ def live_table(oid: str, box, rows: list[list[str]]) -> dict:
     def cell(text):
         return {"text": {"textElements": [{"paragraphMarker": {"style": {}}},
                                           {"textRun": {"content": text + "\n", "style": {}}}]}}
-    return {"objectId": oid, "title": None, "description": None,
+    return {"objectId": oid,   # (no alt text: Google leaves the keys out)
             "size": {"width": pt(x1 - x0), "height": pt(y1 - y0)},
             "transform": {"scaleX": 1, "scaleY": 1, "translateX": x0 * EMU, "translateY": y0 * EMU, "unit": "EMU"},
             "table": {"rows": len(rows), "columns": len(rows[0]),
@@ -573,7 +573,7 @@ def test_the_base_names_the_persons_groups_and_the_boxes_that_draw_nothing(tmp_p
     called both an object the person had added: 2,866 groups and 3,845 blank shapes over the
     corpus, on 214 of its 912 slides, every one of them a slide nobody had touched since adopt read
     it, and the sentence that is true there ("the deck's own") never reached."""
-    group = {"objectId": "gG", "title": None, "description": None,
+    group = {"objectId": "gG",
              "size": {"width": pt(200), "height": pt(30)},
              "transform": {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0, "unit": "EMU"},
              "elementGroup": {"children": [live_shape("gA", (48, 64, 206, 89), "Why it matters")]}}

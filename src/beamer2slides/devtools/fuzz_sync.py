@@ -1790,14 +1790,18 @@ class LiveRound:
         return done
 
     def read(self):
+        from beamer2slides.google_types import as_json
         from beamer2slides.gslides import execute
-        return execute(self.deck.api.presentations().get(presentationId=self.deck.pid))
+        return as_json(execute(self.deck.api.presentations().get(presentationId=self.deck.pid)), self.deck.pid)
 
     def snapshot(self):
         from beamer2slides import snapshot
+        from beamer2slides.deck_pictures import WORKERS
+        from beamer2slides.google_types import presentation
         pres = self.read()
-        read = snapshot.read_presentation(pres)
-        snapshot.sign_pictures(read, pres)
+        typed = presentation(pres, self.deck.pid)
+        read = snapshot.read_presentation(typed)
+        snapshot.sign_pictures(read, typed, None, None, WORKERS, None, None, None, None, None)
         return pres, read
 
     def start_deck(self, build):
@@ -1983,7 +1987,7 @@ class LiveRound:
         from beamer2slides.sync import build_ours
         try:
             with PDFIUM:
-                return build_ours(pdf, folder / "ours", base, "last", SLIDE_W, ())
+                return build_ours(pdf, folder / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
         except Exception as e:  # noqa: BLE001
             self.log.write(f"could not rebuild ours: {e}\n")
             return None

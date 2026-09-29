@@ -7,7 +7,7 @@ import io
 import json
 import os
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,10 +15,16 @@ from typing import Literal, Union
 
 from . import identity
 from .emit import background_key as emit_background_key, slide_layout
+from .deck_pictures import WORKERS as PICTURE_WORKERS, LivePictures
 from .gapi import HttpError
+from .google_types import (AffineTransform, DriveFile, DriveService, FileBody, LayoutProperties, Page, PageElement,
+                           Presentation, Size, SlideProperties, all_elements, background_fill, background_url,
+                           children, file_id, image_url, object_id, part, parts, presentation_id)
 from .gslides import EMU_PER_PT, execute
 from .ir_types import IRError, element_json, parse_element, parse_rendered_element
-from .json_types import Json, JsonObject, as_int, as_object, as_objects, as_str
+from .json_types import (Json, JsonObject, JsonShapeError, as_int, as_object, as_objects, as_optional_str,
+                         as_str)
+from .net import Fetch
 from .typing_compat import assert_never
 
 VERSION = 1
@@ -30,10 +36,15 @@ GEOMETRY_TOLERANCE = 0.05  # pt
 
 # ---------------------------------------------------------------- read-back
 
-def _unit(v: dict | None) -> float:
+def _unit(v: Mapping[str, object] | None) -> float:
+    """A Dimension in pt: a typed one (`google_types.Dimension`) or one read out of the JSON a shape's
+    text and properties still are."""
     if not v:
         return 0.0
-    return v.get("magnitude", 0.0) / (EMU_PER_PT if v.get("unit", "EMU") == "EMU" else 1.0)
+    magnitude = v.get("magnitude", 0.0)
+    if not isinstance(magnitude, (int, float)):
+        raise JsonShapeError(f"a dimension's magnitude: a number was expected, found {type(magnitude).__name__}")
+    return magnitude / (EMU_PER_PT if v.get("unit", "EMU") == "EMU" else 1.0)
 
 
 def colour(c: dict | None) -> str | None:
@@ -49,7 +60,7 @@ def colour(c: dict | None) -> str | None:
     return None
 
 
-def matrix(t: dict | None) -> list[float]:
+def matrix(t: AffineTransform | None) -> list[float]:
     """[scaleX, shearX, shearY, scaleY, translateX pt, translateY pt]."""
     if not t:
         return [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]
@@ -149,17 +160,21 @@ def _outline(o: dict | None) -> dict | None:
             "dash": o.get("dashStyle"), "state": o.get("propertyState", "RENDERED")}
 
 
-def shape_style(e: dict) -> dict:
-    if "shape" in e:
-        props = e["shape"].get("shapeProperties", {})
-        return {"type": e["shape"].get("shapeType"), "fill": _fill(props.get("shapeBackgroundFill")),
-                "outline": _outline(props.get("outline")), "align": props.get("contentAlignment")}
-    if "line" in e:
-        props = e["line"].get("lineProperties", {})
-        return {"line": e["line"].get("lineType"), "fill": _fill(props.get("lineFill")), "weight": round(_unit(props.get("weight")), 2),
+def shape_style(e: PageElement) -> dict:
+    shape, line, image = e.get("shape"), e.get("line"), e.get("image")
+    if shape is not None:
+        props = part(shape.get("shapeProperties"), "shape.shapeProperties")
+        return {"type": shape.get("shapeType"), "fill": _fill(part(props.get("shapeBackgroundFill"), "shapeBackgroundFill")),
+                "outline": _outline(part(props.get("outline"), "shapeProperties.outline")),
+                "align": props.get("contentAlignment")}
+    if line is not None:
+        props = part(line.get("lineProperties"), "line.lineProperties")
+        return {"line": line.get("lineType"), "fill": _fill(part(props.get("lineFill"), "lineFill")),
+                "weight": round(_unit(part(props.get("weight"), "lineProperties.weight")), 2),
                 "dash": props.get("dashStyle"), "arrows": [props.get("startArrow"), props.get("endArrow")]}
-    if "image" in e:
-        return {"outline": _outline(e["image"].get("imageProperties", {}).get("outline"))}
+    if image is not None:
+        props = part(image.get("imageProperties"), "image.imageProperties")
+        return {"outline": _outline(part(props.get("outline"), "imageProperties.outline"))}
     return {}
 
 
@@ -245,26 +260,23 @@ def local_signature(path: "Path | str", shape: tuple[float, float] | None) -> st
     return signature(data)
 
 
-def upload_signatures(pres: dict, files: dict[str, "Path | str"]) -> dict[str, str]:
+def upload_signatures(pres: Presentation, files: Mapping[str, "Path | str"]) -> dict[str, str]:
     """`local_signature` of each picture of `pres` whose file is known: `files` maps an image's
     objectId, or a slide's for its background picture, to the file that was uploaded for it."""
-    raw = {}
-
-    def walk(elements):
-        for e in elements:
-            raw[e["objectId"]] = e
-            walk(e.get("elementGroup", {}).get("children", []))
-
-    for s in pres.get("slides", []):
-        walk(s.get("pageElements", []))
-    page = tuple(page_size(pres)) if pres.get("pageSize") else None
-    slides = {s["objectId"] for s in pres.get("slides", [])}
-    out = {}
+    raw = {object_id(e): e for s in pres.get("slides", [])
+           for e in all_elements(s.get("pageElements", []), object_id(s))}
+    page: tuple[float, float] | None = None
+    if pres.get("pageSize"):
+        width, height = page_size(pres)
+        page = (width, height)
+    slides = {object_id(s) for s in pres.get("slides", [])}
+    out: dict[str, str] = {}
     for oid, path in files.items():
+        e = raw.get(oid)
         if oid in slides:
             shape = page
-        elif "image" in raw.get(oid, {}):
-            size = raw[oid].get("size", {})
+        elif e is not None and "image" in e:
+            size = e.get("size") or Size()
             shape = (_unit(size.get("width")), _unit(size.get("height")))
         else:
             continue
@@ -274,7 +286,7 @@ def upload_signatures(pres: dict, files: dict[str, "Path | str"]) -> dict[str, s
     return out
 
 
-def converted_files(deck: dict, out: Path, state: dict, pres: dict) -> dict[str, Path]:
+def converted_files(deck: dict, out: Path, state: dict, pres: Presentation) -> dict[str, Path]:
     """What emit uploaded for each picture of the deck it just made: an image element's file, a
     slide's own background picture (`upload_signatures`' `files`)."""
     images = picture_urls(pres)[0]
@@ -300,23 +312,20 @@ def _download(url: str, fetch=None) -> bytes | None:
         return None
 
 
-def picture_urls(pres: dict) -> tuple[dict[str, str], dict[str, str]]:
+def picture_urls(pres: Presentation) -> tuple[dict[str, str], dict[str, str]]:
     """(image objectId -> contentUrl, slide objectId -> background picture contentUrl) of a presentations.get."""
-    images, backgrounds = {}, {}
+    images: dict[str, str] = {}
+    backgrounds: dict[str, str] = {}
     for s in pres.get("slides", []):
-        fill = s.get("pageProperties", {}).get("pageBackgroundFill", {})
-        if fill.get("stretchedPictureFill", {}).get("contentUrl"):
-            backgrounds[s["objectId"]] = fill["stretchedPictureFill"]["contentUrl"]
-        stack = list(s.get("pageElements", []))
-        while stack:
-            e = stack.pop()
-            if e.get("image", {}).get("contentUrl"):
-                images[e["objectId"]] = e["image"]["contentUrl"]
-            stack += e.get("elementGroup", {}).get("children", [])
+        if url := background_url(s):
+            backgrounds[object_id(s)] = url
+        for e in all_elements(s.get("pageElements", []), object_id(s)):
+            if url := image_url(e):
+                images[object_id(e)] = url
     return images, backgrounds
 
 
-def _fetcher(fetch):
+def _fetcher(fetch: Fetch | None) -> Fetch:
     """The fetcher a pool's workers are handed: resolved here, on the calling thread."""
     if fetch is not None:
         return fetch
@@ -324,7 +333,8 @@ def _fetcher(fetch):
     return fetcher_for_threads()
 
 
-def picture_signatures(pres: dict, workers: int = 8, fetch=None, skip=(), drive=None) -> dict[str, str]:
+def picture_signatures(pres: Presentation, workers: int, fetch: Fetch | None, skip: Collection[str],
+                       drive: DriveService | None) -> dict[str, str]:
     """Every picture of a presentations.get's slides signed by its pixels, by the id that owns it
     (an image's own objectId, a slide's own for its background picture); `skip`: ids already
     signed (`upload_signatures`).
@@ -334,18 +344,17 @@ def picture_signatures(pres: dict, workers: int = 8, fetch=None, skip=(), drive=
     (`sign_pictures`' `ready`). `fetch`: what downloads them (`net`); pass it when this runs on a
     worker thread, which inherits no context. `drive`: where what was not downloaded is exported
     from (`deck_pictures.LivePictures`) - on the calling thread only, so None on a worker."""
-    from .deck_pictures import LivePictures
     images, backgrounds = picture_urls(pres)
     ids = [i for i in {**images, **backgrounds} if i not in set(skip)]
     if not ids:
         return {}
-    got = LivePictures(pres, drive, _fetcher(fetch), workers).get(ids)
+    got = LivePictures(pres, drive, _fetcher(fetch), workers, None, None).get(ids)
     return {i: sig for i, d in got.items() if (sig := signature(d))}
 
 
-def sign_pictures(read: dict, pres: dict, objects=None, slides=None, workers: int = 8,
-                  ready: dict[str, str] | None = None, fetch=None, drive=None,
-                  files: dict[str, "Path | str"] | None = None, pictures=None) -> int:
+def sign_pictures(read: dict, pres: Presentation, objects: Collection[str] | None, slides: Collection[str] | None,
+                  workers: int, ready: Mapping[str, str] | None, fetch: Fetch | None, drive: DriveService | None,
+                  files: Mapping[str, "Path | str"] | None, pictures: LivePictures | None) -> int:
     """Adds pixel signatures to the image read-backs and picture backgrounds of `read`
     (read_presentation of `pres`); `objects` / `slides`: only these ids (None: all). Returns how
     many pictures were signed or asked for. `ready`: signatures somebody has already made
@@ -380,8 +389,7 @@ def sign_pictures(read: dict, pres: dict, objects=None, slides=None, workers: in
     rest = [oid for oid, _ in jobs if oid not in local]
     if rest:
         if pictures is None:
-            from .deck_pictures import LivePictures
-            pictures = LivePictures(pres, drive, _fetcher(fetch), workers)
+            pictures = LivePictures(pres, drive, _fetcher(fetch), workers, None, None)
         got = pictures.get(rest)
         local.update({i: sig for i, d in got.items() if (sig := signature(d))})
     for oid, target in jobs:
@@ -390,26 +398,29 @@ def sign_pictures(read: dict, pres: dict, objects=None, slides=None, workers: in
     return len(jobs)
 
 
-def readback(e: dict, parent: list[float], parent_group: str | None, z: int) -> dict:
+def readback(e: PageElement, parent: list[float], parent_group: str | None, z: int) -> dict:
     """Normalised read-back of one page element (pt, hex colours, absolute transform)."""
     m = compose(parent, matrix(e.get("transform")))
-    w, h = _unit(e.get("size", {}).get("width")), _unit(e.get("size", {}).get("height"))
-    out = {"kind": next((k for k in ("shape", "image", "line", "table", "elementGroup", "sheetsChart", "video", "wordArt")
-                         if k in e), "other"),
-           "transform": [round(v, 4) for v in m[:4]] + [round(v, 2) for v in m[4:]], "size": [round(w, 2), round(h, 2)],
-           "box": box(m, w, h), "parent_group": parent_group, "z": z, "title": e.get("title"),
-           "description": e.get("description")}
+    size = e.get("size") or Size()
+    w, h = _unit(size.get("width")), _unit(size.get("height"))
+    out: dict[str, object] = {
+        "kind": next((k for k in ("shape", "image", "line", "table", "elementGroup", "sheetsChart", "video", "wordArt")
+                      if k in e), "other"),
+        "transform": [round(v, 4) for v in m[:4]] + [round(v, 2) for v in m[4:]], "size": [round(w, 2), round(h, 2)],
+        "box": box(m, w, h), "parent_group": parent_group, "z": z, "title": e.get("title"),
+        "description": e.get("description")}
     text, runs, paras, spans = None, [], [], []
-    if "shape" in e:
-        text, runs, paras, spans = read_text(e["shape"].get("text"))
-        if "placeholder" in e["shape"]:
-            out["placeholder"] = e["shape"]["placeholder"].get("type")
-    elif "table" in e:
+    shape, table, image = e.get("shape"), e.get("table"), e.get("image")
+    if shape is not None:
+        text, runs, paras, spans = read_text(part(shape.get("text"), "shape.text"))
+        if "placeholder" in shape:
+            out["placeholder"] = part(shape["placeholder"], "shape.placeholder").get("type")
+    elif table is not None:
         rows, at = [], 0
-        for row in e["table"].get("tableRows", []):
+        for row in parts(table.get("tableRows"), "table.tableRows"):
             cells = []
-            for cell in row.get("tableCells", []):
-                t, r, p, s = read_text(cell.get("text"))
+            for cell in parts(row.get("tableCells"), "tableRows.tableCells"):
+                t, r, p, s = read_text(part(cell.get("text"), "tableCells.text"))
                 cells.append(t.rstrip("\n"))
                 runs += [x for x in r if x not in runs]
                 paras += [x for x in p if x not in paras]
@@ -418,7 +429,7 @@ def readback(e: dict, parent: list[float], parent_group: str | None, z: int) -> 
                 at += len(cells[-1]) + 1                       # the tab (or, after the last cell, the newline)
             rows.append("\t".join(cells))
         text = "\n".join(rows)
-        out["table"] = [e["table"].get("rows"), e["table"].get("columns")]
+        out["table"] = [table.get("rows"), table.get("columns")]
     out["text"] = text
     out["text_styles"] = runs
     out["paragraph_styles"] = paras
@@ -428,63 +439,71 @@ def readback(e: dict, parent: list[float], parent_group: str | None, z: int) -> 
     style = shape_style(e)
     out["shape_style"] = style
     out["shape_style_hash"] = identity.sha1(json.dumps(style, sort_keys=True))[:12]
-    if "image" in e:
-        out["image"] = {"contentHash": image_hash(e["image"].get("contentUrl")),
-                        "sourceUrl": e["image"].get("sourceUrl")}
+    if image is not None:
+        out["image"] = {"contentHash": image_hash(as_optional_str(image.get("contentUrl"), "image.contentUrl")),
+                        "sourceUrl": image.get("sourceUrl")}
     return out
 
 
-def background(page: dict) -> dict:
-    fill = page.get("pageProperties", {}).get("pageBackgroundFill", {})
+def background(page: Page) -> dict:
+    fill = background_fill(page)
     if "stretchedPictureFill" in fill:
-        return {"picture": image_hash(fill["stretchedPictureFill"].get("contentUrl"))}
+        return {"picture": image_hash(background_url(page))}
     if "solidFill" in fill:
-        return {"color": colour(fill["solidFill"].get("color"))}
+        return {"color": colour(part(part(fill["solidFill"], "solidFill").get("color"), "solidFill.color"))}
     return {"state": fill.get("propertyState", "INHERIT")}
 
 
-def read_slide(slide: dict) -> dict:
+def read_slide(slide: Page) -> dict:
     """A slide as sync compares it: {objectId, layoutObjectId, background, notes, notes_id,
     order (top-level ids), objects {id: readback}}."""
     objects: dict[str, dict] = {}
     counter = [0]
 
-    def walk(elements, parent, group):
+    def walk(elements: list[PageElement], parent: list[float], group: str | None) -> None:
         for e in elements:
+            oid = object_id(e)
             rb = readback(e, parent, group, counter[0])
             counter[0] += 1
-            objects[e["objectId"]] = rb
+            objects[oid] = rb
             if "elementGroup" in e:
-                m = compose(parent, matrix(e.get("transform")))
-                walk(e["elementGroup"].get("children", []), m, e["objectId"])
-                kids = [objects[c["objectId"]]["box"] for c in e["elementGroup"].get("children", [])]
-                if kids:
-                    rb["box"] = [min(k[0] for k in kids), min(k[1] for k in kids), max(k[2] for k in kids), max(k[3] for k in kids)]
-                rb["children"] = [c["objectId"] for c in e["elementGroup"].get("children", [])]
+                kids = children(e, oid)
+                walk(kids, compose(parent, matrix(e.get("transform"))), oid)
+                boxes = [objects[object_id(c)]["box"] for c in kids]
+                if boxes:
+                    rb["box"] = [min(k[0] for k in boxes), min(k[1] for k in boxes),
+                                 max(k[2] for k in boxes), max(k[3] for k in boxes)]
+                rb["children"] = [object_id(c) for c in kids]
 
     walk(slide.get("pageElements", []), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], None)
-    notes_page = slide.get("slideProperties", {}).get("notesPage", {})
-    notes_id = notes_page.get("notesProperties", {}).get("speakerNotesObjectId")
+    props = slide.get("slideProperties") or SlideProperties()
+    notes_page = props.get("notesPage") or Page()
+    notes_id = as_optional_str(part(notes_page.get("notesProperties"), "notesProperties").get("speakerNotesObjectId"),
+                               "notesProperties.speakerNotesObjectId")
     notes = ""
     for e in notes_page.get("pageElements", []):
-        if e["objectId"] == notes_id:
-            notes = read_text(e.get("shape", {}).get("text"))[0]
-    return {"objectId": slide["objectId"], "layoutObjectId": slide.get("slideProperties", {}).get("layoutObjectId"),
+        if e.get("objectId") == notes_id:
+            notes = read_text(part(part(e.get("shape"), "shape").get("text"), "shape.text"))[0]
+    return {"objectId": object_id(slide), "layoutObjectId": props.get("layoutObjectId"),
             "background": background(slide), "notes": notes.rstrip("\n"), "notes_id": notes_id,
-            "order": [e["objectId"] for e in slide.get("pageElements", [])], "objects": objects}
+            "order": [object_id(e) for e in slide.get("pageElements", [])], "objects": objects}
 
 
-def page_size(pres: dict) -> list[float]:
+def page_size(pres: Presentation) -> list[float]:
     """The presentation's page, in pt. Every box a sync writes is in these points, and a deck a
     person built is whatever size they made it (`adopt_sync`)."""
-    return [_unit(pres["pageSize"]["width"]), _unit(pres["pageSize"]["height"])]
+    size = pres.get("pageSize")
+    if size is None:
+        raise JsonShapeError("the presentation has no pageSize (a fields= mask that left it out?)")
+    return [_unit(size.get("width")), _unit(size.get("height"))]
 
 
-def read_presentation(pres: dict) -> dict:
-    layouts = {l["objectId"]: l.get("layoutProperties", {}).get("name") for l in pres.get("layouts", [])}
-    return {"presentationId": pres["presentationId"], "revisionId": pres.get("revisionId"),
+def read_presentation(pres: Presentation) -> dict:
+    layouts = {object_id(l): (l.get("layoutProperties") or LayoutProperties()).get("name") for l in pres.get("layouts", [])}
+    masters = pres.get("masters", [])
+    return {"presentationId": presentation_id(pres), "revisionId": pres.get("revisionId"),
             "page_size": page_size(pres),
-            "layouts": layouts, "master_background": background(pres["masters"][0]) if pres.get("masters") else None,
+            "layouts": layouts, "master_background": background(masters[0]) if masters else None,
             "slides": [read_slide(s) for s in pres.get("slides", [])]}
 
 
@@ -542,29 +561,181 @@ def same_picture_file(a: Path, b: Path) -> bool:
     return bool((np.abs(laid - old).max(axis=2) > PICTURE_MATCH).mean() <= 0.002)
 
 
-def refresh_pictures(base: dict, ours: dict, deck_out: Path) -> list[dict]:
+# ---------------------------------------------------------------- where a base's pictures are
+
+def sync_work(out: Path) -> Path:
+    """Where a sync of the deck kept in `out` converts the new PDF (`sync.build_ours`). Every sync
+    renders into it again, under the same names, over the last one's files."""
+    return out / "sync" / "ours"
+
+
+def held_pictures(out: Path) -> Path:
+    """Where a sync keeps the files its base's pictures were hashed from, one folder per hash, out
+    of the next render's way (`hold_base_pictures`)."""
+    return out / "sync" / "base-pictures"
+
+
+PictureKey = tuple[str, str]
+"""A base picture as its base knows it: the first 12 hex of its file's sha1 (`fields.image`) and
+the file's name (`ir.file`)."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class PictureFolders:
+    """Where a deck's folder keeps the picture files its bases name. `kept`: folders whose files
+    stay as long as a base naming them lives (`convert`'s out folder, adopt's conversion of the
+    source); `rendered`: the last sync's conversion, written over by the next sync's render;
+    `held`: what a sync held out of that render's way (`hold_base_pictures`)."""
+    kept: tuple[Path, ...]
+    rendered: Path | None
+    held: Path | None
+
+
+def picture_folders(out: Path) -> PictureFolders:
+    """The one answer to where the pictures of a base kept in `out` may be. A base `convert` wrote
+    names its files in `out`; one `adopt` recorded, in `out/sync-base/ours` (`adopt_sync.record`
+    under `adopt`'s `sync-base`); one a sync wrote, in that sync's `sync_work`, and what it kept of
+    older bases wherever those had them."""
+    return PictureFolders(kept=(out, out / "sync-base" / "ours"), rendered=sync_work(out), held=held_pictures(out))
+
+
+def picture_key(e: JsonObject) -> PictureKey | None:
+    """(`fields.image`, `ir.file`) of a base element whose hash read a picture file; None for any
+    other (not a picture, no file, or none there when it was hashed)."""
+    ir, fields = e.get("ir"), e.get("fields")
+    if not isinstance(ir, dict) or ir.get("kind") != "image" or not isinstance(fields, dict):
+        return None
+    file, image = ir.get("file"), fields.get("image")
+    if not isinstance(file, str) or not file or not isinstance(image, str) or not image:
+        return None
+    return image, file
+
+
+@dataclass(frozen=True, kw_only=True)
+class BasePictures:
+    """Where the file each of a base's pictures was hashed from is now, found by its bytes. A name
+    alone does not say: a sync renders the new PDF into the same folder under the same names, so
+    by the next sync another picture stands under the name the base recorded, and the older one of
+    that name is in the out folder `convert` wrote. Read by name, a figure the source changed and
+    then changed back was "the same picture written differently" (`refresh_pictures`): the base
+    took the new hash, the deck kept the changed figure, and no later sync would put it right."""
+    folders: Mapping[PictureKey, Path]
+
+    def folder(self, e: JsonObject) -> Path | None:
+        """The folder holding `e`'s file (a base element) with the bytes its base hashed, or None
+        when no folder given has them."""
+        key = picture_key(e)
+        return None if key is None else self.folders.get(key)
+
+
+NO_PICTURES = BasePictures(folders={})
+
+
+def _base_picture_keys(base: JsonObject) -> list[PictureKey]:
+    keys: list[PictureKey] = []
+    for s in as_objects(base.get("slides", []), "base.slides"):
+        for e in as_objects(s.get("elements", []), "base slide elements"):
+            key = picture_key(e)
+            if key is not None and key not in keys:
+                keys.append(key)
+    return keys
+
+
+def find_base_pictures(base: JsonObject, where: PictureFolders) -> BasePictures:
+    """Each picture of `base` in the first folder of `where` whose file of its name has the bytes the
+    base hashed (`BasePictures`); one found nowhere is left out."""
+    sums: dict[Path, str | None] = {}
+
+    def holds(folder: Path, key: PictureKey) -> bool:
+        path = folder / key[1]
+        if path not in sums:
+            sums[path] = identity.sha1(path.read_bytes()) if path.is_file() else None
+        digest = sums[path]
+        return digest is not None and digest.startswith(key[0])
+
+    found: dict[PictureKey, Path] = {}
+    for key in _base_picture_keys(base):
+        folders = [*where.kept, *([where.held / key[0]] if where.held is not None else []),
+                   *([where.rendered] if where.rendered is not None else [])]
+        at = next((f for f in folders if holds(f, key)), None)
+        if at is not None:
+            found[key] = at
+    return BasePictures(folders=found)
+
+
+def hold_base_pictures(base: JsonObject, out: Path) -> BasePictures:
+    """`find_base_pictures` over `picture_folders(out)`, and every file found where the next render
+    writes (`sync_work`) copied first into `held_pictures(out)`, by hash; held files no picture of
+    `base` needs any more go. Called before a sync renders the new PDF: a base a sync wrote names the
+    files that sync rendered, and this sync's render is about to write others over them."""
+    import shutil
+
+    where = picture_folders(out)
+    found = find_base_pictures(base, where)
+    held = where.held
+    if held is None:
+        return found
+    folders: dict[PictureKey, Path] = {}
+    needed: set[str] = set()
+    for key, folder in found.folders.items():
+        if folder in where.kept:
+            folders[key] = folder
+            continue
+        image, file = key
+        target = held / image
+        if folder != target:
+            (target / file).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(folder / file, target / file)
+        folders[key] = target
+        needed.add(image)
+    if held.is_dir():
+        for sub in held.iterdir():
+            if sub.name not in needed:
+                shutil.rmtree(sub, ignore_errors=True)
+    return BasePictures(folders=folders)
+
+
+@dataclass(frozen=True, kw_only=True)
+class Refreshed:
+    """A base picture whose file changed but which puts the same thing on the page
+    (`refresh_pictures`): the base took the new hash."""
+    slide: str
+    element: str
+
+
+def refresh_pictures(base: JsonObject, ours_slides: Sequence[JsonObject], pairs: Mapping[int, int], ours_out: Path,
+                     pictures: BasePictures) -> list[Refreshed]:
     """Pictures whose file changed but that look the same are not a source change: the base takes
     the new hash and the deck keeps its object, instead of every anchored picture being rewritten
-    when the converter changes how it writes them. `base` is updated in place; returns
-    [{"slide", "element"}] for the report."""
-    refreshed = []
-    for j, i in ((int(k), v) for k, v in ours["pairs"].items()):
-        b, o = base["slides"][i], ours["slides"][j]
-        ours_by = {e["key"]: e for e in o["elements"]}
-        for el in b["elements"]:
-            oe = ours_by.get(el["key"])
-            old, new = el["ir"].get("file"), (oe or {}).get("ir", {}).get("file")
-            if oe is None or el["kind"] != "image" or not old or not new:
+    when the converter changes how it writes them. `base` is updated in place. The base's side is
+    the file its hash was made from (`pictures`), never whatever now has its name: a picture whose
+    file is not found is left to read as changed, which rewrites it - never the other way round."""
+    refreshed: list[Refreshed] = []
+    base_slides = as_objects(base["slides"], "base.slides")
+    for j, i in pairs.items():
+        b, o = base_slides[i], ours_slides[j]
+        slide = as_str(b["key"], "base slide key")
+        ours_by = {as_str(e["key"], "element key"): e for e in as_objects(o["elements"], f"slide {slide}: elements")}
+        for el in as_objects(b["elements"], f"base slide {slide}: elements"):
+            key = as_str(el["key"], f"base slide {slide}: element key")
+            oe = ours_by.get(key)
+            if oe is None or el.get("kind") != "image":
+                continue
+            new = as_object(oe["ir"], f"slide {slide}, element {key}: ir").get("file")
+            old = pictures.folder(el)
+            if old is None or not isinstance(new, str) or not new:
                 continue
             if identity.source_changes(el, oe) != {"image"}:
                 continue
-            if identity.normalise_ir(el["ir"], el.get("anchor")) != identity.normalise_ir(oe["ir"], oe.get("anchor")):
+            if identity.normalise_ir(el["ir"], _anchor_key(el)) != identity.normalise_ir(oe["ir"], _anchor_key(oe)):
                 continue  # (the IR changed in a way the field hashes don't see)
-            if not same_picture_file(deck_out / old, ours["out"] / new):
+            if not same_picture_file(old / as_str(as_object(el["ir"], "ir")["file"], "ir.file"), ours_out / new):
                 continue
-            el["fields"] = {**el["fields"], "image": oe["fields"]["image"]}
+            ours_fields = as_object(oe["fields"], f"slide {slide}, element {key}: fields")
+            el["fields"] = {**as_object(el["fields"], f"base slide {slide}, element {key}: fields"),
+                            "image": ours_fields["image"]}
             el["ir_hash"] = oe["ir_hash"]
-            refreshed.append({"slide": b["key"], "element": el["key"]})
+            refreshed.append(Refreshed(slide=slide, element=key))
     return refreshed
 
 
@@ -683,7 +854,7 @@ def _read_ir(ir: JsonObject, where: str) -> JsonObject:
             raise rendered from None
 
 
-def rehash_base(base: JsonObject, pictures: Sequence[Path]) -> list[BaseForm]:
+def rehash_base(base: JsonObject, pictures: BasePictures) -> list[BaseForm]:
     """In place: every base element's `ir` read through the IR parser (`ir_types`). Where what it
     writes back differs from what the base holds, the base takes it and its hash is worked out
     again - so a form the converter now writes differently (a key left out, a false flag) is a
@@ -691,10 +862,9 @@ def rehash_base(base: JsonObject, pictures: Sequence[Path]) -> list[BaseForm]:
 
     The new hash is only made where the recorded IR still gives the recorded hash with the same
     inputs (the anchor's key, the base's pages, the picture's file); otherwise the element is kept
-    and reported. `pictures`: the folders a base picture's file may be in, tried in order (a base
-    `convert` wrote names files in its out folder, one a sync wrote files in that sync's work
-    folder). A difference the hash does not see needs no file. Returns what was found, element by
-    element; nothing when the base is in today's form."""
+    and reported. `pictures`: where each base picture's file is, with the bytes its hash read
+    (`find_base_pictures`). A difference the hash does not see needs no file. Returns what was
+    found, element by element; nothing when the base is in today's form."""
     page_key = base_page_key(base)
     found: list[BaseForm] = []
     for s in as_objects(base.get("slides", []), "base.slides"):
@@ -716,24 +886,19 @@ def rehash_base(base: JsonObject, pictures: Sequence[Path]) -> list[BaseForm]:
                 e["ir"] = now  # (what changed is nothing the hash reads: ids, pictures' files, spans)
                 found.append(Rewritten(slide=slide, element=element, how="form", hashed=False))
                 continue
-            file = ir.get("file") if ir.get("kind") == "image" else None
-            folders: list[Path | None] = [None]  # (no file: the hash reads none)
-            if isinstance(file, str) and file:
-                folders = [p for p in pictures if (p / file).exists()]
-                if not folders:
-                    found.append(PictureGone(slide=slide, element=element, file=file))
+            folder: Path | None = None  # (no file, or none when it was hashed: the hash read none)
+            if picture_key(e) is not None:
+                folder = pictures.folder(e)
+                if folder is None:
+                    found.append(PictureGone(slide=slide, element=element, file=as_str(ir["file"], "ir.file")))
                     continue
-            for folder in folders:
-                if identity.ir_fields(ir, folder, anchor, page_key)[0] != e.get("ir_hash"):
-                    continue
-                h, fields = identity.ir_fields(now, folder, anchor, page_key)
-                # (the marks `sync.mark_emitted` gives stay: they are about the neighbours, not this IR)
-                e.update(ir=now, ir_hash=h,
-                         fields={**as_object(e.get("fields") or {}, "base element fields"), **fields})
-                found.append(Rewritten(slide=slide, element=element, how="form", hashed=True))
-                break
-            else:
+            if identity.ir_fields(ir, folder, anchor, page_key)[0] != e.get("ir_hash"):
                 found.append(Unreproduced(slide=slide, element=element))
+                continue
+            h, fields = identity.ir_fields(now, folder, anchor, page_key)
+            # (the marks `sync.mark_emitted` gives stay: they are about the neighbours, not this IR)
+            e.update(ir=now, ir_hash=h, fields={**as_object(e.get("fields") or {}, "base element fields"), **fields})
+            found.append(Rewritten(slide=slide, element=element, how="form", hashed=True))
     return found
 
 
@@ -802,8 +967,8 @@ def attach_readback(entry: dict, slide_read: dict | None, objects: list[list[str
         el["readback"] = {oid: found[oid] for oid in oids if oid in found}
 
 
-def build_base(deck: dict, out: Path, pres: dict, state: dict, pdf: "Path | dict", generation: int = 0, sign: bool = False,
-               overlays: str = "last", signatures: dict[str, str] | None = None) -> dict:
+def build_base(deck: dict, out: Path, pres: Presentation, state: dict, pdf: "Path | dict", generation: int,
+               sign: bool, overlays: str, signatures: Mapping[str, str] | None) -> dict:
     """The base after `convert`: `state` is emit's (slides with element object ids); `sign`:
     download the pictures for their signatures (`signatures`: unless these were downloaded
     already); `overlays`: which overlay steps the deck was made from, so a later sync uses the
@@ -814,7 +979,8 @@ def build_base(deck: dict, out: Path, pres: dict, state: dict, pdf: "Path | dict
     entries = slide_entries(deck, out, keys, list(ekeys), list(fps))
     read = read_presentation(pres)
     if sign:
-        sign_pictures(read, pres, ready=signatures)
+        sign_pictures(read, pres, objects=None, slides=None, workers=PICTURE_WORKERS, ready=signatures, fetch=None,
+                      drive=None, files=None, pictures=None)
     by_id = {s["objectId"]: s for s in read["slides"]}
     for entry, s in zip(entries, state["slides"]):
         attach_readback(entry, by_id.get(s["objectId"]), s.get("objects") or [[o] for o in s["elements"]], s.get("groups", []))
@@ -880,7 +1046,7 @@ def write_tags(slides, pid: str, reqs: list[dict]) -> tuple[list[dict], str | No
         return sent, at
 
 
-def tagged(pres: dict, reqs: list[dict], revision: str | None) -> dict:
+def tagged(pres: Presentation, reqs: list[dict], revision: str | None) -> Presentation:
     """A presentations.get with the alt-text titles `reqs` have just written put into it, and the
     revision the batch answered with.
 
@@ -894,16 +1060,14 @@ def tagged(pres: dict, reqs: list[dict], revision: str | None) -> dict:
     if not titles:
         return pres
     out = copy.deepcopy(pres)
-
-    def walk(elements: list[dict]) -> None:
-        for e in elements:
-            if e["objectId"] in titles:
-                e["title"] = titles[e["objectId"]]
-            walk(e.get("elementGroup", {}).get("children", []))
-
     for page in out.get("slides", []):
-        walk(page.get("pageElements", []))
-    return {**out, "revisionId": revision or out.get("revisionId")}
+        # (a group's children are the answer's own objects, checked where they are read: written here)
+        for e in all_elements(page.get("pageElements", []), object_id(page)):
+            if object_id(e) in titles:
+                e["title"] = titles[object_id(e)]
+    if revision:
+        out["revisionId"] = revision
+    return out
 
 
 # ---------------------------------------------------------------- storage
@@ -955,14 +1119,22 @@ def read_local(out: Path | None, pid: str | None) -> tuple[dict | None, str | No
     return (None, f"{local_path(out)}: {problem}") if problem else (data, None)
 
 
-def deck_info(drive, pid: str) -> dict:
+DECK_FACTS = "name,parents,appProperties"
+
+
+def deck_info(drive: DriveService, pid: str) -> DriveFile:
     """The presentation's name, parents and appProperties: everything `load_drive` and `save_drive`
     ask Drive before they can touch the base, and nothing a sync does changes it. A caller that
     reads it once and hands it on (`sync`) pays that round trip once instead of four times."""
-    return execute(drive.files().get(fileId=pid, fields="name,parents,appProperties"))
+    return execute(drive.files().get(fileId=pid, fields=DECK_FACTS))
 
 
-def save_drive(drive, base: dict, title: str | None = None, info: dict | None = None) -> str:
+def base_file(info: DriveFile) -> str | None:
+    """The id of the base file the deck names in its appProperties (None: none yet)."""
+    return (info.get("appProperties") or {}).get(BASE_PROPERTY) or None
+
+
+def save_drive(drive: DriveService, base: dict, title: str | None, info: DriveFile | None) -> str:
     """The base as a JSON file next to the presentation (drive.file scope), its id in the
     presentation's appProperties.b2sBase. Returns the file id.
 
@@ -976,7 +1148,7 @@ def save_drive(drive, base: dict, title: str | None = None, info: dict | None = 
     if info is None:
         info = deck_info(drive, pid)
     data = json.dumps(base, ensure_ascii=False).encode("utf-8")
-    fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
+    fid = base_file(info)
     if fid:
         try:
             execute(drive.files().update(fileId=fid, media_body=media_upload(io.BytesIO(data), "application/json"),
@@ -984,18 +1156,18 @@ def save_drive(drive, base: dict, title: str | None = None, info: dict | None = 
         except HttpError:
             fid = None
     if not fid:
-        body = {"name": f"{title or info.get('name', pid)} - beamer2slides sync base.json", "mimeType": "application/json",
-                "appProperties": {"b2sBaseOf": pid}}
+        body: FileBody = {"name": f"{title or info.get('name', pid)} - beamer2slides sync base.json",
+                          "mimeType": "application/json", "appProperties": {"b2sBaseOf": pid}}
         from .drive_folder import place
         place(body, drive, info.get("parents"))
-        fid = execute(drive.files().create(body=body, fields="id", media_body=media_upload(
-            io.BytesIO(data), "application/json")))["id"]
+        fid = file_id(execute(drive.files().create(body=body, fields="id", media_body=media_upload(
+            io.BytesIO(data), "application/json"))), "the sync base")
         execute(drive.files().update(fileId=pid, body={"appProperties": {BASE_PROPERTY: fid}}, fields="id"))
         info["appProperties"] = {**(info.get("appProperties") or {}), BASE_PROPERTY: fid}
     return fid
 
 
-def mark_cleaned(drive, pid: str, generation: int, info: dict | None = None) -> str | None:
+def mark_cleaned(drive: DriveService | None, pid: str, generation: int, info: DriveFile | None) -> str | None:
     """Say that generation `generation`'s `cleanup` list has been carried out, without writing the
     base to Drive again. Returns why Drive would not take it (None: it did).
 
@@ -1019,11 +1191,11 @@ def mark_cleaned(drive, pid: str, generation: int, info: dict | None = None) -> 
     return None
 
 
-def load_drive(drive, pid: str, info: dict | None = None) -> dict | None:
+def load_drive(drive: DriveService, pid: str, info: DriveFile | None) -> dict | None:
     try:
         if info is None:
             info = execute(drive.files().get(fileId=pid, fields="appProperties"))
-        fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
+        fid = base_file(info)
         if not fid:
             return None
         data = execute(drive.files().get_media(fileId=fid))
@@ -1032,7 +1204,7 @@ def load_drive(drive, pid: str, info: dict | None = None) -> dict | None:
         return None
 
 
-def stale_base_warning(where: str, drive, pid: str, info: dict | None = None) -> str | None:
+def stale_base_warning(where: str, drive: DriveService | None, pid: str, info: DriveFile | None) -> str | None:
     """The deck names a base file in Drive that we cannot read (deleted, or owned by someone else)
     while we sync against the folder's copy: another checkout may have synced this deck since, so
     the copy can be older than the deck. Nothing is lost when it is - deck edits win, and the
@@ -1044,7 +1216,7 @@ def stale_base_warning(where: str, drive, pid: str, info: dict | None = None) ->
             info = deck_info(drive, pid)
     except HttpError:
         return None
-    fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
+    fid = base_file(info)
     if not fid:
         return None
     try:
@@ -1055,8 +1227,8 @@ def stale_base_warning(where: str, drive, pid: str, info: dict | None = None) ->
     return None
 
 
-def load_base(pid: str, out: Path | None, drive=None, problems: list[str] | None = None,
-              info: dict | None = None) -> tuple[dict | None, str]:
+def load_base(pid: str, out: Path | None, drive: DriveService | None, problems: list[str] | None,
+              info: DriveFile | None) -> tuple[dict | None, str]:
     """(base, where it came from): Drive is authoritative, the local copy a cache - except when the
     local one is newer, which is what a sync whose Drive upload failed leaves behind. A base that is
     truncated, from another deck or from a newer schema is not used at all; `problems` collects why
@@ -1071,7 +1243,7 @@ def load_base(pid: str, out: Path | None, drive=None, problems: list[str] | None
 
     def swept(base: dict | None) -> dict | None:
         """A `cleanup` list the deck says has been carried out names nothing (`mark_cleaned`)."""
-        done = ((info or {}).get("appProperties") or {}).get(CLEANED_PROPERTY)
+        done = None if info is None else (info.get("appProperties") or {}).get(CLEANED_PROPERTY)
         if base is not None and done and str(base.get("generation", 0)) == done:
             base.pop("cleanup", None)
         return base
@@ -1097,7 +1269,7 @@ def load_base(pid: str, out: Path | None, drive=None, problems: list[str] | None
     return None, "none"
 
 
-def store_base(base: dict, out: Path, drive=None, label: str = "base", info: dict | None = None) -> str | None:
+def store_base(base: dict, out: Path, drive: DriveService | None, label: str, info: DriveFile | None) -> str | None:
     """Store the base where the next sync will look for it: locally first (atomically), then in
     Drive. Returns why Drive could not take it (None: it did). The caller decides what to do about
     a base that only reached the local folder - sync keeps the objects it would have deleted.
@@ -1112,7 +1284,7 @@ def store_base(base: dict, out: Path, drive=None, label: str = "base", info: dic
         return "no Drive service"
     fail_at(f"{label}:drive")
     try:
-        save_drive(drive, base, info=info)
+        save_drive(drive, base, None, info)
     except (HttpError, OSError) as e:
         return f"{type(e).__name__}: {e}"
     return None
@@ -1157,17 +1329,16 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
     where_to_put_it = None
     if not shared_service("drive", "v3"):
         creds = credentials_for_threads()  # here: a worker thread inherits no context
-        where_to_put_it = pool.submit(lambda: execute(drive_service(creds).files().get(
-            fileId=pid, fields="name,parents,appProperties")))
+        where_to_put_it = pool.submit(lambda: deck_info(drive_service(creds), pid))
     pres = execute(slides.presentations().get(presentationId=pid))
     # Every picture was uploaded from a file here, so it is signed from that file
     # (`upload_signatures`); only one Google may have reshaped is downloaded, while the tags are
     # written: they hang off contentUrls, not off a Google client - only the fetcher, resolved
     # here (`net`). What no download brought is exported afterwards, on this thread.
     local = upload_signatures(pres, converted_files(deck, out, state, pres))
-    signing = pool.submit(picture_signatures, pres, fetch=fetcher_for_threads(), skip=local)
+    signing = pool.submit(picture_signatures, pres, PICTURE_WORKERS, fetcher_for_threads(), local, None)
     pool.shutdown(wait=False)
-    base = build_base(deck, out, pres, state, pdf, overlays=overlays)
+    base = build_base(deck, out, pres, state, pdf, 0, False, overlays, None)
     landed, revision = write_tags(slides, pid, tag_requests(base))
     if landed:
         pres = tagged(pres, landed, revision)  # what a second read would say, measured (`tagged`)
@@ -1177,10 +1348,9 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
     images, backgrounds = picture_urls(pres)
     unsigned = [i for i in {**images, **backgrounds} if i not in signatures]
     if unsigned:  # (their downloads failed already: straight to the export)
-        from .deck_pictures import LivePictures
-        exported = LivePictures(pres, drive, fetcher_for_threads(), slides=slides).export()
+        exported = LivePictures(pres, drive, fetcher_for_threads(), PICTURE_WORKERS, None, slides).export()
         signatures.update({i: sig for i in unsigned if (d := exported.get(i)) and (sig := signature(d))})
-    base = build_base(deck, out, pres, state, pdf, sign=True, overlays=overlays, signatures=signatures)
+    base = build_base(deck, out, pres, state, pdf, 0, True, overlays, signatures)
     # What convert wrote on the master and the layouts, so a sync can carry a new theme there and
     # tell a person's layout edits from its own (theme_sync). A deck without it syncs as before.
     try:
@@ -1191,11 +1361,11 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
     except Exception as e:  # noqa: BLE001 (a missing record costs theme sync, never the conversion)
         problem(f"could not record the deck's theme for sync ({e}); a later sync leaves the "
                 f"master and layouts alone")
-    info = None
+    info: DriveFile | None = None
     if where_to_put_it is not None:
         with contextlib.suppress(Exception):  # then save_drive reads it itself
             info = where_to_put_it.result()
-    failed = store_base(base, out, drive, label="convert-base", info=info)
+    failed = store_base(base, out, drive, "convert-base", info)
     if failed:
         problem(f"could not store the sync base in Drive ({failed}); it was kept only in "
                 f"{local_path(out)}, and a later sync that cannot see that folder refuses with "

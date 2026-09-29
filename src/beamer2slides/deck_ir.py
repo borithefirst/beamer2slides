@@ -1627,10 +1627,12 @@ def read_deck(ref: str, images: Path | None = None, base: dict | None = None, pd
     before any download is tried, and no Drive export is made: a process that may fetch nothing
     (`--no-downloads`, a sandbox) still gets them. `keep["pptx_pictures"]`: how many it held."""
     from .google_auth import slides_service
+    from .google_types import as_json
     from .gslides import execute
     slides = slides or slides_service()
     pid = presentation_id(ref)
-    pres = execute(slides.presentations().get(presentationId=pid))
+    # The readers below take JSON; the typed answer is checked into it once.
+    pres = as_json(execute(slides.presentations().get(presentationId=pid)), pid)
     if keep is not None:
         keep["presentation"] = pres
     p = Path(ref)
@@ -1655,9 +1657,10 @@ def picture_fetch(pres: dict, pptx: bytes | None = None, keep: dict | None = Non
     (a read that has no Google, `read_presentation`). `pptx_first=False`: the fetcher is asked
     before the .pptx (it replays recorded downloads, `deck_files`: the bytes Google serves, where a
     .pptx may hold a re-encoded copy). `keep["pptx_pictures"]`: what the .pptx held."""
-    from .deck_pictures import LivePictures
+    from .deck_pictures import WORKERS, LivePictures
     from .google_auth import drive_service, fetcher_for_threads, slides_service
-    live = LivePictures(pres, None, fetcher_for_threads(), pptx=pptx)
+    from .google_types import presentation
+    live = LivePictures(presentation(pres, "the deck read"), None, fetcher_for_threads(), WORKERS, pptx, None)
     if pptx is not None and keep is not None:
         keep["pptx_pictures"] = len(live.exported or {})
 
@@ -1760,8 +1763,10 @@ def pictures_from_pptx(target: dict, pres: dict, data: bytes, images: Path) -> t
     download of another revision gives only the pages that still pair. -> (filled, held)."""
     from . import deck_fills
     from .deck_pictures import exported_pictures, picture_urls
-    exported = exported_pictures(data, pres)
-    by_url = {u: oid for oid, u in picture_urls(pres).items()}
+    from .google_types import presentation
+    read = presentation(pres, "the presentation.json beside the target")
+    exported = exported_pictures(data, read, None)
+    by_url = {u: oid for oid, u in picture_urls(read).items()}
 
     def lacks(file) -> bool:
         return not file or not Path(file).exists()

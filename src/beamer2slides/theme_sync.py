@@ -26,9 +26,16 @@ import io
 import json
 from collections import Counter
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import identity, snapshot
+from .google_types import (LayoutProperties, Page, PageElement, Presentation, SlideProperties, as_json, background_url,
+                           image_url, object_id, part, parts)
+from .json_types import Json, JsonObject, as_int
 from .merge import conflict_entry
+
+if TYPE_CHECKING:
+    from .deck_pictures import LivePictures
 
 DECORATION = "Theme decoration"   # the alt text emit gives the decoration picture (emit._add_decoration)
 BOX_TOL = 0.5                     # pt: a layout object this far from where it was has been moved
@@ -100,20 +107,32 @@ def same_spec(a: dict | None, b: dict | None) -> bool:
     return json.dumps(norm(a), sort_keys=True) == json.dumps(norm(b), sort_keys=True)
 
 
-def style_hash(e: dict) -> str:
+def text_elements(e: PageElement) -> list[JsonObject]:
+    """A shape's `text.textElements` (none: no shape, or no text)."""
+    shape = part(e.get("shape"), "shape")
+    return parts(part(shape.get("text"), "shape.text").get("textElements"), "shape.text.textElements")
+
+
+def placeholder(e: PageElement) -> JsonObject:
+    """A shape's `placeholder` (`{}`: it is none)."""
+    return part(part(e.get("shape"), "shape").get("placeholder"), "shape.placeholder")
+
+
+def style_hash(e: PageElement) -> str:
     """The styles of every run and paragraph of a page element's text. A layout placeholder holds
     nothing but a newline per list level, which the slides' `text_style_hash` leaves out (a run of
     newlines is no text), and that is exactly where a person's restyling of a layout lands."""
-    parts = []
-    for te in e.get("shape", {}).get("text", {}).get("textElements", []):
+    styles = []
+    for te in text_elements(e):
         if "textRun" in te:
-            parts.append(["run", snapshot._text_style(te["textRun"].get("style", {}))])
+            run = part(te["textRun"], "textRun")
+            styles.append(["run", snapshot._text_style(part(run.get("style"), "textRun.style"))])
         elif "paragraphMarker" in te:
-            parts.append(["paragraph", snapshot._paragraph_style(te["paragraphMarker"])])
-    return identity.sha1(json.dumps(parts, sort_keys=True))[:12]
+            styles.append(["paragraph", snapshot._paragraph_style(part(te["paragraphMarker"], "paragraphMarker"))])
+    return identity.sha1(json.dumps(styles, sort_keys=True))[:12]
 
 
-def slim(rb: dict, e: dict) -> dict:
+def slim(rb: dict, e: PageElement) -> dict:
     """The part of a layout object's read-back a person's edit shows in (`e`: the element as read)."""
     return {"box": rb.get("box"), "style": style_hash(e), "contentHash": (rb.get("image") or {}).get("contentHash")}
 
@@ -132,20 +151,21 @@ def texts_says(texts: list[dict]) -> list[str]:
     return [identity.plain_text(t) for t in texts]
 
 
-def live_texts(pres: dict) -> dict[str, dict]:
+def live_texts(pres: Presentation) -> dict[str, dict]:
     """The layout texts on the deck's layouts: object id -> {page, text, box, style}."""
     from .emit import LAYOUT_TEXT_PREFIX
     out = {}
     for page in pres.get("layouts", []):
         objects = snapshot.read_slide(page)["objects"]
         for e in page.get("pageElements", []):
-            if e["objectId"].startswith(LAYOUT_TEXT_PREFIX) and e["objectId"] in objects:
-                rb = objects[e["objectId"]]
-                out[e["objectId"]] = {"page": page["objectId"], "text": rb.get("text") or "", **slim(rb, e)}
+            oid = object_id(e)
+            if oid.startswith(LAYOUT_TEXT_PREFIX) and oid in objects:
+                rb = objects[oid]
+                out[oid] = {"page": object_id(page), "text": rb.get("text") or "", **slim(rb, e)}
     return out
 
 
-def texts_entry(texts: list[dict], pres: dict) -> dict:
+def texts_entry(texts: list[dict], pres: Presentation) -> dict:
     """The base's record of the layout texts: what they said and what the deck held after writing them."""
     return {"digest": texts_digest(texts), "says": texts_says(texts), "objects": live_texts(pres)}
 
@@ -168,9 +188,9 @@ def texts_edited(was: dict, now: dict) -> list[str]:
     return out
 
 
-def page_name(page: dict) -> str:
-    props = page.get("layoutProperties") or {}
-    return props.get("displayName") or props.get("name") or page["objectId"]
+def page_name(page: Page) -> str:
+    props = page.get("layoutProperties") or LayoutProperties()
+    return props.get("displayName") or props.get("name") or object_id(page)
 
 
 def spec_says(spec: dict | None, kind: str | None = None) -> dict | None:
@@ -196,38 +216,48 @@ def picture_says(pid: dict | None, path=None) -> str:
 
 # ---------------------------------------------------------------- what convert wrote
 
-def layout_groups(pres: dict, slide_groups: dict[str, list[str]]) -> dict[str, str]:
+def layout_groups(pres: Presentation, slide_groups: dict[str, list[str]]) -> dict[str, str]:
     """layout page id -> the decoration group it carries: the one most slides on it have, else
     (a layout no slide uses) the one emit gives its kind."""
     out = {}
     for layout in pres.get("layouts", []):
-        groups = slide_groups.get(layout["objectId"])
+        groups = slide_groups.get(object_id(layout))
         if groups:
-            out[layout["objectId"]] = Counter(groups).most_common(1)[0][0]
+            out[object_id(layout)] = Counter(groups).most_common(1)[0][0]
         else:
-            out[layout["objectId"]] = "TITLE" if (layout.get("layoutProperties") or {}).get("name") == "TITLE" else "*"
+            name = (layout.get("layoutProperties") or LayoutProperties()).get("name")
+            out[object_id(layout)] = "TITLE" if name == "TITLE" else "*"
     return out
 
 
-def page_entry(page: dict, group: str, picture: dict | None, spec: dict) -> dict:
+def page_entry(page: Page, group: str, picture: dict | None, spec: dict) -> dict:
     """One layout or master page as the base records it."""
     objects = snapshot.read_slide(page)["objects"]
-    entry = {"name": page_name(page), "group": group, "decoration": None, "placeholders": {}}
+    decoration: dict[str, object] | None = None
+    placeholders: dict[str, dict[str, object]] = {}
     for e in page.get("pageElements", []):
-        if "image" in e and (e.get("description") or "") == DECORATION and entry["decoration"] is None:
-            entry["decoration"] = {"oid": e["objectId"], "picture": picture, "readback": slim(objects[e["objectId"]], e)}
-        kind = e.get("shape", {}).get("placeholder", {}).get("type")
-        if kind in PLACEHOLDERS and spec.get(kind) is not None:
-            entry["placeholders"][e["objectId"]] = {"kind": kind, "spec": spec[kind], "readback": slim(objects[e["objectId"]], e)}
-    return entry
+        oid = object_id(e)
+        if "image" in e and (e.get("description") or "") == DECORATION and decoration is None:
+            decoration = {"oid": oid, "picture": picture, "readback": slim(objects[oid], e)}
+        kind = placeholder(e).get("type")
+        if isinstance(kind, str) and kind in PLACEHOLDERS and spec.get(kind) is not None:
+            placeholders[oid] = {"kind": kind, "spec": spec[kind], "readback": slim(objects[oid], e)}
+    return {"name": page_name(page), "group": group, "decoration": decoration, "placeholders": placeholders}
 
 
-def record(deck: dict, out: Path, pres: dict, state: dict) -> dict | None:
+def slide_layouts(pres: Presentation) -> dict[str, str | None]:
+    """slide id -> the id of the layout it is on."""
+    return {object_id(s): (s.get("slideProperties") or SlideProperties()).get("layoutObjectId")
+            for s in pres.get("slides", [])}
+
+
+def record(deck: dict, out: Path, pres: Presentation, state: dict) -> dict | None:
     """The base's `theme` after `convert`: what emit wrote on the master and the layouts of `pres`
     (the deck read after it was made). `deck` / `state`: emit's plan.deck and emit.json state."""
     from .emit import PPTX_TITLE_DY, FontMapper, layout_style_spec, master_plan, slide_layout
 
-    if not deck.get("slides") or not pres.get("masters"):
+    masters = pres.get("masters")
+    if not deck.get("slides") or not masters:
         return None
     st = state.get("theme")
     mp = master_plan(deck, out, theme=None)
@@ -235,7 +265,7 @@ def record(deck: dict, out: Path, pres: dict, state: dict) -> dict | None:
     scale = state.get("scale") or 1.0
     spec = layout_style_spec(deck, scale, FontMapper(), PPTX_TITLE_DY, mp["ground"])
     pictures = {g: (picture_id(out / p) if p else None) for g, p in ((st or {}).get("decorations") or {}).items()}
-    layout_of = {s["objectId"]: (s.get("slideProperties") or {}).get("layoutObjectId") for s in pres.get("slides", [])}
+    layout_of = slide_layouts(pres)
     slide_groups: dict[str, list[str]] = {}
     for s, emitted in zip(deck["slides"], state.get("slides", [])):
         name = ((st or {}).get("layouts") or {}).get(str(s["page"])) or slide_layout(s)[0]
@@ -243,16 +273,16 @@ def record(deck: dict, out: Path, pres: dict, state: dict) -> dict | None:
         if lid:
             slide_groups.setdefault(lid, []).append(group_of(name))
     groups = layout_groups(pres, slide_groups)
-    master = pres["masters"][0]
+    master = masters[0]
     readback = snapshot.background(master)
     if "picture" in readback and fill[0] == "png" and fill in mp["bg_file"]:
         readback["signature"] = picture_id(mp["bg_file"][fill])["signature"]
-    pages = {master["objectId"]: page_entry(master, "master", None, spec)}
+    pages = {object_id(master): page_entry(master, "master", None, spec)}
     for layout in pres.get("layouts", []):
-        g = groups[layout["objectId"]]
-        pages[layout["objectId"]] = page_entry(layout, g, pictures.get(g, pictures.get(main_group(g))), spec)
+        g = groups[object_id(layout)]
+        pages[object_id(layout)] = page_entry(layout, g, pictures.get(g, pictures.get(main_group(g))), spec)
     return {"fill": key_text(fill), "shared": key_text(mp["shared"]),
-            "master": {"objectId": master["objectId"], "readback": readback}, "pages": pages,
+            "master": {"objectId": object_id(master), "readback": readback}, "pages": pages,
             "texts": texts_entry(deck.get("layout_texts", []), pres)}
 
 
@@ -280,7 +310,7 @@ def ours_picture(side: dict, group: str) -> dict | None:
 
 # ---------------------------------------------------------------- the merge
 
-def live_signature(url: str | None, oid: str | None = None, pictures=None) -> str | None:
+def live_signature(url: str | None, oid: str | None, pictures: LivePictures | None) -> str | None:
     """The signature of a live picture of the master or a layout (`oid`: its image's id, or the
     page's for its background): read through `pictures` (`deck_pictures.LivePictures`, which falls
     back to a Drive export) when given, else downloaded from `url`."""
@@ -291,7 +321,8 @@ def live_signature(url: str | None, oid: str | None = None, pictures=None) -> st
     return snapshot.signature(data) if data else None
 
 
-def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, new_id, pictures=None) -> dict:
+def plan(base: dict, side: dict, ours: dict, pres: Presentation, tok: str, picture_url, new_id,
+         pictures: LivePictures | None) -> dict:
     """What to write on the master and the layouts, and what to say about it.
 
     `ours`: build_ours' answer (its slides are paired with the base's); `pres`: the live deck;
@@ -309,10 +340,10 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
            "page_group": {}, "written": {}, "pending": {}, "pinned": []}
     pending = ((base.get("pending") or {}).get("theme") or {})
     styling: dict[str, dict] = {}   # placeholder id -> the spec this run writes
-    pages = {p["objectId"]: p for p in pres.get("masters", [])[:1] + pres.get("layouts", [])}
+    pages = {object_id(p): p for p in pres.get("masters", [])[:1] + pres.get("layouts", [])}
 
     # ---- which decoration each layout serves now
-    live_layout = {s["objectId"]: (s.get("slideProperties") or {}).get("layoutObjectId") for s in pres.get("slides", [])}
+    live_layout = slide_layouts(pres)
     ours_pages = [s["page"] for s in ours["deck"]["slides"]]
     on_layout: dict[str, list[tuple[str, str]]] = {}   # layout -> [(slide key, ours group)]
     for j, i in ours.get("pairs", {}).items():
@@ -344,15 +375,15 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
         was = rec["master"]["readback"]
         edited = not snapshot.same_background(was, now)
         if edited and "picture" in now and "picture" in was and was.get("signature"):
-            url = live_master.get("pageProperties", {}).get("pageBackgroundFill", {}).get("stretchedPictureFill", {}).get("contentUrl")
-            edited = not snapshot.signatures_match(was["signature"], live_signature(url, live_master["objectId"], pictures))
+            url = background_url(live_master)
+            edited = not snapshot.signatures_match(was["signature"], live_signature(url, object_id(live_master), pictures))
         converged = side["fill"].startswith("color:") and now.get("color") == side["fill"][6:]
         if converged:
             out["written"]["master"] = side["fill"]
         elif edited:
             conflict("master", None, "master background", rec["fill"], side["fill"], now)
         else:
-            mid = live_master["objectId"]
+            mid = object_id(live_master)
             if side["fill"].startswith("color:"):
                 from .sync import api_colour
                 out["requests"].append({"updatePageProperties": {
@@ -373,7 +404,7 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
         if page is None:
             continue   # (a layout the person deleted: nothing of the theme to keep on it)
         where = "master" if entry["group"] == "master" else f"layout {entry['name']}"
-        live = {e["objectId"]: e for e in page.get("pageElements", [])}
+        live = {object_id(e): e for e in page.get("pageElements", [])}
         objects = snapshot.read_slide(page)["objects"]
         if entry["group"] != "master":
             deco = entry.get("decoration")
@@ -404,7 +435,7 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
                         theirs = f"moved to {[round(v, 1) for v in rb['box']]}"
                     elif (rb.get("image") or {}).get("contentHash") != deco["readback"].get("contentHash"):
                         # Google hands out new URLs for the same picture: only its pixels tell
-                        sig = live_signature(live[oid]["image"].get("contentUrl"), oid, pictures)
+                        sig = live_signature(image_url(live[oid]), oid, pictures)
                         if now is not None and snapshot.signatures_match(sig, now.get("signature")):
                             out["written"][oid] = {"page": pid, "picture": now}   # (an interrupted sync wrote it)
                         elif not snapshot.signatures_match(sig, (was or {}).get("signature")):
@@ -446,7 +477,7 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
                 conflict(where, oid, STYLE_FIELD[ph["kind"]], spec_says(ph["spec"]), spec_says(now), theirs)
                 continue
             from .emit import layout_placeholder_requests
-            out["requests"] += layout_placeholder_requests(now, live[oid])
+            out["requests"] += layout_placeholder_requests(now, as_json(live[oid], oid))
             styling[oid] = now
             out["written"][oid] = {"page": pid, "spec": now}
             out["pending"][oid] = now
@@ -463,7 +494,7 @@ def plan(base: dict, side: dict, ours: dict, pres: dict, tok: str, picture_url, 
 TEXTS_FIELD = "header and footer"
 
 
-def plan_texts(rec: dict, side: dict, ours: dict, pres: dict, pending: dict, out: dict) -> None:
+def plan_texts(rec: dict, side: dict, ours: dict, pres: Presentation, pending: dict, out: dict) -> None:
     """The header and footer words every slide shares (`\\author`, `\\title`, `\\date` in a
     footline), which convert writes once per layout (`emit.write_layout_texts`), merged three ways
     into `out` (plan's answer). Nothing merged them before: a new `\\date`, or a colour theme that
@@ -501,7 +532,7 @@ def plan_texts(rec: dict, side: dict, ours: dict, pres: dict, pending: dict, out
     reqs = [{"deleteObject": {"objectId": oid}} for oid in now]
     for li, layout in enumerate(pres.get("layouts", [])):
         for ti, el in enumerate(new):
-            reqs += text_box_requests(el, layout["objectId"], f"{LAYOUT_TEXT_PREFIX}{li}_{ti}",
+            reqs += text_box_requests(el, object_id(layout), f"{LAYOUT_TEXT_PREFIX}{li}_{ti}",
                                       ours["plan"].scale, ours["plan"].fonts)
     out["requests"] += reqs
     out["written"][TEXTS_FIELD] = {"digest": digest, "says": says}
@@ -509,19 +540,19 @@ def plan_texts(rec: dict, side: dict, ours: dict, pres: dict, pending: dict, out
     out["applied"].append({"slide": "layouts", "element": None, "fields": [TEXTS_FIELD]})
 
 
-def _level_runs(e: dict) -> tuple[list[dict], list[dict]]:
+def _level_runs(e: PageElement) -> tuple[list[JsonObject], list[JsonObject]]:
     """A master or layout placeholder's style per list level: (run styles, paragraph styles), the
     "\\n" each level holds."""
     runs, paras = [], []
-    for te in e.get("shape", {}).get("text", {}).get("textElements", []):
+    for te in text_elements(e):
         if "textRun" in te:
-            runs.append(te["textRun"].get("style") or {})
+            runs.append(part(part(te["textRun"], "textRun").get("style"), "textRun.style"))
         elif "paragraphMarker" in te:
-            paras.append(te["paragraphMarker"].get("style") or {})
+            paras.append(part(part(te["paragraphMarker"], "paragraphMarker").get("style"), "paragraphMarker.style"))
     return runs, paras
 
 
-def _inherited(chain: list[dict], level: int, field: str, paragraph: bool = False):
+def _inherited(chain: list[PageElement], level: int, field: str, paragraph: bool) -> Json:
     for e in chain:
         runs, paras = _level_runs(e)
         styles = paras if paragraph else runs
@@ -532,7 +563,20 @@ def _inherited(chain: list[dict], level: int, field: str, paragraph: bool = Fals
     return None
 
 
-def inherited_pins(pres: dict, restyled: dict[str, dict], slide_ids: set) -> tuple[list[dict], list[str]]:
+def placeholder_chain(e: PageElement, placeholders: dict[str, PageElement]) -> list[PageElement]:
+    """The master and layout placeholders `e` inherits its text style from, nearest first. Each is
+    taken once: parents that name each other end the chain rather than the sync."""
+    chain: list[PageElement] = []
+    seen: set[str] = set()
+    parent = placeholder(e).get("parentObjectId")
+    while isinstance(parent, str) and parent in placeholders and parent not in seen:
+        seen.add(parent)
+        chain.append(placeholders[parent])
+        parent = placeholder(placeholders[parent]).get("parentObjectId")
+    return chain
+
+
+def inherited_pins(pres: Presentation, restyled: dict[str, dict], slide_ids: set) -> tuple[list[dict], list[str]]:
     """Requests that write onto the converter's slides, explicitly, the style their placeholder
     text now takes from a master or layout placeholder this sync restyles (`restyled`: object id
     -> the spec written), and the ids of the objects they touch.
@@ -547,58 +591,58 @@ def inherited_pins(pres: dict, restyled: dict[str, dict], slide_ids: set) -> tup
     style gets it back from the layout, as a fresh conversion's does."""
     if not restyled:
         return [], []
-    placeholders = {e["objectId"]: e for p in pres.get("masters", []) + pres.get("layouts", [])
-                    for e in p.get("pageElements", []) if e.get("shape", {}).get("placeholder")}
+    placeholders = {object_id(e): e for p in pres.get("masters", []) + pres.get("layouts", [])
+                    for e in p.get("pageElements", []) if placeholder(e)}
     reqs, touched = [], []
     for slide in pres.get("slides", []):
         if slide.get("objectId") not in slide_ids:
             continue
         for e in slide.get("pageElements", []):
-            chain, parent = [], e.get("shape", {}).get("placeholder", {}).get("parentObjectId")
-            while parent in placeholders and parent not in chain:
-                chain.append(placeholders[parent])
-                parent = placeholders[parent]["shape"]["placeholder"].get("parentObjectId")
-            written = [restyled[c["objectId"]] for c in chain if c["objectId"] in restyled]
+            chain = placeholder_chain(e, placeholders)
+            written = [restyled[object_id(c)] for c in chain if object_id(c) in restyled]
             if not written:
                 continue
             fields = list(dict.fromkeys(f for spec in written for f in spec["fields"].split(",")))
-            elements = e["shape"].get("text", {}).get("textElements", [])
+            elements = text_elements(e)
             if not elements:
                 continue
-            end_all = elements[-1].get("endIndex", 0) - 1       # (the last newline is Slides' own)
+            oid = object_id(e)
+            end_all = as_int(elements[-1].get("endIndex", 0), "endIndex") - 1   # (the last newline is Slides' own)
             level, before = 0, len(reqs)
             for te in elements:
-                a, b = te.get("startIndex", 0), min(te.get("endIndex", 0), end_all)
+                a, b = as_int(te.get("startIndex", 0), "startIndex"), min(as_int(te.get("endIndex", 0), "endIndex"), end_all)
                 if "paragraphMarker" in te:
-                    level = ((te["paragraphMarker"].get("bullet") or {}).get("nestingLevel") or 0)
-                    style = te["paragraphMarker"].get("style") or {}
+                    marker = part(te["paragraphMarker"], "paragraphMarker")
+                    level = as_int(part(marker.get("bullet"), "bullet").get("nestingLevel") or 0, "bullet.nestingLevel")
+                    style = part(marker.get("style"), "paragraphMarker.style")
                     if "alignment" not in style and any(spec.get("align") for spec in written) and b > a:
-                        value = _inherited(chain, level, "alignment", paragraph=True)
+                        value = _inherited(chain, level, "alignment", True)
                         if value:
                             reqs.append({"updateParagraphStyle": {
-                                "objectId": e["objectId"], "fields": "alignment", "style": {"alignment": value},
+                                "objectId": oid, "fields": "alignment", "style": {"alignment": value},
                                 "textRange": {"type": "FIXED_RANGE", "startIndex": a, "endIndex": b}}})
                 elif "textRun" in te and b > a:
-                    style = te["textRun"].get("style") or {}
+                    style = part(part(te["textRun"], "textRun").get("style"), "textRun.style")
                     pin = {f: v for f in fields if f not in style
-                           for v in [_inherited(chain, level, f)] if v is not None}
+                           for v in [_inherited(chain, level, f, False)] if v is not None}
                     if pin:
                         reqs.append({"updateTextStyle": {
-                            "objectId": e["objectId"], "fields": ",".join(pin), "style": pin,
+                            "objectId": oid, "fields": ",".join(pin), "style": pin,
                             "textRange": {"type": "FIXED_RANGE", "startIndex": a, "endIndex": b}}})
             if len(reqs) > before:
-                touched.append(e["objectId"])
+                touched.append(oid)
     return reqs, touched
 
 
-def new_record(rec: dict, side: dict, done: dict, raw: dict | None) -> dict:
+def new_record(rec: dict, side: dict, done: dict, raw: Presentation | None) -> dict:
     """The base's `theme` after a sync: what was written (`done`, plan's "written") takes the
     source's value and the read-back after the write (`raw`: the deck read after it); everything
     else stays as the base had it - a conflict comes back next time, a deck edit stays one."""
     rec = json.loads(json.dumps(rec))
-    pages = {p["objectId"]: p for p in (raw or {}).get("masters", [])[:1] + (raw or {}).get("layouts", [])}
+    read = raw if raw is not None else Presentation()
+    pages = {object_id(p): p for p in read.get("masters", [])[:1] + read.get("layouts", [])}
     objects = {pid: {oid: slim(rb, e) for oid, rb in snapshot.read_slide(p)["objects"].items()
-                     for e in p.get("pageElements", []) if e["objectId"] == oid} for pid, p in pages.items()}
+                     for e in p.get("pageElements", []) if object_id(e) == oid} for pid, p in pages.items()}
     if "master" in done:
         rec["fill"] = done["master"]
         page = pages.get(rec["master"]["objectId"])
@@ -609,7 +653,7 @@ def new_record(rec: dict, side: dict, done: dict, raw: dict | None) -> dict:
             rec["master"]["readback"] = readback
     rec["shared"] = side["shared"]
     if TEXTS_FIELD in done and rec.get("texts") is not None and raw:
-        rec["texts"] = {**done[TEXTS_FIELD], "objects": live_texts(raw or {})}
+        rec["texts"] = {**done[TEXTS_FIELD], "objects": live_texts(read)}
     for oid, what in done.items():
         if oid in ("master", TEXTS_FIELD):
             continue

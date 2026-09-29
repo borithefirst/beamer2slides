@@ -448,7 +448,7 @@ def base_of(made: Made) -> tuple[dict, dict]:
     deck = copy.deepcopy(made.deck)
     off, state = convert_state(deck)
     pres = simulate(copy.deepcopy(deck))
-    base = snapshot.build_base(off["plan"].deck, made.out, pres, state, made.pdf)
+    base = snapshot.build_base(off["plan"].deck, made.out, pres, state, made.pdf, 0, False, "last", None)
     for entry, slide in zip(base["slides"], off["plan"].deck["slides"]):
         assert [e["id"] for e in entry["elements"]] == [e["id"] for e in slide["elements"]], \
             f"slide {slide['page'] + 1}: the base lost an element"
@@ -526,8 +526,9 @@ def resync(made: Made, home: Path) -> None:
 
     base, pres = adopt_base_of(made) if made.extra.get("folds") is not None else base_of(made)
     # (the width went in as `overlays` while build_ours had defaults: planned at SLIDE_W whatever the deck)
-    ours = sync.build_ours(made.pdf, home / "ours", base, "last", made.page_width or SLIDE_W,
-                           (made.out,) if made.out else ())
+    pictures = snapshot.find_base_pictures(base, snapshot.PictureFolders(kept=(made.out,), rendered=None, held=None)) \
+        if made.out else snapshot.NO_PICTURES
+    ours = sync.build_ours(made.pdf, home / "ours", base, "last", made.page_width or SLIDE_W, pictures)
     # a base this converter just wrote is in today's form: nothing to rewrite, nothing it cannot read
     assert snapshot.base_form_json(ours["base_forms"]) == []
     for s, entry in zip(ours["deck"]["slides"], ours["slides"]):
@@ -537,7 +538,9 @@ def resync(made: Made, home: Path) -> None:
     merge.plan_merge(base, ours, snapshot.read_presentation(pres))
     theme_sync.ours_side(ours)
 
-    s = sync.Sync(None, None, "offline", base, ours, home / "ours", dry_run=True, measure=False)
+    s = sync.Sync(None, None, "offline", base, ours, home / "ours", dry_run=True, measure=False,
+                  trust_generation=True, check_plan=None, follow_labels=False, take_source=(), facts=None,
+                  way_back=None)
     pictures = {}
     for j, slide in enumerate(ours["deck"]["slides"]):
         title = title_element(slide)

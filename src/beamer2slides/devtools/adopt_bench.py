@@ -106,12 +106,13 @@ def capture(pid: str, name: str, refresh: bool = False) -> Path:
     target.json = `deck_ir(foreign=True)` with its pictures in images/. Nothing is written to the deck."""
     from beamer2slides.deck_ir import fetch_url
     from beamer2slides.google_auth import credentials, slides_service
+    from beamer2slides.google_types import as_json
     from beamer2slides.gslides import execute, save_thumbnail
     folder = CORPUS / name
     folder.mkdir(parents=True, exist_ok=True)
     # Always read again: picture contentUrls expire within the hour, so a cached answer can no
     # longer fetch its pictures (403). Thumbnails are kept unless --refresh.
-    pres = execute(slides_service().presentations().get(presentationId=pid))
+    pres = as_json(execute(slides_service().presentations().get(presentationId=pid)), pid)
     (folder / "presentation.json").write_text(json.dumps(pres, indent=1), encoding="utf-8")
     creds = credentials()
 

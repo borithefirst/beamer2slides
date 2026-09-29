@@ -467,7 +467,8 @@ def build_ours(doc, base, out: Path) -> dict:
     slides = entries(doc, out, keys, ekeys, fps)
     # (the base read in today's form before the merge compares it, as `sync.build_ours` does; this
     # world's elements are partial IR the parser refuses, so its bases come back as recorded)
-    forms = sync.base_today(base, doc, (out,))
+    kept = snapshot.PictureFolders(kept=(out,), rendered=None, held=None)
+    forms = sync.base_today(base, doc, snapshot.find_base_pictures(base, kept))
     return {"slides": slides, "pairs": pairs, "out": out, "label_moves": moves,
             "weak_pairs": weak, "near_misses": near, "base_forms": forms}
 

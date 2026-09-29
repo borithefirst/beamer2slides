@@ -117,7 +117,7 @@ def set_text(e: dict, text: str) -> None:
 
 def test_untouched_deck_is_not_edited():
     pres = presentation()
-    found = guard.survey(base_of(pres), pres)
+    found = guard.survey(base_of(pres), pres, True, None)
     assert found == {"edited": False, "revisionId": "rev1", "counts": {}, "slides": [], "slides_added": 0,
                      "slides_deleted": 0, "reordered": False, "examples": []}
 
@@ -127,13 +127,13 @@ def test_a_new_revision_alone_is_not_an_edit():
     pres = presentation()
     base = base_of(pres)
     later = {**copy.deepcopy(pres), "revisionId": "rev999"}
-    assert guard.survey(base, later)["edited"] is False
+    assert guard.survey(base, later, True, None)["edited"] is False
 
 
 def test_scratch_slides_of_an_interrupted_run_are_not_an_edit():
     """measure_places' scratch slides (b2s_mNNN) are the converter's own leftovers, not the person's."""
     base, live = edited(lambda p: p["slides"].append(slide("b2s_m003", [shape("x", (0, 0, 10, 10), "scratch")])))
-    assert guard.survey(base, live)["edited"] is False
+    assert guard.survey(base, live, True, None)["edited"] is False
 
 
 def png(colour: tuple[int, int, int], size=(8, 8)) -> bytes:
@@ -162,9 +162,9 @@ def test_a_new_content_url_for_the_same_picture_is_not_an_edit(fetcher):
         base["slides"][0]["elements"][2]["readback"]["b2s_s000_f0"]["image"]["contentHash"]
 
     fetcher(lambda url: same)
-    assert guard.survey(base, live)["edited"] is False
+    assert guard.survey(base, live, True, None)["edited"] is False
     fetcher(lambda url: other)
-    found = guard.survey(base, live)
+    found = guard.survey(base, live, True, None)
     assert found["edited"] and found["counts"]["image"] == 2
 
 
@@ -185,7 +185,7 @@ def test_a_base_older_than_picture_signatures_cannot_clear_a_new_url_but_says_so
             if "image" in e:
                 e["image"]["contentUrl"] = f"https://lh3.google.com/reissued-{e['objectId']}=s0"
     fetcher(lambda url: png((240, 240, 240)))
-    found = guard.survey(base, live)
+    found = guard.survey(base, live, True, None)
     assert found["edited"] and found["counts"] == {"image_unverified": 2}
     message = guard.refusal_message(pres["presentationId"], Path("out/x"), "x.pdf", found, "edited")
     assert message.startswith("refusing to rebuild: this deck's sync base was written before beamer2slides "
@@ -203,20 +203,20 @@ def test_a_group_emit_named_and_slides_never_made_is_not_a_deletion():
     el = next(e for s in base["slides"] for e in s["elements"] if e.get("readback"))
     el["objects"] = ["never_made_g"] + el["objects"]
     el["main"] = "never_made_g"
-    assert guard.survey(base, pres)["edited"] is False
+    assert guard.survey(base, pres, True, None)["edited"] is False
     real = next(iter(el["readback"]))
     el["main"] = real
     live = copy.deepcopy(pres)
     for s in live["slides"]:
         s["pageElements"] = [e for e in s["pageElements"] if e["objectId"] != real]
-    assert guard.survey(base, live)["edited"] is True
+    assert guard.survey(base, live, True, None)["edited"] is True
 
 
 # ---------------------------------------------------------------- what is an edit
 
 def test_reworded_text_is_an_edit_with_a_readable_example():
     base, live = edited(lambda p: set_text(find(p, "b2s_s001_t1"), "Rewritten by hand"))
-    found = guard.survey(base, live)
+    found = guard.survey(base, live, True, None)
     assert found["edited"] and found["counts"] == {"text": 1}
     assert [s["slide"] for s in found["slides"]] == ["slide001"]
     assert found["slides"][0]["edits"] == [{"element": "text/body/0", "field": "text", "objects": ["b2s_s001_t1"]}]
@@ -230,7 +230,7 @@ def test_moved_and_restyled_objects_are_edits():
         e["transform"]["translateY"] = 200
         find(p, "b2s_s001_t0")["shape"]["text"]["textElements"][1]["textRun"]["style"]["bold"] = True
     base, live = edited(change)
-    found = guard.survey(base, live)
+    found = guard.survey(base, live, True, None)
     assert found["counts"] == {"geometry": 1, "text_style": 1}
     assert guard.summary_line(found) == "2 slides edited: 1 move or resize, 1 style change"
 
@@ -243,19 +243,19 @@ def test_added_object_deleted_object_notes_and_background():
             "textRun"]["content"] = "new notes\n"
         p["slides"][0]["pageProperties"]["pageBackgroundFill"] = {"solidFill": {"color": {"rgbColor": {"red": 1}}}}
     base, live = edited(change)
-    found = guard.survey(base, live)
+    found = guard.survey(base, live, True, None)
     assert found["counts"] == {"objects_added": 1, "background": 1, "deleted": 1, "notes": 1}
     assert "1 object added in Slides" in guard.summary_line(found)
 
 
 def test_slides_added_deleted_and_reordered():
     base, live = edited(lambda p: p["slides"].append(slide("mine", [shape("m0", (0, 0, 10, 10), "a slide I added")])))
-    assert guard.survey(base, live)["slides_added"] == 1
+    assert guard.survey(base, live, True, None)["slides_added"] == 1
     base, live = edited(lambda p: p["slides"].pop(0))
-    found = guard.survey(base, live)
+    found = guard.survey(base, live, True, None)
     assert found["slides_deleted"] == 1 and "deleted in Slides" in found["examples"][0]
     base, live = edited(lambda p: p["slides"].reverse())
-    assert guard.survey(base, live)["reordered"] is True
+    assert guard.survey(base, live, True, None)["reordered"] is True
 
 
 # ---------------------------------------------------------------- the refusal

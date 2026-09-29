@@ -55,7 +55,9 @@ def requests_of(base: dict, ours: dict, pres: dict, home: Path) -> tuple[dict, l
     """(the merge plan, the content requests, the objects left to delete) of a dry sync."""
     theirs = snapshot.read_presentation(pres)
     mplan = merge.plan_merge(base, ours, theirs)
-    s = sync.Sync(None, None, "offline", base, ours, home, dry_run=True, measure=False)
+    s = sync.Sync(None, None, "offline", base, ours, home, dry_run=True, measure=False,
+                  trust_generation=True, check_plan=None, follow_labels=False, take_source=(), facts=None,
+                  way_back=None)
     s.theme_plan = None
     work = s.prepare(mplan, pres, theirs)
     content, cleanup = s.main_requests(work, theirs, pres, {}, [])
@@ -67,7 +69,7 @@ def test_a_sync_writes_everything_else_and_reports_the_element_it_made_a_picture
         lenient: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     base, pres = talk_base(tmp_path)
     unplannable(monkeypatch, POLICY)
-    ours = sync.build_ours(SYNC_DECKS / "disjoint.pdf", tmp_path / "ours", base, "last", SLIDE_W, ())
+    ours = sync.build_ours(SYNC_DECKS / "disjoint.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
 
     [c] = ours["contained"]
     assert (c.slide, c.element, c.kind, c.error) == ("policy", "image/fallback/0", "text", "KeyError: 'lines'")
@@ -103,7 +105,7 @@ def test_under_strict_the_unplannable_element_raises(monkeypatch: pytest.MonkeyP
     base, _ = talk_base(tmp_path)
     unplannable(monkeypatch, POLICY)
     with pytest.raises(KeyError):
-        sync.build_ours(SYNC_DECKS / "disjoint.pdf", tmp_path / "ours", base, "last", SLIDE_W, ())
+        sync.build_ours(SYNC_DECKS / "disjoint.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
 
 
 @pytest.mark.needs_decks("sync/out/v1.pdf")
@@ -117,7 +119,7 @@ def test_an_element_convert_contained_the_same_way_is_no_change(
     assert [c["kind"] for c in off["contained"]] == ["text"]
     emit.crop_fallbacks(off["plan"].deck, [(c["page"], c["id"]) for c in off["contained"]], tmp_path / "v1", "test")
     base, pres = S.base_of(S.Made(deck, "rendered", tmp_path / "v1", used))
-    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, ())
+    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
 
     mplan, content, _ = requests_of(base, ours, pres, tmp_path / "ours")
     found, says = sync.contained_report(ours["contained"], ours["slides"], mplan)
@@ -138,7 +140,7 @@ def test_an_element_the_base_holds_that_emit_now_cannot_plan_is_kept(
     [held] = [e for s in base["slides"] for e in s["elements"]
               if e["kind"] == "text" and "Both versions go into the report" in identity.plain_text(e["ir"])]
     objects, read = list(held["objects"]), copy.deepcopy(held["readback"])
-    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, ())
+    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
 
     mplan, content, cleanup = requests_of(base, ours, pres, tmp_path / "ours")
     assert {u["action"] for p in mplan["slides"] for u in p.get("units", [])} <= {"keep"}

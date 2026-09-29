@@ -136,7 +136,7 @@ def test_a_recreated_unit_deletes_nothing_in_the_content_phase():
     v1 = SYNC_DECKS / "v1.pdf"
     if not v1.exists():
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
-    first = build_ours(v1, Path(os.environ.get("TMP", ".")) / "b2s-crash-ours", {"slides": []}, "last", SLIDE_W, ())
+    first = build_ours(v1, Path(os.environ.get("TMP", ".")) / "b2s-crash-ours", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
     s = bare_sync(ours=first, plan=first["plan"], scale=first["plan"].scale, tok="1zz",
                   urls=defaultdict(lambda: "https://example.com/staged.png"))
     j = next(k for k, o in enumerate(first["slides"]) if o["key"] == "policy")
@@ -194,7 +194,7 @@ class _Exec:
 
 def test_a_missing_base_is_reported_not_guessed(tmp_path):
     problems = []
-    base, where = snapshot.load_base("P1", tmp_path, None, problems)
+    base, where = snapshot.load_base("P1", tmp_path, None, problems, None)
     assert base is None and where == "none" and problems == []
 
 
@@ -202,7 +202,7 @@ def test_a_truncated_local_base_is_refused(tmp_path):
     snapshot.local_path(tmp_path).parent.mkdir(parents=True)
     snapshot.local_path(tmp_path).write_text('{"version": 1, "slides": [', encoding="utf-8")
     problems = []
-    base, where = snapshot.load_base("P1", tmp_path, None, problems)
+    base, where = snapshot.load_base("P1", tmp_path, None, problems, None)
     assert base is None and where == "none"
     assert problems and "could not be read" in problems[0]
 
@@ -210,7 +210,7 @@ def test_a_truncated_local_base_is_refused(tmp_path):
 def test_a_base_of_another_deck_is_refused(tmp_path):
     snapshot.save_local(a_base(pid="OTHER"), tmp_path)
     problems = []
-    base, _ = snapshot.load_base("P1", tmp_path, None, problems)
+    base, _ = snapshot.load_base("P1", tmp_path, None, problems, None)
     assert base is None
     assert "belongs to presentation OTHER" in problems[0]
 
@@ -218,7 +218,7 @@ def test_a_base_of_another_deck_is_refused(tmp_path):
 def test_a_base_from_a_newer_schema_is_refused(tmp_path):
     snapshot.save_local(a_base(version=snapshot.VERSION + 1), tmp_path)
     problems = []
-    base, _ = snapshot.load_base("P1", tmp_path, None, problems)
+    base, _ = snapshot.load_base("P1", tmp_path, None, problems, None)
     assert base is None
     assert "newer than this beamer2slides" in problems[0]
 
@@ -228,18 +228,18 @@ def test_the_newer_of_drive_and_local_wins(tmp_path):
     against objects that are already gone."""
     snapshot.save_local(a_base(generation=5), tmp_path)
     problems = []
-    base, where = snapshot.load_base("P1", tmp_path, FakeDrive(a_base(generation=4)), problems)
+    base, where = snapshot.load_base("P1", tmp_path, FakeDrive(a_base(generation=4)), problems, None)
     assert where == "local" and base["generation"] == 5
     assert "older than the local one" in problems[0]
     problems = []
-    base, where = snapshot.load_base("P1", tmp_path, FakeDrive(a_base(generation=6)), problems)
+    base, where = snapshot.load_base("P1", tmp_path, FakeDrive(a_base(generation=6)), problems, None)
     assert where == "drive" and base["generation"] == 6 and problems == []
 
 
 def test_a_broken_drive_base_falls_back_to_the_local_one(tmp_path):
     snapshot.save_local(a_base(generation=5), tmp_path)
     problems = []
-    base, where = snapshot.load_base("P1", tmp_path, FakeDrive({"version": 1, "presentationId": "P1"}), problems)
+    base, where = snapshot.load_base("P1", tmp_path, FakeDrive({"version": 1, "presentationId": "P1"}), problems, None)
     assert where == "local" and base["generation"] == 5
     assert "stored in Drive was ignored" in problems[0]
 

@@ -92,15 +92,19 @@ def write_json(path: Path, data) -> None:
 
 def read_pres(pid: str) -> dict:
     from beamer2slides.google_auth import slides_service
+    from beamer2slides.google_types import as_json
     from beamer2slides.gslides import execute
-    return execute(slides_service().presentations().get(presentationId=pid))
+    return as_json(execute(slides_service().presentations().get(presentationId=pid)), pid)
 
 
 def snapshot(pid: str) -> tuple[dict, dict]:
     from beamer2slides import snapshot as snap
+    from beamer2slides.deck_pictures import WORKERS
+    from beamer2slides.google_types import presentation
     pres = read_pres(pid)
-    read = snap.read_presentation(pres)
-    snap.sign_pictures(read, pres)
+    typed = presentation(pres, pid)
+    read = snap.read_presentation(typed)
+    snap.sign_pictures(read, typed, None, None, WORKERS, None, None, None, None, None)
     return pres, read
 
 
@@ -308,6 +312,7 @@ def requests_of(stdout: str) -> int | None:
 
 
 def sync(journey: str, tex: Path) -> int:
+    from beamer2slides import snapshot as snap
     from beamer2slides.emit import SLIDE_W
     from beamer2slides.sync import build_ours
     from . import layout_oracle, loss_oracle
@@ -355,7 +360,8 @@ def sync(journey: str, tex: Path) -> int:
 
     if not r.returncode:
         try:
-            ours = build_ours(pdf, folder / "ours", base, "last", SLIDE_W, (out, out / "sync" / "ours"))
+            ours = build_ours(pdf, folder / "ours", base, "last", SLIDE_W,
+                              snap.find_base_pictures(base, snap.picture_folders(out)))
         except Exception as e:  # noqa: BLE001
             ours, summary["ours_error"] = None, f"{type(e).__name__}: {e}"
         for name, judge in (("loss", loss_oracle), ("layout", layout_oracle)):

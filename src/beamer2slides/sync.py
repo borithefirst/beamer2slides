@@ -16,14 +16,16 @@ import re
 import string
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
-from . import faults, identity, merge, snapshot
+from . import faults, google_types, identity, merge, snapshot
+from .deck_pictures import WORKERS as PICTURE_WORKERS, LivePictures
 from .gapi import HttpError, status_of
+from .google_types import DriveFile, Page, PageElement, Presentation, object_id
 from .gslides import EMU_PER_PT, emu, execute, pt
 from .json_types import Json, JsonObject, as_int, as_object, as_objects, as_str
 from .paths import out_root
@@ -303,31 +305,35 @@ def table_steps(have: list, need: list, cols: int, want_cols: int, tol: float = 
     return reqs, cur
 
 
-def drop_objects(pres: dict, objects, slides) -> dict:
+def drop_objects(pres: Presentation, objects: Collection[str], slides: Collection[str]) -> Presentation:
     """A presentations.get without these page elements and slides (leftovers of an interrupted
     sync): everything downstream then plans as if they had never been created."""
-    objects, slides = set(objects), set(slides)
+    gone, gone_slides = set(objects), set(slides)
 
-    def keep(elements):
-        out = []
+    def keep(elements: list[PageElement], where: str) -> list[PageElement]:
+        out: list[PageElement] = []
         for e in elements:
-            if e["objectId"] in objects:
+            if object_id(e) in gone:
                 continue
-            if "elementGroup" in e:
-                children = keep(e["elementGroup"].get("children", []))
-                if not children:
+            group = e.get("elementGroup")
+            if group is not None:
+                kids = keep(google_types.children(e, where), f"{where}/{object_id(e)}")
+                if not kids:
                     continue
-                e = {**e, "elementGroup": {**e["elementGroup"], "children": children}}
+                kept: list[Json] = [google_types.as_json(k, where) for k in kids]
+                trimmed: PageElement = {**e, "elementGroup": {**group, "children": kept}}
+                out.append(trimmed)
+                continue
             out.append(e)
         return out
-    return {**pres, "slides": [{**s, "pageElements": keep(s.get("pageElements", []))}
-                               for s in pres.get("slides", []) if s["objectId"] not in slides]}
+    return {**pres, "slides": [{**s, "pageElements": keep(s.get("pageElements", []), object_id(s))}
+                               for s in pres.get("slides", []) if object_id(s) not in gone_slides]}
 
 
 # ---------------------------------------------------------------- ours
 
 def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_width: float,
-               pictures: Sequence[Path]) -> dict:
+               pictures: snapshot.BasePictures) -> dict:
     """extract, classify and render the new PDF into `work`, plan it like emit and give its
     slides and elements the keys of the base they match.
 
@@ -336,7 +342,8 @@ def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_widt
     and every box this plan holds is PDF pt times the scale that width gives.
 
     `base` is brought to today's form in place before anything is compared with it (`base_today`;
-    `pictures`: the folders its picture files may be in), and what that found is `base_forms`.
+    `pictures`: where its picture files are, found before this render could write over them -
+    `snapshot.hold_base_pictures`), and what that found is `base_forms`.
 
     A base `adopt` recorded also carries the deck's own boxes (`adopt_sync.deck_folds`), and what
     one of them the converter reads back as several is put together again before anything is keyed
@@ -423,7 +430,7 @@ def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_widt
             "context_unwritten": unwritten, "context_unread": unread, "contained": contained, "base_forms": forms}
 
 
-def base_today(base: JsonObject, view: JsonObject, pictures: Sequence[Path]) -> list[snapshot.BaseForm]:
+def base_today(base: JsonObject, view: JsonObject, pictures: snapshot.BasePictures) -> list[snapshot.BaseForm]:
     """In place: `base` brought to today's form, the one place a base is, before anything compares
     its hashes with the new conversion's. An adopt base's marked shapes and tables from before
     688ebf4 first, whose missing fields come from our element of the same mark (`view`, the new
@@ -976,14 +983,10 @@ def style_override_requests(oid: str, change: dict, cells: list[dict] | None = N
     return reqs
 
 
-def raw_objects(pres: dict) -> dict[str, dict]:
+def raw_objects(pres: Presentation) -> dict[str, PageElement]:
     """objectId -> page element of a presentations.get (group children included)."""
-    out, stack = {}, [e for s in pres.get("slides", []) for e in s.get("pageElements", [])]
-    while stack:
-        e = stack.pop()
-        out[e["objectId"]] = e
-        stack += e.get("elementGroup", {}).get("children", [])
-    return out
+    return {object_id(e): e for s in pres.get("slides", [])
+            for e in google_types.all_elements(s.get("pageElements", []), object_id(s))}
 
 
 deck_attributes = merge.deck_attributes   # which attributes on a run are the person's (merge decides)
@@ -1229,12 +1232,13 @@ def carried(base_rb: dict, theirs_rb: dict, new_rb: dict) -> list[float]:
 
 class Sync:
     way_back = None   # the recovery note being made meanwhile; None where there is none to collect
-    theme_side = theme_plan = raw_after = None   # theme_sync's part (set in __init__ / plan_theme)
+    theme_side = theme_plan = None   # theme_sync's part (set in __init__ / plan_theme)
+    raw_after: Presentation | None = None
 
-    def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool = False,
-                 measure: bool = True, trust_generation: bool = True, check_plan=None,
-                 follow_labels: bool = False, take_source=(), facts: dict | None = None,
-                 way_back=None):
+    def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool,
+                 measure: bool, trust_generation: bool, check_plan,
+                 follow_labels: bool, take_source: Sequence[str], facts: DriveFile | None,
+                 way_back):
         # check_plan(mplan, theirs): raises instead of letting the write go ahead. It sits between
         # planning and preparing because that is the last point at which nothing has been sent and
         # the whole of what would be written is known (adopt_sync.problems).
@@ -1259,12 +1263,12 @@ class Sync:
         self.in_place_readback: dict[str, dict] = {}  # objects rewritten in place, before the write
         self.final_revision: str | None = None
         self.facts = facts              # the deck's Drive facts, read once (snapshot.deck_info)
-        self.first_read: dict | None = None  # a `presentations.get` a caller made while we planned
+        self.first_read: Presentation | None = None  # a `presentations.get` a caller made while we planned
         self.deleting: list = []        # staging decks on their way out (drop_staging)
         self.way_back = way_back        # made meanwhile, collected before the first write (guard.WayBack)
         self.theme_side: dict | None = None   # what a fresh conversion writes on the master and layouts (theme_sync)
         self.theme_plan: dict | None = None   # what this sync writes there (None: nothing, an old base)
-        self.raw_after: dict | None = None    # the deck as `finish` last read it
+        self.raw_after = None    # the deck as `finish` last read it
 
     def before_write(self) -> None:
         """Collect the way back (`guard.WayBack`): the deck's revision and the .pptx backup are
@@ -1287,7 +1291,7 @@ class Sync:
 
     # ---- reading and writing
 
-    def read(self) -> dict:
+    def read(self) -> Presentation:
         """The deck, whole. The first one may have been fetched while the base was loaded and the
         PDF converted (`sync`); it is used once and never again, so every later read - after a
         write, or on a second attempt - is a fresh one."""
@@ -1349,12 +1353,12 @@ class Sync:
         from .emit import slide_layout  # noqa: F401 (warm import before timing-sensitive steps)
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
-            pres = self.read()
-            leftovers = [s["objectId"] for s in pres.get("slides", []) if SCRATCH.fullmatch(s["objectId"])]
+            pres: Presentation = self.read()
+            leftovers =[object_id(s) for s in pres.get("slides", []) if SCRATCH.fullmatch(object_id(s))]
             if leftovers and not self.dry_run:  # measure_places' scratch slides of an interrupted run
                 self.delete_scratch(leftovers)
                 pres = self.read()
-            pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(s["objectId"])]}
+            pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(object_id(s))]}
             if attempt == 1 and not snapshot.base_matches(self.base, snapshot.read_presentation(pres)):
                 raise BaseMismatch(
                     f"the sync base (generation {self.base.get('generation', 0)}) describes none of the slides in "
@@ -1440,7 +1444,7 @@ class Sync:
             return result
         raise RuntimeError(f"the deck kept changing while syncing ({MAX_ATTEMPTS} attempts)")
 
-    def recover(self, pres: dict, attempt: int) -> dict:
+    def recover(self, pres: Presentation, attempt: int) -> Presentation:
         """Undo what an earlier sync that died halfway left behind, before anything is planned
         (plan_recovery): its leftover objects are deleted, an element whose objects it deleted takes
         over the ones it created, and a placeholder it rewrote gets the person's text back for the
@@ -1557,7 +1561,7 @@ class Sync:
         when the marker goes up, which where the two are made at once is nothing: it is a note for a
         person and nothing reads it, the staging deck naming itself in Drive
         (`appProperties.b2sStaging`, which is what `tools/drive_usage.py` queries)."""
-        why = snapshot.store_base(self.base, self.out, drive, label="pending", info=self.facts)
+        why = snapshot.store_base(self.base, self.out, drive, "pending", self.facts)
         if why:
             self.warnings.append(f"could not note the started sync in Drive ({why}); noted locally only")
 
@@ -1573,7 +1577,7 @@ class Sync:
         except RevisionMismatch:  # someone edited the deck meanwhile; the objects are stale either way
             return self.send("cleanup", self.cleanup_requests, None)
 
-    def sign_changed(self, theirs: dict, pres: dict) -> tuple[set[str], set[str]]:
+    def sign_changed(self, theirs: dict, pres: Presentation) -> tuple[set[str], set[str]]:
         """The live pictures whose contentUrl differs from the base's, marked `unchecked` and not
         yet signed: (image ids, slide ids of background pictures).
 
@@ -1629,7 +1633,7 @@ class Sync:
                 ask_slides.add(b["objectId"])
         return ask_objects, ask_slides
 
-    def merge_plan(self, theirs: dict, pres: dict) -> dict:
+    def merge_plan(self, theirs: dict, pres: Presentation) -> dict:
         """The merge plan, with the pictures it depends on signed (`sign_changed`). (`self.plan`
         is the new conversion's DeckPlan.)"""
         objects, slides = self.sign_changed(theirs, pres)
@@ -1645,23 +1649,23 @@ class Sync:
                 break
             asked_objects |= ask_objects
             asked_slides |= ask_slides
-            snapshot.sign_pictures(theirs, pres, ask_objects, ask_slides, pictures=self.live_pictures(pres))
+            snapshot.sign_pictures(theirs, pres, ask_objects, ask_slides, PICTURE_WORKERS, None, None, None, None,
+                                   self.live_pictures(pres))
             mplan = plan()
         self.picture_reads = {"unchecked": len(objects) + len(slides), "asked": len(asked_objects) + len(asked_slides)}
         return mplan
 
-    def live_pictures(self, pres: dict):
+    def live_pictures(self, pres: Presentation) -> LivePictures:
         """The pictures of this read of the deck (`deck_pictures.LivePictures`): one per read, so a
         Drive export is made at most once for it."""
-        from .deck_pictures import LivePictures
         from .google_auth import fetcher_for_threads
         key = (pres.get("presentationId"), pres.get("revisionId"), id(pres))
         if getattr(self, "_live_pictures", (None, None))[0] != key:
             self._live_pictures = (key, LivePictures(pres, getattr(self, "drive", None), fetcher_for_threads(),
-                                                     slides=getattr(self, "slides", None)))
+                                                     PICTURE_WORKERS, None, getattr(self, "slides", None)))
         return self._live_pictures[1]
 
-    def picture_adopter(self, pres: dict):
+    def picture_adopter(self, pres: Presentation):
         """Finds the live object that already shows a picture the source now draws, for
         merge.plan_unit. After a pull the source has an `\\includegraphics` for a picture the
         person put into the deck (or put over a figure), so the new conversion offers a picture the
@@ -1738,7 +1742,7 @@ class Sync:
 
     # ---- the master and the layouts (theme_sync)
 
-    def plan_theme(self, mplan: dict, pres: dict) -> None:
+    def plan_theme(self, mplan: dict, pres: Presentation) -> None:
         """The theme's part of the merge, planned beside the slides' and reported with them. A
         deck `adopt` took over has a theme of the person's own and is left alone; a base from
         before theme sync records nothing of the layouts, so they are left alone too (said so when
@@ -1772,7 +1776,7 @@ class Sync:
             return self.theme_side["shared"]
         return self.base.get("master_background")
 
-    def prepare(self, mplan: dict, pres: dict, theirs: dict) -> dict:
+    def prepare(self, mplan: dict, pres: Presentation, theirs: dict) -> dict:
         """What to write, per slide: units to (re)create with their requests' inputs, deletions,
         moves, backgrounds, notes; pictures needed from the staging deck."""
         ours_slides = self.plan.deck["slides"]
@@ -1979,7 +1983,7 @@ class Sync:
 
     # ---- content
 
-    def main_requests(self, work: dict, theirs: dict, pres: dict, moves: dict, scratch: list[str]
+    def main_requests(self, work: dict, theirs: dict, pres: Presentation, moves: dict, scratch: list[str]
                       ) -> tuple[list[dict], list[dict]]:
         """(content, cleanup). Nothing in `content` destroys anything a person could have edited:
         it creates the new objects, refills placeholders and puts the slides in order. Every
@@ -1987,7 +1991,8 @@ class Sync:
         stand-in shapes - goes into `cleanup`, which is sent after the deck's own edits are back on
         the new objects and a base that no longer mentions the old ones is stored."""
         live = {s["objectId"]: s for s in theirs["slides"]}
-        layouts = {l.get("layoutProperties", {}).get("name"): l for l in pres.get("layouts", [])}
+        layouts = {name: l for l in pres.get("layouts", [])
+                   if (name := l.get("layoutProperties", google_types.LayoutProperties()).get("name")) is not None}
         reqs: list[dict] = []
         doomed_slides: list[str] = []
         if self.theme_plan:
@@ -2149,7 +2154,7 @@ class Sync:
             reqs.append({"updatePageElementAltText": r})
         return reqs
 
-    def new_layout(self, slide: dict, layout_name: str, layouts: dict, pres: dict) -> dict | None:
+    def new_layout(self, slide: dict, layout_name: str, layouts: dict[str, Page], pres: Presentation) -> Page | None:
         """The layout a new slide is created on. In a themed deck emit puts the theme decoration
         on the layouts (emit.plan_theme, `theme.layouts` in emit.json) and gives backgrounds that
         don't show it a copy of their layout without it. A new slide that inherits the master
@@ -2165,20 +2170,20 @@ class Sync:
             want = self.theme_side["groups"].get(slide["page"])
             kinds = {b.get("layoutObjectId"): b.get("layout") for b in self.base["slides"]}
             plain = layouts.get(layout_name)
-            if plain is not None and served.get(plain["objectId"]) == want:
+            if plain is not None and served.get(object_id(plain)) == want:
                 return plain
             for l in pres.get("layouts", []):
-                if served.get(l["objectId"]) == want and kinds.get(l["objectId"]) == layout_name:
+                if served.get(object_id(l)) == want and kinds.get(object_id(l)) == layout_name:
                     return l
         if key != self.master_key():
-            by_id = {l["objectId"]: l for l in pres.get("layouts", [])}
+            by_id = {object_id(l): l for l in pres.get("layouts", [])}
             same = [b for b in self.base["slides"] if b.get("background") == key
                     and b.get("layout") == layout_name and b.get("layoutObjectId") in by_id]
             if same:
                 return by_id[same[0]["layoutObjectId"]]
         return layouts.get(layout_name) or layouts.get("BLANK")
 
-    def new_slide(self, w: dict, layouts: dict, moves: dict, pres: dict) -> list[dict]:
+    def new_slide(self, w: dict, layouts: dict[str, Page], moves: dict, pres: Presentation) -> list[dict]:
         from .emit import element_template_keys, slide_layout, subtitle_element, title_element
 
         p = w["plan"]
@@ -2192,11 +2197,13 @@ class Sync:
         mappings, in_place = [], {}
         title_idx = title_element(slide)
         sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
-        for k, e in enumerate(layout.get("pageElements", [])):
-            ph = e.get("shape", {}).get("placeholder")
+        for e in layout.get("pageElements", []):
+            ph = google_types.part(google_types.part(e.get("shape"), "shape").get("placeholder"), "placeholder")
             if not ph:
                 continue
-            size = [snapshot._unit(e["size"]["width"]), snapshot._unit(e["size"]["height"])] if "size" in e else [STAND_IN, STAND_IN]
+            box = e.get("size")
+            size = [snapshot._unit(box.get("width")), snapshot._unit(box.get("height"))] if box is not None \
+                else [STAND_IN, STAND_IN]
             if ph.get("type") == title_kind and title_idx is not None and title_idx not in in_place:
                 oid = f"b2s_{h6(o['key'])}_{h6(o['elements'][title_idx]['key'])}_{self.tok}"
                 in_place[title_idx] = {"id": oid, "size": size}
@@ -2206,9 +2213,9 @@ class Sync:
             else:
                 continue  # (not every layout placeholder is instantiated: the rest go after a read, in finish)
             mappings.append({"layoutPlaceholder": {"type": ph["type"], "index": ph.get("index", 0)}, "objectId": oid})
-        reqs = [{"createSlide": {"objectId": sid, "slideLayoutReference": {"layoutId": layout["objectId"]},
+        reqs = [{"createSlide": {"objectId": sid, "slideLayoutReference": {"layoutId": object_id(layout)},
                                  "placeholderIdMappings": mappings}}]
-        reqs += self.background_requests(sid, o["background"], slide, pres, created=True)
+        reqs += self.background_requests(sid, o["background"], slide, pres, True)
         templates = {}
         if self.plan.uses_templates[slide["page"]]:
             for j, key in enumerate(self.plan.keys):
@@ -2227,7 +2234,7 @@ class Sync:
         reqs += self.tag_requests(o, objects, new_oid, in_place)
         return reqs
 
-    def update_slide(self, w: dict, read: dict, moves: dict, pres: dict) -> list[dict]:
+    def update_slide(self, w: dict, read: dict, moves: dict, pres: Presentation) -> list[dict]:
         from .emit import element_template_keys, label_inside, node_template_key, bend_template_key, template_key
 
         p = w["plan"]
@@ -2367,7 +2374,7 @@ class Sync:
         reqs += self.move_requests(p["units"], bunits, read, self.scale)
         reqs += self.tag_requests(o, created, new_oid, in_place)
         if p.get("background"):
-            reqs += self.background_requests(sid, p["background"], slide, pres)
+            reqs += self.background_requests(sid, p["background"], slide, pres, False)
         if p.get("notes") is not None and read.get("notes_id"):
             if read.get("notes"):
                 reqs.append({"deleteText": {"objectId": read["notes_id"], "textRange": {"type": "ALL"}}})
@@ -2466,7 +2473,7 @@ class Sync:
                 replaced[g] = children[0] if children else None
         return reqs
 
-    def background_requests(self, sid: str, key: str, slide: dict, pres: dict, created: bool = False) -> list[dict]:
+    def background_requests(self, sid: str, key: str, slide: dict, pres: Presentation, created: bool) -> list[dict]:
         master = self.master_key()
         if key == master:
             if created:
@@ -2476,16 +2483,20 @@ class Sync:
                 # slide goes back to inheriting it rather than copying today's. A layout page refuses
                 # INHERIT; a slide takes it, named by `propertyState` alone (tools/probe: the whole
                 # `pageBackgroundFill` as the field is refused).
-                page = next((s for s in pres.get("slides", []) if s["objectId"] == sid), None)
+                page = next((s for s in pres.get("slides", []) if object_id(s) == sid), None)
                 if page is not None and snapshot.background(page) == {"state": "INHERIT"}:
                     return []
                 return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.propertyState",
                                                   "pageProperties": {"pageBackgroundFill": {"propertyState": "INHERIT"}}}}]
-            fill = pres["masters"][0].get("pageProperties", {}).get("pageBackgroundFill", {})
-            if "stretchedPictureFill" in fill:
+            masters = pres.get("masters", [])
+            if not masters:   # (every deck has one; an answer without it has nothing to copy)
+                return []
+            fill = google_types.background_fill(masters[0])
+            url = google_types.background_url(masters[0])
+            if url is not None:
                 return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.stretchedPictureFill.contentUrl",
                                                   "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {
-                                                      "contentUrl": fill["stretchedPictureFill"]["contentUrl"]}}}}}]
+                                                      "contentUrl": url}}}}}]
             if "solidFill" in fill:
                 return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.solidFill.color",
                                                   "pageProperties": {"pageBackgroundFill": {"solidFill": fill["solidFill"]}}}}]
@@ -2500,7 +2511,7 @@ class Sync:
 
     # ---- after the content: z-order, notes of new slides, base, deck overrides
 
-    def finish(self, work: dict, mplan: dict, theirs: dict, pres: dict, rev: str) -> str:
+    def finish(self, work: dict, mplan: dict, theirs: dict, pres: Presentation, rev: str) -> str:
         raw = self.read()
         now = snapshot.read_presentation(raw)
         live = {s["objectId"]: s for s in now["slides"]}
@@ -2526,7 +2537,8 @@ class Sync:
         # read-back of objects as the converter created them, with the new pictures' signatures
         created = {x for w in work["slides"] for oids in (w.get("objects") or {}).values() for x in oids}
         repainted = {w.get("sid") for w in work["slides"] if w["plan"]["action"] == "create" or w["plan"].get("background")}
-        snapshot.sign_pictures(now, raw, created, repainted, files=self.written_files(work), drive=self.drive)
+        snapshot.sign_pictures(now, raw, created, repainted, PICTURE_WORKERS, None, None, self.drive,
+                               self.written_files(work), None)
         self.created = now
         overrides = self.override_requests(work, theirs, now, raw_objects(pres), raw_objects(raw))
         if overrides:
@@ -3277,7 +3289,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     alone = shared_service("slides", "v1") or shared_service("drive", "v3")
     pool = None if alone else ThreadPoolExecutor(1, thread_name_prefix="b2s-sync")
     reading = pool.submit(lambda: execute(slides.presentations().get(presentationId=pid))) if pool else None
-    facts = None
+    facts: DriveFile | None = None
     with contextlib.suppress(HttpError, OSError):
         facts = snapshot.deck_info(drive, pid)  # name, parents, appProperties: read once, used four times
     base, where = snapshot.load_base(pid, folder or out, drive, problems, facts)
@@ -3298,12 +3310,13 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     warnings += [mismatch] if mismatch else []
     for w in warnings:
         print(f"warning: {w}")
-    # The deck's own width, not the frame convert writes into: a deck adopt took over is whatever
+    # The base's picture files are held first: a base the last sync wrote names the files that sync
+    # rendered into the folder this one renders into, and the render writes over them. Planned in
+    # the deck's own width, not the frame convert writes into: a deck adopt took over is whatever
     # size the person made it, and everything this sync creates or moves is planned in slide pt.
-    # (a base convert wrote names its pictures in `out`; one a sync wrote, in that sync's work folder)
-    work = out / "sync" / "ours"
-    ours = build_ours(pdf, work, base, overlays, adopt_sync.deck_width(base), (out, work))
-    refreshed = snapshot.refresh_pictures(base, ours, out)
+    pictures = snapshot.hold_base_pictures(base, out)
+    ours = build_ours(pdf, snapshot.sync_work(out), base, overlays, adopt_sync.deck_width(base), pictures)
+    refreshed = snapshot.refresh_pictures(base, ours["slides"], ours["pairs"], ours["out"], pictures)
 
     def check_plan(mplan: dict, theirs: dict) -> None:
         """An adopted deck's objects are a person's, not ours: refuse rather than write beside
@@ -3319,7 +3332,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         check = check_plan
     # A base that may be behind the deck never decides on its own that an object is a leftover.
     s = Sync(slides, drive, pid, base, ours, out, dry_run, measure, trust_generation=stale is None,
-             check_plan=check, follow_labels=follow_labels, take_source=take_source, facts=facts,
+             check_plan=check, follow_labels=follow_labels, take_source=tuple(take_source or ()), facts=facts,
              way_back=way_back if hasattr(way_back, "result") else None)
     try:
         s.first_read = reading.result() if reading is not None else None
@@ -3347,7 +3360,8 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     report["warnings"] += snapshot.base_form_warnings(forms)
     if forms:  # (a base in an older form, read in today's: `base_today`)
         report["base_forms"] = snapshot.base_form_json(forms)
-    report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
+    report["converged"] += [{"slide": r.slide, "element": r.element, "field": "image",
+                             "how": "the same picture, written differently"} for r in refreshed]
     report["overruns"] = s.overruns
     report["refit"] = s.refit_moves
     info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
@@ -3373,7 +3387,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
             # Stored before the old objects are deleted: whatever happens next, the base that the
             # next sync finds either still points at them or knows they have to go.
             new["cleanup"] = list(s.cleanup_ids)
-        why = snapshot.store_base(new, out, drive, info=facts)
+        why = snapshot.store_base(new, out, drive, "base", facts)
         if why:
             report["warnings"].append(
                 f"could not store the new base in Drive ({why}); kept locally. The {len(s.cleanup_ids)} object(s) this "
@@ -3393,7 +3407,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
                 new.pop("cleanup", None)
                 snapshot.save_local(new, out)
                 if snapshot.mark_cleaned(drive, pid, new["generation"], facts):
-                    snapshot.store_base(new, out, drive, info=facts)
+                    snapshot.store_base(new, out, drive, "base", facts)
         info["generation"] = new["generation"]
     elif not dry_run and where == "drive":
         snapshot.save_local(base, out)  # (refresh the cache)

@@ -47,15 +47,20 @@ def dumped(value: object) -> str:
     return json.dumps(value, sort_keys=True, ensure_ascii=False)
 
 
+def at(base: dict, *folders: Path) -> snapshot.BasePictures:
+    """`base`'s pictures looked for in `folders`, in order."""
+    return snapshot.find_base_pictures(base, snapshot.PictureFolders(kept=folders, rendered=None, held=None))
+
+
 @pytest.mark.needs_decks("sync/out/v1.pdf")
 def test_a_base_in_todays_form_is_read_as_it_is(talk: tuple[dict, dict, Path], tmp_path: Path) -> None:
     """What convert records today: nothing to rewrite, not a hash touched - by the reading alone and
     by a whole `build_ours` of the same source."""
     base, _, v1 = copy.deepcopy(talk[0]), talk[1], talk[2]
     before = dumped(base)
-    assert snapshot.rehash_base(base, (v1,)) == []
+    assert snapshot.rehash_base(base, at(base, v1)) == []
     assert dumped(base) == before
-    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, (v1,))
+    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, at(base, v1))
     assert ours["base_forms"] == []
     assert [e["ir_hash"] for s in base["slides"] for e in s["elements"]] == \
         [e["ir_hash"] for s in json.loads(before)["slides"] for e in s["elements"]]
@@ -74,7 +79,7 @@ def test_a_form_the_converter_no_longer_writes_is_a_rewrite_of_the_base_not_a_so
     assert e["ir_hash"] != identity.ir_fields(canonical, v1, e.get("anchor"), snapshot.base_page_key(base))[0], \
         "(the old form hashes otherwise: without the reading, a source change)"
 
-    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, (v1,))
+    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, at(base, v1))
     assert ours["base_forms"] == [snapshot.Rewritten(slide=slide, element=e["key"], how="form", hashed=True)]
     assert "composite" not in e["ir"]
     [now] = [o for s in ours["slides"] if s["key"] == slide for o in s["elements"] if o["key"] == e["key"]]
@@ -92,7 +97,7 @@ def test_an_element_the_parser_refuses_is_kept_and_said(talk: tuple[dict, dict, 
     slide, e = element(base, "text", "Both versions go into the report")
     recorded_as(base, e, {**e["ir"], "wobble": 1}, v1)
     kept = copy.deepcopy(e)
-    [found] = snapshot.rehash_base(base, (v1,))
+    [found] = snapshot.rehash_base(base, at(base, v1))
     assert isinstance(found, snapshot.Unparsed) and (found.slide, found.element) == (slide, e["key"])
     assert "'wobble'" in found.error
     assert e == kept, "kept as recorded"
@@ -111,12 +116,12 @@ def test_a_picture_whose_file_is_gone_keeps_its_hash(talk: tuple[dict, dict, Pat
     canonical = e["ir"]
     recorded_as(base, e, {**canonical, "overlay": False}, v1)
     kept = copy.deepcopy(e)
-    assert snapshot.rehash_base(base, (tmp_path,)) == [
+    assert snapshot.rehash_base(base, at(base, tmp_path)) == [
         snapshot.PictureGone(slide=slide, element=e["key"], file=canonical["file"])]
     assert e == kept
 
     # (the file where a later sync's work folder has it: the second folder given)
-    assert snapshot.rehash_base(base, (tmp_path, v1)) == [
+    assert snapshot.rehash_base(base, at(base, tmp_path, v1)) == [
         snapshot.Rewritten(slide=slide, element=e["key"], how="form", hashed=True)]
     assert e["ir"] == canonical
     assert e["ir_hash"] == identity.ir_fields(canonical, v1, e.get("anchor"), snapshot.base_page_key(base))[0]
@@ -133,7 +138,7 @@ def test_a_recorded_hash_its_ir_does_not_give_is_kept(talk: tuple[dict, dict, Pa
     recorded_as(base, e, {**e["ir"], "composite": False}, v1)
     e["ir_hash"] = "0" * 16
     kept = copy.deepcopy(e)
-    assert snapshot.rehash_base(base, (v1,)) == [snapshot.Unreproduced(slide=slide, element=e["key"])]
+    assert snapshot.rehash_base(base, at(base, v1)) == [snapshot.Unreproduced(slide=slide, element=e["key"])]
     assert e == kept
 
 
@@ -189,6 +194,6 @@ def test_an_adopt_bases_old_shape_is_brought_up_before_it_is_read() -> None:
     old = {k: v for k, v in ours.items() if k not in ("flip", "radius")} | {"outline": "#00ff00"}
     base = {"adopt": {"boxes": {}}, "slides": [{"key": "s", "page": 0,
                                                 "elements": [adopt_entry("shape/panel/0", old, None)]}]}
-    found = sync.base_today(base, {"slides": [{"page": 0, "elements": [ours]}]}, ())
+    found = sync.base_today(base, {"slides": [{"page": 0, "elements": [ours]}]}, snapshot.NO_PICTURES)
     assert found == [snapshot.Rewritten(slide="s", element="shape/panel/0", how="adopt_shape", hashed=True)]
     assert base["slides"][0]["elements"][0]["ir"] == {**ours, "id": "p1m3"}

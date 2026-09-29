@@ -28,10 +28,20 @@ from __future__ import annotations
 import io
 import posixpath
 import zipfile
+from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
 
+from .google_types import (DriveService, Page, PageElement, Presentation, all_elements, background_fill,
+                           background_url, image_url, object_id)
+
+if TYPE_CHECKING:
+    from .deck_export import SlidesSource
+    from .net import Fetch
+
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+WORKERS = 8   # downloads of a deck's pictures in the air at once
 
 NS = {"p": "http://schemas.openxmlformats.org/presentationml/2006/main",
       "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
@@ -44,36 +54,23 @@ OBJECTS = {f"{{{NS['p']}}}{t}" for t in ("sp", "pic", "grpSp", "graphicFrame", "
 GROUP = f"{{{NS['p']}}}grpSp"
 
 
-def pages(pres: dict) -> list[tuple[str, dict]]:
+def pages(pres: Presentation) -> list[tuple[str, Page]]:
     """(kind, page) of a presentations.get in the export's order of parts: slides, masters, layouts."""
     return [("slide", s) for s in pres.get("slides", [])] + [("master", m) for m in pres.get("masters", [])] + \
         [("layout", l) for l in pres.get("layouts", [])]
 
 
-def picture_urls(pres: dict) -> dict[str, str]:
+def picture_urls(pres: Presentation) -> dict[str, str]:
     """Every picture of every page by the id that owns it: an image's own objectId, a page's for
     its background picture."""
-    urls = {}
+    urls: dict[str, str] = {}
     for _, page in pages(pres):
-        fill = page.get("pageProperties", {}).get("pageBackgroundFill", {})
-        if fill.get("stretchedPictureFill", {}).get("contentUrl"):
-            urls[page["objectId"]] = fill["stretchedPictureFill"]["contentUrl"]
-        stack = list(page.get("pageElements", []))
-        while stack:
-            e = stack.pop()
-            if e.get("image", {}).get("contentUrl"):
-                urls[e["objectId"]] = e["image"]["contentUrl"]
-            stack += e.get("elementGroup", {}).get("children", [])
+        if url := background_url(page):
+            urls[object_id(page)] = url
+        for e in all_elements(page.get("pageElements", []), object_id(page)):
+            if url := image_url(e):
+                urls[object_id(e)] = url
     return urls
-
-
-def _live_objects(elements: list[dict]) -> list[dict]:
-    """A page's elements depth first, a group before its children: the export's order."""
-    out = []
-    for e in elements:
-        out.append(e)
-        out += _live_objects(e.get("elementGroup", {}).get("children", []))
-    return out
 
 
 def _exported_objects(tree) -> list[dict]:
@@ -120,7 +117,7 @@ def _parts(z: zipfile.ZipFile) -> dict[str, list[str]]:
     return {"slide": slides, "master": masters, "layout": layouts}
 
 
-def exported_pictures(data: bytes, pres: dict, wanted=None) -> dict[str, bytes]:
+def exported_pictures(data: bytes, pres: Presentation, wanted: Collection[str] | None) -> dict[str, bytes]:
     """The pictures of a .pptx export of the deck `pres` describes, by the id that owns each (as
     `picture_urls`); `wanted`: only these ids (None: all). A page whose objects cannot be paired
     with the live ones in order is paired by title, and what neither places is left out."""
@@ -149,15 +146,15 @@ def exported_pictures(data: bytes, pres: dict, wanted=None) -> dict[str, bytes]:
                 except KeyError:
                     return None
 
-            fill = page.get("pageProperties", {}).get("pageBackgroundFill", {})
-            if "stretchedPictureFill" in fill and want(page["objectId"]):
+            pid = object_id(page)
+            if "stretchedPictureFill" in background_fill(page) and want(pid):
                 blip = root.find("p:cSld/p:bg/p:bgPr/a:blipFill/a:blip", NS)
                 picture = media(blip.get(EMBED)) if blip is not None else None
                 if picture:
-                    got[page["objectId"]] = picture
+                    got[pid] = picture
             tree = root.find("p:cSld/p:spTree", NS)
             exported = _exported_objects(tree) if tree is not None else []
-            live = _live_objects(page.get("pageElements", []))
+            live = all_elements(page.get("pageElements", []), pid)   # (depth first, a group first: the export's order)
             if len(exported) == len(live) and all((x["title"] or None) == (e.get("title") or None)
                                                   for x, e in zip(exported, live)):
                 pairs = list(zip(live, exported))
@@ -166,17 +163,17 @@ def exported_pictures(data: bytes, pres: dict, wanted=None) -> dict[str, bytes]:
                 for x in exported:
                     if x["title"]:
                         by_title.setdefault(x["title"], []).append(x)
-                titled: dict[str, list[dict]] = {}
+                titled: dict[str, list[PageElement]] = {}
                 for e in live:
-                    if e.get("title"):
-                        titled.setdefault(e["title"], []).append(e)
+                    if title := e.get("title"):
+                        titled.setdefault(title, []).append(e)
                 pairs = [(es[0], by_title[t][0]) for t, es in titled.items()
                          if len(es) == 1 and len(by_title.get(t, ())) == 1]
             for e, x in pairs:
-                if "image" in e and want(e["objectId"]):
+                if "image" in e and want(object_id(e)):
                     picture = media(x["embed"])
                     if picture:
-                        got[e["objectId"]] = picture
+                        got[object_id(e)] = picture
     return got
 
 
@@ -198,8 +195,8 @@ class LivePictures:
     is counted for reports: `exports` (export calls), `copies` (temporary copies made),
     `parts` (exports that came back), `unexported` (slide ids no export brought)."""
 
-    def __init__(self, pres: dict, drive=None, fetch=None, workers: int = 8, pptx: bytes | None = None,
-                 slides=None):
+    def __init__(self, pres: Presentation, drive: DriveService | None, fetch: Fetch | None, workers: int,
+                 pptx: bytes | None, slides: SlidesSource | None) -> None:
         self.pres, self.drive, self.workers, self.slides = pres, drive, workers, slides
         if fetch is None:
             from .google_auth import fetcher_for_threads
@@ -207,7 +204,7 @@ class LivePictures:
         self.fetch = fetch
         self.urls = picture_urls(pres)
         self.got: dict[str, bytes | None] = {}
-        self.exported: dict[str, bytes] | None = None if pptx is None else exported_pictures(pptx, pres)
+        self.exported: dict[str, bytes] | None = None if pptx is None else exported_pictures(pptx, pres, None)
         self.supplied = pptx is not None
         self.downloads = 0    # how many were asked of the fetcher
         self.exports = 0      # how many exports were asked of Drive (1, or one per part tried)
@@ -234,7 +231,7 @@ class LivePictures:
                 self.copies += done.copies
                 self.parts += len(done.parts)
                 self.unexported = [i for m in done.missing for i in m["ids"]]
-                self.exported = done.pictures(self.pres)
+                self.exported = done.pictures(self.pres, None)
         return self.exported
 
     def get(self, ids) -> dict[str, bytes]:

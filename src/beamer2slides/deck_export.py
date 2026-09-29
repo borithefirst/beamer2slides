@@ -32,13 +32,13 @@ import json
 import random
 import time
 from collections import deque
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import TypedDict, Union
 
 from .gapi import HttpError, is_transient, lent_credentials, message_of, status_of
-from .google_types import DriveService, FileBody, SlidesService, file_id
+from .google_types import DriveService, FileBody, Presentation, SlidesService, file_id
 from .json_types import Json
 
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -201,16 +201,15 @@ class Export:
     def complete(self) -> bool:
         return bool(self.parts) and not self.missing
 
-    def pictures(self, pres: Mapping[str, object], wanted: Iterable[str] | None = None) -> dict[str, bytes]:
+    def pictures(self, pres: Presentation, wanted: Collection[str] | None) -> dict[str, bytes]:
         """Every picture the parts hold, by the id that owns it (`deck_pictures.picture_urls`). A
         part pairs with `pres` cut to its slides; the masters and layouts, which every part
         carries, come from the first part that has them."""
         from .deck_pictures import exported_pictures
-        slides = pres.get("slides", [])
-        every = slides if isinstance(slides, list) else []
+        every = pres.get("slides", [])
         got: dict[str, bytes] = {}
         for part in self.parts:
-            sub = {**pres, "slides": every[part.first:part.end]}
+            sub: Presentation = {**pres, "slides": every[part.first:part.end]}
             for oid, data in exported_pictures(part.data, sub, wanted).items():
                 got.setdefault(oid, data)
         return got

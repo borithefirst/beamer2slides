@@ -964,7 +964,7 @@ def build(names: list[str] | None = None) -> dict:
     from beamer2slides.google_auth import drive_service, slides_service
     from beamer2slides.google_types import file_id
     from beamer2slides.gslides import execute
-    from beamer2slides.json_types import as_objects, as_str
+    from beamer2slides.google_types import object_id
     slides, drive = slides_service(), drive_service()
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8")) if MANIFEST.exists() else {}
     pics = pictures()
@@ -984,8 +984,7 @@ def build(names: list[str] | None = None) -> dict:
             pid = import_presentation(slides, drive, title, W, H, make(pics).pptx(), pid)["presentationId"]
         execute(drive.permissions().create(fileId=pid, body={"type": "anyone", "role": "reader"}, fields="id"))
         pres = execute(slides.presentations().get(presentationId=pid, fields="title,slides.objectId"))
-        pages = [as_str(s.get("objectId"), "a slide's id")
-                 for s in as_objects(pres.get("slides", []), f"{name}'s slides")]
+        pages = [object_id(s) for s in pres.get("slides", [])]
         manifest[name] = {"id": pid, "title": TITLES[name], "pages": pages}
         MANIFEST.write_text(json.dumps(manifest, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
         print(f"{name}: {len(pages)} slides  https://docs.google.com/presentation/d/{pid}/view")

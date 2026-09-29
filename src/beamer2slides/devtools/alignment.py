@@ -82,9 +82,10 @@ def slides_elements(out: Path, state: dict, refresh: bool = False) -> dict[str, 
         if data.get("presentationId") == state["presentationId"]:
             return data["boxes"]
     from beamer2slides.google_auth import slides_service
+    from beamer2slides.google_types import as_json
     from beamer2slides.gslides import execute
-    pres = execute(slides_service().presentations().get(
-        presentationId=state["presentationId"], fields="slides(objectId,pageElements)"))
+    pres = as_json(execute(slides_service().presentations().get(
+        presentationId=state["presentationId"], fields="slides(objectId,pageElements)")), "the deck")
     boxes = {}
     for s in as_objects(pres.get("slides", []), "the deck's slides"):
         boxes.update(element_boxes(as_objects(s.get("pageElements", []), "a slide's elements")))

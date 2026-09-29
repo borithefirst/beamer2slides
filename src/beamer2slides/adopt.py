@@ -4444,7 +4444,8 @@ def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, bas
     if held is not None:
         log(f"{Path(pptx).name}: {held} picture(s) of this deck")
         from .deck_pictures import picture_urls
-        if held == 0 and pres and picture_urls(pres):
+        from .google_types import presentation
+        if held == 0 and pres and picture_urls(presentation(pres, "the deck's presentations.get")):
             log("  none: it is not a .pptx of this deck, or its pages no longer pair with the deck as "
                 "read (download it again)")
         if found is not None:

@@ -653,8 +653,9 @@ def presentation_id(deck: str) -> str:
 
 def read(pid: str, slides_api=None) -> Model:
     from beamer2slides.google_auth import slides_service
+    from beamer2slides.google_types import as_json
     from beamer2slides.gslides import execute
-    return Model(execute((slides_api or slides_service()).presentations().get(presentationId=pid)))
+    return Model(as_json(execute((slides_api or slides_service()).presentations().get(presentationId=pid)), pid))
 
 
 def main() -> None:

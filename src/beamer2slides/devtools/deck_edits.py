@@ -48,11 +48,12 @@ class LiveDeck:
         self.model = Model(pres) if pres is not None else self.read()
 
     def read(self) -> Model:
+        from beamer2slides.google_types import as_json
         from beamer2slides.gslides import execute
         if self.pending:
             self.flush()
         self.reads += 1
-        return self.adopt(execute(self.api.presentations().get(presentationId=self.pid)))
+        return self.adopt(as_json(execute(self.api.presentations().get(presentationId=self.pid)), self.pid))
 
     def adopt(self, pres: dict) -> Model:
         """Take a presentations.get somebody else made of this deck as the current read."""

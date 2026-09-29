@@ -30,6 +30,7 @@ from pathlib import Path
 
 from . import guard, identity, merge, snapshot
 from .emit import SLIDE_W
+from .google_types import presentation
 from .json_types import JsonObject, as_object, as_objects, as_str
 
 ORIGIN = merge.ADOPTED   # (the word itself lives there: the merge plans by it and cannot import this)
@@ -573,7 +574,8 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
     `objectId` and its `readback` the same normalised read `sync` compares against. No alt text is
     written anywhere: tagging the objects would be a write into someone else's deck, and the base
     naming the ids does the same job."""
-    read = snapshot.read_presentation(pres)
+    live_deck = presentation(pres, "the adopted deck's presentations.get")
+    read = snapshot.read_presentation(live_deck)
     by_id = {s["objectId"]: s for s in read["slides"]}
     state_slides, whys, layouts, celled, mates, leftovers = [], [], [], [], [], []
     for conv_slide, tgt in zip(conv_deck["slides"], target["slides"]):
@@ -603,7 +605,7 @@ def build_base(conv_deck: dict, conv_out: Path, target: dict, pres: dict, pdf: P
     page_w = conv_deck["slides"][0]["size"][0] if conv_deck["slides"] else SLIDE_W
     state = {"presentationId": read["presentationId"],
              "scale": (read["page_size"][0] / page_w) if page_w else None, "slides": state_slides}
-    base = snapshot.build_base(conv_deck, conv_out, pres, state, Path(pdf), generation=0, overlays=overlays)
+    base = snapshot.build_base(conv_deck, conv_out, live_deck, state, Path(pdf), 0, False, overlays, None)
     # The master's background belongs to the person's deck, not to this conversion: naming one
     # would let a source background change copy the *deck's* master fill onto a slide
     # (`sync.background_requests`). Every background this base writes is written explicitly.
@@ -679,7 +681,8 @@ def record(tex: Path, work: Path, target: dict, pres: dict, engine: str | None =
         return None, "the deck was read without its presentation (no read-back to record)"
     log("recording a sync base for the adopted deck...")
     folds = deck_folds(target)
-    conv, err = convert_source(Path(tex), Path(work), engine, float(snapshot.page_size(pres)[0]), folds)
+    width = snapshot.page_size(presentation(pres, "the adopted deck's presentations.get"))[0]
+    conv, err = convert_source(Path(tex), Path(work), engine, float(width), folds)
     if conv is None:
         return None, f"the source does not compile:\n{err}"
     for c in conv["plan"].contained:
@@ -696,7 +699,7 @@ def store(base: dict, out: Path, drive=None) -> Path:
     """Write the base where `sync --deck <folder>` looks for it. Drive only when asked for."""
     path = snapshot.save_local(base, Path(out))
     if drive is not None:
-        snapshot.save_drive(drive, base)
+        snapshot.save_drive(drive, base, None, None)
     return path
 
 
