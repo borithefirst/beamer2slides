@@ -96,8 +96,9 @@ def same_emission(name: str, plan) -> list[str]:
         was = json.loads(json.dumps(sync.emitted_elements(was_slide, names, plan.scale, plan.fonts)))
         now = json.loads(json.dumps(sync.emitted_elements(slide, names, plan.scale, plan.fonts)))
         found += [f"{name} slide {j + 1} {k}: emitted differently" for k, a, c in zip(names, was, now) if a != c]
-        found += [f"{name} slide {j + 1} {k}: {sorted(sync.context_changes(a, c, [0.0, 0.0], e['kind'])[0])}"
-                  for k, a, c, e in zip(names, was, now, o["elements"]) if any(sync.context_changes(a, c, [0.0, 0.0], e["kind"]))]
+        found += [f"{name} slide {j + 1} {k}: {sorted(sync.context_changes(a, c, [0.0, 0.0], e['kind'], False)[0])}"
+                  for k, a, c, e in zip(names, was, now, o["elements"])
+                  if any(sync.context_changes(a, c, [0.0, 0.0], e["kind"], False))]
     unwritten = sync.mark_emitted(base, ours, deck, {j: j for j in range(len(ours))}, plan.scale, plan.fonts, fast=False, unread=[])
     found += [f"{name}: unwritten {u}" for u in unwritten]
     found += [f"{name} {s['key']} {e['key']}: marked {f}" for s in ours + base["slides"] for e in s["elements"]
@@ -161,29 +162,29 @@ def test_a_title_whose_box_a_new_neighbour_narrowed_is_a_source_change(tmp_path)
     v1, moved = SYNC_DECKS / "v1.pdf", SYNC_DECKS / "table-moved.pdf"
     if not v1.exists() or not moved.exists():
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
-    first = sync.build_ours(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
+    first = sync.build_ours_of(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
 
     def changes(pdf, name):
-        base = {"slides": copy.deepcopy(first["slides"])}
-        ours = sync.build_ours(pdf, tmp_path / name, base, "last", SLIDE_W, snapshot.NO_PICTURES)
+        base = {"slides": copy.deepcopy(first.slides)}
+        ours = sync.build_ours_of(pdf, tmp_path / name, base, "last", SLIDE_W, snapshot.NO_PICTURES)
         out = {}
-        for j, i in ours["pairs"].items():
+        for j, i in ours.pairs.items():
             base_by = {e["key"]: e for e in base["slides"][i]["elements"]}
-            for oe in ours["slides"][j]["elements"]:
+            for oe in ours.slides[j]["elements"]:
                 if oe["key"] in base_by and set(identity.CONTEXT_FIELDS) & identity.source_changes(base_by[oe["key"]], oe):
-                    out[(ours["slides"][j]["title"], oe["key"])] = identity.source_changes(base_by[oe["key"]], oe)
-        return out, ours["context_unwritten"]
+                    out[(ours.slides[j]["title"], oe["key"])] = identity.source_changes(base_by[oe["key"]], oe)
+        return out, ours.context_unwritten
 
     assert changes(moved, "moved") == ({("Results", "text/title/0"): {"width"}}, [])
     assert changes(v1, "same") == ({}, [])
     # a mark an earlier sync left in the base (new_base copies ours' fields) says nothing by itself
-    base = {"slides": copy.deepcopy(first["slides"])}
+    base = {"slides": copy.deepcopy(first.slides)}
     for s in base["slides"]:
         for e in s["elements"]:
             e["fields"] = {**e["fields"], **{f: "ours" for f in identity.CONTEXT_FIELDS}}
-    again = sync.build_ours(v1, tmp_path / "again", base, "last", SLIDE_W, snapshot.NO_PICTURES)
-    assert not any(set(identity.CONTEXT_FIELDS) & identity.source_changes(b, o) for j, i in again["pairs"].items()
-                   for o in again["slides"][j]["elements"] for b in base["slides"][i]["elements"] if b["key"] == o["key"])
+    again = sync.build_ours_of(v1, tmp_path / "again", base, "last", SLIDE_W, snapshot.NO_PICTURES)
+    assert not any(set(identity.CONTEXT_FIELDS) & identity.source_changes(b, o) for j, i in again.pairs.items()
+                   for o in again.slides[j]["elements"] for b in base["slides"][i]["elements"] if b["key"] == o["key"])
 
 
 def test_a_picture_beside_a_line_narrows_its_box():
@@ -303,7 +304,7 @@ def subtitle_page(authors_action: str) -> tuple:
     s.ours = {"slides": [{"key": "s", "elements": [entry("text/title/0", title), entry("text/body/0", new),
                                                    entry("text/body/1", longer)]}], "out": Path(".")}
     s.plan, s.scale, s.tok, s.warnings, s.base = plan, plan.scale, "1zz", [], {"slides": [b]}
-    s.recovery, s.urls = {"restore": {}}, defaultdict(lambda: "https://example.com/x.png")
+    s.recovery, s.urls = sync.no_recovery(), defaultdict(lambda: "https://example.com/x.png")
     w = sync_work.slide_work({"plan": {"key": "s", "base": 0, "ours": 0, "objectId": "LIVE", "units": [
         {"key": "text/body/0", "action": authors_action, "ours_members": ["text/body/0"], "base_members": ["text/body/0"],
          "overrides": {}},

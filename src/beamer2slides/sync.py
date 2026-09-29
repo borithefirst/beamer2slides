@@ -16,26 +16,33 @@ import re
 import string
 import subprocess
 import time
-from collections.abc import Collection, Sequence
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass
+from collections.abc import Callable, Collection, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict
+from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar
 
 from . import faults, google_types, identity, merge, refit, snapshot
 from .deck_pictures import WORKERS as PICTURE_WORKERS, LivePictures
 from .gapi import HttpError, status_of
-from .google_types import DriveFile, Page, PageElement, Presentation, object_id
-from .gslides import EMU_PER_PT, emu, execute, pt
-from .json_types import (Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_optional_str,
-                         as_str)
+from .google_types import DriveFile, DriveService, Page, PageElement, Presentation, SlidesService, object_id
+from .gslides import EMU_PER_PT, execute, pt
+from .json_types import (Json, JsonArray, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects,
+                         as_optional_str, as_str)
 from .paths import out_root
 from .sync_model import (ElementEntry, ElementKey, JsonMap, ObjectId, SlideKey, SlideRead, base as parse_base, deck_read)
 from .typing_compat import assert_never
 
 if TYPE_CHECKING:
+    from .compare import PicHash
     from .emit import DeckPlan, FontMapper
-    from .theme_sync import ThemeMerge, ThemeSide
+    from .emit_model import Place, TemplateKey
+    from .guard import WayBack
+    from .theme_sync import ThemeMerge, ThemeOurs, ThemeSide
+
+    PictureFingerprints = tuple[str, object, PicHash | None]   # (sha1, look, thumbnail hash): picture_adopter
+
+T = TypeVar("T")
 
 MAX_ATTEMPTS = 3
 CHUNK = 450
@@ -91,6 +98,72 @@ def h6(text: str) -> str:
     return identity.sha1(text)[:6]
 
 
+# ---------------------------------------------------------------- reading the JSON sync keeps
+# The base, the live read-back and the created objects stay JSON: sync changes them in place and
+# writes them back as they are. These read one value of them as `x or {}` / `x or []` / `x or ""`
+# did: absent or empty is a new empty value, another shape an error naming where it was.
+
+def _obj(v: Json, where: str) -> JsonObject:
+    return as_object(v, where) if v else {}
+
+
+def _arr(v: Json, where: str) -> JsonArray:
+    return as_array(v, where) if v else []
+
+
+def _objs(v: Json, where: str) -> list[JsonObject]:
+    return as_objects(v, where) if v else []
+
+
+def _strs(v: Json, where: str) -> list[str]:
+    return [as_str(x, f"{where}[{i}]") for i, x in enumerate(_arr(v, where))]
+
+
+def _text(v: Json, where: str) -> str:
+    return as_str(v, where) if v else ""
+
+
+def _nums(v: Json, where: str) -> list[float]:
+    return [_number(x, f"{where}[{i}]") for i, x in enumerate(as_array(v, where))]
+
+
+def _json_strs(xs: Sequence[str]) -> list[Json]:
+    return [x for x in xs]
+
+
+def _json_nums(xs: Sequence[float]) -> list[Json]:
+    return [x for x in xs]
+
+
+def _slides(v: JsonMap, where: str) -> list[JsonObject]:
+    """A base's or a read-back's `slides` (the same dicts, so a change to one is kept)."""
+    return as_objects(v["slides"], f"{where}.slides")
+
+
+def _objects(s: JsonMap, where: str) -> JsonObject:
+    """A read-back slide's objects, objectId -> read-back (the same dict)."""
+    return as_object(s["objects"], f"{where}.objects")
+
+
+def _by_id(read: JsonMap, where: str) -> dict[str, JsonObject]:
+    """A read-back's slides by objectId (the same dicts)."""
+    return {as_str(s["objectId"], f"{where}: slide objectId"): s for s in _slides(read, where)}
+
+
+def _str_set(v: object, where: str) -> set[str]:
+    """A collection of ids a replay handed over as plain data (absent or empty: none)."""
+    if not v:
+        return set()
+    if not isinstance(v, (set, frozenset, list, tuple)):
+        raise JsonShapeError(f"{where}: a collection of ids was expected, found {type(v).__name__}")
+    out: set[str] = set()
+    for x in v:
+        if not isinstance(x, str):
+            raise JsonShapeError(f"{where}: an id was expected, found {type(x).__name__}")
+        out.add(x)
+    return out
+
+
 # ------------------------------------------------- recovering from an interrupted earlier sync
 
 def sync_generation(oid: str) -> int | None:
@@ -99,11 +172,55 @@ def sync_generation(oid: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def plan_recovery(base: dict, theirs: dict, ours_keys=(), trust_generation: bool = True) -> dict:
+def base_generation(base: JsonMap) -> int:
+    """The generation of the sync that wrote `base` (0: convert's own)."""
+    return as_int(base.get("generation", 0), "base.generation")
+
+
+def delete_request(oid: str) -> JsonObject:
+    return google_types.slides_json({"deleteObject": {"objectId": oid}})
+
+
+def delete_file(drive: DriveService, fid: str) -> None:
+    execute(drive.files().delete(fileId=fid))
+
+
+def without_scratch(pres: Presentation) -> Presentation:
+    """The deck without `measure_places`' scratch slides (SCRATCH)."""
+    kept = pres.copy()
+    kept["slides"] = [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(object_id(s))]
+    return kept
+
+
+@dataclass(frozen=True, kw_only=True)
+class Heal:
+    """A base element whose own objects are gone, and the objects an interrupted sync made for it
+    (`object_id` the one carrying its tag, first of `objects`)."""
+    slide: str
+    element: str
+    object_id: str
+    objects: list[str]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Recovery:
+    """What `plan_recovery` found an interrupted earlier sync left in the deck."""
+    sweep: list[str]
+    sweep_slides: list[str]
+    heal: list[Heal]
+    restore: dict[str, JsonObject]
+
+
+def no_recovery() -> Recovery:
+    """Nothing to recover (a sync before it read the deck)."""
+    return Recovery(sweep=[], sweep_slides=[], heal=[], restore={})
+
+
+def plan_recovery(base: JsonObject, theirs: JsonObject, ours_keys: Sequence[str], trust_generation: bool) -> Recovery:
     """What an earlier sync that died halfway left in the deck (docs/sync.md, "If a sync dies").
 
-    `theirs`: snapshot.read_presentation of the live deck. Returns
-    `{"sweep", "sweep_slides", "heal", "restore"}`.
+    `theirs`: snapshot.read_presentation of the live deck. `ours_keys`: the new conversion's slide
+    keys. `trust_generation`: see below.
 
     - **sweep**: objects (and slides) to delete. They were created by a sync of a later generation
       than this base - only our own code makes such ids - and the base's own objects for that
@@ -124,59 +241,68 @@ def plan_recovery(base: dict, theirs: dict, ours_keys=(), trust_generation: bool
     later generation then says nothing - the objects may be the finished work of a sync from the
     other checkout - so only what this base itself names is swept. Healing still happens: it takes
     an object over instead of deleting it, which a base that is behind cannot make wrong."""
-    gen = base.get("generation", 0)
-    pending = base.get("pending") or {}
-    named = set(base.get("cleanup") or [])
-    for ids in (pending.get("objects") or {}).values():
-        named.update(ids)
-    named_slides = set(pending.get("slides") or []) | {x for x in (base.get("cleanup") or [])}
+    gen = as_int(base.get("generation", 0), "base.generation")
+    pending = _obj(base.get("pending"), "base.pending")
+    cleanup = _strs(base.get("cleanup"), "base.cleanup")
+    named = set(cleanup)
+    for ids in _obj(pending.get("objects"), "base.pending.objects").values():
+        named.update(_strs(ids, "base.pending.objects"))
+    named_slides = set(_strs(pending.get("slides"), "base.pending.slides")) | set(cleanup)
     base_objects: set[str] = set()
     alive: dict[tuple[str, str], bool] = {}
-    live = {oid for s in theirs["slides"] for oid in s["objects"]}
-    for b in base["slides"]:
-        for el in b["elements"]:
-            oids = [o for o in (el.get("objects") or []) if o]
+    live = {oid for s in _slides(theirs, "theirs") for oid in _objects(s, "theirs slide")}
+    base_slides_json = _slides(base, "base")
+    for b in base_slides_json:
+        bkey = as_str(b["key"], "base slide key")
+        for el in as_objects(b["elements"], f"base slide {bkey}: elements"):
+            oids = [o for o in _strs(el.get("objects"), f"base slide {bkey}: objects") if o]
             base_objects.update(oids)
-            alive[(b["key"], el["key"])] = bool(oids) and all(o in live for o in oids)
-        base_objects.update(b.get("groups") or [])
-    base_slides = {b.get("objectId") for b in base["slides"] if b.get("objectId")}
+            alive[(bkey, as_str(el["key"], "element key"))] = bool(oids) and all(o in live for o in oids)
+        base_objects.update(_strs(b.get("groups"), f"base slide {bkey}: groups"))
+    base_slides = {as_str(b["objectId"], "base slide objectId") for b in base_slides_json if b.get("objectId")}
     wanted = {h6(k) for k in ours_keys}
 
-    sweep, sweep_slides, heal = [], [], []
-    for s in theirs["slides"]:
-        sid = s["objectId"]
+    sweep: list[str] = []
+    sweep_slides: list[str] = []
+    heal: list[Heal] = []
+    parent: dict[str, str | None] = {}
+    for s in _slides(theirs, "theirs"):
+        sid = as_str(s["objectId"], "theirs slide objectId")
+        objects = _objects(s, f"theirs slide {sid}")
+        for oid, rb in objects.items():
+            parent[oid] = as_optional_str(as_object(rb, f"read-back {oid}").get("parent_group"), f"read-back {oid}")
         if sid not in base_slides:
             g = sync_generation(sid)
             if sid in named_slides or (g is not None and g > gen and sid[4:10] in wanted):
                 sweep_slides.append(sid)
                 continue
-        mine, here = [], []
-        for oid, rb in s["objects"].items():
+        mine: list[str] = []
+        here: list[tuple[str, str, str]] = []
+        for oid, rb in objects.items():
             if oid in base_objects:
                 continue
             g = sync_generation(oid)
             if oid not in named and (g is None or g <= gen):
                 continue  # a person's object, or one of this base's own generation
-            title = rb.get("title") or ""
+            title = _text(as_object(rb, f"read-back {oid}").get("title"), f"read-back {oid}: title")
             key = title[len(snapshot.TAG_PREFIX):] if title.startswith(snapshot.TAG_PREFIX) else ""
             skey, _, ekey = key.partition("/")  # the element key has slashes of its own
             if key and ekey and not alive.get((skey, ekey), True):
-                here.append({"slide": skey, "element": ekey, "objectId": oid})
+                here.append((skey, ekey, oid))
             else:
                 mine.append(oid)
-        healed = [h["objectId"] for h in here]
+        healed = [oid for _, _, oid in here]
         # A healed element's own group, number box and anchored pictures carry no tag of their own.
         sweep += [oid for oid in mine if not any(oid.startswith(m) for m in healed)]
-        for h in here:
-            h["objects"] = [h["objectId"]] + [oid for oid in mine if oid != h["objectId"] and oid.startswith(h["objectId"])]
-        heal += here
+        heal += [Heal(slide=skey, element=ekey, object_id=oid,
+                      objects=[oid] + [o for o in mine if o != oid and o.startswith(oid)]) for skey, ekey, oid in here]
     # Slides deletes a group's children with the group, so naming them as well would make it refuse
     # the whole batch ("The object ... could not be found") and nothing at all would be swept.
-    parent = {oid: rb.get("parent_group") for s in theirs["slides"] for oid, rb in s["objects"].items()}
     doomed = set(sweep)
 
     def inside_a_doomed_group(oid: str) -> bool:
-        seen, p = set(), parent.get(oid)
+        seen: set[str] = set()
+        p = parent.get(oid)
         while p and p not in seen:
             if p in doomed:
                 return True
@@ -188,49 +314,57 @@ def plan_recovery(base: dict, theirs: dict, ours_keys=(), trust_generation: bool
     if not trust_generation:
         sweep = [oid for oid in sweep if oid in named]
         sweep_slides = [sid for sid in sweep_slides if sid in named_slides]
-    restore = {oid: rb for oid, rb in ((k, v) for k, v in (pending.get("in_place") or {}).items())}
-    return {"sweep": sweep, "sweep_slides": sweep_slides, "heal": heal, "restore": restore}
+    restore = {oid: as_object(rb, f"base.pending.in_place.{oid}")
+               for oid, rb in _obj(pending.get("in_place"), "base.pending.in_place").items()}
+    return Recovery(sweep=sweep, sweep_slides=sweep_slides, heal=heal, restore=restore)
 
 
-def heal_base(base: dict, heal: list[dict], theirs: dict, same_source: bool) -> list[str]:
+def heal_base(base: JsonObject, heal: Sequence[Heal], theirs: JsonObject, same_source: bool) -> list[str]:
     """Give the base elements in `heal` the objects an interrupted sync made for them, with their
     live read-back (so the merge sees the converter's own work, not a deck edit). When that sync
     converted another PDF than the one being synced now, what those objects show is unknown: the
     element's hashes are cleared so the source is written over them again."""
-    by_key = {(b["key"], el["key"]): el for b in base["slides"] for el in b["elements"]}
-    objects = {oid: rb for s in theirs["slides"] for oid, rb in s["objects"].items()}
-    done = []
+    by_key = {(as_str(b["key"], "base slide key"), as_str(el["key"], "element key")): el
+              for b in _slides(base, "base") for el in as_objects(b["elements"], "base slide elements")}
+    objects = {oid: rb for s in _slides(theirs, "theirs") for oid, rb in _objects(s, "theirs slide").items()}
+    done: list[str] = []
     for h in heal:
-        el = by_key.get((h["slide"], h["element"]))
+        el = by_key.get((h.slide, h.element))
         if el is None:
             continue
-        oids = h.get("objects") or [h["objectId"]]
-        el["objects"] = oids
+        oids = h.objects
+        el["objects"] = _json_strs(oids)
         el["main"] = oids[0]
-        el["readback"] = {oid: objects[oid] for oid in oids if oid in objects}
+        readback: JsonObject = {oid: objects[oid] for oid in oids if oid in objects}
+        el["readback"] = readback
         if not same_source:
             el["ir_hash"] = "interrupted"
-            el["fields"] = {k: "interrupted" for k in el.get("fields", {})}
-        done.append(f"{h['slide']}/{h['element']}")
+            fields: JsonObject = {k: "interrupted" for k in as_object(el.get("fields", {}), "element fields")}
+            el["fields"] = fields
+        done.append(f"{h.slide}/{h.element}")
     return done
 
 
-def restore_in_place(theirs: dict, saved: dict) -> list[str]:
+def restore_in_place(theirs: JsonObject, saved: Mapping[str, JsonObject]) -> list[str]:
     """Put the text an interrupted sync overwrote in a placeholder back into the read-back (see
     plan_recovery): the merge then re-applies the person's edit to the recreated element."""
-    back = []
-    for s in theirs["slides"]:
-        for oid, rb in list(s["objects"].items()):
+    back: list[str] = []
+    for s in _slides(theirs, "theirs"):
+        objects = _objects(s, "theirs slide")
+        for oid, rb_json in list(objects.items()):
+            rb = as_object(rb_json, f"read-back {oid}")
             old = saved.get(oid)
-            if old and (old.get("text") or "") != (rb.get("text") or ""):
-                s["objects"][oid] = {**rb, **{k: old[k] for k in IN_PLACE_FIELDS if k in old}}
+            if old and _text(old.get("text"), "saved text") != _text(rb.get("text"), f"read-back {oid}: text"):
+                restored: JsonObject = {**rb, **{k: old[k] for k in IN_PLACE_FIELDS if k in old}}
+                objects[oid] = restored
                 back.append(oid)
     return back
 
 
-def table_refill(base_el: dict | None, el: dict, objects: dict, scale: float, fonts) -> dict | None:
-    """A table the source rewrote that can be refilled where it is: {"id", "margins", "cells"}, or
-    None when it has to be made again.
+def table_refill(base_el: JsonObject | None, el: JsonObject, objects: Mapping[str, JsonObject], scale: float,
+                 fonts: "FontMapper") -> "TableFill | None":
+    """A table the source rewrote that can be refilled where it is (`TableFill`), or None when it
+    has to be made again.
 
     A table `convert` wrote came with the .pptx and carries cell margins (`emit.pptx_table`) the API
     can neither read nor set, and that keep the PDF's row pitch; one made by createTable has 7.2 pt
@@ -249,42 +383,52 @@ def table_refill(base_el: dict | None, el: dict, objects: dict, scale: float, fo
     from .emit import pptx_table
     if not base_el or el.get("kind") != "table" or base_el.get("kind") != "table":
         return None
-    old, margins = base_el.get("ir") or {}, base_el.get("table_margins")
-    live = objects.get(base_el.get("main"))
+    old = _obj(base_el.get("ir"), "base element ir")
+    margins = base_el.get("table_margins")
+    main = base_el.get("main")
+    live = objects.get(main) if isinstance(main, str) else None
     if not margins or not live or "cells" not in old:
         return None
-    was_dims, dims = [len(old["cells"]), len(old["columns"])], [len(el["cells"]), len(el["columns"])]
-    if list(live.get("table") or []) != was_dims:
+    was_dims = [len(as_array(old["cells"], "ir.cells")), len(as_array(old["columns"], "ir.columns"))]
+    dims = [len(as_array(el["cells"], "ir.cells")), len(as_array(el["columns"], "ir.columns"))]
+    live_dims = [as_int(n, "read-back table") for n in _arr(live.get("table"), "read-back table")]
+    if live_dims != was_dims:
         return None  # (the deck added or removed a row or column)
     if was_dims == dims:
         if old.get("merges", []) != el.get("merges", []) or old.get("fills", []) != el.get("fills", []):
             return None  # (a merge or a fill can't be taken back by filling cells)
     elif old.get("merges") or el.get("merges") or old.get("fills") or el.get("fills"):
         return None  # (they are placed by row and column: another grid moves them)
-    grid = merge.table_grid(live.get("text"), live.get("table"))
+    grid = merge.table_grid(as_optional_str(live.get("text"), "read-back text"), live_dims)
     if grid is None:
         return None
     new, was = pptx_table(el, scale, fonts), pptx_table(old, scale, fonts)
-    steps = table_steps(margins, new["margins"], was_dims[1], dims[1])
+    have = [_nums(m, "table_margins") for m in as_array(margins, "table_margins")]
+    steps = table_steps(have, new["margins"], was_dims[1], dims[1])
     if steps is None:
         return None
     # (the margins the table has - nothing can change them - not the new conversion's, a rounding off)
-    return {"id": base_el["main"], "margins": steps[1], "shift": (new["x"] - was["x"], new["y"] - was["y"]),
-            "cells": [(r, c) for r, row in enumerate(grid) for c, text in enumerate(row) if text],
-            "steps": steps[0]}
+    return TableFill(id=as_str(main, "base element main"), margins=steps[1],
+                     shift=(new["x"] - was["x"], new["y"] - was["y"]),
+                     cells=[(r, c) for r, row in enumerate(grid) for c, text in enumerate(row) if text],
+                     steps=steps[0])
 
 
-def table_steps(have: list, need: list, cols: int, want_cols: int, tol: float = 0.05
-                ) -> tuple[list[dict], list] | None:
+TABLE_MARGIN_TOL = 0.05  # pt: margins this close are the same (a rounding of the .pptx's EMU)
+
+
+def table_steps(have: Sequence[Sequence[float]], need: Sequence[Sequence[float]], cols: int, want_cols: int
+                ) -> tuple[list[JsonObject], list[list[float]]] | None:
     """Row and column requests (with the table's id left as None) turning a table whose rows have
     the cell margins `have` into one of len(need) rows with the margins `need` and `want_cols`
     columns, and the margins it then has; None when no such steps exist. A row inserted below
     another takes its margins; a column's cells take those of their row whatever it is inserted
     beside, so columns go and come at the right edge."""
-    def same(a, b):
-        return all(abs(x - y) <= tol for x, y in zip(a, b))
+    def same(a: Sequence[float], b: Sequence[float]) -> bool:
+        return all(abs(x - y) <= TABLE_MARGIN_TOL for x, y in zip(a, b))
 
-    cur, reqs = [list(m) for m in have], []
+    cur = [list(m) for m in have]
+    reqs: list[JsonObject] = []
     while True:
         i = next((k for k in range(min(len(cur), len(need))) if not same(cur[k], need[k])), min(len(cur), len(need)))
         if len(cur) == len(need):
@@ -292,19 +436,23 @@ def table_steps(have: list, need: list, cols: int, want_cols: int, tol: float = 
                 return None
             break
         if len(cur) > len(need):
-            reqs.append({"deleteTableRow": {"tableObjectId": None, "cellLocation": {"rowIndex": i, "columnIndex": 0}}})
+            reqs.append(google_types.slides_json({"deleteTableRow": {
+                "tableObjectId": None, "cellLocation": {"rowIndex": i, "columnIndex": 0}}}))
             del cur[i]
         elif i > 0 and same(cur[i - 1], need[i]):
-            reqs.append({"insertTableRows": {"tableObjectId": None, "cellLocation": {"rowIndex": i - 1, "columnIndex": 0},
-                                             "insertBelow": True, "number": 1}})
+            reqs.append(google_types.slides_json({"insertTableRows": {
+                "tableObjectId": None, "cellLocation": {"rowIndex": i - 1, "columnIndex": 0},
+                "insertBelow": True, "number": 1}}))
             cur.insert(i, list(cur[i - 1]))
         else:
             return None
     if want_cols > cols:
-        reqs.append({"insertTableColumns": {"tableObjectId": None, "cellLocation": {"rowIndex": 0, "columnIndex": cols - 1},
-                                            "insertRight": True, "number": want_cols - cols}})
+        reqs.append(google_types.slides_json({"insertTableColumns": {
+            "tableObjectId": None, "cellLocation": {"rowIndex": 0, "columnIndex": cols - 1},
+            "insertRight": True, "number": want_cols - cols}}))
     for c in range(cols - 1, want_cols - 1, -1):
-        reqs.append({"deleteTableColumn": {"tableObjectId": None, "cellLocation": {"rowIndex": 0, "columnIndex": c}}})
+        reqs.append(google_types.slides_json({"deleteTableColumn": {
+            "tableObjectId": None, "cellLocation": {"rowIndex": 0, "columnIndex": c}}}))
     return reqs, cur
 
 
@@ -335,8 +483,58 @@ def drop_objects(pres: Presentation, objects: Collection[str], slides: Collectio
 
 # ---------------------------------------------------------------- ours
 
+@dataclass(frozen=True, kw_only=True)
+class Built:
+    """The new conversion (`build_ours_of`): the PDF synced (`source`) and the one converted (`pdf`,
+    notes taken out), the folder it was rendered into (`out`), its plan and deck.json, its keyed
+    slide entries (`snapshot.slide_entries`), `pairs` (ours index -> base index), the label moves,
+    weak pairs and near misses the keying found, and what the report says of it: context changes
+    sync cannot write or could not read, elements emit could not plan, and the base's old forms."""
+    source: Path
+    pdf: Path
+    out: Path
+    plan: "DeckPlan"
+    deck: JsonObject
+    slides: list[JsonObject]
+    pairs: dict[int, int]
+    label_moves: list[JsonObject]
+    weak_pairs: dict[int, str]
+    near_misses: list[JsonObject]
+    context_unwritten: "list[Unwritten]"
+    context_unread: list["Unread"]
+    contained: list["Contained"]
+    base_forms: list[snapshot.BaseForm]
+
+
+def ours_json(b: Built) -> JsonObject:
+    """What the merge reads of the new conversion (`merge.ours_of`), as JSON: the same slide entries,
+    and the pairs' keys as JSON has them. `Sync.ours` is this view."""
+    pairs: JsonObject = {str(k): v for k, v in b.pairs.items()}
+    weak: JsonObject = {str(k): v for k, v in b.weak_pairs.items()}
+    slides: list[Json] = [s for s in b.slides]
+    moves: list[Json] = [m for m in b.label_moves]
+    near: list[Json] = [m for m in b.near_misses]
+    return {"slides": slides, "pairs": pairs, "label_moves": moves, "weak_pairs": weak, "near_misses": near}
+
+
+def theme_ours_of(b: Built) -> "ThemeOurs":
+    """What theme sync reads of the new conversion (`theme_sync.theme_ours` of the dict entry)."""
+    from .theme_sync import ThemeOurs
+
+    return ThemeOurs(deck=b.deck, out=b.out, scale=b.plan.scale, fonts=b.plan.fonts, pairs=dict(b.pairs),
+                     keys=tuple(as_str(s["key"], "slides.key") for s in b.slides))
+
+
 def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_width: float,
-               pictures: snapshot.BasePictures) -> dict:
+               pictures: snapshot.BasePictures) -> JsonObject:
+    """`build_ours_of` as the JSON the merge and the oracles read (`ours_json`): the dict entry the
+    fuzzers and `edit_hunt` call. What else the conversion holds (its plan, deck, folder, what the
+    report says of it) is the record's: `build_ours_of`."""
+    return ours_json(build_ours_of(pdf, work, base, overlays, page_width, pictures))
+
+
+def build_ours_of(pdf: Path, work: Path, base: JsonObject, overlays: str, page_width: float,
+                  pictures: snapshot.BasePictures) -> Built:
     """extract, classify and render the new PDF into `work`, plan it like emit and give its
     slides and elements the keys of the base they match.
 
@@ -391,7 +589,8 @@ def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_widt
     keys, pairs = identity.inherit_slide_keys(base_infos, base_keys, infos, found, weak)
     near = [identity.reported_near_miss(m, base_keys, infos)
             for m in identity.near_misses_of(base_infos, infos, pairs)]
-    ekeys, fps = [], []
+    ekeys: list[list[ElementKey]] = []
+    fps: list[list[JsonObject]] = []
     for j, slide in enumerate(ours_slides):
         matched = identity.base_items(as_objects(base_slides[pairs[j]]["elements"], f"base slide {base_keys[pairs[j]]}: "
                                                  "elements")) if j in pairs else None
@@ -411,10 +610,12 @@ def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_widt
     forms = base_today(base, view, pictures)
     base_as_contained(base, entries, view, pairs, keys, work, originals)
     unread: list[Unread] = []
-    unwritten = mark_emitted(base, entries, deck, pairs, plan.scale, plan.fonts, fast=True, unread=unread)
-    at: dict[tuple[int, str], tuple[str, str]] = {
-        (as_int(s["page"], "slide.page"), as_str(el["id"], "element id")): (o["key"], e["key"])
-        for s, o in zip(ours_slides, entries) for el, e in zip(as_objects(s["elements"], "elements"), o["elements"])}
+    unwritten = mark_emitted(base, entries, deck, pairs, plan.scale, plan.fonts, True, unread)
+    at: dict[tuple[int, str], tuple[str | None, str | None]] = {
+        (as_int(s["page"], "slide.page"), as_str(el["id"], "element id")):
+            (as_str(o["key"], "slide key"), as_str(e["key"], "element key"))
+        for s, o in zip(ours_slides, entries)
+        for el, e in zip(as_objects(s["elements"], "elements"), as_objects(o["elements"], "entry elements"))}
     contained: list[Contained] = []
     for c in plan.contained:
         page, eid, kind = c["page"], c["id"], c["kind"]
@@ -423,9 +624,9 @@ def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_widt
         words = " ".join(identity.plain_text(was).split()) if was.get("kind") == "text" else ""
         contained.append(Contained(slide=slide_key, element=element_key, page=page, id=eid,
                                    kind=kind, error=c["error"], words=words))
-    return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries,
-            "pairs": pairs, "label_moves": moves, "weak_pairs": weak, "near_misses": near,
-            "context_unwritten": unwritten, "context_unread": unread, "contained": contained, "base_forms": forms}
+    return Built(source=pdf, pdf=prepared.pdf, out=work, plan=plan, deck=deck, slides=entries, pairs=pairs,
+                 label_moves=moves, weak_pairs=weak, near_misses=near, context_unwritten=unwritten,
+                 context_unread=unread, contained=contained, base_forms=forms)
 
 
 def base_today(base: JsonObject, view: JsonObject, pictures: snapshot.BasePictures) -> list[snapshot.BaseForm]:
@@ -477,21 +678,6 @@ class Unread:
     error: str
 
 
-class _KeyedElement(TypedDict):
-    """What these readers take from an element entry of build_ours' slides (`snapshot.slide_entries`)."""
-    key: str
-
-
-class _OursSlideKeys(TypedDict):
-    key: str
-    elements: list[_KeyedElement]
-
-
-class OursSlide(_OursSlideKeys, total=False):
-    """What these readers take from a slide entry of build_ours' `slides`."""
-    title: str | None
-
-
 # ---------------------------------------------------------------- the merge plan, as sync reads it
 
 def slide_units(p: merge.SlidePlan) -> tuple[merge.PlannedUnit, ...]:
@@ -540,7 +726,7 @@ def live_id(p: merge.SlidePlan) -> str | None:
 
 def new_background(p: merge.SlidePlan) -> str | None:
     """The source's background this sync writes onto an updated slide; None where it writes none (a
-    background the source took away is not written either: `has_writes`, `update_slide`)."""
+    background the source took away is not written either: `merge.has_writes_of`, `update_slide`)."""
     match p:
         case merge.UpdateSlide():
             return p.background if p.background_written and p.background else None
@@ -572,26 +758,6 @@ def kept_whole(d: merge.UnitDecision) -> bool:
             return False
         case _:
             assert_never(d)
-
-
-def has_writes(mplan: merge.MergePlan, live_order: Sequence[str]) -> bool:
-    """Whether a merge plan changes the live deck at all (a sync with no changes sends nothing):
-    `merge.has_writes` over the records."""
-    for p in mplan.slides:
-        match p:
-            case merge.CreateSlide() | merge.DeleteSlide():
-                return True
-            case merge.UpdateSlide():
-                if any(isinstance(u.decision, merge.CreateUnit | merge.Recreate | merge.DeleteUnit | merge.MoveUnit)
-                       for u in p.units) or new_background(p) is not None or p.notes is not None:
-                    return True
-            case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.HoldSlide():
-                pass
-            case _:
-                assert_never(p)
-    final = [x for x in mplan.order if not x.startswith("new:")]
-    current = [s for s in live_order if s in final]
-    return current != [s for s in final if s in current]
 
 
 _ACTION_FIELDS = ("key", "action", "source", "deck", "unpaired", "inherited", "in_table")
@@ -757,10 +923,10 @@ class Regroup(TypedDict):
     unit_of: dict[str, str]
 
 
-def placeholder_in_place(oid: str, rb: dict) -> InPlace:
+def placeholder_in_place(oid: str, rb: JsonMap) -> InPlace:
     """A live placeholder (`rb`: its read-back) written into as it is."""
-    size = rb["size"]
-    return InPlace(id=oid, size=(size[0], size[1]), text=(rb.get("text") or "").strip())
+    size = _nums(rb["size"], f"read-back {oid}: size")
+    return InPlace(id=oid, size=(size[0], size[1]), text=_text(rb.get("text"), f"read-back {oid}: text").strip())
 
 
 def updated(p: merge.SlidePlan) -> merge.UpdateSlide | merge.HoldSlide:
@@ -818,7 +984,7 @@ class RunResult:
     revision_id: str | None
 
 
-def planned(deck: dict[str, object], pdf: Path, work: Path, page_width: float) -> "DeckPlan":
+def planned(deck: JsonObject, pdf: Path, work: Path, page_width: float) -> "DeckPlan":
     """`deck` (as classify wrote it) planned as sync writes it, its blocks merged (`emit.DeckPlan`).
     An element emit cannot plan (a field its producer never wrote, 688ebf4) is the picture of its
     region, as `convert` makes it (`DeckPlan.contain`, the plan's `contained`), cut out of `pdf` into
@@ -917,7 +1083,7 @@ def base_as_contained(base: JsonObject, entries: list[JsonObject], view: JsonObj
     return done
 
 
-def contained_report(contained: list[Contained], slides: list[OursSlide],
+def contained_report(contained: list[Contained], slides: Sequence[JsonMap],
                      mplan: merge.MergePlan) -> tuple[list[ContainedFound], list[str]]:
     """build_ours' `contained` (`slides`: its keyed slides), each with whether this sync writes its
     unit, and the report's words for those it writes. A unit it leaves alone is in the deck as the
@@ -927,10 +1093,11 @@ def contained_report(contained: list[Contained], slides: list[OursSlide],
         match p:
             case merge.CreateSlide():
                 o = slides[p.ours]
-                made |= {(o["key"], e["key"]) for e in o["elements"]}
+                made |= {(as_str(o["key"], "slide key"), as_str(e["key"], "element key"))
+                         for e in as_objects(o["elements"], "slide elements")}
             case merge.UpdateSlide():
                 o = slides[p.ours]
-                made |= {(o["key"], k) for u in p.units if written(u.decision) for k in u.ours_members}
+                made |= {(as_str(o["key"], "slide key"), k) for u in p.units if written(u.decision) for k in u.ours_members}
             case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide() | merge.HoldSlide():
                 pass  # (nothing of the new conversion goes onto it)
             case _:
@@ -953,12 +1120,12 @@ def contained_json(found: list[ContainedFound]) -> list[Json]:
     return [{**asdict(f.item), "written": f.written} for f in found]
 
 
-def unread_warnings(unread: list[Unread], slides: list[OursSlide]) -> list[str]:
+def unread_warnings(unread: list[Unread], slides: Sequence[JsonMap]) -> list[str]:
     """The report's words for the slides `mark_emitted` could not compare (`slides`: build_ours'
     keyed slides, for their titles): nothing is lost, but boxes the source left alone there keep
     the size and place they had, even where the source's changes beside them give them others in
     a fresh conversion - and nothing else says so."""
-    titles = {s["key"]: s.get("title") for s in slides}
+    titles = {as_str(s["key"], "slide key"): s.get("title") for s in slides}
     out = []
     for u in unread:
         title = titles.get(u.slide)
@@ -976,8 +1143,8 @@ def unread_warnings(unread: list[Unread], slides: list[OursSlide]) -> list[str]:
     return out
 
 
-def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict[int, int], scale: float, fonts: "FontMapper",
-                 fast: bool, unread: list[Unread]) -> list["Unwritten"]:
+def mark_emitted(base: JsonObject, entries: Sequence[JsonObject], deck: JsonMap, pairs: Mapping[int, int], scale: float,
+                 fonts: "FontMapper", fast: bool, unread: list[Unread]) -> list["Unwritten"]:
     """Give an element whose own IR the source left alone (or only moved) a source change when emit
     now writes it differently all the same, because of what stands around it.
 
@@ -1006,53 +1173,64 @@ def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict[int, i
     everyday case, and the marks are all it costs."""
     from .emit import strict
 
-    unwritten = []
+    unwritten: list[Unwritten] = []
+    base_slides, deck_slides = _slides(base, "base"), _slides(deck, "deck")
     for j, i in pairs.items():
-        b, o, slide = base["slides"][i], entries[j], deck["slides"][j]
-        for e in b["elements"]:
-            if any(f in e.get("fields", {}) for f in identity.CONTEXT_FIELDS):
-                e["fields"] = {k: v for k, v in e["fields"].items() if k not in identity.CONTEXT_FIELDS}
+        b, o, slide = base_slides[i], entries[j], deck_slides[j]
+        okey = str(o["key"])
+        b_elements = as_objects(b["elements"], f"base slide {okey}: elements")
+        for e in b_elements:
+            fields = as_object(e.get("fields", {}), "element fields")
+            if any(f in fields for f in identity.CONTEXT_FIELDS):
+                kept: JsonObject = {k: v for k, v in fields.items() if k not in identity.CONTEXT_FIELDS}
+                e["fields"] = kept
         # (an element the deck keeps though the source dropped it is not what emit wrote the others beside)
-        was = [e for e in b["elements"] if not e.get("removed")]
+        was = [e for e in b_elements if not e.get("removed")]
         if any("ir" not in e for e in was):
             continue
-        base_by = {e["key"]: e for e in was}
-        title_page = b.get("layout") == "TITLE" if b.get("layout") in ("TITLE", "TITLE_ONLY") else bool(slide.get("title_page"))
-        if fast and title_page == bool(slide.get("title_page")) and len(base_by) == len(o["elements"]) and \
-                all(oe["key"] in base_by and base_by[oe["key"]]["ir_hash"] == oe["ir_hash"] for oe in o["elements"]):
+        base_by = {as_str(e["key"], "element key"): e for e in was}
+        o_elements = as_objects(o["elements"], f"slide {okey}: elements")
+        layout = b.get("layout")
+        title_page = layout == "TITLE" if layout in ("TITLE", "TITLE_ONLY") else bool(slide.get("title_page"))
+        if fast and title_page == bool(slide.get("title_page")) and len(base_by) == len(o_elements) and \
+                all(oe["key"] in base_by and base_by[oe["key"]]["ir_hash"] == oe["ir_hash"] for oe in o_elements):
             continue  # (nothing on the slide changed, so nothing emit writes for it did)
-        candidates = [k for k, oe in enumerate(o["elements"])
+        candidates = [k for k, oe in enumerate(o_elements)
                       if oe["key"] in base_by and identity.source_changes(base_by[oe["key"]], oe) <= {"position"}]
         if not candidates:
             continue  # (whatever else changed is rewritten anyway, where the new conversion puts it)
+        was_irs: list[Json] = [e["ir"] for e in was]
         try:
-            before = dict(zip(base_by, emitted_elements({**slide, "title_page": title_page, "elements": [e["ir"] for e in was]},
+            before = dict(zip(base_by, emitted_elements({**slide, "title_page": title_page, "elements": was_irs},
                                                         list(base_by), scale, fonts)))
         except Exception as e:  # noqa: BLE001 - an IR an older converter wrote that today's emit cannot read
             # says nothing either way: no marks - but said, since nothing else would
-            unread.append(Unread(slide=str(o["key"]), side="base", error=f"{type(e).__name__}: {e}"))
+            unread.append(Unread(slide=okey, side="base", error=f"{type(e).__name__}: {e}"))
             continue
         try:
-            now = emitted_elements(slide, [oe["key"] for oe in o["elements"]], scale, fonts)
+            now = emitted_elements(slide, [str(oe["key"]) for oe in o_elements], scale, fonts)
         except Exception as e:  # noqa: BLE001 - the plan's own slide, which `planned` rehearsed
             # (a slide emit could not write would have had the element at fault made a picture, so
             # this is a difference between that rehearsal and `slide_emission`: a bug to see where
             # the suite runs, and in a person's sync the marks it costs, said, not the whole sync)
             if strict():
                 raise
-            unread.append(Unread(slide=str(o["key"]), side="ours", error=f"{type(e).__name__}: {e}"))
+            unread.append(Unread(slide=okey, side="ours", error=f"{type(e).__name__}: {e}"))
             continue
+        s_elements = as_objects(slide["elements"], f"slide {okey}: elements")
         for k in candidates:
-            oe, el = o["elements"][k], slide["elements"][k]
-            be = base_by[oe["key"]]
-            step = [(el["bbox"][q] - be["ir"]["bbox"][q]) * scale for q in (0, 1)]
-            marks, cannot = context_changes(before[oe["key"]], now[k], step, el["kind"],
-                                            same_layout=title_page == bool(slide.get("title_page")))
+            oe, el = o_elements[k], s_elements[k]
+            ekey = str(oe["key"])
+            be = base_by[ekey]
+            box, was_box = _nums(el["bbox"], "bbox"), _nums(as_object(be["ir"], "ir")["bbox"], "ir.bbox")
+            step = [(box[q] - was_box[q]) * scale for q in (0, 1)]
+            marks, cannot = context_changes(before[ekey], now[k], step, as_str(el["kind"], "kind"),
+                                            title_page == bool(slide.get("title_page")))
             for f in marks:
-                be["fields"] = {**be["fields"], f: "base"}
-                oe["fields"] = {**oe["fields"], f: "ours"}
+                be["fields"] = {**as_object(be["fields"], "element fields"), f: "base"}
+                oe["fields"] = {**as_object(oe["fields"], "element fields"), f: "ours"}
             if cannot:
-                unwritten.append(Unwritten(slide=str(o["key"]), element=str(oe["key"]), fields=tuple(sorted(cannot))))
+                unwritten.append(Unwritten(slide=okey, element=ekey, fields=tuple(sorted(cannot))))
     return unwritten
 
 
@@ -1105,7 +1283,7 @@ def unwritten_warnings(unwritten: list[Unwritten], ours: JsonObject) -> list[str
     return out
 
 
-def emitted_elements(slide: dict, names: list[str], scale: float, fonts) -> list[dict]:
+def emitted_elements(slide: JsonObject, names: Sequence[str], scale: float, fonts: "FontMapper") -> list[JsonObject]:
     """Per element of `slide` (a DeckPlan slide), what emit writes for it there, with nothing in it
     that says which deck the slide stands in: object ids by the element's name (`names`, its key),
     the slide's as `@slide`, the template shapes' copies by their template key (`emit.slide_emission`
@@ -1121,9 +1299,7 @@ def emitted_elements(slide: dict, names: list[str], scale: float, fonts) -> list
     mapping = [(oid, f"@{name}") for oid, name in zip(ids, names)] + \
         [(oid, f"@template{key!r}") for oid, key in e["templates"].items()] + [(sid, "@slide")]
     order = sorted(mapping, key=lambda kv: -len(kv[0]))
-    out = [{"requests": [r for r in rename(rs, order) if "updatePageElementsZOrder" not in r], "box": e["boxes"][i],
-            "role": "title" if i == e["title"] else "subtitle" if i == e["subtitle"] else None, "groups": []}
-           for i, (_, rs) in enumerate(e["parts"][1:1 + len(ids)])]
+    groups: list[list[list[Json]]] = [[] for _ in ids]
     at = {f"@{name}": i for i, name in enumerate(names)}
     for _, rs in e["parts"][1 + len(ids):]:
         for r in rs:
@@ -1131,17 +1307,28 @@ def emitted_elements(slide: dict, names: list[str], scale: float, fonts) -> list
             gid = as_str(group.get("groupObjectId", ""), "groupObjectId")
             kind = "block" if gid.startswith(f"{sid}_blk") else "rules" if gid.startswith(f"{sid}_rules") else None
             if kind:
-                members = sorted(c[:-2] if c.endswith("_g") else c for c in rename(group["childrenObjectIds"], order))
+                children = _strs(rename(group["childrenObjectIds"], order), "childrenObjectIds")
+                members = sorted(c[:-2] if c.endswith("_g") else c for c in children)
                 for c in members:
                     if c in at:
-                        out[at[c]]["groups"].append([kind, members])
-    for x in out:
-        x["groups"].sort()
+                        groups[at[c]].append([kind, _json_strs(members)])
+    out: list[JsonObject] = []
+    for i, (_, rs) in enumerate(e["parts"][1:1 + len(ids)]):
+        box = e["boxes"][i]
+        role = "title" if i == e["title"] else "subtitle" if i == e["subtitle"] else None
+        mine: list[Json] = [g for g in sorted(groups[i], key=_group_order)]
+        out.append({"requests": [r for r in rename_requests(rs, order) if "updatePageElementsZOrder" not in r],
+                    "box": None if box is None else _json_nums(box), "role": role, "groups": mine})
     return out
 
 
-def context_changes(was: dict, now: dict, step: list[float], kind: str,
-                    same_layout: bool = False) -> tuple[set[str], set[str]]:
+def _group_order(g: list[Json]) -> tuple[str, list[str]]:
+    """A [kind, members] group entry's sort key, as the list sorted before (kind, then members)."""
+    return as_str(g[0], "group kind"), _strs(g[1], "group members")
+
+
+def context_changes(was: JsonMap, now: JsonMap, step: Sequence[float], kind: str,
+                    same_layout: bool) -> tuple[set[str], set[str]]:
     """(fields recreating the unit writes, fields it cannot) in which two `emitted_elements` entries
     of one element differ; `step`: slide pt the source moved the element by, which its requests
     may differ by and still say the same.
@@ -1150,35 +1337,40 @@ def context_changes(was: dict, now: dict, step: list[float], kind: str,
     plain text below the title) is written by recreating it when the slide keeps its layout
     (`same_layout`): `Sync.update_slide` hands the live SUBTITLE placeholder to the element that has
     the role now and makes the other a box. Any other role change (the slide changing layout) is not."""
-    marks, cannot = set(), set()
+    marks: set[str] = set()
+    cannot: set[str] = set()
     if was["role"] != now["role"]:
         # (and every request differs: a placeholder is transformed, a box created)
         if same_layout and {was["role"], now["role"]} <= {None, "subtitle"}:
             marks.add("emitted")
         else:
             cannot.add("placeholder")
-    elif not _close(was["requests"], now["requests"], [v * EMU_PER_PT for v in step]):
+    elif not _close(was["requests"], now["requests"], [v * EMU_PER_PT for v in step], None):
         marks.add("width" if kind == "text" else "emitted")
-    if (was["box"] is None) != (now["box"] is None) or was["box"] is not None and \
-            any(abs(a + step[q % 2] - c) > WIDTH_MOVED for q, (a, c) in enumerate(zip(was["box"], now["box"]))):
+    was_box, now_box = was["box"], now["box"]
+    if (was_box is None) != (now_box is None) or was_box is not None and \
+            any(abs(a + step[q % 2] - c) > WIDTH_MOVED
+                for q, (a, c) in enumerate(zip(_nums(was_box, "box"), _nums(now_box, "box")))):
         marks.add("placed")
     if was["groups"] != now["groups"]:
         cannot.add("grouping")
     return marks, cannot
 
 
-def _close(a, b, step: list[float], key: str | None = None) -> bool:
+def _close(a: Json, b: Json, step: Sequence[float], key: str | None) -> bool:
     """Two request trees say the same: equal but for float noise, with EMU lengths within
-    WIDTH_MOVED and translations less `step` (EMU) - the source moving an element moves its box."""
+    WIDTH_MOVED and translations less `step` (EMU) - the source moving an element moves its box.
+    `key`: the key `a` and `b` stand under (None: a list item, or the top)."""
     if isinstance(a, dict) and isinstance(b, dict):
         if a.keys() != b.keys():
             return False
-        if a.get("unit") == "EMU" and isinstance(a.get("magnitude"), (int, float)):
-            return abs(a["magnitude"] - b["magnitude"]) <= WIDTH_MOVED * EMU_PER_PT and \
+        magnitude = a.get("magnitude")
+        if a.get("unit") == "EMU" and isinstance(magnitude, (int, float)):
+            return abs(magnitude - _number(b["magnitude"], "magnitude")) <= WIDTH_MOVED * EMU_PER_PT and \
                 all(_close(a[k], b[k], step, k) for k in a if k != "magnitude")
         return all(_close(a[k], b[k], step, k) for k in a)
     if isinstance(a, list) and isinstance(b, list):
-        return len(a) == len(b) and all(_close(x, y, step) for x, y in zip(a, b))
+        return len(a) == len(b) and all(_close(x, y, step, None) for x, y in zip(a, b))
     if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool):
         if key in ("translateX", "translateY"):
             return abs(a + step[key == "translateY"] - b) <= WIDTH_MOVED * EMU_PER_PT
@@ -1192,21 +1384,32 @@ def _close(a, b, step: list[float], key: str | None = None) -> bool:
 
 # ---------------------------------------------------------------- requests
 
-def rename(value, mapping: list[tuple[str, str]]):
+def rename(value: Json, mapping: Sequence[tuple[str, str]]) -> Json:
     """Object ids in requests: a string equal to a key, or a key followed by a non-digit
     suffix (`_g`, `n`, `_n0`), gets the new id. `mapping` is longest key first."""
     if isinstance(value, dict):
-        return {rename(k, mapping): rename(v, mapping) for k, v in value.items()}
+        return {_renamed(k, mapping): rename(v, mapping) for k, v in value.items()}
     if isinstance(value, list):
         return [rename(v, mapping) for v in value]
-    if isinstance(value, str) and value.startswith("b2s_"):
+    if isinstance(value, str):
+        return _renamed(value, mapping)
+    return value
+
+
+def _renamed(value: str, mapping: Sequence[tuple[str, str]]) -> str:
+    if value.startswith("b2s_"):
         for old, new in mapping:
             if value == old or (value.startswith(old) and not value[len(old)].isdigit()):
                 return new + value[len(old):]
     return value
 
 
-def letterbox_fix(oid: str, box: list[float], px: tuple[int, int]) -> dict:
+def rename_requests(reqs: Sequence[JsonObject], mapping: Sequence[tuple[str, str]]) -> list[JsonObject]:
+    """`rename` over a list of requests."""
+    return [as_object(rename(r, mapping), "request") for r in reqs]
+
+
+def letterbox_fix(oid: str, box: Sequence[float], px: tuple[int, int]) -> JsonObject:
     """createImage fits a picture into its box keeping the aspect ratio; this stretches it to the
     box, as the .pptx import does."""
     x0, y0, x1, y1 = box
@@ -1215,9 +1418,9 @@ def letterbox_fix(oid: str, box: list[float], px: tuple[int, int]) -> dict:
     fw, fh = px[0] * s, px[1] * s
     fx, fy = x0 + (w - fw) / 2, y0 + (h - fh) / 2
     sx, sy = w / fw, h / fh
-    return {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
+    return google_types.slides_json({"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
         "scaleX": sx, "scaleY": sy, "unit": "EMU",
-        "translateX": round((x0 - sx * fx) * EMU_PER_PT), "translateY": round((y0 - sy * fy) * EMU_PER_PT)}}}
+        "translateX": round((x0 - sx * fx) * EMU_PER_PT), "translateY": round((y0 - sy * fy) * EMU_PER_PT)}}})
 
 
 def png_size(path: Path) -> tuple[int, int]:
@@ -1226,18 +1429,19 @@ def png_size(path: Path) -> tuple[int, int]:
         return img.size
 
 
-def api_colour(hex_or_theme: str | None) -> dict | None:
+def api_colour(hex_or_theme: str | None) -> JsonObject | None:
     if not hex_or_theme:
         return None
     if hex_or_theme.startswith("theme:"):
         return {"themeColor": hex_or_theme[6:]}
     from .emit import rgb
-    return rgb(hex_or_theme)["opaqueColor"]
+    return as_object(rgb(hex_or_theme)["opaqueColor"], "rgb")
 
 
-def api_text_style(runs: dict) -> tuple[dict, list[str]]:
+def api_text_style(runs: JsonMap) -> tuple[JsonObject, list[str]]:
     """A normalised run style (snapshot._text_style attributes) as an API TextStyle and its fields."""
-    style, fields = {}, []
+    style: JsonObject = {}
+    fields: list[str] = []
     for k, v in runs.items():
         if k in ("fontFamily", "weight"):
             if "weight" in runs:
@@ -1247,10 +1451,10 @@ def api_text_style(runs: dict) -> tuple[dict, list[str]]:
                 style["fontFamily"] = v
                 fields.append("fontFamily")
         elif k == "fontSize":
-            style[k] = pt(v)
+            style[k] = pt(_number(v, "fontSize"))
             fields.append(k)
         elif k in ("foregroundColor", "backgroundColor"):
-            style[k] = {"opaqueColor": api_colour(v)} if v else {}
+            style[k] = {"opaqueColor": api_colour(as_str(v, k))} if v else {}
             fields.append(k)
         elif k == "link":
             continue
@@ -1260,28 +1464,46 @@ def api_text_style(runs: dict) -> tuple[dict, list[str]]:
     return style, list(dict.fromkeys(fields))
 
 
-def style_override_requests(oid: str, change: dict, cells: list[dict] | None = None) -> list[dict]:
+def style_override_requests(oid: str, change: JsonMap, cells: Sequence[google_types.SlidesTableCellLocation] | None
+                            ) -> list[JsonObject]:
     """Uniform text style changes the deck made (merge.uniform_changes), over all of the text
-    (`cells`: the cellLocations of a table, whose text is styled cell by cell)."""
-    reqs = []
-    runs, paras = change.get("runs") or {}, change.get("paragraphs") or {}
-    where = [{"objectId": oid, "cellLocation": c} for c in cells] if cells is not None else [{"objectId": oid}]
+    (`cells`: the cellLocations of a table, whose text is styled cell by cell; None for a shape)."""
+    reqs: list[JsonObject] = []
+    runs, paras = _obj(change.get("runs"), "runs"), _obj(change.get("paragraphs"), "paragraphs")
     style, fields = api_text_style(runs)
-    if fields:
-        reqs += [{"updateTextStyle": {**w, "textRange": {"type": "ALL"}, "style": style, "fields": ",".join(fields)}}
-                 for w in where]
-    pstyle, pfields = {}, []
+    pstyle: JsonObject = {}
+    pfields: list[str] = []
     for k, v in paras.items():
         if k in ("alignment", "lineSpacing", "direction"):
             pstyle[k] = v
             pfields.append(k)
         elif k in ("indentStart", "indentFirstLine", "spaceAbove", "spaceBelow"):
-            pstyle[k] = pt(v)
+            pstyle[k] = pt(_number(v, k))
             pfields.append(k)
+    every: list[google_types.SlidesTableCellLocation | None] = [None] if cells is None else [c for c in cells]
+    if fields:
+        reqs += [text_style_request(oid, c, {"type": "ALL"}, style, ",".join(fields)) for c in every]
     if pfields:
-        reqs += [{"updateParagraphStyle": {**w, "textRange": {"type": "ALL"}, "style": pstyle, "fields": ",".join(pfields)}}
-                 for w in where]
+        reqs += [paragraph_style_request(oid, c, {"type": "ALL"}, pstyle, ",".join(pfields)) for c in every]
     return reqs
+
+
+def text_style_request(oid: str, cell: google_types.SlidesTableCellLocation | None, text_range: google_types.SlidesRange,
+                       style: JsonObject, fields: str) -> JsonObject:
+    """An updateTextStyle, its keys in the order sync always wrote them."""
+    request: google_types.SlidesUpdateTextStyleRequest = (
+        {"objectId": oid, "textRange": text_range, "style": style, "fields": fields} if cell is None else
+        {"objectId": oid, "cellLocation": cell, "textRange": text_range, "style": style, "fields": fields})
+    return google_types.slides_json({"updateTextStyle": request})
+
+
+def paragraph_style_request(oid: str, cell: google_types.SlidesTableCellLocation | None,
+                            text_range: google_types.SlidesRange, style: JsonObject, fields: str) -> JsonObject:
+    """An updateParagraphStyle, its keys in the order sync always wrote them."""
+    request: google_types.SlidesUpdateParagraphStyleRequest = (
+        {"objectId": oid, "textRange": text_range, "style": style, "fields": fields} if cell is None else
+        {"objectId": oid, "cellLocation": cell, "textRange": text_range, "style": style, "fields": fields})
+    return google_types.slides_json({"updateParagraphStyle": request})
 
 
 def raw_objects(pres: Presentation) -> dict[str, PageElement]:
@@ -1293,18 +1515,32 @@ def raw_objects(pres: Presentation) -> dict[str, PageElement]:
 deck_attributes = merge.deck_attributes   # which attributes on a run are the person's (merge decides)
 
 
-def text_containers(old: dict, new: dict) -> list[tuple[dict | None, dict | None, dict | None]]:
+TextContainer = tuple[google_types.SlidesTableCellLocation | None, JsonObject | None, JsonObject | None]
+"""(cellLocation, old text, new text) of one place holding text (`text_containers`)."""
+
+
+def _text_of(v: Json, where: str) -> JsonObject | None:
+    return None if v is None else as_object(v, where)
+
+
+def text_containers(old: PageElement, new: PageElement) -> list[TextContainer]:
     """(cellLocation, old text, new text) of two page elements holding text: a shape, or the cells
     of two tables of the same shape."""
-    if "shape" in old and "shape" in new:
-        return [(None, old["shape"].get("text"), new["shape"].get("text"))]
-    if "table" in old and "table" in new:
-        orows, nrows = old["table"].get("tableRows", []), new["table"].get("tableRows", [])
-        if len(orows) != len(nrows) or any(len(a.get("tableCells", [])) != len(b.get("tableCells", [])) for a, b in zip(orows, nrows)):
+    old_shape, new_shape = old.get("shape"), new.get("shape")
+    if old_shape is not None and new_shape is not None:
+        return [(None, _text_of(old_shape.get("text"), "shape.text"), _text_of(new_shape.get("text"), "shape.text"))]
+    old_table, new_table = old.get("table"), new.get("table")
+    if old_table is not None and new_table is not None:
+        orows = google_types.parts(old_table.get("tableRows"), "table.tableRows")
+        nrows = google_types.parts(new_table.get("tableRows"), "table.tableRows")
+
+        def cells(row: JsonObject) -> list[JsonObject]:
+            return google_types.parts(row.get("tableCells"), "tableRows.tableCells")
+        if len(orows) != len(nrows) or any(len(cells(a)) != len(cells(b)) for a, b in zip(orows, nrows)):
             return []
-        return [({"rowIndex": r, "columnIndex": c}, oc.get("text"), nc.get("text"))
+        return [({"rowIndex": r, "columnIndex": c}, _text_of(oc.get("text"), "cell.text"), _text_of(nc.get("text"), "cell.text"))
                 for r, (orow, nrow) in enumerate(zip(orows, nrows))
-                for c, (oc, nc) in enumerate(zip(orow.get("tableCells", []), nrow.get("tableCells", [])))]
+                for c, (oc, nc) in enumerate(zip(cells(orow), cells(nrow)))]
     return []
 
 
@@ -1315,59 +1551,72 @@ def _utf16_offsets(text: str) -> list[int]:
     return offsets
 
 
-def style_range_requests(oid: str, old: dict, new: dict, base_styles: list[dict], merged: str | None = None) -> list[dict]:
+def style_range_requests(oid: str, old: PageElement, new: PageElement, base_styles: Sequence[JsonMap],
+                         merged: str | None) -> list[JsonObject]:
     """The deck's run style edits of `old` (the live object before sync) re-applied to the same
-    words in `new` (its recreation; `merged`: the text it will hold after the text override)."""
+    words in `new` (its recreation; `merged`: the text it will hold after the text override, None
+    when there is no text override)."""
     from bisect import bisect_left
     from difflib import SequenceMatcher
 
-    reqs = []
+    reqs: list[JsonObject] = []
     for loc, old_text, new_text in text_containers(old, new):
         before = snapshot.read_text(old_text)[0]
         after = merged if merged is not None and loc is None else snapshot.read_text(new_text)[0]
         b_off, a_off = _utf16_offsets(before), _utf16_offsets(after)
         blocks = SequenceMatcher(None, before, after, autojunk=False).get_matching_blocks()
-        for te in (old_text or {}).get("textElements", []):
-            run = te.get("textRun")
-            if not run or not run.get("content", "").strip("\n"):
+        for k, te in enumerate(_objs((old_text or {}).get("textElements"), "text.textElements")):
+            where = f"text.textElements[{k}]"
+            run = _obj(te.get("textRun"), f"{where}.textRun")
+            content = _text(run.get("content"), f"{where}.textRun.content")
+            if not run or not content.strip("\n"):
                 continue
-            style, fields = api_text_style(deck_attributes(snapshot._text_style(run.get("style", {})), base_styles))
+            style, fields = api_text_style(deck_attributes(
+                snapshot._text_style(_obj(run.get("style"), f"{where}.textRun.style")), base_styles))
             if not fields:
                 continue
-            trailing = len(run["content"]) - len(run["content"].rstrip("\n"))  # (paragraph ends keep their style)
-            start, end = bisect_left(b_off, te.get("startIndex", 0)), bisect_left(b_off, te.get("endIndex", 0) - trailing)
+            trailing = len(content) - len(content.rstrip("\n"))  # (paragraph ends keep their style)
+            start = bisect_left(b_off, as_int(te.get("startIndex", 0), f"{where}.startIndex"))
+            end = bisect_left(b_off, as_int(te.get("endIndex", 0), f"{where}.endIndex") - trailing)
             for i, j, n in blocks:
                 lo, hi = max(start, i), min(end, i + n)
                 if hi > lo:
-                    reqs.append({"updateTextStyle": {"objectId": oid, **({"cellLocation": loc} if loc else {}), "textRange": {
+                    reqs.append(text_style_request(oid, loc or None, {
                         "type": "FIXED_RANGE", "startIndex": a_off[j + lo - i], "endIndex": a_off[j + hi - i]},
-                        "style": style, "fields": ",".join(fields)}})
+                        style, ",".join(fields)))
     return reqs
 
 
-def shape_style_requests(oid: str, style: dict) -> list[dict]:
+def shape_style_requests(oid: str, style: JsonMap) -> list[JsonObject]:
     """A shape's fill and outline as the deck has them (snapshot.shape_style)."""
-    props, fields = {}, []
-    fill = style.get("fill") or {}
+    props: JsonObject = {}
+    fields: list[str] = []
+    fill = _obj(style.get("fill"), "shape_style.fill")
     if "color" in fill:
-        props["shapeBackgroundFill"] = {"solidFill": {"color": api_colour(fill["color"]), "alpha": fill.get("alpha", 1.0)}}
+        props["shapeBackgroundFill"] = {"solidFill": {"color": api_colour(as_optional_str(fill["color"], "fill.color")),
+                                                      "alpha": fill.get("alpha", 1.0)}}
         fields += ["shapeBackgroundFill.solidFill.color", "shapeBackgroundFill.solidFill.alpha"]
     elif fill.get("state") == "NOT_RENDERED":
         props["shapeBackgroundFill"] = {"propertyState": "NOT_RENDERED"}
         fields.append("shapeBackgroundFill.propertyState")
-    outline = style.get("outline") or {}
+    outline = _obj(style.get("outline"), "shape_style.outline")
+    outline_fill = _obj(outline.get("fill"), "outline.fill")
     if outline.get("state") == "NOT_RENDERED":
         props["outline"] = {"propertyState": "NOT_RENDERED"}
         fields.append("outline.propertyState")
-    elif outline.get("fill") and "color" in outline["fill"]:
-        props["outline"] = {"outlineFill": {"solidFill": {"color": api_colour(outline["fill"]["color"]),
-                                                          "alpha": outline["fill"].get("alpha", 1.0)}},
-                            "weight": pt(outline.get("weight") or 1.0)}
+    elif outline_fill and "color" in outline_fill:
+        line: JsonObject = {"outlineFill": {"solidFill": {"color": api_colour(as_optional_str(outline_fill["color"], "outline.fill.color")),
+                                                          "alpha": outline_fill.get("alpha", 1.0)}},
+                            "weight": pt(_number(outline.get("weight") or 1.0, "outline.weight"))}
         fields += ["outline.outlineFill.solidFill.color", "outline.outlineFill.solidFill.alpha", "outline.weight"]
         if outline.get("dash"):
-            props["outline"]["dashStyle"] = outline["dash"]
+            line["dashStyle"] = outline["dash"]
             fields.append("outline.dashStyle")
-    return [{"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}}] if fields else []
+        props["outline"] = line
+    if not fields:
+        return []
+    return [google_types.slides_json({"updateShapeProperties": {"objectId": oid, "shapeProperties": props,
+                                                                "fields": ",".join(fields)}})]
 
 
 def box_overlap(a: Sequence[float] | None, b: Sequence[float] | None) -> float:
@@ -1382,20 +1631,34 @@ def box_overlap(a: Sequence[float] | None, b: Sequence[float] | None) -> float:
 HIDDEN = 0.2  # of a text's box: an opaque shape covering more of it hides it (loss_oracle.HIDDEN)
 
 
-def subtree(objects: dict, oid: str) -> list[str]:
+def subtree(objects: JsonMap, oid: str) -> list[str]:
     """`oid` and everything it carries, a group's children included."""
     out: list[str] = []
 
-    def walk(x):
+    def walk(x: str) -> None:
         if x in objects and x not in out:
             out.append(x)
-            for c in objects[x].get("children") or []:
+            for c in _strs(as_object(objects[x], x).get("children"), f"{x}.children"):
                 walk(c)
     walk(oid)
     return out
 
 
-def would_hide(objects: dict, top: str, under: str, spoken_for: set[str] | None = None) -> bool:
+def _opaque_fill(rb: JsonMap, where: str) -> bool:
+    """Is this read-back's shape fill a colour at full alpha?"""
+    fill = _obj(_obj(rb.get("shape_style"), f"{where}.shape_style").get("fill"), f"{where}.shape_style.fill")
+    return fill.get("color") is not None and _number(fill.get("alpha") or 0, f"{where}.fill.alpha") >= 0.999
+
+
+def _covered(t: Sequence[float], s: Sequence[float]) -> bool:
+    """Does box `s` cover more than HIDDEN of box `t`?"""
+    area = (t[2] - t[0]) * (t[3] - t[1])
+    w = min(t[2], s[2]) - max(t[0], s[0])
+    h = min(t[3], s[3]) - max(t[1], s[1])
+    return area > 0 and w > 0 and h > 0 and w * h / area > HIDDEN
+
+
+def would_hide(objects: JsonMap, top: str, under: str, spoken_for: Collection[str] | None) -> bool:
     """Would drawing `top` above `under` put an opaque shape over words somebody can read? The
     question `loss_oracle.occlusion_findings` asks of a finished sync, asked before the write.
 
@@ -1405,42 +1668,39 @@ def would_hide(objects: dict, top: str, under: str, spoken_for: set[str] | None 
     group the person made around one of their own text boxes and one of the converter's. Asking
     whether that element is the source's protected the group and let a created panel cover the
     person's box inside it (converted seed 5200496 at chain 12)."""
-    shapes = [objects[x] for x in subtree(objects, top)
-              if objects[x].get("kind") == "shape" and objects[x].get("box")
-              and ((objects[x].get("shape_style") or {}).get("fill") or {}).get("color") is not None
-              and (((objects[x].get("shape_style") or {}).get("fill") or {}).get("alpha") or 0) >= 0.999]
-    texts = [objects[x] for x in subtree(objects, under)
-             if x not in (spoken_for or ()) and objects[x].get("box")
-             and (objects[x].get("text") or "").strip()]
-    for t in texts:
-        area = (t["box"][2] - t["box"][0]) * (t["box"][3] - t["box"][1])
-        for s in shapes:
-            w = min(t["box"][2], s["box"][2]) - max(t["box"][0], s["box"][0])
-            h = min(t["box"][3], s["box"][3]) - max(t["box"][1], s["box"][1])
-            if area > 0 and w > 0 and h > 0 and w * h / area > HIDDEN:
-                return True
-    return False
+    shapes: list[list[float]] = []
+    for x in subtree(objects, top):
+        rb = as_object(objects[x], x)
+        if rb.get("kind") == "shape" and rb.get("box") and _opaque_fill(rb, x):
+            shapes.append(_nums(rb["box"], f"{x}.box"))
+    texts: list[list[float]] = []
+    for x in subtree(objects, under):
+        rb = as_object(objects[x], x)
+        if x not in (spoken_for or ()) and rb.get("box") and _text(rb.get("text"), f"{x}.text").strip():
+            texts.append(_nums(rb["box"], f"{x}.box"))
+    return any(_covered(t, s) for t in texts for s in shapes)
 
 
-def drawn_order(objects: dict, order: list[str]) -> tuple[list[str], dict[str, str]]:
+def drawn_order(objects: JsonMap, order: Sequence[str]) -> tuple[list[str], dict[str, str]]:
     """Object ids bottom to top, and for each the page element it is drawn inside (itself, when it is
     one): the page's elements in `order`, a group's children where the group stands."""
     out: list[str] = []
     top: dict[str, str] = {}
 
-    def walk(oid, root):
+    def walk(oid: str, root: str) -> None:
         if oid not in objects or oid in top:
             return
         out.append(oid)
         top[oid] = root
-        for c in objects[oid].get("children") or []:
+        for c in _strs(as_object(objects[oid], oid).get("children"), f"{oid}.children"):
             walk(c, root)
     for t in order:
         walk(t, t)
     return out, top
 
 
-def folded_hiders(read: dict, made: set[str], ours: set[str], doomed: set[str] = frozenset()) -> list[tuple[str, str]]:
+def folded_hiders(read: JsonMap, made: Collection[str], ours: Collection[str],
+                  doomed: Collection[str]) -> list[tuple[str, str]]:
     """(text, shape) pairs this sync could not order its way out of, for the report to name.
 
     Z-order is written in two places: the page's element order (`Sync.restack`) and the children of a
@@ -1455,39 +1715,36 @@ def folded_hiders(read: dict, made: set[str], ours: set[str], doomed: set[str] =
     `made` what this sync created, whose containers are its own too. `doomed`: what the cleanup is
     about to delete (`w["doomed"]`) - the order is read before it, and the words of a block the
     source redrew, still under the new block, are going (live scenario nested-group)."""
-    objects = read.get("objects") or {}
-    order, top = drawn_order(objects, read.get("order") or [])
-    out = []
+    objects = _obj(read.get("objects"), "read.objects")
+    order, top = drawn_order(objects, _strs(read.get("order"), "read.order"))
+    out: list[tuple[str, str]] = []
     for i, oid in enumerate(order):
-        rb, stands_in = objects[oid], top[oid]
-        fill = (rb.get("shape_style") or {}).get("fill") or {}
+        rb, stands_in = as_object(objects[oid], oid), top[oid]
         if (oid not in made or stands_in == oid or stands_in in ours or stands_in in made
-                or rb.get("kind") != "shape" or not rb.get("box")
-                or fill.get("color") is None or (fill.get("alpha") or 0) < 0.999):
+                or rb.get("kind") != "shape" or not rb.get("box") or not _opaque_fill(rb, oid)):
             continue
+        shape_box = _nums(rb["box"], f"{oid}.box")
         for under in order[:i]:
-            u = objects[under]
-            if top[under] == stands_in or under in doomed or not u.get("box") or not (u.get("text") or "").strip():
+            u = as_object(objects[under], under)
+            if (top[under] == stands_in or under in doomed or not u.get("box")
+                    or not _text(u.get("text"), f"{under}.text").strip()):
                 continue
-            area = (u["box"][2] - u["box"][0]) * (u["box"][3] - u["box"][1])
-            w = min(u["box"][2], rb["box"][2]) - max(u["box"][0], rb["box"][0])
-            h = min(u["box"][3], rb["box"][3]) - max(u["box"][1], rb["box"][1])
-            if area > 0 and w > 0 and h > 0 and w * h / area > HIDDEN:
+            if _covered(_nums(u["box"], f"{under}.box"), shape_box):
                 out.append((under, oid))
     return out
 
 
-BREAK = {"__b2s_break__": True}  # where a batch may be cut: between slides
+BREAK: JsonObject = {"__b2s_break__": True}  # where a batch may be cut: between slides
 PENDING_URL = "b2s-pending:"     # a picture whose staging URL is still on its way (`Sync.fill_urls`)
 
 
-def batches(reqs: list[dict], size: int = CHUNK) -> list[list[dict]]:
-    """The requests split into batches of at most `size`, cut only where `main_requests` allows it
-    (between slides), so a sync that dies between two batches leaves whole slides behind. One slide
-    with more than `size` requests is the only thing that is ever split."""
+def batches(reqs: Sequence[JsonObject], size: int) -> list[list[JsonObject]]:
+    """The requests split into batches of at most `size` (`CHUNK` in a sync), cut only where
+    `main_requests` allows it (between slides), so a sync that dies between two batches leaves whole
+    slides behind. One slide with more than `size` requests is the only thing that is ever split."""
     size = faults.batch_size(size)
-    blocks: list[list[dict]] = []
-    current: list[dict] = []
+    blocks: list[list[JsonObject]] = []
+    current: list[JsonObject] = []
     for r in reqs:
         if r == BREAK:
             if current:
@@ -1497,7 +1754,7 @@ def batches(reqs: list[dict], size: int = CHUNK) -> list[list[dict]]:
             current.append(r)
     if current:
         blocks.append(current)
-    out: list[list[dict]] = []
+    out: list[list[JsonObject]] = []
     for block in blocks:
         if len(block) > size:
             out += [block[i:i + size] for i in range(0, len(block), size)]
@@ -1508,13 +1765,67 @@ def batches(reqs: list[dict], size: int = CHUNK) -> list[list[dict]]:
     return out
 
 
-def matrix_request(oid: str, m: list[float]) -> dict:
-    return {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
-        "scaleX": m[0], "shearX": m[1], "shearY": m[2], "scaleY": m[3], "unit": "EMU",
-        "translateX": round(m[4] * EMU_PER_PT), "translateY": round(m[5] * EMU_PER_PT)}}}
+def matrix_request(oid: str, m: Sequence[float]) -> JsonObject:
+    return google_types.slides_json({"updatePageElementTransform": {
+        "objectId": oid, "applyMode": "RELATIVE", "transform": {
+            "scaleX": m[0], "shearX": m[1], "shearY": m[2], "scaleY": m[3], "unit": "EMU",
+            "translateX": round(m[4] * EMU_PER_PT), "translateY": round(m[5] * EMU_PER_PT)}}})
 
 
-def carried(base_rb: dict, theirs_rb: dict, new_rb: dict) -> list[float]:
+def _emu(v: float) -> google_types.Dimension:
+    return {"magnitude": round(v * EMU_PER_PT), "unit": "EMU"}
+
+
+def emu_size(w: float, h: float) -> google_types.Size:
+    """A size in slide pt as the API takes it (EMU)."""
+    return {"width": _emu(w), "height": _emu(h)}
+
+
+def emu_size_json(w: float, h: float) -> JsonObject:
+    """`emu_size` as the JSON of a read-back emit plans against."""
+    return {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
+            "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}}
+
+
+def delete_text_request(oid: str, cell: google_types.SlidesTableCellLocation | None) -> JsonObject:
+    """deleteText of all an object's words (`cell`: of that table cell)."""
+    if cell is None:
+        return google_types.slides_json({"deleteText": {"objectId": oid, "textRange": {"type": "ALL"}}})
+    return google_types.slides_json({"deleteText": {"objectId": oid, "cellLocation": cell, "textRange": {"type": "ALL"}}})
+
+
+def named_step(step: JsonMap, oid: str) -> JsonObject:
+    """A `table_steps` request for the table `oid`."""
+    return {k: {**as_object(v, "a table step"), "tableObjectId": oid} for k, v in step.items()}
+
+
+def front_request(oid: str) -> JsonObject:
+    return google_types.slides_json({"updatePageElementsZOrder": {"pageElementObjectIds": [oid],
+                                                                  "operation": "BRING_TO_FRONT"}})
+
+
+def ungroup_request(gid: str) -> JsonObject:
+    return google_types.slides_json({"ungroupObjects": {"objectIds": [gid]}})
+
+
+def page_properties_request(sid: str, fields: str, properties: JsonObject) -> JsonObject:
+    return google_types.slides_json({"updatePageProperties": {"objectId": sid, "fields": fields,
+                                                              "pageProperties": properties}})
+
+
+@dataclass(frozen=True, kw_only=True)
+class Template:
+    """What a template shape (a shadow, exact corners: `emit.template_key`) is duplicated from on a
+    slide sync writes (`Sync.slide_requests`): a live object of that key, or a plain stand-in
+    (`stand_in_request`, `text` ""); `w`, `h` its size (pt), `text` the words a copy brings along
+    and that are then cleared."""
+    id: str
+    w: float
+    h: float
+    text: str
+
+
+def carried(base_rb: JsonMap, theirs_rb: JsonMap, new_rb: JsonMap) -> list[float]:
     """The RELATIVE transform that puts the person's edit of a unit (base -> theirs: a move, a
     resize) onto its recreation `new_rb`, carried along by the source's move of it (base -> new).
 
@@ -1524,34 +1835,40 @@ def carried(base_rb: dict, theirs_rb: dict, new_rb: dict) -> list[float]:
     source's new place plus the person's offset and a resize keeps the person's proportions of the
     source's new box, from its new corner. When the source did not move the unit, `s` is 0 and this
     is `d` itself."""
-    d = snapshot.compose(theirs_rb["transform"], snapshot.invert(base_rb["transform"]))
-    sx, sy = new_rb["box"][0] - base_rb["box"][0], new_rb["box"][1] - base_rb["box"][1]
+    d = snapshot.compose(_nums(theirs_rb["transform"], "theirs.transform"),
+                         snapshot.invert(_nums(base_rb["transform"], "base.transform")))
+    new_box, base_box = _nums(new_rb["box"], "new.box"), _nums(base_rb["box"], "base.box")
+    sx, sy = new_box[0] - base_box[0], new_box[1] - base_box[1]
     return d[:4] + [d[4] + sx - (d[0] * sx + d[1] * sy), d[5] + sy - (d[2] * sx + d[3] * sy)]
 
 
 # ---------------------------------------------------------------- the sync
 
 class Sync:
-    way_back = None   # the recovery note being made meanwhile; None where there is none to collect
+    way_back: "WayBack | None" = None   # the recovery note being made meanwhile; None where there is none to collect
     theme_side: "ThemeSide | None" = None   # theme_sync's part (set in __init__ / plan_theme)
     theme_plan: "ThemeMerge | None" = None
     raw_after: Presentation | None = None
 
-    def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool,
-                 measure: bool, trust_generation: bool, check_plan,
+    def __init__(self, slides: SlidesService, drive: DriveService, pid: str, base: JsonObject, ours: Built, out: Path,
+                 dry_run: bool, measure: bool, trust_generation: bool,
+                 check_plan: "Callable[[merge.MergePlan, JsonObject], None] | None",
                  follow_labels: bool, take_source: Sequence[str], facts: DriveFile | None,
-                 way_back):
+                 way_back: "WayBack | None") -> None:
         # check_plan(mplan, theirs): raises instead of letting the write go ahead. It sits between
         # planning and preparing because that is the last point at which nothing has been sent and
         # the whole of what would be written is known (adopt_sync.problems).
         self.check_plan = check_plan
         self.slides, self.drive, self.pid = slides, drive, pid
-        self.base, self.ours, self.out = base, ours, out
+        self.base, self.out = base, out
+        self.built = ours
+        self.ours: JsonObject = ours_json(ours)   # what the merge reads, and the offline fuzz's replay
+        self.source, self.ours_out = ours.source, ours.out   # the PDF synced, the folder it was rendered into
         self.dry_run, self.measure = dry_run, measure
         self.trust_generation = trust_generation  # may this base's generation decide what is a leftover?
         self.follow_labels = follow_labels        # write to a slide whose label may have moved (merge.hold_slide)
-        self.take_source = tuple(take_source or ())  # conflicts to settle for the source (merge.Resolutions)
-        self.plan = ours["plan"]
+        self.take_source = tuple(take_source)     # conflicts to settle for the source (merge.Resolutions)
+        self.plan: DeckPlan = ours.plan
         self.scale = self.plan.scale
         self.tok = self.token()
         self.sent: dict[str, int] = {}
@@ -1559,21 +1876,21 @@ class Sync:
         self.overruns: list[Json] = []        # warn_about_overruns, for the report
         self.refit_moves: list[Json] = []     # what `refit` moved or grew, for the report
         self.urls: dict[str, str] = {}  # picture file (str) -> contentUrl from the staging deck
-        self.recovery: dict = {}        # what an interrupted earlier sync left (plan_recovery)
+        self.recovery = no_recovery()   # what an interrupted earlier sync left (plan_recovery)
         self.cleanup_ids: list[str] = []      # old objects and slides, deleted after everything else
-        self.cleanup_requests: list[dict] = []
-        self.in_place_readback: dict[str, dict] = {}  # objects rewritten in place, before the write
+        self.cleanup_requests: list[JsonObject] = []
+        self.in_place_readback: JsonObject = {}  # objects rewritten in place, before the write
         self.final_revision: str | None = None
         self.facts = facts              # the deck's Drive facts, read once (snapshot.deck_info)
         self.first_read: Presentation | None = None  # a `presentations.get` a caller made while we planned
-        self.deleting: list = []        # staging decks on their way out (drop_staging)
+        self.deleting: list[Future[None]] = []   # staging decks on their way out (drop_staging)
         self.way_back = way_back        # made meanwhile, collected before the first write (guard.WayBack)
         self.theme_side = None   # what a fresh conversion writes on the master and layouts (theme_sync)
         self.theme_plan = None   # what this sync writes there (None: nothing, an old base)
-        self.theme_applied: list[Json] = []   # theme_sync's part of the report (plan_theme)
-        self.theme_conflicts: list[Json] = []
+        self.theme_applied: list[JsonObject] = []   # theme_sync's part of the report (plan_theme)
+        self.theme_conflicts: list[JsonObject] = []
         self.raw_after = None    # the deck as `finish` last read it
-        self.created: dict = {}   # the deck as read after the write (`finish`), or as planned against
+        self.created: JsonObject = {}   # the deck as read after the write (`finish`), or as planned against
         self.staging: str | None = None       # the staging deck of this attempt, until it is dropped
         self.picture_reads: dict[str, int] = {}   # live pictures in question, and read (merge_plan)
         self.live_read: tuple[tuple[object, ...], LivePictures] | None = None   # (live_pictures)
@@ -1591,10 +1908,12 @@ class Sync:
     def token(self) -> str:
         """The two letters that make this sync's object ids unique. Never the token of a sync that
         was interrupted (its objects may still be in the deck, and an id can only exist once)."""
-        used = {(self.base.get("pending") or {}).get("token")}
+        used = _obj(self.base.get("pending"), "base.pending").get("token")
+        generation = base_generation(self.base) + 1
+        tok = ""
         for _ in range(20):
-            tok = f"{self.base.get('generation', 0) + 1}{''.join(random.choices(string.ascii_lowercase, k=2))}"
-            if tok not in used:
+            tok = f"{generation}{''.join(random.choices(string.ascii_lowercase, k=2))}"
+            if tok != used:
                 return tok
         return tok
 
@@ -1609,12 +1928,16 @@ class Sync:
             return pres
         return execute(self.slides.presentations().get(presentationId=self.pid))
 
-    def revision(self, slides=None) -> str:
-        """`slides`: the client to ask with, where this runs on a thread of its own (`in_background`)."""
-        return execute((slides or self.slides).presentations().get(
-            presentationId=self.pid, fields="revisionId"))["revisionId"]
+    def revision(self, slides: SlidesService | None) -> str:
+        """`slides`: the client to ask with, where this runs on a thread of its own (`in_background`);
+        None: this sync's own."""
+        answer = execute((slides or self.slides).presentations().get(presentationId=self.pid, fields="revisionId"))
+        rev = answer.get("revisionId")
+        if rev is None:
+            raise KeyError("revisionId")   # (as a read of the key did: `asked_revision` asks again)
+        return rev
 
-    def asked_revision(self, asking) -> str:
+    def asked_revision(self, asking: "Future[str] | None") -> str:
         """The revision a worker went to fetch, or one fetched here: a question that failed on the
         thread is asked again rather than carried into the write, where an empty
         `requiredRevisionId` would mean "whatever the deck says now"."""
@@ -1623,38 +1946,44 @@ class Sync:
                 return asking.result()
             except (HttpError, OSError, KeyError):
                 pass
-        return self.revision()
+        return self.revision(None)
 
-    def send(self, phase: str, reqs: list[dict], rev: str | None) -> str:
+    def send(self, phase: str, reqs: list[JsonObject], rev: str | None) -> str:
         """Batches with requiredRevisionId, chained through the revisions they return. A batch is
         cut at a slide boundary where it can (`batches`), so a run that dies between two batches
         leaves whole slides written, never half of one."""
         self.before_write()
         self.fill_urls(reqs)   # nothing goes out carrying a marker, whoever built it (`picture_url`)
-        for n, chunk in enumerate(batches(reqs)):
-            for attempt in range(len(FETCH_RETRY) + 1):
-                try:
-                    body = {"requests": chunk}
-                    if rev:
-                        body["writeControl"] = {"requiredRevisionId": rev}
-                    res = execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body=body))
-                    break
-                except HttpError as e:
-                    from .emit import api_error
-                    message = api_error(e)
-                    if status_of(e) == 400 and "revision" in message.lower() and n == 0:
-                        raise RevisionMismatch(message) from e
-                    if status_of(e) == 400 and PICTURE_FETCH in message and attempt < len(FETCH_RETRY):
-                        # Google could not fetch a staged picture this time (live fuzz seed 2603: the
-                        # same sync run again went through). A refused batch applied nothing - a
-                        # batchUpdate is all or nothing - so the same batch is sent again.
-                        time.sleep(FETCH_RETRY[attempt])
-                        continue
-                    raise RuntimeError(f"sync {phase}: batch refused ({message})") from e
-            rev = res.get("writeControl", {}).get("requiredRevisionId") or self.revision()
+        for n, chunk in enumerate(batches(reqs, CHUNK)):
+            control = self.send_batch(phase, chunk, rev, n == 0).get("writeControl")
+            rev = (control.get("requiredRevisionId") if control is not None else None) or self.revision(None)
             self.sent[phase] = self.sent.get(phase, 0) + len(chunk)
             faults.fail_at(phase)
-        return rev or self.revision()
+        return rev or self.revision(None)
+
+    def send_batch(self, phase: str, chunk: list[JsonObject], rev: str | None, first: bool
+                   ) -> google_types.BatchUpdateResponse:
+        """One batch of `send`, sent again while Google could not fetch a staged picture."""
+        attempt = 0
+        while True:
+            try:
+                body: google_types.BatchUpdateBody = {"requests": chunk}
+                if rev:
+                    body["writeControl"] = {"requiredRevisionId": rev}
+                return execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body=body))
+            except HttpError as e:
+                from .emit import api_error
+                message = api_error(e)
+                if status_of(e) == 400 and "revision" in message.lower() and first:
+                    raise RevisionMismatch(message) from e
+                if status_of(e) == 400 and PICTURE_FETCH in message and attempt < len(FETCH_RETRY):
+                    # Google could not fetch a staged picture this time (live fuzz seed 2603: the
+                    # same sync run again went through). A refused batch applied nothing - a
+                    # batchUpdate is all or nothing - so the same batch is sent again.
+                    time.sleep(FETCH_RETRY[attempt])
+                    attempt += 1
+                    continue
+                raise RuntimeError(f"sync {phase}: batch refused ({message})") from e
 
     # ---- planning
 
@@ -1663,33 +1992,34 @@ class Sync:
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
             pres: Presentation = self.read()
-            leftovers =[object_id(s) for s in pres.get("slides", []) if SCRATCH.fullmatch(object_id(s))]
+            leftovers = [object_id(s) for s in pres.get("slides", []) if SCRATCH.fullmatch(object_id(s))]
             if leftovers and not self.dry_run:  # measure_places' scratch slides of an interrupted run
                 self.delete_scratch(leftovers)
                 pres = self.read()
-            pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(object_id(s))]}
+            pres = without_scratch(pres)
             if attempt == 1 and not snapshot.base_matches(self.base, snapshot.read_presentation(pres)):
                 raise BaseMismatch(
-                    f"the sync base (generation {self.base.get('generation', 0)}) describes none of the slides in "
+                    f"the sync base (generation {base_generation(self.base)}) describes none of the slides in "
                     f"presentation {self.pid}: it belongs to another copy of this deck, or the deck was rebuilt "
                     f"outside sync. Syncing would report every element as deleted. Convert the PDF again "
                     f"(python -m beamer2slides convert) to start a new base, or point --deck at the right deck.")
             pres = self.recover(pres, attempt)
             theirs = snapshot.read_presentation(pres)
-            if self.recovery.get("restore"):
-                restore_in_place(theirs, self.recovery["restore"])
+            if self.recovery.restore:
+                restore_in_place(theirs, self.recovery.restore)
             mplan = self.merge_plan(theirs, pres)
             if self.check_plan is not None:
                 self.check_plan(mplan, theirs)  # (adopt_sync: an adopted deck this may not be written to)
             self.plan_theme(mplan, pres)
             work = self.prepare(mplan, pres, theirs)
+            revision_read = as_optional_str(theirs["revisionId"], "theirs.revisionId")
             if self.dry_run or not work.writes:
-                self.created, self.final_revision = theirs, theirs["revisionId"]  # (a base that only adopts deck fields)
+                self.created, self.final_revision = theirs, revision_read  # (a base that only adopts deck fields)
                 return RunResult(attempts=attempt, plan=mplan, work=work, theirs=theirs, revision_id=None)
             hook = os.environ.pop("B2S_SYNC_BEFORE_WRITE", None)  # (tests: someone edits the deck now)
             if hook:
                 subprocess.run(hook, shell=True, check=False)
-            if self.revision() != theirs["revisionId"]:
+            if self.revision(None) != revision_read:
                 continue  # edited while we planned: plan again
             faults.fail_at("plan")
             # The staging deck and the scratch slides are two things Google can do at once: the
@@ -1697,9 +2027,11 @@ class Sync:
             # looks at, and neither reads what the other writes. The worker builds clients of its
             # own, since a service object is one connection - unless a caller lent us one, which
             # is that caller's and is used on this thread alone (`emit.measure_places`' rule).
-            staging, scratch = None, []               # noted in the pending marker: a run that
-            staged = self.stage_in_background(work)   # dies leaves it for the next one to delete
-            asking, pending = None, None
+            staging: str | None = None                # noted in the pending marker: a run that
+            scratch: list[str] = []                   # dies leaves it for the next one to delete
+            staged = self.stage_in_background(work)
+            asking: Future[str] | None = None
+            pending: Future[None] | None = None
             try:
                 if staged is None:
                     self.staging = staging = self.stage(work, None, None)
@@ -1758,33 +2090,34 @@ class Sync:
         merge to re-apply. The deletions are the first thing this sync writes, and they only ever
         remove an object the deck holds a second time."""
         read = snapshot.read_presentation(pres)
-        rec = plan_recovery(self.base, read, [s["key"] for s in self.ours["slides"]],
+        rec = plan_recovery(self.base, read, [as_str(s["key"], "ours slide key") for s in _slides(self.ours, "ours")],
                             self.trust_generation)
         self.recovery = rec
         # A run that died left its staging deck in Drive. Its id is in `pending.staging` so a person
         # can find it; sync doesn't delete it, because an id read from a file could name anything -
         # only the file this process just created is ever deleted (tests/test_guard.py).
-        if rec["heal"]:
-            same = (self.base.get("pending") or {}).get("source", {}).get("sha1") == \
-                snapshot.source_info(self.ours["source"]).get("sha1")
-            healed = heal_base(self.base, rec["heal"], read, same)
+        if rec.heal:
+            pending_source = _obj(_obj(self.base.get("pending"), "base.pending").get("source"), "base.pending.source")
+            same = pending_source.get("sha1") == snapshot.source_info(self.source).get("sha1")
+            healed = heal_base(self.base, rec.heal, read, same)
             if healed and attempt == 1:
                 self.warnings.append(f"an earlier sync was interrupted after it had replaced {len(healed)} element(s) "
                                      f"({', '.join(healed[:3])}{'...' if len(healed) > 3 else ''}): the deck's objects "
                                      f"were taken over" + ("" if same else " and are written over from the source"))
-        if rec["sweep"] or rec["sweep_slides"]:
+        if rec.sweep or rec.sweep_slides:
             if self.dry_run:
-                self.warnings.append(f"an earlier sync left {len(rec['sweep'])} object(s) and "
-                                     f"{len(rec['sweep_slides'])} slide(s) behind; a real sync would delete them")
+                self.warnings.append(f"an earlier sync left {len(rec.sweep)} object(s) and "
+                                     f"{len(rec.sweep_slides)} slide(s) behind; a real sync would delete them")
             else:
-                gone = self.delete_leftovers(rec["sweep"] + rec["sweep_slides"])
+                gone = self.delete_leftovers(rec.sweep + rec.sweep_slides)
                 if gone and attempt == 1:
                     self.warnings.append(f"deleted {len(gone)} leftover object(s)/slide(s) of an interrupted sync")
                 # Only what is really gone may be planned away: anything still in the deck has to
                 # stay in the picture, or the merge would create it a second time.
-                rec["sweep"] = [oid for oid in rec["sweep"] if oid in gone]
-                rec["sweep_slides"] = [sid for sid in rec["sweep_slides"] if sid in gone]
-            pres = drop_objects(pres, rec["sweep"], rec["sweep_slides"])
+                rec = replace(rec, sweep=[oid for oid in rec.sweep if oid in gone],
+                              sweep_slides=[sid for sid in rec.sweep_slides if sid in gone])
+                self.recovery = rec
+            pres = drop_objects(pres, rec.sweep, rec.sweep_slides)
         return pres
 
     def delete_leftovers(self, ids: list[str]) -> set[str]:
@@ -1794,16 +2127,16 @@ class Sync:
         if not ids:
             return set()
         self.before_write()
-        reqs = [{"deleteObject": {"objectId": oid}} for oid in ids]
+        reqs = [delete_request(oid) for oid in ids]
         try:
             execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body={"requests": reqs}))
             return set(ids)
         except HttpError as first:
-            gone = set()
+            gone: set[str] = set()
             for oid in ids:
                 try:
                     execute(self.slides.presentations().batchUpdate(
-                        presentationId=self.pid, body={"requests": [{"deleteObject": {"objectId": oid}}]}))
+                        presentationId=self.pid, body={"requests": [delete_request(oid)]}))
                 except HttpError as e:
                     if "could not be found" not in str(e):
                         continue  # still in the deck: the merge has to keep seeing it
@@ -1813,7 +2146,7 @@ class Sync:
                                      f"interrupted sync: {first}")
             return gone
 
-    def pending_in_background(self, work: Work, theirs: dict):
+    def pending_in_background(self, work: Work, theirs: JsonObject) -> "Future[None] | None":
         """`mark_pending` on a thread while the staging deck is still being imported, or None where
         it has to be run here (`in_background`).
 
@@ -1830,18 +2163,19 @@ class Sync:
         self.pending_block(work, theirs)
         return self.in_background(lambda slides, drive: self.store_pending(drive), "b2s-pend")
 
-    def mark_pending(self, work: Work, theirs: dict) -> None:
+    def mark_pending(self, work: Work, theirs: JsonObject) -> None:
         """The marker built and stored here and now (`pending_in_background` is the other order)."""
         self.pending_block(work, theirs)
         self.store_pending(self.drive)
 
-    def pending_block(self, work: Work, theirs: dict) -> None:
+    def pending_block(self, work: Work, theirs: JsonObject) -> None:
         """The base's `pending` block before the first write: the generation and token of
         this run, the objects it is about to create and the read-back of the objects it rewrites in
         place. The base itself is unchanged, so a run that dies leaves a valid base of the old
         generation plus a note of what it started. Only a run that gets to the end removes it."""
-        objects: dict[str, list[str]] = {}
+        objects: JsonObject = {}
         slides: list[str] = []
+        ours_slides = _slides(self.ours, "ours")
         for w in work.slides:
             p = w.plan
             match p:
@@ -1854,22 +2188,25 @@ class Sync:
                     continue  # (nothing is made on it)
                 case _:
                     assert_never(p)
-            o = self.ours["slides"][p.ours]
+            o = ours_slides[p.ours]
+            okey = as_str(o["key"], "ours slide key")
+            elements = as_objects(o["elements"], f"ours slide {okey}: elements")
             for i, oids in w.objects.items():
-                objects[f"{o['key']}/{o['elements'][i]['key']}"] = list(oids)
+                objects[f"{okey}/{as_str(elements[i]['key'], 'element key')}"] = _json_strs(oids)
             if w.groups:
-                objects[f"{o['key']}/~groups"] = list(w.groups)
-        self.base["pending"] = {
-            "generation": self.base.get("generation", 0) + 1, "token": self.tok,
+                objects[f"{okey}/~groups"] = _json_strs(w.groups)
+        pending: JsonObject = {
+            "generation": base_generation(self.base) + 1, "token": self.tok,
             "revisionId": theirs.get("revisionId"), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
-            "source": snapshot.source_info(self.ours["source"]), "objects": objects, "slides": slides,
+            "source": snapshot.source_info(self.source), "objects": objects, "slides": _json_strs(slides),
             "in_place": self.in_place_readback, "staging": self.staging}
         if self.theme_plan is not None and self.theme_plan.pending:
             # the layout placeholder styles about to be written: a run that dies after them finds
             # its own writes there next time, not a person's (theme_sync.plan)
-            self.base["pending"]["theme"] = self.theme_plan.pending
+            pending["theme"] = self.theme_plan.pending
+        self.base["pending"] = pending
 
-    def store_pending(self, drive) -> None:
+    def store_pending(self, drive: DriveService | None) -> None:
         """The marker to disk and to Drive. `staging` is whatever this run knows of its staging deck
         when the marker goes up, which where the two are made at once is nothing: it is a note for a
         person and nothing reads it, the staging deck naming itself in Drive
@@ -1890,7 +2227,7 @@ class Sync:
         except RevisionMismatch:  # someone edited the deck meanwhile; the objects are stale either way
             return self.send("cleanup", self.cleanup_requests, None)
 
-    def sign_changed(self, theirs: dict, pres: Presentation) -> tuple[set[str], set[str]]:
+    def sign_changed(self, theirs: JsonObject, pres: Presentation) -> tuple[set[str], set[str]]:
         """The live pictures whose contentUrl differs from the base's, marked `unchecked` and not
         yet signed: (image ids, slide ids of background pictures).
 
@@ -1902,18 +2239,30 @@ class Sync:
         (`pictures_in_question`), then plans again. An unchecked picture still counts as replaced
         - the answer that never loses one - but is not reported as the person's edit
         (`merge.pictures_unchecked`)."""
-        images = {oid: rb["image"] for s in self.base["slides"] for e in s["elements"]
-                  for oid, rb in e.get("readback", {}).items() if "image" in rb}
-        backgrounds = {s.get("objectId"): s.get("background_readback") or {} for s in self.base["slides"]}
-        objects, slides = set(), set()
-        for s in theirs["slides"]:
-            for oid, rb in s["objects"].items():
-                if "image" in rb and oid in images and images[oid].get("contentHash") != rb["image"].get("contentHash"):
-                    objects.add(oid)
-                    rb["image"]["unchecked"] = True
-            bg, old = s.get("background") or {}, backgrounds.get(s["objectId"], {})
+        images: dict[str, JsonObject] = {}
+        backgrounds: dict[str | None, JsonObject] = {}
+        for s in _slides(self.base, "base"):
+            for e in as_objects(s["elements"], "base slide elements"):
+                for oid, rb in _obj(e.get("readback"), "element readback").items():
+                    rbo = as_object(rb, f"read-back {oid}")
+                    if "image" in rbo:
+                        images[oid] = as_object(rbo["image"], f"read-back {oid}: image")
+            backgrounds[as_optional_str(s.get("objectId"), "base slide objectId")] = \
+                _obj(s.get("background_readback"), "base slide background_readback")
+        objects: set[str] = set()
+        slides: set[str] = set()
+        for s in _slides(theirs, "theirs"):
+            sid = as_str(s["objectId"], "theirs slide objectId")
+            for oid, rb in _objects(s, f"theirs slide {sid}").items():
+                rbo = as_object(rb, f"read-back {oid}")
+                if "image" in rbo and oid in images:
+                    image = as_object(rbo["image"], f"read-back {oid}: image")
+                    if images[oid].get("contentHash") != image.get("contentHash"):
+                        objects.add(oid)
+                        image["unchecked"] = True
+            bg, old = _obj(s.get("background"), f"theirs slide {sid}: background"), backgrounds.get(sid, {})
             if "picture" in bg and "picture" in old and old["picture"] != bg["picture"]:
-                slides.add(s["objectId"])
+                slides.add(sid)
                 bg["unchecked"] = True
         return objects, slides
 
@@ -1927,18 +2276,21 @@ class Sync:
         the person replaced it."""
         ask_objects: set[str] = set()
         ask_slides: set[str] = set()
+        base_slides = _slides(self.base, "base")
         for p in mplan.slides:
             match p:
                 case merge.CreateSlide() | merge.HoldSlide():
                     continue
                 case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide():
-                    b = self.base["slides"][p.base]
-                    ask_objects |= {oid for e in b["elements"] for oid in (e.get("objects") or []) if oid in objects}
-                    if b.get("objectId") in slides:
-                        ask_slides.add(b["objectId"])
+                    b = base_slides[p.base]
+                    ask_objects |= {oid for e in as_objects(b["elements"], "base slide elements")
+                                    for oid in _strs(e.get("objects"), "element objects") if oid in objects}
+                    bid = as_optional_str(b.get("objectId"), "base slide objectId")
+                    if bid is not None and bid in slides:
+                        ask_slides.add(bid)
                 case merge.UpdateSlide():
-                    b = self.base["slides"][p.base]
-                    bunits = merge.units(b["elements"])
+                    b = base_slides[p.base]
+                    bunits = merge.units(as_objects(b["elements"], "base slide elements"))
                     for u in p.units:
                         match u.decision:
                             case merge.KeptJoined():
@@ -1951,16 +2303,17 @@ class Sync:
                                 pass
                             case _:
                                 assert_never(u.decision)
-                        ask_objects |= {oid for m in bunits.get(u.key) or [] for oid in (m.get("objects") or [])
-                                        if oid in objects}
-                    o = self.ours["slides"][p.ours]
-                    if b.get("objectId") in slides and b.get("background") != o.get("background"):
-                        ask_slides.add(b["objectId"])
+                        ask_objects |= {oid for m in bunits.get(u.key) or []
+                                        for oid in _strs(m.get("objects"), "element objects") if oid in objects}
+                    o = _slides(self.ours, "ours")[p.ours]
+                    bid = as_optional_str(b.get("objectId"), "base slide objectId")
+                    if bid is not None and bid in slides and b.get("background") != o.get("background"):
+                        ask_slides.add(bid)
                 case _:
                     assert_never(p)
         return ask_objects, ask_slides
 
-    def merge_plan(self, theirs: dict, pres: Presentation) -> merge.MergePlan:
+    def merge_plan(self, theirs: JsonObject, pres: Presentation) -> merge.MergePlan:
         """The merge plan, with the pictures it depends on signed (`sign_changed`). (`self.plan`
         is the new conversion's DeckPlan.)"""
         objects, slides = self.sign_changed(theirs, pres)
@@ -1970,7 +2323,8 @@ class Sync:
             return merge.plan_merge_of(parse_base(self.base), merge.ours_of(self.ours), deck_read(theirs), adopter,
                                        self.follow_labels, merge.Resolutions(self.take_source))
         mplan = plan()
-        asked_objects, asked_slides = set(), set()
+        asked_objects: set[str] = set()
+        asked_slides: set[str] = set()
         for _ in range(3):   # (signing can only settle a slide, never put a new one in question)
             ask_objects, ask_slides = self.pictures_in_question(mplan, objects, slides)
             ask_objects, ask_slides = ask_objects - asked_objects, ask_slides - asked_slides
@@ -1988,7 +2342,7 @@ class Sync:
         """The pictures of this read of the deck (`deck_pictures.LivePictures`): one per read, so a
         Drive export is made at most once for it."""
         from .google_auth import fetcher_for_threads
-        key = (pres.get("presentationId"), pres.get("revisionId"), id(pres))
+        key: tuple[object, ...] = (pres.get("presentationId"), pres.get("revisionId"), id(pres))
         if self.live_read is None or self.live_read[0] != key:
             self.live_read = (key, LivePictures(pres, self.drive, fetcher_for_threads(),
                                                 PICTURE_WORKERS, None, self.slides))
@@ -2009,15 +2363,18 @@ class Sync:
 
         images, _ = snapshot.picture_urls(pres)
         pictures = self.live_pictures(pres)
-        base_ids ={oid for s in self.base["slides"] for e in s["elements"] for oid in (e.get("objects") or [])}
+        base_ids = {oid for s in _slides(self.base, "base") for e in as_objects(s["elements"], "base slide elements")
+                    for oid in _strs(e.get("objects"), "element objects")}
         scale = self.scale or merge.deck_scale(self.base) or 1.0
-        folder = self.ours["out"] / "deck-pictures"
-        deck, mine, taken = {}, {}, set()
+        folder = self.ours_out / "deck-pictures"
+        deck: dict[str, PictureFingerprints | None] = {}
+        mine: dict[Path, PictureFingerprints | None] = {}
+        taken: set[str] = set()
 
-        def fingerprints(path: Path):
+        def fingerprints(path: Path) -> "PictureFingerprints":
             return identity.sha1(path.read_bytes()), picture_look(path), picture_hash(path)
 
-        def deck_picture(oid: str):
+        def deck_picture(oid: str) -> "PictureFingerprints | None":
             """(sha1, look, thumbnail) of a live picture, downloaded once."""
             if oid not in deck:
                 deck[oid] = None
@@ -2029,12 +2386,12 @@ class Sync:
                     deck[oid] = fingerprints(path)
             return deck[oid]
 
-        def our_picture(path: Path):
+        def our_picture(path: Path) -> "PictureFingerprints | None":
             if path not in mine:
                 mine[path] = fingerprints(path) if path.exists() else None
             return mine[path]
 
-        def same(ours, oid: str) -> bool:
+        def same(ours: "PictureFingerprints", oid: str) -> bool:
             got = deck_picture(oid)
             if not got:
                 return False
@@ -2052,7 +2409,7 @@ class Sync:
             file = (el.ir or {}).get("file")
             if not file or not isinstance(file, str):
                 return None
-            ours = our_picture(self.ours["out"] / file)
+            ours = our_picture(self.ours_out / file)
             if ours is None or ours[1] is None:
                 return None
             if oid is not None:  # the deck replaced this element's own picture
@@ -2084,10 +2441,11 @@ class Sync:
         from .adopt_sync import ORIGIN
 
         self.theme_plan = None
-        self.theme_applied, self.theme_conflicts = [], []
+        self.theme_applied = []
+        self.theme_conflicts = []
         if self.base.get("origin") == ORIGIN:
             return
-        ours = theme_sync.theme_ours(self.ours)
+        ours = theme_ours_of(self.built)
         if self.theme_side is None:
             self.theme_side = theme_sync.ours_side(ours)
         report = mplan.report
@@ -2099,16 +2457,9 @@ class Sync:
         tp = theme_sync.plan(self.base, self.theme_side, ours, pres, self.tok, self.picture_url,
                              lambda page: f"b2s_th_{h6(page)}_{self.tok}", self.live_pictures(pres))
         self.theme_plan = tp
-        self.theme_applied = [a for a in tp.applied]
-        self.theme_conflicts = [c for c in tp.conflicts]
+        self.theme_applied = list(tp.applied)
+        self.theme_conflicts = list(tp.conflicts)
         report.warnings += tp.warnings
-
-    def report_of(self, mplan: merge.MergePlan) -> JsonObject:
-        """The merge's report as the sync report starts from it: the slides' part, then the theme's."""
-        report = merge.report_json(mplan.report)
-        report["applied"] = [*as_array(report["applied"], "report.applied"), *self.theme_applied]
-        report["conflicts"] = [*as_array(report["conflicts"], "report.conflicts"), *self.theme_conflicts]
-        return report
 
     def master_key(self) -> str | None:
         """The background a slide shows by inheriting the master: the new source's shared one once
@@ -2116,12 +2467,13 @@ class Sync:
         slide inheriting it shows either way), else what convert put there."""
         if self.base.get("theme") and self.theme_side is not None:
             return self.theme_side.shared
-        return self.base.get("master_background")
+        return as_optional_str(self.base.get("master_background"), "base.master_background")
 
-    def prepare(self, mplan: merge.MergePlan, pres: Presentation, theirs: dict) -> Work:
+    def prepare(self, mplan: merge.MergePlan, pres: Presentation, theirs: JsonObject) -> Work:
         """What to write, per slide: units to (re)create with their requests' inputs, deletions,
         moves, backgrounds, notes; pictures needed from the staging deck."""
-        ours_slides = self.plan.deck["slides"]
+        ours_slides = self.plan.slides()
+        pages = [as_int(s["page"], "slide.page") for s in ours_slides]
         new_ids: dict[str, str] = {p.key: f"b2s_{h6(p.key)}_{self.tok}" for p in mplan.slides
                                    if isinstance(p, merge.CreateSlide)}
         # Internal links: PDF page -> live slide (existing, or created now).
@@ -2129,9 +2481,9 @@ class Sync:
         for p in mplan.slides:
             match p:
                 case merge.CreateSlide():
-                    kept.append((ours_slides[p.ours]["page"], new_ids[p.key]))
+                    kept.append((pages[p.ours], new_ids[p.key]))
                 case merge.UpdateSlide() | merge.HoldSlide():
-                    kept.append((ours_slides[p.ours]["page"], p.object_id))
+                    kept.append((pages[p.ours], p.object_id))
                 case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide():
                     pass
                 case _:
@@ -2144,17 +2496,19 @@ class Sync:
         self.plan.page_slide = page_slide
         master = self.master_key()
         pictures: dict[str, str | None] = {}
-        writes = has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+        writes = merge.has_writes_of(mplan, [as_str(s["objectId"], "theirs slide objectId") for s in _slides(theirs, "theirs")])
         if self.theme_plan is not None:
             pictures.update(self.theme_plan.stage)
             writes = writes or bool(self.theme_plan.requests or self.theme_plan.cleanup)
+        entries = _slides(self.ours, "ours")
         slides: list[SlideWork] = []
         for p in mplan.slides:
             match p:
                 case merge.CreateSlide():
-                    w = SlideWork(p, new_ids[p.key], list(range(len(ours_slides[p.ours]["elements"]))))
+                    w = SlideWork(p, new_ids[p.key], list(range(len(as_array(ours_slides[p.ours]["elements"], "elements")))))
                 case merge.UpdateSlide():
-                    index = {e["key"]: k for k, e in enumerate(self.ours["slides"][p.ours]["elements"])}
+                    index = {as_str(e["key"], "element key"): k
+                             for k, e in enumerate(as_objects(entries[p.ours]["elements"], "ours slide elements"))}
                     w = SlideWork(p, p.object_id, [index[k] for u in p.units if written(u.decision) for k in u.ours_members])
                 case merge.HoldSlide():
                     w = SlideWork(p, p.object_id, [])
@@ -2164,20 +2518,20 @@ class Sync:
                     assert_never(p)
             j = ours_index(p)
             if w.units and j is not None:
-                slide = ours_slides[j]
+                elements = as_objects(ours_slides[j]["elements"], "elements")
                 for i in w.units:
-                    if slide["elements"][i]["kind"] == "image":
-                        pictures[str(self.ours["out"] / slide["elements"][i]["file"])] = None
+                    if elements[i]["kind"] == "image":
+                        pictures[str(self.ours_out / as_str(elements[i]["file"], "image file"))] = None
             background = self.background_written(p)
             if background.startswith("png:") and background != master and j is not None:
-                pictures[str(self.ours["out"] / ours_slides[j]["background"])] = "background"
+                pictures[str(self.ours_out / as_str(ours_slides[j]["background"], "slide background"))] = "background"
             slides.append(w)
         order = [new_ids.get(x[4:], x) if x.startswith("new:") else x for x in mplan.order]
         return Work(slides=slides, pictures=pictures, new_ids=new_ids, page_slide=page_slide, writes=writes, order=order)
 
     # ---- pictures
 
-    def in_background(self, fn, name: str = "b2s-work"):
+    def in_background(self, fn: "Callable[[SlidesService, DriveService], T]", name: str) -> "Future[T] | None":
         """`fn(slides, drive)` on a thread of its own with clients of its own, or None where it has
         to be run here: a client a caller lent us is that caller's and this thread is about to use
         it (`emit.measure_places`' rule). The pool is left to the interpreter; every future this
@@ -2193,7 +2547,7 @@ class Sync:
         finally:
             pool.shutdown(wait=False)
 
-    def picture_url(self, path) -> str:
+    def picture_url(self, path: str | Path) -> str:
         """The staging deck's URL for a picture, or a marker `fill_urls` replaces before the batch
         goes out.
 
@@ -2203,11 +2557,11 @@ class Sync:
         is about to create - does not wait for Drive at all."""
         return self.urls.get(str(path)) or f"{PENDING_URL}{path}"
 
-    def fill_urls(self, reqs: list[dict]) -> None:
+    def fill_urls(self, reqs: list[JsonObject]) -> None:
         """Put the staging deck's URLs into the requests built before it existed. A picture the
         staging deck did not bring fails here, loudly, rather than as a batch Google refuses:
         nothing goes out carrying a marker."""
-        def fill(node):
+        def fill(node: Json) -> Json:
             if isinstance(node, dict):
                 for k, v in node.items():
                     node[k] = self.urls[v[len(PENDING_URL):]] \
@@ -2216,9 +2570,10 @@ class Sync:
                 node[:] = [fill(v) for v in node]
             return node
 
-        fill(reqs)   # every marker, wherever it sits: a picture's URL and a slide background's
+        for r in reqs:   # every marker, wherever it sits: a picture's URL and a slide background's
+            fill(r)
 
-    def stage_in_background(self, work: Work):
+    def stage_in_background(self, work: Work) -> "Future[str | None] | None":
         """`stage` on a thread of its own, or None where there is nothing to stage or it has to be
         run here (`in_background`)."""
         if not [f for f in work.pictures if f not in self.urls]:
@@ -2232,9 +2587,9 @@ class Sync:
         interpreter: a file nobody deletes is one somebody finds in their Drive."""
         self.urls.clear()
         self.staging = None
-        fut = self.in_background(lambda slides, drive: execute(drive.files().delete(fileId=fid)), "b2s-drop")
+        fut = self.in_background(lambda slides, drive: delete_file(drive, fid), "b2s-drop")
         if fut is None:
-            execute(self.drive.files().delete(fileId=fid))
+            delete_file(self.drive, fid)
         else:
             self.deleting.append(fut)
 
@@ -2246,7 +2601,7 @@ class Sync:
                 fut.result()
         self.deleting = []
 
-    def stage(self, work: Work, drive, slides) -> str | None:
+    def stage(self, work: Work, drive: DriveService | None, slides: SlidesService | None) -> str | None:
         """Pictures go through a staging deck imported from a .pptx; its images' contentUrls are
         then used in the live deck. Returns the staging file's id: delete it once the live deck
         has the pictures (the URLs stop working with it).
@@ -2261,7 +2616,7 @@ class Sync:
         needed = [f for f in work.pictures if f not in self.urls]
         if not needed:
             return None
-        page_w, page_h = self.plan.deck["slides"][0]["size"]
+        page_w, page_h = _nums(self.plan.slides()[0]["size"], "slide size")
         pages: list[dict[str, object]] = []
         pictures = [f for f in needed if work.pictures[f] != "background"]
         backgrounds = [f for f in needed if work.pictures[f] == "background"]
@@ -2271,26 +2626,28 @@ class Sync:
                 for n, f in enumerate(pictures[k:k + 40])]})
         for f in backgrounds:
             pages.append({"layout": "BLANK", "fill": {"picture": Path(f)}, "templates": False, "pictures": []})
-        pptx = build_pptx(page_w, page_h, [], pages, {"color": "#ffffff"})
+        pptx = build_pptx(page_w, page_h, [], pages, {"color": "#ffffff"}, None)
         # The marker outlives a killed sync: nothing deletes a staging deck from a file's word, so
         # `tools/drive_usage.py` needs to be able to say which files are certainly leftovers.
         from .drive_folder import place
-        fid = execute(drive.files().create(body=place({"name": "beamer2slides sync staging (temporary)",
-                                                       "mimeType": "application/vnd.google-apps.presentation",
-                                                       "appProperties": {"b2sStaging": self.pid}}, drive),
-                                           media_body=media_upload(pptx, PPTX_MIME), fields="id"))["id"]
+        fid = google_types.file_id(execute(drive.files().create(
+            body=place({"name": "beamer2slides sync staging (temporary)",
+                        "mimeType": "application/vnd.google-apps.presentation",
+                        "appProperties": {"b2sStaging": self.pid}}, drive),
+            media_body=media_upload(pptx, PPTX_MIME), fields="id")), "the staging deck")
         try:
             staged = execute(slides.presentations().get(presentationId=fid))
             made = staged.get("slides", [])
             for s in made[:len(pages) - len(backgrounds)]:
                 for e in s.get("pageElements", []):
                     d = e.get("description") or ""
-                    if "image" in e and d.startswith("b2s-stage:"):
-                        self.urls[pictures[int(d[10:])]] = e["image"]["contentUrl"]
+                    url = google_types.image_url(e)
+                    if url is not None and d.startswith("b2s-stage:"):
+                        self.urls[pictures[int(d[10:])]] = url
             for s, f in zip(made[len(pages) - len(backgrounds):], backgrounds):
-                fill = s.get("pageProperties", {}).get("pageBackgroundFill", {})
-                if "stretchedPictureFill" in fill:
-                    self.urls[f] = fill["stretchedPictureFill"]["contentUrl"]
+                url = google_types.background_url(s)
+                if url is not None:
+                    self.urls[f] = url
             missing = [f for f in needed if f not in self.urls]
             if missing:
                 raise RuntimeError(f"the staging deck brought no picture for {missing[:3]}")
@@ -2306,20 +2663,22 @@ class Sync:
 
     # ---- measuring
 
-    def measure_places(self, work: Work, theirs: dict) -> tuple[dict, list[str]]:
+    def measure_places(self, work: Work, theirs: JsonObject) -> "tuple[dict[str, Place], list[str]]":
         from .emit import measure_places, slide_holes
 
         if not self.measure:
             return {}, []
-        slides = []
+        ours_slides = self.plan.slides()
+        slides: list[Json] = []
         for w in work.slides:
             j = ours_index(w.plan)
             if not w.units or j is None:
                 continue
-            slide = self.plan.deck["slides"][j]
-            ids = {slide["elements"][i]["id"] for i in w.units}
+            slide = ours_slides[j]
+            elements = as_objects(slide["elements"], "elements")
+            ids = {elements[i]["id"] for i in w.units}
             if any(h[3] is not None and h[3]["id"] in ids for h in slide_holes(slide)) or \
-                    any(e.get("marks") and e["id"] in ids for e in slide["elements"]):
+                    any(e.get("marks") and e["id"] in ids for e in elements):
                 slides.append(slide)
         from . import net
         if not slides:
@@ -2328,33 +2687,36 @@ class Sync:
             print("picture places: predicted (downloads are switched off, so no thumbnail can be measured)")
             return {}, []
         self.before_write()   # it adds scratch slides to the deck (b2s_mNNN)
-        live_ids = {s["objectId"] for s in theirs["slides"]}
-        first = theirs["slides"][0]["objectId"]
+        live_slides = _slides(theirs, "theirs")
+        live_ids = {as_str(s["objectId"], "theirs slide objectId") for s in live_slides}
+        first = as_str(live_slides[0]["objectId"], "theirs slide objectId")
         page_slide = {k: v if v in live_ids else first for k, v in self.plan.page_slide.items()}
         return measure_places(self.slides, self.pid, {**self.plan.deck, "slides": slides}, self.scale, self.plan.fonts,
-                              self.plan.placed, page_slide, self.ours["out"], self.plan.page_width)
+                              self.plan.placed, page_slide, self.ours_out, self.plan.page_width)
 
     def delete_scratch(self, scratch: list[str]) -> None:
         self.before_write()
         try:
             execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body={
-                "requests": [{"deleteObject": {"objectId": s}} for s in scratch]}))
+                "requests": [delete_request(s) for s in scratch]}))
         except HttpError as e:
             self.warnings.append(f"could not delete scratch slides {scratch}: {e}")
 
     # ---- content
 
-    def main_requests(self, work: Work, theirs: dict, pres: Presentation, moves: dict, scratch: list[str]
-                      ) -> tuple[list[dict], list[dict]]:
+    def main_requests(self, work: Work, theirs: JsonObject, pres: Presentation, moves: "Mapping[str, Place]",
+                      scratch: list[str]) -> tuple[list[JsonObject], list[JsonObject]]:
         """(content, cleanup). Nothing in `content` destroys anything a person could have edited:
         it creates the new objects, refills placeholders and puts the slides in order. Every
         deletion - the objects a recreated unit replaces, the slides the source removed, the plain
         stand-in shapes - goes into `cleanup`, which is sent after the deck's own edits are back on
         the new objects and a base that no longer mentions the old ones is stored."""
-        live = {s["objectId"]: s for s in theirs["slides"]}
+        read = _slides(theirs, "theirs")
+        ids = [as_str(s["objectId"], "theirs slide objectId") for s in read]
+        live = dict(zip(ids, read))
         layouts = {name: l for l in pres.get("layouts", [])
                    if (name := l.get("layoutProperties", google_types.LayoutProperties()).get("name")) is not None}
-        reqs: list[dict] = []
+        reqs: list[JsonObject] = []
         doomed_slides: list[str] = []
         if self.theme_plan is not None:
             # The master and the layouts first, in the same chain of batches: a layout write and a
@@ -2379,124 +2741,132 @@ class Sync:
                     pass
                 case _:
                     assert_never(p)
-        reqs += [{"deleteObject": {"objectId": s}} for s in scratch]  # (sync's own scratch slides)
+        reqs += [delete_request(s) for s in scratch]  # (sync's own scratch slides)
         # Slide order: created slides were appended.
-        current = [s["objectId"] for s in theirs["slides"] if s["objectId"] not in set(doomed_slides)]
+        current = [sid for sid in ids if sid not in set(doomed_slides)]
         current += created
         final = [s for s in dict.fromkeys(work.order) if s in current]  # (an id can't be in two places)
         for i, sid in enumerate(final):
             if current[i] != sid:
-                reqs.append({"updateSlidesPosition": {"slideObjectIds": [sid], "insertionIndex": i}})
+                reqs.append(google_types.slides_json({"updateSlidesPosition": {"slideObjectIds": [sid],
+                                                                               "insertionIndex": i}}))
                 current.remove(sid)
                 current.insert(i, sid)
         self.cleanup_ids = list(dict.fromkeys([*self.cleanup_ids, *doomed_slides]))
-        cleanup = [{"deleteObject": {"objectId": oid}} for oid in self.cleanup_ids]
+        cleanup = [delete_request(oid) for oid in self.cleanup_ids]
         return reqs, cleanup
 
-    def slide_requests(self, ours: int, units: Sequence[int], sid: str, in_place: dict[int, Refilled],
-                       templates: dict[tuple, dict], moves: dict, new_slide: bool, ungrouped: Collection[int]
-                       ) -> tuple[list[dict], dict[int, list[str]], dict[int, str], list[dict]]:
+    def slide_requests(self, ours: int, units: Sequence[int], sid: str, in_place: Mapping[int, Refilled],
+                       templates: "Mapping[TemplateKey, Template]", moves: "Mapping[str, Place]", new_slide: bool,
+                       ungrouped: Collection[int]
+                       ) -> tuple[list[JsonObject], dict[int, list[str]], dict[int, str], list[JsonObject]]:
         """emit's requests for the chosen elements (`units`) of the new conversion's slide `ours`,
         under live object ids. in_place: element index -> the live placeholder or table it goes
-        into; templates: template key -> {"id", "w", "h", "text"} of a live object (or stand-in) to
-        duplicate; ungrouped: element indices whose own group (with anchored pictures) isn't made.
+        into; templates: template key -> the live object (or stand-in) to duplicate (`Template`);
+        ungrouped: element indices whose own group (with anchored pictures) isn't made.
         Returns (requests, element index -> objects created, element index -> new object id,
         extras: the slide-level requests (groups, z-order) for a new slide)."""
-        from .emit import title_element, subtitle_element
+        from .emit import created_ids, subtitle_element, table_requests, title_element
 
-        o = self.ours["slides"][ours]
-        slide = self.plan.deck["slides"][ours]
-        n = slide["page"]
+        o = _slides(self.ours, "ours")[ours]
+        okey = as_str(o["key"], "ours slide key")
+        slide = self.plan.slides()[ours]
+        source = as_objects(slide["elements"], "elements")
+        n = as_int(slide["page"], "slide.page")
         vsid = f"b2s_s{n:03}"
         # A title with no live placeholder to go into becomes a text box.
-        elements = [dict(e) for e in slide["elements"]]
+        elements: list[JsonObject] = [dict(e) for e in source]
         title_idx = title_element(slide)
         demoted = title_idx is not None and title_idx not in in_place
-        if demoted:
+        if title_idx is not None and title_idx not in in_place:
             elements[title_idx]["role"] = "body"
-        slide_copy = {**slide, "elements": elements}
+        copied: list[Json] = [e for e in elements]
+        slide_copy: JsonObject = {**slide, "elements": copied}
         title_idx = title_element(slide_copy)
         sub_idx = subtitle_element(slide_copy, title_idx) if title_idx is not None else None
         if sub_idx is not None and sub_idx not in in_place:
             slide_copy["title_page"] = False
-        page_elements = {vsid: [{"objectId": f"{vsid}_t{i}", "size": {"width": emu(v.size[0]), "height": emu(v.size[1])}}
-                                for i, v in in_place.items() if isinstance(v, InPlace)]}
+        page_elements: dict[str, list[JsonObject]] = {
+            vsid: [{"objectId": f"{vsid}_t{i}", "size": emu_size_json(v.size[0], v.size[1])}
+                   for i, v in in_place.items() if isinstance(v, InPlace)]}
         keys = self.plan.keys
-        sizes = [(templates[k]["w"], templates[k]["h"]) if k in templates else (STAND_IN, STAND_IN) for k in keys]
+        sizes = [(templates[k].w, templates[k].h) if k in templates else (STAND_IN, STAND_IN) for k in keys]
         parts, element_ids = self.plan.slide_parts(slide_copy, page_elements, {}, moves, sizes)
         if demoted and not new_slide:
             # The other elements as on a slide with its title (a title demoted to body text
             # would widen their right limits, emit.text_right_limit): a stand-in placeholder size.
             orig_title = title_element(slide)
-            orig_sub = subtitle_element(slide, orig_title)
-            stand = [{"objectId": f"{vsid}_t{i}", "size": {"width": emu(STAND_IN), "height": emu(STAND_IN)}}
-                     for i in (orig_title, orig_sub) if i is not None and i not in in_place]
+            orig_sub = subtitle_element(slide, orig_title) if orig_title is not None else None
+            stand: list[JsonObject] = [{"objectId": f"{vsid}_t{i}", "size": emu_size_json(STAND_IN, STAND_IN)}
+                                       for i in (orig_title, orig_sub) if i is not None and i not in in_place]
             full, _ = self.plan.slide_parts(slide, {vsid: page_elements[vsid] + stand}, {}, moves, sizes)
             demoted_idx = {i for i in (orig_title, orig_sub) if i is not None and i not in in_place}
             parts = [full[0]] + [parts[1 + i] if i in demoted_idx else full[1 + i] for i in range(len(element_ids))] + \
                 parts[1 + len(element_ids):]
-        mapping = {}
-        new_oid = {}
-        for i, (vid, e) in enumerate(zip(element_ids, o["elements"])):
-            new_oid[i] = in_place[i].id if i in in_place else f"b2s_{h6(o['key'])}_{h6(e['key'])}_{self.tok}"
+        mapping: dict[str, str] = {}
+        new_oid: dict[int, str] = {}
+        for i, (vid, e) in enumerate(zip(element_ids, as_objects(o["elements"], f"ours slide {okey}: elements"))):
+            new_oid[i] = in_place[i].id if i in in_place else \
+                f"b2s_{h6(okey)}_{h6(as_str(e['key'], 'element key'))}_{self.tok}"
             mapping[vid] = new_oid[i]
         for j, k in enumerate(keys):
             if k in templates:
-                mapping[f"{vsid}_k{j}"] = templates[k]["id"]
+                mapping[f"{vsid}_k{j}"] = templates[k].id
         mapping[vsid] = sid
         order = sorted(mapping.items(), key=lambda kv: -len(kv[0]))
         chosen = set(units)
-        reqs, objects = [], {}
-        from .emit import created_ids
+        reqs: list[JsonObject] = []
+        objects: dict[int, list[str]] = {}
         for i, (el, rs) in enumerate(parts[1:1 + len(element_ids)]):
             if i not in chosen:
                 continue
-            rs = rename(rs, order)
+            rs = rename_requests(rs, order)
             if not new_slide:
                 rs = [r for r in rs if "updatePageElementsZOrder" not in r]
-            if el["kind"] == "image":
-                path = self.ours["out"] / el["file"]
-                box = [v * self.scale for v in self.plan.placed(slide["elements"][i], n)["bbox"]]
+            if el is not None and el["kind"] == "image":
+                path = self.ours_out / as_str(el["file"], "image file")
+                box = [v * self.scale for v in _nums(self.plan.placed(source[i], n)["bbox"], "image bbox")]
                 x0, y0, x1, y1 = box
-                rs = [{"createImage": {"objectId": new_oid[i], "url": self.picture_url(path), "elementProperties": {
-                    "pageObjectId": sid, "size": {"width": emu(x1 - x0), "height": emu(y1 - y0)},
-                    "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU", "translateX": round(x0 * EMU_PER_PT),
-                                  "translateY": round(y0 * EMU_PER_PT)}}}},
+                image: google_types.CreateImageRequest = {
+                    "objectId": new_oid[i], "url": self.picture_url(path), "elementProperties": {
+                        "pageObjectId": sid, "size": emu_size(x1 - x0, y1 - y0),
+                        "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU", "translateX": round(x0 * EMU_PER_PT),
+                                      "translateY": round(y0 * EMU_PER_PT)}}}
+                rs = [google_types.slides_json({"createImage": image}),
                       letterbox_fix(new_oid[i], box, png_size(path))] + rs
             live = in_place.get(i)
             if isinstance(live, TableFill):
                 # Refilled where it is (`table_refill`): its cells emptied, then filled as emit
                 # fills a table the .pptx brought, whose margins this one has.
-                from .emit import table_requests
-                rs = [{"deleteText": {"objectId": new_oid[i], "cellLocation": {"rowIndex": r, "columnIndex": c},
-                                      "textRange": {"type": "ALL"}}} for r, c in live.cells] + \
-                     [{k: {**as_object(v, "a table step"), "tableObjectId": new_oid[i]} for k, v in step.items()}
-                      for step in live.steps] + \
-                     [r for r in table_requests(self.plan.placed(slide["elements"][i], n), sid, new_oid[i], self.scale,
+                rs = [delete_text_request(new_oid[i], {"rowIndex": r, "columnIndex": c}) for r, c in live.cells] + \
+                     [named_step(step, new_oid[i]) for step in live.steps] + \
+                     [r for r in table_requests(self.plan.placed(source[i], n), sid, new_oid[i], self.scale,
                                                 self.plan.fonts, imported=True) if "updatePageElementsZOrder" not in r]
                 dx, dy = live.shift
                 if abs(dx) > 0.01 or abs(dy) > 0.01:  # (the source moved it)
-                    rs.append({"updatePageElementTransform": {"objectId": new_oid[i], "applyMode": "RELATIVE", "transform": {
-                        "scaleX": 1, "scaleY": 1, "unit": "EMU",
-                        "translateX": round(dx * EMU_PER_PT), "translateY": round(dy * EMU_PER_PT)}}})
+                    rs.append(google_types.slides_json({"updatePageElementTransform": {
+                        "objectId": new_oid[i], "applyMode": "RELATIVE", "transform": {
+                            "scaleX": 1, "scaleY": 1, "unit": "EMU",
+                            "translateX": round(dx * EMU_PER_PT), "translateY": round(dy * EMU_PER_PT)}}}))
             elif isinstance(live, InPlace) and live.text:
-                rs = [{"deleteText": {"objectId": new_oid[i], "textRange": {"type": "ALL"}}}] + rs
-            out = []
+                rs = [delete_text_request(new_oid[i], None)] + rs
+            out: list[JsonObject] = []
             for r in rs:  # a duplicated live object brings its text along: clear it
                 out.append(r)
                 if "duplicateObject" in r:
-                    src = r["duplicateObject"]["objectId"]
-                    tpl = next((t for t in templates.values() if t["id"] == src), None)
-                    if tpl and tpl.get("text"):
-                        out += [{"deleteText": {"objectId": v, "textRange": {"type": "ALL"}}}
-                                for v in r["duplicateObject"]["objectIds"].values()]
+                    dup = as_object(r["duplicateObject"], "duplicateObject")
+                    src = dup["objectId"]
+                    tpl = next((t for t in templates.values() if t.id == src), None)
+                    if tpl and tpl.text:
+                        out += [delete_text_request(as_str(v, "duplicateObject.objectIds"), None)
+                                for v in as_object(dup["objectIds"], "duplicateObject.objectIds").values()]
             reqs += out
             objects[i] = list(dict.fromkeys([new_oid[i]] + [x for x in created_ids(rs) if x != new_oid[i]]))
-        extras = []
+        extras: list[JsonObject] = []
         for _, rs in parts[1 + len(element_ids):]:
-            for r in rename(rs, order):
+            for r in rename_requests(rs, order):
                 if "groupObjects" in r:
-                    gid = r["groupObjects"]["groupObjectId"]
+                    gid = as_str(as_object(r["groupObjects"], "groupObjects")["groupObjectId"], "groupObjectId")
                     owner = next((i for i, v in new_oid.items() if gid == f"{v}_g"), None)
                     if owner is not None and owner in chosen:
                         if owner in ungrouped:
@@ -2507,11 +2877,15 @@ class Sync:
                 extras.append(r)
         return reqs, objects, new_oid, extras
 
-    def tag_requests(self, o: dict, objects: dict[int, list[str]], new_oid: dict[int, str], in_place: dict) -> list[dict]:
-        slide = self.plan.deck["slides"][self.ours["slides"].index(o)]
-        reqs = []
+    def tag_requests(self, o: JsonObject, objects: Mapping[int, list[str]], new_oid: Mapping[int, str],
+                     in_place: Mapping[int, Refilled]) -> list[JsonObject]:
+        slide = self.plan.slides()[_slides(self.ours, "ours").index(o)]
+        okey = as_str(o["key"], "ours slide key")
+        entries = as_objects(o["elements"], f"ours slide {okey}: elements")
+        source = as_objects(slide["elements"], "elements")
+        reqs: list[JsonObject] = []
         for i, oids in objects.items():
-            e, el = o["elements"][i], slide["elements"][i]
+            e, el = entries[i], source[i]
             if el["kind"] == "diagram" and len(oids) > 1:
                 # A diagram's own object id *is* the group emit builds its nodes and lines under
                 # (emit.diagram_requests). The API refuses updatePageElementAltText on a group and
@@ -2519,13 +2893,16 @@ class Sync:
                 # goes untagged, as it does in a converted deck (snapshot.tag_requests skips element
                 # groups too); the base names its objects itself, so nothing needs the tag.
                 continue
-            r = {"objectId": new_oid[i], "title": snapshot.tag(o["key"], e["key"])}
-            if el["kind"] == "image" and el.get("alt"):
-                r["description"] = el["alt"]
-            reqs.append({"updatePageElementAltText": r})
+            r: google_types.UpdatePageElementAltTextRequest = {
+                "objectId": new_oid[i], "title": snapshot.tag(okey, as_str(e["key"], "element key"))}
+            alt = el.get("alt")
+            if el["kind"] == "image" and alt:
+                r["description"] = as_str(alt, "image alt")
+            reqs.append(google_types.slides_json({"updatePageElementAltText": r}))
         return reqs
 
-    def new_layout(self, slide: dict, layout_name: str, layouts: dict[str, Page], pres: Presentation) -> Page | None:
+    def new_layout(self, slide: JsonObject, layout_name: str, layouts: Mapping[str, Page],
+                   pres: Presentation) -> Page | None:
         """The layout a new slide is created on. In a themed deck emit puts the theme decoration
         on the layouts (emit.plan_theme, `theme.layouts` in emit.json) and gives backgrounds that
         don't show it a copy of their layout without it. A new slide that inherits the master
@@ -2533,13 +2910,14 @@ class Sync:
         own already carries whatever decoration it shows, so it goes on the same layout as the
         converted slides with that background - found by object id, since the copies' names in the
         deck are the .pptx ones ("Title Only (no theme)"), not the b2s names."""
-        key = snapshot.background_key(slide, self.ours["out"])
-        served = self.theme_plan.page_group if self.theme_plan is not None else {}
+        key = snapshot.background_key(slide, self.ours_out)
+        base_slides = _slides(self.base, "base")
+        served = self.theme_plan.page_group if self.theme_plan is not None else None
         if served and self.theme_side is not None:
             # The layout that serves the decoration a fresh conversion gives this slide now
             # (theme_sync.plan), of the kind it needs: the plain one first, then its copies.
-            want = self.theme_side.groups.get(slide["page"])
-            kinds = {b.get("layoutObjectId"): b.get("layout") for b in self.base["slides"]}
+            want = self.theme_side.groups.get(as_int(slide["page"], "slide.page"))
+            kinds = {lid: b.get("layout") for b in base_slides if isinstance(lid := b.get("layoutObjectId"), str)}
             plain = layouts.get(layout_name)
             if plain is not None and served.get(object_id(plain)) == want:
                 return plain
@@ -2548,26 +2926,29 @@ class Sync:
                     return l
         if key != self.master_key():
             by_id = {object_id(l): l for l in pres.get("layouts", [])}
-            same = [b for b in self.base["slides"] if b.get("background") == key
+            same = [b for b in base_slides if b.get("background") == key
                     and b.get("layout") == layout_name and b.get("layoutObjectId") in by_id]
             if same:
-                return by_id[same[0]["layoutObjectId"]]
+                return by_id[as_str(same[0]["layoutObjectId"], "base slide layoutObjectId")]
         return layouts.get(layout_name) or layouts.get("BLANK")
 
-    def new_slide(self, w: SlideWork, layouts: dict[str, Page], moves: dict, pres: Presentation) -> list[dict]:
+    def new_slide(self, w: SlideWork, layouts: Mapping[str, Page], moves: "Mapping[str, Place]",
+                  pres: Presentation) -> list[JsonObject]:
         from .emit import element_template_keys, slide_layout, subtitle_element, title_element
 
         p = w.plan
         j, sid = ours_index(p), w.sid
         if j is None or sid is None:
             raise ValueError(f"slide {p.key}: only a slide of the new conversion is created")
-        o = self.ours["slides"][j]
-        slide = self.plan.deck["slides"][j]
+        o = _slides(self.ours, "ours")[j]
+        okey = as_str(o["key"], "ours slide key")
+        entries = as_objects(o["elements"], f"ours slide {okey}: elements")
+        slide = self.plan.slides()[j]
         layout_name, title_kind = slide_layout(slide)
         layout = self.new_layout(slide, layout_name, layouts, pres)
         if layout is None:
-            raise RuntimeError(f"the deck has no {layout_name} layout for new slide {o['key']}")
-        mappings: list[dict] = []
+            raise RuntimeError(f"the deck has no {layout_name} layout for new slide {okey}")
+        mappings: list[JsonObject] = []
         in_place: dict[int, Refilled] = {}
         title_idx = title_element(slide)
         sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
@@ -2578,53 +2959,64 @@ class Sync:
             box = e.get("size")
             size = (snapshot._unit(box.get("width")), snapshot._unit(box.get("height"))) if box is not None \
                 else (STAND_IN, STAND_IN)
-            if ph.get("type") == title_kind and title_idx is not None and title_idx not in in_place:
-                oid = f"b2s_{h6(o['key'])}_{h6(o['elements'][title_idx]['key'])}_{self.tok}"
+            kind = ph.get("type")
+            if kind == title_kind and title_idx is not None and title_idx not in in_place:
+                oid = f"b2s_{h6(okey)}_{h6(as_str(entries[title_idx]['key'], 'element key'))}_{self.tok}"
                 in_place[title_idx] = InPlace(id=oid, size=size, text="")  # (a new slide's placeholder is empty)
-            elif ph.get("type") == "SUBTITLE" and sub_idx is not None and sub_idx not in in_place:
-                oid = f"b2s_{h6(o['key'])}_{h6(o['elements'][sub_idx]['key'])}_{self.tok}"
+            elif kind == "SUBTITLE" and sub_idx is not None and sub_idx not in in_place:
+                oid = f"b2s_{h6(okey)}_{h6(as_str(entries[sub_idx]['key'], 'element key'))}_{self.tok}"
                 in_place[sub_idx] = InPlace(id=oid, size=size, text="")
             else:
                 continue  # (not every layout placeholder is instantiated: the rest go after a read, in finish)
             mappings.append({"layoutPlaceholder": {"type": ph["type"], "index": ph.get("index", 0)}, "objectId": oid})
-        reqs = [{"createSlide": {"objectId": sid, "slideLayoutReference": {"layoutId": object_id(layout)},
-                                 "placeholderIdMappings": mappings}}]
-        reqs += self.background_requests(sid, o["background"], slide, pres, True)
-        templates = {}
-        if self.plan.uses_templates[slide["page"]]:
-            for j, key in enumerate(self.plan.keys):
-                stand = f"b2s_{h6(o['key'])}_k{j}_{self.tok}"
-                templates[key] = {"id": stand, "w": STAND_IN, "h": STAND_IN, "stand_in": True}
-                reqs.append(stand_in_request(stand, sid, key))
-            used = {k for e in slide["elements"] for k in element_template_keys(e, self.scale)}
+        reqs = [google_types.slides_json({"createSlide": {
+            "objectId": sid, "slideLayoutReference": {"layoutId": object_id(layout)}, "placeholderIdMappings": mappings}})]
+        reqs += self.background_requests(sid, as_str(o["background"], "ours slide background"), slide, pres, True)
+        templates: dict[TemplateKey, Template] = {}
+        if self.plan.uses_templates[as_int(slide["page"], "slide.page")]:
+            for k, key in enumerate(self.plan.keys):
+                stand = f"b2s_{h6(okey)}_k{k}_{self.tok}"
+                templates[key] = Template(id=stand, w=STAND_IN, h=STAND_IN, text="")
+                reqs.append(stand_in_request(stand, sid, key[0]))
+            used = {k for e in as_objects(slide["elements"], "elements") for k in element_template_keys(e, self.scale)}
             if used:
-                self.warnings.append(f"slide {o['key']}: {len(used)} template shape(s) (shadows, exact corners) made as plain shapes")
+                self.warnings.append(f"slide {okey}: {len(used)} template shape(s) (shadows, exact corners) made as plain shapes")
         # Pictures first, as the .pptx brings them; emit's parts then order everything.
         rs, objects, new_oid, extras = self.slide_requests(j, w.units, sid, in_place, templates, moves, True, frozenset())
         reqs += [r for r in rs if "createImage" in r]  # (a picture's other requests follow in element order)
         reqs += [r for r in rs if "createImage" not in r] + extras
-        w.objects, w.new_oid, w.in_place, w.tops, w.doomed = objects, new_oid, in_place, {}, set()
-        w.groups = [r["groupObjects"]["groupObjectId"] for r in extras if "groupObjects" in r]
+        w.objects, w.new_oid, w.in_place = objects, new_oid, in_place
+        w.tops = {}
+        w.doomed = set()
+        w.groups = [as_str(as_object(r["groupObjects"], "groupObjects")["groupObjectId"], "groupObjectId")
+                    for r in extras if "groupObjects" in r]
         reqs += self.tag_requests(o, objects, new_oid, in_place)
         return reqs
 
-    def update_slide(self, w: SlideWork, read: dict, moves: dict, pres: Presentation) -> list[dict]:
+    def update_slide(self, w: SlideWork, read: JsonObject, moves: "Mapping[str, Place]",
+                     pres: Presentation) -> list[JsonObject]:
         """A kept slide's requests: its units the plan (re)creates, deletes or moves, its background
         and notes. A held slide (`merge.HoldSlide`) has none of those, and gets nothing."""
-        from .emit import element_template_keys, label_inside, node_template_key, bend_template_key, template_key
+        from .emit import bend_template_key, element_template_keys, label_inside, node_template_key, template_key
 
         p = updated(w.plan)
         units = slide_units(p)
-        b = self.base["slides"][p.base]
-        o = self.ours["slides"][p.ours]
-        slide = self.plan.deck["slides"][p.ours]
+        b = _slides(self.base, "base")[p.base]
+        o = _slides(self.ours, "ours")[p.ours]
+        okey = as_str(o["key"], "ours slide key")
+        slide = self.plan.slides()[p.ours]
+        source = as_objects(slide["elements"], "elements")
         sid = p.object_id
-        objects = read["objects"]
-        bunits = merge.units(b["elements"])
-        reqs: list[dict] = []
-        w.objects, w.new_oid, w.in_place, w.groups = {}, {}, {}, []
+        objects = _objects(read, f"slide {sid}")
+        objs = {oid: as_object(rb, f"read-back {oid}") for oid, rb in objects.items()}
+        bunits = merge.units(as_objects(b["elements"], "base slide elements"))
+        reqs: list[JsonObject] = []
+        w.objects = {}
+        w.new_oid = {}
+        w.in_place = {}
+        w.groups = []
         recreated = [u for u in units if written(u.decision)]
-        index = {e["key"]: k for k, e in enumerate(o["elements"])}
+        index = {as_str(e["key"], "element key"): k for k, e in enumerate(as_objects(o["elements"], "ours elements"))}
 
         # Placeholders: a recreated title goes back into its live placeholder.
         in_place: dict[int, Refilled] = {}
@@ -2633,8 +3025,8 @@ class Sync:
                 i = index[mk]
                 base_el = next((m for m in bunits.get(u.key, []) if m["key"] == mk), None)
                 main = base_el.get("main") if base_el else None
-                if main and main in objects and objects[main].get("placeholder"):
-                    in_place[i] = placeholder_in_place(main, objects[main])
+                if isinstance(main, str) and main and main in objs and objs[main].get("placeholder"):
+                    in_place[i] = placeholder_in_place(main, objs[main])
         from .emit import subtitle_element, title_element
         title_idx = title_element(slide)
         sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
@@ -2645,12 +3037,14 @@ class Sync:
         # subtitle role from used to be. It is made a box of its own; the placeholder goes to the
         # element that has the role now (below), or out with the old unit.
         for i in [i for i, v in in_place.items()
-                  if i != (title_idx if objects[v.id].get("placeholder") in ("TITLE", "CENTERED_TITLE") else
-                           sub_idx if objects[v.id].get("placeholder") == "SUBTITLE" else None)]:
+                  if i != (title_idx if objs[v.id].get("placeholder") in ("TITLE", "CENTERED_TITLE") else
+                           sub_idx if objs[v.id].get("placeholder") == "SUBTITLE" else None)]:
             del in_place[i]
         # A new title (the source's title changed beyond recognition) or a text that took the
         # subtitle role goes into the placeholder of the element it replaces, when that one goes.
-        for role, kinds in ((title_idx, ("TITLE", "CENTERED_TITLE")), (sub_idx, ("SUBTITLE",))):
+        roles: tuple[tuple[int | None, tuple[str, ...]], ...] = (
+            (title_idx, ("TITLE", "CENTERED_TITLE")), (sub_idx, ("SUBTITLE",)))
+        for role, kinds in roles:
             if role is None or role in in_place or not any(role == index[mk] for u in recreated for mk in u.ours_members):
                 continue
             taken = {v.id for v in in_place.values()}
@@ -2658,69 +3052,75 @@ class Sync:
                 if not isinstance(u.decision, merge.DeleteUnit | merge.Recreate):
                     continue
                 main = next((m.get("main") for m in bunits.get(u.key, [])[:1]), None)
-                if main and main in objects and main not in taken and objects[main].get("placeholder") in kinds:
-                    in_place[role] = placeholder_in_place(main, objects[main])
+                if isinstance(main, str) and main and main in objs and main not in taken \
+                        and objs[main].get("placeholder") in kinds:
+                    in_place[role] = placeholder_in_place(main, objs[main])
                     break
         # A table whose words alone changed is refilled where it is (`table_refill`) - but not one an
         # interrupted sync already rewrote: what the merge compares against is then the person's
         # version put back (`restore_in_place`), not what the table holds, and cells emptied or rows
         # inserted by that picture would double words or rows. Made again, it is right whatever it holds.
-        restored = set(self.recovery.get("restore") or ())
+        restored = set(self.recovery.restore)
         for u in recreated:
             d = u.decision
             if isinstance(d, merge.Recreate) and len(u.ours_members) == 1 and len(bunits.get(u.key, [])) == 1 \
                     and bunits[u.key][0].get("main") not in restored:
                 i = index[u.ours_members[0]]
-                refill = table_refill(bunits[u.key][0], slide["elements"][i], objects, self.scale, self.plan.fonts)
-                if refill:
-                    shift = refill["shift"]
+                refill = table_refill(bunits[u.key][0], source[i], objs, self.scale, self.plan.fonts)
+                if refill is not None:
                     if d.overrides.geometry and "position" not in d.source:
                         # The deck moved it and the source did not: where it is now is what a
                         # recreation's geometry override would give. When both moved it, the source's
                         # move goes on top of the person's place, as `carried` does for a recreation.
-                        shift = (0.0, 0.0)
-                    in_place[i] = TableFill(id=refill["id"], cells=refill["cells"], steps=refill["steps"], shift=shift,
-                                            margins=refill["margins"])
+                        refill = replace(refill, shift=(0.0, 0.0))
+                    in_place[i] = refill
 
         # Template shapes: duplicate a live object with the same key on this slide, else a stand-in.
-        needed = {k for u in recreated for mk in u.ours_members for k in element_template_keys(slide["elements"][index[mk]], self.scale)}
-        templates, stand_ins = {}, []
+        needed = {k for u in recreated for mk in u.ours_members
+                  for k in element_template_keys(source[index[mk]], self.scale)}
+        templates: dict[TemplateKey, Template] = {}
+        stand_ins: list[str] = []
         if needed:
-            for el in b["elements"]:
-                ir, main = el.get("ir") or {}, el.get("main")
-                if not main:
+            for el in as_objects(b["elements"], "base slide elements"):
+                ir, main = _obj(el.get("ir"), "base element ir"), el.get("main")
+                if not isinstance(main, str) or not main:
                     continue
-                found = []
-                if ir.get("kind") == "shape" and template_key(ir, self.scale):
-                    found.append((template_key(ir, self.scale), main))
+                found: list[tuple[TemplateKey, str]] = []
+                if ir.get("kind") == "shape" and (tk := template_key(ir, self.scale)):
+                    found.append((tk, main))
                 elif ir.get("kind") == "diagram":
-                    found += [(node_template_key(nd), f"{main}_n{j}") for j, nd in enumerate(ir["nodes"]) if nd["shape"] and label_inside(nd)]
-                    found += [(bend_template_key(ln), f"{main}_l{j}") for j, ln in enumerate(ir["lines"]) if ln.get("bend")]
+                    found += [(node_template_key(nd), f"{main}_n{j}") for j, nd in enumerate(as_objects(ir["nodes"], "ir.nodes"))
+                              if nd["shape"] and label_inside(nd)]
+                    found += [(bend_template_key(ln), f"{main}_l{j}") for j, ln in enumerate(as_objects(ir["lines"], "ir.lines"))
+                              if ln.get("bend")]
                 for key, oid in found:
-                    if key in needed and key not in templates and oid in objects:
-                        templates[key] = {"id": oid, "w": objects[oid]["size"][0], "h": objects[oid]["size"][1],
-                                          "text": (objects[oid].get("text") or "").strip()}
+                    if key in needed and key not in templates and oid in objs:
+                        size = _nums(objs[oid]["size"], f"read-back {oid}: size")
+                        templates[key] = Template(id=oid, w=size[0], h=size[1],
+                                                  text=_text(objs[oid].get("text"), f"read-back {oid}: text").strip())
             for j, key in enumerate(self.plan.keys):
                 if key in needed and key not in templates:
-                    stand = f"b2s_{h6(o['key'])}_k{j}_{self.tok}"
-                    templates[key] = {"id": stand, "w": STAND_IN, "h": STAND_IN, "stand_in": True}
+                    stand = f"b2s_{h6(okey)}_k{j}_{self.tok}"
+                    templates[key] = Template(id=stand, w=STAND_IN, h=STAND_IN, text="")
                     stand_ins.append(stand)
-                    reqs.append(stand_in_request(stand, sid, key))
-                    self.warnings.append(f"slide {o['key']}: no live {key[0]} to copy (shadow, exact corners): made a plain shape")
+                    reqs.append(stand_in_request(stand, sid, key[0]))
+                    self.warnings.append(f"slide {okey}: no live {key[0]} to copy (shadow, exact corners): made a plain shape")
 
         # Groups the old objects were in (blocks, and groups the deck made around them): ungrouped
         # first, outermost first (a group inside a group can't be ungrouped), and regrouped with the
         # new objects under the same ids, innermost first.
         regroup, depth, roots_removed = self.regroups_of(units, bunits, read)
-        reqs[:0] = [{"ungroupObjects": {"objectIds": [g]}} for g in sorted(regroup, key=lambda g: depth[g])]
+        reqs[:0] = [ungroup_request(g) for g in sorted(regroup, key=lambda g: depth[g])]
 
         # A unit whose group the deck took apart (its pictures and text still there) is rebuilt ungrouped.
-        ungrouped = set()
+        ungrouped: set[int] = set()
         for u in recreated:
-            anchor = (bunits.get(u.key) or [{}])[0]
-            gid = next((x for x in anchor.get("objects", []) if x == f"{anchor.get('main')}_g"), None)
-            if isinstance(u.decision, merge.Recreate) and u.key in index and gid and gid not in objects \
-                    and anchor.get("main") in objects:
+            members = bunits.get(u.key) or []
+            anchor: JsonObject = members[0] if members else {}
+            anchor_main = anchor.get("main")
+            gid = next((x for x in _strs(anchor.get("objects"), "element objects") if x == f"{anchor_main}_g"), None)
+            if isinstance(u.decision, merge.Recreate) and u.key in index and gid and gid not in objs \
+                    and isinstance(anchor_main, str) and anchor_main in objs:
                 ungrouped.add(index[u.key])
         rs, created, new_oid, _ = self.slide_requests(p.ours, [index[mk] for u in recreated for mk in u.ours_members],
                                                       sid, in_place, templates, moves, False, ungrouped)
@@ -2735,11 +3135,12 @@ class Sync:
         # The text of a placeholder this sync overwrites: recorded so an interrupted run can be
         # told what the person had there (plan_recovery / restore_in_place).
         for v in in_place.values():
-            rb = objects.get(v.id)
+            rb = objs.get(v.id)
             if rb:
-                self.in_place_readback[v.id] = {k: rb[k] for k in IN_PLACE_FIELDS if k in rb}
+                saved: JsonObject = {k: rb[k] for k in IN_PLACE_FIELDS if k in rb}
+                self.in_place_readback[v.id] = saved
         # Regroup: the unit's new top object takes its old root's place among the children.
-        tops = {}
+        tops: dict[str, str] = {}
         for u in recreated:
             if u.key in index:
                 i = index[u.key]
@@ -2753,45 +3154,56 @@ class Sync:
         if background:
             reqs += self.background_requests(sid, background, slide, pres, False)
         notes = p.notes if isinstance(p, merge.UpdateSlide) else None
-        if notes is not None and read.get("notes_id"):
+        notes_id = read.get("notes_id")
+        if notes is not None and isinstance(notes_id, str) and notes_id:
             if read.get("notes"):
-                reqs.append({"deleteText": {"objectId": read["notes_id"], "textRange": {"type": "ALL"}}})
+                reqs.append(delete_text_request(notes_id, None))
             if notes:
-                reqs.append({"insertText": {"objectId": read["notes_id"], "text": notes}})
+                reqs.append(google_types.slides_json({"insertText": {"objectId": notes_id, "text": notes}}))
         w.tops = tops
         return reqs
 
     @staticmethod
-    def zrank(o: dict, bunits: dict, tops: dict) -> dict[str, int]:
+    def zrank(o: JsonMap, bunits: Mapping[str, Sequence[JsonMap]], tops: Mapping[str, str]) -> dict[str, int]:
         """Object id -> where the source draws that element, for every object a rewrite may put into
         a group: the ones this sync writes (`tops`) and the deck's own, which stand for the elements
         the sync is keeping."""
-        pos = {e["key"]: i for i, e in enumerate(o["elements"])}
-        rank = {oid: pos[m["key"]] for members in bunits.values() for m in members
-                for oid in m.get("objects", []) if m["key"] in pos}
+        pos = {as_str(e["key"], "element key"): i for i, e in enumerate(as_objects(o["elements"], "ours elements"))}
+        rank = {oid: pos[key] for members in bunits.values() for m in members
+                if isinstance(key := m["key"], str) and key in pos
+                for oid in _strs(m.get("objects"), "element objects")}
         rank.update({oid: pos[k] for k, oid in tops.items() if k in pos})
         return rank
 
     @staticmethod
-    def regroups(units: list[dict], bunits: dict, read: dict) -> tuple[dict, dict, list]:
-        """`regroups_of` over units as `merge.plan_merge` writes them (the offline fuzz's replay)."""
-        return Sync.regroups_of([planned_unit_of(u, f"unit {n}") for n, u in enumerate(units)], bunits, read)
+    def regroups(units: Sequence[JsonMap], bunits: Mapping[str, Sequence[JsonMap]], read: JsonMap
+                 ) -> tuple[dict[ObjectId, Regroup], dict[ObjectId, int], list[tuple[str, list[Json]]]]:
+        """`regroups_of` over units as `merge.plan_merge` writes them (the offline fuzz's replay), the
+        old roots as JSON."""
+        regroup, depth, roots_removed = Sync.regroups_of([planned_unit_of(u, f"unit {n}") for n, u in enumerate(units)],
+                                                         bunits, read)
+        return regroup, depth, [(k, [r for r in roots]) for k, roots in roots_removed]
 
     @staticmethod
-    def regroups_of(units: Sequence[merge.PlannedUnit], bunits: dict,
-                    read: dict) -> tuple[dict[str, Regroup], dict[str, int], list[tuple[str, list[str]]]]:
+    def regroups_of(units: Sequence[merge.PlannedUnit], bunits: Mapping[str, Sequence[JsonMap]],
+                    read: JsonMap) -> tuple[dict[ObjectId, Regroup], dict[ObjectId, int], list[tuple[str, list[str]]]]:
         """The groups a slide's rewrite takes apart: group id -> {"remove": old roots of rewritten
         units in it, "unit_of": root -> unit key}, with every ancestor of such a group (empty), their
         depth, and (unit key, old root ids) of every unit rewritten or deleted."""
-        objects = read["objects"]
+        objects = _objects(read, "slide read")
+
+        def parent(oid: str) -> str | None:
+            x = _obj(objects.get(oid), f"read-back {oid}").get("parent_group")
+            return x if isinstance(x, str) and x else None
 
         def ancestors(g: str) -> list[str]:
-            chain, x = [], objects.get(g, {}).get("parent_group")
+            chain: list[str] = []
+            x = parent(g)
             while x and x not in chain:
                 chain.append(x)
-                x = objects.get(x, {}).get("parent_group")
+                x = parent(x)
             return chain
-        regroup: dict[str, Regroup] = {}
+        regroup: dict[ObjectId, Regroup] = {}
         roots_removed: list[tuple[str, list[str]]] = []
         for u in units:
             if not isinstance(u.decision, merge.Recreate | merge.DeleteUnit):
@@ -2800,36 +3212,38 @@ class Sync:
             roots = merge.unit_roots(members, read)
             roots_removed.append((u.key, roots))
             for r in roots:
-                g = objects[r].get("parent_group")
-                if g and g not in roots:
-                    regroup.setdefault(g, Regroup(remove=set(), unit_of={}))["remove"].add(r)
-                    regroup[g]["unit_of"][r] = u.key
+                g = as_object(objects[r], f"read-back {r}").get("parent_group")
+                if isinstance(g, str) and g and g not in roots:
+                    regroup.setdefault(ObjectId(g), Regroup(remove=set(), unit_of={}))["remove"].add(r)
+                    regroup[ObjectId(g)]["unit_of"][r] = u.key
                     for a in ancestors(g):
-                        regroup.setdefault(a, Regroup(remove=set(), unit_of={}))
+                        regroup.setdefault(ObjectId(a), Regroup(remove=set(), unit_of={}))
         return regroup, {g: len(ancestors(g)) for g in regroup}, roots_removed
 
     @staticmethod
-    def regroup_requests(regroup: dict, depth: dict, objects: dict, tops: dict, keep_ids: set,
-                         rank: dict | None = None) -> list[dict]:
+    def regroup_requests(regroup: Mapping[ObjectId, Regroup], depth: Mapping[ObjectId, int], objects: JsonMap,
+                         tops: Mapping[str, str], keep_ids: Collection[str], rank: Mapping[str, int]
+                         ) -> list[JsonObject]:
         """The groups `regroups` took apart, made again under the same ids, innermost first: a
         rewritten unit's new top object takes its old root's place among the children (`tops`: unit
         key -> new top; `objects`: the read-back before the rewrite; `rank`: object id -> where the
-        source draws that element, for every child this sync writes and every one it keeps)."""
-        reqs = []
-        rank = rank or {}
+        source draws that element, for every child this sync writes and every one it keeps; `{}`:
+        the children keep their order)."""
+        reqs: list[JsonObject] = []
         replaced: dict[str, str | None] = {}  # regrouped group -> what stands for it now (None: gone)
         for g in sorted(regroup, key=lambda g: -depth[g]):
             info = regroup[g]
-            children, mine = [], {}   # mine: place among the children -> the object standing there
-            for c in objects[g].get("children", []):
+            children: list[str] = []
+            mine: dict[int, str] = {}   # mine: place among the children -> the object standing there
+            for c in _strs(as_object(objects[g], f"read-back {g}").get("children"), f"read-back {g}: children"):
                 if c in info["remove"]:
                     ukey = info["unit_of"][c]
                     if ukey in tops and tops[ukey] not in children and tops[ukey] not in keep_ids:
                         mine[len(children)] = tops[ukey]
                         children.append(tops[ukey])
                 elif c in replaced:
-                    if replaced[c]:
-                        children.append(replaced[c])
+                    if (stands := replaced[c]):
+                        children.append(stands)
                 else:
                     mine[len(children)] = c
                     children.append(c)
@@ -2849,15 +3263,16 @@ class Sync:
                 # sync kept (live, the front page's demo). Once grouped, a child can't be restacked
                 # (`restack` orders what is on the page), so the old order goes back now, while they
                 # are all still on the page. (The offline fuzz replays this: `fuzz_sync._stacked`.)
-                reqs += [{"updatePageElementsZOrder": {"pageElementObjectIds": [c], "operation": "BRING_TO_FRONT"}}
-                         for c in children]
-                reqs.append({"groupObjects": {"groupObjectId": g, "childrenObjectIds": children}})
+                reqs += [front_request(c) for c in children]
+                reqs.append(google_types.slides_json({"groupObjects": {"groupObjectId": g,
+                                                                       "childrenObjectIds": children}}))
                 replaced[g] = g
             else:
                 replaced[g] = children[0] if children else None
         return reqs
 
-    def background_requests(self, sid: str, key: str, slide: dict, pres: Presentation, created: bool) -> list[dict]:
+    def background_requests(self, sid: str, key: str, slide: JsonMap, pres: Presentation,
+                            created: bool) -> list[JsonObject]:
         master = self.master_key()
         if key == master:
             if created:
@@ -2870,47 +3285,48 @@ class Sync:
                 page = next((s for s in pres.get("slides", []) if object_id(s) == sid), None)
                 if page is not None and snapshot.background(page) == {"state": "INHERIT"}:
                     return []
-                return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.propertyState",
-                                                  "pageProperties": {"pageBackgroundFill": {"propertyState": "INHERIT"}}}}]
+                return [page_properties_request(sid, "pageBackgroundFill.propertyState",
+                                                {"pageBackgroundFill": {"propertyState": "INHERIT"}})]
             masters = pres.get("masters", [])
             if not masters:   # (every deck has one; an answer without it has nothing to copy)
                 return []
             fill = google_types.background_fill(masters[0])
             url = google_types.background_url(masters[0])
             if url is not None:
-                return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.stretchedPictureFill.contentUrl",
-                                                  "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {
-                                                      "contentUrl": url}}}}}]
+                return [page_properties_request(sid, "pageBackgroundFill.stretchedPictureFill.contentUrl",
+                                                {"pageBackgroundFill": {"stretchedPictureFill": {"contentUrl": url}}})]
             if "solidFill" in fill:
-                return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.solidFill.color",
-                                                  "pageProperties": {"pageBackgroundFill": {"solidFill": fill["solidFill"]}}}}]
+                return [page_properties_request(sid, "pageBackgroundFill.solidFill.color",
+                                                {"pageBackgroundFill": {"solidFill": fill["solidFill"]}})]
             return []
         if key.startswith("color:"):
-            return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.solidFill.color",
-                                              "pageProperties": {"pageBackgroundFill": {"solidFill": {
-                                                  "color": api_colour(key[6:])}}}}}]
-        url = self.picture_url(self.ours["out"] / slide["background"])
-        return [{"updatePageProperties": {"objectId": sid, "fields": "pageBackgroundFill.stretchedPictureFill.contentUrl",
-                                          "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": {"contentUrl": url}}}}}]
+            return [page_properties_request(sid, "pageBackgroundFill.solidFill.color",
+                                            {"pageBackgroundFill": {"solidFill": {"color": api_colour(key[6:])}}})]
+        url = self.picture_url(self.ours_out / as_str(slide["background"], "slide background"))
+        return [page_properties_request(sid, "pageBackgroundFill.stretchedPictureFill.contentUrl",
+                                        {"pageBackgroundFill": {"stretchedPictureFill": {"contentUrl": url}}})]
 
     # ---- after the content: z-order, notes of new slides, base, deck overrides
 
-    def finish(self, work: Work, mplan: merge.MergePlan, theirs: dict, pres: Presentation, rev: str) -> str:
+    def finish(self, work: Work, mplan: merge.MergePlan, theirs: JsonObject, pres: Presentation, rev: str) -> str:
         raw = self.read()
         now = snapshot.read_presentation(raw)
-        live = {s["objectId"]: s for s in now["slides"]}
-        before = {s["objectId"]: s for s in theirs["slides"]}
-        reqs = []
+        live = _by_id(now, "the deck written")
+        before = _by_id(theirs, "theirs")
+        reqs: list[JsonObject] = []
         for w in work.slides:
             p = w.plan
             match p:
                 case merge.CreateSlide():
-                    s = live.get(w.sid)
+                    s = live.get(w.sid) if w.sid is not None else None
                     mine = {x for oids in w.objects.values() for x in oids} | set(w.groups)
-                    reqs += [{"deleteObject": {"objectId": oid}} for oid, rb in (s["objects"] if s else {}).items()
-                             if rb.get("placeholder") and oid not in mine]
-                    if s and s.get("notes_id") and self.ours["slides"][p.ours].get("notes"):
-                        reqs.append({"insertText": {"objectId": s["notes_id"], "text": self.ours["slides"][p.ours]["notes"]}})
+                    shown: JsonObject = _objects(s, f"slide {w.sid}") if s else {}
+                    reqs += [delete_request(oid) for oid, rb in shown.items()
+                             if as_object(rb, f"read-back {oid}").get("placeholder") and oid not in mine]
+                    notes_id = s.get("notes_id") if s else None
+                    if s and notes_id and (notes := _slides(self.ours, "ours")[p.ours].get("notes")):
+                        reqs.append(google_types.slides_json({"insertText": {
+                            "objectId": as_str(notes_id, "notes_id"), "text": as_str(notes, "ours slide notes")}}))
                 case merge.UpdateSlide():
                     if w.objects:
                         reqs += self.restack_of(p.base, p.ours, p.units, w.doomed, w.tops, before[p.object_id],
@@ -2944,21 +3360,24 @@ class Sync:
         """The file each picture this sync created was made from - an image's objectId, or a
         slide's for the background picture written on it - so the new base signs them from their
         bytes (`snapshot.upload_signatures`) instead of downloading what it has just uploaded."""
-        ours_slides, master = self.plan.deck["slides"], self.master_key()
+        ours_slides, master = self.plan.slides(), self.master_key()
         files: dict[str, Path] = {}
         for w in work.slides:
             p = w.plan
-            j = ours_index(p)
-            if j is None or not w.sid:
+            j, sid = ours_index(p), w.sid
+            if j is None or not sid:
                 continue
             slide = ours_slides[j]
+            source = as_objects(slide["elements"], "elements")
             for i in w.units:
-                el = slide["elements"][i]
-                if el["kind"] == "image" and el.get("file") and w.new_oid.get(i):
-                    files[w.new_oid[i]] = self.ours["out"] / el["file"]
+                el = source[i]
+                file = el.get("file")
+                if el["kind"] == "image" and file and w.new_oid.get(i):
+                    files[w.new_oid[i]] = self.ours_out / as_str(file, "image file")
             key = self.background_written(p)
-            if key.startswith("png:") and key != master and slide.get("background"):
-                files[w.sid] = self.ours["out"] / slide["background"]
+            background = slide.get("background")
+            if key.startswith("png:") and key != master and background:
+                files[sid] = self.ours_out / as_str(background, "slide background")
         return files
 
     def background_written(self, p: merge.SlidePlan) -> str:
@@ -2966,7 +3385,7 @@ class Sync:
         when the source changed it; "" for none."""
         match p:
             case merge.CreateSlide():
-                return self.ours["slides"][p.ours]["background"] or ""
+                return _text(_slides(self.ours, "ours")[p.ours]["background"], "ours slide background")
             case merge.UpdateSlide():
                 return new_background(p) or ""
             case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide() | merge.HoldSlide():
@@ -2974,14 +3393,14 @@ class Sync:
             case _:
                 assert_never(p)
 
-    def warn_about_overruns(self, work: Work, theirs: dict) -> None:
+    def warn_about_overruns(self, work: Work, theirs: JsonMap) -> None:
         """The person's own objects, which sync never moves, that the source's words or pictures
         now run over (`text_layout.overruns`): the source reflowed onto a note the person put under a
         paragraph. Moving the note would guess at what it belongs to, so it is said instead (live
         fuzz r7411, r7414). One read of the deck, only when a written slide holds such an object."""
         from . import text_layout as tl
-        before = {s["objectId"]: s for s in theirs["slides"]}
-        todo = {}
+        before = _by_id(theirs, "theirs")
+        todo: dict[str, tuple[str, set[str], set[str]]] = {}
         for w in work.slides:
             p = w.plan
             if not isinstance(p, merge.UpdateSlide):
@@ -2989,37 +3408,42 @@ class Sync:
             b = before.get(p.object_id)
             if b is None or all(kept_whole(u.decision) for u in p.units):
                 continue
-            users = {u["objectId"] for u in merge.user_objects(self.base["slides"][p.base], b)}
+            base_slide = _slides(self.base, "base")[p.base]
+            users = {u["objectId"] for u in merge.user_objects(base_slide, b)}
             # A unit kept as the deck has it (a conflict the deck's version won) is the deck's too:
             # a table the person gave a row, kept whole, and the source's figure moved up under it
             # (edit hunt h2-2, h4-1). Sync does not move it either.
             kept = {u.key for u in p.units if isinstance(u.decision, merge.KeepRemoved | merge.KeepUnit) and u.decision.deck}
-            kept_objects = {o for e in self.base["slides"][p.base]["elements"]
+            shown = _objects(b, f"slide {p.object_id}")
+            kept_objects = {o for e in as_objects(base_slide["elements"], "base slide elements")
                             if e["key"] in kept or e.get("anchor") in kept
-                            for o in e.get("objects", []) if o in b["objects"]}
-            if any(tl.ink(b["objects"][u]) for u in users | kept_objects if u in b["objects"]):
+                            for o in _strs(e.get("objects"), "element objects") if o in shown}
+            if any(tl.ink(as_object(shown[u], f"read-back {u}")) for u in users | kept_objects if u in shown):
                 todo[p.object_id] = (p.key, users, kept_objects)
         if not todo:
             return
-        def say(rb: dict) -> str:
-            words = (rb.get("text") or "").strip().replace("\n", " ")[:40]
+
+        def say(rb: JsonMap) -> str:
+            words = _text(rb.get("text"), "read-back text").strip().replace("\n", " ")[:40]
             return f"text {words!r}" if words else "picture"
 
         final = snapshot.read_presentation(self.read())
-        for s in final["slides"]:
-            if s["objectId"] not in todo:
+        for s in _slides(final, "final"):
+            sid = as_str(s["objectId"], "final slide objectId")
+            if sid not in todo:
                 continue
-            key, users, kept_objects = todo[s["objectId"]]
-            for o in tl.overruns(before[s["objectId"]], s, users | kept_objects, set(self.cleanup_ids)):
+            key, users, kept_objects = todo[sid]
+            for o in tl.overruns(before[sid], s, users | kept_objects, set(self.cleanup_ids)):
                 self.overruns.append({"slide": key, **tl.overrun_json(o)})
-                mine, theirs_ = before[s["objectId"]]["objects"][o.object], s["objects"][o.other]
+                mine = as_object(_objects(before[sid], f"slide {sid}")[o.object], f"read-back {o.object}")
+                theirs_ = as_object(_objects(s, f"slide {sid}")[o.other], f"read-back {o.other}")
                 self.warnings.append(
                     f"slide {key}: the source's {say(theirs_)} now runs {o.depth:.0f} pt over your {say(mine)}, "
                     + ("which stays where you put it (sync never moves your own objects): move one of them"
                        if o.object in users else
                        "kept as the deck has it for a conflict, so not where the source would put it: move one of them"))
 
-    def refit_jobs(self, work: Work, theirs: dict, created: dict) -> dict[str, list[refit.RefitJob]]:
+    def refit_jobs(self, work: Work, theirs: JsonMap, created: JsonMap) -> dict[str, list[refit.RefitJob]]:
         """Slide id -> the recreated text units whose deck edits `override_requests` wrote over
         them (`refit.plan`'s jobs). Only text boxes the layout model can read (explicit sizes: what
         emit makes); a table refilled in place is not a recreated box. A recreated title goes back
@@ -3028,8 +3452,8 @@ class Sync:
         goes out for it: a panel the sync drew or grew under it is the converter's own object, and
         was never fitted to the person's enlarged font otherwise (edit hunt h5-6)."""
         from . import text_layout as tl
-        pre = {s["objectId"]: s for s in created["slides"]}
-        before = {s["objectId"]: s for s in theirs["slides"]}
+        pre = _by_id(created, "created")
+        before = _by_id(theirs, "theirs")
         jobs: dict[str, list[refit.RefitJob]] = {}
         for w in work.slides:
             p = w.plan
@@ -3038,9 +3462,11 @@ class Sync:
             s = pre.get(p.object_id)
             if s is None:
                 continue
-            o = self.ours["slides"][p.ours]
-            ounits, bunits = merge.units(o["elements"]), merge.units(self.base["slides"][p.base]["elements"])
-            index = {e["key"]: k for k, e in enumerate(o["elements"])}
+            o_elements = as_objects(_slides(self.ours, "ours")[p.ours]["elements"], "ours slide elements")
+            ounits = merge.units(o_elements)
+            bunits = merge.units(as_objects(_slides(self.base, "base")[p.base]["elements"], "base slide elements"))
+            index = {as_str(e["key"], "element key"): k for k, e in enumerate(o_elements)}
+            shown = _objects(s, f"slide {p.object_id}")
             for u in p.units:
                 d = u.decision
                 if not isinstance(d, merge.Recreate) or not merge.overrides_json(d.overrides) or u.key not in index:
@@ -3049,24 +3475,28 @@ class Sync:
                 main = w.new_oid.get(i)
                 if main is None:
                     continue  # (nothing was made for it, so there is no box to fit)
-                rb = s["objects"].get(main)
+                rb = _obj(shown.get(main), f"read-back {main}")
                 if isinstance(w.in_place.get(i), TableFill) or not rb or not tl.text_box(rb) \
                         or tl.layout(rb) is None:
                     continue
-                members = [m for m in ounits.get(u.key, []) if m["key"] in index]
-                pics = [w.new_oid[index[m["key"]]] for m in members[1:]
-                        if m.get("role") == "math" and index[m["key"]] in w.new_oid]
-                own = {x for m in members for x in w.objects.get(index[m["key"]], [])} | {main}
-                old_main = (bunits.get(u.key) or [{}])[0].get("main")
-                names = {w.new_oid[index[m["key"]]]: m["key"] for m in members if index[m["key"]] in w.new_oid}
-                jobs.setdefault(s["objectId"], []).append(refit.RefitJob(
+                members = [(m, index[mk]) for m in ounits.get(u.key, [])
+                           if isinstance(mk := m["key"], str) and mk in index]
+                pics = [w.new_oid[k] for m, k in members[1:] if m.get("role") == "math" and k in w.new_oid]
+                own = {x for _, k in members for x in w.objects.get(k, [])} | {main}
+                bmembers = bunits.get(u.key) or []
+                old_main = bmembers[0].get("main") if bmembers else None
+                names = {w.new_oid[k]: as_str(m["key"], "element key") for m, k in members if k in w.new_oid}
+                had = before.get(p.object_id)
+                had_objects: JsonObject = _obj(had.get("objects"), f"slide {p.object_id}: objects") if had is not None else {}
+                theirs_rb = had_objects.get(old_main) if isinstance(old_main, str) else None
+                jobs.setdefault(as_str(s["objectId"], "slide objectId"), []).append(refit.RefitJob(
                     key=f"slide {p.key}: {u.key}", slide=p.key, names=names,
                     text=main, pictures=tuple(pics), own=frozenset(own),
                     doomed=frozenset(w.doomed),
-                    theirs=before.get(p.object_id, {}).get("objects", {}).get(old_main)))
+                    theirs=None if theirs_rb is None else as_object(theirs_rb, f"read-back {old_main}")))
         return jobs
 
-    def refit(self, work: Work, theirs: dict, created: dict, rev: str) -> str:
+    def refit(self, work: Work, theirs: JsonMap, created: JsonMap, rev: str) -> str:
         """The recreated boxes fitted to the words written into them (`refit`, docs/project-notes.md
         "Merged text into recreated boxes"): formula pictures back over their holes, the box and a
         block panel under it as tall as the merged text needs. What moved is recorded for the base
@@ -3078,14 +3508,18 @@ class Sync:
         if not jobs:
             return rev
         final = snapshot.read_presentation(self.read())
-        fin = {s["objectId"]: s for s in final["slides"]}
-        pre = {s["objectId"]: s for s in created["slides"]}
-        before = {s["objectId"]: s for s in theirs["slides"]}
-        reqs, reshaped, moves = [], {}, []
+        fin = _by_id(final, "final")
+        pre = _by_id(created, "created")
+        before = _by_id(theirs, "theirs")
+        page = final.get("page_size")
+        page_size = None if page is None else _nums(page, "page_size")
+        reqs: list[JsonObject] = []
+        reshaped: dict[str, refit.Reshape] = {}
+        moves: list[refit.Moved] = []
         for sid, js in jobs.items():
             if sid not in fin:
                 continue
-            r, shaped, warnings = refit.plan(js, pre[sid], fin[sid], final.get("page_size"), before.get(sid))
+            r, shaped, warnings = refit.plan(js, pre[sid], fin[sid], page_size, before.get(sid))
             if r:
                 reqs += r + [BREAK]
             reshaped.update(shaped)
@@ -3097,10 +3531,10 @@ class Sync:
             self.refit_moves = [refit.moved_json(m) for m in moves]
         return rev
 
-    def warn_about_folded_hiders(self, work: Work, now: dict) -> None:
+    def warn_about_folded_hiders(self, work: Work, now: JsonMap) -> None:
         """Words this sync covered and could not uncover: `folded_hiders` says why, and nothing else
         in the report would mention it, since nothing was deleted and every write went through."""
-        live = {s["objectId"]: s for s in now["slides"]}
+        live = _by_id(now, "now")
         for w in work.slides:
             p = w.plan
             if not isinstance(p, merge.UpdateSlide):
@@ -3108,11 +3542,14 @@ class Sync:
             s = live.get(p.object_id)
             if not w.objects or s is None:
                 continue
-            b = self.base["slides"][p.base]
-            ours = {o for el in b["elements"] for o in el.get("objects", [])} | set(b.get("groups") or [])
+            b = _slides(self.base, "base")[p.base]
+            ours = {o for el in as_objects(b["elements"], "base slide elements")
+                    for o in _strs(el.get("objects"), "element objects")} | set(_strs(b.get("groups"), "base slide groups"))
             made = {x for oids in w.objects.values() for x in oids} | set(w.groups)
-            for text, shape in folded_hiders(s, made, ours, w.doomed):
-                words = (s["objects"][text].get("text") or "").strip().replace("\n", " ")[:40]
+            shown = _objects(s, f"slide {p.object_id}")
+            for text, _ in folded_hiders(s, made, ours, w.doomed):
+                words = _text(as_object(shown[text], f"read-back {text}").get("text"),
+                              "read-back text").strip().replace("\n", " ")[:40]
                 self.warnings.append(
                     f"slide {b['key']}: {words!r} is now under a shape the source redrew, which stands in a "
                     "group you made: its page element cannot be restacked without moving the rest of that "
@@ -3120,8 +3557,9 @@ class Sync:
                     "to read the words again")
 
     @staticmethod
-    def _by_the_source(desired: list[str], oldtop: dict, tops: dict, keys: list[str], base_order: list[str],
-                       stands_now: dict | None = None, stands_before: dict | None = None):
+    def _by_the_source(desired: list[str], oldtop: Mapping[str, str], tops: Mapping[str, str], keys: Sequence[str],
+                       base_order: Sequence[str], stands_now: Mapping[str, str] | None,
+                       stands_before: Mapping[str, str] | None) -> None:
         """The source's own elements take the source's order among themselves, in the places they
         hold on the page, whether this sync rewrote them or kept them - but only where the deck still
         has them in the order the base does.
@@ -3142,21 +3580,23 @@ class Sync:
         slide the person had ungrouped, so every element stood on the page).
 
         What is ordered are the *page elements* (`stands_now` / `stands_before`, `drawn_order`'s
-        second answer), and a converter group - one the base itself draws on the page - stands for
-        the elements it carries, the first the source draws among them, blocks being made of
-        consecutive elements. Asking it of the objects alone left out everything inside a group, so
-        a block's panel could not be ordered against a table beside it however the source drew them
-        (converted seed 1300381 at chain 6). A group the *person* made stands for nobody: it is not
-        in the base's order, restacking it would move everything else they put in there, and that is
-        the one shape of this the sync answers by talking (`warn_about_folded_hiders`)."""
+        second answer; None: every object stands for itself), and a converter group - one the base
+        itself draws on the page - stands for the elements it carries, the first the source draws
+        among them, blocks being made of consecutive elements. Asking it of the objects alone left
+        out everything inside a group, so a block's panel could not be ordered against a table beside
+        it however the source drew them (converted seed 1300381 at chain 6). A group the *person*
+        made stands for nobody: it is not in the base's order, restacking it would move everything
+        else they put in there, and that is the one shape of this the sync answers by talking
+        (`warn_about_folded_hiders`)."""
         rank = {k: i for i, k in enumerate(keys)}
         page = set(base_order)
 
-        def stands(oid, where):
-            t = (where or {}).get(oid, oid)
+        def stands(oid: str, where: Mapping[str, str] | None) -> str:
+            t = where.get(oid, oid) if where else oid
             return t if t == oid or t in page else oid
 
-        at, was = {}, {}
+        at: dict[str, str] = {}
+        was: dict[str, str] = {}
         for k in sorted((k for k in oldtop if k in rank), key=lambda k: rank[k]):
             el = stands(tops.get(k) or oldtop[k], stands_now)
             if el not in at:                # the first element the source draws in there speaks
@@ -3171,23 +3611,28 @@ class Sync:
         for i, oid in zip(slots, sorted(here, key=lambda o: rank[at[o]])):
             desired[i] = oid
 
-    def restack(self, w: dict, before: dict, now: dict) -> list[dict]:
+    def restack(self, w: Mapping[str, object], before: JsonMap, now: JsonMap) -> list[JsonObject]:
         """`restack_of` over a slide's work as JSON: {"plan" (as `merge.plan_merge` writes it),
         "doomed", "tops"} (the offline fuzz's replay, `fuzz_sync._stacked`)."""
-        p = updated(slide_plan_of(w["plan"], "plan"))
-        return self.restack_of(p.base, p.ours, slide_units(p), w.get("doomed") or set(), w["tops"], before, now)
+        p = updated(slide_plan_of(google_types.json_object(w["plan"], "plan"), "plan"))
+        tops = google_types.json_object(w["tops"], "tops")
+        return self.restack_of(p.base, p.ours, slide_units(p), _str_set(w.get("doomed"), "doomed"),
+                               {k: as_str(v, f"tops[{k}]") for k, v in tops.items()}, before, now)
 
     def restack_of(self, base: int, ours: int, units: Sequence[merge.PlannedUnit], doomed: Collection[str],
-                   tops: dict[str, str], before: dict, now: dict) -> list[dict]:
+                   tops: Mapping[str, str], before: JsonMap, now: JsonMap) -> list[JsonObject]:
         """BRING_TO_FRONT so recreated elements take their old place in the z-order and new
         ones follow their predecessor in the source. The objects the cleanup phase will delete are
         left out: they are still on the slide, under their replacements, until then. `base`, `ours`:
         the slide's index in the base and in the new conversion; `tops`: `SlideWork.tops`."""
-        b = self.base["slides"][base]
-        o = self.ours["slides"][ours]
-        bunits = merge.units(b["elements"])
-        top_now = {oid for oid in now["order"] if oid not in doomed}
-        replace, added, oldtop = {}, [], {}
+        b = _slides(self.base, "base")[base]
+        o = _slides(self.ours, "ours")[ours]
+        bunits = merge.units(as_objects(b["elements"], "base slide elements"))
+        now_order = _strs(now["order"], "now.order")
+        top_now = {oid for oid in now_order if oid not in doomed}
+        swap: dict[str, str] = {}
+        added: list[str] = []
+        oldtop: dict[str, str] = {}
         for u in units:
             d = u.decision
             match d:
@@ -3195,7 +3640,7 @@ class Sync:
                     old = merge.unit_top(bunits[u.key], before)
                     new = tops.get(u.key)
                     if old and new:
-                        replace[old] = new
+                        swap[old] = new
                         oldtop[u.key] = old
                 case merge.CreateUnit() if u.key in tops:
                     added.append(u.key)
@@ -3209,18 +3654,19 @@ class Sync:
                         oldtop[u.key] = old
                 case _:
                     assert_never(d)
-        desired = []
-        for oid in before["order"]:
-            oid = replace.get(oid, oid)
+        desired: list[str] = []
+        for oid in _strs(before["order"], "before.order"):
+            oid = swap.get(oid, oid)
             if oid in top_now and oid not in desired:
                 desired.append(oid)
-        keys = [e["key"] for e in o["elements"]]
-        shown = now.get("objects") or {}
-        stands_now = drawn_order(shown, now.get("order") or [])[1]
-        self._by_the_source(desired, oldtop, tops, keys, b.get("order") or [], stands_now,
-                            drawn_order(before.get("objects") or {}, before.get("order") or [])[1])
+        keys = [as_str(e["key"], "element key") for e in as_objects(o["elements"], "ours slide elements")]
+        shown = _obj(now.get("objects"), "now.objects")
+        stands_now = drawn_order(shown, _strs(now.get("order"), "now.order"))[1]
+        self._by_the_source(desired, oldtop, tops, keys, _strs(b.get("order"), "base slide order"), stands_now,
+                            drawn_order(_obj(before.get("objects"), "before.objects"),
+                                        _strs(before.get("order"), "before.order"))[1])
 
-        def placed(k):
+        def placed(k: str) -> str | None:
             return tops.get(k) or (merge.unit_top(bunits[k], now) if k in bunits else None)
 
         # An element with no place in the deck's order takes the place the source gives it. That is
@@ -3234,12 +3680,13 @@ class Sync:
                     and oid in top_now and oid not in desired]
         for ukey in sorted(added + homeless, key=keys.index):
             new = placed(ukey)
-            if new not in top_now or new in desired:
+            if new is None or new not in top_now or new in desired:
                 continue
             i = keys.index(ukey)
             pos = 0
             for k in reversed(keys[:i]):
-                if (prev := placed(k)) in desired:
+                prev = placed(k)
+                if prev is not None and prev in desired:
                     pos = desired.index(prev) + 1
                     break
             # ... but never above an element the source draws above it. A recreated element keeps the
@@ -3248,7 +3695,8 @@ class Sync:
             # would land on top of text the source puts above it, and nothing is deleted for any
             # other check to see (`loss_oracle.text_hidden`).
             for k in keys[i + 1:]:
-                if (nxt := placed(k)) in desired:
+                nxt = placed(k)
+                if nxt is not None and nxt in desired:
                     pos = min(pos, desired.index(nxt))
                     break
             desired.insert(pos, new)
@@ -3282,14 +3730,15 @@ class Sync:
         for k in keys:
             if (t := placed(k)) is not None:
                 at_rank[t] = min(at_rank.get(t, rank[k]), rank[k])
-        for el in b["elements"]:
-            if el["key"] in keyset:
-                for oid in el.get("objects") or []:
-                    at_rank[oid] = min(at_rank.get(oid, rank[el["key"]]), rank[el["key"]])
+        for el in as_objects(b["elements"], "base slide elements"):
+            ek = el["key"]
+            if isinstance(ek, str) and ek in keyset:
+                for oid in _strs(el.get("objects"), "element objects"):
+                    at_rank[oid] = min(at_rank.get(oid, rank[ek]), rank[ek])
         stand_rank: dict[str, int] = {}             # page element -> the first of them it stands for
         for oid, r in at_rank.items():
-            el = stands_now.get(oid, oid)
-            stand_rank[el] = min(stand_rank.get(el, r), r)
+            el_id = stands_now.get(oid, oid)
+            stand_rank[el_id] = min(stand_rank.get(el_id, r), r)
         made_rank: dict[str, int] = {}
         for k, t in tops.items():
             if k in rank:
@@ -3298,28 +3747,30 @@ class Sync:
             oid = stands_now.get(made, made)
             if oid not in desired:
                 continue
-            r = made_rank.get(made)
+            mr = made_rank.get(made)
             drawn = {x for x, xr in at_rank.items()
-                     if r is None or xr <= r or stand_rank.get(stands_now.get(x, x), r) >= r}
+                     if mr is None or xr <= mr or stand_rank.get(stands_now.get(x, x), mr) >= mr}
             i = desired.index(oid)
             for j, other in enumerate(desired[:i]):
                 if would_hide(shown, made, other, drawn):
                     desired.insert(j, desired.pop(i))
                     break
-        desired += [x for x in now["order"] if x not in desired and x not in doomed]
-        order_now = [x for x in now["order"] if x not in doomed]
+        desired += [x for x in now_order if x not in desired and x not in doomed]
+        order_now = [x for x in now_order if x not in doomed]
         k = 0
         while k < len(desired) and k < len(order_now) and desired[k] == order_now[k]:
             k += 1
-        return [{"updatePageElementsZOrder": {"pageElementObjectIds": [x], "operation": "BRING_TO_FRONT"}} for x in desired[k:]]
+        return [front_request(x) for x in desired[k:]]
 
     @staticmethod
-    def move_requests(units: list[dict], bunits: dict, read: dict, scale: float) -> list[dict]:
+    def move_requests(units: Sequence[JsonMap], bunits: Mapping[str, Sequence[JsonMap]], read: JsonMap,
+                      scale: float) -> list[JsonObject]:
         """`move_requests_of` over units as `merge.plan_merge` writes them (the offline fuzz's replay)."""
         return Sync.move_requests_of([planned_unit_of(u, f"unit {n}") for n, u in enumerate(units)], bunits, read, scale)
 
     @staticmethod
-    def move_requests_of(units: Sequence[merge.PlannedUnit], bunits: dict, read: dict, scale: float) -> list[dict]:
+    def move_requests_of(units: Sequence[merge.PlannedUnit], bunits: Mapping[str, Sequence[JsonMap]], read: JsonMap,
+                         scale: float) -> list[JsonObject]:
         """The source's move written onto the deck's own objects. Every *root* of the unit takes the
         step: normally that is the converter's group, which carries its children, but when the person
         has taken the group apart the roots are the text box and each picture anchored to it, and
@@ -3327,7 +3778,7 @@ class Sync:
         the report calls the move applied (`override_requests` had the same assumption, live fuzz seed
         903). `merge.unit_shift` has already asked that one step fits every member of the unit, so the
         same step is what each root wants."""
-        reqs = []
+        reqs: list[JsonObject] = []
         for u in units:
             if isinstance(u.decision, merge.MoveUnit):
                 dx, dy = (v * scale for v in u.decision.delta)
@@ -3336,31 +3787,35 @@ class Sync:
         return reqs
 
     @staticmethod
-    def _unit_oids(w: SlideWork, ounits: dict, ukey: str, index: dict) -> list[str]:
+    def _unit_oids(w: SlideWork, ounits: Mapping[str, Sequence[JsonMap]], ukey: str,
+                   index: Mapping[str, int]) -> list[str]:
         """The new objects of a recreated unit: its main object and the pictures anchored to it."""
-        oids = []
+        oids: list[str] = []
         for m in ounits.get(ukey, []):
-            oid = w.new_oid.get(index[m["key"]]) if m["key"] in index else None
+            mk = m["key"]
+            oid = w.new_oid.get(index[mk]) if isinstance(mk, str) and mk in index else None
             if oid and oid not in oids:
                 oids.append(oid)
         return oids
 
-    def override_requests(self, work: Work, theirs: dict, now: dict, raw_before: dict,
-                          raw_now: dict) -> list[dict]:
+    def override_requests(self, work: Work, theirs: JsonMap, now: JsonMap, raw_before: Mapping[str, PageElement],
+                          raw_now: Mapping[str, PageElement]) -> list[JsonObject]:
         """Deck edits re-applied to recreated elements: geometry, merged text, styles. raw_before /
         raw_now: objectId -> page element of the deck before sync and now (for run styles)."""
-        before = {s["objectId"]: s for s in theirs["slides"]}
-        after = {s["objectId"]: s for s in now["slides"]}
-        reqs = []
+        before = _by_id(theirs, "theirs")
+        after = _by_id(now, "now")
+        reqs: list[JsonObject] = []
         for w in work.slides:
             p = w.plan
             if not isinstance(p, merge.UpdateSlide):
                 continue  # (only an updated slide has recreated units)
-            b = self.base["slides"][p.base]
-            bunits = merge.units(b["elements"])
-            ounits = merge.units(self.ours["slides"][p.ours]["elements"])
-            index = {e["key"]: k for k, e in enumerate(self.ours["slides"][p.ours]["elements"])}
+            b = _slides(self.base, "base")[p.base]
+            bunits = merge.units(as_objects(b["elements"], "base slide elements"))
+            o_elements = as_objects(_slides(self.ours, "ours")[p.ours]["elements"], "ours slide elements")
+            ounits = merge.units(o_elements)
+            index = {as_str(e["key"], "element key"): k for k, e in enumerate(o_elements)}
             t_read, n_read = before[p.object_id], after[p.object_id]
+            t_objects, n_objects = _objects(t_read, f"slide {p.object_id}"), _objects(n_read, f"slide {p.object_id}")
             for u in p.units:
                 d = u.decision
                 if not isinstance(d, merge.Recreate) or not merge.overrides_json(d.overrides):
@@ -3370,13 +3825,15 @@ class Sync:
                 main = w.new_oid[i]
                 top = w.tops.get(u.key, main)
                 anchor = bunits[u.key][0]
-                old_main = anchor["main"]
-                final_text = None
-                if isinstance(ov.text, merge.TableOverride) and main in n_read["objects"]:
-                    new_rb = n_read["objects"][main]
-                    cells = merge.table_merge(ov.text.base, new_rb.get("text") or "", ov.text.theirs,
-                                              new_rb.get("table"), ov.text.dims)
-                    current = merge.table_grid(new_rb.get("text"), new_rb.get("table"))
+                old_main = as_optional_str(anchor["main"], "base element main")
+                final_text: str | None = None
+                if isinstance(ov.text, merge.TableOverride) and main in n_objects:
+                    new_rb = as_object(n_objects[main], f"read-back {main}")
+                    new_text = as_optional_str(new_rb.get("text"), f"read-back {main}: text")
+                    table = new_rb.get("table")
+                    dims = None if table is None else [as_int(x, "read-back table") for x in as_array(table, "read-back table")]
+                    cells = merge.table_merge(ov.text.base, new_text or "", ov.text.theirs, dims, ov.text.dims)
+                    current = merge.table_grid(new_text, dims)
                     if cells is None or current is None:
                         self.warnings.append(f"slide {p.key}: {u.key}: deck cell edits clash with the new table; not re-applied")
                     else:
@@ -3385,38 +3842,47 @@ class Sync:
                                 if want != now_cell:  # the cell text ends in a newline Slides keeps
                                     reqs += merge.text_edit_requests(main, now_cell + "\n", want + "\n",
                                                                      {"rowIndex": r, "columnIndex": c})
-                elif isinstance(ov.text, merge.TextOverride) and main in n_read["objects"]:
-                    current = n_read["objects"][main].get("text") or ""
-                    merged, clashes, safe = merge.text_merge(ov.text.base, current, ov.text.theirs, ov.text.take)
+                elif isinstance(ov.text, merge.TextOverride) and main in n_objects:
+                    current_text = _text(as_object(n_objects[main], f"read-back {main}").get("text"),
+                                         f"read-back {main}: text")
+                    merged, _, safe = merge.text_merge(ov.text.base, current_text, ov.text.theirs, ov.text.take)
                     if not safe:
                         self.warnings.append(f"slide {p.key}: {u.key}: deck text edits clash with the new text; not re-applied")
                     else:
                         if not merged.endswith("\n"):
                             merged += "\n"
-                        reqs += merge.text_edit_requests(main, current, merged)
+                        reqs += merge.text_edit_requests(main, current_text, merged, None)
                         final_text = merged
                 if ov.text_style is not None:
-                    new_raw = raw_now.get(main, {})
-                    cells = None
-                    if "table" in new_raw:
-                        cells = [{"rowIndex": r, "columnIndex": c} for r, row in enumerate(new_raw["table"].get("tableRows", []))
-                                 for c, _ in enumerate(row.get("tableCells", []))]
+                    new_raw = raw_now.get(main)
+                    locations: list[google_types.SlidesTableCellLocation] | None = None
+                    if new_raw is not None and "table" in new_raw:
+                        rows = google_types.parts(new_raw["table"].get("tableRows"), "table.tableRows")
+                        locations = [{"rowIndex": r, "columnIndex": c} for r, row in enumerate(rows)
+                                     for c, _ in enumerate(google_types.parts(row.get("tableCells"), "tableRow.tableCells"))]
                     reqs += style_override_requests(main, {"runs": ov.text_style.runs, "paragraphs": ov.text_style.paragraphs},
-                                                    cells)
+                                                    locations)
                     if ov.text_style.ranges:
-                        base_styles = anchor.get("readback", {}).get(old_main, {}).get("text_styles", [])
-                        if old_main in raw_before and new_raw:
+                        readback = _obj(anchor.get("readback"), "base element readback")
+                        had = _obj(readback.get(old_main), f"base readback {old_main}") if old_main is not None else {}
+                        base_styles = _objs(had.get("text_styles"), "text_styles")
+                        if old_main is not None and old_main in raw_before and new_raw:
                             reqs += style_range_requests(main, raw_before[old_main], new_raw, base_styles, final_text)
                         else:
                             self.warnings.append(f"slide {p.key}: {u.key}: the deck's word styles could not be re-applied")
                 if ov.shape_style:
                     reqs += shape_style_requests(main, ov.shape_style)
-                if ov.geometry and top in n_read["objects"] and not isinstance(w.in_place.get(i), TableFill):
+                if ov.geometry and top in n_objects and not isinstance(w.in_place.get(i), TableFill):
                     # (a table refilled in place is still where, and as large as, the deck has it)
                     old_top = merge.unit_top(bunits[u.key], t_read) or old_main
-                    base_rb = next((m["readback"].get(old_top) for m in bunits[u.key] if old_top in m.get("readback", {})), None)
-                    theirs_rb = t_read["objects"].get(old_top)
-                    new_rb = n_read["objects"][top]
+                    base_rb: JsonObject = {}
+                    for m in bunits[u.key]:
+                        readbacks = _obj(m.get("readback"), "base element readback")
+                        if old_top is not None and old_top in readbacks:
+                            base_rb = _obj(readbacks[old_top], f"base readback {old_top}")
+                            break
+                    theirs_rb: JsonObject = _obj(t_objects.get(old_top), f"read-back {old_top}") if old_top is not None else {}
+                    new_rb = as_object(n_objects[top], f"read-back {top}")
                     if not base_rb or not theirs_rb:
                         continue
                     step = carried(base_rb, theirs_rb, new_rb)  # (merge: mode "delta", also when both moved it)
@@ -3435,9 +3901,10 @@ class Sync:
 
     # ---- the new base
 
-    def new_base(self, result: RunResult) -> dict:
+    def new_base(self, result: RunResult) -> JsonObject:
         work, theirs = result.work, result.theirs
-        now = {s["objectId"]: s for s in self.created["slides"]}
+        now = _by_id(self.created, "created")
+        base_slides, ours_slides = _slides(self.base, "base"), _slides(self.ours, "ours")
         entries: dict[str, JsonObject] = {}
         for w in work.slides:
             p = w.plan
@@ -3449,7 +3916,7 @@ class Sync:
                     # holds the frame's key and its place in the order (`base_order`); what it says
                     # follows the source, or a frame whose label or title changed after the deletion
                     # stops looking like this entry and comes back as a new slide.
-                    b, o = self.base["slides"][p.base], self.ours["slides"][p.ours]
+                    b, o = base_slides[p.base], ours_slides[p.ours]
                     entries[f"gone:{p.key}"] = {**b, **{k: o.get(k) for k in ("label", "title", "text", "page")},
                                                 "removed": False}   # the source has this frame
                     continue
@@ -3460,8 +3927,7 @@ class Sync:
                     # the entry says the source dropped it (`removed`), or it competes with the slide
                     # the frame really lives on for the frame that looks most like it - see
                     # `align_slides`.
-                    entries[p.object_id or f"gone:{p.key}"] = {**self.base["slides"][p.base],
-                                                               "label": None, "removed": True}
+                    entries[p.object_id or f"gone:{p.key}"] = {**base_slides[p.base], "label": None, "removed": True}
                     continue
                 case merge.HoldSlide():
                     # Nothing was written here (`merge.hold_slide`), and the entry must not say
@@ -3469,77 +3935,93 @@ class Sync:
                     # slide recorded the usual way would read next time as a change already made -
                     # and the edit this sync held back would be gone for good instead of waiting for
                     # the labels to be put right.
-                    b = self.base["slides"][p.base]
-                    entries[b["objectId"]] = dict(b)
+                    b = base_slides[p.base]
+                    entries[as_str(b["objectId"], "base slide objectId")] = dict(b)
                     continue
                 case merge.CreateSlide() | merge.UpdateSlide():
                     pass
                 case _:
                     assert_never(p)
-            o = self.ours["slides"][p.ours]
+            o = ours_slides[p.ours]
+            o_elements = as_objects(o["elements"], "ours slide elements")
             sid = w.sid
             if sid is None:
                 raise ValueError(f"slide {p.key}: written on no slide")
             read = now.get(sid)
             entry: JsonObject = {k: v for k, v in o.items() if k != "elements"}
-            elements = []
+            elements: list[JsonObject] = []
             if isinstance(p, merge.CreateSlide):
-                for i, e in enumerate(o["elements"]):
-                    oids = w.objects.get(i, [w.new_oid.get(i)])
-                    elements.append(self._element(e, oids, read))
+                for i, e in enumerate(o_elements):
+                    made: Sequence[str | None] = w.objects.get(i, [w.new_oid.get(i)])
+                    elements.append(self._element(e, made, read))
                 groups: list[Json] = [g for g in w.groups]
+                no_order: list[Json] = []
                 entry.update(objectId=sid, layoutObjectId=read["layoutObjectId"] if read else None,
                              background_readback=read["background"] if read else None,
                              notes_readback=read["notes"] if read else "", groups=groups,
-                             order=read["order"] if read else [])
+                             order=read["order"] if read else no_order)
             else:
-                b = self.base["slides"][p.base]
-                bunits, ounits = merge.units(b["elements"]), merge.units(o["elements"])
-                index = {e["key"]: k for k, e in enumerate(o["elements"])}
+                b = base_slides[p.base]
+                bunits, ounits = merge.units(as_objects(b["elements"], "base slide elements")), merge.units(o_elements)
+                index = {as_str(e["key"], "element key"): k for k, e in enumerate(o_elements)}
+                none: list[JsonObject] = []
+                read_objects = _obj(read.get("objects"), f"slide {sid}: objects") if read else {}
                 for u in p.units:
                     d = u.decision
                     match d:
                         case merge.CreateUnit() | merge.Recreate():
                             for mk in u.ours_members:
                                 i = index[mk]
-                                elements.append(self._element(o["elements"][i], w.objects.get(i, [w.new_oid[i]]), read))
+                                made_here: Sequence[str | None] = w.objects.get(i, [w.new_oid[i]])
+                                elements.append(self._element(o_elements[i], made_here, read))
                                 live = w.in_place.get(i)
                                 if isinstance(live, TableFill):  # (still the .pptx's table: `table_refill`)
-                                    elements[-1]["table_margins"] = [list(m) for m in live.margins]
+                                    margins: list[Json] = [_json_nums(m) for m in live.margins]
+                                    elements[-1]["table_margins"] = margins
                         case merge.MoveUnit():
                             for m in ounits[u.key]:
                                 old = next((x for x in bunits[u.key] if x["key"] == m["key"]), None)
                                 if old is None:
                                     continue
-                                rb = {oid: {**v, **{k: read["objects"][oid][k] for k in ("box", "transform")}}
-                                      if read and oid in read["objects"] else v for oid, v in old["readback"].items()}
+                                rb: JsonObject = {}
+                                for oid, v in as_object(old["readback"], "base element readback").items():
+                                    if read and oid in read_objects:
+                                        shown = as_object(read_objects[oid], f"read-back {oid}")
+                                        rb[oid] = {**as_object(v, f"base readback {oid}"),
+                                                   **{k: shown[k] for k in ("box", "transform")}}
+                                    else:
+                                        rb[oid] = v
                                 elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb,
                                                  **{k: old[k] for k in ("table_margins",) if k in old}})
                         case merge.AdoptObject():
                             # the deck's own object is what the source now draws (a picture pull put in the source)
                             for mk in u.ours_members:
-                                elements.append(self._element(o["elements"][index[mk]], [d.object_id], read))
+                                elements.append(self._element(o_elements[index[mk]], [d.object_id], read))
                         case merge.AdoptUnit():
                             # the source now says what the deck shows: ours IR, the deck's version of those fields
-                            fields = {"text": ("text",), "geometry": ("box", "transform", "size"),
-                                      "image": ("image", "box", "transform", "size")}
+                            fields: dict[str, tuple[str, ...]] = {
+                                "text": ("text",), "geometry": ("box", "transform", "size"),
+                                "image": ("image", "box", "transform", "size")}
                             for m in ounits[u.key]:
                                 old = next((x for x in bunits[u.key] if x["key"] == m["key"]), None)
                                 if old is None:
                                     continue
-                                rb = copy.deepcopy(old["readback"])
-                                live_obj = (read or {}).get("objects", {}).get(old.get("main"))
-                                if live_obj and old.get("main") in rb:
+                                rb = as_object(copy.deepcopy(old["readback"]), "base element readback")
+                                old_main = old.get("main")
+                                live_obj = read_objects.get(old_main) if isinstance(old_main, str) else None
+                                if live_obj and isinstance(old_main, str) and old_main in rb:
+                                    target = as_object(rb[old_main], f"base readback {old_main}")
+                                    shown = as_object(live_obj, f"read-back {old_main}")
                                     for f in d.adopt:
-                                        rb[old["main"]].update({k: live_obj[k] for k in fields.get(f, ()) if k in live_obj})
+                                        target.update({k: shown[k] for k in fields.get(f, ()) if k in shown})
                                 elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb,
                                                  **{k: old[k] for k in ("table_margins",) if k in old}})
                         case merge.KeepRemoved():
                             # A unit kept because the source dropped it says so, or the next sync reads
                             # a deck that no longer differs from the base and deletes it (merge.plan_unit).
-                            elements += [{**m, "removed": True} for m in bunits.get(u.key, [])]
+                            elements += [{**m, "removed": True} for m in bunits.get(u.key, none)]
                         case merge.KeptJoined() | merge.KeepUnit():
-                            elements += bunits.get(u.key, [])
+                            elements += bunits.get(u.key, none)
                         case merge.DeleteUnit() | merge.GoneUnit():
                             pass
                         case _:
@@ -3547,12 +4029,14 @@ class Sync:
                 background = new_background(p)
                 bg_conflict = b.get("background") != o.get("background") and not background
                 notes_kept = (b.get("notes") or "") != (o.get("notes") or "") and p.notes is None
-                entry.update(objectId=sid, layoutObjectId=b.get("layoutObjectId"), groups=b.get("groups", []),
-                             order=[x for x in read["order"] if x not in w.doomed] if read else b.get("order", []))
+                order: Json = (_json_strs([x for x in _strs(read["order"], "read.order") if x not in w.doomed])
+                               if read else _or_new_list(b, "order"))
+                entry.update(objectId=sid, layoutObjectId=b.get("layoutObjectId"), groups=_or_new_list(b, "groups"),
+                             order=order)
                 if b.get("left_alone"):
                     # the person's own unpaired objects stay theirs at every generation
                     # (`adopt_sync.build_base`, `merge.slide_touched`)
-                    entry["left_alone"] = list(b["left_alone"])
+                    entry["left_alone"] = list(as_array(b["left_alone"], "base slide left_alone"))
                 if background:
                     entry["background_readback"] = read["background"] if read else None
                 else:
@@ -3562,33 +4046,36 @@ class Sync:
                 if p.notes is not None:
                     entry["notes_readback"] = o.get("notes") or ""
                 else:
-                    entry["notes_readback"] = b.get("notes_readback", "")
+                    entry["notes_readback"] = b["notes_readback"] if "notes_readback" in b else ""
                     if notes_kept:
                         entry["notes"] = b.get("notes")
             # (the list `keys_the_source_took` gives back, as the base's JSON takes it)
             kept_elements: list[Json] = [dict(e) for e in merge.keys_the_source_took(elements)]
             entry["elements"] = kept_elements
             entries[sid] = entry
-        slides = [entries.pop(sid) for sid in base_order_of(placed_slides(work), [s["objectId"] for s in self.created["slides"]])
+        live_order = [as_str(s["objectId"], "created slide objectId") for s in _slides(self.created, "created")]
+        slides = [entries.pop(sid) for sid in base_order_of(placed_slides(work), live_order)
                   if sid in entries] + list(entries.values())
         # what `refit` moved or grew is the converter's doing, not the person's (`refit.reshape_base`)
         from .refit import reshape_base
         slides = reshape_base(slides, self.reshaped)
-        new = {**self.base, "generation": self.base.get("generation", 0) + 1, "revisionId": self.final_revision,
-               "source": snapshot.source_info(self.ours["source"]), "slides": slides}
-        pinned = set(self.theme_plan.pinned) if self.theme_plan is not None else set()
+        new_slides: list[Json] = [s for s in slides]
+        new: JsonObject = {**self.base, "generation": base_generation(self.base) + 1, "revisionId": self.final_revision,
+                           "source": snapshot.source_info(self.source), "slides": new_slides}
+        pinned = set(self.theme_plan.pinned) if self.theme_plan is not None else set[str]()
         if pinned:
             # The style theme_sync pinned onto placeholders (`inherited_pins`) looks the same and is
             # converter output: where the person had not restyled the object, the base takes it, or
             # the next sync reads the pins as the person's style edit.
             keys = ("text_styles", "paragraph_styles", "run_spans", "text_style_hash")
-            pre = {oid: as_object(o, oid) for s in as_objects(theirs["slides"], "slides")
-                   for oid, o in as_object(s.get("objects", {}), "objects").items() if oid in pinned}
-            post = {oid: o for s in self.created["slides"] for oid, o in s.get("objects", {}).items() if oid in pinned}
+            pre = {oid: as_object(o, oid) for s in _slides(theirs, "theirs")
+                   for oid, o in _obj(s.get("objects"), "objects").items() if oid in pinned}
+            post = {oid: as_object(o, oid) for s in _slides(self.created, "created")
+                    for oid, o in _obj(s.get("objects"), "objects").items() if oid in pinned}
             for entry in slides:
-                elements = as_objects(entry.get("elements", []), "elements")
+                elements = _objs(entry.get("elements"), "elements")
                 for i, el in enumerate(elements):   # (copies: a kept element is the old base's own dict)
-                    rbs = as_object(el.get("readback") or {}, "readback")
+                    rbs = _obj(el.get("readback"), "readback")
                     for oid in pinned & set(rbs):
                         rb = as_object(rbs[oid], oid)
                         if oid in pre and oid in post and all(rb.get(k) == pre[oid].get(k) for k in keys):
@@ -3600,22 +4087,33 @@ class Sync:
             from . import theme_sync
             new["master_background"] = self.master_key()
             # (a copy: the new base shares nothing with the old one)
-            rec = theme_sync.theme_record(json.loads(json.dumps(self.base["theme"])), "the sync base's theme")
+            rec = theme_sync.theme_record(copy.deepcopy(self.base["theme"]), "the sync base's theme")
             written = self.theme_plan.written if self.theme_plan is not None else {}
             new["theme"] = theme_sync.theme_json(theme_sync.new_record(rec, self.theme_side, written, self.raw_after))
         return new
 
-    def _element(self, e: dict, oids: Sequence[str | None], read: dict | None) -> dict:
+    def _element(self, e: JsonMap, oids: Sequence[str | None], read: JsonMap | None) -> JsonObject:
         # (a created slide's element nothing was made for is recorded with [None]: as it always was)
-        objects = (read or {}).get("objects", {})
-        return {**e, "objects": list(oids), "main": oids[0] if oids else None,
-                "readback": {oid: objects[oid] for oid in oids if oid in objects}}
+        objects = _obj(read.get("objects"), "read.objects") if read else {}
+        made: list[Json] = [oid for oid in oids]
+        return {**e, "objects": made, "main": oids[0] if oids else None,
+                "readback": {oid: objects[oid] for oid in oids if oid is not None and oid in objects}}
 
 
-def base_order(mplan: dict, by_plan: dict, live: list[str]) -> list[str]:
+def _or_new_list(m: JsonMap, key: str) -> Json:
+    """`m.get(key, [])`: the value where there is one (even None), else a new empty list."""
+    if key in m:
+        return m[key]
+    empty: list[Json] = []
+    return empty
+
+
+def base_order(mplan: JsonMap, by_plan: Mapping[int, JsonMap], live: Sequence[str]) -> list[str]:
     """`base_order_of` over a plan as JSON (`merge.merge_plan_json`) and plan id -> {"sid": ...}."""
-    placed = [(p["ours"], f"gone:{p['key']}" if p["action"] == "gone" else by_plan[id(p)]["sid"])
-              for p in mplan["slides"] if p["action"] in ("update", "create", "gone")]
+    placed = [(as_int(p["ours"], "plan slide ours"),
+               f"gone:{as_str(p['key'], 'plan slide key')}" if p["action"] == "gone"
+               else as_str(by_plan[id(p)]["sid"], "plan slide sid"))
+              for p in as_objects(mplan["slides"], "plan slides") if p["action"] in ("update", "create", "gone")]
     return base_order_of(placed, live)
 
 
@@ -3658,19 +4156,138 @@ def base_order_of(placed: Sequence[tuple[int, str]], live: Sequence[str]) -> lis
     return order
 
 
-def stand_in_request(oid: str, sid: str, key: tuple) -> dict:
-    size = {"width": emu(STAND_IN), "height": emu(STAND_IN)}
-    transform = {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0, "unit": "EMU"}
-    if key[0] == "BENT_CONNECTOR":
-        return {"createLine": {"objectId": oid, "lineCategory": "BENT", "elementProperties": {
-            "pageObjectId": sid, "size": size, "transform": transform}}}
-    return {"createShape": {"objectId": oid, "shapeType": key[0], "elementProperties": {
-        "pageObjectId": sid, "size": size, "transform": transform}}}
+def stand_in_request(oid: str, sid: str, preset: str) -> JsonObject:
+    """A plain shape of `preset` (a template key's first part) standing in for a template no live
+    object gives: created at 3,000,000 EMU, the size Slides stores every shape at."""
+    size = emu_size(STAND_IN, STAND_IN)
+    transform: google_types.AffineTransform = {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0,
+                                               "unit": "EMU"}
+    if preset == "BENT_CONNECTOR":
+        return google_types.slides_json({"createLine": {"objectId": oid, "lineCategory": "BENT", "elementProperties": {
+            "pageObjectId": sid, "size": size, "transform": transform}}})
+    return google_types.slides_json({"createShape": {"objectId": oid, "shapeType": preset, "elementProperties": {
+        "pageObjectId": sid, "size": size, "transform": transform}}})
 
 
 # ---------------------------------------------------------------- reports
 
-def _quote(value) -> str:
+@dataclass(frozen=True, kw_only=True)
+class SlidesSaid:
+    """The report's `slides` as the merge wrote them (`merge.report_json`): what happened to whole
+    slides - created, deleted, moved, kept though the source dropped them, held back, added in the deck."""
+    created: list[Json]
+    deleted: list[Json]
+    moved: list[Json]
+    kept: list[JsonObject]
+    held: list[JsonObject]
+    user_added: list[JsonObject]
+
+
+@dataclass(frozen=True, kw_only=True)
+class SyncReport:
+    """What a sync did and did not do: the merge's report of the slides with theme sync's changes and
+    conflicts after them (`report_of`), then what the run adds - every warning, what emit could
+    only make a picture of (`contained`; None: nothing, and the key is left out), the base's older
+    forms (`base_forms`, the same), the person's objects the source now runs over (`overruns`), what
+    `refit` moved. Its JSON is `sync_report_json`'s alone: the report files, the CLI's lines and the
+    agent's `data` all read it."""
+    applied: list[JsonObject]
+    overrides: list[JsonObject]
+    conflicts: list[JsonObject]
+    resolved: list[JsonObject]
+    converged: list[JsonObject]
+    user_objects: list[JsonObject]
+    slides: SlidesSaid
+    warnings: list[str]
+    contained: list[Json] | None
+    base_forms: list[JsonObject] | None
+    overruns: list[Json]
+    refit: list[Json]
+
+
+@dataclass(frozen=True, kw_only=True)
+class SyncResult:
+    """A sync, done (`sync`): which PDF went into which deck, whether it was a dry run, the base it
+    merged against (`base_from`: "drive" or "local"; `generation`: the one it wrote, or read when
+    it wrote none), the overlay steps it converted, how often it planned (`attempts`), the requests
+    it sent per phase, how long it took, its report, each slide's action (`plan_actions`) and the
+    recovery note a caller added (`__main__.add_recovery`; None: none). `sync_result_json` is its
+    JSON, and `write_reports` the one place it is written."""
+    pdf: str
+    presentation_id: str
+    url: str
+    dry_run: bool
+    base_from: str
+    generation: int
+    overlays: str
+    attempts: int
+    requests: dict[str, int]
+    seconds: float
+    report: SyncReport
+    actions: list[Json]
+    recovery: JsonObject | None
+
+
+def _jsons(xs: Sequence[JsonObject]) -> list[Json]:
+    return [x for x in xs]
+
+
+def slides_said_json(s: SlidesSaid) -> JsonObject:
+    return {"created": s.created, "deleted": s.deleted, "moved": s.moved, "kept": _jsons(s.kept),
+            "held": _jsons(s.held), "user_added": _jsons(s.user_added)}
+
+
+def sync_report_json(r: SyncReport) -> JsonObject:
+    """The report as the files and the callers have always had it, key for key and in that order."""
+    out: JsonObject = {"applied": _jsons(r.applied), "overrides": _jsons(r.overrides), "conflicts": _jsons(r.conflicts),
+                       "resolved": _jsons(r.resolved), "converged": _jsons(r.converged),
+                       "user_objects": _jsons(r.user_objects), "slides": slides_said_json(r.slides),
+                       "warnings": _json_strs(r.warnings)}
+    if r.contained is not None:
+        out["contained"] = r.contained
+    if r.base_forms is not None:
+        out["base_forms"] = _jsons(r.base_forms)
+    out["overruns"] = r.overruns
+    out["refit"] = r.refit
+    return out
+
+
+def sync_result_json(r: SyncResult) -> JsonObject:
+    """What `sync` answered as a dict, key for key: the report nested under `report`."""
+    requests: JsonObject = {k: v for k, v in r.requests.items()}
+    out: JsonObject = {"pdf": r.pdf, "presentationId": r.presentation_id, "url": r.url, "dry_run": r.dry_run,
+                       "base_from": r.base_from, "generation": r.generation, "overlays": r.overlays,
+                       "attempts": r.attempts, "requests": requests, "seconds": r.seconds,
+                       "report": sync_report_json(r.report), "actions": r.actions}
+    if r.recovery is not None:
+        out["recovery"] = r.recovery
+    return out
+
+
+def report_of_merge(merged: JsonMap, theme_applied: Sequence[JsonObject], theme_conflicts: Sequence[JsonObject],
+                    warnings: list[str], contained: list[Json] | None, base_forms: list[JsonObject] | None,
+                    converged: Sequence[JsonObject], overruns: list[Json], refit_moves: list[Json]) -> SyncReport:
+    """The sync report over the merge's (`merge.report_json`): theme sync's changes and conflicts
+    after the slides', and what the run adds (`warnings`: every one, the merge's first;
+    `converged`: those after the merge's)."""
+    slides = as_object(merged["slides"], "report.slides")
+    return SyncReport(
+        applied=[*as_objects(merged["applied"], "report.applied"), *theme_applied],
+        overrides=as_objects(merged["overrides"], "report.overrides"),
+        conflicts=[*as_objects(merged["conflicts"], "report.conflicts"), *theme_conflicts],
+        resolved=as_objects(merged["resolved"], "report.resolved"),
+        converged=[*as_objects(merged["converged"], "report.converged"), *converged],
+        user_objects=as_objects(merged["user_objects"], "report.user_objects"),
+        slides=SlidesSaid(created=list(as_array(slides["created"], "report.slides.created")),
+                          deleted=list(as_array(slides["deleted"], "report.slides.deleted")),
+                          moved=list(as_array(slides["moved"], "report.slides.moved")),
+                          kept=as_objects(slides["kept"], "report.slides.kept"),
+                          held=as_objects(slides["held"], "report.slides.held"),
+                          user_added=as_objects(slides["user_added"], "report.slides.user_added")),
+        warnings=warnings, contained=contained, base_forms=base_forms, overruns=overruns, refit=refit_moves)
+
+
+def _quote(value: Json) -> str:
     """One side of a conflict as a report shows it: a text on its own lines, anything else as the
     JSON these entries have always printed. Three versions of a paragraph one under the other is
     most of what a person opens a conflict report to see."""
@@ -3682,11 +4299,12 @@ def _quote(value) -> str:
                      for line in value.rstrip("\n").split("\n"))
 
 
-def conflict_lines(c: dict) -> str:
+def conflict_lines(c: JsonMap) -> str:
     """A conflict, its three sides under it, and - where the source's version can be written here
     instead - the one thing a person types to ask for that (`merge.Resolutions`)."""
     where = f"`{c['slide']}`" + (f" / `{c['element']}`" if c.get("element") else "")
-    out = [f"- {'`' + c['id'] + '` ' if c.get('id') else ''}{where}: **{c['field']}**, {c['resolution']}",
+    cid = c.get("id")
+    out = [f"- {'`' + as_str(cid, 'conflict id') + '` ' if cid else ''}{where}: **{c['field']}**, {c['resolution']}",
            "  - base:", _quote(c["base"]), "  - source:", _quote(c["ours"]), "  - deck:", _quote(c["theirs"])]
     if c.get("takeable") and c["resolution"] != merge.TAKEN_SAYS:
         out.append(f"  - to write the source's version here instead: sync again with "
@@ -3694,42 +4312,80 @@ def conflict_lines(c: dict) -> str:
     return "\n".join(out)
 
 
-def write_reports(out: Path, info: dict) -> tuple[Path, Path]:
+def _section(lines: list[str], title: str, items: Sequence[T], fmt: Callable[[T], str]) -> None:
+    lines.append(f"## {title} ({len(items)})")
+    if items:
+        lines.extend(fmt(x) for x in items)
+    else:
+        lines.append("none")
+    lines.append("")
+
+
+def _loc(x: JsonMap) -> str:
+    return f"`{x['slide']}`" + (f" / `{x['element']}`" if x.get("element") else "")
+
+
+def _fields(x: JsonMap) -> str:
+    return ", ".join(_strs(x["fields"], "report entry fields"))
+
+
+def _applied_line(x: JsonMap) -> str:
+    return f"- {_loc(x)}: {_fields(x)}" + (f" ({x['how']})" if x.get("how") else "")
+
+
+def _resolved_line(x: JsonMap) -> str:
+    return (f"- `{x['id']}` {_loc(x)}: **{x['field']}**. The deck said, and this sync wrote over:\n"
+            f"{_quote(x['was'])}")
+
+
+def _refit_line(x: JsonMap) -> str:
+    if x["what"] == "picture":
+        shift = _nums(x["shift"], "refit shift")
+        return f"- {_loc(x)}: the formula picture follows its hole, {shift[0]:+.1f} / {shift[1]:+.1f} pt"
+    return f"- {_loc(x)}: the {x['what']} grown {_number(x['grown'], 'refit grown'):.1f} pt"
+
+
+def _user_object_line(x: JsonMap) -> str:
+    return f"- `{x['slide']}`: {x['objectId']}" + (f" (copy of {x['copy_of']})" if x.get("copy_of") else "")
+
+
+def _or_none(xs: Sequence[Json]) -> str:
+    return f"{xs}" if xs else "none"
+
+
+def write_reports(out: Path, result: SyncResult) -> tuple[Path, Path]:
+    """sync-report.json and sync-report.md (a dry run's under names of their own): the result's
+    JSON with the report's parts at the top level (`slides_*` for its slides), and the same for a
+    person to read."""
     folder = out / "sync"
     folder.mkdir(parents=True, exist_ok=True)
-    stem = "sync-report" if not info.get("dry_run") else "sync-report-dry-run"
+    stem = "sync-report" if not result.dry_run else "sync-report-dry-run"
     jpath, mpath = folder / f"{stem}.json", folder / f"{stem}.md"
-    r = info["report"]
-    data = {k: v for k, v in info.items() if k != "report"}
-    data.update({k: v for k, v in r.items() if k != "slides"})
-    data.update({f"slides_{k}": v for k, v in r["slides"].items()})
+    whole = sync_result_json(result)
+    report = sync_report_json(result.report)
+    data: JsonObject = {k: v for k, v in whole.items() if k not in ("report", "recovery")}
+    data.update({k: v for k, v in report.items() if k != "slides"})
+    data.update({f"slides_{k}": v for k, v in slides_said_json(result.report.slides).items()})
+    if result.recovery is not None:   # (added after the run: `__main__.add_recovery`)
+        data["recovery"] = result.recovery
     jpath.write_text(json.dumps(data, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
-    lines = [f"# Sync report{' (dry run)' if info.get('dry_run') else ''}", "",
-             f"- PDF: `{info['pdf']}`", f"- Deck: {info['url']}", f"- Base: {info['base_from']} (generation {info['generation']})",
-             f"- Requests sent: {info['requests']}", ""]
-
-    def section(title, items, fmt):
-        lines.append(f"## {title} ({len(items)})")
-        lines.extend(fmt(x) for x in items) if items else lines.append("none")
-        lines.append("")
-    loc = lambda x: f"`{x['slide']}`" + (f" / `{x['element']}`" if x.get("element") else "")
-    section("Source changes applied", r["applied"], lambda x: f"- {loc(x)}: {', '.join(x['fields'])}" + (f" ({x['how']})" if x.get("how") else ""))
-    section("Deck edits kept (overrides)", r["overrides"], lambda x: f"- {loc(x)}: {', '.join(x['fields'])}")
-    section("Conflicts", r["conflicts"], conflict_lines)
-    section("Settled for the source (--take-source)", r.get("resolved") or [],
-            lambda x: f"- `{x['id']}` {loc(x)}: **{x['field']}**. The deck said, and this sync wrote over:\n"
-                      f"{_quote(x['was'])}")
-    section("Converged", r["converged"], lambda x: f"- {loc(x)}: {x['field']}")
-    section("Fitted to the words as merged", r.get("refit") or [],
-            lambda x: f"- {loc(x)}: " + (f"the formula picture follows its hole, {x['shift'][0]:+.1f} / {x['shift'][1]:+.1f} pt"
-                                         if x["what"] == "picture" else f"the {x['what']} grown {x['grown']:.1f} pt"))
-    s = r["slides"]
-    lines += ["## Slides", f"- created: {s['created'] or 'none'}", f"- deleted: {s['deleted'] or 'none'}",
-              f"- moved: {s['moved'] or 'none'}", f"- kept (removed from the source, edited in the deck): {s['kept'] or 'none'}",
-              f"- held (nothing written: which frame the slide is is in doubt): {s.get('held') or 'none'}",
-              f"- added in the deck: {s['user_added'] or 'none'}", ""]
-    section("Objects added in the deck", r["user_objects"], lambda x: f"- `{x['slide']}`: {x['objectId']}" + (f" (copy of {x['copy_of']})" if x.get("copy_of") else ""))
-    section("Warnings", r["warnings"], lambda x: f"- {x}")
+    r, s = result.report, result.report.slides
+    lines = [f"# Sync report{' (dry run)' if result.dry_run else ''}", "",
+             f"- PDF: `{result.pdf}`", f"- Deck: {result.url}",
+             f"- Base: {result.base_from} (generation {result.generation})",
+             f"- Requests sent: {result.requests}", ""]
+    _section(lines, "Source changes applied", r.applied, _applied_line)
+    _section(lines, "Deck edits kept (overrides)", r.overrides, lambda x: f"- {_loc(x)}: {_fields(x)}")
+    _section(lines, "Conflicts", r.conflicts, conflict_lines)
+    _section(lines, "Settled for the source (--take-source)", r.resolved, _resolved_line)
+    _section(lines, "Converged", r.converged, lambda x: f"- {_loc(x)}: {x['field']}")
+    _section(lines, "Fitted to the words as merged", [as_object(x, "refit") for x in r.refit], _refit_line)
+    lines += ["## Slides", f"- created: {_or_none(s.created)}", f"- deleted: {_or_none(s.deleted)}",
+              f"- moved: {_or_none(s.moved)}", f"- kept (removed from the source, edited in the deck): {_or_none(_jsons(s.kept))}",
+              f"- held (nothing written: which frame the slide is is in doubt): {_or_none(_jsons(s.held))}",
+              f"- added in the deck: {_or_none(_jsons(s.user_added))}", ""]
+    _section(lines, "Objects added in the deck", r.user_objects, _user_object_line)
+    _section(lines, "Warnings", r.warnings, lambda x: f"- {x}")
     mpath.write_text("\n".join(lines), encoding="utf-8")
     return jpath, mpath
 
@@ -3748,11 +4404,14 @@ def overlay_mode(asked: str | None, recorded: str | None) -> tuple[str, str | No
     return asked, None
 
 
-def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, overlays: str | None = None,
-         measure: bool = True, way_back=None, backup_mode: str = "auto",
-         force_adopted: bool = False, follow_labels: bool = False, take_source=()) -> dict:
-    """`way_back`: the backup a caller kept before this sync, as a dict - or a `guard.WayBack`
-    still making one on a thread of its own, which is collected before the first write."""
+def sync(pdf: Path, deck: str, out: Path | None, dry_run: bool, overlays: str | None, measure: bool,
+         way_back: "WayBack | None", backup_mode: str, force_adopted: bool, follow_labels: bool,
+         take_source: Sequence[str]) -> SyncResult:
+    """Merge `pdf` into the deck `deck` names, three ways (docs/sync.md). `out`: the folder its
+    base and reports go to (None: the deck's own, else the PDF's under `out_root`); `way_back`: the
+    recovery note a caller is making meanwhile (`guard.WayBack`), collected before the first write,
+    and asked what was kept before an adopted deck's first sync is refused (`backup_mode`: what the
+    person asked for); `take_source`: conflict ids to settle for the source."""
     from . import adopt_sync
     from .google_auth import drive_service, shared_service, slides_service
 
@@ -3772,8 +4431,8 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     facts: DriveFile | None = None
     with contextlib.suppress(HttpError, OSError):
         facts = snapshot.deck_info(drive, pid)  # name, parents, appProperties: read once, used four times
-    base, where = snapshot.load_base(pid, folder or out, drive, problems, facts)
-    if base is None:
+    loaded, where = snapshot.load_base(pid, folder or out, drive, problems, facts)
+    if loaded is None:
         if reading is not None:
             reading.cancel()
         if pool is not None:
@@ -3784,6 +4443,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
                                     "  not with the deck's URL. `convert` would make a second deck and leave this one "
                                     "with its comments and history behind.",
                                     *problems]))
+    base: JsonObject = loaded
     stale = snapshot.stale_base_warning(where, drive, pid, facts)
     warnings = problems + ([stale] if stale else [])
     overlays, mismatch = overlay_mode(overlays, as_optional_str(base.get("overlays"), "base.overlays"))
@@ -3795,25 +4455,26 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     # the deck's own width, not the frame convert writes into: a deck adopt took over is whatever
     # size the person made it, and everything this sync creates or moves is planned in slide pt.
     pictures = snapshot.hold_base_pictures(base, out)
-    ours = build_ours(pdf, snapshot.sync_work(out), base, overlays, adopt_sync.deck_width(base), pictures)
-    refreshed = snapshot.refresh_pictures(base, ours["slides"], ours["pairs"], ours["out"], pictures)
+    ours = build_ours_of(pdf, snapshot.sync_work(out), base, overlays, adopt_sync.deck_width(base), pictures)
+    refreshed = snapshot.refresh_pictures(base, ours.slides, ours.pairs, ours.out, pictures)
+    report_to = out
 
-    def check_plan(mplan: merge.MergePlan, theirs: dict) -> None:
+    def check_plan(mplan: merge.MergePlan, theirs: JsonObject) -> None:
         """An adopted deck's objects are a person's, not ours: refuse rather than write beside
         them (adopt_sync.problems). A dry run plans and reports; it writes nothing, so it never
         refuses - that is how a person sees what the sync wanted to do."""
-        kept = way_back.backup() if hasattr(way_back, "backup") else way_back
-        found = adopt_sync.problems(base, merge.merge_plan_json(mplan), theirs, kept, backup_mode)
+        kept = way_back.backup() if way_back is not None else None
+        found = adopt_sync.problems_of(base, mplan, theirs, kept, backup_mode)
         if found:
-            raise adopt_sync.FirstSyncRefused(adopt_sync.refusal_message(pid, out, pdf, found), found)
+            raise adopt_sync.FirstSyncRefused(adopt_sync.refusal_message(pid, report_to, pdf, found), found)
 
-    check = None
+    check: "Callable[[merge.MergePlan, JsonObject], None] | None" = None
     if base.get("origin") == adopt_sync.ORIGIN and not dry_run and not force_adopted:
         check = check_plan
     # A base that may be behind the deck never decides on its own that an object is a leftover.
     s = Sync(slides, drive, pid, base, ours, out, dry_run, measure, trust_generation=stale is None,
-             check_plan=check, follow_labels=follow_labels, take_source=tuple(take_source or ()), facts=facts,
-             way_back=way_back if hasattr(way_back, "result") else None)
+             check_plan=check, follow_labels=follow_labels, take_source=tuple(take_source), facts=facts,
+             way_back=way_back)
     try:
         s.first_read = reading.result() if reading is not None else None
     except (HttpError, OSError):
@@ -3826,38 +4487,24 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     except BaseException:
         s.await_deletes()   # (a run that ends badly still owns the file it sent away)
         raise
-    report = s.report_of(result.plan)
-    # (the report's own list: what is said after the base is stored lands in it too)
-    said: list[Json] = [*as_array(report["warnings"], "report.warnings")]
-    report["warnings"] = said
+    merged = merge.report_json(result.plan.report)
+    # (every warning, the merge's first; what is said after the base is stored lands in it too)
+    said = [*_strs(merged["warnings"], "report.warnings")]
     # (a slide the deck deleted or the source dropped is nobody's business any more)
     updated = {p.key for p in result.plan.slides if isinstance(p, (merge.UpdateSlide, merge.HoldSlide))}
     said += s.warnings + warnings + unwritten_warnings(
-        [u for u in ours.get("context_unwritten") or [] if u.slide in updated], ours)
-    said += unread_warnings([u for u in ours["context_unread"] if u.slide in updated], ours["slides"])
-    contained, says = contained_report(ours["contained"], ours["slides"], result.plan)
+        [u for u in ours.context_unwritten if u.slide in updated], s.ours)
+    said += unread_warnings([u for u in ours.context_unread if u.slide in updated], ours.slides)
+    contained, says = contained_report(ours.contained, ours.slides, result.plan)
     said += says
-    if contained:  # (what emit could not plan and made a picture: `planned`)
-        report["contained"] = contained_json(contained)
-    forms: list[snapshot.BaseForm] = ours["base_forms"]
+    forms: list[snapshot.BaseForm] = ours.base_forms
     said += snapshot.base_form_warnings(forms)
-    if forms:  # (a base in an older form, read in today's: `base_today`)
-        report["base_forms"] = [f for f in snapshot.base_form_json(forms)]
-    converged: list[Json] = [*as_array(report["converged"], "report.converged")]
-    for r in refreshed:
-        converged.append({"slide": r.slide, "element": r.element, "field": "image",
-                          "how": "the same picture, written differently"})
-    report["converged"] = converged
-    report["overruns"] = s.overruns
-    report["refit"] = s.refit_moves
-    info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
-            "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0), "overlays": overlays,
-            "attempts": result.attempts, "requests": s.sent, "seconds": 0.0,
-            "report": report,
-            "actions": plan_actions(result.plan)}
+    converged: list[JsonObject] = [{"slide": r.slide, "element": r.element, "field": "image",
+                                    "how": "the same picture, written differently"} for r in refreshed]
+    generation = base_generation(base)
     adopted = any(isinstance(u.decision, (merge.AdoptUnit, merge.AdoptObject))
                   for p in result.plan.slides for u in slide_units(p))
-    recovered = bool(s.recovery.get("sweep") or s.recovery.get("sweep_slides") or s.recovery.get("heal")
+    recovered = bool(s.recovery.sweep or s.recovery.sweep_slides or s.recovery.heal
                      or base.get("pending") or base.get("cleanup"))
     if not dry_run and (result.work.writes or adopted or refreshed or recovered):
         new = s.new_base(result) if (result.work.writes or adopted or refreshed) else dict(base)
@@ -3867,7 +4514,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         if s.cleanup_ids:
             # Stored before the old objects are deleted: whatever happens next, the base that the
             # next sync finds either still points at them or knows they have to go.
-            new["cleanup"] = list(s.cleanup_ids)
+            new["cleanup"] = _json_strs(s.cleanup_ids)
         why = snapshot.store_base(new, out, drive, "base", facts)
         if why:
             said.append(
@@ -3889,12 +4536,21 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
                 snapshot.save_local(new, out)
                 if snapshot.mark_cleaned(drive, pid, as_int(new["generation"], "base.generation"), facts):
                     snapshot.store_base(new, out, drive, "base", facts)
-        info["generation"] = new["generation"]
+        generation = as_int(new["generation"], "base.generation")
     elif not dry_run and where == "drive":
         snapshot.save_local(base, out)  # (refresh the cache)
     s.await_deletes()   # the staging deck went on a thread; nobody leaves before it is gone
+    # (what emit could not plan and made a picture: `planned`; a base in an older form, read in
+    # today's: `base_today`)
+    report = report_of_merge(merged, s.theme_applied, s.theme_conflicts, said,
+                             contained_json(contained) if contained else None,
+                             snapshot.base_form_json(forms) if forms else None,
+                             converged, s.overruns, s.refit_moves)
     # Measured where the run really ends: storing the base is Drive round trips of the sync's own,
     # and a number that stopped before them was a number about something else.
-    info["seconds"] = round(time.monotonic() - started, 1)
-    write_reports(out, info)
-    return info
+    done = SyncResult(pdf=str(pdf), presentation_id=pid, url=f"https://docs.google.com/presentation/d/{pid}/edit",
+                      dry_run=dry_run, base_from=where, generation=generation, overlays=overlays,
+                      attempts=result.attempts, requests=s.sent, seconds=round(time.monotonic() - started, 1),
+                      report=report, actions=plan_actions(result.plan), recovery=None)
+    write_reports(out, done)
+    return done

@@ -29,21 +29,21 @@ from .test_sync_containment import SYNC_DECKS, talk_base
 FIGURE = ("convergence", "image/figure/0")   # (the sync talk's plot, which the `figure` variant redraws)
 
 
-def converted_for_sync(pdf: Path, out: Path, base: dict) -> tuple[dict, list[snapshot.Refreshed]]:
+def converted_for_sync(pdf: Path, out: Path, base: dict) -> tuple[sync.Built, list[snapshot.Refreshed]]:
     """What `sync.sync` does before it plans: the base's pictures held, the new PDF converted into
     the deck folder's `sync_work`, and the pictures written differently taken into the base."""
     pictures = snapshot.hold_base_pictures(base, out)
-    ours = sync.build_ours(pdf, snapshot.sync_work(out), base, "last", SLIDE_W, pictures)
-    return ours, snapshot.refresh_pictures(base, ours["slides"], ours["pairs"], ours["out"], pictures)
+    ours = sync.build_ours_of(pdf, snapshot.sync_work(out), base, "last", SLIDE_W, pictures)
+    return ours, snapshot.refresh_pictures(base, ours.slides, ours.pairs, ours.out, pictures)
 
 
-def written_by_a_sync(base: dict, ours: dict) -> dict:
+def written_by_a_sync(base: dict, ours: sync.Built) -> dict:
     """The base a sync that recreated every unit the source changed leaves behind, as
     `Sync.new_base` records one: the new conversion's element, with the object the deck now holds
     for it (read back as the base had it: the person has not touched it)."""
     after = copy.deepcopy(base)
-    for j, i in ours["pairs"].items():
-        now = {e["key"]: e for e in ours["slides"][j]["elements"]}
+    for j, i in ours.pairs.items():
+        now = {e["key"]: e for e in ours.slides[j]["elements"]}
         elements = after["slides"][i]["elements"]
         for k, e in enumerate(elements):
             o = now.get(e["key"])
@@ -63,12 +63,12 @@ def test_a_figure_the_source_changed_back_is_written_back(tmp_path: Path) -> Non
 
     ours, refreshed = converted_for_sync(SYNC_DECKS / "figure.pdf", out, base)
     assert refreshed == []
-    assert unit(merge.plan_merge(copy.deepcopy(base), ours, theirs), *FIGURE)["action"] == "recreate"
+    assert unit(merge.plan_merge(copy.deepcopy(base), sync.ours_json(ours), theirs), *FIGURE)["action"] == "recreate"
     base = written_by_a_sync(base, ours)
 
     ours, refreshed = converted_for_sync(SYNC_DECKS / "v1.pdf", out, base)
     assert refreshed == [], "v1's plot is not the redrawn one written differently"
-    assert unit(merge.plan_merge(copy.deepcopy(base), ours, theirs), *FIGURE)["action"] == "recreate"
+    assert unit(merge.plan_merge(copy.deepcopy(base), sync.ours_json(ours), theirs), *FIGURE)["action"] == "recreate"
     # ... and the redrawn plot the base records was held before the render wrote v1's over it
     [held] = [snapshot.find_base_pictures(base, snapshot.picture_folders(out)).folder(e)
               for s in base["slides"] if s["key"] == FIGURE[0] for e in s["elements"] if e["key"] == FIGURE[1]]

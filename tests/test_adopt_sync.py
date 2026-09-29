@@ -11,6 +11,7 @@ the whole of what they get, so it is part of the product.
 """
 
 import copy
+import dataclasses
 import json
 import random
 from pathlib import Path
@@ -464,7 +465,7 @@ def adopted(tmp_path):
                              conv_element("p1e1", (30, 90, 200, 106), "Learn more")]])
     pdf = tmp_path / "main.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf)
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", None)
     return {"base": base, "target": tgt, "pres": pres, "conv": conv}
 
 
@@ -502,7 +503,7 @@ def test_the_base_counts_what_the_layout_draws_apart_from_what_it_could_not_plac
                              conv_element("p0e1", (12, 4, 118, 18), "conference 2026")]])
     pdf = tmp_path / "main.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf)
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", None)
     el = base["slides"][0]["elements"][1]
     assert el["objects"] == [] and el["from_layout"] is True, "the merge reads this, not the summary"
     assert base["adopt"]["unpaired"] == []
@@ -525,7 +526,7 @@ def test_the_base_says_which_misses_are_cells_of_the_decks_own_tables(tmp_path):
                              conv_element("p0e2", (40, 90, 200, 102), "Highest quality")]])
     pdf = tmp_path / "main.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf)
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", None)
     els = base["slides"][0]["elements"]
     assert all(e["objects"] == [] and e["in_table"] is True for e in els)
     assert [u["why"] for u in base["adopt"]["unpaired"]] == [adopt_sync.IN_A_TABLE] * 3
@@ -543,7 +544,7 @@ def test_the_base_says_which_miss_was_drawn_out_of_a_box_beside_it(tmp_path):
                               "bbox": [34, 56, 44, 66], "anchor": "p0e0"}]])
     pdf = tmp_path / "main.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf)
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", None)
     words, icon = base["slides"][0]["elements"]
     assert words["objects"] == ["gBOX"] and icon["objects"] == []
     assert icon["drawn_from"] == words["key"] and icon["anchor"] == words["key"]
@@ -582,7 +583,7 @@ def test_the_base_names_the_persons_groups_and_the_boxes_that_draw_nothing(tmp_p
     conv = conversion(tgt, [[conv_element("p0e0", (30, 40, 130, 56), "Why it matters")]])
     pdf = tmp_path / "main.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf)
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", None)
     entry = base["slides"][0]
     assert entry["elements"][0]["main"] == "gA", "the box inside the group still pairs"
     assert entry["left_alone"] == ["gG", "gBLANK"], "the group around it and the box that draws nothing"
@@ -613,7 +614,7 @@ def test_the_base_records_the_boxes_every_later_sync_folds_against(tmp_path):
     adopt_sync.fold_slides(conv, folds)
     pdf = tmp_path / "main.pdf"
     pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, folds=folds)
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", folds)
     label = conv["slides"][0]["label"]
     assert base["adopt"]["boxes"][label] == [{"object": "gA", "kind": "text", "bbox": [30, 40, 260, 112],
                                              "text": "Why it matters Three things happened"}]
@@ -639,7 +640,7 @@ def test_the_base_claims_no_master_background(adopted):
 
 def test_the_base_is_written_where_sync_looks_for_it(adopted, tmp_path):
     out = tmp_path / "adopt-work"
-    path = adopt_sync.store(adopted["base"], out)
+    path = adopt_sync.store(adopted["base"], out, None)
     assert path == snapshot.local_path(out) == out / "sync" / "base.json"
     assert json.loads(path.read_text(encoding="utf-8"))["origin"] == "adopt"
     assert sync_mod.resolve_deck(str(out)) == ("PERSONS_DECK", out), "sync --deck <the adopt folder>"
@@ -659,7 +660,8 @@ def test_a_source_whose_frames_are_not_the_decks_slides_gets_no_base(adopted):
 
 
 def test_a_deck_read_without_its_presentation_gets_no_base(tmp_path, adopted):
-    base, why = adopt_sync.record(tmp_path / "main.tex", tmp_path, adopted["target"], {"slides": []})
+    base, why = adopt_sync.record(tmp_path / "main.tex", tmp_path, adopted["target"], {"slides": []},
+                                  None, log=print)
     assert base is None
     assert why == "the deck was read without its presentation (no read-back to record)"
 
@@ -1082,6 +1084,57 @@ def test_a_converted_deck_is_not_asked_any_of_this(world, tmp_path):
     ours = ours_of(world["doc"], base, tmp_path)
     live = W.live_json(W.live_of(base))
     assert adopt_sync.problems(base, merge.plan_merge(base, ours, live), live, None, "auto") == []
+
+
+def forced(plan: merge.MergePlan) -> merge.MergePlan:
+    """The plan a merge saying otherwise would make: every slide kept for the deck deleted and every
+    unit held for a blind member recreated - what the gates stand behind."""
+    def unit(u: merge.PlannedUnit) -> merge.PlannedUnit:
+        d = u.decision
+        if isinstance(d, merge.KeepUnit) and d.blind is not None:
+            none = merge.Overrides(text=None, text_style=None, shape_style=None, geometry=False)
+            return dataclasses.replace(u, decision=merge.Recreate(key=d.key, source=d.source, deck=d.deck,
+                                                                  overrides=none))
+        return u
+    slides: list[merge.SlidePlan] = []
+    for p in plan.slides:
+        if isinstance(p, merge.KeepRemovedSlide):
+            p = merge.DeleteSlide(key=p.key, base=p.base, object_id=p.object_id)
+        elif isinstance(p, merge.UpdateSlide):
+            p = dataclasses.replace(p, units=tuple(unit(u) for u in p.units))
+        slides.append(p)
+    return dataclasses.replace(plan, slides=tuple(slides))
+
+
+def test_the_typed_gate_answers_as_the_gate_over_the_plans_json(world):
+    """`problems_of` reads a `MergePlan`, `problems` the plan's JSON (the fuzz's and these tests'):
+    one gate, so over every refusal each can make they must say the same thing."""
+    live = world["live"]
+    seen: set[str] = set()
+    for edit in ("none", "reword", "delete_slide", "add_element", "unpair"):
+        for variant in ("first", "generation 4", "16:10"):
+            generation = 4 if variant == "generation 4" else 0
+            if edit == "unpair":
+                base, doc = unpair(world, generation)
+            else:
+                base = {**copy.deepcopy(world["base"]), "generation": generation}
+                doc = copy.deepcopy(world["doc"])
+                if edit != "none":
+                    edit_source(getattr(fuzz_sync, f"src_{edit}"), 5, doc, world["out"])
+            if variant == "16:10":
+                base["deck_page_size"] = [1440.0, 900.0]
+            ours = W.build_ours(doc, base, world["out"])
+            plan = merge.plan_merge_of(sync_model.base(base), ours.typed, sync_model.deck_read(live),
+                                       None, False, merge.Resolutions(()))
+            for typed in (plan, forced(plan)):
+                mplan = merge.merge_plan_json(typed)
+                for way_back in (None, KEPT, {"warnings": ["could not export the deck"]}):
+                    for mode in ("auto", "none"):
+                        want = adopt_sync.problems(base, mplan, live, way_back, mode)
+                        assert adopt_sync.problems_of(base, typed, live, way_back, mode) == want, \
+                            (edit, variant, way_back, mode)
+                        seen |= {p["reason"] for p in want}
+    assert seen == {"no-way-back", "slides-deleted", "unpaired", "page-shape"}, "every refusal was asked"
 
 
 # ---------------------------------------------------------------- the round trip

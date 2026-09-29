@@ -69,7 +69,7 @@ def test_the_batch_size_is_the_library_s_unless_the_variable_says_otherwise():
     assert faults.batch_size(400) == 400
     os.environ[faults.SIZE] = "40"
     assert faults.batch_size(400) == 40
-    assert len(sync.batches([{"a": 1}] * 90)) == 3
+    assert len(sync.batches([{"a": 1}] * 90, sync.CHUNK)) == 3
     os.environ[faults.SIZE] = "not a number"
     assert faults.batch_size(400) == 400
     del os.environ[faults.SIZE]
@@ -134,15 +134,16 @@ def test_a_recreated_unit_deletes_nothing_in_the_content_phase():
     that is what lets a killed sync be run again without the person's edit being gone."""
     from collections import defaultdict
 
-    from beamer2slides.sync import build_ours
+    from beamer2slides.sync import build_ours_of
     v1 = SYNC_DECKS / "v1.pdf"
     if not v1.exists():
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
-    first = build_ours(v1, Path(os.environ.get("TMP", ".")) / "b2s-crash-ours", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
-    s = bare_sync(ours=first, plan=first["plan"], scale=first["plan"].scale, tok="1zz",
+    first = build_ours_of(v1, Path(os.environ.get("TMP", ".")) / "b2s-crash-ours", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
+    s = bare_sync(tok="1zz",
                   urls=defaultdict(lambda: "https://example.com/staged.png"))
-    j = next(k for k, o in enumerate(first["slides"]) if o["key"] == "policy")
-    base_slide = copy.deepcopy(first["slides"][j])
+    sync_work.with_ours(s, first)
+    j = next(k for k, o in enumerate(first.slides) if o["key"] == "policy")
+    base_slide = copy.deepcopy(first.slides[j])
     objects = {}
     for e in base_slide["elements"]:
         oid = f"OLD_{e['key'].replace('/', '_')}"
@@ -302,27 +303,27 @@ def live(objects, sid="S1"):
 def test_a_leftover_object_of_an_interrupted_sync_is_swept():
     base = recovery_base(pending={"generation": 2, "token": "2ab", "objects": {"intro/text/body/0": ["b2s_aaaaaa_bbbbbb_2ab"]}})
     theirs = live({"OLD1": readback(), "b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0")})
-    rec = sync.plan_recovery(base, theirs, ["intro"])
-    assert rec["sweep"] == ["b2s_aaaaaa_bbbbbb_2ab"]
-    assert rec["heal"] == []
+    rec = sync.plan_recovery(base, theirs, ["intro"], True)
+    assert rec.sweep == ["b2s_aaaaaa_bbbbbb_2ab"]
+    assert rec.heal == []
 
 
 def test_a_leftover_is_recognised_by_its_id_even_without_a_journal():
     theirs = live({"OLD1": readback(), "b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0")})
-    rec = sync.plan_recovery(recovery_base(), theirs, ["intro"])
-    assert rec["sweep"] == ["b2s_aaaaaa_bbbbbb_2ab"]
+    rec = sync.plan_recovery(recovery_base(), theirs, ["intro"], True)
+    assert rec.sweep == ["b2s_aaaaaa_bbbbbb_2ab"]
 
 
 def test_an_object_a_person_made_is_never_swept():
     theirs = live({"OLD1": readback(), "g2abc_0_3": readback(), "b2s_s003_f1": readback()})
-    rec = sync.plan_recovery(recovery_base(), theirs, ["intro"])
-    assert rec["sweep"] == [] and rec["heal"] == []
+    rec = sync.plan_recovery(recovery_base(), theirs, ["intro"], True)
+    assert rec.sweep == [] and rec.heal == []
 
 
 def test_an_object_of_this_base_s_own_generation_is_not_a_leftover():
     theirs = live({"OLD1": readback(), "b2s_aaaaaa_bbbbbb_1cd": readback("b2s:intro/text/body/0")})
-    rec = sync.plan_recovery(recovery_base(generation=1), theirs, ["intro"])
-    assert rec["sweep"] == []
+    rec = sync.plan_recovery(recovery_base(generation=1), theirs, ["intro"], True)
+    assert rec.sweep == []
 
 
 def test_an_element_whose_objects_an_older_sync_deleted_takes_over_the_new_one():
@@ -330,12 +331,12 @@ def test_an_element_whose_objects_an_older_sync_deleted_takes_over_the_new_one()
     replacement but no base entry for it. It must be adopted, not reported as deleted in the deck."""
     theirs = live({"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", text="new"),
                    "b2s_aaaaaa_bbbbbb_2ab_g": readback(None, kind="elementGroup")})
-    rec = sync.plan_recovery(recovery_base(), theirs, ["intro"])
-    assert rec["sweep"] == []
-    assert rec["heal"] == [{"slide": "intro", "element": "text/body/0", "objectId": "b2s_aaaaaa_bbbbbb_2ab",
-                            "objects": ["b2s_aaaaaa_bbbbbb_2ab", "b2s_aaaaaa_bbbbbb_2ab_g"]}]
+    rec = sync.plan_recovery(recovery_base(), theirs, ["intro"], True)
+    assert rec.sweep == []
+    assert rec.heal == [sync.Heal(slide="intro", element="text/body/0", object_id="b2s_aaaaaa_bbbbbb_2ab",
+                                  objects=["b2s_aaaaaa_bbbbbb_2ab", "b2s_aaaaaa_bbbbbb_2ab_g"])]
     base = recovery_base()
-    done = sync.heal_base(base, rec["heal"], theirs, same_source=True)
+    done = sync.heal_base(base, rec.heal, theirs, same_source=True)
     el = base["slides"][0]["elements"][0]
     assert done == ["intro/text/body/0"]
     assert el["main"] == "b2s_aaaaaa_bbbbbb_2ab" and el["readback"]["b2s_aaaaaa_bbbbbb_2ab"]["text"] == "new"
@@ -345,8 +346,8 @@ def test_an_element_whose_objects_an_older_sync_deleted_takes_over_the_new_one()
 def test_a_healed_element_of_another_source_version_is_written_over_again():
     theirs = live({"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", text="new")})
     base = recovery_base()
-    rec = sync.plan_recovery(base, theirs, ["intro"])
-    sync.heal_base(base, rec["heal"], theirs, same_source=False)
+    rec = sync.plan_recovery(base, theirs, ["intro"], True)
+    sync.heal_base(base, rec.heal, theirs, same_source=False)
     el = base["slides"][0]["elements"][0]
     assert el["ir_hash"] == "interrupted"
     assert set(el["fields"].values()) == {"interrupted"}
@@ -361,7 +362,7 @@ def test_a_swept_group_takes_its_children_with_it():
                    gid: readback(None, kind="elementGroup"),
                    "b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", parent_group=gid),
                    "b2s_aaaaaa_cccccc_2ab": readback("b2s:intro/image/figure/0", parent_group=gid)})
-    assert sync.plan_recovery(recovery_base(), theirs, ["intro"])["sweep"] == [gid]
+    assert sync.plan_recovery(recovery_base(), theirs, ["intro"], True).sweep == [gid]
 
 
 def test_objects_on_a_swept_slide_are_not_named_again():
@@ -371,8 +372,8 @@ def test_objects_on_a_swept_slide_are_not_named_again():
                          {"objectId": sid, "notes": "", "background": {}, "layoutObjectId": "L1",
                           "objects": {"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:extra/text/body/0")},
                           "order": ["b2s_aaaaaa_bbbbbb_2ab"]}]}
-    rec = sync.plan_recovery(recovery_base(), theirs, ["intro", "extra"])
-    assert rec["sweep_slides"] == [sid] and rec["sweep"] == []
+    rec = sync.plan_recovery(recovery_base(), theirs, ["intro", "extra"], True)
+    assert rec.sweep_slides == [sid] and rec.sweep == []
 
 
 def test_a_slide_an_interrupted_sync_created_is_swept_only_when_it_is_created_again():
@@ -381,8 +382,8 @@ def test_a_slide_an_interrupted_sync_created_is_swept_only_when_it_is_created_ag
                           "background": {}, "layoutObjectId": "L1"},
                          {"objectId": sid, "objects": {}, "order": [], "notes": "", "background": {},
                           "layoutObjectId": "L1"}]}
-    assert sync.plan_recovery(recovery_base(), theirs, ["intro", "extra"])["sweep_slides"] == [sid]
-    assert sync.plan_recovery(recovery_base(), theirs, ["intro"])["sweep_slides"] == []
+    assert sync.plan_recovery(recovery_base(), theirs, ["intro", "extra"], True).sweep_slides == [sid]
+    assert sync.plan_recovery(recovery_base(), theirs, ["intro"], True).sweep_slides == []
 
 
 def test_a_base_that_may_be_behind_the_deck_sweeps_nothing_on_a_guess():
@@ -392,12 +393,12 @@ def test_a_base_that_may_be_behind_the_deck_sweeps_nothing_on_a_guess():
     other checkout's sync - so only what this base itself names is swept. Healing still happens:
     it takes an object over instead of deleting it."""
     theirs = live({"OLD1": readback(), "b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0")})
-    assert sync.plan_recovery(recovery_base(), theirs, ["intro"], trust_generation=False)["sweep"] == []
+    assert sync.plan_recovery(recovery_base(), theirs, ["intro"], False).sweep == []
     named = recovery_base(cleanup=["b2s_aaaaaa_bbbbbb_2ab"])  # this base's own dead run named it
-    assert sync.plan_recovery(named, theirs, ["intro"], trust_generation=False)["sweep"] == \
+    assert sync.plan_recovery(named, theirs, ["intro"], False).sweep == \
         ["b2s_aaaaaa_bbbbbb_2ab"]
     gone = live({"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", text="new")})  # OLD1 deleted
-    assert sync.plan_recovery(recovery_base(), gone, ["intro"], trust_generation=False)["heal"]
+    assert sync.plan_recovery(recovery_base(), gone, ["intro"], False).heal
 
 
 def test_a_slide_is_swept_on_a_guess_only_when_the_base_is_the_deck_s_own():
@@ -407,8 +408,8 @@ def test_a_slide_is_swept_on_a_guess_only_when_the_base_is_the_deck_s_own():
                          {"objectId": sid, "objects": {}, "order": [], "notes": "", "background": {},
                           "layoutObjectId": "L1"}]}
     keys = ["intro", "extra"]
-    assert sync.plan_recovery(recovery_base(), theirs, keys)["sweep_slides"] == [sid]
-    assert sync.plan_recovery(recovery_base(), theirs, keys, trust_generation=False)["sweep_slides"] == []
+    assert sync.plan_recovery(recovery_base(), theirs, keys, True).sweep_slides == [sid]
+    assert sync.plan_recovery(recovery_base(), theirs, keys, False).sweep_slides == []
 
 
 def test_the_text_an_interrupted_sync_overwrote_in_a_placeholder_comes_back_for_the_merge():
@@ -416,9 +417,9 @@ def test_the_text_an_interrupted_sync_overwrote_in_a_placeholder_comes_back_for_
                       "text_style_hash": "edited"}}
     base = recovery_base(pending={"generation": 2, "token": "2ab", "objects": {}, "in_place": saved})
     theirs = live({"OLD1": readback(text="the source's new title\n")})
-    rec = sync.plan_recovery(base, theirs, ["intro"])
-    assert rec["restore"] == saved
-    assert sync.restore_in_place(theirs, rec["restore"]) == ["OLD1"]
+    rec = sync.plan_recovery(base, theirs, ["intro"], True)
+    assert rec.restore == saved
+    assert sync.restore_in_place(theirs, rec.restore) == ["OLD1"]
     assert theirs["slides"][0]["objects"]["OLD1"]["text"] == "the person's title\n"
     assert theirs["slides"][0]["objects"]["OLD1"]["box"] == [0, 0, 10, 10]  # (only the text comes back)
 
@@ -447,7 +448,7 @@ def test_every_write_collects_the_way_back_before_it_goes_out():
     plans (`guard.WayBack`), and what makes that safe is that they are collected before anything
     in the deck moves - so every place that writes asks first."""
     api, note = FakeSlidesApi(), _Note()
-    s = bare_sync(slides=api, pid="P1", way_back=note, sent={}, revision=lambda: "rev1")
+    s = bare_sync(slides=api, pid="P1", way_back=note, sent={}, revision=lambda slides: "rev1")
     s.delete_leftovers(["A"])
     assert note.asked == 1 and api.batches == [["A"]], "an interrupted run's leftovers are a write"
     s.delete_scratch(["b2s_m000"])
@@ -494,7 +495,7 @@ def test_nothing_goes_out_carrying_a_marker():
     """A picture the staging deck did not bring fails here, loudly, rather than reaching the deck as
     a URL Google fetches nothing from."""
     api = FakeSlidesApi()
-    s = bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda: "rev1")
+    s = bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda slides: "rev1")
     with pytest.raises(KeyError, match="gone.png"):   # the picture, not whatever the batch trips on
         s.send("content", [{"createImage": {"objectId": "x", "url": f"{sync.PENDING_URL}gone.png"}}], None)
     assert api.batches == [], "and before the batch, not after it"
@@ -529,15 +530,15 @@ def test_a_picture_google_could_not_fetch_is_asked_for_again(monkeypatch):
     monkeypatch.setattr(sync.time, "sleep", lambda s: None)
     reqs = [{"createImage": {"objectId": "x", "url": "https://staging/a"}}]
     api = _Flaky(2)
-    s = bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda: "rev1")
+    s = bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda slides: "rev1")
     assert s.send("content", reqs, "rev1") == "rev2" and len(api.bodies) == 3 and s.sent == {"content": 1}
     api = _Flaky(3)
     with pytest.raises(RuntimeError, match="problem retrieving the image"):
-        bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda: "rev1").send("content", reqs, "rev1")
+        bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda slides: "rev1").send("content", reqs, "rev1")
     assert len(api.bodies) == 1 + len(sync.FETCH_RETRY)
     api = _Flaky(1, "Invalid requests[0].deleteObject: The object (B) could not be found.")
     with pytest.raises(RuntimeError, match="could not be found"):
-        bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda: "rev1").send("content", reqs, "rev1")
+        bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda slides: "rev1").send("content", reqs, "rev1")
     assert len(api.bodies) == 1, "any other refusal is not sent again"
 
 
@@ -548,10 +549,11 @@ def test_the_pending_marker_does_not_wait_for_the_staging_deck():
     file names itself in Drive: `appProperties.b2sStaging`)."""
     work = sync_work.work([{"plan": {"action": "update", "ours": 0, "objectId": "S1"},
                             "objects": {0: ["b2s_a_b_t1", "b2s_a_b_t1_g"]}, "groups": ["G1"]}])
-    ours = {"slides": [{"key": "why", "elements": [{"key": "text/body/0"}]}], "source": SYNC_DECKS / "v1.pdf"}
+    ours = {"slides": [{"key": "why", "elements": [{"key": "text/body/0"}]}]}
 
     def block(staging):
-        s = bare_sync(base={"generation": 3}, ours=ours, tok="t1", in_place_readback={}, staging=staging)
+        s = bare_sync(base={"generation": 3}, ours=ours, source=SYNC_DECKS / "v1.pdf", tok="t1",
+                      in_place_readback={}, staging=staging)
         s.pending_block(work, {"revisionId": "r7"})
         return s.base["pending"]
 

@@ -967,7 +967,7 @@ def test_the_fuzz_world_hands_the_merge_everything_sync_does_about_identity(tmp_
     from beamer2slides import sync
     from beamer2slides.devtools import fuzz_world as W
 
-    said = inspect.getsource(sync.build_ours)
+    said = inspect.getsource(sync.ours_json)   # (what `build_ours` hands the merge)
     wanted = {k for k in ("pairs", "label_moves", "weak_pairs", "near_misses") if f'"{k}"' in said}
     assert wanted == {"pairs", "label_moves", "weak_pairs", "near_misses"}, "sync stopped saying one"
     doc = W.make("adopt", random.Random(7), tmp_path)

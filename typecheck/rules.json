@@ -3,7 +3,6 @@
   "agent/auth.py": 5,
   "agent/content.py": 12,
   "agent/context.py": 12,
-  "agent/deck_tools.py": 2,
   "agent/mcp.py": 24,
   "agent/schema.py": 10,
   "agent/source_tools.py": 6,
@@ -17,9 +16,8 @@
   "playground/runner.py": 1
  },
  "default_arguments": {
-  "__main__.py": 2,
   "adopt.py": 31,
-  "adopt_sync.py": 13,
+  "adopt_sync.py": 3,
   "agent/auth.py": 4,
   "agent/content.py": 8,
   "agent/context.py": 7,
@@ -128,7 +126,6 @@
   "playground/workbench.py": 11,
   "render.py": 14,
   "scripts.py": 4,
-  "sync.py": 24,
   "texmap.py": 8,
   "type3.py": 1
  },

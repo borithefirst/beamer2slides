@@ -302,6 +302,14 @@ def as_json(answer: Presentation | Page | PageElement | DriveFile, where: str) -
     return value
 
 
+def json_object(value: object, where: str) -> JsonObject:
+    """A value a caller built as plain data (a replay's `dict[str, object]`) read as the JSON object
+    it is, checked all the way down (no copy), or an error naming `where`."""
+    if not _is_json_object(value):
+        raise JsonShapeError(f"{where}: not a JSON object")
+    return value
+
+
 def part(value: Json, where: str) -> JsonObject:
     """A nested object of an answer, which Google leaves out when it is empty: absent is `{}`."""
     if value is None:
@@ -348,6 +356,189 @@ def all_elements(elements: Sequence[PageElement], where: str) -> list[PageElemen
         out.append(e)
         out += all_elements(children(e, where), f"{where}/{e.get('objectId')}")
     return out
+
+
+# ------------------------------------------------------------------------------ Slides: requests
+# The requests sync builds itself, one TypedDict per kind and the oneof `SlidesRequest`. A batch
+# also carries emit's requests, which are still JSON, so a built request joins it through
+# `slides_json`. A part copied from a read-back or from emit (a text style, a fill) stays JSON.
+
+
+class SlidesTableCellLocation(TypedDict, total=False):
+    rowIndex: int
+    columnIndex: int
+
+
+class SlidesRange(TypedDict, total=False):
+    type: Required[Literal["ALL", "FIXED_RANGE", "FROM_START_INDEX"]]
+    startIndex: int
+    endIndex: int
+
+
+class SlidesPageElementProperties(TypedDict, total=False):
+    pageObjectId: Required[str]
+    size: Size
+    transform: AffineTransform
+
+
+class DeleteObjectRequest(TypedDict, total=False):
+    objectId: Required[str]
+
+
+class UpdatePageElementTransformRequest(TypedDict, total=False):
+    objectId: Required[str]
+    transform: Required[AffineTransform]
+    applyMode: Required[Literal["RELATIVE", "ABSOLUTE"]]
+
+
+class UpdatePageElementsZOrderRequest(TypedDict, total=False):
+    pageElementObjectIds: Required[list[str]]
+    operation: Required[Literal["BRING_TO_FRONT", "BRING_FORWARD", "SEND_BACKWARD", "SEND_TO_BACK"]]
+
+
+class UpdatePageElementAltTextRequest(TypedDict, total=False):
+    objectId: Required[str]
+    title: str
+    description: str
+
+
+class UpdateSlidesPositionRequest(TypedDict, total=False):
+    slideObjectIds: Required[list[str]]
+    insertionIndex: Required[int]
+
+
+class CreateSlideRequest(TypedDict, total=False):
+    objectId: str
+    insertionIndex: int
+    slideLayoutReference: JsonObject
+    placeholderIdMappings: list[JsonObject]
+
+
+class CreateImageRequest(TypedDict, total=False):
+    objectId: str
+    url: Required[str]
+    elementProperties: SlidesPageElementProperties
+
+
+class CreateShapeRequest(TypedDict, total=False):
+    objectId: str
+    shapeType: Required[str]
+    elementProperties: SlidesPageElementProperties
+
+
+class CreateLineRequest(TypedDict, total=False):
+    objectId: str
+    category: str
+    lineCategory: str
+    elementProperties: SlidesPageElementProperties
+
+
+class SlidesDeleteTextRequest(TypedDict, total=False):
+    objectId: Required[str]
+    cellLocation: SlidesTableCellLocation
+    textRange: SlidesRange
+
+
+class SlidesInsertTextRequest(TypedDict, total=False):
+    objectId: Required[str]
+    cellLocation: SlidesTableCellLocation
+    text: Required[str]
+    insertionIndex: int
+
+
+class SlidesUpdateTextStyleRequest(TypedDict, total=False):
+    objectId: Required[str]
+    cellLocation: SlidesTableCellLocation
+    style: Required[JsonObject]
+    textRange: SlidesRange
+    fields: Required[str]
+
+
+class SlidesUpdateParagraphStyleRequest(TypedDict, total=False):
+    objectId: Required[str]
+    cellLocation: SlidesTableCellLocation
+    style: Required[JsonObject]
+    textRange: SlidesRange
+    fields: Required[str]
+
+
+class UpdatePagePropertiesRequest(TypedDict, total=False):
+    objectId: Required[str]
+    pageProperties: Required[JsonObject]
+    fields: Required[str]
+
+
+class UpdateShapePropertiesRequest(TypedDict, total=False):
+    objectId: Required[str]
+    shapeProperties: Required[JsonObject]
+    fields: Required[str]
+
+
+class InsertTableRowsRequest(TypedDict, total=False):
+    tableObjectId: Required[str | None]
+    """(None: a step planned before the table is named, `sync.table_steps`)"""
+    cellLocation: SlidesTableCellLocation
+    insertBelow: bool
+    number: int
+
+
+class InsertTableColumnsRequest(TypedDict, total=False):
+    tableObjectId: Required[str | None]
+    cellLocation: SlidesTableCellLocation
+    insertRight: bool
+    number: int
+
+
+class DeleteTableRowRequest(TypedDict, total=False):
+    tableObjectId: Required[str | None]
+    cellLocation: Required[SlidesTableCellLocation]
+
+
+class DeleteTableColumnRequest(TypedDict, total=False):
+    tableObjectId: Required[str | None]
+    cellLocation: Required[SlidesTableCellLocation]
+
+
+class GroupObjectsRequest(TypedDict, total=False):
+    groupObjectId: str
+    childrenObjectIds: Required[list[str]]
+
+
+class UngroupObjectsRequest(TypedDict, total=False):
+    objectIds: Required[list[str]]
+
+
+class SlidesRequest(TypedDict, total=False):
+    """One request of a `presentations.batchUpdate` that sync builds: exactly one of these is set."""
+    deleteObject: DeleteObjectRequest
+    updatePageElementTransform: UpdatePageElementTransformRequest
+    updatePageElementsZOrder: UpdatePageElementsZOrderRequest
+    updatePageElementAltText: UpdatePageElementAltTextRequest
+    updateSlidesPosition: UpdateSlidesPositionRequest
+    createSlide: CreateSlideRequest
+    createImage: CreateImageRequest
+    createShape: CreateShapeRequest
+    createLine: CreateLineRequest
+    deleteText: SlidesDeleteTextRequest
+    insertText: SlidesInsertTextRequest
+    updateTextStyle: SlidesUpdateTextStyleRequest
+    updateParagraphStyle: SlidesUpdateParagraphStyleRequest
+    updatePageProperties: UpdatePagePropertiesRequest
+    updateShapeProperties: UpdateShapePropertiesRequest
+    insertTableRows: InsertTableRowsRequest
+    insertTableColumns: InsertTableColumnsRequest
+    deleteTableRow: DeleteTableRowRequest
+    deleteTableColumn: DeleteTableColumnRequest
+    groupObjects: GroupObjectsRequest
+    ungroupObjects: UngroupObjectsRequest
+
+
+def slides_json(request: SlidesRequest) -> JsonObject:
+    """A built request as the JSON of the batch it joins: checked all the way down, not copied."""
+    value: object = request
+    if not _is_json_object(value):
+        raise JsonShapeError(f"a Slides request of {sorted(request)}: not JSON")
+    return value
 
 
 # ------------------------------------------------------------------------------ Slides: calls

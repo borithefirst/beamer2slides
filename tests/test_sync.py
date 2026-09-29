@@ -9,7 +9,7 @@ import pytest
 from beamer2slides.emit import SLIDE_W
 from beamer2slides import identity, merge, refit, snapshot
 from beamer2slides.extract import frame_labels
-from beamer2slides.sync import InPlace, TableFill, letterbox_fix, rename
+from beamer2slides.sync import InPlace, Recovery, TableFill, letterbox_fix, rename
 
 from . import sync_work
 
@@ -941,7 +941,7 @@ def test_an_element_kept_because_the_deck_edited_it_stays_kept():
     assert mplan["report"]["conflicts"][0]["field"] == "removed"
 
     s = sync_work.bare_sync()                              # the base such a sync leaves behind
-    s.base, s.ours, s.created, s.final_revision = base, {**ours, "source": Path("new.pdf")}, theirs, "r2"
+    s.base, s.ours, s.source, s.created, s.final_revision = base, ours, Path("new.pdf"), theirs, "r2"
     work = [{"plan": p, "sid": p["objectId"], "objects": {}, "new_oid": {}, "groups": [], "doomed": set()}
             for p in mplan["slides"]]
     nb = s.new_base(sync_work.run_result(work, theirs))
@@ -989,7 +989,7 @@ def test_a_key_the_source_has_given_away_is_not_claimed_twice_in_the_base():
     assert unit(mplan, "end", "text/body/1")["action"] == "create"
 
     s = sync_work.bare_sync()
-    s.base, s.ours, s.created, s.final_revision = base, {**ours, "source": Path("new.pdf")}, theirs, "r2"
+    s.base, s.ours, s.source, s.created, s.final_revision = base, ours, Path("new.pdf"), theirs, "r2"
     work = [{"plan": p, "sid": p["objectId"], "objects": {}, "new_oid": {2: "b2s_s002_m9", 1: "b2s_s002_t9"},
              "groups": [], "doomed": set()} for p in mplan["slides"]]
     written = s.new_base(sync_work.run_result(work, theirs))["slides"][2]["elements"]
@@ -1477,11 +1477,11 @@ def test_the_elements_a_rewrite_replaces_take_the_sources_order():
     oldtop = {"text/title/0": "old_t0", "text/body/0": "old_t1", "shape/panel/0": "old_s0"}
     base_order = ["old_t0", "old_t1", "old_s0"]               # the last conversion drew the panel on top
     desired = ["new_t0", "user_pic", "new_t1", "new_s0"]
-    Sync._by_the_source(desired, oldtop, tops, keys, base_order)
+    Sync._by_the_source(desired, oldtop, tops, keys, base_order, None, None)
     assert desired == ["new_t0", "user_pic", "new_s0", "new_t1"]
     # ... but a deck whose order is no longer the base's is one somebody restacked, and that stands
     theirs = ["new_s0", "user_pic", "new_t0", "new_t1"]
-    Sync._by_the_source(theirs, oldtop, tops, keys, ["old_t0", "old_t1", "old_s0"])
+    Sync._by_the_source(theirs, oldtop, tops, keys, ["old_t0", "old_t1", "old_s0"], None, None)
     assert theirs == ["new_s0", "user_pic", "new_t0", "new_t1"]
 
 
@@ -1496,11 +1496,11 @@ def test_the_source_orders_a_rewrite_against_the_elements_it_keeps():
     tops = {"shape/panel/0": "new_s0"}                        # ... and only the panel was rewritten
     oldtop = {"text/title/0": "old_t0", "shape/panel/0": "old_s0", "text/body/0": "old_t1"}
     desired = ["old_t0", "old_t1", "new_s0"]
-    Sync._by_the_source(desired, oldtop, tops, keys, ["old_t0", "old_t1", "old_s0"])
+    Sync._by_the_source(desired, oldtop, tops, keys, ["old_t0", "old_t1", "old_s0"], None, None)
     assert desired == ["old_t0", "new_s0", "old_t1"]
     # ... and a deck whose order is no longer the base's is one somebody restacked, and that stands
     theirs = ["old_t1", "old_t0", "new_s0"]
-    Sync._by_the_source(theirs, oldtop, tops, keys, ["old_t0", "old_t1", "old_s0"])
+    Sync._by_the_source(theirs, oldtop, tops, keys, ["old_t0", "old_t1", "old_s0"], None, None)
     assert theirs == ["old_t1", "old_t0", "new_s0"]
 
 
@@ -1546,7 +1546,7 @@ def test_the_children_of_a_rebuilt_group_take_the_sources_order():
     group, = [r["groupObjects"] for r in reqs if "groupObjects" in r]
     assert group["childrenObjectIds"] == ["new_s", "user_pic", "new_t", "kept_t"]
     # ... and with no source order to go by, the deck's own order stands
-    plain, = [r["groupObjects"] for r in Sync.regroup_requests(regroup, {"g": 0}, objects, tops, set())
+    plain, = [r["groupObjects"] for r in Sync.regroup_requests(regroup, {"g": 0}, objects, tops, set(), {})
               if "groupObjects" in r]
     assert plain["childrenObjectIds"] == ["new_t", "user_pic", "new_s", "kept_t"]
 
@@ -1580,18 +1580,18 @@ def test_words_a_grouping_the_person_made_keeps_covered_are_named_in_the_report(
         "mine": readback([40, 40, 256, 68], text="the person's own heading\n"),
         "new_s": opaque}}
     made, ours = {"new_t", "new_s"}, {"blk", "old_t", "old_s"}
-    assert S.folded_hiders(read, made, ours) == [("new_t", "new_s")]
+    assert S.folded_hiders(read, made, ours, set()) == [("new_t", "new_s")]
     # ... and nothing where the shape stands on the page itself: that one `restack` orders away
     page = {"order": ["blk", "new_s"], "objects": {k: v for k, v in read["objects"].items()
                                                    if k not in ("ug", "mine")}}
-    assert S.folded_hiders(page, made, ours) == []
+    assert S.folded_hiders(page, made, ours, set()) == []
     # ... nor where the person's group is where the text is too: no page order decides that
     together = {"order": ["ug"], "objects": {**read["objects"],
                                              "ug": {**read["objects"]["ug"], "children": ["new_t", "new_s"]}}}
-    assert S.folded_hiders(together, made, ours) == []
+    assert S.folded_hiders(together, made, ours, set()) == []
     # ... nor words the cleanup is about to delete: the order is read before it, and the old block's
     # words still stand under the new one (live scenario nested-group warned about v1's block title)
-    assert S.folded_hiders(read, made, ours, doomed={"new_t"}) == []
+    assert S.folded_hiders(read, made, ours, {"new_t"}) == []
     # and the report says it, in the person's words: the sync's own `ours`/`made` come from the base
     sync = sync_work.bare_sync()
     sync.warnings = []
@@ -1950,8 +1950,8 @@ def test_sync_does_not_alt_text_a_diagram_group():
 
     from beamer2slides.sync import Sync
     o = {"key": "figures", "elements": [{"key": "diagram/figure/0"}, {"key": "text/body/0"}]}
-    stub = SimpleNamespace(plan=SimpleNamespace(deck={"slides": [{"elements": [
-        {"kind": "diagram", "id": "p0d0"}, {"kind": "text", "id": "p0t1"}]}]}), ours={"slides": [o]})
+    stub = SimpleNamespace(plan=SimpleNamespace(slides=lambda: [{"elements": [
+        {"kind": "diagram", "id": "p0d0"}, {"kind": "text", "id": "p0t1"}]}]), ours={"slides": [o]})
     oid = "b2s_abcdef_012345_t0k"  # the group emit creates for the diagram, with its nodes and lines inside
     text = "b2s_abcdef_012346_t0k"
     reqs = Sync.tag_requests(stub, o, {0: [oid, f"{oid}_n0", f"{oid}_l0"], 1: [text]},
@@ -2058,7 +2058,7 @@ def test_a_slide_the_source_dropped_keeps_no_label_in_the_new_base():
     base = three_slides()
     s = sync_work.bare_sync()
     s.warnings, s.base, s.final_revision = [], base, "r2"
-    s.ours = {"slides": [], "source": Path("talk.pdf")}
+    s.ours, s.source = {"slides": []}, Path("talk.pdf")
     s.created = {"slides": []}
     plans = [{"key": "intro", "action": "keep_removed", "ours": None, "base": 0, "objectId": "b2s_s000"}]
     written = s.new_base(sync_work.run_result([{"plan": plans[0], "sid": "b2s_s000"}],
@@ -2078,8 +2078,8 @@ def test_a_held_slide_keeps_the_base_it_had():
     base = three_slides()
     s = sync_work.bare_sync()
     s.warnings, s.base, s.final_revision = [], base, "r2"
-    s.ours = {"slides": [{**ours_of(base["slides"][1]), "title": "Results v2", "text": "quite different now"}],
-              "source": Path("talk.pdf")}
+    s.ours = {"slides": [{**ours_of(base["slides"][1]), "title": "Results v2", "text": "quite different now"}]}
+    s.source = Path("talk.pdf")
     s.created = {"slides": []}
     plans = [{"key": "results", "action": "update", "held": "label", "ours": 0, "base": 1,
               "objectId": "b2s_s001", "units": []}]
@@ -2231,19 +2231,20 @@ def test_style_range_requests_follow_the_words():
     assert deck_attributes({"fontFamily": "Lato", "fontSize": 18.0, "bold": True}, base_styles) == {"bold": True}
     old = raw_shape("old", [("Written by an ", plain), ("AI", bold), (" assistant\n", plain)])
     new = raw_shape("new", [("Now written by an AI assistant and converted\n", plain)])
-    (r,) = style_range_requests("new", old, new, base_styles)
+    (r,) = style_range_requests("new", old, new, base_styles, None)
     rng = r["updateTextStyle"]["textRange"]
     assert "Now written by an AI assistant and converted\n"[rng["startIndex"]:rng["endIndex"]] == "AI"
     assert r["updateTextStyle"]["style"] == {"bold": True} and r["updateTextStyle"]["fields"] == "bold"
     # a word the source deleted takes its style along; text after the text override counts
-    assert style_range_requests("new", old, raw_shape("new", [("Written by an assistant\n", plain)]), base_styles) == []
-    (r,) = style_range_requests("new", old, new, base_styles, merged="Written by an AI helper\n")
+    assert style_range_requests("new", old, raw_shape("new", [("Written by an assistant\n", plain)]), base_styles,
+                                None) == []
+    (r,) = style_range_requests("new", old, new, base_styles, "Written by an AI helper\n")
     assert r["updateTextStyle"]["textRange"]["startIndex"] == 14
     # table cells, by cellLocation
     cell = lambda runs: {"text": raw_shape("x", runs)["shape"]["text"]}  # noqa: E731
     old_t = {"objectId": "t", "table": {"tableRows": [{"tableCells": [cell([("Disjoint\n", bold)]), cell([("3.9 s\n", plain)])]}]}}
     new_t = {"objectId": "t", "table": {"tableRows": [{"tableCells": [cell([("Disjoint\n", plain)]), cell([("4.7 s\n", plain)])]}]}}
-    (r,) = style_range_requests("t", old_t, new_t, base_styles)
+    (r,) = style_range_requests("t", old_t, new_t, base_styles, None)
     assert r["updateTextStyle"]["cellLocation"] == {"rowIndex": 0, "columnIndex": 0}
     assert r["updateTextStyle"]["textRange"] == {"type": "FIXED_RANGE", "startIndex": 0, "endIndex": 8}
 
@@ -2261,7 +2262,7 @@ def test_a_style_on_the_last_word_stops_where_the_text_does():
     base_styles = [{"fontFamily": "Lato", "fontSize": 18.0}]
     text = "Written by an assistant\n"
     old = raw_shape("old", [("Written by an ", plain), ("assistant\n", bold)])
-    (r,) = style_range_requests("new", old, raw_shape("new", [(text, plain)]), base_styles)
+    (r,) = style_range_requests("new", old, raw_shape("new", [(text, plain)]), base_styles, None)
     rng = r["updateTextStyle"]["textRange"]
     assert text[rng["startIndex"]:rng["endIndex"]] == "assistant"
     assert rng["endIndex"] == len(text) - 1   # exactly the length `deleteText` would accept
@@ -2274,20 +2275,21 @@ def test_retitled_frame_and_right_limits_on_the_sync_talk(tmp_path):
     """On the sync test talk (tests/decks/sync): the unlabelled frame retitled Takeaways keeps its
     title key, and an element recreated on a slide whose title isn't rewritten gets the same box
     as in a fresh conversion (a title demoted to body text widened text_right_limit)."""
-    from beamer2slides.sync import build_ours
+    from beamer2slides.sync import build_ours_of
     v1, untitled = SYNC_DECKS / "v1.pdf", SYNC_DECKS / "untitled.pdf"
     if not (v1.exists() and untitled.exists()):
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py, or pytest -m sync -k variants)")
-    first = build_ours(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
-    second = build_ours(untitled, tmp_path / "untitled", {"slides": first["slides"]}, "last", SLIDE_W, snapshot.NO_PICTURES)
-    last = second["slides"][-1]
-    assert last["key"] == first["slides"][-1]["key"]
+    first = build_ours_of(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
+    second = build_ours_of(untitled, tmp_path / "untitled", {"slides": first.slides}, "last", SLIDE_W, snapshot.NO_PICTURES)
+    last = second.slides[-1]
+    assert last["key"] == first.slides[-1]["key"]
     assert [e["key"] for e in last["elements"] if e["role"] == "title"] == ["text/title/0"]
 
     s = sync_work.bare_sync()
-    s.ours, s.plan, s.scale, s.tok, s.urls, s.warnings = first, first["plan"], first["plan"].scale, "1zz", {}, []
-    j = next(k for k, o in enumerate(first["slides"]) if o["key"] == "steps")
-    elements = first["plan"].deck["slides"][j]["elements"]
+    ours = sync_work.with_ours(s, first)
+    s.tok, s.urls, s.warnings = "1zz", {}, []
+    j = next(k for k, o in enumerate(first.slides) if o["key"] == "steps")
+    elements = first.plan.deck["slides"][j]["elements"]
     body = next(i for i, e in enumerate(elements) if e.get("role") == "body" and e["kind"] == "text")
     title = next(i for i, e in enumerate(elements) if e.get("role") == "title")
 
@@ -2301,22 +2303,22 @@ def test_retitled_frame_and_right_limits_on_the_sync_talk(tmp_path):
     # Two title boxes and no live placeholder (an adopted slide: `marked.py` gives the title role
     # per box): once the first is demoted, the second is no placeholder either. It was looked up
     # in the slide's placeholders with a bare next(), and an apply died on "StopIteration: ".
-    slide = first["plan"].deck["slides"][j]
+    slide = first.plan.deck["slides"][j]
     second = {**copy.deepcopy(elements[title]), "id": "second-title"}
     second["bbox"] = [second["bbox"][0], second["bbox"][3] + 2, second["bbox"][2], 2 * second["bbox"][3] - second["bbox"][1] + 2]
-    first["plan"].deck["slides"][j] = {**slide, "elements": [*elements, second]}
-    first["slides"][j] = {**first["slides"][j], "elements": [*first["slides"][j]["elements"],
-                                                             {**first["slides"][j]["elements"][title], "key": "text/title/1"}]}
+    first.plan.deck["slides"][j] = {**slide, "elements": [*elements, second]}
+    ours["slides"][j] = {**ours["slides"][j], "elements": [*ours["slides"][j]["elements"],
+                                                         {**ours["slides"][j]["elements"][title], "key": "text/title/1"}]}
     try:
         both = len(elements)
         reqs, _, new_oid, _ = s.slide_requests(j, [title, both], "LIVE", {}, {}, {}, False, frozenset())
         made = {r["createShape"]["objectId"] for r in reqs if "createShape" in r}
         assert {new_oid[title], new_oid[both]} <= made          # both made as boxes of their own
     finally:
-        first["plan"].deck["slides"][j], first["slides"][j]["elements"] = slide, first["slides"][j]["elements"][:-1]
+        first.plan.deck["slides"][j], ours["slides"][j] = slide, first.slides[j]
 
     # A unit whose group the deck took apart is rebuilt without its group.
-    base_slide_ = copy.deepcopy(first["slides"][j])
+    base_slide_ = copy.deepcopy(first.slides[j])
     read = {"objects": {}, "notes": "", "notes_id": None}
     for e in base_slide_["elements"]:
         oid = f"OLD_{e['key'].replace('/', '_')}"
@@ -2326,7 +2328,7 @@ def test_retitled_frame_and_right_limits_on_the_sync_talk(tmp_path):
     s.base = {"slides": [base_slide_]}
     from collections import defaultdict
     s.urls = defaultdict(lambda: "https://example.com/staged.png")  # (the staging deck's picture URLs)
-    members = [e["key"] for e in first["slides"][j]["elements"] if e["key"] == "text/body/0" or e.get("anchor") == "text/body/0"]
+    members = [e["key"] for e in first.slides[j]["elements"] if e["key"] == "text/body/0" or e.get("anchor") == "text/body/0"]
     plan = {"key": "steps", "base": 0, "ours": j, "objectId": "LIVE", "units": [
         {"key": "text/body/0", "action": "recreate", "ours_members": members, "base_members": members, "overrides": {}}]}
 
@@ -2344,16 +2346,17 @@ def test_unit_rebuilt_inside_a_group_nested_in_a_user_group(tmp_path):
     """A block (converter group) inside a group made in the deck: ungroup outermost first, regroup
     innermost first under the same ids (the rebuilt block title used to stay outside, ungrouped)."""
     from collections import defaultdict
-    from beamer2slides.sync import build_ours
+    from beamer2slides.sync import build_ours_of
     v1 = SYNC_DECKS / "v1.pdf"
     if not v1.exists():
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
-    first = build_ours(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
+    first = build_ours_of(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
     s = sync_work.bare_sync()
-    s.ours, s.plan, s.scale, s.tok, s.warnings = first, first["plan"], first["plan"].scale, "1zz", []
+    sync_work.with_ours(s, first)
+    s.tok, s.warnings = "1zz", []
     s.urls = defaultdict(lambda: "https://example.com/staged.png")
-    j = next(k for k, o in enumerate(first["slides"]) if o["key"] == "policy")
-    base_slide_ = copy.deepcopy(first["slides"][j])
+    j = next(k for k, o in enumerate(first.slides) if o["key"] == "policy")
+    base_slide_ = copy.deepcopy(first.slides[j])
     objects = {}
     for e in base_slide_["elements"]:
         oid = f"OLD_{e['key'].replace('/', '_')}"
@@ -2372,7 +2375,7 @@ def test_unit_rebuilt_inside_a_group_nested_in_a_user_group(tmp_path):
     reqs = s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {})
     assert [r["ungroupObjects"]["objectIds"] for r in reqs if "ungroupObjects" in r] == [["USER"], ["BLK"]]
     groups = [r["groupObjects"] for r in reqs if "groupObjects" in r]
-    new_title = w.new_oid[next(i for i, e in enumerate(first["slides"][j]["elements"]) if e["key"] == "text/body/0")]
+    new_title = w.new_oid[next(i for i, e in enumerate(first.slides[j]["elements"]) if e["key"] == "text/body/0")]
     assert [g["groupObjectId"] for g in groups] == ["BLK", "USER"]
     assert new_title in groups[0]["childrenObjectIds"] and "OLD_text_body_0" not in groups[0]["childrenObjectIds"]
     assert groups[1]["childrenObjectIds"] == ["BLK", "OLD_text_body_2"]
@@ -2392,21 +2395,22 @@ def _table_sync(tmp_path, variant: str):
     overrides) drives Sync.update_slide on it as a recreated unit, `margins(base element)` giving
     the base's table_margins, and returns (sync, work, requests, the table's old object id)."""
     from collections import defaultdict
-    from beamer2slides.sync import build_ours
+    from beamer2slides.sync import build_ours_of
     v1, new = SYNC_DECKS / "v1.pdf", SYNC_DECKS / f"{variant}.pdf"
     if not v1.exists() or not new.exists():
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
-    first = build_ours(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
-    second = build_ours(new, tmp_path / "new", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
-    j = next(k for k, o in enumerate(second["slides"]) if o["title"] == "Results")
-    jb = next(k for k, o in enumerate(first["slides"]) if o["title"] == "Results")
+    first = build_ours_of(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
+    second = build_ours_of(new, tmp_path / "new", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
+    j = next(k for k, o in enumerate(second.slides) if o["title"] == "Results")
+    jb = next(k for k, o in enumerate(first.slides) if o["title"] == "Results")
 
     def run(margins, overrides=None, restored=(), source=None):
         s = sync_work.bare_sync()
-        s.ours, s.plan, s.scale, s.tok, s.warnings = second, second["plan"], second["plan"].scale, "1zz", []
-        s.recovery = {"restore": {oid: {} for oid in restored}}
+        sync_work.with_ours(s, second)
+        s.tok, s.warnings = "1zz", []
+        s.recovery = Recovery(sweep=[], sweep_slides=[], heal=[], restore={oid: {} for oid in restored})
         s.urls = defaultdict(lambda: "https://example.com/staged.png")
-        base_slide_ = copy.deepcopy(first["slides"][jb])
+        base_slide_ = copy.deepcopy(first.slides[jb])
         objects = {}
         for e in base_slide_["elements"]:
             oid = f"OLD_{e['key'].replace('/', '_')}"
@@ -2471,7 +2475,7 @@ def test_a_table_whose_words_changed_is_refilled_in_place(tmp_path):
     A table the source moved as well is refilled and moved."""
     from beamer2slides.emit import pptx_table
     run, first, second, j = _table_sync(tmp_path, "tablecell")
-    scale, fonts = first["plan"].scale, first["plan"].fonts
+    scale, fonts = first.plan.scale, first.plan.fonts
 
     s, w, reqs, old = run(lambda e: [list(m) for m in pptx_table(e["ir"], scale, fonts)["margins"]])
     assert not [r for r in reqs if "createTable" in r]
@@ -2488,7 +2492,7 @@ def test_a_table_whose_words_changed_is_refilled_in_place(tmp_path):
     # The source moved it down 20 pt as well (a line added above): refilled, then moved by as much -
     # also when the deck moved it itself (merge's geometry override): the source's move goes on top
     # of the person's place, as `sync.carried` does for a recreated unit.
-    table = next(e for e in second["plan"].deck["slides"][j]["elements"] if e["kind"] == "table")
+    table = next(e for e in second.plan.deck["slides"][j]["elements"] if e["kind"] == "table")
     table["bbox"][1] += 20
     table["bbox"][3] += 20
     table["frame"][1] += 20
@@ -2522,7 +2526,7 @@ def test_a_table_the_source_added_a_row_to_is_grown_in_place(tmp_path):
     the new row takes), between emptying the cells and filling them; the base keeps the margins."""
     from beamer2slides.emit import pptx_table
     run, first, second, j = _table_sync(tmp_path, "table-row")
-    scale, fonts = first["plan"].scale, first["plan"].fonts
+    scale, fonts = first.plan.scale, first.plan.fonts
     s, w, reqs, old = run(lambda e: [list(m) for m in pptx_table(e["ir"], scale, fonts)["margins"]])
     assert not [r for r in reqs if "createTable" in r] and old not in s.cleanup_ids
     kinds = [next(iter(r)) for r in reqs]
@@ -2532,7 +2536,7 @@ def test_a_table_the_source_added_a_row_to_is_grown_in_place(tmp_path):
     assert kinds.index("insertTableRows") < kinds.index("insertText")
     assert any(r["insertText"]["text"] == "4.2 s" and r["insertText"]["cellLocation"]["rowIndex"] == 4
                for r in reqs if "insertText" in r and r["insertText"]["objectId"] == old)
-    i = next(k for k, e in enumerate(second["plan"].deck["slides"][j]["elements"]) if e["kind"] == "table")
+    i = next(k for k, e in enumerate(second.plan.deck["slides"][j]["elements"]) if e["kind"] == "table")
     assert len(w.in_place[i].margins) == 5
 
 
@@ -2732,7 +2736,7 @@ def test_the_adopter_matches_by_bytes_and_by_look(tmp_path, fetcher):
                                                                            ("OTHER", "u_other"), ("COPY", "u_same"),
                                                                            ("INGROUP", "u_same"), ("B2S", "u_same")]]}]}
     s = sync_work.bare_sync()
-    s.ours, s.scale = {"out": ours_out}, 2.0
+    s.ours, s.ours_out, s.scale = {"out": ours_out}, ours_out, 2.0
     s.base = {"slides": [{"key": "intro", "objectId": "S", "groups": [],
                           "elements": [{"key": "image/figure/0", "objects": ["B2S"]}]}]}
     boxes = {"SAME": [40, 120, 160, 160], "LOOK": [44, 124, 164, 164], "CROP": [38, 118, 162, 162],
@@ -2775,7 +2779,7 @@ def test_a_new_slide_inherits_the_master_background(tmp_path):
     deck's theme."""
     s = sync_work.bare_sync()
     s.base = {"master_background": "color:#ffffff"}
-    s.ours = {"out": tmp_path}
+    s.ours, s.ours_out = {"out": tmp_path}, tmp_path
     s.urls = {str(tmp_path / "backgrounds" / "bg-3.png"): "https://content/3"}
     pres = {"masters": [{"pageProperties": {"pageBackgroundFill": {
         "solidFill": {"color": {"rgbColor": {"red": 1, "green": 1, "blue": 1}}}}}}]}
@@ -2802,7 +2806,7 @@ def test_a_new_slide_lands_on_the_layout_of_its_background(tmp_path):
     page = lambda name: {"background": f"backgrounds/{name}"}
     main, standout = (background_key(page(n), tmp_path) for n in ("bg-000.png", "bg-003.png"))
     s = sync_work.bare_sync()
-    s.ours = {"out": tmp_path}
+    s.ours, s.ours_out = {"out": tmp_path}, tmp_path
     s.base = {"master_background": main, "slides": [
         {"key": "a", "layout": "TITLE_ONLY", "background": main, "layoutObjectId": "L_main"},
         {"key": "b", "layout": "TITLE_ONLY", "background": standout, "layoutObjectId": "L_plain"},
@@ -2822,17 +2826,17 @@ def test_a_new_slide_lands_on_the_layout_of_its_background(tmp_path):
 def test_conversion_is_stable():
     """Converting the same PDF twice gives the same keys and hashes (a no-op sync sends nothing)."""
     import tempfile
-    from beamer2slides.sync import build_ours
+    from beamer2slides.sync import build_ours_of
     pdf = DECKS / "sync_smoke_v1.pdf"
     if not pdf.exists():
         pytest.skip("build the test decks first (tests/decks/build.py sync_smoke_v1)")
     with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
-        first = build_ours(pdf, Path(a), {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
-        base = {"slides": first["slides"]}
-        second = build_ours(pdf, Path(b), base, "last", SLIDE_W, snapshot.NO_PICTURES)
-    assert second["pairs"] == {j: j for j in range(len(first["slides"]))}
-    assert [(s["key"], [(e["key"], e["ir_hash"]) for e in s["elements"]]) for s in second["slides"]] == \
-        [(s["key"], [(e["key"], e["ir_hash"]) for e in s["elements"]]) for s in first["slides"]]
+        first = build_ours_of(pdf, Path(a), {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
+        base = {"slides": first.slides}
+        second = build_ours_of(pdf, Path(b), base, "last", SLIDE_W, snapshot.NO_PICTURES)
+    assert second.pairs == {j: j for j in range(len(first.slides))}
+    assert [(s["key"], [(e["key"], e["ir_hash"]) for e in s["elements"]]) for s in second.slides] == \
+        [(s["key"], [(e["key"], e["ir_hash"]) for e in s["elements"]]) for s in first.slides]
 
 
 def test_a_stand_in_is_made_at_the_size_slides_keeps():
@@ -2842,8 +2846,37 @@ def test_a_stand_in_is_made_at_the_size_slides_keeps():
     big: a block's title bar came back 1649 pt wide on a 720 pt page (live, the front page's demo).
     (tests/slides_sim.py neither normalises sizes nor copies objects, so only this sees it.)"""
     from beamer2slides.sync import STAND_IN, stand_in_request
-    size = stand_in_request("b2s_x_k0_1aa", "s", ("ROUND_2_SAME_RECTANGLE",))["createShape"]["elementProperties"]["size"]
+    size = stand_in_request("b2s_x_k0_1aa", "s", "ROUND_2_SAME_RECTANGLE")["createShape"]["elementProperties"]["size"]
     assert size["width"]["magnitude"] == size["height"]["magnitude"] == 3_000_000
     assert size["width"].get("unit", "EMU") == "EMU"
     box_w = 698.0
     assert round(box_w / STAND_IN * 3_000_000 / 12700, 6) == box_w
+
+
+def test_has_writes_of_reads_the_records_as_has_writes_reads_their_json():
+    """`merge.has_writes_of` (sync's and the fuzz's question, on the typed plan) answers what
+    `has_writes` answers of `merge_plan_json` of the same plan: every slide and unit kind, a
+    background written or taken away, notes, and the live order."""
+    k, o = merge.ElementKey("text/body/0"), merge.ObjectId("b2s_s000")
+    none = merge.Overrides(text=None, text_style=None, shape_style=None, geometry=False)
+    decisions = [merge.AdoptObject(key=k, object_id=o), merge.CreateUnit(key=k), merge.GoneUnit(key=k),
+                 merge.DeleteUnit(key=k), merge.KeepRemoved(key=k, deck=("text",)), merge.KeptJoined(key=k),
+                 merge.KeepUnit(key=k, source=("text",), deck=(), blind=None),
+                 merge.Recreate(key=k, source=("text",), deck=(), overrides=none),
+                 merge.AdoptUnit(key=k, source=("text",), deck=("text",), adopt=("text",)),
+                 merge.MoveUnit(key=k, source=("position",), deck=(), delta=(0.0, 3.0))]
+    s = merge.SlideKey("intro")
+
+    def update(units, written, background, notes):
+        return merge.UpdateSlide(key=s, ours=0, base=0, object_id=o, units=units, background_written=written,
+                                 background=background, notes=notes)
+    slides = [merge.CreateSlide(key=s, ours=0), merge.GoneSlide(key=s, ours=0, base=0),
+              merge.KeepRemovedSlide(key=s, base=0, object_id=o), merge.DeleteSlide(key=s, base=0, object_id=o),
+              merge.HoldSlide(key=s, ours=0, base=0, object_id=o)]
+    slides += [update((merge.PlannedUnit(decision=d, base_members=(k,), ours_members=(k,)),), False, None, None)
+               for d in decisions]
+    slides += [update((), w, b, n) for w in (False, True) for b in (None, "", "bg.png") for n in (None, "", "said")]
+    for p in slides:
+        for order, live in (((), ()), (("a", "b"), ["a", "b"]), (("b", "a", "new:x"), ["a", "b"])):
+            plan = merge.MergePlan(slides=(p,), order=order, report=merge.Report())
+            assert merge.has_writes_of(plan, live) == merge.has_writes(merge.merge_plan_json(plan), live), (p, order)

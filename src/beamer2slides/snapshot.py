@@ -663,7 +663,7 @@ def read_presentation_of(pres: Presentation) -> DeckRead:
                     slides=tuple(read_slide_of(s) for s in pres.get("slides", [])))
 
 
-def read_presentation(pres: Presentation) -> dict:
+def read_presentation(pres: Presentation) -> JsonObject:
     """`read_presentation_of` as JSON, for the readers that still take it so (and change it)."""
     return deck_read_json(read_presentation_of(pres))
 
@@ -930,7 +930,7 @@ def slide_entries_of(deck: JsonObject, out: Path, keys: Sequence[SlideKey], elem
 
 
 def slide_entries(deck: JsonObject, out: Path, keys: Sequence[str], element_keys: Sequence[Sequence[str]],
-                  fingerprints: Sequence[Sequence[JsonObject]]) -> list[dict]:
+                  fingerprints: Sequence[Sequence[JsonObject]]) -> list[JsonObject]:
     """`slide_entries_of` as JSON, the fingerprints as `identity.fingerprint` writes them."""
     return [slide_entry_json(s) for s in slide_entries_of(
         deck, out, [SlideKey(k) for k in keys], [[ElementKey(k) for k in ks] for ks in element_keys],
@@ -1195,7 +1195,7 @@ def converted_base(deck: JsonObject, out: Path, pres: Presentation, written: Seq
 
 def build_base(deck: JsonObject, out: Path, pres: Presentation, state: JsonObject, pdf: "Path | str | JsonObject | None",
                generation: int,
-               sign: bool, overlays: str, signatures: Mapping[str, str] | None) -> dict:
+               sign: bool, overlays: str, signatures: Mapping[str, str] | None) -> JsonObject:
     """`build_base_of` as the JSON base.json holds, from a state given as a dict ({"slides",
     "scale"}: adopt's pairing, which names no page or URL; a test's)."""
     scale = state.get("scale")

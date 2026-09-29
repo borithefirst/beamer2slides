@@ -305,7 +305,9 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   and written back byte for byte; `merge.plan_merge_of` returns a `MergePlan` of records
   (`plan_merge` the dict entry); `refit.plan` takes `RefitJob`s, `text_layout.layout` a `Layout`.
   snapshot builds those records and sync reads the MergePlan and `Work` records (its state declared
-  in `__init__`); theme_sync's base theme is a `ThemeRecord` (`theme_record`/`theme_json`), its side
+  in `__init__`); its result is `SyncResult`/`SyncReport` (JSON only through `sync_result_json`,
+  written only by `write_reports`), `build_ours_of` returns `Built` (`ours_json` the merge's view),
+  crash recovery is `Recovery`/`Heal`, `merge.has_writes_of` has_writes on the typed plan; theme_sync's base theme is a `ThemeRecord` (`theme_record`/`theme_json`), its side
   a `ThemeSide`, its merge a `ThemeMerge` of `Wrote`s. `guard.check_rebuild` parses the base
   (`sync_model.base`) and surveys it through merge's `*_of` entries; a base that does not parse is
   refused (`unreadable-base`); test bases come from `tests/made_bases.py`, never partial dicts.

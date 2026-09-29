@@ -49,7 +49,7 @@ def run_result(slides, theirs):
 def bare_sync(**attrs):
     """A `Sync` with no deck behind it: its per-run state as `__init__` starts it, and `attrs`."""
     s = sync.Sync.__new__(sync.Sync)
-    s.warnings, s.overruns, s.refit_moves, s.urls, s.recovery = [], [], [], {}, {}
+    s.warnings, s.overruns, s.refit_moves, s.urls, s.recovery = [], [], [], {}, sync.no_recovery()
     s.cleanup_ids, s.cleanup_requests, s.in_place_readback, s.final_revision = [], [], {}, None
     s.theme_side, s.theme_plan, s.theme_applied, s.theme_conflicts, s.raw_after = None, None, [], [], None
     s.created, s.staging, s.picture_reads, s.live_read, s.reshaped = {}, None, {}, None, {}
@@ -58,3 +58,11 @@ def bare_sync(**attrs):
     for k, v in attrs.items():
         setattr(s, k, v)
     return s
+
+
+def with_ours(s, built):
+    """Hand `s` the new conversion `built` (`sync.build_ours_of`) as `Sync.__init__` takes it: its JSON
+    view (returned, for a test to change what the phases read), plan, scale, source and folder."""
+    s.ours, s.plan, s.scale = sync.ours_json(built), built.plan, built.plan.scale
+    s.source, s.ours_out = built.source, built.out
+    return s.ours

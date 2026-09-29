@@ -859,7 +859,7 @@ def test_sync_deletes_only_the_staging_deck_it_just_created(tmp_path):
         {"objectId": "i", "description": "b2s-stage:0", "image": {"contentUrl": "https://staged"}}]}]}
     drive = FakeDrive()
     me = SimpleNamespace(drive=drive, slides=FakeSlides(staged), urls={}, pid="P1", _fit=lambda f: [40.0, 30.0],
-                         plan=SimpleNamespace(deck={"slides": [{"size": [720, 405]}]}))
+                         plan=SimpleNamespace(slides=lambda: [{"size": [720, 405]}]))
     fid = Sync.stage(me, sync_work.work([], pictures={str(picture_file): "figure"}), None, None)
     assert fid == "NEW1" != me.pid
     assert me.urls == {str(picture_file): "https://staged"}
@@ -867,7 +867,9 @@ def test_sync_deletes_only_the_staging_deck_it_just_created(tmp_path):
     source = (SRC / "sync.py").read_text(encoding="utf-8")
     deletes = set(re.findall(r"files\(\)\.delete\(fileId=([\w.]+)\)", source))
     assert deletes == {"fid"}  # never self.pid, and never an id read from a file
-    assert re.search(r"fid = execute\(drive\.files\(\)\.create\(", source)
+    # ... and `delete_file`, the one other way to it, is only ever handed that same id
+    assert set(re.findall(r"delete_file\([\w.]+, ([\w.]+)\)", source)) == {"fid"}
+    assert re.search(r"fid = google_types\.file_id\(execute\(drive\.files\(\)\.create\(", source)
     assert re.search(r"staging = self\.stage\(work, None, None\)", source)
     # Staged on a thread of its own, with clients of its own: the id still comes from that create
     # and nowhere else, and the future is collected whatever happens (run's own `finally`).

@@ -70,27 +70,27 @@ def talk(tmp_path_factory):
     deck, and the retheme's side."""
     need("v1", "retheme")
     tmp = tmp_path_factory.mktemp("theme")
-    v1 = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
-    side1 = theme_sync.ours_side(theme_sync.theme_ours(v1))
-    out = Path(v1["out"])
-    pres = made_up_deck(len(v1["deck"]["slides"]))
-    state = {"scale": v1["plan"].scale, "slides": [{"objectId": f"S{i}"} for i in range(len(v1["deck"]["slides"]))],
+    v1 = sync.build_ours_of(SYNC_DECKS / "v1.pdf", tmp / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
+    side1 = theme_sync.ours_side(sync.theme_ours_of(v1))
+    out = v1.out
+    pres = made_up_deck(len(v1.deck["slides"]))
+    state = {"scale": v1.plan.scale, "slides": [{"objectId": f"S{i}"} for i in range(len(v1.deck["slides"]))],
              "theme": {"ground": "#ffffff", "master": "#ffffff",
                        "decorations": {g: str(Path(p.path).relative_to(out)) for g, p in side1.pictures.items() if p},
-                       "layouts": {str(s["page"]): emit.slide_layout(s)[0] for s in v1["deck"]["slides"]}}}
-    record = theme_sync.record(v1["deck"], out, pres, state)
+                       "layouts": {str(s["page"]): emit.slide_layout(s)[0] for s in v1.deck["slides"]}}}
+    record = theme_sync.record(v1.deck, out, pres, state)
     rec = theme_sync.theme_json(record)
-    slides = copy.deepcopy(v1["slides"])
+    slides = copy.deepcopy(v1.slides)
     for i, s in enumerate(slides):
         s["objectId"], s["layoutObjectId"] = f"S{i}", "LT" if i == 0 else "LO"
     base = {"slides": slides, "theme": rec, "master_background": side1.shared}
-    retheme = sync.build_ours(SYNC_DECKS / "retheme.pdf", tmp / "retheme", {"slides": slides}, "last", SLIDE_W, snapshot.NO_PICTURES)
+    retheme = sync.build_ours_of(SYNC_DECKS / "retheme.pdf", tmp / "retheme", {"slides": slides}, "last", SLIDE_W, snapshot.NO_PICTURES)
     return {"v1": v1, "side1": side1, "pres": pres, "base": base, "retheme": retheme, "record": record,
-            "side2": theme_sync.ours_side(theme_sync.theme_ours(retheme))}
+            "side2": theme_sync.ours_side(sync.theme_ours_of(retheme))}
 
 
 def plan(talk, pres=None, side=None, ours=None, base=None):
-    return theme_sync.plan(base or talk["base"], side or talk["side2"], theme_sync.theme_ours(ours or talk["retheme"]),
+    return theme_sync.plan(base or talk["base"], side or talk["side2"], sync.theme_ours_of(ours or talk["retheme"]),
                            pres or talk["pres"], "1ab", lambda p: f"url:{Path(p).name}", lambda page: f"new_{page}",
                            None)
 
@@ -138,9 +138,9 @@ def test_the_spec_writes_what_style_layout_placeholders_writes(talk):
         def presentations(self):
             return Presentations()
 
-    mp = emit.master_plan(v1["deck"], Path(v1["out"]), theme=None)
-    emit.style_layout_placeholders(Slides(), "P", v1["deck"], v1["plan"].scale, v1["plan"].fonts, emit.PPTX_TITLE_DY, mp["ground"])
-    spec = emit.layout_style_spec(v1["deck"], v1["plan"].scale, v1["plan"].fonts, emit.PPTX_TITLE_DY, mp["ground"])
+    mp = emit.master_plan(v1.deck, v1.out, theme=None)
+    emit.style_layout_placeholders(Slides(), "P", v1.deck, v1.plan.scale, v1.plan.fonts, emit.PPTX_TITLE_DY, mp["ground"])
+    spec = emit.layout_style_spec(v1.deck, v1.plan.scale, v1.plan.fonts, emit.PPTX_TITLE_DY, mp["ground"])
     mine = [r for page in pres["masters"] + pres["layouts"] for pe in page["pageElements"]
             if (kind := pe.get("shape", {}).get("placeholder", {}).get("type")) in theme_sync.PLACEHOLDERS and spec.get(kind)
             for r in emit.layout_placeholder_requests(spec[kind], pe)]
@@ -293,12 +293,12 @@ def test_a_layout_serves_the_decoration_most_of_its_slides_have(talk):
     layout keeps the decoration of the others, and the slide is a warning."""
     side = copy.deepcopy(talk["side2"])
     ours = talk["retheme"]
-    odd = ours["deck"]["slides"][3]["page"]
+    odd = ours.deck["slides"][3]["page"]
     side.groups[odd] = "*_V1"
     side.pictures["*_V1"] = None
     p = plan(talk, side=side)
     assert p.page_group["LO"] == "*"
-    assert len(p.warnings) == 1 and ours["slides"][3]["key"] in p.warnings[0]
+    assert len(p.warnings) == 1 and ours.slides[3]["key"] in p.warnings[0]
 
 
 def test_the_new_record_takes_what_was_written_and_keeps_what_was_not(talk):
@@ -355,7 +355,7 @@ def with_footers(pres, says):
 def footers(talk):
     """The sync talk's footline (author, title, date) on the made-up deck's layouts, recorded as
     convert records it, and a new version whose \\date changed."""
-    old = talk["v1"]["deck"]["layout_texts"]
+    old = talk["v1"].deck["layout_texts"]
     says = theme_sync.texts_says(old)
     pres = with_footers(talk["pres"], says)
     base = {**talk["base"], "theme": {**talk["base"]["theme"], "texts": theme_sync.texts_json(theme_sync.texts_entry(old, pres))}}
@@ -396,7 +396,7 @@ def test_a_new_date_nobody_edited_rewrites_the_footer_on_every_layout(talk, foot
 
 
 def test_the_same_footer_writes_nothing(talk, footers):
-    p = footer_plan(talk, footers, side=replace(footers["side"], texts=talk["v1"]["deck"]["layout_texts"]))
+    p = footer_plan(talk, footers, side=replace(footers["side"], texts=talk["v1"].deck["layout_texts"]))
     assert not any(r.get("deleteObject", {}).get("objectId", "").startswith(emit.LAYOUT_TEXT_PREFIX) for r in p.requests)
     assert p.applied == [] and p.conflicts == []
 
@@ -436,7 +436,7 @@ def test_a_base_older_than_footer_sync_leaves_them_and_says_so(talk, footers):
     assert not any("createShape" in r for r in p.requests)
     assert any("header and footer" in w and "'October 2026'" in w for w in p.warnings)
     same = footer_plan(talk, footers, base={**footers["base"], "theme": theme},
-                       side=replace(footers["side"], texts=talk["v1"]["deck"]["layout_texts"]))
+                       side=replace(footers["side"], texts=talk["v1"].deck["layout_texts"]))
     assert not any("header and footer" in w for w in same.warnings)
 
 

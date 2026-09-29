@@ -51,10 +51,10 @@ def talk_base(tmp_path: Path) -> tuple[dict, dict]:
     return S.base_of(S.Made(deck, "rendered", tmp_path / "v1", used))
 
 
-def requests_of(base: dict, ours: dict, pres: dict, home: Path) -> tuple[merge.MergePlan, list[dict], list[dict]]:
+def requests_of(base: dict, ours: sync.Built, pres: dict, home: Path) -> tuple[merge.MergePlan, list[dict], list[dict]]:
     """(the merge plan, the content requests, the objects left to delete) of a dry sync."""
     theirs = snapshot.read_presentation(pres)
-    mplan = merge.plan_merge_of(sync_model.base(base), merge.ours_of(ours), sync_model.deck_read(theirs), None, False,
+    mplan = merge.plan_merge_of(sync_model.base(base), merge.ours_of(sync.ours_json(ours)), sync_model.deck_read(theirs), None, False,
                                 merge.Resolutions(()))
     s = sync.Sync(None, None, "offline", base, ours, home, dry_run=True, measure=False,
                   trust_generation=True, check_plan=None, follow_labels=False, take_source=(), facts=None,
@@ -70,12 +70,12 @@ def test_a_sync_writes_everything_else_and_reports_the_element_it_made_a_picture
         lenient: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     base, pres = talk_base(tmp_path)
     unplannable(monkeypatch, POLICY)
-    ours = sync.build_ours(SYNC_DECKS / "disjoint.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
+    ours = sync.build_ours_of(SYNC_DECKS / "disjoint.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
 
-    [c] = ours["contained"]
+    [c] = ours.contained
     assert (c.slide, c.element, c.kind, c.error) == ("policy", "image/fallback/0", "text", "KeyError: 'lines'")
     assert POLICY in c.words
-    [el] = [e for s in ours["deck"]["slides"] for e in s["elements"] if e["id"] == c.id]
+    [el] = [e for s in ours.deck["slides"] for e in s["elements"] if e["id"] == c.id]
     assert el["role"] == "fallback" and (tmp_path / "ours" / el["file"]).exists(), "its picture, cut from the new PDF"
 
     mplan, content, cleanup = requests_of(base, ours, pres, tmp_path / "ours")
@@ -95,7 +95,7 @@ def test_a_sync_writes_everything_else_and_reports_the_element_it_made_a_picture
     deleted = {r["deleteObject"]["objectId"] for r in cleanup}
     assert gone and old and set(old) <= deleted, "the box it replaces goes, as any rewritten unit's does"
 
-    found, says = sync.contained_report(ours["contained"], ours["slides"], mplan)
+    found, says = sync.contained_report(ours.contained, ours.slides, mplan)
     assert [f.written for f in found] == [True]
     assert says and says[0].startswith("slide policy: this version of the converter could not lay out the text")
     assert sync.contained_json(found)[0]["written"] is True
@@ -121,10 +121,10 @@ def test_an_element_convert_contained_the_same_way_is_no_change(
     assert [c["kind"] for c in off["contained"]] == ["text"]
     emit.crop_fallbacks(off["plan"].deck, [(c["page"], c["id"]) for c in off["contained"]], tmp_path / "v1", "test")
     base, pres = S.base_of(S.Made(deck, "rendered", tmp_path / "v1", used))
-    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
+    ours = sync.build_ours_of(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
 
     mplan, content, _ = requests_of(base, ours, pres, tmp_path / "ours")
-    found, says = sync.contained_report(ours["contained"], ours["slides"], mplan)
+    found, says = sync.contained_report(ours.contained, ours.slides, mplan)
     assert [f.written for f in found] == [False] and says == []
     assert not [r for r in content if "createImage" in r], "no picture written again"
 
@@ -142,22 +142,22 @@ def test_an_element_the_base_holds_that_emit_now_cannot_plan_is_kept(
     [held] = [e for s in base["slides"] for e in s["elements"]
               if e["kind"] == "text" and "Both versions go into the report" in identity.plain_text(e["ir"])]
     objects, read = list(held["objects"]), copy.deepcopy(held["readback"])
-    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
+    ours = sync.build_ours_of(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
 
     mplan, content, cleanup = requests_of(base, ours, pres, tmp_path / "ours")
     assert {u["action"] for p in merge.merge_plan_json(mplan)["slides"] for u in p.get("units", [])} <= {"keep"}
     assert not [r for r in content if "createImage" in r] and cleanup == []
-    [c] = ours["contained"]
+    [c] = ours.contained
     assert (held["kind"], held["key"], held["objects"], held["readback"]) == ("image", c.element, objects, read)
-    found, says = sync.contained_report(ours["contained"], ours["slides"], mplan)
+    found, says = sync.contained_report(ours.contained, ours.slides, mplan)
     assert [f.written for f in found] == [False] and says == []
 
 
 def test_both_sides_plan_with_containment() -> None:
-    """The adopt base is `convert_source`'s plan and a later sync's is `build_ours`': both through
+    """The adopt base is `convert_source_of`'s plan and a later sync's is `build_ours`': both through
     `planned`, or one side has a picture where the other has the element, and every sync rewrites it."""
-    assert "planned(" in inspect.getsource(sync.build_ours)
-    assert "planned(" in inspect.getsource(adopt_sync.convert_source)
+    assert "planned(" in inspect.getsource(sync.build_ours_of)
+    assert "planned(" in inspect.getsource(adopt_sync.convert_source_of)
 
 
 # ---------------------------------------------------------------- an adopt base's old tables

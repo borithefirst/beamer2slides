@@ -26,7 +26,8 @@ the wrapper has already installed them for the length of the call.
 import json
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, NoReturn
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Annotated, NoReturn
 
 from .context import Job, tool
 from .types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Refused
@@ -34,6 +35,9 @@ from .types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Refused
 if TYPE_CHECKING:
     from ..checks import Finding
     from ..emit import Preflight
+    from ..guard import RebuildRefused
+    from ..json_types import Json, JsonObject
+    from ..raw_types import RawDoc
 
 __all__ = ["deck_inspect", "deck_convert", "deck_prepare", "deck_upload", "deck_sync", "tex_label"]
 
@@ -94,7 +98,8 @@ def _way_back(j: Job, backup: str, needed: bool = True) -> str:
     return backup
 
 
-def _classify_into(j: Job, source: Path, out: Path, overlays: str, debug_images: bool) -> tuple:
+def _classify_into(j: Job, source: Path, out: Path, overlays: str,
+                   debug_images: bool) -> "tuple[Path, RawDoc, JsonObject, JsonObject]":
     """`__main__.cmd_classify`, without the printing and with the debug render made optional.
 
     Returns (pdf without note pages, raw, deck, facts). `raw.json` and `deck.json` land in `out`
@@ -122,7 +127,7 @@ def _classify_into(j: Job, source: Path, out: Path, overlays: str, debug_images:
         j.artifact(out / "debug", "folder", "one PNG per slide with the classified boxes drawn on it")
     j.artifact(out / "raw.json", "json", "spans, images and drawings as the PDF gives them")
     j.artifact(out / "deck.json", "json", "the intermediate representation the deck is built from")
-    facts = {
+    facts: JsonObject = {
         "pages": raw["source"]["pages"],
         "slides": len(deck["slides"]),
         "notes": {"mode": prepared.mode, "pages": len(prepared.notes)} if prepared.mode else None,
@@ -130,31 +135,34 @@ def _classify_into(j: Job, source: Path, out: Path, overlays: str, debug_images:
         "native_share": deck["stats"].get("native_share", 0),
         "chars": deck["stats"]["chars"],
         "chars_native": deck["stats"]["chars_native"],
-        "fonts": sorted({s["font"] for page in raw["pages"] for s in page["spans"] if s.get("font")}),
+        "fonts": [f for f in sorted({s["font"] for page in raw["pages"] for s in page["spans"] if s.get("font")})],
     }
     return pdf, raw, deck, facts
 
 
-def _slide_rows(deck: dict) -> list[dict]:
+def _slide_rows(deck: "Mapping[str, Json]") -> "list[JsonObject]":
     """One row per slide: what it is made of, and what stays in the background picture."""
     from .. import identity
+    from ..json_types import as_int, as_objects, as_str
 
-    rows = []
-    for slide in deck["slides"]:
+    rows: list[JsonObject] = []
+    for slide in as_objects(deck["slides"], "deck.slides"):
         kinds: dict[str, int] = {}
-        for el in slide["elements"]:
-            kinds[el["kind"]] = kinds.get(el["kind"], 0) + 1
+        for el in as_objects(slide["elements"], "slide.elements"):
+            kind = as_str(el["kind"], "element.kind")
+            kinds[kind] = kinds.get(kind, 0) + 1
         rows.append({
-            "slide": slide["page"] + 1,
+            "slide": as_int(slide["page"], "slide.page") + 1,
             "label": slide.get("label"),
             "title": identity.slide_title(slide),
-            "elements": kinds,
-            "background": [l["reason"] for l in slide.get("left_in_background", [])],
+            "elements": {k: n for k, n in kinds.items()},
+            "background": [l["reason"] for l in as_objects(slide.get("left_in_background", []),
+                                                           "slide.left_in_background")],
         })
     return rows
 
 
-def _label_survey(j: Job, deck: dict) -> dict:
+def _label_survey(j: Job, deck: "Mapping[str, Json]") -> "JsonObject":
     """The one thing that decides whether a later sync can follow this deck (docs/labels.md).
 
     A frame with no `label=` falls back to its title and its position, which a reordered or
@@ -163,8 +171,9 @@ def _label_survey(j: Job, deck: dict) -> dict:
     are cheap to fix now and impossible to fix after someone has edited the deck.
     """
     from .. import identity, labels
+    from ..json_types import as_objects
 
-    found = labels.survey([identity.slide_info(s) for s in deck["slides"]])
+    found: JsonObject = labels.survey([identity.slide_info(s) for s in as_objects(deck["slides"], "deck.slides")])
     for line in labels.problems(found):
         j.warn(line, where="frame labels")
     return found
@@ -196,6 +205,8 @@ def deck_inspect(
     Costs 2-6 s for a 30-page deck, roughly double that with checks. No Google calls, no deck
     is created. Reach for it first, before converting, and whenever a conversion looked wrong.
     """
+    from ..json_types import as_array, as_int, as_object
+
     started = time.time()
     source = _pdf(j, pdf)
     out_dir = _out_dir(j, out, source)
@@ -204,8 +215,8 @@ def deck_inspect(
     slides = _slide_rows(deck)
     totals: dict[str, int] = {}
     for row in slides:
-        for kind, n in row["elements"].items():
-            totals[kind] = totals.get(kind, 0) + n
+        for kind, n in as_object(row["elements"], "row.elements").items():
+            totals[kind] = totals.get(kind, 0) + as_int(n, "row.elements")
     j.data.update(facts)
     j.data["out"] = j.ctx.workspace.ref(out_dir)
     j.data["title"] = raw["source"].get("title")
@@ -229,17 +240,21 @@ def deck_inspect(
                         "by_check": {c: sum(1 for f in findings if f["check"] == c)
                                      for c in sorted({f["check"] for f in findings})}}
 
-    unlabelled = len(survey["unlabelled"])
+    unlabelled = len(as_array(survey["unlabelled"], "labels.unlabelled"))
+    frames = as_int(survey["frames"], "labels.frames")
+    dropped = as_object(facts["overlays"], "facts.overlays")["dropped"]
+    notes = facts["notes"]
     parts = [f"{facts['slides']} slide(s) from {source.name}, "
              f"{facts['native_share']:.0%} of the characters native "
              f"({', '.join(f'{n} {k}' for k, n in sorted(totals.items())) or 'nothing classified'})."]
-    if facts["overlays"]["dropped"]:
-        parts.append(f"{facts['overlays']['dropped']} overlay page(s) were dropped, keeping the "
+    if dropped:
+        parts.append(f"{dropped} overlay page(s) were dropped, keeping the "
                      f"last step of each frame.")
-    if facts["notes"]:
-        parts.append(f"Speaker notes were found on {facts['notes']['pages']} page(s) "
-                     f"({facts['notes']['mode']}).")
-    parts.append(f"{survey['frames'] - unlabelled} of {survey['frames']} frames carry a label of "
+    if notes:
+        said = as_object(notes, "facts.notes")
+        parts.append(f"Speaker notes were found on {said['pages']} page(s) "
+                     f"({said['mode']}).")
+    parts.append(f"{frames - unlabelled} of {frames} frames carry a label of "
                  f"their own" + ("." if not unlabelled else
                                  f"; the other {unlabelled} would have to be identified by title and "
                                  f"position, which a later sync can lose track of."))
@@ -337,7 +352,9 @@ def deck_prepare(
     prepared = _prepare(j, source, out_dir, overlays)
 
     j.data["seconds"] = round(time.time() - started, 2)
-    facts = prepared["facts"]
+    from ..json_types import as_object
+
+    facts = as_object(prepared["facts"], "prepared.facts")
     j.summary = (f"Prepared {facts['slides']} slide(s) from {source.name} in "
                  f"{j.data['out']}: deck.json, one background picture per slide and "
                  f"prepared.json. {facts['native_share']:.0%} of the characters will be native "
@@ -394,7 +411,7 @@ def _check_overlays(overlays: str) -> None:
                       overlays=overlays)
 
 
-def _prepare(j: Job, source: Path, out_dir: Path, overlays: str) -> dict:
+def _prepare(j: Job, source: Path, out_dir: Path, overlays: str) -> "JsonObject":
     """The local half of a conversion: classify, render, and write down what the other half needs.
 
     `prepared.json` is that last part, and it exists because the upload half may run where the
@@ -413,7 +430,7 @@ def _prepare(j: Job, source: Path, out_dir: Path, overlays: str) -> dict:
     j.artifact(out_dir / "backgrounds", "folder", "one background picture per slide")
     survey = _label_survey(j, deck)
 
-    prepared = {
+    prepared: JsonObject = {
         "version": 1,
         "source": source_info(source),        # {"pdf": where it was, "sha1": what it said}
         "name": source.name,
@@ -433,7 +450,7 @@ def _prepare(j: Job, source: Path, out_dir: Path, overlays: str) -> dict:
     return prepared
 
 
-def _read_prepared(j: Job, folder: Path, ref: str) -> dict:
+def _read_prepared(j: Job, folder: Path, ref: str) -> "JsonObject":
     """What `_prepare` left behind, or as much of it as an older folder can say.
 
     A folder written by `deck_convert` before this split has no prepared.json, and there is no
@@ -441,13 +458,15 @@ def _read_prepared(j: Job, folder: Path, ref: str) -> dict:
     the title and the file name are both there. Only the digest is not, and a base that records
     `None` for it costs a later interrupted sync one conservative branch, not a loss.
     """
+    from ..json_types import as_object
+
     if not (folder / "deck.json").is_file():
         raise Refused("not_found", f"{ref} holds no deck.json; deck_prepare writes the folder "
                                    f"deck_upload builds from.", out=ref)
     path = folder / "prepared.json"
     if path.is_file():
         try:
-            prepared = json.loads(path.read_text(encoding="utf-8"))
+            prepared = as_object(json.loads(path.read_text(encoding="utf-8")), f"{ref}/prepared.json")
         except ValueError as exc:
             raise Refused("bad_request", f"{ref}/prepared.json could not be read ({exc}); "
                                          f"prepare the folder again.", out=ref) from None
@@ -467,7 +486,7 @@ def _read_prepared(j: Job, folder: Path, ref: str) -> dict:
             "labels": {}, "prepared": None}
 
 
-def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: bool,
+def _upload(j: Job, out_dir: Path, prepared: "Mapping[str, Json]", title: str | None, new_deck: bool,
             measure: bool, force_rebuild: bool, backup: str, source: Path | None,
             checked: "Preflight | None" = None) -> None:
     """The Google half: build the deck from the folder, then record the base.
@@ -481,15 +500,18 @@ def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: 
     """
     from ..emit import emit
     from ..guard import RebuildRefused
-    from ..json_types import as_array
+    from ..json_types import as_array, as_object, as_str
     from ..snapshot import snapshot_after_convert
 
     deck = json.loads((out_dir / "deck.json").read_text(encoding="utf-8"))
-    facts = prepared.get("facts") or {}
-    overlays = prepared.get("overlays", "last")
-    name = title or prepared.get("title") or Path(prepared.get("name") or "deck").stem
+    facts = as_object(prepared.get("facts") or {}, "prepared.facts")
+    overlays = as_str(prepared.get("overlays", "last"), "prepared.overlays")
+    called = prepared.get("name")
+    name = title or as_str(prepared.get("title") or "", "prepared.title") or \
+        Path(as_str(called or "deck", "prepared.name")).stem
     # The guard reads `Path(pdf).name` and nothing else; the file need not be there.
-    named = source if source is not None else (prepared.get("name") or None)
+    named = source if source is not None else (Path(as_str(called, "prepared.name")) if called else None)
+    recorded = prepared.get("source")
     j.data.setdefault("out", j.ctx.workspace.ref(out_dir))
     j.data.update({k: v for k, v in facts.items() if k not in j.data})
     if prepared.get("labels") and "labels" not in j.data:
@@ -537,7 +559,8 @@ def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: 
     problems: list[str] = []
     try:
         base = snapshot_after_convert(built.deck, out_dir, state,
-                                      source if source is not None else prepared.get("source"),
+                                      source if source is not None else
+                                      (as_object(recorded, "prepared.source") if recorded is not None else None),
                                       overlays, problems)
         base_slides = len(as_array(base["slides"], "base.slides"))
         j.artifact(out_dir / "sync" / "base.json", "json",
@@ -552,8 +575,10 @@ def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: 
     j.data["base_slides"] = base_slides
 
 
-def _convert_summary(j: Job, prepared: dict, seconds: float) -> str:
-    facts = prepared.get("facts") or {}
+def _convert_summary(j: Job, prepared: "Mapping[str, Json]", seconds: float) -> str:
+    from ..json_types import as_object
+
+    facts = as_object(prepared.get("facts") or {}, "prepared.facts")
     base_slides = j.data.get("base_slides")
     return (f"{'Rebuilt' if j.data['rebuilt'] else 'Created'} a {facts.get('slides', 0)}-slide "
             f"deck \"{j.data['title']}\" from {prepared.get('name') or 'the prepared folder'} in "
@@ -564,7 +589,7 @@ def _convert_summary(j: Job, prepared: dict, seconds: float) -> str:
                f"be merged into this deck without losing edits." if base_slides else ""))
 
 
-def _refuse_rebuild(j: Job, refused: Any, source: Path | None, out_dir: Path) -> NoReturn:
+def _refuse_rebuild(j: Job, refused: "RebuildRefused", source: Path | None, out_dir: Path) -> NoReturn:
     """Turn `guard.RebuildRefused` into the code an agent branches on. Always raises.
 
     The library's message names what was edited and offers three ways forward; those become
@@ -577,8 +602,10 @@ def _refuse_rebuild(j: Job, refused: Any, source: Path | None, out_dir: Path) ->
     prepared the folder. The way forward is the same journey either way - a merge instead of a
     rebuild - so what changes is one word of the sentence naming it, not the offer.
     """
-    survey = dict(getattr(refused, "survey", {}) or {})
-    reason = survey.get("reason", "edited")
+    from ..json_types import as_array, as_str
+
+    survey: JsonObject = dict(refused.survey or {})
+    reason = as_str(survey.get("reason", "edited"), "survey.reason")
     code = "no_way_back" if reason == "backup-failed" else "deck_edited"
     ref = j.ctx.workspace.ref(out_dir)
     pdf = f"pdf={j.ctx.workspace.ref(source)!r}, " if source is not None else ""
@@ -596,7 +623,7 @@ def _refuse_rebuild(j: Job, refused: Any, source: Path | None, out_dir: Path) ->
                   url=f"https://docs.google.com/presentation/d/{pid}/edit" if pid else None,
                   presentationId=pid,
                   reason=reason,
-                  examples=list(survey.get("examples") or []),
+                  examples=list(as_array(survey.get("examples") or [], "survey.examples")),
                   counts=survey.get("counts") or {},
                   slides_added=survey.get("slides_added", 0),
                   slides_deleted=survey.get("slides_deleted", 0),
@@ -605,7 +632,7 @@ def _refuse_rebuild(j: Job, refused: Any, source: Path | None, out_dir: Path) ->
                   out=ref)
 
 
-def _rebuild_message(refused: Any, survey: dict, reason: str, code: str) -> str:
+def _rebuild_message(refused: "RebuildRefused", survey: "JsonObject", reason: str, code: str) -> str:
     """Say what the guard found, in this layer's vocabulary rather than the CLI's.
 
     The library's own message ends with three shell commands - `python -m beamer2slides
@@ -621,7 +648,9 @@ def _rebuild_message(refused: Any, survey: dict, reason: str, code: str) -> str:
                 "back to what is in the deck now. Every Drive revision of a Slides file exports "
                 "its current content, so a .pptx export is the only way back there is. "
                 "Nothing was written.")
-    counts = survey.get("counts") or {}
+    from ..json_types import as_array, as_object
+
+    counts = as_object(survey.get("counts") or {}, "survey.counts")
     what = ", ".join(f"{n} {kind.replace('_', ' ')} change(s)" for kind, n in counts.items())
     added, deleted = survey.get("slides_added", 0), survey.get("slides_deleted", 0)
     for n, word in ((added, "added"), (deleted, "deleted")):
@@ -634,7 +663,7 @@ def _rebuild_message(refused: Any, survey: dict, reason: str, code: str) -> str:
         return (f"Refusing to rebuild this deck: {str(refused).splitlines()[0].strip() or reason}. "
                 f"Rebuilding replaces the whole deck, and nothing here can say what would be "
                 f"lost. Nothing was written.")
-    examples = survey.get("examples") or []
+    examples = as_array(survey.get("examples") or [], "survey.examples")
     shown = "".join(f"\n  - {line}" for line in examples[:3])
     return (f"Refusing to rebuild: somebody edited this deck in Google Slides after it was last "
             f"written ({what or 'changes found'}). A rebuild replaces the whole deck, so their "
@@ -681,7 +710,6 @@ def deck_sync(
     """
     from ..sync import BaseMismatch, NoSyncBase, sync as run_sync
 
-    started = time.time()
     _check_backup(backup)
     backup = _way_back(j, backup)
     if overlays not in (None, "last", "all"):
@@ -708,8 +736,8 @@ def deck_sync(
     note = None if dry_run else _cli().record_sync_point(source, target, out_dir, backup)
 
     try:
-        info = run_sync(source, target, out_dir, dry_run, overlays, measure, note, backup,
-                        follow_labels=follow_labels, take_source=take_source or ())
+        result = run_sync(source, target, out_dir, dry_run, overlays, measure, note, backup, False,
+                          follow_labels, list(take_source or ()))
     except NoSyncBase as exc:
         # Without a base there is nothing to merge against: the deck's own edits cannot be told
         # apart from what the last conversion put there.
@@ -739,11 +767,11 @@ def deck_sync(
     if note is not None and note.asked:
         kept = note.kept()
         if kept:
-            _cli().add_recovery(kept, info)
+            result = _cli().add_recovery(kept, result)
         _report_way_back(j, note.kept())
 
-    report = info["report"]
-    for clash in report["conflicts"]:
+    report = result.report
+    for clash in report.conflicts:
         # The id is what a person types back to settle that one conflict for the source, so it
         # belongs in the line the agent relays, not only in the report file.
         takeable = (clash.get("takeable") and clash.get("id")
@@ -752,55 +780,54 @@ def deck_sync(
                    + (f"; take_source={clash['id']} would write the source's version here instead"
                       if takeable else ""),
                    where=str(clash.get("slide")))
-    for warning in report["warnings"]:
+    for warning in report.warnings:
         j.warn(warning, where="sync")
 
     for name, kind in (("sync-report.md", "report"), ("sync-report.json", "json")):
         path = out_dir / "sync" / name
         if path.exists():
             j.artifact(path, kind, "what this sync applied, kept and could not decide")
-    if info.get("recovery"):
-        j.data["recovery"] = info["recovery"]
+    if result.recovery:
+        j.data["recovery"] = result.recovery
 
     # `sync.sync` counts requests per phase ({"text": 12, "pictures": 3}), and a dry run sends
     # none at all: what it planned is in `applied`, `overrides` and `conflicts`.
-    sent = info.get("requests") or {}
-    sent = sent if isinstance(sent, dict) else {"all": int(sent)}
+    sent = result.requests
     requests = sum(sent.values())
     wrote = bool(requests) and not dry_run
     j.data.update({
         "dry_run": dry_run,
         "wrote": wrote,
-        "url": info["url"],
-        "presentationId": info["presentationId"],
-        "applied": len(report["applied"]),
-        "kept": len(report["overrides"]),
-        "conflicts": len(report["conflicts"]),
-        "held": [h["slide"] for h in report["slides"].get("held") or []],
+        "url": result.url,
+        "presentationId": result.presentation_id,
+        "applied": len(report.applied),
+        "kept": len(report.overrides),
+        "conflicts": len(report.conflicts),
+        "held": [h["slide"] for h in report.slides.held],
         # What `take_source` settled, each carrying the deck's own version of that spot: the
         # report file keeps it too, and there is nowhere else it still exists.
-        "resolved": report.get("resolved") or [],
-        "warnings": len(report["warnings"]),
+        "resolved": report.resolved,
+        "warnings": len(report.warnings),
         "requests": requests,
         "requests_by_phase": sent,
-        "actions": info.get("actions", []),
-        "overlays": info.get("overlays"),
-        "base_from": info.get("base_from"),
-        "generation": info.get("generation"),
+        "actions": result.actions,
+        "overlays": result.overlays,
+        "base_from": result.base_from,
+        "generation": result.generation,
         "report": j.ctx.workspace.ref(out_dir / "sync" / "sync-report.json"),
-        "seconds": info.get("seconds", round(time.time() - started, 2)),
+        "seconds": result.seconds,
     })
 
-    j.summary = (f"Sync{' (dry run)' if dry_run else ''} of {source.name} into {info['url']}: "
-                 f"{len(report['applied'])} source change(s) "
+    j.summary = (f"Sync{' (dry run)' if dry_run else ''} of {source.name} into {result.url}: "
+                 f"{len(report.applied)} source change(s) "
                  f"{'would be applied' if dry_run else 'applied'}, "
-                 f"{len(report['overrides'])} deck edit(s) kept, "
-                 f"{len(report['conflicts'])} conflict(s). "
+                 f"{len(report.overrides)} deck edit(s) kept, "
+                 f"{len(report.conflicts)} conflict(s). "
                  + ("Nothing was written to the deck." if not wrote else
                     f"{requests} request(s) were sent; the revision before them is in the "
                     f"recovery block.")
                  + (" Every conflict is a place both sides changed, where the deck won - read them "
-                    "before deciding the source is right." if report["conflicts"] else "")
+                    "before deciding the source is right." if report.conflicts else "")
                  + (f" {len(j.data['resolved'])} conflict(s) were settled for the source because "
                     f"take_source named them; what was written over is in `resolved` and in the "
                     f"report, and nowhere else." if j.data.get("resolved") else "")
@@ -808,14 +835,14 @@ def deck_sync(
                     f"may have moved onto another frame, so which frame those slides belong to is in "
                     f"doubt. That is a question for the person, not for you - ask them to check the "
                     f"`.tex`." if j.data.get("held") else ""))
-    if dry_run and not report["conflicts"]:
+    if dry_run and not report.conflicts:
         j.suggest("run deck_sync again with dry_run=False")
     elif dry_run:
         j.suggest("read the conflicts in sync-report.md, then run deck_sync again with dry_run=False",
                   "change the source where a conflict shows the deck is right")
 
 
-def _report_way_back(j: Job, note: dict | None) -> None:
+def _report_way_back(j: Job, note: "JsonObject | None") -> None:
     """Say what was kept before this sync wrote, where a caller can branch on it.
 
     `sync_point` collects its failures into the recovery note and prints the rest, and at a
@@ -827,11 +854,15 @@ def _report_way_back(j: Job, note: dict | None) -> None:
         j.warn("no way back was recorded before this sync wrote to the deck: neither its revision "
                "nor a backup (see the log)", where="backup")
         return
-    backup = (note.get("entry") or {}).get("backup") or {}
-    for warning in backup.get("warnings", []):
-        j.warn(warning, where="backup")
+    from ..json_types import as_array, as_object, as_str
+
+    entry = note.get("entry")
+    kept = as_object(entry, "the recovery note's entry").get("backup") if entry else None
+    backup: JsonObject = as_object(kept, "the recovery note's backup") if kept else {}
+    for warning in as_array(backup.get("warnings", []), "the backup's warnings"):
+        j.warn(as_str(warning, "a backup warning"), where="backup")
     if backup.get("file"):
-        j.artifact(backup["file"], "pptx", "the deck as it was before this sync")
+        j.artifact(as_str(backup["file"], "the backup's file"), "pptx", "the deck as it was before this sync")
     if backup.get("drive"):
         j.data["backup_copy"] = backup["drive"]
     j.data["backup_mode"] = backup.get("mode")
@@ -897,7 +928,7 @@ def tex_label(
     # a name), so the second frame arrives at every later stage looking unlabelled. Reading the
     # .tex is the only place this is visible at all.
     seen: dict[str, str] = {}
-    duplicates: list[dict] = []
+    duplicates: list[dict[str, str | None]] = []
     for frame in source.frames:
         if not frame.label:
             continue

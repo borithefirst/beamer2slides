@@ -60,8 +60,8 @@ def test_a_base_in_todays_form_is_read_as_it_is(talk: tuple[dict, dict, Path], t
     before = dumped(base)
     assert snapshot.rehash_base(base, at(base, v1)) == []
     assert dumped(base) == before
-    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, at(base, v1))
-    assert ours["base_forms"] == []
+    ours = sync.build_ours_of(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, at(base, v1))
+    assert ours.base_forms == []
     assert [e["ir_hash"] for s in base["slides"] for e in s["elements"]] == \
         [e["ir_hash"] for s in json.loads(before)["slides"] for e in s["elements"]]
 
@@ -79,15 +79,15 @@ def test_a_form_the_converter_no_longer_writes_is_a_rewrite_of_the_base_not_a_so
     assert e["ir_hash"] != identity.ir_fields(canonical, v1, e.get("anchor"), snapshot.base_page_key(base))[0], \
         "(the old form hashes otherwise: without the reading, a source change)"
 
-    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, at(base, v1))
-    assert ours["base_forms"] == [snapshot.Rewritten(slide=slide, element=e["key"], how="form", hashed=True)]
+    ours = sync.build_ours_of(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, at(base, v1))
+    assert ours.base_forms == [snapshot.Rewritten(slide=slide, element=e["key"], how="form", hashed=True)]
     assert "composite" not in e["ir"]
-    [now] = [o for s in ours["slides"] if s["key"] == slide for o in s["elements"] if o["key"] == e["key"]]
+    [now] = [o for s in ours.slides if s["key"] == slide for o in s["elements"] if o["key"] == e["key"]]
     assert identity.source_changes(e, now) == set()
     mplan, content, cleanup = requests_of(base, ours, pres, tmp_path / "ours")
     assert {u["action"] for p in merge.merge_plan_json(mplan)["slides"] for u in p.get("units", [])} <= {"keep"}
     assert [r for r in content if "__b2s_break__" not in r] == [] and cleanup == []  # (breaks: batch bounds)
-    [said] = snapshot.base_form_warnings(ours["base_forms"])
+    [said] = snapshot.base_form_warnings(ours.base_forms)
     assert said.startswith("1 element(s) of the sync base were recorded in an older form") and e["key"] in said
 
 

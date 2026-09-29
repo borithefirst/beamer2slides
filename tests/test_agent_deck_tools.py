@@ -395,7 +395,7 @@ def test_deck_upload_needs_nothing_from_the_workspace_but_the_prepared_folder(pr
 
     prepared_json = json.loads((lonely / "out" / "talk" / "prepared.json").read_text(encoding="utf-8"))
     # The guard gets the name, not the file.
-    assert seen["emit"]["named"] == "talk.pdf"
+    assert str(seen["emit"]["named"]) == "talk.pdf"
     assert seen["emit"]["slides"] == prepared_json["facts"]["slides"]
     assert seen["emit"]["backgrounds"], "the pictures came with the folder"
     # The base records the digest measured on the machine that had the PDF.
@@ -454,7 +454,7 @@ def test_a_folder_prepared_before_the_split_still_uploads(prepared, tmp_path, mo
     ctx = AgentContext(workspace=LocalWorkspace(old), google=FakeGoogle(), allow=ALL_ACTIONS)
     result = deck_upload(ctx, out="out/talk")
     assert result.ok, result.summary
-    assert seen["emit"]["named"] == "talk.pdf", "the name still comes out of deck.json"
+    assert str(seen["emit"]["named"]) == "talk.pdf", "the name still comes out of deck.json"
     assert seen["base"]["pdf"]["sha1"] is None
     assert any("prepared.json" in d.message for d in result.diagnostics)
 
@@ -588,13 +588,18 @@ def sync_world(monkeypatch, *, raises=None, note=None, asked=True):
         seen["point_backup"] = backup
         return Point(note, asked)
 
-    def run_sync(pdf, deck, out, dry_run, overlays, measure, way_back, backup, **kw):
+    def run_sync(pdf, deck, out, dry_run, overlays, measure, way_back, backup, force_adopted, follow_labels,
+                 take_source):
+        from beamer2slides import sync
         seen["sync_backup"] = backup
         if raises is not None:
             raise raises
-        return {"report": {"conflicts": [], "warnings": [], "applied": [], "overrides": [], "slides": {}},
-                "url": "https://docs.google.com/presentation/d/PID/edit", "presentationId": "PID",
-                "requests": {"text": 3}}
+        said = sync.SlidesSaid(created=[], deleted=[], moved=[], kept=[], held=[], user_added=[])
+        report = sync.SyncReport(applied=[], overrides=[], conflicts=[], resolved=[], converged=[], user_objects=[],
+                                 slides=said, warnings=[], contained=None, base_forms=None, overruns=[], refit=[])
+        return sync.SyncResult(pdf=str(pdf), presentation_id="PID", url="https://docs.google.com/presentation/d/PID/edit",
+                               dry_run=dry_run, base_from="local", generation=1, overlays="last", attempts=1,
+                               requests={"text": 3}, seconds=0.5, report=report, actions=[], recovery=None)
 
     monkeypatch.setattr("beamer2slides.__main__.record_sync_point", record_sync_point)
     monkeypatch.setattr("beamer2slides.sync.sync", run_sync)

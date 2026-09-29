@@ -32,26 +32,30 @@ from .raw_types import RawDoc
 
 if TYPE_CHECKING:  # (the Google side is imported where it is used, as the CLI always has)
     from .google_types import DriveService, SlidesService
-    from .json_types import JsonObject
+    from collections.abc import Mapping
+
+    from .json_types import Json, JsonObject
+    from .sync import SyncResult
 
 BACKUP_MODES = ("auto", "none", "file", "drive", "both")  # = guard.BACKUP_MODES (imported lazily)
 _V = TypeVar("_V")
 
 
-def check_labels(deck: dict, mode: str) -> None:
+def check_labels(deck: "Mapping[str, Json]", mode: str) -> None:
     """Say what the deck's frame labels cost a later sync (docs/labels.md). `error` refuses: a
     person who asked for that would rather fix the source than convert a deck sync cannot follow."""
     if mode == "off":
         return
     from . import identity, labels
-    found = labels.problems(labels.survey([identity.slide_info(s) for s in deck["slides"]]))
+    from .json_types import as_objects
+    found = labels.problems(labels.survey([identity.slide_info(s) for s in as_objects(deck["slides"], "deck.slides")]))
     for line in found:
         print(f"  labels: {line}")
     if found and mode == "error":
         raise SystemExit("--check-labels error: the frames above need labels of their own")
 
 
-def cmd_classify(pdf: Path, out: Path, overlays: str = "last", check: str = "off") -> tuple[Path, RawDoc, dict]:
+def cmd_classify(pdf: Path, out: Path, overlays: str, check: str) -> "tuple[Path, RawDoc, JsonObject]":
     out.mkdir(parents=True, exist_ok=True)
     prepared = prepare_notes(pdf, out)
     pdf = prepared.pdf
@@ -148,23 +152,26 @@ def sync_point(pdf: Path, deck: str, out: Path | None, backup: str, slides: "Sli
         return None
 
 
-def add_recovery(note: "JsonObject", info: dict[str, object]) -> None:
-    """The recovery note (`sync_point`'s) on screen and in sync's report."""
+def add_recovery(note: "JsonObject", result: "SyncResult") -> "SyncResult":
+    """The recovery note (`sync_point`'s) on screen, in sync's result (one it already carries
+    stays) and in its report files when the sync wrote them there."""
+    from dataclasses import replace
+
     from .guard import restore_hint
     from .json_types import as_object, as_str
+    from .sync import write_reports
     entry = as_object(note["entry"], "the recovery note's entry")
     print("recovery:")
     for line in restore_hint(entry, "sync"):
         print(line)
-    info.setdefault("recovery", entry)
-    path = Path(as_str(note["out"], "the recovery note's out")) / "sync" / "sync-report.json"
-    if path.exists():
+    noted = result if result.recovery is not None else replace(result, recovery=entry)
+    out = Path(as_str(note["out"], "the recovery note's out"))
+    if (out / "sync" / "sync-report.json").exists():
         try:
-            report = json.loads(path.read_text(encoding="utf-8"))
-            report["recovery"] = entry
-            path.write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
-        except (OSError, ValueError):
+            write_reports(out, replace(result, recovery=entry))
+        except OSError:
             pass
+    return noted
 
 
 def cmd_label(tex: Path, apply: bool) -> None:
@@ -523,30 +530,29 @@ def main() -> None:
             # One --take-source may name several ids, since a report that lists three of them is
             # read in one go and typed back in one go.
             take = [p.strip() for arg in args.take_source for p in str(arg).split(",") if p.strip()]
-            info = sync(args.pdf, args.deck, args.out, args.dry_run, args.overlays, not args.predict_places,
-                        note, args.backup, args.force_adopted, args.follow_labels, take)
+            result = sync(args.pdf, args.deck, args.out, args.dry_run, args.overlays, not args.predict_places,
+                          note, args.backup, args.force_adopted, args.follow_labels, take)
         except FirstSyncRefused as refused:
             raise SystemExit(str(refused)) from None
         # Only a sync that wrote asked for its way back; one that did not is not kept waiting.
         kept = note.kept() if note else None
         if kept:
-            add_recovery(kept, info)
-        r = info["report"]
-        sent = info["requests"] or {}          # Sync.sent counts them per phase, not in total
-        held = r["slides"].get("held") or []
-        resolved = r.get("resolved") or []
-        print(f"sync{' (dry run)' if args.dry_run else ''}: {len(r['applied'])} source changes applied, "
-              f"{len(r['overrides'])} deck edits kept, {len(r['conflicts'])} conflicts, "
+            result = add_recovery(kept, result)
+        r = result.report
+        sent = result.requests                 # Sync.sent counts them per phase, not in total
+        held, resolved = r.slides.held, r.resolved
+        print(f"sync{' (dry run)' if args.dry_run else ''}: {len(r.applied)} source changes applied, "
+              f"{len(r.overrides)} deck edits kept, {len(r.conflicts)} conflicts, "
               + (f"{len(resolved)} settled for the source, " if resolved else "")
               + (f"{len(held)} slide(s) held back, " if held else "") +
-              f"requests {sum(sent.values()) if isinstance(sent, dict) else sent}")
-        for c in r["conflicts"]:
+              f"requests {sum(sent.values())}")
+        for c in r.conflicts:
             print(f"  conflict: {c['slide']} / {c['element']}: {c['field']} ({c['resolution']})"
                   + (f" [--take-source {c['id']}]" if c.get("takeable") and c.get("id")
                      and c["resolution"] != merge.TAKEN_SAYS else ""))
-        for wmsg in r["warnings"]:
+        for wmsg in r.warnings:
             print(f"  warning: {wmsg}")
-        print(f"Google Slides: {info['url']}")
+        print(f"Google Slides: {result.url}")
         return
     out = args.out or out_root() / args.pdf.stem
     if args.command == "classify":

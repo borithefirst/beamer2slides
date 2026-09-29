@@ -500,7 +500,8 @@ def adopt_base_of(made: Made) -> tuple[dict, dict]:
     plan = DeckPlan(merged(deck), made.page_width)
     assert adopt_sync.labels_match(plan.deck, target) is None, adopt_sync.labels_match(plan.deck, target)
     pres = pres_of(target)
-    base = adopt_sync.build_base(plan.deck, made.out, target, pres, made.pdf, folds=made.extra["folds"])
+    base = adopt_sync.build_base(plan.deck, made.out, target, pres, made.pdf, "last",
+                                 made.extra["folds"])
     for entry, slide in zip(base["slides"], plan.deck["slides"]):
         assert [e["id"] for e in entry["elements"]] == [e["id"] for e in slide["elements"]], \
             f"slide {slide['page'] + 1}: the base lost an element"
@@ -528,21 +529,21 @@ def resync(made: Made, home: Path) -> None:
     # (the width went in as `overlays` while build_ours had defaults: planned at SLIDE_W whatever the deck)
     pictures = snapshot.find_base_pictures(base, snapshot.PictureFolders(kept=(made.out,), rendered=None, held=None)) \
         if made.out else snapshot.NO_PICTURES
-    ours = sync.build_ours(made.pdf, home / "ours", base, "last", made.page_width or SLIDE_W, pictures)
+    ours = sync.build_ours_of(made.pdf, home / "ours", base, "last", made.page_width or SLIDE_W, pictures)
     # a base this converter just wrote is in today's form: nothing to rewrite, nothing it cannot read
-    assert snapshot.base_form_json(ours["base_forms"]) == []
-    for s, entry in zip(ours["deck"]["slides"], ours["slides"]):
+    assert snapshot.base_form_json(ours.base_forms) == []
+    for s, entry in zip(ours.deck["slides"], ours.slides):
         assert [e["id"] for e in entry["elements"]] == [e["id"] for e in s["elements"]]
-    sync.mark_emitted(base, ours["slides"], ours["deck"], ours["pairs"], ours["plan"].scale, ours["plan"].fonts,
+    sync.mark_emitted(base, ours.slides, ours.deck, ours.pairs, ours.plan.scale, ours.plan.fonts,
                       fast=False, unread=[])
-    merge.plan_merge(base, ours, snapshot.read_presentation(pres))
-    theme_sync.ours_side(theme_sync.theme_ours(ours))
+    merge.plan_merge(base, sync.ours_json(ours), snapshot.read_presentation(pres))
+    theme_sync.ours_side(sync.theme_ours_of(ours))
 
     s = sync.Sync(None, None, "offline", base, ours, home / "ours", dry_run=True, measure=False,
                   trust_generation=True, check_plan=None, follow_labels=False, take_source=(), facts=None,
                   way_back=None)
     pictures = {}
-    for j, slide in enumerate(ours["deck"]["slides"]):
+    for j, slide in enumerate(ours.deck["slides"]):
         title = title_element(slide)
         in_place = {}
         if title is not None:  # (a placeholder holding words, emptied first)
@@ -551,9 +552,9 @@ def resync(made: Made, home: Path) -> None:
             if el["kind"] == "table":
                 in_place[i] = sync.TableFill(id=f"live{j}_tab{i}", cells=[], steps=[], shift=(0.0, 0.0), margins=[])
             if el["kind"] == "image":
-                pictures[str(ours["out"] / el["file"])] = "picture"
+                pictures[str(ours.out / el["file"])] = "picture"
         if slide.get("background") and not slide.get("background_color"):
-            pictures[str(ours["out"] / slide["background"])] = "background"
+            pictures[str(ours.out / slide["background"])] = "background"
         units = list(range(len(slide["elements"])))
         reqs, objects, new_oid, _ = s.slide_requests(j, units, f"live{j}", in_place, {}, {}, True, frozenset())
         created = {r[k]["objectId"] for r in reqs for k in ("createShape", "createLine", "createTable", "createImage")
@@ -565,7 +566,7 @@ def resync(made: Made, home: Path) -> None:
                 or not says(el, new_oid[i], reqs)]
         assert not lost, f"slide {slide['page'] + 1}: sync would write nothing for {lost}"
     if pictures:
-        page_w, page_h = ours["deck"]["slides"][0]["size"]
+        page_w, page_h = ours.deck["slides"][0]["size"]
         still = [f for f, what in pictures.items() if what != "background"]
         pages = [{"layout": "BLANK", "fill": None, "templates": False, "pictures": [
             {"file": f, "bbox": [0, 0, *s._fit(f)], "alt": f"b2s-stage:{k + n}", "title": "stage"}

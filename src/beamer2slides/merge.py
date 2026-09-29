@@ -2376,6 +2376,39 @@ def has_writes(mplan: JsonMap, live_order: Sequence[str]) -> bool:
     return current != [s for s in final if s in current]
 
 
+def _writes_unit(d: UnitDecision) -> bool:
+    """Whether a unit's decision changes the deck: made, made again, deleted or moved."""
+    if isinstance(d, CreateUnit | Recreate | DeleteUnit | MoveUnit):
+        return True
+    if isinstance(d, AdoptObject | GoneUnit | KeepRemoved | KeptJoined | KeepUnit | AdoptUnit):
+        return False
+    assert_never(d)
+
+
+def _writes_slide(p: SlidePlan) -> bool:
+    """Whether a slide's plan changes the deck (`has_writes_of`): created, deleted, or updated with a
+    unit that writes, a background written that is one (none written, or an empty name, is none: as
+    `has_writes` reads its JSON) or notes."""
+    if isinstance(p, CreateSlide | DeleteSlide):
+        return True
+    if isinstance(p, GoneSlide | KeepRemovedSlide | HoldSlide):
+        return False
+    if isinstance(p, UpdateSlide):
+        return (any(_writes_unit(u.decision) for u in p.units) or (p.background_written and bool(p.background))
+                or p.notes is not None)
+    assert_never(p)
+
+
+def has_writes_of(mplan: MergePlan, live_order: Sequence[str]) -> bool:
+    """`has_writes` of the plan `plan_merge_of` returns, read from its records: the same answer as
+    `has_writes(merge_plan_json(mplan), live_order)`."""
+    if any(_writes_slide(p) for p in mplan.slides):
+        return True
+    final = [x for x in mplan.order if not x.startswith("new:")]
+    current = [s for s in live_order if s in final]
+    return current != [s for s in final if s in current]
+
+
 def _out_of_place(was: Sequence[str], now: Sequence[str]) -> list[str]:
     """The items of `now` that are not in the longest run `was` and `now` agree on - the ones
     somebody picked up and put down elsewhere, rather than the ones that drifted because those did."""
