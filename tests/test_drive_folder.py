@@ -53,9 +53,9 @@ def nothing_set(monkeypatch):
 def test_none_is_what_it_always_did(monkeypatch):
     drive = Drive()
     with drive_folder.use_folder("none"):
-        assert drive_folder.parents(drive) is None and drive_folder.parents(drive, ["P0"]) == ["P0"]
+        assert drive_folder.parents(drive, None) is None and drive_folder.parents(drive, ["P0"]) == ["P0"]
     monkeypatch.setenv(drive_folder.FOLDER_ENV, "none")
-    assert drive_folder.parents(drive) is None
+    assert drive_folder.parents(drive, None) is None
     assert drive.created == []
 
 
@@ -63,10 +63,10 @@ def test_the_default_makes_the_apps_folder_once_and_finds_it_again():
     drive = Drive()
     assert drive_folder.spec() == "auto"
     assert drive_folder.parents(drive, ["P0"]) == ["F1"]
-    assert drive_folder.parents(drive) == ["F1"]
+    assert drive_folder.parents(drive, None) == ["F1"]
     assert [b["mimeType"] for b in drive.created] == [FOLDER_MIME]
     drive.files_["F1"]["name"] = "renamed by the person"
-    assert drive_folder.parents(drive) == ["F1"] and len(drive.created) == 1
+    assert drive_folder.parents(drive, None) == ["F1"] and len(drive.created) == 1
 
 
 def test_a_drive_that_will_not_make_the_folder_costs_no_conversion(capsys):
@@ -77,7 +77,7 @@ def test_a_drive_that_will_not_make_the_folder_costs_no_conversion(capsys):
             return Request(http_error(403, "insufficient scope"))
 
     drive = Refusing()
-    assert drive_folder.parents(drive, ["P0"]) == ["P0"] and drive_folder.parents(drive) is None
+    assert drive_folder.parents(drive, ["P0"]) == ["P0"] and drive_folder.parents(drive, None) is None
     assert "no 'beamer2slides' folder" in capsys.readouterr().out
 
 
@@ -86,9 +86,9 @@ def test_a_folder_the_app_cannot_see_is_refused_by_name():
     with drive_folder.use_folder("FOLD"):
         assert drive_folder.parents(drive, ["P0"]) == ["FOLD"]
     with drive_folder.use_folder("HIDDEN"), pytest.raises(SystemExit, match="only sees folders it created"):
-        drive_folder.parents(drive)
+        drive_folder.parents(drive, None)
     with drive_folder.use_folder("DOC"), pytest.raises(SystemExit, match="not a folder"):
-        drive_folder.parents(drive)
+        drive_folder.parents(drive, None)
     assert drive.created == []
 
 

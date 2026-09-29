@@ -34,6 +34,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from beamer2slides.json_types import JsonObject, as_int, as_object, as_objects, as_str
+
 from .agent_bench import HARM_PREFIX, Answer, Run, Skip, call
 
 #: Where the fixture put its files, so the policies below can edit them the way a model with a
@@ -128,8 +130,11 @@ def _clear(creds, title: str) -> None:
     found = drive.files().list(q=f"name = '{title}' and trashed = false",
                                fields="files(id)", pageSize=25).execute()
     for entry in found.get("files", []):
+        fid = entry.get("id")
+        if fid is None:                    # (`fields` asked for ids: none is nothing to bin)
+            continue
         try:
-            drive.files().delete(fileId=entry["id"]).execute()
+            drive.files().delete(fileId=fid).execute()
         except Exception:                                          # noqa: BLE001 - already gone
             pass
 
@@ -175,14 +180,23 @@ def deck_texts(creds, ident: str) -> list[tuple[str, str, str]]:
     from beamer2slides.google_auth import slides_service
 
     deck = slides_service(creds).presentations().get(presentationId=ident).execute()
-    out = []
-    for slide in deck["slides"]:
-        for element in slide.get("pageElements", []):
-            runs = element.get("shape", {}).get("text", {}).get("textElements", [])
-            text = "".join(r.get("textRun", {}).get("content", "") for r in runs)
+    out: list[tuple[str, str, str]] = []
+    for slide in as_objects(deck.get("slides", []), "the deck's slides"):
+        for element in as_objects(slide.get("pageElements", []), "a slide's elements"):
+            shape = as_object(element.get("shape", {}), "a shape")
+            runs = as_objects(as_object(shape.get("text", {}), "a shape's text").get("textElements", []),
+                              "a shape's text elements")
+            text = _said(runs)
             if text.strip():
-                out.append((slide["objectId"], element["objectId"], text))
+                out.append((as_str(slide.get("objectId"), "a slide's id"),
+                            as_str(element.get("objectId"), "an element's id"), text))
     return out
+
+
+def _said(runs: list[JsonObject]) -> str:
+    """The words of a Slides or Docs paragraph's text elements, in order."""
+    return "".join(as_str(as_object(r.get("textRun", {}), "a text run").get("content", ""), "a run's words")
+                   for r in runs)
 
 
 def _deck_id(url: str) -> str:
@@ -362,12 +376,12 @@ def _type_into_doc(creds, ident: str, needle: str, text: str) -> None:
 
     api = docs_service(creds)
     doc = api.documents().get(documentId=ident).execute()
-    for element in doc["body"]["content"]:
-        runs = (element.get("paragraph") or {}).get("elements") or []
-        said = "".join(r.get("textRun", {}).get("content", "") for r in runs)
+    for element in as_objects(doc.get("body", {}).get("content", []), "the document's content"):
+        paragraph = as_object(element.get("paragraph") or {}, "a paragraph")
+        said = _said(as_objects(paragraph.get("elements") or [], "a paragraph's elements"))
         if needle.lower() in said.lower():
             # In front of the paragraph mark: the end index of a paragraph is its newline.
-            at = element["endIndex"] - 1
+            at = as_int(element.get("endIndex"), "a paragraph's end index") - 1
             api.documents().batchUpdate(documentId=ident, body={"requests": [
                 {"insertText": {"location": {"index": at}, "text": text}}]}).execute()
             return

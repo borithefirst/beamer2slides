@@ -32,26 +32,64 @@ import json
 import random
 import time
 from collections import deque
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from dataclasses import dataclass
+from typing import TypedDict, Union
 
-from .gapi import HttpError, is_transient, message_of, status_of
+from .gapi import HttpError, is_transient, lent_credentials, message_of, status_of
+from .google_types import DriveService, FileBody, SlidesService, file_id
+from .json_types import Json
 
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 PART_NAME = "beamer2slides export part (temporary)"
 WORKERS = 3
+TRIES = 3   # exports of one file, where Drive stumbled (`export_bytes`)
 #: The reasons Drive gives for an export that is too large, rather than not allowed.
 SIZE_REASONS = {"exportSizeLimitExceeded"}
+
+#: The Slides client that cuts copies, or what makes one (called only when parts are needed).
+SlidesSource = Union[SlidesService, Callable[[], SlidesService]]
+#: What makes a worker thread's own (drive, slides) pair.
+Clients = Callable[[], tuple[DriveService, SlidesService]]
+Span = tuple[int, int]
 
 
 def reasons(error: BaseException) -> set[str]:
     """The `reason` strings of an API error's content ({} for anything else)."""
-    try:
-        body = json.loads(getattr(error, "content", b"") or b"{}")
-        errors = body.get("error", {}).get("errors", [])
-        return {e.get("reason") for e in errors if isinstance(e, dict) and e.get("reason")}
-    except (ValueError, AttributeError, TypeError):
+    content = getattr(error, "content", None)
+    if not isinstance(content, (bytes, str)) or not content:
         return set()
+    try:
+        body: Json = json.loads(content)
+    except ValueError:
+        return set()
+    inner = body.get("error") if isinstance(body, dict) else None
+    errors = inner.get("errors") if isinstance(inner, dict) else None
+    if not isinstance(errors, list):
+        return set()
+    found: set[str] = set()
+    for e in errors:
+        reason = e.get("reason") if isinstance(e, dict) else None
+        if isinstance(reason, str) and reason:
+            found.add(reason)
+    return found
+
+
+def deck_ids(pres: Mapping[str, object]) -> tuple[str, list[str]]:
+    """A presentations.get's id and its slides' objectIds, in order - all `export_deck` reads of
+    it. Raises ValueError on a read that lacks them (a `fields=` mask that left them out)."""
+    pid = pres.get("presentationId")
+    slides = pres.get("slides", [])
+    if not isinstance(pid, str) or not isinstance(slides, list):
+        raise ValueError("a presentation read without its presentationId or slides")
+    ids: list[str] = []
+    for s in slides:
+        oid = s.get("objectId") if isinstance(s, dict) else None
+        if not isinstance(oid, str):
+            raise ValueError(f"slide {len(ids) + 1} of {pid} was read without its objectId")
+        ids.append(oid)
+    return pid, ids
 
 
 def too_large(error: BaseException) -> bool:
@@ -68,26 +106,32 @@ def too_large(error: BaseException) -> bool:
     return "too large" in said or "exportsizelimitexceeded" in said
 
 
-def export_bytes(drive, fid: str, tries: int = 3) -> bytes:
-    """One .pptx export of a Drive file. A rate limit or a server that stumbled is tried again, a
-    timeout is not: an export that took `SLOW_EXPORT` once takes it again, and three of them were
-    fifteen minutes of waiting before anybody was told."""
-    from .gslides import SLOW_EXPORT, execute
+def export_bytes(drive: DriveService, fid: str) -> bytes:
+    """One .pptx export of a Drive file, in up to `TRIES` tries. A rate limit or a server that
+    stumbled is tried again, a timeout is not: an export that took `SLOW_EXPORT` once takes it
+    again, and three of them were fifteen minutes of waiting before anybody was told."""
+    from .gslides import SLOW_EXPORT, execute_with
     request = drive.files().export_media(fileId=fid, mimeType=PPTX_MIME)
-    for attempt in range(tries):
+    attempt = 0
+    while True:
         try:
-            data = execute(request, retries=1, timeout=SLOW_EXPORT)
-            return data.getvalue() if isinstance(data, io.BytesIO) else bytes(data)
+            # (bytes from the library; a file-like object from a client a caller injected)
+            data: object = execute_with(request, retries=1, timeout=SLOW_EXPORT)
+            if isinstance(data, io.BytesIO):
+                return data.getvalue()
+            if isinstance(data, (bytes, bytearray, memoryview)):
+                return bytes(data)
+            raise TypeError(f"an export of {fid} answered {type(data).__name__}, not bytes")
         except TimeoutError:
             raise
         except (HttpError, OSError) as e:
-            if attempt == tries - 1 or isinstance(e, HttpError) and not is_transient(e):
+            if attempt >= TRIES - 1 or isinstance(e, HttpError) and not is_transient(e):
                 raise
             time.sleep(2 ** attempt + random.random())
-    raise AssertionError("unreachable")
+            attempt += 1
 
 
-def keep_only(slides, copy: str, ids: list[str], first: int, end: int) -> None:
+def keep_only(slides: SlidesService, copy: str, ids: list[str], first: int, end: int) -> None:
     """Delete from the copy every slide outside [first, end) of the original's `ids`, in one
     batchUpdate. The copy keeps the original's ids (measured); should one not, the batch is refused
     whole, and the copy's own ids are read and deleted by their place."""
@@ -104,14 +148,14 @@ def keep_only(slides, copy: str, ids: list[str], first: int, end: int) -> None:
     except HttpError as e:
         if status_of(e) != 400:
             raise
-        now = [s["objectId"] for s in execute(slides.presentations().get(
-            presentationId=copy, fields="slides.objectId")).get("slides", [])]
+        _, now = deck_ids({"presentationId": copy, **execute(slides.presentations().get(
+            presentationId=copy, fields="slides.objectId"))})
         if len(now) != len(ids):
             raise
         delete(now[:first] + now[end:])
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class Part:
     first: int       # the part's slides, [first, end) of the deck's, 0-based
     end: int
@@ -124,22 +168,29 @@ class Part:
         return f"slides-{self.first + 1:03}-{self.end:03}"
 
 
-@dataclass
+class Missing(TypedDict):
+    """Slides no part holds: [first, last] 1-based, their ids, and why."""
+    slides: list[int]
+    ids: list[str]
+    reason: str
+
+
+@dataclass(kw_only=True)
 class Export:
     """What `export_deck` made: the parts that came out, in slide order, and the slides that did
-    not (`missing`: {"slides": [first, last] 1-based, "ids", "reason"}); `exports` (calls), `copies`
-    made and `deleted`, `leftovers` (copies Drive would not delete: say so, they are the person's to
-    remove, `tools/drive_usage.py --delete-staging`), `refused`: why the deck itself was not
-    exported, when that was not its size."""
+    not (`missing`); `exports` (calls), `copies` made and `deleted`, `leftovers` (copies Drive would
+    not delete: say so, they are the person's to remove, `tools/drive_usage.py --delete-staging`),
+    `refused`: why the deck itself was not exported, when that was not its size. Filled in as the
+    export goes, hence not frozen."""
 
-    slides: int = 0
-    parts: list[Part] = field(default_factory=list)
-    missing: list[dict] = field(default_factory=list)
-    exports: int = 0
-    copies: int = 0
-    deleted: int = 0
-    leftovers: list[str] = field(default_factory=list)
-    refused: str | None = None
+    slides: int
+    parts: list[Part]
+    missing: list[Missing]
+    exports: int
+    copies: int
+    deleted: int
+    leftovers: list[str]
+    refused: str | None
 
     @property
     def whole(self) -> bool:
@@ -150,19 +201,21 @@ class Export:
     def complete(self) -> bool:
         return bool(self.parts) and not self.missing
 
-    def pictures(self, pres: dict, wanted=None) -> dict[str, bytes]:
+    def pictures(self, pres: Mapping[str, object], wanted: Iterable[str] | None = None) -> dict[str, bytes]:
         """Every picture the parts hold, by the id that owns it (`deck_pictures.picture_urls`). A
         part pairs with `pres` cut to its slides; the masters and layouts, which every part
         carries, come from the first part that has them."""
         from .deck_pictures import exported_pictures
+        slides = pres.get("slides", [])
+        every = slides if isinstance(slides, list) else []
         got: dict[str, bytes] = {}
         for part in self.parts:
-            sub = {**pres, "slides": pres.get("slides", [])[part.first:part.end]}
+            sub = {**pres, "slides": every[part.first:part.end]}
             for oid, data in exported_pictures(part.data, sub, wanted).items():
                 got.setdefault(oid, data)
         return got
 
-    def summary(self) -> dict:
+    def summary(self) -> dict[str, object]:
         return {"slides": self.slides, "parts": [[p.first + 1, p.end] for p in self.parts],
                 "bytes": sum(len(p.data) for p in self.parts), "missing": self.missing,
                 "exports": self.exports, "copies": self.copies, "deleted": self.deleted,
@@ -174,30 +227,44 @@ def _halves(first: int, end: int) -> list[tuple[int, int]]:
     return [(first, mid), (mid, end)]
 
 
-def _export_part(drive, slides, pid: str, ids: list[str], span: tuple[int, int], body: dict) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class _PartDone:
+    """What one part's round of calls did, for the calling thread to count: the copy made (None:
+    none), whether it was deleted, the exports tried, and the part's .pptx or why there is none."""
+
+    span: Span
+    copy: str | None
+    deleted: bool
+    exports: int
+    data: bytes | None
+    error: BaseException | None
+
+
+def _export_part(drive: DriveService, slides: SlidesService, pid: str, ids: list[str], span: Span,
+                 body: FileBody) -> _PartDone:
     """One part: copy, delete the slides outside it, export, delete the copy - the last whatever
     happened before it. Returns what happened, for the calling thread to count."""
     from .gslides import execute
     first, end = span
-    out: dict = {"span": span, "data": None, "error": None, "copy": None, "deleted": False, "exports": 0}
     try:
-        out["copy"] = copy = execute(drive.files().copy(fileId=pid, body=dict(body), fields="id"))["id"]
+        copy = file_id(execute(drive.files().copy(fileId=pid, body=body.copy(), fields="id")),
+                       f"a copy of {pid}")
     except (HttpError, OSError) as e:
-        out["error"] = e
-        return out
+        return _PartDone(span=span, copy=None, deleted=False, exports=0, data=None, error=e)
+    exports, data, error, deleted = 0, None, None, False
     try:
         keep_only(slides, copy, ids, first, end)
-        out["exports"] = 1
-        out["data"] = export_bytes(drive, copy)
+        exports = 1
+        data = export_bytes(drive, copy)
     except (HttpError, OSError) as e:
-        out["error"] = e
+        error = e
     finally:
         try:
             execute(drive.files().delete(fileId=copy))
-            out["deleted"] = True
+            deleted = True
         except (HttpError, OSError):
             pass
-    return out
+    return _PartDone(span=span, copy=copy, deleted=deleted, exports=exports, data=data, error=error)
 
 
 def _describe(error: BaseException) -> str:
@@ -208,9 +275,9 @@ def _describe(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"
 
 
-def _client(slides):
+def _client(slides: SlidesSource) -> SlidesService | None:
     """A Slides client out of a client or a function making one (None where it could not)."""
-    if hasattr(slides, "presentations") or not callable(slides):
+    if isinstance(slides, SlidesService):
         return slides
     try:
         return slides()
@@ -218,28 +285,27 @@ def _client(slides):
         return None
 
 
-def export_deck(drive, slides, pres: dict, per_part: int | None = None, workers: int = WORKERS,
-                clients=None) -> Export:
+def export_deck(drive: DriveService, slides: SlidesSource | None, pres: Mapping[str, object],
+                per_part: int | None = None, workers: int = WORKERS, clients: Clients | None = None) -> Export:
     """The deck `pres` describes (a presentations.get; only `presentationId` and the slides'
-    objectIds are needed) as .pptx: whole where Drive gives it, else in parts. `per_part`: start
-    from parts of that many slides instead of the whole deck. `slides`: the Slides client that
-    deletes a copy's other slides, or a function making one, called only when parts are needed;
-    None (or a function that fails): no parts - the whole export or nothing, as before.
-    `clients`: what makes a worker thread's (drive, slides) pair (None: built from credentials
-    resolved here)."""
-    pid = pres["presentationId"]
-    ids = [s["objectId"] for s in pres.get("slides", [])]
-    result = Export(slides=len(ids))
+    objectIds are needed, `deck_ids`) as .pptx: whole where Drive gives it, else in parts.
+    `per_part`: start from parts of that many slides instead of the whole deck. `slides`: the
+    Slides client that deletes a copy's other slides, or a function making one, called only when
+    parts are needed; None (or a function that fails): no parts - the whole export or nothing, as
+    before. `clients`: what makes a worker thread's (drive, slides) pair (None: built from
+    credentials resolved here)."""
+    pid, ids = deck_ids(pres)
     n = len(ids)
+    result = Export(slides=n, parts=[], missing=[], exports=0, copies=0, deleted=0, leftovers=[], refused=None)
+    cutter: SlidesService | None
     if not per_part or per_part >= n or slides is None:
         result.exports += 1
         try:
-            result.parts.append(Part(0, n, export_bytes(drive, pid), copied=False))
+            result.parts.append(Part(first=0, end=n, data=export_bytes(drive, pid), copied=False))
             return result
         except (HttpError, OSError) as e:
-            if slides is not None and n > 1 and too_large(e):
-                slides = _client(slides)
-            if slides is None or n < 2 or not too_large(e):
+            cutter = _client(slides) if slides is not None and n > 1 and too_large(e) else None
+            if cutter is None or n < 2 or not too_large(e):
                 if not too_large(e):
                     result.refused = _describe(e)
                 result.missing.append({"slides": [1, n], "ids": ids, "reason": _describe(e)})
@@ -247,41 +313,41 @@ def export_deck(drive, slides, pres: dict, per_part: int | None = None, workers:
         spans = _halves(0, n)
     else:
         spans = [(a, min(a + per_part, n)) for a in range(0, n, per_part)]
-        slides = _client(slides)
-        if slides is None:
+        cutter = _client(slides)
+        if cutter is None:
             result.missing.append({"slides": [1, n], "ids": ids, "reason": "no Slides client to cut the deck with"})
             return result
     from .drive_folder import place
-    body = place({"name": PART_NAME, "appProperties": {"b2sStaging": pid}}, drive)  # (resolved once, here)
-    _run(result, drive, slides, pid, ids, spans, body, workers, clients)
+    body: FileBody = place({"name": PART_NAME, "appProperties": {"b2sStaging": pid}}, drive)  # (resolved once, here)
+    _run(result, drive, cutter, pid, ids, spans, body, workers, clients)
     result.parts.sort(key=lambda p: p.first)
     result.missing.sort(key=lambda m: m["slides"][0])
     return result
 
 
-def _run(result: Export, drive, slides, pid: str, ids: list[str], spans, body: dict, workers: int,
-         clients=None) -> None:
+def _run(result: Export, drive: DriveService, slides: SlidesService, pid: str, ids: list[str],
+         spans: list[Span], body: FileBody, workers: int, clients: Clients | None) -> None:
     from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
     from .gslides import per_thread
 
     pending = deque(spans)
 
-    def settle(out: dict) -> None:
-        first, end = out["span"]
-        result.exports += out["exports"]
-        if out["copy"]:
+    def settle(out: _PartDone) -> None:
+        first, end = out.span
+        result.exports += out.exports
+        if out.copy:
             result.copies += 1
-            if out["deleted"]:
+            if out.deleted:
                 result.deleted += 1
             else:
-                result.leftovers.append(out["copy"])
-        if out["data"] is not None:
-            result.parts.append(Part(first, end, out["data"], copied=True))
-        elif end - first > 1 and out["copy"] and too_large(out["error"]):
+                result.leftovers.append(out.copy)
+        if out.data is not None:
+            result.parts.append(Part(first=first, end=end, data=out.data, copied=True))
+        elif end - first > 1 and out.copy and out.error is not None and too_large(out.error):
             pending.extend(_halves(first, end))
         else:
-            result.missing.append({"slides": [first + 1, end], "ids": ids[first:end],
-                                   "reason": _describe(out["error"])})
+            reason = _describe(out.error) if out.error is not None else "no export and no error"
+            result.missing.append({"slides": [first + 1, end], "ids": ids[first:end], "reason": reason})
 
     if workers <= 1 or clients is None and (shared_service("drive", "v3") or shared_service("slides", "v1")):
         # A caller's own clients: theirs and one thread's (`emit.measure_places`' rule).
@@ -292,16 +358,19 @@ def _run(result: Export, drive, slides, pid: str, ids: list[str], spans, body: d
         # Resolved here: a worker inherits no context. The lent client's own first - this may itself
         # run on a thread that was handed clients and no context (`guard.WayBack`), where the token
         # file is not whose deck this is.
-        creds = getattr(getattr(drive, "_http", None), "credentials", None) or credentials_for_threads()
-        clients = lambda: (drive_service(creds), slides_service(creds))  # noqa: E731
+        creds = lent_credentials(drive) or credentials_for_threads()
+
+        def own() -> tuple[DriveService, SlidesService]:
+            return drive_service(creds), slides_service(creds)
+        clients = own
     client = per_thread(clients)
 
-    def job(span):
+    def job(span: Span) -> _PartDone:
         d, s = client()
         return _export_part(d, s, pid, ids, span, body)
 
     with ThreadPoolExecutor(workers, thread_name_prefix="b2s-export") as pool:
-        running: dict = {}
+        running: dict[Future[_PartDone], Span] = {}
         while pending or running:
             while pending and len(running) < workers:
                 span = pending.popleft()

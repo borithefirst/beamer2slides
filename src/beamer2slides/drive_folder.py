@@ -26,8 +26,13 @@ id the deck carries, never by folder.
 from __future__ import annotations
 
 import os
+from collections.abc import Generator, Mapping, MutableMapping
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import TypeVar, overload
+
+from .google_types import DriveService, FileBody, file_id
+from .json_types import as_optional_str
 
 FOLDER_ENV = "B2S_DRIVE_FOLDER"
 FOLDER_MIME = "application/vnd.google-apps.folder"
@@ -40,7 +45,7 @@ _spec: ContextVar[str | None] = ContextVar("beamer2slides.drive_folder", default
 
 
 @contextmanager
-def use_folder(spec: str | None):
+def use_folder(spec: str | None) -> Generator[None, None, None]:
     """Create every Drive file inside this block in `spec` (a folder id, `auto` or `none`)."""
     token = _spec.set(spec)
     try:
@@ -54,7 +59,7 @@ def spec() -> str:
     return _spec.get() or os.environ.get(FOLDER_ENV) or AUTO
 
 
-def folder_id(drive) -> str | None:
+def folder_id(drive: DriveService) -> str | None:
     """The id of the folder new files go into (None: `none`, or the app's folder could not be had).
     Raises SystemExit when a folder named by id cannot take them, before anything was created."""
     from .gapi import HttpError, status_of
@@ -68,10 +73,14 @@ def folder_id(drive) -> str | None:
         try:
             found = execute(drive.files().list(q=q, spaces="drive", fields="files(id)",
                                                pageSize=10)).get("files", [])
-            if found:
-                return found[0]["id"]
-            return execute(drive.files().create(body={"name": HOME_NAME, "mimeType": FOLDER_MIME,
-                                                      "appProperties": {HOME_PROPERTY: "1"}}, fields="id"))["id"]
+            # (`fields` asked for ids: a file without one is no answer, and the next is looked at)
+            for folder in found:
+                fid = folder.get("id")
+                if fid:
+                    return fid
+            made = execute(drive.files().create(body={"name": HOME_NAME, "mimeType": FOLDER_MIME,
+                                                      "appProperties": {HOME_PROPERTY: "1"}}, fields="id"))
+            return file_id(made, "the new folder")
         except (HttpError, OSError) as e:
             print(f"warning: no '{HOME_NAME}' folder in Drive ({type(e).__name__}: {e}); the file goes "
                   f"where --drive-folder {NONE} puts it")
@@ -84,10 +93,10 @@ def folder_id(drive) -> str | None:
                          f"'{HOME_NAME}' folder of its own") from None
     if info.get("mimeType") != FOLDER_MIME or info.get("trashed"):
         raise SystemExit(f"Drive file {s} is not a folder{' (it is in the trash)' if info.get('trashed') else ''}")
-    return info["id"]
+    return as_optional_str(info.get("id"), f"Drive file {s}'s id") or s
 
 
-def parents(drive, beside: list[str] | None = None) -> list[str] | None:
+def parents(drive: DriveService, beside: list[str] | None) -> list[str] | None:
     """What a new file's `parents` should be: the folder (`folder_id`), else `beside` (the parents
     of the file it belongs to, for a base or a backup), else None (My Drive's root)."""
     fid = folder_id(drive)
@@ -96,9 +105,22 @@ def parents(drive, beside: list[str] | None = None) -> list[str] | None:
     return list(beside) if beside else None
 
 
-def place(body: dict, drive, beside: list[str] | None = None) -> dict:
-    """`body` (a files.create / files.copy body) with its `parents` set by `parents`."""
+Body = TypeVar("Body", bound=Mapping[str, object])
+
+
+@overload
+def place(body: FileBody, drive: DriveService) -> FileBody: ...
+@overload
+def place(body: FileBody, drive: DriveService, beside: list[str] | None) -> FileBody: ...
+@overload
+def place(body: Body, drive: DriveService, beside: list[str] | None) -> Body: ...
+def place(body: Mapping[str, object], drive: DriveService, beside: list[str] | None = None) -> Mapping[str, object]:
+    """`body` (a files.create / files.copy body) with its `parents` set by `parents`, changed in
+    place and returned as the type it came in: a `FileBody` (what `files().create` takes, and what a
+    dict written in the call is read as) comes back as one, and a body a caller built as a plain
+    dict beforehand (snapshot.store_base, doc_sync's base) as that, until those say `FileBody` too.
+    (`beside` is given wherever such a body is: its file's parents.)"""
     where = parents(drive, beside)
-    if where:
+    if where and isinstance(body, MutableMapping):
         body["parents"] = where
     return body

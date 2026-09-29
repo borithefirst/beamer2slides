@@ -28,16 +28,24 @@ from __future__ import annotations
 import getpass
 import os
 import subprocess
-from collections.abc import Mapping
-from contextlib import contextmanager
+from collections.abc import Callable, Generator, Mapping
+from contextlib import AbstractContextManager, contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypedDict, TypeVar, Union, overload
 
 from . import gapi
+from .google_types import DocsService, DriveService, SlidesService
 from .paths import CHECKOUT, in_checkout
+from .typing_compat import assert_never
+
+if TYPE_CHECKING:
+    from google.auth.credentials import Credentials
+    from typing_extensions import TypeAlias
+
+    from .net import Fetch
 
 ROOT = CHECKOUT  # where a checkout keeps its credentials
 
@@ -87,7 +95,10 @@ def restrict_to_current_user(path: Path) -> None:
         path.chmod(0o600)
 
 
-class _Hook:
+V = TypeVar("V")
+
+
+class _Hook(Generic[V]):
     """Something a caller puts in front of a default, for the length of a block.
 
     The value lives in a `ContextVar`, so it belongs to the thread or the async task that
@@ -107,13 +118,13 @@ class _Hook:
     """
 
     def __init__(self, name: str, what: str) -> None:
-        self._var: ContextVar = ContextVar(name, default=None)
+        self._var: ContextVar[V | None] = ContextVar(name, default=None)
         self._what = what
-        self._active: list = []          # every block currently open, in this whole process
+        self._active: list[V] = []       # every block currently open, in this whole process
         self._lock = Lock()
 
     @contextmanager
-    def use(self, value):
+    def use(self, value: V) -> Generator[None, None, None]:
         token = self._var.set(value)
         with self._lock:
             self._active.append(value)
@@ -127,13 +138,13 @@ class _Hook:
                         del self._active[i]
                         break
 
-    def get(self):
+    def get(self) -> V | None:
         value = self._var.get()
         if value is not None:
             return value
         with self._lock:
             active = list(self._active)
-        if not active or all(a is None for a in active):
+        if not active:
             return None
         if all(a is active[0] for a in active):
             return active[0]
@@ -144,13 +155,47 @@ class _Hook:
             f"pools do), or start the thread with `contextvars.copy_context().run(...)`.")
 
 
+#: What `use_provider` takes: a supply of credentials.
+Provider: TypeAlias = "Callable[[], Credentials]"
+
+
+class Services(TypedDict, total=False):
+    """Ready clients a caller hands over (`use_services`), by api; an api left out is built."""
+    slides: SlidesService
+    drive: DriveService
+    docs: DocsService
+
+
+class ServiceBuilder(Protocol):
+    """A caller's own builder (`use_services`): the client for an api, or None to have the library
+    build it. `creds` is None wherever nobody passed any (see `use_services`)."""
+
+    @overload
+    def __call__(self, api: Literal["slides"], version: str, creds: Credentials | None) -> SlidesService | None: ...
+    @overload
+    def __call__(self, api: Literal["drive"], version: str, creds: Credentials | None) -> DriveService | None: ...
+    @overload
+    def __call__(self, api: Literal["docs"], version: str, creds: Credentials | None) -> DocsService | None: ...
+
+
+Injected: TypeAlias = Union[Services, ServiceBuilder]
+
+
+@dataclass(frozen=True, kw_only=True)
+class _Services:
+    """What `use_services` installed: the mapping or builder, and whether it wants credentials."""
+
+    make: Injected
+    needs_credentials: bool
+
+
 #: What supplies credentials instead of the browser flow, while a block asks for it.
-_credentials_hook = _Hook("beamer2slides.credentials", "credentials provider")
+_credentials_hook: _Hook[Provider] = _Hook("beamer2slides.credentials", "credentials provider")
 #: What builds the API clients instead of `googleapiclient.discovery.build`.
-_services_hook = _Hook("beamer2slides.services", "service builder")
+_services_hook: _Hook[_Services] = _Hook("beamer2slides.services", "service builder")
 
 
-def use_provider(provider):
+def use_provider(provider: Provider) -> AbstractContextManager[None]:
     """Take credentials from `provider()` inside this block, never from the browser flow.
 
     Per context (see `_Hook`): a harness may run this around each of several requests at once,
@@ -159,15 +204,7 @@ def use_provider(provider):
     return _credentials_hook.use(provider)
 
 
-@dataclass(frozen=True)
-class _Services:
-    """What `use_services` installed: the mapping or builder, and whether it wants credentials."""
-
-    make: Any
-    needs_credentials: bool = False
-
-
-def use_services(services, needs_credentials: bool = False):
+def use_services(services: Injected, needs_credentials: bool = False) -> AbstractContextManager[None]:
     """Take the API clients from `services` inside this block, instead of building them.
 
     `services` is either a mapping of api name ("slides", "drive", "docs") to a ready client, or
@@ -189,17 +226,17 @@ def use_services(services, needs_credentials: bool = False):
     is promising this block is one thread's; a builder is handed the api and may return a fresh
     client per call.
     """
-    return _services_hook.use(_Services(services, needs_credentials))
+    return _services_hook.use(_Services(make=services, needs_credentials=needs_credentials))
 
 
-def _for_builder(made: _Services, creds):
+def _for_builder(made: _Services, creds: Credentials | None) -> Credentials | None:
     """The credentials to hand a builder: the caller's, else ours where it asked for them."""
     if creds is None and made.needs_credentials:
         return credentials()
     return creds
 
 
-def shared_service(api: str, version: str = "v1", creds=None) -> bool:
+def shared_service(api: gapi.ApiName, version: str) -> bool:
     """True where every thread asking for an `api` client would be handed the *same* object.
 
     A service object is not thread-safe, so a pass that would run on several threads has to know
@@ -213,12 +250,23 @@ def shared_service(api: str, version: str = "v1", creds=None) -> bool:
         return False
     if isinstance(made.make, Mapping):
         return made.make.get(api) is not None
-    creds = _for_builder(made, creds)   # resolved once: the builder is about to be asked twice
-    first = made.make(api, version, creds)
-    return first is not None and first is made.make(api, version, creds)
+    creds = _for_builder(made, None)   # resolved once: the builder is about to be asked twice
+    first = _ask(made.make, api, version, creds)
+    return first is not None and first is _ask(made.make, api, version, creds)
 
 
-def credentials_for_threads():
+def _ask(builder: ServiceBuilder, api: gapi.ApiName, version: str, creds: Credentials | None) -> object:
+    """A builder's answer for any api, when only whether it answers matters."""
+    if api == "slides":
+        return builder(api, version, creds)
+    if api == "drive":
+        return builder(api, version, creds)
+    if api == "docs":
+        return builder(api, version, creds)
+    assert_never(api)
+
+
+def credentials_for_threads() -> Credentials | None:
     """The credentials worker threads should build their clients from, or None.
 
     Resolved on the calling thread, because a thread inherits no context (`_Hook`) - and only
@@ -231,10 +279,10 @@ def credentials_for_threads():
 
 
 #: What downloads Google's content (pictures, thumbnails) instead of `urllib` (`net`).
-_fetch_hook = _Hook("beamer2slides.fetch", "content fetcher")
+_fetch_hook: _Hook[Fetch] = _Hook("beamer2slides.fetch", "content fetcher")
 
 
-def use_fetcher(fetch):
+def use_fetcher(fetch: Fetch) -> AbstractContextManager[None]:
     """Download every picture, thumbnail and picture source through `fetch(url) -> bytes` inside
     this block, instead of opening a socket of our own (`net`).
 
@@ -247,7 +295,7 @@ def use_fetcher(fetch):
     return _fetch_hook.use(fetch)
 
 
-def fetcher_for_threads():
+def fetcher_for_threads() -> Fetch:
     """The fetcher downloads should go through: the caller's (`use_fetcher`), else
     `net.no_downloads` under `$B2S_NO_DOWNLOADS`, else `urllib`'s. Resolve it on the calling
     thread and pass it into a pool (`_Hook`)."""
@@ -258,17 +306,7 @@ def fetcher_for_threads():
     return net.no_downloads if os.environ.get(net.NO_DOWNLOADS, "") not in ("", "0") else net.urllib_fetch
 
 
-def _service(api: str, version: str, creds):
-    made = _services_hook.get()
-    if made is not None:
-        service = (made.make.get(api) if isinstance(made.make, Mapping)
-                   else made.make(api, version, _for_builder(made, creds)))
-        if service is not None:
-            return service
-    return gapi.build(api, version, creds or credentials())
-
-
-def credentials():
+def credentials() -> Credentials:
     """The OAuth credentials to call Google with: a caller's provider, else the cached token."""
     provider = _credentials_hook.get()
     if provider is not None:
@@ -276,12 +314,12 @@ def credentials():
     try:
         from google.auth.exceptions import RefreshError
         from google.auth.transport.requests import Request
-        from google.oauth2.credentials import Credentials
+        from google.oauth2.credentials import Credentials as UserCredentials
     except ImportError:
         raise ModuleNotFoundError(gapi.MISSING) from None
     creds = None
     if TOKEN.exists():
-        creds = Credentials.from_authorized_user_file(str(TOKEN), SCOPES)
+        creds = UserCredentials.from_authorized_user_file(str(TOKEN), SCOPES)
     if creds and creds.valid:
         return creds
     if creds and creds.expired and creds.refresh_token:
@@ -305,15 +343,37 @@ def credentials():
     return creds
 
 
-def slides_service(creds: Any = None):
-    return _service("slides", "v1", creds)
+#: Each api's client, typed, whoever made it: a caller's (`use_services`), taken at its word, or
+#: the library's (`gapi.build`, which checks it has what `google_types` says the package calls).
 
 
-def drive_service(creds: Any = None):
+def slides_service(creds: Credentials | None = None) -> SlidesService:
+    made = _services_hook.get()
+    if made is not None:
+        service = (made.make.get("slides") if isinstance(made.make, Mapping)
+                   else made.make("slides", "v1", _for_builder(made, creds)))
+        if service is not None:
+            return service
+    return gapi.build("slides", "v1", creds or credentials())
+
+
+def drive_service(creds: Credentials | None = None) -> DriveService:
     """Service objects are not thread-safe: build one per thread, sharing `creds`."""
-    return _service("drive", "v3", creds)
+    made = _services_hook.get()
+    if made is not None:
+        service = (made.make.get("drive") if isinstance(made.make, Mapping)
+                   else made.make("drive", "v3", _for_builder(made, creds)))
+        if service is not None:
+            return service
+    return gapi.build("drive", "v3", creds or credentials())
 
 
-def docs_service(creds: Any = None):
+def docs_service(creds: Credentials | None = None) -> DocsService:
     """The Docs API must be enabled in the Cloud project; see docs/google-docs.md."""
-    return _service("docs", "v1", creds)
+    made = _services_hook.get()
+    if made is not None:
+        service = (made.make.get("docs") if isinstance(made.make, Mapping)
+                   else made.make("docs", "v1", _for_builder(made, creds)))
+        if service is not None:
+            return service
+    return gapi.build("docs", "v1", creds or credentials())

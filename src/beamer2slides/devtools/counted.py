@@ -70,7 +70,7 @@ def main() -> None:
         runpy.run_module("beamer2slides", run_name="__main__", alter_sys=True)
     finally:
         if path:
-            stats = dict(gslides.STATS)
+            stats: dict[str, float] = {name: n for name, n in gslides.STATS.items()}
             stats["seconds"] = round(time.monotonic() - started, 2)
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(stats, f, indent=1, sort_keys=True)

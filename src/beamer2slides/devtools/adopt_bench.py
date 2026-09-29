@@ -38,6 +38,7 @@ import numpy as np
 from PIL import Image
 
 from beamer2slides.arrays import RGB, Mask, SignedRGB
+from beamer2slides.json_types import as_objects
 from beamer2slides.paths import CHECKOUT
 # The scores live in the package: pull's frame guard (`frame_guard`) scores its rounds with them too,
 # and the package never imports devtools.
@@ -128,10 +129,11 @@ def capture(pid: str, name: str, refresh: bool = False) -> Path:
                         raise
                     time.sleep(20 + 10 * attempt)
 
+    pages = as_objects(pres.get("slides", []), f"{name}'s slides")
     with ThreadPoolExecutor(3) as pool:
-        list(pool.map(thumb, enumerate(pres["slides"], 1)))
+        list(pool.map(thumb, enumerate(pages, 1)))
     write_target(folder, pres, fetch_url)
-    print(f"{name}: {pres.get('title')!r}, {len(pres['slides'])} slides -> {folder}")
+    print(f"{name}: {pres.get('title')!r}, {len(pages)} slides -> {folder}")
     return folder
 
 

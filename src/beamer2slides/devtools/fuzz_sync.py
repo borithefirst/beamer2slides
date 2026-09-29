@@ -1745,7 +1745,9 @@ class Template:
         from beamer2slides.google_auth import drive_service
         from beamer2slides.gslides import execute
         drive = drive_service()
-        pid = execute(drive.files().copy(fileId=self.pid, fields="id,appProperties", body=place({"name": name}, drive)))["id"]
+        from beamer2slides.google_types import file_id
+        pid = file_id(execute(drive.files().copy(fileId=self.pid, fields="id,appProperties",
+                                                 body=place({"name": name}, drive))), f"a copy of {self.pid}")
         execute(drive.files().update(fileId=pid, fields="id", body={"appProperties": {
             snapshot.BASE_PROPERTY: None, snapshot.CLEANED_PROPERTY: None}}))
         for p in self.out.rglob("*"):
@@ -2019,8 +2021,9 @@ class LiveRound:
         pid = pid or self.deck.pid
         try:
             info = execute(drive.files().get(fileId=pid, fields="appProperties"))
-            fid = (info.get("appProperties") or {}).get(snapshot.BASE_PROPERTY)
-            if fid:
+            props = info.get("appProperties")
+            fid = props.get(snapshot.BASE_PROPERTY) if isinstance(props, dict) else None
+            if isinstance(fid, str) and fid:
                 execute(drive.files().delete(fileId=fid))
             execute(drive.files().delete(fileId=pid))
         except Exception as e:  # noqa: BLE001

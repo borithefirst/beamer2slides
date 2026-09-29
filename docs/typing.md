@@ -168,6 +168,17 @@ table. When a combination of fields must not happen, choose types in which it ca
   `as_str`, ...), which name where a value of the wrong shape was. That is the interim form of
   "parse at the boundary" until a record's parser exists; a TypedDict view of a dict cannot be passed
   to the legacy `dict` parameters, a `JsonObject` can.
+- **Google's APIs** (`google_types.py`): the part of Slides, Drive and Docs we call, as Protocols.
+  A method's keywords are a TypedDict taken as `**kw: Unpack[...]` (`Required` where Google
+  requires one) and it returns `Request[Answer]`, so `gslides.execute(request) -> Answer`; a call
+  not listed there is added there first. `gapi.build` checks the library's client against the
+  Protocol; an injected client is taken at its word, and a fake takes `**kw` too (pyrefly accepts
+  no named keyword parameters against an Unpack). Answers are `total=False` TypedDicts, not
+  dataclasses: Google's open schema, where a field mask drops any key, kept and written back as
+  they came; read a key with `.get` and say what its absence means (`file_id` reads a new file's).
+  An answer still handed to a parameter annotated `dict` stays `JsonObject` until that parameter
+  says its TypedDict (today `presentations.get` and `files.get`). `execute_with(request, retries=,
+  timeout=)` is the explicit form; it always tries once and ends in a return or a raise.
 - **`typecheck/rules.json`**: per module, how many default arguments, defaulted dataclass fields
   and uses of `Any` remain. Only goes down (`tests/test_typing_rules.py`; `python
   tests/test_typing_rules.py` rewrites it, and refuses to raise a count). A new module has none.

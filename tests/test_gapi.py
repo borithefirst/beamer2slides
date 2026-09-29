@@ -169,14 +169,14 @@ def test_a_slow_export_waits_on_a_connection_of_its_own():
             return b"pptx"
 
     r = Request()
-    assert gslides.execute(r, timeout=300) == b"pptx"
+    assert gslides.execute_with(r, retries=gslides.RETRIES, timeout=300) == b"pptx"
     assert r.used.http.timeout == 300 and isinstance(r.used.credentials, Creds)
 
     class Injected:
         def execute(self):
             return b"theirs"
     assert gapi.patient_http(Injected(), 300) is None
-    assert gslides.execute(Injected(), timeout=300) == b"theirs"
+    assert gslides.execute_with(Injected(), retries=gslides.RETRIES, timeout=300) == b"theirs"
 
 
 # ---------------------------------------------------------------- the builder's credentials

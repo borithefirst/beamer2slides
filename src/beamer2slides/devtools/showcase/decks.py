@@ -962,7 +962,9 @@ TITLES = {"hashing": "Hash tables — lecture 7", **{k: v[0] for k, v in PPTX.it
 def build(names: list[str] | None = None) -> dict:
     from beamer2slides.emit import import_presentation
     from beamer2slides.google_auth import drive_service, slides_service
+    from beamer2slides.google_types import file_id
     from beamer2slides.gslides import execute
+    from beamer2slides.json_types import as_objects, as_str
     slides, drive = slides_service(), drive_service()
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8")) if MANIFEST.exists() else {}
     pics = pictures()
@@ -971,9 +973,9 @@ def build(names: list[str] | None = None) -> dict:
         if name == "hashing":
             if not pid:
                 from beamer2slides.drive_folder import place
-                pid = execute(drive.files().create(body=place({"name": TITLES[name], "mimeType":
-                                                               "application/vnd.google-apps.presentation"}, drive),
-                                                   fields="id"))["id"]
+                pid = file_id(execute(drive.files().create(body=place({"name": TITLES[name], "mimeType":
+                                                                       "application/vnd.google-apps.presentation"},
+                                                                      drive), fields="id")), TITLES[name])
                 manifest[name] = {"id": pid}
                 MANIFEST.write_text(json.dumps(manifest, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
             hashing(slides, pid)
@@ -982,7 +984,9 @@ def build(names: list[str] | None = None) -> dict:
             pid = import_presentation(slides, drive, title, W, H, make(pics).pptx(), pid)["presentationId"]
         execute(drive.permissions().create(fileId=pid, body={"type": "anyone", "role": "reader"}, fields="id"))
         pres = execute(slides.presentations().get(presentationId=pid, fields="title,slides.objectId"))
-        manifest[name] = {"id": pid, "title": TITLES[name], "pages": [s["objectId"] for s in pres["slides"]]}
+        pages = [as_str(s.get("objectId"), "a slide's id")
+                 for s in as_objects(pres.get("slides", []), f"{name}'s slides")]
+        manifest[name] = {"id": pid, "title": TITLES[name], "pages": pages}
         MANIFEST.write_text(json.dumps(manifest, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
-        print(f"{name}: {len(pres['slides'])} slides  https://docs.google.com/presentation/d/{pid}/view")
+        print(f"{name}: {len(pages)} slides  https://docs.google.com/presentation/d/{pid}/view")
     return manifest

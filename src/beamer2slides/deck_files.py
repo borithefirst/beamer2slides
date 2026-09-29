@@ -302,6 +302,7 @@ def save(ref: str, out: Path, pptx: Path | None = None, log=print) -> dict:
     from .deck_ir import picture_fetch, presentation_id, slide_thumbnails
     from .google_auth import slides_service
     from .gslides import execute
+    from .json_types import as_array
 
     out = Path(out)
     if out.exists() and any(out.iterdir()):
@@ -310,7 +311,7 @@ def save(ref: str, out: Path, pptx: Path | None = None, log=print) -> dict:
     pid = presentation_id(ref)
     pres = execute(slides_service().presentations().get(presentationId=pid))
     (out / FOLDERS["presentation"]).write_text(json.dumps(pres, ensure_ascii=False), encoding="utf-8")
-    log(f"presentation: {len(pres.get('slides', []))} slides")
+    log(f"presentation: {len(as_array(pres.get('slides', []), 'the presentation slides'))} slides")
     thumbs = slide_thumbnails(pid, pres, out / FOLDERS["thumbnails"])
     return record(out, pres, thumbs, picture_fetch(pres), pptx, log)
 

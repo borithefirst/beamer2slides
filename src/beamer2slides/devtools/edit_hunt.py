@@ -123,8 +123,9 @@ def drop_slot(slot: str) -> None:
         drive = drive_service()
         try:
             info = execute(drive.files().get(fileId=pid, fields="appProperties"))
-            fid = (info.get("appProperties") or {}).get(snap.BASE_PROPERTY)
-            if fid:
+            props = info.get("appProperties")
+            fid = props.get(snap.BASE_PROPERTY) if isinstance(props, dict) else None
+            if isinstance(fid, str) and fid:
                 execute(drive.files().delete(fileId=fid))
             execute(drive.files().delete(fileId=pid))
         except Exception as e:  # noqa: BLE001 (gone already, or never ours)

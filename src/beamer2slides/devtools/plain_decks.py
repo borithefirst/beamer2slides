@@ -18,8 +18,10 @@ Usage: python tools/plain_decks.py make [NAME...]    creates the decks, captures
 import argparse
 import json
 import sys
+from collections.abc import Mapping
 
 from beamer2slides.devtools.adopt_bench import MANIFEST, capture
+from beamer2slides.json_types import JsonObject, as_int, as_object, as_objects, as_str
 
 # a slide: (predefined layout, {(placeholder type, index): paragraphs}); a paragraph is a string or
 # a list of (text, style) runs, style keys: bold, italic, weight, font
@@ -101,15 +103,23 @@ def paragraphs_requests(oid: str, paragraphs: list, font: str | None) -> list:
     return reqs
 
 
+def _placeholder(element: JsonObject) -> JsonObject:
+    """A page element's placeholder, as `presentations.get` answers it ({} for none)."""
+    return as_object(as_object(element.get("shape", {}), "a shape").get("placeholder", {}), "a placeholder")
+
+
 def make(name: str) -> str:
     from beamer2slides.google_auth import slides_service
     from beamer2slides.gslides import execute
     title, spec, extra = DECKS[name]
     slides = spec()
     s = slides_service()
-    pres = execute(s.presentations().create(body={"title": title}))
-    pid = pres["presentationId"]
-    reqs = [{"deleteObject": {"objectId": pres["slides"][0]["objectId"]}}]
+    made = execute(s.presentations().create(body={"title": title}))
+    first = made.get("slides", [])
+    pid, blank = made.get("presentationId"), first[0].get("objectId") if first else None
+    if pid is None or blank is None:
+        raise ValueError(f"presentations.create answered no deck id or no first slide: {sorted(made)}")
+    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": blank}}]
     for k, (layout, _) in enumerate(slides):
         reqs.append({"createSlide": {"objectId": f"b2s_plain_{k:02d}", "insertionIndex": k,
                                      "slideLayoutReference": {"predefinedLayout": layout}}})
@@ -125,21 +135,24 @@ def make(name: str) -> str:
     if name == "plain-fonts":
         order = [f for f in ("Montserrat", "Raleway", "Inter", "Open Sans") for _ in range(5)]
         font_of = {f"b2s_plain_{k:02d}": f for k, f in enumerate(order)}
+    elements = {as_str(p.get("objectId"), "a slide's id"):
+                as_objects(p.get("pageElements", []), "a slide's elements")
+                for p in as_objects(pres.get("slides", []), f"{name}'s slides")}
     for k, (layout, fill) in enumerate(slides):
-        page = next(p for p in pres["slides"] if p["objectId"] == f"b2s_plain_{k:02d}")
-        held = {}
-        for pe in page.get("pageElements", []):
-            ph = pe.get("shape", {}).get("placeholder")
+        page = f"b2s_plain_{k:02d}"
+        held: dict[tuple[str, int], str] = {}
+        for pe in elements[page]:
+            ph = _placeholder(pe)
             if ph:
-                held[(ph["type"], ph.get("index", 0))] = pe["objectId"]
+                held[(as_str(ph.get("type"), "a placeholder's type"),
+                      as_int(ph.get("index", 0), "a placeholder's index"))] = as_str(pe.get("objectId"), "an id")
         for key, paragraphs in fill.items():
             if key not in held:
                 raise KeyError(f"{name} slide {k} ({layout}) has no {key} placeholder: {sorted(held)}")
-            reqs += paragraphs_requests(held[key], paragraphs, font_of.get(page["objectId"]))
+            reqs += paragraphs_requests(held[key], paragraphs, font_of.get(page))
     if extra == "table":
-        page = next(p for p in pres["slides"] if p["objectId"] == "b2s_plain_table")
-        title = next(pe["objectId"] for pe in page["pageElements"]
-                     if pe.get("shape", {}).get("placeholder", {}).get("type") == "TITLE")
+        title = next(as_str(pe.get("objectId"), "an id") for pe in elements["b2s_plain_table"]
+                     if _placeholder(pe).get("type") == "TITLE")
         reqs += paragraphs_requests(title, ["A table"], "Montserrat")
         cells = [["Cat", "Region", "Weight"], ["Arabian Mau", "Riyadh", "4 kg"],
                  ["Street cat", "Jeddah, on the corniche", "3.5 kg"]]

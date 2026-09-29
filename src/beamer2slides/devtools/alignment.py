@@ -39,6 +39,7 @@ from PIL import Image
 from beamer2slides.arrays import RGB, Floats, Floats32
 from beamer2slides.emit import FontMapper, bullet_shape, fit_holes, merge_blocks, slide_holes
 from beamer2slides.gslides import EMU_PER_PT
+from beamer2slides.json_types import as_objects
 from beamer2slides.pdf import Document
 
 THRESHOLDS = {"hole_gap": 1.5, "number_offset": 1.0, "bullet_delta_e": 15.0, "bullet_size": 0.30, "overlay_drift": 2.0}
@@ -85,8 +86,8 @@ def slides_elements(out: Path, state: dict, refresh: bool = False) -> dict[str, 
     pres = execute(slides_service().presentations().get(
         presentationId=state["presentationId"], fields="slides(objectId,pageElements)"))
     boxes = {}
-    for s in pres.get("slides", []):
-        boxes.update(element_boxes(s.get("pageElements", [])))
+    for s in as_objects(pres.get("slides", []), "the deck's slides"):
+        boxes.update(element_boxes(as_objects(s.get("pageElements", []), "a slide's elements")))
     cache.write_text(json.dumps({"presentationId": state["presentationId"], "boxes": boxes}), encoding="utf-8")
     return boxes
 

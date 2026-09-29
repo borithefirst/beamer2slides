@@ -43,20 +43,6 @@
       "severity": "error"
     },
     {
-      "column": 27,
-      "path": "src/beamer2slides/__main__.py",
-      "name": "implicit-any-lambda",
-      "concise_description": "Type of lambda parameter `slides` is unknown",
-      "severity": "error"
-    },
-    {
-      "column": 35,
-      "path": "src/beamer2slides/__main__.py",
-      "name": "implicit-any-lambda",
-      "concise_description": "Type of lambda parameter `drive` is unknown",
-      "severity": "error"
-    },
-    {
       "column": 69,
       "path": "src/beamer2slides/__main__.py",
       "name": "implicit-any-parameter",
@@ -89,20 +75,6 @@
       "path": "src/beamer2slides/__main__.py",
       "name": "unnecessary-type-conversion",
       "concise_description": "Unnecessary `str()` call; argument is already of type `str`",
-      "severity": "error"
-    },
-    {
-      "column": 15,
-      "path": "src/beamer2slides/__main__.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 34,
-      "path": "src/beamer2slides/__main__.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
       "severity": "error"
     },
     {
@@ -12608,265 +12580,6 @@
       "severity": "error"
     },
     {
-      "column": 18,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`export_bytes` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
-      "column": 79,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `o` with type `Buffer | Iterable[SupportsIndex] | SupportsBytes | SupportsIndex` in function `bytes.__new__`",
-      "severity": "error"
-    },
-    {
-      "column": 15,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`keep_only` is missing an annotation for parameter `slides`",
-      "severity": "error"
-    },
-    {
-      "column": 39,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 19,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 19,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 30,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 30,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 36,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`pictures` is missing an annotation for parameter `wanted`",
-      "severity": "error"
-    },
-    {
-      "column": 26,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 26,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 18,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_export_part` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
-      "column": 25,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_export_part` is missing an annotation for parameter `slides`",
-      "severity": "error"
-    },
-    {
-      "column": 88,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 88,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 97,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 97,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 10,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 10,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 30,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_client` is missing an annotation for parameter `slides`",
-      "severity": "error"
-    },
-    {
-      "column": 17,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`export_deck` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
-      "column": 24,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`export_deck` is missing an annotation for parameter `slides`",
-      "severity": "error"
-    },
-    {
-      "column": 38,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 38,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 17,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`export_deck` is missing an annotation for parameter `clients`",
-      "severity": "error"
-    },
-    {
-      "column": 26,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_run` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
-      "column": 33,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_run` is missing an annotation for parameter `slides`",
-      "severity": "error"
-    },
-    {
-      "column": 67,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_run` is missing an annotation for parameter `spans`",
-      "severity": "error"
-    },
-    {
-      "column": 80,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 80,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 10,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_run` is missing an annotation for parameter `clients`",
-      "severity": "error"
-    },
-    {
-      "column": 21,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 21,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`job` is missing an annotation for parameter `span`",
-      "severity": "error"
-    },
-    {
-      "column": 18,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 18,
-      "path": "src/beamer2slides/deck_export.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 84,
       "path": "src/beamer2slides/deck_files.py",
       "name": "implicit-any-empty-container",
@@ -13004,41 +12717,6 @@
       "path": "src/beamer2slides/deck_files.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/deck_files.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
-      "column": 30,
-      "path": "src/beamer2slides/deck_files.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 36,
-      "path": "src/beamer2slides/deck_files.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `beamer2slides.deck_ir.slide_thumbnails`",
-      "severity": "error"
-    },
-    {
-      "column": 24,
-      "path": "src/beamer2slides/deck_files.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `record`",
-      "severity": "error"
-    },
-    {
-      "column": 52,
-      "path": "src/beamer2slides/deck_files.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `beamer2slides.deck_ir.picture_fetch`",
       "severity": "error"
     },
     {
@@ -16507,34 +16185,6 @@
       "severity": "error"
     },
     {
-      "column": 20,
-      "path": "src/beamer2slides/deck_ir.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
-      "column": 44,
-      "path": "src/beamer2slides/deck_ir.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `slide_thumbnails`",
-      "severity": "error"
-    },
-    {
-      "column": 27,
-      "path": "src/beamer2slides/deck_ir.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `picture_fetch`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/deck_ir.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `deck_ir`",
-      "severity": "error"
-    },
-    {
       "column": 25,
       "path": "src/beamer2slides/deck_ir.py",
       "name": "implicit-any-type-argument",
@@ -17949,38 +17599,10 @@
       "severity": "error"
     },
     {
-      "column": 20,
-      "path": "src/beamer2slides/devtools/adopt_bench.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
       "column": 15,
       "path": "src/beamer2slides/devtools/adopt_bench.py",
       "name": "implicit-any-parameter",
       "concise_description": "`thumb` is missing an annotation for parameter `item`",
-      "severity": "error"
-    },
-    {
-      "column": 40,
-      "path": "src/beamer2slides/devtools/adopt_bench.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 22,
-      "path": "src/beamer2slides/devtools/adopt_bench.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 49,
-      "path": "src/beamer2slides/devtools/adopt_bench.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
       "severity": "error"
     },
     {
@@ -19650,34 +19272,6 @@
       "severity": "error"
     },
     {
-      "column": 19,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`get` is missing an annotation for parameter `documentId`",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`get` is missing an annotation for parameter `includeTabsContent`",
-      "severity": "error"
-    },
-    {
-      "column": 27,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`batchUpdate` is missing an annotation for parameter `documentId`",
-      "severity": "error"
-    },
-    {
-      "column": 39,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`batchUpdate` is missing an annotation for parameter `body`",
-      "severity": "error"
-    },
-    {
       "column": 22,
       "path": "src/beamer2slides/devtools/agent_tasks.py",
       "name": "implicit-any-type-argument",
@@ -19727,20 +19321,6 @@
       "severity": "error"
     },
     {
-      "column": 19,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`get` is missing an annotation for parameter `fileId`",
-      "severity": "error"
-    },
-    {
-      "column": 27,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`get` is missing an annotation for parameter `fields`",
-      "severity": "error"
-    },
-    {
       "column": 22,
       "path": "src/beamer2slides/devtools/agent_tasks.py",
       "name": "implicit-any-type-argument",
@@ -19752,83 +19332,6 @@
       "path": "src/beamer2slides/devtools/agent_tasks.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 25,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`get_media` is missing an annotation for parameter `fileId`",
-      "severity": "error"
-    },
-    {
-      "column": 22,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`create` is missing an annotation for parameter `body`",
-      "severity": "error"
-    },
-    {
-      "column": 28,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`create` is missing an annotation for parameter `fields`",
-      "severity": "error"
-    },
-    {
-      "column": 39,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`create` is missing an annotation for parameter `media_body`",
-      "severity": "error"
-    },
-    {
-      "column": 22,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 22,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `_fd`",
-      "severity": "error"
-    },
-    {
-      "column": 22,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`update` is missing an annotation for parameter `fileId`",
-      "severity": "error"
-    },
-    {
-      "column": 30,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`update` is missing an annotation for parameter `fields`",
-      "severity": "error"
-    },
-    {
-      "column": 41,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`update` is missing an annotation for parameter `body`",
-      "severity": "error"
-    },
-    {
-      "column": 52,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`update` is missing an annotation for parameter `media_body`",
       "severity": "error"
     },
     {
@@ -19848,15 +19351,15 @@
     {
       "column": 22,
       "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`export` is missing an annotation for parameter `fileId`",
+      "name": "implicit-any-type-argument",
+      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
       "severity": "error"
     },
     {
-      "column": 30,
+      "column": 22,
       "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`export` is missing an annotation for parameter `mimeType`",
+      "name": "implicit-any-type-argument",
+      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
       "severity": "error"
     },
     {
@@ -20427,20 +19930,6 @@
       "severity": "error"
     },
     {
-      "column": 29,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 29,
-      "path": "src/beamer2slides/devtools/agent_tasks.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 19,
       "path": "src/beamer2slides/devtools/agent_tasks.py",
       "name": "missing-attribute",
@@ -20525,20 +20014,6 @@
       "severity": "error"
     },
     {
-      "column": 13,
-      "path": "src/beamer2slides/devtools/agent_tasks_google.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/devtools/agent_tasks_google.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
-      "severity": "error"
-    },
-    {
       "column": 14,
       "path": "src/beamer2slides/devtools/agent_tasks_google.py",
       "name": "implicit-any-parameter",
@@ -20574,24 +20049,10 @@
       "severity": "error"
     },
     {
-      "column": 12,
-      "path": "src/beamer2slides/devtools/agent_tasks_google.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
       "column": 21,
       "path": "src/beamer2slides/devtools/agent_tasks_google.py",
       "name": "implicit-any-parameter",
       "concise_description": "`_type_into_deck` is missing an annotation for parameter `creds`",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/devtools/agent_tasks_google.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
       "severity": "error"
     },
     {
@@ -20686,31 +20147,10 @@
       "severity": "error"
     },
     {
-      "column": 11,
-      "path": "src/beamer2slides/devtools/agent_tasks_google.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `documents`",
-      "severity": "error"
-    },
-    {
       "column": 20,
       "path": "src/beamer2slides/devtools/agent_tasks_google.py",
       "name": "implicit-any-parameter",
       "concise_description": "`_type_into_doc` is missing an annotation for parameter `creds`",
-      "severity": "error"
-    },
-    {
-      "column": 11,
-      "path": "src/beamer2slides/devtools/agent_tasks_google.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `documents`",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/devtools/agent_tasks_google.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `documents`",
       "severity": "error"
     },
     {
@@ -20837,20 +20277,6 @@
       "path": "src/beamer2slides/devtools/alignment.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/devtools/alignment.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
-      "column": 14,
-      "path": "src/beamer2slides/devtools/alignment.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
       "severity": "error"
     },
     {
@@ -21470,13 +20896,6 @@
       "severity": "error"
     },
     {
-      "column": 32,
-      "path": "src/beamer2slides/devtools/counted.py",
-      "name": "unsupported-operation",
-      "concise_description": "Cannot set item in `dict[Unknown, int]`",
-      "severity": "error"
-    },
-    {
       "column": 34,
       "path": "src/beamer2slides/devtools/deck_edits.py",
       "name": "implicit-any-parameter",
@@ -21514,20 +20933,6 @@
     {
       "column": 27,
       "path": "src/beamer2slides/devtools/deck_edits.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `LiveDeck.adopt`",
-      "severity": "error"
-    },
-    {
-      "column": 35,
-      "path": "src/beamer2slides/devtools/deck_edits.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
-      "column": 27,
-      "path": "src/beamer2slides/devtools/deck_edits.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
       "severity": "error"
@@ -21565,20 +20970,6 @@
       "path": "src/beamer2slides/devtools/deck_edits.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 24,
-      "path": "src/beamer2slides/devtools/deck_edits.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
-      "column": 16,
-      "path": "src/beamer2slides/devtools/deck_edits.py",
-      "name": "bad-return",
-      "concise_description": "Returned type `Unknown | None` is not assignable to declared return type `dict[Unknown, Unknown]`",
       "severity": "error"
     },
     {
@@ -21593,13 +20984,6 @@
       "path": "src/beamer2slides/devtools/deck_edits.py",
       "name": "implicit-any-parameter",
       "concise_description": "`send` is missing an annotation for parameter `reqs`",
-      "severity": "error"
-    },
-    {
-      "column": 21,
-      "path": "src/beamer2slides/devtools/deck_edits.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
       "severity": "error"
     },
     {
@@ -22296,13 +21680,6 @@
       "severity": "error"
     },
     {
-      "column": 23,
-      "path": "src/beamer2slides/devtools/deck_edits.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `donor_from`",
-      "severity": "error"
-    },
-    {
       "column": 22,
       "path": "src/beamer2slides/devtools/deck_edits.py",
       "name": "implicit-any-type-argument",
@@ -22737,20 +22114,6 @@
       "severity": "error"
     },
     {
-      "column": 46,
-      "path": "src/beamer2slides/devtools/deck_edits.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 46,
-      "path": "src/beamer2slides/devtools/deck_edits.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 30,
       "path": "src/beamer2slides/devtools/deck_edits.py",
       "name": "implicit-any-empty-container",
@@ -22776,20 +22139,6 @@
       "path": "src/beamer2slides/devtools/deck_export.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/devtools/deck_export.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
-      "column": 39,
-      "path": "src/beamer2slides/devtools/deck_export.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `beamer2slides.deck_export.export_deck`",
       "severity": "error"
     },
     {
@@ -27028,20 +26377,6 @@
       "severity": "error"
     },
     {
-      "column": 12,
-      "path": "src/beamer2slides/devtools/edit_hunt.py",
-      "name": "bad-return",
-      "concise_description": "Returned type `Unknown | None` is not assignable to declared return type `dict[Unknown, Unknown]`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/devtools/edit_hunt.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
       "column": 33,
       "path": "src/beamer2slides/devtools/edit_hunt.py",
       "name": "implicit-any-type-argument",
@@ -27081,34 +26416,6 @@
       "path": "src/beamer2slides/devtools/edit_hunt.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 28,
-      "path": "src/beamer2slides/devtools/edit_hunt.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/devtools/edit_hunt.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 25,
-      "path": "src/beamer2slides/devtools/edit_hunt.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
-      "severity": "error"
-    },
-    {
-      "column": 21,
-      "path": "src/beamer2slides/devtools/edit_hunt.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
       "severity": "error"
     },
     {
@@ -27172,13 +26479,6 @@
       "path": "src/beamer2slides/devtools/edit_hunt.py",
       "name": "implicit-any-empty-container",
       "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 29,
-      "path": "src/beamer2slides/devtools/edit_hunt.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
       "severity": "error"
     },
     {
@@ -34357,27 +33657,6 @@
       "severity": "error"
     },
     {
-      "column": 15,
-      "path": "src/beamer2slides/devtools/fuzz_sync.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 23,
-      "path": "src/beamer2slides/devtools/fuzz_sync.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
-      "severity": "error"
-    },
-    {
-      "column": 17,
-      "path": "src/beamer2slides/devtools/fuzz_sync.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
-      "severity": "error"
-    },
-    {
       "column": 22,
       "path": "src/beamer2slides/devtools/fuzz_sync.py",
       "name": "implicit-any-type-argument",
@@ -34410,27 +33689,6 @@
       "path": "src/beamer2slides/devtools/fuzz_sync.py",
       "name": "implicit-any-parameter",
       "concise_description": "`cli` is missing an annotation for parameter `check`",
-      "severity": "error"
-    },
-    {
-      "column": 24,
-      "path": "src/beamer2slides/devtools/fuzz_sync.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
-      "column": 43,
-      "path": "src/beamer2slides/devtools/fuzz_sync.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `beamer2slides.snapshot.read_presentation`",
-      "severity": "error"
-    },
-    {
-      "column": 38,
-      "path": "src/beamer2slides/devtools/fuzz_sync.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `beamer2slides.snapshot.sign_pictures`",
       "severity": "error"
     },
     {
@@ -34655,34 +33913,6 @@
       "path": "src/beamer2slides/devtools/fuzz_sync.py",
       "name": "bad-argument-type",
       "concise_description": "Argument `set[str | None]` is not assignable to parameter `allow_groups_changed` with type `set[str]` in function `beamer2slides.devtools.sync_check.integrity`",
-      "severity": "error"
-    },
-    {
-      "column": 28,
-      "path": "src/beamer2slides/devtools/fuzz_sync.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/devtools/fuzz_sync.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 25,
-      "path": "src/beamer2slides/devtools/fuzz_sync.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
-      "severity": "error"
-    },
-    {
-      "column": 21,
-      "path": "src/beamer2slides/devtools/fuzz_sync.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
       "severity": "error"
     },
     {
@@ -39334,66 +38564,10 @@
       "severity": "error"
     },
     {
-      "column": 20,
-      "path": "src/beamer2slides/devtools/plain_decks.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
-      "column": 11,
-      "path": "src/beamer2slides/devtools/plain_decks.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 43,
-      "path": "src/beamer2slides/devtools/plain_decks.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/devtools/plain_decks.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/devtools/plain_decks.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
       "column": 15,
       "path": "src/beamer2slides/devtools/plain_decks.py",
       "name": "implicit-any-empty-container",
       "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 32,
-      "path": "src/beamer2slides/devtools/plain_decks.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 32,
-      "path": "src/beamer2slides/devtools/plain_decks.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/devtools/plain_decks.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
       "severity": "error"
     },
     {
@@ -39856,20 +39030,6 @@
       "path": "src/beamer2slides/devtools/probe_layout.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 28,
-      "path": "src/beamer2slides/devtools/probe_layout.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 86,
-      "path": "src/beamer2slides/devtools/probe_layout.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `_page_width`",
       "severity": "error"
     },
     {
@@ -43485,13 +42645,6 @@
       "severity": "error"
     },
     {
-      "column": 68,
-      "path": "src/beamer2slides/devtools/showcase/decks.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
       "column": 16,
       "path": "src/beamer2slides/devtools/showcase/decks.py",
       "name": "implicit-any-parameter",
@@ -43846,48 +42999,6 @@
       "path": "src/beamer2slides/devtools/showcase/decks.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 23,
-      "path": "src/beamer2slides/devtools/showcase/decks.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "src/beamer2slides/devtools/showcase/decks.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
-      "severity": "error"
-    },
-    {
-      "column": 17,
-      "path": "src/beamer2slides/devtools/showcase/decks.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `permissions`",
-      "severity": "error"
-    },
-    {
-      "column": 24,
-      "path": "src/beamer2slides/devtools/showcase/decks.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
-      "column": 94,
-      "path": "src/beamer2slides/devtools/showcase/decks.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 30,
-      "path": "src/beamer2slides/devtools/showcase/decks.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
       "severity": "error"
     },
     {
@@ -45239,20 +44350,6 @@
       "path": "src/beamer2slides/devtools/sync_check.py",
       "name": "implicit-any-parameter",
       "concise_description": "`read` is missing an annotation for parameter `slides_api`",
-      "severity": "error"
-    },
-    {
-      "column": 18,
-      "path": "src/beamer2slides/devtools/sync_check.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `Model.__init__`",
-      "severity": "error"
-    },
-    {
-      "column": 26,
-      "path": "src/beamer2slides/devtools/sync_check.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
       "severity": "error"
     },
     {
@@ -53929,13 +53026,6 @@
       "severity": "error"
     },
     {
-      "column": 13,
-      "path": "src/beamer2slides/doc_sync.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
-      "severity": "error"
-    },
-    {
       "column": 42,
       "path": "src/beamer2slides/doc_sync.py",
       "name": "implicit-any-type-argument",
@@ -54580,97 +53670,6 @@
       "severity": "error"
     },
     {
-      "column": 15,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`folder_id` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
-      "column": 21,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 8,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 47,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 86,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`parents` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
-      "column": 17,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 17,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 23,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`place` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
-      "column": 66,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 66,
-      "path": "src/beamer2slides/drive_folder.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 27,
       "path": "src/beamer2slides/emit.py",
       "name": "implicit-any-parameter",
@@ -55046,20 +54045,6 @@
       "path": "src/beamer2slides/emit.py",
       "name": "implicit-any-empty-container",
       "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 72,
-      "path": "src/beamer2slides/emit.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 87,
-      "path": "src/beamer2slides/emit.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
       "severity": "error"
     },
     {
@@ -58759,34 +57744,6 @@
       "severity": "error"
     },
     {
-      "column": 15,
-      "path": "src/beamer2slides/emit_theme.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 11,
-      "path": "src/beamer2slides/emit_theme.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 53,
-      "path": "src/beamer2slides/emit_theme.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "src/beamer2slides/emit_theme.py",
-      "name": "bad-return",
-      "concise_description": "Returned type `Unknown | None` is not assignable to declared return type `dict[Unknown, Unknown]`",
-      "severity": "error"
-    },
-    {
       "column": 27,
       "path": "src/beamer2slides/emit_theme.py",
       "name": "implicit-any-type-argument",
@@ -58983,20 +57940,6 @@
       "severity": "error"
     },
     {
-      "column": 15,
-      "path": "src/beamer2slides/emit_theme.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 68,
-      "path": "src/beamer2slides/emit_theme.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
       "column": 23,
       "path": "src/beamer2slides/emit_theme.py",
       "name": "implicit-any-type-argument",
@@ -59078,20 +58021,6 @@
       "path": "src/beamer2slides/emit_theme.py",
       "name": "implicit-any-empty-container",
       "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 19,
-      "path": "src/beamer2slides/emit_theme.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 45,
-      "path": "src/beamer2slides/emit_theme.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
       "severity": "error"
     },
     {
@@ -60488,83 +59417,6 @@
       "severity": "error"
     },
     {
-      "column": 27,
-      "path": "src/beamer2slides/gapi.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `BaseException` has no attribute `content`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/google_auth.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `ContextVar[_T]`",
-      "severity": "error"
-    },
-    {
-      "column": 23,
-      "path": "src/beamer2slides/google_auth.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `list[_T]`",
-      "severity": "error"
-    },
-    {
-      "column": 19,
-      "path": "src/beamer2slides/google_auth.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`use` is missing an annotation for parameter `value`",
-      "severity": "error"
-    },
-    {
-      "column": 18,
-      "path": "src/beamer2slides/google_auth.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`use_provider` is missing an annotation for parameter `provider`",
-      "severity": "error"
-    },
-    {
-      "column": 18,
-      "path": "src/beamer2slides/google_auth.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`use_services` is missing an annotation for parameter `services`",
-      "severity": "error"
-    },
-    {
-      "column": 35,
-      "path": "src/beamer2slides/google_auth.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_for_builder` is missing an annotation for parameter `creds`",
-      "severity": "error"
-    },
-    {
-      "column": 51,
-      "path": "src/beamer2slides/google_auth.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`shared_service` is missing an annotation for parameter `creds`",
-      "severity": "error"
-    },
-    {
-      "column": 17,
-      "path": "src/beamer2slides/google_auth.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`use_fetcher` is missing an annotation for parameter `fetch`",
-      "severity": "error"
-    },
-    {
-      "column": 38,
-      "path": "src/beamer2slides/google_auth.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_service` is missing an annotation for parameter `creds`",
-      "severity": "error"
-    },
-    {
-      "column": 16,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`per_thread` is missing an annotation for parameter `make`",
-      "severity": "error"
-    },
-    {
       "column": 21,
       "path": "src/beamer2slides/gslides.py",
       "name": "implicit-any-type-argument",
@@ -60593,90 +59445,6 @@
       "severity": "error"
     },
     {
-      "column": 8,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `Counter[_T]`",
-      "severity": "error"
-    },
-    {
-      "column": 23,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `Counter[_T]`",
-      "severity": "error"
-    },
-    {
-      "column": 16,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 16,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`execute` is missing an annotation for parameter `request`",
-      "severity": "error"
-    },
-    {
-      "column": 87,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 87,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`save_thumbnail` is missing an annotation for parameter `slides`",
-      "severity": "error"
-    },
-    {
-      "column": 76,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`save_thumbnail` is missing an annotation for parameter `fetch`",
-      "severity": "error"
-    },
-    {
-      "column": 25,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 28,
-      "path": "src/beamer2slides/gslides.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
       "column": 46,
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
@@ -60691,13 +59459,6 @@
       "severity": "error"
     },
     {
-      "column": 19,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`previous_deck` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
       "column": 40,
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
@@ -60709,34 +59470,6 @@
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 27,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 8,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 60,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 91,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
       "severity": "error"
     },
     {
@@ -60929,20 +59662,6 @@
       "severity": "error"
     },
     {
-      "column": 19,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`check_rebuild` is missing an annotation for parameter `slides`",
-      "severity": "error"
-    },
-    {
-      "column": 27,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`check_rebuild` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
       "column": 25,
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
@@ -60968,13 +59687,6 @@
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 51,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
       "severity": "error"
     },
     {
@@ -60999,20 +59711,6 @@
       "severity": "error"
     },
     {
-      "column": 35,
-      "path": "src/beamer2slides/guard.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `survey`",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`recheck` is missing an annotation for parameter `slides`",
-      "severity": "error"
-    },
-    {
       "column": 38,
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
@@ -61041,34 +59739,6 @@
       "severity": "error"
     },
     {
-      "column": 8,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 17,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`export_pptx` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
-      "column": 18,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`export_parts` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
-      "column": 25,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`export_parts` is missing an annotation for parameter `slides`",
-      "severity": "error"
-    },
-    {
       "column": 58,
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
@@ -61083,34 +59753,6 @@
       "severity": "error"
     },
     {
-      "column": 13,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 39,
-      "path": "src/beamer2slides/guard.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `beamer2slides.deck_export.export_deck`",
-      "severity": "error"
-    },
-    {
-      "column": 29,
-      "path": "src/beamer2slides/guard.py",
-      "name": "bad-assignment",
-      "concise_description": "`list[str]` is not assignable to dict key `leftovers` with type `list[dict[str, int | list[int] | str]] | list[dict[str, Unknown]]`",
-      "severity": "error"
-    },
-    {
-      "column": 19,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`copy_in_drive` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
       "column": 64,
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
@@ -61122,55 +59764,6 @@
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 32,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 24,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "src/beamer2slides/guard.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 51,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 85,
-      "path": "src/beamer2slides/guard.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 17,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`backup_deck` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
-      "column": 17,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`backup_deck` is missing an annotation for parameter `slides`",
       "severity": "error"
     },
     {
@@ -61199,13 +59792,6 @@
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 24,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`__init__` is missing an annotation for parameter `fn`",
       "severity": "error"
     },
     {
@@ -61391,13 +59977,6 @@
       "severity": "error"
     },
     {
-      "column": 19,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`drive_backups` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
       "column": 44,
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
@@ -61406,62 +59985,6 @@
     },
     {
       "column": 44,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 18,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 17,
-      "path": "src/beamer2slides/guard.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 25,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`prune_drive_backups` is missing an annotation for parameter `drive`",
-      "severity": "error"
-    },
-    {
-      "column": 49,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 49,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 25,
-      "path": "src/beamer2slides/guard.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 25,
       "path": "src/beamer2slides/guard.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
@@ -67968,13 +66491,6 @@
       "path": "src/beamer2slides/merge.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "src/beamer2slides/net.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_bytes` is missing an annotation for parameter `data`",
       "severity": "error"
     },
     {
@@ -88985,24 +87501,10 @@
       "severity": "error"
     },
     {
-      "column": 31,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `answer` with type `dict[Unknown, Unknown]` in function `revision`",
-      "severity": "error"
-    },
-    {
       "column": 20,
       "path": "src/beamer2slides/snapshot.py",
       "name": "implicit-any-empty-container",
       "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `answer` with type `dict[Unknown, Unknown]` in function `revision`",
       "severity": "error"
     },
     {
@@ -89118,13 +87620,6 @@
       "severity": "error"
     },
     {
-      "column": 12,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-return",
-      "concise_description": "Returned type `Unknown | None` is not assignable to declared return type `dict[Unknown, Unknown]`",
-      "severity": "error"
-    },
-    {
       "column": 16,
       "path": "src/beamer2slides/snapshot.py",
       "name": "implicit-any-parameter",
@@ -89157,13 +87652,6 @@
       "path": "src/beamer2slides/snapshot.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 15,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
       "severity": "error"
     },
     {
@@ -89220,20 +87708,6 @@
       "path": "src/beamer2slides/snapshot.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 16,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
-      "severity": "error"
-    },
-    {
-      "column": 27,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `str | Unknown | None` is not assignable to parameter `s` with type `bytearray | bytes | str` in function `json.loads`",
       "severity": "error"
     },
     {
@@ -89440,87 +87914,10 @@
       "severity": "error"
     },
     {
-      "column": 55,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `files`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `upload_signatures`",
-      "severity": "error"
-    },
-    {
       "column": 37,
       "path": "src/beamer2slides/snapshot.py",
       "name": "bad-argument-type",
       "concise_description": "Argument `dict[str, Path]` is not assignable to parameter `files` with type `dict[str, Path | str]` in function `upload_signatures`",
-      "severity": "error"
-    },
-    {
-      "column": 71,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `converted_files`",
-      "severity": "error"
-    },
-    {
-      "column": 47,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `concurrent.futures._base.Executor.submit`",
-      "severity": "error"
-    },
-    {
-      "column": 34,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `build_base`",
-      "severity": "error"
-    },
-    {
-      "column": 23,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `tagged`",
-      "severity": "error"
-    },
-    {
-      "column": 40,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `dict[Unknown, Unknown] | Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `picture_urls`",
-      "severity": "error"
-    },
-    {
-      "column": 33,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `dict[Unknown, Unknown] | Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `beamer2slides.deck_pictures.LivePictures.__init__`",
-      "severity": "error"
-    },
-    {
-      "column": 34,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `dict[Unknown, Unknown] | Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `build_base`",
-      "severity": "error"
-    },
-    {
-      "column": 46,
-      "path": "src/beamer2slides/snapshot.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `dict[Unknown, Unknown] | Unknown | None` is not assignable to parameter `pres` with type `dict[Unknown, Unknown]` in function `beamer2slides.theme_sync.record`",
       "severity": "error"
     },
     {
@@ -90826,24 +89223,10 @@
       "severity": "error"
     },
     {
-      "column": 16,
-      "path": "src/beamer2slides/sync.py",
-      "name": "bad-return",
-      "concise_description": "Returned type `Unknown | None` is not assignable to declared return type `dict[Unknown, Unknown]`",
-      "severity": "error"
-    },
-    {
       "column": 24,
       "path": "src/beamer2slides/sync.py",
       "name": "implicit-any-parameter",
       "concise_description": "`revision` is missing an annotation for parameter `slides`",
-      "severity": "error"
-    },
-    {
-      "column": 16,
-      "path": "src/beamer2slides/sync.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
       "severity": "error"
     },
     {
@@ -90879,13 +89262,6 @@
       "path": "src/beamer2slides/sync.py",
       "name": "unbound-name",
       "concise_description": "`res` may be uninitialized",
-      "severity": "error"
-    },
-    {
-      "column": 19,
-      "path": "src/beamer2slides/sync.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
       "severity": "error"
     },
     {
@@ -91495,20 +89871,6 @@
       "path": "src/beamer2slides/sync.py",
       "name": "bad-assignment",
       "concise_description": "`dict[str, Path]` is not assignable to dict value type `bool | list[dict[str, list[float | int] | str | Unknown]] | str | None`",
-      "severity": "error"
-    },
-    {
-      "column": 15,
-      "path": "src/beamer2slides/sync.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "src/beamer2slides/sync.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `get`",
       "severity": "error"
     },
     {
@@ -93315,13 +91677,6 @@
       "path": "src/beamer2slides/sync.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 43,
-      "path": "src/beamer2slides/sync.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `Resource` has no attribute `presentations`",
       "severity": "error"
     },
     {

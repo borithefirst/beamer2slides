@@ -89,7 +89,7 @@ def download(url: str, fetch: Fetch | None = None, tries: int = 3) -> bytes:
     return _bytes(fetch(url))
 
 
-def _bytes(data) -> bytes:
+def _bytes(data: object) -> bytes:
     if isinstance(data, (bytes, bytearray, memoryview)):
         return bytes(data)
     raise TypeError(f"a fetcher returned {type(data).__name__}, not bytes")

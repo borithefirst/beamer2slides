@@ -1168,10 +1168,11 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
     first.pop("tabs", None)  # the importer makes one tab of whatever it is given
     html = doc_ir.to_html(first)
     from .drive_folder import place
-    ident = drive.files().create(
+    from .google_types import file_id
+    ident = file_id(drive.files().create(
         body=place({"name": name or source.get("title") or path.stem, "mimeType": DOC_MIME}, drive),
         media_body=media_upload(io.BytesIO(html.encode("utf-8")), "text/html"),
-        fields="id").execute()["id"]
+        fields="id").execute(), f"the document imported from {path.name}")
 
     doc, live = read_document(docs, ident)
     # The importer builds what HTML can say; give what came back the file's keys, and

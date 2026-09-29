@@ -21,14 +21,21 @@ is not a grader.
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, NoReturn
 
 from beamer2slides.agent.types import Diagnostic, Result
 
 from .agent_bench import HARM_PREFIX, Answer, Run, Scripted, Skip, call
+
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
+    from beamer2slides.google_types import (CreateFile, ExportFile, FileId, GetDocument, GetFile,
+                                            UpdateDocument, UpdateFile)
 
 DECK = "https://docs.google.com/presentation/d/1BENCHdeckAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/edit"
 DECK2 = "https://docs.google.com/presentation/d/1BENCHdeckBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB/edit"
@@ -1225,8 +1232,15 @@ class _Reply:
     def __init__(self, run: Callable[[], Any]) -> None:
         self.run = run
 
-    def execute(self) -> Any:
+    def execute(self, **options: object) -> Any:
+        """(`options`: the connection `gapi.patient_http` may hand a real request; none here.)"""
         return self.run()
+
+
+def _unused(what: str) -> NoReturn:
+    """A method of Google's client (`google_types`) the Docs journeys never call: there for the
+    fake to be a whole client, and loud should a journey start calling it."""
+    raise AssertionError(f"the Docs journeys were not expected to call {what}")
 
 
 class _DocsService:
@@ -1234,15 +1248,19 @@ class _DocsService:
 
     def __init__(self, world) -> None:
         self.world = world
-        self.batches: list[list[dict]] = []
+        self.batches: list[list[Mapping[str, object]]] = []
 
     def documents(self):
         return self
 
-    def get(self, documentId, includeTabsContent=False):
+    # (Each method takes `**kw` as `google_types.Documents` says the real client does: a fake
+    # naming its keywords is not one, since a TypedDict may carry keys it does not name.)
+    def get(self, **kw: Unpack[GetDocument]):
         return _Reply(self.world.read)
 
-    def batchUpdate(self, documentId, body):
+    def batchUpdate(self, **kw: Unpack[UpdateDocument]):
+        body = kw["body"]
+
         def run() -> dict:
             self.batches.append(list(body["requests"]))
             answer = self.world.apply(body["requests"])
@@ -1262,6 +1280,9 @@ class _Comments:
 
     def list(self, **kw):
         return _Reply(lambda: {"comments": list(self.items)})
+
+    def create(self, **kw: object) -> NoReturn:
+        _unused("comments().create")
 
 
 class _DriveService:
@@ -1287,7 +1308,24 @@ class _DriveService:
     def comments(self):
         return _Comments(self.open_comments)
 
-    def get(self, fileId, fields=""):
+    def permissions(self) -> NoReturn:
+        _unused("permissions()")
+
+    def list(self, **kw: object) -> NoReturn:
+        _unused("files().list")
+
+    def copy(self, **kw: object) -> NoReturn:
+        _unused("files().copy")
+
+    def delete(self, **kw: object) -> NoReturn:
+        _unused("files().delete")
+
+    def export_media(self, **kw: object) -> NoReturn:
+        _unused("files().export_media")
+
+    def get(self, **kw: Unpack[GetFile]):
+        fileId = kw["fileId"]
+
         def run() -> dict:
             if fileId != self.document:
                 raise _http(404)
@@ -1296,7 +1334,9 @@ class _DriveService:
 
         return _Reply(run)
 
-    def get_media(self, fileId):
+    def get_media(self, **kw: Unpack[FileId]):
+        fileId = kw["fileId"]
+
         def run() -> bytes:
             if fileId not in self.blobs:
                 raise _http(404)
@@ -1304,26 +1344,37 @@ class _DriveService:
 
         return _Reply(run)
 
-    def create(self, body, fields="", media_body=None):
+    def create(self, **kw: Unpack[CreateFile]):
+        media_body = kw.get("media_body")
+
         def run() -> dict:
+            if media_body is None:
+                raise AssertionError("the Docs journeys create only the base, which has content")
             self.n += 1
             fid = f"base-{self.n}"
-            self.blobs[fid] = media_body._fd.getvalue()
+            self.blobs[fid] = media_body.getbytes(0, media_body.size())
             return {"id": fid}
 
         return _Reply(run)
 
-    def update(self, fileId, fields="", body=None, media_body=None):
+    def update(self, **kw: Unpack[UpdateFile]):
+        fileId, body, media_body = kw["fileId"], kw.get("body", {}), kw.get("media_body")
+
         def run() -> dict:
             if media_body is not None:
-                self.blobs[fileId] = media_body._fd.getvalue()
-            if body and body.get("appProperties"):
-                self.props.update(body["appProperties"])
+                self.blobs[fileId] = media_body.getbytes(0, media_body.size())
+            for key, value in body.get("appProperties", {}).items():
+                if value is None:              # (Drive: a property set to null is removed)
+                    self.props.pop(key, None)
+                else:
+                    self.props[key] = value
             return {"id": fileId}
 
         return _Reply(run)
 
-    def export(self, fileId, mimeType):
+    def export(self, **kw: Unpack[ExportFile]):
+        fileId, mimeType = kw["fileId"], kw["mimeType"]
+
         def run() -> bytes:
             self.exports.append(mimeType)
             if fileId != self.document:

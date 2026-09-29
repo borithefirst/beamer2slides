@@ -203,6 +203,8 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   `$B2S_CLIENT_SECRET` / `$B2S_TOKEN` override.
 - **`googleapiclient` is imported by `gapi.py` only** (extra `[google]`); `HttpError` is bound there
   once. Never import the client library at module scope anywhere else (`tests/test_gapi.py`).
+  The calls we make are Protocols in `google_types.py` (keywords checked, `execute(Request[T]) -> T`);
+  a new call is added there first (docs/typing.md).
 - `google_auth.use_provider` / `use_services` inject credentials or ready clients **per context**
   (ContextVar); a worker thread inherits nothing, so resolve credentials on the calling thread
   (`credentials_for_threads`).

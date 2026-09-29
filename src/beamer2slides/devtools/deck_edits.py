@@ -19,6 +19,7 @@ import sys
 import uuid
 from pathlib import Path
 
+from ..google_types import BatchUpdateResponse
 from .sync_check import (EMU_PER_PT, CheckError, Model, check_all, norm, phrase_span,
                          presentation_id, raw_text, text_elements, utf16)
 
@@ -59,7 +60,7 @@ class LiveDeck:
         self.dirty, self.reshaped = set(), False
         return self.model
 
-    def batch(self, requests: list[dict]) -> dict:
+    def batch(self, requests: list[dict]) -> BatchUpdateResponse:
         from beamer2slides.gslides import execute
         if self.defer:
             self.pending.append(requests)

@@ -27,12 +27,29 @@ matches, which is the right answer rather than an accident.
 they are what the call sites actually want of an error (a status to branch on, a sentence for a
 person to read), and asking through a function instead of `e.resp.status` is what a client of
 another shape could ever answer.
+
+`build` is where a client the library made becomes a typed one: the library builds a `Resource`
+whose methods exist only at runtime (from the discovery document), so `build` checks that it has
+the methods `google_types` says the package calls (`isinstance` against the runtime-checkable
+Protocol) and returns it as that Protocol. A client a caller injected is taken at its word
+(`google_auth.use_services`).
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import IO, TYPE_CHECKING, Literal, Union, overload
+
+from .google_types import DocsService, DriveService, MediaBody, SlidesService
+from .json_types import Json
+
+if TYPE_CHECKING:
+    from google.auth.credentials import Credentials
+    from typing_extensions import TypeAlias
+
+#: Every API the package calls, by the name `build` takes.
+ApiName: TypeAlias = Literal["slides", "drive", "docs"]
+Service: TypeAlias = Union[SlidesService, DriveService, DocsService]
 
 #: What to say when the package is wanted and not there. Named in one place so the two ways out
 #: - install it, or inject clients - are always both offered.
@@ -53,7 +70,7 @@ except ImportError:                    # no client library: nothing here can mak
         constructor's shape, and `status_of` reads it as it reads the real one.
         """
 
-        def __init__(self, resp: Any = None, content: bytes = b"", *args: Any) -> None:
+        def __init__(self, resp: object = None, content: bytes = b"", *args: object) -> None:
             super().__init__(resp, content, *args)
             self.resp, self.content = resp, content
 
@@ -67,8 +84,16 @@ def installed() -> bool:
     return True
 
 
-def build(api: str, version: str, credentials: Any):
-    """`googleapiclient.discovery.build`, imported now rather than at module import.
+@overload
+def build(api: Literal["slides"], version: Literal["v1"], credentials: Credentials) -> SlidesService: ...
+@overload
+def build(api: Literal["drive"], version: Literal["v3"], credentials: Credentials) -> DriveService: ...
+@overload
+def build(api: Literal["docs"], version: Literal["v1"], credentials: Credentials) -> DocsService: ...
+def build(api: ApiName, version: str, credentials: Credentials) -> Service:
+    """`googleapiclient.discovery.build`, imported now rather than at module import, as the
+    Protocol of its api (`google_types`); a client lacking a method the package calls is refused
+    here rather than failing at that call.
 
     `cache_discovery=False` because the cache wants a writable folder and says so loudly when it
     has none; a caller that minds the per-call discovery fetch injects its own client instead.
@@ -77,10 +102,30 @@ def build(api: str, version: str, credentials: Any):
         from googleapiclient.discovery import build as _build
     except ImportError:
         raise ModuleNotFoundError(MISSING) from None
-    return _build(api, version, credentials=credentials, cache_discovery=False)
+    client: object = _build(api, version, credentials=credentials, cache_discovery=False)
+    if api == "slides" and isinstance(client, SlidesService):
+        return client
+    if api == "drive" and isinstance(client, DriveService):
+        return client
+    if api == "docs" and isinstance(client, DocsService):
+        return client
+    raise TypeError(f"the {api} {version} client lacks a method google_types.py says the package calls")
 
 
-def patient_http(request: Any, seconds: float):
+def lent_credentials(client: object) -> Credentials | None:
+    """The credentials a client the library built carries on its connection, for a worker thread
+    to build its own with (`deck_export`), or None: a client a caller injected, or none at all."""
+    creds = getattr(getattr(client, "_http", None), "credentials", None)
+    if creds is None:
+        return None
+    try:
+        from google.auth.credentials import Credentials
+    except ImportError:
+        return None
+    return creds if isinstance(creds, Credentials) else None
+
+
+def patient_http(request: object, seconds: float) -> object | None:
     """An authorised connection that waits `seconds` for an answer, for one call known to be slow,
     or None when the request is not the library's own (an injected client: it runs as it is).
     The library waits 60 s; Drive's .pptx export of a deck set in Noto Sans SC took 115 s and TC
@@ -96,13 +141,13 @@ def patient_http(request: Any, seconds: float):
     return google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=seconds))
 
 
-def media_upload(data: Any, mimetype: str, resumable: bool = False):
+def media_upload(data: IO[bytes], mimetype: str) -> MediaBody:
     """`MediaIoBaseUpload` over a file-like object, for a request's `media_body`."""
     try:
         from googleapiclient.http import MediaIoBaseUpload
     except ImportError:
         raise ModuleNotFoundError(MISSING) from None
-    return MediaIoBaseUpload(data, mimetype=mimetype, resumable=resumable)
+    return MediaIoBaseUpload(data, mimetype=mimetype, resumable=False)
 
 
 def status_of(error: BaseException) -> int | None:
@@ -113,10 +158,17 @@ def status_of(error: BaseException) -> int | None:
 
 def message_of(error: BaseException, limit: int = 200) -> str:
     """What Google said, for a person to read: the API's own message, else the exception."""
-    try:
-        return json.loads(error.content)["error"]["message"][:limit]
-    except (ValueError, KeyError, TypeError, AttributeError):
-        return str(error)[:limit]
+    content = getattr(error, "content", None)
+    if isinstance(content, (bytes, str)):
+        try:
+            said: Json = json.loads(content)
+        except ValueError:
+            said = None
+        inner = said.get("error") if isinstance(said, dict) else None
+        message = inner.get("message") if isinstance(inner, dict) else None
+        if isinstance(message, str):
+            return message[:limit]
+    return str(error)[:limit]
 
 
 def is_transient(error: BaseException) -> bool:

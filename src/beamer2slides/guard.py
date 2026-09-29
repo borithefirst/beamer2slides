@@ -23,13 +23,17 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import TypedDict
 
 from . import merge, snapshot
 from .gapi import HttpError, message_of
+from .google_types import DriveFile, DriveService, FileBody, SlidesService, file_id
 from .gslides import execute
+from .json_types import Json
 
 SCRATCH = re.compile(r"b2s_m\d{3}")  # emit.measure_places' scratch slides
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -65,7 +69,7 @@ def deck_url(pid: str) -> str:
 # ---------------------------------------------------------------- the previous deck
 
 
-def previous_deck(drive, out: Path) -> dict | None:
+def previous_deck(drive: DriveService, out: Path) -> dict | None:
     """What the output folder's emit.json points at: {"presentationId", "state", "name",
     "modifiedTime"}. state: "live", "trashed", "gone" (deleted or not ours any more),
     "other" (not a presentation)."""
@@ -283,7 +287,8 @@ def refusal_message(pid: str, out: Path, pdf: Path | str | None, found: dict, re
     return "\n".join(lines)
 
 
-def check_rebuild(slides, drive, pid: str, out: Path, pdf: Path | str | None = None, force: bool = False,
+def check_rebuild(slides: SlidesService, drive: DriveService, pid: str, out: Path, pdf: Path | str | None = None,
+                  force: bool = False,
                   base: dict | None = None) -> dict:
     """Look at the live deck before replacing its content. Returns the finding
     ({"reason", "revisionId", ...}); raises RebuildRefused unless `force`."""
@@ -316,7 +321,7 @@ def check_rebuild(slides, drive, pid: str, out: Path, pdf: Path | str | None = N
     return found
 
 
-def recheck(slides, pid: str, found: dict | None) -> dict | None:
+def recheck(slides: SlidesService, pid: str, found: dict | None) -> dict | None:
     """`found` again, where the deck is still at the revision it was found at - one field of one
     read instead of the whole deck, the sync base and the survey (None: ask the question again).
 
@@ -343,7 +348,7 @@ def backup_dir(out: Path) -> Path:
     return out / "backups"
 
 
-def export_pptx(drive, pid: str, path: Path) -> int:
+def export_pptx(drive: DriveService, pid: str, path: Path) -> int:
     """The live deck as a .pptx next to the output folder. Drive refuses files.export over 10 MB,
     and takes minutes over a deck in a big embedded face (`gslides.SLOW_EXPORT`); a timeout is
     not tried again (`deck_export.export_bytes`)."""
@@ -353,24 +358,46 @@ def export_pptx(drive, pid: str, path: Path) -> int:
     return len(data)
 
 
-def export_parts(drive, slides, pid: str, path: Path) -> dict:
+class PartFile(TypedDict):
+    """One .pptx part `export_parts` wrote: its path, its slides [first, last] 1-based, its size."""
+    file: str
+    slides: list[int]
+    bytes: int
+
+
+class Unexported(TypedDict):
+    """Slides [first, last] 1-based that no part holds, and why."""
+    slides: list[int]
+    reason: str
+
+
+class _PartsKept(TypedDict):
+    parts: list[PartFile]
+    missing: list[Unexported]
+
+
+class Parts(_PartsKept, total=False):
+    """What `export_parts` kept; `leftovers`: copies Drive would not delete, where there are any."""
+    leftovers: list[str]
+
+
+def export_parts(drive: DriveService, slides: SlidesService, pid: str, path: Path) -> Parts:
     """The live deck as .pptx parts beside `path` (`<stem>-slides-001-004.pptx`), for a deck Drive
     will not export whole (`deck_export`): halves first, since the whole was just refused, each
-    halved again while it is. Returns {"parts": [{"file", "slides": [first, last], "bytes"}],
-    "missing": [...]} - a slide no part brought is in `missing`, and then the parts are no way
-    back to the whole deck (`way_back_kept`)."""
-    from .deck_export import export_deck
+    halved again while it is. A slide no part brought is in `missing`, and then the parts are no
+    way back to the whole deck (`way_back_kept`)."""
+    from .deck_export import deck_ids, export_deck
     pres = execute(slides.presentations().get(presentationId=pid, fields="presentationId,slides.objectId"))
-    n = len(pres.get("slides", []))
+    n = len(deck_ids(pres)[1])
     if n < 2:
         return {"parts": [], "missing": [{"slides": [1, n], "reason": "a deck of one slide has no parts"}]}
     done = export_deck(drive, slides, pres, per_part=(n + 1) // 2)
-    parts = []
+    parts: list[PartFile] = []
     for part in done.parts:
         file = path.with_name(f"{path.stem}-{part.name}.pptx")
         write_whole(file, part.data)
         parts.append({"file": str(file), "slides": [part.first + 1, part.end], "bytes": len(part.data)})
-    kept = {"parts": parts, "missing": [{k: m[k] for k in ("slides", "reason")} for m in done.missing]}
+    kept: Parts = {"parts": parts, "missing": [{"slides": m["slides"], "reason": m["reason"]} for m in done.missing]}
     if done.leftovers:
         kept["leftovers"] = done.leftovers
     return kept
@@ -386,20 +413,26 @@ def write_whole(path: Path, data: bytes) -> None:
     os.replace(part, path)
 
 
-def copy_in_drive(drive, pid: str, name: str | None = None) -> dict:
+def _strings(value: Json) -> list[str] | None:
+    """A JSON list of strings (a file's `parents`), or None where it is none."""
+    return [v for v in value if isinstance(v, str)] if isinstance(value, list) else None
+
+
+def copy_in_drive(drive: DriveService, pid: str, name: str | None = None) -> dict:
     """A Drive copy of the presentation, which stays a full deck with its own URL."""
     info = execute(drive.files().get(fileId=pid, fields="name,parents"))
-    body = {"name": name or f"{info.get('name', 'deck')} (beamer2slides backup "
-                            f"{time.strftime('%Y-%m-%d %H:%M')})",
-            "appProperties": {"b2sBackupOf": pid}}
+    body: FileBody = {"name": name or f"{info.get('name', 'deck')} (beamer2slides backup "
+                                      f"{time.strftime('%Y-%m-%d %H:%M')})",
+                      "appProperties": {"b2sBackupOf": pid}}
     from .drive_folder import place
-    place(body, drive, info.get("parents"))
+    place(body, drive, _strings(info.get("parents")))
     copy = execute(drive.files().copy(fileId=pid, body=body, fields="id,name"))
-    return {"presentationId": copy["id"], "name": copy.get("name"), "url": deck_url(copy["id"])}
+    cid = file_id(copy, f"its copy of {pid}")
+    return {"presentationId": cid, "name": copy.get("name"), "url": deck_url(cid)}
 
 
-def backup_deck(drive, pid: str, out: Path, mode: str, note: str = "", fallback: bool = True,
-                slides=None) -> dict:
+def backup_deck(drive: DriveService, pid: str, out: Path, mode: str, note: str = "", fallback: bool = True,
+                slides: SlidesService | None = None) -> dict:
     """Keep a way back before a destructive write. mode: none | file | drive | both.
     `slides`: a Slides client, with which a deck Drive will not export whole (its size, a timeout)
     is kept in .pptx parts instead (`export_parts`; `parts` in the result, no `file`).
@@ -484,7 +517,7 @@ class WayBack:
     interpreter's exit does not join it, and what it writes goes down whole or not at all
     (`write_whole`)."""
 
-    def __init__(self, fn, name: str = "b2s-back"):
+    def __init__(self, fn: Callable[[SlidesService, DriveService], dict[str, object] | None], name: str = "b2s-back"):
         from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
 
         self.note: dict | None = None
@@ -649,11 +682,12 @@ def prune_backups(out: Path, keep: int = 10, older_than_days: float | None = Non
     return result
 
 
-def drive_backups(drive, pid: str) -> list[dict]:
+def drive_backups(drive: DriveService, pid: str) -> list[DriveFile]:
     """The Drive copies `copy_in_drive` made of this presentation, oldest first. Found by their
     `b2sBackupOf` tag, so a copy somebody made by hand is never among them (and drive.file only
     lists what this app made anyway)."""
-    found, token = [], None
+    found: list[DriveFile] = []
+    token: str | None = None
     query = (f"appProperties has {{ key='b2sBackupOf' and value='{pid}' }} and trashed = false")
     while True:
         r = execute(drive.files().list(q=query, spaces="drive", pageSize=100, pageToken=token,
@@ -664,7 +698,7 @@ def drive_backups(drive, pid: str) -> list[dict]:
             return sorted(found, key=lambda f: f.get("createdTime", ""))
 
 
-def prune_drive_backups(drive, pid: str, keep: int = 10, older_than_days: float | None = None,
+def prune_drive_backups(drive: DriveService, pid: str, keep: int = 10, older_than_days: float | None = None,
                         trash: bool = False) -> dict:
     """`prune_backups` for the Drive copies: every sync with `backup="drive"` (a detached agent
     context's `auto`) leaves one, so they accumulate like the .pptx files do. The newest `keep`
@@ -680,10 +714,13 @@ def prune_drive_backups(drive, pid: str, keep: int = 10, older_than_days: float 
     result = {"copies": len(copies), "doomed": doomed, "trashed": False, "warnings": []}
     if trash and doomed:
         for c in doomed:
+            cid = c.get("id")
+            if cid is None:   # (listed with `files(id,...)`: never so)
+                continue
             try:
-                execute(drive.files().update(fileId=c["id"], body={"trashed": True}, fields="id"))
+                execute(drive.files().update(fileId=cid, body={"trashed": True}, fields="id"))
             except HttpError as e:
-                result["warnings"].append(f"could not move {c.get('name', c['id'])} to the trash ({api_message(e)})")
+                result["warnings"].append(f"could not move {c.get('name', cid)} to the trash ({api_message(e)})")
         result["trashed"] = True
     return result
 
