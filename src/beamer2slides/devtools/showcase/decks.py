@@ -963,6 +963,7 @@ def build(names: list[str] | None = None) -> dict:
     from beamer2slides.emit import import_presentation
     from beamer2slides.google_auth import drive_service, slides_service
     from beamer2slides.google_types import file_id
+    from beamer2slides.json_types import as_str
     from beamer2slides.gslides import execute
     from beamer2slides.google_types import object_id
     slides, drive = slides_service(), drive_service()
@@ -981,7 +982,8 @@ def build(names: list[str] | None = None) -> dict:
             hashing(slides, pid)
         else:
             title, make = PPTX[name]
-            pid = import_presentation(slides, drive, title, W, H, make(pics).pptx(), pid)["presentationId"]
+            pid = as_str(import_presentation(slides, drive, title, W, H, make(pics).pptx(), pid)["presentationId"],
+                         f"{name}'s id")
         execute(drive.permissions().create(fileId=pid, body={"type": "anyone", "role": "reader"}, fields="id"))
         pres = execute(slides.presentations().get(presentationId=pid, fields="title,slides.objectId"))
         pages = [object_id(s) for s in pres.get("slides", [])]

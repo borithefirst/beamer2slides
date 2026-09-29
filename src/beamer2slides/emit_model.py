@@ -5,25 +5,32 @@ emit derives on the way: a run set among others (`in_sentence`), a hole's no-bre
 (`hole_size`), a table cell's run (`cell`). None of that goes back into the IR, which sync diffs.
 Emit's planners make them from the parsed IR (`set_run`, `set_bullet`, `set_paragraph`).
 
+A table is read the same way (`set_table`, `SetTable`), and the empty table the .pptx carries for
+it is a record too (`PptxTable`).
+
 Callers that still hold dicts - classify's lines while it measures them, deck_ir's read of a deck,
-theme_sync's layout texts, the tests - reach the same code through `run_of`, `bullet_of` and
-`paragraph_of`. Those read each key as emit always read it: a key that is absent takes the value
+theme_sync's layout texts, sync's tables, the tests - reach the same code through `run_of`,
+`bullet_of`, `paragraph_of` and `table_of`. Those read each key as emit always read it: a key that is absent takes the value
 emit's `.get` gave it, and a value of the wrong type is refused.
 """
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, TypeVar
 
-from .ir import Align, Family, ProducerShapeKind, Script, ShapeKind
+from . import ir_types
+from .ir import Align, Family, ProducerShapeKind, Script, ShapeKind, TemplateKind
 from .ir_types import (
-    ALIGNS, BULLET_KINDS, FAMILIES, PRODUCER_SHAPE_KINDS, SCRIPTS, TEMPLATE_KINDS, AnyRun, Box, Bullet, BulletKind,
-    Color, DrawnBullet, GlyphBullet, GlyphInk, HoleRun, ImageBullet, Line, MarkedShape, Number, NumberBullet, Outline,
-    Paragraph, RenderedBullet, RenderedDrawnBullet, RenderedGlyphBullet, RenderedImageBullet, Run, ShapeBullet,
-    ShapeElement, TextElement, ThemeText,
+    ALIGNS, BULLET_KINDS, FAMILIES, PRODUCER_SHAPE_KINDS, SCRIPTS, TEMPLATE_KINDS, AnyRun, BeforeWord, Border, Box,
+    Bullet, BulletKind, CardBox, CellFill, Color, Column, DrawnBullet, GlyphBullet, GlyphInk, HoleRun, ImageBullet,
+    ImageElement, Line, Mark, MarkedShape, Merge, Node, Number, NumberBullet, Outline, Paragraph, RenderedBullet,
+    RenderedDrawnBullet,
+    RenderedGlyphBullet, RenderedImageBullet, Rule, Run, ShapeBullet, ShapeElement, TableElement, TextElement, ThemeText,
 )
 from .json_types import Json, JsonObject
 from .typing_compat import assert_never
+
+T = TypeVar("T")
 
 JsonMap = Mapping[str, Json]
 """A JSON object as the dict readers here take it: read-only, so a dict whose values are narrower
@@ -137,8 +144,67 @@ class Template:
     h: float
 
 
-TemplateKey = tuple[str, float, float | None]
-"""A template shape: (preset, corner adjustment, shadow size in slide pt or None)."""
+TemplateKey = tuple[str, float | None, float | None]
+"""A template shape: (preset, corner adjustment, shadow size in slide pt or None). A diagram node
+whose label goes inside it and whose corners have no radius has no adjustment (None)."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class NodeLook:
+    """What a diagram node's template and its label's place are read from (`emit_diagrams`)."""
+    bbox: Box
+    shape: TemplateKind | None
+    """None: a free label."""
+    text: str
+    """Its label's words, joined and stripped."""
+    label_w: float
+    radius: float | None
+
+CellGrid = tuple[tuple[tuple[SetRun, ...], ...], ...]
+"""A table's cells: per row, per column, the runs."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class SetTable:
+    """What a table's planner reads of a table element. What the IR leaves out is empty here, as
+    emit's `.get` read it."""
+    cells: CellGrid
+    """The runs as the IR has them (the layout marks them `cell` and `in_sentence`)."""
+    frame: Box
+    size: float
+    row_baselines: tuple[float, ...]
+    row_heights: tuple[float, ...]
+    row_lines: tuple[int, ...]
+    """Lines per row (a wrapped cell's); empty: one each."""
+    columns: tuple[Column, ...]
+    rules: tuple[Rule, ...]
+    bounds: tuple[float, ...]
+    """The PDF's column boundaries; empty: between the columns' words."""
+    merges: tuple[Merge, ...]
+    borders: tuple[Border, ...]
+    fills: tuple[CellFill, ...]
+    bands: tuple[tuple[int, float, float], ...]
+    wrapped: tuple[tuple[int, int, tuple[int, ...]], ...]
+    justified: tuple[tuple[int, int], ...]
+    merge_x: tuple[tuple[float, float], ...]
+    """Where each merge's words run, by its index in `merges`."""
+
+
+Margins = tuple[float, float, float, float]
+"""A table row's cell margins: left, top, right, bottom (Slides pt)."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class PptxTable:
+    """The empty table the .pptx carries for a table element (`emit_tables.pptx_table_of`), Slides pt."""
+    x: float
+    y: float
+    widths: tuple[float, ...]
+    heights: tuple[float, ...]
+    margins: tuple[Margins, ...]
+    """Per row."""
+    middle: tuple[tuple[int, int], ...]
+    """(row, col) of the cells that span rows: a \\multirow, centred with no top margin of its own."""
 
 
 # ------------------------------------------------------------------------------ from the IR
@@ -210,6 +276,18 @@ def set_text(el: TextElement | ThemeText) -> SetText:
                    rotation=rotation)
 
 
+def set_card(box: CardBox) -> SetText:
+    """A diagram card's text box (classify.card_text) as its planner reads it."""
+    return SetText(paragraphs=tuple(set_paragraph(p, set_runs(p.runs)) for p in box.paragraphs), code=False,
+                   rotation=None)
+
+
+def node_look(n: Node) -> NodeLook:
+    """A parsed diagram node as its template and label placement read it."""
+    return NodeLook(bbox=n.bbox, shape=n.shape, text="".join(r.text for runs in n.paragraphs for r in runs).strip(),
+                    label_w=n.label_w, radius=n.radius)
+
+
 def number_run(n: Number) -> SetRun:
     """A ball's number as the run its box writes: never small caps."""
     return SetRun(text=n.text, font=n.font, family=n.family, size=n.size, bold=n.bold, italic=n.italic,
@@ -239,6 +317,15 @@ def set_shape(el: ShapeElement | MarkedShape) -> SetShape:
     # (an opacity of 0 is kept: only an absent one is opaque)
     return SetShape(bbox=el.bbox, shape=el.shape, flip=el.flip, radius=el.radius, fill=fill,
                     opacity=1.0 if el.opacity is None else el.opacity, outline=el.outline, shadow=shadow)
+
+
+def set_table(el: TableElement) -> SetTable:
+    """A parsed table as its planner reads it."""
+    return SetTable(cells=tuple(tuple(set_runs(cell) for cell in row) for row in el.cells), frame=el.frame,
+                    size=el.size, row_baselines=el.row_baselines, row_heights=el.row_heights,
+                    row_lines=el.row_lines or (), columns=el.columns, rules=el.rules, bounds=el.bounds,
+                    merges=el.merges, borders=el.borders, fills=el.fills or (), bands=el.bands or (),
+                    wrapped=el.wrapped or (), justified=el.justified or (), merge_x=el.merge_x or ())
 
 
 # ------------------------------------------------------------------------------ from dicts
@@ -381,6 +468,11 @@ def _align(value: Json) -> Align:
     raise _wrong(value, "align", f"one of {ALIGNS}")
 
 
+def align_of(value: Json) -> Align:
+    """A paragraph's `align` read where emit still reads dicts (the theme's titles)."""
+    return _align(value)
+
+
 def paragraph_of(d: JsonMap, runs: tuple[SetRun, ...]) -> SetParagraph:
     """A paragraph dict as emit has always read it, holding `runs` (the runs emit sets for it)."""
     bullet = d.get("bullet")
@@ -460,3 +552,249 @@ def shape_measures_of(d: JsonMap) -> tuple[Box, float, float | None]:
 
 def template_of(d: JsonMap) -> Template:
     return Template(id=_str(d["id"], "id"), w=_num(d["w"], "w"), h=_num(d["h"], "h"))
+
+
+def box_of(value: Json, key: str) -> Box:
+    """A bbox read where emit still reads element dicts (groups, placed pictures)."""
+    return _box(value, key)
+
+
+def _template_kind(value: Json) -> TemplateKind | None:
+    if value is None:
+        return None
+    for k in TEMPLATE_KINDS:
+        if value == k:
+            return k
+    raise _wrong(value, "shape", f"one of {TEMPLATE_KINDS}")
+
+
+def node_look_of(d: JsonMap) -> NodeLook:
+    """A node dict as `label_inside` and `node_template_key` always read it: `bbox` and `shape`
+    always, `label_w` (0) and `radius` as `.get`. (Its `paragraphs` too: none is no label.)"""
+    words = "".join(_str(_object(r, "paragraphs")["text"], "text") for runs in _items(d.get("paragraphs", []), "paragraphs")
+                    for r in _items(runs, "paragraphs"))
+    return NodeLook(bbox=_box(d["bbox"], "bbox"), shape=_template_kind(d["shape"]), text=words.strip(),
+                    label_w=_num(d.get("label_w", 0.0), "label_w"), radius=_opt_num(d.get("radius"), "radius"))
+
+
+def node_site_of(d: JsonMap) -> tuple[Box, TemplateKind | None]:
+    """A node dict as `connection` reads it: its box and its shape."""
+    return _box(d["bbox"], "bbox"), _template_kind(d["shape"])
+
+
+ObjectMap = Mapping[str, object]
+"""A dict not yet read, whatever its values' types say: classify's table while it decides whether
+it fits (its merges are its own TypedDicts), sync's base element. Only the IR's readers take it."""
+
+ElementDict = TypeVar("ElementDict", bound=JsonObject)
+"""An element dict a caller hands in and gets back (a copy where it changed), its type the caller's own."""
+
+
+def _listed(d: ObjectMap, key: str, parse: ir_types.Parse[T]) -> tuple[T, ...]:
+    """A list of records the IR's own reader reads, where emit read the key as `.get(key, [])`:
+    absent (or empty) is none."""
+    value = d.get(key)
+    return () if not value else ir_types.tuple_of(parse)(value, ir_types.At(where="table", path=key))
+
+
+def _required(d: ObjectMap, key: str, parse: ir_types.Parse[T]) -> T:
+    return parse(d[key], ir_types.At(where="table", path=key))
+
+
+def _sequence(value: object, key: str) -> Sequence[object]:
+    # (a tuple where a list goes: dicts built in Python, never JSON)
+    if isinstance(value, (list, tuple)):
+        return value
+    raise _wrong(value, key, "a list")
+
+
+def _run_dict(value: object) -> JsonMap:
+    if not isinstance(value, dict):
+        raise _wrong(value, "cells", "an object")
+    return value
+
+
+def _cells(value: object) -> CellGrid:
+    return tuple(tuple(tuple(run_of(_run_dict(r)) for r in _sequence(cell, "cells")) for cell in _sequence(row, "cells"))
+                 for row in _sequence(value, "cells"))
+
+
+def table_of(d: ObjectMap) -> SetTable:
+    """A table dict as emit has always read it: its cells' runs (`run_of`), `frame`, `size`,
+    `row_baselines`, `row_heights`, `columns` and `rules` always, the rest as `.get`. Its columns,
+    rules, merges and the like are read by the IR's own readers (a rule has its `y`)."""
+    numbers = ir_types.tuple_of(ir_types.number)
+    return SetTable(cells=_cells(d["cells"]), frame=_required(d, "frame", ir_types.box),
+                    size=_required(d, "size", ir_types.number),
+                    row_baselines=_required(d, "row_baselines", numbers),
+                    row_heights=_required(d, "row_heights", numbers),
+                    row_lines=_listed(d, "row_lines", ir_types.integer),
+                    columns=_required(d, "columns", ir_types.tuple_of(ir_types.column)),
+                    rules=_required(d, "rules", ir_types.tuple_of(ir_types.rule)),
+                    bounds=_listed(d, "bounds", ir_types.number), merges=_listed(d, "merges", ir_types.merge),
+                    borders=_listed(d, "borders", ir_types.border), fills=_listed(d, "fills", ir_types.cell_fill),
+                    bands=_listed(d, "bands", ir_types.band), wrapped=_listed(d, "wrapped", ir_types.wrapped_cell),
+                    justified=_listed(d, "justified", ir_types.int_pair), merge_x=_listed(d, "merge_x", ir_types.pair))
+
+
+def columns_of(cols: Sequence[JsonMap]) -> tuple[Column, ...]:
+    """Column dicts (a test's `fit_columns`), read by the IR's reader."""
+    return tuple(ir_types.column(dict(c), ir_types.At(where="columns", path=f"[{i}]")) for i, c in enumerate(cols))
+
+
+def objects_of(value: Json, key: str) -> list[JsonObject]:
+    """A list of objects read where emit still reads dicts (a slide's elements, a paragraph's runs):
+    the same objects, not copies."""
+    return [_object(v, key) for v in _items(value, key)]
+
+
+def _map(value: object, key: str) -> JsonMap:
+    if not isinstance(value, dict):
+        raise _wrong(value, key, "an object")
+    return value
+
+
+def dict_of(value: object, key: str) -> JsonObject:
+    """A dict not yet read (`ObjectMap`: sync's deck) as the JSON object it is: the same dict."""
+    if not isinstance(value, dict):
+        raise _wrong(value, key, "an object")
+    return value
+
+
+def maps_of(value: object, key: str) -> list[JsonMap]:
+    """`objects_of` a value of a dict not yet read (`ObjectMap`: sync's copy of a slide)."""
+    return [_map(v, key) for v in _sequence(value, key)]
+
+
+def block_of(e: JsonMap) -> int | None:
+    """A shape's block (the beamer block it belongs to), if any."""
+    block = e.get("block")
+    if block is None:
+        return None
+    if isinstance(block, bool) or not isinstance(block, int):
+        raise TypeError(f"block: {block!r} is not an integer")
+    return block
+
+
+# ------------------------------------------------------------------------------ holes and overlays
+
+
+@dataclass(frozen=True, kw_only=True)
+class Gap:
+    """Where the PDF has a formula hole: what a hole run says beyond the run emit sets."""
+    width: float
+    """The hole's width (`hole`, PDF pt): never 0, a hole of no width is none."""
+    x0: float
+    """Where it starts (`hole_x0`)."""
+    before: tuple[BeforeWord, ...]
+    """The words before it on its line."""
+    next_x0: float | None
+    """Where the word after it starts, when nothing separates them."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class HoleParagraph:
+    """A paragraph as the pictures over its holes are placed from it (`emit_holes`)."""
+    align: Align
+    baselines: tuple[float, ...]
+    runs: tuple[SetRun, ...]
+    gaps: tuple[Gap | None, ...]
+    """Per run: where the PDF has its hole; None for words."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class HoleText:
+    """A text box as the pictures anchored to it are placed from it."""
+    id: str
+    paragraphs: tuple[HoleParagraph, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Anchored:
+    """A picture placed at words: a formula over its hole, an overlay (arrows, braces) over the
+    words its marks lie on."""
+    id: str
+    bbox: Box
+    anchor: str | None
+    marks: tuple[Mark, ...]
+    """An overlay's marks; none for a formula."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class Place:
+    """How far `emit.measure_places` found a picture from its predicted place, slide pt."""
+    dx: float
+    """The move of its left edge."""
+    dy: float
+    sx: float | None
+    """An overlay's stretch; None for a formula, which is only moved."""
+
+
+def _gap(r: AnyRun) -> Gap | None:
+    return Gap(width=r.hole, x0=r.hole_x0, before=r.before, next_x0=r.next_x0) \
+        if isinstance(r, HoleRun) and r.hole else None
+
+
+def hole_paragraph(p: Paragraph) -> HoleParagraph:
+    """A parsed paragraph as its holes' pictures are placed from it."""
+    return HoleParagraph(align=p.align, baselines=tuple(ln.baseline for ln in p.lines), runs=set_runs(p.runs),
+                         gaps=tuple(_gap(r) for r in p.runs))
+
+
+def hole_text(el: TextElement) -> HoleText:
+    return HoleText(id=el.id, paragraphs=tuple(hole_paragraph(p) for p in el.paragraphs))
+
+
+def anchored(el: ImageElement) -> Anchored:
+    return Anchored(id=el.id, bbox=el.bbox, anchor=el.anchor, marks=el.marks or ())
+
+
+def before_of(value: Json) -> tuple[BeforeWord, ...]:
+    """The words before a hole or a mark, as classify writes them: (width, font, family, bold,
+    italic, text, x0)."""
+    out: list[BeforeWord] = []
+    for word in _items(value, "before"):
+        items = _items(word, "before")
+        if len(items) != 7:
+            raise _wrong(word, "before", "a word of 7 items")
+        w, font, family, bold, italic, text, x0 = items
+        out.append((_num(w, "before"), _str(font, "before"), _family(family), _bool(bold, "before"),
+                    _bool(italic, "before"), _str(text, "before"), _num(x0, "before")))
+    return tuple(out)
+
+
+def gap_of(d: JsonMap) -> Gap | None:
+    """A run dict's hole as emit has always read it: `hole_x0` always, `before` and `next_x0` as
+    `.get`; None for words."""
+    hole = d.get("hole")
+    if not hole:
+        return None
+    return Gap(width=_num(hole, "hole"), x0=_num(d["hole_x0"], "hole_x0"), before=before_of(d.get("before", [])),
+               next_x0=_opt_num(d.get("next_x0"), "next_x0"))
+
+
+def hole_paragraph_of(d: JsonMap) -> HoleParagraph:
+    """A paragraph dict as its holes' pictures have always been placed from it: its runs always,
+    `align` and `lines` as `.get`, each line's `baseline` always."""
+    runs = objects_of(d["runs"], "runs")
+    return HoleParagraph(align=_align(d.get("align", "left")),
+                         baselines=tuple(_num(ln["baseline"], "baseline") for ln in objects_of(d.get("lines", []), "lines")),
+                         runs=tuple(run_of(r) for r in runs), gaps=tuple(gap_of(r) for r in runs))
+
+
+def hole_text_of(d: JsonMap) -> HoleText:
+    return HoleText(id=_str(d["id"], "id"),
+                    paragraphs=tuple(hole_paragraph_of(p) for p in objects_of(d["paragraphs"], "paragraphs")))
+
+
+def mark_of(d: JsonMap) -> Mark:
+    """An overlay's mark dict as emit has always read it: `pads` as `.get`, the rest always."""
+    return Mark(x=_num(d["x"], "x"), hole_x0=_num(d["hole_x0"], "hole_x0"), pads=_num(d.get("pads", 0.0), "pads"),
+                font=_str(d["font"], "font"), family=_family(d["family"]), size=_num(d["size"], "size"),
+                bold=_bool(d["bold"], "bold"), italic=_bool(d["italic"], "italic"), before=before_of(d["before"]))
+
+
+def anchored_of(d: JsonMap) -> Anchored:
+    """A picture dict placed at words: `id` and `bbox` always, `anchor` and `marks` as `.get`."""
+    return Anchored(id=_str(d["id"], "id"), bbox=_box(d["bbox"], "bbox"), anchor=_opt_str(d.get("anchor"), "anchor"),
+                    marks=tuple(mark_of(m) for m in objects_of(d.get("marks") or [], "marks")))

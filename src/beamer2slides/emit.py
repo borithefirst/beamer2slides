@@ -11,14 +11,17 @@ callers have always taken from here still are.
 
 import json
 import os
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from concurrent.futures import Future, ThreadPoolExecutor
+from copy import copy
 from pathlib import Path
-from typing import Callable, TypeVar
+from types import FrameType
+from typing import TYPE_CHECKING, Callable, TypedDict, TypeVar
 
-from .emit_diagrams import block_groups, diagram_requests, element_template_keys, rule_groups
+from .emit_diagrams import block_groups, diagram_requests_of, element_template_keys, rule_groups
 from .emit_diagrams import (  # noqa: F401 (callers take these from here)
-    bend_template_key, connection, label_inside, node_template_key,
+    bend_template_key, connection, diagram_requests, label_inside, node_template_key,
 )
 from .emit_holes import fit_holes, formula_shifts, overlay_boxes, text_right_limit
 from .emit_holes import (  # noqa: F401 (callers take these from here)
@@ -37,15 +40,18 @@ from .emit_places import grown_panels, measure_jobs, measure_places, title_bar_u
 from .emit_places import (  # noqa: F401 (callers take these from here)
     find_marks, ink_end, mark_alpha, overlay_move, pick_gap, slides_texts,
 )
-from .emit_model import Placeholder, Template, TemplateKey
+from .emit_model import (
+    ElementDict, JsonMap, ObjectMap, Place, Placeholder, PptxTable, Template, TemplateKey, box_of, dict_of, json_number,
+    objects_of, table_of,
+)
 from .emit_pptx import TEMPLATE_LAYOUTS, api_error, batch, build_pptx, shape_element_requests
 from .emit_pptx import shape_requests, template_key  # noqa: F401 (callers take these from here)
 from .emit_pptx import _add_table, _add_template_shapes  # (DeckPlan.contain tries what the .pptx carries)
 from .emit_pptx import NO_TABLE_STYLE, NS_A, VARIANT  # noqa: F401 (callers take these from here)
-from .emit_tables import pptx_table, table_requests
+from .emit_tables import pptx_table_of, table_element_requests
 from .emit_tables import (  # noqa: F401 (callers take these from here)
-    TABLE_CELL_PAD, TABLE_MARGIN, TABLE_MIN_SHRINK, TABLE_TEXT_TOP, fit_columns, squeezed_columns,
-    table_columns, table_fits, table_layout,
+    TABLE_CELL_PAD, TABLE_MARGIN, TABLE_MIN_SHRINK, TABLE_TEXT_TOP, fit_columns, pptx_table, squeezed_columns,
+    table_columns, table_fits, table_layout, table_requests,
 )
 from .emit_text import merge_blocks, number_requests, text_element_requests
 from .emit_text import (  # noqa: F401 (callers take these from here)
@@ -57,12 +63,12 @@ from .emit_text import (  # noqa: F401 (callers take these from here)
     vertical_layout,
 )
 from .emit_theme import (
-    LAYOUT_PLACEHOLDERS, background_key, import_presentation, master_ground, plan_theme, slide_layout,
-    subtitle_element, title_element, write_layouts,
+    LAYOUT_PLACEHOLDERS, BgKey, import_presentation, master_plan_of, slide_layout, subtitle_element, title_element,
+    write_layouts,
 )
 from .emit_theme import (  # noqa: F401 (callers take these from here)
-    LAYOUT_TEXT_PREFIX, PPTX_MIME, layout_placeholder_requests, layout_style_spec, master_plan,
-    style_layout_placeholders,
+    LAYOUT_TEXT_PREFIX, PPTX_MIME, background_key, layout_placeholder_requests, layout_style_spec, master_ground,
+    master_plan, plan_theme, style_layout_placeholders,
 )
 from .emit_widths import (  # noqa: F401 (callers take these from here)
     SCRIPT_SIZE, SMALL_CAPS_SIZE, WRAP_MARGIN, ZWSP, first_break, pdf_line_breaks, pdf_width, slides_lines,
@@ -76,8 +82,11 @@ from .ir_types import (
     DiagramElement, Element, FallbackImage, ImageElement, MarkedShape, RenderedElement, ShapeElement, TableElement,
     TextElement, parse_element, parse_rendered_element,
 )
-from .json_types import JsonObject
-from .typing_compat import assert_never
+from .json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
+from .typing_compat import assert_never, override
+
+if TYPE_CHECKING:
+    from pptx.slide import Slide
 
 BATCH_MAX_REQUESTS = 400  # slides are sent together until a batch reaches this size
 # A round trip to Google costs about a second whatever it carries, so the wall clock of a
@@ -93,6 +102,12 @@ PICTURE_TITLES = {"math": "Formula", "icon": "Icon", "fallback": "Picture"}
 STRICT_ENV = "B2S_EMIT_STRICT"
 OBJECT_PREFIX = {"shape": "s", "table": "tab", "diagram": "dg", "image": "f"}  # (text: "t")
 _T = TypeVar("_T")
+
+
+def picture_title(e: JsonMap) -> str:
+    """The title a picture's object carries: its role's (PICTURE_TITLES), else "Figure"."""
+    role = e.get("role")
+    return PICTURE_TITLES.get(role, "Figure") if isinstance(role, str) else "Figure"
 
 
 def strict() -> bool:
@@ -118,16 +133,21 @@ def existing_presentation(drive, out: Path) -> str | None:
     return previous["presentationId"] if previous and previous["state"] == "live" else None
 
 
-def size_pt(element: dict) -> tuple[float, float]:
-    size = element["size"]
-    return tuple(size[k]["magnitude"] / (EMU_PER_PT if size[k]["unit"] == "EMU" else 1) for k in ("width", "height"))
+def size_pt(element: JsonMap) -> tuple[float, float]:
+    """A page element's size as the API answered it, in pt."""
+    size = as_object(element["size"], "size")
+
+    def side(k: str) -> float:
+        d = as_object(size[k], k)
+        return json_number(d["magnitude"], "magnitude") / (EMU_PER_PT if d["unit"] == "EMU" else 1)
+    return side("width"), side("height")
 
 
-def fallback_element(el: dict) -> dict:
+def fallback_element(el: JsonMap) -> JsonObject:
     """What an element becomes when Slides refused it (`fallback_pictures`) or emit could not plan
     it (`DeckPlan.contain`): the picture of its region, 2 pt round its box, which `crop_fallbacks`
     cuts out of the PDF page."""
-    x0, y0, x1, y1 = el["bbox"]
+    x0, y0, x1, y1 = box_of(el["bbox"], "bbox")
     return {"kind": "image", "id": el["id"], "role": "fallback", "bbox": [x0 - 2, y0 - 2, x1 + 2, y1 + 2],
             "file": f"figures/fallback-{el['id']}.png"}
 
@@ -350,33 +370,25 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
 
     # Backgrounds: the most common one becomes the master's (the deck's theme): layouts and
     # slides inherit it, and slides added later too. Identical pictures are stored once.
-    bg_key = {s["page"]: background_key(s, out) for s in deck["slides"]}
-    bg_file = {bg_key[s["page"]]: out / s["background"] for s in deck["slides"] if not s.get("background_color")}
-    counts = Counter(bg_key.values())
-    shared = counts.most_common(1)[0][0] if counts and counts.most_common(1)[0][1] >= 2 else None
+    mp = master_plan_of(deck, out, "plan")
+    theme = mp.theme
 
-    def fill(key: tuple) -> dict:
-        return {"color": key[1]} if key[0] == "color" else {"picture": bg_file[key]}
+    def fill(key: BgKey) -> dict[str, str | Path]:
+        return {"color": key[1]} if key[0] == "color" else {"picture": mp.bg_file[key]}
 
-    theme = plan_theme(deck, out, bg_key)
-    master_fill = fill(shared or ("color", "#ffffff"))
-    if theme:
-        group = lambda s: "TITLE" if slide_layout(s)[0] == "TITLE" else "*"
-        # The master's ground colour where the shared background is nothing but ground and decoration.
-        if shared is None or all(theme["exact"].get(group(s)) == shared for s in deck["slides"] if bg_key[s["page"]] == shared):
-            master_fill = {"color": theme["ground"]}
+    master_fill = fill(mp.fill)
     pages = [{
-        "layout": theme["layouts"][s["page"]] if theme else slide_layout(s)[0],
-        "fill": None if bg_key[s["page"]] == shared else fill(bg_key[s["page"]]),
-        "pictures": [{"file": out / e["file"], "bbox": bbox, "alt": e.get("alt"),
-                      "title": PICTURE_TITLES.get(e.get("role"), "Figure")} for e, bbox in plan.pictures(s)],
+        "layout": theme.layouts[s["page"]] if theme else slide_layout(s)[0],
+        "fill": None if mp.bg_key[s["page"]] == mp.shared else fill(mp.bg_key[s["page"]]),
+        "pictures": [{"file": out / as_str(e["file"], "file"), "bbox": bbox, "alt": e.get("alt"),
+                      "title": picture_title(e)} for e, bbox in plan.pictures(s)],
         "tables": plan.tables(s),
         "templates": plan.uses_templates[s["page"]],
     } for s in deck["slides"]]
-    pptx = build_pptx(page_w, page_h, plan.keys, pages, master_fill, theme and theme["decorations"])
+    pptx = build_pptx(page_w, page_h, plan.keys, pages, master_fill, dict(theme.decorations) if theme else None)
     pres = import_presentation(slides, drive, title, page_w, page_h, pptx, existing)
-    pid = pres["presentationId"]
-    sources = pres.get("slides", [])
+    pid = as_str(pres["presentationId"], "presentationId")
+    sources = as_objects(pres.get("slides", []), "the imported slides")
     if len(sources) != len(deck["slides"]):
         raise RuntimeError(f"the import brought {len(sources)} slides, expected {len(deck['slides'])}")
 
@@ -401,7 +413,7 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     creds = credentials_for_threads() if threaded else None  # here: a worker inherits no context
     client = per_thread(lambda: slides_service(creds)) if threaded else (lambda: slides)
     pool = ThreadPoolExecutor(CONTENT_WORKERS, thread_name_prefix="b2s-content") if threaded else None
-    ground = master_ground(shared, bg_file, page_w)
+    ground = mp.ground
     layout_pool, layout_work = None, None
     if threaded:
         layout_pool = ThreadPoolExecutor(1, thread_name_prefix="b2s-layout")
@@ -409,15 +421,16 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     else:
         write_layouts(client, pid, deck, scale, fonts, ground)
 
-    state = {"presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
-             "scale": scale, "slides": []}
+    slide_states: list[dict[str, object]] = []  # (emit.json's "slides", which the base is read with)
+    state: dict[str, object] = {"presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
+                                "scale": scale, "slides": slide_states}
     if plan.contained:  # (emit.json: which elements are pictures because emit could not plan them)
         state["contained"] = plan.contained
     if theme:
-        state["theme"] = {"ground": theme["ground"], "master": master_fill.get("color"),
+        state["theme"] = {"ground": theme.ground, "master": master_fill.get("color"),
                           "decorations": {k: str(p.relative_to(out)).replace("\\", "/") if p else None
-                                          for k, p in theme["decorations"].items()},
-                          "layouts": {str(k): v for k, v in theme["layouts"].items()}}
+                                          for k, p in theme.decorations.items()},
+                          "layouts": {str(k): v for k, v in theme.layouts.items()}}
     # Placeholder sizes (needed to resize them) and any extra layout placeholders.
     created = execute(slides.presentations().get(
         presentationId=pid,
@@ -425,14 +438,16 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     page_elements = {s["objectId"]: s.get("pageElements", []) for s in created["slides"]}
     speaker_notes = {s["objectId"]: s.get("slideProperties", {}).get("notesPage", {})
                      .get("notesProperties", {}).get("speakerNotesObjectId") for s in created["slides"]}
-    moves, scratch = measure_places(slides, pid, deck, scale, fonts, plan.placed, plan.page_slide, out) \
-        if measure else ({}, [])
+    moves: Mapping[str, Place] = {}
+    scratch: list[str] = []
+    if measure:
+        moves, scratch = measure_places(slides, pid, deck, scale, fonts, plan.placed, plan.page_slide, out)
 
     # Phase 2: content, batched over slides. Each slide's requests come in parts (one per
     # element) so that a rejected batch can be narrowed down to the element at fault.
     refused: list[tuple[int, str]] = []
 
-    def send(items: list[tuple[str, int, list[tuple[dict | None, list[dict]]]]]) -> None:
+    def send(items: list[tuple[str, int, list[Part]]]) -> None:
         reqs = [r for _, _, parts in items for _, rs in parts for r in rs]
         if not reqs:
             return
@@ -451,21 +466,22 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
                 if rs:
                     batch(client(), pid, rs)
             except HttpError as e:
-                print(f"warning: {slide_id}: {el['kind'] + ' ' + el['id'] if el else 'request'} rejected "
+                what = f"{el['kind']} {el['id']}" if el else "request"
+                print(f"warning: {slide_id}: {what} rejected "
                       f"({api_error(e)})" + ("; using a picture of it instead" if el and el["kind"] != "image" else ""))
                 if el and el["kind"] != "image":
-                    refused.append((page, el["id"]))
+                    refused.append((page, as_str(el["id"], "element id")))
 
     # A full batch is sent while the next slides are still being planned, several at a time.
-    sent = []
+    sent: list[Future[None]] = []
 
-    def dispatch(items: list) -> None:
+    def dispatch(items: list[tuple[str, int, list[Part]]]) -> None:
         if pool:
             sent.append(pool.submit(send, items))
         else:
             send(items)
 
-    pending: list[tuple[str, int, list]] = []
+    pending: list[tuple[str, int, list[Part]]] = []
     pending_size = 0
     try:
         # The layouts first, and never beside the slides: a slide's title placeholder inherits
@@ -478,34 +494,35 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
         # layout pass overlaps the read and `measure_places` above it, and nothing below.
         if layout_work is not None:
             layout_work.result()
-        for slide in deck["slides"]:
-            n = slide["page"]
-            slide_id = f"b2s_s{n:03}"
+        for slide in plan.slides():
+            n = _page(slide)
+            slide_id = _slide_id(n)
             late: list[tuple[int, Exception]] = []
             parts, element_ids = plan.slide_parts(slide, page_elements, speaker_notes, moves, template_sizes, late)
             for i, e in late:
                 # Planned with Google's own sizes, an element the rehearsal passed tripped all the
                 # same: it goes the way of a refused one, into the rebuild with pictures (`emit`).
                 # (a picture is one already, and stays as the .pptx brought it)
-                el = slide["elements"][i]
+                el = _elements(slide)[i]
                 print(f"warning: {slide_id}: {el['kind']} {el['id']} could not be planned ({type(e).__name__}: {e})"
                       + ("; using a picture of it instead" if el["kind"] != "image" else ""))
                 if el["kind"] != "image":
-                    refused.append((n, el["id"]))
+                    refused.append((n, as_str(el["id"], "element id")))
             size = sum(len(rs) for _, rs in parts)
             # Several slides per round trip; a slide's requests are never split across batches.
             if pending and pending_size + size > BATCH_MAX_REQUESTS:
                 dispatch(pending)
-                pending, pending_size = [], 0
+                pending = []
+                pending_size = 0
             pending.append((slide_id, n, parts))
             pending_size += size
             objects, groups = element_objects(parts, element_ids)
-            state["slides"].append({"page": n, "objectId": slide_id, "elements": element_ids, "objects": objects,
-                                    "groups": groups})
+            slide_states.append({"page": n, "objectId": slide_id, "elements": element_ids, "objects": objects,
+                                 "groups": groups})
             if plan.pptx_tables:  # the base records them: a sync refills such a table in place (sync.table_refill)
-                state["slides"][-1]["table_margins"] = {str(i): pptx_table(el, plan.scale, plan.fonts)["margins"]
-                                                        for i, el in enumerate(slide["elements"]) if el["kind"] == "table"}
-            kinds = [el["kind"] for el in slide["elements"]]
+                slide_states[-1]["table_margins"] = {str(i): [list(m) for m in plan.pptx_table(el).margins]
+                                                     for i, el in enumerate(_elements(slide)) if el["kind"] == "table"}
+            kinds = [el["kind"] for el in _elements(slide)]
             print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
                   f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
         if pending:
@@ -522,27 +539,29 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     return state, refused
 
 
-def created_ids(reqs: list[dict]) -> list[str]:
+def created_ids(reqs: Sequence[JsonMap]) -> list[str]:
     """Object ids a list of requests creates."""
-    out = []
+    out: list[str] = []
     for r in reqs:
-        (kind, body), = r.items()
+        (kind, value), = r.items()
+        body = as_object(value, kind)
         if kind in ("createShape", "createLine", "createTable", "createImage", "createSlide"):
-            out.append(body["objectId"])
+            out.append(as_str(body["objectId"], f"{kind}.objectId"))
         elif kind == "duplicateObject":
-            out += list(body.get("objectIds", {}).values())
+            out += [as_str(v, "duplicateObject.objectIds") for v in as_object(body.get("objectIds", {}), "objectIds").values()]
         elif kind == "groupObjects":
-            out.append(body["groupObjectId"])
+            out.append(as_str(body["groupObjectId"], "groupObjectId"))
     return out
 
 
-def element_objects(parts: list[tuple[dict | None, list[dict]]], element_ids: list[str]) -> tuple[list[list[str]], list[str]]:
+def element_objects(parts: Sequence[tuple[JsonMap | None, Sequence[JsonMap]]], element_ids: Sequence[str]
+                    ) -> tuple[list[list[str]], list[str]]:
     """Per element (in slide_parts order) every object id created for it: its main object first,
     then what its requests create and its group with anchored pictures ({oid}_g); and the slide's
     other groups (blocks, rules)."""
     objects = [[oid] for oid in element_ids]
     index = {oid: i for i, oid in enumerate(element_ids)}
-    groups = []
+    groups: list[str] = []
     k = 0
     for el, reqs in parts:
         if el is not None:
@@ -558,12 +577,90 @@ def element_objects(parts: list[tuple[dict | None, list[dict]]], element_ids: li
     return [list(dict.fromkeys(o)) for o in objects], groups
 
 
+PLACEHOLDER_SIZE = (612.0, 90.0)  # the made-up size of a layout placeholder offline (pt)
+TEMPLATE_SIZE = (100.0, 100.0)    # and of a template shape's copy
+
+Part = tuple[JsonObject | None, list[JsonObject]]
+"""A slide's requests in parts (`DeckPlan.slide_parts`): an element's (the element as placed, its
+requests), or the slide's own (None, requests), so a rejected batch narrows down to one."""
+
+
+def _json_list(items: Sequence[JsonObject]) -> list[Json]:
+    out: list[Json] = [*items]
+    return out
+
+
+def _page(slide: JsonMap) -> int:
+    return as_int(slide["page"], "slide page")
+
+
+def _elements(slide: JsonMap) -> list[JsonObject]:
+    """A slide's elements: the same dicts."""
+    return objects_of(slide["elements"], "elements")
+
+
+def _slide_id(page: int) -> str:
+    return f"b2s_s{page:03}"
+
+
+def _object_id(e: JsonMap) -> str:
+    return as_str(e["objectId"], "objectId")
+
+
+def _magnitude(size: Json, side: str) -> float:
+    """A width or height of a page element's size the API answered, as it says it (EMU)."""
+    return json_number(as_object(as_object(size, "size")[side], side)["magnitude"], "magnitude")
+
+
+def _is_placeholder(e: JsonMap) -> bool:
+    shape = e.get("shape")
+    return isinstance(shape, dict) and "placeholder" in shape
+
+
+def _placeholder_type(e: JsonMap) -> str:
+    return as_str(as_object(as_object(e["shape"], "shape")["placeholder"], "placeholder")["type"], "placeholder type")
+
+
+def _with_bbox(el: ElementDict, bbox: Sequence[float]) -> ElementDict:
+    """`el` (a copy) at another box: the caller's own dict type."""
+    new = copy(el)
+    box: list[Json] = [*bbox]
+    new["bbox"] = box
+    return new
+
+
+def _object_prefix(el: JsonMap) -> str:
+    kind = el["kind"]
+    return OBJECT_PREFIX.get(kind, "t") if isinstance(kind, str) else "t"
+
+
 class DeckPlan:
     """The requests build_deck sends, apart from what only Google knows (the imported slides'
     object IDs, placeholder and template sizes, measured hole moves): pure, so tests can check
-    them offline (plan_offline)."""
+    them offline (plan_offline).
 
-    def __init__(self, deck: dict, page_width: float = SLIDE_W, pptx_tables: bool = False, contain: bool = False):
+    The plan's own state is typed: `page_slide` (PDF page -> the slide internal links go to), `keys`
+    (the template shapes the .pptx carries) and `uses_templates` per page, the predicted `shifts` of
+    formula pictures and `overlays` boxes per page. `deck` (what emit writes: blocks merged, holes
+    fitted), `merged` (the same before the holes are fitted: `emit`'s rebuild) and `contained`
+    ({"page", "id", "kind", "error"} per element made a picture) are the dicts sync, the layout
+    oracle and emit.json read as they always have; the plan reads them through `slides()`."""
+
+    page_width: float
+    pptx_tables: bool
+    scale: float
+    fonts: FontMapper
+    page_slide: Mapping[int, str]
+    contained: list[dict]
+    merged: dict
+    deck: dict
+    keys: list[TemplateKey]
+    uses_templates: dict[int, bool]
+    shifts: dict[int, dict[str, float]]
+    overlays: dict[int, dict[str, tuple[float, float]]]
+    _scratch: "Slide | None"
+
+    def __init__(self, deck: ObjectMap, page_width: float = SLIDE_W, pptx_tables: bool = False, contain: bool = False):
         # `page_width`: the width of the deck this plan is for, in slide pt. A deck `convert` makes
         # is always SLIDE_W wide (it uploads the .pptx that says so), but `sync` may be writing into
         # a deck a person built at any size (`adopt_sync`), and every box, font size and hole width
@@ -574,28 +671,39 @@ class DeckPlan:
         # it cannot plan is the picture of its region (`contain`, listed in `contained`), whose
         # file the caller crops (`crop_fallbacks`). Without it the deck's blocks are merged
         # already and such an element raises.
+        whole = dict_of(deck, "deck")
+        slides = objects_of(whole["slides"], "slides")
         self.page_width = page_width
         self.pptx_tables = pptx_tables
-        self.scale = scale = page_width / deck["slides"][0]["size"][0]
+        self.scale = scale = page_width / json_number(as_array(slides[0]["size"], "size")[0], "size")
         self.fonts = fonts = FontMapper()
         # Internal link targets: PDF page -> slide. A skipped overlay step maps to the kept
         # (last) step of its frame, which comes right after it.
-        kept = sorted(s["page"] for s in deck["slides"])
-        self.page_slide = {}
+        kept = sorted(_page(s) for s in slides)
+        page_slide: dict[int, str] = {}
         for page in range(kept[-1] + 1):
             target = next(k for k in kept if k >= page)
-            self.page_slide[page] = f"b2s_s{target:03}"
-        self.contained: list[dict] = []  # {"page", "id", "kind", "error"}: elements made pictures
+            page_slide[page] = _slide_id(target)
+        self.page_slide = page_slide
+        self.contained = []  # elements made pictures
         self._scratch = None
-        slides = [self.contain(s) for s in deck["slides"]] if contain else deck["slides"]
-        self.merged = {**deck, "slides": slides}  # (blocks merged, holes not yet fitted: `emit`'s rebuild)
-        self.deck = deck = {**deck, "slides": [fit_holes(s, scale, fonts) for s in slides]}
-        self.keys = list(dict.fromkeys(k for s in deck["slides"] for e in s["elements"] for k in element_template_keys(e, scale)))
-        self.uses_templates = {s["page"]: any(element_template_keys(e, scale) for e in s["elements"]) for s in deck["slides"]}
-        self.shifts = {s["page"]: formula_shifts(s, scale, fonts) for s in deck["slides"]}
-        self.overlays = {s["page"]: overlay_boxes(s, scale, fonts) for s in deck["slides"]}
+        merged = copy(whole)  # (blocks merged, holes not yet fitted: `emit`'s rebuild)
+        if contain:
+            merged["slides"] = _json_list([self.contain(s) for s in slides])
+        self.merged = merged
+        fitted = [fit_holes(s, scale, fonts) for s in objects_of(merged["slides"], "slides")]
+        self.deck = deck_out = copy(whole)
+        deck_out["slides"] = _json_list(fitted)
+        self.keys = list(dict.fromkeys(k for s in fitted for e in _elements(s) for k in element_template_keys(e, scale)))
+        self.uses_templates = {_page(s): any(element_template_keys(e, scale) for e in _elements(s)) for s in fitted}
+        self.shifts = {_page(s): formula_shifts(s, scale, fonts) for s in fitted}
+        self.overlays = {_page(s): overlay_boxes(s, scale, fonts) for s in fitted}
 
-    def contain(self, slide: dict) -> dict:
+    def slides(self) -> list[JsonObject]:
+        """The slides of `deck`, as emit writes them."""
+        return objects_of(self.deck["slides"], "slides")
+
+    def contain(self, slide: JsonObject) -> JsonObject:
         """`slide` (as classify wrote it) with its blocks merged, as emit writes it - but for every
         element emit cannot plan, which is the picture of its region instead (`fallback_element`,
         what a refused element becomes), recorded in `contained`.
@@ -610,45 +718,57 @@ class DeckPlan:
         over the whole slide (merging blocks, fitting holes, growing panels, grouping) names no
         element: the one whose picture lets it through is taken (`_culprit`), and the step raises
         when none does. The same slide gives the same pictures. `strict()` raises instead."""
-        n = slide["page"]
-        merged, gone = _settle(slide["elements"], lambda out: (merge_blocks(_swapped(slide["elements"], out)), []))
-        merged = {**slide, "elements": merged}
+        n = _page(slide)
+        elements = _elements(slide)
 
-        def rehearsal(out: set) -> tuple[dict, list[tuple[str, Exception]]]:
-            s = {**merged, "elements": _swapped(merged["elements"], out)}
-            return s, [(s["elements"][i]["id"], e) for i, e in self._rehearse(s)]
+        def merging(out: set[str]) -> tuple[list[JsonObject], list[tuple[str, Exception]]]:
+            return merge_blocks(_swapped(elements, out)), []
 
-        result, more = _settle(merged["elements"], rehearsal)
-        kinds = {el.get("id"): el.get("kind") for el in slide["elements"]}
+        blocks, gone = _settle(elements, merging)
+        merged = copy(slide)
+        merged["elements"] = _json_list(blocks)
+
+        def rehearsal(out: set[str]) -> tuple[JsonObject, list[tuple[str, Exception]]]:
+            s = copy(merged)
+            swapped = _swapped(blocks, out)
+            s["elements"] = _json_list(swapped)
+            return s, [(as_str(swapped[i]["id"], "element id"), e) for i, e in self._rehearse(s)]
+
+        result, more = _settle(blocks, rehearsal)
+        kinds: dict[str, str | None] = {}
+        for el in elements:
+            eid, kind = el.get("id"), el.get("kind")
+            if isinstance(eid, str):
+                kinds[eid] = kind if isinstance(kind, str) else None
         for eid, e in {**gone, **more}.items():
             self.contained.append({"page": n, "id": eid, "kind": kinds.get(eid), "error": f"{type(e).__name__}: {e}"})
         return result
 
-    def _rehearse(self, slide: dict) -> list[tuple[int, Exception]]:
+    def _rehearse(self, slide: JsonObject) -> list[tuple[int, Exception]]:
         """Plan one slide (blocks merged) as build_deck will: [(element index, exception)] for each
         element whose own planning raised. A step over the whole slide raises."""
         scale, fonts = self.scale, self.fonts
         slide = fit_holes(slide, scale, fonts)
         failed: list[tuple[int, Exception]] = []
-        for i, el in enumerate(slide["elements"]):  # what the .pptx carries for it (build_pptx)
+        for i, el in enumerate(_elements(slide)):  # what the .pptx carries for it (build_pptx)
             try:
                 keys = element_template_keys(el, scale)
                 if keys:
                     _add_template_shapes(self._scratch_slide(), keys)
                 if self.pptx_tables and el["kind"] == "table":
-                    _add_table(self._scratch_slide(), pptx_table(el, scale, fonts))
+                    _add_table(self._scratch_slide(), self.pptx_table(el))
             except Exception as e:  # noqa: BLE001 - one element's planning, contained by `contain`
                 failed.append((i, e))
         if failed:
             return failed
         plan = _slide_plan(slide, scale, fonts, self.pptx_tables, self.page_slide)
         measure_jobs(plan.deck, scale, fonts, plan.placed, self.page_slide)
-        request, sizes, copied = _offline_copy(plan, slide)
-        sid = request["duplicateObject"]["objectIds"][request["duplicateObject"]["objectId"]]
+        _, sizes, copied = _offline_copy(plan, slide, PLACEHOLDER_SIZE, TEMPLATE_SIZE)
+        sid = _slide_id(_page(slide))
         plan.slide_parts(slide, {sid: copied}, {sid: f"{sid}_notes"}, {}, sizes, failed)
         return failed
 
-    def _scratch_slide(self):
+    def _scratch_slide(self) -> "Slide":
         """A python-pptx slide `_rehearse` puts template shapes and tables on, as build_pptx will."""
         if self._scratch is None:
             from pptx import Presentation
@@ -656,60 +776,81 @@ class DeckPlan:
             self._scratch = prs.slides.add_slide(prs.slide_layouts[TEMPLATE_LAYOUTS["BLANK"]])
         return self._scratch
 
-    def placed(self, el: dict, n: int) -> dict:
+    def placed(self, el: ElementDict, n: int) -> ElementDict:
         """Inline formula pictures sit over the gap Slides leaves for them (formula_shifts),
-        graphics drawn at words over those words (overlay_boxes)."""
+        graphics drawn at words over those words (overlay_boxes). (A copy where it moved, of the
+        caller's own dict type: sync and measure_places hand theirs in.)"""
         overlays, shifts = self.overlays[n], self.shifts[n]
-        if el["id"] in overlays:
-            return {**el, "bbox": [overlays[el["id"]][0], el["bbox"][1], overlays[el["id"]][1], el["bbox"][3]]}
-        dx = shifts.get(el["id"])
-        return el if dx is None else {**el, "bbox": [el["bbox"][0] + dx, el["bbox"][1], el["bbox"][2] + dx, el["bbox"][3]]}
+        eid = el["id"]
+        if not isinstance(eid, str):
+            return el
+        span = overlays.get(eid)
+        if span is not None:
+            _, y0, _, y1 = box_of(el["bbox"], "bbox")
+            return _with_bbox(el, [span[0], y0, span[1], y1])
+        dx = shifts.get(eid)
+        if dx is None:
+            return el
+        x0, y0, x1, y1 = box_of(el["bbox"], "bbox")
+        return _with_bbox(el, [x0 + dx, y0, x1 + dx, y1])
 
-    def pictures(self, slide: dict) -> list[tuple[dict, list[float]]]:
+    def pictures(self, slide: JsonMap) -> list[tuple[JsonObject, list[float]]]:
         """The slide's pictures with their boxes in the .pptx (slide pt)."""
-        return [(e, [v * self.scale for v in self.placed(e, slide["page"])["bbox"]])
-                for e in slide["elements"] if e["kind"] == "image"]
+        return [(e, [v * self.scale for v in box_of(self.placed(e, _page(slide))["bbox"], "bbox")])
+                for e in _elements(slide) if e["kind"] == "image"]
 
-    def tables(self, slide: dict) -> list[dict]:
+    def tables(self, slide: JsonMap) -> list[PptxTable]:
         """The slide's tables as the .pptx carries them (pptx_table), when it does."""
         if not self.pptx_tables:
             return []
-        return [pptx_table(e, self.scale, self.fonts) for e in slide["elements"] if e["kind"] == "table"]
+        return [self.pptx_table(e) for e in _elements(slide) if e["kind"] == "table"]
 
-    def copy_request(self, slide: dict, source: dict) -> tuple[dict, list[tuple[float, float]]]:
-        """Phase 1: the duplicateObject copying a slide's imported source under our object IDs,
-        and the sizes of the template shapes on the source."""
-        n = slide["page"]  # PDF page index; slides may skip pages (overlays)
-        slide_id = f"b2s_s{n:03}"
+    def pptx_table(self, el: ObjectMap) -> PptxTable:
+        """The empty table the .pptx carries for a table element. (Its page is SLIDE_W / scale wide,
+        as `table_element_requests` takes it: a deck of another width than SLIDE_W is not asked.)"""
+        return pptx_table_of(table_of(el), self.scale, self.fonts, SLIDE_W / self.scale)
+
+    def copy_ids(self, slide: JsonMap, source: JsonMap) -> tuple[dict[str, str], list[tuple[float, float]]]:
+        """`copy_request`'s objectIds (the source's object id -> ours) and the sizes of the template
+        shapes on the source."""
+        n = _page(slide)  # PDF page index; slides may skip pages (overlays)
+        slide_id = _slide_id(n)
         keys, uses_templates = self.keys, self.uses_templates
-        els = source.get("pageElements", [])
-        placeholders = {e["shape"]["placeholder"]["type"]: e["objectId"] for e in els if "placeholder" in e.get("shape", {})}
-        pictures = [e["objectId"] for e in els if "image" in e]
-        tables = [e["objectId"] for e in els if "table" in e]
-        shapes = [e for e in els if "image" not in e and "table" not in e and "placeholder" not in e.get("shape", {})]
-        picture_idx = [i for i, e in enumerate(slide["elements"]) if e["kind"] == "image"]
-        table_idx = [i for i, e in enumerate(slide["elements"]) if e["kind"] == "table"] if self.pptx_tables else []
+        els = objects_of(source.get("pageElements", []), "pageElements")
+        placeholders = {_placeholder_type(e): _object_id(e) for e in els if _is_placeholder(e)}
+        pictures = [_object_id(e) for e in els if "image" in e]
+        tables = [_object_id(e) for e in els if "table" in e]
+        shapes = [e for e in els if "image" not in e and "table" not in e and not _is_placeholder(e)]
+        elements = _elements(slide)
+        picture_idx = [i for i, e in enumerate(elements) if e["kind"] == "image"]
+        table_idx: list[int] = [i for i, e in enumerate(elements) if e["kind"] == "table"] if self.pptx_tables else []
         if len(pictures) != len(picture_idx) or len(tables) != len(table_idx) or \
                 len(shapes) != (len(keys) if uses_templates[n] else 0):
             raise RuntimeError(f"slide {n + 1}: the import brought {len(pictures)} pictures, {len(tables)} tables and "
                                f"{len(shapes)} template shapes, expected {len(picture_idx)}, {len(table_idx)} and "
                                f"{len(keys) if uses_templates[n] else 0}")
-        ids = {source["objectId"]: slide_id}
+        ids = {_object_id(source): slide_id}
         ids.update({oid: f"{slide_id}_f{i}" for oid, i in zip(pictures, picture_idx)})
         ids.update({oid: f"{slide_id}_tab{i}" for oid, i in zip(tables, table_idx)})
-        ids.update({e["objectId"]: f"{slide_id}_k{j}" for j, e in enumerate(shapes)})
-        title_idx = title_element(slide)
-        if title_idx is not None:
-            ids[placeholders[slide_layout(slide)[1]]] = f"{slide_id}_t{title_idx}"
+        ids.update({_object_id(e): f"{slide_id}_k{j}" for j, e in enumerate(shapes)})
+        title_idx, (_, title_kind) = title_element(slide), slide_layout(slide)
+        if title_idx is not None and title_kind is not None:  # (a title is never on the BLANK layout)
+            ids[placeholders[title_kind]] = f"{slide_id}_t{title_idx}"
             sub_idx = subtitle_element(slide, title_idx)
             if sub_idx is not None and "SUBTITLE" in placeholders:
                 ids[placeholders["SUBTITLE"]] = f"{slide_id}_t{sub_idx}"
-        return {"duplicateObject": {"objectId": source["objectId"], "objectIds": ids}}, [size_pt(e) for e in shapes]
+        return ids, [size_pt(e) for e in shapes]
 
-    def slide_parts(self, slide: dict, page_elements: dict[str, list[dict]], speaker_notes: dict[str, str | None],
-                    moves: dict[str, tuple[float, float]], template_sizes: list[tuple[float, float]],
-                    failed: list[tuple[int, Exception]] | None = None
-                    ) -> tuple[list[tuple[dict | None, list[dict]]], list[str]]:
+    def copy_request(self, slide: JsonMap, source: JsonMap) -> tuple[JsonObject, list[tuple[float, float]]]:
+        """Phase 1: the duplicateObject copying a slide's imported source under our object IDs,
+        and the sizes of the template shapes on the source."""
+        ids, sizes = self.copy_ids(slide, source)
+        return _duplicate(_object_id(source), ids), sizes
+
+    def slide_parts(self, slide: JsonObject, page_elements: Mapping[str, Sequence[JsonMap]],
+                    speaker_notes: Mapping[str, str | None], moves: Mapping[str, Place],
+                    template_sizes: Sequence[tuple[float, float]], failed: list[tuple[int, Exception]] | None = None
+                    ) -> tuple[list[Part], list[str]]:
         """Phase 2 for one slide after its copy: requests in parts ((element, requests), so a
         rejected batch can be narrowed down to the element at fault) and the element object IDs.
         `page_elements` and `speaker_notes` describe the copied slides (slide id -> elements with
@@ -720,36 +861,31 @@ class DeckPlan:
         placed, page_slide, uses_templates = self.placed, self.page_slide, self.uses_templates
         placeholder_dy = PPTX_TITLE_DY
 
-        def template_on_slide(slide_id: str, key: tuple) -> dict:
-            """The slide's copy of a template shape ({"id", "w", "h"}: its unscaled size in pt)."""
-            j = keys.index(key)
-            w, h = template_sizes[j]
-            return {"id": f"{slide_id}_k{j}", "w": w, "h": h}
-
-        n = slide["page"]
+        n = _page(slide)
         slide = grown_panels(slide, scale, fonts)
-        slide_id = f"b2s_s{n:03}"
+        slide_id = _slide_id(n)
         # The title (and title page subtitle) is refilled in its placeholder only when the slide
         # holds one: sync demotes a title with no live placeholder, and on an adopted slide the
         # next title-role box (`marked.py` gives the role per box) is a box like any other.
-        live = {e["objectId"] for e in page_elements.get(slide_id, [])}
+        live = {_object_id(e) for e in page_elements.get(slide_id, [])}
         title_idx = title_element(slide)
         title_oid = f"{slide_id}_t{title_idx}" if title_idx is not None else None
         sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
         subtitle_oid = f"{slide_id}_t{sub_idx}" if sub_idx is not None else None
         title_oid, subtitle_oid = (oid if oid in live else None for oid in (title_oid, subtitle_oid))
         ours = (f"{slide_id}_k", f"{slide_id}_f", f"{slide_id}_tab")  # template shapes, pictures, tables from the .pptx
-        parts: list[tuple[dict | None, list[dict]]] = [(None, [
-            {"deleteObject": {"objectId": e["objectId"]}}
-            for e in page_elements.get(slide_id, [])
-            if e["objectId"] not in (title_oid, subtitle_oid) and not e["objectId"].startswith(ours)])]
+        parts: list[Part] = [(None, [
+            {"deleteObject": {"objectId": oid}}
+            for oid in (_object_id(e) for e in page_elements.get(slide_id, []))
+            if oid not in (title_oid, subtitle_oid) and not oid.startswith(ours)])]
+
         def template_record(key: TemplateKey) -> Template:
-            """`template_on_slide`, for the typed shape planner."""
+            """The slide's copy of a template shape and its unscaled size (pt)."""
             j = keys.index(key)
             w, h = template_sizes[j]
             return Template(id=f"{slide_id}_k{j}", w=w, h=h)
 
-        def element_requests(el: dict, oid: str) -> list[JsonObject]:
+        def element_requests(el: JsonObject, oid: str) -> list[JsonObject]:
             """The requests of one element, planned from its parsed IR: a field its producer never
             wrote or wrote in another type raises `IRError` here, which `failed` contains."""
             typed = parse_slide_element(el, "background" in slide, f"slide page {n}")
@@ -757,16 +893,16 @@ class DeckPlan:
                 case ShapeElement() | MarkedShape():
                     return shape_element_requests(typed, slide_id, oid, scale, template_record)
                 case TableElement():
-                    return table_requests(el, slide_id, oid, scale, fonts, self.pptx_tables)
+                    return table_element_requests(typed, slide_id, oid, scale, fonts, self.pptx_tables)
                 case DiagramElement():
-                    return diagram_requests(el, slide_id, oid, scale, fonts,
-                                            (lambda key, s=slide_id: template_on_slide(s, key)) if keys else None)
+                    return diagram_requests_of(typed, slide_id, oid, scale, fonts, template_record if keys else None)
                 case ImageElement() | FallbackImage():
                     # The picture came with the slide: move it to its place in the z-order.
                     reqs: list[JsonObject] = [
                         {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}]
-                    if typed.id in moves:  # to the gap or words measured for it (measure_places)
-                        dx, dy, sx = (*moves[typed.id], 1.0)[:3]
+                    move = moves.get(typed.id)
+                    if move is not None:  # to the gap or words measured for it (measure_places)
+                        dx, dy, sx = move.dx, move.dy, 1.0 if move.sx is None else move.sx
                         # (a relative transform scales about the page origin: the left edge keeps its dx)
                         reqs.insert(0, {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
                             "scaleX": sx, "scaleY": 1, "unit": "EMU",
@@ -779,16 +915,18 @@ class DeckPlan:
                     placeholder = None
                     if oid in (title_oid, subtitle_oid):
                         size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
-                        placeholder = Placeholder(base_w=size["width"]["magnitude"] / EMU_PER_PT,
-                                                  base_h=size["height"]["magnitude"] / EMU_PER_PT, dy=placeholder_dy)
+                        placeholder = Placeholder(base_w=_magnitude(size, "width") / EMU_PER_PT,
+                                                  base_h=_magnitude(size, "height") / EMU_PER_PT, dy=placeholder_dy)
                     return text_element_requests(typed, slide_id, oid, scale, fonts, placeholder, page_slide,
                                                  title_bar_under(el, slide), text_right_limit(el, slide), None)
                 case _:
                     assert_never(typed)
 
-        element_ids = []
-        for i, el in enumerate(slide["elements"]):  # shapes, then pictures, then text on top
-            oid = f"{slide_id}_{OBJECT_PREFIX.get(el['kind'], 't')}{i}"
+        elements = _elements(slide)
+        element_ids: list[str] = []
+        for i, el in enumerate(elements):  # shapes, then pictures, then text on top
+            oid = f"{slide_id}_{_object_prefix(el)}{i}"
+            reqs: list[JsonObject]
             try:
                 el = placed(el, n)
                 reqs = element_requests(el, oid)
@@ -800,31 +938,38 @@ class DeckPlan:
             parts.append((el, reqs))
             element_ids.append(oid)
         # The slide's copies of the template shapes have been duplicated from: remove them.
-        extra = [{"deleteObject": {"objectId": f"{slide_id}_k{j}"}} for j in range(len(keys)) if uses_templates[n]]
+        extra: list[JsonObject] = [{"deleteObject": {"objectId": f"{slide_id}_k{j}"}}
+                                   for j in range(len(keys)) if uses_templates[n]]
         # Inline formula pictures move with their text: group them (placeholders can't be grouped).
-        by_id = {el["id"]: oid for el, oid in zip(slide["elements"], element_ids)}
+        by_id: dict[str, str] = {}
+        for el, oid in zip(elements, element_ids):
+            eid = el["id"]
+            if isinstance(eid, str):
+                by_id[eid] = oid
         anchored: dict[str, list[str]] = {}
-        for el, oid in zip(slide["elements"], element_ids):
-            if el.get("anchor") in by_id and by_id[el["anchor"]] not in (title_oid, subtitle_oid):
-                anchored.setdefault(by_id[el["anchor"]], []).extend([oid, f"{oid}n"] if el.get("number") else [oid])
-        grouped = set()
+        for el, oid in zip(elements, element_ids):
+            anchor = el.get("anchor")
+            if isinstance(anchor, str) and anchor in by_id and by_id[anchor] not in (title_oid, subtitle_oid):
+                anchored.setdefault(by_id[anchor], []).extend([oid, f"{oid}n"] if el.get("number") else [oid])
+        grouped: set[str] = set()
         for text_oid, pictures in anchored.items():
-            extra.append({"groupObjects": {"groupObjectId": f"{text_oid}_g", "childrenObjectIds": [text_oid] + pictures}})
+            extra.append({"groupObjects": {"groupObjectId": f"{text_oid}_g", "childrenObjectIds": [text_oid, *pictures]}})
             grouped |= {text_oid, *pictures}
         # A beamer block (title bar and body shapes plus everything on them) moves as one.
-        for bi, members in enumerate(block_groups(slide["elements"], element_ids, title_oid)):
-            children = [f"{m}_g" if m in anchored else m for m in members if m not in grouped or m in anchored]
+        for bi, members in enumerate(block_groups(elements, element_ids, title_oid)):
+            children: list[Json] = [f"{m}_g" if m in anchored else m for m in members if m not in grouped or m in anchored]
             if len(children) >= 2:
                 extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_blk{bi}", "childrenObjectIds": children}})
                 # A group takes the place of its topmost member, above a table lying on the
                 # block (tables can't join the group): blocks are backdrops, send them back.
                 extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [f"{slide_id}_blk{bi}"],
                                                            "operation": "SEND_TO_BACK"}})
-        for ri, members in enumerate(rule_groups(slide["elements"], element_ids)):
-            extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_rules{ri}", "childrenObjectIds": members}})
-        if slide.get("notes") and speaker_notes.get(slide_id):
-            extra.append({"insertText": {"objectId": speaker_notes[slide_id], "text": slide["notes"]}})
-        if title_oid and len(slide["elements"]) > 1:
+        for ri, members in enumerate(rule_groups(elements, element_ids)):
+            extra.append({"groupObjects": {"groupObjectId": f"{slide_id}_rules{ri}", "childrenObjectIds": [*members]}})
+        notes_id = speaker_notes.get(slide_id)
+        if slide.get("notes") and notes_id:
+            extra.append({"insertText": {"objectId": notes_id, "text": slide["notes"]}})
+        if title_oid and len(elements) > 1:
             # The placeholder was created with the slide, below everything added since.
             extra.append({"updatePageElementsZOrder": {"pageElementObjectIds": [o for o in (title_oid, subtitle_oid) if o],
                                                        "operation": "BRING_TO_FRONT"}})
@@ -832,8 +977,26 @@ class DeckPlan:
         return parts, element_ids
 
 
-def plan_offline(deck: dict, placeholder_size: tuple[float, float] = (612.0, 90.0),
-                 template_size: tuple[float, float] = (100.0, 100.0)) -> dict:
+def _duplicate(source: str, ids: Mapping[str, str]) -> JsonObject:
+    """The duplicateObject copying an imported source slide under our object ids."""
+    object_ids: JsonObject = {k: v for k, v in ids.items()}
+    return {"duplicateObject": {"objectId": source, "objectIds": object_ids}}
+
+
+class OfflinePlan(TypedDict):
+    """`plan_offline`'s answer."""
+    plan: DeckPlan
+    pictures: dict[int, list[tuple[JsonObject, list[float]]]]
+    copies: list[JsonObject]
+    page_elements: dict[str, list[JsonObject]]
+    speaker_notes: dict[str, str]
+    measure: list[JsonObject]
+    slides: list[tuple[str, int, list[Part], list[str]]]
+    contained: list[dict]
+
+
+def plan_offline(deck: ObjectMap, placeholder_size: tuple[float, float] = PLACEHOLDER_SIZE,
+                 template_size: tuple[float, float] = TEMPLATE_SIZE) -> OfflinePlan:
     """What emit would send for a classified deck, without Google: the imported slides are made
     up as the .pptx brings them (layout placeholders, pictures, template shapes) and hole
     pictures keep their predicted places. {"plan": DeckPlan, "pictures": {page: [(element, .pptx
@@ -842,66 +1005,75 @@ def plan_offline(deck: dict, placeholder_size: tuple[float, float] = (612.0, 90.
     "contained": the elements it could not plan, pictures now (`DeckPlan.contain`)}. `deck`: as
     classify wrote it (the plan merges its blocks)."""
     plan = DeckPlan(deck, pptx_tables=True, contain=True)
-    copies, page_elements, template_sizes = [], {}, []
-    for slide in plan.deck["slides"]:
+    copies: list[JsonObject] = []
+    page_elements: dict[str, list[JsonObject]] = {}
+    template_sizes: list[tuple[float, float]] = []
+    for slide in plan.slides():
         request, sizes, copied = _offline_copy(plan, slide, placeholder_size, template_size)
         copies.append(request)
         template_sizes = template_sizes or sizes
-        page_elements[request["duplicateObject"]["objectIds"][request["duplicateObject"]["objectId"]]] = copied
+        page_elements[_slide_id(_page(slide))] = copied
     speaker_notes = {slide_id: f"{slide_id}_notes" for slide_id in page_elements}
-    slides = []
-    for slide in plan.deck["slides"]:
+    slides: list[tuple[str, int, list[Part], list[str]]] = []
+    for slide in plan.slides():
         parts, element_ids = plan.slide_parts(slide, page_elements, speaker_notes, {}, template_sizes)
-        slides.append((f"b2s_s{slide['page']:03}", slide["page"], parts, element_ids))
-    return {"plan": plan, "pictures": {s["page"]: plan.pictures(s) for s in plan.deck["slides"]}, "copies": copies,
+        slides.append((_slide_id(_page(slide)), _page(slide), parts, element_ids))
+    return {"plan": plan, "pictures": {_page(s): plan.pictures(s) for s in plan.slides()}, "copies": copies,
             "page_elements": page_elements, "speaker_notes": speaker_notes,
             "measure": measure_jobs(plan.deck, plan.scale, plan.fonts, plan.placed, plan.page_slide)[0], "slides": slides,
             "contained": plan.contained}
 
 
-def _offline_copy(plan: DeckPlan, slide: dict, placeholder_size: tuple[float, float] = (612.0, 90.0),
-                  template_size: tuple[float, float] = (100.0, 100.0)) -> tuple[dict, list, list[dict]]:
+def _offline_copy(plan: DeckPlan, slide: JsonObject, placeholder_size: tuple[float, float],
+                  template_size: tuple[float, float]) -> tuple[JsonObject, list[tuple[float, float]], list[JsonObject]]:
     """A slide's phase 1 without Google (`plan_offline`, `DeckPlan._rehearse`): its source slide made
     up as the .pptx brings it (layout placeholders, pictures, tables, template shapes, at made-up
     sizes). (copy_request's request, the template shapes' sizes, the copied slide's elements)"""
-    def size(w: float, h: float) -> dict:
+    def size(w: float, h: float) -> JsonObject:
         return {"width": emu(w), "height": emu(h)}
 
-    n, source = slide["page"], f"src{slide['page']:03}"
-    els = [{"objectId": f"{source}_{kind}", "size": size(*placeholder_size), "shape": {"placeholder": {"type": kind}}}
-           for kind in LAYOUT_PLACEHOLDERS[slide_layout(slide)[0]]]
-    els += [{"objectId": f"{source}_p{i}", "size": size(1, 1), "image": {}} for i, _ in enumerate(plan.pictures(slide))]
-    els += [{"objectId": f"{source}_tb{i}", "size": size(sum(t["widths"]), sum(t["heights"])), "table": {}}
-            for i, t in enumerate(plan.tables(slide))]
-    els += [{"objectId": f"{source}_k{j}", "size": size(*template_size), "shape": {}}
-            for j in range(len(plan.keys) if plan.uses_templates[n] else 0)]
-    request, sizes = plan.copy_request(slide, {"objectId": source, "pageElements": els})
-    ids = request["duplicateObject"]["objectIds"]
-    return request, sizes, [{"objectId": ids.get(e["objectId"], f"{e['objectId']}_copy"), "size": e["size"]} for e in els]
+    n = _page(slide)
+    source = f"src{n:03}"
+    els: list[JsonObject] = [
+        {"objectId": f"{source}_{kind}", "size": size(*placeholder_size), "shape": {"placeholder": {"type": kind}}}
+        for kind in LAYOUT_PLACEHOLDERS[slide_layout(slide)[0]]]
+    els.extend({"objectId": f"{source}_p{i}", "size": size(1, 1), "image": {}} for i, _ in enumerate(plan.pictures(slide)))
+    els.extend({"objectId": f"{source}_tb{i}", "size": size(sum(t.widths), sum(t.heights)), "table": {}}
+               for i, t in enumerate(plan.tables(slide)))
+    els.extend({"objectId": f"{source}_k{j}", "size": size(*template_size), "shape": {}}
+               for j in range(len(plan.keys) if plan.uses_templates[n] else 0))
+    ids, sizes = plan.copy_ids(slide, {"objectId": source, "pageElements": _json_list(els)})
+    copied: list[JsonObject] = [{"objectId": ids.get(_object_id(e), f"{_object_id(e)}_copy"), "size": e["size"]}
+                                for e in els]
+    return _duplicate(source, ids), sizes, copied
 
 
-def _slide_plan(slide: dict, scale: float, fonts: FontMapper, pptx_tables: bool, page_slide: dict) -> DeckPlan:
+def _slide_plan(slide: JsonObject, scale: float, fonts: FontMapper, pptx_tables: bool,
+                page_slide: Mapping[int, str]) -> DeckPlan:
     """A DeckPlan of one slide (holes fitted), with none of the deck-wide work __init__ does: the
     template shapes are the slide's own (`slide_emission`, `DeckPlan._rehearse`)."""
-    n = slide["page"]
-    keys = list(dict.fromkeys(k for e in slide["elements"] for k in element_template_keys(e, scale)))
+    n = _page(slide)
+    keys = list(dict.fromkeys(k for e in _elements(slide) for k in element_template_keys(e, scale)))
     plan = DeckPlan.__new__(DeckPlan)
-    plan.page_width, plan.pptx_tables, plan.scale, plan.fonts = slide["size"][0] * scale, pptx_tables, scale, fonts
+    plan.page_width = json_number(as_array(slide["size"], "size")[0], "size") * scale
+    plan.pptx_tables, plan.scale, plan.fonts = pptx_tables, scale, fonts
     plan.deck = {"slides": [slide]}
     plan.keys, plan.uses_templates = keys, {n: bool(keys)}
     plan.shifts = {n: formula_shifts(slide, scale, fonts)}
     plan.overlays = {n: overlay_boxes(slide, scale, fonts)}
     plan.page_slide = page_slide
-    plan.contained, plan._scratch, plan.merged = [], None, plan.deck
+    plan.contained = []
+    plan._scratch = None
+    plan.merged = plan.deck
     return plan
 
 
-def _swapped(elements: list[dict], gone: set) -> list[dict]:
+def _swapped(elements: Sequence[JsonObject], gone: AbstractSet[str]) -> list[JsonObject]:
     """`elements` with each whose id is in `gone` the picture of its region, where it stands."""
     return [fallback_element(e) if e.get("id") in gone else e for e in elements]
 
 
-def _settle(elements: list[dict], attempt: Callable[[set], tuple[_T, list[tuple[str, Exception]]]]
+def _settle(elements: Sequence[JsonMap], attempt: Callable[[set[str]], tuple[_T, list[tuple[str, Exception]]]]
             ) -> tuple[_T, dict[str, Exception]]:
     """Run `attempt(gone)` -> (result, [(element id, exception)] for each element whose own planning
     raised) with more and more of `elements` made pictures, until none raises: (that result, {id:
@@ -931,7 +1103,7 @@ def _settle(elements: list[dict], attempt: Callable[[set], tuple[_T, list[tuple[
         gone.update(new)
 
 
-def _can_picture(el: dict) -> bool:
+def _can_picture(el: JsonMap) -> bool:
     """Whether `fallback_element` can make a picture of the element (an id, a box)."""
     try:
         fallback_element(el)
@@ -940,7 +1112,8 @@ def _can_picture(el: dict) -> bool:
     return True
 
 
-def _culprit(elements: list[dict], gone: dict, attempt, error: Exception) -> str | None:
+def _culprit(elements: Sequence[JsonMap], gone: Mapping[str, Exception], attempt: Callable[[set[str]], object],
+             error: Exception) -> str | None:
     """The element a step over the whole slide failed on (`error`), None when none is found.
 
     First the suspects (`_suspects`: the elements the failing code was holding, one lacking the
@@ -949,9 +1122,13 @@ def _culprit(elements: list[dict], gone: dict, attempt, error: Exception) -> str
     missing the same `flip` fail alike, and each is to blame.) Else the elements are made pictures
     one after the other in slide order, and the one whose picture lets `attempt` through is."""
     # (one with no id or box to make a picture of is never blamed, so never lost)
-    ids = [el["id"] for el in elements if el.get("id") not in gone and _can_picture(el)]
+    ids: list[str] = []
+    for el in elements:
+        eid = el.get("id")
+        if isinstance(eid, str) and eid not in gone and _can_picture(el):
+            ids.append(eid)
 
-    def signature(e: Exception) -> tuple:
+    def signature(e: Exception) -> tuple[type[Exception], tuple[object, ...], str | None]:
         return type(e), e.args, next(iter(_suspects(e, ids)), None)
 
     was = signature(error)
@@ -977,32 +1154,63 @@ def _suspects(error: Exception, ids: list[str]) -> list[str]:
     """Ids (of `ids`) of the elements the code that raised `error` held in its variables, innermost
     frame first; in each frame those lacking a KeyError's key before the others."""
     key = error.args[0] if isinstance(error, KeyError) and error.args and isinstance(error.args[0], str) else None
-    frames, tb = [], error.__traceback__
+    frames: list[FrameType] = []
+    tb = error.__traceback__
     while tb is not None:
         frames.append(tb.tb_frame)
         tb = tb.tb_next
     found: list[str] = []
     for frame in reversed(frames):
-        held = [v for v in frame.f_locals.values() if isinstance(v, dict) and "kind" in v and v.get("id") in ids]
-        for v in sorted(held, key=lambda v: key is None or key in v):
-            if v["id"] not in found:
-                found.append(v["id"])
+        held: list[JsonObject] = []
+        for v in frame.f_locals.values():
+            if isinstance(v, dict) and "kind" in v and v.get("id") in ids:
+                held.append(v)
+        for d in sorted(held, key=lambda d: key is None or key in d):
+            eid = d["id"]
+            if isinstance(eid, str) and eid not in found:
+                found.append(eid)
     return found
 
 
-class _OnePage(dict):
+class _OnePage(Mapping[int, str]):
     """`page_slide` for `slide_emission`: every internal link goes to one stand-in slide. Which
-    slide a link names is the element's own IR (`identity.ir_fields` keys it), not its neighbours'."""
+    slide a link names is the element's own IR (`identity.ir_fields` keys it), not its neighbours'.
+    (Empty as a mapping, as it has always been; only `get` and truth are asked of it.)"""
+
+    @override
+    def __getitem__(self, page: int) -> str:
+        return "b2s_link"
+
+    @override
+    def __contains__(self, page: object) -> bool:
+        return False
+
+    @override
+    def __iter__(self) -> Iterator[int]:
+        return iter(())
+
+    @override
+    def __len__(self) -> int:
+        return 0
 
     def __bool__(self) -> bool:
         return True
 
-    def get(self, page, default=None):
-        return "b2s_link"
+
+class Emission(TypedDict):
+    """`slide_emission`'s answer."""
+    slide_id: str
+    parts: list[tuple[dict | None, list[dict]]]  # (as sync's emitted_elements reads them)
+    element_ids: list[str]
+    boxes: list[list[float] | None]
+    title: int | None
+    subtitle: int | None
+    templates: dict[str, TemplateKey]
 
 
-def slide_emission(slide: dict, scale: float, fonts: FontMapper, placeholder_size: tuple[float, float] = (612.0, 90.0),
-                   template_size: tuple[float, float] = (100.0, 100.0)) -> dict:
+def slide_emission(slide: JsonObject, scale: float, fonts: FontMapper,
+                   placeholder_size: tuple[float, float] = PLACEHOLDER_SIZE,
+                   template_size: tuple[float, float] = TEMPLATE_SIZE) -> Emission:
     """What emit writes for one slide of a DeckPlan (blocks merged, holes fitted: `DeckPlan.deck`),
     worked out from that slide alone, so the same slide gives the same answer in whichever deck it
     stands: {"slide_id", "parts" and "element_ids" (`DeckPlan.slide_parts`), "boxes" (each
@@ -1017,16 +1225,19 @@ def slide_emission(slide: dict, scale: float, fonts: FontMapper, placeholder_siz
     could not plan are pictures already, the same ones every time; and a base slide an older
     converter wrote that today's emit cannot plan has to raise, which mark_emitted reads as
     "nothing to compare" - a picture in its place would be a change the source never made."""
-    n = slide["page"]
-    slide_id = f"b2s_s{n:03}"
+    n = _page(slide)
+    slide_id = _slide_id(n)
     plan = _slide_plan(slide, scale, fonts, False, _OnePage())
     keys = plan.keys
     title = title_element(slide)
     subtitle = subtitle_element(slide, title) if title is not None else None
     w, h = placeholder_size
-    page_elements = {slide_id: [{"objectId": f"{slide_id}_t{i}", "size": {"width": emu(w), "height": emu(h)}}
-                                for i in (title, subtitle) if i is not None]}
+    page_elements: dict[str, list[JsonObject]] = {
+        slide_id: [{"objectId": f"{slide_id}_t{i}", "size": {"width": emu(w), "height": emu(h)}}
+                   for i in (title, subtitle) if i is not None]}
     parts, element_ids = plan.slide_parts(slide, page_elements, {}, {}, [template_size] * len(keys))
-    boxes = [[v * scale for v in plan.placed(e, n)["bbox"]] if e["kind"] == "image" else None for e in slide["elements"]]
+    boxes: list[list[float] | None] = [
+        [v * scale for v in box_of(plan.placed(e, n)["bbox"], "bbox")] if e["kind"] == "image" else None
+        for e in _elements(slide)]
     return {"slide_id": slide_id, "parts": parts, "element_ids": element_ids, "boxes": boxes, "title": title,
             "subtitle": subtitle, "templates": {f"{slide_id}_k{j}": k for j, k in enumerate(keys)}}

@@ -10,6 +10,7 @@ once through `emit_model`.
 
 import math
 from collections.abc import Callable, Mapping, Sequence
+from copy import copy
 from dataclasses import replace
 
 from .emit_metrics import (
@@ -17,7 +18,8 @@ from .emit_metrics import (
     bullet_extent_of, bullet_level_of, bullet_preset_of, bullet_size_of, rgb, u16,
 )
 from .emit_model import (
-    JsonMap, Placeholder, SetParagraph, SetRun, SetText, number_box, number_box_of, placeholder_of, run_of, set_text, text_of,
+    ElementDict, JsonMap, Placeholder, SetParagraph, SetRun, SetText, block_of, box_of, json_number, number_box,
+    number_box_of, placeholder_of, run_of, set_text, text_of,
 )
 from .emit_widths import (
     SCRIPT_SIZE, SMALL_CAPS_SIZE, paragraph_dict, runs_between, set_runs_of, slides_lines_of, slides_width_of,
@@ -26,7 +28,7 @@ from .fonts import cjk_font, font_info, google_font
 from .gslides import EMU_PER_PT, emu, pt
 from .ir import Align
 from .ir_types import Number, TextElement
-from .json_types import JsonObject
+from .json_types import Json, JsonObject
 
 
 def small_caps_line(text: str, smallcaps: bool, z: float) -> float:
@@ -925,25 +927,48 @@ def number_box_requests_of(run: SetRun, center: tuple[float, float], height: flo
     ]
 
 
-def merge_blocks(elements: list[dict]) -> list[dict]:
+def _block_head(e: JsonMap) -> bool:
+    """A block's title bar: a shape of a block with no `title_bar` of its own."""
+    return e["kind"] == "shape" and block_of(e) is not None and not e.get("title_bar")
+
+
+def _round_top(e: JsonMap) -> bool:
+    return e["shape"] == "ROUND_RECTANGLE" or (e["shape"] == "ROUND_2_SAME_RECTANGLE" and not e["flip"])
+
+
+def _round_bottom(e: JsonMap) -> bool:
+    return e["shape"] == "ROUND_RECTANGLE" or (e["shape"] == "ROUND_2_SAME_RECTANGLE" and bool(e["flip"]))
+
+
+def _z_rank(e: JsonMap) -> int:
+    """Creation order is z-order: title bars go above every body (shapes come first, then the rest)."""
+    return 0 if e["kind"] == "shape" and not _block_head(e) else 1 if _block_head(e) else 2
+
+
+def merge_blocks(elements: Sequence[ElementDict]) -> list[ElementDict]:
     """A block body (see classify.blocks) reaches up under its title bar, with the outline
     of the whole block: resizing the block as a group can then never open a gap between
-    the two, and the body's shadow falls behind the whole block."""
-    heads = {e["block"]: e for e in elements if e["kind"] == "shape" and e.get("block") is not None and not e.get("title_bar")}
-    out = []
+    the two, and the body's shadow falls behind the whole block.
+
+    The elements come back as the caller's own dicts (a merged body a copy), so a caller's
+    element type stays its own."""
+    heads = {block_of(e): e for e in elements if _block_head(e)}
+    out: list[ElementDict] = []
     for el in elements:
-        head = heads.get(el.get("block")) if el.get("title_bar") else None
+        head = heads.get(block_of(el)) if el.get("title_bar") else None
         if head is None:
             out.append(el)
             continue
-        top = el["title_bar"][1]
-        top_round = head["shape"] == "ROUND_RECTANGLE" or (head["shape"] == "ROUND_2_SAME_RECTANGLE" and not head["flip"])
-        bottom_round = el["shape"] == "ROUND_RECTANGLE" or (el["shape"] == "ROUND_2_SAME_RECTANGLE" and el["flip"])
+        x0, _, x1, y1 = box_of(el["bbox"], "bbox")
+        top = box_of(el["title_bar"], "title_bar")[1]
         shape, flip = {(True, True): ("ROUND_RECTANGLE", False), (False, False): ("RECTANGLE", False),
                        (True, False): ("ROUND_2_SAME_RECTANGLE", False),
-                       (False, True): ("ROUND_2_SAME_RECTANGLE", True)}[(top_round, bottom_round)]
-        out.append({**el, "bbox": [el["bbox"][0], top, el["bbox"][2], el["bbox"][3]], "shape": shape, "flip": flip,
-                    "radius": max(el["radius"], head["radius"])})
-    # Creation order is z-order: title bars go above every body (shapes come first, then the rest).
-    bar = lambda e: e["kind"] == "shape" and e.get("block") is not None and not e.get("title_bar")
-    return sorted(out, key=lambda e: 0 if e["kind"] == "shape" and not bar(e) else 1 if bar(e) else 2)
+                       (False, True): ("ROUND_2_SAME_RECTANGLE", True)}[(_round_top(head), _round_bottom(el))]
+        bbox: Json = [x0, top, x1, y1]
+        merged = copy(el)
+        merged["bbox"] = bbox
+        merged["shape"] = shape
+        merged["flip"] = flip
+        merged["radius"] = max(json_number(el["radius"], "radius"), json_number(head["radius"], "radius"))
+        out.append(merged)
+    return sorted(out, key=_z_rank)

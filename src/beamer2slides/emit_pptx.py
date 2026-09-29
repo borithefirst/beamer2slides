@@ -7,7 +7,9 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .emit_metrics import SLIDE_W, rgb, xml_text
-from .emit_model import JsonMap, SetShape, Template, TemplateKey, set_shape, shape_measures_of, shape_of, template_of
+from .emit_model import (
+    JsonMap, PptxTable, SetShape, Template, TemplateKey, set_shape, shape_measures_of, shape_of, template_of,
+)
 from .ir_types import Box, MarkedShape, ShapeElement
 from .json_types import JsonObject
 from .gapi import HttpError, message_of
@@ -114,7 +116,7 @@ def _add_template_shapes(slide, keys: list[tuple]) -> None:
 NO_TABLE_STYLE = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"  # PowerPoint's "No Style, No Grid"
 
 
-def _add_table(slide, table: dict) -> None:
+def _add_table(slide, table: PptxTable) -> None:
     """An empty table (pptx_table) on a source slide. Its cell margins are what the API can't
     set: a table made by createTable has 7.2 pt above and below every line, one from a .pptx the
     file's (tools/probe_pptx_table_margins.py); duplicating the slide, inserting rows and columns
@@ -125,9 +127,8 @@ def _add_table(slide, table: dict) -> None:
     def e(v: float) -> Emu:
         return Emu(round(v * EMU_PER_PT))
 
-    rows, cols = len(table["heights"]), len(table["widths"])
-    frame = slide.shapes.add_table(rows, cols, e(table["x"]), e(table["y"]), e(sum(table["widths"])),
-                                   e(sum(table["heights"])))
+    rows, cols = len(table.heights), len(table.widths)
+    frame = slide.shapes.add_table(rows, cols, e(table.x), e(table.y), e(sum(table.widths)), e(sum(table.heights)))
     pr = frame._element.graphic.graphicData.tbl.tblPr
     for flag in ("firstRow", "bandRow"):  # (python-pptx's default look: a header row and bands)
         pr.attrib.pop(flag, None)
@@ -135,12 +136,12 @@ def _add_table(slide, table: dict) -> None:
     if style is None:
         style = etree.SubElement(pr, f"{{{NS_A}}}tableStyleId")
     style.text = NO_TABLE_STYLE
-    for c, w in enumerate(table["widths"]):
+    for c, w in enumerate(table.widths):
         frame.table.columns[c].width = e(w)
-    middle = {tuple(rc) for rc in table.get("middle", [])}
-    for r, h in enumerate(table["heights"]):
+    middle = set(table.middle)
+    for r, h in enumerate(table.heights):
         frame.table.rows[r].height = e(h)
-        left, top, right, bottom = table["margins"][r]
+        left, top, right, bottom = table.margins[r]
         for c in range(cols):
             cell = frame.table.cell(r, c)
             cell.margin_left, cell.margin_top, cell.margin_right, cell.margin_bottom = \
@@ -202,7 +203,7 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict
     - the theme decoration (`decorations`, see plan_theme) at the bottom of the layouts; a page
       layout named with the VARIANT suffix is a copy of its layout with that variant's decoration;
     - one source slide per deck slide (`pages`: {"layout", "fill" (None: inherit),
-      "pictures": [{"file", "bbox" (slide pt), "alt", "title"}], "tables": [pptx_table(...)],
+      "pictures": [{"file", "bbox" (slide pt), "alt", "title"}], "tables": [PptxTable],
       "templates" (bool)}), holding its pictures, its tables (empty, with the cell margins the API
       cannot set) and, if it needs any, the template shapes (shadows, exact corner radii).
 

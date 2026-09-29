@@ -101,11 +101,14 @@ def runs_between(runs: Sequence[SetRun], a: int, b: int) -> list[SetRun]:
 
 
 def wrapped_width(runs: Sequence[JsonMap], starts: Sequence[int], scale: float, fonts: FontMapper) -> float | None:
+    return wrapped_width_of(set_runs_of(runs), starts, scale, fonts)
+
+
+def wrapped_width_of(set_runs: Sequence[SetRun], starts: Sequence[int], scale: float, fonts: FontMapper) -> float | None:
     """Slides width of the widest of a wrapped cell's PDF lines (`starts`: where each line after
     the first begins), a word TeX hyphenated at a line's end taken whole: Slides does not
     hyphenate, and a column that holds each of the PDF's lines so wraps the cell in as many lines
     or fewer - never more, which would grow its row."""
-    set_runs = set_runs_of(runs)
     text = "".join(r.text for r in set_runs)
     bounds = [0, *starts, len(text)]
     widths: list[float] = []
@@ -122,10 +125,13 @@ def wrapped_width(runs: Sequence[JsonMap], starts: Sequence[int], scale: float, 
 
 
 def wrap_joins(runs: Sequence[JsonMap], starts: Sequence[int], scale: float, fonts: FontMapper) -> float | None:
+    return wrap_joins_of(set_runs_of(runs), starts, scale, fonts)
+
+
+def wrap_joins_of(set_runs: Sequence[SetRun], starts: Sequence[int], scale: float, fonts: FontMapper) -> float | None:
     """Slides width of the narrowest of a wrapped cell's PDF lines with the next line's first
     word joined to it: a column whose text room is less than that breaks the cell where TeX did
     (table_columns). None when a run is in a font the probe did not measure."""
-    set_runs = set_runs_of(runs)
     text = "".join(r.text for r in set_runs)
     bounds = [len(text) - len(text.lstrip()), *starts]
     joins: list[float] = []
@@ -143,6 +149,11 @@ def wrap_joins(runs: Sequence[JsonMap], starts: Sequence[int], scale: float, fon
 
 
 def wrap_window(runs: Sequence[JsonMap], lines: int, scale: float, fonts: FontMapper) -> tuple[float, float] | None:
+    return wrap_window_of(set_runs_of(runs), lines, scale, fonts)
+
+
+def wrap_window_of(set_runs: Sequence[SetRun], lines: int, scale: float, fonts: FontMapper
+                   ) -> tuple[float, float] | None:
     """(least text width at which Slides breaks these runs' words into no more than `lines`
     lines, least width at which it breaks them into fewer), Slides pt: Slides breaks greedily at
     spaces, so a column whose text room lies between the two keeps a wrapped cell's row as many
@@ -150,7 +161,6 @@ def wrap_window(runs: Sequence[JsonMap], lines: int, scale: float, fonts: FontMa
     go down to the next line: taken whole on its line (wrapped_width), it widened a column by
     the hyphen's second half and the table past its frame (r2_tables_v1 slide 2, r2_tables_v2
     slide 10). None when a run is in a font the probe did not measure."""
-    set_runs = set_runs_of(runs)
     text = "".join(r.text for r in set_runs)
     words = [(m.start(), m.end()) for m in re.finditer(r"\S+", text)]
     if not words:
@@ -193,14 +203,16 @@ def pdf_width_of(runs: Sequence[SetRun]) -> float | None:
     or None for a run in another font or with characters the tables lack."""
     total = 0.0
     for run in runs:
-        face, info = cm_face_of(run), font_info(run.font)
-        if face is None or run.hole or run.smallcaps:
+        # (no design size: not a TeX optical cut - CM, EC, Latin Modern -, so no CM metrics either;
+        # cm_face_of says None for it too)
+        face, design = cm_face_of(run), font_info(run.font).design_size
+        if face is None or design is None or run.hole or run.smallcaps:
             return None
         slides = ADVANCES.get(FONT_FOR_FAMILY.get(run.family, ""), ADVANCES["Lato"])["regular"]
         _, em, _, skipped = advance_widths(run.text, CM_ADVANCES[face], slides)
         if skipped:
             return None
-        total += em * design_width(DESIGN_WIDTH.get(run.family, DESIGN_WIDTH["sans"]), info.design_size) * run.size
+        total += em * design_width(DESIGN_WIDTH.get(run.family, DESIGN_WIDTH["sans"]), design) * run.size
     return total
 
 

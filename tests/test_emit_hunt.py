@@ -367,19 +367,19 @@ def test_a_wide_table_stays_on_the_page():
     el = eleven_columns()
     assert el["frame"][2] < 362.83
     lay = emit.table_layout(el, page_scale, FONTS, imported=True)
-    assert lay["bounds"][-1] <= 362.83 - emit.TABLE_MARGIN * lay["bounds"][0] + 0.02
-    assert emit.TABLE_MIN_SHRINK <= lay["shrink"] < 1
+    assert lay.bounds[-1] <= 362.83 - emit.TABLE_MARGIN * lay.bounds[0] + 0.02
+    assert emit.TABLE_MIN_SHRINK <= lay.shrink < 1
     # Every cell still fits its column on one line, at the size it is written in.
-    for (r, c), w in lay["cell_width"].items():
-        assert w + 2 * emit.TABLE_CELL_PAD <= lay["widths"][c] + 0.01, (r, c)
-    assert lay["cells"][0][0][0]["size"] == pytest.approx(7.97 * lay["shrink"], rel=1e-3)
+    for (r, c), w in lay.cell_width.items():
+        assert w + 2 * emit.TABLE_CELL_PAD <= lay.widths[c] + 0.01, (r, c)
+    assert lay.cells[0][0][0].size == pytest.approx(7.97 * lay.shrink, rel=1e-3)
     assert el["cells"][0][0][0]["size"] == 7.97  # the IR is left alone
     reqs = table_requests(el, "s", "b2s_s001_b0", page_scale, FONTS, imported=True)
     written = {pt_of(r["updateTextStyle"]["style"]["fontSize"]) for r in reqs
                if "updateTextStyle" in r and r["updateTextStyle"]["textRange"]["type"] == "FIXED_RANGE"}
     full = {FONTS({**r, "cell": True}, page_scale)[1] for row in el["cells"] for c in row for r in c}
     assert max(written) < max(full) and min(written) < min(full)
-    assert emit.pptx_table(el, page_scale, FONTS)["widths"] == lay["widths"]
+    assert emit.pptx_table(el, page_scale, FONTS)["widths"] == list(lay.widths)
     # A table that fits keeps its size and its room.
     ok = signed_table()
-    assert emit.table_layout(ok, SCALE, FONTS)["shrink"] == 1.0
+    assert emit.table_layout(ok, SCALE, FONTS).shrink == 1.0

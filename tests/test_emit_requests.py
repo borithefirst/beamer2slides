@@ -19,7 +19,10 @@ from beamer2slides.emit import (EMU_PER_PT, HOLE_FONT, HOLE_SPACE_EM, SLIDE_W, F
                                 formula_shifts, hole_offset, hole_run, mark_alpha, number_box_requests,
                                 measure_jobs, overlay_boxes, pick_gap, slide_holes, space_shift,
                                 table_requests)
+from beamer2slides.emit_model import Place, table_of
+from beamer2slides.emit_tables import pptx_table_of
 from beamer2slides.extract import extract, select_overlays
+from beamer2slides.fonts import font_info
 from beamer2slides.notes import prepare
 
 TESTS = Path(__file__).resolve().parent
@@ -434,19 +437,20 @@ def test_overlay_marks_highlight_their_words_on_the_scratch_slide(decks):
     for d in decks:
         plan = d.plan
         _, jobs = measure_jobs(plan.deck, plan.scale, plan.fonts, plan.placed, plan.page_slide)
-        for sid, page, _, overlays in jobs:
+        for job in jobs:
+            page = job.page
             texts = {e["id"]: e for e in d.slides[page]["elements"] if e["kind"] == "text"}
-            for o in overlays:
-                pic = o["pic"]
-                text = "\n".join(emit.slides_texts(texts[pic["anchor"]], plan.scale, plan.fonts))
-                where = f"{d.name} page {page + 1} {pic['id']}"
-                marks = [i for w in o["words"] for i, _ in w["marks"]]
-                if sorted(marks) != list(range(len(pic["marks"]))):
-                    found.append(f"{where}: marks {sorted(marks)} of {len(pic['marks'])} on words")
-                for w in o["words"]:
-                    for i, side in w["marks"]:
-                        word = pic["marks"][i]["before"][-1][5] if side else None
-                        got = text[w["range"][0]:w["range"][1]]
+            for o in job.overlays:
+                pic = o.picture
+                text = "\n".join(emit.slides_texts(texts[pic.anchor], plan.scale, plan.fonts))
+                where = f"{d.name} page {page + 1} {pic.id}"
+                marks = [i for w in o.words for i, _ in w.marks]
+                if sorted(marks) != list(range(len(pic.marks))):
+                    found.append(f"{where}: marks {sorted(marks)} of {len(pic.marks)} on words")
+                for w in o.words:
+                    for i, side in w.marks:
+                        word = pic.marks[i].before[-1][5] if side else None
+                        got = text[w.range[0]:w.range[1]]
                         if side and " ".join(word.split()) != " ".join(got.split()):
                             found.append(f"{where}: mark {i} ends {word!r}, highlighted {got!r}")
     assert not found, report(found)
@@ -706,9 +710,9 @@ def overlay(marks_x: list[float], bbox=(100.0, 50.0, 200.0, 60.0)) -> dict:
     ({150.0: 2.0, 155.0: 12.0}, (107.0, 207.0)),    # marks closer than 10 pt: no stretch
 ])
 def test_overlay_boxes_drift_and_clamped_stretch(monkeypatch, drifts, expected):
-    def fake(probe, scale, fonts):  # the drift of the mark at the probe's gap
-        return {"gap": HOLE_PAD + drifts[probe["elements"][0]["paragraphs"][0]["runs"][0]["hole_x0"]]}
-    monkeypatch.setattr(emit_holes, "formula_shifts", fake)
+    def fake(mark, scale, fonts):  # the drift of the mark at its x
+        return drifts[mark.hole_x0]
+    monkeypatch.setattr(emit_holes, "mark_drift", fake)
     x0, x1 = overlay_boxes(overlay(list(drifts)), SCALE, FONTS)["p0o0"]
     assert (x0, x1) == pytest.approx(expected, abs=1e-6)
 
@@ -739,12 +743,12 @@ def test_a_braced_formula_is_measured_on_its_text_line(label):
         {"id": "p0h0", "kind": "image", "anchor": "p0t0", "bbox": pic_box},
         {"id": "p0t0", "kind": "text", "role": "body", "bbox": [10.91, 60.0, 200.0, 160.0], "paragraphs": [para]}]}
     _, jobs = measure_jobs({"slides": [slide]}, SCALE, FONTS, lambda el, n: el, {0: "b2s_s000"})
-    (found,), = [job[2] for job in jobs]
-    assert found["cy"] == pytest.approx((line_at - 0.35 * size) * SCALE)
+    (found,), = [job.gaps for job in jobs]
+    assert found.cy == pytest.approx((line_at - 0.35 * size) * SCALE)
     middle = (pic_box[1] + pic_box[3]) / 2 * SCALE
-    assert abs(round((middle - found["cy"]) / found["pitch"])) == 1, "the picture's middle is a line away"
-    mark = (found["x0"] + 2.0, found["cy"] - 6.0, found["x0"] + 2.0 + found["width"], found["cy"] + 6.0)
-    assert pick_gap([mark], found["x0"], found["cy"], found["width"], found["pitch"]) == pytest.approx((2.0, 0.0))
+    assert abs(round((middle - found.cy) / found.pitch)) == 1, "the picture's middle is a line away"
+    mark = (found.x0 + 2.0, found.cy - 6.0, found.x0 + 2.0 + found.width, found.cy + 6.0)
+    assert pick_gap([mark], found.x0, found.cy, found.width, found.pitch) == pytest.approx((2.0, 0.0))
 
 
 def braced_phrase() -> dict:
@@ -769,22 +773,24 @@ def braced_phrase() -> dict:
 def test_overlay_words_are_highlighted_and_the_brace_fits_them():
     slide = braced_phrase()
     reqs, jobs = measure_jobs({"slides": [slide]}, SCALE, FONTS, lambda el, n: el, {0: "b2s_s000"})
-    (_, _, _, (o,)), = jobs
+    (job,) = jobs
+    (o,) = job.overlays
     text = emit.slides_texts(slide["elements"][0], SCALE, FONTS)[0]
-    assert [text[slice(*w["range"])] for w in o["words"]] == ["updates", "parameter"]
-    assert len({w["colour"] for w in o["words"]}) == 2, "words on one line get different colours"
+    assert [text[slice(*w.range)] for w in o.words] == ["updates", "parameter"]
+    assert len({w.colour for w in o.words}) == 2, "words on one line get different colours"
     highlights = [r["updateTextStyle"] for r in reqs if "backgroundColor" in r.get("updateTextStyle", {}).get("style", {})]
-    assert [(h["textRange"]["startIndex"], h["textRange"]["endIndex"]) for h in highlights] == [w["range"] for w in o["words"]]
+    assert [(h["textRange"]["startIndex"], h["textRange"]["endIndex"]) for h in highlights] == [w.range for w in o.words]
     # Slides sets 'updates' 3 pt (PDF) further right and 3 pt wider, 'parameter' 16 pt further: stretched 12%.
     drift = {91.03: 3.0, 126.42: 6.0, 157.16: 12.0, 202.68: 16.0}
     x = lambda v: (v + drift[v]) * SCALE
-    marks = {w["colour"]: [(x(a), 160.0, x(b), 172.0), (x(a) + 200, 160.0, x(b) + 200, 172.0)]
-             for w, (a, b) in zip(o["words"], [(91.03, 126.42), (157.16, 202.68)])}
-    (dx, dy, sx), table = emit.overlay_move(o, marks, SCALE)
+    marks = {w.colour: [(x(a), 160.0, x(b), 172.0), (x(a) + 200, 160.0, x(b) + 200, 172.0)]
+             for w, (a, b) in zip(o.words, [(91.03, 126.42), (157.16, 202.68)])}
+    move, table = emit.overlay_move(o, marks, SCALE)
     b0, b1 = emit.fit_overlay(slide["elements"][1]["bbox"], list(drift.items()), emit.OVERLAY_STRETCH_MEASURED)
     x0, _, x1, _ = slide["elements"][1]["bbox"]
-    assert dx == pytest.approx((b0 - x0) * SCALE) and dy == 0.0 and sx == pytest.approx((b1 - b0) / (x1 - x0))
-    assert sx > 1 + emit.OVERLAY_STRETCH, "measured words stretch a brace further than predicted ones may"
+    assert move.dx == pytest.approx((b0 - x0) * SCALE) and move.dy == 0.0
+    assert move.sx == pytest.approx((b1 - b0) / (x1 - x0))
+    assert move.sx > 1 + emit.OVERLAY_STRETCH, "measured words stretch a brace further than predicted ones may"
     assert [m[2] for m in table] == pytest.approx(list(drift.values()), abs=0.01)
     assert emit.overlay_move(o, {c: [] for c in marks}, SCALE)[0] is None, "no word found: the prediction stays"
 
@@ -800,7 +806,7 @@ def test_measured_overlay_move_keeps_the_left_edge_under_a_relative_scale(decks)
     x0, _, x1, _ = next(box for e, box in d.result["pictures"][slide["page"]] if e["id"] == pic["id"])
     templates = [(100.0, 100.0)] * len(d.plan.keys)
     parts, _ = d.plan.slide_parts(slide, d.result["page_elements"], d.result["speaker_notes"],
-                                  {pic["id"]: (4.0, 0.0, 1.2)}, templates)
+                                  {pic["id"]: Place(dx=4.0, dy=0.0, sx=1.2)}, templates)
     oid = f"b2s_s{slide['page']:03}_f{i}"
     t, = [r["updatePageElementTransform"] for _, reqs in parts for r in reqs
           if r.get("updatePageElementTransform", {}).get("objectId") == oid]
@@ -946,6 +952,30 @@ def test_a_number_is_set_at_its_pdf_width():
                 run_of("Classes")):
         assert FONTS(run, SCALE)[1] == prose, run["text"]
     assert FONTS(run_of("1,281,167"), SCALE)[1] < prose
+
+
+def test_a_font_with_no_design_size_has_no_pdf_width():
+    # emit_widths.pdf_width_of read `font_info(font).design_size` and handed it to design_width,
+    # which needs a number; a font that is no TeX optical cut has None. cm_face_of refused those
+    # first, so nothing failed, but the width read on that alone. Each now says None for itself.
+    for font, family in (("Helvetica", "sans"), ("Palatino-Roman", "serif"), ("DejaVuSans", "sans")):
+        run = run_of("Coral reefs", font=font, family=family)
+        assert font_info(font).design_size is None, font
+        assert emit.pdf_width([run]) is None, font
+    assert emit.pdf_width([run_of("Coral reefs")]) is not None  # (CMSS10: a design size of 10)
+
+
+def test_a_block_body_with_no_flip_merges_under_its_title_bar():
+    # merge_blocks read a body's `flip` with `and`, so a null flip made the key (True, None) and
+    # the shape table raised KeyError. A body with no flip is one whose bottom is not round.
+    head = {"kind": "shape", "block": 3, "shape": "ROUND_RECTANGLE", "flip": False, "radius": 4.0,
+            "bbox": [10.0, 10.0, 200.0, 30.0]}
+    body = {"kind": "shape", "block": 3, "shape": "ROUND_2_SAME_RECTANGLE", "flip": None, "radius": 2.0,
+            "bbox": [10.0, 30.0, 200.0, 90.0], "title_bar": [10.0, 10.0, 200.0, 30.0]}
+    merged = emit.merge_blocks([head, body])
+    assert merged[0]["shape"] == "ROUND_2_SAME_RECTANGLE" and merged[0]["flip"] is False
+    assert merged[0]["bbox"] == [10.0, 10.0, 200.0, 90.0] and merged[0]["radius"] == 4.0
+    assert merged[1] is head and body["flip"] is None  # the caller's dicts stay as they were
 
 
 def test_deck_ir_reads_a_number_and_small_caps_back_at_their_pdf_size():
@@ -1230,16 +1260,16 @@ def test_a_table_from_the_pptx_keeps_the_pdf_row_pitch():
     # caption. The .pptx brings the table with margins of its own (tools/probe_pptx_table_margins.py).
     el, scale = tight_table(), TIGHT_SCALE
     lay = emit.table_layout(el, scale, FONTS, imported=True)
-    assert lay["y"] == pytest.approx(89.16 * scale) and lay["y"] + sum(lay["heights"]) == pytest.approx(155.55 * scale, abs=0.05)
-    assert lay["ratios"] == pytest.approx([1.0] * 5)  # the text keeps its own line spacing
+    assert lay.y == pytest.approx(89.16 * scale) and lay.y + sum(lay.heights) == pytest.approx(155.55 * scale, abs=0.05)
+    assert lay.ratios == pytest.approx([1.0] * 5)  # the text keeps its own line spacing
     # Every baseline where the PDF has it: the top inset takes booktabs' space under a rule.
-    y = lay["y"]
-    for b, h, inset in zip(el["row_baselines"], lay["heights"], lay["insets"]):
-        assert inset >= 0 and y + inset + emit.TABLE_TEXT_TOP + emit.ASCENT_EM * lay["z"] == pytest.approx(b * scale, abs=0.05)
+    y = lay.y
+    for b, h, inset in zip(el["row_baselines"], lay.heights, lay.insets):
+        assert inset >= 0 and y + inset + emit.TABLE_TEXT_TOP + emit.ASCENT_EM * lay.z == pytest.approx(b * scale, abs=0.05)
         y += h
-    assert lay["insets"][1] > 1.0 and lay["insets"][2] == pytest.approx(0.0, abs=1e-6)  # under \midrule / no rule
+    assert lay.insets[1] > 1.0 and lay.insets[2] == pytest.approx(0.0, abs=1e-6)  # under \midrule / no rule
     api = emit.table_layout(el, scale, FONTS)
-    assert sum(api["heights"]) > sum(lay["heights"]) + 3  # what an API-made table grows by
+    assert sum(api.heights) > sum(lay.heights) + 3  # what an API-made table grows by
 
 
 def test_a_table_from_the_pptx_is_filled_not_created():
@@ -1250,7 +1280,7 @@ def test_a_table_from_the_pptx_is_filled_not_created():
     assert any("createTable" in r for r in table_requests(el, "b2s_s009", "b2s_s009_tab3", scale, FONTS))  # sync's way
     table = emit.pptx_table(el, scale, FONTS)
     lay = emit.table_layout(el, scale, FONTS, imported=True)
-    assert table["margins"] == [(emit.TABLE_CELL_PAD, round(t, 2), emit.TABLE_CELL_PAD, 0.0) for t in lay["insets"]]
+    assert table["margins"] == [[emit.TABLE_CELL_PAD, round(t, 2), emit.TABLE_CELL_PAD, 0.0] for t in lay.insets]
     heights = [r["updateTableRowProperties"]["tableRowProperties"]["minRowHeight"]["magnitude"] / EMU_PER_PT
                for r in reqs if "updateTableRowProperties" in r]
     assert heights == pytest.approx(table["heights"], abs=0.01)
@@ -1260,7 +1290,8 @@ def test_the_pptx_carries_each_table_empty_with_its_margins():
     from pptx import Presentation
     el, scale = tight_table(), TIGHT_SCALE
     table = emit.pptx_table(el, scale, FONTS)
-    page = {"layout": "BLANK", "fill": None, "pictures": [], "tables": [table], "templates": False}
+    typed = pptx_table_of(table_of(el), scale, FONTS, emit.SLIDE_W / scale)
+    page = {"layout": "BLANK", "fill": None, "pictures": [], "tables": [typed], "templates": False}
     prs = Presentation(emit.build_pptx(364.19, 273.14, [], [page], {"color": "#ffffff"}))
     frames = [s for s in prs.slides[0].shapes if s.has_table]
     assert len(frames) == 1
@@ -1294,12 +1325,12 @@ def test_a_wrapped_cell_wraps_in_its_column():
     lay = emit.table_layout(el, TIGHT_SCALE, FONTS, imported=True)
     # (a cell's run is set at the table's size, not shaped: `cell`, FontMapper.shape_ratio; its
     # numbers, as wide as Lato sets them, shrink this tight table a little)
-    widest = emit.slides_width([{**run_of("A cell set in a paragraph", 8.97 * lay["shrink"], font="CMSS9"), "cell": True}],
+    widest = emit.slides_width([{**run_of("A cell set in a paragraph", 8.97 * lay.shrink, font="CMSS9"), "cell": True}],
                                TIGHT_SCALE, FONTS)
-    assert lay["cell_width"][(2, 1)] == pytest.approx(widest)
-    assert widest + 2 * emit.TABLE_CELL_PAD <= lay["widths"][1] < emit.slides_width(el["cells"][2][1], TIGHT_SCALE, FONTS)
-    assert lay["heights"][2] >= 3 * emit.LINE_EM * lay["z"] - 1 and lay["ratios"][2] == pytest.approx(1.0)
-    assert lay["y"] + sum(lay["heights"]) == pytest.approx(177.47 * TIGHT_SCALE, abs=0.05)
+    assert lay.cell_width[(2, 1)] == pytest.approx(widest)
+    assert widest + 2 * emit.TABLE_CELL_PAD <= lay.widths[1] < emit.slides_width(el["cells"][2][1], TIGHT_SCALE, FONTS)
+    assert lay.heights[2] >= 3 * emit.LINE_EM * lay.z - 1 and lay.ratios[2] == pytest.approx(1.0)
+    assert lay.y + sum(lay.heights) == pytest.approx(177.47 * TIGHT_SCALE, abs=0.05)
 
 
 def test_a_subscript_in_a_cell_is_no_larger_than_its_text():

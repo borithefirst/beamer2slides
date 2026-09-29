@@ -4,10 +4,15 @@ p{} cells (justified, several columns at once), list continuations beside each o
 table, and in emit a wrapped cell's column that keeps the PDF's breaks and number cells kept at
 the table's size, justified X cells, centred tables and smaller multicolumn note rows."""
 
+from collections.abc import Sequence
+
 import pytest
 
 from beamer2slides import emit as E
 from beamer2slides.classify import PageClassifier, Rect, Span, classify
+from beamer2slides.emit_model import SetRun, table_of
+from beamer2slides.emit_tables import TableLayout, pptx_table_of
+from beamer2slides.emit_widths import wrap_joins_of, wrap_window_of, wrapped_width_of
 from beamer2slides.fonts import font_info
 
 W, H = 453.54, 255.12
@@ -242,10 +247,11 @@ def test_the_cells_beside_a_multirow_keep_their_rows_top_inset():
     assert any(m["row"] == 1 and m["col"] == 0 and m["rows"] == 2 for m in t["merges"])
     scale = E.SLIDE_W / W
     lay = E.table_layout(t, scale, E.FontMapper(), imported=True, page_w=W)
-    assert lay["insets"][1] > 1.0  # (the space under the rule above it, as every row has)
+    assert lay.insets[1] > 1.0  # (the space under the rule above it, as every row has)
     table = E.pptx_table(t, scale, E.FontMapper(), page_w=W)
     assert table["middle"] == [[1, 0]]
-    prs = Presentation(E.build_pptx(W, H, [], [{"layout": "BLANK", "fill": None, "pictures": [], "tables": [table],
+    typed = pptx_table_of(table_of(t), scale, E.FontMapper(), W)
+    prs = Presentation(E.build_pptx(W, H, [], [{"layout": "BLANK", "fill": None, "pictures": [], "tables": [typed],
                                                 "templates": False}], {"color": "#ffffff"}))
     grid = next(s for s in prs.slides[0].shapes if s.has_table).table
     assert grid.cell(1, 0).margin_top == 0 and grid.cell(1, 1).margin_top == round(table["margins"][1][1] * E.EMU_PER_PT)
@@ -322,12 +328,12 @@ def test_a_justified_x_columns_cells_are_written_justified_to_the_pdfs_edge():
     got = alignments(t)
     assert got[(1, 1)][0] == got[(2, 1)][0] == "JUSTIFIED" and got[(0, 1)][0] == "START"
     # The table no wider than the PDF's (the column's 8% room went into widening it).
-    assert sum(lay["widths"]) <= (275 - 50) * scale + 0.01
-    want = max((265 - 140) * scale, lay["cell_width"][(1, 1)] + E.WRAP_MARGIN, lay["cell_width"][(2, 1)] + E.WRAP_MARGIN)
+    assert sum(lay.widths) <= (275 - 50) * scale + 0.01
+    want = max((265 - 140) * scale, lay.cell_width[(1, 1)] + E.WRAP_MARGIN, lay.cell_width[(2, 1)] + E.WRAP_MARGIN)
     rooms = {cell_room(t, lay, r, 1) for r in (1, 2)}
     assert len(rooms) == 1 and max(rooms) <= want + 0.01  # (one edge, the PDF's where their breaks allow)
     for r in (1, 2):
-        assert lines_at(lay["cells"][r][1], max(rooms), scale, fonts) == 2
+        assert lines_at(lay.cells[r][1], max(rooms), scale, fonts) == 2
     ragged = x_column(justify=False)
     assert "justified" not in ragged and alignments(ragged)[(1, 1)][0] == "START"
 
@@ -427,11 +433,11 @@ def test_a_wrapped_cells_column_does_not_take_the_next_lines_first_word():
         el = wrapped_table(font, family)
         lay = E.table_layout(el, scale, fonts, imported=True, page_w=W)
         _, start, end = alignments(el)[(1, 1)]
-        room = lay["widths"][1] - 2 * E.TABLE_CELL_PAD - start - end
-        runs = lay["cells"][1][1]
-        joined = E.wrap_joins(runs, el["wrapped"][0][2], scale, fonts)
+        room = lay.widths[1] - 2 * E.TABLE_CELL_PAD - start - end
+        runs = lay.cells[1][1]
+        joined = wrap_joins_of(runs, el["wrapped"][0][2], scale, fonts)
         if joined is not None:  # measured: the first line fits, the first line and 'the' do not
-            assert E.wrapped_width(runs, el["wrapped"][0][2], scale, fonts) < room < joined
+            assert wrapped_width_of(runs, el["wrapped"][0][2], scale, fonts) < room < joined
         else:  # a font the PDF itself uses: little more than the PDF's own column
             assert room <= (240 - 100) * scale * 1.03
 
@@ -444,7 +450,7 @@ def test_a_number_cell_is_set_at_the_tables_size():
     el = wrapped_table("LMSans10-Regular", "sans")
     el["cells"][2][1] = [run("123456789012345678", "LMSans10-Regular", "sans")]
     lay = E.table_layout(el, scale, fonts, imported=True, page_w=W)
-    sizes = {fonts(r, scale)[1] for row in lay["cells"] for c in row for r in c}
+    sizes = {fonts.size_of(r, scale)[1] for row in lay.cells for c in row for r in c}
     assert len(sizes) == 1
 
 
@@ -469,14 +475,14 @@ def three_columns(cell: str, second_line: str, col1: tuple[float, float] = (100,
             "merges": [], "rules": [], "borders": [], "fills": []}
 
 
-def lines_at(runs: list[dict], room: float, scale: float, fonts) -> int:
+def lines_at(runs: Sequence[SetRun], room: float, scale: float, fonts) -> int:
     """How many lines Slides breaks these runs into at this text room."""
-    return next(n for n in range(1, 10) if E.wrap_window(runs, n, scale, fonts)[0] <= room)
+    return next(n for n in range(1, 10) if wrap_window_of(runs, n, scale, fonts)[0] <= room)
 
 
-def cell_room(el: dict, lay: dict, r: int, c: int) -> float:
+def cell_room(el: dict, lay: TableLayout, r: int, c: int) -> float:
     _, start, end = alignments(el)[(r, c)]
-    return lay["widths"][c] - 2 * E.TABLE_CELL_PAD - start - end
+    return lay.widths[c] - 2 * E.TABLE_CELL_PAD - start - end
 
 
 def test_a_word_hyphenated_at_a_line_end_goes_down_a_line_instead_of_widening_its_column():
@@ -487,9 +493,9 @@ def test_a_word_hyphenated_at_a_line_end_goes_down_a_line_instead_of_widening_it
     fonts, scale = E.FontMapper(), E.SLIDE_W / W
     el = three_columns("No notion of synonyms or paraphrase at all", "phrase")
     lay = E.table_layout(el, scale, fonts, imported=True, page_w=W)
-    assert lay["shrink"] == 1.0
-    assert lay["bounds"][2] <= el["bounds"][2] + 0.5  # (the rule after the column where the PDF has it)
-    assert lines_at(lay["cells"][1][1], cell_room(el, lay, 1, 1), scale, fonts) == 2
+    assert lay.shrink == 1.0
+    assert lay.bounds[2] <= el["bounds"][2] + 0.5  # (the rule after the column where the PDF has it)
+    assert lines_at(lay.cells[1][1], cell_room(el, lay, 1, 1), scale, fonts) == 2
 
 
 def test_a_wrapped_cells_cap_keeps_the_rule_after_its_column_on_the_pdfs_boundary():
@@ -500,11 +506,11 @@ def test_a_wrapped_cells_cap_keeps_the_rule_after_its_column_on_the_pdfs_boundar
     fonts, scale = E.FontMapper(), E.SLIDE_W / W
     el = three_columns("a ridge of rock and coral near the surface", "coral")
     lay = E.table_layout(el, scale, fonts, imported=True, page_w=W)
-    assert abs(lay["bounds"][2] - el["bounds"][2]) <= 0.5
-    runs = lay["cells"][1][1]
+    assert abs(lay.bounds[2] - el["bounds"][2]) <= 0.5
+    runs = lay.cells[1][1]
     starts = el["wrapped"][0][2]
     room = cell_room(el, lay, 1, 1)
-    assert E.wrapped_width(runs, starts, scale, fonts) < room < E.wrap_joins(runs, starts, scale, fonts)
+    assert wrapped_width_of(runs, starts, scale, fonts) < room < wrap_joins_of(runs, starts, scale, fonts)
     # (the next column's words where the PDF has them)
     assert alignments(el)[(1, 2)][1] == alignments(el)[(0, 2)][1] > 0
 
@@ -516,15 +522,15 @@ def test_a_centred_table_grows_into_both_margins_alike():
     fonts, scale = E.FontMapper(), E.SLIDE_W / W
     el = three_columns("Needs hand-made descriptors; poor", "tors", col1=(100, 215), frame=(50, W - 50))
     lay = E.table_layout(el, scale, fonts, imported=True, page_w=W)
-    width = sum(lay["widths"])
+    width = sum(lay.widths)
     assert width > (el["frame"][2] - el["frame"][0]) * scale + 5  # (it did grow)
-    left, right = lay["x"], E.SLIDE_W - lay["x"] - width
+    left, right = lay.x, E.SLIDE_W - lay.x - width
     assert abs(left - right) <= 0.1
     # The first column's words keep their place in the table: moved with it.
     _, start, _ = alignments(el)[(1, 0)]
-    text_x = lay["x"] + E.TABLE_CELL_PAD + start
-    assert text_x == pytest.approx((el["columns"][0]["x0"] + lay["dx"]) * scale + E.TABLE_CELL_PAD - E.PAD_X, abs=0.05)
-    assert lines_at(lay["cells"][1][1], cell_room(el, lay, 1, 1), scale, fonts) == 2
+    text_x = lay.x + E.TABLE_CELL_PAD + start
+    assert text_x == pytest.approx((el["columns"][0]["x0"] + lay.dx) * scale + E.TABLE_CELL_PAD - E.PAD_X, abs=0.05)
+    assert lines_at(lay.cells[1][1], cell_room(el, lay, 1, 1), scale, fonts) == 2
 
 
 def test_a_smaller_multicolumn_note_row_keeps_the_pdfs_baseline_and_indent():
@@ -546,8 +552,8 @@ def test_a_smaller_multicolumn_note_row_keeps_the_pdfs_baseline_and_indent():
     assert got[(2, 0)][1] > 0 and got[(3, 0)][1] == pytest.approx(got[(2, 0)][1], abs=0.01)
     fonts, scale = E.FontMapper(), E.SLIDE_W / W
     lay = E.table_layout(t, scale, fonts, imported=True, page_w=W)
-    z = fonts(lay["cells"][3][0][0], scale)[1]
-    assert z < lay["z"]
-    top = lay["y"] + sum(lay["heights"][:3]) + lay["insets"][3]
-    baseline = top + E.TABLE_TEXT_TOP + E.ASCENT_EM * z + E.extra_above(lay["ratios"][3], z)
+    z = fonts.size_of(lay.cells[3][0][0], scale)[1]
+    assert z < lay.z
+    top = lay.y + sum(lay.heights[:3]) + lay.insets[3]
+    baseline = top + E.TABLE_TEXT_TOP + E.ASCENT_EM * z + E.extra_above(lay.ratios[3], z)
     assert baseline == pytest.approx(t["row_baselines"][3] * scale, abs=0.2)

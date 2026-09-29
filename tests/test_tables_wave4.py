@@ -23,12 +23,12 @@ def test_a_shaded_row_starts_and_ends_on_its_band():
     assert t["bands"][0][1:] == [50, 68]
     fonts, scale = FontMapper(), 720.0 / 453.54
     lay = E.table_layout(t, scale, fonts, imported=True, page_w=453.54)
-    assert lay["y"] / scale == pytest.approx(50, abs=0.05)
-    tops = [lay["y"] + sum(lay["heights"][:i]) for i in range(len(lay["heights"]) + 1)]
+    assert lay.y / scale == pytest.approx(50, abs=0.05)
+    tops = [lay.y + sum(lay.heights[:i]) for i in range(len(lay.heights) + 1)]
     assert [round(y / scale, 1) for y in tops] == [50, 68, 86, 104, 122]
     # the words stay on the PDF's baselines: the row's inset takes the room above them
     for i, top in enumerate(tops[:-1]):
-        base = top + lay["insets"][i] + E.TABLE_TEXT_TOP + E.ASCENT_EM * lay["sizes"][i]
+        base = top + lay.insets[i] + E.TABLE_TEXT_TOP + E.ASCENT_EM * lay.sizes[i]
         assert base / scale == pytest.approx(t["row_baselines"][i], abs=0.1)
 
 
@@ -140,8 +140,8 @@ def test_an_overfull_table_is_set_smaller_to_end_on_the_page():
     grown = E.table_columns(t, [[[{**r, "cell": True} for r in E.in_sentence(c)] for c in row] for row in t["cells"]],
                             scale, fonts, tight=True)[0]
     assert grown[-1] > t["frame"][2] + 5  # (the case: at its size it runs past the PDF's end)
-    assert lay["bounds"][-1] <= W + 0.01 < t["frame"][2]
-    assert E.TABLE_MIN_SHRINK <= lay["shrink"] < 1
+    assert lay.bounds[-1] <= W + 0.01 < t["frame"][2]
+    assert E.TABLE_MIN_SHRINK <= lay.shrink < 1
 
 
 def google_steps(z: float, space_above: list[float]) -> list[float]:

@@ -37,7 +37,8 @@ import numpy as np
 from PIL import Image
 
 from beamer2slides.arrays import RGB, Floats, Floats32
-from beamer2slides.emit import FontMapper, bullet_shape, fit_holes, merge_blocks, slide_holes
+from beamer2slides.emit import FontMapper, bullet_shape, fit_holes, merge_blocks
+from beamer2slides.emit_holes import hole_slide_dicts, slide_holes_of
 from beamer2slides.gslides import EMU_PER_PT
 from beamer2slides.json_types import as_objects
 from beamer2slides.pdf import Document
@@ -267,11 +268,13 @@ def hole_gaps(img: Image2, pic_ink: Floats32 | Floats, box: list[float], top: fl
 def measure_holes(slide, pictures, boxes, ref: Image2, got: Image2, out: Path, scale: float, fonts) -> list[dict]:
     texts = {e["id"]: e for e in slide["elements"] if e["kind"] == "text"}
     hole_lines = {}
-    for el, p, run, pic in slide_holes(fit_holes(slide, scale, fonts)):
+    for h in slide_holes_of(hole_slide_dicts(fit_holes(slide, scale, fonts))[0]):
+        pic = h.picture
         if pic is not None:
-            line = min(p["lines"], key=lambda l: (not pic["bbox"][1] - 0.5 <= l["baseline"] <= pic["bbox"][3] + 0.5,
-                                                   abs((pic["bbox"][1] + pic["bbox"][3]) / 2 - l["baseline"] + 0.35 * run["size"])))
-            hole_lines[pic["id"]] = (line, run["size"])
+            y0, y1, size = pic.bbox[1], pic.bbox[3], h.run.size
+            baseline = min(h.paragraph.baselines, key=lambda b: (not y0 - 0.5 <= b <= y1 + 0.5,
+                                                                  abs((y0 + y1) / 2 - b + 0.35 * size)))
+            hole_lines[pic.id] = ({"baseline": baseline}, size)
     rows = []
     for el, oid in pictures:
         if el.get("role") not in ("math", "icon") or not el.get("anchor") or el.get("number") or el.get("overlay"):

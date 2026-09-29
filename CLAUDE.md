@@ -258,7 +258,10 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   `IRError` contained the same way; text and shapes are planned from `emit_model`'s records
   (`SetText`, `SetShape`; derived fields such as `in_sentence` live there, never in the IR), dict
   callers through thin entries (`text_box_requests` -> `text_box_requests_of`); tables, diagrams,
-  holes and the theme still plan dicts. A test patching a planner patches
+  holes/overlays and the theme too (`SetTable`, `NodeLook`, `HoleText`/`Anchored`/`Place`,
+  `ThemePlan`/`MasterPlan`/`PlaceholderStyle`); a function handing back the caller's elements keeps
+  their type (`emit_model.ElementDict`, `merge_blocks`); DeckPlan declares its state, its
+  `deck`/`merged`/`contained` still the dicts sync and layout_oracle read. A test patching a planner patches
   `emit.text_element_requests` / `shape_element_requests`. Sync and `adopt_sync.convert_source` plan the same
   way (`sync.planned`, report `contained`); a base element unchanged since takes its picture's form
   in the base (`sync.base_as_contained`), so nothing churns. Slides `mark_emitted` cannot compare

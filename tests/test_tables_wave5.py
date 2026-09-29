@@ -23,15 +23,15 @@ def test_an_overfull_table_ends_on_the_page_with_every_column():
     (t,) = tables(page.elements())
     assert t["frame"][2] > W + 20  # (the case: the PDF's rules run off the page)
     lay, scale, fonts = layout(t)
-    assert lay["fits"] and lay["bounds"][-1] <= W + 0.01
-    assert E.TABLE_MIN_SHRINK <= lay["shrink"] <= 1
+    assert lay.fits and lay.bounds[-1] <= W + 0.01
+    assert E.TABLE_MIN_SHRINK <= lay.shrink <= 1
     # every cell still fits its column on one line
-    for (r, c), w in lay["cell_width"].items():
+    for (r, c), w in lay.cell_width.items():
         if w is not None:
-            assert lay["widths"][c] >= w + 2 * E.TABLE_CELL_PAD + E.WRAP_MARGIN - 0.01, (r, c)
+            assert lay.widths[c] >= w + 2 * E.TABLE_CELL_PAD + E.WRAP_MARGIN - 0.01, (r, c)
     # the text is no smaller than it has to be: a little larger and the columns no longer close up
-    if lay["shrink"] < 1:
-        cells = [[[{**r, "cell": True, "size": r["size"] * (lay["shrink"] + 0.01)} for r in E.in_sentence(runs)]
+    if lay.shrink < 1:
+        cells = [[[{**r, "cell": True, "size": r["size"] * (lay.shrink + 0.01)} for r in E.in_sentence(runs)]
                   for runs in row] for row in t["cells"]]
         got = E.table_columns(t, cells, scale, fonts, tight=True)
         assert E.squeezed_columns(t, cells, got, scale, W) is None
