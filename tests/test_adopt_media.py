@@ -15,7 +15,8 @@ import pytest
 
 from beamer2slides import adopt, fontfetch
 from beamer2slides.deck_ir import MAX_BEAMER_SCALE, YOUTUBE_THUMB, page_size_for
-from beamer2slides.deck_ir_types import target_json
+from beamer2slides.deck_ir_types import TargetImage, target_json
+from .deck_records import record
 from .irs import deck_ir
 
 from .test_adopt import at, presentation, pt, solid, text_shape
@@ -706,6 +707,13 @@ def test_a_face_without_the_letters_set_in_it_gets_no_switch(monkeypatch, tmp_pa
     assert "\\setsansfont{OpenSans}" in text and "NotoSansSymbols" not in text
 
 
+def picture(file: str, alt: str, sha1: str, **props) -> TargetImage:
+    """A picture element as `picture_of` reads it: its file, alt text and hash, and what Slides bakes in."""
+    el = record({"kind": "image", "bbox": [0, 0, 10, 10], "file": file, "alt": alt, "sha1": sha1, **props})
+    assert isinstance(el, TargetImage)
+    return el
+
+
 def test_a_dimmed_picture_is_baked_into_its_file(tmp_path):
     """intro-lecture's title photos carry brightness -0.5 and -0.7, which LaTeX has no option for:
     the file in the tree is the picture as Slides shows it - its colours scaled by 1 + b (measured on
@@ -714,12 +722,12 @@ def test_a_dimmed_picture_is_baked_into_its_file(tmp_path):
     src = tmp_path / "photo.png"
     Image.new("RGB", (8, 8), (200, 100, 40)).save(src)
     tree = tmp_path / "src"
-    dim = adopt.picture_of({"file": str(src), "alt": "Hall", "sha1": "ab" * 20, "brightness": -0.5}, tree)
-    plain = adopt.picture_of({"file": str(src), "alt": "Hall", "sha1": "ab" * 20}, tree)
+    dim = adopt.picture_of(picture(str(src), "Hall", "ab" * 20, brightness=-0.5), tree)
+    plain = adopt.picture_of(picture(str(src), "Hall", "ab" * 20), tree)
     assert dim.rel != plain.rel
     assert Image.open(dim.path).convert("RGB").getpixel((3, 3)) == (100, 50, 20)
     assert Image.open(plain.path).convert("RGB").getpixel((3, 3)) == (200, 100, 40)
-    bright = adopt.picture_of({"file": str(src), "alt": "Hall", "sha1": "ab" * 20, "brightness": 0.5}, tree)
+    bright = adopt.picture_of(picture(str(src), "Hall", "ab" * 20, brightness=0.5), tree)
     assert Image.open(bright.path).convert("RGB").getpixel((3, 3)) == (255, 200, 80)
 
 
@@ -732,7 +740,7 @@ def test_a_tiny_picture_is_drawn_smooth_at_its_size(tmp_path):
     img = Image.new("RGB", (5, 5), (0, 0, 0))
     img.putpixel((0, 0), (255, 255, 255))
     img.save(src)
-    pic = adopt.picture_of({"file": str(src), "alt": "background", "sha1": "cd" * 20}, tmp_path / "src")
+    pic = adopt.picture_of(picture(str(src), "background", "cd" * 20), tmp_path / "src")
     out = Image.open(pic.path).convert("RGB")
     assert max(out.size) == adopt.SMOOTH_PICTURE
     assert natural_size(pic.path) == pytest.approx((5, 5), abs=0.05)
@@ -740,4 +748,4 @@ def test_a_tiny_picture_is_drawn_smooth_at_its_size(tmp_path):
     assert 0 < edge < 255, "the pixels blend into each other"
     big = tmp_path / "big.png"
     Image.new("RGB", (64, 64), (9, 9, 9)).save(big)
-    assert Image.open(adopt.picture_of({"file": str(big), "alt": "x", "sha1": "ef" * 20}, tmp_path / "src").path).size == (64, 64)
+    assert Image.open(adopt.picture_of(picture(str(big), "x", "ef" * 20), tmp_path / "src").path).size == (64, 64)

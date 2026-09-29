@@ -29,10 +29,12 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Sequence
 
 import numpy as np
 
 from ..arrays import Mask, SignedRGB
+from ..deck_ir_types import TargetElement, TargetShape
 
 POINT_RE = r"\(([-\d.]+)pt,([-\d.]+)pt\)"
 ARC_RE = r"arc \[start angle=([-\d.]+), end angle=([-\d.]+), x radius=([-\d.]+)pt, y radius=([-\d.]+)pt\]"
@@ -209,7 +211,8 @@ TOL = 14          # deck_fills.TOL: max channel distance counted as "the fill co
 MIN_TRUE_PX = 30  # a shape with fewer visible fill-coloured pixels than this says too little to judge
 
 
-def match_score(a: SignedRGB, el: dict, above: list[dict], px: float, own_words: bool = False) -> dict | None:
+def match_score(a: SignedRGB, el: TargetShape, above: Sequence[TargetElement], px: float,
+                own_words: bool) -> dict | None:
     """How well `adopt_shapes`' default geometry for `el` (a foreign deck's shape element, as
     `deck_ir.read_presentation` + `deck_fills.settle` leave it: `fill` already read off the
     thumbnail where the API said nothing) agrees with what the thumbnail `a` actually shows in its
@@ -219,29 +222,29 @@ def match_score(a: SignedRGB, el: dict, above: list[dict], px: float, own_words:
     box visible (`deck_fills.SEEN`, mirroring "skip shapes under text or pictures") or too little
     fill-coloured ink to call it either way (`MIN_TRUE_PX`)."""
     from .. import deck_fills
-    kind = (el.get("shape_type") or "").upper()
+    kind = (el.shape_type or "").upper()
     if kind not in ADJUSTABLE_PRESETS:
         return None
-    fill = deck_fills.rgb(el.get("fill"))
-    if fill is None or (el.get("fill_alpha") or 1.0) < 0.99:
+    fill = deck_fills.rgb(el.fill)
+    if fill is None or (el.fill_alpha or 1.0) < 0.99:
         return None
-    fr = el.get("frame") or {}
-    if abs(fr.get("rotation") or 0.0) % 360 > 0.05 or fr.get("shear"):
+    fr = el.frame
+    if fr is not None and (abs(fr.rotation or 0.0) % 360 > 0.05 or fr.shear):
         return None
     h_img, w_img = a.shape[:2]
-    box = deck_fills.px_box(el["bbox"], px, w_img, h_img)
+    box = deck_fills.px_box(el.bbox, px, w_img, h_img, 0)
     bw, bh = box[2] - box[0], box[3] - box[1]
     if bw < 6 or bh < 6:
         return None
-    sub, region, allow = deck_fills.masks(a, box, above, px, own_words)
+    sub, region, allow = deck_fills.masks(a, box, deck_fills.untraced(above), px, own_words)
     if region.sum() < deck_fills.SEEN * region.size:
         return None                        # mostly under a text box or a picture: nothing to judge
-    x0, y0, x1, y1 = el["bbox"]
+    x0, y0, x1, y1 = el.bbox
     w_pt, h_pt = x1 - x0, y1 - y0
-    rings = default_rings(kind, w_pt, h_pt, el.get("corner_radius"))
+    rings = default_rings(kind, w_pt, h_pt, el.corner_radius)
     if rings is None:
         return None                        # a known preset with no fill silhouette (brackets, braces)
-    if fr.get("flip"):
+    if fr is not None and fr.flip:
         rings = mirror_rings(rings, w_pt)
     ours = rasterize(rings, bw, bh, px)
     close = np.abs(sub.astype(np.int16) - fill).max(axis=2) <= TOL

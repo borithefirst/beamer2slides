@@ -35,7 +35,7 @@ from beamer2slides import deck_fills
 from beamer2slides.devtools import preset_geometry as pg
 from beamer2slides.deck_files import DeckFiles
 from beamer2slides.deck_ir import dim, given_thumbnails, read_presentation
-from beamer2slides.deck_ir_types import element_json
+from beamer2slides.deck_ir_types import TargetShape
 from beamer2slides.paths import CHECKOUT
 
 DEFAULT_ROOTS = [CHECKOUT / "out" / "adopt-corpus", CHECKOUT / "out" / "adopt-hunt"]
@@ -77,15 +77,14 @@ def survey_deck(deck_dir: Path, images_dir: Path) -> list[dict]:
         if a is None or page_w <= 0:
             continue
         px = a.shape[1] / page_w
-        elements = [element_json(e) for e in slide.elements]
+        elements = slide.elements
         for k, el in enumerate(elements):
-            if el.get("kind") != "shape":
+            if not isinstance(el, TargetShape):
                 continue
-            score = pg.match_score(a, el, elements[k + 1:], px)
+            score = pg.match_score(a, el, elements[k + 1:], px, False)
             if score is None:
                 continue
-            score.update(deck=deck_dir.name, slide=n + 1, object=el.get("object"),
-                         inherited=el.get("inherited"))
+            score.update(deck=deck_dir.name, slide=n + 1, object=el.object, inherited=el.inherited)
             out.append(score)
     return out
 

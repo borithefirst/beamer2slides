@@ -18,12 +18,23 @@ for them, only a box; see `CUSTOM_AS`.
 import hashlib
 import math
 import re
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 from .adopt_context import AdoptContext
+from .deck_ir_types import Absent, Frame, TargetDeck, TargetShape, TargetText, Trace
 from .inverse import colour_name
 
 K = 0.5523                      # cubic Bezier control distance for a quarter circle, per radius
+
+Pt = tuple[float, float]
+Mode = Literal["fs", "fs-eo", "f", "s", "shade+", "shade-"]
+"""How a preset's path is drawn: filled and stroked (even-odd), filled or stroked only, or the fill
+lightened / darkened (a cube's top, a folded corner)."""
+Paths = list[tuple[str, Mode]]
+Drawn = TargetShape | TargetText
+"""What `shape_block` draws: a shape, or the box of a text element (a flow chart's node)."""
 
 # Slides' arrow heads, in line widths (measured on the corpus thumbnails: a FILL_ARROW head is
 # about 4.5 line widths wide and 4-6 long, whatever the weight).
@@ -81,19 +92,19 @@ def P(x: float, y: float) -> str:
     return f"({pt(x)}pt,{pt(-y)}pt)"
 
 
-def poly(points) -> str:
+def poly(points: Sequence[Pt]) -> str:
     return " -- ".join(P(x, y) for x, y in points) + " -- cycle"
 
 
-def rounded_poly(points, radii) -> str:
+def rounded_poly(points: Sequence[Pt], radii: Sequence[float]) -> str:
     """A closed polygon whose corner i is rounded with radius radii[i] (0 = sharp)."""
     n = len(points)
-    out = []
+    s = ""
     for i in range(n):
         (px, py), (x, y), (nx, ny) = points[i - 1], points[i], points[(i + 1) % n]
         r = radii[i]
         if r <= 0:
-            out.append(("L", (x, y)))
+            s += (" -- " if i else "") + P(x, y)
             continue
         d1, d2 = math.hypot(x - px, y - py), math.hypot(nx - x, ny - y)
         r = min(r, d1 / 2, d2 / 2)
@@ -101,14 +112,7 @@ def rounded_poly(points, radii) -> str:
         b = (x + (nx - x) * r / d2, y + (ny - y) * r / d2)
         c1 = (a[0] + (x - a[0]) * K, a[1] + (y - a[1]) * K)
         c2 = (b[0] + (x - b[0]) * K, b[1] + (y - b[1]) * K)
-        out.append(("C", a, c1, c2, b))
-    s = ""
-    for k, op in enumerate(out):
-        if op[0] == "L":
-            s += (" -- " if k else "") + P(*op[1])
-        else:
-            _, a, c1, c2, b = op
-            s += (" -- " if k else "") + P(*a) + f" .. controls {P(*c1)} and {P(*c2)} .. " + P(*b)
+        s += (" -- " if i else "") + P(*a) + f" .. controls {P(*c1)} and {P(*c2)} .. " + P(*b)
     return s + " -- cycle"
 
 
@@ -116,7 +120,7 @@ def ellipse(cx: float, cy: float, rx: float, ry: float) -> str:
     return f"{P(cx, cy)} ellipse [x radius={pt(max(rx, 0.01))}pt, y radius={pt(max(ry, 0.01))}pt]"
 
 
-def arc(cx: float, cy: float, rx: float, ry: float, start: float, sweep: float, move: bool = True) -> str:
+def arc(cx: float, cy: float, rx: float, ry: float, start: float, sweep: float, move: bool) -> str:
     """An elliptical arc from OOXML angle `start` (degrees, clockwise from +x, y down) through `sweep`."""
     sx = cx + rx * math.cos(math.radians(start))
     sy = cy + ry * math.sin(math.radians(start))
@@ -125,9 +129,10 @@ def arc(cx: float, cy: float, rx: float, ry: float, start: float, sweep: float, 
                    f"x radius={pt(max(rx, 0.01))}pt, y radius={pt(max(ry, 0.01))}pt]")
 
 
-def regular(n: int, w: float, h: float, inner: float | None = None, offset: float = -90.0):
-    """A regular polygon (or star with inner radius ratio `inner`) stretched to fill the box."""
-    pts = []
+def regular(n: int, w: float, h: float, inner: float | None, offset: float) -> list[Pt]:
+    """A regular polygon (or star with inner radius ratio `inner`) stretched to fill the box, its
+    first point `offset` degrees round from +x (-90: at the top)."""
+    pts: list[Pt] = []
     for k in range(n):
         a = math.radians(offset + 360 * k / n)
         pts.append((math.cos(a), math.sin(a)))
@@ -156,9 +161,10 @@ STARS = {"STAR_4": (4, 0.25), "STAR_5": (5, 0.38196), "STAR_6": (6, 0.57735), "S
 POLYGONS = {"PENTAGON": 5, "HEPTAGON": 7, "DECAGON": 10, "DODECAGON": 12}
 
 
-def arrow_polygon(kind: str, w: float, h: float):
+def arrow_polygon(kind: str, w: float, h: float) -> list[Pt] | None:
     """Block arrows: shaft half the cross size (adj1 50000), head as long as half the short side."""
     ss = min(w, h)
+    pts: list[Pt]
     if kind in ("RIGHT_ARROW", "LEFT_ARROW", "NOTCHED_RIGHT_ARROW"):
         x1 = w - ss / 2
         y1, y2 = h / 4, 3 * h / 4
@@ -186,12 +192,17 @@ def arrow_polygon(kind: str, w: float, h: float):
     return None
 
 
-def callout_tail(w: float, h: float):
+def callout_tail(w: float, h: float) -> Pt:
     """The wedge callouts' default tail tip (adj1 -20833, adj2 62500): below the box, left of centre."""
     return w / 2 - w * 0.20833, h / 2 + h * 0.625
 
 
-def preset(kind: str, w: float, h: float, corner: float | None = None) -> list[tuple[str, str]] | None:
+def rectangle(w: float, h: float) -> Paths:
+    """A rectangle filling the frame: what `preset("RECTANGLE", ...)` draws."""
+    return [(poly([(0, 0), (w, 0), (w, h), (0, h)]), "fs")]
+
+
+def preset(kind: str, w: float, h: float, corner: float | None) -> Paths | None:
     """[(TikZ path in the shape's frame, mode)] for a Slides shapeType, mode "fs" (fill and stroke),
     "f" (fill only), "s" (stroke only), or "shade+"/"shade-" (the fill lightened/darkened, as OOXML
     draws a cube's top or a folded corner). None when the preset is not known here. `corner`: a
@@ -250,7 +261,7 @@ def preset(kind: str, w: float, h: float, corner: float | None = None) -> list[t
     if kind == "FLOW_CHART_OFFPAGE_CONNECTOR":
         return [(poly([(0, 0), (w, 0), (w, 0.8 * h), (w / 2, h), (0, 0.8 * h)]), "fs")]
     if kind in POLYGONS:
-        return [(poly(regular(POLYGONS[kind], w, h)), "fs")]
+        return [(poly(regular(POLYGONS[kind], w, h, None, -90.0)), "fs")]
     if kind in ("HEXAGON", "FLOW_CHART_PREPARATION"):
         x = ss * 0.25 if kind == "HEXAGON" else w / 5
         return [(poly([(0, h / 2), (x, 0), (w - x, 0), (w, h / 2), (w - x, h), (x, h)]), "fs")]
@@ -290,7 +301,7 @@ def preset(kind: str, w: float, h: float, corner: float | None = None) -> list[t
             return [(poly([(cx - dx, cy - t), (cx - t, cy - t), (cx - t, cy - dy), (cx + t, cy - dy), (cx + t, cy - t),
                            (cx + dx, cy - t), (cx + dx, cy + t), (cx + t, cy + t), (cx + t, cy + dy), (cx - t, cy + dy),
                            (cx - t, cy + t), (cx - dx, cy + t)]), "fs")]
-        out = []                                         # two bars along the diagonals of the inner box
+        out: Paths = []                                  # two bars along the diagonals of the inner box
         for (ax, ay), (bx, by) in (((w * 0.15, h * 0.15), (w * 0.85, h * 0.85)), ((w * 0.85, h * 0.15), (w * 0.15, h * 0.85))):
             ln = math.hypot(bx - ax, by - ay)
             nx, ny = -(by - ay) / ln * t, (bx - ax) / ln * t
@@ -299,7 +310,7 @@ def preset(kind: str, w: float, h: float, corner: float | None = None) -> list[t
     if kind in ("DONUT", "NO_SMOKING"):
         d = ss * (0.25 if kind == "DONUT" else 0.1875)
         ring = ellipse(w / 2, h / 2, w / 2, h / 2) + " " + ellipse(w / 2, h / 2, w / 2 - d, h / 2 - d)
-        out = [(ring, "fs-eo")]
+        out: Paths = [(ring, "fs-eo")]
         if kind == "NO_SMOKING":
             a = math.radians(45)
             ax, ay = w / 2 + (w / 2 - d) * math.cos(a + math.pi), h / 2 + (h / 2 - d) * math.sin(a + math.pi)
@@ -320,13 +331,13 @@ def preset(kind: str, w: float, h: float, corner: float | None = None) -> list[t
         return [(f"{P(w / 2, h / 4)} .. controls {P(w / 2 + dx2, y1)} and {P(w / 2 + dx1, h / 4)} .. {P(w / 2, h)}"
                  f" .. controls {P(w / 2 - dx1, h / 4)} and {P(w / 2 - dx2, y1)} .. {P(w / 2, h / 4)} -- cycle", "fs")]
     if kind == "PIE":
-        return [(f"{P(w / 2, h / 2)} -- {arc(w / 2, h / 2, w / 2, h / 2, 0, 270)} -- cycle", "fs")]
+        return [(f"{P(w / 2, h / 2)} -- {arc(w / 2, h / 2, w / 2, h / 2, 0, 270, True)} -- cycle", "fs")]
     if kind == "ARC":
-        return [(f"{P(w / 2, h / 2)} -- {arc(w / 2, h / 2, w / 2, h / 2, 270, 90)} -- cycle", "f"),
-                (arc(w / 2, h / 2, w / 2, h / 2, 270, 90), "s")]
+        return [(f"{P(w / 2, h / 2)} -- {arc(w / 2, h / 2, w / 2, h / 2, 270, 90, True)} -- cycle", "f"),
+                (arc(w / 2, h / 2, w / 2, h / 2, 270, 90, True), "s")]
     if kind in STARS:
         n, r = STARS[kind]
-        return [(poly(regular(n, w, h, r)), "fs")]
+        return [(poly(regular(n, w, h, r, -90.0)), "fs")]
     if kind in ("IRREGULAR_SEAL_1", "IRREGULAR_SEAL_2"):
         pts = SEAL1 if kind == "IRREGULAR_SEAL_1" else SEAL2
         return [(poly([(x * w / 21600, y * h / 21600) for x, y in pts]), "fs")]
@@ -339,7 +350,7 @@ def preset(kind: str, w: float, h: float, corner: float | None = None) -> list[t
     if kind == "WEDGE_ELLIPSE_CALLOUT":
         tx, ty = callout_tail(w, h)
         a = math.degrees(math.atan2((ty - h / 2) / (h / 2), (tx - w / 2) / (w / 2)))
-        return [(f"{P(tx, ty)} -- {arc(w / 2, h / 2, w / 2, h / 2, a + 11, 338)} -- cycle", "fs")]
+        return [(f"{P(tx, ty)} -- {arc(w / 2, h / 2, w / 2, h / 2, a + 11, 338, True)} -- cycle", "fs")]
     if kind == "FLOW_CHART_TERMINATOR":
         rx = w * 3475 / 21600
         return [(f"{P(rx, 0)} -- {P(w - rx, 0)} {arc(w - rx, h / 2, rx, h / 2, 270, 180, move=False)} -- {P(rx, h)} "
@@ -351,8 +362,9 @@ def preset(kind: str, w: float, h: float, corner: float | None = None) -> list[t
     if kind == "FLOW_CHART_DELAY":
         return [(f"{P(0, 0)} -- {P(w / 2, 0)} {arc(w / 2, h / 2, w / 2, h / 2, 270, 180, move=False)} -- {P(0, h)} -- cycle", "fs")]
     if kind in ("FLOW_CHART_DOCUMENT", "FLOW_CHART_MULTIDOCUMENT"):
-        def doc(x0, y0, dw, dh):
-            f = lambda x, y: (x0 + x * dw / 21600, y0 + y * dh / 21600)   # noqa: E731
+        def doc(x0: float, y0: float, dw: float, dh: float) -> str:
+            def f(x: float, y: float) -> Pt:
+                return x0 + x * dw / 21600, y0 + y * dh / 21600
             return (f"{P(*f(0, 0))} -- {P(*f(21600, 0))} -- {P(*f(21600, 17322))} .. controls {P(*f(10800, 17322))}"
                     f" and {P(*f(10800, 23922))} .. {P(*f(0, 20172))} -- cycle")
         if kind == "FLOW_CHART_DOCUMENT":
@@ -387,8 +399,9 @@ def preset(kind: str, w: float, h: float, corner: float | None = None) -> list[t
         right = f"{P(w - rw, 0)} {arc(w - rw, r, rw, r, 270, 90, move=False)} -- {P(w, h - r)} {arc(w - rw, h - r, rw, r, 0, 90, move=False)}"
         return [({"LEFT_BRACKET": left, "RIGHT_BRACKET": right}.get(kind, left + " " + right), "s")]
     if kind in ("LEFT_BRACE", "RIGHT_BRACE", "BRACE_PAIR"):
-        def brace(x0, bw, flip):
-            f = (lambda x, y: P(x0 + bw - x, y)) if not flip else (lambda x, y: P(x0 + x, y))
+        def brace(x0: float, bw: float, flip: bool) -> str:
+            def f(x: float, y: float) -> str:
+                return P(x0 + x, y) if flip else P(x0 + bw - x, y)
             r = min(ss * 0.0833, h / 4)
             return (f"{f(0, 0)} .. controls {f(bw / 2, 0)} and {f(bw / 2, 0)} .. {f(bw / 2, r)} -- {f(bw / 2, h / 2 - r)}"
                     f" .. controls {f(bw / 2, h / 2)} and {f(bw / 2, h / 2)} .. {f(bw, h / 2)}"
@@ -412,13 +425,13 @@ def known_preset(kind: str) -> bool:
     kind = (kind or "RECTANGLE").upper()
     if kind in ("CUSTOM", "?", "FREEFORM"):
         return True
-    return preset(kind, 100.0, 60.0) is not None
+    return preset(kind, 100.0, 60.0, None) is not None
 
 
 SQUARE_CORNER = 0.3     # pt: a corner read rounder than this is none
 
 
-def rounded_radius(kind: str, w: float, h: float, corner: float | None = None) -> float | None:
+def rounded_radius(kind: str, w: float, h: float, corner: float | None) -> float | None:
     """The corner radius of a preset that is a rectangle with all four corners rounded alike (what
     `\\sliderect[rounded=r]` draws with TikZ's rounded corners), else None - a square corner read
     off the thumbnail (`corner`) included."""
@@ -439,45 +452,59 @@ def dash_option(dash: str | None, weight: float) -> list[str]:
     return ["dash pattern=" + " ".join(f"{'on' if k % 2 == 0 else 'off'} {pt(v * w)}pt" for k, v in enumerate(pattern))]
 
 
-def style_options(el: dict, ctx, stroke_only: bool = False) -> tuple[list[str], list[str]]:
+def given(v: str | None | Absent) -> str | None:
+    """A key the JSON may leave out (`ABSENT`) read as `.get` read it: None."""
+    return None if isinstance(v, Absent) else v
+
+
+def stroke_of(el: Drawn) -> tuple[str | None, float | None]:
+    """(outline colour, weight): a shape's outline, a text box's `outline_color`."""
+    if isinstance(el, TargetShape):
+        return el.outline, None if isinstance(el.weight, Absent) else el.weight
+    return given(el.outline_color), el.weight
+
+
+def style_options(el: Drawn, ctx: AdoptContext, stroke_only: bool) -> tuple[list[str], list[str]]:
     """(fill options, stroke options) for an element: colours, opacities, weight and dashes."""
-    fill, stroke = el.get("fill"), el.get("outline") or el.get("outline_color")
-    fo, so = [], []
-    gradient = el.get("fill_gradient")
+    fill, (stroke, weight) = el.fill, stroke_of(el)
+    fo: list[str] = []
+    so: list[str] = []
+    gradient = el.fill_gradient
     if gradient and not stroke_only:
         # read off the thumbnail (`deck_fills`): an axis shading through three colours
-        a, b, c = (colour_name(x, ctx.colours) for x in gradient["colors"])
+        a, b, c = (colour_name(x, ctx.colours) for x in gradient.colors)
         # (the middle colour last: setting an end colour resets it to the mean of the two)
-        first, last = ("left", "right") if gradient["axis"] == "x" else ("top", "bottom")
+        first, last = ("left", "right") if gradient.axis == "x" else ("top", "bottom")
         fo += [f"{first} color={a}", f"{last} color={c}", f"middle color={b}"]
     elif fill and not stroke_only:
         fo.append(f"fill={colour_name(fill, ctx.colours)}")
-        if el.get("fill_alpha") is not None and el["fill_alpha"] < 0.995:
-            fo.append(f"fill opacity={el['fill_alpha']:.3f}")
+        if el.fill_alpha is not None and el.fill_alpha < 0.995:
+            fo.append(f"fill opacity={el.fill_alpha:.3f}")
     if stroke:
-        weight = el.get("weight") or 0.75
-        so += [f"draw={colour_name(stroke, ctx.colours)}", f"line width={pt(weight)}pt"]
-        if el.get("outline_alpha") is not None and el["outline_alpha"] < 0.995:
-            so.append(f"draw opacity={el['outline_alpha']:.3f}")
-        so += dash_option(el.get("dash"), weight)
+        width = weight or 0.75
+        so += [f"draw={colour_name(stroke, ctx.colours)}", f"line width={pt(width)}pt"]
+        if el.outline_alpha is not None and el.outline_alpha < 0.995:
+            so.append(f"draw opacity={el.outline_alpha:.3f}")
+        so += dash_option(el.dash, width)
     return fo, so
 
 
-def frame_of(el: dict) -> dict:
+def frame_of(el: Drawn) -> Frame:
     """The element's frame: displayed size, the page position of its (0,0) corner and the unit
-    linear part of its transform. Upright elements without one get it from their box."""
-    fr = el.get("frame")
-    if fr:
-        return fr
-    x0, y0, x1, y1 = el["bbox"]
-    return {"size": [x1 - x0, y1 - y0], "origin": [x0, y0], "matrix": [1.0, 0.0, 0.0, 1.0]}
+    linear part of its transform. Upright elements without one get it from their box (upright and
+    unmirrored: `transform_option` never turns it)."""
+    if el.frame:
+        return el.frame
+    x0, y0, x1, y1 = el.bbox
+    return Frame(size=(x1 - x0, y1 - y0), origin=(x0, y0), matrix=(1.0, 0.0, 0.0, 1.0), rotation=0.0,
+                 flip=False, box=el.bbox, shear=None)
 
 
-def transform_option(fr: dict, x0: float, y0: float) -> str:
+def transform_option(fr: Frame, x0: float, y0: float) -> str:
     """`cm` putting the frame (TikZ coordinates, y up, origin at its corner) where the deck has it,
     relative to the tikzpicture's origin at page (x0, y0)."""
-    q0, q1, q2, q3 = fr["matrix"]
-    ox, oy = fr["origin"]
+    q0, q1, q2, q3 = fr.matrix
+    ox, oy = fr.origin
     tx, ty = ox - x0, -(oy - y0)
     if abs(q0 - 1) < 1e-6 and abs(q3 - 1) < 1e-6 and abs(q1) < 1e-6 and abs(q2) < 1e-6:
         # an upright frame at the picture's own origin needs no transform at all
@@ -542,7 +569,7 @@ def style_word(keys: str, taken: set[str]) -> str:
     return name
 
 
-def survey_styles(target: dict, ctx: AdoptContext, tree: Path | None) -> None:
+def survey_styles(deck: TargetDeck, ctx: AdoptContext, tree: Path | None) -> None:
     """Name the fill, outline, opacity and dashes the deck's shapes draw in again and again, so that
     a person reading a frame meets a shape's look once: `\\sliderect[card]{67.2,63,243.6,37.8}` where
     four TikZ keys stood, and the preamble says once what `card` is.
@@ -556,9 +583,9 @@ def survey_styles(target: dict, ctx: AdoptContext, tree: Path | None) -> None:
     count: dict[str, int] = {}
     scratch.shape_style_count = count
     scratch.shape_styles = {}
-    for slide in target.get("slides") or []:
-        for el in slide.get("elements") or []:
-            if el.get("kind") in ("shape", "text") and el.get("role") not in ("math", "icon"):
+    for slide in deck.slides:
+        for el in slide.elements:
+            if isinstance(el, (TargetShape, TargetText)) and el.role not in ("math", "icon"):
                 shape_block(el, scratch, "  ", tree)
     names: dict[str, str] = {}
     taken: set[str] = set()
@@ -692,7 +719,7 @@ OUTLINE_NUMBERS = 12      # numbers past which a path is a list of points, not a
 NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 
-def path_body(opts: list[str], path: str, kind: str, tree) -> str:
+def path_body(opts: list[str], path: str, kind: str, tree: Path | None) -> str:
     """One `\\path[options] points;` for the body of a `\\slideshape`, with the points in a file of
     their own under `shapes/` (`\\slidepath`) once there are too many of them to read - a five-pointed
     star is twenty numbers, jruby-ja drew 96 of them. It is the same move `traced_block` makes for a
@@ -711,12 +738,11 @@ def path_body(opts: list[str], path: str, kind: str, tree) -> str:
     return f"\\path{options(opts)} {path};"
 
 
-def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str, ctx=None) -> str:
+def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str, ctx: AdoptContext) -> str:
     """A tikzpicture whose bounding box is the element's box on the page, hanging from the top of
     its textblock, so that its origin is at page (x0, y0) whatever is drawn (arrow heads, a callout's
     tail and strokes may reach out of the box: they overlap, the box stays): `\\slideshape`."""
-    if ctx is not None:
-        ctx.packages.add(SHAPE_MACRO)
+    ctx.packages.add(SHAPE_MACRO)
     box = ",".join((pt1(x0), pt1(y0), pt(max(w, 0.01)), pt(max(h, 0.01))))
     return f"{ind}\\slideshape{{{box}}}{{{body}}}\n"
 
@@ -727,10 +753,10 @@ def pt1(v: float) -> str:
     return "0" if s in ("", "-", "0", "-0") else s
 
 
-def connector_path(el: dict, w: float, h: float) -> str:
+def connector_path(line_type: str | None, w: float, h: float) -> str:
     """A connector in its own frame (0,0)-(w,h): straight, elbow (bentConnector2/3/4 with their
     default adjustments) or curved (curvedConnector2/3/4)."""
-    kind = el.get("line_type") or ""
+    kind = line_type or ""
     if "BENT_CONNECTOR_2" in kind:
         return f"{P(0, 0)} -- {P(w, 0)} -- {P(w, h)}"
     if "BENT_CONNECTOR_3" in kind:
@@ -752,36 +778,35 @@ def tip(kind: str | None) -> str:
     return spec.format(l=HEAD_L, w=HEAD_W, i=HEAD_L * 0.35, h=HEAD_L * 0.55, c=HEAD_W * 0.8)
 
 
-def freeform_line(el: dict) -> bool:
+def freeform_line(el: TargetShape) -> bool:
     """A "line" with neither lineType nor lineCategory is a freeform polyline or polygon (an elbow drawn
     point by point in jeb-arch s4, a filled wedge in journey-maps s2): the API gives only its box, and
-    the segment corner to corner that its transform describes is ink the deck does not have."""
-    return "category" in el and not el["category"] and not el.get("line_type")
+    the segment corner to corner that its transform describes is ink the deck does not have. (A
+    `category` left out of the JSON is not such a line: only one the API said is empty.)"""
+    return not isinstance(el.category, Absent) and not el.category and not given(el.line_type)
 
 
-def traced_path(rings, x0: float, y0: float) -> str:
+def traced_path(rings: Sequence[Sequence[Pt]], x0: float, y0: float) -> str:
     """Traced rings (page pt) as one TikZ path relative to the page point (x0, y0)."""
     return " ".join(" -- ".join(P(x - x0, y - y0) for x, y in ring) + " -- cycle" for ring in rings)
 
 
-def traced_block(el: dict, ctx, ind: str, tree=None) -> str:
-    """A freeform whose outline `deck_freeforms` traced from the slide's picture: one filled path
-    (even-odd: the rings of a letter-like shape nest), and where the deck outlines it in another
-    colour, that outline drawn just inside the traced edge (clipped to it, twice as wide), which is
-    where the picture shows it.
+def traced_block(el: TargetShape, tr: Trace, ctx: AdoptContext, ind: str, tree: Path | None) -> str:
+    """A freeform whose outline `deck_freeforms` traced from the slide's picture (`tr`, its `trace`):
+    one filled path (even-odd: the rings of a letter-like shape nest), and where the deck outlines it
+    in another colour, that outline drawn just inside the traced edge (clipped to it, twice as wide),
+    which is where the picture shows it.
 
     With a source tree to write into, the outline goes into a file of its own under `shapes/`, as a
     picture goes under `figures/` (`\\slidefreeform`): a traced outline is hundreds of points read off
     a picture, which nobody edits by hand, and in the frame it buried the slide's words (sc-memphis
     had 922 lines of them a frame). The file holds the very path the frame held, so nothing moves."""
-    tr = el["trace"]
     ctx.packages.add("\\usepackage{tikz}")
-    x0, y0, x1, y1 = el["bbox"]
-    weight = tr.get("weight") or 0.75
+    x0, y0, x1, y1 = el.bbox
+    weight = tr.weight or 0.75
     if tree is not None:
-        import hashlib
         from .adopt import to_bp
-        rings = "\n".join(to_bp(traced_path([ring], x0, y0)) for ring in tr["rings"]) + "\n"
+        rings = "\n".join(to_bp(traced_path([ring], x0, y0)) for ring in tr.rings) + "\n"
         rel = f"shapes/freeform-{hashlib.sha1(rings.encode()).hexdigest()[:8]}.tex"
         dest = tree / rel
         if not dest.exists():
@@ -789,11 +814,11 @@ def traced_block(el: dict, ctx, ind: str, tree=None) -> str:
             dest.write_text(rings, encoding="utf-8")
         ctx.packages.add(SHAPE_MACRO)
         ctx.packages.add(FREEFORM_MACRO)
-        opts = [f"fill={colour_name(tr['fill'], ctx.colours)}"]
-        if tr.get("alpha") is not None and tr["alpha"] < 0.995:
-            opts.append(f"opacity={float(format(tr['alpha'], '.3f')):g}")
-        if tr.get("stroke"):
-            opts.append(f"outline={colour_name(tr['stroke'], ctx.colours)}")
+        opts = [f"fill={colour_name(tr.fill, ctx.colours)}"]
+        if tr.alpha is not None and tr.alpha < 0.995:
+            opts.append(f"opacity={float(format(tr.alpha, '.3f')):g}")
+        if tr.stroke:
+            opts.append(f"outline={colour_name(tr.stroke, ctx.colours)}")
             # drawn twice as wide as the deck's weight (half of it is clipped away); the old writer
             # rounded the doubled width to 0.01, and the macro doubles what it is given
             half = float(f"{2 * weight:.2f}") / 2
@@ -801,23 +826,23 @@ def traced_block(el: dict, ctx, ind: str, tree=None) -> str:
                 opts.append(f"outline width={half:g}")
         box = ",".join((pt1(x0), pt1(y0), pt(max(x1 - x0, 0.01)), pt(max(y1 - y0, 0.01))))
         return f"{ind}\\slidefreeform{options(opts)}{{{box}}}{{{rel}}}\n"
-    path = traced_path(tr["rings"], x0, y0)
-    opts = [f"fill={colour_name(tr['fill'], ctx.colours)}", "even odd rule"]
-    if tr.get("alpha") is not None and tr["alpha"] < 0.995:
-        opts.append(f"fill opacity={tr['alpha']:.3f}")
+    path = traced_path(tr.rings, x0, y0)
+    opts = [f"fill={colour_name(tr.fill, ctx.colours)}", "even odd rule"]
+    if tr.alpha is not None and tr.alpha < 0.995:
+        opts.append(f"fill opacity={tr.alpha:.3f}")
     body = [f"\\path[{','.join(opts)}] {path};"]
-    if tr.get("stroke"):
+    if tr.stroke:
         body.append(f"\\begin{{scope}}[even odd rule]\\clip {path};")
-        body.append(f"\\path[draw={colour_name(tr['stroke'], ctx.colours)},line width={2 * weight:.2f}pt] {path};")
+        body.append(f"\\path[draw={colour_name(tr.stroke, ctx.colours)},line width={2 * weight:.2f}pt] {path};")
         body.append("\\end{scope}")
     return tikz_block(" ".join(body), x0, y0, x1 - x0, y1 - y0, ind, ctx)
 
 
-def tip_options(el: dict, ctx, named: bool) -> list[str]:
+def tip_options(el: TargetShape, ctx: AdoptContext, named: bool) -> list[str]:
     """The arrow option for a line's heads: `->`, `<->`, `-SlideOpen`... (`named`: slides.sty's
     names, `tip_macro`), else the arrows.meta tips spelled out."""
-    kinds = (el.get("start_arrow") or ("FILL_ARROW" if el.get("arrow_start") else None),
-             el.get("end_arrow") or ("FILL_ARROW" if el.get("arrow") else None))
+    kinds = (el.start_arrow or ("FILL_ARROW" if el.arrow_start else None),
+             el.end_arrow or ("FILL_ARROW" if el.arrow else None))
     if not named:
         start, end = (tip(k) for k in kinds)
         if not (start or end):
@@ -833,24 +858,24 @@ def tip_options(el: dict, ctx, named: bool) -> list[str]:
     return [f"{start}-{names[1]}"]
 
 
-def turn_options(fr: dict) -> list[str] | None:
+def turn_options(fr: Frame) -> list[str] | None:
     """`rotate=` (TikZ's degrees, counter-clockwise) and `flip` for a frame turned or mirrored about
     its centre; None for a sheared one, which only `cm` can say."""
-    if fr.get("shear") or "rotation" not in fr or "box" not in fr:
+    if fr.shear:
         return None
-    rot = f"{-(fr.get('rotation') or 0.0):.3f}".rstrip("0").rstrip(".")   # deck_ir's own precision
+    rot = f"{-(fr.rotation or 0.0):.3f}".rstrip("0").rstrip(".")   # deck_ir's own precision
     out = [f"rotate={rot}"] if rot not in ("0", "-0", "") else []
-    return out + (["flip"] if fr.get("flip") else [])
+    return out + (["flip"] if fr.flip else [])
 
 
-def turned_box(fr: dict, x0: float, y0: float, cx: float, cy: float) -> tuple[str, str]:
+def turned_box(fr: Frame, x0: float, y0: float, cx: float, cy: float) -> tuple[str, str]:
     """The top left corner (bp, y down) of the upright box a turned frame is drawn in, such that
     turning it about (cx, cy) (the centre, from the corner, y down) puts every point where the old
     writer's `cm` put it: its picture at the element's box corner rounded to 0.1, the frame's
     origin 0.01 from there, and the matrix to 5 decimals. The frame's own box would do as well to
     within 0.05 pt, but the pixels would move."""
-    q0, q1, q2, q3 = fr["matrix"]
-    ox, oy = fr["origin"]
+    q0, q1, q2, q3 = fr.matrix
+    ox, oy = fr.origin
     a, b, c, d = (round(v, 5) for v in (q0, -q2, -q1, q3))   # TikZ's cm={a,b,c,d}: x' = a x + c y
     px, py = float(pt1(x0)) + float(pt(ox - x0)), -float(pt1(y0)) + float(pt(-(oy - y0)))
     ux, uy = cx, -cy                                           # the centre in TikZ's coordinates
@@ -863,32 +888,32 @@ def turned_box(fr: dict, x0: float, y0: float, cx: float, cy: float) -> tuple[st
     return k(bx), k(-by)
 
 
-def line_block(el: dict, ctx, ind: str, tree=None) -> str:
-    """A line or connector, with its heads, dashes and transparency. A straight one is a
-    `\\slideline` between its two ends; an elbow or a curve is drawn in its own frame, turned or
-    mirrored about the frame's centre."""
-    if el.get("trace"):
-        return traced_block(el, ctx, ind, tree)
-    stroke = el.get("outline")
+def line_block(el: TargetShape, start: Pt, end: Pt, ctx: AdoptContext, ind: str, tree: Path | None) -> str:
+    """A line or connector from `start` to `end` (its `from` and `to`), with its heads, dashes and
+    transparency. A straight one is a `\\slideline` between its two ends; an elbow or a curve is
+    drawn in its own frame, turned or mirrored about the frame's centre."""
+    if el.trace:
+        return traced_block(el, el.trace, ctx, ind, tree)
+    stroke = el.outline
     if not stroke or freeform_line(el):
         return ""
     ctx.packages.add("\\usepackage{tikz}")
-    _, so = style_options(el, ctx, stroke_only=True)
+    _, so = style_options(el, ctx, True)
     so = styled(ctx, so)          # the deck's name for a colour, weight and dash it draws again and again
-    x0, y0, x1, y1 = el["bbox"]
-    fr = el.get("frame")
-    if fr and el.get("line_type") and "STRAIGHT" not in el["line_type"]:
-        w, h = fr["size"]
+    x0, y0, x1, y1 = el.bbox
+    fr = el.frame
+    line_type = given(el.line_type)
+    if fr and line_type and "STRAIGHT" not in line_type:
+        w, h = fr.size
         turn = turn_options(fr)
-        kind = el.get("line_type") or "connector"
         if turn is not None:
             ctx.packages.add(SHAPE_MACRO)
-            body = path_body(so + tip_options(el, ctx, True), connector_path(el, w, h), kind, tree)
+            body = path_body(so + tip_options(el, ctx, True), connector_path(line_type, w, h), line_type, tree)
             bw, bh = pt(max(w, 0.01)), pt(max(h, 0.01))
             box = ",".join(turned_box(fr, x0, y0, float(bw) / 2, float(bh) / 2) + (bw, bh))
             return f"{ind}\\slideshape{options(turn)}{{{box}}}{{{body}}}\n"
         body = path_body(so + tip_options(el, ctx, False) + [transform_option(fr, x0, y0)],
-                         connector_path(el, w, h), kind, tree)
+                         connector_path(line_type, w, h), line_type, tree)
         return tikz_block(body, x0, y0, x1 - x0, y1 - y0, ind, ctx)
     # the ends where the old writer put them: its picture at the box corner rounded to 0.1, and the
     # ends 0.01 from there, so the two sums are the page point to 0.01
@@ -898,36 +923,45 @@ def line_block(el: dict, ctx, ind: str, tree=None) -> str:
         s = str(Decimal(pt1(v0)) + Decimal(pt(v - v0)))
         s = s.rstrip("0").rstrip(".") if "." in s else s
         return "0" if s in ("", "-0") else s
-    (ax, ay), (bx, by) = el["from"], el["to"]
+    (ax, ay), (bx, by) = start, end
     ctx.packages.add(SHAPE_MACRO)
     return (f"{ind}\\slideline{options(so + tip_options(el, ctx, True))}"
             f"{{{at(ax, x0)},{at(ay, y0)}}}{{{at(bx, x0)},{at(by, y0)}}}\n")
 
 
-def shape_block(el: dict, ctx, ind: str, tree=None) -> str:
+def preset_paths(el: Drawn, w: float, h: float) -> tuple[str, Paths]:
+    """(the shapeType drawn, its paths in a w by h frame): a text box's panel is its own shapeType's
+    (a rectangle when it has none); a shape's is its shapeType's, with the pie's angles and a rounded
+    rectangle's corners the thumbnail shows (`deck_fills.pie_angles`, `corner_radius`), not the
+    preset's defaults. A preset not known here is a rectangle."""
+    if isinstance(el, TargetShape):
+        kind = (el.shape_type or el.shape or "RECTANGLE").upper()
+        corner, pie = el.corner_radius, el.pie
+    else:
+        kind, corner, pie = (el.shape_type or "RECTANGLE").upper(), None, None
+    if kind in ("CUSTOM", "?", "FREEFORM"):
+        return kind, ([(ellipse(w / 2, h / 2, w / 2, h / 2), "fs")] if CUSTOM_AS == "ellipse" else rectangle(w, h))
+    if kind == "PIE" and pie:
+        start, sweep = pie
+        return kind, ([(ellipse(w / 2, h / 2, w / 2, h / 2), "fs")] if sweep >= 359.5 else
+                      [(f"{P(w / 2, h / 2)} -- {arc(w / 2, h / 2, w / 2, h / 2, start, sweep, True)} -- cycle", "fs")])
+    return kind, preset(kind, w, h, corner) or rectangle(w, h)
+
+
+def shape_block(el: Drawn, ctx: AdoptContext, ind: str, tree: Path | None) -> str:
     """A shape in its preset's geometry, filled and outlined as the deck has it, turned and mirrored
     by its transform. A freeform is drawn as `deck_freeforms` traced it from the slide's picture,
     else as `CUSTOM_AS` says (its geometry is not in the API)."""
-    if el.get("trace"):
-        return traced_block(el, ctx, ind, tree)
-    fo, so = style_options(el, ctx)
+    if isinstance(el, TargetShape) and el.trace:
+        return traced_block(el, el.trace, ctx, ind, tree)
+    fo, so = style_options(el, ctx, False)
     if not fo and not so:
         return ""
-    kind = (el.get("shape_type") or el.get("shape") or "RECTANGLE").upper()
     fr = frame_of(el)
-    w, h = max(fr["size"][0], 0.01), max(fr["size"][1], 0.01)
-    if kind in ("CUSTOM", "?", "FREEFORM"):
-        paths = preset("ELLIPSE" if CUSTOM_AS == "ellipse" else "RECTANGLE", w, h)
-    elif kind == "PIE" and el.get("pie"):
-        # the angles the thumbnail shows (`deck_fills.pie_angles`), not the preset's default
-        start, sweep = el["pie"]
-        paths = [(ellipse(w / 2, h / 2, w / 2, h / 2), "fs")] if sweep >= 359.5 else \
-            [(f"{P(w / 2, h / 2)} -- {arc(w / 2, h / 2, w / 2, h / 2, start, sweep)} -- cycle", "fs")]
-    else:
-        # a rounded rectangle's corners as the thumbnail shows them (`deck_fills.corner_radius`)
-        paths = preset(kind, w, h, el.get("corner_radius")) or preset("RECTANGLE", w, h)
+    w, h = max(fr.size[0], 0.01), max(fr.size[1], 0.01)
+    kind, paths = preset_paths(el, w, h)
     ctx.packages.add("\\usepackage{tikz}")
-    x0, y0, x1, y1 = el["bbox"]
+    x0, y0, x1, y1 = el.bbox
     where = transform_option(fr, x0, y0)
     # one path filled and outlined alike is the shape the deck drew: that is the line whose style the
     # deck can name (`survey_styles` counts it here, once per element, so the count is of real lines)
@@ -936,8 +970,9 @@ def shape_block(el: dict, ctx, ind: str, tree=None) -> str:
 
     def draw(where: str) -> list[tuple[list[str], str]]:
         """(path options, geometry) per path of the preset."""
-        body = []
+        body: list[tuple[list[str], str]] = []
         for path, mode in paths:
+            keys: list[str]
             if mode.startswith("fs"):
                 keys = list(opts) if mode == "fs" else fo + so
             elif mode == "f":
@@ -967,7 +1002,7 @@ def shape_block(el: dict, ctx, ind: str, tree=None) -> str:
     if not drawn:
         return ""
     one = one and len(drawn) == 1
-    radius = rounded_radius(kind, w, h, el.get("corner_radius"))
+    radius = rounded_radius(kind, w, h, el.corner_radius if isinstance(el, TargetShape) else None)
     turn = turn_options(fr) if where.startswith("cm=") else None
     if one and turn is not None:
         # turned or mirrored: the shape in its upright box, turned about the centre
@@ -1009,13 +1044,13 @@ def shape_block(el: dict, ctx, ind: str, tree=None) -> str:
     return tikz_block(bodies(drawn), x0, y0, x1 - x0, y1 - y0, ind, ctx)
 
 
-def turned_text(latex: str, el: dict, ctx) -> str:
+def turned_text(latex: str, el: TargetText, ctx: AdoptContext) -> str:
     """The text writer's `textblock*`s for a turned element, set turned about its centre."""
-    fr = el.get("frame") or {}
-    angle = fr.get("rotation") or 0.0
-    if abs(angle) < 0.05 or not latex.strip():
+    fr = el.frame
+    angle = (fr.rotation if fr else 0.0) or 0.0
+    if fr is None or abs(angle) < 0.05 or not latex.strip():
         return latex
-    x0, y0, x1, y1 = fr["box"]
+    x0, y0, x1, y1 = fr.box
     ctx.packages.add("\\usepackage{tikz}")
     ctx.packages.add(TURN_MACRO)
     return (f"  \\adoptturned{{{-angle:.2f}}}{{{(x0 + x1) / 2:.2f}pt}}{{{(y0 + y1) / 2:.2f}pt}}{{%\n"

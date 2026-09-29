@@ -11,6 +11,8 @@ from PIL import Image
 
 from beamer2slides import deck_thumbs
 
+from .deck_records import dicts, records
+
 PAGE_BG = (245, 245, 245)
 
 
@@ -43,6 +45,11 @@ def image_el(file: str, bbox: list[float], **extra) -> dict:
             "bbox": list(bbox), "file": file, **extra}
 
 
+def placed(els: list[dict], thumb, px: float) -> list[dict]:
+    """`deck_thumbs.thumbnail_picture_places` over the records `els` stand for: the new elements, as dicts."""
+    return dicts(deck_thumbs.thumbnail_picture_places(records(els), thumb, px))
+
+
 # The frame is a 300 x 200 pt box at (50, 50); px == 1.0 keeps pt and pixels the same, so the
 # numbers above the test bodies are the ones a reader can check against the module's own thresholds.
 FRAME = [50.0, 50.0, 350.0, 250.0]
@@ -56,7 +63,7 @@ def test_a_letterboxed_picture_is_placed_at_its_narrower_box(tmp_path):
     paste_resized(thumb, src, drawn)
     el = image_el(png, FRAME)
 
-    deck_thumbs.thumbnail_picture_places([el], thumb, 1.0)
+    el, = placed([el], thumb, 1.0)
 
     assert el["picture_place"] == "thumbnail"
     x0, y0, x1, y1 = el["bbox"]
@@ -72,7 +79,7 @@ def test_a_stretch_that_already_reads_well_is_left_alone(tmp_path):
     paste_resized(thumb, src, (50, 50, 350, 250))   # fills the whole frame: no padding at all
     el = image_el(png, list(FRAME))
 
-    deck_thumbs.thumbnail_picture_places([el], thumb, 1.0)
+    el, = placed([el], thumb, 1.0)
 
     assert el["bbox"] == FRAME
     assert "picture_place" not in el
@@ -92,7 +99,7 @@ def test_a_covering_element_above_is_left_out_of_the_comparison(tmp_path):
     el = image_el(png, FRAME)
     label = {"kind": "text", "bbox": cover_bbox, "paragraphs": [{"runs": [{"text": "Loss function"}]}]}
 
-    deck_thumbs.thumbnail_picture_places([el, label], thumb, 1.0)
+    el, _ = placed([el, label], thumb, 1.0)
 
     assert el["picture_place"] == "thumbnail"
     x0, y0, x1, y1 = el["bbox"]
@@ -100,8 +107,7 @@ def test_a_covering_element_above_is_left_out_of_the_comparison(tmp_path):
 
 
 @pytest.mark.parametrize("extra", [{"rotation": 12.0}, {"flip": True}, {"crop": {"l": 0.1, "t": 0, "r": 0, "b": 0}},
-                                   {"video": {"source": "YOUTUBE", "id": "y"}}, {"chart": {"chartId": "1"}},
-                                   {"wordArt": True}])
+                                   {"video": {"source": "YOUTUBE", "id": "y"}}, {"chart": {"spreadsheetId": None, "chartId": 1}}])
 def test_what_is_never_moved_this_way(extra, tmp_path):
     src = checker(120, 60)
     png = save_png(tmp_path / "chart.png", src)
@@ -109,7 +115,7 @@ def test_what_is_never_moved_this_way(extra, tmp_path):
     paste_resized(thumb, src, (110, 50, 290, 250))
     el = image_el(png, list(FRAME), **extra)
 
-    deck_thumbs.thumbnail_picture_places([el], thumb, 1.0)
+    el, = placed([el], thumb, 1.0)
 
     assert el["bbox"] == FRAME and "picture_place" not in el
 
@@ -122,7 +128,7 @@ def test_a_frame_too_small_to_search_is_left_alone(tmp_path):
     paste_resized(thumb, src, (14, 10, 26, 20))
     el = image_el(png, tiny)
 
-    deck_thumbs.thumbnail_picture_places([el], thumb, 1.0)
+    el, = placed([el], thumb, 1.0)
 
     assert el["bbox"] == tiny and "picture_place" not in el
 
@@ -130,14 +136,14 @@ def test_a_frame_too_small_to_search_is_left_alone(tmp_path):
 def test_without_a_thumbnail_nothing_changes(tmp_path):
     png = save_png(tmp_path / "chart.png", checker(120, 60))
     el = image_el(png, list(FRAME))
-    deck_thumbs.thumbnail_picture_places([el], None, 1.0)
+    el, = placed([el], None, 1.0)
     assert el["bbox"] == FRAME and "picture_place" not in el
 
 
 def test_a_missing_file_is_left_alone(tmp_path):
     thumb = page(450, 350)
     el = image_el(str(tmp_path / "does-not-exist.png"), list(FRAME))
-    deck_thumbs.thumbnail_picture_places([el], thumb, 1.0)
+    el, = placed([el], thumb, 1.0)
     assert el["bbox"] == FRAME and "picture_place" not in el
 
 
@@ -173,7 +179,7 @@ def test_a_transparent_icon_already_sized_to_its_frame_is_left_alone(tmp_path):
     thumb[50:250, 50:350] = np.asarray(frame)
     el = image_el(str(tmp_path / "flag.png"), list(FRAME))
 
-    deck_thumbs.thumbnail_picture_places([el], thumb, 1.0)
+    el, = placed([el], thumb, 1.0)
 
     assert el["bbox"] == FRAME and "picture_place" not in el
 
@@ -192,7 +198,7 @@ def test_alpha_compositing_is_what_reads_the_icon_as_already_right(tmp_path):
     frame_img = Image.fromarray(composited.astype(np.uint8), "RGB").resize((300, 200), Image.BILINEAR)
     thumb[50:250, 50:350] = np.asarray(frame_img)
 
-    a0, b0, a1, b1 = px_box(FRAME, 1.0, 450, 350)
+    a0, b0, a1, b1 = px_box(tuple(FRAME), 1.0, 450, 350, 0)
     frame_gray = (thumb[b0:b1, a0:a1].astype(np.float32)
                   * np.array([0.299, 0.587, 0.114], dtype=np.float32)).sum(axis=2)
     visible = deck_thumbs._place_visible([], (a0, b0, a1, b1), 1.0, 450, 350)

@@ -25,15 +25,21 @@ import os
 import re
 import shutil
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 from . import labels as labels_mod
 from . import snapshot
 from .fonts import cjk_font
-from .adopt_shapes import SHAPE_MACRO, shape_style_definitions, survey_styles, turned_text
+from .adopt_shapes import SHAPE_MACRO, Drawn, shape_style_definitions, survey_styles, turned_text
 from .adopt_context import AdoptContext, Metrics, adopt_context
-from .inverse import (TEXTPOS, body_style, colour_name, frame_latex, paragraphs_latex,
+from .adopt_theme import FramePlan
+from .deck_ir_types import (TargetDeck, TargetDiagram, TargetElement, TargetImage, TargetShape, TargetTable,
+                            TargetText, Video, element_json, parse_target, recolor_json)
+from .inverse import (TEXTPOS, Picture, body_style, colour_name, frame_latex, paragraphs_latex,
                       picture_block)
+from .json_types import JsonObject
+from .typing_compat import assert_never
 
 # beamer's own page sizes, by the class option that asks for them (`deck_ir.BEAMER_SIZES`).
 ASPECTS = {(453.54, 255.12): "aspectratio=169", (453.54, 283.46): "aspectratio=1610",
@@ -1146,13 +1152,35 @@ def pixel_size(path: Path) -> tuple[int, int]:
         return img.size
 
 
-def picture_of(el: dict, tree: Path | None):
+def picture_of(el: TargetImage, tree: Path | None) -> Picture | None:
     """The `Picture` for an element whose file the deck gave us, copied into the source tree so the
     tree stands on its own (the download sits in the work folder, which is scratch). None when the
-    deck would not give the file: the loop then reports `element_missing`, which says so."""
-    from .inverse import Picture, natural_size, picture_slug
+    deck would not give the file: the loop then reports `element_missing`, which says so.
+
+    Brightness, contrast and recolour are properties LaTeX has no option for: baked into the file
+    (`compare.adjusted_picture`), as `pull` does - intro-lecture's title photos are dimmed to half."""
+    bake: JsonObject = {}
+    if el.brightness:
+        bake["brightness"] = el.brightness
+    if el.contrast:
+        bake["contrast"] = el.contrast
+    if el.recolor:
+        bake["recolor"] = recolor_json(el.recolor)
+    return picture_file(el.file, el.alt, el.sha1, bake, tree)
+
+
+def background_picture(file: str, tree: Path | None) -> Picture | None:
+    """A slide's or layout's picture fill as a `Picture` in the source tree (`picture_file`)."""
+    return picture_file(file, "background", None, {}, tree)
+
+
+def picture_file(file: str | None, alt: str | None, sha1: str | None, bake: JsonObject,
+                 tree: Path | None) -> Picture | None:
+    """`file` copied into the source tree as a picture named after `alt` and `sha1`, the adjustments
+    in `bake` baked into its pixels (`picture_of`)."""
+    from .inverse import natural_size, picture_slug
     from .inverse import LATEX_PICTURES
-    path = Path(el["file"]) if el.get("file") else None
+    path = Path(file) if file else None
     if path is None or not path.exists():
         return None
     suffix = path.suffix.lower()
@@ -1163,33 +1191,30 @@ def picture_of(el: dict, tree: Path | None):
             print(f"  {path.name}: {suffix[1:].upper()} pictures can't be included by LaTeX; left out")
             return None
         suffix = ".png"
-    # Brightness, contrast and recolour are properties LaTeX has no option for: baked into the file
-    # (`compare.adjusted_picture`), as `pull` does - intro-lecture's title photos are dimmed to half
-    bake = {k: el[k] for k in ("brightness", "contrast", "recolor") if el.get(k)}
-    if bake and suffix not in (".png", ".jpg", ".jpeg"):
-        bake = {}
+    adjust = bake if suffix in (".png", ".jpg", ".jpeg") else {}
     # Slides draws a picture smoothed, a PDF viewer a few pixels as squares: vi-slides' 5x5 px
     # background photo came out a checkerboard. A tiny picture is enlarged the way Slides draws it.
-    if suffix in (".png", ".jpg", ".jpeg") and max(pixel_size(path)) < TINY_PICTURE:
-        bake = {**bake, "smooth": SMOOTH_PICTURE}
-    if tree is None and not bake:
+    smooth = SMOOTH_PICTURE if suffix in (".png", ".jpg", ".jpeg") and max(pixel_size(path)) < TINY_PICTURE \
+        else None
+    baked: JsonObject = {**adjust, "smooth": smooth} if smooth else dict(adjust)
+    if tree is None and not baked:
         return Picture(path.name, path, natural_size(path))
-    tag = hashlib.sha1(json.dumps(bake, sort_keys=True).encode()).hexdigest()[:4] if bake else ""
-    rel = f"figures/{picture_slug(el.get('alt'))}-{(el.get('sha1') or path.stem)[:8]}{tag}{suffix}"
+    tag = hashlib.sha1(json.dumps(baked, sort_keys=True).encode()).hexdigest()[:4] if baked else ""
+    rel = f"figures/{picture_slug(alt)}-{(sha1 or path.stem)[:8]}{tag}{suffix}"
     dest = (tree if tree is not None else path.parent) / rel
     if not dest.exists():
         dest.parent.mkdir(parents=True, exist_ok=True)
-        if bake:
+        if baked:
             from PIL import Image
             from .compare import adjusted_picture
             with Image.open(path) as img:
                 img.seek(0)
-                out = adjusted_picture(img, bake) if bake.keys() - {"smooth"} else img.convert("RGBA")
+                out = adjusted_picture(img, baked) if adjust else img.convert("RGBA")
                 dpi = img.info.get("dpi")
             dpi = tuple(float(d) for d in dpi) if dpi and all(float(d) > 1 for d in dpi) else (72.0, 72.0)
-            if bake.get("smooth"):
+            if smooth:
                 # enlarged, at a resolution that keeps the size graphicx gives it (`natural_size`)
-                k = bake["smooth"] / max(out.size)
+                k = smooth / max(out.size)
                 out = out.resize((round(out.width * k), round(out.height * k)), Image.BICUBIC)
                 dpi = (dpi[0] * k, dpi[1] * k)
             if suffix == ".png":
@@ -2511,28 +2536,29 @@ def letterboxed(src: Path, w: float, h: float, dest: Path) -> Path:
     return dest
 
 
-def video_block(el: dict, ctx: AdoptContext, ind: str, tree: Path | None) -> str:
-    """A video: the frame Slides shows before it plays, linked to where it plays. With no poster
-    frame to show (a Drive video: no API gives one) a dark panel with a play symbol stands in."""
-    video = el["video"]
-    x0, y0, x1, y1 = el.get("box") or el["bbox"]
+def video_block(el: TargetImage, video: Video, ctx: AdoptContext, ind: str, tree: Path | None) -> str:
+    """A video (`video`, the element's): the frame Slides shows before it plays, linked to where it
+    plays. With no poster frame to show (a Drive video: no API gives one) a dark panel with a play
+    symbol stands in."""
+    x0, y0, x1, y1 = el.box or el.bbox
     w, h = max(x1 - x0, 0.1), max(y1 - y0, 0.1)
-    link = video.get("url")
+    link = video.url
     body = None
-    if el.get("file") and Path(el["file"]).exists() and tree is not None:
-        dest = tree / "figures" / f"video-{flatten(video.get('id') or 'x')[:24]}-{round(w)}x{round(h)}.png"
+    if el.file and Path(el.file).exists() and tree is not None:
+        dest = tree / "figures" / f"video-{flatten(video.id or 'x')[:24]}-{round(w)}x{round(h)}.png"
         try:
             # a frame read off the slide's thumbnail is already as the player shows it
-            if el.get("poster") == "thumbnail":
+            if el.poster == "thumbnail":
                 dest.parent.mkdir(parents=True, exist_ok=True)
-            framed = Path(shutil.copyfile(el["file"], dest)) if el.get("poster") == "thumbnail" else \
-                letterboxed(Path(el["file"]), w, h, dest)
+            framed = Path(shutil.copyfile(el.file, dest)) if el.poster == "thumbnail" else \
+                letterboxed(Path(el.file), w, h, dest)
         except OSError:
             framed = None
         if framed is not None:
-            from .inverse import Picture, natural_size
+            from .inverse import natural_size
             pic = Picture(framed.relative_to(tree).as_posix(), framed, natural_size(framed))
-            body = picture_block({**{k: v for k, v in el.items() if k != "crop"}}, pic, ctx, ind)
+            # (its crop was the file's, which the poster frame is not)
+            body = picture_block(element_json(replace(el, crop=None)), pic, ctx, ind)
     if body is None:
         ctx.packages.add("\\usepackage{tikz}")
         grey, white = colour_name("#212121", ctx.colours), colour_name("#ffffff", ctx.colours)
@@ -2540,8 +2566,8 @@ def video_block(el: dict, ctx: AdoptContext, ind: str, tree: Path | None) -> str
         cx, cy = w / 2, -h / 2
         tri = (f"({cx - r * 0.45:.1f}pt,{cy + r * 0.6:.1f}pt) -- ({cx + r * 0.65:.1f}pt,{cy:.1f}pt) -- "
                f"({cx - r * 0.45:.1f}pt,{cy - r * 0.6:.1f}pt) -- cycle")
-        outline = el.get("outline")
-        draw = f",draw={colour_name(outline['color'], ctx.colours)},line width={outline['weight']:.2f}pt" \
+        outline = el.outline
+        draw = f",draw={colour_name(outline.color, ctx.colours)},line width={outline.weight:.2f}pt" \
             if outline else ""
         body = tikz_block(f"\\path[fill={grey}{draw}] (0pt,0pt) rectangle ({w:.1f}pt,{-h:.1f}pt);\n"
                           f"{ind}    \\path[draw={white},line width={max(r / 8, 0.4):.2f}pt] ({cx:.1f}pt,{cy:.1f}pt) circle ({r:.1f}pt);\n"
@@ -2554,14 +2580,14 @@ def video_block(el: dict, ctx: AdoptContext, ind: str, tree: Path | None) -> str
     return f"{head}\n{ind}  \\href{{{url_latex(link)}}}{{%\n{inner}{ind}  }}%\n{ind}\\end{{textblock*}}{tail}"
 
 
-def wordart_block(el: dict, ctx: AdoptContext, ind: str) -> str:
+def wordart_block(el: TargetText, ctx: AdoptContext, ind: str) -> str:
     """WordArt: its words stretched to its box, as Slides draws them (Slides keeps no size for them,
     only the box), turned with the element. Fill and outline are not in the API: the text colour."""
     from .inverse import latex_escape
-    x0, y0, x1, y1 = el.get("box") or el["bbox"]
+    x0, y0, x1, y1 = el.box if isinstance(el.box, tuple) else el.bbox
     w, h = max(x1 - x0, 0.1), max(y1 - y0, 0.1)
-    lines = ["".join(r["text"] for r in p["runs"]) for p in el["paragraphs"]]
-    colour = next((r.get("color") for p in el["paragraphs"] for r in p["runs"] if r.get("color")), None)
+    lines = ["".join(r.text for r in p.runs) for p in el.paragraphs]
+    colour = next((r.color for p in el.paragraphs for r in p.runs if r.color), None)
     text = latex_escape(lines[0]) if len(lines) == 1 else \
         "\\begin{tabular}{@{}c@{}}" + "\\\\".join(latex_escape(t) for t in lines) + "\\end{tabular}"
     ctx.packages.add("\\usepackage{graphicx}")
@@ -2570,9 +2596,9 @@ def wordart_block(el: dict, ctx: AdoptContext, ind: str) -> str:
     body = f"\\resizebox*{{{w:.1f}pt}}{{{h:.1f}pt}}{{\\bfseries {text}}}"
     if colour:
         body = f"\\textcolor{{{colour_name(colour, ctx.colours)}}}{{{body}}}"
-    if el.get("rotation"):
-        body = f"\\rotatebox[origin=c]{{{-el['rotation']:g}}}{{{body}}}"
-    bx0, by0, bx1, _ = el["bbox"]
+    if el.rotation:
+        body = f"\\rotatebox[origin=c]{{{-el.rotation:g}}}{{{body}}}"
+    bx0, by0, bx1, _ = el.bbox
     return (f"{ind}\\begin{{textblock*}}{{{bx1 - bx0:.1f}pt}}({bx0:.1f}pt,{by0:.1f}pt)\n"
             f"{ind}  \\noindent{body}\n{ind}\\end{{textblock*}}\n")
 
@@ -2630,36 +2656,36 @@ PICTURE_MACRO = r"""% --- Pictures ---------------------------------------------
 \def\slides@xywh#1,#2,#3,#4\@nil{\def\slides@x{#1}\def\slides@y{#2}\def\slides@w{#3}\def\slides@h{#4}}"""
 
 
-def slide_picture(te: dict, pic, ctx: AdoptContext, ind: str) -> str:
+def slide_picture(te: TargetImage, pic: Picture, ctx: AdoptContext, ind: str) -> str:
     """A deck picture at its place, one `\\slidepicture` line: the numbers `inverse.picture_block`
     wrote (its block's corner, the picture's size), the edits as named options."""
     from .adopt_shapes import pt1
-    x0, y0, _, _ = te["bbox"]
-    bx0, by0, bx1, by1 = te.get("box") or te["bbox"]
-    outline = te.get("outline")
-    pad = outline["weight"] / 2 if outline and not te.get("rotation") else 0.0
+    x0, y0, _, _ = te.bbox
+    bx0, by0, bx1, by1 = te.box or te.bbox
+    outline = te.outline
+    pad = outline.weight / 2 if outline and not te.rotation else 0.0
     opts = []
-    crop = te.get("crop")
+    crop = te.crop
     if crop:
         nw, nh = pic.natural
-        trim = (crop["l"] * nw, crop["b"] * nh, crop["r"] * nw, crop["t"] * nh)
+        trim = (crop.l * nw, crop.b * nh, crop.r * nw, crop.t * nh)
         opts.append("trim=" + " ".join(num(max(0.0, v)) for v in trim))
-    angle = round(-(te.get("rotation") or 0.0), 2)
+    angle = round(-(te.rotation or 0.0), 2)
     if angle:
         opts.append(f"angle={angle:g}")
-    if te.get("flip"):
+    if te.flip:
         opts.append("flip")
-    if te.get("opacity") is not None and te["opacity"] < 0.995:
-        opts.append(f"opacity={num(te['opacity'])}")
+    if te.opacity is not None and te.opacity < 0.995:
+        opts.append(f"opacity={num(te.opacity)}")
     if outline:
-        opts.append(f"outline={colour_name(outline['color'], ctx.colours)}")
-        if num(outline["weight"]) != "0.75":
-            opts.append(f"outline width={num(outline['weight'])}")
-        if outline.get("dash", "SOLID") != "SOLID":
-            opts.append("dash=" + ("dotted" if "DOT" in outline["dash"] and "DASH" not in outline["dash"] else "dashed"))
-    if te.get("mask") == "ellipse":
+        opts.append(f"outline={colour_name(outline.color, ctx.colours)}")
+        if num(outline.weight) != "0.75":
+            opts.append(f"outline width={num(outline.weight)}")
+        if outline.dash != "SOLID":
+            opts.append("dash=" + ("dotted" if "DOT" in outline.dash and "DASH" not in outline.dash else "dashed"))
+    if te.mask == "ellipse":
         opts.append("oval")
-    if outline or te.get("mask") or te.get("opacity") is not None and te["opacity"] < 0.995:
+    if outline or te.mask or te.opacity is not None and te.opacity < 0.995:
         ctx.packages.add(TIKZ)
     ctx.packages.add("\\usepackage{graphicx}")
     ctx.packages.add(TEXTPOS)
@@ -2679,7 +2705,7 @@ def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str) ->
             f"{ind}\\end{{textblock*}}\n")
 
 
-def shape_block(el: dict, ctx: AdoptContext, ind: str, tree: Path | None = None) -> str:
+def shape_block(el: Drawn, ctx: AdoptContext, ind: str, tree: Path | None) -> str:
     """A panel, a node of a flow chart or a connector, at its place on the page.
 
     tikz rather than `\\rule`, because a foreign deck's shapes are not only filled rectangles: the
@@ -2687,8 +2713,8 @@ def shape_block(el: dict, ctx: AdoptContext, ind: str, tree: Path | None = None)
     neither. A shape with no fill and no outline draws nothing and is left out, so the ink is the
     deck's and nothing else."""
     from . import adopt_shapes
-    if el.get("role") == "line" and el.get("from") and el.get("to"):
-        return adopt_shapes.line_block(el, ctx, ind, tree)
+    if isinstance(el, TargetShape) and el.role == "line" and el.start and el.end:
+        return adopt_shapes.line_block(el, el.start, el.end, ctx, ind, tree)
     return adopt_shapes.shape_block(el, ctx, ind, tree)
 
 
@@ -3705,43 +3731,56 @@ def table_block(el: dict, ctx: AdoptContext, ind: str) -> str:
     return "\n".join(lines)
 
 
-def element_latex(el: dict, ctx: AdoptContext, tree: Path | None = None, ind: str = "  ") -> str:
+def element_latex(el: TargetElement, ctx: AdoptContext, tree: Path | None, ind: str) -> str:
     """What one IR element draws: its textblocks, "" when it draws nothing of its own."""
     out = []
-    if el.get("role") in ("math", "icon"):
+    if el.role in ("math", "icon"):
         return ""                                      # part of a text line, not an element of its own
-    if el["kind"] == "shape":
-        out.append(shape_block(el, ctx, ind, tree).rstrip("\n"))
-    elif el["kind"] == "table":
-        out.append(table_block(el, ctx, ind))
-    elif el["kind"] == "image" and el.get("video"):
-        ctx.packages.add(TEXTPOS)
-        out.append(video_block(el, ctx, ind, tree).rstrip("\n"))
-    elif el["kind"] == "text" and el.get("wordart"):
-        out.append(wordart_block(el, ctx, ind).rstrip("\n"))
-    elif el["kind"] == "image":
-        pic = picture_of(el, tree)
-        if pic is not None:
-            ctx.packages.add(TEXTPOS)
-            if el.get("picture_source") == "thumbnail":
-                # its own file never came: a crop of Google's render of the slide stands in
-                # (`deck_fills.recover_pictures`; `pictures_from_thumbnail` says it in the report)
-                alt = " ".join((el.get("alt") or "").split())[:60]
-                out.append(f"{ind}{THUMBNAIL_PICTURE_NOTE}{': ' + alt if alt else ''}")
-            out.append(slide_picture(el, pic, ctx, ind).rstrip("\n"))
-        else:
-            # where it goes, for the person who puts it back (`pictures_missing` says why)
-            alt = " ".join((el.get("alt") or "").split())[:60]
-            out.append(f"{ind}% picture left out{': ' + alt if alt else ''} (at {', '.join(f'{v:.0f}' for v in el['bbox'])} pt)")
-    elif el["kind"] == "text" and el.get("paragraphs"):
-        ctx.packages.add(TEXTPOS)
-        # A node of a flow chart is one element: its box, then its label on top.
-        out.append(shape_block(el, ctx, ind, tree).rstrip("\n"))
-        # A turned text box: its words are written upright in the box it would have if it were
-        # not turned, and that is then set turned about its centre (`adopt_shapes.turned_text`).
-        upright = {**el, "bbox": el["frame"]["box"]} if el.get("frame") else el
-        out.append(turned_text(text_box_latex(upright, ctx, ind), el, ctx))
+    match el:
+        case TargetShape():
+            out.append(shape_block(el, ctx, ind, tree).rstrip("\n"))
+        case TargetTable():
+            out.append(table_block(element_json(el), ctx, ind))
+        case TargetImage():
+            if el.video:
+                ctx.packages.add(TEXTPOS)
+                out.append(video_block(el, el.video, ctx, ind, tree).rstrip("\n"))
+            else:
+                out += image_latex(el, ctx, tree, ind)
+        case TargetText():
+            if el.wordart:
+                out.append(wordart_block(el, ctx, ind).rstrip("\n"))
+            elif el.paragraphs:
+                ctx.packages.add(TEXTPOS)
+                # A node of a flow chart is one element: its box, then its label on top.
+                out.append(shape_block(el, ctx, ind, tree).rstrip("\n"))
+                # A turned text box: its words are written upright in the box it would have if it
+                # were not turned, and that is then set turned about its centre
+                # (`adopt_shapes.turned_text`).
+                upright = replace(el, bbox=el.frame.box) if el.frame else el
+                out.append(turned_text(text_box_latex(element_json(upright), ctx, ind), el, ctx))
+        case TargetDiagram():
+            pass                                       # deck_ir writes none
+        case _:
+            assert_never(el)
     return "\n".join(x for x in out if x.strip())
+
+
+def image_latex(el: TargetImage, ctx: AdoptContext, tree: Path | None, ind: str) -> list[str]:
+    """A picture's lines: the picture where its file came, a note where it did not."""
+    pic = picture_of(el, tree)
+    alt = " ".join((el.alt or "").split())[:60]
+    if pic is None:
+        # where it goes, for the person who puts it back (`pictures_missing` says why)
+        return [f"{ind}% picture left out{': ' + alt if alt else ''} (at {', '.join(f'{v:.0f}' for v in el.bbox)} pt)"]
+    ctx.packages.add(TEXTPOS)
+    out = []
+    if el.picture_source == "thumbnail":
+        # its own file never came: a crop of Google's render of the slide stands in
+        # (`deck_fills.recover_pictures`; `pictures_from_thumbnail` says it in the report)
+        out.append(f"{ind}{THUMBNAIL_PICTURE_NOTE}{': ' + alt if alt else ''}")
+    out.append(slide_picture(el, pic, ctx, ind).rstrip("\n"))
+    return out
 
 
 # What opens a /B2S mark (SLIDES_STY_HEAD's \slides@open), as a frame spells it: one mark per call.
@@ -3797,8 +3836,8 @@ def drawing_order(s: dict, pieces: list[str], plan) -> list[int]:
     lid = s.get("layout")
     master = [k for k in sorted(drawn) if pieces[k] and els[k].get("inherited") and els[k]["inherited"] != lid]
     own = [k for k in sorted(drawn) if pieces[k] and els[k].get("inherited") == lid]
-    slots = [k for types, *_ in SLOTS.values() for k in sorted(drawn)
-             if pieces[k] and not els[k].get("inherited") and els[k].get("placeholder") in types]
+    slots = [k for spec in SLOTS.values() for k in sorted(drawn)
+             if pieces[k] and not els[k].get("inherited") and els[k].get("placeholder") in spec.types]
     return body + master + own + slots
 
 
@@ -3847,20 +3886,17 @@ def frame_labels(target: dict) -> list[str]:
     return out
 
 
-def slide_latex(s: dict, style_for, ctx: AdoptContext, flow: bool, tree: Path | None = None,
-                deck_bg: str | None = None, pieces: list[str] | None = None, plan=None,
-                label: str | None = None) -> str:
+def slide_latex(s: dict, style_for, ctx: AdoptContext, flow: bool, tree: Path | None, deck_bg: str | None,
+                pieces: list[str], plan: FramePlan | None, label: str | None) -> str:
     """One deck slide as a frame. `flow` writes the readable version (`inverse.frame_latex`: a frame
     title and body text in the flow); otherwise every element keeps its own place.
 
-    `pieces`: each element's `element_latex`, when the caller has them already. `plan`: what the
+    `pieces`: each element's `element_latex` (none in the flow). `plan`: what the
     recovered theme draws for this slide (`adopt_theme.FramePlan`): its layout's decoration, title,
     subtitle and number are left out of the frame, which names the layout instead. `label`: the
     frame's identity (`frame_labels`)."""
     if flow:
         return frame_latex(s, style_for, ctx, label)
-    if pieces is None:
-        pieces = [element_latex(el, ctx, tree) for el in s["elements"]]
     opts = plan.options(label) if plan else (f"[plain,label={label}]" if label else "[plain]")
     if plan and s.get("background_gradient"):
         # A recovered theme applies its `background=`/`backdrop=`/`layout=` frame options as one of
@@ -3901,8 +3937,7 @@ def slide_latex(s: dict, style_for, ctx: AdoptContext, flow: bool, tree: Path | 
         # `background_color`/`background_picture`, which this slide still reports the deck-common
         # value for).
         return text
-    backdrop = picture_of({"file": s.get("background_file"), "alt": "background"}, tree) \
-        if s.get("background_file") else None
+    backdrop = background_picture(s["background_file"], tree) if s.get("background_file") else None
     if backdrop is not None:
         # A stretched picture fill is the whole page under everything else, which is beamer's
         # background canvas; the colour under it no longer shows.
@@ -4195,6 +4230,7 @@ def bootstrap(target: dict, tex: Path, flow: bool = False, missing: list | None 
     `slides.sty` beside it that its frames' vocabulary comes from. The fonts the deck names that
     were set in something else are added to `missing` (`font_preamble`'s `ctx.missing_fonts`)."""
     ctx = adopt_context()
+    deck = parse_target(target)
     deck_text_defaults(target, ctx)
     style_for = level_style(target)
     tex.parent.mkdir(parents=True, exist_ok=True)
@@ -4207,7 +4243,7 @@ def bootstrap(target: dict, tex: Path, flow: bool = False, missing: list | None 
         # what most paragraphs and list items are, said once in the preamble
         deck_text_survey(target, ctx)
     # and what its shapes are drawn in, where the deck draws the same look again and again
-    survey_styles(target, ctx, tex.parent)
+    survey_styles(deck, ctx, tex.parent)
     # "% slide N" says which deck slide a frame is, for a person reading the source and for tools
     # that compile frames one at a time (devtools.adopt_bench finds the frames that break a build)
     from . import inverse
@@ -4216,12 +4252,12 @@ def bootstrap(target: dict, tex: Path, flow: bool = False, missing: list | None 
     try:
         names = frame_labels(target)
         if flow:
-            frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg, label=name))
+            frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg, [], None, name))
                       for n, (s, name) in enumerate(zip(target["slides"], names), 1)]
         else:
-            pieces = [[to_bp(element_latex(el, ctx, tex.parent)) for el in s["elements"]] for s in target["slides"]]
-            theme = recovered_theme(target, pieces, ctx, tex.parent, deck_bg)
-            plans = theme[1] if theme else [None] * len(pieces)
+            pieces = [[to_bp(element_latex(el, ctx, tex.parent, "  ")) for el in s.elements] for s in deck.slides]
+            theme = recovered_theme(deck, pieces, ctx, tex.parent, deck_bg)
+            plans: list[FramePlan | None] = list(theme[1]) if theme else [None] * len(pieces)
             frames = [f"% slide {n}\n" + to_bp(slide_latex(s, style_for, ctx, flow, tex.parent, deck_bg, p, plan, name))
                       for n, (s, p, plan, name) in enumerate(zip(target["slides"], pieces, plans, names), 1)]
             (tex.parent / KEYS_FILE).write_text(keys_file(target, pieces, plans, names), encoding="utf-8")
@@ -4258,7 +4294,7 @@ def bootstrap(target: dict, tex: Path, flow: bool = False, missing: list | None 
     if theme:
         # the deck's masters and layouts, said once (`adopt_theme`): after the colours and styles it draws in
         from .adopt_theme import theme_name
-        name = theme_name(target)
+        name = theme_name(deck.source.title)
         theme_file = tex.parent / f"beamertheme{name}.sty"
         extra.append(f"\\usetheme{{{name}}}")
     text = head + "\n" + "\n".join(extra) + "\n\n\\begin{document}\n\n" + "\n".join(frames) + "\n\\end{document}\n"
@@ -4273,20 +4309,21 @@ def bootstrap(target: dict, tex: Path, flow: bool = False, missing: list | None 
     return text
 
 
-def recovered_theme(target: dict, pieces: list[list[str]], ctx: AdoptContext, tree: Path, deck_bg: str | None):
+def recovered_theme(deck: TargetDeck, pieces: list[list[str]], ctx: AdoptContext, tree: Path,
+                    deck_bg: str | None) -> tuple[str, list[FramePlan]] | None:
     """(theme .sty, FramePlan per slide) from `adopt_theme.plan`, or None."""
     import copy
     from . import adopt_theme
     scratch = copy.deepcopy(ctx)          # writing a placeholder again must leave the real context alone
 
     def picture(file: str) -> str | None:
-        pic = picture_of({"file": file, "alt": "background"}, tree)
+        pic = background_picture(file, tree)
         if pic is None:
             return None
         ctx.packages.add("\\usepackage{graphicx}")
         return pic.rel
 
-    return adopt_theme.plan(target, pieces, lambda el: to_bp(element_latex(el, scratch, tree)),
+    return adopt_theme.plan(deck, pieces, lambda el: to_bp(element_latex(el, scratch, tree, "  ")),
                             lambda c: colour_name(c, ctx.colours), picture, deck_bg)
 
 

@@ -6,10 +6,12 @@ thumbnails 720 px wide, so a thumbnail pixel is a Slides point."""
 import numpy as np
 import pytest
 
-from beamer2slides import adopt, adopt_shapes, deck_fills, deck_freeforms
+from beamer2slides import adopt, adopt_shapes, deck_freeforms
 from beamer2slides.adopt_context import adopt_context
+from beamer2slides.deck_ir_types import TargetShape
 
-from .test_adopt_fills import EMU, UNREAD, at, deck, elements, page, pt, shape, solid
+from .deck_records import as_dict, parsed, record, records
+from .test_adopt_fills import EMU, UNREAD, at, deck, elements, page, pt, settle, shape, solid
 
 NONE = {"propertyState": "NOT_RENDERED"}
 
@@ -51,7 +53,7 @@ def test_a_solid_freeform_is_traced_as_its_outline_not_its_box():
     assert len(tr["rings"]) == 1 and tr["fill"].lower() == "#3366cc" and tr["source"] == "thumbnail"
     assert abs(ring_area(tr["rings"]) - np.pi * 40 ** 2) < 0.03 * np.pi * 40 ** 2
     assert len(tr["rings"][0]) < 80                         # simplified, not one point per pixel
-    out = adopt_shapes.shape_block(el, adopt_context(), "")
+    out = adopt_shapes.shape_block(parsed(el), adopt_context(), "", None)
     assert "even odd rule" in out and "rectangle (80" not in out and "cycle" in out
     assert "_traced" not in el
 
@@ -63,12 +65,12 @@ def test_a_ring_of_one_noisy_colour_is_that_colour():
     rng = np.random.default_rng(0)
     a = np.full((60, 60, 3), (147, 11, 144), np.int16) + rng.integers(-5, 6, (60, 60, 3))
     a = np.clip(a, 0, 255).astype(np.uint8)
-    got = deck_freeforms.ring_colour(a, (20, 20, 40, 40))
+    got = deck_freeforms.ring_colour(a, (20, 20, 40, 40), 4)
     assert got is not None and np.abs(np.asarray(got, float) - (147, 11, 144)).max() <= 2
     a[:, :33] = (0, 200, 0)                                 # mostly green: purple lost the ring
-    assert np.abs(np.asarray(deck_freeforms.ring_colour(a, (20, 20, 40, 40)), float) - (0, 200, 0)).max() <= 2
+    assert np.abs(np.asarray(deck_freeforms.ring_colour(a, (20, 20, 40, 40), 4), float) - (0, 200, 0)).max() <= 2
     a[:28] = (230, 230, 230)                              # three colours: none has half of it
-    assert deck_freeforms.ring_colour(a, (20, 20, 40, 40)) is None
+    assert deck_freeforms.ring_colour(a, (20, 20, 40, 40), 4) is None
 
 
 def test_without_thumbnails_nothing_is_traced():
@@ -158,7 +160,7 @@ def test_a_fill_the_page_already_shows_is_traced_by_its_outline_not_left_a_recta
     assert tr["fill"].lower() == "#ffffff" and tr["stroke"].lower() == "#a8dadc"
     assert len(tr["rings"]) == 1
     assert abs(ring_area(tr["rings"]) - np.pi * 40 ** 2) < 0.25 * np.pi * 40 ** 2
-    out = adopt_shapes.shape_block(el, adopt_context(), "")
+    out = adopt_shapes.shape_block(parsed(el), adopt_context(), "", None)
     assert "rectangle (80" not in out and "cycle" in out
 
 
@@ -183,7 +185,7 @@ def test_shared_boxes_finds_freeform_siblings_at_one_box():
         {"kind": "shape", "shape_type": "CUSTOM", "group": "g2", "bbox": [10, 10, 50, 50]},
         {"kind": "shape", "shape_type": "CUSTOM", "group": "g1", "bbox": [200, 200, 40, 40]},
     ]
-    assert deck_freeforms.shared_boxes(els) == [[0, 2]]
+    assert deck_freeforms.shared_boxes(records(els)) == [[0, 2]]
 
 
 def test_a_box_two_freeforms_share_is_baked_as_one_picture_not_two_rectangles(tmp_path):
@@ -201,10 +203,10 @@ def test_a_box_two_freeforms_share_is_baked_as_one_picture_not_two_rectangles(tm
              "object": "lbl", "paragraphs": [{"runs": [{"text": "Precipitacion", "color": "#7ee1ff"}]}]}
     arrow_b = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
               "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a2", "object": "a2"}
-    got = deck_fills.settle([dict(arrow_a), dict(label), dict(arrow_b)], thumb, 1.0, "#ffffff", False, tmp_path)
+    got = settle([arrow_a, label, arrow_b], thumb, 1.0, "#ffffff", False, tmp_path)
     assert [e["kind"] for e in got] == ["image", "text"]
     assert got[0]["id"] == "dia~arrows" and got[0]["group"] == "dia" and got[0]["bbox"] == [100, 100, 300, 300]
-    assert got[1]["id"] == "lbl" and got[1]["paragraphs"] == label["paragraphs"]   # untouched
+    assert got[1]["id"] == "lbl" and got[1]["paragraphs"] == as_dict(record(label))["paragraphs"]   # untouched
 
 
 def test_a_lone_freeform_that_fills_its_box_is_still_left_a_rectangle(tmp_path):
@@ -213,7 +215,7 @@ def test_a_lone_freeform_that_fills_its_box_is_still_left_a_rectangle(tmp_path):
     el = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
           "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a1", "object": "a1"}
     thumb = page((100, 100, 200, 200, "2AA2BF"))
-    got = deck_fills.settle([dict(el)], thumb, 1.0, "#ffffff", False, tmp_path)
+    got = settle([el], thumb, 1.0, "#ffffff", False, tmp_path)
     assert len(got) == 1 and got[0]["kind"] == "shape" and "trace" not in got[0]
 
 
@@ -226,7 +228,7 @@ def test_without_a_pictures_folder_a_shared_box_cluster_is_left_for_tracing():
               "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a1", "object": "a1"}
     arrow_b = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
               "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a2", "object": "a2"}
-    got = deck_fills.settle([dict(arrow_a), dict(arrow_b)], thumb, 1.0, "#ffffff")
+    got = settle([arrow_a, arrow_b], thumb, 1.0, "#ffffff")
     assert [e["id"] for e in got] == ["a1", "a2"]
 
 
@@ -408,8 +410,9 @@ def test_a_turned_connectors_ink_is_looked_for_in_its_whole_frame():
 
 
 def test_an_outline_in_another_colour_is_drawn_inside_the_traced_edge():
-    el = {"kind": "shape", "bbox": [10, 10, 30, 30], "trace": {
+    el = record({"kind": "shape", "bbox": [10, 10, 30, 30], "trace": {
         "rings": [[[10, 10], [30, 10], [30, 30], [10, 30]]], "fill": "#ffffff", "alpha": None,
-        "stroke": "#000000", "weight": 1.0, "source": "thumbnail"}}
-    out = adopt_shapes.traced_block(el, adopt_context(), "")
+        "stroke": "#000000", "weight": 1.0, "source": "thumbnail"}})
+    assert isinstance(el, TargetShape) and el.trace is not None
+    out = adopt_shapes.traced_block(el, el.trace, adopt_context(), "", None)
     assert "\\clip" in out and "line width=2.00pt" in out and "draw=black" in out

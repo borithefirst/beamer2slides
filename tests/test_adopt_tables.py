@@ -11,6 +11,7 @@ import pytest
 
 from beamer2slides import adopt
 from beamer2slides.deck_ir import cell_pad, guess_lines
+from .deck_records import dicts, records
 from .irs import deck_ir
 
 from .test_adopt import at, pt, presentation
@@ -196,6 +197,12 @@ def grid_element(heights=(10, 10, 10), widths=(40, 40), color="#000000") -> dict
             "col_widths": list(widths), "table_borders": borders, "table_cells": cells, "cell_pad": [5.8, 3.6]}
 
 
+def through(step, el: dict, img) -> dict:
+    """One thumbnail pass (`deck_thumbs`) over the record `el` stands for, handed back as a dict."""
+    got, = dicts(step(records([el]), img, PX))
+    return got
+
+
 def blank(h=100, w=120, colour=(255, 255, 255)):
     import numpy as np
     img = np.zeros((int(h * PX), int(w * PX), 3), dtype=np.int16)
@@ -215,7 +222,7 @@ def test_rows_are_as_tall_as_the_thumbnail_draws_them_and_held_there():
     img = blank()
     for y in (10, 24, 38, 52):
         rule(img, y)
-    thumbnail_rows([el], img, PX)
+    el = through(thumbnail_rows, el, img)
     assert el["rows_fixed"] == [0, 1, 2]
     assert el["row_heights"] == pytest.approx([14, 14, 14], abs=0.6)
 
@@ -226,7 +233,7 @@ def test_measuring_stops_at_a_boundary_it_cannot_see():
     img = blank()
     for y in (10, 24):                    # the rule under row 1 is not drawn: rows 1 and 2 could be anything
         rule(img, y)
-    thumbnail_rows([el], img, PX)
+    el = through(thumbnail_rows, el, img)
     assert el["rows_fixed"] == [0]
     assert el["row_heights"][1:] == [10, 10]
 
@@ -238,7 +245,7 @@ def test_a_step_between_two_fills_is_no_border():
     el = grid_element(color="#ffffff")
     img = blank(colour=(250, 240, 235))
     img[int(10 * PX):int(24 * PX), int(10 * PX):int(90 * PX)] = (120, 70, 40)
-    thumbnail_rows([el], img, PX)
+    el = through(thumbnail_rows, el, img)
     assert "rows_fixed" not in el and el["row_heights"] == [10, 10, 10]
 
 
@@ -253,8 +260,8 @@ def test_the_side_inset_is_where_the_cells_words_begin():
         for c in range(2):
             x = 10 + 40 * c + 3 + 0.6                   # the inset plus the first glyph's bearing
             img[int((14 + 14 * r) * PX):int((20 + 14 * r) * PX), int(x * PX):int((x + 20) * PX)] = (0, 0, 0)
-    thumbnail_rows([el], img, PX)
-    thumbnail_cell_pad([el], img, PX)
+    el = through(thumbnail_rows, el, img)
+    el = through(thumbnail_cell_pad, el, img)
     assert el["cell_pad"][0] == pytest.approx(3.0, abs=0.5) and el["cell_pad"][1] == 3.6
 
 
@@ -463,7 +470,7 @@ def test_the_thumbnail_says_how_far_in_a_cells_line_box_stands(valign):
     from beamer2slides.deck_thumbs import thumbnail_cell_text
     el = grid_element(heights=(24, 24, 24))
     img = cell_thumb(el, 1.5, valign)
-    thumbnail_cell_text([el], img, PX)
+    el = through(thumbnail_cell_text, el, img)
     assert el["cell_text_y"] == pytest.approx(1.5, abs=0.6)
 
 
@@ -473,11 +480,11 @@ def test_cells_in_rows_the_thumbnail_could_not_place_say_nothing():
     from beamer2slides.deck_thumbs import thumbnail_cell_text
     el = grid_element(heights=(24, 24, 24))
     img = cell_thumb(el, 1.5, "top", fixed=0)
-    thumbnail_cell_text([el], img, PX)
+    el = through(thumbnail_cell_text, el, img)
     assert "cell_text_y" not in el
     el = grid_element(heights=(24, 24, 24))
     img = cell_thumb(el, 1.5, "bottom", fixed=1)
-    thumbnail_cell_text([el], img, PX)
+    el = through(thumbnail_cell_text, el, img)
     assert "cell_text_y" not in el
 
 

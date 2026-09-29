@@ -18,10 +18,8 @@
  },
  "default_arguments": {
   "__main__.py": 2,
-  "adopt.py": 39,
-  "adopt_shapes.py": 10,
+  "adopt.py": 31,
   "adopt_sync.py": 13,
-  "adopt_theme.py": 2,
   "agent/auth.py": 4,
   "agent/content.py": 8,
   "agent/context.py": 7,
@@ -36,9 +34,6 @@
   "debug.py": 8,
   "deck_export.py": 3,
   "deck_files.py": 10,
-  "deck_fills.py": 13,
-  "deck_freeforms.py": 8,
-  "deck_thumbs.py": 4,
   "devtools/adopt_bench.py": 21,
   "devtools/adopt_replay.py": 2,
   "devtools/agent_bench.py": 33,
@@ -58,7 +53,7 @@
   "devtools/loss_oracle.py": 13,
   "devtools/plain_decks.py": 1,
   "devtools/platform_check.py": 1,
-  "devtools/preset_geometry.py": 3,
+  "devtools/preset_geometry.py": 2,
   "devtools/preset_survey.py": 3,
   "devtools/probe_layout.py": 4,
   "devtools/pure_bench.py": 1,
@@ -143,7 +138,6 @@
   "type3.py": 1
  },
  "defaulted_fields": {
-  "adopt_theme.py": 11,
   "agent/context.py": 11,
   "agent/types.py": 15,
   "classify_model.py": 26,

@@ -17,6 +17,7 @@ import pytest
 from PIL import Image
 
 from beamer2slides import adopt, deck_fills
+from .deck_records import dicts, records
 from .irs import deck_ir
 
 EMU = 12700
@@ -62,6 +63,11 @@ def page(bg=(255, 255, 255)) -> np.ndarray:
     return np.full((405, 720, 3), bg, dtype=np.uint8)
 
 
+def recovered(els: list[dict], thumb, px: float, folder) -> list[dict]:
+    """`deck_fills.recover_pictures` over the records `els` stand for: the new elements, as dicts."""
+    return dicts(deck_fills.recover_pictures(records(els), thumb, px, folder))
+
+
 # ---------------------------------------------------------------- deck_fills.recover_pictures (unit)
 
 def test_a_fetch_error_is_drawn_from_the_thumbnail(tmp_path):
@@ -69,7 +75,7 @@ def test_a_fetch_error_is_drawn_from_the_thumbnail(tmp_path):
     thumb[100:200, 100:300] = [30, 60, 90]
     el = {"kind": "image", "role": "figure", "bbox": [100, 100, 300, 200], "id": "im", "object": "im",
           "group": None, "error": "refused"}
-    deck_fills.recover_pictures([el], thumb, 1.0, tmp_path)
+    el, = recovered([el], thumb, 1.0, tmp_path)
     assert "error" not in el
     assert el["picture_source"] == "thumbnail" and el["format"] == "png"
     from PIL import Image
@@ -84,7 +90,7 @@ def test_undecodable_bytes_are_drawn_from_the_thumbnail_not_kept_as_html(tmp_pat
     thumb[50:150, 50:250] = [10, 200, 30]
     el = {"kind": "image", "bbox": [50, 50, 250, 150], "id": "im", "object": "im", "group": None,
           "file": "somewhere.img", "format": "unknown", "sha1": "deadbeef"}
-    deck_fills.recover_pictures([el], thumb, 1.0, tmp_path)
+    el, = recovered([el], thumb, 1.0, tmp_path)
     assert el["format"] == "png" and el["picture_source"] == "thumbnail"
     assert el["file"] != "somewhere.img"
 
@@ -95,11 +101,11 @@ def test_a_video_is_left_to_its_own_poster_frame(tmp_path):
     thumb[100:200, 100:300] = [30, 60, 90]
     el = {"kind": "image", "bbox": [100, 100, 300, 200], "id": "im", "object": "im", "group": None,
           "error": "refused", "video": {"source": "YOUTUBE", "id": "y"}}
-    deck_fills.recover_pictures([el], thumb, 1.0, tmp_path)
+    el, = recovered([el], thumb, 1.0, tmp_path)
     assert "picture_source" not in el and el.get("error") == "refused"
 
 
-@pytest.mark.parametrize("extra", [{}, {"chart": {"chartId": "1"}}, {"flip": True}, {"rotation": 180.0, "flip": True},
+@pytest.mark.parametrize("extra", [{}, {"chart": {"spreadsheetId": None, "chartId": 1}}, {"flip": True}, {"rotation": 180.0, "flip": True},
                                    {"file": None}, {"file": "gone.png", "format": "png"}])
 def test_every_picture_with_no_file_is_recovered(extra, tmp_path):
     """No file at all (`--no-downloads`, no fetcher, the export refused too), one gone from disk, a
@@ -112,7 +118,7 @@ def test_every_picture_with_no_file_is_recovered(extra, tmp_path):
           "object": "im", "group": None, **extra}
     if "file" not in extra:
         el["error"] = "downloads are off"
-    deck_fills.recover_pictures([el], thumb, 1.0, tmp_path)
+    el, = recovered([el], thumb, 1.0, tmp_path)
     assert el["picture_source"] == "thumbnail" and "flip" not in el and "rotation" not in el
     assert el["bbox"] == [100, 100, 300, 200] == el["box"]
     im = np.asarray(Image.open(el["file"]).convert("RGB"))
@@ -127,7 +133,7 @@ def test_an_svg_is_drawn_from_the_thumbnail(tmp_path):
     thumb = page()
     thumb[40:80, 40:80] = [0, 120, 0]
     el = {"kind": "image", "bbox": [40, 40, 80, 80], "id": "im", "file": str(svg), "format": "svg", "sha1": "s"}
-    deck_fills.recover_pictures([el], thumb, 1.0, tmp_path / "images")
+    el, = recovered([el], thumb, 1.0, tmp_path / "images")
     assert el["picture_source"] == "thumbnail" and el["format"] == "png"
 
 
@@ -140,7 +146,7 @@ def test_words_drawn_above_are_painted_out_of_the_crop(tmp_path):
     photo = {"kind": "image", "bbox": [100, 100, 300, 200], "box": [100, 100, 300, 200], "id": "im", "error": "x"}
     caption = {"kind": "text", "bbox": [140, 130, 260, 160],
                "paragraphs": [{"runs": [{"text": "Sand cat", "color": "#000000"}]}]}
-    deck_fills.recover_pictures([photo, caption], thumb, 1.0, tmp_path)
+    photo, _ = recovered([photo, caption], thumb, 1.0, tmp_path)
     im = np.asarray(Image.open(photo["file"]).convert("RGB")).astype(int)
     assert np.abs(im - [200, 30, 30]).max() <= 2, "no letter left, and the photo filled in under them"
 
@@ -181,7 +187,7 @@ def test_a_turned_picture_is_sampled_back_upright_and_keeps_its_turn(tmp_path):
     thumb = rotated_thumbnail(30, box)
     el = {"kind": "image", "bbox": aabb(30, box), "box": box, "rotation": 30.0, "id": "im", "error": "x",
           "crop": {"l": 0.1, "t": 0, "r": 0, "b": 0}, "opacity": 0.5}
-    deck_fills.recover_pictures([el], thumb, 4.0, tmp_path)
+    el, = recovered([el], thumb, 4.0, tmp_path)
     assert el["rotation"] == 30.0 and el["box"] == box and "crop" not in el and "opacity" not in el
     im = np.asarray(Image.open(el["file"]).convert("RGB")).astype(int)
     assert im.shape[:2] == (480, 640), "the unturned frame at the thumbnail's resolution"
@@ -195,7 +201,7 @@ def test_a_quarter_turn_is_cut_as_it_stands(tmp_path):
     thumb = rotated_thumbnail(90, box)
     bbox = [round(v, 6) for v in aabb(90, box)]
     el = {"kind": "image", "bbox": bbox, "box": box, "rotation": 90.0, "id": "im", "error": "x"}
-    deck_fills.recover_pictures([el], thumb, 4.0, tmp_path)
+    el, = recovered([el], thumb, 4.0, tmp_path)
     assert "rotation" not in el and el["box"] == bbox == el["bbox"]
     im = np.asarray(Image.open(el["file"]).convert("RGB"))
     assert im.shape[:2] == (640, 480)
@@ -207,7 +213,7 @@ def test_a_picture_partly_off_the_page_is_the_part_on_it(tmp_path):
     thumb[50:150, 0:100] = [10, 20, 200]
     el = {"kind": "image", "bbox": [-60, 50, 100, 150], "box": [-60, 50, 100, 150], "id": "im", "error": "x",
           "outline": {"color": "#000000", "weight": 1.0, "dash": "SOLID"}}
-    deck_fills.recover_pictures([el], thumb, 1.0, tmp_path)
+    el, = recovered([el], thumb, 1.0, tmp_path)
     assert el["bbox"] == [0, 50, 100, 150] == el["box"]
     assert "outline" not in el, "an outline on the cut edge would be drawn where the deck has none"
     im = np.asarray(Image.open(el["file"]).convert("RGB"))
@@ -219,7 +225,7 @@ def test_an_outline_stays_on_a_picture_wholly_on_the_page(tmp_path):
     thumb[50:150, 50:150] = [10, 20, 200]
     outline = {"color": "#000000", "weight": 1.0, "dash": "SOLID"}
     el = {"kind": "image", "bbox": [50, 50, 150, 150], "id": "im", "error": "x", "outline": outline}
-    deck_fills.recover_pictures([el], thumb, 1.0, tmp_path)
+    el, = recovered([el], thumb, 1.0, tmp_path)
     assert el["outline"] == outline
 
 
@@ -229,14 +235,14 @@ def test_a_good_picture_is_left_alone(tmp_path):
     Image.new("RGB", (4, 4)).save(ok)
     el = {"kind": "image", "bbox": [100, 100, 300, 200], "id": "im", "object": "im", "group": None,
           "file": str(ok), "format": "png", "sha1": "abc"}
-    deck_fills.recover_pictures([el], thumb, 1.0, tmp_path)
+    el, = recovered([el], thumb, 1.0, tmp_path)
     assert el["file"] == str(ok) and "picture_source" not in el
 
 
 def test_without_a_thumbnail_nothing_changes(tmp_path):
     el = {"kind": "image", "bbox": [100, 100, 300, 200], "id": "im", "object": "im", "group": None,
           "error": "refused"}
-    deck_fills.recover_pictures([el], None, 1.0, tmp_path)
+    el, = recovered([el], None, 1.0, tmp_path)
     assert el.get("error") == "refused" and "picture_source" not in el
 
 

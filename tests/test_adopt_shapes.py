@@ -10,6 +10,7 @@ from beamer2slides import adopt, adopt_shapes
 from beamer2slides.deck_ir import frame
 from .irs import deck_ir
 from beamer2slides.adopt_context import adopt_context
+from .deck_records import parsed, record
 
 EMU = 12700
 
@@ -193,7 +194,7 @@ def test_a_preset_is_drawn_inside_its_box(kind):
     """Every point a preset's paths pass through stays (nearly) in the frame (0,0)-(w,-h), callout
     tails aside. (Bezier control points may lie outside: OOXML's document wave and heart have them.)"""
     import re
-    paths = adopt_shapes.preset(kind, 120.0, 60.0)
+    paths = adopt_shapes.preset(kind, 120.0, 60.0, None)
     assert paths, kind
     for path, mode in paths:
         assert mode in ("fs", "f", "s", "fs-eo", "shade+", "shade-")
@@ -216,15 +217,15 @@ def test_known_preset_tells_a_real_geometry_from_the_rectangle_fallback():
 
 
 def test_an_unknown_preset_is_a_rectangle():
-    assert adopt_shapes.preset("NOT_A_SHAPE", 10, 10) is None
-    out = adopt_shapes.shape_block({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "NOT_A_SHAPE",
-                                    "fill": "#ff0000"}, adopt_context(), "")
+    assert adopt_shapes.preset("NOT_A_SHAPE", 10, 10, None) is None
+    out = adopt_shapes.shape_block(record({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "NOT_A_SHAPE",
+                                           "fill": "#ff0000"}), adopt_context(), "", None)
     assert out.strip() == "\\sliderect[fill=red]{0,0,10,10}", out
 
 
 def test_a_turned_shape_is_drawn_through_its_transform():
     el, = elements(shape("a", "RECTANGLE", 100, 20, transform(200, 100, deg=30), outline="000000"))
-    out = adopt_shapes.shape_block(el, adopt_context(), "")
+    out = adopt_shapes.shape_block(parsed(el), adopt_context(), "", None)
     assert out.startswith("\\sliderect[") and "fill=" in out and "draw=" in out
     # turned by its angle (TikZ counts the other way) about the centre of its upright box, which is
     # the shape's own size and has the centre of the turned shape's bounds
@@ -237,15 +238,16 @@ def test_a_turned_shape_is_drawn_through_its_transform():
 
 def test_transparency_and_dashes_become_tikz_options():
     ctx = adopt_context()
-    fo, so = adopt_shapes.style_options({"fill": "#00ff00", "fill_alpha": 0.25, "outline": "#000000",
-                                         "outline_alpha": 0.5, "weight": 2.0, "dash": "DASH"}, ctx)
+    fo, so = adopt_shapes.style_options(record({"kind": "shape", "bbox": [0, 0, 10, 10], "fill": "#00ff00",
+                                                "fill_alpha": 0.25, "outline": "#000000", "outline_alpha": 0.5,
+                                                "weight": 2.0, "dash": "DASH"}), ctx, False)
     assert "fill opacity=0.250" in fo and "draw opacity=0.500" in so
     assert "dash pattern=on 8pt off 6pt" in so and "line width=2pt" in so
 
 
 def test_a_freeform_is_drawn_as_its_box():
-    out = adopt_shapes.shape_block({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "CUSTOM",
-                                    "fill": "#ff0000"}, adopt_context(), "")
+    out = adopt_shapes.shape_block(record({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "CUSTOM",
+                                           "fill": "#ff0000"}), adopt_context(), "", None)
     assert "\\sliderect" in out and "controls" not in out
 
 

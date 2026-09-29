@@ -19,6 +19,7 @@ from beamer2slides.inverse import tex_env
 from beamer2slides.texmap import build_visible
 
 from . import test_adopt_text as T
+from .deck_records import parsed
 from .test_adopt_shapes import shape, transform
 
 
@@ -145,7 +146,7 @@ def test_colours_are_named_by_what_they_look_like():
 
 def test_a_rectangle_or_an_ellipse_is_one_line_only_when_the_macro_draws_the_same_path():
     ctx = adopt.adopt_context()
-    rect, turned, rounded, oval = (adopt_shapes.shape_block(e, ctx, "") for e in shapes_ir())
+    rect, turned, rounded, oval = (adopt_shapes.shape_block(parsed(e), ctx, "", None) for e in shapes_ir())
     assert rect.startswith("\\sliderect[") and "cycle" not in rect
     # a turned or rounded one too: TikZ turns and rounds the macro's path as it did the spelled one
     assert turned.startswith("\\sliderect[") and "rotate=-30" in turned and "cm=" not in turned

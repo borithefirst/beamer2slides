@@ -9,10 +9,12 @@ import pytest
 
 from beamer2slides import adopt, adopt_shapes, deck_fills
 from beamer2slides.deck_ir import page_size_for
+from beamer2slides.deck_ir_types import TargetImage, TargetShape
 from .irs import deck_ir
 from beamer2slides.adopt_context import adopt_context
 from beamer2slides.inverse import Context
 
+from .deck_records import dicts, parsed, record, records
 from .test_adopt_tables import table
 
 EMU = 12700
@@ -69,6 +71,11 @@ def elements(pres: dict, thumb=None) -> list[dict]:
                    )["slides"][0]["elements"]
 
 
+def settle(els: list[dict], a, px: float, background, picture: bool = False, pictures=None) -> list[dict]:
+    """`deck_fills.settle` over the records `els` stand for, handed back as dicts."""
+    return dicts(deck_fills.settle(records(els), a, px, background, picture, pictures))
+
+
 def no_marks_left(els: list[dict]) -> bool:
     return not any("fill_unread" in e or any("fill_unread" in c for c in e.get("table_cells", []))
                    for e in els)
@@ -107,8 +114,8 @@ def test_a_picture_fill_becomes_the_thumbnails_picture_of_it(tmp_path):
              "fill": None, "outline": None, "fill_unread": True, "id": "ph", "object": "ph", "group": None}
     words = {"kind": "text", "role": "body", "bbox": [140, 130, 260, 160], "id": "t", "object": "t",
              "paragraphs": [{"runs": [{"text": "Gallery", "color": "#ffe17e"}]}]}
-    assert deck_fills.settle([dict(photo), dict(words)], thumb, 1.0, "#ffffff") == [words]
-    got = deck_fills.settle([dict(photo), dict(words)], thumb, 1.0, "#ffffff", False, tmp_path)
+    assert settle([photo, words], thumb, 1.0, "#ffffff") == dicts(records([words]))
+    got = settle([dict(photo), dict(words)], thumb, 1.0, "#ffffff", False, tmp_path)
     assert [e["kind"] for e in got] == ["image", "text"]
     pic = got[0]
     assert pic["id"] == "ph" and pic["fill_source"] == "thumbnail" and pic["bbox"] == [90, 90, 310, 210]
@@ -128,8 +135,8 @@ def test_a_preset_adopt_cannot_draw_becomes_the_thumbnails_picture(tmp_path):
     thumb = page((100, 100, 80, 80, "#3366cc"))
     arrow = {"kind": "shape", "role": "panel", "shape_type": "CURVED_UP_ARROW", "bbox": [100, 100, 180, 180],
              "fill": "#3366cc", "outline": None, "id": "ar", "object": "ar", "group": None}
-    assert deck_fills.settle([dict(arrow)], thumb, 1.0, "#ffffff") == [arrow]
-    got = deck_fills.settle([dict(arrow)], thumb, 1.0, "#ffffff", False, tmp_path)
+    assert settle([arrow], thumb, 1.0, "#ffffff") == dicts(records([arrow]))
+    got = settle([dict(arrow)], thumb, 1.0, "#ffffff", False, tmp_path)
     assert [e["kind"] for e in got] == ["image"]
     pic = got[0]
     assert pic["id"] == "ar~shape" and pic["fill_source"] == "thumbnail" and pic["bbox"] == [100, 100, 180, 180]
@@ -144,7 +151,7 @@ def test_a_known_preset_is_never_replaced_by_a_picture(tmp_path):
     thumb = page((100, 100, 80, 80, "#3366cc"))
     rect = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [100, 100, 180, 180],
             "fill": "#3366cc", "outline": None, "id": "rc", "object": "rc", "group": None}
-    got = deck_fills.settle([dict(rect)], thumb, 1.0, "#ffffff", False, tmp_path)
+    got = settle([dict(rect)], thumb, 1.0, "#ffffff", False, tmp_path)
     assert [e["kind"] for e in got] == ["shape"]
 
 
@@ -174,8 +181,8 @@ def test_a_text_boxs_own_fill_no_ramp_fits_is_baked_behind_it(tmp_path):
     panel = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [90, 90, 310, 310],
              "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
              "paragraphs": [{"runs": [{"text": "Word", "color": "#ffe17e"}]}]}
-    assert deck_fills.settle([dict(panel)], thumb, 1.0, "#ffffff")[0]["id"] == "t"    # no folder: unchanged
-    got = deck_fills.settle([dict(panel)], thumb, 1.0, "#ffffff", False, tmp_path)
+    assert settle([dict(panel)], thumb, 1.0, "#ffffff")[0]["id"] == "t"    # no folder: unchanged
+    got = settle([dict(panel)], thumb, 1.0, "#ffffff", False, tmp_path)
     assert [e["kind"] for e in got] == ["image", "text"]
     pic, text = got
     assert pic["id"] == "t~fill" and text["id"] == "t"
@@ -225,7 +232,7 @@ def test_a_gradient_bar_becomes_an_axis_shading():
     first, middle, last = (deck_fills.rgb(c) for c in g["colors"])
     assert np.abs(first - [8, 3, 2]).max() <= 8 and np.abs(last - [226, 89, 82]).max() <= 8
     assert np.abs(middle - [117, 46, 42]).max() <= 8
-    out = adopt_shapes.shape_block(els[0], adopt_context(), "")
+    out = adopt_shapes.shape_block(parsed(els[0]), adopt_context(), "", None)
     assert "left color=" in out and "right color=" in out and "middle color=" in out
     assert "fill=" not in out
 
@@ -303,12 +310,14 @@ def test_cells_over_a_page_of_another_colour_take_nothing():
 def test_read_region_tells_flat_gradient_and_neither():
     a = np.zeros((40, 100, 3), dtype=np.int16) + [10, 20, 200]
     region, allow = np.ones((40, 100), bool), np.zeros((40, 100), bool)
-    assert deck_fills.read_region(a, region, allow, True)[0] == "solid"
+    flat = deck_fills.FLAT
+    assert isinstance(deck_fills.read_region(a, region, allow, True, flat), deck_fills.Solid)
     a[:, :] = (np.linspace(0, 200, 100)[None, :, None]).astype(np.int16)
-    assert deck_fills.read_region(a, region, allow, True)[:2] == ("gradient", "x")
-    assert deck_fills.read_region(a, region, allow, False) is None
+    ramp = deck_fills.read_region(a, region, allow, True, flat)
+    assert isinstance(ramp, deck_fills.Ramp) and ramp.axis == "x"
+    assert deck_fills.read_region(a, region, allow, False, flat) is None
     a[:, ::7] = 255                          # stripes: neither
-    assert deck_fills.read_region(a, region, allow, True) is None
+    assert deck_fills.read_region(a, region, allow, True, flat) is None
 
 
 def test_a_pie_takes_the_angles_its_thumbnail_shows():
@@ -324,12 +333,12 @@ def test_a_pie_takes_the_angles_its_thumbnail_shows():
     box = [200, 100, 400, 300]
     under = {"kind": "shape", "shape_type": "PIE", "bbox": box, "fill": "#45818e", "id": "u", "object": "u"}
     top = {"kind": "shape", "shape_type": "PIE", "bbox": box, "fill": "#d0e0e3", "id": "t", "object": "t"}
-    out = deck_fills.settle([under, top], a, 1.0, "#ffffff")
+    out = settle([under, top], a, 1.0, "#ffffff")
     start, sweep = next(e for e in out if e["id"] == "t")["pie"]
     assert min(start, 360 - start) < 1 and abs(sweep - 90) < 1.5
     start, sweep = next(e for e in out if e["id"] == "u")["pie"]
     assert abs(start - 90) < 1 and abs(sweep - 270) < 1.5
-    block = adopt_shapes.shape_block(next(e for e in out if e["id"] == "t"), adopt_context(), "")
+    block = adopt_shapes.shape_block(parsed(next(e for e in out if e["id"] == "t")), adopt_context(), "", None)
     assert "end angle=-" in block and "270" not in block
 
 
@@ -359,17 +368,19 @@ def test_a_rounded_rectangle_takes_the_corners_its_thumbnail_shows():
     rounded(450, 100, 650, 200, 16, [219, 68, 55])
     rounded(0, 250, 200, 330, 12, [15, 157, 88])                    # on the page's left edge
     tab = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [0, 250, 200, 330], "fill": "#0f9d58", "id": "t", "object": "t"}
-    assert abs(deck_fills.corner_radius(a.astype(np.int16), tab, [], 1.0) - 12) < 1
+    tab_shape = record(tab)
+    assert isinstance(tab_shape, TargetShape)
+    radius = deck_fills.corner_radius(a.astype(np.int16), tab_shape, [], 1.0)
+    assert radius is not None and abs(radius - 12) < 1
     bar ={"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [0, 0, 720, 45], "fill": "#ccff00", "id": "b", "object": "b"}
     pill = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [100, 100, 400, 160], "fill": "#4285f4", "id": "p", "object": "p"}
     card = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [450, 100, 650, 200], "fill": "#db4437", "id": "c", "object": "c"}
     lid = {"kind": "shape", "shape_type": "RECTANGLE", "bbox": [440, 90, 720, 300], "fill": "#db4437", "id": "l", "object": "l"}
-    out = {e["id"]: e for e in deck_fills.settle([bar, pill, card], a.astype(np.int16), 1.0, "#ffffff")}
+    out = {e["id"]: e for e in settle([bar, pill, card], a.astype(np.int16), 1.0, "#ffffff")}
     assert out["b"]["corner_radius"] < 0.5 and abs(out["p"]["corner_radius"] - 30) < 1 and abs(out["c"]["corner_radius"] - 16) < 1
-    assert "rounded" not in adopt_shapes.shape_block(out["b"], adopt_context(), "")
-    assert "rounded=30" in adopt_shapes.shape_block(out["p"], adopt_context(), "")
-    card.pop("corner_radius")
-    hidden = {e["id"]: e for e in deck_fills.settle([card, lid], a.astype(np.int16), 1.0, "#ffffff")}
+    assert "rounded" not in adopt_shapes.shape_block(parsed(out["b"]), adopt_context(), "", None)
+    assert "rounded=30" in adopt_shapes.shape_block(parsed(out["p"]), adopt_context(), "", None)
+    hidden = {e["id"]: e for e in settle([card, lid], a.astype(np.int16), 1.0, "#ffffff")}
     assert "corner_radius" not in hidden["c"]
 
 
@@ -386,7 +397,7 @@ def test_an_outlined_box_is_read_by_its_outline_and_not_on_another_ones():
               "outline": "#000000", "weight": 4, "id": "y", "object": "y"}
     pink = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [260, 60, 460, 200], "fill": "#f8d8d8",
             "outline": "#000000", "weight": 4, "id": "p", "object": "p"}
-    out = {e["id"]: e for e in deck_fills.settle([yellow, pink], a.astype(np.int16), 1.0, "#eeeeee")}
+    out = {e["id"]: e for e in settle([yellow, pink], a.astype(np.int16), 1.0, "#eeeeee")}
     assert abs(out["p"]["corner_radius"] - 30) < 1.5 and abs(out["y"]["corner_radius"] - 30) < 1.5
 
 
@@ -473,9 +484,9 @@ def test_a_sliver_beside_a_full_width_picture_still_fits_a_gradient():
     px = W / page_w
     title_h = round(108 * SCALE)
     pic_x0, pic_x1 = round(30 * SCALE), round(695 * SCALE)
-    bboxes = [{"bbox": [0.0, 0.0, page_w, 108 * page_w / 720]},
-              {"bbox": [30 * page_w / 720, 108 * page_w / 720, 695 * page_w / 720, page_h]}]
-    mask = deck_fills.page_visible_mask(bboxes, px, W, H)
+    boxes = [(0.0, 0.0, page_w, 108 * page_w / 720),
+             (30 * page_w / 720, 108 * page_w / 720, 695 * page_w / 720, page_h)]
+    mask = deck_fills.page_visible_mask(boxes, px, W, H)
     cx, cy = page_w * 0.5, page_h * 0.5                 # IR pt, the page's own centre
     yy, xx = np.mgrid[0:H, 0:W]
     r_full = np.hypot(xx - cx * px, yy - cy * px)
@@ -760,7 +771,7 @@ def test_a_drive_videos_poster_frame_is_read_off_the_thumbnail(tmp_path):
     video = {"kind": "image", "role": "figure", "bbox": [100, 100, 300, 220], "id": "v", "object": "v",
              "video": {"source": "DRIVE", "id": "x", "url": None}}
     tube = {**video, "id": "y", "file": "hq.jpg", "video": {"source": "YOUTUBE", "id": "y"}}
-    out = deck_fills.settle([video, tube], a, 1.0, "#ffffff", pictures=tmp_path)
+    out = settle([video, tube], a, 1.0, "#ffffff", pictures=tmp_path)
     v = next(e for e in out if e["id"] == "v")
     assert v["poster"] == "thumbnail" and v["video"]["source"] == "DRIVE"
     from PIL import Image
@@ -823,7 +834,7 @@ def test_a_gradient_ellipse_is_a_picture_of_only_its_ellipse(tmp_path):
     from PIL import Image
     a = page((150, 50, 200, 200, "#3366cc"))
     noisy(a, 200, 100, 100, 100, oval=True)
-    got = deck_fills.settle([panel_under(), ball()], a, 1.0, "#ffffff", False, tmp_path)
+    got = settle([panel_under(), ball()], a, 1.0, "#ffffff", False, tmp_path)
     pic, = (e for e in got if e["kind"] == "image")
     im = np.asarray(Image.open(pic["file"]))
     assert im.shape == (100, 100, 4)
@@ -838,7 +849,7 @@ def test_a_nodes_see_through_text_box_on_its_shape_is_no_picture_of_it(tmp_path)
     noisy(a, 200, 100, 100, 100, oval=True)
     words = {"kind": "text", "role": "body", "bbox": [200, 100, 300, 200], "id": "t", "object": "t",
              "fill_unread": True, "paragraphs": [{"runs": [{"text": "Facebook", "color": "#ffffff"}]}]}
-    got = deck_fills.settle([panel_under(), ball(), words], a, 1.0, "#ffffff", False, tmp_path)
+    got = settle([panel_under(), ball(), words], a, 1.0, "#ffffff", False, tmp_path)
     assert [e["id"] for e in got if e["kind"] == "image"] == ["b"], "the ball's picture, no `t~fill`"
     assert not next(e for e in got if e["id"] == "t").get("fill")
 
@@ -854,7 +865,7 @@ def test_a_picture_under_a_see_through_shape_does_not_take_its_tint_twice(tmp_pa
     blob = {**ball(), "shape_type": "CUSTOM"}
     veil = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [180, 90, 320, 150],
             "fill": "#ffffff", "fill_alpha": 0.4, "outline": None, "id": "v", "object": "v", "group": None}
-    got = deck_fills.settle([panel_under(), blob, veil], a, 1.0, "#ffffff", False, tmp_path)
+    got = settle([panel_under(), blob, veil], a, 1.0, "#ffffff", False, tmp_path)
     pic, = (e for e in got if e["kind"] == "image")
     im = np.asarray(Image.open(pic["file"]).convert("RGB")).astype(float)
     assert np.abs(im[5:45, 5:95] - truth[5:45, 5:95]).max() <= 2, "under the veil: the picture itself"
@@ -877,7 +888,7 @@ def test_a_see_through_freeform_is_traced_by_its_opaque_outline():
     funnel = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [150, 100, 350, 250],
               "fill": "#ffffff", "fill_alpha": 0.4, "outline": "#da1c27", "weight": 2.0, "id": "f",
               "object": "f", "group": None}
-    got = deck_fills.settle([panel_under((100, 50, 400, 300)), funnel], np.asarray(img), 1.0, "#ffffff")
+    got = settle([panel_under((100, 50, 400, 300)), funnel], np.asarray(img), 1.0, "#ffffff")
     f = next(e for e in got if e["id"] == "f")
     assert f.get("trace"), "traced"
     xs = [x for ring in f["trace"]["rings"] for x, _ in ring]
@@ -964,7 +975,7 @@ def test_an_outline_ring_on_a_picture_is_no_line(tmp_path):
     ring = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [200, 100, 400, 200], "fill": None,
             "outline": "#33b7bf", "weight": 2.0, "fill_unread": True, "_not_rendered": True, "id": "r",
             "object": "r", "group": None}
-    got = deck_fills.settle([under, ring], np.asarray(img), 1.0, None, True, tmp_path)
+    got = settle([under, ring], np.asarray(img), 1.0, None, True, tmp_path)
     assert [(e["kind"], e["id"]) for e in got] == [("image", "p"), ("image", "r")]
 
 
@@ -992,7 +1003,7 @@ def test_a_ring_cut_by_a_caption_in_its_colour_is_still_a_ring(tmp_path):
            "id": "h", "object": "h", "group": None}
     caption = {"kind": "text", "role": "body", "bbox": [255, 196, 350, 218], "id": "t", "object": "t",
                "paragraphs": [{"runs": [{"text": "local network", "color": "#c81e32"}]}]}
-    got = deck_fills.settle([ring, pic, caption], np.asarray(img), 1.0, "#ffffff", False, tmp_path)
+    got = settle([ring, pic, caption], np.asarray(img), 1.0, "#ffffff", False, tmp_path)
     r = next(e for e in got if e["id"].startswith("r"))
     assert r["kind"] == "image" and not r.get("trace"), "the ring's picture, not an open line"
 
@@ -1034,7 +1045,7 @@ def test_a_ring_round_what_shows_the_slide_is_its_line_closed_under_its_caption(
     caption = {"kind": "text", "role": "body", "bbox": [160, 232, 340, 290], "id": "t", "object": "t",
                "paragraphs": [{"runs": [{"text": "local network", "color": "#c8253c"}]},
                               {"runs": [{"text": "wide area network", "color": "#00882b"}]}]}
-    got = deck_fills.settle([house, wire, ring, caption], np.asarray(img), 1.0, "#ffffff", False, tmp_path)
+    got = settle([house, wire, ring, caption], np.asarray(img), 1.0, "#ffffff", False, tmp_path)
     r = next(e for e in got if e["id"] == "r")
     assert r["kind"] == "shape" and r.get("trace"), "its line, not a picture of its box"
     ink = drawn(r["trace"]["rings"])
@@ -1065,7 +1076,7 @@ def test_a_ring_an_opaque_bar_crosses_still_holds_what_it_holds(tmp_path):
             "object": "r", "group": None}
     bar = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [380, 145, 420, 155],
            "fill": "#444444", "outline": None, "id": "b", "object": "b", "group": None}
-    got = deck_fills.settle([under, ring, bar], np.asarray(img), 1.0, None, True, tmp_path)
+    got = settle([under, ring, bar], np.asarray(img), 1.0, None, True, tmp_path)
     r = next(e for e in got if e["id"] == "r")
     assert r["kind"] == "image" and not r.get("trace"), "the ring's picture, not an open line"
 
@@ -1082,8 +1093,9 @@ def test_a_crop_keeps_its_own_outline_where_words_of_another_colour_lie(tmp_path
              "paragraphs": [{"runs": [{"text": "words", "color": "#222222"}]}]}
     frame = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [80, 60, 220, 140],
              "outline": "#c81e32", "id": "f", "object": "f", "group": None}
-    pic = deck_fills.thumbnail_picture(a, frame, [words], 1.0, None, tmp_path)
-    im = np.asarray(Image.open(pic["file"]).convert("RGB")).astype(int)
+    pic = deck_fills.thumbnail_picture(a, record(frame), [record(words)], 1.0, None, tmp_path)
+    assert pic is not None and pic.file is not None
+    im = np.asarray(Image.open(pic.file).convert("RGB")).astype(int)
     assert np.abs(im[44:46, 20:120] - (200, 30, 50)).max() <= 1, "the frame is no letter"
     assert np.abs(im[40:43, 20:120:4] - 34).min() > 100, "the letters are painted out"
 
@@ -1119,9 +1131,10 @@ def test_a_picture_google_shows_round_is_masked_to_its_ellipse(tmp_path):
             patch[keep] = src[keep]
         else:
             patch[:] = src
-        el = {"kind": "image", "bbox": [200, 100, 300, 200], "file": str(file), "id": "p"}
-        thumbnail_picture_masks([el], a, 1.0)
-        return el.get("mask")
+        el = record({"kind": "image", "bbox": [200, 100, 300, 200], "file": str(file), "id": "p"})
+        got, = thumbnail_picture_masks([el], a, 1.0)
+        assert isinstance(got, TargetImage)
+        return got.mask
 
     assert shown(True) == "ellipse"
     assert shown(False) is None, "a picture shown whole is a rectangle"
@@ -1142,7 +1155,7 @@ def test_a_see_through_text_box_on_a_photo_takes_no_picture_of_it(tmp_path):
     words = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [0, 100, 720, 160],
              "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
              "paragraphs": [{"runs": [{"text": "European spheres", "color": "#000000"}]}]}
-    got = deck_fills.settle([dict(words)], a, 1.0, "#ffffff", False, tmp_path)
+    got = settle([dict(words)], a, 1.0, "#ffffff", False, tmp_path)
     assert [e["id"] for e in got] == ["t"], "no `t~fill`"
 
 
@@ -1165,7 +1178,7 @@ def test_a_text_boxs_fill_picture_leaves_a_picture_under_it_showing(tmp_path):
     poem = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [90, 90, 310, 310],
             "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
             "paragraphs": [{"runs": [{"text": "A cup of wine", "color": "#000000"}]}]}
-    got = deck_fills.settle([dict(portrait), dict(poem)], a, 1.0, "#ffffff", False, tmp_path)
+    got = settle([dict(portrait), dict(poem)], a, 1.0, "#ffffff", False, tmp_path)
     pic = next(e for e in got if e["id"] == "t~fill")
     im = np.asarray(Image.open(pic["file"]))
     assert (im[110:190, 120:200, 3] == 0).mean() > 0.95, "the portrait shows through"

@@ -11,11 +11,18 @@ import re
 import pytest
 
 from beamer2slides import adopt
+from beamer2slides.deck_ir_types import TargetText, TextBox
 from .irs import deck_ir
 
+from .deck_records import as_dict, dicts, record, records
 from .test_adopt import at, font_folder, pt, solid
 
 EMU = 12700
+
+
+def passed(step, els: list[dict], im, px: float) -> list[dict]:
+    """A deck_thumbs pass over the records `els` stand for: the elements it hands back, as dicts."""
+    return dicts(step(records(els), im, px))
 
 
 @pytest.fixture(autouse=True)
@@ -273,24 +280,20 @@ def test_the_thumbnail_tells_a_fixed_box_with_no_insets():
         return im, px
 
     for ink_at, top, bare in ((50.6, 54.2, True), (55.0, 58.2, False), (50.6, 58.2, False)):
-        el = element()
-        thumbnail_insets([el], *thumb(ink_at, top))
+        el, = passed(thumbnail_insets, [element()], *thumb(ink_at, top))
         assert (el["box"].get("insets") == 0) == bare, (ink_at, top)
-    el = element()
-    thumbnail_insets([el, {"kind": "image", "bbox": [45.0, 40.0, 60.0, 110.0]}], *thumb(50.6, 54.2))
+    el, _ = passed(thumbnail_insets, [element(), {"kind": "image", "bbox": [45.0, 40.0, 60.0, 110.0]}],
+                   *thumb(50.6, 54.2))
     assert "insets" not in el["box"], "a picture across the box's left strip is ink too"
-    el = element()
     ground = {"kind": "image", "bbox": [0.0, 0.0, 453.54, 300.0]}
-    thumbnail_insets([ground, el], *thumb(50.6, 54.2))
+    _, el = passed(thumbnail_insets, [ground, element()], *thumb(50.6, 54.2))
     assert el["box"].get("insets") == 0, "a template's full-slide picture under the box is its ground"
-    el = element()
-    thumbnail_insets([el, ground], *thumb(50.6, 54.2))
+    el, _ = passed(thumbnail_insets, [element(), ground], *thumb(50.6, 54.2))
     assert "insets" not in el["box"], "a picture over the box hides what it would show"
     # devfest2020's titles: each stands on its own ground, a picture of the thumbnail behind its words
     # at exactly its box (`deck_fills`, "<id>~fill"), which no panel test lets through
-    el = {**element(), "id": "t"}
-    thumbnail_insets([{"kind": "image", "id": "t~fill", "bbox": [50.0, 50.0, 200.0, 100.0]}, el],
-                     *thumb(50.6, 54.2))
+    _, el = passed(thumbnail_insets, [{"kind": "image", "id": "t~fill", "bbox": [50.0, 50.0, 200.0, 100.0]},
+                                      {**element(), "id": "t"}], *thumb(50.6, 54.2))
     assert el["box"].get("insets") == 0, "a box's own ground is not something crossing it"
 
     # gdg24's stat grids: a caption box overlaps the heading box's lower rows. Those rows are not read,
@@ -301,14 +304,12 @@ def test_the_thumbnail_tells_a_fixed_box_with_no_insets():
         return im, px
 
     cap = {"kind": "text", "bbox": [45.0, 85.0, 200.0, 110.0]}
-    el = element()
-    thumbnail_insets([el, cap], *caption(55.0))
+    el, _ = passed(thumbnail_insets, [element(), cap], *caption(55.0))
     assert el["box"].get("insets") == 0, "a box crossing the lower rows leaves the first line readable"
-    el = element()
     im, px = caption(50.3)
     im[int(54.2 * px):int(60.2 * px)] = 240
     im[int(58.2 * px):int(64.2 * px), int(55 * px):int(95 * px)] = 20
-    thumbnail_insets([el, cap], im, px)
+    el, _ = passed(thumbnail_insets, [element(), cap], im, px)
     assert "insets" not in el["box"], "the caption's words at the edge are not this box's"
 
 
@@ -327,7 +328,7 @@ def test_ink_on_the_boxs_first_column_is_its_own_unless_it_goes_on_outside():
               "box": {"valign": "top", "scale": 720 / 453.54}}
         im = np.full((int(300 * px), int(453.54 * px), 3), 240, dtype=np.int16)
         im[int(54.2 * px):int(60.2 * px), int(ink_from * px):int(90 * px)] = 20
-        thumbnail_insets([el], im, px)
+        el, = passed(thumbnail_insets, [el], im, px)
         return el["box"].get("insets")
 
     assert read(50.0) == 0
@@ -358,13 +359,23 @@ def test_a_big_first_glyphs_own_bearing_does_not_hide_a_box_with_no_insets(monke
               "box": {"valign": "middle", "scale": 720 / 453.54}}
         im = np.full((int(300 * px), int(453.54 * px), 3), 240, dtype=np.int16)
         im[int(62 * px):int(90 * px), int((50 + lsb * size) * px):int(150 * px)] = 20
-        thumbnail_insets([el], im, px)
+        el, = passed(thumbnail_insets, [el], im, px)
         return el
     assert "insets" not in read()["box"], "no metrics: 4.8 pt in is Slides' inset"
     monospace_face(monkeypatch, lsb=lsb)
-    assert starting_bearing(read()["paragraphs"]) == pytest.approx(lsb * size)
+    got = record(read())
+    assert isinstance(got, TargetText)
+    assert starting_bearing(got.paragraphs) == pytest.approx(lsb * size)
     el = read()
     assert el["box"]["insets"] == 0 and el["anchor"] == [round(54.22 - 6.7 / (720 / 453.54), 2), 90.0]
+
+
+def told_rows(el: dict, thumb, px: float):
+    """`deck_thumbs.inset_rows` on the record `el` stands for, alone on its slide."""
+    from beamer2slides.deck_thumbs import inset_rows
+    r = record(el)
+    assert isinstance(r, TargetText) and isinstance(r.box, TextBox)
+    return inset_rows(r, r.box, [r], r.paragraphs, thumb, px)
 
 
 def centred_title(valign: str = "top"):
@@ -382,7 +393,7 @@ def test_a_centred_box_with_no_insets_is_told_by_its_rows(monkeypatch):
     import numpy as np
 
     from beamer2slides.adopt import snapped_line_box
-    from beamer2slides.deck_thumbs import inset_rows, thumbnail_insets
+    from beamer2slides.deck_thumbs import thumbnail_insets
     from beamer2slides.emit import BASELINE_A
     monospace_face(monkeypatch)
     px = 4.0
@@ -400,20 +411,16 @@ def test_a_centred_box_with_no_insets_is_told_by_its_rows(monkeypatch):
         return im
 
     for top, told in ((default_top - inset, 0), (default_top, 1), (default_top - inset / 2, None)):
-        el = centred_title()
-        assert inset_rows(el, [el], el["paragraphs"], thumb(top), px) == told, top
-    el = centred_title()
-    thumbnail_insets([el], thumb(default_top - inset), px)
+        assert told_rows(centred_title(), thumb(top), px) == told, top
+    el, = passed(thumbnail_insets, [centred_title()], thumb(default_top - inset), px)
     assert el["box"]["insets"] == 0
     assert el["anchor"] == [0.0, round(70.0 - inset, 2)], "the baseline goes up by the top inset, not sideways"
-    el = centred_title()
-    thumbnail_insets([el], thumb(default_top), px)
+    el, = passed(thumbnail_insets, [centred_title()], thumb(default_top), px)
     assert "insets" not in el["box"]
-    el = centred_title("middle")
-    thumbnail_insets([el], thumb(default_top - inset), px)
+    el, = passed(thumbnail_insets, [centred_title("middle")], thumb(default_top - inset), px)
     assert "insets" not in el["box"], "a middle-aligned stack does not move with its insets"
-    el, picture = centred_title(), {"kind": "image", "bbox": [200.0, 40.0, 240.0, 70.0]}
-    thumbnail_insets([el, picture], thumb(default_top - inset), px)
+    picture = {"kind": "image", "bbox": [200.0, 40.0, 240.0, 70.0]}
+    el, _ = passed(thumbnail_insets, [centred_title(), picture], thumb(default_top - inset), px)
     assert "insets" not in el["box"], "a picture over the line's rows is ink too"
 
 
@@ -421,11 +428,11 @@ def test_a_panel_under_a_box_that_runs_off_the_slide_still_counts_as_ground():
     """devfest2020's "50%" box runs 800 pt past the slide's right edge; the panel it stands on ends
     at the slide edge, and only has to hold the strip that is read."""
     from beamer2slides.deck_thumbs import crossed
-    e = {"kind": "text", "bbox": [100.0, 50.0, 1000.0, 120.0]}
-    panel = {"kind": "shape", "bbox": [0.0, 0.0, 453.54, 255.12]}
+    e = record({"kind": "text", "bbox": [100.0, 50.0, 1000.0, 120.0]})
+    panel = record({"kind": "shape", "bbox": [0.0, 0.0, 453.54, 255.12]})
     assert not crossed(e, [panel, e], (99.0, 50.0, 110.0, 120.0))
     assert crossed(e, [panel, e], (99.0, 50.0, 460.0, 120.0)), "past the panel is not its ground"
-    narrow = {"kind": "shape", "bbox": [90.0, 0.0, 105.0, 255.12]}
+    narrow = record({"kind": "shape", "bbox": [90.0, 0.0, 105.0, 255.12]})
     assert crossed(e, [narrow, e], (99.0, 50.0, 110.0, 120.0))
 
 
@@ -443,18 +450,17 @@ def test_a_box_starting_left_of_the_slide_is_read_from_the_slides_edge():
     panel = {"kind": "shape", "bbox": [-10.0, -10.0, 500.0, 300.0]}
     im = np.full((int(300 * px), int(453.54 * px), 3), 240, dtype=np.int16)
     im[int(66 * px):int(75 * px), int(2.9 * px):int(60 * px)] = 20       # Slides' 6.7 pt inset, 0.2 pt bearing
-    thumbnail_insets([panel, el], im, px)
+    _, el = passed(thumbnail_insets, [panel, el], im, px)
     assert "insets" not in el["box"]
 
 
 def test_shaped_scripts_are_not_read_by_their_glyph_tops(monkeypatch):
     """An Arabic letter's joined form is not the glyph its code point maps to: arabic-training's
     lists read as inset-free from the cmap's heights, and lost 0.04 a slide."""
-    from beamer2slides.deck_thumbs import inset_rows
     monospace_face(monkeypatch)
     el = centred_title()
     el["paragraphs"][0]["runs"][0]["text"] = "التطبيقات"
-    assert inset_rows(el, [el], el["paragraphs"], None, 4.0) is None
+    assert told_rows(el, None, 4.0) is None
 
 
 def test_an_overflowing_box_is_read_where_its_words_stand():
@@ -474,15 +480,18 @@ def test_an_overflowing_box_is_read_where_its_words_stand():
     im = np.full((int(300 * px), int(453.54 * px), 3), 240, dtype=np.int16)
     im[int(40 * px):int(46 * px), int(50.4 * px):int(90 * px)] = 20        # `def f():` over the box
     im[int(55 * px):int(61 * px), int(70 * px):int(110 * px)] = 20         # its indented body in it
-    assert text_rows(element(1), element(1)["paragraphs"], 300) == (50.0, 70.0)
-    top, bottom = text_rows(element(4), element(4)["paragraphs"], 300)
+    def rows(lines):
+        r = record(element(lines))
+        assert isinstance(r, TargetText)
+        return text_rows(r, r.paragraphs, 300)
+
+    assert rows(1) == (50.0, 70.0)
+    top, bottom = rows(4)
     assert round(top, 2) == 40.96 and round(bottom, 2) == 79.04, "4 x 9.52 pt, centred"
-    assert text_rows(element(10), element(10)["paragraphs"], 300)[0] < 40
-    el = element(10)
-    thumbnail_insets([el], im, px)
+    assert rows(10)[0] < 40
+    el, = passed(thumbnail_insets, [element(10)], im, px)
     assert el["box"].get("insets") == 0
-    el = element(1)
-    thumbnail_insets([el], im, px)
+    el, = passed(thumbnail_insets, [element(1)], im, px)
     assert "insets" not in el["box"], "a box its words fit reads its own rows only"
 
 
@@ -561,11 +570,13 @@ def test_a_run_that_only_names_its_font_takes_the_weight_its_thumbnail_shows():
 
 def test_the_stroke_width_of_a_thumbnail_in_em():
     from beamer2slides.deck_thumbs import BOLD_STROKE_EM, stroke_em
-    el =text_of(deck_ir(title_deck({}), foreign=True), "s_title")
-    thin, thick = (stroke_em(el, [el], stroked(el, w).astype("int16"), 1600 / 453.54) for w in (0.07, 0.15))
+    el = text_of(deck_ir(title_deck({}), foreign=True), "s_title")
+    r = record(el)
+    assert isinstance(r, TargetText)
+    thin, thick = (stroke_em(r, [r], stroked(el, w).astype("int16"), 1600 / 453.54) for w in (0.07, 0.15))
     assert thin == pytest.approx(0.07, abs=0.02) and thick == pytest.approx(0.15, abs=0.03)
     assert thin < BOLD_STROKE_EM < thick
-    assert stroke_em(el, [el, {"kind": "image", "bbox": [0, 0, 400, 400]}],
+    assert stroke_em(r, [r, record({"kind": "image", "bbox": [0, 0, 400, 400]})],
                      stroked(el, 0.15).astype("int16"), 1600 / 453.54) is None, "a picture over it is ink too"
 
 
@@ -575,13 +586,18 @@ def test_a_hebrew_first_line_is_placed_by_its_baseline():
     cleared first; Latin and CJK first lines are left to the cap rule."""
     import numpy as np
 
-    from beamer2slides.deck_thumbs import baseline_drift
     px, scale, z = 4.0, 2.0, 12.0
 
     def element(text):
         return {"kind": "text", "bbox": [50.0, 50.0, 250.0, 120.0], "anchor": [53.0, 65.0],
                 "box": {"valign": "top", "scale": scale},
                 "paragraphs": [{"runs": [{"text": text, "size": z}], "slides": {}}]}
+
+    def baseline_drift(text, im):
+        from beamer2slides.deck_thumbs import baseline_drift
+        el = record(element(text))
+        assert isinstance(el, TargetText) and isinstance(el.box, TextBox)
+        return baseline_drift(el, el.box, [el], el.paragraphs, im, px)
 
     def thumb(baseline, underline=False, bold_tops=False):
         im = np.full((600, 1200, 3), 250, dtype=np.int16)
@@ -594,16 +610,12 @@ def test_a_hebrew_first_line_is_placed_by_its_baseline():
             im[B + 4:B + 6, int(55 * px):int(200 * px)] = 10
         return im
 
-    el = element("שלום עולם")
-    paras = el["paragraphs"]
     for shown in (61.4, 65.0):
         for kw in ({}, {"underline": True}, {"bold_tops": True}):
-            got = baseline_drift(el, [el], paras, thumb(shown, **kw), px)
+            got = baseline_drift("שלום עולם", thumb(shown, **kw))
             assert got == pytest.approx((shown - 65.0) * scale, abs=0.6), (shown, kw)
-    latin = element("Hello world")
-    assert baseline_drift(latin, [latin], latin["paragraphs"], thumb(61.4), px) is None
-    cjk = element("日本語")
-    assert baseline_drift(cjk, [cjk], cjk["paragraphs"], thumb(61.4), px) is None
+    assert baseline_drift("Hello world", thumb(61.4)) is None
+    assert baseline_drift("日本語", thumb(61.4)) is None
 
 
 def test_list_items_collapse_their_spacing_and_other_paragraphs_do_not(tmp_path):
@@ -706,20 +718,20 @@ def test_the_side_a_boxs_words_start_on_says_whose_side_insets_an_import_kept():
         return im
 
     # words 3.4 IR pt (6.8 Slides pt) in from the start side, whichever side that is
-    assert side_gap(element(False), [], thumb(53.4, 120), px) == pytest.approx(6.8, abs=0.3)
-    assert side_gap(element(True), [], thumb(180, 246.6), px) == pytest.approx(6.8, abs=0.3)
+    assert side_gap(record(element(False)), [], thumb(53.4, 120), px) == pytest.approx(6.8, abs=0.3)
+    assert side_gap(record(element(True)), [], thumb(180, 246.6), px) == pytest.approx(6.8, abs=0.3)
     centred = element(True)
     centred["paragraphs"][0]["align"] = "center"
-    assert side_gap(centred, [], thumb(180, 246.6), px) is None, "no line starts at a side"
-    over = {"kind": "image", "bbox": [40.0, 40.0, 260.0, 110.0]}
-    assert side_gap(element(True), [element(True), over], thumb(180, 246.6), px) is None
-    assert side_inset(element(True), 6.8) == pytest.approx(6.8 - 0.04 * 10 * scale)
+    assert side_gap(record(centred), [], thumb(180, 246.6), px) is None, "no line starts at a side"
+    rtl, over = records([element(True), {"kind": "image", "bbox": [40.0, 40.0, 260.0, 110.0]}])
+    assert side_gap(rtl, [rtl, over], thumb(180, 246.6), px) is None
+    assert side_inset(record(element(True)), 6.8) == pytest.approx(6.8 - 0.04 * 10 * scale)
 
     def imported(sides):
-        slides = [{"elements": [element(True, str(k)) for k in range(4)]}]
-        drifts = [(e, PPTX_INSET_Y - 7.2) for e in slides[0]["elements"]]
-        pptx_insets(slides, drifts, sides)
-        return slides[0]["elements"][0]["box"]
+        els = records([element(True, str(k)) for k in range(4)])
+        drifts = [(e, PPTX_INSET_Y - 7.2) for e in els]
+        (first, *_), = pptx_insets([els], drifts, sides)
+        return as_dict(first)["box"]
 
     assert imported([6.1, 6.5, 7.3])["inset_y"] == PPTX_INSET_Y
     assert "inset_x" not in imported([6.1, 6.5, 7.3]), "Slides' own sides"
@@ -1028,16 +1040,17 @@ def test_powerpoint_insets_where_the_thumbnails_show_them():
     from beamer2slides.deck_thumbs import pptx_insets
 
     def box(valign="top"):
-        return {"kind": "text", "box": {"valign": valign, "scale": 2.0}, "anchor": [10.0, 20.0]}
+        return record({"kind": "text", "bbox": [5.0, 10.0, 105.0, 40.0], "box": {"valign": valign, "scale": 2.0},
+                       "anchor": [10.0, 20.0]})
 
     hit, miss, other, low = box(), box(), box(), box("bottom")
-    slides = [{"elements": [hit, miss, other, low]}]
-    pptx_insets(slides, [(hit, -3.5), (miss, 0.2)])
+    (hit, miss, other, low), = [dicts(s) for s in pptx_insets([[hit, miss, other, low]],
+                                                              [(hit, -3.5), (miss, 0.2)], [])]
     assert hit["box"]["inset_y"] == 3.6 and hit["anchor"] == [10.0, 18.2]
     assert "inset_y" not in miss["box"] and "inset_y" not in other["box"]
     assert "inset_x" not in hit["box"], "a lone box keeps Slides' sides (ap-bio-stats)"
     a, b, c, d = box(), box(), box(), box("bottom")
-    pptx_insets([{"elements": [a, b, c, d]}], [(a, -3.6), (b, -3.9), (c, -3.2)])
+    (a, b, c, d), = [dicts(s) for s in pptx_insets([[a, b, c, d]], [(a, -3.6), (b, -3.9), (c, -3.2)], [])]
     assert d["box"]["inset_y"] == 3.6 and d["anchor"] == [10.0, 21.8]
     assert all(e["box"]["inset_x"] == 3.6 for e in (a, b, c, d)), "a deck imported whole (comps-analysis)"
 
@@ -1049,16 +1062,17 @@ def test_a_deck_is_imported_whole_when_most_sane_readings_are_nearer_powerpoints
     from beamer2slides.deck_thumbs import pptx_insets
 
     def box():
-        return {"kind": "text", "box": {"valign": "top", "scale": 2.0}, "anchor": [10.0, 20.0]}
+        return record({"kind": "text", "bbox": [5.0, 10.0, 105.0, 40.0], "box": {"valign": "top", "scale": 2.0},
+                       "anchor": [10.0, 20.0]})
 
-    read = [box() for _ in range(6)]
-    unmeasured = box()
-    pptx_insets([{"elements": read + [unmeasured]}], list(zip(read, [-2.28, -4.01, -3.71, -2.36, 7.99, -8.08])))
+    def inset(read, drifts):
+        slide, = pptx_insets([read + [box()]], list(zip(read, drifts)), [])
+        return dicts(slide)
+
+    *read, unmeasured = inset([box() for _ in range(6)], [-2.28, -4.01, -3.71, -2.36, 7.99, -8.08])
     assert unmeasured["box"]["inset_y"] == 3.6
     assert [("inset_y" in e["box"]) for e in read] == [False, True, True, False, False, False]
-    read = [box() for _ in range(4)]
-    unmeasured = box()
-    pptx_insets([{"elements": read + [unmeasured]}], list(zip(read, [-3.6, 0.1, 0.2, 9.0])))
+    *_, unmeasured = inset([box() for _ in range(4)], [-3.6, 0.1, 0.2, 9.0])
     assert "inset_y" not in unmeasured["box"], "one in three sane readings is a mixed deck"
 
 
@@ -1071,12 +1085,14 @@ def test_a_bulleted_right_to_left_first_line_is_measured_by_its_baseline():
     px, scale, z = 4.0, 2.0, 12.0
     el = {"kind": "text", "bbox": [50.0, 50.0, 250.0, 120.0], "anchor": [53.0, 65.0],
           "box": {"valign": "top", "scale": scale},
-          "paragraphs": [{"bullet": {"glyph": "●"}, "runs": [{"text": "مرحبا بالعالم", "size": z}], "slides": {}}]}
+          "paragraphs": [{"bullet": {"kind": "glyph", "text": "●"}, "runs": [{"text": "مرحبا بالعالم", "size": z}],
+                          "slides": {}}]}
     im = np.full((600, 1200, 3), 250, dtype=np.int16)
     B = int(round(63.2 * px))
     for x in range(int(55 * px), int(200 * px), 12):
         im[B - int(0.6 * z * px):B, x:x + 3] = 10
-    assert top_drift(el, [el], im, px) == pytest.approx((63.2 - 65.0) * scale, abs=0.6)
+    r = record(el)
+    assert top_drift(r, [r], im, px) == pytest.approx((63.2 - 65.0) * scale, abs=0.6)
 
 
 def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
@@ -1102,11 +1118,9 @@ def test_the_thumbnails_measure_a_first_line_and_skip_what_crosses_it():
         return {"kind": "text", "bbox": [10.0, 10.0, 190.0, 60.0], "anchor": [16.7, 30.0], "box": {"scale": 1.0},
                 "paragraphs": [{"align": "left", "bullet": None, "runs": [{"text": "Some words", "size": 8.0}]},
                                {"align": "left", "bullet": None, "runs": [{"text": "More", "size": 8.0}]}]}
-    el = element()
-    ink_widths([el], im, px)
+    el, = passed(ink_widths, [element()], im, px)
     assert el["ink_width"] == pytest.approx(60.0, abs=0.3)
-    el = element()
-    ink_widths([el, {"kind": "image", "bbox": [100.0, 20.0, 120.0, 40.0]}], im, px)
+    el, _ = passed(ink_widths, [element(), {"kind": "image", "bbox": [100.0, 20.0, 120.0, 40.0]}], im, px)
     assert "ink_width" not in el
 
 

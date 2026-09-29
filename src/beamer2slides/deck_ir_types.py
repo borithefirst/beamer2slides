@@ -761,13 +761,12 @@ def _element(v: object, at: At) -> TargetElement:
 
 
 def parse_element(v: object, where: str) -> TargetElement:
-    """One element as `element_json` writes it, typed (`deck_ir`'s thumbnail passes still work on
-    that JSON); raises `IRError` naming `where`."""
+    """One element as `element_json` writes it, typed; raises `IRError` naming `where`."""
     return _element(v, At(where=where, path=""))
 
 
 def parse_page_gradient(v: object, where: str) -> PageGradient:
-    """A slide's `background_gradient` as `deck_fills.page_gradient` reads it off the thumbnail."""
+    """A slide's `background_gradient` as target.json writes it (`deck_fills.page_gradient`)."""
     return _page_gradient(v, At(where=where, path=""))
 
 
@@ -946,11 +945,12 @@ def _page_gradient_json(g: PageGradient) -> JsonObject:
     return out
 
 
-def _crop_json(c: Crop) -> JsonObject:
+def crop_json(c: Crop) -> JsonObject:
+    """A picture's `crop` as `deck_ir` writes it (`compare.cropped_picture` reads that)."""
     return {"l": c.l, "t": c.t, "r": c.r, "b": c.b}
 
 
-def _recolor_json(r: Recolor) -> JsonObject:
+def recolor_json(r: Recolor) -> JsonObject:
     return {"name": r.name,
             "stops": [{"color": s.color, "alpha": s.alpha, "position": s.position} for s in r.stops]}
 
@@ -959,12 +959,12 @@ def _picture_props(out: JsonObject, p: _PictureProps) -> None:
     _opt(out, "box", None if p.box is None else _box(p.box))
     _opt(out, "flip", p.flip)
     _opt(out, "rotation", p.rotation)
-    _opt(out, "crop", None if p.crop is None else _crop_json(p.crop))
+    _opt(out, "crop", None if p.crop is None else crop_json(p.crop))
     _opt(out, "crop_angle", p.crop_angle)
     _opt(out, "opacity", p.opacity)
     _opt(out, "brightness", p.brightness)
     _opt(out, "contrast", p.contrast)
-    _opt(out, "recolor", None if p.recolor is None else _recolor_json(p.recolor))
+    _opt(out, "recolor", None if p.recolor is None else recolor_json(p.recolor))
     if p.outline is not None:
         out["outline"] = {"color": p.outline.color, "weight": p.outline.weight, "dash": p.outline.dash}
     _opt(out, "file", p.file)
@@ -1151,6 +1151,6 @@ __all__ = ["ABSENT", "Absent", "CellParagraph", "Chart", "Crop", "DeckSource", "
            "IRError", "Layout", "PageGradient", "PictureOutline", "Recolor", "RecolorStop", "SlidesMeasures",
            "TableBorder", "TableCell", "TargetBullet", "TargetDeck", "TargetDiagram", "TargetElement", "TargetImage",
            "TargetLine", "TargetParagraph", "TargetRun", "TargetShape", "TargetSlide", "TargetTable", "TargetText",
-           "TextBox", "ThumbnailOf", "Trace", "Video", "element_json", "is_target", "paragraph_json", "parse_element",
+           "TextBox", "ThumbnailOf", "Trace", "Video", "crop_json", "element_json", "is_target", "paragraph_json", "parse_element",
            "parse_page_gradient", "parse_target", "run_json",
            "slide_json", "target_json"]

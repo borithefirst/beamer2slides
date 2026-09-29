@@ -362,7 +362,11 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   docs/adopt-bench.md): absolute-first `slidebox` frames in a `slides.sty` vocabulary, a recovered
   theme, a label per frame from the slide's objectId, and a base so the source can be synced back
   into that same deck (`adopt_sync.py`). deck_ir builds `TargetDeck` records (`target_json` its
-  one JSON writer; deck_fills/deck_thumbs still take element dicts through one bridge). adopt's
+  one JSON writer); the thumbnail passes (deck_fills, deck_freeforms, deck_thumbs) take a slide's
+  element records and hand back new ones (`replace`), never changing one; adopt parses the target
+  once (`bootstrap`), `element_latex` matches each kind to `assert_never`, adopt_shapes and
+  adopt_theme read records (text boxes and tables still write from `element_json`); tests build
+  records with `tests/deck_records.py`. adopt's
   state is `adopt_context.AdoptContext` (inverse's Context plus every field adopt keeps), built by
   `adopt_context()`: never set an attribute on a context that is not declared there. An adopted source also converts: a marked shape Slides has
   no shape for (line, freeform, picture fill, outline alone) is its picture at render

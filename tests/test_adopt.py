@@ -14,6 +14,7 @@ import pytest
 
 from beamer2slides import adopt
 from beamer2slides.deck_ir import family_of
+from .deck_records import dicts, records
 from .irs import deck_ir
 
 EMU = 12700
@@ -685,20 +686,17 @@ def test_a_right_to_left_one_line_box_is_measured_too():
         return {"kind": "text", "bbox": [10.0, 10.0, 190.0, 60.0], "anchor": [16.7, 30.0],
                 "box": {"scale": 1.0}, "paragraphs": [p]}
 
-    rtl = element("right", "rtl")
-    ink_widths([rtl], im, px)
+    rtl, = dicts(ink_widths(records([element("right", "rtl")]), im, px))
     assert rtl["ink_width"] == pytest.approx(60.0, abs=0.3)
 
     # a left-to-right paragraph that merely happens to be right-aligned is unrelated and still
     # excluded (this is not a blanket relaxation of the alignment check)
-    plain_right = element("right", None)
-    ink_widths([plain_right], im, px)
+    plain_right, = dicts(ink_widths(records([element("right", None)]), im, px))
     assert "ink_width" not in plain_right
 
     # a right-to-left paragraph flush with its OWN start (align=right) is measured, but one written
     # centered, or mistakenly left, is not - only the mirrored equivalent of "left" qualifies
-    off_start = element("left", "rtl")
-    ink_widths([off_start], im, px)
+    off_start, = dicts(ink_widths(records([element("left", "rtl")]), im, px))
     assert "ink_width" not in off_start
 
 

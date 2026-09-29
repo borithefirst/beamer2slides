@@ -32,7 +32,7 @@ from .deck_ir_types import (ABSENT, Absent, CellParagraph, Chart, Crop, DeckSour
                             PageGradient, PictureOutline, Recolor, RecolorStop, SlidesMeasures, TableBorder, TableCell,
                             TargetBullet, TargetDeck, TargetDiagram, TargetElement, TargetImage, TargetLine,
                             TargetParagraph, TargetRun, TargetShape, TargetSlide, TargetTable, TargetText, TextBox,
-                            VAlign, Video, element_json, parse_element, parse_page_gradient, target_json)
+                            VAlign, Video, target_json)
 from .deck_thumbs import (SNAP_PAGE, ink_widths, pptx_insets, side_gap, side_inset, thumbnail_cell_pad,
                           thumbnail_cell_text, thumbnail_insets, thumbnail_picture_masks,
                           thumbnail_picture_places, thumbnail_rows, thumbnail_weights, top_drift)
@@ -1075,7 +1075,7 @@ def stash_picture(url: str, fetch: Fetch, images: Path) -> Stashed:
 
 
 def stash_json(got: Stashed) -> JsonObject:
-    """A `Stashed` as the keys of an image element (what `deck_fills.picture_unusable` reads)."""
+    """A `Stashed` as the keys of an image element's JSON (`pictures_from_pptx` writes them)."""
     out: JsonObject = {}
     for key, value in (("file", got.file), ("sha1", got.sha1), ("format", got.format), ("error", got.error)):
         if value is not None:
@@ -1140,7 +1140,7 @@ Votes = dict[str, list[int]]
 """`vote_inherited`'s tally: element id -> [seen, absent]."""
 
 
-def vote_inherited(elements: list[JsonObject], thumb: SignedRGB, px: float, votes: Votes) -> None:
+def vote_inherited(elements: Sequence[TargetElement], thumb: SignedRGB, px: float, votes: Votes) -> None:
     """One slide's word on every inherited (master/layout) element it carries: did its own thumbnail
     show that element's own appearance, past whatever this slide itself draws over it?
 
@@ -1161,18 +1161,18 @@ def vote_inherited(elements: list[JsonObject], thumb: SignedRGB, px: float, vote
     from . import deck_fills
     h, w = thumb.shape[:2]
     for k, el in enumerate(elements):
-        if not el.get("inherited"):
+        if not el.inherited:
             continue
-        at = deck_fills.px_box(el["bbox"], px, w, h, deck_fills.MARGIN_PX)
+        at = deck_fills.px_box(el.bbox, px, w, h, deck_fills.MARGIN_PX)
         if at[2] - at[0] < 4 or at[3] - at[1] < 4:
             continue
-        sub, region, _ = deck_fills.masks(thumb, at, elements[k + 1:], px, False)
+        sub, region, _ = deck_fills.masks(thumb, at, deck_fills.untraced(elements[k + 1:]), px, False)
         if int(region.sum()) < deck_fills.INHERITED_MIN_PX:
             continue
         share = deck_fills.element_appearance_share(sub, region, el)
         if share is None:
             continue
-        vote = votes.setdefault(as_str(el["id"], WHERE), [0, 0])
+        vote = votes.setdefault(el.id, [0, 0])
         if share >= deck_fills.INHERITED_VISIBLE:
             vote[0] += 1
         elif share <= deck_fills.INHERITED_ABSENT_MAX:
@@ -1762,8 +1762,8 @@ def read_target(pres: Presentation, pdf_size: Sequence[float] | None, base: Json
     Without it those fills stay unknown, and shapes with nothing else to draw are left out. A
     thumbnail given as a path is kept as the slide's `thumbnail`, for pull's frame guard.
 
-    A foreign slide's thumbnail passes (`deck_fills`, `deck_thumbs`) still work on the elements'
-    JSON (`element_json`); each element is parsed back (`parse_element`) once they are done."""
+    A foreign slide's thumbnail passes (`deck_fills`, `deck_thumbs`) take the slide's element records
+    and hand back new ones: a pass never changes a record, it replaces it."""
     page_w, page_h, scale = page_size_for(pres, pdf_size, foreign)
     fonts = FontMapper()
     resolver = StyleResolver(pres)
@@ -1778,7 +1778,7 @@ def read_target(pres: Presentation, pdf_size: Sequence[float] | None, base: Json
         for e in _objs(s.get("elements")):
             for oid in _strings(e.get("objects")):
                 object_keys[oid] = (_str(s.get("key")), _str(e.get("key")))
-    drifts: list[tuple[JsonObject, float]] = []   # (box, `top_drift`) of every measurable box, for `pptx_insets`
+    drifts: list[tuple[TargetElement, float]] = []   # (box, `top_drift`) of every measurable box, for `pptx_insets`
     sides: list[float] = []                       # `side_inset` of every box whose words' start edge could be read
     inherited_votes: Votes = {}                   # `vote_inherited`, tallied over every slide
     inherited_groups: dict[str, tuple[str, str]] = {}   # element id -> `(page, source group)` for `decide_drops`
@@ -1812,7 +1812,7 @@ def read_target(pres: Presentation, pdf_size: Sequence[float] | None, base: Json
         return out if foreign else fold_groups(out, lines)
 
     slides: list[TargetSlide] = []
-    pending: list[tuple[TargetSlide, list[JsonObject]]] = []    # a foreign slide and its elements' JSON
+    pending: list[tuple[TargetSlide, list[TargetElement]]] = []    # a foreign slide and its elements
     for n, slide in enumerate(pres.get("slides") or []):
         tags: list[str] = []
         under: list[TargetElement] = []
@@ -1846,7 +1846,6 @@ def read_target(pres: Presentation, pdf_size: Sequence[float] | None, base: Json
                 elements=tuple(elements)))
             continue
         from . import deck_fills
-        dicts = [element_json(e) for e in elements]
         gradient: PageGradient | None = None
         bg_file: str | None | Absent = ABSENT
         bg_source: str | None = None
@@ -1856,7 +1855,7 @@ def read_target(pres: Presentation, pdf_size: Sequence[float] | None, base: Json
         thumb = None if raw is None else deck_fills.load(raw)
         if thumb is not None:
             px = thumb.shape[1] / page_w
-            vote_inherited(dicts, thumb, px, inherited_votes)
+            vote_inherited(elements, thumb, px, inherited_votes)
         if thumb is not None and not picture and color:
             # `pageBackgroundFill` can be wrong two ways: a solid the thumbnail simply is not
             # (a gradient the API has no type for, `deck_fills.page_gradient`), or a solid that
@@ -1864,7 +1863,7 @@ def read_target(pres: Presentation, pdf_size: Sequence[float] | None, base: Json
             # included - is what Slides actually draws (china-pptx: a slide-level solidFill over
             # a layout's radial picture). Both are read from the same mismatch, cheaply: most
             # slides' own colour explains their background and neither check goes further.
-            bg_mask = deck_fills.page_visible_mask(dicts, px, thumb.shape[1], thumb.shape[0])
+            bg_mask = deck_fills.page_visible_mask([e.bbox for e in elements], px, thumb.shape[1], thumb.shape[0])
             if not deck_fills.region_matches(thumb, bg_mask, color):
                 # A candidate is only taken once confirmed on these pixels: offered on its say-so
                 # alone, the layout's or master's *shared* picture wrongly overrode slides whose
@@ -1884,9 +1883,8 @@ def read_target(pres: Presentation, pdf_size: Sequence[float] | None, base: Json
                 elif pcolor_share >= deck_fills.FLAT:
                     color = pcolor
                 else:
-                    found = deck_fills.page_gradient(thumb, bg_mask, color, px)
-                    gradient = None if found is None else parse_page_gradient(found, f"slide {n + 1}")
-                    if found is None and images is not None:
+                    gradient = deck_fills.page_gradient(thumb, bg_mask, color, px)
+                    if gradient is None and images is not None:
                         # Neither a flat colour, a picture the API can point to, nor a clean
                         # ramp explains it - a texture no reference exists for at all
                         # (en-flowchart's fine gold stripes), or any other backdrop
@@ -1895,48 +1893,48 @@ def read_target(pres: Presentation, pdf_size: Sequence[float] | None, base: Json
                         # colour already shown to be wrong.
                         texture = deck_fills.page_texture_picture(thumb, bg_mask, images)
                         if texture:
-                            color, bg_file = None, as_str(texture["file"], WHERE)
+                            color, bg_file = None, texture
         if thumb is not None and images is not None:
-            deck_fills.recover_pictures(dicts, thumb, px, images)
-        dicts = deck_fills.settle(dicts, thumb, px, None if picture else color, bool(picture), images)
-        thumbnail_insets(dicts, thumb, px)
-        thumbnail_rows(dicts, thumb, px)
-        thumbnail_cell_pad(dicts, thumb, px)
-        thumbnail_cell_text(dicts, thumb, px)
-        thumbnail_weights(dicts, thumb, px)
-        ink_widths(dicts, thumb, px)
-        for e in dicts:
-            d = top_drift(e, dicts, thumb, px)
+            elements = deck_fills.recover_pictures(elements, thumb, px, images)
+        elements = deck_fills.settle(elements, thumb, px, None if picture else color, bool(picture), images)
+        elements = thumbnail_insets(elements, thumb, px)
+        elements = thumbnail_rows(elements, thumb, px)
+        elements = thumbnail_cell_pad(elements, thumb, px)
+        elements = thumbnail_cell_text(elements, thumb, px)
+        elements = thumbnail_weights(elements, thumb, px)
+        elements = ink_widths(elements, thumb, px)
+        for e in elements:
+            d = top_drift(e, elements, thumb, px)
             if d is not None:
                 drifts.append((e, d))
-        for e in dicts:
-            g = side_gap(e, dicts, thumb, px)
+        for e in elements:
+            g = side_gap(e, elements, thumb, px)
             if g is not None:
                 sides.append(side_inset(e, g))
-        thumbnail_picture_places(dicts, thumb, px)
-        thumbnail_picture_masks(dicts, thumb, px)
+        # (these two change pictures only: the text boxes `drifts` names stay the objects the slide holds)
+        elements = thumbnail_picture_places(elements, thumb, px)
+        elements = thumbnail_picture_masks(elements, thumb, px)
         if picture and fetch and images is not None:
             # adopt draws it (a stretched picture fill is the whole page); pull never does, the
             # source it refines already draws whatever the converter baked into it
             got = stash_picture(picture, fetch, images)
             bg_file = got.file
-            if thumb is not None and deck_fills.picture_unusable(stash_json(got)):
+            if thumb is not None and deck_fills.picture_unusable(got.file, got.format, got.error):
                 # none came: the page as the thumbnail shows it around what stands on it
-                page_picture = deck_fills.background_from_thumbnail(thumb, dicts, px, images)
+                page_picture = deck_fills.background_from_thumbnail(thumb, elements, px, images)
                 if page_picture:
-                    bg_file = _str(page_picture.get("file"))
+                    bg_file = page_picture
                     bg_source = "thumbnail"
         pending.append((TargetSlide(
             page=n, frame=str(n + 1), size=(page_w, page_h), object_id=oid, key=key, notes=notes_text(slide),
             background_color=color, background_picture=picture, background_gradient=gradient,
             background_file=bg_file, background_source=bg_source, layout=_layout_id(slide), thumbnail=shown,
-            elements=()), dicts))
+            elements=()), elements))
     if foreign:
         drop_ids = decide_drops(inherited_votes, inherited_groups)
-        kept = [(s, [e for e in dicts if e.get("id") not in drop_ids] if drop_ids else dicts) for s, dicts in pending]
-        pptx_insets([{"elements": dicts} for _, dicts in kept], drifts, sides)
-        slides = [replace(s, elements=tuple(parse_element(e, f"slide {s.page + 1}") for e in dicts))
-                  for s, dicts in kept]
+        kept = [(s, [e for e in els if e.id not in drop_ids] if drop_ids else els) for s, els in pending]
+        written = pptx_insets([els for _, els in kept], drifts, sides)
+        slides = [replace(s, elements=tuple(els)) for (s, _), els in zip(kept, written)]
     return TargetDeck(
         version=1, source=DeckSource(presentation_id=pres.get("presentationId"), title=pres.get("title"),
                                      revision_id=pres.get("revisionId")),

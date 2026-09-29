@@ -6,52 +6,68 @@ their elements, which titles move into the template - can be read off directly. 
 through `deck_ir` and `adopt.bootstrap` on the fixture of test_adopt.py.
 """
 
+from dataclasses import replace
+
 from beamer2slides import adopt, adopt_theme
 from beamer2slides.adopt_theme import plan, slot_parts, slug, theme_name
+from beamer2slides.deck_ir_types import (ABSENT, DeckSource, Layout, TargetDeck, TargetElement, TargetSlide,
+                                         TargetText)
+from .deck_records import record
 from .irs import deck_ir
 
 from .test_adopt import presentation, text_shape
 
 
-def words_of(el: dict) -> str:
-    return "".join(r["text"] for p in el.get("paragraphs") or [] for r in p["runs"])
+def words_of(el: TargetElement) -> str:
+    return "".join(r.text for p in el.paragraphs for r in p.runs) if isinstance(el, TargetText) else ""
 
 
-def render(el: dict) -> str:
+def render(el: TargetElement) -> str:
     """What `element_latex` would write: the words between a box's opening and closing lines."""
-    return f"  \\begin{{textblock*}}{{{el['bbox'][0]}}}\n    {words_of(el)}\n  \\end{{textblock*}}"
+    return f"  \\begin{{textblock*}}{{{el.bbox[0]:g}}}\n    {words_of(el)}\n  \\end{{textblock*}}"
 
 
-def title(words: str, box=(10, 10, 200, 40), kind="TITLE") -> dict:
-    return {"kind": "text", "placeholder": kind, "bbox": list(box), "paragraphs": [{"runs": [{"text": words}]}]}
+def title(words: str, box=(10, 10, 200, 40), kind="TITLE") -> TargetElement:
+    return record({"kind": "text", "placeholder": kind, "bbox": list(box), "paragraphs": [{"runs": [{"text": words}]}]})
 
 
-def deco(owner: str, name: str, box=(0, 0, 450, 20)) -> dict:
-    return {"kind": "shape", "inherited": owner, "bbox": list(box), "name": name}
+def deco(owner: str, name: str, box=(0, 0, 450, 20)) -> TargetElement:
+    # (the element's id carries the name its stand-in LaTeX writes)
+    return record({"kind": "shape", "inherited": owner, "bbox": list(box), "id": name})
 
 
-def own(name: str, box=(300, 150, 400, 200)) -> dict:
-    return {"kind": "shape", "bbox": list(box), "name": name}
+def own(name: str, box=(300, 150, 400, 200)) -> TargetElement:
+    return record({"kind": "shape", "bbox": list(box), "id": name})
 
 
-def target(slides: list[dict]) -> dict:
-    return {"source": {"title": "My talk"}, "slides": slides, "layouts": {
-        "L": {"name": "Title and body", "master": "M", "background_color": None, "background_picture": None},
-        "M": {"name": "Simple", "master": None, "background_color": None, "background_picture": None}}}
+def layout(name: str, master: str | None) -> Layout:
+    return Layout(name=name, master=master, background_color=None, background_picture=None)
 
 
-def latex(el: dict) -> str:
-    return render(el) if el["kind"] == "text" else f"  % {el['name']}"
+LAYOUTS = {"L": layout("Title and body", "M"), "M": layout("Simple", None)}
 
 
-def planned(slides: list[dict], deck_bg=None):
+def target(slides: list[TargetSlide], layouts: dict[str, Layout] | None = None) -> TargetDeck:
+    return TargetDeck(version=1, source=DeckSource(presentation_id=ABSENT, title="My talk", revision_id=ABSENT),
+                      page_size=(450.0, 250.0), scale=1.0, slides=tuple(slides),
+                      layouts=tuple((layouts or LAYOUTS).items()), first_slide=None)
+
+
+def latex(el: TargetElement) -> str:
+    return render(el) if isinstance(el, TargetText) else f"  % {el.id}"
+
+
+def planned(slides: list[TargetSlide], deck_bg=None):
     t = target(slides)
-    pieces = [[latex(e) for e in s["elements"]] for s in slides]
+    pieces = [[latex(e) for e in s.elements] for s in slides]
     return plan(t, pieces, render, lambda c: "c" + c.strip("#"), lambda f: f"figures/{f}", deck_bg)
 
 
-def slide(*elements, layout="L", **extra) -> dict:
-    return {"layout": layout, "elements": list(elements), **extra}
+def slide(*elements, layout="L", background_color=None, background_file=ABSENT) -> TargetSlide:
+    return TargetSlide(page=1, frame="f", size=(450.0, 250.0), object_id="p", key=None, notes=None,
+                       background_color=background_color, background_picture=None, background_gradient=ABSENT,
+                       background_file=background_file, background_source=None, layout=layout, thumbnail=None,
+                       elements=tuple(elements))
 
 
 # ---------------------------------------------------------------- names
@@ -66,10 +82,10 @@ def test_a_layout_is_named_by_its_display_name():
 
 
 def test_the_theme_is_named_after_the_deck_and_shadows_no_beamer_theme():
-    assert theme_name({"source": {"title": "CS 161 SP25 - Lecture 17"}}) == "CS161SP25Lecture17"
-    assert theme_name({"source": {"title": "2024 talk"}}) == "Deck2024Talk"
-    assert theme_name({"source": {"title": "Madrid"}}) == "MadridDeck"
-    assert theme_name({"source": {}}) == "Deck"
+    assert theme_name("CS 161 SP25 - Lecture 17") == "CS161SP25Lecture17"
+    assert theme_name("2024 talk") == "Deck2024Talk"
+    assert theme_name("Madrid") == "MadridDeck"
+    assert theme_name(None) == "Deck"
 
 
 # ---------------------------------------------------------------- the layout's decoration
@@ -81,7 +97,7 @@ def test_slides_on_one_layout_name_it_and_leave_its_decoration_to_the_theme():
     assert all(p.drawn == {0, 1} for p in plans), "the frame keeps only its own element"
     assert "\\defbeamertemplate{background}{title-and-body}{\\layoutdecoration{%\n  % bar\n  % logo" in sty
     assert sty.count("% bar") == 1 and "% card" not in sty
-    assert plans[0].options() == "[plain,layout=title-and-body]"
+    assert plans[0].options(None) == "[plain,layout=title-and-body]"
 
 
 def test_a_slide_that_draws_its_layout_differently_keeps_its_elements():
@@ -91,24 +107,22 @@ def test_a_slide_that_draws_its_layout_differently_keeps_its_elements():
     slides.append(slide(deco("M", "bar"), deco("L", "logo, read differently")))
     _sty, plans = planned(slides)
     assert [p.layout for p in plans] == ["title-and-body"] * 3 + [None]
-    assert plans[3].drawn == set() and plans[3].options() == "[plain]"
+    assert plans[3].drawn == set() and plans[3].options(None) == "[plain]"
 
 
 def test_a_master_several_layouts_draw_is_said_once():
     slides = [slide(deco("M", "bar"), deco("L", "logo")), slide(deco("M", "bar"), deco("L2", "stripe"), layout="L2")]
-    t = target(slides)
-    t["layouts"]["L2"] = {"name": "Section header", "master": "M", "background_color": None,
-                          "background_picture": None}
-    pieces = [[latex(e) for e in s["elements"]] for s in slides]
+    layouts = {**LAYOUTS, "L2": layout("Section header", "M")}
+    t = target(slides, layouts)
+    pieces = [[latex(e) for e in s.elements] for s in slides]
     sty, plans = plan(t, pieces, render, str, str, None)
     assert [p.layout for p in plans] == ["title-and-body", "section-header"]
     assert sty.count("% bar") == 1 and sty.count("\\drawmaster{simple}") == 2
     # a second master drawing the same (a deck pasted into another brings its master along)
-    for s in slides[1:]:
-        s["elements"][0]["inherited"] = "M2"
-    t["layouts"]["L2"]["master"] = "M2"
-    t["layouts"]["M2"] = {**t["layouts"]["M"], "name": "Simple copy"}
-    sty, _plans = plan(t, pieces, render, str, str, None)
+    slides[1:] = [replace(s, elements=(replace(s.elements[0], inherited="M2"),) + s.elements[1:]) for s in slides[1:]]
+    layouts["L2"] = layout("Section header", "M2")
+    layouts["M2"] = layout("Simple copy", None)
+    sty, _plans = plan(target(slides, layouts), pieces, render, str, str, None)
     assert sty.count("% bar") == 1 and sty.count("\\drawmaster{simple}") == 2
 
 
@@ -120,10 +134,10 @@ def test_a_piece_with_a_parameter_sign_is_never_put_in_a_template():
 
 
 def test_a_slide_with_no_layout_is_left_alone():
-    assert plan({"slides": [slide(own("x"))]}, [["x"]], render, str, str, None) is None, \
+    assert plan(replace(target([slide(own("x"))]), layouts=None), [["x"]], render, str, str, None) is None, \
         "an IR written before deck_ir recorded layouts"
     _sty, plans = planned([slide(own("x"), layout=None)])
-    assert plans[0].layout is None and plans[0].options() == "[plain]"
+    assert plans[0].layout is None and plans[0].options(None) == "[plain]"
 
 
 # ---------------------------------------------------------------- the page under it
@@ -132,15 +146,14 @@ def test_the_layouts_page_comes_with_it_and_a_slide_of_its_own_says_so():
     slides = [slide(deco("L", "logo"), background_color="#112233") for _ in range(2)]
     slides.append(slide(deco("L", "logo"), background_color="#ffffff"))
     slides.append(slide(deco("L", "logo"), background_file="bars.png"))
-    t = target(slides)
-    t["layouts"]["L"]["background_color"] = "#112233"
-    pieces = [[latex(e) for e in s["elements"]] for s in slides]
+    t = target(slides, {**LAYOUTS, "L": replace(LAYOUTS["L"], background_color="#112233")})
+    pieces = [[latex(e) for e in s.elements] for s in slides]
     sty, plans = plan(t, pieces, render, lambda c: "c" + c.strip("#"), lambda f: f"figures/{f}", "#ffffff")
     assert "\\layoutcanvas{title-and-body}{\\setbeamercolor{background canvas}{bg=c112233}}" in sty
     assert plans[0].background is None and plans[0].backdrop is None
     assert plans[2].background == "deckbg", "the deck's own page, under a layout that has another"
     assert plans[3].backdrop == "figures/bars.png"
-    assert plans[3].options() == "[plain,layout=title-and-body,backdrop=figures/bars.png]"
+    assert plans[3].options(None) == "[plain,layout=title-and-body,backdrop=figures/bars.png]"
 
 
 # ---------------------------------------------------------------- title, subtitle, number
@@ -150,7 +163,9 @@ def test_slot_parts_split_a_placeholder_into_its_frame_and_its_words():
     prefix, suffix, words = slot_parts(el, render(el), render)
     assert words == "Last time: CAPTCHAs" and prefix + words + suffix == render(el)
     assert slot_parts(title("50% off"), render(title("50% off")), render) is None, "a comment sign"
-    two = {**el, "paragraphs": [{"runs": [{"text": "a"}]}, {"runs": [{"text": "b"}]}]}
+    two = record({"kind": "text", "placeholder": "TITLE", "bbox": [10, 10, 200, 40],
+                  "paragraphs": [{"runs": [{"text": "a"}]}, {"runs": [{"text": "b"}]}]})
+    assert isinstance(el, TargetText) and isinstance(two, TargetText)
     assert slot_parts(two, render(two).replace("ab", "a\nb"), lambda e: render(e).replace(
         "Qqzxbeginslotqa", "Qqzxbeginslotqa\n")) is None, "words over several lines stay in the frame"
 
@@ -176,7 +191,7 @@ def test_a_title_stays_in_the_frame_when_something_under_it_touches_it():
 def test_a_title_written_differently_stays_in_the_frame():
     slides = [slide(title(f"T{n}")) for n in range(3)]
     t = target(slides)
-    pieces = [[render(e) for e in s["elements"]] for s in slides]
+    pieces = [[render(e) for e in s.elements] for s in slides]
     pieces[2][0] = pieces[2][0].replace("textblock*}{10}", "textblock*}{11}")    # moved by a point
     _sty, plans = plan(t, pieces, render, str, str, None)
     assert [bool(p.header()) for p in plans] == [True, True, False]
@@ -190,7 +205,7 @@ def test_the_slide_number_is_the_frame_number():
     assert "\\withnumber{%\n  \\begin{textblock*}{420}\n    \\insertframenumber{}\n" in sty
     assert [1 in p.drawn for p in plans[:3]] == [True, True, False], "a number that is not the page's"
     assert [p.nonumber for p in plans] == [False, False, True, True]
-    assert plans[3].options() == "[plain,layout=title-and-body,nonumber]"
+    assert plans[3].options(None) == "[plain,layout=title-and-body,nonumber]"
 
 
 # ---------------------------------------------------------------- through deck_ir and bootstrap

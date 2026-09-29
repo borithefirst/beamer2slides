@@ -2,13 +2,16 @@
 comparing it with a foreign deck's thumbnail (`devtools/preset_survey.py`'s phase 1 survey).
 
 Offline: hand-built numpy thumbnails (1 px per pt, so a shape's box in pt is its box in pixels)
-and bare element dicts - only the fields `preset_geometry.match_score` itself reads, not a full
+and bare elements (`deck_records.record`) - only the fields `preset_geometry.match_score` itself reads, not a full
 `presentations.get` answer (that pipeline is `deck_ir`'s and `deck_fills`' to test)."""
 
 import numpy as np
 from PIL import Image, ImageDraw
 
+from beamer2slides.deck_ir_types import TargetElement
 from beamer2slides.devtools import preset_geometry as pg
+
+from .deck_records import record
 
 WHITE = "#ffffff"
 BLUE = "#1a2b3c"
@@ -33,8 +36,8 @@ def parallelogram_pts(x0, y0, w, h, slant_share):
     return [(x0, y0 + h), (x0 + x, y0), (x0 + w, y0), (x0 + w - x, y0 + h)]
 
 
-def shape_el(kind, x0, y0, w, h, fill=BLUE, **extra) -> dict:
-    return {"kind": "shape", "shape_type": kind, "bbox": [x0, y0, x0 + w, y0 + h], "fill": fill, **extra}
+def shape_el(kind, x0, y0, w, h, fill=BLUE, **extra) -> TargetElement:
+    return record({"kind": "shape", "shape_type": kind, "bbox": [x0, y0, x0 + w, y0 + h], "fill": fill, **extra})
 
 
 # ---------------------------------------------------------------- path_polygons / default_rings
@@ -83,7 +86,7 @@ def test_match_score_agrees_when_thumbnail_draws_the_default_slant():
     pts = parallelogram_pts(10, 10, 100, 60, 0.25)        # exactly adopt_shapes' own default
     paint(a, pts, BLUE)
     el = shape_el("PARALLELOGRAM", 10, 10, 100, 60)
-    score = pg.match_score(a, el, [], px=1.0)
+    score = pg.match_score(a, el, [], 1.0, False)
     assert score is not None
     assert score["iou"] > 0.9
 
@@ -97,7 +100,7 @@ def test_match_score_disagrees_on_a_thin_ribbon_like_ja_schedule():
     ribbon = [(x0 + w - 22, y0), (x0 + w, y0), (x0 + w - 6, y0 + h), (x0 + w - 28, y0 + h)]
     paint(a, ribbon, BLUE)
     el = shape_el("PARALLELOGRAM", x0, y0, w, h)
-    score = pg.match_score(a, el, [], px=1.0)
+    score = pg.match_score(a, el, [], 1.0, False)
     assert score is not None
     assert score["iou"] < 0.5
     assert score["p_out"] > 0.3                           # our wide default paints over bare page
@@ -106,13 +109,13 @@ def test_match_score_disagrees_on_a_thin_ribbon_like_ja_schedule():
 def test_match_score_none_without_a_fill():
     a = canvas(120, 80)
     el = shape_el("PARALLELOGRAM", 10, 10, 100, 60, fill=None)
-    assert pg.match_score(a, el, [], px=1.0) is None
+    assert pg.match_score(a, el, [], 1.0, False) is None
 
 
 def test_match_score_none_for_non_adjustable_preset():
     a = canvas(120, 80)
     el = shape_el("RECTANGLE", 10, 10, 100, 60)
-    assert pg.match_score(a, el, [], px=1.0) is None
+    assert pg.match_score(a, el, [], 1.0, False) is None
 
 
 def test_match_score_none_when_rotated():
@@ -120,7 +123,7 @@ def test_match_score_none_when_rotated():
     pts = parallelogram_pts(10, 10, 100, 60, 0.25)
     paint(a, pts, BLUE)
     el = shape_el("PARALLELOGRAM", 10, 10, 100, 60, frame={"rotation": 30.0})
-    assert pg.match_score(a, el, [], px=1.0) is None
+    assert pg.match_score(a, el, [], 1.0, False) is None
 
 
 def test_match_score_none_when_mostly_covered_above():
@@ -129,7 +132,7 @@ def test_match_score_none_when_mostly_covered_above():
     paint(a, pts, BLUE)
     el = shape_el("PARALLELOGRAM", 10, 10, 100, 60)
     cover = {"kind": "shape", "bbox": [0, 0, 120, 80], "fill": "#ff0000", "fill_alpha": 1.0, "role": "panel"}
-    assert pg.match_score(a, el, [cover], px=1.0) is None
+    assert pg.match_score(a, el, [record(cover)], 1.0, False) is None
 
 
 def test_match_score_flip_mirrors_the_default_polygon():
@@ -139,8 +142,8 @@ def test_match_score_flip_mirrors_the_default_polygon():
     mirrored_pts = [(2 * x0 + w - x, y) for x, y in pts]
     paint(a, mirrored_pts, BLUE)
     el = shape_el("PARALLELOGRAM", x0, y0, w, h, frame={"flip": True})
-    mirrored = pg.match_score(a, el, [], px=1.0)
-    upright = pg.match_score(a, {**el, "frame": {}}, [], px=1.0)
+    mirrored = pg.match_score(a, el, [], 1.0, False)
+    upright = pg.match_score(a, shape_el("PARALLELOGRAM", x0, y0, w, h, frame={}), [], 1.0, False)
     assert mirrored is not None and upright is not None
     assert mirrored["iou"] > 0.9
     assert upright["iou"] < mirrored["iou"]
