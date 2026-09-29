@@ -970,7 +970,8 @@ def test_a_ring_cut_by_a_caption_in_its_colour_is_still_a_ring(tmp_path):
     """cs161-net 13: a red ring round the houses and their wires, a caption in the same red across its
     rim. The trace leaves the rim under those words out (they may be the letters), which opened the
     ring into a line: drawn so, the wires only its crop held were gone. Under words of its colour the
-    stroke still closes the ring, and a ring is left to the thumbnail's picture."""
+    stroke still closes the ring; here the letters cross its rim, so what lies under them is no line
+    to close the traced ring with (`closed_under_words`), and the ring is the thumbnail's picture."""
     from PIL import Image, ImageDraw
     red = (200, 30, 50)
     a = page()
@@ -991,6 +992,79 @@ def test_a_ring_cut_by_a_caption_in_its_colour_is_still_a_ring(tmp_path):
                "paragraphs": [{"runs": [{"text": "local network", "color": "#c81e32"}]}]}
     got = deck_fills.settle([ring, pic, caption], np.asarray(img), 1.0, "#ffffff", False, tmp_path)
     r = next(e for e in got if e["id"].startswith("r"))
+    assert r["kind"] == "image" and not r.get("trace"), "the ring's picture, not an open line"
+
+
+def drawn(rings, size=(720, 405)) -> np.ndarray:
+    """The pixels a trace's rings fill, even-odd (at 1 px per pt)."""
+    from PIL import Image, ImageDraw
+    out = np.zeros(size[::-1], dtype=bool)
+    for ring in rings:
+        im = Image.new("1", size, 0)
+        ImageDraw.Draw(im).polygon([tuple(p) for p in ring], fill=1)
+        out ^= np.asarray(im, dtype=bool)
+    return out
+
+
+def test_a_ring_round_what_shows_the_slide_is_its_line_closed_under_its_caption(tmp_path):
+    """cs161-net 13: a green ring round two red rings, their houses and wires, drawn above them, and
+    a caption box with green and red words across its rim. What it holds shows the white slide
+    wherever nothing under it lies, so its NOT_RENDERED fill is no fill: it is its line, all round.
+    It was the thumbnail's picture of its whole box, the diagram under it and all, and that crop
+    painted the rim under the caption's box out as the caption's letters: a ring with a gap."""
+    from PIL import Image, ImageDraw
+    green, red = (0, 136, 43), (200, 37, 60)
+    a = page((230, 158, 170, 4, "#0063c0"),                 # a wire, under the ring
+             (150, 130, 60, 60, "#fde29a"), (172, 165, 14, 25, "#c0604a"))    # a house, under it too
+    Image.fromarray(a[130:190, 150:210].copy()).save(tmp_path / "house.png")
+    img = Image.fromarray(a)
+    draw = ImageDraw.Draw(img)
+    draw.rounded_rectangle([100, 100, 499, 259], radius=25, outline=green, width=3)
+    for x in range(170, 320, 8):                            # the caption's red words, inside the ring
+        draw.rectangle([x, 238, x + 1, 248], fill=red)
+    house = {"kind": "image", "role": "figure", "bbox": [150, 130, 210, 190], "file": str(tmp_path / "house.png"),
+             "id": "h", "object": "h", "group": None}
+    wire = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [230, 158, 400, 162],
+            "fill": "#0063c0", "outline": None, "id": "w", "object": "w", "group": None}
+    ring = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [100, 100, 500, 260], "fill": None,
+            "outline": "#00882b", "weight": 3.0, "fill_unread": True, "_not_rendered": True, "id": "r",
+            "object": "r", "group": None}
+    caption = {"kind": "text", "role": "body", "bbox": [160, 232, 340, 290], "id": "t", "object": "t",
+               "paragraphs": [{"runs": [{"text": "local network", "color": "#c8253c"}]},
+                              {"runs": [{"text": "wide area network", "color": "#00882b"}]}]}
+    got = deck_fills.settle([house, wire, ring, caption], np.asarray(img), 1.0, "#ffffff", False, tmp_path)
+    r = next(e for e in got if e["id"] == "r")
+    assert r["kind"] == "shape" and r.get("trace"), "its line, not a picture of its box"
+    ink = drawn(r["trace"]["rings"])
+    assert ink[256:260, 170:330].any(axis=0).all(), "closed under the caption's box"
+    assert ink[100:104, 150:450].any(axis=0).all() and not ink[130:230, 130:470].any(), "a line, holding nothing"
+    assert [e["id"] for e in got if e["kind"] == "image"] == ["h"]
+
+
+def test_a_ring_an_opaque_bar_crosses_still_holds_what_it_holds(tmp_path):
+    """cs161-net 13: a wire drawn above a ring hides it where it crosses, and the trace takes in only
+    3 px of what it hides - a pixel's gap left in the ring opened it, and a ring that holds nothing
+    is no ring: taken for a line. Round a fill no reading explains, over a picture, the fill was
+    lost. The ring goes on under what hides it, and stays the thumbnail's picture."""
+    from PIL import Image, ImageDraw
+    ramp = np.linspace(0, 1, 400)[None, :, None]
+    a = page()
+    a[50:350, 100:500] = np.round((1 - ramp) * [30, 40, 120] + ramp * [120, 30, 60]).astype(np.uint8)
+    Image.fromarray(a[50:350, 100:500].copy()).save(tmp_path / "photo.png")
+    striped(a, 200, 100, 200, 100, (240, 192, 32), (250, 180, 200))
+    img = Image.fromarray(a)
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([200, 100, 399, 199], outline=TEAL, width=2)
+    draw.rectangle([380, 145, 419, 154], fill=(68, 68, 68))   # the bar, above the ring
+    under = {"kind": "image", "role": "figure", "bbox": [100, 50, 500, 350], "file": str(tmp_path / "photo.png"),
+             "id": "p", "object": "p", "group": None}
+    ring = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [200, 100, 400, 200], "fill": None,
+            "outline": "#33b7bf", "weight": 2.0, "fill_unread": True, "_not_rendered": True, "id": "r",
+            "object": "r", "group": None}
+    bar = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [380, 145, 420, 155],
+           "fill": "#444444", "outline": None, "id": "b", "object": "b", "group": None}
+    got = deck_fills.settle([under, ring, bar], np.asarray(img), 1.0, None, True, tmp_path)
+    r = next(e for e in got if e["id"] == "r")
     assert r["kind"] == "image" and not r.get("trace"), "the ring's picture, not an open line"
 
 

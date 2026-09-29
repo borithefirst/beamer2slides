@@ -454,28 +454,164 @@ def outline_only(a: np.ndarray, el: dict, above: list[dict], under: list[dict], 
     Taken only when the traced ink is a line, as NOT_RENDERED may just as well be a real fill no
     reading explained (china-pptx's .pptx gradients): no thicker than the stroke (`THICK`) - the
     trace takes in the holes of its ring that show neither the ground nor what lies under it, so
-    such a fill comes out a blob - and enclosing nothing (`ENCLOSES`): where no ground is known (a
-    picture under it, a background picture) a hole may be that fill too, and a ring is no line
-    anyway. The stroke's colour under words of that colour closes a ring as well: the trace leaves
-    it out as their letters (cs161-net 13: its rings, each cut by a caption in its colour, came out
-    open lines, and the wires only their crops held went with them). Either is left to the
-    thumbnail's picture, as before."""
+    such a fill comes out a blob - and, when it encloses anything (`ENCLOSES`), holding nothing a fill
+    could be: where no ground is known (a picture under it, a background picture) a hole may be that
+    fill too. A ring is closed under words of its colour, which the trace leaves out as their letters,
+    and under what opaque elements above hide where it meets them; what it holds must show the
+    slide's own colour wherever nothing else lies under it (`holds_nothing`), and it is then traced
+    closed under those words (`closed_under_words`: cs161-net 13's three rings, each cut by a
+    caption box holding words of its colour, came out open lines, or pictures of their whole box
+    with that rim painted out as letters). Anything else is left to the thumbnail's picture, as
+    before."""
     from . import deck_freeforms as FF
     if not FF.trace(a, el, above, under, px, background, bottom, False):
         return False
     x0, y0, ink = el["_traced"]
-    y1, x1 = y0 + ink.shape[0], x0 + ink.shape[1]
-    _, wordy, _ = FF.unknowns(a, (x0, y0, x1, y1), above, px)
-    stroke = np.abs(a[y0:y1, x0:x1] - rgb(el["outline"])).max(axis=2) <= TOL
     r = int(np.ceil((el.get("weight") or 0.75) * px / 2)) + 1
-    thick = (~FF.dilate(~ink, r)).sum() > THICK * ink.sum()
-    wall = ink | FF.dilate(stroke & wordy & ~ink, 1)
-    encloses = (FF.enclosed(wall) & ~wall).sum() > ENCLOSES * ink.sum()
-    if thick or encloses:
-        el.pop("trace", None)
-        el.pop("_traced", None)
-        return False
+    if (~FF.dilate(~ink, r)).sum() > THICK * ink.sum():
+        return _untraced(el)
+    y1, x1 = y0 + ink.shape[0], x0 + ink.shape[1]
+    hidden, wordy, _ = FF.unknowns(a, (x0, y0, x1, y1), above, px)
+    sub = a[y0:y1, x0:x1].astype(np.int16)
+    paint = rgb(el["outline"])
+    stroke = np.abs(sub - paint).max(axis=2) <= TOL
+    # what the ink goes on under: words of its colour, and what an opaque element above hides where
+    # it meets the ink (the trace takes in only 3 px of it: cs161-net 13's wire over a red ring left
+    # a pixel's gap in it, and that ring, open, read as no ring at all)
+    covers = hidden_at(ink, hidden, r + CROSSING)
+    wall = ink | FF.dilate(stroke & wordy & ~ink, 1) | covers
+    held = FF.enclosed(wall) & ~wall
+    # a sliver between the line and what hides it (en-mos 57's curve along its header) holds no room
+    if (held & ~FF.dilate(~held, 2)).sum() <= ENCLOSES * ink.sum():
+        return True
+    # a ring. What it holds is no fill when it shows the slide's own colour wherever nothing else
+    # would show there; then the ring is the stroke all round, closed under the words of its colour
+    if not holds_nothing(sub, held, hidden | wordy, (x0, y0, x1, y1), under, px, background):
+        return _untraced(el)
+    closed = closed_under_words(ink, sub, stroke & wordy & ~ink, paint, r)
+    shut = FF.enclosed(closed | covers) & held
+    if shut.sum() < RING_SHUT * held.sum():
+        return _untraced(el)             # the words' pieces are no line: the thumbnail's picture, as before
+    if (closed & ~ink).any():
+        page = rgb(background) if bottom else None
+        alpha = el.get("outline_alpha")
+        seen = FF.blend(paint, alpha, page) if page is not None and alpha is not None and alpha < 0.99 \
+            else paint.astype(np.float32)
+        cov = FF.coverage(sub, seen, page)
+        # the words' pixels are no edge of the shape, but for the rims of what closes it: as wide there
+        unknown = hidden | (wordy & ~FF.dilate(closed & ~ink, 1))
+        field = np.where(closed, np.clip(cov, 0.51, 1.0), np.where(unknown, 0.0, np.minimum(cov, 0.49)))
+        rings = traced_rings(field, x0, y0, px)
+        if not rings:
+            return _untraced(el)
+        el["trace"]["rings"] = rings
+        el["_traced"] = (x0, y0, closed)
     return True
+
+
+RING_SHUT = 0.9          # share of what the stroke's ink holds that the traced ring must hold itself
+BARE = 0.1               # share of what a ring holds that must lie over nothing but the slide
+BARE_SHOWS = 0.95        # ... and show the slide's colour there, for the ring to hold no fill
+
+
+def _untraced(el: dict) -> bool:
+    el.pop("trace", None)
+    el.pop("_traced", None)
+    return False
+
+
+CROSSING = 3             # px past half the stroke a line is taken to go on under what hides it
+
+
+def hidden_at(ink: np.ndarray, hidden: np.ndarray, reach: int) -> np.ndarray:
+    """What opaque elements above hide (`hidden`) within `reach` px of the traced `ink`, in the pieces
+    the ink meets: a line crossing under them goes on there as far as anyone can tell."""
+    from . import deck_freeforms as FF
+    labels, n = FF.components(hidden, conn8=False)
+    if not n:
+        return hidden
+    met = np.zeros(n + 1, dtype=bool)
+    met[np.unique(labels[FF.dilate(ink, 1) & hidden])] = True
+    met[0] = False
+    return met[labels] & FF.dilate(ink, reach)
+
+
+def holds_nothing(sub: np.ndarray, held: np.ndarray, unknown: np.ndarray, region, under: list[dict],
+                  px: float, background: str | None) -> bool:
+    """Does what a ring holds (`held`, over `sub`, the thumbnail from pixel `region`'s corner) show
+    the slide's own colour wherever only the slide lies under it (`BARE_SHOWS`), in a fair share of
+    it (`BARE`)? Then the ring's NOT_RENDERED fill is no fill at all: cs161-net 13's green ring round
+    two red rings, their houses and wires, over nothing but its unfilled body text box. Elements
+    under it may show anything in their boxes, and so may an unfilled text's letters and whatever
+    `unknown` (hidden or worded from above) covers; on a slide without one colour (a background
+    picture) nothing is known."""
+    from . import deck_freeforms as FF
+    bg = rgb(background)
+    if bg is None:
+        return False
+    x0, y0, x1, y1 = region
+    ah, aw = sub.shape[:2]
+    covered = unknown.copy()
+    for e in under:
+        if not e.get("bbox"):
+            continue
+        c0, d0, c1, d1 = (int(np.floor(e["bbox"][0] * px)) - 2 - x0, int(np.floor(e["bbox"][1] * px)) - 2 - y0,
+                          int(np.ceil(e["bbox"][2] * px)) + 2 - x0, int(np.ceil(e["bbox"][3] * px)) + 2 - y0)
+        if c1 <= 0 or d1 <= 0 or c0 >= aw or d0 >= ah:
+            continue
+        box = (slice(max(0, d0), max(0, d1)), slice(max(0, c0), max(0, c1)))
+        if e["kind"] == "text":
+            # a text box shows the slide but for its letters (and their rims), or a fill of its own,
+            # which is then no colour of the slide's and counts against (not settled yet: under)
+            inks = [rgb(run.get("color")) for p in e.get("paragraphs", []) for run in p.get("runs", [])]
+            part = sub[box]
+            letters = np.zeros(part.shape[:2], dtype=bool)
+            for c in inks:
+                letters |= np.abs(part - (c if c is not None else 0)).max(axis=2) <= 3 * TOL
+            covered[box] |= FF.dilate(letters, 2)
+        else:
+            covered[box] = True
+    inner = held & ~FF.dilate(~held, 2)            # clear of the ring's own antialiased rim
+    bare = inner & ~covered
+    if bare.sum() < BARE * held.sum():
+        return False
+    shows = np.abs(sub - bg).max(axis=2) <= TOL
+    return (bare & shows).sum() >= BARE_SHOWS * bare.sum()
+
+
+def closed_under_words(ink: np.ndarray, sub: np.ndarray, under_words: np.ndarray, paint, r: int) -> np.ndarray:
+    """`ink` with the pieces of the stroke's colour under words of that colour (`under_words`) that
+    join two of its cut ends and are as thin as the stroke: the trace leaves them out as the letters
+    they may be, which cut cs161-net 13's rings open wherever their caption's box lay. A piece a
+    letter crosses is thicker than the line and stays out."""
+    from . import deck_freeforms as FF
+    cov = FF.coverage(sub, np.asarray(paint, dtype=np.float32))
+    cand = FF.dilate(under_words, 1) & (cov >= 0.5) & ~ink
+    labels, n = FF.components(cand)
+    out = ink.copy()
+    near = FF.dilate(ink, 1)
+    for k in range(1, n + 1):
+        piece = labels == k
+        if not (piece & under_words).any():
+            continue
+        if (~FF.dilate(~piece, r)).sum() > THICK * piece.sum():
+            continue                       # a letter across it: no line
+        _, ends = FF.components(FF.dilate(piece & near, 2))
+        if ends >= 2:
+            out |= piece
+    return out
+
+
+def traced_rings(field: np.ndarray, x0: int, y0: int, px: float) -> list:
+    """The rings `deck_freeforms` writes for a coverage `field` whose [0, 0] is pixel (x0, y0)."""
+    from . import deck_freeforms as FF
+    rings = []
+    for ring in FF.contours(field):
+        if FF.area(ring) < 1.5:
+            continue
+        ring = FF.simplify(ring, FF.SIMPLIFY)
+        rings.append([[round(float(x0 + x + 0.5) / px, 2), round(float(y0 + y + 0.5) / px, 2)] for x, y in ring])
+    return rings
 
 
 PIE_STEP = 0.25          # degrees between the rays a pie's angles are read on

@@ -312,7 +312,9 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   (opaque, or an unsaid shape's picture, an ellipse's being its disc) is excused
   (`reaches_sides(covered=)`), and a line's ink is looked for in its whole turned frame
   (`frame_bounds`). A NOT_RENDERED outlined freeform no fill reading explains
-  is its outline alone when that ink is a thin line enclosing nothing (`deck_fills.outline_only`);
+  is its outline alone when that ink is a thin line, or a ring holding only the slide's own colour
+  where nothing else lies (`deck_fills.outline_only`, `holds_nothing`), closed under words of its
+  colour (`closed_under_words`) and under what hides it (`hidden_at`);
   an untraced freeform's crop gets no box outline, and a crop's letters never take its own outline
   colour (`letters_of(keep=)`). Benchmark: `devtools/adopt_bench.py` (29 public decks + `tools/plain_decks.py`'s two made
   in Slides; `run --iter N` says whether the loop converged, and it is slow). **Iterate with
