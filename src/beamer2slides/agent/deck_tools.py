@@ -26,10 +26,13 @@ the wrapper has already installed them for the length of the call.
 import json
 import time
 from pathlib import Path
-from typing import Annotated, Any, NoReturn
+from typing import TYPE_CHECKING, Annotated, Any, NoReturn
 
 from .context import Job, tool
 from .types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Refused
+
+if TYPE_CHECKING:
+    from ..checks import Finding
 
 __all__ = ["deck_inspect", "deck_convert", "deck_prepare", "deck_upload", "deck_sync", "tex_label"]
 
@@ -212,10 +215,10 @@ def deck_inspect(
     survey = _label_survey(j, deck)
     j.data["labels"] = survey
 
-    findings: list[dict] = []
+    findings: "list[Finding]" = []
     if checks:
         from .. import checks as invariants
-        rendered = invariants.convert_locally(source, overlays)
+        rendered = invariants.convert_pages(source, overlays)
         findings = invariants.run_checks(rendered)
         for f in findings:
             j.warn(f"{f['check']}: {f.get('detail', '')}".strip(),

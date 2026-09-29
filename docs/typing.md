@@ -220,8 +220,12 @@ unknowable. The order:
    recorded hash can be recomputed from the recorded IR; otherwise, and when the parser refuses
    it, it is kept and reported (`BaseForm`, report `base_forms`). A change of JSON form is a
    rewrite of the base, never a change of the source. Over the 1,164 bases under out/: nothing to
-   rewrite. Next: consumers parse at their entry, leaves first (emit's `DeckPlan`, identity,
-   checks, compare, merge/sync), and producers construct typed values last.
+   rewrite. *First consumers*: checks.py parses deck.json at the rendered stage; compare.py reads
+   both decks into its own view records at entry, because its target is deck_ir's reading of a
+   live deck, which ir_types does not model, and its current side carries the pull loop's
+   `key`/`frame_index`. Next: consumers parse at their entry (emit's `DeckPlan`, identity,
+   merge/sync); deck_ir's IR as its own type; inverse keeping the frame keys beside the deck, and
+   residuals as a record per kind; producers construct typed values last.
 2. **The hubs**: `gslides.execute`'s result; the Slides/Drive/Docs service objects (`gapi.py`);
    PageClassifier's mixins sharing undeclared attributes (one declared base); `inverse.Planner`'s
    `element()` that callers know is present; adopt's `Context` attributes set dynamically.

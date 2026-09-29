@@ -446,22 +446,25 @@ def _stand_ins() -> dict[str, Callable]:
 
     @_tool("deck_inspect", needs=(READS, WRITES))
     def deck_inspect(job, pdf, out=None, overlays="last", checks=True, debug_images=False):
-        from beamer2slides.checks import convert_locally, run_checks
+        from beamer2slides.checks import convert_pages, run_checks
+        from beamer2slides.json_types import as_objects, as_str
         path = job.path(pdf)
         folder = job.ctx.workspace.out_dir(out or path.stem)
-        rendered = convert_locally(path, overlays)
+        rendered = convert_pages(path, overlays)
         (folder / "deck.json").write_text(json.dumps(rendered.deck, indent=1, default=str), encoding="utf-8")
         job.artifact(folder / "deck.json", "json", "what every slide converts to")
         findings = run_checks(rendered) if checks else []
         kinds: dict[str, int] = {}
-        for slide in rendered.deck["slides"]:
-            for el in slide.get("elements", []):
-                kinds[el["kind"]] = kinds.get(el["kind"], 0) + 1
-        job.data = {"slides": len(rendered.deck["slides"]), "elements": kinds,
+        slides = as_objects(rendered.deck["slides"], "deck.json slides")
+        for slide in slides:
+            for el in as_objects(slide.get("elements", []), "slide elements"):
+                kind = as_str(el["kind"], "element kind")
+                kinds[kind] = kinds.get(kind, 0) + 1
+        job.data = {"slides": len(slides), "elements": kinds,
                     "findings": [dict(f) for f in findings], "stand_in": True}
         for f in findings[:20]:
             job.warn(f"{f['check']}: {f['detail']}", f"page {f['page'] + 1}")
-        job.summary = (f"{path.name} converts to {len(rendered.deck['slides'])} slide(s); "
+        job.summary = (f"{path.name} converts to {len(slides)} slide(s); "
                        f"{len(findings)} invariant finding(s).")
 
     @_tool("tex_label", needs=(READS, WRITES))
