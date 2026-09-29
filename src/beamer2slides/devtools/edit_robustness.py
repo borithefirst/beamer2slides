@@ -73,6 +73,7 @@ from pathlib import Path
 
 import numpy as np
 
+from beamer2slides.arrays import Mask, Pixels
 from beamer2slides.paths import CHECKOUT
 
 from .adopt_bench import CORPUS, split_frames
@@ -587,7 +588,7 @@ def on_page(a: Anchor, size: list | None, page: tuple[float, float]) -> Anchor:
 
 
 def box_mask(region: list, page: tuple[float, float], shape: tuple[int, int], grow: str = "",
-             ink: tuple[int, int, int, int] | None = None, shift: float = 0.0) -> np.ndarray:
+             ink: tuple[int, int, int, int] | None = None, shift: float = 0.0) -> Mask:
     """The room the edit is allowed, on the render's pixel grid: the element's box with PAD bp
     around it, together with `ink` - the pixels the element already covers on the unedited page,
     which can reach past its box, since Slides lets a text box's last line hang out of it and the
@@ -614,7 +615,7 @@ def box_mask(region: list, page: tuple[float, float], shape: tuple[int, int], gr
     return m
 
 
-def ink_hull(base: np.ndarray, without: np.ndarray | None) -> tuple[int, int, int, int] | None:
+def ink_hull(base: Pixels, without: Pixels | None) -> tuple[int, int, int, int] | None:
     """The pixels one element covers: the unedited page against the same page compiled without that
     element. Both forms place every box absolutely, so taking one out moves nothing else."""
     if without is None or without.shape != base.shape:
@@ -624,7 +625,7 @@ def ink_hull(base: np.ndarray, without: np.ndarray | None) -> tuple[int, int, in
     return None if not len(ys) else (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
 
 
-def judge_pixels(before: np.ndarray, after: np.ndarray, region: np.ndarray) -> dict:
+def judge_pixels(before: Pixels, after: Pixels, region: Mask) -> dict:
     """What changed, and whether it stayed in the box. `breach` names the sides it left by."""
     if before.shape != after.shape:
         return {"changed": -1, "outside": -1, "confined": False, "visible": True, "breach": ["size"]}
@@ -851,7 +852,7 @@ def pick_sample(index: list[dict], seed: int, n: int) -> list[dict]:
 
 # ------------------------------------------------------------------------------------------ the run
 
-def render(pdf: Path) -> tuple[np.ndarray, str, int, tuple[float, float]]:
+def render(pdf: Path) -> tuple[Pixels, str, int, tuple[float, float]]:
     from beamer2slides.pdf import Document
     doc = Document(pdf)
     try:
@@ -879,7 +880,7 @@ class Builder:
 
 
 def element_inks(builder: "Builder", head: str, tail: str, lines: list[str], tag: str, a: Anchor,
-                 base: np.ndarray) -> dict:
+                 base: Pixels) -> dict:
     """What the anchor's element, and the title's, already cover on the unedited page: the frame
     compiled once without each of them. Two compiles per slide and form, and they make `confined`
     say what it means - the edit took room the element did not already have."""
@@ -938,7 +939,7 @@ def run_form(deck: str, tag: str, picks: list[dict], out: Path, corpus: Path = C
                 continue
             got, text, pages2, _ = render(pdf2)
             box = {"anchor": a.bbox, "title": a.title_bbox, "table": a.table_bbox}[applied.where]
-            region = box_mask(box, page, base.shape[:2], applied.grow,
+            region = box_mask(box, page, (base.shape[0], base.shape[1]), applied.grow,
                               inks.get(applied.where), applied.shift)
             row["where"] = applied.where
             row.update(judge_pixels(base, got, region))

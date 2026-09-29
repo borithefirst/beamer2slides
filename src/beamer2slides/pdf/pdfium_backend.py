@@ -17,6 +17,7 @@ import numpy as np
 import pypdfium2 as pdfium
 import pypdfium2.raw as R
 
+from ..arrays import Pixels
 from .api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
                   EmbeddedImage, PageObject, PdfError, char_box, font_metrics, join_surrogates, mul,
                   pixel_bounds, render_matrix, trace, transform_box)
@@ -59,7 +60,7 @@ def _rgba(getter, obj) -> tuple[int, int, int, int] | None:
     return r.value, g.value, b.value, a.value
 
 
-def _bitmap_array(bitmap) -> np.ndarray | None:
+def _bitmap_array(bitmap) -> Pixels | None:
     """A PDFium bitmap as RGB or RGBA pixels (uint8, h x w x 3/4). Unknown formats give None."""
     if not bitmap:
         return None
@@ -499,7 +500,7 @@ class Page:
             pixels=img, rendered=drawn)
 
     @staticmethod
-    def _image_pixels(handle) -> np.ndarray | None:
+    def _image_pixels(handle) -> Pixels | None:
         bitmap = R.FPDFImageObj_GetBitmap(handle)
         try:
             return _bitmap_array(bitmap)
@@ -507,7 +508,7 @@ class Page:
             if bitmap:
                 R.FPDFBitmap_Destroy(bitmap)
 
-    def _rendered_image(self, handle) -> np.ndarray | None:
+    def _rendered_image(self, handle) -> Pixels | None:
         """The image object rasterised by PDFium with its matrix, mask and colour space applied:
         upright, in page orientation, on a transparent ground where a mask makes it see-through."""
         bitmap = R.FPDFImageObj_GetRenderedBitmap(self.doc.pdf.raw, self.raw, handle)
@@ -548,7 +549,7 @@ class Page:
 
     # ------------------------------------------------------------------ rendering
 
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> np.ndarray:
+    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
         ix0, iy0, w, h = pixel_bounds(zoom, clip if clip is not None else self.rect)
         bitmap = R.FPDFBitmap_Create(w, h, 1 if transparent else 0)
         try:

@@ -14,8 +14,11 @@ modes on images, pattern-filled stencils) raises PdfError: an image comes out ex
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import numpy as np
 
+from ...arrays import BGRA, Floats32, Ints, Pixels, UInt32
 from ..api import PdfError
 from . import decode_image as DI
 from . import raster as R
@@ -95,7 +98,7 @@ def weights(dest_len, dmin, dmax, src_len, smin, smax, bilinear):
     return starts, table
 
 
-def _gather(src: np.ndarray, starts, table, axis_len: int):
+def _gather(src: Pixels, starts: Ints, table: Ints, axis_len: int) -> UInt32:
     """Sum_j w_j * src[..., start + j, :] over the weight table: (n, ...) uint32 sums, wrapping
     as C's uint32 arithmetic does (numpy's uint32 products and sums wrap mod 2^32 the same way).
     `src` is (len, rest...) along the axis being resampled."""
@@ -228,7 +231,8 @@ def _merge(back, src, alpha):
     return (back * (255 - alpha) + src * alpha) // 255
 
 
-def compose(dest: np.ndarray, dkind: str, block, sfmt: str, pal, clip, mask_argb: int):
+def compose(dest: BGRA, dkind: str, block: Pixels, sfmt: str, pal: Sequence[int] | None,
+            clip: Ints | None, mask_argb: int):
     """CFX_ScanlineCompositor's row functions (no blending) over a whole block: `dest` (h, w, 4)
     uint8 view, `clip` (h, w) int array or None (after the composer's alpha)."""
     d = dest.astype(np.int64)
@@ -388,7 +392,7 @@ def _fixed256(v: float) -> int:
     return roundf(F(v * 256.0))
 
 
-def _fix_split(val: np.ndarray):
+def _fix_split(val: Floats32):
     """CFX_BilinearMatrix::Transform's integer part (saturated) and remainder (0..255)."""
     with np.errstate(invalid="ignore", over="ignore"):
         q = np.trunc(val / np.float32(256)).astype(np.float64)

@@ -25,8 +25,7 @@ import threading
 from pathlib import Path
 from typing import Sequence
 
-import numpy as np
-
+from ..arrays import Pixels
 from .. import interpreter
 from . import wire
 from .api import Box, Char, EmbeddedImage, PageObject, PdfError
@@ -218,7 +217,7 @@ class SandboxPage:
     def links(self) -> list[dict]:
         return self._call("links")
 
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> np.ndarray:
+    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
         return self._call("render", float(zoom), None if clip is None else tuple(float(v) for v in clip),
                           bool(transparent))
 

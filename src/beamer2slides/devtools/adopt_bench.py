@@ -37,6 +37,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from beamer2slides.arrays import RGB, Mask, SignedRGB
 from beamer2slides.paths import CHECKOUT
 # The scores live in the package: pull's frame guard (`frame_guard`) scores its rounds with them too,
 # and the package never imports devtools.
@@ -176,7 +177,7 @@ def write_target(folder: Path, pres: dict | None = None, fetch=None) -> dict:
 
 # -------------------------------------------------------------------------------------------- score
 
-def element_losses(m_ref: np.ndarray, m_got: np.ndarray, slide: dict, top: int = 6) -> list[dict]:
+def element_losses(m_ref: Mask, m_got: Mask, slide: dict, top: int = 6) -> list[dict]:
     """Where a slide's `boxes` score went: every pixel `overlap` counts against it (ink of the deck
     with none of ours near it = `miss`, ours with none of the deck's near it = `extra`) is charged to
     the smallest element box holding it, so an element's `loss` is exactly its share of 1 - boxes."""
@@ -209,10 +210,10 @@ def element_losses(m_ref: np.ndarray, m_got: np.ndarray, slide: dict, top: int =
     return out
 
 
-def score_page(ref: np.ndarray, got: np.ndarray, slide: dict) -> tuple[dict, np.ndarray]:
+def score_page(ref: SignedRGB, got: SignedRGB, slide: dict) -> tuple[dict, RGB]:
     h, w = ref.shape[:2]
-    scores, m_ref, m_got = ink_scores(ref, got, slide)
-    scores["losses"] = element_losses(m_ref, m_got, slide)
+    ink, m_ref, m_got = ink_scores(ref, got, slide)
+    scores = {**ink, "losses": element_losses(m_ref, m_got, slide)}
     d = np.full((h, w, 3), 255, dtype=np.uint8)
     d[m_ref & ~m_got] = (220, 40, 40)
     d[m_got & ~m_ref] = (30, 110, 230)

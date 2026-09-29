@@ -18,6 +18,7 @@ import struct
 
 import numpy as np
 
+from ...arrays import Bytes, Floats32, Pixels, UInt32
 from . import filters as FL
 from .colors import adobe_cmyk_to_srgb_array, icc_openable, icc_srgb
 from .crt import roundf
@@ -68,7 +69,7 @@ class CS:
         """GetDefaultValue: (min, max)."""
         return 0.0, 1.0
 
-    def rgb(self, v: np.ndarray, std: bool = False):
+    def rgb(self, v: Floats32, std: bool = False):
         """GetRGB over (..., n) float32 values: (r, g, b) float32 arrays and a validity mask
         (GetRGBOrZerosOnError gives zeros where it is False). `std` is IsStdConversionEnabled(),
         which a colour space passes on to its base (CPDF_BasedCS::EnableStdConversion)."""
@@ -107,17 +108,17 @@ class CS:
         raise Unsupported(f"{f} image colours")
 
 
-def _cmyk_rgb_f(v: np.ndarray):
+def _cmyk_rgb_f(v: Floats32):
     """CPDF_DeviceCS::GetRGB for CMYK without std conversion: AdobeCmykToStandardRgbF, each
     channel clamped, rounded to a byte with the 0.49999997f offset, looked up, times 1/255.f."""
-    c = np.clip(np.nan_to_num(v[..., :4].astype(F32), nan=F32(0)), F32(0), F32(1))
+    c = np.clip(np.nan_to_num(v[..., :4].astype(F32), nan=0.0), F32(0), F32(1))
     q = (c * F32(255) + F32(0.49999997)).astype(np.int64)
     table = adobe_cmyk_to_srgb_array(q.reshape(-1, 4))
     rgb = (table.astype(F32) * F32(1.0 / 255.0)).reshape(q.shape[:-1] + (3,))
     return rgb[..., 0], rgb[..., 1], rgb[..., 2], np.ones(q.shape[:-1], bool)
 
 
-def _cmyk_std_f(v: np.ndarray):
+def _cmyk_std_f(v: Floats32):
     """CPDF_DeviceCS::GetRGB for CMYK with std conversion (the colours of an image loaded inside a
     soft mask, or of a /SMask stream): 1 - min(1, c + k) per channel, the components not normalised,
     and std::min(1.0f, x) keeping 1.0f where x is NaN. Always valid."""
@@ -458,7 +459,7 @@ def _pad(data: bytes, pitch: int, height: int) -> bytes:
 # ---------------------------------------------------------------------- CPDF_DIB
 
 
-def _bits(rows: np.ndarray, bpc: int, count: int) -> np.ndarray:
+def _bits(rows: Bytes, bpc: int, count: int) -> UInt32:
     """GetBits8 for `count` consecutive samples of every row."""
     if bpc == 8:
         return rows[:, :count].astype(np.uint32)
@@ -701,7 +702,7 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True,
 
 
 def _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, comp_step,
-                 trans_mask=False) -> np.ndarray:
+                 trans_mask=False) -> Pixels:
     """TranslateScanline24bpp: BGR bytes. Under TransMask() the CMYK lines are (1-c)(1-k) and no
     colour space is asked: the default-decode path writes that byte-wise through
     CPDF_DeviceCS::TranslateImageLine, which fills an FX_RGB_STRUCT laid over the BGR bytes in its

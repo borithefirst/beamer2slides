@@ -12,6 +12,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from .arrays import Mask, SignedRGB
 from .google_auth import slides_service
 from .gslides import save_thumbnail
 from .pdf import Document
@@ -19,14 +20,14 @@ from .pdf import Document
 DIFF_THRESHOLD = 70  # max channel difference that counts as text rather than resampling noise
 
 
-def rgb_array(image: Image.Image, size: tuple[int, int] | None = None) -> np.ndarray:
+def rgb_array(image: Image.Image, size: tuple[int, int] | None = None) -> SignedRGB:
     image = image.convert("RGB")
     if size and image.size != size:
         image = image.resize(size, Image.Resampling.BILINEAR)
     return np.asarray(image).astype(np.int16)
 
 
-def text_mask(img: np.ndarray, background: np.ndarray) -> np.ndarray:
+def text_mask(img: SignedRGB, background: SignedRGB) -> Mask:
     """Pixels that differ from the background, minus 1-px resampling outlines.
 
     Google rescales the uploaded background, so edges of things left in the background
@@ -42,7 +43,7 @@ def text_mask(img: np.ndarray, background: np.ndarray) -> np.ndarray:
 MIN_ROW_PX, MIN_COL_PX = 4, 2  # rows/columns with fewer text pixels are specks, not text
 
 
-def bands(mask: np.ndarray, min_gap: int) -> int:
+def bands(mask: Mask, min_gap: int) -> int:
     """Text lines = runs of text rows; gaps shorter than `min_gap` px are within a line."""
     rows = np.flatnonzero(mask.sum(axis=1) >= MIN_ROW_PX)
     if rows.size == 0:
@@ -50,7 +51,7 @@ def bands(mask: np.ndarray, min_gap: int) -> int:
     return int((np.diff(rows) > min_gap).sum()) + 1
 
 
-def ink_box(mask: np.ndarray):
+def ink_box(mask: Mask):
     rows = np.flatnonzero(mask.sum(axis=1) >= MIN_ROW_PX)
     cols = np.flatnonzero(mask.sum(axis=0) >= MIN_COL_PX)
     if rows.size == 0 or cols.size == 0:  # rows of specks thinner than a column: no ink box
@@ -58,7 +59,7 @@ def ink_box(mask: np.ndarray):
     return cols[0], rows[0], cols[-1] + 1, rows[-1] + 1
 
 
-def dilate(mask: np.ndarray) -> np.ndarray:
+def dilate(mask: Mask) -> Mask:
     out = mask.copy()
     out[1:] |= mask[:-1]
     out[:-1] |= mask[1:]

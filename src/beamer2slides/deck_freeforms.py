@@ -42,6 +42,7 @@ from collections import Counter
 
 import numpy as np
 
+from .arrays import Floats32, Int32, Mask, SignedRGB
 from . import deck_fills as F
 
 TOL = 14                  # max channel distance of a pixel that is the paint itself
@@ -113,7 +114,7 @@ def shared_boxes(elements: list[dict]) -> list[list[int]]:
 
 # ------------------------------------------------------------------------------ pixel machinery
 
-def components(mask: np.ndarray, conn8: bool = True) -> tuple[np.ndarray, int]:
+def components(mask: Mask, conn8: bool = True) -> tuple[Int32, int]:
     """Connected components of a boolean mask (labels 1..n, 0 = background), by runs per row and a
     union-find over the runs that touch - numpy has no labelling of its own and scipy is not a
     dependency."""
@@ -161,7 +162,7 @@ def components(mask: np.ndarray, conn8: bool = True) -> tuple[np.ndarray, int]:
     return labels, len(remap)
 
 
-def dilate(mask: np.ndarray, r: int) -> np.ndarray:
+def dilate(mask: Mask, r: int) -> Mask:
     out = mask.copy()
     for _ in range(r):
         m = out.copy()
@@ -173,7 +174,7 @@ def dilate(mask: np.ndarray, r: int) -> np.ndarray:
     return out
 
 
-def enclosed(wall: np.ndarray) -> np.ndarray:
+def enclosed(wall: Mask) -> Mask:
     """What a closed ring (`wall`, its ink) keeps in: the ring itself, plus every pixel that a walk
     from the region's own edge cannot reach without crossing it. A gap in the ring lets the outside
     in, so it is no longer enclosed - as with a hand-drawn outline that never quite closes."""
@@ -187,7 +188,7 @@ def enclosed(wall: np.ndarray) -> np.ndarray:
     return ~outside
 
 
-def max_filter(v: np.ndarray, r: int) -> np.ndarray:
+def max_filter(v: Floats32, r: int) -> Floats32:
     out = v.copy()
     h, w = v.shape
     p = np.pad(v, r, mode="edge")
@@ -197,7 +198,7 @@ def max_filter(v: np.ndarray, r: int) -> np.ndarray:
     return out
 
 
-def coverage(sub: np.ndarray, paint, ground=None) -> np.ndarray:
+def coverage(sub: SignedRGB, paint, ground=None) -> Floats32:
     """How much of `paint` each pixel holds, 0..1. With the ground known, the pixel's projection on
     the line from ground to paint (antialiasing mixes the two); without, against the strongest
     contrast to the paint within two pixels (what lies beyond the edge, whatever it is)."""
@@ -220,7 +221,7 @@ def coverage(sub: np.ndarray, paint, ground=None) -> np.ndarray:
 
 # --------------------------------------------------------------------------- marching squares
 
-def contours(field: np.ndarray, level: float = 0.5) -> list[list[tuple[float, float]]]:
+def contours(field: Floats32, level: float = 0.5) -> list[list[tuple[float, float]]]:
     """Closed iso-lines of `field` at `level`, in pixel-centre coordinates (x, y) of `field`."""
     f = np.pad(field.astype(np.float32), 1, constant_values=0.0)
     inside = f >= level
@@ -308,7 +309,7 @@ def area(ring) -> float:
 
 # ----------------------------------------------------------------------------------- the reading
 
-def paste(dst: np.ndarray, origin, mask: np.ndarray, at) -> None:
+def paste(dst: Mask, origin, mask: Mask, at) -> None:
     """OR `mask` (whose [0, 0] is image pixel `at`) into `dst` (whose [0, 0] is `origin`)."""
     ox, oy = origin
     ax, ay = at
@@ -320,7 +321,7 @@ def paste(dst: np.ndarray, origin, mask: np.ndarray, at) -> None:
         dst[y0:y1, x0:x1] |= mask[y0 - (ay - oy):y1 - (ay - oy), x0 - (ax - ox):x1 - (ax - ox)]
 
 
-def unknowns(a: np.ndarray, region, above: list[dict], px: float):
+def unknowns(a: SignedRGB, region, above: list[dict], px: float):
     """(pixels hidden under opaque elements above, pixels a text above may have letters on, the
     colours of those letters) over the pixel box `region`."""
     a0, b0, a1, b1 = region
@@ -348,7 +349,7 @@ def unknowns(a: np.ndarray, region, above: list[dict], px: float):
     return hidden, wordy & ~hidden, inks
 
 
-def unsaid(a: np.ndarray, region, above: list[dict], px: float, drawn: bool = False) -> np.ndarray:
+def unsaid(a: SignedRGB, region, above: list[dict], px: float, drawn: bool = False) -> Mask:
     """The boxes of shapes above whose fill neither the API nor the thumbnail could say (a multicolour
     `{}` freeform: Canva's art on sc-memphis' panel): whatever shows there may be theirs. `drawn`:
     only what such a shape draws on the page, which is what its picture from the thumbnail covers
@@ -380,7 +381,7 @@ def blend(colour, alpha: float, ground):
     return np.asarray(colour, dtype=np.float32) * alpha + np.asarray(ground, dtype=np.float32) * (1 - alpha)
 
 
-def ring_colour(a: np.ndarray, region, width: int = 4):
+def ring_colour(a: SignedRGB, region, width: int = 4):
     """The colour most of a ring just around `region` is (None when there is too little of it). The
     majority vote is taken twice - a coarse 8-wide bucket first to guess near which colour the votes
     cluster, then every pixel within `TOL` of that guess (as `unread_paint` already does) - because a
@@ -406,7 +407,7 @@ def ring_colour(a: np.ndarray, region, width: int = 4):
     return np.median(px_[close], axis=0)
 
 
-def unread_paint(sub: np.ndarray, visible: np.ndarray, ground):
+def unread_paint(sub: SignedRGB, visible: Mask, ground):
     """The one colour a `{}` fill shows over `ground` in its box, or None (a picture, a texture,
     or more than one colour: nothing a flat path can say)."""
     n = int(visible.sum())
@@ -437,7 +438,7 @@ def unread_paint(sub: np.ndarray, visible: np.ndarray, ground):
 REFUSED: Counter = Counter()             # why freeforms were left as they were (for the bench)
 
 
-def trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: float,
+def trace(a: SignedRGB, el: dict, above: list[dict], under: list[dict], px: float,
           background: str | None, bottom: bool, unread: bool) -> bool:
     """Trace a freeform in the thumbnail `a` (see the module docstring): sets `el["trace"]` (and for
     a `{}` fill its `fill`), or leaves the element as it is and counts why in `REFUSED`."""
@@ -451,7 +452,7 @@ def trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: flo
     return not why
 
 
-def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: float,
+def _trace(a: SignedRGB, el: dict, above: list[dict], under: list[dict], px: float,
            background: str | None, bottom: bool, unread: bool, trim: bool = True) -> str | None:
     if el.get("fill_gradient") or el.get("trace"):
         return "done"
@@ -648,7 +649,8 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
     if not rings:
         return "no-rings"
     paint_fill, paint_stroke = (fill, None) if fill else (stroke, None)
-    if fill and stroke and np.abs(F.rgb(fill) - F.rgb(stroke)).max() > TOL:
+    fill_rgb, stroke_rgb = F.rgb(fill), F.rgb(stroke)
+    if fill_rgb is not None and stroke_rgb is not None and np.abs(fill_rgb - stroke_rgb).max() > TOL:
         paint_stroke = stroke
     if unread and el.get("fill") is None:
         el["fill"], el["fill_source"] = fill, "thumbnail"
@@ -670,7 +672,7 @@ def frame_bounds(fr: dict | None, bbox) -> list[float]:
     return [min(xs), min(ys), max(xs), max(ys)]
 
 
-def under_colours(a: np.ndarray, region, el: dict, under: list[dict]) -> list:
+def under_colours(a: SignedRGB, region, el: dict, under: list[dict]) -> list:
     """The colours a hole in `el` may show when elements lie under it: the colour around the region,
     the fills, outlines and letters of what is under it (a translucent fill blended over the others),
     or [] when a picture, table or shading is under it and any colour may show."""
@@ -691,7 +693,7 @@ def under_colours(a: np.ndarray, region, el: dict, under: list[dict]) -> list:
     return grounds
 
 
-def continues_outside(a: np.ndarray, region, labels: np.ndarray, n: int, paints, kin_boxes=()):
+def continues_outside(a: SignedRGB, region, labels: Int32, n: int, paints, kin_boxes=()):
     """Per component: the share of its pixels on the region's edge whose neighbour just outside the
     region is the paint too (0 for a component that touches the edge at fewer than 4 pixels). An
     outside neighbour in one of `kin_boxes` (pixel boxes of `kin` lines) is not asked: ink running on
@@ -727,7 +729,7 @@ def continues_outside(a: np.ndarray, region, labels: np.ndarray, n: int, paints,
 RIM = 0.9                 # share of a traced edge an outline must run along to vouch for the ink
 
 
-def outlined(inside: np.ndarray, sub: np.ndarray, fill, stroke, el: dict, unknown: np.ndarray) -> bool:
+def outlined(inside: Mask, sub: SignedRGB, fill, stroke, el: dict, unknown: Mask) -> bool:
     """Is the ink an opaque fill wrapped in an opaque outline of another colour - both paints in it,
     and the outline's along (`RIM` of) every edge the ink shows? Two colours in that order are the
     element's own signature: a neighbour of the fill's colour, or a colour taken for it, does not wear
@@ -752,7 +754,7 @@ def outlined(inside: np.ndarray, sub: np.ndarray, fill, stroke, el: dict, unknow
 UNDER = 0.5               # share of the ink's end toward a side that must meet a cover for it to run on under it
 
 
-def reaches_sides(inside: np.ndarray, unknown: np.ndarray, region, box, size, covered=None) -> bool:
+def reaches_sides(inside: Mask, unknown: Mask, region, box, size, covered=None) -> bool:
     """Does the traced ink reach every side of the element's box (within `SIDE` px)? A side that is
     off the page, or mostly unseen, is excused - and so is one toward which the ink ends against
     something drawn above it (`covered`: opaque elements, and the pictures of shapes nobody could

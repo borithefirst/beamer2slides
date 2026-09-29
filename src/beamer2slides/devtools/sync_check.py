@@ -39,6 +39,8 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from ..arrays import Floats
+
 EMU_PER_PT = 12700
 TOL = 1.5
 
@@ -81,7 +83,7 @@ def hex_color(c: dict | None) -> str | None:
     return "#" + "".join(f"{round(rgb.get(k, 0.0) * 255):02x}" for k in ("red", "green", "blue"))
 
 
-def _affine(t: dict | None) -> np.ndarray:
+def _affine(t: dict | None) -> Floats:
     t = t or {"scaleX": 1, "scaleY": 1}
     unit = EMU_PER_PT if t.get("unit", "EMU") == "EMU" else 1.0
     return np.array([[t.get("scaleX", 0.0), t.get("shearX", 0.0), t.get("translateX", 0.0) / unit],

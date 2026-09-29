@@ -27,6 +27,7 @@ from fractions import Fraction
 
 import numpy as np
 
+from ...arrays import UInt32
 from . import cie
 from . import raster as R
 from .colors import adobe_cmyk_to_srgb
@@ -1328,7 +1329,7 @@ def draw(dev, rec: Record, matrix, clip_rect, alpha: int) -> None:
     set_dibits(dev, bitmap, l, t)
 
 
-def set_dibits(dev, bitmap: np.ndarray, left: int, top: int) -> None:
+def set_dibits(dev, bitmap: UInt32, left: int, top: int) -> None:
     """SetDIBitsWithBlend (Normal) -> CFX_AggDeviceDriver::SetDIBits -> CompositeBitmap of a
     BGRA bitmap under the clip region."""
     h, w = bitmap.shape

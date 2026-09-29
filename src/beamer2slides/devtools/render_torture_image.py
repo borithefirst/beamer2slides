@@ -35,6 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..arrays import Bytes
 from .render_torture import EXTGS
 from .torture_kit import compare_renders, drop_lines
 
@@ -110,7 +111,7 @@ def _rl(b: bytes, r: random.Random) -> bytes:
     return bytes(out) + b"\x80"
 
 
-def _png(rows: np.ndarray, bpp: int, r: random.Random) -> bytes:
+def _png(rows: Bytes, bpp: int, r: random.Random) -> bytes:
     """PNG-predict the rows (a random filter per row)."""
     out = bytearray()
     width = rows.shape[1]

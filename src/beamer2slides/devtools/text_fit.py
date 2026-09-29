@@ -28,12 +28,15 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
+from ..arrays import Ints, Mask, SignedRGB
 from ..fidelity import rgb_array, bands
+from ..json_types import JsonObject
 from ..pdf import Document
 
 DRIFT_PT = 2.0
@@ -41,14 +44,30 @@ GROWN_PT = 2.0
 WIDTH_TOL = 0.08  # the calibrated substitutes land within a few per cent
 
 
-def _box(mask: np.ndarray):
+# A box in pixels: x0, y0, x1, y1.
+PxBox = tuple[int, int, int, int]
+
+
+@dataclass(frozen=True, kw_only=True)
+class _Measured:
+    """One element's ink on both sides (`r` the PDF's, `s` Slides'), within its window `win`."""
+    el: JsonObject
+    size: float
+    ref: PxBox | None
+    slides: PxBox | None
+    r: Mask
+    s: Mask
+    win: PxBox
+
+
+def _box(mask: Mask) -> PxBox | None:
     ys, xs = np.nonzero(mask)
     if not len(xs):
         return None
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
 
 
-def _ink(ref: np.ndarray, sl: np.ndarray, win: tuple, box: tuple) -> tuple[np.ndarray, np.ndarray]:
+def _ink(ref: SignedRGB, sl: SignedRGB, win: tuple, box: tuple) -> tuple[Mask, Mask]:
     """Ink in a window of both images, against the ground the text stands on: the commonest
     colour inside its own box (`box`, pixels) in the PDF render - a block's title bar, not the
     body panel the window also reaches into. A native panel is in both images and in neither
@@ -66,10 +85,11 @@ def _ink(ref: np.ndarray, sl: np.ndarray, win: tuple, box: tuple) -> tuple[np.nd
     return mr, ms
 
 
-def _runs(profile: np.ndarray, join: int) -> list[tuple[int, int]]:
-    """Runs of True in a profile, joined across gaps shorter than `join`."""
+def _runs(on: Ints, join: int) -> list[tuple[int, int]]:
+    """Runs of True in a profile, given as the indices `on` where it is True, joined across gaps
+    shorter than `join`."""
     out: list[list[int]] = []
-    for i in np.flatnonzero(profile):
+    for i in on:
         if out and i - out[-1][1] < join:
             out[-1][1] = i + 1
         else:
@@ -77,27 +97,27 @@ def _runs(profile: np.ndarray, join: int) -> list[tuple[int, int]]:
     return [tuple(r) for r in out]
 
 
-def _own(m: np.ndarray, x0: int, x1: int, size_px: float) -> None:
+def _own(m: Mask, x0: int, x1: int, size_px: float) -> None:
     """Keep only the ink that is this element's, in place: lines at least 0.3 em tall (not a
     panel's corner or rim), and in each line the runs of words - joined across word spaces -
     that reach into the element's own columns. A line spilling past its box stays whole; a
     neighbour's word beyond a gap does not come with it."""
-    for top, bottom in _runs(m.any(axis=1), max(1, round(0.12 * size_px))):
+    for top, bottom in _runs(np.flatnonzero(m.any(axis=1)), max(1, round(0.12 * size_px))):
         if bottom - top < 0.3 * size_px:
             m[top:bottom] = False
             continue
-        for a, b in _runs(m[top:bottom].any(axis=0), max(1, round(0.6 * size_px))):
+        for a, b in _runs(np.flatnonzero(m[top:bottom].any(axis=0)), max(1, round(0.6 * size_px))):
             if b < x0 - 0.3 * size_px or a > x1 + 0.3 * size_px:
                 m[top:bottom, a:b] = False
 
 
-def _line_findings(e: dict, name: str, r: np.ndarray, s: np.ndarray, gap: int, size: float,
+def _line_findings(e: dict, name: str, r: Mask, s: Mask, gap: int, size: float,
                    scale: float) -> list[dict]:
     """With the same number of lines on both sides, line i of the PDF against line i of Slides:
     the worst drift of the edge its paragraph is aligned to, the worst width ratio, the first
     line's vertical drift and how much further the last one went (the pitch)."""
     pt = lambda px: round(float(px) / scale, 1)
-    rows_r, rows_s = _runs(r.any(axis=1), gap), _runs(s.any(axis=1), gap)
+    rows_r, rows_s = _runs(np.flatnonzero(r.any(axis=1)), gap), _runs(np.flatnonzero(s.any(axis=1)), gap)
     marks = [(ln["baseline"] * scale, p.get("align") or "left", ln.get("x0"), ln.get("x1"))
              for p in e.get("paragraphs", []) for ln in p.get("lines", [])]
     worst: dict[str, tuple] = {}
@@ -131,13 +151,13 @@ def _line_findings(e: dict, name: str, r: np.ndarray, s: np.ndarray, gap: int, s
     return out
 
 
-def measure_slide(slide: dict, ref: np.ndarray, sl: np.ndarray, scale: float, crops: Path | None = None) -> dict:
+def measure_slide(slide: dict, ref: SignedRGB, sl: SignedRGB, scale: float, crops: Path | None = None) -> dict:
     """Findings for one slide. `scale` = pixels per PDF point; `ref` and `sl` are RGB arrays of
     the PDF page and Google's thumbnail at the same size."""
     pt = lambda px: round(px / scale, 1)
     els = [e for e in slide["elements"] if e["kind"] in ("text", "table", "image", "diagram")
            and e.get("role") not in ("footer",)]
-    info = []
+    info: list[_Measured] = []
     h, w = ref.shape[:2]
     full_r = np.zeros((h, w), bool)
     full_s = np.zeros((h, w), bool)
@@ -170,19 +190,19 @@ def measure_slide(slide: dict, ref: np.ndarray, sl: np.ndarray, scale: float, cr
         r[win[1]:win[3], win[0]:win[2]], s[win[1]:win[3], win[0]:win[2]] = mr, ms
         full_r |= r
         full_s |= s
-        info.append({"el": e, "size": size, "ref": _box(r), "slides": _box(s), "r": r, "s": s, "win": win})
+        info.append(_Measured(el=e, size=size, ref=_box(r), slides=_box(s), r=r, s=s, win=win))
     ref, sl = full_r, full_s  # for the collision walks: the elements' own ink, nothing else
 
     findings = []
     for it in info:
-        e, br, bs, size = it["el"], it["ref"], it["slides"], it["size"]
+        e, br, bs, size = it.el, it.ref, it.slides, it.size
         name = _name(e)
         if br is None or bs is None:
             findings.append({"kind": "missing", "element": name, "where": "slides" if bs is None else "pdf"})
             continue
         gap = max(1, round(0.12 * size * scale))
         if e["kind"] == "text":
-            lr, ls = bands(it["r"], gap), bands(it["s"], gap)
+            lr, ls = bands(it.r, gap), bands(it.s, gap)
             # A wrap adds (or takes away) a line of height too: bands alone also change where
             # Slides' deeper subscripts or a panel's corner join or split two runs of rows.
             grew = (bs[3] - bs[1]) - (br[3] - br[1])
@@ -192,7 +212,7 @@ def measure_slide(slide: dict, ref: np.ndarray, sl: np.ndarray, scale: float, cr
             elif ls < lr:
                 findings.append({"kind": "crowded", "element": name, "lines_pdf": lr, "lines_slides": ls})
             if lr == ls:
-                findings += _line_findings(e, name, it["r"], it["s"], gap, size, scale)
+                findings += _line_findings(e, name, it.r, it.s, gap, size, scale)
         elif (bs[3] - br[3]) / scale > GROWN_PT:
             findings.append({"kind": "grown", "element": name, "pt": pt(bs[3] - br[3])})
 
@@ -201,7 +221,7 @@ def measure_slide(slide: dict, ref: np.ndarray, sl: np.ndarray, scale: float, cr
     # to B: the white space between them in the PDF has (nearly) closed.
     for a in info:
         for b in info:
-            ra, sa, rb = a["ref"], a["slides"], b["ref"]
+            ra, sa, rb = a.ref, a.slides, b.ref
             if a is b or ra is None or sa is None or rb is None:
                 continue
             for axis in (1, 0):  # 1: A above B; 0: A left of B
@@ -210,18 +230,18 @@ def measure_slide(slide: dict, ref: np.ndarray, sl: np.ndarray, scale: float, cr
                     continue  # not facing each other across this axis
                 gap_pdf, gap_sl = rb[axis] - ra[axis + 2], rb[axis] - sa[axis + 2]
                 if gap_pdf >= scale and gap_sl < min(1.5 * scale, 0.25 * gap_pdf):
-                    findings.append({"kind": "touch", "element": _name(a["el"]), "other": _name(b["el"]),
+                    findings.append({"kind": "touch", "element": _name(a.el), "other": _name(b.el),
                                      "direction": "below" if axis == 1 else "right",
                                      "gap_pdf_pt": pt(gap_pdf), "gap_slides_pt": pt(gap_sl)})
     if crops is not None:
         crops.mkdir(parents=True, exist_ok=True)
-        named = {_name(it["el"]): it for it in info}
+        named = {_name(it.el): it for it in info}
         for i, f in enumerate(findings):
             it = named.get(f["element"])
             if it is None:
                 continue
-            a0, b0, a1, b1 = it["win"]
-            pair = np.vstack([it["r"][b0:b1, a0:a1], np.ones((3, a1 - a0), bool), it["s"][b0:b1, a0:a1]])
+            a0, b0, a1, b1 = it.win
+            pair = np.vstack([it.r[b0:b1, a0:a1], np.ones((3, a1 - a0), bool), it.s[b0:b1, a0:a1]])
             Image.fromarray(~pair).save(crops / f"{slide['page'] + 1:03}-{i}-{f['kind']}.png")
     return {"page": slide["page"], "label": slide.get("label"), "findings": findings}
 

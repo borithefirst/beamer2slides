@@ -33,6 +33,7 @@ Without thumbnails (the offline tests, `pull`) candidates are simply dropped, ex
 from __future__ import annotations
 
 import numpy as np
+from .arrays import Floats, Floats32, Gray, Ints, Mask, SignedRGB
 
 TOL = 14                 # max channel distance of a pixel from the region's colour (JPEG-ish noise, AA)
 FLAT = 0.72              # share of the looked-at pixels that must be the colour (the rest: words above)
@@ -46,7 +47,7 @@ RING_PX = 6              # width of the ring around a box whose colour is what s
 EDGE_SAME = 0.5          # a box whose ring is this much its own colour has no visible edge
 
 
-def load(image) -> np.ndarray | None:
+def load(image) -> SignedRGB | None:
     """An RGB array from a path, a PIL image or an array (None stays None)."""
     if image is None:
         return None
@@ -125,7 +126,7 @@ def wordy(el: dict) -> bool:
             or el["kind"] == "image" and see_through(el.get("file"), el.get("crop")))
 
 
-def read_region(a: np.ndarray, region: np.ndarray, allow: np.ndarray, gradient_ok: bool, flat: float = FLAT):
+def read_region(a: SignedRGB, region: Mask, allow: Mask, gradient_ok: bool, flat: float = FLAT):
     """What fills the pixels `region` of `a` (the box less what hides it): ("solid", colour),
     ("gradient", axis, [three colours]) or None. `allow`: where ink of words drawn above may be."""
     n = int(region.sum())
@@ -172,7 +173,7 @@ def read_region(a: np.ndarray, region: np.ndarray, allow: np.ndarray, gradient_o
     return None
 
 
-def bake_shared_cluster(elements: list[dict], members: list[int], a: np.ndarray, px: float,
+def bake_shared_cluster(elements: list[dict], members: list[int], a: SignedRGB, px: float,
                         background: str | None, picture: bool, pictures) -> list[dict]:
     """Replace a `deck_freeforms.shared_boxes` cluster - freeform siblings that all declare the same
     box - with one picture of the thumbnail's own pixels in that box (`thumbnail_picture`), in place
@@ -202,7 +203,7 @@ SEAM_GAP = 2       # px each side of a box's edge compared across it
 SEAM_RATIO = 1.5   # an edge is no edge while the step across it is at most this times the step beside it
 
 
-def seamless(a: np.ndarray, el: dict, above: list[dict], px: float) -> bool:
+def seamless(a: SignedRGB, el: dict, above: list[dict], px: float) -> bool:
     """Whether what shows in `el`'s box runs on across its edges unbroken: a see-through text box on a
     photo (china-pptx 183's bullets over the Qing gate), whose `{}`/NOT_RENDERED fill is nothing of
     its own, rather than a panel (173's shaded caption panel has an edge on every side). On each side
@@ -247,7 +248,7 @@ def seamless(a: np.ndarray, el: dict, above: list[dict], px: float) -> bool:
     return step <= max(TOL, SEAM_RATIO * calm)
 
 
-def shown_through(pic: dict, a: np.ndarray, below: list[dict], px: float) -> None:
+def shown_through(pic: dict, a: SignedRGB, below: list[dict], px: float) -> None:
     """Make a text box's thumbnail fill (`pic`) transparent wherever the thumbnail shows a picture
     under the box as that picture is: the box's fill is nothing there. china-pptx 138: a page-sized
     text box on the gold page took the portrait beside the poem into its picture, the hat's black
@@ -298,7 +299,7 @@ def ground_below(el: dict, below: list[dict], tol: float = 1.0) -> bool:
     return False
 
 
-def shape_fallback_picture(a: np.ndarray, el: dict, above: list[dict], px: float,
+def shape_fallback_picture(a: SignedRGB, el: dict, above: list[dict], px: float,
                            background: str | None, pictures):
     """A shape whose Slides shapeType `adopt_shapes.preset` has no geometry for (a curved or bent
     block arrow, or any other preset the corpora have not yet needed) drawn as the thumbnail's own
@@ -366,7 +367,7 @@ def settle(elements: list[dict], image, px: float, background: str | None, pictu
         # (`deck_freeforms`), after its fill is known
         free = a is not None and deck_freeforms.freeform(el)
         if not el.get("fill_unread") and not cells:
-            if free:
+            if free and a is not None:
                 bottom = not picture and not any(overlaps(e, el) for e in elements[:k])
                 deck_freeforms.trace(a, el, elements[k + 1:], elements[:k], px, background, bottom, False)
             out.append(el)
@@ -443,7 +444,7 @@ ENCLOSES = 0.5           # pixels an outline-only trace may enclose, per pixel o
 THICK = 0.1              # share of that ink allowed to survive an erosion by half the stroke and a pixel
 
 
-def outline_only(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: float,
+def outline_only(a: SignedRGB, el: dict, above: list[dict], under: list[dict], px: float,
                  background: str | None, bottom: bool) -> bool:
     """Trace an outlined freeform whose NOT_RENDERED fill the thumbnail could not read as any colour,
     ramp or one paint, with its outline as the only paint: NOT_RENDERED is also what Slides says of a
@@ -464,6 +465,9 @@ def outline_only(a: np.ndarray, el: dict, above: list[dict], under: list[dict], 
     with that rim painted out as letters). Anything else is left to the thumbnail's picture, as
     before."""
     from . import deck_freeforms as FF
+    paint = rgb(el.get("outline"))
+    if paint is None:
+        return False  # (no outline colour to trace by)
     if not FF.trace(a, el, above, under, px, background, bottom, False):
         return False
     x0, y0, ink = el["_traced"]
@@ -473,7 +477,6 @@ def outline_only(a: np.ndarray, el: dict, above: list[dict], under: list[dict], 
     y1, x1 = y0 + ink.shape[0], x0 + ink.shape[1]
     hidden, wordy, _ = FF.unknowns(a, (x0, y0, x1, y1), above, px)
     sub = a[y0:y1, x0:x1].astype(np.int16)
-    paint = rgb(el["outline"])
     stroke = np.abs(sub - paint).max(axis=2) <= TOL
     # what the ink goes on under: words of its colour, and what an opaque element above hides where
     # it meets the ink (the trace takes in only 3 px of it: cs161-net 13's wire over a red ring left
@@ -523,7 +526,7 @@ def _untraced(el: dict) -> bool:
 CROSSING = 3             # px past half the stroke a line is taken to go on under what hides it
 
 
-def hidden_at(ink: np.ndarray, hidden: np.ndarray, reach: int) -> np.ndarray:
+def hidden_at(ink: Mask, hidden: Mask, reach: int) -> Mask:
     """What opaque elements above hide (`hidden`) within `reach` px of the traced `ink`, in the pieces
     the ink meets: a line crossing under them goes on there as far as anyone can tell."""
     from . import deck_freeforms as FF
@@ -536,7 +539,7 @@ def hidden_at(ink: np.ndarray, hidden: np.ndarray, reach: int) -> np.ndarray:
     return met[labels] & FF.dilate(ink, reach)
 
 
-def holds_nothing(sub: np.ndarray, held: np.ndarray, unknown: np.ndarray, region, under: list[dict],
+def holds_nothing(sub: SignedRGB, held: Mask, unknown: Mask, region, under: list[dict],
                   px: float, background: str | None) -> bool:
     """Does what a ring holds (`held`, over `sub`, the thumbnail from pixel `region`'s corner) show
     the slide's own colour wherever only the slide lies under it (`BARE_SHOWS`), in a fair share of
@@ -579,7 +582,7 @@ def holds_nothing(sub: np.ndarray, held: np.ndarray, unknown: np.ndarray, region
     return (bare & shows).sum() >= BARE_SHOWS * bare.sum()
 
 
-def closed_under_words(ink: np.ndarray, sub: np.ndarray, under_words: np.ndarray, paint, r: int) -> np.ndarray:
+def closed_under_words(ink: Mask, sub: SignedRGB, under_words: Mask, paint, r: int) -> Mask:
     """`ink` with the pieces of the stroke's colour under words of that colour (`under_words`) that
     join two of its cut ends and are as thin as the stroke: the trace leaves them out as the letters
     they may be, which cut cs161-net 13's rings open wherever their caption's box lay. A piece a
@@ -602,7 +605,7 @@ def closed_under_words(ink: np.ndarray, sub: np.ndarray, under_words: np.ndarray
     return out
 
 
-def traced_rings(field: np.ndarray, x0: int, y0: int, px: float) -> list:
+def traced_rings(field: Floats32, x0: int, y0: int, px: float) -> list:
     """The rings `deck_freeforms` writes for a coverage `field` whose [0, 0] is pixel (x0, y0)."""
     from . import deck_freeforms as FF
     rings = []
@@ -619,7 +622,7 @@ PIE_RADII = (0.3, 0.45, 0.6, 0.75, 0.9)   # where along each ray, in the radius
 PIE_STRAY = 2.0          # degrees of other colour allowed inside the arc read (letters, leader lines)
 
 
-def pie_angles(a: np.ndarray, el: dict, above: list[dict], px: float):
+def pie_angles(a: SignedRGB, el: dict, above: list[dict], px: float):
     """The (start, sweep) a PIE shape is drawn with, in OOXML degrees (clockwise from +x, y down), read
     from the thumbnail: the API gives a pie as its preset and box only, not the angles a person
     dragged, and the preset's default is a 270 degree slice (intro-lecture's grading chart: five
@@ -684,7 +687,7 @@ CORNER_AGREE_PX = 2.5
 CORNER_AGREE_SHARE = 0.15
 
 
-def corner_radius(a: np.ndarray, el: dict, above: list[dict], px: float) -> float | None:
+def corner_radius(a: SignedRGB, el: dict, above: list[dict], px: float) -> float | None:
     """The corner radius (IR pt) a rounded rectangle is drawn with, read from the thumbnail: the API
     gives the preset, not the corner a person dragged, and the preset's default of a sixth of the
     shorter side rounded journey-maps' square title bars. Along each rounded corner's diagonal the
@@ -750,7 +753,7 @@ def corner_radius(a: np.ndarray, el: dict, above: list[dict], px: float) -> floa
     return round(float(np.median(radii)) / px, 2)
 
 
-def crossing(p: np.ndarray, steps: np.ndarray, col, line, edge: bool = False) -> float | None:
+def crossing(p: SignedRGB, steps: Ints, col, line, edge: bool = False) -> float | None:
     """Where along a run of pixels (the first the ground outside a shape, the others at `steps` + 0.5
     in from its corner) the shape's colour or outline covers half a pixel, to a fraction of one; None
     when the ground is the shape's colour or no three pixels in a row are covered. `edge`: the run
@@ -783,7 +786,7 @@ def crossing(p: np.ndarray, steps: np.ndarray, col, line, edge: bool = False) ->
 
 PICTURE_MIN_PX = 12      # a thumbnail picture's box must be at least this many pixels each way
 
-def thumbnail_picture(a: np.ndarray, el: dict, above: list[dict], px: float, page: str | None, folder):
+def thumbnail_picture(a: SignedRGB, el: dict, above: list[dict], px: float, page: str | None, folder):
     """A shape whose fill the thumbnail shows as neither one colour nor a ramp - a photo cut to a
     freeform (sc-memphis' section slides: the girl, the wave, the ring), a texture - as the one
     picture of it there is: the thumbnail's pixels in its box. The API gives no URL for a picture
@@ -820,7 +823,7 @@ def thumbnail_picture(a: np.ndarray, el: dict, above: list[dict], px: float, pag
             "fill_source": "thumbnail"}
 
 
-def unblended(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float) -> np.ndarray:
+def unblended(sub: Floats32, a0: int, b0: int, above: list[dict], px: float) -> Floats32:
     """`sub` (thumbnail pixels from column `a0`, row `b0`) with the see-through fills of the shapes
     `above` taken back out where they lie - their traced outline (`deck_freeforms`), their ellipse or
     their box: the crop goes under them, and would otherwise show their tint twice (en-smartart's
@@ -853,7 +856,7 @@ def unblended(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float) -
     return sub
 
 
-def ellipse_alpha(h: int, w: int, samples: int = 4) -> np.ndarray:
+def ellipse_alpha(h: int, w: int, samples: int = 4) -> Gray:
     """The alpha of the ellipse an `h` by `w` box inscribes, its rim antialiased (`samples`² points
     a pixel)."""
     s = (np.arange(samples) + 0.5) / samples
@@ -864,8 +867,8 @@ def ellipse_alpha(h: int, w: int, samples: int = 4) -> np.ndarray:
     return np.round(cover * 255).astype(np.uint8)
 
 
-def letters_of(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float, w: int, h: int,
-               keep: str | None = None) -> np.ndarray:
+def letters_of(sub: Floats32, a0: int, b0: int, above: list[dict], px: float, w: int, h: int,
+               keep: str | None = None) -> Mask:
     """Where in `sub` (the thumbnail's pixels from column `a0`, row `b0` on; the thumbnail is `w` x
     `h`) the words of the text elements `above` are drawn: a pixel nearer a run's colour than its
     box's ground. Not grown: the antialiased rims are the caller's to take (`dilate`).
@@ -896,14 +899,14 @@ def letters_of(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float, 
                     # a letter's pixel is nearer its colour than the ground's (antialiased rims are
                     # taken by the dilation)
                     hit = (np.abs(part - c).max(axis=2) < off) & (off > TOL)
-                    if own is not None and np.abs(c - k).max() > TOL:
+                    if own is not None and k is not None and np.abs(c - k).max() > TOL:
                         hit &= ~own[box]
                     letters[box] |= hit
     return letters
 
 
-def painted_out(sub: np.ndarray, a0: int, b0: int, above: list[dict], px: float, w: int, h: int,
-                keep: str | None = None) -> np.ndarray:
+def painted_out(sub: Floats32, a0: int, b0: int, above: list[dict], px: float, w: int, h: int,
+                keep: str | None = None) -> Floats32:
     """`sub` with the letters of the texts `above` (`letters_of`, grown over their rims) filled in
     from the pixels around them: what a thumbnail crop keeps of what lies under those words, so a
     text box drawn again above the crop does not print its words twice a little apart. `keep`: the
@@ -960,7 +963,7 @@ def picture_unusable(el: dict) -> bool:
     return el.get("format") in UNUSABLE_FORMATS or Path(file).suffix.lower() in UNUSABLE_SUFFIXES
 
 
-def picture_from_thumbnail(a: np.ndarray, el: dict, above: list[dict], px: float, folder) -> dict | None:
+def picture_from_thumbnail(a: SignedRGB, el: dict, above: list[dict], px: float, folder) -> dict | None:
     """A picture element as the thumbnail shows it: {file, sha1, format, bbox, box, rotation?} to
     put in place of the file that never arrived, or None when too little of it is on the page.
 
@@ -1056,7 +1059,7 @@ def recover_pictures(elements: list[dict], a, px: float, folder) -> None:
         el["picture_source"] = "thumbnail"
 
 
-def inpaint(sub: np.ndarray, hole: np.ndarray) -> np.ndarray:
+def inpaint(sub: Floats32, hole: Mask) -> Floats32:
     """`sub` with the pixels `hole` filled in from their neighbours, ring by ring inwards."""
     out = sub.copy()
     todo = hole.copy()
@@ -1083,7 +1086,7 @@ def inpaint(sub: np.ndarray, hole: np.ndarray) -> np.ndarray:
     return out
 
 
-def masks(a: np.ndarray, box, above: list[dict], px: float, own_words: bool):
+def masks(a: SignedRGB, box, above: list[dict], px: float, own_words: bool):
     """(the pixels of the box `box`, the part of it looked at, where ink not the fill's may be in it:
     all of it when `own_words`)."""
     h, w = a.shape[:2]
@@ -1112,7 +1115,7 @@ def masks(a: np.ndarray, box, above: list[dict], px: float, own_words: bool):
     return sub, region, allow
 
 
-def edges_show(a: np.ndarray, bbox, px: float, colour) -> bool:
+def edges_show(a: SignedRGB, bbox, px: float, colour) -> bool:
     """Does a box of `colour` stand out from what is just around it? When most of the ring around
     it is that colour too, the element's edges are nowhere to be seen: either it is not filled at
     all and shows what it stands on (sc-memphis' squiggle tiles over the pale wave), or its fill
@@ -1128,7 +1131,7 @@ def edges_show(a: np.ndarray, bbox, px: float, colour) -> bool:
     return (np.abs(ring_px - np.asarray(colour)).max(axis=1) <= TOL).mean() < EDGE_SAME
 
 
-def outside(a: np.ndarray, bbox, px: float):
+def outside(a: SignedRGB, bbox, px: float):
     """The colour the page mostly is outside a box: what a table's unfilled cells show. A ring just
     around a table is no good for that - its own outer borders and a row grown past the stored
     height run through it (comps-analysis' tables on a #444444 page)."""
@@ -1206,7 +1209,7 @@ INHERITED_ABSENT_MAX = 0.35  # ... at or below this, "not shown" (between the tw
                               # confident either/or a whole deck's worth of slides should decide on)
 
 
-def element_appearance_share(sub: np.ndarray, region: np.ndarray, el: dict) -> float | None:
+def element_appearance_share(sub: SignedRGB, region: Mask, el: dict) -> float | None:
     """Share of an inherited (master/layout) element's own visible pixels (`sub`, `region`: `masks`'
     box-local view of it, whatever another element draws over it already excluded) that match its
     own known appearance - a flat `fill`, or its own downloaded picture cropped and stretched to its
@@ -1269,7 +1272,7 @@ PAGE_GRAD_TRIM = 0.12        # worst-explained share of the sample a plain fit s
                               # worst-percentile tail, so a photo or swirl is not rescued by this.
 
 
-def page_visible_mask(elements: list[dict], px: float, w: int, h: int) -> np.ndarray:
+def page_visible_mask(elements: list[dict], px: float, w: int, h: int) -> Mask:
     """The page's own pixels: everywhere no element's box (grown by `MARGIN_PX` for its antialiased
     rim) reaches. Conservative like the rest of the module - an element that turns out see-through or
     unfilled still keeps its box out of the reading, so a plain page is never blamed for what stands
@@ -1284,7 +1287,7 @@ def page_visible_mask(elements: list[dict], px: float, w: int, h: int) -> np.nda
     return mask
 
 
-def region_flat_share(a: np.ndarray, region: np.ndarray, colour: str | None) -> float:
+def region_flat_share(a: SignedRGB, region: Mask, colour: str | None) -> float:
     """The share of `region`'s pixels within `TOL` of `colour` - 0 when there is nothing to compare
     or nothing visible."""
     col = rgb(colour)
@@ -1295,12 +1298,12 @@ def region_flat_share(a: np.ndarray, region: np.ndarray, colour: str | None) -> 
     return float((close & region).sum() / n)
 
 
-def region_matches(a: np.ndarray, region: np.ndarray, colour: str | None) -> bool:
+def region_matches(a: SignedRGB, region: Mask, colour: str | None) -> bool:
     """Does a flat `colour` explain what a region of the page's own pixels shows?"""
     return region_flat_share(a, region, colour) >= FLAT
 
 
-def picture_region_share(a: np.ndarray, region: np.ndarray, path: str, w: int, h: int) -> float:
+def picture_region_share(a: SignedRGB, region: Mask, path: str, w: int, h: int) -> float:
     """Does a candidate picture - stretched to the page, as `stretchedPictureFill` draws it - explain
     a region of the page's own pixels? The same question `region_flat_share` asks of a flat colour,
     for the layout's or master's own picture `parent_background` offers instead of one (china-pptx:
@@ -1319,7 +1322,7 @@ def picture_region_share(a: np.ndarray, region: np.ndarray, path: str, w: int, h
     return float((close & region).sum() / n)
 
 
-def _page_regression(region: np.ndarray, a: np.ndarray, n: int):
+def _page_regression(region: Mask, a: SignedRGB, n: int):
     """`n` pixels drawn from `region` (all of it when smaller): (x, y, colour) in pixel coordinates,
     float64, for the least-squares fits below."""
     ys, xs = np.nonzero(region)
@@ -1335,7 +1338,7 @@ RADIAL_STEPS_MIN = 24    # ... at least this many steps each way, so a small reg
 RADIAL_KEEP_PCTL = 60    # only the steeper half or so of gradients: near the centre they are noise
 
 
-def _radial_centre(a: np.ndarray, region: np.ndarray):
+def _radial_centre(a: SignedRGB, region: Mask):
     """Where a radial fill's centre is, from the *direction* of the thumbnail's own colour gradient
     rather than its shape: a radial fill is some function of the distance to its centre alone, so at
     every point its steepest change points straight along the line to (or from) that centre, whatever
@@ -1372,7 +1375,7 @@ def _radial_centre(a: np.ndarray, region: np.ndarray):
     return float(sol[0]), float(sol[1])
 
 
-def _fit_share(X: np.ndarray, pix: np.ndarray, tol: float):
+def _fit_share(X: Floats, pix: Floats, tol: float):
     """Least squares `pix` against `X`, retried once on the worst `PAGE_GRAD_TRIM` share of points
     dropped when the plain fit's own share is short of `PAGE_GRAD_FIT` (`PAGE_GRAD_TRIM`). Either way
     the returned `share`/`span` are scored against *every* point `X`/`pix` holds, refit coefficients
@@ -1406,7 +1409,7 @@ PAGE_TEXTURE_PATCHES = 14    # patches drawn from the region before giving up on
 PAGE_TEXTURE_MIN_HITS = 6    # ... at least this many must land to say anything either way
 
 
-def page_textured(a: np.ndarray, region: np.ndarray) -> bool:
+def page_textured(a: SignedRGB, region: Mask) -> bool:
     """Is the page's own visible background (`region`) a fine printed texture - stripes, a weave,
     fine noise - rather than the smooth ramp `page_gradient` fits affine or radial models to? A
     handful of small squares spread across `region` (wholly inside it, so an element's edge is never
@@ -1435,7 +1438,7 @@ def page_textured(a: np.ndarray, region: np.ndarray) -> bool:
     return hits >= PAGE_TEXTURE_MIN_HITS and worst >= PAGE_TEXTURE_STD
 
 
-def page_texture_picture(a: np.ndarray, region: np.ndarray, folder) -> dict | None:
+def page_texture_picture(a: SignedRGB, region: Mask, folder) -> dict | None:
     """The page's own background where nothing describes it - no flat colour, no picture the API can
     point to, and (`page_textured`) too fine a grain for `page_gradient`'s ramp - as the one picture
     of it there is: the thumbnail's own pixels, with whatever elements stand on the page painted back
@@ -1463,7 +1466,7 @@ def page_texture_picture(a: np.ndarray, region: np.ndarray, folder) -> dict | No
     return {"file": str(path), "sha1": sha, "format": "png"}
 
 
-def background_from_thumbnail(a: np.ndarray, elements: list[dict], px: float, folder) -> dict | None:
+def background_from_thumbnail(a: SignedRGB, elements: list[dict], px: float, folder) -> dict | None:
     """A slide's background picture (`stretchedPictureFill`) that never arrived, as the thumbnail
     shows the page: `page_texture_picture` over what the elements leave of it. The page under every
     element but a see-through text box is painted back in from around it - an opaque element hides
@@ -1489,7 +1492,7 @@ def background_from_thumbnail(a: np.ndarray, elements: list[dict], px: float, fo
     return page_texture_picture(a, ~hole, folder)
 
 
-def page_gradient(a: np.ndarray, region: np.ndarray, flat_colour: str | None, px: float):
+def page_gradient(a: SignedRGB | None, region: Mask, flat_colour: str | None, px: float):
     """A linear (any angle) or radial gradient the page's own pixels (`region`, `page_visible_mask`)
     fit better than the flat colour Slides' API reported for the page background
     (`deck_ir.page_background`): `pageBackgroundFill` has no gradient type at all, so a .pptx

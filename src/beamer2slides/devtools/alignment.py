@@ -36,6 +36,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from beamer2slides.arrays import RGB, Floats, Floats32
 from beamer2slides.emit import FontMapper, bullet_shape, fit_holes, merge_blocks, slide_holes
 from beamer2slides.gslides import EMU_PER_PT
 from beamer2slides.pdf import Document
@@ -49,13 +50,13 @@ SUBSTITUTED = {"triangle"}  # bullets Slides draws as another glyph (➢ for ▶
 
 # ---------------------------------------------------------------- Slides geometry
 
-def _affine(t: dict) -> np.ndarray:
+def _affine(t: dict) -> Floats:
     unit = EMU_PER_PT if t.get("unit", "EMU") == "EMU" else 1.0
     return np.array([[t.get("scaleX", 0.0), t.get("shearX", 0.0), t.get("translateX", 0.0) / unit],
                      [t.get("shearY", 0.0), t.get("scaleY", 0.0), t.get("translateY", 0.0) / unit], [0, 0, 1]])
 
 
-def element_boxes(page_elements: list[dict], parent: np.ndarray | None = None) -> dict[str, list[float]]:
+def element_boxes(page_elements: list[dict], parent: Floats | None = None) -> dict[str, list[float]]:
     """Absolute boxes (slide pt) of page elements, group children included."""
     parent = np.eye(3) if parent is None else parent
     out = {}
@@ -95,17 +96,17 @@ def slides_elements(out: Path, state: dict, refresh: bool = False) -> dict[str, 
 class Image2:
     """An RGB image on a grid of `k` px per PDF point."""
 
-    def __init__(self, rgb: np.ndarray, k: float):
+    def __init__(self, rgb: RGB, k: float):
         self.rgb, self.k = rgb.astype(np.float32), k
 
-    def crop(self, x0, y0, x1, y1) -> tuple[np.ndarray, int, int]:
+    def crop(self, x0, y0, x1, y1) -> tuple[Floats32, int, int]:
         h, w = self.rgb.shape[:2]
         a0, b0 = max(0, int(np.floor(x0 * self.k))), max(0, int(np.floor(y0 * self.k)))
         a1, b1 = min(w, int(np.ceil(x1 * self.k))), min(h, int(np.ceil(y1 * self.k)))
         return self.rgb[b0:max(b0, b1), a0:max(a0, a1)], a0, b0
 
 
-def strength(rgb: np.ndarray, ref: np.ndarray | None = None) -> np.ndarray:
+def strength(rgb: Floats32, ref: Floats32 | None = None) -> Floats32 | Floats:
     """0..1 ink strength: difference from the reference colour (the crop's median), relative
     to the strongest ink in the crop."""
     if rgb.size == 0:
@@ -115,7 +116,7 @@ def strength(rgb: np.ndarray, ref: np.ndarray | None = None) -> np.ndarray:
     return np.clip(d / max(float(np.percentile(d, 99.5)), 80.0), 0, 1)
 
 
-def ring_colour(img: Image2, box: list[float], width_px: int = 3) -> np.ndarray:
+def ring_colour(img: Image2, box: list[float], width_px: int = 3) -> Floats32:
     """Median colour just outside a box: the page under a picture."""
     rgb, a0, b0 = img.crop(box[0] - 2 * width_px / img.k, box[1] - 2 * width_px / img.k,
                            box[2] + 2 * width_px / img.k, box[3] + 2 * width_px / img.k)
@@ -124,7 +125,7 @@ def ring_colour(img: Image2, box: list[float], width_px: int = 3) -> np.ndarray:
     return np.median(ring, axis=0)
 
 
-def picture_ink(png: Path, page: np.ndarray) -> np.ndarray:
+def picture_ink(png: Path, page: Floats32) -> Floats32 | Floats:
     """Ink strength of a picture file: alpha for transparent pictures, else difference from the
     page colour under it (`page`; its own border may be a frame)."""
     im = Image.open(png)
@@ -135,7 +136,7 @@ def picture_ink(png: Path, page: np.ndarray) -> np.ndarray:
     return strength(np.asarray(im.convert("RGB")).astype(np.float32), page)
 
 
-def place(ink: np.ndarray, box: list[float], img: Image2, region: tuple[int, int, int, int]) -> np.ndarray:
+def place(ink: Floats32 | Floats, box: list[float], img: Image2, region: tuple[int, int, int, int]) -> Floats32:
     """A picture's ink resampled into its box (PDF pt) on `img`'s grid, cut to `region` (px)."""
     a0, b0, a1, b1 = region
     out = np.zeros((b1 - b0, a1 - a0), np.float32)
@@ -150,7 +151,7 @@ def place(ink: np.ndarray, box: list[float], img: Image2, region: tuple[int, int
     return out
 
 
-def runs(profile: np.ndarray, gap_px: float = 0.0) -> list[tuple[float, float]]:
+def runs(profile: Floats32 | Floats, gap_px: float = 0.0) -> list[tuple[float, float]]:
     """Sub-pixel (start, end) of the runs where a column profile reaches EDGE, joined across
     gaps narrower than `gap_px`."""
     on = profile >= EDGE
@@ -217,7 +218,7 @@ def line_of(pic_box: list[float], paragraphs: list[dict]) -> tuple[dict, dict] |
                                      abs((y0 + y1) / 2 - c[1]["baseline"] + 0.35 * c[0]["size"])))
 
 
-def band_profile(img: Image2, x0, x1, top, bottom, masks: list[tuple[np.ndarray, list[float]]]):
+def band_profile(img: Image2, x0, x1, top, bottom, masks: list[tuple[Floats32 | Floats, list[float]]]):
     """Column profile of text ink in a band (PDF pt), picture ink removed; the pictures' own
     column profiles; px origin; and the columns where picture ink hides the text entirely."""
     rgb, a0, b0 = img.crop(x0, top, x1, bottom)
@@ -236,7 +237,7 @@ def band_profile(img: Image2, x0, x1, top, bottom, masks: list[tuple[np.ndarray,
     return s.max(axis=0), pics, a0, hidden
 
 
-def hole_gaps(img: Image2, pic_ink: np.ndarray, box: list[float], top: float, bottom: float, size: float) -> dict | None:
+def hole_gaps(img: Image2, pic_ink: Floats32 | Floats, box: list[float], top: float, bottom: float, size: float) -> dict | None:
     """Ink gaps (pt) left and right of a picture on its line band, and whether text ink ends at
     the edge of the picture's box (covered by it)."""
     reach = REACH_EM * size
@@ -356,7 +357,7 @@ def measure_numbers(pictures, boxes, ref: Image2, got: Image2, scale: float) -> 
     return rows
 
 
-def lab(rgb: np.ndarray) -> np.ndarray:
+def lab(rgb: Floats) -> Floats:
     c = rgb / 255
     c = np.where(c > 0.04045, ((c + 0.055) / 1.055) ** 2.4, c / 12.92)
     xyz = c @ np.array([[0.4124, 0.3576, 0.1805], [0.2126, 0.7152, 0.0722], [0.0193, 0.1192, 0.9505]]).T
@@ -389,7 +390,7 @@ def bullet_ink(img: Image2, cell: list[float], shaded: bool) -> dict | None:
             "color": "#%02x%02x%02x" % tuple(int(v) for v in np.median(pix, axis=0))}
 
 
-def hex_rgb(color: str) -> np.ndarray:
+def hex_rgb(color: str) -> Floats:
     return np.array([int(color.lstrip("#")[j:j + 2], 16) for j in (0, 2, 4)], np.float64)
 
 
@@ -437,7 +438,7 @@ def measure_bullets(slide, ref: Image2, got: Image2) -> list[dict]:
 
 
 def word_runs(img: Image2, x0: float, x1: float, top: float, bottom: float, size: float,
-              ink: np.ndarray, box: list[float]) -> list[tuple[float, float]]:
+              ink: Floats32 | Floats, box: list[float]) -> list[tuple[float, float]]:
     """Words (x extents, pt) on a line band, an overlay picture's ink removed. A gap the picture
     hides entirely (an arrow crossing a word) doesn't split a word."""
     got = band_profile(img, x0, x1, top, bottom, [(ink, box)])
@@ -454,7 +455,7 @@ def word_runs(img: Image2, x0: float, x1: float, top: float, bottom: float, size
 
 
 def word_edge(img: Image2, x: float, left_edge: bool, top: float, bottom: float, size: float,
-              ink: np.ndarray, box: list[float]) -> float | None:
+              ink: Floats32 | Floats, box: list[float]) -> float | None:
     """The word edge (pt) nearest `x` on a line band."""
     edges = [w[0 if left_edge else 1] for w in word_runs(img, x - 1.5 * size, x + 1.5 * size, top, bottom, size, ink, box)]
     return min(edges, key=lambda v: abs(v - x)) if edges else None

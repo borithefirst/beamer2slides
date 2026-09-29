@@ -57,6 +57,7 @@ from pathlib import Path
 
 import numpy as np
 
+from ..arrays import Mask
 from .adopt_bench import CORPUS, decks, load_target
 
 SIZE = 40.0        # big enough that one rendered pixel is not the whole difference
@@ -75,22 +76,17 @@ STYLES = (("upright", ""), ("bold", "\\bfseries "), ("italic", "\\itshape "),
 
 # ---------------------------------------------------------------------------------------- measuring
 
-def bands(ink: np.ndarray) -> list[tuple[int, int]]:
+def bands(ink: Mask) -> list[tuple[int, int]]:
     """The rows of ink, split where a blank row separates them: one band per probe line."""
-    rows = ink.any(axis=1)
-    out, start = [], None
-    for y, v in enumerate(rows):
-        if v and start is None:
-            start = y
-        elif not v and start is not None:
-            out.append((start, y))
-            start = None
-    if start is not None:
-        out.append((start, len(rows)))
-    return out
+    rows = np.flatnonzero(ink.any(axis=1))
+    if not rows.size:
+        return []
+    breaks = np.flatnonzero(np.diff(rows) > 1)
+    starts, ends = [rows[0], *rows[breaks + 1]], [*(rows[breaks] + 1), rows[-1] + 1]
+    return [(int(a), int(b)) for a, b in zip(starts, ends)]
 
 
-def stroke(m: np.ndarray) -> float:
+def stroke(m: Mask) -> float:
     """Mean stroke width in pixels: a stroke w wide and L long has area wL and an outline of 2L, so
     2 x area / outline is w. `deck_thumbs.stroke_em` measures the deck's own thumbnails the same way,
     which is what makes the two comparable."""
@@ -103,7 +99,7 @@ def stroke(m: np.ndarray) -> float:
     return 2 * area / max(area - int(inner.sum()), 1)
 
 
-def slant(m: np.ndarray) -> float:
+def slant(m: Mask) -> float:
     """The shear that lines the ink up into columns: ~0 for an upright face, > 0 for one leaning
     right. Argmax over the sum of squares of the column histogram - the classic deskew, which reads
     a shape and not a centroid, so a letter that happens to be top-heavy cannot fake it."""

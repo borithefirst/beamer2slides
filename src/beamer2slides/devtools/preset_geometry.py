@@ -32,6 +32,8 @@ import re
 
 import numpy as np
 
+from ..arrays import Mask, SignedRGB
+
 POINT_RE = r"\(([-\d.]+)pt,([-\d.]+)pt\)"
 ARC_RE = r"arc \[start angle=([-\d.]+), end angle=([-\d.]+), x radius=([-\d.]+)pt, y radius=([-\d.]+)pt\]"
 ELLIPSE_RE = r"ellipse \[x radius=([-\d.]+)pt, y radius=([-\d.]+)pt\]"
@@ -185,7 +187,7 @@ def mirror_rings(rings: list[list[tuple[float, float]]], w: float) -> list[list[
     return [[(w - x, y) for x, y in ring] for ring in rings]
 
 
-def rasterize(rings: list[list[tuple[float, float]]], w_px: int, h_px: int, scale: float) -> np.ndarray:
+def rasterize(rings: list[list[tuple[float, float]]], w_px: int, h_px: int, scale: float) -> Mask:
     """A boolean mask, `h_px` by `w_px`, of `rings` (the shape's own frame, pt) filled even-odd at
     `scale` pixels per pt: right for a plain fill (one ring) and for the ring pairs a hole preset
     (donut, frame, no-smoking) draws, each further ring toggling what is already covered - exactly
@@ -207,7 +209,7 @@ TOL = 14          # deck_fills.TOL: max channel distance counted as "the fill co
 MIN_TRUE_PX = 30  # a shape with fewer visible fill-coloured pixels than this says too little to judge
 
 
-def match_score(a: np.ndarray, el: dict, above: list[dict], px: float, own_words: bool = False) -> dict | None:
+def match_score(a: SignedRGB, el: dict, above: list[dict], px: float, own_words: bool = False) -> dict | None:
     """How well `adopt_shapes`' default geometry for `el` (a foreign deck's shape element, as
     `deck_ir.read_presentation` + `deck_fills.settle` leave it: `fill` already read off the
     thumbnail where the API said nothing) agrees with what the thumbnail `a` actually shows in its

@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import numpy as np
 
+from ..arrays import Ints, Pixels
 
-def pixel_diff(a: np.ndarray, b: np.ndarray) -> tuple[int, np.ndarray]:
+
+def pixel_diff(a: Pixels, b: Pixels) -> tuple[int, Ints]:
     """(pixels that differ, per-pixel max difference over the channels)."""
     if a.shape != b.shape:
         raise AssertionError(f"shapes {a.shape} != {b.shape}")

@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol, Sequence, TypedDict, Union, runtime_checkable
 
-import numpy as np
+from ..arrays import Pixels
 
 Box = tuple[float, float, float, float]
 Matrix = tuple[float, float, float, float, float, float]  # [a b c d e f], PDF row-vector convention
@@ -117,8 +117,8 @@ class EmbeddedImage:
     upright: bool                       # axis aligned and not mirrored (a y flip is the PDF norm)
     blended: bool                       # drawn with a constant alpha or a blend mode
     transparent: bool                   # anything see-through: a soft mask, a stencil mask, `blended`
-    pixels: np.ndarray | None = None    # uint8, h x w x 3 or 4
-    rendered: np.ndarray | None = None  # uint8, h x w x 3 or 4
+    pixels: Pixels | None = None    # uint8, h x w x 3 or 4
+    rendered: Pixels | None = None  # uint8, h x w x 3 or 4
 
     @property
     def jpeg(self) -> bytes:
@@ -221,7 +221,7 @@ class PdfPage(Protocol):
     def links(self) -> list[Link]:
         """Link annotations with a target page or a URI."""
 
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> np.ndarray:
+    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
         """uint8 pixels of the page (or of `clip`, page space), `zoom` pixels per point, pixel
         bounds rounded outwards (`pixel_bounds`): h x w x 3 on white, or h x w x 4 on a
         transparent ground if `transparent`. Annotations are drawn; inactive objects are not.

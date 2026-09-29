@@ -18,6 +18,7 @@ from typing import Sequence
 
 import numpy as np
 
+from ...arrays import Pixels, RGBA
 from ..api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
                    EmbeddedImage, PageObject, PdfError, char_box, font_metrics, join_surrogates, mul,
                    pixel_bounds, render_matrix, trace, transform_box)
@@ -423,7 +424,7 @@ class Page:
             raw=raw, decoded_size=len(decoded), clipped=clipped,
             upright=upright, blended=blended, transparent=see_through, pixels=pixels, rendered=drawn)
 
-    def _image_pixels(self, o) -> np.ndarray | None:
+    def _image_pixels(self, o) -> Pixels | None:
         """FPDFImageObj_GetBitmap: CPDF_Image::LoadDIBBase (CPDF_DIB::Load with no resources, so a
         named colour space doesn't load, and no mask) at the image's native size, a 1 bpp or palette
         format converted to one without a palette. As pdfium_backend gives it: 8bppRgb as gray
@@ -448,7 +449,7 @@ class Page:
             return dib.rows[..., [2, 1, 0, 3]].copy()
         return np.repeat(gray[..., None], 3, axis=2)
 
-    def _rendered_image(self, o) -> np.ndarray | None:
+    def _rendered_image(self, o) -> RGBA | None:
         """FPDFImageObj_GetRenderedBitmap: the image object alone through CPDF_ImageRenderer onto a
         clear BGRA bitmap of ceil(hypot) of its own matrix's columns, flipped and moved to its
         lowest corner, under its clip matched onto that bitmap; its ExtGState soft mask and blend
@@ -499,7 +500,7 @@ class Page:
 
     # ------------------------------------------------------------------ rendering
 
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> np.ndarray:
+    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
         """FPDF_RenderPageBitmapWithMatrix as pdfium_backend calls it (render.py)."""
         ix0, iy0, w, h = pixel_bounds(zoom, clip if clip is not None else self.rect)
         fs = render_matrix(zoom, ix0, iy0, self.rotation, self.width, self.height)

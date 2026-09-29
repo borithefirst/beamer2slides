@@ -36,7 +36,7 @@
   "agent/tools.py": 1,
   "agent/workspace.py": 4,
   "bidi.py": 5,
-  "checks.py": 4,
+  "checks.py": 3,
   "classify_graphics.py": 1,
   "classify_model.py": 1,
   "classify_paragraphs.py": 5,

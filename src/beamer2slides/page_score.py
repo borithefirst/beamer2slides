@@ -19,8 +19,10 @@ from pathlib import Path
 
 import numpy as np
 
+from .arrays import Mask, SignedRGB
 
-def page_ground(a: np.ndarray) -> np.ndarray:
+
+def page_ground(a: SignedRGB) -> SignedRGB:
     """The colour the page mostly is, as the background ink is measured against."""
     flat = a.reshape(-1, 3).astype(np.int32)
     packed = (flat[:, 0] << 16) | (flat[:, 1] << 8) | flat[:, 2]   # np.unique(axis=0) took ~0.5 s a page
@@ -44,7 +46,7 @@ def element_boxes(slide: dict, w: int, h: int) -> list[tuple[int, tuple[int, int
     return out
 
 
-def covered_mask(slide: dict, w: int, h: int) -> np.ndarray:
+def covered_mask(slide: dict, w: int, h: int) -> Mask:
     """The slide's element boxes, with room around them. Scoring only the whole page would let one
     unreproduced backdrop hide everything else; `page` reports that."""
     m = np.zeros((h, w), dtype=bool)
@@ -53,21 +55,21 @@ def covered_mask(slide: dict, w: int, h: int) -> np.ndarray:
     return m
 
 
-def overlap(m_ref: np.ndarray, m_got: np.ndarray) -> float:
+def overlap(m_ref: Mask, m_got: Mask) -> float:
     from .fidelity import dilate
     inter = (dilate(m_ref) & m_got).sum() + (m_ref & dilate(m_got)).sum()
     total = m_ref.sum() + m_got.sum()
     return float(inter / total) if total else 1.0
 
 
-def ink_masks(ref: np.ndarray, got: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def ink_masks(ref: SignedRGB, got: SignedRGB) -> tuple[Mask, Mask]:
     """Each side's ink, both measured against the reference's ground."""
     from .fidelity import text_mask
     ground = page_ground(ref)
     return text_mask(ref, ground), text_mask(got, ground)
 
 
-def ink_scores(ref: np.ndarray, got: np.ndarray, slide: dict) -> tuple[dict, np.ndarray, np.ndarray]:
+def ink_scores(ref: SignedRGB, got: SignedRGB, slide: dict) -> tuple[dict[str, float], Mask, Mask]:
     """{boxes, page, pixels} of `got` against `ref` (int16 RGB arrays of one size), and both ink masks."""
     h, w = ref.shape[:2]
     m_ref, m_got = ink_masks(ref, got)
@@ -78,7 +80,7 @@ def ink_scores(ref: np.ndarray, got: np.ndarray, slide: dict) -> tuple[dict, np.
     return scores, m_ref, m_got
 
 
-def load_thumbnail(source) -> np.ndarray | None:
+def load_thumbnail(source) -> SignedRGB | None:
     """A thumbnail (a path, PIL image or array) as an int16 RGB array; None when there is none."""
     from PIL import Image
     from .fidelity import rgb_array
@@ -95,7 +97,7 @@ def load_thumbnail(source) -> np.ndarray | None:
     return a[..., :3].astype(np.int16) if a.ndim == 3 else None
 
 
-def render_like(page, ref: np.ndarray) -> np.ndarray:
+def render_like(page, ref: SignedRGB) -> SignedRGB:
     """A PDF page rendered onto the reference's pixel grid (int16 RGB)."""
     from PIL import Image
     from .fidelity import rgb_array
@@ -104,7 +106,7 @@ def render_like(page, ref: np.ndarray) -> np.ndarray:
     return rgb_array(img, (w, h))
 
 
-def boxes_score(page, ref: np.ndarray, slide: dict) -> float:
+def boxes_score(page, ref: SignedRGB, slide: dict) -> float:
     """The `boxes` score of a PDF page against a thumbnail of the slide `slide` (its IR)."""
     got = render_like(page, ref)
     h, w = ref.shape[:2]

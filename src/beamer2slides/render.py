@@ -13,11 +13,13 @@ within it.
 """
 
 import io
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
+from .arrays import Floats, Ints, Mask, Pixels, RGB, RGBA
 from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page, PdfError
 
 BACKGROUND_WIDTH_PX = 2000
@@ -41,12 +43,12 @@ def _grow(r, d: float) -> Box:
     return r[0] - d, r[1] - d, r[2] + d, r[3] + d
 
 
-def save_png(img: np.ndarray, path: Path) -> None:
+def save_png(img: Pixels, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(img).save(path)
 
 
-def load_png(path: Path) -> np.ndarray:
+def load_png(path: Path) -> RGB:
     return np.array(Image.open(path).convert("RGB"))
 
 
@@ -101,7 +103,7 @@ class Eraser:
         return [d["rect"] for d in self.page.drawings()
                 if d["type"] in ("f", "fs") and d["object"] not in self.removed]
 
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False, hide: list = ()) -> np.ndarray:
+    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False, hide: Sequence[int] = ()) -> Pixels:
         """The page without what was removed (and without the objects in `hide`, ids)."""
         page = self.page
         off = sorted(self.removed) + list(hide)
@@ -254,7 +256,7 @@ def image_file(page: Page, obj: int) -> tuple[bytes, str, tuple[int, int], str] 
     return buf.getvalue(), "png", im.px, "decoded"
 
 
-def _pillow_rgb(data: bytes) -> np.ndarray | None:
+def _pillow_rgb(data: bytes) -> RGB | None:
     try:
         return np.array(Image.open(io.BytesIO(data)).convert("RGB"))
     except Exception:
@@ -320,7 +322,7 @@ def save_bytes(data: bytes, path: Path) -> None:
 
 
 def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path: Path,
-                transparent: bool = False, hide: list = ()) -> list[int]:
+                transparent: bool = False, hide: Sequence[int] = ()) -> list[int]:
     x0, y0, x1, y1 = bbox
     width, height = x1 - x0, y1 - y0
     zoom = FIGURE_PX_PER_PT if max(width, height) > 60 else SMALL_FIGURE_PX_PER_PT
@@ -341,7 +343,7 @@ GROUND_FLAT = 6        # levels: the page under a picture counts as one colour
 GROUND_MATCH = 16      # levels: the transparent crop laid on that colour shows the opaque crop
 
 
-def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndarray, hide: list = ()) -> np.ndarray:
+def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: RGB, hide: Sequence[int] = ()) -> Pixels:
     """A picture anchored to text (inline formula, icon, number ball) on a transparent ground, so it
     shows the slide under it when the background colour changes or it is moved onto a shape.
     What stays in the background (paths reaching out of the box as render_backgrounds leaves them,
@@ -369,8 +371,8 @@ def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndar
     return rgba
 
 
-def on_picture_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np.ndarray, rgba: np.ndarray,
-                      ground: list, hide: list = ()) -> np.ndarray:
+def on_picture_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: RGB, rgba: RGBA,
+                      ground: list, hide: Sequence[int] = ()) -> Pixels:
     """An anchored picture on a photo or a shading reaching out of its box (a `\\textbar\\quad
     \\faIcon` hole on a full-bleed title photo, r1_design_v2 s1): the ground is no one colour,
     but it stays in the background under the picture (render_backgrounds keeps an image that
@@ -395,7 +397,7 @@ def on_picture_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: np
 GROUND_RIM = 0.5  # pt
 
 
-def unblend_rim(rgba: np.ndarray, clear: np.ndarray, ground: np.ndarray, width: int) -> np.ndarray:
+def unblend_rim(rgba: RGBA, clear: Mask, ground: Floats, width: int) -> RGBA:
     """Opaque pixels near the transparent ground that fade into the page colour (a ball's shading
     ends in it, and clips have no soft edge on a transparent bitmap) become that much transparent
     (colour to alpha), so no light fringe shows on another background."""
@@ -701,7 +703,7 @@ DECORATION_AGREE = 0.9    # share of the decoration a background must show to be
 DECORATION_TOLERANCE = 2  # levels
 
 
-def page_ground(img: np.ndarray) -> np.ndarray:
+def page_ground(img: RGB) -> Ints:
     """The most common colour of a background (the page ground)."""
     px = img[::4, ::4].reshape(-1, 3).astype(np.int64)
     packed = (px[:, 0] << 16) | (px[:, 1] << 8) | px[:, 2]
@@ -710,7 +712,7 @@ def page_ground(img: np.ndarray) -> np.ndarray:
     return np.array([(v >> 16) & 255, (v >> 8) & 255, v & 255])
 
 
-def theme_decoration(images, ground: np.ndarray) -> tuple[np.ndarray | None, list[bool], bool]:
+def theme_decoration(images, ground: Ints) -> tuple[RGBA | None, list[bool], bool]:
     """The theme decoration a layout can carry for backgrounds that share it (`images`: distinct
     backgrounds, the most used first): an RGBA picture of the first one, opaque where it differs
     from the ground and every background taking it shows the same pixels, transparent elsewhere.
@@ -735,7 +737,7 @@ def theme_decoration(images, ground: np.ndarray) -> tuple[np.ndarray | None, lis
     return np.dstack([first, np.where(mask, 255, 0).astype(np.uint8)]), inside, int(mask.sum()) == total
 
 
-def uniform_color(img: np.ndarray, tolerance: int = 3) -> str | None:
+def uniform_color(img: RGB, tolerance: int = 3) -> str | None:
     """The single colour of a background with nothing left on it, else None. Such slides get
     a plain Slides background colour instead of a picture."""
     ref = np.median(img[::17, ::17].reshape(-1, 3), axis=0)
@@ -744,8 +746,8 @@ def uniform_color(img: np.ndarray, tolerance: int = 3) -> str | None:
     return "#" + "".join(f"{int(v):02x}" for v in ref)
 
 
-def flat_colour(img: np.ndarray, area: Box, px_per_pt: float, ring: int = 4,
-                ignore: np.ndarray | None = None) -> np.ndarray | None:
+def flat_colour(img: RGB, area: Box, px_per_pt: float, ring: int = 4,
+                ignore: Mask | None = None) -> Floats | None:
     """The page colour around an area (a thin ring just outside it), if that ring is flat.
     Pixels marked in `ignore` (other converted elements, a neighbour's shadow) don't count."""
     h, w = img.shape[:2]
@@ -764,7 +766,7 @@ def flat_colour(img: np.ndarray, area: Box, px_per_pt: float, ring: int = 4,
     return colour if (np.abs(pixels - colour).max(axis=1) <= 6).mean() >= 0.97 else None
 
 
-def paint_out_leftovers(img: np.ndarray, slide: dict, px_per_pt: float) -> None:
+def paint_out_leftovers(img: RGB, slide: dict, px_per_pt: float) -> None:
     """Paint out of the background what would otherwise stay behind when a native element
     is moved, with the page colour around it (only where that is flat):
 
@@ -823,8 +825,8 @@ def paint_out_leftovers(img: np.ndarray, slide: dict, px_per_pt: float) -> None:
             img[d0:d1, keep_cols] = saved_cols
 
 
-def picture_crossings(img: np.ndarray, area: Box, colour: np.ndarray, px_per_pt: float, ignore: np.ndarray,
-                      ring: int = 4) -> tuple[np.ndarray, np.ndarray]:
+def picture_crossings(img: RGB, area: Box, colour: Floats, px_per_pt: float, ignore: Mask,
+                      ring: int = 4) -> tuple[Ints, Ints]:
     """The pixel rows and columns (image indices) where something drawn in the background runs
     into `area` across its edge: rows crossed on its left or right, columns on its top or
     bottom, in the ring `flat_colour` judged (a pixel either side for antialiasing)."""
@@ -832,7 +834,7 @@ def picture_crossings(img: np.ndarray, area: Box, colour: np.ndarray, px_per_pt:
     a0, b0 = max(0, int(area[0] * px_per_pt) - 2), max(0, int(area[1] * px_per_pt) - 2)
     a1, b1 = min(w, int(np.ceil(area[2] * px_per_pt)) + 2), min(h, int(np.ceil(area[3] * px_per_pt)) + 2)
 
-    def drawn(ys: slice, xs: slice) -> np.ndarray:
+    def drawn(ys: slice, xs: slice) -> Mask:
         return (np.abs(img[ys, xs, :3].astype(int) - colour[:3]).max(axis=-1) > 6) & ~ignore[ys, xs]
 
     rows = np.zeros(max(0, b1 - b0), bool)
@@ -843,7 +845,7 @@ def picture_crossings(img: np.ndarray, area: Box, colour: np.ndarray, px_per_pt:
     for ys in (slice(max(0, b0 - ring), b0), slice(b1, min(h, b1 + ring))):
         if ys.stop > ys.start and a1 > a0:
             cols |= drawn(ys, slice(a0, a1)).any(axis=0)
-    def grow(m: np.ndarray) -> np.ndarray:
+    def grow(m: Mask) -> Mask:
         out = m.copy()
         out[1:] |= m[:-1]
         out[:-1] |= m[1:]
@@ -852,7 +854,7 @@ def picture_crossings(img: np.ndarray, area: Box, colour: np.ndarray, px_per_pt:
     return b0 + np.nonzero(grow(rows))[0], a0 + np.nonzero(grow(cols))[0]
 
 
-def ink_colour(img: np.ndarray, rect_pt: list[float], px_per_pt: float) -> str | None:
+def ink_colour(img: Pixels, rect_pt: list[float], px_per_pt: float) -> str | None:
     """Typical colour of what is drawn in a small area (a shaded ball bullet): the median of
     the pixels that differ from what is behind it (`ring_background`: on a picture's edge the
     picture's pixels in the box are not the ball's), or from the page around it."""
@@ -894,7 +896,7 @@ def glyph_ink(page: Page, box: list[float]) -> tuple[list[float], float] | None:
         return None
     ink = distance > max(60, distance.max() / 2)
 
-    def blob(profile: np.ndarray) -> tuple[int, int]:
+    def blob(profile: Ints) -> tuple[int, int]:
         a = b = int(profile.argmax())
         while a > 0 and profile[a - 1]:
             a -= 1
@@ -911,7 +913,7 @@ def glyph_ink(page: Page, box: list[float]) -> tuple[list[float], float] | None:
             round(float(ix0 + c1 / GLYPH_INK_ZOOM), 2), round(float(iy0 + r1 / GLYPH_INK_ZOOM), 2)], round(fill, 2)
 
 
-def ring_background(img: np.ndarray, a0: int, b0: int, a1: int, b1: int, r: int = 3) -> np.ndarray | None:
+def ring_background(img: Pixels, a0: int, b0: int, a1: int, b1: int, r: int = 3) -> Floats | None:
     """What is behind a small rectangle of pixels [b0:b1, a0:a1], from a ring `r` px wide around
     it: each column running from the strip above to the strip below, each row from the strip on
     the left to the one on the right, the two weighted by how well their ends agree. A bullet
@@ -924,7 +926,8 @@ def ring_background(img: np.ndarray, a0: int, b0: int, a1: int, b1: int, r: int 
     px = img[..., :3].astype(float)
     t = (np.arange(h) + 0.5) / h
     s = (np.arange(w) + 0.5) / w
-    guesses, errors = [], []
+    guesses: list[Floats] = []
+    errors: list[float] = []
     if b0 >= r and b1 + r <= img.shape[0]:
         top, bottom = np.median(px[b0 - r:b0, a0:a1], axis=0), np.median(px[b1:b1 + r, a0:a1], axis=0)
         guesses.append(top[None] * (1 - t)[:, None, None] + bottom[None] * t[:, None, None])
@@ -936,10 +939,13 @@ def ring_background(img: np.ndarray, a0: int, b0: int, a1: int, b1: int, r: int 
     if not guesses:
         return None
     weights = [1.0 / (e + 1.0) ** 2 for e in errors]  # (squared: an edge's 5% ghost showed)
-    return sum(g * wt for g, wt in zip(guesses, weights)) / sum(weights)
+    blended = guesses[0] * weights[0]
+    for g, wt in zip(guesses[1:], weights[1:]):
+        blended = blended + g * wt
+    return blended / sum(weights)
 
 
-def patch_rects(img: np.ndarray, rects_pt: list[list[float]], px_per_pt: float) -> None:
+def patch_rects(img: Pixels, rects_pt: list[list[float]], px_per_pt: float) -> None:
     """Paint rectangles with what the ring around them says is behind (`ring_background`), or
     its median colour at the image's edge.
 

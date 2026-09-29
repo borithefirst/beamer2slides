@@ -992,7 +992,7 @@ def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True, mode:
                 print("seed", seed, "EXC", type(e).__name__, e)
             stats["failed"].append(seed)
             continue
-        if npx is None:
+        if b is None:               # the pure reader refused (npx is None, d its message)
             stats["refused"][d] = stats["refused"].get(d, 0) + 1
             continue
         if not npx:

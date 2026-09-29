@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .arrays import Floats32, Mask, RGB
 from .emit_holes import (
     OVERLAY_STRETCH_MEASURED, fit_overlay, hole_neighbours, hole_offset, mark_drifts, slide_holes,
     text_right_limit,
@@ -32,17 +33,17 @@ HOLE_MARKS = ["#ff00ff", "#00ffff", "#ffff00", "#00ff00"]  # 0/255 channels only
 MARK_CORE = 0.9  # a pixel at least this much covered by a mark is inside it
 
 
-def mark_alpha(img: np.ndarray, color: str) -> np.ndarray:
+def mark_alpha(img: RGB, color: str) -> Floats32:
     """How much of each pixel of an RGB thumbnail a highlight in `color` covers (white page).
     Dark glyph pixels have the colour's full channels low too: they count as uncovered."""
     c = [int(color.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4)]
-    img = img.astype(np.float32)
-    full = np.min([img[..., i] for i in range(3) if c[i] == 255], axis=0)
-    alpha = np.mean([(255 - img[..., i]) / 255 for i in range(3) if c[i] == 0], axis=0)
+    px = img.astype(np.float32)
+    full = np.min([px[..., i] for i in range(3) if c[i] == 255], axis=0)
+    alpha = np.mean([(255 - px[..., i]) / 255 for i in range(3) if c[i] == 0], axis=0)
     return np.where(full >= 200, np.clip(alpha, 0.0, 1.0), 0.0)
 
 
-def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
+def _runs(mask: Mask) -> list[tuple[int, int]]:
     """Index ranges [a, b] of consecutive True values."""
     idx = np.flatnonzero(mask)
     if idx.size == 0:
@@ -51,14 +52,14 @@ def _runs(mask: np.ndarray) -> list[tuple[int, int]]:
     return [(int(g[0]), int(g[-1])) for g in np.split(idx, cuts + 1)]
 
 
-def _edges(profile: np.ndarray, a: int, b: int) -> tuple[float, float]:
+def _edges(profile: Floats32, a: int, b: int) -> tuple[float, float]:
     """Sub-pixel extent of a covered range [a, b]: partly covered neighbours add their share."""
     lo = a - (profile[a - 1] if a > 0 else 0.0)
     hi = b + 1 + (profile[b + 1] if b + 1 < profile.size else 0.0)
     return float(lo), float(hi)
 
 
-def find_marks(alpha: np.ndarray, px_per_pt: float) -> list[tuple[float, float, float, float]]:
+def find_marks(alpha: Floats32, px_per_pt: float) -> list[tuple[float, float, float, float]]:
     """Highlighted rectangles (x0, y0, x1, y1 in pt) in a mark_alpha map. A glyph lying over a
     highlight hides it only in some rows, so columns count as covered if any row of the band is."""
     out = []
@@ -88,7 +89,7 @@ def pick_gap(marks: list[tuple[float, float, float, float]], x0: float, cy: floa
     return m[0] - x0, lines * pitch
 
 
-def ink_end(img: np.ndarray, px_per_pt: float, y0: float, y1: float, x0: float, x1: float) -> float | None:
+def ink_end(img: RGB, px_per_pt: float, y0: float, y1: float, x0: float, x1: float) -> float | None:
     """Right end (pt) of the dark text pixels between rows y0..y1 and columns x0..x1 (pt)."""
     h, w = img.shape[:2]
     a, b = max(0, int(x0 * px_per_pt)), min(w, int(math.ceil(x1 * px_per_pt)))

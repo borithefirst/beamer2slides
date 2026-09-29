@@ -16,6 +16,7 @@ import math
 
 import numpy as np
 
+from ...arrays import BGRA
 from . import raster as R
 from .crt import cdiv, roundf
 from .raster import F
@@ -294,12 +295,12 @@ def _cell_bitmap(status, rec, cel, matrix, width: int, height: int):
 class _Bitmap:
     """A rendered cell as CFX_DIBBase::StretchTo reads it."""
 
-    def __init__(self, bgra: np.ndarray):
+    def __init__(self, bgra: BGRA):
         self.rows, self.fmt, self.palette = bgra, "bgra", None
         self.h, self.w = bgra.shape[:2]
 
 
-def _stretched(bgra: np.ndarray, width: int, height: int):
+def _stretched(bgra: BGRA, width: int, height: int):
     """StretchTo(width, height) of a cell under 16 pixels (PDFium draws it at 8 x 8 first)."""
     from .render_image import stretch
     got = stretch(_Bitmap(bgra), width, height, (0, 0, width, height), False)

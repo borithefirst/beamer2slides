@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from ...arrays import Gray
 from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT, PdfError
 from . import raster as R
 from .crt import rect_valid, roundf
@@ -260,7 +261,7 @@ class _Glyph:
 
     __slots__ = ("left", "top", "kind", "mask")
 
-    def __init__(self, left: int, top: int, kind: str, mask: np.ndarray):
+    def __init__(self, left: int, top: int, kind: str, mask: Gray):
         self.left, self.top, self.kind, self.mask = left, top, kind, mask
 
 
@@ -371,7 +372,7 @@ def _transform_to(dib, m):
 # ---------------------------------------------------------------------- SetBitMask
 
 
-def set_bit_mask(dev, kind: str, mask: np.ndarray, left: int, top: int, argb: int) -> None:
+def set_bit_mask(dev, kind: str, mask: Gray, left: int, top: int, argb: int) -> None:
     """CFX_RenderDevice::SetBitMask -> the AGG driver's SetDIBits -> CFX_DIBitmap::CompositeMask:
     CompositeRow_BitMask2Rgb/Argb or ByteMask2Rgb/Argb through the clip region."""
     alpha = argb >> 24
@@ -406,7 +407,7 @@ def set_bit_mask(dev, kind: str, mask: np.ndarray, left: int, top: int, argb: in
     dest[~on] = saved[~on]
 
 
-def _composite_into(mask: np.ndarray, g: _Glyph, x: int, y: int, alpha: int) -> None:
+def _composite_into(mask: Gray, g: _Glyph, x: int, y: int, alpha: int) -> None:
     """CFX_DIBitmap::CompositeMask onto a k8bppMask bitmap: CompositeRow_BitMask2Mask /
     ByteMask2Mask at the colour's alpha."""
     h, w = g.mask.shape

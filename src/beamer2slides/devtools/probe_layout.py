@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from ..arrays import Mask, SignedRGB
 from .sync_check import EMU_PER_PT, Model, flatten, presentation_id
 
 HOLE_COLOURS = ["#ff00ff", "#00c8ff", "#ffb000", "#00d060"]
@@ -34,7 +35,7 @@ NBSP = "\xa0"
 
 @dataclass
 class Ink:
-    mask: np.ndarray            # True where the objects put ink (thumbnail pixels)
+    mask: Mask            # True where the objects put ink (thumbnail pixels)
     per_pt: float               # thumbnail pixels per slide pt
 
     @property
@@ -129,7 +130,7 @@ def _drop(api, pid: str, copies: list[str]) -> None:
             "requests": [{"deleteObject": {"objectId": c}} for c in copies]}))
 
 
-def _pixels(path: Path) -> np.ndarray:
+def _pixels(path: Path) -> SignedRGB:
     return np.asarray(Image.open(path).convert("RGB")).astype(np.int16)
 
 

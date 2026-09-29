@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from ...arrays import BGRA, Gray, Int32
 from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT, PdfError
 from . import raster as R
 from .raster import F
@@ -74,7 +75,7 @@ class Clip:
         else:
             self._mask_and_rect(rect, self.box, self.mask)
 
-    def intersect_mask(self, left: int, top: int, mask: np.ndarray) -> None:
+    def intersect_mask(self, left: int, top: int, mask: Gray) -> None:
         mbox = (left, top, left + mask.shape[1], top + mask.shape[0])
         if self.mask is None:
             self._mask_and_rect(self.box, mbox, mask)
@@ -112,7 +113,7 @@ class Device:
         self.w, self.h, self.alpha = width, height, alpha
         self.ox, self.oy, ww, wh = window if window is not None else (0, 0, width, height)
         self.bgra = np.zeros((wh, ww, 4), np.uint8)
-        self.backdrop: np.ndarray | None = None      # a knockout device's backdrop
+        self.backdrop: BGRA | None = None      # a knockout device's backdrop
         self.clip: Clip | None = None
         self.stack: list = []
 
@@ -357,7 +358,7 @@ class Device:
         dest[..., :3] = out.astype(np.uint8)
         dest[..., 3] = np.where(fresh, covered, np.where(mix, _merge(da, sa, cover), da)).astype(np.uint8)
 
-    def _blend(self, dest: np.ndarray, src: np.ndarray, color: int, span: bool) -> None:
+    def _blend(self, dest: BGRA, src: Int32, color: int, span: bool) -> None:
         """Normal-mode compositing of `color` at per-pixel alpha `src` (CompositeSpanRGB/ARGB when
         `span`, CompositeRow_ByteMask2Rgb/Bgra otherwise: they differ only on transparent pixels)."""
         c = np.array([color & 0xFF, (color >> 8) & 0xFF, (color >> 16) & 0xFF], np.int32)
@@ -414,7 +415,7 @@ class Device:
             dest[..., 3] = 255
 
 
-def _window(a: np.ndarray, x0: int, y0: int, box):
+def _window(a: Gray, x0: int, y0: int, box):
     """The part of coverage `a` (placed at x0, y0) inside FX_RECT `box`: (array, (left, top))."""
     h, w = a.shape
     l, t = max(x0, box[0]), max(y0, box[1])
@@ -890,7 +891,7 @@ def unported(objects, ctx=None) -> str | None:
 
 
 def render_page(objects, box, rotation: int, fs, width: int, height: int,
-                transparent: bool, ctx=None) -> np.ndarray:
+                transparent: bool, ctx=None) -> BGRA:
     """FPDF_RenderPageBitmapWithMatrix onto a fresh bitmap (white, or clear when
     `transparent`) with FS_MATRIX `fs` (api.render_matrix): the BGRA bytes. `ctx`:
     render_transparency.Context (the document, for soft masks and groups)."""

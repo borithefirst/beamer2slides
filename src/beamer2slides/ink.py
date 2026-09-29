@@ -11,6 +11,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from .arrays import Gray
 from .pdf import Page
 
 INK_THRESHOLD = 128  # grey level below which a pixel counts as ink (50% coverage)
@@ -32,15 +33,15 @@ class Box:
         return self.y1 - self.y0
 
 
-def load_gray(path: Path) -> np.ndarray:
+def load_gray(path: Path) -> Gray:
     return np.asarray(Image.open(path).convert("L"))
 
 
-def render_gray(page: Page, px_per_pt: float) -> np.ndarray:
+def render_gray(page: Page, px_per_pt: float) -> Gray:
     return np.asarray(Image.fromarray(page.render(px_per_pt)).convert("L"))
 
 
-def _crop(gray: np.ndarray, region: Box | None, px_per_pt: float) -> tuple[np.ndarray, int, int]:
+def _crop(gray: Gray, region: Box | None, px_per_pt: float) -> tuple[Gray, int, int]:
     if region is None:
         return gray, 0, 0
     h, w = gray.shape
@@ -51,7 +52,7 @@ def _crop(gray: np.ndarray, region: Box | None, px_per_pt: float) -> tuple[np.nd
     return gray[y0:y1, x0:x1], x0, y0
 
 
-def ink_box(gray: np.ndarray, px_per_pt: float, region: Box | None = None) -> Box | None:
+def ink_box(gray: Gray, px_per_pt: float, region: Box | None = None) -> Box | None:
     """Bounding box of all ink inside `region` (points), or None if there is none."""
     sub, ox, oy = _crop(gray, region, px_per_pt)
     ink = sub < INK_THRESHOLD
@@ -67,7 +68,7 @@ def ink_box(gray: np.ndarray, px_per_pt: float, region: Box | None = None) -> Bo
     )
 
 
-def ink_bands(gray: np.ndarray, px_per_pt: float, region: Box | None = None, min_gap_px: int = 2) -> list[Box]:
+def ink_bands(gray: Gray, px_per_pt: float, region: Box | None = None, min_gap_px: int = 2) -> list[Box]:
     """Horizontal bands of ink (text lines), top to bottom, each with its own x-extent."""
     sub, ox, oy = _crop(gray, region, px_per_pt)
     ink = sub < INK_THRESHOLD

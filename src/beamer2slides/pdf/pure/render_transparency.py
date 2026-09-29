@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from ...arrays import BGRA, Ints
 from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT
 from . import raster as R
 from .colors import load_colorspace
@@ -214,7 +215,7 @@ def process_transparency(status, obj, matrix) -> bool:
     return True
 
 
-def multiply_alpha(bgra: np.ndarray, alpha: float) -> None:
+def multiply_alpha(bgra: BGRA, alpha: float) -> None:
     """CFX_DIBitmap::MultiplyAlpha on a BGRA bitmap."""
     if alpha == 1.0:
         return
@@ -236,7 +237,7 @@ def kind(dev) -> str:
     return "bgra" if dev.alpha else "bgrx"
 
 
-def composite_dibitmap(status, obj, bitmap: np.ndarray, left: int, top: int, blend: str,
+def composite_dibitmap(status, obj, bitmap: BGRA, left: int, top: int, blend: str,
                        transparency) -> None:
     """CPDF_RenderStatus::CompositeDIBitmap of a BGRA bitmap (`transparency`: the status's
     (group, isolated), a form making it a group)."""
@@ -296,7 +297,7 @@ def render_backdrop(status, obj, bbox):
     return dev.bgra
 
 
-def get_dibits(dev, rect) -> np.ndarray:
+def get_dibits(dev, rect) -> BGRA:
     """CFX_AggDeviceDriver::GetDIBits into a new bitmap of the device's format over `rect`: over
     a group backdrop, the device's bitmap composited onto the backdrop's piece (from the bitmap's
     origin, as PDFium does), else the device's pixels; a format change keeps the new bitmap's
@@ -333,7 +334,7 @@ def get_dibits(dev, rect) -> np.ndarray:
     return out
 
 
-def set_dibits(dev, src: np.ndarray, skind: str, left: int, top: int, blend: str) -> None:
+def set_dibits(dev, src: BGRA, skind: str, left: int, top: int, blend: str) -> None:
     """CFX_RenderDevice::SetDIBitsWithBlend (the AGG driver's SetDIBits): the part inside the
     clip box, composited through the clip mask."""
     h, w = src.shape[:2]
@@ -354,7 +355,7 @@ def set_dibits(dev, src: np.ndarray, skind: str, left: int, top: int, blend: str
     blit(dest, kind(dev), s, skind, blend, clip)
 
 
-def composite_bitmap(dest: np.ndarray, dkind: str, dest_left: int, dest_top: int, src: np.ndarray,
+def composite_bitmap(dest: BGRA, dkind: str, dest_left: int, dest_top: int, src: BGRA,
                      skind: str, src_left: int, src_top: int, blend: str, width=None,
                      height=None) -> None:
     """CFX_DIBitmap::CompositeBitmap with no clip (GetOverlapRect, then the row compositor);
@@ -374,7 +375,7 @@ def composite_bitmap(dest: np.ndarray, dkind: str, dest_left: int, dest_top: int
     blit(dest[t:b, l:r], dkind, src[t - yo:b - yo, l - xo:r - xo], skind, blend, None)
 
 
-def blit(d: np.ndarray, dkind: str, s: np.ndarray, skind: str, blend: str, clip) -> None:
+def blit(d: BGRA, dkind: str, s: BGRA, skind: str, blend: str, clip: Ints | None) -> None:
     """CFX_ScanlineCompositor's rows over aligned pixels `d` (written) and `s`; `clip` the clip
     mask's values or None."""
     D = d.astype(np.int64)

@@ -55,6 +55,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
+from beamer2slides.arrays import RGB, Floats32, Int16, Mask, SignedRGB
 from beamer2slides.page_score import covered_mask, ink_masks, overlap
 
 REACH = 16          # px on the thumbnail grid (1600 wide): about a line of body text
@@ -79,7 +80,7 @@ TORCH_METRICS = ("ot_shift", "ot_missing", "ot_extra", "ssim", "tile_ssim", "lpi
 
 # ------------------------------------------------------------------------------------------ numpy
 
-def distance_to(mask: np.ndarray, reach: int = REACH) -> np.ndarray:
+def distance_to(mask: Mask, reach: int = REACH) -> Int16:
     """Every pixel's distance to the nearest set pixel of `mask`, up to `reach` (reach + 1 beyond):
     dilations alternating 4- and 8-neighbour, an octagon within 8% of the Euclidean distance."""
     d = np.full(mask.shape, reach + 1, dtype=np.int16)
@@ -101,7 +102,7 @@ def distance_to(mask: np.ndarray, reach: int = REACH) -> np.ndarray:
     return d
 
 
-def lab(a: np.ndarray) -> np.ndarray:
+def lab(a: SignedRGB) -> Floats32:
     """sRGB (0-255, any integer or float array) -> CIE L*a*b* (D65)."""
     c = a.astype(np.float32) / 255
     c = np.where(c <= 0.04045, c / 12.92, ((c + 0.055) / 1.055) ** 2.4)
@@ -117,7 +118,7 @@ def tiles(h: int, w: int, size: int = TILE):
             yield slice(y, min(h, y + size)), slice(x, min(w, x + size))
 
 
-def box_mean(a: np.ndarray, k: int) -> np.ndarray:
+def box_mean(a: RGB | Mask, k: int) -> Floats32:
     """The mean over a k x k window (edges clamped), from an integral image."""
     r = k // 2
     p = np.pad(a.astype(np.float32), ((r + 1, r),) + ((r + 1, r),) + ((0, 0),) * (a.ndim - 2), mode="edge")
@@ -126,7 +127,7 @@ def box_mean(a: np.ndarray, k: int) -> np.ndarray:
     return (c[k:k + h, k:k + w] - c[:h, k:k + w] - c[k:k + h, :w] + c[:h, :w]) / (k * k)
 
 
-def rank_filter(a: np.ndarray, k: int, fn) -> np.ndarray:
+def rank_filter(a: RGB, k: int, fn) -> RGB:
     """A k x k min or max filter (fn = np.minimum / np.maximum), separable, edges clamped: windows
     doubled 1, 2, 4 ... then two overlapping ones make k."""
     r = k // 2
@@ -141,28 +142,28 @@ def rank_filter(a: np.ndarray, k: int, fn) -> np.ndarray:
     return a
 
 
-def local_ink(a: np.ndarray) -> np.ndarray:
+def local_ink(a: SignedRGB) -> Mask:
     """Ink against its own surroundings rather than the page's one colour: what a LOCAL px opening or
     closing takes away (a top-hat, either polarity), by more than LOCAL_CONTRAST in some channel.
     Strokes thinner than LOCAL are ink on any ground - a panel, a photo, a gradient - while a panel
     and its straight edges survive both and are not."""
-    a = a.astype(np.uint8)
-    opened = rank_filter(rank_filter(a, LOCAL, np.minimum), LOCAL, np.maximum)
-    closed = rank_filter(rank_filter(a, LOCAL, np.maximum), LOCAL, np.minimum)
+    px = a.astype(np.uint8)
+    opened = rank_filter(rank_filter(px, LOCAL, np.minimum), LOCAL, np.maximum)
+    closed = rank_filter(rank_filter(px, LOCAL, np.maximum), LOCAL, np.minimum)
     # one polarity per place: dark words on a light ground are what the closing takes away, and the
     # light gaps between their letters (which the opening takes) are ground. The ground is the one of
     # the two the neighbourhood's mean is nearer (decided on a grid 4 px apart).
-    h, w = a.shape[:2]
+    h, w = px.shape[:2]
     s = (slice(None, None, 4), slice(None, None, 4))
-    mean = box_mean(a[s], (2 * LOCAL + 1) // 4 | 1)
+    mean = box_mean(px[s], (2 * LOCAL + 1) // 4 | 1)
     light = np.abs(mean - closed[s]).max(-1) <= np.abs(mean - opened[s]).max(-1)
     light_ground = light.repeat(4, 0).repeat(4, 1)[:h, :w]
-    m = np.where(light_ground, (closed.astype(np.int16) - a).max(-1), (a.astype(np.int16) - opened).max(-1)) \
+    m = np.where(light_ground, (closed.astype(np.int16) - px).max(-1), (px.astype(np.int16) - opened).max(-1)) \
         > LOCAL_CONTRAST
     return m & (box_mean(m[..., None], 3)[..., 0] * 9 >= 4.5)     # itself and 4 of its 8 neighbours
 
 
-def ink_pair(m_ref: np.ndarray, m_got: np.ndarray) -> dict:
+def ink_pair(m_ref: Mask, m_got: Mask) -> dict:
     """Where each side's ink has the other's: capped distances both ways."""
     d_ref, d_got = distance_to(m_got), distance_to(m_ref)
     cap = np.float32(REACH)
@@ -178,7 +179,7 @@ def ink_pair(m_ref: np.ndarray, m_got: np.ndarray) -> dict:
             "extra": float((m_got & ~near_got).sum() / n_got) if n_got else 0.0}
 
 
-def worst_tile(dist: np.ndarray, m_ref: np.ndarray, m_got: np.ndarray) -> float:
+def worst_tile(dist: Floats32, m_ref: Mask, m_got: Mask) -> float:
     h, w = dist.shape
     out = 0.0
     for ys, xs in tiles(h, w):
@@ -188,7 +189,7 @@ def worst_tile(dist: np.ndarray, m_ref: np.ndarray, m_got: np.ndarray) -> float:
     return out
 
 
-def numpy_metrics(ref: np.ndarray, got: np.ndarray, slide: dict) -> tuple[dict, dict]:
+def numpy_metrics(ref: SignedRGB, got: SignedRGB, slide: dict) -> tuple[dict, dict]:
     """The numpy metrics of `got` against `ref` (int16 RGB arrays of one size), and the maps they were
     read from (for heat maps)."""
     h, w = ref.shape[:2]
@@ -242,7 +243,7 @@ class Gpu:
         self._lpips = self._dino = self._clip = None
 
     # -- unbalanced optimal transport of ink mass, log-domain Sinkhorn on a separable grid
-    def ot(self, m_ref: np.ndarray, m_got: np.ndarray) -> dict:
+    def ot(self, m_ref: Mask, m_got: Mask) -> dict:
         """Unbalanced entropic optimal transport (squared distance, KL marginals) of the deck's ink onto
         ours, on a grid of OT_CELL px cells. Mass moves when that is cheaper than destroying it and
         creating it anew, which it is up to about OT_REACH cells: `ot_shift` is how far the moved mass
@@ -299,7 +300,7 @@ class Gpu:
                 "ot_extra": round(float((b - moved_got).clamp_min(0).sum()) / (sb / scale), 5)}
 
     # -- structural similarity
-    def ssim(self, ref: np.ndarray, got: np.ndarray) -> dict:
+    def ssim(self, ref: SignedRGB, got: SignedRGB) -> dict:
         t = self.torch
         y = lambda a: t.as_tensor(a[..., :3] @ np.array([0.299, 0.587, 0.114]), dtype=t.float32,  # noqa: E731
                                   device=self.device)[None, None] / 255
@@ -317,7 +318,7 @@ class Gpu:
         return {"ssim": round(float(loss.mean()), 5), "tile_ssim": round(float(tiled.max()), 5)}, loss.cpu().numpy()
 
     # -- learned perceptual distance
-    def lpips(self, ref: np.ndarray, got: np.ndarray) -> dict:
+    def lpips(self, ref: SignedRGB, got: SignedRGB) -> dict:
         t = self.torch
         if self._lpips is None:
             import lpips
@@ -330,7 +331,7 @@ class Gpu:
         return {"lpips": round(float(d.mean()), 5), "tile_lpips": round(float(tiled.max()), 5)}, d.cpu().numpy()
 
     # -- embeddings
-    def dino(self, ref: np.ndarray, got: np.ndarray) -> dict:
+    def dino(self, ref: SignedRGB, got: SignedRGB) -> dict:
         """DINOv2 (small) at 37 x 21 patches: 1 - cosine of the pooled embeddings, and of the least
         alike patch."""
         t = self.torch
@@ -353,7 +354,7 @@ class Gpu:
         return {"dino": round(float(1 - cos(c1, c2, dim=0)), 5), "dino_worst": round(float(patch.max()), 5)}, \
             patch.reshape(21, 37).cpu().numpy()
 
-    def clip(self, ref: np.ndarray, got: np.ndarray) -> dict:
+    def clip(self, ref: SignedRGB, got: SignedRGB) -> dict:
         t = self.torch
         if self._clip is None:
             from transformers import CLIPModel, CLIPProcessor
@@ -368,7 +369,7 @@ class Gpu:
             e = e.pooler_output
         return {"clip": round(float(1 - t.nn.functional.cosine_similarity(e[0], e[1], dim=0)), 5)}
 
-    def metrics(self, ref: np.ndarray, got: np.ndarray, m_ref: np.ndarray, m_got: np.ndarray) -> dict:
+    def metrics(self, ref: SignedRGB, got: SignedRGB, m_ref: Mask, m_got: Mask) -> dict:
         out = dict(self.ot(m_ref, m_got))
         for fn in (self.ssim, self.lpips, self.dino):
             out.update(fn(ref, got)[0])
@@ -808,7 +809,7 @@ the adopted source | ink (red only in the deck, blue only in ours) · x = times 
     return path
 
 
-def heat(values: np.ndarray, size: tuple[int, int], top: float) -> Image.Image:
+def heat(values: Floats32, size: tuple[int, int], top: float) -> Image.Image:
     """A map as white (0) to dark red (`top` and over), resized to `size`."""
     v = np.clip(np.nan_to_num(values.astype(np.float32)) / top, 0, 1)
     rgb = np.stack([255 - 115 * v, 255 - 255 * v, 255 - 255 * v], -1).astype(np.uint8)

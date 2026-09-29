@@ -10,6 +10,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .arrays import RGB
 from .emit_metrics import ASCENT_EM, BASELINE_A, LINE_EM, PAD_X, PPTX_TITLE_DY, SLIDE_W, FontMapper, rgb
 from .emit_pptx import THEME_VARIANTS, VARIANT, api_error
 from .emit_text import text_box_requests
@@ -130,11 +131,11 @@ def master_ground(shared: tuple | None, files: dict, page_w: float):
         return lambda bbox: colour
     from PIL import Image
 
-    img = np.asarray(Image.open(files[shared]).convert("RGB"))
+    img: RGB = np.asarray(Image.open(files[shared]).convert("RGB"))
     k =img.shape[1] / page_w
 
     def ground(bbox: list[float]) -> str:
-        x0, y0, x1, y1 = (max(0, int(round(v * k))) for v in bbox)
+        x0, y0, x1, y1 = (max(0, round(v * k)) for v in bbox)
         area = img[y0:max(y1, y0 + 1), x0:max(x1, x0 + 1)].reshape(-1, 3)
         return "#" + "".join(f"{int(v):02x}" for v in np.median(area, axis=0)) if len(area) else "#ffffff"
     return ground

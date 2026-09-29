@@ -31,6 +31,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .arrays import Floats, Ints, Mask, Pixels, RGB
 from . import render
 from .classify import classify
 from .emit import BULLET_SHAPES, SLIDE_W, FontMapper, fit_holes, merge_blocks, slide_holes
@@ -48,8 +49,8 @@ REACH = 10             # pt past that: ink running on this far is page structure
 class Rendered:
     raw: dict
     deck: dict
-    backgrounds: dict[int, np.ndarray] = field(default_factory=dict)  # page -> RGB, as render wrote it
-    originals: dict[int, np.ndarray] = field(default_factory=dict)    # page -> RGB of the PDF page, same scale
+    backgrounds: dict[int, RGB] = field(default_factory=dict)  # page -> RGB, as render wrote it
+    originals: dict[int, RGB] = field(default_factory=dict)    # page -> RGB of the PDF page, same scale
 
     def px_per_pt(self, slide: dict) -> float:
         return render.BACKGROUND_WIDTH_PX / slide["size"][0]
@@ -62,7 +63,7 @@ def convert_locally(pdf: Path, overlays: str = "last") -> Rendered:
         prepared = prepare(pdf, out)  # (without note pages)
         raw = select_overlays(extract(prepared.pdf, prepared.labels), overlays)
         deck = classify(raw)
-        saved: dict[Path, np.ndarray] = {}
+        saved: dict[Path, Pixels] = {}
         keep = render.save_png
         render.save_png = lambda img, path: saved.__setitem__(Path(path), img)
         try:
@@ -124,13 +125,13 @@ def px_box(b, k: float, shape) -> tuple[int, int, int, int]:
             min(w, int(np.ceil(b[2] * k))), min(h, int(np.ceil(b[3] * k))))
 
 
-def paint(mask: np.ndarray, b, k: float, value=True) -> None:
+def paint(mask: Mask, b: Box, k: float) -> None:
     a0, b0, a1, b1 = px_box(b, k, mask.shape)
     if a1 > a0 and b1 > b0:
-        mask[b0:b1, a0:a1] = value
+        mask[b0:b1, a0:a1] = True
 
 
-def inked(img: np.ndarray, ground) -> np.ndarray:
+def inked(img: RGB, ground) -> Mask:
     """Pixels whose colour differs from `ground` (a colour or an image of the same size) by more
     than INK_DIFF in some channel."""
     ground = np.asarray(ground, np.uint8)
@@ -138,7 +139,7 @@ def inked(img: np.ndarray, ground) -> np.ndarray:
     return (d[..., 0] > INK_DIFF) | (d[..., 1] > INK_DIFF) | (d[..., 2] > INK_DIFF)  # (faster than any(axis=2))
 
 
-def cell_counts(mask: np.ndarray, cell: int) -> np.ndarray:
+def cell_counts(mask: Mask, cell: int) -> Ints:
     """Marked pixels per cell of a grid of `cell` px squares."""
     h, w = mask.shape
     gh, gw = -(-h // cell), -(-w // cell)
@@ -147,7 +148,7 @@ def cell_counts(mask: np.ndarray, cell: int) -> np.ndarray:
     return padded.reshape(gh, cell, gw, cell).sum(axis=(1, 3))
 
 
-def labels(cells: np.ndarray) -> tuple[np.ndarray, int]:
+def labels(cells: Mask) -> tuple[Ints, int]:
     """8-connected labels of a boolean grid, and their number."""
     out = np.zeros(cells.shape, int)
     n = 0
@@ -168,14 +169,14 @@ def labels(cells: np.ndarray) -> tuple[np.ndarray, int]:
     return out, n
 
 
-def cells_box(comp: np.ndarray, cell: int, origin: tuple[int, int], k: float) -> Box:
+def cells_box(comp: Mask, cell: int, origin: tuple[int, int], k: float) -> Box:
     """Box in pt of a component of grid cells whose grid starts at pixel `origin` (x, y)."""
     rows, cols = np.nonzero(comp)
     return [round((origin[0] + cols.min() * cell) / k, 1), round((origin[1] + rows.min() * cell) / k, 1),
             round((origin[0] + (cols.max() + 1) * cell) / k, 1), round((origin[1] + (rows.max() + 1) * cell) / k, 1)]
 
 
-def components(mask: np.ndarray, k: float) -> list[tuple[Box, int]]:
+def components(mask: Mask, k: float) -> list[tuple[Box, int]]:
     """Connected groups of marked pixels, on a grid of about 1 pt cells: (box in pt, pixels)."""
     cell = max(1, int(round(k)))
     counts = cell_counts(mask, cell)
@@ -241,7 +242,7 @@ def on_pictures(page: dict) -> list[Box]:
 
 # ---------------------------------------------------------------- invariant 1
 
-def _exits(on_border: np.ndarray) -> int:
+def _exits(on_border: Mask) -> int:
     """Separate stretches of a component along the window's border, walked round the perimeter."""
     ring = np.concatenate([on_border[0, :], on_border[1:, -1], on_border[-1, -2::-1], on_border[-2:0:-1, 0]])
     if ring.all():
@@ -344,11 +345,11 @@ def stray_labels(rendered: Rendered, slide: dict) -> list[dict]:
 
 # ---------------------------------------------------------------- invariant 2
 
-def _hex(c: str) -> np.ndarray:
+def _hex(c: str) -> Floats:
     return np.array([int(c[i:i + 2], 16) for i in (1, 3, 5)], float)
 
 
-def preview(rendered: Rendered, slide: dict) -> np.ndarray:
+def preview(rendered: Rendered, slide: dict) -> RGB:
     """The background with the slide's shapes painted over it (boxes, no rounded corners)."""
     img = rendered.backgrounds[slide["page"]].copy()
     k = rendered.px_per_pt(slide)
@@ -361,7 +362,7 @@ def preview(rendered: Rendered, slide: dict) -> np.ndarray:
     return img
 
 
-def carried(slide: dict, page: dict, shape: tuple, k: float) -> np.ndarray:
+def carried(slide: dict, page: dict, shape: tuple, k: float) -> Mask:
     """Pixels whose content something native or a picture takes over: glyphs of native text
     (and of text moved to the layout), bullets, pictures, table and diagram boxes, text
     decorations, and the rims, corners, strips and shadows of shapes."""

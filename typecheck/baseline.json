@@ -6238,20 +6238,6 @@
       "severity": "error"
     },
     {
-      "column": 29,
-      "path": "src/beamer2slides/checks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`paint` is missing an annotation for parameter `b`",
-      "severity": "error"
-    },
-    {
-      "column": 42,
-      "path": "src/beamer2slides/checks.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`paint` is missing an annotation for parameter `value`",
-      "severity": "error"
-    },
-    {
       "column": 28,
       "path": "src/beamer2slides/checks.py",
       "name": "implicit-any-parameter",
@@ -13427,13 +13413,6 @@
       "severity": "error"
     },
     {
-      "column": 38,
-      "path": "src/beamer2slides/deck_fills.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `ndarray | None` is not assignable to parameter `a` with type `ndarray` in function `beamer2slides.deck_freeforms.trace`",
-      "severity": "error"
-    },
-    {
       "column": 37,
       "path": "src/beamer2slides/deck_fills.py",
       "name": "implicit-any-type-argument",
@@ -13473,20 +13452,6 @@
       "path": "src/beamer2slides/deck_fills.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 21,
-      "path": "src/beamer2slides/deck_fills.py",
-      "name": "unsupported-operation",
-      "concise_description": "`-` is not supported between `ndarray[tuple[Any, ...], dtype[signedinteger[_16Bit]]]` and `None`",
-      "severity": "error"
-    },
-    {
-      "column": 18,
-      "path": "src/beamer2slides/deck_fills.py",
-      "name": "missing-attribute",
-      "concise_description": "Object of class `NoneType` has no attribute `astype`",
       "severity": "error"
     },
     {
@@ -13669,13 +13634,6 @@
       "path": "src/beamer2slides/deck_fills.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 51,
-      "path": "src/beamer2slides/deck_fills.py",
-      "name": "unsupported-operation",
-      "concise_description": "`-` is not supported between `ndarray[tuple[Any, ...], dtype[signedinteger[Unknown]]]` and `None`",
       "severity": "error"
     },
     {
@@ -14390,27 +14348,6 @@
       "path": "src/beamer2slides/deck_freeforms.py",
       "name": "missing-attribute",
       "concise_description": "Object of class `NoneType` has no attribute `astype`",
-      "severity": "error"
-    },
-    {
-      "column": 35,
-      "path": "src/beamer2slides/deck_freeforms.py",
-      "name": "unsupported-operation",
-      "concise_description": "`-` is not supported between `ndarray[tuple[Any, ...], dtype[signedinteger[Unknown]]]` and `None`",
-      "severity": "error"
-    },
-    {
-      "column": 35,
-      "path": "src/beamer2slides/deck_freeforms.py",
-      "name": "unsupported-operation",
-      "concise_description": "`-` is not supported between `None` and `ndarray[tuple[Any, ...], dtype[signedinteger[Unknown]]]`",
-      "severity": "error"
-    },
-    {
-      "column": 35,
-      "path": "src/beamer2slides/deck_freeforms.py",
-      "name": "unsupported-operation",
-      "concise_description": "`-` is not supported between `None` and `None`",
       "severity": "error"
     },
     {
@@ -21520,13 +21457,6 @@
     },
     {
       "column": 37,
-      "path": "src/beamer2slides/devtools/bold_torture.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 44,
       "path": "src/beamer2slides/devtools/bold_torture.py",
       "name": "implicit-any-empty-container",
       "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
@@ -45340,13 +45270,6 @@
       "severity": "error"
     },
     {
-      "column": 24,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `list[signedinteger[_NBitIntP] | Unknown]` is not assignable to parameter `object` with type `list[int]` in function `list.append`",
-      "severity": "error"
-    },
-    {
       "column": 12,
       "path": "src/beamer2slides/devtools/text_fit.py",
       "name": "bad-return",
@@ -45435,300 +45358,6 @@
       "path": "src/beamer2slides/devtools/text_fit.py",
       "name": "implicit-any-empty-container",
       "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 22,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `float | ndarray | tuple[int, int, int, int] | Unknown | None` is not assignable to parameter `e` with type `dict[Unknown, Unknown]` in function `_name`",
-      "severity": "error"
-    },
-    {
-      "column": 28,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "unsupported-operation",
-      "concise_description": "`*` is not supported between `float` and `tuple[int, int, int, int]`",
-      "severity": "error"
-    },
-    {
-      "column": 28,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "unsupported-operation",
-      "concise_description": "`*` is not supported between `float` and `None`",
-      "severity": "error"
-    },
-    {
-      "column": 28,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `float | ndarray[tuple[Any, ...], dtype[float64]] | Unknown` is not assignable to parameter `number` with type `_SupportsRound1[int]` in function `round`",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `tuple[int, int, int, int]`",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 28,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `float | ndarray | tuple[int, int, int, int] | Unknown | None` is not assignable to parameter `mask` with type `ndarray` in function `beamer2slides.fidelity.bands`",
-      "severity": "error"
-    },
-    {
-      "column": 49,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `float | ndarray | tuple[int, int, int, int] | Unknown | None` is not assignable to parameter `mask` with type `ndarray` in function `beamer2slides.fidelity.bands`",
-      "severity": "error"
-    },
-    {
-      "column": 21,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 29,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 39,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 47,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 42,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "unsupported-operation",
-      "concise_description": "`*` is not supported between `float` and `tuple[int, int, int, int]`",
-      "severity": "error"
-    },
-    {
-      "column": 42,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "unsupported-operation",
-      "concise_description": "`*` is not supported between `float` and `None`",
-      "severity": "error"
-    },
-    {
-      "column": 44,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `float | tuple[int, int, int, int] | Unknown | None` is not assignable to parameter `e` with type `dict[Unknown, Unknown]` in function `_line_findings`",
-      "severity": "error"
-    },
-    {
-      "column": 53,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `float | ndarray | tuple[int, int, int, int] | Unknown | None` is not assignable to parameter `r` with type `ndarray` in function `_line_findings`",
-      "severity": "error"
-    },
-    {
-      "column": 62,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `float | ndarray | tuple[int, int, int, int] | Unknown | None` is not assignable to parameter `s` with type `ndarray` in function `_line_findings`",
-      "severity": "error"
-    },
-    {
-      "column": 76,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `float | ndarray | tuple[int, int, int, int] | Unknown | None` is not assignable to parameter `size` with type `float` in function `_line_findings`",
-      "severity": "error"
-    },
-    {
-      "column": 15,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 23,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 73,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 81,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 24,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 32,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 46,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 54,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 35,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 46,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 60,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 71,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 72,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `float | ndarray | tuple[int, int, int, int] | Unknown | None` is not assignable to parameter `e` with type `dict[Unknown, Unknown]` in function `_name`",
-      "severity": "error"
-    },
-    {
-      "column": 97,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `float | ndarray | tuple[int, int, int, int] | Unknown | None` is not assignable to parameter `e` with type `dict[Unknown, Unknown]` in function `_name`",
-      "severity": "error"
-    },
-    {
-      "column": 24,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `float | ndarray | tuple[int, int, int, int] | Unknown | None` is not assignable to parameter `e` with type `dict[Unknown, Unknown]` in function `_name`",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "not-iterable",
-      "concise_description": "Type `float` is not iterable",
-      "severity": "error"
-    },
-    {
-      "column": 13,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "not-iterable",
-      "concise_description": "Type `None` is not iterable",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `tuple[int, int, int, int]`",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
-      "severity": "error"
-    },
-    {
-      "column": 83,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `float`",
-      "severity": "error"
-    },
-    {
-      "column": 83,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "bad-index",
-      "concise_description": "Cannot index into `tuple[int, int, int, int]`",
-      "severity": "error"
-    },
-    {
-      "column": 83,
-      "path": "src/beamer2slides/devtools/text_fit.py",
-      "name": "unsupported-operation",
-      "concise_description": "`None` is not subscriptable",
       "severity": "error"
     },
     {
@@ -68538,20 +68167,6 @@
       "severity": "error"
     },
     {
-      "column": 47,
-      "path": "src/beamer2slides/page_score.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 47,
-      "path": "src/beamer2slides/page_score.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 16,
       "path": "src/beamer2slides/pdf/__init__.py",
       "name": "bad-return",
@@ -71818,13 +71433,6 @@
       "path": "src/beamer2slides/pdf/pure/decode_image.py",
       "name": "missing-attribute",
       "concise_description": "Object of class `NoneType` has no attribute `rgb`",
-      "severity": "error"
-    },
-    {
-      "column": 30,
-      "path": "src/beamer2slides/pdf/pure/decode_image.py",
-      "name": "no-matching-overload",
-      "concise_description": "No matching overload found for function `numpy.lib._type_check_impl.nan_to_num` called with arguments: (ndarray[tuple[Any, ...], dtype[floating[_32Bit]]], nan=floating[_32Bit])",
       "severity": "error"
     },
     {
@@ -78170,20 +77778,6 @@
       "severity": "error"
     },
     {
-      "column": 30,
-      "path": "src/beamer2slides/pdf/pure/render_image.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_gather` is missing an annotation for parameter `starts`",
-      "severity": "error"
-    },
-    {
-      "column": 38,
-      "path": "src/beamer2slides/pdf/pure/render_image.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_gather` is missing an annotation for parameter `table`",
-      "severity": "error"
-    },
-    {
       "column": 12,
       "path": "src/beamer2slides/pdf/pure/render_image.py",
       "name": "implicit-any-parameter",
@@ -78237,27 +77831,6 @@
       "path": "src/beamer2slides/pdf/pure/render_image.py",
       "name": "implicit-any-parameter",
       "concise_description": "`_merge` is missing an annotation for parameter `alpha`",
-      "severity": "error"
-    },
-    {
-      "column": 43,
-      "path": "src/beamer2slides/pdf/pure/render_image.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`compose` is missing an annotation for parameter `block`",
-      "severity": "error"
-    },
-    {
-      "column": 61,
-      "path": "src/beamer2slides/pdf/pure/render_image.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`compose` is missing an annotation for parameter `pal`",
-      "severity": "error"
-    },
-    {
-      "column": 66,
-      "path": "src/beamer2slides/pdf/pure/render_image.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`compose` is missing an annotation for parameter `clip`",
       "severity": "error"
     },
     {
@@ -81716,13 +81289,6 @@
       "path": "src/beamer2slides/pdf/pure/render_transparency.py",
       "name": "implicit-any-parameter",
       "concise_description": "`composite_bitmap` is missing an annotation for parameter `height`",
-      "severity": "error"
-    },
-    {
-      "column": 76,
-      "path": "src/beamer2slides/pdf/pure/render_transparency.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`blit` is missing an annotation for parameter `clip`",
       "severity": "error"
     },
     {
@@ -87515,13 +87081,6 @@
       "severity": "error"
     },
     {
-      "column": 100,
-      "path": "src/beamer2slides/render.py",
-      "name": "bad-function-definition",
-      "concise_description": "Default `tuple[()]` is not assignable to parameter `hide` with type `list[Unknown]`",
-      "severity": "error"
-    },
-    {
       "column": 27,
       "path": "src/beamer2slides/render.py",
       "name": "implicit-any-parameter",
@@ -87697,38 +87256,10 @@
       "severity": "error"
     },
     {
-      "column": 50,
-      "path": "src/beamer2slides/render.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `list[_T]`",
-      "severity": "error"
-    },
-    {
-      "column": 57,
-      "path": "src/beamer2slides/render.py",
-      "name": "bad-function-definition",
-      "concise_description": "Default `tuple[()]` is not assignable to parameter `hide` with type `list[Unknown]`",
-      "severity": "error"
-    },
-    {
       "column": 31,
       "path": "src/beamer2slides/render.py",
       "name": "bad-argument-type",
       "concise_description": "Argument `tuple[float, ...]` is not assignable to parameter `clip` with type `tuple[float, float, float, float] | None` in function `Eraser.render`",
-      "severity": "error"
-    },
-    {
-      "column": 92,
-      "path": "src/beamer2slides/render.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `list[_T]`",
-      "severity": "error"
-    },
-    {
-      "column": 99,
-      "path": "src/beamer2slides/render.py",
-      "name": "bad-function-definition",
-      "concise_description": "Default `tuple[()]` is not assignable to parameter `hide` with type `list[Unknown]`",
       "severity": "error"
     },
     {
@@ -87736,27 +87267,6 @@
       "path": "src/beamer2slides/render.py",
       "name": "bad-argument-type",
       "concise_description": "Argument `tuple[float, ...]` is not assignable to parameter `clip` with type `tuple[float, float, float, float] | None` in function `Eraser.render`",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "src/beamer2slides/render.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `list[_T]`",
-      "severity": "error"
-    },
-    {
-      "column": 43,
-      "path": "src/beamer2slides/render.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_T` for generic class `list[_T]`",
-      "severity": "error"
-    },
-    {
-      "column": 50,
-      "path": "src/beamer2slides/render.py",
-      "name": "bad-function-definition",
-      "concise_description": "Default `tuple[()]` is not assignable to parameter `hide` with type `list[Unknown]`",
       "severity": "error"
     },
     {
@@ -87988,27 +87498,6 @@
       "path": "src/beamer2slides/render.py",
       "name": "bad-argument-type",
       "concise_description": "Argument `list[Unknown]` is not assignable to parameter `area` with type `tuple[float, float, float, float]` in function `picture_crossings`",
-      "severity": "error"
-    },
-    {
-      "column": 23,
-      "path": "src/beamer2slides/render.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 27,
-      "path": "src/beamer2slides/render.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "src/beamer2slides/render.py",
-      "name": "bad-return",
-      "concise_description": "Returned type `float` is not assignable to declared return type `ndarray | None`",
       "severity": "error"
     },
     {
