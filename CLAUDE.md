@@ -308,7 +308,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   `deck_freeforms`): a fill wrapped in its own outline of another colour need not reach every side
   of its box (`outlined`); lines of one group in one paint are `kin`, whose shared ink neither hides
   nor runs on; a line 2 px or wider is cut to within 2 px of its paint (`CORED_STROKE`), and a cut
-  line refused as `sides` is asked whole. A NOT_RENDERED outlined freeform no fill reading explains
+  line refused as `sides` is asked whole; a side toward which the ink ends against something above
+  (opaque, or an unsaid shape's picture, an ellipse's being its disc) is excused
+  (`reaches_sides(covered=)`), and a line's ink is looked for in its whole turned frame
+  (`frame_bounds`). A NOT_RENDERED outlined freeform no fill reading explains
   is its outline alone when that ink is a thin line enclosing nothing (`deck_fills.outline_only`);
   an untraced freeform's crop gets no box outline, and a crop's letters never take its own outline
   colour (`letters_of(keep=)`). Benchmark: `devtools/adopt_bench.py` (29 public decks + `tools/plain_decks.py`'s two made

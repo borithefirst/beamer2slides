@@ -9,7 +9,7 @@ import pytest
 from beamer2slides import adopt, adopt_shapes, deck_fills, deck_freeforms
 from beamer2slides.inverse import Context
 
-from .test_adopt_fills import UNREAD, at, deck, elements, page, pt, shape, solid
+from .test_adopt_fills import EMU, UNREAD, at, deck, elements, page, pt, shape, solid
 
 NONE = {"propertyState": "NOT_RENDERED"}
 
@@ -352,6 +352,59 @@ def test_a_stroke_whose_end_is_mixed_with_another_line_is_asked_whole():
     thumb[slope() & (x < 108)] = [82, 114, 82]              # navy and green, half and half
     [el] = elements(deck(sloped()), thumb)
     assert min(p[0] for r in el["trace"]["rings"] for p in r) / K < 101
+
+
+def connector(oid: str, origin, axis, length: float, height: float, weight: float) -> dict:
+    """A SmartArt connector as the API gives it: a line with no type, its frame `length` by `height`
+    turned so that its first axis runs along `axis` (a unit vector, y down)."""
+    (ox, oy), (cx, cy) = origin, axis
+    return {"objectId": oid, "size": {"width": pt(length), "height": pt(height)},
+            "transform": {"scaleX": cx, "shearX": -cy, "shearY": cy, "scaleY": cx,
+                          "translateX": ox * EMU, "translateY": oy * EMU, "unit": "EMU"},
+            "line": {"lineProperties": {"lineFill": solid("207F97"), "weight": pt(weight)}}}
+
+
+def band(p, q, half: float) -> np.ndarray:
+    """The pixels within `half` of the segment p-q (a stroke with butt ends)."""
+    y, x = np.mgrid[0:405, 0:720] + 0.5
+    (px_, py), (qx, qy) = p, q
+    dx, dy = qx - px_, qy - py
+    n = np.hypot(dx, dy)
+    along = ((x - px_) * dx + (y - py) * dy) / n
+    across = np.abs((x - px_) * dy - (y - py) * dx) / n
+    return (along >= 0) & (along <= n) & (across <= half)
+
+
+def test_a_line_ending_under_a_photo_disc_above_it_is_traced_to_the_disc():
+    """en-smartart 4: three connectors leave from under Homer, a photo cut to a disc (a `{}` fill no
+    colour or ramp explains). The disc's rim cuts each line's end off short of its box's side, and
+    that side mostly lies beside the disc, so it was not unseen: all three were refused (`sides`)
+    and left out. Ink that ends against something drawn above it runs on under it."""
+    thumb = paint(page(), band((165, 130), (240, 60), 2), "#207f97")
+    photo = disc(140, 140, 40)
+    y, x = np.mgrid[0:405, 0:720]
+    for k, colour in enumerate(("#ffd90f", "#ffffff", "#d1b271")):
+        paint(thumb, photo & (x // 6 % 3 == k), colour)
+    n = np.hypot(75, 70)
+    line = connector("line", (165, 130), (75 / n, -70 / n), n, 0, 4)
+    els = {e["id"]: e for e in elements(deck(line, shape("homer", "ELLIPSE", 100, 100, 80, 80, UNREAD)), thumb)}
+    xs = [p[0] / K for r in els["line"]["trace"]["rings"] for p in r]
+    assert 170 < min(xs) < 178 and max(xs) > 238                    # from the disc's rim to its end
+    # the same ink with nothing above it that could hide its end: a piece of something, left as before
+    assert "trace" not in elements(deck(line), thumb)[0]
+
+
+def test_a_turned_connectors_ink_is_looked_for_in_its_whole_frame():
+    """en-smartart 4: a SmartArt connector runs along the middle of a frame as tall as its stroke,
+    turned. Its box is that of the frame's two ends, and the frame's other two corners - its ink's
+    corners - lie beyond it by more than the antialiased rim: looked for in that box grown by the
+    rim, the traced ink came out with its ends cut square."""
+    c, s = np.cos(np.radians(30)), np.sin(np.radians(30))
+    ox, oy = 200, 150
+    ink = band((ox + 6 * s, oy + 6 * c), (ox + 80 * c + 6 * s, oy - 80 * s + 6 * c), 6)
+    [el] = elements(deck(connector("line", (ox, oy), (c, -s), 80, 12, 12)), paint(page(), ink, "#207f97"))
+    ys = [p[1] / K for r in el["trace"]["rings"] for p in r]
+    assert min(ys) < oy - 80 * s + 1 and max(ys) > oy + 12 * c - 1  # both far corners of the frame
 
 
 def test_an_outline_in_another_colour_is_drawn_inside_the_traced_edge():

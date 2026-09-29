@@ -28,9 +28,11 @@ flat colour. Conservative, because a wrong shape paints over what lies under it:
 cannot say must be one colour over one ground (a picture or texture fill is left as before), a
 colour some element under it has too is ambiguous, and the traced ink must reach all four sides of
 the element's box (a shape's box is the box of its geometry) except where they are hidden or off the
-page - or be the element's fill wrapped in its outline of another colour (`outlined`: a curved arrow
-in a frame larger than itself). Lines of one group in one paint (`kin`: SmartArt connectors sharing
-a bar) share their ink: it neither hides nor runs on from one to the other. When any of that fails,
+page, or where the ink ends against something drawn above it (`reaches_sides`; a line's ink is
+looked for in its whole frame, `frame_bounds`) - or be the element's fill wrapped in its outline of
+another colour (`outlined`: a curved arrow in a frame larger than itself). Lines of one group in one
+paint (`kin`: SmartArt connectors sharing a bar) share their ink: it neither hides nor runs on from
+one to the other. When any of that fails,
 nothing changes: the element keeps what it had before this module. Without thumbnails nothing is
 traced."""
 
@@ -346,16 +348,31 @@ def unknowns(a: np.ndarray, region, above: list[dict], px: float):
     return hidden, wordy & ~hidden, inks
 
 
-def unsaid(a: np.ndarray, region, above: list[dict], px: float) -> np.ndarray:
+def unsaid(a: np.ndarray, region, above: list[dict], px: float, drawn: bool = False) -> np.ndarray:
     """The boxes of shapes above whose fill neither the API nor the thumbnail could say (a multicolour
-    `{}` freeform: Canva's art on sc-memphis' panel): whatever shows there may be theirs."""
+    `{}` freeform: Canva's art on sc-memphis' panel): whatever shows there may be theirs. `drawn`:
+    only what such a shape draws on the page, which is what its picture from the thumbnail covers
+    (`deck_fills.thumbnail_picture`) - an ELLIPSE's is the ellipse its box inscribes, its corners
+    showing what lies under it (en-smartart 4: a photo cut to a disc)."""
     a0, b0, a1, b1 = region
     h, w = a.shape[:2]
     m = np.zeros((b1 - b0, a1 - a0), dtype=bool)
     for e in above:
         if e.get("_unsaid"):
             c0, d0, c1, d1 = F.px_box(e["bbox"], px, w, h, 0)
-            m[max(0, d0 - b0):max(0, d1 - b0), max(0, c0 - a0):max(0, c1 - a0)] = True
+            r0, r1 = max(0, d0 - b0), min(b1 - b0, max(0, d1 - b0))
+            q0, q1 = max(0, c0 - a0), min(a1 - a0, max(0, c1 - a0))
+            if r1 <= r0 or q1 <= q0:
+                continue
+            part = (slice(r0, r1), slice(q0, q1))
+            if drawn and (e.get("shape_type") or "").upper() == "ELLIPSE" and not (e.get("frame") or {}).get("rotation"):
+                x0, y0, x1, y1 = (v * px for v in e["bbox"])
+                ys, xs = np.mgrid[part] + 0.5
+                ys, xs = ys + b0, xs + a0
+                rx, ry = max((x1 - x0) / 2, 1e-6), max((y1 - y0) / 2, 1e-6)
+                m[part] |= ((xs - (x0 + x1) / 2) / rx) ** 2 + ((ys - (y0 + y1) / 2) / ry) ** 2 <= 1
+            else:
+                m[part] = True
     return m
 
 
@@ -447,8 +464,12 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
     x0, y0, x1, y1 = (v * px for v in el["bbox"])
     if x1 - x0 < 1.5 and y1 - y0 < 1.5:
         return "tiny"
-    region = (max(0, int(np.floor(x0)) - grow), max(0, int(np.floor(y0)) - grow),
-              min(w, int(np.ceil(x1)) + grow), min(h, int(np.ceil(y1)) + grow))
+    # a line's box is that of its two ends; its path may lie anywhere in its frame, whose other two
+    # corners a turned frame puts beyond that box (en-smartart 4: SmartArt's connectors run along
+    # the middle of a turned frame as tall as their stroke)
+    f0, g0, f1, g1 = (v * px for v in frame_bounds(el.get("frame"), el["bbox"])) if line else (x0, y0, x1, y1)
+    region = (max(0, int(np.floor(f0)) - grow), max(0, int(np.floor(g0)) - grow),
+              min(w, int(np.ceil(f1)) + grow), min(h, int(np.ceil(g1)) + grow))
     a0, b0, a1, b1 = region
     if a1 - a0 < 2 or b1 - b0 < 2:
         return "tiny"
@@ -602,7 +623,8 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
                 inside[piece] = False
     if inside.sum() < MIN_PX:
         return "sides"
-    if not reaches_sides(inside, hidden | wordy, region, (x0, y0, x1, y1), (w, h)):
+    covered = hidden | unsaid(a, region, above, px, drawn=True)
+    if not reaches_sides(inside, hidden | wordy, region, (x0, y0, x1, y1), (w, h), covered):
         # cut back to its paint as a stroke is (above; china-pptx 60: a dark branch against the sky
         # ran on from an arrow's tip as a hair of it), what is left must be wrapped in its outline
         inside = inside & (near_core | hidden | wordy)
@@ -635,6 +657,17 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
                    "stroke": paint_stroke, "weight": round(weight, 3) if paint_stroke else None,
                    "source": "thumbnail"}
     el["_traced"] = (a0, b0, inside)
+
+
+def frame_bounds(fr: dict | None, bbox) -> list[float]:
+    """The page box of an element's whole frame (`deck_ir.frame`: its four corners, turned and
+    sheared as the transform has them), grown to hold `bbox`; `bbox` alone without a frame."""
+    if not fr or "origin" not in fr or "matrix" not in fr or "size" not in fr:
+        return list(bbox)
+    (ox, oy), (q0, q1, q2, q3), (fw, fh) = fr["origin"], fr["matrix"], fr["size"]
+    xs = [ox + q0 * u * fw + q1 * v * fh for u in (0, 1) for v in (0, 1)] + [bbox[0], bbox[2]]
+    ys = [oy + q2 * u * fw + q3 * v * fh for u in (0, 1) for v in (0, 1)] + [bbox[1], bbox[3]]
+    return [min(xs), min(ys), max(xs), max(ys)]
 
 
 def under_colours(a: np.ndarray, region, el: dict, under: list[dict]) -> list:
@@ -716,9 +749,16 @@ def outlined(inside: np.ndarray, sub: np.ndarray, fill, stroke, el: dict, unknow
     return bool(rim.any()) and (rim & dilate(score, 2)).sum() >= RIM * rim.sum()
 
 
-def reaches_sides(inside: np.ndarray, unknown: np.ndarray, region, box, size) -> bool:
+UNDER = 0.5               # share of the ink's end toward a side that must meet a cover for it to run on under it
+
+
+def reaches_sides(inside: np.ndarray, unknown: np.ndarray, region, box, size, covered=None) -> bool:
     """Does the traced ink reach every side of the element's box (within `SIDE` px)? A side that is
-    off the page, or mostly unseen, is excused."""
+    off the page, or mostly unseen, is excused - and so is one toward which the ink ends against
+    something drawn above it (`covered`: opaque elements, and the pictures of shapes nobody could
+    read), since it runs on under it there. A line's end is a point of its box's side, not the side:
+    en-smartart 4's three connectors leave from under Homer, a photo cut to a disc, whose rim cuts
+    each one's end off well short of a side that mostly lies beside the disc."""
     a0, b0, a1, b1 = region
     x0, y0, x1, y1 = box
     w, h = size
@@ -727,14 +767,18 @@ def reaches_sides(inside: np.ndarray, unknown: np.ndarray, region, box, size) ->
     my0, my1 = b0 + ys.min(), b0 + ys.max() + 1
     lx0, ly0 = int(np.clip(round(x0) - a0, 0, inside.shape[1] - 1)), int(np.clip(round(y0) - b0, 0, inside.shape[0] - 1))
     lx1, ly1 = int(np.clip(round(x1) - a0, 1, inside.shape[1])), int(np.clip(round(y1) - b0, 1, inside.shape[0]))
+    near = dilate(covered, 2) if covered is not None and covered.any() else None
 
     def unseen(strip) -> bool:
         return strip.size == 0 or strip.mean() > 0.5
 
+    def under(end) -> bool:
+        return near is not None and bool(near[ys[end], xs[end]].mean() >= UNDER)
+
     checks = [
-        (mx0 <= x0 + SIDE, x0 <= 0.5 or unseen(unknown[:, lx0:lx0 + 4])),
-        (my0 <= y0 + SIDE, y0 <= 0.5 or unseen(unknown[ly0:ly0 + 4, :])),
-        (mx1 >= x1 - SIDE, x1 >= w - 0.5 or unseen(unknown[:, max(0, lx1 - 4):lx1])),
-        (my1 >= y1 - SIDE, y1 >= h - 0.5 or unseen(unknown[max(0, ly1 - 4):ly1, :])),
+        (mx0 <= x0 + SIDE, x0 <= 0.5 or unseen(unknown[:, lx0:lx0 + 4]) or under(xs <= xs.min() + 1)),
+        (my0 <= y0 + SIDE, y0 <= 0.5 or unseen(unknown[ly0:ly0 + 4, :]) or under(ys <= ys.min() + 1)),
+        (mx1 >= x1 - SIDE, x1 >= w - 0.5 or unseen(unknown[:, max(0, lx1 - 4):lx1]) or under(xs >= xs.max() - 1)),
+        (my1 >= y1 - SIDE, y1 >= h - 0.5 or unseen(unknown[max(0, ly1 - 4):ly1, :]) or under(ys >= ys.max() - 1)),
     ]
     return all(reached or excused for reached, excused in checks)
