@@ -28,8 +28,11 @@ flat colour. Conservative, because a wrong shape paints over what lies under it:
 cannot say must be one colour over one ground (a picture or texture fill is left as before), a
 colour some element under it has too is ambiguous, and the traced ink must reach all four sides of
 the element's box (a shape's box is the box of its geometry) except where they are hidden or off the
-page. When any of that fails, nothing changes: the element keeps what it had before this module.
-Without thumbnails nothing is traced."""
+page - or be the element's fill wrapped in its outline of another colour (`outlined`: a curved arrow
+in a frame larger than itself). Lines of one group in one paint (`kin`: SmartArt connectors sharing
+a bar) share their ink: it neither hides nor runs on from one to the other. When any of that fails,
+nothing changes: the element keeps what it had before this module. Without thumbnails nothing is
+traced."""
 
 from __future__ import annotations
 
@@ -46,6 +49,7 @@ MIN_PX = 6                # traced pixels a shape needs at all
 SIDE = 2.5                # px: how close the ink must come to each side of the box
 OTHER = 0.04              # share of a `{}` box's visible pixels allowed to be neither paint nor ground
 CONTINUES = 0.5           # a piece whose cut edges mostly continue outside the box is a neighbour's
+CORED_STROKE = 2.0        # px: a stroke this wide shows its paint all along, so ink far from it is not its
 
 
 def freeform(el: dict) -> bool:
@@ -55,6 +59,16 @@ def freeform(el: dict) -> bool:
     if el.get("role") == "line":
         return "category" in el and not el["category"] and not el.get("line_type")
     return (el.get("shape_type") or "").upper() in ("CUSTOM", "FREEFORM")
+
+
+def kin(e: dict, el: dict) -> bool:
+    """Is `e` a line of the line `el`'s own group, drawn in its paint? A SmartArt org chart's elbow
+    connectors (en-smartart 3: one line per child, down from the parent, along a bar they all share,
+    down to the child) run into each other's boxes by design: what one of them shows of the other is
+    their common ink, neither hidden by it nor a neighbour's run on outside the box."""
+    return (e is not el and el.get("role") == "line" and e.get("role") == "line" and bool(el.get("group"))
+            and e.get("group") == el["group"] and (e.get("outline") or "").lower() == (el.get("outline") or "").lower()
+            and e.get("outline_alpha") == el.get("outline_alpha"))
 
 
 SAME_BOX = 0.5            # pt: siblings this close in every edge are called "the same declared box"
@@ -411,13 +425,17 @@ def trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: flo
     """Trace a freeform in the thumbnail `a` (see the module docstring): sets `el["trace"]` (and for
     a `{}` fill its `fill`), or leaves the element as it is and counts why in `REFUSED`."""
     why = _trace(a, el, above, under, px, background, bottom, unread)
+    if why == "sides" and el.get("role") == "line":
+        # a stroke cut back to its paint loses its end where it crosses another line's ink, which is
+        # no pixel of its paint (journey-maps 4: three curves from one origin): then it is asked whole
+        why = _trace(a, el, above, under, px, background, bottom, unread, trim=False)
     if why:
         REFUSED[why] += 1
     return not why
 
 
 def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: float,
-           background: str | None, bottom: bool, unread: bool) -> str | None:
+           background: str | None, bottom: bool, unread: bool, trim: bool = True) -> str | None:
     if el.get("fill_gradient") or el.get("trace"):
         return "done"
     h, w = a.shape[:2]
@@ -435,7 +453,7 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
     if a1 - a0 < 2 or b1 - b0 < 2:
         return "tiny"
     sub = a[b0:b1, a0:a1].astype(np.int16)
-    hidden, wordy, inks = unknowns(a, region, above, px)
+    hidden, wordy, inks = unknowns(a, region, [e for e in above if not kin(e, el)], px)
     page = F.rgb(background) if bottom else None
     ground = page
     ring_field = None
@@ -507,6 +525,15 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
         cored[np.unique(labels[core & inside])] = True
         cored[0] = False
         inside = cored[labels]
+    # an antialiased rim is a pixel or two wide: what reads as the paint beyond that is the edge of
+    # something else against a stronger contrast still (jeb-arch 4: a box outline beside a connector's
+    # end became a hook of it; emoji-essay 2: letters on a dark band closed a curve's box into a
+    # slab). Only a stroke, and ink vouched for by its outline (below), is cut back to it: a filled
+    # shape's own hatching is hairs with no core either (drawing-workshop 63), and a hairline is
+    # all rim, its paint showing only here and there (journey-maps 2: a 1 px outline came out dashed)
+    near_core = dilate(core, 2)
+    if line and trim and weight * px >= CORED_STROKE:
+        inside &= near_core
     # holes a text above made with its letters, or that lie wholly under opaque elements, are the
     # shape's; any other hole is the shape's own
     holes, n = components(~inside, conn8=False)
@@ -552,17 +579,35 @@ def _trace(a: np.ndarray, el: dict, above: list[dict], under: list[dict], px: fl
     labels, n = components(inside)
     if not n:
         return "few"
-    cont = continues_outside(a, region, labels, n, paints)
+    kin_boxes = [F.px_box(e["bbox"], px, w, h, -grow) for e in above + under if kin(e, el)]
+    cont = continues_outside(a, region, labels, n, paints, kin_boxes)
     sizes = np.bincount(labels.ravel(), minlength=n + 1)
     sizes[0] = 0
     if cont[int(sizes.argmax())] > CONTINUES:
         return "continues"
     if n > 1:
+        # the ink kin share runs on from the shape's own; a piece apart from it that runs on into a
+        # kin's box, or that a kin above already traced, is that kin's (drawing-workshop 14: each
+        # letter's outline is a line of one group, and the next letter's edge lies in this one's box)
+        taken = np.zeros_like(inside)
+        if kin_boxes:
+            cont = continues_outside(a, region, labels, n, paints)
+            for e in above:
+                if kin(e, el) and e.get("_traced") is not None:
+                    ex, ey, m = e["_traced"]
+                    paste(taken, (a0, b0), dilate(m, 1), (ex, ey))
         for k in range(1, n + 1):
-            if cont[k] > CONTINUES and sizes[k] < 0.5 * sizes[1:].max():
-                inside[labels == k] = False
-    if inside.sum() < MIN_PX or not reaches_sides(inside, hidden | wordy, region, (x0, y0, x1, y1), (w, h)):
+            piece = labels == k
+            if sizes[k] < 0.5 * sizes[1:].max() and (cont[k] > CONTINUES or taken[piece].mean() > 0.9):
+                inside[piece] = False
+    if inside.sum() < MIN_PX:
         return "sides"
+    if not reaches_sides(inside, hidden | wordy, region, (x0, y0, x1, y1), (w, h)):
+        # cut back to its paint as a stroke is (above; china-pptx 60: a dark branch against the sky
+        # ran on from an arrow's tip as a hair of it), what is left must be wrapped in its outline
+        inside = inside & (near_core | hidden | wordy)
+        if not outlined(inside, sub, fill, stroke, el, hidden | wordy):
+            return "sides"
     # a freeform that is its box is a rectangle, which the preset says better (and edits better)
     bx0, by0 = int(np.clip(round(x0) - a0, 0, inside.shape[1])), int(np.clip(round(y0) - b0, 0, inside.shape[0]))
     bx1, by1 = int(np.clip(round(x1) - a0, 0, inside.shape[1])), int(np.clip(round(y1) - b0, 0, inside.shape[0]))
@@ -613,9 +658,11 @@ def under_colours(a: np.ndarray, region, el: dict, under: list[dict]) -> list:
     return grounds
 
 
-def continues_outside(a: np.ndarray, region, labels: np.ndarray, n: int, paints):
+def continues_outside(a: np.ndarray, region, labels: np.ndarray, n: int, paints, kin_boxes=()):
     """Per component: the share of its pixels on the region's edge whose neighbour just outside the
-    region is the paint too (0 for a component that touches the edge at fewer than 4 pixels)."""
+    region is the paint too (0 for a component that touches the edge at fewer than 4 pixels). An
+    outside neighbour in one of `kin_boxes` (pixel boxes of `kin` lines) is not asked: ink running on
+    there is the ink the two share."""
     h, w = a.shape[:2]
     a0, b0, a1, b1 = region
     out = np.zeros(n + 1)
@@ -625,19 +672,48 @@ def continues_outside(a: np.ndarray, region, labels: np.ndarray, n: int, paints)
     def is_paint(pix):
         return np.min([np.abs(pix - p).max(axis=-1) for p in paints], axis=0) <= TOL
 
-    for side, lab, outside in (
-            ("top", labels[0, :], a[b0 - 2, a0:a1] if b0 >= 2 else None),
-            ("bottom", labels[-1, :], a[b1 + 1, a0:a1] if b1 + 1 < h else None),
-            ("left", labels[:, 0], a[b0:b1, a0 - 2] if a0 >= 2 else None),
-            ("right", labels[:, -1], a[b0:b1, a1 + 1] if a1 + 1 < w else None)):
+    xs, ys = np.arange(a0, a1), np.arange(b0, b1)
+    for lab, outside, px_, py_ in (
+            (labels[0, :], a[b0 - 2, a0:a1] if b0 >= 2 else None, xs, np.full(len(xs), b0 - 2)),
+            (labels[-1, :], a[b1 + 1, a0:a1] if b1 + 1 < h else None, xs, np.full(len(xs), b1 + 1)),
+            (labels[:, 0], a[b0:b1, a0 - 2] if a0 >= 2 else None, np.full(len(ys), a0 - 2), ys),
+            (labels[:, -1], a[b0:b1, a1 + 1] if a1 + 1 < w else None, np.full(len(ys), a1 + 1), ys)):
         if outside is None:
             continue
+        shared = np.zeros(len(lab), dtype=bool)
+        for c0, d0, c1, d1 in kin_boxes:
+            shared |= (px_ >= c0) & (px_ < c1) & (py_ >= d0) & (py_ < d1)
         ok = is_paint(outside.astype(np.int16))
-        np.add.at(total, lab, 1)
-        np.add.at(hits, lab, ok.astype(float))
+        np.add.at(total, lab[~shared], 1)
+        np.add.at(hits, lab[~shared], ok[~shared].astype(float))
     out[total >= 4] = hits[total >= 4] / total[total >= 4]
     out[0] = 0
     return out
+
+
+RIM = 0.9                 # share of a traced edge an outline must run along to vouch for the ink
+
+
+def outlined(inside: np.ndarray, sub: np.ndarray, fill, stroke, el: dict, unknown: np.ndarray) -> bool:
+    """Is the ink an opaque fill wrapped in an opaque outline of another colour - both paints in it,
+    and the outline's along (`RIM` of) every edge the ink shows? Two colours in that order are the
+    element's own signature: a neighbour of the fill's colour, or a colour taken for it, does not wear
+    the outline too. Such ink need not reach every side of the box: a curved arrow drawn in a frame
+    larger than itself (china-pptx 60: four red arrows outlined in green, each touching two sides of
+    its turned frame) is the element whole, not a piece of something else."""
+    if el.get("role") == "line" or not fill or not stroke:
+        return False
+    if any((el.get(k) if el.get(k) is not None else 1.0) < 0.99 for k in ("fill_alpha", "outline_alpha")):
+        return False
+    f, s = F.rgb(fill), F.rgb(stroke)
+    if f is None or s is None or np.abs(f - s).max() <= 3 * TOL:
+        return False
+    fcore = inside & (np.abs(sub - f).max(axis=2) <= TOL)
+    score = inside & (np.abs(sub - s).max(axis=2) <= TOL)
+    if fcore.sum() < MIN_PX or score.sum() < MIN_PX:
+        return False
+    rim = inside & dilate(~inside & ~unknown, 1)
+    return bool(rim.any()) and (rim & dilate(score, 2)).sum() >= RIM * rim.sum()
 
 
 def reaches_sides(inside: np.ndarray, unknown: np.ndarray, region, box, size) -> bool:

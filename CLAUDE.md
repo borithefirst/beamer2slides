@@ -304,7 +304,14 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   theme, a label per frame from the slide's objectId, and a base so the source can be synced back
   into that same deck (`adopt_sync.py`). An element tied to no object of the person's is kept, not
   duplicated (`merge.ADOPTED`, `field: unpaired`); layout-drawn and in-table elements are named as
-  such. Benchmark: `devtools/adopt_bench.py` (29 public decks + `tools/plain_decks.py`'s two made
+  such. What the API gives no geometry or fill for is read from the thumbnail (`deck_fills`,
+  `deck_freeforms`): a fill wrapped in its own outline of another colour need not reach every side
+  of its box (`outlined`); lines of one group in one paint are `kin`, whose shared ink neither hides
+  nor runs on; a line 2 px or wider is cut to within 2 px of its paint (`CORED_STROKE`), and a cut
+  line refused as `sides` is asked whole. A NOT_RENDERED outlined freeform no fill reading explains
+  is its outline alone when that ink is a thin line enclosing nothing (`deck_fills.outline_only`);
+  an untraced freeform's crop gets no box outline, and a crop's letters never take its own outline
+  colour (`letters_of(keep=)`). Benchmark: `devtools/adopt_bench.py` (29 public decks + `tools/plain_decks.py`'s two made
   in Slides; `run --iter N` says whether the loop converged, and it is slow). **Iterate with
   `devtools/adopt_replay.py run [deck[:a-b]] [--micro] --save/--against`**: the loop's round 0 over
   the corpus (compiles and targets cached, 17 s warm; `--micro` = `adopt_bench.MICRO`, 36 slides, one

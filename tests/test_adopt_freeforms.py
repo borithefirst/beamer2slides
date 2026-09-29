@@ -9,7 +9,7 @@ import pytest
 from beamer2slides import adopt, adopt_shapes, deck_fills, deck_freeforms
 from beamer2slides.inverse import Context
 
-from .test_adopt_fills import UNREAD, deck, elements, page, pt, shape, solid
+from .test_adopt_fills import UNREAD, at, deck, elements, page, pt, shape, solid
 
 NONE = {"propertyState": "NOT_RENDERED"}
 
@@ -228,6 +228,130 @@ def test_without_a_pictures_folder_a_shared_box_cluster_is_left_for_tracing():
               "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a2", "object": "a2"}
     got = deck_fills.settle([dict(arrow_a), dict(arrow_b)], thumb, 1.0, "#ffffff")
     assert [e["id"] for e in got] == ["a1", "a2"]
+
+
+def curved_arrow() -> tuple[np.ndarray, np.ndarray]:
+    """A quarter ring in the lower left of the box (100, 100)-(260, 260): it touches the box's left and
+    bottom sides only, as a curved arrow drawn in a frame larger than itself does. (all, its inside
+    less a 3 px rim)."""
+    y, x = np.mgrid[0:405, 0:720] + 0.5
+    band = disc(210, 260, 110) & ~disc(210, 260, 80) & (x < 210) & (y < 260)
+    return band, band & ~deck_freeforms.dilate(~band, 3)
+
+
+def test_ink_in_its_own_fill_and_outline_need_not_reach_every_side_of_the_box():
+    """china-pptx 60: four red arrows outlined in green, each a curve in a turned frame far larger
+    than its ink, were refused (`sides`: the ink reached two sides of the box) and drawn as four giant
+    red rectangles. Red wrapped in green all along its edge is the element's own ink - a neighbour of
+    the fill's colour does not wear the outline too - so it is traced; a dark hair running on from it
+    (a branch against the sky) is left out, being no rim of either paint."""
+    band, fill = curved_arrow()
+    thumb = paint(paint(page(), band, "#5d992b"), fill, "#ff0000")
+    thumb[180:182, 150:230] = 0                              # a black hair from the ring outwards
+    pe = outlined(shape("a", "CUSTOM", 100, 100, 160, 160, solid("FF0000")), "5D992B", 3)
+    [el] = elements(deck(pe), thumb)
+    tr = el["trace"]
+    assert tr["fill"].lower() == "#ff0000" and tr["stroke"].lower() == "#5d992b"
+    assert abs(ring_area(tr["rings"]) - band.sum()) < 0.1 * band.sum()
+    assert max(p[0] for r in tr["rings"] for p in r) / K < 214          # the hair is not the arrow's
+    # the same ink with no outline round it vouches for nothing: the box is left as before
+    [el] = elements(deck(pe), paint(page(), band, "#ff0000"))
+    assert "trace" not in el
+
+
+def elbow(oid: str, x0: float, x1: float) -> dict:
+    """A SmartArt connector as the API gives it: a line with no type from (x0, 130) to (x1, 170), its
+    box all we are told of the elbow drawn in it."""
+    return {"objectId": oid, "size": {"width": pt(x1 - x0), "height": pt(40)}, "transform": at(x0, 130),
+            "line": {"lineProperties": {"lineFill": solid("474B78"), "weight": pt(4)}}}
+
+
+def test_connectors_sharing_a_bar_are_each_traced():
+    """en-smartart 3: an org chart's 18 elbow connectors, one line each, down from the parent, along a
+    bar they all share and down to the child. 12 were refused: the bar ran on out of each box into its
+    sibling's (`continues`), or a sibling traced first hid the stub they share (`sides`). A line of
+    the same group in the same paint is kin: what runs on into its box, or lies under its ink, is
+    their common ink."""
+    thumb = page()
+    navy = [0x47, 0x4B, 0x78]
+    thumb[130:150, 198:202] = navy                          # the parent's stub
+    thumb[148:152, 98:302] = navy                           # the bar
+    for x in (100, 150, 300):                               # the children's stubs
+        thumb[150:170, x - 2:x + 2] = navy
+    lines = [elbow("a", 100, 200), elbow("b", 200, 300), elbow("c", 150, 200)]
+    group = {"objectId": "g", "transform": at(0, 0), "size": {"width": pt(720), "height": pt(405)},
+             "elementGroup": {"children": lines}}
+    els = elements(deck(group), thumb)
+    assert [e["id"] for e in els if e.get("trace")] == ["a", "b", "c"]
+    a = next(e for e in els if e["id"] == "a")
+    xs = [p[0] / K for r in a["trace"]["rings"] for p in r]
+    assert min(xs) < 100 and max(xs) > 200                  # its whole run, the stub c shares included
+
+
+def test_a_kins_own_piece_in_the_box_stays_the_kins():
+    """drawing-workshop 14: each letter of a word is a freeform line of one group in black, and the
+    edge of the next letter lies in this one's box. Ink a kin shares is the line's only where it runs
+    on from the line's own: a piece apart that the kin above already traced is the kin's."""
+    thumb = page()
+    for x0, y0, x1, y1 in ((100, 100, 160, 160), (120, 120, 140, 140)):
+        thumb[y0 - 2:y1 + 2, x0 - 2:x1 + 2] = 0
+        thumb[y0 + 2:y1 - 2, x0 + 2:x1 - 2] = 255
+
+    def outline(oid, x0, y0, x1, y1):
+        return {"objectId": oid, "size": {"width": pt(x1 - x0), "height": pt(y1 - y0)}, "transform": at(x0, y0),
+                "line": {"lineProperties": {"lineFill": solid("000000"), "weight": pt(4)}}}
+
+    group = {"objectId": "g", "transform": at(0, 0), "size": {"width": pt(720), "height": pt(405)},
+             "elementGroup": {"children": [outline("big", 100, 100, 160, 160), outline("small", 120, 120, 140, 140)]}}
+    els = {e["id"]: e for e in elements(deck(group), thumb)}
+    assert len(els["small"]["trace"]["rings"]) == 2 and len(els["big"]["trace"]["rings"]) == 2
+
+
+def slope(x0: float = 100, x1: float = 300) -> np.ndarray:
+    """A 4 px stroke from (x0, 130) down to (x1, 150)."""
+    y, x = np.mgrid[0:405, 0:720] + 0.5
+    return (np.abs(y - 132 - (x - x0) * 16 / (x1 - x0)) <= 2) & (x >= x0) & (x < x1)
+
+
+def sloped(oid: str = "a") -> dict:
+    return {"objectId": oid, "size": {"width": pt(200), "height": pt(20)}, "transform": at(100, 130),
+            "line": {"lineProperties": {"lineFill": solid("474B78"), "weight": pt(4)}}}
+
+
+def test_a_strokes_ink_is_its_paint_and_an_edge_of_something_else_beside_it_is_not():
+    """jeb-arch 4: a connector's end meets a box outline of a lighter blue, which read as the stroke's
+    paint well enough to become a hook of it. Ink more than an antialiased rim from any pixel of the
+    stroke's own paint is not the stroke's."""
+    thumb = paint(page(), slope(), "#474b78")
+    thumb[100:200, 300:303] = [0x5B, 0x9B, 0xD5]            # the box's left edge, where the stroke ends
+    box = outlined(shape("box", "RECTANGLE", 300, 100, 100, 100, NONE), "5B9BD5", 3)
+    els = {e["id"]: e for e in elements(deck(box, sloped()), thumb)}
+    tr = els["a"]["trace"]
+    assert not [p for r in tr["rings"] for p in r if p[0] / K > 299 and p[1] / K < 140]
+
+
+def test_a_hairline_that_rarely_shows_its_paint_is_not_cut_into_dashes():
+    """journey-maps 2: a 0.47 pt outline is a pixel wide on the thumbnail, its paint showing whole at
+    one pixel in several; cut back to those it came out dashed. (Its antialiased trail is drawn two
+    pixels tall here so that its steps stay joined.)"""
+    y, x = np.mgrid[0:405, 0:720] + 0.5
+    hair = (np.abs(y - 132 - (x - 100) * 16 / 200) <= 1) & (x >= 100) & (x < 300)
+    thumb = paint(paint(page(), hair, "#9193ae"), hair & (x.astype(int) % 8 == 0), "#474b78")
+    pe = sloped()
+    pe["line"]["lineProperties"]["weight"] = pt(0.5)
+    [el] = elements(deck(pe), thumb)
+    assert len(el["trace"]["rings"]) == 1
+
+
+def test_a_stroke_whose_end_is_mixed_with_another_line_is_asked_whole():
+    """journey-maps 4: three curves leave one origin, and where they run together no pixel is any one
+    curve's paint. Cut back to its paint the curve no longer reached the box's side and was refused;
+    asked whole, it is traced."""
+    thumb = paint(page(), slope(), "#474b78")
+    y, x = np.mgrid[0:405, 0:720] + 0.5
+    thumb[slope() & (x < 108)] = [82, 114, 82]              # navy and green, half and half
+    [el] = elements(deck(sloped()), thumb)
+    assert min(p[0] for r in el["trace"]["rings"] for p in r) / K < 101
 
 
 def test_an_outline_in_another_colour_is_drawn_inside_the_traced_edge():
