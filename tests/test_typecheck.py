@@ -13,7 +13,10 @@ adds what the build cannot say:
     this file, not a quiet regeneration;
   * no baseline entry is about a TypedDict (688ebf4: the element contract holds everywhere);
   * the config sees the bug classes it is for: 688ebf4's optional key read by subscript, a record
-    built without one of its fields, a case left out of an exhaustive match.
+    built without one of its fields, a case left out of an exhaustive match;
+  * the tests type-check too, against typecheck/tests_baseline.json (TESTS_CEILING, `prune tests`),
+    so a test still calling a function the old way is an error where it calls it. The suite is not
+    built, so this is their only gate.
 
 The checker's answers depend on the types of the packages it reads, so they are checked against one
 environment: the versions the build pins ([build-system] requires). Where this interpreter has other
@@ -45,9 +48,12 @@ SRC = Path(google_auth.__file__).parent   # (not resolved: see tests/test_gapi.p
 ROOT = SRC.parent.parent
 PYPROJECT = ROOT / "pyproject.toml"
 BASELINE = ROOT / "typecheck" / "baseline.json"
+TESTS_BASELINE = ROOT / "typecheck" / "tests_baseline.json"
 
 # The legacy errors typecheck/baseline.json holds: lower it with every prune, never raise it.
 CEILING = 5116
+# The same for the tests (typecheck/tests_baseline.json, admitted whole on 2026-09-29).
+TESTS_CEILING = 12567
 
 TYPED_DICT_KINDS = {"bad-typed-dict", "bad-typed-dict-key", "not-required-key-access"}
 
@@ -115,13 +121,24 @@ def build_pins() -> list[Requirement]:
     """The build's pinned requirements that apply to this interpreter."""
     build = config()["build-system"]
     assert isinstance(build, dict)
-    pins = [Requirement(r) for r in build["requires"]]
+    return pinned(build["requires"])
+
+
+def pins_for_tests() -> list[Requirement]:
+    """What the tests' check reads beyond the build's pins ([tool.beamer2slides.typecheck])."""
+    tool = config()["tool"]
+    assert isinstance(tool, dict)
+    return pinned(tool["beamer2slides"]["typecheck"]["tests-requires"])
+
+
+def pinned(requires: list[str]) -> list[Requirement]:
+    pins = [Requirement(r) for r in requires]
     return [r for r in pins if (r.marker is None or r.marker.evaluate()) and str(r.specifier).startswith("==")]
 
 
-def environment_mismatches() -> list[str]:
+def environment_mismatches(pins: list[Requirement]) -> list[str]:
     out = []
-    for r in build_pins():
+    for r in pins:
         try:
             here = version(r.name)
         except PackageNotFoundError:
@@ -132,10 +149,10 @@ def environment_mismatches() -> list[str]:
     return out
 
 
-def pyrefly_command() -> list[str]:
+def pyrefly_command(pins: list[Requirement]) -> list[str]:
     if not PYPROJECT.exists():
         skip("no pyproject.toml beside the package (the checker is configured there)")
-    mismatches = environment_mismatches()
+    mismatches = environment_mismatches(pins)
     if mismatches:
         skip("the checker's answers depend on the versions it reads, and these are not the build's: "
              + "; ".join(mismatches) + " (pip install the [build-system] requires pins)")
@@ -155,7 +172,12 @@ def check(command: list[str], *args: str) -> subprocess.CompletedProcess[str]:
 
 @pytest.fixture(scope="module")
 def command() -> list[str]:
-    return pyrefly_command()
+    return pyrefly_command(build_pins())
+
+
+@pytest.fixture(scope="module")
+def tests_command() -> list[str]:
+    return pyrefly_command(build_pins() + pins_for_tests())
 
 
 def backend() -> ModuleType:
@@ -178,11 +200,46 @@ def found(command: list[str]) -> list[dict[str, object]]:
     return errors
 
 
+@pytest.fixture(scope="module")
+def found_in_tests(tests_command: list[str]) -> list[dict[str, object]]:
+    """Every diagnostic in tests/, as the build backend's "tests" target asks for them."""
+    empty = Path(tempfile.mkdtemp()) / "baseline.json"
+    empty.write_text('{"errors": []}', encoding="utf-8")
+    done = check(tests_command, "--baseline", str(empty), "--min-severity", "info", "--output-format", "json",
+                 *backend().ARGUMENTS["tests"])
+    assert done.stdout.strip(), done.stderr
+    errors: list[dict[str, object]] = json.loads(done.stdout)["errors"]
+    return errors
+
+
+def described(fresh: list[dict[str, object]]) -> str:
+    return "\n".join(f"{d['path']}:{d['line']} [{d['name']}] {d['concise_description']}" for d in fresh)
+
+
 def test_the_package_type_checks_as_the_build_checks_it(found: list[dict[str, object]]) -> None:
     """Every diagnostic, whatever its severity, past what the baseline lists: the build's own refusal."""
     build = backend()
-    fresh = build.new_errors(found, build.baseline())
-    assert not fresh, "\n".join(f"{d['path']}:{d['line']} [{d['name']}] {d['concise_description']}" for d in fresh)
+    fresh = build.new_errors(found, build.baseline("package"))
+    assert not fresh, described(fresh)
+
+
+def test_the_tests_type_check(found_in_tests: list[dict[str, object]]) -> None:
+    """The same refusal over tests/: a test written today type-checks, and one left calling a
+    function the old way after its signature changed is named here."""
+    build = backend()
+    fresh = build.new_errors(found_in_tests, build.baseline("tests"))
+    assert not fresh, described(fresh)
+
+
+def test_the_tests_baseline_only_shrinks(found_in_tests: list[dict[str, object]]) -> None:
+    build = backend()
+    stale = build.stale_entries(found_in_tests, build.baseline("tests"))
+    assert not stale, (f"the tests' baseline holds {len(stale)} errors that are fixed: run `python "
+                       "build_backend/beamer2slides_build.py prune tests` and lower TESTS_CEILING")
+    entries = json.loads(TESTS_BASELINE.read_text(encoding="utf-8"))["errors"]
+    assert len(entries) <= TESTS_CEILING, (f"the tests' baseline grew to {len(entries)} entries: new code "
+                                           "type-checks, it is never added to the baseline")
+    assert len(entries) == TESTS_CEILING, f"the tests' baseline shrank to {len(entries)}: lower TESTS_CEILING to match"
 
 
 def test_a_baseline_entry_excuses_one_error_not_all_its_kind() -> None:
@@ -202,7 +259,7 @@ def test_the_baseline_only_shrinks(found: list[dict[str, object]]) -> None:
     """An error fixed leaves the baseline (`python build_backend/beamer2slides_build.py prune`), and
     CEILING follows it down; nothing is ever added to it."""
     build = backend()
-    stale = build.stale_entries(found, build.baseline())
+    stale = build.stale_entries(found, build.baseline("package"))
     assert not stale, (f"the baseline holds {len(stale)} errors that are fixed: run `python "
                        "build_backend/beamer2slides_build.py prune` and lower CEILING")
     entries = json.loads(BASELINE.read_text(encoding="utf-8"))["errors"]

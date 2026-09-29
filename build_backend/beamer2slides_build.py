@@ -21,7 +21,13 @@ The hooks' signatures, defaults included, are PEP 517's, not ours: a frontend ca
 arguments it has.
 
 `python build_backend/beamer2slides_build.py prune` drops from the baseline what is fixed (never
-adds); tests/test_typecheck.py runs the same comparison."""
+adds); tests/test_typecheck.py runs the same comparison.
+
+tests/ is a second target, with a baseline of its own (typecheck/tests_baseline.json, `prune
+tests`): the suite is not built, so tests/test_typecheck.py is its gate, and it reads pytest's types,
+pinned in [tool.beamer2slides.typecheck] tests-requires rather than among the build's requirements.
+Checked apart from the package, a test calling a function whose signature changed is an error where
+the call is, before the suite runs."""
 
 import json
 import subprocess
@@ -29,7 +35,7 @@ import sys
 import tempfile
 from collections import Counter
 from pathlib import Path
-from typing import Optional, Union
+from typing import Literal, Optional, Union
 
 from setuptools import build_meta
 from setuptools.build_meta import (get_requires_for_build_editable, get_requires_for_build_sdist,
@@ -37,7 +43,16 @@ from setuptools.build_meta import (get_requires_for_build_editable, get_requires
                                    prepare_metadata_for_build_wheel)
 
 ROOT = Path(__file__).parent.parent
-BASELINE = ROOT / "typecheck" / "baseline.json"
+
+# What is checked: the package (with build_backend/, as [tool.pyrefly] includes it), or the tests.
+Target = Literal["package", "tests"]
+BASELINES: dict[Target, Path] = {"package": ROOT / "typecheck" / "baseline.json",
+                                 "tests": ROOT / "typecheck" / "tests_baseline.json"}
+# The tests are handed to pyrefly by name, which replaces the config's includes; `.` makes them the
+# package `tests`, whose relative imports then resolve.
+ARGUMENTS: dict[Target, list[str]] = {"package": [],
+                                      "tests": ["--config", "pyproject.toml", "--search-path", "src",
+                                                "--search-path", ".", "tests"]}
 
 ConfigSettings = Optional[dict[str, Union[str, list[str]]]]
 
@@ -54,14 +69,15 @@ def key(d: dict[str, object]) -> Key:
     return (str(d["path"]).replace("\\", "/"), str(d["name"]), str(d["concise_description"]), str(d["severity"]))
 
 
-def diagnostics(python: str) -> list[dict[str, object]]:
-    """Every diagnostic pyrefly has for the package, whatever its severity, with no baseline (the
+def diagnostics(python: str, target: Target) -> list[dict[str, object]]:
+    """Every diagnostic pyrefly has for the target, whatever its severity, with no baseline (the
     checker's own log lines, on stderr, are not diagnostics)."""
     with tempfile.TemporaryDirectory() as scratch:
         empty = Path(scratch) / "baseline.json"
         empty.write_text('{"errors": []}', encoding="utf-8")
         done = subprocess.run([python, "-m", "pyrefly", "check", "--python-interpreter-path", python,
-                               "--baseline", str(empty), "--min-severity", "info", "--output-format", "json"],
+                               "--baseline", str(empty), "--min-severity", "info", "--output-format", "json",
+                               *ARGUMENTS[target]],
                               cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
     try:
         found: list[dict[str, object]] = json.loads(done.stdout)["errors"]
@@ -72,8 +88,8 @@ def diagnostics(python: str) -> list[dict[str, object]]:
     return found
 
 
-def baseline() -> list[dict[str, object]]:
-    entries: list[dict[str, object]] = json.loads(BASELINE.read_text(encoding="utf-8"))["errors"]
+def baseline(target: Target) -> list[dict[str, object]]:
+    entries: list[dict[str, object]] = json.loads(BASELINES[target].read_text(encoding="utf-8"))["errors"]
     return entries
 
 
@@ -104,19 +120,19 @@ def stale_entries(found: list[dict[str, object]], entries: list[dict[str, object
 
 
 def type_check() -> None:
-    fresh = new_errors(diagnostics(sys.executable), baseline())
+    fresh = new_errors(diagnostics(sys.executable, "package"), baseline("package"))
     if fresh:
         lines = [f"{d['path']}:{d['line']}: {d['severity']} [{d['name']}] {d['concise_description']}" for d in fresh]
         raise TypeCheckFailed("beamer2slides does not type-check, so it is not built (docs/typing.md):\n"
                               + "\n".join(lines))
 
 
-def prune() -> int:
-    """Drops the fixed errors from the baseline, keeping its order; returns how many."""
-    entries = baseline()
-    stale = {id(e) for e in stale_entries(diagnostics(sys.executable), entries)}
+def prune(target: Target) -> int:
+    """Drops the fixed errors from the target's baseline, keeping its order; returns how many."""
+    entries = baseline(target)
+    stale = {id(e) for e in stale_entries(diagnostics(sys.executable, target), entries)}
     kept = [e for e in entries if id(e) not in stale]
-    BASELINE.write_text(json.dumps({"errors": kept}, indent=2) + "\n", encoding="utf-8")
+    BASELINES[target].write_text(json.dumps({"errors": kept}, indent=2) + "\n", encoding="utf-8")
     return len(stale)
 
 
@@ -143,7 +159,13 @@ __all__ = ["build_editable", "build_sdist", "build_wheel", "get_requires_for_bui
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] != ["prune"]:
-        sys.exit("usage: python build_backend/beamer2slides_build.py prune")
-    n = prune()
-    print(f"{n} fixed errors left the baseline; {len(baseline())} remain (lower CEILING in tests/test_typecheck.py)")
+    if sys.argv[1:] == ["prune"]:
+        n = prune("package")
+        print(f"{n} fixed errors left the baseline; {len(baseline('package'))} remain "
+              "(lower CEILING in tests/test_typecheck.py)")
+    elif sys.argv[1:] == ["prune", "tests"]:
+        n = prune("tests")
+        print(f"{n} fixed errors left the tests' baseline; {len(baseline('tests'))} remain "
+              "(lower TESTS_CEILING in tests/test_typecheck.py)")
+    else:
+        sys.exit("usage: python build_backend/beamer2slides_build.py prune [tests]")

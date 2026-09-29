@@ -3,7 +3,8 @@
 # workflow adds what a build cannot say: the baseline holds nothing already fixed and never grows
 # (tests/test_typecheck.py), the probes still see their bug classes, and the pattern ledger
 # (typecheck/rules.json: default arguments, defaulted dataclass fields, Any) only goes down
-# (tests/test_typing_rules.py).
+# (tests/test_typing_rules.py). tests/ is checked too, against typecheck/tests_baseline.json,
+# with pytest pinned by [tool.beamer2slides.typecheck] tests-requires.
 #
 # On 3.12 with exactly the versions the build pins ([build-system] requires), which is the
 # environment the baseline was made in: the checker reads those packages' types, and another numpy
@@ -32,7 +33,7 @@ jobs:
           python-version: "3.12"
       - name: The build's pinned versions, then the package (whose build type-checks it)
         run: |
-          python -c "import tomllib; print('\n'.join(tomllib.load(open('pyproject.toml', 'rb'))['build-system']['requires']))" > /tmp/pins.txt
+          python -c "import tomllib; c = tomllib.load(open('pyproject.toml', 'rb')); print('\n'.join(c['build-system']['requires'] + c['tool']['beamer2slides']['typecheck']['tests-requires']))" > /tmp/pins.txt
           python -m pip install -r /tmp/pins.txt
           python -m pip install -c /tmp/pins.txt -e ".[dev]"
       - run: python -m pytest -q -p no:cacheprovider -rs tests/test_typecheck.py tests/test_typing_rules.py

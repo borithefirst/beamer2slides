@@ -185,6 +185,14 @@ table. When a combination of fields must not happen, choose types in which it ca
   build_backend/beamer2slides_build.py prune` drops them, and `tests/test_typecheck.py`'s `CEILING`
   goes down to match. Never `pyrefly --update-baseline`: new code type-checks; it is never added to
   the baseline.
+- **`typecheck/tests_baseline.json`**: tests/ under the same checker and config, as the build
+  backend's `tests` target (the files handed to pyrefly by name, `.` on the search path so
+  `tests` is a package). Admitted whole on 2026-09-29 (12,567 errors, the only time a baseline
+  grew), then the same ratchet: `prune tests`, `TESTS_CEILING`. The build cannot run it (its
+  environment has no pytest), so `tests/test_typecheck.py` is its gate, with pytest pinned in
+  `[tool.beamer2slides.typecheck] tests-requires`. What it buys: a test left calling a function
+  the old way after its signature changed is an error at the call, not a failure found when the
+  suite runs - and when retyping the package makes a test's error disappear, prune it.
 - **JSON not yet parsed** is a `json_types.JsonObject`, read through its narrowings (`as_object`,
   `as_str`, ...), which name where a value of the wrong shape was. That is the interim form of
   "parse at the boundary" until a record's parser exists; a TypedDict view of a dict cannot be passed
@@ -241,7 +249,9 @@ unknowable. The order:
    `element()` that callers know is present; adopt's `Context` attributes set dynamically.
 3. **Units and ids** as NewTypes, from the IR outward.
 4. **Module by module to zero**: annotations, defaults removed, `Any` replaced, the baseline pruned.
-5. **tests/ and tools/** under the same checker.
+5. **tests/ and tools/** under the same checker. *tests/ admitted* (2026-09-29, its own baseline
+   above). tools/ is next: 30 of its 79 files are runpy shims over devtools (checked with the
+   package), the other 49 (probes, calibration, proofs) are checked by nothing yet.
 
 When you touch a function for any reason, leave it to these rules: fully annotated, no defaults,
 records as dataclasses. Then prune the baseline and lower the ledger.

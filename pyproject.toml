@@ -124,6 +124,12 @@ use-ignore-files = false    # git ignores .claude/worktrees/, and pyrefly then s
 baseline = "typecheck/baseline.json"
 enabled-ignores = []        # no suppression comment is honoured: `# type: ignore` is an error left standing
 
+[tool.beamer2slides.typecheck]
+# tests/ is checked too, against typecheck/tests_baseline.json (build_backend's "tests" target, gated
+# by tests/test_typecheck.py; CI installs these beside the build's pins). The tests read pytest's
+# types, so its version is pinned here, as the build pins what the package imports.
+tests-requires = ["pytest==9.1.1"]
+
 [tool.pyrefly.errors]
 # Reading a key a TypedDict does not promise (`el["flip"]` where flip is optional): the 688ebf4
 # KeyError. Off in pyrefly's default and strict presets, on in pyright's.
