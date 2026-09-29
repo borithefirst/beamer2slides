@@ -69,7 +69,8 @@ def image_element(w_pt, h_pt, transform, props=None):
 # ---------------------------------------------------------------- deck_ir
 
 def test_picture_props_read_rotation_crop_transparency_outline():
-    from beamer2slides.deck_ir import StyleResolver, affine
+    from beamer2slides.deck_ir import Ident, StyleResolver, affine
+    from beamer2slides.deck_ir_types import element_json
     th = math.radians(30)
     w, h, scale = 100.0, 50.0, 2.0
     cx, cy = 300.0, 200.0
@@ -81,7 +82,9 @@ def test_picture_props_read_rotation_crop_transparency_outline():
              "outline": {"outlineFill": {"solidFill": {"color": {"rgbColor": {"red": 1.0}}}},
                          "weight": {"magnitude": 38100, "unit": "EMU"}, "dashStyle": "SOLID"}}
     pe = image_element(w, h, tr, props)
-    el = element_of(pe, affine(pe["transform"]), StyleResolver({}), None, scale, 720, None, None)
+    ident = Ident(id="img1", object="img1", group=None, key=None)
+    el = element_json(element_of(pe, affine(pe["transform"]), StyleResolver({}), None, scale, 720, None, None, False,
+                                 ident))
     assert el["rotation"] == 30.0 and not el.get("flip")
     assert el["box"] == [(cx - w / 2) / scale, (cy - h / 2) / scale, (cx + w / 2) / scale, (cy + h / 2) / scale]
     aabb_w = w * math.cos(th) + h * math.sin(th)
@@ -90,12 +93,12 @@ def test_picture_props_read_rotation_crop_transparency_outline():
     assert el["opacity"] == 0.5 and el["brightness"] == 0.25
     assert el["outline"] == {"color": "#ff0000", "weight": 1.5, "dash": "SOLID"}
     # an untouched picture carries none of them; a mirrored one is a flip
-    plain = picture_props(image_element(w, h, {"scaleX": 1, "scaleY": 1}), [1, 0, 0, 0, 1, 0], w, h, scale, {})
-    assert set(plain) == {"box"}
-    mirrored = picture_props({}, [-1, 0, 100, 0, 1, 0], w, h, scale, {})
-    assert mirrored["flip"] and abs(mirrored.get("rotation", 0.0)) < 0.01
-    upside = picture_props({}, [1, 0, 0, 0, -1, 50], w, h, scale, {})
-    assert upside["flip"] and abs(abs(upside["rotation"]) - 180) < 0.01
+    plain = picture_props(image_element(w, h, {"scaleX": 1, "scaleY": 1})["image"], (1, 0, 0, 0, 1, 0), w, h, scale, {})
+    assert [f.name for f in dataclasses.fields(plain) if getattr(plain, f.name) is not None] == ["box"]
+    mirrored = picture_props({}, (-1, 0, 100, 0, 1, 0), w, h, scale, {})
+    assert mirrored.flip and abs(mirrored.rotation or 0.0) < 0.01
+    upside = picture_props({}, (1, 0, 0, 0, -1, 50), w, h, scale, {})
+    assert upside.flip and upside.rotation is not None and abs(abs(upside.rotation) - 180) < 0.01
 
 
 def test_image_formats():

@@ -24,6 +24,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from beamer2slides.deck_ir import read_deck  # noqa: E402
+from beamer2slides.deck_ir_types import target_json  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT = [ROOT / "tests" / "decks" / "out" / n for n in ("07_images.pdf", "23_raster_images.pdf")]
@@ -64,7 +65,7 @@ def main(argv=None) -> int:
         if args.convert or not (out / "emit.json").exists():
             convert(pdf, out)
         deck = json.loads((out / "deck.json").read_text(encoding="utf-8"))
-        live = read_deck(str(out), images=out / "deck-pictures")
+        live = target_json(read_deck(str(out), out / "deck-pictures", None, None, None, False, None, None))
         print(f"\n=== {pdf.name}  ({json.loads((out / 'emit.json').read_text(encoding='utf-8'))['url']})")
         for ours, theirs in zip(deck["slides"], live["slides"]):
             mine = [e for e in ours["elements"] if e["kind"] == "image"]

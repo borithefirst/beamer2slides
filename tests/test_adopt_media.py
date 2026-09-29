@@ -14,7 +14,9 @@ from pathlib import Path
 import pytest
 
 from beamer2slides import adopt, fontfetch
-from beamer2slides.deck_ir import MAX_BEAMER_SCALE, YOUTUBE_THUMB, deck_ir, page_size_for
+from beamer2slides.deck_ir import MAX_BEAMER_SCALE, YOUTUBE_THUMB, page_size_for
+from beamer2slides.deck_ir_types import target_json
+from .irs import deck_ir
 
 from .test_adopt import at, presentation, pt, solid, text_shape
 
@@ -135,7 +137,7 @@ def test_a_live_read_takes_the_pptx_it_is_given_before_any_download(tmp_path, mo
     slides = type("S", (), {"presentations": lambda self: self,
                             "get": lambda self, presentationId: Request(pres)})()
     kept: dict = {}
-    ir = read_deck("P", images=tmp_path / "images", slides=slides, foreign=True, keep=kept, pptx=data)
+    ir = target_json(read_deck("P", tmp_path / "images", None, None, slides, True, kept, data))
     [el] = own(ir)
     assert Path(el["file"]).read_bytes() == cat and kept["pptx_pictures"] == 1
     assert "https://example.invalid/cat.png" not in asked
@@ -152,7 +154,7 @@ def test_a_saved_presentation_is_read_with_no_google(tmp_path, monkeypatch, fetc
     pres, cat, data = cat_deck()
     assert is_presentation(pres) and not is_presentation(deck_ir(pres, foreign=True))
     kept: dict = {}
-    ir = read_presentation(pres, tmp_path / "images", data, kept)
+    ir = target_json(read_presentation(pres, tmp_path / "images", data, kept, None, True))
     [el] = own(ir)
     assert Path(el["file"]).read_bytes() == cat and el["object"] == "p1"
     assert kept["pptx_pictures"] == 1 and kept["presentation"] is pres
@@ -304,7 +306,7 @@ def test_a_poster_is_not_shrunk_to_beamers_page():
     w, h = 48 * 72, 36 * 72
     pw, ph, scale = page_size_for(sized(w, h), None, foreign=True)
     assert scale <= MAX_BEAMER_SCALE and (pw, ph) == (w / 2, h / 2)
-    assert page_size_for(sized(w, h), None)[2] > MAX_BEAMER_SCALE, "pull keeps beamer's page"
+    assert page_size_for(sized(w, h), None, False)[2] > MAX_BEAMER_SCALE, "pull keeps beamer's page"
 
 
 # ---------------------------------------------------------------- fonts from google/fonts

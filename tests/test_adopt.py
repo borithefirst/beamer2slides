@@ -13,7 +13,8 @@ from pathlib import Path
 import pytest
 
 from beamer2slides import adopt
-from beamer2slides.deck_ir import deck_ir, family_of
+from beamer2slides.deck_ir import family_of
+from .irs import deck_ir
 
 EMU = 12700
 

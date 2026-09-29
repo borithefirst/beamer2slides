@@ -13,13 +13,13 @@ import json
 import pytest
 
 from beamer2slides.compare import TOL, compare, residual_json, without_keys
-from beamer2slides.deck_ir import deck_ir
-from beamer2slides.deck_ir_types import (ABSENT, TargetImage, TargetShape, element_json, is_target, parse_target,
-                                         target_json)
+from beamer2slides.deck_ir_types import (ABSENT, TargetImage, TargetShape, TargetText, element_json, is_target,
+                                         parse_target, target_json)
 from beamer2slides.inverse import target_pictures, typed_target
 from beamer2slides.ir_types import IRError
 
-from .test_adopt import blank_line_deck, presentation
+from .irs import deck_ir
+from .test_adopt import blank_line_deck, presentation, text_shape
 from .test_adopt_compiles import NAMES, SHOWCASE
 
 
@@ -51,6 +51,22 @@ def test_a_showcase_target_round_trips(name):
 def test_what_deck_ir_reads_round_trips(foreign):
     round_trip(deck_ir(presentation(), foreign=foreign))
     round_trip(deck_ir(blank_line_deck(), foreign=foreign))
+
+
+def test_a_text_box_with_a_see_through_outline_is_a_target():
+    # deck_ir wrote `outline_alpha` on a foreign text box whose outline is semi-transparent (a
+    # person's labelled node), but the target's text record had no such field: parse_target and
+    # inverse.typed_target refused the whole deck with an IRError. Found by the typed builder.
+    pres = presentation()
+    box = text_shape("s0_node", "A node", 300, 200, 120, 40, outline="FF0000")
+    box["shape"]["shapeProperties"]["outline"]["outlineFill"]["solidFill"]["alpha"] = 0.5
+    pres["slides"][0]["pageElements"].append(box)
+    d = deck_ir(pres, foreign=True)
+    [el] = [e for e in d["slides"][0]["elements"] if e.get("object") == "s0_node"]
+    assert el["kind"] == "text" and el["outline_alpha"] == 0.5
+    round_trip(d)
+    [typed] = [e for e in parse_target(d).slides[0].elements if e.object == "s0_node"]
+    assert isinstance(typed, TargetText) and typed.outline_alpha == 0.5
 
 
 def test_a_key_left_out_and_a_null_one_stay_apart():

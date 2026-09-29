@@ -53,7 +53,7 @@ from .compare import (HOLE, TOL, AlignResidual, BackgroundResidual, BoxExtra, Bo
                       TextMissing, TextResidual, WordOp, compare, current_slide_of, grey16, is_theme, norm_text,
                       para_text, picture_hash, residual_json, residual_line, slide_paragraphs, slide_title,
                       target_slide_of, text_anchor, word_op_json)
-from .deck_ir_types import TargetDeck, TargetImage, element_json, is_target, parse_target
+from .deck_ir_types import TargetDeck, TargetImage, element_json, is_target, parse_target, target_json
 from .json_types import Json, JsonObject, as_array, as_int, as_object, as_objects
 from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, frame_visible,
                      line_of, locate_words, mask_comments, match_group, norm_word, page_frames, read_args, skip_space,
@@ -1783,7 +1783,7 @@ class Planner:
         from PIL import Image
         from .deck_ir import fetch_url, image_format
         try:
-            got = fetch_url(te["source_url"])
+            got = fetch_url(te["source_url"], None)
             img = Image.open(io.BytesIO(got))
             cur = Image.open(io.BytesIO(data))
             tmp = self.ws.work / "source-url.bin"
@@ -2613,7 +2613,7 @@ def converge(tex: Path, target: "dict | Later", work: Path, max_iter: int, hando
     fg: "FrameGuard | None" = None
     if guard:
         from .frame_guard import FrameGuard, target_thumbnails
-        fg = FrameGuard(deck, target_thumbnails(deck) if thumbnails is None else thumbnails or None, log)
+        fg = FrameGuard(typed, target_thumbnails(typed) if thumbnails is None else thumbnails or None, log)
     for it in range(max_iter + 1):
         built = ws.build(work / "classify", has_notes, compiled=ready)
         ready = None
@@ -3040,9 +3040,9 @@ def cmd_pull(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | N
         # On a thread of its own while the source compiles for the first time (`converge`): the
         # deck read needs no PDF and the compile needs no deck, and this is the one place in a
         # pull where a Google round trip and a TeX run stand in each other's way.
-        target = read_deck(deck, images=work / "target-images")
-        print(f"deck: {len(target['slides'])} slides read")
-        return target
+        read_back = read_deck(deck, work / "target-images", None, None, None, False, None, None)
+        print(f"deck: {len(read_back.slides)} slides read")
+        return target_json(read_back)
 
     return run_pull(Later(read), tex, work, apply, out, max_iter, handout, engine, print)
 

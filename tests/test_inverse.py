@@ -312,7 +312,7 @@ TEXT_KINDS = {"text", "style", "bullet", "align", "paragraph_order", "paragraph_
 def test_deck_ir_reads_back_what_emit_writes(name):
     from .slides_sim import simulate
     from beamer2slides.classify import classify
-    from beamer2slides.deck_ir import deck_ir
+    from .irs import deck_ir
     from beamer2slides.extract import extract, select_overlays
     deck = classify(select_overlays(extract(built_pdf(name), None), "last"))
     ir = deck_ir(simulate(deck), deck["slides"][0]["size"])
@@ -326,7 +326,7 @@ def test_deck_ir_reads_back_what_emit_writes(name):
 def test_deck_ir_sees_slides_edits():
     from .slides_sim import simulate
     from beamer2slides.classify import classify
-    from beamer2slides.deck_ir import deck_ir
+    from .irs import deck_ir
     from beamer2slides.extract import extract, select_overlays
     deck = classify(select_overlays(extract(built_pdf("01_basic"), None), "last"))
     pres = simulate(deck)

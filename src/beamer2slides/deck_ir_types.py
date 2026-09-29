@@ -195,6 +195,8 @@ class TargetText(_Element):
     wordart: bool | None
     rotation: float | None
     outline_color: str | None | Absent
+    outline_alpha: float | None
+    """A text box's outline seen through (`deck_ir.outline_props`)."""
     weight: float | None
     dash: str | None
     fill: str | None
@@ -702,7 +704,8 @@ def _element(v: object, at: At) -> TargetElement:
             placeholder=f.nullable("placeholder", string), shape_type=f.nullable("shape_type", string),
             paragraphs=f.req("paragraphs", tuple_of(_paragraph)), box=f.optional("box", _text_box),
             wordart=f.optional("wordart", boolean), rotation=f.optional("rotation", number),
-            outline_color=_tri(f, "outline_color", string), weight=f.optional("weight", number),
+            outline_color=_tri(f, "outline_color", string), outline_alpha=f.optional("outline_alpha", number),
+            weight=f.optional("weight", number),
             dash=f.optional("dash", string), fill=f.optional("fill", string),
             fill_alpha=f.optional("fill_alpha", number), fill_gradient=f.optional("fill_gradient", _fill_gradient),
             fill_source=f.optional("fill_source", string), fill_unread=f.optional("fill_unread", boolean),
@@ -755,6 +758,17 @@ def _element(v: object, at: At) -> TargetElement:
         assert_never(kind)
     f.close()
     return out
+
+
+def parse_element(v: object, where: str) -> TargetElement:
+    """One element as `element_json` writes it, typed (`deck_ir`'s thumbnail passes still work on
+    that JSON); raises `IRError` naming `where`."""
+    return _element(v, At(where=where, path=""))
+
+
+def parse_page_gradient(v: object, where: str) -> PageGradient:
+    """A slide's `background_gradient` as `deck_fills.page_gradient` reads it off the thumbnail."""
+    return _page_gradient(v, At(where=where, path=""))
 
 
 def _slide(v: object, at: At) -> TargetSlide:
@@ -1018,6 +1032,7 @@ def element_json(el: TargetElement) -> JsonObject:
             _opt(out, "frame", None if el.frame is None else _frame_json(el.frame))
             out["shape_type"] = el.shape_type
             _tri_put(out, "outline_color", el.outline_color)
+            _opt(out, "outline_alpha", el.outline_alpha)
             _opt(out, "fill_gradient", None if el.fill_gradient is None else _fill_gradient_json(el.fill_gradient))
             _opt(out, "fill_source", el.fill_source)
             _opt(out, "ink_width", el.ink_width)
@@ -1136,5 +1151,6 @@ __all__ = ["ABSENT", "Absent", "CellParagraph", "Chart", "Crop", "DeckSource", "
            "IRError", "Layout", "PageGradient", "PictureOutline", "Recolor", "RecolorStop", "SlidesMeasures",
            "TableBorder", "TableCell", "TargetBullet", "TargetDeck", "TargetDiagram", "TargetElement", "TargetImage",
            "TargetLine", "TargetParagraph", "TargetRun", "TargetShape", "TargetSlide", "TargetTable", "TargetText",
-           "TextBox", "ThumbnailOf", "Trace", "Video", "element_json", "is_target", "paragraph_json", "parse_target", "run_json",
+           "TextBox", "ThumbnailOf", "Trace", "Video", "element_json", "is_target", "paragraph_json", "parse_element",
+           "parse_page_gradient", "parse_target", "run_json",
            "slide_json", "target_json"]

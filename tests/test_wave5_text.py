@@ -190,7 +190,7 @@ def test_pull_and_merge_read_the_break_before_a_hole_as_nothing():
     """deck_ir drops it (the IR, compare and pull never see it), merge.collapse_holes too (a deck
     converted before the break and one after say the same), and LaTeX escaping writes nothing."""
     from beamer2slides import inverse, merge
-    from beamer2slides.deck_ir import deck_ir
+    from .irs import deck_ir
     from beamer2slides.devtools import deck_edits
     from .test_adopt import pt
     from .test_adopt_text import box, deck, para, text_of

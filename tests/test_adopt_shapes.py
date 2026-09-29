@@ -7,8 +7,9 @@ import re
 import pytest
 
 from beamer2slides import adopt, adopt_shapes
-from beamer2slides.deck_ir import deck_ir, frame
-from beamer2slides.inverse import Context
+from beamer2slides.deck_ir import frame
+from .irs import deck_ir
+from beamer2slides.adopt_context import adopt_context
 
 EMU = 12700
 
@@ -75,35 +76,35 @@ def elements(*pes) -> list[dict]:
 # ---------------------------------------------------------------- the frame of an element
 
 def test_an_upright_element_is_its_own_box():
-    fr = frame([2.0, 0.0, 10.0, 0.0, 3.0, 20.0], 5.0, 4.0, 1.0)
-    assert fr["size"] == [10.0, 12.0] and fr["rotation"] == 0.0 and fr["flip"] is False
-    assert fr["box"] == [10.0, 20.0, 20.0, 32.0]
+    fr = frame((2.0, 0.0, 10.0, 0.0, 3.0, 20.0), 5.0, 4.0, 1.0)
+    assert fr.size == (10.0, 12.0) and fr.rotation == 0.0 and fr.flip is False
+    assert fr.box == (10.0, 20.0, 20.0, 32.0)
 
 
 def test_a_turned_element_keeps_its_size_and_its_centre():
     """Turned 30 degrees, its bounding box is bigger than it; the frame is what was turned."""
     c, s = math.cos(math.radians(30)), math.sin(math.radians(30))
-    m = [c * 2, -s * 1, 100.0, s * 2, c * 1, 50.0]         # a 40 x 10 box scaled (2, 1), turned 30 clockwise
+    m = (c * 2, -s * 1, 100.0, s * 2, c * 1, 50.0)         # a 40 x 10 box scaled (2, 1), turned 30 clockwise
     fr = frame(m, 20.0, 10.0, 1.0)
-    assert fr["size"] == [40.0, 10.0] and fr["rotation"] == pytest.approx(30.0)
+    assert fr.size == (40.0, 10.0) and fr.rotation == pytest.approx(30.0)
     cx = 100 + c * 20 - s * 5
     cy = 50 + s * 20 + c * 5
-    assert fr["box"] == pytest.approx([cx - 20, cy - 5, cx + 20, cy + 5], abs=1e-3)
+    assert fr.box == pytest.approx((cx - 20, cy - 5, cx + 20, cy + 5), abs=1e-3)
 
 
 def test_a_mirrored_element_says_so_and_an_upside_down_one_is_turned():
     """flipH keeps a text box's words upright (PowerPoint and Slides do this); flipV is flipH turned 180."""
-    h = frame([-1.0, 0.0, 30.0, 0.0, 1.0, 0.0], 30.0, 10.0, 1.0)
-    assert h["flip"] is True and h["rotation"] == pytest.approx(0.0)
-    v = frame([1.0, 0.0, 0.0, 0.0, -1.0, 10.0], 30.0, 10.0, 1.0)
-    assert v["flip"] is True and abs(v["rotation"]) == pytest.approx(180.0)
-    assert v["box"] == [0.0, 0.0, 30.0, 10.0]
+    h = frame((-1.0, 0.0, 30.0, 0.0, 1.0, 0.0), 30.0, 10.0, 1.0)
+    assert h.flip is True and h.rotation == pytest.approx(0.0)
+    v = frame((1.0, 0.0, 0.0, 0.0, -1.0, 10.0), 30.0, 10.0, 1.0)
+    assert v.flip is True and abs(v.rotation) == pytest.approx(180.0)
+    assert v.box == (0.0, 0.0, 30.0, 10.0)
 
 
 def test_a_line_with_no_height_still_has_a_frame():
     """Most straight connectors are stored with height 0: the missing axis is the other's normal."""
-    fr = frame([0.0, 0.0, 5.0, 1.0, 0.0, 5.0], 40.0, 0.0, 1.0)   # 40 long, pointing down the page
-    assert fr["size"] == [40.0, 0.0] and fr["rotation"] == pytest.approx(90.0) and fr["flip"] is False
+    fr = frame((0.0, 0.0, 5.0, 1.0, 0.0, 5.0), 40.0, 0.0, 1.0)   # 40 long, pointing down the page
+    assert fr.size == (40.0, 0.0) and fr.rotation == pytest.approx(90.0) and fr.flip is False
 
 
 # ---------------------------------------------------------------- what foreign_shape reads
@@ -217,13 +218,13 @@ def test_known_preset_tells_a_real_geometry_from_the_rectangle_fallback():
 def test_an_unknown_preset_is_a_rectangle():
     assert adopt_shapes.preset("NOT_A_SHAPE", 10, 10) is None
     out = adopt_shapes.shape_block({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "NOT_A_SHAPE",
-                                    "fill": "#ff0000"}, Context(), "")
+                                    "fill": "#ff0000"}, adopt_context(), "")
     assert out.strip() == "\\sliderect[fill=red]{0,0,10,10}", out
 
 
 def test_a_turned_shape_is_drawn_through_its_transform():
     el, = elements(shape("a", "RECTANGLE", 100, 20, transform(200, 100, deg=30), outline="000000"))
-    out = adopt_shapes.shape_block(el, Context(), "")
+    out = adopt_shapes.shape_block(el, adopt_context(), "")
     assert out.startswith("\\sliderect[") and "fill=" in out and "draw=" in out
     # turned by its angle (TikZ counts the other way) about the centre of its upright box, which is
     # the shape's own size and has the centre of the turned shape's bounds
@@ -235,7 +236,7 @@ def test_a_turned_shape_is_drawn_through_its_transform():
 
 
 def test_transparency_and_dashes_become_tikz_options():
-    ctx = Context()
+    ctx = adopt_context()
     fo, so = adopt_shapes.style_options({"fill": "#00ff00", "fill_alpha": 0.25, "outline": "#000000",
                                          "outline_alpha": 0.5, "weight": 2.0, "dash": "DASH"}, ctx)
     assert "fill opacity=0.250" in fo and "draw opacity=0.500" in so
@@ -244,7 +245,7 @@ def test_transparency_and_dashes_become_tikz_options():
 
 def test_a_freeform_is_drawn_as_its_box():
     out = adopt_shapes.shape_block({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "CUSTOM",
-                                    "fill": "#ff0000"}, Context(), "")
+                                    "fill": "#ff0000"}, adopt_context(), "")
     assert "\\sliderect" in out and "controls" not in out
 
 

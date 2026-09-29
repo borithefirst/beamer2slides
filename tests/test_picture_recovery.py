@@ -17,7 +17,7 @@ import pytest
 from PIL import Image
 
 from beamer2slides import adopt, deck_fills
-from beamer2slides.deck_ir import deck_ir
+from .irs import deck_ir
 
 EMU = 12700
 HTML_SIGNIN = b"<!doctype html><html><head><title>Sign in - Google Accounts</title></head></html>"

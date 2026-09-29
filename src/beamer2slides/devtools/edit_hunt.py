@@ -110,9 +110,10 @@ def snapshot(pid: str) -> tuple[dict, dict]:
 
 def thumbs(pid: str, pres: dict, folder: Path) -> None:
     from beamer2slides.deck_ir import slide_thumbnails
+    from beamer2slides.google_types import presentation
     if folder.exists():
         shutil.rmtree(folder)
-    slide_thumbnails(pid, pres, folder)
+    slide_thumbnails(pid, presentation(pres, pid), folder)
 
 
 def drop_slot(slot: str) -> None:

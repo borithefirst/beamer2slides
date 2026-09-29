@@ -194,8 +194,8 @@ def declared(target: dict, tree: Path) -> tuple[list[str], list[tuple[str, str, 
     """(preamble lines, [(family label, LaTeX switch, deck font name)]) for one deck: the real
     writers, into a real tree, so what is probed is exactly what `adopt` would have written."""
     from beamer2slides import adopt, scripts
-    from beamer2slides.inverse import Context
-    ctx = Context()
+    from beamer2slides.adopt_context import adopt_context
+    ctx = adopt_context()
     lines = scripts.script_preamble(target, tree) + adopt.font_preamble(target, tree, ctx)
     # which deck font each of the document's three kinds was set in: font_preamble's own ranking
     counts: dict = {}
@@ -215,7 +215,7 @@ def declared(target: dict, tree: Path) -> tuple[list[str], list[tuple[str, str, 
                                  ("mono", "\\ttfamily ", "setmonofont")):
         if any(line.startswith("\\" + marker) for line in lines):
             fams.append((fam, command, main.get(fam, "")))
-    for font, command in sorted((getattr(ctx, "font_switches", None) or {}).items()):
+    for font, command in sorted(ctx.font_switches.items()):
         fams.append((f"switch {font}", command + " ", font))
     return lines, fams
 

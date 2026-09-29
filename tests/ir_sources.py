@@ -231,7 +231,7 @@ def showcase_target(case: str) -> dict:
 def read_back(made: Made) -> Made:
     """`deck_ir` of the deck convert would make of `made` (`slides_sim.simulate`): what `pull`
     reads from a converted deck nobody edited."""
-    from beamer2slides.deck_ir import deck_ir
+    from .irs import deck_ir
 
     from .slides_sim import simulate
 
@@ -603,7 +603,7 @@ def round0(made: Made, home: Path) -> None:
     hashes = picture_hashes(cand, typed, home / "work")
     comp = compare(cand.current(), typed, TOL, hashes)
     comp.summary()
-    FrameGuard(target, None, lambda *a: None).observe(0, cand, comp)
+    FrameGuard(typed, None, lambda *a: None).observe(0, cand, comp)
     Planner(cand, comp, target, Context(pt_option=class_pt_option(ws.source)), ws, set(), {}, hashes).plan()
 
 

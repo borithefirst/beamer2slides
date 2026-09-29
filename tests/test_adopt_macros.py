@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 
 from beamer2slides import adopt, adopt_shapes
-from beamer2slides.deck_ir import deck_ir
+from .irs import deck_ir
 from beamer2slides.inverse import tex_env
 from beamer2slides.texmap import build_visible
 
@@ -106,25 +106,27 @@ def test_words_ending_in_a_tie_keep_it_from_par():
     def words_of(text):
         el = {"kind": "text", "bbox": [0, 0, 100, 40], "box": {"scale": 1.0, "valign": "top"},
               "paragraphs": [{"runs": [{"text": text, "size": 10.0}], "slides": {}}]}
-        return re.search(r"\{body\}\{(.*)\}$", adopt.text_box_latex(el, adopt.Context(), ""))[1]
+        return re.search(r"\{body\}\{(.*)\}$", adopt.text_box_latex(el, adopt.adopt_context(), ""))[1]
     assert words_of("Meeting  ") == "Meeting~~ "
     assert words_of("Plain words") == "Plain words", "nothing to take: nothing added"
 
 
 def test_text_styles_are_named_by_size_and_what_sets_them_apart():
-    ctx = adopt.Context()
+    ctx = adopt.adopt_context()
     ctx.body_size, ctx.main_colour = 10.0, "#202124"
     m = ("9.68", "12", "2.32")
-    assert adopt.text_style(ctx, 10.0, colour="#202124", metrics=m) == "body"
-    assert adopt.text_style(ctx, 10.0, colour="#202124", metrics=m) == "body", "one name per style"
-    assert adopt.text_style(ctx, 24.0, weight="bold", colour="#202124", metrics=m) == "title-bold"
-    assert adopt.text_style(ctx, 15.0, colour="#4285f4", metrics=m) == "heading-blue"
-    assert adopt.text_style(ctx, 8.0, family="mono", italic=True, metrics=m) == "small-mono-italic"
-    assert adopt.text_style(ctx, 10.0, weight="w600", colour="#202124", metrics=m) == "body-semibold"
-    assert adopt.text_style(ctx, 10.0, colour="#202124") == "label", "a bullet's style has no line box"
+    def style(size, family="", weight="", italic=False, colour=None, metrics=None):
+        return adopt.text_style(ctx, size, family, "", weight, italic, colour, metrics)
+    assert style(10.0, colour="#202124", metrics=m) == "body"
+    assert style(10.0, colour="#202124", metrics=m) == "body", "one name per style"
+    assert style(24.0, weight="bold", colour="#202124", metrics=m) == "title-bold"
+    assert style(15.0, colour="#4285f4", metrics=m) == "heading-blue"
+    assert style(8.0, family="mono", italic=True, metrics=m) == "small-mono-italic"
+    assert style(10.0, weight="w600", colour="#202124", metrics=m) == "body-semibold"
+    assert style(10.0, colour="#202124") == "label", "a bullet's style has no line box"
     # the same name for another style is told apart by its size, then by a number
-    assert adopt.text_style(ctx, 10.0, colour="#202124", metrics=("9.68", "14", "4.32")) == "body-10"
-    assert adopt.text_style(ctx, 10.0, colour="#202124", metrics=("9.68", "15", "5.32")) == "body-10-2"
+    assert style(10.0, colour="#202124", metrics=("9.68", "14", "4.32")) == "body-10"
+    assert style(10.0, colour="#202124", metrics=("9.68", "15", "5.32")) == "body-10-2"
     lines = adopt.style_definitions(ctx)
     assert lines[0] == "\\slidestyle{body}{size=10, color=b2s202124, ascent=9.68, pitch=12, depth=2.32}"
     assert "\\slidestyle{small-mono-italic}{size=8, family=mono, italic, ascent=9.68, pitch=12, depth=2.32}" in lines
@@ -142,7 +144,7 @@ def test_colours_are_named_by_what_they_look_like():
 
 
 def test_a_rectangle_or_an_ellipse_is_one_line_only_when_the_macro_draws_the_same_path():
-    ctx = adopt.Context()
+    ctx = adopt.adopt_context()
     rect, turned, rounded, oval = (adopt_shapes.shape_block(e, ctx, "") for e in shapes_ir())
     assert rect.startswith("\\sliderect[") and "cycle" not in rect
     # a turned or rounded one too: TikZ turns and rounds the macro's path as it did the spelled one
@@ -318,7 +320,7 @@ def test_an_enumerate_counts_and_types_only_the_numbers_it_cannot_count():
     bullet = lambda n: {"text": n, "size": 10.0, "kind": "number"}
     el = T.prose(*({"runs": [T.words(w)], "bullet": bullet(n), "slides": {"indent_start": 18}}
                    for n, w in (("2.", "Two"), ("3.", "Three"), ("7.", "Seven"))))
-    ctx = adopt.Context()
+    ctx = adopt.adopt_context()
     tex = adopt.text_box_latex(el, ctx, "")
     assert "\\begin{enumerate}[start=2]" in tex, tex
     assert "\\item Two" in tex and "\\item Three" in tex and "\\item[label={7.}] Seven" in tex, tex
@@ -470,7 +472,7 @@ def test_a_justified_paragraph_breaks_where_its_ragged_twin_breaks(tmp_path):
 def test_a_slidetable_puts_its_cells_fills_and_borders_where_the_deck_has_them(tmp_path):
     """test_adopt_tables' table (a header over two columns, a first cell over two rows, a fill Slides
     does not draw, a border inside a merge) compiled: every word, fill and rule where Slides has it."""
-    from beamer2slides.deck_ir import deck_ir as read
+    from .irs import deck_ir as read
     from . import test_adopt_tables as TT
     scale = 720 / 453.54
     heights = (30, 60, 30)                    # the middle row with room, so its cells' places show
@@ -538,7 +540,7 @@ def test_only_a_script_s_own_fallback_face_asks_the_tab_macro_to_forgive_it():
     assert adopt.tab_segment_needs_tolerance("mixed 開発 words")
     assert not adopt.tab_segment_needs_tolerance("ESOP #")
     assert not adopt.tab_segment_needs_tolerance("")
-    tex = adopt.text_box_latex(T.prose({"runs": [T.words("ESOP #\t余暇\tRole")], "slides": {}}), adopt.Context(), "")
+    tex = adopt.text_box_latex(T.prose({"runs": [T.words("ESOP #\t余暇\tRole")], "slides": {}}), adopt.adopt_context(), "")
     assert "\\slidestab{36.00pt}{ESOP \\#}" in tex, tex
     assert "\\slidestabf{36.00pt}{" in tex and "余暇" in tex, tex
 

@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 
 from beamer2slides import adopt, adopt_shapes, deck_fills, deck_freeforms
-from beamer2slides.inverse import Context
+from beamer2slides.adopt_context import adopt_context
 
 from .test_adopt_fills import EMU, UNREAD, at, deck, elements, page, pt, shape, solid
 
@@ -51,7 +51,7 @@ def test_a_solid_freeform_is_traced_as_its_outline_not_its_box():
     assert len(tr["rings"]) == 1 and tr["fill"].lower() == "#3366cc" and tr["source"] == "thumbnail"
     assert abs(ring_area(tr["rings"]) - np.pi * 40 ** 2) < 0.03 * np.pi * 40 ** 2
     assert len(tr["rings"][0]) < 80                         # simplified, not one point per pixel
-    out = adopt_shapes.shape_block(el, Context(), "")
+    out = adopt_shapes.shape_block(el, adopt_context(), "")
     assert "even odd rule" in out and "rectangle (80" not in out and "cycle" in out
     assert "_traced" not in el
 
@@ -158,7 +158,7 @@ def test_a_fill_the_page_already_shows_is_traced_by_its_outline_not_left_a_recta
     assert tr["fill"].lower() == "#ffffff" and tr["stroke"].lower() == "#a8dadc"
     assert len(tr["rings"]) == 1
     assert abs(ring_area(tr["rings"]) - np.pi * 40 ** 2) < 0.25 * np.pi * 40 ** 2
-    out = adopt_shapes.shape_block(el, Context(), "")
+    out = adopt_shapes.shape_block(el, adopt_context(), "")
     assert "rectangle (80" not in out and "cycle" in out
 
 
@@ -411,5 +411,5 @@ def test_an_outline_in_another_colour_is_drawn_inside_the_traced_edge():
     el = {"kind": "shape", "bbox": [10, 10, 30, 30], "trace": {
         "rings": [[[10, 10], [30, 10], [30, 30], [10, 30]]], "fill": "#ffffff", "alpha": None,
         "stroke": "#000000", "weight": 1.0, "source": "thumbnail"}}
-    out = adopt_shapes.traced_block(el, Context(), "")
+    out = adopt_shapes.traced_block(el, adopt_context(), "")
     assert "\\clip" in out and "line width=2.00pt" in out and "draw=black" in out

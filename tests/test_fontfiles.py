@@ -16,7 +16,7 @@ import pytest
 
 from beamer2slides import adopt, fontfetch, fontfiles, net
 from beamer2slides.agent import ALL_ACTIONS, AgentContext, LocalWorkspace
-from beamer2slides.deck_ir import deck_ir
+from .irs import deck_ir
 
 from .test_adopt import text_shape
 from .test_adopt_media import STATIC_META, VARIABLE_META, deck_with, tiny_font

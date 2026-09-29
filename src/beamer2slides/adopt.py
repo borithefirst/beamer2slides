@@ -31,7 +31,8 @@ from . import labels as labels_mod
 from . import snapshot
 from .fonts import cjk_font
 from .adopt_shapes import SHAPE_MACRO, shape_style_definitions, survey_styles, turned_text
-from .inverse import (Context, TEXTPOS, body_style, colour_name, frame_latex, paragraphs_latex,
+from .adopt_context import AdoptContext, Metrics, adopt_context
+from .inverse import (TEXTPOS, body_style, colour_name, frame_latex, paragraphs_latex,
                       picture_block)
 
 # beamer's own page sizes, by the class option that asks for them (`deck_ir.BEAMER_SIZES`).
@@ -123,13 +124,13 @@ def element_style(el: dict) -> dict:
             "font": max(fonts, key=fonts.get) if fonts else None}
 
 
-def base_lead(style: dict, ctx: Context) -> str:
+def base_lead(style: dict, ctx: AdoptContext) -> str:
     """The switches that make `style` the base inside a textblock."""
     from .inverse import size_switch
     out = []
     if style.get("size"):
         out.append(size_switch(style["size"], ctx.pt_option))
-    switch = getattr(ctx, "font_switches", {}).get(style.get("font") or "")
+    switch = ctx.font_switches.get(style.get("font") or "")
     if switch:
         out.append(switch)                  # the deck's second face of this kind (`font_preamble`)
     elif style.get("family") == "mono":
@@ -640,11 +641,11 @@ def weight_faces(font: str, files: dict, used: dict, tree: Path | None, font_wei
     return "".join("," + o for o in opts)
 
 
-def series(r: dict, ctx: Context) -> str:
+def series(r: dict, ctx: AdoptContext) -> str:
     """The NFSS series a run (or a base style) is set in: `w<weight>` where `weight_faces` gave its
     font that weight, else bold or not."""
     w = r.get("weight")
-    if w and (int(w), bool(r.get("italic"))) in (getattr(ctx, "font_weights", None) or {}).get(r.get("font") or "", ()):
+    if w and (int(w), bool(r.get("italic"))) in ctx.font_weights.get(r.get("font") or "", ()):
         return f"w{int(w)}"
     return "b" if r.get("bold") else "m"
 
@@ -662,7 +663,7 @@ EXTRA_FONTS_MAX = 12
 AREA_SIZE = 12.0
 
 
-def font_preamble(target: dict, tree: Path | None, ctx: Context | None = None) -> list[str]:
+def font_preamble(target: dict, tree: Path | None, ctx: AdoptContext | None) -> list[str]:
     """fontspec lines for the typefaces the deck is written in, and the files beside the source.
 
     A foreign deck is written in the person's fonts, not the converter's three, and helvet in place
@@ -1573,7 +1574,7 @@ def text_escape(text: str) -> str:
     return out
 
 
-def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
+def run_tex(r: dict, base: dict, text: str, ctx: AdoptContext) -> str:
     """One run's text with the style it has over `base`, both ways: a box whose base is bold writes
     `\\textmd` for its regular words, where `inverse.runs_latex` wrote nothing and left them bold."""
     lead = len(text) - len(text.lstrip(" "))
@@ -1584,7 +1585,7 @@ def run_tex(r: dict, base: dict, text: str, ctx: Context) -> str:
     # the spaces around the styled core are Slides' too, however many: ap-bio-stats' literal "•  "
     # bullets stand their text two Arial spaces off, where one TeX space folded them into one
     spaces = (lambda n: " " + "\\ " * (n - 1) if n else "")
-    struts = getattr(ctx, "line_struts", None)
+    struts = ctx.line_struts
     outer = ""
     if struts is not None and r.get("script"):
         # a raised strut would make its line as much taller: ap-bio-stats' "E = mc²" line stood 4 pt low
@@ -1658,12 +1659,12 @@ def paragraph_base(p: dict) -> dict:
     return out
 
 
-def font_switch(font: str, ctx: Context) -> str:
+def font_switch(font: str, ctx: AdoptContext) -> str:
     """The `\\newfontfamily` command `font_preamble` made for a deck's second typeface, or ''."""
-    return (getattr(ctx, "font_switches", None) or {}).get(font or "", "")
+    return ctx.font_switches.get(font or "", "")
 
 
-def runs_tex(runs: list[dict], base: dict, ctx: Context, brk: str) -> str:
+def runs_tex(runs: list[dict], base: dict, ctx: AdoptContext, brk: str) -> str:
     """A paragraph's runs; a soft break (Shift+Enter, \\x0b) ends the line wherever it stands - inside
     a bold word, at the paragraph's start - since the paragraph is already in horizontal mode
     (`\\noindent`) and the break is written between the styled pieces, never inside one."""
@@ -1760,7 +1761,7 @@ def tab_segment_needs_tolerance(text: str) -> bool:
     return any(script_of(c) is not None for c in text)
 
 
-def tabbed_tex(runs: list[dict], base: dict, ctx: Context, brk: str, start: float, stop: float,
+def tabbed_tex(runs: list[dict], base: dict, ctx: AdoptContext, brk: str, start: float, stop: float,
                restart: float | None = None) -> str:
     """A paragraph with tabs set on Slides' default stops (`stop` pt apart, the pen `start` pt from the
     text edge where the paragraph begins). A soft break starts the pen again at `restart` (indentStart:
@@ -1842,25 +1843,25 @@ WEIGHT_WORDS = {100: "thin", 200: "extralight", 300: "light", 400: "regular", 50
                 700: "bold", 800: "extrabold", 900: "black"}
 
 
-def text_style(ctx: Context, size: float, family: str = "", face: str = "", weight: str = "",
-               italic: bool = False, colour: str | None = None, metrics: tuple | None = None) -> str:
+def text_style(ctx: AdoptContext, size: float, family: str, face: str, weight: str, italic: bool,
+               colour: str | None, metrics: Metrics | None) -> str:
     """The name of a text style (`\\slidestyle` in the preamble), made on first use: its size next to
     the deck's body size (title, heading, large, body, small, tiny), then what sets it apart - its
     typeface, weight, slant and colour where that is not the deck's usual text colour. `metrics` is
     the paragraph's line box (ascent, pitch, depth; bp strings), None for a bullet's style."""
     colour_tex = colour_name(colour, ctx.colours) if colour else ""
     key = (num(size), family, face, weight, italic, colour_tex, metrics)
-    styles = ctx.__dict__.setdefault("text_styles", {})
-    ctx.__dict__["last_style_key"] = key            # what `box_parts` records: names are made per context
+    styles = ctx.text_styles
+    ctx.last_style_key = key            # what `box_parts` records: names are made per context
     if key in styles:
         return styles[key]
-    body = getattr(ctx, "body_size", None) or size
+    body = ctx.body_size or size
     if abs(size - body) < 0.05:
         words = ["body"]
     else:
         words = [next(w for top, w in SIZE_WORDS if size / body >= top)]
     if face:
-        font = next((f for f, s in (getattr(ctx, "font_switches", None) or {}).items() if s == face), "")
+        font = next((f for f, s in ctx.font_switches.items() if s == face), "")
         words.append(re.sub(r"[^a-z0-9]", "", font.lower())[:16] or "face")
     elif family in ("mono", "serif"):
         words.append(family)
@@ -1868,7 +1869,7 @@ def text_style(ctx: Context, size: float, family: str = "", face: str = "", weig
         words.append("bold" if weight == "bold" else WEIGHT_WORDS.get(int(weight[1:]), weight))
     if italic:
         words.append("italic")
-    if colour and colour.lower() != (getattr(ctx, "main_colour", None) or "").lower():
+    if colour and colour.lower() != (ctx.main_colour or "").lower():
         words.append(NAMED_WORDS.get(colour.lower()) or colour_word(colour).lower())
     if metrics is None:
         words[0] = "label"
@@ -1886,10 +1887,10 @@ def text_style(ctx: Context, size: float, family: str = "", face: str = "", weig
 NAMED_WORDS = {"#000000": "black", "#ffffff": "white"}
 
 
-def style_definitions(ctx: Context) -> list[str]:
+def style_definitions(ctx: AdoptContext) -> list[str]:
     """`\\slidestyle` lines for the styles the frames use, in the order they were first used."""
     out = []
-    for (size, family, face, weight, italic, colour, metrics), name in (getattr(ctx, "text_styles", None) or {}).items():
+    for (size, family, face, weight, italic, colour, metrics), name in ctx.text_styles.items():
         keys = [f"size={size}"]
         keys += [f"family={family}"] if family in ("mono", "serif") else []
         keys += [f"face={face}"] if face else []
@@ -1899,19 +1900,19 @@ def style_definitions(ctx: Context) -> list[str]:
         if metrics:
             keys += [f"ascent={metrics[0]}", f"pitch={metrics[1]}", f"depth={metrics[2]}"]
         out.append(f"\\slidestyle{{{name}}}{{{', '.join(keys)}}}")
-    for code, name in (getattr(ctx, "bullet_marks", None) or {}).items():
+    for code, name in ctx.bullet_marks.items():
         out.append(f"\\slidemark{{{name}}}{{{code}}}")
     return out
 
 
-def bullet_mark(ctx: Context, glyph: str, z: float, colour: str | None, code: str) -> str:
+def bullet_mark(ctx: AdoptContext, glyph: str, z: float, colour: str | None, code: str) -> str:
     """The name a drawn bullet (`\\slidemark`) goes by: dot, ring or square, its colour where that is
     not the deck's usual text colour, its size when the deck draws it in more than one."""
-    marks = ctx.__dict__.setdefault("bullet_marks", {})
+    marks = ctx.bullet_marks
     if code in marks:
         return marks[code]
     words = [{"●": "dot", "○": "ring", "■": "square", "•": "bullet"}[glyph]]
-    if colour and colour.lower() != (getattr(ctx, "main_colour", None) or "").lower():
+    if colour and colour.lower() != (ctx.main_colour or "").lower():
         words.append(NAMED_WORDS.get(colour.lower()) or colour_word(colour).lower())
     name = "-".join(words)
     taken = set(marks.values())
@@ -1924,7 +1925,7 @@ def bullet_mark(ctx: Context, glyph: str, z: float, colour: str | None, code: st
     return name
 
 
-def bullet_tex(p: dict, ctx: Context, scale: float, right: float) -> str:
+def bullet_tex(p: dict, ctx: AdoptContext, scale: float, right: float) -> str:
     """The bullet, its right edge `right` pt from where the line's text starts (negative: left of it):
     `\\slidebullet` for the ● ○ ■ Slides draws, `\\slidelabel` for a typed one."""
     spec = bullet_spec(p, ctx, scale, right)
@@ -1935,7 +1936,7 @@ def bullet_tex(p: dict, ctx: Context, scale: float, right: float) -> str:
     return f"\\slidelabel{{{ctx.text_styles[spec['labelstyle'][1]]}}}{{{spec['literal']}}}{{{spec['gap']}}}"
 
 
-def bullet_spec(p: dict, ctx: Context, scale: float, right: float) -> dict | None:
+def bullet_spec(p: dict, ctx: AdoptContext, scale: float, right: float) -> dict | None:
     """What `bullet_tex` draws, as a list item's keys (`\\item`, `\\setslidelist`): `mark` a drawn
     bullet ("M", its \\slidemark code), or `label` typed text in `labelstyle` ("S", the style's key);
     `gap` bp from its right edge to the text; `literal` the typed text. None: no glyph."""
@@ -1974,7 +1975,7 @@ def bullet_spec(p: dict, ctx: Context, scale: float, right: float) -> dict | Non
         bullet_mark(ctx, "•", z, b.get("color"), code)
         return {"mark": ("M", code), "label": "", "labelstyle": "", "gap": num(-(right - after)), "literal": ""}
     family = b.get("font_family") if b.get("font_family") in ("mono", "serif") else ""
-    text_style(ctx, float(f"{z:.2f}"), family, "", "bold" if b.get("bold") else "", False, b.get("color"))
+    text_style(ctx, float(f"{z:.2f}"), family, "", "bold" if b.get("bold") else "", False, b.get("color"), None)
     literal = text_escape(glyph)
     return {"mark": "", "label": literal, "labelstyle": ("S", ctx.last_style_key), "gap": num(-right),
             "literal": literal}
@@ -2028,7 +2029,7 @@ def trailing_space(last: dict, valign: str, shape: str | None = None) -> float:
     return float((last.get("slides") or {}).get("space_below") or 0.0)
 
 
-def text_box_latex(el: dict, ctx: Context, ind: str) -> str:
+def text_box_latex(el: dict, ctx: AdoptContext, ind: str) -> str:
     """A text box laid out as Slides lays it out: the element's own box, the vertical alignment done
     by TeX (`\\vbox to` its height with the slack above, below or both), each paragraph at its own
     size, pitch, spacing and indents, bullets drawn where Slides draws them. See the notes above.
@@ -2050,7 +2051,7 @@ LEVEL_KEYS = ("style", "indent", "first", "labelstyle", "bullet", "gap")
 KEY_ORDER = ("style", "align", "indent", "rindent", "first", "lang", "labelstyle", "bullet", "gap", "space")
 
 
-def box_parts(el: dict, ctx: Context) -> dict:
+def box_parts(el: dict, ctx: AdoptContext) -> dict:
     """What `text_box_latex` writes, before it is said: the box's options and geometry, and per
     paragraph its full keys (`keys`, styles as ("S", key) and drawn bullets as ("M", code), since
     names are made per context), what only it says (`extra`: space=, prevdepth=, mixed), its words,
@@ -2069,7 +2070,7 @@ def box_parts(el: dict, ctx: Context) -> dict:
     ctx.packages.add(TEXTPOS)
     ctx.packages.add(SLIDES_TEXT)
     box_opts = [valign] if valign != "top" else []
-    if valign != "middle" and f"{inset:.2f}" != getattr(ctx, "slide_inset", None):
+    if valign != "middle" and f"{inset:.2f}" != ctx.slide_inset:
         box_opts.append(f"inset={num(inset)}")
     recs = []
     prev = None
@@ -2289,7 +2290,7 @@ def number_text(label: str, n: int) -> str | None:
     return m[1] + tok + m[3]
 
 
-def key_text(k: str, v, ctx: Context) -> str:
+def key_text(k: str, v, ctx: AdoptContext) -> str:
     """One key as the macros read it."""
     if k == "align":
         return v
@@ -2302,7 +2303,7 @@ def key_text(k: str, v, ctx: Context) -> str:
     return f"{k}={v}"
 
 
-def keys_text(keys: dict, ctx: Context) -> list[str]:
+def keys_text(keys: dict, ctx: AdoptContext) -> list[str]:
     return [key_text(k, keys[k], ctx) for k in KEY_ORDER if k in keys and keys[k] is not None]
 
 
@@ -2340,21 +2341,21 @@ def level_keys(items: list[dict]) -> dict:
     return {k: majority([r[k] for r in items if r.get(k) is not None]) for k in LEVEL_KEYS}
 
 
-def deck_level(ctx: Context, env: str, depth: int, items: list[dict]) -> dict:
+def deck_level(ctx: AdoptContext, env: str, depth: int, items: list[dict]) -> dict:
     """What `\\setslidelist{env}{depth}` says: the deck's majority (`deck_text_survey`), or when no
     survey was made, what most of these items say."""
-    levels = ctx.__dict__.setdefault("list_levels", {})
+    levels = ctx.list_levels
     if (env, depth) not in levels:
         levels[(env, depth)] = level_keys([r["keys"] for r in items])
     return levels[(env, depth)]
 
 
-def level_definitions(ctx: Context) -> list[str]:
+def level_definitions(ctx: AdoptContext) -> list[str]:
     """`\\setslidepar` and `\\setslidelist` lines for the deck's paragraph and list-level defaults."""
     out = []
-    if getattr(ctx, "deck_style", None):
+    if ctx.deck_style:
         out.append(f"\\setslidepar{{{key_text('style', ctx.deck_style, ctx)}}}")
-    for (env, depth), level in sorted((getattr(ctx, "list_levels", None) or {}).items(),
+    for (env, depth), level in sorted(ctx.list_levels.items(),
                                       key=lambda kv: (kv[0][0] != "itemize", kv[0])):
         said = {k: v for k, v in level.items()
                 if v is not None and (k == "style" or v != {**PAR_KEYS, **ITEM_KEYS}[k])}
@@ -2362,7 +2363,7 @@ def level_definitions(ctx: Context) -> list[str]:
     return out
 
 
-def deck_text_survey(target: dict, ctx: Context) -> None:
+def deck_text_survey(target: dict, ctx: AdoptContext) -> None:
     """The deck's paragraph style (`\\setslidepar`) and its list levels (`\\setslidelist`): what most
     paragraphs of its multi-paragraph boxes, and most items of each level, are. Worked out on a copy
     of the context, the real one naming the styles as the frames first use them."""
@@ -2388,7 +2389,7 @@ def deck_text_survey(target: dict, ctx: Context) -> None:
     ctx.list_levels = {k: level_keys(v) for k, v in levels.items()}
 
 
-def box_source(parts: dict, ctx: Context, ind: str) -> str:
+def box_source(parts: dict, ctx: AdoptContext, ind: str) -> str:
     """`box_parts` said as briefly as the macros allow: one paragraph as `\\slidetext`; else a
     slidebox whose options carry what most of its paragraphs share, `\\slidepar`s saying what they
     alone say, and list items as `itemize` / `enumerate` whose level (`\\setslidelist`) and list
@@ -2399,7 +2400,7 @@ def box_source(parts: dict, ctx: Context, ind: str) -> str:
         # one paragraph: the box and it on one line
         opts, style, words = recs[0]["single"]
         return f"{ind}\\slidetext{brackets(box_opts + opts)}{{{geometry}}}{{{style}}}{{{words}}}"
-    deck = {**PAR_KEYS, **ITEM_KEYS, "style": getattr(ctx, "deck_style", None)}
+    deck = {**PAR_KEYS, **ITEM_KEYS, "style": ctx.deck_style}
     has_items = any(r["item"] for r in recs)
     # the box's own defaults, for its paragraphs and its items alike: what a list level says
     # (`\setslidelist`) is not the box's to say where it holds a list
@@ -2510,7 +2511,7 @@ def letterboxed(src: Path, w: float, h: float, dest: Path) -> Path:
     return dest
 
 
-def video_block(el: dict, ctx: Context, ind: str, tree: Path | None) -> str:
+def video_block(el: dict, ctx: AdoptContext, ind: str, tree: Path | None) -> str:
     """A video: the frame Slides shows before it plays, linked to where it plays. With no poster
     frame to show (a Drive video: no API gives one) a dark panel with a play symbol stands in."""
     video = el["video"]
@@ -2553,7 +2554,7 @@ def video_block(el: dict, ctx: Context, ind: str, tree: Path | None) -> str:
     return f"{head}\n{ind}  \\href{{{url_latex(link)}}}{{%\n{inner}{ind}  }}%\n{ind}\\end{{textblock*}}{tail}"
 
 
-def wordart_block(el: dict, ctx: Context, ind: str) -> str:
+def wordart_block(el: dict, ctx: AdoptContext, ind: str) -> str:
     """WordArt: its words stretched to its box, as Slides draws them (Slides keeps no size for them,
     only the box), turned with the element. Fill and outline are not in the API: the text colour."""
     from .inverse import latex_escape
@@ -2629,7 +2630,7 @@ PICTURE_MACRO = r"""% --- Pictures ---------------------------------------------
 \def\slides@xywh#1,#2,#3,#4\@nil{\def\slides@x{#1}\def\slides@y{#2}\def\slides@w{#3}\def\slides@h{#4}}"""
 
 
-def slide_picture(te: dict, pic, ctx: Context, ind: str) -> str:
+def slide_picture(te: dict, pic, ctx: AdoptContext, ind: str) -> str:
     """A deck picture at its place, one `\\slidepicture` line: the numbers `inverse.picture_block`
     wrote (its block's corner, the picture's size), the edits as named options."""
     from .adopt_shapes import pt1
@@ -2678,7 +2679,7 @@ def tikz_block(body: str, x0: float, y0: float, w: float, h: float, ind: str) ->
             f"{ind}\\end{{textblock*}}\n")
 
 
-def shape_block(el: dict, ctx: Context, ind: str, tree: Path | None = None) -> str:
+def shape_block(el: dict, ctx: AdoptContext, ind: str, tree: Path | None = None) -> str:
     """A panel, a node of a flow chart or a connector, at its place on the page.
 
     tikz rather than `\\rule`, because a foreign deck's shapes are not only filled rectangles: the
@@ -3339,7 +3340,7 @@ def table_segments(el: dict) -> list[tuple[tuple, list]]:
     return sorted(runs.items(), key=lambda kv: (kv[0][0], kv[0][1]))
 
 
-def cell_lead(base: dict, cell: dict, ctx: Context) -> str:
+def cell_lead(base: dict, cell: dict, ctx: AdoptContext) -> str:
     """A table cell's base style with its lines as far apart as Slides sets them (LINE_EM x
     lineSpacing). The size switch alone spaced them by the class's leading: hebrew-lesson's cells
     stood 14.0 pt apart where the thumbnail shows 14.45. Only the distance between lines: the strut
@@ -3399,7 +3400,7 @@ def breakable(p: dict) -> bool:
     return False
 
 
-def table_cell(c: dict, ctx: Context, ind: str, text_y) -> tuple[dict, str]:
+def table_cell(c: dict, ctx: AdoptContext, ind: str, text_y) -> tuple[dict, str]:
     """A cell's options (None: whatever its row says) and its LaTeX, in `slidetable`'s terms."""
     from .scripts import block_rtl, rtl_language
     opts: dict = {k: None for k in CELL_DEFAULTS}
@@ -3487,7 +3488,7 @@ def option_text(key: str, value) -> str:
     return f"{CELL_KEYS[key]}={value}"
 
 
-def border_style(b: dict, ctx: Context) -> str:
+def border_style(b: dict, ctx: AdoptContext) -> str:
     """A border segment as TikZ options (`\\hborder`, `border=`)."""
     opts = [colour_name(b["color"] or "#000000", ctx.colours), f"line width={num(b['weight'])}pt"]
     if b["dash"] in DASHES:
@@ -3497,7 +3498,7 @@ def border_style(b: dict, ctx: Context) -> str:
     return ",".join(opts)
 
 
-def table_borders(el: dict, ctx: Context) -> tuple[str, list[str]]:
+def table_borders(el: dict, ctx: AdoptContext) -> tuple[str, list[str]]:
     """The table's border style and the `\\hborder` / `\\vborder` lines that say where the lines
     differ from it. A segment inside a merged cell is no border whatever the deck lists there
     (`table_segments`), so it goes with whichever style its neighbours have."""
@@ -3591,7 +3592,7 @@ def table_places(widths: list[float], padx: float, pady: float) -> tuple[str, st
     return num(float(ix), 3), num(float(iy), 3), xs
 
 
-def table_block(el: dict, ctx: Context, ind: str) -> str:
+def table_block(el: dict, ctx: AdoptContext, ind: str) -> str:
     """A table at its place and size, written as a `slidetable`: columns once, then rows of cells
     as in a tabular, with what Slides says that a tabular cannot - fills, a row's minimum height,
     Slides' insets, a colour, weight and dash per border segment - as options that name only where a
@@ -3704,7 +3705,7 @@ def table_block(el: dict, ctx: Context, ind: str) -> str:
     return "\n".join(lines)
 
 
-def element_latex(el: dict, ctx: Context, tree: Path | None = None, ind: str = "  ") -> str:
+def element_latex(el: dict, ctx: AdoptContext, tree: Path | None = None, ind: str = "  ") -> str:
     """What one IR element draws: its textblocks, "" when it draws nothing of its own."""
     out = []
     if el.get("role") in ("math", "icon"):
@@ -3846,7 +3847,7 @@ def frame_labels(target: dict) -> list[str]:
     return out
 
 
-def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None = None,
+def slide_latex(s: dict, style_for, ctx: AdoptContext, flow: bool, tree: Path | None = None,
                 deck_bg: str | None = None, pieces: list[str] | None = None, plan=None,
                 label: str | None = None) -> str:
     """One deck slide as a frame. `flow` writes the readable version (`inverse.frame_latex`: a frame
@@ -3933,7 +3934,7 @@ def without_options(opts: str, *keys: str) -> str:
     return "[" + ",".join(kept) + "]"
 
 
-def gradient_tikz(gradient: dict, w: float, h: float, ctx: Context) -> str:
+def gradient_tikz(gradient: dict, w: float, h: float, ctx: AdoptContext) -> str:
     """A tikzpicture drawing `gradient` (`deck_fills.page_gradient`) full bleed over a `w` by `h` bp
     page, y down like every other page position in the IR: `\\setbeamertemplate{background canvas}`
     can only ever be given a flat colour or a picture, so this stands in for a gradient exactly as a
@@ -3957,7 +3958,7 @@ def gradient_tikz(gradient: dict, w: float, h: float, ctx: Context) -> str:
             f"\\end{{scope}}\\end{{tikzpicture}}")
 
 
-def background_canvas_command(gradient: dict, size, ctx: Context) -> str:
+def background_canvas_command(gradient: dict, size, ctx: AdoptContext) -> str:
     """The bare `\\setbeamertemplate{background canvas}{...}` assignment drawing `gradient`, for a
     plain frame with no theme options of its own to race against (`background_gradient_latex`)."""
     ctx.packages.add(TIKZ)
@@ -3965,7 +3966,7 @@ def background_canvas_command(gradient: dict, size, ctx: Context) -> str:
     return "\\setbeamertemplate{background canvas}{" + gradient_tikz(gradient, w, h, ctx) + "}"
 
 
-def background_gradient_latex(gradient: dict, size, ctx: Context, text: str) -> str:
+def background_gradient_latex(gradient: dict, size, ctx: AdoptContext, text: str) -> str:
     """`text` (typically a whole frame), in a group of its own on a background canvas drawn as
     `gradient` instead of the flat colour the API reported for a page whose thumbnail is not that
     colour at all: `pageBackgroundFill` has no gradient type, so a .pptx `<a:gradFill>` or a radial
@@ -4024,14 +4025,14 @@ def gradient_backdrop(gradient: dict, size, tree: Path | None) -> str | None:
     return rel
 
 
-def preamble(target: dict, ctx: Context, flow: bool, tree: Path | None = None,
+def preamble(target: dict, ctx: AdoptContext, flow: bool, tree: Path | None = None,
              missing: list | None = None) -> str:
     """A theme that draws nothing. A foreign deck carries its own decoration in its elements, so
     anything beamer adds by itself (navigation bar, headline, footline, frame title style) is ink
     the deck does not have, and every pixel of it is a residual the loop cannot remove."""
     opt, paper = page_setup(target["slides"][0].get("size") if target["slides"] else target.get("page_size"))
     from .scripts import script_preamble
-    fonts = getattr(ctx, "font_lines", None) or font_preamble(target, tree, ctx)
+    fonts = ctx.font_lines or font_preamble(target, tree, ctx)
     lines = [f"\\documentclass[{opt}]{{beamer}}" if opt else "\\documentclass{beamer}",
              *([paper] if paper else []),
              # A deck is mostly pictures, and LuaTeX re-encodes every PNG with transparency at zlib
@@ -4081,12 +4082,12 @@ def text_elements(node):
             yield from text_elements(v)
 
 
-def deck_text_defaults(target: dict, ctx: Context) -> None:
+def deck_text_defaults(target: dict, ctx: AdoptContext) -> None:
     """What most of a deck's text is (its size, its colour, its boxes' inset), so the names of text
     styles are relative to it and the usual inset goes unsaid (`\\setslideinset`)."""
-    sizes: dict = {}
-    colours: dict = {}
-    insets: dict = {}
+    sizes: dict[float, int] = {}
+    colours: dict[str, int] = {}
+    insets: dict[str, int] = {}
     for el in text_elements(target.get("slides") or []):
         for p in el["paragraphs"]:
             if not p.get("runs"):
@@ -4099,11 +4100,11 @@ def deck_text_defaults(target: dict, ctx: Context) -> None:
                 colours[base["color"]] = colours.get(base["color"], 0) + n
         box = el.get("box") if isinstance(el.get("box"), dict) else None
         if el.get("bbox") and box is not None and (box.get("valign") or "top") != "middle":
-            k = f"{box_insets(el)[1]:.2f}"
-            insets[k] = insets.get(k, 0) + 1
-    ctx.body_size = max(sizes, key=sizes.get) if sizes else None
-    ctx.main_colour = max(colours, key=colours.get) if colours else None
-    ctx.slide_inset = max(insets, key=insets.get) if insets else None
+            inset = f"{box_insets(el)[1]:.2f}"
+            insets[inset] = insets.get(inset, 0) + 1
+    ctx.body_size = max(sizes, key=lambda k: sizes[k]) if sizes else None
+    ctx.main_colour = max(colours, key=lambda k: colours[k]) if colours else None
+    ctx.slide_inset = max(insets, key=lambda k: insets[k]) if insets else None
 
 
 def rename_colours(text: str, colours: dict[str, str]) -> str:
@@ -4193,7 +4194,7 @@ def bootstrap(target: dict, tex: Path, flow: bool = False, missing: list | None 
     """Write `tex` (and return it): a compilable beamer source with a frame per deck slide, and the
     `slides.sty` beside it that its frames' vocabulary comes from. The fonts the deck names that
     were set in something else are added to `missing` (`font_preamble`'s `ctx.missing_fonts`)."""
-    ctx = Context()
+    ctx = adopt_context()
     deck_text_defaults(target, ctx)
     style_for = level_style(target)
     tex.parent.mkdir(parents=True, exist_ok=True)
@@ -4201,7 +4202,7 @@ def bootstrap(target: dict, tex: Path, flow: bool = False, missing: list | None 
     # the typefaces first: a text box whose letters are in the deck's second face switches to it
     ctx.font_lines = font_preamble(target, tex.parent, ctx)
     if missing is not None:
-        missing.extend(getattr(ctx, "missing_fonts", []))
+        missing.extend(ctx.missing_fonts)
     if not flow:
         # what most paragraphs and list items are, said once in the preamble
         deck_text_survey(target, ctx)
@@ -4272,7 +4273,7 @@ def bootstrap(target: dict, tex: Path, flow: bool = False, missing: list | None 
     return text
 
 
-def recovered_theme(target: dict, pieces: list[list[str]], ctx: Context, tree: Path, deck_bg: str | None):
+def recovered_theme(target: dict, pieces: list[list[str]], ctx: AdoptContext, tree: Path, deck_bg: str | None):
     """(theme .sty, FramePlan per slide) from `adopt_theme.plan`, or None."""
     import copy
     from . import adopt_theme
@@ -4403,7 +4404,9 @@ def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | 
 def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, base, base_in_drive, log,
            missing: list, pictures: list, pptx: Path | None = None, found: dict | None = None, files=None):
     from .deck_ir import is_presentation
+    from .deck_ir_types import target_json
     from .inverse import run_pull
+    from .json_types import as_array
     pres = None
     data = Path(pptx).read_bytes() if pptx else None
     held = None
@@ -4418,11 +4421,11 @@ def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, bas
         thumbnails = None
         if files is not None and files.thumbnails:
             thumbnails, shots = given_thumbnails(doc, files.thumbnails, log)
-            log(f"thumbnails: {shots} of {len(doc.get('slides', []))} slides")
+            log(f"thumbnails: {shots} of {len(as_array(doc['slides'], 'the slides'))} slides")
             if found is not None:
                 found["thumbnails_read"] = shots
-        target = read_presentation(doc, work / "target-images", data, kept, thumbnails,
-                                   pptx_first=files is None or files.pictures is None)
+        target = target_json(read_presentation(doc, work / "target-images", data, kept, thumbnails,
+                                               files is None or files.pictures is None))
         pres = doc
         held = kept.get("pptx_pictures")
     elif doc is not None:
@@ -4431,14 +4434,14 @@ def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, bas
         if data is not None and pres is None:
             log(f"{Path(pptx).name} is not used: a saved target pairs its pictures through the "
                 f"presentation.json beside it, and there is none")
-        elif data is not None:
+        elif data is not None and pres is not None:
             from .deck_ir import pictures_from_pptx
             filled, held = pictures_from_pptx(target, pres, data, work / "target-images")
             log(f"{Path(pptx).name}: {filled} picture(s) the target lacked")
     else:
         from .deck_ir import read_deck
         kept: dict = {}
-        target = read_deck(deck, images=work / "target-images", foreign=True, keep=kept, pptx=data)
+        target = target_json(read_deck(deck, work / "target-images", None, None, None, True, kept, data))
         pres = kept.get("presentation")
         held = kept.get("pptx_pictures")
     if held is not None:
@@ -4450,11 +4453,12 @@ def _adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, bas
                 "read (download it again)")
         if found is not None:
             found["pptx_pictures"] = held
-    log(f"deck: {len(target['slides'])} slides read")
+    slide_count = len(as_array(target["slides"], "the target's slides"))
+    log(f"deck: {slide_count} slides read")
     if written_already(tex):
         raise SystemExit(f"{tex} exists already: adopt writes a new source tree (use `pull` to refine one)")
     bootstrap(target, tex, flow, missing)
-    log(f"wrote {tex} ({len(target['slides'])} frames)")
+    log(f"wrote {tex} ({slide_count} frames)")
     for line in missing_fonts_lines(missing):
         log(line)
     pictures.extend(pictures_missing(target))

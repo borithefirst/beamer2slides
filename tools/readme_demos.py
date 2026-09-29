@@ -101,7 +101,7 @@ def adopt_slide() -> None:
     keep = Model(pres).one(SLIDE).index
     pres["slides"] = [pres["slides"][keep]]
     size = json.loads((ROOT / "out" / "demo" / "deck.json").read_text(encoding="utf-8"))["slides"][0]["size"]
-    ir = deck_ir(pres, size, None, fetch_url, ADOPT / "images", foreign=True)
+    ir = deck_ir(pres, size, None, lambda url: fetch_url(url, None), ADOPT / "images", True, None)
     shutil.rmtree(ADOPT / "tree", ignore_errors=True)
     tex = ADOPT / "tree" / "main.tex"
     adopt.bootstrap(ir, tex)

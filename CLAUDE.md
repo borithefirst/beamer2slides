@@ -351,7 +351,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
 - **Adopt** (a deck a person built in Slides -> a beamer source, `adopt*.py`,
   docs/adopt-bench.md): absolute-first `slidebox` frames in a `slides.sty` vocabulary, a recovered
   theme, a label per frame from the slide's objectId, and a base so the source can be synced back
-  into that same deck (`adopt_sync.py`). An adopted source also converts: a marked shape Slides has
+  into that same deck (`adopt_sync.py`). deck_ir builds `TargetDeck` records (`target_json` its
+  one JSON writer; deck_fills/deck_thumbs still take element dicts through one bridge). adopt's
+  state is `adopt_context.AdoptContext` (inverse's Context plus every field adopt keeps), built by
+  `adopt_context()`: never set an attribute on a context that is not declared there. An adopted source also converts: a marked shape Slides has
   no shape for (line, freeform, picture fill, outline alone) is its picture at render
   (`marked.pictured_shapes`; the read-back compare sees keeps it a shape), and a `slidetable`'s
   mark says its grid (`/xs`, `/ys`, a cell's `/rs`/`/cs`), laid out as emit's table by

@@ -126,14 +126,14 @@ def test_a_read_deck_s_pictures_come_through_the_fetcher(tmp_path, fetcher):
     from beamer2slides import deck_ir
 
     fetcher(lambda url: png())
-    got = deck_ir.stash_picture("https://lh3/pic=s0", deck_ir.fetch_url, tmp_path)
-    assert got["format"] and (tmp_path / got["file"]).read_bytes() == png()
+    got = deck_ir.stash_picture("https://lh3/pic=s0", lambda u: deck_ir.fetch_url(u, None), tmp_path)
+    assert got.format and (tmp_path / got.file).read_bytes() == png()
 
     class Refused(Exception):
         pass
 
     fetcher(lambda url: (_ for _ in ()).throw(Refused("egress denied")))
-    assert "egress denied" in deck_ir.stash_picture("https://lh3/pic=s0", deck_ir.fetch_url, tmp_path)["error"]
+    assert "egress denied" in deck_ir.stash_picture("https://lh3/pic=s0", lambda u: deck_ir.fetch_url(u, None), tmp_path).error
 
 
 def _s15f16(x: float) -> bytes:
@@ -226,8 +226,8 @@ def test_a_picture_s_embedded_colour_profile_is_applied_and_dropped(tmp_path, fe
     data = png_with_icc((128, 128, 128), icc)
 
     fetcher(lambda url: data)
-    got = deck_ir.stash_picture("https://lh3/pic=s0", deck_ir.fetch_url, tmp_path)
-    saved = (tmp_path / got["file"]).read_bytes()
+    got = deck_ir.stash_picture("https://lh3/pic=s0", lambda u: deck_ir.fetch_url(u, None), tmp_path)
+    saved = (tmp_path / got.file).read_bytes()
     from PIL import Image
     import numpy as np
     out = Image.open(io.BytesIO(saved))
@@ -241,8 +241,8 @@ def test_a_picture_with_no_colour_profile_is_untouched(tmp_path, fetcher):
     from beamer2slides import deck_ir
 
     fetcher(lambda url: png())
-    got = deck_ir.stash_picture("https://lh3/pic=s0", deck_ir.fetch_url, tmp_path)
-    assert (tmp_path / got["file"]).read_bytes() == png()
+    got = deck_ir.stash_picture("https://lh3/pic=s0", lambda u: deck_ir.fetch_url(u, None), tmp_path)
+    assert (tmp_path / got.file).read_bytes() == png()
 
 
 def test_a_picture_s_source_url_on_any_host_goes_through_the_fetcher(tmp_path, fetcher):

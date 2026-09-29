@@ -38,7 +38,7 @@ import numpy as np
 from PIL import Image
 
 from beamer2slides.arrays import RGB, Mask, SignedRGB
-from beamer2slides.json_types import as_objects
+from beamer2slides.json_types import as_array, as_objects
 from beamer2slides.paths import CHECKOUT
 # The scores live in the package: pull's frame guard (`frame_guard`) scores its rounds with them too,
 # and the package never imports devtools.
@@ -133,7 +133,7 @@ def capture(pid: str, name: str, refresh: bool = False) -> Path:
     pages = as_objects(pres.get("slides", []), f"{name}'s slides")
     with ThreadPoolExecutor(3) as pool:
         list(pool.map(thumb, enumerate(pages, 1)))
-    write_target(folder, pres, fetch_url)
+    write_target(folder, pres, lambda url: fetch_url(url, None))
     print(f"{name}: {pres.get('title')!r}, {len(pages)} slides -> {folder}")
     return folder
 
@@ -166,7 +166,7 @@ def build_target(folder: Path, pres: dict | None = None, fetch=None) -> dict:
         path = folder / "slides" / f"{n + 1:03d}.png"
         return path if path.exists() else None
 
-    target = deck_ir(pres, fetch=get, images=folder / "images", foreign=True, thumbnails=thumbnail)
+    target = deck_ir(pres, None, None, get, folder / "images", True, thumbnail)
     if fetch is not None:
         known_path.write_text(json.dumps(known, indent=0), encoding="utf-8")
     return target
@@ -286,7 +286,8 @@ def load_target(folder: Path, slides: str | None, run: Path | None = None, files
         from beamer2slides.deck_ir import given_thumbnails, read_presentation
         pres = json.loads(files.presentation.read_text(encoding="utf-8"))
         thumbs, _ = given_thumbnails(pres, files.thumbnails, lambda *_: None)
-        target = read_presentation(pres, (run or folder) / "target-images", None, None, thumbs, pptx_first=False)
+        from beamer2slides.deck_ir_types import target_json
+        target = target_json(read_presentation(pres, (run or folder) / "target-images", None, None, thumbs, False))
         if run is not None:
             (run / "target.json").write_text(json.dumps(target, indent=1), encoding="utf-8")
     elif (folder / "presentation.json").exists():
@@ -298,7 +299,7 @@ def load_target(folder: Path, slides: str | None, run: Path | None = None, files
     if slides:
         a, _, b = slides.partition("-")
         lo, hi = int(a) - 1, int(b or a)
-        target["slides"] = target["slides"][lo:hi]
+        target["slides"] = as_array(target["slides"], "the target's slides")[lo:hi]
         target["first_slide"] = lo
     return target
 

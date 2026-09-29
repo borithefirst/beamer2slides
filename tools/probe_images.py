@@ -348,7 +348,7 @@ def main() -> None:
             if pe is None:
                 continue
             url = pe["image"]["contentUrl"]
-            data = fetch_url(url)
+            data = fetch_url(url, None)
             (work / f"import-{name}.bin").write_bytes(data)
             info = describe(data)
             row = {"edits": edits, "contentUrl_host": url.split("/")[2], "contentUrl_tail": url[-40:],
@@ -368,7 +368,7 @@ def main() -> None:
                 row["url_variants"] = {}
                 for label, v in url_variants(url):
                     try:
-                        row["url_variants"][label] = describe(fetch_url(v))
+                        row["url_variants"][label] = describe(fetch_url(v, None))
                     except Exception as e:
                         row["url_variants"][label] = str(e)[:80]
             rows[name] = row
@@ -452,7 +452,7 @@ def main() -> None:
             pe = by_id.get(oid)
             if pe is None:
                 continue
-            data = fetch_url(pe["image"]["contentUrl"])
+            data = fetch_url(pe["image"]["contentUrl"], None)
             info = describe(data)
             row = {"content": info, "props": props(pe),
                    "same_bytes_as_import": info["sha1"] == rows.get(name, rows["plain"])["content"]["sha1"]}

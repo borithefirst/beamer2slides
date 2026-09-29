@@ -982,7 +982,7 @@ def test_deck_ir_reads_a_number_and_small_caps_back_at_their_pdf_size():
     from beamer2slides.deck_ir import pdf_size
     for run in (run_of("1,281,167", 8.97, font="CMSS9"), run_of("Small caps", font="CMCSC10", family="serif", smallcaps=True)):
         family, z = FONTS(run, SCALE)
-        size, _ = pdf_size(FONTS, family, z, False, False, SCALE, text=run["text"], smallcaps=run["smallcaps"])
+        size, _ = pdf_size(FONTS, family, z, False, False, SCALE, None, run["text"], run["smallcaps"], False)
         assert size == pytest.approx(run["size"], rel=0.02), run["text"]
 
 
@@ -1105,7 +1105,7 @@ def test_deck_ir_reads_an_outlier_run_back_at_its_pdf_size():
                 run_of("THE QUICK BROWN FOX JUMPS OVER", font="CMBX10", family="serif", bold=True)):
         family, z = FONTS(run, SCALE)
         assert z != FONTS(dict(run, text="The quick brown fox jumps over"), SCALE)[1]
-        size, _ = pdf_size(FONTS, family, z, run["bold"], False, SCALE, text=run["text"])
+        size, _ = pdf_size(FONTS, family, z, run["bold"], False, SCALE, None, run["text"], False, False)
         assert size == pytest.approx(run["size"], rel=0.01), run["text"]
 
 

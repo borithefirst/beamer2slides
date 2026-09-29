@@ -311,11 +311,12 @@ def save(ref: str, out: Path, pptx: Path | None = None, log=print) -> dict:
     out.mkdir(parents=True, exist_ok=True)
     pid = presentation_id(ref)
     # Saved and read on as JSON, like a presentation.json read back from disk.
-    pres = as_json(execute(slides_service().presentations().get(presentationId=pid)), pid)
+    read = execute(slides_service().presentations().get(presentationId=pid))
+    pres = as_json(read, pid)
     (out / FOLDERS["presentation"]).write_text(json.dumps(pres, ensure_ascii=False), encoding="utf-8")
     log(f"presentation: {len(as_array(pres.get('slides', []), 'the presentation slides'))} slides")
-    thumbs = slide_thumbnails(pid, pres, out / FOLDERS["thumbnails"])
-    return record(out, pres, thumbs, picture_fetch(pres), pptx, log)
+    thumbs = slide_thumbnails(pid, read, out / FOLDERS["thumbnails"])
+    return record(out, pres, thumbs, picture_fetch(read, None, None, True, True), pptx, log)
 
 
 def record(out: Path, pres: dict, thumbs, fetch_pictures, pptx: Path | None = None, log=print) -> dict:
@@ -346,7 +347,7 @@ def record(out: Path, pres: dict, thumbs, fetch_pictures, pptx: Path | None = No
             for el in _images(target):
                 if el.get("source_url"):
                     try:
-                        fetch_url(el["source_url"])
+                        fetch_url(el["source_url"], None)
                     except Exception:  # noqa: BLE001 - the deck's own bytes are what a live read keeps then
                         pass
             adopt.bootstrap(target, Path(tmp) / "tree" / "main.tex", False, missing)

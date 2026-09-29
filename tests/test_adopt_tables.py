@@ -10,7 +10,8 @@ import re
 import pytest
 
 from beamer2slides import adopt
-from beamer2slides.deck_ir import cell_pad, deck_ir, guess_lines
+from beamer2slides.deck_ir import cell_pad, guess_lines
+from .irs import deck_ir
 
 from .test_adopt import at, pt, presentation
 
@@ -414,7 +415,7 @@ def test_a_one_word_cell_too_wide_for_its_insets_stays_on_its_line(tmp_path):
     assert "wrap" not in t and "word" not in t
     sty = macros(tmp_path)
     assert "\\def\\slides@t@check" in sty and "\\def\\slides@t@word" in sty
-    ctx = adopt.Context()
+    ctx = adopt.adopt_context()
     boxed = {"row": 0, "col": 0, "rowspan": 1, "colspan": 1, "valign": "top",
              "paragraphs": [{"align": "left", "runs": [{"text": "two words", "size": 10.0, "underline": True}]}]}
     opts, body = adopt.table_cell(boxed, ctx, "", None)

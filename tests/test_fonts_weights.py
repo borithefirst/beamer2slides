@@ -41,10 +41,12 @@ def test_a_small_optical_cut_is_measured_in_the_face_slides_draws():
 
 def read_back_runs(style: dict, foreign: bool = False) -> list[dict]:
     from beamer2slides.deck_ir import StyleResolver, text_paragraphs
+    from beamer2slides.deck_ir_types import run_json as element_run
     text = {"textElements": [{"startIndex": 0, "endIndex": 10, "paragraphMarker": {"style": {}}},
                              {"startIndex": 0, "endIndex": 10, "textRun": {"content": "June 2026\n", "style": style}}]}
     pe = {"objectId": "b2s_s001_t0", "shape": {"shapeType": "TEXT_BOX", "text": text}}
-    return [r for p in text_paragraphs(pe, text, StyleResolver({}), FONTS, SCALE, foreign=foreign) for r in p["runs"]]
+    return [element_run(r.run) for p in text_paragraphs(pe, text, StyleResolver({}), FONTS, SCALE, False, 1.0, 0.0, False, foreign)
+            for r in p.runs]
 
 
 def test_a_small_optical_cut_reads_back_regular():
@@ -67,7 +69,7 @@ def test_an_optically_heavier_footline_pulls_back_with_no_residual():
     # the way Google stores them (a weight of 700 and up reads back bold), read by deck_ir, compared
     import copy
     from beamer2slides.compare import TOL, compare, without_keys
-    from beamer2slides.deck_ir import deck_ir
+    from .irs import deck_ir
     from .slides_sim import simulate
     from .test_inverse import TEXT_KINDS, built_pdf
     from beamer2slides.classify import classify

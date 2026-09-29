@@ -18,7 +18,9 @@ for them, only a box; see `CUSTOM_AS`.
 import hashlib
 import math
 import re
+from pathlib import Path
 
+from .adopt_context import AdoptContext
 from .inverse import colour_name
 
 K = 0.5523                      # cubic Bezier control distance for a quarter circle, per radius
@@ -492,17 +494,17 @@ def options(opts: list[str]) -> str:
 REPEAT_STYLE = 3       # `readability.REPEAT_FRAMES`: what a source says three times it should name
 
 
-def styled(ctx, opts: list[str]) -> list[str]:
+def styled(ctx: AdoptContext, opts: list[str]) -> list[str]:
     """`opts` under the deck's name for that style where it has one, the keys themselves where not.
     While a survey is running (`survey_styles`) the style is counted instead, so that what gets a
     name is what the frames really write."""
     if not opts:
         return opts
     key = ",".join(opts)
-    count = getattr(ctx, "shape_style_count", None)
+    count = ctx.shape_style_count
     if count is not None:
         count[key] = count.get(key, 0) + 1
-    names = getattr(ctx, "shape_styles", None) or {}
+    names = ctx.shape_styles
     return [names[key]] if key in names else list(opts)
 
 
@@ -540,7 +542,7 @@ def style_word(keys: str, taken: set[str]) -> str:
     return name
 
 
-def survey_styles(target: dict, ctx, tree=None) -> None:
+def survey_styles(target: dict, ctx: AdoptContext, tree: Path | None) -> None:
     """Name the fill, outline, opacity and dashes the deck's shapes draw in again and again, so that
     a person reading a frame meets a shape's look once: `\\sliderect[card]{67.2,63,243.6,37.8}` where
     four TikZ keys stood, and the preamble says once what `card` is.
@@ -551,8 +553,9 @@ def survey_styles(target: dict, ctx, tree=None) -> None:
     import copy
     from .adopt import shape_block
     scratch = copy.deepcopy(ctx)
-    scratch.__dict__["shape_style_count"] = count = {}
-    scratch.__dict__.pop("shape_styles", None)
+    count: dict[str, int] = {}
+    scratch.shape_style_count = count
+    scratch.shape_styles = {}
     for slide in target.get("slides") or []:
         for el in slide.get("elements") or []:
             if el.get("kind") in ("shape", "text") and el.get("role") not in ("math", "icon"):
@@ -562,13 +565,13 @@ def survey_styles(target: dict, ctx, tree=None) -> None:
     for key, n in sorted(count.items(), key=lambda kv: (-kv[1], kv[0])):
         if n >= REPEAT_STYLE:
             names[key] = style_word(key, taken)
-    ctx.__dict__["shape_styles"] = names
+    ctx.shape_styles = names
 
 
-def shape_style_definitions(ctx) -> list[str]:
+def shape_style_definitions(ctx: AdoptContext) -> list[str]:
     """The `\\slideshapestyle` lines for the styles `survey_styles` named, most used first."""
     return [f"\\slideshapestyle{{{name}}}{{{keys}}}"
-            for keys, name in (getattr(ctx, "shape_styles", None) or {}).items()]
+            for keys, name in ctx.shape_styles.items()]
 
 
 # \slideshape{x,y,w,h}{paths}: a tikzpicture whose bounding box is the element's box, x bp from the

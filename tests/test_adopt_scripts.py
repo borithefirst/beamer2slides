@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from beamer2slides import adopt, scripts
-from beamer2slides.deck_ir import deck_ir
+from .irs import deck_ir
 from beamer2slides.inverse import Context, paragraphs_latex, runs_latex
 
 from .test_adopt import at, pt
@@ -243,7 +243,7 @@ def test_cjk_letters_do_not_count_against_the_font_they_are_typed_in(font_folder
     make_font(font_folder, "Arial", "Rubyis")
     make_font(font_folder, "Noto Sans JP", "日本語です")
     adopt._FAMILIES.clear()
-    lines = adopt.font_preamble(target_with("Ruby is 日本語です日本語です日本語です"), None)
+    lines = adopt.font_preamble(target_with("Ruby is 日本語です日本語です日本語です"), None, None)
     assert any(l.startswith("\\setsansfont{Arial}") for l in lines)
 
 
@@ -329,7 +329,7 @@ def test_arabic_in_the_decks_second_typeface_is_sent_to_a_font_that_has_it(font_
     adopt._FAMILIES.clear()
     t = deck_ir(deck(paragraph(latin * 3), paragraph("Shukran | " * 8 + "شكراً", font="Montserrat")),
                 foreign=True)
-    ctx = adopt.Context()
+    ctx = adopt.adopt_context()
     lines = adopt.font_preamble(t, None, ctx)
     command = ctx.font_switches["Montserrat"]
     assert f"\\babelfont{{{command[1:]}}}[" in "\n".join(lines)
@@ -349,7 +349,7 @@ def test_a_second_typeface_that_draws_all_its_letters_is_a_plain_newfontfamily(f
     adopt._FAMILIES.clear()
     t = deck_ir(deck(paragraph(latin * 3), paragraph("Shukran | " * 8 + arabic, font="Montserrat")),
                 foreign=True)
-    ctx = adopt.Context()
+    ctx = adopt.adopt_context()
     lines = adopt.font_preamble(t, None, ctx)
     line = next(l for l in lines if l.startswith(f"\\newfontfamily{ctx.font_switches['Montserrat']}{{Montserrat}}"))
     assert not any(l.startswith("\\babelfont") for l in lines)
@@ -367,7 +367,7 @@ def test_a_font_missing_after_a_second_typeface_is_still_named(font_folder):
     adopt._FAMILIES.clear()
     t = deck_ir(deck(paragraph(latin * 3), paragraph("Shukran | " * 8, font="Montserrat"),
                      paragraph("Nowhere to be found " * 2, font="Nowhere")), foreign=True)
-    ctx = adopt.Context()
+    ctx = adopt.adopt_context()
     adopt.font_preamble(t, None, ctx)
     assert "Montserrat" in ctx.font_switches
     assert "Nowhere" in [m["font"] for m in ctx.missing_fonts]
@@ -382,7 +382,7 @@ def test_a_font_only_a_table_is_set_in_gets_its_switch(font_folder):
     run = lambda text, font: {"paragraphs": [{"runs": [{"text": text, "font": font, "family": "sans", "size": 10}]}]}
     title = {"kind": "text", **run("Feline species " * 3, "Montserrat")}
     table = {"kind": "table", "table_cells": [run("Dense fur padded paws ", "Roboto") for _ in range(4)]}
-    ctx = adopt.Context()
+    ctx = adopt.adopt_context()
     lines = adopt.font_preamble({"slides": [{"elements": [title, table]}]}, None, ctx)
     assert "Roboto" in ctx.font_switches or any(l.startswith("\\setsansfont{Roboto}") for l in lines)
 

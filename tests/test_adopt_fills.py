@@ -8,7 +8,9 @@ import numpy as np
 import pytest
 
 from beamer2slides import adopt, adopt_shapes, deck_fills
-from beamer2slides.deck_ir import deck_ir, page_size_for
+from beamer2slides.deck_ir import page_size_for
+from .irs import deck_ir
+from beamer2slides.adopt_context import adopt_context
 from beamer2slides.inverse import Context
 
 from .test_adopt_tables import table
@@ -223,7 +225,7 @@ def test_a_gradient_bar_becomes_an_axis_shading():
     first, middle, last = (deck_fills.rgb(c) for c in g["colors"])
     assert np.abs(first - [8, 3, 2]).max() <= 8 and np.abs(last - [226, 89, 82]).max() <= 8
     assert np.abs(middle - [117, 46, 42]).max() <= 8
-    out = adopt_shapes.shape_block(els[0], Context(), "")
+    out = adopt_shapes.shape_block(els[0], adopt_context(), "")
     assert "left color=" in out and "right color=" in out and "middle color=" in out
     assert "fill=" not in out
 
@@ -327,7 +329,7 @@ def test_a_pie_takes_the_angles_its_thumbnail_shows():
     assert min(start, 360 - start) < 1 and abs(sweep - 90) < 1.5
     start, sweep = next(e for e in out if e["id"] == "u")["pie"]
     assert abs(start - 90) < 1 and abs(sweep - 270) < 1.5
-    block = adopt_shapes.shape_block(next(e for e in out if e["id"] == "t"), Context(), "")
+    block = adopt_shapes.shape_block(next(e for e in out if e["id"] == "t"), adopt_context(), "")
     assert "end angle=-" in block and "270" not in block
 
 
@@ -364,8 +366,8 @@ def test_a_rounded_rectangle_takes_the_corners_its_thumbnail_shows():
     lid = {"kind": "shape", "shape_type": "RECTANGLE", "bbox": [440, 90, 720, 300], "fill": "#db4437", "id": "l", "object": "l"}
     out = {e["id"]: e for e in deck_fills.settle([bar, pill, card], a.astype(np.int16), 1.0, "#ffffff")}
     assert out["b"]["corner_radius"] < 0.5 and abs(out["p"]["corner_radius"] - 30) < 1 and abs(out["c"]["corner_radius"] - 16) < 1
-    assert "rounded" not in adopt_shapes.shape_block(out["b"], Context(), "")
-    assert "rounded=30" in adopt_shapes.shape_block(out["p"], Context(), "")
+    assert "rounded" not in adopt_shapes.shape_block(out["b"], adopt_context(), "")
+    assert "rounded=30" in adopt_shapes.shape_block(out["p"], adopt_context(), "")
     card.pop("corner_radius")
     hidden = {e["id"]: e for e in deck_fills.settle([card, lid], a.astype(np.int16), 1.0, "#ffffff")}
     assert "corner_radius" not in hidden["c"]
@@ -744,11 +746,11 @@ def test_a_solid_the_thumbnail_disagrees_with_falls_through_to_the_layout_colour
 
 def test_the_gradient_is_drawn_as_a_clipped_shading():
     linear = {"type": "linear", "angle": -30.0, "colors": ["#0a0a0a", "#f05014"]}
-    out = adopt.background_gradient_latex(linear, [720, 405], Context(), "TEXT")
+    out = adopt.background_gradient_latex(linear, [720, 405], adopt_context(), "TEXT")
     assert "setbeamertemplate{background canvas}" in out and "shade[left color=" in out
     assert "rotate=-30" in out and "\\clip" in out and "TEXT" in out
     radial = {"type": "radial", "center": [300, 200], "radius": 350, "colors": ["#faf0c8", "#1e1e3c"]}
-    out2 = adopt.background_gradient_latex(radial, [720, 405], Context(), "TEXT")
+    out2 = adopt.background_gradient_latex(radial, [720, 405], adopt_context(), "TEXT")
     assert "shading=radial" in out2 and "inner color=" in out2 and "outer color=" in out2
 
 

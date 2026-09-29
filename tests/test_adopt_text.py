@@ -11,7 +11,7 @@ import re
 import pytest
 
 from beamer2slides import adopt
-from beamer2slides.deck_ir import deck_ir
+from .irs import deck_ir
 
 from .test_adopt import at, font_folder, pt, solid
 
@@ -233,13 +233,12 @@ def test_list_items_are_itemize_drawn_with_slides_bullets(tmp_path):
 def test_an_arial_bullet_on_words_of_another_face_is_arials_disc():
     """sc-functions' • bullets are Arial on News Gothic words: typed in the words' face, they came out
     as its six-point star. Drawn as Arial's disc; on Arial words, typed as they are."""
-    from beamer2slides.inverse import Context
     para = lambda font: {"bullet": {"text": "•", "font": "Arial", "size": 20.0, "color": "#000000"},
                          "runs": [{"text": "x", "font": font, "size": 20.0}]}
-    spec = adopt.bullet_spec(para("News Gothic MT"), Context(), 1.0, 0.0)
+    spec = adopt.bullet_spec(para("News Gothic MT"), adopt.adopt_context(), 1.0, 0.0)
     assert spec["mark"] and spec["label"] == ""
     assert "radius=2.48pt" in spec["mark"][1] and "baseline=-4.53pt" in spec["mark"][1]
-    typed = adopt.bullet_spec(para("Arial"), Context(), 1.0, 0.0)
+    typed = adopt.bullet_spec(para("Arial"), adopt.adopt_context(), 1.0, 0.0)
     assert not typed["mark"] and typed["label"] == "•"
 
 
@@ -496,10 +495,10 @@ def test_a_middle_aligned_box_stacks_its_last_paragraphs_space_below():
     el = {"kind": "text", "bbox": [0, 0, 100, 80], "box": {"scale": 2.0, "valign": "middle"},
           "paragraphs": [{"runs": [{"text": "add(6, 7)", "size": 15.0}], "slides": {}},
                          {"runs": [{"text": "???", "size": 24.0}], "slides": {"space_below": 10.0}}]}
-    text = adopt.text_box_latex(el, adopt.Context(), "")
+    text = adopt.text_box_latex(el, adopt.adopt_context(), "")
     assert "\\begin{slidebox}[middle,tail=5]" in text, text
     el["box"]["valign"] = "top"
-    assert "tail=" not in adopt.text_box_latex(el, adopt.Context(), "")
+    assert "tail=" not in adopt.text_box_latex(el, adopt.adopt_context(), "")
 
 
 def test_a_line_as_wide_as_its_box_stays_on_one_line():
@@ -1083,12 +1082,12 @@ def test_a_bulleted_right_to_left_first_line_is_measured_by_its_baseline():
 def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
     el = {"kind": "text", "bbox": [0, 0, 100, 50], "box": {"scale": 1.0, "valign": "top"},
           "paragraphs": [{"runs": [{"text": "Hi", "size": 10.0}], "slides": {}}]}
-    plain = adopt.text_box_latex(el, adopt.Context(), "")
+    plain = adopt.text_box_latex(el, adopt.adopt_context(), "")
     el["box"]["inset_y"] = 3.6
-    assert "inset=6.48" in plain and "inset=2.88" in adopt.text_box_latex(el, adopt.Context(), "")
+    assert "inset=6.48" in plain and "inset=2.88" in adopt.text_box_latex(el, adopt.adopt_context(), "")
     assert "{6.7,0,86.61,50}" in plain
     el["box"]["inset_x"] = 3.6
-    assert "{3.6,0,92.81,50}" in adopt.text_box_latex(el, adopt.Context(), "")
+    assert "{3.6,0,92.81,50}" in adopt.text_box_latex(el, adopt.adopt_context(), "")
 
 
 def test_the_thumbnails_measure_a_first_line_and_skip_what_crosses_it():
@@ -1138,7 +1137,7 @@ def test_a_paragraph_of_two_sizes_is_spaced_line_by_line():
           "paragraphs": [{"runs": [{"text": "First step: ", "size": 20.0},
                                    {"text": "two words", "size": 10.0}], "slides": {}},
                          {"runs": [{"text": "Next", "size": 10.0}], "slides": {}}]}
-    ctx = adopt.Context()
+    ctx = adopt.adopt_context()
     tex = adopt.text_box_latex(el, ctx, "")
     styles = "\n".join(adopt.style_definitions(ctx))
     small, big = adopt.line_box(10.0, 1.0), adopt.line_box(20.0, 1.0)
@@ -1168,7 +1167,7 @@ def test_the_gap_between_two_paragraphs_is_the_bigger_of_their_spaces():
     def gap(below, above):
         return adopt.text_box_latex(prose({"runs": [words("One")], "slides": {"space_below": below}},
                                           {"runs": [words("Two")], "slides": {"space_above": above}}),
-                                    adopt.Context(), "")
+                                    adopt.adopt_context(), "")
     assert gap(11, 11) == gap(11, 0) == gap(0, 11) != gap(0, 0)
 
 
@@ -1179,7 +1178,7 @@ def test_each_list_item_says_whether_its_side_of_the_gap_collapses():
         return adopt.text_box_latex(prose(
             {"runs": [words("One")], "bullet": bullet, "slides": {"space_below": 3, "spacing_mode": mode}},
             {"runs": [words("Two")], "bullet": bullet, "slides": {"spacing_mode": "COLLAPSE_LISTS"}}),
-            adopt.Context(), "")
+            adopt.adopt_context(), "")
     assert items("NEVER_COLLAPSE") != items("COLLAPSE_LISTS")
     assert "space=" not in items("COLLAPSE_LISTS"), "no space between the two line boxes"
     assert "\\item[space=3]" in items("NEVER_COLLAPSE")
@@ -1188,14 +1187,14 @@ def test_each_list_item_says_whether_its_side_of_the_gap_collapses():
 def test_a_bulleted_line_with_tabs_stands_them_on_the_default_stops():
     """creandum-board's "DD/MM/YY XX am<TAB><TAB>Other important date" items."""
     tex = adopt.text_box_latex(prose({"runs": [words("9 am\t\tBoard")], "bullet": {"text": "●", "size": 10.0},
-                                      "slides": {"indent_start": 18, "indent_first": 0}}), adopt.Context(), "")
+                                      "slides": {"indent_start": 18, "indent_first": 0}}), adopt.adopt_context(), "")
     assert tex.count("\\slidestab{36.00pt}") == 2 and "\\global\\slidesx=18.00pt" in tex
 
 
 def test_spaces_are_kept_however_many_and_as_wide_as_their_own_font():
     """ap-bio-stats' literal "•  " bullets: an Arial run in a Calibri paragraph whose two spaces stand
     the text off by two Arial spaces - folded into one Calibri space, every item's text came 2 pt short."""
-    ctx = adopt.Context()
+    ctx = adopt.adopt_context()
     ctx.font_switches = {"Arial": "\\adoptfontA"}
     base = {"size": 10.0, "font": "Calibri", "family": "sans", "bold": False, "italic": False, "color": None}
     tex = adopt.runs_tex([words("•  ", font="Arial"), words("Mathematically")], base, ctx, "\\break ")
@@ -1208,7 +1207,7 @@ def test_spaces_are_kept_however_many_and_as_wide_as_their_own_font():
 def test_a_superscript_does_not_raise_its_line_box():
     """ap-bio-stats slide 4: the strut inside "E = mc²"'s superscript made its line 4 pt taller."""
     el = prose({"runs": [words("Law ", size=20.0), words("E = mc"), words("2", script="super")], "slides": {}})
-    tex = adopt.text_box_latex(el, adopt.Context(), "")
+    tex = adopt.text_box_latex(el, adopt.adopt_context(), "")
     sup = tex[tex.index("\\textsuperscript"):]
     assert "\\slidestrut" not in sup.split("}")[0]
     assert re.search(r"\\slidestrut\{[\d.]+\}\{[\d.]+\}\\textsuperscript\{2\}", tex)

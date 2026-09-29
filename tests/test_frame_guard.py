@@ -14,8 +14,13 @@ from PIL import Image, ImageDraw
 
 from beamer2slides import inverse
 from beamer2slides.compare import TOL
-from beamer2slides.frame_guard import FrameGuard, Seen, slide_words, why, word_error
+from beamer2slides.deck_ir_types import parse_target
+from beamer2slides.frame_guard import (FrameGuard, Seen, slide_words, target_slide_words, target_thumbnails, why,
+                                       word_error)
 from beamer2slides.inverse import Candidate, Edit, converge, report
+from beamer2slides.page_score import json_boxes, target_boxes
+
+from .test_adopt_compiles import NAMES, SHOWCASE
 
 W, H = 400, 225                     # page, pt (= PDF pixels at 72 dpi)
 BOX = (40, 60, 360, 120)            # the text element's box
@@ -145,11 +150,12 @@ def test_without_the_guard_the_bad_edit_stays(tmp_path, stand_ins):
 def seen(round_: int, text: str, score: float, mode: str = "residuals", penalty: float | None = None) -> Seen:
     if penalty is None:
         penalty = -score if mode == "residuals" else 0.0
-    return Seen(round_, Path("main.tex"), (0, len(text)), text, (0,), mode, score, "f", penalty)
+    return Seen(round=round_, file=Path("main.tex"), span=(0, len(text)), text=text, slides=(0,), mode=mode,
+                score=score, label="f", penalty=penalty)
 
 
 def guard_with(*history: Seen) -> FrameGuard:
-    g = FrameGuard({"slides": []})
+    g = FrameGuard({"slides": []}, None, print)
     g.history[("label", "f")] = list(history)
     g.last_round = history[-1].round
     return g
@@ -192,3 +198,20 @@ def test_words_the_page_has_wrong():
                           {"kind": "image", "role": "math", "paragraphs": [{"runs": [{"text": "x"}]}]}]}
     assert slide_words(slide) == ["hello", "world", "again", "one", "two"]
     assert word_error(["a", "b", "b"], ["b", "c"]) == 3
+
+
+@pytest.mark.needs_decks(*(f"foreign/showcase/{n}/target.json" for n in NAMES))
+@pytest.mark.parametrize("name", NAMES)
+def test_a_typed_target_reads_as_its_json(name):
+    """The guard reads deck_ir's typed read (`inverse.typed_target`) where it once read the JSON: the
+    same words, the same boxes and the same thumbnails, slide by slide."""
+    d = json.loads((SHOWCASE / name / "target.json").read_text(encoding="utf-8"))
+    typed = parse_target(d)
+    assert len(typed.slides) == len(d["slides"])
+    for s, j in zip(typed.slides, d["slides"]):
+        assert target_slide_words(s) == slide_words(j)
+        assert target_boxes(s) == json_boxes(j)
+    a, b = target_thumbnails(typed), target_thumbnails(d)
+    assert (a is None) == (b is None)
+    if a is not None and b is not None:
+        assert [a(k) for k in range(-1, len(d["slides"]) + 1)] == [b(k) for k in range(-1, len(d["slides"]) + 1)]

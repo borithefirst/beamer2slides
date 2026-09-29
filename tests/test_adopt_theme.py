@@ -8,7 +8,7 @@ through `deck_ir` and `adopt.bootstrap` on the fixture of test_adopt.py.
 
 from beamer2slides import adopt, adopt_theme
 from beamer2slides.adopt_theme import plan, slot_parts, slug, theme_name
-from beamer2slides.deck_ir import deck_ir
+from .irs import deck_ir
 
 from .test_adopt import presentation, text_shape
 

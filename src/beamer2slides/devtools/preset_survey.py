@@ -35,6 +35,7 @@ from beamer2slides import deck_fills
 from beamer2slides.devtools import preset_geometry as pg
 from beamer2slides.deck_files import DeckFiles
 from beamer2slides.deck_ir import dim, given_thumbnails, read_presentation
+from beamer2slides.deck_ir_types import element_json
 from beamer2slides.paths import CHECKOUT
 
 DEFAULT_ROOTS = [CHECKOUT / "out" / "adopt-corpus", CHECKOUT / "out" / "adopt-hunt"]
@@ -62,13 +63,13 @@ def survey_deck(deck_dir: Path, images_dir: Path) -> list[dict]:
     of the deck at `deck_dir` (its `deck-files/`), scored against that slide's own thumbnail."""
     files = DeckFiles.load(deck_dir / "deck-files")
     pres = json.loads(files.presentation.read_text(encoding="utf-8"))
-    thumbnails, shots = given_thumbnails(pres, files.thumbnails, log=lambda *a: None)
+    thumbnails, shots = given_thumbnails(pres, files.thumbnails, lambda *a: None)
     if not shots:
         return []
-    target = read_presentation(pres, images_dir, thumbnails=thumbnails)
+    target = read_presentation(pres, images_dir, None, None, thumbnails, True)
     page_w = dim(pres["pageSize"]["width"])
     out: list[dict] = []
-    for n, slide in enumerate(target.get("slides", [])):
+    for n, slide in enumerate(target.slides):
         thumb_path = thumbnails(n)
         if thumb_path is None:
             continue
@@ -76,7 +77,7 @@ def survey_deck(deck_dir: Path, images_dir: Path) -> list[dict]:
         if a is None or page_w <= 0:
             continue
         px = a.shape[1] / page_w
-        elements = slide.get("elements") or []
+        elements = [element_json(e) for e in slide.elements]
         for k, el in enumerate(elements):
             if el.get("kind") != "shape":
                 continue

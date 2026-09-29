@@ -34,13 +34,19 @@ from __future__ import annotations
 
 import hashlib
 from collections import Counter
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, Union
+
+from .deck_ir_types import TargetDeck, TargetDiagram, TargetImage, TargetShape, TargetSlide, TargetTable, TargetText
+from .json_types import JsonObject, as_objects, as_optional_str
+from .typing_compat import assert_never
 
 if TYPE_CHECKING:
     from .compare import Comparison
     from .inverse import Candidate
+    from .pdf import PdfDocument
 
 # boxes score a frame may lose before it is put back: float noise only. At 0.005 five micro-corpus
 # slides kept rounds that cost 0.001-0.002 of ink and bought no residual (apps-edu-zh:9 13 -> 13,
@@ -55,7 +61,17 @@ RESIDUAL_WEIGHT = {
     "image": 1.0, "shape": 1.0, "style": 1.0, "bullet": 1.0, "align": 1.0, "notes": 1.0, "background": 1.0,
     "geometry": 0.5,
 }
-PUNCT = ".,;:!?()[]{}\"'«»“”‘’–—-•·"
+PUNCT = ".,;:!?()[]{}\"'«»“”‘’–—-•·"
+
+Thumbnails = Callable[[int], object]
+"""Google's picture of target slide j: a path, an image or an array (None: none)."""
+
+GuardSlide = Union[TargetSlide, JsonObject]
+"""A target slide: deck_ir's read, typed, or a deck.json slide (`tex_converge`'s target, a test's)."""
+
+Mode = Literal["ink", "residuals"]
+FrameKey = Union[tuple[Literal["label"], str], tuple[Literal["slides"], tuple[int, ...]]]
+"""A frame across rounds: by its label, else by the target slides compare paired with its pages."""
 
 
 def words_of(text: str) -> list[str]:
@@ -63,12 +79,12 @@ def words_of(text: str) -> list[str]:
     return [w for w in (w.strip(PUNCT).lower() for w in norm_text(text).split()) if w]
 
 
-def slide_words(slide: dict) -> list[str]:
+def slide_words(slide: JsonObject) -> list[str]:
     """The words a slide's IR says it shows: text boxes, tables and diagram labels (a formula or icon
     picture has none)."""
     from .compare import diagram_text, table_text
     out: list[str] = []
-    for el in slide.get("elements", []):
+    for el in as_objects(slide.get("elements", []), "a slide's elements"):
         if el.get("role") in ("math", "icon"):
             continue
         if el.get("kind") == "table":
@@ -76,9 +92,38 @@ def slide_words(slide: dict) -> list[str]:
         elif el.get("kind") == "diagram":
             out += [w for t in diagram_text(el) for w in words_of(t)]
         else:
-            for p in el.get("paragraphs") or []:
-                out += words_of("".join(r.get("text", "") for r in p.get("runs", []) if not r.get("hole")))
+            for p in as_objects(el.get("paragraphs") or [], "an element's paragraphs"):
+                out += words_of("".join(str(r.get("text", "")) for r in as_objects(p.get("runs", []), "runs")
+                                        if not r.get("hole")))
     return out
+
+
+def target_slide_words(slide: TargetSlide) -> list[str]:
+    """`slide_words` of deck_ir's typed read: the same words, from the same fields."""
+    from .compare import HOLE, norm_text
+    out: list[str] = []
+    for el in slide.elements:
+        if el.role in ("math", "icon"):
+            continue
+        match el:
+            case TargetTable():
+                out += [w for row in el.rows for c in row for w in words_of(norm_text(c))]
+            case TargetDiagram():
+                texts = [norm_text(" ".join("".join(HOLE if r.hole else r.text for r in runs) for runs in n.paragraphs))
+                         for n in el.nodes]
+                out += [w for t in sorted(t for t in texts if t) for w in words_of(t)]
+            case TargetText():
+                for p in el.paragraphs:
+                    out += words_of("".join(r.text for r in p.runs if not r.hole))
+            case TargetImage() | TargetShape():
+                pass                                # deck_ir gives neither paragraphs
+            case _:
+                assert_never(el)
+    return out
+
+
+def guard_slide_words(slide: GuardSlide) -> list[str]:
+    return target_slide_words(slide) if isinstance(slide, TargetSlide) else slide_words(slide)
 
 
 def word_error(want: list[str], got: list[str]) -> int:
@@ -87,15 +132,22 @@ def word_error(want: list[str], got: list[str]) -> int:
     return sum((a - b).values()) + sum((b - a).values())
 
 
-def target_thumbnails(target: dict):
+def guard_slides(target: TargetDeck | JsonObject) -> list[GuardSlide]:
+    if isinstance(target, TargetDeck):
+        return list(target.slides)
+    return list(as_objects(target.get("slides", []), "the target's slides"))
+
+
+def target_thumbnails(target: TargetDeck | JsonObject) -> Thumbnails | None:
     """The thumbnails a target carries (`deck_ir` keeps a foreign read's paths as `thumbnail`)."""
-    slides = target.get("slides", [])
-    if not any(s.get("thumbnail") for s in slides):
+    paths = [s.thumbnail if isinstance(s, TargetSlide) else as_optional_str(s.get("thumbnail"), "a slide's thumbnail")
+             for s in guard_slides(target)]
+    if not any(paths):
         return None
-    return lambda j: slides[j].get("thumbnail") if 0 <= j < len(slides) else None
+    return lambda j: paths[j] if 0 <= j < len(paths) else None
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class Seen:
     """One frame in one round."""
     round: int
@@ -103,20 +155,21 @@ class Seen:
     span: tuple[int, int]          # the frame's offsets in that round's text of `file`
     text: str
     slides: tuple[int, ...]        # target slides it stands for
-    mode: str                      # "ink" or "residuals"
+    mode: Mode
     score: float                   # higher is better: ink, or minus the penalty
     label: str | None
-    penalty: float = 0.0           # weighted residuals and wrong words, lower is better (both modes)
+    penalty: float                 # weighted residuals and wrong words, lower is better (both modes)
 
 
 class FrameGuard:
-    def __init__(self, target: dict, thumbnails=None, log=print):
-        self.target = target
+    def __init__(self, target: TargetDeck | JsonObject, thumbnails: Thumbnails | None,
+                 log: Callable[[str], object]) -> None:
+        self.slides = guard_slides(target)
         self.thumbnails = thumbnails
         self.log = log
-        self.history: dict[tuple, list[Seen]] = {}
-        self.slides_of: dict[tuple, tuple[int, ...]] = {}
-        self.cache: dict[tuple, float] = {}
+        self.history: dict[FrameKey, list[Seen]] = {}
+        self.slides_of: dict[FrameKey, tuple[int, ...]] = {}
+        self.cache: dict[tuple[int, str, str], float] = {}
         self._has_thumb: dict[int, bool] = {}
         self._words: dict[int, list[str]] = {}
         self.last_round = -1
@@ -134,24 +187,26 @@ class FrameGuard:
 
     def target_words(self, j: int) -> list[str]:
         if j not in self._words:
-            self._words[j] = slide_words(self.target["slides"][j])
+            self._words[j] = guard_slide_words(self.slides[j])
         return self._words[j]
 
-    def ink(self, doc, cand, ci: int | None, j: int, text: str, context: str) -> float:
+    def ink(self, doc: list[PdfDocument | None], cand: Candidate, ci: int | None, j: int, text: str,
+            context: str) -> float:
         """`boxes` of candidate slide `ci`'s page against target slide j's thumbnail (0: no page)."""
-        if ci is None:
+        if ci is None or self.thumbnails is None:
             return 0.0
         key = (j, text, context)
         if key not in self.cache:
-            from .page_score import boxes_score, load_thumbnail
+            from .page_score import boxes_score, load_thumbnail, slide_boxes
             ref = load_thumbnail(self.thumbnails(j))
             if ref is None:
                 self._has_thumb[j] = False
                 return 0.0
-            if doc[0] is None:
+            pdf = doc[0]
+            if pdf is None:
                 from .pdf import Document
-                doc[0] = Document(cand.pdf)
-            self.cache[key] = boxes_score(doc[0][cand.deck["slides"][ci]["page"]], ref, self.target["slides"][j])
+                pdf = doc[0] = Document(cand.pdf)
+            self.cache[key] = boxes_score(pdf[cand.deck["slides"][ci]["page"]], ref, slide_boxes(self.slides[j]))
         return self.cache[key]
 
     def penalty(self, cand: Candidate, comp: Comparison, cis: list[int], slides: tuple[int, ...]) -> float:
@@ -164,7 +219,7 @@ class FrameGuard:
 
     # ------------------------------------------------------------------ rounds
 
-    def observe(self, it: int, cand, comp) -> float | None:
+    def observe(self, it: int, cand: Candidate, comp: Comparison) -> float | None:
         """Remember every frame of round `it` with its score; the mean ink score of the frames scored
         by ink (None: none were)."""
         self.last_round = it
@@ -176,15 +231,15 @@ class FrameGuard:
                 by_frame.setdefault(f.index, []).append(ci)
                 frames[f.index] = f
         context = context_hash(cand)
-        doc = [None]
-        seen_keys: dict[tuple, int] = {}
-        entries: list[tuple[tuple, Seen]] = []
-        inks = []
+        doc: list[PdfDocument | None] = [None]
+        seen_keys: dict[FrameKey, int] = {}
+        entries: list[tuple[FrameKey, Seen]] = []
+        inks: list[float] = []
         try:
             for fi, cis in by_frame.items():
                 f = frames[fi]
                 paired = tuple(sorted({pairs[ci] for ci in cis if ci in pairs}))
-                key = ("label", f.label) if f.label else ("slides", paired)
+                key: FrameKey = ("label", f.label) if f.label else ("slides", paired)
                 if paired:
                     self.slides_of[key] = paired
                 slides = self.slides_of.get(key, ())
@@ -193,7 +248,8 @@ class FrameGuard:
                 seen_keys[key] = seen_keys.get(key, 0) + 1
                 text = cand.source.text(f.file)[f.start:f.end]
                 pen = self.penalty(cand, comp, cis, slides)
-                mode, score = "residuals", -pen
+                mode: Mode = "residuals"
+                score = -pen
                 if all(self.has_thumbnail(j) for j in slides):
                     of = {pairs[ci]: ci for ci in cis if ci in pairs}
                     if not of and len(cis) == len(slides):      # its pages paired with nothing: by order
@@ -202,10 +258,12 @@ class FrameGuard:
                     if all(self._has_thumb[j] for j in slides):  # every picture loaded after all
                         mode, score = "ink", ink
                         inks.append(ink)
-                entries.append((key, Seen(it, f.file, (f.start, f.end), text, slides, mode, score, f.label, pen)))
+                entries.append((key, Seen(round=it, file=f.file, span=(f.start, f.end), text=text, slides=slides,
+                                          mode=mode, score=score, label=f.label, penalty=pen)))
         finally:
-            if doc[0] is not None:
-                doc[0].close()
+            pdf = doc[0]
+            if pdf is not None:
+                pdf.close()
         for key, seen in entries:
             if seen_keys[key] == 1:            # two frames under one key: neither can be told apart
                 self.history.setdefault(key, []).append(seen)
@@ -213,8 +271,8 @@ class FrameGuard:
 
     def plan(self) -> list[tuple[Seen, Seen]]:
         """(the frame as the loop left it, its best round) for every frame to put back."""
-        out = []
-        for key, seen in self.history.items():
+        out: list[tuple[Seen, Seen]] = []
+        for seen in self.history.values():
             final = seen[-1]
             if final.round != self.last_round:
                 continue
@@ -241,7 +299,7 @@ def best_round(seen: list[Seen]) -> Seen:
     return min((s for s in good if s.penalty <= least + PENALTY_EPS), key=lambda s: s.round)
 
 
-def context_hash(cand) -> str:
+def context_hash(cand: Candidate) -> str:
     """Everything of the source outside its frames (the preamble above all): a frame's page is the same
     page while its own text and this stay the same."""
     h = hashlib.sha1()
