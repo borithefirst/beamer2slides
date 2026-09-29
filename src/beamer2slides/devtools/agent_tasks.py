@@ -34,7 +34,7 @@ from .agent_bench import HARM_PREFIX, Answer, Run, Scripted, Skip, call
 if TYPE_CHECKING:
     from typing_extensions import Unpack
 
-    from beamer2slides.doc_ir import Ir
+    from beamer2slides.doc_ir import Block, Ir
     from beamer2slides.google_types import (CreateFile, ExportFile, FileId, GetDocument, GetFile,
                                             UpdateDocument, UpdateFile)
 
@@ -1402,13 +1402,13 @@ def _markdown(world) -> str:
         for units, _ in doc_world.containers(tab.units, 1):
             line: list[str] = []
             for u in units:
-                if u["k"] == "c":
-                    line.append(u["c"])
-                elif u["k"] == "m":
+                if isinstance(u, doc_world.Char):
+                    line.append(u.unit)
+                elif isinstance(u, doc_world.ParaMark):
                     out.append("".join(line))
                     line = []
-                elif u["k"] == "o" and u["o"]["chip"] == "equation":
-                    line.append("$" + u["o"].get("latex", "") + "$")
+                elif isinstance(u, doc_world.Equation):
+                    line.append("$" + u.latex + "$")
             if line:
                 out.append("".join(line))
     return "\n\n".join(out)
@@ -1435,7 +1435,7 @@ def _document_text(world) -> str:
     from beamer2slides import doc_ir
     from beamer2slides.devtools import doc_world
 
-    ir = doc_world.read_ir(world)
+    ir = doc_world.read_ir(world, None, None)
     return "\n".join(doc_ir.runs_text(block.get("runs", []))
                      for part in doc_ir.parts(ir) for block in part["blocks"])
 
@@ -1481,7 +1481,7 @@ class DocsFixture:
     beside it) and a document nobody ever pushed, which is what `doc_adopt` is for.
     """
 
-    def __init__(self, ws, parts: list[dict], *, file: str = "doc.html", title: str = "The report",
+    def __init__(self, ws, parts: list[Ir], *, file: str = "doc.html", title: str = "The report",
                  comments: tuple = (), keyed: bool = True, base: bool = True) -> None:
         import json
 
@@ -1503,7 +1503,7 @@ class DocsFixture:
                 # Where a push puts it: the cache beside the file *and* Drive, whose copy
                 # is the one every checkout sees and the one `load_base` prefers.
                 docs.store_base(self.path, json.loads(json.dumps(ir)) | {"document": DOC_LIVE},
-                                self.drive, DOC_LIVE)
+                                self.drive, DOC_LIVE, previous=0, base_fid=None)
         self.install()
 
     # -- the seams ----------------------------------------------------------------------
@@ -1543,7 +1543,7 @@ class DocsFixture:
         from beamer2slides import doc_ir
         from beamer2slides.devtools import doc_world
 
-        found = doc_world.read_ir(self.world)["blocks"][block]
+        found = doc_world.read_ir(self.world, None, None)["blocks"][block]
         at = doc_ir._span(found)[0] + doc_ir.runs_text(found.get("runs", [])).index(was)
         self.world.apply([
             {"deleteContentRange": {"range": {"startIndex": at, "endIndex": at + len(was)}}},
@@ -1572,7 +1572,7 @@ class DocsFixture:
                 "revision": self.world.revision, **extra}
 
 
-def _docs_fixture(ws, parts: list[dict], **kw) -> DocsFixture:
+def _docs_fixture(ws, parts: list[Ir], **kw) -> DocsFixture:
     """The fixture, or `Skip` on a machine that cannot hold one at all."""
     try:
         import beamer2slides.doc_sync  # noqa: F401 - google-api-python-client is a hard import
@@ -1610,17 +1610,17 @@ def _requests(result: Result | None) -> int | None:
 
 # One block of a corpus document, named after the tag the canonical file writes it as.
 
-def _p(text: str) -> dict:
+def _p(text: str) -> Block:
     return {"kind": "paragraph", "runs": [{"text": text}]}
 
 
-def _h(text: str) -> dict:
+def _h(text: str) -> Block:
     return {"kind": "heading", "level": 1, "runs": [{"text": text}]}
 
 
 # ---------------------------------------------------------------------- live: the core loop
 
-CORE_BLOCKS = [
+CORE_BLOCKS: list[Block] = [
     _h("Release notes"),
     _p("The first paragraph, which the reader tightens in the document."),
     _p("The second paragraph, which the source rewrites in the file."),
@@ -1729,7 +1729,7 @@ def task_docs_core() -> Task:
 
 # ------------------------------------------------------------------- live: the open comment
 
-COMMENT_BLOCKS = [
+COMMENT_BLOCKS: list[Block] = [
     _h("Limitations"),
     _p("The limitations section says the model was rerun on the new data."),
     _p("A paragraph nobody has asked anything about."),
@@ -1828,7 +1828,7 @@ def task_docs_comment() -> Task:
 
 # ------------------------------------------------------------------------ live: no base at all
 
-BASE_BLOCKS = [
+BASE_BLOCKS: list[Block] = [
     _h("The handover"),
     _p("The first paragraph, which a reader has been editing all week."),
     _p("The second paragraph, which the source rewrites."),
@@ -1932,7 +1932,7 @@ def task_docs_no_base() -> Task:
 # ----------------------------------------------------------------------- live: a frozen run
 
 EQUATION = "E=m{c}^{2}"
-FROZEN_BLOCKS = [
+FROZEN_BLOCKS: list[Block] = [
     _h("The model"),
     {"kind": "paragraph", "runs": [{"text": "the value "}, {"chip": "equation", "text": EQUATION},
                                    {"text": " holds everywhere"}]},
@@ -2035,7 +2035,7 @@ def task_docs_frozen() -> Task:
 
 # ---------------------------------------------------------------------------- live: adopt
 
-ADOPT_BLOCKS = [
+ADOPT_BLOCKS: list[Block] = [
     _h("Team notes"),
     _p("A document somebody has been writing for a year."),
     _p("Nobody ever pushed a file into it, so it has no anchors and no base."),

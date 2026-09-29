@@ -277,7 +277,7 @@ def test_a_doc_s_inserted_pictures_come_through_the_fetcher(tmp_path, monkeypatc
         return answers[url]
 
     fetcher(fetch)
-    assert doc_sync.fetch_pictures(tmp_path / "talk.html", {}) == 2
+    assert doc_sync.fetch_pictures(tmp_path / "talk.html", {}, drive=None, ident=None) == 2
     assert runs[0]["src"] == "talk.media/kix.one.png" and runs[1]["src"] == "talk.media/kix.two.jpg"
     assert "src" not in runs[2]
 

@@ -40,22 +40,41 @@ self-consistent, and it is.
 The world renders itself as `documents.get` JSON (`read`), so the campaign reads it
 with the real `doc_ir.from_document`, the real `apply_keys` and the real
 `restore_unreadable`: the read side is under test too, not stubbed.
+
+**Every unit is immutable** (frozen dataclasses; a style or a measures dict is never
+written once it is in a unit). A request that restyles text or a paragraph puts a new
+unit where the old one stood. That is what lets two paragraphs share one `Para` after
+a split, and what lets `apply` take its spare copy by copying lists alone
+(`Tab.copied`): the copy shares every unit with the world, and only the lists a
+request splices are the copy's own.
 """
 
 from __future__ import annotations
 
-import copy
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Final, Literal
 
 from .. import doc_ir, doc_merge
-from ..doc_ir import Block, Ir, Measures, Run, Script, Style
-from ..google_types import (DocsBatchUpdateResponse, DocsDocumentTab, DocsEmbeddedObject,
-                            DocsInlineObject, DocsList, DocsNamedRanges, DocsNamedStyle,
-                            DocsNestingLevel, DocsParagraph, DocsParagraphElement,
-                            DocsParagraphStyle, DocsStructuralElement, DocsTab,
-                            DocsTableCell, DocsTableRow, DocsTabProperties, DocsTextStyle,
-                            Document)
+from ..doc_ir import Block, Ir, Mark, MarkApi, Measures, Run, Script, Style
+from ..google_types import (AddDocumentTabRequest, CreateNamedRangeRequest,
+                            CreateParagraphBulletsRequest, DeleteContentRangeRequest,
+                            DeleteNamedRangeRequest, DeleteParagraphBulletsRequest,
+                            DeleteTabRequest, DeleteTableLineRequest, DocsBatchUpdateResponse,
+                            DocsDimension, DocsDocumentTab, DocsEmbeddedObject,
+                            DocsInlineObject, DocsList, DocsLocation, DocsNamedRanges,
+                            DocsNamedStyle, DocsNestingLevel, DocsParagraph,
+                            DocsParagraphElement, DocsParagraphStyle, DocsRangeWrite,
+                            DocsRequest, DocsStructuralElement, DocsTab, DocsTableCell,
+                            DocsTableCellLocation, DocsTableRow, DocsTabProperties,
+                            DocsTextStyle, Document, InsertDateRequest,
+                            InsertInlineImageRequest, InsertPersonRequest, InsertTableRequest,
+                            InsertTableColumnRequest, InsertTableRowRequest, InsertTextRequest,
+                            UpdateDocumentTabPropertiesRequest, UpdateParagraphStyleRequest,
+                            UpdateTextStyleRequest)
 from ..json_types import JsonObject
+from ..typing_compat import assert_never
+
 
 # What the API answers a request it will not take. Google throws out the whole batch
 # with it, so this is never caught request by request (docs/google-docs.md).
@@ -68,9 +87,10 @@ class Refused(RuntimeError):
 # The glyphs `createParagraphBullets` leaves behind, by preset (measured: after one,
 # the list reads back as what it is, where an imported one never could).
 ORDERED_PRESET = "NUMBERED_DECIMAL_ALPHA_ROMAN"
-STYLE_FIELDS = {"bold": "bold", "italic": "italic", "underline": "underline",
-                "strikethrough": "strike"}
-MARK_KEYS = {key for key, _ in doc_ir.MARK_FIELDS}
+# What an equation costs in index units (measured on one document), and a table of
+# contents where the corpus does not say.
+EQUATION_SIZE: Final = 13
+TOC_SIZE: Final = 4
 
 
 # ---------------------------------------------------------------- UTF-16 code units
@@ -88,103 +108,174 @@ def utf16_units(text: str) -> list[str]:
     return [raw[i:i + 2].decode("utf-16-le", "surrogatepass") for i in range(0, len(raw), 2)]
 
 
-def text_of(units: list[str]) -> str:
+def text_of(units: Sequence[str]) -> str:
     return b"".join(u.encode("utf-16-le", "surrogatepass")
                     for u in units).decode("utf-16-le", "surrogatepass")
 
 
 # ---------------------------------------------------------------- the units of a tab
 
-def char(c: str, style: dict | None = None) -> dict:
-    return {"k": "c", "c": c, "s": dict(style or {})}
+@dataclass(frozen=True, kw_only=True)
+class Bullet:
+    """The list a paragraph is an item of, and how deep in it."""
+    list_id: str
+    level: int
 
 
-def mark(style: dict | None = None, para: dict | None = None) -> dict:
-    """A paragraph mark: the newline that ends a paragraph, and where its style lives."""
-    return {"k": "m", "c": "\n", "s": dict(style or {}),
-            "p": copy_para(para) if para else plain()}
+@dataclass(frozen=True, kw_only=True)
+class Para:
+    """A paragraph's own properties, held by the mark that ends it.
 
+    Shared, never copied: a paragraph split off another starts with the very same
+    `Para`, and a request that restyles one gives its mark a new one. Written in place,
+    as the dicts this used to be were, one `updateParagraphStyle` on one block set the
+    line spacing of every paragraph ever split from the same ancestor — and appending a
+    block writes "\\ntext", which is a split — while the next request to clear a measure
+    cleared it everywhere too, which is what made it invisible: the document stayed
+    self-consistent, so nothing but a judge asking "did the source's restyle arrive
+    *here*?" could see it (offline seed 110149).
 
-def copy_para(para: dict) -> dict:
-    """A paragraph's properties, copied deeply enough to be its own.
-
-    `dict(para)` is not deep enough: `measures` and `bullet` are dicts of their
-    own, so a paragraph split off another went on sharing the very dict its
-    measures live in, and `_do_updateParagraphStyle`, which writes into it,
-    wrote every paragraph ever split from the same ancestor. Splitting is how
-    every block a sync appends comes into the world ("\\ntext"), so one
-    `updateParagraphStyle` on one block set the line spacing of half the body -
-    and the next request to clear a measure cleared it everywhere too, which is
-    what made it invisible: the document stayed self-consistent, so nothing but
-    a judge asking "did the source's restyle arrive *here*?" could see it.
+    `measures` holds the properties of `doc_merge.PARAGRAPH_FIELDS` by their IR key,
+    absent meaning inherited rather than zero (`doc_ir._paragraph_measures`), and is
+    never written once it is here. `align` is the API's word (`START`, `CENTER`, ...),
+    None when the paragraph sets none of its own, which is not the same as START: it is
+    whatever the document's named style says, and saying it out loud is the only way
+    this world can hold a theme (`fuzz_docs.THEME`).
     """
-    out = dict(para)
-    out["measures"] = dict(para.get("measures") or {})
-    if para.get("bullet"):
-        out["bullet"] = dict(para["bullet"])
-    return out
+    named: str
+    align: str | None
+    bullet: Bullet | None
+    measures: Measures
 
 
-def plain() -> dict:
-    # `measures` holds the properties of `doc_merge.PARAGRAPH_FIELDS` by their IR
-    # key, absent meaning inherited rather than zero (`doc_ir._paragraph_measures`).
-    # `align` is None when the paragraph sets none of its own, which is not the same
-    # as START: it is whatever the document's named style says, and saying it out loud
-    # is the only way this world can hold a theme (`THEME`).
-    return {"named": "NORMAL_TEXT", "align": None, "bullet": None, "measures": {}}
+@dataclass(frozen=True, kw_only=True)
+class Char:
+    """One UTF-16 code unit of text, and the style it wears (never written in place)."""
+    unit: str
+    style: Style
 
 
-def obj(kind: str, **fields) -> dict:
-    """A chip, an equation or a picture: one index unit, except an equation."""
-    return {"k": "o", "o": {"chip": kind, "size": 13 if kind == "equation" else 1, **fields}}
+@dataclass(frozen=True, kw_only=True)
+class ParaMark:
+    """A paragraph mark: the newline that ends a paragraph, and where its style lives."""
+    style: Style
+    para: Para
 
 
-def table(rows: list[list[list[dict]]]) -> dict:
-    return {"k": "t", "rows": rows}
+@dataclass(frozen=True, kw_only=True)
+class Picture:
+    """An inline picture. `size_pt` is what `insertInlineImage` or the corpus asked for."""
+    id: str
+    uri: str
+    alt: str
+    size_pt: Sequence[float] | None
 
 
-def toc(size: int = 4) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class Person:
+    email: str
+    name: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class DateChip:
+    timestamp: str
+    display: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class Equation:
+    """Several index units (`EQUATION_SIZE`) that no request may cut into."""
+    latex: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class OtherChip:
+    """A chip the world only holds a place for: a rich link, a dropdown, a footnote."""
+    kind: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class Grid:
+    """A table. Its rows are the one place units hold units, and the lists a table
+    request splices: frozen as a unit, but its cells are written like a body."""
+    rows: list[list[list[Unit]]]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Toc:
     """A table of contents: generated content no request can make (docs/google-docs.md)."""
-    return {"k": "toc", "size": size}
+    size: int
 
 
-def unit_size(u: dict) -> int:
-    if u["k"] == "t":
-        return 1 + sum(1 + sum(1 + size(cell) for cell in row) for row in u["rows"])
-    if u["k"] == "toc":
-        return u["size"]
-    if u["k"] == "o":
-        return u["o"].get("size", 1)
+Chip = Picture | Person | DateChip | Equation | OtherChip
+Unit = Char | ParaMark | Chip | Grid | Toc
+
+
+@dataclass(frozen=True, kw_only=True)
+class Ranged:
+    """One named range of a tab, `[start, end)` in document indices."""
+    id: str
+    name: str
+    start: int
+    end: int
+
+
+def plain() -> Para:
+    return Para(named="NORMAL_TEXT", align=None, bullet=None, measures={})
+
+
+def new_mark() -> ParaMark:
+    """The mark of an empty paragraph with nothing set on it."""
+    return ParaMark(style={}, para=plain())
+
+
+def unit_size(u: Unit) -> int:
+    if isinstance(u, (Char, ParaMark)):
+        return 1
+    if isinstance(u, Grid):
+        return 1 + sum(1 + sum(1 + size(cell) for cell in row) for row in u.rows)
+    if isinstance(u, Toc):
+        return u.size
+    if isinstance(u, Equation):
+        return EQUATION_SIZE
     return 1
 
 
-def size(units: list[dict]) -> int:
+def size(units: Sequence[Unit]) -> int:
     return sum(unit_size(u) for u in units)
 
 
-def _row_size(row: list) -> int:
+def _row_size(row: Sequence[Sequence[Unit]]) -> int:
     """What a table row costs in document indices: the row itself, then each cell."""
     return 1 + sum(1 + size(cell) for cell in row)
 
 
-def _row_start(grid: dict, at: int, index: int) -> int:
+def _row_start(grid: Grid, at: int, index: int) -> int:
     """Where a row begins: the table's own unit, then every row in front of it."""
-    return at + 1 + sum(_row_size(row) for row in grid["rows"][:index])
+    return at + 1 + sum(_row_size(row) for row in grid.rows[:index])
 
 
-def _cell_start(grid: dict, at: int, row: int, column: int) -> int:
+def _cell_start(grid: Grid, at: int, row: int, column: int) -> int:
     """Where a cell begins: its row, then every cell in front of it in that row."""
     return (_row_start(grid, at, row) + 1
-            + sum(1 + size(cell) for cell in grid["rows"][row][:column]))
+            + sum(1 + size(cell) for cell in grid.rows[row][:column]))
 
 
-def text_units(text: str, style: dict | None = None) -> list[dict]:
-    return [char(c, style) for c in utf16_units(text)]
+def text_units(text: str, style: Style) -> list[Char]:
+    return [Char(unit=c, style=style) for c in utf16_units(text)]
+
+
+def _copied(units: Sequence[Unit]) -> list[Unit]:
+    """A unit list the copy owns: every list a request may splice is new, every unit
+    the world's own (they never change, so sharing them is safe)."""
+    return [Grid(rows=[[_copied(cell) for cell in row] for row in u.rows])
+            if isinstance(u, Grid) else u for u in units]
 
 
 # ---------------------------------------------------------------- finding an index
 
-def locate(units: list[dict], start: int, index: int) -> tuple[list, int] | None:
+def locate(units: list[Unit], start: int, index: int) -> tuple[list[Unit], int] | None:
     """The unit list that holds document index `index`, and the offset in it.
 
     None when the index names no place at all: a row's or a cell's own unit, or a spot
@@ -198,16 +289,16 @@ def locate(units: list[dict], start: int, index: int) -> tuple[list, int] | None
         if index == at:
             return units, i
         if at < index < at + n:
-            if u["k"] == "t":
+            if isinstance(u, Grid):
                 return _in_table(u, at, index)
             return None            # inside an equation, or inside a TOC
         at += n
     return (units, len(units)) if index == at else None
 
 
-def _in_table(t: dict, start: int, index: int) -> tuple[list, int] | None:
+def _in_table(t: Grid, start: int, index: int) -> tuple[list[Unit], int] | None:
     at = start + 1                                   # past the table's own unit
-    for row in t["rows"]:
+    for row in t.rows:
         at += 1                                      # the row's own unit
         for cell in row:
             at += 1                                  # the cell's own unit
@@ -218,7 +309,7 @@ def _in_table(t: dict, start: int, index: int) -> tuple[list, int] | None:
     return None
 
 
-def splits_a_pair(cont: list[dict], offset: int) -> bool:
+def splits_a_pair(cont: Sequence[Unit], offset: int) -> bool:
     """Whether an index falls *between* the two code units of an astral character.
 
     A judgement, not a measurement: `documents.get` answers in JSON, so a document
@@ -229,11 +320,14 @@ def splits_a_pair(cont: list[dict], offset: int) -> bool:
     handed a document no reader could have made, and the crash would surface far away
     (`doc_ir.utf16_len`, which encodes strictly, as the API's own JSON does).
     """
-    return offset < len(cont) and cont[offset]["k"] == "c" \
-        and 0xDC00 <= ord(cont[offset]["c"]) < 0xE000
+    if offset >= len(cont):
+        return False
+    u = cont[offset]
+    return isinstance(u, Char) and 0xDC00 <= ord(u.unit) < 0xE000
 
 
-def writable_spot(units: list[dict], index: int, request: dict) -> tuple[list, int]:
+def writable_spot(units: list[Unit], index: int,
+                  request: Mapping[str, object]) -> tuple[list[Unit], int]:
     """Where a request may write text, or `Refused`.
 
     Nothing can be inserted at a table's own index (measured), nor at a row's or a
@@ -248,21 +342,22 @@ def writable_spot(units: list[dict], index: int, request: dict) -> tuple[list, i
         raise Refused(request, f"index {index} is inside an astral character")
     if offset == len(cont):
         raise Refused(request, f"index {index} is past the segment's last paragraph mark")
-    if cont[offset]["k"] in ("t", "toc"):
-        what = "a table of contents" if cont[offset]["k"] == "toc" else "a table"
+    here = cont[offset]
+    if isinstance(here, (Grid, Toc)):
+        what = "a table of contents" if isinstance(here, Toc) else "a table"
         raise Refused(request, f"index {index} is {what}'s own index: nothing can be "
                                f"inserted there")
     return cont, offset
 
 
-def containers(units: list[dict], start: int):
+def containers(units: list[Unit], start: int) -> Iterator[tuple[list[Unit], int]]:
     """(unit list, its first index) for a body and for every table cell inside it."""
     yield units, start
     at = start
     for u in units:
-        if u["k"] == "t":
+        if isinstance(u, Grid):
             inner = at + 1
-            for row in u["rows"]:
+            for row in u.rows:
                 inner += 1
                 for cell in row:
                     inner += 1
@@ -271,19 +366,32 @@ def containers(units: list[dict], start: int):
         at += unit_size(u)
 
 
-def paragraphs(units: list[dict], start: int):
-    """(container, first offset, mark offset, first index, mark index) per paragraph,
-    in the body and in every cell."""
+@dataclass(frozen=True, kw_only=True)
+class ParagraphAt:
+    """One paragraph where it stands: its container, the offsets of its first unit and
+    of its mark there, the document indices of both, and the mark itself."""
+    units: list[Unit]
+    low: int
+    offset: int
+    first: int
+    at: int
+    mark: ParaMark
+
+
+def paragraphs(units: list[Unit], start: int) -> Iterator[ParagraphAt]:
+    """Every paragraph, in the body and in every cell."""
     for cont, at in containers(units, start):
         low, index = 0, at
         for i, u in enumerate(cont):
             index += unit_size(u)
-            if u["k"] == "m":
-                yield cont, low, i, index - 1 - _run_len(_own(cont[low:i])), index - 1
+            if isinstance(u, ParaMark):
+                yield ParagraphAt(units=cont, low=low, offset=i,
+                                  first=index - 1 - _run_len(_own(cont[low:i])),
+                                  at=index - 1, mark=u)
                 low = i + 1
 
 
-def _own(run: list[dict]) -> list[dict]:
+def _own(run: Sequence[Unit]) -> Sequence[Unit]:
     """The units of a paragraph's own run: whatever follows the last structural
     element in it.
 
@@ -299,12 +407,12 @@ def _own(run: list[dict]) -> list[dict]:
     for as long as it liked.
     """
     for i in range(len(run) - 1, -1, -1):
-        if run[i]["k"] in ("t", "toc"):
+        if isinstance(run[i], (Grid, Toc)):
             return run[i + 1:]
     return run
 
 
-def _run_len(units: list[dict]) -> int:
+def _run_len(units: Sequence[Unit]) -> int:
     return sum(unit_size(u) for u in units)
 
 
@@ -313,12 +421,21 @@ def _run_len(units: list[dict]) -> int:
 class Tab:
     """One tab: its units, its named ranges, its lists. The first tab is the body."""
 
-    def __init__(self, tab_id: str, title: str = "", parent: str | None = None,
-                 units: list | None = None):
+    def __init__(self, tab_id: str, title: str, parent: str | None,
+                 units: list[Unit]) -> None:
         self.id, self.title, self.parent = tab_id, title, parent
-        self.units: list[dict] = units if units is not None else [mark()]
-        self.named: list[dict] = []      # {"id", "name", "start", "end"}
-        self.lists: dict[str, dict] = {}  # listId -> {"ordered": bool | None}
+        self.units = units
+        self.named: list[Ranged] = []
+        # listId -> whether it is numbered; None is the list an import built, which
+        # cannot say (`_levels`).
+        self.lists: dict[str, bool | None] = {}
+
+    def copied(self) -> Tab:
+        """A copy a batch can be applied to and thrown away (`World.apply`)."""
+        out = Tab(self.id, self.title, self.parent, _copied(self.units))
+        out.named = list(self.named)
+        out.lists = dict(self.lists)
+        return out
 
     def size(self) -> int:
         return size(self.units)
@@ -330,9 +447,9 @@ class Tab:
 class World:
     """A whole document: tabs, named ranges, inline objects and a revision id."""
 
-    def __init__(self, title: str = "doc"):
+    def __init__(self, title: str) -> None:
         self.title = title
-        self.tabs: list[Tab] = [Tab("t.0")]
+        self.tabs: list[Tab] = [Tab("t.0", "", None, [new_mark()])]
         # The document's theme: `namedStyleType` -> what that style says, which is
         # what a paragraph setting nothing of its own shows. No request can write one
         # (there is none in the API), so nothing here ever changes it — it is here so
@@ -340,9 +457,18 @@ class World:
         # the one thing a document's look is made of. Empty for most corpus shapes.
         self.theme: dict[str, DocsNamedStyle] = {}
         self.revision = 1
-        # A plain counter, not itertools.count: a world is deep-copied all the time (the
+        # A plain counter, not itertools.count: a world is copied all the time (the
         # campaign tries a second sync on a copy), and copying an iterator is deprecated.
         self._ids = 0
+
+    def copied(self) -> World:
+        """A world of its own, as `copy.deepcopy` would make it, at the cost of its
+        lists: the units are shared, since nothing ever changes one."""
+        out = World(self.title)
+        out.tabs = [t.copied() for t in self.tabs]
+        out.theme = dict(self.theme)
+        out.revision, out._ids = self.revision, self._ids
+        return out
 
     # -- building
 
@@ -387,12 +513,12 @@ class World:
         content += _content_json(t.units, 1, objects)
         named: dict[str, DocsNamedRanges] = {}
         for ranged in t.named:
-            entry = named.setdefault(ranged["name"], {"name": ranged["name"], "namedRanges": []})
+            entry = named.setdefault(ranged.name, {"name": ranged.name, "namedRanges": []})
             entry.setdefault("namedRanges", []).append(
-                {"namedRangeId": ranged["id"], "name": ranged["name"],
-                 "ranges": [{"startIndex": ranged["start"], "endIndex": ranged["end"]}]})
-        lists: dict[str, DocsList] = {lid: {"listProperties": {"nestingLevels": _levels(info)}}
-                                      for lid, info in t.lists.items()}
+                {"namedRangeId": ranged.id, "name": ranged.name,
+                 "ranges": [{"startIndex": ranged.start, "endIndex": ranged.end}]})
+        lists: dict[str, DocsList] = {lid: {"listProperties": {"nestingLevels": _levels(ordered)}}
+                                      for lid, ordered in t.lists.items()}
         out: DocsDocumentTab = {"body": {"content": content}, "lists": lists,
                                 "inlineObjects": objects, "namedRanges": named}
         if self.theme:
@@ -407,31 +533,31 @@ class World:
     def latex(self) -> dict[tuple[str | None, int], str]:
         """Every equation's LaTeX, by (tab, start) — what `doc_ir.latex_of` digs out of
         the Markdown export on a live document, since `documents.get` says `{}`."""
-        out = {}
+        out: dict[tuple[str | None, int], str] = {}
         for t in self.tabs:
             for cont, at in containers(t.units, 1):
                 index = at
                 for u in cont:
-                    if u["k"] == "o" and u["o"]["chip"] == "equation":
-                        out[(None if t is self.tabs[0] else t.id, index)] = u["o"].get("latex", "")
+                    if isinstance(u, Equation):
+                        out[(None if t is self.tabs[0] else t.id, index)] = u.latex
                     index += unit_size(u)
         return out
 
     # -- writing
 
-    def apply(self, requests: Sequence[Mapping[str, object]]) -> DocsBatchUpdateResponse:
+    def apply(self, requests: Sequence[DocsRequest]) -> DocsBatchUpdateResponse:
         """One batch, all or nothing.
 
-        Any request is taken in, typed (`DocsRequest`, what a sync plans) or as a
-        browser would send it (a reader's edit in `fuzz_docs`): what the world has no
-        handler for is refused, as Google refuses it.
+        Every request is a `DocsRequest`, whether a sync planned it or a reader in
+        `fuzz_docs` sent it as a browser would: what the world has no handler for is
+        refused, as Google refuses it.
 
         Google applies a batch as a transaction: one request it refuses throws out
         every other one with it. A sync that plans a request the API will not take
         therefore writes *nothing* and dies, which is exactly the failure the Slides
         campaign could not see until its applier started consuming requests.
         """
-        spare = copy.deepcopy(self.tabs)
+        spare = [t.copied() for t in self.tabs]
         replies: list[JsonObject] = []
         try:
             for request in requests:
@@ -442,35 +568,72 @@ class World:
         self.revision += 1
         return {"replies": replies}
 
-    def _one(self, request: Mapping[str, object]) -> JsonObject | None:
-        name = next(iter(request), None)
-        handler = getattr(self, f"_do_{name}", None)
-        if handler is None or name is None:
-            raise Refused(request, "no such request in the v1 API")
-        return handler(request[name], request)
+    def _one(self, request: DocsRequest) -> JsonObject | None:
+        """The one request a `Request` holds, handed to its handler."""
+        if (insert := request.get("insertText")) is not None:
+            return self._do_insertText(insert, request)
+        if (delete := request.get("deleteContentRange")) is not None:
+            return self._do_deleteContentRange(delete, request)
+        if (text := request.get("updateTextStyle")) is not None:
+            return self._do_updateTextStyle(text, request)
+        if (paragraph := request.get("updateParagraphStyle")) is not None:
+            return self._do_updateParagraphStyle(paragraph, request)
+        if (bullets := request.get("createParagraphBullets")) is not None:
+            return self._do_createParagraphBullets(bullets, request)
+        if (unbullets := request.get("deleteParagraphBullets")) is not None:
+            return self._do_deleteParagraphBullets(unbullets, request)
+        if (create := request.get("createNamedRange")) is not None:
+            return self._do_createNamedRange(create, request)
+        if (unname := request.get("deleteNamedRange")) is not None:
+            return self._do_deleteNamedRange(unname, request)
+        if (table := request.get("insertTable")) is not None:
+            return self._do_insertTable(table, request)
+        if (row := request.get("insertTableRow")) is not None:
+            return self._do_insertTableRow(row, request)
+        if (column := request.get("insertTableColumn")) is not None:
+            return self._do_insertTableColumn(column, request)
+        if (unrow := request.get("deleteTableRow")) is not None:
+            return self._do_deleteTableRow(unrow, request)
+        if (uncolumn := request.get("deleteTableColumn")) is not None:
+            return self._do_deleteTableColumn(uncolumn, request)
+        if (image := request.get("insertInlineImage")) is not None:
+            return self._do_insertInlineImage(image, request)
+        if (person := request.get("insertPerson")) is not None:
+            return self._do_insertPerson(person, request)
+        if (date := request.get("insertDate")) is not None:
+            return self._do_insertDate(date, request)
+        if (add := request.get("addDocumentTab")) is not None:
+            return self._do_addDocumentTab(add, request)
+        if (props := request.get("updateDocumentTabProperties")) is not None:
+            return self._do_updateDocumentTabProperties(props, request)
+        if (drop := request.get("deleteTab")) is not None:
+            return self._do_deleteTab(drop, request)
+        raise Refused(request, "no such request in the v1 API")
 
     # -- text
 
-    def _do_insertText(self, arg: dict, request: dict) -> None:
-        tab = self.tab(arg["location"].get("tabId"))
-        self._insert(tab, arg["location"]["index"], arg["text"], request)
+    def _do_insertText(self, arg: InsertTextRequest, request: DocsRequest) -> None:
+        location = _location(arg.get("location"), "insertText")
+        tab = self.tab(location.get("tabId"))
+        self._insert(tab, location["index"], arg["text"], request)
 
-    def _insert(self, tab: Tab, index: int, text: str, request: dict) -> None:
+    def _insert(self, tab: Tab, index: int, text: str, request: DocsRequest) -> None:
         cont, offset = writable_spot(tab.units, index, request)
         style = _style_in_front(cont, offset)
         para = _paragraph_at(cont, offset)
-        new: list[dict] = []
-        pieces = text.split("\n")
-        for i, piece in enumerate(pieces):
+        new: list[Unit] = []
+        for i, piece in enumerate(text.split("\n")):
             if i:
-                new.append(mark(style, para))
+                new.append(ParaMark(style=style, para=para))
             new += text_units(piece, style)
         cont[offset:offset] = new
-        self._shift(tab, index, len(new))
+        self._shift(tab, index, len(new), None)
 
-    def _do_deleteContentRange(self, arg: dict, request: dict) -> None:
-        tab = self.tab(arg["range"].get("tabId"))
-        start, end = arg["range"]["startIndex"], arg["range"]["endIndex"]
+    def _do_deleteContentRange(self, arg: DeleteContentRangeRequest,
+                               request: DocsRequest) -> None:
+        span = arg["range"]
+        tab = self.tab(span.get("tabId"))
+        start, end = span["startIndex"], span["endIndex"]
         if end <= start or start < 1:
             raise Refused(request, f"the range [{start}, {end}) is empty or before the body")
         if end > tab.end():
@@ -487,219 +650,242 @@ class World:
             raise Refused(request, "Invalid deletion range: the segment's last paragraph "
                                    "mark cannot be deleted")
         for k in range(i, j):
-            if cont[k]["k"] == "m" and k + 1 < len(cont) \
-                    and cont[k + 1]["k"] in ("t", "toc") and k + 1 >= j:
-                what = "a table of contents" if cont[k + 1]["k"] == "toc" else "a table"
-                raise Refused(request, f"Invalid deletion range: the newline in front of "
-                                       f"{what} cannot be deleted")
+            if isinstance(cont[k], ParaMark) and k + 1 < len(cont) and k + 1 >= j:
+                after = cont[k + 1]
+                if isinstance(after, (Grid, Toc)):
+                    what = "a table of contents" if isinstance(after, Toc) else "a table"
+                    raise Refused(request, f"Invalid deletion range: the newline in front "
+                                           f"of {what} cannot be deleted")
         # Docs merges the two paragraphs keeping the *first* one's style: the mark that
         # survives takes the paragraph style of the first one deleted. That is the rule
         # `doc_merge._delete_range` leans on when a block gives up its neighbour's mark.
-        gone = next((u["p"] for u in cont[i:j] if u["k"] == "m"), None)
+        gone = next((u.para for u in cont[i:j] if isinstance(u, ParaMark)), None)
         del cont[i:j]
         if gone is not None:
-            after = next((u for u in cont[i:] if u["k"] == "m"), None)
-            if after is not None:
-                after["p"] = copy_para(gone)
+            for k in range(i, len(cont)):
+                survivor = cont[k]
+                if isinstance(survivor, ParaMark):
+                    cont[k] = ParaMark(style=survivor.style, para=gone)
+                    break
         self._shift(tab, start, -(end - start), end)
 
     # -- objects
 
-    def _do_insertInlineImage(self, arg: dict, request: dict) -> None:
-        picture = {"uri": arg["uri"]}
-        if arg.get("objectSize"):
-            picture["size_pt"] = [arg["objectSize"]["width"]["magnitude"],
-                                  arg["objectSize"]["height"]["magnitude"]]
-        self._object(arg["location"], obj("image", id=self.fresh("kix.i"), **picture), request)
-
-    def _do_insertPerson(self, arg: dict, request: dict) -> None:
-        email = arg["personProperties"]["email"]
-        self._object(arg["location"], obj("person", email=email, name=email.split("@")[0]),
+    def _do_insertInlineImage(self, arg: InsertInlineImageRequest,
+                              request: DocsRequest) -> None:
+        size_pt: tuple[float, float] | None = None
+        if dimensions := arg.get("objectSize"):
+            size_pt = (_magnitude(dimensions.get("width")),
+                       _magnitude(dimensions.get("height")))
+        self._object(_location(arg.get("location"), "insertInlineImage"),
+                     Picture(id=self.fresh("kix.i"), uri=arg["uri"], alt="", size_pt=size_pt),
                      request)
 
-    def _do_insertDate(self, arg: dict, request: dict) -> None:
-        stamp = arg["dateElementProperties"]["timestamp"]
-        self._object(arg["location"], obj("date", timestamp=stamp, display=stamp[:10]), request)
+    def _do_insertPerson(self, arg: InsertPersonRequest, request: DocsRequest) -> None:
+        email = arg["personProperties"].get("email")
+        if email is None:
+            raise ValueError("an insertPerson with no email: the world makes a chip of one")
+        self._object(arg["location"], Person(email=email, name=email.split("@")[0]), request)
 
-    def _object(self, location: dict, unit: dict, request: dict) -> None:
+    def _do_insertDate(self, arg: InsertDateRequest, request: DocsRequest) -> None:
+        stamp = arg["dateElementProperties"].get("timestamp")
+        if stamp is None:
+            raise ValueError("an insertDate with no timestamp: the world makes a chip of one")
+        self._object(arg["location"], DateChip(timestamp=stamp, display=stamp[:10]), request)
+
+    def _object(self, location: DocsLocation, unit: Chip, request: DocsRequest) -> None:
         tab = self.tab(location.get("tabId"))
         index = location["index"]
         cont, offset = writable_spot(tab.units, index, request)
         cont.insert(offset, unit)
-        self._shift(tab, index, unit_size(unit))
+        self._shift(tab, index, unit_size(unit), None)
 
     # -- styling
 
-    def _do_updateTextStyle(self, arg: dict, request: dict) -> None:
-        tab = self.tab(arg["range"].get("tabId"))
-        fields = [f.strip() for f in arg.get("fields", "").split(",") if f.strip()]
-        given = arg.get("textStyle", {})
-        # By the request's field names, which are strings: the IR key each one sets.
-        style: Mapping[str, object] = _ir_style(given)
-        for u, _ in self._chars(tab, arg["range"], request):
+    def _do_updateTextStyle(self, arg: UpdateTextStyleRequest, request: DocsRequest) -> None:
+        span = arg["range"]
+        tab = self.tab(span.get("tabId"))
+        # A field the world does not know is left alone: a request can name only the
+        # fields of `API_TO_IR`, which the merge writes and a reader's menus set.
+        fields = [field for f in arg["fields"].split(",")
+                  if (field := _TEXT_FIELD.get(f.strip())) is not None]
+        given = arg["textStyle"]
+        read = _ir_style(given)
+        for cont, k in _chars(tab, span["startIndex"], span["endIndex"]):
+            u = cont[k]
+            if not isinstance(u, (Char, ParaMark)):
+                continue
+            style: Style = {**u.style}
             for field in fields:
-                key = API_TO_IR.get(field, field)
-                if key in MARK_KEYS and field in given:
-                    # A mark named *with* a value, False included: `_ir_style` reads
-                    # a document, where False against no named style is nothing, but
-                    # a request means what it says.
-                    u["s"][key] = bool(given[field])
-                elif value := style.get(key):
-                    u["s"][key] = value
-                else:
-                    u["s"].pop(key, None)
-                    # A face named with no value puts the paragraph's own back, and
-                    # the file's older `code` spelling is a face like any other.
-                    if key == "font":
-                        u["s"].pop("code", None)
+                _restyle(style, field, given, read)
+            cont[k] = (Char(unit=u.unit, style=style) if isinstance(u, Char)
+                       else ParaMark(style=style, para=u.para))
 
-    def _do_updateParagraphStyle(self, arg: dict, request: dict) -> None:
-        style = arg.get("paragraphStyle", {})
-        fields = [f.strip() for f in arg.get("fields", "").split(",") if f.strip()]
-        for para in self._paragraphs(arg["range"]):
-            if "namedStyleType" in fields and style.get("namedStyleType"):
-                para["named"] = style["namedStyleType"]
+    def _do_updateParagraphStyle(self, arg: UpdateParagraphStyleRequest,
+                                 request: DocsRequest) -> None:
+        style = arg["paragraphStyle"]
+        fields = {f.strip() for f in arg["fields"].split(",") if f.strip()}
+        # Every property as the IR spells it, rounded as a read rounds it, so a value
+        # written and then read back is the same number and the merge sees no change
+        # nobody made.
+        said = doc_ir._paragraph_measures(style)
+        for found in self._paragraphs(arg["range"]):
+            para = found.mark.para
+            named, align = para.named, para.align
+            if "namedStyleType" in fields and (asked := style.get("namedStyleType")):
+                named = asked
             if "alignment" in fields:
                 # Named with no value: back to what the paragraph inherits, which is
                 # None here — not START. The difference is the whole of a theme.
-                para["align"] = style.get("alignment")
+                align = style.get("alignment")
             # A field the merge names without a value means "back to the default"
             # (`doc_merge.paragraph_style`), which is how a property the source
             # dropped goes away. Naming it and not applying that would make the
             # merge write it again for ever.
+            measures: Measures = {**para.measures}
             for key, api in doc_merge.PARAGRAPH_FIELDS:
                 if api not in fields:
                     continue
-                if api in style:
-                    para.setdefault("measures", {})[key] = _ir_measure(key, style[api])
+                value = doc_ir.read_measure(said, key) if api in style else None
+                if value is None:
+                    doc_ir.pop_measure(measures, key)
                 else:
-                    para.get("measures", {}).pop(key, None)
+                    doc_ir.set_measure(measures, key, value)
+            found.units[found.offset] = ParaMark(
+                style=found.mark.style,
+                para=Para(named=named, align=align, bullet=para.bullet, measures=measures))
 
-    def _do_createParagraphBullets(self, arg: dict, request: dict) -> None:
+    def _do_createParagraphBullets(self, arg: CreateParagraphBulletsRequest,
+                                   request: DocsRequest) -> None:
         tab = self.tab(arg["range"].get("tabId"))
-        ordered = arg.get("bulletPreset") == ORDERED_PRESET
-        fresh = None
-        for para in self._paragraphs(arg["range"]):
-            if para.get("bullet"):
+        ordered = arg["bulletPreset"] == ORDERED_PRESET
+        fresh: str | None = None
+        for found in self._paragraphs(arg["range"]):
+            para = found.mark.para
+            if para.bullet is not None:
                 # Measured: over a list the importer built, this keeps every item's
                 # nesting level and gives the list glyphs it can report from then on.
-                tab.lists[para["bullet"]["list"]] = {"ordered": ordered}
+                tab.lists[para.bullet.list_id] = ordered
                 continue
             if fresh is None:
                 fresh = self.fresh("kix.l")
-                tab.lists[fresh] = {"ordered": ordered}
-            para["bullet"] = {"list": fresh, "level": 0}
+                tab.lists[fresh] = ordered
+            _repara(found, Para(named=para.named, align=para.align,
+                                bullet=Bullet(list_id=fresh, level=0), measures=para.measures))
 
-    def _do_deleteParagraphBullets(self, arg: dict, request: dict) -> None:
-        for para in self._paragraphs(arg["range"]):
-            para["bullet"] = None
+    def _do_deleteParagraphBullets(self, arg: DeleteParagraphBulletsRequest,
+                                   request: DocsRequest) -> None:
+        for found in self._paragraphs(arg["range"]):
+            para = found.mark.para
+            _repara(found, Para(named=para.named, align=para.align, bullet=None,
+                                measures=para.measures))
 
-    def _chars(self, tab: Tab, span: dict, request: dict):
-        start, end = span["startIndex"], span["endIndex"]
-        for cont, at in containers(tab.units, 1):
-            index = at
-            for u in cont:
-                if start <= index < end and u["k"] in ("c", "m"):
-                    yield u, index
-                index += unit_size(u)
-
-    def _paragraphs(self, span: dict):
-        """The paragraph styles of every paragraph the range touches."""
+    def _paragraphs(self, span: DocsRangeWrite) -> Iterator[ParagraphAt]:
+        """Every paragraph the range touches."""
         tab = self.tab(span.get("tabId"))
         start, end = span["startIndex"], span["endIndex"]
-        for cont, low, i, first, at in paragraphs(tab.units, 1):
-            if first < end and start <= at:
-                yield cont[i]["p"]
+        for found in paragraphs(tab.units, 1):
+            if found.first < end and start <= found.at:
+                yield found
 
     # -- tables
 
-    def _do_insertTable(self, arg: dict, request: dict) -> None:
+    def _do_insertTable(self, arg: InsertTableRequest, request: DocsRequest) -> None:
         rows, columns = arg["rows"], arg["columns"]
         if rows < 1 or columns < 1:
             raise Refused(request, "a table needs a row and a column")
-        grid = table([[[mark()] for _ in range(columns)] for _ in range(rows)])
-        if "endOfSegmentLocation" in arg:
-            tab = self.tab(arg["endOfSegmentLocation"].get("tabId"))
+        grid = Grid(rows=[[[new_mark()] for _ in range(columns)] for _ in range(rows)])
+        if (at_end := arg.get("endOfSegmentLocation")) is not None:
+            tab = self.tab(at_end.get("tabId"))
             # Measured: a table written after everything keeps a paragraph after it,
             # because a document ends on one.
-            tab.units += [grid, mark()]
+            tab.units += [grid, new_mark()]
             return
-        tab = self.tab(arg["location"].get("tabId"))
-        index = arg["location"]["index"]
+        location = _location(arg.get("location"), "insertTable")
+        tab = self.tab(location.get("tabId"))
+        index = location["index"]
         cont, offset = writable_spot(tab.units, index, request)
         # `insertTable` splits the paragraph its index is in: what was before the index
         # stays a paragraph of its own, then comes the table, then the rest (measured).
         para = _paragraph_at(cont, offset)
-        cont[offset:offset] = [mark(_style_in_front(cont, offset), para), grid]
-        self._shift(tab, index, 1 + unit_size(grid))
+        cont[offset:offset] = [ParaMark(style=_style_in_front(cont, offset), para=para), grid]
+        self._shift(tab, index, 1 + unit_size(grid), None)
 
-    def _do_insertTableRow(self, arg: dict, request: dict) -> None:
+    def _do_insertTableRow(self, arg: InsertTableRowRequest, request: DocsRequest) -> None:
         # A row is written at its own index, not the table's: a named range on a cell
         # of a row *above* the new one does not move, and one below does. Shifting the
         # whole table by the row's size, which this did, moved every anchor in it.
-        tab, grid, at = self._grid(arg["tableCellLocation"], request)
         cell = arg["tableCellLocation"]
+        tab, grid, at = self._grid(cell, request)
         row = cell.get("rowIndex", 0) + (1 if arg.get("insertBelow") else 0)
         start = _row_start(grid, at, row)
-        grid["rows"].insert(row, [[mark()] for _ in grid["rows"][0]])
-        self._shift(tab, start, _row_size(grid["rows"][row]))
+        grid.rows.insert(row, [[new_mark()] for _ in grid.rows[0]])
+        self._shift(tab, start, _row_size(grid.rows[row]), None)
 
-    def _do_insertTableColumn(self, arg: dict, request: dict) -> None:
-        tab, grid, at = self._grid(arg["tableCellLocation"], request)
+    def _do_insertTableColumn(self, arg: InsertTableColumnRequest,
+                              request: DocsRequest) -> None:
         cell = arg["tableCellLocation"]
+        tab, grid, at = self._grid(cell, request)
         column = cell.get("columnIndex", 0) + (1 if arg.get("insertRight") else 0)
         # One cell per row, back to front: a cell written low down leaves the indices
         # above it alone, so each `_cell_start` is still the one the grid has.
-        for r in reversed(range(len(grid["rows"]))):
+        for r in reversed(range(len(grid.rows))):
             start = _cell_start(grid, at, r, column)
-            grid["rows"][r].insert(column, [mark()])
-            self._shift(tab, start, 1 + size(grid["rows"][r][column]))
+            grid.rows[r].insert(column, [new_mark()])
+            self._shift(tab, start, 1 + size(grid.rows[r][column]), None)
 
-    def _do_deleteTableRow(self, arg: dict, request: dict) -> None:
+    def _do_deleteTableRow(self, arg: DeleteTableLineRequest, request: DocsRequest) -> None:
         """A row's content goes out of the document, so everything after it moves up.
         Shifting by 0, which this did, left every anchor below the table one row's
         worth of units too high: the keys below a table the source regridded all slid
         onto the block above (chain-8 seeds 5099, 5167). Google moves them."""
-        tab, grid, at = self._grid(arg["tableCellLocation"], request)
-        if len(grid["rows"]) <= 1:
+        cell = arg["tableCellLocation"]
+        tab, grid, at = self._grid(cell, request)
+        if len(grid.rows) <= 1:
             raise Refused(request, "a table's last row cannot be deleted")
-        row = arg["tableCellLocation"].get("rowIndex", 0)
+        row = cell.get("rowIndex", 0)
         start = _row_start(grid, at, row)
-        self._shift(tab, start, -_row_size(grid["rows"][row]))
-        grid["rows"].pop(row)
+        self._shift(tab, start, -_row_size(grid.rows[row]), None)
+        grid.rows.pop(row)
 
-    def _do_deleteTableColumn(self, arg: dict, request: dict) -> None:
-        tab, grid, at = self._grid(arg["tableCellLocation"], request)
-        if len(grid["rows"][0]) <= 1:
+    def _do_deleteTableColumn(self, arg: DeleteTableLineRequest,
+                              request: DocsRequest) -> None:
+        cell = arg["tableCellLocation"]
+        tab, grid, at = self._grid(cell, request)
+        if len(grid.rows[0]) <= 1:
             raise Refused(request, "a table's last column cannot be deleted")
-        column = arg["tableCellLocation"].get("columnIndex", 0)
-        for r in reversed(range(len(grid["rows"]))):
+        column = cell.get("columnIndex", 0)
+        for r in reversed(range(len(grid.rows))):
             start = _cell_start(grid, at, r, column)
-            self._shift(tab, start, -(1 + size(grid["rows"][r][column])))
-            grid["rows"][r].pop(column)
+            self._shift(tab, start, -(1 + size(grid.rows[r][column])), None)
+            grid.rows[r].pop(column)
 
-    def _grid(self, where: dict, request: dict) -> tuple[Tab, dict, int]:
+    def _grid(self, where: DocsTableCellLocation,
+              request: DocsRequest) -> tuple[Tab, Grid, int]:
         tab = self.tab(where["tableStartLocation"].get("tabId"))
         at = where["tableStartLocation"]["index"]
         index = 1
         for u in tab.units:
-            if index == at and u["k"] == "t":
+            if index == at and isinstance(u, Grid):
                 return tab, u, at
             index += unit_size(u)
         raise Refused(request, f"no table starts at {at}")
 
     # -- named ranges
 
-    def _do_createNamedRange(self, arg: dict, request: dict) -> dict:
-        tab = self.tab(arg["range"].get("tabId"))
-        start, end = arg["range"]["startIndex"], arg["range"]["endIndex"]
+    def _do_createNamedRange(self, arg: CreateNamedRangeRequest,
+                             request: DocsRequest) -> JsonObject:
+        span = arg["range"]
+        tab = self.tab(span.get("tabId"))
+        start, end = span["startIndex"], span["endIndex"]
         if end <= start or start < 1 or end > tab.end():
             raise Refused(request, f"the range [{start}, {end}) is not in the body")
         ident = self.fresh("nr.")
-        tab.named.append({"id": ident, "name": arg["name"], "start": start, "end": end})
+        tab.named.append(Ranged(id=ident, name=arg["name"], start=start, end=end))
         return {"createNamedRange": {"namedRangeId": ident}}
 
-    def _do_deleteNamedRange(self, arg: dict, request: dict) -> None:
+    def _do_deleteNamedRange(self, arg: DeleteNamedRangeRequest,
+                             request: DocsRequest) -> None:
         """By id, or every range of a name: the two the API takes, one of them required.
         Which tabs it reaches is `tabsCriteria` where the request gives one. Where it
         does not, a *name* goes to every tab (the reference; unmeasured, and nothing
@@ -711,13 +897,14 @@ class World:
         ident, name = arg.get("namedRangeId"), arg.get("name")
         if not ident and not name:
             raise Refused(request, "deleteNamedRange needs a namedRangeId or a name")
-        wanted = set((arg.get("tabsCriteria") or {}).get("tabIds", []))
+        criteria = arg.get("tabsCriteria")
+        wanted = set(criteria.get("tabIds", [])) if criteria else set()
         tabs = ([t for t in self.tabs if t.id in wanted] if wanted
                 else self.tabs[:1] if ident else self.tabs)
         hit = False
         for tab in tabs:
             kept = [r for r in tab.named
-                    if not (r["id"] == ident if ident else r["name"] == name)]
+                    if not (r.id == ident if ident else r.name == name)]
             hit = hit or len(kept) != len(tab.named)
             tab.named = kept
         if not hit:
@@ -725,7 +912,7 @@ class World:
 
     # -- tabs
 
-    def _do_addDocumentTab(self, arg: dict, request: dict) -> dict:
+    def _do_addDocumentTab(self, arg: AddDocumentTabRequest, request: DocsRequest) -> JsonObject:
         """A new tab, at the index it asks for among its parent's ("when a tab is
         added at a given index, all subsequent tabs' indexes are incremented" — the
         discovery document). No index means the end, which is where one lands.
@@ -738,14 +925,14 @@ class World:
         nothing has ever written to. `doc_merge.tab_index` never asks for it — that
         is what this makes sure of.
         """
-        props = arg.get("tabProperties", {})
+        props = arg["tabProperties"]
         parent = props.get("parentTabId")
         ident = self.fresh("t.")
         siblings = [t for t in self.tabs if t.parent == parent]
         index = props.get("index")
         if parent is None and index == 0:
             raise Refused(request, "no tab can go in front of the first tab")
-        fresh = Tab(ident, props.get("title", ""), parent)
+        fresh = Tab(ident, props.get("title", ""), parent, [new_mark()])
         if index is None or index >= len(siblings):
             self.tabs.append(fresh)
         else:
@@ -753,11 +940,15 @@ class World:
         return {"addDocumentTab": {"tabProperties": {"tabId": ident,
                                                      "title": props.get("title", "")}}}
 
-    def _do_updateDocumentTabProperties(self, arg: dict, request: dict) -> None:
-        props = arg.get("tabProperties", {})
-        self.tab(props["tabId"]).title = props.get("title", "")
+    def _do_updateDocumentTabProperties(self, arg: UpdateDocumentTabPropertiesRequest,
+                                        request: DocsRequest) -> None:
+        props = arg["tabProperties"]
+        ident = props.get("tabId")
+        if ident is None:
+            raise ValueError("an updateDocumentTabProperties that names no tab")
+        self.tab(ident).title = props.get("title", "")
 
-    def _do_deleteTab(self, arg: dict, request: dict) -> None:
+    def _do_deleteTab(self, arg: DeleteTabRequest, request: DocsRequest) -> None:
         ident = arg["tabId"]
         if self.tabs[0].id == ident:
             raise Refused(request, "the first tab cannot be deleted")
@@ -765,17 +956,17 @@ class World:
 
     # -- named ranges follow the text
 
-    def _shift(self, tab: Tab, index: int, delta: int, end: int | None = None) -> None:
+    def _shift(self, tab: Tab, index: int, delta: int, end: int | None) -> None:
         """Google keeps every named range up to date as the text moves (measured).
 
         Half-open `[start, end)`: text typed at an anchor's first index falls outside
         it and pushes it along, text typed inside grows it, and an anchor whose text is
         all deleted disappears — which is the signal `doc_merge` reads as a block the
-        reader deleted.
+        reader deleted. `end` is where a delete ends, when it is not `index - delta`.
         """
-        alive = []
+        alive: list[Ranged] = []
         for ranged in tab.named:
-            low, high = ranged["start"], ranged["end"]
+            low, high = ranged.start, ranged.end
             if delta >= 0:
                 if index <= low:
                     low, high = low + delta, high + delta
@@ -786,26 +977,60 @@ class World:
                 low = low - max(0, min(low, cut_high) - cut_low)
                 high = high - max(0, min(high, cut_high) - cut_low)
             if high > low:
-                alive.append(ranged | {"start": low, "end": high})
+                alive.append(ranged if (low, high) == (ranged.start, ranged.end)
+                             else Ranged(id=ranged.id, name=ranged.name, start=low, end=high))
         tab.named = alive
+
+
+def _location(location: DocsLocation | None, what: str) -> DocsLocation:
+    """The index a request writes at. The API also takes the end of a segment for
+    these; nothing the world is sent says that, so a request that does is not modelled."""
+    if location is None:
+        raise ValueError(f"an {what} with no location: the world writes at an index only")
+    return location
+
+
+def _magnitude(dimension: DocsDimension | None) -> float:
+    if dimension is None or (magnitude := dimension.get("magnitude")) is None:
+        raise ValueError("an objectSize without both its magnitudes")
+    return magnitude
+
+
+def _chars(tab: Tab, start: int, end: int) -> Iterator[tuple[list[Unit], int]]:
+    """Where every character and mark in `[start, end)` stands: its container and offset."""
+    for cont, at in containers(tab.units, 1):
+        index = at
+        for k, u in enumerate(cont):
+            if start <= index < end and isinstance(u, (Char, ParaMark)):
+                yield cont, k
+            index += unit_size(u)
+
+
+def _repara(found: ParagraphAt, para: Para) -> None:
+    """Give a paragraph new properties: a new mark where its mark stood."""
+    found.units[found.offset] = ParaMark(style=found.mark.style, para=para)
 
 
 # ---------------------------------------------------------------- style translation
 
-def _style_in_front(cont: list[dict], offset: int) -> dict:
+def _style_in_front(cont: Sequence[Unit], offset: int) -> Style:
     """The style Docs gives text typed here: the character in front of it (measured)."""
-    if offset and cont[offset - 1]["k"] in ("c", "m"):
-        return dict(cont[offset - 1]["s"])
-    if offset < len(cont) and cont[offset]["k"] in ("c", "m"):
-        return dict(cont[offset]["s"])
+    if offset:
+        before = cont[offset - 1]
+        if isinstance(before, (Char, ParaMark)):
+            return before.style
+    if offset < len(cont):
+        here = cont[offset]
+        if isinstance(here, (Char, ParaMark)):
+            return here.style
     return {}
 
 
-def _paragraph_at(cont: list[dict], offset: int) -> dict:
+def _paragraph_at(cont: Sequence[Unit], offset: int) -> Para:
     """The paragraph style at this offset: the mark that terminates it."""
     for u in cont[offset:]:
-        if u["k"] == "m":
-            return copy_para(u["p"])
+        if isinstance(u, ParaMark):
+            return u.para
     return plain()
 
 
@@ -818,38 +1043,94 @@ def _ir_style(text_style: DocsTextStyle) -> Style:
     comparison in the oracle was against a reader nobody uses. The world's whole
     claim is that it reads what `doc_ir` reads, so it has to call it.
 
-    No `default`: a named style is subtracted from what a *document* reports, and
-    the world's documents carry no `namedStyles` — nothing here sets a property
-    that only repeats one.
+    No named style: one is subtracted from what a *document* reports, and the world's
+    documents carry no `namedStyles` — nothing here sets a property that only repeats
+    one.
     """
-    return doc_ir._style_of(text_style)
+    return doc_ir._style_of(text_style, None)
 
 
 # The `updateTextStyle` fields the merge writes, and the IR key each one sets
 # (`doc_merge.MANAGED`). The world applies a request field by field, so a field it
 # does not know would be silently ignored and the read-back would never show it.
-API_TO_IR = {"bold": "bold", "italic": "italic", "underline": "underline",
-             "strikethrough": "strike", "foregroundColor": "color",
-             "backgroundColor": "highlight", "link": "link",
-             "weightedFontFamily": "font", "fontSize": "fontsize",
-             "smallCaps": "smallcaps", "baselineOffset": "script"}
+TextField = Literal["bold", "italic", "underline", "strikethrough", "foregroundColor",
+                    "backgroundColor", "link", "weightedFontFamily", "fontSize", "smallCaps",
+                    "baselineOffset"]
+API_TO_IR: Final[dict[TextField, str]] = {
+    "bold": "bold", "italic": "italic", "underline": "underline",
+    "strikethrough": "strike", "foregroundColor": "color",
+    "backgroundColor": "highlight", "link": "link",
+    "weightedFontFamily": "font", "fontSize": "fontsize",
+    "smallCaps": "smallcaps", "baselineOffset": "script"}
+_TEXT_FIELD: Final[dict[str, TextField]] = {field: field for field in API_TO_IR}
+_MARK_OF: Final[dict[MarkApi, Mark]] = {api: key for key, api in doc_ir.MARK_FIELDS}
 
 
-def _ir_measure(key: str, value):
-    """One `paragraphStyle` property as the IR spells it — the inverse of
-    `doc_merge._set_paragraph`, rounded as `doc_ir._paragraph_measures` rounds it,
-    so a value written and then read back is the same number and the merge does not
-    see a change nobody made."""
-    if key == "line_spacing":
-        return round(float(value) / 100, 3)
-    if key == "shading":
-        rgb = (value or {}).get("backgroundColor", {}).get("color", {}).get("rgbColor")
-        return doc_ir._hex(rgb) if rgb else None
-    if key in doc_ir.PARAGRAPH_FLAGS:
-        return True if value else None
-    if key in doc_ir.BORDER_SIDES:
-        return doc_ir._border(value)
-    return doc_ir._points(value)
+def _restyle(style: Style, field: TextField, given: DocsTextStyle, read: Style) -> None:
+    """What one named field of an `updateTextStyle` does to one character's style.
+
+    A mark named *with* a value is set to it, False included: `_ir_style` reads a
+    document, where False against no named style is nothing, but a request means what
+    it says. Anything named with no value is taken off, which is the API's "back to
+    what you inherit"."""
+    match field:
+        case "bold" | "italic" | "underline" | "strikethrough" | "smallCaps":
+            key = _MARK_OF[field]
+            if field in given:
+                doc_ir._set_mark(style, key, bool(doc_ir._mark_api(given, field)))
+            else:
+                _drop_mark(style, key)
+        case "foregroundColor":
+            if color := read.get("color"):
+                style["color"] = color
+            else:
+                style.pop("color", None)
+        case "backgroundColor":
+            if highlight := read.get("highlight"):
+                style["highlight"] = highlight
+            else:
+                style.pop("highlight", None)
+        case "link":
+            if link := read.get("link"):
+                style["link"] = link
+            else:
+                style.pop("link", None)
+        case "weightedFontFamily":
+            if font := read.get("font"):
+                style["font"] = font
+            else:
+                # A face named with no value puts the paragraph's own back, and the
+                # file's older `code` spelling is a face like any other.
+                style.pop("font", None)
+                style.pop("code", None)
+        case "fontSize":
+            if fontsize := read.get("fontsize"):
+                style["fontsize"] = fontsize
+            else:
+                style.pop("fontsize", None)
+        case "baselineOffset":
+            if script := read.get("script"):
+                style["script"] = script
+            else:
+                style.pop("script", None)
+        case _:
+            assert_never(field)
+
+
+def _drop_mark(style: Style, key: Mark) -> None:
+    match key:
+        case "bold":
+            style.pop("bold", None)
+        case "italic":
+            style.pop("italic", None)
+        case "underline":
+            style.pop("underline", None)
+        case "strike":
+            style.pop("strike", None)
+        case "smallcaps":
+            style.pop("smallcaps", None)
+        case _:
+            assert_never(key)
 
 
 def _api_measures(measures: Measures) -> DocsParagraphStyle:
@@ -899,7 +1180,7 @@ def _api_style(style: Style) -> DocsTextStyle:
 SCRIPT_API: dict[Script, str] = {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT", "none": "NONE"}
 
 
-def nest(world: "World", span: dict, level: int) -> bool:
+def nest(world: World, span: DocsRangeWrite, level: int) -> bool:
     """Tab and Shift-Tab in a list — the one reader act that is no request at all.
 
     `createParagraphBullets` says nothing about a nesting level: Docs reads one off
@@ -914,23 +1195,26 @@ def nest(world: "World", span: dict, level: int) -> bool:
     Answers whether anything moved, since the caller counts a draw that did nothing.
     """
     moved = False
-    for para in world._paragraphs(span):
-        if para.get("bullet") and para["bullet"]["level"] != level:
-            para["bullet"]["level"] = level
+    for found in world._paragraphs(span):
+        para = found.mark.para
+        if para.bullet is not None and para.bullet.level != level:
+            _repara(found, Para(named=para.named, align=para.align,
+                                bullet=Bullet(list_id=para.bullet.list_id, level=level),
+                                measures=para.measures))
             moved = True
     return moved
 
 
-def _levels(info: dict) -> list[DocsNestingLevel]:
+def _levels(ordered: bool | None) -> list[DocsNestingLevel]:
     """A list's nesting levels as `documents.get` reports them.
 
     `ordered: None` is the list Drive's HTML importer built: every level comes back
     `GLYPH_TYPE_UNSPECIFIED`, for `<ul>` and `<ol>` alike, which is why the file has to
     say which it is (`doc_ir._ordered`, `doc_merge.restore_unreadable`).
     """
-    if info.get("ordered") is None:
+    if ordered is None:
         return [{"glyphType": "GLYPH_TYPE_UNSPECIFIED"} for _ in range(9)]
-    if info["ordered"]:
+    if ordered:
         return [{"glyphType": g, "glyphFormat": "%0."}
                 for g in ("DECIMAL", "ALPHA", "ROMAN") for _ in range(3)]
     return [{"glyphSymbol": g} for g in "●○■" for _ in range(3)]
@@ -938,18 +1222,18 @@ def _levels(info: dict) -> list[DocsNestingLevel]:
 
 # ---------------------------------------------------------------- documents.get JSON
 
-def _content_json(units: list[dict], start: int,
+def _content_json(units: Sequence[Unit], start: int,
                   objects: dict[str, DocsInlineObject]) -> list[DocsStructuralElement]:
     out: list[DocsStructuralElement] = []
     at, low = start, start
-    run: list[dict] = []
+    run: list[Unit] = []
     for u in units:
-        if u["k"] in ("t", "toc"):
+        if isinstance(u, (Grid, Toc)):
             if run:
                 out.append(_paragraph_json(run, low, objects))
                 run = []
             n = unit_size(u)
-            out.append(_table_json(u, at, objects) if u["k"] == "t" else
+            out.append(_table_json(u, at, objects) if isinstance(u, Grid) else
                        {"startIndex": at, "endIndex": at + n,
                         "tableOfContents": {"content": []}})
             at += n
@@ -957,19 +1241,20 @@ def _content_json(units: list[dict], start: int,
             continue
         run.append(u)
         at += unit_size(u)
-        if u["k"] == "m":
+        if isinstance(u, ParaMark):
             out.append(_paragraph_json(run, low, objects))
-            run, low = [], at
+            run = []
+            low = at
     if run:
         out.append(_paragraph_json(run, low, objects))
     return out
 
 
-def _paragraph_json(run: list[dict], start: int,
+def _paragraph_json(run: Sequence[Unit], start: int,
                     objects: dict[str, DocsInlineObject]) -> DocsStructuralElement:
     elements: list[DocsParagraphElement] = []
     held: list[str] = []          # code units waiting to become one text run
-    held_style: Style | None = None
+    held_style: DocsTextStyle = {}
     at = start
 
     def flush(end: int) -> None:
@@ -979,70 +1264,71 @@ def _paragraph_json(run: list[dict], start: int,
             # index units here and only become one Python character again together.
             elements.append({"startIndex": end - len(held), "endIndex": end,
                              "textRun": {"content": text_of(held),
-                                         "textStyle": _api_style(held_style or {})}})
-        held, held_style = [], None
+                                         "textStyle": held_style}})
+        held = []
+        held_style = DocsTextStyle()
 
     for u in run:
-        if u["k"] == "o":
-            flush(at)
-            elements.append(_object_json(u["o"], at, objects))
-            at += unit_size(u)
+        if isinstance(u, (Char, ParaMark)):
+            style = _api_style(u.style)
+            if held and style != held_style:
+                flush(at)
+            held.append(u.unit if isinstance(u, Char) else "\n")
+            held_style = style
+            at += 1
             continue
-        style = _api_style(u["s"])
-        if held and style != _api_style(held_style or {}):
-            flush(at)
-        held.append(u["c"])
-        held_style = u["s"]
-        at += 1
+        if isinstance(u, (Grid, Toc)):
+            raise AssertionError("a table inside a paragraph's run")
+        flush(at)
+        elements.append(_object_json(u, at, objects))
+        at += unit_size(u)
     flush(at)
-    para = run[-1]["p"] if run and run[-1]["k"] == "m" else plain()
+    last = run[-1] if run else None
+    para = last.para if isinstance(last, ParaMark) else plain()
     # A paragraph reports what is set on it, never what it inherits: no `alignment`
     # key at all when it sets none, which is how Docs answers and what lets the
     # reader subtract the named style (`doc_ir._named_defaults`).
-    para_style: DocsParagraphStyle = {"namedStyleType": para["named"]}
-    if para.get("align"):
-        para_style["alignment"] = para["align"]
-    para_style.update(_api_measures(para.get("measures") or {}))
+    para_style: DocsParagraphStyle = {"namedStyleType": para.named}
+    if para.align:
+        para_style["alignment"] = para.align
+    para_style.update(_api_measures(para.measures))
     paragraph: DocsParagraph = {"elements": elements, "paragraphStyle": para_style}
-    if para.get("bullet"):
-        paragraph["bullet"] = {"listId": para["bullet"]["list"],
-                               "nestingLevel": para["bullet"]["level"]}
+    if para.bullet is not None:
+        paragraph["bullet"] = {"listId": para.bullet.list_id,
+                               "nestingLevel": para.bullet.level}
     return {"startIndex": start, "endIndex": at, "paragraph": paragraph}
 
 
-def _object_json(o: dict, at: int, objects: dict[str, DocsInlineObject]) -> DocsParagraphElement:
-    out: DocsParagraphElement = {"startIndex": at, "endIndex": at + o.get("size", 1)}
-    kind = o["chip"]
-    if kind == "equation":
+def _object_json(o: Chip, at: int, objects: dict[str, DocsInlineObject]) -> DocsParagraphElement:
+    out: DocsParagraphElement = {"startIndex": at, "endIndex": at + unit_size(o)}
+    if isinstance(o, Equation):
         out["equation"] = {}
-    elif kind == "person":
-        out["person"] = {"personProperties": {"name": o.get("name", ""),
-                                              "email": o.get("email", "")}}
-    elif kind == "date":
+    elif isinstance(o, Person):
+        out["person"] = {"personProperties": {"name": o.name, "email": o.email}}
+    elif isinstance(o, DateChip):
         out["dateElement"] = {"dateElementProperties": {
-            "displayText": o.get("display", ""), "timestamp": o.get("timestamp", ""),
-            "dateFormat": o.get("format", ""), "locale": o.get("locale", "")}}
-    elif kind == "link":
-        out["richLink"] = {"richLinkProperties": {"title": o.get("title", ""),
-                                                  "uri": o.get("uri", "")}}
-    elif kind == "image":
-        embedded: DocsEmbeddedObject = {"imageProperties": {"contentUri": o.get("uri", "")}}
-        if o.get("size_pt"):
-            embedded["size"] = {"width": {"magnitude": o["size_pt"][0], "unit": "PT"},
-                                "height": {"magnitude": o["size_pt"][1], "unit": "PT"}}
-        if o.get("alt"):
-            embedded["description"] = o["alt"]
-        objects[o["id"]] = {"inlineObjectProperties": {"embeddedObject": embedded}}
-        out["inlineObjectElement"] = {"inlineObjectId": o["id"]}
+            "displayText": o.display, "timestamp": o.timestamp,
+            "dateFormat": "", "locale": ""}}
+    elif isinstance(o, Picture):
+        embedded: DocsEmbeddedObject = {"imageProperties": {"contentUri": o.uri}}
+        if o.size_pt:
+            embedded["size"] = {"width": {"magnitude": o.size_pt[0], "unit": "PT"},
+                                "height": {"magnitude": o.size_pt[1], "unit": "PT"}}
+        if o.alt:
+            embedded["description"] = o.alt
+        objects[o.id] = {"inlineObjectProperties": {"embeddedObject": embedded}}
+        out["inlineObjectElement"] = {"inlineObjectId": o.id}
+    elif o.kind == "link":
+        out["richLink"] = {"richLinkProperties": {"title": "", "uri": ""}}
     # A dropdown chip: an element with a span and no content key of any kind (measured).
     return out
 
 
-def _table_json(t: dict, start: int,
+def _table_json(t: Grid, start: int,
                 objects: dict[str, DocsInlineObject]) -> DocsStructuralElement:
     at = start + 1
     rows: list[DocsTableRow] = []
-    for row in t["rows"]:
+    for row in t.rows:
         row_start = at
         at += 1
         cells: list[DocsTableCell] = []
@@ -1054,111 +1340,123 @@ def _table_json(t: dict, start: int,
             cells.append({"startIndex": cell_start, "endIndex": at, "content": content})
         rows.append({"startIndex": row_start, "endIndex": at, "tableCells": cells})
     return {"startIndex": start, "endIndex": at,
-            "table": {"rows": len(t["rows"]),
-                      "columns": len(t["rows"][0]) if t["rows"] else 0,
+            "table": {"rows": len(t.rows),
+                      "columns": len(t.rows[0]) if t.rows else 0,
                       "tableRows": rows}}
+
+
 # ---------------------------------------------------------------- IR -> a world
 
-def build(parts: list[dict], title: str = "doc") -> World:
-    """A world from IR-shaped blocks, one `parts` entry per tab.
+def build(parts: Sequence[Ir], title: str) -> World:
+    """A world from IR-shaped blocks, one `parts` entry per tab: its `blocks`, and its
+    `title` and `parent` where it has them.
 
-    `{"title": ..., "parent": ..., "blocks": [...]}`, where a block is what the IR
-    calls one: paragraph / heading / item / table / toc, with `runs`. A run with
-    `chip` becomes the object of that kind; everything else becomes text.
+    A block is what the IR calls one: paragraph / heading / item / table / toc, with
+    `runs`. A run with `chip` becomes the object of that kind; everything else becomes
+    text.
     """
     world = World(title)
     for i, part in enumerate(parts):
         if i:
             world.tabs.append(Tab(world.fresh("t."), part.get("title", ""),
-                                  part.get("parent")))
+                                  part.get("parent"), [new_mark()]))
         tab = world.tabs[i] if i < len(world.tabs) else world.tabs[-1]
         tab.title = part.get("title", tab.title)
         tab.units = _units_of(part["blocks"], tab, world)
-        if not tab.units or tab.units[-1]["k"] != "m":
-            tab.units.append(mark())     # a body ends on a paragraph: the `trailer`
-        if tab.units[0]["k"] in ("t", "toc"):
+        if not tab.units or not isinstance(tab.units[-1], ParaMark):
+            tab.units.append(new_mark())     # a body ends on a paragraph: the `trailer`
+        if isinstance(tab.units[0], (Grid, Toc)):
             # And a table cannot be the first thing in a body: one that is has an empty
             # paragraph in front of it that no request can delete (`doc_ir._hide_trailer`
             # calls it the `lead`). A corpus without it would put the merge at index 0.
-            tab.units.insert(0, mark())
+            tab.units.insert(0, new_mark())
     return world
 
 
-def _units_of(blocks: Sequence[Block], tab: Tab, world: World) -> list[dict]:
-    out: list[dict] = []
+def _units_of(blocks: Sequence[Block], tab: Tab, world: World) -> list[Unit]:
+    out: list[Unit] = []
     for block in blocks:
         if block["kind"] == "table":
-            out.append(table([[_units_of(cell, tab, world) or [mark()] for cell in row]
-                              for row in block.get("rows", [])]))
+            out.append(Grid(rows=[[_units_of(cell, tab, world) or [new_mark()] for cell in row]
+                                  for row in block.get("rows", [])]))
             continue
         if block["kind"] == "toc":
-            out.append(toc())
+            out.append(Toc(size=TOC_SIZE))
             continue
-        para = plain()
-        if block["kind"] != "item":
-            para["named"] = doc_merge.named_style(block)
-        if align := block.get("align"):
-            para["align"] = doc_ir.TO_ALIGNMENT[align]
-        para["measures"] = {key: value for key, _ in doc_merge.PARAGRAPH_FIELDS
-                            if (value := doc_ir.measure_of(block, key)) is not None}
+        align = block.get("align")
+        measures: Measures = {}
+        for key, _ in doc_merge.PARAGRAPH_FIELDS:
+            if (value := doc_ir.measure_of(block, key)) is not None:
+                doc_ir.set_measure(measures, key, value)
         indent, indent_first = block.get("indent"), block.get("indent_first")
         if indent is not None or indent_first is not None:
             # A measure is kept as `documents.get` says it, so the first line is from the
             # page margin: `margin-left` plus a `text-indent`, a negative one dropped
             # (measured 2026-09-24: 36 + 18 imports as 54, 36 - 18 as 36).
-            para["measures"].pop("indent_first", None)
+            measures.pop("indent_first", None)
             first = (indent or 0.0) + max(indent_first or 0.0, 0.0)
             if first:
-                para["measures"]["indent_first"] = first
+                measures["indent_first"] = first
+        bullet: Bullet | None = None
         if block["kind"] == "item":
             lid = block.get("list") or "kix.imported"
-            para["bullet"] = {"list": lid, "level": block.get("level", 0)}
+            bullet = Bullet(list_id=lid, level=block.get("level", 0))
             # An imported list cannot say whether it is numbered: that is the state the
             # merge has to cope with, so it is the corpus's default.
-            tab.lists.setdefault(lid, {"ordered": _glyphs(block)})
+            tab.lists.setdefault(lid, _glyphs(block))
+        para = Para(named="NORMAL_TEXT" if block["kind"] == "item"
+                    else doc_merge.named_style(block),
+                    align=doc_ir.TO_ALIGNMENT[align] if align else None,
+                    bullet=bullet, measures=measures)
         for run in block.get("runs", []):
             if chip := run.get("chip"):
                 out.append(_object_unit(chip, run, world))
             else:
-                out += text_units(run["text"], {k: v for k, v in run.items()
-                                                if k not in ("text", "width")})
-        out.append(mark(para=para))
+                out += text_units(run["text"], _run_style(run))
+        out.append(ParaMark(style={}, para=para))
     return out
 
 
+def _run_style(run: Run) -> Style:
+    """What a run wears, and nothing else it says (its text, its width)."""
+    style: Style = {}
+    doc_ir.apply_style(style, run)
+    return style
+
+
 def _glyphs(block: Mapping[str, object]) -> bool | None:
-    """Whether a corpus list is numbered (`fuzz_docs._item`'s `glyphs`): a key of the
-    corpus's own, which no IR block carries. None is the list an import built."""
+    """Whether a corpus list is numbered (a test's `glyphs`): a key of the corpus's own,
+    which no IR block carries. None is the list an import built."""
     said = block.get("glyphs")
     return said if isinstance(said, bool) else None
 
 
-def _object_unit(kind: str, run: Run, world: World) -> dict:
+def _object_unit(kind: str, run: Run, world: World) -> Chip:
     if kind == "image":
-        return obj("image", id=run.get("value") or world.fresh("kix.i"),
-                   uri=run.get("uri", "https://example.invalid/pic"),
-                   alt=run.get("alt", ""), size_pt=run.get("size"))
+        return Picture(id=run.get("value") or world.fresh("kix.i"),
+                       uri=run.get("uri", "https://example.invalid/pic"),
+                       alt=run.get("alt", ""), size_pt=run.get("size"))
     if kind == "person":
-        return obj("person", email=run.get("value", "someone@example.com"),
-                   name=run.get("text", "Someone"))
+        return Person(email=run.get("value", "someone@example.com"),
+                      name=run.get("text", "Someone"))
     if kind == "date":
-        return obj("date", timestamp=run.get("value", "2026-09-20T12:00:00Z"),
-                   display=run.get("text", "Sep 20, 2026"))
+        return DateChip(timestamp=run.get("value", "2026-09-20T12:00:00Z"),
+                        display=run.get("text", "Sep 20, 2026"))
     if kind == "equation":
-        return obj("equation", latex=run.get("text", "E=m{c}^{2}"))
-    return obj(kind)
+        return Equation(latex=run.get("text", "E=m{c}^{2}"))
+    return OtherChip(kind=kind)
 
 
 # ---------------------------------------------------------------- reading it as a sync does
 
-def part_ir(world: World, tab: str | None, ours: Ir | None = None,
-            base: Ir | None = None) -> Ir:
+def part_ir(world: World, tab: str | None, ours: Ir | None, base: Ir | None) -> Ir:
     """One tab's IR, filled in the way a sync's read fills it in.
 
     This mirrors `doc_sync._part_of` and calls the same public functions, so the read
     side of the pipeline is under test here too: the keys come from the named ranges, a
     list's ordered-ness from the file and the base (an imported list cannot say its
-    own), and a picture's file name from the base.
+    own), and a picture's file name from the base. `ours` and `base` are the file and
+    the base, None where a read has neither (`fuzz_docs.bootstrap`).
     """
     if tab:
         mine, was = doc_ir.tab_part(ours, tab), doc_ir.tab_part(base, tab)
@@ -1183,7 +1481,7 @@ def part_ir(world: World, tab: str | None, ours: Ir | None = None,
     return part
 
 
-def read_ir(world: World, ours: Ir | None = None, base: Ir | None = None) -> Ir:
+def read_ir(world: World, ours: Ir | None, base: Ir | None) -> Ir:
     """The whole document's IR: the first tab, with the others under `tabs`."""
     ir = part_ir(world, None, ours, base)
     extra = [part_ir(world, tab.id, ours, base) for tab in world.tabs[1:]]
@@ -1193,7 +1491,7 @@ def read_ir(world: World, ours: Ir | None = None, base: Ir | None = None) -> Ir:
     return ir
 
 
-def settled_ir(world: World, ours: Ir | None = None, base: Ir | None = None) -> Ir:
+def settled_ir(world: World, ours: Ir | None, base: Ir | None) -> Ir:
     """The read that becomes the file and the base: the same, plus every equation's
     LaTeX, which on a live document comes from the Markdown export (`doc_sync.settle`
     → `doc_ir.attach_latex`) and never from `documents.get`."""

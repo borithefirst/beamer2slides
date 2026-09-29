@@ -49,8 +49,8 @@ def para(key: str, text: str, **rest) -> dict:
     return {"kind": "paragraph", "key": key, "runs": [{"text": text}], **rest}
 
 
-def texts(result: dict) -> list[str]:
-    return [doc_merge.block_text(b) for b in result["blocks"]]
+def texts(result: doc_merge.Merged | doc_merge.Plan) -> list[str]:
+    return [doc_merge.block_text(b) for b in result.blocks]
 
 
 def applied(ir: dict, requests: list[dict]) -> list[str]:
@@ -87,7 +87,7 @@ BASE = live([para("p:alpha", "alpha one two"), para("p:bravo", "bravo three four
 
 def test_nothing_changed_writes_nothing():
     result = doc_merge.plan(BASE, live(BASE["blocks"]), live(BASE["blocks"]))
-    assert result["requests"] == [] and result["conflicts"] == []
+    assert result.requests == [] and result.conflicts == []
 
 
 def test_a_document_edit_survives_an_untouched_source():
@@ -95,7 +95,7 @@ def test_a_document_edit_survives_an_untouched_source():
                    para("p:charlie", "charlie five six")])
     result = doc_merge.plan(BASE, live(BASE["blocks"]), theirs)
     assert texts(result)[1] == "bravo THREE four"
-    assert result["requests"] == []  # the document already says it
+    assert result.requests == []  # the document already says it
 
 
 def test_a_source_edit_is_written_to_the_document():
@@ -103,7 +103,7 @@ def test_a_source_edit_is_written_to_the_document():
                  para("p:charlie", "charlie five six")])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     assert texts(result)[1] == "bravo three FOUR"
-    assert [r for r in result["requests"] if "insertText" in r][0]["insertText"]["text"] == "FOUR"
+    assert [r for r in result.requests if "insertText" in r][0]["insertText"]["text"] == "FOUR"
 
 
 def test_a_rewritten_word_inherits_the_style_of_the_words_it_replaces():
@@ -114,11 +114,11 @@ def test_a_rewritten_word_inherits_the_style_of_the_words_it_replaces():
     ours = live([{"kind": "paragraph", "key": "p:styled", "runs": [
         {"text": "the "}, {"text": "canonic file", "bold": True}]}])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    kinds = [next(iter(r)) for r in result["requests"]]
+    kinds = [next(iter(r)) for r in result.requests]
     assert kinds == ["insertText", "deleteContentRange"]
     # "canonical" sits at 5..14; the replacement goes in at 14, after its last letter.
-    assert result["requests"][0]["insertText"]["location"]["index"] == 14
-    assert result["requests"][1]["deleteContentRange"]["range"]["startIndex"] == 5
+    assert result.requests[0]["insertText"]["location"]["index"] == 14
+    assert result.requests[1]["deleteContentRange"]["range"]["startIndex"] == 5
 
 
 def test_both_sides_editing_different_words_merge():
@@ -128,7 +128,7 @@ def test_both_sides_editing_different_words_merge():
                    para("p:charlie", "charlie five six")])
     result = doc_merge.plan(BASE, ours, theirs)
     assert texts(result)[0] == "alpha ONE TWO"
-    assert result["conflicts"] == []
+    assert result.conflicts == []
 
 
 def test_both_sides_editing_the_same_words_conflict_and_the_document_wins():
@@ -136,9 +136,9 @@ def test_both_sides_editing_the_same_words_conflict_and_the_document_wins():
     theirs = live([para("p:alpha", "alpha DOCUMENT two")] + BASE["blocks"][1:])
     result = doc_merge.plan(BASE, ours, theirs)
     assert texts(result)[0] == "alpha DOCUMENT two"
-    assert result["conflicts"][0]["key"] == "p:alpha"
-    assert result["conflicts"][0]["ours"] == "SOURCE"
-    assert result["conflicts"][0]["theirs"] == "DOCUMENT"
+    assert result.conflicts[0]["key"] == "p:alpha"
+    assert result.conflicts[0]["ours"] == "SOURCE"
+    assert result.conflicts[0]["theirs"] == "DOCUMENT"
 
 
 # ---------------------------------------------------------------- frozen runs
@@ -156,8 +156,8 @@ def test_words_around_a_chip_are_edited_and_the_chip_is_not():
     base = live([chipped("due ", " please")])
     ours = live([chipped("due ", " PLEASE")])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    assert doc_merge.frozen_of(result["blocks"][0]) == doc_merge.frozen_of(base["blocks"][0])
-    edits = result["requests"]
+    assert doc_merge.frozen_of(result.blocks[0]) == doc_merge.frozen_of(base["blocks"][0])
+    edits = result.requests
     assert [r["insertText"]["text"] for r in edits if "insertText" in r] == ["PLEASE"]
     # The chip sits at index 5 and holds one unit: no edit may touch it.
     for request in edits:
@@ -172,13 +172,13 @@ def test_index_arithmetic_counts_a_chip_as_one_unit_not_its_words():
     base = live([chipped("due ", " soon")])
     ours = live([chipped("due ", " later")])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    insert = next(r["insertText"] for r in result["requests"] if "insertText" in r)
+    insert = next(r["insertText"] for r in result.requests if "insertText" in r)
     # 1 (body start) + 4 ("due ") puts the chip at 5, the space at 6 and "soon" at
     # 7..11, so the new word goes in at the end of what it replaces: 11. Believing
     # the chip's display text would have put it at 22.
     assert insert["location"]["index"] == 11
     assert insert["text"] == "later"
-    assert result["requests"][1]["deleteContentRange"]["range"] == {"startIndex": 7,
+    assert result.requests[1]["deleteContentRange"]["range"] == {"startIndex": 7,
                                                                    "endIndex": 11}
 
 
@@ -188,9 +188,9 @@ def test_a_source_that_would_rewrite_a_chip_the_document_also_edited_is_refused(
                   "runs": [{"text": "due tomorrow please"}]}])
     theirs = live([chipped("due ", " please, really")])
     result = doc_merge.plan(base, ours, theirs)
-    assert result["requests"] == []
-    assert "left alone" in result["notes"][0]
-    assert doc_merge.frozen_of(result["blocks"][0]) == (("date", "Sep 25, 2026",
+    assert result.requests == []
+    assert "left alone" in result.notes[0]
+    assert doc_merge.frozen_of(result.blocks[0]) == (("date", "Sep 25, 2026",
                                                         "2026-09-25T12:00:00Z"),)
 
 
@@ -201,8 +201,8 @@ def test_a_chip_the_source_took_out_of_an_untouched_block_is_taken_out():
     ours = live([{"kind": "paragraph", "key": "p:due",
                   "runs": [{"text": "due tomorrow please"}]}])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    assert result["blocks"][0]["rewrite"] and not result["notes"]
-    assert applied(live(base["blocks"]), result["requests"]) == ["due tomorrow please"]
+    assert result.blocks[0]["rewrite"] and not result.notes
+    assert applied(live(base["blocks"]), result.requests) == ["due tomorrow please"]
 
 
 def test_an_equation_is_never_deleted_to_write_a_block_again():
@@ -211,7 +211,7 @@ def test_an_equation_is_never_deleted_to_write_a_block_again():
     ours = live([{"kind": "paragraph", "key": "p:eq",
                   "runs": [{"text": "so "}, dict(equation), dict(CHIP)]}])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    assert result["requests"] == [] and "no request can write" in result["notes"][0]
+    assert result.requests == [] and "no request can write" in result.notes[0]
 
 
 # ---------------------------------------------------------------- styling
@@ -225,20 +225,20 @@ def test_a_mark_the_source_added_is_written_to_the_document():
     ours = live([styled("p:s", {"text": "one "}, {"text": "two", "bold": True},
                         {"text": " three"})])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    styles = [r["updateTextStyle"] for r in result["requests"] if "updateTextStyle" in r]
+    styles = [r["updateTextStyle"] for r in result.requests if "updateTextStyle" in r]
     assert [s["range"] for s in styles] == [{"startIndex": 1, "endIndex": 5},
                                             {"startIndex": 5, "endIndex": 8},
                                             {"startIndex": 8, "endIndex": 14}]
     assert styles[1]["textStyle"] == {"bold": True}
     # No words changed, so nothing is inserted or deleted.
-    assert not [r for r in result["requests"] if "insertText" in r or "deleteContentRange" in r]
+    assert not [r for r in result.requests if "insertText" in r or "deleteContentRange" in r]
 
 
 def test_a_mark_the_source_took_away_is_named_so_it_goes_away():
     base = live([styled("p:s", {"text": "one "}, {"text": "two", "bold": True})])
     ours = live([styled("p:s", {"text": "one two"})])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    style = [r["updateTextStyle"] for r in result["requests"] if "updateTextStyle" in r][0]
+    style = [r["updateTextStyle"] for r in result.requests if "updateTextStyle" in r][0]
     assert style["textStyle"] == {}
     # The fields are named although the run carries none of them: that is what clears
     # the bold. The face and the size are named too, now that the file carries them —
@@ -254,12 +254,12 @@ def test_styling_a_second_sync_writes_nothing():
     # The document now says what the source says: the same run layout, read back.
     theirs = live([styled("p:s", {"text": "one "}, {"text": "two", "bold": True},
                           {"text": " three"})])
-    assert doc_merge.plan(theirs, ours, theirs)["requests"] == []
+    assert doc_merge.plan(theirs, ours, theirs).requests == []
 
 
-def styles_written(result: dict) -> list[tuple[int, int, dict]]:
+def styles_written(result: doc_merge.Plan) -> list[tuple[int, int, dict]]:
     return [(r["updateTextStyle"]["range"]["startIndex"], r["updateTextStyle"]["range"]["endIndex"],
-             r["updateTextStyle"]["textStyle"]) for r in result["requests"] if "updateTextStyle" in r]
+             r["updateTextStyle"]["textStyle"]) for r in result.requests if "updateTextStyle" in r]
 
 
 def test_a_word_the_source_restyled_is_styled_while_the_document_rewrote_another():
@@ -271,8 +271,8 @@ def test_a_word_the_source_restyled_is_styled_while_the_document_rewrote_another
     at = theirs["blocks"][0]["span"][0]
     assert [(s - at, e - at, style) for s, e, style in styles_written(result)] == [
         (0, 4, {}), (4, 7, {"bold": True}), (7, 13, {})]
-    assert result["notes"] == []
-    runs = result["blocks"][0]["runs"]
+    assert result.notes == []
+    runs = result.blocks[0]["runs"]
     assert [(r["text"], r.get("bold", False)) for r in runs] == [
         ("one ", False), ("two", True), (" THREE", False)]
 
@@ -284,7 +284,7 @@ def test_a_word_the_source_restyled_and_the_document_rewrote_is_the_documents():
     theirs = live([styled("p:s", {"text": "one TWO three"})])
     result = doc_merge.plan(base, ours, theirs)
     assert all(style == {} for _, _, style in styles_written(result))
-    assert "keep the document's styling" in result["notes"][0]
+    assert "keep the document's styling" in result.notes[0]
 
 
 def test_a_picture_the_reader_inserted_is_not_a_restyle():
@@ -302,10 +302,10 @@ def test_a_picture_the_reader_inserted_is_not_a_restyle():
     theirs = live([styled("p:s", {"text": "lantern"}, dict(picture))])
     result = doc_merge.plan(base, ours, theirs)
     assert [style for _, _, style in styles_written(result)] == [{"bold": True}]
-    assert result["notes"] == []
+    assert result.notes == []
     # And the reader's picture is still there: the source's marks go on the words, not
     # over the block.
-    assert [r.get("value") or r["text"] for r in result["blocks"][0]["runs"]] == [
+    assert [r.get("value") or r["text"] for r in result.blocks[0]["runs"]] == [
         "lantern", "kix.i9"]
 
 
@@ -318,7 +318,7 @@ def test_both_sides_restyling_one_block_is_said_out_loud():
     theirs = live([styled("p:s", {"text": "one "}, {"text": "two", "bold": True})])
     result = doc_merge.plan(base, ours, theirs)
     assert styles_written(result) == []
-    assert [n for n in result["notes"] if "both sides restyled it" in n]
+    assert [n for n in result.notes if "both sides restyled it" in n]
 
 
 def test_both_sides_setting_one_paragraph_is_said_out_loud():
@@ -326,9 +326,9 @@ def test_both_sides_setting_one_paragraph_is_said_out_loud():
     ours = live([para("p:s", "one") | {"align": "center"}])
     theirs = live([para("p:s", "one") | {"line_spacing": 1.5}])
     result = doc_merge.plan(base, ours, theirs)
-    assert [n for n in result["notes"]
+    assert [n for n in result.notes
             if "both sides changed how the paragraph is set" in n]
-    assert not [r for r in result["requests"] if "updateParagraphStyle" in r]
+    assert not [r for r in result.requests if "updateParagraphStyle" in r]
 
 
 def test_the_source_restyles_and_rewords_while_the_document_adds_words():
@@ -337,7 +337,7 @@ def test_the_source_restyles_and_rewords_while_the_document_adds_words():
                         {"text": " is ready"})])
     theirs = live([styled("p:s", {"text": "the plan is ready today"})])
     result = doc_merge.plan(base, ours, theirs)
-    runs = result["blocks"][0]["runs"]
+    runs = result.blocks[0]["runs"]
     assert "".join(r["text"] for r in runs) == "the new plan is ready today"
     assert [r["text"] for r in runs if r.get("italic")] == ["new plan"]
 
@@ -346,7 +346,7 @@ def test_a_paragraph_the_source_turned_into_a_heading_is_written():
     base = live([para("p:h", "a heading")])
     ours = live([{"kind": "heading", "level": 2, "key": "p:h", "runs": [{"text": "a heading"}]}])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    style = [r["updateParagraphStyle"] for r in result["requests"]][0]
+    style = [r["updateParagraphStyle"] for r in result.requests][0]
     assert style["paragraphStyle"]["namedStyleType"] == "HEADING_2"
     assert style["range"] == {"startIndex": 1, "endIndex": 11}
 
@@ -360,12 +360,12 @@ def test_a_title_the_source_moved_or_reworded_is_still_a_title():
     # The source centres it — a shape change, so the whole paragraph style is written,
     # `namedStyleType` with it.
     result = doc_merge.plan(base, live([was | {"align": "center"}]), live(base["blocks"]))
-    style = [r["updateParagraphStyle"] for r in result["requests"]][0]
+    style = [r["updateParagraphStyle"] for r in result.requests][0]
     assert style["paragraphStyle"]["namedStyleType"] == "TITLE"
     assert style["paragraphStyle"]["alignment"] == "CENTER"
     # And the source moving it off the style still writes what it asked for.
     plain = doc_merge.plan(base, live([para("t:x", "The Report")]), live(base["blocks"]))
-    assert [r["updateParagraphStyle"] for r in plain["requests"]][0][
+    assert [r["updateParagraphStyle"] for r in plain.requests][0][
         "paragraphStyle"]["namedStyleType"] == "NORMAL_TEXT"
 
 
@@ -374,7 +374,7 @@ def test_a_list_item_the_source_made_a_paragraph_loses_its_bullet():
                   "runs": [{"text": "an item"}]}])
     ours = live([para("i:x", "an item")])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    kinds = [next(iter(r)) for r in result["requests"]]
+    kinds = [next(iter(r)) for r in result.requests]
     assert kinds == ["deleteParagraphBullets", "updateParagraphStyle"]
 
 
@@ -383,7 +383,7 @@ def test_a_paragraph_the_source_made_a_list_item_gets_its_bullet_last():
     ours = live([{"kind": "item", "level": 0, "ordered": True, "key": "i:x",
                   "runs": [{"text": "an item", "bold": True}]}])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    kinds = [next(iter(r)) for r in result["requests"]]
+    kinds = [next(iter(r)) for r in result.requests]
     assert kinds == ["updateParagraphStyle", "updateTextStyle", "createParagraphBullets"]
 
 
@@ -407,9 +407,9 @@ def test_a_cell_the_source_edited_is_written():
     ours = live([b for b in GRID["blocks"]])
     ours["blocks"][1]["rows"][0][1][0]["runs"] = [{"text": "b ONE", "width": 5}]
     result = doc_merge.plan(GRID, ours, live(GRID["blocks"]))
-    merged = result["blocks"][1]
+    merged = result.blocks[1]
     assert cell_text(merged, 0, 1) == "b ONE"
-    insert = [r["insertText"] for r in result["requests"] if "insertText" in r]
+    insert = [r["insertText"] for r in result.requests if "insertText" in r]
     assert [i["text"] for i in insert] == ["ONE"]
     # The edit lands inside that cell, not at the table's own index.
     assert insert[0]["location"]["index"] == GRID["blocks"][1]["rows"][0][1][0]["span"][1] - 1
@@ -424,9 +424,9 @@ def test_a_table_the_reader_typed_in_survives_the_source_dropping_it():
     theirs = live(GRID["blocks"])
     theirs["blocks"][1]["rows"][0][1][0]["runs"] = [{"text": "b ONE typed"}]
     result = doc_merge.plan(GRID, ours, live(theirs["blocks"]))
-    assert [b.get("key") for b in result["blocks"]] == ["p:before", "t:grid", "p:after"]
-    assert cell_text(result["blocks"][1], 0, 1) == "b ONE typed"
-    assert any("dropped by the source but edited" in note for note in result["notes"])
+    assert [b.get("key") for b in result.blocks] == ["p:before", "t:grid", "p:after"]
+    assert cell_text(result.blocks[1], 0, 1) == "b ONE typed"
+    assert any("dropped by the source but edited" in note for note in result.notes)
 
 
 def test_a_row_the_reader_added_survives_the_source_dropping_the_table():
@@ -437,20 +437,20 @@ def test_a_row_the_reader_added_survives_the_source_dropping_the_table():
                    table("t:grid", [["a one", "b one"], ["a two", "b two"], ["", ""]]),
                    GRID["blocks"][2]])
     result = doc_merge.plan(GRID, ours, theirs)
-    assert [b.get("key") for b in result["blocks"]] == ["p:before", "t:grid", "p:after"]
+    assert [b.get("key") for b in result.blocks] == ["p:before", "t:grid", "p:after"]
 
 
 def test_a_table_nobody_touched_still_goes_when_the_source_drops_it():
     ours = live([GRID["blocks"][0], GRID["blocks"][2]])
     result = doc_merge.plan(GRID, ours, live(GRID["blocks"]))
-    assert [b.get("key") for b in result["blocks"]] == ["p:before", "p:after"]
+    assert [b.get("key") for b in result.blocks] == ["p:before", "p:after"]
 
 
 def test_a_block_added_in_front_of_a_table_goes_after_the_paragraph_before_it():
     """Measured: nothing can be inserted at a table's own index."""
     ours = live([GRID["blocks"][0], para("p:new", "a new line"), *GRID["blocks"][1:]])
     result = doc_merge.plan(GRID, ours, live(GRID["blocks"]))
-    insert = [r["insertText"] for r in result["requests"] if "insertText" in r]
+    insert = [r["insertText"] for r in result.requests if "insertText" in r]
     assert insert == [{"location": {"index": GRID["blocks"][1]["span"][0] - 1},
                        "text": "\na new line"}]
 
@@ -465,13 +465,13 @@ def test_a_body_that_starts_with_a_table_writes_in_front_of_it_into_its_lead():
             else {"paragraph": {"elements": [{"startIndex": b["span"][0], "endIndex": b["span"][1],
                                               "textRun": {"content": "\n"}}]}})}
         for b in grid["blocks"]]}}
-    read = doc_ir.from_document(doc)
+    read = doc_ir.from_document(doc, tab_id=None)
     assert [b["kind"] for b in read["blocks"]] == ["table"]
     assert read["lead"] == [1, 2] and read["trailer"] == grid["blocks"][2]["span"]
     theirs = {"blocks": [grid["blocks"][1]], "lead": [1, 2]}
     ours = {"blocks": [para("p:one", "one"), para("p:two", "two"), grid["blocks"][1]]}
     result = doc_merge.plan({"blocks": [grid["blocks"][1]]}, ours, theirs)
-    assert [r["insertText"] for r in result["requests"] if "insertText" in r] == [
+    assert [r["insertText"] for r in result.requests if "insertText" in r] == [
         {"location": {"index": 1}, "text": "\ntwo"}, {"location": {"index": 1}, "text": "one"}]
 
 
@@ -481,9 +481,9 @@ def test_two_cells_of_one_table_edited_on_both_sides_merge():
     theirs = live([b for b in GRID["blocks"]])
     theirs["blocks"][1]["rows"][1][1][0]["runs"] = [{"text": "b TWO", "width": 5}]
     result = doc_merge.plan(GRID, ours, theirs)
-    merged = result["blocks"][1]
+    merged = result.blocks[1]
     assert cell_text(merged, 0, 0) == "a ONE" and cell_text(merged, 1, 1) == "b TWO"
-    assert result["conflicts"] == []
+    assert result.conflicts == []
 
 
 def test_the_same_cell_edited_on_both_sides_conflicts_and_the_document_wins():
@@ -492,9 +492,9 @@ def test_the_same_cell_edited_on_both_sides_conflicts_and_the_document_wins():
     theirs = live([b for b in GRID["blocks"]])
     theirs["blocks"][1]["rows"][0][0][0]["runs"] = [{"text": "a DOCUMENT", "width": 10}]
     result = doc_merge.plan(GRID, ours, theirs)
-    assert cell_text(result["blocks"][1], 0, 0) == "a DOCUMENT"
-    assert result["conflicts"][0]["theirs"] == "DOCUMENT"
-    assert result["requests"] == []
+    assert cell_text(result.blocks[1], 0, 0) == "a DOCUMENT"
+    assert result.conflicts[0]["theirs"] == "DOCUMENT"
+    assert result.requests == []
 
 
 def test_a_block_deleted_in_front_of_a_table_gives_up_the_mark_before_it():
@@ -506,7 +506,7 @@ def test_a_block_deleted_in_front_of_a_table_gives_up_the_mark_before_it():
                 table("t:grid", [["a one"]]), para("p:after", "after the table")])
     ours = live([was["blocks"][0], was["blocks"][2], was["blocks"][3]])
     result = doc_merge.plan(was, ours, live(was["blocks"]))
-    assert result["requests"] == [{"deleteContentRange": {"range": {
+    assert result.requests == [{"deleteContentRange": {"range": {
         "startIndex": was["blocks"][1]["span"][0] - 1,
         "endIndex": was["blocks"][1]["span"][1] - 1}}}]
 
@@ -517,7 +517,7 @@ def test_two_blocks_deleted_in_front_of_a_table_do_not_want_one_mark_twice():
                 table("t:grid", [["a one"]])])
     result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][3]]),
                             live(was["blocks"]))
-    spans = [r["deleteContentRange"]["range"] for r in result["requests"]]
+    spans = [r["deleteContentRange"]["range"] for r in result.requests]
     assert spans == [{"startIndex": was["blocks"][2]["span"][0] - 1,
                       "endIndex": was["blocks"][2]["span"][1] - 1},
                      {"startIndex": was["blocks"][1]["span"][0] - 1,
@@ -536,7 +536,7 @@ def test_a_delete_that_borrows_the_mark_in_front_names_the_range_it_leaves_behin
     empty["rangeId"], empty["range"] = "r7", list(empty["span"])
     result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][2]]),
                             live(was["blocks"]))
-    assert result["requests"] == [
+    assert result.requests == [
         {"deleteContentRange": {"range": {"startIndex": empty["span"][0] - 1,
                                           "endIndex": empty["span"][1] - 1}}},
         {"deleteNamedRange": {"namedRangeId": "r7"}}]
@@ -553,7 +553,7 @@ def test_a_delete_that_takes_the_range_with_it_names_nothing():
     before["range"] = [before["span"][0], before["span"][1] - 1]
     result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][2]]),
                             live(was["blocks"]))
-    assert not [r for r in result["requests"] if "deleteNamedRange" in r]
+    assert not [r for r in result.requests if "deleteNamedRange" in r]
 
 
 def test_a_block_deleted_between_two_tables_leaves_its_paragraph_behind():
@@ -563,7 +563,7 @@ def test_a_block_deleted_between_two_tables_leaves_its_paragraph_behind():
                 table("t:two", [["b"]])])
     result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][2]]),
                             live(was["blocks"]))
-    assert result["requests"] == [{"deleteContentRange": {"range": {
+    assert result.requests == [{"deleteContentRange": {"range": {
         "startIndex": was["blocks"][1]["span"][0],
         "endIndex": was["blocks"][1]["span"][1] - 1}}}]
 
@@ -575,14 +575,14 @@ def test_a_table_the_source_deleted_takes_the_newline_question_with_it():
                 table("t:grid", [["a one"]]), para("p:after", "after the table")])
     result = doc_merge.plan(was, live([was["blocks"][0], was["blocks"][3]]),
                             live(was["blocks"]))
-    spans = [r["deleteContentRange"]["range"] for r in result["requests"]]
+    spans = [r["deleteContentRange"]["range"] for r in result.requests]
     assert spans == [{"startIndex": was["blocks"][2]["span"][0],
                       "endIndex": was["blocks"][2]["span"][1]},
                      {"startIndex": was["blocks"][1]["span"][0],
                       "endIndex": was["blocks"][1]["span"][1]}]
 
 
-def regrid(rows: list[list[str]]) -> dict:
+def regrid(rows: list[list[str]]) -> doc_merge.Plan:
     """The plan for a source that gave the GRID table these rows and columns."""
     ours = live([GRID["blocks"][0], table("t:grid", rows), GRID["blocks"][2]])
     return doc_merge.plan(GRID, ours, live(GRID["blocks"]))
@@ -590,31 +590,31 @@ def regrid(rows: list[list[str]]) -> dict:
 
 def test_a_column_the_source_added_is_written_before_the_words():
     result = regrid([["a one", "b one", "c one"], ["a two", "b two", "c two"]])
-    assert result["structure"] == [{"insertTableColumn": {
+    assert result.structure == [{"insertTableColumn": {
         "tableCellLocation": {"tableStartLocation": {"index": GRID["blocks"][1]["span"][0]},
                               "rowIndex": 0, "columnIndex": 1}, "insertRight": True}}]
     # The words come on the pass after this one, against the grid the document
     # will then have: there is no index here for a cell that does not exist yet.
-    assert result["requests"] == []
-    assert result["shaped"][0]["note"] == "`t:grid`: inserts a column — the grid the source has"
+    assert result.requests == []
+    assert result.shaped[0].note == "`t:grid`: inserts a column — the grid the source has"
 
 
 def test_a_row_the_source_added_in_the_middle_goes_in_the_middle():
     result = regrid([["a one", "b one"], ["a new", "b new"], ["a two", "b two"]])
-    assert result["structure"] == [{"insertTableRow": {
+    assert result.structure == [{"insertTableRow": {
         "tableCellLocation": {"tableStartLocation": {"index": GRID["blocks"][1]["span"][0]},
                               "rowIndex": 0, "columnIndex": 0}, "insertBelow": True}}]
 
 
 def test_a_row_the_source_added_at_the_top_is_written_above_the_first():
     result = regrid([["a new", "b new"], ["a one", "b one"], ["a two", "b two"]])
-    assert result["structure"][0]["insertTableRow"]["insertBelow"] is False
-    assert result["structure"][0]["insertTableRow"]["tableCellLocation"]["rowIndex"] == 0
+    assert result.structure[0]["insertTableRow"]["insertBelow"] is False
+    assert result.structure[0]["insertTableRow"]["tableCellLocation"]["rowIndex"] == 0
 
 
 def test_a_row_the_source_deleted_is_deleted():
     result = regrid([["a one", "b one"]])
-    assert result["structure"] == [{"deleteTableRow": {"tableCellLocation": {
+    assert result.structure == [{"deleteTableRow": {"tableCellLocation": {
         "tableStartLocation": {"index": GRID["blocks"][1]["span"][0]},
         "rowIndex": 1, "columnIndex": 0}}}]
 
@@ -623,8 +623,8 @@ def test_a_row_the_source_rewrote_is_not_deleted_and_written_again():
     """Only the count a stretch is out by is a grid edit; the words are merged after,
     cell by cell, and a row deleted and rebuilt would lose what the document put in it."""
     result = regrid([["a ONE", "b ONE"], ["a two", "b two"], ["a new", "b new"]])
-    assert [next(iter(r)) for r in result["structure"]] == ["insertTableRow"]
-    assert result["structure"][0]["insertTableRow"]["tableCellLocation"]["rowIndex"] == 1
+    assert [next(iter(r)) for r in result.structure] == ["insertTableRow"]
+    assert result.structure[0]["insertTableRow"]["tableCellLocation"]["rowIndex"] == 1
 
 
 def grid_table(rows: list[list[str]], key: str = "t:grid") -> dict:
@@ -641,10 +641,10 @@ def test_a_grid_both_sides_changed_merges_rows_from_one_and_columns_from_the_oth
     ours = grid_table([["a one", "b one", "c one"], ["a two", "b two", "c two"]])
     theirs = grid_table([["a one", "b one"]])
     result = doc_merge.plan(GRID, ours, theirs)
-    assert result["structure"] == [{"insertTableColumn": {
+    assert result.structure == [{"insertTableColumn": {
         "tableCellLocation": {"tableStartLocation": {"index": theirs["blocks"][1]["span"][0]},
                               "rowIndex": 0, "columnIndex": 1}, "insertRight": True}}]
-    assert result["notes"] == []
+    assert result.notes == []
 
 
 def test_rows_and_columns_changed_at_once_are_both_written():
@@ -652,7 +652,7 @@ def test_rows_and_columns_changed_at_once_are_both_written():
     longer is still the same row."""
     result = regrid([["a one", "b one", "c one"]])
     at = GRID["blocks"][1]["span"][0]
-    assert result["structure"] == [
+    assert result.structure == [
         {"deleteTableRow": {"tableCellLocation": {"tableStartLocation": {"index": at},
                                                   "rowIndex": 1, "columnIndex": 0}}},
         {"insertTableColumn": {"tableCellLocation": {"tableStartLocation": {"index": at},
@@ -663,8 +663,8 @@ def test_rows_and_columns_changed_at_once_are_both_written():
 def test_a_row_the_source_deleted_but_the_document_wrote_in_is_kept():
     theirs = grid_table([["a one", "b one"], ["a two", "b TYPED"]])
     result = doc_merge.plan(GRID, grid_table([["a one", "b one"]]), theirs)
-    assert result["structure"] == []
-    assert "took away a row, but the document wrote in it" in result["notes"][0]
+    assert result.structure == []
+    assert "took away a row, but the document wrote in it" in result.notes[0]
 
 
 def test_a_row_the_document_deleted_that_the_source_wrote_in_is_said_to_be_gone():
@@ -677,37 +677,37 @@ def test_a_row_the_document_deleted_that_the_source_wrote_in_is_said_to_be_gone(
     """
     ours = grid_table([["a one", "b one"], ["a two", "b REWRITTEN"]])
     result = doc_merge.plan(GRID, ours, grid_table([["a one", "b one"]]))
-    assert result["structure"] == []
+    assert result.structure == []
     assert not any("REWRITTEN" in r.get("insertText", {}).get("text", "")
-                   for r in result["requests"])
-    assert any("deleted a row the source wrote in" in note for note in result["notes"]), \
-        result["notes"]
+                   for r in result.requests)
+    assert any("deleted a row the source wrote in" in note for note in result.notes), \
+        result.notes
 
 
 def test_a_row_the_document_deleted_that_the_source_left_alone_says_nothing():
     """The whole grid is one row shorter, which is not the source writing in it."""
     ours = grid_table([["a one", "b one", "c one"], ["a two", "b two", "c two"]])
     result = doc_merge.plan(GRID, ours, grid_table([["a one", "b one"]]))
-    assert not any("the words with it" in note for note in result["notes"]), result["notes"]
+    assert not any("the words with it" in note for note in result.notes), result.notes
 
 
 def test_a_row_the_document_added_stays_while_the_source_adds_a_column():
     theirs = grid_table([["a one", "b one"], ["a two", "b two"], ["a doc", "b doc"]])
     ours = grid_table([["a one", "b one", "c one"], ["a two", "b two", "c two"]])
     result = doc_merge.plan(GRID, ours, theirs)
-    assert kinds(result["structure"]) == ["insertTableColumn"]
-    assert result["structure"][0]["insertTableColumn"]["tableCellLocation"]["columnIndex"] == 1
+    assert kinds(result.structure) == ["insertTableColumn"]
+    assert result.structure[0]["insertTableColumn"]["tableCellLocation"]["columnIndex"] == 1
 
     after = grid_table([["a one", "b one", ""], ["a two", "b two", ""],
                         ["a doc", "b doc", ""]])
-    rebased = doc_merge.rebase_tables(GRID, after, result["shaped"])
+    rebased = doc_merge.rebase_tables(GRID, after, result.shaped)
     # The reader's row is not in the base: nothing agreed on it.
     assert doc_merge._grid(rebased["blocks"][1]) == (3, 3)
     assert rebased["blocks"][1]["aligned"]["row_live"] == [(0, 0), (1, 1)]
     again = doc_merge.plan(rebased, ours, after)
-    assert again["structure"] == [] and again["notes"] == []
-    assert [r["insertText"]["text"] for r in again["requests"]] == ["c two", "c one"]
-    assert [cell_text(again["blocks"][1], r, 2) for r in range(3)] == ["c one", "c two", ""]
+    assert again.structure == [] and again.notes == []
+    assert [r["insertText"]["text"] for r in again.requests] == ["c two", "c one"]
+    assert [cell_text(again.blocks[1], r, 2) for r in range(3)] == ["c one", "c two", ""]
 
 
 def test_a_column_and_a_row_the_source_added_get_their_words_on_the_next_pass():
@@ -716,7 +716,7 @@ def test_a_column_and_a_row_the_source_added_get_their_words_on_the_next_pass():
     theirs = grid_table([["a one", "b one"], ["a two", "b TYPED"]])
     result = doc_merge.plan(GRID, ours, theirs)
     at = theirs["blocks"][1]["span"][0]
-    assert result["structure"] == [
+    assert result.structure == [
         {"insertTableRow": {"tableCellLocation": {"tableStartLocation": {"index": at},
                                                   "rowIndex": 1, "columnIndex": 0},
                             "insertBelow": True}},
@@ -725,13 +725,13 @@ def test_a_column_and_a_row_the_source_added_get_their_words_on_the_next_pass():
                                "insertRight": True}}]
 
     after = grid_table([["a one", "", "b one"], ["a two", "", "b TYPED"], ["", "", ""]])
-    rebased = doc_merge.rebase_tables(GRID, after, result["shaped"])
+    rebased = doc_merge.rebase_tables(GRID, after, result.shaped)
     again = doc_merge.plan(rebased, ours, after)
-    assert again["structure"] == []
-    merged = again["blocks"][1]
+    assert again.structure == []
+    merged = again.blocks[1]
     assert [[doc_merge.block_text(c[0]) for c in row] for row in merged["rows"]] == [
         ["a one", "NEW", "b one"], ["a two", "NEW2", "b TYPED"], ["a three", "x", "b three"]]
-    assert sorted(r["insertText"]["text"] for r in again["requests"]) == [
+    assert sorted(r["insertText"]["text"] for r in again.requests) == [
         "NEW", "NEW2", "a three", "b three", "x"]
 
 
@@ -743,16 +743,16 @@ def test_a_row_the_reader_deleted_is_not_put_back_on_the_pass_after_the_regrid()
     ours = grid_table([["a one", "b one"], ["a two", "b two"], ["a new", "b new"]])
     theirs = grid_table([["a one", "b one"]])
     result = doc_merge.plan(GRID, ours, theirs)
-    assert kinds(result["structure"]) == ["insertTableRow"]
-    assert result["shaped"][0]["lines"]["dropped"] == {"row": [1], "column": []}
+    assert kinds(result.structure) == ["insertTableRow"]
+    assert result.shaped[0].lines["dropped"] == {"row": [1], "column": []}
 
     after = grid_table([["a one", "b one"], ["", ""]])
-    rebased = doc_merge.rebase_tables(GRID, after, result["shaped"])
+    rebased = doc_merge.rebase_tables(GRID, after, result.shaped)
     assert rebased["blocks"][1]["aligned"]["row_dropped"] == [1]
     again = doc_merge.plan(rebased, ours, after)
-    assert again["structure"] == []
+    assert again.structure == []
     assert [[doc_merge.block_text(c[0]) for c in row]
-            for row in again["blocks"][1]["rows"]] == [["a one", "b one"],
+            for row in again.blocks[1]["rows"]] == [["a one", "b one"],
                                                        ["a new", "b new"]]
 
 
@@ -762,9 +762,9 @@ def test_a_cell_the_source_split_into_two_paragraphs_is_written_with_the_break()
                                        {"kind": "paragraph", "runs": [{"text": "b more"}]}]
     theirs = grid_table([["a one", "b one"], ["a two", "b TYPED"]])
     result = doc_merge.plan(GRID, ours, theirs)
-    assert result["structure"] == []
+    assert result.structure == []
     cell = theirs["blocks"][1]["rows"][0][1][0]
-    assert [r for r in result["requests"] if "insertText" in r] == [
+    assert [r for r in result.requests if "insertText" in r] == [
         {"insertText": {"location": {"index": cell["span"][1] - 1}, "text": "\nb more"}}]
 
 
@@ -777,10 +777,10 @@ def test_a_cell_the_document_holds_two_paragraphs_in_merges_as_one_text():
     theirs = live([GRID["blocks"][0], typed, GRID["blocks"][2]])
     result = doc_merge.plan(GRID, ours, theirs)
     first = theirs["blocks"][1]["rows"][0][0][0]
-    inserts = [r["insertText"] for r in result["requests"] if "insertText" in r]
+    inserts = [r["insertText"] for r in result.requests if "insertText" in r]
     assert inserts == [{"location": {"index": first["span"][1] - 1}, "text": "ONE"}]
-    assert result["blocks"][1]["rows"][0][0][0]["joined"]
-    assert doc_merge.block_text(result["blocks"][1]["rows"][0][0][0]) == "a ONE\na typed"
+    assert result.blocks[1]["rows"][0][0][0]["joined"]
+    assert doc_merge.block_text(result.blocks[1]["rows"][0][0][0]) == "a ONE\na typed"
 
 
 MOVE = live([para("p:one", "one"), para("p:two", "two"),
@@ -791,30 +791,30 @@ def test_a_table_the_source_moved_is_deleted_and_built_again_where_the_file_has_
     ours = live([MOVE["blocks"][2], MOVE["blocks"][0], MOVE["blocks"][1], MOVE["blocks"][3]])
     result = doc_merge.plan(MOVE, ours, live(MOVE["blocks"]))
     grid = MOVE["blocks"][2]["span"]
-    assert result["structure"] == [
+    assert result.structure == [
         {"deleteContentRange": {"range": {"startIndex": grid[0], "endIndex": grid[1]}}},
         {"insertTable": {"rows": 1, "columns": 2, "location": {"index": 1}}}]
     # `lines` is None: one grid on all three sides needs no matching carried over.
-    assert result["shaped"][0] | {"note": ""} == {"key": "t:grid", "after": None,
-                                                  "moved": True, "lines": None,
-                                                  "note": ""}
+    assert result.shaped[0] == doc_merge.Told(
+        key="t:grid", after=None, moved=True, lines=None, ops=[], swallowed=None, eaten=None,
+        note="`t:grid`: moved where the source has it")
 
     after = live([table(None, [["", ""]]), *MOVE["blocks"][:2], MOVE["blocks"][3]])
     after["blocks"][0]["key"] = None
-    assert doc_merge.anchor_tables(after, result["shaped"]) == 1
-    rebased = doc_merge.rebase_tables(MOVE, after, result["shaped"])
+    assert doc_merge.anchor_tables(after, result.shaped) == 1
+    rebased = doc_merge.rebase_tables(MOVE, after, result.shaped)
     assert [b["key"] for b in rebased["blocks"]] == ["t:grid", "p:one", "p:two", "p:three"]
     again = doc_merge.plan(rebased, ours, after)
-    assert again["structure"] == []
-    assert sorted(r["insertText"]["text"] for r in again["requests"]) == ["a", "b"]
+    assert again.structure == []
+    assert sorted(r["insertText"]["text"] for r in again.requests) == ["a", "b"]
 
 
 def test_a_table_the_document_changed_is_not_moved():
     ours = live([MOVE["blocks"][2], MOVE["blocks"][0], MOVE["blocks"][1], MOVE["blocks"][3]])
     theirs = live([*MOVE["blocks"][:2], table("t:grid", [["a", "TYPED"]]), MOVE["blocks"][3]])
     result = doc_merge.plan(MOVE, ours, theirs)
-    assert result["structure"] == []
-    assert any("document changed it" in n for n in result["notes"])
+    assert result.structure == []
+    assert any("document changed it" in n for n in result.notes)
 
 
 def test_a_table_the_source_deleted_at_the_end_takes_the_empty_paragraph_after_it():
@@ -825,7 +825,7 @@ def test_a_table_the_source_deleted_at_the_end_takes_the_empty_paragraph_after_i
     theirs = live(was["blocks"]) | {"trailer": was["trailer"]}
     result = doc_merge.plan(was, live([was["blocks"][0]]), theirs)
     span = was["blocks"][1]["span"]
-    assert result["requests"] == [{"deleteContentRange": {"range": {
+    assert result.requests == [{"deleteContentRange": {"range": {
         "startIndex": span[0] - 1, "endIndex": span[1]}}}]
 
 
@@ -833,7 +833,7 @@ def test_a_table_the_source_deleted_at_the_start_takes_the_lead_with_it():
     was = live([table("t:grid", [["a"]]), para("p:one", "one")], start=2)
     theirs = live(was["blocks"], start=2) | {"lead": [1, 2]}
     result = doc_merge.plan(was, live([was["blocks"][1]]), theirs)
-    assert result["requests"] == [{"deleteContentRange": {"range": {
+    assert result.requests == [{"deleteContentRange": {"range": {
         "startIndex": 1, "endIndex": was["blocks"][0]["span"][1]}}}]
 
 
@@ -842,14 +842,15 @@ def test_a_table_the_source_added_is_built_where_the_file_puts_it():
     ours = live([was["blocks"][0], table("t:new", [["x", "y"]]), was["blocks"][1]])
     result = doc_merge.plan(was, ours, live(was["blocks"]))
     at = was["blocks"][1]["span"][0]
-    assert result["structure"] == [
+    assert result.structure == [
         {"insertTable": {"rows": 1, "columns": 2, "location": {"index": at}}},
         # `insertTable` splits the paragraph it is written into, so an empty one is
         # left in front of the table. The mark before it goes instead, which merges
         # the two and leaves both blocks as the file has them.
         {"deleteContentRange": {"range": {"startIndex": at - 1, "endIndex": at}}}]
-    assert result["shaped"] == [{"key": "t:new", "after": "p:one",
-                                 "note": "`t:new`: a table of 1×2 added by the source"}]
+    assert result.shaped == [doc_merge.Told(
+        key="t:new", after="p:one", moved=False, lines=None, ops=[], swallowed=None, eaten=None,
+        note="`t:new`: a table of 1×2 added by the source")]
 
 
 def test_a_table_the_source_added_in_front_of_a_table_goes_at_the_mark_before_it():
@@ -859,7 +860,7 @@ def test_a_table_the_source_added_in_front_of_a_table_goes_at_the_mark_before_it
     ours = live([GRID["blocks"][0], table("t:new", [["x"]]), GRID["blocks"][1],
                  GRID["blocks"][2]])
     result = doc_merge.plan(GRID, ours, live(GRID["blocks"]))
-    assert result["structure"] == [{"insertTable": {
+    assert result.structure == [{"insertTable": {
         "rows": 1, "columns": 1,
         "location": {"index": GRID["blocks"][1]["span"][0] - 1}}}]
 
@@ -867,7 +868,7 @@ def test_a_table_the_source_added_in_front_of_a_table_goes_at_the_mark_before_it
 def test_a_table_the_source_added_at_the_end_goes_to_the_end_of_the_segment():
     ours = live(GRID["blocks"] + [table("t:new", [["x"], ["y"]])])
     result = doc_merge.plan(GRID, ours, live(GRID["blocks"]))
-    assert result["structure"] == [{"insertTable": {"rows": 2, "columns": 1,
+    assert result.structure == [{"insertTable": {"rows": 2, "columns": 1,
                                                     "endOfSegmentLocation": {}}}]
 
 
@@ -877,8 +878,9 @@ def test_a_table_the_document_built_is_found_by_what_it_follows():
     built = live([GRID["blocks"][0], table(None, [["", ""]]), GRID["blocks"][1],
                   GRID["blocks"][2]])
     built["blocks"][1]["key"] = None
-    assert doc_merge.anchor_tables(built, [{"key": "t:new", "after": "p:before",
-                                            "note": ""}]) == 1
+    assert doc_merge.anchor_tables(built, [doc_merge.Told(
+        key="t:new", after="p:before", moved=False, lines=None, ops=[], swallowed=None,
+        eaten=None, note="")]) == 1
     assert built["blocks"][1]["key"] == "t:new"
 
 
@@ -887,7 +889,8 @@ def test_the_base_takes_the_row_that_was_just_written_and_nothing_else():
     wrote on the source's behalf, so the base says it too. Only the grid, though — the
     reader's words in that table were never agreed on, and a base that swallowed them
     would make the next plan read them as words the source had taken away."""
-    shaped = [{"key": "t:grid", "ops": [("row", "insert", 1)]}]
+    shaped = [doc_merge.Told(key="t:grid", after=None, moved=False, lines=None,
+                             ops=[("row", "insert", 1)], swallowed=None, eaten=None, note="")]
     after = live([GRID["blocks"][0], table("t:grid", [["a one", "b one"], ["", ""],
                                                       ["a two", "b TYPED"]]),
                   GRID["blocks"][2]])
@@ -901,16 +904,18 @@ def test_the_base_takes_the_row_that_was_just_written_and_nothing_else():
                                                      ["a two", "b two"]]),
                  GRID["blocks"][2]])
     result = doc_merge.plan(rebased, ours, live(after["blocks"]))
-    assert result["structure"] == []
+    assert result.structure == []
     # The source's words go into the row that was just made, and the reader keeps theirs.
-    assert [r["insertText"]["text"] for r in result["requests"]] == ["b new", "a new"]
-    assert cell_text(result["blocks"][1], 2, 1) == "b TYPED"
+    assert [r["insertText"]["text"] for r in result.requests] == ["b new", "a new"]
+    assert cell_text(result.blocks[1], 2, 1) == "b TYPED"
 
 
 def test_a_new_table_lands_in_the_base_where_the_document_has_it():
     after = live([GRID["blocks"][0], table("t:new", [["x"]]), GRID["blocks"][1],
                   GRID["blocks"][2]])
-    rebased = doc_merge.rebase_tables(GRID, after, [{"key": "t:new"}])
+    rebased = doc_merge.rebase_tables(GRID, after, [doc_merge.Told(
+        key="t:new", after=None, moved=False, lines=None, ops=[], swallowed=None, eaten=None,
+        note="")])
     assert [b["key"] for b in rebased["blocks"]] == ["p:before", "t:new", "t:grid", "p:after"]
 
 
@@ -920,8 +925,8 @@ def test_a_new_block_carrying_an_equation_is_reported_not_written():
                      {"text": "so "}, {"chip": "equation", "frozen": True, "text": ""}]}]
                 + BASE["blocks"][1:])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
-    assert result["requests"] == []
-    assert "no request can create" in result["notes"][0]
+    assert result.requests == []
+    assert "no request can create" in result.notes[0]
 
 
 def test_a_new_block_carrying_a_date_or_a_person_is_written_with_them():
@@ -933,15 +938,15 @@ def test_a_new_block_carrying_a_date_or_a_person_is_written_with_them():
                 + BASE["blocks"][1:])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     at = BASE["blocks"][1]["span"][0]
-    kinds = [next(iter(r)) for r in result["requests"]]
+    kinds = [next(iter(r)) for r in result.requests]
     assert kinds[:3] == ["insertText", "insertPerson", "insertDate"]
-    assert result["requests"][0]["insertText"]["text"] == "due  ask \n"
+    assert result.requests[0]["insertText"]["text"] == "due  ask \n"
     # Back to front, each at its place in the words: the person after "due  ask ",
     # then the date after "due ", which pushes the person one unit right.
-    assert result["requests"][1]["insertPerson"] == {
+    assert result.requests[1]["insertPerson"] == {
         "location": {"index": at + 9}, "personProperties": {"email": "ada@example.com"}}
-    assert result["requests"][2]["insertDate"]["location"] == {"index": at + 4}
-    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+    assert result.requests[2]["insertDate"]["location"] == {"index": at + 4}
+    assert applied(live(BASE["blocks"]), result.requests) == texts(result)
 
 
 # ---------------------------------------------------------------- pictures
@@ -960,21 +965,21 @@ def test_a_picture_the_source_added_is_staged_and_inserted():
                 + BASE["blocks"][1:])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     at = BASE["blocks"][1]["span"][0]
-    assert result["requests"][0] == {"insertText": {"location": {"index": at}, "text": "\n"}}
+    assert result.requests[0] == {"insertText": {"location": {"index": at}, "text": "\n"}}
     # The file's name stands in for a URL until `doc_sync.Stager` has one, and the
     # size goes in points: 60 × 40 px is what the importer makes 45 × 30 pt.
-    assert result["requests"][1] == {"insertInlineImage": {
+    assert result.requests[1] == {"insertInlineImage": {
         "location": {"index": at}, "uri": doc_merge.STAGE + "figures/plot.png",
         "objectSize": {"width": {"magnitude": 45.0, "unit": "PT"},
                        "height": {"magnitude": 30.0, "unit": "PT"}}}}
-    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+    assert applied(live(BASE["blocks"]), result.requests) == texts(result)
 
 
 def test_a_picture_among_words_goes_where_the_words_put_it():
     ours = live(BASE["blocks"] + [figure("p:inline", {"text": "see "}, picture("a.png", sha="a"),
                                          {"text": " and "}, picture("b.png", sha="b"))])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
-    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+    assert applied(live(BASE["blocks"]), result.requests) == texts(result)
     assert texts(result)[-1] == f"see {doc_merge.FROZEN} and {doc_merge.FROZEN}"
 
 
@@ -985,10 +990,10 @@ def test_a_picture_the_source_regenerated_is_replaced():
     ours = live([para("p:one", "one"), figure("p:plot", picture("plot.png", value="i.0", sha="new"))])
     result = doc_merge.plan(base, ours, theirs)
     start, end = theirs["blocks"][1]["span"]
-    assert result["requests"][0] == {"deleteContentRange": {"range": {
+    assert result.requests[0] == {"deleteContentRange": {"range": {
         "startIndex": start, "endIndex": end - 1}}}
-    assert result["requests"][1]["insertInlineImage"]["uri"] == doc_merge.STAGE + "plot.png"
-    assert applied(theirs, result["requests"]) == texts(result)
+    assert result.requests[1]["insertInlineImage"]["uri"] == doc_merge.STAGE + "plot.png"
+    assert applied(theirs, result.requests) == texts(result)
 
 
 def test_a_picture_the_source_only_renamed_is_no_change():
@@ -997,14 +1002,14 @@ def test_a_picture_the_source_only_renamed_is_no_change():
     theirs = live([figure("p:plot", {"chip": "image", "frozen": True, "text": "", "value": "i.0"})])
     doc_merge.restore_pictures(theirs, base, ours)
     assert theirs["blocks"][0]["runs"][0]["src"] == "new-name.png"   # the file follows the rename
-    assert doc_merge.plan(base, ours, theirs)["requests"] == []
+    assert doc_merge.plan(base, ours, theirs).requests == []
 
 
 def test_a_picture_file_that_is_not_checked_out_is_no_change():
     base = live([figure("p:plot", picture("plot.png", value="i.0", sha="s"))])
     ours = live([figure("p:plot", picture("plot.png", value="i.0", missing=True))])
     theirs = live(base["blocks"])
-    assert doc_merge.plan(base, ours, theirs)["requests"] == []
+    assert doc_merge.plan(base, ours, theirs).requests == []
 
 
 def test_a_size_the_source_changes_is_said_out_loud_rather_than_dropped():
@@ -1019,12 +1024,12 @@ def test_a_size_the_source_changes_is_said_out_loud_rather_than_dropped():
     ours = live([figure("p:plot", picture("plot.png", value="i.0", sha="s", size=[120, 80],
                                           alt="A bigger plot"))])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    assert result["requests"] == []
-    assert [note.split(" — ")[0] for note in result["notes"]] == [
+    assert result.requests == []
+    assert [note.split(" — ")[0] for note in result.notes] == [
         "p:plot: the source gave the picture the size 120×80 and no request writes one",
         "p:plot: the source gave the picture the alt text 'A bigger plot' and no request "
         "writes one"]
-    assert "60×40" in result["notes"][0] and "data-object" in result["notes"][0]
+    assert "60×40" in result.notes[0] and "data-object" in result.notes[0]
 
 
 def test_a_size_that_goes_in_with_the_picture_the_sync_writes_is_not_reported():
@@ -1044,23 +1049,23 @@ def test_a_size_that_goes_in_with_the_picture_the_sync_writes_is_not_reported():
     ours = live(base["blocks"][:2] + [plot(sha="new", size=[120, 80], alt="A plot")]
                 + base["blocks"][3:])
     result = doc_merge.plan(base, ours, theirs)
-    images = [r["insertInlineImage"] for r in result["requests"] if "insertInlineImage" in r]
+    images = [r["insertInlineImage"] for r in result.requests if "insertInlineImage" in r]
     assert images and images[0]["objectSize"]["width"]["magnitude"] == 90.0
-    assert [note for note in result["notes"] if "the size" in note] == []
-    assert [note for note in result["notes"] if "the alt text" in note]
+    assert [note for note in result.notes if "the size" in note] == []
+    assert [note for note in result.notes if "the alt text" in note]
     # Moved instead: the insert carries the document's 60 × 40, and it is said.
     ours = live([plot(sha="s", size=[120, 80])] + base["blocks"][:2] + base["blocks"][3:])
     result = doc_merge.plan(base, ours, live(theirs["blocks"]))
-    images = [r["insertInlineImage"] for r in result["requests"] if "insertInlineImage" in r]
+    images = [r["insertInlineImage"] for r in result.requests if "insertInlineImage" in r]
     assert images and images[0]["objectSize"]["width"]["magnitude"] == 45.0
-    assert [note for note in result["notes"] if "the size" in note]
+    assert [note for note in result.notes if "the size" in note]
 
 
 def test_a_picture_the_reader_replaced_is_the_documents():
     base = live([figure("p:plot", picture("plot.png", value="i.0", sha="s"))])
     theirs = live([figure("p:plot", {"chip": "image", "frozen": True, "text": "", "value": "kix.9"})])
     result = doc_merge.plan(base, live(base["blocks"]), theirs)
-    assert result["requests"] == []
+    assert result.requests == []
 
 
 def test_a_moved_block_with_a_picture_is_written_from_the_documents_copy():
@@ -1072,9 +1077,9 @@ def test_a_moved_block_with_a_picture_is_written_from_the_documents_copy():
     theirs["blocks"][3]["runs"][1]["uri"] = "https://lh7/plot"
     ours = live([was["blocks"][i] for i in (A, D, B, C, E)])
     result = doc_merge.plan(was, ours, theirs)
-    images = [r["insertInlineImage"] for r in result["requests"] if "insertInlineImage" in r]
+    images = [r["insertInlineImage"] for r in result.requests if "insertInlineImage" in r]
     assert [i["uri"] for i in images] == ["https://lh7/plot"]    # no staging: Docs has it
-    assert applied(theirs, result["requests"]) == texts(result)
+    assert applied(theirs, result.requests) == texts(result)
 
 
 def test_pictures_just_inserted_learn_their_files_by_place():
@@ -1097,18 +1102,18 @@ def test_a_block_the_source_added_is_inserted_with_its_styling():
                 + BASE["blocks"][1:])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     assert texts(result)[1] == "New heading"
-    kinds = [next(iter(r)) for r in result["requests"]]
+    kinds = [next(iter(r)) for r in result.requests]
     # One updateTextStyle per run, the plain one included: text written from nothing
     # inherits the styling of the character in front of it, so every managed field is
     # named, or a block moved under an underlined heading comes out underlined.
     assert kinds == ["insertText", "deleteParagraphBullets", "updateParagraphStyle",
                      "updateTextStyle", "updateTextStyle"]
-    insert = result["requests"][0]["insertText"]
+    insert = result.requests[0]["insertText"]
     assert insert["text"] == "New heading\n"
     assert insert["location"]["index"] == BASE["blocks"][1]["span"][0]
-    assert (result["requests"][2]["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"]
+    assert (result.requests[2]["updateParagraphStyle"]["paragraphStyle"]["namedStyleType"]
             == "HEADING_2")
-    plain, bold = (r["updateTextStyle"] for r in result["requests"][3:])
+    plain, bold = (r["updateTextStyle"] for r in result.requests[3:])
     assert plain["textStyle"] == {} and "bold" in plain["fields"].split(",")
     assert bold["textStyle"] == {"bold": True}
     assert set(plain["fields"].split(",")) == set(doc_merge.MANAGED)
@@ -1118,12 +1123,12 @@ def test_a_list_item_gets_its_bullets_after_its_styling():
     ours = live(BASE["blocks"] + [{"kind": "item", "level": 0, "ordered": True,
                                    "key": "item:step", "runs": [{"text": "step one"}]}])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
-    kinds = [next(iter(r)) for r in result["requests"]]
+    kinds = [next(iter(r)) for r in result.requests]
     assert kinds == ["insertText", "updateParagraphStyle", "updateTextStyle",
                      "createParagraphBullets"]
     # A block that is not a list item says so, or it joins the list it was written into.
     assert "deleteParagraphBullets" not in kinds
-    assert (result["requests"][-1]["createParagraphBullets"]["bulletPreset"]
+    assert (result.requests[-1]["createParagraphBullets"]["bulletPreset"]
             == "NUMBERED_DECIMAL_ALPHA_ROMAN")
 
 
@@ -1131,38 +1136,38 @@ def test_a_block_appended_at_the_end_puts_its_paragraph_break_first():
     ours = live(BASE["blocks"] + [para("p:delta", "delta seven")])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     tail = BASE["blocks"][-1]["span"][1] - 1
-    kinds = [next(iter(r)) for r in result["requests"]]
+    kinds = [next(iter(r)) for r in result.requests]
     assert kinds == ["insertText", "deleteParagraphBullets", "updateParagraphStyle",
                      "updateTextStyle"]
-    insert = result["requests"][0]["insertText"]
+    insert = result.requests[0]["insertText"]
     # The body's last newline cannot be written past, so the break goes in before
     # the words: "delta seven\n" at `tail` would join the last paragraph instead and
     # leave an empty one behind it.
     assert insert == {"location": {"index": tail}, "text": "\ndelta seven"}
-    assert (result["requests"][2]["updateParagraphStyle"]["range"]
+    assert (result.requests[2]["updateParagraphStyle"]["range"]
             == {"startIndex": tail + 1, "endIndex": tail + 1 + len("delta seven") + 1})
-    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+    assert applied(live(BASE["blocks"]), result.requests) == texts(result)
 
 
 def test_two_blocks_appended_at_the_end_keep_their_order():
     ours = live(BASE["blocks"] + [para("p:delta", "delta seven"), para("p:echo", "echo eight")])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
-    inserts = [r["insertText"] for r in result["requests"] if "insertText" in r]
+    inserts = [r["insertText"] for r in result.requests if "insertText" in r]
     # Both go in at the one index, and what is written last ends up in front of what
     # was written before it, so the later block is written first.
     assert [i["text"] for i in inserts] == ["\necho eight", "\ndelta seven"]
     assert {i["location"]["index"] for i in inserts} == {BASE["blocks"][-1]["span"][1] - 1}
-    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+    assert applied(live(BASE["blocks"]), result.requests) == texts(result)
 
 
 def test_two_blocks_added_before_one_block_keep_their_order():
     ours = live(BASE["blocks"][:1] + [para("p:delta", "delta"), para("p:echo", "echo")]
                 + BASE["blocks"][1:])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
-    inserts = [r["insertText"] for r in result["requests"] if "insertText" in r]
+    inserts = [r["insertText"] for r in result.requests if "insertText" in r]
     assert [i["text"] for i in inserts] == ["echo\n", "delta\n"]
     assert {i["location"]["index"] for i in inserts} == {BASE["blocks"][1]["span"][0]}
-    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+    assert applied(live(BASE["blocks"]), result.requests) == texts(result)
 
 
 def test_an_append_is_written_before_the_edits_of_the_paragraph_it_follows():
@@ -1172,10 +1177,10 @@ def test_an_append_is_written_before_the_edits_of_the_paragraph_it_follows():
     tail = BASE["blocks"][-1]["span"][1] - 1
     # The edit ends where the appended block begins. Written the other way round, the
     # index the append was planned at would be inside the rewritten word.
-    assert result["requests"][0]["insertText"] == {"location": {"index": tail},
+    assert result.requests[0]["insertText"] == {"location": {"index": tail},
                                                    "text": "\ndelta seven"}
-    assert [r["insertText"]["text"] for r in result["requests"] if "insertText" in r][1] == "SIX"
-    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+    assert [r["insertText"]["text"] for r in result.requests if "insertText" in r][1] == "SIX"
+    assert applied(live(BASE["blocks"]), result.requests) == texts(result)
 
 
 def test_a_block_appended_while_the_last_one_goes_lands_after_the_delete():
@@ -1183,10 +1188,10 @@ def test_a_block_appended_while_the_last_one_goes_lands_after_the_delete():
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     # The deleted block is further down the document, so it goes first and leaves the
     # paragraph mark the append was planned at — the second last one — where it was.
-    assert next(iter(result["requests"][0])) == "deleteContentRange"
-    assert result["requests"][1]["insertText"] == {
+    assert next(iter(result.requests[0])) == "deleteContentRange"
+    assert result.requests[1]["insertText"] == {
         "location": {"index": BASE["blocks"][1]["span"][1] - 1}, "text": "\ndelta seven"}
-    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+    assert applied(live(BASE["blocks"]), result.requests) == texts(result)
 
 
 def test_the_last_block_gives_up_the_mark_before_it_not_the_bodys_own():
@@ -1195,15 +1200,15 @@ def test_the_last_block_gives_up_the_mark_before_it_not_the_bodys_own():
     ours = live(BASE["blocks"][:2])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     start, end = BASE["blocks"][2]["span"]
-    assert result["requests"] == [{"deleteContentRange": {"range": {
+    assert result.requests == [{"deleteContentRange": {"range": {
         "startIndex": start - 1, "endIndex": end - 1}}}]
-    assert applied(live(BASE["blocks"]), result["requests"]) == texts(result)
+    assert applied(live(BASE["blocks"]), result.requests) == texts(result)
 
 
 def test_the_last_two_blocks_pass_the_mark_leftwards():
     ours = live(BASE["blocks"][:1])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
-    assert applied(live(BASE["blocks"]), result["requests"]) == ["alpha one two"]
+    assert applied(live(BASE["blocks"]), result.requests) == ["alpha one two"]
 
 
 def test_a_block_after_a_final_table_is_written_into_the_paragraph_the_body_keeps():
@@ -1215,7 +1220,7 @@ def test_a_block_after_a_final_table_is_written_into_the_paragraph_the_body_keep
     theirs["trailer"] = [theirs["blocks"][-1]["span"][1], theirs["blocks"][-1]["span"][1] + 1]
     ours = live(base["blocks"] + [para("p:two", "two"), para("p:three", "three")])
     result = doc_merge.plan(base, ours, theirs)
-    inserts = [r["insertText"] for r in result["requests"] if "insertText" in r]
+    inserts = [r["insertText"] for r in result.requests if "insertText" in r]
     at = theirs["trailer"][0]
     assert inserts == [{"location": {"index": at}, "text": "\nthree"},
                        {"location": {"index": at}, "text": "two"}]
@@ -1230,21 +1235,21 @@ def test_the_empty_paragraph_after_a_final_table_is_not_a_block():
                 {"startIndex": 7, "endIndex": 9, "textRun": {"content": "a\n"}}]}}]}]}]}},
         {"startIndex": 12, "endIndex": 13, "paragraph": {"elements": [
             {"startIndex": 12, "endIndex": 13, "textRun": {"content": "\n"}}]}}]}}
-    ir = doc_ir.from_document(doc)
+    ir = doc_ir.from_document(doc, tab_id=None)
     assert [b["kind"] for b in ir["blocks"]] == ["paragraph", "table"]
     assert ir["trailer"] == [12, 13]
     assert doc_merge.tidy_requests(ir) == []
     # Inserted after a list item, the table leaves that item's glyph on the paragraph
     # after it: still no block, but made a plain paragraph again.
     doc["body"]["content"][-1]["paragraph"]["bullet"] = {"listId": "l"}
-    ir = doc_ir.from_document(doc)
+    ir = doc_ir.from_document(doc, tab_id=None)
     assert ir["trailer_kind"] == "item"
     assert [next(iter(r)) for r in doc_merge.tidy_requests(ir)] == [
         "deleteParagraphBullets", "updateParagraphStyle"]
     del doc["body"]["content"][-1]["paragraph"]["bullet"]
     # One a reader typed into is a block like any other.
     doc["body"]["content"][-1]["paragraph"]["elements"][0]["textRun"]["content"] = "typed\n"
-    assert [b["kind"] for b in doc_ir.from_document(doc)["blocks"]] == ["paragraph", "table",
+    assert [b["kind"] for b in doc_ir.from_document(doc, tab_id=None)["blocks"]] == ["paragraph", "table",
                                                                         "paragraph"]
 
 
@@ -1279,7 +1284,7 @@ def test_a_read_equation_takes_its_latex_from_the_base_and_the_merge_writes_noth
                   "runs": [{"text": "So "}, dict(eq, text="E=m{c}^{2}")]}])
     doc_merge.restore_unreadable(theirs, base, base)
     assert theirs["blocks"][0]["runs"][1]["text"] == "E=m{c}^{2}"
-    assert doc_merge.plan(base, base, theirs)["requests"] == []
+    assert doc_merge.plan(base, base, theirs).requests == []
     # A block that holds another number of equations than the base's is not guessed at.
     other = live([{"kind": "paragraph", "key": "p:e", "runs": [dict(eq), dict(eq)]}])
     doc_merge.restore_unreadable(other, base)
@@ -1290,7 +1295,7 @@ def test_a_block_the_source_deleted_is_deleted_in_the_document():
     ours = live([BASE["blocks"][0], BASE["blocks"][2]])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     assert texts(result) == ["alpha one two", "charlie five six"]
-    assert result["requests"] == [{"deleteContentRange": {"range": {
+    assert result.requests == [{"deleteContentRange": {"range": {
         "startIndex": BASE["blocks"][1]["span"][0],
         "endIndex": BASE["blocks"][1]["span"][1]}}}]
 
@@ -1301,15 +1306,15 @@ def test_a_source_delete_loses_to_a_document_edit():
                    para("p:charlie", "charlie five six")])
     result = doc_merge.plan(BASE, ours, theirs)
     assert texts(result)[1] == "bravo THREE four"
-    assert result["requests"] == []
-    assert "kept" in result["notes"][0]
+    assert result.requests == []
+    assert "kept" in result.notes[0]
 
 
 def test_a_block_deleted_in_the_document_stays_deleted():
     theirs = live([BASE["blocks"][0], BASE["blocks"][2]])
     result = doc_merge.plan(BASE, live(BASE["blocks"]), theirs)
     assert texts(result) == ["alpha one two", "charlie five six"]
-    assert result["requests"] == []
+    assert result.requests == []
 
 
 def test_a_block_added_in_the_document_is_left_where_it_is():
@@ -1317,7 +1322,7 @@ def test_a_block_added_in_the_document_is_left_where_it_is():
                   + BASE["blocks"][1:])
     result = doc_merge.plan(BASE, live(BASE["blocks"]), theirs)
     assert texts(result)[1] == "typed here"
-    assert result["requests"] == []
+    assert result.requests == []
 
 
 def test_edits_are_ordered_back_to_front_so_indices_stay_valid():
@@ -1325,7 +1330,7 @@ def test_edits_are_ordered_back_to_front_so_indices_stay_valid():
                  para("p:charlie", "charlie FIVE six")])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
     touched = [next(iter(r.values()))["range"]["startIndex"] if "deleteContentRange" in r
-               else r["insertText"]["location"]["index"] for r in result["requests"]]
+               else r["insertText"]["location"]["index"] for r in result.requests]
     assert touched == sorted(touched, reverse=True)
 
 
@@ -1347,14 +1352,14 @@ def test_a_block_the_source_moved_up_is_moved_in_the_document():
     result = doc_merge.plan(FIVE, order(A, D, B, C, E), live(FIVE["blocks"]))
     assert texts(result) == ["alpha one", "delta four", "bravo two", "charlie three",
                              "echo five"]
-    assert [b["key"] for b in result["blocks"] if b.get("moved")] == ["p:delta"]
-    kinds = [next(iter(r)) for r in result["requests"]]
+    assert [b["key"] for b in result.blocks if b.get("moved")] == ["p:delta"]
+    kinds = [next(iter(r)) for r in result.requests]
     # Deleted where it was first (the higher index), then written where it belongs.
     assert kinds == ["deleteContentRange", "insertText", "deleteParagraphBullets",
                      "updateParagraphStyle", "updateTextStyle"]
-    assert result["requests"][0]["deleteContentRange"]["range"] == {
+    assert result.requests[0]["deleteContentRange"]["range"] == {
         "startIndex": FIVE["blocks"][D]["span"][0], "endIndex": FIVE["blocks"][D]["span"][1]}
-    assert result["requests"][1]["insertText"] == {
+    assert result.requests[1]["insertText"] == {
         "location": {"index": FIVE["blocks"][B]["span"][0]}, "text": "delta four\n"}
 
 
@@ -1362,10 +1367,10 @@ def test_a_block_the_source_moved_down_is_written_before_it_is_deleted():
     result = doc_merge.plan(FIVE, order(A, C, D, B, E), live(FIVE["blocks"]))
     assert texts(result) == ["alpha one", "charlie three", "delta four", "bravo two",
                              "echo five"]
-    kinds = [next(iter(r)) for r in result["requests"]]
+    kinds = [next(iter(r)) for r in result.requests]
     assert kinds == ["insertText", "deleteParagraphBullets", "updateParagraphStyle",
                      "updateTextStyle", "deleteContentRange"]
-    assert result["requests"][0]["insertText"] == {
+    assert result.requests[0]["insertText"] == {
         "location": {"index": FIVE["blocks"][E]["span"][0]}, "text": "bravo two\n"}
 
 
@@ -1376,7 +1381,7 @@ def test_a_moved_block_carries_the_words_both_sides_changed():
                    para("p:delta", "READER delta four"), FIVE["blocks"][E]])
     result = doc_merge.plan(FIVE, ours, theirs)
     assert texts(result)[1] == "READER delta four SOURCE"
-    assert [r["insertText"]["text"] for r in result["requests"] if "insertText" in r] == \
+    assert [r["insertText"]["text"] for r in result.requests if "insertText" in r] == \
         ["READER delta four SOURCE\n"]
 
 
@@ -1387,10 +1392,10 @@ def test_a_moved_list_item_is_written_as_a_list_item():
                  "runs": [{"text": "step one"}]}, para("p:echo", "echo five")])
     ours = live([was["blocks"][i] for i in (A, D, B, C, E)])
     result = doc_merge.plan(was, ours, live(was["blocks"]))
-    kinds = [next(iter(r)) for r in result["requests"]]
+    kinds = [next(iter(r)) for r in result.requests]
     assert kinds == ["deleteContentRange", "insertText", "updateParagraphStyle",
                      "updateTextStyle", "createParagraphBullets"]
-    assert (result["requests"][-1]["createParagraphBullets"]["bulletPreset"]
+    assert (result.requests[-1]["createParagraphBullets"]["bulletPreset"]
             == "NUMBERED_DECIMAL_ALPHA_ROMAN")
 
 
@@ -1399,8 +1404,8 @@ def test_a_reversal_moves_the_fewest_blocks_it_can():
     assert texts(result) == ["echo five", "delta four", "charlie three", "bravo two",
                              "alpha one"]
     # One block of the five can stay where it is, and exactly one does.
-    assert len([b for b in result["blocks"] if b.get("moved")]) == 4
-    assert applied(live(FIVE["blocks"]), result["requests"]) == texts(result)
+    assert len([b for b in result.blocks if b.get("moved")]) == 4
+    assert applied(live(FIVE["blocks"]), result.requests) == texts(result)
 
 
 @pytest.mark.parametrize("places", [(A, D, B, C, E), (A, C, D, B, E), (E, D, C, B, A),
@@ -1410,7 +1415,7 @@ def test_whatever_the_source_reordered_the_requests_say_the_same(places):
     the document ends up saying exactly what the merge says it should."""
     result = doc_merge.plan(FIVE, order(*places), live(FIVE["blocks"]))
     assert texts(result) == [doc_merge.block_text(FIVE["blocks"][i]) for i in places]
-    assert applied(live(FIVE["blocks"]), result["requests"]) == texts(result)
+    assert applied(live(FIVE["blocks"]), result.requests) == texts(result)
 
 
 def test_the_requests_say_the_same_when_blocks_are_added_moved_and_deleted_at_once():
@@ -1419,7 +1424,7 @@ def test_the_requests_say_the_same_when_blocks_are_added_moved_and_deleted_at_on
     result = doc_merge.plan(FIVE, ours, live(FIVE["blocks"]))
     assert texts(result) == ["alpha one", "a new one", "delta four", "bravo two",
                              "another new one"]
-    assert applied(live(FIVE["blocks"]), result["requests"]) == texts(result)
+    assert applied(live(FIVE["blocks"]), result.requests) == texts(result)
 
 
 def test_both_sides_reordering_leaves_the_documents_order_alone():
@@ -1427,15 +1432,15 @@ def test_both_sides_reordering_leaves_the_documents_order_alone():
     result = doc_merge.plan(FIVE, order(A, D, B, C, E), theirs)
     assert texts(result) == ["bravo two", "alpha one", "charlie three", "delta four",
                              "echo five"]
-    assert result["requests"] == []
-    assert "both sides moved blocks" in result["notes"][0]
+    assert result.requests == []
+    assert "both sides moved blocks" in result.notes[0]
 
 
 def test_a_block_the_document_moved_stays_where_the_document_put_it():
     result = doc_merge.plan(FIVE, live(FIVE["blocks"]), order(A, D, B, C, E))
     assert texts(result) == ["alpha one", "delta four", "bravo two", "charlie three",
                              "echo five"]
-    assert result["requests"] == []
+    assert result.requests == []
 
 
 def test_a_block_with_a_chip_in_it_is_not_moved():
@@ -1446,8 +1451,8 @@ def test_a_block_with_a_chip_in_it_is_not_moved():
                 para("p:echo", "echo five")])
     ours = live([was["blocks"][i] for i in (A, D, B, C, E)])
     result = doc_merge.plan(was, ours, live(was["blocks"]))
-    assert result["requests"] == []
-    assert "cannot be written from nothing" in result["notes"][0]
+    assert result.requests == []
+    assert "cannot be written from nothing" in result.notes[0]
 
 
 def test_a_move_and_the_second_sync_that_writes_nothing():
@@ -1455,9 +1460,9 @@ def test_a_move_and_the_second_sync_that_writes_nothing():
     ours = order(A, D, B, C, E)
     result = doc_merge.plan(FIVE, ours, live(FIVE["blocks"]))
     settled = live([{k: v for k, v in b.items() if k not in ("span", "moved", "origin")}
-                    for b in result["blocks"]])
+                    for b in result.blocks])
     again = doc_merge.plan(settled, ours, live(settled["blocks"]))
-    assert again["requests"] == [] and again["notes"] == []
+    assert again.requests == [] and again.notes == []
 
 
 def test_a_moved_block_keeps_its_key_after_the_write():
@@ -1468,8 +1473,8 @@ def test_a_moved_block_keeps_its_key_after_the_write():
     read_back = live([{k: v for k, v in b.items()
                        if k not in ("span", "moved", "origin", "key")}
                       if b.get("moved") else {k: v for k, v in b.items() if k != "span"}
-                      for b in result["blocks"]])
-    assert doc_merge.adopt_keys(read_back, result["blocks"]) == 1
+                      for b in result.blocks])
+    assert doc_merge.adopt_keys(read_back, result.blocks) == 1
     assert [b["key"] for b in read_back["blocks"]] == [
         "p:alpha", "p:delta", "p:bravo", "p:charlie", "p:echo"]
 
@@ -1477,8 +1482,8 @@ def test_a_moved_block_keeps_its_key_after_the_write():
 def test_an_added_block_keeps_the_id_its_author_wrote():
     ours = live(BASE["blocks"] + [para("p:the-note", "a paragraph with an id of its own")])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
-    read_back = live([para(None, doc_merge.block_text(b)) for b in result["blocks"]])
-    doc_merge.adopt_keys(read_back, result["blocks"])
+    read_back = live([para(None, doc_merge.block_text(b)) for b in result.blocks])
+    doc_merge.adopt_keys(read_back, result.blocks)
     assert read_back["blocks"][-1]["key"] == "p:the-note"
 
 
@@ -1510,10 +1515,10 @@ def test_an_insert_is_sent_after_the_edits_of_the_block_it_pushes_down():
     ours = live([BASE["blocks"][0], para("p:new", "brand new line"),
                  para("p:bravo", "bravo three FOUR"), BASE["blocks"][2]])
     result = doc_merge.plan(BASE, ours, live(BASE["blocks"]))
-    where = {r["insertText"]["text"]: i for i, r in enumerate(result["requests"])
+    where = {r["insertText"]["text"]: i for i, r in enumerate(result.requests)
              if "insertText" in r}
     assert where["FOUR"] < where["brand new line\n"]
-    assert (result["requests"][where["brand new line\n"]]["insertText"]["location"]["index"]
+    assert (result.requests[where["brand new line\n"]]["insertText"]["location"]["index"]
             == BASE["blocks"][1]["span"][0])
 
 
@@ -1575,58 +1580,58 @@ def test_tabs_pair_by_id_and_the_source_can_add_rename_and_delete_them():
     theirs = tabbed(tab("t.1", "Notes", "a"), tab("t.2", "Old", "b"),
                     tab("t.3", "Busy", "c", "reader's"), tab("t.4", "Reader's own", "r"))
     out = doc_merge.pair_tabs(base, ours, theirs)
-    assert [(t, mine["title"], was["title"]) for t, mine, was in out["pairs"]] == [
+    assert [(t, mine["title"], was["title"]) for t, mine, was in out.pairs] == [
         ("t.1", "Notes, renamed", "Notes")]
-    assert [p["title"] for p in out["create"]] == ["Appendix"]
-    assert out["requests"] == [
+    assert [p["title"] for p in out.create] == ["Appendix"]
+    assert out.requests == [
         {"updateDocumentTabProperties": {"tabProperties": {"tabId": "t.1",
                                                            "title": "Notes, renamed"},
                                          "fields": "title"}},
         {"deleteTab": {"tabId": "t.2"}}]
     # t.3: deleted in the source, written in by the reader — theirs. t.4: theirs, and read.
-    assert any("'Busy'" in n and "kept" in n for n in out["notes"])
+    assert any("'Busy'" in n and "kept" in n for n in out.notes)
 
 
 def test_a_tab_both_sides_renamed_keeps_the_document_title():
     base = tabbed(tab("t.1", "Notes", "a"))
     out = doc_merge.pair_tabs(base, tabbed(tab("t.1", "Mine", "a")),
                               tabbed(tab("t.1", "Theirs", "a")))
-    assert out["requests"] == [] and "renamed on both sides" in out["notes"][0]
+    assert out.requests == [] and "renamed on both sides" in out.notes[0]
 
 
 def test_a_tab_the_reader_deleted_stays_deleted_and_a_source_edit_to_it_is_said():
     base = tabbed(tab("t.1", "Notes", "a"))
     out = doc_merge.pair_tabs(base, tabbed(tab("t.1", "Notes", "a", "b")), tabbed())
-    assert out["pairs"] == [] and out["create"] == [] and out["requests"] == []
-    assert "deleted in the document" in out["notes"][0]
+    assert out.pairs == [] and out.create == [] and out.requests == []
+    assert "deleted in the document" in out.notes[0]
     quiet = doc_merge.pair_tabs(base, tabbed(tab("t.1", "Notes", "a")), tabbed())
-    assert quiet["notes"] == []
+    assert quiet.notes == []
 
 
 def test_the_document_is_renamed_when_the_file_alone_renamed_it():
     base, theirs = tabbed(), tabbed()
     out = doc_merge.pair_tabs(base, tabbed() | {"title": "A better name"}, theirs)
-    assert out["rename"] == "A better name" and out["requests"] == []
-    assert out["notes"] == [] and "renamed 'A better name'" in out["applied"][0]
+    assert out.rename == "A better name" and out.requests == []
+    assert out.notes == [] and "renamed 'A better name'" in out.applied[0]
     # The reader renamed it and the source did not: the file simply follows at the settle.
     quiet = doc_merge.pair_tabs(base, tabbed(), tabbed() | {"title": "Theirs"})
-    assert quiet["rename"] is None and quiet["notes"] == []
+    assert quiet.rename is None and quiet.notes == []
 
 
 def test_a_document_renamed_on_both_sides_keeps_the_name_the_reader_gave_it():
     out = doc_merge.pair_tabs(tabbed(), tabbed() | {"title": "Mine"},
                               tabbed() | {"title": "Theirs"})
-    assert out["rename"] is None
-    assert out["notes"] == ["the document was renamed on both sides — it keeps 'Theirs', "
+    assert out.rename is None
+    assert out.notes == ["the document was renamed on both sides — it keeps 'Theirs', "
                             "not 'Mine'"]
     # A base that cannot say who moved keeps the document's name too, and says so.
     old = doc_merge.pair_tabs({"blocks": [para("p:front", "front")]},
                               tabbed() | {"title": "Mine"}, tabbed() | {"title": "Theirs"})
-    assert old["rename"] is None and "does not say which of them renamed" in old["notes"][0]
+    assert old.rename is None and "does not say which of them renamed" in old.notes[0]
     # No base at all is `push`, which is naming the document out of this very file.
     birth = doc_merge.pair_tabs({"blocks": []}, tabbed() | {"title": "Mine"},
                                 tabbed() | {"title": "In Drive"})
-    assert birth["rename"] is None and birth["notes"] == []
+    assert birth.rename is None and birth.notes == []
 
 
 def _first(title=None, **rest):
@@ -1639,18 +1644,18 @@ def test_the_first_tab_is_renamed_when_the_file_alone_renamed_it():
     """Every other tab names itself on its `<section>`; the first tab is the body, and
     the file's `<title>` is the *document's* name, not this tab's."""
     out = doc_merge.pair_tabs(_first("Draft"), _first("Chapter one"), _first("Draft"))
-    assert out["requests"] == [{"updateDocumentTabProperties": {
+    assert out.requests == [{"updateDocumentTabProperties": {
         "tabProperties": {"tabId": "t.0", "title": "Chapter one"}, "fields": "title"}}]
-    assert out["applied"] == ["the first tab renamed 'Chapter one'"] and out["notes"] == []
+    assert out.applied == ["the first tab renamed 'Chapter one'"] and out.notes == []
     # The reader renamed it and the source did not: the file follows at the settle.
     quiet = doc_merge.pair_tabs(_first("Draft"), _first("Draft"), _first("Theirs"))
-    assert quiet["requests"] == [] and quiet["notes"] == []
+    assert quiet.requests == [] and quiet.notes == []
 
 
 def test_the_first_tab_renamed_on_both_sides_keeps_the_readers_name():
     out = doc_merge.pair_tabs(_first("Draft"), _first("Mine"), _first("Theirs"))
-    assert out["requests"] == []
-    assert out["notes"] == ["the first tab was renamed on both sides — it keeps "
+    assert out.requests == []
+    assert out.notes == ["the first tab was renamed on both sides — it keeps "
                             "'Theirs', not 'Mine'"]
 
 
@@ -1659,8 +1664,8 @@ def test_the_first_tab_is_named_out_of_the_file_when_there_is_no_base():
     birth, the first tab's title is Drive's own default — so a `push` whose file says
     one writes it rather than calling it a disagreement nobody can settle."""
     out = doc_merge.pair_tabs({"blocks": []}, _first("Chapter one"), _first("Tab 1"))
-    assert out["applied"] == ["the first tab renamed 'Chapter one'"]
-    assert out["notes"] == []
+    assert out.applied == ["the first tab renamed 'Chapter one'"]
+    assert out.notes == []
 
 
 def test_a_tab_the_source_moved_is_reported_rather_than_dropped():
@@ -1668,13 +1673,13 @@ def test_a_tab_the_source_moved_is_reported_rather_than_dropped():
                        tab("t.3", "Three", "c"))
     base = tabbed(one, two, three)
     out = doc_merge.pair_tabs(base, tabbed(three, one, two), tabbed(one, two, three))
-    assert out["requests"] == [] and len(out["notes"]) == 1
-    assert out["notes"][0] == ("the source puts the tabs in the order 'Three', 'One', "
+    assert out.requests == [] and len(out.notes) == 1
+    assert out.notes[0] == ("the source puts the tabs in the order 'Three', 'One', "
                                "'Two'; moving a tab is not written, so the document's "
                                "order stands")
     # The reader moved one and the file still has the base's order: nothing to say.
     quiet = doc_merge.pair_tabs(base, tabbed(one, two, three), tabbed(three, one, two))
-    assert quiet["notes"] == []
+    assert quiet.notes == []
 
 
 def _made(ours, theirs, parents=()):
@@ -1684,7 +1689,7 @@ def _made(ours, theirs, parents=()):
                               ours, theirs)
     siblings, indices = doc_merge.tab_siblings(theirs), []
     known = {p.get("tab") for p in doc_ir.parts(theirs)} - {None} | set(parents)
-    for i, part in enumerate(out["create"]):
+    for i, part in enumerate(out.create):
         request = doc_merge.add_tab_request(part, known, ours, siblings)
         props = request["addDocumentTab"]["tabProperties"]
         indices.append(props["index"])
@@ -1738,10 +1743,10 @@ def test_a_child_tab_is_placed_among_its_parents_tabs_not_among_the_roots():
 def test_a_new_tab_left_empty_by_a_sync_that_died_is_taken_not_made_twice():
     ours = tabbed(tab(None, "Appendix", "z"))
     out = doc_merge.pair_tabs(tabbed(), ours, tabbed(tab("t.7", "Appendix")))
-    assert out["create"] == [] and out["pairs"][0][0] == "t.7"
+    assert out.create == [] and out.pairs[0][0] == "t.7"
     busy = doc_merge.pair_tabs(tabbed(), tabbed(tab(None, "Appendix", "z")),
                                tabbed(tab("t.7", "Appendix", "reader's")))
-    assert [p["title"] for p in busy["create"]] == ["Appendix"]
+    assert [p["title"] for p in busy.create] == ["Appendix"]
 
 
 # ---------------------------------------------------------------- faces and measures
@@ -1755,7 +1760,7 @@ def test_a_face_and_a_size_the_source_set_are_written_as_themselves():
     ours = live([{"kind": "paragraph", "key": "p:s", "runs": [
         styled_run("one ", font="Roboto Mono", fontsize=9), styled_run("two")]}])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    style = [r["updateTextStyle"] for r in result["requests"] if "updateTextStyle" in r][0]
+    style = [r["updateTextStyle"] for r in result.requests if "updateTextStyle" in r][0]
     assert style["textStyle"]["weightedFontFamily"] == {"fontFamily": "Roboto Mono"}
     assert style["textStyle"]["fontSize"] == {"magnitude": 9.0, "unit": "PT"}
 
@@ -1788,7 +1793,7 @@ def test_a_raised_run_is_written_and_owned_like_the_rest_of_the_styling():
     ours = live([{"kind": "paragraph", "key": "p:s", "runs": [
         styled_run("x"), styled_run("2", script="super"), styled_run(" and more")]}])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    styles = [r["updateTextStyle"] for r in result["requests"] if "updateTextStyle" in r]
+    styles = [r["updateTextStyle"] for r in result.requests if "updateTextStyle" in r]
     raised = [s for s in styles if s["textStyle"].get("baselineOffset")]
     assert len(raised) == 1
     assert raised[0]["textStyle"]["baselineOffset"] == "SUPERSCRIPT"
@@ -1803,7 +1808,7 @@ def test_a_superscript_the_source_took_away_is_named_with_no_value_so_it_goes():
         styled_run("x"), styled_run("2", script="super")]}])
     ours = live([para("p:s", "x2")])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    styles = [r["updateTextStyle"] for r in result["requests"] if "updateTextStyle" in r]
+    styles = [r["updateTextStyle"] for r in result.requests if "updateTextStyle" in r]
     assert styles and all("baselineOffset" not in s["textStyle"] for s in styles)
     assert all("baselineOffset" in s["fields"] for s in styles)
 
@@ -1830,7 +1835,7 @@ def test_the_measurements_of_a_paragraph_are_written_and_named():
     ours = live([para("p:s", "one two", indent=36.0, line_spacing=1.5,
                       space_above=12.0, shading="#fff2cc")])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    style = [r["updateParagraphStyle"] for r in result["requests"]
+    style = [r["updateParagraphStyle"] for r in result.requests
              if "updateParagraphStyle" in r][0]
     assert style["paragraphStyle"]["indentStart"] == {"magnitude": 36.0, "unit": "PT"}
     assert style["paragraphStyle"]["lineSpacing"] == 150.0
@@ -1843,7 +1848,7 @@ def test_a_measurement_the_source_dropped_is_named_with_no_value_so_it_goes():
     base = live([para("p:s", "one two", indent=36.0, align="center")])
     ours = live([para("p:s", "one two")])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    style = [r["updateParagraphStyle"] for r in result["requests"]
+    style = [r["updateParagraphStyle"] for r in result.requests
              if "updateParagraphStyle" in r][0]
     assert "indentStart" not in style["paragraphStyle"]     # named and unset: back to default
     assert "indentStart" in style["fields"]
@@ -1852,7 +1857,7 @@ def test_a_measurement_the_source_dropped_is_named_with_no_value_so_it_goes():
     assert "alignment" not in style["paragraphStyle"]
     assert "alignment" in style["fields"]
     # And the merged block itself no longer carries what the source took away.
-    assert "indent" not in result["blocks"][0] and "align" not in result["blocks"][0]
+    assert "indent" not in result.blocks[0] and "align" not in result.blocks[0]
 
 
 def test_a_rule_and_a_page_break_the_source_set_are_written_as_docs_spells_them():
@@ -1860,7 +1865,7 @@ def test_a_rule_and_a_page_break_the_source_set_are_written_as_docs_spells_them(
     ours = live([para("p:s", "one two", border_bottom="1.5pt dotted #cc0000 pad 5pt",
                       page_break=True)])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    style = [r["updateParagraphStyle"] for r in result["requests"]
+    style = [r["updateParagraphStyle"] for r in result.requests
              if "updateParagraphStyle" in r][0]["paragraphStyle"]
     assert style["pageBreakBefore"] is True
     assert style["borderBottom"] == {
@@ -1871,7 +1876,7 @@ def test_a_rule_and_a_page_break_the_source_set_are_written_as_docs_spells_them(
     # border is not "back to the default" — the border itself is the field written.
     tight = live([para("p:s", "one two", border_bottom="1pt solid #000000")])
     again = doc_merge.plan(base, tight, live(base["blocks"]))
-    side = [r["updateParagraphStyle"] for r in again["requests"]
+    side = [r["updateParagraphStyle"] for r in again.requests
             if "updateParagraphStyle" in r][0]["paragraphStyle"]["borderBottom"]
     assert side["padding"] == {"magnitude": 0.0, "unit": "PT"}
 
@@ -1880,7 +1885,7 @@ def test_a_rule_the_source_took_off_is_named_with_no_value_so_it_goes():
     base = live([para("p:s", "one two", border_bottom="1pt solid #000000",
                       keep_with_next=True)])
     result = doc_merge.plan(base, live([para("p:s", "one two")]), live(base["blocks"]))
-    style = [r["updateParagraphStyle"] for r in result["requests"]
+    style = [r["updateParagraphStyle"] for r in result.requests
              if "updateParagraphStyle" in r][0]
     assert "borderBottom" not in style["paragraphStyle"]
     assert "keepWithNext" not in style["paragraphStyle"]
@@ -1896,7 +1901,7 @@ def test_an_alignment_somebody_chose_is_still_written_with_a_value():
         base = live([para("p:s", "one two")])
         ours = live([para("p:s", "one two", align=align)])
         result = doc_merge.plan(base, ours, live(base["blocks"]))
-        style = [r["updateParagraphStyle"] for r in result["requests"]
+        style = [r["updateParagraphStyle"] for r in result.requests
                  if "updateParagraphStyle" in r][0]
         assert style["paragraphStyle"]["alignment"] == want
 
@@ -1907,7 +1912,7 @@ def test_an_items_indents_are_left_to_the_bullet_preset():
     ours = live([{"kind": "item", "key": "i:a", "level": 0, "ordered": False,
                   "line_spacing": 2.0, "runs": [{"text": "an item"}]}])
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    style = [r["updateParagraphStyle"] for r in result["requests"]
+    style = [r["updateParagraphStyle"] for r in result.requests
              if "updateParagraphStyle" in r][0]
     assert "indentStart" not in style["fields"] and "indentFirstLine" not in style["fields"]
     assert style["paragraphStyle"]["lineSpacing"] == 200.0
@@ -1918,8 +1923,8 @@ def test_a_paragraph_only_the_document_dressed_is_left_alone():
     base = live([para("p:s", "one two")])
     theirs = live([para("p:s", "one two", line_spacing=1.5, shading="#eeeeee")])
     result = doc_merge.plan(base, live(base["blocks"]), theirs)
-    assert result["requests"] == []
-    assert result["blocks"][0]["line_spacing"] == 1.5
+    assert result.requests == []
+    assert result.blocks[0]["line_spacing"] == 1.5
 
 
 # ------------------------------------------------- what no import can carry
@@ -2106,7 +2111,7 @@ def test_a_later_tabs_blocks_are_adopted_before_anything_keys_them():
             "tabs": [{"tab": "t.1", "blocks": [dict(para("", "quartz count"),
                                                     key=None)]}]}
     live["tabs"][0]["blocks"][0].pop("key")
-    doc_merge.settle_keys(live, {"t.1": [para("t:year", "quartz count")]})
+    doc_merge.settle_keys(live, {"t.1": [para("t:year", "quartz count")]}, base=None)
     assert [b["key"] for b in live["tabs"][0]["blocks"]] == ["t:year"]
 
 
@@ -2115,7 +2120,7 @@ def test_a_block_no_plan_knows_is_still_keyed_from_its_words():
     reader added — has to come out of the settle with a key of some kind."""
     live = {"blocks": [dict(para("", "a reader wrote this"))], "tabs": []}
     live["blocks"][0].pop("key")
-    doc_merge.settle_keys(live, {})
+    doc_merge.settle_keys(live, {}, base=None)
     assert live["blocks"][0]["key"] == "paragraph:a-reader-wrote-this"
 
 
@@ -2126,7 +2131,7 @@ def test_a_heading_the_reader_demoted_is_left_demoted():
     base = live([{"kind": "heading", "level": 1, "key": "h:t", "runs": [styled_run("Goals")]}])
     theirs = live([para("h:t", "Goals")])
     result = doc_merge.plan(base, live(base["blocks"]), theirs)
-    doc_merge.adopt_keys(theirs, result["blocks"])
+    doc_merge.adopt_keys(theirs, result.blocks)
     assert doc_merge.tidy_requests(theirs) == []
 
 
@@ -2135,6 +2140,30 @@ def test_a_parent_tab_the_source_deleted_is_kept_while_a_child_is_still_wanted()
     ours = tabbed(tab("t.2", "Child", "b", parent="t.1"))
     theirs = tabbed(tab("t.1", "Parent", "a"), tab("t.2", "Child", "b", parent="t.1"))
     out = doc_merge.pair_tabs(base, ours, theirs)
-    assert out["requests"] == [] and "keeps tabs inside it" in out["notes"][0]
-    assert doc_merge.add_tab_request({"title": "New", "parent": "t.1"}, {"t.1"}) == {
+    assert out.requests == [] and "keeps tabs inside it" in out.notes[0]
+    assert doc_merge.add_tab_request({"title": "New", "parent": "t.1"}, {"t.1"}, ours=None, siblings=None) == {
         "addDocumentTab": {"tabProperties": {"title": "New", "parentTabId": "t.1"}}}
+
+
+def test_a_rebase_hint_for_a_ragged_grid_has_no_size_and_breaks_nothing():
+    """`rebase_tables` records a grid whose rows differ in length as a size of None.
+    The hint is read back against the grids the two sides have now: a missing size
+    matches a grid that is still ragged, and no other - never a TypeError on `list(None)`."""
+    def grid(*widths: int) -> dict:
+        return {"kind": "table", "rows": [[[para("", "x")]] * n for n in widths]}
+
+    def hint(live_size, mine_size) -> dict:
+        return {"live": live_size, "mine": mine_size, "row_dropped": [], "column_dropped": [],
+                "row_live": [], "column_live": [], "row_mine": [], "column_mine": []}
+
+    ragged, square = grid(2, 1), grid(2, 2)
+    said = hint(None, [2, 2])                  # a list: what JSON makes of a tuple
+    assert doc_merge._hint({"kind": "table", "aligned": said}, square, ragged) is said
+    assert doc_merge._hint({"kind": "table", "aligned": said}, square, square) is None
+    assert doc_merge._hint({"kind": "table", "aligned": hint((2, 2), None)}, ragged, square) \
+        is not None
+    assert doc_merge._hint({"kind": "table", "aligned": hint((2, 2), None)}, square, square) \
+        is None
+    assert doc_merge._hint({"kind": "table"}, square, square) is None
+    assert doc_merge._same_size(None, None) and not doc_merge._same_size(None, (2, 2))
+    assert not doc_merge._same_size([2, 2], None) and doc_merge._same_size([2, 2], (2, 2))

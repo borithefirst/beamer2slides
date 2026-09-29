@@ -65,7 +65,7 @@ def paper(request):
     path = OUT / f"{request.node.name}.html"
     path.write_text(SOURCE, encoding="utf-8")
     doc_sync.base_path(path).unlink(missing_ok=True)
-    info = doc_sync.push(path, name=f"b2s docs test: {request.node.name}")
+    info = doc_sync.push(path, name=f"b2s docs test: {request.node.name}", new_doc=False)
     yield Paper(path, info["document"])
     drive_service(credentials()).files().delete(fileId=info["document"]).execute()
 
@@ -212,7 +212,7 @@ def test_a_heading_the_theme_centres_survives_a_source_restyle(request):
         # to write over it: this test's folder is its own, so it starts clean.
         path.unlink(missing_ok=True)
         doc_sync.base_path(path).unlink(missing_ok=True)
-        doc_sync.adopt(ident, path)
+        doc_sync.adopt(ident, path, force=False, folder=None)
         paper = Paper(path, ident)
         assert "text-align" not in paper.text   # the file claims none of the theme
         # A source restyle of that very block: the words change and the styling with

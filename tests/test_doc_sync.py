@@ -37,6 +37,39 @@ def test_a_base_of_another_document_is_no_base(tmp_path):
     assert doc_sync.base_problem("not json at all", None) == "not a JSON object"
 
 
+def test_a_malformed_base_fails_where_it_is_read_and_says_where(tmp_path):
+    """A base whose values are of another shape than its keys hold is refused by the
+    parse that reads it, naming the value, and so never reaches the merge - where it
+    broke before as a KeyError or a TypeError deep in the plan, with the file and the
+    document half settled."""
+    path = tmp_path / "doc.html"
+    bad = {"document": "d", "blocks": [{"kind": "paragraph", "runs": [{"text": 3}]}]}
+    assert "the base.blocks[0].runs[0].text" in doc_sync.base_problem(bad, "d")
+    assert "the base.blocks[0].kind" in doc_sync.base_problem(
+        {"document": "d", "blocks": [{"runs": []}]}, "d")
+    assert "the base.generation" in doc_sync.base_problem(
+        {"document": "d", "blocks": [], "generation": "several"}, "d")
+    doc_sync.base_path(path).parent.mkdir(parents=True)
+    doc_sync.base_path(path).write_text(json.dumps(bad), encoding="utf-8")
+    problems: list[str] = []
+    assert doc_sync.load_base(path, "d", None, problems, None) == (None, "none")
+    assert len(problems) == 1 and "the base beside the file was ignored" in problems[0]
+    assert "blocks[0].runs[0].text" in problems[0]
+
+
+def test_a_new_tab_whose_answer_names_no_id_is_a_shape_error_not_an_index_error():
+    from beamer2slides.json_types import JsonShapeError
+    made = {"replies": [{"addDocumentTab": {"tabProperties": {"tabId": "t.2"}}}]}
+    assert doc_sync._new_tab_id(made) == "t.2"
+    for answer, said in (({}, "no reply"), ({"replies": []}, "no reply"),
+                         ({"replies": [{}]}, "the addDocumentTab reply"),
+                         ({"replies": [{"addDocumentTab": {}}]}, "tabProperties"),
+                         ({"replies": [{"addDocumentTab": {"tabProperties": {"tabId": 7}}}]},
+                          "tabId")):
+        with pytest.raises(JsonShapeError, match=said):
+            doc_sync._new_tab_id(answer)
+
+
 def test_the_report_keeps_its_name_beside_a_file_called_doc_html(tmp_path):
     path = tmp_path / "doc.html"
     info = {"url": "u", "requests": 2, "dry_run": True, "conflicts": [], "notes": ["a note"],
@@ -175,10 +208,10 @@ def test_a_read_is_made_again_through_a_blip_and_a_write_never_is(monkeypatch):
     assert len(calls) == 1
     calls.clear()
     with pytest.raises(ssl.SSLEOFError):
-        doc_sync._read(flaky(*[ssl.SSLEOFError("EOF")] * 9), tries=3)
+        doc_sync._read_tries(flaky(*[ssl.SSLEOFError("EOF")] * 9), 3)
     assert len(calls) == 3                        # and it gives up rather than looping
     # A write is never made again: a batch whose answer was lost may have been applied.
-    assert "_read(" not in inspect.getsource(doc_sync.send)
+    assert "_read" not in inspect.getsource(doc_sync.send)
 
 
 class _Storage:
@@ -255,9 +288,9 @@ def test_a_checkout_with_no_state_folder_finds_the_base_in_drive(tmp_path):
     before the base went to Drive that dropped the sync into the `--assume-base`
     dialog, where both answers throw somebody's work away."""
     drive = _Storage()
-    doc_sync.save_drive(drive, "doc-1", _base(2, "p:drive"))
+    doc_sync.save_drive(drive, "doc-1", _base(2, "p:drive"), title=None, known_fid=None)
     problems = []
-    base, where = doc_sync.load_base(tmp_path / "doc.html", "doc-1", drive, problems)
+    base, where = doc_sync.load_base(tmp_path / "doc.html", "doc-1", drive, problems, found=None)
     assert where == "drive" and base["blocks"][0]["key"] == "p:drive"
     assert problems == []
     assert drive.props[doc_sync.BASE_PROPERTY] == "base-1"   # the document names it
@@ -267,9 +300,9 @@ def test_the_base_in_drive_beats_a_stale_copy_beside_the_file(tmp_path):
     path = tmp_path / "doc.html"
     drive = _Storage()
     doc_sync.save_base(path, _base(3, "p:stale"))
-    doc_sync.save_drive(drive, "doc-1", _base(5, "p:drive"))
+    doc_sync.save_drive(drive, "doc-1", _base(5, "p:drive"), title=None, known_fid=None)
     problems = []
-    base, where = doc_sync.load_base(path, "doc-1", drive, problems)
+    base, where = doc_sync.load_base(path, "doc-1", drive, problems, found=None)
     assert where == "drive" and base["blocks"][0]["key"] == "p:drive"
     assert any("another checkout has synced" in line for line in problems), problems
 
@@ -278,10 +311,10 @@ def test_a_copy_newer_than_drives_is_the_one_used(tmp_path):
     """What a sync whose Drive upload failed leaves behind: the cache is ahead."""
     path = tmp_path / "doc.html"
     drive = _Storage()
-    doc_sync.save_drive(drive, "doc-1", _base(2, "p:drive"))
+    doc_sync.save_drive(drive, "doc-1", _base(2, "p:drive"), title=None, known_fid=None)
     doc_sync.save_base(path, _base(4, "p:local"))
     problems = []
-    base, where = doc_sync.load_base(path, "doc-1", drive, problems)
+    base, where = doc_sync.load_base(path, "doc-1", drive, problems, found=None)
     assert where == "local" and base["blocks"][0]["key"] == "p:local"
     assert any("older than the copy beside the file" in line for line in problems), problems
 
@@ -291,7 +324,7 @@ def test_the_copy_is_used_with_a_word_about_it_when_drive_has_no_base(tmp_path):
     drive = _Storage()
     doc_sync.save_base(path, _base(1, "p:local"))
     problems = []
-    base, where = doc_sync.load_base(path, "doc-1", drive, problems)
+    base, where = doc_sync.load_base(path, "doc-1", drive, problems, found=None)
     assert where == "local" and base["blocks"][0]["key"] == "p:local"
     assert any("Drive has none" in line for line in problems), problems
 
@@ -302,11 +335,11 @@ def test_a_base_drive_names_but_cannot_serve_is_said_out_loud(tmp_path):
     document, and that is the person's to know."""
     path = tmp_path / "doc.html"
     drive = _Storage()
-    doc_sync.save_drive(drive, "doc-1", _base(2, "p:drive"))
+    doc_sync.save_drive(drive, "doc-1", _base(2, "p:drive"), title=None, known_fid=None)
     drive.blobs.clear()
     doc_sync.save_base(path, _base(1, "p:local"))
     problems = []
-    base, where = doc_sync.load_base(path, "doc-1", drive, problems)
+    base, where = doc_sync.load_base(path, "doc-1", drive, problems, found=None)
     assert where == "local" and base["blocks"][0]["key"] == "p:local"
     assert any("cannot be read" in line for line in problems), problems
 
@@ -314,18 +347,18 @@ def test_a_base_drive_names_but_cannot_serve_is_said_out_loud(tmp_path):
 def test_a_base_from_another_document_is_ignored_wherever_it_sits(tmp_path):
     path = tmp_path / "doc.html"
     drive = _Storage()
-    doc_sync.save_drive(drive, "doc-1", {"document": "elsewhere", "blocks": []})
+    doc_sync.save_drive(drive, "doc-1", {"document": "elsewhere", "blocks": []}, title=None, known_fid=None)
     doc_sync.save_base(path, {"document": "elsewhere", "blocks": []})
     problems = []
-    assert doc_sync.load_base(path, "doc-1", drive, problems) == (None, "none")
+    assert doc_sync.load_base(path, "doc-1", drive, problems, found=None) == (None, "none")
     assert len(problems) == 2 and all("belongs to document elsewhere" in p for p in problems)
 
 
 def test_with_no_base_anywhere_the_assume_base_dialog_is_what_is_left(tmp_path):
     path = tmp_path / "doc.html"
-    assert doc_sync.load_base(path, "doc-1", _Storage(), []) == (None, "none")
+    assert doc_sync.load_base(path, "doc-1", _Storage(), [], found=None) == (None, "none")
     with pytest.raises(SystemExit) as raised:
-        doc_sync._no_base(path, {"blocks": []}, {"blocks": []}, None)
+        doc_sync._no_base(path, {"blocks": []}, {"blocks": []}, None, drive=None, document=None, backup=True, dry_run=False)
     said = str(raised.value)
     assert "document-wins" in said and "source-wins" in said
     # and it says, for each answer, whose work it discards.
@@ -336,12 +369,12 @@ def test_with_no_base_anywhere_the_assume_base_dialog_is_what_is_left(tmp_path):
 def test_a_stored_base_goes_to_both_places_and_the_count_rises(tmp_path):
     path = tmp_path / "doc.html"
     drive = _Storage()
-    assert doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1", previous=4) is None
+    assert doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1", previous=4, base_fid=None) is None
     assert doc_sync.load_local(path, "doc-1")["generation"] == 5
-    assert doc_sync.load_drive(drive, "doc-1")["generation"] == 5
-    doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1", previous=5)
+    assert doc_sync.load_drive(drive, "doc-1", found=None, hint=None)["generation"] == 5
+    doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1", previous=5, base_fid=None)
     assert len(drive.created) == 1                       # the same file, written again
-    assert doc_sync.load_drive(drive, "doc-1")["generation"] == 6
+    assert doc_sync.load_drive(drive, "doc-1", found=None, hint=None)["generation"] == 6
 
 
 def test_the_cache_remembers_where_the_base_is_and_keeps_remembering(tmp_path):
@@ -351,10 +384,10 @@ def test_the_cache_remembers_where_the_base_is_and_keeps_remembering(tmp_path):
     the run after it ask again, and the saving alternates away."""
     path = tmp_path / "doc.html"
     drive = _Storage()
-    doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1")
+    doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1", previous=0, base_fid=None)
     fid = doc_sync.load_local(path, "doc-1")[doc_sync.BASE_FID]
-    assert fid == "base-1" and doc_sync.BASE_FID not in doc_sync.load_drive(drive, "doc-1")
-    doc_sync.store_base(path, _base(0, "p:two"), drive, "doc-1", base_fid=fid)
+    assert fid == "base-1" and doc_sync.BASE_FID not in doc_sync.load_drive(drive, "doc-1", found=None, hint=None)
+    doc_sync.store_base(path, _base(0, "p:two"), drive, "doc-1", base_fid=fid, previous=0)
     assert doc_sync.load_local(path, "doc-1")[doc_sync.BASE_FID] == fid
 
     # And with it, the base is fetched without asking the document where it is.
@@ -377,7 +410,7 @@ def test_a_drive_write_that_fails_keeps_the_cache_and_says_why(tmp_path):
     path = tmp_path / "doc.html"
     drive = _Storage()
     drive.refuse_create = True
-    why = doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1")
+    why = doc_sync.store_base(path, _base(0, "p:one"), drive, "doc-1", previous=0, base_fid=None)
     assert why and "HttpError" in why
     assert doc_sync.load_local(path, "doc-1")["generation"] == 1
 
@@ -417,12 +450,12 @@ def test_a_rename_drive_has_made_is_what_the_file_and_the_base_say(tmp_path):
     the base would agree with the file."""
     path = tmp_path / "doc.html"
     live = doc_sync.settle(_OneRead("The old name"), "doc-1", path,
-                           {"blocks": []}, {"blocks": []}, renamed="A better name")
+                           {"blocks": []}, {"blocks": []}, renamed="A better name", planned=None, drive=None, problems=None, name_unmodelled=False, base_fid=None, read=None)
     assert live["title"] == "A better name"
     assert "<title>A better name</title>" in path.read_text(encoding="utf-8")
     assert doc_sync.load_local(path, "doc-1")["title"] == "A better name"
     # Without one, the settle says whatever the read said.
-    doc_sync.settle(_OneRead("The old name"), "doc-1", path, {"blocks": []}, {"blocks": []})
+    doc_sync.settle(_OneRead("The old name"), "doc-1", path, {"blocks": []}, {"blocks": []}, planned=None, drive=None, problems=None, name_unmodelled=False, renamed=None, base_fid=None, read=None)
     assert "<title>The old name</title>" in path.read_text(encoding="utf-8")
 
 
@@ -445,13 +478,13 @@ def test_the_destructive_direction_exports_the_document_first(tmp_path):
     path = tmp_path / "doc.html"
     drive = _Storage()
     ours, theirs = {"blocks": ["the file"]}, {"blocks": ["the document"]}
-    base, kept = doc_sync._no_base(path, ours, theirs, "source-wins", drive, "doc-1")
+    base, kept = doc_sync._no_base(path, ours, theirs, "source-wins", drive, "doc-1", backup=True, dry_run=False)
     assert base is theirs                       # every difference is the source's
     assert kept and kept.parent == tmp_path / ".b2s" / "backups"
     assert kept.read_bytes() == b"<html>the document as it was</html>"
     assert drive.exports == [("doc-1", "text/html")]
     # The other direction writes nothing to the document, so it needs no way back.
-    base, kept = doc_sync._no_base(path, ours, theirs, "document-wins", drive, "doc-1")
+    base, kept = doc_sync._no_base(path, ours, theirs, "document-wins", drive, "doc-1", backup=True, dry_run=False)
     assert base is ours and kept is None and len(drive.exports) == 1
 
 
@@ -462,7 +495,7 @@ def test_a_dry_run_of_the_destructive_direction_exports_nothing(tmp_path):
     drive = _Storage()
     ours, theirs = {"blocks": ["the file"]}, {"blocks": ["the document"]}
     base, kept = doc_sync._no_base(path, ours, theirs, "source-wins", drive, "doc-1",
-                                   dry_run=True)
+                                   dry_run=True, backup=True)
     assert base is theirs and kept is None
     assert drive.exports == [] and not (tmp_path / ".b2s" / "backups").exists()
 
@@ -475,10 +508,10 @@ def test_a_backup_drive_refuses_stops_that_sync(tmp_path):
     drive.export_error = _http(403)
     ours, theirs = {"blocks": ["the file"]}, {"blocks": ["the document"]}
     with pytest.raises(SystemExit) as raised:
-        doc_sync._no_base(path, ours, theirs, "source-wins", drive, "doc-1")
+        doc_sync._no_base(path, ours, theirs, "source-wins", drive, "doc-1", backup=True, dry_run=False)
     assert "--no-backup" in str(raised.value)
     base, kept = doc_sync._no_base(path, ours, theirs, "source-wins", drive, "doc-1",
-                                   backup=False)
+                                   backup=False, dry_run=False)
     assert base is theirs and kept is None
 
 
@@ -537,7 +570,7 @@ def test_without_a_write_control_in_the_answer_the_later_batches_go_unguarded():
     """Unmeasured against the live API: whether the answer always carries one. If
     it does not, the chain stops guarding rather than sending a stale revision."""
     docs = _Batches(revisions=False)
-    doc_sync.send(docs, "d", _texts(doc_sync.CHUNK + 1), "rev0")
+    doc_sync.send(docs, "d", _texts(doc_sync.CHUNK + 1), "rev0", notes=None)
     assert "writeControl" in docs.sent[0] and "writeControl" not in docs.sent[1]
 
 
@@ -625,7 +658,7 @@ def test_every_tab_is_read_with_its_own_keys_and_written_to_the_file():
         "tabId": "t.2", "title": "Older notes", "parentTabId": "t.1"}}
     doc = {"title": "D", "tabs": [_tab("t.0", "Tab 1", "chapter"),
                                   _tab("t.1", "Notes", "notes", ranges, [child])]}
-    ir = doc_sync.document_ir(doc, "d")
+    ir = doc_sync.document_ir(doc, "d", ours=None, base=None)
     assert [b["runs"][0]["text"] for b in ir["blocks"]] == ["chapter"]
     notes, older = ir["tabs"]
     assert (notes["tab"], notes["title"], notes["blocks"][0]["key"]) == ("t.1", "Notes",
@@ -648,7 +681,7 @@ def test_every_tab_is_read_with_its_own_keys_and_written_to_the_file():
 
 def test_a_tab_just_added_is_empty_and_what_is_written_there_goes_into_it():
     doc = {"tabs": [_tab("t.0", "Tab 1", "chapter"), _tab("t.9", "New", "")]}
-    part = doc_ir.parts(doc_sync.document_ir(doc, "d"))[1]
+    part = doc_ir.parts(doc_sync.document_ir(doc, "d", ours=None, base=None))[1]
     assert part["blocks"] == [] and part["trailer"] == [1, 2]
 
 
@@ -702,15 +735,14 @@ def test_the_report_has_a_section_for_the_open_comments(tmp_path):
 
 
 def test_the_report_says_what_each_side_contributed():
-    applied, kept, gone = doc_sync._summary({"blocks": [
+    applied, kept, gone = doc_sync._summary([
         {"key": "p:new", "kind": "paragraph", "origin": "added by the source",
          "runs": [{"text": "written from the file"}]},
         {"key": "p:one", "kind": "paragraph", "origin": "merged", "runs": [{"text": "merged words"}]},
         {"key": "p:two", "kind": "paragraph", "origin": "kept from the document",
          "runs": [{"text": "typed by a reader"}]},
         {"key": "p:three", "kind": "paragraph", "runs": [{"text": "untouched"}]}],
-        "removed": [{"key": "p:four", "kind": "paragraph",
-                     "runs": [{"text": "the file dropped this"}]}]})
+        [{"key": "p:four", "kind": "paragraph", "runs": [{"text": "the file dropped this"}]}])
     assert applied == ["`p:new` added: 'written from the file'",
                        "`p:one` rewritten: 'merged words'"]
     assert kept == ["`p:two` says what the document says: 'typed by a reader'"]
@@ -729,8 +761,8 @@ def test_a_block_the_file_no_longer_has_is_named_as_deleted(tmp_path):
     base = live([para("p:one", "hello"), para("p:two", "LAlalalalaa")])
     ours = live([para("p:one", "Gello")])                     # the stale buffer, saved
     result = doc_merge.plan(base, ours, live(base["blocks"]))
-    assert [doc_merge.block_text(b) for b in result["removed"]] == ["LAlalalalaa"]
-    assert doc_sync._summary(result)[2] == ["`p:two`: 'LAlalalalaa'"]
+    assert [doc_merge.block_text(b) for b in result.removed] == ["LAlalalalaa"]
+    assert doc_sync._summary(result.blocks, result.removed)[2] == ["`p:two`: 'LAlalalalaa'"]
 
     path = tmp_path / "doc.html"
     info = {"url": "u", "requests": 2, "dry_run": False, "conflicts": [], "notes": [],
@@ -745,7 +777,7 @@ def test_a_block_the_file_no_longer_has_is_named_as_deleted(tmp_path):
 
 def test_a_table_is_reported_by_its_cells():
     grid = table("t:one", [["Region", "Sales"], ["North", "1200"]])
-    applied, kept, gone = doc_sync._summary({"blocks": [grid | {"origin": "merged"}]})
+    applied, kept, gone = doc_sync._summary([grid | {"origin": "merged"}], [])
     assert applied == ["`t:one` rewritten: 'Region | Sales | North | 1200'"]
     assert kept == [] and gone == []
 
@@ -756,8 +788,8 @@ def test_a_document_edit_inside_a_cell_is_reported_as_the_documents():
     base = live([table("t:one", [["Region", "Sales"], ["North", "1200"]])])
     theirs = live([table("t:one", [["Region", "Sales"], ["North", "1500"]])])
     result = doc_merge.plan(base, live(base["blocks"]), theirs)
-    assert result["requests"] == []
-    assert doc_sync._summary(result)[1] == ["`t:one` says what the document says: "
+    assert result.requests == []
+    assert doc_sync._summary(result.blocks, result.removed)[1] == ["`t:one` says what the document says: "
                                             "'Region | Sales | North | 1500'"]
 
 
@@ -774,7 +806,7 @@ def test_a_sync_says_how_much_of_the_document_the_file_cannot_say():
     doc = _unmodelled_doc(avoidWidowAndOrphan=True, direction="LEFT_TO_RIGHT",
                           tabStops=[{"offset": {"magnitude": 36}}],
                           borderBetween={"width": {"magnitude": 1}})
-    notes = doc_sync.unmodelled_notes(doc)
+    notes = doc_sync.unmodelled_notes(doc, full=False)
     assert len(notes) == 1
     assert notes[0].startswith(
         "4 kinds of document property this file cannot say "
@@ -818,7 +850,7 @@ def test_the_block_that_would_lose_something_is_named_by_its_own_words():
     use: the person about to edit a paragraph needs to know it is *that* one."""
     doc = _said_doc(("Plain enough", {}),
                     ("Why this matters", {"borderBetween": {"width": {"magnitude": 1}}}))
-    notes = doc_sync.block_risk_notes(doc)
+    notes = doc_sync.block_risk_notes(doc, limit=doc_sync.RISKY_BLOCKS)
     assert notes == ["the paragraph 'Why this matters' carries "
                      "paragraphStyle.borderBetween; rewriting that block "
                      "through the file would drop it"]
@@ -826,7 +858,7 @@ def test_the_block_that_would_lose_something_is_named_by_its_own_words():
 
 def test_a_block_carrying_nothing_the_file_misses_is_not_named():
     """Or the report would list the whole document and say nothing."""
-    assert doc_sync.block_risk_notes(_said_doc(("Plain enough", {}))) == []
+    assert doc_sync.block_risk_notes(_said_doc(("Plain enough", {})), limit=doc_sync.RISKY_BLOCKS) == []
 
 
 def test_the_blocks_are_named_most_laden_first_and_the_tail_is_counted():
@@ -841,12 +873,12 @@ def test_the_blocks_are_named_most_laden_first_and_the_tail_is_counted():
     assert notes[-1].startswith("and 8 more blocks carry something the file cannot say")
 
 
-def _planned(doc: dict, reorder: bool = False, reword: bool = False) -> list[dict]:
+def _planned(doc: dict, reorder: bool = False, reword: bool = False) -> list[doc_sync.Written]:
     """One tab's plan over a document, keyed as a synced document would be."""
     import copy
 
     from beamer2slides import doc_ir, doc_merge
-    theirs = doc_ir.from_document(doc)
+    theirs = doc_ir.from_document(doc, tab_id=None)
     for n, block in enumerate(theirs["blocks"]):
         block["key"] = f"p:{n}"
     base, ours = copy.deepcopy(theirs), copy.deepcopy(theirs)
@@ -854,8 +886,7 @@ def _planned(doc: dict, reorder: bool = False, reword: bool = False) -> list[dic
         ours["blocks"] = ours["blocks"][-1:] + ours["blocks"][:-1]
     if reword:
         ours["blocks"][-1]["runs"] = [{"text": "Bordered words, reworded"}]
-    return [{"stamp": None, "label": None,
-             "result": doc_merge.plan(base, ours, copy.deepcopy(theirs))}]
+    return [doc_sync._dry(None, None, doc_merge.plan(base, ours, copy.deepcopy(theirs)))]
 
 
 def test_the_block_this_sync_is_about_to_cost_something_is_named_as_a_loss():
@@ -876,7 +907,7 @@ def test_a_block_whose_words_merely_change_costs_nothing_and_is_not_named():
     doc = _said_doc(("First words", {}), ("Second words", {}),
                     ("Bordered words", {"borderBetween": {"width": {"magnitude": 1}}}))
     planned = _planned(doc, reword=True)
-    assert planned[0]["result"]["requests"], "the source edit reached no request"
+    assert planned[0].result.requests, "the source edit reached no request"
     assert doc_sync.rewrite_losses(doc, planned) == []
 
 

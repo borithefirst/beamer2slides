@@ -181,7 +181,7 @@ def paper(google, request):
     path = OUT / f"{request.node.name}.html"
     path.write_text(SOURCE, encoding="utf-8")
     doc_sync.base_path(path).unlink(missing_ok=True)
-    info = doc_sync.push(path, name=f"b2s docs test: {request.node.name}")
+    info = doc_sync.push(path, name=f"b2s docs test: {request.node.name}", new_doc=False)
     assert info["anchored"] == info["blocks"], "every block should carry a named range"
     yield Paper(path, info["document"])
     drive_service(credentials()).files().delete(fileId=info["document"]).execute()
@@ -475,7 +475,7 @@ def test_a_file_with_a_picture_is_pushed_with_it(google, request):
     path.write_text(f'<html><body><p>A figure:</p><p><img src="{src}" alt="green"></p>'
                     f'<p>after it</p></body></html>', encoding="utf-8")
     doc_sync.base_path(path).unlink(missing_ok=True)
-    info = doc_sync.push(path, name=f"b2s docs test: {request.node.name}")
+    info = doc_sync.push(path, name=f"b2s docs test: {request.node.name}", new_doc=False)
     try:
         text = path.read_text(encoding="utf-8")
         assert f'<img src="{src}" alt="green" width="80" height="50" data-object=' in text, text
@@ -557,7 +557,7 @@ def test_an_equation_reaches_the_file_as_latex_and_survives_a_rewrite(google, re
         path = OUT / f"{request.node.name}.html"
         path.write_text("<html><body></body></html>", encoding="utf-8")
         doc_sync.base_path(path).unlink(missing_ok=True)
-        doc_sync.sync(path, document=ident, assume_base="file")
+        doc_sync.sync(path, document=ident, assume_base="file", dry_run=False, backup=True)
         paper = Paper(path, ident)
         text = paper.text
         assert 'data-chip="equation">E=m{c}^{2}</span>' in text, text
@@ -649,7 +649,7 @@ def test_a_checkout_with_no_local_state_syncs_from_the_base_in_drive(paper):
     from beamer2slides import doc_sync
     from beamer2slides.google_auth import credentials, drive_service
     drive = drive_service(credentials())
-    stored = doc_sync.load_drive(drive, paper.ident)
+    stored = doc_sync.load_drive(drive, paper.ident, found=None, hint=None)
     assert stored and stored["document"] == paper.ident, "push should store the base in Drive"
 
     doc_sync.base_path(paper.path).unlink()          # what a fresh clone looks like
@@ -769,7 +769,7 @@ def test_a_document_nobody_pushed_is_adopted_and_then_syncs_to_nothing(google, r
         path.unlink(missing_ok=True)
         doc_sync.base_path(path).unlink(missing_ok=True)
 
-        info = doc_sync.adopt(ident, path)
+        info = doc_sync.adopt(ident, path, force=False, folder=None)
         assert info["blocks"] and info["anchored"] == info["blocks"], info
         text = path.read_text(encoding="utf-8")
         assert f'content="{ident}"' in text              # the file says where it lives
@@ -777,7 +777,7 @@ def test_a_document_nobody_pushed_is_adopted_and_then_syncs_to_nothing(google, r
         assert "the second point</li>" in text
         assert "<td><p>1200</p></td>" in text
         assert ">The closing paragraph.</p>" in text
-        assert doc_sync.load_drive(drive, ident) is not None      # and the base is in Drive
+        assert doc_sync.load_drive(drive, ident, found=None, hint=None) is not None      # and the base is in Drive
 
         paper = Paper(path, ident)
         paper.settled()
@@ -786,10 +786,10 @@ def test_a_document_nobody_pushed_is_adopted_and_then_syncs_to_nothing(google, r
         # same file, because every block is already named by its range.
         docs = docs_service(credentials())
         doc, _ = doc_sync.read_document(docs, ident)
-        before = len(doc_ir.named_ranges_of(doc))
-        again = doc_sync.adopt(ident, path)
+        before = len(doc_ir.named_ranges_of(doc, tab_id=None))
+        again = doc_sync.adopt(ident, path, force=False, folder=None)
         doc, _ = doc_sync.read_document(docs, ident)
-        assert len(doc_ir.named_ranges_of(doc)) == before
+        assert len(doc_ir.named_ranges_of(doc, tab_id=None)) == before
         assert again["blocks"] == info["blocks"]
         assert path.read_text(encoding="utf-8") == text
         paper.settled()
@@ -798,8 +798,8 @@ def test_a_document_nobody_pushed_is_adopted_and_then_syncs_to_nothing(google, r
         other = OUT / f"{request.node.name}-other.html"
         other.write_text(text.replace(ident, "someone-elses-document"), encoding="utf-8")
         with pytest.raises(SystemExit):
-            doc_sync.adopt(ident, other)
-        doc_sync.adopt(ident, other, force=True)
+            doc_sync.adopt(ident, other, force=False, folder=None)
+        doc_sync.adopt(ident, other, force=True, folder=None)
         assert f'content="{ident}"' in other.read_text(encoding="utf-8")
     finally:
         drive.files().delete(fileId=ident).execute()
@@ -883,7 +883,7 @@ def test_a_file_with_tabs_is_pushed_with_them(google, request):
     path.write_text("<html><body><p>front</p>" + APPENDIX.replace("</body>", "")
                     + "</body></html>", encoding="utf-8")
     doc_sync.base_path(path).unlink(missing_ok=True)
-    info = doc_sync.push(path, name=f"b2s docs test: {request.node.name}")
+    info = doc_sync.push(path, name=f"b2s docs test: {request.node.name}", new_doc=False)
     try:
         paper = Paper(path, info["document"])
         assert info["tabs"] == 3 and info["anchored"] == info["blocks"]

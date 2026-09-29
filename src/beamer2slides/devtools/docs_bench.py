@@ -28,10 +28,13 @@ import re
 import sys
 import threading
 import time
+from collections.abc import Generator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from .. import doc_sync
+from ..json_types import Json, JsonObject
 from ..paths import out_root
 
 FOLDER = out_root() / "docs-bench"
@@ -44,7 +47,7 @@ WORDS = ("signal thicket meadow vellum harbour lantern quarry ribbon cobble "
 
 # ---------------------------------------------------------------- the fixture
 
-def paper(blocks: int = 40, seed: int = 0) -> str:
+def paper(blocks: int, seed: int) -> str:
     """A canonical file of about `blocks` blocks: headings, prose, a list, a table.
 
     Shaped like something a person would keep in git - long enough that a read and a
@@ -84,7 +87,7 @@ def reword(path: Path, round_no: int) -> int:
     text = path.read_text(encoding="utf-8")
     hits = 0
 
-    def edit(match: re.Match) -> str:
+    def edit(match: re.Match[str]) -> str:
         nonlocal hits
         if hits >= 3:
             return match.group(0)
@@ -99,25 +102,38 @@ def reword(path: Path, round_no: int) -> int:
 
 # ---------------------------------------------------------------- the instrument
 
+@dataclass(frozen=True, kw_only=True)
+class Call:
+    """One Google call: which, when it started (seconds into the run), for how long, and
+    on which thread."""
+    call: str
+    at: float
+    seconds: float
+    thread: str
+
+    def json(self) -> JsonObject:
+        return {"call": self.call, "at": self.at, "seconds": self.seconds, "thread": self.thread}
+
+
 class Calls:
     """Every Google call of a run: when it started, how long it took, what it was."""
 
     def __init__(self) -> None:
-        self.rows: list[dict] = []
+        self.rows: list[Call] = []
         self.lock = threading.Lock()
         self.t0 = time.perf_counter()
 
     def add(self, name: str, start: float, end: float) -> None:
         with self.lock:
-            self.rows.append({"call": name, "at": round(start - self.t0, 3),
-                              "seconds": round(end - start, 3),
-                              "thread": threading.current_thread().name})
+            self.rows.append(Call(call=name, at=round(start - self.t0, 3),
+                                  seconds=round(end - start, 3),
+                                  thread=threading.current_thread().name))
 
     # -- what the rows say
 
     def busy(self) -> float:
         """Seconds of wall clock with at least one request open (overlaps counted once)."""
-        spans = sorted((r["at"], r["at"] + r["seconds"]) for r in self.rows)
+        spans = sorted((r.at, r.at + r.seconds) for r in self.rows)
         total, end = 0.0, -1.0
         for a, b in spans:
             a = max(a, end)
@@ -129,7 +145,7 @@ class Calls:
     def by_call(self) -> list[tuple[str, int, float]]:
         out: dict[str, list[float]] = {}
         for row in self.rows:
-            out.setdefault(row["call"], []).append(row["seconds"])
+            out.setdefault(row.call, []).append(row.seconds)
         return sorted(((k, len(v), sum(v)) for k, v in out.items()),
                       key=lambda r: -r[2])
 
@@ -147,14 +163,14 @@ def name_of(uri: str, method: str) -> str:
 
 
 @contextmanager
-def profile():
+def profile() -> Generator[Calls, None, None]:
     """Time every Google call made inside the block (`HttpRequest.execute`)."""
     from googleapiclient.http import HttpRequest
 
     calls = Calls()
     original = HttpRequest.execute
 
-    def timed(self, *args, **kwargs):
+    def timed(self: HttpRequest, *args: object, **kwargs: object) -> object:
         start = time.perf_counter()
         try:
             return original(self, *args, **kwargs)
@@ -168,7 +184,7 @@ def profile():
         HttpRequest.execute = original
 
 
-def report(label: str, calls: Calls, seconds: float, extra: dict | None = None) -> dict:
+def report(label: str, calls: Calls, seconds: float, extra: Mapping[str, Json]) -> JsonObject:
     """Print the table and give back what a caller would put in a JSON line."""
     busy = calls.busy()
     print(f"\n{label}: {seconds:.2f} s, {len(calls.rows)} Google calls, "
@@ -177,8 +193,9 @@ def report(label: str, calls: Calls, seconds: float, extra: dict | None = None) 
         print(f"   {total:6.2f} s  x{count:<3} {name}")
     if extra:
         print("   " + "  ".join(f"{k}={v}" for k, v in extra.items()))
+    rows: list[Json] = [row.json() for row in calls.rows]
     return {"label": label, "seconds": round(seconds, 2), "calls": len(calls.rows),
-            "busy": round(busy, 2), "rows": calls.rows} | (extra or {})
+            "busy": round(busy, 2), "rows": rows} | dict(extra)
 
 
 # ---------------------------------------------------------------- the commands
@@ -192,24 +209,24 @@ def prepare(folder: Path, blocks: int, fresh: bool) -> dict[str, str]:
         if ours.get("document"):
             print(f"{path} already names document {ours['document']}")
             return {"document": ours["document"], "file": str(path)}
-    path.write_text(paper(blocks), encoding="utf-8")
+    path.write_text(paper(blocks, 0), encoding="utf-8")
     start = time.perf_counter()
     with profile() as calls:
-        info = doc_sync.push(path)
+        info = doc_sync.push(path, name=None, new_doc=False)
     report("push", calls, time.perf_counter() - start, {"blocks": info["blocks"]})
     return {"document": info["document"], "file": str(path)}
 
 
-def one_sync(path: Path, round_no: int) -> dict:
+def one_sync(path: Path, round_no: int) -> JsonObject:
     changed = reword(path, round_no)
     start = time.perf_counter()
     with profile() as calls:
-        info = doc_sync.sync(path)
+        info = doc_sync.sync(path, document=None, dry_run=False, assume_base=None, backup=True)
     return report(f"sync {round_no}", calls, time.perf_counter() - start,
                   {"requests": info["requests"], "edited": changed})
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None) -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("what", choices=["prepare", "sync", "adopt", "calls"])
@@ -225,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
         print((folder / CALLS).read_text(encoding="utf-8"))
         return 0
 
-    runs = []
+    runs: list[JsonObject] = []
     if args.what == "prepare":
         prepare(folder, args.blocks, args.fresh)
         return 0
@@ -234,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
         target = folder / "adopted.html"
         start = time.perf_counter()
         with profile() as calls:
-            got = doc_sync.adopt(info["document"], target, force=True)
+            got = doc_sync.adopt(info["document"], target, force=True, folder=None)
         runs.append(report("adopt", calls, time.perf_counter() - start,
                            {"blocks": got["blocks"]}))
     else:
@@ -253,4 +270,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

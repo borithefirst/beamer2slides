@@ -32,8 +32,9 @@ credentials: `@tool` has installed the provider by the time a body runs.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated
 
 from .. import doc_ir
 from .. import doc_sync as docs
@@ -48,7 +49,19 @@ ASSUME_VALUES = docs.ASSUME_MODES + tuple(docs.ASSUME_ALIASES)
 
 # ---------------------------------------------------------------- the translation layer
 
-def report_diagnostics(j: Job, info: docs.SyncReport) -> dict[str, Any]:
+@dataclass(frozen=True, kw_only=True)
+class SyncCounts:
+    """What `report_diagnostics` found in one sync report, for the journey's data."""
+    conflicts: int
+    notes: int
+    comments: int
+    #: The write went in as several batches, so it was not atomic.
+    chunked: bool
+    #: Blocks written again from nothing that carried what the file cannot say.
+    lost: int
+
+
+def report_diagnostics(j: Job, info: docs.SyncReport) -> SyncCounts:
     """Turn one sync report into diagnostics, and say what was in it.
 
     Written apart from the journey so it can be tested on a report dict alone: the shape
@@ -108,9 +121,9 @@ def report_diagnostics(j: Job, info: docs.SyncReport) -> dict[str, Any]:
     if info.get("base") == "none":
         j.warn("there was no base, so assume_base decided the whole merge rather than a "
                "three-way comparison", "the base")
-    return {"conflicts": len(info.get("conflicts") or []),
-            "notes": len(info.get("notes") or []), "comments": len(comments),
-            "chunked": chunked, "lost": lost}
+    return SyncCounts(conflicts=len(info.get("conflicts") or []),
+                      notes=len(info.get("notes") or []), comments=len(comments),
+                      chunked=chunked, lost=lost)
 
 
 def _state_artifacts(j: Job, path: Path) -> dict[str, str]:
@@ -154,7 +167,7 @@ def _options() -> list[dict[str, str]]:
     return [{"value": mode, "costs": docs.ASSUME_MEANS[mode]} for mode in docs.ASSUME_MODES]
 
 
-def _exit(j: Job, exc: SystemExit, file: str | None = None) -> None:
+def _exit(j: Job, exc: SystemExit, file: str | None) -> None:
     """Turn the library's `SystemExit` into the refusal an agent can branch on.
 
     The library says no by printing a paragraph and exiting; the codes are in
@@ -318,10 +331,10 @@ def doc_sync(
         "url": info["url"], "document": info["document"], "dry_run": info["dry_run"],
         "written": wrote, "requests": info["requests"],
         "applied": len(info["applied"]), "kept": len(info["kept"]),
-        "conflicts": counts["conflicts"], "chunked": counts["chunked"],
+        "conflicts": counts.conflicts, "chunked": counts.chunked,
         # Blocks this run wrote again from nothing that carried something the file
         # cannot say. Almost always 0, and a number worth seeing when it is not.
-        "lost": counts["lost"],
+        "lost": counts.lost,
         # Blocks the document had that this run takes away, the file no longer having
         # them. The one number here about words that are gone for good.
         "deleted": len(info.get("removed") or []),
@@ -336,7 +349,7 @@ def doc_sync(
     head = (f"{'Planned' if info['dry_run'] else 'Merged'} {file} against {info['url']}: "
             f"{len(info['applied'])} block(s) from the source, {len(info['kept'])} kept from "
             f"the document, {len(info.get('removed') or [])} deleted from the document, "
-            f"{counts['conflicts']} conflict(s) the document won, "
+            f"{counts.conflicts} conflict(s) the document won, "
             f"{info['requests']} request(s) {'planned' if info['dry_run'] else 'sent'}.")
     if info["dry_run"]:
         j.suggest("run doc_sync again with dry_run=False" if info["requests"] else
@@ -349,8 +362,8 @@ def doc_sync(
         j.suggest("doc_sync again with dry_run=True to confirm it now writes 0 requests")
         tail = ("The file, the document and the base now say the same thing, so a second "
                 "sync should write 0 requests - worth confirming with dry_run=True.")
-    if counts["comments"]:
-        tail += (f" {counts['comments']} open comment(s) hang on passages in the document "
+    if counts.comments:
+        tail += (f" {counts.comments} open comment(s) hang on passages in the document "
                  f"that nothing in the merge can see; read them before trusting this.")
     j.summary = f"{head} {tail}"
 

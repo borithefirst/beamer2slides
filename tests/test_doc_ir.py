@@ -135,7 +135,7 @@ def test_a_picture_in_the_document_reads_with_its_size_alt_and_url():
             "description": "the alt", "size": {"width": {"magnitude": 45, "unit": "PT"},
                                                "height": {"magnitude": 30, "unit": "PT"}},
             "imageProperties": {"contentUri": "https://lh7/x"}}}}}}
-    run = doc_ir.from_document(doc)["blocks"][0]["runs"][0]
+    run = doc_ir.from_document(doc, tab_id=None)["blocks"][0]["runs"][0]
     assert run == {"chip": "image", "frozen": True, "text": "", "value": "kix.1", "width": 1,
                    "size": [60, 40], "alt": "the alt", "uri": "https://lh7/x"}
     # The URL dies within the hour and never reaches the file.
@@ -186,7 +186,7 @@ LIVE = {
 
 
 def test_reads_headings_alignment_and_both_kinds_of_list():
-    ir = doc_ir.from_document(LIVE)
+    ir = doc_ir.from_document(LIVE, tab_id=None)
     kinds = [(b["kind"], b.get("level"), b.get("ordered")) for b in ir["blocks"]]
     assert kinds[:5] == [("heading", 1, None), ("paragraph", None, None),
                          ("item", 0, False), ("item", 1, False), ("item", 0, True)]
@@ -194,7 +194,7 @@ def test_reads_headings_alignment_and_both_kinds_of_list():
 
 
 def test_every_chip_becomes_a_frozen_run():
-    ir = doc_ir.from_document(LIVE)
+    ir = doc_ir.from_document(LIVE, tab_id=None)
     runs = ir["blocks"][-1]["runs"]
     assert [r.get("chip") for r in runs] == [
         None, "date", "unknown", "person", "equation", None, "object", None]
@@ -206,18 +206,18 @@ def test_every_chip_becomes_a_frozen_run():
 
 
 def test_a_block_keeps_the_span_it_came_from():
-    ir = doc_ir.from_document(LIVE)
+    ir = doc_ir.from_document(LIVE, tab_id=None)
     assert ir["blocks"][0]["span"] == [1, 11]
     assert ir["blocks"][-1]["span"] == [42, 72]
 
 
 def test_a_run_knows_how_many_index_units_it_holds():
     """A chip is one unit however long its words look; the equation was thirteen."""
-    runs = doc_ir.from_document(LIVE)["blocks"][-1]["runs"]
+    runs = doc_ir.from_document(LIVE, tab_id=None)["blocks"][-1]["runs"]
     assert [r["width"] for r in runs] == [4, 1, 1, 1, 13, 5, 1, 3]
     assert runs[1]["text"] == "Sep 25, 2026" and runs[1]["width"] == 1
     # The widths account for every index unit of the block, newline included.
-    block = doc_ir.from_document(LIVE)["blocks"][-1]
+    block = doc_ir.from_document(LIVE, tab_id=None)["blocks"][-1]
     assert sum(r["width"] for r in block["runs"]) == block["span"][1] - block["span"][0] - 1
 
 
@@ -233,22 +233,22 @@ IMPORTED_LIST = {
 
 
 def test_an_imported_list_cannot_say_whether_it_is_numbered():
-    block = doc_ir.from_document(IMPORTED_LIST)["blocks"][0]
+    block = doc_ir.from_document(IMPORTED_LIST, tab_id=None)["blocks"][0]
     assert block["kind"] == "item" and block["ordered"] is None
 
 
 def test_a_linked_run_drops_the_blue_underline_docs_paints_for_free():
     style = doc_ir._style_of({"link": {"url": "https://example.com/"}, "underline": True,
-                              "foregroundColor": {"color": {"rgbColor": {"blue": 0.93333334}}}})
+                              "foregroundColor": {"color": {"rgbColor": {"blue": 0.93333334}}}}, default=None)
     assert style == {"link": "https://example.com/"}
     # A colour somebody chose is not free styling, and stays.
     green = doc_ir._style_of({"link": {"url": "u"}, "underline": True,
-                              "foregroundColor": {"color": {"rgbColor": {"green": 1.0}}}})
+                              "foregroundColor": {"color": {"rgbColor": {"green": 1.0}}}}, default=None)
     assert green == {"link": "u", "underline": True, "color": "#00ff00"}
 
 
 def test_the_trailing_newline_is_the_paragraph_not_its_text():
-    ir = doc_ir.from_document(LIVE)
+    ir = doc_ir.from_document(LIVE, tab_id=None)
     assert doc_ir.runs_text(ir["blocks"][0]["runs"]) == "A heading"
 
 
@@ -325,7 +325,7 @@ NAMED = {"b2s:heading:a-heading": {"name": "b2s:heading:a-heading", "namedRanges
 
 
 def test_keys_come_back_from_the_named_ranges():
-    ir = doc_ir.apply_keys(doc_ir.from_document(LIVE), NAMED)
+    ir = doc_ir.apply_keys(doc_ir.from_document(LIVE, tab_id=None), NAMED)
     assert ir["blocks"][0]["key"] == "heading:a-heading"
     assert ir["blocks"][0]["rangeId"] == "r1"
     assert ir["blocks"][1]["key"] == "paragraph:centred"
@@ -334,7 +334,7 @@ def test_keys_come_back_from_the_named_ranges():
 
 
 def test_a_block_the_document_does_not_name_gets_a_range():
-    ir = doc_ir.apply_keys(doc_ir.from_document(LIVE), NAMED)
+    ir = doc_ir.apply_keys(doc_ir.from_document(LIVE, tab_id=None), NAMED)
     doc_ir.key_blocks(ir)
     requests = doc_ir.name_requests(ir)
     names = [r["createNamedRange"]["name"] for r in requests]
@@ -353,7 +353,7 @@ def test_a_range_that_drifted_is_planted_again_where_it_belongs():
     drifted = {"b2s:heading:a-heading": {"name": "b2s:heading:a-heading", "namedRanges": [
         {"namedRangeId": "r1", "name": "b2s:heading:a-heading",
          "ranges": [{"startIndex": 9, "endIndex": 10}]}]}}
-    ir = doc_ir.apply_keys(doc_ir.from_document(LIVE), NAMED | drifted)
+    ir = doc_ir.apply_keys(doc_ir.from_document(LIVE, tab_id=None), NAMED | drifted)
     assert ir["blocks"][0]["range"] == [9, 10]
     assert ir["blocks"][1]["range"] == [11, 18]
     low, high = doc_ir.anchor_range(ir["blocks"][0])
@@ -374,7 +374,7 @@ def test_the_named_ranges_of_a_tabbed_read_are_found_in_the_tab():
         {"tabProperties": {"tabId": "t.0"},
          "documentTab": {"body": {"content": [paragraph("named", 1)]},
                          "lists": {}, "namedRanges": NAMED}}]}
-    ir = doc_ir.apply_keys(doc_ir.from_document(tabbed), doc_ir.named_ranges_of(tabbed))
+    ir = doc_ir.apply_keys(doc_ir.from_document(tabbed, tab_id=None), doc_ir.named_ranges_of(tabbed, tab_id=None))
     assert ir["blocks"][0]["key"] == "heading:a-heading"
 
 
@@ -435,7 +435,7 @@ def test_two_equations_side_by_side_are_found_one_after_the_other():
 
 def test_the_latex_reaches_the_file_and_comes_back_from_it():
     from beamer2slides import doc_sync
-    ir = doc_sync.document_ir(EQUATIONS, "ident")
+    ir = doc_sync.document_ir(EQUATIONS, "ident", ours=None, base=None)
     found = doc_ir.latex_of(doc_ir.equation_spots(EQUATIONS), EQUATIONS_MD)
     assert doc_ir.attach_latex(ir, found) == 4
     html = doc_ir.to_html(ir)
@@ -524,7 +524,7 @@ def test_a_title_and_a_subtitle_are_kinds_of_their_own():
             "elements": [{"startIndex": 1, "endIndex": 5,
                           "textRun": {"content": "hi\n", "textStyle": {}}}]}}]}}
 
-    assert [doc_ir.from_document(document(n))["blocks"][0]["kind"]
+    assert [doc_ir.from_document(document(n), tab_id=None)["blocks"][0]["kind"]
             for n in ("TITLE", "SUBTITLE", "NORMAL_TEXT")] == \
         ["title", "subtitle", "paragraph"]
 
@@ -587,12 +587,12 @@ def test_a_run_a_raising_named_style_puts_back_on_the_baseline_says_so():
                     "content": "up  ", "textStyle": {"baselineOffset": "SUPERSCRIPT"}}},
                 {"startIndex": 5, "endIndex": 10, "textRun": {
                     "content": "down\n", "textStyle": {"baselineOffset": "NONE"}}}]}}]}}
-    runs = doc_ir.from_document(raised)["blocks"][0]["runs"]
+    runs = doc_ir.from_document(raised, tab_id=None)["blocks"][0]["runs"]
     # A run that says it is raised says so whether or not the theme raises it too —
     # a mark is carried the same way, and only the *refusal* needs the named style to
     # be read at all. The file has an attribute for what no tag can spell.
     assert [r.get("script") for r in runs] == ["super", "none"]
-    html = doc_ir.to_html(doc_ir.key_blocks(doc_ir.from_document(raised)))
+    html = doc_ir.to_html(doc_ir.key_blocks(doc_ir.from_document(raised, tab_id=None)))
     assert 'data-script="none"' in html
     assert [r.get("script") for r in doc_ir.from_html(html)["blocks"][0]["runs"]] == \
         ["super", "none"]
@@ -640,7 +640,7 @@ BORDERED_LIVE = {
 def test_a_paragraphs_rules_and_its_page_break_are_read():
     """Borders sit in the very dialog that sets shading, and shading round-tripped
     while the rule beside it vanished on the first rewrite."""
-    block = doc_ir.from_document(BORDERED_LIVE)["blocks"][0]
+    block = doc_ir.from_document(BORDERED_LIVE, tab_id=None)["blocks"][0]
     assert block["border_bottom"] == "1.5pt solid #cc0000 pad 5pt"
     assert block["border_left"] == "3pt dashed #000000"
     assert block["page_break"] is True and block["keep_with_next"] is True
@@ -650,7 +650,7 @@ def test_a_paragraphs_rules_and_its_page_break_are_read():
 
 
 def test_a_rule_and_a_page_break_survive_the_file():
-    ir = doc_ir.from_document(BORDERED_LIVE)
+    ir = doc_ir.from_document(BORDERED_LIVE, tab_id=None)
     line = [l for l in doc_ir.to_html(ir).splitlines() if "Part I" in l][0]
     assert 'data-border-bottom="1.5pt solid #cc0000 pad 5pt"' in line
     assert 'data-border-left="3pt dashed #000000"' in line
@@ -703,14 +703,14 @@ STYLED_LIVE = {
 def test_a_run_that_only_repeats_its_named_style_says_nothing():
     """Subtracting the named style is what keeps the file from being a wall of spans:
     an import sets a face and a size on every run it writes."""
-    runs = doc_ir.from_document(STYLED_LIVE)["blocks"][0]["runs"]
+    runs = doc_ir.from_document(STYLED_LIVE, tab_id=None)["blocks"][0]["runs"]
     assert runs[0] == {"text": "same ", "width": 5}
     assert runs[1] == {"text": "diff", "width": 4, "font": "Courier New",
                        "fontsize": 7.5, "smallcaps": True}
 
 
 def test_a_paragraph_reports_only_what_it_sets_itself():
-    block = doc_ir.from_document(STYLED_LIVE)["blocks"][0]
+    block = doc_ir.from_document(STYLED_LIVE, tab_id=None)["blocks"][0]
     assert block["line_spacing"] == 1.5 and block["indent"] == 36.0
     assert block["space_above"] == 12.0 and block["shading"] == "#fff2cc"
     # Nothing it does not set, and nothing that only repeats the named style.
@@ -728,7 +728,7 @@ def test_a_first_line_indent_is_css_s_from_the_margin_left_and_docs_from_the_pag
         doc = {"body": {"content": [{"startIndex": 1, "endIndex": 3, "paragraph": {
             "paragraphStyle": {"namedStyleType": "NORMAL_TEXT"} | para,
             "elements": [{"startIndex": 1, "endIndex": 3, "textRun": {"content": "a\n"}}]}}]}}
-        block = doc_ir.from_document(doc)["blocks"][0]
+        block = doc_ir.from_document(doc, tab_id=None)["blocks"][0]
         return block.get("indent"), block.get("indent_first")
 
     assert read(indentStart=36, indentFirstLine=54) == (36.0, 18.0)
@@ -779,9 +779,9 @@ def test_a_heading_the_theme_centres_says_nothing_about_its_alignment():
                 "A heading", 1, {"namedStyleType": "HEADING_1"} |
                 ({"alignment": alignment} if alignment else {}))]}}
 
-    assert "align" not in doc_ir.from_document(doc(None))["blocks"][0]
-    assert "align" not in doc_ir.from_document(doc("CENTER"))["blocks"][0]
-    assert doc_ir.from_document(doc("START"))["blocks"][0]["align"] == "left"
+    assert "align" not in doc_ir.from_document(doc(None), tab_id=None)["blocks"][0]
+    assert "align" not in doc_ir.from_document(doc("CENTER"), tab_id=None)["blocks"][0]
+    assert doc_ir.from_document(doc("START"), tab_id=None)["blocks"][0]["align"] == "left"
 
 
 def test_a_bullets_own_indents_are_the_presets_and_never_the_files():
@@ -791,7 +791,7 @@ def test_a_bullets_own_indents_are_the_presets_and_never_the_files():
     doc["body"]["content"][0]["paragraph"] = dict(
         STYLED_LIVE["body"]["content"][0]["paragraph"],
         bullet={"listId": "kix.l", "nestingLevel": 0})
-    block = doc_ir.from_document(doc)["blocks"][0]
+    block = doc_ir.from_document(doc, tab_id=None)["blocks"][0]
     assert block["kind"] == "item" and "indent" not in block
     assert block["line_spacing"] == 1.5   # everything else is still carried
 

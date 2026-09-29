@@ -38,20 +38,25 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dataclasses
 import json
 import random
 import re
 import sys
 import time
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 
 from .. import doc_ir, doc_merge, doc_sync
-from ..doc_ir import Block, Ir, NamedDefault
+from ..doc_ir import Block, Ir, Kind, Mark, Measures, NamedDefault, Run, Style
 from ..doc_sync import SyncReport, Written
-from ..google_types import DocsBatchUpdateResponse, DocsNamedStyle, DocsRequest, DocsTabProperties
+from ..google_types import (DocsBatchUpdateResponse, DocsLocation, DocsNamedStyle,
+                            DocsParagraphStyle, DocsRangeWrite, DocsRequest,
+                            DocsTableCellLocation, DocsTabProperties, DocsTextStyle)
+from ..typing_compat import assert_never
 from . import doc_loss_oracle as oracle
-from .doc_loss_oracle import CellSays, FrozenKey
+from .doc_loss_oracle import CellSays, Finding, FrozenKey, Theme
 from . import doc_world
 from .doc_world import Refused
 
@@ -61,6 +66,11 @@ WORD = re.compile(r"\w+")
 MARK_KEYS: set[str] = {key for key, _ in doc_ir.MARK_FIELDS}
 #: A stretch of run styling as `_worn` compares it: (field, value) pairs, sorted.
 Marks = tuple[tuple[str, object], ...]
+#: What a reader op sends: the batches, each a list of requests, in the order they go.
+Batches = list[list[DocsRequest]]
+#: And what it touched: the keys of the blocks it worked on, and the fresh words it
+#: typed, for `collide` to answer (None: a block with no key).
+Touched = list[str | None]
 
 FRESH = ["kestrel", "harbour", "lantern", "meadow", "quartz", "ribbon", "signal",
          "thicket", "umbrella", "vellum", "willow", "zephyr"]
@@ -70,48 +80,50 @@ FRESH = ["kestrel", "harbour", "lantern", "meadow", "quartz", "ribbon", "signal"
 # so every field named there has to be reachable from both sides or the clearing is
 # unfuzzed: a campaign that only ever sets italic proves nothing about a face, a size
 # or an indent. `code` and `font` are one field on the wire (both are the run's family),
-# so drawing one drops the other.
-RUN_MARKS = [("bold", True), ("italic", True), ("underline", True), ("strike", True),
-             ("smallcaps", True), ("code", True),
-             ("font", "Georgia"), ("font", "Roboto Mono"),
-             ("fontsize", 9.0), ("fontsize", 14.5),
-             ("script", "super"), ("script", "sub"),
-             ("color", "#993333"), ("highlight", "#ffee88"),
-             # Ctrl+K's half of the dialect. `link` is in `doc_merge.MANAGED`, so a
-             # source restyle names it whether or not the block asks for it — and no
-             # op had ever put one on a run from either side, so what a restyle does
-             # to a link was as undrawn as the bullet was (`read_link_word`).
-             ("link", "https://example.invalid/anchor")]
+# so drawing one drops the other. One mark each, drawn whole.
+RUN_MARKS: list[Style] = [
+    {"bold": True}, {"italic": True}, {"underline": True}, {"strike": True},
+    {"smallcaps": True}, {"code": True},
+    {"font": "Georgia"}, {"font": "Roboto Mono"},
+    {"fontsize": 9.0}, {"fontsize": 14.5},
+    {"script": "super"}, {"script": "sub"},
+    {"color": "#993333"}, {"highlight": "#ffee88"},
+    # Ctrl+K's half of the dialect. `link` is in `doc_merge.MANAGED`, so a source
+    # restyle names it whether or not the block asks for it — and no op had ever put
+    # one on a run from either side, so what a restyle does to a link was as undrawn
+    # as the bullet was (`read_link_word`).
+    {"link": "https://example.invalid/anchor"}]
 
-PARA_MARKS = [("align", "center"), ("align", "justify"), ("indent", 18.0),
-              ("indent_first", 36.0), ("line_spacing", 1.5), ("shading", "#eef2ff"),
-              ("space_above", 6.0), ("space_below", 12.0),
-              ("border_bottom", "1pt solid #333333"),
-              ("border_bottom", "2.5pt dashed #cc0000 pad 4pt"),
-              ("border_left", "3pt dotted #0000ff"),
-              ("page_break", True), ("keep_with_next", True)]
+PARA_MARKS: list[Measures] = [
+    {"align": "center"}, {"align": "justify"}, {"indent": 18.0},
+    {"indent_first": 36.0}, {"line_spacing": 1.5}, {"shading": "#eef2ff"},
+    {"space_above": 6.0}, {"space_below": 12.0},
+    {"border_bottom": "1pt solid #333333"},
+    {"border_bottom": "2.5pt dashed #cc0000 pad 4pt"},
+    {"border_left": "3pt dotted #0000ff"},
+    {"page_break": True}, {"keep_with_next": True}]
 
 
 # ---------------------------------------------------------------- the corpus
 
-def _p(text, **kw):
-    return {"kind": "paragraph", "runs": [{"text": text}], **kw}
+def _p(text: str) -> Block:
+    return {"kind": "paragraph", "runs": [{"text": text}]}
 
 
-def _h(text, level=1):
-    return {"kind": "heading", "level": level, "runs": [{"text": text}]}
+def _h(text: str) -> Block:
+    return {"kind": "heading", "level": 1, "runs": [{"text": text}]}
 
 
-def _i(text, level=0, glyphs=None):
-    return {"kind": "item", "level": level, "glyphs": glyphs, "runs": [{"text": text}]}
+def _i(text: str, level: int) -> Block:
+    return {"kind": "item", "level": level, "runs": [{"text": text}]}
 
 
-def _t(rows):
+def _t(rows: Sequence[Sequence[str]]) -> Block:
     return {"kind": "table",
             "rows": [[[_p(cell)] for cell in row] for row in rows]}
 
 
-def _shapes() -> dict:
+def _shapes() -> dict[str, list[Block]]:
     """One entry per shape that has broken something, plus enough ordinary prose to
     give the merge somewhere to work (docs/google-docs.md names every one of these)."""
     return {
@@ -124,7 +136,7 @@ def _shapes() -> dict:
                    _p("And a second one after that.")],
         "prose": [_h("Notes"), _p("The first paragraph says one thing."),
                   _p("The second paragraph says another."),
-                  _i("alpha"), _i("beta"), _i("gamma", 1), _p("A closing line.")],
+                  _i("alpha", 0), _i("beta", 0), _i("gamma", 1), _p("A closing line.")],
         "ends_on_table": [_h("Results"), _p("What we found."),
                           _t([["year", "count"], ["2024", "7"], ["2025", "9"]])],
         "opens_on_table": [_t([["key", "value"], ["a", "1"]]),
@@ -138,14 +150,14 @@ def _shapes() -> dict:
             {"text": " holds everywhere"}]},
             {"kind": "paragraph", "runs": [{"chip": "equation", "text": "{\\int}_0^1 x"}]},
             _p("and prose after it.")],
-        "imported_list": [_h("Steps"), _i("mix"), _i("bake"), _i("cool"),
+        "imported_list": [_h("Steps"), _i("mix", 0), _i("bake", 0), _i("cool", 0),
                           _p("Follow them in order.")],
         "chips": [{"kind": "paragraph", "runs": [
             {"text": "ask "}, {"chip": "person", "text": "Ada", "value": "ada@example.com"},
             {"text": " before "}, {"chip": "date", "text": "Sep 20, 2026",
                                    "value": "2026-09-20T00:00:00Z"}]},
             {"kind": "paragraph", "runs": [
-                {"chip": "image", "value": "kix.pic0", "src": "media/plot.png",
+                {"chip": "image", "text": "", "value": "kix.pic0", "src": "media/plot.png",
                  "uri": "https://example.invalid/plot.png"}]},
             _p("A caption under it.")],
         "toc": [{"kind": "toc"}, _h("One"), _p("First section."),
@@ -160,7 +172,8 @@ def _shapes() -> dict:
         # only what is set on it, so the file cannot say it and must not undo it.
         "themed": [_h("A themed heading"), _p("Under it, a paragraph."),
                    _h("Another heading"), _p("And prose after that."),
-                   _p("A line the source can move.", align="center")],
+                   {"kind": "paragraph", "align": "center",
+                    "runs": [{"text": "A line the source can move."}]}],
     }
 
 
@@ -231,24 +244,24 @@ def bootstrap(world: doc_world.World) -> Ir:
 
 
 def sync_once(world: doc_world.World, ours: Ir, base: Ir,
-              seen: Counter[str] | None = None) -> tuple[SyncReport, Ir, Ir]:
+              seen: Counter[str]) -> tuple[SyncReport, Ir, Ir]:
     """`doc_sync.sync` against the world: plan every tab, write it, then settle.
 
     Returns the report and the file and base the settle leaves behind — which are the
     same read, as they are on a real sync: file, document and base agree from here.
+    `seen` counts the requests sent (a fresh `Counter()` when nobody is counting).
     """
-    seen = seen if seen is not None else Counter()
     theirs = doc_world.read_ir(world, ours, base)
     tabs = doc_merge.pair_tabs(base, ours, theirs)
-    if tabs["requests"]:
-        _send(world, tabs["requests"], seen)
-    if rename := tabs["rename"]:
+    if tabs.requests:
+        _send(world, tabs.requests, seen)
+    if rename := tabs.rename:
         world.title = rename   # Drive's, not a request (`doc_sync.rename_document`)
-    pairs = list(tabs["pairs"])
+    pairs = list(tabs.pairs)
     known = {tab for p in doc_ir.parts(theirs) if (tab := p.get("tab")) is not None}
     siblings = doc_merge.tab_siblings(theirs)
     made: dict[str, str] = {}
-    for part in tabs["create"]:
+    for part in tabs.create:
         if (parent := part.get("parent")) is not None and parent in made:
             part["parent"] = made[parent]
         request = doc_merge.add_tab_request(part, known | set(made.values()),
@@ -271,7 +284,7 @@ def sync_once(world: doc_world.World, ours: Ir, base: Ir,
     for tab, mine, was in start + pairs:
         written.append(_sync_part(world, stager, tab, ours, base, mine, was, seen))
     report = _report(ours, tabs, written)
-    live = settle(world, ours, base, {each["stamp"]: each["result"]["blocks"]
+    live = settle(world, ours, base, {each.stamp: each.result.blocks
                                       for each in written})
     return report, live, copy.deepcopy(live)
 
@@ -281,10 +294,10 @@ def _sync_part(world: doc_world.World, stager: Stager, tab: str | None, ours: Ir
     theirs = doc_world.part_ir(world, tab, ours, base)
     result = doc_merge.plan(was, mine, theirs)
     was, result, shaped = _write_structure(world, tab, ours, base, mine, was, result, seen)
-    if result["requests"]:
-        _send(world, stager.resolve(doc_merge.on_tab(result["requests"], tab)), seen)
-    return {"stamp": tab, "label": mine.get("title", "") if tab else None,
-            "result": result, "shaped": shaped, "attempts": 0}
+    if result.requests:
+        _send(world, stager.resolve(doc_merge.on_tab(result.requests, tab)), seen)
+    return Written(stamp=tab, label=mine.get("title", "") if tab else None,
+                   result=result, shaped=shaped, attempts=0)
 
 
 def _write_structure(world: doc_world.World, tab: str | None, ours: Ir, base: Ir, mine: Ir,
@@ -294,20 +307,20 @@ def _write_structure(world: doc_world.World, tab: str | None, ours: Ir, base: Ir
     plan the words against the grid the document has now."""
     shaped: list[doc_merge.Told] = []
     for _ in range(3):
-        if not result["structure"]:
+        if not result.structure:
             break
-        _send(world, doc_merge.on_tab(result["structure"], tab), seen)
-        shaped += result["shaped"]
+        _send(world, doc_merge.on_tab(result.structure, tab), seen)
+        shaped += result.shaped
         theirs = doc_world.part_ir(world, tab, ours, base)
         found = doc_merge.recover_tables(
-            was, theirs, {key for t in result["shaped"] if (key := t["key"])})
-        anchored = doc_merge.anchor_tables(theirs, result["shaped"])
-        anchored += doc_merge.recover_swallowed(theirs, result["shaped"])
-        anchored += doc_merge.recover_eaten(theirs, result["shaped"])
+            was, theirs, {key for t in result.shaped if (key := t.key)})
+        anchored = doc_merge.anchor_tables(theirs, result.shaped)
+        anchored += doc_merge.recover_swallowed(theirs, result.shaped)
+        anchored += doc_merge.recover_eaten(theirs, result.shaped)
         if anchored or found:
             _send(world, doc_merge.on_tab(doc_ir.name_requests(theirs), tab), seen)
             theirs = doc_world.part_ir(world, tab, ours, base)
-        was = doc_merge.rebase_tables(was, theirs, result["shaped"])
+        was = doc_merge.rebase_tables(was, theirs, result.shaped)
         result = doc_merge.plan(was, mine, theirs)
     return was, result, shaped
 
@@ -371,70 +384,87 @@ def _report(ours: Ir, tabs: doc_merge.TabPlan, written: Sequence[Written]) -> Sy
     """`doc_sync._report`, the same shape, so the oracle reads a real one."""
     info: SyncReport = {
         "document": "world", "url": "world", "dry_run": False, "requests": 0,
-        "conflicts": [], "notes": list(ours.get("unsupported", [])) + tabs["notes"],
-        "applied": list(tabs["applied"]), "kept": [], "comments": [], "removed": []}
+        "conflicts": [], "notes": list(ours.get("unsupported", [])) + tabs.notes,
+        "applied": list(tabs.applied), "kept": [], "comments": [], "removed": []}
     for each in written:
-        result, label = each["result"], each["label"]
-        info["requests"] += len(result["requests"]) + len(result["structure"])
-        info["conflicts"] += [doc_sync._in_tab(c, label) for c in result["conflicts"]]
-        info["notes"] += [doc_sync._said_in(label, n) for n in result["notes"]]
-        info["applied"] += [doc_sync._said_in(label, note) for t in each["shaped"]
-                            if (note := t.get("note")) is not None]
-        for block in result["blocks"]:
+        result, label = each.result, each.label
+        info["requests"] += len(result.requests) + len(result.structure)
+        info["conflicts"] += [doc_sync._in_tab(c, label) for c in result.conflicts]
+        info["notes"] += [doc_sync._said_in(label, n) for n in result.notes]
+        info["applied"] += [doc_sync._said_in(label, t.note) for t in each.shaped]
+        for block in result.blocks:
             origin, key = block.get("origin"), block.get("key", "(unkeyed)")
             if block.get("moved") or origin in ("added by the source", "merged"):
                 info["applied"].append(doc_sync._said_in(label, f"`{key}` {origin}"))
             elif origin:
                 info["kept"].append(doc_sync._said_in(label, f"`{key}` {origin}"))
-    info["requests"] += len(tabs["requests"]) + len(tabs["create"])
+    info["requests"] += len(tabs.requests) + len(tabs.create)
     return info
 
 
 # ---------------------------------------------------------------- what the reader does
 
-def _blocks(part: dict) -> list[dict]:
-    return part.get("blocks", [])
+def _blocks(part: Ir) -> list[Block]:
+    return part["blocks"]
 
 
-def _word_spots(block: dict) -> list[tuple[str, int, int]]:
+def _ends(block: Block) -> tuple[int, int]:
+    """Where a block starts and ends in the document it was read from."""
+    span = block.get("span")
+    if not span:
+        raise ValueError(f"a block read with no span: {block.get('key')}")
+    return span[0], span[1]
+
+
+def _rows(block: Block) -> list[list[list[Block]]]:
+    return block.get("rows", [])
+
+
+def _word_spots(block: Block) -> list[tuple[str, int, int]]:
     """(word, start index, end index) for every word of a paragraph-like block."""
-    out, at = [], block.get("span", [1, 1])[0]
+    out: list[tuple[str, int, int]] = []
+    span = block.get("span")
+    at: int = span[0] if span is not None else 1
     for run in block.get("runs", []):
-        width = run.get("width", doc_ir.utf16_len(run.get("text", "")))
+        text = run["text"]
+        width = run.get("width")
         if not run.get("frozen"):
-            for match in WORD.finditer(run.get("text", "")):
-                low = at + doc_ir.utf16_len(run["text"][:match.start()])
+            for match in WORD.finditer(text):
+                low = at + doc_ir.utf16_len(text[:match.start()])
                 out.append((match.group(), low, low + doc_ir.utf16_len(match.group())))
-        at += width
+        at += width if width is not None else doc_ir.utf16_len(text)
     return out
 
 
-def _paragraph_blocks(part: dict) -> list[dict]:
-    return [b for b in _blocks(part) if b.get("kind") in doc_ir.TEXT_KINDS
-            and b.get("span")]
+def _paragraph_blocks(part: Ir) -> list[Block]:
+    return [b for b in _blocks(part) if b["kind"] in doc_ir.TEXT_KINDS and b.get("span")]
 
 
-def _tables(part: dict) -> list[dict]:
-    return [b for b in _blocks(part) if b.get("kind") == "table" and b.get("span")]
+def _tables(part: Ir) -> list[Block]:
+    return [b for b in _blocks(part) if b["kind"] == "table" and b.get("span")]
 
 
-def _cells(table: dict):
-    for r, row in enumerate(table.get("rows", [])):
+def _cells(table: Block) -> Iterator[tuple[int, int, Block]]:
+    for r, row in enumerate(_rows(table)):
         for c, cell in enumerate(row):
             if cell:
                 yield r, c, cell[0]
 
 
-def read_type_word(rng, part, tab):
+#: What a reader op answers: the batches it sends and what it touched.
+Reading = tuple[Batches, Touched]
+
+
+def read_type_word(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     spots = [s for b in _paragraph_blocks(part) for s in _word_spots(b)]
     if not spots:
         return [], []
     word, low, _ = rng.choice(spots)
     fresh = rng.choice(FRESH)
-    return [{"insertText": {"location": _at(low, tab), "text": fresh + " "}}], [fresh]
+    return [[{"insertText": {"location": _at(low, tab), "text": fresh + " "}}]], [fresh]
 
 
-def read_reword(rng, part, tab):
+def read_reword(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     spots = [(b, s) for b in _paragraph_blocks(part) for s in _word_spots(b)]
     if not spots:
         return [], []
@@ -442,39 +472,39 @@ def read_reword(rng, part, tab):
     fresh = rng.choice(FRESH)
     # The insert goes in at the end of what it replaces, and the delete after it: text
     # takes the style of the character in front of it (docs/google-docs.md).
-    return [{"insertText": {"location": _at(high, tab), "text": fresh}},
-            {"deleteContentRange": {"range": _span(low, high, tab)}}], [block.get("key")]
+    return [[{"insertText": {"location": _at(high, tab), "text": fresh}},
+             {"deleteContentRange": {"range": _span(low, high, tab)}}]], [block.get("key")]
 
 
-def read_delete_word(rng, part, tab):
+def read_delete_word(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     spots = [(b, s) for b in _paragraph_blocks(part) for s in _word_spots(b)
              if len(_word_spots(b)) > 1]
     if not spots:
         return [], []
     block, (_, low, high) = rng.choice(spots)
-    return [{"deleteContentRange": {"range": _span(low, high, tab)}}], [block.get("key")]
+    return [[{"deleteContentRange": {"range": _span(low, high, tab)}}]], [block.get("key")]
 
 
-def read_append_block(rng, part, tab):
+def read_append_block(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     blocks = _paragraph_blocks(part)
     if not blocks:
         return [], []
     block = rng.choice(blocks)
     fresh = rng.choice(FRESH)
-    return [{"insertText": {"location": _at(block["span"][1] - 1, tab),
-                            "text": f"\nthe reader wrote {fresh}"}}], [fresh]
+    return [[{"insertText": {"location": _at(_ends(block)[1] - 1, tab),
+                             "text": f"\nthe reader wrote {fresh}"}}]], [fresh]
 
 
-def read_delete_block(rng, part, tab):
+def read_delete_block(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     blocks = _paragraph_blocks(part)
     if len(blocks) < 2:
         return [], []
     block = rng.choice(blocks)
-    low, high = block["span"]
-    return [{"deleteContentRange": {"range": _span(low, high, tab)}}], [block.get("key")]
+    low, high = _ends(block)
+    return [[{"deleteContentRange": {"range": _span(low, high, tab)}}]], [block.get("key")]
 
 
-def read_split_block(rng, part, tab):
+def read_split_block(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader presses Enter in the middle of a paragraph.
 
     The commonest editing action there is, and one nothing else here draws. A named
@@ -484,14 +514,14 @@ def read_split_block(rng, part, tab):
     second half is a block nobody has ever seen, which the settle must key and name.
     """
     spots = [(b, s) for b in _paragraph_blocks(part) for s in _word_spots(b)
-             if s[1] > b["span"][0]]
+             if s[1] > _ends(b)[0]]
     if not spots:
         return [], []
     block, (_, low, _) = rng.choice(spots)
-    return [{"insertText": {"location": _at(low, tab), "text": "\n"}}], [block.get("key")]
+    return [[{"insertText": {"location": _at(low, tab), "text": "\n"}}]], [block.get("key")]
 
 
-def read_join_blocks(rng, part, tab):
+def read_join_blocks(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader backspaces at the start of a paragraph, joining it to the one above.
 
     The mirror of the split, and the shape Docs' own merge-on-delete rule is about:
@@ -503,17 +533,17 @@ def read_join_blocks(rng, part, tab):
     """
     blocks = _blocks(part)
     pairs = [(blocks[i], blocks[i + 1]) for i in range(len(blocks) - 1)
-             if all(b.get("kind") in doc_ir.TEXT_KINDS and b.get("span")
+             if all(b["kind"] in doc_ir.TEXT_KINDS and b.get("span")
                     for b in blocks[i:i + 2])]
     if not pairs:
         return [], []
     first, second = rng.choice(pairs)
-    mark = first["span"][1] - 1
-    return [{"deleteContentRange": {"range": _span(mark, mark + 1, tab)}}], \
+    mark = _ends(first)[1] - 1
+    return [[{"deleteContentRange": {"range": _span(mark, mark + 1, tab)}}]], \
         [first.get("key"), second.get("key")]
 
 
-def read_paste_block(rng, part, tab):
+def read_paste_block(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader copies a paragraph and pastes it somewhere else in the tab.
 
     What this makes that nothing else does is **two blocks that say exactly the same
@@ -531,21 +561,21 @@ def read_paste_block(rng, part, tab):
     text = doc_ir.runs_text(block.get("runs", []))
     if not text.strip():
         return [], []
-    return [{"insertText": {"location": _at(target["span"][1] - 1, tab),
-                            "text": "\n" + text}}], [block.get("key")]
+    return [[{"insertText": {"location": _at(_ends(target)[1] - 1, tab),
+                             "text": "\n" + text}}]], [block.get("key")]
 
 
-def read_bold_word(rng, part, tab):
+def read_bold_word(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     spots = [(b, s) for b in _paragraph_blocks(part) for s in _word_spots(b)]
     if not spots:
         return [], []
     block, (_, low, high) = rng.choice(spots)
-    return [{"updateTextStyle": {"range": _span(low, high, tab),
-                                 "textStyle": {"bold": True}, "fields": "bold"}}], \
+    return [[{"updateTextStyle": {"range": _span(low, high, tab),
+                                  "textStyle": {"bold": True}, "fields": "bold"}}]], \
         [block.get("key")]
 
 
-def read_unmark_word(rng, part, tab, theme=None):
+def read_unmark_word(rng: random.Random, part: Ir, tab: str | None, theme: Theme) -> Reading:
     """A reader pressing Ctrl+B on a word a *theme* made bold.
 
     This is the run-level twin of the alignment loss: a mark turned off is a run
@@ -555,7 +585,7 @@ def read_unmark_word(rng, part, tab, theme=None):
     with no theme the request is written all the same and means nothing, which is
     also what the document says about it.
     """
-    blocks = [b for b in _paragraph_blocks(part) if b.get("kind") == "heading"] \
+    blocks = [b for b in _paragraph_blocks(part) if b["kind"] == "heading"] \
         or _paragraph_blocks(part)
     spots = [(b, s) for b in blocks for s in _word_spots(b)]
     if not spots:
@@ -564,19 +594,18 @@ def read_unmark_word(rng, part, tab, theme=None):
     # A mark the theme actually puts on this block, when there is one: turning off a
     # mark nothing puts on is a request that means nothing, and a campaign made of
     # those would say it had drawn this and proved nothing by it.
-    wears = sorted((theme or {}).get(doc_merge.named_style(block), set())
-                   & {key for key, _ in doc_ir.MARK_FIELDS})
+    worn = theme.get(doc_merge.named_style(block), set())
+    wears: list[Mark] = [key for key, _ in sorted(doc_ir.MARK_FIELDS) if key in worn]
     key = rng.choice(wears) if wears else rng.choice(doc_ir.MARK_FIELDS)[0]
     api = dict(doc_ir.MARK_FIELDS)[key]
-    return [{"updateTextStyle": {"range": _span(low, high, tab),
-                                 "textStyle": {api: False}, "fields": api}}], \
+    style: DocsTextStyle = {}
+    doc_merge._set_mark_api(style, api, False)
+    return [[{"updateTextStyle": {"range": _span(low, high, tab),
+                                  "textStyle": style, "fields": api}}]], \
         [block.get("key")]
 
 
-read_unmark_word.wants_theme = True
-
-
-def read_link_word(rng, part, tab):
+def read_link_word(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader presses Ctrl+K on a word, or takes the link off one.
 
     `link` is one of `doc_merge.MANAGED` — the fields the merge names on a restyle
@@ -605,14 +634,15 @@ def read_link_word(rng, part, tab):
     block, (_, low, high) = rng.choice(spots)
     # Taking one off is the same request with no url in it, which is how the API says
     # "no link" and how a reader's Ctrl+Shift+K reads back.
-    style = {} if rng.random() < 0.25 else \
+    style: DocsTextStyle = {} if rng.random() < 0.25 else \
         {"link": {"url": f"https://example.invalid/{rng.randrange(1 << 16):04x}"}}
-    return [{"updateTextStyle": {"range": _span(low, high, tab),
-                                 "textStyle": style, "fields": "link"}}], \
+    return [[{"updateTextStyle": {"range": _span(low, high, tab),
+                                  "textStyle": style, "fields": "link"}}]], \
         [block.get("key")]
 
 
-def read_indent(rng, part, tab, world=None):
+def read_indent(rng: random.Random, part: Ir, tab: str | None,
+                world: doc_world.World) -> Reading:
     """The reader presses Tab or Shift-Tab on a list item.
 
     The other half of the bullet button, and the half nothing could draw: a nesting
@@ -623,7 +653,7 @@ def read_indent(rng, part, tab, world=None):
     level 0 and nothing else moved one, so a level the *reader* chose, which is the
     only kind the file cannot ask for again, had never existed in a round.
     """
-    items = [b for b in part.get("blocks", []) if b.get("kind") == "item"]
+    items = [b for b in part["blocks"] if b["kind"] == "item"]
     if not items:
         return [], []
     block = rng.choice(items)
@@ -632,29 +662,28 @@ def read_indent(rng, part, tab, world=None):
     # is nowhere to go from level 0 but down. Docs allows nine levels; two is as deep
     # as any of this says anything.
     level = max(0, min(2, was + rng.choice([-1, 1, 1])))
-    span = {"startIndex": block["span"][0], "endIndex": block["span"][1], "tabId": tab}
-    return [], ([block.get("key")] if doc_world.nest(world, span, level) else [])
+    low, high = _ends(block)
+    return [], ([block.get("key")] if doc_world.nest(world, _span(low, high, tab), level)
+                else [])
 
 
-read_indent.wants_world = True
-
-
-def read_heading(rng, part, tab):
-    blocks = [b for b in _paragraph_blocks(part) if b.get("kind") != "item"]
+def read_heading(rng: random.Random, part: Ir, tab: str | None) -> Reading:
+    blocks = [b for b in _paragraph_blocks(part) if b["kind"] != "item"]
     if not blocks:
         return [], []
     block = rng.choice(blocks)
     named = rng.choice(["HEADING_3", "TITLE", "SUBTITLE", "NORMAL_TEXT"])
-    return [{"updateParagraphStyle": {
-        "range": _span(*block["span"], tab),
+    low, high = _ends(block)
+    return [[{"updateParagraphStyle": {
+        "range": _span(low, high, tab),
         "paragraphStyle": {"namedStyleType": named},
-        "fields": "namedStyleType"}}], [block.get("key")]
+        "fields": "namedStyleType"}}]], [block.get("key")]
 
 
 # What the reader picks in the editor's own menus, written the way Docs writes it.
 # Spelled out here rather than taken from `doc_merge`, so the harness is not checking
 # the merge against its own idea of a Dimension.
-READER_FACES = [
+READER_FACES: list[tuple[DocsTextStyle, str]] = [
     ({"weightedFontFamily": {"fontFamily": "Georgia", "weight": 400}}, "weightedFontFamily"),
     ({"weightedFontFamily": {"fontFamily": "Courier New", "weight": 400}},
      "weightedFontFamily"),
@@ -667,7 +696,7 @@ READER_FACES = [
      "foregroundColor"),
 ]
 
-READER_MEASURES = [
+READER_MEASURES: list[tuple[DocsParagraphStyle, str]] = [
     ({"indentStart": {"magnitude": 36, "unit": "PT"}}, "indentStart"),
     ({"indentFirstLine": {"magnitude": 18, "unit": "PT"}}, "indentFirstLine"),
     ({"lineSpacing": 200}, "lineSpacing"),
@@ -687,7 +716,7 @@ READER_MEASURES = [
 ]
 
 
-def read_face(rng, part, tab):
+def read_face(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader chooses a face, a size or a colour for a word — the case that
     matters most, because `doc_merge.MANAGED` lets a source restyle clear it."""
     spots = [(b, s) for b in _paragraph_blocks(part) for s in _word_spots(b)]
@@ -695,33 +724,34 @@ def read_face(rng, part, tab):
         return [], []
     block, (_, low, high) = rng.choice(spots)
     style, field = rng.choice(READER_FACES)
-    return [{"updateTextStyle": {"range": _span(low, high, tab),
-                                 "textStyle": style, "fields": field}}], [block.get("key")]
+    return [[{"updateTextStyle": {"range": _span(low, high, tab),
+                                  "textStyle": style, "fields": field}}]], [block.get("key")]
 
 
-def read_measure(rng, part, tab):
+def read_measure(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader indents a paragraph, spaces it out or shades it."""
     blocks = _paragraph_blocks(part)
     if not blocks:
         return [], []
     block = rng.choice(blocks)
     style, field = rng.choice(READER_MEASURES)
-    return [{"updateParagraphStyle": {"range": _span(*block["span"], tab),
-                                      "paragraphStyle": style, "fields": field}}], \
+    low, high = _ends(block)
+    return [[{"updateParagraphStyle": {"range": _span(low, high, tab),
+                                       "paragraphStyle": style, "fields": field}}]], \
         [block.get("key")]
 
 
-def read_renumber_list(rng, part, tab):
-    items = [b for b in _blocks(part) if b.get("kind") == "item" and b.get("span")]
+def read_renumber_list(rng: random.Random, part: Ir, tab: str | None) -> Reading:
+    items = [b for b in _blocks(part) if b["kind"] == "item" and b.get("span")]
     if not items:
         return [], []
-    low, high = items[0]["span"][0], items[-1]["span"][1]
-    return [{"createParagraphBullets": {
+    low, high = _ends(items[0])[0], _ends(items[-1])[1]
+    return [[{"createParagraphBullets": {
         "range": _span(low, high, tab),
-        "bulletPreset": doc_world.ORDERED_PRESET}}], [b.get("key") for b in items]
+        "bulletPreset": doc_world.ORDERED_PRESET}}]], [b.get("key") for b in items]
 
 
-def read_bullet(rng, part, tab):
+def read_bullet(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader clicks the bullet button: a paragraph becomes a list item, or stops
     being one.
 
@@ -738,22 +768,26 @@ def read_bullet(rng, part, tab):
     if not blocks:
         return [], []
     block = rng.choice(blocks)
-    span = _span(*block["span"], tab)
-    if block.get("kind") == "item":
-        return [{"deleteParagraphBullets": {"range": span}}], [block.get("key")]
+    low, high = _ends(block)
+    span = _span(low, high, tab)
+    if block["kind"] == "item":
+        return [[{"deleteParagraphBullets": {"range": span}}]], [block.get("key")]
     preset = doc_world.ORDERED_PRESET if rng.random() < 0.4 \
         else "BULLET_DISC_CIRCLE_SQUARE"
-    return [{"createParagraphBullets": {"range": span, "bulletPreset": preset}}], \
+    return [[{"createParagraphBullets": {"range": span, "bulletPreset": preset}}]], \
         [block.get("key")]
 
 
 # What a reader may set on a paragraph *inside a table cell*. `pageBreakBefore` is
 # left out: Docs refuses it in a table, and a request the real API would reject is
 # the harness's own doing, never the sync's.
-CELL_MEASURES = [m for m in READER_MEASURES if m[1] != "pageBreakBefore"]
+CELL_MEASURES: list[tuple[DocsParagraphStyle, str]] = \
+    [m for m in READER_MEASURES if m[1] != "pageBreakBefore"]
+#: And what a reader may set on a word there: the faces, and bold.
+CELL_FACES: list[tuple[DocsTextStyle, str]] = READER_FACES + [({"bold": True}, "bold")]
 
 
-def read_cell_style(rng, part, tab):
+def read_cell_style(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader styling a word, or setting a paragraph, *inside a table cell*.
 
     Every reader op that styles anything walks `part["blocks"]`, and a cell is not
@@ -771,20 +805,21 @@ def read_cell_style(rng, part, tab):
         return [], []
     table, block = rng.choice(spots)
     if rng.random() < 0.35:
-        style, field = rng.choice(CELL_MEASURES)
-        return [{"updateParagraphStyle": {"range": _span(*block["span"], tab),
-                                          "paragraphStyle": style,
-                                          "fields": field}}], [table.get("key")]
+        measure, field = rng.choice(CELL_MEASURES)
+        low, high = _ends(block)
+        return [[{"updateParagraphStyle": {"range": _span(low, high, tab),
+                                           "paragraphStyle": measure,
+                                           "fields": field}}]], [table.get("key")]
     words = _word_spots(block)
     if not words:
         return [], []
     _, low, high = rng.choice(words)
-    style, field = rng.choice(READER_FACES + [({"bold": True}, "bold")])
-    return [{"updateTextStyle": {"range": _span(low, high, tab),
-                                 "textStyle": style, "fields": field}}], [table.get("key")]
+    style, field = rng.choice(CELL_FACES)
+    return [[{"updateTextStyle": {"range": _span(low, high, tab),
+                                  "textStyle": style, "fields": field}}]], [table.get("key")]
 
 
-def read_cell_chip(rng, part, tab):
+def read_cell_chip(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader putting a person chip or a picture *into a table cell*.
 
     A table of owners is the commonest place in a real document for a chip to be, and
@@ -798,16 +833,16 @@ def read_cell_chip(rng, part, tab):
     if not spots:
         return [], []
     table, block = rng.choice(spots)
-    at = _at(block["span"][1] - 1, tab)
+    at = _at(_ends(block)[1] - 1, tab)
     if rng.random() < 0.5:
-        return [{"insertPerson": {
+        return [[{"insertPerson": {
             "location": at,
-            "personProperties": {"email": "reader@example.com"}}}], [table.get("key")]
-    return [{"insertInlineImage": {
-        "location": at, "uri": "https://example.invalid/reader.png"}}], [table.get("key")]
+            "personProperties": {"email": "reader@example.com"}}}]], [table.get("key")]
+    return [[{"insertInlineImage": {
+        "location": at, "uri": "https://example.invalid/reader.png"}}]], [table.get("key")]
 
 
-def read_split_cell(rng, part, tab):
+def read_split_cell(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader pressing Enter inside a table cell.
 
     `read_split_block` is the commonest edit there is and it walks `part["blocks"]`,
@@ -818,48 +853,50 @@ def read_split_cell(rng, part, tab):
     its own, as the other cell ops do.
     """
     spots = [(t, b) for t in _tables(part) for _, _, b in _cells(t)
-             if b.get("span") and b["span"][1] - b["span"][0] > 2]
+             if b.get("span") and _ends(b)[1] - _ends(b)[0] > 2]
     if not spots:
         return [], []
     table, block = rng.choice(spots)
-    low, high = block["span"]
-    return [{"insertText": {"location": _at(rng.randrange(low + 1, high - 1), tab),
-                            "text": "\n"}}], [table.get("key")]
+    low, high = _ends(block)
+    return [[{"insertText": {"location": _at(rng.randrange(low + 1, high - 1), tab),
+                             "text": "\n"}}]], [table.get("key")]
 
 
-def read_cell_type(rng, part, tab):
+def read_cell_type(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     spots = [(t, r, c, b) for t in _tables(part) for r, c, b in _cells(t) if b.get("span")]
     if not spots:
         return [], []
     table, _, _, block = rng.choice(spots)
     fresh = rng.choice(FRESH)
-    return [{"insertText": {"location": _at(block["span"][0], tab),
-                            "text": fresh + " "}}], [table.get("key"), fresh]
+    return [[{"insertText": {"location": _at(_ends(block)[0], tab),
+                             "text": fresh + " "}}]], [table.get("key"), fresh]
 
 
-def read_add_row(rng, part, tab):
+def _cell_at(table: Block, tab: str | None, row: int, column: int) -> DocsTableCellLocation:
+    return {"tableStartLocation": _at(_ends(table)[0], tab),
+            "rowIndex": row, "columnIndex": column}
+
+
+def read_add_row(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     tables = _tables(part)
     if not tables:
         return [], []
     table = rng.choice(tables)
-    return [{"insertTableRow": {
-        "tableCellLocation": {"tableStartLocation": _at(table["span"][0], tab),
-                              "rowIndex": 0, "columnIndex": 0},
-        "insertBelow": True}}], [table.get("key")]
+    return [[{"insertTableRow": {"tableCellLocation": _cell_at(table, tab, 0, 0),
+                                 "insertBelow": True}}]], [table.get("key")]
 
 
-def read_delete_row(rng, part, tab):
-    tables = [t for t in _tables(part) if len(t.get("rows", [])) > 1]
+def read_delete_row(rng: random.Random, part: Ir, tab: str | None) -> Reading:
+    tables = [t for t in _tables(part) if len(_rows(t)) > 1]
     if not tables:
         return [], []
     table = rng.choice(tables)
-    row = rng.randrange(len(table["rows"]))
-    return [{"deleteTableRow": {
-        "tableCellLocation": {"tableStartLocation": _at(table["span"][0], tab),
-                              "rowIndex": row, "columnIndex": 0}}}], [table.get("key")]
+    row = rng.randrange(len(_rows(table)))
+    return [[{"deleteTableRow": {"tableCellLocation": _cell_at(table, tab, row, 0)}}]], \
+        [table.get("key")]
 
 
-def read_add_column(rng, part, tab):
+def read_add_column(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader adds a column. Rows and columns are not the same thing to the merge:
     a row is one line of the grid, a column is a cell taken out of *every* row, matched
     by its words across the whole table (`doc_merge._column_score`) rather than by its
@@ -869,44 +906,41 @@ def read_add_column(rng, part, tab):
     if not tables:
         return [], []
     table = rng.choice(tables)
-    return [{"insertTableColumn": {
-        "tableCellLocation": {"tableStartLocation": _at(table["span"][0], tab),
-                              "rowIndex": 0, "columnIndex": 0},
-        "insertRight": True}}], [table.get("key")]
+    return [[{"insertTableColumn": {"tableCellLocation": _cell_at(table, tab, 0, 0),
+                                    "insertRight": True}}]], [table.get("key")]
 
 
-def read_delete_column(rng, part, tab):
-    tables = [t for t in _tables(part) if len(t.get("rows", [[]])[0]) > 1]
+def read_delete_column(rng: random.Random, part: Ir, tab: str | None) -> Reading:
+    tables = [t for t in _tables(part) if _rows(t) and len(_rows(t)[0]) > 1]
     if not tables:
         return [], []
     table = rng.choice(tables)
-    column = rng.randrange(len(table["rows"][0]))
-    return [{"deleteTableColumn": {
-        "tableCellLocation": {"tableStartLocation": _at(table["span"][0], tab),
-                              "rowIndex": 0, "columnIndex": column}}}], [table.get("key")]
+    column = rng.randrange(len(_rows(table)[0]))
+    return [[{"deleteTableColumn": {
+        "tableCellLocation": _cell_at(table, tab, 0, column)}}]], [table.get("key")]
 
 
-def read_insert_picture(rng, part, tab):
+def read_insert_picture(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     blocks = _paragraph_blocks(part)
     if not blocks:
         return [], []
     block = rng.choice(blocks)
-    return [{"insertInlineImage": {"location": _at(block["span"][1] - 1, tab),
-                                   "uri": "https://example.invalid/reader.png"}}], \
+    return [[{"insertInlineImage": {"location": _at(_ends(block)[1] - 1, tab),
+                                    "uri": "https://example.invalid/reader.png"}}]], \
         [block.get("key")]
 
 
-def read_insert_chip(rng, part, tab):
+def read_insert_chip(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     blocks = _paragraph_blocks(part)
     if not blocks:
         return [], []
     block = rng.choice(blocks)
-    return [{"insertPerson": {"location": _at(block["span"][1] - 1, tab),
-                              "personProperties": {"email": "reader@example.com"}}}], \
+    return [[{"insertPerson": {"location": _at(_ends(block)[1] - 1, tab),
+                               "personProperties": {"email": "reader@example.com"}}}]], \
         [block.get("key")]
 
 
-def read_move_block(rng, part, tab):
+def read_move_block(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """A drag: the reader cuts a block and drops it somewhere else. Its named range
     dies with the cut, which is what a drag really does.
 
@@ -931,8 +965,8 @@ def read_move_block(rng, part, tab):
     text = doc_ir.runs_text(block.get("runs", []))
     if not text.strip():
         return [], []
-    low, high = block["span"]
-    at = target["span"][1] - 1
+    low, high = _ends(block)
+    at = _ends(target)[1] - 1
     if at >= high:                     # the cut is in front of where it is dropped
         at -= high - low
     return [[{"deleteContentRange": {"range": _span(low, high, tab)}}],
@@ -940,18 +974,18 @@ def read_move_block(rng, part, tab):
         [block.get("key")]
 
 
-def read_rename_tab(rng, part, tab):
+def read_rename_tab(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader renames the tab they are looking at, in the tab strip. The first
     tab's id is not `tab` (a location in it carries none) but the part's own."""
     ident = tab or part.get("tab")
     if not ident:
         return [], []
-    return [{"updateDocumentTabProperties": {
+    return [[{"updateDocumentTabProperties": {
         "tabProperties": {"tabId": ident, "title": f"Reader's {rng.choice(FRESH)}"},
-        "fields": "title"}}], []
+        "fields": "title"}}]], []
 
 
-def read_add_tab(rng, part, tab):
+def read_add_tab(rng: random.Random, part: Ir, tab: str | None) -> Reading:
     """The reader clicks + in the tab strip. Docs makes it with one empty paragraph
     and hands back its id; nothing here types into it, since a later step's ops draw
     a tab at random and will reach this one.
@@ -959,80 +993,112 @@ def read_add_tab(rng, part, tab):
     Nobody knows of such a tab: it is in neither the file nor the base, so the merge
     must leave it alone and the settle must read it into the file — keys, named
     ranges and all — or the sync after it will see a tab the file never had."""
-    return [{"addDocumentTab": {"tabProperties": {
-        "title": f"Reader's {rng.choice(FRESH)}"}}}], []
+    return [[{"addDocumentTab": {"tabProperties": {
+        "title": f"Reader's {rng.choice(FRESH)}"}}}]], []
 
 
-def read_drop_tab(rng, part, tab, tabs):
+def read_drop_tab(rng: random.Random, part: Ir, tab: str | None,
+                  tabs: list[str]) -> Reading:
     """The reader deletes a tab in the tab strip. Never the first: that one is the
     body and Docs refuses it (so does the world). What has to follow the tab is its
     base entry and its `<section>` in the file."""
     if not tabs:
         return [], []
-    return [{"deleteTab": {"tabId": rng.choice(tabs)}}], []
+    return [[{"deleteTab": {"tabId": rng.choice(tabs)}}]], []
 
 
-read_drop_tab.wants_tabs = True
+# Most reader ops are a person typing in the tab they look at, and know nothing more
+# than that tab. Three know one thing more, and say so by their kind:
+@dataclass(frozen=True, kw_only=True)
+class Plain:
+    op: Callable[[random.Random, Ir, str | None], Reading]
 
 
-READER = {
-    "type_word": read_type_word, "reword": read_reword, "delete_word": read_delete_word,
-    "append_block": read_append_block, "delete_block": read_delete_block,
-    "split_block": read_split_block, "join_blocks": read_join_blocks,
-    "paste_block": read_paste_block,
-    "bold_word": read_bold_word, "unmark_word": read_unmark_word,
-    "link_word": read_link_word, "indent": read_indent, "heading": read_heading,
-    "face": read_face, "measure": read_measure,
-    "renumber_list": read_renumber_list, "bullet": read_bullet,
-    "cell_type": read_cell_type,
-    "cell_style": read_cell_style, "cell_chip": read_cell_chip,
-    "split_cell": read_split_cell,
-    "add_row": read_add_row, "delete_row": read_delete_row,
-    "add_column": read_add_column, "delete_column": read_delete_column,
-    "insert_picture": read_insert_picture, "insert_chip": read_insert_chip,
-    "move_block": read_move_block, "rename_tab": read_rename_tab,
-    "add_tab": read_add_tab, "drop_tab": read_drop_tab,
+@dataclass(frozen=True, kw_only=True)
+class NeedsTheme:
+    """An op that turns styling *off* has to know what the theme turns on."""
+    op: Callable[[random.Random, Ir, str | None, Theme], Reading]
+
+
+@dataclass(frozen=True, kw_only=True)
+class NeedsTabs:
+    """An op about the tab strip rather than a tab: which tabs there are to delete is
+    not a thing the part it is looking at can say."""
+    op: Callable[[random.Random, Ir, str | None, list[str]], Reading]
+
+
+@dataclass(frozen=True, kw_only=True)
+class NeedsWorld:
+    """An op that is no request at all: a nesting level cannot be written by any field
+    of the v1 API, so `read_indent` reaches the world itself (`doc_world.nest` says
+    why). A draw of it that moved nothing counts as nothing to do, exactly as an empty
+    batch does."""
+    op: Callable[[random.Random, Ir, str | None, doc_world.World], Reading]
+
+
+ReaderOp = Plain | NeedsTheme | NeedsTabs | NeedsWorld
+
+READER: dict[str, ReaderOp] = {
+    "type_word": Plain(op=read_type_word), "reword": Plain(op=read_reword),
+    "delete_word": Plain(op=read_delete_word),
+    "append_block": Plain(op=read_append_block), "delete_block": Plain(op=read_delete_block),
+    "split_block": Plain(op=read_split_block), "join_blocks": Plain(op=read_join_blocks),
+    "paste_block": Plain(op=read_paste_block),
+    "bold_word": Plain(op=read_bold_word), "unmark_word": NeedsTheme(op=read_unmark_word),
+    "link_word": Plain(op=read_link_word), "indent": NeedsWorld(op=read_indent),
+    "heading": Plain(op=read_heading),
+    "face": Plain(op=read_face), "measure": Plain(op=read_measure),
+    "renumber_list": Plain(op=read_renumber_list), "bullet": Plain(op=read_bullet),
+    "cell_type": Plain(op=read_cell_type),
+    "cell_style": Plain(op=read_cell_style), "cell_chip": Plain(op=read_cell_chip),
+    "split_cell": Plain(op=read_split_cell),
+    "add_row": Plain(op=read_add_row), "delete_row": Plain(op=read_delete_row),
+    "add_column": Plain(op=read_add_column), "delete_column": Plain(op=read_delete_column),
+    "insert_picture": Plain(op=read_insert_picture),
+    "insert_chip": Plain(op=read_insert_chip),
+    "move_block": Plain(op=read_move_block), "rename_tab": Plain(op=read_rename_tab),
+    "add_tab": Plain(op=read_add_tab), "drop_tab": NeedsTabs(op=read_drop_tab),
 }
 
 
-def _at(index: int, tab) -> dict:
-    return {"index": index} | ({"tabId": tab} if tab else {})
+def _at(index: int, tab: str | None) -> DocsLocation:
+    location: DocsLocation = {"index": index}
+    if tab:
+        location["tabId"] = tab
+    return location
 
 
-def _span(low: int, high: int, tab) -> dict:
-    return {"startIndex": low, "endIndex": high} | ({"tabId": tab} if tab else {})
+def _span(low: int, high: int, tab: str | None) -> DocsRangeWrite:
+    span: DocsRangeWrite = {"startIndex": low, "endIndex": high}
+    if tab:
+        span["tabId"] = tab
+    return span
 
 
 def apply_reader(world: doc_world.World, name: str, rng: random.Random,
-                 seen: Counter) -> list:
+                 seen: Counter[str]) -> list[str]:
     """One reader edit, on a tab drawn at random. A batch the world refuses is the
     harness's own doing — a person in a browser never sends one — so it is dropped and
     counted, never blamed on the sync."""
-    tabs = [None] + [t.id for t in world.tabs[1:]]
+    tabs: list[str | None] = [None] + [t.id for t in world.tabs[1:]]
     tab = rng.choice(tabs)
     part = doc_ir.from_document(world.read(), tab)
     doc_ir.apply_keys(part, doc_ir.named_ranges_of(world.read(), part.get("tab")))
     op = READER[name]
-    # An op that turns styling *off* has to know what the theme turns on, and only
-    # that one does; the rest are a reader typing, who knows nothing of the sort.
-    wants: dict[str, object] = \
-        {"theme": theme_fields(world)} if getattr(op, "wants_theme", False) else {}
-    # And one op is about the tab strip rather than about a tab: which tabs there are
-    # to delete is not a thing the part it is looking at can say.
-    if getattr(op, "wants_tabs", False):
-        wants["tabs"] = [t.id for t in world.tabs[1:]]
-    # And one op is no request at all: a nesting level cannot be written by any field
-    # of the v1 API, so `read_indent` reaches the world itself (`doc_world.nest` says
-    # why). It is the exception, named here so the rest stay what they are — a batch
-    # the reader sends — and a draw of it that moved nothing counts as nothing to do,
-    # exactly as an empty batch does.
-    if getattr(op, "wants_world", False):
-        wants["world"] = world
-    batches, touched = op(rng, part, tab, **wants)
-    if not batches and not (getattr(op, "wants_world", False) and touched):
+    if isinstance(op, Plain):
+        batches, touched = op.op(rng, part, tab)
+    elif isinstance(op, NeedsTheme):
+        batches, touched = op.op(rng, part, tab, theme_fields(world))
+    elif isinstance(op, NeedsTabs):
+        batches, touched = op.op(rng, part, tab, [t.id for t in world.tabs[1:]])
+    elif isinstance(op, NeedsWorld):
+        batches, touched = op.op(rng, part, tab, world)
+    else:
+        assert_never(op)
+    if not batches and not (isinstance(op, NeedsWorld) and touched):
         seen["reader/" + name + " (nothing to do)"] += 1
         return []
-    for batch in _as_batches(batches):
+    for batch in batches:
         try:
             world.apply(batch)
         except Refused:
@@ -1042,41 +1108,38 @@ def apply_reader(world: doc_world.World, name: str, rng: random.Random,
     return [t for t in touched if t]
 
 
-def _as_batches(batches: Sequence[object]) -> list[Sequence[Mapping[str, object]]]:
-    """A reader op's requests as the batches they are sent in: an op answers one
-    batch (a list of requests) or several (a list of those)."""
-    if batches and isinstance(batches[0], dict):
-        batches = [batches]
-    out: list[Sequence[Mapping[str, object]]] = []
-    for batch in batches:
-        if not isinstance(batch, (list, tuple)):
-            raise TypeError(f"a reader op answered {batch!r} where a batch belongs")
-        out.append(batch)
-    return out
-
-
 # ---------------------------------------------------------------- what the source does
 
 def _parts(ir: Ir) -> list[Ir]:
     return doc_ir.parts(ir)
 
 
-def _pick(rng, ir, kinds=doc_ir.TEXT_KINDS):
+def _runs(block: Block) -> list[Run]:
+    """A block's runs, as the list it holds (made when it holds none)."""
+    runs = block.get("runs")
+    if runs is None:
+        runs = []
+        block["runs"] = runs
+    return runs
+
+
+def _pick(rng: random.Random, ir: Ir, kinds: Sequence[Kind]) -> tuple[Ir, int, Block] | None:
     spots = [(part, i, b) for part in _parts(ir)
-             for i, b in enumerate(part.get("blocks", [])) if b.get("kind") in kinds]
+             for i, b in enumerate(part["blocks"]) if b["kind"] in kinds]
     return rng.choice(spots) if spots else None
 
 
-def src_reword(rng, ir, touched):
-    spot = _pick(rng, ir)
+def src_reword(rng: random.Random, ir: Ir, touched: Touched) -> None:
+    spot = _pick(rng, ir, doc_ir.TEXT_KINDS)
     if not spot:
         return
     _, _, block = spot
     _swap_word(rng, block)
 
 
-def _swap_word(rng, block) -> bool:
-    runs = [r for r in block.get("runs", []) if not r.get("frozen") and WORD.search(r["text"])]
+def _swap_word(rng: random.Random, block: Block) -> bool:
+    runs = [r for r in block.get("runs", [])
+            if not r.get("frozen") and WORD.search(r["text"])]
     if not runs:
         return False
     run = rng.choice(runs)
@@ -1086,24 +1149,24 @@ def _swap_word(rng, block) -> bool:
     return True
 
 
-def src_append(rng, ir, touched):
-    spot = _pick(rng, ir)
+def src_append(rng: random.Random, ir: Ir, touched: Touched) -> None:
+    spot = _pick(rng, ir, doc_ir.TEXT_KINDS)
     if not spot:
         return
     part, i, _ = spot
     part["blocks"].insert(i + 1, _p(f"the source added {rng.choice(FRESH)}"))
 
 
-def src_drop(rng, ir, touched):
-    spot = _pick(rng, ir)
+def src_drop(rng: random.Random, ir: Ir, touched: Touched) -> None:
+    spot = _pick(rng, ir, doc_ir.TEXT_KINDS)
     if not spot or len(spot[0]["blocks"]) < 2:
         return
     part, i, _ = spot
     part["blocks"].pop(i)
 
 
-def src_move(rng, ir, touched):
-    spot = _pick(rng, ir)
+def src_move(rng: random.Random, ir: Ir, touched: Touched) -> None:
+    spot = _pick(rng, ir, doc_ir.TEXT_KINDS)
     if not spot or len(spot[0]["blocks"]) < 3:
         return
     part, i, block = spot
@@ -1111,32 +1174,33 @@ def src_move(rng, ir, touched):
     part["blocks"].insert(rng.randrange(len(part["blocks"]) + 1), block)
 
 
-def _mark_run(rng, block) -> bool:
+def _mark_run(rng: random.Random, block: Block) -> bool:
     """Put one run mark of the dialect on one run of a block."""
     runs = [r for r in block.get("runs", []) if not r.get("frozen") and r["text"].strip()]
     if not runs:
         return False
     run = rng.choice(runs)
-    key, value = rng.choice(RUN_MARKS)
-    run[key] = value
-    if key in ("font", "code"):
-        run.pop("code" if key == "font" else "font", None)
+    mark = rng.choice(RUN_MARKS)
+    doc_ir.apply_style(run, mark)
+    if "font" in mark:
+        run.pop("code", None)
+    elif "code" in mark:
+        run.pop("font", None)
     return True
 
 
-def _mark_paragraph(rng, block) -> bool:
+def _mark_paragraph(rng: random.Random, block: Block) -> bool:
     """Put one paragraph measure of the dialect on a block. These are `SHAPE_KEYS`,
     so they travel by `_take_shape`, not by the run restyler: a different code path
     from `_mark_run` and worth drawing on its own."""
-    if block.get("kind") == "table":
+    if block["kind"] == "table":
         return False
-    key, value = rng.choice(PARA_MARKS)
-    block[key] = value
+    doc_ir.apply_measures(block, rng.choice(PARA_MARKS))
     return True
 
 
-def src_restyle(rng, ir, touched):
-    spot = _pick(rng, ir)
+def src_restyle(rng: random.Random, ir: Ir, touched: Touched) -> None:
+    spot = _pick(rng, ir, doc_ir.TEXT_KINDS)
     if not spot:
         return
     _, _, block = spot
@@ -1146,16 +1210,19 @@ def src_restyle(rng, ir, touched):
         _mark_run(rng, block)
 
 
-def src_retitle(rng, ir, touched):
+#: The named styles `src_retitle` moves a block between.
+RETITLE_KINDS: tuple[Kind, ...] = ("paragraph", "heading", "title", "subtitle")
+
+
+def src_retitle(rng: random.Random, ir: Ir, touched: Touched) -> None:
     """Move a block between the named styles. Every one of Docs' styles is drawn:
     `namedStyleType` is a field the merge names on every paragraph it writes, so a
     style the dialect cannot spell is one it silently writes body text over."""
-    spot = _pick(rng, ir, ("paragraph", "heading", "title", "subtitle"))
+    spot = _pick(rng, ir, RETITLE_KINDS)
     if not spot:
         return
     _, _, block = spot
-    kinds = [k for k in ("paragraph", "heading", "title", "subtitle")
-             if k != block["kind"]]
+    kinds = [k for k in RETITLE_KINDS if k != block["kind"]]
     block["kind"] = rng.choice(kinds)
     if block["kind"] == "heading":
         block["level"] = rng.randint(1, 3)
@@ -1163,7 +1230,7 @@ def src_retitle(rng, ir, touched):
         block.pop("level", None)
 
 
-def src_bullet(rng, ir, touched):
+def src_bullet(rng: random.Random, ir: Ir, touched: Touched) -> None:
     """The source writes a paragraph as a list item, or a list item as a paragraph.
 
     `src_retitle` moves a block between the named styles and `item` is not one of
@@ -1193,48 +1260,47 @@ def src_bullet(rng, ir, touched):
     block["ordered"] = rng.random() < 0.4
 
 
-def src_add_table(rng, ir, touched):
+def src_add_table(rng: random.Random, ir: Ir, touched: Touched) -> None:
     part = rng.choice(_parts(ir))
-    at = rng.randrange(len(part.get("blocks", [])) + 1)
-    part.setdefault("blocks", []).insert(at, _t([["h1", "h2"], [rng.choice(FRESH), "x"]]))
+    at = rng.randrange(len(part["blocks"]) + 1)
+    part["blocks"].insert(at, _t([["h1", "h2"], [rng.choice(FRESH), "x"]]))
 
 
-def _source_cells(ir) -> list[dict]:
+def _source_cells(ir: Ir) -> list[Block]:
     """Every paragraph inside every cell of every table the file has."""
     return [inner for cell in _source_cell_lists(ir) for inner in cell]
 
 
-def _source_cell_lists(ir) -> list[list]:
+def _source_cell_lists(ir: Ir) -> list[list[Block]]:
     """Every cell, as the list of paragraphs it is."""
-    return [cell for part in _parts(ir) for b in part.get("blocks", [])
-            if b.get("kind") == "table" for row in b.get("rows", []) for cell in row]
+    return [cell for part in _parts(ir) for b in part["blocks"]
+            if b["kind"] == "table" for row in _rows(b) for cell in row]
 
 
-def src_regrid(rng, ir, touched):
-    tables = [b for part in _parts(ir) for b in part.get("blocks", [])
-              if b.get("kind") == "table"]
+def src_regrid(rng: random.Random, ir: Ir, touched: Touched) -> None:
+    tables = [b for part in _parts(ir) for b in part["blocks"] if b["kind"] == "table"]
     if not tables:
         return
-    table = rng.choice(tables)
+    rows = _rows(rng.choice(tables))
     # Columns as well as rows, and the merge treats the two quite differently: a
     # column is matched across the table by its words, a row by its cells in the
     # columns that matched. Drawing rows alone left `_column_score` and the whole
     # column half of `_table_lines` unreached.
     if rng.random() < 0.5:
-        if rng.random() < 0.5 or len(table["rows"]) < 2:
-            table["rows"].append([[_p(rng.choice(FRESH))] for _ in table["rows"][0]])
+        if rng.random() < 0.5 or len(rows) < 2:
+            rows.append([[_p(rng.choice(FRESH))] for _ in rows[0]])
         else:
-            table["rows"].pop(rng.randrange(len(table["rows"])))
-    elif rng.random() < 0.5 or len(table["rows"][0]) < 2:
-        for row in table["rows"]:
+            rows.pop(rng.randrange(len(rows)))
+    elif rng.random() < 0.5 or len(rows[0]) < 2:
+        for row in rows:
             row.append([_p(rng.choice(FRESH))])
     else:
-        column = rng.randrange(len(table["rows"][0]))
-        for row in table["rows"]:
+        column = rng.randrange(len(rows[0]))
+        for row in rows:
             row.pop(column)
 
 
-def src_edit_cell(rng, ir, touched):
+def src_edit_cell(rng: random.Random, ir: Ir, touched: Touched) -> None:
     cells = _source_cells(ir)
     if not cells:
         return
@@ -1245,7 +1311,7 @@ def src_edit_cell(rng, ir, touched):
     cell["runs"] = [{"text": f"{rng.choice(FRESH)}-{rng.randrange(1 << 20):05x}"}]
 
 
-def src_restyle_cell(rng, ir, touched):
+def src_restyle_cell(rng: random.Random, ir: Ir, touched: Touched) -> None:
     """The source's half of what `read_cell_style` draws: a cell restyled rather
     than reworded. `src_restyle` picks from `part["blocks"]`, where a cell never
     is, so the file had no way of asking for one."""
@@ -1259,7 +1325,7 @@ def src_restyle_cell(rng, ir, touched):
         _mark_run(rng, cell)
 
 
-def src_split_cell(rng, ir, touched):
+def src_split_cell(rng: random.Random, ir: Ir, touched: Touched) -> None:
     """The source giving a cell a second paragraph.
 
     Every cell of every corpus shape holds exactly one paragraph and no op had ever
@@ -1272,7 +1338,7 @@ def src_split_cell(rng, ir, touched):
     if not cells:
         return
     cell = rng.choice(cells)
-    words = "".join(r.get("text", "") for r in cell[0]["runs"] if not r.get("frozen"))
+    words = "".join(r["text"] for r in cell[0].get("runs", []) if not r.get("frozen"))
     parts = words.split(" ", 1)
     if len(parts) == 2 and parts[1].strip():
         cell[0]["runs"] = [{"text": parts[0]}]
@@ -1281,7 +1347,16 @@ def src_split_cell(rng, ir, touched):
         cell.append(_p(rng.choice(FRESH)))
 
 
-def src_cell_chip(rng, ir, touched):
+def _grace() -> Run:
+    return {"chip": "person", "frozen": True, "text": "Grace", "value": "grace@example.com"}
+
+
+def _picture(name: str) -> Run:
+    return {"chip": "image", "frozen": True, "text": "",
+            "src": f"media/{name}.png", "sha": f"sha-{name}"}
+
+
+def src_cell_chip(rng: random.Random, ir: Ir, touched: Touched) -> None:
     """The source asking for a chip or a picture *in a table cell*.
 
     No request edits an embedded object, so a block whose frozen runs the source
@@ -1295,40 +1370,36 @@ def src_cell_chip(rng, ir, touched):
         return
     cell = rng.choice(cells)
     name = rng.choice(FRESH)
-    cell.setdefault("runs", []).append(
-        {"chip": "person", "frozen": True, "text": "Grace", "value": "grace@example.com"}
-        if rng.random() < 0.5 else
-        {"chip": "image", "frozen": True, "text": "",
-         "src": f"media/{name}.png", "sha": f"sha-{name}"})
+    _runs(cell).append(_grace() if rng.random() < 0.5 else _picture(name))
 
 
-def src_add_picture(rng, ir, touched):
-    spot = _pick(rng, ir)
+def src_add_picture(rng: random.Random, ir: Ir, touched: Touched) -> None:
+    spot = _pick(rng, ir, doc_ir.TEXT_KINDS)
     if not spot:
         return
     part, i, _ = spot
     name = rng.choice(FRESH)
-    part["blocks"].insert(i + 1, {"kind": "paragraph", "runs": [
-        {"chip": "image", "frozen": True, "text": "",
-         "src": f"media/{name}.png", "sha": f"sha-{name}"}]})
+    part["blocks"].insert(i + 1, {"kind": "paragraph", "runs": [_picture(name)]})
 
 
-def src_add_chip(rng, ir, touched):
-    spot = _pick(rng, ir)
+def src_add_chip(rng: random.Random, ir: Ir, touched: Touched) -> None:
+    spot = _pick(rng, ir, doc_ir.TEXT_KINDS)
     if not spot:
         return
     _, _, block = spot
-    block.setdefault("runs", []).append(
-        {"chip": "person", "frozen": True, "text": "Grace", "value": "grace@example.com"})
+    _runs(block).append(_grace())
 
 
-def src_add_tab(rng, ir, touched):
-    ir.setdefault("tabs", []).append(
-        {"title": f"Tab {rng.choice(FRESH)}",
-         "blocks": [_p(f"a tab the source asked for, {rng.choice(FRESH)}")]})
+def src_add_tab(rng: random.Random, ir: Ir, touched: Touched) -> None:
+    tabs = ir.get("tabs")
+    if tabs is None:
+        tabs = []
+        ir["tabs"] = tabs
+    tabs.append({"title": f"Tab {rng.choice(FRESH)}",
+                 "blocks": [_p(f"a tab the source asked for, {rng.choice(FRESH)}")]})
 
 
-def src_rename_tab(rng, ir, touched):
+def src_rename_tab(rng: random.Random, ir: Ir, touched: Touched) -> None:
     """The first tab is drawn too: it names itself in the file's `b2s-tab` meta and
     nowhere else, and it is the tab everybody is actually looking at."""
     extra = ir.get("tabs") or []
@@ -1338,14 +1409,14 @@ def src_rename_tab(rng, ir, touched):
     rng.choice(extra)["title"] = f"Renamed {rng.choice(FRESH)}"
 
 
-def src_drop_tab(rng, ir, touched):
+def src_drop_tab(rng: random.Random, ir: Ir, touched: Touched) -> None:
     extra = ir.get("tabs") or []
     if not extra:
         return
     extra.pop(rng.randrange(len(extra)))
 
 
-def src_collide(rng, ir, touched):
+def src_collide(rng: random.Random, ir: Ir, touched: Touched) -> None:
     """Change exactly what the reader just changed.
 
     Both sides on one block is what every merge rule is about, and two independent
@@ -1354,7 +1425,7 @@ def src_collide(rng, ir, touched):
     """
     keys = [k for k in touched if k]
     spots = [(part, i, b) for part in _parts(ir)
-             for i, b in enumerate(part.get("blocks", [])) if b.get("key") in keys]
+             for i, b in enumerate(part["blocks"]) if b.get("key") in keys]
     if not spots:
         return src_reword(rng, ir, touched)
     part, i, block = rng.choice(spots)
@@ -1369,26 +1440,28 @@ def src_collide(rng, ir, touched):
         # sides are on.
         part["blocks"].pop(i)
         part["blocks"].insert(rng.randrange(len(part["blocks"]) + 1), block)
-    elif how == "append" and block.get("kind") != "table":
-        block.setdefault("runs", []).append({"text": f" and {rng.choice(FRESH)}"})
-    elif how == "cell" and block.get("kind") == "table":
-        cells = [inner for row in block["rows"] for cell in row for inner in cell]
+    elif how == "append" and block["kind"] != "table":
+        _runs(block).append({"text": f" and {rng.choice(FRESH)}"})
+    elif how == "cell" and block["kind"] == "table":
+        cells = [inner for row in _rows(block) for cell in row for inner in cell]
         if cells:
             rng.choice(cells)["runs"] = [{"text": rng.choice(FRESH)}]
-    elif how == "restyle" and block.get("kind") != "table":
+    elif how == "restyle" and block["kind"] != "table":
         if rng.random() < 0.35:
             _mark_paragraph(rng, block)
         else:
             _mark_run(rng, block)
-    elif block.get("kind") != "table":
+    elif block["kind"] != "table":
         _swap_word(rng, block)
-    elif block.get("kind") == "table":
-        cells = [inner for row in block["rows"] for cell in row for inner in cell]
+    elif block["kind"] == "table":
+        cells = [inner for row in _rows(block) for cell in row for inner in cell]
         if cells:
             _swap_word(rng, rng.choice(cells))
 
 
-SOURCE = {
+SourceOp = Callable[[random.Random, Ir, Touched], None]
+
+SOURCE: dict[str, SourceOp] = {
     "reword": src_reword, "append": src_append, "drop": src_drop, "move": src_move,
     "restyle": src_restyle, "retitle": src_retitle, "bullet": src_bullet,
     "add_table": src_add_table,
@@ -1402,29 +1475,49 @@ SOURCE = {
 
 # ---------------------------------------------------------------- a round
 
-def draw(seed: int, chain: int, shape: str | None = None) -> dict:
+#: One op of a script: its name and its salt.
+Op = tuple[str, int]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Step:
+    """What one step of a round runs: the reader's ops, then the source's."""
+    reader: tuple[Op, ...]
+    source: tuple[Op, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Script:
+    """The script of a round: which shape, and each step's ops."""
+    shape: str
+    steps: tuple[Step, ...]
+
+
+def draw(seed: int, chain: int, shape: str | None) -> Script:
     """The script of a round: which shape, and which ops each step runs on each side.
 
     Every op carries its own salt, so the shrinker can drop one and leave the rest
-    drawing exactly what they drew.
+    drawing exactly what they drew. `shape` None draws one.
     """
     rng = random.Random(seed)
-    script = {"shape": shape or rng.choice(SHAPES), "steps": []}
+    drawn = shape or rng.choice(SHAPES)
     names = sorted(READER)
     source_names = sorted(n for n in SOURCE if n != "collide")
+    steps: list[Step] = []
     for _ in range(chain):
-        reader = [[rng.choice(names), rng.randrange(1 << 30)]
+        reader = [(rng.choice(names), rng.randrange(1 << 30))
                   for _ in range(rng.randint(MIN_EDITS, MAX_EDITS))]
-        source = [[rng.choice(source_names), rng.randrange(1 << 30)]
+        source = [(rng.choice(source_names), rng.randrange(1 << 30))
                   for _ in range(rng.randint(MIN_EDITS, MAX_EDITS))]
         if rng.random() < COLLIDE_CHANCE:
-            source.append(["collide", rng.randrange(1 << 30)])
-        script["steps"].append({"reader": reader, "source": source})
-    return script
+            source.append(("collide", rng.randrange(1 << 30)))
+        steps.append(Step(reader=tuple(reader), source=tuple(source)))
+    return Script(shape=drawn, steps=tuple(steps))
 
 
 #: A named style's `paragraphStyle` keys, by the IR field each one is.
-THEME_FIELDS = {"alignment": "align"} | {api: key for key, api in doc_merge.PARAGRAPH_FIELDS}
+THEME_FIELDS: dict[str, str] = \
+    {"alignment": "align"} | {api: key for key, api in doc_merge.PARAGRAPH_FIELDS}
 
 
 def theme_fields(world: doc_world.World) -> dict[str, set[str]]:
@@ -1436,11 +1529,14 @@ def theme_fields(world: doc_world.World) -> dict[str, set[str]]:
     its question of a block's own fields, where a run mark is never one, so naming
     them costs it nothing.
     """
-    return {name: {THEME_FIELDS[api] for api in (style.get("paragraphStyle") or {})
-                   if api in THEME_FIELDS}
-            | {key for key, api in doc_ir.MARK_FIELDS
-               if (style.get("textStyle") or {}).get(api)}
-            for name, style in (world.theme or {}).items()}
+    out: dict[str, set[str]] = {}
+    for name, style in world.theme.items():
+        paragraph = style.get("paragraphStyle") or {}
+        text = style.get("textStyle") or {}
+        fields = {THEME_FIELDS[api] for api in paragraph if api in THEME_FIELDS}
+        out[name] = fields | {key for key, api in doc_ir.MARK_FIELDS
+                              if doc_ir._mark_api(text, api)}
+    return out
 
 
 def theme_values(world: doc_world.World) -> dict[str, NamedDefault]:
@@ -1457,20 +1553,20 @@ def theme_values(world: doc_world.World) -> dict[str, NamedDefault]:
     return doc_ir._named_defaults(world.read(), None)
 
 
-def run_script(script: dict, seen: Counter | None = None) -> list[dict]:
-    """One round: push, then (reader edits, source edits, sync, judge) per step."""
-    seen = seen if seen is not None else Counter()
-    seen["shape/" + script["shape"]] += 1
-    world = corpus(script["shape"])
+def run_script(script: Script, seen: Counter[str]) -> list[Finding]:
+    """One round: push, then (reader edits, source edits, sync, judge) per step.
+    `seen` counts what the round reached (a fresh `Counter()` when nobody asks)."""
+    seen["shape/" + script.shape] += 1
+    world = corpus(script.shape)
     ours = bootstrap(world)
     base = copy.deepcopy(ours)
-    found: list[dict] = []
+    found: list[Finding] = []
 
-    for step, edits in enumerate(script["steps"]):
-        touched: list = []
-        for name, salt in edits["reader"]:
+    for step, edits in enumerate(script.steps):
+        touched: Touched = []
+        for name, salt in edits.reader:
             touched += apply_reader(world, name, random.Random(salt), seen)
-        for name, salt in edits["source"]:
+        for name, salt in edits.source:
             seen["source/" + name] += 1
             SOURCE[name](random.Random(salt), ours, touched)
         was, mine = copy.deepcopy(base), copy.deepcopy(ours)
@@ -1481,17 +1577,18 @@ def run_script(script: dict, seen: Counter | None = None) -> list[dict]:
             found.append(oracle.finding(
                 "batch_refused", "loss",
                 f"step {step}: Google would have thrown out the whole batch — "
-                f"{refused.why} ({json.dumps(refused.request)[:160]})"))
+                f"{refused.why} ({json.dumps(refused.request)[:160]})", None, None))
             return found
         except Exception as err:                       # noqa: BLE001 (the campaign's job)
             found.append(oracle.finding("crash", "loss",
-                                        f"step {step}: {type(err).__name__}: {err}"))
+                                        f"step {step}: {type(err).__name__}: {err}",
+                                        None, None))
             return found
         for conflict in report["conflicts"]:
             seen["conflict/" + str(conflict.get("field", "text"))] += 1
-        found += [f | {"detail": f"step {step}: {f['detail']}"}
-                  for f in oracle.check(was, before, base, report, mine,
-                                        theme=theme_fields(world))]
+        found += [dataclasses.replace(f, detail=f"step {step}: {f.detail}")
+                  for f in oracle.check(was, before, base, report, mine, (),
+                                        theme_fields(world))]
         found += _arrived(was, before, mine, ours, report, step, seen,
                           theme_values(world))
         found += _settled(world, ours, base, step, seen)
@@ -1500,22 +1597,24 @@ def run_script(script: dict, seen: Counter | None = None) -> list[dict]:
     return found
 
 
-def _settled(world, ours, base, step, seen) -> list[dict]:
+def _settled(world: doc_world.World, ours: Ir, base: Ir, step: int,
+             seen: Counter[str]) -> list[Finding]:
     """A sync that has run must leave nothing to do: file, document and base agree, so
     the next one writes 0 requests (docs/google-docs.md)."""
-    spare = copy.deepcopy(world)
+    spare = world.copied()
     try:
-        report, _, _ = sync_once(spare, copy.deepcopy(ours), copy.deepcopy(base))
+        report, _, _ = sync_once(spare, copy.deepcopy(ours), copy.deepcopy(base), Counter())
     except Refused as refused:
         return [oracle.finding("unsettled", "report",
-                               f"step {step}: the second sync is refused: {refused.why}")]
+                               f"step {step}: the second sync is refused: {refused.why}",
+                               None, None)]
     if not report["requests"]:
         seen["settled"] += 1
         return []
     return [oracle.finding(
         "unsettled", "report",
         f"step {step}: a second sync still writes {report['requests']} request(s): "
-        f"{'; '.join(report['applied'][:3])}")]
+        f"{'; '.join(report['applied'][:3])}", None, None)]
 
 
 def _grid(block: Block | None) -> tuple[int, int] | None:
@@ -1529,7 +1628,7 @@ def _grid(block: Block | None) -> tuple[int, int] | None:
 
 def _arrived(was: Ir, before: Ir, mine: Ir, after: Ir, report: SyncReport,
              step: int, seen: Counter[str],
-             theme: Mapping[str, NamedDefault] | None = None) -> list[dict]:
+             theme: Mapping[str, NamedDefault]) -> list[Finding]:
     """Did the source's regrid arrive? The third judge, and the campaign's own.
 
     The loss oracle says in its first paragraph that it does not ask this — it asks
@@ -1561,7 +1660,7 @@ def _arrived(was: Ir, before: Ir, mine: Ir, after: Ir, report: SyncReport,
     said = oracle.accounted(report)
     doc_ir.key_blocks(mine)
     sides = [oracle.parts_by_tab(ir) for ir in (was, before, mine, after)]
-    out: list[dict] = []
+    out: list[Finding] = []
     for tab, part in sides[0].items():
         if any(tab not in side for side in sides[1:]):
             continue
@@ -1574,7 +1673,7 @@ def _arrived(was: Ir, before: Ir, mine: Ir, after: Ir, report: SyncReport,
                 out += _words_arrived(key, block, here, file_b, then, said, tab,
                                       step, seen)
                 out += _styling_arrived(key, block, here, file_b, then, said, tab,
-                                        step, seen, theme or {})
+                                        step, seen, theme)
                 continue
             out += _cells_arrived(key, block, here, file_b, then, said, tab,
                                   step, seen)
@@ -1598,7 +1697,7 @@ def _arrived(was: Ir, before: Ir, mine: Ir, after: Ir, report: SyncReport,
                 f"step {step}: the reader left the table {key!r} exactly as the base "
                 f"has it and the source asks for {want[0]}x{want[1]}, but the sync "
                 f"left the document at {got[0]}x{got[1]} and the report says nothing",
-                tab=tab, key=key))
+                tab, key))
         out += _order_arrived(part, sides[1][tab], sides[2][tab], sides[3][tab],
                               said, tab, step, seen)
         out += _existence_arrived(part, sides[1][tab], sides[2][tab], sides[3][tab],
@@ -1607,18 +1706,18 @@ def _arrived(was: Ir, before: Ir, mine: Ir, after: Ir, report: SyncReport,
 
 
 def _block_keys(part: Ir) -> list[str]:
-    return [key for b in part.get("blocks", []) if (key := b.get("key"))]
+    return [key for b in part["blocks"] if (key := b.get("key"))]
 
 
 def _wordless(part: Ir) -> set[str]:
     """The keys of the blocks of this part that say nothing — a table with no words
     in it among them, since `doc_ir.key_blocks` names that one `table:empty`."""
-    return {key for b in part.get("blocks", [])
+    return {key for b in part["blocks"]
             if (key := b.get("key")) and not _says(b)[0].strip()}
 
 
-def _order_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
-                   seen: Counter) -> list[dict]:
+def _order_arrived(was_p: Ir, doc_p: Ir, src_p: Ir, end_p: Ir, said: str, tab: str | None,
+                   step: int, seen: Counter[str]) -> list[Finding]:
     """And the same question about the *order*: where the reader moved nothing, the
     blocks the source moved must come out where the file has them.
 
@@ -1681,11 +1780,11 @@ def _order_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
         f"step {step}: the reader left the order of {tab or 'the body'} exactly as "
         f"the base has it and the file puts {first!r} in front of {second!r}, but the "
         f"sync left the document ordered {end} and the report says nothing",
-        tab=tab, key=first)]
+        tab, first)]
 
 
-def _existence_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
-                       seen: Counter) -> list[dict]:
+def _existence_arrived(was_p: Ir, doc_p: Ir, src_p: Ir, end_p: Ir, said: str,
+                       tab: str | None, step: int, seen: Counter[str]) -> list[Finding]:
     """And the same question about a block *being there at all*: where the reader left
     it alone, a block the source dropped must be gone and one it added must be in.
 
@@ -1745,7 +1844,7 @@ def _existence_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
     """
     was_b, doc_b = (oracle.keyed(p) for p in (was_p, doc_p))
     file_keys, end_keys = set(_block_keys(src_p)), set(_block_keys(end_p))
-    out = []
+    out: list[Finding] = []
     for key, block in was_b.items():
         here, mine = doc_b.get(key), _says(block)
         if key in file_keys or here is None or _grid(block) is not None \
@@ -1761,8 +1860,8 @@ def _existence_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
             f"step {step}: the source dropped {key!r} and the reader left it word for "
             f"word as the base has it, but a block still carries that key and as many "
             f"say {_says(block)[0][:60]!r} when the sync is over as before it, and "
-            f"the report says nothing", tab=tab, key=key))
-    for block in src_p.get("blocks", []):
+            f"the report says nothing", tab, key))
+    for block in src_p["blocks"]:
         key, mine = block.get("key"), _says(block)
         if key in was_b or not mine[0].strip() or _grid(block) is not None:
             continue                  # a block the source has added, and it says something
@@ -1777,17 +1876,18 @@ def _existence_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
             f"step {step}: the source added {key!r} saying {_says(block)[0][:60]!r}, "
             f"but nothing in {tab or 'the body'} carries that key when the sync is "
             f"over and no more blocks of it say that than before, and the report "
-            f"says nothing", tab=tab, key=key))
+            f"says nothing", tab, key))
     return out
 
 
 def _saying(part: Ir, text: str) -> int:
     """How many blocks of the part say exactly this text."""
-    return sum(1 for b in part.get("blocks", []) if _says(b)[0] == text)
+    return sum(1 for b in part["blocks"] if _says(b)[0] == text)
 
 
-def _words_arrived(key, block, here, file_b, then, said, tab, step,
-                   seen: Counter) -> list[dict]:
+def _words_arrived(key: str, block: Block, here: Block, file_b: Block, then: Block,
+                   said: str, tab: str | None, step: int,
+                   seen: Counter[str]) -> list[Finding]:
     """The same question for a paragraph: one the reader left word for word as the
     base has it, and the source reworded, must say what the file says when the sync
     is over.
@@ -1814,11 +1914,12 @@ def _words_arrived(key, block, here, file_b, then, said, tab, step,
         "wording_lost", "loss",
         f"step {step}: the reader left {key!r} word for word as the base has it and "
         f"the source made it {mine[0]!r}, but the sync left the document saying "
-        f"{end[0]!r} and the report says nothing", tab=tab, key=key)]
+        f"{end[0]!r} and the report says nothing", tab, key)]
 
 
-def _styling_arrived(key, block, here, file_b, then, said, tab, step,
-                     seen: Counter[str], theme: Mapping[str, NamedDefault]) -> list[dict]:
+def _styling_arrived(key: str, block: Block, here: Block, file_b: Block, then: Block,
+                     said: str, tab: str | None, step: int,
+                     seen: Counter[str], theme: Mapping[str, NamedDefault]) -> list[Finding]:
     """And the same question about a block's *look*: one the reader left exactly as
     the base has it, words and styling both, must look the way the file asks when the
     sync is over.
@@ -1871,7 +1972,7 @@ def _styling_arrived(key, block, here, file_b, then, said, tab, step,
         # it should — read as the source's restyle vanishing. The named style itself is
         # part of `_shape`, so nothing goes unjudged: the half that can speak does.
         seen["arrival/runs unasked"] += 1
-    out = []
+    out: list[Finding] = []
     for what, kind, now, want, got in halves:
         if want == now:
             continue
@@ -1883,7 +1984,7 @@ def _styling_arrived(key, block, here, file_b, then, said, tab, step,
             kind, "loss",
             f"step {step}: the reader left {key!r} exactly as the base has it, the "
             f"base had {now}, the source asks for {want}, and the sync left the "
-            f"document at {got} with the report saying nothing", tab=tab, key=key))
+            f"document at {got} with the report saying nothing", tab, key))
     return out
 
 
@@ -2009,8 +2110,9 @@ def _cell_text(said: CellSays) -> str:
                            for _ in range(n))
 
 
-def _cells_arrived(key, block, here, file_b, then, said, tab, step,
-                   seen: Counter) -> list[dict]:
+def _cells_arrived(key: str, block: Block, here: Block, file_b: Block, then: Block,
+                   said: str, tab: str | None, step: int,
+                   seen: Counter[str]) -> list[Finding]:
     """A cell the source rewrote, in a table whose words the reader did not touch,
     must be somewhere in the table when the sync is over.
 
@@ -2044,7 +2146,7 @@ def _cells_arrived(key, block, here, file_b, then, said, tab, step,
         return []                     # the reader wrote in it: the merge decides
     was_cells, file_cells = (_cell_says(b) for b in (block, file_b))
     after = Counter(_cell_says(then).values())
-    out = []
+    out: list[Finding] = []
     for at, text in file_cells.items():
         old = was_cells.get(at)
         if text == old or base_cells[text] \
@@ -2058,26 +2160,32 @@ def _cells_arrived(key, block, here, file_b, then, said, tab, step,
             "cell_lost", "loss",
             f"step {step}: the source rewrote the cell at {at} of the table {key!r} "
             f"to {_cell_text(text)!r}, the reader wrote nothing in that table, and no "
-            f"cell of it says so when the sync is over", tab=tab, key=key))
+            f"cell of it says so when the sync is over", tab, key))
     return out
 
 
-def offline_round(seed: int, chain: int = 1, script: dict | None = None,
-                  seen: Counter | None = None) -> list[dict]:
-    return run_script(script or draw(seed, chain), seen)
+def offline_round(seed: int, chain: int, script: Script | None,
+                  seen: Counter[str]) -> list[Finding]:
+    """One round of `seed` at `chain` steps, or of `script` when one is given."""
+    return run_script(script or draw(seed, chain, None), seen)
 
 
 # ---------------------------------------------------------------- shrinking
 
-def shrink(script: dict, rounds: int = 200, still=None) -> dict:
+#: What counts as the same failure, to the shrinker: the findings that still fail.
+Still = Callable[[list[Finding]], list[Finding]]
+
+
+def shrink(script: Script, rounds: int, still: Still | None) -> Script:
     """Take a failing script apart: drop steps, then ops, keeping every reduction that
     still fails. Each op's salt travels with it, so the rest draw what they drew.
 
-    `still` says what counts as the same failure. A reduction that trades an unknown
-    finding for one of the `KNOWN` ones is no reduction at all — it would shrink the
-    new defect away and print a reproduction of an old one.
+    `still` says what counts as the same failure (None: any failure at all). A
+    reduction that trades an unknown finding for one of the `KNOWN` ones is no
+    reduction at all — it would shrink the new defect away and print a reproduction
+    of an old one. `rounds` bounds the reductions tried (200 from the command line).
     """
-    still = still or oracle.failures
+    fails: Still = still or oracle.failures
     best = script
     tried = 0
     changed = True
@@ -2087,39 +2195,39 @@ def shrink(script: dict, rounds: int = 200, still=None) -> dict:
             tried += 1
             if tried > rounds:
                 break
-            if still(_quiet(candidate)):
+            if fails(_quiet(candidate)):
                 best, changed = candidate, True
                 break
     return best
 
 
-def _reductions(script: dict):
-    for i in range(len(script["steps"])):
-        if len(script["steps"]) > 1:
-            trimmed = copy.deepcopy(script)
-            trimmed["steps"].pop(i)
-            yield trimmed
-    for i, step in enumerate(script["steps"]):
-        for side in ("reader", "source"):
-            for j in range(len(step[side])):
-                trimmed = copy.deepcopy(script)
-                trimmed["steps"][i][side].pop(j)
-                yield trimmed
+def _reductions(script: Script) -> Iterator[Script]:
+    steps = script.steps
+    for i in range(len(steps)):
+        if len(steps) > 1:
+            yield dataclasses.replace(script, steps=steps[:i] + steps[i + 1:])
+    for i, step in enumerate(steps):
+        for j in range(len(step.reader)):
+            fewer = dataclasses.replace(step, reader=step.reader[:j] + step.reader[j + 1:])
+            yield dataclasses.replace(script, steps=steps[:i] + (fewer,) + steps[i + 1:])
+        for j in range(len(step.source)):
+            fewer = dataclasses.replace(step, source=step.source[:j] + step.source[j + 1:])
+            yield dataclasses.replace(script, steps=steps[:i] + (fewer,) + steps[i + 1:])
 
 
-def _quiet(script: dict) -> list[dict]:
+def _quiet(script: Script) -> list[Finding]:
     try:
-        return run_script(script)
+        return run_script(script, Counter())
     except Exception:                                  # noqa: BLE001
-        return [oracle.finding("crash", "loss", "the harness itself raised")]
+        return [oracle.finding("crash", "loss", "the harness itself raised", None, None)]
 
 
-def describe_script(script: dict) -> str:
-    lines = [f"  shape {script['shape']}"]
-    for i, step in enumerate(script["steps"]):
+def describe_script(script: Script) -> str:
+    lines = [f"  shape {script.shape}"]
+    for i, step in enumerate(script.steps):
         lines.append(f"  step {i}: reader "
-                     + ", ".join(f"{n}({s})" for n, s in step["reader"])
-                     + " | source " + ", ".join(f"{n}({s})" for n, s in step["source"]))
+                     + ", ".join(f"{n}({s})" for n, s in step.reader)
+                     + " | source " + ", ".join(f"{n}({s})" for n, s in step.source))
     return "\n".join(lines)
 
 
@@ -2136,7 +2244,16 @@ def describe_script(script: dict) -> str:
 # was seen, not which defect caused it: several of these showed up as a lost key, and
 # the tests, not the signature, say which is which. Which is why a fixed entry goes:
 # it is let through, so it would swallow the next defect that looks like it.
-KNOWN = (
+@dataclass(frozen=True, kw_only=True)
+class KnownBug:
+    """A defect found and not yet fixed: its id, and the finding's kind and a piece of
+    its words that say it is this one."""
+    id: str
+    kind: str
+    has: str
+
+
+KNOWN: tuple[KnownBug, ...] = (
     # Seven entries stood at the head and the foot of this tuple and are gone, not
     # rewritten: each is fixed and has a test of its own in tests/test_doc_fuzz.py, and
     # each signature was wide enough to swallow the next defect that looks like it —
@@ -2210,30 +2327,39 @@ KNOWN = (
 # covered deletes and not moves.
 
 
-def known_bug(found: dict) -> str | None:
+def known_bug(found: Finding) -> str | None:
     """Which known defect this finding is a symptom of, if any."""
     for bug in KNOWN:
-        if found["kind"] == bug["kind"] and bug["has"] in found["detail"]:
-            return bug["id"]
+        if found.kind == bug.kind and bug.has in found.detail:
+            return bug.id
     return None
 
 
-def triage(found: list[dict]) -> tuple[list[dict], list[str]]:
+def triage(found: list[Finding]) -> tuple[list[Finding], list[str]]:
     """The failures nobody knows about yet, and the ids of the known ones."""
-    unknown, known = [], []
+    unknown: list[Finding] = []
+    known: list[str] = []
     for one in oracle.failures(found):
         bug = known_bug(one)
-        (known.append(bug) if bug else unknown.append(one))
+        if bug:
+            known.append(bug)
+        else:
+            unknown.append(one)
     return unknown, known
+
+
+def _unknown(found: list[Finding]) -> list[Finding]:
+    """The shrinker's question once a round has found something new: is it still new?"""
+    return triage(found)[0]
 
 
 # ---------------------------------------------------------------- the campaign
 
-def run_offline(rounds: int, seed: int = 0, chain: int = 1, do_shrink: bool = True,
-                shape: str | None = None, strict: bool = False) -> int:
-    seen: Counter = Counter()
+def run_offline(rounds: int, seed: int, chain: int, do_shrink: bool,
+                shape: str | None, strict: bool) -> int:
+    seen: Counter[str] = Counter()
     started, bad = time.time(), 0
-    hit: Counter = Counter()
+    hit: Counter[str] = Counter()
     for n in range(rounds):
         script = draw(seed + n, chain, shape)
         found = offline_round(seed + n, chain, script, seen)
@@ -2246,7 +2372,7 @@ def run_offline(rounds: int, seed: int = 0, chain: int = 1, do_shrink: bool = Tr
         print(oracle.describe(found))
         print(describe_script(script))
         if do_shrink:
-            small = shrink(script, still=(lambda f: triage(f)[0]) if unknown else None)
+            small = shrink(script, 200, _unknown if unknown else None)
             if small != script:
                 print("  shrunk to:")
                 print(describe_script(small))
@@ -2260,7 +2386,7 @@ def run_offline(rounds: int, seed: int = 0, chain: int = 1, do_shrink: bool = Tr
     return 1 if bad else 0
 
 
-def known_seen(hit: Counter) -> str:
+def known_seen(hit: Counter[str]) -> str:
     """What the round hit of what is known already. A known defect nobody reaches any
     more is worth saying out loud: either it is fixed, or the campaign stopped looking."""
     if not KNOWN:
@@ -2268,15 +2394,15 @@ def known_seen(hit: Counter) -> str:
                 "and --strict has nothing more to add.")
     lines = ["known defects (let through; --strict fails on them):"]
     for bug in KNOWN:
-        lines.append(f"  {bug['id']}: {hit.get(bug['id'], 0)}"
-                     + ("" if hit.get(bug["id"]) else "   (not reached in this run)"))
+        lines.append(f"  {bug.id}: {hit.get(bug.id, 0)}"
+                     + ("" if hit.get(bug.id) else "   (not reached in this run)"))
     return "\n".join(lines)
 
 
-def coverage(seen: Counter) -> str:
+def coverage(seen: Counter[str]) -> str:
     """What the campaign actually reached. A campaign that never plans an insertTable
     proves nothing about tables, and only counting says so."""
-    groups: dict = {}
+    groups: dict[str, Counter[str]] = {}
     for key, count in seen.items():
         head, _, rest = key.partition("/")
         groups.setdefault(head, Counter())[rest or head] = count
@@ -2287,8 +2413,8 @@ def coverage(seen: Counter) -> str:
     return "\n".join(lines)
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+def main(argv: list[str] | None) -> int:
+    ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument("mode", choices=["offline"], nargs="?", default="offline")
     ap.add_argument("--rounds", type=int, default=100)
     ap.add_argument("--seed", type=int, default=0)
@@ -2299,23 +2425,29 @@ def main(argv=None) -> int:
     ap.add_argument("--strict", action="store_true",
                     help="fail on the known defects too (KNOWN): how a fix is checked")
     args = ap.parse_args(argv)
+    chain: int = args.chain
+    shape: str | None = args.shape
+    strict: bool = args.strict
+    shrinking = not args.no_shrink
     if args.replay is not None:
-        script = draw(args.replay, args.chain, args.shape)
-        found = offline_round(args.replay, args.chain, script)
+        replay: int = args.replay
+        script = draw(replay, chain, shape)
+        found = offline_round(replay, chain, script, Counter())
         print(describe_script(script))
         print(oracle.describe(found))
         unknown, known = triage(found)
         for bug in known:
             print(f"  known: {bug}")
-        if oracle.failures(found) and not args.no_shrink:
-            small = shrink(script, still=(lambda f: triage(f)[0]) if unknown else None)
+        if oracle.failures(found) and shrinking:
+            small = shrink(script, 200, _unknown if unknown else None)
             print("shrunk to:")
             print(describe_script(small))
             print(oracle.describe(_quiet(small)))
-        return 1 if unknown or (args.strict and known) else 0
-    return run_offline(args.rounds, args.seed, args.chain, not args.no_shrink,
-                       args.shape, args.strict)
+        return 1 if unknown or (strict and known) else 0
+    rounds: int = args.rounds
+    seed: int = args.seed
+    return run_offline(rounds, seed, chain, shrinking, shape, strict)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

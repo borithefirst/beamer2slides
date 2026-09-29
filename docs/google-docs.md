@@ -2094,8 +2094,10 @@ its own, so a paragraph split off another went on sharing the very dict its meas
 in. Every block a sync appends is written `"\ntext"`, which is a split, so one
 `updateParagraphStyle` set the line spacing of half the body — and the next request to
 clear a measure cleared it everywhere too, which is exactly why nothing saw it: the
-document stayed self-consistent and the base agreed with it (`doc_world.copy_para`; seed
-110149, 3 of 200 rounds at chain 4 with the shallow copy back).
+document stayed self-consistent and the base agreed with it (seed 110149, 3 of 200 rounds
+at chain 4 with the shallow copy back). The fix was `copy_para`; since the world was typed,
+a paragraph's properties are a frozen `doc_world.Para` and a restyle builds a new one
+(`_do_updateParagraphStyle` copies `measures` before writing), so there is no copy to forget.
 
 **The merge.** `styles_of` counts run boundaries, on purpose: a mark applied to part of a
 run splits it, so the boundaries are where the information is. Asked of the *document* it

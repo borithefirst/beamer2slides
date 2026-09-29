@@ -23,7 +23,8 @@ from bisect import bisect_left
 from collections import Counter
 from difflib import SequenceMatcher
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
-from typing import TYPE_CHECKING, Final, Literal, TypedDict, TypeVar
+from dataclasses import dataclass
+from typing import Final, Literal, TypedDict, TypeVar
 
 from . import doc_ir
 from .doc_ir import (Aligned, Block, BulletFix, Dropped, GridLine, GridOp, Ir, Kind, LineName,
@@ -36,9 +37,6 @@ from .google_types import (DocsDimension, DocsEndOfSegmentLocation, DocsLocation
                            docs_request_kind)
 from .merge import diff3, tokens
 from .typing_compat import assert_never
-
-if TYPE_CHECKING:
-    from typing_extensions import Required
 
 _T = TypeVar("_T")
 
@@ -119,17 +117,21 @@ StyleItems = tuple[tuple[str, object], ...]
 Styled = tuple[object, ...]
 
 
-class Told(TypedDict, total=False):
+@dataclass(frozen=True, kw_only=True)
+class Told:
     """What one step of the structural batch did to a table (`structure`): the
     passes after the write find that table again by it (`anchor_tables`,
-    `recover_swallowed`, `recover_eaten`, `rebase_tables`)."""
-    key: Required[str | None]
-    after: str | None               # the block it follows; absent: nothing was built
-    moved: bool
-    lines: TableLines | None
-    ops: list[GridOp]
-    swallowed: str                  # a name the insert's swallow took (`_swallowed`)
-    eaten: str                      # a name the delete of the body's last table ate
+    `recover_swallowed`, `recover_eaten`, `rebase_tables`).
+
+    A record the plan builds and the sync reads within one run; it never reaches JSON.
+    """
+    key: str | None
+    after: str | None               # the block it follows (None: it opens its part)
+    moved: bool                     # deleted and built again where the source has it
+    lines: TableLines | None        # how its lines match (`rebase_tables`)
+    ops: list[GridOp]               # the row and column inserts and deletes of a regrid
+    swallowed: str | None           # a name the insert's swallow took (`_swallowed`)
+    eaten: str | None               # a name the delete of the body's last table ate
     note: str
 
 
@@ -147,15 +149,21 @@ def _conflicts(clashes: Iterable[Mapping[str, str]], key: str) -> list[Conflict]
              "key": key} for clash in clashes]
 
 
-class Merged(TypedDict):
+@dataclass(frozen=True, kw_only=True)
+class Merged:
     """What `merge` decides: the blocks in the document's order, and what it says."""
     blocks: list[Block]
     conflicts: list[Conflict]
     notes: list[str]
 
 
-class Plan(Merged):
-    """`merge`, and the requests that write it (`plan`)."""
+@dataclass(frozen=True, kw_only=True)
+class Plan:
+    """`merge`, and the requests that write it (`plan`). Built and read within one
+    sync (the report copies out what it says: `Conflict`s, notes, counts)."""
+    blocks: list[Block]
+    conflicts: list[Conflict]
+    notes: list[str]
     structure: list[DocsRequest]
     shaped: list[Told]
     removed: list[Block]
@@ -906,7 +914,7 @@ def inherit_keys(base: Ir, ours: Ir) -> Ir:
     return ours
 
 
-def recover_tables(base: Ir, theirs: Ir, spoken_for: Set[str | None] | None = None) -> int:
+def recover_tables(base: Ir, theirs: Ir, spoken_for: Set[str | None] | None) -> int:
     """Give back the key of a table whose anchor the *reader* deleted in the browser.
 
     A table is anchored in its first cell (`doc_ir.anchor_span`), because the cells
@@ -1007,15 +1015,15 @@ def anchor_tables(live: Ir, shaped: list[Told]) -> int:
     tie-break it always was.
     """
     done = 0
-    todo = [(key, told) for told in shaped if "after" in told and (key := told["key"])]
+    todo = [(key, told) for told in shaped if (key := told.key)]
     moved = True
     while moved:
         moved = False
-        for key, told in sorted(todo, key=lambda t: t[1].get("after") is None):
+        for key, told in sorted(todo, key=lambda t: t[1].after is None):
             if any(b.get("key") == key for b in live["blocks"]):
                 continue
             start = 0
-            if (after := told.get("after")) is not None:
+            if (after := told.after) is not None:
                 at = next((i for i, b in enumerate(live["blocks"])
                            if b.get("key") == after), None)
                 if at is None:
@@ -1047,10 +1055,10 @@ def anchor_tables(live: Ir, shaped: list[Told]) -> int:
             # nothing is the safe half of it: the key comes back at the re-plan,
             # where `recover_tables` has both tables in front of it at once and the
             # words tell them apart.
-            want = _lines_size(lines) if (lines := told.get("lines")) else None
+            want = _lines_size(lines) if (lines := told.lines) else None
             if want is not None:
                 free = [b for b in free if _size(b.get("rows", [])) == want]
-            built = not (told.get("ops") or told.get("lines"))
+            built = not (told.ops or told.lines)
             found = next((b for b in free if _blank_table(b) == built), None) \
                 or (free[0] if free else None)
             if found is not None:
@@ -1090,11 +1098,11 @@ def recover_swallowed(live: Ir, shaped: list[Told]) -> int:
     have = {b.get("key") for b in live["blocks"] if b.get("key")}
     done = 0
     for told in shaped:
-        key = told.get("swallowed")
+        key = told.swallowed
         if not key or key in have:
             continue
         at = next((i for i, b in enumerate(live["blocks"])
-                   if b.get("key") == told["key"]), None)
+                   if b.get("key") == told.key), None)
         if not at:                      # not found, or nothing in front of it
             continue
         before = live["blocks"][at - 1]
@@ -1137,7 +1145,7 @@ def recover_eaten(live: Ir, shaped: list[Told]) -> int:
     have = {b.get("key") for b in live["blocks"] if b.get("key")}
     done = 0
     for told in shaped:
-        key = told.get("eaten")
+        key = told.eaten
         if not key or key in have:
             continue
         block, span = _trailing_empty(live)
@@ -1191,23 +1199,23 @@ def rebase_tables(base: Ir, theirs: Ir, shaped: Sequence[Told]) -> Ir:
     blocks = list(base["blocks"])
     for told in shaped:
         index = next((i for i, b in enumerate(theirs["blocks"])
-                      if b.get("key") == told["key"]), None)
+                      if b.get("key") == told.key), None)
         if index is None:
             continue
-        at = next((i for i, b in enumerate(blocks) if b.get("key") == told["key"]), None)
-        if at is None or told.get("moved"):
+        at = next((i for i, b in enumerate(blocks) if b.get("key") == told.key), None)
+        if at is None or told.moved:
             # Built from nothing — a table the source added, or one it moved, which
             # was deleted where it stood: the base has it where the document now does,
             # and as blank as it is there.
             fresh = theirs["blocks"][index]
-            if told.get("moved") and (lines := told.get("lines")):
+            if told.moved and (lines := told.lines):
                 fresh = _moved_table(fresh, lines)
             if at is not None:
                 del blocks[at]
             blocks.insert(_place(theirs, blocks, index), fresh)
-        elif lines := told.get("lines"):
+        elif lines := told.lines:
             blocks[at] = _rebased_table(blocks[at], lines, theirs["blocks"][index])
-        elif ops := told.get("ops"):
+        elif ops := told.ops:
             blocks[at] = _regridded(blocks[at], ops)
     out = base.copy()
     out["blocks"] = blocks
@@ -1430,7 +1438,7 @@ def _adopt_by_words(live: Ir, free: dict[tuple[MatchShape, str], list[tuple[str,
 
 
 def settle_keys(live: Ir, planned: Mapping[str | None, list[Block]],
-                base: Ir | None = None) -> None:
+                base: Ir | None) -> None:
     """Give every part the keys the plan meant it to have, then key what is left.
 
     Two passes and not one, which is the whole of it: `doc_ir.key_blocks` recurses
@@ -1467,7 +1475,7 @@ def settle_keys(live: Ir, planned: Mapping[str | None, list[Block]],
         for part in parts:
             stamp = None if part is live else part.get("tab")
             if stamp in was:
-                recover_tables(was[stamp], part)
+                recover_tables(was[stamp], part, spoken_for=None)
     for part in parts:
         doc_ir.key_blocks(part)
 
@@ -1757,7 +1765,7 @@ def merge(base: Ir, ours: Ir, theirs: Ir) -> Merged:
         fresh.pop("span", None)
         fresh["origin"] = "added by the source"
         merged.insert(_place(ours, merged, index), fresh)
-    return {"blocks": merged, "conflicts": conflicts, "notes": notes}
+    return Merged(blocks=merged, conflicts=conflicts, notes=notes)
 
 
 def _by_key(blocks: Iterable[Block]) -> dict[str, Block]:
@@ -3341,14 +3349,10 @@ def structure(theirs: Ir, merged: list[Block],
                             + _orphan_range(blocks[index], start, end, ()))
             swallowed = _swallowed(theirs, reqs)
             eaten = _eaten(theirs, index, start)
-            told: Told = {"key": key, "after": _after_key(merged, position, swallowed, eaten),
-                          "moved": True, "lines": block.get("lines")}
-            if swallowed:
-                told["swallowed"] = swallowed
-            if eaten:
-                told["eaten"] = eaten
-            told["note"] = f"`{key}`: moved where the source has it"
-            plans.append((at, reqs, told))
+            plans.append((at, reqs, Told(
+                key=key, after=_after_key(merged, position, swallowed, eaten), moved=True,
+                lines=block.get("lines"), ops=[], swallowed=swallowed or None,
+                eaten=eaten or None, note=f"`{key}`: moved where the source has it")))
         elif regrid := block.get("regrid"):
             what = ", ".join(f"{how}s a {line}" for line, how, _ in regrid)
             start = doc_ir._span(block)[0]
@@ -3356,10 +3360,10 @@ def structure(theirs: Ir, merged: list[Block],
             # (`doc_ir.anchor_span`), and a row or column delete can take that very
             # cell, so a regrid can leave the table with no named range at all. It is
             # then found again exactly as a new one is, and the range planted back.
-            plans.append((start, _grid_requests(start, regrid),
-                          {"key": key, "ops": regrid, "lines": block.get("lines"),
-                           "after": _after_key(merged, position, None, None),
-                           "note": f"`{key}`: {what} — the grid the source has"}))
+            plans.append((start, _grid_requests(start, regrid), Told(
+                key=key, after=_after_key(merged, position, None, None), moved=False,
+                lines=block.get("lines"), ops=regrid, swallowed=None, eaten=None,
+                note=f"`{key}`: {what} — the grid the source has")))
         elif block.get("origin") == "added by the source":
             grid = block.get("rows", [])
             rows = len(grid)
@@ -3370,11 +3374,10 @@ def structure(theirs: Ir, merged: list[Block],
                                            rows, columns)
             if reqs:
                 swallowed = _swallowed(theirs, reqs)
-                told = {"key": key, "after": _after_key(merged, position, swallowed, None)}
-                if swallowed:
-                    told["swallowed"] = swallowed
-                told["note"] = f"`{key}`: a table of {rows}×{columns} added by the source"
-                plans.append((at, reqs, told))
+                plans.append((at, reqs, Told(
+                    key=key, after=_after_key(merged, position, swallowed, None), moved=False,
+                    lines=None, ops=[], swallowed=swallowed or None, eaten=None,
+                    note=f"`{key}`: a table of {rows}×{columns} added by the source")))
             else:
                 notes.append(f"{key}: a table the source adds where the document has no "
                              f"paragraph to write in — before the table it opens on, or "
@@ -3388,10 +3391,10 @@ def structure(theirs: Ir, merged: list[Block],
         seen.add(at)
         shaped.append(told)
         steps.append((at, 1, reqs))
-        if told.get("moved"):
+        if told.moved:
             # Its delete only with its insert: a table deleted this round and built
             # the next would read, in between, as a table the document deleted.
-            steps.append(deletes[told["key"]])
+            steps.append(deletes[told.key])
     out: list[DocsRequest] = []
     for _, _, reqs in sorted(steps, key=lambda p: (-p[0], p[1])):
         out += reqs
@@ -3629,7 +3632,7 @@ def _delete_range(blocks: Sequence[Block], index: int, going: Set[int], ends: bo
 
 
 def _orphan_range(block: Block, start: int, end: int,
-                  cuts: Iterable[tuple[int, int]] = ()) -> list[DocsRequest]:
+                  cuts: Iterable[tuple[int, int]]) -> list[DocsRequest]:
     """The `deleteNamedRange` a delete needs when the block's own range outlives it.
 
     A block standing in front of a table gives up the *previous* block's paragraph
@@ -3976,11 +3979,11 @@ def plan(base: Ir, ours: Ir, theirs: Ir) -> Plan:
     doc_ir.key_blocks(ours)
     restore_unreadable(base, ours)
     restore_unreadable(theirs, ours, base)
-    recover_tables(base, theirs)
+    recover_tables(base, theirs, spoken_for=None)
     _unseen_pictures(ours, base)
     inherit_keys(base, ours)
     merged = merge(base, ours, theirs)
-    blocks, notes = merged["blocks"], merged["notes"]
+    blocks, notes = merged.blocks, merged.notes
     for block in blocks:
         if block.get("origin") == "added by the source" and not _writable_block(block):
             notes.append(f"{block.get('key')}: a new block with a chip in it that no "
@@ -3995,9 +3998,8 @@ def plan(base: Ir, ours: Ir, theirs: Ir) -> Plan:
     unwritten_levels(theirs, blocks, notes)
     unwritten_glyphs(theirs, blocks, notes)
     removed = deleted_blocks(theirs, blocks)
-    return {"blocks": blocks, "conflicts": merged["conflicts"], "notes": notes,
-            "structure": grid, "shaped": shaped, "removed": removed,
-            "requests": requests(theirs, blocks)}
+    return Plan(blocks=blocks, conflicts=merged.conflicts, notes=notes, structure=grid,
+                shaped=shaped, removed=removed, requests=requests(theirs, blocks))
 
 
 def deleted_blocks(theirs: Ir, merged: Sequence[Block]) -> list[Block]:
@@ -4441,8 +4443,10 @@ def _properties_on(props: DocsTabProperties, tab: str) -> DocsTabProperties:
     return out
 
 
-class TabPlan(TypedDict):
-    """What `pair_tabs` says happens to the tabs (its docstring names each field)."""
+@dataclass(frozen=True, kw_only=True)
+class TabPlan:
+    """What `pair_tabs` says happens to the tabs (its docstring names each field).
+    Built and read within one sync; what the report says of it is copied out."""
     pairs: list[tuple[str, Ir, Ir]]
     create: list[Ir]
     requests: list[DocsRequest]
@@ -4478,8 +4482,11 @@ def pair_tabs(base: Ir, ours: Ir, theirs: Ir) -> TabPlan:
     live = _tabs_by_id(theirs)
     was = _tabs_by_id(base)
     ours_ids = {p.get("tab") for p in ours.get("tabs", [])}
-    out: TabPlan = {"pairs": [], "create": [], "requests": [], "applied": [], "notes": [],
-                    "rename": None}
+    pairs: list[tuple[str, Ir, Ir]] = []
+    create: list[Ir] = []
+    requests: list[DocsRequest] = []
+    applied: list[str] = []
+    notes: list[str] = []
     taken: set[str] = set()
     for part in ours.get("tabs", []):
         tab, name = part.get("tab"), part.get("title", "")
@@ -4490,16 +4497,16 @@ def pair_tabs(base: Ir, ours: Ir, theirs: Ir) -> TabPlan:
             old_title = old.get("title") if old is not None else None
             if name != now_title and name:
                 if now_title == (old.get("title", now_title) if old is not None else now_title):
-                    out["requests"].append(_rename_tab(tab, name))
-                    out["applied"].append(f"tab {now.get('title')!r} renamed {name!r}")
+                    requests.append(_rename_tab(tab, name))
+                    applied.append(f"tab {now.get('title')!r} renamed {name!r}")
                 elif name != old_title:
-                    out["notes"].append(f"tab {now.get('title')!r}: renamed on both sides — "
-                                        f"the document's title is kept, not {name!r}")
-            out["pairs"].append((tab, part, old if old is not None else {"blocks": []}))
+                    notes.append(f"tab {now.get('title')!r}: renamed on both sides — "
+                                 f"the document's title is kept, not {name!r}")
+            pairs.append((tab, part, old if old is not None else {"blocks": []}))
         elif tab is not None and tab in was:
             if doc_ir.blocks_html(part["blocks"]) != doc_ir.blocks_html(was[tab]["blocks"]):
-                out["notes"].append(f"tab {name!r} was deleted in the document; the source's "
-                                    f"changes to it are not written")
+                notes.append(f"tab {name!r} was deleted in the document; the source's "
+                             f"changes to it are not written")
         else:
             # A tab of that title nobody knew of and nothing is in: the one a sync that
             # died after creating it left behind. Anything else would be a second tab.
@@ -4508,9 +4515,9 @@ def pair_tabs(base: Ir, ours: Ir, theirs: Ir) -> TabPlan:
             if same:
                 taken.add(same[0])
                 part["tab"] = same[0]
-                out["pairs"].append((same[0], part, {"blocks": []}))
+                pairs.append((same[0], part, {"blocks": []}))
             else:
-                out["create"].append(part)
+                create.append(part)
     for tab, old in was.items():
         if tab in ours_ids or tab not in live:
             continue
@@ -4519,18 +4526,20 @@ def pair_tabs(base: Ir, ours: Ir, theirs: Ir) -> TabPlan:
                     if p.get("parent") == tab and p.get("tab") in ours_ids]
         if (doc_ir.blocks_html(now["blocks"]) != doc_ir.blocks_html(old["blocks"])
                 or now.get("title") != old.get("title") or children):
-            out["notes"].append(f"tab {name!r} was deleted in the source, but the document "
-                                f"changed it (or keeps tabs inside it) — kept")
+            notes.append(f"tab {name!r} was deleted in the source, but the document "
+                         f"changed it (or keeps tabs inside it) — kept")
         else:
-            out["requests"].append({"deleteTab": {"tabId": tab}})
-            out["applied"].append(f"tab {name!r} deleted")
-    first_tab_title(base, ours, theirs, out)
-    document_title(base, ours, theirs, out)
-    tab_order(base, ours, theirs, out)
-    return out
+            requests.append({"deleteTab": {"tabId": tab}})
+            applied.append(f"tab {name!r} deleted")
+    first_tab_title(base, ours, theirs, requests, applied, notes)
+    rename = document_title(base, ours, theirs, applied, notes)
+    tab_order(base, ours, theirs, notes)
+    return TabPlan(pairs=pairs, create=create, requests=requests, applied=applied, notes=notes,
+                   rename=rename)
 
 
-def first_tab_title(base: Ir, ours: Ir, theirs: Ir, out: TabPlan) -> None:
+def first_tab_title(base: Ir, ours: Ir, theirs: Ir, requests: list[DocsRequest],
+                    applied: list[str], notes: list[str]) -> None:
     """The first tab's own name, which the file says in its `b2s-tab` meta.
 
     Every other tab names itself on its `<section>`; the first tab is the file's body
@@ -4551,14 +4560,15 @@ def first_tab_title(base: Ir, ours: Ir, theirs: Ir, out: TabPlan) -> None:
     if not mine or not tab or mine == now or mine == was:
         return
     if was is not None and now != was:
-        out["notes"].append(f"the first tab was renamed on both sides — it keeps {now!r}, "
-                            f"not {mine!r}")
+        notes.append(f"the first tab was renamed on both sides — it keeps {now!r}, "
+                     f"not {mine!r}")
         return
-    out["requests"].append(_rename_tab(tab, mine))
-    out["applied"].append(f"the first tab renamed {mine!r}")
+    requests.append(_rename_tab(tab, mine))
+    applied.append(f"the first tab renamed {mine!r}")
 
 
-def document_title(base: Ir, ours: Ir, theirs: Ir, out: TabPlan) -> None:
+def document_title(base: Ir, ours: Ir, theirs: Ir, applied: list[str],
+                   notes: list[str]) -> str | None:
     """The document's name, which the file says in its `<title>`.
 
     A Google Doc's title *is* its name in Drive, and no `batchUpdate` request writes
@@ -4569,7 +4579,7 @@ def document_title(base: Ir, ours: Ir, theirs: Ir, out: TabPlan) -> None:
     it is written (through Drive, `doc_sync.rename_document`, which is why this is
     `rename` and not a request); renamed in the document alone and the file simply
     follows at the settle; renamed on both sides and the document's name stands,
-    with a note.
+    with a note. Returns the name to write, or None.
 
     A base with no title at all — one an older version of this tool wrote — cannot
     say who moved, so the document's name stands and the note says that too. No base
@@ -4579,20 +4589,21 @@ def document_title(base: Ir, ours: Ir, theirs: Ir, out: TabPlan) -> None:
     mine, now = ours.get("title"), theirs.get("title")
     was = base.get("title")
     if not mine or mine == now or mine == was:
-        return
+        return None
     if was is None and not (base.get("blocks") or base.get("tabs")):
-        return
+        return None
     if was is None:
-        out["notes"].append(f"the file calls the document {mine!r} and the document calls "
-                            f"itself {now!r}; the base does not say which of them renamed "
-                            f"it, so the document's name is kept")
-    elif now != was:
-        out["notes"].append(f"the document was renamed on both sides — it keeps {now!r}, "
-                            f"not {mine!r}")
-    else:
-        out["rename"] = mine
-        out["applied"].append(f"the document renamed {mine!r} (in Drive: no request "
-                              f"writes a document's title)")
+        notes.append(f"the file calls the document {mine!r} and the document calls "
+                     f"itself {now!r}; the base does not say which of them renamed "
+                     f"it, so the document's name is kept")
+        return None
+    if now != was:
+        notes.append(f"the document was renamed on both sides — it keeps {now!r}, "
+                     f"not {mine!r}")
+        return None
+    applied.append(f"the document renamed {mine!r} (in Drive: no request "
+                   f"writes a document's title)")
+    return mine
 
 
 def _tab_order_of(ir: Ir, known: Set[str | None]) -> list[str | None]:
@@ -4600,7 +4611,7 @@ def _tab_order_of(ir: Ir, known: Set[str | None]) -> list[str | None]:
     return [p.get("tab") for p in ir.get("tabs", []) if p.get("tab") in known]
 
 
-def tab_order(base: Ir, ours: Ir, theirs: Ir, out: TabPlan) -> None:
+def tab_order(base: Ir, ours: Ir, theirs: Ir, notes: list[str]) -> None:
     """A tab the source moved, which is not written.
 
     Blocks the source moved go back where the file has them, because a move is a
@@ -4628,7 +4639,7 @@ def tab_order(base: Ir, ours: Ir, theirs: Ir, out: TabPlan) -> None:
     if len(mine) < 2 or mine == now or mine == _tab_order_of(base, known):
         return
     titles = {tab: p.get("title", "") for tab, p in _tabs_by_id(theirs).items()}
-    out["notes"].append(
+    notes.append(
         "the source puts the tabs in the order "
         + ", ".join(repr(titles.get(t, t) if t is not None else None) for t in mine)
         + "; moving a tab is not written, so the document's order stands")
@@ -4681,8 +4692,8 @@ def tab_index(part: Ir, ours: Ir, parent: str | None, siblings: Sequence[str | N
     return 0
 
 
-def add_tab_request(part: Ir, parents: Set[str], ours: Ir | None = None,
-                    siblings: Siblings | None = None) -> DocsRequest:
+def add_tab_request(part: Ir, parents: Set[str], ours: Ir | None,
+                    siblings: Siblings | None) -> DocsRequest:
     """`addDocumentTab` for a tab the source added, under its parent if that exists
     and where the file puts it among that parent's tabs.
 

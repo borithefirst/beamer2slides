@@ -21,7 +21,7 @@ def _world() -> doc_world.World:
 
 
 def _ranges(world: doc_world.World, name: str = "b2s:x") -> list[tuple[str, str]]:
-    return [(t.id, r["id"]) for t in world.tabs for r in t.named if r["name"] == name]
+    return [(t.id, r.id) for t in world.tabs for r in t.named if r.name == name]
 
 
 def test_a_named_range_on_another_tab_is_deleted_only_where_the_request_says_so():
@@ -75,10 +75,10 @@ def test_a_key_planted_again_on_an_empty_paragraph_stays_on_it():
     way an empty paragraph's key slid onto the block the sync wrote at its mark): the
     sync's answer is to delete the range and plant it on the mark again after the write,
     in the same batch. Pinned here so the applier keeps letting that batch through."""
-    world = doc_world.World()
+    world = doc_world.World("doc")
     world.apply([{"createNamedRange": {"name": "b2s:paragraph:empty",
                                        "range": {"startIndex": 1, "endIndex": 2}}}])
-    [old] = [r["id"] for r in world.tabs[0].named]
+    [old] = [r.id for r in world.tabs[0].named]
     world.apply([
         {"insertText": {"location": {"index": 1}, "text": "\nwritten here"}},
         {"deleteNamedRange": {"namedRangeId": old}},
@@ -86,7 +86,7 @@ def test_a_key_planted_again_on_an_empty_paragraph_stays_on_it():
                               "range": {"startIndex": 1, "endIndex": 2}}},
     ])
     [kept] = world.tabs[0].named
-    assert (kept["start"], kept["end"]) == (1, 2)
+    assert (kept.start, kept.end) == (1, 2)
     content = world.read()["tabs"][0]["documentTab"]["body"]["content"]
     paragraphs = [c for c in content if "paragraph" in c]
     assert [c["startIndex"] for c in paragraphs] == [1, 2]
@@ -102,7 +102,7 @@ def test_a_paragraph_split_off_another_has_measurements_of_its_own():
     which left the document self-consistent and the base agreeing with it. Only a judge
     asking "did the source's restyle arrive *here*?" could see it (offline seed 110149).
     """
-    world = doc_world.World()
+    world = doc_world.World("doc")
     world.apply([{"insertText": {"location": {"index": 1}, "text": "one\ntwo"}}])
     world.apply([{"updateParagraphStyle": {
         "range": {"startIndex": 1, "endIndex": 4},

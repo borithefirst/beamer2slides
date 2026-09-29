@@ -38,6 +38,7 @@ import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar
 
@@ -83,7 +84,8 @@ class StoredBase(Ir, total=False):
     base_fid: str
 
 
-class Written(TypedDict):
+@dataclass(frozen=True, kw_only=True)
+class Written:
     """One tab, planned and written (`_sync_part`), or only planned (a dry run)."""
     stamp: str | None               # the tab's id; None for the first tab, "new" for one to add
     label: str | None               # its title in the report; None for the first tab
@@ -132,7 +134,16 @@ class AdoptReport(PushReport):
     file: str
 
 
-def _read(request: Request[_T], tries: int = 4) -> _T:
+#: How many times a read is asked before its failure is the run's.
+READ_TRIES = 4
+
+
+def _read(request: Request[_T]) -> _T:
+    """`_read_tries` with the tries every read of a sync gets."""
+    return _read_tries(request, READ_TRIES)
+
+
+def _read_tries(request: Request[_T], tries: int) -> _T:
     """One read, made again through a transient failure.
 
     A read can be made twice for the price of a round trip and nothing else, so every
@@ -263,8 +274,8 @@ def _base_property(info: DriveFile) -> str | None:
     return info.get("appProperties", {}).get(BASE_PROPERTY) or None
 
 
-def load_drive(drive: DriveService, document: str, found: dict[str, str] | None = None,
-               hint: str | None = None) -> StoredBase | None:
+def load_drive(drive: DriveService, document: str, found: dict[str, str] | None,
+               hint: str | None) -> StoredBase | None:
     """The base Drive holds for this document, or None (no base, or unreadable).
 
     `found` is filled with the base file's id where there is one: the document's
@@ -320,7 +331,7 @@ def _read_base_file(drive: DriveService, fid: str) -> Json | None:
 
 
 def save_drive(drive: DriveService, document: str, base: Mapping[str, object],
-               title: str | None = None, known_fid: str | None = None) -> str:
+               title: str | None, known_fid: str | None) -> str:
     """The base as a JSON file in the document's own folder, its id in the
     document's `appProperties.b2sBase`. Returns the file id.
 
@@ -406,9 +417,9 @@ def stale_base_warning(where: Where, drive: DriveService | None, document: str) 
     return None
 
 
-def load_base(path: Path, document: str, drive: DriveService | None = None,
-              problems: list[str] | None = None,
-              found: dict[str, str] | None = None) -> tuple[StoredBase | None, Where]:
+def load_base(path: Path, document: str, drive: DriveService | None,
+              problems: list[str] | None,
+              found: dict[str, str] | None) -> tuple[StoredBase | None, Where]:
     """(the base, where it came from: `drive`, `local` or `none`).
 
     Drive is authoritative and the copy beside the file is a cache — except when
@@ -460,9 +471,9 @@ def load_base(path: Path, document: str, drive: DriveService | None = None,
     return None, "none"
 
 
-def store_base(path: Path, base: Ir, drive: DriveService | None = None,
-               document: str | None = None, previous: int = 0,
-               base_fid: str | None = None) -> str | None:
+def store_base(path: Path, base: Ir, drive: DriveService | None,
+               document: str | None, previous: int,
+               base_fid: str | None) -> str | None:
     """Store the base where the next sync will look for it: beside the file first
     (atomically), then in Drive, which is where it is looked for first.
 
@@ -487,7 +498,7 @@ def store_base(path: Path, base: Ir, drive: DriveService | None = None,
     if not document:
         return "the base does not say which document it belongs to"
     try:
-        fid = save_drive(drive, document, _without(stamped, "uri"), known_fid=base_fid)
+        fid = save_drive(drive, document, _without(stamped, "uri"), known_fid=base_fid, title=None)
     except (HttpError, OSError) as err:
         return f"{type(err).__name__}: {err}"
     if fid and fid != known:
@@ -628,8 +639,8 @@ def _get(docs: DocsService, ident: str) -> Document:
     return _read(docs.documents().get(documentId=ident, includeTabsContent=True))
 
 
-def document_ir(doc: Document, ident: str, ours: Ir | None = None,
-                base: Ir | None = None) -> Ir:
+def document_ir(doc: Document, ident: str, ours: Ir | None,
+                base: Ir | None) -> Ir:
     """The first tab is the IR; the others go under `tabs` (`doc_ir.parts`), each
     filled in from the file's and the base's tab with the same id."""
     ir = _part_of(doc, None, ours, base)
@@ -744,7 +755,7 @@ def limits(ours: Ir) -> list[str]:
     return list(ours.get("unsupported", []))
 
 
-def unmodelled_notes(doc: Document, full: bool = False) -> list[str]:
+def unmodelled_notes(doc: Document, full: bool) -> list[str]:
     """What the live document carries that the dialect never reads.
 
     `doc_ir.unmodelled` walks the raw `documents.get` answer against the reader's own
@@ -767,7 +778,7 @@ def unmodelled_notes(doc: Document, full: bool = False) -> list[str]:
     if full:
         return [f"the document has {found[path]['count']} × {path} "
                 f"(e.g. {found[path]['example']}), which the canonical file cannot say"
-                for path in order] + block_risk_notes(doc)
+                for path in order] + block_risk_notes(doc, limit=RISKY_BLOCKS)
     rest = f" and {len(order) - 3} more" if len(order) > 3 else ""
     # The one number a sync can act on: not how many kinds there are but how many
     # blocks a rewrite would cost something. Naming them is `adopt`'s job, once.
@@ -787,7 +798,7 @@ PROPERTIES = 4          # how many of one block's properties to name on its line
 LOSS_MARK = "in nothing the file can say"
 
 
-def block_risk_notes(doc: Document, limit: int = RISKY_BLOCKS) -> list[str]:
+def block_risk_notes(doc: Document, limit: int) -> list[str]:
     """Which blocks would lose something if the source rewrote them.
 
     The counts above are the document's; these are addresses. A property the dialect
@@ -841,15 +852,15 @@ def rewrite_losses(doc: Document, planned: Sequence[Written]) -> list[str]:
         return []
     out: list[str] = []
     for each in planned:
-        for block in each["result"].get("blocks", []):
+        for block in each.result.blocks:
             if not (span := block.get("span")) or not (block.get("rewrite") or block.get("moved")):
                 continue
-            hit = risky.get((each["stamp"], tuple(span)))
+            hit = risky.get((each.stamp, tuple(span)))
             if hit is None:
                 continue
             named = ", ".join(".".join(path.split(".")[-2:]) for path in hit["unread"])
             why = "moved" if block.get("moved") else "rewritten from the file"
-            where = f"[{each['label']}] " if each.get("label") else ""
+            where = f"[{each.label}] " if each.label else ""
             words = f"{hit['words'][:48]!r}" if hit["words"] else f"at {hit['span'][0]}"
             out.append(f"{where}the {hit['kind']} {words} is being {why}, which drops "
                        f"{named} — the document's, and {LOSS_MARK}")
@@ -865,8 +876,8 @@ def stamp_of(ir: Ir, part: Ir) -> str | None:
 # ---------------------------------------------------------------- writing
 
 def send(docs: DocsService, ident: str, requests: Sequence[DocsRequest],
-         revision: str | None = None,
-         notes: list[str] | None = None) -> DocsBatchUpdateResponse:
+         revision: str | None,
+         notes: list[str] | None) -> DocsBatchUpdateResponse:
     """One `batchUpdate`, or — past `CHUNK` requests — several, in order.
 
     Docs applies a batch's requests in the order they are given, and the plan is
@@ -990,8 +1001,8 @@ class Stager:
         self.files = []
 
 
-def fetch_pictures(path: Path, live: Ir, drive: DriveService | None = None,
-                   ident: str | None = None) -> int:
+def fetch_pictures(path: Path, live: Ir, drive: DriveService | None,
+                   ident: str | None) -> int:
     """Put the pictures a reader inserted into the document beside the canonical file.
 
     Their `contentUri` lasts about half an hour and names nothing of ours, so a file
@@ -1101,7 +1112,7 @@ def plant_ranges(docs: DocsService, ident: str, ir: Ir, tab: str | None) -> int:
     if not requests:
         return 0
     try:
-        adopt_replies(ir, requests, send(docs, ident, requests))
+        adopt_replies(ir, requests, send(docs, ident, requests, revision=None, notes=None))
         return len(requests)
     except HttpError as err:
         print(f"  the batch of {len(requests)} named ranges was refused ({status_of(err)}); "
@@ -1109,7 +1120,7 @@ def plant_ranges(docs: DocsService, ident: str, ir: Ir, tab: str | None) -> int:
     done = 0
     for request in requests:
         try:
-            adopt_replies(ir, [request], send(docs, ident, [request]))
+            adopt_replies(ir, [request], send(docs, ident, [request], revision=None, notes=None))
             done += 1
         except HttpError as err:
             print(f"  no anchor for {_range_named(request)}: {status_of(err)}")
@@ -1162,10 +1173,10 @@ def adopt_replies(ir: Ir, requests: Sequence[DocsRequest], answer: DocsBatchUpda
 
 
 def settle(docs: DocsService, ident: str, path: Path, ours: Ir | None, base: Ir | None,
-           planned: Mapping[str | None, list[Block]] | None = None,
-           drive: DriveService | None = None, problems: list[str] | None = None,
-           name_unmodelled: bool = False, renamed: str | None = None,
-           base_fid: str | None = None, read: tuple[Document, Ir] | None = None) -> Ir:
+           planned: Mapping[str | None, list[Block]] | None,
+           drive: DriveService | None, problems: list[str] | None,
+           name_unmodelled: bool, renamed: str | None,
+           base_fid: str | None, read: tuple[Document, Ir] | None) -> Ir:
     """After a write: read the document, anchor what is new, and let that read be both
     the new base and the new canonical file. File, document and base agree from here.
 
@@ -1195,7 +1206,7 @@ def settle(docs: DocsService, ident: str, path: Path, ours: Ir | None, base: Ir 
     for part in doc_ir.parts(live):
         tidy += doc_merge.on_tab(doc_merge.tidy_requests(part), stamp_of(live, part))
     if tidy:
-        send(docs, ident, tidy)
+        send(docs, ident, tidy, revision=None, notes=None)
     for part in doc_ir.parts(live):
         named += plant_ranges(docs, ident, part, stamp_of(live, part))
     if tidy:
@@ -1307,16 +1318,17 @@ def _words(block: Block) -> str:
     return doc_merge.block_text(block)[:60]
 
 
-def _summary(result: doc_merge.Plan) -> tuple[list[str], list[str], list[str]]:
+def _summary(blocks: list[Block],
+             removed: list[Block]) -> tuple[list[str], list[str], list[str]]:
     applied: list[str] = []
     kept: list[str] = []
     gone: list[str] = []
-    for block in result.get("removed", []):
+    for block in removed:
         # Its own list and its own heading, above everything else the report says: it
         # is the one change here that no second sync can bring back
         # (`doc_merge.deleted_blocks`).
         gone.append(f"`{block.get('key', '(unkeyed)')}`: {_words(block)!r}")
-    for block in result["blocks"]:
+    for block in blocks:
         key = block.get("key", "(unkeyed)")
         words = _words(block)
         if block.get("moved"):
@@ -1342,7 +1354,7 @@ def _summary(result: doc_merge.Plan) -> tuple[list[str], list[str], list[str]]:
 
 # ---------------------------------------------------------------- commands
 
-def push(path: Path, name: str | None = None, new_doc: bool = False) -> PushReport:
+def push(path: Path, name: str | None, new_doc: bool) -> PushReport:
     """Create the document from the canonical file and plant one anchor per block."""
     source = read_file(path)
     if (named := source.get("document")) and not new_doc:
@@ -1373,17 +1385,17 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> PushRepo
     written = _write_tabs(drive, docs, ident, path, source, {"blocks": []}, live, tabs,
                           False, None, None)
     planned: dict[str | None, list[Block]] = {None: source["blocks"]}
-    planned.update({w["stamp"]: w["result"]["blocks"] for w in written})
+    planned.update({w.stamp: w.result.blocks for w in written})
     notes = limits(source)
-    live = settle(docs, ident, path, source, source, planned, drive, notes, True)
+    live = settle(docs, ident, path, source, source, planned, drive, notes, True, renamed=None, base_fid=None, read=None)
     blocks = [b for part in doc_ir.parts(live) for b in part["blocks"]]
     return {"document": ident, "url": url(ident), "blocks": len(blocks),
             "anchored": sum(1 for b in blocks if b.get("rangeId")),
             "tabs": len(doc_ir.parts(live)), "notes": notes}
 
 
-def adopt(document: str, path: Path | None = None, force: bool = False,
-          folder: Path | None = None) -> AdoptReport:
+def adopt(document: str, path: Path | None, force: bool,
+          folder: Path | None) -> AdoptReport:
     """Write the canonical file a document nobody pushed never had.
 
     The Docs twin of `beamer2slides adopt`. `push` goes file → document and refuses
@@ -1410,7 +1422,7 @@ def adopt(document: str, path: Path | None = None, force: bool = False,
     docs, drive = docs_service(creds), drive_service(creds)
     doc, live = read_document(docs, ident)
     if path is None:
-        path = Path(folder or ".") / f"{doc_ir.slug(doc.get('title') or ident)}.html"
+        path = Path(folder or ".") / f"{doc_ir.slug(doc.get('title') or ident, limit=doc_ir.SLUG_LENGTH)}.html"
     if path.exists():
         named = doc_ir.from_html(path.read_text(encoding="utf-8")).get("document")
         if named != ident and not force:
@@ -1424,15 +1436,15 @@ def adopt(document: str, path: Path | None = None, force: bool = False,
     notes = limits(live)
     # Nothing has been written since that read, so the document cannot have moved:
     # `settle` reading it again would be a round trip for the same answer.
-    live = settle(docs, ident, path, None, None, None, drive, notes, True, read=(doc, live))
+    live = settle(docs, ident, path, None, None, None, drive, notes, True, read=(doc, live), renamed=None, base_fid=None)
     blocks = [b for part in doc_ir.parts(live) for b in part["blocks"]]
     return {"document": ident, "url": url(ident), "file": str(path), "blocks": len(blocks),
             "anchored": sum(1 for b in blocks if b.get("rangeId")),
             "tabs": len(doc_ir.parts(live)), "notes": notes}
 
 
-def sync(path: Path, document: str | None = None, dry_run: bool = False,
-         assume_base: str | None = None, backup: bool = True) -> SyncReport:
+def sync(path: Path, document: str | None, dry_run: bool,
+         assume_base: str | None, backup: bool) -> SyncReport:
     """Merge the file and the document three ways, write, and rewrite the file."""
     ours = read_file(path)
     named = document_id(document) if document else ours.get("document")
@@ -1471,23 +1483,23 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
 
     if dry_run:
         planned = [_dry(None, None, doc_merge.plan(base, ours, theirs))]
-        for tab, mine, was in tabs["pairs"]:
+        for tab, mine, was in tabs.pairs:
             planned.append(_dry(tab, mine.get("title", ""),
                                 doc_merge.plan(was, mine, doc_ir.tab_part(theirs, tab) or {"blocks": []})))
-        for mine in tabs["create"]:
+        for mine in tabs.create:
             # What a tab just added reads as: nothing, and the paragraph it keeps.
             planned.append(_dry("new", mine.get("title", ""), doc_merge.plan(
                 {"blocks": []}, mine, {"blocks": [], "trailer": [U16(1), U16(2)]})))
         info = _report(ident, True, ours, tabs, planned,
                        collect(asking, lambda: open_comments(drive, ident)))
-        info["plan"] = tabs["requests"] + [
+        info["plan"] = tabs.requests + [
             r for each in planned for r in doc_merge.on_tab(
-                each["result"]["structure"] + each["result"]["requests"], each["stamp"])]
-        info["requests"] = len(info["plan"]) + len(tabs["create"])
+                each.result.structure + each.result.requests, each.stamp)]
+        info["requests"] = len(info["plan"]) + len(tabs.create)
         info["base"] = where
         # A dry run never reaches `settle`, which is where this is normally said —
         # and it is the run where being told what a write would cost is worth most.
-        info["notes"] = (troubles + info["notes"] + unmodelled_notes(doc)
+        info["notes"] = (troubles + info["notes"] + unmodelled_notes(doc, full=False)
                          + rewrite_losses(doc, planned))
         info["report"] = str(write_report(path, info))
         return info
@@ -1499,7 +1511,7 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
     written = _write_tabs(drive, docs, ident, path, ours, base, theirs, tabs, True, doc,
                           batched)
     renamed = (rename_document(drive, ident, rename, batched)
-               if (rename := tabs["rename"]) else None)
+               if (rename := tabs.rename) else None)
     # The comments are the report's, and nothing before this point wanted them: the read
     # has been running beside the planning and the write it is only now waited for.
     info = _report(ident, False, ours, tabs, written,
@@ -1509,8 +1521,8 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
         info["backup"] = str(kept)
     info["notes"] = troubles + info["notes"] + batched + rewrite_losses(doc, written)
     live = settle(docs, ident, path, ours, base,
-                  {each["stamp"]: each["result"]["blocks"] for each in written}, drive,
-                  info["notes"], renamed=renamed, base_fid=found.get("fid"))
+                  {each.stamp: each.result.blocks for each in written}, drive,
+                  info["notes"], renamed=renamed, base_fid=found.get("fid"), name_unmodelled=False, read=None)
     info["blocks"] = sum(len(part["blocks"]) for part in doc_ir.parts(live))
     info["report"] = str(write_report(path, info))
     return info
@@ -1518,8 +1530,7 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
 
 def _dry(stamp: str | None, label: str | None, result: doc_merge.Plan) -> Written:
     """A tab a dry run planned and did not write."""
-    return {"stamp": stamp, "label": label, "result": result, "shaped": result["shaped"],
-            "attempts": 0}
+    return Written(stamp=stamp, label=label, result=result, shaped=result.shaped, attempts=0)
 
 
 def _said_in(label: str | None, line: str) -> str:
@@ -1541,21 +1552,20 @@ def _report(ident: str, dry_run: bool, ours: Ir, tabs: doc_merge.TabPlan,
     said with the tab's title in front."""
     info: SyncReport = {
         "document": ident, "url": url(ident), "dry_run": dry_run, "requests": 0,
-        "conflicts": [], "notes": limits(ours) + tabs["notes"],
-        "applied": list(tabs["applied"]), "kept": [], "comments": asked, "removed": []}
+        "conflicts": [], "notes": limits(ours) + tabs.notes,
+        "applied": list(tabs.applied), "kept": [], "comments": asked, "removed": []}
     for each in written:
-        result, label = each["result"], each["label"]
-        info["requests"] += len(result["requests"])
-        info["conflicts"] += [_in_tab(c, label) for c in result["conflicts"]]
-        info["notes"] += [_said_in(label, n) for n in result["notes"]]
-        applied, kept, gone = _summary(result)
-        info["applied"] += ([_said_in(label, note) for t in each["shaped"]
-                             if (note := t.get("note")) is not None]
+        result, label = each.result, each.label
+        info["requests"] += len(result.requests)
+        info["conflicts"] += [_in_tab(c, label) for c in result.conflicts]
+        info["notes"] += [_said_in(label, n) for n in result.notes]
+        applied, kept, gone = _summary(result.blocks, result.removed)
+        info["applied"] += ([_said_in(label, t.note) for t in each.shaped]
                             + [_said_in(label, a) for a in applied])
         info["kept"] += [_said_in(label, k) for k in kept]
         info["removed"] += [_said_in(label, g) for g in gone]
-        if each["attempts"]:
-            info["replanned"] = max(info.get("replanned", 0), each["attempts"])
+        if each.attempts:
+            info["replanned"] = max(info.get("replanned", 0), each.attempts)
     return info
 
 
@@ -1569,22 +1579,22 @@ def _write_tabs(drive: DriveService, docs: DocsService, ident: str, path: Path, 
     `doc` is the read the sync began with: tabs are planned against it until something
     has been written, so a reader who typed since is caught by the revision check and
     the tab is planned again, rather than slipping in unnoticed between two reads."""
-    if tabs["requests"] or tabs["create"]:
+    if tabs.requests or tabs.create:
         doc = None
-    if tabs["requests"]:
-        send(docs, ident, tabs["requests"])
-    pairs = list(tabs["pairs"])
+    if tabs.requests:
+        send(docs, ident, tabs.requests, revision=None, notes=None)
+    pairs = list(tabs.pairs)
     known = {tab for p in doc_ir.parts(theirs) if (tab := p.get("tab")) is not None}
     siblings = doc_merge.tab_siblings(theirs)
     made: dict[str, str] = {}
-    for part in tabs["create"]:
+    for part in tabs.create:
         # One at a time: a child tab needs the id its parent was just given, and a
         # tab placed among its siblings needs the ids of the ones already made.
         if (parent := part.get("parent")) is not None and parent in made:
             part["parent"] = made[parent]
         request = doc_merge.add_tab_request(part, known | set(made.values()),
                                             ours, siblings)
-        reply = send(docs, ident, [request])
+        reply = send(docs, ident, [request], revision=None, notes=None)
         tab = _new_tab_id(reply)
         if mine := part.get("tab"):
             made[mine] = tab
@@ -1602,7 +1612,7 @@ def _write_tabs(drive: DriveService, docs: DocsService, ident: str, path: Path, 
         for tab, mine, was in start + pairs:
             done = _sync_part(docs, ident, path, stager, tab, ours, base, mine, was, doc, notes)
             written.append(done)
-            if done["result"]["requests"] or done["shaped"] or done["attempts"]:
+            if done.result.requests or done.shaped or done.attempts:
                 doc = None  # the document has moved on from that read
     finally:
         # The pictures are in the document now, copied: the staging file can go.
@@ -1611,8 +1621,11 @@ def _write_tabs(drive: DriveService, docs: DocsService, ident: str, path: Path, 
 
 
 def _new_tab_id(answer: DocsBatchUpdateResponse) -> str:
-    """The id Docs gave the tab one `addDocumentTab` made."""
+    """The id Docs gave the tab one `addDocumentTab` made (`JsonShapeError` when the
+    answer does not say one: the tab exists then, and nothing can be written into it)."""
     replies = answer.get("replies") or []
+    if not replies:
+        raise JsonShapeError("the addDocumentTab answer: no reply")
     added = as_object(replies[0].get("addDocumentTab"), "the addDocumentTab reply")
     props = as_object(added.get("tabProperties"), "the addDocumentTab reply's tabProperties")
     return as_str(props.get("tabId"), "the addDocumentTab reply's tabId")
@@ -1638,8 +1651,8 @@ def _sync_part(docs: DocsService, ident: str, path: Path, stager: Stager, tab: s
     attempt, revision = 0, doc.get("revisionId")
     while True:
         try:
-            if result["requests"]:
-                send(docs, ident, stager.resolve(doc_merge.on_tab(result["requests"], tab)),
+            if result.requests:
+                send(docs, ident, stager.resolve(doc_merge.on_tab(result.requests, tab)),
                      revision, notes)
             break
         except HttpError as err:
@@ -1658,8 +1671,8 @@ def _sync_part(docs: DocsService, ident: str, path: Path, stager: Stager, tab: s
                 docs, ident, tab, ours, base, mine, was, doc, theirs, result)
             shaped += more
             revision = doc.get("revisionId")
-    return {"stamp": tab, "label": mine.get("title", "") if tab else None,
-            "result": result, "shaped": shaped, "attempts": attempt}
+    return Written(stamp=tab, label=mine.get("title", "") if tab else None,
+                   result=result, shaped=shaped, attempts=attempt)
 
 
 def read_part(docs: DocsService, ident: str, tab: str | None, ours: Ir | None,
@@ -1689,10 +1702,10 @@ def _write_structure(docs: DocsService, ident: str, tab: str | None, ours: Ir, b
     """
     shaped: list[doc_merge.Told] = []
     for _ in range(ATTEMPTS):
-        if not result["structure"]:
+        if not result.structure:
             break
         try:
-            send(docs, ident, doc_merge.on_tab(result["structure"], tab), doc.get("revisionId"))
+            send(docs, ident, doc_merge.on_tab(result.structure, tab), doc.get("revisionId"), notes=None)
         except HttpError as err:
             if not moved_on(err):
                 raise
@@ -1700,7 +1713,7 @@ def _write_structure(docs: DocsService, ident: str, tab: str | None, ours: Ir, b
             doc, theirs = read_part(docs, ident, tab, ours, base)
             result = doc_merge.plan(was, mine, theirs)
             continue
-        shaped += result["shaped"]
+        shaped += result.shaped
         doc, theirs = read_part(docs, ident, tab, ours, base)
         # A table the *reader* beheaded in the browser carries no range either
         # (`doc_merge.recover_tables`), and this read is the one place that had
@@ -1709,19 +1722,19 @@ def _write_structure(docs: DocsService, ident: str, tab: str | None, ours: Ir, b
         # gave it that key. Recovered first, it is not free to be taken, and
         # `plant_ranges` puts its own range back in the same breath.
         found = doc_merge.recover_tables(
-            was, theirs, {t["key"] for t in result["shaped"] if t.get("key")})
-        anchored = doc_merge.anchor_tables(theirs, result["shaped"])
+            was, theirs, {t.key for t in result.shaped if t.key})
+        anchored = doc_merge.anchor_tables(theirs, result.shaped)
         # And the empty paragraph a new table's swallow took the name off, which the
         # plan below would read as a block the reader had deleted. After the
         # anchoring: it is found by the table it stands in front of.
-        anchored += doc_merge.recover_swallowed(theirs, result["shaped"])
+        anchored += doc_merge.recover_swallowed(theirs, result.shaped)
         # And the empty paragraph the delete of the body's last table ate the mark
         # of, which the trailer now stands in for.
-        anchored += doc_merge.recover_eaten(theirs, result["shaped"])
+        anchored += doc_merge.recover_eaten(theirs, result.shaped)
         if anchored or found:
             plant_ranges(docs, ident, theirs, tab)
             doc, theirs = read_part(docs, ident, tab, ours, base)
-        was = doc_merge.rebase_tables(was, theirs, result["shaped"])
+        was = doc_merge.rebase_tables(was, theirs, result.shaped)
         result = doc_merge.plan(was, mine, theirs)
     return doc, theirs, was, result, shaped
 
@@ -1785,8 +1798,8 @@ def backup_document(drive: DriveService, document: str, path: Path) -> Path:
 
 
 def _no_base(path: Path, ours: Ir, theirs: Ir, assume: str | None,
-             drive: DriveService | None = None, document: str | None = None,
-             backup: bool = True, dry_run: bool = False) -> tuple[Ir, Path | None]:
+             drive: DriveService | None, document: str | None,
+             backup: bool, dry_run: bool) -> tuple[Ir, Path | None]:
     """What to do when the last sync's base is nowhere — neither in Drive nor beside
     the file. (The base, the backup taken before a destructive answer.)
 

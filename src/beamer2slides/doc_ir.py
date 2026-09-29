@@ -797,7 +797,7 @@ PICTURE_ATTRS = ("src", "alt", "title")
 
 # ---------------------------------------------------------------- runs
 
-def _style_of(text_style: DocsTextStyle, default: NamedDefault | None = None) -> Style:
+def _style_of(text_style: DocsTextStyle, default: NamedDefault | None) -> Style:
     """The marks we keep, from a Docs textStyle.
 
     `default` is what the paragraph's named style already says (`_named_defaults`):
@@ -1019,7 +1019,7 @@ def utf16_len(text: str) -> int:
 
 # ---------------------------------------------------------------- live document -> IR
 
-def from_document(doc: Document, tab_id: str | None = None) -> Ir:
+def from_document(doc: Document, tab_id: str | None) -> Ir:
     """`documents.get` JSON to the IR.
 
     A document read with `includeTabsContent=True` has no `body` at all — it has
@@ -2216,7 +2216,11 @@ def from_html(html: str) -> Ir:
 
 # ---------------------------------------------------------------- keys
 
-def slug(text: str, limit: int = 40) -> str:
+#: How long a slug made from a title or words may be.
+SLUG_LENGTH = 40
+
+
+def slug(text: str, limit: int) -> str:
     return SLUG.sub("-", text.lower()).strip("-")[:limit] or "empty"
 
 
@@ -2239,13 +2243,13 @@ def key_blocks(ir: Ir) -> Ir:
     for block in ir["blocks"]:
         if block.get("key"):
             continue
-        stem = f"{block['kind']}:{slug(_first_words(block))}"
+        stem = f"{block['kind']}:{slug(_first_words(block), limit=SLUG_LENGTH)}"
         seen[stem] = seen.get(stem, 0) + 1
         block["key"] = stem if seen[stem] == 1 else f"{stem}#{seen[stem]}"
     return ir
 
 
-def named_ranges_of(doc: Document, tab_id: str | None = None) -> dict[str, DocsNamedRanges]:
+def named_ranges_of(doc: Document, tab_id: str | None) -> dict[str, DocsNamedRanges]:
     """The document's named ranges, by name, from either read shape."""
     if "body" in doc:
         return doc.get("namedRanges", {}) or {}

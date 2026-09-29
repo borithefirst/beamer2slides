@@ -185,10 +185,10 @@ SHAPED = ((870308, 8, "two_tables"), (870368, 8, "two_tables"),
 
 def _round(seed: int, chain: int, shape: str | None = None) -> None:
     script = fuzz_docs.draw(seed, chain, shape=shape)
-    found = fuzz_docs.offline_round(seed, chain, script=script)
+    found = fuzz_docs.offline_round(seed, chain, script=script, seen=Counter())
     unknown, known = fuzz_docs.triage(found)
     if unknown:
-        small = fuzz_docs.shrink(script, still=lambda f: fuzz_docs.triage(f)[0])
+        small = fuzz_docs.shrink(script, still=lambda f: fuzz_docs.triage(f)[0], rounds=200)
         pytest.fail(f"seed {seed} (chain {chain}) lost something no one knows about\n"
                     f"{oracle.describe(unknown)}\n{fuzz_docs.describe_script(small)}")
 
@@ -231,7 +231,7 @@ def test_the_campaign_reaches_what_it_claims_to_reach():
 
     seen: Counter = Counter()
     for seed in range(ROUNDS):
-        fuzz_docs.offline_round(seed, 1, seen=seen)
+        fuzz_docs.offline_round(seed, 1, seen=seen, script=None)
     for request in ("insertText", "deleteContentRange", "insertTable", "insertPerson",
                     "insertInlineImage", "updateTextStyle", "updateParagraphStyle"):
         assert seen[f"request/{request}"], f"{ROUNDS} rounds never sent {request}"
@@ -253,7 +253,7 @@ def _ir(*blocks, tabs=()):
 
 
 def _kinds(found):
-    return {f["kind"] for f in oracle.failures(found)}
+    return {f.kind for f in oracle.failures(found)}
 
 
 NOTHING = {"conflicts": [], "notes": [], "applied": []}
@@ -289,7 +289,7 @@ def test_the_oracle_lets_a_chip_go_with_the_column_the_source_deleted():
     before = _ir(_chip_table("t1"), _p("k2", "A note."))
     after = _ir(_plain_table("t1"), _p("k2", "A note."))
     ours = _ir(_plain_table("t1"), _chip_para("k2", "A note."))
-    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=ours))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=ours, allow=(), theme=None))
 
 
 def test_a_chip_the_reader_put_in_a_cell_is_nobodys_to_drop():
@@ -305,7 +305,7 @@ def test_a_chip_the_reader_put_in_a_cell_is_nobodys_to_drop():
     after = _ir(_plain_table("t1"), _p("k2", "A note."))
     ours = _ir(_plain_table("t1"), _chip_para("k2", "A note."))
     assert not oracle._dropped_cells(before["blocks"][0], base, ours)
-    assert _kinds(oracle.check(base, before, after, NOTHING, ours=ours)) == \
+    assert _kinds(oracle.check(base, before, after, NOTHING, ours=ours, allow=(), theme=None)) == \
         {"cell_words_lost", "frozen_gone"}
 
 
@@ -326,7 +326,7 @@ def test_a_column_the_reader_deleted_is_not_every_row_deleted_at_once():
     before = _ir(_rows_table("t1", [["year", "count"], ["2024", "7"]]))
     after = _ir(_rows_table("t1", [["year", "count", "lantern"],
                                    ["2024", "7", "umbrella"]]))
-    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
 
 
 def test_a_row_the_reader_deleted_beside_a_column_is_still_reported():
@@ -335,7 +335,7 @@ def test_a_row_the_reader_deleted_beside_a_column_is_still_reported():
     base = _ir(_rows_table("t1", [["alpha", "xray"], ["bravo", "yankee"]]))
     before = _ir(_rows_table("t1", [["alpha"]]))
     after = _ir(_rows_table("t1", [["alpha", "xray"], ["bravo", "yankee"]]))
-    assert "row_resurrected" in _kinds(oracle.check(base, before, after, NOTHING))
+    assert "row_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
 
 
 def test_the_oracle_sees_a_block_the_reader_added_disappear():
@@ -343,9 +343,9 @@ def test_the_oracle_sees_a_block_the_reader_added_disappear():
     before = _ir(_p("k1", "Kept."), {"kind": "paragraph",
                                      "runs": [{"text": "Typed by the reader."}]})
     after = _ir(_p("k1", "Kept."))
-    assert _kinds(oracle.check(base, before, after, NOTHING)) == {"block_gone"}
+    assert _kinds(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None)) == {"block_gone"}
     said = {"conflicts": [], "notes": ["Typed by the reader. — left out, see the report"]}
-    assert not oracle.failures(oracle.check(base, before, after, said))
+    assert not oracle.failures(oracle.check(base, before, after, said, ours=None, allow=(), theme=None))
 
 
 def _grid(rows, **kw):
@@ -363,11 +363,11 @@ def test_the_oracle_knows_a_table_the_reader_beheaded_from_one_they_made():
     base = _ir(_grid([["a", "b"], ["1", "2"], ["x", "y"]], key="t1"))
     before = _ir(_grid([["1", "2"], ["x", "y"]]))           # the reader beheaded it
     after = _ir(_grid([["1", "ribbon"], ["x", "y"]], key="t1"))   # the source's cell
-    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
     # And it is judged, not excused: a word the reader typed into a row they kept has
     # to be there afterwards, exactly as in any other table.
     before = _ir(_grid([["1", "willow"], ["x", "y"]]))
-    assert _kinds(oracle.check(base, before, after, NOTHING)) == {
+    assert _kinds(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None)) == {
         "cell_words_lost", "words_lost"}
 
 
@@ -375,9 +375,9 @@ def test_the_oracle_sees_a_word_the_reader_typed_swallowed():
     base = _ir(_p("k1", "The line."))
     before = _ir(_p("k1", "The willow line."))
     after = _ir(_p("k1", "The line."))
-    assert _kinds(oracle.check(base, before, after, NOTHING)) == {"words_lost"}
+    assert _kinds(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None)) == {"words_lost"}
     said = {"conflicts": [{"key": "k1", "field": "text"}], "notes": []}
-    assert not oracle.failures(oracle.check(base, before, after, said))
+    assert not oracle.failures(oracle.check(base, before, after, said, ours=None, allow=(), theme=None))
 
 
 def test_the_oracle_sees_styling_the_reader_put_on_a_word_dropped():
@@ -385,7 +385,7 @@ def test_the_oracle_sees_styling_the_reader_put_on_a_word_dropped():
     before = _ir({"key": "k1", "kind": "paragraph",
                   "runs": [{"text": "one "}, {"text": "two", "bold": True}]})
     after = _ir(_p("k1", "one two"))
-    assert _kinds(oracle.check(base, before, after, NOTHING)) == {"styling_lost"}
+    assert _kinds(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None)) == {"styling_lost"}
 
 
 def test_a_mark_the_source_adds_beside_the_readers_is_not_the_readers_going():
@@ -399,11 +399,11 @@ def test_a_mark_the_source_adds_beside_the_readers_is_not_the_readers_going():
     after = _ir({"key": "k1", "kind": "paragraph",
                  "runs": [{"text": "one "},
                           {"text": "two", "color": "#993333", "strike": True}]})
-    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
     # And the colour really going is still a loss, strike or no strike.
     gone = _ir({"key": "k1", "kind": "paragraph",
                 "runs": [{"text": "one "}, {"text": "two", "strike": True}]})
-    assert _kinds(oracle.check(base, before, gone, NOTHING)) == {"styling_lost"}
+    assert _kinds(oracle.check(base, before, gone, NOTHING, ours=None, allow=(), theme=None)) == {"styling_lost"}
 
 
 def test_a_word_the_merge_split_into_two_runs_still_wears_what_it_wore():
@@ -419,12 +419,12 @@ def test_a_word_the_merge_split_into_two_runs_still_wears_what_it_wore():
                  "runs": [{"text": "a \xad", "color": "#993333", "strike": True},
                           {"text": "vellum ", "color": "#993333"},
                           {"text": "hyphen", "color": "#993333", "strike": True}]})
-    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
     # The colour off the half the reader typed is a loss again: the word wears a mark
     # only where every character of it does.
     half = copy.deepcopy(after)
     del half["blocks"][0]["runs"][1]["color"]
-    assert _kinds(oracle.check(base, before, half, NOTHING)) == {"styling_lost"}
+    assert _kinds(oracle.check(base, before, half, NOTHING, ours=None, allow=(), theme=None)) == {"styling_lost"}
 
 
 def _head(key, text, **kw):
@@ -443,13 +443,13 @@ def test_the_oracle_sees_a_paragraph_stop_following_the_documents_theme():
     base = _ir(_head("k1", "A heading"))
     before = _ir(_head("k1", "A heading"))
     after = _ir(_head("k1", "A heading", align="left"))
-    found = oracle.check(base, before, after, NOTHING, theme=THEME)
+    found = oracle.check(base, before, after, NOTHING, theme=THEME, ours=None, allow=())
     assert _kinds(found) == {"theme_undone"}
-    assert all(f["severity"] == "loss" for f in oracle.failures(found))
+    assert all(f.severity == "loss" for f in oracle.failures(found))
     # The file asking for it is the reason a sync may write one.
     mine = _ir(_head("k1", "A heading", align="left"))
     assert not oracle.failures(oracle.check(base, before, after, NOTHING, mine,
-                                            theme=THEME))
+                                            theme=THEME, allow=()))
 
 
 def test_a_twin_the_key_lands_on_is_not_a_paragraph_that_stopped_following_the_theme():
@@ -471,14 +471,14 @@ def test_a_twin_the_key_lands_on_is_not_a_paragraph_that_stopped_following_the_t
     after = _ir(_head("k1", "A heading", align="center"), _p("k2", "Prose."))
     mine = _ir(_p("k2", "Prose."))                           # the file drops the heading
     assert not oracle.failures(oracle.check(base, before, after, NOTHING, mine,
-                                            theme=THEME))
+                                            theme=THEME, allow=()))
     # A twin that says something else is no twin at all, and the question stands.
     other = _ir(_head("k1", "A heading"), _p("k2", "Prose."),
                 _head(None, "Another heading", align="center"))
     stands = _ir(_head("k1", "A heading", align="center"), _p("k2", "Prose."),
                  _head(None, "Another heading", align="center"))
     assert _kinds(oracle.check(base, other, stands, NOTHING, mine,
-                               theme=THEME)) == {"theme_undone"}
+                               theme=THEME, allow=())) == {"theme_undone"}
 
 
 def test_the_oracle_keeps_out_of_what_the_document_does_to_its_own_paragraphs():
@@ -489,8 +489,8 @@ def test_the_oracle_keeps_out_of_what_the_document_does_to_its_own_paragraphs():
     base = _ir(_p("k1", "A line."))
     before = _ir(_p("k1", "A line."))
     after = _ir(_p("k1", "A line.", align="center"))
-    assert not oracle.failures(oracle.check(base, before, after, NOTHING, theme=THEME))
-    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, theme=THEME, ours=None, allow=()))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
 
 
 def test_the_campaign_sees_a_theme_undone(monkeypatch):
@@ -524,8 +524,8 @@ def test_the_campaign_sees_a_theme_undone(monkeypatch):
     caught = 0
     for seed in range(40):
         found = fuzz_docs.offline_round(
-            seed, script=fuzz_docs.draw(seed, 2, shape="themed"))
-        caught += "theme_undone" in {f["kind"] for f in oracle.failures(found)}
+            seed, script=fuzz_docs.draw(seed, 2, shape="themed"), chain=1, seen=Counter())
+        caught += "theme_undone" in {f.kind for f in oracle.failures(found)}
     assert caught >= 3, "the campaign no longer reaches the defect it was built for"
 
 
@@ -548,12 +548,12 @@ def test_the_oracle_sees_a_mark_the_reader_took_off_handed_back():
     base = _run_head("k1", "A heading")
     before = _run_head("k1", "A heading", bold=False)
     after = _run_head("k1", "A heading")
-    found = oracle.check(_ir(base), _ir(before), _ir(after), NOTHING, theme=MARKED)
+    found = oracle.check(_ir(base), _ir(before), _ir(after), NOTHING, theme=MARKED, ours=None, allow=())
     assert _kinds(found) == {"styling_restored"}
     # And silent when the report owns up to it.
     said = {"conflicts": [{"key": "k1", "field": "text"}], "notes": []}
     assert not oracle.failures(oracle.check(_ir(base), _ir(before), _ir(after), said,
-                                            theme=MARKED))
+                                            theme=MARKED, ours=None, allow=()))
 
 
 def test_a_mark_the_source_asks_for_on_an_agreed_un_bolding_is_the_sources_to_ask():
@@ -568,17 +568,17 @@ def test_a_mark_the_source_asks_for_on_an_agreed_un_bolding_is_the_sources_to_as
     after = _run_head("k1", "A heading", bold=True)
     mine = _run_head("k1", "A heading", bold=True)      # the file asks for it
     assert not oracle.failures(oracle.check(_ir(base), _ir(before), _ir(after),
-                                            NOTHING, _ir(mine), theme=MARKED))
+                                            NOTHING, _ir(mine), theme=MARKED, allow=()))
     # Only the file *saying* the mark excuses it. A file that says nothing there is a
     # block the source moved, written again from nothing and handed to the theme.
     quiet = _run_head("k1", "A heading")
     assert _kinds(oracle.check(_ir(base), _ir(before), _ir(quiet), NOTHING,
-                               _ir(quiet), theme=MARKED)) == {"styling_restored"}
+                               _ir(quiet), theme=MARKED, allow=())) == {"styling_restored"}
     # And an un-bolding of this very round is the reader's news, whatever the file
     # asks for: both sides on one word is the document's, or a conflict.
     assert _kinds(oracle.check(_ir(_run_head("k1", "A heading")), _ir(before),
                                _ir(after), NOTHING, _ir(mine),
-                               theme=MARKED)) == {"styling_restored"}
+                               theme=MARKED, allow=())) == {"styling_restored"}
 
 
 def test_a_mark_no_named_style_puts_on_is_not_one_a_reader_took_off():
@@ -588,7 +588,7 @@ def test_a_mark_no_named_style_puts_on_is_not_one_a_reader_took_off():
                                                           "bold": False}]}
     after = _p("k1", "A line.")
     assert not oracle.failures(oracle.check(_ir(_p("k1", "A line.")), _ir(before),
-                                            _ir(after), NOTHING, theme=MARKED))
+                                            _ir(after), NOTHING, theme=MARKED, ours=None, allow=()))
 
 
 def test_a_block_that_stopped_being_a_heading_took_no_mark_off_anybody():
@@ -598,7 +598,7 @@ def test_a_block_that_stopped_being_a_heading_took_no_mark_off_anybody():
     before = _run_head("k1", "A heading", bold=False)
     after = {"key": "k1", "kind": "paragraph", "runs": [{"text": "A heading"}]}
     assert "styling_restored" not in _kinds(
-        oracle.check(_ir(before), _ir(before), _ir(after), NOTHING, theme=MARKED))
+        oracle.check(_ir(before), _ir(before), _ir(after), NOTHING, theme=MARKED, ours=None, allow=()))
 
 
 def test_the_bold_a_heading_inherits_is_not_bold_the_reader_put_on():
@@ -610,7 +610,7 @@ def test_the_bold_a_heading_inherits_is_not_bold_the_reader_put_on():
     before = _run_head("k1", "And prose after that.")          # merged into a heading
     after = _run_head("k1", "And prose after that.", fontsize=14.5)
     assert not oracle.failures(oracle.check(_ir(base), _ir(before), _ir(after),
-                                            NOTHING, theme=MARKED))
+                                            NOTHING, theme=MARKED, ours=None, allow=()))
 
 
 def test_a_second_copy_of_the_un_bolded_word_is_not_the_readers_coming_back():
@@ -629,12 +629,12 @@ def test_a_second_copy_of_the_un_bolded_word_is_not_the_readers_coming_back():
     after = copy.deepcopy(before)
     after["runs"].append({"text": " and harbour"})          # the source's own "and"
     assert not oracle.failures(oracle.check(_ir(base), _ir(before), _ir(after),
-                                            NOTHING, theme=MARKED))
+                                            NOTHING, theme=MARKED, ours=None, allow=()))
     # And the reader's own occurrence going back to the theme is still a loss.
     handed = copy.deepcopy(after)
     handed["runs"][1] = {"text": "and"}
     assert _kinds(oracle.check(_ir(base), _ir(before), _ir(handed), NOTHING,
-                               theme=MARKED)) == {"styling_restored"}
+                               theme=MARKED, ours=None, allow=())) == {"styling_restored"}
 
 
 def test_the_un_bolded_word_is_asked_about_in_its_own_block():
@@ -645,7 +645,7 @@ def test_the_un_bolded_word_is_asked_about_in_its_own_block():
     base = _ir(_run_head("k1", "A heading"), other)
     before = _ir(_run_head("k1", "A heading", bold=False), other)
     assert not oracle.failures(oracle.check(base, before, copy.deepcopy(before),
-                                            NOTHING, theme=MARKED))
+                                            NOTHING, theme=MARKED, ours=None, allow=()))
 
 
 def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
@@ -678,8 +678,8 @@ def test_the_campaign_sees_a_mark_the_file_cannot_say_is_off(monkeypatch):
     caught = 0
     for seed in range(400, 560):
         found = fuzz_docs.offline_round(
-            seed, script=fuzz_docs.draw(seed, 3, shape="themed"))
-        caught += "styling_restored" in {f["kind"] for f in oracle.failures(found)}
+            seed, script=fuzz_docs.draw(seed, 3, shape="themed"), chain=1, seen=Counter())
+        caught += "styling_restored" in {f.kind for f in oracle.failures(found)}
     assert caught >= 3, "the campaign no longer reaches the defect it was built for"
 
 
@@ -691,14 +691,14 @@ def test_the_oracle_sees_the_first_tab_renamed_back_under_the_reader():
     base = _ir(_p("k1", "x")) | {"tab_title": "Draft"}
     before = _ir(_p("k1", "x")) | {"tab_title": "The reader's name"}
     after = _ir(_p("k1", "x")) | {"tab_title": "The source's name"}
-    assert "tab_renamed" in _kinds(oracle.check(base, before, after, NOTHING))
+    assert "tab_renamed" in _kinds(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
     # Said out loud, it is no longer a loss...
     told = {"conflicts": [], "notes": ["the first tab was renamed on both sides — it "
                                        "keeps 'The reader's name', not 'x'"], "applied": []}
-    assert "tab_renamed" not in _kinds(oracle.check(base, before, after, told))
+    assert "tab_renamed" not in _kinds(oracle.check(base, before, after, told, ours=None, allow=(), theme=None))
     # ...and neither is a rename the reader never made.
     kept = _ir(_p("k1", "x")) | {"tab_title": "Draft"}
-    assert "tab_renamed" not in _kinds(oracle.check(base, kept, after, NOTHING))
+    assert "tab_renamed" not in _kinds(oracle.check(base, kept, after, NOTHING, ours=None, allow=(), theme=None))
 
 
 def test_the_oracle_sees_a_block_the_reader_deleted_come_back():
@@ -709,15 +709,15 @@ def test_the_oracle_sees_a_block_the_reader_deleted_come_back():
     before = _ir(_p("k1", "Kept."))
     after = _ir(_p("k1", "Kept."), _p("k2", "Struck out by the reader."))
     ours = _ir(_p("k1", "Kept."), _p("k2", "Struck out by the reader."))
-    assert "block_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    assert "block_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours, allow=(), theme=None))
     # Said out loud it is no longer silent — in the notes, which is where `accounted`
     # looks; "created", like "applied", says one line per block and would excuse all.
     told = {"conflicts": [], "applied": [],
             "notes": ["k2 was deleted in the document and the source still asks for it"]}
-    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, told, ours))
+    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, told, ours, allow=(), theme=None))
     # ...and the source dropping it too leaves nothing for the file to ask for.
     gone = _ir(_p("k1", "Kept."))
-    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, gone))
+    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, gone, allow=(), theme=None))
 
 
 def test_the_oracle_does_not_call_a_block_the_reader_moved_a_resurrection():
@@ -731,7 +731,7 @@ def test_the_oracle_does_not_call_a_block_the_reader_moved_a_resurrection():
                  _p("k1", "Kept."))
     after = _ir(_p("k2", "Dragged somewhere else."), _p("k1", "Kept."))
     ours = _ir(_p("k1", "Kept."), _p("k2", "Dragged somewhere else."))
-    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    assert "block_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, ours, allow=(), theme=None))
 
 
 def test_the_oracle_sees_a_row_the_reader_deleted_come_back():
@@ -742,14 +742,14 @@ def test_the_oracle_sees_a_row_the_reader_deleted_come_back():
     before = _ir(_grid([["h1", "h2"]], key="t1"))            # the reader deleted it
     after = _ir(_grid([["h1", "h2"], ["ribbon", "x"]], key="t1"))
     ours = _ir(_grid([["h1", "h2"], ["ribbon", "x"]], key="t1"))
-    assert "row_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    assert "row_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours, allow=(), theme=None))
     told = {"conflicts": [], "applied": [],
             "notes": ["t1: the row 'ribbon | x' the document deleted is written again"]}
-    assert "row_resurrected" not in _kinds(oracle.check(base, before, after, told, ours))
+    assert "row_resurrected" not in _kinds(oracle.check(base, before, after, told, ours, allow=(), theme=None))
     # A row whose words are still in the table is one they moved or reworded, not one
     # they deleted — the same forgiveness a block gets.
     moved = _ir(_grid([["ribbon", "x"], ["h1", "h2"]], key="t1"))
-    assert "row_resurrected" not in _kinds(oracle.check(base, moved, after, NOTHING, ours))
+    assert "row_resurrected" not in _kinds(oracle.check(base, moved, after, NOTHING, ours, allow=(), theme=None))
 
 
 def test_the_oracle_lets_the_source_spend_a_deleted_rows_words_elsewhere():
@@ -763,10 +763,10 @@ def test_the_oracle_lets_the_source_spend_a_deleted_rows_words_elsewhere():
     before = _ir(_grid([["meadow"]], key="t1"))          # the reader deleted 'thicket'
     ours = _ir(_grid([["thicket"], ["thicket"]], key="t1"))   # the source rewrote 'meadow'
     after = _ir(_grid([["thicket"]], key="t1"))
-    assert "row_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    assert "row_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, ours, allow=(), theme=None))
     # Two of them is one row more than the source ever asked for.
     twice = _ir(_grid([["thicket"], ["thicket"]], key="t1"))
-    assert "row_resurrected" in _kinds(oracle.check(base, before, twice, NOTHING, ours))
+    assert "row_resurrected" in _kinds(oracle.check(base, before, twice, NOTHING, ours, allow=(), theme=None))
 
 
 def test_a_chips_face_is_not_words_the_reader_typed():
@@ -783,11 +783,11 @@ def test_a_chips_face_is_not_words_the_reader_typed():
                   "runs": [{"text": "ask "}, chip | {"text": "Sep 20, 2026"}]})
     after = _ir({"key": "k1", "kind": "paragraph",
                  "runs": [{"text": "ask "}, chip | {"text": "2026-09-20"}]})
-    assert "words_lost" not in _kinds(oracle.check(base, before, after, NOTHING, base))
+    assert "words_lost" not in _kinds(oracle.check(base, before, after, NOTHING, base, allow=(), theme=None))
     # The chip going is another matter, and that one is still heard.
     gone = _ir(_p("k1", "ask "))
     assert "frozen_gone" in _kinds(
-        oracle.check(base, before, gone, NOTHING, _ir(*before["blocks"])))
+        oracle.check(base, before, gone, NOTHING, _ir(*before["blocks"]), allow=(), theme=None))
 
 
 def test_the_oracle_forgives_the_words_a_drag_glues_to_their_neighbours():
@@ -805,11 +805,11 @@ def test_the_oracle_forgives_the_words_a_drag_glues_to_their_neighbours():
     after = _ir(_p("k1", "Second section"),
                 _p("k2", "harbourgrace"))
     assert "block_resurrected" not in _kinds(
-        oracle.check(base, before, after, NOTHING, _ir(*base["blocks"])))
+        oracle.check(base, before, after, NOTHING, _ir(*base["blocks"]), allow=(), theme=None))
     # And a word that stands nowhere at all is still heard.
     struck = _ir(_p("k1", "Second section"))
     assert "block_resurrected" in _kinds(
-        oracle.check(base, struck, after, NOTHING, _ir(*base["blocks"])))
+        oracle.check(base, struck, after, NOTHING, _ir(*base["blocks"]), allow=(), theme=None))
 
 
 def test_the_oracle_forgives_a_block_the_reader_dragged_away_from_a_chip():
@@ -826,11 +826,11 @@ def test_the_oracle_forgives_a_block_the_reader_dragged_away_from_a_chip():
                  {"kind": "paragraph", "runs": [{"text": "And this follows."}]})
     after = _ir(_p("k1", "First."), _p("k2", "And this follows."))
     assert "block_resurrected" not in _kinds(
-        oracle.check(base, before, after, NOTHING, _ir(*base["blocks"])))
+        oracle.check(base, before, after, NOTHING, _ir(*base["blocks"]), allow=(), theme=None))
     # And a block that really was gone before the sync is still heard.
     struck = _ir(_p("k1", "First."))
     assert "block_resurrected" in _kinds(
-        oracle.check(base, struck, after, NOTHING, _ir(*base["blocks"])))
+        oracle.check(base, struck, after, NOTHING, _ir(*base["blocks"]), allow=(), theme=None))
 
 
 def test_the_oracle_sees_a_tab_the_reader_deleted_come_back():
@@ -843,27 +843,27 @@ def test_the_oracle_sees_a_tab_the_reader_deleted_come_back():
     before = _ir(_p("k1", "x"))                        # the reader deleted it
     after = _ir(_p("k1", "x"), tabs=[dict(appendix, tab="t.9")])
     ours = _ir(_p("k1", "x"), tabs=[appendix])         # the file still asks for it
-    assert "tab_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours))
+    assert "tab_resurrected" in _kinds(oracle.check(base, before, after, NOTHING, ours, allow=(), theme=None))
     # Said out loud it is no longer silent...
     told = {"conflicts": [], "notes": ["tab 'Appendix' was created again"], "applied": []}
-    assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, told, ours))
+    assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, told, ours, allow=(), theme=None))
     # ...nor is it a resurrection when the source gave the tab up too...
     gone = _ir(_p("k1", "x"))
-    assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, gone))
+    assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, gone, allow=(), theme=None))
     # ...nor when what stands there now says something else under that name...
     other = _ir(_p("k1", "x"), tabs=[dict(appendix, tab="t.9",
                                           blocks=[_p("k2", "Something else.")])])
-    assert "tab_resurrected" not in _kinds(oracle.check(base, before, other, NOTHING, ours))
+    assert "tab_resurrected" not in _kinds(oracle.check(base, before, other, NOTHING, ours, allow=(), theme=None))
     # ...nor when the source is asking for a fresh tab of that name. A `<section>` with
     # no `data-tab` is a tab the document never had, and two new tabs saying the same
     # thing are word-for-word twins by construction (chain-8 seed 65370: two `add_tab`
     # draws picked one name).
     asks = _ir(_p("k1", "x"), tabs=[appendix, {"title": "Appendix",
                                                "blocks": [_p("k2", "Later.")]}])
-    assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, asks))
+    assert "tab_resurrected" not in _kinds(oracle.check(base, before, after, NOTHING, asks, allow=(), theme=None))
     # One ask does not answer for two tabs, though.
     twice = _ir(_p("k1", "x"), tabs=[dict(appendix, tab="t.9"), dict(appendix, tab="t.10")])
-    assert "tab_resurrected" in _kinds(oracle.check(base, before, twice, NOTHING, asks))
+    assert "tab_resurrected" in _kinds(oracle.check(base, before, twice, NOTHING, asks, allow=(), theme=None))
 
 
 def test_the_oracle_sees_a_chip_the_reader_inserted_disappear():
@@ -871,7 +871,7 @@ def test_the_oracle_sees_a_chip_the_reader_inserted_disappear():
     base = _ir(_p("k1", "ask "))
     before = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "ask "}, chip]})
     after = _ir(_p("k1", "ask "))
-    assert "frozen_gone" in _kinds(oracle.check(base, before, after, NOTHING))
+    assert "frozen_gone" in _kinds(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
 
 
 def test_the_oracle_sees_a_picture_the_reader_inserted_disappear():
@@ -880,7 +880,7 @@ def test_the_oracle_sees_a_picture_the_reader_inserted_disappear():
     base = _ir(_p("k1", "look "))
     before = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, shot]})
     after = _ir(_p("k1", "look "))
-    assert "frozen_gone" in _kinds(oracle.check(base, before, after, NOTHING))
+    assert "frozen_gone" in _kinds(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
 
 
 def test_the_oracle_lets_a_picture_the_settle_named_alone():
@@ -895,13 +895,13 @@ def test_the_oracle_lets_a_picture_the_settle_named_alone():
     named = shot | {"src": "doc.media/kix.i7.png", "sha": "b9c1f0a2"}
     before = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, shot]})
     after = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, named]})
-    assert not oracle.failures(oracle.check(_ir(_p("k1", "look ")), before, after, NOTHING))
+    assert not oracle.failures(oracle.check(_ir(_p("k1", "look ")), before, after, NOTHING, ours=None, allow=(), theme=None))
     # And the other way round: a block the sync rewrote keeps the file and is given a
     # new object id, which is the case `frozen_key`'s docstring was written for.
     rewritten = named | {"value": "kix.i9", "uri": "https://example.invalid/again.png"}
     settled = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, named]})
     after = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "look "}, rewritten]})
-    assert not oracle.failures(oracle.check(settled, settled, after, NOTHING))
+    assert not oracle.failures(oracle.check(settled, settled, after, NOTHING, ours=None, allow=(), theme=None))
 
 
 def test_the_oracle_names_the_right_one_of_two_pictures_from_one_url():
@@ -920,16 +920,16 @@ def test_the_oracle_names_the_right_one_of_two_pictures_from_one_url():
                  {"key": "k2", "kind": "paragraph", "runs": [{"text": "and "}, second]})
     after = _ir(_p("k1", "look "),
                 {"key": "k2", "kind": "paragraph", "runs": [{"text": "and "}, second]})
-    found = oracle.failures(oracle.check(base, before, after, NOTHING))
-    assert [one["detail"] for one in found if "image" in one["detail"]] == [
+    found = oracle.failures(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
+    assert [one.detail for one in found if "image" in one.detail] == [
         "the image 'sha-i4' the document held is not in it any more"]
     # And the excuse asks the same question: a file that holds `second` and not
     # `first` is a source that took `first` out, and their shared uri must not make
     # the one it kept answer for the one it dropped.
     ours = _ir(_p("k1", "look "),
                {"key": "k2", "kind": "paragraph", "runs": [{"text": "and "}, second]})
-    found = oracle.failures(oracle.check(base, before, after, NOTHING, ours))
-    assert not [one for one in found if "image" in one["detail"]]
+    found = oracle.failures(oracle.check(base, before, after, NOTHING, ours, allow=(), theme=None))
+    assert not [one for one in found if "image" in one.detail]
 
 
 def test_two_copies_of_one_picture_and_the_source_drops_one():
@@ -950,10 +950,10 @@ def test_two_copies_of_one_picture_and_the_source_drops_one():
     after = _ir(held("k2", "kix.i17"))          # rewritten, so a new object id
     ours = _ir(held("k2", "kix.i15"))           # the file dropped the first block
     assert not oracle.failures(oracle.check(base, copy.deepcopy(base), after,
-                                            NOTHING, ours))
+                                            NOTHING, ours, allow=(), theme=None))
     # Both copies going is still a loss: the file asks for one of them.
     assert "frozen_gone" in _kinds(oracle.check(base, copy.deepcopy(base),
-                                                _ir(_p("k2", "  ")), NOTHING, ours))
+                                                _ir(_p("k2", "  ")), NOTHING, ours, allow=(), theme=None))
 
 
 def test_the_copy_the_reader_deleted_does_not_answer_for_the_one_the_source_drops():
@@ -977,11 +977,11 @@ def test_the_copy_the_reader_deleted_does_not_answer_for_the_one_the_source_drop
     base = _ir(held("k1", "kix.i5"), held("k2", "kix.i7"))
     before = _ir(held("k2", "kix.i7"))          # the reader deleted the first block
     ours = _ir(held("k1", "kix.i5"))            # and the source dropped the second
-    assert not oracle.failures(oracle.check(base, before, _ir(), NOTHING, ours))
+    assert not oracle.failures(oracle.check(base, before, _ir(), NOTHING, ours, allow=(), theme=None))
     # The control: a file that still asks for the copy the document holds is a
     # picture that has to survive.
     assert "frozen_gone" in _kinds(oracle.check(base, before, _ir(), NOTHING,
-                                                _ir(held("k2", "kix.i7"))))
+                                                _ir(held("k2", "kix.i7")), allow=(), theme=None))
 
 
 def test_the_oracle_lets_a_chip_go_with_the_block_the_source_dropped():
@@ -997,12 +997,12 @@ def test_the_oracle_lets_a_chip_go_with_the_block_the_source_dropped():
     after = _ir(_p("k2", "status"))
     # The file has dropped k1 and put a chip of the same address into k2.
     ours = _ir({"key": "k2", "kind": "paragraph", "runs": [{"text": "status"}, chip]})
-    assert not oracle.failures(oracle.check(base, base, after, NOTHING, ours))
+    assert not oracle.failures(oracle.check(base, base, after, NOTHING, ours, allow=(), theme=None))
     # But a chip the reader put there is not the source's to drop.
     theirs = _ir({"key": "k1", "kind": "paragraph",
                   "runs": [{"text": "ask "}, chip, {"text": " today"}]},
                  _p("k2", "status"))
-    assert "frozen_gone" in _kinds(oracle.check(base, theirs, after, NOTHING, ours))
+    assert "frozen_gone" in _kinds(oracle.check(base, theirs, after, NOTHING, ours, allow=(), theme=None))
 
 
 def test_the_oracle_sees_a_cell_the_reader_typed_in_overwritten():
@@ -1012,16 +1012,16 @@ def test_the_oracle_sees_a_cell_the_reader_typed_in_overwritten():
                          [[_p(None, "1")], [_p(None, second)]]]}
 
     base, before, after = _ir(table("2")), _ir(table("2 willow")), _ir(table("2"))
-    assert "cell_words_lost" in _kinds(oracle.check(base, before, after, NOTHING))
+    assert "cell_words_lost" in _kinds(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
 
 
 def test_the_oracle_sees_the_readers_order_undone():
     base = _ir(_p("k1", "One."), _p("k2", "Two."))
     before = _ir(_p("k2", "Two."), _p("k1", "One."))
     after = _ir(_p("k1", "One."), _p("k2", "Two."))
-    found = oracle.check(base, before, after, NOTHING)
+    found = oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None)
     assert _kinds(found) == {"order_undone"}
-    assert not oracle.failures(oracle.check(base, before, before, NOTHING))
+    assert not oracle.failures(oracle.check(base, before, before, NOTHING, ours=None, allow=(), theme=None))
 
 
 def test_the_oracle_sees_a_tab_the_reader_wrote_in_disappear():
@@ -1031,11 +1031,11 @@ def test_the_oracle_sees_a_tab_the_reader_wrote_in_disappear():
                  tabs=[dict(tab, blocks=[_p("k2", "Tab words and the reader's.")])])
     after = _ir(_p("k1", "Body."))
     ours = _ir(_p("k1", "Body."), tabs=[tab])        # the file still asks for the tab
-    assert _kinds(oracle.check(base, before, after, NOTHING, ours)) == {"tab_gone"}
+    assert _kinds(oracle.check(base, before, after, NOTHING, ours, allow=(), theme=None)) == {"tab_gone"}
     # A tab the source dropped and the reader left alone is not a loss.
     quiet = _ir(_p("k1", "Body."), tabs=[dict(tab, blocks=[_p("k2", "Tab words.")])])
     assert not oracle.failures(
-        oracle.check(base, quiet, after, NOTHING, _ir(_p("k1", "Body."))))
+        oracle.check(base, quiet, after, NOTHING, _ir(_p("k1", "Body.")), allow=(), theme=None))
 
 
 def test_the_oracle_catches_a_loss_put_into_a_real_round():
@@ -1049,12 +1049,12 @@ def test_the_oracle_catches_a_loss_put_into_a_real_round():
                                  "text": "willow "}}])
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
 
     hurt = copy.deepcopy(base)
     hurt["blocks"] = [b for b in hurt["blocks"] if b.get("key") != "paragraph:a-closing-line"]
-    assert _kinds(oracle.check(was, before, hurt, report, mine)) == {"block_gone"}
+    assert _kinds(oracle.check(was, before, hurt, report, mine, allow=(), theme=None)) == {"block_gone"}
 
 
 def test_the_oracle_lets_a_token_both_sides_edited_half_of_alone():
@@ -1065,10 +1065,10 @@ def test_the_oracle_lets_a_token_both_sides_edited_half_of_alone():
     base = _ir(_p("k1", "a soft­hyphen here"))
     before = _ir(_p("k1", "a quartz­hyphen here"))          # the reader took "soft"
     after = _ir(_p("k1", "a quartz­zephyr here"))           # the source took "hyphen"
-    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
     # And the reader's own half going is still a loss.
     gone = _ir(_p("k1", "a soft­zephyr here"))
-    assert _kinds(oracle.check(base, before, gone, NOTHING)) == {"words_lost"}
+    assert _kinds(oracle.check(base, before, gone, NOTHING, ours=None, allow=(), theme=None)) == {"words_lost"}
 
 
 def test_the_oracle_lets_a_token_the_reader_pared_down_alone():
@@ -1083,10 +1083,10 @@ def test_the_oracle_lets_a_token_the_reader_pared_down_alone():
     base = _ir(_p("k1", "a soft­hyphen here"))
     before = _ir(_p("k1", "a ­hyphen here"))                # the reader deleted "soft"
     after = _ir(_p("k1", "a ­willow here"))                 # the source reworded it
-    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
     # A word of the base the reader typed again somewhere new is still their own work.
     typed = _ir(_p("k1", "a ­hyphen here hyphen"))
-    assert _kinds(oracle.check(base, typed, after, NOTHING)) == {"words_lost"}
+    assert _kinds(oracle.check(base, typed, after, NOTHING, ours=None, allow=(), theme=None)) == {"words_lost"}
 
 
 # ---------------------------------------------------------------- the world is the rules
@@ -1128,7 +1128,7 @@ def test_a_table_in_a_later_tab_keeps_the_key_the_file_gave_it():
     grid = [b for b in doc_ir.parts(ours)[1]["blocks"] if b["kind"] == "table"][0]
     assert grid["key"] == "table:year"
     grid["rows"][0][0][0]["runs"] = [{"text": "quartz"}]
-    _, ours, _ = fuzz_docs.sync_once(world, ours, base)
+    _, ours, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [b["key"] for b in doc_ir.parts(ours)[1]["blocks"]
             if b["kind"] == "table"] == ["table:year"]
 
@@ -1140,12 +1140,12 @@ def test_the_first_tab_renamed_in_the_file_is_renamed_and_stays_renamed():
     world, ours, base = _push("tabs")
     assert ours["tab_title"] == world.tabs[0].title
     ours["tab_title"] = "Chapter one"
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert world.tabs[0].title == "Chapter one"
     assert ours["tab_title"] == "Chapter one" and base["tab_title"] == "Chapter one"
     assert any("first tab renamed 'Chapter one'" in a for a in report["applied"])
     # And the sync after it writes nothing: the three sides agree.
-    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    again, _, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert again["requests"] == 0
 
 
@@ -1161,14 +1161,14 @@ def test_a_tab_the_reader_added_is_read_into_the_file_and_left_alone():
                                  "text": "A thought of my own."}}])
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     added = [p for p in doc_ir.parts(ours) if p.get("tab") == ident]
     assert len(added) == 1 and added[0]["title"] == "Reader's tab"
     assert doc_merge.block_text(added[0]["blocks"][0]) == "A thought of my own."
     # Keyed and named: the second sync finds it again rather than reading it as new.
     assert added[0]["blocks"][0]["key"]
-    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    again, _, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert again["requests"] == 0
 
 
@@ -1186,18 +1186,18 @@ def test_a_range_left_behind_by_a_join_does_not_steal_the_blocks_key():
     mark = ours["blocks"][0]["span"][1] - 1
     world.apply([{"deleteContentRange": {
         "range": {"startIndex": mark, "endIndex": mark + 1}}}])
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [b["key"] for b in ours["blocks"]] == [first]
     assert doc_merge.block_text(ours["blocks"][0]) == "Results here.What we found."
     # The swallowed block's range is gone from the document, not merely unread.
-    assert [r["name"] for r in world.tabs[0].named] == [doc_ir.KEY_PREFIX + first]
-    assert second not in [r["name"][len(doc_ir.KEY_PREFIX):] for r in world.tabs[0].named]
+    assert [r.name for r in world.tabs[0].named] == [doc_ir.KEY_PREFIX + first]
+    assert second not in [r.name[len(doc_ir.KEY_PREFIX):] for r in world.tabs[0].named]
     # And now the source rewrites the very words the surviving range sits on.
     ours["blocks"][0]["runs"] = [{"text": "Rewritten entirely."}]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [b["key"] for b in ours["blocks"]] == [first]
     assert doc_merge.block_text(ours["blocks"][0]) == "Rewritten entirely."
-    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    again, _, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert again["requests"] == 0
 
 
@@ -1217,11 +1217,11 @@ def test_a_range_left_by_a_join_is_deleted_before_the_words_it_would_steal_are_w
         "range": {"startIndex": mark, "endIndex": mark + 1}}}])
     ours["blocks"][0]["runs"] = [{"text": "meadow"}]
     del ours["blocks"][1]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [b["key"] for b in ours["blocks"]] == [first]
     assert doc_merge.block_text(ours["blocks"][0]).startswith("meadow")
-    assert [r["name"] for r in world.tabs[0].named] == [doc_ir.KEY_PREFIX + first]
-    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    assert [r.name for r in world.tabs[0].named] == [doc_ir.KEY_PREFIX + first]
+    again, _, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert again["requests"] == 0
 
 
@@ -1241,7 +1241,7 @@ def test_a_block_retitled_behind_a_deleted_item_is_not_re_bulletted_by_the_settl
     by_key = {b["key"]: b for b in ours["blocks"]}
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "item:cool"]
     by_key["paragraph:follow-them-in-order"]["kind"] = "title"
-    fuzz_docs.sync_once(world, ours, base)
+    fuzz_docs.sync_once(world, ours, base, seen=Counter())
     last = doc_world.read_ir(world, ours, base)["blocks"][-1]
     assert (last["key"], last["kind"]) == ("paragraph:follow-them-in-order", "title")
 
@@ -1262,7 +1262,7 @@ def test_the_cell_judge_waits_only_for_words_the_source_really_wrote():
     written = _table([["year", "count"], ["2024", "vellum"], ["2025", "9"]])
     out = fuzz_docs._cells_arrived("table:year", was, here, written, then,
                                    {}, None, 0, seen)
-    assert [f["kind"] for f in out] == ["cell_lost"], out
+    assert [f.kind for f in out] == ["cell_lost"], out
 
 
 def test_two_paragraphs_deleted_in_front_of_a_table_do_not_delete_one_range_twice():
@@ -1276,7 +1276,7 @@ def test_two_paragraphs_deleted_in_front_of_a_table_do_not_delete_one_range_twic
     named twice.
     """
     block = {"key": "paragraph:empty", "rangeId": "nr.15", "range": [90, 91]}
-    assert doc_merge._orphan_range(block, 89, 90) \
+    assert doc_merge._orphan_range(block, 89, 90, cuts=()) \
         == [{"deleteNamedRange": {"namedRangeId": "nr.15"}}]
     assert doc_merge._orphan_range(block, 89, 90, [(89, 90), (90, 99)]) == []
 
@@ -1284,7 +1284,7 @@ def test_two_paragraphs_deleted_in_front_of_a_table_do_not_delete_one_range_twic
                                 _table([["a"]]), _para("End.")])
     ours["blocks"] = [b for b in ours["blocks"]
                       if b.get("key") not in ("paragraph:empty", "paragraph:empty#2")]
-    fuzz_docs.sync_once(world, ours, base)
+    fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _keys(doc_world.read_ir(world, ours, base)) \
         == ["paragraph:head", "table:a", "paragraph:end"]
 
@@ -1305,7 +1305,7 @@ def test_an_empty_paragraph_of_the_sources_own_is_never_a_tables_lead():
     world, ours, base = _build([_table([["a"]]), _para(""), _table([["b"]])])
     first, rest = ours["blocks"][0], ours["blocks"][1:]
     ours["blocks"] = rest + [first]            # the source moves the opening table down
-    fuzz_docs.sync_once(world, ours, base)
+    fuzz_docs.sync_once(world, ours, base, seen=Counter())
     keys = _keys(doc_world.read_ir(world, ours, base))
     assert "paragraph:empty" in keys, keys
     assert keys.index("paragraph:empty") < keys.index("table:b") < keys.index("table:a")
@@ -1329,8 +1329,8 @@ def test_a_paragraph_dragged_against_a_cells_word_is_not_a_word_of_the_readers()
                                  tab_was) == []
     # Without the tab's own base words the weld is invisible, and the source rewriting
     # its half of the token reads as the reader's work gone.
-    assert [f["kind"] for f in
-            oracle._cell_findings("table:h1", here, was, then, after, {}, None)] \
+    assert [f.kind for f in
+            oracle._cell_findings("table:h1", here, was, then, after, {}, None, tab_was=None)] \
         == ["cell_words_lost"]
 
 
@@ -1353,12 +1353,12 @@ def test_a_table_the_source_moves_and_regrids_at_once_keeps_the_row_the_reader_d
     # the move is written for — and gives it a row of its own.
     table["rows"].append([[_para("zephyr")], [_para("willow")]])
     ours["blocks"] = [table, ours["blocks"][0], ours["blocks"][2]]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [b["kind"] for b in ours["blocks"]] == ["table", "paragraph", "paragraph"]
     assert [[doc_merge.block_text(c[0]) for c in row] for row in ours["blocks"][0]["rows"]] \
         == [["h1", "h2"], ["zephyr", "willow"]]
     assert any("moved" in note for note in report["applied"])
-    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    again, _, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert again["requests"] == 0
 
 
@@ -1376,7 +1376,7 @@ def test_a_paragraph_the_reader_pasted_twice_over_keeps_the_originals_identity()
         end = ours["blocks"][-1]["span"][1] - 1
         world.apply([{"insertText": {"location": {"index": end},
                                      "text": "\n" + text}}])
-        report, ours, base = fuzz_docs.sync_once(world, ours, base)
+        report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [doc_merge.block_text(b) for b in ours["blocks"]] == \
         [text, "What we found.", text, text]
     # The copies are keyed apart, and the original's key never moved to one of them.
@@ -1384,10 +1384,10 @@ def test_a_paragraph_the_reader_pasted_twice_over_keeps_the_originals_identity()
     assert len(set(_keys(ours))) == 4
     # A source edit to the original lands on the original.
     ours["blocks"][0]["runs"] = [{"text": "Results, revised."}]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [doc_merge.block_text(b) for b in ours["blocks"]] == \
         ["Results, revised.", "What we found.", text, text]
-    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    again, _, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert again["requests"] == 0
 
 
@@ -1401,12 +1401,12 @@ def test_a_tab_the_source_adds_in_the_middle_is_made_in_the_middle():
     ours["tabs"].insert(0, {"title": "Notes", "blocks": [_p("p:notes", "In between.")]})
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     assert [t.title for t in world.tabs[1:]] == ["Notes", "Appendix"]
     assert [p.get("title") for p in doc_ir.parts(ours)[1:]] == ["Notes", "Appendix"]
     assert doc_merge.block_text(doc_ir.parts(ours)[1]["blocks"][0]) == "In between."
-    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    again, _, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert again["requests"] == 0
     # And nothing goes in front of the body, which is root index 0 and the one tab
     # that cannot be deleted: the world refuses it so that a planner asking would be
@@ -1425,15 +1425,15 @@ def test_a_tab_the_reader_deleted_stays_deleted_and_goes_out_of_the_file():
     world.apply([{"deleteTab": {"tabId": ident}}])
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     # By title, not by id: a tab created again to answer for the deleted one would
     # carry a new id and slip past every check that asks for the old one.
     assert [t.title for t in world.tabs].count(title) == 0
     assert len(world.tabs) == count - 1
     assert [p.get("title") for p in doc_ir.parts(ours)[1:]].count(title) == 0
     assert [p.get("title") for p in doc_ir.parts(base)[1:]].count(title) == 0
-    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    again, _, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert again["requests"] == 0
 
 
@@ -1448,10 +1448,10 @@ def test_a_tab_the_reader_deleted_takes_the_sources_changes_to_it_with_it():
     world.apply([{"deleteTab": {"tabId": ident}}])
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     assert any("deleted in the document" in line for line in report["notes"])
-    again, _, _ = fuzz_docs.sync_once(world, ours, base)
+    again, _, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert again["requests"] == 0
 
 
@@ -1469,7 +1469,7 @@ def test_a_table_whose_anchor_row_the_source_deletes_keeps_its_key():
     assert grid["key"] == "table:year" and len(grid["rows"]) == 3
     del grid["rows"][0]                       # the row the named range lives in
     grid["rows"][0][0][0]["runs"] = [{"text": "umbrella"}]
-    _, ours, _ = fuzz_docs.sync_once(world, ours, base)
+    _, ours, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     now = [b for b in doc_ir.parts(ours)[1]["blocks"] if b["kind"] == "table"]
     assert [b["key"] for b in now] == ["table:year"]
     assert doc_merge._match_text(now[0]) == "umbrella | 7 | 2025 | 9"
@@ -1492,7 +1492,7 @@ def test_a_table_whose_anchor_row_the_reader_deletes_keeps_its_key():
     world.apply([{"deleteTableRow": {"tableCellLocation": {
         "tableStartLocation": {"index": grid["span"][0]}, "rowIndex": 0}}}])
     grid["rows"][1][1][0]["runs"] = [{"text": "kestrel"}]     # the source edits a cell
-    _, ours, _ = fuzz_docs.sync_once(world, ours, base)
+    _, ours, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     now = [b for b in ours["blocks"] if b["kind"] == "table"]
     assert [b["key"] for b in now] == ["table:a", "table:c"]
     assert doc_merge._match_text(now[1]) == "3 | kestrel"
@@ -1510,11 +1510,11 @@ def test_a_table_built_out_of_nothing_is_never_taken_for_one_that_had_words():
 
     base = {"blocks": [table([["c", "d"], ["3", "4"]]) | {"key": "table:c"}]}
     theirs = {"blocks": [table([["", ""], ["", ""]])]}
-    assert doc_merge.recover_tables(base, theirs) == 0
+    assert doc_merge.recover_tables(base, theirs, spoken_for=None) == 0
     assert theirs["blocks"][0].get("key") is None
     # And the one it is for: the reader's row delete leaves the rest of the words.
     theirs = {"blocks": [table([["3", "4"]])]}
-    assert doc_merge.recover_tables(base, theirs) == 1
+    assert doc_merge.recover_tables(base, theirs, spoken_for=None) == 1
     assert theirs["blocks"][0]["key"] == "table:c"
 
 
@@ -1537,7 +1537,7 @@ def test_a_table_the_insert_put_in_front_of_its_anchor_is_found_there():
     # the next insert splits.
     ours["blocks"] = [b for b in ours["blocks"]
                       if b.get("key") != "paragraph:a-paragraph-in-between"]
-    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [b.get("key") for b in ours["blocks"]] == [
         "table:a", "paragraph:empty", "table:c", "paragraph:the-end"]
 
@@ -1548,7 +1548,7 @@ def test_a_table_the_insert_put_in_front_of_its_anchor_is_found_there():
     ours["blocks"].insert(at, {"kind": "table", "rows": [
         [[fuzz_docs._p("h1")], [fuzz_docs._p("h2")]],
         [[fuzz_docs._p("kestrel")], [fuzz_docs._p("x")]]]})
-    _, ours, _ = fuzz_docs.sync_once(world, ours, base)
+    _, ours, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     now = [b for b in ours["blocks"] if b["kind"] == "table"]
     assert [doc_merge._match_text(b) for b in now] == [
         "a | b | 1 | 2", "h1 | h2 | kestrel | x", "3 | 4"]
@@ -1573,13 +1573,13 @@ def test_a_beheaded_table_keeps_its_key_in_a_tab_the_merge_plans_nothing_for():
     world.apply(doc_merge.on_tab([{"deleteTableRow": {"tableCellLocation": {
         "tableStartLocation": {"index": grid["span"][0]}, "rowIndex": 0}}}], part["tab"]))
     ours["tabs"] = [t for t in ours["tabs"] if t is not part]   # the source drops the tab
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert any("kept" in note for note in report["notes"])
     kept = doc_ir.parts(ours)[1]
     now = [b for b in kept["blocks"] if b["kind"] == "table"]
     assert [b["key"] for b in now] == ["table:year"]
     # And the range is really in the document: a second sync reads the key back.
-    _, ours, _ = fuzz_docs.sync_once(world, ours, base)
+    _, ours, _ = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [b["key"] for b in doc_ir.parts(ours)[1]["blocks"]
             if b["kind"] == "table"] == ["table:year"]
 
@@ -1613,7 +1613,7 @@ def test_a_table_the_reader_beheaded_does_not_take_the_key_of_one_the_source_reg
     # named, and the one with the words in it is the reader's.
     mine = next(b for b in ours["blocks"] if b["key"] == second["key"])
     mine["rows"] = mine["rows"][1:]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     grids = [b for b in base["blocks"] if b["kind"] == "table"]
     assert [b["key"] for b in grids] == [first["key"], second["key"]]
     assert [doc_merge._table_words(b) for b in grids] == ["1 2", ""]
@@ -1642,7 +1642,7 @@ def test_a_paragraph_does_not_keep_the_centring_of_the_one_deleted_above_it():
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != above["key"]]
     behind = next(b for b in ours["blocks"] if b["key"] == "paragraph:and-prose-after-that")
     behind["line_spacing"] = 1.5
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     now = next(b for b in base["blocks"] if b["key"] == "paragraph:and-prose-after-that")
     assert now.get("kind") == "paragraph"     # the heading's named style, already put back
     assert now.get("line_spacing") == 1.5     # the restyle the source did ask for
@@ -1669,7 +1669,7 @@ def test_a_paragraph_under_a_deleted_one_of_its_own_kind_is_not_centred_either()
     behind = next(b for b in ours["blocks"]
                   if b["key"] == "paragraph:the-second-paragraph-says-another")
     behind["line_spacing"] = 1.5
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     now = next(b for b in base["blocks"]
                if b["key"] == "paragraph:the-second-paragraph-says-another")
     assert now.get("line_spacing") == 1.5
@@ -1720,8 +1720,8 @@ def test_the_campaign_sees_a_restyle_that_never_arrived(monkeypatch):
                         lambda live, mine: [dict(r) for r in live.get("runs", [])])
     caught = 0
     for seed in range(32):
-        found = fuzz_docs.offline_round(seed, 3, script=fuzz_docs.draw(seed, 3))
-        caught += "restyle_lost" in {f["kind"] for f in oracle.failures(found)}
+        found = fuzz_docs.offline_round(seed, 3, script=fuzz_docs.draw(seed, 3, shape=None), seen=Counter())
+        caught += "restyle_lost" in {f.kind for f in oracle.failures(found)}
     assert caught >= 2, "the campaign no longer reaches the defect it was built for"
 
 
@@ -1768,7 +1768,7 @@ def test_a_table_whose_rows_shifted_is_not_merged_cell_by_place():
     world, ours, base = _build([_para("Counts."), _table([["year", "count"], ["2024", "7"], ["2025", "9"]])])
     table = [b for b in ours["blocks"] if b["kind"] == "table"][0]
     table["rows"][1][1][0]["runs"].append(picture)
-    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
 
     live = doc_world.read_ir(world, ours, base)
     head = [b for b in live["blocks"] if b["kind"] == "table"][0]["rows"][0][1][0]
@@ -1776,7 +1776,7 @@ def test_a_table_whose_rows_shifted_is_not_merged_cell_by_place():
                                    "personProperties": {"email": "reader@example.com"}}}])
     table = [b for b in ours["blocks"] if b["kind"] == "table"][0]
     table["rows"] = table["rows"][1:] + [[[_para("signal")], [_para("vellum")]]]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
 
     live = doc_world.read_ir(world, ours, base)
     rows = [b for b in live["blocks"] if b["kind"] == "table"][0]["rows"]
@@ -1794,7 +1794,7 @@ def test_a_block_in_front_of_a_table_of_contents_can_be_deleted():
     batch — the sync died. `doc_ir.STRUCTURAL` is what those rules are about."""
     world, ours, base = _build([_para("First line."), {"kind": "toc"}, _para("After it.")])
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "paragraph:first-line"]
-    fuzz_docs.sync_once(world, ours, base)
+    fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _keys(doc_world.read_ir(world, ours, base)) == ["toc:empty", "paragraph:after-it"]
 
 
@@ -1803,7 +1803,7 @@ def test_a_block_can_be_written_in_front_of_a_table_of_contents():
     index, where nothing can be inserted."""
     world, ours, base = _build([_para("First line."), {"kind": "toc"}, _para("After it.")])
     ours["blocks"].insert(1, _para("A new line."))
-    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [doc_merge.block_text(b) for b in doc_world.read_ir(world, ours, base)["blocks"]] \
         == ["First line.", "A new line.", "", "After it."]
 
@@ -1817,7 +1817,7 @@ def test_an_empty_paragraph_between_two_tables_is_kept_and_said_out_loud():
     world, ours, base = _build([_table([["a", "b"]]), _para(""),
                                 _table([["c", "d"]]), _para("The end.")])
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "paragraph:empty"]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _keys(doc_world.read_ir(world, ours, base)) == [
         "table:a", "paragraph:empty", "table:c", "paragraph:the-end"]
     assert any("no request can delete it" in line for line in report["notes"])
@@ -1836,8 +1836,8 @@ def test_a_table_the_reader_typed_in_survives_the_source_dropping_it():
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     ours["blocks"] = [b for b in ours["blocks"] if b["kind"] != "table"]
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
 
 
 def test_a_block_with_an_equation_survives_the_source_dropping_it():
@@ -1850,8 +1850,8 @@ def test_a_block_with_an_equation_survives_the_source_dropping_it():
     ours["blocks"] = [b for b in ours["blocks"]
                       if not any(r.get("chip") == "equation" for r in b.get("runs", []))]
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
 
 
 def test_a_paragraph_stays_a_paragraph_when_the_heading_above_it_is_deleted():
@@ -1862,7 +1862,7 @@ def test_a_paragraph_stays_a_paragraph_when_the_heading_above_it_is_deleted():
     read-back's and `tidy_requests` writes the difference."""
     world, ours, base = _push("prose")
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "heading:notes"]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert base["blocks"][0]["kind"] == "paragraph"
 
 
@@ -1894,7 +1894,7 @@ def test_a_heading_the_source_turned_into_a_paragraph_is_a_paragraph():
                        "runs": [{"text": "Results"}]}]}
     mine = {"blocks": [{"key": "k", "kind": "paragraph", "runs": [{"text": "Results"}]}]}
     live = copy.deepcopy(was)
-    merged = doc_merge.merge(was, mine, live)["blocks"][0]
+    merged = doc_merge.merge(was, mine, live).blocks[0]
     assert merged["kind"] == "paragraph" and merged.get("level") is None
 
 
@@ -1918,8 +1918,8 @@ def test_a_block_the_source_reworded_and_moved_keeps_the_readers_styling():
     ours["blocks"][0]["runs"][0]["text"] = "lantern beta"
     ours["blocks"].append(ours["blocks"].pop(0))
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     moved = doc_world.read_ir(world, ours, base)["blocks"][-1]
     assert [(r["text"], r.get("bold")) for r in moved["runs"]] == \
         [("lantern ", None), ("beta", True)]
@@ -1944,12 +1944,12 @@ def test_a_block_whose_only_change_was_a_mark_is_not_one_the_source_may_delete()
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     ours["blocks"].pop(0)                          # the source drops that very block
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     live = doc_world.read_ir(world, ours, base)
     assert [(r["text"], r.get("bold")) for r in live["blocks"][0]["runs"]] == \
         [("alpha ", None), ("beta", True), (" gamma", None)]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -1978,8 +1978,8 @@ def test_a_table_the_reader_styled_a_cell_of_is_not_one_the_source_may_move():
         was, mine = copy.deepcopy(base), copy.deepcopy(ours)
         ours["blocks"].insert(3, ours["blocks"].pop(1))       # the source moves it
         before = doc_world.settled_ir(world, ours, base)
-        report, ours, base = fuzz_docs.sync_once(world, ours, base)
-        assert not oracle.failures(oracle.check(was, before, base, report, mine))
+        report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+        assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
         live = doc_world.read_ir(world, ours, base)
         assert [b["kind"] for b in live["blocks"]] == \
             ["paragraph", "table", "paragraph", "paragraph", "paragraph"], edit
@@ -1987,7 +1987,7 @@ def test_a_table_the_reader_styled_a_cell_of_is_not_one_the_source_may_move():
         assert (kept["runs"][0].get("smallcaps") if edit == "mark"
                 else kept.get("align")) == (True if edit == "mark" else "center"), edit
         assert any("the document changed it" in note for note in report["notes"]), edit
-        again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+        again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
         assert again["applied"] == [], edit
 
 
@@ -2039,10 +2039,10 @@ def test_an_empty_paragraph_whose_mark_a_delete_borrows_keeps_its_name():
                                 _para("After.")])
     assert _keys(doc_world.read_ir(world, ours, base))[0] == "paragraph:empty"
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "paragraph:gone"]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _keys(doc_world.read_ir(world, ours, base)) == \
         ["paragraph:empty", "table:a", "paragraph:after"]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2057,11 +2057,11 @@ def test_a_chip_the_source_puts_in_a_table_cell_is_written():
     ours["blocks"][1]["rows"][0][1][0].setdefault("runs", []).append(
         {"chip": "person", "frozen": True, "text": "Grace",
          "value": "grace@example.com"})
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     cell = doc_world.read_ir(world, ours, base)["blocks"][1]["rows"][0][1][0]
     assert [oracle.frozen_key(r) for r in cell["runs"] if r.get("frozen")] == \
         [("person", "grace@example.com")]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2084,13 +2084,13 @@ def test_a_column_the_reader_styled_is_not_one_the_source_may_take_away():
         "textStyle": {"smallCaps": True}, "fields": "smallCaps"}}])
     for row in ours["blocks"][1]["rows"]:
         row.pop(0)                                  # the source drops the column
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     kept = doc_world.read_ir(world, ours, base)["blocks"][1]
     assert [[doc_merge.block_text(b) for b in cell] for row in kept["rows"]
             for cell in row] == [["a"], ["b"], ["c"], ["d"]]
     assert kept["rows"][1][0][0]["runs"][0].get("smallcaps") is True
     assert any("took away a column" in note for note in report["notes"])
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2103,13 +2103,13 @@ def test_the_campaigns_cell_judge_asks_what_a_chip_is_not_what_it_reads_as(monke
     of `cell_chip` failed 16 regression seeds at once and every one of them was the
     judge's own. The test above is the sync's side of the same round.
     """
-    script = {"shape": "two_tables",
-              "steps": [{"reader": [], "source": [("cell_chip", 612933180)]}]}
-    assert not oracle.failures(fuzz_docs.run_script(copy.deepcopy(script), Counter()))
+    script = fuzz_docs.Script(shape="two_tables", steps=(
+        fuzz_docs.Step(reader=(), source=(("cell_chip", 612933180),)),))
+    assert not oracle.failures(fuzz_docs.run_script(script, Counter()))
     monkeypatch.setattr(fuzz_docs, "_cell_says", lambda block: {
         at: (text, ()) for at, text in oracle.cells_of(block).items()})
-    blind = oracle.failures(fuzz_docs.run_script(copy.deepcopy(script), Counter()))
-    assert {f["kind"] for f in blind} == {"cell_lost"}
+    blind = oracle.failures(fuzz_docs.run_script(script, Counter()))
+    assert {f.kind for f in blind} == {"cell_lost"}
 
 
 def test_a_cell_the_source_splits_keeps_the_chip_it_holds():
@@ -2130,12 +2130,12 @@ def test_a_cell_the_source_splits_keeps_the_chip_it_holds():
     cell[0]["runs"].append({"chip": "person", "frozen": True, "text": "Grace",
                             "value": "grace@example.com"})
     cell.append(_para("meadow"))
-    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     live = doc_world.read_ir(world, ours, base)["blocks"][1]["rows"][0][1]
     assert [doc_merge.block_text(b) for b in live] == ["b" + doc_merge.FROZEN, "meadow"]
     assert [oracle.frozen_key(r) for b in live for r in b["runs"] if r.get("frozen")] \
         == [("person", "grace@example.com")]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2160,11 +2160,11 @@ def test_a_chip_the_source_swaps_in_a_cell_it_splits_is_written():
         {"text": "thicket"},
         {"chip": "person", "frozen": True, "text": "Grace",
          "value": "grace@example.com"}]})
-    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     live = doc_world.read_ir(world, ours, base)["blocks"][1]["rows"][0][0]
     assert [oracle.frozen_key(r) for b in live for r in b["runs"] if r.get("frozen")] \
         == [("person", "grace@example.com")]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2186,10 +2186,10 @@ def test_the_table_a_rewrite_changes_is_still_the_table_it_was():
         {"chip": "person", "frozen": True, "text": "Grace",
          "value": "grace@example.com"})
     ours["blocks"][1]["rows"][0][1].append(_para("ribbon"))
-    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _keys(doc_world.read_ir(world, ours, base)) == \
         ["paragraph:one", "table:a", "paragraph:two"]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2210,20 +2210,20 @@ def test_a_bold_the_source_grew_over_the_word_before_it_is_written():
         "range": {"startIndex": start + 16, "endIndex": start + 26},
         "textStyle": {"bold": True}, "fields": "bold"}}])
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert not oracle.failures(oracle.check(was, doc_world.settled_ir(world, mine, was),
-                                            base, report, mine))
+                                            base, report, mine, allow=(), theme=None))
     # The source now asks for the bold one word wider, and for nothing else at all.
     ours["blocks"][0]["runs"] = [{"text": "the value"},
                                  {"text": " holds everywhere", "bold": True}]
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     live = doc_world.read_ir(world, ours, base)
     assert [(r["text"], r.get("bold")) for r in live["blocks"][0]["runs"]] == \
         [("the value", None), (" holds everywhere", True)]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2245,8 +2245,8 @@ def test_a_word_the_reader_marked_is_not_a_restyle_when_the_source_only_rewords(
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     ours["blocks"][0]["runs"][0]["text"] = "alpha beta epsilon"
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     assert not [note for note in report["notes"] if "restyled" in note]
     live = doc_world.read_ir(world, ours, base)
     assert [(r["text"], r.get("bold")) for r in live["blocks"][0]["runs"]] == \
@@ -2275,15 +2275,15 @@ def test_a_block_the_reader_only_centred_is_not_one_the_source_may_delete():
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     ours["blocks"].pop(0)                          # the source drops that very block
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     live = doc_world.read_ir(world, ours, base)
     assert [doc_merge.block_text(b) for b in live["blocks"]] == \
         ["alpha beta gamma", "The end."]
     assert live["blocks"][0].get("align") == "center"
     assert any("dropped by the source but edited in the document" in note
                for note in report["notes"])
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2301,8 +2301,8 @@ def test_a_styled_word_the_source_replaced_is_reported_with_the_styling():
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     ours["blocks"][0]["runs"][0]["text"] = "alpha quartz gamma"
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     assert any("'beta'" in line for line in report["notes"])
     assert doc_merge.block_text(doc_world.read_ir(world, ours, base)["blocks"][0]) \
         == "alpha quartz gamma"
@@ -2322,11 +2322,11 @@ def test_an_empty_paragraphs_key_stays_on_it_when_a_block_is_written_at_its_mark
                                 _table([["c", "d"]]), _para("The end.")])
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
     ours["blocks"].insert(at, _para("Willow here."))
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _keys(doc_world.read_ir(world, ours, base)) == [
         "table:a", "paragraph:empty", "paragraph:willow-here", "table:c", "paragraph:the-end"]
     assert _keys(ours) == _keys(base) == _keys(doc_world.read_ir(world, ours, base))
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2348,12 +2348,12 @@ def test_a_block_appended_where_a_table_is_now_last_goes_after_it_not_into_it():
     ours["blocks"].append(_para("The source added thicket."))
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     live = doc_world.read_ir(world, ours, base)
     assert _keys(live) == ["table:key", "paragraph:the-source-added-thicket"]
     assert oracle.text_of(live["blocks"][0]) == "key value"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2381,15 +2381,15 @@ def test_a_range_a_reader_stretched_over_the_next_block_does_not_take_its_key():
     stretched = doc_world.read_ir(world, ours, base)["blocks"][-2]
     assert stretched["range"][1] > doc_ir.anchor_range(stretched)[1], \
         "the split has to grow the range for this to be the case it is about"
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _keys(ours) == ["paragraph:a-line", "paragraph:a-closing-line",
                            "paragraph:sing-line"]
     ours["blocks"] = [b for b in ours["blocks"]
                       if b["key"] != "paragraph:a-closing-line"]
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     assert _keys(doc_world.read_ir(world, ours, base)) == [
         "paragraph:a-line", "paragraph:sing-line"]
 
@@ -2419,14 +2419,14 @@ def test_a_key_a_readers_chip_pushed_onto_the_mark_survives_a_structural_batch()
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
     ours["blocks"].insert(2, ours["blocks"].pop(at))
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     live = doc_world.read_ir(world, ours, base)
     assert _keys(live) == ["table:a", "paragraph:empty", "table:c", "paragraph:signal",
                            "paragraph:the-end"]
     assert [r.get("chip") for r in live["blocks"][1]["runs"]] == ["person"]
     assert oracle.text_of(live["blocks"][2]) == "c d"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2451,8 +2451,8 @@ def test_a_block_written_from_nothing_does_not_inherit_its_neighbours_styling():
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     ours["blocks"].insert(3, ours["blocks"].pop(0))     # in front of "delta", after the heading
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     moved = doc_world.read_ir(world, ours, base)["blocks"][3]
     assert [(r["text"], r.get("bold"), r.get("underline")) for r in moved["runs"]] == \
         [("alpha ", None, None), ("beta", True, None)]
@@ -2470,7 +2470,7 @@ def test_a_table_added_between_two_tables_is_refused_and_said_out_loud():
     world, ours, base = _push("two_tables")
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
     ours["blocks"].insert(at, _table([["h1", "h2"], ["willow", "x"]]))
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     texts = [oracle.text_of(b) for b in base["blocks"]]
     assert not any("willow" in one for one in texts), \
         f"the new table was written into {texts}"
@@ -2480,7 +2480,7 @@ def test_a_table_added_between_two_tables_is_refused_and_said_out_loud():
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
     ours["blocks"].insert(at, _table([["h1", "h2"], ["willow", "x"]]))
     for _ in range(2):                       # a grid is built on one pass, filled on the next
-        report, ours, base = fuzz_docs.sync_once(world, ours, base)
+        report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert "h1 h2 willow x" in [oracle.text_of(b) for b in base["blocks"]]
 
 
@@ -2499,7 +2499,7 @@ def test_an_empty_paragraph_a_new_tables_swallow_unnames_keeps_its_key():
     ours["blocks"][1]["runs"] = [chip]
     ours["blocks"].insert(2, _table([["h1", "h2"]]))
     for _ in range(2):                       # a grid is built on one pass, filled on the next
-        report, ours, base = fuzz_docs.sync_once(world, ours, base)
+        report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _keys(base) == ["paragraph:head", "paragraph:empty", "table:h1",
                            "paragraph:tail"]
     assert list(oracle.frozen_marks(base["blocks"][1])) == [("person", "grace@example.com")]
@@ -2514,7 +2514,7 @@ def test_a_paragraph_the_source_moves_between_two_tables_is_left_where_it_is():
     world, ours, base = _push("two_tables")
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
     ours["blocks"].insert(at, ours["blocks"].pop())
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _keys(base) == ["paragraph:before-both", "table:a", "table:c",
                            "paragraph:after-both"]
     assert any("no paragraph to write in" in note for note in report["notes"]), report
@@ -2535,7 +2535,7 @@ def test_a_table_the_source_moves_right_behind_another_is_left_where_it_is():
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
     ours["blocks"].insert(at - 1, ours["blocks"].pop(at))   # right behind `table:a`
     ours["blocks"][at]["align"] = "justify"                # the paragraph it passed
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert any("right behind another table" in note for note in report["notes"]), report
     assert _keys(base) == ["table:a", "paragraph:a-paragraph-in-between", "table:c",
                            "paragraph:the-end"]
@@ -2561,8 +2561,8 @@ def test_a_table_whose_move_structure_refuses_is_no_anchor_where_the_file_has_it
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:c"][0]
     ours["blocks"].insert(0, ours["blocks"].pop(at))   # in front of the table it opens on
     result = doc_merge.plan(base, ours, doc_world.read_ir(world, ours, base))
-    assert any("no paragraph to write in" in note for note in result["notes"]), result
-    assert [b.get("key") for b in result["blocks"]] == [
+    assert any("no paragraph to write in" in note for note in result.notes), result
+    assert [b.get("key") for b in result.blocks] == [
         "table:a", "paragraph:mid", "table:c", "paragraph:end"]
 
 
@@ -2582,7 +2582,7 @@ def test_a_block_the_file_puts_behind_a_table_that_cannot_move_is_said_to_stay_t
     world.apply([{"insertText": {"location": {"index": row[0][0]["span"][0]}, "text": "x"}}])
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "table:h1"][0]
     ours["blocks"] += [ours["blocks"].pop(at), ours["blocks"].pop(at)]   # table + empty
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _keys(base) == ["paragraph:status-today", "table:h1", "paragraph:empty",
                            "paragraph:one", "paragraph:two", "paragraph:three"]
     assert any("left where the document has it" in note for note in report["notes"]), report
@@ -2599,7 +2599,7 @@ def test_an_item_written_from_nothing_cannot_be_given_its_nesting_level():
     world, ours, base = _push("prose")
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "item:gamma"][0]
     ours["blocks"].insert(1, ours["blocks"].pop(at))      # the nested item, up front
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert any("written from nothing as a list item" in note
                for note in report["notes"]), report
 
@@ -2614,7 +2614,7 @@ def test_an_item_whose_mark_a_delete_hands_over_says_the_level_it_comes_out_at()
     world, ours, base = _push("prose")
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "item:beta"][0]
     ours["blocks"].append(ours["blocks"].pop(at))         # `beta`, level 0, to the end
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert any("it comes out at level 0, not at 1" in note
                for note in report["notes"]), report
     assert [b["key"] for b in base["blocks"] if b["kind"] == "item"] \
@@ -2635,7 +2635,7 @@ def test_an_item_appended_behind_a_deeper_one_says_so_although_it_asks_for_level
     world, ours, base = _build([_item("alpha"), _item("beta"), _item("gamma", 1)])
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "item:alpha"][0]
     ours["blocks"].append(ours["blocks"].pop(at))           # level 0, past level 1
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert any("it comes out at level 1, the level of the item in front of it, not at 0"
                in note for note in report["notes"]), report
     live = doc_world.read_ir(world, ours, base)
@@ -2660,13 +2660,13 @@ def test_an_item_written_in_front_of_a_nested_one_takes_that_ones_level():
                                 _para("Tail.")])
     at = [i for i, b in enumerate(ours["blocks"]) if b.get("key") == "item:beta"][0]
     ours["blocks"].insert(3, ours["blocks"].pop(at))        # beta, to just before gamma
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert any("it comes out at level 1, the level of the item it is written in front "
                "of, not at 0" in note for note in report["notes"]), report
     live = doc_world.read_ir(world, ours, base)
     assert [(b.get("key"), b.get("level")) for b in live["blocks"] if b["kind"] == "item"] \
         == [("item:alpha", 0), ("item:beta", 1), ("item:gamma", 1)]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -2682,7 +2682,7 @@ def test_an_item_that_keeps_its_own_mark_keeps_the_level_on_it():
     block = [b for b in ours["blocks"] if b.get("key") == "item:gamma"][0]
     assert block["level"] == 1
     block["level"] = 0
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert any("it stays at level 1, not at 0" in note for note in report["notes"]), report
     live = doc_world.read_ir(world, ours, base)
     assert [(b.get("key"), b.get("level")) for b in live["blocks"] if b["kind"] == "item"] \
@@ -2712,11 +2712,11 @@ def test_the_glyph_a_delete_in_front_hands_over_is_written_again():
     ours["blocks"].append(ours["blocks"].pop(at))           # a move: a delete and a write
     under = [b for b in ours["blocks"] if "Under it." in doc_ir.runs_text(b["runs"])][0]
     under.update(kind="item", level=0, ordered=True)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     live = doc_ir.from_document(world.read(), None)
     assert [(b.get("kind"), b.get("ordered")) for b in live["blocks"]] \
         == [("item", True), ("paragraph", None), ("item", False)]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -2733,14 +2733,14 @@ def test_one_item_of_a_list_cannot_be_numbered_on_its_own():
     to one source op and no reader at all)."""
     world, ours, base = _push("prose")
     [b for b in ours["blocks"] if b.get("key") == "item:alpha"][0]["ordered"] = True
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert any("Docs cannot number item:alpha and leave item:beta, item:gamma bulleted"
                in note for note in report["notes"]), report
     live = doc_world.read_ir(world, ours, base)
     assert [(b.get("key"), b.get("ordered")) for b in live["blocks"] if b["kind"] == "item"] \
         == [("item:alpha", False), ("item:beta", False), ("item:gamma", False)]
     # And the settle has written that back, so the file and the document agree.
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -2763,14 +2763,14 @@ def test_a_glyph_is_the_list_a_block_lands_in_not_the_one_it_came_from():
     ours["blocks"].insert(1, ours["blocks"].pop(at))        # gamma, to just in front
     [b for b in ours["blocks"] if b.get("key") == "paragraph:numbered-soon"][0] \
         .update(kind="item", level=0, ordered=True)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert any("Docs cannot number paragraph:numbered-soon and leave item:gamma "
                "bulleted" in note for note in report["notes"]), report
     live = doc_ir.from_document(world.read(), None)
     items = [b for b in live["blocks"] if b["kind"] == "item"]
     assert len({b.get("list") for b in items}) == 1          # one list, so one glyph
     assert {b.get("ordered") for b in items} == {True}       # gamma numbered with it
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -2795,14 +2795,14 @@ def test_a_block_written_where_a_delete_happens_takes_the_deleted_marks_level():
     block.update(kind="item", level=0)                       # moved, and bulleted
     ours["blocks"].insert(3, block)                          # to just where gamma goes
     ours["blocks"] = [b for b in ours["blocks"] if b.get("key") != "item:gamma"]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert any("paragraph:notes: written from nothing where the paragraph in front of "
                "it goes" in note and "it comes out at level 1, not at 0" in note
                for note in report["notes"]), report
     live = doc_world.read_ir(world, ours, base)
     assert [(b.get("key"), b.get("level")) for b in live["blocks"] if b["kind"] == "item"] \
         == [("item:alpha", 0), ("item:beta", 0), ("paragraph:notes", 1)]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -2834,11 +2834,11 @@ def test_the_named_style_a_bullet_was_hiding_is_written_when_the_bullet_goes():
     mix = [b for b in ours["blocks"] if b.get("key") == "item:mix"][0]
     mix.update(kind="paragraph")
     mix.pop("ordered", None), mix.pop("level", None)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     live = doc_ir.from_document(world.read(), None)
     assert [(b.get("kind"), b.get("level")) for b in live["blocks"]] \
         == [("paragraph", None), ("paragraph", None), ("item", 0)]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -2875,7 +2875,7 @@ def test_a_mark_the_reader_moved_to_another_word_survives_a_source_restyle():
     ours["blocks"][0]["runs"] = [
         {"text": "alpha "}, {"text": "bravo", "bold": True},
         {"text": " charlie "}, {"text": "delta", "italic": True}]
-    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     runs = [(r["text"], r.get("bold"), r.get("italic"))
             for r in base["blocks"][0]["runs"]]
     assert runs == [("alpha ", None, None), ("charlie", True, None),
@@ -2892,7 +2892,7 @@ def test_a_block_the_source_adds_behind_one_it_moves_goes_with_it():
     world, ours, base = _build([_para("One."), _para("Two."), _para("Three.")])
     ours["blocks"].insert(0, ours["blocks"].pop())              # `Three.` to the front
     ours["blocks"].insert(1, _para("Right behind it."))
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _keys(base) == ["paragraph:three", "paragraph:right-behind-it",
                            "paragraph:one", "paragraph:two"]
 
@@ -2917,10 +2917,10 @@ def test_two_tables_after_one_anchor_are_told_apart_by_what_they_say():
     ours["blocks"].insert(1, _table([["h1", "h2"], ["harbour", "x"]]))   # in, and adds
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)                 # one in front
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     for _ in range(2):        # a grid is built on one pass and filled on the next
-        report, ours, base = fuzz_docs.sync_once(world, ours, base)
+        report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     live = doc_world.read_ir(world, ours, base)
     assert [(b["key"], oracle.text_of(b))
             for b in live["blocks"] if b["kind"] == "table"] == \
@@ -2947,14 +2947,14 @@ def test_a_table_moved_behind_one_the_same_batch_regrids_is_found_again():
     ours["blocks"].insert(1, moved)                       # and moves table:c up to it
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     live = doc_world.read_ir(world, ours, base)
     assert [k for k in _keys(live) if k.startswith("table:")] == ["table:a", "table:c"]
     tables = [b for b in live["blocks"] if b["kind"] == "table"]
     assert oracle.text_of(tables[0]) == "1 2"             # the row is gone
     assert oracle.text_of(tables[1]) == "c d 3 4"         # and the words came along
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -2982,14 +2982,14 @@ def test_a_move_the_merge_takes_back_leaves_the_block_where_the_document_has_it(
     ours["blocks"].insert(3, _table([["h1", "h2"], ["harbour", "x"]]))
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     live = doc_world.read_ir(world, ours, base)
     assert oracle.text_of(next(b for b in live["blocks"] if b["key"] == "table:a")) \
         == "a b 1 2"
     assert sum(1 for b in live["blocks"] if not oracle.text_of(b)) == 2, \
         "one empty paragraph per attempt at the move would be left over"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -3014,15 +3014,15 @@ def test_a_kept_paragraph_does_not_follow_the_table_the_source_moves_away_from_i
     ours["blocks"].insert(1, ours["blocks"].pop(2))  # the table up past the paragraph
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     live = doc_world.read_ir(world, ours, base)
     # The paragraph is kept on the pass that moves the table and deleted on the next,
     # where it stands between two ordinary blocks and has a mark to borrow again.
     assert _keys(live) == ["paragraph:before-both", "table:h1", "paragraph:quartz-next",
                            "table:a", "paragraph:after-both"]
     assert oracle.text_of(live["blocks"][1]) == "h1 h2 thicket x"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -3040,7 +3040,7 @@ def test_a_block_in_a_second_tab_keeps_its_key_when_the_source_moves_and_rewords
         moved = blocks.pop(0)
         moved["runs"] = [{"text": "Quite another title"}]
         blocks.append(moved)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     body = {b["key"] for b in base["blocks"]}
     appendix = {b["key"] for b in doc_ir.parts(base)[1]["blocks"]}
     assert "heading:notes" in body                      # the control: the body is right
@@ -3068,10 +3068,10 @@ def test_a_table_anchored_on_an_empty_paragraph_the_batch_swallows_is_found_agai
     ours["blocks"].insert(at, _table([["h1", "h2"], ["harbour", "x"]]))
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     for _ in range(2):        # a grid is built on one pass and filled on the next
-        report, ours, base = fuzz_docs.sync_once(world, ours, base)
+        report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     live = doc_world.read_ir(world, ours, base)
     assert _keys(live) == ["paragraph:before-it", "paragraph:empty", "table:h1",
                            "paragraph:after-it"]
@@ -3101,12 +3101,12 @@ def test_a_source_move_onto_the_place_the_document_already_has_is_not_written():
     ours["blocks"].insert(2, _para("The source added zephyr."))
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     live = doc_world.read_ir(world, ours, base)
     assert oracle.text_of(next(b for b in live["blocks"] if b["kind"] == "table")) \
         == "h1 h2 harbour x"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -3131,13 +3131,13 @@ def test_a_block_moved_to_the_end_past_a_table_goes_after_it_not_into_it():
                        "table:a", "paragraph:alpha-one"]]
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
-    assert not oracle.failures(oracle.check(was, before, base, report, mine))
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
+    assert not oracle.failures(oracle.check(was, before, base, report, mine, allow=(), theme=None))
     live = doc_world.read_ir(world, ours, base)
     assert _keys(live) == ["paragraph:delta-four", "paragraph:echo-five",
                            "paragraph:beta-two", "table:a", "paragraph:alpha-one"]
     assert oracle.text_of(live["blocks"][3]) == "a b 1 2"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["applied"] == []
 
 
@@ -3158,9 +3158,9 @@ def test_the_oracle_forgives_nothing_for_punctuation_a_reader_cannot_move():
     really makes, and their own tests follow."""
     assert not hasattr(oracle, "_dressed_up") and not hasattr(oracle, "_undressed")
     was = oracle.words("a b 1 2 kestrel")
-    assert not oracle.joined_differently(".1", oracle.words("a b .thicket 2"), was)
+    assert not oracle.joined_differently(".1", oracle.words("a b .thicket 2"), was, tab_was=None, theirs=None)
     was = oracle.words("Second section. and kestrel. stands")
-    assert not oracle.joined_differently("section", oracle.words("Second kestrel."), was)
+    assert not oracle.joined_differently("section", oracle.words("Second kestrel."), was, tab_was=None, theirs=None)
 
 
 def test_the_oracle_lets_two_base_words_a_join_welded_together_go():
@@ -3178,10 +3178,10 @@ def test_the_oracle_lets_two_base_words_a_join_welded_together_go():
     token out of two blocks."""
     was = oracle.words("And prose after that. A line the source can move.")
     after = oracle.words("And prose after vellum.A line the source can move.")
-    assert oracle.joined_differently("that.A", after, was, was)
-    assert not oracle.joined_differently("that.Z", after, was, was), \
+    assert oracle.joined_differently("that.A", after, was, was, theirs=None)
+    assert not oracle.joined_differently("that.Z", after, was, was, theirs=None), \
         "`Z` is no token of the base: a word the reader typed"
-    assert not oracle.joined_differently("line.A", after, was, was), \
+    assert not oracle.joined_differently("line.A", after, was, was, theirs=None), \
         "both halves still stand in the tab, so nothing made this token disappear"
 
 
@@ -3222,7 +3222,7 @@ def _grid_block(key: str, rows: list[list[str]]) -> dict:
 def _asked(was, before, mine, after, report=None):
     from collections import Counter
     return fuzz_docs._arrived(was, before, mine, after,
-                              report or {"conflicts": [], "notes": []}, 0, Counter())
+                              report or {"conflicts": [], "notes": []}, 0, Counter(), theme={})
 
 
 def test_a_table_the_source_shrinks_and_moves_is_built_at_the_shape_it_asked_for():
@@ -3241,13 +3241,13 @@ def test_a_table_the_source_shrinks_and_moves_is_built_at_the_shape_it_asked_for
     table["rows"].pop(0)                       # the source drops the header row
     ours["blocks"].remove(table)               # ... and moves the table to the end
     ours["blocks"].append(table)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert "`table:a`: moved where the source has it" in report["applied"]
     assert [b.get("key") for b in ours["blocks"]][-1] == "table:a"
     grid = [b for b in ours["blocks"] if b.get("key") == "table:a"][0]
     assert [[doc_ir.runs_text(cell[0].get("runs", [])) for cell in row]
             for row in grid["rows"]] == [["1", "2"]]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -3260,7 +3260,7 @@ def test_the_campaign_asks_whether_the_sources_regrid_arrived():
     was = {"blocks": [_grid_block("table:x", [["a", "b"], ["1", "2"]])]}
     before = copy.deepcopy(was)                      # the reader touched nothing
     mine = {"blocks": [_grid_block("table:x", [["a", "b"]])]}   # the source drops a row
-    assert [f["kind"] for f in _asked(was, before, mine, was)] == ["grid_lost"]
+    assert [f.kind for f in _asked(was, before, mine, was)] == ["grid_lost"]
     assert not _asked(was, before, mine, mine), "the regrid arrived: nothing to say"
     assert not _asked(was, before, mine, was,
                       {"conflicts": [{"key": "table:x"}], "notes": []}), \
@@ -3276,7 +3276,7 @@ def test_the_campaign_asks_whether_the_sources_cell_edit_arrived():
     was = {"blocks": [_grid_block("table:x", [["a", "b"], ["1", "2"]])]}
     before = {"blocks": [_grid_block("table:x", [["b"], ["2"]])]}   # a column deleted
     mine = {"blocks": [_grid_block("table:x", [["a", "zephyr"], ["1", "2"]])]}
-    assert [f["kind"] for f in _asked(was, before, mine, before)] == ["cell_lost"]
+    assert [f.kind for f in _asked(was, before, mine, before)] == ["cell_lost"]
     arrived = {"blocks": [_grid_block("table:x", [["zephyr"], ["2"]])]}
     assert not _asked(was, before, mine, arrived)
     # And the cell the reader took away with its column is no arrival to wait for.
@@ -3300,7 +3300,7 @@ def test_the_campaign_asks_whether_the_sources_wording_arrived():
     was = {"blocks": [_p("k1", "Results here.")]}
     before = copy.deepcopy(was)                      # the reader touched nothing
     mine = {"blocks": [_p("k1", "Results, revised.")]}
-    assert [f["kind"] for f in _asked(was, before, mine, was)] == ["wording_lost"]
+    assert [f.kind for f in _asked(was, before, mine, was)] == ["wording_lost"]
     assert not _asked(was, before, mine, mine), "the wording arrived"
     assert not _asked(was, before, mine, was,
                       {"conflicts": [], "notes": ["k1: left alone"]}), \
@@ -3334,19 +3334,19 @@ def test_a_heading_behind_a_paragraph_the_source_drops_still_follows_the_theme()
     own doing.
     """
     world = doc_world.build([{"blocks": [
-        fuzz_docs._p("Justified prose.", align="justify"),
+        fuzz_docs._p("Justified prose.") | {"align": "justify"},
         fuzz_docs._h("A heading"), fuzz_docs._p("And prose after that.")]}],
         title="fuzz")
     world.theme = {name: dict(style) for name, style in fuzz_docs.THEME.items()}
     ours = fuzz_docs.bootstrap(world)
     base = copy.deepcopy(ours)
     ours["blocks"] = [b for b in ours["blocks"] if b["key"] != "paragraph:justified-prose"]
-    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     live = doc_world.read_ir(world, ours, base)
     assert _keys(live) == ["heading:a-heading", "paragraph:and-prose-after-that"]
     assert live["blocks"][0].get("align") is None, \
         "the heading wears the theme's centring; nobody asked it to justify itself"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -3382,7 +3382,7 @@ def test_a_mark_the_theme_already_puts_on_is_no_restyle_when_the_named_style_cha
     # And it still speaks where all four sides are one named style: the source asks
     # for an italic that never arrives.
     italic = block([plain, {"text": "heading", "italic": True}])
-    assert [f["kind"] for f in fuzz_docs._styling_arrived(
+    assert [f.kind for f in fuzz_docs._styling_arrived(
         "k1", base, base, italic, base, seen=Counter(), **asked)] == ["restyle_lost"]
 
 
@@ -3406,12 +3406,12 @@ def test_a_paragraph_the_reader_pasted_in_front_does_not_take_the_originals_key(
     ours["blocks"][0]["runs"] = [{"text": text},
                                  {"chip": "person", "frozen": True, "text": "Grace",
                                   "value": "grace@example.com"}]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [doc_merge.block_text(b) for b in ours["blocks"]] == \
         [text, text + "￼", "What we found."]
     assert _keys(ours)[1] == first, "the chip's block is the one the file named"
     assert _keys(ours)[0] != first
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -3428,9 +3428,9 @@ def test_the_oracle_lets_a_pared_down_token_whose_joiner_went_too_alone():
     base = _ir(_p("k1", "a soft\xadhyphen here"))
     before = _ir(_p("k1", "a hyphen here"))         # the reader deleted "a soft\xad"
     after = _ir(_p("k1", "a kestrel here"))         # the source reworded the other half
-    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
     both = _ir(_p("k1", "a \xadhyphen here hyphen"))
-    assert _kinds(oracle.check(base, both, after, NOTHING)) == {"words_lost"}, \
+    assert _kinds(oracle.check(base, both, after, NOTHING, ours=None, allow=(), theme=None)) == {"words_lost"}, \
         "the paring is the one with the joiner still on it; the bare word is theirs"
 
 
@@ -3453,12 +3453,12 @@ def test_a_mark_taken_off_a_block_the_source_dropped_is_not_handed_back():
     after = _ir(_run_head("k1", "A themed heading"), _p("k2", "Prose."))
     dropped = _ir(_p("k2", "Prose."))                       # the file drops the heading
     assert not oracle.failures(oracle.check(base, before, after, NOTHING, dropped,
-                                            theme=MARKED))
+                                            theme=MARKED, allow=()))
     # And the excuse is the file saying so. A file that still asks for the heading is
     # a block nobody dropped, and the un-bolding is owed.
     kept = _ir(_run_head("k1", "A themed heading"), _p("k2", "Prose."))
     assert _kinds(oracle.check(base, before, after, NOTHING, kept,
-                               theme=MARKED)) == {"styling_restored"}
+                               theme=MARKED, allow=())) == {"styling_restored"}
 
 
 def test_an_un_marked_word_the_source_reworded_away_is_not_owed_by_its_twin():
@@ -3481,7 +3481,7 @@ def test_an_un_marked_word_the_source_reworded_away_is_not_owed_by_its_twin():
     after = _ir(heading([{"text": "A "}, {"text": "vellum", "bold": False},
                          {"text": " and a thicket"}]))
     assert not oracle.failures(oracle.check(base, before, after, NOTHING, mine,
-                                            theme=MARKED))
+                                            theme=MARKED, allow=()))
     # The mirror: the source adds a second `and` and the reader's own goes back bold.
     was = _ir(_run_head("k1", "A heading and willow"))
     read = _ir(heading([{"text": "A heading "}, {"text": "and", "bold": False},
@@ -3489,7 +3489,7 @@ def test_an_un_marked_word_the_source_reworded_away_is_not_owed_by_its_twin():
     asks = _ir(_run_head("k1", "A heading and willow and harbour"))
     back = _ir(_run_head("k1", "A heading and willow and harbour"))
     assert _kinds(oracle.check(was, read, back, NOTHING, asks,
-                               theme=MARKED)) == {"styling_restored"}
+                               theme=MARKED, allow=())) == {"styling_restored"}
 
 
 def test_the_empty_block_a_new_table_swallows_is_recovered_whatever_it_wears():
@@ -3515,13 +3515,13 @@ def test_the_empty_block_a_new_table_swallows_is_recovered_whatever_it_wears():
     assert _keys(ours)[1] == "subtitle:empty"
     ours["blocks"][1]["kind"] = "paragraph"          # the source demotes it
     ours["blocks"].insert(2, fuzz_docs._t([["h1", "h2"], ["quartz", "x"]]))
-    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     live = doc_world.read_ir(world, ours, base)
     assert doc_merge.named_style(live["blocks"][1]) == "NORMAL_TEXT", \
         "the empty block the table swallowed still wears the style the source dropped"
     assert [doc_merge._table_words(b) for b in live["blocks"] if b["kind"] == "table"] \
         == ["a b 1 2", "h1 h2 quartz x", "c d 3 4"]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -3546,7 +3546,7 @@ def test_the_orphan_a_backspace_leaves_is_not_handed_to_a_new_tables_paragraph()
     base = copy.deepcopy(ours)
     assert _keys(ours) == ["paragraph:one", "paragraph:empty", "table:c"]
 
-    mark = doc_world.read_ir(world)["blocks"][0]["span"][1] - 1
+    mark = doc_world.read_ir(world, None, None)["blocks"][0]["span"][1] - 1
     world.apply([{"deleteContentRange": {"range": {"startIndex": mark,
                                                    "endIndex": mark + 1}}}])
     joined = doc_world.read_ir(world, ours, base)
@@ -3555,12 +3555,12 @@ def test_the_orphan_a_backspace_leaves_is_not_handed_to_a_new_tables_paragraph()
     # The source never saw that: it rewords the block and puts a table in front of it.
     ours["blocks"][1]["runs"] = [{"text": " and harbour"}]
     ours["blocks"].insert(2, fuzz_docs._t([["h1", "h2"], ["quartz", "x"]]))
-    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
 
     live = doc_world.read_ir(world, ours, base)
     assert [doc_merge.block_text(b) for b in live["blocks"]] == ["One.", "", "", ""], \
         "the block the reader deleted is back, with the source's words written into it"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -3582,15 +3582,15 @@ def test_a_block_the_merge_will_not_write_is_asked_about_by_the_key_it_is_refuse
     ours["blocks"].insert(at, _para("The source added willow."))
     was, mine = copy.deepcopy(base), copy.deepcopy(ours)
     before = doc_world.settled_ir(world, ours, base)
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     note = next(n for n in report["notes"] if "no paragraph to write in" in n)
     assert "takes it back out of the file" in note, note
     assert not any("willow" in oracle.text_of(b) for b in ours["blocks"]), \
         "the settle regenerates the file from the document, which has no such block"
     assert fuzz_docs._arrived(was, before, copy.deepcopy(mine), ours, report, 0,
-                              Counter()) == []
+                              Counter(), theme={}) == []
     # Asked the way it used to be — the file unkeyed — the refusal cannot be looked up.
-    assert [f["kind"] for f in fuzz_docs._existence_arrived(
+    assert [f.kind for f in fuzz_docs._existence_arrived(
         was, before, copy.deepcopy(mine), ours, oracle.accounted(report), None, 0,
         Counter())] == ["addition_lost"]
 
@@ -3695,7 +3695,7 @@ def test_anything_at_all_happening_to_a_twin_does_not_lose_the_copy_that_arrived
     assert fuzz_docs._existence_arrived(base, base, file_p, end_p, "", None, 0,
                                         Counter()) == []
     end_p["blocks"] = end_p["blocks"][:2]          # the copy really is gone
-    assert [f["kind"] for f in fuzz_docs._existence_arrived(
+    assert [f.kind for f in fuzz_docs._existence_arrived(
         base, base, file_p, end_p, "", None, 0, Counter())] == ["addition_lost"]
 
 
@@ -3714,12 +3714,12 @@ def test_a_table_that_never_said_anything_is_recovered_onto_nothing():
     base = {"blocks": [dict(_table([[""], [""]]), key="table:empty")]}
     built, beheaded = _table([["", ""], ["", ""]]), _table([["vellum "]])
     theirs = {"blocks": [built, beheaded]}
-    assert doc_merge.recover_tables(base, theirs) == 0
+    assert doc_merge.recover_tables(base, theirs, spoken_for=None) == 0
     assert not built.get("key") and not beheaded.get("key")
     # A table with words is still recovered by them.
     base = {"blocks": [dict(_table([["alpha", "beta"]]), key="table:alpha")]}
     theirs = {"blocks": [_table([["", ""], ["", ""]]), _table([["alpha", "beta"]])]}
-    assert doc_merge.recover_tables(base, theirs) == 1
+    assert doc_merge.recover_tables(base, theirs, spoken_for=None) == 1
     assert theirs["blocks"][1]["key"] == "table:alpha"
 
 
@@ -3741,8 +3741,9 @@ def test_a_table_the_batch_regridded_is_not_the_one_the_reader_beheaded():
     lines = {"row": [doc_merge._Line(0, 0, None, True), doc_merge._Line(1, 1, 0),
                      doc_merge._Line(2, 2, 1)],
              "column": [doc_merge._Line(0, 0, 0)]}
-    told = {"key": "table:c", "after": "paragraph:before-both",
-            "ops": [{"deleteTableRow": {}}], "lines": lines}
+    told = doc_merge.Told(key="table:c", after="paragraph:before-both", moved=False,
+                          lines=lines, ops=[("row", "delete", 1)], swallowed=None, eaten=None,
+                          note="")
     beheaded, regridded = _table([["b"]]), _table([[""], ["4"]])
     live = {"blocks": [_p("paragraph:before-both", "Before both."),
                        beheaded, regridded]}
@@ -3788,7 +3789,7 @@ def test_two_empty_paragraphs_trading_names_is_not_an_order_undone():
     # The same shape with the wordless population unchanged: the judge still sees it.
     src = {"blocks": [tables[0], tail[0], _p("paragraph:the", "The "), tables[1],
                       _p("paragraph:empty", ""), tail[1]]}
-    assert [f["kind"] for f in fuzz_docs._order_arrived(
+    assert [f.kind for f in fuzz_docs._order_arrived(
         was, was, src, was, "", None, 0, Counter())] == ["order_lost"]
 
 
@@ -3807,10 +3808,10 @@ def test_the_stop_the_source_parks_against_a_word_does_not_take_its_bold_away():
                   "runs": [{"text": "zephyr", "bold": True}, {"text": " both."}]})
     after = _ir({"key": "k1", "kind": "paragraph",
                  "runs": [{"text": "lantern zephyr", "bold": True}, {"text": "."}]})
-    assert not oracle.failures(oracle.check(base, before, after, NOTHING))
+    assert not oracle.failures(oracle.check(base, before, after, NOTHING, ours=None, allow=(), theme=None))
     # And the bold really going is a loss still, stop or no stop.
     gone = _ir({"key": "k1", "kind": "paragraph", "runs": [{"text": "lantern zephyr."}]})
-    assert _kinds(oracle.check(base, before, gone, NOTHING)) == {"styling_lost"}
+    assert _kinds(oracle.check(base, before, gone, NOTHING, ours=None, allow=(), theme=None)) == {"styling_lost"}
 
 
 def test_a_key_this_batch_is_about_to_place_is_not_the_recoverys_to_give():
@@ -3837,7 +3838,7 @@ def test_a_key_this_batch_is_about_to_place_is_not_the_recoverys_to_give():
     assert [b.get("key") for b in theirs["blocks"]] == ["table:a", None]
     # Without it, the batch's own key is the one the guess gives away.
     theirs = copy.deepcopy(scene)
-    assert doc_merge.recover_tables(base, theirs) == 1
+    assert doc_merge.recover_tables(base, theirs, spoken_for=None) == 1
     assert [b.get("key") for b in theirs["blocks"]] == ["table:h1", None]
 
 
@@ -3899,7 +3900,7 @@ def test_the_empty_paragraph_a_moved_tables_delete_eats_gets_its_name_back():
     empty = next(b for b in ours["blocks"] if b["key"] == "paragraph:empty")
     empty["kind"], empty["level"] = "heading", 1
 
-    _, ours, base = fuzz_docs.sync_once(world, ours, base)
+    _, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     live = doc_world.read_ir(world, ours, base)
     # `paragraph:empty#2` is the one `insertTable` leaves between the two tables,
     # which no request can delete and Docs wants there anyway.
@@ -3908,7 +3909,7 @@ def test_the_empty_paragraph_a_moved_tables_delete_eats_gets_its_name_back():
     kept = live["blocks"][-1]
     assert doc_merge.named_style(kept) == "HEADING_1", \
         "the block is there, so the source's restyle of it has somewhere to go"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -3932,12 +3933,12 @@ def test_a_cell_both_sides_wrote_in_is_reported_under_the_table_it_is_in():
     assert _keys(ours) == ["paragraph:one", "table:a"]
 
     # The reader writes in the first cell, and the source writes something else there.
-    cell = doc_world.read_ir(world)["blocks"][1]["rows"][0][0][0]
+    cell = doc_world.read_ir(world, None, None)["blocks"][1]["rows"][0][0][0]
     world.apply([{"insertText": {"location": {"index": cell["span"][0]},
                                  "text": "meadow "}}])
     ours["blocks"][1]["rows"][0][0][0]["runs"] = [{"text": "thicket a"}]
 
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert [(c["ours"], c["theirs"], c["key"]) for c in report["conflicts"]] \
         == [("thicket ", "meadow ", "table:a")], \
         "the cell is named by the table it is in, which is the only address it has"
@@ -3978,7 +3979,7 @@ def test_how_the_reader_set_a_paragraph_survives_the_source_moving_a_chip_in_it(
     block["runs"] = block["runs"] + [{"chip": "person", "frozen": True,
                                       "text": "Grace", "value": "grace@example.com"}]
 
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     after = next(b for b in doc_world.read_ir(world, ours, base)["blocks"]
                  if b.get("key") == key)
     assert (after.get("align"), after.get("space_above")) == ("center", 12.0), \
@@ -3986,7 +3987,7 @@ def test_how_the_reader_set_a_paragraph_survives_the_source_moving_a_chip_in_it(
     assert any(r.get("frozen") for r in after["runs"]), \
         "and the source's chip went in all the same"
     assert not report["notes"], "neither side contradicted the other, so nothing to say"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -4016,7 +4017,7 @@ def test_a_link_the_reader_made_survives_the_source_moving_the_block():
         "fields": "link"}}])
 
     ours["blocks"].append(ours["blocks"].pop(0))       # and the source moves that block
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     after = doc_world.read_ir(world, ours, base)["blocks"]
     assert [doc_merge.block_text(b) for b in after] == \
         ["Second.", "Third.", "See the manual for details."]
@@ -4024,7 +4025,7 @@ def test_a_link_the_reader_made_survives_the_source_moving_the_block():
         [("See the ", None), ("manual", "https://example.invalid/manual"),
          (" for details.", None)], "the link came back on the word, and only on it"
     assert not report["notes"], "the source said nothing about links, so nothing to say"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -4042,7 +4043,7 @@ def test_a_link_the_reader_made_outranks_a_source_restyle_of_the_same_block():
         "fields": "link"}}])
 
     ours["blocks"][0]["runs"][0]["italic"] = True     # the source italicises the line
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     after = doc_world.read_ir(world, ours, base)["blocks"][0]
     assert [(r["text"], r.get("link"), r.get("italic")) for r in after["runs"]] == \
         [("See the ", None, None),
@@ -4051,7 +4052,7 @@ def test_a_link_the_reader_made_outranks_a_source_restyle_of_the_same_block():
     assert report["notes"] == ["paragraph:see-the-manual-for-details: both sides "
                                "restyled it — the document's styling is kept and the "
                                "source's is not written"]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -4076,7 +4077,7 @@ def test_a_link_the_source_takes_off_goes_because_link_is_managed():
         [None, "https://example.invalid/manual", None], "the file says it, so it is there"
 
     ours["blocks"][0]["runs"] = [{"text": "See the manual for details."}]
-    fuzz_docs.sync_once(world, ours, base)
+    fuzz_docs.sync_once(world, ours, base, seen=Counter())
     after = doc_world.read_ir(world, ours, base)["blocks"][0]
     assert [(r["text"], r.get("link")) for r in after["runs"]] == \
         [("See the manual for details.", None)], "and the link went with it"
@@ -4123,14 +4124,14 @@ def test_a_nesting_level_the_reader_chose_is_named_when_a_rewrite_takes_it():
 
     beta = next(b for b in ours["blocks"] if "beta" in doc_merge.block_text(b))
     ours["blocks"].append(ours["blocks"].pop(ours["blocks"].index(beta)))
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _levels(world) == [("alpha", 0), ("gamma", 1), ("beta", 0)]
     assert report["notes"] == [
         "item:beta: written from nothing as a list item, and no request gives a "
         "bullet its nesting level — it comes out at level 0, where "
         "`createParagraphBullets` starts a list of its own, not at 1"], \
         "and the note names the list it really lands in, not an item in front of it"
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0
 
 
@@ -4146,11 +4147,11 @@ def test_a_nesting_level_a_delete_in_front_hands_over_is_named_too():
 
     ours["blocks"] = [b for b in ours["blocks"]
                       if "alpha" not in doc_merge.block_text(b)]
-    report, ours, base = fuzz_docs.sync_once(world, ours, base)
+    report, ours, base = fuzz_docs.sync_once(world, ours, base, seen=Counter())
     assert _levels(world) == [("beta", 0), ("gamma", 1)]
     assert report["notes"] == [
         "item:beta: the paragraph in front of it goes, and Docs hands its style to "
         "this one — no request gives a bullet its nesting level, so it comes out at "
         "level 0, not at 1"]
-    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base))
+    again, _, _ = fuzz_docs.sync_once(world, copy.deepcopy(ours), copy.deepcopy(base), seen=Counter())
     assert again["requests"] == 0

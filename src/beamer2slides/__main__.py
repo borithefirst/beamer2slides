@@ -19,7 +19,9 @@
 import argparse
 import json
 import time
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TypeVar
 
 from .classify import classify
 from .debug import render_debug
@@ -29,6 +31,7 @@ from .paths import out_root
 from .raw_types import RawDoc
 
 BACKUP_MODES = ("auto", "none", "file", "drive", "both")  # = guard.BACKUP_MODES (imported lazily)
+_V = TypeVar("_V")
 
 
 def check_labels(deck: dict, mode: str) -> None:
@@ -190,26 +193,101 @@ def cmd_label(tex: Path, apply: bool) -> None:
     print(f"labelled {len(edits)} frame(s). Recompile, then convert or sync as usual.")
 
 
-def cmd_docs(args) -> None:
+@dataclass(frozen=True, kw_only=True)
+class DocsPush:
+    """`docs push`, as the command line said it."""
+    file: Path
+    name: str | None
+    new_doc: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class DocsAdopt:
+    """`docs adopt`: the document, and where its file goes (None: a slug of its title)."""
+    doc: str
+    file: Path | None
+    force: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class DocsSync:
+    """`docs sync`: the file, the document when the file's own is not the one, and how."""
+    file: Path
+    doc: str | None
+    dry_run: bool
+    assume_base: str | None
+    backup: bool
+
+
+def _said(args: argparse.Namespace, name: str) -> object:
+    """One of argparse's answers, as a value still to be narrowed."""
+    value: object = getattr(args, name)
+    return value
+
+
+def _path(args: argparse.Namespace, name: str) -> Path | None:
+    value = _said(args, name)
+    if value is None or isinstance(value, Path):
+        return value
+    raise SystemExit(f"--{name}: a path was expected, found {value!r}")
+
+
+def _text(args: argparse.Namespace, name: str) -> str | None:
+    value = _said(args, name)
+    if value is None or isinstance(value, str):
+        return value
+    raise SystemExit(f"--{name}: a word was expected, found {value!r}")
+
+
+def _flag(args: argparse.Namespace, name: str) -> bool:
+    return _said(args, name) is True
+
+
+def _given(value: _V | None, name: str) -> _V:
+    if value is None:
+        raise SystemExit(f"{name} is required")
+    return value
+
+
+def docs_command(args: argparse.Namespace) -> DocsPush | DocsAdopt | DocsSync:
+    """The `docs` subcommand argparse read, as the record its journey takes. Every
+    default is argparse's, decided here once and passed on whole."""
+    command = _text(args, "docs_command")
+    if command == "push":
+        return DocsPush(file=_given(_path(args, "file"), "file"), name=_text(args, "name"),
+                        new_doc=_flag(args, "new_doc"))
+    if command == "adopt":
+        return DocsAdopt(doc=_given(_text(args, "doc"), "--doc"), file=_path(args, "file"),
+                         force=_flag(args, "force"))
+    if command == "sync":
+        return DocsSync(file=_given(_path(args, "file"), "file"), doc=_text(args, "doc"),
+                        dry_run=_flag(args, "dry_run"), assume_base=_text(args, "assume_base"),
+                        backup=not _flag(args, "no_backup"))
+    raise SystemExit(f"docs: no command {command!r}")
+
+
+def cmd_docs(args: argparse.Namespace) -> None:
     """Google Docs: the canonical HTML file and the document, kept in step (docs/google-docs.md)."""
     from .doc_sync import adopt, push, sync
-    if args.docs_command == "push":
-        info = push(args.file, args.name, args.new_doc)
-        for note in info["notes"]:
+    said = docs_command(args)
+    if isinstance(said, DocsPush):
+        pushed = push(said.file, said.name, said.new_doc)
+        for note in pushed["notes"]:
             print(f"  note: {note}")
-        print(f"{args.file}: {info['blocks']} blocks, {info['anchored']} of them anchored")
-        print(f"Google Docs: {info['url']}")
+        print(f"{said.file}: {pushed['blocks']} blocks, {pushed['anchored']} of them anchored")
+        print(f"Google Docs: {pushed['url']}")
         return
-    if args.docs_command == "adopt":
-        info = adopt(args.doc, args.file, args.force)
-        for note in info["notes"]:
+    if isinstance(said, DocsAdopt):
+        # A file named by the document's title lands in the folder the person typed in.
+        adopted = adopt(said.doc, said.file, said.force, None)
+        for note in adopted["notes"]:
             print(f"  note: {note}")
-        print(f"{info['file']}: {info['blocks']} blocks, {info['anchored']} of them anchored, "
-              f"{info['tabs']} tab(s)")
-        print(f"Google Docs: {info['url']}")
-        print(f"`docs sync {info['file']}` from here on.")
+        print(f"{adopted['file']}: {adopted['blocks']} blocks, {adopted['anchored']} of them "
+              f"anchored, {adopted['tabs']} tab(s)")
+        print(f"Google Docs: {adopted['url']}")
+        print(f"`docs sync {adopted['file']}` from here on.")
         return
-    info = sync(args.file, args.doc, args.dry_run, args.assume_base, not args.no_backup)
+    info = sync(said.file, said.doc, said.dry_run, said.assume_base, said.backup)
     for clash in info["conflicts"]:
         print(f"  conflict {clash['key']}: the source said {clash['ours']!r}, "
               f"the document says {clash['theirs']!r} (the document wins)")
@@ -217,7 +295,7 @@ def cmd_docs(args) -> None:
         print(f"  note: {note}")
     for comment in info.get("comments", []):
         print(f"  open comment: {comment}")
-    print(f"docs sync{' (dry run)' if args.dry_run else ''}: {len(info['applied'])} block(s) from "
+    print(f"docs sync{' (dry run)' if said.dry_run else ''}: {len(info['applied'])} block(s) from "
           f"the source, {len(info['kept'])} kept from the document, "
           f"{len(info['conflicts'])} conflict(s), {info['requests']} request(s)")
     if info.get("backup"):

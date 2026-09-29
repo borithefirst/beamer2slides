@@ -226,8 +226,7 @@ REPORT = {
 def test_a_report_becomes_diagnostics_at_the_right_levels(tmp_path):
     j = _job(tmp_path)
     counts = doc_tools.report_diagnostics(j, REPORT)
-    assert counts == {"conflicts": 2, "notes": 2, "comments": 1, "chunked": True,
-                      "lost": 0}
+    assert counts == doc_tools.SyncCounts(conflicts=2, notes=2, comments=1, chunked=True, lost=0)
     levels = [d.level for d in j.diagnostics]
     assert levels.count("conflict") == 2 and "note" not in levels
     clash = j.diagnostics[0]
@@ -243,7 +242,7 @@ def test_a_chunked_write_is_said_to_be_the_one_that_is_not_atomic(tmp_path):
     doc_tools.report_diagnostics(j, REPORT)
     chunk = [d for d in j.diagnostics if d.where == "the write"]
     assert len(chunk) == 1 and "not atomic" in chunk[0].message
-    assert doc_tools.report_diagnostics(_job(tmp_path), REPORT | {"notes": []})["chunked"] is False
+    assert doc_tools.report_diagnostics(_job(tmp_path), REPORT | {"notes": []}).chunked is False
 
 
 def test_the_one_note_that_is_a_loss_is_not_left_among_the_cautions(tmp_path):
@@ -256,13 +255,13 @@ def test_the_one_note_that_is_a_loss_is_not_left_among_the_cautions(tmp_path):
             f"paragraphStyle.borderBetween — the document's, and {doc_sync.LOSS_MARK}")
     j = _job(tmp_path)
     counts = doc_tools.report_diagnostics(j, REPORT | {"notes": [lost]})
-    assert counts["lost"] == 1
+    assert counts.lost == 1
     said = [d for d in j.diagnostics if d.where == "what is lost"]
     assert len(said) == 1 and "Why this matters" in said[0].message
     assert "no spelling for it" in said[0].message
     assert any("set the property again by hand" in step for step in j.next_steps)
     # And an ordinary note is still an ordinary note.
-    assert doc_tools.report_diagnostics(_job(tmp_path), REPORT)["lost"] == 0
+    assert doc_tools.report_diagnostics(_job(tmp_path), REPORT).lost == 0
 
 
 def test_an_open_comment_becomes_a_warning_because_nothing_else_can_see_one(tmp_path):
@@ -274,7 +273,7 @@ def test_an_open_comment_becomes_a_warning_because_nothing_else_can_see_one(tmp_
     assert len(said) == 1 and said[0].level == "warning" and said[0].where == "the document"
     assert "Ada" in said[0].message and "is this still true?" in said[0].message
     assert any("read the open comments" in step for step in j.next_steps)
-    assert doc_tools.report_diagnostics(_job(tmp_path), REPORT | {"comments": []})["comments"] == 0
+    assert doc_tools.report_diagnostics(_job(tmp_path), REPORT | {"comments": []}).comments == 0
 
 
 def test_a_merge_with_no_base_behind_it_says_so(tmp_path):
@@ -419,7 +418,7 @@ def test_a_sync_writes_the_source_edit_and_then_has_nothing_left_to_write(tmp_pa
     assert any("open comment" in d.message for d in result.diagnostics)
     assert "0 requests" in result.summary                  # and what to check next
     # The words reached the document, and the file was regenerated from what it now says.
-    said = doc_ir.runs_text(doc_world.read_ir(world)["blocks"][2]["runs"])
+    said = doc_ir.runs_text(doc_world.read_ir(world, None, None)["blocks"][2]["runs"])
     assert said == "The second paragraph, which the source rewrote, at some length."
     assert "rewrote, at some length" in path.read_text(encoding="utf-8")
     kinds = {a.kind: a.ref for a in result.artifacts}
@@ -428,7 +427,7 @@ def test_a_sync_writes_the_source_edit_and_then_has_nothing_left_to_write(tmp_pa
     assert result.data["base_file"] == ".b2s/doc.base.json"
 
     # And the base went to Drive, where the next checkout looks for it first.
-    assert docs.load_drive(drive, "doc-1")["document"] == "doc-1"
+    assert docs.load_drive(drive, "doc-1", found=None, hint=None)["document"] == "doc-1"
     again = doc_tools.doc_sync(ctx, file="doc.html")
     assert again.ok and again.data["requests"] == 0 and not again.data["written"]
     assert again.data["base"] == "drive"
@@ -484,7 +483,7 @@ def test_the_reader_wins_where_both_sides_moved(tmp_path, monkeypatch):
     world, path, _, _ = _pair(tmp_path, monkeypatch)
     # Both sides change the same word, which is the one case a three-way merge cannot
     # take both of: the reader calls it theirs, the source calls it the third.
-    at = doc_world.read_ir(world)["blocks"][2]["span"][0] + len("The ")
+    at = doc_world.read_ir(world, None, None)["blocks"][2]["span"][0] + len("The ")
     world.apply([
         {"deleteContentRange": {"range": {"startIndex": at, "endIndex": at + len("second")}}},
         {"insertText": {"location": {"index": at}, "text": "reader's"}}])
@@ -495,7 +494,7 @@ def test_the_reader_wins_where_both_sides_moved(tmp_path, monkeypatch):
     assert result.data["conflicts"] == 1
     clash = [d for d in result.diagnostics if d.level == "conflict"]
     assert len(clash) == 1 and "the document won" in clash[0].message
-    said = doc_ir.runs_text(doc_world.read_ir(world)["blocks"][2]["runs"])
+    said = doc_ir.runs_text(doc_world.read_ir(world, None, None)["blocks"][2]["runs"])
     assert said == "The reader's paragraph, which the source rewrites."
     # and the file was regenerated from the document, so it says the reader's word too.
     assert "paragraph, which the source rewrites." in path.read_text(encoding="utf-8")
@@ -528,7 +527,7 @@ def test_a_paragraph_the_file_no_longer_has_is_deleted_and_said_out_loud(tmp_pat
     assert "deleted from the document" in gone[0].message
     assert "untouched by anyone" in gone[0].message           # the words, not just a count
     assert any("put them back into the canonical file" in step for step in result.next_steps)
-    assert "untouched by anyone" not in json.dumps(doc_world.read_ir(world))
+    assert "untouched by anyone" not in json.dumps(doc_world.read_ir(world, None, None))
     report = (tmp_path / ".b2s" / "doc.sync-report.md").read_text(encoding="utf-8")
     assert "## Deleted from the document (no way back)" in report
 

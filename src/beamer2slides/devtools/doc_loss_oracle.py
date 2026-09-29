@@ -50,17 +50,20 @@ import sys
 import unicodedata
 from collections import Counter
 from collections.abc import Collection, Iterator, Mapping, Set
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from .. import doc_ir, doc_merge
 from ..doc_ir import Block, Ir, Run
+from ..json_types import Json, as_array, as_object, as_str
 
 if TYPE_CHECKING:
     from ..doc_sync import SyncReport
 
-SEVERITIES = ("loss", "undo", "report", "note")
-FAIL = ("loss", "undo", "report")
+Severity = Literal["loss", "undo", "report", "note"]
+SEVERITIES: tuple[Severity, ...] = ("loss", "undo", "report", "note")
+FAIL: tuple[Severity, ...] = ("loss", "undo", "report")
 
 WORD = re.compile(r"\S+")
 # The run marks, which are the only styling a named style can put on a word here.
@@ -75,9 +78,25 @@ FrozenKey = tuple[str, str]
 CellSays = tuple[str, tuple[tuple[FrozenKey, int], ...]]
 
 
-def finding(kind: str, severity: str, detail: str, tab=None, key=None, block=None) -> dict:
-    return {"kind": kind, "severity": severity, "detail": detail,
-            "tab": tab, "key": key, "block": block}
+@dataclass(frozen=True, kw_only=True)
+class Finding:
+    """One thing a judge has to say about a sync: what kind of thing went wrong, how
+    bad it is (`SEVERITIES`), in words, and where - the tab (None for the first) and
+    the block's key, where there is one.
+
+    Built and read only by the oracle, the campaign's judges (`fuzz_docs`) and the
+    tests, and printed through `describe`, so it is a record and not a dict: nothing
+    writes one to JSON. There was a `block` field too, which no judge ever set."""
+    kind: str
+    severity: Severity
+    detail: str
+    tab: str | None
+    key: str | None
+
+
+def finding(kind: str, severity: Severity, detail: str, tab: str | None,
+            key: str | None) -> Finding:
+    return Finding(kind=kind, severity=severity, detail=detail, tab=tab, key=key)
 
 
 # ---------------------------------------------------------------- reading an IR
@@ -192,9 +211,9 @@ def stands_elsewhere(text: str, whole: str) -> bool:
                for piece in _split(token))
 
 
-def joined_differently(token: str, after: Counter, was: Counter,
-                       tab_was: Counter | None = None,
-                       theirs: Counter | None = None) -> bool:
+def joined_differently(token: str, after: Counter[str], was: Counter[str],
+                       tab_was: Counter[str] | None,
+                       theirs: Counter[str] | None) -> bool:
     r"""A token the reader typed is not lost when the words *they* put in it are still
     there, joined to something else.
 
@@ -245,7 +264,7 @@ def joined_differently(token: str, after: Counter, was: Counter,
     return all(piece in there for piece in pieces if piece not in base)
 
 
-def _pared_down(token: str, was: Counter, theirs: Counter | None = None) -> bool:
+def _pared_down(token: str, was: Counter[str], theirs: Counter[str] | None) -> bool:
     """Whether this token is a token of the base with one of its joined words deleted.
 
     Exactly that, and nothing looser: the base token with the span of one of its word
@@ -284,7 +303,7 @@ def _pared_down(token: str, was: Counter, theirs: Counter | None = None) -> bool
     return False
 
 
-def _welded(token: str, after: Counter, was: Counter) -> bool:
+def _welded(token: str, after: Counter[str], was: Counter[str]) -> bool:
     """Whether this token is two tokens of the base pushed together, one of which the
     source has since rewritten.
 
@@ -311,8 +330,8 @@ def _welded(token: str, after: Counter, was: Counter) -> bool:
     return False
 
 
-def _cleaved(token: str, after: Counter, was: Counter,
-             theirs: Counter | None) -> bool:
+def _cleaved(token: str, after: Counter[str], was: Counter[str],
+             theirs: Counter[str] | None) -> bool:
     """Whether this token is half of a token of the base the reader split in two.
 
     `_welded`'s mirror, and the other thing pressing Enter does. A reader who joins
@@ -555,7 +574,7 @@ def _worn(run: Run, wears: Set[str]) -> set[str]:
             if k not in ("text", "width") and (said[k] if k in said else True)}
 
 
-def marks_on(block: Block, theme: Theme | None = None) -> Counter[tuple[str, str]]:
+def marks_on(block: Block, theme: Theme | None) -> Counter[tuple[str, str]]:
     """What each of a block's words *wears*, by (mark, word): the marks chosen for it
     and the ones its named style puts on, less the ones a run says False to.
 
@@ -588,7 +607,7 @@ def marks_on(block: Block, theme: Theme | None = None) -> Counter[tuple[str, str
     return out
 
 
-def unmarked_of(block: Block, theme: Theme | None = None) -> Counter[tuple[str, str]]:
+def unmarked_of(block: Block, theme: Theme | None) -> Counter[tuple[str, str]]:
     """The marks a reader deliberately took *off* a word, by (mark, word).
 
     Only an explicit False counts, and only against a named style that puts the mark
@@ -642,8 +661,7 @@ def _named(said: str, *what: object) -> bool:
 # ---------------------------------------------------------------- the checks
 
 def check(base: Ir | None, before: Ir, after: Ir, report: SyncReport | None,
-          ours: Ir | None = None, allow: Collection[str] = (),
-          theme: Theme | None = None) -> list[dict]:
+          ours: Ir | None, allow: Collection[str], theme: Theme | None) -> list[Finding]:
     """Judge one sync. `before` is the document as the reader left it, `after` the
     settled read, `base` what both sides last agreed on, `ours` the file that was
     synced. `allow` names kinds to keep out of the verdict.
@@ -653,8 +671,13 @@ def check(base: Ir | None, before: Ir, after: Ir, report: SyncReport | None,
     covers what a theme is made of — a paragraph wearing a named style and made to
     stop (`_inherited_findings`). Nothing in a `documents.get` answer says a
     paragraph inherits, only that it sets nothing, so the caller has to say."""
-    said = accounted(report)
-    out: list[dict] = []
+    return check_told(base, before, after, accounted(report), ours, allow, theme)
+
+
+def check_told(base: Ir | None, before: Ir, after: Ir, said: str, ours: Ir | None,
+               allow: Collection[str], theme: Theme | None) -> list[Finding]:
+    """`check`, the report already read into what it accounts for (`accounted`)."""
+    out: list[Finding] = []
     was, now, then = parts_by_tab(base), parts_by_tab(before), parts_by_tab(after)
     file_tabs = parts_by_tab(ours) if ours is not None else {}
     for tab, part in now.items():
@@ -670,13 +693,13 @@ def check(base: Ir | None, before: Ir, after: Ir, report: SyncReport | None,
             if not (dropped and kept) and not _named(said, tab, part.get("title")):
                 out.append(finding("tab_gone", "loss",
                                    f"the tab {part.get('title')!r} is not in the document any "
-                                   f"more and the report does not say why", tab=tab))
+                                   f"more and the report does not say why", tab, None))
             continue
         out += _tab_findings(was.get(tab), part, then.get(tab), said, tab,
                              doc_ir.tab_part(ours, tab) if tab else ours, theme)
         out += _title_findings(was.get(tab), part, then[tab], said, tab)
     out += _resurrection_findings(was, now, then, file_tabs, said, ours)
-    return [f for f in out if f["kind"] not in allow]
+    return [f for f in out if f.kind not in allow]
 
 
 def _fresh_asks(ours: Ir | None) -> Counter[str | None]:
@@ -693,7 +716,7 @@ def _fresh_asks(ours: Ir | None) -> Counter[str | None]:
 
 def _resurrection_findings(was: Mapping[str | None, Ir], now: Mapping[str | None, Ir],
                            then: Mapping[str | None, Ir], file_tabs: Mapping[str | None, Ir],
-                           said: str, ours: Ir | None) -> list[dict]:
+                           said: str, ours: Ir | None) -> list[Finding]:
     """A tab the reader deleted that the sync put back.
 
     Nothing of the reader's *disappears* here, so every other question in this file
@@ -711,7 +734,7 @@ def _resurrection_findings(was: Mapping[str | None, Ir], now: Mapping[str | None
     chain-8 seed 65370, two `add_tab`s drawing the same name).
     """
     asked = _fresh_asks(ours)
-    out: list[dict] = []
+    out: list[Finding] = []
     for tab, old in was.items():
         if tab is None or tab in now or tab not in file_tabs:
             continue
@@ -727,7 +750,8 @@ def _resurrection_findings(was: Mapping[str | None, Ir], now: Mapping[str | None
         if not _named(said, title):
             out.append(finding("tab_resurrected", "loss",
                                f"the reader deleted the tab {title!r} and it is "
-                               f"back after the sync; the report does not say why", tab=tab))
+                               f"back after the sync; the report does not say why", tab,
+                               None))
     return out
 
 
@@ -740,7 +764,7 @@ def _tab_name(part: Ir | None, tab: str | None) -> str:
 
 
 def _title_findings(was: Ir | None, now: Ir, then: Ir, said: str,
-                    tab: str | None) -> list[dict]:
+                    tab: str | None) -> list[Finding]:
     """A tab the reader renamed and the sync renamed back.
 
     Only the reader's own rename is theirs to lose: a source rename over a title the
@@ -754,12 +778,12 @@ def _title_findings(was: Ir | None, now: Ir, then: Ir, said: str,
         return []
     return [finding("tab_renamed", "loss",
                     f"the tab the reader named {mine!r} is called {after!r} now and the "
-                    f"report does not say why", tab=tab)]
+                    f"report does not say why", tab, None)]
 
 
 def _tab_findings(was: Ir | None, now: Ir, then: Ir | None, said: str,
-                  tab: str | None, mine: Ir | None, theme: Theme | None) -> list[dict]:
-    out: list[dict] = []
+                  tab: str | None, mine: Ir | None, theme: Theme | None) -> list[Finding]:
+    out: list[Finding] = []
     if was:
         # A table the reader beheaded is not a table the reader *made*. Deleting a
         # table's first row takes its named range with it (`doc_ir.anchor_span`), so
@@ -768,7 +792,7 @@ def _tab_findings(was: Ir | None, now: Ir, then: Ir | None, said: str,
         # base's table, and the merge knows it again (`doc_merge.recover_tables`), so
         # the oracle asks the same question and judges it by its key: the source's own
         # edit to a cell the reader kept is then a change and not a loss.
-        doc_merge.recover_tables(was, now)
+        doc_merge.recover_tables(was, now, spoken_for=None)
     old, new = keyed(was), keyed(then)
     live = keyed(now)
     after_text = part_text(then)
@@ -778,7 +802,7 @@ def _tab_findings(was: Ir | None, now: Ir, then: Ir | None, said: str,
         after_frozen += frozen_marks(block)
     after_styles: Counter[tuple[str, str]] = Counter()
     for block in blocks_of(then):
-        after_styles += marks_on(block)
+        after_styles += marks_on(block, None)
     source_keys = {key for b in blocks_of(mine) if (key := b.get("key"))}
     file_blocks = keyed(mine)
 
@@ -804,15 +828,14 @@ def _tab_findings(was: Ir | None, now: Ir, then: Ir | None, said: str,
                 out.append(finding(
                     "identity_lost", "report",
                     f"the block {key} said {theirs_text[:40]!r} and has lost its key, "
-                    f"though neither side dropped the block",
-                    tab=tab, key=key))
+                    f"though neither side dropped the block", tab, key))
             else:
                 out.append(finding(
                     "block_gone", "loss",
                     f"the block {key} said {theirs_text[:60]!r} and is not in the document "
                     f"any more; the report does not account for it"
                     + (", though the file still names it" if key in source_keys else ""),
-                    tab=tab, key=key))
+                    tab, key))
             continue
         out += _words_findings(key, block, base_block, new[key], after_words, said, tab,
                                words(part_text(was)))
@@ -858,7 +881,7 @@ def _tab_findings(was: Ir | None, now: Ir, then: Ir | None, said: str,
         out.append(finding("block_resurrected", "loss",
                            f"the reader deleted the block {key}, {text_of(was_block)[:60]!r}, "
                            f"and it is back after the sync; the report does not say why",
-                           tab=tab, key=key))
+                           tab, key))
 
     for block in unkeyed(now):
         text = text_of(block).strip()
@@ -868,7 +891,7 @@ def _tab_findings(was: Ir | None, now: Ir, then: Ir | None, said: str,
         out.append(finding("block_gone", "loss",
                            f"a {'table' if block.get('kind') == 'table' else 'block'} "
                            f"the reader added, {text[:60]!r}, is not in the "
-                           f"document any more", tab=tab))
+                           f"document any more", tab, None))
 
     before_frozen: Counter[FrozenKey] = Counter()
     for block in now.get("blocks", []):
@@ -895,7 +918,7 @@ def _tab_findings(was: Ir | None, now: Ir, then: Ir | None, said: str,
         out.append(finding("frozen_gone", "loss",
                            f"the {kind} {value!r} the document held is not in it any more"
                            + ("" if remakeable else ", and no request can make one"),
-                           tab=tab))
+                           tab, None))
 
     out += _picture_findings(now, mine, then, said, tab)
     out += _order_findings(was, now, then, said, tab)
@@ -923,7 +946,7 @@ def _twin_already(now_part: Ir | None, block: Block, after_block: Block, field: 
 
 def _inherited_findings(key: str, block: Block, after_block: Block, mine: Ir | None,
                         said: str, tab: str | None, theme: Theme | None,
-                        now_part: Ir | None) -> list[dict]:
+                        now_part: Ir | None) -> list[Finding]:
     """A paragraph that wore the document's named style and stopped.
 
     A document's look lives in its named styles, and a paragraph that sets nothing of
@@ -949,7 +972,7 @@ def _inherited_findings(key: str, block: Block, after_block: Block, mine: Ir | N
     if not fields:
         return []
     mine_block = next((b for b in blocks_of(mine) if b.get("key") == key), None)
-    out: list[dict] = []
+    out: list[Finding] = []
     for field in fields:
         now, then = field_of(block, field), field_of(after_block, field)
         if then is None or then == now \
@@ -961,7 +984,7 @@ def _inherited_findings(key: str, block: Block, after_block: Block, mine: Ir | N
             "theme_undone", "loss",
             f"the block {key} inherited its {field} and now says {then!r} of its own, "
             f"which neither the reader nor the file asked for: it has stopped following "
-            f"the document's named style", tab=tab, key=key))
+            f"the document's named style", tab, key))
     return [f for f in out if not _named(said, key)]
 
 
@@ -981,8 +1004,8 @@ def _behind(was: Ir | None, key: str) -> str | None:
     return None
 
 
-def _shape_findings(key, block, base_block, after_block, said, tab,
-                    behind_dropped: bool) -> list[dict]:
+def _shape_findings(key: str, block: Block, base_block: Block | None, after_block: Block,
+                    said: str, tab: str | None, behind_dropped: bool) -> list[Finding]:
     """How the reader set a paragraph, put back the way the file has it.
 
     The mirror of `_style_findings` one level up: a mark is a choice about a word and
@@ -1003,14 +1026,15 @@ def _shape_findings(key, block, base_block, after_block, said, tab,
     if base_block is None or block.get("kind") == "table" or behind_dropped:
         return []
     for field in SHAPE_FIELDS:
-        theirs, then, now = (block.get(field), base_block.get(field),
-                             after_block.get(field))
+        theirs, then, now = (doc_merge.shape_of(block, field),
+                             doc_merge.shape_of(base_block, field),
+                             doc_merge.shape_of(after_block, field))
         if theirs == then or now == theirs:
             continue
         return [] if _named(said, key) else [finding(
             "shape_undone", "loss",
             f"the block {key} had its {field} set to {theirs!r} by the reader and says "
-            f"{now!r} after the sync, which is what the file asks for", tab=tab, key=key)]
+            f"{now!r} after the sync, which is what the file asks for", tab, key)]
     return []
 
 
@@ -1081,7 +1105,7 @@ def _dropped_cells(block: Block, was: Ir | None, mine: Ir | None) -> Counter[Fro
 
 
 def _picture_findings(now: Ir, mine: Ir | None, then: Ir | None,
-                      said: str, tab: str | None) -> list[dict]:
+                      said: str, tab: str | None) -> list[Finding]:
     """The pictures the document held and does not hold any more.
 
     Paired by name (`pair_images`), because a picture may keep its object id or keep
@@ -1104,7 +1128,7 @@ def _picture_findings(now: Ir, mine: Ir | None, then: Ir | None,
     the one the reader had already taken away, so nothing was excused and the
     picture the source itself gave up was named as lost (fresh seed 994410, chain 8).
     """
-    out: list[dict] = []
+    out: list[Finding] = []
     held = images_of(now)
     hits = pair_images(held, images_of(then), False)
     telling = telling_names(held)
@@ -1119,7 +1143,7 @@ def _picture_findings(now: Ir, mine: Ir | None, then: Ir | None,
             continue
         out.append(finding("frozen_gone", "loss",
                            f"the image {frozen_key(run)[1]!r} the document held is not "
-                           f"in it any more", tab=tab))
+                           f"in it any more", tab, None))
     return out
 
 
@@ -1140,11 +1164,12 @@ def _stands(key: str, block: Block, mine: Ir | None, then: Ir | None) -> bool:
                for after in blocks_of(then) for w in wanted)
 
 
-def _words_findings(key, block, base_block, after_block, after_words, said, tab,
-                    tab_was: Counter | None = None):
+def _words_findings(key: str, block: Block, base_block: Block | None, after_block: Block,
+                    after_words: Counter[str], said: str, tab: str | None,
+                    tab_was: Counter[str] | None) -> list[Finding]:
     """Words the reader typed that the document does not say any more."""
     theirs = words(own_words(block))
-    was = words(own_words(base_block)) if base_block else Counter()
+    was = words(own_words(base_block)) if base_block else Counter[str]()
     typed = theirs - was                                  # what the reader added
     if not typed:
         return []
@@ -1160,19 +1185,22 @@ def _words_findings(key, block, base_block, after_block, after_words, said, tab,
         return []
     return [finding("words_lost", "loss",
                     f"the block {key} lost words the reader typed: "
-                    f"{' '.join(sorted(lost))[:80]}", tab=tab, key=key)]
+                    f"{' '.join(sorted(lost))[:80]}", tab, key)]
 
 
-def _cored(counted: Counter) -> Counter:
+def _cored(counted: Counter[str]) -> Counter[str]:
     """Word counts by `core`: the spelling a styled word is known by."""
-    out: Counter = Counter()
+    out: Counter[str] = Counter()
     for token, times in counted.items():
         out[core(token)] += times
     return out
 
 
-def _style_findings(key, block, base_block, after_styles, after_block, after_words,
-                    said, tab, theme=None, file_block=None, dropped=False):
+def _style_findings(key: str, block: Block, base_block: Block | None,
+                    after_styles: Counter[tuple[str, str]], after_block: Block,
+                    after_words: Counter[str], said: str, tab: str | None,
+                    theme: Theme | None, file_block: Block | None,
+                    dropped: bool) -> list[Finding]:
     """Styling the reader put on words that are still there — or took off them.
 
     Taking a mark off is as much a choice as putting one on, and the only way to
@@ -1224,8 +1252,8 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
     is a file to say it: asked of a check given none, "the file no longer names this
     key" is true of every key there is, and the whole half falls silent.
     """
-    theirs = marks_on(block)
-    was = marks_on(base_block) if base_block else Counter()
+    theirs = marks_on(block, None)
+    was = marks_on(base_block, None) if base_block else Counter[tuple[str, str]]()
     # A styled word is its `core`, so the question "is the word still there?" has to
     # be asked in the same words: `after_words` counts the tab's `\S+` tokens.
     standing = _cored(after_words)
@@ -1235,9 +1263,9 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
         mark, word = next(iter(lost))
         return [finding("styling_lost", "loss",
                         f"the block {key} lost the {mark} the reader put on "
-                        f"{word!r}", tab=tab, key=key)]
-    agreed = unmarked_of(base_block, theme) if base_block else Counter()
-    asked = marks_on(file_block) if file_block else Counter()
+                        f"{word!r}", tab, key)]
+    agreed = unmarked_of(base_block, theme) if base_block else Counter[tuple[str, str]]()
+    asked = marks_on(file_block, None) if file_block else Counter[tuple[str, str]]()
     undone = (unmarked_of(block, theme) - unmarked_of(after_block, theme)
               - (agreed & asked))
     # An un-mark is undone only on a word that is still *that* word. The question is
@@ -1250,8 +1278,8 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
     # the source has just added is the mirror case and must still be no excuse
     # (themed seed 40254).
     here = _cored(words(text_of(block)))
-    asks = _cored(words(text_of(file_block))) if file_block else Counter()
-    back = Counter()
+    asks = _cored(words(text_of(file_block))) if file_block else Counter[str]()
+    back: Counter[tuple[str, str]] = Counter()
     for (mark, word), times in (undone & marks_on(after_block, theme)).items():
         reworded = max(0, here[word] - asks[word]) if file_block else 0
         if standing.get(word) and times > reworded:
@@ -1260,12 +1288,13 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
         mark, word = next(iter(back))
         return [finding("styling_restored", "loss",
                         f"the block {key} has the {mark} back on {word!r}, which the "
-                        f"reader had taken off", tab=tab, key=key)]
+                        f"reader had taken off", tab, key)]
     return []
 
 
-def _cell_findings(key, block, base_block, after_block, after_words, said, tab,
-                   tab_was: Counter | None = None):
+def _cell_findings(key: str, block: Block, base_block: Block | None, after_block: Block,
+                   after_words: Counter[str], said: str, tab: str | None,
+                   tab_was: Counter[str] | None) -> list[Finding]:
     """Words the reader typed into a cell, cell by cell where the grid allows it.
 
     A cell is known by its place, and a row the reader inserted shifts every cell
@@ -1285,10 +1314,11 @@ def _cell_findings(key, block, base_block, after_block, after_words, said, tab,
     Only `_welded` sees the tab; everything else is the table's question, since a
     regrid is what moves words about inside one.
     """
-    theirs, was = cells_of(block), cells_of(base_block) if base_block else {}
+    theirs = cells_of(block)
+    was = cells_of(base_block) if base_block else {}
     now = cells_of(after_block)
-    elsewhere = words(text_of(base_block)) if base_block else Counter()
-    out = []
+    elsewhere = words(text_of(base_block)) if base_block else Counter[str]()
+    out: list[Finding] = []
     for at, text in theirs.items():
         typed = words(text) - words(was.get(at, ""))
         typed = Counter({w: n for w, n in typed.items()
@@ -1296,7 +1326,7 @@ def _cell_findings(key, block, base_block, after_block, after_words, said, tab,
         if not typed:
             continue
         # By place when the grid still has that cell, else anywhere in the table.
-        survived = words(now[at]) if at in now else Counter()
+        survived = words(now[at]) if at in now else Counter[str]()
         after_all = words(text_of(after_block))
         lost = typed - survived - (after_all - survived)
         # `words(text)` is the reader's own cell, which `_cleaved` needs: pressing
@@ -1307,7 +1337,7 @@ def _cell_findings(key, block, base_block, after_block, after_words, said, tab,
         if lost and not _named(said, key):
             out.append(finding("cell_words_lost", "loss",
                                f"the cell {at} of {key} lost {' '.join(sorted(lost))[:60]}",
-                               tab=tab, key=key))
+                               tab, key))
     return out
 
 
@@ -1351,8 +1381,9 @@ def _rows_still_shown(base_block: Block, block: Block) -> Counter[str]:
     return out
 
 
-def _row_resurrection_findings(key, block, base_block, after_block, said, tab,
-                               file_block=None):
+def _row_resurrection_findings(key: str, block: Block, base_block: Block | None,
+                               after_block: Block | None, said: str, tab: str | None,
+                               file_block: Block | None) -> list[Finding]:
     """A row the reader deleted that the sync put back.
 
     `block_resurrected` at the third size. A row has no key: the merge knows it by
@@ -1381,7 +1412,7 @@ def _row_resurrection_findings(key, block, base_block, after_block, said, tab,
     live_count = Counter(live_rows)
     shown = _rows_still_shown(base_block, block)
     asked = Counter(_row_texts(file_block)) if file_block else Counter(base_rows)
-    out = []
+    out: list[Finding] = []
     for row in dict.fromkeys(base_rows):
         allowed = max(live_count[row], shown[row]) \
             + max(0, asked[row] - Counter(base_rows)[row])
@@ -1391,22 +1422,22 @@ def _row_resurrection_findings(key, block, base_block, after_block, said, tab,
             continue
         out.append(finding("row_resurrected", "loss",
                            f"the reader deleted the row {row[:60]!r} of {key} and it is "
-                           f"back after the sync; the report does not say why",
-                           tab=tab, key=key))
+                           f"back after the sync; the report does not say why", tab, key))
     return out
 
 
-def _order_findings(was, now, then, said, tab):
+def _order_findings(was: Ir | None, now: Ir, then: Ir | None, said: str,
+                    tab: str | None) -> list[Finding]:
     """A block the reader moved must stay where they put it (docs/google-docs.md: the
     merged order is the document's)."""
-    order_was = [b["key"] for b in (was or {}).get("blocks", []) if b.get("key")]
-    order_now = [b["key"] for b in (now or {}).get("blocks", []) if b.get("key")]
-    order_then = [b["key"] for b in (then or {}).get("blocks", []) if b.get("key")]
+    order_was = [key for b in blocks_of(was) if (key := b.get("key"))]
+    order_now = [key for b in blocks_of(now) if (key := b.get("key"))]
+    order_then = [key for b in blocks_of(then) if (key := b.get("key"))]
     shared = set(order_was) & set(order_now) & set(order_then)
     place_was = {k: i for i, k in enumerate(k for k in order_was if k in shared)}
     place_now = {k: i for i, k in enumerate(k for k in order_now if k in shared)}
     place_then = {k: i for i, k in enumerate(k for k in order_then if k in shared)}
-    out = []
+    out: list[Finding] = []
     for x in shared:
         for y in shared:
             if x >= y:
@@ -1418,39 +1449,60 @@ def _order_findings(was, now, then, said, tab):
                     and not _named(said, x, y):
                 out.append(finding("order_undone", "undo",
                                    f"the reader moved {x} and {y} apart and the sync put "
-                                   f"them back the way the base had them", tab=tab, key=x))
+                                   f"them back the way the base had them", tab, x))
                 return out   # one is enough: a move shows up in every pair it crosses
     return out
 
 
 # ---------------------------------------------------------------- saying it
 
-def failures(findings: list[dict]) -> list[dict]:
-    return [f for f in findings if f["severity"] in FAIL]
+def failures(findings: list[Finding]) -> list[Finding]:
+    return [f for f in findings if f.severity in FAIL]
 
 
-def describe(findings: list[dict]) -> str:
+def describe(findings: list[Finding]) -> str:
     if not findings:
         return "nothing lost"
-    lines = []
-    for f in sorted(findings, key=lambda f: SEVERITIES.index(f["severity"])):
-        where = " ".join(str(x) for x in (f.get("tab"), f.get("key")) if x)
-        lines.append(f"  [{f['severity']}] {f['kind']}{(' ' + where) if where else ''}: "
-                     f"{f['detail']}")
+    lines: list[str] = []
+    for f in sorted(findings, key=lambda f: SEVERITIES.index(f.severity)):
+        where = " ".join(x for x in (f.tab, f.key) if x)
+        lines.append(f"  [{f.severity}] {f.kind}{(' ' + where) if where else ''}: "
+                     f"{f.detail}")
     return "\n".join(lines)
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+def told_in(report: Json, where: str) -> str:
+    """`accounted` of a report that has been through JSON: its conflicts, dumped as
+    `accounted` dumps them, and its notes. Nothing else of it is read, so nothing else
+    is parsed."""
+    if report is None:
+        return ""
+    obj = as_object(report, where)
+    lines = [json.dumps(c, ensure_ascii=False)
+             for c in as_array(obj.get("conflicts", []), f"{where}.conflicts")]
+    lines += [as_str(note, f"{where}.notes[{n}]")
+              for n, note in enumerate(as_array(obj.get("notes", []), f"{where}.notes"))]
+    return "\n".join(lines)
+
+
+def main(argv: list[str] | None) -> int:
+    ap = argparse.ArgumentParser(description=(__doc__ or "").splitlines()[0])
     ap.add_argument("bundle", type=Path,
                     help="JSON with base / before / after / report / ours")
     args = ap.parse_args(argv)
-    data = json.loads(args.bundle.read_text(encoding="utf-8"))
-    found = check(data.get("base", {}), data["before"], data["after"],
-                  data.get("report", {}), data.get("ours"))
+    bundle: Path = args.bundle
+    data = as_object(json.loads(bundle.read_text(encoding="utf-8")), "the bundle")
+    base, ours = data.get("base"), data.get("ours")
+    found = check_told(
+        doc_ir.parse_ir(base, "the bundle.base") if base is not None else None,
+        doc_ir.parse_ir(data.get("before"), "the bundle.before"),
+        doc_ir.parse_ir(data.get("after"), "the bundle.after"),
+        told_in(data.get("report"), "the bundle.report"),
+        doc_ir.parse_ir(ours, "the bundle.ours") if ours is not None else None,
+        (), None)
     print(describe(found))
     return 1 if failures(found) else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

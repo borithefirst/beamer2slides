@@ -461,7 +461,9 @@ markers.
 - Types: the IR is `doc_ir`'s TypedDicts (`Ir`, `Block`, `Run`), variable keys read through
   Literal accessors (`mark_of`, `measure_of`); plans `doc_merge.Plan`/`TabPlan`, reports
   `doc_sync.SyncReport`; requests and replies `google_types`' Docs types. `doc_world.World.apply`
-  takes plain Mappings on purpose (the fuzz's reader ops are browser-shaped).
+  takes `DocsRequest`s (the fuzz's reader ops are typed batches); `doc_merge.Plan`/`Merged`/
+  `TabPlan`/`Told`, `doc_sync.Written`, the world's units and the oracle's findings are frozen
+  dataclasses; `Conflict` and the reports stay TypedDicts because they are serialised.
 - Reads retry through blips (`doc_sync._read`); **writes never retry** (a lost answer may have
   been applied).
 - Fuzzed against `devtools/doc_loss_oracle.py` and four campaign judges in `tools/fuzz_docs.py`
