@@ -303,7 +303,7 @@ def test_deck_ir_reads_back_what_emit_writes(name):
     from beamer2slides.classify import classify
     from beamer2slides.deck_ir import deck_ir
     from beamer2slides.extract import extract, select_overlays
-    deck = classify(select_overlays(extract(built_pdf(name)), "last"))
+    deck = classify(select_overlays(extract(built_pdf(name), None), "last"))
     ir = deck_ir(simulate(deck), deck["slides"][0]["size"])
     comp = compare(deck, ir)
     bad = [r for r in comp.open() if r["kind"] in TEXT_KINDS or (r["kind"] == "geometry" and "dw" not in r)]
@@ -317,7 +317,7 @@ def test_deck_ir_sees_slides_edits():
     from beamer2slides.classify import classify
     from beamer2slides.deck_ir import deck_ir
     from beamer2slides.extract import extract, select_overlays
-    deck = classify(select_overlays(extract(built_pdf("01_basic")), "last"))
+    deck = classify(select_overlays(extract(built_pdf("01_basic"), None), "last"))
     pres = simulate(deck)
     si, box = next((si, pe) for si, s in enumerate(pres["slides"]) for pe in s["pageElements"]
                    if "Plain paragraph" in json.dumps(pe.get("shape", {}).get("text", {})))

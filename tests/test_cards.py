@@ -66,7 +66,7 @@ def talk() -> dict:
     pdf = GDG / "gdg-talk.pdf"
     if not pdf.exists():
         pytest.skip(f"{pdf.name} not built")
-    return classify(select_overlays(extract(pdf), "last"))
+    return classify(select_overlays(extract(pdf, None), "last"))
 
 
 def test_gdg_talk_columns_stay_apart_and_cards_are_text():

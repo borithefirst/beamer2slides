@@ -72,7 +72,7 @@ def test_an_optically_heavier_footline_pulls_back_with_no_residual():
     from .test_inverse import TEXT_KINDS, built_pdf
     from beamer2slides.classify import classify
     from beamer2slides.extract import extract, select_overlays
-    deck = copy.deepcopy(classify(select_overlays(extract(built_pdf("01_basic")), "last")))
+    deck = copy.deepcopy(classify(select_overlays(extract(built_pdf("01_basic"), None), "last")))
     tiny = 0
     for s in deck["slides"]:
         for el in s["elements"]:

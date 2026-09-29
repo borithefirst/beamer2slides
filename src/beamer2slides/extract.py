@@ -4,21 +4,26 @@ import dataclasses
 import math
 import re
 import unicodedata
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 from . import bidi, type3
 from .fonts import font_info
 from .pdf import NO_OBJECT, OBJ_IMAGE, Char, Document, Page, char_box
+from .pdf.api import Drawing, Link
+from .raw_types import (
+    DrawingType, PathItem, RawColor, RawDoc, RawDrawing, RawImage, RawLink, RawMark, RawPage, RawSpan,
+)
 
 LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
                            "ﬅ": "st", "ﬆ": "st"})
 
 
-def _r(values, nd=2):
+def _r(values: Iterable[float], nd: int) -> list[float]:
     return [round(float(v), nd) for v in values]
 
 
-def _hex(rgb) -> str | None:
+def _hex(rgb: tuple[float, float, float] | None) -> RawColor | None:
     if rgb is None:
         return None
     return "#" + "".join(f"{round(max(0.0, min(1.0, c)) * 255):02x}" for c in rgb[:3])
@@ -35,14 +40,17 @@ def _points(item: tuple) -> list:
     return [list(p) for p in item[1:]]
 
 
-def _path(d: dict, max_items: int = 20) -> list | None:
+PATH_ITEMS = 20  # a drawing of more pieces has no path in raw.json
+
+
+def _path(d: Drawing) -> list[PathItem] | None:
     """Path geometry for small drawings (diagram nodes, lines, arrow tips): [op, [[x, y], ...]]."""
-    if len(d["items"]) > max_items:
+    if len(d["items"]) > PATH_ITEMS:
         return None
-    return [[item[0], [[round(x, 2), round(y, 2)] for x, y in _points(item)]] for item in d["items"]]
+    return [(item[0], [[round(x, 2), round(y, 2)] for x, y in _points(item)]) for item in d["items"]]
 
 
-def _rounded_corners(d: dict) -> dict[str, float]:
+def _rounded_corners(d: Drawing) -> dict[str, float]:
     """Which bbox corners of a path are drawn with a curve, and the curve's radius."""
     x0, y0, x1, y1 = d["rect"]
     corners: dict[str, float] = {}
@@ -387,26 +395,30 @@ class Visibility:
 MARK_PREFIX = "B2S"  # the marked-content tags slides.sty writes around an adopted element
 
 
-def page_marks(page: Page) -> dict[int, tuple]:
+Marks = tuple[RawMark, ...]
+"""The B2S marks around one page object, outermost first."""
+
+
+def page_marks(page: Page) -> dict[int, Marks]:
     """The B2S marks around each page object that has any, outermost first, as (tag, params):
     slides.sty's own (`adopt.SLIDES_MARKS`), others (a tagged PDF's /P, /Span) left out. A form's
     children are inside the marks around the form, which PDFium lists as the form's only."""
     objects = page.objects()
-    found: dict[int, tuple] = {}
+    found: dict[int, Marks] = {}
     for po in objects:  # a form comes before what it holds
-        own = tuple(m for m in getattr(po, "marks", ()) if m[0].startswith(MARK_PREFIX))
+        own: Marks = tuple(m for m in getattr(po, "marks", ()) if m[0].startswith(MARK_PREFIX))
         outer = found.get(po.parent, ()) if po.parent is not None else ()
         if outer or own:
             found[po.id] = outer + own
     return found
 
 
-def _marks_json(marks: tuple) -> list:
-    return [[tag, dict(params)] for tag, params in marks]
+def _marks_json(marks: Marks) -> list[RawMark]:
+    return [(tag, dict(params)) for tag, params in marks]
 
 
 def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False,
-          chars: list[Char] | None = None, marks: dict[int, tuple] | None = None) -> list[dict]:
+          chars: list[Char] | None = None, marks: dict[int, Marks] | None = None) -> list[dict]:
     """Runs of glyphs on one line with the same font, size and colour, split at word gaps. Only
     glyphs that show (`Visibility`), or with `hidden` only those on the page that don't. `chars`:
     the page's characters as read (`page_chars`), when the caller has them. `marks`
@@ -429,7 +441,7 @@ def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False
             bx1 = max(ch.box[2] for ch in boxed)
             by1 = max(ch.box[3] for ch in boxed)
             first = run[0]
-            span = {"text": text, "font": first.font, "size": first.size, "color": first.color,
+            span: dict[str, object] = {"text": text, "font": first.font, "size": first.size, "color": first.color,
                     "alpha": first.alpha, "origin": first.origin, "bbox": (bx0, by0, bx1, by1),
                     "dir": first.dir, "chars": list(run)}
             mark = next((mark_of(ch) for ch in run if not ch.synthetic), ())
@@ -455,7 +467,7 @@ def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False
                     at.dir, NO_OBJECT, at.font_id, width, True, at.ascent, at.descent)
 
     prev: Char | None = None
-    last_mark: tuple = ()
+    last_mark: Marks = ()
     for k, ch in enumerate(shown):
         space = None
         # Another element's (or paragraph's) glyphs: its own span, whatever the gap. A space
@@ -523,38 +535,48 @@ def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False
     return out
 
 
-def _opacity(d: dict, key: str) -> float:
+def _opacity(v: float | None) -> float:
     """A drawing's fill or stroke opacity; 1 when the backend says nothing (0 is fully transparent)."""
-    v = d.get(key)
     return 1.0 if v is None else v
 
 
-def _visible(d: dict) -> dict | None:
-    """What of a drawing shows: a fill or stroke at opacity 0 (a tikz node drawn with opacity=0
-    on an overlay step) is left out, and a drawing with neither is none."""
-    fill = d["type"] in ("f", "fs") and _opacity(d, "fill_opacity") > 0
-    stroke = d["type"] in ("s", "fs") and _opacity(d, "stroke_opacity") > 0
-    if fill and stroke or d["type"] == ("f" if fill else "s" if stroke else None):
-        return d
+def _visible(d: Drawing) -> tuple[Drawing, DrawingType] | None:
+    """What of a drawing shows, and so its type: a fill or stroke at opacity 0 (a tikz node drawn
+    with opacity=0 on an overlay step) is left out, and a drawing with neither is none."""
+    fill = d["type"] in ("f", "fs") and _opacity(d.get("fill_opacity")) > 0
+    stroke = d["type"] in ("s", "fs") and _opacity(d.get("stroke_opacity")) > 0
+    if fill and stroke:
+        return d, "fs"
     if not (fill or stroke):
         return None
-    if fill:
-        return {k: v for k, v in d.items() if k not in ("color", "stroke_opacity", "width")} | {"type": "f"}
-    return {k: v for k, v in d.items() if k not in ("fill", "fill_opacity", "even_odd")} | {"type": "s"}
+    shown: DrawingType = "f" if fill else "s"
+    if d["type"] == shown:
+        return d, shown
+    part = d.copy()
+    part["type"] = shown
+    if fill:  # (what the stroke alone says)
+        part.pop("color", None)
+        part.pop("stroke_opacity", None)
+        part.pop("width", None)
+    else:
+        part.pop("fill", None)
+        part.pop("fill_opacity", None)
+        part.pop("even_odd", None)
+    return part, shown
 
 
-def _shadow_pieces(drawings: list[dict]) -> list[tuple]:
+def _shadow_pieces(drawings: list[Drawing]) -> list[tuple[int, int, int, int]]:
     """Beamer's block shadows: a black rectangle under a soft mask whose shadings fade its
     edges, offset right and down from the panel painted over it. The mask contents are not
     page objects, so the visible parts of the shadow (right of and below the panel) are
     reported as shading pieces on whole points, as the shadings themselves would be."""
-    pieces = []
+    pieces: list[tuple[int, int, int, int]] = []
     for i, m in enumerate(drawings):
         if not m.get("soft_mask") or m["type"] != "f":
             continue
         mx0, my0, mx1, my1 = m["rect"]
         for p in drawings[i + 1:]:
-            if p["type"] not in ("f", "fs") or p.get("soft_mask") or _opacity(p, "fill_opacity") < 1.0:
+            if p["type"] not in ("f", "fs") or p.get("soft_mask") or _opacity(p.get("fill_opacity")) < 1.0:
                 continue
             px0, py0, px1, py1 = p["rect"]
             dx, dy = mx1 - px1, my1 - py1
@@ -603,55 +625,84 @@ def readable(text: str, font: str) -> str:
     return INFERIOR_RUN.sub(figures, text)
 
 
-def extract_page(page: Page, label: str) -> dict:
+def _image(image_id: str, bbox: Iterable[float], px: list[float], marks: Marks | None) -> RawImage:
+    image: RawImage = {"id": image_id, "bbox": _r(bbox, 2), "px": px}
+    if marks is not None:
+        image["marks"] = _marks_json(marks)
+    return image
+
+
+def _drawing(drawing_id: str, d: Drawing, shown: DrawingType, marks: Marks | None) -> RawDrawing:
+    width = d.get("width")
+    out: RawDrawing = {
+        "id": drawing_id, "type": shown, "items": "".join(item[0] for item in d["items"]),
+        "bbox": _r(d["rect"], 2), "fill": _hex(d.get("fill")), "stroke": _hex(d.get("color")),
+        "width": round(width, 2) if width else None,
+        "fill_opacity": round(_opacity(d.get("fill_opacity")), 3),
+        "stroke_opacity": round(_opacity(d.get("stroke_opacity")), 3),
+        "soft_mask": bool(d.get("soft_mask")),  # a soft mask or a blend mode (multiply)
+        "corners": _rounded_corners(d),
+        "path": _path(d),
+    }
+    if marks is not None:
+        out["marks"] = _marks_json(marks)
+    return out
+
+
+def _link(link: Link) -> RawLink:
+    bbox = _r(link["bbox"], 2)
+    uri = link.get("uri")
+    if isinstance(uri, str):
+        return {"bbox": bbox, "uri": uri}
+    page = link.get("page")
+    if isinstance(page, int):
+        return {"bbox": bbox, "page": page}
+    raise ValueError(f"a link with neither a URI nor a page: {link}")
+
+
+def extract_page(page: Page, label: str) -> RawPage:
     n = page.index
-    out_spans = []
+    out_spans: list[RawSpan] = []
     visibility = Visibility(page)
     chars, decoded = page_chars(page)
     marks = page_marks(page)
-    marked = lambda obj: {"marks": _marks_json(marks[obj])} if obj in marks else {}
 
-    def span_json(s: dict, sid: str) -> dict:
-        return {
+    def span_json(s: dict, sid: str) -> RawSpan:
+        span: RawSpan = {
             # Ligature code points (xelatex/lualatex text layers) as plain letters, so the
             # text stays searchable and spell-checkable in Slides.
             "id": sid, "text": readable(s["text"], s["font"]), "font": s["font"],
             "size": round(s["size"], 3), "color": f"#{s['color']:06x}", "alpha": s["alpha"],
-            "origin": _r(s["origin"]), "bbox": _r(s["bbox"]), "dir": _r(s["dir"], 3),
+            "origin": _r(s["origin"], 2), "bbox": _r(s["bbox"], 2), "dir": _r(s["dir"], 3),
             # (a TeX bitmap font's small caps are a font of their own: ECCC1095)
             "smallcaps": s["chars"][0].font_id not in decoded and _small_caps(page, s["chars"]),
-            **({"marks": _marks_json(s["marks"])} if "marks" in s else {}),
         }
+        if "marks" in s:
+            span["marks"] = _marks_json(s["marks"])
+        return span
 
     for s in spans(page, visibility, chars=chars, marks=marks):
         if s["text"].strip():
             out_spans.append(span_json(s, f"p{n}s{len(out_spans)}"))
 
     page_drawings = page.drawings()
-    found = [(info["bbox"], [info["width"], info["height"]], marked(info["object"])) for info in page.images()]
-    found += [(b, [b[2] - b[0], b[3] - b[1]], {}) for b in _shadow_pieces(page_drawings)]
-    images = [{"id": f"p{n}i{i}", "bbox": _r(b), "px": px, **m} for i, (b, px, m) in enumerate(found)]
+    images = [_image(f"p{n}i{i}", info["bbox"], [info["width"], info["height"]], marks.get(info["object"]))
+              for i, info in enumerate(page.images())]
+    images += [_image(f"p{n}i{len(images) + i}", b, [b[2] - b[0], b[3] - b[1]], None)
+               for i, b in enumerate(_shadow_pieces(page_drawings))]
 
     # ids are indices into page.drawings() (render.crop_overlay finds the objects by them), so a
     # drawing that does not show leaves a gap
-    drawings = [{
-        "id": f"p{n}d{i}", "type": d["type"], "items": "".join(item[0] for item in d["items"]),
-        "bbox": _r(d["rect"]), "fill": _hex(d.get("fill")), "stroke": _hex(d.get("color")),
-        "width": round(d["width"], 2) if d.get("width") else None,
-        "fill_opacity": round(_opacity(d, "fill_opacity"), 3),
-        "stroke_opacity": round(_opacity(d, "stroke_opacity"), 3),
-        "soft_mask": bool(d.get("soft_mask")),  # a soft mask or a blend mode (multiply)
-        "corners": _rounded_corners(d),
-        "path": _path(d),
-        **marked(d["object"]),
-    } for i, d in ((i, _visible(d)) for i, d in enumerate(page_drawings)) if d is not None]
+    drawings = [_drawing(f"p{n}d{i}", shown[0], shown[1], marks.get(d["object"]))
+                for i, d in enumerate(page_drawings) if (shown := _visible(d)) is not None]
 
-    links = [{"bbox": _r(link["bbox"]), **({"uri": link["uri"]} if "uri" in link else {"page": link["page"]})}
-             for link in page.links()]
+    links = [_link(link) for link in page.links()]
 
     # Anything entirely outside the page (e.g. the cut-off half of a notes-on-second-screen page).
     x0, y0, x1, y1 = page.rect
-    inside = lambda b: b[2] > x0 and b[0] < x1 and b[3] > y0 and b[1] < y1
+
+    def inside(b: Sequence[float]) -> bool:
+        return b[2] > x0 and b[0] < x1 and b[3] > y0 and b[1] < y1
     out_spans = [s for s in out_spans if inside(s["bbox"])]
     images = [i for i in images if inside(i["bbox"])]
     drawings = [d for d in drawings if inside(d["bbox"])]
@@ -666,16 +717,19 @@ def extract_page(page: Page, label: str) -> dict:
     hidden_spans = [span_json(s, f"p{n}h{i}") for i, s in enumerate(r for r in hidden_runs if "marks" in r
                                                                    and r["text"].strip() and inside(r["bbox"]))]
 
-    return {
+    out: RawPage = {
         "index": n, "label": label,
-        "size": _r((page.width, page.height)),
+        "size": _r((page.width, page.height), 2),
         "spans": out_spans, "images": images, "drawings": drawings, "links": links,
-        **({"hidden_text": hidden} if hidden else {}),
-        **({"hidden_spans": hidden_spans} if hidden_spans else {}),
     }
+    if hidden:
+        out["hidden_text"] = hidden
+    if hidden_spans:
+        out["hidden_spans"] = hidden_spans
+    return out
 
 
-def select_overlays(raw: dict, mode: str) -> dict:
+def select_overlays(raw: RawDoc, mode: str) -> RawDoc:
     """Beamer gives every overlay step of a frame its own page, all with the frame number
     as page label. mode 'last' keeps only the final (complete) step of each frame; 'all'
     keeps every page. Handout PDFs have one page per label, so both are the same there."""
@@ -683,7 +737,7 @@ def select_overlays(raw: dict, mode: str) -> dict:
         return raw
     pages = raw["pages"]
 
-    def title(p: dict) -> str:
+    def title(p: RawPage) -> str:
         """The frame title: the largest text in the top fifth of the page. (Not all of that
         band: a subtitle set with \\framesubtitle<n>, or a TikZ label drawn up there on one
         step, changed the band's text from step to step and split one frame into several.)"""
@@ -694,10 +748,10 @@ def select_overlays(raw: dict, mode: str) -> dict:
         return " ".join(s["text"].strip() for s in sorted(band, key=lambda s: (round(s["origin"][1]), s["bbox"][0]))
                         if s["size"] >= 0.9 * big)
 
-    def words(p: dict) -> list[str]:  # what is drawn, seen or not (`hidden_text`)
+    def words(p: RawPage) -> list[str]:  # what is drawn, seen or not (`hidden_text`)
         return [w for t in [s["text"] for s in p["spans"]] + p.get("hidden_text", []) for w in t.split()]
 
-    def same_frame(a: dict, b: dict) -> bool:
+    def same_frame(a: RawPage, b: RawPage) -> bool:
         """Overlay steps share the frame number, and the title or nearly all of their text (a
         later step shows what the earlier one did). Themes that don't count some frames (title
         and section pages) share numbers too, but neither their title nor their text. With
@@ -734,9 +788,9 @@ def frame_labels(dests: list[tuple[str, int]]) -> dict[int, str]:
     return out
 
 
-def extract(pdf: Path, labels: list[str] | None = None) -> dict:
-    """`labels` replaces the PDF's page labels (notes.prepare deletes pages, and PDFium can't
-    rewrite the label tree)."""
+def extract(pdf: Path, labels: list[str] | None) -> RawDoc:
+    """raw.json of `pdf`. `labels`, when given, replace the PDF's page labels (notes.prepare deletes
+    pages, and PDFium can't rewrite the label tree)."""
     doc = Document(pdf)
     try:
         meta = doc.metadata

@@ -51,6 +51,7 @@ from .ir_types import (At, Box, DiagramElement, FallbackImage, Fields, HoleRun, 
 from .json_types import Json, JsonObject, as_int, as_objects
 from .notes import prepare
 from .pdf import Document
+from .raw_types import RawDoc
 from .typing_compat import assert_never
 
 INK_DIFF = 48          # colour difference (max channel) from the ground that counts as ink
@@ -100,8 +101,8 @@ class RawPage:
     images: tuple[RawGraphic, ...]
 
 
-# raw.json has no typed form yet: these read only the keys the checks use (no `close`: the rest is
-# extract's, and not refused here).
+# The keys of raw.json the checks read, as records (raw_types' TypedDicts are extract's whole page;
+# these hold what the checks use, read from it once).
 
 def raw_span(v: object, at: At) -> RawSpan:
     f = Fields(v, at, "raw span")
@@ -120,7 +121,7 @@ def raw_page_of(v: object, at: At) -> RawPage:
                    drawings=f.req("drawings", tuple_of(raw_graphic)), images=f.req("images", tuple_of(raw_graphic)))
 
 
-def raw_pages(raw: JsonObject) -> dict[int, RawPage]:
+def raw_pages(raw: RawDoc) -> dict[int, RawPage]:
     """raw.json's pages by index (the first of an index, as a search in page order finds it)."""
     out: dict[int, RawPage] = {}
     for page in tuple_of(raw_page_of)(raw["pages"], At(where="raw.json", path="pages")):
@@ -132,7 +133,7 @@ def raw_pages(raw: JsonObject) -> dict[int, RawPage]:
 
 @dataclass(frozen=True, kw_only=True)
 class Rendered:
-    raw: JsonObject
+    raw: RawDoc
     deck: JsonObject                  # deck.json as render left it: what callers write and emit plans
     pages: Mapping[int, RawPage]      # raw.json's pages, read
     backgrounds: Mapping[int, RGB]    # page -> RGB, as render wrote it
@@ -159,7 +160,7 @@ def convert_pages(pdf: Path, overlays: str) -> Rendered:
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp)
         prepared = prepare(pdf, out)  # (without note pages)
-        raw: JsonObject = select_overlays(extract(prepared.pdf, prepared.labels), overlays)
+        raw: RawDoc = select_overlays(extract(prepared.pdf, prepared.labels), overlays)
         deck: JsonObject = classify(raw)
         saved: dict[Path, Pixels] = {}
 

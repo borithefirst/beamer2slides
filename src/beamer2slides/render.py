@@ -21,6 +21,7 @@ from PIL import Image
 
 from .arrays import Floats, Ints, Mask, Pixels, RGB, RGBA
 from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page, PdfError
+from .raw_types import RawDoc, RawImage, RawPage, RawSpan
 
 BACKGROUND_WIDTH_PX = 2000
 FIGURE_PX_PER_PT = 8.0     # ~ 4 px per Slides point on a 4:3 deck: sharp on high-DPI screens
@@ -37,6 +38,11 @@ def _intersects(a, b) -> bool:
 
 def _inside(inner, outer) -> bool:
     return inner[0] >= outer[0] and inner[1] >= outer[1] and inner[2] <= outer[2] and inner[3] <= outer[3]
+
+
+def _box(b: list[float]) -> Box:
+    """A JSON box, [x0, y0, x1, y1], as a Box."""
+    return b[0], b[1], b[2], b[3]
 
 
 def _grow(r, d: float) -> Box:
@@ -148,11 +154,11 @@ def _same_dir(a, b) -> bool:
     return abs(a[0] - b[0]) <= 0.05 and abs(a[1] - b[1]) <= 0.05
 
 
-def owned_by(spans: list[dict]):
+def owned_by(spans: list[RawSpan]):
     """A test of whether a drawn glyph is one of these raw spans' own: same font and size, on the
     span's baseline, between its start and its end along the baseline. (Glyph boxes say nothing
     of the kind: a hanging radical's box lies in the line above.)"""
-    by_font: dict[tuple, list[dict]] = {}
+    by_font: dict[tuple[str, float], list[RawSpan]] = {}
     for s in spans:
         by_font.setdefault((s["font"], round(s["size"], 2)), []).append(s)
 
@@ -173,7 +179,7 @@ def owned_by(spans: list[dict]):
     return test
 
 
-def others_glyphs(eraser: "Eraser", figures: list[dict], spans: dict) -> dict[str, list]:
+def others_glyphs(eraser: "Eraser", figures: list[dict], spans: dict[str, RawSpan]) -> dict[str, list]:
     """Per picture, the text objects another picture owns, to leave out of its crop when one of
     the two moves with its words (a hole): a display formula's crop reaching into the line above
     showed the hanging tail of that line's inline integral at the PDF place, a piece floating
@@ -200,7 +206,7 @@ def others_glyphs(eraser: "Eraser", figures: list[dict], spans: dict) -> dict[st
     return out
 
 
-def _span_band(span: dict) -> Box:
+def _span_band(span: RawSpan) -> Box:
     """_band for a raw span, also for text turned by 90° (the x-height lies beside its baseline)."""
     dx, dy = span["dir"]
     if abs(dx) > 0.01 or abs(dy) < 0.99:
@@ -321,7 +327,7 @@ def save_bytes(data: bytes, path: Path) -> None:
     path.write_bytes(data)
 
 
-def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[dict], path: Path,
+def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[RawImage], path: Path,
                 transparent: bool = False, hide: Sequence[int] = ()) -> list[int]:
     x0, y0, x1, y1 = bbox
     width, height = x1 - x0, y1 - y0
@@ -422,7 +428,7 @@ def unblend_rim(rgba: RGBA, clear: Mask, ground: Floats, width: int) -> RGBA:
     return out
 
 
-def crop_overlay(eraser: Eraser, fig: dict, labels: list[dict], path: Path) -> list[int]:
+def crop_overlay(eraser: Eraser, fig: dict, labels: list[RawSpan], path: Path) -> list[int]:
     """A graphic drawn over text (classify.overlay): only its own drawings and labels, on a
     transparent ground, so neither the page nor text left in the background under it comes
     along. They leave the background right away: no other crop shows them either."""
@@ -453,7 +459,7 @@ INK_REACH = 3.0     # em beyond its box that a formula glyph's ink is looked for
 INK_PAD = 0.75      # pt around the ink found, for anti-aliasing
 
 
-def grow_to_ink(eraser: Eraser, bbox: list[float], members: list[dict]) -> list[float]:
+def grow_to_ink(eraser: Eraser, bbox: list[float], members: list[RawSpan]) -> list[float]:
     """A formula picture's box grown to the ink of its own glyphs. Glyph boxes are font boxes
     (ascender to descender), not ink: a display \\sum or \\int from CMEX hangs from its origin
     and reaches an em past its box, a \\left( of a matrix three rows, and a picture of the box
@@ -529,7 +535,7 @@ def _probe(el: dict) -> Box:
     return x0 + dx, y0 + dy, x1 - dx, y1 - dy
 
 
-def verify_and_remove_shapes(original: Page, eraser: Eraser, slide: dict, raw_page: dict) -> None:
+def verify_and_remove_shapes(original: Page, eraser: Eraser, slide: dict, raw_page: RawPage) -> None:
     """Keep only shapes whose panel visibly shows its fill colour (beamer draws shadows as
     black rectangles under a soft mask), then remove those panels from the background."""
     keep_visible_shapes(original, slide, raw_page)
@@ -554,11 +560,11 @@ def verify_and_remove_shapes(original: Page, eraser: Eraser, slide: dict, raw_pa
         slide["elements"] = [e for e in slide["elements"] if e not in remaining]
 
 
-def keep_visible_shapes(original: Page, slide: dict, raw_page: dict) -> None:
+def keep_visible_shapes(original: Page, slide: dict, raw_page: RawPage) -> None:
     """Drop shape candidates whose fill doesn't show on the page. (A shape the page marks as one -
     adopt's slides.sty, `marked.py` - is one whatever covers it.)"""
-    avoid = [s["bbox"] for s in raw_page["spans"]] + [i["bbox"] for i in raw_page["images"]] + \
-            [e["bbox"] for e in slide["elements"] if e["kind"] == "image"]
+    avoid: list[Box] = [_box(s["bbox"]) for s in raw_page["spans"]] + [_box(i["bbox"]) for i in raw_page["images"]] + \
+        [_box(e["bbox"]) for e in slide["elements"] if e["kind"] == "image"]
     keep = []
     for i, el in enumerate(slide["elements"]):
         if el["kind"] != "shape" or el.get("mark"):
@@ -575,8 +581,8 @@ def keep_visible_shapes(original: Page, slide: dict, raw_page: dict) -> None:
     slide["elements"] = keep
 
 
-def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path,
-                       kept_shapes: frozenset = frozenset()) -> list[Path]:
+def render_backgrounds(pdf: Path, raw: RawDoc, deck: dict, out: Path,
+                       kept_shapes: frozenset[str] = frozenset()) -> list[Path]:
     """`kept_shapes`: marks `marked.pictured_shapes` leaves shapes (sync over an old adopt base)."""
     from .marked import pictured_shapes
 

@@ -68,7 +68,7 @@ def main() -> None:
         name = pdf.stem if pdf.stem != "talk" else pdf.parent.name
         out = ROOT / "out" / "leftovers" / name
         out.mkdir(parents=True, exist_ok=True)
-        raw = select_overlays(extract(pdf), "last")
+        raw = select_overlays(extract(pdf, None), "last")
         deck = classify(raw)
         render_backgrounds(pdf, raw, deck, out)
         for slide in deck["slides"]:

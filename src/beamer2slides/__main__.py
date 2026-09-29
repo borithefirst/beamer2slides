@@ -26,6 +26,7 @@ from .debug import render_debug
 from .extract import extract, select_overlays
 from .notes import prepare as prepare_notes
 from .paths import out_root
+from .raw_types import RawDoc
 
 BACKUP_MODES = ("auto", "none", "file", "drive", "both")  # = guard.BACKUP_MODES (imported lazily)
 
@@ -43,7 +44,7 @@ def check_labels(deck: dict, mode: str) -> None:
         raise SystemExit("--check-labels error: the frames above need labels of their own")
 
 
-def cmd_classify(pdf: Path, out: Path, overlays: str = "last", check: str = "off") -> tuple[Path, dict, dict]:
+def cmd_classify(pdf: Path, out: Path, overlays: str = "last", check: str = "off") -> tuple[Path, RawDoc, dict]:
     out.mkdir(parents=True, exist_ok=True)
     prepared = prepare_notes(pdf, out)
     pdf = prepared.pdf
@@ -55,8 +56,9 @@ def cmd_classify(pdf: Path, out: Path, overlays: str = "last", check: str = "off
     for page in raw["pages"]:
         page["notes"] = prepared.notes.get(page["index"])
     raw = select_overlays(raw, overlays)
-    if raw.get("overlays", {}).get("dropped"):
-        print(f"overlays: kept the last step of each frame, skipped {raw['overlays']['dropped']} pages")
+    dropped = raw["overlays"]["dropped"] if "overlays" in raw else 0
+    if dropped:
+        print(f"overlays: kept the last step of each frame, skipped {dropped} pages")
     (out / "raw.json").write_text(json.dumps(raw, indent=1, ensure_ascii=False), encoding="utf-8")
     deck = classify(raw)
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")

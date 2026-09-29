@@ -21,8 +21,11 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
+from collections.abc import Sequence
 
 from .classify import Line, PageClassifier, Paragraph, Rect, label_of, span_runs, union_all
+from .classify_model import Span
+from .raw_types import RawDrawing, RawImage, RawItem, RawPage, RawSpan
 
 ELEMENT, PARAGRAPH, BULLET, CELL, UNDERLINE, STRIKE = "B2S", "B2Sp", "B2Sb", "B2Sc", "B2Su", "B2Ss"
 KINDS = ("spans", "drawings", "images")
@@ -31,59 +34,99 @@ NUMBERED = re.compile(r"\d|[a-z]\.|[ivx]+\.")
 FLIP = {"left": "right", "right": "left"}
 
 
-def params(item: dict, tag: str) -> dict | None:
+MarkParams = dict[str, str | int]
+"""A mark's parameters (`raw_types.RawMark`)."""
+GroupId = str | int | None
+"""A marked element's number on the page (`/n`), else its key (`/k`)."""
+
+
+def params(item: RawItem, tag: str) -> MarkParams | None:
     """The parameters of the outermost `tag` mark around a raw item, None outside any."""
     return next((p for t, p in item.get("marks") or () if t == tag), None)
 
 
-def element_of(item: dict) -> dict | None:
+def element_of(item: RawItem) -> MarkParams | None:
     return params(item, ELEMENT)
 
 
-def has_marks(page: dict) -> bool:
-    return any(element_of(item) is not None for kind in KINDS for item in page.get(kind, ()))
+def page_items(page: RawPage) -> list[RawItem]:
+    """What a mark can be around on a page, kind by kind (`KINDS`). (A test's hand-built page may
+    leave a kind out.)"""
+    return [*page.get("spans", []), *page.get("drawings", []), *page.get("images", [])]
 
 
-def group_id(p: dict):
+def has_marks(page: RawPage) -> bool:
+    return any(element_of(item) is not None for item in page_items(page))
+
+
+def group_id(p: MarkParams) -> GroupId:
     return p.get("n", p.get("k"))
+
+
+def paragraph_index(item: RawItem) -> int | None:
+    """The paragraph mark's `/i` around an item (a number: slides.sty writes it so)."""
+    i = (params(item, PARAGRAPH) or {}).get("i")
+    return i if isinstance(i, int) else None
 
 
 class Group:
     """One marked element: what it drew, by kind."""
 
-    def __init__(self, n, p: dict):
-        self.n, self.key, self.kind = n, p.get("k"), p.get("t", "")
+    def __init__(self, n: GroupId, p: MarkParams) -> None:
+        key, kind = p.get("k"), p.get("t", "")
+        self.n, self.key, self.kind = n, None if key is None else str(key), str(kind)
         self.params = p
-        self.items = {kind: [] for kind in KINDS}
+        self.spans: list[RawSpan] = []
+        self.drawings: list[RawDrawing] = []
+        self.images: list[RawImage] = []
 
     @property
     def mark(self) -> str:
         return self.key or f"#{self.n}"
 
-    def page(self, page: dict, drop=None) -> dict:
-        """The page with this element's objects alone (less those `drop` says)."""
-        keep = lambda i: not (drop and drop(i))
-        return {**page, **{kind: [i for i in self.items[kind] if keep(i)] for kind in KINDS}}
+    def page(self, page: RawPage, drop: frozenset[str]) -> RawPage:
+        """The page with this element's objects alone, less those whose ids `drop` holds."""
+        return {**page, "spans": [s for s in self.spans if s["id"] not in drop],
+                "drawings": [d for d in self.drawings if d["id"] not in drop],
+                "images": [i for i in self.images if i["id"] not in drop]}
 
 
-def split(page: dict) -> tuple[dict, list[Group]]:
+def typeset_order(g: Group) -> tuple[bool, int, str]:
+    return not isinstance(g.n, int), g.n if isinstance(g.n, int) else 0, str(g.n)
+
+
+def split(page: RawPage) -> tuple[RawPage, list[Group]]:
     """(the page of unmarked objects, the marked elements in the order the page typeset them)."""
-    groups: dict = {}
-    rest = {kind: [] for kind in KINDS}
-    for kind in KINDS:
-        for item in page.get(kind, ()):
-            p = element_of(item)
-            if p is None:
-                rest[kind].append(item)
-                continue
-            g = groups.setdefault(group_id(p), Group(group_id(p), p))
-            g.items[kind].append(item)
-    for item in page.get("hidden_spans", ()):  # (words a picture drawn later covers: `extract`)
-        p = element_of(item)
+    groups: dict[GroupId, Group] = {}
+
+    def group(p: MarkParams) -> Group:  # (its first item's marks say what the element is)
+        return groups.setdefault(group_id(p), Group(group_id(p), p))
+    spans: list[RawSpan] = []
+    drawings: list[RawDrawing] = []
+    images: list[RawImage] = []
+    for s in page.get("spans", []):
+        p = element_of(s)
+        if p is None:
+            spans.append(s)
+        else:
+            group(p).spans.append(s)
+    for d in page.get("drawings", []):
+        p = element_of(d)
+        if p is None:
+            drawings.append(d)
+        else:
+            group(p).drawings.append(d)
+    for i in page.get("images", []):
+        p = element_of(i)
+        if p is None:
+            images.append(i)
+        else:
+            group(p).images.append(i)
+    for s in page.get("hidden_spans", []):  # (words a picture drawn later covers: `extract`)
+        p = element_of(s)
         if p is not None and group_id(p) in groups:
-            groups[group_id(p)].items["spans"].append(item)
-    order = sorted(groups.values(), key=lambda g: (not isinstance(g.n, int), g.n if isinstance(g.n, int) else 0, str(g.n)))
-    return {**page, **rest}, order
+            groups[group_id(p)].spans.append(s)
+    return {**page, "spans": spans, "drawings": drawings, "images": images}, sorted(groups.values(), key=typeset_order)
 
 
 # ---------------------------------------------------------------------------------------------- text
@@ -93,14 +136,15 @@ class MarkedText(PageClassifier):
     display formula), a paragraph is what one paragraph mark holds, with the alignment and list level
     it says, a bullet what the bullet mark holds, and the box is one box."""
 
-    def __init__(self, page: dict, body: float, art: dict | None = None):
+    def __init__(self, page: RawPage, body: float, art: dict[int | None, Rect]) -> None:
         super().__init__(page, body)
-        self.para = {s["id"]: params(s, PARAGRAPH) or {} for s in page["spans"]}
+        self.para: dict[str, MarkParams] = {s["id"]: params(s, PARAGRAPH) or {} for s in page["spans"]}
+        self.par_of = {s["id"]: paragraph_index(s) for s in page["spans"]}
         self.in_bullet = {s["id"] for s in page["spans"] if params(s, BULLET) is not None}
-        self.art = art or {}   # paragraph index -> the box of a bullet drawn as a picture or a path
+        self.art = art   # paragraph index -> the box of a bullet drawn as a picture or a path
 
-    def par_index(self, s) -> int | None:
-        return self.para.get(s.id, {}).get("i")
+    def par_index(self, s: Span) -> int | None:
+        return self.par_of.get(s.id)
 
     def build_lines(self, spans):
         by: dict = {}
@@ -119,7 +163,9 @@ class MarkedText(PageClassifier):
         or `\\sout` set are underlined or struck whatever their rules look like."""
         super().text_decorations(spans)
         for s in spans:
-            raw = self._raw_spans.get(s.id) or {}
+            raw = self.raw_spans.get(s.id)
+            if raw is None:
+                continue
             if params(raw, UNDERLINE) is not None:
                 s.underline = True
             if params(raw, STRIKE) is not None:
@@ -200,7 +246,7 @@ def same_row(lines: list[Line]) -> list[Line]:
     return out
 
 
-def unturned(sub: dict) -> float | None:
+def unturned(sub: RawPage) -> float | None:
     """A text box Slides turned (adopt's \\adoptturned): its words set back level about the middle
     of their ink, as they stand in the deck's own unturned box - the classifier reads level lines
     only. Rewrites `sub`'s spans in place; the angle turned (degrees, clockwise on the page as
@@ -216,37 +262,39 @@ def unturned(sub: dict) -> float | None:
     box = union_all(Rect.of(s["bbox"]) for s in spans)
     cx, cy = box.cx, box.cy
     c, sn = math.cos(a), math.sin(a)
-    back = lambda x, y: (cx + (x - cx) * c + (y - cy) * sn, cy - (x - cx) * sn + (y - cy) * c)
-    out = []
+
+    def back(x: float, y: float) -> tuple[float, float]:
+        return cx + (x - cx) * c + (y - cy) * sn, cy - (x - cx) * sn + (y - cy) * c
+    out: list[RawSpan] = []
     for s in spans:
         x0, y0, x1, y1 = s["bbox"]
         W, H = x1 - x0, y1 - y0
         den = c * c - sn * sn
         w = max(0.1, (W * c - H * abs(sn)) / den)
         h = max(0.1, (H * c - W * abs(sn)) / den)
-        ox, oy = back(*s["origin"])
+        ox, oy = back(s["origin"][0], s["origin"][1])
         descent = 0.22 * h
         out.append({**s, "dir": [1.0, 0.0], "origin": [ox, oy], "bbox": [ox, oy - h + descent, ox + w, oy + descent]})
     sub["spans"] = out
     return round(math.degrees(a), 2)
 
 
-def text_elements(g: Group, page: dict, body: float) -> tuple[list[dict], dict]:
+def text_elements(g: Group, page: RawPage, body: float) -> tuple[list[dict], dict]:
     """A marked text box: its text element (with `mark`) and the pictures that go with it (formula
     holes, icon bullets); the rest of the sub-classification (what it left in the background)."""
-    art_items = [i for kind in ("drawings", "images") for i in g.items[kind] if params(i, BULLET) is not None]
-    art: dict = {}
+    art_items: list[RawDrawing | RawImage] = [i for i in [*g.drawings, *g.images] if params(i, BULLET) is not None]
+    art: dict[int | None, Rect] = {}
     for i in art_items:
-        k = (params(i, PARAGRAPH) or {}).get("i")
+        k = paragraph_index(i)
         art[k] = art[k].union(Rect.of(i["bbox"])) if k in art else Rect.of(i["bbox"])
-    sub = g.page(page, drop=lambda i: i in art_items)
+    sub = g.page(page, frozenset(i["id"] for i in art_items))
     turn = unturned(sub)
     res = MarkedText(sub, body, art).classify()
     if turn is not None:
         for e in res["elements"]:
             e["rotation"] = turn
     texts = [e for e in res["elements"] if e["kind"] == "text"]
-    hidden = {s["id"] for s in page.get("hidden_spans", ())}
+    hidden = {s["id"] for s in page.get("hidden_spans", [])}
     for e in res["elements"]:
         # words the page hides are the box's words, but no object of the page's text: they stay
         # out of `spans` (render erases what `spans` names)
@@ -269,14 +317,14 @@ def text_elements(g: Group, page: dict, body: float) -> tuple[list[dict], dict]:
 
 # ---------------------------------------------------------------------------------- pictures, shapes
 
-def union_box(items: list[dict], grow: float = 0.0) -> list[float] | None:
+def union_box(items: Sequence[RawItem], grow: float) -> list[float] | None:
     rects = [Rect.of(i["bbox"]).expand(grow) for i in items]
     return union_all(rects).as_list() if rects else None
 
 
 def picture_element(g: Group, pid: str) -> dict:
-    ims, ds, ss = g.items["images"], g.items["drawings"], g.items["spans"]
-    bbox = union_box(ims) or union_box(ds, 0.5) or union_box(ss)
+    ims, ds, ss = g.images, g.drawings, g.spans
+    bbox = union_box(ims, 0.0) or union_box(ds, 0.5) or union_box(ss, 0.0)
     el = {"id": pid, "kind": "image", "role": "figure", "bbox": bbox, "spans": [s["id"] for s in ss],
           "mark": g.mark, "mark_n": g.n}
     if len(ims) == 1 and not ds and not ss:
@@ -284,17 +332,17 @@ def picture_element(g: Group, pid: str) -> dict:
     return el
 
 
-def filled(d: dict) -> bool:
+def filled(d: RawDrawing) -> bool:
     return bool(d.get("fill")) and "f" in d["type"]
 
 
-def area(d: dict) -> float:
+def area(d: RawDrawing) -> float:
     x0, y0, x1, y1 = d["bbox"]
     return max(0.0, x1 - x0) * max(0.0, y1 - y0)
 
 
 def shape_element(g: Group, pid: str) -> dict:
-    ds, ims = g.items["drawings"], g.items["images"]
+    ds, ims = g.drawings, g.images
     fills = sorted((d for d in ds if filled(d)), key=area, reverse=True)
     strokes = [d for d in ds if "s" in d["type"]]
     main = fills[0] if fills else (max(strokes, key=lambda d: sum(d["bbox"][2:]) - sum(d["bbox"][:2])) if strokes else None)
@@ -311,13 +359,13 @@ def shape_element(g: Group, pid: str) -> dict:
         (ax, ay), (bx, by) = ends
         bbox = [min(ax, bx), min(ay, by), max(ax, bx), max(ay, by)]
     elif line:
-        bbox = union_box(shafts)
+        bbox = union_box(shafts, 0.0)
     elif fills or ims:
-        bbox = union_box(fills + ims)
+        bbox = union_box([*fills, *ims], 0.0)
         if strokes and not fills:
-            bbox = union_box(strokes + ims)
+            bbox = union_box([*strokes, *ims], 0.0)
     else:
-        bbox = union_box(ds) or union_box(g.items["spans"])
+        bbox = union_box(ds, 0.0) or union_box(g.spans, 0.0)
     box = None if line else box_of(g.params.get("box"))
     if box and bbox and box[2] - box[0] > 0.5 and box[3] - box[1] > 0.5:
         # The box adopt drew the shape in, unless what it drew stands out of it (a shape turned):
@@ -332,7 +380,7 @@ def shape_element(g: Group, pid: str) -> dict:
           "outline": {"color": stroke["stroke"], "width": stroke.get("width") or 1.0} if stroke else None,
           "shape": "line" if line else "RECTANGLE" if main and main["items"] == "re" else "custom",
           "flip": False, "radius": 0.0,
-          "drawings": [d["id"] for d in ds], "spans": [s["id"] for s in g.items["spans"]], "mark": g.mark}
+          "drawings": [d["id"] for d in ds], "spans": [s["id"] for s in g.spans], "mark": g.mark}
     if ims and not fills:
         el["picture"] = [i["id"] for i in ims]  # a picture fill
     if fills and fills[0].get("fill_opacity", 1) < 0.99:
@@ -347,7 +395,7 @@ def drawn_natively(el: dict) -> bool:
     return el["shape"] == "RECTANGLE" and bool(el.get("fill")) and not el.get("picture")
 
 
-def pictured_shapes(slide: dict, raw_page: dict, keep: frozenset = frozenset()) -> None:
+def pictured_shapes(slide: dict, raw_page: RawPage, keep: frozenset[str]) -> None:
     """In place: each marked shape emit has no Slides shape for becomes the picture of what its
     mark draws, where it stands in the drawing order (an adopted deck's freeform, uploaded again,
     raised KeyError 'custom' in the .pptx's template shapes). Only a conversion does this
@@ -383,16 +431,16 @@ def shape_marks(base: dict) -> frozenset:
 
 # ---------------------------------------------------------------------------------------------- tables
 
-def table_element(g: Group, page: dict, body: float, pid: str) -> dict:
+def table_element(g: Group, page: RawPage, body: float, pid: str) -> dict:
     """A marked table: its grid from its own mark, each cell's words from what that cell's mark
     holds, and the layout emit writes it by (`table_layout`) from its mark's grid, its cells' words
     and what it drew (`table_grid`)."""
     rows, cols = int(g.params.get("rows") or 0), int(g.params.get("cols") or 0)
-    c = PageClassifier(g.page(page), body)
+    c = PageClassifier(g.page(page, frozenset()), body)
     spans = c.spans()
     cells: dict = {}
     spanning: dict = {}
-    for s, raw in zip(spans, c.page["spans"]):
+    for s, raw in zip(spans, c.raw["spans"]):
         p = params(raw, CELL)
         if p is not None:
             rc = (int(p.get("r", 0)), int(p.get("c", 0)))
@@ -409,9 +457,9 @@ def table_element(g: Group, page: dict, body: float, pid: str) -> dict:
                 runs.append({**runs[-1], "text": " ", "script": None})
             runs += span_runs(line.spans)
         grid[r][k] = runs
-    bbox = box_of(g.params.get("box")) or union_box(g.items["drawings"] + g.items["spans"])
+    bbox = box_of(g.params.get("box")) or union_box([*g.drawings, *g.spans], 0.0)
     el = {"id": pid, "kind": "table", "role": "table", "bbox": bbox, "cells": grid,
-          "spans": [s["id"] for s in g.items["spans"]], "drawings": [d["id"] for d in g.items["drawings"]],
+          "spans": [s["id"] for s in g.spans], "drawings": [d["id"] for d in g.drawings],
           "mark": g.mark}
     if bbox:  # (a table of empty cells too: emit reads its columns, KeyError 'columns' - audit)
         el.update(table_grid(g, bbox, rows, cols, cells, spanning, body))
@@ -487,7 +535,7 @@ def table_grid(g: Group, bbox: list[float], rows: int, cols: int, cells: dict, s
     def at(v: float, edges: list[float]) -> int:
         return max(0, min(len(edges) - 2, sum(1 for e in edges[1:-1] if v >= e)))
     fills, borders = [], []
-    for d in g.items["drawings"]:
+    for d in g.drawings:
         dx0, dy0, dx1, dy1 = d["bbox"]
         if filled(d) and d.get("fill_opacity", 1) >= 0.99:  # (the cell its corner stands in: a merge's first)
             fills.append({"row": at(dy0 + min(4.0, (dy1 - dy0) / 4), ys), "col": at(dx0 + min(4.0, (dx1 - dx0) / 4), xs),
@@ -561,7 +609,7 @@ def fold_parts(elements: list[dict]) -> list[dict]:
     return out
 
 
-def classify_marked(page: dict, body: float) -> dict:
+def classify_marked(page: RawPage, body: float) -> dict:
     """A marked page's slide, in `classify_page`'s shape."""
     rest, groups = split(page)
     out = PageClassifier(rest, body).classify()
@@ -583,7 +631,7 @@ def classify_marked(page: dict, body: float) -> dict:
             marked.append(picture_element(g, pid))
         elif g.kind == "table":
             marked.append(table_element(g, page, body, pid))
-            native_chars += sum(len(s["text"].strip()) for s in g.items["spans"])
+            native_chars += sum(len(s["text"].strip()) for s in g.spans)
         else:
             marked.append(shape_element(g, pid))
     out["elements"] += fold_parts(marked)

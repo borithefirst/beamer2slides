@@ -62,7 +62,7 @@ def time_extract(spec: str, path: Path) -> tuple[float, int]:
     from beamer2slides.extract import extract
     with pdf.use_backend(spec):
         t = clock()
-        raw = extract(path)
+        raw = extract(path, None)
         return clock() - t, len(raw["pages"])
 
 
@@ -113,7 +113,7 @@ def bench(what: str, decks: list[Path], repeat: int, only: str | None) -> dict:
                 if what == "extract":
                     with pdf.use_backend(spec):
                         from beamer2slides.extract import extract
-                        rows[p.stem]["pages"] = len(extract(p)["pages"])
+                        rows[p.stem]["pages"] = len(extract(p, None)["pages"])
                 else:
                     rows[p.stem]["pages"] = draw_pages(spec, p, skips[p])
                 each[p.stem].append(clock() - t)

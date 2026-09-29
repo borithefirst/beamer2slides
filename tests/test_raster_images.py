@@ -102,7 +102,7 @@ def test_looks_like_has_teeth(doc):
 @pytest.fixture(scope="module")
 def converted(tmp_path_factory):
     out = tmp_path_factory.mktemp("raster")
-    raw = select_overlays(extract(DECK), "last")
+    raw = select_overlays(extract(DECK, None), "last")
     deck = classify(raw)
     render_backgrounds(DECK, raw, deck, out)
     return out, raw, deck

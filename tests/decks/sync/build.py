@@ -201,7 +201,9 @@ def summary(folder: Path) -> list[dict]:
     """What a classified folder (deck.json, raw.json) says per slide: title, texts (paragraphs,
     table cells, diagram labels), pictures (role and a position-free content hash), notes."""
     deck = json.loads((folder / "deck.json").read_text(encoding="utf-8"))
-    raw = {p["index"]: p for p in json.loads((folder / "raw.json").read_text(encoding="utf-8"))["pages"]}
+    from beamer2slides.raw_types import parse_raw  # (raw.json becomes pages only through its parser)
+    raw_json = folder / "raw.json"
+    raw = {p["index"]: p for p in parse_raw(json.loads(raw_json.read_text(encoding="utf-8")), str(raw_json))["pages"]}
     slides = []
     for s in deck["slides"]:
         title, texts, pictures = None, [], []

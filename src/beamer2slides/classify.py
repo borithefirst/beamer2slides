@@ -28,7 +28,7 @@ from .classify_text import (  # noqa: F401 (callers take these from here)
     bullet_shape, card_text, compose_accents, gap_between, hyphen_cut, label_of, math_family, math_pieces,
     negate, span_runs, type3_symbol,
 )
-from .raw_types import RawPage, RawSpan
+from .raw_types import RawDoc, RawPage, RawSpan
 
 FRAME_COUNTER_RE =re.compile(r"^\d{1,4}( ?/ ?\d{1,4})?$")
 
@@ -38,16 +38,11 @@ class PageClassifier(ReasonsMixin):
     decorates which span) is declared in `classify_state.PageState` and found in `classify`; the
     mixins' methods, inherited one from the next, share it."""
 
-    def __init__(self, page: dict, body: float) -> None:
-        # The page is trusted to be what extract writes (`raw_types.RawPage`): a page read from
-        # raw.json is not checked key by key yet. (A test's hand-built page holds only what its
-        # method reads.)
-        super().__init__(RawPage(**page), body)
-        self.page = page  # (marked.py reads the spans of the page it built through this)
+    def __init__(self, page: RawPage, body: float) -> None:
+        # (a page extract made, or one `raw_types.parse_page` read; a test's hand-built page holds
+        # only what its method reads)
+        super().__init__(page, body)
         self.raw_spans: dict[str, RawSpan] = {s["id"]: s for s in self.raw["spans"]}
-        # marked.py's view of the same spans, untyped: its `params` takes a plain dict, which a
-        # RawSpan is not. (Goes once `params` takes the raw types.)
-        self._raw_spans = {s["id"]: s for s in page["spans"]}
 
     # -- output -----------------------------------------------------------------
 
@@ -437,7 +432,7 @@ def mark_big_headings(slides: list[dict], body: float) -> None:
             texts[i]["role"] = "title"
 
 
-def classify_page(page: dict, body: float) -> dict:
+def classify_page(page: RawPage, body: float) -> dict:
     """One page's slide; a page the classifier trips over stays a picture as a whole. A page whose
     objects say what they are (adopt's slides.sty marks) is read from its marks (`marked.py`)."""
     from . import marked
@@ -463,7 +458,7 @@ def classify_page(page: dict, body: float) -> dict:
         }
 
 
-def classify(raw: dict) -> dict:
+def classify(raw: RawDoc) -> dict:
     body = body_size(raw)
     slides = [classify_page(page, body) for page in raw["pages"]]
     literal_list_numbers(slides)

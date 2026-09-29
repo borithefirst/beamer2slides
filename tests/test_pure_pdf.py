@@ -103,8 +103,8 @@ def numbers_apart(a, b, where="") -> int:
     if isinstance(a, dict):
         assert isinstance(b, dict) and a.keys() == b.keys(), where
         return sum(numbers_apart(a[k], b[k], f"{where}.{k}") for k in a)
-    if isinstance(a, list):
-        assert isinstance(b, list) and len(a) == len(b), where
+    if isinstance(a, (list, tuple)):  # (a parsed raw.json's pairs are tuples)
+        assert isinstance(b, (list, tuple)) and len(a) == len(b), where
         return sum(numbers_apart(x, y, f"{where}[{i}]") for i, (x, y) in enumerate(zip(a, b)))
     if isinstance(a, (int, float)) and not isinstance(a, bool) and a != b:
         assert isinstance(b, (int, float)) and abs(a - b) <= 0.0101, f"{where}: {a!r} != {b!r}"
@@ -119,13 +119,14 @@ def test_extract_and_classify_on_the_pure_reader_write_pdfiums_deck():
     of the raw.json files 0.01 apart (docs/pdf-from-scratch.md)."""
     from beamer2slides.classify import classify
     from beamer2slides.extract import extract
+    from beamer2slides.raw_types import parse_raw
 
     apart = 0
     for path in DECKS:
         runs = []
         for spec in ("pure", "pdfium"):
             with pdf.use_backend(spec):
-                raw = json.loads(json.dumps(extract(path), default=str))
+                raw = parse_raw(json.loads(json.dumps(extract(path, None))), path.name)
                 deck = json.loads(json.dumps(classify(raw), default=str))
             runs.append((raw, deck))
         assert runs[0][1] == runs[1][1], f"{path.stem}: deck.json"

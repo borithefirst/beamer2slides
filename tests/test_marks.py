@@ -38,7 +38,7 @@ def backend(request):
 def raw_of(tmp_path, pages: list[bytes], forms=(), name="p.pdf") -> dict:
     path = tmp_path / name
     path.write_bytes(pdf_bytes(pages, forms, extra_resources=FONT))
-    return extract.extract(path)
+    return extract.extract(path, None)
 
 
 def read_back(tmp_path, page: bytes) -> dict:
@@ -61,8 +61,8 @@ def test_spans_carry_their_marks_and_never_cross_one(tmp_path, backend):
             text(10, 50, b"Loose"))
     spans = raw_of(tmp_path, [page])["pages"][0]["spans"]
     got = {s["text"]: s.get("marks") for s in spans}
-    assert got == {"Left": [["B2S", {"k": "a", "t": "text"}], ["B2Sp", {"i": 0}]],
-                   "Right": [["B2S", {"k": "b", "t": "text"}], ["B2Sp", {"i": 0}]],
+    assert got == {"Left": [("B2S", {"k": "a", "t": "text"}), ("B2Sp", {"i": 0})],
+                   "Right": [("B2S", {"k": "b", "t": "text"}), ("B2Sp", {"i": 0})],
                    "Loose": None}
 
 
@@ -75,7 +75,7 @@ def test_drawings_and_form_children_carry_marks(tmp_path, backend):
             b"/P <</MCID 0>> BDC 0 0 1 rg 100 10 20 20 re f EMC")
     drawings = raw_of(tmp_path, [page], [form])["pages"][0]["drawings"]
     marks = [d.get("marks") for d in sorted(drawings, key=lambda d: d["bbox"][0])]
-    assert marks == [[["B2S", {"k": "s1", "t": "shape"}]], [["B2S", {"k": "pic", "t": "picture"}]], None]
+    assert marks == [[("B2S", {"k": "s1", "t": "shape"})], [("B2S", {"k": "pic", "t": "picture"})], None]
 
 
 def test_adopt_names_each_mark_after_its_deck_object():
@@ -110,7 +110,7 @@ def test_a_page_without_marks_extracts_as_before(tmp_path, backend):
     assert all("marks" not in item for kind in ("spans", "drawings", "images") for item in plain[kind])
     for kind in ("spans", "drawings"):
         for item in marked[kind]:
-            assert item.pop("marks") == [["B2S", {"k": "all", "t": "text"}]]
+            assert item.pop("marks") == [("B2S", {"k": "all", "t": "text"})]
     assert json.dumps(marked, sort_keys=True) == json.dumps(plain, sort_keys=True)
 
 

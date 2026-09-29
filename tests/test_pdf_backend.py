@@ -346,7 +346,7 @@ def test_the_pipeline_through_the_sandbox_writes_the_same_files(tmp_path):
 
     def run(spec, out):
         with pdf.use_backend(get_backend(spec)):
-            raw = extract(BLOCKS)
+            raw = extract(BLOCKS, None)
             deck = classify(raw)
             render.render_backgrounds(BLOCKS, raw, deck, out)
         files = {p.relative_to(out).as_posix(): p.read_bytes() for p in sorted(out.rglob("*")) if p.is_file()}

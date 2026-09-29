@@ -11,7 +11,7 @@ from . import bidi
 from .classify_model import ACCENTS, OUTLINE_MIN, Line, Paragraph, Rect, Span
 from .fonts import MATH_ITALIC_RE, font_info
 from .ir import BulletShape, Script
-from .raw_types import RawDrawing, RawSpan
+from .raw_types import RawDoc, RawDrawing, RawSpan
 
 
 # Operator names set upright inside formulas (\min, \lim, \log, \operatorname{Var}): words of a
@@ -887,7 +887,7 @@ def code_indent(par: Paragraph, box_x0: float, pitch: float | None) -> str:
     return " " * max(0, round((par.x0 - box_x0) / (pitch or mono_advance(par.first.content))))
 
 
-def body_size(raw: dict) -> float:
+def body_size(raw: RawDoc) -> float:
     """The deck's most common text size, not counting theme furniture: a piece of text drawn at
     the same place on at least half the frames (and three of them) is a footline or headline
     ("Author (Inst.)  Short title  date"). In a Madrid/Boadilla deck with little prose - a deck
