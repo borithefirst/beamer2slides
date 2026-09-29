@@ -522,10 +522,14 @@ def resync(made: Made, home: Path) -> None:
     placeholder, a table refilled in place as `table_refill` does - with the staging .pptx that
     brings the pictures."""
     from beamer2slides import merge, snapshot, sync, theme_sync
-    from beamer2slides.emit import build_pptx, title_element
+    from beamer2slides.emit import SLIDE_W, build_pptx, title_element
 
     base, pres = adopt_base_of(made) if made.extra.get("folds") is not None else base_of(made)
-    ours = sync.build_ours(made.pdf, home / "ours", base, made.page_width)
+    # (the width went in as `overlays` while build_ours had defaults: planned at SLIDE_W whatever the deck)
+    ours = sync.build_ours(made.pdf, home / "ours", base, "last", made.page_width or SLIDE_W,
+                           (made.out,) if made.out else ())
+    # a base this converter just wrote is in today's form: nothing to rewrite, nothing it cannot read
+    assert snapshot.base_form_json(ours["base_forms"]) == []
     for s, entry in zip(ours["deck"]["slides"], ours["slides"]):
         assert [e["id"] for e in entry["elements"]] == [e["id"] for e in s["elements"]]
     sync.mark_emitted(base, ours["slides"], ours["deck"], ours["pairs"], ours["plan"].scale, ours["plan"].fonts,

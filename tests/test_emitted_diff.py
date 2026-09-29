@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from beamer2slides.emit import SLIDE_W
 from beamer2slides import emit, identity, sync
 from beamer2slides.classify import classify
 from beamer2slides.extract import extract, select_overlays
@@ -148,11 +149,11 @@ def test_a_title_whose_box_a_new_neighbour_narrowed_is_a_source_change(tmp_path)
     v1, moved = SYNC_DECKS / "v1.pdf", SYNC_DECKS / "table-moved.pdf"
     if not v1.exists() or not moved.exists():
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
-    first = sync.build_ours(v1, tmp_path / "v1", {"slides": []})
+    first = sync.build_ours(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, ())
 
     def changes(pdf, name):
         base = {"slides": copy.deepcopy(first["slides"])}
-        ours = sync.build_ours(pdf, tmp_path / name, base)
+        ours = sync.build_ours(pdf, tmp_path / name, base, "last", SLIDE_W, ())
         out = {}
         for j, i in ours["pairs"].items():
             base_by = {e["key"]: e for e in base["slides"][i]["elements"]}
@@ -168,7 +169,7 @@ def test_a_title_whose_box_a_new_neighbour_narrowed_is_a_source_change(tmp_path)
     for s in base["slides"]:
         for e in s["elements"]:
             e["fields"] = {**e["fields"], **{f: "ours" for f in identity.CONTEXT_FIELDS}}
-    again = sync.build_ours(v1, tmp_path / "again", base)
+    again = sync.build_ours(v1, tmp_path / "again", base, "last", SLIDE_W, ())
     assert not any(set(identity.CONTEXT_FIELDS) & identity.source_changes(b, o) for j, i in again["pairs"].items()
                    for o in again["slides"][j]["elements"] for b in base["slides"][i]["elements"] if b["key"] == o["key"])
 

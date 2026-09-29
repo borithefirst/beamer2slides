@@ -16,6 +16,7 @@ import re
 import string
 import subprocess
 import time
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -325,14 +326,17 @@ def drop_objects(pres: dict, objects, slides) -> dict:
 
 # ---------------------------------------------------------------- ours
 
-def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
-               page_width: float | None = None) -> dict:
+def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_width: float,
+               pictures: Sequence[Path]) -> dict:
     """extract, classify and render the new PDF into `work`, plan it like emit and give its
     slides and elements the keys of the base they match.
 
-    `page_width`: how wide the deck this will be written into is, in slide pt (default: the
-    SLIDE_W frame `convert` makes). A deck `adopt` took over is whatever size the person made it,
+    `page_width`: how wide the deck this will be written into is, in slide pt (emit's SLIDE_W for
+    the frame `convert` makes). A deck `adopt` took over is whatever size the person made it,
     and every box this plan holds is PDF pt times the scale that width gives.
+
+    `base` is brought to today's form in place before anything is compared with it (`base_today`;
+    `pictures`: the folders its picture files may be in), and what that found is `base_forms`.
 
     A base `adopt` recorded also carries the deck's own boxes (`adopt_sync.deck_folds`), and what
     one of them the converter reads back as several is put together again before anything is keyed
@@ -343,7 +347,6 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
     listed in "contained" with its slide and element keys, for the report."""
     from . import adopt_sync
     from .classify import classify
-    from .emit import SLIDE_W
     from .extract import extract, select_overlays
     from .marked import shape_marks
     from .notes import prepare
@@ -357,29 +360,38 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
     raw = select_overlays(raw, overlays)
     deck = classify(raw)
     render_backgrounds(prepared.pdf, raw, deck, work, shape_marks(base))
-    adopt_sync.fold_slides(deck, (base.get("adopt") or {}).get("boxes") or {})
+    adopt = base.get("adopt")
+    boxes = as_object(adopt, "base.adopt").get("boxes") if adopt is not None else None
+    folds: dict[str, list[JsonObject]] = {}
+    for label, objects in (as_object(boxes, "base.adopt.boxes").items() if boxes is not None else ()):
+        folds[label] = as_objects(objects, f"base.adopt.boxes.{label}")
+    adopt_sync.fold_slides(deck, folds)
     (work / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
-    plan = planned(deck, prepared.pdf, work, page_width or SLIDE_W)
+    plan = planned(deck, prepared.pdf, work, page_width)
     originals = contained_originals(deck, [(int(c["page"]), str(c["id"])) for c in plan.contained])
     deck = plan.deck
     infos = [identity.slide_info(s) for s in deck["slides"]]
-    base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "",
-                   "page": b["page"], "removed": b.get("removed")}   # `align_slides`: a slide the source dropped
-                  for b in base["slides"]]
+    base_slides = as_objects(base["slides"], "base.slides")
+    base_keys = [as_str(b["key"], "base slide key") for b in base_slides]
+    base_infos: list[JsonObject] = [
+        {"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "",
+         "page": as_int(b["page"], f"base slide {k}: page"), "removed": b.get("removed")}   # `align_slides`: a slide the source dropped
+        for b, k in zip(base_slides, base_keys)]
     moves = identity.label_moves(base_infos, infos)
     for m in moves:  # indices are no use to a reader of the report; the base's keys are
-        m["slide"] = base["slides"][m["base"]]["key"]
-        m["frame_is"] = base["slides"][m["frame_is"]]["key"] if m["frame_is"] is not None else None
+        m["slide"] = base_keys[m["base"]]
+        m["frame_is"] = base_keys[m["frame_is"]] if m["frame_is"] is not None else None
         m["slide_is"] = infos[m["slide_is"]]["title"] if m["slide_is"] is not None else None
     weak: dict[int, str] = {}
-    keys, pairs = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos, moves, weak)
+    keys, pairs = identity.inherit_slide_keys(base_infos, base_keys, infos, moves, weak)
     near = identity.near_misses(base_infos, infos, pairs)
     for m in near:  # as with the moves: the report reads better with the base's key than an index
-        m["slide"] = base["slides"][m["base"]]["key"]
+        m["slide"] = base_keys[m["base"]]
         m["title"] = infos[m["ours"]]["title"]
     ekeys, fps = [], []
     for j, slide in enumerate(deck["slides"]):
-        matched = identity.base_items(base["slides"][pairs[j]]["elements"]) if j in pairs else None
+        matched = identity.base_items(as_objects(base_slides[pairs[j]]["elements"], f"base slide {base_keys[pairs[j]]}: "
+                                                 "elements")) if j in pairs else None
         k, f = identity.slide_element_keys(slide["elements"], work, matched)
         ekeys.append(k)
         fps.append(f)
@@ -391,8 +403,7 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
         view_slide: JsonObject = {**s, "elements": elements}
         view_slides.append(view_slide)
     view: JsonObject = {"slides": view_slides}  # (its readers take the slides alone)
-    adopt_sync.upgrade_shapes(base, view)
-    adopt_sync.upgrade_tables(base, view)
+    forms = base_today(base, view, pictures)
     base_as_contained(base, entries, view, pairs, keys, work, originals)
     unread: list[Unread] = []
     unwritten = mark_emitted(base, entries, deck, pairs, plan.scale, plan.fonts, fast=True, unread=unread)
@@ -409,7 +420,21 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
                                    kind=None if kind is None else str(kind), error=str(c["error"]), words=words))
     return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries,
             "pairs": pairs, "label_moves": moves, "weak_pairs": weak, "near_misses": near,
-            "context_unwritten": unwritten, "context_unread": unread, "contained": contained}
+            "context_unwritten": unwritten, "context_unread": unread, "contained": contained, "base_forms": forms}
+
+
+def base_today(base: JsonObject, view: JsonObject, pictures: Sequence[Path]) -> list[snapshot.BaseForm]:
+    """In place: `base` brought to today's form, the one place a base is, before anything compares
+    its hashes with the new conversion's. An adopt base's marked shapes and tables from before
+    688ebf4 first, whose missing fields come from our element of the same mark (`view`, the new
+    conversion as classify read it); then every element through the IR parser
+    (`snapshot.rehash_base`; `pictures`: where its picture files may be). A form the converter now
+    writes differently is then a rewrite of the base, not a change of the source."""
+    from . import adopt_sync
+
+    page_key = snapshot.base_page_key(base)
+    return [*adopt_sync.upgrade_shapes(base, view, page_key), *adopt_sync.upgrade_tables(base, view, page_key),
+            *snapshot.rehash_base(base, pictures)]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -3275,7 +3300,9 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
         print(f"warning: {w}")
     # The deck's own width, not the frame convert writes into: a deck adopt took over is whatever
     # size the person made it, and everything this sync creates or moves is planned in slide pt.
-    ours = build_ours(pdf, out / "sync" / "ours", base, overlays, adopt_sync.deck_width(base))
+    # (a base convert wrote names its pictures in `out`; one a sync wrote, in that sync's work folder)
+    work = out / "sync" / "ours"
+    ours = build_ours(pdf, work, base, overlays, adopt_sync.deck_width(base), (out, work))
     refreshed = snapshot.refresh_pictures(base, ours, out)
 
     def check_plan(mplan: dict, theirs: dict) -> None:
@@ -3316,6 +3343,10 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     report["warnings"] += says
     if contained:  # (what emit could not plan and made a picture: `planned`)
         report["contained"] = contained_json(contained)
+    forms: list[snapshot.BaseForm] = ours["base_forms"]
+    report["warnings"] += snapshot.base_form_warnings(forms)
+    if forms:  # (a base in an older form, read in today's: `base_today`)
+        report["base_forms"] = snapshot.base_form_json(forms)
     report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
     report["overruns"] = s.overruns
     report["refit"] = s.refit_moves

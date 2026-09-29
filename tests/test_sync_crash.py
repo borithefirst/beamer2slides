@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from beamer2slides.emit import SLIDE_W
 from beamer2slides import faults, snapshot, sync
 from beamer2slides.inverse import Result, replace_file, source_hashes, unchanged_since_pull, write_outputs
 
@@ -135,7 +136,7 @@ def test_a_recreated_unit_deletes_nothing_in_the_content_phase():
     v1 = SYNC_DECKS / "v1.pdf"
     if not v1.exists():
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
-    first = build_ours(v1, Path(os.environ.get("TMP", ".")) / "b2s-crash-ours", {"slides": []})
+    first = build_ours(v1, Path(os.environ.get("TMP", ".")) / "b2s-crash-ours", {"slides": []}, "last", SLIDE_W, ())
     s = bare_sync(ours=first, plan=first["plan"], scale=first["plan"].scale, tok="1zz",
                   urls=defaultdict(lambda: "https://example.com/staged.png"))
     j = next(k for k, o in enumerate(first["slides"]) if o["key"] == "policy")

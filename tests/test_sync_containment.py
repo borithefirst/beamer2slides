@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from beamer2slides.emit import SLIDE_W
 from beamer2slides import adopt_sync, emit, identity, merge, snapshot, sync
 
 from . import ir_sources as S
@@ -65,7 +66,7 @@ def test_a_sync_writes_everything_else_and_reports_the_element_it_made_a_picture
         lenient: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     base, pres = talk_base(tmp_path)
     unplannable(monkeypatch, POLICY)
-    ours = sync.build_ours(SYNC_DECKS / "disjoint.pdf", tmp_path / "ours", base)
+    ours = sync.build_ours(SYNC_DECKS / "disjoint.pdf", tmp_path / "ours", base, "last", SLIDE_W, ())
 
     [c] = ours["contained"]
     assert (c.slide, c.element, c.kind, c.error) == ("policy", "image/fallback/0", "text", "KeyError: 'lines'")
@@ -101,7 +102,7 @@ def test_under_strict_the_unplannable_element_raises(monkeypatch: pytest.MonkeyP
     base, _ = talk_base(tmp_path)
     unplannable(monkeypatch, POLICY)
     with pytest.raises(KeyError):
-        sync.build_ours(SYNC_DECKS / "disjoint.pdf", tmp_path / "ours", base)
+        sync.build_ours(SYNC_DECKS / "disjoint.pdf", tmp_path / "ours", base, "last", SLIDE_W, ())
 
 
 @pytest.mark.needs_decks("sync/out/v1.pdf")
@@ -115,7 +116,7 @@ def test_an_element_convert_contained_the_same_way_is_no_change(
     assert [c["kind"] for c in off["contained"]] == ["text"]
     emit.crop_fallbacks(off["plan"].deck, [(c["page"], c["id"]) for c in off["contained"]], tmp_path / "v1", "test")
     base, pres = S.base_of(S.Made(deck, "rendered", tmp_path / "v1", used))
-    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base)
+    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, ())
 
     mplan, content, _ = requests_of(base, ours, pres, tmp_path / "ours")
     found, says = sync.contained_report(ours["contained"], ours["slides"], mplan)
@@ -136,7 +137,7 @@ def test_an_element_the_base_holds_that_emit_now_cannot_plan_is_kept(
     [held] = [e for s in base["slides"] for e in s["elements"]
               if e["kind"] == "text" and "Both versions go into the report" in identity.plain_text(e["ir"])]
     objects, read = list(held["objects"]), copy.deepcopy(held["readback"])
-    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base)
+    ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, ())
 
     mplan, content, cleanup = requests_of(base, ours, pres, tmp_path / "ours")
     assert {u["action"] for p in mplan["slides"] for u in p.get("units", [])} <= {"keep"}
@@ -175,14 +176,14 @@ def test_an_adopt_base_older_than_its_tables_layout_is_no_source_change() -> Non
     def entry(ir: dict) -> dict:
         h, fields = identity.ir_fields(ir, None, None, None)
         return {"key": "table/table/0", "kind": "table", "anchor": None, "ir": ir, "ir_hash": h, "fields": fields}
-    base = {"adopt": {"boxes": {}}, "slides": [{"elements": [entry(old), entry(edited)]}]}
-    adopt_sync.upgrade_tables(base, deck)
+    base = {"adopt": {"boxes": {}}, "slides": [{"key": "s", "elements": [entry(old), entry(edited)]}]}
+    assert [(r.slide, r.how) for r in adopt_sync.upgrade_tables(base, deck, None)] == [("s", "adopt_table")]
     same, changed = base["slides"][0]["elements"]
     assert same["ir"]["id"] == "p4m2" and same["ir"]["columns"] == ours["columns"]
     assert identity.source_changes(same, entry(ours)) == set()
     assert changed["ir"] is edited, "a table the source changed is left for the merge to see"
     plain = {"slides": [{"elements": [entry(old)]}]}
-    adopt_sync.upgrade_tables(plain, deck)  # (a convert base has no marks to upgrade)
+    assert adopt_sync.upgrade_tables(plain, deck, None) == []  # (a convert base has no marks to upgrade)
     assert plain["slides"][0]["elements"][0]["ir"] is old
 
 

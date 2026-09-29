@@ -1979,10 +1979,11 @@ class LiveRound:
     def ours(self, pdf: Path, base: dict, folder: Path):
         """The new conversion the sync used, rebuilt offline (no Google call) so the oracle can tell
         a word the source rewrote from a word that vanished."""
+        from beamer2slides.emit import SLIDE_W
         from beamer2slides.sync import build_ours
         try:
             with PDFIUM:
-                return build_ours(pdf, folder / "ours", base)
+                return build_ours(pdf, folder / "ours", base, "last", SLIDE_W, ())
         except Exception as e:  # noqa: BLE001
             self.log.write(f"could not rebuild ours: {e}\n")
             return None

@@ -7,13 +7,19 @@ import io
 import json
 import os
 import re
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, Union
 
 from . import identity
 from .emit import background_key as emit_background_key, slide_layout
 from .gapi import HttpError
 from .gslides import EMU_PER_PT, execute
+from .ir_types import IRError, element_json, parse_element, parse_rendered_element
+from .json_types import Json, JsonObject, as_int, as_object, as_objects, as_str
+from .typing_compat import assert_never
 
 VERSION = 1
 TAG_PREFIX = "b2s:"
@@ -580,13 +586,200 @@ def slide_entries(deck: dict, out: Path, keys: list[str], element_keys: list[lis
     return entries
 
 
-def page_keys(deck: dict, keys: list[str]):
+def page_keys(deck: JsonObject, keys: Sequence[str]) -> Callable[[int], str]:
     """PDF page -> slide key, for internal links (a skipped overlay step links to its kept step)."""
-    kept = sorted((s["page"], k) for s, k in zip(deck["slides"], keys))
+    slides = as_objects(deck["slides"], "deck.slides")
+    return page_key_of([(as_int(s["page"], "slide.page"), k) for s, k in zip(slides, keys)])
+
+
+def page_key_of(pages: Sequence[tuple[int, str]]) -> Callable[[int], str]:
+    """`page_keys` over (page, slide key) pairs."""
+    kept = sorted(pages)
 
     def key(page: int) -> str:
         return next((k for p, k in kept if p >= page), kept[-1][1] if kept else "")
     return key
+
+
+def base_page_key(base: JsonObject) -> Callable[[int], str]:
+    """`page_keys` over a base's own slides, as `slide_entries` hashed their links. A slide the
+    source dropped is left out: its page is of an older PDF, and it was not in the conversion that
+    hashed the others."""
+    pages: list[tuple[int, str]] = []
+    for s in as_objects(base.get("slides", []), "base.slides"):
+        if not s.get("removed"):
+            key = as_str(s["key"], "base slide key")
+            pages.append((as_int(s["page"], f"base slide {key}: page"), key))
+    return page_key_of(pages)
+
+
+# ---------------------------------------------------------------- a base in today's form
+
+RewriteHow = Literal["form", "adopt_shape", "adopt_table"]
+"""How a base element was brought to today's form: `form`, its IR written as `ir_types` writes it
+(`rehash_base`); `adopt_shape` / `adopt_table`, a marked shape or table an adopt base recorded
+before 688ebf4 (`adopt_sync.upgrade_shapes` / `upgrade_tables`)."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class Rewritten:
+    """A base element whose `ir` is now in today's form. `hashed`: its hash changed with it (a
+    difference the hash does not see leaves it as it was)."""
+    slide: str
+    element: str
+    how: RewriteHow
+    hashed: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class Unparsed:
+    """A base element today's IR parser refuses (`error` says where): kept as recorded."""
+    slide: str
+    element: str
+    error: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class PictureGone:
+    """A picture whose IR would be rewritten, but whose file is in none of the folders given: its
+    hash holds the file's, which cannot be worked out again, so the element is kept as recorded."""
+    slide: str
+    element: str
+    file: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class Unreproduced:
+    """An element whose IR would be rewritten, but whose recorded hash its recorded IR does not give
+    here (a link hashed against other pages, a picture file written again since): kept as recorded,
+    since a new hash from other inputs would say a change nobody made."""
+    slide: str
+    element: str
+
+
+BaseForm = Union[Rewritten, Unparsed, PictureGone, Unreproduced]
+
+
+def _dumped(value: Json) -> str:
+    return json.dumps(value, sort_keys=True, ensure_ascii=False)
+
+
+def _anchor_key(e: JsonObject) -> str | None:
+    anchor = e.get("anchor")
+    return anchor if isinstance(anchor, str) else None
+
+
+def _read_ir(ir: JsonObject, where: str) -> JsonObject:
+    """A base element's IR as `ir_types` writes it: emit's plan of one, or - where that is refused -
+    a classified element, which an older adopt base holds for a marked shape emit cannot draw (a
+    freeform kept a shape by `marked.shape_marks`, which today's plan makes its picture). Raises
+    the rendered reading's error when neither reads it."""
+    try:
+        return element_json(parse_rendered_element(ir, where))
+    except IRError as rendered:
+        try:
+            return element_json(parse_element(ir, where))
+        except IRError:
+            raise rendered from None
+
+
+def rehash_base(base: JsonObject, pictures: Sequence[Path]) -> list[BaseForm]:
+    """In place: every base element's `ir` read through the IR parser (`ir_types`). Where what it
+    writes back differs from what the base holds, the base takes it and its hash is worked out
+    again - so a form the converter now writes differently (a key left out, a false flag) is a
+    rewrite of the base, not a change of the source.
+
+    The new hash is only made where the recorded IR still gives the recorded hash with the same
+    inputs (the anchor's key, the base's pages, the picture's file); otherwise the element is kept
+    and reported. `pictures`: the folders a base picture's file may be in, tried in order (a base
+    `convert` wrote names files in its out folder, one a sync wrote files in that sync's work
+    folder). A difference the hash does not see needs no file. Returns what was found, element by
+    element; nothing when the base is in today's form."""
+    page_key = base_page_key(base)
+    found: list[BaseForm] = []
+    for s in as_objects(base.get("slides", []), "base.slides"):
+        slide = as_str(s["key"], "base slide key")
+        for e in as_objects(s.get("elements", []), f"base slide {slide}: elements"):
+            if e.get("ir") is None:
+                continue  # (a base older than the IR in it: nothing to read)
+            element = as_str(e["key"], f"base slide {slide}: element key")
+            ir = as_object(e["ir"], f"base slide {slide}, element {element}: ir")
+            try:
+                now = _read_ir(ir, f"base slide {slide}")
+            except IRError as err:
+                found.append(Unparsed(slide=slide, element=element, error=str(err)))
+                continue
+            if _dumped(now) == _dumped(ir):
+                continue
+            anchor = _anchor_key(e)
+            if identity.ir_fields(ir, None, anchor, page_key)[0] == identity.ir_fields(now, None, anchor, page_key)[0]:
+                e["ir"] = now  # (what changed is nothing the hash reads: ids, pictures' files, spans)
+                found.append(Rewritten(slide=slide, element=element, how="form", hashed=False))
+                continue
+            file = ir.get("file") if ir.get("kind") == "image" else None
+            folders: list[Path | None] = [None]  # (no file: the hash reads none)
+            if isinstance(file, str) and file:
+                folders = [p for p in pictures if (p / file).exists()]
+                if not folders:
+                    found.append(PictureGone(slide=slide, element=element, file=file))
+                    continue
+            for folder in folders:
+                if identity.ir_fields(ir, folder, anchor, page_key)[0] != e.get("ir_hash"):
+                    continue
+                h, fields = identity.ir_fields(now, folder, anchor, page_key)
+                # (the marks `sync.mark_emitted` gives stay: they are about the neighbours, not this IR)
+                e.update(ir=now, ir_hash=h,
+                         fields={**as_object(e.get("fields") or {}, "base element fields"), **fields})
+                found.append(Rewritten(slide=slide, element=element, how="form", hashed=True))
+                break
+            else:
+                found.append(Unreproduced(slide=slide, element=element))
+    return found
+
+
+def base_form_warnings(found: Sequence[BaseForm]) -> list[str]:
+    """The report's words for what `rehash_base` and the adopt upgrades found: nothing when the base
+    was in today's form."""
+    rewritten = [f for f in found if isinstance(f, Rewritten)]
+    kept = [f for f in found if not isinstance(f, Rewritten)]
+    says: list[str] = []
+    if rewritten:
+        says.append(f"{len(rewritten)} element(s) of the sync base were recorded in an older form of the converter's IR "
+                    f"and were read in today's, so they are no change of the source: "
+                    + ", ".join(f"{f.slide}/{f.element}" for f in rewritten[:8]) + (" ..." if len(rewritten) > 8 else ""))
+    for f in kept:
+        match f:
+            case Unparsed():
+                says.append(f"slide {f.slide}: the sync base records {f.element} in a form this version cannot read "
+                            f"({f.error}); it is kept as recorded, and may read as changed by the source")
+            case PictureGone():
+                says.append(f"slide {f.slide}: the picture file {f.file} the sync base records for {f.element} is gone; "
+                            f"it is kept as recorded, and may read as changed by the source")
+            case Unreproduced():
+                says.append(f"slide {f.slide}: the sync base's hash of {f.element} cannot be worked out again here; "
+                            f"it is kept as recorded, and may read as changed by the source")
+            case _:
+                assert_never(f)
+    return says
+
+
+def base_form_json(found: Sequence[BaseForm]) -> list[JsonObject]:
+    """`found` for the report, each with what happened (`outcome`)."""
+    out: list[JsonObject] = []
+    for f in found:
+        match f:
+            case Rewritten():
+                out.append({"outcome": "rewritten", "slide": f.slide, "element": f.element, "how": f.how,
+                            "hashed": f.hashed})
+            case Unparsed():
+                out.append({"outcome": "unparsed", "slide": f.slide, "element": f.element, "error": f.error})
+            case PictureGone():
+                out.append({"outcome": "picture_gone", "slide": f.slide, "element": f.element, "file": f.file})
+            case Unreproduced():
+                out.append({"outcome": "unreproduced", "slide": f.slide, "element": f.element})
+            case _:
+                assert_never(f)
+    return out
 
 
 def attach_readback(entry: dict, slide_read: dict | None, objects: list[list[str]], groups: list[str]) -> None:

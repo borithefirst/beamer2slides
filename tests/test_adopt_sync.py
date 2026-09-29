@@ -1126,12 +1126,13 @@ def test_an_adopt_base_older_than_the_shapes_it_records_is_no_source_change():
     def entry(ir):
         h, fields = identity.ir_fields(ir)
         return {"key": "shape/panel/0", "kind": "shape", "anchor": None, "ir": ir, "ir_hash": h, "fields": fields}
-    base = {"adopt": {"boxes": {}}, "slides": [{"elements": [entry(old), entry(moved)]}]}
-    adopt_sync.upgrade_shapes(base, deck)
+    base = {"adopt": {"boxes": {}}, "slides": [{"key": "s", "elements": [entry(old), entry(moved)]}]}
+    assert [(r.slide, r.how, r.hashed) for r in adopt_sync.upgrade_shapes(base, deck, None)] == \
+        [("s", "adopt_shape", True)] * 2
     same, changed = base["slides"][0]["elements"]
     assert same["ir_hash"] == identity.ir_fields(ours)[0]
     assert changed["ir"]["outline"] == {"color": "#00ff00", "width": 2.02}
     assert changed["fields"]["position"] != identity.ir_fields({**ours, "mark": "p80_i13"})[1]["position"]
     plain = {"slides": [{"elements": [entry(old)]}]}
-    adopt_sync.upgrade_shapes(plain, deck)  # (a convert base has no marks to upgrade)
+    assert adopt_sync.upgrade_shapes(plain, deck, None) == []  # (a convert base has no marks to upgrade)
     assert plain["slides"][0]["elements"][0]["ir"] is old

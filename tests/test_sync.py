@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from beamer2slides.emit import SLIDE_W
 from beamer2slides import identity, merge
 from beamer2slides.extract import frame_labels
 from beamer2slides.sync import letterbox_fix, rename
@@ -2251,8 +2252,8 @@ def test_retitled_frame_and_right_limits_on_the_sync_talk(tmp_path):
     v1, untitled = SYNC_DECKS / "v1.pdf", SYNC_DECKS / "untitled.pdf"
     if not (v1.exists() and untitled.exists()):
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py, or pytest -m sync -k variants)")
-    first = build_ours(v1, tmp_path / "v1", {"slides": []})
-    second = build_ours(untitled, tmp_path / "untitled", {"slides": first["slides"]})
+    first = build_ours(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, ())
+    second = build_ours(untitled, tmp_path / "untitled", {"slides": first["slides"]}, "last", SLIDE_W, ())
     last = second["slides"][-1]
     assert last["key"] == first["slides"][-1]["key"]
     assert [e["key"] for e in last["elements"] if e["role"] == "title"] == ["text/title/0"]
@@ -2321,7 +2322,7 @@ def test_unit_rebuilt_inside_a_group_nested_in_a_user_group(tmp_path):
     v1 = SYNC_DECKS / "v1.pdf"
     if not v1.exists():
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
-    first = build_ours(v1, tmp_path / "v1", {"slides": []})
+    first = build_ours(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, ())
     s = Sync.__new__(Sync)
     s.ours, s.plan, s.scale, s.tok, s.warnings = first, first["plan"], first["plan"].scale, "1zz", []
     s.urls = defaultdict(lambda: "https://example.com/staged.png")
@@ -2369,8 +2370,8 @@ def _table_sync(tmp_path, variant: str):
     v1, new = SYNC_DECKS / "v1.pdf", SYNC_DECKS / f"{variant}.pdf"
     if not v1.exists() or not new.exists():
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
-    first = build_ours(v1, tmp_path / "v1", {"slides": []})
-    second = build_ours(new, tmp_path / "new", {"slides": []})
+    first = build_ours(v1, tmp_path / "v1", {"slides": []}, "last", SLIDE_W, ())
+    second = build_ours(new, tmp_path / "new", {"slides": []}, "last", SLIDE_W, ())
     j = next(k for k, o in enumerate(second["slides"]) if o["title"] == "Results")
     jb = next(k for k, o in enumerate(first["slides"]) if o["title"] == "Results")
 
@@ -2794,9 +2795,9 @@ def test_conversion_is_stable():
     if not pdf.exists():
         pytest.skip("build the test decks first (tests/decks/build.py sync_smoke_v1)")
     with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
-        first = build_ours(pdf, Path(a), {"slides": []})
+        first = build_ours(pdf, Path(a), {"slides": []}, "last", SLIDE_W, ())
         base = {"slides": first["slides"]}
-        second = build_ours(pdf, Path(b), base)
+        second = build_ours(pdf, Path(b), base, "last", SLIDE_W, ())
     assert second["pairs"] == {j: j for j in range(len(first["slides"]))}
     assert [(s["key"], [(e["key"], e["ir_hash"]) for e in s["elements"]]) for s in second["slides"]] == \
         [(s["key"], [(e["key"], e["ir_hash"]) for e in s["elements"]]) for s in first["slides"]]

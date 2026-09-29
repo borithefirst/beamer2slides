@@ -24,12 +24,13 @@ change. Nothing here calls Drive; `adopt --base-in-drive` is how one asks for th
 """
 
 import json
+from collections.abc import Callable
 from difflib import SequenceMatcher
 from pathlib import Path
 
 from . import guard, identity, merge, snapshot
 from .emit import SLIDE_W
-from .json_types import JsonObject, as_object, as_objects
+from .json_types import JsonObject, as_object, as_objects, as_str
 
 ORIGIN = merge.ADOPTED   # (the word itself lives there: the merge plans by it and cannot import this)
 # A pair is a claim that one converted element *is* one object of the deck. Both numbers are about
@@ -437,49 +438,76 @@ def fold_slides(deck: dict, folds: dict[str, list[dict]]) -> None:
             slide["elements"], _ = fold_composites(slide["elements"], objects)
 
 
-def upgrade_shapes(base: dict, deck: dict) -> None:
+def _marked(deck: JsonObject, kind: str) -> dict[str, JsonObject]:
+    """Our elements of `kind` by their mark."""
+    ours: dict[str, JsonObject] = {}
+    for s in as_objects(deck.get("slides", []), "deck.slides"):
+        for e in as_objects(s["elements"], "deck slide elements"):
+            mark = e.get("mark")
+            if isinstance(mark, str) and mark and e.get("kind") == kind:
+                ours[mark] = e
+    return ours
+
+
+def _rehashed(e: JsonObject, new: JsonObject, page_key: Callable[[int], str] | None) -> bool:
+    """In place: base element `e` holding `new` as its IR, hashed as `snapshot.slide_entries` hashes
+    (its anchor's key, the base's pages: a table's cell can link to a slide). Whether the hash
+    changed."""
+    anchor = e.get("anchor")
+    h, fields = identity.ir_fields(new, None, anchor if isinstance(anchor, str) else None, page_key)
+    was = e.get("ir_hash")
+    e.update(ir=new, ir_hash=h, fields={**as_object(e.get("fields") or {}, "base element fields"), **fields})
+    return h != was
+
+
+def upgrade_shapes(base: JsonObject, deck: JsonObject,
+                   page_key: Callable[[int], str] | None) -> list[snapshot.Rewritten]:
     """In place: a marked shape an adopt base recorded before 688ebf4 (no `flip` or `radius`, its
     outline a bare colour) in today's form, and hashed again, so an unchanged source is no change.
     The width the old form left out is taken from our element of the same mark when its outline
     is the same colour, and from a shape: one object's crop and outline can share a mark (poster's
     fills). Without this, syncing an unchanged source into china's adopted deck recreated four of
-    the person's freeforms (audit, 2026-09-29)."""
+    the person's freeforms (audit, 2026-09-29). `page_key`: the base's (`snapshot.base_page_key`)."""
     if base.get("adopt") is None:
-        return
-    ours = {e["mark"]: e for s in deck.get("slides", ()) for e in s["elements"]
-            if e.get("mark") and e["kind"] == "shape"}
-    for slide in base.get("slides", ()):
-        for e in slide.get("elements", ()):
-            ir = e.get("ir") or {}
-            if e.get("kind") != "shape" or not ir.get("mark") or "flip" in ir:
+        return []
+    ours = _marked(deck, "shape")
+    done: list[snapshot.Rewritten] = []
+    for slide in as_objects(base.get("slides", []), "base.slides"):
+        slide_key = as_str(slide["key"], "base slide key")
+        for e in as_objects(slide.get("elements", []), f"base slide {slide_key}: elements"):
+            ir = as_object(e.get("ir") or {}, f"base slide {slide_key}: element ir")
+            mark = ir.get("mark")
+            if e.get("kind") != "shape" or not isinstance(mark, str) or not mark or "flip" in ir:
                 continue
-            new = {**ir, "flip": False, "radius": 0.0}
-            if isinstance(ir.get("outline"), str):
-                mine = (ours.get(ir["mark"]) or {}).get("outline")
-                width = mine["width"] if isinstance(mine, dict) and mine.get("color") == ir["outline"] else 1.0
-                new["outline"] = {"color": ir["outline"], "width": width}
-            h, fields = identity.ir_fields(new, None, e.get("anchor"))
-            e.update(ir=new, ir_hash=h, fields={**e.get("fields", {}), **fields})
+            new: JsonObject = {**ir, "flip": False, "radius": 0.0}
+            colour = ir.get("outline")
+            if isinstance(colour, str):
+                mine = (ours.get(mark) or {}).get("outline")
+                width = mine.get("width") if isinstance(mine, dict) and mine.get("color") == colour else None
+                new["outline"] = {"color": colour, "width": width if isinstance(width, (int, float)) else 1.0}
+            hashed = _rehashed(e, new, page_key)
+            done.append(snapshot.Rewritten(slide=slide_key, element=as_str(e["key"], f"base slide {slide_key}: element key"),
+                                           how="adopt_shape", hashed=hashed))
+    return done
 
 
-def upgrade_tables(base: JsonObject, deck: JsonObject) -> None:
+def upgrade_tables(base: JsonObject, deck: JsonObject,
+                   page_key: Callable[[int], str] | None) -> list[snapshot.Rewritten]:
     """In place: a marked table (`slidetable`) an adopt base recorded before 688ebf4 - its cells and
     box, no layout (`columns`, `rows`, rules...) - in today's form, so an unchanged source is no
     change. The layout is taken from our table of the same mark, and only when everything the old
     form did say is the same there: a source that changed the table still reads as changed. Without
     this, syncing hashing's unchanged source into its adopted deck recreated the person's table
-    (`source_changes` {'style'}, audit 2026-09-29)."""
+    (`source_changes` {'style'}, audit 2026-09-29). `page_key`: the base's pages, which our side's
+    links are hashed against too (a cell linking to a slide read as changed when hashed without)."""
     if base.get("adopt") is None:
-        return
-    ours: dict[str, JsonObject] = {}
-    for s in as_objects(deck.get("slides", []), "deck.slides"):
-        for e in as_objects(s["elements"], "deck slide elements"):
-            mark = e.get("mark")
-            if isinstance(mark, str) and mark and e["kind"] == "table":
-                ours[mark] = e
+        return []
+    ours = _marked(deck, "table")
+    done: list[snapshot.Rewritten] = []
     for slide in as_objects(base.get("slides", []), "base.slides"):
-        for e in as_objects(slide.get("elements", []), "base slide elements"):
-            ir = as_object(e.get("ir") or {}, "base element ir")
+        slide_key = as_str(slide["key"], "base slide key")
+        for e in as_objects(slide.get("elements", []), f"base slide {slide_key}: elements"):
+            ir = as_object(e.get("ir") or {}, f"base slide {slide_key}: element ir")
             mark = ir.get("mark")
             now = ours.get(mark) if isinstance(mark, str) else None
             if e.get("kind") != "table" or now is None or "columns" in ir or "columns" not in now:
@@ -489,9 +517,10 @@ def upgrade_tables(base: JsonObject, deck: JsonObject) -> None:
             if not same:
                 continue
             new: JsonObject = {**now, "id": ir.get("id", now["id"])}
-            anchor = e.get("anchor")
-            h, fields = identity.ir_fields(new, None, anchor if isinstance(anchor, str) else None)
-            e.update(ir=new, ir_hash=h, fields={**as_object(e.get("fields", {}), "base element fields"), **fields})
+            hashed = _rehashed(e, new, page_key)
+            done.append(snapshot.Rewritten(slide=slide_key, element=as_str(e["key"], f"base slide {slide_key}: element key"),
+                                           how="adopt_table", hashed=hashed))
+    return done
 
 
 # ---------------------------------------------------------------- the base

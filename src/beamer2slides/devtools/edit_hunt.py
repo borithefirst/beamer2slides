@@ -308,6 +308,7 @@ def requests_of(stdout: str) -> int | None:
 
 
 def sync(journey: str, tex: Path) -> int:
+    from beamer2slides.emit import SLIDE_W
     from beamer2slides.sync import build_ours
     from . import layout_oracle, loss_oracle
     from . import sync_check as sc
@@ -354,7 +355,7 @@ def sync(journey: str, tex: Path) -> int:
 
     if not r.returncode:
         try:
-            ours = build_ours(pdf, folder / "ours", base)
+            ours = build_ours(pdf, folder / "ours", base, "last", SLIDE_W, (out, out / "sync" / "ours"))
         except Exception as e:  # noqa: BLE001
             ours, summary["ours_error"] = None, f"{type(e).__name__}: {e}"
         for name, judge in (("loss", loss_oracle), ("layout", layout_oracle)):

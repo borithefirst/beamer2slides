@@ -464,8 +464,12 @@ def build_ours(doc, base, out: Path) -> dict:
         k, f = identity.slide_element_keys(s["elements"], out, matched)
         ekeys.append(k)
         fps.append(f)
-    return {"slides": entries(doc, out, keys, ekeys, fps), "pairs": pairs, "out": out, "label_moves": moves,
-            "weak_pairs": weak, "near_misses": near}
+    slides = entries(doc, out, keys, ekeys, fps)
+    # (the base read in today's form before the merge compares it, as `sync.build_ours` does; this
+    # world's elements are partial IR the parser refuses, so its bases come back as recorded)
+    forms = sync.base_today(base, doc, (out,))
+    return {"slides": slides, "pairs": pairs, "out": out, "label_moves": moves,
+            "weak_pairs": weak, "near_misses": near, "base_forms": forms}
 
 
 def live_of(base) -> dict:

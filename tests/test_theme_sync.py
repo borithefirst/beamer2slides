@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from beamer2slides.emit import SLIDE_W
 from beamer2slides import emit, identity, snapshot, sync, theme_sync
 from beamer2slides.theme_sync import DECORATION
 
@@ -68,7 +69,7 @@ def talk(tmp_path_factory):
     deck, and the retheme's side."""
     need("v1", "retheme")
     tmp = tmp_path_factory.mktemp("theme")
-    v1 = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp / "v1", {"slides": []})
+    v1 = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp / "v1", {"slides": []}, "last", SLIDE_W, ())
     side1 = theme_sync.ours_side(v1)
     out = Path(v1["out"])
     pres = made_up_deck(len(v1["deck"]["slides"]))
@@ -81,7 +82,7 @@ def talk(tmp_path_factory):
     for i, s in enumerate(slides):
         s["objectId"], s["layoutObjectId"] = f"S{i}", "LT" if i == 0 else "LO"
     base = {"slides": slides, "theme": rec, "master_background": side1["shared"]}
-    retheme = sync.build_ours(SYNC_DECKS / "retheme.pdf", tmp / "retheme", {"slides": slides})
+    retheme = sync.build_ours(SYNC_DECKS / "retheme.pdf", tmp / "retheme", {"slides": slides}, "last", SLIDE_W, ())
     return {"v1": v1, "side1": side1, "pres": pres, "base": base, "retheme": retheme,
             "side2": theme_sync.ours_side(retheme)}
 
