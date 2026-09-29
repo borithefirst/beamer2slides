@@ -23,34 +23,45 @@ import argparse
 import os
 import random
 import re
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ..arrays import Ints, Pixels
 from .torture_kit import compare_renders, drop_lines
+
+if TYPE_CHECKING:
+    from ..pdf.pure.document import PdfFile
+    from ..pdf.pure.fonts import Font, PdfMap, PdfValue
+    from ..pdf.pure.syntax import PdfDict, Ref
 
 ROOT = Path(__file__).resolve().parents[3]
 DECKS = Path(os.environ.get("B2S_TEST_DECKS") or ROOT / "tests" / "decks" / "out")
+PER_KIND = 40                  # fonts harvested of each kind at most
 
 EXTGS = b"/ExtGState << " + b" ".join(
     b"/A%d << /ca %s /CA %s >>" % (k, v, v) for k, v in enumerate([b"0.5", b"0.25", b"0.8", b"0.0", b"1"])) + b" >>"
+
+Compared = tuple[int, Pixels, Pixels, Ints]
+"""(pixels that differ, PDFium's render, pure's render, per-pixel max difference)."""
 
 
 # ---------------------------------------------------------------------- fonts from the decks
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class FontSpec:
     name: str                  # where it came from: deck/fontname
-    kind: str                  # type1 | cff | truetype | cid-cff | cid-truetype | type3
-    objects: list              # serialized objects; object 0 is the font dict; refs are "@k@" placeholders
-    codes: list                # codes worth showing (a glyph in the subset)
-    two_byte: bool = False     # CID font with a 2-byte CMap (Identity-H)
-    extra: dict = field(default_factory=dict)
+    kind: str                  # type1 | cff | truetype | cid-cff | cid-truetype | type3, or a test's own
+    objects: list[bytes]       # serialized objects; object 0 is the font dict; refs are "@k@" placeholders
+    codes: list[int]           # codes worth showing (a glyph in the subset)
+    two_byte: bool             # CID font with a 2-byte CMap (Identity-H)
 
 
-def _write_value(v, refmap) -> bytes:
+def _write_value(v: PdfValue, refmap: Callable[[Ref], int]) -> bytes:
     from ..pdf.pure.document import _write_name, _write_number
     from ..pdf.pure.syntax import Name, Ref, String
     if v is None:
@@ -72,17 +83,17 @@ def _write_value(v, refmap) -> bytes:
     return b"null"
 
 
-def copy_graph(pdf, root_ref) -> list:
+def copy_graph(pdf: PdfFile, root_ref: Ref) -> list[bytes]:
     """The object `root_ref` and everything it refers to, as serialized objects whose references
     are placeholders `@k@` (k = index in the returned list)."""
     from ..pdf.pure.syntax import Stream
-    order: dict = {}
-    out: list = []
+    order: dict[int, int] = {}
+    out: list[bytes] = []
 
-    def refmap(ref):
+    def refmap(ref: Ref) -> int:
         if ref.num not in order:
             order[ref.num] = len(out)
-            out.append(None)
+            out.append(b"")                  # its place, written once its references are
             obj = pdf.get(ref.num)
             if isinstance(obj, Stream):
                 d = dict(obj.dict)
@@ -97,20 +108,22 @@ def copy_graph(pdf, root_ref) -> list:
     return out
 
 
-def _font_refs(pdf):
+def _font_refs(pdf: PdfFile) -> list[tuple[Ref, PdfDict]]:
     """(ref, font dict) of every font a page's or form's resources name."""
     from ..pdf.pure.syntax import Ref, Stream
-    seen, found = set(), []
+    fonts_seen: set[int] = set()
+    forms_seen: set[int] = set()
+    found: list[tuple[Ref, PdfDict]] = []
 
-    def walk_res(res, depth=0):
-        res = pdf.resolve(res)
+    def walk_res(value: PdfValue, depth: int) -> None:
+        res = pdf.resolve(value)
         if not isinstance(res, dict) or depth > 6:
             return
         fonts = pdf.resolve(res.get("Font"))
         if isinstance(fonts, dict):
             for v in fonts.values():
-                if isinstance(v, Ref) and v.num not in seen:
-                    seen.add(v.num)
+                if isinstance(v, Ref) and v.num not in fonts_seen:
+                    fonts_seen.add(v.num)
                     d = pdf.resolve(v)
                     if isinstance(d, dict):
                         found.append((v, d))
@@ -119,8 +132,8 @@ def _font_refs(pdf):
         xo = pdf.resolve(res.get("XObject"))
         if isinstance(xo, dict):
             for v in xo.values():
-                if isinstance(v, Ref) and ("x", v.num) not in seen:
-                    seen.add(("x", v.num))
+                if isinstance(v, Ref) and v.num not in forms_seen:
+                    forms_seen.add(v.num)
                     s = pdf.resolve(v)
                     if isinstance(s, Stream) and s.get("Subtype") == "Form":
                         walk_res(s.get("Resources"), depth + 1)
@@ -128,11 +141,11 @@ def _font_refs(pdf):
     for i in range(pdf.page_count):
         found_page = pdf.page_dict(i)
         if found_page is not None:
-            walk_res(pdf.page_attr(found_page[1], "Resources"))
+            walk_res(pdf.page_attr(found_page[1], "Resources"), 0)
     return found
 
 
-def _kind(pdf, d) -> str | None:
+def _kind(pdf: PdfFile, d: PdfMap) -> str | None:
     r = pdf.resolve
     sub = r(d.get("Subtype"))
     if sub == "Type3":
@@ -162,10 +175,10 @@ def _kind(pdf, d) -> str | None:
     return None
 
 
-def _codes(font) -> list:
+def _codes(font: Font) -> list[int]:
     """Codes of a loaded pure Font that have a glyph (simple fonts: 0..255; CID: from the widths)."""
-    from ..pdf.pure.fonts import NO_GLYPH, CIDFont, Type3Font
-    codes = []
+    from ..pdf.pure.fonts import NO_GLYPH, CIDFont, SimpleFont, Type3Font
+    codes: list[int] = []
     if isinstance(font, Type3Font):
         for code in range(256):
             try:
@@ -183,15 +196,17 @@ def _codes(font) -> list:
             if g not in (None, -1, 0, NO_GLYPH) and font.char_width(code) > 0:
                 codes.append(code)
         return codes
-    glyphs = getattr(font, "glyphs", None) or {}
+    if not isinstance(font, SimpleFont):
+        return codes
+    glyphs = font.glyphs
     for code in range(256):
-        g = glyphs.get(code, NO_GLYPH) if isinstance(glyphs, dict) else (glyphs[code] if code < len(glyphs) else NO_GLYPH)
+        g = glyphs[code] if code < len(glyphs) else NO_GLYPH
         if g not in (None, -1, NO_GLYPH) and font.char_width(code) > 0:
             codes.append(code)
     return codes
 
 
-def _inked(font, codes: list) -> list:
+def _inked(font: Font, codes: list[int]) -> list[int]:
     """The codes whose glyph has an outline: a subset font keeps a width for every code of its
     encoding but a program only for the glyphs the document used, so most codes draw nothing."""
     from ..pdf.pure import ftoutline
@@ -200,29 +215,32 @@ def _inked(font, codes: list) -> list:
         face = ftoutline.face_of(font)
     except Exception:  # noqa: BLE001
         return codes                         # a font the port cannot draw: the page is refused anyway
-    out = []
+    out: list[int] = []
     for code in codes:
         try:
             g = glyph_of(font, code)
-            if g >= 0 and face.path(g):
+            if g >= 0 and face.path(g, ftoutline.IDENTITY16):
                 out.append(code)
         except Exception:  # noqa: BLE001
             out.append(code)
     return out or codes
 
 
-_HARVEST: list | None = None
+_HARVEST: list[FontSpec] | None = None
 
 
-def harvest(decks: Path = DECKS, limit_per_kind: int = 40) -> list[FontSpec]:
-    """Every embedded font of the test decks, deduplicated by base font name and kind."""
+def harvest() -> list[FontSpec]:
+    """Every embedded font of the test decks (`DECKS`), deduplicated by base font name and kind,
+    `PER_KIND` of each kind at most."""
     global _HARVEST
     if _HARVEST is not None:
         return _HARVEST
     from ..pdf.pure.document import read
     from ..pdf.pure.fonts import load_font
-    specs, seen, per = [], set(), {}
-    for path in sorted(decks.glob("*.pdf")):
+    specs: list[FontSpec] = []
+    seen: set[tuple[str, str]] = set()
+    per: dict[str, int] = {}
+    for path in sorted(DECKS.glob("*.pdf")):
         if path.stem.endswith("-handout"):
             continue
         try:
@@ -235,11 +253,13 @@ def harvest(decks: Path = DECKS, limit_per_kind: int = 40) -> list[FontSpec]:
                 continue
             base = str(pdf.resolve(d.get("BaseFont")) or f"t3-{path.stem}-{ref.num}")
             key = (kind, base.split("+")[-1])
-            if key in seen or per.get(kind, 0) >= limit_per_kind:
+            if key in seen or per.get(kind, 0) >= PER_KIND:
                 continue
             try:
                 font = load_font(pdf, d)
-                codes = _codes(font) if font is not None else []
+                if font is None:
+                    continue
+                codes = _codes(font)
                 if codes and kind != "type3":
                     codes = _inked(font, codes)
             except Exception:  # noqa: BLE001
@@ -249,7 +269,8 @@ def harvest(decks: Path = DECKS, limit_per_kind: int = 40) -> list[FontSpec]:
             seen.add(key)
             per[kind] = per.get(kind, 0) + 1
             two = kind.startswith("cid") and str(pdf.resolve(d.get("Encoding"))) in ("Identity-H", "Identity-V")
-            specs.append(FontSpec(f"{path.stem}/{base}", kind, copy_graph(pdf, ref), codes, two))
+            specs.append(FontSpec(name=f"{path.stem}/{base}", kind=kind, objects=copy_graph(pdf, ref),
+                                  codes=codes, two_byte=two))
     _HARVEST = specs
     return specs
 
@@ -257,10 +278,13 @@ def harvest(decks: Path = DECKS, limit_per_kind: int = 40) -> list[FontSpec]:
 # ---------------------------------------------------------------------- PDF
 
 
-def pdf_bytes(content: bytes, fonts: list[FontSpec], media=(0, 0, 200, 150)) -> bytes:
-    """One page drawing `content` with /F0, /F1... = `fonts`."""
+MEDIA = (0, 0, 200, 150)
+
+
+def pdf_bytes(content: bytes, fonts: list[FontSpec]) -> bytes:
+    """One page (`MEDIA`) drawing `content` with /F0, /F1... = `fonts`."""
     objs: list[bytes] = []
-    font_nums = []
+    font_nums: list[int] = []
     for spec in fonts:
         base = len(objs) + 1
         for body in spec.objects:
@@ -270,13 +294,13 @@ def pdf_bytes(content: bytes, fonts: list[FontSpec], media=(0, 0, 200, 150)) -> 
     cid = len(objs) + 1
     objs.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
     pages_num = len(objs) + 2
-    box = b"[%s]" % b" ".join(b"%g" % v for v in media)
+    box = b"[%s]" % b" ".join(b"%g" % v for v in MEDIA)
     objs.append(b"<< /Type /Page /Parent %d 0 R /MediaBox %s /Resources %s /Contents %d 0 R >>"
                 % (pages_num, box, res, cid))
     objs.append(b"<< /Type /Pages /Kids [%d 0 R] /Count 1 >>" % (pages_num - 1))
     objs.append(b"<< /Type /Catalog /Pages %d 0 R >>" % pages_num)
     out = bytearray(b"%PDF-1.7\n")
-    offs = []
+    offs: list[int] = []
     for i, o in enumerate(objs, 1):
         offs.append(len(out))
         out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
@@ -469,13 +493,13 @@ def _metric(r: random.Random, lo: int, hi: int) -> int:
     return r.randint(lo, hi)
 
 
-def _w2(r: random.Random, codes: list) -> bytes:
+def _w2(r: random.Random, codes: list[int]) -> bytes:
     """A random /W2: `c [w1 vx vy ...]` runs (sometimes a group short) and `c1 c2 w1 vx vy`."""
-    parts = []
+    parts: list[bytes] = []
     for _ in range(r.randint(1, 4)):
         c = r.choice(codes)
         if r.random() < 0.5:
-            vals = []
+            vals: list[int] = []
             for _ in range(r.randint(1, 3)):
                 vals += [_metric(r, -1400, 200), _metric(r, -200, 1200), _metric(r, -300, 1300)]
             if r.random() < 0.15:
@@ -522,10 +546,10 @@ def vertical_spec(r: random.Random, spec: FontSpec) -> FontSpec:
     if m and extra:
         k = int(m.group(1))
         objs[k] = objs[k].replace(b"<<", b"<<" + extra, 1)
-    return FontSpec(spec.name + " (V)", spec.kind, objs, spec.codes, True, dict(spec.extra, vertical=True))
+    return FontSpec(name=spec.name + " (V)", kind=spec.kind, objects=objs, codes=spec.codes, two_byte=True)
 
 
-def case(seed: int, kind: str = "any", simple: int = 2):
+def case(seed: int, kind: str, simple: int) -> tuple[bytes, list[FontSpec], float, bool]:
     """(content, fonts, zoom, transparent) for seed `seed`. `simple` 3: text clip pages
     (`random_clip_page`); 4: vertical writing (`vertical_spec`), mixed with horizontal fonts."""
     r = random.Random(seed)
@@ -551,22 +575,25 @@ def case(seed: int, kind: str = "any", simple: int = 2):
     return b"\n".join(groups), fonts, zoom, transparent
 
 
-def compare(content: bytes, fonts, zoom: float, transparent: bool):
-    """(pixels that differ, PDFium's render, pure's render, per-pixel max difference)."""
-    return compare_renders(pdf_bytes(content, fonts), zoom, transparent)
+def compare(content: bytes, fonts: list[FontSpec], zoom: float, transparent: bool) -> Compared:
+    """`Compared` of the page; a PdfError from the pure reader is raised."""
+    n, a, b, d = compare_renders(pdf_bytes(content, fonts), zoom, transparent)
+    if n is None or b is None or isinstance(d, str):
+        raise AssertionError("compare_renders raises the pure reader's refusals")
+    return n, a, b, d
 
 
-def shrink(content: bytes, fonts, zoom: float, transparent: bool) -> bytes:
+def shrink(content: bytes, fonts: list[FontSpec], zoom: float, transparent: bool) -> bytes:
     """Drop lines while the difference remains."""
-    def fails(c):
+    def fails(c: bytes) -> bool:
         try:
             return compare(c, fonts, zoom, transparent)[0] > 0
         except Exception:  # noqa: BLE001
             return False
-    return drop_lines(content, fails, keep=(b"q", b"Q", b"BT", b"ET"))
+    return drop_lines(content, fails, (b"q", b"Q", b"BT", b"ET"))
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
@@ -578,7 +605,7 @@ def main(argv=None) -> int:
     from ..pdf.api import PdfError
     out = Path(args.out)
     fails = refused = 0
-    reasons: dict = {}
+    reasons: dict[str, int] = {}
     for seed in range(args.seed0, args.seed0 + args.n):
         content, fonts, zoom, transparent = case(seed, args.kind, args.simple)
         try:
@@ -611,4 +638,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(None))

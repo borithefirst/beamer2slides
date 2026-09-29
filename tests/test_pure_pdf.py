@@ -699,7 +699,7 @@ def _sfnt_around_cff(spec: FontSpec, tag: str) -> FontSpec:
     fb.font.save(out)
     new = out.getvalue()
     objs[i] = b"<< /Subtype /OpenType /Length %d >>\nstream\n" % len(new) + new + b"\nendstream"
-    return FontSpec(spec.name, "otto", objs, spec.codes, spec.two_byte)
+    return FontSpec(name=spec.name, kind="otto", objects=objs, codes=spec.codes, two_byte=spec.two_byte)
 
 
 def test_cff_in_an_otto_sfnt_draws_unhinted_as_pdfium_does():
@@ -792,7 +792,7 @@ def test_vertical_writing_reads_and_draws_as_pdfium():
         objs = [head, *spec.objects[1:]]
         objs[k] = objs[k].replace(b"<<", b"<</W2 [%d %d -500 250 800] /DW2 [900 -1200]" % (
             spec.codes[0], spec.codes[0]), 1)
-        v = FontSpec("v", "cid-cff", objs, spec.codes, True)
+        v = FontSpec(name="v", kind="cid-cff", objects=objs, codes=spec.codes, two_byte=True)
         body = b"BT /F0 20 Tf 50 120 Td <%04x%04x%04x> Tj ET" % (spec.codes[0], spec.codes[0], spec.codes[1])
         doc = pdf.resolve("pure").open(pdf_bytes(body, [v]))
         try:
@@ -810,7 +810,9 @@ def test_the_pure_renderer_draws_system_substitutes_and_type3_text():
     bitmap fonts) draw as PDFium's."""
     from beamer2slides.devtools.render_torture_text import FontSpec, compare, harvest
     _needs_foxit()
-    helvetica = FontSpec("standard", "type1", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"], [65])
+    helvetica = FontSpec(name="standard", kind="type1",
+                         objects=[b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"], codes=[65],
+                         two_byte=False)
     for zoom in (1.0, 3.1):
         n, a, _, _ = compare(b"BT /F0 12 Tf 10 10 Td (Agyph 0,Q) Tj ET", [helvetica], zoom, False)
         assert n == 0 and (a[..., :3] < 128).any()
@@ -897,7 +899,7 @@ def test_the_pure_renderer_survives_type3_torture_seeds():
     248 (/Widths rounded in doubles), 241 and 583 (a zero /FontBBox read half built by a glyph that
     selects its own font), 482 (that recursion never ended)."""
     from beamer2slides.devtools.render_torture_type3 import case, compare, run
-    stats = run(0, 40, verbose=False)
+    stats = run(0, 40, None, False)
     assert not stats["failed"], f"seeds apart (python tools/render_torture_type3.py SEED 1): {stats['failed']}"
     assert stats["drawn"] >= 36
     apart = {s: n for s in (12, 241, 248, 482, 583) if (n := compare(*case(s))[0])}
@@ -926,9 +928,10 @@ def _needs_foxit() -> None:
 
 def _subst_font(base: bytes, flags: int, extra: bytes, desc: bytes, subtype: bytes) -> FontSpec:
     from beamer2slides.devtools.render_torture_text import FontSpec
-    return FontSpec(base.decode(), "unknown", [
+    return FontSpec(name=base.decode(), kind="unknown", objects=[
         b"<< /Type /Font /Subtype /%s /BaseFont /%s %s /FontDescriptor @1@ >>" % (subtype, base, extra),
-        b"<< /Type /FontDescriptor /FontName /%s /Flags %d /FontBBox [0 -200 1000 900] %s >>" % (base, flags, desc)], [65])
+        b"<< /Type /FontDescriptor /FontName /%s /Flags %d /FontBBox [0 -200 1000 900] %s >>" % (base, flags, desc)],
+        codes=[65], two_byte=False)
 
 
 _WIDTHS = b"/FirstChar 32 /LastChar 126 /Widths [%s]" % b" ".join(b"%d" % (200 + 37 * i % 700) for i in range(95))
@@ -1007,11 +1010,13 @@ def test_a_generic_face_keeps_its_blend_between_documents():
     from beamer2slides.pdf.pdfium_backend import PdfiumBackend
     from beamer2slides.pdf.pure.backend import PureBackend
     _needs_foxit()
-    wide = FontSpec("wide", "unknown", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Wide /FirstChar 77 "
-                                        b"/LastChar 77 /Widths [1400] /FontDescriptor @1@ >>",
-                                        b"<< /Type /FontDescriptor /FontName /Wide /Flags 32 >>"], [77])
-    bare = FontSpec("bare", "unknown", [b"<< /Type /Font /Subtype /Type1 /BaseFont /Bare /FontDescriptor @1@ >>",
-                                        b"<< /Type /FontDescriptor /FontName /Bare /Flags 32 >>"], [77])
+    wide = FontSpec(name="wide", kind="unknown",
+                    objects=[b"<< /Type /Font /Subtype /Type1 /BaseFont /Wide /FirstChar 77 "
+                             b"/LastChar 77 /Widths [1400] /FontDescriptor @1@ >>",
+                             b"<< /Type /FontDescriptor /FontName /Wide /Flags 32 >>"], codes=[77], two_byte=False)
+    bare = FontSpec(name="bare", kind="unknown",
+                    objects=[b"<< /Type /Font /Subtype /Type1 /BaseFont /Bare /FontDescriptor @1@ >>",
+                             b"<< /Type /FontDescriptor /FontName /Bare /Flags 32 >>"], codes=[77], two_byte=False)
     first = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (M) Tj ET", [wide])
     second = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (MMMM) Tj ET", [bare])
     bounds = []
@@ -1039,7 +1044,7 @@ def test_a_system_face_does_not_carry_its_charmap_into_the_next_document():
     both must still be PDFium's - which they were not while the face was cached for good."""
     from beamer2slides.devtools.render_torture_subst import case, compare
     _needs_foxit()
-    apart = {seed: compare(*case(seed))[0] for seed in (311, 316)}
+    apart = {seed: compare(*case(seed, 2, "any"))[0] for seed in (311, 316)}
     assert not any(apart.values()), apart
 
 
@@ -1050,9 +1055,9 @@ def test_a_cached_system_face_lives_while_a_document_holds_it():
     from beamer2slides.pdf.pure import fontmapper
     from beamer2slides.pdf.pure.backend import PureBackend
     _needs_foxit()
-    spec = FontSpec("arial", "installed",
-                    [b"<< /Type /Font /Subtype /TrueType /BaseFont /Arial /FontDescriptor @1@ >>",
-                     b"<< /Type /FontDescriptor /FontName /Arial /Flags 32 >>"], [65])
+    spec = FontSpec(name="arial", kind="installed",
+                    objects=[b"<< /Type /Font /Subtype /TrueType /BaseFont /Arial /FontDescriptor @1@ >>",
+                             b"<< /Type /FontDescriptor /FontName /Arial /Flags 32 >>"], codes=[65], two_byte=False)
     data = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (Arial) Tj ET", [spec])
     m = fontmapper.mapper()
     first = PureBackend().open(data)
@@ -1752,7 +1757,7 @@ def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
     apart = []
     for seed in [0, 7, 20, 21, 28, 45, 51, *range(100, 130)]:
         try:
-            content, fonts, _, _ = case(seed, "any")
+            content, fonts, _, _ = case(seed, "any", 2)
         except SystemExit:          # TeX Live's decks have no Type 3 fonts (cm-super is there)
             continue
         data = pdf_bytes(content, fonts)
@@ -1782,7 +1787,7 @@ def test_text_torture_pages_extract_as_pdfium_to_the_last_bit():
     for kind in ["type3"]:
         for seed in range(20):
             try:
-                content, fonts, _, _ = case(seed, kind)
+                content, fonts, _, _ = case(seed, kind, 2)
             except SystemExit:
                 break
             data = pdf_bytes(content, fonts)
@@ -1907,7 +1912,7 @@ def test_right_to_left_text_is_ordered_as_pdfium_orders_it(direction: str) -> No
         pytest.skip("no TrueType font to harvest (build the test decks)")
     apart = []
     for seed in range(60):
-        content, fonts, _, _ = case(seed, "cid-truetype")
+        content, fonts, _, _ = case(seed, "cid-truetype", 2)
         data = pdf_bytes(content, fonts)
         if direction:
             data = data.replace(b"<< /Type /Catalog /Pages", b"<</ViewerPreferences<</Direction/R2L>>/Pages", 1)
@@ -2164,17 +2169,17 @@ def test_bidi_segments_are_cfx_bidistrings():
                                                  bidi_segments)
 
     units = [ord(c) for c in "ab שלום 12"]
-    segments, rtl = bidi_segments(units)
+    segments, rtl = bidi_segments(units, True)
     # PDFium's list starts with an empty segment too; one right segment against one left one is a tie,
     # and auto order turns the line only for strictly more right segments (digits are weak: they
     # don't count)
     assert not rtl and segments == [(0, 0, BIDI_NEUTRAL), (0, 2, BIDI_LEFT), (2, 1, BIDI_NEUTRAL),
                                     (3, 4, BIDI_RIGHT), (7, 1, BIDI_NEUTRAL), (8, 2, BIDI_LEFT_WEAK)]
-    segments, rtl = bidi_segments([ord(c) for c in "שלום ab אב"])
+    segments, rtl = bidi_segments([ord(c) for c in "שלום ab אב"], True)
     assert rtl and [s[2] for s in segments] == [BIDI_RIGHT, BIDI_NEUTRAL, BIDI_LEFT, BIDI_NEUTRAL,
                                                 BIDI_RIGHT, BIDI_NEUTRAL]
     assert not bidi_segments([ord(c) for c in "שלום ab אב"], auto_order=False)[1]
-    segments, rtl = bidi_segments([ord(c) for c in "left to right"])
+    segments, rtl = bidi_segments([ord(c) for c in "left to right"], True)
     assert not rtl and [s[2] for s in segments if s[1]] == [BIDI_LEFT, BIDI_NEUTRAL] * 2 + [BIDI_LEFT]
 
 

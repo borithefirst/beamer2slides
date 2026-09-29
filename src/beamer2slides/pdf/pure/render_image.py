@@ -748,7 +748,7 @@ def get_dib(ctx: Context, obj: PObj, dev: Device) -> DI.DIB | None:
     else:
         std, gc = status_flags(obj, ctx)
         try:
-            dib = DI.load(ctx.doc, _image_stream(obj), _resources(ctx, obj), need, std_cs=std, group_cmyk=gc)
+            dib = DI.load(ctx.doc, image_stream(obj), _resources(ctx, obj), need, std_cs=std, group_cmyk=gc)
         except DI.Unsupported as e:
             raise PdfError(f"the pure reader cannot render {e} yet") from e
     cache[key] = CachedImage(stream=obj.stream, dib=dib, set_max=need[0] != 0 and need[1] != 0)
@@ -802,7 +802,7 @@ def _resources(ctx: Context, obj: PObj) -> PdfDict:
     return res if isinstance(res, dict) else ctx.page_resources
 
 
-def _image_stream(obj: PObj) -> Stream | InlineImage:
+def image_stream(obj: PObj) -> Stream | InlineImage:
     """The image an image object draws (the content parser gives every one its stream)."""
     stream = obj.stream
     if isinstance(stream, (Stream, InlineImage)):
@@ -827,7 +827,7 @@ def refusal(obj: PObj, ctx: Context | None) -> str | None:
         dib: DI.DIB | None = None
         flags = status_flags(obj, ctx)
         try:
-            dib = DI.load(ctx.doc, _image_stream(obj), _resources(ctx, obj), (0, 0),
+            dib = DI.load(ctx.doc, image_stream(obj), _resources(ctx, obj), (0, 0),
                           std_cs=flags[0], group_cmyk=flags[1])
             stencil = dib is not None and dib.fmt == "mask1"
             if stencil and dib is not None and dib.mask is not None:

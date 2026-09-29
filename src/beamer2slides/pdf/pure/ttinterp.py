@@ -10,6 +10,8 @@ needs no stretching and MPPEM is 64. Arithmetic is on 32-bit FT_Long (Windows), 
 """
 from __future__ import annotations
 
+from typing import Callable
+
 from .crt import cdiv
 from .ftoutline import Unported, i32, mulfix, divfix
 
@@ -118,23 +120,33 @@ def normalize(vx: int, vy: int, old: tuple[int, int]) -> tuple[int, int]:
 # ------------------------------------------------------------------ state
 
 
+# a point of a zone: [x, y], changed in place and shared by the zone's copies
+Point = list[int]
+
+
 class Zone:
     """TT_GlyphZoneRec: lists of [x, y] shared by copies, n_points per copy."""
 
-    def __init__(self, n_points=0, org=None, cur=None, orus=None, tags=None, contours=None, first_point=0):
+    def __init__(self, n_points: int, org: list[Point], cur: list[Point], orus: list[Point], tags: list[int],
+                 contours: list[int], first_point: int) -> None:
         self.n_points = n_points
-        self.org = org if org is not None else []
-        self.cur = cur if cur is not None else []
-        self.orus = orus if orus is not None else []
-        self.tags = tags if tags is not None else []
-        self.contours = contours if contours is not None else []
+        self.org = org
+        self.cur = cur
+        self.orus = orus
+        self.tags = tags
+        self.contours = contours
         self.n_contours = len(self.contours)
         self.first_point = first_point
 
-    def copy(self) -> "Zone":
+    def copy(self) -> Zone:
         z = Zone.__new__(Zone)
         z.__dict__.update(self.__dict__)
         return z
+
+
+def empty_zone() -> Zone:
+    """A zone of no points (a size's program runs on one)."""
+    return Zone(0, [], [], [], [], [], 0)
 
 
 GS_SAVED = ("minimum_distance", "control_value_cutin", "single_width_cutin", "single_width_value",
@@ -142,7 +154,7 @@ GS_SAVED = ("minimum_distance", "control_value_cutin", "single_width_cutin", "si
 
 
 class GS:
-    def __init__(self):
+    def __init__(self) -> None:
         self.rp0 = self.rp1 = self.rp2 = 0
         self.gep0 = self.gep1 = self.gep2 = 1
         self.dual = self.proj = self.free = (0x4000, 0)
@@ -159,7 +171,7 @@ class GS:
         self.scan_control = False
         self.scan_type = 0
 
-    def copy(self) -> "GS":
+    def copy(self) -> GS:
         g = GS.__new__(GS)
         g.__dict__.update(self.__dict__)
         return g
@@ -168,9 +180,17 @@ class GS:
 class Def:
     __slots__ = ("range", "start", "end", "opc", "active")
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.range = self.start = self.end = self.opc = 0
         self.active = False
+
+
+class CallRec:
+    """TT_CallRec: where a CALL / LOOPCALL returns to, and how many more times its function runs."""
+    __slots__ = ("caller_range", "caller_ip", "count", "d")
+
+    def __init__(self, caller_range: int, caller_ip: int, count: int, d: Def) -> None:
+        self.caller_range, self.caller_ip, self.count, self.d = caller_range, caller_ip, count, d
 
 
 class TTError(Exception):
@@ -180,7 +200,8 @@ class TTError(Exception):
 class Exec:
     """TT_ExecContextRec plus the size's function/instruction definitions."""
 
-    def __init__(self, maxp: dict, cvt_size: int, scale: int, num_glyphs: int, codes: dict):
+    def __init__(self, maxp: dict[str, int], cvt_size: int, scale: int, num_glyphs: int,
+                 codes: dict[int, bytes]) -> None:
         max_stack = maxp.get("maxStackElements", 0)
         self.stack_size = max_stack + max(max_stack // 2, 128)
         self.stack = [0] * (self.stack_size + 1)
@@ -199,10 +220,22 @@ class Exec:
         self.bc = 0
         self.is_composite = False
         self.gs = GS()
-        self.twilight = Zone()
-        self.pts = Zone()
+        self.twilight = empty_zone()
+        self.pts = empty_zone()
         self.cvt = self.cvt_base = [0] * cvt_size
         self.storage = self.storage_base = [0] * self.store_size
+        # the rest is set by run_context and the instructions before anything reads it
+        self.zp0 = self.zp1 = self.zp2 = self.pts
+        self.mv = (0, 0)
+        self.move_kind = 0
+        self.period = self.phase = self.threshold = 0
+        self.error: str | None = None
+        self.opcode = self.length = self.args = self.new_top = self.top = 0
+        self.call_stack: list[CallRec] = []
+        self.ini_range = self.cur_range = 0
+        self.code = b""
+        self.ip = 0
+        self.loopcall_max = self.neg_jump_max = self.loopcall_counter = self.neg_jump_counter = 0
 
     # -- TT_Load_Context / TT_Run_Context
     def load_context(self, twilight: Zone) -> None:
@@ -270,10 +303,10 @@ class Exec:
             return dy
         return dotfix14(dx, dy, px, py)
 
-    def proj_pts(self, a, b) -> int:
+    def proj_pts(self, a: Point, b: Point) -> int:
         return self.project(i32(a[0] - b[0]), i32(a[1] - b[1]))
 
-    def dual_pts(self, a, b) -> int:
+    def dual_pts(self, a: Point, b: Point) -> int:
         return self.dualproj(i32(a[0] - b[0]), i32(a[1] - b[1]))
 
     def move(self, zone: Zone, p: int, d: int) -> None:
@@ -324,8 +357,9 @@ class Exec:
             z.tags[p] |= TOUCH_Y
 
     # -- rounding
-    def round(self, d: int, state: int | None = None) -> int:
-        s = self.gs.round_state if state is None else state
+    def round(self, d: int) -> int:
+        """The distance rounded by the graphics state's round state."""
+        s = self.gs.round_state
         if s == 1:                                  # Round_To_Grid
             if d >= 0:
                 v = i32(d + 32) & -64
@@ -453,7 +487,7 @@ class Exec:
 # ------------------------------------------------------------------ instructions
 
 
-def _svtca(e, a, st):
+def _svtca(e: Exec, a: int, st: list[int]) -> None:
     op = e.opcode
     aa = (op & 1) << 14
     v = (aa, aa ^ 0x4000)
@@ -464,7 +498,7 @@ def _svtca(e, a, st):
     e.compute_funcs()
 
 
-def _sxvtl(e, i1, i2, opc, old):
+def _sxvtl(e: Exec, i1: int, i2: int, opc: int, old: tuple[int, int]) -> tuple[int, int] | None:
     if bounds(i1, e.zp2.n_points) or bounds(i2, e.zp1.n_points):
         e.error = "Invalid_Reference"
         return None
@@ -477,44 +511,44 @@ def _sxvtl(e, i1, i2, opc, old):
     return normalize(A, B, old)
 
 
-def _spvtl(e, a, st):
+def _spvtl(e: Exec, a: int, st: list[int]) -> None:
     v = _sxvtl(e, st[a + 1] & 0xFFFF, st[a] & 0xFFFF, e.opcode, e.gs.proj)
     if v is not None:
         e.gs.proj = e.gs.dual = v
         e.compute_funcs()
 
 
-def _sfvtl(e, a, st):
+def _sfvtl(e: Exec, a: int, st: list[int]) -> None:
     v = _sxvtl(e, st[a + 1] & 0xFFFF, st[a] & 0xFFFF, e.opcode, e.gs.free)
     if v is not None:
         e.gs.free = v
         e.compute_funcs()
 
 
-def _spvfs(e, a, st):
+def _spvfs(e: Exec, a: int, st: list[int]) -> None:
     e.gs.proj = e.gs.dual = normalize(_short(st[a]), _short(st[a + 1]), e.gs.proj)
     e.compute_funcs()
 
 
-def _sfvfs(e, a, st):
+def _sfvfs(e: Exec, a: int, st: list[int]) -> None:
     e.gs.free = normalize(_short(st[a]), _short(st[a + 1]), e.gs.free)
     e.compute_funcs()
 
 
-def _gpv(e, a, st):
+def _gpv(e: Exec, a: int, st: list[int]) -> None:
     st[a], st[a + 1] = e.gs.proj
 
 
-def _gfv(e, a, st):
+def _gfv(e: Exec, a: int, st: list[int]) -> None:
     st[a], st[a + 1] = e.gs.free
 
 
-def _sfvtpv(e, a, st):
+def _sfvtpv(e: Exec, a: int, st: list[int]) -> None:
     e.gs.free = e.gs.proj
     e.compute_funcs()
 
 
-def _isect(e, a, st):
+def _isect(e: Exec, a: int, st: list[int]) -> None:
     point, a0, a1, b0, b1 = st[a], st[a + 1], st[a + 2], st[a + 3], st[a + 4]
     z0, z1, z2 = e.zp0, e.zp1, e.zp2
     if (bounds(b0, z0.n_points) or bounds(b1, z0.n_points) or bounds(a0, z1.n_points)
@@ -538,12 +572,18 @@ def _isect(e, a, st):
     z2.tags[point] |= TOUCH_X | TOUCH_Y
 
 
-def _srp(e, a, st):
+def _srp(e: Exec, a: int, st: list[int]) -> None:
     v = st[a] & 0xFFFF
-    setattr(e.gs, ("rp0", "rp1", "rp2")[e.opcode - 0x10], v)
+    k = e.opcode - 0x10
+    if k == 0:
+        e.gs.rp0 = v
+    elif k == 1:
+        e.gs.rp1 = v
+    else:
+        e.gs.rp2 = v
 
 
-def _szp(e, a, st):
+def _szp(e: Exec, a: int, st: list[int]) -> None:
     v = st[a]
     if v == 0:
         z = e.twilight
@@ -561,22 +601,22 @@ def _szp(e, a, st):
         e.zp2, e.gs.gep2 = z, v
 
 
-def _sloop(e, a, st):
+def _sloop(e: Exec, a: int, st: list[int]) -> None:
     if st[a] < 0:
         e.error = "Bad_Argument"
     else:
         e.gs.loop = min(st[a], 0xFFFF)
 
 
-def _round_state(e, a, st):
+def _round_state(e: Exec, a: int, st: list[int]) -> None:
     e.gs.round_state = {0x18: 1, 0x19: 0, 0x3D: 2, 0x7C: 3, 0x7D: 4, 0x7A: 5}[e.opcode]
 
 
-def _smd(e, a, st):
+def _smd(e: Exec, a: int, st: list[int]) -> None:
     e.gs.minimum_distance = st[a]
 
 
-def _else(e, a, st):
+def _else(e: Exec, a: int, st: list[int]) -> None:
     n = 1
     while True:
         if not e.skip_code():
@@ -589,13 +629,13 @@ def _else(e, a, st):
             return
 
 
-def _jmpr(e, a, st):
+def _jmpr(e: Exec, a: int, st: list[int]) -> None:
     off = st[a]
     if off == 0 and e.args == 0:
         e.error = "Bad_Argument"
         return
     e.ip = i32(e.ip + off)
-    if e.ip < 0 or (e.call_stack and e.ip > e.call_stack[-1][3].end):
+    if e.ip < 0 or (e.call_stack and e.ip > e.call_stack[-1].d.end):
         e.error = "Bad_Argument"
         return
     e.length = 0
@@ -605,39 +645,39 @@ def _jmpr(e, a, st):
             e.error = "Execution_Too_Long"
 
 
-def _scvtci(e, a, st):
+def _scvtci(e: Exec, a: int, st: list[int]) -> None:
     e.gs.control_value_cutin = st[a]
 
 
-def _sswci(e, a, st):
+def _sswci(e: Exec, a: int, st: list[int]) -> None:
     e.gs.single_width_cutin = st[a]
 
 
-def _ssw(e, a, st):
+def _ssw(e: Exec, a: int, st: list[int]) -> None:
     e.gs.single_width_value = mulfix(st[a], e.scale)
 
 
-def _dup(e, a, st):
+def _dup(e: Exec, a: int, st: list[int]) -> None:
     st[a + 1] = st[a]
 
 
-def _pop(e, a, st):
+def _pop(e: Exec, a: int, st: list[int]) -> None:
     pass
 
 
-def _clear(e, a, st):
+def _clear(e: Exec, a: int, st: list[int]) -> None:
     e.new_top = 0
 
 
-def _swap(e, a, st):
+def _swap(e: Exec, a: int, st: list[int]) -> None:
     st[a], st[a + 1] = st[a + 1], st[a]
 
 
-def _depth(e, a, st):
+def _depth(e: Exec, a: int, st: list[int]) -> None:
     st[a] = e.top
 
 
-def _cindex(e, a, st):
+def _cindex(e: Exec, a: int, st: list[int]) -> None:
     L = st[a]
     if L <= 0 or L > e.args:
         e.error = "Invalid_Reference"
@@ -646,7 +686,7 @@ def _cindex(e, a, st):
         st[a] = st[e.args - L]
 
 
-def _mindex(e, a, st):
+def _mindex(e: Exec, a: int, st: list[int]) -> None:
     L = st[a]
     if L <= 0 or L > e.args:
         e.error = "Invalid_Reference"
@@ -657,7 +697,7 @@ def _mindex(e, a, st):
     st[e.args - 1] = k
 
 
-def _alignpts(e, a, st):
+def _alignpts(e: Exec, a: int, st: list[int]) -> None:
     p1, p2 = st[a] & 0xFFFF, st[a + 1] & 0xFFFF
     if bounds(p1, e.zp1.n_points) or bounds(p2, e.zp0.n_points):
         e.error = "Invalid_Reference"
@@ -667,7 +707,7 @@ def _alignpts(e, a, st):
     e.move(e.zp0, p2, i32(-d))
 
 
-def _utp(e, a, st):
+def _utp(e: Exec, a: int, st: list[int]) -> None:
     p = st[a]
     if bounds(p, e.zp0.n_points):
         e.error = "Invalid_Reference"
@@ -680,7 +720,7 @@ def _utp(e, a, st):
     e.zp0.tags[p] &= mask
 
 
-def _find_fdef(e, f):
+def _find_fdef(e: Exec, f: int) -> Def | None:
     if bounds(f, e.max_func + 1):
         return None
     d = e.fdefs[f] if f < len(e.fdefs) else None
@@ -695,17 +735,17 @@ def _find_fdef(e, f):
     return d if d.active else None
 
 
-def _call_def(e, d, count):
+def _call_def(e: Exec, d: Def, count: int) -> bool:
     if len(e.call_stack) >= CALL_SIZE:
         e.error = "Stack_Overflow"
         return False
-    e.call_stack.append([e.cur_range, e.ip + 1, count, d])
+    e.call_stack.append(CallRec(e.cur_range, e.ip + 1, count, d))
     e.goto_range(d.range, d.start)
     e.length = 0
     return True
 
 
-def _loopcall(e, a, st):
+def _loopcall(e: Exec, a: int, st: list[int]) -> None:
     d = _find_fdef(e, _u32(st[a + 1]))
     if d is None:
         e.error = "Invalid_Reference"
@@ -720,7 +760,7 @@ def _loopcall(e, a, st):
             e.error = "Execution_Too_Long"
 
 
-def _call(e, a, st):
+def _call(e: Exec, a: int, st: list[int]) -> None:
     d = _find_fdef(e, _u32(st[a]))
     if d is None:
         e.error = "Invalid_Reference"
@@ -728,7 +768,7 @@ def _call(e, a, st):
     _call_def(e, d, 1)
 
 
-def _skip_def(e, d):
+def _skip_def(e: Exec, d: Def) -> None:
     while e.skip_code():
         if e.opcode in (0x89, 0x2C):
             e.error = "Nested_DEFS"
@@ -738,7 +778,7 @@ def _skip_def(e, d):
             return
 
 
-def _fdef(e, a, st):
+def _fdef(e: Exec, a: int, st: list[int]) -> None:
     if e.ini_range == GLYPH:
         e.error = "DEF_In_Glyf_Bytecode"
         return
@@ -763,21 +803,21 @@ def _fdef(e, a, st):
     _skip_def(e, d)
 
 
-def _endf(e, a, st):
+def _endf(e: Exec, a: int, st: list[int]) -> None:
     if not e.call_stack:
         e.error = "ENDF_In_Exec_Stream"
         return
     rec = e.call_stack.pop()
-    rec[2] -= 1
+    rec.count -= 1
     e.length = 0
-    if rec[2] > 0:
+    if rec.count > 0:
         e.call_stack.append(rec)
-        e.ip = rec[3].start
+        e.ip = rec.d.start
     else:
-        e.goto_range(rec[0], rec[1])
+        e.goto_range(rec.caller_range, rec.caller_ip)
 
 
-def _idef(e, a, st):
+def _idef(e: Exec, a: int, st: list[int]) -> None:
     if e.ini_range == GLYPH:
         e.error = "DEF_In_Glyf_Bytecode"
         return
@@ -802,7 +842,7 @@ def _idef(e, a, st):
     _skip_def(e, d)
 
 
-def _unknown(e, a, st):
+def _unknown(e: Exec, a: int, st: list[int]) -> None:
     op = e.opcode
     for d in e.idefs[:e.num_idefs]:
         if (d.opc & 0xFF) == op and d.active:
@@ -815,7 +855,7 @@ def _unknown(e, a, st):
     e.error = "Invalid_Opcode"
 
 
-def _mdap(e, a, st):
+def _mdap(e: Exec, a: int, st: list[int]) -> None:
     p = st[a] & 0xFFFF
     if bounds(p, e.zp0.n_points):
         e.error = "Invalid_Reference"
@@ -830,7 +870,7 @@ def _mdap(e, a, st):
     e.gs.rp0 = e.gs.rp1 = p
 
 
-def _iup(e, a, st):
+def _iup(e: Exec, a: int, st: list[int]) -> None:
     z = e.pts
     if z.n_contours == 0:
         return
@@ -843,7 +883,7 @@ def _iup(e, a, st):
     org, cur, orus, tags = z.org, z.cur, z.orus, z.tags
     n = z.n_points
 
-    def shift(p1, p2, p):
+    def shift(p1: int, p2: int, p: int) -> None:
         dx = i32(cur[p][k] - org[p][k])
         if dx != 0:
             for i in range(p1, p):
@@ -851,7 +891,7 @@ def _iup(e, a, st):
             for i in range(p + 1, p2 + 1):
                 cur[i][k] = i32(cur[i][k] + dx)
 
-    def interp(p1, p2, r1, r2):
+    def interp(p1: int, p2: int, r1: int, r2: int) -> None:
         if p1 > p2 or r1 >= n or r2 >= n:
             return
         o1, o2 = orus[r1][k], orus[r2][k]
@@ -902,7 +942,7 @@ def _iup(e, a, st):
                     interp(first, first_touched - 1, cur_touched, first_touched)
 
 
-def _displacement(e, cur):
+def _displacement(e: Exec, cur: list[Point] | None) -> tuple[int, int, int] | None:
     if e.opcode & 1:
         z, p = e.zp0, e.gs.rp1
     else:
@@ -915,7 +955,7 @@ def _displacement(e, cur):
     return mulfix(d, e.mv[0]), mulfix(d, e.mv[1]), refp
 
 
-def _shp(e, a, st):
+def _shp(e: Exec, a: int, st: list[int]) -> None:
     loop = e.gs.loop
     if e.new_top < loop:
         e.error = "Too_Few_Arguments"
@@ -938,7 +978,7 @@ def _shp(e, a, st):
     e.gs.loop = 1
 
 
-def _shc(e, a, st):
+def _shc(e: Exec, a: int, st: list[int]) -> None:
     contour = st[a] & 0xFFFF
     bnd = 1 if e.gs.gep2 == 0 else e.zp2.n_contours
     if contour >= bnd:
@@ -956,7 +996,7 @@ def _shc(e, a, st):
             e.move_zp2(i, dx, dy)
 
 
-def _shz(e, a, st):
+def _shz(e: Exec, a: int, st: list[int]) -> None:
     v = st[a]
     if v == 0:
         cur, limit = e.twilight.cur, e.twilight.n_points
@@ -979,7 +1019,7 @@ def _shz(e, a, st):
                 cur[i][1] = i32(cur[i][1] + dy)
 
 
-def _shpix(e, a, st):
+def _shpix(e: Exec, a: int, st: list[int]) -> None:
     loop = e.gs.loop
     g = e.gs
     tw = g.gep0 == 0 or g.gep1 == 0 or g.gep2 == 0
@@ -1006,7 +1046,7 @@ def _shpix(e, a, st):
     g.loop = 1
 
 
-def _ip(e, a, st):
+def _ip(e: Exec, a: int, st: list[int]) -> None:
     g = e.gs
     loop = g.loop
     if e.new_top < loop:
@@ -1046,7 +1086,7 @@ def _ip(e, a, st):
     g.loop = 1
 
 
-def _msirp(e, a, st):
+def _msirp(e: Exec, a: int, st: list[int]) -> None:
     p = st[a] & 0xFFFF
     g = e.gs
     if bounds(p, e.zp1.n_points) or bounds(g.rp0, e.zp0.n_points):
@@ -1064,7 +1104,7 @@ def _msirp(e, a, st):
         g.rp0 = p
 
 
-def _alignrp(e, a, st):
+def _alignrp(e: Exec, a: int, st: list[int]) -> None:
     g = e.gs
     loop = g.loop
     if e.new_top < loop or bounds(g.rp0, e.zp0.n_points):
@@ -1085,7 +1125,7 @@ def _alignrp(e, a, st):
     g.loop = 1
 
 
-def _miap(e, a, st):
+def _miap(e: Exec, a: int, st: list[int]) -> None:
     g = e.gs
     entry = _u32(st[a + 1])
     p = st[a] & 0xFFFF
@@ -1108,14 +1148,14 @@ def _miap(e, a, st):
     g.rp0 = g.rp1 = p
 
 
-def _orig_dist(e, zp_a, pa, zp_b, pb):
+def _orig_dist(e: Exec, zp_a: Zone, pa: int, zp_b: Zone, pb: int) -> int:
     g = e.gs
     if g.gep0 == 0 or g.gep1 == 0:
         return e.dual_pts(zp_a.org[pa], zp_b.org[pb])
     return mulfix(e.dual_pts(zp_a.orus[pa], zp_b.orus[pb]), e.x_scale)
 
 
-def _mdrp(e, a, st):
+def _mdrp(e: Exec, a: int, st: list[int]) -> None:
     g = e.gs
     p = st[a] & 0xFFFF
     op = e.opcode
@@ -1142,7 +1182,7 @@ def _mdrp(e, a, st):
         g.rp0 = p
 
 
-def _mirp(e, a, st):
+def _mirp(e: Exec, a: int, st: list[int]) -> None:
     g = e.gs
     p = st[a] & 0xFFFF
     op = e.opcode
@@ -1183,7 +1223,7 @@ def _mirp(e, a, st):
     g.rp2 = p
 
 
-def _npush(e, a, st):
+def _npush(e: Exec, a: int, st: list[int]) -> None:
     code, ip = e.code, e.ip + 1
     if ip >= len(code):
         e.error = "Code_Overflow"
@@ -1207,7 +1247,7 @@ def _npush(e, a, st):
     e.ip = ip
 
 
-def _push(e, a, st):
+def _push(e: Exec, a: int, st: list[int]) -> None:
     op = e.opcode
     code, ip = e.code, e.ip
     word = op >= 0xB8
@@ -1225,7 +1265,7 @@ def _push(e, a, st):
     e.ip = ip
 
 
-def _ws(e, a, st):
+def _ws(e: Exec, a: int, st: list[int]) -> None:
     i = _u32(st[a])
     if i >= e.store_size:
         e.error = "Invalid_Reference"
@@ -1235,7 +1275,7 @@ def _ws(e, a, st):
     e.storage[i] = st[a + 1]
 
 
-def _rs(e, a, st):
+def _rs(e: Exec, a: int, st: list[int]) -> None:
     i = _u32(st[a])
     if i >= e.store_size:
         e.error = "Invalid_Reference"
@@ -1243,13 +1283,13 @@ def _rs(e, a, st):
     st[a] = e.storage[i]
 
 
-def _write_cvt(e, i, v):
+def _write_cvt(e: Exec, i: int, v: int) -> None:
     if e.ini_range == GLYPH and e.cvt is e.cvt_base:
         e.cvt = list(e.cvt_base)
     e.cvt[i] = v
 
 
-def _wcvtp(e, a, st):
+def _wcvtp(e: Exec, a: int, st: list[int]) -> None:
     i = _u32(st[a])
     if i >= e.cvt_size:
         e.error = "Invalid_Reference"
@@ -1257,7 +1297,7 @@ def _wcvtp(e, a, st):
     _write_cvt(e, i, st[a + 1])
 
 
-def _wcvtf(e, a, st):
+def _wcvtf(e: Exec, a: int, st: list[int]) -> None:
     i = _u32(st[a])
     if i >= e.cvt_size:
         e.error = "Invalid_Reference"
@@ -1265,7 +1305,7 @@ def _wcvtf(e, a, st):
     _write_cvt(e, i, mulfix(st[a + 1], e.scale))
 
 
-def _rcvt(e, a, st):
+def _rcvt(e: Exec, a: int, st: list[int]) -> None:
     i = _u32(st[a])
     if i >= e.cvt_size:
         e.error = "Invalid_Reference"
@@ -1273,7 +1313,7 @@ def _rcvt(e, a, st):
     st[a] = e.cvt[i]
 
 
-def _gc(e, a, st):
+def _gc(e: Exec, a: int, st: list[int]) -> None:
     L = st[a]
     z = e.zp2
     if bounds(L, z.n_points):
@@ -1288,7 +1328,7 @@ def _gc(e, a, st):
         st[a] = e.project(v[0], v[1])
 
 
-def _scfs(e, a, st):
+def _scfs(e: Exec, a: int, st: list[int]) -> None:
     L = st[a] & 0xFFFF
     z = e.zp2
     if bounds(L, z.n_points):
@@ -1301,7 +1341,7 @@ def _scfs(e, a, st):
         z.org[L][:] = z.cur[L]
 
 
-def _md(e, a, st):
+def _md(e: Exec, a: int, st: list[int]) -> None:
     K, L = st[a + 1] & 0xFFFF, st[a] & 0xFFFF
     if bounds(L, e.zp0.n_points) or bounds(K, e.zp1.n_points):
         e.error = "Invalid_Reference"
@@ -1313,34 +1353,34 @@ def _md(e, a, st):
     st[a] = d
 
 
-def _mppem(e, a, st):
+def _mppem(e: Exec, a: int, st: list[int]) -> None:
     st[a] = 64
 
 
-def _mps(e, a, st):
+def _mps(e: Exec, a: int, st: list[int]) -> None:
     st[a] = 4096
 
 
-def _flipon(e, a, st):
+def _flipon(e: Exec, a: int, st: list[int]) -> None:
     e.gs.auto_flip = e.opcode == 0x4D
 
 
-def _debug(e, a, st):
+def _debug(e: Exec, a: int, st: list[int]) -> None:
     e.error = "Debug_OpCode"
 
 
-def _cmp(e, a, st):
+def _cmp(e: Exec, a: int, st: list[int]) -> None:
     x, y = st[a], st[a + 1]
     op = e.opcode
     st[a] = int(x < y if op == 0x50 else x <= y if op == 0x51 else x > y if op == 0x52 else
                 x >= y if op == 0x53 else x == y if op == 0x54 else x != y)
 
 
-def _odd(e, a, st):
+def _odd(e: Exec, a: int, st: list[int]) -> None:
     st[a] = int((e.round(st[a]) & 127) == (64 if e.opcode == 0x56 else 0))
 
 
-def _if(e, a, st):
+def _if(e: Exec, a: int, st: list[int]) -> None:
     if st[a] != 0:
         return
     n, out = 1, False
@@ -1357,11 +1397,11 @@ def _if(e, a, st):
             out = n == 0
 
 
-def _eif(e, a, st):
+def _eif(e: Exec, a: int, st: list[int]) -> None:
     pass
 
 
-def _logic(e, a, st):
+def _logic(e: Exec, a: int, st: list[int]) -> None:
     op = e.opcode
     if op == 0x5A:
         st[a] = int(st[a] != 0 and st[a + 1] != 0)
@@ -1371,7 +1411,7 @@ def _logic(e, a, st):
         st[a] = int(st[a] == 0)
 
 
-def _deltap(e, a, st):
+def _deltap(e: Exec, a: int, st: list[int]) -> None:
     nump = st[a]
     if nump < 0 or nump > e.new_top // 2:
         e.error = "Too_Few_Arguments"
@@ -1417,18 +1457,18 @@ def _deltap(e, a, st):
                 e.move(e.zp0, A, B)
 
 
-def _sdb(e, a, st):
+def _sdb(e: Exec, a: int, st: list[int]) -> None:
     e.gs.delta_base = st[a] & 0xFFFF
 
 
-def _sds(e, a, st):
+def _sds(e: Exec, a: int, st: list[int]) -> None:
     if _u32(st[a]) > 6:
         e.error = "Bad_Argument"
     else:
         e.gs.delta_shift = st[a] & 0xFFFF
 
 
-def _arith(e, a, st):
+def _arith(e: Exec, a: int, st: list[int]) -> None:
     x, y = st[a], st[a + 1]
     op = e.opcode
     if op == 0x60:
@@ -1444,7 +1484,7 @@ def _arith(e, a, st):
         st[a] = muldiv(x, y, 64)
 
 
-def _unary(e, a, st):
+def _unary(e: Exec, a: int, st: list[int]) -> None:
     x = st[a]
     op = e.opcode
     if op == 0x64:
@@ -1457,21 +1497,21 @@ def _unary(e, a, st):
         st[a] = i32(x + 63) & -64
 
 
-def _round_op(e, a, st):
-    st[a] = e.round(st[a], None) if e.opcode <= 0x6B else st[a]
+def _round_op(e: Exec, a: int, st: list[int]) -> None:
+    st[a] = e.round(st[a]) if e.opcode <= 0x6B else st[a]
 
 
-def _sround(e, a, st):
+def _sround(e: Exec, a: int, st: list[int]) -> None:
     e.set_super_round(0x4000 if e.opcode == 0x76 else 0x2D41, st[a])
     e.gs.round_state = 6 if e.opcode == 0x76 else 7
 
 
-def _jrot(e, a, st):
+def _jrot(e: Exec, a: int, st: list[int]) -> None:
     if (st[a + 1] != 0) == (e.opcode == 0x78):
         _jmpr(e, a, st)
 
 
-def _fliprg(e, a, st):
+def _fliprg(e: Exec, a: int, st: list[int]) -> None:
     if e.bc == 7:
         return
     K, L = st[a + 1], st[a]
@@ -1485,7 +1525,7 @@ def _fliprg(e, a, st):
         tags[i] = tags[i] | 1 if on else tags[i] & ~1
 
 
-def _flippt(e, a, st):
+def _flippt(e: Exec, a: int, st: list[int]) -> None:
     loop = e.gs.loop
     if e.new_top < loop:
         e.error = "Too_Few_Arguments"
@@ -1505,7 +1545,7 @@ def _flippt(e, a, st):
     e.gs.loop = 1
 
 
-def _scanctrl(e, a, st):
+def _scanctrl(e: Exec, a: int, st: list[int]) -> None:
     A = st[a] & 0xFF
     if A == 0xFF:
         e.gs.scan_control = True
@@ -1529,7 +1569,7 @@ def _scanctrl(e, a, st):
     e.gs.scan_control = sc
 
 
-def _sdpvtl(e, a, st):
+def _sdpvtl(e: Exec, a: int, st: list[int]) -> None:
     p1, p2 = st[a + 1] & 0xFFFF, st[a] & 0xFFFF
     if bounds(p2, e.zp1.n_points) or bounds(p1, e.zp2.n_points):
         e.error = "Invalid_Reference"
@@ -1552,7 +1592,7 @@ def _sdpvtl(e, a, st):
     e.compute_funcs()
 
 
-def _getinfo(e, a, st):
+def _getinfo(e: Exec, a: int, st: list[int]) -> None:
     x = st[a]
     k = 40 if x & 1 else 0
     if x & 64:
@@ -1566,21 +1606,21 @@ def _getinfo(e, a, st):
     st[a] = k
 
 
-def _roll(e, a, st):
+def _roll(e: Exec, a: int, st: list[int]) -> None:
     A, B, C = st[a + 2], st[a + 1], st[a]
     st[a + 2], st[a + 1], st[a] = C, A, B
 
 
-def _minmax(e, a, st):
+def _minmax(e: Exec, a: int, st: list[int]) -> None:
     st[a] = max(st[a], st[a + 1]) if e.opcode == 0x8B else min(st[a], st[a + 1])
 
 
-def _scantype(e, a, st):
+def _scantype(e: Exec, a: int, st: list[int]) -> None:
     if st[a] >= 0:
         e.gs.scan_type = st[a] & 0xFFFF
 
 
-def _instctrl(e, a, st):
+def _instctrl(e: Exec, a: int, st: list[int]) -> None:
     K, L = st[a + 1], st[a]
     if K < 1 or K > 3:
         e.error = "Invalid_Reference"
@@ -1596,11 +1636,11 @@ def _instctrl(e, a, st):
         e.error = "Invalid_Reference"
 
 
-def _nop(e, a, st):
+def _nop(e: Exec, a: int, st: list[int]) -> None:
     pass
 
 
-_DISPATCH = [_unknown] * 256
+_DISPATCH: list[Callable[[Exec, int, list[int]], None]] = [_unknown] * 256
 for _op, _h in [(0x00, _svtca), (0x01, _svtca), (0x02, _svtca), (0x03, _svtca), (0x04, _svtca),
                 (0x05, _svtca), (0x06, _spvtl), (0x07, _spvtl), (0x08, _sfvtl), (0x09, _sfvtl),
                 (0x0A, _spvfs), (0x0B, _sfvfs), (0x0C, _gpv), (0x0D, _gfv), (0x0E, _sfvtpv),

@@ -26,12 +26,23 @@ from __future__ import annotations
 
 import argparse
 import random
+from collections.abc import Iterable
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal
 
 import numpy as np
 
-from .render_torture_text import FontSpec, pdf_bytes, random_text
+from ..typing_compat import assert_never
+from .render_torture_text import Compared, FontSpec, pdf_bytes, random_text
 from .torture_kit import compare_renders, drop_lines
+
+if TYPE_CHECKING:
+    from ..arrays import Pixels
+    from ..pdf.pure.fontmapper import LinuxFontInfo, SubstFont
+    from ..pdf.pure.fonts import Font
+
+Forced = Literal["weight", "italic_angle", "flag_mm"]
+"""A substitution field `sweep` forces."""
 
 UNKNOWN = ["Foo", "Qwerty-Bold", "Blorp,Italic", "Zed-BoldItalic", "Nimbus-Oblique", "Frobnitz-Light",
            "Wibble-Black", "AAAA+Gloop", "Serifish-Roman", "Sansy,BoldItalic", "Monoid-Regular", "X"]
@@ -47,7 +58,8 @@ NAMES = ["A", "B", "a", "b", "e", "g", "x", "zero", "one", "alpha", "bullet", "s
          "quotedbl", "ampersand", "Q", "W", "m", "f", "fi", "adieresis", "a20", "a71", "uni0041"]
 
 
-def random_font(r: random.Random, pool: str = "any") -> FontSpec:
+def random_font(r: random.Random, pool: str) -> FontSpec:
+    """A made-up font of `pool` (any, unknown, symbol, installed)."""
     k = r.random()
     if pool == "unknown" or (pool == "any" and k < 0.6):
         base, family = r.choice(UNKNOWN), "unknown"
@@ -88,7 +100,7 @@ def random_font(r: random.Random, pool: str = "any") -> FontSpec:
     if e < 0.3:
         font.append(b"/Encoding /%s" % r.choice([b"WinAnsiEncoding", b"MacRomanEncoding", b"StandardEncoding"]))
     elif e < 0.55:
-        diffs = []
+        diffs: list[bytes] = []
         for _ in range(r.randint(1, 6)):
             diffs.append(b"%d" % r.randint(32, 126))
             diffs += [b"/" + r.choice(NAMES).encode() for _ in range(r.randint(1, 3))]
@@ -102,10 +114,10 @@ def random_font(r: random.Random, pool: str = "any") -> FontSpec:
         objects = objects[:1]
     lo, hi = max(first, 32), min(last, 126) if r.random() < 0.8 else 255
     codes = list(range(lo, hi + 1)) or list(range(32, 127))
-    return FontSpec(f"{base}/{subtype}/{flags}", family, objects, codes)
+    return FontSpec(name=f"{base}/{subtype}/{flags}", kind=family, objects=objects, codes=codes, two_byte=False)
 
 
-def case(seed: int, simple: int = 2, pool: str = "any"):
+def case(seed: int, simple: int, pool: str) -> tuple[bytes, list[FontSpec], float, bool]:
     """(content, fonts, zoom, transparent) for seed `seed`."""
     r = random.Random(seed)
     fonts = [random_font(r, pool) for _ in range(r.randint(1, 3))]
@@ -120,10 +132,11 @@ def case(seed: int, simple: int = 2, pool: str = "any"):
 # CFX_MacFontInfo does not know is answered with Courier New - so on macOS the reset page drew in a
 # system font and reset nothing, while on Windows GDI refused the name and it reached the built-in
 # faces. Drawing stays on code 65, whose width sets the blend.
-_RESET_FONTS = [FontSpec(f"reset/{flags}", "unknown", [
+_RESET_FONTS = [FontSpec(name=f"reset/{flags}", kind="unknown", objects=[
     b"<< /Type /Font /Subtype /Type1 /BaseFont /Reset%d /FirstChar 65 /LastChar 66 /Widths [640 500] "
     b"/FontDescriptor @1@ >>" % flags,
-    b"<< /Type /FontDescriptor /FontName /Reset%d /Flags %d /FontBBox [0 0 1000 1000] >>" % (flags, flags)], [65])
+    b"<< /Type /FontDescriptor /FontName /Reset%d /Flags %d /FontBBox [0 0 1000 1000] >>" % (flags, flags)],
+    codes=[65], two_byte=False)
     for flags in (32, 34)]
 _RESET_CONTENT = b"BT /F0 20 Tf 60 60 Td (A) Tj ET BT /F1 20 Tf 120 60 Td (A) Tj ET"
 _RESET = pdf_bytes(_RESET_CONTENT, _RESET_FONTS)
@@ -142,7 +155,7 @@ def resync() -> None:
     for backend in (PdfiumBackend, PureBackend):
         doc = backend().open(_RESET)
         try:
-            doc[0].render(1)
+            doc[0].render(1, None, False)
         finally:
             doc.close()
 
@@ -156,10 +169,11 @@ def reset_faces() -> list[str]:
     from ..pdf.pure import ftoutline
     from ..pdf.pure.backend import PureBackend
     before = generic_blends()
-    said, calls = [], []
+    said: list[str] = []
+    calls: list[str] = []
     real = ftoutline.Face.adjust_variation
 
-    def spy(self, glyph, dest_width, weight):
+    def spy(self: ftoutline.Face, glyph: int, dest_width: int, weight: int) -> None:
         real(self, glyph, dest_width, weight)
         calls.append(f"{id(self)} glyph {glyph} width {dest_width} weight {weight} -> {self.blend_key()}")
 
@@ -170,11 +184,11 @@ def reset_faces() -> list[str]:
             page = doc[0]
             page.chars()
             for font in page._fonts:
-                subst = getattr(font, "subst", None)
+                subst = font.subst
                 said.append(f"{font.base_name}->{subst.family if subst else None}"
-                            f"{' generic' if getattr(font, 'subst_generic', False) else ''}"
-                            f" face {id(getattr(font, 'program', None))}")
-            page.render(1)
+                            f"{' generic' if font.subst_generic else ''}"
+                            f" face {id(font.program)}")
+            page.render(1, None, False)
         finally:
             doc.close()
     finally:
@@ -206,34 +220,43 @@ def generic_blends() -> str:
         return f"unknown: {type(e).__name__} {e}"
 
 
-def compare(content: bytes, fonts, zoom: float, transparent: bool):
-    """(pixels that differ, PDFium's render, pure's render, per-pixel max difference)."""
+def compare(content: bytes, fonts: list[FontSpec], zoom: float, transparent: bool) -> Compared:
+    """`Compared` of the page, from both generic faces reset (`resync`); a PdfError from the pure
+    reader is raised."""
     global LAST_BLENDS
     resync()
     LAST_BLENDS = generic_blends()
-    return compare_renders(pdf_bytes(content, fonts), zoom, transparent)
+    n, a, b, d = compare_renders(pdf_bytes(content, fonts), zoom, transparent)
+    if n is None or b is None or isinstance(d, str):
+        raise AssertionError("compare_renders raises the pure reader's refusals")
+    return n, a, b, d
 
 
-def faces(content: bytes, fonts) -> list[str]:
+def faces(content: bytes, fonts: list[FontSpec]) -> list[str]:
     """Which face each side loaded for the page's fonts, as a line per font: the substitute is the
     platform's choice (GDI on Windows, the folder scan elsewhere), so a seed that only fails on one
     OS is usually two different faces, and the font program's size and digest say so without the
     file. Never raises: this is for the failure report."""
-    out = []
+    out: list[str] = []
     try:
         from ..pdf.pdfium_backend import PdfiumBackend, _font_program
         from ..pdf.pure.backend import PureBackend
         data = pdf_bytes(content, fonts)
-        said = []
-        for backend in (PdfiumBackend(), PureBackend()):
-            doc = backend.open(data)
-            try:
-                page = doc[0]
-                page.chars()                                  # fills page._fonts
-                said.append([_describe(f, _font_program) for f in page._fonts])
-            finally:
-                doc.close()
-        for i, (a, b) in enumerate(zip(*said)):
+        ref = PdfiumBackend().open(data)
+        try:
+            page = ref[0]
+            page.chars()                                      # fills page._fonts
+            theirs = [_digest(_font_program(f)) for f in page._fonts]
+        finally:
+            ref.close()
+        pure = PureBackend().open(data)
+        try:
+            pure_page = pure[0]
+            pure_page.chars()
+            ours = [_describe(f) for f in pure_page._fonts]
+        finally:
+            pure.close()
+        for i, (a, b) in enumerate(zip(theirs, ours)):
             out.append(f"   font {i}: pdfium {a}")
             out.append(f"           pure   {b}")
     except Exception as e:  # noqa: BLE001
@@ -241,33 +264,34 @@ def faces(content: bytes, fonts) -> list[str]:
     return out
 
 
-def _describe(font, program_of) -> str:
-    """A font handle (PDFium's) or a pure Font, as its face's size and digest plus what the
-    substitution asked for."""
+def _digest(data: bytes) -> str:
+    """A font program as its size and digest."""
     import hashlib
-    if not hasattr(font, "subst"):                            # a PDFium font handle
-        data = program_of(font)
-        return f"{len(data)} bytes {hashlib.sha1(data).hexdigest()[:8] if data else '-'}"
-    program = getattr(font, "program", None)
-    data = getattr(program, "platform_data", None) or getattr(program, "face_data", None) or b""
+    return f"{len(data)} bytes {hashlib.sha1(data).hexdigest()[:8] if data else '-'}"
+
+
+def _describe(font: Font) -> str:
+    """A pure Font, as its face's size and digest plus what the substitution asked for."""
+    program = font.program
+    data = (program.platform_data or program.face_data or b"") if program is not None else b""
     subst = font.subst
     asked = (f" subst {subst.family!r} weight {subst.weight} italic {subst.italic_angle}"
              if subst is not None else " no subst")
-    return f"{font.base_name} {len(data)} bytes {hashlib.sha1(data).hexdigest()[:8] if data else '-'}{asked}"
+    return f"{font.base_name} {_digest(data)}{asked}"
 
 
-def glyphs(content: bytes, fonts) -> list[str]:
+def glyphs(content: bytes, fonts: list[FontSpec]) -> list[str]:
     """Which code of which font the two readers draw differently: every code the page's strings use is
     drawn alone in each font and the renders compared, so the report names the glyph rather than the
     page. The ink ratio says what kind of difference it is - a ratio near 1 is the same glyph a hair
     apart, a small one is a glyph one side does not draw at all - and pure's glyph index for that code
     is printed beside it, which is where a platform's glyph map shows. Never raises: this is for the
     failure report."""
-    out = []
+    out: list[str] = []
     try:
-        codes = sorted({b for b in _string_bytes(content)})
+        codes = sorted(_string_bytes(content))
         for i in range(len(fonts)):
-            said = []
+            said: list[str] = []
             for code in codes:
                 one = b"BT /F%d 40 Tf 20 40 Td <%02x> Tj ET" % (i, code)
                 try:
@@ -286,11 +310,11 @@ def glyphs(content: bytes, fonts) -> list[str]:
     return out
 
 
-def _string_bytes(content: bytes) -> set:
+def _string_bytes(content: bytes) -> set[int]:
     """The bytes the content stream's strings show, hex and literal alike (escapes left as written:
     this is a diagnostic, and a code too many only costs a render)."""
     import re
-    seen = set()
+    seen: set[int] = set()
     for m in re.finditer(rb"<([0-9A-Fa-f\s]*)>|\(((?:\\.|[^()\\])*)\)", content, re.S):
         if m.group(1) is not None:
             hexes = re.sub(rb"\s", b"", m.group(1))
@@ -300,12 +324,12 @@ def _string_bytes(content: bytes) -> set:
     return seen
 
 
-def _ink(image) -> float:
+def _ink(image: Pixels) -> float:
     """How much the page is painted: the darkness of every pixel added up."""
     return float(np.sum(255 - image[..., :3].mean(axis=2)))
 
 
-def _pure_glyph(content: bytes, fonts) -> str:
+def _pure_glyph(content: bytes, fonts: list[FontSpec]) -> str:
     """The glyph index the pure reader maps that one code to, or '?'."""
     try:
         from ..pdf.pure.backend import PureBackend
@@ -325,7 +349,7 @@ def _pure_glyph(content: bytes, fonts) -> str:
         return "?"
 
 
-def widths(content: bytes, fonts) -> list[str]:
+def widths(content: bytes, fonts: list[FontSpec]) -> list[str]:
     """The advance each reader gives the page's characters. A code with no /Widths entry is measured
     on the face itself, and PDFium loads that glyph without setting the multiple master axes
     (CPDF_SimpleFont::LoadCharMetrics), so the answer is whatever blend the shared face stands at -
@@ -337,7 +361,7 @@ def widths(content: bytes, fonts) -> list[str]:
         from ..pdf.pdfium_backend import PdfiumBackend
         from ..pdf.pure.backend import PureBackend
         data = pdf_bytes(content, fonts)
-        said = []
+        said: list[tuple[list[tuple[int, str]], list[float | None]]] = []
         for backend in (PdfiumBackend(), PureBackend()):
             doc = backend.open(data)
             try:
@@ -362,7 +386,7 @@ def widths(content: bytes, fonts) -> list[str]:
     return out
 
 
-def anatomy(content: bytes, fonts) -> list[str]:
+def anatomy(content: bytes, fonts: list[FontSpec]) -> list[str]:
     """How the pure reader builds a substituted font's glyphs: the multiple master blend it lands on
     for each code (`blend_key`, the axis coordinates), and the outline that comes out (how many
     points, where they sum to). Two platforms that draw the same face differently say here which of
@@ -370,7 +394,7 @@ def anatomy(content: bytes, fonts) -> list[str]:
     render alone can tell. Never raises: this is for the failure report."""
     out: list[str] = []
     try:
-        from ..pdf.pure import render_text
+        from ..pdf.pure import ftoutline, render_text
         from ..pdf.pure.backend import PureBackend
         from ..pdf.pure.fonts import SimpleFont
         doc = PureBackend().open(pdf_bytes(content, fonts))
@@ -382,20 +406,22 @@ def anatomy(content: bytes, fonts) -> list[str]:
                 if subst is None:
                     continue
                 face = render_text.subst_face(font)
-                if face is None or not hasattr(face, "blend_key"):
+                if not isinstance(face, ftoutline.Face):      # a system TrueType face has no blend
                     continue
                 if not isinstance(font, SimpleFont):    # as reading its glyphs failed before
                     raise AttributeError(f"'{type(font).__name__}' object has no attribute 'glyphs'")
-                said = []
+                said: list[str] = []
                 for code in sorted(_string_bytes(content))[:6]:
                     glyph = font.glyphs[code]
+                    if glyph is None:                   # as the outline of None failed before
+                        raise TypeError(f"code {code} has no glyph")
                     width = font.char_width(code)
                     if subst.flag_mm:
                         face.adjust_variation(glyph, width, subst.weight)
-                    outline = face.outline(glyph, (0x10000, 0, 0, 0x10000))
+                    outline = face.outline(glyph, ftoutline.IDENTITY16)
                     points = [p for contour in (outline or []) for p in contour[0]]
-                    bitmap = render_text.render_glyph(face, glyph, (40.0, 0.0, 0.0, 40.0),
-                                                      subst, width)
+                    bitmap = render_text.render_glyph(face, glyph, (40.0, 0.0, 0.0, 40.0, 0.0, 0.0),
+                                                      subst, width, False)
                     ink = (f"{bitmap[2]}x{bitmap[3]}@{bitmap[0]},{bitmap[1]} ink {int(bitmap[4].sum())}"
                            if bitmap else "no bitmap")
                     said.append(f"{code}->{glyph} w {width} blend {face.blend_key()} "
@@ -411,7 +437,19 @@ def anatomy(content: bytes, fonts) -> list[str]:
     return out
 
 
-def sweep(content: bytes, fonts, zoom: float, transparent: bool) -> list[str]:
+def _force(subst: SubstFont, field: Forced, value: int) -> None:
+    """Set one field of a substitution (`flag_mm` takes a bool)."""
+    if field == "weight":
+        subst.weight = value
+    elif field == "italic_angle":
+        subst.italic_angle = value
+    elif field == "flag_mm":
+        subst.flag_mm = bool(value)
+    else:
+        assert_never(field)
+
+
+def sweep(content: bytes, fonts: list[FontSpec], zoom: float, transparent: bool) -> list[str]:
     """What the substitution would have to say for pure to draw the page as PDFium draws it: each
     font's weight, italic angle and multiple master blend are forced in turn and the page compared
     again. A value that brings the difference down - to nothing, usually - names the field the two
@@ -426,11 +464,13 @@ def sweep(content: bytes, fonts, zoom: float, transparent: bool) -> list[str]:
         resync()
         doc = PdfiumBackend().open(data)
         try:
-            want = doc[0].render(zoom, transparent=transparent).astype(int)
+            want = doc[0].render(zoom, None, transparent).astype(int)
         finally:
             doc.close()
 
-        def pure(index: int, field: str, value) -> int:
+        def pure(index: int, field: Forced, value: int) -> int:
+            """The pixels apart with font `index`'s `field` forced to `value` (no such font:
+            nothing forced)."""
             resync()
             doc = PureBackend().open(data)
             try:
@@ -440,16 +480,16 @@ def sweep(content: bytes, fonts, zoom: float, transparent: bool) -> list[str]:
                     subst = page._fonts[index].subst
                     if subst is None:
                         return -1
-                    setattr(subst, field, value)
-                got = page.render(zoom, transparent=transparent).astype(int)
+                    _force(subst, field, value)
+                got = page.render(zoom, None, transparent).astype(int)
             finally:
                 doc.close()
             return int((np.abs(want - got).max(axis=2) > 0).sum())
 
-        def best(index: int, field: str, values) -> tuple[int, object] | None:
+        def best(index: int, field: Forced, values: Iterable[int]) -> tuple[int, int] | None:
             """The value of that field that draws the page closest, or None where none beats the
             substitution as it stands."""
-            got = None
+            got: tuple[int, int] | None = None
             for value in values:
                 try:
                     npx = pure(index, field, value)
@@ -459,16 +499,18 @@ def sweep(content: bytes, fonts, zoom: float, transparent: bool) -> list[str]:
                     got = (npx, value)
             return got
 
-        base = pure(-1, "", None)                             # -1: nothing forced, the plain render
+        base = pure(-1, "weight", 0)                          # -1: nothing forced, the plain render
         out.append(f"   sweep: as is {base} px")
+        forced: tuple[tuple[Forced, tuple[int, ...]], ...] = (("italic_angle", (0, -11, -12, -15)),
+                                                               ("flag_mm", (False,)))
         for i in range(len(fonts)):
-            said = []
+            said: list[str] = []
             coarse = best(i, "weight", range(100, 1001, 100))
             if coarse:                                        # then the ten weights around it
                 fine = best(i, "weight", range(max(coarse[1] - 90, 1), coarse[1] + 100, 10))
                 npx, value = min(filter(None, (coarse, fine)))
                 said.append(f"weight={value}: {npx} px")
-            for field, values in (("italic_angle", (0, -11, -12, -15)), ("flag_mm", (False,))):
+            for field, values in forced:
                 got = best(i, field, values)
                 if got:
                     said.append(f"{field}={got[1]}: {got[0]} px")
@@ -481,17 +523,17 @@ def sweep(content: bytes, fonts, zoom: float, transparent: bool) -> list[str]:
     return out
 
 
-def shrink(content: bytes, fonts, zoom: float, transparent: bool) -> bytes:
+def shrink(content: bytes, fonts: list[FontSpec], zoom: float, transparent: bool) -> bytes:
     """Drop lines while the difference remains."""
-    def fails(c):
+    def fails(c: bytes) -> bool:
         try:
             return compare(c, fonts, zoom, transparent)[0] > 0
         except Exception:  # noqa: BLE001
             return False
-    return drop_lines(content, fails, keep=(b"q", b"Q", b"BT", b"ET"))
+    return drop_lines(content, fails, (b"q", b"Q", b"BT", b"ET"))
 
 
-_USER_FONT_PATHS = None          # PDFium reads the paths later: the buffer has to stay alive
+_USER_FONT_PATHS: object = None  # PDFium reads the paths later: the buffer has to stay alive
 
 
 def use_font_folder(folder: str) -> None:
@@ -513,16 +555,17 @@ def use_font_folder(folder: str) -> None:
     import pypdfium2.raw as raw
 
     from ..pdf.pure import fontmapper
-    _USER_FONT_PATHS = (ctypes.c_char_p * 2)(str(folder).encode("utf-8"), None)
+    paths = (ctypes.c_char_p * 2)(folder.encode("utf-8"), None)
+    _USER_FONT_PATHS = paths
     config = raw.FPDF_LIBRARY_CONFIG()
     config.version = 2
     config.m_pIsolate = None
     config.m_v8EmbedderSlot = 0
-    config.m_pUserFontPaths = ctypes.cast(_USER_FONT_PATHS, ctypes.POINTER(ctypes.POINTER(ctypes.c_char)))
+    config.m_pUserFontPaths = ctypes.cast(paths, ctypes.POINTER(ctypes.POINTER(ctypes.c_char)))
     raw.FPDF_DestroyLibrary()
     raw.FPDF_InitLibraryWithConfig(config)
 
-    def info():
+    def info() -> LinuxFontInfo:
         got = fontmapper.LinuxFontInfo([folder])
         if sys.platform == "win32":
             got.symbol_internal, got.narrow_family = False, "ArialNarrow"
@@ -531,7 +574,7 @@ def use_font_folder(folder: str) -> None:
     fontmapper._mapper = None
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
@@ -547,7 +590,7 @@ def main(argv=None) -> int:
     from ..pdf.api import PdfError
     out = Path(args.out)
     fails = refused = drawn = 0
-    reasons: dict = {}
+    reasons: dict[str, int] = {}
     try:
         for line in reset_faces():
             print(line)
@@ -589,4 +632,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(None))

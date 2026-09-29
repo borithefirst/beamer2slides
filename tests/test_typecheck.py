@@ -51,7 +51,7 @@ BASELINE = ROOT / "typecheck" / "baseline.json"
 TESTS_BASELINE = ROOT / "typecheck" / "tests_baseline.json"
 
 # The legacy errors typecheck/baseline.json holds: lower it with every prune, never raise it.
-CEILING = 1027
+CEILING = 15
 # The same for the tests (typecheck/tests_baseline.json, admitted whole on 2026-09-29).
 TESTS_CEILING = 11396
 

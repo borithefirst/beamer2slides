@@ -23,8 +23,13 @@ from __future__ import annotations
 
 import struct
 import sys
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from typing import TypeVar
 
 from . import psnames_data
+
+T = TypeVar("T")
 
 # FT_Encoding values PDFium distinguishes (fxge::FontEncoding)
 UNICODE, MS_SYMBOL, APPLE_ROMAN, NONE = "unicode", "ms_symbol", "apple_roman", "none"
@@ -70,7 +75,7 @@ class CMap:
     """One FT_CharMap. `base` is the subtable's offset in `table` (the whole cmap table, whose
     end is the validator's limit)."""
 
-    def __init__(self, platform: int, encoding_id: int, fmt: int, table: bytes, base: int, flags: int = 0):
+    def __init__(self, platform: int, encoding_id: int, fmt: int, table: bytes, base: int, flags: int) -> None:
         self.platform, self.encoding_id, self.format = platform, encoding_id, fmt
         self.encoding = find_encoding(platform, encoding_id)
         self.table, self.base, self.flags = table, base, flags
@@ -119,7 +124,8 @@ class CMap:
             return 0
         return self._map4_linear(code, num_glyphs) if self.flags & UNSORTED else self._map4_binary(code, num_glyphs)
 
-    def _glyph4(self, code, start, end, delta, offset, r, i, n, num_glyphs) -> int | None:
+    def _glyph4(self, code: int, start: int, end: int, delta: int, offset: int, r: int, i: int, n: int,
+                num_glyphs: int) -> int | None:
         """The lookup once a segment holds the code; None for `continue` (linear search)."""
         limit = len(self.table)
         if i >= n - 1 and start == 0xFFFF and end == 0xFFFF:   # an incorrect last segment
@@ -490,13 +496,13 @@ _EXTRA = ((0x0394, "Delta"), (0x03A9, "Omega"), (0x2215, "fraction"), (0x00AD, "
           (0x021A, "Tcommaaccent"), (0x021B, "tcommaaccent"))
 
 
-def msvc_qsort(a: list, gt, eq) -> None:
+def msvc_qsort(a: list[T], gt: Callable[[T, T], bool], eq: Callable[[T, T], bool]) -> None:
     """The UCRT's qsort (qsort.cpp), in place: a quicksort with median-of-three pivots, an explicit
     stack, the smaller side first, and `shortsort` (select the maximum, swap it to the end) below
     CUTOFF = 8 elements. `gt(x, y)` is compare(x, y) > 0, `eq(x, y)` compare(x, y) == 0."""
     if len(a) < 2:
         return
-    stack = []
+    stack: list[tuple[int, int]] = []
     lo, hi = 0, len(a) - 1
     while True:
         size = hi - lo + 1
@@ -564,7 +570,7 @@ def msvc_qsort(a: list, gt, eq) -> None:
 class PsUnicodes:
     """psnames' synthesized Unicode charmap (ps_unicodes_init / ps_unicodes_char_index)."""
 
-    def __init__(self, names):
+    def __init__(self, names: Sequence[str]) -> None:
         maps: list[tuple[int, int]] = []
         states = [0] * len(_EXTRA)
         extra = [0] * len(_EXTRA)
@@ -589,13 +595,23 @@ class PsUnicodes:
         # compare_uni_maps: by base value, a base glyph before its variants. Two glyphs with one
         # value compare equal, and which of them the search meets is up to ft_qsort = the C
         # library's qsort: on Windows the UCRT's (not stable, ported), elsewhere called for real
-        def key(m):
+        def key(m: tuple[int, int]) -> tuple[int, int]:
             return m[0] & ~VARIANT_BIT, m[0]
+
+        def gt(a: tuple[int, int], b: tuple[int, int]) -> bool:
+            return key(a) > key(b)
+
+        def eq(a: tuple[int, int], b: tuple[int, int]) -> bool:
+            return key(a) == key(b)
+
+        def cmp(a: tuple[int, int], b: tuple[int, int]) -> int:
+            return (key(a) > key(b)) - (key(a) < key(b))
+
         if sys.platform == "win32":
-            msvc_qsort(maps, lambda a, b: key(a) > key(b), lambda a, b: key(a) == key(b))
+            msvc_qsort(maps, gt, eq)
         else:
             from .crt import qsort
-            qsort(maps, lambda a, b: (key(a) > key(b)) - (key(a) < key(b)))
+            qsort(maps, cmp)
         self.maps = maps
 
     def __bool__(self) -> bool:
@@ -629,7 +645,7 @@ class SynthCMap:
 
     platform, encoding_id, format, encoding, flags = 3, 1, -1, UNICODE, 0
 
-    def __init__(self, unicodes: PsUnicodes):
+    def __init__(self, unicodes: PsUnicodes) -> None:
         self.unicodes = unicodes
 
     def char_index(self, code: int, num_glyphs: int) -> int:
@@ -642,12 +658,27 @@ class AdobeCMap:
 
     platform, format, flags = 7, -1, 0
 
-    def __init__(self, encoding_id: int, gids: list[int]):
+    def __init__(self, encoding_id: int, gids: list[int]) -> None:
         self.encoding_id, self.gids = encoding_id, gids
         self.encoding = ("adobe_standard", "adobe_expert", "adobe_custom", "adobe_latin1")[encoding_id]
 
     def char_index(self, code: int, num_glyphs: int) -> int:
         return self.gids[code] if code < 256 else 0
+
+
+# A face's charmaps: its validated subtables and the ones FreeType synthesizes
+CharMap = CMap | SynthCMap | AdobeCMap
+
+
+@dataclass(frozen=True, kw_only=True)
+class CffInfo:
+    """What cffobjs.c adds to an OpenType face with a `CFF ` table: the charset's glyph names,
+    whether the font is CID-keyed, the Adobe encoding charmap's id (None when the encoding maps no
+    code) and the glyph of each code below 256."""
+    names: list[str]
+    cid_keyed: bool
+    encoding_id: int | None
+    gids: list[int]
 
 
 # ---------------------------------------------------------------------- the face
@@ -665,7 +696,7 @@ def _read(data: bytes, pos: int, n: int) -> bytes:
     return data[pos:pos + n]
 
 
-def font_dir(data: bytes, font_number: int = 0) -> list[tuple[bytes, int, int]]:
+def font_dir(data: bytes, font_number: int) -> list[tuple[bytes, int, int]]:
     """tt_face_load_font_dir (sfnt/ttload.c): FreeType's (tag, offset, length) for one font of the
     file, in directory order. check_table_dir first (not for OTTO): entries that can't be read end
     the directory, an entry past the stream is ignored, and every `head` entry must be at least
@@ -726,14 +757,14 @@ def font_dir(data: bytes, font_number: int = 0) -> list[tuple[bytes, int, int]]:
 class Face:
     """FT_Face of an sfnt as PDFium's LoadGlyphMap uses it.
 
-    An OpenType font with a `CFF ` table goes through cffobjs.c after sfnt_load_face: `cff` is then
-    (charset names, CID-keyed?, Adobe encoding id or None when the encoding maps no code, code ->
-    glyph for codes < 256). Its glyph names are the charset's, the sfnt loader's Unicode charmap
-    (from `post` names) may already be there, and the CFF driver adds its own from the charset
-    when no (3, 1) or Apple Unicode subtable is, then the Adobe encoding charmap."""
+    An OpenType font with a `CFF ` table goes through cffobjs.c after sfnt_load_face (`cff`, see
+    CffInfo). Its glyph names are the charset's, the sfnt loader's Unicode charmap (from `post`
+    names) may already be there, and the CFF driver adds its own from the charset when no (3, 1)
+    or Apple Unicode subtable is, then the Adobe encoding charmap."""
 
-    def __init__(self, data: bytes, cff: tuple | None = None, font_number: int = 0):
+    def __init__(self, data: bytes, cff: CffInfo | None, font_number: int) -> None:
         self.data = data
+        self.font_number = font_number
         self.dir = font_dir(data, font_number)
         self.format_tag = _read(data, _u32(data, 12 + 4 * font_number) if data[:4] == b"ttcf" else 0, 4)
         self._open(data, cff is not None)
@@ -743,29 +774,30 @@ class Face:
         # tt_face_load_post reads its 32-byte header from the stream, not from the table: a shorter
         # table followed by other data still loads (and load_post_names then finds no names)
         self.post_format = _u32(data, post[0]) if post and post[0] + 32 <= len(data) else None
-        self._cff_names = None
+        self._cff_names: list[str] | None = None
+        self._glyph_names: list[str] | None = None
         # sfnt_load_face: FT_FACE_FLAG_GLYPH_NAMES when tt_face_load_post succeeded (formats 1, 2,
         # 2.5 and 3) and the format isn't 3
         self.has_glyph_names = self.post_format in (0x00010000, 0x00020000, 0x00025000)
         cmap = self.table(b"cmap")
-        self.charmaps: list = build_cmaps(data[cmap[0]:cmap[0] + cmap[1]] if cmap else b"")
+        self.charmaps: list[CharMap] = []
+        self.charmaps += build_cmaps(data[cmap[0]:cmap[0] + cmap[1]] if cmap else b"")
         if not any(c.encoding in (UNICODE, MS_SYMBOL) for c in self.charmaps) and self.has_glyph_names:
             unicodes = PsUnicodes(self._post_names())
             if unicodes:            # else No_Unicode_Glyph_Name: no charmap
                 self.charmaps.append(SynthCMap(unicodes))
         if cff is not None:
-            names, cid_keyed, encoding_id, gids = cff
-            self.num_glyphs = len(names)
-            if not cid_keyed:
+            self.num_glyphs = len(cff.names)
+            if not cff.cid_keyed:
                 self.has_glyph_names = True
-                self._cff_names = names
+                self._cff_names = cff.names
             if not any((c.platform, c.encoding_id) == (3, 1) or c.platform == 0 for c in self.charmaps):
-                unicodes = PsUnicodes(names if not cid_keyed else [])
+                unicodes = PsUnicodes(cff.names if not cff.cid_keyed else [])
                 if unicodes:
                     self.charmaps.append(SynthCMap(unicodes))
-            if encoding_id is not None:
-                self.charmaps.append(AdobeCMap(encoding_id, gids))
-        self.charmap = None
+            if cff.encoding_id is not None:
+                self.charmaps.append(AdobeCMap(cff.encoding_id, cff.gids))
+        self.charmap: CharMap | None = None
         self.select_unicode()       # FT_Open_Face: the Unicode charmap by default
 
     # -- opening (sfnt_load_face, tt_face_init)
@@ -788,7 +820,7 @@ class Face:
             raise FaceError("head missing")
         h = _read(data, head[0], 54)
         self.units_per_em = _u16(h, 18)
-        self.head_bbox = tuple(_s16(h, 36 + 2 * k) for k in range(4))
+        self.head_bbox = (_s16(h, 36), _s16(h, 38), _s16(h, 40), _s16(h, 42))
         self.index_to_loc_format = _s16(h, 50)
         self.head_flags = _u16(h, 16)
         if not 16 <= self.units_per_em <= 16384:
@@ -808,7 +840,8 @@ class Face:
                 self.maxp["maxTwilightPoints"] = min(0xFFFF - 4, self.maxp["maxTwilightPoints"])
         self.maxp_num_glyphs = self.num_glyphs = self.maxp["numGlyphs"]
         # tt_face_load_hhea / hmtx: both needed ('true' Mac fonts may lack hhea: no outlines then)
-        self.hhea = None
+        self.hhea: dict[str, int] | None = None
+        self.hmtx: tuple[int, int] | None = None
         hhea = self.table(b"hhea")
         if hhea:
             self.hhea = self._metrics_header(hhea[0])
@@ -819,7 +852,8 @@ class Face:
             self.has_outline = False
         else:
             raise FaceError("hhea missing")
-        self.vhea = self.vmtx = None
+        self.vhea: dict[str, int] | None = None
+        self.vmtx: tuple[int, int] | None = None
         vhea = self.table(b"vhea")
         if vhea:
             self.vhea = self._metrics_header(vhea[0])
@@ -928,9 +962,9 @@ class Face:
         # an unordered loca only bounds the size (and a missing glyf gives a wrong, non-zero one)
         return glyf_offset + pos1, pos2 - pos1 if pos2 >= pos1 else glyf_len - pos1
 
-    def metrics(self, index: int, vertical: bool = False) -> tuple[int, int]:
-        """tt_face_get_metrics: (advance, side bearing) in font units."""
-        header, table = (self.vhea, self.vmtx) if vertical else (self.hhea, getattr(self, "hmtx", None))
+    def metrics(self, index: int, vertical: bool) -> tuple[int, int]:
+        """tt_face_get_metrics: (advance, side bearing) in font units, from vmtx when `vertical`."""
+        header, table = (self.vhea, self.vmtx) if vertical else (self.hhea, self.hmtx)
         if not header or not table:
             return 0, 0
         pos, size = table
@@ -952,9 +986,10 @@ class Face:
 
     # -- glyph names (tt_face_get_ps_name, or the CFF charset)
     def glyph_names(self) -> list[str]:
-        if getattr(self, "_glyph_names", None) is None:
-            self._glyph_names = self._cff_names if self._cff_names is not None else self._post_names()
-        return self._glyph_names
+        names = self._glyph_names
+        if names is None:
+            names = self._glyph_names = self._cff_names if self._cff_names is not None else self._post_names()
+        return names
 
     def glyph_name(self, index: int) -> str:
         """FT_Get_Glyph_Name: '' without glyph names or past the face's last glyph (the post names
@@ -965,7 +1000,7 @@ class Face:
     def _post_names(self) -> list[str]:
         n = self.maxp_num_glyphs          # load_post_names counts maxp's glyphs, not the face's
         mac = psnames_data.MAC_NAMES
-        names = [".notdef"] * n
+        names: list[str] = [".notdef"] * n
         post, fmt = self._post, self.post_format
         if fmt == 0x00010000:
             if n == 258:

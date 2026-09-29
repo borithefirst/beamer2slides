@@ -24,7 +24,21 @@ ascender = yMax, descender = yMin, units per em 1000 (the FontMatrix these faces
 """
 from __future__ import annotations
 
+import functools
 import re
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from ...typing_compat import override
+
+if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
+    from fontTools.misc.psCharStrings import T1CharString
+    from fontTools.misc.psOperators import ps_object
+
+    U64 = npt.NDArray[np.uint64]
 
 EEXEC_KEY = 55665
 CHARSTRING_KEY = 4330
@@ -51,23 +65,26 @@ def decrypt(data: bytes, key: int) -> bytes:
 _A, _B = 52845, 22719
 _A_INV = pow(_A, -1, 1 << 16)
 _VECTOR_MIN = 192
-_powers: tuple = (0, None, None)
+_powers: tuple[U64, U64] | None = None
 
 
-def _power_tables(n: int):
+def _power_tables(n: int) -> tuple[U64, U64]:
     """(A^i, A^-(i+1)) mod 2^16 for i < n, as uint64."""
     global _powers
-    if _powers[0] < n:
+    powers = _powers
+    have = 0 if powers is None else len(powers[0])
+    if powers is None or have < n:
         import numpy as np
-        size = max(n, 2 * _powers[0], 4096)
+        size = max(n, 2 * have, 4096)
         a = np.full(size, _A, np.uint64)
         a[0] = 1
         b = np.full(size, _A_INV, np.uint64)
-        _powers = (size, np.cumprod(a) & 0xFFFF, np.cumprod(b) & 0xFFFF)
-    return _powers[1], _powers[2]
+        low = np.uint64(0xFFFF)
+        powers = _powers = (np.cumprod(a, dtype=np.uint64) & low, np.cumprod(b, dtype=np.uint64) & low)
+    return powers
 
 
-def decrypt_many(chunks: list, key: int) -> list[bytes]:
+def decrypt_many(chunks: list[bytes], key: int) -> list[bytes]:
     """`decrypt(chunk, key)` for every chunk, each from `key` again, in one numpy pass."""
     import numpy as np
     lengths = [len(c) for c in chunks]
@@ -85,14 +102,15 @@ def decrypt_many(chunks: list, key: int) -> list[bytes]:
     # r_i = A^i·(A^-start·key + S_i - S_start), all mod 2^16
     r = (apow[:n] * (_inv_pow(first, ainv) * key + total[:n] - total[first])) & 0xFFFF
     plain = ((c ^ (r >> 8)) & 0xFF).astype(np.uint8).tobytes()
-    out, at = [], 0
+    out: list[bytes] = []
+    at = 0
     for size in lengths:
         out.append(plain[at:at + size])
         at += size
     return out
 
 
-def _inv_pow(first, ainv):
+def _inv_pow(first: npt.NDArray[np.int64], ainv: U64) -> U64:
     """A^-start for each start (A^-0 = 1)."""
     import numpy as np
     out = np.ones(len(first), np.uint64)
@@ -138,7 +156,7 @@ def round_fix(v: int) -> int:
 class Type1Program:
     """What the loader keeps: glyph order, decrypted charstrings and subrs, encoding, blend, bbox."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.order: list[str] = []
         self.charstrings: dict[str, bytes] = {}
         self.subrs: list[bytes | None] = []
@@ -147,8 +165,8 @@ class Type1Program:
         self.num_designs = 0
         self.design_map: list[tuple[list[int], list[int]]] = []   # per axis: design points, blend points
         self.len_buildchar = 0
-        self.font_bbox = (0, 0, 0, 0)          # 16.16, after the blend
-        self.bbox = (0, 0, 0, 0)               # the face's, whole units
+        self.font_bbox: tuple[int, int, int, int] = (0, 0, 0, 0)   # 16.16, after the blend
+        self.bbox: tuple[int, int, int, int] = (0, 0, 0, 0)        # the face's, whole units
 
 
 def _segments(data: bytes) -> tuple[bytes, bytes]:
@@ -178,7 +196,8 @@ def _numbers(text: bytes) -> list[bytes]:
     return re.findall(rb"[-+]?(?:\d+\.?\d*|\.\d+)", text)
 
 
-def _binary_items(text: bytes, start: int, head: re.Pattern, stop: re.Pattern):
+def _binary_items(text: bytes, start: int, head: re.Pattern[bytes], stop: re.Pattern[bytes]
+                  ) -> Iterator[tuple[re.Match[bytes], bytes]]:
     """(match, data) for each `<head> n RD <n bytes>` from `start`, until `stop` matches first."""
     pos = start
     while True:
@@ -210,7 +229,7 @@ def parse(data: bytes) -> Type1Program:
     m = re.search(rb"/BlendDesignMap\s*\[(.*?\]\s*\])\s*\]\s*def", clear, re.S)
     if m:
         axes = re.findall(rb"\[((?:\s*\[[^\[\]]*\])+)\s*\]", m.group(1))
-        dmap = []
+        dmap: list[tuple[list[int], list[int]]] = []
         for axis in axes:
             pts = [_numbers(pt) for pt in re.findall(rb"\[([^\[\]]*)\]", axis)]
             dmap.append(([int(float(p[0])) for p in pts], [to_fixed(p[1]) for p in pts]))
@@ -224,7 +243,7 @@ def parse(data: bytes) -> Type1Program:
     if m:
         v = [round_fix(to_fixed(t)) for t in _numbers(m.group(1))[:4]]
         if len(v) == 4:
-            p.font_bbox = tuple(v)
+            p.font_bbox = (v[0], v[1], v[2], v[3])
     if p.weight_vector is not None:
         m = re.search(rb"/FontBBox\s*\{\s*\{([^}]*)\}\s*\{([^}]*)\}\s*\{([^}]*)\}\s*\{([^}]*)\}\s*\}", clear)
         if m:
@@ -293,7 +312,16 @@ def parse(data: bytes) -> Type1Program:
 # the same program, and a talk's fonts come back in every PDF of the process); each call hands out
 # fresh charstring objects, since fontTools' drawing replaces a charstring's bytecode.
 
-_T1_CACHE: dict = {}
+@dataclass(frozen=True, kw_only=True)
+class Parsed:
+    """`T1Font.parse`'s reading of a program, charstrings as bytecode: shared, never changed."""
+    font: dict[str, object]     # the font dictionary; its CharStrings and Private/Subrs are psLib's
+    names: list[str]            # the CharStrings' glyph names, in their order
+    glyph_codes: list[bytes]    # each name's decrypted charstring, lenIV bytes cut
+    subr_codes: list[bytes]     # the subroutines', likewise
+
+
+_T1_CACHE: dict[bytes, Parsed] = {}
 _T1_CACHE_SIZE = 64
 
 
@@ -323,36 +351,41 @@ _LAST_OPS = _PLAIN_OPS | {"def", "put"}
 _SKIP_WS = re.compile(rb"[" + _WS + rb"]*")
 _PROC_KEY = 48          # a text is looked up by its first bytes, then compared whole
 _PROC_MIN = 64          # shorter procedures are read as fast as they are looked up
-_PROCS: dict = {}
+_PROCS: dict[bytes, list[tuple[bytes, ps_object]]] = {}
 _PROCS_MAX = 512
-_MARK = object()        # stands for the interpreter's mark inside a kept procedure
 
 
+@functools.cache
 def _interpreter_class():
     from fontTools.misc import psLib
-    from fontTools.misc.psOperators import ps_integer
+    from fontTools.misc.psOperators import ps_integer, ps_object
 
     plain = (psLib.ps_name, psLib.ps_literal, psLib.ps_integer, psLib.ps_real, psLib.ps_string)
     fields = frozenset(("value", "type"))
+    kept_mark = psLib.ps_mark()     # stands for the interpreter's mark inside a kept procedure
 
-    def snapshot(obj, mark):
+    def snapshot(obj: ps_object, mark: ps_object) -> ps_object | None:
         """A kept copy of a procedure just built, or None when it holds anything unexpected."""
         if obj is mark:
-            return _MARK
-        cls = type(obj)
+            return kept_mark
+        cls: type[ps_object] = type(obj)
         if obj.__dict__.keys() - fields:
             return None
+        value: object
         if cls is psLib.ps_procedure:
-            if type(obj.value) is not list:
+            held: object = obj.value
+            if not isinstance(held, list) or type(held) is not list:
                 return None
-            items = []
-            for item in obj.value:
+            items: list[ps_object] = []
+            for item in held:
+                if not isinstance(item, ps_object):
+                    return None
                 kept = snapshot(item, mark)
                 if kept is None:
                     return None
                 items.append(kept)
             value = items
-        elif cls in plain and type(obj.value) in (str, int, float, bool):
+        elif type(obj) in plain and type(obj.value) in (str, int, float, bool):
             value = obj.value
         else:
             return None
@@ -361,23 +394,26 @@ def _interpreter_class():
         new.value = value
         return new
 
-    def fresh(kept, mark):
+    def fresh(kept: ps_object, mark: ps_object) -> ps_object:
         """New objects for a kept procedure, the interpreter's own mark put back."""
-        if kept is _MARK:
+        if kept is kept_mark:
             return mark
-        cls = type(kept)
+        cls: type[ps_object] = type(kept)
         new = cls.__new__(cls)
         new.__dict__.update(kept.__dict__)
         if cls is psLib.ps_procedure:
-            new.value = [fresh(item, mark) for item in kept.value]
+            held: object = kept.value
+            if isinstance(held, list):
+                new.value = [fresh(item, mark) for item in held if isinstance(item, ps_object)]
         return new
 
     class Interpreter(psLib.PSInterpreter):
-        def __init__(self, encoding="ascii"):
+        def __init__(self, encoding: str) -> None:
             super().__init__(encoding)
             self._own_ops = dict(self.dictstack[0])
 
-        def ps_eexec(self):
+        @override
+        def ps_eexec(self) -> None:
             f = self.pop("filetype").value
             # PSTokenizer.starteexec with the fast cipher
             f.pos = f.pos + 1
@@ -398,7 +434,7 @@ def _interpreter_class():
             if type(proc) is not psLib.ps_procedure or proc.literal or not proc.value:
                 return None
             items = proc.value
-            out = []
+            out: list[Callable[[], None]] = []
             last = len(items) - 1
             for k, item in enumerate(items):
                 if type(item) is not psLib.ps_name or item.literal:
@@ -412,12 +448,14 @@ def _interpreter_class():
                         break
                 else:
                     return None
-                if op is not self._own_ops.get(n):
+                own = self._own_ops.get(n)
+                if own is None or op is not own:
                     return None
-                out.append(op.function)
+                out.append(own.function)
             return out
 
-        def ps_for(self):
+        @override
+        def ps_for(self) -> None:
             """`0 1 255 {1 index exch /.notdef put} for`, which opens every program's Encoding, as
             the stores it makes: a procedure of that shape (its names resolving to our operators)
             over an array, integers in its range; any other loop is psLib's own."""
@@ -441,14 +479,14 @@ def _interpreter_class():
                         return
             super().ps_for()
 
-        def _resolved(self, name):
+        def _resolved(self, name: str) -> object:
             dictstack = self.dictstack
             for i in range(len(dictstack) - 1, -1, -1):
                 if name in dictstack[i]:
                     return dictstack[i][name]
             return None
 
-        def _shortcut(self, tokenizer) -> bool:
+        def _shortcut(self, tokenizer: psLib.PSTokenizer) -> bool:
             buf, pos = tokenizer.buf, tokenizer.pos
             m = _READ.match(buf, pos)
             if m is None:
@@ -472,8 +510,10 @@ def _interpreter_class():
                         f()
             return True
 
-        def interpret(self, data, getattr=getattr):
-            """psLib.PSInterpreter.interpret, with `_shortcut` tried at the top level."""
+        def run(self, data: bytes) -> None:
+            """psLib.PSInterpreter.interpret, with `_shortcut` tried at the top level (its
+            `getattr` parameter a local)."""
+            getattr_ = getattr
             tokenizer = self.tokenizer = psLib.PSTokenizer(data, self.encoding)
             getnexttoken = tokenizer.getnexttoken
             do_token = self.do_token
@@ -482,7 +522,7 @@ def _interpreter_class():
             skip_ws = _SKIP_WS.match
             recording = None    # (buffer, start) of a top-level `{` being read the long way
             try:
-                while 1:
+                while True:
                     if not self.proclevel:
                         if recording is not None:
                             buf, start = recording
@@ -501,7 +541,8 @@ def _interpreter_class():
                         if shortcut(tokenizer):
                             continue
                         buf = tokenizer.buf
-                        start = skip_ws(buf, tokenizer.pos).end()
+                        ws = skip_ws(buf, tokenizer.pos)      # always matches, maybe empty
+                        start = tokenizer.pos if ws is None else ws.end()
                         if buf[start:start + 1] == b"{":
                             hit = False
                             for text, kept in _PROCS.get(buf[start:start + _PROC_KEY], ()):
@@ -517,12 +558,12 @@ def _interpreter_class():
                     if not token:
                         break
                     if tokentype:
-                        handler = getattr(self, tokentype)
-                        object = handler(token)
+                        handler = getattr_(self, tokentype)
+                        got = handler(token)
                     else:
-                        object = do_token(token)
-                    if object is not None:
-                        handle_object(object)
+                        got = do_token(token)
+                    if got is not None:
+                        handle_object(got)
                 tokenizer.close()
                 self.tokenizer = None
             except:  # noqa: E722 - psLib's own clause, re-raised
@@ -535,20 +576,14 @@ def _interpreter_class():
     return Interpreter
 
 
-_Interpreter = None
-
-
-def _suckfont(data: bytes, encoding: str = "ascii"):
-    """psLib.suckfont over the fast cipher."""
-    global _Interpreter
+def _suckfont(data: bytes):
+    """psLib.suckfont over the fast cipher (its default encoding, ascii)."""
     from fontTools.misc import psLib
-    if _Interpreter is None:
-        _Interpreter = _interpreter_class()
     m = re.search(rb"/FontName\s+/([^ \t\n\r]+)\s+def", data)
     font_name = m.group(1).decode() if m else None
-    interpreter = _Interpreter(encoding=encoding)
-    interpreter.interpret(b"/Helvetica 4 dict dup /Encoding StandardEncoding put definefont pop")
-    interpreter.interpret(data)
+    interpreter = _interpreter_class()("ascii")
+    interpreter.run(b"/Helvetica 4 dict dup /Encoding StandardEncoding put definefont pop")
+    interpreter.run(data)
     fontdir = interpreter.dictstack[0]["FontDirectory"].value
     if font_name in fontdir:
         rawfont = fontdir[font_name]
@@ -562,13 +597,12 @@ def _suckfont(data: bytes, encoding: str = "ascii"):
     return psLib.unpack_item(rawfont)
 
 
-def _as_bytes(v) -> bytes:
+def _as_bytes(v: bytes | str) -> bytes:
     return v if isinstance(v, bytes) else v.encode("latin-1")
 
 
-def _parsed(data: bytes):
-    """(font dict without CharStrings/Subrs, names, charstring bytes, subr bytes) as T1Font.parse
-    leaves them, from the cache."""
+def _parsed(data: bytes) -> Parsed:
+    """The program as T1Font.parse leaves it, from the cache."""
     hit = _T1_CACHE.get(data)
     if hit is not None:
         return hit
@@ -577,32 +611,30 @@ def _parsed(data: bytes):
     len_iv = font["Private"].get("lenIV", 4)
     assert len_iv >= 0
     subrs = font["Private"]["Subrs"]
-    names = list(charstrings.keys())
+    names: list[str] = list(charstrings.keys())
     plain = decrypt_many([_as_bytes(charstrings[n]) for n in names] + [_as_bytes(s) for s in subrs],
                          CHARSTRING_KEY)
-    glyph_codes = [p[len_iv:] for p in plain[:len(names)]]
-    subr_codes = [p[len_iv:] for p in plain[len(names):]]
-    hit = (font, names, glyph_codes, subr_codes)
+    hit = Parsed(font=font, names=names, glyph_codes=[p[len_iv:] for p in plain[:len(names)]],
+                 subr_codes=[p[len_iv:] for p in plain[len(names):]])
     if len(_T1_CACHE) >= _T1_CACHE_SIZE:
         _T1_CACHE.pop(next(iter(_T1_CACHE)))
     _T1_CACHE[data] = hit
     return hit
 
 
-def fonttools_font(data: bytes) -> dict:
-    """`T1Font.parse`'s `font` dictionary for a program: CharStrings and Private/Subrs hold fresh
-    T1CharString objects, the rest is shared and must not be changed."""
+def fonttools_font(data: bytes) -> tuple[dict[str, object], dict[str, T1CharString]]:
+    """`T1Font.parse`'s `font` dictionary for a program (shared: never to be changed) and its
+    CharStrings as fresh T1CharString objects over fresh subroutines."""
     from fontTools.misc import psCharStrings
-    font, names, glyph_codes, subr_codes = _parsed(data)
-    subrs: list = []
-    subrs.extend(psCharStrings.T1CharString(code, subrs=subrs) for code in subr_codes)
-    out = dict(font)
-    out["Private"] = dict(font["Private"], Subrs=subrs)
-    out["CharStrings"] = {n: psCharStrings.T1CharString(code, subrs=subrs) for n, code in zip(names, glyph_codes)}
-    return out
+    parsed = _parsed(data)
+    subrs: list[T1CharString] = []
+    subrs.extend(psCharStrings.T1CharString(code, subrs=subrs) for code in parsed.subr_codes)
+    return parsed.font, {n: psCharStrings.T1CharString(code, subrs=subrs)
+                         for n, code in zip(parsed.names, parsed.glyph_codes)}
 
 
-def fonttools_codes(data: bytes):
+def fonttools_codes(data: bytes) -> tuple[dict[str, object], dict[str, bytes], list[bytes | None]]:
     """(font dict, {glyph name: charstring bytecode}, [subr bytecode]) without charstring objects."""
-    font, names, glyph_codes, subr_codes = _parsed(data)
-    return font, dict(zip(names, glyph_codes)), list(subr_codes)
+    parsed = _parsed(data)
+    subrs: list[bytes | None] = list(parsed.subr_codes)
+    return parsed.font, dict(zip(parsed.names, parsed.glyph_codes)), subrs

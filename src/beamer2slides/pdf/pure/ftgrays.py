@@ -15,7 +15,11 @@ have no conic points).
 """
 from __future__ import annotations
 
+from typing import Callable, Final, Iterator, Literal
+
 import numpy
+
+from ...typing_compat import assert_never
 
 ON, CUBIC, CONIC = 1, 2, 0
 
@@ -23,9 +27,19 @@ PIXEL_BITS = 8
 ONE_PIXEL = 1 << PIXEL_BITS
 INT_MIN = -(1 << 31)
 
-SUBPIXEL = "subpixel"
-HARMONY = "harmony"
-LCD_MODE = SUBPIXEL
+Point26 = tuple[int, int]
+"""A 26.6 outline point (x, y)."""
+Contour = tuple[list[Point26], list[int]]
+"""One contour: its points and their tags (ON, CUBIC, CONIC)."""
+Outline = list[Contour]
+LcdBitmap = tuple[int, int, int, int, int, bytes]
+"""(left, top, width in bytes, rows, pitch, buffer rows top to bottom)."""
+
+LcdMode = Literal["subpixel", "harmony"]
+SUBPIXEL: Final = "subpixel"
+HARMONY: Final = "harmony"
+LCD_MODE: LcdMode = SUBPIXEL
+PPEM = 64                             # PDFium renders every glyph at 64 ppem
 
 LCD_WEIGHTS = (0x08, 0x4D, 0x56, 0x4D, 0x08)
 LCD_GEOMETRY = (-21, 0, 21)          # Harmony's sub[i].x (y all 0)
@@ -61,10 +75,10 @@ def _udiv(a: int, r: int) -> int:
 class _Raster:
     """One ``gray_TWorker``: cells per scanline, then a sweep into spans."""
 
-    def __init__(self, min_ex: int, min_ey: int, max_ex: int, max_ey: int):
+    def __init__(self, min_ex: int, min_ey: int, max_ex: int, max_ey: int) -> None:
         self.min_ex, self.min_ey, self.max_ex, self.max_ey = min_ex, min_ey, max_ex, max_ey
-        self.rows: dict[int, dict[int, list]] = {}
-        self.cell = None
+        self.rows: dict[int, dict[int, list[int]]] = {}      # ey -> ex -> [cover, area]
+        self.cell: list[int] | None = None
         self.x = self.y = 0
 
     def set_cell(self, ex: int, ey: int) -> None:
@@ -77,7 +91,8 @@ class _Raster:
         rows = self.rows
         row = rows.get(ey)                       # not setdefault: that builds a dict on every call
         if row is None:
-            row = rows[ey] = {}
+            row = {}
+            rows[ey] = row
         cell = row.get(ex)
         if cell is None:
             cell = row[ex] = [0, 0]              # cover, area
@@ -187,7 +202,7 @@ class _Raster:
     def line_to(self, x: int, y: int) -> None:
         self.render_line(x * 4, y * 4)
 
-    def conic_to(self, control, to) -> None:
+    def conic_to(self, control: Point26, to: Point26) -> None:
         """``gray_render_conic``, the FT_INT64 version: a DDA in 32.32 fixed point over 2^k
         segments, k from the arc's deviation (each bisection divides it by 4 exactly)."""
         p0x, p0y = self.x, self.y
@@ -229,7 +244,7 @@ class _Raster:
             qy = _int64(qy + ry)
             self.render_line(_int32(px >> 32), _int32(py >> 32))
 
-    def cubic_to(self, c1, c2, to) -> None:
+    def cubic_to(self, c1: Point26, c2: Point26, to: Point26) -> None:
         arc = [(to[0] * 4, to[1] * 4), (c2[0] * 4, c2[1] * 4), (c1[0] * 4, c1[1] * 4), (self.x, self.y)]
         max_ey, min_ey = self.max_ey, self.min_ey
         if all((p[1] >> PIXEL_BITS) >= max_ey for p in arc) or all((p[1] >> PIXEL_BITS) < min_ey for p in arc):
@@ -266,7 +281,7 @@ class _Raster:
                 return
             b -= 3
 
-    def spans(self):
+    def spans(self) -> Iterator[tuple[int, int, int, int]]:
         """``gray_sweep_direct`` with the non-zero rule: yields (y, x, len, coverage).
 
         ``FT_FILL_RULE`` (below, three times) and the two FT_Int32 casts are written out rather
@@ -314,7 +329,9 @@ def _half(v: int) -> int:
     return -((-v) // 2) if v < 0 else v // 2
 
 
-def outline_decompose(outline, move_to, line_to, conic_to, cubic_to) -> None:
+def outline_decompose(outline: Outline, move_to: Callable[[Point26], None], line_to: Callable[[Point26], None],
+                      conic_to: Callable[[Point26, Point26], None],
+                      cubic_to: Callable[[Point26, Point26, Point26], None]) -> None:
     """``FT_Outline_Decompose`` (base/ftoutln.c, shift 0 and delta 0) over ``[(points, tags)]``.
     A contour starting on a conic control starts at its last point when that one is on the curve,
     else halfway between the two; two conic controls in a row imply the on-curve point halfway.
@@ -380,7 +397,7 @@ def outline_decompose(outline, move_to, line_to, conic_to, cubic_to) -> None:
             line_to(v_start)
 
 
-def decompose(outline, raster: _Raster, dx: int = 0, dy: int = 0) -> None:
+def decompose(outline: Outline, raster: _Raster, dx: int, dy: int) -> None:
     """``FT_Outline_Decompose`` into the rasterizer, every point shifted by (dx, dy) first
     (FT_Outline_Translate)."""
     if dx or dy:
@@ -389,7 +406,7 @@ def decompose(outline, raster: _Raster, dx: int = 0, dy: int = 0) -> None:
                       raster.conic_to, raster.cubic_to)
 
 
-def cbox(outline):
+def cbox(outline: Outline) -> tuple[int, int, int, int]:
     xs = [p[0] for pts, _ in outline for p in pts]
     ys = [p[1] for pts, _ in outline for p in pts]
     if not xs:
@@ -397,13 +414,13 @@ def cbox(outline):
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def render_lcd(outline, ppem: int = 64, mode: str | None = None):
-    """``FT_Render_Glyph(FT_RENDER_MODE_LCD)`` on a transformed 26.6 outline.
+def render_lcd(outline: Outline, ppem: int, mode: LcdMode) -> LcdBitmap | None:
+    """``FT_Render_Glyph(FT_RENDER_MODE_LCD)`` on a transformed 26.6 outline, at `ppem` (PDFium's
+    is `PPEM`) with the LCD filter of `mode` (PDFium's build is `LCD_MODE`).
 
     Returns ``(left, top, width, rows, pitch, buffer)`` (width in bytes = 3 per pixel, buffer rows
     top to bottom) or None where FreeType errs or makes an empty bitmap (PDFium draws nothing).
     """
-    mode = mode or LCD_MODE
     n_points = sum(len(p) for p, _ in outline)
     if not n_points:
         return None
@@ -413,9 +430,11 @@ def render_lcd(outline, ppem: int = 64, mode: str | None = None):
     if mode == SUBPIXEL:
         rxmin -= 43
         rxmax += 43
-    else:
+    elif mode == HARMONY:
         rxmin -= max(LCD_GEOMETRY)
         rxmax -= min(LCD_GEOMETRY)
+    else:
+        assert_never(mode)
     pxmin += rxmin >> 6
     pymin += rymin >> 6
     pxmax += (rxmax + 63) >> 6
@@ -439,7 +458,7 @@ def render_lcd(outline, ppem: int = 64, mode: str | None = None):
             return None
         imploded = [([((x + x_shift) * 3, y + y_shift) for x, y in pts], tags) for pts, tags in outline]
         raster = _Raster(0, 0, width, rows)
-        decompose(imploded, raster)
+        decompose(imploded, raster, 0, 0)
         w = LCD_WEIGHTS
         size = len(buf)
         # The FIR as a convolution, which is what it is: every write is `+= add` on a byte that

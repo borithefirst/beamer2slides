@@ -18,9 +18,33 @@ from __future__ import annotations
 
 import io
 import math
+from typing import TYPE_CHECKING, Final, Literal, TypeAlias
 
 from .crt import cdiv
-from .ftgrays import CUBIC, ON
+from .ftgrays import CUBIC, ON, Outline, Point26
+
+if TYPE_CHECKING:
+    from ...arrays import Gray
+    from .fonts import Font
+    from .truetype import TrueTypeFace
+    from .type1 import Type1Program
+
+Matrix16 = tuple[int, int, int, int]
+"""An FT_Set_Transform matrix (xx, xy, yx, yy) in 16.16."""
+IDENTITY16: Matrix16 = (0x10000, 0, 0, 0x10000)
+PathKind = Literal["M", "L", "C"]
+PathPoint = tuple[float, float, PathKind, bool]
+"""One point of LoadGlyphPath's path: x, y in em units (float32), move/line/bezier, closes."""
+BlendKey = tuple[int, ...] | None
+"""A multiple master face's weight vector at a load, None for every other face."""
+CffSubrs = tuple[list[bytes | None], int]
+"""A CFF Private dict's local subroutines and their bias."""
+_EscState = tuple[bool, int, int, int, int, bool, bool]
+"""What a two-byte operator hands back to the interpreter's loop (`Decoder._esc`)."""
+GlyphBitmap: TypeAlias = "tuple[int, int, int, int, Gray]"
+"""A glyph RenderGlyph drew in LCD mode: left, top, width in subpixels, rows, its coverage."""
+BitmapKey = tuple[int, int, int, int]
+"""CFX_GlyphCache's size key: the device matrix's a, b, c, d times 10000, truncated."""
 
 MASK32 = 0xFFFFFFFF
 MAX_SUBR = 16            # CF2_MAX_SUBR and T1_MAX_SUBRS_CALLS
@@ -98,12 +122,24 @@ class Face:
     """One embedded Type 1 or CFF program, read again from the PDF's bytes (fontTools' parse keeps
     each charstring's bytecode; drawing one would replace it)."""
 
-    # a multiple master font's blend (PS_Blend): None for every other font
-    weight_vector: list[int] | None = None
-    num_designs = 0
-    len_buildchar = 0
+    order: list[str]
+    local: dict[str, CffSubrs] | None                 # CFF: glyph name -> its Private dict's subrs
+    is_t1: bool
+    cid_keyed: bool
+    charstrings: dict[str, bytes]
+    subrs: list[bytes | None]
+    gsubrs: list[bytes | None]
+    local_bias: int
+    global_bias: int
+    # a multiple master font's blend (PS_Blend): no weight vector for every other font
+    weight_vector: list[int] | None
+    default_weight_vector: list[int] | None
+    design_map: list[tuple[list[int], list[int]]]      # per axis: design points, blend points
+    num_designs: int
+    len_buildchar: int
+    buildchar: list[int]                               # face->buildchar: one array for every glyph load
 
-    def __init__(self, font):
+    def __init__(self, font: Font) -> None:
         prog = font.program
         if prog is None or not font.embedded:
             raise Unported("font without an embedded program")
@@ -111,6 +147,8 @@ class Face:
             raise Unported("TrueType glyphs")
         self.order = prog.order
         self.local = None
+        self.cid_keyed = False
+        self._no_blend()
         data = font.program_data
         if prog.kind == "type1":
             self._load_type1(data)
@@ -118,32 +156,41 @@ class Face:
             self._load_cff(data)
         self._init_caches()
 
+    def _no_blend(self) -> None:
+        self.weight_vector = self.default_weight_vector = None
+        self.design_map = []
+        self.num_designs = self.len_buildchar = 0
+        self.buildchar = []
+
     def _init_caches(self) -> None:
         self.upem = 1000
         self.x_scale = divfix(64 * 64, self.upem)      # FT_Set_Pixel_Sizes(64): DivFix(4096, upem)
-        self._units: dict[int, object] = {}
-        self._advances: dict[int, int] = {}
-        self._outlines: dict = {}
-        self._paths: dict = {}
+        self._units: dict[tuple[int, BlendKey], Outline | None] = {}
+        self._advances: dict[tuple[int, BlendKey], int] = {}
+        self._outlines: dict[tuple[int, Matrix16, BlendKey], Outline | None] = {}
+        self._paths: dict[tuple[int, Matrix16, BlendKey], list[PathPoint] | None] = {}
+        # CFX_GlyphCache's bitmaps of an embedded face (render_text.load_glyph_bitmap)
+        self.glyph_bitmaps: dict[BitmapKey, dict[int, GlyphBitmap | None]] = {}
 
     @classmethod
-    def from_type1(cls, t1) -> "Face":
+    def from_type1(cls, t1: Type1Program) -> Face:
         """A face over a Type 1 program `type1.parse` read (FreeType's own loader, blend included):
         PDFium's built-in multiple master faces."""
         face = cls.__new__(cls)
         face.order = t1.order
         face.local = None
         face.is_t1 = True
+        face.cid_keyed = False
         face.charstrings = t1.charstrings
         face.subrs = t1.subrs
         face.gsubrs = []
         face.local_bias = face.global_bias = 0
         face.weight_vector = list(t1.weight_vector) if t1.weight_vector is not None else None
         face.default_weight_vector = list(face.weight_vector) if face.weight_vector is not None else None
-        face.design_map = getattr(t1, "design_map", [])
+        face.design_map = t1.design_map
         face.num_designs = t1.num_designs
         face.len_buildchar = t1.len_buildchar
-        face.buildchar = [0] * t1.len_buildchar          # face->buildchar: one array for every glyph load
+        face.buildchar = [0] * t1.len_buildchar
         face._init_caches()
         return face
 
@@ -151,7 +198,10 @@ class Face:
     def _load_type1(self, data: bytes) -> None:
         from . import type1
         d, self.charstrings, self.subrs = type1.fonttools_codes(data)   # t1Lib.T1Font.parse's
-        matrix = [float(v) for v in d.get("FontMatrix", [0.001, 0, 0, 0.001, 0, 0])]
+        given = d.get("FontMatrix", [0.001, 0, 0, 0.001, 0, 0])
+        if not isinstance(given, (list, tuple)):
+            raise Unported(f"Type 1 FontMatrix {given!r}")
+        matrix = [float(v) for v in given]
         if matrix != [0.001, 0.0, 0.0, 0.001, 0.0, 0.0]:
             raise Unported(f"Type 1 FontMatrix {matrix}")
         self.is_t1 = True
@@ -180,8 +230,8 @@ class Face:
         self.is_t1 = False
         cs = top.CharStrings
         self.charstrings = {}
-        self.local = {}                       # glyph name -> (subrs, bias) of its Private dict
-        by_private: dict = {}
+        local: dict[str, CffSubrs] = {}       # glyph name -> (subrs, bias) of its Private dict
+        by_private: dict[int, CffSubrs] = {}
         for n in top.charset:
             if n not in cs:
                 continue
@@ -191,17 +241,21 @@ class Face:
             key = id(priv)
             if key not in by_private:
                 subrs = getattr(priv, "Subrs", None) if priv is not None else None
-                lst = [subrs[i].bytecode for i in range(len(subrs))] if subrs is not None else []
+                lst: list[bytes | None] = [subrs[i].bytecode for i in range(len(subrs))] if subrs is not None else []
                 by_private[key] = (lst, _bias(len(lst)))
-            self.local[n] = by_private[key]
-        self.subrs, self.local_bias = [], _bias(0)
+            local[n] = by_private[key]
+        self.local = local
+        self.subrs = []
+        self.local_bias = _bias(0)
         gs = cff.GlobalSubrs
         self.gsubrs = [gs[i].bytecode for i in range(len(gs))]
         self.global_bias = _bias(len(self.gsubrs))
 
     def charstring(self, glyph: int) -> bytes:
-        name = self.order[glyph] if 0 <= glyph < len(self.order) else None
-        data = self.charstrings.get(name) if name is not None else None
+        if not 0 <= glyph < len(self.order):
+            raise GlyphError(f"no glyph {glyph}")
+        name = self.order[glyph]
+        data = self.charstrings.get(name)
         if data is None:
             raise GlyphError(f"no glyph {glyph}")
         if self.local is not None:                        # CFF: the glyph's own Private dict
@@ -210,7 +264,7 @@ class Face:
 
     def seac_glyph(self, code: int) -> bytes:
         """t1_lookup_glyph_by_stdcharcode_ps / cff_lookup_glyph_by_stdcharcode: by standard name."""
-        if not 0 <= code <= 255 or getattr(self, "cid_keyed", False):
+        if not 0 <= code <= 255 or self.cid_keyed:
             raise GlyphError("seac code")
         name = _std_name(code)
         data = self.charstrings.get(name)
@@ -224,19 +278,21 @@ class Face:
         face = cls.__new__(cls)
         face.order = order
         face.local = None
+        face.cid_keyed = False
+        face._no_blend()
         face._load_cff(data)
         face._init_caches()
         return face
 
     # -- multiple masters (t1load.c): the blend is state of the face, shared by every font drawn with it
-    def blend_key(self):
+    def blend_key(self) -> BlendKey:
         return None if self.weight_vector is None else tuple(self.weight_vector)
 
     def mm_var(self) -> list[tuple[int, int, int]] | None:
         """T1_Get_MM_Var: per axis (minimum, maximum, default), 16.16; None without a blend."""
-        if self.weight_vector is None or not self.design_map:
-            return None
         w = self.default_weight_vector
+        if self.weight_vector is None or w is None or not self.design_map:
+            return None
         n = len(self.design_map)
         if n == 1:
             coords = [w[1]]
@@ -251,7 +307,10 @@ class Face:
 
     def set_mm_design(self, coords: list[int]) -> None:
         """FT_Set_MM_Design_Coordinates = T1_Set_MM_Design, then t1_set_mm_blend."""
-        blends_out = []
+        wv = self.weight_vector
+        if wv is None:                  # no blend: no designs, nothing to set
+            return
+        blends_out: list[int] = []
         for n, (designs, blends) in enumerate(self.design_map):
             design = coords[n] if n < len(coords) else cdiv(designs[-1] - designs[0], 2)
             before = after = -1
@@ -286,7 +345,7 @@ class Face:
                 if factor >= 0x10000:
                     continue
                 result = mulfix(result, factor)
-            self.weight_vector[n] = result
+            wv[n] = result
 
     def adjust_variation(self, glyph: int, dest_width: int, weight: int) -> None:
         """CFX_Face::AdjustVariationParams: the Weight axis at `weight`, the Width axis where the
@@ -316,7 +375,7 @@ class Face:
         return a
 
     # -- the three products
-    def units(self, glyph: int):
+    def units(self, glyph: int) -> Outline | None:
         """The unscaled outline (whole font units, psobjs' builder) or None when the load fails."""
         key = (glyph, self.blend_key())
         if key not in self._units:
@@ -336,20 +395,20 @@ class Face:
         a = self._advances[(glyph, self.blend_key())]
         return i32((a + 0x8000 - (1 if a < 0 else 0)) & ~0xFFFF) >> 16    # FT_RoundFix, then >> 16
 
-    def outline(self, glyph: int, matrix: tuple[int, int, int, int]):
+    def outline(self, glyph: int, matrix: Matrix16) -> Outline | None:
         """FT_Load_Glyph under FT_Set_Transform(matrix = xx, xy, yx, yy): 26.6 contours
         [(points, tags)] as ftgrays takes them, or None."""
         key = (glyph, matrix, self.blend_key())
         if key in self._outlines:
             return self._outlines[key]
         units = self.units(glyph)
-        out = None
+        out: Outline | None = None
         if units is not None:
             xx, xy, yx, yy = matrix
-            identity = matrix == (0x10000, 0, 0, 0x10000)
+            identity = matrix == IDENTITY16
             out = []
             for pts, tags in units:
-                sp = []
+                sp: list[Point26] = []
                 for x, y in pts:
                     x, y = mulfix(x, self.x_scale), mulfix(y, self.x_scale)
                     if not identity:
@@ -359,9 +418,9 @@ class Face:
         self._outlines[key] = out
         return out
 
-    def path(self, glyph: int, matrix: tuple[int, int, int, int] = (0x10000, 0, 0, 0x10000)):
+    def path(self, glyph: int, matrix: Matrix16) -> list[PathPoint] | None:
         """CFX_Face::LoadGlyphPath: [(x, y, kind, close)] in em units (float32), or None. `matrix` is
-        the FT_Set_Transform a substitute's skew makes."""
+        the FT_Set_Transform a substitute's skew makes (`IDENTITY16` for none)."""
         key = (glyph, matrix, self.blend_key())
         if key in self._paths:
             return self._paths[key]
@@ -424,7 +483,7 @@ def vector_normlen(x_: int, y_: int) -> tuple[int, int, int]:
     return vx, vy, ln
 
 
-def _orientation(outline) -> int:
+def _orientation(outline: Outline) -> int:
     """FT_Outline_Get_Orientation (the FT_INT64 shoelace): 1 TrueType, 2 PostScript, 0 none."""
     if not any(pts for pts, _ in outline):
         return 1
@@ -439,7 +498,7 @@ def _orientation(outline) -> int:
     return 2 if area > 0 else 1 if area < 0 else 0
 
 
-def embolden(outline, strength: int):
+def embolden(outline: Outline, strength: int) -> Outline:
     """FT_Outline_Embolden(outline, strength) on 26.6 contours [(points, tags)]: a new outline."""
     xs = ys = cdiv(strength, 2)
     if xs == 0 and ys == 0:
@@ -447,7 +506,7 @@ def embolden(outline, strength: int):
     orient = _orientation(outline)
     if orient == 0:
         return outline                      # Invalid_Argument, which PDFium ignores: left as it was
-    out = []
+    out: Outline = []
     for pts, tags in outline:
         points = [list(p) for p in pts]
         first, last = 0, len(points) - 1
@@ -490,7 +549,7 @@ def embolden(outline, strength: int):
                 i = j
             in_x, in_y, l_in = ox, oy, l_out
             j = j + 1 if j < last else first
-        out.append(([tuple(p) for p in points], tags))
+        out.append(([(p[0], p[1]) for p in points], tags))
     return out
 
 
@@ -526,49 +585,52 @@ def _bias(n: int) -> int:
 # --------------------------------------------------------------- LoadGlyphPath
 
 
-MOVE, LINE, BEZIER = "M", "L", "C"
+MOVE: Final = "M"
+LINE: Final = "L"
+BEZIER: Final = "C"
 
 
-def _glyph_path(outline):
+def _glyph_path(outline: Outline) -> list[PathPoint] | None:
     """FT_Outline_Decompose into Outline_MoveTo/LineTo/ConicTo/CubicTo, then
-    Outline_CheckEmptyContour and ClosePath. Points are [x, y, kind, close] with
+    Outline_CheckEmptyContour and ClosePath. Points are (x, y, kind, close) with
     x = (float)pos / 4096. A conic becomes a cubic with controls cur + (ctrl - cur) * 2 / 3 and
     ctrl + (to - ctrl) / 3, in C's truncating 32-bit FT_Pos arithmetic."""
     from .ftgrays import outline_decompose
     from .raster import F
-    pts: list[list] = []
+    pts: list[PathPoint] = []
     cur = [0, 0]
 
-    def pt(x, y):
-        return F(F(x) / 4096.0), F(F(y) / 4096.0)
+    def point(x: int, y: int, kind: PathKind) -> PathPoint:
+        return F(F(x) / 4096.0), F(F(y) / 4096.0), kind, False
 
-    def close():
+    def close() -> None:
         if pts:
-            pts[-1][3] = True
+            x, y, kind, _ = pts[-1]
+            pts[-1] = (x, y, kind, True)
 
-    def move_to(p):
+    def move_to(p: Point26) -> None:
         _check_empty(pts)
         close()
-        pts.append([*pt(*p), MOVE, False])
+        pts.append(point(p[0], p[1], MOVE))
         cur[:] = p
 
-    def line_to(p):
-        pts.append([*pt(*p), LINE, False])
+    def line_to(p: Point26) -> None:
+        pts.append(point(p[0], p[1], LINE))
         cur[:] = p
 
-    def conic_to(c, p):
+    def conic_to(c: Point26, p: Point26) -> None:
         cx, cy = cur
-        pts.append([*pt(i32(cx + cdiv(i32(i32(c[0] - cx) * 2), 3)),
-                        i32(cy + cdiv(i32(i32(c[1] - cy) * 2), 3))), BEZIER, False])
-        pts.append([*pt(i32(c[0] + cdiv(i32(p[0] - c[0]), 3)),
-                        i32(c[1] + cdiv(i32(p[1] - c[1]), 3))), BEZIER, False])
-        pts.append([*pt(*p), BEZIER, False])
+        pts.append(point(i32(cx + cdiv(i32(i32(c[0] - cx) * 2), 3)),
+                         i32(cy + cdiv(i32(i32(c[1] - cy) * 2), 3)), BEZIER))
+        pts.append(point(i32(c[0] + cdiv(i32(p[0] - c[0]), 3)),
+                         i32(c[1] + cdiv(i32(p[1] - c[1]), 3)), BEZIER))
+        pts.append(point(p[0], p[1], BEZIER))
         cur[:] = p
 
-    def cubic_to(c1, c2, p):
-        pts.append([*pt(*c1), BEZIER, False])
-        pts.append([*pt(*c2), BEZIER, False])
-        pts.append([*pt(*p), BEZIER, False])
+    def cubic_to(c1: Point26, c2: Point26, p: Point26) -> None:
+        pts.append(point(c1[0], c1[1], BEZIER))
+        pts.append(point(c2[0], c2[1], BEZIER))
+        pts.append(point(p[0], p[1], BEZIER))
         cur[:] = p
 
     try:
@@ -582,7 +644,7 @@ def _glyph_path(outline):
     return pts
 
 
-def _check_empty(pts: list) -> None:
+def _check_empty(pts: list[PathPoint]) -> None:
     size = len(pts)
     if size >= 2 and pts[size - 2][2] == MOVE and not pts[size - 2][3] \
             and pts[size - 2][:2] == pts[size - 1][:2]:
@@ -601,8 +663,8 @@ def _check_empty(pts: list) -> None:
 class Builder:
     """psobjs.c's PS_Builder over one FT_Outline (points in whole units, tags ON / CUBIC)."""
 
-    def __init__(self):
-        self.points: list[tuple[int, int]] = []
+    def __init__(self) -> None:
+        self.points: list[Point26] = []
         self.tags: list[int] = []
         self.contours: list[int] = []
         self.n_contours = 0
@@ -651,20 +713,20 @@ class Builder:
         self.close_contour()
         self.path_begun = False
 
-    def cb_line(self, p0, p1) -> None:
+    def cb_line(self, p0: Point26, p1: Point26) -> None:
         if not self.path_begun:
             self.start_point(*p0)
         self.add_point(p1[0], p1[1], True)
 
-    def cb_cube(self, p0, p1, p2, p3) -> None:
+    def cb_cube(self, p0: Point26, p1: Point26, p2: Point26, p3: Point26) -> None:
         if not self.path_begun:
             self.start_point(*p0)
         self.add_point(p1[0], p1[1], False)
         self.add_point(p2[0], p2[1], False)
         self.add_point(p3[0], p3[1], True)
 
-    def result(self):
-        out = []
+    def result(self) -> Outline:
+        out: Outline = []
         first = 0
         for c in range(self.n_contours):
             last = self.contours[c]
@@ -683,23 +745,24 @@ def _hint(v: int) -> int:
 class GlyphPath:
     """pshints.c's CF2_GlyphPath without darkening: offsets are 0, so joins never intersect."""
 
-    def __init__(self, dec: "Decoder"):
+    def __init__(self, dec: Decoder) -> None:
         self.dec = dec
         self.b = dec.builder
         self.move_pending = True
         self.path_open = False
         self.closing = False
         self.queued = False
-        self.prev_op = None
-        self.prev = ()
-        self.cur_cs = (0, 0)
-        self.start = (0, 0)
-        self.current_ds = (0, 0)
-        self.offset_start0 = (0, 0)
-        self.offset_start1 = (0, 0)
+        # the element queued one step behind: a line (p0, p1) or a curve (p0, p1, p2, p3)
+        self.prev_op: Literal["L", "C"] | None = None
+        self.prev: tuple[Point26, ...] = ()
+        self.cur_cs: Point26 = (0, 0)
+        self.start: Point26 = (0, 0)
+        self.current_ds: Point26 = (0, 0)
+        self.offset_start0: Point26 = (0, 0)
+        self.offset_start1: Point26 = (0, 0)
 
     @staticmethod
-    def ds(p):
+    def ds(p: Point26) -> Point26:
         return _hint(p[0]), _hint(p[1])
 
     def move_to(self, x: int, y: int) -> None:
@@ -710,7 +773,7 @@ class GlyphPath:
         if not d.map_valid or d.mask_new:
             d.build_map()
 
-    def _push_move(self, start) -> None:
+    def _push_move(self, start: Point26) -> None:
         d = self.dec
         if not d.map_valid:
             self.move_to(*self.start)
@@ -719,7 +782,7 @@ class GlyphPath:
         self.current_ds = pt1
         self.offset_start0 = start
 
-    def _push_prev(self, next_p0, close: bool) -> None:
+    def _push_prev(self, next_p0: Point26, close: bool) -> None:
         # prevP1 == nextP0 always (no darkening offsets): no intersection.
         if self.prev_op == "L":
             p1 = self.ds(self.prev[1])
@@ -756,7 +819,7 @@ class GlyphPath:
             d.build_map()
         self.cur_cs = (x, y)
 
-    def curve_to(self, x1, y1, x2, y2, x3, y3) -> None:
+    def curve_to(self, x1: int, y1: int, x2: int, y2: int, x3: int, y3: int) -> None:
         d = self.dec
         p0 = self.cur_cs
         if self.move_pending:
@@ -788,7 +851,7 @@ class GlyphPath:
 class Stack:
     """psstack.c: 48 typed entries; errors fail the glyph."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.v: list[int] = []
         self.is_int: list[bool] = []
 
@@ -854,7 +917,7 @@ class Stack:
         if shift == 0:
             return
         start = idx = -1
-        last_v = last_t = None
+        last_v, last_t = 0, False           # read in on the first pass (start == idx == -1)
         for _ in range(count):
             if start == idx:
                 start += 1
@@ -910,7 +973,7 @@ class Decoder:
         self.n_stems = 0
         self.have_width = False
 
-    def load(self, charstring: bytes):
+    def load(self, charstring: bytes) -> Outline:
         self.interp(charstring, False, 0, 0)
         self.builder.close_contour()                     # cf2_outline_close
         return self.builder.result()
@@ -1054,9 +1117,10 @@ class Decoder:
                 else:
                     idx, table = num + face.local_bias, face.subrs
                 idx &= MASK32
-                if idx >= len(table) or table[idx] is None:
+                code = table[idx] if idx < len(table) else None
+                if code is None:
                     raise GlyphError("subroutine index")
-                buf = _Buf(table[idx])
+                buf = _Buf(code)
                 subr_stack.append(buf)
                 continue
             elif op == 11:                                        # return
@@ -1067,14 +1131,13 @@ class Decoder:
                 continue
             elif op == 12:
                 op2 = buf.byte()
-                r = self._esc(op2, st, gp, locals())
-                if r is not None:
-                    kind, vals = r
-                    if kind == "exit":
-                        return
-                    (cur_x, cur_y, result_cnt, known, large_int, clear) = vals
-                    if not clear:
-                        continue
+                done, cur_x, cur_y, result_cnt, known, large_int, clear = self._esc(
+                    op2, st, gp, cur_x, cur_y, result_cnt, known, large_int, initial_map_ready, doing_seac,
+                    results, storage, flex_store)
+                if done:
+                    return
+                if not clear:
+                    continue
             elif op == 13:                                        # hsbw
                 if t1:
                     self.advance_x = st.pop_fixed()
@@ -1243,17 +1306,16 @@ class Decoder:
             if clear:
                 st.clear()
 
-    def _esc(self, op2, st: Stack, gp: GlyphPath, env: dict):
-        """The two-byte operators. Returns None (break: clear the stack), ("exit", None) or
-        ("state", (cur_x, cur_y, result_cnt, known, large_int, clear))."""
+    def _esc(self, op2: int, st: Stack, gp: GlyphPath, cur_x: int, cur_y: int, result_cnt: int, known: int,
+             large_int: bool, initial_map_ready: bool, doing_seac: bool, results: list[int], storage: list[int],
+             flex_store: list[int]) -> _EscState:
+        """The two-byte operators, over the interpreter's locals it is handed: (done, cur_x, cur_y,
+        result_cnt, known, large_int, clear), done when the glyph ends here (seac), clear when the
+        operator breaks (the stack is cleared) rather than continues."""
         t1 = self.is_t1
-        cur_x, cur_y = env["cur_x"], env["cur_y"]
-        result_cnt, known, large_int = env["result_cnt"], env["known"], env["large_int"]
-        initial_map_ready, doing_seac = env["initial_map_ready"], env["doing_seac"]
-        results, storage, flex_store = env["results"], env["storage"], env["flex_store"]
 
-        def state(clear):
-            return "state", (cur_x, cur_y, result_cnt, known, large_int, clear)
+        def state(clear: bool) -> _EscState:
+            return False, cur_x, cur_y, result_cnt, known, large_int, clear
 
         if op2 in (34, 35, 36, 37):
             rfs = {34: (1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0), 35: (1,) * 12,
@@ -1298,7 +1360,7 @@ class Decoder:
             self.lsb_x = self.lsb_y = 0
             self.interp(accent, True, i32(adx - asb), ady)
             (self.lsb_x, self.lsb_y), (self.advance_x, self.advance_y) = bearing, advance
-            return "exit", None
+            return True, cur_x, cur_y, result_cnt, known, large_int, True
         if op2 == 7:                                      # sbw
             if t1:
                 self.advance_y = st.pop_fixed()
@@ -1524,7 +1586,8 @@ class Decoder:
             return state(True)
         return state(True)
 
-    def _flex(self, st: Stack, gp: GlyphPath, cur_x: int, cur_y: int, rfs, conditional: bool):
+    def _flex(self, st: Stack, gp: GlyphPath, cur_x: int, cur_y: int, rfs: tuple[int, ...],
+              conditional: bool) -> tuple[int, int]:
         vals = [0] * 14
         vals[0], vals[1] = cur_x, cur_y
         idx = 0
@@ -1557,15 +1620,15 @@ class Decoder:
         return vals[12], vals[13]
 
 
-def face_of(font) -> Face:
+def face_of(font: Font) -> Face | TrueTypeFace:
     """The Face of a pure `fonts.Font`, made once per font object."""
-    face = font.__dict__.get("_b2s_face")
+    face = font.b2s_face
     if face is None:
         prog = font.program
         if prog is not None and font.embedded and prog.kind == "truetype":
             from .truetype import TrueTypeFace
-            face = TrueTypeFace(font)
+            face = TrueTypeFace(prog)
         else:
             face = Face(font)
-        font.__dict__["_b2s_face"] = face
+        font.b2s_face = face
     return face

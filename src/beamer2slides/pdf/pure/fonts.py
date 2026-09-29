@@ -18,18 +18,38 @@ work: they come from the PDF), which is what PDFium does for a font it cannot lo
 
 from __future__ import annotations
 
+import functools
 import io
 import math
 import os
 import re
 import sys
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeAlias, TypeVar
 
+from ...typing_compat import assert_never, override
 from . import crt, sfnt
 from .crt import cdiv
 from .encodings import NAMES, UNICODES
-from .syntax import Name, Stream, float32, operations
+from .syntax import Name, PdfObject, Stream, float32, operations
+
+if TYPE_CHECKING:
+    from fontTools.pens.basePen import AbstractPen
+
+    from .content import PObj
+    from .document import PdfFile
+    from .fontmapper import SubstFont
+    from .ftoutline import BlendKey, Face
+    from .render_text import FallbackFont
+    from .render_type3 import Char
+    from .truetype import TrueTypeFace
+    from .type1 import Type1Program
+
+# A PDF value and dictionary as the parser hands them over: read through isinstance, never assumed
+PdfValue: TypeAlias = PdfObject
+PdfMap: TypeAlias = Mapping[str, PdfValue]
 
 # PDFium's FontEncoding values, by the table names in encodings.py
 BUILTIN, STANDARD, WINANSI, MACROMAN, MACEXPERT, PDFDOC, SYMBOL, ZAPF, MSSYMBOL = (
@@ -58,11 +78,20 @@ def normalize_metric(value: float, upem: int) -> int:
 
 def round_half_away(x: float) -> int:
     """FXSYS_roundf."""
-    return int(math.floor(abs(x) + 0.5)) * (1 if x >= 0 else -1)
+    return math.floor(abs(x) + 0.5) * (1 if x >= 0 else -1)
 
 
-def _int(v, default=0) -> int:
-    """CPDF_Object::GetInteger: numbers truncate, anything else is the default."""
+def _int(v: object) -> int:
+    """CPDF_Object::GetInteger: numbers truncate, anything else is 0."""
+    if isinstance(v, bool):
+        return 0
+    if isinstance(v, (int, float)):
+        return int(v)
+    return 0
+
+
+def _int_or(v: object, default: int) -> int:
+    """GetIntegerFor with a default: numbers truncate, anything else is `default`."""
     if isinstance(v, bool):
         return default
     if isinstance(v, (int, float)):
@@ -70,14 +99,26 @@ def _int(v, default=0) -> int:
     return default
 
 
-def doc_fonts(doc) -> dict:
+# The document's fonts: by id() of their dictionary, and "stock" for the stock font
+FontCache: TypeAlias = "dict[int | str, Font | None]"
+
+
+def doc_fonts(doc: PdfFile) -> FontCache:
     """The document's fonts by dictionary (CPDF_DocPageData's font map: one font per dictionary,
     shared by pages, forms and Type 3 glyph procedures)."""
-    return doc.__dict__.setdefault("_b2s_fonts", {})
+    fonts: FontCache = doc.__dict__.setdefault("_b2s_fonts", {})
+    return fonts
 
 
-def _num(v, default=0.0) -> float:
-    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+def _num(v: object) -> float:
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+
+def _int_box(doc: PdfFile, items: Sequence[PdfValue]) -> tuple[int, int, int, int]:
+    """Four GetIntegerAt of an array: 0 past the end of a short one."""
+    n = len(items)
+    return (_int(doc.resolve(items[0])) if n > 0 else 0, _int(doc.resolve(items[1])) if n > 1 else 0,
+            _int(doc.resolve(items[2])) if n > 2 else 0, _int(doc.resolve(items[3])) if n > 3 else 0)
 
 
 # ---------------------------------------------------------------------- Adobe glyph names
@@ -140,7 +181,8 @@ def _string_to_units(word: bytes) -> list[int]:
     """StringToWideString: groups of 4 hex digits, one UTF-16 unit each."""
     if len(word) <= 2 or word[:1] != b"<" or word[-1:] != b">":
         return []
-    out, ch, n = [], 0, 0
+    out: list[int] = []
+    ch, n = 0, 0
     for c in word[1:-1]:
         if c in b"\x00\t\n\x0c\r ":
             continue
@@ -156,7 +198,8 @@ def _string_to_units(word: bytes) -> list[int]:
 
 def _string_data_add(units: list[int]) -> list[int]:
     """StringDataAdd: the next string of a multi-unit bfrange (16-bit carry)."""
-    out, value = [], 1
+    out: list[int] = []
+    value = 1
     for u in reversed(units):
         ch = (u + value) & 0xFFFF
         if ch < u:
@@ -179,19 +222,44 @@ _CMAP_KEYWORDS = frozenset((b"begincidchar", b"begincidrange", b"endcidrange", b
                             b"/Registry", b"/Ordering", b"/Supplement", b"begincodespacerange"))
 
 
+_HEX_DIGITS, _DEC_DIGITS = re.compile(rb"[0-9A-Fa-f]*"), re.compile(rb"[0-9]*")
+
+
 def _cmap_code(word: bytes) -> int:
     """CPDF_CMapParser::GetCode: `<` then hex digits, else decimal digits, up to the first other
     character; 0 on a uint32 overflow."""
     num = 0
     if word[:1] == b"<":
-        digits, base = re.match(rb"[0-9A-Fa-f]*", word[1:]).group(0), 16
+        digits, base = _HEX_DIGITS.match(word, 1), 16
     else:
-        digits, base = re.match(rb"[0-9]*", word).group(0), 10
-    for c in digits:
+        digits, base = _DEC_DIGITS.match(word), 10
+    for c in digits.group(0) if digits else b"":
         num = num * base + int(chr(c), 16)
         if num > 0xFFFFFFFF:
             return 0
     return num
+
+
+@dataclass(frozen=True, kw_only=True)
+class _ArrayRange:
+    """A bfrange `<low> <high> [<dest> ...]`: one destination string per code."""
+    low: int
+    dests: list[bytes]
+
+
+@dataclass(frozen=True, kw_only=True)
+class _SingleRange:
+    """A bfrange onto one unit: codes low..high map to value, value + 1, ..."""
+    low: int
+    high: int
+    value: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class _MultiRange:
+    """A bfrange onto a multi-unit string: each code the next string (StringDataAdd)."""
+    low: int
+    strings: list[list[int]]
 
 
 class ToUnicodeMap:
@@ -229,10 +297,10 @@ class ToUnicodeMap:
             self._insert(code, len(self.multi) * 0x10000 + 0xFFFF)
             self.multi.append(units)
 
-    def _bfchar(self, words, i, previous):
+    def _bfchar(self, words: list[bytes], i: int, previous: bytes) -> tuple[int, bytes]:
         count = _to_int(previous)
         valid = 0 <= count <= self.BF_LIMIT
-        entries = []
+        entries: list[tuple[int, bytes]] = []
         word = b""
         while i < len(words):
             word = words[i]
@@ -257,13 +325,13 @@ class ToUnicodeMap:
                 self._set(code, _string_to_units(dest))
         return i, word
 
-    def _bfrange(self, words, i, previous):
+    def _bfrange(self, words: list[bytes], i: int, previous: bytes) -> tuple[int, bytes]:
         count = _to_int(previous)
         valid = 0 <= count <= self.BF_LIMIT
-        ranges = []
+        ranges: list[_ArrayRange | _SingleRange | _MultiRange] = []
         word = b""
 
-        def take():
+        def take() -> bytes:
             nonlocal i
             w = words[i] if i < len(words) else b""
             i += 1
@@ -290,7 +358,7 @@ class ToUnicodeMap:
                 continue
             word = take()
             if word == b"[":
-                ranges.append(("array", low, [take() for _ in range(low, high + 1)]))
+                ranges.append(_ArrayRange(low=low, dests=[take() for _ in range(low, high + 1)]))
                 if len(ranges) > count:
                     valid = False
                     continue
@@ -300,30 +368,32 @@ class ToUnicodeMap:
                 continue
             dest = _string_to_units(word)
             if len(dest) == 1:
-                ranges.append(("single", low, high, dest[0]))
+                ranges.append(_SingleRange(low=low, high=high, value=dest[0]))
             else:
                 strings = [dest]
                 for _ in range(low + 1, high + 1):
                     strings.append(_string_data_add(strings[-1]))
-                ranges.append(("multi", low, strings))
+                ranges.append(_MultiRange(low=low, strings=strings))
             if len(ranges) > count:
                 valid = False
         else:
             word = b""
         if valid and len(ranges) == count:
             for r in ranges:
-                if r[0] == "array":
-                    for k, w in enumerate(r[2]):
-                        self._set(r[1] + k, _string_to_units(w))
-                elif r[0] == "single":
-                    value = r[3]
-                    for code in range(r[1], r[2] + 1):
+                if isinstance(r, _ArrayRange):
+                    for k, w in enumerate(r.dests):
+                        self._set(r.low + k, _string_to_units(w))
+                elif isinstance(r, _SingleRange):
+                    value = r.value
+                    for code in range(r.low, r.high + 1):
                         self._insert(code, value)
                         value += 1
-                else:
-                    for k, units in enumerate(r[2]):
-                        self._insert(r[1] + k, len(self.multi) * 0x10000 + 0xFFFF)
+                elif isinstance(r, _MultiRange):
+                    for k, units in enumerate(r.strings):
+                        self._insert(r.low + k, len(self.multi) * 0x10000 + 0xFFFF)
                         self.multi.append(units)
+                else:
+                    assert_never(r)
         return i, word
 
     def lookup(self, code: int) -> list[int]:
@@ -345,7 +415,7 @@ class CMap:
     and embedded CMaps (codespace ranges, cidrange, cidchar); a predefined CMap other than
     Identity is read as Identity (none of the PDFs this pipeline sees use one)."""
 
-    def __init__(self, name: str = "Identity-H", data: bytes | None = None):
+    def __init__(self, name: str, data: bytes | None) -> None:
         self.vertical = name.endswith("V")     # CPDF_CMap(predefined name): its last letter
         self.spaces: list[tuple[int, int, int]] = [(2, 0, 0xFFFF)]   # (bytes, low, high)
         self.cids: dict[int, int] | None = None                    # None: identity
@@ -355,7 +425,9 @@ class CMap:
 
     def _parse(self, data: bytes) -> None:
         words = cmap_words(data)
-        spaces, cids, ranges = [], {}, []
+        spaces: list[tuple[int, int, int]] = []
+        cids: dict[int, int] = {}
+        ranges: list[tuple[int, int, int]] = []
         i = 0
         while i < len(words):
             w = words[i]
@@ -391,7 +463,8 @@ class CMap:
         self.cids, self.ranges = cids, ranges
 
     def codes(self, data: bytes) -> list[int]:
-        out, i = [], 0
+        out: list[int] = []
+        i = 0
         while i < len(data):
             for size, lo, hi in sorted(self.spaces):
                 if i + size <= len(data):
@@ -427,16 +500,24 @@ class CMap:
 # ---------------------------------------------------------------------- font programs
 
 
-def _ft_bbox(bbox):
+Box: TypeAlias = "tuple[int, int, int, int]"     # (left, bottom, right, top)
+
+
+def _ft_bbox(bbox: object) -> Box | None:
     """A Type 1 / CFF FontBBox as FreeType's face bbox: 16.16 fixed, mins floored (>> 16) and maxes
     ceiled ((v + 0xFFFF) >> 16). FreeType also makes these faces' ascender yMax, descender yMin."""
-    if not bbox or len(bbox) < 4:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
         return None
     try:
-        x0, y0, x1, y1 = (int(round(float(v) * 65536)) for v in bbox[:4])
+        x0, y0, x1, y1 = (round(float(v) * 65536) for v in bbox[:4])
     except (TypeError, ValueError):
         return None
     return x0 >> 16, y0 >> 16, (x1 + 0xFFFF) >> 16, (y1 + 0xFFFF) >> 16
+
+
+def _sfnt_lookup(cmap: sfnt.CharMap, num_glyphs: int) -> Callable[[int], int]:
+    """An sfnt charmap's code -> glyph index, for a face of `num_glyphs` glyphs."""
+    return lambda code: cmap.char_index(code, num_glyphs)
 
 
 class Charmap:
@@ -444,13 +525,29 @@ class Charmap:
 
     __slots__ = ("pid", "eid", "encoding", "lookup", "format")
 
-    def __init__(self, pid: int, eid: int, encoding: str, lookup: Callable[[int], int], format: int = 0):
+    def __init__(self, pid: int, eid: int, encoding: str, lookup: Callable[[int], int], format: int) -> None:
         self.pid, self.eid, self.encoding, self.lookup, self.format = pid, eid, encoding, lookup, format
 
 
-_POINTS_PEN = None
+class Glyph(Protocol):
+    """A glyph a font program's glyph set hands out: fontTools' charstrings, `_SfntGlyph`."""
+
+    def draw(self, pen: AbstractPen) -> None: ...
 
 
+class GlyphSet(Protocol):
+    """Glyph name -> glyph: fontTools' CharStrings, a dict of T1CharStrings, `_SfntGlyphs`."""
+
+    def __getitem__(self, name: str, /) -> Glyph: ...
+
+
+# Which FreeType encoding charmap a Type 1 / CFF face gets (T1_ENCODING_TYPE_*), by its encoding id
+EncodingKind = Literal["standard", "expert", "custom", "latin1"]
+_ENCODING_IDS: dict[EncodingKind, int] = {"standard": 0, "expert": 1, "custom": 2, "latin1": 3}
+_ENCODING_NAMES = ("adobe_standard", "adobe_expert", "adobe_custom", "adobe_latin1")
+
+
+@functools.cache
 def _points_pen():
     """A pen that keeps the points a charstring draws, instead of a box it grows point by point.
 
@@ -458,60 +555,78 @@ def _points_pen():
     function call per point, where appending the coordinates and taking min/max once at the end is
     a third cheaper (42.5 -> 31.0 us per glyph over the 1,183 the test decks load, a bare NullPen
     being 26.3), and gives the same box on every one of them - min/max only compares the numbers
-    the same points already are. Built on first use: fontTools is the optional `[pure]` extra."""
-    global _POINTS_PEN
-    if _POINTS_PEN is None:
-        from fontTools.pens.basePen import BasePen
+    the same points already are. Built on first use: fontTools is the optional `[pure]` extra.
 
-        class _Points(BasePen):
-            # BasePen still does the work only it can: decomposing a composite glyph's components
-            # and a multi-point q-curve. The on-curve points it implies for the latter are averages
-            # of control points, so they lie in the box those control points already make.
-            def __init__(self, glyphset):
-                super().__init__(glyphset)
-                self.xs: list[float] = []
-                self.ys: list[float] = []
+    Every point a segment names is kept as it comes: BasePen would split a super-bezier or a
+    multi-point q-curve and add the on-curve points they imply (and one for a contour of off-curve
+    points alone, the `None` a q-curve then ends on), but those are averages of control points, so
+    they lie in the box the control points already make. DecomposingPen draws a composite glyph's
+    components through `glyphset`, as BasePen does."""
+    from fontTools.pens.basePen import DecomposingPen
 
-            def _moveTo(self, pt):
-                self.xs.append(pt[0])
-                self.ys.append(pt[1])
+    class _Points(DecomposingPen):
+        def __init__(self, glyphset: GlyphSet | None) -> None:
+            super().__init__(glyphset)
+            self.xs: list[float] = []
+            self.ys: list[float] = []
 
-            def _lineTo(self, pt):
-                self.xs.append(pt[0])
-                self.ys.append(pt[1])
+        @override
+        def moveTo(self, pt: tuple[float, float]) -> None:
+            self.xs.append(pt[0])
+            self.ys.append(pt[1])
 
-            def _curveToOne(self, p1, p2, p3):
-                for x, y in (p1, p2, p3):
-                    self.xs.append(x)
-                    self.ys.append(y)
+        @override
+        def lineTo(self, pt: tuple[float, float]) -> None:
+            self.xs.append(pt[0])
+            self.ys.append(pt[1])
 
-            def _qCurveToOne(self, p1, p2):
-                for x, y in (p1, p2):
-                    self.xs.append(x)
-                    self.ys.append(y)
+        @override
+        def curveTo(self, *points: tuple[float, float]) -> None:
+            for x, y in points:
+                self.xs.append(x)
+                self.ys.append(y)
 
-        _POINTS_PEN = _Points
-    return _POINTS_PEN
+        @override
+        def qCurveTo(self, *points: tuple[float, float] | None) -> None:
+            for p in points:
+                if p is not None:
+                    self.xs.append(p[0])
+                    self.ys.append(p[1])
+
+        @override
+        def closePath(self) -> None:
+            pass
+
+        @override
+        def endPath(self) -> None:
+            pass
+
+    return _Points
 
 
 class Program:
     """A font program read by fontTools: glyph names or ids -> unscaled control boxes."""
 
-    def __init__(self, kind: str, glyphs, order: list[str], upem: int, encoding=None,
-                 cid_keyed: bool = False, bbox=None, ascender=0, descender=0, cmaps=None):
+    def __init__(self, kind: str, glyphs: GlyphSet | None, order: list[str], upem: int,
+                 encoding: list[str] | None, cid_keyed: bool, bbox: Box | None, ascender: int,
+                 descender: int) -> None:
         self.kind, self.glyphs, self.order, self.upem = kind, glyphs, order, upem
         self.index = {n: i for i, n in enumerate(order)}
         self.encoding = encoding          # builtin: list of 256 names, or None
         self.cid_keyed = cid_keyed
         self.bbox = bbox                  # font units (l, b, r, t)
         self.ascender, self.descender = ascender, descender
-        self.cmaps = cmaps or {}          # TrueType: {(platform, encoding): {code: glyph name}}
-        self.cmap_list: list = []         # sfnt: [(platform, encoding, {code: glyph name})] in file order
         self.sfnt = False                 # a TrueType/OpenType file (CFX_Font::IsTTFont)
         self.glyph_names = True           # FT_HAS_GLYPH_NAMES
         self.ps_names = True              # names FT_Get_Name_Index can find (sfnt: post format 1/2/2.5)
-        self.encoding_kind = "standard"   # Type 1 / CFF: which FreeType encoding charmap the face gets
-        self._boxes: dict[int, tuple] = {}
+        self.encoding_kind: EncodingKind = "standard"   # Type 1 / CFF: FreeType's encoding charmap
+        # the font file a substitute face was loaded from (CFX_Font's span, the whole collection for
+        # a TTC), and a built-in Foxit face's own bytes: set by the font mapper
+        self.platform_data: bytes | None = None
+        self.face_data: bytes | None = None
+        # a substitute's drawing face, one per program (render_text.subst_face / truetype_face)
+        self.draw_face: Face | TrueTypeFace | None = None
+        self._boxes: dict[int, Box | None] = {}
         self._charmaps: list[Charmap] | None = None
         self._charmap: Charmap | None = None
 
@@ -525,11 +640,16 @@ class Program:
 
     sfnt_face: sfnt.Face | None = None     # an sfnt program's FT_Face (charmaps, `post` names)
 
-    def attach_face(self, data: bytes, cff: tuple | None = None, font_number: int = 0) -> None:
+    def attach_face(self, data: bytes, cff: sfnt.CffInfo | None, font_number: int) -> None:
         """Take charmaps and glyph names from FreeType's reading of the sfnt, not fontTools'."""
         self.sfnt_face = sfnt.Face(data, cff, font_number)
         self.glyph_names = self.sfnt_face.has_glyph_names
         self.ps_names = True
+
+    def glyf_face(self) -> sfnt.Face | None:
+        """The sfnt face whose `glyf` outlines this program draws (TrueType only): the face of the
+        collection member it was loaded from."""
+        return self.glyphs.face if isinstance(self.glyphs, _SfntGlyphs) else None
 
     # -- the face's charmaps, as FreeType lists and selects them. The selection is state of the face,
     #    and a face the font mapper caches is shared by every font drawn with it, as in PDFium.
@@ -544,20 +664,19 @@ class Program:
         if self.sfnt_face is not None:
             # sfnt.Face: the validated subtables in file order, then the charmaps FreeType synthesizes
             n = self.sfnt_face.num_glyphs
-            return [Charmap(c.platform, c.encoding_id, c.encoding,
-                            lambda code, c=c: c.char_index(code, n), c.format) for c in self.sfnt_face.charmaps]
+            return [Charmap(c.platform, c.encoding_id, c.encoding, _sfnt_lookup(c, n), c.format)
+                    for c in self.sfnt_face.charmaps]
         # Type 1 (T1_Face_Init) and CFF (cff_face_init): psnames' Unicode charmap, which exists when
         # some glyph name has a Unicode value (ps_unicodes_init fails otherwise), then the Adobe
         # encoding charmap - always for Type 1, for CFF only when the encoding maps some code
-        out = []
+        out: list[Charmap] = []
         unicodes = sfnt.PsUnicodes(self.order if not self.cid_keyed else [])
         if unicodes:
-            out.append(Charmap(3, 1, "unicode", lambda code: unicodes.char_index(code & 0xFFFFFFFF)))
+            out.append(Charmap(3, 1, "unicode", lambda code: unicodes.char_index(code & 0xFFFFFFFF), 0))
         if not self.cid_keyed and self.encoding is not None and \
                 (self.kind == "type1" or any(self.builtin_index(c) for c in range(256))):
-            eid = {"standard": 0, "expert": 1, "custom": 2, "latin1": 3}[self.encoding_kind]
-            enc = ("adobe_standard", "adobe_expert", "adobe_custom", "adobe_latin1")[eid]
-            out.append(Charmap(7, eid, enc, self.builtin_index))
+            eid = _ENCODING_IDS[self.encoding_kind]
+            out.append(Charmap(7, eid, _ENCODING_NAMES[eid], self.builtin_index, 0))
         return out
 
     def select_unicode(self) -> bool:
@@ -647,10 +766,11 @@ class Program:
         if index in self._boxes:
             return self._boxes[index]
         box = None
-        if 0 <= index < len(self.order):
+        glyphs = self.glyphs
+        if glyphs is not None and 0 <= index < len(self.order):
             try:
-                pen = _points_pen()(self.glyphs)
-                self.glyphs[self.order[index]].draw(pen)
+                pen = _points_pen()(glyphs)
+                glyphs[self.order[index]].draw(pen)
                 b = (min(pen.xs), min(pen.ys), max(pen.xs), max(pen.ys)) if pen.xs else (0, 0, 0, 0)
                 # FreeType's unscaled outline points are whole font units (Adobe engine: floored)
                 l, bt, r, t = (math.floor(v) for v in b)
@@ -661,19 +781,24 @@ class Program:
         self._boxes[index] = box
         return box
 
-    def _advance_units(self, index: int):
+    def _advance_units(self, index: int) -> float | None:
         """FT_Load_Glyph(FT_LOAD_NO_SCALE)'s metrics.horiAdvance in font units, None where
         FT_Load_Glyph would fail."""
+        glyphs = self.glyphs
+        if glyphs is None:
+            return None
         try:
             name = self.order[index]
-            if self.kind == "truetype":
-                return self.glyphs.hmtx[name][0] if hasattr(self.glyphs, "hmtx") \
-                    else self.glyphs[name].width
-            g = self.glyphs[name]
-            if getattr(g, "width", None) is None:
+            if isinstance(glyphs, _SfntGlyphs):
+                return glyphs.hmtx[name][0]
+            g = glyphs[name]
+            # a charstring knows its width once drawn (fontTools' T1/T2 decompilers set it)
+            width: object = getattr(g, "width", None)
+            if width is None:
                 from fontTools.pens.basePen import NullPen
                 g.draw(NullPen())
-            return g.width or 0
+                width = getattr(g, "width", None)
+            return width if isinstance(width, (int, float)) and width else 0
         except Exception:  # noqa: BLE001
             return None
 
@@ -693,10 +818,19 @@ class Program:
         return int(a) if not self.upem else cdiv(int(a) * 1000, self.upem)
 
 
-def _upem_from_matrix(matrix) -> int:
+def _float(v: object) -> float:
+    """float() of a number or numeric string read from a program; TypeError for anything else."""
+    if isinstance(v, (int, float, str)):
+        return float(v)
+    raise TypeError(v)
+
+
+def _upem_from_matrix(matrix: object) -> int:
+    if not isinstance(matrix, (list, tuple)):
+        return 1000
     try:
-        scale = abs(float(matrix[3])) or abs(float(matrix[0]))
-        return int(round(1.0 / scale)) if scale else 1000
+        scale = abs(_float(matrix[3])) or abs(_float(matrix[0]))
+        return round(1.0 / scale) if scale else 1000
     except (TypeError, ValueError, IndexError):
         return 1000
 
@@ -704,22 +838,26 @@ def _upem_from_matrix(matrix) -> int:
 def load_type1(data: bytes) -> Program | None:
     from . import type1
     # t1Lib.T1Font.parse's dictionary (cleartext + binary eexec part, as in FontFile)
-    d = type1.fonttools_font(data)
-    charstrings = d["CharStrings"]
+    d, charstrings = type1.fonttools_font(data)
     names = list(charstrings.keys())
     if NOTDEF in names:  # FreeType swaps .notdef with glyph 0 (t1load.c parse_charstrings)
         i = names.index(NOTDEF)
         names[0], names[i] = names[i], names[0]
-    enc = d.get("Encoding")
-    kind = "custom"
-    if isinstance(enc, str) and enc == "StandardEncoding" or enc is None:
+    font_enc = d.get("Encoding")
+    kind: EncodingKind = "custom"
+    enc: list[str] | None = None
+    if isinstance(font_enc, str) and font_enc == "StandardEncoding" or font_enc is None:
         enc = [_predefined_name(STANDARD, c) or NOTDEF for c in range(256)]
         kind = "standard"
-    elif isinstance(enc, list):
-        enc = [str(n) if n else NOTDEF for n in enc] + [NOTDEF] * (256 - len(enc))
+    elif isinstance(font_enc, list):
+        enc = [str(n) if n else NOTDEF for n in font_enc] + [NOTDEF] * (256 - len(font_enc))
+    elif isinstance(font_enc, str):
+        # another encoding's name: read as the old code did, code by code through the name's
+        # letters (FreeType would know ExpertEncoding and ISOLatin1Encoding)
+        enc = list(font_enc)
     bbox = _ft_bbox(d.get("FontBBox"))
     prog = Program("type1", charstrings, names, _upem_from_matrix(d.get("FontMatrix", [0.001, 0, 0, 0.001])),
-                   encoding=enc, bbox=bbox, ascender=bbox[3] if bbox else 0, descender=bbox[1] if bbox else 0)
+                   enc, False, bbox, bbox[3] if bbox else 0, bbox[1] if bbox else 0)
     prog.encoding_kind = kind
     return prog
 
@@ -729,20 +867,22 @@ class GenericProgram(Program):
     loaded by `ftoutline.py`'s port of FreeType's glyph loader at the font's default blend: fontTools
     cannot build these fonts (their PostScript blends the designs at run time)."""
 
-    def __init__(self, t1):
+    def __init__(self, t1: Type1Program) -> None:
         from .ftoutline import Face
         enc = t1.encoding or [_predefined_name(STANDARD, c) or NOTDEF for c in range(256)]
-        super().__init__("type1", None, t1.order, 1000, encoding=enc, bbox=t1.bbox,
-                         ascender=t1.bbox[3], descender=t1.bbox[1])
+        super().__init__("type1", None, t1.order, 1000, enc, False, t1.bbox, t1.bbox[3], t1.bbox[1])
         self.encoding_kind = "custom" if t1.encoding else "standard"
         self.face = Face.from_type1(t1)
+        # boxes by glyph and blend: the face's blend moves as text is drawn
+        self._blend_boxes: dict[tuple[int, BlendKey], Box | None] = {}
 
-    def glyph_box(self, index: int):
+    @override
+    def glyph_box(self, index: int) -> Box | None:
         """FT_Load_Glyph(FT_LOAD_NO_SCALE)'s metrics: the outline's control box (t1gload), at the blend
         the face has now (drawing text moves it: `ftoutline.Face.adjust_variation`)."""
         key = (index, self.face.blend_key())
-        if key in self._boxes:
-            return self._boxes[key]
+        if key in self._blend_boxes:
+            return self._blend_boxes[key]
         box = None
         if 0 <= index < len(self.order):
             units = self.face.units(index)
@@ -750,15 +890,17 @@ class GenericProgram(Program):
                 xs = [x for pts, _tags in units for x, _y in pts]
                 ys = [y for pts, _tags in units for _x, y in pts]
                 l, b, r, t = (min(xs), min(ys), max(xs), max(ys)) if xs else (0, 0, 0, 0)
-                box = tuple(normalize_metric(v, 1000) for v in (l, b, r, t))
-        self._boxes[key] = box
+                box = (normalize_metric(l, 1000), normalize_metric(b, 1000), normalize_metric(r, 1000),
+                       normalize_metric(t, 1000))
+        self._blend_boxes[key] = box
         return box
 
-    def _advance_units(self, index: int):
+    @override
+    def _advance_units(self, index: int) -> float | None:
         return self.face.advance(index) if 0 <= index < len(self.order) else None
 
 
-def load_generic(data: bytes) -> Program | None:
+def load_generic(data: bytes) -> GenericProgram | None:
     from . import type1
     try:
         return GenericProgram(type1.parse(data))
@@ -766,7 +908,7 @@ def load_generic(data: bytes) -> Program | None:
         return None
 
 
-def load_cff(data: bytes) -> Program | None:
+def load_cff(data: bytes) -> Program:
     from fontTools.cffLib import CFFFontSet
     cff = CFFFontSet()
     cff.decompile(io.BytesIO(data), None)
@@ -774,8 +916,8 @@ def load_cff(data: bytes) -> Program | None:
     charstrings = top.CharStrings
     order = list(top.charset)
     cid_keyed = hasattr(top, "ROS")
-    enc = None
-    kind = "standard"
+    enc: list[str] | None = None
+    kind: EncodingKind = "standard"
     if not cid_keyed:
         e = getattr(top, "Encoding", "StandardEncoding")
         if e == "StandardEncoding":
@@ -784,27 +926,28 @@ def load_cff(data: bytes) -> Program | None:
             enc = [_predefined_name(MACEXPERT, c) or NOTDEF for c in range(256)]
             kind = "expert"
         elif isinstance(e, list):
-            enc = [n or NOTDEF for n in e] + [NOTDEF] * (256 - len(e))
+            enc = [str(n) if n else NOTDEF for n in e] + [NOTDEF] * (256 - len(e))
             kind = "custom"
     matrix = getattr(top, "FontMatrix", [0.001, 0, 0, 0.001, 0, 0])
     bbox = _ft_bbox(getattr(top, "FontBBox", None))
-    prog = Program("cff", charstrings, order, _upem_from_matrix(matrix), encoding=enc, cid_keyed=cid_keyed,
-                   bbox=bbox, ascender=bbox[3] if bbox else 0, descender=bbox[1] if bbox else 0)
+    prog = Program("cff", charstrings, order, _upem_from_matrix(matrix), enc, cid_keyed,
+                   bbox, bbox[3] if bbox else 0, bbox[1] if bbox else 0)
     prog.encoding_kind = kind
     return prog
 
 
-def load_truetype(data: bytes, font_number: int = 0) -> Program | None:
+def load_truetype(data: bytes, font_number: int) -> Program | None:
+    """The sfnt program of member `font_number` of `data` (0 for a font that is no collection)."""
     from fontTools.ttLib import TTFont
     tt = TTFont(io.BytesIO(data), lazy=True, fontNumber=font_number)
     if "CFF " in tt:
         prog = load_cff(tt.getTableData("CFF "))
         if prog:
-            prog.cmaps = _tt_cmaps(tt)
             prog.sfnt = True
             gids = [prog.builtin_index(c) for c in range(256)]
-            eid = {"standard": 0, "expert": 1}.get(prog.encoding_kind, 2) if any(gids) else None
-            prog.attach_face(data, (prog.order, prog.cid_keyed, eid, gids), font_number)
+            eid = ({"standard": 0, "expert": 1}.get(prog.encoding_kind, 2) if any(gids) else None)
+            prog.attach_face(data, sfnt.CffInfo(names=prog.order, cid_keyed=prog.cid_keyed, encoding_id=eid,
+                                                gids=gids), font_number)
         return prog
     try:
         face = sfnt.Face(data, None, font_number)
@@ -813,8 +956,8 @@ def load_truetype(data: bytes, font_number: int = 0) -> Program | None:
     # glyphs are known by index: fontTools would name them from `post`, which FreeType only reads
     # for FT_Get_Name_Index (sfnt.Face), and which may be broken where the outlines are fine
     order = ["glyph%05d" % i for i in range(face.num_glyphs)]
-    prog = Program("truetype", _SfntGlyphs(face, order), order, face.units_per_em, bbox=face.head_bbox,
-                   ascender=face.ascender, descender=face.descender, cmaps=_tt_cmaps(tt))
+    prog = Program("truetype", _SfntGlyphs(face, order), order, face.units_per_em, None, False,
+                   face.head_bbox, face.ascender, face.descender)
     prog.sfnt = True
     prog.attach_face(data, None, font_number)
     return prog
@@ -824,55 +967,55 @@ class _SfntGlyphs:
     """A glyph set over the glyf data FreeType finds (sfnt.Face.location) and its hmtx metrics
     (sfnt.Face.metrics), drawn by fontTools' glyf decoder."""
 
-    def __init__(self, face, order):
+    def __init__(self, face: sfnt.Face, order: list[str]) -> None:
         from fontTools.ttLib.tables._g_l_y_f import Glyph, table__g_l_y_f
         self.face, self.order = face, order
         self.index = {name: i for i, name in enumerate(order)}
         self.glyf = table__g_l_y_f()
         self.glyf.glyphOrder = order
-        self.glyf.glyphs = _LazyGlyphs(lambda name: Glyph(self._data(self.index[name])))
-        self.hmtx = _LazyGlyphs(lambda name: face.metrics(self.index[name]))
 
-    def _data(self, i):
+        def glyph(name: str) -> Glyph:
+            return Glyph(self._data(self.index[name]))
+
+        def metrics(name: str) -> tuple[int, int]:
+            return face.metrics(self.index[name], False)
+        self.glyf.glyphs = _Lazy(glyph)
+        self.hmtx: _Lazy[tuple[int, int]] = _Lazy(metrics)
+
+    def _data(self, i: int) -> bytes:
         offset, size = self.face.location(i)
         return self.face.data[offset:offset + size]
 
-    def __getitem__(self, name):
+    def __getitem__(self, name: str) -> _SfntGlyph:
         return _SfntGlyph(self, name)
 
 
-class _LazyGlyphs(dict):
-    def __init__(self, make):
+_V = TypeVar("_V")
+
+
+class _Lazy(dict[str, _V], Generic[_V]):
+    """A dict that makes each missing value on first use."""
+
+    def __init__(self, make: Callable[[str], _V]) -> None:
         super().__init__()
         self.make = make
 
-    def __missing__(self, key):
+    def __missing__(self, key: str) -> _V:
         value = self[key] = self.make(key)
         return value
 
 
 class _SfntGlyph:
-    def __init__(self, glyphs, name):
+    def __init__(self, glyphs: _SfntGlyphs, name: str) -> None:
         self.glyphs, self.name = glyphs, name
         self.width, self.lsb = glyphs.hmtx[name]
 
-    def draw(self, pen):
+    def draw(self, pen: AbstractPen) -> None:
         """The outline moved so that its xMin sits at the hmtx left side bearing (the glyph's pp1 at
         the origin), as fontTools' glyph set and FreeType's loader both place it."""
         glyf = self.glyphs.glyf
         glyph = glyf[self.name]
         glyph.draw(pen, glyf, self.lsb - glyph.xMin if hasattr(glyph, "xMin") else 0)
-
-
-def _tt_cmaps(tt) -> dict:
-    out = {}
-    try:
-        if "cmap" in tt:
-            for sub in tt["cmap"].tables:
-                out.setdefault((sub.platformID, sub.platEncID), sub.cmap)
-    except Exception:  # noqa: BLE001 - a cmap fontTools cannot read; the charmaps are sfnt.Face's
-        pass
-    return out
 
 
 def load_program(stream: Stream | None, data: bytes, subtype_key: str) -> Program | None:
@@ -883,7 +1026,7 @@ def load_program(stream: Stream | None, data: bytes, subtype_key: str) -> Progra
         if subtype_key == "FontFile":
             return load_type1(data)
         if subtype_key == "FontFile2" or data[:4] in (b"\x00\x01\x00\x00", b"true", b"OTTO", b"ttcf"):
-            return load_truetype(data)
+            return load_truetype(data, 0)
         if data[:1] == b"\x01":
             return load_cff(data)
         if data[:2] == b"%!":
@@ -971,7 +1114,7 @@ def system_face(index: int) -> Program | None:
         if sys.platform == "win32" and index < len(_WIN32_FACES):
             path = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts" / _WIN32_FACES[index]
             try:
-                program = load_truetype(path.read_bytes())
+                program = load_truetype(path.read_bytes(), 0)
             except Exception:  # noqa: BLE001 - no such file, or fontTools missing
                 program = None
         _system_faces[index] = program
@@ -1000,7 +1143,7 @@ class Font:
     subtype = "Type1"
     vertical = False
 
-    def __init__(self, doc, d: dict):
+    def __init__(self, doc: PdfFile, d: PdfMap) -> None:
         self.doc, self.dict = doc, d
         r = doc.resolve
         self.base_name = str(r(d.get("BaseFont")) or "")
@@ -1009,23 +1152,28 @@ class Font:
         self.stem_v = 0
         self.font_weight: int | None = None
         self.subst_generic = False       # drawn with PDFium's multiple master face
-        self.subst = None                # fontmapper.SubstFont of a substituted face (drawing needs it)
+        self.subst: SubstFont | None = None   # a substituted face's SubstFont (drawing needs it)
         self.ascent = self.descent = 0
-        self.font_bbox = (0, 0, 0, 0)   # l, b, r, t
+        self.font_bbox: Box = (0, 0, 0, 0)   # l, b, r, t
         self.program_data = b""
         self.program: Program | None = None
         self.embedded = False
+        # what drawing keeps on the font: its outline face (ftoutline or truetype, by `face_of`)
+        self.b2s_face: Face | TrueTypeFace | None = None
+        # why render_text cannot draw it (`_face`), and the CFX_Font it falls back to
+        self.face_refused: str | None = None
+        self.fallback: FallbackFont | None = None
         tu = r(d.get("ToUnicode"))
         self.to_unicode = ToUnicodeMap(doc.stream_data(tu)) if isinstance(tu, Stream) else None
 
     # CPDF_Font::LoadFontDescriptor
-    def _descriptor(self, desc) -> None:
+    def _descriptor(self, desc: object) -> None:
         r = self.doc.resolve
         if isinstance(desc, Stream):     # GetDictFor: a stream answers with its dictionary
             desc = desc.dict
         if not isinstance(desc, dict):
             return
-        self.flags = _int(r(desc.get("Flags")), FLAG_NONSYMBOLIC) if "Flags" in desc else FLAG_NONSYMBOLIC
+        self.flags = _int_or(r(desc.get("Flags")), FLAG_NONSYMBOLIC) if "Flags" in desc else FLAG_NONSYMBOLIC
         angle = _int(r(desc.get("ItalicAngle")))
         if angle < 0:
             self.flags |= FLAG_ITALIC
@@ -1049,7 +1197,7 @@ class Font:
             self.descent = -self.descent
         bbox = r(desc.get("FontBBox"))
         if isinstance(bbox, list):       # GetIntegerAt: 0 past the end of a short array
-            self.font_bbox = tuple(_int(r(bbox[k])) if k < len(bbox) else 0 for k in range(4))
+            self.font_bbox = _int_box(self.doc, bbox)
         for key in ("FontFile", "FontFile2", "FontFile3"):
             stream = r(desc.get(key))
             if isinstance(stream, Stream):
@@ -1089,7 +1237,7 @@ class Font:
                     else:
                         first = [min(first[0], l), min(first[1], b), max(first[2], rt), max(first[3], t)]
                 if first:
-                    self.font_bbox = tuple(first)
+                    self.font_bbox = (first[0], first[1], first[2], first[3])
         if self.ascent == 0 and self.descent == 0:
             l, b, rt, t = self.char_bbox(ord("A"))
             self.ascent = self.font_bbox[3] if b == t else t
@@ -1126,16 +1274,17 @@ class Font:
 class SimpleFont(Font):
     """CPDF_FaceBasedSimpleFont: Type1 and TrueType with up to 256 codes."""
 
-    def __init__(self, doc, d: dict):
+    def __init__(self, doc: PdfFile, d: PdfMap) -> None:
         super().__init__(doc, d)
         self.subtype = str(doc.resolve(d.get("Subtype")) or "Type1")
         self.widths = [0xFFFF] * 256
         self.use_font_width = False
         self.base_encoding = BUILTIN
         self.char_names: list[str | None] = []
-        self.glyphs: list = [NO_GLYPH] * 256      # glyph index per code; NO_GLYPH = 0xffff
+        self.glyphs: list[int | None] = [NO_GLYPH] * 256      # glyph index per code; NO_GLYPH = 0xffff
         self.enc_unicode = [0] * 256              # encoding_ (CPDF_FontEncoding)
-        self._boxes: dict[int, tuple] = {}
+        self._boxes: dict[int, Box] = {}
+        self.base14: int | None = None
         self._load()
 
     def _load(self) -> None:
@@ -1277,11 +1426,13 @@ class SimpleFont(Font):
                 elif item is not None:
                     code = _int(item)       # GetInteger: 0 for anything that is not a number
 
-    def char_name(self, code: int, encoding: str | None = None) -> str | None:
-        """CPDF_Font::GetAdobeCharName(base_encoding, char_names_, code); the font's own base
-        encoding unless another is given."""
-        if encoding is None:
-            encoding = self.base_encoding
+    def char_name(self, code: int) -> str | None:
+        """CPDF_Font::GetAdobeCharName(base_encoding, char_names_, code) with the font's own base
+        encoding."""
+        return self.char_name_in(code, self.base_encoding)
+
+    def char_name_in(self, code: int, encoding: str) -> str | None:
+        """CPDF_Font::GetAdobeCharName(encoding, char_names_, code)."""
         if not 0 <= code < 256:
             return None
         if self.char_names and self.char_names[code]:
@@ -1346,7 +1497,7 @@ class SimpleFont(Font):
                 p.set_charmap(1 if first_unicode else 0)
         # macOS PDFium's own path when CoreGraphics takes the font program (bCoreText): it names a
         # code by glyph 0's name too, and gives .notdef and space the space's glyph
-        core_text = crt.quartz_font(self.program_data if self.embedded else getattr(p, "platform_data", None))
+        core_text = crt.quartz_font(self.program_data if self.embedded else p.platform_data)
         if self.flags & FLAG_SYMBOLIC:
             for code in range(256):
                 name = self.char_name(code)
@@ -1420,7 +1571,7 @@ class SimpleFont(Font):
             to_unicode_key = "ToUnicode" in self.dict
             mac_unicodes = UNICODES[MACROMAN]
             for code in range(256):
-                name = self.char_name(code, base)
+                name = self.char_name_in(code, base)
                 if not name:
                     self.glyphs[code] = p.char_index(code) if self.embedded else NO_GLYPH
                     continue
@@ -1455,7 +1606,7 @@ class SimpleFont(Font):
             if self._any_glyph():
                 if base != BUILTIN:
                     for code in range(256):
-                        name = self.char_name(code, base)
+                        name = self.char_name_in(code, base)
                         if name:
                             self.enc_unicode[code] = unicode_from_adobe_name(name)
                 elif p.use_tt_charmap(1, 0):
@@ -1473,7 +1624,7 @@ class SimpleFont(Font):
                 if self.embedded:
                     self.enc_unicode[code] = code
                 else:
-                    name = self.char_name(code, BUILTIN)
+                    name = self.char_name_in(code, BUILTIN)
                     if name:
                         self.enc_unicode[code] = unicode_from_adobe_name(name)
                     elif base != BUILTIN:
@@ -1509,6 +1660,7 @@ class SimpleFont(Font):
                 box = (cdiv(box[0] * w, tt), box[1], cdiv(box[2] * w, tt), box[3])
         self._boxes[code] = box
 
+    @override
     def char_width(self, code: int) -> int:
         if code > 0xFF:
             code = 0
@@ -1518,6 +1670,7 @@ class SimpleFont(Font):
                 self.widths[code] = 0
         return self.widths[code]
 
+    @override
     def char_bbox(self, code: int) -> tuple[int, int, int, int]:
         if code > 0xFF:
             code = 0
@@ -1525,6 +1678,7 @@ class SimpleFont(Font):
             self._load_metrics(code)
         return self._boxes.get(code, (-1, -1, -1, -1))
 
+    @override
     def unicode(self, code: int) -> list[int]:
         units = super().unicode(code)
         if units:
@@ -1534,6 +1688,7 @@ class SimpleFont(Font):
             return []
         return [u] if u <= 0xFFFF else list(struct_utf16(u))
 
+    @override
     def code_from_unicode(self, u: int) -> int:
         code = super().code_from_unicode(u)
         if code:
@@ -1554,25 +1709,27 @@ class Type3Font(SimpleFont):
 
     subtype = "Type3"
 
-    def __init__(self, doc, d: dict):
+    def __init__(self, doc: PdfFile, d: PdfMap) -> None:
         Font.__init__(self, doc, d)
         r = doc.resolve
         self.char_names = []
         self.base_encoding = BUILTIN
         self.enc_unicode = [0] * 256
         self.glyphs = [NO_GLYPH] * 256
+        self.use_font_width = True         # no face to take widths from: never the spacing heuristic
         m = r(d.get("FontMatrix"))
-        self.matrix = tuple(_num(r(v)) for v in m[:6]) if isinstance(m, list) and len(m) >= 6 else \
-            (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+        self.matrix: tuple[float, float, float, float, float, float] = (
+            (_num(r(m[0])), _num(r(m[1])), _num(r(m[2])), _num(r(m[3])), _num(r(m[4])), _num(r(m[5])))
+            if isinstance(m, list) and len(m) >= 6 else (1.0, 0.0, 0.0, 1.0, 0.0, 0.0))
         xs, ys = self.matrix[0], self.matrix[3]
         bbox = r(d.get("FontBBox"))
         if isinstance(bbox, list) and len(bbox) >= 4:
             v = [_num(r(x)) for x in bbox[:4]]
-            # in floats, like PDFium: 6 * 0.011f * 1000 is 66 there, 65.9999996 in doubles
-            box = tuple(float32(float32(v[k] * (xs, ys)[k % 2]) * 1000) for k in range(4))
+            # in floats, like PDFium: 6 * 0.011f * 1000 is 66 there, 65.9999996 in doubles.
             # CFX_FloatRect::ToFxRect: each corner as given, truncated toward zero (37 * 0.01204
             # * 1000 = 445.48 is 445: metropolis's bullet font); nothing puts the corners in order
-            self.font_bbox = tuple(int(v) for v in box)
+            self.font_bbox = (int(float32(float32(v[0] * xs) * 1000)), int(float32(float32(v[1] * ys) * 1000)),
+                              int(float32(float32(v[2] * xs) * 1000)), int(float32(float32(v[3] * ys) * 1000)))
         self.widths = [0] * 256
         start = _int(r(d.get("FirstChar")))
         widths = r(d.get("Widths"))
@@ -1581,14 +1738,17 @@ class Type3Font(SimpleFont):
                 # floats: 0.5025 * 1000 is 502.5 there (503), 502.4999 in doubles
                 self.widths[start + i] = round_half_away(float32(float32(float32(_num(r(widths[i]))) * xs) * 1000))
         procs = r(d.get("CharProcs"))
-        self.procs = procs if isinstance(procs, dict) else {}
+        self.procs: PdfMap = procs if isinstance(procs, dict) else {}
         if r(d.get("Encoding")) is not None:
             self._pdf_encoding(False, False)
-        self._chars: dict[int, tuple[int, tuple] | None] = {}
+        self._chars: dict[int, tuple[int, Box] | None] = {}
+        # the renderer's CPDF_Type3Char per code (render_type3.load_char), None: no procedure
+        self.drawn_chars: dict[int, Char | None] = {}
         self._loading = 0                  # m_CharLoadingDepth
         self.metrics_checked = False
 
     @property
+    @override
     def is_type3(self) -> bool:
         return True
 
@@ -1600,6 +1760,7 @@ class Type3Font(SimpleFont):
             self.metrics_checked = True
             self._check_metrics()
 
+    @override
     def _check_metrics(self) -> None:
         if self.font_bbox == (0, 0, 0, 0):
             # CheckFontMetrics with no face: the union of the char boxes that have a width, kept
@@ -1620,7 +1781,7 @@ class Type3Font(SimpleFont):
             l, b, rt, t = self.char_bbox(ord("g"))
             self.descent = self.font_bbox[1] if b == t else b
 
-    def _load_char(self, code: int):
+    def _load_char(self, code: int) -> tuple[int, Box] | None:
         """CPDF_Type3Font::LoadChar + CPDF_Type3Char: (width, bbox) or None. The procedure is
         parsed as a form, which may select fonts (this one too) and load their chars: past
         kMaxType3FormLevel (4) loads deep, a char is nothing and is not kept."""
@@ -1628,13 +1789,14 @@ class Type3Font(SimpleFont):
             return None
         if code in self._chars:
             return self._chars[code]
-        result = None
+        result: tuple[int, Box] | None = None
         name = self.char_name(code)
         stream = self.doc.resolve(self.procs.get(name)) if name else None
         if isinstance(stream, Stream):
-            width, bbox = 0, (0, 0, 0, 0)
+            width = 0
+            bbox: Box = (0, 0, 0, 0)
             data = self.doc.stream_data(stream)
-            form_box = None
+            form_box: tuple[float, float, float, float] | None = None
             if b"Tf" in data:
                 # parsing the form loads the chars of the fonts it selects, whatever the d1 box
                 self._loading += 1
@@ -1651,7 +1813,8 @@ class Type3Font(SimpleFont):
                         width = round_half_away(float32(nums[0] * 1000))
                     elif op == "d1" and len(nums) >= 6:
                         width = round_half_away(float32(nums[0] * 1000))
-                        bbox = tuple(round_half_away(float32(v * 1000)) for v in nums[2:6])
+                        bbox = (round_half_away(float32(nums[2] * 1000)), round_half_away(float32(nums[3] * 1000)),
+                                round_half_away(float32(nums[4] * 1000)), round_half_away(float32(nums[5] * 1000)))
                     break
             a, b, c, d, e, f = self.matrix
             xunit = abs(a) if b == 0 else abs(b) if a == 0 else \
@@ -1665,7 +1828,8 @@ class Type3Font(SimpleFont):
                         form_box = self._form_box(data)
                     finally:
                         self._loading -= 1
-                l, bt, rt, t = (float32(v * 1000) for v in form_box)
+                fl, fb, fr, ft = form_box
+                l, bt, rt, t = float32(fl * 1000), float32(fb * 1000), float32(fr * 1000), float32(ft * 1000)
             # CPDF_Type3Char::Transform: the font matrix as it is, its translation (text space)
             # added to the glyph-space box unscaled, in floats
             pts = [(float32(float32(float32(a * x) + float32(c * y)) + e),
@@ -1676,11 +1840,11 @@ class Type3Font(SimpleFont):
         self._chars[code] = result
         return result
 
-    def _form_box(self, data: bytes) -> tuple:
+    def _form_box(self, data: bytes) -> tuple[float, float, float, float]:
         """CPDF_PageObjectHolder::CalcBoundingBox of the glyph procedure parsed as a form: the
         union of its objects' rects, glyph space (nothing drawn: an empty rect)."""
         from .content import Parser  # content.py imports this module
-        objects: list = []
+        objects: list[PObj] = []
         res = self.doc.resolve(self.dict.get("Resources"))
         try:
             Parser(self.doc, res if isinstance(res, dict) else {}, objects, doc_fonts(self.doc), {}).parse_page(
@@ -1693,6 +1857,7 @@ class Type3Font(SimpleFont):
         return (min(r[0] for r in rects), min(r[1] for r in rects), max(r[2] for r in rects),
                 max(r[3] for r in rects))
 
+    @override
     def char_width(self, code: int) -> int:
         if code >= 256:
             code = 0
@@ -1701,13 +1866,16 @@ class Type3Font(SimpleFont):
         ch = self._load_char(code)
         return ch[0] if ch else 0
 
+    @override
     def char_bbox(self, code: int) -> tuple[int, int, int, int]:
         ch = self._load_char(code)
         return ch[1] if ch else (0, 0, 0, 0)
 
+    @override
     def unicode(self, code: int) -> list[int]:
         return Font.unicode(self, code)
 
+    @override
     def code_from_unicode(self, u: int) -> int:
         return Font.code_from_unicode(self, u)
 
@@ -1718,23 +1886,23 @@ _ANSI: dict[int, int] = {}
 def _ansi_char(code: int) -> int:
     """MultiByteToWideChar(CP_ACP) of one code (one byte under 256, else two) into a one-wchar
     buffer: the character when exactly one comes out, else 0. Windows only (PDFium's #if)."""
-    if sys.platform != "win32" or code < 0:
-        return 0
-    if code not in _ANSI:
-        import ctypes
-        seq = bytes([code]) if code < 256 else bytes([(code // 256) & 0xFF, code % 256])
-        buf = ctypes.create_unicode_buffer(1)
-        n = ctypes.windll.kernel32.MultiByteToWideChar(0, 0, seq, len(seq), buf, 1)
-        _ANSI[code] = ord(buf[0]) if n == 1 else 0
-    return _ANSI[code]
+    if sys.platform == "win32" and code >= 0:
+        if code not in _ANSI:
+            import ctypes
+            seq = bytes([code]) if code < 256 else bytes([(code // 256) & 0xFF, code % 256])
+            buf = ctypes.create_unicode_buffer(1)
+            n = ctypes.windll.kernel32.MultiByteToWideChar(0, 0, seq, len(seq), buf, 1)
+            _ANSI[code] = ord(buf[0]) if n == 1 else 0
+        return _ANSI[code]
+    return 0
 
 
 def _i16(v: int) -> int:
     """static_cast<int16_t>."""
-    return ((int(v) + 0x8000) & 0xFFFF) - 0x8000
+    return ((v + 0x8000) & 0xFFFF) - 0x8000
 
 
-def _load_metrics_array(items: list, n: int) -> list[int]:
+def _load_metrics_array(items: Sequence[PdfValue], n: int) -> list[int]:
     """LoadMetricsArray (cpdf_cidfont.cpp), as the flat vector<int> it fills: `c [v...]` gives
     one (c, c, n values) entry per n array items (0 past the end), `c1 c2 v...` one (c1, c2, n
     values); an array not right after a lone code stops the whole parse."""
@@ -1773,7 +1941,7 @@ class CIDFont(Font):
 
     subtype = "Type0"
 
-    def __init__(self, doc, d: dict):
+    def __init__(self, doc: PdfFile, d: PdfMap) -> None:
         super().__init__(doc, d)
         r = doc.resolve
         fonts = r(d.get("DescendantFonts"))
@@ -1784,25 +1952,26 @@ class CIDFont(Font):
             raise ValueError("CPDF_CIDFont::Load: no single descendant font")
         self.base_name = str(r(desc_font.get("BaseFont")) or "")
         enc = r(d.get("Encoding"))
-        if not isinstance(enc, (Name, Stream)):
-            raise ValueError("CPDF_CIDFont::Load: an /Encoding that is neither a name nor a stream")
+        self._cmap_name: str | None
         if isinstance(enc, Stream):
             self.cmap = CMap("", doc.stream_data(enc))
             self._cmap_name = None
+        elif isinstance(enc, Name):
+            self._cmap_name = str(enc)
+            self.cmap = CMap(self._cmap_name, None)
         else:
-            self._cmap_name = str(enc) if isinstance(enc, Name) else "Identity-H"
-            self.cmap = CMap(self._cmap_name)
+            raise ValueError("CPDF_CIDFont::Load: an /Encoding that is neither a name nor a stream")
         self.vertical = self.cmap.vertical
         self.cid_type0 = str(r(desc_font.get("Subtype")) or "") == "CIDFontType0"
         self._descriptor(r(desc_font.get("FontDescriptor")))
-        self.default_width = _int(r(desc_font.get("DW")), 1000) if "DW" in desc_font else 1000
+        self.default_width = _int_or(r(desc_font.get("DW")), 1000) if "DW" in desc_font else 1000
         self.width_list: list[tuple[int, int, int]] = []
         w = r(desc_font.get("W"))
         if isinstance(w, list):
             self._metrics_array([r(v) for v in w])
         gid = r(desc_font.get("CIDToGIDMap"))
         self.cid_to_gid = doc.stream_data(gid) if isinstance(gid, Stream) else None
-        self._boxes: dict[int, tuple] = {}
+        self._boxes: dict[int, Box] = {}
         self._check_metrics()
         # vertical metrics: default_vy_ 880, default_w1_ -1000 (int16), W2 as LowHighValXY
         self.default_vy, self.default_w1 = 880, -1000
@@ -1811,13 +1980,14 @@ class CIDFont(Font):
         if self.vertical:
             w2 = r(desc_font.get("W2"))
             if isinstance(w2, list):
-                items = [r(v) for v in w2]
+                items: list[PdfValue] = [r(v) for v in w2]
                 items = [[r(u) for u in v] if isinstance(v, list) else v for v in items]
                 flat = _load_metrics_array(items, 3)
                 if len(flat) % 5:
                     # reinterpret_span over a vector whose size is no multiple of the struct: a CHECK
                     self.vert_metrics_broken = True
-                self.vert_metrics = [tuple(flat[k:k + 5]) for k in range(0, len(flat) - 4, 5)]
+                self.vert_metrics = [(flat[k], flat[k + 1], flat[k + 2], flat[k + 3], flat[k + 4])
+                                     for k in range(0, len(flat) - 4, 5)]
             dw2 = r(desc_font.get("DW2"))
             if isinstance(dw2, list):
                 self.default_vy = _i16(_int(r(dw2[0])) if len(dw2) > 0 else 0)
@@ -1851,13 +2021,14 @@ class CIDFont(Font):
                 break
         return _i16(int(width / 2)), self.default_vy
 
+    @override
     def glyph_width(self, u: int, size: float) -> float:
         """FPDFFont_GetGlyphWidth: the vertical advance (W2's w1, usually negative) when vertical."""
         if not self.vertical:
             return super().glyph_width(u, size)
         return float32(float32(self.vert_width(self.code_from_unicode(u)) * float32(size)) / 1000.0)
 
-    def _metrics_array(self, items: list) -> None:
+    def _metrics_array(self, items: Sequence[PdfValue]) -> None:
         """LoadMetricsArray with nElements 1: `c [w...]` and `c1 c2 w`."""
         r = self.doc.resolve
         pending: list[int] = []
@@ -1876,12 +2047,14 @@ class CIDFont(Font):
                     self.width_list.append((pending[0], pending[1], pending[2]))
                     pending = []
 
+    @override
     def codes(self, data: bytes) -> list[int]:
         return self.cmap.codes(data)
 
     def char_size(self, code: int) -> int:
         return self.cmap.char_size(code)
 
+    @override
     def char_width(self, code: int) -> int:
         cid = self.cmap.cid(code)
         for lo, hi, w in self.width_list:
@@ -1901,6 +2074,7 @@ class CIDFont(Font):
             return p.cid_index(cid)
         return cid
 
+    @override
     def char_bbox(self, code: int) -> tuple[int, int, int, int]:
         if code in self._boxes:
             return self._boxes[code]
@@ -1915,6 +2089,7 @@ class CIDFont(Font):
         self._boxes[code] = rect
         return rect
 
+    @override
     def unicode(self, code: int) -> list[int]:
         units = super().unicode(code)
         if units or self._cmap_name is not None:
@@ -1925,6 +2100,7 @@ class CIDFont(Font):
         u = _ansi_char(code)
         return [u] if u else []
 
+    @override
     def code_from_unicode(self, u: int) -> int:
         """CPDF_CIDFont::CharCodeFromUnicode: the ToUnicode map reversed, else by the CMap's coding.
         An embedded CMap is kUNKNOWN and Identity-H/V kCID with no CID-to-Unicode map loaded (the
@@ -1938,7 +2114,7 @@ class CIDFont(Font):
         return u if u < 0x80 else 0
 
 
-def load_font(doc, d) -> Font | None:
+def load_font(doc: PdfFile, d: PdfValue) -> Font | None:
     """CPDF_Font::Create."""
     if not isinstance(d, dict):
         return None

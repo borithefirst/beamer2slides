@@ -24,20 +24,31 @@ nothing. The string is already in logical order, so a right-to-left line does no
 from __future__ import annotations
 
 import math
+from typing import TYPE_CHECKING
 
+from ..api import Matrix, PdfError
 from . import unicode_data
 from .content import OBJ_FORM, OBJ_TEXT, PObj, f32m, f32p, item_origin
 from .navigation import pdf_decode_text as _decode_units, wide
 from .syntax import F32X2, F32X3, F32X4, F32X6, F32X8, Name, Ref, String, float32 as f32
-from .fonts import INVALID_CODE
+from .fonts import INVALID_CODE, CIDFont, Font, PdfMap
+
+if TYPE_CHECKING:
+    from .document import PdfFile
+
+Rect = tuple[float, float, float, float]
+"""A CFX_FloatRect as (left, bottom, right, top)."""
+Point = tuple[float, float]
+Segment = tuple[int, int, int]
+"""A CFX_BidiChar segment: start, count, direction."""
 
 NORMAL, GENERATED, NOT_UNICODE, HYPHEN, PIECE, ACTUAL_TEXT = range(6)
 MC_PASS, MC_DONE, MC_DELAY = range(3)   # MarkedContentState
 SIZE_EPSILON = 0.01
 TIE = 1e-6  # relative: well under float32's resolution
 DEFAULT_FONT_SIZE = 1.0
-IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
-EMPTY = (0.0, 0.0, 0.0, 0.0)
+IDENTITY: Matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+EMPTY: Rect = (0.0, 0.0, 0.0, 0.0)
 
 
 def pdf_decode_text(data: bytes) -> str:
@@ -53,12 +64,13 @@ BIDI_NEUTRAL, BIDI_LEFT, BIDI_RIGHT, BIDI_LEFT_WEAK = range(4)
 bidi_direction = unicode_data.direction    # CFX_BidiChar::AppendChar over PDFium's own table
 
 
-def bidi_segments(units: list[int], auto_order: bool = True) -> tuple[list[tuple[int, int, int]], bool]:
+def bidi_segments(units: list[int], auto_order: bool) -> tuple[list[Segment], bool]:
     """CFX_BidiString: (start, count, direction) segments in the order they are written, and
-    whether the overall direction is right to left: with `auto_order`, more right segments than
-    left ones; without, never (only SetOverallDirectionRight turns it).
+    whether the overall direction is right to left: with `auto_order` (CFX_BidiString's default),
+    more right segments than left ones; without, never (only SetOverallDirectionRight turns it).
     Like PDFium's, the list starts with the empty segment a first change of direction closes."""
-    order, start, count, direction = [], 0, 0, BIDI_NEUTRAL
+    order: list[Segment] = []
+    start, count, direction = 0, 0, BIDI_NEUTRAL
     for u in units:
         d = bidi_direction(u)
         if d != direction:
@@ -85,18 +97,18 @@ DIR_UNKNOWN, DIR_HORIZONTAL, DIR_VERTICAL = range(3)   # TextOrientation
 # ---------------------------------------------------------------------- CFX_Matrix / CFX_FloatRect
 
 
-def concat(m, n):
+def concat(m: Matrix, n: Matrix) -> Matrix:
     """PDFium's `m * n`: m first, then n."""
     a, b, c, d, e, f = m
     A, B, C, D, E, F = n
     return (a * A + b * C, a * B + b * D, c * A + d * C, c * B + d * D, e * A + f * C + E, e * B + f * D + F)
 
 
-def apply(m, x, y):
+def apply(m: Matrix, x: float, y: float) -> Point:
     return m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]
 
 
-def inverse(m):
+def inverse(m: Matrix) -> Matrix:
     a, b, c, d, e, f = m
     i = a * d - b * c
     if i == 0:
@@ -105,7 +117,7 @@ def inverse(m):
     return d / i, b / j, c / j, a / i, (c * f - d * e) / i, (a * f - b * e) / j
 
 
-def concat32(m, n):
+def concat32(m: Matrix, n: Matrix) -> Matrix:
     """CFX_Matrix::operator* in C floats (m and n float32 already)."""
     a, b, c, d, e, f = m
     A, B, C, D, E, F = n
@@ -114,13 +126,13 @@ def concat32(m, n):
             f32(f32(f32(e * A) + f32(f * C)) + E), f32(f32(f32(e * B) + f32(f * D)) + F))
 
 
-def _apply32(m, x, y):
+def _apply32(m: Matrix, x: float, y: float) -> Point:
     """CFX_Matrix::Transform in C floats: every product and sum rounded."""
     return (f32(f32(f32(m[0] * x) + f32(m[2] * y)) + m[4]),
             f32(f32(f32(m[1] * x) + f32(m[3] * y)) + m[5]))
 
 
-def _inverse32(m):
+def _inverse32(m: Matrix) -> Matrix:
     """CFX_Matrix::GetInverse in C floats."""
     a, b, c, d, e, f = (f32(v) for v in m)
     i = f32(f32(a * d) - f32(b * c))
@@ -131,11 +143,12 @@ def _inverse32(m):
             f32(f32(f32(a * f) - f32(b * e)) / j))
 
 
-def _transform_rect32(m, r):
+def _transform_rect32(m: Matrix, r: Rect) -> Rect:
     """CFX_Matrix::TransformRect in C floats."""
-    m = tuple(f32(v) for v in m)
-    l, b, rt, t = r
-    pts = [_apply32(m, x, y) for x, y in ((l, t), (l, b), (rt, t), (rt, b))]
+    a, b, c, d, e, f = m
+    m32 = (f32(a), f32(b), f32(c), f32(d), f32(e), f32(f))
+    l, bt, rt, t = r
+    pts = [_apply32(m32, x, y) for x, y in ((l, t), (l, bt), (rt, t), (rt, bt))]
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     return min(xs), min(ys), max(xs), max(ys)
 
@@ -150,7 +163,7 @@ _p6, _u6 = F32X6.pack, F32X6.unpack
 _p8, _u8 = F32X8.pack, F32X8.unpack
 
 
-def apply32(m, x, y):
+def apply32(m: Matrix, x: float, y: float) -> Point:
     """CFX_Matrix::Transform in C floats: every product and sum rounded."""
     try:
         ax, cy, bx, dy = _u4(_p4(m[0] * x, m[2] * y, m[1] * x, m[3] * y))
@@ -160,7 +173,7 @@ def apply32(m, x, y):
         return _apply32(m, x, y)
 
 
-def inverse32(m):
+def inverse32(m: Matrix) -> Matrix:
     """CFX_Matrix::GetInverse in C floats."""
     try:
         a, b, c, d, e, f = _u6(_p6(*m))
@@ -174,7 +187,7 @@ def inverse32(m):
         return _inverse32(m)
 
 
-def transform_rect32(m, r):
+def transform_rect32(m: Matrix, r: Rect) -> Rect:
     """CFX_Matrix::TransformRect in C floats."""
     try:
         a, b, c, d, e, f = _u6(_p6(*m))
@@ -192,54 +205,54 @@ def transform_rect32(m, r):
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def x_unit(m):
+def x_unit(m: Matrix) -> float:
     a, b = m[0], m[1]
     return abs(a) if b == 0 else abs(b) if a == 0 else math.hypot(a, b)
 
 
-def y_unit(m):
+def y_unit(m: Matrix) -> float:
     c, d = m[2], m[3]
     return abs(d) if c == 0 else abs(c) if d == 0 else math.hypot(c, d)
 
 
-def distance(m, v):
+def distance(m: Matrix, v: float) -> float:
     """TransformDistance."""
     return v * (x_unit(m) + y_unit(m)) / 2
 
 
-def x_distance(m, v):
+def x_distance(m: Matrix, v: float) -> float:
     """TransformXDistance."""
     return math.hypot(m[0] * v, m[1] * v)
 
 
-def transform_rect(m, r):
+def transform_rect(m: Matrix, r: Rect) -> Rect:
     l, b, rt, t = r
     pts = [apply(m, x, y) for x, y in ((l, t), (l, b), (rt, t), (rt, b))]
     xs, ys = [p[0] for p in pts], [p[1] for p in pts]
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def normalize(r):
+def normalize(r: Rect) -> Rect:
     l, b, rt, t = r
     return min(l, rt), min(b, t), max(l, rt), max(b, t)
 
 
-def is_empty(r):
+def is_empty(r: Rect) -> bool:
     return r[0] >= r[2] or r[1] >= r[3]
 
 
-def intersect(r, o):
+def intersect(r: Rect, o: Rect) -> Rect:
     r, o = normalize(r), normalize(o)
     out = max(r[0], o[0]), max(r[1], o[1]), min(r[2], o[2]), min(r[3], o[3])
     return EMPTY if out[0] > out[2] or out[1] > out[3] else out
 
 
-def union(r, o):
+def union(r: Rect, o: Rect) -> Rect:
     r, o = normalize(r), normalize(o)
     return min(r[0], o[0]), min(r[1], o[1]), max(r[2], o[2]), max(r[3], o[3])
 
 
-def contains(r, x, y):
+def contains(r: Rect, x: float, y: float) -> bool:
     l, b, rt, t = normalize(r)
     return l <= x <= rt and b <= y <= t
 
@@ -247,7 +260,15 @@ def contains(r, x, y):
 # ---------------------------------------------------------------------- font helpers
 
 
-def char_width(code: int, font) -> int:
+def text_font(obj: PObj) -> Font:
+    """A text object's font: content makes text objects only in a font (`Parser._add_text`)."""
+    font = obj.font
+    if font is None:
+        raise PdfError("a text object without a font")
+    return font
+
+
+def char_width(code: int, font: Font) -> int:
     """GetCharWidth in cpdf_textpage.cpp: the width, else the glyph box's."""
     if code == INVALID_CODE:
         return 0
@@ -258,11 +279,11 @@ def char_width(code: int, font) -> int:
     return max(r - l, 0)
 
 
-def unicode_of(font, code: int) -> list[int]:
+def unicode_of(font: Font, code: int) -> list[int]:
     return font.unicode(code) if code != INVALID_CODE else []
 
 
-def first_unicode(font, code: int) -> int:
+def first_unicode(font: Font, code: int) -> int:
     """UnicodeFromCharCode's first unit, or the code itself when there is none."""
     u = unicode_of(font, code)
     return u[0] if u else code & 0xFFFF
@@ -271,17 +292,18 @@ def first_unicode(font, code: int) -> int:
 def is_right_to_left(obj: PObj) -> bool:
     """IsRightToLeft: every item, a TJ kern too (its invalid code is U+FFFF as a 16-bit wchar_t);
     Front() of the item's Unicode, the code when that is 0, and 0 left out."""
-    font = obj.font
+    font = text_font(obj)
     firsts = [(unicode_of(font, code) or [0])[0] or code & 0xFFFF for code, _ in obj.items]
-    return bidi_segments([u for u in firsts if u])[1]
+    return bidi_segments([u for u in firsts if u], True)[1]
 
 
 def _isprint(c: int) -> bool:
     return 0x20 <= c < 0x7F
 
 
-def unicode_text_for(d: dict, key: str, doc=None) -> str:
-    """CPDF_Dictionary::GetUnicodeTextFor: a string or a name decoded (one reference followed), else ''."""
+def unicode_text_for(d: PdfMap, key: str, doc: PdfFile | None) -> str:
+    """CPDF_Dictionary::GetUnicodeTextFor: a string or a name decoded (one reference followed,
+    when there is a document to follow it in), else ''."""
     value = d.get(key)
     if isinstance(value, Ref):
         value = doc.get(value.num) if doc is not None else None
@@ -306,15 +328,15 @@ def font_size_h(obj: PObj) -> float:
     return abs(math.hypot(obj.matrix[0], obj.matrix[1]) * obj.font_size)
 
 
-def text_matrix(obj: PObj):
+def text_matrix(obj: PObj) -> Matrix:
     return obj.matrix
 
 
-def pos(obj: PObj):
+def pos(obj: PObj) -> Point:
     return obj.matrix[4], obj.matrix[5]
 
 
-def space_threshold(font, fsh: float, code: int) -> float:
+def space_threshold(font: Font, fsh: float, code: int) -> float:
     """CalculateSpaceThreshold."""
     space = font.code_from_unicode(0x20)
     threshold = 0.0
@@ -342,13 +364,14 @@ def generate_space(px: float, last_pos: float, this_width: float, last_width: fl
     return diff > this_width + last_width
 
 
-def end_horizontal_line(this_rect, prev_rect) -> bool:
+def end_horizontal_line(this_rect: Rect, prev_rect: Rect) -> bool:
     if this_rect[3] - this_rect[1] <= 4.5 or prev_rect[3] - prev_rect[1] <= 4.5:
         return False
     return max(this_rect[1], prev_rect[1]) >= min(this_rect[3], prev_rect[3])
 
 
-def end_vertical_line(this_rect, prev_rect, line_rect, this_size, prev_size) -> bool:
+def end_vertical_line(this_rect: Rect, prev_rect: Rect, line_rect: Rect, this_size: float,
+                      prev_size: float) -> bool:
     if this_rect[2] - this_rect[0] <= this_size * 0.1 or prev_rect[2] - prev_rect[0] <= prev_size * 0.1:
         return False
     return min(this_rect[2], line_rect[2]) <= max(this_rect[0], line_rect[0])
@@ -370,12 +393,16 @@ def _isalnum(c: int) -> bool:
 
 
 class CharInfo:
+    """CPDF_TextPage::CharInfo: its kind (NORMAL...), char code, Unicode unit, page-space origin,
+    glyph box, text-to-page matrix, text object (None for a line break) and loose bounds."""
+
     __slots__ = ("type", "code", "unicode", "origin", "box", "matrix", "obj", "loose")
 
-    def __init__(self, ctype, code, unicode, origin, box, matrix, obj):
+    def __init__(self, ctype: int, code: int, unicode: int, origin: Point, box: Rect,
+                 matrix: Matrix, obj: PObj | None) -> None:
         self.type, self.code, self.unicode = ctype, code, unicode
         self.origin, self.box, self.matrix, self.obj = origin, box, matrix, obj
-        self.loose = loose_bounds(self)
+        self.loose: Rect = loose_bounds(self)
 
     def copy(self) -> "CharInfo":
         c = CharInfo.__new__(CharInfo)
@@ -388,15 +415,17 @@ class CharInfo:
         return self.obj.font_size if self.obj is not None and self.obj.font is not None else DEFAULT_FONT_SIZE
 
 
-def loose_bounds(ci: CharInfo):
+def loose_bounds(ci: CharInfo) -> Rect:
     """GetLooseBounds: the advance by the font's ascent and descent, with the glyph box."""
     if is_empty(ci.box):
         return ci.box
     obj = ci.obj
-    size = ci.font_size
-    if obj is not None and abs(size) >= 0.0001 and ci.code != INVALID_CODE:
-        font = obj.font
-        if font.vertical:
+    font = obj.font if obj is not None else None
+    if obj is None or font is None:          # a line break PDFium made up: its box alone
+        return ci.box
+    size = obj.font_size                     # `ci.font_size`
+    if abs(size) >= 0.0001 and ci.code != INVALID_CODE:
+        if isinstance(font, CIDFont) and font.vertical:
             # a font-size square beside the page-space origin, whatever the matrix: offsets in
             # double from float products, each edge rounded to float
             vx, vy = font.vert_origin(ci.code)
@@ -433,10 +462,10 @@ def loose_bounds(ci: CharInfo):
 # The chars of one text object share its matrix (the very tuple), so its inverse is kept for the
 # next char. The entry holds the tuple itself, so an `is` match can't be a new tuple at an old
 # address, and it is replaced whole, so threads never see a matrix paired with another's inverse.
-_last_inverse = (None, None)
+_last_inverse: tuple[Matrix | None, Matrix] = (None, IDENTITY)
 
 
-def _inverse_of(m):
+def _inverse_of(m: Matrix) -> Matrix:
     global _last_inverse
     last = _last_inverse
     if m is last[0] and type(m) is tuple:
@@ -459,19 +488,22 @@ def is_normal(ci: CharInfo) -> bool:
 class TextPage:
     """CPDF_TextPage over `objects` (content.py's page objects, pre-order)."""
 
-    def __init__(self, objects: list[PObj], width: float, height: float, display=None, rtl: bool = False):
+    def __init__(self, objects: list[PObj], width: float, height: float, display: Matrix | None,
+                 rtl: bool) -> None:
+        """`display`: the page-to-device matrix (None: the page flipped into `height`); `rtl`: the
+        document's /ViewerPreferences say /Direction /R2L."""
         self.objects = objects
         self.rtl = rtl
         self.width, self.height = width, height
-        self.display = display or (1.0, 0.0, 0.0, -1.0, 0.0, height)
+        self.display: Matrix = display or (1.0, 0.0, 0.0, -1.0, 0.0, height)
         self.chars: list[CharInfo] = []
         self.buf: list[int] = []
         self.temp: list[CharInfo] = []
         self.temp_buf: list[int] = []
-        self.text_objects: list[tuple[PObj, tuple]] = []
+        self.text_objects: list[tuple[PObj, Matrix]] = []
         self.prev_obj: PObj | None = None
-        self.prev_matrix = IDENTITY
-        self.line_rect = EMPTY
+        self.prev_matrix: Matrix = IDENTITY
+        self.line_rect: Rect = EMPTY
         self.textline_dir = DIR_UNKNOWN
         self._holders: dict[int, list[PObj]] = {}
         self._index: dict[int, int] = {}
@@ -492,7 +524,7 @@ class TextPage:
         self.text_objects = []
         self._close_temp_line()
 
-    def _walk(self, holder: list[PObj], form_matrix) -> None:
+    def _walk(self, holder: list[PObj], form_matrix: Matrix) -> None:
         for o in holder:
             if not o.active:
                 continue
@@ -534,7 +566,7 @@ class TextPage:
         if end_h - start_h < double:
             return DIR_VERTICAL
 
-        def filled(mask, s, e):
+        def filled(mask: list[bool], s: int, e: int) -> float:
             return 0.0 if s >= e else sum(mask[s:e]) / (e - s)
 
         sum_h = filled(hmask, start_h, end_h)
@@ -548,7 +580,7 @@ class TextPage:
         return DIR_UNKNOWN
 
     # ---- ProcessTextObject
-    def _process_text_object(self, obj: PObj, form_matrix) -> None:
+    def _process_text_object(self, obj: PObj, form_matrix: Matrix) -> None:
         if abs(obj.rect[2] - obj.rect[0]) < SIZE_EPSILON:
             return
         new = (obj, form_matrix)
@@ -560,9 +592,9 @@ class TextPage:
         prev, prev_form = self.text_objects[-1]
         if not prev.items:
             return
-        prev_width = char_width(prev.items[-1][0], prev.font) * prev.font_size / 1000
+        prev_width = char_width(prev.items[-1][0], text_font(prev)) * prev.font_size / 1000
         prev_width = distance(concat(text_matrix(prev), prev_form), abs(prev_width))
-        this_width = abs(char_width(obj.items[0][0], obj.font) * obj.font_size / 1000)
+        this_width = abs(char_width(obj.items[0][0], text_font(obj)) * obj.font_size / 1000)
         this_width = distance(concat(text_matrix(obj), form_matrix), abs(this_width))
         threshold = max(prev_width, this_width) / 4
         prev_pos = apply(self.display, *apply(prev_form, *pos(prev)))
@@ -628,7 +660,7 @@ class TextPage:
         dx = pos(obj1)[0] - pos(obj2)[0]
         dy = pos(obj1)[1] - pos(obj2)[1]
         size = obj2.font_size
-        cw = char_width(obj2.items[-1][0], obj2.font)
+        cw = char_width(obj2.items[-1][0], text_font(obj2))
         max_pre = max(prev_rect[3] - prev_rect[1], prev_rect[2] - prev_rect[0], size)
         return abs(dx) <= 0.9 * cw * size / 1000 and abs(dy) <= max_pre / 8
 
@@ -642,7 +674,7 @@ class TextPage:
                 self.prev_obj, self.prev_matrix = obj, form_matrix
                 continue
             if self.prev_obj is not None:
-                kind = self._insert_object(obj, form_matrix)
+                kind = self._insert_object(obj, self.prev_obj, form_matrix)
                 if kind == H_LINEBREAK:
                     self.line_rect = obj.rect
                 else:
@@ -685,7 +717,7 @@ class TextPage:
                 return MC_DELAY
         return MC_DONE
 
-    def _marked(self, obj: PObj, form_matrix) -> None:
+    def _marked(self, obj: PObj, form_matrix: Matrix) -> None:
         actual = ""
         for item in obj.marks:
             d = item.param()
@@ -751,23 +783,24 @@ class TextPage:
         prev = self._prev_char()
         return prev is not None and prev.type in (PIECE, ACTUAL_TEXT) and is_hyphen_code(prev.unicode)
 
-    def _insert_object(self, obj: PObj, form_matrix) -> int:
-        """ProcessInsertObject: what goes between the previous object and this one."""
+    def _insert_object(self, obj: PObj, prev_obj: PObj, form_matrix: Matrix) -> int:
+        """ProcessInsertObject: what goes between the previous object (`prev_obj`, unless the
+        last char says another) and this one."""
         prev = self._prev_char()
         if prev is not None and prev.obj is not None:
-            self.prev_obj = prev.obj
-        prev_obj = self.prev_obj
+            prev_obj = self.prev_obj = prev.obj
         mode = self._writing_mode(obj)
         if mode == DIR_UNKNOWN:
             mode = self._writing_mode(prev_obj)
         n = len(prev_obj.items)
         if n == 0:
             return H_NONE
+        font, prev_font = text_font(obj), text_font(prev_obj)
         prev_code = prev_obj.items[-1][0]
         prev_x = item_origin(prev_obj, prev_obj.items[-1])[0]
         code = obj.items[0][0]
         this_rect, prev_rect = obj.rect, prev_obj.rect
-        current = first_unicode(obj.font, code)
+        current = first_unicode(font, code)
         if mode == DIR_HORIZONTAL:
             if end_horizontal_line(this_rect, prev_rect):
                 return H_HYPHEN if self._is_hyphen(current) else H_LINEBREAK
@@ -776,9 +809,9 @@ class TextPage:
                 return H_HYPHEN if self._is_hyphen(current) else H_LINEBREAK
 
         last_pos = prev_x
-        last_w = char_width(prev_code, prev_obj.font)
+        last_w = char_width(prev_code, prev_font)
         last_width = abs(last_w * prev_obj.font_size / 1000)
-        this_w = char_width(code, obj.font)
+        this_w = char_width(code, font)
         this_width = abs(this_w * obj.font_size / 1000)
         threshold = max(last_width, this_width) / 4
         prev_matrix = concat(text_matrix(prev_obj), self.prev_matrix)
@@ -813,7 +846,7 @@ class TextPage:
             return H_HYPHEN
         if current == 0x20:
             return H_NONE
-        prev_str = unicode_of(prev_obj.font, prev_code)
+        prev_str = unicode_of(prev_font, prev_code)
         if prev_str and prev_str[-1] == 0x20:
             return H_NONE
 
@@ -830,14 +863,14 @@ class TextPage:
             threshold2 *= 1.5
         return H_SPACE if generate_space((px, py)[0], last_pos, this_width, last_width, threshold2) else H_NONE
 
-    def _generated(self, unicode: int, form_matrix) -> CharInfo | None:
+    def _generated(self, unicode: int, form_matrix: Matrix) -> CharInfo | None:
         """GenerateCharInfo: a character placed after the previous one."""
         prev = self._prev_char()
         if prev is None:
             return None
         width = 0
         if prev.obj is not None and prev.code != INVALID_CODE:
-            width = char_width(prev.code, prev.obj.font)
+            width = char_width(prev.code, text_font(prev.obj))
         # in C floats: the size, the char box's Height(), `pre_width * font_size / 1000` and the sum
         size = f32(prev.obj.font_size) if prev.obj is not None else f32(prev.box[3] - prev.box[1])
         if not size:
@@ -845,7 +878,7 @@ class TextPage:
         x, y = f32(prev.origin[0] + f32(f32(width * size) / 1000)), prev.origin[1]
         return CharInfo(GENERATED, INVALID_CODE, unicode, (x, y), (x, y, x, y), form_matrix, None)
 
-    def _append_generated(self, unicode: int, form_matrix, temp: bool) -> None:
+    def _append_generated(self, unicode: int, form_matrix: Matrix, temp: bool) -> None:
         ci = self._generated(unicode, form_matrix)
         if ci is None:
             return
@@ -856,7 +889,7 @@ class TextPage:
             self.buf.append(unicode)
             self.chars.append(ci)
 
-    def _generate(self, kind: int, obj: PObj, form_matrix) -> bool:
+    def _generate(self, kind: int, obj: PObj, form_matrix: Matrix) -> bool:
         """ProcessGenerateCharacter: False skips the object."""
         if kind == H_SPACE:
             self._append_generated(0x20, form_matrix, True)
@@ -866,7 +899,7 @@ class TextPage:
                 self._append_generated(0x0D, form_matrix, False)
                 self._append_generated(0x0A, form_matrix, False)
         elif kind == H_HYPHEN:
-            if len(obj.items) == 1 and is_hyphen_code(first_unicode(obj.font, obj.items[0][0])):
+            if len(obj.items) == 1 and is_hyphen_code(first_unicode(text_font(obj), obj.items[0][0])):
                 return False
             while self.temp_buf and self.temp_buf[-1] == 0x20:
                 self.temp_buf.pop()
@@ -881,7 +914,7 @@ class TextPage:
         return True
 
     # ---- ProcessTextObjectItems
-    def _items(self, obj: PObj, form_matrix, matrix) -> None:
+    def _items(self, obj: PObj, form_matrix: Matrix, matrix: Matrix) -> None:
         n = len(obj.items)
         fsh = font_size_h(obj)
         base_space = 0.0
@@ -909,8 +942,9 @@ class TextPage:
             self.temp[start_chars:] = self.temp[start_chars:][::-1]
             self.temp_buf[start_chars:] = self.temp_buf[start_chars:][::-1]
 
-    def _items_in_order(self, obj: PObj, form_matrix, matrix, fsh: float, base_space: float) -> None:
-        font = obj.font
+    def _items_in_order(self, obj: PObj, form_matrix: Matrix, matrix: Matrix, fsh: float,
+                        base_space: float) -> None:
+        font = text_font(obj)
         spacing = 0.0
         size = f32(f32(obj.font_size) / 1000)
         for i, item in enumerate(obj.items):
@@ -938,17 +972,18 @@ class TextPage:
             # C floats: `rect.left * font_size + origin.x` rounds after the product and the sum
             try:
                 pl, pb, pr, pt = _u4(_p4(l * size, b * size, r * size, t * size))
-                box = list(_u4(_p4(pl + x, pb + y, pr + x, pt + y)))
+                bl, bb, br, bt = _u4(_p4(pl + x, pb + y, pr + x, pt + y))
             except OverflowError:
-                box = [f32(f32(l * size) + x), f32(f32(b * size) + y), f32(f32(r * size) + x),
-                       f32(f32(t * size) + y)]
-            if abs(box[3] - box[1]) < SIZE_EPSILON:
-                box[3] = f32(box[1] + size)
-            if abs(box[2] - box[0]) < SIZE_EPSILON:
+                bl, bb, br, bt = (f32(f32(l * size) + x), f32(f32(b * size) + y), f32(f32(r * size) + x),
+                                  f32(f32(t * size) + y))
+            if abs(bt - bb) < SIZE_EPSILON:
+                bt = f32(bb + size)
+            if abs(br - bl) < SIZE_EPSILON:
                 # CPDF_TextObject::GetCharWidth: the vertical advance in vertical writing
-                w = font.vert_width(code) if font.vertical else font.char_width(code)
-                box[2] = f32(box[0] + f32(w * size))
-            box = transform_rect32(matrix, box)
+                w = font.vert_width(code) if isinstance(font, CIDFont) and font.vertical else \
+                    font.char_width(code)
+                br = f32(bl + f32(w * size))
+            box = transform_rect32(matrix, (bl, bb, br, bt))
             ci = CharInfo(ctype, code, 0, apply32(matrix, x, y), box, matrix, obj)
             if not units:
                 self.temp.append(ci)
@@ -979,7 +1014,8 @@ class TextPage:
     def _close_temp_line(self) -> None:
         if not self.temp:
             return
-        buf, chars = [], []
+        buf: list[int] = []
+        chars: list[CharInfo] = []
         prev_space = False
         for u, ci in zip(self.temp_buf, self.temp):
             if u != 0x20:
@@ -992,7 +1028,7 @@ class TextPage:
             chars.append(ci)
         # CFX_BidiString(str, auto_order=false): a line runs right to left only in a document whose
         # /ViewerPreferences say /Direction /R2L (FPDFText_LoadPage), whatever its letters
-        segments, _ = bidi_segments(buf, auto_order=False)
+        segments, _ = bidi_segments(buf, False)
         if self.rtl:
             segments = segments[::-1]
         current = BIDI_RIGHT if self.rtl else BIDI_LEFT
@@ -1011,7 +1047,8 @@ class TextPage:
                     current = BIDI_LEFT
                 for m in range(start, start + count):
                     self._add_char(buf[m], chars[m])
-        self.temp, self.temp_buf = [], []
+        self.temp = []
+        self.temp_buf = []
 
     def _add_char_rtl(self, u: int, ci: CharInfo) -> None:
         """AddCharInfoByRLDirection: mirrored, and decomposed into pieces."""

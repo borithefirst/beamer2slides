@@ -16,38 +16,71 @@ from __future__ import annotations
 
 import argparse
 import random
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 import numpy as np
 
+from ..typing_compat import assert_never
 from .render_torture import EXTGS
 from .torture_kit import drop_lines, pixel_diff
 
+if TYPE_CHECKING:
+    from ..arrays import Ints, Pixels
+
 MEDIA = (0, 0, 200, 150)
+
+Named = tuple[bytes, int]
+"""(resource name, object number)."""
+
+Compared = tuple["int | None", "Pixels", "Pixels | None", "Ints | str"]
+"""(pixels that differ, -1 when the two readers disagree on the page's objects, None when the pure
+reader refuses; PDFium's render; pure's render, None when it refused; per-pixel difference, or
+what went wrong)."""
+
+
+class Stats(TypedDict):
+    """What `run` saw: the seeds apart, the refusals by reason, the pages drawn exactly."""
+    failed: list[int]
+    refused: dict[str, int]
+    drawn: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class Resources:
+    """What one Type 3 font's glyph procedures name, filled in as they are made: images and forms,
+    shadings, and fonts (None: the font itself)."""
+    xobject: list[Named]
+    shading: list[Named]
+    font: list[tuple[bytes, int | None]]
+
+
+GlyphKind = Literal["bitmap", "path", "colored", "form", "nested", "empty", "colored_image", "self", "mixed"]
 
 
 def _n(v: float) -> bytes:
     return (b"%.4f" % v).rstrip(b"0").rstrip(b".") or b"0"
 
 
-def _ns(*vs) -> bytes:
+def _ns(*vs: float) -> bytes:
     return b" ".join(_n(v) for v in vs)
 
 
-def pdf_bytes(content: bytes, objects: list[bytes], fonts: list[tuple[bytes, int]], media=MEDIA) -> bytes:
-    """One page of `content`, with `objects` numbered 1.. in front and `fonts` (name, object
-    number) in its /Font dictionary; the ExtGStates are `render_torture.EXTGS` (/A0../A4)."""
+def pdf_bytes(content: bytes, objects: list[bytes], fonts: list[Named]) -> bytes:
+    """One page of `content` (`MEDIA`), with `objects` numbered 1.. in front and `fonts` (name,
+    object number) in its /Font dictionary; the ExtGStates are `render_torture.EXTGS` (/A0../A4)."""
     objs = list(objects)
     res = b"<< " + EXTGS + b" /Font << " + b" ".join(b"/%s %d 0 R" % (n, i) for n, i in fonts) + b" >> >>"
     objs.append(b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream")
     cid = len(objs)
     pages = cid + 2
-    box = b"[%s]" % b" ".join(b"%g" % v for v in media)
+    box = b"[%s]" % b" ".join(b"%g" % v for v in MEDIA)
     objs.append(b"<< /Type /Page /Parent %d 0 R /MediaBox %s /Resources %s /Contents %d 0 R >>" % (pages, box, res, cid))
     objs.append(b"<< /Type /Pages /Kids [%d 0 R] /Count 1 >>" % (cid + 1))
     objs.append(b"<< /Type /Catalog /Pages %d 0 R >>" % pages)
     out = bytearray(b"%PDF-1.7\n")
-    offs = []
+    offs: list[int] = []
     for i, o in enumerate(objs, 1):
         offs.append(len(out))
         out += b"%d 0 obj\n" % i + o + b"\nendobj\n"
@@ -59,15 +92,17 @@ def pdf_bytes(content: bytes, objects: list[bytes], fonts: list[tuple[bytes, int
     return bytes(out)
 
 
-GLYPH_KINDS = ("bitmap", "bitmap", "bitmap", "path", "path", "colored", "form", "nested", "empty",
-               "colored_image", "self", "mixed", "mixed")
+GLYPH_KINDS: tuple[GlyphKind, ...] = (
+    "bitmap", "bitmap", "bitmap", "path", "path", "colored", "form", "nested", "empty",
+    "colored_image", "self", "mixed", "mixed")
 
 
 class Builder:
     def __init__(self, r: random.Random):
         self.r = r
         self.objects: list[bytes] = []
-        self.fonts: list[tuple[bytes, int]] = []
+        self.fonts: list[Named] = []
+        self.glyph_counts: list[int] = []      # of each font in `fonts`
 
     def add(self, b: bytes) -> int:
         self.objects.append(b)
@@ -77,7 +112,7 @@ class Builder:
         return self.add(b"<< %s /Length %d >>\nstream\n" % (entries, len(data)) + data + b"\nendstream")
 
     # ---- glyph pieces
-    def mask(self):
+    def mask(self) -> tuple[int, int, bytes, bytes]:
         """(width, height, packed rows, /Decode entry) of a random image mask."""
         r = self.r
         w, h = r.randint(1, 28), r.randint(1, 28)
@@ -96,12 +131,12 @@ class Builder:
         packed = np.packbits(painted.astype(np.uint8), axis=1).tobytes()
         return w, h, packed, decode
 
-    def path_ops(self, box, colors: bool) -> list[bytes]:
+    def path_ops(self, box: tuple[float, float, float, float], colors: bool) -> list[bytes]:
         r = self.r
         l, b, rt, t = box
-        ops = []
+        ops: list[bytes] = []
 
-        def pt():
+        def pt() -> tuple[float, float]:
             return r.uniform(l, rt), r.uniform(b, t)
 
         for _ in range(r.randint(1, 3)):
@@ -132,7 +167,7 @@ class Builder:
             ops[-1] += b" " + r.choice([b"f", b"f", b"f*", b"S", b"B", b"b*", b"s"])
         return ops
 
-    def glyph(self, kind: str, U: float, res: dict, depth: int) -> bytes:
+    def glyph(self, kind: GlyphKind, U: float, res: Resources, depth: int) -> bytes:
         """The content stream of one glyph procedure (glyph space: U units per text unit)."""
         r = self.r
         w = r.uniform(0.2, 1.1) * U
@@ -167,10 +202,10 @@ class Builder:
                 else:
                     img = b"BI /IM true /W %d /H %d%s ID " % (mw, mh, decode) + packed + b"\nEI"
             else:
-                name = b"I%d" % len(res.setdefault("XObject", []))
+                name = b"I%d" % len(res.xobject)
                 oid = self.stream(b"/Type /XObject /Subtype /Image /ImageMask true /Width %d /Height %d%s"
                                   % (mw, mh, decode.replace(b"/D ", b"/Decode ")), packed)
-                res["XObject"].append((name, oid))
+                res.xobject.append((name, oid))
                 img = b"/" + name + b" Do"
             return b"\n".join(head + [img, b"Q"])
         if kind == "path":
@@ -189,12 +224,12 @@ class Builder:
                     data = bytes(r.randrange(256) for _ in range(w_ * h_))
                     ops += [cm, b"BI /W %d /H %d /CS /G /BPC 8 ID " % (w_, h_) + data + b"\nEI", b"Q"]
                 else:
-                    name = b"Sh%d" % len(res.setdefault("Shading", []))
+                    name = b"Sh%d" % len(res.shading)
                     sid = self.add(b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [%s] /Function << "
                                    b"/FunctionType 2 /Domain [0 1] /C0 [%s] /C1 [%s] /N 1 >> /Extend [true true] >>"
                                    % (_ns(l, b, rt, t), _ns(r.random(), r.random(), r.random()),
                                       _ns(r.random(), r.random(), r.random())))
-                    res["Shading"].append((name, sid))
+                    res.shading.append((name, sid))
                     ops += [b"q %s re W n /%s sh Q" % (_ns(l, b, 0.5 * (rt - l), 0.5 * (t - b)), name)]
             return b"\n".join(ops)
         if kind == "colored":
@@ -203,27 +238,30 @@ class Builder:
             inner = self.path_ops(box, True)
             fid = self.stream(b"/Type /XObject /Subtype /Form /BBox [%s]" % _ns(l - U, b - U, rt + U, t + U),
                               b"\n".join(inner))
-            name = b"F%d" % len(res.setdefault("XObject", []))
-            res["XObject"].append((name, fid))
+            name = b"F%d" % len(res.xobject)
+            res.xobject.append((name, fid))
             head = r.choice([d0, d1])
             pre = [b"%s rg" % _ns(r.random(), r.random(), r.random())] if r.random() < 0.4 else []
             return b"\n".join([head] + pre + [b"/" + name + b" Do"] + self.path_ops(box, True)[:r.randint(0, 1)])
-        # nested Type 3 text (or the font inside its own glyphs)
-        if kind == "self" or depth >= 2:
-            name, fsize = b"S", U
-            res.setdefault("Font", []).append((b"S", None))
-        else:
-            fid, _ = self.font(depth + 1)
-            name = b"N%d" % len(res.setdefault("Font", []))
-            res["Font"].append((name, fid))
-            fsize = r.uniform(0.3, 1.2) * U
-        head = r.choice([d0, d1])
-        pre = [b"%s rg" % _ns(r.random(), r.random(), r.random())] if r.random() < 0.5 else []
-        codes = bytes(r.randrange(4) for _ in range(r.randint(1, 3)))
-        text = b"BT /%s %s Tf %s Td <%s> Tj ET" % (name, _n(fsize), _ns(l, b + 0.3 * (t - b)), codes.hex().encode())
-        return b"\n".join([head] + pre + [text])
+        if kind == "nested" or kind == "self":
+            # nested Type 3 text (or the font inside its own glyphs)
+            if kind == "self" or depth >= 2:
+                name, fsize = b"S", U
+                res.font.append((b"S", None))
+            else:
+                fid, _ = self.font(depth + 1)
+                name = b"N%d" % len(res.font)
+                res.font.append((name, fid))
+                fsize = r.uniform(0.3, 1.2) * U
+            head = r.choice([d0, d1])
+            pre = [b"%s rg" % _ns(r.random(), r.random(), r.random())] if r.random() < 0.5 else []
+            codes = bytes(r.randrange(4) for _ in range(r.randint(1, 3)))
+            text = b"BT /%s %s Tf %s Td <%s> Tj ET" % (name, _n(fsize), _ns(l, b + 0.3 * (t - b)),
+                                                         codes.hex().encode())
+            return b"\n".join([head] + pre + [text])
+        assert_never(kind)
 
-    def font(self, depth: int = 0) -> tuple[int, int]:
+    def font(self, depth: int) -> tuple[int, int]:
         """(object number, number of glyphs) of a random Type 3 font."""
         r = self.r
         s = r.choice([0.001, 0.001, 0.001, 0.01, 0.011, 0.0005, 0.05, 1.0])
@@ -241,23 +279,23 @@ class Builder:
             fm[4], fm[5] = r.uniform(-0.2, 0.2), r.uniform(-0.2, 0.2)
         U = 1 / s
         n = r.randint(1, 5)
-        res: dict = {}
+        res = Resources(xobject=[], shading=[], font=[])
         kinds = [r.choice(GLYPH_KINDS[:9] if depth or r.random() < 0.5 else GLYPH_KINDS) for _ in range(n)]
         if r.random() < 0.4:
             kinds = [kinds[0]] * n
-        procs = []
-        widths = []
+        procs: list[Named] = []
+        widths: list[float] = []
         for i, kind in enumerate(kinds):
             content = self.glyph(kind, U, res, depth)
             procs.append((b"g%d" % i, self.stream(b"", content)))
             widths.append(r.uniform(0.3, 1.0) * U)
         me = self.add(b"")                 # placeholder: the font may name itself
-        fonts = [(nm, me if oid is None else oid) for nm, oid in res.get("Font", [])]
-        parts = []
-        if res.get("XObject"):
-            parts.append(b"/XObject << " + b" ".join(b"/%s %d 0 R" % x for x in res["XObject"]) + b" >>")
-        if res.get("Shading"):
-            parts.append(b"/Shading << " + b" ".join(b"/%s %d 0 R" % x for x in res["Shading"]) + b" >>")
+        fonts = [(nm, me if oid is None else oid) for nm, oid in res.font]
+        parts: list[bytes] = []
+        if res.xobject:
+            parts.append(b"/XObject << " + b" ".join(b"/%s %d 0 R" % x for x in res.xobject) + b" >>")
+        if res.shading:
+            parts.append(b"/Shading << " + b" ".join(b"/%s %d 0 R" % x for x in res.shading) + b" >>")
         if fonts:
             parts.append(b"/Font << " + b" ".join(b"/%s %d 0 R" % x for x in fonts) + b" >>")
         k = r.random()
@@ -277,9 +315,9 @@ class Builder:
     def draw(self) -> bytes:
         r = self.r
         if not self.fonts or r.random() < 0.3:
-            fid, n = self.font()
+            fid, n = self.font(0)
             self.fonts.append((b"T%d" % len(self.fonts), fid))
-            self.glyph_counts = getattr(self, "glyph_counts", []) + [n]
+            self.glyph_counts.append(n)
         fi = r.randrange(len(self.fonts))
         name, n = self.fonts[fi][0], self.glyph_counts[fi]
         ops = [b"q"]
@@ -322,7 +360,7 @@ class Builder:
         return b"\n".join(ops)
 
 
-def case(seed: int):
+def case(seed: int) -> tuple[bytes, list[bytes], list[Named], float, bool]:
     """(content, objects, fonts, zoom, transparent) for `seed`."""
     r = random.Random(seed)
     b = Builder(r)
@@ -332,9 +370,9 @@ def case(seed: int):
     return content, b.objects, b.fonts, zoom, transparent
 
 
-def compare(content: bytes, objects, fonts, zoom: float, transparent: bool):
+def compare(content: bytes, objects: list[bytes], fonts: list[Named], zoom: float, transparent: bool) -> Compared:
     """(pixels that differ or None when the pure reader refuses, PDFium's render, pure's render,
-    per-pixel difference or the refusal)."""
+    per-pixel difference or the refusal): `Compared`."""
     from ..pdf.api import PdfError
     from ..pdf.pdfium_backend import PdfiumBackend
     from ..pdf.pure.backend import PureBackend
@@ -344,11 +382,11 @@ def compare(content: bytes, objects, fonts, zoom: float, transparent: bool):
     try:
         # what the page holds first: a Type 3 glyph that selects fonts loads their chars
         read = [([dataclasses.astuple(o) for o in doc[0].objects()], doc[0].object_bounds()) for doc in docs]
-        a = docs[0][0].render(zoom, transparent=transparent)
+        a = docs[0][0].render(zoom, None, transparent)
         if read[0] != read[1]:
             return -1, a, a, "objects or bounds apart"
         try:
-            b = docs[1][0].render(zoom, transparent=transparent)
+            b = docs[1][0].render(zoom, None, transparent)
         except PdfError as e:
             return None, a, None, str(e)
     finally:
@@ -358,19 +396,20 @@ def compare(content: bytes, objects, fonts, zoom: float, transparent: bool):
     return n, a, b, d
 
 
-def shrink(content: bytes, objects, fonts, zoom: float, transparent: bool):
+def shrink(content: bytes, objects: list[bytes], fonts: list[Named], zoom: float, transparent: bool) -> bytes:
     """Drop lines of the page while the difference remains."""
-    def fails(c):
+    def fails(c: bytes) -> bool:
         try:
             return (compare(c, objects, fonts, zoom, transparent)[0] or 0) != 0
         except Exception:
             return False
-    return drop_lines(content, fails, keep=(b"q", b"Q", b"BT", b"ET"))
+    return drop_lines(content, fails, (b"q", b"Q", b"BT", b"ET"))
 
 
-def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True) -> dict:
-    """{'failed': [seeds], 'refused': {reason: count}, 'drawn': count}."""
-    stats = {"failed": [], "refused": {}, "drawn": 0}
+def run(seed0: int, n: int, out: Path | None, verbose: bool) -> Stats:
+    """The seeds apart, the refusals by reason, the pages drawn exactly (`Stats`); `verbose`
+    shrinks each failure and prints it, into `out` too when given."""
+    stats = Stats(failed=[], refused={}, drawn=0)
     for seed in range(seed0, seed0 + n):
         content, objects, fonts, zoom, transparent = case(seed)
         try:
@@ -381,7 +420,8 @@ def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True) -> di
             stats["failed"].append(seed)
             continue
         if npx is None:
-            stats["refused"][d] = stats["refused"].get(d, 0) + 1
+            reason = d if isinstance(d, str) else "refused"
+            stats["refused"][reason] = stats["refused"].get(reason, 0) + 1
             continue
         if not npx:
             stats["drawn"] += 1
@@ -396,7 +436,7 @@ def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True) -> di
         else:
             print(f"seed {seed} zoom {zoom} transparent {transparent}: {npx} px, max {d.max() if npx else 0}")
         print("-- page\n" + small.decode("latin-1")[:1500])
-        if out is not None and npx and not isinstance(d, str):
+        if out is not None and npx and b is not None and not isinstance(d, str):
             out.mkdir(parents=True, exist_ok=True)
             from PIL import Image
             vis = np.concatenate([a[..., :3], b[..., :3], np.stack([np.where(d > 0, 255, 0)] * 3, -1)], 1)
@@ -405,7 +445,7 @@ def run(seed0: int, n: int, out: Path | None = None, verbose: bool = True) -> di
     return stats
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("seed0", type=int, nargs="?", default=0)
     ap.add_argument("n", type=int, nargs="?", default=200)
@@ -419,4 +459,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(None))

@@ -5,17 +5,46 @@ strings and junk tails, tables laid out in random order, random /Encoding, /Flag
 ToUnicode - and every extract call compared between the pure reader and PDFium. The first
 difference per seed is printed, shrunk, with the font's recipe. `tests/test_pure_pdf.py` replays
 every seed that found a bug."""
+from __future__ import annotations
+
 import dataclasses
 import io
 import random
 import struct
 import sys
 from collections import Counter
+from collections.abc import Sequence
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from fontTools.fontBuilder import FontBuilder
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 
 from . import render_torture_text as T
+
+if TYPE_CHECKING:
+    from ..pdf.api import Box, Char, PageObject
+
+Cmap = dict[int, int]
+"""A cmap subtable's mapping: code -> glyph id."""
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class Segment:
+    """One format 4 segment: its codes, its idDelta and its glyphs - through glyphIdArray (a list),
+    by idDelta alone (None), or an idRangeOffset of 0xFFFF ("ffff")."""
+    start: int
+    end: int
+    delta: int
+    glyphs: list[int] | Literal["ffff"] | None
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class Said:
+    """What one reader says about the page, compared field by field in this order."""
+    objects: list[tuple[object, ...]]
+    object_bounds: list[Box]
+    chars: list[dict[str, object]]
+    widths: list[float | None]
 
 NAMES = [".notdef", "space", "A", "a", "B", "b", "uni0041", "uni00E9", "uni00e9", "u1F600", "u00E9", "u0041",
          "a85", "a96", "a205", "a1", "Delta", "Omega", "fraction", "hyphen", "mu", "fi", "f_i", "A.sc", "e.alt",
@@ -26,7 +55,7 @@ CODES_UNI = [0x20, 0x41, 0x61, 0x42, 0xE9, 0xC9, 0x2022, 0x20AC, 0x394, 0x2206, 
              0x2D, 0x131, 0xF041, 0xF020, 0xF061, 0x1F600, 0x10FFFF, 0x21, 0x23, 0x2026, 0x27]
 
 
-def glyph(i):
+def glyph(i: int):
     pen = TTGlyphPen(None)
     x0, y0 = (i * 37) % 90, -30 + (i * 23) % 70
     w, h = 80 + 17 * (i % 13), 200 + 29 * (i % 11)
@@ -37,12 +66,12 @@ def glyph(i):
 
 # ---------------------------------------------------------------- raw cmap subtables
 
-def sub0(m):
+def sub0(m: Cmap) -> bytes:
     arr = bytes(m.get(c, 0) & 0xFF for c in range(256))
     return struct.pack(">HHH", 0, 262, 0) + arr
 
 
-def sub6(m):
+def sub6(m: Cmap) -> bytes:
     codes = [c for c in m if c < 0x10000]
     if not codes:
         return struct.pack(">HHHHH", 6, 10, 0, 0, 0)
@@ -52,8 +81,9 @@ def sub6(m):
     return struct.pack(">HHHHH", 6, 10 + 2 * len(ids), 0, first, len(ids)) + struct.pack(">%dH" % len(ids), *ids)
 
 
-def sub12(m, fmt=12):
-    groups = []
+def sub12(m: Cmap, fmt: int) -> bytes:
+    """Format 12 (glyph ids run on with the codes) or 13 (one glyph per group)."""
+    groups: list[list[int]] = []     # [first code, last code, glyph]
     for c in sorted(m):
         g = m[c]
         if groups and c == groups[-1][1] + 1 and (fmt == 13 and g == groups[-1][2] or
@@ -65,54 +95,57 @@ def sub12(m, fmt=12):
     return struct.pack(">HHIII", fmt, 0, 16 + len(body), 0, len(groups)) + body
 
 
-def sub4(m, r, mode):
-    """mode: plain | array | overlap | unsorted | nolast | badlast"""
+def sub4(m: Cmap, r: random.Random, mode: str) -> bytes:
+    """mode: plain | array | overlap | unsorted | ffff | nolast | badlast"""
     codes = sorted(c for c in m if c < 0xFFFF)
-    segs = []   # [start, end, delta, glyphs or None]
+    runs: list[tuple[int, list[int]]] = []     # (first code, the glyphs of the codes from it on)
     for c in codes:
-        if segs and c == segs[-1][1] + 1 and r.random() < 0.8:
-            segs[-1][1] = c
-            segs[-1][3].append(m[c])
+        if runs and c == runs[-1][0] + len(runs[-1][1]) and r.random() < 0.8:
+            runs[-1][1].append(m[c])
         else:
-            segs.append([c, c, 0, [m[c]]])
-    out = []
-    for s, e, _, gl in segs:
+            runs.append((c, [m[c]]))
+    out: list[Segment] = []
+    for s, gl in runs:
+        e = s + len(gl) - 1
         if mode != "plain" and r.random() < 0.5:
-            out.append([s, e, 0, gl])                               # through glyphIdArray
+            out.append(Segment(start=s, end=e, delta=0, glyphs=gl))              # through glyphIdArray
         else:
             deltas = {(g - (s + k)) & 0xFFFF for k, g in enumerate(gl)}
             if len(deltas) == 1:
-                out.append([s, e, deltas.pop(), None])
+                out.append(Segment(start=s, end=e, delta=deltas.pop(), glyphs=None))
             else:
-                out.append([s, e, 0, gl])
+                out.append(Segment(start=s, end=e, delta=0, glyphs=gl))
     if mode == "overlap" and out:
         k = r.randrange(len(out))
-        s, e, d, gl = out[k]
+        s, e = out[k].start, out[k].end
         s2 = max(0, s - r.randint(0, 3))
-        out.insert(k + 1, [s2, e + r.randint(0, 3), r.randint(0, 20), None])
-        out.sort(key=lambda t: t[0])
+        out.insert(k + 1, Segment(start=s2, end=e + r.randint(0, 3), delta=r.randint(0, 20), glyphs=None))
+        out.sort(key=lambda t: t.start)
     if mode == "unsorted" and len(out) > 1:
         i, j = r.sample(range(len(out)), 2)
         out[i], out[j] = out[j], out[i]
     if mode == "ffff" and out:
-        out[r.randrange(len(out))][3] = "ffff"
+        k = r.randrange(len(out))
+        out[k] = dataclasses.replace(out[k], glyphs="ffff")
     if mode != "nolast":
-        out.append([0xFFFF, 0xFFFF, 1, None])
+        out.append(Segment(start=0xFFFF, end=0xFFFF, delta=1, glyphs=None))
     if mode == "badlast":
-        out[-1] = [0xFFFF, 0xFFFF, 0, [5]]
+        out[-1] = Segment(start=0xFFFF, end=0xFFFF, delta=0, glyphs=[5])
     n = len(out)
-    ends = [t[1] for t in out]
-    starts = [t[0] for t in out]
-    deltas = [t[2] & 0xFFFF for t in out]
-    offsets, array = [], []
+    ends = [t.end for t in out]
+    starts = [t.start for t in out]
+    deltas = [t.delta & 0xFFFF for t in out]
+    offsets: list[int] = []
+    array: list[int] = []
     for i, t in enumerate(out):
-        if t[3] == "ffff":
+        glyphs = t.glyphs
+        if isinstance(glyphs, str):
             offsets.append(0xFFFF)
-        elif t[3] is None:
+        elif glyphs is None:
             offsets.append(0)
         else:
             offsets.append(2 * (n - i) + 2 * len(array))
-            array += [(g - t[2]) & 0xFFFF if g else 0 for g in t[3]]
+            array += [(g - t.delta) & 0xFFFF if g else 0 for g in glyphs]
     body = struct.pack(">%dH" % n, *ends) + b"\0\0" + struct.pack(">%dH" % n, *starts) + \
         struct.pack(">%dH" % n, *deltas) + struct.pack(">%dH" % n, *offsets) + \
         struct.pack(">%dH" % len(array), *array)
@@ -120,8 +153,8 @@ def sub4(m, r, mode):
     return struct.pack(">HHHHHHH", 4, length & 0xFFFF, 0, 2 * n, 0, 0, 0) + body
 
 
-def make_cmap(r, n_glyphs, recipe):
-    subs = []
+def make_cmap(r: random.Random, n_glyphs: int, recipe: list[str]) -> bytes:
+    subs: list[tuple[int, int, bytes]] = []
     for _ in range(r.choice([0, 1, 1, 2, 2, 3, 4])):
         pid, eid = r.choice([(3, 0), (3, 1), (1, 0), (0, 3), (0, 4), (3, 10), (3, 2), (0, 5), (2, 1), (1, 1)])
         if (pid, eid) == (3, 0):
@@ -170,10 +203,14 @@ def make_cmap(r, n_glyphs, recipe):
     return head + recs + blobs
 
 
-def make_post(r, n, recipe):
+def _post_header(fmt: int) -> bytes:
+    return struct.pack(">IihhIIIII", fmt, 0, -100, 50, 0, 0, 0, 0, 0)
+
+
+def make_post(r: random.Random, n: int, recipe: list[str]) -> bytes | None:
     kind = r.choice(["none", "3", "2", "2", "2", "2.5", "1", "4", "short"])
-    hdr = lambda fmt: struct.pack(">IihhIIIII", fmt, 0, -100, 50, 0, 0, 0, 0, 0)
-    names = []
+    hdr = _post_header
+    names: list[str] = []
     if kind == "3":
         data = hdr(0x00030000)
     elif kind == "1":
@@ -189,7 +226,8 @@ def make_post(r, n, recipe):
         from ..pdf.pure.psnames_data import MAC_NAMES
         names = [r.choice(NAMES) for _ in range(n)]
         names[0] = ".notdef" if r.random() < 0.8 else names[0]
-        extra, idx = [], []
+        extra: list[str] = []
+        idx: list[int] = []
         for nm in names:
             if nm in MAC_NAMES and r.random() < 0.7:
                 idx.append(MAC_NAMES.index(nm))
@@ -221,7 +259,7 @@ def make_post(r, n, recipe):
     return data
 
 
-def make_os2(tables, r, recipe):
+def make_os2(tables: dict[bytes, bytes], r: random.Random, recipe: list[str]) -> None:
     """An OS/2 table of any version, maybe cut short, and hhea metrics maybe 0: sfnt_load_face's
     ascender and descender (USE_TYPO_METRICS, then hhea, then typo, then win) - they are the char
     boxes of a font whose FontBBox is 0 0 0 0 (--os2)."""
@@ -245,7 +283,7 @@ def make_os2(tables, r, recipe):
     recipe.append(f"os2 v{version} len {length} sel {selection:#x} typo {typo} win {win} hhea0 {zero}")
 
 
-def make_font(r, recipe, os2=None):
+def make_font(r: random.Random, recipe: list[str], os2: random.Random | None) -> bytes:
     n = r.randint(3, 30)
     order = [".notdef"] + ["g%d" % i for i in range(1, n)]
     fb = FontBuilder(1000, isTTF=True)
@@ -259,7 +297,7 @@ def make_font(r, recipe, os2=None):
     buf = io.BytesIO()
     tt.save(buf, reorderTables=False)
     raw = buf.getvalue()
-    tables = {}
+    tables: dict[bytes, bytes] = {}
     for k in range(struct.unpack_from(">H", raw, 4)[0]):
         tag, _, off, length = struct.unpack_from(">4sIII", raw, 12 + 16 * k)
         tables[tag] = raw[off:off + length]
@@ -275,7 +313,7 @@ def make_font(r, recipe, os2=None):
         tables[b"post"] = post
     if os2 is not None:
         make_os2(tables, os2, recipe)
-    layout = None
+    layout: list[bytes] | None = None
     if r.random() < 0.5:
         layout = list(tables)
         r.shuffle(layout)
@@ -283,11 +321,14 @@ def make_font(r, recipe, os2=None):
     return sfnt(tables, layout)
 
 
-def sfnt(tables, layout=None):
+def sfnt(tables: dict[bytes, bytes], layout: list[bytes] | None) -> bytes:
+    """The font file of `tables`, its directory sorted, the tables themselves laid out in `layout`'s
+    order (None: sorted too)."""
     tags = sorted(tables)
     out = bytearray(struct.pack(">IHHHH", 0x00010000, len(tags), 0, 0, 0))
     off = 12 + 16 * len(tags)
-    where, blobs = {}, b""
+    where: dict[bytes, int] = {}
+    blobs = b""
     for tag in layout or tags:
         where[tag] = off + len(blobs)
         blobs += tables[tag] + b"\0" * (-len(tables[tag]) % 4)
@@ -299,7 +340,7 @@ def sfnt(tables, layout=None):
 DIRECTORY = ["cut", "long", "maxp", "dup", "unsorted", "zero", "offset", "count", "head", "hhea", "loca"]
 
 
-def mutate_directory(data, r, recipe):
+def mutate_directory(data: bytes, r: random.Random, recipe: list[str]) -> bytes:
     """Break the table directory or a table FreeType checks while opening the face (--directory)."""
     d = bytearray(data)
     n = struct.unpack_from(">H", d, 4)[0]
@@ -334,7 +375,9 @@ def mutate_directory(data, r, recipe):
     return bytes(d)
 
 
-def pdf_font(r, recipe, directory=None, os2=None):
+def pdf_font(r: random.Random, recipe: list[str], directory: random.Random | None,
+             os2: random.Random | None) -> T.FontSpec:
+    """The font of a seed: `directory` breaks its table directory, `os2` adds an OS/2 table."""
     data = make_font(r, recipe, os2)
     if directory is not None:
         data = mutate_directory(data, directory, recipe)
@@ -343,7 +386,7 @@ def pdf_font(r, recipe, directory=None, os2=None):
     if enc == "dict":
         base = r.choice(["", "/BaseEncoding /WinAnsiEncoding", "/BaseEncoding /MacRomanEncoding",
                          "/BaseEncoding /StandardEncoding", "/BaseEncoding /Bogus"])
-        diffs = []
+        diffs: list[str] = []
         for _ in range(r.randint(1, 6)):
             diffs.append(str(r.randrange(256)))
             diffs += ["/" + (r.choice(NAMES + ["g%d" % r.randrange(8), "uni%04X" % r.choice(CODES_UNI[:16])])
@@ -375,10 +418,10 @@ def pdf_font(r, recipe, directory=None, os2=None):
                 "<00> <FF> endcodespacerange %d beginbfchar %s endbfchar endcmap CMapName currentdict /CMap "
                 "defineresource pop end end" % (pairs.count("> <"), pairs)).encode()
         objs.append(b"<< /Length %d >>\nstream\n" % len(cmap) + cmap + b"\nendstream")
-    return T.FontSpec("torture", "truetype", objs, list(range(256)))
+    return T.FontSpec(name="torture", kind="truetype", objects=objs, codes=list(range(256)), two_byte=False)
 
 
-def content(r):
+def content(r: random.Random) -> bytes:
     lines = []
     for k in range(r.randint(1, 8)):
         codes = [r.randrange(256) if r.random() < 0.5 else r.randrange(0x20, 0x80) for _ in range(r.randint(1, 16))]
@@ -387,17 +430,54 @@ def content(r):
     return b"\n".join(lines)
 
 
-def said(page):
-    chars = [{k: v for k, v in dataclasses.asdict(c).items() if k != "font_id"} for c in page.chars()]
-    return {
-        "objects": [dataclasses.astuple(o) for o in page.objects()],
-        "object_bounds": page.object_bounds(),
-        "chars": chars,
-        "widths": page.glyph_widths([(c.font_id, c.c[:1], c.size) for c in page.chars() if c.font_id >= 0 and c.c]),
-    }
+def _object_tuple(o: PageObject) -> tuple[object, ...]:
+    return dataclasses.astuple(o)
 
 
-def first_diff(cont, fonts):
+class Readable(Protocol):
+    """What `said` asks of a page, of either backend."""
+    def objects(self) -> list[PageObject]: ...
+    def object_bounds(self) -> list[Box]: ...
+    def chars(self) -> list[Char]: ...
+    def glyph_widths(self, requests: Sequence[tuple[int, str, float]]) -> list[float | None]: ...
+
+
+def said(page: Readable) -> Said:
+    chars: list[dict[str, object]] = [{k: v for k, v in dataclasses.asdict(c).items() if k != "font_id"}
+                                      for c in page.chars()]
+    return Said(
+        objects=[_object_tuple(o) for o in page.objects()],
+        object_bounds=page.object_bounds(),
+        chars=chars,
+        widths=page.glyph_widths([(c.font_id, c.c[:1], c.size) for c in page.chars() if c.font_id >= 0 and c.c]),
+    )
+
+
+def _apart(k: str, a: Sequence[object], b: Sequence[object]) -> str | None:
+    """The first item of field `k` the two readers say apart, or their lengths."""
+    if a == b:
+        return None
+    if len(a) == len(b):
+        for i, (x, y) in enumerate(zip(a, b)):
+            if x != y:
+                return f"{k}[{i}] pure {x} pdfium {y}"
+    return f"{k} lengths {len(a)} {len(b)}"
+
+
+def _chars_apart(a: list[dict[str, object]], b: list[dict[str, object]]) -> str | None:
+    """`_apart` over the chars, showing only the fields of the first char apart that differ."""
+    if a == b:
+        return None
+    if len(a) == len(b):
+        for i, (x, y) in enumerate(zip(a, b)):
+            if x != y:
+                x = {q: x[q] for q in x if x[q] != y[q]}
+                y = {q: y[q] for q in x}
+                return f"chars[{i}] pure {x} pdfium {y}"
+    return f"chars lengths {len(a)} {len(b)}"
+
+
+def first_diff(cont: bytes, fonts: list[T.FontSpec]) -> str | None:
     from ..pdf.pdfium_backend import PdfiumBackend
     from ..pdf.pure.backend import PureBackend
     data = T.pdf_bytes(cont, fonts)
@@ -407,20 +487,11 @@ def first_diff(cont, fonts):
     finally:
         for doc in docs:
             doc.close()
-    for k in a:
-        if a[k] != b[k]:
-            if isinstance(a[k], list) and len(a[k]) == len(b[k]):
-                for i, (x, y) in enumerate(zip(a[k], b[k])):
-                    if x != y:
-                        if isinstance(x, dict):
-                            x = {q: x[q] for q in x if x[q] != y[q]}
-                            y = {q: y[q] for q in x}
-                        return f"{k}[{i}] pure {x} pdfium {y}"
-            return f"{k} lengths {len(a[k])} {len(b[k])}"
-    return None
+    return (_apart("objects", a.objects, b.objects) or _apart("object_bounds", a.object_bounds, b.object_bounds)
+            or _chars_apart(a.chars, b.chars) or _apart("widths", a.widths, b.widths))
 
 
-def shrink(cont, fonts):
+def shrink(cont: bytes, fonts: list[T.FontSpec]) -> bytes:
     """Fewest lines, then fewest codes per line."""
     lines = cont.split(b"\n")
     i = 0
@@ -446,12 +517,12 @@ def shrink(cont, fonts):
     return b"\n".join(lines)
 
 
-def case(seed, directory=False, os2=False):
-    """`directory` breaks the sfnt's table directory too, `os2` adds an OS/2 table and a zero
-    FontBBox, each from a generator of its own, so the seeds without them keep making the fonts they
-    always made."""
+def case(seed: int, directory: bool, os2: bool) -> tuple[bytes, list[T.FontSpec], list[str]]:
+    """(content, fonts, recipe) of `seed`. `directory` breaks the sfnt's table directory too, `os2`
+    adds an OS/2 table and a zero FontBBox, each from a generator of its own, so the seeds without
+    them keep making the fonts they always made."""
     r = random.Random(seed)
-    recipe = []
+    recipe: list[str] = []
     spec = pdf_font(r, recipe, random.Random(seed * 7919 + 1) if directory else None,
                     random.Random(seed * 7919 + 2) if os2 else None)
     return content(r), [spec], recipe
@@ -460,7 +531,7 @@ def case(seed, directory=False, os2=False):
 if __name__ == "__main__":
     seed0, n = int(sys.argv[1]), int(sys.argv[2])
     directory, os2 = "--directory" in sys.argv, "--os2" in sys.argv
-    bad = Counter()
+    bad: Counter[str] = Counter()
     for seed in range(seed0, seed0 + n):
         cont, fonts, recipe = case(seed, directory, os2)
         try:

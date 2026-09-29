@@ -25,6 +25,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
 REPO = "https://pdfium.googlesource.com/pdfium/"
@@ -136,7 +137,7 @@ def _source(name: str, local: Path | None) -> str:
     return base64.b64decode(raw).decode("latin-1")
 
 
-def fetch(local: Path | None = None, log=print) -> Path:
+def fetch(local: Path | None, log: Callable[[str], object]) -> Path:
     """Fill the cache: every face not there yet, from `local` or from PDFium's repository.
     A face whose bytes do not match the pinned digest is refused (nothing is written)."""
     dest = cache_dir()
@@ -156,7 +157,7 @@ def fetch(local: Path | None = None, log=print) -> Path:
     return dest
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str]) -> int:
     import argparse
     ap = argparse.ArgumentParser(prog="python -m beamer2slides.pdf.pure.foxit", description=__doc__.split("\n")[0])
     ap.add_argument("--from", dest="local", type=Path, help="a folder with PDFium's Foxit*.cpp sources")
@@ -166,9 +167,9 @@ def main(argv: list[str] | None = None) -> int:
         gone = missing()
         print(f"{cache_dir()}: {len(FACES) - len(gone)} of {len(FACES)} faces" + (f", missing {gone}" if gone else ""))
         return 1 if gone else 0
-    print(f"faces in {fetch(args.local)}")
+    print(f"faces in {fetch(args.local, print)}")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(sys.argv[1:]))

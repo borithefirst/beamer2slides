@@ -29,13 +29,28 @@ glyph images that are not image masks, pattern colours, and Type 3 text drawn in
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, Literal, TypeAlias
+
 import numpy as np
 
-from ...arrays import Gray
-from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT, PdfError
+from ...arrays import Gray, Int32
+from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT, Matrix, PdfError
 from . import raster as R
 from .crt import rect_valid, roundf
+from .fonts import Type3Font, doc_fonts
 from .raster import F
+
+if TYPE_CHECKING:
+    from .content import PObj
+    from .decode_image import DIB
+    from .render import Device, Status
+
+GlyphKind: TypeAlias = Literal["mask1", "mask8"]
+"""A glyph bitmap's pixels: 0/1 values ("mask1") or 0..255 ("mask8")."""
+SizeKey: TypeAlias = "tuple[int, int, int, int]"
+"""A glyph map's key: the matrix's a, b, c, d times 10000, rounded."""
+Placed: TypeAlias = "tuple[_Glyph, tuple[int, int]]"
+"""A glyph kept for the text's mask, and its origin in device pixels."""
 
 MAX_BLUES = 16                     # kType3MaxBlues
 MODE_INVISIBLE = 3
@@ -52,30 +67,24 @@ class Char:
     objects, None once there is no form), `every` (all of them, nested ones included), and after
     LoadBitmapFromSoleImageOfForm `bitmap` (a decode_image.DIB or None) and `image_matrix`."""
 
-    __slots__ = ("colored", "objects", "every", "bitmap", "image_matrix", "why", "image")
+    __slots__ = ("colored", "objects", "every", "bitmap", "image_matrix", "why")
 
-    def __init__(self, colored: bool, objects, every, why):
+    def __init__(self, colored: bool, objects: list[PObj] | None, every: list[PObj],
+                 why: str | None) -> None:
         self.colored, self.objects, self.every, self.why = colored, objects, every, why
-        self.bitmap = None
-        self.image_matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
-        self.image = None
+        self.bitmap: DIB | None = None
+        self.image_matrix: Matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
 
-def _fonts(doc) -> dict:
-    """The fonts glyph procedures select (CPDF_DocPageData's font map: one font per dictionary)."""
-    from .fonts import doc_fonts
-    return doc_fonts(doc)
-
-
-def load_char(font, code: int) -> Char | None:
+def load_char(font: Type3Font, code: int) -> Char | None:
     """CPDF_Type3Font::LoadChar: the char's procedure parsed as a form, cached on the font."""
-    cache = font.__dict__.setdefault("_b2s_type3_chars", {})
+    cache = font.drawn_chars
     if code not in cache:
         cache[code] = _load_char(font, code)
     return cache[code]
 
 
-def _load_char(font, code: int) -> Char | None:
+def _load_char(font: Type3Font, code: int) -> Char | None:
     from dataclasses import replace
 
     from .content import Parser, check_clip, initial_state
@@ -114,12 +123,13 @@ def _load_char(font, code: int) -> Char | None:
                 named = isinstance(cs, Name) and str(cs) not in DEVICE_SPACES
             if named:
                 why = "named resources in a Type 3 font without /Resources"
-    objects: list = []
-    parser = Parser(doc, font_res if isinstance(font_res, dict) else {}, objects, _fonts(doc), {})
+    objects: list[PObj] = []
+    parser = Parser(doc, font_res if isinstance(font_res, dict) else {}, objects, doc_fonts(doc), {})
     parser.parsed.append(stream)
     state = replace(initial_state(), fill_set=False, stroke_set=False)
     try:
-        parser._run(data, proc_res if isinstance(proc_res, dict) else font_res, state,
+        # the procedure's own resources, else the font's (the parser's page resources)
+        parser._run(data, proc_res if isinstance(proc_res, dict) else parser.page_resources, state,
                     (0.0, 0.0, 0.0, 0.0), None)
     except RecursionError:
         why = why or "Type 3 glyphs nested this deep"
@@ -128,10 +138,11 @@ def _load_char(font, code: int) -> Char | None:
     return Char(colored, top or None, objects, why)
 
 
-def _independent_bitmap(font, img):
+def _independent_bitmap(font: Type3Font, img: PObj) -> DIB | None:
     """CPDF_ImageObject::GetIndependentBitmap: the image as CPDF_DIB loads it (no resources)."""
     from . import decode_image as DI
-    stream = img.stream
+    from .render_image import image_stream
+    stream = image_stream(img)
     if not getattr(stream, "exact", True):
         raise PdfError("the pure reader cannot render inline images whose codec's end is not "
                        "found as PDFium finds it (DCT, CCITT) yet")
@@ -149,29 +160,37 @@ def _independent_bitmap(font, img):
     return dib
 
 
-def sole_image(font, ch: Char) -> bool:
-    """CPDF_Type3Char::LoadBitmapFromSoleImageOfForm: True when the char is drawn as a bitmap
-    (or not at all), False when it is drawn as a form."""
-    if ch.bitmap is not None or ch.objects is None:
-        return True
+def form_objects(font: Type3Font, ch: Char) -> list[PObj] | None:
+    """CPDF_Type3Char::LoadBitmapFromSoleImageOfForm: None when the char is drawn as a bitmap
+    (or not at all), else the objects of the form it is drawn as."""
+    objects = ch.objects
+    if ch.bitmap is not None or objects is None:
+        return None
     if ch.colored:
-        return False
-    if len(ch.objects) != 1 or ch.objects[0].type != OBJ_IMAGE:
-        return False
-    img = ch.objects[0]
+        return objects
+    if len(objects) != 1 or objects[0].type != OBJ_IMAGE:
+        return objects
+    img = objects[0]
     ch.bitmap = _independent_bitmap(font, img)
-    ch.image_matrix = tuple(F(v) for v in img.matrix)
+    a, b, c, d, e, f = img.matrix
+    ch.image_matrix = (F(a), F(b), F(c), F(d), F(e), F(f))
     ch.objects = None
-    return True
+    return None
+
+
+def sole_image(font: Type3Font, ch: Char) -> bool:
+    """True when the char is drawn as a bitmap (or not at all), False when it is drawn as a form
+    (`form_objects`)."""
+    return form_objects(font, ch) is None
 
 
 # ---------------------------------------------------------------------- what cannot be drawn
 
 
-def unsupported(obj, chain: tuple = ()) -> str | None:
-    """Why Type 3 text object `obj` (not invisible) cannot be drawn exactly, or None. `chain`:
-    the fonts (their dictionaries' ids) whose glyphs it is drawn in."""
-    font = obj.font
+def unsupported(obj: PObj, font: Type3Font, chain: tuple[int, ...]) -> str | None:
+    """Why text object `obj` (not invisible) in Type 3 font `font` cannot be drawn exactly, or
+    None. `chain`: the fonts (their dictionaries' ids) whose glyphs it is drawn in, () for a page's
+    own text."""
     if obj.pattern:
         return "Type 3 text in a pattern colour"
     key = id(font.dict)
@@ -189,7 +208,7 @@ def unsupported(obj, chain: tuple = ()) -> str | None:
     return None
 
 
-def _char_refusal(font, ch: Char, chain: tuple) -> str | None:
+def _char_refusal(font: Type3Font, ch: Char, chain: tuple[int, ...]) -> str | None:
     if ch.why is not None:
         return ch.why
     if ch.objects is None and ch.bitmap is None:
@@ -213,11 +232,12 @@ def _char_refusal(font, ch: Char, chain: tuple) -> str | None:
             if o.pattern:
                 return "pattern colours in Type 3 glyphs"
         elif o.type == OBJ_TEXT:
-            if not o.items or o.font is None or o.text_mode == MODE_INVISIBLE:
+            text_font = o.font
+            if not o.items or text_font is None or o.text_mode == MODE_INVISIBLE:
                 continue
-            if not o.font.is_type3 or not 0 <= o.text_mode <= 7:
+            if not isinstance(text_font, Type3Font) or not 0 <= o.text_mode <= 7:
                 return "text in Type 3 glyphs"
-            why = unsupported(o, chain)
+            why = unsupported(o, text_font, chain)
             if why is not None:
                 return why
         else:
@@ -231,13 +251,13 @@ def _char_refusal(font, ch: Char, chain: tuple) -> str | None:
 class _GlyphMap:
     """CPDF_Type3GlyphMap."""
 
-    def __init__(self):
-        self.top_blue: list = []
-        self.bottom_blue: list = []
-        self.glyphs: dict = {}
+    def __init__(self) -> None:
+        self.top_blue: list[int] = []
+        self.bottom_blue: list[int] = []
+        self.glyphs: dict[int, _Glyph | None] = {}
 
     @staticmethod
-    def _adjust(pos: float, blues: list) -> int:
+    def _adjust(pos: float, blues: list[int]) -> int:
         """AdjustBlueHelper."""
         min_distance = F(1000000.0)
         closest = -1
@@ -263,7 +283,7 @@ class _Glyph:
 
     __slots__ = ("left", "top", "kind", "mask")
 
-    def __init__(self, left: int, top: int, kind: str, mask: Gray):
+    def __init__(self, left: int, top: int, kind: GlyphKind, mask: Gray) -> None:
         self.left, self.top, self.kind, self.mask = left, top, kind, mask
 
 
@@ -271,13 +291,14 @@ class _Cache:
     """CPDF_Type3Cache: glyph maps by the matrix's size key (it lives while a text object that
     found a glyph in it is being drawn: CPDF_DocRenderData holds it weakly)."""
 
-    def __init__(self, font):
+    def __init__(self, font: Type3Font) -> None:
         self.font = font
-        self.maps: dict = {}
+        self.maps: dict[SizeKey, _GlyphMap] = {}
 
-    def load(self, code: int, m) -> _Glyph | None:
+    def load(self, code: int, m: Matrix) -> _Glyph | None:
         """LoadGlyphBitmap."""
-        key = tuple(roundf(F(v * 10000)) for v in m[:4])
+        key = (roundf(F(m[0] * 10000)), roundf(F(m[1] * 10000)), roundf(F(m[2] * 10000)),
+               roundf(F(m[3] * 10000)))
         gm = self.maps.get(key)
         if gm is None:
             gm = self.maps[key] = _GlyphMap()
@@ -287,7 +308,7 @@ class _Cache:
         g = gm.glyphs[code] = self._render(gm, code, m)
         return g
 
-    def _render(self, gm: _GlyphMap, code: int, m) -> _Glyph | None:
+    def _render(self, gm: _GlyphMap, code: int, m: Matrix) -> _Glyph | None:
         """RenderGlyph."""
         ch = load_char(self.font, code)
         if ch is None or ch.bitmap is None:
@@ -321,7 +342,7 @@ class _Cache:
         return _Glyph(left, -top, kind, mask)
 
 
-def _stretch_to(dib, dw: int, dh: int):
+def _stretch_to(dib: DIB, dw: int, dh: int) -> tuple[GlyphKind, Gray] | None:
     """CFX_DIBBase::StretchTo with no clip: ("mask1" | "mask8", pixels) or None."""
     from .render_image import stretch
     if dw == 0 or dh == 0:
@@ -337,7 +358,7 @@ def _stretch_to(dib, dw: int, dh: int):
     return "mask8", block[..., 0].copy()
 
 
-def _transform_to(dib, m):
+def _transform_to(dib: DIB, m: Matrix) -> tuple[tuple[GlyphKind, Gray] | None, int, int]:
     """CFX_DIBBase::TransformTo (CFX_ImageTransformer with no clip): ((kind, pixels), left, top),
     or (None, 0, 0)."""
     from .render_image import closest_rect, stretch, transform
@@ -374,7 +395,8 @@ def _transform_to(dib, m):
 # ---------------------------------------------------------------------- SetBitMask
 
 
-def set_bit_mask(dev, kind: str, mask: Gray, left: int, top: int, argb: int) -> None:
+def set_bit_mask(dev: Device, kind: GlyphKind, mask: Gray | Int32, left: int, top: int,
+                 argb: int) -> None:
     """CFX_RenderDevice::SetBitMask -> the AGG driver's SetDIBits -> CFX_DIBitmap::CompositeMask:
     CompositeRow_BitMask2Rgb/Argb or ByteMask2Rgb/Argb through the clip region."""
     alpha = argb >> 24
@@ -409,7 +431,7 @@ def set_bit_mask(dev, kind: str, mask: Gray, left: int, top: int, argb: int) -> 
     dest[~on] = saved[~on]
 
 
-def _composite_into(mask: Gray, g: _Glyph, x: int, y: int, alpha: int) -> None:
+def _composite_into(mask: Int32, g: _Glyph, x: int, y: int, alpha: int) -> None:
     """CFX_DIBitmap::CompositeMask onto a k8bppMask bitmap: CompositeRow_BitMask2Mask /
     ByteMask2Mask at the colour's alpha."""
     h, w = g.mask.shape
@@ -433,7 +455,7 @@ def _composite_into(mask: Gray, g: _Glyph, x: int, y: int, alpha: int) -> None:
 # ---------------------------------------------------------------------- ProcessType3Text
 
 
-def _form_status(status, dev, ch: Char, fill_argb: int, key):
+def _form_status(status: Status, dev: Device, ch: Char, fill_argb: int, key: int) -> Status:
     from .render import Status
     sub = Status(dev, (False, False), False, 1.0, status.ctx, None)
     sub.type3_char, sub.t3_fill, sub.rect_aa = ch, fill_argb, True
@@ -441,11 +463,11 @@ def _form_status(status, dev, ch: Char, fill_argb: int, key):
     return sub
 
 
-def process_type3_text(status, obj, matrix) -> None:
-    """CPDF_RenderStatus::ProcessType3Text (a display device, not a printer)."""
+def process_type3_text(status: Status, obj: PObj, font: Type3Font, matrix: Matrix) -> None:
+    """CPDF_RenderStatus::ProcessType3Text (a display device, not a printer) of text object `obj`
+    in its font `font`."""
     from .render import Device, _argb
     from .render_transparency import set_dibits
-    font = obj.font
     key = id(font.dict)
     if key in status.type3_fonts:
         return
@@ -462,7 +484,7 @@ def process_type3_text(status, obj, matrix) -> None:
     char_matrix = tuple(F(F(v) * size) for v in font.matrix)
     text_matrix = tuple(obj.matrix)
     n = len(obj.items)
-    glyphs: list = [None] * n
+    glyphs: list[Placed | None] = [None] * n
     listing = n > 0                    # !glyphs.empty()
     kept = None                        # the Type 3 cache a found glyph keeps alive
     for i, (code, x) in enumerate(obj.items):
@@ -475,7 +497,8 @@ def process_type3_text(status, obj, matrix) -> None:
             raise PdfError(f"the pure reader cannot render {ch.why} yet")
         ca, cb, cc, cd, ce, cf = char_matrix
         m = R.concat(R.concat((ca, cb, cc, cd, F(ce + F(x)), cf), text_matrix), matrix)
-        if not sole_image(font, ch):
+        form = form_objects(font, ch)
+        if form is not None:
             if listing:
                 for g in glyphs[:i]:
                     if g is not None:
@@ -487,10 +510,10 @@ def process_type3_text(status, obj, matrix) -> None:
             if fill_alpha == 255:
                 sub = _form_status(status, dev, ch, fill_argb, key)
                 dev.save()
-                sub.render_list(ch.objects, m)
+                sub.render_list(form, m)
                 dev.restore(False)
                 continue
-            rects = [o.rect for o in ch.objects]
+            rects = [o.rect for o in form]
             box = (min(q[0] for q in rects), min(q[1] for q in rects),
                    max(q[2] for q in rects), max(q[3] for q in rects))
             rect = R.outer_rect(R.transform_rect(m, box))
@@ -503,7 +526,7 @@ def process_type3_text(status, obj, matrix) -> None:
                 raise PdfError("the pure reader cannot render Type 3 glyphs this big yet")
             bd = Device(w, h, True, None)
             sub = _form_status(status, bd, ch, fill_argb, key)
-            sub.render_list(ch.objects, m[:4] + (F(m[4] + float(-rect[0])),
+            sub.render_list(form, m[:4] + (F(m[4] + float(-rect[0])),
                                                  F(m[5] + float(-rect[1]))))
             set_dibits(dev, bd.bgra, "bgra", rect[0], rect[1], "Normal")
             continue

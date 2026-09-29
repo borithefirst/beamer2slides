@@ -18,9 +18,34 @@ FreeType leaves undefined but whose stack effect it still applies.
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal
 
-from .ftoutline import Unported, _glyph_path, divfix, i32, mulfix
+from .ftgrays import Outline, Point26
+from .ftoutline import (IDENTITY16, BitmapKey, GlyphBitmap, Matrix16, PathPoint, Unported,
+                        _glyph_path, divfix, i32, mulfix)
 from . import ttinterp as T
+
+if TYPE_CHECKING:
+    from .fonts import Program
+    from .sfnt import Face as SfntFace
+
+Loaded = tuple[list[T.Point], list[int], list[int]]
+"""A glyph as TT_Load_Glyph leaves it: 26.6 points before the transform, their tags, contour ends."""
+TwilightState = tuple[list[T.Point], list[T.Point], list[int]]
+"""The twilight zone's original and current points and tags, copied."""
+_Sub = tuple[int, int, int, int, Matrix16, bool]
+"""A composite's component: flags, glyph index, arg1, arg2, its transform, whether it has one."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class Failed:
+    """A size program (fpgm or prep) that ran and failed, with FreeType's error."""
+    error: str
+
+
+Ready = Literal["not run", "ran"] | Failed
+"""size->bytecode_ready / cvt_ready: not run yet, ran, or failed."""
 
 TRICKY_NAMES = ("cpop", "DFGirl-W6-WIN-BF", "DFGothic-EB", "DFGyoSho-Lt", "DFHei", "DFHSGothic-W5",
                 "DFHSMincho-W3", "DFHSMincho-W7", "DFKaiSho-SB", "DFKaiShu", "DFKai-SB", "DFMing", "DLC",
@@ -77,7 +102,7 @@ def _checksum(b: bytes) -> int:
     return s & 0xFFFFFFFF
 
 
-def is_tricky(face, names: list[str]) -> bool:
+def is_tricky(face: SfntFace, names: list[str]) -> bool:
     """tt_check_trickyness: by family name, then by the checksums of cvt, fpgm and prep."""
     for name in names:
         if len(name) > 7 and name[6] == "+" and all("A" <= c <= "Z" for c in name[:6]):
@@ -132,23 +157,32 @@ class _Fail(Exception):
 class TrueTypeFace:
     """An embedded glyf font at 64 ppem, with the ftoutline.Face interface render_text uses."""
 
-    def __init__(self, font=None, program=None):
-        prog = program if program is not None else font.program
-        face = prog.glyphs.face
+    def __init__(self, program: Program) -> None:
+        face = program.glyf_face()
+        if face is None:
+            raise Unported("TrueType glyphs without a glyf table")
         self.face = face
         for tag in (b"fvar", b"gvar", b"HVAR", b"VVAR", b"avar", b"CBLC", b"CBDT", b"sbix"):
             if face.table(tag):
                 raise Unported(f"TrueType font with a {tag.decode().strip()} table")
-        if is_tricky(face, _family_names(face.data, getattr(prog, "font_number", 0))):
+        if is_tricky(face, _family_names(face.data, face.font_number)):
             raise Unported("a tricky TrueType font (FreeType always hints it)")
         self.upem = face.units_per_em
         self.scale = divfix(64 << 6, self.upem)
         self.num_glyphs = face.num_glyphs
-        self._outlines: dict = {}
-        self._paths: dict = {}
-        self._units: dict = {}
-        self.bytecode_ready = -1            # size->bytecode_ready: -1 not run, else the error
-        self.cvt_ready = -1
+        self._outlines: dict[tuple[int, Matrix16], Outline | None] = {}
+        self._paths: dict[tuple[int, Matrix16], list[PathPoint] | None] = {}
+        # CFX_GlyphCache's bitmaps of an embedded face (render_text.load_glyph_bitmap)
+        self.glyph_bitmaps: dict[BitmapKey, dict[int, GlyphBitmap | None]] = {}
+        self.bytecode_ready: Ready = "not run"
+        self.cvt_ready: Ready = "not run"
+        self.hinted = False
+        self.pts: list[T.Point] = []
+        self.tags: list[int] = []
+        self.contours: list[int] = []
+        self.composites: list[int] = []
+        self.overlap = False
+        self.pp: list[T.Point] = []
 
     # -- the size: fpgm, prep
     def _init_bytecode(self) -> None:
@@ -159,18 +193,18 @@ class TrueTypeFace:
                                {T.FONT: f.fpgm, T.CVT: f.prep})
         n = f.maxp.get("maxTwilightPoints", 0) + 4
         self.twilight = T.Zone(n, [[0, 0] for _ in range(n)], [[0, 0] for _ in range(n)],
-                               [[0, 0] for _ in range(n)], [0] * n)
+                               [[0, 0] for _ in range(n)], [0] * n, [], 0)
         self.size_gs = T.GS()
         err = None
         if f.fpgm:
             e.load_context(self.twilight)
-            err = e.run_context(T.FONT, T.Zone(), self.size_gs)
+            err = e.run_context(T.FONT, T.empty_zone(), self.size_gs)
             if not err:
                 self._save(e)
-        self.bytecode_ready = err or 0
-        self.cvt_ready = -1
+        self.bytecode_ready = Failed(error=err) if err else "ran"
+        self.cvt_ready = "not run"
 
-    def _save(self, e) -> None:
+    def _save(self, e: T.Exec) -> None:
         for k in T.GS_SAVED:
             setattr(self.size_gs, k, getattr(e.gs, k))
 
@@ -186,19 +220,19 @@ class TrueTypeFace:
         e.cvt_base[:] = [mulfix(v, self.scale) for v in self.face_cvt]
         err = None
         if self.face.prep:
-            err = e.run_context(T.CVT, T.Zone(), self.size_gs)
+            err = e.run_context(T.CVT, T.empty_zone(), self.size_gs)
             if not err:
                 self._save(e)
-        self.cvt_ready = err or 0
+        self.cvt_ready = Failed(error=err) if err else "ran"
         if not err and self.size_gs.instruct_control & 2:
             raise Unported("a TrueType prep that sets INSTCTRL bit 2")
         self.prep_twilight = self._twilight_state()
 
-    def _twilight_state(self):
+    def _twilight_state(self) -> TwilightState:
         tw = self.twilight
         return ([p[:] for p in tw.org], [p[:] for p in tw.cur], list(tw.tags))
 
-    def _set_twilight(self, state) -> None:
+    def _set_twilight(self, state: TwilightState) -> None:
         tw = self.twilight
         for dst, src in ((tw.org, state[0]), (tw.cur, state[1])):
             for d, s in zip(dst, src):
@@ -206,26 +240,28 @@ class TrueTypeFace:
         tw.tags[:] = state[2]
 
     # -- glyph loading
-    def _load(self, gid: int, hinted: bool):
+    def _load(self, gid: int, hinted: bool) -> Loaded:
         """TT_Load_Glyph: (points, tags, contours) in 26.6 before the transform. Raises _Fail."""
         self.hinted = hinted
         if hinted:
-            if self.bytecode_ready < 0:
+            if self.bytecode_ready == "not run":
                 self._init_bytecode()
-            if self.bytecode_ready:
-                raise _Fail(self.bytecode_ready)
-            if self.cvt_ready < 0:
+            if isinstance(self.bytecode_ready, Failed):
+                raise _Fail(self.bytecode_ready.error)
+            if self.cvt_ready == "not run":
                 self._run_prep()
-            if self.cvt_ready:
-                raise _Fail(self.cvt_ready)
+            if isinstance(self.cvt_ready, Failed):
+                raise _Fail(self.cvt_ready.error)
             if self.size_gs.instruct_control & 1:
                 self.hinted = False
             else:
                 e = self.exec
                 e.load_context(self.twilight)
                 e.bc = (self.size_gs.instruct_control & 4) ^ 4
-        self.pts, self.tags, self.contours = [], [], []
-        self.composites: list[int] = []
+        self.pts = []
+        self.tags = []
+        self.contours = []
+        self.composites = []
         self.overlap = False
         self.pp = [[0, 0], [0, 0], [0, 0], [0, 0]]
         self._load_glyph(gid, 0)
@@ -256,7 +292,7 @@ class TrueTypeFace:
                 raise _Fail("Invalid_Outline")
             n_contours = struct.unpack_from(">h", data, 0)[0]
             bbox = struct.unpack_from(">4h", data, 2)
-        aw, lsb = f.metrics(gid)
+        aw, lsb = f.metrics(gid, False)
         tsb, ah = self._vmetrics(gid, bbox[3])
         pp1x = i32(bbox[0] - lsb)
         pp = [[pp1x, 0], [i32(pp1x + aw), 0], [0, i32(bbox[3] + tsb)], [0, 0]]
@@ -274,7 +310,7 @@ class TrueTypeFace:
         else:
             self._composite(gid, data, recurse)
 
-    def _vmetrics(self, gid: int, ymax: int):
+    def _vmetrics(self, gid: int, ymax: int) -> tuple[int, int]:
         f = self.face
         if f.vhea and f.vmtx:
             ah, tsb = f.metrics(gid, True)
@@ -305,7 +341,7 @@ class TrueTypeFace:
             raise _Fail("Too_Many_Hints")
         ins = data[p:p + n_ins]
         p += n_ins
-        flags = []
+        flags: list[int] = []
         while len(flags) < n_points:
             if p + 1 > limit:
                 raise _Fail("Invalid_Outline")
@@ -322,9 +358,10 @@ class TrueTypeFace:
                 flags.extend([c] * cnt)
         if n_points and flags[0] & 0x40:
             self.overlap = True
-        coords = []
+        coords: list[list[int]] = []
         for short, same in ((2, 0x10), (4, 0x20)):
-            v, out = 0, []
+            v = 0
+            out: list[int] = []
             for fl in flags:
                 if fl & short:
                     if p + 1 > limit:
@@ -342,20 +379,21 @@ class TrueTypeFace:
         base = len(self.pts)
         pts = [[x, y] for x, y in zip(*coords)] + [p_[:] for p_ in self.pp]
         tags = [fl & 1 for fl in flags] + [0, 0, 0, 0]
-        orus = [q[:] for q in pts] if self.hinted else None
+        hinted = self.hinted
+        orus = [q[:] for q in pts] if hinted else []
         s = self.scale
         for q in pts:
             q[0], q[1] = mulfix(q[0], s), mulfix(q[1], s)
         self.pp = [q[:] for q in pts[-4:]]
         contours = [base + c for c in ends]
-        if self.hinted:
-            zone = T.Zone(len(pts), None, pts, orus, tags, list(ends), 0)
+        if hinted:
+            zone = T.Zone(len(pts), [], pts, orus, tags, list(ends), 0)
             self._hint(zone, ins, False)
         self.pts.extend(pts[:n_points])
         self.tags.extend(tags[:n_points])
         self.contours.extend(contours)
 
-    def _hint(self, zone, ins: bytes, composite: bool) -> None:
+    def _hint(self, zone: T.Zone, ins: bytes, composite: bool) -> None:
         e = self.exec
         n = zone.n_points
         if ins:
@@ -386,7 +424,7 @@ class TrueTypeFace:
             raise _Fail("Invalid_Composite")
         self.composites.append(gid)
         p, limit = 10, len(data)
-        subs = []
+        subs: list[_Sub] = []
         while True:
             if p + 4 > limit:
                 raise _Fail("Invalid_Composite")
@@ -437,7 +475,8 @@ class TrueTypeFace:
         if subs[0][0] & OVERLAP_COMPOUND:
             self.overlap = True
 
-    def _component(self, flags, a1, a2, m, have_scale, start_point, num_base) -> None:
+    def _component(self, flags: int, a1: int, a2: int, m: Matrix16, have_scale: bool, start_point: int,
+                   num_base: int) -> None:
         pts = self.pts
         xx, xy, yx, yy = m
         if have_scale:
@@ -465,7 +504,7 @@ class TrueTypeFace:
             for q in pts[num_base:]:
                 q[0], q[1] = i32(q[0] + x), i32(q[1] + y)
 
-    def _composite_program(self, data, ins_pos, start_point, start_contour) -> None:
+    def _composite_program(self, data: bytes, ins_pos: int, start_point: int, start_contour: int) -> None:
         if ins_pos + 2 > len(data):
             raise _Fail("Invalid_Composite")
         n_ins = struct.unpack_from(">H", data, ins_pos)[0]
@@ -479,13 +518,14 @@ class TrueTypeFace:
         n = len(cur) - 4
         for i in range(n):
             tags[i] &= ~(T.TOUCH_X | T.TOUCH_Y)
-        zone = T.Zone(len(cur), None, cur, None, tags, self.contours[start_contour:], start_point)
+        zone = T.Zone(len(cur), [], cur, [], tags, self.contours[start_contour:], start_point)
         self._hint(zone, ins, True)
         self.tags[start_point:] = tags[:n]
 
     # -- the products
-    def _hinted_outline(self, gid: int):
-        before = self._twilight_state() if self.bytecode_ready == 0 and self.cvt_ready == 0 else None
+    def _hinted_outline(self, gid: int) -> Loaded | None:
+        before = self._twilight_state() if self.bytecode_ready == "ran" and self.cvt_ready == "ran" else None
+        got: Loaded | None
         try:
             got = self._load(gid, True)
         except _Fail:
@@ -493,6 +533,7 @@ class TrueTypeFace:
         if before is not None and before != self.prep_twilight:
             after = self._twilight_state()
             self._set_twilight(self.prep_twilight)
+            fresh: Loaded | None
             try:
                 fresh = self._load(gid, True)
             except _Fail:
@@ -507,7 +548,7 @@ class TrueTypeFace:
                 return None
         return got
 
-    def outline(self, glyph: int, matrix: tuple[int, int, int, int]):
+    def outline(self, glyph: int, matrix: Matrix16) -> Outline | None:
         """RenderGlyph's FT_Load_Glyph under FT_Set_Transform(matrix): contours [(points, tags)]."""
         key = (glyph, matrix)
         if key in self._outlines:
@@ -517,20 +558,26 @@ class TrueTypeFace:
         self._outlines[key] = out
         return out
 
-    def unhinted(self, glyph: int, matrix: tuple[int, int, int, int] = (0x10000, 0, 0, 0x10000)):
+    def _reset_size(self) -> None:
+        """FT_Set_Pixel_Sizes: prep runs again before the next hinted load (once fpgm ran)."""
+        if self.bytecode_ready == "ran":
+            self.cvt_ready = "not run"
+
+    def unhinted(self, glyph: int, matrix: Matrix16) -> Outline | None:
         """LoadGlyphPath's load: FT_Set_Pixel_Sizes (a size reset: prep runs again before the next
-        hinted load), FT_Set_Transform(matrix) (a substitute's skew), then an unhinted load."""
-        self.cvt_ready = -1 if self.bytecode_ready == 0 else self.cvt_ready
+        hinted load), FT_Set_Transform(matrix) (a substitute's skew, else `IDENTITY16`), then an
+        unhinted load."""
+        self._reset_size()
         try:
             return _contours(self._load(glyph, False), matrix)
         except _Fail:
             return None
 
-    def path(self, glyph: int, matrix: tuple[int, int, int, int] = (0x10000, 0, 0, 0x10000)):
+    def path(self, glyph: int, matrix: Matrix16) -> list[PathPoint] | None:
         """CFX_Face::LoadGlyphPath: [(x, y, kind, close)] in em units, from the unhinted outline."""
         key = (glyph, matrix)
         if key in self._paths:
-            self.cvt_ready = -1 if self.bytecode_ready == 0 else self.cvt_ready
+            self._reset_size()
             return self._paths[key]
         out = self.unhinted(glyph, matrix)
         path = None if out is None else _glyph_path(out)
@@ -538,13 +585,14 @@ class TrueTypeFace:
         return path
 
 
-def _contours(got, matrix):
+def _contours(got: Loaded, matrix: Matrix16) -> Outline:
     pts, tags, contours = got
     xx, xy, yx, yy = matrix
-    identity = matrix == (0x10000, 0, 0, 0x10000)
-    out, start = [], 0
+    identity = matrix == IDENTITY16
+    out: Outline = []
+    start = 0
     for end in contours:
-        sp = []
+        sp: list[Point26] = []
         for x, y in pts[start:end + 1]:
             if not identity:
                 x, y = i32(mulfix(x, xx) + mulfix(y, xy)), i32(mulfix(x, yx) + mulfix(y, yy))
