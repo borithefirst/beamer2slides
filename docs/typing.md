@@ -190,6 +190,12 @@ unknowable. The order:
    written to exactly today's JSON: `identity.ir_fields` hashes the key set, so `to_json` leaves out
    what was never set, fixed-length arrays stay lists, and old bases parse (with their upgrades)
    and compare equal. The classifier's in-place additions become constructions.
+   *Types done* (`ir_types.py`, 2026-09-29): every deck.json and every base `ir` under out/
+   (2,046 decks, 57,069 base elements) round-trips key for key; the one canonicalisation is a
+   `false` flag written as absent (none exists). Next: `snapshot.rehash_base` (a base read through
+   the parser, its hash recomputed where the form changed - 0 today, the safety net for what
+   follows), then consumers parse at their entry, leaves first (emit's `DeckPlan`, identity,
+   checks, compare, merge/sync), and producers construct typed values last.
 2. **The hubs**: `gslides.execute`'s result; the Slides/Drive/Docs service objects (`gapi.py`);
    PageClassifier's mixins sharing undeclared attributes (one declared base); `inverse.Planner`'s
    `element()` that callers know is present; adopt's `Context` attributes set dynamically.
