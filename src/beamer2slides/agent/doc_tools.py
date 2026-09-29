@@ -48,7 +48,7 @@ ASSUME_VALUES = docs.ASSUME_MODES + tuple(docs.ASSUME_ALIASES)
 
 # ---------------------------------------------------------------- the translation layer
 
-def report_diagnostics(j: Job, info: dict) -> dict[str, Any]:
+def report_diagnostics(j: Job, info: docs.SyncReport) -> dict[str, Any]:
     """Turn one sync report into diagnostics, and say what was in it.
 
     Written apart from the journey so it can be tested on a report dict alone: the shape
@@ -58,9 +58,9 @@ def report_diagnostics(j: Job, info: dict) -> dict[str, Any]:
     blind to.
     """
     for clash in info.get("conflicts") or []:
-        where = str(clash.get("key", "?"))
-        if clash.get("tab") is not None:
-            where = f"{clash['tab']} / {where}"
+        where = clash.get("key", "?")
+        if (tab := clash.get("tab")) is not None:
+            where = f"{tab} / {where}"
         j.conflict(f"the source said {clash.get('ours')!r}, the document says "
                    f"{clash.get('theirs')!r}; the document won", where)
     # A block the file no longer has is deleted from the document, which is what a source
@@ -102,9 +102,9 @@ def report_diagnostics(j: Job, info: dict) -> dict[str, Any]:
     if comments:
         j.suggest("read the open comments before trusting this sync: a rewritten passage "
                   "answers the comment hanging on it by accident")
-    if info.get("replanned"):
+    if replanned := info.get("replanned"):
         j.warn(f"somebody typed in the document while this sync was planned; it was read "
-               f"and planned again {info['replanned']} time(s)", "the document")
+               f"and planned again {replanned} time(s)", "the document")
     if info.get("base") == "none":
         j.warn("there was no base, so assume_base decided the whole merge rather than a "
                "three-way comparison", "the base")
@@ -134,11 +134,11 @@ def _state_artifacts(j: Job, path: Path) -> dict[str, str]:
     return out
 
 
-def _report_artifacts(j: Job, info: dict) -> dict[str, str]:
+def _report_artifacts(j: Job, info: docs.SyncReport) -> dict[str, str]:
     out: dict[str, str] = {}
-    if not info.get("report"):
+    if not (report := info.get("report")):
         return out
-    md = Path(info["report"])
+    md = Path(report)
     if md.is_file():
         j.artifact(md, "report", "what this sync wrote, kept and could not carry, in prose")
         out["report"] = j.ctx.workspace.ref(md)

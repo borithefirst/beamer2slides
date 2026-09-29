@@ -22,11 +22,25 @@ from __future__ import annotations
 from bisect import bisect_left
 from collections import Counter
 from difflib import SequenceMatcher
-from collections.abc import Iterable
-from typing import NamedTuple
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
+from typing import TYPE_CHECKING, Final, Literal, TypedDict, TypeVar
 
 from . import doc_ir
+from .doc_ir import (Aligned, Block, BulletFix, Dropped, GridLine, GridOp, Ir, Kind, LineName,
+                     MarkApi, Measure, MeasureValue, Measures, Run, Size, Style, StyledRange,
+                     TableLines, U16, WholeStyle)
+from .google_types import (DocsDimension, DocsEndOfSegmentLocation, DocsLocation,
+                           DocsParagraphBorder, DocsParagraphStyle,
+                           DocsRangeWrite, DocsRequest, DocsRgbColor, DocsTabProperties,
+                           DocsTableCellLocation, DocsTextStyle, InsertInlineImageRequest,
+                           docs_request_kind)
 from .merge import diff3, tokens
+from .typing_compat import assert_never
+
+if TYPE_CHECKING:
+    from typing_extensions import Required
+
+_T = TypeVar("_T")
 
 # One character standing for a frozen run while text is diffed, so a merge can move
 # words around it but never through it. U+FFFC is the object replacement character.
@@ -34,7 +48,8 @@ FROZEN = "￼"
 BLOCK_MATCH = 0.5  # least similarity for an unkeyed block to inherit a key
 TABLE_MATCH = 0.5  # least similarity for a table that lost its anchor to be known again
 TABLE_MARGIN = 0.1  # and how far clear of the runner-up, on both sides, it has to be
-BULLETS = {False: "BULLET_DISC_CIRCLE_SQUARE", True: "NUMBERED_DECIMAL_ALPHA_ROMAN"}
+BULLETS: Final[dict[bool, str]] = {False: "BULLET_DISC_CIRCLE_SQUARE",
+                                   True: "NUMBERED_DECIMAL_ALPHA_ROMAN"}
 # The textStyle fields this merge owns: named on a restyle whether or not the run
 # carries them, so that a mark the source took away is taken away in the document.
 #
@@ -58,40 +73,129 @@ MANAGED = ("backgroundColor", "baselineOffset", "bold", "fontSize", "foregroundC
 # `text-align`, `margin-left`, `text-indent`, `line-height`"); the last three only
 # through `batchUpdate` (`doc_ir.PARAGRAPH_DATA` says why), which the study measured
 # working for `updateParagraphStyle` with `shading`.
-PARAGRAPH_FIELDS = ((("indent", "indentStart"), ("indent_first", "indentFirstLine"),
-                     ("line_spacing", "lineSpacing"), ("shading", "shading"),
-                     ("space_above", "spaceAbove"), ("space_below", "spaceBelow"))
-                    + tuple(doc_ir.BORDER_SIDES.items())
-                    + tuple(doc_ir.PARAGRAPH_FLAGS.items()))
+ParagraphApi = Literal["indentStart", "indentFirstLine", "lineSpacing", "shading", "spaceAbove",
+                       "spaceBelow", "borderTop", "borderBottom", "borderLeft", "borderRight",
+                       "pageBreakBefore", "keepWithNext"]
+PARAGRAPH_FIELDS: Final[tuple[tuple[Measure, ParagraphApi], ...]] = (
+    (("indent", "indentStart"), ("indent_first", "indentFirstLine"),
+     ("line_spacing", "lineSpacing"), ("shading", "shading"),
+     ("space_above", "spaceAbove"), ("space_below", "spaceBelow"))
+    + tuple(doc_ir.BORDER_SIDES.items())
+    + tuple(doc_ir.PARAGRAPH_FLAGS.items()))
 # What is written on a paragraph, named whether or not the block asks for it, so
 # that a property the source took away goes away. Unset-and-named is the API's own
 # way of saying "back to the default" (documented, not measured here).
-MANAGED_PARAGRAPH = ("namedStyleType", "alignment") + tuple(a for _, a in PARAGRAPH_FIELDS)
+MANAGED_PARAGRAPH: Final[tuple[str, ...]] = (("namedStyleType", "alignment")
+                                             + tuple(a for _, a in PARAGRAPH_FIELDS))
 # Those of them a block says in its own words, and how each is spelled in the API.
 # The named style is not one: it is the block's kind (`named_style`).
-PARAGRAPH_KEYS = (("align", "alignment"),) + PARAGRAPH_FIELDS
+PARAGRAPH_KEYS: Final[tuple[tuple[Measure | Literal["align"], str], ...]] = (
+    (("align", "alignment"),) + PARAGRAPH_FIELDS)
 # A bullet's indents are the list preset's, not a choice anybody made: `doc_ir`
 # leaves them out of an item and `createParagraphBullets` would overwrite them.
-ITEM_PARAGRAPH = tuple(f for f in MANAGED_PARAGRAPH if not f.startswith("indent"))
+ITEM_PARAGRAPH: Final[tuple[str, ...]] = tuple(f for f in MANAGED_PARAGRAPH
+                                               if not f.startswith("indent"))
 # Everything about a block that is not its words, its styling or its identity.
-SHAPE_KEYS = ("kind", "level", "ordered", "align") + tuple(k for k, _ in PARAGRAPH_FIELDS)
+ShapeKey = Literal["kind", "level", "ordered", "align", "indent", "indent_first",
+                   "line_spacing", "shading", "space_above", "space_below", "border_top",
+                   "border_bottom", "border_left", "border_right", "page_break",
+                   "keep_with_next"]
+SHAPE_KEYS: Final[tuple[ShapeKey, ...]] = (("kind", "level", "ordered", "align")
+                                           + tuple(k for k, _ in PARAGRAPH_FIELDS))
 # What no HTML import can put in a document, so a push has to write it afterwards
 # (`carry_unimported`, `tidy_requests`).
-UNIMPORTABLE = (("shading", "space_above", "space_below")
-                + tuple(doc_ir.BORDER_SIDES) + tuple(doc_ir.PARAGRAPH_FLAGS))
+UNIMPORTABLE: Final[tuple[Measure, ...]] = (("shading", "space_above", "space_below")
+                                            + tuple(doc_ir.BORDER_SIDES)
+                                            + tuple(doc_ir.PARAGRAPH_FLAGS))
 # What is written first when two edits are planned at one and the same index
 # (`requests` says why each one sits where it does).
 DELETE, APPEND, REPLANT, EDIT, BEFORE = 0, 1, 2, 3, 4
+# A request with where it goes and in which order among those at one index: what the
+# planner sorts before it sends (`requests`).
+Planned = tuple[int, int, int, DocsRequest]
+# A frozen run's identity (`_frozen_id`), and a block's styling (`_styled`).
+FrozenId = tuple[str, str, str]
+StyleItems = tuple[tuple[str, object], ...]
+Styled = tuple[object, ...]
+
+
+class Told(TypedDict, total=False):
+    """What one step of the structural batch did to a table (`structure`): the
+    passes after the write find that table again by it (`anchor_tables`,
+    `recover_swallowed`, `recover_eaten`, `rebase_tables`)."""
+    key: Required[str | None]
+    after: str | None               # the block it follows; absent: nothing was built
+    moved: bool
+    lines: TableLines | None
+    ops: list[GridOp]
+    swallowed: str                  # a name the insert's swallow took (`_swallowed`)
+    eaten: str                      # a name the delete of the body's last table ate
+    note: str
+
+
+class Conflict(TypedDict):
+    """A stretch of words both sides rewrote: the document's version stays."""
+    base: str
+    ours: str
+    theirs: str
+    key: str
+
+
+def _conflicts(clashes: Iterable[Mapping[str, str]], key: str) -> list[Conflict]:
+    """`diff3`'s clashes, each named by the block (or table) it is in."""
+    return [{"base": clash["base"], "ours": clash["ours"], "theirs": clash["theirs"],
+             "key": key} for clash in clashes]
+
+
+class Merged(TypedDict):
+    """What `merge` decides: the blocks in the document's order, and what it says."""
+    blocks: list[Block]
+    conflicts: list[Conflict]
+    notes: list[str]
+
+
+class Plan(Merged):
+    """`merge`, and the requests that write it (`plan`)."""
+    structure: list[DocsRequest]
+    shaped: list[Told]
+    removed: list[Block]
+    requests: list[DocsRequest]
+
+
+def shape_of(block: Block, key: ShapeKey) -> object:
+    """One of a block's `SHAPE_KEYS`: None where it says nothing."""
+    match key:
+        case "kind":
+            return block["kind"]
+        case "level":
+            return block.get("level")
+        case "ordered":
+            return block.get("ordered")
+        case "align":
+            return block.get("align")
+        case ("indent" | "indent_first" | "line_spacing" | "shading" | "space_above"
+              | "space_below" | "border_top" | "border_bottom" | "border_left" | "border_right"
+              | "page_break" | "keep_with_next"):
+            return doc_ir.measure_of(block, key)
+        case _:
+            assert_never(key)
+
+
+def paragraph_of(block: Measures, key: Measure | Literal["align"]) -> MeasureValue | None:
+    """One of a block's `PARAGRAPH_KEYS`: its alignment or one measurement."""
+    if key == "align":
+        return block.get("align")
+    return doc_ir.measure_of(block, key)
 
 
 # ---------------------------------------------------------------- block text
 
-def block_text(block: dict) -> str:
+def block_text(block: Block) -> str:
     """A block's text as the merge sees it: frozen runs are one opaque character."""
     return "".join(FROZEN if r.get("frozen") else r["text"] for r in block.get("runs", []))
 
 
-def _match_text(block: dict) -> str:
+def _match_text(block: Block) -> str:
     """What a block is recognised by. A table has no words of its own, so its cells
     stand in for it — without them every table in a document looks like every other,
     and two of them would swap keys the moment one was added.
@@ -113,7 +217,7 @@ def _match_text(block: dict) -> str:
     return block_text(block)
 
 
-def _edited(live: dict, was: dict) -> bool:
+def _edited(live: Block, was: Block) -> bool:
     """Whether the document changed a block since the base — the test that outranks a
     source delete, and so the last thing standing between a reader's words and a
     `deleteContentRange`.
@@ -146,7 +250,7 @@ def _edited(live: dict, was: dict) -> bool:
             or _shapes(live) != _shapes(was))
 
 
-def _styled(block: dict) -> tuple:
+def _styled(block: Block) -> Styled:
     """The styling of a block's words, in the order they wear it.
 
     By the stretch of text a style covers, not by the runs it is written in: a reader
@@ -156,23 +260,28 @@ def _styled(block: dict) -> tuple:
     if block.get("kind") == "table":
         return tuple(_styled(inner) for row in block.get("rows", [])
                      for cell in row for inner in cell)
-    out: list[list] = []
+    out: list[tuple[str, StyleItems]] = []
     for run in block.get("runs", []):
         text = FROZEN if run.get("frozen") else run.get("text", "")
-        style = () if run.get("frozen") else tuple(sorted(_text_style(run).items()))
+        style: StyleItems = () if run.get("frozen") else _style_items(_text_style(run))
         if out and out[-1][1] == style:
-            out[-1][0] += text
+            out[-1] = (out[-1][0] + text, style)
         else:
-            out.append([text, style])
-    return tuple((text, style) for text, style in out)
+            out.append((text, style))
+    return tuple(out)
 
 
-def frozen_of(block: dict) -> tuple:
+def _style_items(style: Mapping[str, object]) -> StyleItems:
+    """A text style as sorted (field, value) pairs: what two styles are compared by."""
+    return tuple(sorted(style.items(), key=lambda item: item[0]))
+
+
+def frozen_of(block: Block) -> tuple[FrozenId, ...]:
     """What the frozen runs are, in order. Two blocks may only be merged if equal."""
     return tuple(_frozen_id(r) for r in block.get("runs", []) if r.get("frozen"))
 
 
-def _frozen_id(run: dict) -> tuple:
+def _frozen_id(run: Run) -> FrozenId:
     """A frozen run's identity. A picture is its object *and* the file it shows — the
     file's name and a digest of its bytes — so a figure the source regenerated under
     the same name is a picture that changed."""
@@ -180,10 +289,10 @@ def _frozen_id(run: dict) -> tuple:
         # By its bytes where they are known, so a file the source only renamed is the
         # same picture; by its name where they are not (a URL, a file not checked out).
         return ("image", run.get("value", ""), run.get("sha") or run.get("src", ""))
-    return (run["chip"], run.get("text", ""), run.get("value", ""))
+    return (run.get("chip", ""), run.get("text", ""), run.get("value", ""))
 
 
-def writable(run: dict) -> bool:
+def writable(run: Run) -> bool:
     """Whether a request can create this frozen run (measured, docs/google-docs.md):
     a picture from a file or a URL, a person chip from its email, a date chip from its
     timestamp. A rich link is refused by the API; an equation, a dropdown, a footnote
@@ -195,7 +304,7 @@ def writable(run: dict) -> bool:
     return run.get("chip") in ("person", "date") and bool(run.get("value"))
 
 
-def _writable_block(block: dict) -> bool:
+def _writable_block(block: Block) -> bool:
     if block.get("kind") == "toc":
         return False                       # no insertTableOfContents in the v1 API
     return all(writable(r) for r in block.get("runs", []))
@@ -208,11 +317,11 @@ def _writable_block(block: dict) -> bool:
 # block written in front of one went at its own index and a block deleted in front of
 # one gave up its own mark. Docs refuses both, a refusal throws out the whole batch,
 # and the sync died (the campaign's 'toc-block', fixed and out of `fuzz_docs.KNOWN`).
-def _structural(block: dict | None) -> bool:
+def _structural(block: Block | None) -> bool:
     return block is not None and block.get("kind") in doc_ir.STRUCTURAL
 
 
-def restore_pictures(live: dict, base: dict | None, ours: dict | None = None) -> dict:
+def restore_pictures(live: Ir, base: Ir | None, ours: Ir | None) -> Ir:
     """Tell each picture in the document which file it shows, from the files that know.
 
     The document knows a picture by its object id and nothing else of ours, so the
@@ -223,24 +332,30 @@ def restore_pictures(live: dict, base: dict | None, ours: dict | None = None) ->
     nothing to write. What the document cannot carry (an alt text on a picture a sync
     inserted) is filled in the same way; the document's own wins wherever it has one.
     """
-    was = {r["value"]: r for r in _image_runs((base or {}).get("blocks", [])) if r.get("value")}
-    now = {r["value"]: r for r in _image_runs((ours or {}).get("blocks", [])) if r.get("value")}
+    was = _pictures_by_object(base.get("blocks", []) if base else [])
+    now = _pictures_by_object(ours.get("blocks", []) if ours else [])
     for run in _image_runs(live["blocks"]):
-        before, after = was.get(run.get("value")), now.get(run.get("value"))
+        value = run.get("value", "")
+        before, after = was.get(value), now.get(value)
         if after is not None and (before is None or after.get("sha") == before.get("sha")):
             _fill_picture(run, after)
         _fill_picture(run, before)
     return live
 
 
-def place_pictures(live: dict, planned: list[dict]) -> int:
+def _pictures_by_object(blocks: Sequence[Block]) -> dict[str, Run]:
+    """Every picture run of `blocks` that names its object, by that object."""
+    return {value: r for r in _image_runs(blocks) if (value := r.get("value"))}
+
+
+def place_pictures(live: Ir, planned: Sequence[Block]) -> int:
     """Pictures the sync just inserted, told their files by where they stand: a new
     object id is unknown to every file, but it is the n-th picture of a block the
     plan wrote, and so is the file it was made from."""
-    by_key = {b["key"]: b for b in planned if b.get("key")}
+    by_key = {key: b for b in planned if (key := b.get("key"))}
     done = 0
     for block in live["blocks"]:
-        wanted = by_key.get(block.get("key"))
+        wanted = by_key.get(block.get("key", ""))
         if wanted is None:
             continue
         mine, theirs = list(_image_runs([wanted])), list(_image_runs([block]))
@@ -253,7 +368,7 @@ def place_pictures(live: dict, planned: list[dict]) -> int:
     return done
 
 
-def unwritten_pictures(base: dict, ours: dict, theirs: dict, merged: list[dict],
+def unwritten_pictures(base: Ir, ours: Ir, theirs: Ir, merged: Sequence[Block],
                        notes: list[str]) -> None:
     """A picture's size and its alt text are read and never written.
 
@@ -273,55 +388,75 @@ def unwritten_pictures(base: dict, ours: dict, theirs: dict, merged: list[dict],
     (a crop, a recolour: `doc_ir.unmodelled`), which is why the sync will not do it
     of its own accord over a number.
     """
-    was = {r["value"]: r for r in _image_runs(base["blocks"]) if r.get("value")}
-    live = {r["value"]: r for r in _image_runs(theirs["blocks"]) if r.get("value")}
+    was = _pictures_by_object(base["blocks"])
+    live = _pictures_by_object(theirs["blocks"])
     written = {r.get("value"): r.get("size") for block in merged
                if block.get("rewrite") or block.get("moved") or block.get("origin")
                == "added by the source" for r in _image_runs([block])}
     for block in ours["blocks"]:
         for run in _image_runs([block]):
-            before = was.get(run.get("value"))
+            value = run.get("value", "")
+            before = was.get(value)
             if before is None:
                 continue
-            for what, key in (("size", "size"), ("alt text", "alt"), ("title", "title")):
-                if run.get(key) == before.get(key) or (
-                        key == "size" and run["value"] in written
-                        and written[run["value"]] == run.get("size")):
+            said: tuple[tuple[str, Literal["size", "alt", "title"]], ...] = (
+                ("size", "size"), ("alt text", "alt"), ("title", "title"))
+            for what, key in said:
+                if _picture_field(run, key) == _picture_field(before, key) or (
+                        key == "size" and value in written
+                        and written[value] == run.get("size")):
                     continue
                 way = (". Write the picture into the file again without its data-object "
                        "to have it inserted at that size" if key == "size" else "")
                 notes.append(
                     f"{block.get('key')}: the source gave the picture the {what} "
-                    f"{_said(key, run.get(key))} and no request writes one — the document "
-                    f"keeps {_said(key, live.get(run['value'], before).get(key))} and the "
-                    f"file goes back to it{way}")
+                    f"{_said(_picture_field(run, key))} and no request writes one — the "
+                    f"document keeps {_said(_picture_field(live.get(value, before), key))} "
+                    f"and the file goes back to it{way}")
 
 
-def _said(key: str, value) -> str:
+def _picture_field(run: Run, key: Literal["size", "alt", "title"]) -> list[int] | str | None:
+    match key:
+        case "size":
+            return run.get("size")
+        case "alt":
+            return run.get("alt")
+        case "title":
+            return run.get("title")
+        case _:
+            assert_never(key)
+
+
+def _said(value: list[int] | str | None) -> str:
     if value is None:
         return "none"
-    return f"{value[0]}×{value[1]}" if key == "size" else repr(value)
+    return repr(value) if isinstance(value, str) else f"{value[0]}×{value[1]}"
 
 
-def _unseen_pictures(ours: dict, base: dict) -> None:
+def _unseen_pictures(ours: Ir, base: Ir) -> None:
     """A picture file the checkout does not have says nothing about its bytes: take the
     base's word for them, or every sync would see it change."""
-    was = {r["value"]: r for r in _image_runs(base["blocks"]) if r.get("value")}
+    was = _pictures_by_object(base["blocks"])
     for run in _image_runs(ours["blocks"]):
-        if run.get("missing") and not run.get("sha") and run.get("value") in was:
-            if was[run["value"]].get("sha"):
-                run["sha"] = was[run["value"]]["sha"]
+        if run.get("missing") and not run.get("sha") and (before := was.get(run.get("value", ""))):
+            if sha := before.get("sha"):
+                run["sha"] = sha
 
 
-def _fill_picture(run: dict, source: dict | None) -> None:
+def _fill_picture(run: Run, source: Run | None) -> None:
     if source is None:
         return
-    for key in ("src", "sha", "alt", "title"):
-        if not run.get(key) and source.get(key):
-            run[key] = source[key]
+    if not run.get("src") and (src := source.get("src")):
+        run["src"] = src
+    if not run.get("sha") and (sha := source.get("sha")):
+        run["sha"] = sha
+    if not run.get("alt") and (alt := source.get("alt")):
+        run["alt"] = alt
+    if not run.get("title") and (title := source.get("title")):
+        run["title"] = title
 
 
-def _image_runs(blocks: list[dict]):
+def _image_runs(blocks: Iterable[Block]) -> Iterator[Run]:
     for block in blocks:
         for row in block.get("rows", []):
             for cell in row:
@@ -331,7 +466,7 @@ def _image_runs(blocks: list[dict]):
                 yield run
 
 
-def restore_unreadable(live: dict, *sources: dict) -> dict:
+def restore_unreadable(live: Ir, *sources: Ir) -> Ir:
     """Fill in what a read cannot see, from the files that can.
 
     The mirror image of the frozen runs. A chip is content the file cannot carry, so
@@ -340,27 +475,27 @@ def restore_unreadable(live: dict, *sources: dict) -> dict:
     long as the block lives. A list the document itself made reads properly and never
     reaches here, and a block nobody knows falls back to bullets.
     """
-    known = {}
+    known: dict[str, bool] = {}
     for source in sources:
         for block in source["blocks"]:
-            if block.get("key") and block.get("ordered") is not None:
-                known.setdefault(block["key"], block["ordered"])
+            if (key := block.get("key")) and (ordered := block.get("ordered")) is not None:
+                known.setdefault(key, ordered)
     for block in live["blocks"]:
         if block.get("kind") == "item" and block.get("ordered") is None:
-            block["ordered"] = bool(known.get(block.get("key"), False))
+            block["ordered"] = known.get(block.get("key", ""), False)
             block["guessed"] = True   # `bullet_requests` makes the document say it itself
     # An equation's LaTeX is what no `documents.get` says (only the export does, and
     # only the settling read asks it: `doc_sync.equation_latex`), so a read's equation
     # is blank where the file's and the base's hold its LaTeX, and would look changed.
     # A block with as many equations as its namesake gets theirs, in order.
-    latex = {}
+    latex: dict[str, list[str]] = {}
     for source in reversed(sources):   # the base first: it is the last read
         for block in source["blocks"]:
             said = [r.get("text", "") for r in _equations(block)]
-            if block.get("key") and any(said):
-                latex.setdefault(block["key"], said)
+            if (key := block.get("key")) and any(said):
+                latex.setdefault(key, said)
     for block in live["blocks"]:
-        runs, said = list(_equations(block)), latex.get(block.get("key"))
+        runs, said = list(_equations(block)), latex.get(block.get("key", ""))
         if said and len(said) == len(runs):
             for run, text in zip(runs, said):
                 if not run.get("text"):
@@ -368,7 +503,7 @@ def restore_unreadable(live: dict, *sources: dict) -> dict:
     return live
 
 
-def _equations(block: dict):
+def _equations(block: Block) -> Iterator[Run]:
     """A block's equation runs in order, those in its table cells included."""
     for run in block.get("runs", []):
         if run.get("chip") == "equation":
@@ -379,7 +514,18 @@ def _equations(block: dict):
                 yield from _equations(inner)
 
 
-def tidy_requests(live: dict) -> list[dict]:
+def _range(start: int, end: int) -> DocsRangeWrite:
+    """The `Range` a request names, from `start` up to `end`."""
+    return {"startIndex": start, "endIndex": end}
+
+
+def _span_range(block: Block) -> DocsRangeWrite:
+    """A block's whole span as a request names it."""
+    start, end = doc_ir._span(block)
+    return _range(start, end)
+
+
+def tidy_requests(live: Ir) -> list[DocsRequest]:
     """What a sync writes after the merge so the document reads back as it looks:
     the styling no import could carry (`carry_unimported`), bullets for the lists it
     cannot describe, and a plain paragraph after a final table that took over a list
@@ -391,20 +537,22 @@ def tidy_requests(live: dict) -> list[dict]:
     writes as well: `deleteParagraphBullets` keeps the nesting by adding indent of its
     own, so a style written before it is a style the delete then edits.
     """
-    out = (restore_bullets(live, taking_off=True) + unimported_requests(live)
-           + restore_bullets(live, taking_off=False) + bullet_requests(live))
-    for part in ("trailer", "lead"):
-        if live.get(f"{part}_kind"):
-            start, end = live[part]
-            span = {"startIndex": start, "endIndex": end}
-            out += [{"deleteParagraphBullets": {"range": span}},
-                    {"updateParagraphStyle": {"range": span, "fields": "namedStyleType,alignment",
-                                              "paragraphStyle": {"namedStyleType": "NORMAL_TEXT",
-                                                                 "alignment": "START"}}}]
+    out = (restore_bullets(live, True) + unimported_requests(live)
+           + restore_bullets(live, False) + bullet_requests(live))
+    for kind, (start, end) in ((live.get("trailer_kind"), live.get("trailer") or [U16(0), U16(0)]),
+                               (live.get("lead_kind"), live.get("lead") or [U16(0), U16(0)])):
+        if kind:
+            span = _range(start, end)
+            plain: list[DocsRequest] = [
+                {"deleteParagraphBullets": {"range": span}},
+                {"updateParagraphStyle": {"range": span, "fields": "namedStyleType,alignment",
+                                          "paragraphStyle": {"namedStyleType": "NORMAL_TEXT",
+                                                             "alignment": "START"}}}]
+            out += plain
     return out
 
 
-def unimported_requests(live: dict) -> list[dict]:
+def unimported_requests(live: Ir) -> list[DocsRequest]:
     """The styling `carry_unimported` found missing, written with `batchUpdate`.
 
     A paragraph's own span for the shading and the space around it; the exact
@@ -413,39 +561,44 @@ def unimported_requests(live: dict) -> list[dict]:
     named style, for a Title or a Subtitle, which the importer flattens to body text
     whatever the file says (`class="title"` reaches nothing).
     """
-    out = []
+    out: list[DocsRequest] = []
     for block in live["blocks"]:
         want = block.get("unimported")
         if not want:
             continue
-        if want.get("whole"):
+        if whole := want.get("whole"):
             # A paragraph this run wrote: the whole style the plan asked for, fields
             # named whether or not it asks for them, so what a write left on the
             # block and nobody asked for goes away with the rest (`carry_unimported`).
-            style, fields = want["whole"]["style"], want["whole"]["fields"]
             out.append({"updateParagraphStyle": {
-                "range": {"startIndex": block["span"][0], "endIndex": block["span"][1]},
-                "paragraphStyle": style, "fields": fields}})
+                "range": _span_range(block), "paragraphStyle": whole["style"],
+                "fields": whole["fields"]}})
         elif want["paragraph"] or want.get("named"):
-            style = {api: (doc_ir.TO_ALIGNMENT[want["paragraph"][key]] if key == "align"
-                           else _paragraph_value(key, want["paragraph"][key]))
-                     for key, api in PARAGRAPH_KEYS if key in want["paragraph"]}
-            if "indent_first" in want["paragraph"]:
-                style["indentFirstLine"] = _paragraph_value(
-                    "indent_first", (want["paragraph"].get("indent") or 0.0) + want["paragraph"]["indent_first"])
-            if want.get("named"):
-                style["namedStyleType"] = want["named"]
+            said = want["paragraph"]
+            style: DocsParagraphStyle = {}
+            for key, _ in PARAGRAPH_KEYS:
+                if (value := paragraph_of(said, key)) is None:
+                    continue
+                if key == "align":
+                    if (align := said.get("align")) is not None:
+                        style["alignment"] = doc_ir.TO_ALIGNMENT[align]
+                else:
+                    _set_paragraph(style, key, value)
+            if (first := said.get("indent_first")) is not None:
+                _set_paragraph(style, "indent_first", (said.get("indent") or 0.0) + first)
+            if named := want.get("named"):
+                style["namedStyleType"] = named
             out.append({"updateParagraphStyle": {
-                "range": {"startIndex": block["span"][0], "endIndex": block["span"][1]},
-                "paragraphStyle": style, "fields": ",".join(sorted(style))}})
-        for start, end, style in want["runs"]:
+                "range": _span_range(block), "paragraphStyle": style,
+                "fields": ",".join(sorted(style))}})
+        for start, end, text_style in want["runs"]:
             out.append({"updateTextStyle": {
-                "range": {"startIndex": start, "endIndex": end},
-                "textStyle": style, "fields": ",".join(sorted(style))}})
+                "range": _range(start, end),
+                "textStyle": text_style, "fields": ",".join(sorted(text_style))}})
     return out
 
 
-def restore_bullets(live: dict, taking_off: bool) -> list[dict]:
+def restore_bullets(live: Ir, taking_off: bool) -> list[DocsRequest]:
     """Put back the bullet a write took off a block, or take off one it put on.
 
     `carry_unimported` found it. The half that creates one comes after the paragraph
@@ -455,19 +608,25 @@ def restore_bullets(live: dict, taking_off: bool) -> list[dict]:
     off comes first, `deleteParagraphBullets` being a request that writes indents of
     its own (`tidy_requests`).
     """
-    out = []
+    out: list[DocsRequest] = []
     for block in live["blocks"]:
-        want = (block.get("unimported") or {}).get("bullet")
+        want = _bullet_fix(block)
         if want is None or not block.get("span") or (want == "none") != taking_off:
             continue
-        span = {"startIndex": block["span"][0], "endIndex": block["span"][1]}
+        span = _span_range(block)
         out.append({"deleteParagraphBullets": {"range": span}} if want == "none" else
                    {"createParagraphBullets": {
                        "range": span, "bulletPreset": BULLETS[want == "ordered"]}})
     return out
 
 
-def bullet_requests(live: dict) -> list[dict]:
+def _bullet_fix(block: Block) -> BulletFix | None:
+    """The bullet a settle puts on a block or takes off it, if any."""
+    unimported = block.get("unimported")
+    return unimported.get("bullet") if unimported else None
+
+
+def bullet_requests(live: Ir) -> list[DocsRequest]:
     """Bullets of the document's own for the lists it cannot describe.
 
     Measured: `createParagraphBullets` over a list the importer built replaces its
@@ -492,42 +651,50 @@ def bullet_requests(live: dict) -> list[dict]:
     chains 4 and 8. Asking the same question of the glyph is a guard against nothing,
     and a guard against nothing is how one stops noticing.
     """
-    out, run = [], []
-    for block in live["blocks"] + [{"kind": "end"}]:
-        item = _settles_as_item(block)
-        if (run and (not item or not block.get("span")
+    out: list[DocsRequest] = []
+    run: list[Block] = []
+    for block in [*live["blocks"], None]:
+        item = block is not None and _settles_as_item(block)
+        if (run and (block is None or not item or not block.get("span")
                      or block.get("ordered") != run[0].get("ordered"))):
             if any(b.get("guessed") for b in run):
                 out.append({"createParagraphBullets": {
-                    "range": {"startIndex": run[0]["span"][0], "endIndex": run[-1]["span"][1]},
+                    "range": _range(doc_ir._span(run[0])[0], doc_ir._span(run[-1])[1]),
                     "bulletPreset": BULLETS[bool(run[0].get("ordered"))]}})
             run = []
-        if item and block.get("span"):
+        if block is not None and item and block.get("span"):
             run.append(block)
     return out
 
 
-def _settles_as_item(block: dict) -> bool:
+def _settles_as_item(block: Block) -> bool:
     """Whether a read-back block is a list item once the settle has written what
     `carry_unimported` found: a bullet it is about to take off is already gone."""
-    if (block.get("unimported") or {}).get("bullet") == "none":
+    if _bullet_fix(block) == "none":
         return False
     return block.get("kind") == "item"
 
 
-def styles_of(block: dict) -> tuple:
+RunStyle = tuple[str, frozenset[tuple[str, object]]]
+
+
+def styles_of(block: Block) -> tuple[RunStyle, ...]:
     """A block's styling, run by run, without its words.
 
     What changes when somebody marks a word bold or takes a colour away — and not
     when somebody rewrites a word, which is the text merge's business. A mark applied
     to part of a run splits it, so the run count carries the boundaries.
     """
-    return tuple(("chip", frozenset()) if r.get("frozen") else
-                 ("text", frozenset((k, v) for k, v in r.items() if k not in ("text", "width")))
+    return tuple(("chip", frozenset()) if r.get("frozen") else ("text", _marks(r))
                  for r in block.get("runs", []))
 
 
-def marks_of(block: dict) -> tuple:
+def _marks(run: Run) -> frozenset[tuple[str, object]]:
+    """Everything a run says about itself but its words and its width."""
+    return frozenset((k, v) for k, v in run.items() if k not in ("text", "width"))
+
+
+def marks_of(block: Block) -> tuple[frozenset[tuple[str, object]], ...]:
     """What a block's words are marked with: the chips left out, alike runs joined.
 
     `styles_of` answers "is this block styled exactly as it was", boundaries and
@@ -548,17 +715,17 @@ def marks_of(block: dict) -> tuple:
     the word before it reads as the same alternation of mark sets it always was.
     `_remarked` is the other half, and `_merge_block` asks both.
     """
-    out: list[frozenset] = []
+    out: list[frozenset[tuple[str, object]]] = []
     for run in block.get("runs", []):
         if run.get("frozen"):
             continue
-        marks = frozenset((k, v) for k, v in run.items() if k not in ("text", "width"))
+        marks = _marks(run)
         if not out or out[-1] != marks:
             out.append(marks)
     return tuple(out)
 
 
-def _remarked(was: dict, now: dict) -> bool:
+def _remarked(was: Block, now: Block) -> bool:
     """Whether a word both blocks have is marked differently in them.
 
     `marks_of` drops the words to stay deaf to a chip splitting a run, and drops
@@ -583,17 +750,20 @@ def _remarked(was: dict, now: dict) -> bool:
                for w, i in _word_pairs(block_text(was), now_text))
 
 
-def _shape(block: dict) -> tuple:
+Shape = tuple[object, ...]
+
+
+def _shape(block: Block) -> Shape:
     """The part of a block that is not its words.
 
     The paragraph's own measurements count: a source that changes nothing but a
     block's line spacing has changed the block, and this is what says so, so that
     `_restyle_requests` writes the paragraph again.
     """
-    return tuple(block.get(key) for key in SHAPE_KEYS)
+    return tuple(shape_of(block, key) for key in SHAPE_KEYS)
 
 
-def _shapes(block: dict) -> tuple:
+def _shapes(block: Block) -> Shape:
     """How a block is set — and how a *table* is, which is how its cells are.
 
     `_styled` is the same shape for the same reason: a table says what it is through
@@ -606,23 +776,36 @@ def _shapes(block: dict) -> tuple:
     return _shape(block)
 
 
-def _take_shape(out: dict, mine: dict) -> dict:
+def _take_shape(out: Block, mine: Block) -> Block:
     """Give a block the source's shape — the whole of it, absences included.
 
     A dict update can only add: for as long as this was one, a source that took a
     block's centring (or its shading) away left the document centred for good,
     because the key it no longer writes said nothing at all.
     """
-    for key in SHAPE_KEYS:
-        if key in mine:
-            out[key] = mine[key]
+    out["kind"] = mine["kind"]
+    if (level := mine.get("level")) is not None:
+        out["level"] = level
+    else:
+        out.pop("level", None)
+    if "ordered" in mine:
+        out["ordered"] = mine.get("ordered")
+    else:
+        out.pop("ordered", None)
+    if (align := mine.get("align")) is not None:
+        out["align"] = align
+    else:
+        out.pop("align", None)
+    for key, _ in PARAGRAPH_FIELDS:
+        if (value := doc_ir.measure_of(mine, key)) is not None:
+            doc_ir.set_measure(out, key, value)
         else:
-            out.pop(key, None)
+            doc_ir.pop_measure(out, key)
     return out
 
 
-def _merged_shape(out: dict, was: dict, mine: dict, live: dict, a_block: bool,
-                  key: str, notes: list) -> dict:
+def _merged_shape(out: Block, was: Block, mine: Block, live: Block, a_block: bool,
+                  key: str, notes: list[str]) -> Block:
     """How a block is *set*, merged the way its words are: the source's where the
     document left it alone, the document's where both sides changed it, and a note
     saying so when they did.
@@ -653,7 +836,10 @@ def _merged_shape(out: dict, was: dict, mine: dict, live: dict, a_block: bool,
     return out
 
 
-def _match_shape(block: dict) -> tuple:
+MatchShape = tuple[Kind, int | None, str | None]
+
+
+def _match_shape(block: Block) -> MatchShape:
     """What two blocks must share to be the same block.
 
     Ordered-ness is left out on purpose: an imported list cannot say whether it is
@@ -665,7 +851,7 @@ def _match_shape(block: dict) -> tuple:
 
 # ---------------------------------------------------------------- keys
 
-def inherit_keys(base: dict, ours: dict) -> dict:
+def inherit_keys(base: Ir, ours: Ir) -> Ir:
     """Give `ours` the keys of the base blocks it matches, so edits line up.
 
     Exact text first, then a similarity pass over what is left — `identity.py`'s
@@ -690,36 +876,37 @@ def inherit_keys(base: dict, ours: dict) -> dict:
     asserted = [block.get("key") for block in ours["blocks"]]
     doc_ir.key_blocks(ours)
     taken: set[str] = {key for key in asserted if key}
-    free = [b for b in base["blocks"] if b.get("key") and b["key"] not in taken]
-    by_text: dict[tuple, list] = {}
-    for block in free:
-        by_text.setdefault((_match_shape(block), _match_text(block)), []).append(block)
-    pending = []
+    free = [(key, b) for b in base["blocks"] if (key := b.get("key")) and key not in taken]
+    by_text: dict[tuple[MatchShape, str], list[str]] = {}
+    for key, block in free:
+        by_text.setdefault((_match_shape(block), _match_text(block)), []).append(key)
+    pending: list[Block] = []
     for block, mine in zip(ours["blocks"], asserted):
         if mine:
             continue
         same = by_text.get((_match_shape(block), _match_text(block)))
         if same:
-            block["key"] = same.pop(0)["key"]
+            block["key"] = same.pop(0)
             taken.add(block["key"])
         else:
             pending.append(block)
-    rest = [b for b in free if b["key"] not in taken]
+    rest = [(key, b) for key, b in free if key not in taken]
     for block in pending:
-        best, score = None, BLOCK_MATCH
-        for candidate in rest:
+        best: tuple[str, Block] | None = None
+        score = BLOCK_MATCH
+        for key, candidate in rest:
             if _match_shape(candidate) != _match_shape(block):
                 continue
             ratio = SequenceMatcher(None, _match_text(candidate), _match_text(block)).ratio()
             if ratio > score:
-                best, score = candidate, ratio
+                best, score = (key, candidate), ratio
         if best is not None:
-            block["key"] = best["key"]
+            block["key"] = best[0]
             rest.remove(best)
     return ours
 
 
-def recover_tables(base: dict, theirs: dict, spoken_for: set | None = None) -> int:
+def recover_tables(base: Ir, theirs: Ir, spoken_for: Set[str | None] | None = None) -> int:
     """Give back the key of a table whose anchor the *reader* deleted in the browser.
 
     A table is anchored in its first cell (`doc_ir.anchor_span`), because the cells
@@ -763,9 +950,9 @@ def recover_tables(base: dict, theirs: dict, spoken_for: set | None = None) -> i
     put its tables; this pass only guesses, so it goes second on those.
     """
     claimed = {block.get("key") for block in theirs["blocks"]}
-    missing = [b for b in base["blocks"]
-               if b.get("kind") == "table" and b.get("key") and b["key"] not in claimed
-               and b["key"] not in (spoken_for or ()) and _table_words(b)]
+    missing = [(key, b) for b in base["blocks"]
+               if b.get("kind") == "table" and (key := b.get("key")) and key not in claimed
+               and key not in (spoken_for or ()) and _table_words(b)]
     free = [b for b in theirs["blocks"]
             if b.get("kind") == "table" and not b.get("key") and _table_words(b)]
     if not missing or not free:
@@ -774,9 +961,9 @@ def recover_tables(base: dict, theirs: dict, spoken_for: set | None = None) -> i
     # small table's characters, so a table `insertTable` had just built out of
     # nothing scored 0.55 against one with four words in it.
     score = {(i, j): SequenceMatcher(None, _table_words(was), _table_words(now)).ratio()
-             for i, was in enumerate(missing) for j, now in enumerate(free)}
+             for i, (_, was) in enumerate(missing) for j, now in enumerate(free)}
     done = 0
-    for i, was in enumerate(missing):
+    for i, (key, _) in enumerate(missing):
         row = sorted(((score[i, j], j) for j in range(len(free))), reverse=True)
         best, j = row[0]
         column = sorted(score[k, j] for k in range(len(missing)))
@@ -786,12 +973,12 @@ def recover_tables(base: dict, theirs: dict, spoken_for: set | None = None) -> i
             continue
         if len(column) > 1 and best - column[-2] < TABLE_MARGIN:
             continue
-        free[j]["key"] = was["key"]
+        free[j]["key"] = key
         done += 1
     return done
 
 
-def anchor_tables(live: dict, shaped: list[dict]) -> int:
+def anchor_tables(live: Ir, shaped: list[Told]) -> int:
     """Name the tables the structural batch created, so the next plan knows them.
 
     A table `insertTable` built carries no named range, and a read cannot tell it from
@@ -820,17 +1007,17 @@ def anchor_tables(live: dict, shaped: list[dict]) -> int:
     tie-break it always was.
     """
     done = 0
-    todo = [told for told in shaped if "after" in told and told["key"]]
+    todo = [(key, told) for told in shaped if "after" in told and (key := told["key"])]
     moved = True
     while moved:
         moved = False
-        for told in sorted(todo, key=lambda t: t["after"] is None):
-            if any(b.get("key") == told["key"] for b in live["blocks"]):
+        for key, told in sorted(todo, key=lambda t: t[1].get("after") is None):
+            if any(b.get("key") == key for b in live["blocks"]):
                 continue
             start = 0
-            if told["after"] is not None:
+            if (after := told.get("after")) is not None:
                 at = next((i for i, b in enumerate(live["blocks"])
-                           if b.get("key") == told["after"]), None)
+                           if b.get("key") == after), None)
                 if at is None:
                     continue
                 start = at + 1
@@ -860,20 +1047,20 @@ def anchor_tables(live: dict, shaped: list[dict]) -> int:
             # nothing is the safe half of it: the key comes back at the re-plan,
             # where `recover_tables` has both tables in front of it at once and the
             # words tell them apart.
-            want = _built_size(told) if told.get("lines") else None
+            want = _lines_size(lines) if (lines := told.get("lines")) else None
             if want is not None:
                 free = [b for b in free if _size(b.get("rows", [])) == want]
             built = not (told.get("ops") or told.get("lines"))
             found = next((b for b in free if _blank_table(b) == built), None) \
                 or (free[0] if free else None)
             if found is not None:
-                found["key"] = told["key"]
+                found["key"] = key
                 done += 1
                 moved = True
     return done
 
 
-def recover_swallowed(live: dict, shaped: list[dict]) -> int:
+def recover_swallowed(live: Ir, shaped: list[Told]) -> int:
     """Give back the key a new table's swallow took off an empty paragraph.
 
     `_new_table_requests` gets rid of the empty paragraph `insertTable` leaves by
@@ -919,7 +1106,7 @@ def recover_swallowed(live: dict, shaped: list[dict]) -> int:
     return done
 
 
-def recover_eaten(live: dict, shaped: list[dict]) -> int:
+def recover_eaten(live: Ir, shaped: list[Told]) -> int:
     """Give back the key the delete of a body's last table ate off the empty
     paragraph in front of it: the trailer takes that paragraph's place.
 
@@ -954,25 +1141,25 @@ def recover_eaten(live: dict, shaped: list[dict]) -> int:
         if not key or key in have:
             continue
         block, span = _trailing_empty(live)
-        if block is None and span is None:
-            continue
         if block is not None:
             block["key"] = key
-        else:
+        elif span is not None:
             live["blocks"].append({"kind": "paragraph", "runs": [], "key": key,
                                    "span": list(span)})
             live.pop("trailer", None)
             live.pop("trailer_kind", None)
+        else:
+            continue
         have.add(key)
         done += 1
     return done
 
 
-def _trailing_empty(live: dict) -> tuple[dict | None, list | None]:
+def _trailing_empty(live: Ir) -> tuple[Block | None, list[U16] | None]:
     """The empty paragraph the body ends on: the hidden trailer, or — where the body
     no longer ends on a table — the unnamed block that same paragraph reads as."""
-    if live.get("trailer"):
-        return None, list(live["trailer"])
+    if trailer := live.get("trailer"):
+        return None, list(trailer)
     last = live["blocks"][-1] if live["blocks"] else None
     if last is not None and not last.get("key") and not _structural(last) \
             and not _match_text(last).strip():
@@ -980,18 +1167,18 @@ def _trailing_empty(live: dict) -> tuple[dict | None, list | None]:
     return None, None
 
 
-def _table_words(block: dict) -> str:
+def _table_words(block: Block) -> str:
     """A table's cells as one stretch of words, with nothing of the grid in it."""
     return " ".join(block_text(inner) for row in block.get("rows", [])
                     for cell in row for inner in cell).strip()
 
 
-def _blank_table(block: dict) -> bool:
+def _blank_table(block: Block) -> bool:
     """Whether a table says nothing at all — which is how `insertTable` leaves one."""
     return not _match_text(block).strip(" |")
 
 
-def rebase_tables(base: dict, theirs: dict, shaped: list[dict]) -> dict:
+def rebase_tables(base: Ir, theirs: Ir, shaped: Sequence[Told]) -> Ir:
     """What both sides agree on once the grid has been written.
 
     The grid the document now has is the one this sync gave it on the source's behalf,
@@ -1013,19 +1200,45 @@ def rebase_tables(base: dict, theirs: dict, shaped: list[dict]) -> dict:
             # was deleted where it stood: the base has it where the document now does,
             # and as blank as it is there.
             fresh = theirs["blocks"][index]
-            if told.get("moved") and told.get("lines"):
-                fresh = _moved_table(fresh, told["lines"])
+            if told.get("moved") and (lines := told.get("lines")):
+                fresh = _moved_table(fresh, lines)
             if at is not None:
                 del blocks[at]
             blocks.insert(_place(theirs, blocks, index), fresh)
-        elif told.get("lines"):
-            blocks[at] = _rebased_table(blocks[at], told["lines"], theirs["blocks"][index])
-        elif told.get("ops"):
-            blocks[at] = _regridded(blocks[at], told["ops"])
-    return dict(base) | {"blocks": blocks}
+        elif lines := told.get("lines"):
+            blocks[at] = _rebased_table(blocks[at], lines, theirs["blocks"][index])
+        elif ops := told.get("ops"):
+            blocks[at] = _regridded(blocks[at], ops)
+    out = base.copy()
+    out["blocks"] = blocks
+    return out
 
 
-def _rebased_table(was: dict, lines: dict, now: dict) -> dict:
+def _aligned(lines: TableLines, now: Block, agreed: dict[LineName, list[GridLine]],
+             live: dict[LineName, list[tuple[int, int]]]) -> Aligned:
+    """How a rebased table's lines match: `agreed` is the lines the rebased grid
+    has, and `live` pairs each of them with the document's."""
+    dropped = lines.get("dropped") or {"row": [], "column": []}
+    return {"live": _size(now.get("rows", [])), "mine": lines["mine"],
+            "row_dropped": dropped.get("row", []),
+            "row_live": live["row"],
+            "row_mine": [(i, line.mine) for i, line in enumerate(agreed["row"])
+                         if line.mine is not None],
+            "column_dropped": dropped.get("column", []),
+            "column_live": live["column"],
+            "column_mine": [(i, line.mine) for i, line in enumerate(agreed["column"])
+                            if line.mine is not None]}
+
+
+_LINE_NAMES: Final[tuple[LineName, ...]] = ("row", "column")
+
+
+def _kept_lines(lines: TableLines) -> dict[LineName, list[GridLine]]:
+    """The lines a merged table keeps, by dimension."""
+    return {name: _kept(lines[name]) for name in _LINE_NAMES}
+
+
+def _rebased_table(was: Block, lines: TableLines, now: Block) -> Block:
     """The base's table on the grid that was just written, and how its lines match.
 
     A row the source added is in it, blank; a row the document added is not, since
@@ -1036,23 +1249,22 @@ def _rebased_table(was: dict, lines: dict, now: dict) -> dict:
     (`_table_lines`), which are exactly the ones no line of the rebased base can
     speak for.
     """
-    names = ("row", "column")
-    kept = {name: [line for line in lines[name] if not line.gone] for name in names}
+    kept = _kept_lines(lines)
     agreed = {name: [line for line in kept[name] if line.was is not None or line.mine is not None]
-              for name in names}
-    rows = [[[dict(b) for b in (_cell(was, row.was, column.was) or _blank_cell())]
+              for name in _LINE_NAMES}
+    rows = [[[b.copy() for b in (_cell(was, row.was, column.was) or _blank_cell())]
              for column in agreed["column"]] for row in agreed["row"]]
-    aligned = {"live": _size(now.get("rows", [])), "mine": lines["mine"]}
-    for name in names:
-        aligned[f"{name}_dropped"] = lines.get("dropped", {}).get(name, [])
+    live: dict[LineName, list[tuple[int, int]]] = {}
+    for name in _LINE_NAMES:
         where = {id(line): k for k, line in enumerate(kept[name])}
-        aligned[f"{name}_live"] = [(i, where[id(line)]) for i, line in enumerate(agreed[name])]
-        aligned[f"{name}_mine"] = [(i, line.mine) for i, line in enumerate(agreed[name])
-                                   if line.mine is not None]
-    return dict(was) | {"rows": rows, "aligned": aligned}
+        live[name] = [(i, where[id(line)]) for i, line in enumerate(agreed[name])]
+    out = was.copy()
+    out["rows"] = rows
+    out["aligned"] = _aligned(lines, now, agreed, live)
+    return out
 
 
-def _moved_table(now: dict, lines: dict) -> dict:
+def _moved_table(now: Block, lines: TableLines) -> Block:
     """The base's table for one this sync moved: as blank as the document has it, and
     with the matching a regrid records.
 
@@ -1064,18 +1276,14 @@ def _moved_table(now: dict, lines: dict) -> dict:
     added and puts back the row a reader deleted. Its rows are the document's, so each
     stands for the merged line of the same number.
     """
-    names = ("row", "column")
-    kept = {name: [line for line in lines[name] if not line.gone] for name in names}
-    aligned = {"live": _size(now.get("rows", [])), "mine": lines["mine"]}
-    for name in names:
-        aligned[f"{name}_dropped"] = lines.get("dropped", {}).get(name, [])
-        aligned[f"{name}_live"] = [(i, i) for i in range(len(kept[name]))]
-        aligned[f"{name}_mine"] = [(i, line.mine) for i, line in enumerate(kept[name])
-                                   if line.mine is not None]
-    return dict(now) | {"aligned": aligned}
+    kept = _kept_lines(lines)
+    live = {name: [(i, i) for i in range(len(kept[name]))] for name in _LINE_NAMES}
+    out = now.copy()
+    out["aligned"] = _aligned(lines, now, kept, live)
+    return out
 
 
-def _regridded(was: dict, ops: list[tuple]) -> dict:
+def _regridded(was: Block, ops: list[GridOp]) -> Block:
     """The base's table with the rows and columns that were just written in it."""
     rows = [list(row) for row in was.get("rows", [])]
     for line, how, at in sorted(ops, key=_op_order):
@@ -1091,14 +1299,16 @@ def _regridded(was: dict, ops: list[tuple]) -> dict:
                 del row[at]
             else:
                 row.insert(at, _blank_cell())
-    return dict(was) | {"rows": rows}
+    out = was.copy()
+    out["rows"] = rows
+    return out
 
 
-def _blank_cell() -> list[dict]:
+def _blank_cell() -> list[Block]:
     return [{"kind": "paragraph", "runs": []}]
 
 
-def adopt_keys(live: dict, planned: list[dict]) -> int:
+def adopt_keys(live: Ir, planned: list[Block]) -> int:
     """Give a block written from nothing the key the merge meant it to have.
 
     A move is a delete and an insert, and the delete takes the block's named range
@@ -1110,24 +1320,24 @@ def adopt_keys(live: dict, planned: list[dict]) -> int:
     Being the one place that holds the plan and the read-back side by side, this is
     also where `carry_unimported` notes the styling no import could carry.
     """
-    taken = {b["key"] for b in live["blocks"] if b.get("key")}
+    taken = {key for b in live["blocks"] if (key := b.get("key"))}
     done = _adopt_in_order(live["blocks"], planned, taken)
-    free: dict[tuple, list[dict]] = {}
+    free: dict[tuple[MatchShape, str], list[tuple[str, Block]]] = {}
     for block in planned:
-        if block.get("key") and block["key"] not in taken:
-            free.setdefault((_match_shape(block), _match_text(block)), []).append(block)
+        if (key := block.get("key")) and key not in taken:
+            free.setdefault((_match_shape(block), _match_text(block)), []).append((key, block))
     for block in live["blocks"]:
         if block.get("key"):
             continue
         if same := free.get((_match_shape(block), _match_text(block))):
-            block["key"] = same.pop(0)["key"]
+            block["key"] = same.pop(0)[0]
             done += 1
     done += _adopt_by_words(live, free)
     carry_unimported(live, planned)
     return done
 
 
-def _adopt_in_order(live: list[dict], planned: list[dict], taken: set) -> int:
+def _adopt_in_order(live: list[Block], planned: list[Block], taken: set[str]) -> int:
     """The plan and the read-back, side by side and *in order*.
 
     Words alone cannot say which block is which, and a document is full of blocks
@@ -1171,17 +1381,18 @@ def _adopt_in_order(live: list[dict], planned: list[dict], taken: set) -> int:
             continue
         for offset in range(j2 - j1):
             want, got = planned[i1 + offset], live[j1 + offset]
-            if got.get("key") or not want.get("key") or want["key"] in taken:
+            key = want.get("key")
+            if got.get("key") or not key or key in taken:
                 continue
             if mine[a[i1 + offset]] != theirs[a[i1 + offset]]:
                 continue
-            got["key"] = want["key"]
-            taken.add(want["key"])
+            got["key"] = key
+            taken.add(key)
             done += 1
     return done
 
 
-def _adopt_by_words(live: dict, free: dict) -> int:
+def _adopt_by_words(live: Ir, free: dict[tuple[MatchShape, str], list[tuple[str, Block]]]) -> int:
     """A second pass on the words alone, for a block whose *shape* the write changed.
 
     Docs merges two paragraphs keeping the first one's style, so deleting a block
@@ -1200,10 +1411,10 @@ def _adopt_by_words(live: dict, free: dict) -> int:
     here would hand one block's identity to another, which is the defect this whole
     family is about.
     """
-    by_words: dict[str, list[dict]] = {}
+    by_words: dict[str, list[tuple[str, Block]]] = {}
     for (_, words), blocks in free.items():
         by_words.setdefault(words, []).extend(blocks)
-    orphans: dict[str, list[dict]] = {}
+    orphans: dict[str, list[Block]] = {}
     for block in live["blocks"]:
         if not block.get("key"):
             orphans.setdefault(_match_text(block), []).append(block)
@@ -1211,14 +1422,15 @@ def _adopt_by_words(live: dict, free: dict) -> int:
     for words, mine in by_words.items():
         theirs = orphans.get(words, [])
         if len(mine) == 1 and len(theirs) == 1 and (
-                (mine[0]["kind"] in doc_ir.STRUCTURAL)
+                (mine[0][1]["kind"] in doc_ir.STRUCTURAL)
                 == (theirs[0]["kind"] in doc_ir.STRUCTURAL)):
-            theirs[0]["key"] = mine[0]["key"]
+            theirs[0]["key"] = mine[0][0]
             done += 1
     return done
 
 
-def settle_keys(live: dict, planned: dict, base: dict | None = None) -> None:
+def settle_keys(live: Ir, planned: Mapping[str | None, list[Block]],
+                base: Ir | None = None) -> None:
     """Give every part the keys the plan meant it to have, then key what is left.
 
     Two passes and not one, which is the whole of it: `doc_ir.key_blocks` recurses
@@ -1247,8 +1459,8 @@ def settle_keys(live: dict, planned: dict, base: dict | None = None) -> None:
     parts = doc_ir.parts(live)
     for part in parts:
         stamp = None if part is live else part.get("tab")
-        if planned.get(stamp):
-            adopt_keys(part, planned[stamp])
+        if blocks := planned.get(stamp):
+            adopt_keys(part, blocks)
     if base:
         was = {None if p is base else p.get("tab"): p
                for p in doc_ir.parts(base) if p.get("blocks") is not None}
@@ -1260,7 +1472,7 @@ def settle_keys(live: dict, planned: dict, base: dict | None = None) -> None:
         doc_ir.key_blocks(part)
 
 
-def carry_unimported(live: dict, planned: list[dict]) -> int:
+def carry_unimported(live: Ir, planned: list[Block]) -> int:
     """Note on each read-back block what the plan asked for that no import can write.
 
     Paragraph shading and the space above and below a paragraph are not in what
@@ -1277,21 +1489,26 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
     the plan does not mention is left alone: in a read, "absent" is also what a
     reader who took the styling off looks like, and a settle must never undo that.
     """
-    want = {b["key"]: b for b in planned if b.get("key")}
+    want = {key: b for b in planned if (key := b.get("key"))}
     done = 0
     for block in live["blocks"]:
-        mine = want.get(block.get("key"))
+        key = block.get("key")
+        mine = want.get(key) if key is not None else None
         if mine is None or not block.get("span"):
             continue
-        missing = {key: mine[key] for key in UNIMPORTABLE
-                   if mine.get(key) is not None and mine[key] != block.get(key)}
-        if ("item" not in (mine["kind"], block["kind"]) and (mine.get("indent_first") or 0) < 0
-                and mine["indent_first"] != block.get("indent_first")):
+        missing: Measures = {}
+        for measure in UNIMPORTABLE:
+            value = doc_ir.measure_of(mine, measure)
+            if value is not None and value != doc_ir.measure_of(block, measure):
+                doc_ir.set_measure(missing, measure, value)
+        first = mine.get("indent_first")
+        if ("item" not in (mine["kind"], block["kind"]) and first is not None and first < 0
+                and first != block.get("indent_first")):
             # A hanging first line: Drive's importer drops a negative `text-indent`
             # (measured 2026-09-24: `margin-left:36pt; text-indent:-18pt` arrives as
             # 36 / 36), and `updateParagraphStyle` writes it. With its start, since
             # the request's number is from the page margin (`doc_ir._relative_first`).
-            missing["indent_first"] = mine["indent_first"]
+            missing["indent_first"] = first
             missing["indent"] = mine.get("indent") or 0.0
         ranges = _unimportable_runs(mine, block)
         # A named style the import could not carry. Compared as the style and not as
@@ -1300,7 +1517,7 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
         # safe against a reader who demoted a heading in the browser for the reason
         # the rest of this is: `mine` is the merged plan, and `_take_shape` gives it
         # the source's shape only where the document kept the base's.
-        named = named_style(mine)
+        named: str | None = named_style(mine)
         if named == named_style(block):
             named = None
         # And the bullet, which no named style carries: a list item and a plain
@@ -1318,7 +1535,7 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
         # (offline chain-4 seed 7700184: the source moves the item in front of it, and
         # the delete that ends the move is the last request in the batch). Both sides
         # items and disagreeing is the case the line above cannot see.
-        bullet = None
+        bullet: BulletFix | None = None
         if (mine["kind"] == "item") != (block["kind"] == "item"):
             bullet = ("ordered" if mine.get("ordered") else "unordered") \
                 if mine["kind"] == "item" else "none"
@@ -1347,7 +1564,7 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
         # under a theme that centres headings reports no alignment of its own, and
         # the centring the delete above it handed over shows only once `named` has
         # written NORMAL_TEXT back — which is in this very batch (seed 912452).
-        whole = None
+        whole: WholeStyle | None = None
         if (mine.get("paragraph_written") or mine.get("paragraph_merged")) \
                 and (named or _unwritten(mine, block)):
             style, fields = paragraph_style(mine)
@@ -1359,7 +1576,7 @@ def carry_unimported(live: dict, planned: list[dict]) -> int:
     return done
 
 
-def _unwritten(mine: dict, live: dict) -> list[str]:
+def _unwritten(mine: Block, live: Block) -> list[str]:
     """Which measurements the write did not leave as the plan asked.
 
     Deleting a paragraph hands the block behind it the style of the one that went,
@@ -1390,10 +1607,10 @@ def _unwritten(mine: dict, live: dict) -> list[str]:
     same thing as taking back a field the write itself mangled.
     """
     return [api for key, api in PARAGRAPH_KEYS
-            if api in _paragraph_fields(mine) and mine.get(key) != live.get(key)]
+            if api in _paragraph_fields(mine) and paragraph_of(mine, key) != paragraph_of(live, key)]
 
 
-def _paragraph_fields(mine: dict) -> tuple:
+def _paragraph_fields(mine: Block) -> tuple[str, ...]:
     """Which paragraph properties the settle may write on a block. A bullet's own
     indents are the list preset's, so they belong to neither side — but the question
     is whether the block is an **item once this settle has finished**, not what the
@@ -1409,7 +1626,7 @@ def _paragraph_fields(mine: dict) -> tuple:
     return ITEM_PARAGRAPH if mine["kind"] == "item" else MANAGED_PARAGRAPH
 
 
-def _unimportable_runs(mine: dict, live: dict) -> list[tuple[int, int, dict]]:
+def _unimportable_runs(mine: Block, live: Block) -> list[StyledRange]:
     """Where the plan wants run styling the document has none of, in its index space.
 
     Two things are asked, both invisible to an HTML import: small caps, which has no
@@ -1427,41 +1644,47 @@ def _unimportable_runs(mine: dict, live: dict) -> list[tuple[int, int, dict]]:
     if block_text(mine) != block_text(live) or any(
             r.get("frozen") for b in (mine, live) for r in b.get("runs", [])):
         return []
-    out = []
-    for key, api, value in (("smallcaps", "smallCaps", True),
-                            ("script", "baselineOffset", "SUPERSCRIPT"),
-                            ("script", "baselineOffset", "SUBSCRIPT")):
-        want = "super" if value == "SUPERSCRIPT" else "sub" if value == "SUBSCRIPT" else True
-        for start, end in _gaps(_mask(mine, key, want), _mask(live, key, want),
-                                live["span"][0]):
-            out.append((start, end, {api: value}))
+    out: list[StyledRange] = []
+    at = doc_ir._span(live)[0]
+
+    def wanted(asks: Callable[[Run], bool], style: DocsTextStyle) -> None:
+        for start, end in _gaps(_mask(mine, asks), _mask(live, asks), at):
+            out.append((start, end, style.copy()))
+
+    wanted(lambda run: run.get("smallcaps") is True, {"smallCaps": True})
+    wanted(lambda run: run.get("script") == "super", {"baselineOffset": "SUPERSCRIPT"})
+    wanted(lambda run: run.get("script") == "sub", {"baselineOffset": "SUBSCRIPT"})
     # And a face or a size the importer did not keep. Drive's importer carries a single
     # family name verbatim — except when it does not: measured 2026-09-24, three imports
     # of one file, the third made Consolas and Roboto Mono into Arial. So the plan's face
     # is written wherever the read-back has another (a name compared without case: the
     # same import gave back `courier new` for Courier New).
-    for face in {r["font"] for r in mine.get("runs", []) if r.get("font")}:
-        for start, end in _gaps(_mask(mine, "font", face.casefold()),
-                                _mask(live, "font", face.casefold()), live["span"][0]):
-            out.append((start, end, {"weightedFontFamily": {"fontFamily": face}}))
-    for size in {r["fontsize"] for r in mine.get("runs", []) if r.get("fontsize")}:
-        for start, end in _gaps(_mask(mine, "fontsize", size), _mask(live, "fontsize", size),
-                                live["span"][0]):
-            out.append((start, end, {"fontSize": {"magnitude": float(size), "unit": "PT"}}))
+    for face in {font for r in mine.get("runs", []) if (font := r.get("font"))}:
+        wanted(_in_face(face.casefold()), {"weightedFontFamily": {"fontFamily": face}})
+    for size in {fontsize for r in mine.get("runs", []) if (fontsize := r.get("fontsize"))}:
+        wanted(_at_size(size), {"fontSize": {"magnitude": float(size), "unit": "PT"}})
     return out
 
 
-def _mask(block: dict, key: str, want) -> list[bool]:
-    def value(run):
-        got = run.get(key)
-        return got.casefold() if key == "font" and isinstance(got, str) else got
-    return [value(run) == want for run in block.get("runs", [])
+def _in_face(face: str) -> Callable[[Run], bool]:
+    """Whether a run is set in this face, its name compared without case."""
+    return lambda run: (run.get("font") or "").casefold() == face
+
+
+def _at_size(size: float) -> Callable[[Run], bool]:
+    return lambda run: run.get("fontsize") == size
+
+
+def _mask(block: Block, asks: Callable[[Run], bool]) -> list[bool]:
+    """For each index unit of a block's words, whether its run is as `asks` wants."""
+    return [asks(run) for run in block.get("runs", [])
             for _ in range(doc_ir.utf16_len(run.get("text", "")))]
 
 
 def _gaps(mine: list[bool], live: list[bool], at: int) -> list[list[int]]:
     """The stretches the plan asks for and the read-back has not got."""
-    out, start = [], None
+    out: list[list[int]] = []
+    start: int | None = None
     for spot, want in enumerate(mine):
         if want and not live[spot]:
             start = at + spot if start is None else start
@@ -1475,34 +1698,34 @@ def _gaps(mine: list[bool], live: list[bool], at: int) -> list[list[int]]:
 
 # ---------------------------------------------------------------- merge
 
-def merge(base: dict, ours: dict, theirs: dict) -> dict:
+def merge(base: Ir, ours: Ir, theirs: Ir) -> Merged:
     """Merge the three sides. Returns the merged blocks, conflicts and notes.
 
     The merged list follows the *document's* order — a reader who moved a
     paragraph meant it — with blocks the source added spliced in where the source
     put them.
     """
-    base_by = {b["key"]: b for b in base["blocks"] if b.get("key")}
-    ours_by = {b["key"]: b for b in ours["blocks"] if b.get("key")}
-    theirs_by = {b["key"]: b for b in theirs["blocks"] if b.get("key")}
-    conflicts: list[dict] = []
+    base_by = _by_key(base["blocks"])
+    ours_by = _by_key(ours["blocks"])
+    theirs_by = _by_key(theirs["blocks"])
+    conflicts: list[Conflict] = []
     notes: list[str] = []
-    merged: list[dict] = []
+    merged: list[Block] = []
 
     for block in theirs["blocks"]:
         key = block.get("key")
         if key is None:
-            merged.append(dict(block) | {"origin": "added in the document"})
+            merged.append(_with_origin(block, "added in the document"))
             continue
         mine, was = ours_by.get(key), base_by.get(key)
         if was is None:
-            merged.append(dict(block) | {"origin": "unknown to the base"})
+            merged.append(_with_origin(block, "unknown to the base"))
             continue
         if mine is None:
             # The source dropped it. A document edit outranks that.
             if _edited(block, was):
                 notes.append(f"{key}: dropped by the source but edited in the document — kept")
-                merged.append(dict(block) | {"origin": "kept over a source delete"})
+                merged.append(_with_origin(block, "kept over a source delete"))
             elif not _writable_block(block):
                 # And so does content no request could ever make again: the rewrite path
                 # in `_merge_block` refuses to delete-and-write such a block, and a plain
@@ -1511,9 +1734,9 @@ def merge(base: dict, ours: dict, theirs: dict) -> dict:
                 notes.append(f"{key}: dropped by the source but holds an equation, a "
                              f"dropdown or a table of contents no request can make "
                              f"again — kept")
-                merged.append(dict(block) | {"origin": "kept over a source delete"})
+                merged.append(_with_origin(block, "kept over a source delete"))
             continue
-        merged.append(_merge_block(was, mine, block, conflicts, notes))
+        merged.append(_merge_block(was, mine, block, conflicts, notes, None))
 
     # The source's moves before its additions, because an addition is placed after the
     # block the file puts it behind and a move does not carry what stands behind it: a
@@ -1530,12 +1753,26 @@ def merge(base: dict, ours: dict, theirs: dict) -> dict:
             continue  # already placed, or deleted in the document: the delete stands
         # Whatever span this block had is an index into a different document: drop it,
         # and let `origin` be what says this one has to be written from nothing.
-        fresh = {k: v for k, v in block.items() if k != "span"}
-        merged.insert(_place(ours, merged, index), fresh | {"origin": "added by the source"})
+        fresh = block.copy()
+        fresh.pop("span", None)
+        fresh["origin"] = "added by the source"
+        merged.insert(_place(ours, merged, index), fresh)
     return {"blocks": merged, "conflicts": conflicts, "notes": notes}
 
 
-def _place(ours: dict, merged: list, index: int) -> int:
+def _by_key(blocks: Iterable[Block]) -> dict[str, Block]:
+    """The keyed blocks of a side, by key."""
+    return {key: b for b in blocks if (key := b.get("key"))}
+
+
+def _with_origin(block: Block, origin: doc_ir.Origin) -> Block:
+    """A copy of a block, with what the merge says became of it."""
+    out = block.copy()
+    out["origin"] = origin
+    return out
+
+
+def _place(ours: Ir, merged: Sequence[Block], index: int) -> int:
     """Where a source-added block goes: after the merged block that precedes it in ours."""
     for before in reversed(ours["blocks"][:index]):
         at = next((i for i, b in enumerate(merged) if b.get("key") == before.get("key")), None)
@@ -1544,11 +1781,12 @@ def _place(ours: dict, merged: list, index: int) -> int:
     return 0
 
 
-def _order_of(blocks: list[dict], keys: set) -> list[str]:
-    return [b["key"] for b in blocks if b.get("key") in keys]
+def _order_of(blocks: list[Block], keys: Set[str | None]) -> list[str]:
+    return [key for b in blocks if (key := b.get("key")) is not None and key in keys]
 
 
-def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, notes: list) -> None:
+def _apply_source_moves(base: Ir, ours: Ir, theirs: Ir, merged: list[Block],
+                        notes: list[str]) -> None:
     """Put back where the file has them the blocks the *source* moved.
 
     The merged order is the document's, because a reader who moved a paragraph meant
@@ -1561,8 +1799,8 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
     A move whose two ends are one place is no move, and writing it is destructive:
     the guard at the bottom is what says so.
     """
-    placed = {b["key"]: b for b in merged if b.get("key")}
-    common = placed.keys() & {b.get("key") for b in base["blocks"]} \
+    placed = _by_key(merged)
+    common: set[str] = placed.keys() & {b.get("key") for b in base["blocks"]} \
         & {b.get("key") for b in ours["blocks"]} & {b.get("key") for b in theirs["blocks"]}
     was, mine, live = (_order_of(side["blocks"], common) for side in (base, ours, theirs))
     if mine == was:
@@ -1634,7 +1872,7 @@ def _apply_source_moves(base: dict, ours: dict, theirs: dict, merged: list, note
         block["moved"] = True
 
 
-def _table_movable(was: dict, live: dict) -> bool:
+def _table_movable(was: Block, live: Block) -> bool:
     """Whether a table can be deleted and built again with nothing lost: the
     document's cells say what the base's do, are marked and set as the base has them,
     and hold nothing frozen. That the grid to build is whole rows is the caller's
@@ -1682,15 +1920,16 @@ def _moved_keys(was: list[str], mine: list[str]) -> list[str]:
             ends.append(at)
         else:
             tails[length], ends[length] = value, at
-    kept, at = set(), ends[-1] if ends else -1
+    kept: set[str] = set()
+    at = ends[-1] if ends else -1
     while at >= 0:
         kept.add(mine[at])
         at = came[at]
     return [key for key in mine if key not in kept]
 
 
-def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list,
-                 inside: str | None = None) -> dict:
+def _merge_block(was: Block, mine: Block, live: Block, conflicts: list[Conflict],
+                 notes: list[str], inside: str | None) -> Block:
     key = live.get("key") or inside or "a table cell"
     # A cell has no key, and the base a cell is merged against may be a stand-in: a row
     # or a column one side has just added pairs with nothing, so every cell of it reads
@@ -1701,7 +1940,7 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     # table at all — the reader of it cannot find the cell and the loss oracle cannot
     # tell which table was spoken for (offline chain-12 seed 1710213, shape `prose`).
     a_block = bool(live.get("key"))
-    out = dict(live)
+    out = live.copy()
     if live.get("kind") == "table":
         return _merge_table(was, mine, live, conflicts, notes)
     # Only the source's own chip changes need a decision: one the document made (a
@@ -1718,16 +1957,18 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
             # written, so an equation in it — which no request can make again — keeps
             # the whole block as the document has it.
             if _writable_block(live) and all(writable(r) for r in runs):
-                return _merged_shape(dict(out), was, mine, live, a_block, key, notes) \
-                    | {"runs": runs, "rewrite": True, "origin": "merged"}
+                shaped = _merged_shape(out.copy(), was, mine, live, a_block, key, notes)
+                shaped["runs"] = runs
+                shaped["rewrite"] = True
+                shaped["origin"] = "merged"
+                return shaped
             notes.append(f"{key}: the source changed a chip or picture no request can write "
                          f"— left alone")
-            return out | {"origin": "frozen content differs"}
+            return _with_origin(out, "frozen content differs")
         notes.append(f"{key}: the source would rewrite a chip or equation — left alone")
-        return out | {"origin": "frozen content differs"}
+        return _with_origin(out, "frozen content differs")
     text, clashes = diff3(block_text(was), block_text(mine), block_text(live))
-    for clash in clashes:
-        conflicts.append(dict(clash) | {"key": key})
+    conflicts.extend(_conflicts(clashes, key))
     _merged_shape(out, was, mine, live, a_block, key, notes)
     if text != block_text(live):
         out["runs"] = _retext(live, text)
@@ -1781,7 +2022,8 @@ def _merge_block(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     return out
 
 
-def _merge_table(was: dict, mine: dict, live: dict, conflicts: list, notes: list) -> dict:
+def _merge_table(was: Block, mine: Block, live: Block, conflicts: list[Conflict],
+                 notes: list[str]) -> Block:
     """A table merges three ways twice: its rows and columns, then its cells.
 
     Inside a table a block has no named range: a cell is known by the row and column
@@ -1793,7 +2035,8 @@ def _merge_table(was: dict, mine: dict, live: dict, conflicts: list, notes: list
     merged on the pass after that, against the grid the document then has.
     """
     key = live.get("key") or "a table"
-    out = dict(live)
+    out = live.copy()
+    lines: list[list[CellPlace]]
     if _hint(was, mine, live) is None and _grid(was) == _grid(mine) == _grid(live) \
             and _in_place(was, mine) and _in_place(was, live):
         # One shape on all three sides, and no line whose words moved to another
@@ -1806,41 +2049,59 @@ def _merge_table(was: dict, mine: dict, live: dict, conflicts: list, notes: list
         if found is None:
             notes.append(f"{key}: the table's rows and columns differ between the sides "
                          f"— left alone")
-            return out | {"origin": "table grid differs"}
+            return _with_origin(out, "table grid differs")
         rows, columns, settled = found
         ops = _grid_ops(rows, "row") + _grid_ops(columns, "column")
-        matched = {"row": rows, "column": columns, "dropped": settled,
-                   "mine": _size(mine.get("rows", []))}
+        matched: TableLines = {"row": rows, "column": columns, "dropped": settled,
+                               "mine": _size(mine.get("rows", []))}
         if ops:
-            return out | {"origin": "the grid the source has", "regrid": ops,
-                          "lines": matched}
+            out["origin"] = "the grid the source has"
+            out["regrid"] = ops
+            out["lines"] = matched
+            return out
         # No line is added or taken away, so the document's grid is the merged one,
         # and every live cell is merged where it stands. The matching is carried all
         # the same: a table the source *moved* is built again blank, and the round
         # after has to be told which of the file's lines that grid stands for
         # (`rebase_tables`) rather than guess it from words that are not there yet.
-        out = out | {"lines": matched}
-        lines = [[(row.live, column.live, row.was, column.was, row.mine, column.mine)
-                  for column in columns] for row in rows]
-    merged = []
-    for row in lines:
-        cells = []
-        for r, c, wr, wc, mr, mc in row:
-            here = live["rows"][r][c]
+        out["lines"] = matched
+        lines = [[(_live_line(row), _live_line(column), row.was, column.was, row.mine,
+                   column.mine) for column in columns] for row in rows]
+    merged: list[list[list[Block]]] = []
+    now = live.get("rows", [])
+    for row_places in lines:
+        cells: list[list[Block]] = []
+        for r, c, wr, wc, mr, mc in row_places:
+            here = now[r][c]
             then, want = _cell(was, wr, wc), _cell(mine, mr, mc)
-            cells.append([dict(b) for b in here] if then is None or want is None
+            cells.append([b.copy() for b in here] if then is None or want is None
                          else _merge_cell(then, want, here, conflicts, notes, key))
         merged.append(cells)
     # A table has no words of its own, so what its cells did is what it did: the
     # report and the write side both ask the table, not the blocks inside it.
     inside = {b.get("origin") for row in merged for cell in row for b in cell}
-    return out | {"rows": merged} | ({"origin": "merged"} if "merged" in inside
-                                     else {"origin": "kept from the document"}
-                                     if "kept from the document" in inside else {})
+    out["rows"] = merged
+    if "merged" in inside:
+        out["origin"] = "merged"
+    elif "kept from the document" in inside:
+        out["origin"] = "kept from the document"
+    return out
 
 
-def _merge_cell(was: list, mine: list, live: list, conflicts: list, notes: list,
-                key: str) -> list[dict]:
+# A cell of a merged table: its row and column in the document, in the base and in
+# the file (None where that side has no such line).
+CellPlace = tuple[int, int, int | None, int | None, int | None, int | None]
+
+
+def _live_line(line: GridLine) -> int:
+    """Where a line of a grid no regrid touches stands in the document."""
+    if line.live is None:
+        raise ValueError(f"a line the document has not got, in a grid kept whole: {line}")
+    return line.live
+
+
+def _merge_cell(was: list[Block], mine: list[Block], live: list[Block],
+                conflicts: list[Conflict], notes: list[str], key: str) -> list[Block]:
     """One cell, three ways: paragraph by paragraph while the three agree on how many
     there are, and as one text with its paragraph breaks in it when they do not."""
     if len(was) == len(mine) == len(live):
@@ -1848,10 +2109,9 @@ def _merge_cell(was: list, mine: list, live: list, conflicts: list, notes: list,
                 for w, m, l in zip(was, mine, live)]
     then, want, now = (_cell_text(cell) for cell in (was, mine, live))
     text, clashes = diff3(then, want, now)
-    for clash in clashes:
-        conflicts.append(dict(clash) | {"key": key})
+    conflicts.extend(_conflicts(clashes, key))
     if text == now:
-        return [dict(b) | ({"origin": "kept from the document"} if now != then else {})
+        return [_with_origin(b, "kept from the document") if now != then else b.copy()
                 for b in live]
     # Two reasons the words cannot carry it. The merged text may run through a frozen
     # run, and `text_requests` never puts a hunk through one; or the source may have
@@ -1883,13 +2143,13 @@ def _merge_cell(was: list, mine: list, live: list, conflicts: list, notes: list,
         # writing it is not saying so.
         notes.append(f"{key}: the source changed a cell a chip or equation stands in "
                      f"— left alone")
-        return [dict(b) | {"origin": "kept from the document"} for b in live]
+        return [_with_origin(b, "kept from the document") for b in live]
     # `_pairs` sets this against the live cell read as one block (`_joined`), so the
     # breaks are written as the newlines they are.
     return [{"kind": "paragraph", "joined": True, "runs": [{"text": text}], "origin": "merged"}]
 
 
-def _in_place(was: dict, side: dict) -> bool:
+def _in_place(was: Block, side: Block) -> bool:
     """Whether one side's lines are the base's lines where they stand: the words match
     no better when rows or columns are paired elsewhere (`_align`) than place by place.
 
@@ -1903,8 +2163,9 @@ def _in_place(was: dict, side: dict) -> bool:
     """
     then, now = (_texts(b.get("rows", [])) for b in (was, side))
 
-    def pairs_better(here, there, score) -> bool:
-        def total(pairs):
+    def pairs_better(here: list[list[str]], there: list[list[str]],
+                     score: Callable[[list[str], list[str]], float]) -> bool:
+        def total(pairs: Iterable[tuple[int, int]]) -> float:
             return sum(s for s in (score(here[i], there[j]) for i, j in pairs) if s >= ALIKE)
         return total(_align(here, there, score)) > total(
             (i, i) for i in range(min(len(here), len(there)))) + 1e-9
@@ -1914,7 +2175,7 @@ def _in_place(was: dict, side: dict) -> bool:
     return not pairs_better(then, now, _row_score([(c, c) for c in range(len(then[0]))]))
 
 
-def _cell_kept(was: list, live: list) -> bool:
+def _cell_kept(was: list[Block], live: list[Block]) -> bool:
     """Whether the document left a cell exactly as the base has it — words, styling
     and frozen runs, paragraph by paragraph."""
     return ([block_text(b) for b in was] == [block_text(b) for b in live]
@@ -1923,7 +2184,7 @@ def _cell_kept(was: list, live: list) -> bool:
             and [frozen_of(b) for b in was] == [frozen_of(b) for b in live])
 
 
-def _cell_frozen(cell: list[dict]) -> tuple:
+def _cell_frozen(cell: list[Block]) -> tuple[FrozenId, ...]:
     """What a cell's frozen runs are, in order, the paragraph breaks left out: a cell
     the source splits keeps its chips, and it is the chips that are being compared."""
     return tuple(f for block in cell for f in frozen_of(block))
@@ -1944,21 +2205,15 @@ def _text_writable(current: str, target: str) -> bool:
                    in SequenceMatcher(None, a, b, autojunk=False).get_opcodes())
 
 
-class _Line(NamedTuple):
-    """One row or column of the merged table: where it is in each side, if anywhere,
-    and whether it is about to be taken out of the document."""
-    was: int | None
-    live: int | None
-    mine: int | None
-    gone: bool = False
+_Line = GridLine   # one row or column of the merged table (`doc_ir.GridLine`)
 
 
 ALIKE = 0.5    # least score for two rows (or columns) to be the same line
 BLANK = 0.6    # two lines with nothing written in them: alike, but less than equal
 
 
-def _table_lines(was: dict, mine: dict, live: dict, notes: list,
-                 key: str) -> tuple[list[_Line], list[_Line], dict] | None:
+def _table_lines(was: Block, mine: Block, live: Block, notes: list[str],
+                 key: str) -> tuple[list[GridLine], list[GridLine], Dropped] | None:
     """The merged rows and columns of a table, or None when there is no telling.
 
     The columns are matched by the words in them and the rows by their cells in those
@@ -1976,8 +2231,13 @@ def _table_lines(was: dict, mine: dict, live: dict, notes: list,
         return None                            # a row out of step with the others
     now, then, want = (_texts(rows) for rows in (here, old, src))
     hint = _hint(was, mine, live)
-    dropped = {name: frozenset((hint or {}).get(f"{name}_dropped", ()))
-               for name in ("row", "column")}
+    dropped: dict[LineName, frozenset[int]] = {
+        "row": frozenset(hint.get("row_dropped", []) if hint else ()),
+        "column": frozenset(hint.get("column_dropped", []) if hint else ())}
+    live_columns: Sequence[tuple[int, int]]
+    mine_columns: Sequence[tuple[int, int]]
+    live_rows: Sequence[tuple[int, int]]
+    mine_rows: Sequence[tuple[int, int]]
     if hint:
         live_columns, mine_columns = hint["column_live"], hint["column_mine"]
         live_rows, mine_rows = hint["row_live"], hint["row_mine"]
@@ -1989,11 +2249,11 @@ def _table_lines(was: dict, mine: dict, live: dict, notes: list,
 
     now_set, then_set = (_sets(rows) for rows in (here, old))
 
-    def row_kept(w, l):
+    def row_kept(w: int, l: int) -> bool:
         return (_line_unchanged(then[w], now[l], live_columns, len(now[l]))
                 and _same_set(then_set[w], now_set[l], live_columns))
 
-    def column_kept(w, l):
+    def column_kept(w: int, l: int) -> bool:
         return (_line_unchanged([row[w] for row in then], [row[l] for row in now],
                                 live_rows, len(now))
                 and _same_set([row[w] for row in then_set],
@@ -2005,9 +2265,11 @@ def _table_lines(was: dict, mine: dict, live: dict, notes: list,
                             column_kept, dropped["column"])
     if rows is None or columns is None:
         return None
-    settled = {}
-    for name, merged, pairs, across in (("row", rows, mine_rows, mine_columns),
-                                        ("column", columns, mine_columns, mine_rows)):
+    settled: Dropped = {"row": [], "column": []}
+    sides: tuple[tuple[LineName, list[GridLine], Sequence[tuple[int, int]],
+                       Sequence[tuple[int, int]]], ...] = (
+        ("row", rows, mine_rows, mine_columns), ("column", columns, mine_columns, mine_rows))
+    for name, merged, pairs, across in sides:
         for line in merged:
             if line.was is not None and line.mine is None and not line.gone:
                 notes.append(f"{key}: the source took away a {name}, but the document wrote "
@@ -2031,8 +2293,8 @@ def _table_lines(was: dict, mine: dict, live: dict, notes: list,
     return rows, columns, settled
 
 
-def _source_wrote_in(then: list[list[str]], want: list[list[str]], name: str,
-                     w: int, m: int, across: list[tuple[int, int]]) -> bool:
+def _source_wrote_in(then: Sequence[Sequence[str]], want: Sequence[Sequence[str]], name: str,
+                     w: int, m: int, across: Sequence[tuple[int, int]]) -> bool:
     """Whether the source changed a cell of a row (or column) of the base.
 
     Only the cells of the *other* dimension's lines both sides share are asked, as in
@@ -2044,24 +2306,30 @@ def _source_wrote_in(then: list[list[str]], want: list[list[str]], name: str,
     return any(then[a][w] != want[b][m] for a, b in across)
 
 
-def _hint(was: dict, mine: dict, live: dict) -> dict | None:
+def _hint(was: Block, mine: Block, live: Block) -> Aligned | None:
     """How the base's lines match, when `rebase_tables` left that said for the grids
     the two sides have now."""
     hint = was.get("aligned")
-    if hint and hint["live"] == _size(live.get("rows", [])) \
-            and hint["mine"] == _size(mine.get("rows", [])):
+    if hint and _same_size(hint["live"], _size(live.get("rows", []))) \
+            and _same_size(hint["mine"], _size(mine.get("rows", []))):
         return hint
     return None
 
 
-def _size(rows: list) -> tuple[int, int] | None:
+def _same_size(said: Sequence[int] | None, size: Size | None) -> bool:
+    """Whether a size a base recorded is this one — a list once it has been through
+    JSON, which a tuple never equals."""
+    return said == size if said is None or size is None else list(said) == list(size)
+
+
+def _size(rows: Sequence[Sequence[object]]) -> Size | None:
     """A grid's rows and columns, when every row has as many cells as the first."""
     if not rows or not rows[0] or any(len(row) != len(rows[0]) for row in rows):
         return None
     return len(rows), len(rows[0])
 
 
-def _built_size(block: dict) -> tuple[int, int] | None:
+def _built_size(block: Block) -> Size | None:
     """The shape a table the source moved has to be built again at.
 
     Not the file's — the file may still hold a row the reader deleted — and not
@@ -2078,16 +2346,20 @@ def _built_size(block: dict) -> tuple[int, int] | None:
     lines = block.get("lines")
     if not lines:
         return _size(block.get("rows", []))
-    rows, columns = (sum(not line.gone for line in lines[name])
-                     for name in ("row", "column"))
+    return _lines_size(lines)
+
+
+def _lines_size(lines: TableLines) -> Size | None:
+    """The shape of a merged table: every line but the ones settled as `gone`."""
+    rows, columns = (sum(not line.gone for line in lines[name]) for name in _LINE_NAMES)
     return (rows, columns) if rows and columns else None
 
 
-def _cell_text(cell: list[dict]) -> str:
+def _cell_text(cell: list[Block]) -> str:
     return "\n".join(block_text(block) for block in cell)
 
 
-def _texts(rows: list) -> list[list[str]]:
+def _texts(rows: Sequence[Sequence[list[Block]]]) -> list[list[str]]:
     return [[_cell_text(cell) for cell in row] for row in rows]
 
 
@@ -2106,7 +2378,7 @@ def _column_score(a: list[str], b: list[str]) -> float:
     return sum((one & other).values()) / max(sum(one.values()), sum(other.values()))
 
 
-def _row_score(columns: list[tuple[int, int]]):
+def _row_score(columns: Sequence[tuple[int, int]]) -> Callable[[list[str], list[str]], float]:
     """How alike two rows are: the share of their cells, in the columns that match,
     that say the same thing — cells nobody wrote in left out of the count."""
     def score(a: list[str], b: list[str]) -> float:
@@ -2117,7 +2389,8 @@ def _row_score(columns: list[tuple[int, int]]):
     return score
 
 
-def _align(here: list, there: list, score) -> list[tuple[int, int]]:
+def _align(here: list[list[str]], there: list[list[str]],
+           score: Callable[[list[str], list[str]], float]) -> list[tuple[int, int]]:
     """Which line of `here` is which line of `there`, keeping both orders.
 
     The pairs that are at least ALIKE and add up to the most, and then, between two
@@ -2131,7 +2404,8 @@ def _align(here: list, there: list, score) -> list[tuple[int, int]]:
         for j in range(m - 1, -1, -1):
             take = best[i + 1][j + 1] + alike[i][j] if alike[i][j] >= ALIKE else -1.0
             best[i][j] = max(take, best[i + 1][j], best[i][j + 1])
-    sure, i, j = [], 0, 0
+    sure: list[tuple[int, int]] = []
+    i, j = 0, 0
     while i < n and j < m:
         if alike[i][j] >= ALIKE and best[i][j] == best[i + 1][j + 1] + alike[i][j]:
             sure.append((i, j))
@@ -2140,7 +2414,7 @@ def _align(here: list, there: list, score) -> list[tuple[int, int]]:
             i += 1
         else:
             j += 1
-    out = []
+    out: list[tuple[int, int]] = []
     for (i0, j0), (i1, j1) in zip([(-1, -1)] + sure, sure + [(n, m)]):
         out += [(i0 + 1 + k, j0 + 1 + k) for k in range(min(i1 - i0, j1 - j0) - 1)]
         if i1 < n:
@@ -2148,7 +2422,7 @@ def _align(here: list, there: list, score) -> list[tuple[int, int]]:
     return out
 
 
-def _line_unchanged(was: list[str], live: list[str], across: list[tuple[int, int]],
+def _line_unchanged(was: list[str], live: list[str], across: Sequence[tuple[int, int]],
                     width: int) -> bool:
     """Whether the document left a row (or column) as the base has it: every cell the
     two share says the same, and nothing is written in a cell the base did not have."""
@@ -2157,14 +2431,17 @@ def _line_unchanged(was: list[str], live: list[str], across: list[tuple[int, int
             and all(not live[l].strip() for l in range(width) if l not in matched))
 
 
-def _sets(rows: list) -> list[list[tuple]]:
+CellSet = tuple[tuple[Styled, Shape], ...]
+
+
+def _sets(rows: Sequence[Sequence[list[Block]]]) -> list[list[CellSet]]:
     """How each cell of a grid is *set*, beside what `_texts` says it says."""
     return [[tuple((_styled(b), _shape(b)) for b in cell) for cell in row]
             for row in rows]
 
 
-def _same_set(was: list[tuple], live: list[tuple],
-              across: list[tuple[int, int]]) -> bool:
+def _same_set(was: list[CellSet], live: list[CellSet],
+              across: Sequence[tuple[int, int]]) -> bool:
     """Whether the document left a row (or column) styled as the base has it.
 
     `_edited`'s rule at the size of a line, and the last place in this file that still
@@ -2181,9 +2458,9 @@ def _same_set(was: list[tuple], live: list[tuple],
     return all(was[w] == live[l] for w, l in across)
 
 
-def _merged_lines(n_live: int, n_mine: int, live: list[tuple[int, int]],
-                  mine: list[tuple[int, int]], unchanged,
-                  dropped: frozenset = frozenset()) -> list[_Line] | None:
+def _merged_lines(n_live: int, n_mine: int, live: Sequence[tuple[int, int]],
+                  mine: Sequence[tuple[int, int]], unchanged: Callable[[int, int], bool],
+                  dropped: frozenset[int]) -> list[GridLine] | None:
     """The rows (or columns) of the merged table, in the document's order.
 
     Every line the document has is there: one the source took away is marked `gone`
@@ -2196,8 +2473,8 @@ def _merged_lines(n_live: int, n_mine: int, live: list[tuple[int, int]],
     (the last row cannot be deleted), and says so with None.
     """
     was_of = {l: w for w, l in live}
-    mine_of = dict(mine)
-    lines = []
+    mine_of = {w: m for w, m in mine}
+    lines: list[GridLine] = []
     for l in range(n_live):
         w = was_of.get(l)
         if w is None:
@@ -2211,20 +2488,20 @@ def _merged_lines(n_live: int, n_mine: int, live: list[tuple[int, int]],
         if m in known:
             continue
         at = next((k + 1 for k in range(len(lines) - 1, -1, -1)
-                   if lines[k].mine is not None and lines[k].mine < m), 0)
+                   if (before := lines[k].mine) is not None and before < m), 0)
         lines.insert(at, _Line(None, None, m))
     if n_live and all(line.gone for line in lines if line.live is not None):
         return None
     return lines
 
 
-def _grid_ops(lines: list[_Line], name: str) -> list[tuple[str, str, int]]:
+def _grid_ops(lines: list[GridLine], name: LineName) -> list[GridOp]:
     """The rows (or columns) to delete and insert, at the document's indices: a line
     goes in in front of the document's next line, whichever side that one is on."""
     width = sum(line.live is not None for line in lines)
-    ops = []
+    ops: list[GridOp] = []
     for k, line in enumerate(lines):
-        if line.gone:
+        if line.gone and line.live is not None:     # only a line the document has goes
             ops.append((name, "delete", line.live))
         elif line.live is None:
             ops.append((name, "insert", next((later.live for later in lines[k + 1:]
@@ -2232,67 +2509,76 @@ def _grid_ops(lines: list[_Line], name: str) -> list[tuple[str, str, int]]:
     return ops
 
 
-def _kept(lines: list[_Line]) -> list[_Line]:
+def _kept(lines: list[GridLine]) -> list[GridLine]:
     return [line for line in lines if not line.gone]
 
 
-def _cell(block: dict, row: int | None, column: int | None) -> list[dict] | None:
-    if row is None or column is None:
+def _cell(block: Block, row: int | None, column: int | None) -> list[Block] | None:
+    rows = block.get("rows")
+    if row is None or column is None or rows is None:
         return None
     try:
-        return block["rows"][row][column]
-    except (KeyError, IndexError):
+        return rows[row][column]
+    except IndexError:
         return None
 
 
-def _grid(block: dict) -> tuple:
+def _grid(block: Block) -> tuple[int, ...]:
     """How many cells each row has."""
     return tuple(len(row) for row in block.get("rows", []))
 
 
-def _rewritten_runs(mine: dict, live: dict) -> list[dict]:
+def _rewritten_runs(mine: Block, live: Block) -> list[Run]:
     """The file's runs, with every frozen run the document already has taken from the
     document — it knows where that picture's pixels are, and what a chip says."""
-    have: dict[tuple, list] = {}
+    have: dict[FrozenId, list[Run]] = {}
     for run in live.get("runs", []):
         if run.get("frozen"):
             have.setdefault(_frozen_id(run), []).append(run)
-    out = []
+    out: list[Run] = []
     for run in mine.get("runs", []):
         if run.get("frozen"):
             same = have.get(_frozen_id(run))
-            out.append(dict(same.pop(0)) if same else dict(run) | {"width": 1})
+            out.append(same.pop(0).copy() if same else _with_width(run, 1))
         else:
-            out.append(dict(run) | {"width": doc_ir.utf16_len(run["text"])})
+            out.append(_with_width(run, doc_ir.utf16_len(run["text"])))
     return out
 
 
-def _restyled(live: dict, mine: dict) -> list[dict]:
+def _with_width(run: Run, width: int) -> Run:
+    """A copy of a run that holds `width` index units."""
+    out = run.copy()
+    out["width"] = U16(width)
+    return out
+
+
+def _restyled(live: Block, mine: Block) -> list[Run]:
     """The source's runs, with the document's frozen runs put back where they were."""
     frozen = iter([r for r in live.get("runs", []) if r.get("frozen")])
-    out = []
+    out: list[Run] = []
     for run in mine.get("runs", []):
         if run.get("frozen"):
             kept = next(frozen, None)
-            out.append(dict(kept if kept is not None else run))
+            out.append((kept if kept is not None else run).copy())
         else:
-            out.append(dict(run) | {"width": doc_ir.utf16_len(run["text"])})
+            out.append(_with_width(run, doc_ir.utf16_len(run["text"])))
     return out
 
 
-def _char_styles(block: dict) -> list:
-    """The styling of every character of `block_text`: a run's marks, or the frozen
-    run itself for the one character that stands for it."""
-    out: list = []
+def _char_styles(block: Block) -> list[Run]:
+    """The styling of every character of `block_text`: a run's marks (`doc_ir.style_key`:
+    the run with no words and no width), or the frozen run itself for the one character
+    that stands for it."""
+    out: list[Run] = []
     for run in block.get("runs", []):
         if run.get("frozen"):
             out.append(run)
         else:
-            out += [{k: v for k, v in run.items() if k not in ("text", "width")}] * len(run["text"])
+            out += [doc_ir.style_key(run)] * len(run["text"])
     return out
 
 
-def _word_pairs(one: str, other: str):
+def _word_pairs(one: str, other: str) -> Iterator[tuple[int, int]]:
     """(i, j) for every character of `one` whose word is also in `other`, in order."""
     a, b = tokens(one), tokens(other)
     at_a, at_b = [0], [0]
@@ -2306,7 +2592,7 @@ def _word_pairs(one: str, other: str):
                 yield at_a[i1] + k, at_b[j1] + k
 
 
-def _restyled_words(was: dict, mine: dict, live: dict, text: str) -> tuple[list[dict], bool]:
+def _restyled_words(was: Block, mine: Block, live: Block, text: str) -> tuple[list[Run], bool]:
     """Runs for merged `text` whose words both sides changed, and one side the marks.
 
     Every character takes the document's styling where its word is the document's,
@@ -2324,7 +2610,7 @@ def _restyled_words(was: dict, mine: dict, live: dict, text: str) -> tuple[list[
     own. The second value says whether a word the source restyled is gone from the
     merge — the document rewrote it, and its new words keep the document's styling.
     """
-    styles: list = [None] * len(text)
+    styles: list[Run | None] = [None] * len(text)
     live_styles, mine_styles = _char_styles(live), _char_styles(mine)
     was_styles = _char_styles(was)
     for i, j in _word_pairs(block_text(live), text):
@@ -2333,7 +2619,7 @@ def _restyled_words(was: dict, mine: dict, live: dict, text: str) -> tuple[list[
     # not asking for anything there. A word it does not have is one the source typed,
     # and that one comes with the file's styling.
     said = {i: was_styles[w] for w, i in _word_pairs(block_text(was), block_text(mine))}
-    kept = set()
+    kept: set[int] = set()
     for i, j in _word_pairs(block_text(mine), text):
         kept.add(i)
         if text[j] != FROZEN and mine_styles[i] != said.get(i):
@@ -2344,34 +2630,35 @@ def _restyled_words(was: dict, mine: dict, live: dict, text: str) -> tuple[list[
     return _runs_from_styles(text, styles, live), lost
 
 
-def _runs_from_styles(text: str, styles: list, live: dict) -> list[dict]:
+def _runs_from_styles(text: str, styles: list[Run | None], live: Block) -> list[Run]:
     """Runs for `text` from one style per character: a character with none takes the
     one before it, as Docs gives a typed character, and the frozen runs are the
     document's own, in its order — the merge adds or drops none the document does
     not have (`_merge_block` checks the source's)."""
-    runs: list[dict] = []
+    runs: list[Run] = []
     frozen = iter([r for r in live.get("runs", []) if r.get("frozen")])
-    previous: dict = {}
-    for char, style in zip(text, styles):
+    previous: Run = {"text": ""}
+    for char, said in zip(text, styles):
         if char == FROZEN:
             chip = next(frozen, None)
             if chip is not None:
-                runs.append(dict(chip))
+                runs.append(chip.copy())
             continue
-        style = previous if style is None or style.get("frozen") else style
+        style = previous if said is None or said.get("frozen") else said
         previous = style
-        if runs and not runs[-1].get("frozen") and \
-                {k: v for k, v in runs[-1].items() if k not in ("text", "width")} == style:
+        if runs and not runs[-1].get("frozen") and doc_ir.style_key(runs[-1]) == style:
             runs[-1]["text"] += char
         else:
-            runs.append(dict(style) | {"text": char})
+            run = style.copy()
+            run["text"] = char
+            runs.append(run)
     for run in runs:
         if not run.get("frozen"):
-            run["width"] = doc_ir.utf16_len(run["text"])
+            run["width"] = U16(doc_ir.utf16_len(run["text"]))
     return runs
 
 
-def _retext(live: dict, text: str) -> list[dict]:
+def _retext(live: Block, text: str) -> list[Run]:
     """Put merged text back into the live block's runs, frozen runs untouched.
 
     Every word the document has keeps the document's styling on it, wherever the
@@ -2381,14 +2668,14 @@ def _retext(live: dict, text: str) -> list[dict]:
     soon as the block was written again from nothing (a block the source both
     reworded and moved, `moved-styling`).
     """
-    styles: list = [None] * len(text)
+    styles: list[Run | None] = [None] * len(text)
     live_styles = _char_styles(live)
     for i, j in _word_pairs(block_text(live), text):
         styles[j] = live_styles[i]
     return _runs_from_styles(text, styles, live)
 
 
-def reader_styling_gone(was: dict, live: dict, text: str) -> str | None:
+def reader_styling_gone(was: Block, live: Block, text: str) -> str | None:
     """The first word the reader styled that the merged `text` no longer has.
 
     A word carries the reader's styling when its marks differ from the base's on
@@ -2411,10 +2698,10 @@ def reader_styling_gone(was: dict, live: dict, text: str) -> str | None:
 
 # ---------------------------------------------------------------- edits
 
-def _positions(block: dict) -> list[int]:
+def _positions(block: Block) -> list[int]:
     """Document index of every character of `block_text`, plus the end."""
-    at = block["span"][0]
-    out = []
+    at: int = doc_ir._span(block)[0]
+    out: list[int] = []
     for run in block.get("runs", []):
         if run.get("frozen"):
             out.append(at)
@@ -2427,7 +2714,7 @@ def _positions(block: dict) -> list[int]:
     return out
 
 
-def text_requests(live: dict, target: str) -> list[dict]:
+def text_requests(live: Block, target: str) -> list[DocsRequest]:
     """deleteContentRange / insertText turning a live block's text into `target`.
 
     Back to front, so the indices of the edits still to come stay valid, and never
@@ -2442,7 +2729,7 @@ def text_requests(live: dict, target: str) -> list[dict]:
     offsets = [0]
     for token in a:
         offsets.append(offsets[-1] + len(token))
-    out = []
+    out: list[DocsRequest] = []
     for op, i1, i2, j1, j2 in reversed(SequenceMatcher(None, a, b, autojunk=False).get_opcodes()):
         if op == "equal":
             continue
@@ -2457,20 +2744,28 @@ def text_requests(live: dict, target: str) -> list[dict]:
         # while inserting at the start would inherit from whatever came before the
         # hunk. Deleting afterwards is safe: the insert moved nothing below `end`.
         if insert:
-            out.append({"insertText": {"location": {"index": end}, "text": insert}})
+            out.append(_insert(end, insert))
         if end > start:
-            out.append({"deleteContentRange": {"range": {"startIndex": start, "endIndex": end}}})
+            out.append(_delete(start, end))
     return out
 
 
-def _run_width(run: dict) -> int:
+def _insert(index: int, text: str) -> DocsRequest:
+    return {"insertText": {"location": {"index": index}, "text": text}}
+
+
+def _delete(start: int, end: int) -> DocsRequest:
+    return {"deleteContentRange": {"range": _range(start, end)}}
+
+
+def _run_width(run: Run) -> int:
     """How many index units a run holds: a chip or a picture is one."""
-    if "width" in run:
-        return run["width"]
+    if (width := run.get("width")) is not None:
+        return width
     return 1 if run.get("frozen") else doc_ir.utf16_len(run["text"])
 
 
-def _width(block: dict) -> int:
+def _width(block: Block) -> int:
     """How many index units a block's text holds, the paragraph mark apart."""
     return sum(_run_width(run) for run in block.get("runs", []))
 
@@ -2480,7 +2775,7 @@ def _width(block: dict) -> int:
 STAGE = "b2s-stage:"
 
 
-def _content_requests(at: int, block: dict, before: str = "", after: str = "") -> list[dict]:
+def _content_requests(at: int, block: Block, before: str, after: str) -> list[DocsRequest]:
     """A block's words and objects written at `at`, as `before + words + after`.
 
     The words go in as one piece with the objects left out, and the objects are then
@@ -2488,61 +2783,70 @@ def _content_requests(at: int, block: dict, before: str = "", after: str = "") -
     is pushed right by the ones in front of it, which is exactly the one unit each of
     them holds.
     """
-    words, objects = "", []
+    words = ""
+    objects: list[tuple[int, Run]] = []
     for run in block.get("runs", []):
         if run.get("frozen"):
             objects.append((doc_ir.utf16_len(words), run))
         else:
             words += run["text"]
     text = before + words + after
-    out = [{"insertText": {"location": {"index": at}, "text": text}}] if text else []
+    out = [_insert(at, text)] if text else []
     at += doc_ir.utf16_len(before)
     for offset, run in reversed(objects):
         out.append(_object_request(at + offset, run))
     return out
 
 
-def _object_request(index: int, run: dict) -> dict:
-    location = {"index": index}
+def _object_request(index: int, run: Run) -> DocsRequest:
+    location: DocsLocation = {"index": index}
     if run.get("chip") == "person":
-        return {"insertPerson": {"location": location, "personProperties": {"email": run["value"]}}}
+        return {"insertPerson": {"location": location,
+                                 "personProperties": {"email": _chip_value(run)}}}
     if run.get("chip") == "date":
         return {"insertDate": {"location": location,
-                               "dateElementProperties": {"timestamp": run["value"]}}}
+                               "dateElementProperties": {"timestamp": _chip_value(run)}}}
     src = run.get("src", "")
     uri = run.get("uri") or (src if src.startswith(("https://", "http://")) else STAGE + src)
-    request = {"location": location, "uri": uri}
-    if run.get("size"):
-        width, height = run["size"]
+    request: InsertInlineImageRequest = {"location": location, "uri": uri}
+    if size := run.get("size"):
+        width, height = size
         request["objectSize"] = {"width": {"magnitude": width * doc_ir.PT_PER_PX, "unit": "PT"},
                                  "height": {"magnitude": height * doc_ir.PT_PER_PX, "unit": "PT"}}
     return {"insertInlineImage": request}
 
 
-def _paragraph_requests(start: int, end: int, block: dict, was_item: bool) -> list[dict]:
+def _chip_value(run: Run) -> str:
+    """What a person or date chip says: its email, its timestamp."""
+    value = run.get("value")
+    if value is None:
+        raise KeyError(f"a {run.get('chip')} chip that says nothing: {run}")
+    return value
+
+
+def _paragraph_requests(start: int, end: int, block: Block, was_item: bool) -> list[DocsRequest]:
     """The paragraph's kind, alignment and bullet, in the only order that works."""
-    out: list[dict] = []
+    out: list[DocsRequest] = []
     # The settle reads this back: only a paragraph this run wrote may have a field
     # of its own written again from the plan (`_unwritten`).
     block["paragraph_written"] = True
     if block["kind"] != "item" and was_item:
         # Text inserted at the start of a list item joins that item, bullet and all;
         # and a block the source turned back into a paragraph must lose its glyph.
-        out.append({"deleteParagraphBullets": {"range": {"startIndex": start, "endIndex": end}}})
+        out.append({"deleteParagraphBullets": {"range": _range(start, end)}})
     style, fields = paragraph_style(block)
     out.append({"updateParagraphStyle": {
-        "range": {"startIndex": start, "endIndex": end}, "paragraphStyle": style,
-        "fields": fields}})
+        "range": _range(start, end), "paragraphStyle": style, "fields": fields}})
     if block["kind"] == "item":
         # Bullets last: a style request covering the whole paragraph would restyle
         # the glyph too, the same trap as the Slides pipeline's createParagraphBullets.
         out.append({"createParagraphBullets": {
-            "range": {"startIndex": start, "endIndex": end},
+            "range": _range(start, end),
             "bulletPreset": BULLETS[bool(block.get("ordered"))]}})
     return out
 
 
-def paragraph_style(block: dict) -> tuple[dict, str]:
+def paragraph_style(block: Block) -> tuple[DocsParagraphStyle, str]:
     """A block's `paragraphStyle` and the fields to write it under.
 
     Every field the merge owns is named; only the ones the block asks for are given
@@ -2557,13 +2861,13 @@ def paragraph_style(block: dict) -> tuple[dict, str]:
     a theme; a reader who left-aligned a centred heading in the browser still reads
     back as `align: left` and is written as START.
     """
-    style = {"namedStyleType": named_style(block)}
-    if block.get("align"):
-        style["alignment"] = doc_ir.TO_ALIGNMENT[block["align"]]
+    style: DocsParagraphStyle = {"namedStyleType": named_style(block)}
+    if align := block.get("align"):
+        style["alignment"] = doc_ir.TO_ALIGNMENT[align]
     fields = ITEM_PARAGRAPH if block["kind"] == "item" else MANAGED_PARAGRAPH
     for key, api in PARAGRAPH_FIELDS:
-        if api in fields and block.get(key) is not None:
-            style[api] = _paragraph_value(key, block[key])
+        if api in fields and (value := doc_ir.measure_of(block, key)) is not None:
+            _set_paragraph(style, key, value)
     if "indentFirstLine" in fields and (block.get("indent") is not None
                                         or block.get("indent_first") is not None):
         # The file's `text-indent` is from `margin-left`, Docs' `indentFirstLine` from
@@ -2571,11 +2875,11 @@ def paragraph_style(block: dict) -> tuple[dict, str]:
         # first line where it was *within* it. A named style's own indents count as
         # none here, which every style this has met says.
         first = (block.get("indent") or 0.0) + (block.get("indent_first") or 0.0)
-        style["indentFirstLine"] = _paragraph_value("indent_first", first)
+        _set_paragraph(style, "indent_first", first)
     return style, ",".join(fields)
 
 
-def named_style(block: dict) -> str:
+def named_style(block: Block) -> str:
     """Which of Docs' named styles a block is. `namedStyleType` is named on every
     paragraph the merge writes, so a kind missing from here is silently written as
     body text: that is what happened to Title and Subtitle (`doc_ir.NAMED_KINDS`)."""
@@ -2584,20 +2888,44 @@ def named_style(block: dict) -> str:
     return doc_ir.KIND_STYLE.get(block["kind"], "NORMAL_TEXT")
 
 
-def _paragraph_value(key: str, value):
-    if key == "line_spacing":
-        # A Docs lineSpacing is the multiplier × 100 (single spacing is 100).
-        return float(value) * 100
-    if key == "shading":
-        return {"backgroundColor": {"color": {"rgbColor": _rgb(value)}}}
-    if key in doc_ir.PARAGRAPH_FLAGS:
-        return bool(value)
-    if key in doc_ir.BORDER_SIDES:
-        return _border_value(value)
-    return {"magnitude": float(value), "unit": "PT"}
+def _set_paragraph(style: DocsParagraphStyle, key: Measure, value: MeasureValue) -> None:
+    """Write one of a block's measurements into a `paragraphStyle`, as the API says it."""
+    match key:
+        case "line_spacing":
+            # A Docs lineSpacing is the multiplier × 100 (single spacing is 100).
+            style["lineSpacing"] = doc_ir.as_float(value) * 100
+        case "shading":
+            style["shading"] = {"backgroundColor": {"color": {
+                "rgbColor": _rgb(doc_ir.as_text(value))}}}
+        case "page_break":
+            style["pageBreakBefore"] = bool(value)
+        case "keep_with_next":
+            style["keepWithNext"] = bool(value)
+        case "border_top":
+            style["borderTop"] = _border_value(doc_ir.as_text(value))
+        case "border_bottom":
+            style["borderBottom"] = _border_value(doc_ir.as_text(value))
+        case "border_left":
+            style["borderLeft"] = _border_value(doc_ir.as_text(value))
+        case "border_right":
+            style["borderRight"] = _border_value(doc_ir.as_text(value))
+        case "indent":
+            style["indentStart"] = _points(value)
+        case "indent_first":
+            style["indentFirstLine"] = _points(value)
+        case "space_above":
+            style["spaceAbove"] = _points(value)
+        case "space_below":
+            style["spaceBelow"] = _points(value)
+        case _:
+            assert_never(key)
 
 
-def _border_value(said: str) -> dict:
+def _points(value: MeasureValue) -> DocsDimension:
+    return {"magnitude": doc_ir.as_float(value), "unit": "PT"}
+
+
+def _border_value(said: str) -> DocsParagraphBorder:
     """A `ParagraphBorder` from the way the file spells one (`doc_ir._border`).
 
     The padding is always named: a rule the source moved back against the text has
@@ -2613,7 +2941,7 @@ def _border_value(said: str) -> dict:
             "dashStyle": doc_ir.TO_DASH_STYLE.get(dash, "SOLID")}
 
 
-def _run_requests(start: int, block: dict, reset: bool = False) -> list[dict]:
+def _run_requests(start: int, block: Block, reset: bool) -> list[DocsRequest]:
     """`updateTextStyle` per run of a block laid out from `start`.
 
     `reset` is for a block that already exists: the fields are named whether or not
@@ -2623,26 +2951,28 @@ def _run_requests(start: int, block: dict, reset: bool = False) -> list[dict]:
     run that only repeats its named style names the field with no value, which puts
     the paragraph's own face back rather than some face of ours.
     """
-    out, at = [], start
+    out: list[DocsRequest] = []
+    at = start
     for run in block.get("runs", []):
         width = _run_width(run)
         marks = _text_style(run)
         if width and not run.get("frozen") and (marks or reset):
-            fields = sorted(set(marks) | (set(MANAGED) if reset else set()))
+            named: set[str] = set(marks)
+            fields = sorted(named | (set(MANAGED) if reset else set()))
             out.append({"updateTextStyle": {
-                "range": {"startIndex": at, "endIndex": at + width},
-                "textStyle": marks, "fields": ",".join(fields)}})
+                "range": _range(at, at + width), "textStyle": marks,
+                "fields": ",".join(fields)}})
         at += width
     return out
 
 
-def _bullets_last(paragraph: list[dict], runs: list[dict]) -> list[dict]:
+def _bullets_last(paragraph: list[DocsRequest], runs: list[DocsRequest]) -> list[DocsRequest]:
     """The run styling goes between the paragraph's style and its bullet, always."""
     made = [r for r in paragraph if "createParagraphBullets" in r]
     return [r for r in paragraph if "createParagraphBullets" not in r] + runs + made
 
 
-def _style_requests(start: int, block: dict, reset: bool = True) -> list[dict]:
+def _style_requests(start: int, block: Block, reset: bool) -> list[DocsRequest]:
     """Everything but the words, for a block written at `start` from nothing.
 
     The runs are written with `reset`: text inserted inherits the styling of the
@@ -2655,99 +2985,116 @@ def _style_requests(start: int, block: dict, reset: bool = True) -> list[dict]:
                          _run_requests(start, block, reset))
 
 
-def _block_edits(live: dict, want: dict) -> list[dict]:
+def _block_edits(live: Block, want: Block) -> list[DocsRequest]:
     """What turns one block of the document into what the merge says, in place."""
     if not want.get("rewrite"):
         return text_requests(live, block_text(want)) + _restyle_requests(live, want)
     # Written again from the file: everything but the paragraph mark goes, which keeps
     # the block where it is (and a table after it happy), and the file's runs go in.
-    start, end = live["span"]
-    out = ([{"deleteContentRange": {"range": {"startIndex": start, "endIndex": end - 1}}}]
-           if end - 1 > start else [])
-    return out + _content_requests(start, want) + _style_requests(start, want, reset=True)
+    start, end = doc_ir._span(live)
+    out = [_delete(start, end - 1)] if end - 1 > start else []
+    return (out + _content_requests(start, want, "", "")
+            + _style_requests(start, want, True))
 
 
-def _restyle_requests(live: dict, want: dict) -> list[dict]:
+def _restyle_requests(live: Block, want: Block) -> list[DocsRequest]:
     """What to write when the merge changed a block's styling rather than its words.
 
     Planned against the block's own start and sent after that block's text edits —
     which is why the two live in one plan: by then the block says what the merge
     says, and the runs line up.
     """
-    start = live["span"][0]
+    start = doc_ir._span(live)[0]
     end = start + _width(want) + 1
-    paragraph = (_paragraph_requests(start, end, want, was_item=live.get("kind") == "item")
+    paragraph = (_paragraph_requests(start, end, want, live.get("kind") == "item")
                  if _shape(want) != _shape(live) else [])
-    runs = _run_requests(start, want, reset=True) if want.get("restyle") else []
+    runs = _run_requests(start, want, True) if want.get("restyle") else []
     return _bullets_last(paragraph, runs)
 
 
-def _text_style(run: dict) -> dict:
-    style: dict = {}
+def _text_style(run: Style) -> DocsTextStyle:
+    style: DocsTextStyle = {}
     for key, api in doc_ir.MARK_FIELDS:
         # False is a value, not an absence: it is how a run says it is *not* bold
         # against a theme whose headings are, and naming the field with no value
         # would hand it back to the theme (`doc_ir.MARK_FIELDS`).
-        if run.get(key) is not None:
-            style[api] = bool(run[key])
+        if (said := doc_ir.mark_of(run, key)) is not None:
+            _set_mark_api(style, api, said)
     # The face the run says it is; `<code>` in a file written before faces were
     # carried still means the one face it always meant (`doc_ir.CODE_FAMILY`).
     if run.get("font") or run.get("code"):
         style["weightedFontFamily"] = {"fontFamily": run.get("font") or doc_ir.CODE_FAMILY}
-    if run.get("script"):
+    if script := run.get("script"):
         # "none" is a value here, as `False` is for a mark: it is how a run says it is
         # *not* raised against a named style that raises the whole paragraph.
-        style["baselineOffset"] = {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT",
-                                   "none": "NONE"}[run["script"]]
-    if run.get("fontsize"):
-        style["fontSize"] = {"magnitude": float(run["fontsize"]), "unit": "PT"}
-    if run.get("color"):
-        style["foregroundColor"] = {"color": {"rgbColor": _rgb(run["color"])}}
-    if run.get("highlight"):
-        style["backgroundColor"] = {"color": {"rgbColor": _rgb(run["highlight"])}}
-    if run.get("link"):
-        style["link"] = {"url": run["link"]}
+        style["baselineOffset"] = doc_ir.TO_SCRIPT[script]
+    if fontsize := run.get("fontsize"):
+        style["fontSize"] = {"magnitude": float(fontsize), "unit": "PT"}
+    if color := run.get("color"):
+        style["foregroundColor"] = {"color": {"rgbColor": _rgb(color)}}
+    if highlight := run.get("highlight"):
+        style["backgroundColor"] = {"color": {"rgbColor": _rgb(highlight)}}
+    if link := run.get("link"):
+        style["link"] = {"url": link}
     return style
 
 
-def _rgb(value: str) -> dict:
+def _set_mark_api(style: DocsTextStyle, api: MarkApi, value: bool) -> None:
+    match api:
+        case "bold":
+            style["bold"] = value
+        case "italic":
+            style["italic"] = value
+        case "underline":
+            style["underline"] = value
+        case "strikethrough":
+            style["strikethrough"] = value
+        case "smallCaps":
+            style["smallCaps"] = value
+        case _:
+            assert_never(api)
+
+
+def _rgb(value: str) -> DocsRgbColor:
     value = value.lstrip("#")
-    return {name: int(value[i:i + 2], 16) / 255
-            for name, i in (("red", 0), ("green", 2), ("blue", 4))}
+    return {"red": int(value[0:2], 16) / 255, "green": int(value[2:4], 16) / 255,
+            "blue": int(value[4:6], 16) / 255}
 
 
-def requests(theirs: dict, merged: list[dict]) -> list[dict]:
+def requests(theirs: Ir, merged: list[Block]) -> list[DocsRequest]:
     """Every edit that turns the live document into the merge, back to front.
 
     Blocks are addressed by the spans `theirs` was read at, so nothing here may be
     sent against a document that has moved on — `sync.py`'s plan/send/re-plan with
     `requiredRevisionId` is the guard, and the same rule holds here.
     """
-    by_key = {b["key"]: b for b in merged if b.get("key")}
-    plans: list[tuple[int, int, list[dict]]] = []  # (index, order within, requests)
+    by_key = _by_key(merged)
+    blocks = theirs["blocks"]
+    plans: list[tuple[int, int, list[DocsRequest]]] = []  # (index, order within, requests)
 
     # Which of the document's blocks go: the ones the source deleted, and the ones it
     # moved (a move is a delete here and a write further down). Their ranges are
     # decided together, because a delete in front of a table borrows the mark of the
     # block before it and two of them must not ask for the same one.
-    going = {i for i, live in enumerate(theirs["blocks"]) if _goes(live, by_key)}
+    going = {i for i, live in enumerate(blocks) if _goes(live, by_key)}
     # Whether the last block read is the body's last paragraph, whose mark is the
     # body's own: not when an empty paragraph after a final table was left out.
     ends = not theirs.get("trailer")
     filled = any(_written_here(b) and _insert_index(merged, p) is None
                  for p, b in enumerate(merged))
-    left_empty = None
+    left_empty: int | None = None
+    lead = theirs.get("lead")
     # Every one of them first, because a range one delete leaves behind another may
     # already have taken (`_orphan_range`).
-    cuts = {index: _delete_range(theirs["blocks"], index, going, ends,
-                                 theirs.get("lead"), filled) for index in sorted(going)}
+    cuts = {index: _delete_range(blocks, index, going, ends, lead, filled)
+            for index in sorted(going)}
     for index in sorted(going):
-        live = theirs["blocks"][index]
+        live = blocks[index]
         start, end = cuts[index]
-        plans.append((start, DELETE, [{"deleteContentRange": {
-            "range": {"startIndex": start, "endIndex": end}}}]
-            + _orphan_range(live, start, end, cuts.values())))
-        if index == len(theirs["blocks"]) - 1 and end == theirs["blocks"][index]["span"][1] - 1:
+        span = doc_ir._span(live)
+        plans.append((start, DELETE, [_delete(start, end)]
+                      + _orphan_range(live, start, end, cuts.values())))
+        if index == len(blocks) - 1 and end == span[1] - 1:
             # The body's last block, whose words go and whose own mark stays
             # (`_delete_range`): the document ends on an empty paragraph exactly
             # where it was. It has to, since a body may not end on a table.
@@ -2763,28 +3110,30 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
         # where. The block behind takes the style; the one in front does only where
         # the delete borrowed *its* mark (`_delete_range`, a block in front of a
         # table), so that neighbour is named only then.
-        sides = [1, -1] if start < live["span"][0] else [1]
-        for block in (_neighbour(theirs["blocks"], index, side, going) for side in sides):
-            want = by_key.get((block or {}).get("key"))
+        sides = [1, -1] if start < span[0] else [1]
+        for side in sides:
+            want = _keyed(by_key, _neighbour(blocks, index, side, going))
             if want is not None:
                 want["paragraph_merged"] = True
 
-    for index, live in enumerate(theirs["blocks"]):
-        want = by_key.get(live.get("key"))
+    for index, live in enumerate(blocks):
+        want = _keyed(by_key, live)
         if index in going or want is None or want.get("span") != live.get("span"):
             continue
         for one, other in _pairs(live, want):
             edits = _block_edits(one, other)
             if edits:
-                plans.append((one["span"][0], EDIT, edits))
+                plans.append((doc_ir._span(one)[0], EDIT, edits))
 
     # The paragraph mark of the last block that survives this sync: where a block
     # with nothing after it is appended. Blocks the source deleted are past it, and
     # they are deleted first (higher indices come first), so it still holds then.
-    kept = [b for b in theirs["blocks"]
-            if b.get("key") is None or (b["key"] in by_key and not by_key[b["key"]].get("moved"))]
-    tail = kept[-1]["span"][1] - 1 if kept else 1
+    kept = [b for b in blocks if _stays(b, by_key)]
+    tail = doc_ir._span(kept[-1])[1] - 1 if kept else 1
     trailer = theirs.get("trailer")
+    # Where the first block appended is written, when the body ends on an empty
+    # paragraph after a table.
+    into: int | None = trailer[0] if trailer else None
     if trailer is None and left_empty is not None and kept and _structural(kept[-1]):
         # Everything the body ended on is going — deleted by the source, or moved to
         # somewhere in front — and the last block that stays is a table, whose own
@@ -2793,19 +3142,17 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
         # into the table: the table swallowed it and the write took the table's named
         # range with it (chain-8 seed 189 for the delete, the permutation sweep of
         # `_apply_source_moves` for the move).
-        trailer = [left_empty]
-    if trailer:
+        into = left_empty
+    if into is not None:
         # The body ends on a table and the empty paragraph after it: the first block
         # appended is written *into* that paragraph, and the rest after it.
-        tail = trailer[0]
+        tail = into
     first = min((p for p, b in enumerate(merged)
                  if _written_here(b) and _insert_index(merged, p) is None), default=None)
     # A body that begins with a table begins with the empty paragraph in front of it
     # (`doc_ir._hide_trailer`): the first block written before that table goes into it.
-    lead = theirs.get("lead")
     lead_first = min((p for p, b in enumerate(merged) if _written_here(b) and lead
-                      and (_anchor(merged, p) or {}).get("span", [None])[0] == lead[1]),
-                     default=None)
+                      and _anchor_start(merged, p) == lead[1]), default=None)
     # An empty paragraph is all mark, so its named range *is* its mark, and text
     # written at a range's first index pushes the range along (Docs' rule): "\ntext"
     # appended at that mark leaves the key on the new block's mark and the empty
@@ -2815,11 +3162,9 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     # again where it belongs in the same batch — once, after every append there
     # (`REPLANT`), and before a block inserted in front of the paragraph, which
     # pushes the fresh range along as it should.
-    empties = {b["span"][1] - 1: b for i, b in enumerate(theirs["blocks"])
-               if i not in going and b.get("key") and b.get("rangeId") and b.get("span")
-               and (b["range"][0] == b["span"][1] - 1 if b.get("range")
-                    else b["span"][1] == b["span"][0] + 1 and not b.get("runs"))}
-    replant: dict[int, dict] = {}
+    empties = {doc_ir._span(b)[1] - 1: b for i, b in enumerate(blocks)
+               if i not in going and _all_mark(b)}
+    replant: dict[int, Block] = {}
     # Back to front here too: two blocks added at one index both insert there, and
     # what is written last ends up in front, so the later block is planned first.
     for position in range(len(merged) - 1, -1, -1):
@@ -2827,40 +3172,39 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
         if not _written_here(block):
             continue
         at = _insert_index(merged, position)
-        anchor = _anchor(merged, position)
-        if _structural(anchor):
+        if at is not None and _structural(_anchor(merged, position)):
             # Nothing can be written at a table's or a table of contents' own index
             # (measured: refused), so a block in front of one goes after the paragraph
             # before it — "\ntext" at that paragraph's mark, ahead of its own edits there.
             at -= 1
             if position == lead_first:
-                plans.append((at, APPEND, _content_requests(at, block)
-                              + _style_requests(at, block)))
+                plans.append((at, APPEND, _content_requests(at, block, "", "")
+                              + _style_requests(at, block, True)))
             else:
-                plans.append((at, APPEND, _content_requests(at, block, before="\n")
-                              + _style_requests(at + 1, block)))
+                plans.append((at, APPEND, _content_requests(at, block, "\n", "")
+                              + _style_requests(at + 1, block, True)))
                 if at in empties:
                     replant[at] = empties[at]
         elif at is not None:
-            plans.append((at, BEFORE, _content_requests(at, block, after="\n")
-                          + _style_requests(at, block)))
-        elif trailer and position == first:
-            plans.append((tail, APPEND, _content_requests(tail, block)
-                          + _style_requests(tail, block)))
-        elif kept or trailer:
+            plans.append((at, BEFORE, _content_requests(at, block, "", "\n")
+                          + _style_requests(at, block, True)))
+        elif into is not None and position == first:
+            plans.append((tail, APPEND, _content_requests(tail, block, "", "")
+                          + _style_requests(tail, block, True)))
+        elif kept or into is not None:
             # Nothing follows it, so it is appended after the document's last
             # paragraph — and the break goes in *first*, the words after it. The
             # body's final newline cannot be written past, so "text\n" at `tail`
             # would join the last paragraph and leave an empty one behind instead.
-            plans.append((tail, APPEND, _content_requests(tail, block, before="\n")
-                          + _style_requests(tail + 1, block)))
+            plans.append((tail, APPEND, _content_requests(tail, block, "\n", "")
+                          + _style_requests(tail + 1, block, True)))
             if tail in empties:
                 replant[tail] = empties[tail]
         else:
             # Nothing of the document survives: write into the empty paragraph Docs
             # always keeps, and let the empty one end up at the bottom.
-            plans.append((tail, APPEND, _content_requests(tail, block, after="\n")
-                          + _style_requests(tail, block)))
+            plans.append((tail, APPEND, _content_requests(tail, block, "", "\n")
+                          + _style_requests(tail, block, True)))
     # The mirror image of `_orphan_range`, and the other way a mark can be somebody
     # else's undoing: a block in front of a table gives up the **previous** block's
     # paragraph mark (`_delete_range`), and where a range is all mark that delete
@@ -2876,17 +3220,9 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
         if start in empties:
             replant.setdefault(start, empties[start])
     for at, live in replant.items():
-        # The block's own indices are below the mark, so nothing written there has
-        # moved them and its anchor is where `theirs` read it.
-        low, high = doc_ir.anchor_range(live)
-        plans.append((at, REPLANT,
-                      ([] if at in eaten_marks else
-                       [{"deleteNamedRange": {"namedRangeId": live["rangeId"]}}])
-                      + [{"createNamedRange": {
-                          "name": doc_ir.KEY_PREFIX + live["key"],
-                          "range": {"startIndex": low, "endIndex": high}}}]))
+        plans.append((at, REPLANT, _replant(live, at in eaten_marks)))
 
-    out: list[dict] = []
+    out: list[DocsRequest] = []
     # Back to front, so an earlier edit never moves a later one's indices, and at one
     # index by what the edits do there: a block appended at the last paragraph's mark
     # must go in before that paragraph's own edits, which end where it begins; a block
@@ -2905,7 +3241,53 @@ def requests(theirs: dict, merged: list[dict]) -> list[dict]:
     return doc_ir.orphan_requests(theirs) + out if out else out
 
 
-def _written_here(block: dict) -> bool:
+def _keyed(by_key: Mapping[str, Block], block: Block | None) -> Block | None:
+    """The merge's block for a block of the document, by its key."""
+    key = block.get("key") if block is not None else None
+    return by_key.get(key) if key else None
+
+
+def _stays(block: Block, by_key: Mapping[str, Block]) -> bool:
+    """Whether a block of the document is still there after this sync: one nobody
+    keyed, or one the merge keeps and does not move."""
+    key = block.get("key")
+    if key is None:
+        return True
+    want = by_key.get(key)
+    return want is not None and not want.get("moved")
+
+
+def _anchor_start(merged: Sequence[Block], position: int) -> int | None:
+    """Where the block `_insert_index` writes in front of begins, if it was read."""
+    anchor = _anchor(merged, position)
+    span = anchor.get("span") if anchor is not None else None
+    return span[0] if span else None
+
+
+def _all_mark(block: Block) -> bool:
+    """A keyed block whose named range is its paragraph mark: an empty paragraph, or
+    one a reader's chip or word pushed its range onto the mark of (`requests`)."""
+    span = block.get("span")
+    if not block.get("key") or not block.get("rangeId") or not span:
+        return False
+    if planted := block.get("range"):
+        return planted[0] == span[1] - 1
+    return span[1] == span[0] + 1 and not block.get("runs")
+
+
+def _replant(live: Block, eaten: bool) -> list[DocsRequest]:
+    """A block's named range planted again where it belongs, the old one taken away
+    first unless the batch has taken it already."""
+    key, range_id, planted = live.get("key"), live.get("rangeId"), doc_ir.anchor_range(live)
+    if not key or not range_id or planted is None:
+        raise ValueError(f"only a keyed block with a range is planted again: {live}")
+    # The block's own indices are below the mark, so nothing written there has
+    # moved them and its anchor is where `theirs` read it.
+    return (([] if eaten else [{"deleteNamedRange": {"namedRangeId": range_id}}])
+            + [doc_ir._create_range(key, planted)])
+
+
+def _written_here(block: Block) -> bool:
     """Whether `requests` writes this block from nothing: one the source added or
     moved — but not a table, which is a grid (`structure` builds it), and not a block
     with a chip no request can create (`plan` says so in its notes)."""
@@ -2914,8 +3296,8 @@ def _written_here(block: dict) -> bool:
             and _writable_block(block))
 
 
-def structure(theirs: dict, merged: list[dict],
-              notes: list[str] | None = None) -> tuple[list[dict], list[dict]]:
+def structure(theirs: Ir, merged: list[Block],
+              notes: list[str]) -> tuple[list[DocsRequest], list[Told]]:
     """The requests that change a table's shape, and what each of them does.
 
     A grid is not text. `insertTable`, `insertTableRow` and their deletes are the only
@@ -2925,8 +3307,9 @@ def structure(theirs: dict, merged: list[dict],
     its key and its anchor — and plans the text against the grid it then has
     (`doc_sync.sync`). Back to front, so the indices of the ones still to come hold.
     """
-    plans: list[tuple[int, list[dict], dict]] = []
-    deletes: dict[str, tuple[int, int, list[dict]]] = {}
+    blocks = theirs["blocks"]
+    plans: list[tuple[int, list[DocsRequest], Told]] = []
+    deletes: dict[str | None, tuple[int, int, list[DocsRequest]]] = {}
     for block in list(merged):                   # `_put_back` below rearranges it
         if block.get("kind") != "table":
             continue
@@ -2937,65 +3320,67 @@ def structure(theirs: dict, merged: list[dict],
             # its words are written on the next pass, like a new table's. Only a table
             # the document left as the base has it gets here (`_apply_source_moves`),
             # so nothing of the reader's is in what is deleted.
-            rows, columns = block["build"]
+            build = block.get("build")
+            if build is None:
+                raise KeyError(f"{key}: a moved table says what grid to build")
+            rows, columns = build
             at, reqs = _new_table_requests(theirs, _insert_index(merged, position),
                                            rows, columns)
             if not reqs:
                 block["moved"] = False
                 _put_back(merged, block)
-                if notes is not None:
-                    notes.append(f"{key}: the source moved it where the document has no "
-                                 f"paragraph to write in — before the table it opens on, "
-                                 f"or between two tables — and it stays where the document "
-                                 f"has it")
+                notes.append(f"{key}: the source moved it where the document has no "
+                             f"paragraph to write in — before the table it opens on, "
+                             f"or between two tables — and it stays where the document "
+                             f"has it")
                 continue
-            index = next(i for i, b in enumerate(theirs["blocks"])
-                         if b.get("span") == block.get("span"))
-            start, end = _delete_range(theirs["blocks"], index, {index},
-                                       not theirs.get("trailer"), theirs.get("lead"))
-            deletes[key] = (start, 0, [{"deleteContentRange": {
-                "range": {"startIndex": start, "endIndex": end}}}]
-                + _orphan_range(theirs["blocks"][index], start, end))
+            index = next(i for i, b in enumerate(blocks) if b.get("span") == block.get("span"))
+            start, end = _delete_range(blocks, index, {index}, not theirs.get("trailer"),
+                                       theirs.get("lead"), False)
+            deletes[key] = (start, 0, [_delete(start, end)]
+                            + _orphan_range(blocks[index], start, end, ()))
             swallowed = _swallowed(theirs, reqs)
             eaten = _eaten(theirs, index, start)
-            plans.append((at, reqs,
-                          {"key": key,
-                           "after": _after_key(merged, position, swallowed, eaten),
-                           "moved": True, "lines": block.get("lines"),
-                           **({"swallowed": swallowed} if swallowed else {}),
-                           **({"eaten": eaten} if eaten else {}),
-                           "note": f"`{key}`: moved where the source has it"}))
-        elif block.get("regrid"):
-            what = ", ".join(f"{how}s a {line}" for line, how, _ in block["regrid"])
+            told: Told = {"key": key, "after": _after_key(merged, position, swallowed, eaten),
+                          "moved": True, "lines": block.get("lines")}
+            if swallowed:
+                told["swallowed"] = swallowed
+            if eaten:
+                told["eaten"] = eaten
+            told["note"] = f"`{key}`: moved where the source has it"
+            plans.append((at, reqs, told))
+        elif regrid := block.get("regrid"):
+            what = ", ".join(f"{how}s a {line}" for line, how, _ in regrid)
+            start = doc_ir._span(block)[0]
             # `after` although nothing is built: a table is anchored in its first cell
             # (`doc_ir.anchor_span`), and a row or column delete can take that very
             # cell, so a regrid can leave the table with no named range at all. It is
             # then found again exactly as a new one is, and the range planted back.
-            plans.append((block["span"][0], _grid_requests(block["span"][0], block["regrid"]),
-                          {"key": key, "ops": block["regrid"], "lines": block.get("lines"),
-                           "after": _after_key(merged, position),
+            plans.append((start, _grid_requests(start, regrid),
+                          {"key": key, "ops": regrid, "lines": block.get("lines"),
+                           "after": _after_key(merged, position, None, None),
                            "note": f"`{key}`: {what} — the grid the source has"}))
         elif block.get("origin") == "added by the source":
-            rows = len(block.get("rows", []))
-            columns = len(block["rows"][0]) if rows else 0
+            grid = block.get("rows", [])
+            rows = len(grid)
+            columns = len(grid[0]) if rows else 0
             if not rows or not columns or block.get("nowhere"):
                 continue
             at, reqs = _new_table_requests(theirs, _insert_index(merged, position),
                                            rows, columns)
             if reqs:
                 swallowed = _swallowed(theirs, reqs)
-                plans.append((at, reqs,
-                              {"key": key,
-                               "after": _after_key(merged, position, swallowed),
-                               **({"swallowed": swallowed} if swallowed else {}),
-                               "note": f"`{key}`: a table of {rows}×{columns} "
-                                       f"added by the source"}))
-            elif notes is not None:
+                told = {"key": key, "after": _after_key(merged, position, swallowed, None)}
+                if swallowed:
+                    told["swallowed"] = swallowed
+                told["note"] = f"`{key}`: a table of {rows}×{columns} added by the source"
+                plans.append((at, reqs, told))
+            else:
                 notes.append(f"{key}: a table the source adds where the document has no "
                              f"paragraph to write in — before the table it opens on, or "
                              f"between two tables — cannot be built")
-    shaped: list[dict] = []
-    steps: list[tuple[int, int, list[dict]]] = []
+    shaped: list[Told] = []
+    steps: list[tuple[int, int, list[DocsRequest]]] = []
     seen: set[int] = set()
     for at, reqs, told in sorted(plans, key=lambda p: -p[0]):
         if at in seen:
@@ -3007,7 +3392,7 @@ def structure(theirs: dict, merged: list[dict],
             # Its delete only with its insert: a table deleted this round and built
             # the next would read, in between, as a table the document deleted.
             steps.append(deletes[told["key"]])
-    out: list[dict] = []
+    out: list[DocsRequest] = []
     for _, _, reqs in sorted(steps, key=lambda p: (-p[0], p[1])):
         out += reqs
     if out:
@@ -3033,8 +3418,8 @@ def structure(theirs: dict, merged: list[dict],
 _END = 1 << 30  # a table appended at the end of the body: after every index there is
 
 
-def _after_key(merged: list[dict], position: int, swallowed: str | None = None,
-               eaten: str | None = None) -> str | None:
+def _after_key(merged: Sequence[Block], position: int, swallowed: str | None,
+               eaten: str | None) -> str | None:
     """The key of the nearest block in front of this one that the document already
     has — where a table written from nothing will be found again once it exists.
 
@@ -3044,14 +3429,15 @@ def _after_key(merged: list[dict], position: int, swallowed: str | None = None,
     both of those come back unnamed.
     """
     for block in reversed(merged[:position]):
-        if block.get("key") and block.get("span") and not block.get("moved"):
-            if block["key"] in (swallowed, eaten):
+        key = block.get("key")
+        if key and block.get("span") and not block.get("moved"):
+            if key in (swallowed, eaten):
                 continue
-            return block["key"]
+            return key
     return None
 
 
-def _eaten(theirs: dict, index: int, start: int) -> str | None:
+def _eaten(theirs: Ir, index: int, start: int) -> str | None:
     """The key the delete of the body's last table takes with the mark in front of it.
 
     `_delete_range` reaches back over that mark so the trailer is not left standing
@@ -3060,16 +3446,18 @@ def _eaten(theirs: dict, index: int, start: int) -> str | None:
     mark: the delete then covers its range whole and Docs drops it
     (`recover_eaten`).
     """
-    if index == 0 or start >= theirs["blocks"][index]["span"][0]:
+    blocks = theirs["blocks"]
+    if index == 0 or start >= doc_ir._span(blocks[index])[0]:
         return None
-    before = theirs["blocks"][index - 1]
+    before = blocks[index - 1]
     span = before.get("span")
-    if before.get("key") and span and span[0] >= start:
-        return before["key"]
+    key = before.get("key")
+    if key and span and span[0] >= start:
+        return key
     return None
 
 
-def _swallowed(theirs: dict, reqs: list[dict]) -> str | None:
+def _swallowed(theirs: Ir, reqs: Sequence[DocsRequest]) -> str | None:
     """The key a new table's swallow takes with the mark it deletes, if it takes one.
 
     `_new_table_requests` gets rid of the empty paragraph `insertTable` leaves by
@@ -3083,18 +3471,19 @@ def _swallowed(theirs: dict, reqs: list[dict]) -> str | None:
     deleted (`recover_swallowed`).
     """
     for req in reqs:
-        span = req.get("deleteContentRange", {}).get("range")
-        if not span:
+        cut = req.get("deleteContentRange")
+        if cut is None:
             continue
+        span = cut["range"]
         gone = [span["startIndex"], span["endIndex"]]
         block = next((b for b in theirs["blocks"] if b.get("span") == gone), None)
-        if block is not None and block.get("key"):
-            return block["key"]
+        if block is not None and (key := block.get("key")):
+            return key
     return None
 
 
-def _new_table_requests(theirs: dict, at: int | None, rows: int,
-                        columns: int) -> tuple[int, list[dict]]:
+def _new_table_requests(theirs: Ir, at: int | None, rows: int,
+                        columns: int) -> tuple[int, list[DocsRequest]]:
     """A table where the file puts it, without the empty paragraph that comes with it.
 
     All of this was measured on a live document. `insertTable` splits the paragraph
@@ -3121,22 +3510,25 @@ def _new_table_requests(theirs: dict, at: int | None, rows: int,
     every re-plan built another (the campaign's 'table-in-a-table', fixed and out of
     `fuzz_docs.KNOWN`).
     """
-    table = {"rows": rows, "columns": columns}
     if at is None:
-        return _END, [{"insertTable": table | {"endOfSegmentLocation": {}}}]
-    after = next((b for b in theirs["blocks"] if b["span"][0] == at), None)
-    before = next((b for b in theirs["blocks"] if b["span"][1] == at), None)
+        return _END, [{"insertTable": {"rows": rows, "columns": columns,
+                                       "endOfSegmentLocation": {}}}]
+    blocks = theirs["blocks"]
+    after = next((b for b in blocks if doc_ir._span(b)[0] == at), None)
+    before = next((b for b in blocks if doc_ir._span(b)[1] == at), None)
     if _structural(after):
         if before is None or _structural(before):
             return at, []                              # nowhere to write it
-        return at - 1, [{"insertTable": table | {"location": {"index": at - 1}}}]
-    out = [{"insertTable": table | {"location": {"index": at}}}]
+        return at - 1, [{"insertTable": {"rows": rows, "columns": columns,
+                                         "location": {"index": at - 1}}}]
+    out: list[DocsRequest] = [{"insertTable": {"rows": rows, "columns": columns,
+                                               "location": {"index": at}}}]
     if at > 1 and before is not None and not _structural(before):
-        out.append({"deleteContentRange": {"range": {"startIndex": at - 1, "endIndex": at}}})
+        out.append(_delete(at - 1, at))
     return at, out
 
 
-def _op_order(op: tuple) -> tuple:
+def _op_order(op: GridOp) -> tuple[bool, int, bool]:
     """Rows before columns, each back to front, and at one index the delete first.
 
     An insert is written beside the line in front of it (`_grid_requests`), so every
@@ -3148,36 +3540,46 @@ def _op_order(op: tuple) -> tuple:
     return line != "row", -index, how != "delete"
 
 
-def _grid_requests(start: int, ops: list[tuple]) -> list[dict]:
+def _grid_requests(start: int, ops: Sequence[GridOp]) -> list[DocsRequest]:
     """Rows and columns added or taken away, back to front so the indices hold."""
-    where = {"index": start}
-    out = []
+    where: DocsLocation = {"index": start}
+    out: list[DocsRequest] = []
     for line, how, index in sorted(ops, key=_op_order):
         row, column = (index, 0) if line == "row" else (0, index)
-        cell = {"tableStartLocation": where, "rowIndex": row, "columnIndex": column}
         if how == "delete":
-            out.append({f"deleteTable{line.capitalize()}": {"tableCellLocation": cell}})
+            cell: DocsTableCellLocation = {"tableStartLocation": where, "rowIndex": row,
+                                           "columnIndex": column}
+            if line == "row":
+                out.append({"deleteTableRow": {"tableCellLocation": cell}})
+            else:
+                out.append({"deleteTableColumn": {"tableCellLocation": cell}})
             continue
         # There is no "insert at 0": the API adds beside a cell, so the first line is
         # written above or left of the one that is there now.
-        cell |= {"rowIndex": max(row - 1, 0)} if line == "row" else {"columnIndex": max(column - 1, 0)}
-        out.append({f"insertTable{line.capitalize()}": {
-            "tableCellLocation": cell,
-            ("insertBelow" if line == "row" else "insertRight"): index > 0}})
+        if line == "row":
+            out.append({"insertTableRow": {
+                "tableCellLocation": {"tableStartLocation": where,
+                                      "rowIndex": max(row - 1, 0), "columnIndex": column},
+                "insertBelow": index > 0}})
+        else:
+            out.append({"insertTableColumn": {
+                "tableCellLocation": {"tableStartLocation": where,
+                                      "rowIndex": row, "columnIndex": max(column - 1, 0)},
+                "insertRight": index > 0}})
     return out
 
 
-def _goes(live: dict, by_key: dict) -> bool:
+def _goes(live: Block, by_key: Mapping[str, Block]) -> bool:
     """Whether this block of the document is deleted: the source dropped it, or the
     source moved it and it is written again where the file puts it."""
-    want = by_key.get(live.get("key"))
+    want = _keyed(by_key, live)
     if want is None:
         return live.get("key") is not None
     return bool(want.get("moved")) and want.get("span") == live.get("span")
 
 
-def _neighbour(blocks: list[dict], index: int, step: int,
-               going: set[int]) -> dict | None:
+def _neighbour(blocks: Sequence[Block], index: int, step: int,
+               going: Set[int]) -> Block | None:
     """The nearest block on one side of `index` that this batch is not deleting."""
     at = index + step
     while 0 <= at < len(blocks) and at in going:
@@ -3185,9 +3587,8 @@ def _neighbour(blocks: list[dict], index: int, step: int,
     return blocks[at] if 0 <= at < len(blocks) else None
 
 
-def _delete_range(blocks: list[dict], index: int, going: set[int],
-                  ends: bool = True, lead: list | None = None,
-                  filled: bool = False) -> tuple[int, int]:
+def _delete_range(blocks: Sequence[Block], index: int, going: Set[int], ends: bool,
+                  lead: Sequence[int] | None, filled: bool) -> tuple[int, int]:
     """What to delete for block `index`, without touching a newline that must stay.
 
     "Deleting the newline character before a Table, TableOfContents or SectionBreak"
@@ -3210,7 +3611,7 @@ def _delete_range(blocks: list[dict], index: int, going: set[int],
     Unless a block is being written into that trailer (`filled`): the two would then
     be merged into one paragraph, so the table goes alone.
     """
-    start, end = blocks[index]["span"]
+    start, end = doc_ir._span(blocks[index])
     if _structural(blocks[index]):
         if index == 0 and lead and lead[1] == start:
             return lead[0], end
@@ -3227,8 +3628,8 @@ def _delete_range(blocks: list[dict], index: int, going: set[int],
     return start - 1, end - 1
 
 
-def _orphan_range(block: dict, start: int, end: int,
-                  cuts: Iterable[tuple[int, int]] = ()) -> list[dict]:
+def _orphan_range(block: Block, start: int, end: int,
+                  cuts: Iterable[tuple[int, int]] = ()) -> list[DocsRequest]:
     """The `deleteNamedRange` a delete needs when the block's own range outlives it.
 
     A block standing in front of a table gives up the *previous* block's paragraph
@@ -3255,18 +3656,21 @@ def _orphan_range(block: dict, start: int, end: int,
     with its text is refused, which throws out the whole batch and kills the sync
     (offline chain-6 seed 550667: two empty paragraphs in front of a table, both
     deleted in one step). So every cut of the batch is asked, this one among them.
+
+    `cuts` defaults to none: the tests ask about one delete on its own.
     """
+    range_id = block.get("rangeId")
     span = block.get("range") or doc_ir.anchor_range(block)
-    if not block.get("rangeId") or not span:
+    if not range_id or not span:
         return []
     if any(low <= span[0] and span[1] <= high
            for low, high in [(start, end), *cuts]):
         return []
-    return [{"deleteNamedRange": {"namedRangeId": block["rangeId"]}}]
+    return [{"deleteNamedRange": {"namedRangeId": range_id}}]
 
 
-def _mark_is_taken(blocks: list[dict], index: int, going: set[int], ends: bool,
-                   lead: list | None = None, filled: bool = False) -> bool:
+def _mark_is_taken(blocks: Sequence[Block], index: int, going: Set[int], ends: bool,
+                   lead: Sequence[int] | None, filled: bool) -> bool:
     """Whether this block's own paragraph mark must survive the delete — because a
     structural element follows it (a table or a table of contents: the newline in
     front of one cannot be deleted), because it ends the body, or because the deleted
@@ -3276,11 +3680,11 @@ def _mark_is_taken(blocks: list[dict], index: int, going: set[int], ends: bool,
         return ends
     if after in going:
         return (_delete_range(blocks, after, going, ends, lead, filled)[0]
-                < blocks[after]["span"][0])
+                < doc_ir._span(blocks[after])[0])
     return _structural(blocks[after])
 
 
-def _pairs(live: dict, want: dict):
+def _pairs(live: Block, want: Block) -> Iterator[tuple[Block, Block]]:
     """(live block, merged block) for a block and, if it is a table, for every block
     in its cells — where identity is the cell's place, not a named range."""
     yield live, want
@@ -3298,24 +3702,26 @@ def _pairs(live: dict, want: dict):
                     yield inner, merged
 
 
-def _cell_runs(cell: list[dict]) -> dict:
+def _cell_runs(cell: Sequence[Block]) -> Block:
     """A cell's paragraphs read as one block: the marks between them are newlines in
     its text, one unit each. For a side with no spans — the file's cell — which is
     what a rewrite writes and what `_joined` is over the document's."""
-    runs: list[dict] = []
+    runs: list[Run] = []
     for i, block in enumerate(cell):
         if i:
-            runs.append({"text": "\n", "width": 1})
+            runs.append({"text": "\n", "width": U16(1)})
         runs += block.get("runs", [])
     return {"kind": "paragraph", "runs": runs}
 
 
-def _joined(cell: list[dict]) -> dict:
+def _joined(cell: Sequence[Block]) -> Block:
     """The document's cell as one block, the last mark — the cell's own — outside."""
-    return _cell_runs(cell) | {"span": [cell[0]["span"][0], cell[-1]["span"][1]]}
+    out = _cell_runs(cell)
+    out["span"] = [doc_ir._span(cell[0])[0], doc_ir._span(cell[-1])[1]]
+    return out
 
 
-def _insert_index(merged: list[dict], position: int) -> int | None:
+def _insert_index(merged: Sequence[Block], position: int) -> int | None:
     """Where a new block's text goes: at the start of the block that follows it,
     or None when nothing follows and it is appended to the document instead.
 
@@ -3323,10 +3729,10 @@ def _insert_index(merged: list[dict], position: int) -> int | None:
     is about to be deleted from, which says nothing about where the new one goes.
     """
     anchor = _anchor(merged, position)
-    return anchor["span"][0] if anchor else None
+    return doc_ir._span(anchor)[0] if anchor else None
 
 
-def _anchor(merged: list[dict], position: int) -> dict | None:
+def _anchor(merged: Sequence[Block], position: int) -> Block | None:
     """The block `_insert_index` writes in front of."""
     for block in merged[position + 1:]:
         if block.get("span") and not block.get("moved"):
@@ -3334,7 +3740,7 @@ def _anchor(merged: list[dict], position: int) -> dict | None:
     return None
 
 
-def refuse_back_to_back(merged: list[dict], notes: list[str]) -> None:
+def refuse_back_to_back(merged: list[Block], notes: list[str]) -> None:
     """Refuse to write a table where it would stand right behind another one.
 
     Docs keeps an undeletable paragraph between two tables (the `between_tables`
@@ -3380,7 +3786,7 @@ def refuse_back_to_back(merged: list[dict], notes: list[str]) -> None:
                          f"the document keeps a paragraph of its own — not written")
 
 
-def refuse_eaten_anchor(theirs: dict, merged: list[dict], notes: list[str]) -> None:
+def refuse_eaten_anchor(theirs: Ir, merged: list[Block], notes: list[str]) -> None:
     """Refuse to move the body's last table in front of the paragraph it ends behind.
 
     A body may not end on a table, so Docs keeps an empty paragraph after one and no
@@ -3405,10 +3811,10 @@ def refuse_eaten_anchor(theirs: dict, merged: list[dict], notes: list[str]) -> N
     if len(live) < 2 or not theirs.get("trailer") or not _structural(live[-1]):
         return
     last, before = live[-1], live[-2]
-    if _structural(before) or block_text(before).strip() or not last.get("key"):
+    last_key = last.get("key")
+    if _structural(before) or block_text(before).strip() or not last_key:
         return
-    position = next((i for i, b in enumerate(merged)
-                     if b.get("key") == last["key"]), None)
+    position = next((i for i, b in enumerate(merged) if b.get("key") == last_key), None)
     if position is None or not merged[position].get("moved"):
         return
     anchor = _anchor(merged, position)
@@ -3416,14 +3822,14 @@ def refuse_eaten_anchor(theirs: dict, merged: list[dict], notes: list[str]) -> N
         return
     merged[position]["moved"] = False
     _put_back(merged, merged[position])
-    notes.append(f"{last['key']}: the source moves it in front of "
+    notes.append(f"{last_key}: the source moves it in front of "
                  f"{before.get('key')}, and the body may not end on a table — the mark "
                  f"the table gives up on its way out is that empty paragraph's own, so "
                  f"the place the table would be written goes with it. Left where the "
                  f"document has it")
 
 
-def refuse_nowhere(theirs: dict, merged: list[dict], notes: list[str]) -> None:
+def refuse_nowhere(theirs: Ir, merged: list[Block], notes: list[str]) -> None:
     """Refuse to write a block whose place in the document has no paragraph in it.
 
     Nothing can be written at a table's or a table of contents' own index, so a block
@@ -3465,7 +3871,7 @@ def refuse_nowhere(theirs: dict, merged: list[dict], notes: list[str]) -> None:
                          f"between the tables in the document, or move it in the file")
 
 
-def _put_back(merged: list[dict], block: dict) -> None:
+def _put_back(merged: list[Block], block: Block) -> None:
     """Put a block whose move was refused back where the document has it.
 
     "Left where the document has it" has to be true of the list as well, not only of
@@ -3483,15 +3889,15 @@ def _put_back(merged: list[dict], block: dict) -> None:
     where = len(merged)
     if span:
         where = next((i for i, b in enumerate(merged)
-                      if b.get("span") and not b.get("moved") and b["span"][0] > span[0]),
+                      if (at := b.get("span")) and not b.get("moved") and at[0] > span[0]),
                      len(merged))
     merged.insert(where, block)
 
 
-def _nowhere(theirs: dict, merged: list[dict], position: int) -> bool:
+def _nowhere(theirs: Ir, merged: Sequence[Block], position: int) -> bool:
     """Whether the place this block is written at is inside a table's last cell."""
     anchor = _anchor(merged, position)
-    if not _structural(anchor):
+    if anchor is None or not _structural(anchor):
         return False
     at = next((i for i, b in enumerate(theirs["blocks"])
                if b.get("span") == anchor.get("span")), None)
@@ -3500,7 +3906,7 @@ def _nowhere(theirs: dict, merged: list[dict], position: int) -> bool:
     return at is not None and at > 0 and _structural(theirs["blocks"][at - 1])
 
 
-def restore_undeletable(theirs: dict, merged: list[dict], notes: list[str]) -> None:
+def restore_undeletable(theirs: Ir, merged: list[Block], notes: list[str]) -> None:
     """Put back a block the merge means to delete and that no request can delete.
 
     An empty paragraph between two tables is the case: its own mark is the newline in
@@ -3513,7 +3919,7 @@ def restore_undeletable(theirs: dict, merged: list[dict], notes: list[str]) -> N
     `_mark_is_taken` asks whether the block after this one is going too.
     """
     for _ in range(len(theirs["blocks"]) + 1):
-        by_key = {b["key"]: b for b in merged if b.get("key")}
+        by_key = _by_key(merged)
         going = {i for i, live in enumerate(theirs["blocks"]) if _goes(live, by_key)}
         ends = not theirs.get("trailer")
         filled = any(_written_here(b) and _insert_index(merged, p) is None
@@ -3525,28 +3931,29 @@ def restore_undeletable(theirs: dict, merged: list[dict], notes: list[str]) -> N
             return
         live = theirs["blocks"][stuck]
         key = live.get("key")
-        if by_key.get(key, {}).get("moved"):
+        moving = _keyed(by_key, live)
+        if moving is not None and moving.get("moved"):
             # It is not being dropped but moved, and the move is a delete and a write:
             # leaving it where the document has it is what `_apply_source_moves` does
             # for everything else it cannot carry.
-            by_key[key]["moved"] = False
-            _put_back(merged, by_key[key])
+            moving["moved"] = False
+            _put_back(merged, moving)
             notes.append(f"{key}: the source moved it, but it stands between two tables "
                          f"where nothing can be deleted — left where the document has it")
             continue
         notes.append(f"{key}: dropped by the source, but it stands between two tables "
                      f"where no request can delete it — kept")
         merged.insert(_after_live(theirs, merged, stuck),
-                      dict(live) | {"origin": "kept from the document"})
+                      _with_origin(live, "kept from the document"))
 
 
-def _empty_range(blocks: list[dict], index: int, going: set[int], ends: bool,
-                 lead: list | None, filled: bool) -> bool:
+def _empty_range(blocks: Sequence[Block], index: int, going: Set[int], ends: bool,
+                 lead: Sequence[int] | None, filled: bool) -> bool:
     start, end = _delete_range(blocks, index, going, ends, lead, filled)
     return end <= start
 
 
-def _after_live(theirs: dict, merged: list[dict], index: int) -> int:
+def _after_live(theirs: Ir, merged: Sequence[Block], index: int) -> int:
     """Where a block of the document goes back into the merge: behind the merged block
     that carries the key of the one in front of it there, or at the front.
 
@@ -3564,7 +3971,7 @@ def _after_live(theirs: dict, merged: list[dict], index: int) -> int:
     return 0
 
 
-def plan(base: dict, ours: dict, theirs: dict) -> dict:
+def plan(base: Ir, ours: Ir, theirs: Ir) -> Plan:
     """The whole planning step: keys, merge, the grid, the edits."""
     doc_ir.key_blocks(ours)
     restore_unreadable(base, ours)
@@ -3572,26 +3979,28 @@ def plan(base: dict, ours: dict, theirs: dict) -> dict:
     recover_tables(base, theirs)
     _unseen_pictures(ours, base)
     inherit_keys(base, ours)
-    result = merge(base, ours, theirs)
-    for block in result["blocks"]:
+    merged = merge(base, ours, theirs)
+    blocks, notes = merged["blocks"], merged["notes"]
+    for block in blocks:
         if block.get("origin") == "added by the source" and not _writable_block(block):
-            result["notes"].append(f"{block.get('key')}: a new block with a chip in it that no "
-                                   f"request can create (or a picture file that is not there) "
-                                   f"cannot be written")
-    unwritten_pictures(base, ours, theirs, result["blocks"], result["notes"])
-    refuse_back_to_back(result["blocks"], result["notes"])
-    refuse_eaten_anchor(theirs, result["blocks"], result["notes"])
-    refuse_nowhere(theirs, result["blocks"], result["notes"])
-    restore_undeletable(theirs, result["blocks"], result["notes"])
-    result["structure"], result["shaped"] = structure(theirs, result["blocks"], result["notes"])
-    unwritten_levels(theirs, result["blocks"], result["notes"])
-    unwritten_glyphs(theirs, result["blocks"], result["notes"])
-    result["removed"] = deleted_blocks(theirs, result["blocks"])
-    result["requests"] = requests(theirs, result["blocks"])
-    return result
+            notes.append(f"{block.get('key')}: a new block with a chip in it that no "
+                         f"request can create (or a picture file that is not there) "
+                         f"cannot be written")
+    unwritten_pictures(base, ours, theirs, blocks, notes)
+    refuse_back_to_back(blocks, notes)
+    refuse_eaten_anchor(theirs, blocks, notes)
+    refuse_nowhere(theirs, blocks, notes)
+    restore_undeletable(theirs, blocks, notes)
+    grid, shaped = structure(theirs, blocks, notes)
+    unwritten_levels(theirs, blocks, notes)
+    unwritten_glyphs(theirs, blocks, notes)
+    removed = deleted_blocks(theirs, blocks)
+    return {"blocks": blocks, "conflicts": merged["conflicts"], "notes": notes,
+            "structure": grid, "shaped": shaped, "removed": removed,
+            "requests": requests(theirs, blocks)}
 
 
-def deleted_blocks(theirs: dict, merged: list[dict]) -> list[dict]:
+def deleted_blocks(theirs: Ir, merged: Sequence[Block]) -> list[Block]:
     """The document's blocks this plan takes away for good, for the report to name.
 
     The one thing a sync does that cannot be undone, and the report had no word for
@@ -3608,11 +4017,16 @@ def deleted_blocks(theirs: dict, merged: list[dict]) -> list[dict]:
     delete — which is this same question, asked by `_goes`. A block the source *moved*
     is deleted and written again, so it is not one of these.
     """
-    kept = {b["key"] for b in merged if b.get("key")}
-    return [b for b in theirs["blocks"] if b.get("key") and b["key"] not in kept]
+    kept = set(_by_key(merged))
+    return [b for b in theirs["blocks"] if (key := b.get("key")) and key not in kept]
 
 
-def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None:
+def _level_of(block: Block) -> int:
+    """The nesting level a block stands at in a list: 0 for anything but an item."""
+    return block.get("level", 0) if block.get("kind") == "item" else 0
+
+
+def unwritten_levels(theirs: Ir, merged: Sequence[Block], notes: list[str]) -> None:
     """Say when an item cannot be given the nesting level the source asks for.
 
     No request sets one. `createParagraphBullets` says nothing about a level: Docs
@@ -3662,9 +4076,6 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
 
     After `structure`, which is where a move can still be taken back.
     """
-    def level_of(block: dict) -> int:
-        return block.get("level", 0) if block.get("kind") == "item" else 0
-
     donors, keeps = _mark_donors(theirs, merged)
     lands: list[int | None] = []            # the level each item really comes out at
     for at, block in enumerate(merged):
@@ -3682,13 +4093,13 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
             # in front of (offline chain-10 seed 8100356, shape `prose`: the source
             # moves a heading to the end, into the very place a nested item it is
             # dropping stood, and the heading came out a nested item).
-            out = level_of(donors[at])
+            out = _level_of(donors[at])
             lands.append(out)
-            if out != level_of(block):
+            if out != _level_of(block):
                 notes.append(f"{block.get('key')}: written from nothing where the paragraph "
                              f"in front of it goes, so Docs hands it that one's style — no "
                              f"request gives a bullet its nesting level, so it comes out at "
-                             f"level {out}, not at {level_of(block)}")
+                             f"level {out}, not at {_level_of(block)}")
             continue
         # Whose paragraph style the new text wears, and so whose place in a list; where
         # no list stands there, `createParagraphBullets` starts one at level 0. Either
@@ -3697,9 +4108,16 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
         # source moved a level-0 item to the end, behind an item the reader had nested;
         # chain-12 seed 1640036: it moved one to just in front of a nested item).
         anchor = _anchor(merged, at)
-        splits = anchor is not None and not _structural(anchor)
-        out = level_of(anchor) if splits else \
-            (lands[at - 1] if at and lands[at - 1] is not None else 0)
+        behind = lands[at - 1] if at else None
+        if anchor is not None and not _structural(anchor):
+            out = _level_of(anchor)
+            whose = f"level {out}, the level of the item it is written in front of"
+        elif behind is not None:
+            out = behind
+            whose = f"level {out}, the level of the item in front of it"
+        else:
+            out = 0
+            whose = "level 0, where `createParagraphBullets` starts a list of its own"
         lands.append(out)
         if out != block.get("level", 0):
             # And where the text wears the style of something that is no item at all —
@@ -3708,10 +4126,6 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
             # note used to say "the level of the item in front of it" there, naming an
             # item nobody could find: a person reading it would look for the wrong
             # thing (a block the source moves to the end of a document ending in prose).
-            whose = f"level {out}, the level of the item it is written in front of" \
-                if splits else f"level {out}, the level of the item in front of it" \
-                if at and lands[at - 1] is not None \
-                else "level 0, where `createParagraphBullets` starts a list of its own"
             notes.append(f"{block.get('key')}: written from nothing as a list item, and no "
                          f"request gives a bullet its nesting level — it comes out at "
                          f"{whose}, not at {block.get('level', 0)}")
@@ -3724,20 +4138,20 @@ def unwritten_levels(theirs: dict, merged: list[dict], notes: list[str]) -> None
             # The plainest of the three, and the one the other two are exceptions to:
             # the block keeps its own paragraph mark, so it keeps the level that mark
             # carries. A block that was no item at all starts a list at level 0.
-            if want.get("kind") == "item" and level_of(want) != level_of(block):
+            if want.get("kind") == "item" and _level_of(want) != _level_of(block):
                 notes.append(f"{want.get('key')}: it keeps the paragraph mark it stands on, "
                              f"and with it the nesting level that mark carries — no request "
-                             f"gives a bullet one, so it stays at level {level_of(block)}, "
-                             f"not at {level_of(want)}")
+                             f"gives a bullet one, so it stays at level {_level_of(block)}, "
+                             f"not at {_level_of(want)}")
             continue
-        if level_of(donor) == level_of(want):
+        if _level_of(donor) == _level_of(want):
             continue
         notes.append(f"{want.get('key')}: the paragraph in front of it goes, and Docs hands "
                      f"its style to this one — no request gives a bullet its nesting level, "
-                     f"so it comes out at level {level_of(donor)}, not at {level_of(want)}")
+                     f"so it comes out at level {_level_of(donor)}, not at {_level_of(want)}")
 
 
-def _mark_donors(theirs: dict, merged: list[dict]) -> tuple[dict[int, dict], dict[int, dict]]:
+def _mark_donors(theirs: Ir, merged: Sequence[Block]) -> tuple[dict[int, Block], dict[int, Block]]:
     """Whose paragraph mark each merged block comes out on: what a delete hands it,
     and what it keeps of its own. Two dicts over the merged index.
 
@@ -3749,20 +4163,21 @@ def _mark_donors(theirs: dict, merged: list[dict]) -> tuple[dict[int, dict], dic
     from nothing at that index takes the mark first, being written in front of the
     next one (offline chain-10 seed 8100356).
     """
-    by_key = {b["key"]: b for b in merged if b.get("key")}
+    by_key = _by_key(merged)
     index_of = {id(block): at for at, block in enumerate(merged)}
-    live = theirs.get("blocks", [])
+    live = theirs["blocks"]
     going = {i for i, block in enumerate(live) if _goes(block, by_key)}
-    donors: dict[int, dict] = {}
-    keeps: dict[int, dict] = {}
+    donors: dict[int, Block] = {}
+    keeps: dict[int, Block] = {}
     for index, block in enumerate(live):
-        want = by_key.get(block.get("key"))
+        want = _keyed(by_key, block)
         if index in going or want is None or _written_here(want):
             continue
         keeps[index_of[id(want)]] = block
-        donor = None                      # the first of the run of deletes in front
+        donor: Block | None = None        # the first of the run of deletes in front
         at = index - 1
-        while at in going and not _mark_is_taken(live, at, going, True, theirs.get("lead")):
+        while at in going and not _mark_is_taken(live, at, going, True, theirs.get("lead"),
+                                                 False):
             donor, at = live[at], at - 1
         if donor is None:
             continue
@@ -3775,7 +4190,7 @@ def _mark_donors(theirs: dict, merged: list[dict]) -> tuple[dict[int, dict], dic
     return donors, keeps
 
 
-def unwritten_glyphs(theirs: dict, merged: list[dict], notes: list[str]) -> None:
+def unwritten_glyphs(theirs: Ir, merged: Sequence[Block], notes: list[str]) -> None:
     """Say when the source asks one item of a list for a glyph the list cannot give it.
 
     A glyph belongs to the **list**, not to the item: `createParagraphBullets` takes a
@@ -3803,7 +4218,7 @@ def unwritten_glyphs(theirs: dict, merged: list[dict], notes: list[str]) -> None
     numbers is that list's second member however the file writes it (offline chain-10
     seeds 8100237, 8100057 and 8100374, shape `prose`).
     """
-    lists: dict[object, list[tuple[str, bool]]] = {}
+    lists: dict[ListToken, list[tuple[str, bool]]] = {}
     for token, block in zip(_landing_lists(theirs, merged), merged):
         if token is not None:
             lists.setdefault(token, []).append(
@@ -3818,7 +4233,18 @@ def unwritten_glyphs(theirs: dict, merged: list[dict], notes: list[str]) -> None
                      f"{bulleted} bulleted, so all of them come out alike")
 
 
-def _landing_lists(theirs: dict, merged: list[dict]) -> list[object]:
+# Which list an item comes out in: the document's list id, or a list of its own that
+# starts at that merged index.
+ListToken = str | tuple[Literal["own"], int]
+
+
+def _list_of(had: Block | None, at: int) -> ListToken:
+    """The list an item wearing `had`'s paragraph style comes out in."""
+    listed = had.get("list") if had is not None and had.get("kind") == "item" else None
+    return listed or ("own", at)
+
+
+def _landing_lists(theirs: Ir, merged: Sequence[Block]) -> list[ListToken | None]:
     """Which list each merged item comes out in, one token per block, None for
     anything that is not an item.
 
@@ -3830,21 +4256,17 @@ def _landing_lists(theirs: dict, merged: list[dict]) -> list[object]:
     one it is written in front of, or, where nothing follows it, the one in front.
     """
     donors, _ = _mark_donors(theirs, merged)
-    was = {b.get("key"): b for b in theirs.get("blocks", []) if b.get("key")}
-    tokens: list[object] = [None] * len(merged)
+    was = _by_key(theirs["blocks"])
+    tokens: list[ListToken | None] = [None] * len(merged)
     for at, block in enumerate(merged):
         if block.get("kind") != "item" or _written_here(block):
             continue
-        had = donors.get(at) or was.get(block.get("key")) or {}
-        tokens[at] = had.get("list") if had.get("kind") == "item" else None
-        tokens[at] = tokens[at] or ("own", at)
+        tokens[at] = _list_of(donors.get(at) or _keyed(was, block), at)
     for at, block in enumerate(merged):
         if block.get("kind") != "item" or not _written_here(block):
             continue
         if at in donors:
-            had = donors[at]
-            tokens[at] = (had.get("list") if had.get("kind") == "item" else None) \
-                or ("own", at)
+            tokens[at] = _list_of(donors[at], at)
             continue
         anchor = _anchor(merged, at)
         if anchor is not None and not _structural(anchor):
@@ -3864,7 +4286,7 @@ def _landing_lists(theirs: dict, merged: list[dict]) -> list[object]:
 TABS_CRITERIA = ("deleteNamedRange", "replaceAllText", "replaceNamedRangeContent")
 
 
-def on_tab(requests: list[dict], tab: str | None) -> list[dict]:
+def on_tab(requests: list[DocsRequest], tab: str | None) -> list[DocsRequest]:
     """The requests aimed at one tab: `tabId` in every location and range.
 
     A request without one goes to the first tab (measured), so the first tab's are
@@ -3879,31 +4301,166 @@ def on_tab(requests: list[dict], tab: str | None) -> list[dict]:
     is refused, and with it every anchor that tab was about to be given. Which
     means that until this was stamped, a drifted or orphaned range on a second tab
     could never be repaired at all (`doc_ir.replant_requests`, `orphan_requests`).
+
+    The requests come back as new values; the plan's own are never touched.
     """
     if not tab:
         return requests
+    return [_on_tab(request, tab) for request in requests]
 
-    def stamp(value, key=None):
-        if isinstance(value, list):
-            return [stamp(v) for v in value]
-        if not isinstance(value, dict):
-            return value
-        out = {k: stamp(v, k) for k, v in value.items()}
-        if "index" in value or "startIndex" in value or key == "endOfSegmentLocation":
-            out["tabId"] = tab
-        return out
 
-    out = []
-    for request in requests:
-        aimed = stamp(request)
-        for name in aimed:
-            if name in TABS_CRITERIA:
-                aimed[name]["tabsCriteria"] = {"tabIds": [tab]}
-        out.append(aimed)
+def _given(value: _T | None) -> _T:
+    """The one part a request of its kind holds."""
+    if value is None:
+        raise KeyError("a request with no body for its kind")
+    return value
+
+
+def _on_tab(request: DocsRequest, tab: str) -> DocsRequest:
+    """One request aimed at a tab past the first (`on_tab`)."""
+    kind = docs_request_kind(request)
+    match kind:
+        case "insertText":
+            text = _given(request.get("insertText")).copy()
+            if (location := text.get("location")) is not None:
+                text["location"] = _location_on(location, tab)
+            if (end := text.get("endOfSegmentLocation")) is not None:
+                text["endOfSegmentLocation"] = _end_on(end, tab)
+            return {"insertText": text}
+        case "insertTable":
+            table = _given(request.get("insertTable")).copy()
+            if (location := table.get("location")) is not None:
+                table["location"] = _location_on(location, tab)
+            if (end := table.get("endOfSegmentLocation")) is not None:
+                table["endOfSegmentLocation"] = _end_on(end, tab)
+            return {"insertTable": table}
+        case "insertInlineImage":
+            image = _given(request.get("insertInlineImage")).copy()
+            if (location := image.get("location")) is not None:
+                image["location"] = _location_on(location, tab)
+            if (end := image.get("endOfSegmentLocation")) is not None:
+                image["endOfSegmentLocation"] = _end_on(end, tab)
+            return {"insertInlineImage": image}
+        case "insertPerson":
+            person = _given(request.get("insertPerson")).copy()
+            person["location"] = _location_on(person["location"], tab)
+            return {"insertPerson": person}
+        case "insertDate":
+            date = _given(request.get("insertDate")).copy()
+            date["location"] = _location_on(date["location"], tab)
+            return {"insertDate": date}
+        case "deleteContentRange":
+            cut = _given(request.get("deleteContentRange")).copy()
+            cut["range"] = _range_on(cut["range"], tab)
+            return {"deleteContentRange": cut}
+        case "updateTextStyle":
+            styled = _given(request.get("updateTextStyle")).copy()
+            styled["range"] = _range_on(styled["range"], tab)
+            return {"updateTextStyle": styled}
+        case "updateParagraphStyle":
+            para = _given(request.get("updateParagraphStyle")).copy()
+            para["range"] = _range_on(para["range"], tab)
+            return {"updateParagraphStyle": para}
+        case "createParagraphBullets":
+            made = _given(request.get("createParagraphBullets")).copy()
+            made["range"] = _range_on(made["range"], tab)
+            return {"createParagraphBullets": made}
+        case "deleteParagraphBullets":
+            gone = _given(request.get("deleteParagraphBullets")).copy()
+            gone["range"] = _range_on(gone["range"], tab)
+            return {"deleteParagraphBullets": gone}
+        case "createNamedRange":
+            named = _given(request.get("createNamedRange")).copy()
+            named["range"] = _range_on(named["range"], tab)
+            return {"createNamedRange": named}
+        case "deleteNamedRange":
+            unnamed = _given(request.get("deleteNamedRange")).copy()
+            unnamed["tabsCriteria"] = {"tabIds": [tab]}
+            return {"deleteNamedRange": unnamed}
+        case "insertTableRow":
+            row = _given(request.get("insertTableRow")).copy()
+            row["tableCellLocation"] = _cell_on(row["tableCellLocation"], tab)
+            return {"insertTableRow": row}
+        case "insertTableColumn":
+            column = _given(request.get("insertTableColumn")).copy()
+            column["tableCellLocation"] = _cell_on(column["tableCellLocation"], tab)
+            return {"insertTableColumn": column}
+        case "deleteTableRow":
+            row_gone = _given(request.get("deleteTableRow")).copy()
+            row_gone["tableCellLocation"] = _cell_on(row_gone["tableCellLocation"], tab)
+            return {"deleteTableRow": row_gone}
+        case "deleteTableColumn":
+            column_gone = _given(request.get("deleteTableColumn")).copy()
+            column_gone["tableCellLocation"] = _cell_on(column_gone["tableCellLocation"], tab)
+            return {"deleteTableColumn": column_gone}
+        case "addDocumentTab":
+            added = _given(request.get("addDocumentTab")).copy()
+            added["tabProperties"] = _properties_on(added["tabProperties"], tab)
+            return {"addDocumentTab": added}
+        case "updateDocumentTabProperties":
+            renamed = _given(request.get("updateDocumentTabProperties")).copy()
+            renamed["tabProperties"] = _properties_on(renamed["tabProperties"], tab)
+            return {"updateDocumentTabProperties": renamed}
+        case "deleteTab":
+            return {"deleteTab": _given(request.get("deleteTab")).copy()}
+        case _:
+            assert_never(kind)
+
+
+def _location_on(location: DocsLocation, tab: str) -> DocsLocation:
+    out = location.copy()
+    out["tabId"] = tab
     return out
 
 
-def pair_tabs(base: dict, ours: dict, theirs: dict) -> dict:
+def _end_on(end: DocsEndOfSegmentLocation, tab: str) -> DocsEndOfSegmentLocation:
+    out = end.copy()
+    out["tabId"] = tab
+    return out
+
+
+def _range_on(span: DocsRangeWrite, tab: str) -> DocsRangeWrite:
+    out = span.copy()
+    out["tabId"] = tab
+    return out
+
+
+def _cell_on(cell: DocsTableCellLocation, tab: str) -> DocsTableCellLocation:
+    """A cell names its table by the table's start, which is the Location stamped."""
+    out = cell.copy()
+    out["tableStartLocation"] = _location_on(cell["tableStartLocation"], tab)
+    return out
+
+
+def _properties_on(props: DocsTabProperties, tab: str) -> DocsTabProperties:
+    """Tab properties, stamped only where they say an `index` — which is how the walk
+    this replaced told a Location, and so what it did to them."""
+    out = props.copy()
+    if "index" in props:
+        out["tabId"] = tab
+    return out
+
+
+class TabPlan(TypedDict):
+    """What `pair_tabs` says happens to the tabs (its docstring names each field)."""
+    pairs: list[tuple[str, Ir, Ir]]
+    create: list[Ir]
+    requests: list[DocsRequest]
+    applied: list[str]
+    notes: list[str]
+    rename: str | None
+
+
+def _tabs_by_id(ir: Ir) -> dict[str, Ir]:
+    return {tab: p for p in ir.get("tabs", []) if (tab := p.get("tab"))}
+
+
+def _rename_tab(tab: str, title: str) -> DocsRequest:
+    return {"updateDocumentTabProperties": {"tabProperties": {"tabId": tab, "title": title},
+                                            "fields": "title"}}
+
+
+def pair_tabs(base: Ir, ours: Ir, theirs: Ir) -> TabPlan:
     """Which tab of the file is which tab of the document, and what happens to tabs.
 
     The same three-way rule as for blocks, one level up, with the tab id as identity:
@@ -3918,27 +4475,28 @@ def pair_tabs(base: dict, ours: dict, theirs: dict) -> dict:
     what the report says about them, and `rename` the document's new name, which is
     no request at all (`document_title`).
     """
-    live = {p["tab"]: p for p in theirs.get("tabs", []) if p.get("tab")}
-    was = {p["tab"]: p for p in base.get("tabs", []) if p.get("tab")}
+    live = _tabs_by_id(theirs)
+    was = _tabs_by_id(base)
     ours_ids = {p.get("tab") for p in ours.get("tabs", [])}
-    out: dict = {"pairs": [], "create": [], "requests": [], "applied": [], "notes": [],
-                 "rename": None}
-    taken: set = set()
+    out: TabPlan = {"pairs": [], "create": [], "requests": [], "applied": [], "notes": [],
+                    "rename": None}
+    taken: set[str] = set()
     for part in ours.get("tabs", []):
         tab, name = part.get("tab"), part.get("title", "")
-        if tab in live:
+        if tab is not None and tab in live:
             taken.add(tab)
-            old, now = was.get(tab, {}), live[tab]
-            if name != now.get("title", "") and name:
-                if now.get("title", "") == old.get("title", now.get("title", "")):
-                    out["requests"].append({"updateDocumentTabProperties": {
-                        "tabProperties": {"tabId": tab, "title": name}, "fields": "title"}})
+            old, now = was.get(tab), live[tab]
+            now_title = now.get("title", "")
+            old_title = old.get("title") if old is not None else None
+            if name != now_title and name:
+                if now_title == (old.get("title", now_title) if old is not None else now_title):
+                    out["requests"].append(_rename_tab(tab, name))
                     out["applied"].append(f"tab {now.get('title')!r} renamed {name!r}")
-                elif name != old.get("title"):
+                elif name != old_title:
                     out["notes"].append(f"tab {now.get('title')!r}: renamed on both sides — "
                                         f"the document's title is kept, not {name!r}")
-            out["pairs"].append((tab, part, old or {"blocks": []}))
-        elif tab in was:
+            out["pairs"].append((tab, part, old if old is not None else {"blocks": []}))
+        elif tab is not None and tab in was:
             if doc_ir.blocks_html(part["blocks"]) != doc_ir.blocks_html(was[tab]["blocks"]):
                 out["notes"].append(f"tab {name!r} was deleted in the document; the source's "
                                     f"changes to it are not written")
@@ -3957,7 +4515,8 @@ def pair_tabs(base: dict, ours: dict, theirs: dict) -> dict:
         if tab in ours_ids or tab not in live:
             continue
         now, name = live[tab], old.get("title", "")
-        children = [p for p in live.values() if p.get("parent") == tab and p["tab"] in ours_ids]
+        children = [p for p in live.values()
+                    if p.get("parent") == tab and p.get("tab") in ours_ids]
         if (doc_ir.blocks_html(now["blocks"]) != doc_ir.blocks_html(old["blocks"])
                 or now.get("title") != old.get("title") or children):
             out["notes"].append(f"tab {name!r} was deleted in the source, but the document "
@@ -3971,7 +4530,7 @@ def pair_tabs(base: dict, ours: dict, theirs: dict) -> dict:
     return out
 
 
-def first_tab_title(base: dict, ours: dict, theirs: dict, out: dict) -> None:
+def first_tab_title(base: Ir, ours: Ir, theirs: Ir, out: TabPlan) -> None:
     """The first tab's own name, which the file says in its `b2s-tab` meta.
 
     Every other tab names itself on its `<section>`; the first tab is the file's body
@@ -3995,12 +4554,11 @@ def first_tab_title(base: dict, ours: dict, theirs: dict, out: dict) -> None:
         out["notes"].append(f"the first tab was renamed on both sides — it keeps {now!r}, "
                             f"not {mine!r}")
         return
-    out["requests"].append({"updateDocumentTabProperties": {
-        "tabProperties": {"tabId": tab, "title": mine}, "fields": "title"}})
+    out["requests"].append(_rename_tab(tab, mine))
     out["applied"].append(f"the first tab renamed {mine!r}")
 
 
-def document_title(base: dict, ours: dict, theirs: dict, out: dict) -> None:
+def document_title(base: Ir, ours: Ir, theirs: Ir, out: TabPlan) -> None:
     """The document's name, which the file says in its `<title>`.
 
     A Google Doc's title *is* its name in Drive, and no `batchUpdate` request writes
@@ -4037,7 +4595,12 @@ def document_title(base: dict, ours: dict, theirs: dict, out: dict) -> None:
                               f"writes a document's title)")
 
 
-def tab_order(base: dict, ours: dict, theirs: dict, out: dict) -> None:
+def _tab_order_of(ir: Ir, known: Set[str | None]) -> list[str | None]:
+    """The ids of the tabs all three sides have, in the order this side has them."""
+    return [p.get("tab") for p in ir.get("tabs", []) if p.get("tab") in known]
+
+
+def tab_order(base: Ir, ours: Ir, theirs: Ir, out: TabPlan) -> None:
     """A tab the source moved, which is not written.
 
     Blocks the source moved go back where the file has them, because a move is a
@@ -4058,23 +4621,23 @@ def tab_order(base: dict, ours: dict, theirs: dict, out: dict) -> None:
     Only what the *source* moved: where the file still has the base's order, the
     reader moved a tab and the file is simply following it.
     """
-    def order(ir, known):
-        return [p["tab"] for p in ir.get("tabs", []) if p.get("tab") in known]
-
     known = ({p.get("tab") for p in ours.get("tabs", [])}
              & {p.get("tab") for p in theirs.get("tabs", [])}
              & {p.get("tab") for p in base.get("tabs", [])})
-    mine, now = order(ours, known), order(theirs, known)
-    if len(mine) < 2 or mine == now or mine == order(base, known):
+    mine, now = _tab_order_of(ours, known), _tab_order_of(theirs, known)
+    if len(mine) < 2 or mine == now or mine == _tab_order_of(base, known):
         return
-    titles = {p["tab"]: p.get("title", "") for p in theirs.get("tabs", []) if p.get("tab")}
+    titles = {tab: p.get("title", "") for tab, p in _tabs_by_id(theirs).items()}
     out["notes"].append(
-        "the source puts the tabs in the order " + ", ".join(repr(titles.get(t, t))
-                                                             for t in mine)
+        "the source puts the tabs in the order "
+        + ", ".join(repr(titles.get(t, t) if t is not None else None) for t in mine)
         + "; moving a tab is not written, so the document's order stands")
 
 
-def tab_siblings(theirs: dict) -> dict:
+Siblings = dict[str | None, list[str | None]]
+
+
+def tab_siblings(theirs: Ir) -> Siblings:
     """The document's tabs by parent, each in the order the document shows them.
 
     The first tab is a root tab like any other — index 0, and the one every other
@@ -4082,14 +4645,14 @@ def tab_siblings(theirs: dict) -> dict:
     it, `None` for a read that holds only that tab. A place is all the arithmetic
     wants, and that is one thing the file cannot name anyway.
     """
-    out: dict = {None: [theirs.get("tab")]}
+    out: Siblings = {None: [theirs.get("tab")]}
     for part in theirs.get("tabs", []):
-        if part.get("tab"):
-            out.setdefault(part.get("parent") or None, []).append(part["tab"])
+        if tab := part.get("tab"):
+            out.setdefault(part.get("parent") or None, []).append(tab)
     return out
 
 
-def tab_index(part: dict, ours: dict, parent: str | None, siblings: list) -> int:
+def tab_index(part: Ir, ours: Ir, parent: str | None, siblings: Sequence[str | None]) -> int:
     """Where among its parent's tabs a tab the source added goes.
 
     `addDocumentTab` takes the index the new tab is to have and pushes the later ones
@@ -4103,7 +4666,7 @@ def tab_index(part: dict, ours: dict, parent: str | None, siblings: list) -> int
     the body, and nothing may.
     """
     parts = doc_ir.parts(ours)
-    before: list = []
+    before: list[Ir] = []
     for other in parts:
         if other is part:
             break
@@ -4113,22 +4676,23 @@ def tab_index(part: dict, ours: dict, parent: str | None, siblings: list) -> int
             continue
         if other is parts[0]:
             return 1
-        if other.get("tab") in siblings:
-            return siblings.index(other["tab"]) + 1
+        if (tab := other.get("tab")) in siblings:
+            return siblings.index(tab) + 1
     return 0
 
 
-def add_tab_request(part: dict, parents: dict, ours: dict | None = None,
-                    siblings: dict | None = None) -> dict:
+def add_tab_request(part: Ir, parents: Set[str], ours: Ir | None = None,
+                    siblings: Siblings | None = None) -> DocsRequest:
     """`addDocumentTab` for a tab the source added, under its parent if that exists
     and where the file puts it among that parent's tabs.
 
     With no `ours` and `siblings` to say where that is, the request names no index
-    and the tab lands at the end, which is where every tab this made used to land.
+    and the tab lands at the end, which is where every tab this made used to land —
+    and how the tests ask for the parent alone.
     """
-    props = {"title": part.get("title") or "Tab"}
-    if part.get("parent") in parents:
-        props["parentTabId"] = part["parent"]
+    props: DocsTabProperties = {"title": part.get("title") or "Tab"}
+    if (parent := part.get("parent")) is not None and parent in parents:
+        props["parentTabId"] = parent
     if ours is not None and siblings is not None:
         under = props.get("parentTabId")
         props["index"] = tab_index(part, ours, under, siblings.get(under, []))

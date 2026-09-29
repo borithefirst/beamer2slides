@@ -49,16 +49,30 @@ import re
 import sys
 import unicodedata
 from collections import Counter
+from collections.abc import Collection, Iterator, Mapping, Set
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .. import doc_ir, doc_merge
+from ..doc_ir import Block, Ir, Run
+
+if TYPE_CHECKING:
+    from ..doc_sync import SyncReport
 
 SEVERITIES = ("loss", "undo", "report", "note")
 FAIL = ("loss", "undo", "report")
 
 WORD = re.compile(r"\S+")
 # The run marks, which are the only styling a named style can put on a word here.
-MARK_KEYS = {key for key, _ in doc_ir.MARK_FIELDS}
+MARK_KEYS: set[str] = {key for key, _ in doc_ir.MARK_FIELDS}
+
+#: What a document's named styles set, as `check` is told it: the IR fields per
+#: `namedStyleType` (`fuzz_docs.theme_fields`).
+Theme = Mapping[str, Set[str]]
+#: What a frozen run is, to a reader (`frozen_key`).
+FrozenKey = tuple[str, str]
+#: What one table cell is, for counting (`_cell_says`).
+CellSays = tuple[str, tuple[tuple[FrozenKey, int], ...]]
 
 
 def finding(kind: str, severity: str, detail: str, tab=None, key=None, block=None) -> dict:
@@ -68,7 +82,7 @@ def finding(kind: str, severity: str, detail: str, tab=None, key=None, block=Non
 
 # ---------------------------------------------------------------- reading an IR
 
-def parts_by_tab(ir: dict | None) -> dict:
+def parts_by_tab(ir: Ir | None) -> dict[str | None, Ir]:
     """{tab id (None for the first): part} for a whole IR.
 
     A `<section>` with no `data-tab` is a tab the *file* is asking for and the
@@ -83,22 +97,33 @@ def parts_by_tab(ir: dict | None) -> dict:
     """
     if not ir:
         return {}
-    out = {}
+    out: dict[str | None, Ir] = {}
     for at, part in enumerate(doc_ir.parts(ir)):
         tab = None if part is ir else part.get("tab") or f"?{at}"
         out.setdefault(tab, part)
     return out
 
 
-def keyed(part: dict | None) -> dict:
-    return {b["key"]: b for b in (part or {}).get("blocks", []) if b.get("key")}
+def blocks_of(part: Ir | None) -> list[Block]:
+    """A part's blocks; none for a part that is not there."""
+    return part.get("blocks", []) if part else []
 
 
-def unkeyed(part: dict | None) -> list[dict]:
-    return [b for b in (part or {}).get("blocks", []) if not b.get("key")]
+def keyed(part: Ir | None) -> dict[str, Block]:
+    return {key: b for b in blocks_of(part) if (key := b.get("key"))}
 
 
-def text_of(block: dict) -> str:
+def unkeyed(part: Ir | None) -> list[Block]:
+    return [b for b in blocks_of(part) if not b.get("key")]
+
+
+def field_of(block: Block, field: str) -> object:
+    """A block's field named by a variable: a paragraph measure, a shape key."""
+    said: Mapping[str, object] = block
+    return said.get(field)
+
+
+def text_of(block: Block) -> str:
     """Everything a block says, cells included.
 
     A frozen run gets a space each side: a chip's own words sit right against the text
@@ -114,7 +139,7 @@ def text_of(block: dict) -> str:
                    for r in block.get("runs", []))
 
 
-def own_words(block: dict) -> str:
+def own_words(block: Block) -> str:
     """What a block says in its own right: the frozen runs left out.
 
     A chip's **face is the document's to draw** — the file says `Grace`, Docs renders
@@ -134,11 +159,11 @@ def own_words(block: dict) -> str:
                    for r in block.get("runs", []))
 
 
-def part_text(part: dict | None) -> str:
-    return " ".join(text_of(b) for b in (part or {}).get("blocks", []))
+def part_text(part: Ir | None) -> str:
+    return " ".join(text_of(b) for b in blocks_of(part))
 
 
-def words(text: str) -> Counter:
+def words(text: str) -> Counter[str]:
     return Counter(WORD.findall(text))
 
 
@@ -319,7 +344,7 @@ def _cleaved(token: str, after: Counter, was: Counter,
     return False
 
 
-def runs_of(block: dict):
+def runs_of(block: Block) -> Iterator[Run]:
     if block.get("kind") == "table":
         for row in block.get("rows", []):
             for cell in row:
@@ -329,7 +354,7 @@ def runs_of(block: dict):
     yield from block.get("runs", [])
 
 
-def frozen_key(run: dict) -> tuple:
+def frozen_key(run: Run) -> FrozenKey:
     """What a frozen run is, to a reader.
 
     A picture is the file it shows, not the object id Docs gave it: a block the sync
@@ -344,7 +369,7 @@ def frozen_key(run: dict) -> tuple:
     return (run.get("chip", "object"), run.get("value") or run.get("text", ""))
 
 
-def image_names(run: dict) -> set:
+def image_names(run: Run) -> set[FrozenKey]:
     """Every name that says which picture this is — and it takes all of them.
 
     Neither half of `frozen_key`'s rule holds on its own across one sync. The object
@@ -360,12 +385,12 @@ def image_names(run: dict) -> set:
                                            run.get("uri"), run.get("value")) if value}
 
 
-def images_of(part: dict | None) -> list[dict]:
-    return [run for block in (part or {}).get("blocks", []) for run in runs_of(block)
+def images_of(part: Ir | None) -> list[Run]:
+    return [run for block in blocks_of(part) for run in runs_of(block)
             if run.get("frozen") and run.get("chip") == "image"]
 
 
-def telling_names(runs: list[dict]) -> list[set]:
+def telling_names(runs: list[Run]) -> list[set[FrozenKey]]:
     """Of each picture's names, the ones that say *which* picture it is: the names no
     other picture standing beside it carries.
 
@@ -380,7 +405,7 @@ def telling_names(runs: list[dict]) -> list[set]:
     return [{name for name in image_names(run) if seen[name] == 1} for run in runs]
 
 
-def pair_images(now: list[dict], then: list[dict], ids: bool = False) -> list[int | None]:
+def pair_images(now: list[Run], then: list[Run], ids: bool) -> list[int | None]:
     """For each picture the document held, the one it has now, or None.
 
     Two passes: a telling name first, then any name at all, so a picture keeps its
@@ -415,10 +440,10 @@ def pair_images(now: list[dict], then: list[dict], ids: bool = False) -> list[in
     return hit
 
 
-def frozen_marks(block: dict) -> Counter:
+def frozen_marks(block: Block) -> Counter[FrozenKey]:
     """What a block holds that a plain paragraph cannot say, by what identifies it.
     Pictures are left out: they are matched by name, not counted (`image_names`)."""
-    out: Counter = Counter()
+    out: Counter[FrozenKey] = Counter()
     if block.get("kind") == "toc":
         out[("toc", "")] += 1
     for run in runs_of(block):
@@ -427,13 +452,13 @@ def frozen_marks(block: dict) -> Counter:
     return out
 
 
-def frozen_runs(part: dict | None) -> dict:
+def frozen_runs(part: Ir | None) -> dict[FrozenKey, Run]:
     """One representative run per frozen mark, so `doc_merge.writable` can be asked
     whether a request could ever put it back."""
-    out = {}
-    for block in (part or {}).get("blocks", []):
+    out: dict[FrozenKey, Run] = {}
+    for block in blocks_of(part):
         if block.get("kind") == "toc":
-            out.setdefault(("toc", ""), {"chip": "toc", "frozen": True})
+            out.setdefault(("toc", ""), {"text": "", "chip": "toc", "frozen": True})
         for run in runs_of(block):
             if run.get("frozen"):
                 out.setdefault(frozen_key(run), run)
@@ -469,7 +494,7 @@ def _core_span(word: str) -> tuple[int, int]:
     return (start, end) if start < end else (0, len(word))
 
 
-def _under_words(block: dict):
+def _under_words(block: Block) -> Iterator[tuple[str, list[Run]]]:
     r"""Each word of a block with the runs under its characters.
 
     A word is what a reader sees, so it is read off the block's whole text and not
@@ -492,10 +517,11 @@ def _under_words(block: dict):
             yield match.group()[start:end], runs
 
 
-def _chars_under(block: dict) -> tuple[str, list]:
+def _chars_under(block: Block) -> tuple[str, list[Run | None]]:
     """A block's text and, per character, the run it came from (None where frozen)."""
+    text = ""
+    under: list[Run | None] = []
     if block.get("kind") == "table":
-        text, under = "", []
         for row in block.get("rows", []):
             for cell in row:
                 for inner in cell:
@@ -504,7 +530,6 @@ def _chars_under(block: dict) -> tuple[str, list]:
                         text, under = text + " ", under + [None]
                     text, under = text + body, under + fields
         return text, under
-    text, under = "", []
     for run in block.get("runs", []):
         body = run.get("text", "")
         if run.get("frozen"):
@@ -514,14 +539,23 @@ def _chars_under(block: dict) -> tuple[str, list]:
     return text, under
 
 
-def _wears(block: dict, theme: dict | None) -> set:
+def _wears(block: Block, theme: Theme | None) -> set[str]:
     """The marks this block's named style puts on, which is what its runs inherit."""
     if not block.get("kind") or block.get("kind") == "table":
         return set()
-    return MARK_KEYS & set((theme or {}).get(doc_merge.named_style(block), ()))
+    sets = theme.get(doc_merge.named_style(block)) if theme else None
+    return MARK_KEYS & set(sets or ())
 
 
-def marks_on(block: dict, theme: dict | None = None) -> Counter:
+def _worn(run: Run, wears: Set[str]) -> set[str]:
+    """The marks one run puts on its words: its own, and the inherited ones it does not
+    say False to."""
+    said: Mapping[str, object] = run
+    return {k for k in set(said) | wears
+            if k not in ("text", "width") and (said[k] if k in said else True)}
+
+
+def marks_on(block: Block, theme: Theme | None = None) -> Counter[tuple[str, str]]:
     """What each of a block's words *wears*, by (mark, word): the marks chosen for it
     and the ones its named style puts on, less the ones a run says False to.
 
@@ -546,18 +580,15 @@ def marks_on(block: dict, theme: dict | None = None) -> Counter:
     losing that (themed seed 283).
     """
     wears = _wears(block, theme)
-    out: Counter = Counter()
+    out: Counter[tuple[str, str]] = Counter()
     for word, under in _under_words(block):
-        marks = set.intersection(*({k for k in set(run) | wears
-                                    if k not in ("text", "width")
-                                    and (run[k] if k in run else True)}
-                                   for run in under))
-        for mark in marks:
+        worn = [_worn(run, wears) for run in under]
+        for mark in worn[0].intersection(*worn[1:]):
             out[(mark, word)] += 1
     return out
 
 
-def unmarked_of(block: dict, theme: dict | None = None) -> Counter:
+def unmarked_of(block: Block, theme: Theme | None = None) -> Counter[tuple[str, str]]:
     """The marks a reader deliberately took *off* a word, by (mark, word).
 
     Only an explicit False counts, and only against a named style that puts the mark
@@ -566,15 +597,20 @@ def unmarked_of(block: dict, theme: dict | None = None) -> Counter:
     heading — which a move in the document can do — lost the mark and chose nothing.
     """
     wears = _wears(block, theme)
-    out: Counter = Counter()
+    out: Counter[tuple[str, str]] = Counter()
     for word, under in _under_words(block):
-        for mark in set.intersection(*({key for key in wears if run.get(key) is False}
-                                       for run in under)):
+        off = [{key for key in wears if said.get(key) is False}
+               for said in (_as_mapping(run) for run in under)]
+        for mark in off[0].intersection(*off[1:]):
             out[(mark, word)] += 1
     return out
 
 
-def cells_of(block: dict) -> dict:
+def _as_mapping(run: Run) -> Mapping[str, object]:
+    return run
+
+
+def cells_of(block: Block) -> dict[tuple[int, int], str]:
     return {(r, c): " ".join(text_of(b) for b in cell)
             for r, row in enumerate(block.get("rows", []))
             for c, cell in enumerate(row)}
@@ -582,7 +618,7 @@ def cells_of(block: dict) -> dict:
 
 # ---------------------------------------------------------------- the report
 
-def accounted(report: dict) -> str:
+def accounted(report: SyncReport | None) -> str:
     """What the report says *about the reader's work*, as one haystack to look a key
     up in: the conflicts and the notes.
 
@@ -592,20 +628,22 @@ def accounted(report: dict) -> str:
     merged — if the reader's sentence came out of that merge missing, that is exactly
     the bug, and the report has not named it.
     """
-    info = report or {}
-    lines = [json.dumps(c, ensure_ascii=False) for c in info.get("conflicts", [])]
-    lines += [str(x) for x in info.get("notes", [])]
+    if not report:
+        return ""
+    lines = [json.dumps(c, ensure_ascii=False) for c in report.get("conflicts", [])]
+    lines += report.get("notes", [])
     return "\n".join(lines)
 
 
-def _named(said: str, *what) -> bool:
+def _named(said: str, *what: object) -> bool:
     return any(str(x) and str(x) in said for x in what)
 
 
 # ---------------------------------------------------------------- the checks
 
-def check(base: dict, before: dict, after: dict, report: dict,
-          ours: dict | None = None, allow=(), theme: dict | None = None) -> list[dict]:
+def check(base: Ir | None, before: Ir, after: Ir, report: SyncReport | None,
+          ours: Ir | None = None, allow: Collection[str] = (),
+          theme: Theme | None = None) -> list[dict]:
     """Judge one sync. `before` is the document as the reader left it, `after` the
     settled read, `base` what both sides last agreed on, `ours` the file that was
     synced. `allow` names kinds to keep out of the verdict.
@@ -641,7 +679,7 @@ def check(base: dict, before: dict, after: dict, report: dict,
     return [f for f in out if f["kind"] not in allow]
 
 
-def _fresh_asks(ours: dict | None) -> Counter:
+def _fresh_asks(ours: Ir | None) -> Counter[str | None]:
     """How many tabs of each title the *source* is asking for outright.
 
     A `<section>` with no `data-tab` is a tab the file wants and the document has
@@ -653,8 +691,9 @@ def _fresh_asks(ours: dict | None) -> Counter:
                    if not part.get("tab")) if ours else Counter()
 
 
-def _resurrection_findings(was: dict, now: dict, then: dict, file_tabs: dict,
-                           said: str, ours: dict | None = None) -> list[dict]:
+def _resurrection_findings(was: Mapping[str | None, Ir], now: Mapping[str | None, Ir],
+                           then: Mapping[str | None, Ir], file_tabs: Mapping[str | None, Ir],
+                           said: str, ours: Ir | None) -> list[dict]:
     """A tab the reader deleted that the sync put back.
 
     Nothing of the reader's *disappears* here, so every other question in this file
@@ -671,7 +710,8 @@ def _resurrection_findings(was: dict, now: dict, then: dict, file_tabs: dict,
     for one of the new tabs before any of them is called a resurrection (`_fresh_asks`;
     chain-8 seed 65370, two `add_tab`s drawing the same name).
     """
-    asked, out = _fresh_asks(ours), []
+    asked = _fresh_asks(ours)
+    out: list[dict] = []
     for tab, old in was.items():
         if tab is None or tab in now or tab not in file_tabs:
             continue
@@ -691,13 +731,16 @@ def _resurrection_findings(was: dict, now: dict, then: dict, file_tabs: dict,
     return out
 
 
-def _tab_name(part: dict | None, tab) -> str:
+def _tab_name(part: Ir | None, tab: str | None) -> str:
     """What a tab calls itself. The first tab's `title` is the *document's* name, so
     its own is `tab_title` (`doc_ir.TAB_META`)."""
-    return ((part or {}).get("title") if tab else (part or {}).get("tab_title")) or ""
+    if not part:
+        return ""
+    return (part.get("title") if tab else part.get("tab_title")) or ""
 
 
-def _title_findings(was: dict | None, now: dict, then: dict, said: str, tab) -> list[dict]:
+def _title_findings(was: Ir | None, now: Ir, then: Ir, said: str,
+                    tab: str | None) -> list[dict]:
     """A tab the reader renamed and the sync renamed back.
 
     Only the reader's own rename is theirs to lose: a source rename over a title the
@@ -714,8 +757,8 @@ def _title_findings(was: dict | None, now: dict, then: dict, said: str, tab) -> 
                     f"report does not say why", tab=tab)]
 
 
-def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
-                  tab, mine: dict | None, theme: dict | None = None) -> list[dict]:
+def _tab_findings(was: Ir | None, now: Ir, then: Ir | None, said: str,
+                  tab: str | None, mine: Ir | None, theme: Theme | None) -> list[dict]:
     out: list[dict] = []
     if was:
         # A table the reader beheaded is not a table the reader *made*. Deleting a
@@ -730,14 +773,14 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
     live = keyed(now)
     after_text = part_text(then)
     after_words = words(after_text)
-    after_frozen: Counter = Counter()
-    for block in (then or {}).get("blocks", []):
+    after_frozen: Counter[FrozenKey] = Counter()
+    for block in blocks_of(then):
         after_frozen += frozen_marks(block)
-    after_styles: Counter = Counter()
-    for block in (then or {}).get("blocks", []):
+    after_styles: Counter[tuple[str, str]] = Counter()
+    for block in blocks_of(then):
         after_styles += marks_on(block)
-    source_keys = {b["key"] for b in (mine or {}).get("blocks", []) if b.get("key")}
-    file_blocks = keyed(mine) if mine else {}
+    source_keys = {key for b in blocks_of(mine) if (key := b.get("key"))}
+    file_blocks = keyed(mine)
 
     for key, block in live.items():
         theirs_text = text_of(block)
@@ -777,8 +820,7 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
                                after_words, said, tab, theme, file_blocks.get(key),
                                dropped=mine is not None and not touched
                                and key in old and key not in source_keys)
-        out += _inherited_findings(key, block, new[key], (mine or {}), said, tab, theme,
-                                   now)
+        out += _inherited_findings(key, block, new[key], mine, said, tab, theme, now)
         out += _shape_findings(key, block, base_block, new[key], said, tab,
                                behind_dropped=_behind(was, key) is not None
                                and _behind(was, key) not in source_keys)
@@ -828,13 +870,13 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
                            f"the reader added, {text[:60]!r}, is not in the "
                            f"document any more", tab=tab))
 
-    before_frozen: Counter = Counter()
+    before_frozen: Counter[FrozenKey] = Counter()
     for block in now.get("blocks", []):
         if _source_dropped(block, was, mine):
             continue
         before_frozen += frozen_marks(block) - _dropped_cells(block, was, mine)
-    mine_frozen: Counter = Counter()
-    for block in (mine or {}).get("blocks", []):
+    mine_frozen: Counter[FrozenKey] = Counter()
+    for block in blocks_of(mine):
         mine_frozen += frozen_marks(block)
     runs = frozen_runs(now)
     for mark, count in before_frozen.items():
@@ -844,7 +886,8 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
         # only goes when the report says it did. By *count*, because the same email or
         # the same file may stand in two places and the source may drop one of them
         # (chain-4 seed 309: two `grace@example.com` chips, one block dropped).
-        remakeable = doc_merge.writable(runs.get(mark, {"chip": kind, "frozen": True}))
+        remakeable = doc_merge.writable(
+            runs.get(mark, {"text": "", "chip": kind, "frozen": True}))
         want = min(count, mine_frozen.get(mark, 0)) if remakeable and mine is not None \
             else count
         if after_frozen.get(mark, 0) >= want or _named(said, value, kind):
@@ -859,7 +902,8 @@ def _tab_findings(was: dict | None, now: dict, then: dict | None, said: str,
     return out
 
 
-def _twin_already(now_part: dict, block: dict, after_block: dict, field, value) -> bool:
+def _twin_already(now_part: Ir | None, block: Block, after_block: Block, field: str,
+                  value: object) -> bool:
     """Whether the block this key names *after* the sync is another one that already
     stood in the document saying these words with this field set this way.
 
@@ -873,12 +917,13 @@ def _twin_already(now_part: dict, block: dict, after_block: dict, field, value) 
     """
     words = text_of(after_block)
     return any(other is not block and text_of(other) == words
-               and other.get(field) == value
-               for other in (now_part or {}).get("blocks", []))
+               and field_of(other, field) == value
+               for other in blocks_of(now_part))
 
 
-def _inherited_findings(key, block, after_block, mine: dict, said: str, tab,
-                        theme: dict | None, now_part: dict | None = None) -> list[dict]:
+def _inherited_findings(key: str, block: Block, after_block: Block, mine: Ir | None,
+                        said: str, tab: str | None, theme: Theme | None,
+                        now_part: Ir | None) -> list[dict]:
     """A paragraph that wore the document's named style and stopped.
 
     A document's look lives in its named styles, and a paragraph that sets nothing of
@@ -900,14 +945,15 @@ def _inherited_findings(key, block, after_block, mine: dict, said: str, tab,
     deleted in front of it: that is the document's doing, not ours.
     """
     named = doc_merge.named_style(block) if block.get("kind") != "table" else None
-    fields = (theme or {}).get(named) or ()
+    fields = (theme.get(named) if theme and named is not None else None) or ()
     if not fields:
         return []
-    mine_block = next((b for b in mine.get("blocks", []) if b.get("key") == key), None)
-    out = []
+    mine_block = next((b for b in blocks_of(mine) if b.get("key") == key), None)
+    out: list[dict] = []
     for field in fields:
-        now, then = block.get(field), after_block.get(field)
-        if then is None or then == now or (mine_block or {}).get(field) == then:
+        now, then = field_of(block, field), field_of(after_block, field)
+        if then is None or then == now \
+                or (field_of(mine_block, field) if mine_block else None) == then:
             continue
         if _twin_already(now_part, block, after_block, field, then):
             continue
@@ -926,9 +972,9 @@ def _inherited_findings(key, block, after_block, mine: dict, said: str, tab,
 SHAPE_FIELDS = tuple(k for k in doc_merge.SHAPE_KEYS if k != "ordered")
 
 
-def _behind(was: dict | None, key) -> str | None:
+def _behind(was: Ir | None, key: str) -> str | None:
     """The key of the block standing in front of this one in the base."""
-    blocks = (was or {}).get("blocks", [])
+    blocks = blocks_of(was)
     for at, block in enumerate(blocks):
         if block.get("key") == key:
             return blocks[at - 1].get("key") if at else None
@@ -968,7 +1014,7 @@ def _shape_findings(key, block, base_block, after_block, said, tab,
     return []
 
 
-def _source_dropped(block: dict, was: dict | None, mine: dict | None) -> bool:
+def _source_dropped(block: Block, was: Ir | None, mine: Ir | None) -> bool:
     """Whether this block is one the source dropped and the reader left alone, so
     that what it holds goes with it.
 
@@ -991,19 +1037,19 @@ def _source_dropped(block: dict, was: dict | None, mine: dict | None) -> bool:
         and text_of(base_block) == text_of(block)
 
 
-def _cell_says(cell: list[dict]) -> tuple:
+def _cell_says(cell: list[Block]) -> CellSays:
     """What one cell is, for counting: its words and the frozen runs in it."""
-    marks: Counter = Counter()
+    marks: Counter[FrozenKey] = Counter()
     for block in cell:
         marks += frozen_marks(block)
     return (" ".join(text_of(b) for b in cell), tuple(sorted(marks.items())))
 
 
-def _table_cells(block: dict) -> Counter:
+def _table_cells(block: Block) -> Counter[CellSays]:
     return Counter(_cell_says(cell) for row in block.get("rows", []) for cell in row)
 
 
-def _dropped_cells(block: dict, was: dict | None, mine: dict | None) -> Counter:
+def _dropped_cells(block: Block, was: Ir | None, mine: Ir | None) -> Counter[FrozenKey]:
     """What a table's cells hold that the source took out of the file with them.
 
     `_source_dropped` is about a block, and a cell is not one: a table keeps its key
@@ -1021,12 +1067,12 @@ def _dropped_cells(block: dict, was: dict | None, mine: dict | None) -> Counter:
     unlike the base's, so it is nobody's to drop, which is the sync's own rule for the
     line it stands in (`doc_merge._same_set`). By count, as everything about chips is.
     """
-    if block.get("kind") != "table" or mine is None or not block.get("key"):
+    if block.get("kind") != "table" or mine is None or not (key := block.get("key")):
         return Counter()
-    there, base = (keyed(side).get(block["key"]) for side in (mine, was))
+    there, base = keyed(mine).get(key), keyed(was).get(key)
     if there is None or base is None:
         return Counter()
-    out: Counter = Counter()
+    out: Counter[FrozenKey] = Counter()
     gone = (_table_cells(block) & _table_cells(base)) - _table_cells(there)
     for (_, marks), count in gone.items():
         for mark, n in marks:
@@ -1034,8 +1080,8 @@ def _dropped_cells(block: dict, was: dict | None, mine: dict | None) -> Counter:
     return out
 
 
-def _picture_findings(now: dict, mine: dict | None, then: dict | None,
-                      said: str, tab) -> list[dict]:
+def _picture_findings(now: Ir, mine: Ir | None, then: Ir | None,
+                      said: str, tab: str | None) -> list[dict]:
     """The pictures the document held and does not hold any more.
 
     Paired by name (`pair_images`), because a picture may keep its object id or keep
@@ -1060,11 +1106,11 @@ def _picture_findings(now: dict, mine: dict | None, then: dict | None,
     """
     out: list[dict] = []
     held = images_of(now)
-    hits = pair_images(held, images_of(then))
+    hits = pair_images(held, images_of(then), False)
     telling = telling_names(held)
     left = [i for i in range(len(held)) if hits[i] is None]
     if mine is not None:
-        asked = pair_images(held, images_of(mine), ids=True)
+        asked = pair_images(held, images_of(mine), True)
         left = left[:max(0, len(left) - sum(1 for at in asked if at is None))]
     for i in left:
         run = held[i]
@@ -1077,7 +1123,7 @@ def _picture_findings(now: dict, mine: dict | None, then: dict | None,
     return out
 
 
-def _stands(key, block, mine: dict | None, then: dict | None) -> bool:
+def _stands(key: str, block: Block, mine: Ir | None, then: Ir | None) -> bool:
     """Whether the block whose key is gone is still there, whole, under another key.
 
     A key lost is a key lost, and nothing else; a paragraph whose words the sync
@@ -1087,11 +1133,11 @@ def _stands(key, block, mine: dict | None, then: dict | None) -> bool:
     to write the source's version of that block.
     """
     wanted = [words(text_of(block))]
-    for other in (mine or {}).get("blocks", []):
+    for other in blocks_of(mine):
         if other.get("key") == key:
             wanted.append(words(text_of(other)))
     return any(w and not (w - words(text_of(after)))
-               for after in (then or {}).get("blocks", []) for w in wanted)
+               for after in blocks_of(then) for w in wanted)
 
 
 def _words_findings(key, block, base_block, after_block, after_words, said, tab,
@@ -1203,7 +1249,8 @@ def _style_findings(key, block, base_block, after_styles, after_block, after_wor
     # Counted against the *file*, because that says whose doing it was: an occurrence
     # the source has just added is the mirror case and must still be no excuse
     # (themed seed 40254).
-    here, asks = _cored(words(text_of(block))), _cored(words(text_of(file_block or {})))
+    here = _cored(words(text_of(block)))
+    asks = _cored(words(text_of(file_block))) if file_block else Counter()
     back = Counter()
     for (mark, word), times in (undone & marks_on(after_block, theme)).items():
         reworded = max(0, here[word] - asks[word]) if file_block else 0
@@ -1264,18 +1311,18 @@ def _cell_findings(key, block, base_block, after_block, after_words, said, tab,
     return out
 
 
-def _row_texts(block: dict | None) -> list[str]:
+def _row_texts(block: Block | None) -> list[str]:
     """One string per row, its cells joined: what a row *says*, which is the only
     handle on a row there is (a row carries no key of its own)."""
     return [" | ".join(text_of(inner) for cell in row for inner in cell).strip()
-            for row in (block or {}).get("rows", [])]
+            for row in (block.get("rows", []) if block else [])]
 
 
-def _row_cells(row: list) -> Counter:
+def _row_cells(row: list[list[Block]]) -> Counter[str]:
     return Counter(" ".join(text_of(inner) for inner in cell).strip() for cell in row)
 
 
-def _rows_still_shown(base_block: dict, block: dict) -> Counter:
+def _rows_still_shown(base_block: Block, block: Block) -> Counter[str]:
     """The base's rows the document still shows, a column the reader deleted not
     counting against them.
 
@@ -1293,7 +1340,7 @@ def _rows_still_shown(base_block: dict, block: dict) -> Counter:
     """
     live = [_row_cells(row) for row in block.get("rows", [])]
     texts = _row_texts(base_block)
-    out: Counter = Counter()
+    out: Counter[str] = Counter()
     for text, row in zip(texts, base_block.get("rows", [])):
         cells = _row_cells(row)
         for i, there in enumerate(live):

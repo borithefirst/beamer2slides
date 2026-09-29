@@ -183,7 +183,7 @@ def report(label: str, calls: Calls, seconds: float, extra: dict | None = None) 
 
 # ---------------------------------------------------------------- the commands
 
-def prepare(folder: Path, blocks: int, fresh: bool) -> dict:
+def prepare(folder: Path, blocks: int, fresh: bool) -> dict[str, str]:
     """The document this bench measures against, made once and reused."""
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / PAPER
@@ -197,7 +197,7 @@ def prepare(folder: Path, blocks: int, fresh: bool) -> dict:
     with profile() as calls:
         info = doc_sync.push(path)
     report("push", calls, time.perf_counter() - start, {"blocks": info["blocks"]})
-    return info
+    return {"document": info["document"], "file": str(path)}
 
 
 def one_sync(path: Path, round_no: int) -> dict:

@@ -26,6 +26,7 @@ change here.
 from __future__ import annotations
 
 import base64
+import copy
 import hashlib
 import io
 import json
@@ -35,13 +36,26 @@ import random
 import re
 import subprocess
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar
 
 from . import doc_ir, doc_merge, google_auth
+from .doc_ir import U16, Block, Ir, Run
 from .gapi import HttpError, is_transient, media_upload, status_of
 from .google_auth import (credentials, credentials_for_threads, docs_service, drive_service,
                           shared_service)
+from .google_types import (DocsBatchUpdateBody, DocsBatchUpdateResponse, DocsRequest,
+                           DocsService, DocsTabProperties, Document, DriveFile, DriveService, FileBody,
+                           Request)
+from .json_types import Json, JsonObject, JsonShapeError, as_object, as_str
+from .typing_compat import assert_never
+
+if TYPE_CHECKING:
+    from typing_extensions import Required
+
+_T = TypeVar("_T")
 
 DOC_MIME = "application/vnd.google-apps.document"
 JSON_MIME = "application/json"
@@ -57,8 +71,68 @@ BASE_FID = "base_fid"
 # Above this many requests one `batchUpdate` is cut into several (`send`).
 CHUNK = 500
 
+# Where a sync's base came from (`load_base`).
+Where = Literal["drive", "local", "none"]
 
-def _read(request, tries: int = 4):
+
+class StoredBase(Ir, total=False):
+    """A base as it is stored, in Drive and beside the file: the document's IR as the
+    last settle read it, and the two things only the store says - how many syncs it
+    has seen (`store_base`) and, in the cache alone, where Drive keeps it (`BASE_FID`)."""
+    generation: int
+    base_fid: str
+
+
+class Written(TypedDict):
+    """One tab, planned and written (`_sync_part`), or only planned (a dry run)."""
+    stamp: str | None               # the tab's id; None for the first tab, "new" for one to add
+    label: str | None               # its title in the report; None for the first tab
+    result: doc_merge.Plan
+    shaped: list[doc_merge.Told]    # what the structural batches did
+    attempts: int                   # how often it was planned again after a refused write
+
+
+class TabConflict(doc_merge.Conflict, total=False):
+    tab: str                        # the tab it is on, past the first
+
+
+class SyncReport(TypedDict, total=False):
+    """What `sync` did, the JSON of `.b2s/<stem>.sync-report.json` (`write_report`) and
+    what `agent/doc_tools.py` reads."""
+    document: Required[str]
+    url: Required[str]
+    dry_run: Required[bool]
+    requests: Required[int]
+    conflicts: Required[list[TabConflict]]
+    notes: Required[list[str]]
+    applied: Required[list[str]]
+    kept: Required[list[str]]
+    comments: Required[list[str]]
+    removed: Required[list[str]]
+    replanned: int
+    plan: list[DocsRequest]         # a dry run's requests, as they would be sent
+    base: Where
+    backup: str
+    blocks: int
+    report: str
+
+
+class PushReport(TypedDict):
+    """What `push` made."""
+    document: str
+    url: str
+    blocks: int
+    anchored: int
+    tabs: int
+    notes: list[str]
+
+
+class AdoptReport(PushReport):
+    """What `adopt` wrote."""
+    file: str
+
+
+def _read(request: Request[_T], tries: int = 4) -> _T:
     """One read, made again through a transient failure.
 
     A read can be made twice for the price of a round trip and nothing else, so every
@@ -82,6 +156,7 @@ def _read(request, tries: int = 4):
             if attempt == tries - 1:
                 raise
         time.sleep(min(8.0, 2 ** attempt) + random.random())
+    raise ValueError(f"a read given {tries} tries is never made")
 
 
 # ---------------------------------------------------------------- state: Drive first
@@ -104,36 +179,64 @@ def base_path(path: Path) -> Path:
     return state_dir(path) / f"{path.stem}.base.json"
 
 
-def base_problem(data, document: str | None) -> str | None:
+def base_problem(data: Json, document: str | None) -> str | None:
     """Why `data` cannot be used as the base of `document` (None: it can)."""
+    parsed = parse_base(data, document)
+    return parsed if isinstance(parsed, str) else None
+
+
+def parse_base(data: Json, document: str | None) -> StoredBase | str:
+    """A base as JSON gave it, parsed (`doc_ir.parse_ir`), or why it is no base of
+    `document` (any document's, when that is None): not an object, no blocks, another
+    document's, or a value of another shape than its key holds."""
     if not isinstance(data, dict):
         return "not a JSON object"
     if not isinstance(data.get("blocks"), list):
         return "no blocks"
     if document and data.get("document") != document:
         return f"it belongs to document {data.get('document')}"
-    return None
+    try:
+        base: StoredBase = {"blocks": doc_ir.parse_blocks(data.get("blocks"), "the base.blocks")}
+        doc_ir.read_ir_fields(base, data, "the base")
+        if (generation := data.get("generation")) is not None:
+            base["generation"] = _whole(generation, "the base.generation")
+        if isinstance(fid := data.get(BASE_FID), str):
+            base["base_fid"] = fid
+    except JsonShapeError as err:
+        return str(err)
+    return base
 
 
-def read_local(path: Path, document: str | None) -> tuple[dict | None, str | None]:
+def _whole(value: Json, where: str) -> int:
+    """A count as JSON wrote it: `int()` took a float or a numeral here before bases
+    were parsed, and a base written that way is still somebody's base."""
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise JsonShapeError(f"{where}: a count was expected, found {value!r}")
+    try:
+        return int(value)
+    except ValueError as err:
+        raise JsonShapeError(f"{where}: a count was expected, found {value!r}") from err
+
+
+def read_local(path: Path, document: str | None) -> tuple[StoredBase | None, str | None]:
     """(the cached base, why not): a missing, truncated or foreign file is no base."""
     file = base_path(path)
     if not file.exists():
         return None, None
     try:
-        data = json.loads(file.read_text(encoding="utf-8"))
+        data: Json = json.loads(file.read_text(encoding="utf-8"))
     except (OSError, ValueError) as err:
         return None, f"{file} could not be read ({type(err).__name__}: {err})"
-    problem = base_problem(data, document)
-    return (None, f"{file}: {problem}") if problem else (data, None)
+    parsed = parse_base(data, document)
+    return (None, f"{file}: {parsed}") if isinstance(parsed, str) else (parsed, None)
 
 
-def load_local(path: Path, document: str) -> dict | None:
+def load_local(path: Path, document: str) -> StoredBase | None:
     """The cache alone, with no Drive call. `load_base` is what a sync uses."""
     return read_local(path, document)[0]
 
 
-def save_base(path: Path, base: dict) -> Path:
+def save_base(path: Path, base: Mapping[str, object]) -> Path:
     """Written to a temporary file and moved into place: a run killed here leaves the
     previous base, never half of one (half a base is no base at all)."""
     file = base_path(path)
@@ -146,17 +249,22 @@ def save_base(path: Path, base: dict) -> Path:
     return file
 
 
-def base_file_id(drive, document: str) -> str | None:
+def base_file_id(drive: DriveService, document: str) -> str | None:
     """The id of the document's base file in Drive, off its own appProperties."""
     try:
         info = _read(drive.files().get(fileId=document, fields="appProperties"))
     except HttpError:
         return None
-    return (info.get("appProperties") or {}).get(BASE_PROPERTY)
+    return _base_property(info)
 
 
-def load_drive(drive, document: str, found: dict | None = None,
-               hint: str | None = None) -> dict | None:
+def _base_property(info: DriveFile) -> str | None:
+    """`appProperties.b2sBase` of a `files.get` answer, where it says one."""
+    return info.get("appProperties", {}).get(BASE_PROPERTY) or None
+
+
+def load_drive(drive: DriveService, document: str, found: dict[str, str] | None = None,
+               hint: str | None = None) -> StoredBase | None:
     """The base Drive holds for this document, or None (no base, or unreadable).
 
     `found` is filled with the base file's id where there is one: the document's
@@ -172,12 +280,20 @@ def load_drive(drive, document: str, found: dict | None = None,
     that does not answer, or answers with another document's base, is no worse than
     none: the lookup happens after all.
     """
+    parsed = _load_drive(drive, document, found, hint)
+    return None if parsed is None or isinstance(parsed, str) else parsed
+
+
+def _load_drive(drive: DriveService, document: str, found: dict[str, str] | None,
+                hint: str | None) -> StoredBase | str | None:
+    """`load_drive`, and why a base Drive holds is none (a file that is not JSON is no
+    base at all, as before: None)."""
     if hint:
-        found_it = _read_base_file(drive, hint)
-        if found_it is not None and base_problem(found_it, document) is None:
+        said = _read_base_file(drive, hint)
+        if said is not None and not isinstance(checked := parse_base(said, document), str):
             if found is not None:
                 found["fid"] = hint
-            return found_it
+            return checked
     try:
         fid = base_file_id(drive, document)
     except HttpError:
@@ -185,22 +301,26 @@ def load_drive(drive, document: str, found: dict | None = None,
     if not fid:
         return None
     data = _read_base_file(drive, fid)
-    if data is not None and found is not None:
+    if data is None:
+        return None
+    if found is not None:
         found["fid"] = fid
-    return data
+    # Any document's here: whose it is, `load_base` says out loud.
+    return parse_base(data, None)
 
 
-def _read_base_file(drive, fid: str) -> dict | None:
+def _read_base_file(drive: DriveService, fid: str) -> Json | None:
     """The JSON one Drive file holds, or None where it cannot be read as JSON at all."""
     try:
         data = _read(drive.files().get_media(fileId=fid))
-        return json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
+        said: Json = json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
+        return said
     except (HttpError, ValueError, OSError):
         return None
 
 
-def save_drive(drive, document: str, base: dict, title: str | None = None,
-               known_fid: str | None = None) -> str:
+def save_drive(drive: DriveService, document: str, base: Mapping[str, object],
+               title: str | None = None, known_fid: str | None = None) -> str:
     """The base as a JSON file in the document's own folder, its id in the
     document's `appProperties.b2sBase`. Returns the file id.
 
@@ -222,7 +342,7 @@ def save_drive(drive, document: str, base: dict, title: str | None = None,
         except HttpError:
             pass  # deleted, or somebody else's now: ask the document below
     info = _read(drive.files().get(fileId=document, fields="name,parents,appProperties"))
-    fid = (info.get("appProperties") or {}).get(BASE_PROPERTY)
+    fid = _base_property(info)
     if fid:
         try:
             drive.files().update(fileId=fid, fields="id", media_body=media_upload(
@@ -230,18 +350,24 @@ def save_drive(drive, document: str, base: dict, title: str | None = None,
         except HttpError:
             fid = None  # deleted, or somebody else's now: a new one is made below
     if not fid:
-        body = {"name": f"{title or info.get('name', document)} - beamer2slides docs base.json",
-                "mimeType": JSON_MIME, "appProperties": {"b2sBaseOf": document}}
+        name = info.get("name")
+        body: FileBody = {"name": f"{title or (name if isinstance(name, str) else document)}"
+                                  f" - beamer2slides docs base.json",
+                          "mimeType": JSON_MIME, "appProperties": {"b2sBaseOf": document}}
+        parents = info.get("parents")
         from .drive_folder import place
-        place(body, drive, info.get("parents"))
-        fid = drive.files().create(body=body, fields="id", media_body=media_upload(
-            io.BytesIO(data), JSON_MIME)).execute()["id"]
+        place(body, drive, [p for p in parents if isinstance(p, str)]
+              if isinstance(parents, list) else None)
+        from .google_types import file_id
+        fid = file_id(drive.files().create(body=body, fields="id", media_body=media_upload(
+            io.BytesIO(data), JSON_MIME)).execute(), "the base file")
         drive.files().update(fileId=document, fields="id",
                              body={"appProperties": {BASE_PROPERTY: fid}}).execute()
     return fid
 
 
-def rename_document(drive, document: str, name: str, problems: list[str]) -> str | None:
+def rename_document(drive: DriveService, document: str, name: str,
+                    problems: list[str]) -> str | None:
     """Rename the document, which is a Drive call and not a request.
 
     A Google Doc's title is its name in Drive: `documents.get` reports it and no
@@ -259,7 +385,7 @@ def rename_document(drive, document: str, name: str, problems: list[str]) -> str
         return None
 
 
-def stale_base_warning(where: str, drive, document: str) -> str | None:
+def stale_base_warning(where: Where, drive: DriveService | None, document: str) -> str | None:
     """The document names a base in Drive that we cannot read (deleted, or owned by
     somebody else) while we sync against the copy beside the file: another checkout
     may have synced this document since, so the copy can be older than the document.
@@ -280,9 +406,9 @@ def stale_base_warning(where: str, drive, document: str) -> str | None:
     return None
 
 
-def load_base(path: Path, document: str, drive=None,
+def load_base(path: Path, document: str, drive: DriveService | None = None,
               problems: list[str] | None = None,
-              found: dict | None = None) -> tuple[dict | None, str]:
+              found: dict[str, str] | None = None) -> tuple[StoredBase | None, Where]:
     """(the base, where it came from: `drive`, `local` or `none`).
 
     Drive is authoritative and the copy beside the file is a cache — except when
@@ -300,15 +426,19 @@ def load_base(path: Path, document: str, drive=None,
     if why:
         problems.append(f"the base beside the file was ignored: {why}")
     # The cache is read first for its `base_fid` alone, which saves Drive's own lookup.
-    remote = (load_drive(drive, document, found, (local or {}).get(BASE_FID))
-              if drive is not None else None)
-    if remote is not None:
-        problem = base_problem(remote, document)
-        if problem:
-            problems.append(f"the base stored in Drive was ignored: {problem}")
-            remote = None
+    said = (_load_drive(drive, document, found, local.get("base_fid") if local is not None else None)
+            if drive is not None else None)
+    remote: StoredBase | None = None
+    if isinstance(said, str):
+        problems.append(f"the base stored in Drive was ignored: {said}")
+    elif said is not None:
+        if document and said.get("document") != document:
+            problems.append(f"the base stored in Drive was ignored: "
+                            f"it belongs to document {said.get('document')}")
+        else:
+            remote = said
     if remote is not None and local is not None:
-        here, there = int(local.get("generation", 0)), int(remote.get("generation", 0))
+        here, there = local.get("generation", 0), remote.get("generation", 0)
         if here > there:
             problems.append(f"the base in Drive is older than the copy beside the file "
                             f"(generation {there} vs {here}): syncing from the copy and "
@@ -330,8 +460,9 @@ def load_base(path: Path, document: str, drive=None,
     return None, "none"
 
 
-def store_base(path: Path, base: dict, drive=None, document: str | None = None,
-               previous: int = 0, base_fid: str | None = None) -> str | None:
+def store_base(path: Path, base: Ir, drive: DriveService | None = None,
+               document: str | None = None, previous: int = 0,
+               base_fid: str | None = None) -> str | None:
     """Store the base where the next sync will look for it: beside the file first
     (atomically), then in Drive, which is where it is looked for first.
 
@@ -340,19 +471,19 @@ def store_base(path: Path, base: dict, drive=None, document: str | None = None,
     that the base came from it.
     """
     cached, _ = read_local(path, None)
-    stamped = dict(base)
+    stamped: dict[str, object] = dict(base)
     # The count only has to rise, and it is what tells a cache another checkout has
     # overtaken from one whose Drive write failed. The cache beside the file counts
     # too: an `--assume-base` run has no base to take the number from.
-    stamped["generation"] = max(previous, int((cached or {}).get("generation", 0))) + 1
+    stamped["generation"] = max(previous, cached.get("generation", 0) if cached is not None else 0) + 1
     stamped.pop(BASE_FID, None)   # what goes to Drive is the base and nothing of ours
     # The cache keeps what it believed, or the sync would drop the hint it was just given
     # and the run after this one would have to look the base up again.
-    known = base_fid or (cached or {}).get(BASE_FID)
+    known = base_fid or (cached.get("base_fid") if cached is not None else None)
     save_base(path, stamped | ({BASE_FID: known} if known else {}))
     if drive is None:
         return "no Drive service"
-    document = document or stamped.get("document")
+    document = document or base.get("document")
     if not document:
         return "the base does not say which document it belongs to"
     try:
@@ -367,15 +498,17 @@ def store_base(path: Path, base: dict, drive=None, document: str | None = None,
     return None
 
 
-def _without(value, key: str):
-    """`value` with `key` taken out of every dict in it, however deep."""
-    if isinstance(value, dict):
-        return {k: _without(v, key) for k, v in value.items() if k != key}
+def _without(value: Mapping[str, object], key: str) -> dict[str, object]:
+    """`value` with `key` taken out of every object in it, however deep."""
+    return {k: _without_in(v, key) for k, v in value.items() if k != key}
+
+
+def _without_in(value: object, key: str) -> object:
+    if isinstance(value, Mapping):
+        return {str(k): _without_in(v, key) for k, v in value.items() if k != key}
     if isinstance(value, list):
-        return [_without(v, key) for v in value]
+        return [_without_in(v, key) for v in value]
     return value
-
-
 def document_id(text: str) -> str:
     """The document a URL, an id or a canonical file names."""
     found = DOC_ID.search(text)
@@ -388,14 +521,15 @@ def url(ident: str) -> str:
 
 # ---------------------------------------------------------------- reading both sides
 
-def read_file(path: Path) -> dict:
+def read_file(path: Path) -> Ir:
     if not path.is_file():
         raise SystemExit(f"{path}: no such file (this command reads the canonical HTML)")
     ir = doc_ir.key_blocks(doc_ir.from_html(path.read_text(encoding="utf-8")))
-    if ir.get("stray"):
-        raise SystemExit(stray_refusal(path, ir["stray"]))
+    if stray := ir.get("stray"):
+        raise SystemExit(stray_refusal(path, stray))
     for run in _pictures(ir):
-        local = picture_file(path, run.get("src", ""))
+        src = run.get("src", "")
+        local = picture_file(path, src)
         if local is None:
             continue
         if local.is_file():
@@ -403,7 +537,7 @@ def read_file(path: Path) -> dict:
         else:
             run["missing"] = True
             ir.setdefault("unsupported", []).append(
-                f"<img src={run['src']!r}>: no such file beside {path.name} — "
+                f"<img src={src!r}>: no such file beside {path.name} — "
                 f"the picture is left as the document has it")
     return ir
 
@@ -436,7 +570,7 @@ def _short(text: str) -> str:
     return text if len(text) <= STRAY_LONG else text[:STRAY_LONG - 1] + "…"
 
 
-def _pictures(ir: dict) -> list[dict]:
+def _pictures(ir: Ir) -> list[Run]:
     """Every picture run of every tab."""
     return [run for part in doc_ir.parts(ir) for run in doc_merge._image_runs(part["blocks"])]
 
@@ -457,13 +591,13 @@ def data_uri(file: Path) -> str:
     return f"data:{mime};base64,{base64.b64encode(file.read_bytes()).decode()}"
 
 
-def embedded(path: Path, ir: dict) -> dict:
+def embedded(path: Path, ir: Ir) -> Ir:
     """The file as the importer should see it: every picture's bytes inside it.
 
     Measured: Drive's HTML import embeds a `data:` URI and keeps `alt` and `title` as
     the picture's description and title. A relative `src` would mean nothing to it.
     """
-    out = json.loads(json.dumps(ir))
+    out = copy.deepcopy(ir)
     for run in _pictures(out):
         local = picture_file(path, run.get("src", ""))
         if local is not None and local.is_file():
@@ -471,11 +605,13 @@ def embedded(path: Path, ir: dict) -> dict:
     return out
 
 
-def write_file(path: Path, ir: dict, document: str) -> None:
-    path.write_text(doc_ir.to_html(dict(ir) | {"document": document}), encoding="utf-8")
+def write_file(path: Path, ir: Ir, document: str) -> None:
+    named = ir.copy()
+    named["document"] = document
+    path.write_text(doc_ir.to_html(named), encoding="utf-8")
 
 
-def read_document(docs, ident: str, *sources: dict) -> tuple[dict, dict]:
+def read_document(docs: DocsService, ident: str, *sources: Ir) -> tuple[Document, Ir]:
     """The document, and its IR — every tab — with what a read cannot say filled in.
 
     Keys come from the named ranges; a list's ordered-ness comes from `sources` — the
@@ -483,16 +619,17 @@ def read_document(docs, ident: str, *sources: dict) -> tuple[dict, dict]:
     (`doc_merge.restore_unreadable`).
     """
     doc = _get(docs, ident)
-    ours, base = (list(sources) + [None, None])[:2]
+    ours = sources[0] if sources else None
+    base = sources[1] if len(sources) > 1 else None
     return doc, document_ir(doc, ident, ours, base)
 
 
-def _get(docs, ident: str) -> dict:
+def _get(docs: DocsService, ident: str) -> Document:
     return _read(docs.documents().get(documentId=ident, includeTabsContent=True))
 
 
-def document_ir(doc: dict, ident: str, ours: dict | None = None,
-                base: dict | None = None) -> dict:
+def document_ir(doc: Document, ident: str, ours: Ir | None = None,
+                base: Ir | None = None) -> Ir:
     """The first tab is the IR; the others go under `tabs` (`doc_ir.parts`), each
     filled in from the file's and the base's tab with the same id."""
     ir = _part_of(doc, None, ours, base)
@@ -504,7 +641,7 @@ def document_ir(doc: dict, ident: str, ours: dict | None = None,
     return ir
 
 
-def _part_of(doc: dict, tab: str | None, ours: dict | None, base: dict | None) -> dict:
+def _part_of(doc: Document, tab: str | None, ours: Ir | None, base: Ir | None) -> Ir:
     """One tab's IR (None: the first). `ours` and `base` are whole IRs: the tab of
     theirs with the same id is what fills this one in."""
     if tab:
@@ -525,12 +662,12 @@ def _part_of(doc: dict, tab: str | None, ours: dict | None, base: dict | None) -
             part["tab_title"] = props.get("title", "")
         else:
             part["title"] = props.get("title", "")
-            if props.get("parentTabId"):
-                part["parent"] = props["parentTabId"]
+            if parent := props.get("parentTabId"):
+                part["parent"] = parent
     return part
 
 
-def open_comments(drive, ident: str) -> list[str]:
+def open_comments(drive: DriveService, ident: str) -> list[str]:
     """The comments on the document nobody has resolved, for the report.
 
     A comment is a question somebody asked about a passage, and a sync that rewrites
@@ -546,16 +683,21 @@ def open_comments(drive, ident: str) -> list[str]:
                    "quotedFileContent/value,replies/content)")).get("comments", [])
     except HttpError as err:
         return [f"the document's comments could not be read ({status_of(err)})"]
-    out = []
+    out: list[str] = []
     for comment in found:
         if comment.get("resolved"):
             continue
         about = (comment.get("quotedFileContent") or {}).get("value", "")
+        who = comment.get("author", {}).get("displayName", "somebody")
         replies = len(comment.get("replies", []))
-        out.append(f"{comment.get('author', {}).get('displayName', 'somebody')} "
-                   f"on {about[:40]!r}: {comment.get('content', '')[:80]!r}"
+        out.append(f"{who} on {_said(about)[:40]!r}: {comment.get('content', '')[:80]!r}"
                    + (f", and {replies} repl{'y' if replies == 1 else 'ies'}" if replies else ""))
     return out
+
+
+def _said(value: Json) -> str:
+    """A string an answer gave, or nothing where it gave none."""
+    return value if isinstance(value, str) else ""
 
 
 def lent_clients() -> bool:
@@ -568,12 +710,12 @@ def lent_clients() -> bool:
     live tests do, and a fake world driven from two threads is no more thread-safe than a
     real client.
     """
-    return bool(shared_service("docs", "v1") or shared_service("drive", "v3")
+    return (shared_service("docs", "v1") or shared_service("drive", "v3")
                 or docs_service is not google_auth.docs_service
                 or drive_service is not google_auth.drive_service)
 
 
-def in_background(fn, name: str = "b2s-docs"):
+def in_background(fn: Callable[[DocsService, DriveService], _T], name: str) -> Future[_T] | None:
     """`fn(docs, drive)` on a thread of its own with clients of its own, or None where it
     has to be run here (`lent_clients`).
 
@@ -592,17 +734,17 @@ def in_background(fn, name: str = "b2s-docs"):
         pool.shutdown(wait=False)
 
 
-def collect(future, otherwise):
+def collect(future: Future[_T] | None, otherwise: Callable[[], _T]) -> _T:
     """What a background read answered, or what it answers when there was no thread."""
     return future.result() if future is not None else otherwise()
 
 
-def limits(ours: dict) -> list[str]:
+def limits(ours: Ir) -> list[str]:
     """What this sync cannot carry, said out loud rather than dropped in silence."""
     return list(ours.get("unsupported", []))
 
 
-def unmodelled_notes(doc: dict, full: bool = False) -> list[str]:
+def unmodelled_notes(doc: Document, full: bool = False) -> list[str]:
     """What the live document carries that the dialect never reads.
 
     `doc_ir.unmodelled` walks the raw `documents.get` answer against the reader's own
@@ -645,7 +787,7 @@ PROPERTIES = 4          # how many of one block's properties to name on its line
 LOSS_MARK = "in nothing the file can say"
 
 
-def block_risk_notes(doc: dict, limit: int = RISKY_BLOCKS) -> list[str]:
+def block_risk_notes(doc: Document, limit: int = RISKY_BLOCKS) -> list[str]:
     """Which blocks would lose something if the source rewrote them.
 
     The counts above are the document's; these are addresses. A property the dialect
@@ -656,7 +798,7 @@ def block_risk_notes(doc: dict, limit: int = RISKY_BLOCKS) -> list[str]:
     in the document, and to leave that one alone.
     """
     risky = doc_ir.unread_blocks(doc)
-    out = []
+    out: list[str] = []
     for block in risky[:limit]:
         # The last two segments of the path: the struct and the field, which is what
         # names the property. The nodes above them say where the walker was, not what
@@ -676,7 +818,7 @@ def block_risk_notes(doc: dict, limit: int = RISKY_BLOCKS) -> list[str]:
     return out
 
 
-def rewrite_losses(doc: dict, planned: list[dict]) -> list[str]:
+def rewrite_losses(doc: Document, planned: Sequence[Written]) -> list[str]:
     """What this sync actually costs, as opposed to what it risks.
 
     `block_risk_notes` names every block that carries something the dialect never
@@ -697,12 +839,12 @@ def rewrite_losses(doc: dict, planned: list[dict]) -> list[str]:
              for block in doc_ir.unread_blocks(doc)}
     if not risky:
         return []
-    out = []
+    out: list[str] = []
     for each in planned:
         for block in each["result"].get("blocks", []):
-            if not block.get("span") or not (block.get("rewrite") or block.get("moved")):
+            if not (span := block.get("span")) or not (block.get("rewrite") or block.get("moved")):
                 continue
-            hit = risky.get((each["stamp"], tuple(block["span"])))
+            hit = risky.get((each["stamp"], tuple(span)))
             if hit is None:
                 continue
             named = ", ".join(".".join(path.split(".")[-2:]) for path in hit["unread"])
@@ -714,7 +856,7 @@ def rewrite_losses(doc: dict, planned: list[dict]) -> list[str]:
     return out
 
 
-def stamp_of(ir: dict, part: dict) -> str | None:
+def stamp_of(ir: Ir, part: Ir) -> str | None:
     """The `tabId` a tab's requests carry: none for the first tab, which is where a
     request without one goes (`doc_merge.on_tab`)."""
     return None if part is ir else part.get("tab")
@@ -722,8 +864,9 @@ def stamp_of(ir: dict, part: dict) -> str | None:
 
 # ---------------------------------------------------------------- writing
 
-def send(docs, ident: str, requests: list[dict], revision: str | None = None,
-         notes: list[str] | None = None) -> dict:
+def send(docs: DocsService, ident: str, requests: Sequence[DocsRequest],
+         revision: str | None = None,
+         notes: list[str] | None = None) -> DocsBatchUpdateResponse:
     """One `batchUpdate`, or — past `CHUNK` requests — several, in order.
 
     Docs applies a batch's requests in the order they are given, and the plan is
@@ -750,17 +893,20 @@ def send(docs, ident: str, requests: list[dict], revision: str | None = None,
         notes.append(f"{len(requests)} requests were written in {len(cuts)} batches of up to "
                      f"{CHUNK}: unlike one batch, a run that fails part-way leaves the "
                      f"batches before it in the document")
-    replies: list = []
-    answer: dict = {}
+    replies: list[JsonObject] = []
+    answer: DocsBatchUpdateResponse = {}
     for cut in cuts:
         answer = _batch(docs, ident, cut, revision)
         replies += answer.get("replies", [])
         revision = (answer.get("writeControl") or {}).get("requiredRevisionId")
-    return answer | {"replies": replies}
+    whole = answer.copy()
+    whole["replies"] = replies
+    return whole
 
 
-def _batch(docs, ident: str, requests: list[dict], revision: str | None) -> dict:
-    body: dict = {"requests": requests}
+def _batch(docs: DocsService, ident: str, requests: Sequence[DocsRequest],
+           revision: str | None) -> DocsBatchUpdateResponse:
+    body: DocsBatchUpdateBody = {"requests": requests}
     if revision:
         # The plan is indices into the document as it was read. Anyone who typed since
         # has moved them, so the write is refused rather than landing in the wrong place.
@@ -786,24 +932,28 @@ class Stager:
 
     NAME = "beamer2slides docs staging (temporary)"
 
-    def __init__(self, drive, docs, path: Path):
+    def __init__(self, drive: DriveService, docs: DocsService, path: Path) -> None:
         self.drive, self.docs, self.path = drive, docs, path
         self.urls: dict[str, str] = {}
         self.files: list[str] = []
 
-    def resolve(self, requests: list[dict]) -> list[dict]:
+    def resolve(self, requests: Sequence[DocsRequest]) -> list[DocsRequest]:
         """The requests with every staged picture's URL filled in."""
-        wanted = [r["insertInlineImage"]["uri"][len(doc_merge.STAGE):] for r in requests
-                  if r.get("insertInlineImage", {}).get("uri", "").startswith(doc_merge.STAGE)]
+        wanted = [image["uri"][len(doc_merge.STAGE):] for r in requests
+                  if (image := r.get("insertInlineImage"))
+                  and image["uri"].startswith(doc_merge.STAGE)]
         needed = sorted(set(wanted) - self.urls.keys())
         if needed:
             self._stage(needed)
-        out = []
+        out: list[DocsRequest] = []
         for request in requests:
             image = request.get("insertInlineImage")
             if image and image["uri"].startswith(doc_merge.STAGE):
-                request = {"insertInlineImage": image | {
-                    "uri": self.urls[image["uri"][len(doc_merge.STAGE):]]}}
+                staged = image.copy()
+                staged["uri"] = self.urls[image["uri"][len(doc_merge.STAGE):]]
+                fixed: DocsRequest = {"insertInlineImage": staged}
+                out.append(fixed)
+                continue
             out.append(request)
         return out
 
@@ -813,18 +963,20 @@ class Stager:
         body = "".join(f'<p>{n}:<img src="{data_uri(self.path.parent / src)}"></p>'
                        for n, src in enumerate(sources))
         from .drive_folder import place
-        ident = self.drive.files().create(
-            body=place({"name": self.NAME, "mimeType": DOC_MIME, "appProperties": {"b2sStaging": "docs"}},
-                       self.drive),
+        from .google_types import file_id
+        ident = file_id(self.drive.files().create(
+            body=place({"name": self.NAME, "mimeType": DOC_MIME,
+                        "appProperties": {"b2sStaging": "docs"}}, self.drive),
             media_body=media_upload(io.BytesIO(f"<html><body>{body}</body></html>".encode()),
-                                    "text/html"), fields="id").execute()["id"]
+                                    "text/html"), fields="id").execute(), "the staging document")
         self.files.append(ident)
-        staged = doc_ir.from_document(_get(self.docs, ident))
+        staged = doc_ir.from_document(_get(self.docs, ident), None)
         for block in staged["blocks"]:
-            label = doc_ir.runs_text(block["runs"]).split(":")[0]
-            uris = [r.get("uri") for r in block["runs"] if r.get("chip") == "image"]
-            if label.isdigit() and int(label) < len(sources) and uris and uris[0]:
-                self.urls[sources[int(label)]] = uris[0]
+            runs = block.get("runs", [])
+            label = doc_ir.runs_text(runs).split(":")[0]
+            uris = [r.get("uri") for r in runs if r.get("chip") == "image"]
+            if label.isdigit() and int(label) < len(sources) and uris and (uri := uris[0]):
+                self.urls[sources[int(label)]] = uri
         missing = [s for s in sources if s not in self.urls]
         if missing:
             raise RuntimeError(f"the staging document brought no picture for {missing[:3]}")
@@ -838,7 +990,8 @@ class Stager:
         self.files = []
 
 
-def fetch_pictures(path: Path, live: dict, drive=None, ident: str | None = None) -> int:
+def fetch_pictures(path: Path, live: Ir, drive: DriveService | None = None,
+                   ident: str | None = None) -> int:
     """Put the pictures a reader inserted into the document beside the canonical file.
 
     Their `contentUri` lasts about half an hour and names nothing of ours, so a file
@@ -852,31 +1005,32 @@ def fetch_pictures(path: Path, live: dict, drive=None, ident: str | None = None)
     """
     from . import net
 
-    wanted = [run for run in _pictures(live)
-              if not run.get("src") and run.get("uri") and run.get("value")]
-    got, failed = {}, {}
-    for run in wanted:
+    wanted = [(value, uri, run) for run in _pictures(live)
+              if not run.get("src") and (uri := run.get("uri")) and (value := run.get("value"))]
+    got: dict[str, bytes] = {}
+    failed: dict[str, object] = {}
+    for value, uri, _ in wanted:
         if net.downloads_off():
-            failed[run["value"]] = "downloads are switched off"
+            failed[value] = "downloads are switched off"
             continue
         try:
-            got[run["value"]] = net.download(run["uri"])   # through the caller's fetcher
+            got[value] = net.download(uri)   # through the caller's fetcher
         except Exception as err:  # noqa: BLE001 - a harness's fetcher raises its own types
-            failed[run["value"]] = err
+            failed[value] = err
     if failed and drive is not None and ident:
         exported = exported_pictures(drive, ident, _pictures(live))
         got |= {oid: exported[oid] for oid in failed if oid in exported}
     done = 0
-    for run in wanted:
-        data = got.get(run["value"])
+    for value, _, run in wanted:
+        data = got.get(value)
         if data is None:
-            print(f"  the picture {run['value']} could not be fetched: {failed.get(run['value'])}")
+            print(f"  the picture {value} could not be fetched: {failed.get(value)}")
             continue
         # A fetcher hands over bytes and nothing else, so the picture names its own type.
         suffix = net.picture_suffix(data)
         folder = path.parent / f"{path.stem}.media"
         folder.mkdir(parents=True, exist_ok=True)
-        name = re.sub(r"[^A-Za-z0-9_.-]", "_", run["value"]) + suffix
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", value) + suffix
         (folder / name).write_bytes(data)
         run["src"], run["sha"] = f"{folder.name}/{name}", digest(data)
         done += 1
@@ -888,7 +1042,7 @@ def fetch_pictures(path: Path, live: dict, drive=None, ident: str | None = None)
 EXPORT_SIZE_SLACK = 1.5
 
 
-def exported_pictures(drive, ident: str, runs: list[dict]) -> dict[str, bytes]:
+def exported_pictures(drive: DriveService, ident: str, runs: Sequence[Run]) -> dict[str, bytes]:
     """The pictures of `runs` (every picture run of the document, in document order) as
     Drive's zip export of the document carries them, by object id.
 
@@ -918,22 +1072,23 @@ def exported_pictures(drive, ident: str, runs: list[dict]) -> dict[str, bytes]:
               f"document {len(runs)}, so they cannot be paired")
         return {}
     folder = page.rpartition("/")[0]
-    out = {}
+    out: dict[str, bytes] = {}
     for tag, run in zip(tags, runs):
         src = re.search(r'\bsrc="([^"]+)"', tag)
         size = [re.search(rf"\b{side}:\s*([\d.]+)px", tag) for side in ("width", "height")]
-        if run.get("size") and all(size) and any(
-                abs(float(m.group(1)) - want) > EXPORT_SIZE_SLACK for m, want in zip(size, run["size"])):
+        said = [float(m.group(1)) for m in size if m is not None]
+        if (want := run.get("size")) and len(said) == len(size) and any(
+                abs(side - wanted) > EXPORT_SIZE_SLACK for side, wanted in zip(said, want)):
             print(f"  no pictures from the document's export: the picture {run.get('value')} "
                   f"is not the size its place in the export says")
             return {}
         name = f"{folder}/{src.group(1)}" if src and folder else (src.group(1) if src else None)
-        if run.get("value") and name in archive.namelist():
-            out[run["value"]] = archive.read(name)
+        if (value := run.get("value")) and name in archive.namelist():
+            out[value] = archive.read(name)
     return out
 
 
-def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
+def plant_ranges(docs: DocsService, ident: str, ir: Ir, tab: str | None) -> int:
     """Name every keyed block of one tab the document does not name yet.
 
     One batch, and on a refusal one request at a time, so a range the API will not
@@ -957,13 +1112,20 @@ def plant_ranges(docs, ident: str, ir: dict, tab: str | None = None) -> int:
             adopt_replies(ir, [request], send(docs, ident, [request]))
             done += 1
         except HttpError as err:
-            what = next(iter(request.values()))
-            print(f"  no anchor for {what.get('name') or what.get('namedRangeId')}: "
-                  f"{status_of(err)}")
+            print(f"  no anchor for {_range_named(request)}: {status_of(err)}")
     return done
 
 
-def adopt_replies(ir: dict, requests: list[dict], answer: dict) -> int:
+def _range_named(request: DocsRequest) -> str | None:
+    """The named range a `createNamedRange` or `deleteNamedRange` is about."""
+    if (made := request.get("createNamedRange")) is not None:
+        return made["name"]
+    if (gone := request.get("deleteNamedRange")) is not None:
+        return gone.get("name") or gone.get("namedRangeId")
+    return None
+
+
+def adopt_replies(ir: Ir, requests: Sequence[DocsRequest], answer: DocsBatchUpdateResponse) -> int:
     """Give each block the id of the named range just planted on it.
 
     A `createNamedRange` answers with the id of the range it made, and the request
@@ -979,29 +1141,31 @@ def adopt_replies(ir: dict, requests: list[dict], answer: dict) -> int:
     would_say` proves against the live API.
     """
     replies = answer.get("replies") or []
-    by_key = {b["key"]: b for b in ir["blocks"] if b.get("key")}
+    by_key = {key: b for b in ir["blocks"] if (key := b.get("key"))}
     done = 0
     for n, request in enumerate(requests):
         ask = request.get("createNamedRange")
         made = (replies[n] if n < len(replies) else {}) or {}
-        planted = (made.get("createNamedRange") or {}).get("namedRangeId")
-        if not ask or not planted:
+        created = made.get("createNamedRange")
+        planted = created.get("namedRangeId") if isinstance(created, dict) else None
+        if not ask or not planted or not isinstance(planted, str):
             continue
         block = by_key.get(ask["name"][len(doc_ir.KEY_PREFIX):])
         if block is None:
             continue
         block["rangeId"] = planted
-        block["range"] = [ask["range"]["startIndex"], ask["range"]["endIndex"]]
+        block["range"] = [U16(ask["range"]["startIndex"]), U16(ask["range"]["endIndex"])]
         done += 1
     if any(r.get("deleteNamedRange") for r in requests):
         ir.pop("orphans", None)
     return done
 
 
-def settle(docs, ident: str, path: Path, ours: dict, base: dict,
-           planned: dict | None = None, drive=None, problems: list[str] | None = None,
+def settle(docs: DocsService, ident: str, path: Path, ours: Ir | None, base: Ir | None,
+           planned: Mapping[str | None, list[Block]] | None = None,
+           drive: DriveService | None = None, problems: list[str] | None = None,
            name_unmodelled: bool = False, renamed: str | None = None,
-           base_fid: str | None = None, read: tuple[dict, dict] | None = None) -> dict:
+           base_fid: str | None = None, read: tuple[Document, Ir] | None = None) -> Ir:
     """After a write: read the document, anchor what is new, and let that read be both
     the new base and the new canonical file. File, document and base agree from here.
 
@@ -1020,12 +1184,13 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
     reading it twice in a row is a round trip for nothing. `base_fid` is the base
     file in Drive this run already found (`load_base`)."""
     planned = planned or {}
-    doc, live = read if read is not None else read_document(docs, ident, ours, base)
+    doc, live = read if read is not None else _read_both(docs, ident, ours, base)
     for line in unmodelled_notes(doc, name_unmodelled):
         print(f"  {line}")
         if problems is not None:
             problems.append(line)
-    tidy, named = [], 0
+    tidy: list[DocsRequest] = []
+    named = 0
     doc_merge.settle_keys(live, planned, base)
     for part in doc_ir.parts(live):
         tidy += doc_merge.on_tab(doc_merge.tidy_requests(part), stamp_of(live, part))
@@ -1037,18 +1202,17 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
         # What the anchors did, the batch itself answered (`adopt_replies`); what
         # `tidy_requests` did - a named style, a bullet, a list's glyph - it did not,
         # and the block it left behind is what the file and the base must say.
-        doc, live = read_document(docs, ident, ours, base)
+        doc, live = _read_both(docs, ident, ours, base)
     for part in doc_ir.parts(live):
-        if planned.get(stamp_of(live, part)):
-            doc_merge.place_pictures(part, planned[stamp_of(live, part)])
+        if blocks := planned.get(stamp_of(live, part)):
+            doc_merge.place_pictures(part, blocks)
     if drive is not None:
         equation_latex(drive, ident, doc, live)
     if renamed:
         live["title"] = renamed
     fetch_pictures(path, live, drive, ident)
     write_file(path, live, ident)
-    refused = store_base(path, live, drive, ident, int((base or {}).get("generation", 0)),
-                         base_fid=base_fid)
+    refused = store_base(path, live, drive, ident, _generation(base), base_fid=base_fid)
     if refused and drive is not None:
         line = (f"the base could not be stored in Drive ({refused}); the copy in {STATE_DIR}/ "
                 f"beside the file is the only one, so another checkout has no base to sync from")
@@ -1058,7 +1222,22 @@ def settle(docs, ident: str, path: Path, ours: dict, base: dict,
     return live
 
 
-def equation_latex(drive, ident: str, doc: dict, live: dict) -> int:
+def _read_both(docs: DocsService, ident: str, ours: Ir | None,
+               base: Ir | None) -> tuple[Document, Ir]:
+    """`read_document` with the file and the base, either of which may be missing."""
+    doc = _get(docs, ident)
+    return doc, document_ir(doc, ident, ours, base)
+
+
+def _generation(base: Mapping[str, object] | None) -> int:
+    """How many syncs `base` has seen, where it is a base that was stored."""
+    if base is None:
+        return 0
+    said = base.get("generation", 0)
+    return int(said) if isinstance(said, (int, float, str)) else 0
+
+
+def equation_latex(drive: DriveService, ident: str, doc: Document, live: Ir) -> int:
     """Give each equation of `live` its LaTeX, which `documents.get` does not say at all
     (an equation reads as `{}`) and the Markdown export does (`doc_ir.latex_of`).
 
@@ -1074,20 +1253,20 @@ def equation_latex(drive, ident: str, doc: dict, live: dict) -> int:
     except HttpError as err:
         print(f"  no LaTeX for the equations: the Markdown export was refused ({status_of(err)})")
         return 0
-    if isinstance(markdown, bytes):
-        markdown = markdown.decode("utf-8")
-    return doc_ir.attach_latex(live, doc_ir.latex_of(spots, markdown))
+    text = markdown.decode("utf-8") if isinstance(markdown, bytes) else str(markdown)
+    return doc_ir.attach_latex(live, doc_ir.latex_of(spots, text))
 
 
 # ---------------------------------------------------------------- the report
 
-BASE_FROM = {"drive": "the base file in Drive, which every checkout sees",
-             "local": f"the cache in {STATE_DIR}/ beside the file (Drive has none, or "
-                      f"could not be read)",
-             "none": "none — there was no base, and --assume-base decided"}
+BASE_FROM: dict[Where, str] = {
+    "drive": "the base file in Drive, which every checkout sees",
+    "local": f"the cache in {STATE_DIR}/ beside the file (Drive has none, or "
+             f"could not be read)",
+    "none": "none — there was no base, and --assume-base decided"}
 
 
-def write_report(path: Path, info: dict) -> Path:
+def write_report(path: Path, info: SyncReport) -> Path:
     state_dir(path).mkdir(parents=True, exist_ok=True)
     # Not `with_suffix`: `table.sync-report` already looks suffixed, and the report
     # would land in `table.md` next to a file called table.html.
@@ -1098,10 +1277,10 @@ def write_report(path: Path, info: dict) -> Path:
     lines = [f"# {path.name} → {info['url']}", "",
              f"{time.strftime('%Y-%m-%d %H:%M:%S')} — {info['requests']} request(s) "
              f"{'planned' if info['dry_run'] else 'written'}", ""]
-    if info.get("base"):
-        lines += [f"Base: {BASE_FROM.get(info['base'], info['base'])}", ""]
-    if info.get("backup"):
-        lines += [f"The document was exported to `{info['backup']}` before being written over "
+    if base := info.get("base"):
+        lines += [f"Base: {BASE_FROM.get(base, base)}", ""]
+    if backup := info.get("backup"):
+        lines += [f"The document was exported to `{backup}` before being written over "
                   f"(`--assume-base source-wins` has no base to merge against).", ""]
     for title, items in ((f"Deleted from the document{'' if info['dry_run'] else ' (no way back)'}",
                           info.get("removed", [])),
@@ -1119,7 +1298,7 @@ def write_report(path: Path, info: dict) -> Path:
     return md_file
 
 
-def _words(block: dict) -> str:
+def _words(block: Block) -> str:
     """The block, short enough to read in a report. A table has no words of its own,
     so its cells stand in for it."""
     if block.get("kind") == "table":
@@ -1128,43 +1307,52 @@ def _words(block: dict) -> str:
     return doc_merge.block_text(block)[:60]
 
 
-def _summary(result: dict) -> tuple[list[str], list[str], list[str]]:
-    applied, kept, gone = [], [], []
+def _summary(result: doc_merge.Plan) -> tuple[list[str], list[str], list[str]]:
+    applied: list[str] = []
+    kept: list[str] = []
+    gone: list[str] = []
     for block in result.get("removed", []):
         # Its own list and its own heading, above everything else the report says: it
         # is the one change here that no second sync can bring back
         # (`doc_merge.deleted_blocks`).
         gone.append(f"`{block.get('key', '(unkeyed)')}`: {_words(block)!r}")
     for block in result["blocks"]:
-        origin, key = block.get("origin"), block.get("key", "(unkeyed)")
+        key = block.get("key", "(unkeyed)")
         words = _words(block)
         if block.get("moved"):
             applied.append(f"`{key}` moved to where the source has it: {words!r}")
-        elif origin == "added by the source":
-            applied.append(f"`{key}` added: {words!r}")
-        elif origin == "merged":
-            applied.append(f"`{key}` rewritten: {words!r}")
-        elif origin in ("added in the document", "unknown to the base"):
-            kept.append(f"`{key}` is the document's own: {words!r}")
-        elif origin == "kept from the document":
-            kept.append(f"`{key}` says what the document says: {words!r}")
-        elif origin == "kept over a source delete":
-            kept.append(f"`{key}` was deleted in the source but edited here: {words!r}")
+            continue
+        match block.get("origin"):
+            case "added by the source":
+                applied.append(f"`{key}` added: {words!r}")
+            case "merged":
+                applied.append(f"`{key}` rewritten: {words!r}")
+            case "added in the document" | "unknown to the base":
+                kept.append(f"`{key}` is the document's own: {words!r}")
+            case "kept from the document":
+                kept.append(f"`{key}` says what the document says: {words!r}")
+            case "kept over a source delete":
+                kept.append(f"`{key}` was deleted in the source but edited here: {words!r}")
+            case "frozen content differs" | "table grid differs" | "the grid the source has" | None:
+                pass
+            case unexpected:
+                assert_never(unexpected)
     return applied, kept, gone
 
 
 # ---------------------------------------------------------------- commands
 
-def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
+def push(path: Path, name: str | None = None, new_doc: bool = False) -> PushReport:
     """Create the document from the canonical file and plant one anchor per block."""
     source = read_file(path)
-    if source.get("document") and not new_doc:
-        raise SystemExit(f"{path} already names document {source['document']}\n"
-                         f"  {url(source['document'])}\n"
+    if (named := source.get("document")) and not new_doc:
+        raise SystemExit(f"{path} already names document {named}\n"
+                         f"  {url(named)}\n"
                          f"  Use `docs sync` to write to it, or --new-doc for a second one.")
     creds = credentials()
     drive, docs = drive_service(creds), docs_service(creds)
-    first = embedded(path, source) | {"document": None}
+    first = embedded(path, source)
+    first.pop("document", None)
     first.pop("tabs", None)  # the importer makes one tab of whatever it is given
     html = doc_ir.to_html(first)
     from .drive_folder import place
@@ -1179,12 +1367,13 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
     # the ordered-ness the import threw away.
     doc_merge.inherit_keys(source, live)
     doc_merge.restore_unreadable(live, source)
-    plant_ranges(docs, ident, live)
+    plant_ranges(docs, ident, live, None)
     # The other tabs are written the way a sync writes a tab the source added.
     tabs = doc_merge.pair_tabs({"blocks": []}, source, live)
     written = _write_tabs(drive, docs, ident, path, source, {"blocks": []}, live, tabs,
-                          first=False)
-    planned = {None: source["blocks"]} | {w["stamp"]: w["result"]["blocks"] for w in written}
+                          False, None, None)
+    planned: dict[str | None, list[Block]] = {None: source["blocks"]}
+    planned.update({w["stamp"]: w["result"]["blocks"] for w in written})
     notes = limits(source)
     live = settle(docs, ident, path, source, source, planned, drive, notes, True)
     blocks = [b for part in doc_ir.parts(live) for b in part["blocks"]]
@@ -1194,7 +1383,7 @@ def push(path: Path, name: str | None = None, new_doc: bool = False) -> dict:
 
 
 def adopt(document: str, path: Path | None = None, force: bool = False,
-          folder: Path | None = None) -> dict:
+          folder: Path | None = None) -> AdoptReport:
     """Write the canonical file a document nobody pushed never had.
 
     The Docs twin of `beamer2slides adopt`. `push` goes file → document and refuses
@@ -1235,7 +1424,7 @@ def adopt(document: str, path: Path | None = None, force: bool = False,
     notes = limits(live)
     # Nothing has been written since that read, so the document cannot have moved:
     # `settle` reading it again would be a round trip for the same answer.
-    live = settle(docs, ident, path, None, {}, None, drive, notes, True, read=(doc, live))
+    live = settle(docs, ident, path, None, None, None, drive, notes, True, read=(doc, live))
     blocks = [b for part in doc_ir.parts(live) for b in part["blocks"]]
     return {"document": ident, "url": url(ident), "file": str(path), "blocks": len(blocks),
             "anchored": sum(1 for b in blocks if b.get("rangeId")),
@@ -1243,30 +1432,32 @@ def adopt(document: str, path: Path | None = None, force: bool = False,
 
 
 def sync(path: Path, document: str | None = None, dry_run: bool = False,
-         assume_base: str | None = None, backup: bool = True) -> dict:
+         assume_base: str | None = None, backup: bool = True) -> SyncReport:
     """Merge the file and the document three ways, write, and rewrite the file."""
     ours = read_file(path)
-    ident = document_id(document) if document else ours.get("document")
-    if not ident:
+    named = document_id(document) if document else ours.get("document")
+    if not named:
         raise SystemExit(f"{path} does not say which document it belongs to.\n"
                          f"  Pass --doc <url or id>, or `docs push {path.name}` to make one.")
+    ident: str = named
     creds = credentials()
     docs, drive = docs_service(creds), drive_service(creds)
     troubles: list[str] = []
-    found: dict = {}
+    found: dict[str, str] = {}
     # The three reads a sync opens with need nothing of each other: the base, the
     # document, and the comments — which nothing before the report wants at all, so that
     # one is waited for after the write rather than here. The base stays on this thread,
     # being the one that reads a file and appends to `troubles`.
     reading = in_background(lambda d, _: _get(d, ident), "b2s-doc")
     asking = in_background(lambda _, d: open_comments(d, ident), "b2s-comments")
-    base, where = load_base(path, ident, drive, troubles, found)
+    stored, where = load_base(path, ident, drive, troubles, found)
     doc = collect(reading, lambda: _get(docs, ident))
     for trouble in troubles:
         print(f"  {trouble}")
-    theirs = document_ir(doc, ident, ours, base or {"blocks": []})
-    kept = None
-    if base is None:
+    theirs = document_ir(doc, ident, ours, stored or {"blocks": []})
+    kept: Path | None = None
+    base: Ir
+    if stored is None:
         base, kept = _no_base(path, ours, theirs, assume_base, drive, ident, backup,
                               dry_run)
         if kept:
@@ -1274,19 +1465,19 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
         elif dry_run and backup and assume_mode(assume_base) == "source-wins":
             print("  a real run would export the document to "
                   f"{STATE_DIR}/backups/ before writing over it")
+    else:
+        base = stored
     tabs = doc_merge.pair_tabs(base, ours, theirs)
 
     if dry_run:
-        planned = [{"stamp": None, "label": None, "result": doc_merge.plan(base, ours, theirs)}]
+        planned = [_dry(None, None, doc_merge.plan(base, ours, theirs))]
         for tab, mine, was in tabs["pairs"]:
-            planned.append({"stamp": tab, "label": mine.get("title", ""),
-                            "result": doc_merge.plan(was, mine, doc_ir.tab_part(theirs, tab))})
+            planned.append(_dry(tab, mine.get("title", ""),
+                                doc_merge.plan(was, mine, doc_ir.tab_part(theirs, tab) or {"blocks": []})))
         for mine in tabs["create"]:
             # What a tab just added reads as: nothing, and the paragraph it keeps.
-            planned.append({"stamp": "new", "label": mine.get("title", ""), "result":
-                            doc_merge.plan({"blocks": []}, mine, {"blocks": [], "trailer": [1, 2]})})
-        for each in planned:
-            each["shaped"] = each["result"]["shaped"]
+            planned.append(_dry("new", mine.get("title", ""), doc_merge.plan(
+                {"blocks": []}, mine, {"blocks": [], "trailer": [U16(1), U16(2)]})))
         info = _report(ident, True, ours, tabs, planned,
                        collect(asking, lambda: open_comments(drive, ident)))
         info["plan"] = tabs["requests"] + [
@@ -1305,10 +1496,10 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
     if hook:
         subprocess.run(hook, shell=True, check=False)
     batched: list[str] = []
-    written = _write_tabs(drive, docs, ident, path, ours, base, theirs, tabs, doc=doc,
-                          notes=batched)
-    renamed = (rename_document(drive, ident, tabs["rename"], batched)
-               if tabs.get("rename") else None)
+    written = _write_tabs(drive, docs, ident, path, ours, base, theirs, tabs, True, doc,
+                          batched)
+    renamed = (rename_document(drive, ident, rename, batched)
+               if (rename := tabs["rename"]) else None)
     # The comments are the report's, and nothing before this point wanted them: the read
     # has been running beside the planning and the write it is only now waited for.
     info = _report(ident, False, ours, tabs, written,
@@ -1325,32 +1516,52 @@ def sync(path: Path, document: str | None = None, dry_run: bool = False,
     return info
 
 
-def _report(ident: str, dry_run: bool, ours: dict, tabs: dict, written: list[dict],
-            asked: list[str]) -> dict:
+def _dry(stamp: str | None, label: str | None, result: doc_merge.Plan) -> Written:
+    """A tab a dry run planned and did not write."""
+    return {"stamp": stamp, "label": label, "result": result, "shaped": result["shaped"],
+            "attempts": 0}
+
+
+def _said_in(label: str | None, line: str) -> str:
+    """A line of the report, with the tab it is about in front past the first tab."""
+    return f"[{label}] {line}" if label is not None else line
+
+
+def _in_tab(conflict: doc_merge.Conflict, label: str | None) -> TabConflict:
+    tagged: TabConflict = {"base": conflict["base"], "ours": conflict["ours"],
+                           "theirs": conflict["theirs"], "key": conflict["key"]}
+    if label is not None:
+        tagged["tab"] = label
+    return tagged
+
+
+def _report(ident: str, dry_run: bool, ours: Ir, tabs: doc_merge.TabPlan,
+            written: Sequence[Written], asked: list[str]) -> SyncReport:
     """The report of a sync, every tab in it; what happened past the first tab is
     said with the tab's title in front."""
-    info = {"document": ident, "url": url(ident), "dry_run": dry_run, "requests": 0,
-            "conflicts": [], "notes": limits(ours) + tabs["notes"],
-            "applied": list(tabs["applied"]), "kept": [], "comments": asked, "removed": []}
+    info: SyncReport = {
+        "document": ident, "url": url(ident), "dry_run": dry_run, "requests": 0,
+        "conflicts": [], "notes": limits(ours) + tabs["notes"],
+        "applied": list(tabs["applied"]), "kept": [], "comments": asked, "removed": []}
     for each in written:
         result, label = each["result"], each["label"]
-        say = (lambda line, label=label: f"[{label}] {line}") if label is not None else str
         info["requests"] += len(result["requests"])
-        info["conflicts"] += [c | {"tab": label} if label is not None else c
-                              for c in result["conflicts"]]
-        info["notes"] += [say(n) for n in result["notes"]]
+        info["conflicts"] += [_in_tab(c, label) for c in result["conflicts"]]
+        info["notes"] += [_said_in(label, n) for n in result["notes"]]
         applied, kept, gone = _summary(result)
-        info["applied"] += [say(t["note"]) for t in each["shaped"]] + [say(a) for a in applied]
-        info["kept"] += [say(k) for k in kept]
-        info["removed"] += [say(g) for g in gone]
-        if each.get("attempts"):
+        info["applied"] += ([_said_in(label, note) for t in each["shaped"]
+                             if (note := t.get("note")) is not None]
+                            + [_said_in(label, a) for a in applied])
+        info["kept"] += [_said_in(label, k) for k in kept]
+        info["removed"] += [_said_in(label, g) for g in gone]
+        if each["attempts"]:
             info["replanned"] = max(info.get("replanned", 0), each["attempts"])
     return info
 
 
-def _write_tabs(drive, docs, ident: str, path: Path, ours: dict, base: dict, theirs: dict,
-                tabs: dict, first: bool = True, doc: dict | None = None,
-                notes: list[str] | None = None) -> list[dict]:
+def _write_tabs(drive: DriveService, docs: DocsService, ident: str, path: Path, ours: Ir,
+                base: Ir, theirs: Ir, tabs: doc_merge.TabPlan, first: bool,
+                doc: Document | None, notes: list[str] | None) -> list[Written]:
     """Write every tab: the tab edits (`doc_merge.pair_tabs`) first, then each tab's
     words, the first tab first. A tab is its own plan and its own batch — its indices
     are its own — so the others wait for nothing it does.
@@ -1363,27 +1574,32 @@ def _write_tabs(drive, docs, ident: str, path: Path, ours: dict, base: dict, the
     if tabs["requests"]:
         send(docs, ident, tabs["requests"])
     pairs = list(tabs["pairs"])
-    known = {p.get("tab") for p in doc_ir.parts(theirs)} - {None}
-    siblings, made = doc_merge.tab_siblings(theirs), {}
+    known = {tab for p in doc_ir.parts(theirs) if (tab := p.get("tab")) is not None}
+    siblings = doc_merge.tab_siblings(theirs)
+    made: dict[str, str] = {}
     for part in tabs["create"]:
         # One at a time: a child tab needs the id its parent was just given, and a
         # tab placed among its siblings needs the ids of the ones already made.
-        if part.get("parent") in made:
-            part["parent"] = made[part["parent"]]
+        if (parent := part.get("parent")) is not None and parent in made:
+            part["parent"] = made[parent]
         request = doc_merge.add_tab_request(part, known | set(made.values()),
                                             ours, siblings)
         reply = send(docs, ident, [request])
-        tab = reply["replies"][0]["addDocumentTab"]["tabProperties"]["tabId"]
-        if part.get("tab"):
-            made[part["tab"]] = tab
+        tab = _new_tab_id(reply)
+        if mine := part.get("tab"):
+            made[mine] = tab
         part["tab"] = tab
-        props = request["addDocumentTab"]["tabProperties"]
-        siblings.setdefault(props.get("parentTabId"), []).insert(props["index"], tab)
+        adding = request.get("addDocumentTab")
+        props: DocsTabProperties = adding["tabProperties"] if adding is not None else {}
+        if (index := props.get("index")) is None:
+            raise ValueError("an addDocumentTab request that names no index")
+        siblings.setdefault(props.get("parentTabId"), []).insert(index, tab)
         pairs.append((tab, part, {"blocks": []}))
     stager = Stager(drive, docs, path)
-    written = []
+    written: list[Written] = []
     try:
-        for tab, mine, was in ([(None, ours, base)] if first else []) + pairs:
+        start: list[tuple[str | None, Ir, Ir]] = [(None, ours, base)] if first else []
+        for tab, mine, was in start + pairs:
             done = _sync_part(docs, ident, path, stager, tab, ours, base, mine, was, doc, notes)
             written.append(done)
             if done["result"]["requests"] or done["shaped"] or done["attempts"]:
@@ -1394,9 +1610,17 @@ def _write_tabs(drive, docs, ident: str, path: Path, ours: dict, base: dict, the
     return written
 
 
-def _sync_part(docs, ident: str, path: Path, stager: Stager, tab: str | None,
-               ours: dict, base: dict, mine: dict, was: dict, doc: dict | None = None,
-               notes: list[str] | None = None) -> dict:
+def _new_tab_id(answer: DocsBatchUpdateResponse) -> str:
+    """The id Docs gave the tab one `addDocumentTab` made."""
+    replies = answer.get("replies") or []
+    added = as_object(replies[0].get("addDocumentTab"), "the addDocumentTab reply")
+    props = as_object(added.get("tabProperties"), "the addDocumentTab reply's tabProperties")
+    return as_str(props.get("tabId"), "the addDocumentTab reply's tabId")
+
+
+def _sync_part(docs: DocsService, ident: str, path: Path, stager: Stager, tab: str | None,
+               ours: Ir, base: Ir, mine: Ir, was: Ir, doc: Document | None,
+               notes: list[str] | None) -> Written:
     """Plan one tab against the document and write it.
 
     `tab` is None for the first tab, whose requests go without a `tabId`; `mine` and
@@ -1438,15 +1662,16 @@ def _sync_part(docs, ident: str, path: Path, stager: Stager, tab: str | None,
             "result": result, "shaped": shaped, "attempts": attempt}
 
 
-def read_part(docs, ident: str, tab: str | None, ours: dict | None,
-              base: dict | None) -> tuple[dict, dict]:
+def read_part(docs: DocsService, ident: str, tab: str | None, ours: Ir | None,
+              base: Ir | None) -> tuple[Document, Ir]:
     """The document, and the IR of one tab of it (None: the first)."""
     doc = _get(docs, ident)
     return doc, _part_of(doc, tab, ours, base)
 
 
-def _write_structure(docs, ident: str, tab: str | None, ours: dict, base: dict,
-                     mine: dict, was: dict, doc: dict, theirs: dict, result: dict) -> tuple:
+def _write_structure(docs: DocsService, ident: str, tab: str | None, ours: Ir, base: Ir,
+                     mine: Ir, was: Ir, doc: Document, theirs: Ir, result: doc_merge.Plan
+                     ) -> tuple[Document, Ir, Ir, doc_merge.Plan, list[doc_merge.Told]]:
     """Write what the grid needs before the words, and plan the words again.
 
     A table the source added and rows or columns it changed cannot go in the batch
@@ -1462,7 +1687,7 @@ def _write_structure(docs, ident: str, tab: str | None, ours: dict, base: dict,
     in words for the report. A batch that leaves work over (two tables added at one
     index, which one send cannot place) comes round again.
     """
-    shaped: list[dict] = []
+    shaped: list[doc_merge.Told] = []
     for _ in range(ATTEMPTS):
         if not result["structure"]:
             break
@@ -1501,11 +1726,12 @@ def _write_structure(docs, ident: str, tab: str | None, ours: dict, base: dict,
     return doc, theirs, was, result, shaped
 
 
-ASSUME_MODES = ("document-wins", "source-wins")
+AssumeMode = Literal["document-wins", "source-wins"]
+ASSUME_MODES: tuple[AssumeMode, ...] = ("document-wins", "source-wins")
 # The names this option had first. They read backwards: they named the side the base
 # would be *taken from*, which is the side whose changes are thereby thrown away.
-ASSUME_ALIASES = {"file": "document-wins", "document": "source-wins"}
-ASSUME_MEANS = {
+ASSUME_ALIASES: dict[str, AssumeMode] = {"file": "document-wins", "document": "source-wins"}
+ASSUME_MEANS: dict[AssumeMode, str] = {
     "document-wins": "the document is right where they differ: nothing is written to it, "
                      "and the file is rewritten from the document — every edit made to the "
                      "source since the last sync is discarded",
@@ -1514,12 +1740,13 @@ ASSUME_MEANS = {
 }
 
 
-def assume_mode(value: str | None) -> str | None:
+def assume_mode(value: str | None) -> AssumeMode | None:
     """`--assume-base`, with the old spellings mapped and named for what they do."""
-    if value is None:
-        return None
-    if value in ASSUME_MODES:
-        return value
+    match value:
+        case None:
+            return None
+        case "document-wins" | "source-wins":
+            return value
     mode = ASSUME_ALIASES.get(value)
     if mode is None:
         raise SystemExit(f"--assume-base {value}: expected one of "
@@ -1529,7 +1756,7 @@ def assume_mode(value: str | None) -> str | None:
     return mode
 
 
-def backup_document(drive, document: str, path: Path) -> Path:
+def backup_document(drive: DriveService, document: str, path: Path) -> Path:
     """Export the document to `.b2s/backups/<stem>-<when>.html` before it is
     overwritten whole.
 
@@ -1557,9 +1784,9 @@ def backup_document(drive, document: str, path: Path) -> Path:
     return out
 
 
-def _no_base(path: Path, ours: dict, theirs: dict, assume: str | None, drive=None,
-             document: str | None = None, backup: bool = True,
-             dry_run: bool = False) -> tuple[dict, Path | None]:
+def _no_base(path: Path, ours: Ir, theirs: Ir, assume: str | None,
+             drive: DriveService | None = None, document: str | None = None,
+             backup: bool = True, dry_run: bool = False) -> tuple[Ir, Path | None]:
     """What to do when the last sync's base is nowhere — neither in Drive nor beside
     the file. (The base, the backup taken before a destructive answer.)
 

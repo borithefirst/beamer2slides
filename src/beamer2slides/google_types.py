@@ -574,18 +574,464 @@ class DocsWriteControl(TypedDict, total=False):
     targetRevisionId: str
 
 
+# The parts of a document `doc_ir` reads (its `_NODES` graph says the same thing, for the
+# report of what it does not read). Styles, colours and sizes are also what the requests
+# below write, so the two halves share them.
+
+
+class DocsDimension(TypedDict, total=False):
+    magnitude: float
+    unit: str
+
+
+class DocsRgbColor(TypedDict, total=False):
+    red: float
+    green: float
+    blue: float
+
+
+class DocsColor(TypedDict, total=False):
+    rgbColor: DocsRgbColor
+
+
+class DocsOptionalColor(TypedDict, total=False):
+    color: DocsColor
+
+
+class DocsWeightedFontFamily(TypedDict, total=False):
+    fontFamily: str
+    weight: int
+
+
+class DocsLink(TypedDict, total=False):
+    url: str
+
+
+class DocsTextStyle(TypedDict, total=False):
+    bold: bool
+    italic: bool
+    underline: bool
+    strikethrough: bool
+    smallCaps: bool
+    baselineOffset: str
+    weightedFontFamily: DocsWeightedFontFamily
+    fontSize: DocsDimension
+    foregroundColor: DocsOptionalColor
+    backgroundColor: DocsOptionalColor
+    link: DocsLink
+
+
+class DocsParagraphBorder(TypedDict, total=False):
+    color: DocsOptionalColor
+    width: DocsDimension
+    padding: DocsDimension
+    dashStyle: str
+
+
+class DocsShading(TypedDict, total=False):
+    backgroundColor: DocsOptionalColor
+
+
+class DocsParagraphStyle(TypedDict, total=False):
+    namedStyleType: str
+    alignment: str
+    indentStart: DocsDimension
+    indentFirstLine: DocsDimension
+    lineSpacing: float
+    spaceAbove: DocsDimension
+    spaceBelow: DocsDimension
+    shading: DocsShading
+    borderTop: DocsParagraphBorder
+    borderBottom: DocsParagraphBorder
+    borderLeft: DocsParagraphBorder
+    borderRight: DocsParagraphBorder
+    pageBreakBefore: bool
+    keepWithNext: bool
+
+
+class DocsTextRun(TypedDict, total=False):
+    content: str
+    textStyle: DocsTextStyle
+
+
+class DocsDateElementProperties(TypedDict, total=False):
+    displayText: str
+    timestamp: str
+    dateFormat: str
+    timeFormat: str
+    locale: str
+
+
+class DocsDateElement(TypedDict, total=False):
+    dateElementProperties: DocsDateElementProperties
+
+
+class DocsPersonProperties(TypedDict, total=False):
+    name: str
+    email: str
+
+
+class DocsPerson(TypedDict, total=False):
+    personProperties: DocsPersonProperties
+
+
+class DocsRichLinkProperties(TypedDict, total=False):
+    title: str
+    uri: str
+    mimeType: str
+
+
+class DocsRichLink(TypedDict, total=False):
+    richLinkProperties: DocsRichLinkProperties
+
+
+class DocsFootnoteReference(TypedDict, total=False):
+    footnoteNumber: str
+    footnoteId: str
+
+
+class DocsInlineObjectElement(TypedDict, total=False):
+    inlineObjectId: str
+
+
+class DocsParagraphElement(TypedDict, total=False):
+    startIndex: int
+    endIndex: int
+    textRun: DocsTextRun
+    dateElement: DocsDateElement
+    person: DocsPerson
+    richLink: DocsRichLink
+    footnoteReference: DocsFootnoteReference
+    equation: JsonObject
+    inlineObjectElement: DocsInlineObjectElement
+    horizontalRule: JsonObject
+
+
+class DocsBullet(TypedDict, total=False):
+    listId: str
+    nestingLevel: int
+
+
+class DocsParagraph(TypedDict, total=False):
+    elements: list[DocsParagraphElement]
+    paragraphStyle: DocsParagraphStyle
+    bullet: DocsBullet
+
+
+class DocsTableCell(TypedDict, total=False):
+    startIndex: int
+    endIndex: int
+    content: list[DocsStructuralElement]
+
+
+class DocsTableRow(TypedDict, total=False):
+    startIndex: int
+    endIndex: int
+    tableCells: list[DocsTableCell]
+
+
+class DocsTable(TypedDict, total=False):
+    rows: int
+    columns: int
+    tableRows: list[DocsTableRow]
+
+
+class DocsStructuralElement(TypedDict, total=False):
+    startIndex: int
+    endIndex: int
+    paragraph: DocsParagraph
+    table: DocsTable
+    tableOfContents: JsonObject
+    sectionBreak: JsonObject
+
+
+class DocsBody(TypedDict, total=False):
+    content: list[DocsStructuralElement]
+
+
+class DocsNestingLevel(TypedDict, total=False):
+    glyphSymbol: str
+    glyphType: str
+    glyphFormat: str
+
+
+class DocsListProperties(TypedDict, total=False):
+    nestingLevels: list[DocsNestingLevel]
+
+
+class DocsList(TypedDict, total=False):
+    listProperties: DocsListProperties
+
+
+class DocsSize(TypedDict, total=False):
+    width: DocsDimension
+    height: DocsDimension
+
+
+class DocsImageProperties(TypedDict, total=False):
+    contentUri: str
+
+
+class DocsEmbeddedObject(TypedDict, total=False):
+    title: str
+    description: str
+    size: DocsSize
+    imageProperties: DocsImageProperties
+
+
+class DocsInlineObjectProperties(TypedDict, total=False):
+    embeddedObject: DocsEmbeddedObject
+
+
+class DocsInlineObject(TypedDict, total=False):
+    objectId: str
+    inlineObjectProperties: DocsInlineObjectProperties
+
+
+class DocsNamedStyle(TypedDict, total=False):
+    namedStyleType: str
+    textStyle: DocsTextStyle
+    paragraphStyle: DocsParagraphStyle
+
+
+class DocsNamedStyles(TypedDict, total=False):
+    styles: list[DocsNamedStyle]
+
+
+class DocsRange(TypedDict, total=False):
+    startIndex: int
+    endIndex: int
+    segmentId: str
+    tabId: str
+
+
+class DocsNamedRange(TypedDict, total=False):
+    namedRangeId: str
+    name: str
+    ranges: list[DocsRange]
+
+
+class DocsNamedRanges(TypedDict, total=False):
+    """All the ranges of one name (`namedRanges` maps a name to one of these)."""
+    name: str
+    namedRanges: list[DocsNamedRange]
+
+
+class DocsTabProperties(TypedDict, total=False):
+    tabId: str
+    title: str
+    parentTabId: str
+    index: int
+    nestingLevel: int
+
+
+class DocsDocumentTab(TypedDict, total=False):
+    body: DocsBody
+    lists: dict[str, DocsList]
+    inlineObjects: dict[str, DocsInlineObject]
+    namedStyles: DocsNamedStyles
+    namedRanges: dict[str, DocsNamedRanges]
+    documentStyle: JsonObject
+
+
+class DocsTab(TypedDict, total=False):
+    tabProperties: DocsTabProperties
+    documentTab: DocsDocumentTab
+    childTabs: list[DocsTab]
+
+
 class Document(TypedDict, total=False):
     """`documents.get`. With `includeTabsContent` the content is under `tabs`, not `body`."""
     documentId: str
     title: str
     revisionId: str
-    body: JsonObject
-    tabs: list[JsonObject]
-    namedRanges: JsonObject
-    inlineObjects: JsonObject
-    lists: JsonObject
+    suggestionsViewMode: str
+    body: DocsBody
+    tabs: list[DocsTab]
+    namedRanges: dict[str, DocsNamedRanges]
+    inlineObjects: dict[str, DocsInlineObject]
+    lists: dict[str, DocsList]
     documentStyle: JsonObject
-    namedStyles: JsonObject
+    namedStyles: DocsNamedStyles
+
+
+# The requests `doc_merge` and `doc_ir` write, as the discovery document spells them. A
+# `Request` is a oneof: exactly one of its keys is set, which is how the API says it and
+# how a reader (`devtools/doc_world`) asks which one it holds (`request.get(...)`).
+
+
+class DocsLocation(TypedDict, total=False):
+    index: Required[int]
+    tabId: str
+    segmentId: str
+
+
+class DocsEndOfSegmentLocation(TypedDict, total=False):
+    tabId: str
+    segmentId: str
+
+
+class DocsRangeWrite(TypedDict, total=False):
+    """A `Range` a request names: always both ends, a tab where it is not the first."""
+    startIndex: Required[int]
+    endIndex: Required[int]
+    tabId: str
+    segmentId: str
+
+
+class DocsTabsCriteria(TypedDict, total=False):
+    tabIds: list[str]
+
+
+class InsertTextRequest(TypedDict, total=False):
+    text: Required[str]
+    location: DocsLocation
+    endOfSegmentLocation: DocsEndOfSegmentLocation
+
+
+class DeleteContentRangeRequest(TypedDict, total=False):
+    range: Required[DocsRangeWrite]
+
+
+class UpdateTextStyleRequest(TypedDict, total=False):
+    range: Required[DocsRangeWrite]
+    textStyle: Required[DocsTextStyle]
+    fields: Required[str]
+
+
+class UpdateParagraphStyleRequest(TypedDict, total=False):
+    range: Required[DocsRangeWrite]
+    paragraphStyle: Required[DocsParagraphStyle]
+    fields: Required[str]
+
+
+class CreateParagraphBulletsRequest(TypedDict, total=False):
+    range: Required[DocsRangeWrite]
+    bulletPreset: Required[str]
+
+
+class DeleteParagraphBulletsRequest(TypedDict, total=False):
+    range: Required[DocsRangeWrite]
+
+
+class CreateNamedRangeRequest(TypedDict, total=False):
+    name: Required[str]
+    range: Required[DocsRangeWrite]
+
+
+class DeleteNamedRangeRequest(TypedDict, total=False):
+    namedRangeId: str
+    name: str
+    tabsCriteria: DocsTabsCriteria
+
+
+class InsertTableRequest(TypedDict, total=False):
+    rows: Required[int]
+    columns: Required[int]
+    location: DocsLocation
+    endOfSegmentLocation: DocsEndOfSegmentLocation
+
+
+class DocsTableCellLocation(TypedDict, total=False):
+    tableStartLocation: Required[DocsLocation]
+    rowIndex: Required[int]
+    columnIndex: Required[int]
+
+
+class InsertTableRowRequest(TypedDict, total=False):
+    tableCellLocation: Required[DocsTableCellLocation]
+    insertBelow: Required[bool]
+
+
+class InsertTableColumnRequest(TypedDict, total=False):
+    tableCellLocation: Required[DocsTableCellLocation]
+    insertRight: Required[bool]
+
+
+class DeleteTableLineRequest(TypedDict, total=False):
+    """`deleteTableRow` and `deleteTableColumn`: the line through one cell."""
+    tableCellLocation: Required[DocsTableCellLocation]
+
+
+class DocsObjectSize(TypedDict, total=False):
+    width: DocsDimension
+    height: DocsDimension
+
+
+class InsertInlineImageRequest(TypedDict, total=False):
+    uri: Required[str]
+    location: DocsLocation
+    endOfSegmentLocation: DocsEndOfSegmentLocation
+    objectSize: DocsObjectSize
+
+
+class InsertPersonRequest(TypedDict, total=False):
+    location: Required[DocsLocation]
+    personProperties: Required[DocsPersonProperties]
+
+
+class InsertDateRequest(TypedDict, total=False):
+    location: Required[DocsLocation]
+    dateElementProperties: Required[DocsDateElementProperties]
+
+
+class AddDocumentTabRequest(TypedDict, total=False):
+    tabProperties: Required[DocsTabProperties]
+
+
+class UpdateDocumentTabPropertiesRequest(TypedDict, total=False):
+    tabProperties: Required[DocsTabProperties]
+    fields: Required[str]
+
+
+class DeleteTabRequest(TypedDict, total=False):
+    tabId: Required[str]
+
+
+class DocsRequest(TypedDict, total=False):
+    """One request of a `documents.batchUpdate`: exactly one of these is set."""
+    insertText: InsertTextRequest
+    deleteContentRange: DeleteContentRangeRequest
+    updateTextStyle: UpdateTextStyleRequest
+    updateParagraphStyle: UpdateParagraphStyleRequest
+    createParagraphBullets: CreateParagraphBulletsRequest
+    deleteParagraphBullets: DeleteParagraphBulletsRequest
+    createNamedRange: CreateNamedRangeRequest
+    deleteNamedRange: DeleteNamedRangeRequest
+    insertTable: InsertTableRequest
+    insertTableRow: InsertTableRowRequest
+    insertTableColumn: InsertTableColumnRequest
+    deleteTableRow: DeleteTableLineRequest
+    deleteTableColumn: DeleteTableLineRequest
+    insertInlineImage: InsertInlineImageRequest
+    insertPerson: InsertPersonRequest
+    insertDate: InsertDateRequest
+    addDocumentTab: AddDocumentTabRequest
+    updateDocumentTabProperties: UpdateDocumentTabPropertiesRequest
+    deleteTab: DeleteTabRequest
+
+
+# Every kind of request above, by the key that says it.
+DocsRequestKind = Literal[
+    "insertText", "deleteContentRange", "updateTextStyle", "updateParagraphStyle",
+    "createParagraphBullets", "deleteParagraphBullets", "createNamedRange", "deleteNamedRange",
+    "insertTable", "insertTableRow", "insertTableColumn", "deleteTableRow", "deleteTableColumn",
+    "insertInlineImage", "insertPerson", "insertDate", "addDocumentTab",
+    "updateDocumentTabProperties", "deleteTab"]
+DOCS_REQUEST_KINDS: tuple[DocsRequestKind, ...] = (
+    "insertText", "deleteContentRange", "updateTextStyle", "updateParagraphStyle",
+    "createParagraphBullets", "deleteParagraphBullets", "createNamedRange", "deleteNamedRange",
+    "insertTable", "insertTableRow", "insertTableColumn", "deleteTableRow", "deleteTableColumn",
+    "insertInlineImage", "insertPerson", "insertDate", "addDocumentTab",
+    "updateDocumentTabProperties", "deleteTab")
+
+
+def docs_request_kind(request: DocsRequest) -> DocsRequestKind:
+    """Which request this is: the one key of the oneof that is set."""
+    for kind in DOCS_REQUEST_KINDS:
+        if kind in request:
+            return kind
+    raise ValueError(f"a Docs request of no kind we write: {sorted(request)}")
 
 
 class DocsBatchUpdateResponse(TypedDict, total=False):

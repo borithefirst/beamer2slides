@@ -448,6 +448,10 @@ markers.
 - What a request cannot say is **reported, not guessed**: bullet nesting levels and glyphs
   (`unwritten_levels`, `unwritten_glyphs`), picture sizes and alt text, unmodelled properties
   (`doc_ir.unmodelled`). What a sync deletes is listed first in the report.
+- Types: the IR is `doc_ir`'s TypedDicts (`Ir`, `Block`, `Run`), variable keys read through
+  Literal accessors (`mark_of`, `measure_of`); plans `doc_merge.Plan`/`TabPlan`, reports
+  `doc_sync.SyncReport`; requests and replies `google_types`' Docs types. `doc_world.World.apply`
+  takes plain Mappings on purpose (the fuzz's reader ops are browser-shaped).
 - Reads retry through blips (`doc_sync._read`); **writes never retry** (a lost answer may have
   been applied).
 - Fuzzed against `devtools/doc_loss_oracle.py` and four campaign judges in `tools/fuzz_docs.py`

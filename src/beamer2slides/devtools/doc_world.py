@@ -45,13 +45,22 @@ with the real `doc_ir.from_document`, the real `apply_keys` and the real
 from __future__ import annotations
 
 import copy
+from collections.abc import Mapping, Sequence
 
 from .. import doc_ir, doc_merge
+from ..doc_ir import Block, Ir, Measures, Run, Script, Style
+from ..google_types import (DocsBatchUpdateResponse, DocsDocumentTab, DocsEmbeddedObject,
+                            DocsInlineObject, DocsList, DocsNamedRanges, DocsNamedStyle,
+                            DocsNestingLevel, DocsParagraph, DocsParagraphElement,
+                            DocsParagraphStyle, DocsStructuralElement, DocsTab,
+                            DocsTableCell, DocsTableRow, DocsTabProperties, DocsTextStyle,
+                            Document)
+from ..json_types import JsonObject
 
 # What the API answers a request it will not take. Google throws out the whole batch
 # with it, so this is never caught request by request (docs/google-docs.md).
 class Refused(RuntimeError):
-    def __init__(self, request: dict, why: str):
+    def __init__(self, request: Mapping[str, object], why: str) -> None:
         self.request, self.why = request, why
         super().__init__(f"{next(iter(request), '?')}: {why}")
 
@@ -329,7 +338,7 @@ class World:
         # (there is none in the API), so nothing here ever changes it — it is here so
         # that a paragraph *inheriting* a property can be represented at all, which is
         # the one thing a document's look is made of. Empty for most corpus shapes.
-        self.theme: dict[str, dict] = {}
+        self.theme: dict[str, DocsNamedStyle] = {}
         self.revision = 1
         # A plain counter, not itertools.count: a world is deep-copied all the time (the
         # campaign tries a second sync on a copy), and copying an iterator is deprecated.
@@ -351,18 +360,18 @@ class World:
 
     # -- reading
 
-    def read(self) -> dict:
+    def read(self) -> Document:
         """The document as `documents.get(includeTabsContent=True)` reports it.
 
         With the flag the `body` key disappears and `tabs` takes its place, nested by
         parent — measured, and the reason every read in the sync passes the flag.
         """
-        by_parent: dict[str | None, list] = {}
+        by_parent: dict[str | None, list[Tab]] = {}
         for t in self.tabs:
             by_parent.setdefault(t.parent, []).append(t)
 
-        def branch(t: Tab, index: int) -> dict:
-            props = {"tabId": t.id, "title": t.title, "index": index}
+        def branch(t: Tab, index: int) -> DocsTab:
+            props: DocsTabProperties = {"tabId": t.id, "title": t.title, "index": index}
             if t.parent:
                 props["parentTabId"] = t.parent
             return {"tabProperties": props, "documentTab": self._tab_json(t),
@@ -371,26 +380,31 @@ class World:
         return {"title": self.title, "revisionId": f"r{self.revision}",
                 "tabs": [branch(t, i) for i, t in enumerate(by_parent.get(None, []))]}
 
-    def _tab_json(self, t: Tab) -> dict:
-        objects: dict = {}
-        content = [{"startIndex": 0, "endIndex": 1, "sectionBreak": {"sectionStyle": {}}}]
+    def _tab_json(self, t: Tab) -> DocsDocumentTab:
+        objects: dict[str, DocsInlineObject] = {}
+        content: list[DocsStructuralElement] = [
+            {"startIndex": 0, "endIndex": 1, "sectionBreak": {"sectionStyle": {}}}]
         content += _content_json(t.units, 1, objects)
-        named: dict = {}
+        named: dict[str, DocsNamedRanges] = {}
         for ranged in t.named:
             entry = named.setdefault(ranged["name"], {"name": ranged["name"], "namedRanges": []})
-            entry["namedRanges"].append({"namedRangeId": ranged["id"], "name": ranged["name"],
-                                         "ranges": [{"startIndex": ranged["start"],
-                                                     "endIndex": ranged["end"]}]})
-        lists = {lid: {"listProperties": {"nestingLevels": _levels(info)}}
-                 for lid, info in t.lists.items()}
-        out = {"body": {"content": content}, "lists": lists, "inlineObjects": objects,
-               "namedRanges": named}
+            entry.setdefault("namedRanges", []).append(
+                {"namedRangeId": ranged["id"], "name": ranged["name"],
+                 "ranges": [{"startIndex": ranged["start"], "endIndex": ranged["end"]}]})
+        lists: dict[str, DocsList] = {lid: {"listProperties": {"nestingLevels": _levels(info)}}
+                                      for lid, info in t.lists.items()}
+        out: DocsDocumentTab = {"body": {"content": content}, "lists": lists,
+                                "inlineObjects": objects, "namedRanges": named}
         if self.theme:
-            out["namedStyles"] = {"styles": [
-                {"namedStyleType": name} | dict(style) for name, style in self.theme.items()]}
+            styles: list[DocsNamedStyle] = []
+            for name, style in self.theme.items():
+                said: DocsNamedStyle = {"namedStyleType": name}
+                said.update(style)
+                styles.append(said)
+            out["namedStyles"] = {"styles": styles}
         return out
 
-    def latex(self) -> dict[tuple, str]:
+    def latex(self) -> dict[tuple[str | None, int], str]:
         """Every equation's LaTeX, by (tab, start) — what `doc_ir.latex_of` digs out of
         the Markdown export on a live document, since `documents.get` says `{}`."""
         out = {}
@@ -405,8 +419,12 @@ class World:
 
     # -- writing
 
-    def apply(self, requests: list[dict]) -> dict:
+    def apply(self, requests: Sequence[Mapping[str, object]]) -> DocsBatchUpdateResponse:
         """One batch, all or nothing.
+
+        Any request is taken in, typed (`DocsRequest`, what a sync plans) or as a
+        browser would send it (a reader's edit in `fuzz_docs`): what the world has no
+        handler for is refused, as Google refuses it.
 
         Google applies a batch as a transaction: one request it refuses throws out
         every other one with it. A sync that plans a request the API will not take
@@ -414,7 +432,7 @@ class World:
         campaign could not see until its applier started consuming requests.
         """
         spare = copy.deepcopy(self.tabs)
-        replies = []
+        replies: list[JsonObject] = []
         try:
             for request in requests:
                 replies.append(self._one(request) or {})
@@ -424,10 +442,10 @@ class World:
         self.revision += 1
         return {"replies": replies}
 
-    def _one(self, request: dict) -> dict | None:
+    def _one(self, request: Mapping[str, object]) -> JsonObject | None:
         name = next(iter(request), None)
         handler = getattr(self, f"_do_{name}", None)
-        if handler is None:
+        if handler is None or name is None:
             raise Refused(request, "no such request in the v1 API")
         return handler(request[name], request)
 
@@ -516,7 +534,8 @@ class World:
         tab = self.tab(arg["range"].get("tabId"))
         fields = [f.strip() for f in arg.get("fields", "").split(",") if f.strip()]
         given = arg.get("textStyle", {})
-        style = _ir_style(given)
+        # By the request's field names, which are strings: the IR key each one sets.
+        style: Mapping[str, object] = _ir_style(given)
         for u, _ in self._chars(tab, arg["range"], request):
             for field in fields:
                 key = API_TO_IR.get(field, field)
@@ -525,8 +544,8 @@ class World:
                     # a document, where False against no named style is nothing, but
                     # a request means what it says.
                     u["s"][key] = bool(given[field])
-                elif style.get(key):
-                    u["s"][key] = style[key]
+                elif value := style.get(key):
+                    u["s"][key] = value
                 else:
                     u["s"].pop(key, None)
                     # A face named with no value puts the paragraph's own back, and
@@ -790,7 +809,7 @@ def _paragraph_at(cont: list[dict], offset: int) -> dict:
     return plain()
 
 
-def _ir_style(text_style: dict) -> dict:
+def _ir_style(text_style: DocsTextStyle) -> Style:
     """A Docs textStyle as the IR spells it.
 
     `doc_ir._style_of` itself, never a copy of it. A copy is what this was, and it
@@ -818,7 +837,7 @@ API_TO_IR = {"bold": "bold", "italic": "italic", "underline": "underline",
 
 def _ir_measure(key: str, value):
     """One `paragraphStyle` property as the IR spells it — the inverse of
-    `doc_merge._paragraph_value`, rounded as `doc_ir._paragraph_measures` rounds it,
+    `doc_merge._set_paragraph`, rounded as `doc_ir._paragraph_measures` rounds it,
     so a value written and then read back is the same number and the merge does not
     see a change nobody made."""
     if key == "line_spacing":
@@ -833,40 +852,51 @@ def _ir_measure(key: str, value):
     return doc_ir._points(value)
 
 
-def _api_measures(measures: dict) -> dict:
+def _api_measures(measures: Measures) -> DocsParagraphStyle:
     """Every paragraph property of the dialect as `documents.get` reports it."""
-    return {api: doc_merge._paragraph_value(key, measures[key])
-            for key, api in doc_merge.PARAGRAPH_FIELDS
-            if measures.get(key) is not None}
+    out: DocsParagraphStyle = {}
+    # Every read of a paragraph comes through here, so the typed accessor is asked
+    # only about what the block sets: the fuzz spends its time in this loop.
+    present: Mapping[str, object] = measures
+    for key, _ in doc_merge.PARAGRAPH_FIELDS:
+        if key in present and (value := doc_ir.measure_of(measures, key)) is not None:
+            doc_merge._set_paragraph(out, key, value)
+    return out
 
 
-def _api_style(style: dict) -> dict:
+def _api_style(style: Style) -> DocsTextStyle:
     """The inverse of `_ir_style`: what `documents.get` would report for it."""
-    out: dict = {}
+    out: DocsTextStyle = {}
+    present: Mapping[str, object] = style    # asked only about the marks it has (hot)
     for key, api in doc_ir.MARK_FIELDS:
         # A mark is True, absent — or False, which a reader leaves behind by turning
         # off a mark the named style puts on. `documents.get` reports all three, and
         # collapsing the last two is how a theme's bold would come back unasked.
-        if style.get(key) is not None:
-            out[api] = bool(style[key])
+        if key in present and (said := doc_ir.mark_of(style, key)) is not None:
+            doc_merge._set_mark_api(out, api, said)
     # `code` is the file's older spelling for a monospaced face and still means
     # Courier New (`doc_ir.CODE_FAMILY`); an explicit face wins over it.
     family = style.get("font") or (doc_ir.CODE_FAMILY if style.get("code") else None)
     if family:
         out["weightedFontFamily"] = {"fontFamily": family}
-    if style.get("script"):
+    if script := style.get("script"):
         # Not a mark: one of three values, and "none" is the third rather than the
         # absence of the other two (`doc_ir.SCRIPTS`).
-        out["baselineOffset"] = {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT",
-                                 "none": "NONE"}[style["script"]]
-    if style.get("fontsize"):
-        out["fontSize"] = {"magnitude": float(style["fontsize"]), "unit": "PT"}
-    for api, key in (("foregroundColor", "color"), ("backgroundColor", "highlight")):
-        if style.get(key):
-            out[api] = {"color": {"rgbColor": doc_merge._rgb(style[key])}}
-    if style.get("link"):
-        out["link"] = {"url": style["link"]}
+        out["baselineOffset"] = SCRIPT_API[script]
+    if fontsize := style.get("fontsize"):
+        out["fontSize"] = {"magnitude": float(fontsize), "unit": "PT"}
+    if color := style.get("color"):
+        out["foregroundColor"] = {"color": {"rgbColor": doc_merge._rgb(color)}}
+    if highlight := style.get("highlight"):
+        out["backgroundColor"] = {"color": {"rgbColor": doc_merge._rgb(highlight)}}
+    if link := style.get("link"):
+        out["link"] = {"url": link}
     return out
+
+
+# What `documents.get` says for each raised or lowered run: the world's own table, not
+# `doc_ir.TO_SCRIPT`, so a reader that misread one would not be agreed with here.
+SCRIPT_API: dict[Script, str] = {"super": "SUPERSCRIPT", "sub": "SUBSCRIPT", "none": "NONE"}
 
 
 def nest(world: "World", span: dict, level: int) -> bool:
@@ -891,7 +921,7 @@ def nest(world: "World", span: dict, level: int) -> bool:
     return moved
 
 
-def _levels(info: dict) -> list[dict]:
+def _levels(info: dict) -> list[DocsNestingLevel]:
     """A list's nesting levels as `documents.get` reports them.
 
     `ordered: None` is the list Drive's HTML importer built: every level comes back
@@ -908,9 +938,11 @@ def _levels(info: dict) -> list[dict]:
 
 # ---------------------------------------------------------------- documents.get JSON
 
-def _content_json(units: list[dict], start: int, objects: dict) -> list[dict]:
-    out: list[dict] = []
-    at, low, run = start, start, []
+def _content_json(units: list[dict], start: int,
+                  objects: dict[str, DocsInlineObject]) -> list[DocsStructuralElement]:
+    out: list[DocsStructuralElement] = []
+    at, low = start, start
+    run: list[dict] = []
     for u in units:
         if u["k"] in ("t", "toc"):
             if run:
@@ -933,10 +965,11 @@ def _content_json(units: list[dict], start: int, objects: dict) -> list[dict]:
     return out
 
 
-def _paragraph_json(run: list[dict], start: int, objects: dict) -> dict:
-    elements: list[dict] = []
+def _paragraph_json(run: list[dict], start: int,
+                    objects: dict[str, DocsInlineObject]) -> DocsStructuralElement:
+    elements: list[DocsParagraphElement] = []
     held: list[str] = []          # code units waiting to become one text run
-    held_style: dict | None = None
+    held_style: Style | None = None
     at = start
 
     def flush(end: int) -> None:
@@ -966,53 +999,53 @@ def _paragraph_json(run: list[dict], start: int, objects: dict) -> dict:
     # A paragraph reports what is set on it, never what it inherits: no `alignment`
     # key at all when it sets none, which is how Docs answers and what lets the
     # reader subtract the named style (`doc_ir._named_defaults`).
-    para_style = {"namedStyleType": para["named"]}
+    para_style: DocsParagraphStyle = {"namedStyleType": para["named"]}
     if para.get("align"):
         para_style["alignment"] = para["align"]
-    out = {"startIndex": start, "endIndex": at,
-           "paragraph": {"elements": elements, "paragraphStyle":
-                         para_style | _api_measures(para.get("measures") or {})}}
+    para_style.update(_api_measures(para.get("measures") or {}))
+    paragraph: DocsParagraph = {"elements": elements, "paragraphStyle": para_style}
     if para.get("bullet"):
-        out["paragraph"]["bullet"] = {"listId": para["bullet"]["list"],
-                                      "nestingLevel": para["bullet"]["level"]}
-    return out
+        paragraph["bullet"] = {"listId": para["bullet"]["list"],
+                               "nestingLevel": para["bullet"]["level"]}
+    return {"startIndex": start, "endIndex": at, "paragraph": paragraph}
 
 
-def _object_json(o: dict, at: int, objects: dict) -> dict:
-    span = {"startIndex": at, "endIndex": at + o.get("size", 1)}
+def _object_json(o: dict, at: int, objects: dict[str, DocsInlineObject]) -> DocsParagraphElement:
+    out: DocsParagraphElement = {"startIndex": at, "endIndex": at + o.get("size", 1)}
     kind = o["chip"]
     if kind == "equation":
-        return span | {"equation": {}}
-    if kind == "person":
-        return span | {"person": {"personProperties": {"name": o.get("name", ""),
-                                                       "email": o.get("email", "")}}}
-    if kind == "date":
-        return span | {"dateElement": {"dateElementProperties": {
+        out["equation"] = {}
+    elif kind == "person":
+        out["person"] = {"personProperties": {"name": o.get("name", ""),
+                                              "email": o.get("email", "")}}
+    elif kind == "date":
+        out["dateElement"] = {"dateElementProperties": {
             "displayText": o.get("display", ""), "timestamp": o.get("timestamp", ""),
-            "dateFormat": o.get("format", ""), "locale": o.get("locale", "")}}}
-    if kind == "link":
-        return span | {"richLink": {"richLinkProperties": {"title": o.get("title", ""),
-                                                           "uri": o.get("uri", "")}}}
-    if kind == "image":
-        embedded: dict = {"imageProperties": {"contentUri": o.get("uri", "")}}
+            "dateFormat": o.get("format", ""), "locale": o.get("locale", "")}}
+    elif kind == "link":
+        out["richLink"] = {"richLinkProperties": {"title": o.get("title", ""),
+                                                  "uri": o.get("uri", "")}}
+    elif kind == "image":
+        embedded: DocsEmbeddedObject = {"imageProperties": {"contentUri": o.get("uri", "")}}
         if o.get("size_pt"):
             embedded["size"] = {"width": {"magnitude": o["size_pt"][0], "unit": "PT"},
                                 "height": {"magnitude": o["size_pt"][1], "unit": "PT"}}
         if o.get("alt"):
             embedded["description"] = o["alt"]
         objects[o["id"]] = {"inlineObjectProperties": {"embeddedObject": embedded}}
-        return span | {"inlineObjectElement": {"inlineObjectId": o["id"]}}
+        out["inlineObjectElement"] = {"inlineObjectId": o["id"]}
     # A dropdown chip: an element with a span and no content key of any kind (measured).
-    return span
+    return out
 
 
-def _table_json(t: dict, start: int, objects: dict) -> dict:
+def _table_json(t: dict, start: int,
+                objects: dict[str, DocsInlineObject]) -> DocsStructuralElement:
     at = start + 1
-    rows = []
+    rows: list[DocsTableRow] = []
     for row in t["rows"]:
         row_start = at
         at += 1
-        cells = []
+        cells: list[DocsTableCell] = []
         for cell in row:
             cell_start = at
             at += 1
@@ -1024,8 +1057,6 @@ def _table_json(t: dict, start: int, objects: dict) -> dict:
             "table": {"rows": len(t["rows"]),
                       "columns": len(t["rows"][0]) if t["rows"] else 0,
                       "tableRows": rows}}
-
-
 # ---------------------------------------------------------------- IR -> a world
 
 def build(parts: list[dict], title: str = "doc") -> World:
@@ -1053,12 +1084,12 @@ def build(parts: list[dict], title: str = "doc") -> World:
     return world
 
 
-def _units_of(blocks: list[dict], tab: Tab, world: World) -> list[dict]:
+def _units_of(blocks: Sequence[Block], tab: Tab, world: World) -> list[dict]:
     out: list[dict] = []
     for block in blocks:
         if block["kind"] == "table":
             out.append(table([[_units_of(cell, tab, world) or [mark()] for cell in row]
-                              for row in block["rows"]]))
+                              for row in block.get("rows", [])]))
             continue
         if block["kind"] == "toc":
             out.append(toc())
@@ -1066,16 +1097,17 @@ def _units_of(blocks: list[dict], tab: Tab, world: World) -> list[dict]:
         para = plain()
         if block["kind"] != "item":
             para["named"] = doc_merge.named_style(block)
-        if block.get("align"):
-            para["align"] = doc_ir.TO_ALIGNMENT[block["align"]]
-        para["measures"] = {key: block[key] for key, _ in doc_merge.PARAGRAPH_FIELDS
-                            if block.get(key) is not None}
-        if block.get("indent") is not None or block.get("indent_first") is not None:
+        if align := block.get("align"):
+            para["align"] = doc_ir.TO_ALIGNMENT[align]
+        para["measures"] = {key: value for key, _ in doc_merge.PARAGRAPH_FIELDS
+                            if (value := doc_ir.measure_of(block, key)) is not None}
+        indent, indent_first = block.get("indent"), block.get("indent_first")
+        if indent is not None or indent_first is not None:
             # A measure is kept as `documents.get` says it, so the first line is from the
             # page margin: `margin-left` plus a `text-indent`, a negative one dropped
             # (measured 2026-09-24: 36 + 18 imports as 54, 36 - 18 as 36).
             para["measures"].pop("indent_first", None)
-            first = (block.get("indent") or 0.0) + max(block.get("indent_first") or 0.0, 0.0)
+            first = (indent or 0.0) + max(indent_first or 0.0, 0.0)
             if first:
                 para["measures"]["indent_first"] = first
         if block["kind"] == "item":
@@ -1083,10 +1115,10 @@ def _units_of(blocks: list[dict], tab: Tab, world: World) -> list[dict]:
             para["bullet"] = {"list": lid, "level": block.get("level", 0)}
             # An imported list cannot say whether it is numbered: that is the state the
             # merge has to cope with, so it is the corpus's default.
-            tab.lists.setdefault(lid, {"ordered": block.get("glyphs")})
+            tab.lists.setdefault(lid, {"ordered": _glyphs(block)})
         for run in block.get("runs", []):
-            if run.get("chip"):
-                out.append(_object_unit(run, world))
+            if chip := run.get("chip"):
+                out.append(_object_unit(chip, run, world))
             else:
                 out += text_units(run["text"], {k: v for k, v in run.items()
                                                 if k not in ("text", "width")})
@@ -1094,8 +1126,14 @@ def _units_of(blocks: list[dict], tab: Tab, world: World) -> list[dict]:
     return out
 
 
-def _object_unit(run: dict, world: World) -> dict:
-    kind = run["chip"]
+def _glyphs(block: Mapping[str, object]) -> bool | None:
+    """Whether a corpus list is numbered (`fuzz_docs._item`'s `glyphs`): a key of the
+    corpus's own, which no IR block carries. None is the list an import built."""
+    said = block.get("glyphs")
+    return said if isinstance(said, bool) else None
+
+
+def _object_unit(kind: str, run: Run, world: World) -> dict:
     if kind == "image":
         return obj("image", id=run.get("value") or world.fresh("kix.i"),
                    uri=run.get("uri", "https://example.invalid/pic"),
@@ -1113,8 +1151,8 @@ def _object_unit(run: dict, world: World) -> dict:
 
 # ---------------------------------------------------------------- reading it as a sync does
 
-def part_ir(world: World, tab: str | None, ours: dict | None = None,
-            base: dict | None = None) -> dict:
+def part_ir(world: World, tab: str | None, ours: Ir | None = None,
+            base: Ir | None = None) -> Ir:
     """One tab's IR, filled in the way a sync's read fills it in.
 
     This mirrors `doc_sync._part_of` and calls the same public functions, so the read
@@ -1145,7 +1183,7 @@ def part_ir(world: World, tab: str | None, ours: dict | None = None,
     return part
 
 
-def read_ir(world: World, ours: dict | None = None, base: dict | None = None) -> dict:
+def read_ir(world: World, ours: Ir | None = None, base: Ir | None = None) -> Ir:
     """The whole document's IR: the first tab, with the others under `tabs`."""
     ir = part_ir(world, None, ours, base)
     extra = [part_ir(world, tab.id, ours, base) for tab in world.tabs[1:]]
@@ -1155,7 +1193,7 @@ def read_ir(world: World, ours: dict | None = None, base: dict | None = None) ->
     return ir
 
 
-def settled_ir(world: World, ours: dict | None = None, base: dict | None = None) -> dict:
+def settled_ir(world: World, ours: Ir | None = None, base: Ir | None = None) -> Ir:
     """The read that becomes the file and the base: the same, plus every equation's
     LaTeX, which on a live document comes from the Markdown export (`doc_sync.settle`
     → `doc_ir.attach_latex`) and never from `documents.get`."""

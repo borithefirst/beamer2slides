@@ -44,16 +44,23 @@ import re
 import sys
 import time
 from collections import Counter
+from collections.abc import Mapping, Sequence
 
-from .. import doc_ir, doc_merge
+from .. import doc_ir, doc_merge, doc_sync
+from ..doc_ir import Block, Ir, NamedDefault
+from ..doc_sync import SyncReport, Written
+from ..google_types import DocsBatchUpdateResponse, DocsNamedStyle, DocsRequest, DocsTabProperties
 from . import doc_loss_oracle as oracle
+from .doc_loss_oracle import CellSays, FrozenKey
 from . import doc_world
 from .doc_world import Refused
 
 MIN_EDITS, MAX_EDITS = 1, 4
 COLLIDE_CHANCE = 0.45
 WORD = re.compile(r"\w+")
-MARK_KEYS = {key for key, _ in doc_ir.MARK_FIELDS}
+MARK_KEYS: set[str] = {key for key, _ in doc_ir.MARK_FIELDS}
+#: A stretch of run styling as `_worn` compares it: (field, value) pairs, sorted.
+Marks = tuple[tuple[str, object], ...]
 
 FRESH = ["kestrel", "harbour", "lantern", "meadow", "quartz", "ribbon", "signal",
          "thicket", "umbrella", "vellum", "willow", "zephyr"]
@@ -160,8 +167,8 @@ def _shapes() -> dict:
 #: The named styles the `themed` shape's world carries. No request writes one — the
 #: API has none — so this is fixed for the life of a round, and every difference it
 #: makes is a difference in what a paragraph *inherits*.
-THEME = {"HEADING_1": {"paragraphStyle": {"alignment": "CENTER"},
-                       "textStyle": {"bold": True}}}
+THEME: dict[str, DocsNamedStyle] = {
+    "HEADING_1": {"paragraphStyle": {"alignment": "CENTER"}, "textStyle": {"bold": True}}}
 
 
 def corpus(name: str) -> doc_world.World:
@@ -174,7 +181,7 @@ def corpus(name: str) -> doc_world.World:
                                title="fuzz")
     world = doc_world.build([{"blocks": shapes[name]}], title="fuzz")
     if name == "themed":
-        world.theme = {name: dict(style) for name, style in THEME.items()}
+        world.theme = {name: style.copy() for name, style in THEME.items()}
     return world
 
 
@@ -186,19 +193,21 @@ SHAPES = sorted(list(_shapes()) + ["tabs"])
 class Stager:
     """`doc_sync.Stager` without Drive: a staged picture gets a URL the world can hold."""
 
-    def resolve(self, requests: list[dict]) -> list[dict]:
-        out = []
+    def resolve(self, requests: Sequence[DocsRequest]) -> list[DocsRequest]:
+        out: list[DocsRequest] = []
         for request in requests:
             image = request.get("insertInlineImage")
             if image and image["uri"].startswith(doc_merge.STAGE):
-                request = copy.deepcopy(request)
-                request["insertInlineImage"]["uri"] = \
-                    "https://staged.invalid/" + image["uri"][len(doc_merge.STAGE):]
+                staged = copy.deepcopy(image)
+                staged["uri"] = "https://staged.invalid/" + image["uri"][len(doc_merge.STAGE):]
+                fixed: DocsRequest = {"insertInlineImage": staged}
+                out.append(fixed)
+                continue
             out.append(request)
         return out
 
 
-def bootstrap(world: doc_world.World) -> dict:
+def bootstrap(world: doc_world.World) -> Ir:
     """Every block keyed and named in the document, and a file that is the document's
     own read.
 
@@ -209,7 +218,7 @@ def bootstrap(world: doc_world.World) -> dict:
     a document written in the browser for a year, adopted, edited in the file, synced
     back — rather than one this tool made out of its own dialect.
     """
-    ir = doc_world.read_ir(world)
+    ir = doc_world.read_ir(world, None, None)
     for part in doc_ir.parts(ir):
         stamp = None if part is ir else part.get("tab")
         doc_ir.key_blocks(part)
@@ -221,8 +230,8 @@ def bootstrap(world: doc_world.World) -> dict:
     return ir
 
 
-def sync_once(world: doc_world.World, ours: dict, base: dict,
-              seen: Counter | None = None) -> tuple[dict, dict, dict]:
+def sync_once(world: doc_world.World, ours: Ir, base: Ir,
+              seen: Counter[str] | None = None) -> tuple[SyncReport, Ir, Ir]:
     """`doc_sync.sync` against the world: plan every tab, write it, then settle.
 
     Returns the report and the file and base the settle leaves behind — which are the
@@ -233,27 +242,33 @@ def sync_once(world: doc_world.World, ours: dict, base: dict,
     tabs = doc_merge.pair_tabs(base, ours, theirs)
     if tabs["requests"]:
         _send(world, tabs["requests"], seen)
-    if tabs["rename"]:
-        world.title = tabs["rename"]   # Drive's, not a request (`doc_sync.rename_document`)
+    if rename := tabs["rename"]:
+        world.title = rename   # Drive's, not a request (`doc_sync.rename_document`)
     pairs = list(tabs["pairs"])
-    known = {p.get("tab") for p in doc_ir.parts(theirs)} - {None}
-    siblings, made = doc_merge.tab_siblings(theirs), {}
+    known = {tab for p in doc_ir.parts(theirs) if (tab := p.get("tab")) is not None}
+    siblings = doc_merge.tab_siblings(theirs)
+    made: dict[str, str] = {}
     for part in tabs["create"]:
-        if part.get("parent") in made:
-            part["parent"] = made[part["parent"]]
+        if (parent := part.get("parent")) is not None and parent in made:
+            part["parent"] = made[parent]
         request = doc_merge.add_tab_request(part, known | set(made.values()),
                                             ours, siblings)
         reply = _send(world, [request], seen)
-        tab = reply["replies"][0]["addDocumentTab"]["tabProperties"]["tabId"]
-        if part.get("tab"):
-            made[part["tab"]] = tab
+        tab = doc_sync._new_tab_id(reply)
+        if mine := part.get("tab"):
+            made[mine] = tab
         part["tab"] = tab
-        props = request["addDocumentTab"]["tabProperties"]
-        siblings.setdefault(props.get("parentTabId"), []).insert(props["index"], tab)
+        adding = request.get("addDocumentTab")
+        props: DocsTabProperties = adding["tabProperties"] if adding is not None else {}
+        if (index := props.get("index")) is None:
+            raise ValueError("an addDocumentTab request that names no index")
+        siblings.setdefault(props.get("parentTabId"), []).insert(index, tab)
         pairs.append((tab, part, {"blocks": []}))
 
-    stager, written = Stager(), []
-    for tab, mine, was in [(None, ours, base)] + pairs:
+    stager = Stager()
+    written: list[Written] = []
+    start: list[tuple[str | None, Ir, Ir]] = [(None, ours, base)]
+    for tab, mine, was in start + pairs:
         written.append(_sync_part(world, stager, tab, ours, base, mine, was, seen))
     report = _report(ours, tabs, written)
     live = settle(world, ours, base, {each["stamp"]: each["result"]["blocks"]
@@ -261,20 +276,23 @@ def sync_once(world: doc_world.World, ours: dict, base: dict,
     return report, live, copy.deepcopy(live)
 
 
-def _sync_part(world, stager, tab, ours, base, mine, was, seen) -> dict:
+def _sync_part(world: doc_world.World, stager: Stager, tab: str | None, ours: Ir, base: Ir,
+               mine: Ir, was: Ir, seen: Counter[str]) -> Written:
     theirs = doc_world.part_ir(world, tab, ours, base)
     result = doc_merge.plan(was, mine, theirs)
     was, result, shaped = _write_structure(world, tab, ours, base, mine, was, result, seen)
     if result["requests"]:
         _send(world, stager.resolve(doc_merge.on_tab(result["requests"], tab)), seen)
     return {"stamp": tab, "label": mine.get("title", "") if tab else None,
-            "result": result, "shaped": shaped}
+            "result": result, "shaped": shaped, "attempts": 0}
 
 
-def _write_structure(world, tab, ours, base, mine, was, result, seen) -> tuple:
+def _write_structure(world: doc_world.World, tab: str | None, ours: Ir, base: Ir, mine: Ir,
+                     was: Ir, result: doc_merge.Plan, seen: Counter[str]
+                     ) -> tuple[Ir, doc_merge.Plan, list[doc_merge.Told]]:
     """`doc_sync._write_structure`: the grid first, on its own, then read again and
     plan the words against the grid the document has now."""
-    shaped: list[dict] = []
+    shaped: list[doc_merge.Told] = []
     for _ in range(3):
         if not result["structure"]:
             break
@@ -282,7 +300,7 @@ def _write_structure(world, tab, ours, base, mine, was, result, seen) -> tuple:
         shaped += result["shaped"]
         theirs = doc_world.part_ir(world, tab, ours, base)
         found = doc_merge.recover_tables(
-            was, theirs, {t["key"] for t in result["shaped"] if t.get("key")})
+            was, theirs, {key for t in result["shaped"] if (key := t["key"])})
         anchored = doc_merge.anchor_tables(theirs, result["shaped"])
         anchored += doc_merge.recover_swallowed(theirs, result["shaped"])
         anchored += doc_merge.recover_eaten(theirs, result["shaped"])
@@ -294,11 +312,12 @@ def _write_structure(world, tab, ours, base, mine, was, result, seen) -> tuple:
     return was, result, shaped
 
 
-def settle(world: doc_world.World, ours: dict, base: dict, planned: dict) -> dict:
+def settle(world: doc_world.World, ours: Ir, base: Ir,
+           planned: Mapping[str | None, list[Block]]) -> Ir:
     """`doc_sync.settle` without the filesystem: read, anchor what is new, and let that
     read be the new file and the new base."""
     live = doc_world.read_ir(world, ours, base)
-    tidy = []
+    tidy: list[DocsRequest] = []
     doc_merge.settle_keys(live, planned, base)
     for part in doc_ir.parts(live):
         stamp = None if part is live else part.get("tab")
@@ -316,14 +335,14 @@ def settle(world: doc_world.World, ours: dict, base: dict, planned: dict) -> dic
         live = doc_world.read_ir(world, ours, base)
     for part in doc_ir.parts(live):
         stamp = None if part is live else part.get("tab")
-        if planned.get(stamp):
-            doc_merge.place_pictures(part, planned[stamp])
+        if wanted := planned.get(stamp):
+            doc_merge.place_pictures(part, wanted)
     doc_ir.attach_latex(live, world.latex())
     _fetch_pictures(live)
     return live
 
 
-def _fetch_pictures(live: dict) -> None:
+def _fetch_pictures(live: Ir) -> None:
     """`doc_sync.fetch_pictures` without the download: a picture the document has and
     the file does not is saved beside the file, so the file can carry it from now on.
 
@@ -332,39 +351,41 @@ def _fetch_pictures(live: dict) -> None:
     bytes, and two pictures with the same object id are the same file.
     """
     for part in doc_ir.parts(live):
-        for block in part.get("blocks", []):
+        for block in part["blocks"]:
             for run in oracle.runs_of(block):
-                if run.get("chip") != "image" or run.get("src") or not run.get("value"):
+                value = run.get("value")
+                if run.get("chip") != "image" or run.get("src") or not value:
                     continue
-                run["src"] = f"media/{run['value']}.png"
-                run["sha"] = f"sha-{run['value']}"
+                run["src"] = f"media/{value}.png"
+                run["sha"] = f"sha-{value}"
 
 
-def _send(world: doc_world.World, requests: list[dict], seen: Counter) -> dict:
+def _send(world: doc_world.World, requests: Sequence[DocsRequest],
+          seen: Counter[str]) -> DocsBatchUpdateResponse:
     for request in requests:
         seen["request/" + next(iter(request), "?")] += 1
     return world.apply(requests)
 
 
-def _report(ours: dict, tabs: dict, written: list[dict]) -> dict:
+def _report(ours: Ir, tabs: doc_merge.TabPlan, written: Sequence[Written]) -> SyncReport:
     """`doc_sync._report`, the same shape, so the oracle reads a real one."""
-    info = {"document": "world", "dry_run": False, "requests": 0, "conflicts": [],
-            "notes": list(ours.get("unsupported", [])) + tabs["notes"],
-            "applied": list(tabs["applied"]), "kept": [], "comments": []}
+    info: SyncReport = {
+        "document": "world", "url": "world", "dry_run": False, "requests": 0,
+        "conflicts": [], "notes": list(ours.get("unsupported", [])) + tabs["notes"],
+        "applied": list(tabs["applied"]), "kept": [], "comments": [], "removed": []}
     for each in written:
         result, label = each["result"], each["label"]
-        say = (lambda line, label=label: f"[{label}] {line}") if label is not None else str
-        info["requests"] += len(result["requests"]) + len(result.get("structure", []))
-        info["conflicts"] += [c | {"tab": label} if label is not None else c
-                              for c in result["conflicts"]]
-        info["notes"] += [say(n) for n in result["notes"]]
-        info["applied"] += [say(t["note"]) for t in each["shaped"]]
+        info["requests"] += len(result["requests"]) + len(result["structure"])
+        info["conflicts"] += [doc_sync._in_tab(c, label) for c in result["conflicts"]]
+        info["notes"] += [doc_sync._said_in(label, n) for n in result["notes"]]
+        info["applied"] += [doc_sync._said_in(label, note) for t in each["shaped"]
+                            if (note := t.get("note")) is not None]
         for block in result["blocks"]:
             origin, key = block.get("origin"), block.get("key", "(unkeyed)")
             if block.get("moved") or origin in ("added by the source", "merged"):
-                info["applied"].append(say(f"`{key}` {origin}"))
+                info["applied"].append(doc_sync._said_in(label, f"`{key}` {origin}"))
             elif origin:
-                info["kept"].append(say(f"`{key}` {origin}"))
+                info["kept"].append(doc_sync._said_in(label, f"`{key}` {origin}"))
     info["requests"] += len(tabs["requests"]) + len(tabs["create"])
     return info
 
@@ -994,7 +1015,8 @@ def apply_reader(world: doc_world.World, name: str, rng: random.Random,
     op = READER[name]
     # An op that turns styling *off* has to know what the theme turns on, and only
     # that one does; the rest are a reader typing, who knows nothing of the sort.
-    wants = {"theme": theme_fields(world)} if getattr(op, "wants_theme", False) else {}
+    wants: dict[str, object] = \
+        {"theme": theme_fields(world)} if getattr(op, "wants_theme", False) else {}
     # And one op is about the tab strip rather than about a tab: which tabs there are
     # to delete is not a thing the part it is looking at can say.
     if getattr(op, "wants_tabs", False):
@@ -1010,9 +1032,7 @@ def apply_reader(world: doc_world.World, name: str, rng: random.Random,
     if not batches and not (getattr(op, "wants_world", False) and touched):
         seen["reader/" + name + " (nothing to do)"] += 1
         return []
-    if batches and isinstance(batches[0], dict):
-        batches = [batches]
-    for batch in batches:
+    for batch in _as_batches(batches):
         try:
             world.apply(batch)
         except Refused:
@@ -1022,9 +1042,22 @@ def apply_reader(world: doc_world.World, name: str, rng: random.Random,
     return [t for t in touched if t]
 
 
+def _as_batches(batches: Sequence[object]) -> list[Sequence[Mapping[str, object]]]:
+    """A reader op's requests as the batches they are sent in: an op answers one
+    batch (a list of requests) or several (a list of those)."""
+    if batches and isinstance(batches[0], dict):
+        batches = [batches]
+    out: list[Sequence[Mapping[str, object]]] = []
+    for batch in batches:
+        if not isinstance(batch, (list, tuple)):
+            raise TypeError(f"a reader op answered {batch!r} where a batch belongs")
+        out.append(batch)
+    return out
+
+
 # ---------------------------------------------------------------- what the source does
 
-def _parts(ir: dict) -> list[dict]:
+def _parts(ir: Ir) -> list[Ir]:
     return doc_ir.parts(ir)
 
 
@@ -1174,7 +1207,7 @@ def _source_cells(ir) -> list[dict]:
 def _source_cell_lists(ir) -> list[list]:
     """Every cell, as the list of paragraphs it is."""
     return [cell for part in _parts(ir) for b in part.get("blocks", [])
-            if b.get("kind") == "table" for row in b["rows"] for cell in row]
+            if b.get("kind") == "table" for row in b.get("rows", []) for cell in row]
 
 
 def src_regrid(rng, ir, touched):
@@ -1394,7 +1427,7 @@ def draw(seed: int, chain: int, shape: str | None = None) -> dict:
 THEME_FIELDS = {"alignment": "align"} | {api: key for key, api in doc_merge.PARAGRAPH_FIELDS}
 
 
-def theme_fields(world: doc_world.World) -> dict:
+def theme_fields(world: doc_world.World) -> dict[str, set[str]]:
     """What the world's theme sets, as `doc_loss_oracle.check` wants it: the IR fields
     per named style. Nothing in a read says a paragraph *inherits* — only that it sets
     nothing itself — so the oracle has to be told what there was to inherit.
@@ -1410,7 +1443,7 @@ def theme_fields(world: doc_world.World) -> dict:
             for name, style in (world.theme or {}).items()}
 
 
-def theme_values(world: doc_world.World) -> dict:
+def theme_values(world: doc_world.World) -> dict[str, NamedDefault]:
     """What the world's theme *says*, by named style, as the reader subtracts it.
 
     `theme_fields` names the fields for the oracle, which only needs to know that
@@ -1485,18 +1518,18 @@ def _settled(world, ours, base, step, seen) -> list[dict]:
         f"{'; '.join(report['applied'][:3])}")]
 
 
-def _grid(block: dict | None) -> tuple[int, int] | None:
+def _grid(block: Block | None) -> tuple[int, int] | None:
     """A table's shape, or None when it is not a rectangular table — a ragged one
     (merged cells) is a thing the merge reports rather than writes."""
-    rows = (block or {}).get("rows")
-    if (block or {}).get("kind") != "table" or not rows:
+    if not block or block.get("kind") != "table" or not (rows := block.get("rows")):
         return None
     widths = {len(row) for row in rows}
     return (len(rows), widths.pop()) if len(widths) == 1 else None
 
 
-def _arrived(was: dict, before: dict, mine: dict, after: dict, report: dict,
-             step: int, seen: Counter, theme: dict | None = None) -> list[dict]:
+def _arrived(was: Ir, before: Ir, mine: Ir, after: Ir, report: SyncReport,
+             step: int, seen: Counter[str],
+             theme: Mapping[str, NamedDefault] | None = None) -> list[dict]:
     """Did the source's regrid arrive? The third judge, and the campaign's own.
 
     The loss oracle says in its first paragraph that it does not ask this — it asks
@@ -1528,7 +1561,7 @@ def _arrived(was: dict, before: dict, mine: dict, after: dict, report: dict,
     said = oracle.accounted(report)
     doc_ir.key_blocks(mine)
     sides = [oracle.parts_by_tab(ir) for ir in (was, before, mine, after)]
-    out = []
+    out: list[dict] = []
     for tab, part in sides[0].items():
         if any(tab not in side for side in sides[1:]):
             continue
@@ -1573,15 +1606,15 @@ def _arrived(was: dict, before: dict, mine: dict, after: dict, report: dict,
     return out
 
 
-def _block_keys(part: dict) -> list[str]:
-    return [b["key"] for b in part.get("blocks", []) if b.get("key")]
+def _block_keys(part: Ir) -> list[str]:
+    return [key for b in part.get("blocks", []) if (key := b.get("key"))]
 
 
-def _wordless(part: dict) -> set:
+def _wordless(part: Ir) -> set[str]:
     """The keys of the blocks of this part that say nothing — a table with no words
     in it among them, since `doc_ir.key_blocks` names that one `table:empty`."""
-    return {b["key"] for b in part.get("blocks", [])
-            if b.get("key") and not _says(b)[0].strip()}
+    return {key for b in part.get("blocks", [])
+            if (key := b.get("key")) and not _says(b)[0].strip()}
 
 
 def _order_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
@@ -1748,7 +1781,7 @@ def _existence_arrived(was_p, doc_p, src_p, end_p, said, tab, step,
     return out
 
 
-def _saying(part: dict, text: str) -> int:
+def _saying(part: Ir, text: str) -> int:
     """How many blocks of the part say exactly this text."""
     return sum(1 for b in part.get("blocks", []) if _says(b)[0] == text)
 
@@ -1785,7 +1818,7 @@ def _words_arrived(key, block, here, file_b, then, said, tab, step,
 
 
 def _styling_arrived(key, block, here, file_b, then, said, tab, step,
-                     seen: Counter, theme: dict) -> list[dict]:
+                     seen: Counter[str], theme: Mapping[str, NamedDefault]) -> list[dict]:
     """And the same question about a block's *look*: one the reader left exactly as
     the base has it, words and styling both, must look the way the file asks when the
     sync is over.
@@ -1854,7 +1887,7 @@ def _styling_arrived(key, block, here, file_b, then, said, tab, step,
     return out
 
 
-def _worn(block: dict, theme: dict) -> tuple:
+def _worn(block: Block, theme: Mapping[str, NamedDefault]) -> tuple[tuple[Marks, str], ...]:
     """A block's run styling as styled stretches of text, adjacent alike ones merged.
 
     Per character and not per word, which is what `oracle.marks_on` is and what this
@@ -1876,29 +1909,32 @@ def _worn(block: dict, theme: dict) -> tuple:
     (seed 220012), and reading it as a mark accuses the sync of losing an un-bolding
     of a word that was never bold.
     """
-    puts_on = set(theme.get(doc_merge.named_style(block), {}).get("marks") or ())
-    out: list[list] = []
+    said = theme.get(doc_merge.named_style(block))
+    puts_on: set[str] = set(said.get("marks") or ()) if said else set()
+    out: list[tuple[Marks, str]] = []
     for run in block.get("runs", []):
         if run.get("frozen"):
             continue
-        style = dict(run)
+        style: dict[str, object] = dict(run)
         if style.pop("code", None) and not style.get("font"):
             style["font"] = doc_ir.CODE_FAMILY
-        marks = tuple(sorted((k, _flat(v)) for k, v in style.items()
-                             if k not in ("text", "width")
-                             and not (k in MARK_KEYS and bool(v) == (k in puts_on))))
+        # A dict's keys are unique, so sorting by the key alone is the whole order.
+        marks = tuple(sorted(((k, _flat(v)) for k, v in style.items()
+                              if k not in ("text", "width")
+                              and not (k in MARK_KEYS and bool(v) == (k in puts_on))),
+                             key=lambda kv: kv[0]))
         if out and out[-1][0] == marks:
-            out[-1][1] += run.get("text", "")
+            out[-1] = (marks, out[-1][1] + run.get("text", ""))
         else:
-            out.append([marks, run.get("text", "")])
+            out.append((marks, run.get("text", "")))
     return tuple((marks, text) for marks, text in out if text)
 
 
-def _flat(value):
+def _flat(value: object) -> object:
     return json.dumps(value, sort_keys=True) if isinstance(value, (dict, list)) else value
 
 
-def _shape(block: dict, theme: dict) -> tuple:
+def _shape(block: Block, theme: Mapping[str, NamedDefault]) -> tuple[object, ...]:
     """A block's paragraph styling: its named style and every measure the merge owns.
 
     A paragraph reads back with a property only where it differs from its named
@@ -1917,18 +1953,20 @@ def _shape(block: dict, theme: dict) -> tuple:
     fields = ("level", "ordered") + tuple(k for k, _ in doc_merge.PARAGRAPH_KEYS)
     if block.get("kind") == "item":
         fields = tuple(f for f in fields if not f.startswith("indent"))
-    gives = theme.get(name, {})
-    out = {}
+    gives: Mapping[str, object] = theme.get(name) or {}
+    out: dict[str, object] = {}
     for field in fields:
-        value = block.get(field)
+        value = oracle.field_of(block, field)
         # A theme that sets nothing aligns left, which is what the API's own default
         # is: the two spellings of that are one thing.
         inherited = gives.get(field) or ("left" if field == "align" else None)
         out[field] = None if value == inherited else value
-    return (name,) + tuple(sorted((k, v) for k, v in out.items() if v is not None))
+    # A dict's keys are unique, so sorting by the key alone is the whole order.
+    return (name,) + tuple(sorted(((k, v) for k, v in out.items() if v is not None),
+                                  key=lambda kv: kv[0]))
 
 
-def _says(block: dict) -> tuple:
+def _says(block: Block) -> tuple[str, Counter[FrozenKey]]:
     """What a block says, comparably between the file and a read-back: the words of
     its own, and the frozen runs by what they *are*.
 
@@ -1942,7 +1980,7 @@ def _says(block: dict) -> tuple:
             oracle.frozen_marks(block))
 
 
-def _cell_says(block: dict) -> dict:
+def _cell_says(block: Block) -> dict[tuple[int, int], CellSays]:
     """What each cell of a table says, in `_says`' language rather than `cells_of`'s.
 
     The same subtraction one size down, and it had to be made twice because the two
@@ -1952,11 +1990,11 @@ def _cell_says(block: dict) -> dict:
     the edit read as one that never arrived and every seed drawing `cell_chip` failed
     at once. The cell is the last place in this file that asked in the old language.
     """
-    out = {}
+    out: dict[tuple[int, int], CellSays] = {}
     for r, row in enumerate(block.get("rows", [])):
         for c, cell in enumerate(row):
             said = [_says(b) for b in cell]
-            marks: Counter = Counter()
+            marks: Counter[FrozenKey] = Counter()
             for _, m in said:
                 marks += m
             out[(r, c)] = (" ".join(w for w, _ in said),
@@ -1964,7 +2002,7 @@ def _cell_says(block: dict) -> dict:
     return out
 
 
-def _cell_text(said: tuple) -> str:
+def _cell_text(said: CellSays) -> str:
     """One cell's `_cell_says` as a line a person can read in a finding."""
     words, marks = said
     return words + "".join(f" [{kind} {value}]" for (kind, value), n in marks
@@ -2009,7 +2047,8 @@ def _cells_arrived(key, block, here, file_b, then, said, tab, step,
     out = []
     for at, text in file_cells.items():
         old = was_cells.get(at)
-        if text == old or base_cells[text] or doc_cells[old] < base_cells[old]:
+        if text == old or base_cells[text] \
+                or (old is not None and doc_cells[old] < base_cells[old]):
             continue
         seen["arrival/cell asked"] += 1
         if after[text] or oracle._named(said, key):

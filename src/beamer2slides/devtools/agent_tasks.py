@@ -34,6 +34,7 @@ from .agent_bench import HARM_PREFIX, Answer, Run, Scripted, Skip, call
 if TYPE_CHECKING:
     from typing_extensions import Unpack
 
+    from beamer2slides.doc_ir import Ir
     from beamer2slides.google_types import (CreateFile, ExportFile, FileId, GetDocument, GetFile,
                                             UpdateDocument, UpdateFile)
 
@@ -1413,7 +1414,7 @@ def _markdown(world) -> str:
     return "\n\n".join(out)
 
 
-def _attach_latex(world, ir: dict) -> int:
+def _attach_latex(world, ir: Ir) -> int:
     """Give the pushed file its equations' LaTeX, the way `doc_sync.settle` gives it.
 
     `fuzz_docs.bootstrap` goes through `doc_world.settled_ir`, whose own `World.latex`
@@ -1543,7 +1544,7 @@ class DocsFixture:
         from beamer2slides.devtools import doc_world
 
         found = doc_world.read_ir(self.world)["blocks"][block]
-        at = found["span"][0] + doc_ir.runs_text(found["runs"]).index(was)
+        at = doc_ir._span(found)[0] + doc_ir.runs_text(found.get("runs", [])).index(was)
         self.world.apply([
             {"deleteContentRange": {"range": {"startIndex": at, "endIndex": at + len(was)}}},
             {"insertText": {"location": {"index": at}, "text": now}}])

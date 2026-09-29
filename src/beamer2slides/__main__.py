@@ -222,7 +222,7 @@ def cmd_docs(args) -> None:
           f"{len(info['conflicts'])} conflict(s), {info['requests']} request(s)")
     if info.get("backup"):
         print(f"  the document was exported to {info['backup']} before being written over")
-    print(f"report: {info['report']}")
+    print(f"report: {info.get('report')}")
     print(f"Google Docs: {info['url']}")
 
 

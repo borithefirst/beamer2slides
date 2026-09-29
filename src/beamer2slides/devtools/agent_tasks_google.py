@@ -34,7 +34,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from beamer2slides.json_types import JsonObject, as_int, as_object, as_objects, as_str
+from beamer2slides.json_types import JsonObject, as_object, as_objects, as_str
 
 from .agent_bench import HARM_PREFIX, Answer, Run, Skip, call
 
@@ -377,12 +377,12 @@ def _type_into_doc(creds, ident: str, needle: str, text: str) -> None:
 
     api = docs_service(creds)
     doc = api.documents().get(documentId=ident).execute()
-    for element in as_objects(doc.get("body", {}).get("content", []), "the document's content"):
-        paragraph = as_object(element.get("paragraph") or {}, "a paragraph")
-        said = _said(as_objects(paragraph.get("elements") or [], "a paragraph's elements"))
-        if needle.lower() in said.lower():
+    for element in doc.get("body", {}).get("content", []):
+        said = "".join(el.get("textRun", {}).get("content", "")
+                       for el in element.get("paragraph", {}).get("elements", []))
+        if needle.lower() in said.lower() and "endIndex" in element:
             # In front of the paragraph mark: the end index of a paragraph is its newline.
-            at = as_int(element.get("endIndex"), "a paragraph's end index") - 1
+            at = element["endIndex"] - 1
             api.documents().batchUpdate(documentId=ident, body={"requests": [
                 {"insertText": {"location": {"index": at}, "text": text}}]}).execute()
             return
