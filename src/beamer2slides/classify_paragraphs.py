@@ -3,20 +3,21 @@ runs a paragraph is written as.
 """
 
 import re
-from collections.abc import Mapping
 from dataclasses import replace
 
 from .classify_model import (
-    ACCENTS, HOLE_PAD, Line, Paragraph, Rect, Span, extension_font, reads_rtl, union_all,
+    ACCENTS, HOLE_PAD, Line, Paragraph, Rect, Span, extension_font, ir_bullet, reads_rtl, union_all,
 )
 from .classify_text import (
-    COMPOSED, FRACTION_SLASH, NBSP, NEGATION, RAISED_MARKS, cjk, explicit_hyphen, first_word_width,
-    formula_groups, gap_between, glued, is_code, is_mono, last_word_width, line_word_width, math_family,
-    math_pieces, math_text, negate, prose_spaces, raised_mark, reading_order, script_of, script_size,
-    stretched, thin_span, with_accent,
+    COMPOSED, FRACTION_SLASH, NBSP, NEGATION, RAISED_MARKS, cjk, code_indent, code_pitch, explicit_hyphen,
+    family_of, first_word_width, formula_groups, gap_between, glued, is_code, is_mono, last_word_width,
+    line_starts, line_word_width, look, math_family, math_pieces, math_text, negate, prose_spaces, raised_mark,
+    reading_order, script_of, script_size, stretched, thin_span, with_accent, with_text,
 )
 from .classify_lines import LinesMixin
 from .fonts import serif_math_letters
+from .ir import Align, BeforeWord, Run, TextElement
+from .ir import Paragraph as ParagraphJson
 
 
 EM_SPACE = chr(0x2003)
@@ -146,7 +147,7 @@ class ParagraphsMixin(LinesMixin):
         return bool(words) and (words[0] in ("—", "–", "---") or words[0][:2] in ("— ", "– ")) and \
             last.text.rstrip()[-1:] in ("”", "\"", "»", "’")
 
-    def continues(self, par: Paragraph, line: Line) -> str | None:
+    def continues(self, par: Paragraph, line: Line) -> Align | None:
         """How `line` continues `par` ('left' | 'center' | 'right'), or None. `join_indent`
         says how far a first line was set in, when that is how it continues."""
         self.join_indent = 0.0
@@ -269,7 +270,7 @@ class ParagraphsMixin(LinesMixin):
             below = u
         return False
 
-    def single_line_align(self, line: Line, margin: float, neighbours: list[Paragraph]) -> str:
+    def single_line_align(self, line: Line, margin: float, neighbours: list[Paragraph]) -> Align:
         """A line alone is centred when it is centred on the page, right-aligned when it ends at
         the right margin - unless it starts where text next to it starts (the other items of
         its list, the block title above it, the column it is in): then it is left-aligned and
@@ -329,7 +330,7 @@ class ParagraphsMixin(LinesMixin):
         for line in lines:
             if line.reason not in (None, "math"):
                 continue
-            best: tuple[Paragraph, str] | None = None
+            best: tuple[Paragraph, Align] | None = None
             for par in reversed(paragraphs):
                 how = self.continues(par, line)
                 if how:
@@ -450,12 +451,75 @@ class ParagraphsMixin(LinesMixin):
                     p.level = min(range(len(levels)), key=lambda i: abs(levels[i] - bx))
         return boxes
 
+    def text_element(self, box: list[Paragraph], element_id: str) -> TextElement:
+        """A text box of paragraphs, as deck.json says it. (An icon bullet is no bullet here:
+        `PageClassifier.classify` makes it a picture of the item.)"""
+        rect = union_all([p.rect for p in box] + [Rect.of(b["bbox"]) for b in (p.bullet for p in box) if b])
+        code = all(is_code(p.spans) and not p.bullet for p in box)
+        pitch =code_pitch([s for p in box for s in p.spans], rect.x0) if code else None
+
+        def unbalanced(p: Paragraph) -> bool:
+            """Centred (or right-aligned) lines broken where a greedy wrap would not break, or
+            nearly would (TeX balances them, or they were broken by hand): no box width
+            reproduces the breaks reliably, so they become soft breaks. So do lines broken
+            where the room they are centred in would have taken the next word: a title page's
+            \\institute or \\date broken with \\\\ (Slides re-wrapped them mid-affiliation)."""
+            if p.align == "left" or len(p.lines) < 2 or not all(l.content for l in p.lines):
+                return False
+            widest = max(l.x1 - l.x0 for l in p.lines)
+            room = max(widest + 0.5 * p.size, self.free_width(p) - 0.5 * p.size)
+            return any(a.x1 - a.x0 + 0.2 * p.size + first_word_width(b.content[0], False) <= room
+                       for a, b in zip(p.lines, p.lines[1:]))
+        runs = [self.runs(p, code_indent(p, rect.x0, pitch) if code else "", unbalanced(p), pitch, rect.x0) for p in box]
+        # (said only where it is known, on a left-aligned wrapped paragraph: line_starts)
+        starts = [line_starts(p.lines, r) if p.align == "left" and not code and not p.direction else None
+                  for p, r in zip(box, runs)]
+
+        def paragraph(p: Paragraph, r: list[Run], s: list[int] | None) -> ParagraphJson:
+            direction = p.direction
+            return {
+                "align": p.align, "level": p.level, "bullet": ir_bullet(p.bullet), "size": round(p.size, 2),
+                # Said only where it is true, as `deck_ir` says it of a deck that is read
+                # back: a left-to-right paragraph is every deck this project had until now.
+                **({"direction": direction} if direction else {}),
+                # (as `deck_ir` reads Slides' JUSTIFIED: a left paragraph, justified)
+                **({"justified": True} if p.justified else {}),
+                # (a first line set in by \parindent starts at lines[0].x0, emit indents it)
+                "text_x0": round(p.x0 - p.indent, 2),
+                "tab_x0": round(p.first.tab.rect.x0, 2) if p.first.tab else None,
+                "lines": [{"baseline": round(l.baseline, 2), "x0": round(l.x0, 2), "x1": round(l.x1, 2)}
+                          for l in p.lines],
+                # Right edge a wrapped line could grow to before TeX would have pulled up the
+                # next line's first word: a text box narrower than this wraps the same way.
+                # (as a width from the paragraph's left edge, so centred lines count too; the next
+                # word up to where Slides may break it, after a hyphen: 'Санкт-' of
+                # 'Санкт-Петербургский' was pulled up, r3_scripts_ruxe s1)
+                "wrap_limit": round(min(l.x0 for l in p.lines) + min(a.x1 - a.x0 + 0.25 * p.size + line_word_width(b, True)
+                                                                     for a, b in zip(p.lines, p.lines[1:])), 2)
+                              if len(p.lines) > 1 and all(l.content for l in p.lines) else None,
+                **({"line_starts": s} if s else {}),
+                "runs": r,
+            }
+        return {
+            "id": element_id, "kind": "text", "role": box[0].role, "bbox": rect.as_list(),
+            "panel": self.panel_of(rect),
+            "paragraphs": [paragraph(p, r, s) for p, r, s in zip(box, runs, starts)],
+            "code": code,
+            "spans": [s.id for p in box for s in p.spans if s.info.family != "icon" and not s.drawn
+                      and not any(s in h for l in p.lines for h in l.holes)],
+            # Fraction bars now written as text, underlines and highlight boxes now text
+            # styles: they leave the background with the glyphs.
+            "strokes": [f[0].as_list() for p in box for l in p.lines for f in l.fractions] +
+                       list({tuple(r.as_list()): r.as_list() for p in box for s in p.spans
+                             for r in self.decor_rects.get(s.id, [])}.values()),
+        }
+
     @staticmethod
-    def runs(par: Paragraph, indent: str, soft_breaks: bool, pitch: float | None, x_ref: float) -> list[dict]:
+    def runs(par: Paragraph, indent: str, soft_breaks: bool, pitch: float | None, x_ref: float) -> list[Run]:
         """`indent`: spaces a code line starts with (`code_indent`, else ""); `soft_breaks`: its
         lines keep their breaks (a title's); `pitch`, `x_ref`: a code block's column grid
         (`code_pitch`), which its spaces keep, else None and 0."""
-        runs: list[dict] = []
+        runs: list[Run] = []
         prev: Span | None = None
         hole_x1 = 0.0
         for li, line in enumerate(par.lines):
@@ -471,7 +535,7 @@ class ParagraphsMixin(LinesMixin):
             for si, (span, forced) in enumerate(order):
                 if isinstance(span, str):  # (FRACTION_SLASH, the only string)
                     main = line.main
-                    runs.append({"text": FRACTION_SLASH, "font": main.font, "family": main.info.family,
+                    runs.append({"text": FRACTION_SLASH, "font": main.font, "family": family_of(main),
                                  "size": round(line.size, 2), "bold": False, "italic": False, "smallcaps": False,
                                  "color": main.color, "link": main.link, "script": None,
                                  "underline": False, "highlight": None})
@@ -498,13 +562,13 @@ class ParagraphsMixin(LinesMixin):
                     main = line.main
                     # What precedes the formula on its line, for emit to predict where Slides
                     # will actually leave the gap (substitute fonts are not exactly as wide).
-                    before = [[round(s.rect.w, 2), s.font, s.info.family, s.info.bold, s.info.italic,
+                    before: list[BeforeWord] = [(round(s.rect.w, 2), s.font, family_of(s), s.info.bold, s.info.italic,
                                # math spacing is part of the span (" ≥"): Slides sets a plain space there
-                               math_text(s.font, s.text)[0] if s.info.family == "math" else s.text, round(s.rect.x0, 2)]
+                               math_text(s.font, s.text)[0] if s.info.family == "math" else s.text, round(s.rect.x0, 2))
                               for s in line.content if s.rect.x1 <= x0 + 0.5 and s.info.family != "icon"
                               and not any(s in h for h in line.holes)]
                     after = [s.rect.x0 for s in line.content if s.rect.x0 >= x1 - 0.5 and s not in hole and s.info.family != "icon"]
-                    runs.append({"text": " ", "font": main.font, "family": main.info.family,
+                    runs.append({"text": " ", "font": main.font, "family": family_of(main),
                                  "size": round(line.size, 2), "bold": False, "italic": False, "smallcaps": False,
                                  "color": main.color, "link": None, "script": None, "underline": False,
                                  # (the picture is cropped with HOLE_PAD on both sides: room for that too)
@@ -590,10 +654,11 @@ class ParagraphsMixin(LinesMixin):
                             # (a \quad measures 0.999 em between the advance boxes; a justified
                             # line's own stretched spaces stay spaces)
                             sep += EM_SPACE * max(1, round((gap - 0.33 * line.size) / line.size))
-                    if si and sep == " " and runs[-1].get("hole"):
+                    hole_w = runs[-1].get("hole")
+                    if si and sep == " " and hole_w:
                         # The space after a formula becomes part of its gap: TeX's space there
                         # is wider than a Slides space would be.
-                        runs[-1]["hole"] = round(runs[-1]["hole"] + gap, 2)
+                        runs[-1]["hole"] = round(hole_w + gap, 2)
                         sep = ""
                         text = text.lstrip()
                     if sep and not runs[-1]["text"].endswith(" ") and not text.startswith(" "):
@@ -613,7 +678,7 @@ class ParagraphsMixin(LinesMixin):
                 script = forced or script_of(span, line)
                 # Slides shrinks sub/superscripts itself: give them the line's size.
                 size = script_size(span, line) if script else span.size
-                family, italic = span.info.family, span.info.italic
+                family, italic = family_of(span), span.info.italic
                 pieces = [(text, italic)]
                 if family == "math":
                     # Math fonts carry symbols and variables; show them in the text family -
@@ -630,38 +695,40 @@ class ParagraphsMixin(LinesMixin):
                     glue = si > 0 and prev is not None and formulas.get(id(prev)) == formulas[id(span)] \
                         and bool(runs) and not runs[-1].get("hole")
                     if glue:
-                        before = runs[-1]["text"]
-                        runs[-1]["text"] = before.rstrip(" ") + NBSP * (len(before) - len(before.rstrip(" ")))
+                        ahead = runs[-1]["text"]
+                        runs[-1]["text"] = ahead.rstrip(" ") + NBSP * (len(ahead) - len(ahead.rstrip(" ")))
                     last = len(pieces) - 1
                     pieces = [(glued(t, glue if k == 0 else True, k < last), it) for k, (t, it) in enumerate(pieces)]
                 for k, (text, italic) in enumerate(pieces):
                     plain = bool(tail) and k == 1
-                    style = {
-                        "font": span.font, "family": family,
+                    style: Run = {
+                        "text": "", "font": span.font, "family": family,
                         "size": round(size, 2),
                         "bold": span.info.bold, "italic": italic, "smallcaps": span.info.smallcaps,
                         "color": span.color, "link": span.link, "script": script,
                         "underline": span.underline and not plain, "strike": span.strike and not plain,
                         "highlight": None if plain else span.highlight,
                     }
-                    def marks(r: Mapping[str, object]) -> tuple[object, object, object]:
-                        return r["underline"], r.get("strike", False), r["highlight"]
+                    def marks(r: Run) -> tuple[bool, bool, str | None]:
+                        return r.get("underline", False), r.get("strike", False), r.get("highlight")
 
                     if runs and runs[-1]["text"].endswith(" ") and marks(runs[-1]) != marks(style) and any(marks(runs[-1])):
                         runs[-1]["text"] = runs[-1]["text"][:-1]  # an underline, strike or highlight ends at the word
                         if any(marks(style)):  # and the next one starts at its word: the space between is plain
-                            runs.append({**runs[-1], "text": " ", "underline": False, "strike": False, "highlight": None})
+                            plain_space: Run = {**runs[-1], "text": " ", "underline": False, "strike": False,
+                                                "highlight": None}
+                            runs.append(plain_space)
                         else:
                             text = " " + text
-                    if style["highlight"] and span.pad_left and k == 0:
+                    if style.get("highlight") and span.pad_left and k == 0:
                         lead = len(text) - len(text.lstrip(" "))
                         text = text[:lead] + BOX_PAD + text[lead:]
-                    if style["highlight"] and span.pad_right and k == len(pieces) - 1 - bool(tail):
+                    if style.get("highlight") and span.pad_right and k == len(pieces) - 1 - bool(tail):
                         text = text + BOX_PAD
-                    if runs and not runs[-1].get("hole") and all(runs[-1].get(k) == v for k, v in style.items()):
+                    if runs and not runs[-1].get("hole") and look(runs[-1]) == look(style):
                         runs[-1]["text"] += text
                     else:
-                        runs.append({"text": text, **style})
+                        runs.append(with_text(style, text))
                 prev = span
         prose_spaces(runs)
         if not indent:

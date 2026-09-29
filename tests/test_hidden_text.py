@@ -250,6 +250,7 @@ def test_hidden_text_stays_as_hidden_in_the_background(tmp_path):
     under its cover in the background picture exactly as in the PDF, and the native words are
     switched off."""
     from beamer2slides.classify import classify
+    from beamer2slides.ir import deck_json
     from beamer2slides.render import load_png, render_backgrounds
 
     content = (text(20, 150, b"Native words") + text(20, 60, b"Buried") +
@@ -268,10 +269,10 @@ def test_hidden_text_stays_as_hidden_in_the_background(tmp_path):
     finally:
         doc.close()
     assert "".join(ch.c for ch in hidden) == "Buried"
-    deck = classify(raw)
+    deck = deck_json(classify(raw))
     texts = [s["text"] for s in raw["pages"][0]["spans"]]
     assert all("Buried" not in t for t in texts)
-    [png] = render_backgrounds(path, raw, deck, tmp_path / "bg")
+    [png] = render_backgrounds(path, raw, deck, tmp_path / "bg", frozenset())
     bg = load_png(png)
     z = bg.shape[1] / 400
     doc = pdf.Document(path)

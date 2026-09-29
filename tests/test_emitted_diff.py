@@ -16,6 +16,8 @@ from beamer2slides.emit import SLIDE_W
 from beamer2slides import emit, identity, snapshot, sync
 from beamer2slides.classify import classify
 from beamer2slides.extract import extract, select_overlays
+from beamer2slides.ir import deck_json
+from beamer2slides.json_types import Json, as_objects
 from beamer2slides.notes import prepare
 
 from . import sync_work
@@ -78,8 +80,10 @@ def sync_talk() -> tuple:
         with tempfile.TemporaryDirectory() as tmp:
             prepared = prepare(pdf, Path(tmp))
             raw = extract(prepared.pdf, prepared.labels)
-            deck = classify(select_overlays(raw, "last"))
-        plan = emit.DeckPlan({**deck, "slides": [{**s, "elements": emit.merge_blocks(s["elements"])} for s in deck["slides"]]})
+            deck = deck_json(classify(select_overlays(raw, "last")))
+        slides: list[Json] = [{**s, "elements": [e for e in emit.merge_blocks(as_objects(s["elements"], "elements"))]}
+                              for s in as_objects(deck["slides"], "slides")]
+        plan = emit.DeckPlan({**deck, "slides": slides})
         out.append((pdf.stem, plan))
     return tuple(out)
 

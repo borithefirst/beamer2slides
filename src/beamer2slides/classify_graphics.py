@@ -14,6 +14,7 @@ from .classify_model import (
 from .classify_state import BareFrame, Frame, Panel, PathKey, Rule
 from .classify_tables import TablesMixin
 from .fonts import font_info
+from .ir import Element, ShapeElement, ShapeKind
 from .raw_types import RawColor, RawDrawing, RawSpan
 
 FRAME_RULE_PT = 1.5  # a filled box this thin is a rule (\fcolorbox's \fboxrule, a tcolorbox's frame)
@@ -35,6 +36,13 @@ class _Framing:
     edge_of: list[str]
     """Each rule's edge, in the order of `ids`."""
     rects: list[Rect]
+
+
+def drawings_of(e: Element) -> list[str]:
+    """The raw drawings an element names as its own (an overlay's, a marked table's)."""
+    if e["kind"] == "image" or e["kind"] == "table" or e["kind"] == "shape":
+        return e.get("drawings", [])
+    return []
 
 
 class GraphicsMixin(TablesMixin):
@@ -634,7 +642,7 @@ class GraphicsMixin(TablesMixin):
                 best = i
         return best
 
-    def shapes(self, lines: list[Line], elements: list[dict]) -> list[dict]:
+    def shapes(self, lines: list[Line], elements: list[Element]) -> list[ShapeElement]:
         """Filled panels (beamer blocks and the like) that can become native shapes.
 
         Only panels that are pure content containers qualify: not touching the page edge
@@ -644,9 +652,9 @@ class GraphicsMixin(TablesMixin):
         used = {sid for e in elements for sid in e["spans"]}
         leftovers = [s.rect for l in lines for s in l.spans if s.id not in used]
         figures = [Rect.of(e["bbox"]) for e in elements if e["kind"] in ("image", "table", "diagram") and not e.get("overlay")]
-        figures += [self.graphic_drawings[i] for e in elements for i in e.get("drawings", [])]
-        figures += [Rect.of(p["bullet"]["bbox"]) for e in elements if e["kind"] == "text"
-                    for p in e["paragraphs"] if p["bullet"] and p["bullet"].get("patch")]
+        figures += [self.graphic_drawings[i] for e in elements for i in drawings_of(e)]
+        figures += [Rect.of(b["bbox"]) for e in elements if e["kind"] == "text"
+                    for p in e["paragraphs"] for b in [p["bullet"]] if b and b.get("patch")]
         loose = [g for g in self.graphics if not any(f.expand(0.5).contains_rect(g, tol=0.5) for f in figures)]
         # Strokes drawn after a panel that reach onto it (a matrix's quadrant dividers on the
         # panels' shared edges, an axis along their bottom): they stay in the background, and a
@@ -654,14 +662,14 @@ class GraphicsMixin(TablesMixin):
         # (Hairlines that long count as theme decoration: any stroke not in a picture counts, but
         # not one that leaves the background with the text - an underline, a fraction bar.)
         order = {d["id"]: i for i, d in enumerate(self.raw["drawings"])}
-        with_text = {tuple(s) for e in elements for s in e.get("strokes", [])}
+        with_text = {tuple(s) for e in elements if e["kind"] == "text" for s in e.get("strokes", [])}
         strokes = [(i, Rect.of(d["bbox"]).expand((d["width"] or 0.4) / 2)) for i, d in enumerate(self.raw["drawings"])
                    if d["type"] == "s" and d["id"] not in self.decor_ids and d["id"] not in self.frame_ids
                    and tuple(Rect.of(d["bbox"]).as_list()) not in with_text
                    and not any(f.expand(0.5).contains_rect(Rect.of(d["bbox"]), tol=0.5) for f in figures)]
-        bullet_images = {p["bullet"]["image"] for e in elements if e["kind"] == "text"
-                         for p in e["paragraphs"] if p["bullet"] and p["bullet"]["kind"] == "image"}
-        out = []
+        bullet_images = {b["image"] for e in elements if e["kind"] == "text"
+                         for p in e["paragraphs"] for b in [p["bullet"]] if b is not None and b["kind"] == "image"}
+        out: list[ShapeElement] = []
         for p in sorted(self.panels, key=lambda p: -p.bbox.w * p.bbox.h):
             r = p.bbox
             frame = p.frame
@@ -671,9 +679,11 @@ class GraphicsMixin(TablesMixin):
             if not p.image and not p.fill and frame is not None and not any(
                     Rect.of(e["bbox"]).expand(0.5).contains_rect(r, tol=0.5) for e in elements if e["kind"] in ("image", "table", "diagram")):
                 k = len(out)
-                out += [{"id": f"p{self.raw['index']}s{k}r{i}", "kind": "shape", "role": "rule", "bbox": rule,
-                         "fill": frame.color, "shape": "RECTANGLE", "flip": False, "radius": 0.0,
-                         "drawing": p.id, "spans": []} for i, rule in enumerate(frame.rules)]
+                bare: list[ShapeElement] = [
+                    {"id": f"p{self.raw['index']}s{k}r{i}", "kind": "shape", "role": "rule", "bbox": rule,
+                     "fill": frame.color, "shape": "RECTANGLE", "flip": False, "radius": 0.0,
+                     "drawing": p.id, "spans": []} for i, rule in enumerate(frame.rules)]
+                out += bare
                 continue
             if p.image or not p.fill or (p.opacity < 0.99 and not covered):
                 continue
@@ -692,6 +702,7 @@ class GraphicsMixin(TablesMixin):
             if any(inner.contains_rect(ir, tol=0) and im["id"] not in bullet_images for im, ir in self.small_images):
                 continue
             corners = set(p.corners)
+            kind: ShapeKind
             if not corners:
                 kind, flip = "RECTANGLE", False
             elif corners == {"tl", "tr"}:
@@ -702,26 +713,32 @@ class GraphicsMixin(TablesMixin):
                 kind, flip = "ROUND_RECTANGLE", False
             if any(o["bbox"] == r.as_list() and o["fill"] == p.fill for o in out):
                 continue  # the same panel painted twice (a tcolorbox's title tab)
-            out.append({"id": f"p{self.raw['index']}s{len(out)}", "kind": "shape", "role": "panel",
-                        "bbox": r.as_list(), "fill": p.fill, "shape": kind, "flip": flip,
-                        "radius": max(p.corners.values(), default=0.0), "drawing": p.id, "spans": []})
+            panel: ShapeElement = {"id": f"p{self.raw['index']}s{len(out)}", "kind": "shape", "role": "panel",
+                                   "bbox": r.as_list(), "fill": p.fill, "shape": kind, "flip": flip,
+                                   "radius": max(p.corners.values(), default=0.0), "drawing": p.id, "spans": []}
+            out.append(panel)
             if len(p.tiles) > 1:  # (a listing's per-line bands, painted as this one fill)
-                out[-1]["tiles"] = p.tiles
+                panel["tiles"] = p.tiles
             if frame and len(frame.sides) == 4:
-                out[-1].update(bbox=frame.box, outline={"color": frame.color, "width": frame.width},
-                               frame_drawings=frame.ids)
-            elif frame:  # listings' frame=lines, leftline...: the sides drawn are rules over the panel
-                panel = out[-1]
+                panel["bbox"] = frame.box
+                panel["outline"] = {"color": frame.color, "width": frame.width}
                 panel["frame_drawings"] = frame.ids
-                out += [{"id": f"{panel['id']}r{k}", "kind": "shape", "role": "rule", "bbox": rule,
-                         "fill": frame.color, "shape": "RECTANGLE", "flip": False, "radius": 0.0,
-                         "drawing": panel["drawing"], "spans": []} for k, rule in enumerate(frame.rules)]
+            elif frame:  # listings' frame=lines, leftline...: the sides drawn are rules over the panel
+                panel["frame_drawings"] = frame.ids
+                sides: list[ShapeElement] = [
+                    {"id": f"{panel['id']}r{k}", "kind": "shape", "role": "rule", "bbox": rule,
+                     "fill": frame.color, "shape": "RECTANGLE", "flip": False, "radius": 0.0,
+                     "drawing": p.id, "spans": []} for k, rule in enumerate(frame.rules)]
+                out += sides
             if p.opacity < 0.99:
-                out[-1].update(role="highlight", opacity=round(p.opacity, 3), anchor=covered.most_common(1)[0][0])
+                last = out[-1]
+                last["role"] = "highlight"
+                last["opacity"] = round(p.opacity, 3)
+                last["anchor"] = covered.most_common(1)[0][0]
         return self.framed_panels(out)
 
     @staticmethod
-    def framed_panels(shapes: list[dict]) -> list[dict]:
+    def framed_panels(shapes: list[ShapeElement]) -> list[ShapeElement]:
         """A panel painted over a slightly larger one of another colour, inset by the same few
         tenths of a point on every side, is framed by it: tcolorbox (and themes like it) paints
         the frame colour's box and the interior over it. The inner panel becomes one shape with
@@ -740,16 +757,19 @@ class GraphicsMixin(TablesMixin):
                 if not (0.1 <= min(insets) and max(insets) <= FRAME_RULE_PT and max(insets) - min(insets) <= 0.3):
                     continue
                 w = sum(insets) / 4
-                inner.update(bbox=[round(ox0 + w / 2, 2), round(oy0 + w / 2, 2), round(ox1 - w / 2, 2), round(oy1 - w / 2, 2)],
-                             outline={"color": outer["fill"], "width": round(w, 2)},
-                             radius=round(max(outer["radius"] - w / 2, inner["radius"]) if outer["radius"] else inner["radius"], 2),
-                             shape=outer["shape"] if outer["shape"] != "RECTANGLE" else inner["shape"],
-                             frame_drawings=[outer["drawing"]])
+                color = outer["fill"]
+                if color is None:
+                    continue  # (never: every panel here is filled)
+                inner["bbox"] = [round(ox0 + w / 2, 2), round(oy0 + w / 2, 2), round(ox1 - w / 2, 2), round(oy1 - w / 2, 2)]
+                inner["outline"] = {"color": color, "width": round(w, 2)}
+                inner["radius"] = round(max(outer["radius"] - w / 2, inner["radius"]) if outer["radius"] else inner["radius"], 2)
+                inner["shape"] = outer["shape"] if outer["shape"] != "RECTANGLE" else inner["shape"]
+                inner["frame_drawings"] = [d for d in [outer.get("drawing")] if d is not None]
                 out.remove(outer)
                 break
         return out
 
-    def blocks(self, shapes: list[dict]) -> None:
+    def blocks(self, shapes: list[ShapeElement]) -> None:
         """Beamer blocks: a title bar panel directly above a body panel of the same width get a
         common `block` number; the body gets the title bar's box (`title_bar`), and emit lays
         it under the whole block so that no gap can open between the two when the block is
@@ -767,7 +787,8 @@ class GraphicsMixin(TablesMixin):
                 bx0, by0, bx1, by1 = body["bbox"]
                 # Title page boxes overlap the two parts by a few points.
                 if abs(hx0 - bx0) <= 1.5 and abs(hx1 - bx1) <= 1.5 and by0 - hy1 <= 3.5 and by0 >= max(hy0 + 1, hy1 - 4):
-                    head["block"] = body["block"] = k
+                    head["block"] = k
+                    body["block"] = k
                     body["title_bar"] = head["bbox"]
                     body["strips"] = [im["bbox"] for im in self.raw["images"]
                                       if im["bbox"][3] - im["bbox"][1] <= 6 and hy1 - 3 <= (im["bbox"][1] + im["bbox"][3]) / 2 <= by0 + 3
@@ -779,8 +800,9 @@ class GraphicsMixin(TablesMixin):
             if el.get("block") is not None and "title_bar" not in el:
                 continue  # title bars: the body carries the block's shadow
             x0, y0, x1, y1 = el["bbox"]
-            if el.get("title_bar"):
-                y0 = el["title_bar"][1]
+            title_bar = el.get("title_bar")
+            if title_bar:
+                y0 = title_bar[1]
             outer = Rect(x0 - 1.5, y0 - 1.5, x1 + 8, y1 + 8)
             inner = Rect(x0 + 1, y0 + 1, x1 - 1, y1 - 1)
             pieces = [Rect.of(im["bbox"]) for im in self.raw["images"]

@@ -120,7 +120,7 @@ def test_the_library_works_with_no_google_client_installed(tmp_path):
     env = dict(os.environ, PYTHONPATH=os.pathsep.join(
         [str(SRC.parent)] + ([os.environ["PYTHONPATH"]] if os.environ.get("PYTHONPATH") else [])))
     done = subprocess.run([interpreter.python(), "-c", _SANDBOX], capture_output=True, text=True,
-                          cwd=tmp_path, env=interpreter.env(env))
+                          cwd=tmp_path, env=interpreter.env_over(env))
     assert done.returncode == 0, done.stderr[-3000:]
     assert done.stdout.strip().endswith("ok")
 

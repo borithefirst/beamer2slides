@@ -10,6 +10,8 @@ import pytest
 from beamer2slides import bidi, emit, text_layout
 from beamer2slides.classify import Rect, classify_page
 from beamer2slides.gslides import EMU_PER_PT
+from beamer2slides.ir import slide_json
+from beamer2slides.json_types import as_objects
 
 from .test_emit_requests import FONTS, SCALE, run_of
 
@@ -70,7 +72,7 @@ def two_columns() -> dict:
 
 
 def test_the_ball_right_of_a_hebrew_item_is_its_bullet():
-    slide = classify_page(two_columns(), SIZE)
+    slide = slide_json(classify_page(two_columns(), SIZE))
     items = [p for e in texts(slide) for p in e["paragraphs"] if p["bullet"]]
     assert sorted(words(p) for p in items) == sorted(RIGHT + LEFT)
     assert all(p["bullet"]["kind"] == "image" and p.get("direction") == "rtl" for p in items)
@@ -80,8 +82,8 @@ def test_the_ball_right_of_a_hebrew_item_is_its_bullet():
 
 
 def test_two_columns_of_hebrew_items_are_no_table():
-    slide = classify_page(two_columns(), SIZE)
-    assert not [e for e in slide["elements"] if e["kind"] == "table"]
+    slide = slide_json(classify_page(two_columns(), SIZE))
+    assert not [e for e in as_objects(slide["elements"], "elements") if e["kind"] == "table"]
     # each column is a list of its own, its items one box
     boxes = [e for e in texts(slide) if any(p["bullet"] for p in e["paragraphs"])]
     assert sorted(len(e["paragraphs"]) for e in boxes) == [2, 3]
@@ -119,7 +121,7 @@ def enumerate_page() -> dict:
 
 
 def test_each_numbered_hebrew_item_is_its_own_paragraph():
-    slide = classify_page(enumerate_page(), SIZE)
+    slide = slide_json(classify_page(enumerate_page(), SIZE))
     paras = [p for e in texts(slide) for p in e["paragraphs"]]
     got = [words(p) for p in paras]
     for t in ENUM + NESTED + [LAST]:
@@ -129,7 +131,7 @@ def test_each_numbered_hebrew_item_is_its_own_paragraph():
 
 
 def test_a_nested_hebrew_item_is_one_level_down():
-    slide = classify_page(enumerate_page(), SIZE)
+    slide = slide_json(classify_page(enumerate_page(), SIZE))
     paras = {words(p).strip(): p for e in texts(slide) for p in e["paragraphs"]}
     assert all(paras[t]["bullet"] and paras[t]["level"] == 1 for t in NESTED)
 
@@ -147,7 +149,7 @@ def box_extent(el: dict) -> tuple[float, float]:
 def test_a_hebrew_list_box_spans_its_words_and_not_only_its_bullet():
     # The bullet hangs right of the words, so it is the box's right edge, and the words its
     # left: a box from the bullet's left edge was 7 pt wide, and every item wrapped letter by letter.
-    slide = classify_page(two_columns(), SIZE)
+    slide = slide_json(classify_page(two_columns(), SIZE))
     box = next(e for e in texts(slide) if len(e["paragraphs"]) == 3)
     x0, x1 = box_extent(box)
     words_x0 = min(l["x0"] for p in box["paragraphs"] for l in p["lines"])

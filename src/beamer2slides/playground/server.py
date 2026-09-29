@@ -229,7 +229,7 @@ class Playground:
         pdf, raw, deck = cmd_classify(pdf, out, "last", "warn")
         t = self.stage(job, "extract + classify", t)
         job.state = "rendering"
-        render_backgrounds(pdf, raw, deck, out)
+        render_backgrounds(pdf, raw, deck, out, frozenset())
         (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
         t = self.stage(job, "render", t)
         page_pngs(pdf, deck, out / "pages")

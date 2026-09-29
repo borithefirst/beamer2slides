@@ -74,6 +74,8 @@ def test_an_items_formula_wrapped_alone_is_a_paragraph_of_its_own():
     from beamer2slides import emit
 
     from beamer2slides.classify import classify
+    from beamer2slides.ir import element_json
+    from beamer2slides.json_types import as_objects
 
     from .test_charts_diagrams import lines
 
@@ -114,7 +116,8 @@ def test_an_items_formula_wrapped_alone_is_a_paragraph_of_its_own():
     assert formula["bullet"] is None and [bool(r.get("hole")) for r in formula["runs"]] == [True]
     assert formula["lines"][0]["x0"] == item["lines"][0]["x0"]
     scale = emit.SLIDE_W / slide["size"][0]
-    assert emit.slides_lines(item, scale, emit.FontMapper()) is not None  # measured: the box can grow
+    measured = as_objects(element_json(box)["paragraphs"], "paragraphs")[k]
+    assert emit.slides_lines(measured, scale, emit.FontMapper()) is not None  # measured: the box can grow
 
 
 def test_a_wrapped_formula_line_of_symbols_is_one_hole():

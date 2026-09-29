@@ -7,6 +7,7 @@ import math
 from beamer2slides import classify as C
 from beamer2slides.classify import Line, PageClassifier, Rect, Span, body_size, classify
 from beamer2slides.fonts import font_info
+from beamer2slides.ir import deck_json
 
 W, H = 453.54, 255.12
 SANS, MONO = "LMSans10-Regular", "LMMono10-Regular"
@@ -73,7 +74,7 @@ def body_text(page: Page, y: float = 225) -> None:
 
 
 def deck(*pages: Page) -> dict:
-    return classify({"version": 1, "source": {"title": ""}, "pages": [p.raw() for p in pages]})
+    return deck_json(classify({"version": 1, "source": {"title": ""}, "pages": [p.raw() for p in pages]}))
 
 
 def elements(page: Page) -> list[dict]:

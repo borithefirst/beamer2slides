@@ -25,26 +25,26 @@ def frame(title: str = "A frame", opts: str = "", overlay: str = "", body: str =
 # ---------------------------------------------------------------- slugs
 
 def test_a_label_is_readable_and_safe_in_an_option_list():
-    assert labels.slug("Why decks diverge", set()) == "why-decks-diverge"
+    assert labels.slug("Why decks diverge", set(), "frame") == "why-decks-diverge"
     # a beamer option list is split on commas and brackets, and a PDF destination is not prose
-    assert labels.slug("Results: 50% (q1, q2) - \u00e9t\u00e9!", set()) == "results-50-q1-q2-ete"
-    assert labels.slug(None, set()) == "frame"
-    assert labels.slug("2024 in review", set()).startswith("f-2024")
+    assert labels.slug("Results: 50% (q1, q2) - \u00e9t\u00e9!", set(), "frame") == "results-50-q1-q2-ete"
+    assert labels.slug(None, set(), "frame") == "frame"
+    assert labels.slug("2024 in review", set(), "frame").startswith("f-2024")
 
 
 def test_a_label_never_collides_with_one_that_is_already_there():
     taken = {"results"}
-    first = labels.slug("Results", taken)
+    first = labels.slug("Results", taken, "frame")
     taken.add(first)
-    second = labels.slug("Results", taken)
+    second = labels.slug("Results", taken, "frame")
     assert first == "results-2" and second == "results-3"
     assert len({first, second} & {"results"}) == 0
 
 
 def test_a_very_long_title_is_cut_but_stays_distinct():
     title = "A frame whose title goes on and on and on past any reasonable length"
-    a = labels.slug(title, set())
-    b = labels.slug(title, {a})
+    a = labels.slug(title, set(), "frame")
+    b = labels.slug(title, {a}, "frame")
     assert len(a) <= labels.MAX_SLUG and len(b) <= labels.MAX_SLUG and a != b
 
 
@@ -167,5 +167,5 @@ def test_a_written_label_is_read_back_as_that_frames_label(tmp_path):
 
 @pytest.mark.parametrize("title", ["Résumé", "数据分析", "C++ & you", "   ", "---"])
 def test_any_title_produces_a_usable_label(title):
-    name = labels.slug(title, set())
+    name = labels.slug(title, set(), "frame")
     assert name and labels.SAFE.sub("", name) == name and not name.startswith("-") and not name.endswith("-")

@@ -286,7 +286,7 @@ def test_control_characters_in_an_alt_text_do_not_break_the_pptx(tmp_path):
     alt = "\x10A living wage\x11 is a \x1door\x00 \ud835 plan"
     page = {"layout": "BLANK", "fill": None, "templates": False, "tables": [],
             "pictures": [{"file": png, "bbox": [10, 10, 50, 50], "alt": alt, "title": "b2s:\x1a1/f0"}]}
-    prs = Presentation(emit.build_pptx(453.54, 340.16, [], [page], {"color": "#ffffff"}))
+    prs = Presentation(emit.build_pptx(453.54, 340.16, [], [page], {"color": "#ffffff"}, None))
     pic = next(s for s in prs.slides[0].shapes if s.shape_type == 13)
     assert pic._element.nvPicPr.cNvPr.get("descr") == "A living wage is a oor  plan"
     assert pic._element.nvPicPr.cNvPr.get("title") == "b2s:1/f0"

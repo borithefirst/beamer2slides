@@ -156,8 +156,13 @@ def status_of(error: BaseException) -> int | None:
     return status if isinstance(status, int) else None
 
 
-def message_of(error: BaseException, limit: int = 200) -> str:
-    """What Google said, for a person to read: the API's own message, else the exception."""
+def message_of(error: BaseException) -> str:
+    """What Google said, for a person to read (its first 200 characters): `message_within`."""
+    return message_within(error, 200)
+
+
+def message_within(error: BaseException, limit: int) -> str:
+    """What Google said, cut at `limit` characters: the API's own message, else the exception."""
     content = getattr(error, "content", None)
     if isinstance(content, (bytes, str)):
         try:

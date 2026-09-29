@@ -20,8 +20,8 @@ def test_wrap_limit_takes_the_next_word_only_to_its_hyphen():
     got = paragraphs(spans)
     assert len(got) == 1 and "the Saint-Petersburg" in text(got[0]), [text(p) for p in got]
     whole = 180.0 * len(word) / len(word + " State University")
-    limit = got[0]["wrap_limit"]
-    assert limit < 30.0 + 250.0 + 0.25 * size + 0.6 * whole, limit
+    limit = got[0].get("wrap_limit")
+    assert limit is not None and limit < 30.0 + 250.0 + 0.25 * size + 0.6 * whole, limit
 
 
 def test_a_word_whose_hyphen_comes_before_a_digit_is_taken_whole():
@@ -90,9 +90,9 @@ def test_text_italic_letters_inside_a_formula_are_in_its_hole():
              span(", where the time is", 184.5, y, size, w=90.0)]
     got = paragraphs(spans)
     assert len(got) == 1, [text(p) for p in got]
-    holes = [r for r in got[0]["runs"] if r.get("hole")]
+    holes = [(r.get("hole_x0", 0.0), r.get("hole", 0.0)) for r in got[0]["runs"] if r.get("hole")]
     assert len(holes) == 1 and "b N" not in text(got[0]), text(got[0])
-    assert holes[0]["hole_x0"] + holes[0]["hole"] >= 184.0, holes
+    assert holes[0][0] + holes[0][1] >= 184.0, holes
 
 
 def test_a_display_crop_leaves_out_the_hanging_ink_of_a_hole_above(tmp_path):
@@ -105,7 +105,8 @@ def test_a_display_crop_leaves_out_the_hanging_ink_of_a_hole_above(tmp_path):
     from PIL import Image
     from beamer2slides.render import render_backgrounds
     from .test_hidden_text import one_page
-    from .test_pictures_hunt import raw_of
+    from beamer2slides.json_types import JsonObject, as_str
+    from .test_pictures_hunt import num_list, raw_of
 
     content = (b"BT /F1 12 Tf 10 120 Td (As) Tj ET\nBT /F1 30 Tf 60 120 Td (g) Tj ET\n"
                b"BT /F1 20 Tf 60 95 Td (x) Tj ET\n")
@@ -114,17 +115,20 @@ def test_a_display_crop_leaves_out_the_hanging_ink_of_a_hole_above(tmp_path):
     raw = raw_of(path)
     words, g, x = raw["pages"][0]["spans"]
     assert (g["text"], x["text"]) == ("g", "x")
-    text_el = {"id": "t0", "kind": "text", "role": "body", "bbox": words["bbox"], "spans": [words["id"]],
-               "paragraphs": []}
-    hole = {"id": "h0", "kind": "image", "role": "math", "anchor": "t0", "bbox": list(g["bbox"]), "spans": [g["id"]]}
+    text_el: JsonObject = {"id": "t0", "kind": "text", "role": "body", "bbox": list(words["bbox"]),
+                           "spans": [words["id"]], "paragraphs": []}
+    hole: JsonObject = {"id": "h0", "kind": "image", "role": "math", "anchor": "t0", "bbox": list(g["bbox"]),
+                        "spans": [g["id"]]}
     top = g["bbox"][3] - 3.0  # the display's box reaches 3 pt into the g's descender
-    display = {"id": "m0", "kind": "image", "role": "math", "bbox": [50.0, top, 120.0, x["bbox"][3] + 1],
-               "spans": [x["id"]]}
-    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [display, hole, text_el], "on_layout": []}]}
-    render_backgrounds(path, raw, deck, tmp_path / "out")
-    crop = np.array(Image.open(tmp_path / "out" / display["file"]).convert("L")).astype(int)
-    zoom = crop.shape[1] / (display["bbox"][2] - display["bbox"][0])
-    rows = crop[:max(1, int((x["bbox"][1] - display["bbox"][1]) * zoom) - 2)]  # above the x
+    display: JsonObject = {"id": "m0", "kind": "image", "role": "math", "bbox": [50.0, top, 120.0, x["bbox"][3] + 1],
+                           "spans": [x["id"]]}
+    deck: JsonObject = {"slides": [{"page": 0, "size": [400, 200], "elements": [display, hole, text_el],
+                                    "on_layout": []}]}
+    render_backgrounds(path, raw, deck, tmp_path / "out", frozenset())
+    crop = np.array(Image.open(tmp_path / "out" / as_str(display["file"], "file")).convert("L")).astype(int)
+    box = num_list(display["bbox"])
+    zoom = crop.shape[1] / (box[2] - box[0])
+    rows = crop[:max(1, int((x["bbox"][1] - box[1]) * zoom) - 2)]  # above the x
     assert rows.size and (rows > 200).all(), rows.min()
 
 

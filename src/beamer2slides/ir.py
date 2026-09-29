@@ -31,7 +31,9 @@ import re
 import types
 import typing
 from dataclasses import dataclass
-from typing import Annotated, Any, Callable, Literal, TypedDict, Union
+from typing import Annotated, Callable, Literal, TypedDict, TypeGuard, Union
+
+from .json_types import Json, JsonObject
 
 # ------------------------------------------------------------------------------ values
 
@@ -215,6 +217,13 @@ Bullet = Union[GlyphBullet, NumberBullet, ImageBullet, ShapeBullet]
 """By `kind`. (classify's `icon` bullets are anchored images before the deck is written.)"""
 
 
+def bullet_label(bullet: Bullet) -> Label | None:
+    """Where a bullet's number or glyph is drawn; a drawn shape has none."""
+    if bullet["kind"] == "shape":
+        return None
+    return bullet.get("label")
+
+
 class _ParagraphKeys(TypedDict):
     align: Align
     level: int
@@ -347,6 +356,12 @@ class _ImageOptional(TypedDict, total=False):
     switches every other object off by it to judge the picture alone. A mark with no `/n` (only
     hand-written PDFs) gives its key here instead, as `marked.group_id` does, which is what
     `others_than` matches it by."""
+    rotation: float
+    """Degrees counterclockwise: a picture of a turned marked text box (`marked.text_elements`)."""
+    hidden_spans: list[SpanId]
+    """A turned marked box's glyphs the page hides (`marked.text_elements`): not erased."""
+    parts: list[Part]
+    """A marked picture's other calls (`marked.fold_parts`)."""
 
 
 class ImageElement(_ImageKeys, _ImageOptional):
@@ -412,6 +427,8 @@ class _ShapeOptional(TypedDict, total=False):
     mark: str
     picture: list[str]
     """A marked shape's picture fill, raw image ids (render makes such a shape its picture)."""
+    parts: list[Part]
+    """A marked shape's other calls (`marked.fold_parts`)."""
 
 
 class ShapeElement(_ShapeKeys, _ShapeOptional):
@@ -518,6 +535,8 @@ class TableElement(_TableKeys, total=False):
     """[row, col] of wrapped cells set justified."""
     drawings: list[str]
     mark: str
+    parts: list[Part]
+    """A marked table's other calls (`marked.fold_parts`)."""
 
 
 # ------------------------------------------------------------------------------ diagrams
@@ -668,21 +687,21 @@ class RenderedDeck(_DeckKeys):
 
 
 STAGES: dict[str, type] = {"classified": Deck, "rendered": RenderedDeck}
-OPEN: frozenset = frozenset({Source})
+OPEN: frozenset[type] = frozenset({Source})
 """TypedDicts a key they do not declare is no problem in."""
-LOCATED: frozenset = frozenset({Slide, RenderedSlide, TextElement, ImageElement, RenderedImage, ShapeElement,
-                                RenderedShape, TableElement, DiagramElement})
+LOCATED: frozenset[type] = frozenset({Slide, RenderedSlide, TextElement, ImageElement, RenderedImage, ShapeElement,
+                                      RenderedShape, TableElement, DiagramElement})
 """TypedDicts a problem inside is reported under (its slide's page, its element's id)."""
 
 # ------------------------------------------------------------------------------ the check
 
-Check = Callable[[Any, str, str, list], None]
+Check = Callable[[object, str, str, list[str]], None]
 """check(value, where, path, problems): appends a line per problem found in `value`."""
 
-_NAMES: dict = {Box: "Box", Point: "Point", Color: "Color", BeforeWord: "BeforeWord"}
+_NAMES: dict[object, str] = {Box: "Box", Point: "Point", Color: "Color", BeforeWord: "BeforeWord"}
 
 
-def type_name(tp: Any) -> str:
+def type_name(tp: object) -> str:
     """A type as these docs write it."""
     if tp in _NAMES:
         return _NAMES[tp]
@@ -697,34 +716,44 @@ def type_name(tp: Any) -> str:
         return " | ".join(type_name(a) for a in args)
     if origin is Annotated:
         return type_name(args[0])
-    if origin in (list, tuple, dict):
-        return f"{origin.__name__}[{', '.join(type_name(a) for a in args)}]"
+    for kind in (list, tuple, dict):
+        if origin is kind:
+            return f"{kind.__name__}[{', '.join(type_name(a) for a in args)}]"
     return str(tp)
 
 
-def _say(out: list, where: str, path: str, what: str) -> None:
+def _say(out: list[str], where: str, path: str, what: str) -> None:
     out.append(f"{where}: {path}: {what}" if path else f"{where}: {what}")
 
 
-def _show(value: Any) -> str:
+def _show(value: object) -> str:
     text = repr(value)
     return text if len(text) <= 60 else text[:57] + "..."
 
 
-def _wrong(out: list, where: str, path: str, value: Any, expected: str) -> None:
+def _wrong(out: list[str], where: str, path: str, value: object, expected: str) -> None:
     _say(out, where, path, f"is {_show(value)} ({type(value).__name__}), expected {expected}")
 
 
-def _is_typeddict(tp: Any) -> bool:
+def _typeddict(tp: object) -> type | None:
+    """`tp` when it is a TypedDict class, else None."""
     # (list[int] passes for a type on 3.10 and 3.11: a generic alias is none)
-    return typing.get_origin(tp) is None and isinstance(tp, type) and issubclass(tp, dict) \
-        and hasattr(tp, "__required_keys__")
+    if typing.get_origin(tp) is None and isinstance(tp, type) and issubclass(tp, dict) \
+            and hasattr(tp, "__required_keys__"):
+        return tp
+    return None
 
 
-_CHECKS: dict = {}
+def _required_keys(cls: type) -> list[str]:
+    """A TypedDict's required keys (`__required_keys__`, which `type` does not declare), sorted."""
+    keys: frozenset[str] = vars(cls)["__required_keys__"]
+    return sorted(keys)
 
 
-def checker(tp: Any, strict: bool = True) -> Check:
+_CHECKS: dict[tuple[object, bool], Check] = {}
+
+
+def checker(tp: object, strict: bool) -> Check:
     """The compiled check of a type (cached). `strict`: a key no TypedDict declares is a problem."""
     got = _CHECKS.get((tp, strict))
     if got is None:
@@ -733,41 +762,43 @@ def checker(tp: Any, strict: bool = True) -> Check:
 
 
 def _scalar(tp: type) -> Check:
-    kinds = (int, float) if tp is float else (tp,)
+    kinds: tuple[type, ...] = (int, float) if tp is float else (tp,)
     name = tp.__name__
 
-    def check(v, where, path, out):
+    def check(v: object, where: str, path: str, out: list[str]) -> None:
         if not isinstance(v, kinds) or (isinstance(v, bool) and tp is not bool):
             _wrong(out, where, path, v, name)
     return check
 
 
-def _compile(tp: Any, strict: bool) -> Check:
-    if tp is Any:
-        return lambda v, where, path, out: None
+def _check_none(v: object, where: str, path: str, out: list[str]) -> None:
+    if v is not None:
+        _wrong(out, where, path, v, "None")
+
+
+def _compile(tp: object, strict: bool) -> Check:
     if tp is type(None):
-        def check_none(v, where, path, out):
-            if v is not None:
-                _wrong(out, where, path, v, "None")
-        return check_none
-    if tp in (bool, int, float, str):
-        return _scalar(tp)
-    if _is_typeddict(tp):
-        return _compile_typeddict(tp, strict)
+        return _check_none
+    for scalar in (bool, int, float, str):
+        if tp is scalar:
+            return _scalar(scalar)
+    cls = _typeddict(tp)
+    if cls is not None:
+        return _compile_typeddict(cls, strict)
     origin, args = typing.get_origin(tp), typing.get_args(tp)
     if origin is Annotated:
         return _compile_annotated(checker(args[0], strict), args[1:])
     if origin is Literal:
-        def check_literal(v, where, path, out):
+        def check_literal(v: object, where: str, path: str, out: list[str]) -> None:
             if not any(type(v) is type(a) and v == a for a in args):
                 _say(out, where, path, f"is {_show(v)}, expected one of {type_name(tp)}")
         return check_literal
-    if origin in (Union, types.UnionType):
+    if origin is Union or origin is types.UnionType:
         return _compile_union(tp, args, strict)
     if origin is list:
         item = checker(args[0], strict)
 
-        def check_list(v, where, path, out):
+        def check_list(v: object, where: str, path: str, out: list[str]) -> None:
             if not isinstance(v, list):
                 _wrong(out, where, path, v, type_name(tp))
                 return
@@ -777,7 +808,7 @@ def _compile(tp: Any, strict: bool) -> Check:
     if origin is tuple:  # (a JSON list of fixed length, each place its own type)
         items = [checker(a, strict) for a in args]
 
-        def check_tuple(v, where, path, out):
+        def check_tuple(v: object, where: str, path: str, out: list[str]) -> None:
             if not isinstance(v, (list, tuple)) or len(v) != len(items):
                 _say(out, where, path, f"is {_show(v)}, expected {len(items)} items: {type_name(tp)}")
                 return
@@ -787,11 +818,11 @@ def _compile(tp: Any, strict: bool) -> Check:
     raise TypeError(f"ir: no check for {tp!r}")
 
 
-def _compile_annotated(inner: Check, markers: tuple) -> Check:
+def _compile_annotated(inner: Check, markers: tuple[object, ...]) -> Check:
     lengths = [m.n for m in markers if isinstance(m, Length)]
     patterns = [(re.compile(m.regex), m.says) for m in markers if isinstance(m, Pattern)]
 
-    def check(v, where, path, out):
+    def check(v: object, where: str, path: str, out: list[str]) -> None:
         seen = len(out)
         inner(v, where, path, out)
         if len(out) > seen:
@@ -799,30 +830,32 @@ def _compile_annotated(inner: Check, markers: tuple) -> Check:
                 del out[seen:]
                 _wrong(out, where, path, v, patterns[0][1])
             return
+        # (the inner check passed: a length marker's value is a list, a pattern's a string)
         for n in lengths:
-            if len(v) != n:
+            if isinstance(v, list) and len(v) != n:
                 _say(out, where, path, f"has {len(v)} items, expected {n}")
         for rx, says in patterns:
-            if not rx.fullmatch(v):
+            if isinstance(v, str) and not rx.fullmatch(v):
                 _say(out, where, path, f"is {_show(v)}, expected {says}")
     return check
 
 
-def _kinds(tp: Any) -> tuple:
+def _kinds(tp: object) -> tuple[object, ...]:
     """The `kind` values a TypedDict arm of a union is told apart by (none: not such an arm)."""
-    if not _is_typeddict(tp) or "kind" not in tp.__required_keys__:
+    cls = _typeddict(tp)
+    if cls is None or "kind" not in _required_keys(cls):
         return ()
-    kind = typing.get_type_hints(tp)["kind"]
+    kind = typing.get_type_hints(cls)["kind"]
     return typing.get_args(kind) if typing.get_origin(kind) is Literal else ()
 
 
-def _compile_union(tp: Any, args: tuple, strict: bool) -> Check:
+def _compile_union(tp: object, args: tuple[object, ...], strict: bool) -> Check:
     nullable = type(None) in args
     arms = [a for a in args if a is not type(None)]
     if len(arms) == 1:  # X | None: X's own problems, told precisely
         only = checker(arms[0], strict)
 
-        def check_optional(v, where, path, out):
+        def check_optional(v: object, where: str, path: str, out: list[str]) -> None:
             if v is not None or not nullable:
                 only(v, where, path, out)
         return check_optional
@@ -831,25 +864,26 @@ def _compile_union(tp: Any, args: tuple, strict: bool) -> Check:
     if all(kinds) and len(by_kind) == sum(map(len, kinds)):  # told apart by `kind`
         names = ", ".join(repr(k) for k in by_kind)
 
-        def check_by_kind(v, where, path, out):
+        def check_by_kind(v: object, where: str, path: str, out: list[str]) -> None:
             if v is None and nullable:
                 return
             if not isinstance(v, dict):
                 _wrong(out, where, path, v, type_name(tp))
                 return
-            arm = by_kind.get(v.get("kind"))
+            kind: object = v.get("kind")
+            arm = by_kind.get(kind)
             if arm is None:
-                _say(out, where, f"{path}.kind" if path else "kind", f"is {_show(v.get('kind'))}, expected one of {names}")
+                _say(out, where, f"{path}.kind" if path else "kind", f"is {_show(kind)}, expected one of {names}")
             else:
                 arm(v, where, path, out)
         return check_by_kind
     compiled = [checker(a, strict) for a in arms]
 
-    def check_any(v, where, path, out):
+    def check_any(v: object, where: str, path: str, out: list[str]) -> None:
         if v is None and nullable:
             return
         for c in compiled:
-            trial: list = []
+            trial: list[str] = []
             c(v, where, path, trial)
             if not trial:
                 return
@@ -859,22 +893,24 @@ def _compile_union(tp: Any, args: tuple, strict: bool) -> Check:
 
 def _compile_typeddict(cls: type, strict: bool) -> Check:
     hints = typing.get_type_hints(cls, include_extras=True)
-    required = sorted(cls.__required_keys__)
-    fields: dict = {}  # (compiled at first use: TypedDicts name each other in any order)
+    required = _required_keys(cls)
+    fields: dict[str, Check] = {}  # (compiled at first use: TypedDicts name each other in any order)
     lenient = cls in OPEN or not strict
     located = cls in LOCATED
     is_slide = cls in (Slide, RenderedSlide)
     name = cls.__name__
 
-    def check(v, where, path, out):
+    def check(v: object, where: str, path: str, out: list[str]) -> None:
         if not isinstance(v, dict):
             _wrong(out, where, path, v, name)
             return
         if located:
             if is_slide:
-                where = f"slide page {v.get('page', '?')}"
+                page: object = v.get("page", "?")
+                where = f"slide page {page}"
             else:
-                where = f"{where}, element {v.get('id') or '?'}"
+                element: object = v.get("id")
+                where = f"{where}, element {element or '?'}"
             path = ""
         if not fields:
             fields.update((k, checker(t, strict)) for k, t in hints.items())
@@ -890,7 +926,7 @@ def _compile_typeddict(cls: type, strict: bool) -> Check:
     return check
 
 
-def problems(deck: Any, stage: str = "classified", *, unknown_keys: bool = True) -> list[str]:
+def problems(deck: object, stage: str, *, unknown_keys: bool) -> list[str]:
     """Where `deck` breaks deck.json's contract at `stage` ('classified' or 'rendered'), a line
     each: "slide page 3, element p3t1: paragraphs[0].runs[2].color: is ...". A key no type here
     declares is a problem unless `unknown_keys=False`: a producer's new key is written here first."""
@@ -901,8 +937,68 @@ def problems(deck: Any, stage: str = "classified", *, unknown_keys: bool = True)
     return out
 
 
-def validate(deck: Any, stage: str = "classified", *, unknown_keys: bool = True) -> None:
+def validate(deck: object, stage: str, *, unknown_keys: bool) -> None:
     """Raise ValueError listing every problem (`problems`) when `deck` breaks the contract."""
     found = problems(deck, stage, unknown_keys=unknown_keys)
     if found:
         raise ValueError(f"deck.json breaks its {stage} contract ({len(found)} problems):\n  " + "\n  ".join(found))
+
+
+def _is_slide(v: object) -> TypeGuard[Slide]:
+    return not _slide_problems(v)
+
+
+def _slide_problems(v: object) -> list[str]:
+    out: list[str] = []
+    checker(Slide, False)(v, "slide", "", out)
+    return out
+
+
+def slide_of(v: JsonObject) -> Slide:
+    """A slide another producer wrote as JSON (`marked.classify_marked`), as the contract's
+    classified `Slide` (keys no type declares allowed); ValueError listing what breaks it."""
+    if _is_slide(v):
+        return v
+    found = _slide_problems(v)
+    raise ValueError(f"not a classified slide ({len(found)} problems):\n  " + "\n  ".join(found))
+
+
+# ------------------------------------------------------------------------------ as JSON
+
+
+def _json(v: object, where: str) -> Json:
+    """A deck.json value as JSON: tuples become lists, the dicts' key order kept."""
+    if v is None or isinstance(v, (bool, int, float, str)):
+        return v
+    if isinstance(v, (list, tuple)):
+        return [_json(x, f"{where}[{i}]") for i, x in enumerate(v)]
+    if isinstance(v, dict):
+        out: JsonObject = {}
+        for k, x in v.items():
+            key: object = k
+            if not isinstance(key, str):
+                raise TypeError(f"ir: {where}: a key {key!r} is no string")
+            out[key] = _json(x, f"{where}.{key}")
+        return out
+    raise TypeError(f"ir: {where}: {type(v).__name__} is no JSON value")
+
+
+def run_json(run: Run) -> JsonObject:
+    """A run as JSON (a copy), for a producer still building JSON (`marked.table_element`)."""
+    return {k: _json(v, k) for k, v in run.items()}
+
+
+def element_json(element: Element) -> JsonObject:
+    """A classified element as JSON (a copy), for a reader of deck.json's form (`emit.table_fits`)."""
+    return {k: _json(v, k) for k, v in element.items()}
+
+
+def slide_json(slide: Slide) -> JsonObject:
+    """A classified slide as JSON, as deck.json writes it (a copy: the slide is not changed)."""
+    return {k: _json(v, k) for k, v in slide.items()}
+
+
+def deck_json(deck: Deck) -> JsonObject:
+    """A classified deck as JSON (`classify.classify`'s answer as render, emit and deck.json read
+    it), a copy: tuples become lists, keys keep their order."""
+    return {k: _json(v, k) for k, v in deck.items()}

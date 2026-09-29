@@ -15,6 +15,7 @@ import pytest
 
 from beamer2slides.classify import classify
 from beamer2slides.extract import extract, select_overlays
+from beamer2slides.ir import deck_json
 from beamer2slides.pdf import OBJ_IMAGE, Document
 from beamer2slides.render import _looks_like, image_file, render_backgrounds, sole_image
 
@@ -103,8 +104,8 @@ def test_looks_like_has_teeth(doc):
 def converted(tmp_path_factory):
     out = tmp_path_factory.mktemp("raster")
     raw = select_overlays(extract(DECK, None), "last")
-    deck = classify(raw)
-    render_backgrounds(DECK, raw, deck, out)
+    deck = deck_json(classify(raw))
+    render_backgrounds(DECK, raw, deck, out, frozenset())
     return out, raw, deck
 
 

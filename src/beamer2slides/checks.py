@@ -41,6 +41,7 @@ import numpy as np
 from .arrays import Floats, Ints, Mask, Pixels, RGB
 from . import render
 from .classify import classify
+from .ir import deck_json
 from .emit import BULLET_SHAPES, SLIDE_W, FontMapper, fit_holes, merge_blocks, slide_holes
 from .extract import extract, select_overlays
 from .ir_types import (At, Box, DiagramElement, FallbackImage, Fields, HoleRun, NumberBullet, Paragraph,
@@ -161,7 +162,7 @@ def convert_pages(pdf: Path, overlays: str) -> Rendered:
         out = Path(tmp)
         prepared = prepare(pdf, out)  # (without note pages)
         raw: RawDoc = select_overlays(extract(prepared.pdf, prepared.labels), overlays)
-        deck: JsonObject = classify(raw)
+        deck = deck_json(classify(raw))
         saved: dict[Path, Pixels] = {}
 
         def keep_png(img: Pixels, path: Path) -> None:
@@ -170,7 +171,7 @@ def convert_pages(pdf: Path, overlays: str) -> Rendered:
         keep = render.save_png
         render.save_png = keep_png
         try:
-            render.render_backgrounds(prepared.pdf, raw, deck, out)
+            render.render_backgrounds(prepared.pdf, raw, deck, out, frozenset())
         finally:
             render.save_png = keep
         backgrounds: dict[int, RGB] = {}

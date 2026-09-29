@@ -6,9 +6,15 @@ from PIL import Image
 
 from beamer2slides import pdf
 from beamer2slides.extract import extract_page
+from beamer2slides.json_types import Json, JsonObject, as_array, as_str
 from beamer2slides.render import render_backgrounds
 
 from .test_hidden_text import one_page
+
+
+def num_list(value: Json) -> list[float]:
+    """A JSON array of numbers (a box render wrote into the deck), as floats."""
+    return [float(v) for v in as_array(value, "numbers") if isinstance(v, (int, float))]
 
 
 def raw_of(path) -> dict:
@@ -43,14 +49,14 @@ def test_a_formula_glyph_hanging_into_the_line_above_stays_in_its_picture(tmp_pa
     assert sign[0]["bbox"][1] < first[0]["origin"][1] - 0.2 * 12
     boxes = [s["bbox"] for s in sign + formula]
     bbox = [min(b[0] for b in boxes), min(b[1] for b in boxes), max(b[2] for b in boxes), max(b[3] for b in boxes)]
-    text = {"id": "t0", "kind": "text", "role": "body", "bbox": list(first[0]["bbox"]),
-            "spans": [s["id"] for s in first], "paragraphs": []}
-    picture = {"id": "h0", "kind": "image", "role": "math", "anchor": "t0", "bbox": bbox,
-               "spans": [s["id"] for s in sign + formula]}
-    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [text, picture], "on_layout": []}]}
-    render_backgrounds(path, raw, deck, tmp_path / "out")
-    crop = ink(tmp_path / "out" / picture["file"])
-    bbox = picture["bbox"]  # (grown to its ink)
+    text: JsonObject = {"id": "t0", "kind": "text", "role": "body", "bbox": list(first[0]["bbox"]),
+                        "spans": [s["id"] for s in first], "paragraphs": []}
+    picture: JsonObject = {"id": "h0", "kind": "image", "role": "math", "anchor": "t0", "bbox": list(bbox),
+                           "spans": [s["id"] for s in sign + formula]}
+    deck: JsonObject = {"slides": [{"page": 0, "size": [400, 200], "elements": [text, picture], "on_layout": []}]}
+    render_backgrounds(path, raw, deck, tmp_path / "out", frozenset())
+    crop = ink(tmp_path / "out" / as_str(picture["file"], "file"))
+    bbox = num_list(picture["bbox"])  # (grown to its ink)
     zoom = crop.shape[1] / (bbox[2] - bbox[0])
     x0, x1 = (np.array([sign[0]["bbox"][0], sign[0]["bbox"][2]]) - bbox[0]) * zoom
     above = crop[: int((min(s["bbox"][1] for s in formula) - bbox[1]) * zoom), int(x0):int(x1)]
@@ -73,16 +79,17 @@ def test_a_logo_wordmark_set_tight_above_a_native_line_stays_in_its_overlay(tmp_
     small = [s for s in page["spans"] if s["size"] < 7]
     assert mark and small and len(page["drawings"]) == 1
     assert mark[0]["bbox"][3] > small[0]["origin"][1] - 0.45 * 6  # it reaches the band: the case
-    text = {"id": "t0", "kind": "text", "role": "body", "bbox": list(small[0]["bbox"]),
-            "spans": [s["id"] for s in small], "paragraphs": []}
-    logo = {"id": "f0", "kind": "image", "role": "figure", "overlay": True,
-            "bbox": [19, 38, mark[0]["bbox"][2] + 1, 61], "spans": [mark[0]["id"]],
-            "drawings": [page["drawings"][0]["id"]]}
-    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [logo, text], "on_layout": []}]}
-    render_backgrounds(path, raw, deck, tmp_path / "out")
-    crop = np.array(Image.open(tmp_path / "out" / logo["file"]).convert("RGBA")).astype(int)
-    zoom = crop.shape[1] / (logo["bbox"][2] - logo["bbox"][0])
-    words = crop[:, int((44 - logo["bbox"][0]) * zoom):]
+    text: JsonObject = {"id": "t0", "kind": "text", "role": "body", "bbox": list(small[0]["bbox"]),
+                        "spans": [s["id"] for s in small], "paragraphs": []}
+    logo: JsonObject = {"id": "f0", "kind": "image", "role": "figure", "overlay": True,
+                        "bbox": [19, 38, mark[0]["bbox"][2] + 1, 61], "spans": [mark[0]["id"]],
+                        "drawings": [page["drawings"][0]["id"]]}
+    deck: JsonObject = {"slides": [{"page": 0, "size": [400, 200], "elements": [logo, text], "on_layout": []}]}
+    render_backgrounds(path, raw, deck, tmp_path / "out", frozenset())
+    crop = np.array(Image.open(tmp_path / "out" / as_str(logo["file"], "file")).convert("RGBA")).astype(int)
+    box = num_list(logo["bbox"])
+    zoom = crop.shape[1] / (box[2] - box[0])
+    words = crop[:, int((44 - box[0]) * zoom):]
     assert (words[..., 3] > 128).sum() > 50  # the wordmark is in the picture
 
 
@@ -157,9 +164,9 @@ def test_words_a_thin_picture_grazes_stay_in_the_background(tmp_path):
     (rule,) = page["drawings"]
     box = [rule["bbox"][0] - 1, rule["bbox"][1] - 1, rule["bbox"][2] + 1, rule["bbox"][3] + 1]
     assert all(s["bbox"][3] > box[1] for s in page["spans"])  # the words' boxes reach into it: the case
-    figure = {"id": "f0", "kind": "image", "role": "figure", "bbox": box, "spans": []}
-    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [figure], "on_layout": []}]}
-    [png] = render_backgrounds(path, raw, deck, tmp_path / "out")
+    figure: JsonObject = {"id": "f0", "kind": "image", "role": "figure", "bbox": list(box), "spans": []}
+    deck: JsonObject = {"slides": [{"page": 0, "size": [400, 200], "elements": [figure], "on_layout": []}]}
+    [png] = render_backgrounds(path, raw, deck, tmp_path / "out", frozenset())
     bg = load_png(png)
     z = bg.shape[1] / 400
     words = bg[round(z * 40):round(z * box[1]), round(z * 20):round(z * 140)]
@@ -362,15 +369,18 @@ def test_a_figure_crop_leaves_out_the_ball_bullets_its_box_reaches(tmp_path):
     page = raw["pages"][0]
     (image,) = page["images"]
     words = page["spans"]
-    text = {"id": "t0", "kind": "text", "role": "body", "bbox": [128, 136, 200, 150], "spans": [s["id"] for s in words],
-            "paragraphs": [{"bullet": {"kind": "image", "image": image["id"], "bbox": image["bbox"]}, "runs": [], "lines": []}]}
-    figure = {"id": "f0", "kind": "image", "role": "figure", "bbox": [19, 39, 121, 147], "spans": []}
-    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [figure, text], "on_layout": []}]}
-    render_backgrounds(path, raw, deck, tmp_path / "out")
-    crop = np.array(Image.open(tmp_path / "out" / figure["file"]).convert("RGB")).astype(int)
-    zoom = crop.shape[1] / (figure["bbox"][2] - figure["bbox"][0])
-    edge = crop[:, int((image["bbox"][0] - figure["bbox"][0]) * zoom) + 1:]
-    assert image["bbox"][0] < figure["bbox"][2]  # the box reaches the bullet: the case
+    text: JsonObject = {"id": "t0", "kind": "text", "role": "body", "bbox": [128, 136, 200, 150],
+                        "spans": [s["id"] for s in words],
+                        "paragraphs": [{"bullet": {"kind": "image", "image": image["id"], "bbox": list(image["bbox"])},
+                                        "runs": [], "lines": []}]}
+    figure: JsonObject = {"id": "f0", "kind": "image", "role": "figure", "bbox": [19, 39, 121, 147], "spans": []}
+    deck: JsonObject = {"slides": [{"page": 0, "size": [400, 200], "elements": [figure, text], "on_layout": []}]}
+    render_backgrounds(path, raw, deck, tmp_path / "out", frozenset())
+    crop = np.array(Image.open(tmp_path / "out" / as_str(figure["file"], "file")).convert("RGB")).astype(int)
+    box = num_list(figure["bbox"])
+    zoom = crop.shape[1] / (box[2] - box[0])
+    edge = crop[:, int((image["bbox"][0] - box[0]) * zoom) + 1:]
+    assert image["bbox"][0] < box[2]  # the box reaches the bullet: the case
     ball = (edge[..., 0] < 90) & (edge[..., 1] < 80) & (edge[..., 2] > 150)  # (the pie is 0, 115, 178)
     assert not ball.any()  # no piece of the ball
 

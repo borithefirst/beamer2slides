@@ -8,26 +8,27 @@ Two beamer modes are supported, both with beamer's default "note page" template
 `prepare` writes a notes-free slides.pdf and returns the note text per slide page.
 """
 
+from dataclasses import dataclass
 from typing import NamedTuple
 
 from pathlib import Path
 
-from .extract import page_marks, spans as page_spans
-from .pdf import Document, Page
+from .extract import PageSpan, page_marks, shown_spans
+from .pdf import Document, Page, PdfDocument
 
 Box = tuple[float, float, float, float]
 
 
-def _contains(outer: Box, inner) -> bool:
+def _contains(outer: Box, inner: Box) -> bool:
     return inner[0] >= outer[0] and inner[1] >= outer[1] and inner[2] <= outer[2] and inner[3] <= outer[3]
 
 
-def _spans_in(spans: list[dict], area: Box) -> list[dict]:
-    return [s for s in spans if s["text"].strip() and
-            area[0] <= (s["bbox"][0] + s["bbox"][2]) / 2 <= area[2] and area[1] <= (s["bbox"][1] + s["bbox"][3]) / 2 <= area[3]]
+def _spans_in(spans: list[PageSpan], area: Box) -> list[PageSpan]:
+    return [s for s in spans if s.text.strip() and
+            area[0] <= (s.bbox[0] + s.bbox[2]) / 2 <= area[2] and area[1] <= (s.bbox[1] + s.bbox[3]) / 2 <= area[3]]
 
 
-def _note_header(page: Page, spans: list[dict], area: Box) -> float | None:
+def _note_header(page: Page, spans: list[PageSpan], area: Box) -> float | None:
     """Bottom of the note page header band inside `area`, or None if this is no note page."""
     x0, y0, x1, y1 = area
     width, height = x1 - x0, y1 - y0
@@ -40,11 +41,11 @@ def _note_header(page: Page, spans: list[dict], area: Box) -> float | None:
         header = (x0 + 0.6 * width, y0, x1, r[3])
         inside = _spans_in(spans, area)
         # Text size of the note itself: the frame thumbnail can hold more words than a short note.
-        body = [s for s in inside if not _contains(header, s["bbox"])] or inside
-        sizes = sorted(s["size"] for s in body)
+        body = [s for s in inside if not _contains(header, s.bbox)] or inside
+        sizes = sorted(s.size for s in body)
         if not sizes:
             return None
-        tiny = [s for s in inside if s["size"] < 0.45 * sizes[len(sizes) // 2] and _contains(header, s["bbox"])]
+        tiny = [s for s in inside if s.size < 0.45 * sizes[len(sizes) // 2] and _contains(header, s.bbox)]
         if len(tiny) >= 1 or _thumbnail_canvas(page, area, r[3]):  # the frame thumbnail
             return r[3]
     return None
@@ -65,27 +66,39 @@ def _thumbnail_canvas(page: Page, area: Box, header_bottom: float) -> bool:
     return False
 
 
-def _note_text(spans: list[dict], area: Box, header_bottom: float) -> str:
+@dataclass(frozen=True, kw_only=True)
+class _NoteLine:
+    """A line of a note as `_note_text` reads it: its baseline, where its words end, its text and
+    its largest size."""
+    baseline: float
+    x1: float
+    text: str
+    size: float
+
+
+def _note_text(spans: list[PageSpan], area: Box, header_bottom: float) -> str:
     body = (area[0], header_bottom, area[2], area[3])
-    lines: list[list] = []  # [baseline, x1, text, size]
-    for s in sorted(_spans_in(spans, body), key=lambda s: (round(s["origin"][1], 1), s["bbox"][0])):
-        text, size, baseline = s["text"].strip(), s["size"], s["origin"][1]
+    lines: list[_NoteLine] = []
+    for s in sorted(_spans_in(spans, body), key=lambda s: (round(s.origin[1], 1), s.bbox[0])):
+        text, size, baseline = s.text.strip(), s.size, s.origin[1]
         line = lines[-1] if lines else None
-        if line and abs(baseline - line[0]) <= 0.3 * size:
+        if line and abs(baseline - line.baseline) <= 0.3 * size:
             # Pieces of one word (a style change) join; a word gap becomes a space.
-            line[2] += ("" if s["bbox"][0] - line[1] < 0.1 * size else " ") + text
-            line[1] = s["bbox"][2]
-            line[3] = max(line[3], size)
+            lines[-1] = _NoteLine(baseline=line.baseline, x1=s.bbox[2],
+                                  text=line.text + ("" if s.bbox[0] - line.x1 < 0.1 * size else " ") + text,
+                                  size=max(line.size, size))
         else:
-            lines.append([baseline, s["bbox"][2], text, size])
-    out, prev = [], None
-    for baseline, _, text, size in lines:
-        if prev is not None and baseline - prev[0] > 1.6 * size:
+            lines.append(_NoteLine(baseline=baseline, x1=s.bbox[2], text=text, size=size))
+    out: list[str] = []
+    prev: _NoteLine | None = None
+    for line in lines:
+        if prev is not None and line.baseline - prev.baseline > 1.6 * line.size:
             out.append("")
-        out.append(text)
-        prev = (baseline, size)
+        out.append(line.text)
+        prev = line
     # Join wrapped lines of one paragraph; blank entries separate paragraphs.
-    paragraphs, current = [], []
+    paragraphs: list[str] = []
+    current: list[str] = []
     for item in out:
         if item == "":
             paragraphs.append(" ".join(current))
@@ -107,32 +120,33 @@ class Prepared(NamedTuple):
 def prepare(pdf: Path, out: Path) -> Prepared:
     doc = Document(pdf)
     try:
-        return Prepared(*_prepare(doc, pdf, out))
+        return _prepare(doc, pdf, out)
     finally:
         doc.close()
 
 
-def _prepare(doc: Document, pdf: Path, out: Path) -> tuple:
+def _prepare(doc: PdfDocument, pdf: Path, out: Path) -> Prepared:
     if not len(doc):
-        return pdf, {}, None, None
+        return Prepared(pdf, {}, None, None)
     first = doc[0]
     notes: dict[int, str] = {}
     path = out / "slides.pdf"
 
     if first.width / first.height >= 2.2:
-        half = [(p.width / 2, 0.0, p.width, p.height) for p in doc]
-        spans = [page_spans(p) for p in doc]
-        headers = [_note_header(p, s, a) for p, s, a in zip(doc, spans, half)]
+        pages = [doc[k] for k in range(len(doc))]
+        half = [(p.width / 2, 0.0, p.width, p.height) for p in pages]
+        spans = [shown_spans(p) for p in pages]
+        headers = [_note_header(p, s, a) for p, s, a in zip(pages, spans, half)]
         if sum(h is not None for h in headers) < 0.5 * len(doc):
-            return pdf, {}, None, None
-        for page, s, area, header in zip(doc, spans, half, headers):
+            return Prepared(pdf, {}, None, None)
+        for page, s, area, header in zip(pages, spans, half, headers):
             if header is not None:
                 text = _note_text(s, area, header)
                 if text:
                     notes[page.index] = text
         # keep the left half: the slide
         path.write_bytes(doc.save(boxes={page.index: (0.0, 0.0, page.width / 2, page.height) for page in doc}))
-        return path, notes, "second screen", None
+        return Prepared(path, notes, "second screen", None)
 
     keep: list[int] = []
     for page in doc:
@@ -140,7 +154,7 @@ def _prepare(doc: Document, pdf: Path, out: Path) -> tuple:
         # the note's, unmarked, and a slide with a band across its top and small words at its right
         # end (drawing-workshop 28 and 50) read as the note template
         note = page.index and not page_marks(page)
-        spans = page_spans(page) if note else []
+        spans = shown_spans(page) if note else []
         header = _note_header(page, spans, page.rect) if note else None
         if header is None:
             keep.append(page.index)
@@ -149,8 +163,8 @@ def _prepare(doc: Document, pdf: Path, out: Path) -> tuple:
         if keep and text:
             notes[keep[-1]] = (notes.get(keep[-1], "") + "\n" + text).strip()
     if len(keep) == len(doc):
-        return pdf, {}, None, None
+        return Prepared(pdf, {}, None, None)
     path.write_bytes(doc.save(pages=keep))
     # The saved page label tree still counts the deleted pages.
     labels = [doc.label(k) or str(k + 1) for k in keep]
-    return path, {keep.index(k): v for k, v in notes.items()}, "note pages", labels
+    return Prepared(path, {keep.index(k): v for k, v in notes.items()}, "note pages", labels)

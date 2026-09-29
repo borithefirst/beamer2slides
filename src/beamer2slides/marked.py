@@ -29,6 +29,7 @@ from collections.abc import Iterable, Sequence
 
 from .classify import Line, PageClassifier, Paragraph, Rect, label_of, span_runs, union_all
 from .classify_model import Span
+from .ir import Align, run_json, slide_json
 from .json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_optional_str, as_str
 from .raw_types import RawDrawing, RawImage, RawItem, RawPage, RawSpan
 from .typing_compat import override
@@ -37,7 +38,7 @@ ELEMENT, PARAGRAPH, BULLET, CELL, UNDERLINE, STRIKE = "B2S", "B2Sp", "B2Sb", "B2
 KINDS = ("spans", "drawings", "images")
 # deck_ir reads a Slides glyph as a number like this
 NUMBERED = re.compile(r"\d|[a-z]\.|[ivx]+\.")
-FLIP = {"left": "right", "right": "left"}
+FLIP: dict[Align, Align] = {"left": "right", "right": "left"}
 
 
 MarkParams = dict[str, str | int]
@@ -218,9 +219,13 @@ class MarkedText(PageClassifier):
                 line.tab = None
                 marker.sort(key=lambda s: s.rect.x0)
                 token = "".join(s.text.strip() for s in marker)
-                line.bullet = {"kind": "number" if NUMBERED.search(token) else "glyph", "text": token,
-                               "color": marker[0].color, "bbox": union_all(s.rect for s in marker).as_list(),
-                               "label": label_of(marker)}
+                box = union_all(s.rect for s in marker).as_list()
+                if NUMBERED.search(token):
+                    line.bullet = {"kind": "number", "text": token, "color": marker[0].color, "bbox": box,
+                                   "label": label_of(marker)}
+                else:
+                    line.bullet = {"kind": "glyph", "text": token, "color": marker[0].color, "bbox": box,
+                                   "label": label_of(marker)}
                 line.bullet_spans = marker
             elif first and i in self.art:
                 line.bullet = {"kind": "glyph", "text": "", "bbox": self.art[i].as_list(), "drawn": True}
@@ -330,7 +335,7 @@ def text_elements(g: Group, page: RawPage, body: float) -> tuple[list[JsonObject
         art[k] = art[k].union(Rect.of(i["bbox"])) if k in art else Rect.of(i["bbox"])
     sub = g.page(page, frozenset(i["id"] for i in art_items))
     turn = unturned(sub)
-    res: JsonObject = MarkedText(sub, body, art).classify()
+    res = slide_json(MarkedText(sub, body, art).classify())
     elements = as_objects(res["elements"], f"marked box {g.mark}: elements")
     if turn is not None:
         for e in elements:
@@ -518,7 +523,7 @@ def table_element(g: Group, page: RawPage, body: float, pid: str) -> JsonObject:
         for line in lines:
             if runs:
                 runs.append({**as_object(runs[-1], "table cell run"), "text": " ", "script": None})
-            runs += span_runs(line.spans)
+            runs += [run_json(run) for run in span_runs(line.spans)]
         grid[r][k] = runs
     bbox = box_of(g.params.get("box")) or union_box([*g.drawings, *g.spans], 0.0)
     el: JsonObject = {"id": pid, "kind": "table", "role": "table", "bbox": _box_json(bbox),
@@ -698,7 +703,7 @@ def fold_parts(elements: list[JsonObject]) -> list[JsonObject]:
 def classify_marked(page: RawPage, body: float) -> JsonObject:
     """A marked page's slide, in `classify_page`'s shape."""
     rest, groups = split(page)
-    out: JsonObject = PageClassifier(rest, body).classify()
+    out = slide_json(PageClassifier(rest, body).classify())
     left = as_array(out["left_in_background"], "page: left_in_background")
     n = page["index"]
     marked: list[JsonObject] = []

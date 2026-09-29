@@ -4,23 +4,45 @@ drawings that become native diagrams.
 
 import math
 from collections import Counter
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from typing import Literal
 
 from .classify_model import (
     HOLE_PAD, Line, Paragraph, Rect, Span, cluster_rects, miter_reach, overlap, polygon_shape, union_all,
     upright_ellipse,
 )
 from .classify_paragraphs import ParagraphsMixin
-from .classify_text import EQ_NUMBER_RE, card_text, math_text, span_runs
+from .classify_text import EQ_NUMBER_RE, card_text, family_of, math_text, span_runs
+from .ir import (
+    Arrow, BeforeWord, DiagramElement, DiagramLine, Element, ImageElement, Mark, Node, ShapeElement, TemplateKind,
+    TextElement,
+)
 from .raw_types import RawDrawing, RawImage
 
 MAX_PLAIN_RECTANGLES = 32  # more rectangles in one cluster (a QR code, a pixel grid) are a picture
+
+End = Literal["from", "to"]
+ENDS: tuple[End, End] = ("from", "to")
+
+
+@dataclass(frozen=True, kw_only=True)
+class DraftNode:
+    """A diagram node while `diagram_from` gathers it: its box, the words inside it, how it is
+    drawn (`shape` None: a free label), and its corner radius when the drawing says one."""
+    rect: Rect
+    shape: TemplateKind | None
+    spans: list[Span]
+    fill: str | None
+    stroke: str | None
+    width: float | None
+    radius: float | None
 
 
 class FiguresMixin(ParagraphsMixin):
     """Methods of classify.PageClassifier; the state they share is `classify_state.PageState`."""
 
-    def math_pictures(self, lines: list[Line], paragraphs: list[Paragraph], elements: list[dict]) -> list[dict]:
+    def math_pictures(self, lines: list[Line], paragraphs: list[Paragraph], elements: list[Element]) -> list[Element]:
         """Math that cannot be text (display equations, fractions, and paragraphs containing
         them) becomes movable pictures instead of staying baked into the background."""
         used = {sid for e in elements for sid in e["spans"]}
@@ -37,10 +59,11 @@ class FiguresMixin(ParagraphsMixin):
                 for p in e["paragraphs"]:
                     blocked += [Rect(l["x0"], l["baseline"] - 0.8 * p["size"], l["x1"], l["baseline"] + 0.25 * p["size"])
                                 for l in p["lines"]]
-                    if p["bullet"]:  # glyph boxes include ascender space; use their visible core
-                        b = Rect.of(p["bullet"]["bbox"])
+                    bullet = p["bullet"]
+                    if bullet:  # glyph boxes include ascender space; use their visible core
+                        b = Rect.of(bullet["bbox"])
                         blocked.append(Rect(b.x0, b.cy - 0.25 * b.h, b.x1, b.cy + 0.25 * b.h))
-        out = []
+        out: list[Element] = []
         taken: set[str] = set()
         clusters = cluster_rects([s.rect for s in spans] + list(self.bars), gap=0.6 * self.body)
         # (clusters whose boxes overlap are one formula: a display \sum between the words of its
@@ -78,11 +101,12 @@ class FiguresMixin(ParagraphsMixin):
                 par = Paragraph([Line(members)], align="right")
                 out.append(self.text_element([par], f"p{self.raw['index']}eq{len(out)}"))
                 continue
-            out.append({"id": f"p{self.raw['index']}m{len(out)}", "kind": "image", "role": "math",
-                        "bbox": box.as_list(), "spans": [s.id for s in members]})
+            picture: ImageElement = {"id": f"p{self.raw['index']}m{len(out)}", "kind": "image", "role": "math",
+                                     "bbox": box.as_list(), "spans": [s.id for s in members]}
+            out.append(picture)
         return out
 
-    def figures(self, lines: list[Line], text_elements: list[dict]) -> list[dict]:
+    def figures(self, lines: list[Line], text_elements: list[TextElement]) -> list[Element]:
         """Figure regions (graphics, images and their labels) that can become separate pictures.
 
         Skipped, so they stay in the background: specks (shadow corners, QED boxes),
@@ -90,11 +114,11 @@ class FiguresMixin(ParagraphsMixin):
         label_spans = [s for l in lines if l.reason in ("figure", "rotated") for s in l.spans]
         if not self.regions:
             return []
-        def ink_rect(e: dict) -> Rect:
+        def ink_rect(e: TextElement) -> Rect:
             # Big text without descenders (a statistic: "92%") ends at its baseline, not a
             # quarter em below it where a card under it may start.
             r = Rect.of(e["bbox"])
-            last = e["paragraphs"][-1] if e.get("paragraphs") else None
+            last = e["paragraphs"][-1] if e["paragraphs"] else None
             if last and last["lines"]:
                 text = "".join(run["text"] for run in last["runs"])
                 depth = 0.25 if any(c in "gjpqyQ,;()[]{}|/@$_" for c in text) else 0.05
@@ -103,23 +127,23 @@ class FiguresMixin(ParagraphsMixin):
 
         text_rects = [ink_rect(e) for e in text_elements]
 
-        def grazed(e: dict, t: Rect, c: Rect) -> bool:
+        def grazed(e: TextElement, t: Rect, c: Rect) -> bool:
             """A figure reaching less than an em into a text box's outline, clear of its lines
             and bullets (a pie's pin label in the margin of the list beside it, between two
             bullets): no text under it. (Deeper in, a figure is over the text.)"""
             if min(t.x1, c.x1) - max(t.x0, c.x0) >= self.body and min(t.y1, c.y1) - max(t.y0, c.y0) >= self.body:
                 return False
             ink = [Rect(l["x0"], l["baseline"] - 0.8 * p["size"], l["x1"], l["baseline"] + 0.25 * p["size"])
-                   for p in e.get("paragraphs", []) for l in p["lines"]]
-            ink += [Rect.of(p["bullet"]["bbox"]) for p in e.get("paragraphs", []) if p["bullet"] and p["bullet"].get("bbox")]
+                   for p in e["paragraphs"] for l in p["lines"]]
+            ink += [Rect.of(b["bbox"]) for p in e["paragraphs"] for b in [p["bullet"]] if b and b["bbox"]]
             # (the figure's own pieces there, not its outline: the label reaches under the
             # bullets' column between two of them)
             pieces = [r for r in rects if c.expand(0.1).contains_rect(r, tol=0.5) and r.intersects(t)]
             return bool(ink) and not any(r.intersects(q) for r in ink for q in pieces)
 
-        self.bullet_boxes = [Rect.of(p["bullet"]["bbox"]).expand(1) for e in text_elements for p in e["paragraphs"]
-                             if p["bullet"] and p["bullet"].get("bbox")]
-        out = []
+        self.bullet_boxes = [Rect.of(b["bbox"]).expand(1) for e in text_elements for p in e["paragraphs"]
+                             for b in [p["bullet"]] if b and b["bbox"]]
+        out: list[Element] = []
         # Tables first, from their rules: clustering could merge a table with a picture beside it.
         for group in self.table_rules:
             frame = union_all(r.rect for r in group).expand(1)
@@ -156,7 +180,7 @@ class FiguresMixin(ParagraphsMixin):
             diagram = None if over_text else self.diagram_from(c, label_spans, len(out))
             if diagram and self.splits_cells(diagram, label_spans):
                 diagram = None  # a ruled grid table_from could not read: a picture, not merged rows
-            if diagram and any(n.get("text") for n in diagram["nodes"]):
+            if diagram and any(n["text"] for n in diagram["nodes"]):
                 out.append(diagram)  # frames around their own text (a framed paragraph), not marks on prose
                 continue
             overlay = self.overlay(c, label_spans, lines, len(out), over_text)
@@ -185,8 +209,8 @@ class FiguresMixin(ParagraphsMixin):
                 # while the crop showed only the rule. (A rule with no words on it - a footnote's,
                 # above its text - stays a picture: in the background it is ink by native words.)
                 continue
-            el = {"id": f"p{self.raw['index']}f{len(out)}", "kind": "image", "role": "figure",
-                  "bbox": self.clip_to_bands(c, c.expand(1.0)).as_list(), "spans": spans}
+            el: ImageElement = {"id": f"p{self.raw['index']}f{len(out)}", "kind": "image", "role": "figure",
+                                "bbox": self.clip_to_bands(c, c.expand(1.0)).as_list(), "spans": spans}
             bare = None if spans else self.bare_image(c)
             if bare is not None:
                 # One `\includegraphics` and nothing else: the picture is the image itself, on
@@ -211,7 +235,7 @@ class FiguresMixin(ParagraphsMixin):
             return None
         return images[0]
 
-    def overlay(self, c: Rect, label_spans: list[Span], lines: list[Line], index: int, over_text: bool) -> dict | None:
+    def overlay(self, c: Rect, label_spans: list[Span], lines: list[Line], index: int, over_text: bool) -> ImageElement | None:
         """A figure cluster drawn over native text or right at its words (a tikzmark arrow, a
         brace under a phrase, an emphasis ellipse, a callout): a picture of only its own
         drawings and labels on a transparent ground (`drawings`), grouped with the text it
@@ -278,7 +302,7 @@ class FiguresMixin(ParagraphsMixin):
             if not met:
                 return None
         labels = [s for s in label_spans if c.expand(0.5).contains_rect(s.rect, tol=0.5)]
-        el: dict[str, object] = {"id": f"p{self.raw['index']}f{index}", "kind": "image", "role": "figure", "overlay": True,
+        el: ImageElement = {"id": f"p{self.raw['index']}f{index}", "kind": "image", "role": "figure", "overlay": True,
               "bbox": union_all([self.graphic_drawings[d["id"]] for d in drawings] + [s.rect for s in labels]).expand(1.0).as_list(),
               "spans": [s.id for s in labels], "drawings": [d["id"] for d in drawings]}
         if met:
@@ -288,21 +312,22 @@ class FiguresMixin(ParagraphsMixin):
                            for x in (s.rect.x0, s.rect.x1)]
         return el
 
-    def trim_overlays(self, elements: list[dict]) -> None:
+    def trim_overlays(self, elements: list[Element]) -> None:
         """Drawings of an overlay that lie within a formula picture (a highlight behind a line
         that became one picture) belong to that picture: the overlay gives them up."""
-        boxes = [Rect.of(e["bbox"]) for e in elements if e["kind"] == "image" and e.get("role") == "math"]
+        boxes = [Rect.of(e["bbox"]) for e in elements if e["kind"] == "image" and e["role"] == "math"]
         by_id = self.spans_by_id
         for el in elements:
-            if not el.get("overlay"):
+            if el["kind"] != "image" or not el.get("overlay"):
                 continue
-            el["drawings"] = [i for i in el["drawings"] if not any(b.contains_rect(self.graphic_drawings[i], tol=0.5) for b in boxes)]
-            if el["drawings"]:
-                el["bbox"] = union_all([self.graphic_drawings[i] for i in el["drawings"]] +
+            drawings = [i for i in el.get("drawings", []) if not any(b.contains_rect(self.graphic_drawings[i], tol=0.5) for b in boxes)]
+            el["drawings"] = drawings
+            if drawings:
+                el["bbox"] = union_all([self.graphic_drawings[i] for i in drawings] +
                                        [by_id[i].rect for i in el["spans"]]).expand(1.0).as_list()
 
     @staticmethod
-    def mark(line: Line, x: float) -> dict:
+    def mark(line: Line, x: float) -> Mark:
         """Where a graphic meets a line of text at `x`: the line's style and the words before x,
         as a formula hole run carries them (emit.formula_shifts predicts where x lands in Slides)."""
         main = line.main
@@ -321,18 +346,19 @@ class FiguresMixin(ParagraphsMixin):
                 cuts.append((a, max(1, round((b - a - 0.33 * line.size) / line.size)) * line.size))  # (as runs() writes it)
         def closed(v: float) -> float:
             return v - sum(w for c, w in cuts if c < v - 0.5)
-        before = [[round(s.rect.w, 2), s.font, s.info.family, s.info.bold, s.info.italic,
-                   math_text(s.font, s.text)[0] if s.info.family == "math" else s.text, round(closed(s.rect.x0), 2)]
-                  for s in words]
+        before: list[BeforeWord] = [
+            (round(s.rect.w, 2), s.font, family_of(s), s.info.bold, s.info.italic,
+             math_text(s.font, s.text)[0] if s.info.family == "math" else s.text, round(closed(s.rect.x0), 2))
+            for s in words]
         # (a hole's gap in Slides is HOLE_PAD wider on each side)
         pads = 2 * HOLE_PAD * sum(r.x1 <= x + 0.5 for r in holes)
-        return {"x": round(x, 2), "hole_x0": round(closed(x), 2), "pads": pads, "font": main.font, "family": main.info.family, "size": round(line.size, 2),
+        return {"x": round(x, 2), "hole_x0": round(closed(x), 2), "pads": pads, "font": main.font, "family": family_of(main), "size": round(line.size, 2),
                 "bold": main.info.bold, "italic": main.info.italic, "before": before}
 
-    def icons(self, text_elements: list[dict]) -> list[dict]:
+    def icons(self, text_elements: list[TextElement]) -> list[ImageElement]:
         """Small raster images next to text that are not bullets (bibliography icons, inline
         logos): movable pictures. Overlapping parts of one icon are cropped together."""
-        bullets = {p["bullet"].get("image") for e in text_elements for p in e["paragraphs"] if p["bullet"]}
+        bullets = {b.get("image") for e in text_elements for p in e["paragraphs"] for b in [p["bullet"]] if b}
         starts = [Rect(l["x0"], l["baseline"] - p["size"], l["x1"], l["baseline"])
                   for e in text_elements for p in e["paragraphs"] for l in p["lines"]]
 
@@ -346,7 +372,7 @@ class FiguresMixin(ParagraphsMixin):
                  and 0.15 * self.H < ir.cy < 0.88 * self.H and not self.on_edge_artwork(ir)
                  and not any(p.bbox.expand(1).intersects(ir) for p in self.panels)]  # block shadow pieces
         rects = [c for c in cluster_rects(rects, gap=0.0) if beside_text(c)]
-        out = []
+        out: list[ImageElement] = []
         for c in rects:
             out.append({"id": f"p{self.raw['index']}ic{len(out)}", "kind": "image", "role": "icon",
                         "bbox": c.expand(0.5).as_list(), "spans": []})
@@ -357,16 +383,16 @@ class FiguresMixin(ParagraphsMixin):
                 out[-1]["anchor"] = item
         return out
 
-    def specks_on_panels(self, spans: list[Span], elements: list[dict]) -> list[dict]:
+    def specks_on_panels(self, spans: list[Span], elements: list[Element]) -> list[ImageElement]:
         """Small graphics on a block panel that no other element took (a proof's QED box, a
         TikZ mark): the panel becomes a native shape over the background, so they become
         pictures above it (grouped with the block) instead of staying hidden in the background."""
         taken = [Rect.of(e["bbox"]) for e in elements if e["kind"] in ("image", "table", "diagram")]
-        taken += [Rect.of(p["bullet"]["bbox"]) for e in elements if e["kind"] == "text"
-                  for p in e["paragraphs"] if p["bullet"] and p["bullet"].get("bbox")]
+        taken += [Rect.of(b["bbox"]) for e in elements if e["kind"] == "text"
+                  for p in e["paragraphs"] for b in [p["bullet"]] if b and b["bbox"]]
         panels = [p.bbox for p in self.panels if p.fill and not p.image
                   and p.bbox.x0 > 1 and p.bbox.y0 > 1 and p.bbox.x1 < self.W - 1 and p.bbox.y1 < self.H - 1]
-        out = []
+        out: list[ImageElement] = []
         for c in (cluster_rects(self.graphics, gap=0.5) if self.graphics and panels else []):
             if max(c.w, c.h) >= 25 or any(t.expand(0.5).intersects(c) for t in taken) or \
                     not any(p.expand(-0.5).contains_rect(c, tol=0.5) for p in panels) or \
@@ -437,14 +463,14 @@ class FiguresMixin(ParagraphsMixin):
         return any(s["id"] not in labels and s["text"].strip() and box.contains(*centre(Rect.of(s["bbox"])))
                    for s in self.raw["spans"])
 
-    def plain_rectangles(self, c: Rect, label_spans: list[Span], index: int) -> list[dict]:
+    def plain_rectangles(self, c: Rect, label_spans: list[Span], index: int) -> list[ShapeElement]:
         """A figure cluster that is only opaque filled rectangles without text (progress bars,
         colour swatches, \\rule): native rectangle shapes."""
         box = c.expand(0.5)
         if any(box.contains_rect(s.rect, tol=0.5) for s in label_spans) or self.holds_other_text(c, label_spans) or \
                 any(box.intersects(Rect.of(im["bbox"])) for im in self.raw["images"]):
             return []
-        out = []
+        out: list[ShapeElement] = []
         for d in self.raw["drawings"]:
             r = Rect.of(d["bbox"])
             if not box.intersects(r) or d["id"] in self.decor_ids or self.is_decoration(r) or r.w * r.h >= 0.95 * self.W * self.H:
@@ -467,7 +493,7 @@ class FiguresMixin(ParagraphsMixin):
         for d in self.raw["drawings"]:
             r = Rect.of(d["bbox"])
             if d["type"] == "f" and d["fill"] and d.get("fill_opacity", 1.0) >= 0.99 and d["id"] not in self.decor_ids \
-                    and r.x0 > 1 and r.x1 < self.W - 1 and all(o["drawing"] != d["id"] for o in out) \
+                    and r.x0 > 1 and r.x1 < self.W - 1 and all(o.get("drawing") != d["id"] for o in out) \
                     and any(abs(r.y0 - o["bbox"][1]) < 0.1 and abs(r.y1 - o["bbox"][3]) < 0.1
                             and r.x0 <= o["bbox"][0] + 0.1 and r.x1 >= o["bbox"][2] - 0.1 for o in out):
                 out.insert(0, {"id": f"p{self.raw['index']}r{index + len(out)}", "kind": "shape", "role": "rule",
@@ -476,11 +502,11 @@ class FiguresMixin(ParagraphsMixin):
         return out
 
     @staticmethod
-    def closed_frames(nodes: list[dict], lines: list[dict]) -> None:
+    def closed_frames(nodes: list[DraftNode], lines: list[DiagramLine]) -> None:
         """Four stroked lines closing a rectangle (\\fbox and \\fcolorbox draw their frame side by
         side) become one rectangle node; a filled rectangle right inside the frame (the
         \\fcolorbox background) takes it as its outline."""
-        def extent(ln: Mapping[str, list[float]], k: int) -> list[float]:
+        def extent(ln: DiagramLine, k: int) -> list[float]:
             return sorted((ln["from"][k], ln["to"][k]))
         horizontal = [l for l in lines if "via" not in l and abs(l["from"][1] - l["to"][1]) < 0.05]
         vertical = [l for l in lines if "via" not in l and abs(l["from"][0] - l["to"][0]) < 0.05]
@@ -502,23 +528,25 @@ class FiguresMixin(ParagraphsMixin):
                 rect = Rect(left["from"][0], y0, right["from"][0], y1)
                 for ln in (top, bottom, left, right):
                     lines.remove(ln)
-                inner = next((n for n in nodes if n["shape"] == "RECTANGLE" and n["stroke"] is None and
-                              rect.expand(tol).contains_rect(n["rect"], tol=0.5) and n["rect"].w >= rect.w - 2 * tol
-                              and n["rect"].h >= rect.h - 2 * tol), None)
-                if inner:
-                    inner.update(rect=rect, stroke=top["stroke"], width=top["width"])
+                inner = next((i for i, n in enumerate(nodes) if n.shape == "RECTANGLE" and n.stroke is None and
+                              rect.expand(tol).contains_rect(n.rect, tol=0.5) and n.rect.w >= rect.w - 2 * tol
+                              and n.rect.h >= rect.h - 2 * tol), None)
+                if inner is not None:
+                    nodes[inner] = replace(nodes[inner], rect=rect, stroke=top["stroke"], width=top["width"])
                 else:
-                    nodes.append({"rect": rect, "shape": "RECTANGLE", "spans": [], "fill": None,
-                                  "stroke": top["stroke"], "width": top["width"]})
+                    nodes.append(DraftNode(rect=rect, shape="RECTANGLE", spans=[], fill=None,
+                                           stroke=top["stroke"], width=top["width"], radius=None))
 
-    def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> dict | None:
+    def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> DiagramElement | None:
         """A figure cluster made only of simple nodes (rectangles, rounded rectangles, ellipses)
         with their text inside, straight lines and arrow tips: rebuilt from native Slides
         shapes and lines. Anything else (curves, images, math, loose labels) keeps it a picture."""
         box = c.expand(0.5)
         if any(box.contains_rect(Rect.of(im["bbox"]), tol=0.5) for im in self.raw["images"]) or self.holds_other_text(c, label_spans):
             return None
-        nodes, lines, tips = [], [], []
+        nodes: list[DraftNode] = []
+        lines: list[DiagramLine] = []
+        tips: list[tuple[Rect, Arrow, list[list[float]], float]] = []
         for d in self.raw["drawings"]:
             r = Rect.of(d["bbox"])
             if not box.contains_rect(r, tol=0.5) or r.w * r.h >= 0.95 * self.W * self.H:
@@ -531,21 +559,23 @@ class FiguresMixin(ParagraphsMixin):
                 # multiplied fill): native shapes came out opaque, the dimmed step drawn in full.
                 return None
             ops = "".join(op for op, _ in path)
-            shape = {"re": "RECTANGLE", "lclclclc": "ROUND_RECTANGLE", "clclclcl": "ROUND_RECTANGLE",
-                     "cccc": "ELLIPSE" if upright_ellipse(path, r) else None}.get(ops)
+            shapes: dict[str, TemplateKind | None] = {
+                "re": "RECTANGLE", "lclclclc": "ROUND_RECTANGLE", "clclclcl": "ROUND_RECTANGLE",
+                "cccc": "ELLIPSE" if upright_ellipse(path, r) else None}
+            shape = shapes.get(ops)
             points = [p for _, pts in path for p in pts]
             if shape is None and max(r.w, r.h) > 6 and ops in ("llll", "lll") and "f" in d["type"] + "f":
                 shape = polygon_shape(points, r)  # decision diamonds, triangles
             if shape and r.w > 3 and r.h > 3:
-                nodes.append({"rect": r, "shape": shape, "spans": [],
-                              "fill": d["fill"] if "f" in d["type"] else None,
-                              "stroke": d["stroke"] if "s" in d["type"] else None, "width": d["width"],
-                              # rounded corners=3pt: without it the node got Slides' default rounding
-                              **({"radius": max(d["corners"].values())}
-                                 if shape == "ROUND_RECTANGLE" and d.get("corners") else {})})
+                corners = d.get("corners")
+                nodes.append(DraftNode(rect=r, shape=shape, spans=[],
+                                       fill=d["fill"] if "f" in d["type"] else None,
+                                       stroke=d["stroke"] if "s" in d["type"] else None, width=d["width"],
+                                       # rounded corners=3pt: without it the node got Slides' default rounding
+                                       radius=max(corners.values()) if shape == "ROUND_RECTANGLE" and corners else None))
             elif d["type"] == "s" and set(ops) == {"l"} and max(r.w, r.h) > 6:
                 segments = [(tuple(a), tuple(b)) for _, (a, b) in path]
-                style = {"stroke": d["stroke"] or "#000000", "width": d["width"] or 0.4, "arrow_from": None, "arrow_to": None}
+                stroke, width = d["stroke"] or "#000000", d["width"] or 0.4
                 (p0, p1), (p1b, p2) = segments[0], segments[-1]
                 if len(segments) == 2 and math.dist(p1, p1b) < 0.05 and (abs(p0[0] - p1[0]) < 0.05) != (abs(p0[1] - p1[1]) < 0.05) \
                         and (abs(p1[0] - p2[0]) < 0.05) != (abs(p1[1] - p2[1]) < 0.05) \
@@ -555,19 +585,22 @@ class FiguresMixin(ParagraphsMixin):
                     # the end) with its turn halfway, three segments; adj 0 draws |- right.
                     if abs(p0[0] - p1[0]) >= 0.05:
                         p0, p2 = p2, p0
-                    lines.append({"from": list(p0), "via": list(p1), "to": list(p2), "bend": "vh", **style})
+                    lines.append({"from": list(p0), "via": list(p1), "to": list(p2), "bend": "vh",
+                                  "stroke": stroke, "width": width, "arrow_from": None, "arrow_to": None})
                 else:  # straight lines, and other polylines one segment at a time
                     for (x1, y1), (x2, y2) in segments:
-                        lines.append({"from": [x1, y1], "to": [x2, y2], **style})
+                        lines.append({"from": [x1, y1], "to": [x2, y2],
+                                      "stroke": stroke, "width": width, "arrow_from": None, "arrow_to": None})
             elif max(r.w, r.h) <= 6 and set(ops) <= {"c", "l"}:
                 # Arrow heads are small separate paths: stroked (->), filled triangles (latex)
                 # or filled concave quadrilaterals (stealth).
+                head: Arrow
                 if d["type"] == "s":
-                    style = "OPEN_ARROW"
+                    head = "OPEN_ARROW"
                 else:
-                    style = "STEALTH_ARROW" if ops == "llll" else "FILL_ARROW"
+                    head = "STEALTH_ARROW" if ops == "llll" else "FILL_ARROW"
                 points = [p for _, pts in path for p in pts]
-                tips.append((r, style, points, d["width"] if "s" in d["type"] and d["width"] else 0.0))
+                tips.append((r, head, points, d["width"] if "s" in d["type"] and d["width"] else 0.0))
             else:
                 return None
         self.closed_frames(nodes, lines)
@@ -577,20 +610,23 @@ class FiguresMixin(ParagraphsMixin):
         # lens, one circle's own part - and a node's text is set centred in all of it.
         for i, a in enumerate(nodes):
             for b in nodes[i + 1:]:
-                ra, rb = a["rect"], b["rect"]
+                ra, rb = a.rect, b.rect
                 if overlap(ra, rb) > 0.05 * min(ra.w * ra.h, rb.w * rb.h) and \
                         not ra.contains_rect(rb, tol=0.5) and not rb.contains_rect(ra, tol=0.5):
                     return None
-        for tip, style, points, outline in tips:
-            ends = [(ln, end) for ln in lines for end in ("from", "to") if tip.expand(1).contains(*ln[end])]
+        for tip, head, points, outline in tips:
+            ends = [(ln, end) for ln in lines for end in ENDS if tip.expand(1).contains(*ln[end])]
             if not ends:
                 return None
             ln, end = ends[0]
-            ln["arrow_" + end] = style
-            if style != "OPEN_ARROW":
+            if end == "from":
+                ln["arrow_from"] = head
+            else:
+                ln["arrow_to"] = head
+            if head != "OPEN_ARROW":
                 # TikZ stops the line where a filled head begins; Slides draws the head at the
                 # line's end, so extend the line to the tip.
-                other = ln.get("via") or ln["to" if end == "from" else "from"]
+                other = ln.get("via") or (ln["to"] if end == "from" else ln["from"])
                 ux, uy = ln[end][0] - other[0], ln[end][1] - other[1]
                 length = (ux * ux + uy * uy) ** 0.5 or 1.0
                 ux, uy = ux / length, uy / length
@@ -610,8 +646,8 @@ class FiguresMixin(ParagraphsMixin):
             return None
         free: list[Span] = []
 
-        def area(n: Mapping[str, Rect]) -> float:
-            return n["rect"].w * n["rect"].h
+        def area(n: DraftNode) -> float:
+            return n.rect.w * n.rect.h
         seen: list[Span] = []
         for s in spans:
             if s.info.family in ("math", "icon") or "�" in s.text or not s.horizontal:
@@ -626,41 +662,42 @@ class FiguresMixin(ParagraphsMixin):
                    and abs(o.size - s.size) <= 0.1 for o in seen):
                 continue
             seen.append(s)
-            owners = [n for n in nodes if n["rect"].contains(s.rect.cx, s.rect.cy)]
+            owners = [n for n in nodes if n.rect.contains(s.rect.cx, s.rect.cy)]
             if owners:
                 smallest = min(map(area, owners))
-                [n for n in owners if area(n) <= 1.02 * smallest + 0.01][-1]["spans"].append(s)
+                [n for n in owners if area(n) <= 1.02 * smallest + 0.01][-1].spans.append(s)
             else:
                 free.append(s)  # edge labels and captions: a text box in the group
-        if sum(n["shape"] is not None and not n["spans"] for n in nodes) > MAX_PLAIN_RECTANGLES:
+        if sum(n.shape is not None and not n.spans for n in nodes) > MAX_PLAIN_RECTANGLES:
             return None  # a QR code, a pixel grid: modules, not nodes
         # Free labels on one baseline and close together are one label. (Close on both sides:
         # two edge labels whose baselines round apart sort right to left, and the one-sided gap
         # joined them across the node between - "connect SYN+ACK" over two arrows.)
         for s in sorted(free, key=lambda s: (round(s.baseline), s.rect.x0)):
-            last = nodes[-1] if nodes and nodes[-1]["shape"] is None else None
-            if last and abs(last["spans"][-1].baseline - s.baseline) <= 0.3 * s.size and \
-                    -0.3 * s.size <= s.rect.x0 - last["spans"][-1].rect.x1 <= 0.5 * s.size:
-                last["spans"].append(s)
-                last["rect"] = last["rect"].union(s.rect)
+            last = nodes[-1] if nodes and nodes[-1].shape is None else None
+            if last and abs(last.spans[-1].baseline - s.baseline) <= 0.3 * s.size and \
+                    -0.3 * s.size <= s.rect.x0 - last.spans[-1].rect.x1 <= 0.5 * s.size:
+                last.spans.append(s)
+                nodes[-1] = replace(last, rect=last.rect.union(s.rect))
             else:
-                nodes.append({"rect": s.rect, "shape": None, "spans": [s], "fill": None, "stroke": None, "width": None})
+                nodes.append(DraftNode(rect=s.rect, shape=None, spans=[s], fill=None, stroke=None, width=None,
+                                       radius=None))
 
-        out_nodes = []
+        out_nodes: list[Node] = []
         for n in nodes:
             rows: list[list[Span]] = []
-            for s in sorted(n["spans"], key=lambda s: (s.baseline, s.rect.x0)):
+            for s in sorted(n.spans, key=lambda s: (s.baseline, s.rect.x0)):
                 if rows and abs(s.baseline - rows[-1][0].baseline) <= 0.5 * s.size:
                     rows[-1].append(s)
                 else:
                     rows.append([s])
             out_nodes.append({
-                "bbox": n["rect"].as_list(), "shape": n["shape"], "fill": n["fill"], "stroke": n["stroke"],
-                "width": n["width"], "paragraphs": [span_runs(sorted(row, key=lambda s: s.rect.x0)) for row in rows],
+                "bbox": n.rect.as_list(), "shape": n.shape, "fill": n.fill, "stroke": n.stroke,
+                "width": n.width, "paragraphs": [span_runs(sorted(row, key=lambda s: s.rect.x0)) for row in rows],
                 "baselines": [round(row[0].baseline, 2) for row in rows],
                 "label_w": round(max((max(s.rect.x1 for s in row) - min(s.rect.x0 for s in row) for row in rows), default=0.0), 2),
-                "text": card_text(n["rect"], rows) if n["shape"] else None,
-                **({"radius": n["radius"]} if "radius" in n else {}),
+                "text": card_text(n.rect, rows) if n.shape else None,
+                **({"radius": n.radius} if n.radius is not None else {}),
             })
         return {"id": f"p{self.raw['index']}dg{index}", "kind": "diagram", "role": "figure",
                 "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,

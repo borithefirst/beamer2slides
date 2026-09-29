@@ -5,7 +5,9 @@ import math
 import re
 import unicodedata
 from collections.abc import Iterable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, Protocol
 
 from . import bidi, type3
 from .fonts import font_info
@@ -14,6 +16,7 @@ from .pdf.api import Drawing, Link
 from .raw_types import (
     DrawingType, PathItem, RawColor, RawDoc, RawDrawing, RawImage, RawLink, RawMark, RawPage, RawSpan,
 )
+from .typing_compat import assert_never
 
 LIGATURES = str.maketrans({"ﬀ": "ff", "ﬁ": "fi", "ﬂ": "fl", "ﬃ": "ffi", "ﬄ": "ffl",
                            "ﬅ": "st", "ﬆ": "st"})
@@ -29,15 +32,46 @@ def _hex(rgb: tuple[float, float, float] | None) -> RawColor | None:
     return "#" + "".join(f"{round(max(0.0, min(1.0, c)) * 255):02x}" for c in rgb[:3])
 
 
-def _points(item: tuple) -> list:
+Point = tuple[float, float]
+Box = tuple[float, float, float, float]
+
+
+def _xy(v: object) -> Point:
+    """A path item's point (a pair of numbers, as the backend gives it: a tuple or a list)."""
+    if isinstance(v, (tuple, list)) and len(v) == 2:
+        x, y = v
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+            return x, y
+    raise ValueError(f"not a point: {v!r}")
+
+
+def _box4(v: object) -> Box:
+    """A "re" item's rectangle (x0, y0, x1, y1)."""
+    if isinstance(v, (tuple, list)) and len(v) == 4:
+        x0, y0, x1, y1 = v
+        if isinstance(x0, (int, float)) and isinstance(y0, (int, float)) \
+                and isinstance(x1, (int, float)) and isinstance(y1, (int, float)):
+            return x0, y0, x1, y1
+    raise ValueError(f"not a rectangle: {v!r}")
+
+
+def _quad(v: object) -> tuple[Point, Point, Point, Point]:
+    """A "qu" item's corners in drawing order: ul, ll, lr, ur."""
+    if isinstance(v, (tuple, list)) and len(v) == 4:
+        p0, p1, p2, p3 = v
+        return _xy(p0), _xy(p1), _xy(p2), _xy(p3)
+    raise ValueError(f"not a quad: {v!r}")
+
+
+def _points(item: Sequence[object]) -> list[list[float]]:
     op = item[0]
     if op == "re":
-        x0, y0, x1, y1 = item[1]
+        x0, y0, x1, y1 = _box4(item[1])
         return [[x0, y0], [x1, y1]]
     if op == "qu":
-        p0, p1, p2, p3 = item[1]  # the quad's corners in drawing order: ul, ll, lr, ur
+        p0, p1, p2, p3 = _quad(item[1])
         return [list(p) for p in (p0, p3, p2, p1)]  # ul, ur, lr, ll
-    return [list(p) for p in item[1:]]
+    return [list(_xy(p)) for p in item[1:]]
 
 
 PATH_ITEMS = 20  # a drawing of more pieces has no path in raw.json
@@ -155,42 +189,41 @@ def _gaps(chars: list[Char]) -> list[float | None]:
     return out
 
 
-def tracked_gaps(chars: list[Char], tracks: dict[int, float] | None = None) -> dict[int, bool]:
+def tracked_gaps(chars: list[Char], tracks: dict[int, float]) -> dict[int, bool]:
     """Letterspaced stretches: character index -> True where the gap before it is a word gap,
     False where it is the tracking between two letters of a word (never a word space). A stretch is a
     run of glyphs in one font on one line none of which touch (each gap at least TRACK_MIN): the
     tracking (within TRACK_BAND of the median), a kern off it, or a word gap (TRACK_WORD more),
     with at least TRACK_LETTERS tracked gaps between letters. In ordinary words the glyphs touch
-    and only word spaces stand apart. Math and monospaced glyphs are left alone. `tracks`, when
-    given, gets each index's stretch tracking (em)."""
+    and only word spaces stand apart. Math and monospaced glyphs are left alone. `tracks` gets
+    each index's stretch tracking (em)."""
     gaps = _gaps(chars)
     out: dict[int, bool] = {}
     i = 1
     while i < len(chars):
-        if gaps[i] is None or gaps[i] < TRACK_MIN:
+        # (index k, gaps[k]) of a stretch: gaps[k] is the gap between chars[k - 1] and chars[k]
+        seg: list[tuple[int, float]] = []
+        while i < len(chars) and (g := gaps[i]) is not None and g >= TRACK_MIN:
+            seg.append((i, g))
+            i += 1
+        if not seg:
             i += 1
             continue
-        j = i
-        while j < len(chars) and gaps[j] is not None and gaps[j] >= TRACK_MIN:
-            j += 1
-        seg = range(i, j)  # gaps[k] is the gap between chars[k - 1] and chars[k]
-        i = j
-        if font_info(chars[seg[0]].font).family in ("math", "mono"):
+        if font_info(chars[seg[0][0]].font).family in ("math", "mono"):
             continue
-        near = sorted(gaps[k] for k in seg if TRACK_MIN <= gaps[k] <= TRACK_MAX)
+        near = sorted(g for _, g in seg if g <= TRACK_MAX)
         if len(near) < TRACK_LETTERS:
             continue
         track = near[len(near) // 2]
-        letters = [k for k in seg if abs(gaps[k] - track) <= TRACK_BAND
+        letters = [k for k, g in seg if abs(g - track) <= TRACK_BAND
                    and chars[k - 1].c.isalpha() and chars[k].c.isalpha()]
-        inner = [k for k in seg if gaps[k] < track + TRACK_WORD]
+        inner = [k for k, g in seg if g < track + TRACK_WORD]
         # (ordinary words: most inner gaps touch, only the word spaces are near the median)
         if len(letters) < TRACK_LETTERS or len(letters) < 0.6 * len(inner):
             continue
-        for k in seg:
-            out[k] = gaps[k] >= track + TRACK_WORD
-            if tracks is not None:
-                tracks[k] = track
+        for k, g in seg:
+            out[k] = g >= track + TRACK_WORD
+            tracks[k] = track
     return out
 
 
@@ -251,32 +284,37 @@ CURVE_STEPS = 8
 GRID = 24.0  # pt, cells of the index of covering objects
 
 
-def _flatten(items: list) -> list[list[tuple[float, float]]]:
+Polygon = list[Point]
+
+
+def _flatten(items: Sequence[Sequence[object]]) -> list[Polygon]:
     """A filled path's items as closed polygons: chains of items that join end to start (a
     filled subpath is closed whether or not the PDF closes it), curves in straight steps."""
-    polys: list[list] = []
-    chain: list | None = None  # the subpath being followed
+    polys: list[Polygon] = []
+    chain: Polygon | None = None  # the subpath being followed
     for item in items:
         op = item[0]
         if op in ("re", "qu"):
             if op == "re":
-                x0, y0, x1, y1 = item[1]
+                x0, y0, x1, y1 = _box4(item[1])
                 polys.append([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
             else:
-                polys.append([tuple(p) for p in item[1]])
+                polys.append(list(_quad(item[1])))
             chain = None
             continue
-        start = tuple(item[1])
+        start = _xy(item[1])
+        pts: Polygon
         if op == "l":
-            pts = [tuple(item[2])]
+            pts = [_xy(item[2])]
         else:
-            p0, p1, p2, p3 = item[1:5]
+            p0, p1, p2, p3 = (_xy(p) for p in item[1:5])
             pts = []
             for k in range(1, CURVE_STEPS + 1):
                 t = k / CURVE_STEPS
                 u = 1 - t
-                pts.append(tuple(u ** 3 * p0[i] + 3 * u * u * t * p1[i] + 3 * u * t * t * p2[i] + t ** 3 * p3[i]
-                                 for i in (0, 1)))
+                x, y = (u ** 3 * p0[i] + 3 * u * u * t * p1[i] + 3 * u * t * t * p2[i] + t ** 3 * p3[i]
+                        for i in (0, 1))
+                pts.append((x, y))
         if chain is not None and chain[-1] == start:
             chain.extend(pts)
         else:
@@ -285,7 +323,7 @@ def _flatten(items: list) -> list[list[tuple[float, float]]]:
     return [p for p in polys if len(p) >= 3]
 
 
-def _winding(polys: list, x: float, y: float, even_odd: bool) -> bool:
+def _winding(polys: list[Polygon], x: float, y: float, even_odd: bool) -> bool:
     """Whether (x, y) is inside the polygons under the path's fill rule."""
     wind = crossings = 0
     for poly in polys:
@@ -300,8 +338,26 @@ def _winding(polys: list, x: float, y: float, even_odd: bool) -> bool:
     return crossings % 2 == 1 if even_odd else wind != 0
 
 
-def _in(box, x: float, y: float) -> bool:
+def _in(box: Box, x: float, y: float) -> bool:
     return box[0] <= x <= box[2] and box[1] <= y <= box[3]
+
+
+@dataclass(frozen=True, kw_only=True)
+class _Cover:
+    """Something opaque painted over what came before it: its object id, its box in page space,
+    and what of the box it paints - all of it, the polygons of a filled path (under its fill
+    rule), or an image's pixels where nothing is see-through (`Visibility._image_opaque`)."""
+    obj: int
+    box: Box
+    paints: Literal["box", "path", "image"]
+    polys: list[Polygon]
+    even_odd: bool
+
+
+class Sight(Protocol):
+    """What `spans` asks of a page's visibility: whether one glyph is hidden (`Visibility`)."""
+
+    def hidden(self, ch: Char) -> bool: ...
 
 
 class Visibility:
@@ -322,21 +378,24 @@ class Visibility:
         # is known only by its box, which may promise more than the clip path lets through (a
         # mindmap's connection bar is clipped to the space between two circles), so something
         # its clip cuts does not count.
-        self.covers: list[tuple] = []  # (object id, bbox, polygons, "image" or None for a box, even_odd)
+        self.covers: list[_Cover] = []
         for d in page.drawings():
             if d["type"] not in ("f", "fs") or d.get("fill") is None or d.get("soft_mask") \
                     or d.get("fill_opacity", 1.0) < 1.0 or self._cut(d["object"], d["rect"]):
                 continue
             items = d["items"]
             box_only = len(items) == 1 and items[0][0] == "re"
-            self.covers.append((d["object"], d["rect"], None if box_only else _flatten(items),
-                                d.get("even_odd", False)))
+            self.covers.append(_Cover(obj=d["object"], box=d["rect"], paints="box" if box_only else "path",
+                                      polys=[] if box_only else _flatten(items),
+                                      even_odd=d.get("even_odd", False)))
         kinds = {po.id: po.type for po in objects}
         for info in page.images():
             if kinds.get(info["object"]) == OBJ_IMAGE:  # its box is what its clips let show
-                self.covers.append((info["object"], info["bbox"], "image", False))
+                self.covers.append(_Cover(obj=info["object"], box=info["bbox"], paints="image", polys=[],
+                                          even_odd=False))
         self.grid: dict[tuple[int, int], list[int]] = {}
-        for k, (_, (x0, y0, x1, y1), _, _) in enumerate(self.covers):
+        for k, cover in enumerate(self.covers):
+            x0, y0, x1, y1 = cover.box
             if x1 - x0 > 4 * self.rect[2] or y1 - y0 > 4 * self.rect[3]:
                 continue  # a runaway coordinate: nothing to index
             for gx in range(math.floor(x0 / GRID), math.floor(x1 / GRID) + 1):
@@ -344,7 +403,7 @@ class Visibility:
                     self.grid.setdefault((gx, gy), []).append(k)
         self._opaque: dict[int, bool] = {}
 
-    def _cut(self, obj: int, rect) -> bool:
+    def _cut(self, obj: int, rect: Box) -> bool:
         clip = self.clips.get(obj)
         return clip is not None and not (clip[0] <= rect[0] + 0.5 and clip[1] <= rect[1] + 0.5
                                          and clip[2] >= rect[2] - 0.5 and clip[3] >= rect[3] - 0.5)
@@ -359,14 +418,19 @@ class Visibility:
 
     def _covered(self, obj: int, x: float, y: float) -> bool:
         for k in self.grid.get((math.floor(x / GRID), math.floor(y / GRID)), ()):
-            cover, box, polys, even_odd = self.covers[k]
-            if cover <= obj or not _in(box, x, y):
+            cover = self.covers[k]
+            if cover.obj <= obj or not _in(cover.box, x, y):
                 continue
-            if polys == "image":
-                if self._image_opaque(cover):
+            if cover.paints == "image":
+                if self._image_opaque(cover.obj):
                     return True
-            elif polys is None or _winding(polys, x, y, even_odd):
+            elif cover.paints == "box":
                 return True
+            elif cover.paints == "path":
+                if _winding(cover.polys, x, y, cover.even_odd):
+                    return True
+            else:
+                assert_never(cover.paints)
         return False
 
     def hidden(self, ch: Char) -> bool:
@@ -417,20 +481,44 @@ def _marks_json(marks: Marks) -> list[RawMark]:
     return [(tag, dict(params)) for tag, params in marks]
 
 
-def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False,
-          chars: list[Char] | None = None, marks: dict[int, Marks] | None = None) -> list[dict]:
+@dataclass(frozen=True, kw_only=True)
+class PageSpan:
+    """A run of glyphs on one line in one font, size and colour (`spans`): its text as drawn, the
+    first glyph's style and origin, the box of its glyphs (combining marks left out), the glyphs
+    (word spaces made by `spans` among them, `Char.synthetic`) and the B2S marks around it
+    (outermost first; none off an adopted page)."""
+    text: str
+    font: str
+    size: float
+    color: int
+    alpha: int
+    origin: tuple[float, float]
+    bbox: Box
+    dir: tuple[float, float]
+    chars: tuple[Char, ...]
+    marks: Marks
+
+
+def shown_spans(page: Page) -> list[PageSpan]:
+    """`spans` of the glyphs that show, the page's characters as PDFium reads them (no Type 3 or
+    right-to-left reading) and no marks: what a tool looking at one page wants."""
+    return spans(page, Visibility(page), False, page.chars(), {})
+
+
+def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
+          marks: dict[int, Marks]) -> list[PageSpan]:
     """Runs of glyphs on one line with the same font, size and colour, split at word gaps. Only
     glyphs that show (`Visibility`), or with `hidden` only those on the page that don't. `chars`:
-    the page's characters as read (`page_chars`), when the caller has them. `marks`
-    (`page_marks`): a span never crosses from one B2S mark to another, and carries its own."""
-    out = []
+    the page's characters as read (`page_chars`, or `page.chars()`). `marks` (`page_marks`): a
+    span never crosses from one B2S mark to another, and carries its own."""
+    out: list[PageSpan] = []
     run: list[Char] = []
     x0, y0, x1, y1 = page.rect
-    visibility = visibility or Visibility(page)
-    marks = marks or {}
-    mark_of = lambda ch: marks.get(ch.obj, ())
 
-    def flush():
+    def mark_of(ch: Char) -> Marks:
+        return marks.get(ch.obj, ())
+
+    def flush() -> None:
         if run and any(not ch.synthetic for ch in run):
             text = "".join(ch.c for ch in run)
             # A combining mark sits over the letter before it; its own box (PDFium gives it one,
@@ -441,17 +529,14 @@ def spans(page: Page, visibility: Visibility | None = None, hidden: bool = False
             bx1 = max(ch.box[2] for ch in boxed)
             by1 = max(ch.box[3] for ch in boxed)
             first = run[0]
-            span: dict[str, object] = {"text": text, "font": first.font, "size": first.size, "color": first.color,
-                    "alpha": first.alpha, "origin": first.origin, "bbox": (bx0, by0, bx1, by1),
-                    "dir": first.dir, "chars": list(run)}
-            mark = next((mark_of(ch) for ch in run if not ch.synthetic), ())
-            if mark:
-                span["marks"] = mark
-            out.append(span)
+            mark: Marks = next((mark_of(ch) for ch in run if not ch.synthetic), ())
+            out.append(PageSpan(text=text, font=first.font, size=first.size, color=first.color, alpha=first.alpha,
+                                origin=first.origin, bbox=(bx0, by0, bx1, by1), dir=first.dir, chars=tuple(run),
+                                marks=mark))
         run.clear()
 
     # characters outside the page (e.g. the cut-off half of a notes-on-second-screen page)
-    shown = [ch for ch in (page.chars() if chars is None else chars)
+    shown = [ch for ch in chars
              if not (ch.box[2] <= x0 or ch.box[0] >= x1 or ch.box[3] <= y0 or ch.box[1] >= y1)
              and visibility.hidden(ch) == hidden]
     shown = _accent_overhang(page, shown)
@@ -616,7 +701,7 @@ def readable(text: str, font: str) -> str:
     if font_info(font).family == "math" or not INFERIOR_RUN.search(text):
         return text
 
-    def figures(m: re.Match) -> str:
+    def figures(m: re.Match[str]) -> str:
         run = m.group()
         before = text[m.start() - 1] if m.start() else None
         # (at the span's start the letter may be the span before's: a lone figure stays)
@@ -667,22 +752,22 @@ def extract_page(page: Page, label: str) -> RawPage:
     chars, decoded = page_chars(page)
     marks = page_marks(page)
 
-    def span_json(s: dict, sid: str) -> RawSpan:
+    def span_json(s: PageSpan, sid: str) -> RawSpan:
         span: RawSpan = {
             # Ligature code points (xelatex/lualatex text layers) as plain letters, so the
             # text stays searchable and spell-checkable in Slides.
-            "id": sid, "text": readable(s["text"], s["font"]), "font": s["font"],
-            "size": round(s["size"], 3), "color": f"#{s['color']:06x}", "alpha": s["alpha"],
-            "origin": _r(s["origin"], 2), "bbox": _r(s["bbox"], 2), "dir": _r(s["dir"], 3),
+            "id": sid, "text": readable(s.text, s.font), "font": s.font,
+            "size": round(s.size, 3), "color": f"#{s.color:06x}", "alpha": s.alpha,
+            "origin": _r(s.origin, 2), "bbox": _r(s.bbox, 2), "dir": _r(s.dir, 3),
             # (a TeX bitmap font's small caps are a font of their own: ECCC1095)
-            "smallcaps": s["chars"][0].font_id not in decoded and _small_caps(page, s["chars"]),
+            "smallcaps": s.chars[0].font_id not in decoded and _small_caps(page, list(s.chars)),
         }
-        if "marks" in s:
-            span["marks"] = _marks_json(s["marks"])
+        if s.marks:
+            span["marks"] = _marks_json(s.marks)
         return span
 
-    for s in spans(page, visibility, chars=chars, marks=marks):
-        if s["text"].strip():
+    for s in spans(page, visibility, False, chars, marks):
+        if s.text.strip():
             out_spans.append(span_json(s, f"p{n}s{len(out_spans)}"))
 
     page_drawings = page.drawings()
@@ -710,12 +795,12 @@ def extract_page(page: Page, label: str) -> RawPage:
 
     # The words drawn but not seen are still the frame's: beamer draws what a later overlay step
     # uncovers at alpha 0 (transparent mode), and select_overlays tells steps apart by their words.
-    hidden_runs = spans(page, visibility, hidden=True, chars=chars, marks=marks)
-    hidden = [t for s in hidden_runs if (t := readable(s["text"], s["font"]).strip())]
+    hidden_runs = spans(page, visibility, True, chars, marks)
+    hidden = [t for s in hidden_runs if (t := readable(s.text, s.font).strip())]
     # On a page whose elements say what they are (adopt's marks), a marked element's words the page
     # hides (under a picture drawn after them) are still that element's, hidden in the deck as here.
-    hidden_spans = [span_json(s, f"p{n}h{i}") for i, s in enumerate(r for r in hidden_runs if "marks" in r
-                                                                   and r["text"].strip() and inside(r["bbox"]))]
+    hidden_spans = [span_json(s, f"p{n}h{i}") for i, s in enumerate(r for r in hidden_runs if r.marks
+                                                                   and r.text.strip() and inside(r.bbox))]
 
     out: RawPage = {
         "index": n, "label": label,
@@ -780,7 +865,7 @@ def frame_labels(dests: list[tuple[str, int]]) -> dict[int, str]:
     frame's first page and x<n> on its n-th overlay step; hyperref's own destinations (page.3,
     Navigation3) have no steps."""
     names = {name for name, _ in dests}
-    out = {}
+    out: dict[int, str] = {}
     for name, page in dests:
         m = FRAME_STEP.fullmatch(name)
         if m and m.group(1) in names and page >= 0:

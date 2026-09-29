@@ -380,8 +380,8 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   and adopt no longer calls `element_json`; inverse's Planner reads the loop's view as
   `LoopElement` records (`loop_element`/`loop_picture`, from deck.json or a target alike,
   `typed_target` -> `TargetDeck | JsonObject`) and matches every residual kind to `assert_never`;
-  marked builds its elements as `JsonObject`s (ir's TypedDicts wait on a typed
-  `PageClassifier.classify`); tests build records with `tests/deck_records.py`. adopt's
+  `PageClassifier.classify` returns ir's TypedDicts (`ir.slide_json`/`element_json`/`run_json`
+  write them), while marked still builds `JsonObject`s and can move to them; tests build records with `tests/deck_records.py`. adopt's
   state is `adopt_context.AdoptContext` (inverse's Context plus every field adopt keeps), built by
   `adopt_context()`: never set an attribute on a context that is not declared there. An adopted source also converts: a marked shape Slides has
   no shape for (line, freeform, picture fill, outline alone) is its picture at render

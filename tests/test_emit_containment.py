@@ -101,7 +101,7 @@ def test_an_element_emit_cannot_plan_is_the_picture_of_its_region(lenient, monke
               "pictures": [{"file": tmp_path / e["file"], "bbox": bbox, "alt": None, "title": "Picture"}
                            for e, bbox in plan.pictures(s) if e.get("role") == "fallback"],  # (render made none)
               "tables": plan.tables(s)} for s in plan.deck["slides"]]
-    prs = Presentation(emit.build_pptx(page_w, page_h, plan.keys, pages, {"color": "#ffffff"}))
+    prs = Presentation(emit.build_pptx(page_w, page_h, plan.keys, pages, {"color": "#ffffff"}, None))
     k = [s["page"] for s in plan.deck["slides"]].index(page)
     assert sum(sh.shape_type == MSO_SHAPE_TYPE.PICTURE for sh in prs.slides[k].shapes) == 1
 
@@ -147,7 +147,7 @@ def test_the_same_element_strict_is_the_same_error(monkeypatch):
 
 
 def shape_requests_of(el: dict, oid: str) -> list[dict]:
-    return real_shape_requests(el, "b2s_s000", oid, emit.SLIDE_W / 360.0)
+    return real_shape_requests(el, "b2s_s000", oid, emit.SLIDE_W / 360.0, None)
 
 
 def test_a_step_over_the_whole_slide_blames_the_element_it_tripped_on(lenient):

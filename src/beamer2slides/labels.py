@@ -23,8 +23,12 @@ deck's slide came from.
 
 import re
 import unicodedata
+from dataclasses import dataclass
+from pathlib import Path
+from typing import TypedDict
 
 from . import texmap
+from .json_types import JsonObject, as_optional_str
 
 MAX_SLUG = 28
 # Everything a beamer option list, a PDF destination name and a hyperref \hyperlink can carry
@@ -32,8 +36,9 @@ MAX_SLUG = 28
 SAFE = re.compile(r"[^a-z0-9-]+")
 
 
-def slug(title: str | None, taken: set[str], fallback: str = "frame") -> str:
-    """A readable label from a frame title, unique among `taken`. Accents are folded (a PDF
+def slug(title: str | None, taken: set[str], fallback: str) -> str:
+    """A readable label from a frame title (`fallback` when it has no letters), unique among
+    `taken`. Accents are folded (a PDF
     destination name is not the place to find out how a viewer encodes them) and the result is
     kept short enough to read in a diff."""
     text = unicodedata.normalize("NFKD", title or "")
@@ -50,10 +55,51 @@ def slug(title: str | None, taken: set[str], fallback: str = "frame") -> str:
     raise ValueError(f"cannot make a label out of {title!r}")
 
 
-def survey(infos: list[dict]) -> dict:
-    """What a converted deck's slides say about labels: the ones without, and the labels that name
-    more than one frame. Overlay steps of one frame share its label and are not duplicates, so
-    slides are counted by frame (`page` is the frame's first page for every step of it).
+class Unlabelled(TypedDict):
+    """A frame with no label: its first slide (0-based) and its title."""
+    slide: int
+    title: str | None
+
+
+class Duplicate(TypedDict):
+    """A label on more than one frame: the titles its slides carry, and those slides."""
+    label: str
+    titles: list[str]
+    slides: list[int]
+
+
+class Survey(TypedDict):
+    """What `survey` found (an agent tool's result carries it: `survey_json`)."""
+    slides: int
+    frames: int
+    unlabelled: list[Unlabelled]
+    duplicates: list[Duplicate]
+
+
+class LabelEdit(TypedDict):
+    """One label `plan` writes: `text` inserted at offset `at` of `file`, for the frame `index`
+    (its `title`, on `line`)."""
+    file: Path
+    at: int
+    text: str
+    label: str
+    title: str | None
+    line: int
+    index: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class _Frame:
+    label: str | None
+    titles: list[str]
+    slides: list[int]
+
+
+def survey(infos: list[JsonObject]) -> Survey:
+    """What a converted deck's slides say about labels (`identity.slide_info`): the ones without,
+    and the labels that name more than one frame. Overlay steps of one frame share its label and
+    are not duplicates, so slides are counted by frame (`page` is the frame's first page for every
+    step of it).
 
     A label written on two frames is *not* one of the duplicates found here, because it never
     reaches the PDF twice: hyperref keeps the first destination of a name and drops the second, so
@@ -62,32 +108,41 @@ def survey(infos: list[dict]) -> dict:
     Only `plan` below, which reads the `.tex`, can see that case. What is left for `duplicates` is
     a label whose slides are not one run, or whose steps do not agree on a title - which the PDF
     can show and which nothing downstream expects."""
-    frames: dict[object, dict] = {}
+    frames: dict[str | tuple[str, int], _Frame] = {}
     for i, info in enumerate(infos):
-        key = info.get("label") or ("#", i)
-        frames.setdefault(key, {"label": info.get("label"), "titles": [], "slides": []})
-        frames[key]["slides"].append(i)
-        if info.get("title"):
-            frames[key]["titles"].append(info["title"])
-    unlabelled = [{"slide": f["slides"][0], "title": (f["titles"] or [None])[0]}
-                  for f in frames.values() if not f["label"]]
-    duplicates = []
+        label = as_optional_str(info.get("label"), f"slide {i}: label")
+        title = as_optional_str(info.get("title"), f"slide {i}: title")
+        frame = frames.setdefault(label or ("#", i), _Frame(label=label, titles=[], slides=[]))
+        frame.slides.append(i)
+        if title:
+            frame.titles.append(title)
+    unlabelled: list[Unlabelled] = [{"slide": f.slides[0], "title": f.titles[0] if f.titles else None}
+                                    for f in frames.values() if not f.label]
+    duplicates: list[Duplicate] = []
     for f in frames.values():
-        if not f["label"]:
+        if not f.label:
             continue
-        titles = sorted({t for t in f["titles"]})
-        spread = f["slides"] != list(range(f["slides"][0], f["slides"][0] + len(f["slides"])))
+        titles = sorted(set(f.titles))
+        spread = f.slides != list(range(f.slides[0], f.slides[0] + len(f.slides)))
         # Steps of one frame are consecutive and say the same thing. Two frames that share a label,
         # sit next to each other and have the same title cannot be told apart from steps here: that
         # is a distinction only the .tex has, and `label` (this module's other half) makes it there.
         if len(titles) > 1 or spread:
-            duplicates.append({"label": f["label"], "titles": titles, "slides": f["slides"]})
+            duplicates.append({"label": f.label, "titles": titles, "slides": f.slides})
     return {"slides": len(infos), "frames": len(frames), "unlabelled": unlabelled, "duplicates": duplicates}
 
 
-def problems(found: dict) -> list[str]:
+def survey_json(found: Survey) -> JsonObject:
+    """A survey as JSON (a copy), for a result that carries it."""
+    return {"slides": found["slides"], "frames": found["frames"],
+            "unlabelled": [{"slide": u["slide"], "title": u["title"]} for u in found["unlabelled"]],
+            "duplicates": [{"label": d["label"], "titles": list(d["titles"]), "slides": list(d["slides"])}
+                           for d in found["duplicates"]]}
+
+
+def problems(found: Survey) -> list[str]:
     """Human lines for a survey, empty when every frame carries a label of its own."""
-    out = []
+    out: list[str] = []
     if found["unlabelled"]:
         which = ", ".join(f"{u['title'] or 'untitled'} (slide {u['slide'] + 1})" for u in found["unlabelled"][:3])
         out.append(f"{len(found['unlabelled'])} of {found['frames']} frames have no label: {which}"
@@ -102,15 +157,15 @@ def problems(found: dict) -> list[str]:
     return out
 
 
-def plan(source: texmap.Source) -> list[dict]:
+def plan(source: texmap.Source) -> list[LabelEdit]:
     """One edit per frame that has no label: where to write it, and what. Frames that already have
     one are left alone, and their labels are what the new ones are kept distinct from."""
     taken = {f.label for f in source.frames if f.label}
-    edits = []
+    edits: list[LabelEdit] = []
     for frame in source.frames:
         if frame.label:
             continue
-        name = slug(frame.title, taken)
+        name = slug(frame.title, taken, "frame")
         taken.add(name)
         if frame.opts_end >= 0:
             at, text = frame.opts_end, (f",label={name}" if frame.options.strip() else f"label={name}")
@@ -121,10 +176,10 @@ def plan(source: texmap.Source) -> list[dict]:
     return edits
 
 
-def apply(source: texmap.Source, edits: list[dict]) -> dict:
+def apply(source: texmap.Source, edits: list[LabelEdit]) -> dict[Path, str]:
     """The new text of each file the edits touch. Offsets are into the file as it was read, so the
     edits of one file are written back to front and never move one another."""
-    out: dict = {}
+    out: dict[Path, str] = {}
     for path in {e["file"] for e in edits}:
         text = source.text(path)
         for e in sorted((e for e in edits if e["file"] == path), key=lambda e: e["at"], reverse=True):

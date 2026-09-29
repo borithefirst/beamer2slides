@@ -2,6 +2,12 @@
 
 from beamer2slides.devtools import readability
 
+
+def measured(tex: str, known: set[str], shared: str) -> readability.Measured:
+    m = readability.measure(tex, known, shared)
+    assert m is not None, "no frames"
+    return m
+
 HAND = r"""\documentclass{beamer}
 \begin{document}
 \begin{frame}{Results}
@@ -29,7 +35,7 @@ MACHINE = r"""\documentclass{beamer}
 
 
 def test_a_hand_written_frame_reads_as_one_and_a_typeset_one_does_not():
-    hand, machine = readability.measure(HAND), readability.measure(MACHINE)
+    hand, machine = measured(HAND, set(), ""), measured(MACHINE, set(), "")
     assert readability.score(hand) > 0.9
     assert readability.score(machine) < 0.3
     assert machine["numbers"] > 10 * hand["numbers"]
@@ -53,13 +59,13 @@ def test_what_the_decks_own_sty_defines_reads_as_vocabulary_and_not_as_plumbing(
     v = readability.vocabulary(sty)
     assert v == {"slidepicture", "slidetable"}, "a strut is plumbing whoever named it, and @ names are internal"
     frame = "\\begin{document}\n\\begin{frame}\n  \\slidepicture{1,2,3,4}{a.png} words here\n\\end{frame}\n"
-    assert readability.measure(frame, v)["author"] > readability.measure(frame)["author"]
+    assert measured(frame, v, "")["author"] > measured(frame, set(), "")["author"]
 
 
 def test_lines_every_frame_repeats_are_what_a_theme_should_say():
     frame = "\\begin{frame}\n  \\includegraphics[width=453.5bp]{figures/master-logo.png}\n  Words %d here\n\\end{frame}\n"
     tex = "\\begin{document}\n" + "".join(frame % k for k in range(4)) + "\\end{document}"
-    m = readability.measure(tex)
+    m = measured(tex, set(), "")
     assert m["repeat"] < 0.7 and m["top_repeated"][0][0] == 4
 
 
@@ -71,8 +77,8 @@ def test_machinery_said_three_times_inside_one_frame_counts_as_said_three_times(
     table = "\\begin{document}\n\\begin{frame}\n" + rows + "\\end{frame}\n\\end{document}"
     items = "\\begin{document}\n\\begin{frame}\n" + "".join(f"  \\item Item {w}\n" for w in words) + \
             "\\end{frame}\n\\end{document}"
-    assert readability.measure(table)["repeat"] < 0.3, "one style, said four times"
-    assert readability.measure(items)["repeat"] == 1.0, "four items a person wrote"
+    assert measured(table, set(), "")["repeat"] < 0.3, "one style, said four times"
+    assert measured(items, set(), "")["repeat"] == 1.0, "four items a person wrote"
 
 
 def test_a_frame_emptied_into_the_theme_is_not_free():
@@ -83,11 +89,11 @@ def test_a_frame_emptied_into_the_theme_is_not_free():
         "\\end{document}"
     theme = "\\defbeamertemplate{background}{section}{%\n" + "".join(
         "  \\slidetext{%d.5,63,243.57,37.8}{body}{Decoration %d}\n" % (k, k) for k in range(20)) + "}\n"
-    assert readability.score(readability.measure(tex)) > readability.score(readability.measure(tex, shared=theme))
+    assert readability.score(measured(tex, set(), "")) > readability.score(measured(tex, set(), theme))
 
 
 def test_a_literal_a_frame_says_twice_is_reported():
     twice = ("\\begin{document}\n\\begin{frame}\n  \\frametitle{Quarterly revenue}\n"
              "  \\slidetext{1,2,3,4}{body}{Quarterly revenue}\n\\end{frame}\n\\end{document}")
     once = twice.replace("{body}{Quarterly revenue}", "{body}{Something else entirely}")
-    assert readability.measure(twice)["twins"] == 1 and readability.measure(once)["twins"] == 0
+    assert measured(twice, set(), "")["twins"] == 1 and measured(once, set(), "")["twins"] == 0

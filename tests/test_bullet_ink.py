@@ -7,6 +7,7 @@ import pytest
 
 from beamer2slides import emit
 from beamer2slides.emit import BULLET_SHAPES, FontMapper, bullet_level, bullet_shape, bullet_size, text_box_requests
+from beamer2slides.ir import ImageBullet, Label, NumberBullet
 
 DECKS = Path(__file__).resolve().parent / "decks" / "out"
 SCALE = 1.98
@@ -137,19 +138,29 @@ def test_a_ball_shows_its_letter_not_the_white_parentheses_at_its_edges():
     """r3_dense_v2 s7: enumerate items [ball] with [(a)]: the white parentheses sit on the ball's
     rim and the page, unseen; set in Slides' font they cut white crescents into the ball."""
     from beamer2slides.classify import ball_number
-    white, blue = {"color": "#ffffff", "x0": 12.88}, {"color": "#3333b3", "x0": 12.88}
-    ball = {"kind": "image", "image": "p6i0", "text": "(a)", "bbox": [13, 92, 22, 101]}
+    white, blue = _label("#ffffff", 12.88), _label("#3333b3", 12.88)
+    ball: ImageBullet = {"kind": "image", "image": "p6i0", "text": "(a)", "bbox": [13, 92, 22, 101]}
+    iv: ImageBullet = {**ball, "text": "iv"}
+    number: NumberBullet = {"kind": "number", "text": "(a)", "bbox": [13, 92, 22, 101]}
     assert ball_number(ball, white) == "a"
-    assert ball_number({**ball, "text": "iv"}, white) == "iv"
+    assert ball_number(iv, white) == "iv"
     assert ball_number(ball, blue) == "(a)", "parentheses one can see stay"
-    assert ball_number({**ball, "kind": "number"}, white) == "(a)"
+    assert ball_number(number, white) == "(a)"
+
+
+def _label(color: str, x0: float) -> Label:
+    """A list label: its colour and left edge are what `ball_number` reads."""
+    return {"x0": x0, "baseline": 0.0, "font": "CMR10", "family": "serif", "size": 10.0, "bold": False,
+            "italic": False, "color": color}
 
 
 def test_parentheses_on_the_balls_face_stay():
     """r3_dense_v3 s7: [(i)] on 10 pt balls. '(i)' and '(ii)' are narrower than the ball and
     their parentheses show on its dark face; wave 2 dropped them. '(iii)' reaches the rim."""
     from beamer2slides.classify import ball_number
-    ball = {"kind": "image", "image": "p6i0", "text": "(i)", "bbox": [15.0, 168.0, 25.0, 178.0]}
-    assert ball_number(ball, {"color": "#ffffff", "x0": 16.3}) == "(i)"
-    assert ball_number({**ball, "text": "(ii)"}, {"color": "#ffffff", "x0": 15.54}) == "(ii)"
-    assert ball_number({**ball, "text": "(iii)"}, {"color": "#ffffff", "x0": 14.78}) == "iii"
+
+    def ball(text: str) -> ImageBullet:
+        return {"kind": "image", "image": "p6i0", "text": text, "bbox": [15.0, 168.0, 25.0, 178.0]}
+    assert ball_number(ball("(i)"), _label("#ffffff", 16.3)) == "(i)"
+    assert ball_number(ball("(ii)"), _label("#ffffff", 15.54)) == "(ii)"
+    assert ball_number(ball("(iii)"), _label("#ffffff", 14.78)) == "iii"

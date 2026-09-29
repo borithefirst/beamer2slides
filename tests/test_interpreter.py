@@ -12,7 +12,7 @@ from beamer2slides import interpreter
 def test_this_interpreter_when_it_has_a_name(monkeypatch):
     monkeypatch.delenv(interpreter.ENV, raising=False)
     assert interpreter.python() == sys.executable
-    assert interpreter.env({"A": "1"}) == {"A": "1"}          # nothing added for our own Python
+    assert interpreter.env_over({"A": "1"}) == {"A": "1"}          # nothing added for our own Python
 
 
 def test_the_hosts_choice_wins(monkeypatch, tmp_path):
@@ -34,7 +34,7 @@ def test_an_empty_sys_executable_still_starts_a_child_that_imports_the_package(m
     monkeypatch.setenv("PATH", os.path.dirname(real) + os.pathsep + os.environ.get("PATH", ""))
     python = interpreter.python()
     assert python and os.path.isfile(python)
-    env = interpreter.env({k: v for k, v in os.environ.items() if k != "PYTHONPATH"} | {"PYTHONPATH": "extra"})
+    env = interpreter.env_over({k: v for k, v in os.environ.items() if k != "PYTHONPATH"} | {"PYTHONPATH": "extra"})
     paths = env["PYTHONPATH"].split(os.pathsep)
     assert paths[-1] == "extra" and len(paths) > 1
     done = subprocess.run([python, "-c", "import beamer2slides.interpreter; print('ok')"],

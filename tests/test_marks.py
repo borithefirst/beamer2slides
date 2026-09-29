@@ -12,6 +12,8 @@ import pytest
 
 from beamer2slides import classify, extract, pdf
 from beamer2slides.devtools.render_torture import MEDIA, pdf_bytes
+from beamer2slides.ir import deck_json, slide_json
+from beamer2slides.json_types import JsonObject, as_array, as_objects, as_str
 
 FONT = b" /Font << /F0 << /Type /Font /Subtype /Type1 /BaseFont /Helvetica >> >>"
 
@@ -44,7 +46,13 @@ def raw_of(tmp_path, pages: list[bytes], forms=(), name="p.pdf") -> dict:
 def read_back(tmp_path, page: bytes) -> dict:
     """The page's slide as the read-back of an adopted PDF gets it (`classify.classify_page`)."""
     raw = raw_of(tmp_path, [page])
-    return classify.classify_page(raw["pages"][0], classify.body_size(raw))
+    return slide_json(classify.classify_page(raw["pages"][0], classify.body_size(raw)))
+
+
+def by_mark(deck: JsonObject) -> dict[str, JsonObject]:
+    """mark -> element of a deck's first slide, as deck.json holds it."""
+    slide = as_objects(deck["slides"], "slides")[0]
+    return {as_str(e["mark"], "mark"): e for e in as_objects(slide["elements"], "elements") if e.get("mark")}
 
 
 def texts(slide: dict) -> dict:
@@ -187,17 +195,16 @@ def test_an_adopted_shape_slides_has_no_preset_for_is_uploaded_as_its_picture(tm
             element(b"l", b"shape", b"0 0 0 RG 1 w 120 20 m 180 60 l S") +
             element(b"o", b"shape", b"0 0 0 RG 1 w 20 70 50 30 re S"))
     raw = raw_of(tmp_path, [page])
-    deck = classify.classify(raw)
-    els = lambda: {e["mark"]: e for e in deck["slides"][0]["elements"] if e.get("mark")}
-    before = [e["mark"] for e in els().values()]
-    assert {k: (e["kind"], e["shape"]) for k, e in els().items()} == {
+    deck = deck_json(classify.classify(raw))
+    before = list(by_mark(deck))
+    assert {k: (e["kind"], e["shape"]) for k, e in by_mark(deck).items()} == {
         "r": ("shape", "RECTANGLE"), "f": ("shape", "custom"), "l": ("shape", "line"), "o": ("shape", "RECTANGLE")}
-    render.render_backgrounds(tmp_path / "p.pdf", raw, deck, tmp_path / "out")
-    assert [e["mark"] for e in els().values()] == before
-    assert {k: e["kind"] for k, e in els().items()} == {"r": "shape", "f": "image", "l": "image", "o": "image"}
+    render.render_backgrounds(tmp_path / "p.pdf", raw, deck, tmp_path / "out", frozenset())
+    assert list(by_mark(deck)) == before
+    assert {k: e["kind"] for k, e in by_mark(deck).items()} == {"r": "shape", "f": "image", "l": "image", "o": "image"}
     for k in "flo":
-        assert (tmp_path / "out" / els()[k]["file"]).is_file()
-    line = els()["l"]["bbox"]
+        assert (tmp_path / "out" / as_str(by_mark(deck)[k]["file"], "file")).is_file()
+    line = [v for v in as_array(by_mark(deck)["l"]["bbox"], "bbox") if isinstance(v, (int, float))]
     assert line[0] < 120 and line[2] > 180  # (with the stroke's ink)
     planned = emit.plan_offline(deck)
     assert planned["plan"].keys == []
@@ -270,12 +277,12 @@ def test_a_shape_an_old_adopt_base_holds_stays_a_shape_for_sync(tmp_path, backen
     page = (element(b"f", b"shape", b"1 0 0 rg 70 10 m 110 10 l 90 45 l h f") +
             element(b"l", b"shape", b"0 0 0 RG 1 w 120 20 m 180 60 l S"))
     raw = raw_of(tmp_path, [page])
-    deck = classify.classify(raw)
+    deck = deck_json(classify.classify(raw))
     base = {"adopt": {}, "slides": [{"elements": [{"kind": "shape", "ir": {"kind": "shape", "mark": "f"}},
                                                   {"kind": "image", "ir": {"kind": "image", "mark": "l"}}]}]}
     assert marked.shape_marks(base) == {"f"} and marked.shape_marks({**base, "adopt": None}) == frozenset()
     render.render_backgrounds(tmp_path / "p.pdf", raw, deck, tmp_path / "out", marked.shape_marks(base))
-    assert {e["mark"]: e["kind"] for e in deck["slides"][0]["elements"] if e.get("mark")} == {"f": "shape", "l": "image"}
+    assert {k: e["kind"] for k, e in by_mark(deck).items()} == {"f": "shape", "l": "image"}
 
 
 def test_underlined_words_are_underlined_whatever_their_rules(tmp_path, backend):
@@ -308,10 +315,10 @@ def test_words_a_later_picture_hides_are_still_the_box_words(tmp_path, backend):
     assert raw["pages"][0]["hidden_spans"]
     assert all(s["id"].startswith("p0h") for s in raw["pages"][0]["hidden_spans"])
     slide = classify.classify_page(raw["pages"][0], classify.body_size(raw))
-    assert texts(slide)["t"] == ["This image does not have transparency."]
-    box = next(e for e in slide["elements"] if e.get("mark") == "t")
+    assert texts(slide_json(slide))["t"] == ["This image does not have transparency."]
+    box = next(e for e in slide["elements"] if e["kind"] == "text" and e.get("mark") == "t")
     shown = {s["id"] for s in raw["pages"][0]["spans"]}
-    assert box["hidden_spans"] and set(box["spans"]) <= shown
+    assert box.get("hidden_spans") and set(box["spans"]) <= shown
     plain = raw_of(tmp_path, [words + cover], name="plain.pdf")["pages"][0]
     assert "hidden_spans" not in plain and plain["hidden_text"]
 

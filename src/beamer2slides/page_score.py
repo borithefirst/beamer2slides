@@ -173,10 +173,10 @@ def load_thumbnail(source: object) -> SignedRGB | None:
 def render_like(page: Page, ref: SignedRGB) -> SignedRGB:
     """A PDF page rendered onto the reference's pixel grid (int16 RGB)."""
     from PIL import Image
-    from .fidelity import rgb_array
+    from .fidelity import rgb_array_at
     h, w = ref.shape[:2]
     img = Image.fromarray(page.render(w / page.width)).convert("RGB")
-    return rgb_array(img, (w, h))
+    return rgb_array_at(img, (w, h))
 
 
 def boxes_score(page: Page, ref: SignedRGB, slide: SlideBoxes) -> float:

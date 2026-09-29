@@ -354,12 +354,13 @@ def test_the_pipeline_through_the_sandbox_writes_the_same_files(tmp_path: Path) 
     from beamer2slides import render
     from beamer2slides.classify import classify
     from beamer2slides.extract import extract
+    from beamer2slides.ir import deck_json
 
     def run(spec: str, out: Path) -> tuple[str, dict[str, bytes]]:
         with pdf.use_backend(get_backend(spec)):
             raw = extract(BLOCKS, None)
-            deck = classify(raw)
-            render.render_backgrounds(BLOCKS, raw, deck, out)
+            deck = deck_json(classify(raw))
+            render.render_backgrounds(BLOCKS, raw, deck, out, frozenset())
         files = {p.relative_to(out).as_posix(): p.read_bytes() for p in sorted(out.rglob("*")) if p.is_file()}
         return json.dumps([raw, deck], sort_keys=True, default=str), files
 

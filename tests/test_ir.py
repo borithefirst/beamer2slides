@@ -20,7 +20,9 @@ from beamer2slides.classify import classify
 from beamer2slides.emit_diagrams import CONNECTION_SITES, TEXT_RECT_WIDTH
 from beamer2slides.emit_metrics import BULLET_SHAPES, FONT_FOR_FAMILY, GLYPH_SHAPES
 from beamer2slides.extract import extract, select_overlays
+from beamer2slides.json_types import JsonObject, as_objects, as_str
 from beamer2slides.notes import prepare
+from beamer2slides.raw_types import RawDoc
 
 from .test_marks import INLINE_IMAGE, cell, element, paragraph, raw_of, text
 
@@ -32,14 +34,14 @@ def pdfs() -> list[Path]:
     return out + sorted((TESTS / "themes" / "out").glob("*/talk.pdf"))
 
 
-def read(pdf: Path, tmp: Path) -> tuple[dict, dict, Path]:
+def read(pdf: Path, tmp: Path) -> tuple[RawDoc, JsonObject, Path]:
     """(raw, deck, the PDF read) as `convert` gets them: notes split off, overlays' last steps."""
     prepared = prepare(pdf, tmp)
     raw = extract(prepared.pdf, prepared.labels)
     for page in raw["pages"]:
         page["notes"] = prepared.notes.get(page["index"])
     raw = select_overlays(raw, "last")
-    return raw, classify(raw), prepared.pdf
+    return raw, ir.deck_json(classify(raw)), prepared.pdf
 
 
 @lru_cache(maxsize=None)
@@ -62,7 +64,7 @@ def test_every_built_deck_holds_to_the_classified_contract():
     decks = classified()
     if not decks:
         pytest.skip("no PDFs built")
-    found = [f"{name}: {p}" for name, deck in decks for p in ir.problems(deck, "classified")]
+    found = [f"{name}: {p}" for name, deck in decks for p in ir.problems(deck, "classified", unknown_keys=True)]
     assert not found, report(found)
 
 
@@ -80,10 +82,12 @@ def test_a_rendered_deck_holds_to_the_rendered_contract(name, tmp_path):
     if not pdf.exists():
         pytest.skip(f"not built: {name}")
     raw, deck, read_pdf = read(pdf, tmp_path)
-    render.render_backgrounds(read_pdf, raw, deck, tmp_path / "out")
-    found = ir.problems(deck, "rendered")
+    render.render_backgrounds(read_pdf, raw, deck, tmp_path / "out", frozenset())
+    found = ir.problems(deck, "rendered", unknown_keys=True)
     assert not found, report(found)
-    assert all((tmp_path / "out" / e["file"]).is_file() for s in deck["slides"] for e in s["elements"] if e["kind"] == "image")
+    images = [e for s in as_objects(deck["slides"], "slides") for e in as_objects(s["elements"], "elements")
+              if e["kind"] == "image"]
+    assert all((tmp_path / "out" / as_str(e["file"], "file")).is_file() for e in images)
 
 
 def marked_pages() -> list[bytes]:
@@ -111,19 +115,20 @@ def test_marked_pages_hold_to_both_contracts(tmp_path, backend):
 
 def check_marked_pages(tmp_path):
     raw = raw_of(tmp_path, marked_pages())
-    deck = classify(raw)
-    shapes = {e["mark"]: e["shape"] for e in deck["slides"][0]["elements"] if e["kind"] == "shape"}
+    classified = classify(raw)
+    shapes = {e.get("mark"): e["shape"] for e in classified["slides"][0]["elements"] if e["kind"] == "shape"}
     assert {shapes["f"], shapes["l"]} == {"custom", "line"}
-    assert {e["kind"] for s in deck["slides"] for e in s["elements"]} == {"text", "image", "shape", "table"}
-    assert not (found := ir.problems(deck, "classified")), report(found)
-    render.render_backgrounds(tmp_path / "p.pdf", raw, deck, tmp_path / "out")
-    assert not (found := ir.problems(deck, "rendered")), report(found)
+    assert {e["kind"] for s in classified["slides"] for e in s["elements"]} == {"text", "image", "shape", "table"}
+    deck = ir.deck_json(classified)
+    assert not (found := ir.problems(deck, "classified", unknown_keys=True)), report(found)
+    render.render_backgrounds(tmp_path / "p.pdf", raw, deck, tmp_path / "out", frozenset())
+    assert not (found := ir.problems(deck, "rendered", unknown_keys=True)), report(found)
 
 
 def test_a_marked_table_with_no_words_is_still_a_table_emit_can_lay_out(tmp_path):
     page = element(b"t", b"table", b"0 0 0 RG 1 w 20 110 m 180 110 l S ", b" /rows 2 /cols 2 /box (20 20 160 40)")
     deck = classify(raw_of(tmp_path, [page]))
-    assert not (found := ir.problems(deck, "classified")), report(found)
+    assert not (found := ir.problems(deck, "classified", unknown_keys=True)), report(found)
 
 
 # ------------------------------------------------------------------------------ lookup tables
@@ -160,7 +165,7 @@ def test_every_type_resolves_and_says_each_key_once():
         hints = typing.get_type_hints(t, include_extras=True)
         assert set(hints) == t.__required_keys__ | t.__optional_keys__, t.__name__
         assert not t.__required_keys__ & t.__optional_keys__, t.__name__
-        ir.checker(t)  # compiles
+        ir.checker(t, True)  # compiles
 
 
 # ------------------------------------------------------------------------------ what a problem says
@@ -195,9 +200,9 @@ def rendered(deck: dict) -> dict:
 
 
 def test_a_well_formed_deck_has_no_problems():
-    assert ir.problems(small_deck()) == []
-    assert ir.problems(rendered(small_deck()), "rendered") == []
-    ir.validate(small_deck())
+    assert ir.problems(small_deck(), "classified", unknown_keys=True) == []
+    assert ir.problems(rendered(small_deck()), "rendered", unknown_keys=True) == []
+    ir.validate(small_deck(), "classified", unknown_keys=True)
 
 
 def test_the_shape_marked_pages_wrote_before_688ebf4_is_a_problem():
@@ -208,16 +213,16 @@ def test_the_shape_marked_pages_wrote_before_688ebf4_is_a_problem():
     deck["slides"][0]["elements"][0] = {
         "id": "p0m0", "kind": "shape", "role": "panel", "bbox": [70.0, 10.0, 110.0, 45.0], "fill": None,
         "outline": "#000000", "shape": "custom", "radius": 0.0, "drawings": ["p0d0"], "spans": [], "mark": "f"}
-    found = ir.problems(deck, "classified")
+    found = ir.problems(deck, "classified", unknown_keys=True)
     assert "slide page 0, element p0m0: lacks required key 'flip' (bool)" in found
     assert "slide page 0, element p0m0: outline: is '#000000' (str), expected Outline" in found
     assert len(found) == 2
-    found = ir.problems(rendered(deck), "rendered")
+    found = ir.problems(rendered(deck), "rendered", unknown_keys=True)
     assert "slide page 0, element p0m0: shape: is 'custom', expected one of " \
            "'ROUND_RECTANGLE' | 'ROUND_2_SAME_RECTANGLE' | 'RECTANGLE' | 'ELLIPSE' | 'DIAMOND' | 'TRIANGLE'" in found
     assert "slide page 0, element p0m0: fill: is None (NoneType), expected a colour '#rrggbb', lowercase" in found
     with pytest.raises(ValueError, match="lacks required key 'flip'"):
-        ir.validate(deck, "rendered")
+        ir.validate(deck, "rendered", unknown_keys=True)
 
 
 def test_a_problem_names_its_slide_element_key_and_what_is_wrong():
@@ -233,7 +238,7 @@ def test_a_problem_names_its_slide_element_key_and_what_is_wrong():
     text_el["colour"] = "#000000"
     slide["elements"].append({"id": "p4x0", "kind": "blob"})
     del deck["body_size"]
-    assert ir.problems(deck) == [
+    assert ir.problems(deck, "classified", unknown_keys=True) == [
         "deck: lacks required key 'body_size' (float)",
         "slide page 4, element p4t0: lacks required key 'bbox' (Box)",
         "slide page 4, element p4t0: paragraphs[0].align: is 'justify', expected one of 'left' | 'center' | 'right'",
@@ -242,9 +247,9 @@ def test_a_problem_names_its_slide_element_key_and_what_is_wrong():
         "slide page 4, element p4t0: has unknown key 'colour' (not in TextElement)",
         "slide page 4: elements[2].kind: is 'blob', expected one of 'text', 'image', 'shape', 'table', 'diagram'",
     ]
-    assert not any("unknown key" in p for p in ir.problems(deck, unknown_keys=False))
+    assert not any("unknown key" in p for p in ir.problems(deck, "classified", unknown_keys=False))
     with pytest.raises(ValueError, match=r"7 problems"):
-        ir.validate(deck)
+        ir.validate(deck, "classified", unknown_keys=True)
 
 
 def test_numbers_and_flags_are_told_apart():
@@ -254,7 +259,7 @@ def test_numbers_and_flags_are_told_apart():
     el["radius"] = 3          # fine: an int where a float goes
     el["flip"] = 0            # not a bool
     el["bbox"] = [10, 10, True, 60]
-    assert ir.problems(deck) == [
+    assert ir.problems(deck, "classified", unknown_keys=True) == [
         "slide page 0, element p0s0: bbox[2]: is True (bool), expected float",
         "slide page 0, element p0s0: flip: is 0 (int), expected bool",
     ]
@@ -267,15 +272,15 @@ def test_checking_a_long_deck_takes_well_under_a_second():
     slide["elements"][1]["paragraphs"] = [copy.deepcopy(para) for _ in range(12)]
     slide["elements"] *= 10
     deck["slides"] = [dict(slide, page=i) for i in range(60)]
-    ir.problems(deck)  # (the first call compiles the checks)
+    ir.problems(deck, "classified", unknown_keys=True)  # (the first call compiles the checks)
     start = time.perf_counter()
-    assert ir.problems(deck) == []
+    assert ir.problems(deck, "classified", unknown_keys=True) == []
     assert time.perf_counter() - start < 0.5
 
 
 def test_a_stage_is_one_the_contract_knows():
     with pytest.raises(ValueError, match="stage 'emitted'"):
-        ir.problems(small_deck(), "emitted")
+        ir.problems(small_deck(), "emitted", unknown_keys=True)
 
 
 def test_classify_page_output_is_a_slide_of_the_contract(tmp_path):
@@ -285,4 +290,4 @@ def test_classify_page_output_is_a_slide_of_the_contract(tmp_path):
     slide.setdefault("on_layout", [])
     deck = small_deck()
     deck["slides"] = [slide]
-    assert not (found := ir.problems(deck)), report(found)
+    assert not (found := ir.problems(deck, "classified", unknown_keys=True)), report(found)

@@ -110,7 +110,7 @@ def test_a_rendered_deck_and_its_emit_plan_come_back_as_they_were_written(name, 
     if not pdf.exists():
         pytest.skip(f"not built: {name}")
     raw, deck, read_pdf = read(pdf, tmp_path)
-    render.render_backgrounds(read_pdf, raw, deck, tmp_path / "out")
+    render.render_backgrounds(read_pdf, raw, deck, tmp_path / "out", frozenset())
     assert_same(deck, "rendered")
     planned = emit.DeckPlan(deck).deck
     assert_same(planned, "rendered")
@@ -124,12 +124,12 @@ def test_marked_pages_come_back_at_both_stages(tmp_path):
     """Adopt's read-back: a freeform and a line are marked shapes as classified, pictures once
     rendered (`marked.pictured_shapes`: no `mark_n`), and a marked table keeps its mark."""
     raw = raw_of(tmp_path, marked_pages())
-    deck = classify(raw)
+    deck = ir.deck_json(classify(raw))
     typed = ir_types.parse_deck(deck, "classified")
     kinds = {type(e).__name__ for s in typed.slides for e in s.elements}
     assert {"MarkedShape", "TextElement", "ImageElement", "TableElement"} <= kinds
     assert_same(deck, "classified")
-    render.render_backgrounds(tmp_path / "p.pdf", raw, deck, tmp_path / "out")
+    render.render_backgrounds(tmp_path / "p.pdf", raw, deck, tmp_path / "out", frozenset())
     assert_same(deck, "rendered")
     shapes = [e for s in ir_types.parse_deck(deck, "rendered").slides for e in s.elements
               if isinstance(e, ir_types.RenderedMarkedShape)]

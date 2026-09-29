@@ -2,6 +2,7 @@
 subtitle touching a heading), which lines continue a paragraph (a column below its picture),
 how a lone line is aligned, and how Chinese or Japanese lines are joined and wrapped."""
 
+from beamer2slides import ir
 from beamer2slides.classify import PageClassifier, Rect, Span, classify_page, first_word_width
 from beamer2slides.fonts import font_info
 
@@ -30,7 +31,7 @@ def page(spans: list[Span]) -> dict:
             "drawings": [], "links": [], "frame_label": None}
 
 
-def paragraphs(spans: list[Span], body: float = 11.0) -> list[dict]:
+def paragraphs(spans: list[Span], body: float = 11.0) -> list[ir.Paragraph]:
     slide = classify_page(page(spans), body)
     return [p for el in slide["elements"] if el["kind"] == "text" for p in el["paragraphs"]]
 
@@ -39,7 +40,7 @@ def build_lines(spans: list[Span]):
     return PageClassifier(page(spans), 11.0).build_lines(spans)
 
 
-def text(p: dict) -> str:
+def text(p: ir.Paragraph) -> str:
     return "".join(r["text"] for r in p["runs"])
 
 
@@ -168,5 +169,5 @@ def test_a_japanese_line_may_break_after_any_character():
     assert abs(first_word_width(first, False) - 11) < 0.5
     assert 20 < first_word_width(span("BERT）を", 20, 100, w=60), False) < 40  # the Latin word before them
     (par,) = paragraphs(ja_paragraph())
-    assert par["wrap_limit"] <= W
-    assert par["wrap_limit"] >= 20 + len(JA1) * 11
+    limit = par.get("wrap_limit")
+    assert limit is not None and 20 + len(JA1) * 11 <= limit <= W

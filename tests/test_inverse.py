@@ -339,8 +339,10 @@ def test_deck_ir_reads_back_what_emit_writes(name):
     from beamer2slides.classify import classify
     from .irs import deck_ir
     from beamer2slides.extract import extract, select_overlays
-    deck = classify(select_overlays(extract(built_pdf(name), None), "last"))
-    ir = deck_ir(simulate(deck), deck["slides"][0]["size"])
+    from beamer2slides.ir import deck_json
+    classified = classify(select_overlays(extract(built_pdf(name), None), "last"))
+    deck = deck_json(classified)
+    ir = deck_ir(simulate(deck), classified["slides"][0]["size"])
     comp = compare(without_keys(deck), ir, TOL, {})
     bad = [r for r in comp.open() if r.kind in TEXT_KINDS or isinstance(r, TextGeometry)]
     assert bad == []
@@ -353,7 +355,10 @@ def test_deck_ir_sees_slides_edits():
     from beamer2slides.classify import classify
     from .irs import deck_ir
     from beamer2slides.extract import extract, select_overlays
-    deck = classify(select_overlays(extract(built_pdf("01_basic"), None), "last"))
+    from beamer2slides.ir import deck_json
+    classified = classify(select_overlays(extract(built_pdf("01_basic"), None), "last"))
+    deck = deck_json(classified)
+    size = classified["slides"][0]["size"]
     pres = simulate(deck)
     si, box = next((si, pe) for si, s in enumerate(pres["slides"]) for pe in s["pageElements"]
                    if "Plain paragraph" in json.dumps(pe.get("shape", {}).get("text", {})))
@@ -372,9 +377,9 @@ def test_deck_ir_sees_slides_edits():
                                  {"textRun": {"content": tr["content"][i + 5:], "style": tr_style}}]
             break
     assert start >= 0
-    scale = pres["pageSize"]["width"]["magnitude"] / 12700 / deck["slides"][0]["size"][0]
+    scale = pres["pageSize"]["width"]["magnitude"] / 12700 / size[0]
     box["transform"]["translateY"] += 30 * scale * 12700
-    comp = compare(without_keys(deck), deck_ir(pres, deck["slides"][0]["size"]), TOL, {})
+    comp = compare(without_keys(deck), deck_ir(pres, size), TOL, {})
     styles = [residual_json(r) for r in comp.open() if r.kind == "style"]
     assert [(r["field"], r["text"]) for r in styles] == [("bold", "Plain")]
     geo = [r for r in comp.open() if isinstance(r, (TextGeometry, BoxGeometry)) and target_slide_of(r) == si]

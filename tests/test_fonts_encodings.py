@@ -9,6 +9,7 @@ import pytest
 from beamer2slides.classify import (Line, PageClassifier, Paragraph, Rect, Span, compose_accents, math_family,
                                     math_pieces, math_text, negate, type3_symbol)
 from beamer2slides.fonts import FontInfo, font_info, google_font
+from beamer2slides.ir import Run
 
 
 @pytest.mark.parametrize("name, family, bold, italic, smallcaps", [
@@ -121,7 +122,7 @@ def raw_span(i, text, font, x0, x1, baseline=100.0, size=10.0):
             "dir": [1.0, 0.0], "smallcaps": False}
 
 
-def runs_of(raw_spans: list[dict]) -> list[dict]:
+def runs_of(raw_spans: list[dict]) -> list[Run]:
     page = PageClassifier({"size": [364, 273], "spans": raw_spans, "links": []}, 10)
     line = Line(page.spans())
     return PageClassifier.runs(Paragraph([line]), "", False, None, 0.0)

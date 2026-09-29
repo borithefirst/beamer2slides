@@ -5,7 +5,9 @@ a text box's line geometry, and bullets.
 import json
 import re
 import unicodedata
+from collections.abc import Mapping
 from importlib import resources
+from typing import TypedDict
 
 from .emit_model import BulletFace, JsonMap, SetBullet, SetRun, bullet_of, run_of
 from .fonts import font_info, google_font
@@ -205,7 +207,16 @@ def cm_face_of(run: SetRun) -> str | None:
     return CM_FACE.get((run.family, run.bold, run.italic and not slanted))
 
 
-def _advance(table: dict, ch: str) -> float | None:
+class CmFace(TypedDict):
+    """A CM_ADVANCES entry: one Computer Modern face's advances and kerning pairs (character or
+    pair -> em) and its interword and extra (sentence) space."""
+    advances: dict[str, float]
+    kerns: dict[str, float]
+    space: float
+    extra_space: float
+
+
+def _advance(table: Mapping[str, float], ch: str) -> float | None:
     """A character's advance in a table, or its base letter's (é -> e: an accent adds no width)."""
     w = table.get(ch)
     if w is None and ch.isalpha():
@@ -213,7 +224,7 @@ def _advance(table: dict, ch: str) -> float | None:
     return w
 
 
-def advance_widths(text: str, cm: dict, slides: dict) -> tuple[float, float, int, int]:
+def advance_widths(text: str, cm: CmFace, slides: Mapping[str, float]) -> tuple[float, float, int, int]:
     """(Slides em, PDF em, characters counted, characters skipped) of a text set in a Computer
     Modern face (`cm`, a CM_ADVANCES entry) and in its Slides substitute (`slides`, an ADVANCES
     entry). The PDF side is what TeX set: ligatures, kerning pairs, interword space and the extra
@@ -225,7 +236,8 @@ def advance_widths(text: str, cm: dict, slides: dict) -> tuple[float, float, int
     text = LEADER.sub(lambda m: "\0" * m.group().count("."), text)
     s_em = p_em = 0.0
     counted = skipped = 0
-    factor, prev = 1000, None
+    factor = 1000
+    prev: str | None = None
     for ch in text:
         if ch == "\0":  # a leader's dot
             skipped += 1
@@ -238,8 +250,8 @@ def advance_widths(text: str, cm: dict, slides: dict) -> tuple[float, float, int
             continue
         parts = next((seq for seq, lig in CM_LIGATURES if lig == ch), ch)  # Slides sets no ligature
         p = _advance(cm["advances"], ch)
-        ws = [_advance(slides, c) for c in parts]
-        if p is None or None in ws:
+        ws = [w for c in parts if (w := _advance(slides, c)) is not None]
+        if p is None or len(ws) < len(parts):
             skipped += len(parts)
             prev = None
             continue
@@ -409,7 +421,7 @@ class FontMapper:
         ratio = s_em / p_em / self.reference_ratio(face, slides, title)
         return ratio if abs(ratio - 1) > SHAPE_TOL else 1.0
 
-    def reference_ratio(self, face: str, slides: dict, title: bool) -> float:
+    def reference_ratio(self, face: str, slides: Mapping[str, float], title: bool) -> float:
         """Slides em / PDF em of the calibration sentences in a face: where its size factor
         puts the widths of ordinary text."""
         key = (face, id(slides), title)  # `slides` is one of ADVANCES' tables, which live as long
@@ -537,7 +549,7 @@ def bullet_extent_of(bullet: SetBullet, size: float, scale: float) -> tuple[floa
     return bullet.bbox[0], bullet.bbox[2], bullet_gap(bullet, z)
 
 
-def rgb(hex_color: str) -> dict:
+def rgb(hex_color: str) -> JsonObject:
     h = hex_color.lstrip("#")
     return {"opaqueColor": {"rgbColor": {k: int(h[i:i + 2], 16) / 255 for k, i in
                                          (("red", 0), ("green", 2), ("blue", 4))}}}

@@ -14,6 +14,8 @@ from beamer2slides.emit_model import SetRun, table_of
 from beamer2slides.emit_tables import TableLayout, pptx_table_of
 from beamer2slides.emit_widths import wrap_joins_of, wrap_window_of, wrapped_width_of
 from beamer2slides.fonts import font_info
+from beamer2slides.ir import DiagramElement, DiagramLine, Node, deck_json
+from beamer2slides.json_types import as_objects
 
 W, H = 453.54, 255.12
 SANS = "LMSans10-Regular"
@@ -61,8 +63,8 @@ class Page:
 
     def elements(self) -> list[dict]:
         self.words("Body text that sets the size of the deck", 30, 245)
-        deck = classify({"version": 1, "source": {"title": ""}, "pages": [self.raw()]})
-        return deck["slides"][0]["elements"]
+        deck = deck_json(classify({"version": 1, "source": {"title": ""}, "pages": [self.raw()]}))
+        return as_objects(as_objects(deck["slides"], "slides")[0]["elements"], "elements")
 
 
 def tables(els: list[dict]) -> list[dict]:
@@ -252,7 +254,7 @@ def test_the_cells_beside_a_multirow_keep_their_rows_top_inset():
     assert table["middle"] == [[1, 0]]
     typed = pptx_table_of(table_of(t), scale, E.FontMapper(), W)
     prs = Presentation(E.build_pptx(W, H, [], [{"layout": "BLANK", "fill": None, "pictures": [], "tables": [typed],
-                                                "templates": False}], {"color": "#ffffff"}))
+                                                "templates": False}], {"color": "#ffffff"}, None))
     grid = next(s for s in prs.slides[0].shapes if s.has_table).table
     assert grid.cell(1, 0).margin_top == 0 and grid.cell(1, 1).margin_top == round(table["margins"][1][1] * E.EMU_PER_PT)
 
@@ -393,12 +395,19 @@ def test_a_node_split_by_a_vertical_line_is_no_diagram_node():
                     rect=Rect(x0, baseline - 7.5, x0 + len(text) * 5, baseline + 2.5),
                     baseline=baseline, horizontal=True, info=font_info(SANS))
 
-    node = {"bbox": [50, 90, 250, 106], "shape": "rect"}
-    line = {"from": [150, 90], "to": [150, 106]}
+    def diagram(line: DiagramLine) -> DiagramElement:
+        node: Node = {"bbox": [50.0, 90.0, 250.0, 106.0], "shape": "RECTANGLE", "fill": None, "stroke": "#000000",
+                      "width": 0.4, "paragraphs": [], "baselines": [], "label_w": 0.0, "text": None}
+        return {"id": "p0d0", "kind": "diagram", "role": "figure", "bbox": [50.0, 80.0, 250.0, 106.0], "nodes": [node],
+                "lines": [line], "spans": []}
+
+    line: DiagramLine = {"from": [150.0, 90.0], "to": [150.0, 106.0], "arrow_from": None, "arrow_to": None,
+                         "stroke": "#000000", "width": 0.4}
+    elbow: DiagramLine = {**line, "via": [150.0, 80.0]}
     words = [sp("left", 60), sp("right", 160)]
-    assert PageClassifier.splits_cells({"nodes": [node], "lines": [line]}, words)
-    assert not PageClassifier.splits_cells({"nodes": [node], "lines": [line]}, [sp("left", 60), sp("more", 90)])
-    assert not PageClassifier.splits_cells({"nodes": [node], "lines": [{**line, "via": [[150, 80]]}]}, words)
+    assert PageClassifier.splits_cells(diagram(line), words)
+    assert not PageClassifier.splits_cells(diagram(line), [sp("left", 60), sp("more", 90)])
+    assert not PageClassifier.splits_cells(diagram(elbow), words)
 
 
 # ---------------------------------------------------------------- emit

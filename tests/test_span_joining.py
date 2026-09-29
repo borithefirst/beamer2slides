@@ -41,7 +41,7 @@ class Shown:
 
 
 def texts(chars, widths=None) -> list[str]:
-    return [s["text"] for s in extract.spans(Page(chars, widths), Shown(), chars=chars)]
+    return [s.text for s in extract.spans(Page(chars, widths), Shown(), False, chars, {})]
 
 
 def test_a_narrow_space_between_touching_glyphs_is_a_space():

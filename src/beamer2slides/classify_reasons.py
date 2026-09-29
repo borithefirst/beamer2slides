@@ -72,9 +72,12 @@ class ReasonsMixin(FiguresMixin):
                 line.tab = nxt
                 return
             if gap >= 0.25 * line.size and (token in BULLET_GLYPHS or ENUM_RE.match(token)) and not on_ball and not dash:
-                kind = "glyph" if token in BULLET_GLYPHS else "number"
-                line.bullet = {"kind": kind, "text": token, "color": first.color, "bbox": first.rect.as_list(),
-                               "label": label_of([first])}
+                if token in BULLET_GLYPHS:
+                    line.bullet = {"kind": "glyph", "text": token, "color": first.color, "bbox": first.rect.as_list(),
+                                   "label": label_of([first])}
+                else:
+                    line.bullet = {"kind": "number", "text": token, "color": first.color, "bbox": first.rect.as_list(),
+                                   "label": label_of([first])}
                 line.bullet_spans = [first]
                 return
             # Numbers drawn on a small box or circle (e.g. Bergen's enumerate): the box is
@@ -116,10 +119,12 @@ class ReasonsMixin(FiguresMixin):
                     and g.x1 <= x0 + 0.5 and x0 - g.x1 <= 2.0 * line.size \
                     and line.baseline - 0.9 * line.size <= g.cy <= line.baseline + 0.1 * line.size \
                     and self.stands_alone(g, spans[0].rect):
-                shape = bullet_shape(self.graphic_paths.get(tuple(g.as_list())))
+                look = bullet_shape(self.graphic_paths.get(tuple(g.as_list())))
                 # (a mark with parts drawn inside it - a globe's meridians in its disc - is no glyph)
-                if shape and not any(g.contains_rect(o, tol=0.5) and not o.contains_rect(g, tol=0.5) for o in self.graphics if o is not g):
-                    line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True, **shape}
+                if "shape" in look and "color" in look and \
+                        not any(g.contains_rect(o, tol=0.5) and not o.contains_rect(g, tol=0.5) for o in self.graphics if o is not g):
+                    line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True,
+                                   "shape": look["shape"], "color": look["color"]}
                 else:  # no Slides glyph looks like it (beamer's bibliography icon): a picture
                     icon = union_all([g] + [ir for _, ir in self.small_images if ir.intersects(g)])
                     line.bullet = {"kind": "icon", "text": "", "bbox": icon.as_list(), "spans": []}
@@ -169,9 +174,11 @@ class ReasonsMixin(FiguresMixin):
             if 0.25 * line.size <= g.w <= 1.3 * line.size and 0.25 * line.size <= g.h <= 1.6 * line.size \
                     and 0.5 <= g.w / g.h <= 2.0 and g.x0 >= x1 - 0.5 and g.x0 - x1 <= 2.0 * line.size \
                     and level(g) and self.stands_alone(g, spans[-1].rect):
-                shape = bullet_shape(self.graphic_paths.get(tuple(g.as_list())))
-                if shape and not any(g.contains_rect(o, tol=0.5) and not o.contains_rect(g, tol=0.5) for o in self.graphics if o is not g):
-                    line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True, **shape}
+                look = bullet_shape(self.graphic_paths.get(tuple(g.as_list())))
+                if "shape" in look and "color" in look and \
+                        not any(g.contains_rect(o, tol=0.5) and not o.contains_rect(g, tol=0.5) for o in self.graphics if o is not g):
+                    line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True,
+                                   "shape": look["shape"], "color": look["color"]}
                 else:
                     icon = union_all([g] + [ir for _, ir in self.small_images if ir.intersects(g)])
                     line.bullet = {"kind": "icon", "text": "", "bbox": icon.as_list(), "spans": []}

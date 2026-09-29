@@ -40,6 +40,10 @@ from __future__ import annotations
 
 import dataclasses
 import unicodedata
+from collections.abc import Iterable, Sequence
+from typing import Literal, Protocol, TypeVar
+
+from .pdf import Char
 
 NEUTRAL, LEFT, RIGHT, WEAK = range(4)
 
@@ -103,10 +107,10 @@ def _clusters(text: str) -> list[tuple[int, int]]:
     return [(a, b) for a, b in out]
 
 
-def logical_text(text: str, base: int | None = None) -> str:
-    """One span's characters in reading order, given them as the page draws them: left to right.
-    `base`: which way the line it stands in reads, where the caller knows (`logical_line`)."""
-    return logical_line([text], base)[0][1]
+def logical_text(text: str) -> str:
+    """One span's characters in reading order, given them as the page draws them: left to right,
+    the span reading its own way (`line_base`)."""
+    return logical_line([text], None, [])[0][1]
 
 
 # ---------------------------------------------------------------- Unicode's algorithm, both ways
@@ -172,7 +176,8 @@ def _levels(text: str, cells: list[tuple[int, int]], base: int) -> list[int]:
             last = x
         elif x == "EN" and last == "L":
             t[i] = "L"
-    stack, pairs = [], []
+    stack: list[tuple[str, int]] = []
+    pairs: list[tuple[int, int]] = []
     for i, (a, _) in enumerate(cells):  # N0: bracket pairs (BD16)
         c = text[a]
         if t[i] != "ON":
@@ -190,7 +195,7 @@ def _levels(text: str, cells: list[tuple[int, int]], base: int) -> list[int]:
         if e in inside:
             t[o] = t[c] = e
         elif inside:
-            before = next((_strong(x) for x in reversed(t[:o]) if _strong(x)), e)
+            before = next((s for s in map(_strong, reversed(t[:o])) if s is not None), e)
             t[o] = t[c] = before if before in inside else e
     i = 0
     while i < len(t):  # N1, N2
@@ -200,8 +205,9 @@ def _levels(text: str, cells: list[tuple[int, int]], base: int) -> list[int]:
         j = i
         while j < len(t) and not _strong(t[j]):
             j += 1
-        before = _strong(t[i - 1]) if i else e
-        after = _strong(t[j]) if j < len(t) else e
+        # (both strong: t[i - 1] ended a strong stretch or was resolved to one, t[j] ends this one)
+        before = (_strong(t[i - 1]) or e) if i else e
+        after = (_strong(t[j]) or e) if j < len(t) else e
         t[i:j] = [before if before == after else e] * (j - i)
         i = j
     if e == "L":
@@ -241,7 +247,7 @@ def display(text: str, base: int) -> str:
     return "".join(out)
 
 
-def line_base(texts: list[str], prior: int | None = None) -> int:
+def line_base(texts: list[str], prior: int | None) -> int:
     """Which way a line reads, given its pieces as the page draws them, left to right.
 
     A line of one script's letters reads that script's way. A line with both takes the page's
@@ -265,7 +271,7 @@ def line_base(texts: list[str], prior: int | None = None) -> int:
     return RIGHT if right > left else LEFT
 
 
-def page_direction(texts) -> int | None:
+def page_direction(texts: Iterable[str]) -> int | None:
     """A page's own direction: the one with at least twice the other's letters, else None."""
     right = left = 0
     for text in texts:
@@ -334,7 +340,17 @@ def _islands(text: str, cells: list[tuple[int, int]], base: int) -> list[tuple[i
     return out
 
 
-def _reading(text: str, cells: list[tuple[int, int]], base: int, marks: bool):
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class _Read:
+    """A visual line as `_reading` reads it: the clusters in reading order, those read at a
+    right-to-left level, and the marks to write before and after clusters."""
+    order: list[int]
+    turned: set[int]
+    before: dict[int, str]
+    after: dict[int, str]
+
+
+def _reading(text: str, cells: list[tuple[int, int]], base: int, marks: bool) -> _Read:
     """The clusters of a visual line in reading order, the clusters read at a right-to-left level
     (a bracket there is the other one), and the LRMs to write before and after clusters where
     `marks` asks for them: around a Latin island that does not start with a letter or ends on
@@ -364,7 +380,7 @@ def _reading(text: str, cells: list[tuple[int, int]], base: int, marks: bool):
         inside = {k for a, b in islands for k in range(a, b)}
         turned = set(range(len(cells))) - inside
         blocks.reverse()
-    return [k for block in blocks for k in block], turned, before, after
+    return _Read(order=[k for block in blocks for k in block], turned=turned, before=before, after=after)
 
 
 def _reading_island(kinds: list[str], a: int, b: int) -> list[int]:
@@ -379,20 +395,21 @@ def _reading_island(kinds: list[str], a: int, b: int) -> list[int]:
     return [k for run in reversed(runs) for k in run]
 
 
-def logical_line(texts: list[str], base: int | None = None,
-                 joins: list[str] | None = None) -> list[tuple[int, str]]:
+def logical_line(texts: list[str], base: int | None, joins: list[str]) -> list[tuple[int, str]]:
     """A line's pieces in reading order, given them left to right as the page draws them: (index
     of the piece, its text as read). `joins[i]` is what stands between pieces i and i + 1 on the
-    page and neither holds (a word space: it separates, it is not written). `base` defaults to
-    `line_base`. A line with no right-to-left letters that is not said to read right to left
-    comes back as it was."""
-    joins = list(joins or []) + [""] * len(texts)
+    page and neither holds (a word space: it separates, it is not written; missing ones are
+    nothing). `base` None is `line_base`'s. A line with no right-to-left letters that is not said
+    to read right to left comes back as it was."""
+    joins = list(joins) + [""] * len(texts)
     visual = "".join(t + joins[i] for i, t in enumerate(texts))
     if base != RIGHT and not has_rtl(visual):
         return list(enumerate(texts))
     if base is None:
-        base = line_base(texts)
-    cells, owner, pos = [], [], 0
+        base = line_base(texts, None)
+    cells: list[tuple[int, int]] = []
+    owner: list[int | None] = []
+    pos = 0
     for i, t in enumerate(texts):  # (a cluster never crosses from one piece into the next)
         cells += [(pos + a, pos + b) for a, b in _clusters(t)]
         owner += [i] * (len(cells) - len(owner))
@@ -402,18 +419,25 @@ def logical_line(texts: list[str], base: int | None = None,
             owner.append(None)
             pos += 1
     shown = visual.strip()
-    best = None
-    for marks in ((), ("before",), ("after",), ("before", "after")) if base == RIGHT else ((),):
-        order, turned, before, after = _reading(visual, cells, base, bool(marks))
-        before, after = (before if "before" in marks else {}), (after if "after" in marks else {})
-        written = "".join(before.get(k, "") + _as_read(visual, cells[k], k in turned) + after.get(k, "")
-                          for k in order)
+    none: dict[int, str] = {}
+    choices: list[tuple[Literal["before", "after"], ...]] = \
+        [(), ("before",), ("after",), ("before", "after")] if base == RIGHT else [()]
+    best: _Read | None = None
+    for marks in choices:
+        read = _reading(visual, cells, base, bool(marks))
+        read = _Read(order=read.order, turned=read.turned,
+                     before=read.before if "before" in marks else none,
+                     after=read.after if "after" in marks else none)
+        written = "".join(read.before.get(k, "") + _as_read(visual, cells[k], k in read.turned)
+                          + read.after.get(k, "") for k in read.order)
         fits = display(written, base).strip() == shown
         if best is None or fits:
-            best = (order, turned, before, after)
+            best = read
         if fits:
             break
-    order, turned, before, after = best
+    if best is None:  # (the first choice always is one)
+        raise AssertionError("logical_line read no way")
+    order, turned, before, after = best.order, best.turned, best.before, best.after
     owner = _strays(visual, cells, owner, order)
     pieces: dict[int, list[str]] = {}
     first: dict[int, int] = {}
@@ -427,11 +451,25 @@ def logical_line(texts: list[str], base: int | None = None,
     return [(i, "".join(pieces[i]) if i in pieces else texts[i]) for i in ranked]
 
 
-def lead_mark(spans: list) -> str:
+class Placed(Protocol):
+    """What putting spans in reading order asks of one: its text, and where `classify` read it
+    in its line (`classify_model.Span.reading`: line, rank, base, room before it), if it did."""
+
+    @property
+    def text(self) -> str: ...
+
+    @property
+    def reading(self) -> tuple[int, int, int, float] | None: ...
+
+
+PlacedT = TypeVar("PlacedT", bound=Placed)
+
+
+def lead_mark(spans: Sequence[Placed]) -> str:
     """RLM for spans of a right-to-left line (`reading`) whose words start with a Latin one - a
     table cell 'O(1) on average' in Hebrew - which Unicode's P2, all a cell is asked
     (`reads_rtl`), would read left to right; else nothing."""
-    bases = {s.reading[2] for s in spans if getattr(s, "reading", None)}
+    bases = {s.reading[2] for s in spans if s.reading}
     if bases == {RIGHT} and not reads_rtl("".join(s.text for s in spans)):
         return RLM
     return ""
@@ -444,34 +482,40 @@ def spaced(texts: list[str], base: int, joins: list[str]) -> dict[int, int]:
     room between two of them is that join's, or none - not the distance between them."""
     joins = list(joins) + [""] * len(texts)
     visual = "".join(t + joins[i] for i, t in enumerate(texts))
-    cells, owner, pos = [], [], 0
+    cells: list[tuple[int, int]] = []
+    owner: list[tuple[Literal["piece", "join"], int]] = []
+    pos = 0
     for i, t in enumerate(texts):
         cells += [(pos + a, pos + b) for a, b in _clusters(t)]
-        owner += [("piece", i)] * (len(cells) - len(owner))
+        piece: tuple[Literal["piece", "join"], int] = ("piece", i)
+        owner += [piece] * (len(cells) - len(owner))
         pos += len(t)
         for c in joins[i]:
             cells.append((pos, pos + 1))
             owner.append(("join", i))
             pos += 1
-    order = _reading(visual, cells, base, False)[0]
+    order = _reading(visual, cells, base, False).order
     out: dict[int, int] = {}
     seen: set[int] = set()
-    for prev, k in zip([None] + order, order):
+    prev: int | None = None
+    for k in order:
         kind, i = owner[k]
         if kind == "piece" and i not in seen:
             seen.add(i)
             if prev is not None and owner[prev][0] == "join":
                 out[i] = owner[prev][1]
+        prev = k
     return out
 
 
-def _strays(text: str, cells: list[tuple[int, int]], owner: list, order: list[int]) -> list:
+def _strays(text: str, cells: list[tuple[int, int]], owner: list[int | None],
+            order: list[int]) -> list[int | None]:
     """Who holds each cluster as the line is read. A piece's space that the reading takes away
     from the rest of it (' O' before a formula on a Hebrew line: the space is read after the
     formula) goes with the piece read just before it, where it is read."""
     owner = list(owner)
     runs: dict[int, list[list[int]]] = {}
-    prev = None
+    prev: int | None = None
     for k in order:
         i = owner[k]
         if i is not None:
@@ -526,7 +570,7 @@ def _resolved(classes: list[int], base: int) -> list[int]:
         before = next((x for x in reversed(out[:i]) if x is not None), None)
         after = next((x for x in out[i + 1:] if x is not None), None)
         out[i] = before if before is not None and before == after else base
-    return out
+    return [base if c is None else c for c in out]  # (none is left)
 
 
 def _reorder(classes: list[int], base: int) -> list[int]:
@@ -568,16 +612,16 @@ def _span_class(text: str) -> int:
     return NEUTRAL
 
 
-def logical_spans(items: list, text=lambda s: s.text) -> list:
+def logical_spans(items: Sequence[PlacedT]) -> list[PlacedT]:
     """A line's spans in reading order, given them left to right as the page draws them. Spans
     that `classify` read as one line (`reading`: line, rank, base - see `logical_line`) keep that
     order; others are put in order by their texts alone."""
     if len(items) < 2:
         return list(items)
-    keys = [getattr(s, "reading", None) for s in items]
-    if all(k is not None for k in keys) and len({k[0] for k in keys}) == 1:
+    keys = [k for k in (s.reading for s in items) if k is not None]
+    if len(keys) == len(items) and len({k[0] for k in keys}) == 1:
         return [s for _, s in sorted(zip(keys, items), key=lambda p: p[0][1])]
-    classes = [_span_class(text(s)) for s in items]
+    classes = [_span_class(s.text) for s in items]
     if RIGHT not in classes:
         return list(items)
     return [items[i] for i in _reorder(classes, _base(classes))]
@@ -591,11 +635,11 @@ def logical_spans(items: list, text=lambda s: s.text) -> list:
 _PDFIUM_NEUTRAL, _PDFIUM_LEFT, _PDFIUM_RIGHT = 0, 1, 2
 
 
-def _line_groups(chars: list) -> list[list[int]]:
+def _line_groups(chars: list[Char]) -> list[list[int]]:
     """Indices of the characters of each line, in the order the text page wrote them: a new line
     where the baseline or the direction changes (as the text page's own temp line ends)."""
     groups: list[list[int]] = []
-    first = None
+    first: Char | None = None
     for i, ch in enumerate(chars):
         if first is not None and ch.dir == first.dir:
             ux, uy = ch.dir
@@ -608,13 +652,13 @@ def _line_groups(chars: list) -> list[list[int]]:
     return groups
 
 
-def _unmirrored(chars: list, idx: list[int]) -> dict[int, str]:
+def _unmirrored(chars: list[Char], idx: list[int]) -> dict[int, str]:
     """The text of the line's characters PDFium mirrored, as the page draws them."""
     from .pdf.pure.unicode_data import direction, mirror  # PDFium's own tables (imported late: pure is big)
     out: dict[int, str] = {}
     current = _PDFIUM_LEFT
     for i in idx:
-        units = []
+        units: list[str] = []
         for u in chars[i].c:
             d = direction(ord(u)) if ord(u) < 0x10000 else _PDFIUM_NEUTRAL
             if d == _PDFIUM_RIGHT:
@@ -629,7 +673,7 @@ def _unmirrored(chars: list, idx: list[int]) -> dict[int, str]:
     return out
 
 
-def _along(ch) -> float:
+def _along(ch: Char) -> float:
     return ch.origin[0] * ch.dir[0] + ch.origin[1] * ch.dir[1]
 
 
@@ -637,7 +681,7 @@ def _is_mark(c: str) -> bool:
     return bool(c) and all(unicodedata.combining(u) for u in c)
 
 
-def _left_to_right(line: list, spaces: list[float]) -> list:
+def _left_to_right(line: list[Char], spaces: list[float]) -> list[Char]:
     """A line's characters left to right, where it draws right-to-left letters leftwards (XeTeX,
     whose words PDFium's reversal leaves with their letters at falling x; LuaTeX, which draws
     each word as it is read). A mark goes with its letter. The spaces are left out - XeTeX's are
@@ -649,7 +693,7 @@ def _left_to_right(line: list, spaces: list[float]) -> list:
     text page's own, `spaces`: where along the line it put one), touches it: its advance is
     the distance between their origins. PDFium gives Arabic glyphs of a font with no widths for
     them one advance, 0.21 em for every letter, and the gaps that left split words into letters."""
-    clusters: list[list] = []
+    clusters: list[list[Char]] = []
     drawn: dict[int, int] = {}
     for n, ch in enumerate(line):
         if clusters and _is_mark(ch.c):
@@ -673,11 +717,11 @@ def _left_to_right(line: list, spaces: list[float]) -> list:
     return [ch for k in turn for ch in clusters[k]]
 
 
-def _with_text(ch, text: str):
+def _with_text(ch: Char, text: str) -> Char:
     return dataclasses.replace(ch, c=text)
 
 
-def visual_chars(chars: list) -> list:
+def visual_chars(chars: list[Char]) -> list[Char]:
     """The page's characters with each line that holds right-to-left letters as the page shows it:
     the characters PDFium's text page mirrored given back their own text, and a line whose
     letters do not run left to right put so (`_left_to_right`) - which is what `logical_line`
@@ -685,7 +729,7 @@ def visual_chars(chars: list) -> list:
     if not any(has_rtl(ch.c) for ch in chars):
         return chars
     out = list(chars)
-    result: list = []
+    result: list[Char] = []
     gaps = [ch for ch in out if not ch.c.strip()]
     for idx in _line_groups(out):
         if not any(has_rtl(out[i].c) for i in idx):
@@ -698,8 +742,8 @@ def visual_chars(chars: list) -> list:
         if any(_along(b) < _along(a) - 0.05 * max(a.size, 0.01) for a, b in zip(placed, placed[1:])):
             first = line[0]
             ux, uy = first.dir
-            on_line = lambda s: s.dir == first.dir and abs((s.origin[0] - first.origin[0]) * uy - (
-                s.origin[1] - first.origin[1]) * ux) <= 0.3 * max(first.size, 0.01)
-            line = _left_to_right(line, [_along(s) for s in gaps if on_line(s)])
+            line = _left_to_right(line, [_along(s) for s in gaps if s.dir == first.dir and abs(
+                (s.origin[0] - first.origin[0]) * uy - (s.origin[1] - first.origin[1]) * ux)
+                <= 0.3 * max(first.size, 0.01)])
         result += line
     return result

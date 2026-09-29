@@ -139,7 +139,7 @@ def test_a_framed_panel_is_written_with_its_outline():
     plan = emit.plan_offline(deck("28_frames_code"))["plan"]
     slide = plan.deck["slides"][0]
     [panel] = [e for e in slide["elements"] if e.get("fill") == "#e6e6ff"]
-    [update] = [r["updateShapeProperties"] for r in emit.shape_requests(panel, "s", "o", plan.scale)
+    [update] = [r["updateShapeProperties"] for r in emit.shape_requests(panel, "s", "o", plan.scale, None)
                 if "updateShapeProperties" in r]
     outline = update["shapeProperties"]["outline"]
     assert outline["propertyState"] == "RENDERED"

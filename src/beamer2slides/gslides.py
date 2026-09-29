@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 
 from .gapi import HttpError, is_transient, patient_http, status_of
 from .google_types import Request, SlidesService
+from .json_types import JsonObject
 
 if TYPE_CHECKING:
     from .net import Fetch
@@ -47,11 +48,11 @@ def per_thread(make: Callable[[], T]) -> Callable[[], T]:
     return client
 
 
-def pt(v: float) -> dict:
+def pt(v: float) -> JsonObject:
     return {"magnitude": v, "unit": "PT"}
 
 
-def emu(v_pt: float) -> dict:
+def emu(v_pt: float) -> JsonObject:
     return {"magnitude": round(v_pt * EMU_PER_PT), "unit": "EMU"}
 
 

@@ -37,7 +37,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from typing import TypedDict, Union
 
-from .gapi import HttpError, is_transient, lent_credentials, message_of, status_of
+from .gapi import HttpError, is_transient, lent_credentials, message_of, message_within, status_of
 from .google_types import DriveService, FileBody, Presentation, SlidesService, file_id
 from .json_types import Json
 
@@ -102,7 +102,7 @@ def too_large(error: BaseException) -> bool:
         return False
     if reasons(error) & SIZE_REASONS:
         return True
-    said = message_of(error, 500).lower()
+    said = message_within(error, 500).lower()
     return "too large" in said or "exportsizelimitexceeded" in said
 
 

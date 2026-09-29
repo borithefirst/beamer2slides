@@ -491,7 +491,7 @@ class Workbench:
             self.command(),
             cwd=session.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-            env=interpreter.env({**os.environ, **FENCE}), **_own_group())
+            env=interpreter.env_over({**os.environ, **FENCE}), **_own_group())
         stopped: list[str] = []
         noise: list[str] = []
         watchdog = threading.Timer(RUN_TIMEOUT, lambda: (stopped.append("timeout"), kill(proc)))

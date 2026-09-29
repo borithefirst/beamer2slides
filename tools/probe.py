@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PIL import Image
 
-from beamer2slides.extract import spans
+from beamer2slides.extract import shown_spans
 from beamer2slides.pdf import Document, Page
 
 
@@ -22,9 +22,9 @@ def probe_page(page: Page) -> None:
     print(f"\n=== page {page.index + 1}  size {page.width:.1f} x {page.height:.1f} pt ===")
 
     print("-- text spans --")
-    for s in spans(page):
-        if s["text"].strip():
-            print(f"  {fmt_rect(s['bbox'])} {s['font'][:22]:<22} {s['size']:5.2f} #{s['color']:06x} {s['text']!r}")
+    for s in shown_spans(page):
+        if s.text.strip():
+            print(f"  {fmt_rect(s.bbox)} {s.font[:22]:<22} {s.size:5.2f} #{s.color:06x} {s.text!r}")
 
     print("-- images and shadings --")
     for info in page.images():

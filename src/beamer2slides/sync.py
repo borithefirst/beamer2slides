@@ -556,6 +556,7 @@ def build_ours_of(pdf: Path, work: Path, base: JsonObject, overlays: str, page_w
     listed in "contained" with its slide and element keys, for the report."""
     from . import adopt_sync
     from .classify import classify
+    from .ir import deck_json
     from .extract import extract, select_overlays
     from .marked import shape_marks
     from .notes import prepare
@@ -567,7 +568,7 @@ def build_ours_of(pdf: Path, work: Path, base: JsonObject, overlays: str, page_w
     for page in raw["pages"]:
         page["notes"] = prepared.notes.get(page["index"])
     raw = select_overlays(raw, overlays)
-    deck = classify(raw)
+    deck = deck_json(classify(raw))
     render_backgrounds(prepared.pdf, raw, deck, work, shape_marks(base))
     adopt = base.get("adopt")
     boxes = as_object(adopt, "base.adopt").get("boxes") if adopt is not None else None

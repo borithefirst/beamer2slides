@@ -66,7 +66,7 @@ def stage(drive, slides, files: list[Path], page: tuple[float, float]) -> tuple[
     pages = [{"layout": "BLANK", "fill": None, "templates": False, "pictures": [
         {"file": f, "bbox": [0, 0, 100, 100 * Image.open(f).size[1] / Image.open(f).size[0]],
          "alt": f"b2s-stage:{k}", "title": "stage"} for k, f in enumerate(files)]}]
-    pptx = build_pptx(page[0], page[1], [], pages, {"color": "#ffffff"})
+    pptx = build_pptx(page[0], page[1], [], pages, {"color": "#ffffff"}, None)
     fid = execute(drive.files().create(body={"name": "beamer2slides pull proof staging (temporary)",
                                              "mimeType": "application/vnd.google-apps.presentation"},
                                        media_body=MediaIoBaseUpload(pptx, mimetype=PPTX_MIME, resumable=True),

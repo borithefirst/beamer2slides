@@ -65,7 +65,7 @@ def main() -> int:
             if args.build or not pdf.exists():
                 pdf = build(theme)
             deck = classify(extract(pdf, None))
-            render_debug(pdf, deck, OUT / theme / "debug", zoom=2.0)
+            render_debug(pdf, deck, OUT / theme / "debug", 2.0)
             kinds = [e["kind"] for s in deck["slides"] for e in s["elements"]]
             reasons: dict[str, int] = {}
             for s in deck["slides"]:

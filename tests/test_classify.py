@@ -10,6 +10,7 @@ import pytest
 
 from beamer2slides.classify import Rect, classify
 from beamer2slides.extract import extract, select_overlays
+from beamer2slides.ir import deck_json
 from beamer2slides.notes import prepare
 
 DECKS = Path(__file__).resolve().parent / "decks" / "out"
@@ -19,7 +20,7 @@ THEMES = Path(__file__).resolve().parent / "themes" / "out"
 def load(pdf: Path, overlays: str = "last") -> dict:
     if not pdf.exists():
         pytest.skip(f"{pdf.name} not built")
-    return classify(select_overlays(extract(pdf, None), overlays))
+    return deck_json(classify(select_overlays(extract(pdf, None), overlays)))
 
 
 def deck(name: str) -> dict:
@@ -293,7 +294,7 @@ def test_a_long_tick_row_belongs_to_its_chart():
 @pytest.mark.needs_decks("out/03_figures-handout.pdf")
 def test_titles_pushed_off_a_plot_are_the_plots_but_its_caption_is_text():
     raw = select_overlays(extract(DECKS / "03_figures-handout.pdf", None), "last")
-    slide = classify(raw)["slides"][5]
+    slide = deck("03_figures")["slides"][5]  # (the same raw, classified)
     assert body_texts(slide) == ["Figure: Measured in the cold room."]
     figure = next(e for e in slide["elements"] if e["kind"] == "image")
     by_id = {s["id"]: s["text"] for s in raw["pages"][5]["spans"]}

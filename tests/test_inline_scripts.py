@@ -4,6 +4,7 @@ own degree sign and asterisk, and where the word space after smaller words goes.
 
 from beamer2slides.classify import Rect, Span, classify_page
 from beamer2slides.fonts import font_info
+from beamer2slides.ir import Run
 
 W, H = 362.83, 272.13
 FONT = "LMSans10-Regular"
@@ -23,7 +24,7 @@ def after(s: Span, text: str, rise: float = 0.0, size: float = 11.0, gap: float 
     return span(text, s.rect.x1 + gap, s.baseline - rise * 11.0, size, font=font)
 
 
-def runs(spans: list[Span]) -> list[dict]:
+def runs(spans: list[Span]) -> list[Run]:
     raw = [{"id": f"p0s{i}", "text": s.text, "font": s.font, "size": s.size, "color": s.color, "alpha": 255,
             "origin": [s.rect.x0, s.baseline], "bbox": s.rect.as_list(), "dir": [1.0, 0.0], "smallcaps": False}
            for i, s in enumerate(spans)]
@@ -35,7 +36,7 @@ def runs(spans: list[Span]) -> list[dict]:
     return par["runs"]
 
 
-def plain(rs: list[dict]) -> list[tuple]:
+def plain(rs: list[Run]) -> list[tuple]:
     return [(r["text"], r["script"], r["size"]) for r in rs]
 
 

@@ -6,6 +6,7 @@ import math
 from beamer2slides import pdf
 from beamer2slides.classify import classify
 from beamer2slides.extract import extract_page, select_overlays
+from beamer2slides.ir import deck_json
 from beamer2slides.render import load_png, render_backgrounds
 
 from .test_charts_diagrams import H, W, Page, body_text, deck, elements, lines, rect
@@ -326,7 +327,7 @@ def test_a_turned_stamp_keeps_its_letters_where_it_crosses_native_words(tmp_path
         doc.close()
     deck = classify(raw)
     assert [e["kind"] for e in deck["slides"][0]["elements"]] == ["text"]  # both lines native, the stamp not
-    [png] = render_backgrounds(path, raw, deck, tmp_path / "bg")
+    [png] = render_backgrounds(path, raw, deck_json(deck), tmp_path / "bg", frozenset())
     bg = load_png(png)
     doc = pdf.Document(path)
     try:

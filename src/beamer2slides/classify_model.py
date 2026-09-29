@@ -4,8 +4,9 @@ import math
 import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
+from typing import Literal, TypedDict, Union
 
-from . import bidi
+from . import bidi, ir
 from .fonts import FontInfo
 from .raw_types import PathItem, RawDrawing
 
@@ -135,10 +136,30 @@ Fraction = tuple[Rect, list[Span], list[Span]]
 """A small inline fraction Slides text carries: its bar, its numerator's and denominator's spans."""
 
 
+class IconBullet(TypedDict):
+    """A list item's mark drawn in a symbol font or as a small graphic (`assign_reasons`): no
+    bullet of deck.json's, but a picture grouped with the item (`PageClassifier.classify`)."""
+    kind: Literal["icon"]
+    text: str
+    bbox: list[float]
+    spans: list[str]
+
+
+LineBullet = Union[ir.GlyphBullet, ir.NumberBullet, ir.ImageBullet, ir.ShapeBullet, IconBullet]
+"""What a line's bullet is while classifying: one of deck.json's, or an icon."""
+
+
+def ir_bullet(b: LineBullet | None) -> ir.Bullet | None:
+    """The bullet deck.json writes for a line's: an icon is no bullet (its picture stands in)."""
+    if b is None or b["kind"] == "icon":
+        return None
+    return b
+
+
 @dataclass(eq=False)
 class Line:
     spans: list[Span]
-    bullet: dict | None = None
+    bullet: LineBullet | None = None
     bullet_spans: list[Span] = field(default_factory=list)
     reason: str | None = None
     inline_math: bool = False
@@ -266,9 +287,9 @@ def reads_rtl(line: Line) -> bool:
 @dataclass(eq=False)
 class Paragraph:
     lines: list[Line]
-    align: str = "left"
+    align: ir.Align = "left"
     reason: str | None = None
-    role: str = "body"
+    role: ir.TextRole = "body"
     level: int = 0
     indent: float = 0.0  # a first line set in by \parindent: how far right of the others it starts
     justified: bool = False
@@ -286,11 +307,11 @@ class Paragraph:
         return self.first.size
 
     @property
-    def bullet(self) -> dict | None:
+    def bullet(self) -> LineBullet | None:
         return self.first.bullet
 
     @property
-    def direction(self) -> str | None:
+    def direction(self) -> Literal["rtl"] | None:
         """`rtl` where the paragraph reads right to left, else None - Unicode's P2 over the
         words as they are now read (`bidi`). Slides has to be told: in a paragraph it takes
         for left-to-right, a Hebrew sentence's full stop lands at the wrong end, a bullet
@@ -319,7 +340,7 @@ ACCENTS = {"¯": "̄", "ˆ": "̂", "˜": "̃", "˙": "̇", "¨": "̈", "´": "́
            "`": "̀", "ˇ": "̌", "˘": "̆", "˚": "̊", "˝": "̋", "¸": "̧", "˛": "̨"}
 
 
-def polygon_shape(points: Sequence[Sequence[float]], r: "Rect") -> str | None:
+def polygon_shape(points: Sequence[Sequence[float]], r: "Rect") -> Literal["DIAMOND", "TRIANGLE"] | None:
     """Slides shape for a closed polygon path: a diamond touching the middle of each side of its
     bounding box, or a triangle with its apex centred on the top or bottom side."""
     tol = 0.08 * max(r.w, r.h)

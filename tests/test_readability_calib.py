@@ -15,6 +15,7 @@ import re
 import pytest
 
 from beamer2slides.devtools import readability_calib as rc
+from beamer2slides.paths import CHECKOUT
 
 
 # ------------------------------------------------------------------------------------- the sample
@@ -25,9 +26,9 @@ def test_the_drawn_sample_is_the_one_that_was_judged():
     if not path.exists() or not rc.CORPUS.is_dir():
         pytest.skip("no corpus (out/adopt-corpus) or no committed sample")
     saved = json.loads(path.read_text(encoding="utf-8"))
-    drawn = rc.sample(rc.CORPUS, saved["seed"])
-    assert [{k: s[k] for k in ("deck", "index", "kind")} for s in drawn] == saved["slides"]
-    pairs = rc.build_pairs(drawn, rc.human_frames(), saved["seed"])
+    drawn = rc.sample(rc.CORPUS, saved["seed"], rc.QUOTA, rc.PER_DECK)
+    assert [{"deck": s["deck"], "index": s["index"], "kind": s["kind"]} for s in drawn] == saved["slides"]
+    pairs = rc.build_pairs(drawn, rc.human_frames(CHECKOUT), saved["seed"], rc.HUMAN_PAIRS)
     assert [p["id"] for p in pairs] == [p["id"] for p in saved["pairs"]]
     assert [p["left"]["what"] for p in pairs] == [p["left"] for p in saved["pairs"]]
 
@@ -35,7 +36,7 @@ def test_the_drawn_sample_is_the_one_that_was_judged():
 def test_the_sample_is_stratified_and_spread_over_the_decks():
     if not rc.CORPUS.is_dir():
         pytest.skip("no corpus")
-    drawn = rc.sample()
+    drawn = rc.sample(rc.CORPUS, rc.SEED, rc.QUOTA, rc.PER_DECK)
     for kind, want in rc.QUOTA.items():
         here = [s for s in drawn if s["kind"] == kind]
         assert len(here) == want, kind
@@ -57,14 +58,14 @@ def test_a_frame_is_named_by_what_it_is_made_of():
 
 
 def test_a_frame_is_shown_whole_with_what_wraps_it():
-    side = {"body": "[plain]\n  words\n", "lead": "{\\setbeamercolor{x}{bg=red}", "tail": "}"}
-    shown = rc.show(side)
+    side: rc.Wrapped = {"body": "[plain]\n  words\n", "lead": "{\\setbeamercolor{x}{bg=red}", "tail": "}"}
+    shown = rc.show(side, rc.MAX_LINES)
     assert shown.splitlines()[0] == "{\\setbeamercolor{x}{bg=red}"
     assert "\\begin{frame}[plain]" in shown and shown.splitlines()[-1] == "}"
 
 
 def test_a_frame_too_long_to_read_is_elided_and_says_how_much_was_left_out():
-    side = {"body": "[plain]\n" + "\n".join(f"  line {i}" for i in range(400)), "lead": "", "tail": ""}
+    side: rc.Wrapped = {"body": "[plain]\n" + "\n".join(f"  line {i}" for i in range(400)), "lead": "", "tail": ""}
     shown = rc.show(side, max_lines=50)
     assert len(shown.splitlines()) == 51                      # the elision is one line of its own
     assert "further lines" in shown and "line 399" in shown
@@ -97,8 +98,8 @@ def test_nothing_in_a_prompt_says_which_form_a_source_is():
 def test_a_vocabulary_is_the_signatures_and_their_comments_not_the_package():
     if not rc.CORPUS.is_dir():
         pytest.skip("no corpus")
-    deck = rc.decks()[0]
-    text = rc.vocabulary_reference(rc.TAGS[-1], [deck])
+    deck = rc.decks(rc.CORPUS, rc.TAGS)[0]
+    text = rc.vocabulary_reference(rc.TAGS[-1], [deck], rc.CORPUS)
     assert "\\newcommand\\slidepicture" in text or "\\newcommand\\slidetext" in text
     # a package's insides are not vocabulary: no line here defines one
     assert not re.search(r"(?m)^\\(?:newcommand|def|newenvironment)\{?\\?slides@", text)
@@ -107,23 +108,37 @@ def test_a_vocabulary_is_the_signatures_and_their_comments_not_the_package():
 def test_the_vocabulary_of_a_batch_is_said_once_per_form():
     if not rc.CORPUS.is_dir():
         pytest.skip("no corpus")
-    pairs = rc.rebuild_pairs()
-    text = rc.prompt(rc.batches(pairs)[0])
+    pairs = rc.rebuild_pairs(rc.CORPUS, rc.SEED)
+    text = rc.prompt(rc.batches(pairs, rc.BATCH)[0], rc.CORPUS)
     assert text.count("### Vocabulary ") <= 3                 # two forms and the hand-written note
-    for p in rc.batches(pairs)[0]:
+    for p in rc.batches(pairs, rc.BATCH)[0]:
         assert f"### Pair {p['id']}" in text
         assert f"**{p['id']} source A**" in text and f"**{p['id']} source B**" in text
 
 
 # ---------------------------------------------------------------------------------- the agreement
 
-def _pair(pid, kind="form", left="m6-a", right="ls-a"):
-    return {"id": pid, "kind": kind, "slide_kind": "prose", "deck": "d", "index": int(pid[1:]),
-            "human_source": "talk", "human_index": 0,
-            "left": {"what": left}, "right": {"what": right}}
+def _side(what: str) -> rc.Side:
+    return {"what": what, "body": "", "lead": "", "tail": ""}
 
 
-def _verdicts(table: dict[str, list[str]]) -> dict:
+def _pair(pid: str) -> rc.FormPair:
+    """The same slide of deck `d`, m6-a on the left."""
+    return {"id": pid, "kind": "form", "slide_kind": "prose", "deck": "d", "index": int(pid[1:]),
+            "left": _side("m6-a"), "right": _side("ls-a")}
+
+
+def _human_pair(pid: str, left: str, right: str) -> rc.HumanPair:
+    """Deck `d`'s slide against frame 0 of the hand-written `talk`."""
+    return {"id": pid, "kind": "human", "slide_kind": "prose", "deck": "d", "index": int(pid[1:]),
+            "human_source": "talk", "human_index": 0, "left": _side(left), "right": _side(right)}
+
+
+def _score(a: float, b: float, prefer: str, margin: float) -> rc.ProxyScore:
+    return {"A": a, "B": b, "prefer": prefer, "margin": margin}
+
+
+def _verdicts(table: dict[str, list[str]]) -> rc.Verdicts:
     return {f"j{i + 1}": {pid: {"prefer": v[i], "reason": ""} for pid, v in table.items()}
             for i in range(len(next(iter(table.values()))))}
 
@@ -136,13 +151,13 @@ def test_the_majority_of_three_votes():
 
 
 def test_agreement_counts_only_the_pairs_the_judges_settled():
-    pairs = [_pair("f1"), _pair("f2"), _pair("f3")]
+    pairs: list[rc.Pair] = [_pair("f1"), _pair("f2"), _pair("f3")]
     verdicts = _verdicts({"f1": ["A", "A", "B"],      # majority A
                           "f2": ["B", "B", "B"],      # majority B
                           "f3": ["A", "B", "tie"]})   # no majority
-    scores = {"f1": {"A": 0.6, "B": 0.4, "prefer": "A", "margin": 0.2},
-              "f2": {"A": 0.6, "B": 0.4, "prefer": "A", "margin": 0.2},
-              "f3": {"A": 0.5, "B": 0.4, "prefer": "A", "margin": 0.1}}
+    scores = {"f1": _score(0.6, 0.4, "A", 0.2),
+              "f2": _score(0.6, 0.4, "A", 0.2),
+              "f3": _score(0.5, 0.4, "A", 0.1)}
     a = rc.agreement(pairs, verdicts, scores)
     assert a["form"]["pairs"] == 2 and a["form"]["no_majority"] == 1
     assert a["form"]["agreement"] == 0.5                      # right on f1, wrong on f2
@@ -150,10 +165,10 @@ def test_agreement_counts_only_the_pairs_the_judges_settled():
 
 
 def test_the_inter_judge_numbers_are_the_ceiling_they_claim_to_be():
-    pairs = [_pair(f"f{i}") for i in range(1, 5)]
+    pairs: list[rc.Pair] = [_pair(f"f{i}") for i in range(1, 5)]
     verdicts = _verdicts({"f1": ["A", "A", "A"], "f2": ["A", "A", "B"],
                           "f3": ["B", "B", "B"], "f4": ["A", "B", "A"]})
-    scores = {p["id"]: {"A": 1.0, "B": 0.0, "prefer": "A", "margin": 1.0} for p in pairs}
+    scores = {p["id"]: _score(1.0, 0.0, "A", 1.0) for p in pairs}
     j = rc.agreement(pairs, verdicts, scores)["judges"]
     assert j["unanimous"] == 0.5                              # f1 and f3
     # 12 judge-judge comparisons, the split pairs cost two each
@@ -173,11 +188,10 @@ def test_spearman_is_spearman():
 
 
 def test_a_frame_wins_its_share_of_the_votes_it_was_in():
-    pairs = [_pair("f1"), _pair("h1", kind="human", left="ls-a", right="human")]
-    pairs[1]["index"] = 1
+    pairs: list[rc.Pair] = [_pair("f1"), _human_pair("h1", "ls-a", "human")]
     verdicts = _verdicts({"f1": ["B", "B", "A"], "h1": ["B", "B", "tie"]})
-    scores = {"f1": {"A": 0.2, "B": 0.7, "prefer": "B", "margin": -0.5},
-              "h1": {"A": 0.7, "B": 0.9, "prefer": "B", "margin": -0.2}}
+    scores = {"f1": _score(0.2, 0.7, "B", -0.5),
+              "h1": _score(0.7, 0.9, "B", -0.2)}
     f = rc.agreement(pairs, verdicts, scores)["frames"]
     # the same frame stands in both pairs, so its wins are pooled: 2 of 3 as B, 0.5 of 3 as A
     assert f["rate"]["ls-a/d/1"] == pytest.approx(2.5 / 6)

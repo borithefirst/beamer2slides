@@ -5,12 +5,14 @@ import statistics
 import unicodedata
 from collections import Counter
 from collections.abc import Iterable
-from typing import Protocol, TypedDict
+from typing import Literal, Protocol, TypedDict
 
 from . import bidi
 from .classify_model import ACCENTS, OUTLINE_MIN, Line, Paragraph, Rect, Span
 from .fonts import MATH_ITALIC_RE, font_info
-from .ir import BulletShape, Script
+from .ir import BulletShape, CardBox, Family, Label, Script
+from .ir import Paragraph as ParagraphJson
+from .ir import Run
 from .raw_types import RawDoc, RawDrawing, RawSpan
 
 
@@ -287,7 +289,7 @@ def math_text(font: str, text: str) -> tuple[str, bool]:
     return "".join(t for t, _ in pieces), any(i for _, i in pieces)
 
 
-def math_family(line: "Line", par: "Paragraph | None") -> str:
+def math_family(line: "Line", par: "Paragraph | None") -> Literal["sans", "serif"]:
     """The text family math is shown in: the family most of the words around it are set in -
     on its line, else in its paragraph (None: none around it) - never a monospaced one (a
     formula after \\texttt{x} is not code), and serif when there are no words (TeX's math is
@@ -299,7 +301,7 @@ def math_family(line: "Line", par: "Paragraph | None") -> str:
             if s.info.family in ("sans", "serif"):
                 weight[s.info.family] += len(s.text.strip())
         if weight:
-            return weight.most_common(1)[0][0]
+            return "sans" if weight.most_common(1)[0][0] == "sans" else "serif"
     return "serif"
 
 
@@ -337,15 +339,30 @@ def gap_between(a: "Span", b: "Span") -> float:
     return max(b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1)
 
 
-def span_runs(spans: list[Span]) -> list[dict]:
+_FAMILIES: dict[str, Family] = {"sans": "sans", "serif": "serif", "mono": "mono", "math": "math", "icon": "icon"}
+
+
+def family_of(s: Span) -> Family:
+    """A span's font family (`FontInfo.family`, said as a string) as deck.json says it."""
+    return _FAMILIES[s.info.family]
+
+
+def look(r: Run) -> tuple[object, ...]:
+    """A run's style, every key but its text: two runs of one look are one run (`span_runs`,
+    `PageClassifier.runs`). A decoration a run does not say is None."""
+    return (r["font"], r["family"], r["size"], r["bold"], r["italic"], r["smallcaps"], r["color"], r["link"],
+            r["script"], r.get("underline"), r.get("strike"), r.get("highlight"))
+
+
+def span_runs(spans: list[Span]) -> list[Run]:
     """Runs for a short piece of text given as spans left to right (cells, node labels), put into
     reading order first. Simple math works as in text lines: symbols from math fonts,
     sub/superscripts."""
-    runs: list[dict] = []
+    runs: list[Run] = []
     if not spans:
         return runs
     main = max(spans, key=lambda s: s.size)
-    base_family = next((s.info.family for s in spans if s.info.family not in ("math", "icon")), "sans")
+    base_family: Family = next((family_of(s) for s in spans if s.info.family not in ("math", "icon")), "sans")
     spans = list(bidi.logical_spans(spans))
     lead = bidi.lead_mark(spans)
 
@@ -383,7 +400,7 @@ def span_runs(spans: list[Span]) -> list[dict]:
                 runs[-1]["text"] += " "  # the word space before \texttt is the prose's, not a monospaced one
             else:
                 text = " " + text
-        family, italic, script = s.info.family, s.info.italic, None
+        family, italic = family_of(s), s.info.italic
         pieces = [(text, italic)]
         if family == "math":
             family = base_family
@@ -393,13 +410,14 @@ def span_runs(spans: list[Span]) -> list[dict]:
         if script == "super" and text.strip() in RAISED_MARKS:
             pieces, script, size = [(raised_mark(text), False)], None, main.size
         for text, italic in pieces:
-            style = {"font": s.font, "family": family, "size": round(size, 2),
-                     "bold": s.info.bold, "italic": italic, "smallcaps": s.info.smallcaps, "color": s.color,
-                     "link": s.link, "script": script, "underline": s.underline, "strike": s.strike, "highlight": s.highlight}
-            if runs and all(runs[-1][k] == v for k, v in style.items()):
+            run: Run = {"text": text, "font": s.font, "family": family, "size": round(size, 2),
+                        "bold": s.info.bold, "italic": italic, "smallcaps": s.info.smallcaps, "color": s.color,
+                        "link": s.link, "script": script, "underline": s.underline, "strike": s.strike,
+                        "highlight": s.highlight}
+            if runs and look(runs[-1]) == look(run):
                 runs[-1]["text"] += text
             else:
-                runs.append({"text": text, **style})
+                runs.append(run)
     prose_spaces(runs)
     runs = [r for r in runs if r["text"]]
     if lead and runs:  # (a right-to-left cell starting with a Latin word says which way it reads)
@@ -458,7 +476,7 @@ def glued(text: str, lead: bool, trail: bool) -> str:
     return text
 
 
-def prose_spaces(runs: list[dict]) -> None:
+def prose_spaces(runs: list[Run]) -> None:
     """A word space at the edge of inline code belongs to the surrounding text: in a monospaced
     font it would be twice as wide. (In a table cell too: the span ' __exit__' comes with its
     space, 'paired with  __exit__', r2_code_v4 s5.)"""
@@ -473,36 +491,41 @@ def prose_spaces(runs: list[dict]) -> None:
                 b["text"] = " " + b["text"]
 
 
-def cell_runs(lines: list[list[Span]]) -> tuple[list[dict], list[int]]:
+def cell_runs(lines: list[list[Span]]) -> tuple[list[Run], list[int]]:
     """Runs of a table cell given as its lines of spans (a paragraph column wraps): one paragraph,
     the lines joined by a space, or by nothing where TeX hyphenated a word at the line's end.
     And where in the runs' text each line after the first starts."""
-    runs: list[dict] = []
-    starts = []
+    runs: list[Run] = []
+    starts: list[int] = []
     for spans in lines:
         more = span_runs(spans)
         if runs and more:
             tail, head = runs[-1]["text"], more[0]["text"].lstrip()
             if len(tail) >= 2 and tail.endswith("-") and tail[-2].isalpha() and head[:1].islower():
-                runs[-1] = {**runs[-1], "text": tail[:-1]}
-                more[0] = {**more[0], "text": head}
+                runs[-1] = with_text(runs[-1], tail[:-1])
+                more[0] = with_text(more[0], head)
             else:
-                more[0] = {**more[0], "text": " " + head}
+                more[0] = with_text(more[0], " " + head)
             starts.append(sum(len(r["text"]) for r in runs) + len(more[0]["text"]) - len(head))
-            if all(runs[-1][k] == v for k, v in more[0].items() if k != "text"):
-                runs[-1] = {**runs[-1], "text": runs[-1]["text"] + more[0]["text"]}
+            if look(runs[-1]) == look(more[0]):
+                runs[-1] = with_text(runs[-1], runs[-1]["text"] + more[0]["text"])
                 more = more[1:]
         runs += more
     return runs, starts
 
 
-def label_of(spans: list[Span]) -> dict | None:
+def with_text(r: Run, text: str) -> Run:
+    """A copy of a run with other text."""
+    return {**r, "text": text}
+
+
+def label_of(spans: list[Span]) -> Label | None:
     """Where and how a list number is drawn, to write it as literal text if Slides can't number it."""
     if not spans:
         return None
     s = min(spans, key=lambda s: s.rect.x0)
-    return {"x0": round(s.rect.x0, 2), "baseline": round(s.baseline, 2), "font": s.font, "family": s.info.family, "size": round(s.size, 2),
-            "bold": s.info.bold, "italic": s.info.italic, "color": s.color}
+    return {"x0": round(s.rect.x0, 2), "baseline": round(s.baseline, 2), "font": s.font, "family": family_of(s),
+            "size": round(s.size, 2), "bold": s.info.bold, "italic": s.info.italic, "color": s.color}
 
 
 class BulletLook(TypedDict, total=False):
@@ -641,7 +664,7 @@ def last_word_width(span: Span) -> float:
     return span.rect.w * text_weight(text.split()[-1]) / text_weight(text)
 
 
-def line_starts(lines: list["Line"], runs: list[dict]) -> list[int] | None:
+def line_starts(lines: list["Line"], runs: list[Run]) -> list[int] | None:
     """Where each of a paragraph's lines after the first starts in its runs' joined text (at the
     word after a space), then that text's length - or None where a line's first word is not found
     there (a hyphenated or CJK line end, a hole, a glyph read another way). emit sets each PDF line's
@@ -772,7 +795,7 @@ def explicit_hyphen(tail: str) -> bool:
     return "-" in word or word.lstrip("([{“‘\"'").casefold() in COMPOUND_HEADS
 
 
-def card_text(node: Rect, rows: list[list[Span]]) -> list[dict[str, list[dict]]] | None:
+def card_text(node: Rect, rows: list[list[Span]]) -> list[CardBox] | None:
     """The text on a node that is more than a centred label (a card: a big number over a
     caption, a heading over wrapped body copy) as its text boxes ({"paragraphs": [...]}, each
     placed on its baselines), or None for a simple label (one size, centred on the node)."""
@@ -801,19 +824,19 @@ def card_text(node: Rect, rows: list[list[Span]]) -> list[dict[str, list[dict]]]
                 paragraphs[-1].append(i)
                 continue
         paragraphs.append([i])
-    boxes: list[list[dict]] = []
+    boxes: list[list[ParagraphJson]] = []
     for idx in paragraphs:
         lines = [info[i] for i in idx]
         on_centre = all(abs((l["x0"] + l["x1"]) / 2 - node.cx) <= 2 for l in lines) and not flush_left(lines)
         left = not on_centre and (len(lines) == 1 or all(abs(l["x0"] - lines[0]["x0"]) <= 1 for l in lines))
-        runs: list[dict] = []
+        runs: list[Run] = []
         for i in idx:
             row_runs = span_runs(rows[i])
             if runs and row_runs:
                 # a centred caption keeps its breaks (see text_element.unbalanced)
-                runs[-1] = {**runs[-1], "text": runs[-1]["text"].rstrip() + (" " if left else chr(11))}
+                runs[-1] = with_text(runs[-1], runs[-1]["text"].rstrip() + (" " if left else chr(11)))
             runs += row_runs
-        par = {
+        par: ParagraphJson = {
             "align": "left" if left else "center", "level": 0, "bullet": None, "size": round(lines[0]["size"], 2),
             "text_x0": round(min(l["x0"] for l in lines), 2), "tab_x0": None,
             "lines": [{"baseline": round(l["baseline"], 2), "x0": round(l["x0"], 2), "x1": round(l["x1"], 2)} for l in lines],

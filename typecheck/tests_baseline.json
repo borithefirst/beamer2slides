@@ -2927,13 +2927,6 @@
       "severity": "error"
     },
     {
-      "column": 12,
-      "path": "tests/ir_sources.py",
-      "name": "bad-return",
-      "concise_description": "Returned type `tuple[dict[Unknown, Unknown], RawDoc, Path]` is not assignable to declared return type `tuple[dict[Unknown, Unknown], dict[Unknown, Unknown], Path]`",
-      "severity": "error"
-    },
-    {
       "column": 28,
       "path": "tests/ir_sources.py",
       "name": "implicit-any-empty-container",
@@ -3207,20 +3200,6 @@
       "severity": "error"
     },
     {
-      "column": 55,
-      "path": "tests/ir_sources.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 74,
-      "path": "tests/ir_sources.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 21,
       "path": "tests/ir_sources.py",
       "name": "implicit-any-type-argument",
@@ -3446,20 +3425,6 @@
     },
     {
       "column": 51,
-      "path": "tests/ir_sources.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 55,
-      "path": "tests/ir_sources.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 74,
       "path": "tests/ir_sources.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
@@ -21085,13 +21050,6 @@
       "severity": "error"
     },
     {
-      "column": 24,
-      "path": "tests/test_bidi.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`__init__` is missing an annotation for parameter `text`",
-      "severity": "error"
-    },
-    {
       "column": 12,
       "path": "tests/test_bidi.py",
       "name": "implicit-any-parameter",
@@ -22870,20 +22828,6 @@
       "severity": "error"
     },
     {
-      "column": 32,
-      "path": "tests/test_columns.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 63,
-      "path": "tests/test_columns.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 13,
       "path": "tests/test_columns.py",
       "name": "implicit-any-type-argument",
@@ -22892,20 +22836,6 @@
     },
     {
       "column": 21,
-      "path": "tests/test_columns.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 32,
-      "path": "tests/test_columns.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 63,
       "path": "tests/test_columns.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
@@ -45844,21 +45774,7 @@
       "severity": "error"
     },
     {
-      "column": 44,
-      "path": "tests/test_fonts_encodings.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 29,
-      "path": "tests/test_fonts_encodings.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 44,
       "path": "tests/test_fonts_encodings.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
@@ -50310,34 +50226,6 @@
       "severity": "error"
     },
     {
-      "column": 20,
-      "path": "tests/test_inline_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 37,
-      "path": "tests/test_inline_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 20,
-      "path": "tests/test_inline_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 37,
-      "path": "tests/test_inline_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 35,
       "path": "tests/test_inline_scripts.py",
       "name": "implicit-any-type-argument",
@@ -51094,20 +50982,6 @@
       "severity": "error"
     },
     {
-      "column": 51,
-      "path": "tests/test_ir.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `dict[Unknown, Unknown]` is not assignable to parameter `raw` with type `RawDoc` in function `beamer2slides.render.render_backgrounds`",
-      "severity": "error"
-    },
-    {
-      "column": 12,
-      "path": "tests/test_ir.py",
-      "name": "bad-return",
-      "concise_description": "Returned type `tuple[RawDoc, dict[Unknown, Unknown], Path]` is not assignable to declared return type `tuple[dict[Unknown, Unknown], dict[Unknown, Unknown], Path]`",
-      "severity": "error"
-    },
-    {
       "column": 10,
       "path": "tests/test_ir.py",
       "name": "implicit-any-parameter",
@@ -51192,20 +51066,6 @@
       "severity": "error"
     },
     {
-      "column": 41,
-      "path": "tests/test_ir.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 47,
-      "path": "tests/test_ir.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 17,
       "path": "tests/test_ir.py",
       "name": "implicit-any-type-argument",
@@ -51235,20 +51095,6 @@
     },
     {
       "column": 38,
-      "path": "tests/test_ir.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 41,
-      "path": "tests/test_ir.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 47,
       "path": "tests/test_ir.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
@@ -51473,13 +51319,6 @@
     },
     {
       "column": 41,
-      "path": "tests/test_ir_types.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `dict[Unknown, Unknown]` is not assignable to parameter `raw` with type `RawDoc` in function `beamer2slides.render.render_backgrounds`",
-      "severity": "error"
-    },
-    {
-      "column": 51,
       "path": "tests/test_ir_types.py",
       "name": "bad-argument-type",
       "concise_description": "Argument `dict[Unknown, Unknown]` is not assignable to parameter `raw` with type `RawDoc` in function `beamer2slides.render.render_backgrounds`",
@@ -54384,97 +54223,6 @@
       "severity": "error"
     },
     {
-      "column": 102,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 23,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 27,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 41,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 46,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 57,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 23,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 27,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 31,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 41,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 46,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 57,
-      "path": "tests/test_lists_scripts.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 30,
       "path": "tests/test_marks.py",
       "name": "bad-argument-type",
@@ -56617,34 +56365,6 @@
       "severity": "error"
     },
     {
-      "column": 91,
-      "path": "tests/test_pictures_hunt.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 95,
-      "path": "tests/test_pictures_hunt.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 97,
-      "path": "tests/test_pictures_hunt.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 98,
-      "path": "tests/test_pictures_hunt.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
       "column": 19,
       "path": "tests/test_pictures_hunt.py",
       "name": "implicit-any-lambda",
@@ -56747,34 +56467,6 @@
       "path": "tests/test_pictures_wave4.py",
       "name": "bad-argument-type",
       "concise_description": "Argument `dict[Unknown, Unknown]` is not assignable to parameter `raw` with type `RawDoc` in function `beamer2slides.render.render_backgrounds`",
-      "severity": "error"
-    },
-    {
-      "column": 91,
-      "path": "tests/test_pictures_wave4.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 95,
-      "path": "tests/test_pictures_wave4.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 95,
-      "path": "tests/test_pictures_wave4.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
-      "severity": "error"
-    },
-    {
-      "column": 97,
-      "path": "tests/test_pictures_wave4.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
       "severity": "error"
     },
     {
@@ -58040,48 +57732,6 @@
     {
       "column": 26,
       "path": "tests/test_raw_types.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 16,
-      "path": "tests/test_readability_calib.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_pair` is missing an annotation for parameter `kind`",
-      "severity": "error"
-    },
-    {
-      "column": 29,
-      "path": "tests/test_readability_calib.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_pair` is missing an annotation for parameter `left`",
-      "severity": "error"
-    },
-    {
-      "column": 11,
-      "path": "tests/test_readability_calib.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_pair` is missing an annotation for parameter `pid`",
-      "severity": "error"
-    },
-    {
-      "column": 42,
-      "path": "tests/test_readability_calib.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`_pair` is missing an annotation for parameter `right`",
-      "severity": "error"
-    },
-    {
-      "column": 47,
-      "path": "tests/test_readability_calib.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 47,
-      "path": "tests/test_readability_calib.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
       "severity": "error"
@@ -60149,13 +59799,6 @@
       "path": "tests/test_span_joining.py",
       "name": "bad-argument-type",
       "concise_description": "Argument `Page` is not assignable to parameter `page` with type `PdfPage` in function `beamer2slides.extract.spans`",
-      "severity": "error"
-    },
-    {
-      "column": 67,
-      "path": "tests/test_span_joining.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `Shown` is not assignable to parameter `visibility` with type `Visibility | None` in function `beamer2slides.extract.spans`",
       "severity": "error"
     },
     {
@@ -83483,13 +83126,6 @@
       "severity": "error"
     },
     {
-      "column": 35,
-      "path": "tests/test_type3.py",
-      "name": "bad-argument-type",
-      "concise_description": "Argument `test_body_and_bold_are_two_fonts_and_split_the_spans.Shown` is not assignable to parameter `visibility` with type `Visibility | None` in function `beamer2slides.extract.spans`",
-      "severity": "error"
-    },
-    {
       "column": 26,
       "path": "tests/test_type3.py",
       "name": "implicit-any-parameter",
@@ -83963,13 +83599,6 @@
       "path": "tests/test_wave5_text.py",
       "name": "bad-return",
       "concise_description": "Returned type `tuple[Unknown, list[tuple[Unknown | Json, Unknown | Json, Unknown | Json]]]` is not assignable to declared return type `tuple[str, list[tuple[str, int, int]]]`",
-      "severity": "error"
-    },
-    {
-      "column": 107,
-      "path": "tests/test_wave5_text.py",
-      "name": "implicit-any-empty-container",
-      "concise_description": "Cannot infer type of empty container; it will be treated as containing `Any`",
       "severity": "error"
     },
     {

@@ -3,13 +3,19 @@
 import numpy as np
 from PIL import Image
 
+from beamer2slides.json_types import JsonObject, as_objects, as_str
 from beamer2slides.render import render_backgrounds
 
 from .test_hidden_text import one_page
-from .test_pictures_hunt import raw_of
+from .test_pictures_hunt import num_list, raw_of
 
 
-def ball_under_a_figure_edge(tmp_path):
+def first_slide(deck: JsonObject) -> JsonObject:
+    return as_objects(deck["slides"], "slides")[0]
+
+
+def ball_under_a_figure_edge(tmp_path) -> tuple[JsonObject, list[float], JsonObject]:
+    """The rendered slide, the ball image's box and the bullet render filled in."""
     path = tmp_path / "bullets.pdf"
     # the ball bullet an image, as beamer's shaded balls come back
     content = (b"0 0.45 0.7 rg 20 60 100 100 re f\n"
@@ -20,13 +26,13 @@ def ball_under_a_figure_edge(tmp_path):
     page = raw["pages"][0]
     (image,) = page["images"]
     words = page["spans"]
-    bullet = {"kind": "image", "image": image["id"], "bbox": image["bbox"]}
-    text = {"id": "t0", "kind": "text", "role": "body", "bbox": [128, 136, 200, 150], "spans": [s["id"] for s in words],
-            "paragraphs": [{"bullet": bullet, "runs": [], "lines": []}]}
-    figure = {"id": "f0", "kind": "image", "role": "figure", "bbox": [19, 39, 123.2, 147], "spans": []}
-    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [figure, text], "on_layout": []}]}
-    render_backgrounds(path, raw, deck, tmp_path / "out")
-    return deck["slides"][0], image, bullet
+    bullet: JsonObject = {"kind": "image", "image": image["id"], "bbox": list(image["bbox"])}
+    text: JsonObject = {"id": "t0", "kind": "text", "role": "body", "bbox": [128, 136, 200, 150],
+                        "spans": [s["id"] for s in words], "paragraphs": [{"bullet": bullet, "runs": [], "lines": []}]}
+    figure: JsonObject = {"id": "f0", "kind": "image", "role": "figure", "bbox": [19, 39, 123.2, 147], "spans": []}
+    deck: JsonObject = {"slides": [{"page": 0, "size": [400, 200], "elements": [figure, text], "on_layout": []}]}
+    render_backgrounds(path, raw, deck, tmp_path / "out", frozenset())
+    return first_slide(deck), [float(v) for v in image["bbox"]], bullet
 
 
 def test_a_ball_bullet_a_figure_box_reaches_keeps_its_colour(tmp_path):
@@ -34,19 +40,20 @@ def test_a_ball_bullet_a_figure_box_reaches_keeps_its_colour(tmp_path):
     the list's balls; the figure's removal took the half of each ball inside it from the
     background, the colour read from what was left found no ball, and the Slides bullets came
     out in each item's first word's colour (blue, orange, black) where the PDF has navy balls."""
-    slide, image, bullet = ball_under_a_figure_edge(tmp_path)
-    assert image["bbox"][0] < 123.2 < image["bbox"][2]  # the figure box ends inside the ball: the case
+    slide, ball, bullet = ball_under_a_figure_edge(tmp_path)
+    assert ball[0] < 123.2 < ball[2]  # the figure box ends inside the ball: the case
     assert bullet.get("color"), bullet
-    r, g, b = (int(bullet["color"][k:k + 2], 16) for k in (1, 3, 5))
+    color = as_str(bullet["color"], "color")
+    r, g, b = (int(color[k:k + 2], 16) for k in (1, 3, 5))
     assert abs(r - 0x33) < 24 and abs(g - 0x33) < 24 and abs(b - 0xb3) < 24
 
 
 def test_a_ball_bullet_a_figure_box_reaches_leaves_the_background(tmp_path):
     """The same ball is patched out of the background whole: no half ball beside the Slides one."""
-    slide, image, _ = ball_under_a_figure_edge(tmp_path)
-    bg = np.array(Image.open(tmp_path / "out" / slide["background"]).convert("RGB")).astype(int)
+    slide, ball, _ = ball_under_a_figure_edge(tmp_path)
+    bg = np.array(Image.open(tmp_path / "out" / as_str(slide["background"], "background")).convert("RGB")).astype(int)
     zoom = bg.shape[1] / 400
-    x0, y0, x1, y1 = (int(round(v * zoom)) for v in image["bbox"])
+    x0, y0, x1, y1 = (int(round(v * zoom)) for v in ball)
     area = bg[y0:y1, x0:x1]
     ball = (area[..., 0] < 90) & (area[..., 1] < 80) & (area[..., 2] > 150)
     assert not ball.any()
@@ -68,8 +75,8 @@ def test_every_numbered_hebrew_ball_keeps_its_number():
         x0, y0, x1, y1 = im["bbox"]
         im["bbox"], im["px"] = [x0, y0 - 0.5, x1, y1 + 0.5], [12, 12]
     slide = classify_page(pg, SIZE)
-    numbers = sorted(p["bullet"]["text"] for e in slide["elements"] for p in e.get("paragraphs", [])
-                     if p["bullet"] and p["bullet"]["text"])
+    numbers = sorted(b["text"] for e in slide["elements"] if e["kind"] == "text" for p in e["paragraphs"]
+                     if (b := p["bullet"]) and b["text"])
     assert numbers == ["1", "2", "3", "4"], numbers
     loose = [e for e in slide["elements"] if e["kind"] == "text"
              and "".join(r["text"] for p in e["paragraphs"] for r in p["runs"]).strip().isdigit()]
@@ -88,14 +95,14 @@ def test_an_icon_bullet_picture_takes_its_whole_glyph(tmp_path):
     glyph, *words = raw["pages"][0]["spans"]
     assert glyph["text"] == "W"
     x0, y0, x1, y1 = glyph["bbox"]
-    text = {"id": "t0", "kind": "text", "role": "body", "bbox": [60, 35, 160, 55],
-            "spans": [s["id"] for s in words], "paragraphs": []}
-    icon = {"id": "u0", "kind": "image", "role": "icon", "anchor": "t0",
-            "bbox": [x0, y0, (x0 + x1) / 2, y1], "spans": [glyph["id"]]}
-    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [icon, text], "on_layout": []}]}
-    render_backgrounds(path, raw, deck, tmp_path / "out")
-    assert icon["bbox"][2] >= x1 - 1.5  # the whole glyph
-    crop = np.array(Image.open(tmp_path / "out" / icon["file"]).convert("L")).astype(int)
+    text: JsonObject = {"id": "t0", "kind": "text", "role": "body", "bbox": [60, 35, 160, 55],
+                        "spans": [s["id"] for s in words], "paragraphs": []}
+    icon: JsonObject = {"id": "u0", "kind": "image", "role": "icon", "anchor": "t0",
+                        "bbox": [x0, y0, (x0 + x1) / 2, y1], "spans": [glyph["id"]]}
+    deck: JsonObject = {"slides": [{"page": 0, "size": [400, 200], "elements": [icon, text], "on_layout": []}]}
+    render_backgrounds(path, raw, deck, tmp_path / "out", frozenset())
+    assert num_list(icon["bbox"])[2] >= x1 - 1.5  # the whole glyph
+    crop = np.array(Image.open(tmp_path / "out" / as_str(icon["file"], "file")).convert("L")).astype(int)
     right = crop[:, int(crop.shape[1] * 0.75):]
     assert (right < 128).any()  # the right strokes of the W are in the picture
 
@@ -111,10 +118,11 @@ def test_a_line_running_through_a_picture_stays_in_the_background_at_its_edges(t
     path = tmp_path / "graph.pdf"
     path.write_bytes(one_page(content))
     raw = raw_of(path)
-    figure = {"id": "f0", "kind": "image", "role": "figure", "bbox": [120, 60, 220, 110], "spans": []}
-    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [figure], "on_layout": []}]}
-    render_backgrounds(path, raw, deck, tmp_path / "out")
-    bg = np.array(Image.open(tmp_path / "out" / deck["slides"][0]["background"]).convert("RGB")).astype(int)
+    figure: JsonObject = {"id": "f0", "kind": "image", "role": "figure", "bbox": [120, 60, 220, 110], "spans": []}
+    deck: JsonObject = {"slides": [{"page": 0, "size": [400, 200], "elements": [figure], "on_layout": []}]}
+    render_backgrounds(path, raw, deck, tmp_path / "out", frozenset())
+    background = as_str(first_slide(deck)["background"], "background")
+    bg = np.array(Image.open(tmp_path / "out" / background).convert("RGB")).astype(int)
     zoom = bg.shape[1] / 400
     y = int(round(100 * zoom))  # (PDF y 100 is 100 from the bottom of a 200 pt page)
     for a, b in ((int(120 * zoom) - 1, int(120 * zoom) + 3), (int(220 * zoom) - 2, int(220 * zoom) + 2)):
@@ -195,16 +203,17 @@ def test_a_hole_on_a_photo_keeps_the_photo_under_it(tmp_path):
     glyph = next(s for s in raw["pages"][0]["spans"] if s["text"] == "W")
     words = [s for s in raw["pages"][0]["spans"] if s is not glyph]
     x0, y0, x1, y1 = glyph["bbox"]
-    text = {"id": "t0", "kind": "text", "role": "body", "bbox": [40, 90, 300, 110],
-            "spans": [s["id"] for s in words], "paragraphs": []}
-    hole = {"id": "h0", "kind": "image", "role": "math", "anchor": "t0", "bbox": [x0 - 1, y0, x1 + 1, y1],
-            "spans": [glyph["id"]]}
-    deck = {"slides": [{"page": 0, "size": [400, 200], "elements": [hole, text], "on_layout": []}]}
-    render_backgrounds(path, raw, deck, tmp_path / "out")
-    bg = np.array(Image.open(tmp_path / "out" / deck["slides"][0]["background"]).convert("RGB")).astype(int)
+    text: JsonObject = {"id": "t0", "kind": "text", "role": "body", "bbox": [40, 90, 300, 110],
+                        "spans": [s["id"] for s in words], "paragraphs": []}
+    hole: JsonObject = {"id": "h0", "kind": "image", "role": "math", "anchor": "t0",
+                        "bbox": [x0 - 1, y0, x1 + 1, y1], "spans": [glyph["id"]]}
+    deck: JsonObject = {"slides": [{"page": 0, "size": [400, 200], "elements": [hole, text], "on_layout": []}]}
+    render_backgrounds(path, raw, deck, tmp_path / "out", frozenset())
+    background = as_str(first_slide(deck)["background"], "background")
+    bg = np.array(Image.open(tmp_path / "out" / background).convert("RGB")).astype(int)
     zoom = bg.shape[1] / 400
-    a0, b0, a1, b1 = (int(round(v * zoom)) for v in hole["bbox"])
+    a0, b0, a1, b1 = (int(round(v * zoom)) for v in num_list(hole["bbox"]))
     under = bg[b0 + 2:b1 - 2, a0 + 2:a1 - 2]
     assert (under.max(axis=2) < 120).all()  # the photo's dark pixels, no white box, no glyph
-    crop = np.array(Image.open(tmp_path / "out" / hole["file"]))
+    crop = np.array(Image.open(tmp_path / "out" / as_str(hole["file"], "file")))
     assert crop.shape[2] == 4 and (crop[..., 3] == 0).mean() > 0.2  # the glyph on a clear ground

@@ -29,6 +29,7 @@ from functools import lru_cache
 from importlib import resources
 
 from .fonts import font_info
+from .pdf import Char
 
 # Through the package, like emit's calibration: under a runfiles tree `__file__.resolve()` is a
 # content store where calibration/ is not beside the module, and every Type 3 deck failed to extract.
@@ -59,7 +60,7 @@ class TexFont:
     name: str           # TFM name: ecbx1095, tcss1095, lass1000
     encoding: str       # T1 | TS1 | T2A
     size: float         # design size, pt
-    widths: tuple       # 256 advances, em (0: no glyph)
+    widths: tuple[float, ...]   # 256 advances, em (0: no glyph)
 
 
 @lru_cache(maxsize=1)
@@ -86,8 +87,11 @@ MAX_SAMPLES = 6       # measurements kept per code
 
 OVER = 0.2            # weight of a reported advance's excess over a width (ink reaching past it)
 
+Observed = dict[int, tuple[list[float], float | None]]
+"""One font's measured glyphs: code -> (moves, reported) (`advances`)."""
 
-def advances(chars: list) -> dict[int, dict[int, tuple[list[float], float]]]:
+
+def advances(chars: list[Char]) -> dict[int, Observed]:
     """What each Type 3 font's glyphs measure (em): font_id -> code -> (moves, reported), from the
     page's characters in content order (`pdf.api.Char`; the code is the character PDFium gave
     back). PDFium's advance for a Type 3 glyph (`reported`, the smallest seen) is its loose box,
@@ -96,10 +100,11 @@ def advances(chars: list) -> dict[int, dict[int, tuple[list[float], float]]]:
     plus a kern where the pair has one. A code matches a width when one of them does. Text drawn
     at a slant (a chart's rotated labels) has a box that is no advance (`reported` None): only
     its moves say anything, and a code without one is left out."""
-    out: dict[int, dict[int, tuple[list[float], float | None]]] = {}
+    out: dict[int, Observed] = {}
     moves: dict[tuple[int, int], list[float]] = {}
     reported: dict[tuple[int, int], float | None] = {}
-    for a, b in zip(chars, chars[1:] + [None]):
+    after: list[Char | None] = [*chars[1:], None]
+    for a, b in zip(chars, after):
         if a.font != "Type3" or len(a.c) != 1 or ord(a.c) > 0xFF or a.size <= 0 or a.synthetic:
             continue
         key = (a.font_id, ord(a.c))
@@ -133,19 +138,19 @@ def _code_error(moves: list[float], reported: float | None, width: float) -> flo
     return min(e, NO_GLYPH)
 
 
-def _error(obs: dict[int, tuple[list[float], float | None]], widths: tuple) -> float:
+def _error(obs: Observed, widths: tuple[float, ...]) -> float:
     errs = sorted(_code_error(moves, reported, widths[c]) for c, (moves, reported) in obs.items())
     keep = len(errs) - int(TRIM * len(errs)) if len(errs) >= 4 else len(errs)
     return sum(errs[:keep]) / keep
 
 
-def candidates(obs: dict, size: float) -> list[TexFont]:
+def candidates(obs: Observed, size: float) -> list[TexFont]:
     """The TeX fonts the measured glyphs (`advances`) fit best, drawn at `size` pt: all those
     within one step of the best fit, of the design sizes near `size` when one of those fits (LaTeX
     loads ecrm1095 for 10.95 pt text; a font drawn scaled - \\scalebox, an odd \\fontsize - still
     matches at another size). Several when the glyphs do not tell them apart: twins with the very
     same widths, or a few digits that are as wide in every face."""
-    scored = []
+    scored: list[tuple[tuple[int, bool], TexFont]] = []
     for f in fonts().values():
         e = _error(obs, f.widths) if obs else NO_GLYPH
         if e < GOOD:
@@ -162,7 +167,7 @@ def _rank(f: TexFont) -> int:
     return PLAIN_FIRST.index(shape) if shape in PLAIN_FIRST else len(PLAIN_FIRST) + (shape in TWINS)
 
 
-def identify(obs: dict, size: float, prior: dict[str, float] | None = None) -> TexFont | None:
+def identify(obs: Observed, size: float, prior: dict[str, float]) -> TexFont | None:
     """The TeX font of the measured glyphs, or None. Of the `candidates`, the face (the TFM name's
     two shape letters) the page uses most elsewhere, then the family (`prior`: shape or
     "family:<serif|sans|mono>" -> characters; "text:<family>" for the page's other fonts), then
@@ -175,24 +180,23 @@ def identify(obs: dict, size: float, prior: dict[str, float] | None = None) -> T
     found = candidates(obs, size)
     if not found:
         return None
-    prior = prior or {}
     symbols = bool(obs) and all(c >= 0x80 for c in obs)
 
-    def key(f: TexFont):
+    def key(f: TexFont) -> tuple[float, float, float, bool, int, str]:
         shape = f.name[2:4]
         return (-prior.get(SLANTED_OF.get(shape, shape), 0), -prior.get("family:" + family(shape), 0),
                 -prior.get("text:" + family(shape), 0), (f.encoding == "T1") == symbols, _rank(f), f.name)
     return min(found, key=key)
 
 
-def slanted(obs: dict, font: TexFont) -> bool:
+def slanted(obs: Observed, font: TexFont) -> bool:
     """The glyphs are the slanted twin of `font` (ecsi of ecss, ecsl of ecrm), which has the same
     widths. A slanted letter's ink leans out past its advance, so PDFium's loose box for it is
     wider than the width; upright CM letters stay inside theirs but for f and j (and a
     typewriter's m). Most of the letters leaning out: slanted."""
-    letters = [c for c in obs if chr(c).isalpha() and chr(c) not in "fjm" and font.widths[c]
-               and obs[c][1] is not None]
-    out = [c for c in letters if obs[c][1] > font.widths[c] * 1.01 + 0.005]
+    letters = [(c, r) for c, (_, r) in obs.items() if chr(c).isalpha() and chr(c) not in "fjm" and font.widths[c]
+               and r is not None]
+    out = [c for c, r in letters if r > font.widths[c] * 1.01 + 0.005]
     return len(out) >= min(3, len(letters)) and len(letters) >= 2 and len(out) >= 0.5 * len(letters)
 
 
@@ -208,7 +212,7 @@ class PageFont:
     encoding: str
 
 
-def page_fonts(chars: list) -> dict[int, PageFont]:
+def page_fonts(chars: list[Char]) -> dict[int, PageFont]:
     """font_id -> the TeX font of each Type 3 font the page's characters (content order) are
     drawn in, where one fits. Fonts whose glyphs fit several faces (a few digits are as wide in
     every face) take the face, else the family, the page's other Type 3 text is in, else the
@@ -238,7 +242,7 @@ def page_fonts(chars: list) -> dict[int, PageFont]:
             key = "family:" + families.pop()
             prior[key] = prior.get(key, 0) + count[fid]
     out: dict[int, PageFont] = {}
-    unknown = []
+    unknown: list[int] = []
     for fid, obs in measured.items():
         font = identify(obs, statistics.median(size[fid]), prior) if found[fid] else None
         high = {c: v for c, v in obs.items() if c >= 0x80}
@@ -253,7 +257,7 @@ def page_fonts(chars: list) -> dict[int, PageFont]:
     return out
 
 
-def _cyrillic(obs: dict, size: float, prior: dict, known: dict[int, PageFont]) -> PageFont | None:
+def _cyrillic(obs: Observed, size: float, prior: dict[str, float], known: dict[int, PageFont]) -> PageFont | None:
     """A T2A (LH) font the table has no widths for (LH fonts are generated on demand: an
     installation has the few it was asked for). Its Latin letters are EC's, so an EC font that
     fits them but not the codes above 0x7F is that face's Cyrillic. Cyrillic words with no Latin
@@ -275,12 +279,12 @@ def _cyrillic(obs: dict, size: float, prior: dict, known: dict[int, PageFont]) -
     return None
 
 
-def decode(chars: list, found: dict[int, PageFont]) -> list:
+def decode(chars: list[Char], found: dict[int, PageFont]) -> list[Char]:
     """The page's characters with those of the identified Type 3 fonts as their text (T1's 0x1C
     as ﬁ, T2A's 0xC6 as Ж) and their font named for the TeX font (ECBX1095; `fonts.font_info`
     reads its family and weight). A mark with no text (T1's compound word mark) is left out.
     PDFium gives code 0 (T1's grave accent) as U+FFFD."""
-    out = []
+    out: list[Char] = []
     for ch in chars:
         font = found.get(ch.font_id) if ch.font == "Type3" else None
         if font is None or ch.synthetic:

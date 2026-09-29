@@ -8,6 +8,7 @@ import pytest
 from beamer2slides.classify import PageClassifier, Rect, Span, card_text, classify
 from beamer2slides.extract import extract, select_overlays
 from beamer2slides.fonts import font_info
+from beamer2slides.ir import deck_json
 
 GDG = Path(__file__).resolve().parents[1] / "out" / "themes" / "gdg"
 FONT = "GoogleSansFlex-Regular"
@@ -48,7 +49,7 @@ def test_left_card_joins_wrapped_body_lines():
     heading, body = box["paragraphs"]
     assert heading["align"] == body["align"] == "left"
     assert "".join(r["text"] for r in body["runs"]) == "Personalised summaries, more languages, and a smaller model"
-    assert body["wrap_limit"] is not None and len(body["lines"]) == 2
+    assert body.get("wrap_limit") is not None and len(body["lines"]) == 2
 
 
 def test_gutter_between_columns():
@@ -66,7 +67,7 @@ def talk() -> dict:
     pdf = GDG / "gdg-talk.pdf"
     if not pdf.exists():
         pytest.skip(f"{pdf.name} not built")
-    return classify(select_overlays(extract(pdf, None), "last"))
+    return deck_json(classify(select_overlays(extract(pdf, None), "last")))
 
 
 def test_gdg_talk_columns_stay_apart_and_cards_are_text():

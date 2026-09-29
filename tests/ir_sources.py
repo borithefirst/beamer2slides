@@ -22,6 +22,9 @@ from pathlib import Path
 
 import pytest
 
+from beamer2slides.json_types import JsonObject
+from beamer2slides.raw_types import RawDoc
+
 TESTS = Path(__file__).parent
 DECKS = TESTS / "decks" / "out"
 
@@ -43,11 +46,12 @@ class Made:
 
 # ---------------------------------------------------------------- producers
 
-def _convert_pdf(pdf: Path, out: Path) -> tuple[dict, dict, Path]:
+def _convert_pdf(pdf: Path, out: Path) -> tuple[JsonObject, RawDoc, Path]:
     """convert's local half (`__main__.cmd_convert`, `agent.deck_tools._prepare`,
     `sync.build_ours`): notes taken out, extract, the last overlay steps, classify, render."""
     from beamer2slides.classify import classify
     from beamer2slides.extract import extract, select_overlays
+    from beamer2slides.ir import deck_json
     from beamer2slides.notes import prepare
     from beamer2slides.render import render_backgrounds
 
@@ -57,8 +61,8 @@ def _convert_pdf(pdf: Path, out: Path) -> tuple[dict, dict, Path]:
     for page in raw["pages"]:
         page["notes"] = prepared.notes.get(page["index"])
     raw = select_overlays(raw, "last")
-    deck = classify(raw)
-    render_backgrounds(prepared.pdf, raw, deck, out)
+    deck = deck_json(classify(raw))
+    render_backgrounds(prepared.pdf, raw, deck, out, frozenset())
     return deck, raw, prepared.pdf
 
 
@@ -573,7 +577,7 @@ def resync(made: Made, home: Path) -> None:
             for n, f in enumerate(still[k:k + 40])]} for k in range(0, len(still), 40)]
         pages += [{"layout": "BLANK", "fill": {"picture": Path(f)}, "templates": False, "pictures": []}
                   for f, what in pictures.items() if what == "background"]
-        assert len(source_slides(build_pptx(page_w, page_h, [], pages, {"color": "#ffffff"}))) == len(pages)
+        assert len(source_slides(build_pptx(page_w, page_h, [], pages, {"color": "#ffffff"}, None))) == len(pages)
 
 
 # ---------------------------------------------------------------- pull and adopt (deck_ir's side)

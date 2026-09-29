@@ -35,6 +35,7 @@ import re
 import sys
 from collections import Counter
 from pathlib import Path
+from typing import Literal, TypedDict
 
 AUTHOR = frozenset("""
 begin end frame frametitle framesubtitle item itemize enumerate description textbf textit emph underline
@@ -60,8 +61,14 @@ STYLE_ARG = re.compile(r"(\\slidetext\b(?:\[[^\]\n]*\])?(?:\{[-\d.,\s]*\})?)\{[\
 # environments are structure both kinds of source have, and a macro that replaces one says no less
 NEUTRAL = frozenset({"begin", "end"})
 
+# what should be small (scored human / ours), and what should be large (ours / human)
+Small = Literal["lines", "numbers", "plumbing", "bloat"]
+Scored = Literal["lines", "numbers", "plumbing", "bloat", "author"]
+Component = Literal["lines", "numbers", "plumbing", "bloat", "author", "repeat"]
+SMALL: tuple[Small, ...] = ("lines", "numbers", "plumbing", "bloat")
+
 # medians over REFERENCE (sources people wrote), `ref` recomputes them
-HUMAN = {"lines": 8.4, "numbers": 0.088, "plumbing": 0.04, "bloat": 1.867, "author": 0.836}
+HUMAN: dict[Scored, float] = {"lines": 8.4, "numbers": 0.088, "plumbing": 0.04, "bloat": 1.867, "author": 0.836}
 REFERENCE = ("tests/decks/*.tex", "tests/decks/sync/talk.tex")
 
 CONSTRUCTS = [
@@ -138,23 +145,41 @@ def vocabulary(*sources: str) -> set[str]:
     return {n for n in names if not n.startswith("slides@") and not any(p.search("\\" + n) for p in plumbing)}
 
 
-def measure(tex: str, known: set[str] | None = None, shared: str = "") -> dict:
-    """`shared` is what the frames make the reader read besides themselves - the recovered beamer
-    theme, which holds the elements the layouts draw. It counts once, spread over the frames: saying
-    a thing once is the point, but a frame whose body is `\\frametitle{Expressions}` and nothing else
-    is not free. Every ratio here is per word, so without this an emptied frame scores near 1.0 while
-    a person who wants to move its box has to go and edit the layout (judges h06)."""
+class Measured(TypedDict):
+    """What `measure` reads off a source (a report's row; `agent.source_tools` hands some of it on)."""
+    frames: int
+    words: int
+    lines: float
+    numbers: float
+    plumbing: float
+    bloat: float
+    author: float
+    repeat: float
+    constructs: dict[str, int]
+    twins: int
+    top_commands: list[tuple[str, int]]
+    top_repeated: list[tuple[int, str]]
+
+
+def measure(tex: str, known: set[str], shared: str) -> Measured | None:
+    """None for a source with no frames. `known` is the tree's own vocabulary (`tree_vocabulary`;
+    empty for none). `shared` is what the frames make the reader read besides themselves - the
+    recovered beamer theme, which holds the elements the layouts draw ("" for none). It counts once,
+    spread over the frames: saying a thing once is the point, but a frame whose body is
+    `\\frametitle{Expressions}` and nothing else is not free. Every ratio here is per word, so without
+    this an emptied frame scores near 1.0 while a person who wants to move its box has to go and edit
+    the layout (judges h06)."""
     fs = frames(tex)
     if not fs:
-        return {}
+        return None
     pieces = fs + ([shared] if shared.strip() else [])
     words = sum(len(visible(f).split()) for f in pieces)
     text_chars = sum(len(visible(f)) for f in pieces)
     cmds = Counter(m for f in pieces for m in CS.findall(f) if m[:1].isalpha() and m not in NEUTRAL)
     n_cmd = sum(cmds.values())
-    author = sum(n for c, n in cmds.items() if c in AUTHOR or (known and c in known))
+    author = sum(n for c, n in cmds.items() if c in AUTHOR or c in known)
     lines = [ln for f in pieces for ln in f.strip("\n").split("\n")]
-    seen: Counter = Counter()
+    seen: Counter[str] = Counter()
     for f in pieces:
         for ln in f.split("\n"):
             if key := _key(ln):
@@ -185,22 +210,24 @@ def twins(fs: list[str]) -> int:
     return sum(sum(1 for n in Counter(TWIN.findall(f)).values() if n > 1) for f in fs)
 
 
-def components(m: dict, human: dict = HUMAN) -> dict:
-    small = {k: min(1.0, human[k] / m[k]) if m[k] > 0 else 1.0 for k in ("lines", "numbers", "plumbing", "bloat")}
-    return {**small, "author": min(1.0, m["author"] / human["author"]), "repeat": m["repeat"]}
+def components(m: Measured) -> dict[Component, float]:
+    """Each component against `HUMAN`, 1.0 where it reads like a hand-written source."""
+    out: dict[Component, float] = {k: min(1.0, HUMAN[k] / m[k]) if m[k] > 0 else 1.0 for k in SMALL}
+    out["author"] = min(1.0, m["author"] / HUMAN["author"])
+    out["repeat"] = m["repeat"]
+    return out
 
 
-def score(m: dict, human: dict = HUMAN) -> float:
-    c = components(m, human)
+def score(m: Measured) -> float:
+    c = components(m)
     return math.exp(sum(math.log(max(v, 1e-3)) for v in c.values()) / len(c))
 
 
-def reference(root: Path) -> dict:
-    ms = [measure(p.read_text(encoding="utf-8", errors="replace"))
-          for pat in REFERENCE for p in sorted(root.glob(pat))]
-    ms = [m for m in ms if m]
+def reference(root: Path) -> dict[Scored, float]:
+    ms = [m for pat in REFERENCE for p in sorted(root.glob(pat))
+          if (m := measure(p.read_text(encoding="utf-8", errors="replace"), set(), ""))]
 
-    def median(xs):
+    def median(xs: list[float]) -> float:
         xs = sorted(xs)
         return xs[len(xs) // 2]
     return {k: round(median([m[k] for m in ms]), 3) for k in HUMAN}
@@ -222,8 +249,9 @@ def tree_theme(tree: Path) -> str:
     return "\n".join(p.read_text(encoding="utf-8", errors="replace") for p in sorted(tree.glob("beamertheme*.sty")))
 
 
-def report(corpus: Path, tag: str, verbose: bool = False) -> None:
-    rows, lines_by = [], Counter()
+def report(corpus: Path, tag: str, verbose: bool) -> None:
+    rows: list[tuple[str, Measured]] = []
+    lines_by: Counter[str] = Counter()
     for d in sorted(p for p in corpus.iterdir() if (p / "runs" / tag / "tree").is_dir()):
         tree = d / "runs" / tag / "tree"
         m = measure(tree_source(tree), tree_vocabulary(tree), tree_theme(tree))
@@ -251,7 +279,7 @@ def report(corpus: Path, tag: str, verbose: bool = False) -> None:
         print(f"  {100 * n / total:5.1f}%  {n:7}  {k}")
 
 
-def main(argv=None) -> None:
+def main(argv: list[str]) -> None:
     import argparse
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -267,7 +295,7 @@ def main(argv=None) -> None:
         report(CORPUS, args.tag, args.verbose)
     elif args.cmd == "file":
         for p in args.paths:
-            m = measure(Path(p).read_text(encoding="utf-8", errors="replace"))
+            m = measure(Path(p).read_text(encoding="utf-8", errors="replace"), set(), "")
             print(f"{p}: {score(m):.3f}" if m else f"{p}: no frames")
     else:
         print(reference(Path.cwd()))

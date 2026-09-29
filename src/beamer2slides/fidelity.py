@@ -8,6 +8,7 @@ masks: offsets of the ink box, width ratio and number of text lines.
 
 import json
 from pathlib import Path
+from typing import Literal, TypedDict
 
 import numpy as np
 from PIL import Image
@@ -20,11 +21,17 @@ from .pdf import Document
 DIFF_THRESHOLD = 70  # max channel difference that counts as text rather than resampling noise
 
 
-def rgb_array(image: Image.Image, size: tuple[int, int] | None = None) -> SignedRGB:
+def rgb_array(image: Image.Image) -> SignedRGB:
+    """The picture's RGB as signed pixels (differences of two stay exact)."""
+    return np.asarray(image.convert("RGB")).astype(np.int16)
+
+
+def rgb_array_at(image: Image.Image, size: tuple[int, int]) -> SignedRGB:
+    """`rgb_array` of the picture resampled to `size` (width, height) when it is not that size."""
     image = image.convert("RGB")
-    if size and image.size != size:
+    if image.size != size:
         image = image.resize(size, Image.Resampling.BILINEAR)
-    return np.asarray(image).astype(np.int16)
+    return rgb_array(image)
 
 
 def text_mask(img: SignedRGB, background: SignedRGB) -> Mask:
@@ -68,7 +75,40 @@ def dilate(mask: Mask) -> Mask:
     return out
 
 
-def measure(pdf: Path, out: Path, refresh: bool = False) -> dict:
+class Missing(TypedDict):
+    """An element whose ink one side does not show."""
+    id: str
+    missing: Literal["reference", "slides"]
+
+
+class ElementFit(TypedDict):
+    """How an element's ink on Google's thumbnail sits against the PDF's (slide pt)."""
+    id: str
+    text: str
+    """The first 40 characters of its first paragraph, or `[kind]` for what is no text."""
+    dx_pt: float
+    dy_top_pt: float
+    dy_bottom_pt: float
+    width_ratio: float
+    lines_ref: int
+    lines_slides: int
+
+
+class SlideFit(TypedDict):
+    page: int
+    text_overlap: float
+    elements: list[Missing | ElementFit]
+
+
+class Report(TypedDict):
+    """fidelity.json."""
+    presentationId: str
+    slides: list[SlideFit]
+
+
+def measure(pdf: Path, out: Path, refresh: bool) -> Report:
+    """Each slide's Google thumbnail (saved again when `refresh`, or when the deck was emitted since)
+    against its PDF page: fidelity.json and fidelity/diff-NNN.png."""
     deck = json.loads((out / "deck.json").read_text(encoding="utf-8"))
     state = json.loads((out / "emit.json").read_text(encoding="utf-8"))
     original = Document(pdf)
@@ -76,7 +116,7 @@ def measure(pdf: Path, out: Path, refresh: bool = False) -> dict:
     fdir = out / "fidelity"
     fdir.mkdir(exist_ok=True)
 
-    report = {"presentationId": state["presentationId"], "slides": []}
+    report: Report = {"presentationId": state["presentationId"], "slides": []}
     for slide, emitted in zip(deck["slides"], state["slides"]):
         n = slide["page"]
         thumb_path = fdir / f"slides-{n + 1:03}.png"
@@ -89,14 +129,14 @@ def measure(pdf: Path, out: Path, refresh: bool = False) -> dict:
         # Background: the uploaded PNG (with its patches). The reference goes through the same
         # render-at-upload-size-then-rescale path, so content left in the background cancels out.
         bg_png = Image.open(out / "backgrounds" / f"bg-{n + 1:03}.png")
-        bg = rgb_array(bg_png, (w, h))
+        bg = rgb_array_at(bg_png, (w, h))
         zoom = bg_png.width / original[n].width
-        ref = rgb_array(Image.fromarray(original[n].render(zoom)), (w, h))
+        ref = rgb_array_at(Image.fromarray(original[n].render(zoom)), (w, h))
         m_ref, m_sl = text_mask(ref, bg), text_mask(thumb, bg)
 
         px_per_pdf_pt = w / slide["size"][0]
         px_per_slide_pt = w / 720.0
-        elements = []
+        elements: list[Missing | ElementFit] = []
         covered = np.zeros_like(m_ref)
         for el, oid in zip(slide["elements"], emitted["elements"]):
             is_text = el["kind"] == "text"
@@ -141,7 +181,7 @@ def measure(pdf: Path, out: Path, refresh: bool = False) -> dict:
     return report
 
 
-def print_report(report: dict) -> None:
+def print_report(report: Report) -> None:
     print(f"{'slide':>5} {'overlap':>8}  {'dx':>6} {'dy top':>7} {'dy bot':>7} {'width':>6} {'lines':>6}  text")
     for s in report["slides"]:
         print(f"{s['page'] + 1:>5} {s['text_overlap']:>8.1%}")

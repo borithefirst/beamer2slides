@@ -648,6 +648,7 @@ def convert_source_of(tex: Path, work: Path, engine: str | None, page_width: flo
     region (`sync.planned`), as the sync's own conversion will make it: the plan's `contained`.
     Returns (the conversion, "") or (None, the compile error)."""
     from .classify import classify
+    from .ir import deck_json
     from .extract import extract, select_overlays
     from .inverse import Workspace
     from .notes import prepare
@@ -665,8 +666,8 @@ def convert_source_of(tex: Path, work: Path, engine: str | None, page_width: flo
     for page in raw["pages"]:
         page["notes"] = prepared.notes.get(page["index"])
     raw = select_overlays(raw, "last")
-    deck: JsonObject = classify(raw)
-    render_backgrounds(prepared.pdf, raw, deck, out)
+    deck = deck_json(classify(raw))
+    render_backgrounds(prepared.pdf, raw, deck, out, frozenset())
     if folds:
         fold_slides(deck, folds)
     plan = planned(deck, prepared.pdf, out, page_width)

@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, TypeVar
 from .classify import classify
 from .debug import render_debug
 from .extract import extract, select_overlays
+from .ir import deck_json
 from .notes import prepare as prepare_notes
 from .paths import out_root
 from .raw_types import RawDoc
@@ -71,13 +72,14 @@ def cmd_classify(pdf: Path, out: Path, overlays: str, check: str) -> "tuple[Path
     if dropped:
         print(f"overlays: kept the last step of each frame, skipped {dropped} pages")
     (out / "raw.json").write_text(json.dumps(raw, indent=1, ensure_ascii=False), encoding="utf-8")
-    deck = classify(raw)
+    classified = classify(raw)
+    deck = deck_json(classified)
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
-    render_debug(pdf, deck, out / "debug")
-    s = deck["stats"]
-    print(f"{pdf.name}: {len(deck['slides'])} slides, {s['chars_native']}/{s['chars']} chars native "
+    render_debug(pdf, classified, out / "debug", 3.0)
+    s = classified["stats"]
+    print(f"{pdf.name}: {len(classified['slides'])} slides, {s['chars_native']}/{s['chars']} chars native "
           f"({s['native_share']:.0%}) -> {out}")
-    for slide in deck["slides"]:
+    for slide in classified["slides"]:
         left = ", ".join(f"{l['reason']} {len(l['spans'])}" for l in slide["left_in_background"])
         kinds = [e["kind"] for e in slide["elements"]]
         print(f"  slide {slide['page'] + 1:>2}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures,"
@@ -99,7 +101,7 @@ def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlay
     preflight = preflight_in_background(out, source, new_deck, force_rebuild)
     # (--check-labels error refuses here, before anything is written to Drive)
     pdf, raw, deck = cmd_classify(pdf, out, overlays, check)  # pdf: without note pages, if there were any
-    render_backgrounds(pdf, raw, deck, out)
+    render_backgrounds(pdf, raw, deck, out, frozenset())
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     checked = preflight()  # RebuildRefused comes out here, with nothing yet written to Drive
     title = title or raw["source"]["title"] or source.stem

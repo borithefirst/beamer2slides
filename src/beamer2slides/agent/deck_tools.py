@@ -108,6 +108,7 @@ def _classify_into(j: Job, source: Path, out: Path, overlays: str,
     """
     from ..classify import classify
     from ..extract import extract, select_overlays
+    from ..ir import deck_json
     from ..notes import prepare as prepare_notes
 
     prepared = prepare_notes(source, out)
@@ -119,22 +120,23 @@ def _classify_into(j: Job, source: Path, out: Path, overlays: str,
         page["notes"] = prepared.notes.get(page["index"])
     raw = select_overlays(raw, overlays)
     (out / "raw.json").write_text(json.dumps(raw, indent=1, ensure_ascii=False), encoding="utf-8")
-    deck = classify(raw)
+    classified = classify(raw)
+    deck = deck_json(classified)
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     if debug_images:
         from ..debug import render_debug
-        render_debug(pdf, deck, out / "debug")
+        render_debug(pdf, classified, out / "debug", 3.0)
         j.artifact(out / "debug", "folder", "one PNG per slide with the classified boxes drawn on it")
     j.artifact(out / "raw.json", "json", "spans, images and drawings as the PDF gives them")
     j.artifact(out / "deck.json", "json", "the intermediate representation the deck is built from")
     facts: JsonObject = {
         "pages": raw["source"]["pages"],
-        "slides": len(deck["slides"]),
+        "slides": len(classified["slides"]),
         "notes": {"mode": prepared.mode, "pages": len(prepared.notes)} if prepared.mode else None,
         "overlays": {"mode": overlays, "dropped": raw.get("overlays", {}).get("dropped", 0)},
-        "native_share": deck["stats"].get("native_share", 0),
-        "chars": deck["stats"]["chars"],
-        "chars_native": deck["stats"]["chars_native"],
+        "native_share": classified["stats"]["native_share"],
+        "chars": classified["stats"]["chars"],
+        "chars_native": classified["stats"]["chars_native"],
         "fonts": [f for f in sorted({s["font"] for page in raw["pages"] for s in page["spans"] if s.get("font")})],
     }
     return pdf, raw, deck, facts
@@ -173,10 +175,10 @@ def _label_survey(j: Job, deck: "Mapping[str, Json]") -> "JsonObject":
     from .. import identity, labels
     from ..json_types import as_objects
 
-    found: JsonObject = labels.survey([identity.slide_info(s) for s in as_objects(deck["slides"], "deck.slides")])
+    found = labels.survey([identity.slide_info(s) for s in as_objects(deck["slides"], "deck.slides")])
     for line in labels.problems(found):
         j.warn(line, where="frame labels")
-    return found
+    return labels.survey_json(found)
 
 
 # ---------------------------------------------------------------- the tools
@@ -425,7 +427,7 @@ def _prepare(j: Job, source: Path, out_dir: Path, overlays: str) -> "JsonObject"
     from ..snapshot import source_info
 
     pdf_path, raw, deck, facts = _classify_into(j, source, out_dir, overlays, debug_images=False)
-    render_backgrounds(pdf_path, raw, deck, out_dir)
+    render_backgrounds(pdf_path, raw, deck, out_dir, frozenset())
     (out_dir / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     j.artifact(out_dir / "backgrounds", "folder", "one background picture per slide")
     survey = _label_survey(j, deck)

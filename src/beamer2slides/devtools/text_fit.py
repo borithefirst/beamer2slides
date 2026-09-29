@@ -36,7 +36,7 @@ import numpy as np
 from PIL import Image
 
 from ..arrays import Ints, Mask, SignedRGB
-from ..fidelity import rgb_array, bands
+from ..fidelity import rgb_array, rgb_array_at, bands
 from ..json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_optional_str, as_str
 from ..pdf import Document
 
@@ -481,11 +481,11 @@ def measure(pdf: Path, out: Path, crops: bool) -> FitReport:
         thumb_path = out / "fidelity" / f"slides-{n + 1:03}.png"
         if not thumb_path.exists():
             raise SystemExit(f"{thumb_path} missing: run `python -m beamer2slides fidelity {pdf} --out {out}` first")
-        thumb = rgb_array(Image.open(thumb_path), None)
+        thumb = rgb_array(Image.open(thumb_path))
         h, w = thumb.shape[:2]
         # The PDF page rendered as the background was, then scaled to the thumbnail's size.
         bg_width = Image.open(out / "backgrounds" / f"bg-{n + 1:03}.png").width
-        ref = rgb_array(Image.fromarray(doc[n].render(bg_width / doc[n].width)), (w, h))
+        ref = rgb_array_at(Image.fromarray(doc[n].render(bg_width / doc[n].width)), (w, h))
         slides.append(measure_slide(slide, ref, thumb, w / slide.width, out / "text_fit" if crops else None))
     report = FitReport(pdf=str(pdf), slides=slides)
     (out / "text_fit.json").write_text(json.dumps(report.json(), indent=1, ensure_ascii=False), encoding="utf-8")

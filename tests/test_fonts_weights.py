@@ -74,6 +74,7 @@ def test_an_optically_heavier_footline_pulls_back_with_no_residual():
     from .test_inverse import TEXT_KINDS, built_pdf
     from beamer2slides.classify import classify
     from beamer2slides.extract import extract, select_overlays
+    from beamer2slides.ir import deck_json
     deck = copy.deepcopy(classify(select_overlays(extract(built_pdf("01_basic"), None), "last")))
     tiny = 0
     for s in deck["slides"]:
@@ -85,12 +86,13 @@ def test_an_optically_heavier_footline_pulls_back_with_no_residual():
                             r["font"], r["size"] = "SFSI0600" if r["italic"] else "SFSS0600", 5.98
                             tiny += 1
     assert tiny
-    pres = simulate(deck)
+    data = deck_json(deck)
+    pres = simulate(data)
     styles = [te["textRun"]["style"] for s in pres["slides"] for pe in s["pageElements"]
               for te in pe.get("shape", {}).get("text", {}).get("textElements", []) if "textRun" in te]
     assert any((st.get("weightedFontFamily") or {}).get("weight") == emit.OPTICAL_WEIGHT and not st.get("bold")
                for st in styles)
-    comp = compare(without_keys(deck), deck_ir(pres, deck["slides"][0]["size"]), TOL, {})
+    comp = compare(without_keys(data), deck_ir(pres, deck["slides"][0]["size"]), TOL, {})
     assert [r for r in comp.open() if r.kind in TEXT_KINDS] == []
 
 

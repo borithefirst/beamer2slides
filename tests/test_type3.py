@@ -77,8 +77,8 @@ def test_body_and_bold_are_two_fonts_and_split_the_spans():
 
     chars, decoded = extract.page_chars(Page())
     assert decoded == {0, 1}
-    spans = extract.spans(Page(), Shown(), chars=chars)
-    assert [(s["text"], s["font"]) for s in spans] == [
+    spans = extract.spans(Page(), Shown(), False, chars, {})
+    assert [(s.text, s.font) for s in spans] == [
         ("Wiśniewska", "ECRM1095"), ("proved", "ECRM1095"), ("the", "ECRM1095"), ("ﬁrst", "ECRM1095"),
         ("claim", "ECBX1095"), ("–", "ECBX1095"), ("twice", "ECBX1095")]
 

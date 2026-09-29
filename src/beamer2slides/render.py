@@ -13,13 +13,14 @@ within it.
 """
 
 import io
-from collections.abc import Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from .arrays import Floats, Ints, Mask, Pixels, RGB, RGBA
+from .json_types import Json, JsonArray, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_str
 from .pdf import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Char, Document, Page, PdfError
 from .raw_types import RawDoc, RawImage, RawPage, RawSpan
 
@@ -30,23 +31,62 @@ FIGURE_MAX_PX = 3000
 GLYPH_MARGIN = 0.15        # em around a removed glyph's box that its ink may reach (accents, italics)
 
 Box = tuple[float, float, float, float]
+GlyphTest = Callable[[Char], bool]
 
 
-def _intersects(a, b) -> bool:
+def _intersects(a: Sequence[float], b: Sequence[float]) -> bool:
     return a[0] < b[2] and b[0] < a[2] and a[1] < b[3] and b[1] < a[3]
 
 
-def _inside(inner, outer) -> bool:
+def _inside(inner: Sequence[float], outer: Sequence[float]) -> bool:
     return inner[0] >= outer[0] and inner[1] >= outer[1] and inner[2] <= outer[2] and inner[3] <= outer[3]
 
 
-def _box(b: list[float]) -> Box:
+def _box(b: Sequence[float]) -> Box:
     """A JSON box, [x0, y0, x1, y1], as a Box."""
     return b[0], b[1], b[2], b[3]
 
 
-def _grow(r, d: float) -> Box:
+def _grow(r: Sequence[float], d: float) -> Box:
     return r[0] - d, r[1] - d, r[2] + d, r[3] + d
+
+
+# ------------------------------------------------------------------ deck.json as render reads it
+# The deck render is handed is JSON (deck.json, or classify's deck as `ir.deck_json` writes it),
+# changed in place into rendered.json; its numbers are read as they are (an int stays one).
+
+def _number(value: Json, where: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise JsonShapeError(f"{where}: a number was expected, found {type(value).__name__}")
+    return value
+
+
+def _numbers(value: Json, where: str) -> list[float]:
+    return [_number(v, where) for v in as_array(value, where)]
+
+
+def _json_box(value: Json, where: str) -> Box:
+    x = _numbers(value, where)
+    if len(x) != 4:
+        raise JsonShapeError(f"{where}: a box of 4 numbers was expected, found {len(x)}")
+    return x[0], x[1], x[2], x[3]
+
+
+def _array_at(obj: JsonObject, key: str) -> JsonArray:
+    """`obj[key]`, an array, or none where it is missing."""
+    value = obj.get(key)
+    return [] if value is None else as_array(value, key)
+
+
+def _ids(obj: JsonObject, key: str) -> list[str]:
+    """`obj[key]`, a list of ids (span ids), or none where it is missing."""
+    return [as_str(v, key) for v in _array_at(obj, key)]
+
+
+def _json_numbers(values: Sequence[float]) -> list[Json]:
+    out: list[Json] = []
+    out.extend(values)
+    return out
 
 
 def save_png(img: Pixels, path: Path) -> None:
@@ -77,7 +117,7 @@ class Eraser:
         self.partial.pop(key, None)
         self.chars.pop(key, None)
 
-    def remove_chars(self, hit) -> None:
+    def remove_chars(self, hit: GlyphTest) -> None:
         """Glyphs for which `hit(char)` is true. A text object whose glyphs all go is switched off."""
         for key, chars in list(self.chars.items()):
             gone = [ch for ch in chars if hit(ch)]
@@ -92,7 +132,7 @@ class Eraser:
             if po.type == OBJ_PATH and key not in self.removed and _inside(self.bounds[key], area):
                 self._remove(key)
 
-    def remove_images_in(self, area: Box, keep=()) -> None:
+    def remove_images_in(self, area: Box, keep: Collection[int]) -> None:
         """Images and shadings: switched off inside the area, their pixels there removed when they
         reach out of it. What is in `keep` (ids) stays whole."""
         for key, po in self.objects.items():
@@ -109,8 +149,9 @@ class Eraser:
         return [d["rect"] for d in self.page.drawings()
                 if d["type"] in ("f", "fs") and d["object"] not in self.removed]
 
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False, hide: Sequence[int] = ()) -> Pixels:
-        """The page without what was removed (and without the objects in `hide`, ids)."""
+    def render(self, zoom: float, clip: Box | None, transparent: bool, hide: Sequence[int]) -> Pixels:
+        """The page without what was removed (and without the objects in `hide`, ids), the whole
+        page where `clip` is None."""
         page = self.page
         off = sorted(self.removed) + list(hide)
         page.set_active(off, False)
@@ -125,7 +166,7 @@ class Eraser:
                 h, w = img.shape[:2]
                 mask = np.zeros((h, w), bool)
 
-                def paint(r, value):
+                def paint(r: Sequence[float], value: bool) -> None:
                     a0, b0 = max(0, int(np.floor(r[0] * zoom - ox))), max(0, int(np.floor(r[1] * zoom - oy)))
                     a1, b1 = min(w, int(np.ceil(r[2] * zoom - ox))), min(h, int(np.ceil(r[3] * zoom - oy)))
                     if a1 > a0 and b1 > b0:
@@ -150,11 +191,11 @@ def _band(bbox: list[float], baseline: float, size: float) -> Box:
     return x0 + 0.2, baseline - 0.45 * size, x1 - 0.2, baseline - 0.2 * size
 
 
-def _same_dir(a, b) -> bool:
+def _same_dir(a: Sequence[float], b: Sequence[float]) -> bool:
     return abs(a[0] - b[0]) <= 0.05 and abs(a[1] - b[1]) <= 0.05
 
 
-def owned_by(spans: list[RawSpan]):
+def owned_by(spans: list[RawSpan]) -> GlyphTest:
     """A test of whether a drawn glyph is one of these raw spans' own: same font and size, on the
     span's baseline, between its start and its end along the baseline. (Glyph boxes say nothing
     of the kind: a hanging radical's box lies in the line above.)"""
@@ -162,7 +203,7 @@ def owned_by(spans: list[RawSpan]):
     for s in spans:
         by_font.setdefault((s["font"], round(s["size"], 2)), []).append(s)
 
-    def test(ch) -> bool:
+    def test(ch: Char) -> bool:
         for s in by_font.get((ch.font, round(ch.size, 2)), ()):
             if not _same_dir(ch.dir, s["dir"]):
                 continue
@@ -179,17 +220,17 @@ def owned_by(spans: list[RawSpan]):
     return test
 
 
-def others_glyphs(eraser: "Eraser", figures: list[dict], spans: dict[str, RawSpan]) -> dict[str, list]:
+def others_glyphs(eraser: "Eraser", figures: list[JsonObject], spans: dict[str, RawSpan]) -> dict[str, list[int]]:
     """Per picture, the text objects another picture owns, to leave out of its crop when one of
     the two moves with its words (a hole): a display formula's crop reaching into the line above
     showed the hanging tail of that line's inline integral at the PDF place, a piece floating
     under the hole's own integral once Slides set the words elsewhere (r1_math_v2 s5)."""
-    owners = {fig["id"]: owned_by([spans[sid] for sid in fig.get("spans", []) if sid in spans])
+    owners = {as_str(fig["id"], "id"): owned_by([spans[sid] for sid in _ids(fig, "spans") if sid in spans])
               for fig in figures if fig.get("spans") and not fig.get("overlay")}
     if len(owners) < 2 or not any(fig.get("anchor") for fig in figures):
         return {}
-    anchored = {fig["id"] for fig in figures if fig.get("anchor")}
-    out: dict[str, list] = {}
+    anchored = {as_str(fig["id"], "id") for fig in figures if fig.get("anchor")}
+    out: dict[str, list[int]] = {}
     for key, chars in eraser.chars.items():
         if not chars:
             continue
@@ -200,9 +241,10 @@ def others_glyphs(eraser: "Eraser", figures: list[dict], spans: dict[str, RawSpa
         if not all(map(owners[owner], chars)):
             continue
         for fig in figures:
-            if fig["id"] != owner and (fig["id"] in anchored or owner in anchored) and \
-                    any(_intersects(ch.box, _grow(fig["bbox"], INK_REACH * ch.size)) for ch in chars):
-                out.setdefault(fig["id"], []).append(key)
+            fid = as_str(fig["id"], "id")
+            if fid != owner and (fid in anchored or owner in anchored) and \
+                    any(_intersects(ch.box, _grow(_json_box(fig["bbox"], "bbox"), INK_REACH * ch.size)) for ch in chars):
+                out.setdefault(fid, []).append(key)
     return out
 
 
@@ -269,10 +311,10 @@ def _pillow_rgb(data: bytes) -> RGB | None:
         return None
 
 
-def sole_image(page: Page, bbox: list[float]) -> int | None:
+def sole_image(page: Page, bbox: Sequence[float]) -> int | None:
     """The id of the image object a figure region consists of: it covers the region and nothing
     else is drawn there (classify marks such regions, but the page decides)."""
-    found = None
+    found: int | None = None
     objects = page.objects()
     for im in page.images():
         if not _intersects(im["bbox"], bbox):
@@ -284,41 +326,43 @@ def sole_image(page: Page, bbox: list[float]) -> int | None:
     return found
 
 
-def _looks_like(data: bytes, page: Page, obj: int, bbox: list[float]) -> bool:
+def _looks_like(data: bytes, page: Page, obj: int, bbox: Sequence[float]) -> bool:
     """Does the file, laid on the page without the image, show what the page shows there? The
     last check on PDFium's decode: a palette, colour space or mask read differently would come
     out as another picture."""
-    want = page.render(IMAGE_CHECK_PX_PER_PT, tuple(bbox)).astype(int)
+    want = page.render(IMAGE_CHECK_PX_PER_PT, _box(bbox)).astype(int)
     h, w = want.shape[:2]
     if w < 2 or h < 2:
         return True
     page.set_active([obj], False)
     try:
-        under = page.render(IMAGE_CHECK_PX_PER_PT, tuple(bbox)).astype(float)
+        under = page.render(IMAGE_CHECK_PX_PER_PT, _box(bbox)).astype(float)
     finally:
         page.set_active([obj], True)
-    img = Image.open(io.BytesIO(data)).convert("RGBA").resize((w, h), Image.BILINEAR)
+    img = Image.open(io.BytesIO(data)).convert("RGBA").resize((w, h), Image.Resampling.BILINEAR)
     px = np.array(img).astype(float)
     alpha = px[..., 3:] / 255
     got = px[..., :3] * alpha + under * (1 - alpha)
     return bool(np.abs(got - want).mean() <= IMAGE_CHECK_DIFF)
 
 
-def embedded_picture(eraser: Eraser, fig: dict, path: Path) -> Path | None:
+def embedded_picture(eraser: Eraser, fig: JsonObject, path: Path) -> Path | None:
     """The figure's picture written from the image object's own data (`image_file`), or None
     where the page has to be rendered after all. Sets `px` and `picture` on the element."""
-    obj = sole_image(eraser.page, fig["bbox"])
+    bbox = _numbers(fig["bbox"], "bbox")
+    obj = sole_image(eraser.page, bbox)
     if obj is None:
         return None
     chosen = image_file(eraser.page, obj)
     if chosen is None:
         return None
     data, ext, px, route = chosen
-    if not _looks_like(data, eraser.page, obj, fig["bbox"]):
+    if not _looks_like(data, eraser.page, obj, bbox):
         return None
     path = path.with_suffix("." + ext)
     save_bytes(data, path)
-    fig["px"], fig["picture"] = [px[0], px[1]], route
+    fig["px"] = [px[0], px[1]]
+    fig["picture"] = route
     return path
 
 
@@ -327,8 +371,10 @@ def save_bytes(data: bytes, path: Path) -> None:
     path.write_bytes(data)
 
 
-def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[RawImage], path: Path,
-                transparent: bool = False, hide: Sequence[int] = ()) -> list[int]:
+def crop_figure(eraser: Eraser, bbox: Sequence[float], raw_images: list[RawImage], path: Path,
+                transparent: bool, hide: Sequence[int]) -> tuple[int, int]:
+    """The picture of a figure region on the page as erased so far, at a resolution for its
+    size; its (width, height) in pixels."""
     x0, y0, x1, y1 = bbox
     width, height = x1 - x0, y1 - y0
     zoom = FIGURE_PX_PER_PT if max(width, height) > 60 else SMALL_FIGURE_PX_PER_PT
@@ -338,18 +384,18 @@ def crop_figure(eraser: Eraser, bbox: list[float], raw_images: list[RawImage], p
         if ix1 > ix0 and _inside(im["bbox"], bbox) and (ix1 - ix0) * (iy1 - iy0) > 0.8 * width * height:
             zoom = max(zoom, im["px"][0] / (ix1 - ix0))
     zoom = min(zoom, FIGURE_MAX_PX / max(width, height))
-    img = eraser.render(zoom, tuple(bbox), hide=hide)
+    img = eraser.render(zoom, _box(bbox), False, hide)
     if transparent:
         img = clear_ground(eraser, bbox, zoom, img, hide)
     save_png(img, path)
-    return [img.shape[1], img.shape[0]]
+    return img.shape[1], img.shape[0]
 
 
 GROUND_FLAT = 6        # levels: the page under a picture counts as one colour
 GROUND_MATCH = 16      # levels: the transparent crop laid on that colour shows the opaque crop
 
 
-def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: RGB, hide: Sequence[int] = ()) -> Pixels:
+def clear_ground(eraser: Eraser, bbox: Sequence[float], zoom: float, opaque: RGB, hide: Sequence[int]) -> Pixels:
     """A picture anchored to text (inline formula, icon, number ball) on a transparent ground, so it
     shows the slide under it when the background colour changes or it is moved onto a shape.
     What stays in the background (paths reaching out of the box as render_backgrounds leaves them,
@@ -359,7 +405,7 @@ def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: RGB, hi
     ground = [key for key, po in eraser.objects.items() if key not in eraser.removed and (
         (po.type == OBJ_PATH and not _inside(bounds[key], _grow(bbox, 5))) or
         (po.type in (OBJ_IMAGE, OBJ_SHADING) and not _inside(bounds[key], _grow(bbox, 0.5))))]
-    rgba = eraser.render(zoom, tuple(bbox), transparent=True, hide=ground + list(hide))
+    rgba = eraser.render(zoom, _box(bbox), True, ground + list(hide))
     if rgba.shape[:2] != opaque.shape[:2]:
         return opaque
     clear = rgba[..., 3] == 0
@@ -377,8 +423,8 @@ def clear_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: RGB, hi
     return rgba
 
 
-def on_picture_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: RGB, rgba: RGBA,
-                      ground: list, hide: Sequence[int] = ()) -> Pixels:
+def on_picture_ground(eraser: Eraser, bbox: Sequence[float], zoom: float, opaque: RGB, rgba: RGBA,
+                      ground: list[int], hide: Sequence[int]) -> Pixels:
     """An anchored picture on a photo or a shading reaching out of its box (a `\\textbar\\quad
     \\faIcon` hole on a full-bleed title photo, r1_design_v2 s1): the ground is no one colour,
     but it stays in the background under the picture (render_backgrounds keeps an image that
@@ -390,7 +436,7 @@ def on_picture_ground(eraser: Eraser, bbox: list[float], zoom: float, opaque: RG
                for key in ground):
         return opaque
     drawn = [key for key in eraser.objects if key not in eraser.removed and key not in set(ground)]
-    under = eraser.render(zoom, tuple(bbox), hide=drawn + list(hide))
+    under = eraser.render(zoom, _box(bbox), False, drawn + list(hide))
     if under.shape[:2] != opaque.shape[:2]:
         return opaque
     alpha = rgba[..., 3:].astype(float) / 255
@@ -428,30 +474,35 @@ def unblend_rim(rgba: RGBA, clear: Mask, ground: Floats, width: int) -> RGBA:
     return out
 
 
-def crop_overlay(eraser: Eraser, fig: dict, labels: list[RawSpan], path: Path) -> list[int]:
+def crop_overlay(eraser: Eraser, fig: JsonObject, labels: list[RawSpan], path: Path) -> tuple[int, int]:
     """A graphic drawn over text (classify.overlay): only its own drawings and labels, on a
     transparent ground, so neither the page nor text left in the background under it comes
-    along. They leave the background right away: no other crop shows them either."""
+    along. They leave the background right away: no other crop shows them either. Its (width,
+    height) in pixels."""
     page = eraser.page
     objects = [d["object"] for d in page.drawings()]  # in the order extract numbered them
-    paths = {objects[int(i.rsplit("d", 1)[1])] for i in fig["drawings"]}
+    paths = {objects[int(i.rsplit("d", 1)[1])] for i in _ids(fig, "drawings")}
     bands = [_span_band(s) for s in labels]
-    hit = lambda ch: any(_intersects(ch.box, b) for b in bands)
+
+    def hit(ch: Char) -> bool:
+        return any(_intersects(ch.box, b) for b in bands)
+
     texts = {key for key, chars in eraser.chars.items() if any(map(hit, chars))}
     off = [key for key, po in eraser.objects.items() if key not in paths | texts and po.type != OBJ_FORM]
-    x0, y0, x1, y1 = fig["bbox"]
+    box = _json_box(fig["bbox"], "bbox")
+    x0, y0, x1, y1 = box
     zoom = min(FIGURE_PX_PER_PT if max(x1 - x0, y1 - y0) > 60 else SMALL_FIGURE_PX_PER_PT,
                FIGURE_MAX_PX / max(x1 - x0, y1 - y0))
     page.set_active(off, False)
     try:
-        img = page.render(zoom, tuple(fig["bbox"]), transparent=True)
+        img = page.render(zoom, box, transparent=True)
     finally:
         page.set_active(off, True)
     for key in paths:
         eraser._remove(key)
     eraser.remove_chars(hit)
     save_png(img, path)
-    return [img.shape[1], img.shape[0]]
+    return img.shape[1], img.shape[0]
 
 
 INK_ZOOM = 4.0      # px per pt at which a formula's ink is measured
@@ -469,8 +520,11 @@ def grow_to_ink(eraser: Eraser, bbox: list[float], members: list[RawSpan]) -> li
     if not members:
         return bbox
     rects = [s["bbox"] for s in members]
-    mine = lambda ch: any(r[0] - 0.1 <= (ch.box[0] + ch.box[2]) / 2 <= r[2] + 0.1 and
-                          r[1] - 0.1 <= (ch.box[1] + ch.box[3]) / 2 <= r[3] + 0.1 for r in rects)
+
+    def mine(ch: Char) -> bool:
+        return any(r[0] - 0.1 <= (ch.box[0] + ch.box[2]) / 2 <= r[2] + 0.1 and
+                   r[1] - 0.1 <= (ch.box[1] + ch.box[3]) / 2 <= r[3] + 0.1 for r in rects)
+
     own = [key for key, chars in eraser.chars.items() if chars and all(map(mine, chars))]
     if not own:
         return bbox
@@ -480,8 +534,8 @@ def grow_to_ink(eraser: Eraser, bbox: list[float], members: list[RawSpan]) -> li
             min(page.width, bbox[2] + reach), min(page.height, bbox[3] + reach))
     if area[2] <= area[0] or area[3] <= area[1]:
         return bbox
-    drawn = eraser.render(INK_ZOOM, area).astype(np.int16)
-    bare = eraser.render(INK_ZOOM, area, hide=own).astype(np.int16)
+    drawn = eraser.render(INK_ZOOM, area, False, ()).astype(np.int16)
+    bare = eraser.render(INK_ZOOM, area, False, own).astype(np.int16)
     if drawn.shape != bare.shape:
         return bbox
     ink = np.abs(drawn - bare).max(axis=2) > 24
@@ -499,7 +553,7 @@ def crop_region(pdf: Path, page: int, bbox: list[float], path: Path, zoom: float
     """A picture of a page region (emit's stand-in for an element the Slides API refused)."""
     doc = Document(pdf)
     try:
-        save_png(doc[page].render(zoom, tuple(bbox)), path)
+        save_png(doc[page].render(zoom, _box(bbox)), path)
     finally:
         doc.close()
 
@@ -527,63 +581,81 @@ def _fill_fraction(page: Page, rect: Box, fill: str, avoid: list[Box]) -> float:
     return hits / total if total else 0.0
 
 
-def _probe(el: dict) -> Box:
+def _probe(el: JsonObject) -> Box:
     """The inside of a shape, clear of rounded corners and anti-aliased edges (thin bars keep
     their middle)."""
-    x0, y0, x1, y1 = el["bbox"]
-    dx, dy = min(el["radius"] + 1.5, (x1 - x0) / 4), min(1.5, (y1 - y0) / 4)
+    x0, y0, x1, y1 = _json_box(el["bbox"], "bbox")
+    dx, dy = min(_number(el["radius"], "radius") + 1.5, (x1 - x0) / 4), min(1.5, (y1 - y0) / 4)
     return x0 + dx, y0 + dy, x1 - dx, y1 - dy
 
 
-def verify_and_remove_shapes(original: Page, eraser: Eraser, slide: dict, raw_page: RawPage) -> None:
+def _elements(slide: JsonObject) -> list[JsonObject]:
+    return as_objects(slide["elements"], "slide.elements")
+
+
+def _title_top(el: JsonObject) -> float:
+    """Where a block's title bar starts (`title_bar`: its box)."""
+    return _numbers(el["title_bar"], "title_bar")[1]
+
+
+def verify_and_remove_shapes(original: Page, eraser: Eraser, slide: JsonObject, raw_page: RawPage) -> None:
     """Keep only shapes whose panel visibly shows its fill colour (beamer draws shadows as
     black rectangles under a soft mask), then remove those panels from the background."""
     keep_visible_shapes(original, slide, raw_page)
-    remaining = [e for e in slide["elements"] if e["kind"] == "shape"]
+    remaining = [e for e in _elements(slide) if e["kind"] == "shape"]
     for margin in (1.5, 5.0):  # a stroked outline reaches past the panel; widen if a panel survived
         if not remaining:
             break
         for el in remaining:
-            eraser.remove_paths_inside(_grow(el["bbox"], margin))
+            eraser.remove_paths_inside(_grow(_json_box(el["bbox"], "bbox"), margin))
             if el.get("shadow"):
                 # The shadow's black rectangles (drawn under a soft mask) would render solid
                 # once the panels above them are gone.
-                x0, y0, x1, y1 = el["bbox"]
-                y0 = el["title_bar"][1] if el.get("title_bar") else y0
-                size = el["shadow"]["size"]
+                x0, y0, x1, y1 = _json_box(el["bbox"], "bbox")
+                y0 = _title_top(el) if el.get("title_bar") else y0
+                size = _number(as_object(el["shadow"], "shadow")["size"], "shadow.size")
                 eraser.remove_paths_inside((x0 - 1.5, y0 - 1.5, x1 + size + 1.5, y1 + size + 1.5))
         # Still drawn: the panel's path is still on the page. (Its colour showing is no proof: a
         # white block on a white page looks the same with or without its panel.)
         drawn = eraser.filled_paths()
-        remaining = [el for el in remaining if any(all(abs(r[k] - el["bbox"][k]) < 0.5 for k in range(4)) for r in drawn)]
+        remaining = [el for el in remaining
+                     if any(all(abs(r[k] - _json_box(el["bbox"], "bbox")[k]) < 0.5 for k in range(4)) for r in drawn)]
     if remaining:  # could not be removed: leave those panels in the background only
-        slide["elements"] = [e for e in slide["elements"] if e not in remaining]
+        kept: list[Json] = [e for e in _elements(slide) if e not in remaining]
+        slide["elements"] = kept
 
 
-def keep_visible_shapes(original: Page, slide: dict, raw_page: RawPage) -> None:
+def keep_visible_shapes(original: Page, slide: JsonObject, raw_page: RawPage) -> None:
     """Drop shape candidates whose fill doesn't show on the page. (A shape the page marks as one -
     adopt's slides.sty, `marked.py` - is one whatever covers it.)"""
+    elements = _elements(slide)
     avoid: list[Box] = [_box(s["bbox"]) for s in raw_page["spans"]] + [_box(i["bbox"]) for i in raw_page["images"]] + \
-        [_box(e["bbox"]) for e in slide["elements"] if e["kind"] == "image"]
-    keep = []
-    for i, el in enumerate(slide["elements"]):
+        [_json_box(e["bbox"], "bbox") for e in elements if e["kind"] == "image"]
+    keep: list[Json] = []
+    for i, el in enumerate(elements):
         if el["kind"] != "shape" or el.get("mark"):
             keep.append(el)
             continue
         probe = _probe(el)
         # Rules drawn on top of this one (a progress bar on its track) hide its colour there.
-        above = [e["bbox"] for e in slide["elements"][i + 1:] if e["kind"] == "shape" and e.get("role") == "rule"]
+        above = [_json_box(e["bbox"], "bbox") for e in elements[i + 1:] if e["kind"] == "shape" and e.get("role") == "rule"]
         # (a translucent highlight shows its colour mixed with the page: not a shadow's black box)
         if probe[2] <= probe[0] or probe[3] <= probe[1] or \
-                (not el.get("opacity") and _fill_fraction(original, probe, el["fill"], avoid + above) < 0.9):
+                (not el.get("opacity") and _fill_fraction(original, probe, as_str(el["fill"], "fill"), avoid + above) < 0.9):
             continue
         keep.append(el)
     slide["elements"] = keep
 
 
-def render_backgrounds(pdf: Path, raw: RawDoc, deck: dict, out: Path,
-                       kept_shapes: frozenset[str] = frozenset()) -> list[Path]:
-    """`kept_shapes`: marks `marked.pictured_shapes` leaves shapes (sync over an old adopt base)."""
+def _paragraphs(el: JsonObject) -> list[JsonObject]:
+    return [as_object(p, "paragraph") for p in _array_at(el, "paragraphs")]
+
+
+def render_backgrounds(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path,
+                       kept_shapes: frozenset[str]) -> list[Path]:
+    """Each slide's background picture and its figures' crops, written under `out`; `deck`
+    (deck.json) is changed in place into rendered.json. `kept_shapes`: marks
+    `marked.pictured_shapes` leaves shapes (sync over an old adopt base), else none."""
     from .marked import pictured_shapes
 
     doc = Document(pdf)
@@ -592,45 +664,56 @@ def render_backgrounds(pdf: Path, raw: RawDoc, deck: dict, out: Path,
     spans = {s["id"]: s for page in raw["pages"] for s in page["spans"]}
     images = {i["id"]: i for page in raw["pages"] for i in page["images"]}
     (out / "background.pdf").unlink(missing_ok=True)  # written by earlier versions
-    paths = []
-    for slide in deck["slides"]:
-        eraser = Eraser(doc[slide["page"]])
-        pictured_shapes(slide, raw_pages[slide["page"]], kept_shapes)
-        texts = [e for e in slide["elements"] if e["kind"] == "text"]
-        figures = [e for e in slide["elements"] if e["kind"] == "image"]
+    paths: list[Path] = []
+    for slide in as_objects(deck["slides"], "deck.slides"):
+        index = as_int(slide["page"], "slide.page")
+        eraser = Eraser(doc[index])
+        pictured_shapes(slide, raw_pages[index], kept_shapes)
+        texts = [e for e in _elements(slide) if e["kind"] == "text"]
+        figures = [e for e in _elements(slide) if e["kind"] == "image"]
 
         # A glyph goes with a native line only when it runs the line's way: a stamp turned 25°
         # across the bullets ("DRAFT", tikz overlay) has glyph boxes far larger than its ink,
         # which met the words' bands and lost letters under them.
-        native = [sid for el in texts for sid in el["spans"]] + slide.get("on_layout", [])
+        native = [sid for el in texts for sid in _ids(el, "spans")] + _ids(slide, "on_layout")
         bands = [(_span_band(s), tuple(s["dir"])) for s in (spans[sid] for sid in native)]
         if bands:
             # A glyph a picture owns stays for its crop, whatever line's band it reaches into: a
             # radical sign hangs from its origin an em above its formula's baseline, into the
             # words of the line above, and went with them (neither text nor picture showed it).
             mine = set(native)
-            pictured = owned_by([spans[sid] for el in figures for sid in el.get("spans", [])
+            pictured = owned_by([spans[sid] for el in figures for sid in _ids(el, "spans")
                                  if sid in spans and sid not in mine])
             ours = owned_by([spans[sid] for sid in native])
-            eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) and _same_dir(ch.dir, d) for b, d in bands)
-                                and not (pictured(ch) and not ours(ch)))
-        for x0, y0, x1, y1 in (st for el in texts for st in el.get("strokes", [])):
+
+            def in_line(ch: Char) -> bool:
+                return any(_intersects(ch.box, b) and _same_dir(ch.dir, d) for b, d in bands) \
+                    and not (pictured(ch) and not ours(ch))
+
+            eraser.remove_chars(in_line)
+        for x0, y0, x1, y1 in (_json_box(st, "strokes") for el in texts for st in _array_at(el, "strokes")):
             eraser.remove_paths_inside((x0 - 1.5, y0 - 1.5, x1 + 1.5, y1 + 1.5))  # bars of fractions converted to text
 
         # A native list's image bullets are the list's, whatever picture box reaches them: a pie's
         # pin label ending beside a ball-bullet column showed slivers of the balls at its edge,
         # beside the Slides bullets.
-        bullet_boxes = [_grow(images[p["bullet"]["image"]]["bbox"], 0.5) for el in texts for p in el.get("paragraphs", [])
-                        if p["bullet"] and p["bullet"].get("kind") == "image" and p["bullet"].get("image") in images]
+        bullet_boxes: list[Box] = []
+        for el in texts:
+            for p in _paragraphs(el):
+                bullet = p["bullet"]
+                if isinstance(bullet, dict) and bullet and bullet.get("kind") == "image" and bullet.get("image") in images:
+                    bullet_boxes.append(_grow(images[as_str(bullet["image"], "bullet.image")]["bbox"], 0.5))
         bullet_objects = [key for key, po in eraser.objects.items() if po.type in (OBJ_IMAGE, OBJ_SHADING)
                           and any(_inside(eraser.bounds[key], b) for b in bullet_boxes)]
 
         others = others_glyphs(eraser, figures, spans)
         # Graphics drawn over text first: the other crops must not show them.
         for fig in sorted(figures, key=lambda f: not f.get("overlay")):
-            path = out / "figures" / f"{fig['id']}.png"
+            fid = as_str(fig["id"], "id")
+            path = out / "figures" / f"{fid}.png"
             if fig.get("overlay"):
-                fig["px"] = crop_overlay(eraser, fig, [spans[sid] for sid in fig["spans"]], path)
+                w, h = crop_overlay(eraser, fig, [spans[sid] for sid in _ids(fig, "spans")], path)
+                fig["px"] = [w, h]
             else:
                 # A region that is one `\includegraphics` keeps the embedded file itself.
                 own = None if fig.get("anchor") or not fig.get("image") else embedded_picture(eraser, fig, path)
@@ -639,24 +722,32 @@ def render_backgrounds(pdf: Path, raw: RawDoc, deck: dict, out: Path,
                     # (an icon glyph too: FontAwesome's advance box under xelatex is half its
                     # warning triangle, and the crop of the box cut the '!' off)
                     if fig.get("role") == "math" or (fig.get("role") == "icon" and fig.get("spans")):
-                        fig["bbox"] = grow_to_ink(eraser, fig["bbox"], [spans[sid] for sid in fig["spans"] if sid in spans])
-                    fig["px"] = crop_figure(eraser, fig["bbox"], raw_pages[slide["page"]]["images"], path,
-                                            transparent=bool(fig.get("anchor")),
-                                            hide=bullet_objects + others.get(fig["id"], []))
+                        grown = grow_to_ink(eraser, _numbers(fig["bbox"], "bbox"),
+                                            [spans[sid] for sid in _ids(fig, "spans") if sid in spans])
+                        fig["bbox"] = _json_numbers(grown)
+                    w, h = crop_figure(eraser, _numbers(fig["bbox"], "bbox"), raw_pages[index]["images"], path,
+                                       bool(fig.get("anchor")), bullet_objects + others.get(fid, []))
+                    fig["px"] = [w, h]
             fig["file"] = str(path.relative_to(out)).replace("\\", "/")
         # Native tables leave the background the same way pictures do (text and rules), without a crop.
         figures = [f for f in figures if not f.get("overlay")]
-        figures += [e for e in slide["elements"] if e["kind"] in ("table", "diagram")]
+        figures += [e for e in _elements(slide) if e["kind"] in ("table", "diagram")]
         if figures:
-            boxes = [tuple(fig["bbox"]) for fig in figures]
+            boxes = [_json_box(fig["bbox"], "bbox") for fig in figures]
             # The glyphs a picture holds, not those its box grazes: the words just above a thin
             # figure (a rule under them) reach into it by their descent, and went from the
             # background while the crop showed only the rule. (What a grazed glyph has inside the
             # box the picture shows over it, in place.)
-            held = owned_by([spans[sid] for fig in figures for sid in fig.get("spans", []) if sid in spans])
-            centre = lambda ch: ((ch.box[0] + ch.box[2]) / 2, (ch.box[1] + ch.box[3]) / 2)
-            eraser.remove_chars(lambda ch: any(_intersects(ch.box, b) for b in boxes) and (
-                any(b[0] <= centre(ch)[0] <= b[2] and b[1] <= centre(ch)[1] <= b[3] for b in boxes) or held(ch)))
+            held = owned_by([spans[sid] for fig in figures for sid in _ids(fig, "spans") if sid in spans])
+
+            def centre(ch: Char) -> tuple[float, float]:
+                return (ch.box[0] + ch.box[2]) / 2, (ch.box[1] + ch.box[3]) / 2
+
+            def in_figure(ch: Char) -> bool:
+                return any(_intersects(ch.box, b) for b in boxes) and (
+                    any(b[0] <= centre(ch)[0] <= b[2] and b[1] <= centre(ch)[1] <= b[3] for b in boxes) or held(ch))
+
+            eraser.remove_chars(in_figure)
             for fig, b in zip(figures, boxes):
                 # (a native list's ball stays whole for its colour and its patch: a pie's label
                 # widening the figure over the ball column took half of each ball, and the Slides
@@ -665,32 +756,37 @@ def render_backgrounds(pdf: Path, raw: RawDoc, deck: dict, out: Path,
                 # the next word, wherever Slides set the words off the PDF's place)
                 ground = [key for key, po in eraser.objects.items() if fig.get("anchor") and
                           po.type in (OBJ_IMAGE, OBJ_SHADING) and _inside(_grow(b, -0.5), eraser.bounds[key])]
-                eraser.remove_images_in(b, keep=bullet_objects + ground)
+                eraser.remove_images_in(b, bullet_objects + ground)
                 # Stroked paths reach past the figure box by half their width, arrow tips further.
                 eraser.remove_paths_inside(_grow(b, 5))
 
         # Panels last: figure crops taken above still show the panel colour behind them.
-        verify_and_remove_shapes(original[slide["page"]], eraser, slide, raw_pages[slide["page"]])
+        verify_and_remove_shapes(original[index], eraser, slide, raw_pages[index])
 
-        page = doc[slide["page"]]
+        page = doc[index]
         zoom = BACKGROUND_WIDTH_PX / page.width
-        path = out / "backgrounds" / f"bg-{slide['page'] + 1:03}.png"
-        img = eraser.render(zoom)
+        path = out / "backgrounds" / f"bg-{index + 1:03}.png"
+        img = eraser.render(zoom, None, False, ())
 
-        px_per_pt = BACKGROUND_WIDTH_PX / slide["size"][0]
-        bullets = []
-        for el in slide["elements"]:
-            for p in el.get("paragraphs", []):
+        px_per_pt = BACKGROUND_WIDTH_PX / _numbers(slide["size"], "slide.size")[0]
+        bullets: list[list[float]] = []
+        for el in _elements(slide):
+            for p in _paragraphs(el):
                 b = p["bullet"]
-                if b and b["kind"] == "glyph" and "ink" not in b:
-                    measured = glyph_ink(original[slide["page"]], b["bbox"])
+                if not isinstance(b, dict) or not b:
+                    continue
+                if b["kind"] == "glyph" and "ink" not in b:
+                    measured = glyph_ink(original[index], _numbers(b["bbox"], "bullet.bbox"))
                     if measured:  # (emit sizes and shapes the Slides bullet by it)
-                        b["ink"], b["fill"] = measured
-                if b and b["kind"] == "image":
-                    bullets.append(images[b["image"]]["bbox"])
-                    b.setdefault("color", ink_colour(img, b["bbox"], px_per_pt))  # the Slides bullet's colour
-                elif b and b.get("patch"):  # number drawn on a vector box
-                    x0, y0, x1, y1 = b["bbox"]
+                        ink, fill = measured
+                        b["ink"] = _json_numbers(ink)
+                        b["fill"] = fill
+                if b["kind"] == "image":
+                    bullets.append(images[as_str(b["image"], "bullet.image")]["bbox"])
+                    # (the Slides bullet's colour)
+                    b.setdefault("color", ink_colour(img, _numbers(b["bbox"], "bullet.bbox"), px_per_pt))
+                elif b.get("patch"):  # number drawn on a vector box
+                    x0, y0, x1, y1 = _json_box(b["bbox"], "bullet.bbox")
                     bullets.append([x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5])
         if bullets:
             patch_rects(img, bullets, px_per_pt)
@@ -698,7 +794,7 @@ def render_backgrounds(pdf: Path, raw: RawDoc, deck: dict, out: Path,
         save_png(img, path)
         paths.append(path)
         slide["background"] = str(path.relative_to(out)).replace("\\", "/")
-        slide["background_color"] = uniform_color(img)
+        slide["background_color"] = uniform_color(img, 3)
     doc.close()
     original.close()
     return paths
@@ -718,22 +814,22 @@ def page_ground(img: RGB) -> Ints:
     return np.array([(v >> 16) & 255, (v >> 8) & 255, v & 255])
 
 
-def theme_decoration(images, ground: Ints) -> tuple[RGBA | None, list[bool], bool]:
+def theme_decoration(images: Iterable[RGB], ground: Ints) -> tuple[RGBA | None, list[bool], bool]:
     """The theme decoration a layout can carry for backgrounds that share it (`images`: distinct
     backgrounds, the most used first): an RGBA picture of the first one, opaque where it differs
     from the ground and every background taking it shows the same pixels, transparent elsewhere.
     Drawn over those backgrounds it changes nothing, and over another ground colour it keeps the
     bars and lines. Returns (picture or None, per image whether it shows the decoration, whether
     the first image is exactly the ground plus the picture)."""
-    images = iter(images)
-    first = next(images)
+    rest = iter(images)
+    first = next(rest)
     ref = first.astype(np.int16)
     mask = np.abs(ref - ground).max(axis=2) > DECORATION_TOLERANCE
     total = int(mask.sum())
     if total < DECORATION_MIN * mask.size:
-        return None, [False] * (1 + sum(1 for _ in images)), False
+        return None, [False] * (1 + sum(1 for _ in rest)), False
     inside = [True]
-    for img in images:
+    for img in rest:
         same = np.abs(img.astype(np.int16) - ref).max(axis=2) <= DECORATION_TOLERANCE if img.shape == ref.shape else None
         ok = same is not None and (same & mask).sum() >= DECORATION_AGREE * mask.sum()
         inside.append(bool(ok))
@@ -743,7 +839,7 @@ def theme_decoration(images, ground: Ints) -> tuple[RGBA | None, list[bool], boo
     return np.dstack([first, np.where(mask, 255, 0).astype(np.uint8)]), inside, int(mask.sum()) == total
 
 
-def uniform_color(img: RGB, tolerance: int = 3) -> str | None:
+def uniform_color(img: RGB, tolerance: int) -> str | None:
     """The single colour of a background with nothing left on it, else None. Such slides get
     a plain Slides background colour instead of a picture."""
     ref = np.median(img[::17, ::17].reshape(-1, 3), axis=0)
@@ -752,10 +848,10 @@ def uniform_color(img: RGB, tolerance: int = 3) -> str | None:
     return "#" + "".join(f"{int(v):02x}" for v in ref)
 
 
-def flat_colour(img: RGB, area: Box, px_per_pt: float, ring: int = 4,
-                ignore: Mask | None = None) -> Floats | None:
-    """The page colour around an area (a thin ring just outside it), if that ring is flat.
-    Pixels marked in `ignore` (other converted elements, a neighbour's shadow) don't count."""
+def flat_colour(img: RGB, area: Box, px_per_pt: float, ring: int, ignore: Mask | None) -> Floats | None:
+    """The page colour around an area (a thin ring `ring` px wide just outside it), if that ring
+    is flat. Pixels marked in `ignore` (other converted elements, a neighbour's shadow) don't
+    count."""
     h, w = img.shape[:2]
     a0, b0 = max(0, int(area[0] * px_per_pt) - 2), max(0, int(area[1] * px_per_pt) - 2)
     a1, b1 = min(w, int(np.ceil(area[2] * px_per_pt)) + 2), min(h, int(np.ceil(area[3] * px_per_pt)) + 2)
@@ -772,7 +868,7 @@ def flat_colour(img: RGB, area: Box, px_per_pt: float, ring: int = 4,
     return colour if (np.abs(pixels - colour).max(axis=1) <= 6).mean() >= 0.97 else None
 
 
-def paint_out_leftovers(img: RGB, slide: dict, px_per_pt: float) -> None:
+def paint_out_leftovers(img: RGB, slide: JsonObject, px_per_pt: float) -> None:
     """Paint out of the background what would otherwise stay behind when a native element
     is moved, with the page colour around it (only where that is flat):
 
@@ -782,39 +878,43 @@ def paint_out_leftovers(img: RGB, slide: dict, px_per_pt: float) -> None:
       (emit lays the body under the title bar) and the shadow pieces (emit gives the body a
       native drop shadow). Where the page is not flat the shadow stays in the background and
       the body gets none."""
-    shapes = [e for e in slide["elements"] if e["kind"] == "shape"]
+    shapes = [e for e in _elements(slide) if e["kind"] == "shape"]
     kept = {e["block"] for e in shapes if e.get("block") is not None and "title_bar" not in e} & \
            {e["block"] for e in shapes if e.get("title_bar")}
     for el in shapes:
         if el.get("block") is not None and el["block"] not in kept:  # one half was not verified
             for key in ("block", "title_bar", "strips"):
                 el.pop(key, None)
-    jobs = []  # (area whose surroundings give the colour, rects to paint, element)
+    jobs: list[tuple[Box, list[Box], JsonObject]] = []  # (area whose surroundings give the colour, rects to paint, element)
     for el in shapes:
-        rects = list(el.get("strips", [])) + (el["shadow"]["pieces"] if el.get("shadow") else [])
+        rects = [_json_box(r, "strips") for r in _array_at(el, "strips")] + \
+            ([_json_box(r, "shadow.pieces") for r in as_array(as_object(el["shadow"], "shadow")["pieces"], "shadow.pieces")]
+             if el.get("shadow") else [])
         if rects:
-            x0, y0, x1, y1 = el["bbox"]
-            area = [x0, el["title_bar"][1] if el.get("title_bar") else y0, x1, y1]
+            x0, y0, x1, y1 = _json_box(el["bbox"], "bbox")
+            area = (x0, _title_top(el) if el.get("title_bar") else y0, x1, y1)
             for r in rects:
-                area = [min(area[0], r[0]), min(area[1], r[1]), max(area[2], r[2]), max(area[3], r[3])]
+                area = (min(area[0], r[0]), min(area[1], r[1]), max(area[2], r[2]), max(area[3], r[3]))
             jobs.append((area, rects, el))
-    for el in slide["elements"]:
+    for el in _elements(slide):
         if el["kind"] == "image" and not el.get("overlay"):  # (an overlay's box holds the page under it)
-            jobs.append((el["bbox"], [el["bbox"]], el))
+            box = _json_box(el["bbox"], "bbox")
+            jobs.append((box, [box], el))
     # Other elements and everything about to be painted don't count as the page around an area.
     ignore = np.zeros(img.shape[:2], bool)
-    covered = [e["bbox"] for e in slide["elements"] if e["kind"] in ("shape", "image", "table", "diagram")]
+    covered = [_json_box(e["bbox"], "bbox") for e in _elements(slide) if e["kind"] in ("shape", "image", "table", "diagram")]
     covered += [r for _, rects, _ in jobs for r in rects]
-    covered += [[x0, e["title_bar"][1], x1, y1] for e in shapes if e.get("title_bar") for x0, _, x1, y1 in [e["bbox"]]]
+    covered += [(x0, _title_top(e), x1, y1) for e in shapes if e.get("title_bar")
+                for x0, _, x1, y1 in [_json_box(e["bbox"], "bbox")]]
     for rx0, ry0, rx1, ry1 in covered:
         ignore[max(0, int(ry0 * px_per_pt) - 2):int(np.ceil(ry1 * px_per_pt)) + 2,
                max(0, int(rx0 * px_per_pt) - 2):int(np.ceil(rx1 * px_per_pt)) + 2] = True
-    colours = [flat_colour(img, area, px_per_pt, ignore=ignore) for area, _, _ in jobs]  # before any painting
+    colours = [flat_colour(img, area, px_per_pt, 4, ignore) for area, _, _ in jobs]  # before any painting
     # A drawing the background keeps that runs into a picture's box from outside (a git graph's
     # main line through the branch picture) stays where it crosses: painted out, it stopped a
     # pixel short of the crop on either side, a white nick in the line in Slides (and under an
     # anchored picture's transparent ground, which leaves such paths to the background, a gap).
-    crossed = [picture_crossings(img, area, colour, px_per_pt, ignore) if colour is not None and el["kind"] == "image"
+    crossed = [picture_crossings(img, area, colour, px_per_pt, ignore, 4) if colour is not None and el["kind"] == "image"
                else (np.zeros(0, int), np.zeros(0, int)) for (area, _, el), colour in zip(jobs, colours)]
     for (area, rects, el), colour, (rows, cols) in zip(jobs, colours, crossed):
         if colour is None:
@@ -832,7 +932,7 @@ def paint_out_leftovers(img: RGB, slide: dict, px_per_pt: float) -> None:
 
 
 def picture_crossings(img: RGB, area: Box, colour: Floats, px_per_pt: float, ignore: Mask,
-                      ring: int = 4) -> tuple[Ints, Ints]:
+                      ring: int) -> tuple[Ints, Ints]:
     """The pixel rows and columns (image indices) where something drawn in the background runs
     into `area` across its edge: rows crossed on its left or right, columns on its top or
     bottom, in the ring `flat_colour` judged (a pixel either side for antialiasing)."""
@@ -871,7 +971,7 @@ def ink_colour(img: Pixels, rect_pt: list[float], px_per_pt: float) -> str | Non
     ring = np.concatenate([img[max(0, b0 - 3):b0, a0:a1, :3].reshape(-1, 3), img[b1:b1 + 3, a0:a1, :3].reshape(-1, 3)]).astype(int)
     if not len(area) or not len(ring):
         return None
-    behind = ring_background(img, a0, b0, a1, b1)
+    behind = ring_background(img, a0, b0, a1, b1, 3)
     behind = np.median(ring, axis=0) if behind is None else behind.reshape(-1, 3)
     ink = area[np.abs(area - behind).sum(axis=1) > 60]
     if len(ink) < 0.2 * len(area):
@@ -919,7 +1019,7 @@ def glyph_ink(page: Page, box: list[float]) -> tuple[list[float], float] | None:
             round(float(ix0 + c1 / GLYPH_INK_ZOOM), 2), round(float(iy0 + r1 / GLYPH_INK_ZOOM), 2)], round(fill, 2)
 
 
-def ring_background(img: Pixels, a0: int, b0: int, a1: int, b1: int, r: int = 3) -> Floats | None:
+def ring_background(img: Pixels, a0: int, b0: int, a1: int, b1: int, r: int) -> Floats | None:
     """What is behind a small rectangle of pixels [b0:b1, a0:a1], from a ring `r` px wide around
     it: each column running from the strip above to the strip below, each row from the strip on
     the left to the one on the right, the two weighted by how well their ends agree. A bullet

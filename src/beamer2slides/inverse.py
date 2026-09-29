@@ -728,6 +728,7 @@ class Workspace:
         the same options then, so a caller cannot hand over a PDF of another document."""
         from .classify import classify
         from .extract import extract, select_overlays
+        from .ir import deck_json
         from .notes import prepare as prepare_notes
 
         reuse = compiled is not None and self.notes == target_has_notes
@@ -742,21 +743,24 @@ class Workspace:
             page["notes"] = prepared.notes.get(page["index"])
         kept_original = original_pages(pdf, prepared)
         selected = select_overlays(raw, "last")
-        deck = classify(selected)
-        if any(e["kind"] == "shape" for s in deck["slides"] for e in s["elements"]):
+        classified = classify(selected)
+        deck = deck_json(classified)
+        slides = as_objects(deck["slides"], "deck.slides")
+        if any(e["kind"] == "shape" for s in classified["slides"] for e in s["elements"]):
             from .pdf import Document
             from .render import keep_visible_shapes
             raw_pages = {p["index"]: p for p in selected["pages"]}
             doc = Document(prepared.pdf)
             try:  # as convert's render does: beamer's soft-masked shadow boxes aren't panels
-                for slide in deck["slides"]:
-                    keep_visible_shapes(doc[slide["page"]], slide, raw_pages[slide["page"]])
+                for slide in slides:
+                    index = as_int(slide["page"], "slide.page")
+                    keep_visible_shapes(doc[index], slide, raw_pages[index])
             finally:
                 doc.close()
         sync = synctex_pages(self.build_dir / f"{self.main.stem}.synctex.gz")
         frames_by_page = page_frames(self.source, sync, [p["label"] for p in raw["pages"]], self.src)
         frames = []
-        for slide in deck["slides"]:
+        for slide in classified["slides"]:
             orig = kept_original[slide["page"]] if slide["page"] < len(kept_original) else slide["page"]
             frames.append(frames_by_page[orig] if orig < len(frames_by_page) else None)
         words = {p["index"]: [w for s in p["spans"] for w in s["text"].split()] for p in selected["pages"]}
@@ -767,14 +771,14 @@ def original_pages(pdf: Path, prepared: "Prepared") -> list[int]:
     """Page index in the compiled PDF of each page of the notes-free PDF."""
     if prepared.mode != "note pages":
         return list(range(10 ** 5))
-    from .extract import spans as page_spans
+    from .extract import shown_spans
     from .notes import _note_header
     from .pdf import Document
     doc = Document(pdf)
     try:
         keep = []
         for page in doc:
-            spans = page_spans(page) if page.index else []
+            spans = shown_spans(page) if page.index else []
             header = _note_header(page, spans, page.rect) if page.index else None
             if header is None:
                 keep.append(page.index)

@@ -2,9 +2,13 @@
 Slides; shape requests; a batch of requests.
 """
 
+from __future__ import annotations
+
 import io
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .emit_metrics import SLIDE_W, rgb, xml_text
 from .emit_model import (
@@ -13,7 +17,14 @@ from .emit_model import (
 from .ir_types import Box, MarkedShape, ShapeElement
 from .json_types import JsonObject
 from .gapi import HttpError, message_of
+from .google_types import SlidesService
 from .gslides import EMU_PER_PT, emu, execute, pt
+
+if TYPE_CHECKING:
+    from pptx.oxml.xmlchemy import BaseOxmlElement
+    from pptx.presentation import Presentation
+    from pptx.slide import Slide, SlideLayout
+    from pptx.parts.slide import BaseSlidePart
 
 
 # Native drop shadows, calibrated against beamer's block shadow (tools/calibrate_shadow.py):
@@ -56,12 +67,21 @@ NS_P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 NS_R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
-def _set_background(part, c_sld, fill: dict) -> None:
+PageFill = Mapping[str, object]
+"""A page background: {"color": "#rrggbb"} or {"picture": Path} (stretched)."""
+
+
+def _set_background(part: BaseSlidePart, c_sld: BaseOxmlElement | None, fill: PageFill) -> None:
     """A page background in the .pptx: {"color": "#rrggbb"} or {"picture": Path} (stretched)."""
     from lxml import etree
 
+    if c_sld is None:
+        raise ValueError("a page without its cSld")
     if "color" in fill:
-        inner = f'<a:solidFill><a:srgbClr val="{fill["color"].lstrip("#").upper()}"/></a:solidFill>'
+        color = fill["color"]
+        if not isinstance(color, str):
+            raise TypeError(f"a background colour is a hex string, not {color!r}")
+        inner = f'<a:solidFill><a:srgbClr val="{color.lstrip("#").upper()}"/></a:solidFill>'
     else:
         _, rid = part.get_or_add_image_part(str(fill["picture"]))  # identical files are stored once
         inner = (f'<a:blipFill dpi="0" rotWithShape="1"><a:blip r:embed="{rid}"/><a:srcRect/>'
@@ -73,7 +93,7 @@ def _set_background(part, c_sld, fill: dict) -> None:
         f'<p:bg xmlns:p="{NS_P}" xmlns:a="{NS_A}" xmlns:r="{NS_R}"><p:bgPr>{inner}<a:effectLst/></p:bgPr></p:bg>'))
 
 
-def _add_template_shapes(slide, keys: list[tuple]) -> None:
+def _add_template_shapes(slide: Slide, keys: Sequence[TemplateKey]) -> None:
     from lxml import etree
     from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
     from pptx.util import Pt
@@ -83,6 +103,8 @@ def _add_template_shapes(slide, keys: list[tuple]) -> None:
     a = NS_A
     for i, (kind, adj, shadow) in enumerate(keys):
         if kind == "BENT_CONNECTOR":
+            if adj is None:
+                raise ValueError("a bent connector's template key carries where its elbow is")
             line = slide.shapes.add_connector(MSO_CONNECTOR.ELBOW, Pt(10), Pt(10), Pt(110), Pt(110))
             geometry = line._element.spPr.find(f"{{{a}}}prstGeom")
             geometry.set("prst", "bentConnector3")
@@ -116,7 +138,7 @@ def _add_template_shapes(slide, keys: list[tuple]) -> None:
 NO_TABLE_STYLE = "{2D5ABB26-0587-4C30-8999-92F81FD0307C}"  # PowerPoint's "No Style, No Grid"
 
 
-def _add_table(slide, table: PptxTable) -> None:
+def _add_table(slide: Slide, table: PptxTable) -> None:
     """An empty table (pptx_table) on a source slide. Its cell margins are what the API can't
     set: a table made by createTable has 7.2 pt above and below every line, one from a .pptx the
     file's (tools/probe_pptx_table_margins.py); duplicating the slide, inserting rows and columns
@@ -129,7 +151,9 @@ def _add_table(slide, table: PptxTable) -> None:
 
     rows, cols = len(table.heights), len(table.widths)
     frame = slide.shapes.add_table(rows, cols, e(table.x), e(table.y), e(sum(table.widths)), e(sum(table.heights)))
-    pr = frame._element.graphic.graphicData.tbl.tblPr
+    pr = frame.table._tbl.tblPr
+    if pr is None:
+        raise ValueError("python-pptx made a table without <a:tblPr>")
     for flag in ("firstRow", "bandRow"):  # (python-pptx's default look: a header row and bands)
         pr.attrib.pop(flag, None)
     style = pr.find(f"{{{NS_A}}}tableStyleId")
@@ -152,7 +176,7 @@ VARIANT = "_V"      # layout name suffix: a copy of the layout with another them
 THEME_VARIANTS = 3
 
 
-def _clone_layout(prs, layout, name: str):
+def _clone_layout(prs: Presentation, layout: SlideLayout, name: str) -> SlideLayout:
     """A copy of a layout (placeholders only, no pictures) added to the master, shown as `name`."""
     from copy import deepcopy
 
@@ -177,7 +201,7 @@ def _clone_layout(prs, layout, name: str):
     return part.slide_layout
 
 
-def _add_decoration(layout, picture: Path, width: int, height: int) -> None:
+def _add_decoration(layout: SlideLayout, picture: Path, width: int, height: int) -> None:
     """The theme decoration as a full-page picture at the bottom of a layout: above the slide
     background, below everything on the slide."""
     from lxml import etree
@@ -193,8 +217,69 @@ def _add_decoration(layout, picture: Path, width: int, height: int) -> None:
         f'<a:prstGeom prst="rect"><a:avLst/></a:prstGeom></p:spPr></p:pic>'))
 
 
-def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict], master_fill: dict,
-               decorations: dict | None = None) -> io.BytesIO:
+@dataclass(frozen=True, kw_only=True)
+class PptxPicture:
+    """A picture on a source slide: its file, its box (slide pt) and its alt text and title (both
+    "" for none)."""
+    file: str
+    bbox: Box
+    alt: str
+    title: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class PptxPage:
+    """A source slide of the .pptx (`build_pptx`, which reads it from its page dict: `pptx_page`)."""
+    layout: str
+    fill: PageFill | None
+    pictures: tuple[PptxPicture, ...]
+    tables: tuple[PptxTable, ...]
+    templates: bool
+
+
+def _number(v: object, where: str) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise TypeError(f"{where}: a number, not {v!r}")
+    return v
+
+
+def _str(v: object, where: str) -> str:
+    if not isinstance(v, str):
+        raise TypeError(f"{where}: a string, not {v!r}")
+    return v
+
+
+def pptx_page(page: Mapping[str, object]) -> PptxPage:
+    """A page dict of `build_pptx` ({"layout", "fill" (None: inherit), "pictures": [{"file",
+    "bbox", "alt", "title"}], "tables": [PptxTable] (optional), "templates"}) as its record."""
+    layout, fill, pictures = page["layout"], page["fill"], page["pictures"]
+    if not isinstance(layout, str):
+        raise TypeError(f"a page's layout is a name, not {layout!r}")
+    if fill is not None and not isinstance(fill, Mapping):
+        raise TypeError(f"a page's fill is a mapping, not {fill!r}")
+    if not isinstance(pictures, (list, tuple)):
+        raise TypeError(f"a page's pictures are a list, not {pictures!r}")
+    pics: list[PptxPicture] = []
+    for pic in pictures:
+        if not isinstance(pic, Mapping):
+            raise TypeError(f"a picture is a mapping, not {pic!r}")
+        box = pic["bbox"]
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            raise TypeError(f"a picture's bbox is four numbers, not {box!r}")
+        x0, y0, x1, y1 = (_number(v, "a picture's bbox") for v in box)
+        alt = pic.get("alt")  # (none, or "": no alt text and no title)
+        pics.append(PptxPicture(file=str(pic["file"]), bbox=(x0, y0, x1, y1),
+                                alt=_str(alt, "a picture's alt text") if alt else "",
+                                title=_str(pic["title"], "a picture's title") if alt else ""))
+    tables = page.get("tables", [])
+    if not isinstance(tables, (list, tuple)) or not all(isinstance(t, PptxTable) for t in tables):
+        raise TypeError(f"a page's tables are PptxTables, not {tables!r}")
+    return PptxPage(layout=layout, fill=fill, pictures=tuple(pics),
+                    tables=tuple(t for t in tables if isinstance(t, PptxTable)), templates=bool(page["templates"]))
+
+
+def build_pptx(page_w: float, page_h: float, keys: Sequence[TemplateKey], pages: Sequence[Mapping[str, object]],
+               master_fill: PageFill, decorations: Mapping[str, Path | None] | None) -> io.BytesIO:
     """The deck's starting point, imported through Drive. It carries everything the Slides API
     could only insert from a public URL, so no picture ever leaves the user's Drive:
 
@@ -209,48 +294,63 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict
 
     emit copies each source slide under our own object IDs and then deletes it."""
     from pptx import Presentation
+    from pptx.parts.slide import BaseSlidePart
     from pptx.util import Emu
 
+    parsed = [pptx_page(p) for p in pages]
     prs = Presentation()
     height = SLIDE_W * page_h / page_w
-    ratio = height / (prs.slide_height / EMU_PER_PT)
-    prs.slide_width, prs.slide_height = Emu(round(SLIDE_W * EMU_PER_PT)), Emu(round(height * EMU_PER_PT))
+    default_h = prs.slide_height
+    if default_h is None:
+        raise ValueError("python-pptx's default template has no slide height")
+    ratio = height / (default_h / EMU_PER_PT)
+    slide_w, slide_h = Emu(round(SLIDE_W * EMU_PER_PT)), Emu(round(height * EMU_PER_PT))
+    prs.slide_width, prs.slide_height = slide_w, slide_h
     if abs(ratio - 1) > 1e-3:  # the default template's placeholders are laid out for 4:3
         for page in [prs.slide_master, *prs.slide_layouts]:
             for shape in page.placeholders:
                 # A layout placeholder without its own position inherits the master's, rescaled
                 # already (setting its top and height would scale it twice and write x and width 0).
-                if shape._element.spPr.find(f"{{{NS_A}}}xfrm") is not None and shape.height is not None:
-                    shape.top, shape.height = Emu(round(shape.top * ratio)), Emu(round(shape.height * ratio))
+                top, shape_h = shape.top, shape.height
+                if shape._element.spPr.find(f"{{{NS_A}}}xfrm") is not None and top is not None \
+                        and shape_h is not None:
+                    shape.top, shape.height = Emu(round(top * ratio)), Emu(round(shape_h * ratio))
     master = prs.slide_master
-    _set_background(master.part, master.element.find(f"{{{NS_P}}}cSld"), master_fill)
+    master_part = master.part
+    if not isinstance(master_part, BaseSlidePart):
+        raise TypeError(f"python-pptx's slide master is a {type(master_part).__name__}, not a slide part")
+    _set_background(master_part, master.element.find(f"{{{NS_P}}}cSld"), master_fill)
     decorations = decorations or {}
     layouts = {name: prs.slide_layouts[i] for name, i in TEMPLATE_LAYOUTS.items()}
     originals = list(prs.slide_layouts)
-    for name in dict.fromkeys(p["layout"] for p in pages if VARIANT in p["layout"]):
+    for name in dict.fromkeys(p.layout for p in parsed if VARIANT in p.layout):
         kind, n = name.rsplit(VARIANT, 1)
         picture = decorations.get(f"{'TITLE' if kind == 'TITLE' else '*'}{VARIANT}{n}")
         layouts[name] = _clone_layout(prs, layouts[kind], f"{layouts[kind].name} ({f'theme {int(n) + 1}' if picture else 'no theme'})")
         if picture:
-            _add_decoration(layouts[name], picture, prs.slide_width, prs.slide_height)
+            _add_decoration(layouts[name], picture, slide_w, slide_h)
     for i, layout in enumerate(originals):
         picture = decorations.get("TITLE" if i == TEMPLATE_LAYOUTS["TITLE"] else "*")
         if picture:
-            _add_decoration(layout, picture, prs.slide_width, prs.slide_height)
-    for page in pages:
-        slide = prs.slides.add_slide(layouts[page["layout"]])
-        if page["fill"]:
-            _set_background(slide.part, slide.element.find(f"{{{NS_P}}}cSld"), page["fill"])
-        for pic in page["pictures"]:
-            x0, y0, x1, y1 = pic["bbox"]
-            shape = slide.shapes.add_picture(str(pic["file"]), Emu(round(x0 * EMU_PER_PT)), Emu(round(y0 * EMU_PER_PT)),
+            _add_decoration(layout, picture, slide_w, slide_h)
+    for page in parsed:
+        slide = prs.slides.add_slide(layouts[page.layout])
+        if page.fill:
+            _set_background(slide.part, slide.element.find(f"{{{NS_P}}}cSld"), page.fill)
+        for pic in page.pictures:
+            x0, y0, x1, y1 = pic.bbox
+            shape = slide.shapes.add_picture(pic.file, Emu(round(x0 * EMU_PER_PT)), Emu(round(y0 * EMU_PER_PT)),
                                              Emu(round((x1 - x0) * EMU_PER_PT)), Emu(round((y1 - y0) * EMU_PER_PT)))
-            if pic.get("alt"):  # (text from the PDF: raw Type 3 T1 codes are C0 controls, xml_text)
-                shape._element.nvPicPr.cNvPr.set("descr", xml_text(pic["alt"]))
-                shape._element.nvPicPr.cNvPr.set("title", xml_text(pic["title"]))
-        for table in page.get("tables", []):
+            if pic.alt:  # (text from the PDF: raw Type 3 T1 codes are C0 controls, xml_text)
+                nv = shape._element.find(f"{{{NS_P}}}nvPicPr")
+                c_nv = nv.find(f"{{{NS_P}}}cNvPr") if nv is not None else None
+                if c_nv is None:
+                    raise ValueError("python-pptx made a picture without its cNvPr")
+                c_nv.set("descr", xml_text(pic.alt))
+                c_nv.set("title", xml_text(pic.title))
+        for table in page.tables:
             _add_table(slide, table)
-        if page["templates"]:
+        if page.templates:
             _add_template_shapes(slide, keys)
     buf = io.BytesIO()
     prs.save(buf)
@@ -259,7 +359,7 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict
 
 
 def shape_requests(el: JsonMap, slide_id: str, object_id: str, scale: float,
-                   template: JsonMap | None = None) -> list[JsonObject]:
+                   template: JsonMap | None) -> list[JsonObject]:
     """`shape_requests_of` a shape dict (a diagram's node, the tests' panels), with a template
     dict ({"id", "w", "h"})."""
     return shape_requests_of(shape_of(el), slide_id, object_id, scale, template_of(template) if template else None)
@@ -326,5 +426,5 @@ def api_error(e: HttpError) -> str:
     return message_of(e)
 
 
-def batch(slides, pid: str, reqs: list[dict]) -> None:
+def batch(slides: SlidesService, pid: str, reqs: Sequence[Mapping[str, object]]) -> None:
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))

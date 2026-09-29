@@ -23,6 +23,7 @@ from beamer2slides.emit_model import Place, table_of
 from beamer2slides.emit_tables import pptx_table_of
 from beamer2slides.extract import extract, select_overlays
 from beamer2slides.fonts import font_info
+from beamer2slides.ir import deck_json
 from beamer2slides.notes import prepare
 
 TESTS = Path(__file__).resolve().parent
@@ -253,7 +254,7 @@ def emitted() -> tuple[Emitted, ...]:
             raw = extract(prepared.pdf, prepared.labels)
             for page in raw["pages"]:
                 page["notes"] = prepared.notes.get(page["index"])
-            deck = classify(select_overlays(raw, "last"))
+            deck = deck_json(classify(select_overlays(raw, "last")))
         out.append(Emitted(str(pdf.relative_to(TESTS.parent)).replace("\\", "/"), deck))
     return tuple(out)
 
@@ -551,8 +552,8 @@ def test_wide_pptx_rescales_every_placeholder_once():
     """16:9 decks: layout placeholders that inherit the master's position used to be scaled twice,
     with x and width written as 0."""
     from pptx import Presentation
-    square = placeholders(Presentation(emit.build_pptx(720.0, 540.0, [], [], {"color": "#ffffff"})))
-    wide = placeholders(Presentation(emit.build_pptx(720.0, 405.0, [], [], {"color": "#ffffff"})))
+    square = placeholders(Presentation(emit.build_pptx(720.0, 540.0, [], [], {"color": "#ffffff"}, None)))
+    wide = placeholders(Presentation(emit.build_pptx(720.0, 405.0, [], [], {"color": "#ffffff"}, None)))
     for (layout, name, x, y, w, h), (_, _, wx, wy, ww, wh) in zip(square, wide):
         assert (wx, ww) == (x, w) and ww > 0, (layout, name)
         assert abs(wy - 0.75 * y) <= 1 and abs(wh - 0.75 * h) <= 1, (layout, name)
@@ -565,7 +566,7 @@ def test_pptx_pictures_sit_at_their_boxes(tmp_path):
     box = [101.37, 57.2, 180.05, 96.93]
     page = {"layout": "BLANK", "fill": None, "templates": False,
             "pictures": [{"file": tmp_path / "f.png", "bbox": box, "alt": "x^2", "title": "Formula"}]}
-    pic, = Presentation(emit.build_pptx(453.54, 255.12, [], [page], {"color": "#ffffff"})).slides[0].shapes
+    pic, = Presentation(emit.build_pptx(453.54, 255.12, [], [page], {"color": "#ffffff"}, None)).slides[0].shapes
     got = [pic.left, pic.top, pic.left + pic.width, pic.top + pic.height]
     assert all(abs(g - v * EMU_PER_PT) <= 1 for g, v in zip(got, box))
     assert pic._element.nvPicPr.cNvPr.get("descr") == "x^2"
@@ -1292,7 +1293,7 @@ def test_the_pptx_carries_each_table_empty_with_its_margins():
     table = emit.pptx_table(el, scale, FONTS)
     typed = pptx_table_of(table_of(el), scale, FONTS, emit.SLIDE_W / scale)
     page = {"layout": "BLANK", "fill": None, "pictures": [], "tables": [typed], "templates": False}
-    prs = Presentation(emit.build_pptx(364.19, 273.14, [], [page], {"color": "#ffffff"}))
+    prs = Presentation(emit.build_pptx(364.19, 273.14, [], [page], {"color": "#ffffff"}, None))
     frames = [s for s in prs.slides[0].shapes if s.has_table]
     assert len(frames) == 1
     grid = frames[0].table

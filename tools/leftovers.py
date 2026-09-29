@@ -19,6 +19,7 @@ from PIL import Image, ImageDraw
 from beamer2slides.classify import classify
 from beamer2slides.emit import merge_blocks
 from beamer2slides.extract import extract, select_overlays
+from beamer2slides.ir import deck_json
 from beamer2slides.render import BACKGROUND_WIDTH_PX, render_backgrounds
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,8 +70,8 @@ def main() -> None:
         out = ROOT / "out" / "leftovers" / name
         out.mkdir(parents=True, exist_ok=True)
         raw = select_overlays(extract(pdf, None), "last")
-        deck = classify(raw)
-        render_backgrounds(pdf, raw, deck, out)
+        deck = deck_json(classify(raw))
+        render_backgrounds(pdf, raw, deck, out, frozenset())
         for slide in deck["slides"]:
             png = out / slide["background"]
             image = Image.open(png).convert("RGB")

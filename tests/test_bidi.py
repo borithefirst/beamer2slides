@@ -86,10 +86,11 @@ def test_looks_rtl_counts_letters_and_not_punctuation():
 class Piece:
     """The least a span needs to be put in order: its text."""
 
-    def __init__(self, text):
+    def __init__(self, text: str) -> None:
         self.text = text
+        self.reading: tuple[int, int, int, float] | None = None
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return self.text
 
 
@@ -181,7 +182,7 @@ def test_the_gap_on_a_right_to_left_line_is_measured_the_other_way():
 # islands one by one wrote ':7' for '7:', '13-12' for '12-13' and scrambled a formula's numbers.
 
 def visual_to_logical(visual: str) -> str:
-    return bidi.logical_line([visual], bidi.RIGHT)[0][1]
+    return bidi.logical_line([visual], bidi.RIGHT, [])[0][1]
 
 
 def test_a_number_before_a_colon_reads_the_way_the_title_shows_it():
@@ -222,7 +223,7 @@ def test_brackets_around_a_transliteration_in_an_arabic_line():
 def test_a_line_opening_on_a_latin_name_reads_as_its_page_does():
     # 'AVL tree' in a Hebrew title: one strong letter each way, so the line alone could read either
     # way; the page, Hebrew throughout, says right to left.
-    assert bidi.line_base(["AVL", "ץע"]) == bidi.LEFT
+    assert bidi.line_base(["AVL", "ץע"], None) == bidi.LEFT
     prior = bidi.page_direction(["םולש םלוע", "AVL", "שופיח ץע"])
     assert prior == bidi.RIGHT
     assert bidi.line_base(["AVL", "ץע"], prior) == bidi.RIGHT

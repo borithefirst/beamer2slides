@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 from beamer2slides import ink
-from beamer2slides.extract import spans as page_spans
+from beamer2slides.extract import shown_spans
 from beamer2slides.pdf import Document
 from beamer2slides.google_auth import slides_service
 from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
@@ -166,17 +166,17 @@ def reference() -> dict:
     zoom = 12.0
     rows = {}
     for (key, text, style), page in zip(WIDTH_ROWS, doc):
-        spans = [s for s in page_spans(page) if s["text"].strip()]
+        spans = [s for s in shown_spans(page) if s.text.strip()]
         box = ink.ink_box(ink.render_gray(page, zoom), zoom)
-        rows[key] = {"font": spans[0]["font"], "size": round(spans[0]["size"], 3), "ink_width": box.width}
+        rows[key] = {"font": spans[0].font, "size": round(spans[0].size, 3), "ink_width": box.width}
     caps_page = doc[len(WIDTH_ROWS)]
-    caps_span = page_spans(caps_page)[0]
+    caps_span = shown_spans(caps_page)[0]
     caps_box = ink.ink_box(ink.render_gray(caps_page, zoom), zoom)
     return {
         "engine": "pdflatex",
         "rows": rows,
-        "cap_height_em": caps_box.height / caps_span["size"],
-        "cap_font": caps_span["font"],
+        "cap_height_em": caps_box.height / caps_span.size,
+        "cap_font": caps_span.font,
     }
 
 

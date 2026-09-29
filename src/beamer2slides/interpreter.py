@@ -16,6 +16,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+from collections.abc import Mapping
 
 ENV = "B2S_PYTHON"
 
@@ -35,10 +36,15 @@ def python() -> str:
                        f"python3 nor python is on the PATH; set ${ENV}")
 
 
-def env(base: dict | None = None) -> dict:
-    """`base` (default: this process's environment) for a child started with `python()`: when that
-    is not this very interpreter, with this process's import path in front of `PYTHONPATH`."""
-    out = dict(os.environ if base is None else base)
+def env() -> dict[str, str]:
+    """This process's environment for a child started with `python()` (`env_over`)."""
+    return env_over(os.environ)
+
+
+def env_over(base: Mapping[str, str]) -> dict[str, str]:
+    """`base` for a child started with `python()`: when that is not this very interpreter, with
+    this process's import path in front of `PYTHONPATH`."""
+    out = dict(base)
     if sys.executable and python() == sys.executable:
         return out
     ours = [p for p in sys.path if p and os.path.exists(p)]
