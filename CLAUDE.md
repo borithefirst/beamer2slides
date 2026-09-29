@@ -26,12 +26,20 @@ decorations) is a picture, or baked into a per-slide background picture.
   (PageClassifier's mixins, `classify_model`, `classify_text`) and `emit_*` (layered, no import
   cycle; each module's docstring says what it holds). Callers keep importing from the face; a
   test that monkeypatches a name patches the module that reads it.
-- **deck.json's contract is `ir.py`**: a TypedDict per element kind and stage (`classified`,
-  `rendered`); `ir.problems(deck, stage)` / `ir.validate` check a deck at runtime. A producer that
-  writes a new field or kind says it there first (688ebf4: marked.py wrote shapes emit could not
-  read). **pyrefly gates the types** (`[tool.pyrefly]`, `tests/test_typecheck.py`: the `GATED`
-  modules check clean and the list only grows; no TypedDict error anywhere; optional keys read by
-  subscript are errors).
+- **Types first (docs/typing.md - read it before writing code here).** The code type-checks under
+  pyrefly's strict preset with no errors or warnings, and nothing is suppressed: rewrite the code
+  until the checker agrees (no `# type: ignore` - the config honours none -, no `cast`, no `Any`).
+  **Nothing is built unchecked**: `build_backend/beamer2slides_build.py` runs the check before every
+  wheel, editable install and sdist, against pinned dependency types. Write so the checker does the
+  work: records with static keys are `@dataclass(frozen=True, kw_only=True)` with no field defaults;
+  **functions take no default arguments**; closed sets are Literals matched to `assert_never`
+  (`typing_compat`); JSON is parsed into typed values where it enters; ids and units are NewTypes;
+  a stage is a type. Legacy errors live in `typecheck/baseline.json`, which only shrinks (`pyrefly
+  check --prune-baseline`, lower `CEILING` in `tests/test_typecheck.py`; never `--update-baseline`);
+  defaults, defaulted fields and `Any` per module in `typecheck/rules.json`, only down
+  (`tests/test_typing_rules.py`). A function you touch leaves to these rules.
+- **deck.json's contract is `ir.py`** (TypedDicts per kind and stage, `ir.problems` / `ir.validate`
+  at runtime), to become dataclasses parsed from and written to today's JSON (docs/typing.md).
 - **The PDF library is a swappable backend** (`src/beamer2slides/pdf/`, docs/pdf-backend.md).
   Nothing outside that package imports pypdfium2; answers are plain data, page objects are named
   by id. `api.py` is the contract, `pdfium_backend.py` the reference, `sandbox.py` runs any backend

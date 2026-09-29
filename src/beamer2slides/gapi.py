@@ -114,7 +114,7 @@ def status_of(error: BaseException) -> int | None:
 def message_of(error: BaseException, limit: int = 200) -> str:
     """What Google said, for a person to read: the API's own message, else the exception."""
     try:
-        return json.loads(error.content)["error"]["message"][:limit]  # type: ignore[attr-defined]
+        return json.loads(error.content)["error"]["message"][:limit]
     except (ValueError, KeyError, TypeError, AttributeError):
         return str(error)[:limit]
 

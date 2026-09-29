@@ -2093,3 +2093,13 @@ def test_a_right_to_left_line_comes_out_in_pdfiums_order():
     finally:
         ours.close()
         theirs.close()
+
+
+def test_a_pdfdoc_encoded_symbolic_font_maps_its_codes_to_unicode():
+    """A symbolic TrueType font with /Encoding /PDFDocEncoding whose substitute has no usable cmap
+    maps each code through PDFDocEncoding: the lookup imported a table that did not exist, and the
+    content parser dropped the whole text object (found by pyrefly's missing-module-attribute)."""
+    from beamer2slides.pdf.pure.fonts import PDFDOC, _predefined_unicode
+
+    assert [_predefined_unicode(PDFDOC, c) for c in (0x41, 0x18, 0x80, 0xAD, 0xE9, 0x10)] == \
+        [0x41, 0x02D8, 0x2022, 0x0000, 0xE9, 0]

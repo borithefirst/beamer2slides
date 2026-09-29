@@ -13,7 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN useradd --create-home --uid 1000 player
 WORKDIR /app
-COPY --chown=player pyproject.toml README.md ./
+# The build type-checks the package first (docs/typing.md): it needs its backend and baseline.
+COPY --chown=player pyproject.toml README.md MANIFEST.in ./
+COPY --chown=player build_backend ./build_backend
+COPY --chown=player typecheck ./typecheck
 COPY --chown=player src ./src
 RUN pip install --no-cache-dir ".[google]"
 # What the page shows besides the talks it is given: the examples and the recorded runs.

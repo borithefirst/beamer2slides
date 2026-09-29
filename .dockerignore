@@ -2,6 +2,9 @@
 *
 !pyproject.toml
 !README.md
+!MANIFEST.in
+!build_backend/
+!typecheck/
 !src/
 !examples/demo/demo.tex
 !tests/decks/*.tex

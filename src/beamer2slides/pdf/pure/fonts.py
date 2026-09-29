@@ -102,8 +102,8 @@ def _predefined_name(encoding: str, code: int) -> str | None:
 
 def _predefined_unicode(encoding: str, code: int) -> int:
     if encoding == PDFDOC:
-        from .document import _PDFDOC
-        return _PDFDOC.get(code, code) if code >= 0x18 else 0
+        from .navigation import _PDFDOC
+        return _PDFDOC[code] if 0x18 <= code < 256 else 0
     table = UNICODES.get(encoding)
     return table[code] if table and 0 <= code < 256 else 0
 

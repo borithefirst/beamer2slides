@@ -290,9 +290,9 @@ def tool(name: str, needs: tuple[str, ...] = (READS,), local: Callable[["Job", d
                     job.seconds = time.time() - started
             return _deliver(job.result, ctx)
 
-        call.tool_name = name                                      # type: ignore[attr-defined]
-        call.needs = needs                                         # type: ignore[attr-defined]
-        call.body = fn                                             # type: ignore[attr-defined]
+        call.tool_name = name
+        call.needs = needs
+        call.body = fn
         return call
 
     return wrap

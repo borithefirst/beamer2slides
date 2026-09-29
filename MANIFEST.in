@@ -1,0 +1,4 @@
+# What an sdist needs to build a wheel: the build backend and the type check it runs first
+# (build_backend/beamer2slides_build.py, docs/typing.md).
+recursive-include build_backend *.py
+include typecheck/baseline.json

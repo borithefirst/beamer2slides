@@ -379,7 +379,7 @@ class Replayed(Mapping):
                 return missing_tool(name)
             return copy.deepcopy(got[n])
 
-        run_tool.tool_name = name                                  # type: ignore[attr-defined]
+        run_tool.tool_name = name
         return run_tool
 
 
@@ -538,7 +538,7 @@ class FakeTools(Mapping):
                 item = item(ToolCall(name, dict(arguments)), n)
             return copy.deepcopy(item)
 
-        run_tool.tool_name = name                                  # type: ignore[attr-defined]
+        run_tool.tool_name = name
         return run_tool
 
 
