@@ -104,7 +104,7 @@ def adopt_slide() -> None:
     ir = deck_ir(pres, size, None, lambda url: fetch_url(url, None), ADOPT / "images", True, None)
     shutil.rmtree(ADOPT / "tree", ignore_errors=True)
     tex = ADOPT / "tree" / "main.tex"
-    adopt.bootstrap(ir, tex)
+    adopt.bootstrap(ir, tex, False, None)
     pdflatex(tex, 1)
     print("wrote", tex.relative_to(ROOT), "and main.pdf")
 

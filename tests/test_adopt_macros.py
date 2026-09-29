@@ -40,7 +40,7 @@ def sample_deck() -> dict:
 
 
 def written(tmp_path) -> tuple[str, str]:
-    text = adopt.bootstrap(deck_ir(sample_deck(), foreign=True), tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(deck_ir(sample_deck(), foreign=True), tmp_path / "tree" / "main.tex", False, None)
     return text, (tmp_path / "tree" / "slides.sty").read_text(encoding="utf-8")
 
 
@@ -107,7 +107,8 @@ def test_words_ending_in_a_tie_keep_it_from_par():
     def words_of(text):
         el = {"kind": "text", "bbox": [0, 0, 100, 40], "box": {"scale": 1.0, "valign": "top"},
               "paragraphs": [{"runs": [{"text": text, "size": 10.0}], "slides": {}}]}
-        return re.search(r"\{body\}\{(.*)\}$", adopt.text_box_latex(el, adopt.adopt_context(), ""))[1]
+        # a run record always says its colour, so the style is named for black
+        return re.search(r"\{body-black\}\{(.*)\}$", T.box_latex(el, adopt.adopt_context(), ""))[1]
     assert words_of("Meeting  ") == "Meeting~~ "
     assert words_of("Plain words") == "Plain words", "nothing to take: nothing added"
 
@@ -322,7 +323,7 @@ def test_an_enumerate_counts_and_types_only_the_numbers_it_cannot_count():
     el = T.prose(*({"runs": [T.words(w)], "bullet": bullet(n), "slides": {"indent_start": 18}}
                    for n, w in (("2.", "Two"), ("3.", "Three"), ("7.", "Seven"))))
     ctx = adopt.adopt_context()
-    tex = adopt.text_box_latex(el, ctx, "")
+    tex = T.box_latex(el, ctx, "")
     assert "\\begin{enumerate}[start=2]" in tex, tex
     assert "\\item Two" in tex and "\\item Three" in tex and "\\item[label={7.}] Seven" in tex, tex
     level, = (ln for ln in adopt.level_definitions(ctx) if ln.startswith("\\setslidelist{enumerate}{1}"))
@@ -477,7 +478,7 @@ def test_a_slidetable_puts_its_cells_fills_and_borders_where_the_deck_has_them(t
     from . import test_adopt_tables as TT
     scale = 720 / 453.54
     heights = (30, 60, 30)                    # the middle row with room, so its cells' places show
-    text = adopt.bootstrap(read(TT.deck(TT.table(heights=heights)), foreign=True), tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(read(TT.deck(TT.table(heights=heights)), foreign=True), tmp_path / "tree" / "main.tex", False, None)
     doc = compiled(tmp_path / "tree" / "main.tex")
     page = doc[0]
     x0, y0 = round(50 / scale, 1), round(80 / scale, 1)
@@ -541,7 +542,7 @@ def test_only_a_script_s_own_fallback_face_asks_the_tab_macro_to_forgive_it():
     assert adopt.tab_segment_needs_tolerance("mixed 開発 words")
     assert not adopt.tab_segment_needs_tolerance("ESOP #")
     assert not adopt.tab_segment_needs_tolerance("")
-    tex = adopt.text_box_latex(T.prose({"runs": [T.words("ESOP #\t余暇\tRole")], "slides": {}}), adopt.adopt_context(), "")
+    tex = T.box_latex(T.prose({"runs": [T.words("ESOP #\t余暇\tRole")], "slides": {}}), adopt.adopt_context(), "")
     assert "\\slidestab{36.00pt}{ESOP \\#}" in tex, tex
     assert "\\slidestabf{36.00pt}{" in tex and "余暇" in tex, tex
 
@@ -557,7 +558,7 @@ def test_the_forgiving_tab_macro_snaps_a_small_overshoot_back_but_the_plain_one_
     measures a similar 14.7% into its own next stop and must not be snapped back; one genuinely past
     tolerance (`TAB2`) advances both macros alike."""
     text = adopt.bootstrap(deck_ir(T.deck(T.box("s_t", T.para("x", runs=[("A\tB", {})]))), foreign=True),
-                           tmp_path / "tree" / "main.tex")
+                           tmp_path / "tree" / "main.tex", False, None)
     stop = adopt.TAB_STOP
     tol = stop * adopt.TAB_TOLERANCE
 

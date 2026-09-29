@@ -24,11 +24,12 @@ PARA = "\n"
 INPUT_RE = re.compile(r"\\(input|include|subfile)\s*\{([^}]+)\}")
 BEGIN_FRAME_RE = re.compile(r"\\begin\s*\{frame\}")
 END_FRAME_RE = re.compile(r"\\end\s*\{frame\}")
+CONTROL_TOKEN_RE = re.compile(r"\\([A-Za-z@]+|.)", re.DOTALL)
 
 
 def mask_comments(text: str) -> str:
     """Comments replaced by spaces (same length): offsets stay valid, `%` inside \\% kept."""
-    out = []
+    out: list[str] = []
     for line in text.split("\n"):
         i = 0
         while True:
@@ -91,7 +92,7 @@ def read_args(s: str, i: int, spec: str) -> tuple[list[tuple[str, int, int] | No
     """Arguments after a command at s[i] by spec letters: s star, < overlay, o/O optional [..],
     m/M mandatory {..} or one token, ( coordinate pair. Returns [(kind, start, end)] (content
     offsets) and the index after them."""
-    args = []
+    args: list[tuple[str, int, int] | None] = []
     for kind in spec:
         j = skip_space(s, i) if kind in "mM(" else i
         if kind == "s":
@@ -135,9 +136,13 @@ def read_args(s: str, i: int, spec: str) -> tuple[list[tuple[str, int, int] | No
                 args.append((kind, j + 1, k - 1))
                 i = k
             elif j < len(s) and s[j] == "\\":
-                m = re.match(r"\\([A-Za-z@]+|.)", s[j:])
-                args.append((kind, j, j + len(m.group(0))))
-                i = j + len(m.group(0))
+                # One token: a control word, else the character after the backslash, a line end
+                # too (`\` ending a line), which `.` alone would not match. A backslash ending the
+                # text is a token of its own.
+                m = CONTROL_TOKEN_RE.match(s, j)
+                n = len(m.group(0)) if m else 1
+                args.append((kind, j, j + n))
+                i = j + n
             elif j < len(s) and s[j] not in "}":
                 args.append((kind, j, j + 1))
                 i = j + 1
@@ -186,7 +191,7 @@ class Source:
                 return cand.resolve()
         return None
 
-    def _load(self, path: Path, seen: set) -> None:
+    def _load(self, path: Path, seen: set[Path]) -> None:
         if path in seen:
             return
         seen.add(path)
@@ -356,9 +361,11 @@ def page_frames(source: Source, sync: list[SyncPage], labels: list[str] | None =
             f = source.frame_at(path, line)
             if f:
                 tally[f.index] = tally.get(f.index, 0) + n
-        out.append(source.frames[max(tally, key=tally.get)] if tally else None)
+        out.append(source.frames[max(tally, key=lambda fi: tally[fi])] if tally else None)
     if labels and (not sync or all(f is None for f in out)):
-        out, fi, prev = [], -1, None
+        out = []
+        fi = -1
+        prev: str | None = None
         for label in labels:
             if label != prev:
                 fi += 1
@@ -677,16 +684,23 @@ def build_visible(s: str, start: int, end: int, title_frame: bool = False) -> Vi
         j = skip_space(s, k)
         if j < end and s[j] == "{":
             targs, k2 = read_args(s, k, "M")
-            a = len(v.text)
-            walk(targs[0][1], targs[0][2])
-            v.title, v.title_src = (a, len(v.text)), (targs[0][1], targs[0][2])
-            v.add(PARA, k2, k2)
-            k = k2
-            j = skip_space(s, k)
-            if j < end and s[j] == "{":
-                sargs, k = read_args(s, k, "M")
-                walk(sargs[0][1], sargs[0][2])
-                v.add(PARA, k, k)
+            title = targs[0]
+            # A title brace nothing closes (the rest of the file unbalanced) is no title: the
+            # body is read from there, as text.
+            if title is not None:
+                a = len(v.text)
+                walk(title[1], title[2])
+                v.title, v.title_src = (a, len(v.text)), (title[1], title[2])
+                v.add(PARA, k2, k2)
+                k = k2
+                j = skip_space(s, k)
+                if j < end and s[j] == "{":
+                    sargs, k3 = read_args(s, k, "M")
+                    subtitle = sargs[0]
+                    if subtitle is not None:
+                        walk(subtitle[1], subtitle[2])
+                        k = k3
+                        v.add(PARA, k, k)
         tm = END_FRAME_RE.search(s, k, end)
         walk(k, tm.start() if tm else end)
     else:
@@ -741,9 +755,10 @@ class WordMap:
     def span(self, i0: int, i1: int) -> tuple[int, int] | None:
         """Visible range covering words i0..i1-1, when all of them were found."""
         got = self.vis[i0:i1]
-        if not got or any(g is None for g in got):
+        found = [g for g in got if g is not None]
+        if not got or len(found) < len(got):
             return None
-        return got[0][0], got[-1][1]
+        return found[0][0], found[-1][1]
 
 
 def locate_words(text: str, visible: Visible, lo: int = 0, hi: int | None = None) -> WordMap:

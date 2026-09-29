@@ -12,9 +12,27 @@ import pytest
 
 from beamer2slides import adopt, scripts
 from .irs import deck_ir
-from beamer2slides.inverse import Context, paragraphs_latex, runs_latex
+from beamer2slides.deck_ir_types import parse_target
+from beamer2slides.inverse import Context, TextStyle, loop_paragraph, loop_run, paragraphs_latex, runs_latex
 
+from .deck_records import target_filled
 from .test_adopt import at, pt
+
+# what a paragraph's base style says: 18 pt and nothing else, or nothing at all
+BASE18 = TextStyle(size=18.0, color=None, family=None, bold=False, italic=False, font=None, weight=None)
+NO_BASE = TextStyle(size=None, color=None, family=None, bold=False, italic=False, font=None, weight=None)
+
+
+def base18(_p: object) -> TextStyle:
+    return BASE18
+
+
+def paras(*ps: dict) -> list:
+    return [loop_paragraph(p, "test") for p in ps]
+
+
+def loop_runs(*rs: dict) -> list:
+    return [loop_run(r, "test") for r in rs]
 
 EMU = 12700
 
@@ -108,21 +126,21 @@ def ltr(words: str, align: str = "left") -> dict:
 
 def test_a_right_to_left_text_is_set_in_its_language_with_logical_alignment():
     """LuaTeX's skips are logical: in an RTL paragraph `\\raggedright` is flush right."""
-    out = paragraphs_latex([rtl("مرحبا"), rtl("يسار", "left"), rtl("وسط", "center")],
-                           lambda p: {"size": 18.0}, Context(), "  ")
+    out = paragraphs_latex(paras(rtl("مرحبا"), rtl("يسار", "left"), rtl("وسط", "center")),
+                           base18, Context(), "  ")
     assert out.startswith("  \\begin{otherlanguage}{arabic}\n") and out.endswith("\\par\n  \\end{otherlanguage}")
     assert "\\raggedright مرحبا" in out and "\\raggedleft يسار" in out and "\\centering وسط" in out
 
 
 def test_bullets_of_a_right_to_left_text_are_inside_its_language():
-    out = paragraphs_latex([rtl("אחד", bullet=True), rtl("שתיים", bullet=True)], lambda p: {"size": 18.0},
+    out = paragraphs_latex(paras(rtl("אחד", bullet=True), rtl("שתיים", bullet=True)), base18,
                            Context(), "")
     assert out.index("\\begin{otherlanguage}{hebrew}") < out.index("\\begin{itemize}")
     assert out.index("\\end{itemize}") < out.index("\\end{otherlanguage}")
 
 
 def test_one_right_to_left_paragraph_among_others_gets_a_group_of_its_own():
-    out = paragraphs_latex([ltr("Hello"), rtl("שלום")], lambda p: {"size": 18.0}, Context(), "")
+    out = paragraphs_latex(paras(ltr("Hello"), rtl("שלום")), base18, Context(), "")
     assert out.splitlines()[0] == "Hello"
     assert "\\begin{otherlanguage}{hebrew}\\raggedright שלום\\par\\end{otherlanguage}" in out
 
@@ -131,14 +149,14 @@ def test_a_list_opening_one_level_deep_has_an_item_to_hang_on():
     """`\\begin{itemize}\\begin{itemize}` is "Something's wrong--perhaps a missing \\item"
     (arabic-training slides 12 and 17)."""
     deep = {**rtl("עמוק", bullet=True), "level": 1}
-    out = paragraphs_latex([deep, rtl("אחד", bullet=True), deep], lambda p: {"size": 18.0}, Context(), "")
+    out = paragraphs_latex(paras(deep, rtl("אחד", bullet=True), deep), base18, Context(), "")
     lines = [l.strip() for l in out.splitlines()]
     assert lines[1:4] == ["\\begin{itemize}", "\\item[]", "\\begin{itemize}"]
     assert lines.count("\\item[]") == 1                   # the second deep item follows a real one
 
 
 def test_left_to_right_paragraphs_are_written_as_before():
-    out = paragraphs_latex([ltr("a"), ltr("b", "right"), ltr("c", "center")], lambda p: {"size": 18.0}, Context(), "")
+    out = paragraphs_latex(paras(ltr("a"), ltr("b", "right"), ltr("c", "center")), base18, Context(), "")
     assert out == "a\n\n\\raggedleft b\n\n\\centering c"
 
 
@@ -146,21 +164,21 @@ def test_a_blank_lines_size_ends_with_it():
     """cs161-tls slide 41: a 9 pt spacer line between 14 pt paragraphs left its `\\fontsize` on, and
     both paragraphs after it came out at 9 pt (runs are written against the base style)."""
     spacer = {"runs": [{"text": " ", "size": 7.0}], "align": "left", "bullet": None, "level": 0}
-    out = paragraphs_latex([ltr("a"), spacer, ltr("b")], lambda p: {"size": 18.0}, Context(), "")
+    out = paragraphs_latex(paras(ltr("a"), spacer, ltr("b")), base18, Context(), "")
     blank = out.split("\n\n")[1]
     assert blank.startswith("{\\fontsize") and blank.endswith("\\strut\\par}")
 
 
 def test_a_soft_break_is_never_inside_a_style():
     """`\\underline{a\\\\ b}` stops the build ("Not allowed in LR mode", jruby-ja slide 10)."""
-    out = runs_latex([{"text": "10000\x0bmatcher", "underline": True}], {}, Context())
+    out = runs_latex(loop_runs({"text": "10000\x0bmatcher", "underline": True}), NO_BASE, Context())
     assert out == "\\underline{10000}\\\\ \\underline{matcher}"
-    assert "\\underline{\\\\" not in runs_latex([{"text": "\x0b", "underline": True}], {}, Context())
+    assert "\\underline{\\\\" not in runs_latex(loop_runs({"text": "\x0b", "underline": True}), NO_BASE, Context())
 
 
 def test_two_soft_breaks_in_a_row_leave_an_empty_line_that_compiles():
     """A second `\\\\` on an empty line is "There's no line here to end" in ragged text."""
-    out = runs_latex([{"text": "a\x0b\x0bb"}], {}, Context())
+    out = runs_latex(loop_runs({"text": "a\x0b\x0bb"}), NO_BASE, Context())
     assert out == "a\\\\ \\mbox{}\\\\ b"
 
 
@@ -243,7 +261,8 @@ def test_cjk_letters_do_not_count_against_the_font_they_are_typed_in(font_folder
     make_font(font_folder, "Arial", "Rubyis")
     make_font(font_folder, "Noto Sans JP", "日本語です")
     adopt._FAMILIES.clear()
-    lines = adopt.font_preamble(target_with("Ruby is 日本語です日本語です日本語です"), None, None)
+    t = target_with("Ruby is 日本語です日本語です日本語です")
+    lines = adopt.font_preamble(parse_target(t), t, None, None)
     assert any(l.startswith("\\setsansfont{Arial}") for l in lines)
 
 
@@ -330,7 +349,7 @@ def test_arabic_in_the_decks_second_typeface_is_sent_to_a_font_that_has_it(font_
     t = deck_ir(deck(paragraph(latin * 3), paragraph("Shukran | " * 8 + "شكراً", font="Montserrat")),
                 foreign=True)
     ctx = adopt.adopt_context()
-    lines = adopt.font_preamble(t, None, ctx)
+    lines = adopt.font_preamble(parse_target(t), t, None, ctx)
     command = ctx.font_switches["Montserrat"]
     assert f"\\babelfont{{{command[1:]}}}[" in "\n".join(lines)
     assert any(l.startswith(f"\\babelfont[arabic]{{{command[1:]}}}") and l.endswith("{Arial-Regular.ttf}")
@@ -350,7 +369,7 @@ def test_a_second_typeface_that_draws_all_its_letters_is_a_plain_newfontfamily(f
     t = deck_ir(deck(paragraph(latin * 3), paragraph("Shukran | " * 8 + arabic, font="Montserrat")),
                 foreign=True)
     ctx = adopt.adopt_context()
-    lines = adopt.font_preamble(t, None, ctx)
+    lines = adopt.font_preamble(parse_target(t), t, None, ctx)
     line = next(l for l in lines if l.startswith(f"\\newfontfamily{ctx.font_switches['Montserrat']}{{Montserrat}}"))
     assert not any(l.startswith("\\babelfont") for l in lines)
     # and it shapes its own Arabic: LuaTeX's node renderer drew arabic-training's Tahoma unjoined
@@ -368,7 +387,7 @@ def test_a_font_missing_after_a_second_typeface_is_still_named(font_folder):
     t = deck_ir(deck(paragraph(latin * 3), paragraph("Shukran | " * 8, font="Montserrat"),
                      paragraph("Nowhere to be found " * 2, font="Nowhere")), foreign=True)
     ctx = adopt.adopt_context()
-    adopt.font_preamble(t, None, ctx)
+    adopt.font_preamble(parse_target(t), t, None, ctx)
     assert "Montserrat" in ctx.font_switches
     assert "Nowhere" in [m["font"] for m in ctx.missing_fonts]
 
@@ -380,10 +399,12 @@ def test_a_font_only_a_table_is_set_in_gets_its_switch(font_folder):
     make_font(font_folder, "Roboto", "Densfurpadwk ")
     adopt._FAMILIES.clear()
     run = lambda text, font: {"paragraphs": [{"runs": [{"text": text, "font": font, "family": "sans", "size": 10}]}]}
-    title = {"kind": "text", **run("Feline species " * 3, "Montserrat")}
-    table = {"kind": "table", "table_cells": [run("Dense fur padded paws ", "Roboto") for _ in range(4)]}
+    title = {"kind": "text", "bbox": [0, 0, 400, 40], **run("Feline species " * 3, "Montserrat")}
+    table = {"kind": "table", "bbox": [0, 50, 400, 150],
+             "table_cells": [{"row": 0, "col": k, **run("Dense fur padded paws ", "Roboto")} for k in range(4)]}
     ctx = adopt.adopt_context()
-    lines = adopt.font_preamble({"slides": [{"elements": [title, table]}]}, None, ctx)
+    t = target_filled({"slides": [{"elements": [title, table]}]})
+    lines = adopt.font_preamble(parse_target(t), t, None, ctx)
     assert "Roboto" in ctx.font_switches or any(l.startswith("\\setsansfont{Roboto}") for l in lines)
 
 
@@ -507,7 +528,7 @@ def test_the_decks_own_thai_font_wins_when_it_covers_the_letters(font_folder, mo
 def test_the_adopted_preamble_puts_script_lines_before_the_fonts(font_folder, tmp_path):
     make_font(font_folder, "Yu Gothic", "日本")
     t = target_with("日本")
-    text = adopt.bootstrap(t, tmp_path / "main.tex")
+    text = adopt.bootstrap(t, tmp_path / "main.tex", False, None)
     assert text.index("\\defaultfontfeatures") < text.index("\\setsansfont")
     assert text.index("{babel}") < text.index("\\usepackage{fontspec}")
 

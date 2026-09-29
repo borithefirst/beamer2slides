@@ -16,7 +16,7 @@
   "playground/runner.py": 1
  },
  "default_arguments": {
-  "adopt.py": 31,
+  "adopt.py": 20,
   "adopt_sync.py": 3,
   "agent/auth.py": 4,
   "agent/content.py": 8,
@@ -89,10 +89,9 @@
   "identity.py": 12,
   "ink.py": 3,
   "interpreter.py": 1,
-  "inverse.py": 12,
+  "inverse.py": 5,
   "ir.py": 5,
   "labels.py": 1,
-  "marked.py": 1,
   "merge.py": 4,
   "net.py": 4,
   "pdf/api.py": 4,

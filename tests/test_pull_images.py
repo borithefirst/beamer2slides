@@ -17,8 +17,15 @@ from PIL import Image
 from .test_inverse import current
 from beamer2slides.compare import TOL, compare, displayed_picture, grey16, hash_distance, picture_hash
 from beamer2slides.deck_ir import element_of, image_format, picture_props
-from beamer2slides.inverse import (Candidate, Context, Picture, Planner, Workspace, ensure_preamble, picture_latex,
-                                   picture_slug, picture_sources, reading_order)
+from beamer2slides.inverse import (Candidate, Context, Picture, Planner, Workspace, ensure_preamble, loop_element,
+                                   loop_picture, picture_latex, picture_slug, picture_sources, reading_order)
+from beamer2slides.ir_types import At, box
+
+
+def looped(e: dict):
+    """A picture element as the planner reads it (bbox made up where the test gives none)."""
+    e = {"bbox": [0, 0, 10, 10], **e}
+    return loop_picture(e, box(e["bbox"], At(where="test", path="bbox")), "test")
 
 EMU = 12700
 TESTS = Path(__file__).resolve().parent
@@ -113,16 +120,17 @@ def test_picture_latex_crop_angle_opacity_outline():
     ctx = Context()
     pic = Picture("figures/photo-12345678.png", Path("x.png"), (300.0, 200.0))
     te = {"bbox": [10, 20, 110, 70], "box": [10, 20, 110, 70], "crop": {"l": 0.1, "t": 0.2, "r": 0.3, "b": 0.05}}
-    assert picture_latex(te, pic, ctx) == \
+    assert picture_latex(looped(te), pic, ctx, None) == \
         r"\includegraphics[trim=30.00 10.00 90.00 40.00,clip,width=100.0pt,height=50.0pt]{figures/photo-12345678.png}"
     turned = {**te, "rotation": 30.0}
-    assert picture_latex(turned, pic, ctx).endswith("height=50.0pt,angle=-30]{figures/photo-12345678.png}")
+    assert picture_latex(looped(turned), pic, ctx, None).endswith("height=50.0pt,angle=-30]{figures/photo-12345678.png}")
     see_through = {**turned, "opacity": 0.5, "outline": {"color": "#ff0000", "weight": 3.0, "dash": "SOLID"}}
-    out = picture_latex(see_through, pic, ctx)
+    out = picture_latex(looped(see_through), pic, ctx, None)
     assert out.startswith(r"\rotatebox{-30}{\tikz\node[inner sep=0pt,text opacity=0.50,draw=red,line width=3.00pt]{")
     assert "angle" not in out and out.endswith("};}")
     assert r"\usepackage{tikz}" in ctx.packages
-    assert picture_latex({**te, "crop": None, "flip": True}, pic, ctx).startswith(r"\reflectbox{\includegraphics[width=100.0pt")
+    assert picture_latex(looped({**te, "crop": None, "flip": True}), pic, ctx, None).startswith(
+        r"\reflectbox{\includegraphics[width=100.0pt")
 
 
 def test_picture_slug():
@@ -168,9 +176,9 @@ def test_picture_sources_in_source_order(tmp_path):
     srcs = picture_sources(text, ws.source.frames[0])
     assert [s.kind for s in srcs] == ["graphics", "env"]
     assert text[srcs[1].inner[0]:srcs[1].inner[1]].endswith("\\end{tikzpicture}")
-    left = {"kind": "image", "bbox": [20, 80, 200, 200]}
-    right = {"kind": "image", "bbox": [240, 90, 420, 190]}
-    wide = {"kind": "image", "bbox": [20, 30, 420, 60]}
+    left, right, wide = (loop_element(e, "test") for e in (
+        {"id": "l", "kind": "image", "bbox": [20, 80, 200, 200]}, {"id": "r", "kind": "image", "bbox": [240, 90, 420, 190]},
+        {"id": "w", "kind": "image", "bbox": [20, 30, 420, 60]}))
     assert reading_order([right, left, wide]) == [wide, left, right]
 
 
@@ -180,27 +188,27 @@ def test_picture_file_names_reuse_and_formats(tmp_path):
     deck_files.mkdir()
     # the deck's copy of photo.png: downscaled and re-encoded by Google -> the source's own file
     Image.open(ws.src / "figures" / "photo.png").resize((300, 200), Image.LANCZOS).save(deck_files / "down.jpg", quality=80)
-    same = p.picture({"file": str(deck_files / "down.jpg"), "alt": None})
+    same = p.picture(looped({"file": str(deck_files / "down.jpg"), "alt": None}))
     assert same.rel == "figures/photo.png" and same.natural == (600.0, 400.0)
     # a new picture: the deck's bytes as they are, named by alt text and content
     new = photo(deck_files / "new.png", seed=9)
-    pic = p.picture({"file": str(new), "alt": "Lab bench"})
+    pic = p.picture(looped({"file": str(new), "alt": "Lab bench"}))
     sha = hashlib.sha1(new.read_bytes()).hexdigest()
     assert pic.rel == f"figures/lab-bench-{sha[:8]}.png" and pic.path.read_bytes() == new.read_bytes()
     # the same bytes again (another slide): the file just written
-    assert p.picture({"file": str(new), "alt": "Another name"}).rel == pic.rel
+    assert p.picture(looped({"file": str(new), "alt": "Another name"})).rel == pic.rel
     # an animated GIF: first frame as PNG, with a note
     frames = [Image.new("RGB", (40, 30), c) for c in ((200, 0, 0), (0, 200, 0))]
     frames[0].save(deck_files / "anim.gif", save_all=True, append_images=frames[1:])
-    gif = p.picture({"file": str(deck_files / "anim.gif"), "alt": None})
+    gif = p.picture(looped({"file": str(deck_files / "anim.gif"), "alt": None}))
     assert gif.rel.endswith(".png") and Image.open(gif.path).getpixel((5, 5))[:3] == (200, 0, 0)
     assert any("first frame of 2" in n for n in ctx.notes)
     # brightness can't be an option: baked into a new file
-    bright = p.picture({"file": str(new), "alt": "Lab bench", "brightness": 0.3})
+    bright = p.picture(looped({"file": str(new), "alt": "Lab bench", "brightness": 0.3}))
     assert bright.rel != pic.rel and np.asarray(Image.open(bright.path).convert("L")).mean() > \
         np.asarray(Image.open(new).convert("L")).mean() + 15
     assert any("brightness baked" in n for n in ctx.notes)
-    assert p.picture({"file": str(deck_files / "missing.png")}) is None
+    assert p.picture(looped({"file": str(deck_files / "missing.png")})) is None
 
 
 def test_replace_tikz_figure_keeps_it_commented(tmp_path):

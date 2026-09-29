@@ -82,22 +82,26 @@ def test_adopt_names_each_mark_after_its_deck_object():
     """slides-keys.tex lists, frame by frame, the objectId behind each mark in drawing order: a text
     box's panel is `<id>+shape`, a layout's object `layout/object`, an id TeX cannot carry nothing."""
     from beamer2slides import adopt
+    from beamer2slides.adopt_theme import FramePlan
+    from .deck_records import deck, record
     assert adopt.mark_key("layout~p3_i2") == "layout/p3_i2"
     assert adopt.mark_key("has space") is None
-    box = {"id": "g1_0_5", "kind": "text"}
+    at = {"bbox": [0, 0, 10, 10]}
+    box = {"id": "g1_0_5", "kind": "text", **at}
     panelled = "\\slideshape{rect}{..}\n\\begin{slidebox}{..}"
-    assert adopt.piece_keys(box, panelled) == ["g1_0_5+shape", "g1_0_5"]
-    assert adopt.piece_keys({"id": "p2", "kind": "image"}, "\\slidepicture{..}") == ["p2"]
-    assert adopt.piece_keys({"id": "a b", "kind": "shape"}, "\\sliderect{..}") == [""]
+    assert adopt.piece_keys(record(box), panelled) == ["g1_0_5+shape", "g1_0_5"]
+    assert adopt.piece_keys(record({"id": "p2", "kind": "image", **at}), "\\slidepicture{..}") == ["p2"]
+    assert adopt.piece_keys(record({"id": "a b", "kind": "shape", **at}), "\\sliderect{..}") == [""]
 
-    class Plan:  # the layout draws the logo and the title, at shipout: after the frame's own
-        layout, drawn = "title-only", {0, 1}
-    title = {"id": "t0", "kind": "text", "placeholder": "TITLE"}
-    target = {"slides": [{"layout": "L", "elements": [title, {"id": "logo", "kind": "image", "inherited": "L"},
-                                                      box, {"id": "t", "kind": "table"}]},
-                         {"elements": [{"id": None, "kind": "text"}]}]}
+    # the layout draws the logo and the title, at shipout: after the frame's own
+    plan = FramePlan(layout="title-only", drawn=frozenset({0, 1}), words={}, background=None, backdrop=None,
+                     nonumber=False)
+    title = {"id": "t0", "kind": "text", "placeholder": "TITLE", **at}
+    target = deck({"slides": [{"layout": "L", "elements": [title, {"id": "logo", "kind": "image", "inherited": "L", **at},
+                                                           box, {"id": "t", "kind": "table", **at}]},
+                              {"elements": [{"id": "no key", "kind": "text", **at}]}]})
     pieces = [["\\begin{slidebox}", "\\slidepicture{..}", panelled, "\\begin{slidetable}"], ["\\begin{slidebox}"]]
-    got = adopt.keys_file(target, pieces, [Plan(), None], ["s1", "s2"]).splitlines()
+    got = adopt.keys_file(target, pieces, [plan, None], ["s1", "s2"]).splitlines()
     assert [line for line in got if not line.startswith("%")] == ["\\slidekeys{s1}{g1_0_5+shape,g1_0_5,t,logo,t0}"]
 
 

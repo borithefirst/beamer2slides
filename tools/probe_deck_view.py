@@ -43,7 +43,7 @@ def one(name: str) -> dict | None:
         target = json.loads((folder / "target.json").read_text(encoding="utf-8"))
         tex = Path(tmp) / "tree" / "main.tex"
         t0 = time.perf_counter()
-        adopt.bootstrap(target, tex, False)
+        adopt.bootstrap(target, tex, False, None)
         secs = time.perf_counter() - t0
         files = [p for p in sorted(tex.parent.rglob("*")) if p.is_file()]
         text = [p for p in files if p.suffix in TEXT]

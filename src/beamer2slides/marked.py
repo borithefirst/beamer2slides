@@ -14,18 +14,24 @@ keys file named it, else `#<n>`. What no mark holds - the frame title beamer typ
 person wrote by hand - goes through `classify` as before, on a page that holds only those objects,
 so the classifier's guesses can neither swallow a marked element nor merge two of them.
 
-A page without marks never comes here: its read-back is `classify` unchanged."""
+A page without marks never comes here: its read-back is `classify` unchanged.
+
+The slide and the elements are deck.json as JSON (`JsonObject`), as classify writes them: `ir.py`'s
+TypedDicts say their shape, but the classifier's own page (`PageClassifier.classify`) is not typed
+yet, and the elements here join it."""
 
 from __future__ import annotations
 
 import math
 import re
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 from .classify import Line, PageClassifier, Paragraph, Rect, label_of, span_runs, union_all
 from .classify_model import Span
+from .json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_optional_str, as_str
 from .raw_types import RawDrawing, RawImage, RawItem, RawPage, RawSpan
+from .typing_compat import override
 
 ELEMENT, PARAGRAPH, BULLET, CELL, UNDERLINE, STRIKE = "B2S", "B2Sp", "B2Sb", "B2Sc", "B2Su", "B2Ss"
 KINDS = ("spans", "drawings", "images")
@@ -38,6 +44,26 @@ MarkParams = dict[str, str | int]
 """A mark's parameters (`raw_types.RawMark`)."""
 GroupId = str | int | None
 """A marked element's number on the page (`/n`), else its key (`/k`)."""
+MarkValue = str | int | None
+"""One parameter of a mark, or none (`MarkParams.get`)."""
+Cell = tuple[int, int]
+"""A table cell's (row, column)."""
+
+
+def _nums(xs: Iterable[float]) -> list[Json]:
+    return [x for x in xs]
+
+
+def _strs(xs: Iterable[str]) -> list[Json]:
+    return [x for x in xs]
+
+
+def _objects(xs: Iterable[JsonObject]) -> list[Json]:
+    return [x for x in xs]
+
+
+def _box_json(b: list[float] | None) -> Json:
+    return None if b is None else _nums(b)
 
 
 def params(item: RawItem, tag: str) -> MarkParams | None:
@@ -146,19 +172,22 @@ class MarkedText(PageClassifier):
     def par_index(self, s: Span) -> int | None:
         return self.par_of.get(s.id)
 
-    def build_lines(self, spans):
-        by: dict = {}
+    @override
+    def build_lines(self, spans: list[Span]) -> list[Line]:
+        by: dict[int | None, list[Span]] = {}
         for s in spans:
             by.setdefault(self.par_index(s), []).append(s)
-        lines = []
+        lines: list[Line] = []
         for ss in by.values():
             lines += same_row(super().build_lines(ss))
         return sorted(lines, key=lambda l: (l.baseline, l.rect.x0))
 
-    def detect_bullet(self, line):
+    @override
+    def detect_bullet(self, line: Line) -> None:
         """(the marks say which spans are the bullet: `assign_reasons`)"""
 
-    def text_decorations(self, spans):
+    @override
+    def text_decorations(self, spans: list[Span]) -> None:
         """The classifier's rules under and through words, and what the marks say: words `\\uline`
         or `\\sout` set are underlined or struck whatever their rules look like."""
         super().text_decorations(spans)
@@ -171,14 +200,16 @@ class MarkedText(PageClassifier):
             if params(raw, STRIKE) is not None:
                 s.strike = True
 
-    def assign_reasons(self, lines):
+    @override
+    def assign_reasons(self, lines: list[Line]) -> None:
         super().assign_reasons(lines)
         limits = {id(l) for o in lines for l in o.limits}  # a formula's limits go into its hole
-        firsts: dict = {}
+        firsts: dict[int | None, Line] = {}
         for line in sorted(lines, key=lambda l: l.baseline):
             if line.reason == "rotated" or id(line) in limits:
                 continue
-            line.reason, line.bullet, line.bullet_spans = None, None, []
+            no_spans: list[Span] = []
+            line.reason, line.bullet, line.bullet_spans = None, None, no_spans
             i = self.line_par(line)
             first = i not in firsts
             firsts.setdefault(i, line)
@@ -194,26 +225,29 @@ class MarkedText(PageClassifier):
             elif first and i in self.art:
                 line.bullet = {"kind": "glyph", "text": "", "bbox": self.art[i].as_list(), "drawn": True}
 
-    def line_par(self, line) -> int | None:
+    def line_par(self, line: Line) -> int | None:
         return Counter(self.par_index(s) for s in line.spans).most_common(1)[0][0]
 
-    def display_pieces_apart(self, paragraphs):
+    @staticmethod
+    @override
+    def display_pieces_apart(paragraphs: list[Paragraph]) -> list[Paragraph]:
         return paragraphs
 
-    def build_paragraphs(self, lines):
+    @override
+    def build_paragraphs(self, lines: list[Line]) -> list[Paragraph]:
         self.hfill_hosts = set()
-        by: dict = {}
+        by: dict[int | None, list[Line]] = {}
         for line in lines:
             if line.reason is None:
                 by.setdefault(self.line_par(line), []).append(line)
-        out = []
+        out: list[Paragraph] = []
         for i, ls in sorted(by.items(), key=lambda kv: (kv[0] is None, kv[0] or 0)):
             ls.sort(key=lambda l: l.baseline)
             par = Paragraph(ls)
             p = self.para.get(ls[0].spans[0].id, {})
             a = p.get("a", "left")
             par.justified = a == "justify"
-            par.align = a if a in ("center", "right") else "left"
+            par.align = "center" if a == "center" else "right" if a == "right" else "left"
             if par.direction == "rtl":            # LuaTeX's skips are logical (adopt.box_latex)
                 par.align = FLIP.get(par.align, par.align)
             par.level = max(0, int(p["l"]) - 1) if p.get("l") else 0
@@ -228,7 +262,8 @@ class MarkedText(PageClassifier):
                 p.role = "title" if out[0].role == "title" else p.role
         return out
 
-    def build_boxes(self, paragraphs):
+    @override
+    def build_boxes(self, paragraphs: list[Paragraph]) -> list[list[Paragraph]]:
         return [paragraphs] if paragraphs else []
 
 
@@ -279,7 +314,13 @@ def unturned(sub: RawPage) -> float | None:
     return round(math.degrees(a), 2)
 
 
-def text_elements(g: Group, page: RawPage, body: float) -> tuple[list[dict], dict]:
+def span_ids(e: JsonObject, where: str) -> list[str]:
+    """An element's `spans`, none when it names none."""
+    ids = e.get("spans")
+    return [] if ids is None else [as_str(i, f"{where}: spans") for i in as_array(ids, f"{where}: spans")]
+
+
+def text_elements(g: Group, page: RawPage, body: float) -> tuple[list[JsonObject], JsonObject]:
     """A marked text box: its text element (with `mark`) and the pictures that go with it (formula
     holes, icon bullets); the rest of the sub-classification (what it left in the background)."""
     art_items: list[RawDrawing | RawImage] = [i for i in [*g.drawings, *g.images] if params(i, BULLET) is not None]
@@ -289,29 +330,31 @@ def text_elements(g: Group, page: RawPage, body: float) -> tuple[list[dict], dic
         art[k] = art[k].union(Rect.of(i["bbox"])) if k in art else Rect.of(i["bbox"])
     sub = g.page(page, frozenset(i["id"] for i in art_items))
     turn = unturned(sub)
-    res = MarkedText(sub, body, art).classify()
+    res: JsonObject = MarkedText(sub, body, art).classify()
+    elements = as_objects(res["elements"], f"marked box {g.mark}: elements")
     if turn is not None:
-        for e in res["elements"]:
+        for e in elements:
             e["rotation"] = turn
-    texts = [e for e in res["elements"] if e["kind"] == "text"]
+    texts = [e for e in elements if e["kind"] == "text"]
     hidden = {s["id"] for s in page.get("hidden_spans", [])}
-    for e in res["elements"]:
+    for e in elements:
         # words the page hides are the box's words, but no object of the page's text: they stay
         # out of `spans` (render erases what `spans` names)
-        if hidden.intersection(e.get("spans", ())):
-            e["hidden_spans"] = [i for i in e["spans"] if i in hidden]
-            e["spans"] = [i for i in e["spans"] if i not in hidden]
+        ids = span_ids(e, f"marked box {g.mark}")
+        if hidden.intersection(ids):
+            e["hidden_spans"] = _strs(i for i in ids if i in hidden)
+            e["spans"] = _strs(i for i in ids if i not in hidden)
     if not texts:
         return [], res
-    main = max(texts, key=lambda e: len(e["spans"]))
+    main = max(texts, key=lambda e: len(as_array(e["spans"], f"marked box {g.mark}: spans")))
     main["mark"] = g.mark
     box = box_of(g.params.get("box"))
     if box:
         # the box adopt set the words in: `\slidetext` puts it at the target's text anchor, `\slidebox`
         # at the target's box, so it is data for a reader who knows which, not the target's bbox
-        main["mark_box"] = box
-    ids = {e["id"] for e in texts}
-    keep = texts + [e for e in res["elements"] if e.get("anchor") in ids]
+        main["mark_box"] = _nums(box)
+    ids = {as_str(e["id"], f"marked box {g.mark}: id") for e in texts}
+    keep = texts + [e for e in elements if e.get("anchor") in ids]
     return keep, res
 
 
@@ -322,11 +365,11 @@ def union_box(items: Sequence[RawItem], grow: float) -> list[float] | None:
     return union_all(rects).as_list() if rects else None
 
 
-def picture_element(g: Group, pid: str) -> dict:
+def picture_element(g: Group, pid: str) -> JsonObject:
     ims, ds, ss = g.images, g.drawings, g.spans
     bbox = union_box(ims, 0.0) or union_box(ds, 0.5) or union_box(ss, 0.0)
-    el = {"id": pid, "kind": "image", "role": "figure", "bbox": bbox, "spans": [s["id"] for s in ss],
-          "mark": g.mark, "mark_n": g.n}
+    el: JsonObject = {"id": pid, "kind": "image", "role": "figure", "bbox": _box_json(bbox),
+                      "spans": _strs(s["id"] for s in ss), "mark": g.mark, "mark_n": g.n}
     if len(ims) == 1 and not ds and not ss:
         el["image"] = ims[0]["id"]  # the picture is the image itself (classify.bare_image)
     return el
@@ -341,7 +384,11 @@ def area(d: RawDrawing) -> float:
     return max(0.0, x1 - x0) * max(0.0, y1 - y0)
 
 
-def shape_element(g: Group, pid: str) -> dict:
+def outline_json(stroke: RawDrawing | None) -> JsonObject | None:
+    return {"color": stroke["stroke"], "width": stroke.get("width") or 1.0} if stroke else None
+
+
+def shape_element(g: Group, pid: str) -> JsonObject:
     ds, ims = g.drawings, g.images
     fills = sorted((d for d in ds if filled(d)), key=area, reverse=True)
     strokes = [d for d in ds if "s" in d["type"]]
@@ -352,6 +399,7 @@ def shape_element(g: Group, pid: str) -> dict:
     line = bool(shafts) and not ims and all(
         max(d["bbox"][2] - d["bbox"][0], d["bbox"][3] - d["bbox"][1]) <= max(0.25 * reach, 12.0) for d in fills)
     ends = points_of(g.params.get("line"))
+    bbox: list[float] | None
     if ends:
         # `\slideline` says its two points: the line runs to them, to its arrows' tips (the shaft
         # TikZ draws stops at a head's base)
@@ -375,27 +423,27 @@ def shape_element(g: Group, pid: str) -> dict:
         if Rect.of(box).expand(reach).contains_rect(Rect.of(bbox), tol=0.5):
             bbox = box
     stroke = next((d for d in strokes if d.get("stroke")), None)
-    el = {"id": pid, "kind": "shape", "role": "line" if line else "panel", "bbox": bbox,
-          "fill": None if line or not fills else fills[0]["fill"],
-          "outline": {"color": stroke["stroke"], "width": stroke.get("width") or 1.0} if stroke else None,
-          "shape": "line" if line else "RECTANGLE" if main and main["items"] == "re" else "custom",
-          "flip": False, "radius": 0.0,
-          "drawings": [d["id"] for d in ds], "spans": [s["id"] for s in g.spans], "mark": g.mark}
+    el: JsonObject = {"id": pid, "kind": "shape", "role": "line" if line else "panel", "bbox": _box_json(bbox),
+                      "fill": None if line or not fills else fills[0]["fill"],
+                      "outline": outline_json(stroke),
+                      "shape": "line" if line else "RECTANGLE" if main and main["items"] == "re" else "custom",
+                      "flip": False, "radius": 0.0,
+                      "drawings": _strs(d["id"] for d in ds), "spans": _strs(s["id"] for s in g.spans), "mark": g.mark}
     if ims and not fills:
-        el["picture"] = [i["id"] for i in ims]  # a picture fill
+        el["picture"] = _strs(i["id"] for i in ims)  # a picture fill
     if fills and fills[0].get("fill_opacity", 1) < 0.99:
         el["opacity"] = fills[0]["fill_opacity"]
     return el
 
 
-def drawn_natively(el: dict) -> bool:
+def drawn_natively(el: JsonObject) -> bool:
     """Whether emit has a Slides shape for a marked shape: a filled rectangle. A line (emit draws
     lines only inside diagrams), a `\\slidepath` or `\\slidefreeform` outline (`custom`: no preset
     has its points), a picture fill or an outline alone has none."""
     return el["shape"] == "RECTANGLE" and bool(el.get("fill")) and not el.get("picture")
 
 
-def pictured_shapes(slide: dict, raw_page: RawPage, keep: frozenset[str]) -> None:
+def pictured_shapes(slide: JsonObject, raw_page: RawPage, keep: frozenset[str]) -> None:
     """In place: each marked shape emit has no Slides shape for becomes the picture of what its
     mark draws, where it stands in the drawing order (an adopted deck's freeform, uploaded again,
     raised KeyError 'custom' in the .pptx's template shapes). Only a conversion does this
@@ -408,38 +456,53 @@ def pictured_shapes(slide: dict, raw_page: RawPage, keep: frozenset[str]) -> Non
     source deleted four of china's freeforms and stacked pictures on them (audit, 2026-09-29)."""
     drawings = {d["id"]: d for d in raw_page["drawings"]}
     images = {i["id"]: i for i in raw_page["images"]}
-    for k, el in enumerate(slide["elements"]):
-        if el["kind"] != "shape" or not el.get("mark") or drawn_natively(el) or el["mark"] in keep:
+    elements = as_array(slide["elements"], "slide: elements")
+    for k, item in enumerate(elements):
+        el = as_object(item, f"slide: elements[{k}]")
+        mark = el.get("mark")
+        if el["kind"] != "shape" or not mark or drawn_natively(el) or mark in keep:
             continue
+        where = f"slide: elements[{k}]"
         # (a stroke's ink reaches half its width past its path)
         rects = [Rect.of(d["bbox"]).expand(max(0.5, (d.get("width") or 0.0) / 2))
-                 for d in (drawings.get(i) for i in el.get("drawings", ())) if d] + \
-                [Rect.of(images[i]["bbox"]) for i in el.get("picture", ()) if i in images]
-        slide["elements"][k] = {"id": el["id"], "kind": "image", "role": "figure",
-                                "bbox": union_all(rects).as_list() if rects else el["bbox"],
-                                "spans": el.get("spans", []), "mark": el["mark"]}
+                 for d in (drawings.get(as_str(i, f"{where}: drawings")) for i in as_array(el.get("drawings", []), where))
+                 if d] + \
+                [Rect.of(images[i]["bbox"]) for i in (as_str(p, f"{where}: picture") for p in as_array(el.get("picture", []), where))
+                 if i in images]
+        picture: JsonObject = {"id": el["id"], "kind": "image", "role": "figure",
+                               "bbox": _nums(union_all(rects).as_list()) if rects else el["bbox"],
+                               "spans": el.get("spans", []), "mark": el["mark"]}
+        elements[k] = picture
 
 
-def shape_marks(base: dict) -> frozenset:
+def shape_marks(base: JsonObject) -> frozenset[str]:
     """The marks a sync base records as shapes: what `pictured_shapes` keeps shapes for that base's
     deck. Only an adopt base has marks; one written since 688ebf4 has its pictured ones as images."""
     if base.get("adopt") is None:
         return frozenset()
-    return frozenset(e["ir"]["mark"] for s in base.get("slides", ()) for e in s.get("elements", ())
-                     if e.get("kind") == "shape" and (e.get("ir") or {}).get("mark"))
+    marks: list[str] = []
+    for s in as_objects(base.get("slides", []), "base: slides"):
+        for e in as_objects(s.get("elements", []), "base: slide elements"):
+            if e.get("kind") != "shape":
+                continue
+            ir = e.get("ir")
+            mark = as_object(ir, "base: element ir").get("mark") if ir else None
+            if mark:
+                marks.append(as_str(mark, "base: element ir: mark"))
+    return frozenset(marks)
 
 
 # ---------------------------------------------------------------------------------------------- tables
 
-def table_element(g: Group, page: RawPage, body: float, pid: str) -> dict:
+def table_element(g: Group, page: RawPage, body: float, pid: str) -> JsonObject:
     """A marked table: its grid from its own mark, each cell's words from what that cell's mark
     holds, and the layout emit writes it by (`table_layout`) from its mark's grid, its cells' words
     and what it drew (`table_grid`)."""
     rows, cols = int(g.params.get("rows") or 0), int(g.params.get("cols") or 0)
     c = PageClassifier(g.page(page, frozenset()), body)
     spans = c.spans()
-    cells: dict = {}
-    spanning: dict = {}
+    cells: dict[Cell, list[Span]] = {}
+    spanning: dict[Cell, Cell] = {}
     for s, raw in zip(spans, c.raw["spans"]):
         p = params(raw, CELL)
         if p is not None:
@@ -448,37 +511,38 @@ def table_element(g: Group, page: RawPage, body: float, pid: str) -> dict:
             spanning[rc] = (int(p.get("rs") or 1), int(p.get("cs") or 1))
     rows = max([rows] + [r + 1 for r, _ in cells])
     cols = max([cols] + [k + 1 for _, k in cells])
-    grid = [[[] for _ in range(cols)] for _ in range(rows)]
+    grid: list[list[Json]] = [[[] for _ in range(cols)] for _ in range(rows)]
     for (r, k), ss in cells.items():
         lines = sorted(c.build_lines(ss), key=lambda l: (l.baseline, l.rect.x0))
-        runs: list[dict] = []
+        runs: list[Json] = []
         for line in lines:
             if runs:
-                runs.append({**runs[-1], "text": " ", "script": None})
+                runs.append({**as_object(runs[-1], "table cell run"), "text": " ", "script": None})
             runs += span_runs(line.spans)
         grid[r][k] = runs
     bbox = box_of(g.params.get("box")) or union_box([*g.drawings, *g.spans], 0.0)
-    el = {"id": pid, "kind": "table", "role": "table", "bbox": bbox, "cells": grid,
-          "spans": [s["id"] for s in g.spans], "drawings": [d["id"] for d in g.drawings],
-          "mark": g.mark}
+    el: JsonObject = {"id": pid, "kind": "table", "role": "table", "bbox": _box_json(bbox),
+                      "cells": [row for row in grid],
+                      "spans": _strs(s["id"] for s in g.spans), "drawings": _strs(d["id"] for d in g.drawings),
+                      "mark": g.mark}
     if bbox:  # (a table of empty cells too: emit reads its columns, KeyError 'columns' - audit)
         el.update(table_grid(g, bbox, rows, cols, cells, spanning, body))
     return el
 
 
-def spread(text, n: int, start: float, scale: float = 1.0) -> list[float] | None:
+def spread(text: MarkValue, n: int, start: float) -> list[float] | None:
     """A mark's `/xs` or `/ys`: n + 1 edges, each from `start` (bp, or pt when it says so)."""
     parts = BOX_PART.findall(str(text or ""))
     if len(parts) != n + 1:
         return None
-    return [start + float(v) * (72 / 72.27 if unit == "pt" else scale) for v, unit in parts]
+    return [start + float(v) * (72 / 72.27 if unit == "pt" else 1.0) for v, unit in parts]
 
 
 def split_between(extents: list[tuple[float, float] | None], lo: float, hi: float) -> list[float]:
     """Edges between runs of text, midway between one's end and the next one's start, `lo` and
     `hi` outside; beside a run with no text, evenly between the edges known on either side."""
     n = len(extents)
-    edges: list = [lo] + [None] * (n - 1) + [hi]
+    edges: list[float | None] = [lo] + [None] * (n - 1) + [hi]
     for i in range(1, n):
         a, b = extents[i - 1], extents[i]
         if a and b:
@@ -487,15 +551,22 @@ def split_between(extents: list[tuple[float, float] | None], lo: float, hi: floa
     while i < n:
         if edges[i] is None:
             j = next(j for j in range(i, n + 1) if edges[j] is not None)
+            before, after = edges[i - 1], edges[j]
+            # (the edges are filled left to right: the one before a gap is known)
+            assert before is not None and after is not None
             for k in range(i, j):
-                edges[k] = edges[i - 1] + (edges[j] - edges[i - 1]) * (k - i + 1) / (j - i + 1)
+                edges[k] = before + (after - before) * (k - i + 1) / (j - i + 1)
             i = j
         i += 1
-    return edges
+    return [e for e in edges if e is not None]
 
 
-def table_grid(g: Group, bbox: list[float], rows: int, cols: int, cells: dict, spanning: dict,
-               body: float) -> dict:
+def merge_json(r: int, c: int, rs: int, cs: int, align: str) -> JsonObject:
+    return {"row": r, "col": c, "rows": rs, "cols": cs, "align": align}
+
+
+def table_grid(g: Group, bbox: list[float], rows: int, cols: int, cells: dict[Cell, list[Span]],
+               spanning: dict[Cell, Cell], body: float) -> JsonObject:
     """What emit lays a marked table out by, classify's table fields: column `bounds` and row tops
     (`bands`, which place each row) from the mark's `/xs` and `/ys` (a source adopt wrote before
     they were said: from where the cells' words stand), per column its words' extent and
@@ -504,29 +575,36 @@ def table_grid(g: Group, bbox: list[float], rows: int, cols: int, cells: dict, s
     x0, y0, x1, y1 = bbox
     single = {rc: ss for rc, ss in cells.items() if spanning.get(rc, (1, 1)) == (1, 1)}
 
-    def extent(ss, lo, hi):
-        return (min(getattr(s.rect, lo) for s in ss), max(getattr(s.rect, hi) for s in ss)) if ss else None
+    def extent(ss: list[Span] | None, across: bool) -> tuple[float, float] | None:
+        """Where words run: across the page (x), else down it (y)."""
+        if not ss:
+            return None
+        if across:
+            return min(s.rect.x0 for s in ss), max(s.rect.x1 for s in ss)
+        return min(s.rect.y0 for s in ss), max(s.rect.y1 for s in ss)
     xs = spread(g.params.get("xs"), cols, x0) or split_between(
-        [extent([s for (r, k), ss in single.items() if k == c for s in ss], "x0", "x1") for c in range(cols)], x0, x1)
+        [extent([s for (r, k), ss in single.items() if k == c for s in ss], True) for c in range(cols)], x0, x1)
     ys = spread(g.params.get("ys"), rows, y0) or split_between(
-        [extent([s for (r, k), ss in single.items() if r == i for s in ss], "y0", "y1") for i in range(rows)], y0, y1)
+        [extent([s for (r, k), ss in single.items() if r == i for s in ss], False) for i in range(rows)], y0, y1)
     sizes = Counter(round(s.size, 1) for ss in cells.values() for s in ss)
     size = sizes.most_common(1)[0][0] if sizes else body
-    def align(ss, lo: float, hi: float) -> str:  # one cell's words between its edges
+    def align(ss: list[Span], lo: float, hi: float) -> str:  # one cell's words between its edges
         left, right = min(s.rect.x0 for s in ss) - lo, hi - max(s.rect.x1 for s in ss)
         return "center" if abs(left - right) <= max(1.5, 0.15 * (left + right)) and left > 3 else \
             "right" if right < left else "left"
 
-    def words(ss, lo: float, hi: float) -> list[float]:  # (no words: a padding in from its edges)
-        a, b = extent(ss, "x0", "x1") or (lo + 0.3 * size, hi - 0.3 * size)
+    def words(ss: list[Span] | None, lo: float, hi: float) -> list[float]:  # (no words: a padding in from its edges)
+        a, b = extent(ss, True) or (lo + 0.3 * size, hi - 0.3 * size)
         return [round(a, 2), round(b, 2)]
-    columns = []
+    columns: list[JsonObject] = []
+    aligns: list[str] = []
     for c in range(cols):
         mine = [ss for (r, k), ss in single.items() if k == c and ss]
         votes = Counter(align(ss, xs[c], xs[c + 1]) for ss in mine)
         a, b = words([s for ss in mine for s in ss], xs[c], xs[c + 1])
-        columns.append({"x0": a, "x1": b, "align": votes.most_common(1)[0][0] if votes else "left"})
-    baselines = []
+        aligns.append(votes.most_common(1)[0][0] if votes else "left")
+        columns.append({"x0": a, "x1": b, "align": aligns[-1]})
+    baselines: list[float] = []
     for i in range(rows):
         firsts = [min(s.baseline for s in ss) for (r, k), ss in cells.items() if r == i]
         baselines.append(round(min(firsts) if firsts else ys[i] + size, 2))
@@ -534,7 +612,8 @@ def table_grid(g: Group, bbox: list[float], rows: int, cols: int, cells: dict, s
 
     def at(v: float, edges: list[float]) -> int:
         return max(0, min(len(edges) - 2, sum(1 for e in edges[1:-1] if v >= e)))
-    fills, borders = [], []
+    fills: list[JsonObject] = []
+    borders: list[JsonObject] = []
     for d in g.drawings:
         dx0, dy0, dx1, dy1 = d["bbox"]
         if filled(d) and d.get("fill_opacity", 1) >= 0.99:  # (the cell its corner stands in: a merge's first)
@@ -557,21 +636,23 @@ def table_grid(g: Group, bbox: list[float], rows: int, cols: int, cells: dict, s
     # A merged cell is aligned by its own words across the columns it spans, as classify's are
     # (`place_cells`): its first column's alignment wrote a centred spanning head START (audit).
     spans_of = [((r, c), (rs, cs)) for (r, c), (rs, cs) in sorted(spanning.items()) if (rs, cs) != (1, 1)]
-    merges = [{"row": r, "col": c, "rows": rs, "cols": cs,
-               "align": align(cells[(r, c)], xs[c], xs[min(c + cs, cols)]) if cells.get((r, c)) else columns[c]["align"]}
+    merges = [merge_json(r, c, rs, cs, align(cells[(r, c)], xs[c], xs[min(c + cs, cols)]) if cells.get((r, c)) else aligns[c])
               for (r, c), (rs, cs) in spans_of]
-    return {"frame": [round(v, 2) for v in (xs[0], ys[0], xs[-1], ys[-1])], "size": size,
-            "row_baselines": baselines, "row_heights": heights, "columns": columns,
-            "bounds": [round(v, 2) for v in xs], "bands": [[i, round(ys[i], 2), round(ys[i + 1], 2)] for i in range(rows)],
-            "merges": merges, **({"merge_x": [words(cells.get((r, c)), xs[c], xs[min(c + cs, cols)])
-                                              for (r, c), (rs, cs) in spans_of]} if merges else {}),
-            "rules": [], "borders": borders, "fills": fills}
+    grid: JsonObject = {
+        "frame": _nums(round(v, 2) for v in (xs[0], ys[0], xs[-1], ys[-1])), "size": size,
+        "row_baselines": _nums(baselines), "row_heights": _nums(heights), "columns": _objects(columns),
+        "bounds": _nums(round(v, 2) for v in xs), "bands": [_nums((i, round(ys[i], 2), round(ys[i + 1], 2))) for i in range(rows)],
+        "merges": _objects(merges)}
+    if merges:
+        grid["merge_x"] = [_nums(words(cells.get((r, c)), xs[c], xs[min(c + cs, cols)])) for (r, c), (rs, cs) in spans_of]
+    grid.update({"rules": [], "borders": _objects(borders), "fills": _objects(fills)})
+    return grid
 
 
 BOX_PART = re.compile(r"(-?\d*\.?\d+)\s*(bp|pt)?")
 
 
-def box_of(text) -> list[float] | None:
+def box_of(text: MarkValue) -> list[float] | None:
     """A mark's `/box (x y w h)`: the box adopt put the element in, from the page's top left, each
     in bp unless it says pt (TeX points: a dimension TeX computed)."""
     parts = BOX_PART.findall(str(text or ""))
@@ -581,7 +662,7 @@ def box_of(text) -> list[float] | None:
     return [round(x, 2), round(y, 2), round(x + w, 2), round(y + h, 2)]
 
 
-def points_of(text) -> list[tuple[float, float]] | None:
+def points_of(text: MarkValue) -> list[tuple[float, float]] | None:
     """A line mark's `/line (x1 y1 x2 y2)`: its two points, bp from the page's top left."""
     parts = BOX_PART.findall(str(text or ""))
     if len(parts) != 4:
@@ -592,41 +673,50 @@ def points_of(text) -> list[tuple[float, float]] | None:
 
 # ----------------------------------------------------------------------------------------------- page
 
-def fold_parts(elements: list[dict]) -> list[dict]:
+def fold_parts(elements: list[JsonObject]) -> list[JsonObject]:
     """An element's other calls (`adopt.piece_keys`: `<key>+shape`, a text box's panel) are that
     element's: a text box takes its panel's fill, and neither is an element of its own."""
-    keyed = {e["mark"]: e for e in elements if e.get("mark")}
-    out = []
+    keyed: dict[str, JsonObject] = {}
     for e in elements:
-        base, plus, _ = (e.get("mark") or "").partition("+")
+        mark = e.get("mark")
+        if mark:
+            keyed[as_str(mark, "marked element: mark")] = e
+    out: list[JsonObject] = []
+    for e in elements:
+        base, plus, _ = (as_optional_str(e.get("mark"), "marked element: mark") or "").partition("+")
         owner = keyed.get(base) if plus else None
         if owner is None or owner is e:
             out.append(e)
             continue
-        owner.setdefault("parts", []).append({k: e[k] for k in ("kind", "bbox", "mark") if k in e})
+        part: JsonObject = {k: e[k] for k in ("kind", "bbox", "mark") if k in e}
+        as_array(owner.setdefault("parts", []), "marked element: parts").append(part)
         if owner["kind"] == "text" and e["kind"] == "shape" and e.get("fill"):
             owner["fill"] = e["fill"]
     return out
 
 
-def classify_marked(page: RawPage, body: float) -> dict:
+def classify_marked(page: RawPage, body: float) -> JsonObject:
     """A marked page's slide, in `classify_page`'s shape."""
     rest, groups = split(page)
-    out = PageClassifier(rest, body).classify()
+    out: JsonObject = PageClassifier(rest, body).classify()
+    left = as_array(out["left_in_background"], "page: left_in_background")
     n = page["index"]
-    marked: list[dict] = []
+    marked: list[JsonObject] = []
     native_chars = 0
     for g in groups:
         pid = f"p{n}m{g.n}"
         if g.kind == "text":
             els, res = text_elements(g, page, body)
-            for e in res["elements"]:           # ids unique on the page: the mark's number in each
-                e["id"] = f"{e['id']}m{g.n}"
-                if isinstance(e.get("anchor"), str):
-                    e["anchor"] = f"{e['anchor']}m{g.n}"
+            for e in as_objects(res["elements"], f"marked box {g.mark}: elements"):
+                # ids unique on the page: the mark's number in each
+                e["id"] = f"{as_str(e['id'], f'marked box {g.mark}: id')}m{g.n}"
+                anchor = e.get("anchor")
+                if isinstance(anchor, str):
+                    e["anchor"] = f"{anchor}m{g.n}"
             marked += els
-            out["left_in_background"] += res["left_in_background"]
-            native_chars += res["stats"]["chars_native"]
+            left += as_array(res["left_in_background"], f"marked box {g.mark}: left_in_background")
+            native_chars += as_int(as_object(res["stats"], f"marked box {g.mark}: stats")["chars_native"],
+                                   f"marked box {g.mark}: chars_native")
         elif g.kind == "picture":
             marked.append(picture_element(g, pid))
         elif g.kind == "table":
@@ -634,8 +724,9 @@ def classify_marked(page: RawPage, body: float) -> dict:
             native_chars += sum(len(s["text"].strip()) for s in g.spans)
         else:
             marked.append(shape_element(g, pid))
-    out["elements"] += fold_parts(marked)
+    as_array(out["elements"], "page: elements").extend(fold_parts(marked))
     out["stats"] = {"chars": sum(len(s["text"].strip()) for s in page["spans"]),
-                    "chars_native": out["stats"]["chars_native"] + native_chars}
+                    "chars_native": as_int(as_object(out["stats"], "page: stats")["chars_native"], "page: chars_native")
+                    + native_chars}
     out["marked"] = len(groups)
     return out

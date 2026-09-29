@@ -248,7 +248,7 @@ def test_a_picture_with_no_colour_profile_is_untouched(tmp_path, fetcher):
 def test_a_picture_s_source_url_on_any_host_goes_through_the_fetcher(tmp_path, fetcher):
     """The original of a picture inserted by URL: a host chosen by whoever inserted it, which is
     exactly the egress a backend has to see."""
-    from beamer2slides.inverse import Planner, picture_look
+    from beamer2slides.inverse import Planner, loop_picture, picture_look
 
     big, small = png((64, 64)), png((16, 16))
     asked = []
@@ -256,7 +256,7 @@ def test_a_picture_s_source_url_on_any_host_goes_through_the_fetcher(tmp_path, f
     cur = tmp_path / "cur.png"
     cur.write_bytes(small)
     planner = SimpleNamespace(ws=SimpleNamespace(work=tmp_path), ctx=SimpleNamespace(notes=[]))
-    te = {"source_url": "https://example.org/figure.png"}
+    te = loop_picture({"source_url": "https://example.org/figure.png"}, (0.0, 0.0, 1.0, 1.0), "test")
     data, _, _ = Planner.source_url_bytes(planner, te, small, "png", picture_look(cur))
     assert asked == ["https://example.org/figure.png"]
     assert data == big and planner.ctx.notes, "the larger original was taken"

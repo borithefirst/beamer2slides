@@ -14,7 +14,12 @@ from beamer2slides import adopt
 from beamer2slides.deck_ir_types import TargetText, TextBox
 from .irs import deck_ir
 
-from .deck_records import as_dict, dicts, record, records
+from beamer2slides.inverse import TextStyle
+
+from .deck_records import as_dict, dicts, paragraph, record, records
+from .deck_records import deck as deck_of
+from .deck_records import runs as run_records
+from .deck_records import text as text_record
 from .test_adopt import at, font_folder, pt, solid
 
 EMU = 12700
@@ -23,6 +28,11 @@ EMU = 12700
 def passed(step, els: list[dict], im, px: float) -> list[dict]:
     """A deck_thumbs pass over the records `els` stand for: the elements it hands back, as dicts."""
     return dicts(step(records(els), im, px))
+
+
+def box_latex(el: dict, ctx: adopt.AdoptContext, ind: str) -> str:
+    """`adopt.text_box_latex` over the record the dict `el` stands for."""
+    return adopt.text_box_latex(text_record(el), ctx, ind)
 
 
 @pytest.fixture(autouse=True)
@@ -197,7 +207,7 @@ def test_the_loop_measures_a_bottom_or_middle_box_where_its_box_holds_it():
 # ---------------------------------------------------------------- the LaTeX it writes
 
 def source(tmp_path, d: dict) -> str:
-    return adopt.bootstrap(deck_ir(d, foreign=True), tmp_path / "tree" / "main.tex")
+    return adopt.bootstrap(deck_ir(d, foreign=True), tmp_path / "tree" / "main.tex", False, None)
 
 
 def frame_of(text: str) -> str:
@@ -242,11 +252,11 @@ def test_an_arial_bullet_on_words_of_another_face_is_arials_disc():
     as its six-point star. Drawn as Arial's disc; on Arial words, typed as they are."""
     para = lambda font: {"bullet": {"text": "•", "font": "Arial", "size": 20.0, "color": "#000000"},
                          "runs": [{"text": "x", "font": font, "size": 20.0}]}
-    spec = adopt.bullet_spec(para("News Gothic MT"), adopt.adopt_context(), 1.0, 0.0)
-    assert spec["mark"] and spec["label"] == ""
-    assert "radius=2.48pt" in spec["mark"][1] and "baseline=-4.53pt" in spec["mark"][1]
-    typed = adopt.bullet_spec(para("Arial"), adopt.adopt_context(), 1.0, 0.0)
-    assert not typed["mark"] and typed["label"] == "•"
+    spec = adopt.bullet_spec(paragraph(para("News Gothic MT")), adopt.adopt_context(), 1.0, 0.0)
+    assert spec and spec.mark and spec.label == ""
+    assert "radius=2.48pt" in spec.mark[1] and "baseline=-4.53pt" in spec.mark[1]
+    typed = adopt.bullet_spec(paragraph(para("Arial")), adopt.adopt_context(), 1.0, 0.0)
+    assert typed and not typed.mark and typed.label == "•"
 
 
 def test_a_bullet_is_followed_by_no_word_space(tmp_path):
@@ -333,6 +343,63 @@ def test_ink_on_the_boxs_first_column_is_its_own_unless_it_goes_on_outside():
 
     assert read(50.0) == 0
     assert read(48.0) is None
+
+
+def test_a_paragraph_slides_says_nothing_of_stands_at_no_indent():
+    """A paragraph with no `slides` measures (a WordArt's; one a pptx import left bare) is read at
+    indent 0 by the thumbnail passes. Reading its indents raised before 485d624."""
+    import numpy as np
+
+    from beamer2slides.deck_thumbs import inset_rows, side_gap, thumbnail_insets
+    px = 4.0
+
+    def element():
+        return {"kind": "text", "bbox": [50.0, 50.0, 200.0, 100.0], "anchor": [54.22, 64.0], "wrap_width": 141.5,
+                "paragraphs": [{"align": "left", "bullet": None, "runs": [{"text": "Words", "size": 8.0}]}],
+                "box": {"valign": "top", "scale": 720 / 453.54}}
+
+    im = np.full((int(300 * px), int(453.54 * px), 3), 240, dtype=np.int16)
+    im[int(54.2 * px):int(60.2 * px), int(50.6 * px):int(90.6 * px)] = 20
+    el = record(element())
+    assert isinstance(el, TargetText) and el.paragraphs[0].slides is None
+    got, = passed(thumbnail_insets, [element()], im, px)
+    assert got["box"]["insets"] == 0
+    assert side_gap(el, [el], im, px) == pytest.approx(1.0, abs=0.7)
+    assert isinstance(el.box, TextBox)
+    assert inset_rows(el, el.box, [el], el.paragraphs, im, px) is None, "no metrics for Words"
+
+
+def test_a_font_with_no_unicode_cmap_gives_no_glyph_metrics(tmp_path, monkeypatch):
+    """A deck font whose only cmap is not Unicode finds no glyph by its character: no metrics, as
+    for a font not at hand. Before 485d624 its glyph function raised AttributeError on None.get."""
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+
+    from beamer2slides import deck_thumbs
+    fb = FontBuilder(1000, isTTF=True)
+    fb.setupGlyphOrder([".notdef", "A"])
+    fb.setupCharacterMap({65: "A"})
+    pen = TTGlyphPen(None)
+    pen.moveTo((0, 0))
+    pen.lineTo((500, 700))
+    pen.lineTo((500, 0))
+    pen.closePath()
+    fb.setupGlyf({".notdef": TTGlyphPen(None).glyph(), "A": pen.glyph()})
+    fb.setupHorizontalMetrics({".notdef": (500, 0), "A": (600, 0)})
+    fb.setupHorizontalHeader(ascent=800, descent=-200)
+    fb.setupNameTable({"familyName": "Nomap Sans", "styleName": "Regular"})
+    fb.setupOS2()
+    fb.setupPost()
+    mac = fb.font["cmap"].tables[0]
+    mac.platformID, mac.platEncID = 1, 0            # Macintosh Roman: no Unicode table left
+    fb.font["cmap"].tables = [mac]
+    path = tmp_path / "NomapSans.ttf"
+    fb.save(str(path))
+    from fontTools.ttLib import TTFont
+    assert TTFont(str(path)).getBestCmap() is None
+    monkeypatch.setattr(adopt, "font_family", lambda name, want, near="": {"match": "Nomap Sans", "UprightFont": path})
+    monkeypatch.setattr(deck_thumbs, "_FACES", {})
+    assert deck_thumbs.face_glyphs("Nomap Sans", False, False) is None
 
 
 def monospace_face(monkeypatch, lsb: float = 0.05, top: float = 0.7):
@@ -498,16 +565,16 @@ def test_an_overflowing_box_is_read_where_its_words_stand():
 def test_a_middle_aligned_box_stacks_its_last_paragraphs_space_below():
     """intro-lecture's titles (10 pt below) stood 5 pt low without it; top-aligned boxes and gdg24's
     turned stickers (ELLIPSE) show none of it."""
-    last = {"slides": {"space_below": 10.0}}
-    assert adopt.trailing_space(last, "middle") == 10.0 and adopt.trailing_space(last, "bottom") == 10.0
-    assert adopt.trailing_space(last, "top") == 0.0 and adopt.trailing_space(last, "middle", "ELLIPSE") == 0.0
+    last = paragraph({"slides": {"space_below": 10.0}})
+    assert adopt.trailing_space(last, "middle", None) == 10.0 and adopt.trailing_space(last, "bottom", None) == 10.0
+    assert adopt.trailing_space(last, "top", None) == 0.0 and adopt.trailing_space(last, "middle", "ELLIPSE") == 0.0
     el = {"kind": "text", "bbox": [0, 0, 100, 80], "box": {"scale": 2.0, "valign": "middle"},
           "paragraphs": [{"runs": [{"text": "add(6, 7)", "size": 15.0}], "slides": {}},
                          {"runs": [{"text": "???", "size": 24.0}], "slides": {"space_below": 10.0}}]}
-    text = adopt.text_box_latex(el, adopt.adopt_context(), "")
+    text = box_latex(el, adopt.adopt_context(), "")
     assert "\\begin{slidebox}[middle,tail=5]" in text, text
     el["box"]["valign"] = "top"
-    assert "tail=" not in adopt.text_box_latex(el, adopt.adopt_context(), "")
+    assert "tail=" not in box_latex(el, adopt.adopt_context(), "")
 
 
 def test_a_line_as_wide_as_its_box_stays_on_one_line():
@@ -515,11 +582,11 @@ def test_a_line_as_wide_as_its_box_stays_on_one_line():
     code (9.44875 page pt, set at 9.45) needs a measure 0.013% wider to keep its 621.0 pt line, and
     sc-dark-minimal's 88 pt heading (27.714, set at 27.71) one that much narrower to wrap."""
     scale = 720 / 453.54
-    code = [{"runs": [{"text": "x", "size": 9.45}], "slides": {"size": 15.0}}]
+    code = [paragraph({"runs": [{"text": "x", "size": 9.45}], "slides": {"size": 15.0}})]
     assert 69 * 0.6 * 9.45 <= adopt.measure(391.18, code, scale) < 391.26
-    heading = [{"runs": [{"text": "About Us.", "size": 27.71}], "slides": {"size": 87.99}}]
+    heading = [paragraph({"runs": [{"text": "About Us.", "size": 27.71}], "slides": {"size": 87.99}})]
     assert adopt.measure(129.13, heading, 3.1750231512104774) < 129.13
-    odd = [{"runs": [{"text": "x", "size": 12.0}], "slides": {"size": 30.0}}]
+    odd = [paragraph({"runs": [{"text": "x", "size": 12.0}], "slides": {"size": 30.0}})]
     assert adopt.measure(100.0, odd, 2.0) == 100.0 + adopt.FIT_SLACK, "not a rounding: left alone"
 
 
@@ -753,7 +820,7 @@ def test_single_spaced_lines_are_a_whole_number_of_pixels_apart():
     assert pitch(14) == pytest.approx(16.8), "gdg24's 14 pt body copy"
     assert pitch(24, on=False) == pytest.approx(28.8)
     assert pitch(14, 1.15) == pytest.approx(14 * 1.2 * 1.15)
-    above, _ = adopt.snapped_line_box(12.0, 1.0, scale)
+    above, _ = adopt.snapped_line_box(12.0, 1.0, scale, True)
     assert above == adopt.line_box(12.0, 1.0)[0], "the baseline stays; the depth takes the difference"
 
     def snap_of(width):
@@ -1098,12 +1165,12 @@ def test_a_bulleted_right_to_left_first_line_is_measured_by_its_baseline():
 def test_a_box_with_powerpoint_insets_starts_its_text_3_6_pt_higher():
     el = {"kind": "text", "bbox": [0, 0, 100, 50], "box": {"scale": 1.0, "valign": "top"},
           "paragraphs": [{"runs": [{"text": "Hi", "size": 10.0}], "slides": {}}]}
-    plain = adopt.text_box_latex(el, adopt.adopt_context(), "")
+    plain = box_latex(el, adopt.adopt_context(), "")
     el["box"]["inset_y"] = 3.6
-    assert "inset=6.48" in plain and "inset=2.88" in adopt.text_box_latex(el, adopt.adopt_context(), "")
+    assert "inset=6.48" in plain and "inset=2.88" in box_latex(el, adopt.adopt_context(), "")
     assert "{6.7,0,86.61,50}" in plain
     el["box"]["inset_x"] = 3.6
-    assert "{3.6,0,92.81,50}" in adopt.text_box_latex(el, adopt.adopt_context(), "")
+    assert "{3.6,0,92.81,50}" in box_latex(el, adopt.adopt_context(), "")
 
 
 def test_the_thumbnails_measure_a_first_line_and_skip_what_crosses_it():
@@ -1134,14 +1201,15 @@ def test_a_stand_in_is_condensed_to_the_widths_the_thumbnails_show(tmp_path):
     # five "A"s at 10 pt: 3000 units of advance less the last one's 100 of right bearing = 29 pt of ink
 
     def sample(width, text="AAAAA"):
-        return {"ink_width": width, "paragraphs": [{"runs": [{"text": text, "size": 10.0, "font": "Deck Serif"}]}]}
-    target = {"slides": [{"elements": [sample(26.1), sample(26.2), sample(15.0)]}]}
+        return {"kind": "text", "bbox": [0, 0, 100, 20], "ink_width": width,
+                "paragraphs": [{"runs": [{"text": text, "size": 10.0, "font": "Deck Serif"}]}]}
+    target = deck_of({"slides": [{"elements": [sample(26.1), sample(26.2), sample(15.0)]}]})
     assert adopt.font_widths("Deck Serif", files, target) == pytest.approx(0.9, abs=0.005)
     assert adopt.stretch("Deck Serif", "TinySans", files, target) == ",FakeStretch=0.902"
     assert adopt.stretch("Tiny Sans", "TinySans", files, target) == "", "the deck's own font"
-    near = {"slides": [{"elements": [sample(28.8), sample(29.1)]}]}
+    near = deck_of({"slides": [{"elements": [sample(28.8), sample(29.1)]}]})
     assert adopt.font_widths("Deck Serif", files, near) is None, "within 2%"
-    lone = {"slides": [{"elements": [sample(26.1)]}]}
+    lone = deck_of({"slides": [{"elements": [sample(26.1)]}]})
     assert adopt.font_widths("Deck Serif", files, lone) is None, "one measure is not enough"
 
 
@@ -1152,7 +1220,7 @@ def test_a_paragraph_of_two_sizes_is_spaced_line_by_line():
                                    {"text": "two words", "size": 10.0}], "slides": {}},
                          {"runs": [{"text": "Next", "size": 10.0}], "slides": {}}]}
     ctx = adopt.adopt_context()
-    tex = adopt.text_box_latex(el, ctx, "")
+    tex = box_latex(el, ctx, "")
     styles = "\n".join(adopt.style_definitions(ctx))
     small, big = adopt.line_box(10.0, 1.0), adopt.line_box(20.0, 1.0)
     first = re.search(r"\\slidepar\[style=([\w-]+),mixed\]\{", tex)
@@ -1179,7 +1247,7 @@ def test_the_gap_between_two_paragraphs_is_the_bigger_of_their_spaces():
     """ap-bio-stats slide 52: 11 pt below one paragraph and 11 pt above the next stand them 11 pt apart
     on the thumbnail, not 22."""
     def gap(below, above):
-        return adopt.text_box_latex(prose({"runs": [words("One")], "slides": {"space_below": below}},
+        return box_latex(prose({"runs": [words("One")], "slides": {"space_below": below}},
                                           {"runs": [words("Two")], "slides": {"space_above": above}}),
                                     adopt.adopt_context(), "")
     assert gap(11, 11) == gap(11, 0) == gap(0, 11) != gap(0, 0)
@@ -1189,7 +1257,7 @@ def test_each_list_item_says_whether_its_side_of_the_gap_collapses():
     """creandum-board: the first item is NEVER_COLLAPSE with 3 pt below, the next COLLAPSE_LISTS."""
     def items(mode):
         bullet = {"text": "●", "size": 10.0}
-        return adopt.text_box_latex(prose(
+        return box_latex(prose(
             {"runs": [words("One")], "bullet": bullet, "slides": {"space_below": 3, "spacing_mode": mode}},
             {"runs": [words("Two")], "bullet": bullet, "slides": {"spacing_mode": "COLLAPSE_LISTS"}}),
             adopt.adopt_context(), "")
@@ -1200,7 +1268,7 @@ def test_each_list_item_says_whether_its_side_of_the_gap_collapses():
 
 def test_a_bulleted_line_with_tabs_stands_them_on_the_default_stops():
     """creandum-board's "DD/MM/YY XX am<TAB><TAB>Other important date" items."""
-    tex = adopt.text_box_latex(prose({"runs": [words("9 am\t\tBoard")], "bullet": {"text": "●", "size": 10.0},
+    tex = box_latex(prose({"runs": [words("9 am\t\tBoard")], "bullet": {"text": "●", "size": 10.0},
                                       "slides": {"indent_start": 18, "indent_first": 0}}), adopt.adopt_context(), "")
     assert tex.count("\\slidestab{36.00pt}") == 2 and "\\global\\slidesx=18.00pt" in tex
 
@@ -1210,18 +1278,19 @@ def test_spaces_are_kept_however_many_and_as_wide_as_their_own_font():
     the text off by two Arial spaces - folded into one Calibri space, every item's text came 2 pt short."""
     ctx = adopt.adopt_context()
     ctx.font_switches = {"Arial": "\\adoptfontA"}
-    base = {"size": 10.0, "font": "Calibri", "family": "sans", "bold": False, "italic": False, "color": None}
-    tex = adopt.runs_tex([words("•  ", font="Arial"), words("Mathematically")], base, ctx, "\\break ")
+    # a run's colour is always said (black where the dict said none), and so is its base's
+    base = TextStyle(size=10.0, font="Calibri", family="sans", bold=False, italic=False, color="#000000", weight=None)
+    tex = adopt.runs_tex(run_records([words("•  ", font="Arial"), words("Mathematically")]), base, ctx, "\\break ")
     assert tex == "{\\adoptfontA •\\ \\ }Mathematically"
     # the same style on both sides of a run boundary: the two spaces are two, and none ends the paragraph
-    tex = adopt.runs_tex([words("a "), words(" b  ", color="#ff0000")], base, ctx, "\\break ")
+    tex = adopt.runs_tex(run_records([words("a "), words(" b  ", color="#ff0000")]), base, ctx, "\\break ")
     assert tex.startswith("a \\") and tex.endswith("{b}")
 
 
 def test_a_superscript_does_not_raise_its_line_box():
     """ap-bio-stats slide 4: the strut inside "E = mc²"'s superscript made its line 4 pt taller."""
     el = prose({"runs": [words("Law ", size=20.0), words("E = mc"), words("2", script="super")], "slides": {}})
-    tex = adopt.text_box_latex(el, adopt.adopt_context(), "")
+    tex = box_latex(el, adopt.adopt_context(), "")
     sup = tex[tex.index("\\textsuperscript"):]
     assert "\\slidestrut" not in sup.split("}")[0]
     assert re.search(r"\\slidestrut\{[\d.]+\}\{[\d.]+\}\\textsuperscript\{2\}", tex)

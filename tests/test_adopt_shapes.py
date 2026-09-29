@@ -168,7 +168,7 @@ def test_a_line_says_what_its_heads_dashes_and_route_are():
 def test_an_elbow_connector_is_drawn_in_its_frame_with_its_heads(tmp_path):
     text = adopt.bootstrap(deck_ir(deck(line("l", 100, 50, transform(10, 10), endArrow="FILL_ARROW",
                                              line_type="BENT_CONNECTOR_3", category="BENT")), foreign=True),
-                           tmp_path / "main.tex")
+                           tmp_path / "main.tex", False, None)
     path = next(l for l in text.splitlines() if "\\path" in l)
     assert path.count("--") == 3, "three legs"
     # Slides' filled head is TikZ's `->`, which slides.sty makes the triangle Slides draws
@@ -180,7 +180,7 @@ def test_a_line_that_says_nothing_of_its_kind_is_a_freeform_and_not_drawn(tmp_pa
     """journey-maps s2: the corner-to-corner segment of a filled polygon's box is ink it does not have."""
     pe = line("l", 100, 50, transform(10, 10))
     del pe["line"]["lineType"], pe["line"]["lineCategory"]
-    text = adopt.bootstrap(deck_ir(deck(pe), foreign=True), tmp_path / "main.tex")
+    text = adopt.bootstrap(deck_ir(deck(pe), foreign=True), tmp_path / "main.tex", False, None)
     assert "\\path" not in text
 
 
@@ -266,7 +266,7 @@ def boxes(n: int) -> list[dict]:
 def test_a_look_the_deck_draws_again_and_again_becomes_a_name(tmp_path):
     """A person reading the source should meet a shape once: shapes drawn alike name the look, and
     the preamble says once what the name is. Twice is not a repetition - those keep their keys."""
-    text = adopt.bootstrap(deck_ir(deck(*alike(3), *boxes(2)), foreign=True), tmp_path / "main.tex")
+    text = adopt.bootstrap(deck_ir(deck(*alike(3), *boxes(2)), foreign=True), tmp_path / "main.tex", False, None)
     keys = dict(re.findall(r"\\slideshapestyle\{([\w-]+)\}\{([^}]*)\}", text))
     assert keys == {"fill-yellow-outline-blue": "fill=Yellow,draw=blue,line width=1.89pt"}
     assert text.count("[fill-yellow-outline-blue]") == 3
@@ -288,7 +288,7 @@ def test_a_style_name_is_never_a_word_tikz_reads_as_a_colour():
 def test_a_named_look_can_still_be_changed_on_one_shape(tmp_path):
     """A name must make an edit cheaper, not dearer: `\\sliderect[card,fill=Red]{...}` recolours one
     card and leaves the rest, because TikZ takes the last key that sets a property."""
-    adopt.bootstrap(deck_ir(deck(*alike(3)), foreign=True), tmp_path / "main.tex")
+    adopt.bootstrap(deck_ir(deck(*alike(3)), foreign=True), tmp_path / "main.tex", False, None)
     sty = (tmp_path / "slides.sty").read_text(encoding="utf-8")
     assert "\\newcommand\\slideshapestyle[2]{\\tikzset{#1/.style={#2}}}" in sty
 
@@ -297,7 +297,7 @@ def test_a_path_of_too_many_points_to_read_keeps_them_in_a_file(tmp_path):
     """As a traced freeform's outline does (`traced_block`): a five-pointed star is twenty numbers
     that nobody edits by hand, and in the frame they bury the slide's words. `\\slidepath` expands to
     the very `\\path` the frame held, so nothing moves, and the shape is still a `\\slideshape`."""
-    text = adopt.bootstrap(deck_ir(deck(*alike(3)), foreign=True), tmp_path / "main.tex")
+    text = adopt.bootstrap(deck_ir(deck(*alike(3)), foreign=True), tmp_path / "main.tex", False, None)
     drawn = [ln.strip() for ln in text.splitlines() if "\\slidepath" in ln]
     assert len(drawn) == 3 and all(ln.startswith("\\slideshape{") for ln in drawn)
     rel = re.search(r"\{(shapes/star5-\w+\.tex)\}", drawn[0]).group(1)
@@ -315,7 +315,7 @@ def test_a_path_of_too_many_points_to_read_keeps_them_in_a_file(tmp_path):
 def test_a_path_short_enough_to_read_stays_in_the_frame(tmp_path):
     """The file is for coordinates nobody reads; an elbow connector's three legs are the shape."""
     text = adopt.bootstrap(deck_ir(deck(line("l", 100, 50, transform(10, 10), line_type="BENT_CONNECTOR_3",
-                                             category="BENT")), foreign=True), tmp_path / "main.tex")
+                                             category="BENT")), foreign=True), tmp_path / "main.tex", False, None)
     assert "\\slidepath" not in text and "\\path[" in text
     assert not (tmp_path / "shapes").exists()
 
@@ -334,7 +334,7 @@ def test_turned_words_are_written_upright_and_set_turned(tmp_path):
     not the bounding box's), and `\\adoptturned` sets that turned about the centre."""
     ir = deck_ir(turned_text_deck(30), foreign=True)
     el = ir["slides"][0]["elements"][0]
-    text = adopt.bootstrap(ir, tmp_path / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "main.tex", False, None)
     assert "\\adoptturned{-30.00}" in text
     assert "\\newsavebox\\adopt@box" in (tmp_path / "slides.sty").read_text(encoding="utf-8")
     width = float(text.split("\\slidetext{")[1].split("}")[0].split(",")[2])
@@ -346,9 +346,9 @@ def test_turned_words_are_written_upright_and_set_turned(tmp_path):
 
 def test_upright_and_mirrored_words_are_not_wrapped(tmp_path):
     for ir in (deck_ir(turned_text_deck(0), foreign=True), deck_ir(turned_text_deck(0, flip_h=True), foreign=True)):
-        assert "adoptturned" not in adopt.bootstrap(ir, tmp_path / "main.tex")
+        assert "adoptturned" not in adopt.bootstrap(ir, tmp_path / "main.tex", False, None)
 
 
 def test_upside_down_words_are_turned_half_way(tmp_path):
-    text = adopt.bootstrap(deck_ir(turned_text_deck(0, flip_v=True), foreign=True), tmp_path / "main.tex")
+    text = adopt.bootstrap(deck_ir(turned_text_deck(0, flip_v=True), foreign=True), tmp_path / "main.tex", False, None)
     assert "\\adoptturned{180.00}" in text or "\\adoptturned{-180.00}" in text

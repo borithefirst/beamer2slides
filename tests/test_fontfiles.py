@@ -150,7 +150,7 @@ def test_supplied_fonts_are_found_first_and_set_the_deck(tmp_path):
     missing: list = []
     with adopt.use_fonts(root):
         assert adopt.font_family("Tiny Sans", "sans")["UprightFont"].parent == root / "tinysans"
-        text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", missing=missing)
+        text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, missing)
     assert "\\setsansfont{TinySans}[Path=fonts/,Extension=.ttf,UprightFont=*-Regular,BoldFont=*-Bold," in text
     assert (tmp_path / "tree" / "fonts" / "TinySans-Regular.ttf").exists()
     assert missing == []
@@ -163,7 +163,7 @@ def test_a_font_that_is_nowhere_is_named_with_what_it_was_set_in(tmp_path):
     ir = deck_ir(deck_with(text_shape("t", "Words in a face nobody has", 10, 10, 300, 40, font="Nowhere Sans")),
                  foreign=True)
     missing: list = []
-    adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", missing=missing)
+    adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, missing)
     # (by the name the IR carries it under: the family's name without its spaces)
     assert [(m["font"], m["kind"], m["set_in"]) for m in missing] == [("NowhereSans", "sans", "texgyreheros")]
     assert missing[0]["letters"] >= len("Words in a face nobody has")
@@ -179,7 +179,7 @@ def test_a_metric_twin_is_still_a_font_the_deck_lacks(tmp_path):
     ir = deck_ir(deck_with(text_shape("t", "Words in Arial", 10, 10, 300, 40, font="Arial")), foreign=True)
     missing: list = []
     with adopt.use_fonts(root):
-        text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", missing=missing)
+        text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, missing)
     assert "\\setsansfont{Arimo}" in text
     assert [(m["font"], m["set_in"]) for m in missing] == [("Arial", "Arimo")]
 

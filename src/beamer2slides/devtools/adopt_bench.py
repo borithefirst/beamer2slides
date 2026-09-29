@@ -337,7 +337,7 @@ def _run(name, folder, run, res, t0, iters, flow, slides, cache, guard, blind, f
         target = load_target(folder, slides, run, files)
         res["n"] = len(target["slides"])
         tex = run / "tree" / "main.tex"
-        adopt.bootstrap(target, tex, flow)
+        adopt.bootstrap(target, tex, flow, None)
         res["bootstrap_s"] = round(time.perf_counter() - t0, 1)
         key = cache_key(tex.parent, target)
         hit = CORPUS / name / "cache" / key

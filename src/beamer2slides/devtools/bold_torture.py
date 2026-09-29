@@ -195,8 +195,9 @@ def declared(target: dict, tree: Path) -> tuple[list[str], list[tuple[str, str, 
     writers, into a real tree, so what is probed is exactly what `adopt` would have written."""
     from beamer2slides import adopt, scripts
     from beamer2slides.adopt_context import adopt_context
+    from beamer2slides.deck_ir_types import parse_target
     ctx = adopt_context()
-    lines = scripts.script_preamble(target, tree) + adopt.font_preamble(target, tree, ctx)
+    lines = scripts.script_preamble(target, tree) + adopt.font_preamble(parse_target(target), target, tree, ctx)
     # which deck font each of the document's three kinds was set in: font_preamble's own ranking
     counts: dict = {}
     for s in target["slides"]:

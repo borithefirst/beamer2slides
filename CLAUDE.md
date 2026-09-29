@@ -366,9 +366,13 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   into that same deck (`adopt_sync.py`). deck_ir builds `TargetDeck` records (`target_json` its
   one JSON writer); the thumbnail passes (deck_fills, deck_freeforms, deck_thumbs) take a slide's
   element records and hand back new ones (`replace`), never changing one; adopt parses the target
-  once (`bootstrap`), `element_latex` matches each kind to `assert_never`, adopt_shapes and
-  adopt_theme read records (text boxes and tables still write from `element_json`); tests build
-  records with `tests/deck_records.py`. adopt's
+  once (`bootstrap`), `element_latex` matches each kind to `assert_never`; adopt_shapes,
+  adopt_theme, text boxes (`text_box_latex`, `box_parts`) and tables (`table_block`) read records,
+  and adopt no longer calls `element_json`; inverse's Planner reads the loop's view as
+  `LoopElement` records (`loop_element`/`loop_picture`, from deck.json or a target alike,
+  `typed_target` -> `TargetDeck | JsonObject`) and matches every residual kind to `assert_never`;
+  marked builds its elements as `JsonObject`s (ir's TypedDicts wait on a typed
+  `PageClassifier.classify`); tests build records with `tests/deck_records.py`. adopt's
   state is `adopt_context.AdoptContext` (inverse's Context plus every field adopt keeps), built by
   `adopt_context()`: never set an attribute on a context that is not declared there. An adopted source also converts: a marked shape Slides has
   no shape for (line, freeform, picture fill, outline alone) is its picture at render

@@ -542,17 +542,15 @@ class SlidePara:
 
 @dataclass(frozen=True, kw_only=True)
 class Para:
-    """A `SlidePara` of a slide held as a dict (inverse finds each in its source by `el["id"]`).
-    `el` and `p` stay bare dicts, as `Comparison.residuals` do: inverse reads them key by key, and
-    a `JsonObject` makes each of those reads an error until inverse narrows them."""
-    el: dict
+    """A `SlidePara` of a slide held as a dict (inverse finds each in its source by `el["id"]`)."""
+    el: JsonObject
     ei: int
     pi: int
     order: int
     text: str
 
     @property
-    def p(self) -> dict:
+    def p(self) -> JsonObject:
         return as_objects(self.el["paragraphs"], "paragraphs")[self.pi]
 
 

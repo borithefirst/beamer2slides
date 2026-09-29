@@ -945,6 +945,11 @@ def _page_gradient_json(g: PageGradient) -> JsonObject:
     return out
 
 
+def page_gradient_json(g: PageGradient) -> JsonObject:
+    """A slide's `background_gradient` as target.json writes it (`parse_page_gradient` read back)."""
+    return _page_gradient_json(g)
+
+
 def crop_json(c: Crop) -> JsonObject:
     """A picture's `crop` as `deck_ir` writes it (`compare.cropped_picture` reads that)."""
     return {"l": c.l, "t": c.t, "r": c.r, "b": c.b}
@@ -1152,5 +1157,5 @@ __all__ = ["ABSENT", "Absent", "CellParagraph", "Chart", "Crop", "DeckSource", "
            "TableBorder", "TableCell", "TargetBullet", "TargetDeck", "TargetDiagram", "TargetElement", "TargetImage",
            "TargetLine", "TargetParagraph", "TargetRun", "TargetShape", "TargetSlide", "TargetTable", "TargetText",
            "TextBox", "ThumbnailOf", "Trace", "Video", "crop_json", "element_json", "is_target", "paragraph_json", "parse_element",
-           "parse_page_gradient", "parse_target", "run_json",
+           "page_gradient_json", "parse_page_gradient", "parse_target", "run_json",
            "slide_json", "target_json"]

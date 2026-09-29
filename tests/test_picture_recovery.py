@@ -306,7 +306,7 @@ def test_no_downloads_draws_a_turned_picture_from_the_thumbnail_and_the_frame_sa
     assert "error" in el["thumbnail_of"] and "error" not in el
     assert adopt.pictures_missing(ir) == []
     assert adopt.pictures_from_thumbnail(ir) == [{"slide": 1, "alt": "Sand cat"}]
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert "% picture from the slide thumbnail: Sand cat" in text and "picture left out" not in text
     assert re.search(r"\\slidepicture\[angle=-30\]\{[\d.,]+\}\{figures/sand-cat-\w+\.png\}", text)
 
@@ -316,7 +316,7 @@ def test_without_its_thumbnail_the_picture_stays_missing(tmp_path):
     ir = deck_ir(pres, fetch=refused, images=tmp_path / "images", foreign=True, thumbnails=lambda n: None)
     [el] = ir["slides"][0]["elements"]
     assert "picture_source" not in el and len(adopt.pictures_missing(ir)) == 1
-    assert "% picture left out" in adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    assert "% picture left out" in adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
 
 
 def test_a_pptx_given_later_puts_the_file_back_as_the_deck_draws_it(tmp_path):
@@ -357,7 +357,7 @@ def test_a_background_picture_that_never_came_is_the_page_the_thumbnail_shows(tm
     assert (bg[300:, 500:] == thumb[300:, 500:]).all(), "the page the thumbnail shows, pixel for pixel"
     assert adopt.pictures_missing(ir) == []
     assert adopt.pictures_from_thumbnail(ir) == [{"slide": 1, "alt": "slide background"}]
-    assert adopt.THUMBNAIL_BACKGROUND_NOTE in adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    assert adopt.THUMBNAIL_BACKGROUND_NOTE in adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
 
 
 def test_adopt_reports_what_the_thumbnails_stood_in_for(tmp_path, monkeypatch, fetcher):

@@ -9,7 +9,8 @@ the one strict way (`parse_element`): a key no version of `deck_ir` writes is st
 import hashlib
 import json
 
-from beamer2slides.deck_ir_types import TargetElement, element_json, parse_element
+from beamer2slides.deck_ir_types import (TableCell, TargetDeck, TargetElement, TargetParagraph, TargetRun,
+                                         TargetTable, TargetText, element_json, parse_element, parse_target)
 
 # The keys each kind takes as null. Any other key a test sets to None is one deck_ir leaves out.
 _NULLABLE = {"text": {"group", "key", "placeholder", "shape_type", "outline_color"},
@@ -38,6 +39,9 @@ def _paragraph(p: dict, x0: float) -> dict:
            "lines": [], "runs": []}
     out.update(_pruned(p, {"bullet", "tab_x0"}))
     out["runs"] = [_run(r, size) for r in runs]
+    if out["bullet"] is not None:
+        # a bullet that says no kind is a glyph: only "number" changes what adopt writes
+        out["bullet"] = {"kind": "glyph", **out["bullet"]}
     if "slides" in out:
         # What the dict readers took a measure Slides left unsaid to be.
         out["slides"] = {"font": runs[0].get("font", "Arial") if runs else "Arial", "size": size,
@@ -122,6 +126,61 @@ def filled(d: dict) -> dict:
     if "frame" in out:
         out["frame"] = _frame(out["frame"], bbox)
     return out
+
+
+def slide_filled(s: dict, n: int) -> dict:
+    """A slide dict with every key `deck_ir` always writes; its elements `filled`."""
+    out = {"page": n, "frame": f"f{n}", "size": [720.0, 405.0], "objectId": f"slide{n}", "key": None,
+           "notes": None, "background_color": None, "background_picture": None}
+    out.update(s)
+    out["elements"] = [filled(e) for e in s.get("elements", [])]
+    return out
+
+
+def target_filled(d: dict) -> dict:
+    """A target dict (`{"slides": [...]}` and what else a test says), with every key filled."""
+    out = {"version": 1, "source": {"title": None}, "page_size": [720.0, 405.0], "scale": 1.0}
+    out.update(d)
+    out["slides"] = [slide_filled(s, n) for n, s in enumerate(d.get("slides", []), 1)]
+    return out
+
+
+def deck(d: dict) -> TargetDeck:
+    """The record of a test's partial target dict."""
+    return parse_target(target_filled(d))
+
+
+def paragraph(p: dict) -> TargetParagraph:
+    """One text paragraph's record, from the keys a test says."""
+    el = record({"kind": "text", "bbox": [0, 0, 100, 20], "paragraphs": [p]})
+    assert isinstance(el, TargetText)
+    return el.paragraphs[0]
+
+
+def runs(rs: list[dict]) -> tuple[TargetRun, ...]:
+    """Run records, from the keys a test says (a size a run leaves out is 12)."""
+    return paragraph({"runs": rs}).runs
+
+
+def text(d: dict) -> TargetText:
+    """A text element's record, from the keys a test says."""
+    el = record({"kind": "text", **d})
+    assert isinstance(el, TargetText)
+    return el
+
+
+def table(d: dict) -> TargetTable:
+    """A table's record, from the keys a test says (a bbox is filled in when it says none)."""
+    el = record({"kind": "table", "bbox": [0, 0, 100, 20], **d})
+    assert isinstance(el, TargetTable)
+    return el
+
+
+def cell(c: dict) -> TableCell:
+    """One table cell's record, from the keys a test says (row and column 0 unless it says)."""
+    cells = table({"table_cells": [{"row": 0, "col": 0, **c}]}).table_cells
+    assert cells is not None
+    return cells[0]
 
 
 def record(d: dict) -> TargetElement:

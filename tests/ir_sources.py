@@ -95,7 +95,7 @@ def adopted_source(case: str, home: Path, target: dict | None = None) -> dict:
         mp.setenv("B2S_NO_DOWNLOADS", "1")  # (offline: no font or picture fetch whatever the deck names)
         adopt._FAMILIES.clear()
         try:
-            text = adopt.bootstrap(target, tex)
+            text = adopt.bootstrap(target, tex, False, None)
         finally:
             adopt._FAMILIES.clear()
     if shutil.which(engine(text), path=tex_env()["PATH"]) is None:

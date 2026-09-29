@@ -14,7 +14,7 @@ import pytest
 
 from beamer2slides import adopt
 from beamer2slides.deck_ir import family_of
-from .deck_records import dicts, records
+from .deck_records import deck, dicts, records
 from .irs import deck_ir
 
 EMU = 12700
@@ -215,7 +215,7 @@ def test_a_blank_line_someone_typed_is_a_line(tmp_path):
     box = next(e for e in ir["slides"][0]["elements"] if e["kind"] == "text" and e["bbox"][1] > 80)
     assert ["".join(r["text"] for r in p["runs"]) for p in box["paragraphs"]] == \
         [" ", "first", " ", "second"], "the blank lines are kept, the trailing one is not"
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     blank = re.findall(r"\\slide(?:par(?:\[[^\]]*\])?|text(?:\[[^\]]*\])?(?:\{[^}]*\})+)\{\}$", text, re.M)
     assert len(blank) == 2, "each blank line takes a line of its own"
 
@@ -268,7 +268,7 @@ def placed(text: str) -> int:
 
 def source_for(tmp_path: Path, target: dict | None = None) -> str:
     target = target if target is not None else target_with_pictures(tmp_path)
-    return adopt.bootstrap(target, tmp_path / "tree" / "main.tex")
+    return adopt.bootstrap(target, tmp_path / "tree" / "main.tex", False, None)
 
 
 def theme_of(tmp_path: Path) -> str:
@@ -391,7 +391,7 @@ def test_a_slide_on_a_picture_is_drawn_on_it(tmp_path):
     ir = deck_ir(pres, foreign=True, fetch=lambda url: png.read_bytes(), images=tmp_path / "images")
     assert ir["slides"][1]["background_file"] and "background_file" not in ir["slides"][0]
     assert "background_file" not in deck_ir(pres)["slides"][1], "pull reads no backdrop"
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert text.count(",backdrop=figures/") == 1
     assert (tmp_path / "tree" / "figures").is_dir()
 
@@ -461,7 +461,7 @@ def test_a_typeface_the_machine_lacks_takes_the_nearest_of_its_kind(tmp_path, mo
         text_shape("s0_code", "print(1)", 100, 200, 300, 40, font="Space Mono"))
     monkeypatch.setenv("B2S_FONTS", str(font_folder(
         tmp_path, "GoogleSansFlex-Regular.ttf", "GoogleSansCode-Regular.ttf", "Cousine-Regular.ttf")))
-    text = adopt.bootstrap(deck_ir(pres, foreign=True), tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(deck_ir(pres, foreign=True), tmp_path / "tree" / "main.tex", False, None)
     assert "\\setmonofont{GoogleSansCode}" in text, "the nearest kin of the face the deck is set in"
 
 
@@ -481,15 +481,15 @@ def test_a_trailing_width_qualifier_is_a_different_narrower_font(tmp_path):
     assert adopt.stood_in("Arial MT", dict(files)) is None, "a genuine alias, not a stand-in"
 
     def sample(width, text="AAAAA"):
-        return {"ink_width": width,
+        return {"kind": "text", "bbox": [0, 0, 100, 20], "ink_width": width,
                 "paragraphs": [{"runs": [{"text": text, "size": 10.0, "font": "Arial Narrow"}]}]}
     # 5 "A"s at 10 pt is 29 pt of ink at this machine's Arial (600 advance, 100 right bearing); the
     # deck's own thumbnails show Arial Narrow's words about 10% narrower than that
-    target = {"slides": [{"elements": [sample(26.1), sample(26.2), sample(15.0)]}]}
+    target = deck({"slides": [{"elements": [sample(26.1), sample(26.2), sample(15.0)]}]})
     assert adopt.stretch("Arial Narrow", "Arial", files, target) == ",FakeStretch=0.902"
     assert adopt.stretch("Arial", "Arial", files, target) == "", "the deck's own font is never stretched"
     # too few lines measured: Arial Narrow is Arial at 82% by design (offline, ua-space's title)
-    assert adopt.stretch("Arial Narrow", "Arimo", files, {"slides": []}) == ",FakeStretch=0.82"
+    assert adopt.stretch("Arial Narrow", "Arimo", files, deck({"slides": []})) == ",FakeStretch=0.82"
     assert adopt.same_font_name("calibri", "calibrilight"), "a weight is the same family, not a stand-in"
 
 
@@ -557,11 +557,11 @@ def test_verdana_is_set_wide_and_consolas_narrow_with_too_few_lines_to_measure(t
     to measure (`font_widths` needs at least two): Verdana's stand-in is stretched out to match its
     screen-legible width, Consolas' the other way, same as Arial Narrow's 82% (ua-space, offline)."""
     noto = {"UprightFont": tmp_path / "NotoSans-Regular.ttf"}
-    assert adopt.stretch("Verdana", "NotoSans", noto, {"slides": []}) == ",FakeStretch=1.07"
+    assert adopt.stretch("Verdana", "NotoSans", noto, deck({"slides": []})) == ",FakeStretch=1.07"
     inconsolata = {"UprightFont": tmp_path / "Inconsolata-Regular.ttf"}
-    assert adopt.stretch("Consolas", "Inconsolata", inconsolata, {"slides": []}) == ",FakeStretch=1.1"
+    assert adopt.stretch("Consolas", "Inconsolata", inconsolata, deck({"slides": []})) == ",FakeStretch=1.1"
     # the deck's own font is never stretched against itself
-    assert adopt.stretch("Verdana", "Verdana", noto, {"slides": []}) == ""
+    assert adopt.stretch("Verdana", "Verdana", noto, deck({"slides": []})) == ""
 
 
 def test_verdana_stands_in_as_noto_sans_when_the_machine_lacks_it(tmp_path, monkeypatch):
@@ -714,10 +714,11 @@ def test_font_widths_ignores_bidi_marks_in_a_right_to_left_line(tmp_path):
     files = {"UprightFont": path}
 
     def sample(width, text):
-        return {"ink_width": width, "paragraphs": [{"runs": [{"text": text, "size": 10.0, "font": "Deck Serif"}]}]}
+        return {"kind": "text", "bbox": [0, 0, 100, 20], "ink_width": width,
+                "paragraphs": [{"runs": [{"text": text, "size": 10.0, "font": "Deck Serif"}]}]}
     # 5 "A"s at 10 pt is 29 pt of ink (600 advance, 100 right bearing); marks add no glyph and no width
-    plain = {"slides": [{"elements": [sample(26.1, "AAAAA"), sample(26.2, "AAAAA")]}]}
-    marked = {"slides": [{"elements": [
-        sample(26.1, f"{RLM}AA{LRM}AAA"), sample(26.2, f"{LRM}{RLM}AAAAA{RLM}")]}]}
+    plain = deck({"slides": [{"elements": [sample(26.1, "AAAAA"), sample(26.2, "AAAAA")]}]})
+    marked = deck({"slides": [{"elements": [
+        sample(26.1, f"{RLM}AA{LRM}AAA"), sample(26.2, f"{LRM}{RLM}AAAAA{RLM}")]}]})
     assert adopt.font_widths("Deck Serif", files, marked) == adopt.font_widths("Deck Serif", files, plain)
     assert adopt.font_widths("Deck Serif", files, marked) == pytest.approx(0.9, abs=0.005)

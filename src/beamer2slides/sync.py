@@ -38,9 +38,10 @@ if TYPE_CHECKING:
     from .emit import DeckPlan, FontMapper
     from .emit_model import Place, TemplateKey
     from .guard import WayBack
+    from .inverse import Look
     from .theme_sync import ThemeMerge, ThemeOurs, ThemeSide
 
-    PictureFingerprints = tuple[str, object, PicHash | None]   # (sha1, look, thumbnail hash): picture_adopter
+    PictureFingerprints = tuple[str, Look | None, PicHash | None]   # (sha1, look, thumbnail hash): picture_adopter
 
 T = TypeVar("T")
 

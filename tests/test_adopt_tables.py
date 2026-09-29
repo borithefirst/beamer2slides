@@ -11,7 +11,9 @@ import pytest
 
 from beamer2slides import adopt
 from beamer2slides.deck_ir import cell_pad, guess_lines
+from .deck_records import cell as cell_record
 from .deck_records import dicts, records
+from .deck_records import table as table_record
 from .irs import deck_ir
 
 from .test_adopt import at, pt, presentation
@@ -249,6 +251,22 @@ def test_a_step_between_two_fills_is_no_border():
     assert "rows_fixed" not in el and el["row_heights"] == [10, 10, 10]
 
 
+def test_a_border_colour_that_is_no_rgb_hex_is_not_looked_for():
+    """A border whose colour is not #rrggbb has no pixel colour to look for: the row is measured by
+    the borders that have one. Reading it raised a TypeError (None[None, :]) before 485d624."""
+    from beamer2slides.deck_thumbs import thumbnail_rows
+    el = grid_element()
+    for b in el["table_borders"]:
+        if b["col"] == 1:
+            b["color"] = "#000"
+    img = blank()
+    for y in (10, 24, 38, 52):
+        rule(img, y)
+    el = through(thumbnail_rows, el, img)
+    assert el["rows_fixed"] == [0, 1, 2]
+    assert el["row_heights"] == pytest.approx([14, 14, 14], abs=0.6)
+
+
 def test_the_side_inset_is_where_the_cells_words_begin():
     """comps-analysis' .pptx cells start their words 3 pt in where the guess said 5.8."""
     from beamer2slides.deck_thumbs import thumbnail_cell_pad, thumbnail_rows
@@ -269,7 +287,7 @@ def test_measured_rows_are_written_fixed(tmp_path):
     """Most rows measured: `fixed` is the table's, and the one row TeX may still grow says `grow`."""
     ir = deck_ir(deck(table()), foreign=True)
     next(e for e in ir["slides"][0]["elements"] if e["kind"] == "table")["rows_fixed"] = [0, 1]
-    head, rows = table_rows(adopt.bootstrap(ir, tmp_path / "tree" / "main.tex"))
+    head, rows = table_rows(adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None))
     assert ", fixed," in head
     assert [r.startswith("\\row[grow]") for r in rows] == [False, False, True]
     assert "\\row[grow]" not in table_source(source(tmp_path / "unmeasured", table())), "none measured, none said"
@@ -284,7 +302,7 @@ def test_guess_lines_tells_one_line_from_several():
 # ---------------------------------------------------------------- the source it writes
 
 def source(tmp_path, *tables) -> str:
-    return adopt.bootstrap(deck_ir(deck(*tables), foreign=True), tmp_path / "tree" / "main.tex")
+    return adopt.bootstrap(deck_ir(deck(*tables), foreign=True), tmp_path / "tree" / "main.tex", False, None)
 
 
 def macros(tmp_path) -> str:
@@ -366,12 +384,12 @@ def test_cells_sit_where_their_vertical_alignment_says(tmp_path):
 
 
 def test_segments_join_runs_of_one_style():
-    el = {"row_heights": [1, 1], "col_widths": [1, 1, 1], "table_cells": [],
+    el = {"bbox": [0, 0, 3, 2], "row_heights": [1, 1], "col_widths": [1, 1, 1], "table_cells": [],
           "table_borders": [{"dir": "h", "row": 1, "col": c, "color": "#000000", "alpha": 1, "weight": 1,
                              "dash": "SOLID"} for c in (0, 1)]
           + [{"dir": "h", "row": 1, "col": 2, "color": "#ff0000", "alpha": 1, "weight": 1, "dash": "SOLID"},
              {"dir": "h", "row": 9, "col": 0, "color": "#000000", "alpha": 1, "weight": 1, "dash": "SOLID"}]}
-    segs = adopt.table_segments(el)
+    segs = adopt.table_segments(table_record(el))
     assert [(k[2], spans) for k, spans in segs] == [("#000000", [(0, 2)]), ("#ff0000", [(2, 3)])]
 
 
@@ -425,7 +443,7 @@ def test_a_one_word_cell_too_wide_for_its_insets_stays_on_its_line(tmp_path):
     ctx = adopt.adopt_context()
     boxed = {"row": 0, "col": 0, "rowspan": 1, "colspan": 1, "valign": "top",
              "paragraphs": [{"align": "left", "runs": [{"text": "two words", "size": 10.0, "underline": True}]}]}
-    opts, body = adopt.table_cell(boxed, ctx, "", None)
+    opts, body = adopt.table_cell(cell_record(boxed), ctx, "", None)
     assert opts["word"] is False and adopt.option_text("word", False) == "wrap"
 
 
@@ -491,10 +509,10 @@ def test_cells_in_rows_the_thumbnail_could_not_place_say_nothing():
 def test_a_cells_line_stands_the_measured_inset_plus_its_line_box():
     from beamer2slides.emit import ASCENT_EM, LINE_EM
     one = {"paragraphs": [{"runs": [{"text": "a", "size": 10.0}]}, {"runs": [{"text": "b", "size": 20.0}]}]}
-    assert adopt.cell_line_place(dict(one, valign="top"), 1.0) == pytest.approx(1.0 + ASCENT_EM * 10)
-    assert adopt.cell_line_place(dict(one, valign="bottom"), 1.0) == pytest.approx(1.0 + (LINE_EM - ASCENT_EM) * 20)
-    assert adopt.cell_line_place(dict(one, valign="middle"), 1.0) is None
-    assert adopt.cell_line_place({"valign": "top", "paragraphs": []}, 1.0) is None
+    assert adopt.cell_line_place(cell_record(dict(one, valign="top")), 1.0) == pytest.approx(1.0 + ASCENT_EM * 10)
+    assert adopt.cell_line_place(cell_record(dict(one, valign="bottom")), 1.0) == pytest.approx(1.0 + (LINE_EM - ASCENT_EM) * 20)
+    assert adopt.cell_line_place(cell_record(dict(one, valign="middle")), 1.0) is None
+    assert adopt.cell_line_place(cell_record({"valign": "top", "paragraphs": []}), 1.0) is None
 
 
 def test_a_measured_inset_places_a_cell_by_its_first_or_last_baseline(tmp_path):
@@ -505,7 +523,7 @@ def test_a_measured_inset_places_a_cell_by_its_first_or_last_baseline(tmp_path):
     ir = deck_ir(deck(table()), foreign=True)
     el = next(e for e in ir["slides"][0]["elements"] if e["kind"] == "table")
     el["cell_text_y"] = 1.0
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     sty = macros(tmp_path)
     assert "\\def\\slides@t@ht" in sty and "\\def\\slides@t@dp" in sty and "\\def\\slides@t@first" in sty
     head, rows = table_rows(text)
@@ -513,7 +531,7 @@ def test_a_measured_inset_places_a_cell_by_its_first_or_last_baseline(tmp_path):
     assert f"baseline={1.0 + adopt.line_box(z, 1.0)[0]:.2f}" in head
     cells = [c for r in rows for c in cells_of(r)]
     bottom = [c for c in cells if "valign=bottom" in c]
-    last = adopt.cell_line_place({"valign": "bottom", "paragraphs": [{"runs": [{"size": z}]}]}, 1.0)
+    last = adopt.cell_line_place(cell_record({"valign": "bottom", "paragraphs": [{"runs": [{"size": z}]}]}), 1.0)
     assert len(bottom) == 1 and f"baseline={last:.2f}" in bottom[0]
     middle = [c for c in cells if "valign=middle" in c]
     assert len(middle) == 1 and "baseline" not in middle[0], "a middle cell is placed as before"

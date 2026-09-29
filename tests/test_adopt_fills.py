@@ -9,7 +9,7 @@ import pytest
 
 from beamer2slides import adopt, adopt_shapes, deck_fills
 from beamer2slides.deck_ir import page_size_for
-from beamer2slides.deck_ir_types import TargetImage, TargetShape
+from beamer2slides.deck_ir_types import TargetImage, TargetShape, parse_page_gradient
 from .irs import deck_ir
 from beamer2slides.adopt_context import adopt_context
 from beamer2slides.inverse import Context
@@ -756,12 +756,13 @@ def test_a_solid_the_thumbnail_disagrees_with_falls_through_to_the_layout_colour
 
 
 def test_the_gradient_is_drawn_as_a_clipped_shading():
-    linear = {"type": "linear", "angle": -30.0, "colors": ["#0a0a0a", "#f05014"]}
-    out = adopt.background_gradient_latex(linear, [720, 405], adopt_context(), "TEXT")
+    linear = parse_page_gradient({"type": "linear", "angle": -30.0, "colors": ["#0a0a0a", "#f05014"]}, "test")
+    out = adopt.background_gradient_latex(linear, (720, 405), adopt_context(), "TEXT")
     assert "setbeamertemplate{background canvas}" in out and "shade[left color=" in out
     assert "rotate=-30" in out and "\\clip" in out and "TEXT" in out
-    radial = {"type": "radial", "center": [300, 200], "radius": 350, "colors": ["#faf0c8", "#1e1e3c"]}
-    out2 = adopt.background_gradient_latex(radial, [720, 405], adopt_context(), "TEXT")
+    radial = parse_page_gradient({"type": "radial", "center": [300, 200], "radius": 350,
+                                  "colors": ["#faf0c8", "#1e1e3c"]}, "test")
+    out2 = adopt.background_gradient_latex(radial, (720, 405), adopt_context(), "TEXT")
     assert "shading=radial" in out2 and "inner color=" in out2 and "outer color=" in out2
 
 
@@ -790,14 +791,22 @@ def test_a_themed_frame_takes_its_gradient_as_its_own_backdrop_option():
 
 
 def test_a_gradient_backdrop_is_drawn_from_the_fitted_model(tmp_path):
+    import hashlib
+    import json
     from PIL import Image
-    linear = {"type": "linear", "angle": 90.0, "colors": ["#ff0000", "#0000ff"]}
+    as_read = {"type": "linear", "angle": 90.0, "colors": ["#ff0000", "#0000ff"]}
+    linear = parse_page_gradient(as_read, "test")
     rel = adopt.gradient_backdrop(linear, (720.0, 405.0), tmp_path)
+    # named by the gradient as target.json writes it, as when it was read as a dict: a file made
+    # before is found again
+    tag = hashlib.sha1(json.dumps([as_read, 720.0, 405.0], sort_keys=True).encode()).hexdigest()[:10]
+    assert rel == f"figures/gradient-{tag}.png"
     img = np.asarray(Image.open(tmp_path / rel).convert("RGB")).astype(int)
     top, bottom = img[0, img.shape[1] // 2], img[-1, img.shape[1] // 2]
     assert top[2] > 200 and bottom[0] > 200, "90 degrees runs up the page: colour 0 at the bottom"
     assert adopt.gradient_backdrop(linear, (720.0, 405.0), tmp_path) == rel     # one file per ramp
-    radial = {"type": "radial", "center": [360.0, 202.5], "radius": 400.0, "colors": ["#ffffff", "#000000"]}
+    radial = parse_page_gradient({"type": "radial", "center": [360.0, 202.5], "radius": 400.0,
+                                  "colors": ["#ffffff", "#000000"]}, "test")
     img = np.asarray(Image.open(tmp_path / adopt.gradient_backdrop(radial, (720.0, 405.0), tmp_path)))
     assert img[img.shape[0] // 2, img.shape[1] // 2].min() > 250 and img[0, 0].max() < 160
     assert adopt.gradient_backdrop(linear, (720.0, 405.0), None) is None
@@ -1187,10 +1196,10 @@ def test_a_text_boxs_fill_picture_leaves_a_picture_under_it_showing(tmp_path):
 
 
 def test_pull_writes_a_round_picture_clipped_and_outlined_round():
-    from types import SimpleNamespace
-    from beamer2slides.inverse import picture_edits, picture_latex
-    te = {"bbox": [10, 20, 110, 80], "mask": "ellipse", "outline": {"color": "#000000", "weight": 2.0}}
+    from beamer2slides.inverse import Picture, loop_picture, picture_edits, picture_latex
+    te = loop_picture({"bbox": [10, 20, 110, 80], "mask": "ellipse", "outline": {"color": "#000000", "weight": 2.0}},
+                      (10.0, 20.0, 110.0, 80.0), "test")
     assert picture_edits(te)
-    tex = picture_latex(te, SimpleNamespace(natural=(50, 30), rel="p.png"), Context())
+    tex = picture_latex(te, Picture("p.png", Path("p.png"), (50.0, 30.0)), Context(), None)
     assert "\\clip (0pt,0pt) ellipse [x radius=50.00pt,y radius=30.00pt]" in tex, tex
     assert "\\draw[draw=" in tex and tex.count("ellipse [") == 2, tex

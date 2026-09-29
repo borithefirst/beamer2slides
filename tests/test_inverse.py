@@ -21,8 +21,9 @@ import pytest
 from . import inverse_edits as ed
 from beamer2slides.compare import (TOL, BoxGeometry, Current, TextGeometry, WordOp, bullet_sig, compare, match_slides,
                                    residual_json, style_diffs, target_slide_of, without_keys, word_diff)
-from beamer2slides.inverse import (Candidate, Context, Planner, Workspace, balance_span, colour_name, enclosing_group,
-                                   ensure_preamble, frame_latex, latex_escape, runs_latex, size_switch)
+from beamer2slides.inverse import (TITLE_STYLE, Candidate, Context, Planner, TextStyle, Workspace, balance_span, colour_name,
+                                   enclosing_group, ensure_preamble, frame_latex, latex_escape, loop_run, loop_texts,
+                                   runs_latex, size_switch)
 from beamer2slides.texmap import (OPAQUE, Source, build_visible, locate_words, mask_comments, page_frames,
                                   read_args, synctex_pages, visible_text)
 
@@ -81,7 +82,7 @@ def test_words_after_an_ellipsis_map_to_their_own_letters():
 
 def test_a_note_opening_on_a_soft_break_leaves_vertical_mode_first():
     """`\\\\` opening a paragraph has no line to end (test_ir_matrix's hashing-note_break)."""
-    out = frame_latex({"key": "k", "elements": [], "notes": "\x0bHeads up\nand \x0b more"}, None, Context())
+    out = frame_latex([], "k", "\x0bHeads up\nand \x0b more", lambda _p: TITLE_STYLE, Context(), None)
     assert "\\note{\\leavevmode\\\\ Heads up\n\nand \\\\  more}" in out
 
 
@@ -93,6 +94,25 @@ def test_read_args_and_comments():
     assert s[end:].strip() == "rest"
     masked = mask_comments("a % comment\nb \\% not")
     assert "comment" not in masked and "\\% not" in masked and len(masked) == len("a % comment\nb \\% not")
+
+
+def test_a_backslash_ending_a_line_or_the_text_is_one_token():
+    """texmap.read_args: a mandatory argument that is `\\` and a line end (a control space), or a
+    backslash ending the text, crashed the visible text (`re.match` with `.` found nothing)."""
+    assert read_args("\\textbf\\\nx", 7, "m") == ([("m", 7, 9)], 9)
+    assert read_args("ab\\", 2, "m") == ([("m", 2, 3)], 3)
+    assert visible_text("a \\textbf\\\nb") == "a b"
+
+
+def test_a_frame_title_nothing_closes_is_read_as_body():
+    """texmap.build_visible: a frame title or subtitle whose `{` the rest of the file never closes
+    crashed the frame's visible text; it is no title now, its words read as the body's."""
+    s = "\\begin{frame}{Title\nBody words\n\\end{frame}"
+    v = build_visible(s, 0, len(s), title_frame=True)
+    assert v.title is None and v.text.split() == ["Title", "Body", "words"]
+    s = "\\begin{frame}{T}{Sub\nBody\n\\end{frame}"
+    v = build_visible(s, 0, len(s), title_frame=True)
+    assert v.title == (0, 1) and v.text.split() == ["T", "Sub", "Body"]
 
 
 def test_source_frames_inputs_and_labels(tmp_path):
@@ -221,8 +241,9 @@ def test_latex_helpers():
     assert colour_name("#123456", defined) == "b2s123456" and defined == {"b2s123456": "123456"}
     assert size_switch(14.4, 11) == r"\Large" and size_switch(30, 11).startswith(r"\fontsize{30.0}")
     ctx = Context()
-    base = {"size": 10.95, "color": "#000000", "bold": False, "italic": False, "family": "sans"}
-    runs = [{"text": "plain "}, {"text": "bold", "bold": True}, {"text": " red", "color": "#ff0000"}]
+    base = TextStyle(size=10.95, color="#000000", bold=False, italic=False, family="sans", font=None, weight=None)
+    runs = [loop_run(r, "test") for r in
+            [{"text": "plain "}, {"text": "bold", "bold": True}, {"text": " red", "color": "#ff0000"}]]
     assert runs_latex(runs, base, ctx) == r"plain \textbf{bold} \textcolor{red}{red}"
     text = r"a \textbf{b \emph{c} d} e"
     g = enclosing_group(text, text.index("c"), text.index("c") + 1, ("emph",), 0)
@@ -234,10 +255,14 @@ def test_latex_helpers():
         {"kind": "text", "role": "body", "paragraphs": [
             {"bullet": {"kind": "glyph"}, "level": 0, "runs": [{"text": "One"}]},
             {"bullet": {"kind": "glyph"}, "level": 1, "runs": [{"text": "Two"}]}]}]}
-    out = frame_latex(slide, lambda p: base, ctx)
+    texts = loop_texts(slide, "test")
+
+    def style_for(_p: object) -> TextStyle:
+        return base
+    out = frame_latex(texts, "limits", "Say it.", style_for, ctx, None)
     assert out.startswith("\\begin{frame}[label=limits]{Limits}") and "\\note{Say it.}" in out
     assert out.count("\\begin{itemize}") == 2
-    assert "[label=" not in frame_latex({**slide, "key": "title:limits#1"}, lambda p: base, ctx)
+    assert "[label=" not in frame_latex(texts, "title:limits#1", "Say it.", style_for, ctx, None)
 
 
 def plan_offline(tmp_path: Path, target: dict) -> str:
@@ -383,7 +408,7 @@ def test_converge_source_pairs(name, rounds, tmp_path):
     if reason := pdflatex_missing():
         pytest.skip(reason)
     from beamer2slides.inverse import converge, ir_from_tex
-    target = ir_from_tex(INV / f"{name}.tex", tmp_path / "target")
+    target = ir_from_tex(INV / f"{name}.tex", tmp_path / "target", False)
     t = time.time()
     res = converge(INV / "a.tex", target, tmp_path / "loop", 8, False, None, TOL, print, True, None)
     record(f"pair:{name}", res, time.time() - t)

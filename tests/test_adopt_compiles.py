@@ -72,7 +72,7 @@ def fonts(monkeypatch, tmp_path):
 def test_the_source_adopt_writes_compiles(name, tmp_path, fonts):
     target = target_of(name)
     main = tmp_path / "tree" / "main.tex"
-    text = adopt.bootstrap(target, main)
+    text = adopt.bootstrap(target, main, False, None)
     program = shutil.which(engine(text), path=tex_env()["PATH"])
     if program is None:
         # CI says it has TeX (`$B2S_REQUIRE_TEX`): a job that skipped every compile would pass

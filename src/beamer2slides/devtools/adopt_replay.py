@@ -132,7 +132,7 @@ def replay(spec: str, fresh: bool) -> dict:
         t = time.perf_counter()
         shutil.rmtree(home, ignore_errors=True)
         tex = home / "tree" / "main.tex"
-        adopt.bootstrap(target, tex, False)
+        adopt.bootstrap(target, tex, False, None)
         notes = any(s.get("notes") for s in target["slides"]) or uses_notes(Source(tex))
         times["bootstrap"] = time.perf_counter() - t
         t = time.perf_counter()
@@ -185,7 +185,7 @@ def replay(spec: str, fresh: bool) -> dict:
         per_slide = Counter(r.slide if isinstance(r, SlideExtra) else target_slide_of(r) for r in found)
         suspect = [r for r in found if (j := r.slide if isinstance(r, SlideExtra) else target_slide_of(r)) is not None
                    and j < len(ink) and ink[j] >= SUSPECT_INK]
-        res.update(pages=len(cand.deck["slides"]), ink=round(sum(ink) / max(1, len(ink)), 3),
+        res.update(pages=len(cand.slides()), ink=round(sum(ink) / max(1, len(ink)), 3),
                    open=len(found), suspect=len(suspect),
                    kinds=dict(Counter(r.kind for r in found).most_common()),
                    suspect_kinds=dict(Counter(r.kind for r in suspect).most_common()),

@@ -206,14 +206,14 @@ class FrameGuard:
             if pdf is None:
                 from .pdf import Document
                 pdf = doc[0] = Document(cand.pdf)
-            self.cache[key] = boxes_score(pdf[cand.deck["slides"][ci]["page"]], ref, slide_boxes(self.slides[j]))
+            self.cache[key] = boxes_score(pdf[cand.page(ci)], ref, slide_boxes(self.slides[j]))
         return self.cache[key]
 
     def penalty(self, cand: Candidate, comp: Comparison, cis: list[int], slides: tuple[int, ...]) -> float:
         from .compare import target_slide_of
         wanted = set(slides)
         res = sum(RESIDUAL_WEIGHT.get(r.kind, 1.0) for r in comp.open() if target_slide_of(r) in wanted)
-        got = [w for ci in cis for w in words_of(" ".join(cand.words.get(cand.deck["slides"][ci]["page"], [])))]
+        got = [w for ci in cis for w in words_of(" ".join(cand.words.get(cand.page(ci), [])))]
         want = [w for j in slides for w in self.target_words(j)]
         return res + WORD_WEIGHT * word_error(want, got)
 

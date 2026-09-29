@@ -221,7 +221,7 @@ def test_deck_ir_records_each_slides_layout_and_the_layouts_names():
 def test_bootstrap_writes_the_theme_beside_the_source_and_uses_it(tmp_path):
     pres = presentation()
     pres["slides"][2]["pageElements"].append(text_shape("s2_x", "own words", 60, 300, 300, 40))
-    text = adopt.bootstrap(deck_ir(pres, foreign=True), tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(deck_ir(pres, foreign=True), tmp_path / "tree" / "main.tex", False, None)
     sty = tmp_path / "tree" / "beamerthemeTemplate.sty"
     assert sty.exists() and "\\usetheme{Template}" in text
     assert text.index("\\usetheme{Template}") < text.index("\\begin{document}")
@@ -232,7 +232,7 @@ def test_bootstrap_writes_the_theme_beside_the_source_and_uses_it(tmp_path):
 
 
 def test_a_flow_source_has_no_theme(tmp_path):
-    text = adopt.bootstrap(deck_ir(presentation(), foreign=True), tmp_path / "tree" / "main.tex", flow=True)
+    text = adopt.bootstrap(deck_ir(presentation(), foreign=True), tmp_path / "tree" / "main.tex", True, None)
     assert "\\usetheme{Template}" not in text and not list((tmp_path / "tree").glob("*.sty"))
 
 

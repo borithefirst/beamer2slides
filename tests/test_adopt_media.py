@@ -84,7 +84,7 @@ def test_a_linked_chart_is_the_picture_slides_keeps_of_it(tmp_path):
     assert (el["kind"], el["role"]) == ("image", "figure")
     assert el["chart"] == {"spreadsheetId": "sheet", "chartId": 7}
     assert Path(el["file"]).exists() and el["outline"]["color"] == "#ff0000"
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert re.search(r"\\slidepicture\[outline=\w+,outline width=[\d.]+\]\{[\d.,]+\}\{figures/chart-\w+\.png\}", text)
     assert "sheetsChart" not in json.dumps(deck_ir(deck_with(chart))), "pull reads no chart"
     assert not own(deck_ir(deck_with(chart))), "pull still leaves charts alone"
@@ -102,7 +102,7 @@ def test_a_picture_the_deck_would_not_give_is_named_and_marked_where_it_went(tmp
     assert missing["slide"] == 1 and missing["alt"] == "Sand cat" and "404" in missing["why"]
     assert theme["layout"] == "m1" and again["slide"] == 2, "the master's picture said once, not per slide"
     ir["slides"].pop()
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert "% picture left out: Sand cat (at " in text
     assert text.count("\\slidepicture") == 1, "the picture it has is still drawn"
     assert any("slide 1 'Sand cat'" in line for line in adopt.missing_pictures_lines([missing]))
@@ -192,7 +192,7 @@ def test_a_saved_target_takes_its_pictures_from_the_decks_pptx(tmp_path):
     assert pictures_from_pptx(ir, pres, data, tmp_path / "images") == (1, 1)
     assert Path(el["file"]).read_bytes() == cat and "error" not in el
     assert not [m for m in adopt.pictures_missing(ir) if not m.get("layout")]
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert "picture left out: Sand cat" not in text
     # another deck's download pairs nothing and fills nothing
     other = deck_with()
@@ -213,7 +213,7 @@ def test_a_youtube_video_is_its_poster_frame_linked_to_the_video(tmp_path):
     ir = deck_ir(deck_with(youtube()), foreign=True, fetch=fetch, images=tmp_path / "images")
     [el] = own(ir)
     assert el["video"]["source"] == "YOUTUBE" and el["file"] and thumb in fetch.asked
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert "\\href{https://www.youtube.com/watch?v=abc_123}{%" in text
     [framed] = (tmp_path / "tree" / "figures").glob("video-*.png")
     assert framed.name in text
@@ -240,7 +240,7 @@ def test_a_drive_video_is_a_play_panel_linked_to_the_video(tmp_path):
     fetch = Fetcher({})
     ir = deck_ir(deck_with(drive), foreign=True, fetch=fetch, images=tmp_path / "images")
     assert fetch.asked == ["https://example.invalid/backdrop.png"], "nothing to download for a Drive video"
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert "\\href{https://drive.google.com/file/d/d1/view\\#t=5}{%" in text
     assert "circle" in text and "cycle" in text                     # the play symbol
     assert text.count("\\begin{textblock*}") == text.count("\\end{textblock*}")
@@ -251,7 +251,7 @@ def test_a_video_whose_thumbnail_is_gone_is_still_drawn(tmp_path):
     ir = deck_ir(deck_with(youtube()), foreign=True, fetch=Fetcher({}), images=tmp_path / "images")
     [el] = own(ir)
     assert "error" in el and not el.get("file")
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert "\\href{https://www.youtube.com/watch?v=abc_123}" in text and "circle" in text
 
 
@@ -265,10 +265,20 @@ def test_wordart_is_its_words_stretched_to_its_box(tmp_path):
     [el] = own(ir)
     assert el["kind"] == "text" and el["wordart"]
     assert ["".join(r["text"] for r in p["runs"]) for p in el["paragraphs"]] == ["Hello", "World"]
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     line = next(l for l in text.splitlines() if "resizebox" in l)
     assert "\\resizebox*{" in line and "Hello\\\\World" in line and "\\rotatebox[origin=c]" in line
     assert not own(deck_ir(deck_with(art))), "pull reads no WordArt"
+
+
+def test_wordart_with_a_text_box_is_stretched_to_its_bbox():
+    """A WordArt whose `box` is a text box's layout, not its unturned frame, stretches to its bbox.
+    Unpacking the layout as four numbers raised a ValueError before 485d624."""
+    el = record({"kind": "text", "wordart": True, "bbox": [10.0, 20.0, 110.0, 60.0],
+                 "box": {"valign": "top", "scale": 1.0},
+                 "paragraphs": [{"runs": [{"text": "Art", "size": 12.0, "color": "#112233"}]}]})
+    text = adopt.wordart_block(el, adopt.adopt_context(), "")
+    assert "\\resizebox*{100.0pt}{40.0pt}{\\bfseries Art}" in text
 
 
 def test_empty_wordart_is_nothing():
@@ -297,7 +307,7 @@ def test_a_page_beamer_has_no_option_for_is_that_page(tmp_path):
     assert scale == 2.0 and abs(pw / ph - 595.3 / 841.9) < 1e-6
     opt, paper = adopt.page_setup([pw, ph])
     assert opt == "" and paper == f"\\geometry{{papersize={{{pw:.2f}bp,{ph:.2f}bp}}}}"
-    text = adopt.bootstrap(deck_ir(sized(595.3, 841.9), foreign=True), tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(deck_ir(sized(595.3, 841.9), foreign=True), tmp_path / "tree" / "main.tex", False, None)
     assert "aspectratio" not in text
     assert paper in text and text.index("\\documentclass") < text.index(paper) < text.index("\\begin{document}")
 
@@ -469,7 +479,7 @@ def test_adopt_sets_the_deck_in_a_fetched_family(monkeypatch, tmp_path):
     monkeypatch.setattr(fontfetch, "get", hub)
     ir = deck_ir(deck_with(text_shape("t", "Words in a fetched face", 10, 10, 300, 40, font="Tiny Flex")),
                  foreign=True)
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     # the family has no italic (the variable font has no ital axis), so italic and bold italic are
     # fontspec's slant of the two faces it does have, never left unsaid
     assert ("\\setsansfont{TinyFlex}[Path=fonts/,Extension=.ttf,UprightFont=*-Regular,BoldFont=*-Bold,"
@@ -635,7 +645,7 @@ def test_a_run_in_weight_600_is_set_in_its_own_face(monkeypatch, tmp_path):
     ir = deck_ir(deck_with(head, body), foreign=True)
     run = next(e for e in ir["slides"][0]["elements"] if e.get("id") == "h")["paragraphs"][0]["runs"][0]
     assert run["weight"] == 600 and run["bold"], "600 is bold to anything that knows only two weights"
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert ",FontFace={w600}{n}{Font=TinyFlex-W600}]" in text
     style = re.search(r"\\slidetext\{[^}]*\}\{([\w-]+)\}\{This is a Headline", text)[1]
     assert re.search(rf"\\slidestyle\{{{style}\}}\{{[^}}]*weight=w600[,}}]", text), "its style selects series w600"
@@ -654,7 +664,7 @@ def test_a_decks_second_face_gets_a_switch_of_its_own(monkeypatch, tmp_path):
     monkeypatch.setenv("B2S_FONTS", str(shelf))
     ir = deck_ir(deck_with(text_shape("t0", "body text " * 20, 10, 10, 600, 100, font="Open Sans"),
                            text_shape("t1", "A title " * 8, 10, 200, 600, 60, font="Montserrat")), foreign=True)
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert "\\setsansfont{OpenSans}" in text
     assert "\\newfontfamily\\adoptfontA{Montserrat}" in text
 
@@ -680,7 +690,7 @@ def test_a_face_of_few_but_huge_letters_gets_a_switch_too(monkeypatch, tmp_path)
         ir = deck_ir(deck_with(text_shape("t0", "body text " * 20, 10, 10, 600, 100, font="Open Sans"),
                                text_shape("t1", "03", 10, 120, 600, 300, font="Montserrat", size=size)),
                      foreign=True)
-        text = adopt.bootstrap(ir, tmp_path / f"tree{size:.0f}" / "main.tex")
+        text = adopt.bootstrap(ir, tmp_path / f"tree{size:.0f}" / "main.tex", False, None)
         assert ("\\newfontfamily\\adoptfontA{Montserrat}" in text) == switched
 
 
@@ -696,14 +706,14 @@ def test_a_face_without_the_letters_set_in_it_gets_no_switch(monkeypatch, tmp_pa
     ir = deck_ir(deck_with(text_shape("t0", "AAAA " * 30, 10, 10, 600, 100, font="Open Sans"),
                            text_shape("t1", "שלום " * 20, 10, 200, 600, 60,
                                       font="Noto Sans Symbols")), foreign=True)
-    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex")
+    text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     assert "\\setsansfont{OpenSans}" in text and "NotoSansSymbols" not in text
     assert adopt.font_coverage(shelf / "NotoSansSymbols-Regular.ttf", {"A": 3, "B": 1}) == 0.75
     # and when it is the deck's most used font, it is not the document's either
     only = deck_ir(deck_with(text_shape("t1", "שלום " * 20, 10, 200, 600, 60,
                                         font="Noto Sans Symbols"),
                              text_shape("t2", "AAAA", 10, 10, 600, 100, font="Open Sans")), foreign=True)
-    text = adopt.bootstrap(only, tmp_path / "tree2" / "main.tex")
+    text = adopt.bootstrap(only, tmp_path / "tree2" / "main.tex", False, None)
     assert "\\setsansfont{OpenSans}" in text and "NotoSansSymbols" not in text
 
 

@@ -42,7 +42,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, Union
+from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, Union
 
 from .compare import (HOLE, TOL, AlignResidual, BackgroundResidual, BoxExtra, BoxGeometry, BoxMissing, BulletResidual,
                       ColorChange, Comparison, Current, DiagramResidual, FlagChange, ImageResidual, InlineImage,
@@ -53,15 +53,18 @@ from .compare import (HOLE, TOL, AlignResidual, BackgroundResidual, BoxExtra, Bo
                       TextMissing, TextResidual, WordOp, compare, current_slide_of, grey16, is_theme, norm_text,
                       para_text, picture_hash, residual_json, residual_line, slide_paragraphs, slide_title,
                       target_slide_of, text_anchor, word_op_json)
-from .deck_ir_types import TargetDeck, TargetImage, element_json, is_target, parse_target, target_json
-from .json_types import Json, JsonObject, as_array, as_int, as_object, as_objects
+from .deck_ir_types import TargetDeck, TargetImage, element_json, is_target, parse_target, recolor_json, target_json
+from .ir_types import At, Box, box
+from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_str
 from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, frame_visible,
                      line_of, locate_words, mask_comments, match_group, norm_word, page_frames, read_args, skip_space,
                      synctex_pages)
 from .typing_compat import assert_never
 
 if TYPE_CHECKING:
+    from .arrays import Floats32
     from .frame_guard import FrameGuard, Seen
+    from .notes import Prepared
     from .pdf import Page
 
 MIKTEX_BIN = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "MiKTeX" / "miktex" / "bin" / "x64"
@@ -95,7 +98,7 @@ STYLE_CMDS = {
 }
 
 
-def tex_env() -> dict:
+def tex_env() -> dict[str, str]:
     env = dict(os.environ)
     if MIKTEX_BIN.is_dir() and str(MIKTEX_BIN) not in env.get("PATH", ""):
         env["PATH"] = f"{MIKTEX_BIN};{env.get('PATH', '')}"
@@ -111,7 +114,7 @@ ESCAPE = {"\\": r"\textbackslash{}", "&": r"\&", "%": r"\%", "$": r"\$", "#": r"
 
 # Set while adopt writes a source: its lengths are then rewritten from pt to bp afterwards
 # (`adopt.to_bp`), and a number followed by "pt" in the deck's own words must not be one of them.
-GUARD_UNITS = False
+GUARD_UNITS: bool = False
 
 
 def latex_escape(text: str) -> str:
@@ -136,54 +139,308 @@ def size_switch(size: float, pt_option: int) -> str:
     return f"\\fontsize{{{size:.1f}}}{{{1.2 * size:.1f}}}\\selectfont"
 
 
-def runs_latex(runs: list[dict], base: dict, ctx: "Context") -> str:
+@dataclass(frozen=True, kw_only=True)
+class TextStyle:
+    """The style LaTeX sets text in where a run says nothing else: `runs_latex` writes a run's
+    style only where it differs from this. None where the base says nothing of it (a frame title's
+    size and colour are the theme's). `font` and `weight` are adopt's: the face its base names."""
+    size: float | None
+    color: str | None
+    family: str | None
+    bold: bool
+    italic: bool
+    font: str | None
+    weight: int | None
+
+
+class RunIn(Protocol):
+    """What the LaTeX writers read of a run: a target's (`deck_ir_types.TargetRun`), or the loop's
+    reading of a run of either deck shape (`LoopRun`)."""
+    @property
+    def text(self) -> str: ...
+    @property
+    def hole(self) -> float | None: ...
+    @property
+    def family(self) -> str | None: ...
+    @property
+    def bold(self) -> bool: ...
+    @property
+    def italic(self) -> bool: ...
+    @property
+    def underline(self) -> bool: ...
+    @property
+    def script(self) -> str | None: ...
+    @property
+    def color(self) -> str | None: ...
+    @property
+    def size(self) -> float | None: ...
+    @property
+    def link(self) -> str | None: ...
+
+
+class BulletIn(Protocol):
+    @property
+    def kind(self) -> str | None: ...
+
+
+class ParagraphIn(Protocol):
+    """What `paragraphs_latex` reads of a paragraph: a target's text or cell paragraph, or the loop's
+    reading of one (`LoopParagraph`)."""
+    @property
+    def runs(self) -> Sequence[RunIn]: ...
+    @property
+    def bullet(self) -> BulletIn | None: ...
+    @property
+    def level(self) -> int: ...
+    @property
+    def align(self) -> str | None: ...
+    @property
+    def direction(self) -> str | None: ...
+
+
+P = TypeVar("P", bound=ParagraphIn)
+
+
+@dataclass(frozen=True, kw_only=True)
+class LoopRun:
+    """A run as the loop reads it from either deck shape (deck.json, a target): what a missing key
+    reads as is what the dict reads of it did (`loop_run`)."""
+    text: str
+    hole: float | None
+    family: str | None
+    bold: bool
+    italic: bool
+    underline: bool
+    script: str | None
+    color: str | None
+    size: float | None
+    link: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class LoopBullet:
+    kind: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class LoopParagraph:
+    runs: tuple[LoopRun, ...]
+    bullet: LoopBullet | None
+    level: int
+    align: str | None
+    direction: str | None
+    tab_x0: float | None
+    line_ends: tuple[float, ...]
+    """Each line's `x1`, where one says it (`textblock_latex` sizes a new box by them)."""
+
+
+def _loop_str(o: JsonObject, key: str, where: str) -> str | None:
+    v = o.get(key)
+    if v is None or isinstance(v, str):
+        return v
+    raise JsonShapeError(f"{where}: {key} is no string")
+
+
+def _number(v: Json, where: str) -> float:
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    raise JsonShapeError(f"{where}: a number was expected")
+
+
+def _loop_number(o: JsonObject, key: str, where: str) -> float | None:
+    v = o.get(key)
+    return None if v is None else _number(v, f"{where}: {key}")
+
+
+def loop_run(r: JsonObject, where: str) -> LoopRun:
+    return LoopRun(text=as_str(r["text"], f"{where}: text"), hole=_loop_number(r, "hole", where),
+                   family=_loop_str(r, "family", where), bold=bool(r.get("bold")), italic=bool(r.get("italic")),
+                   underline=bool(r.get("underline")), script=_loop_str(r, "script", where),
+                   color=_loop_str(r, "color", where), size=_loop_number(r, "size", where),
+                   link=None if r.get("link") is None else str(r.get("link")))
+
+
+def loop_paragraph(p: JsonObject, where: str) -> LoopParagraph:
+    """A paragraph of either deck shape as the writers read it. A bullet that says nothing (`{}`)
+    is none, as `p.get("bullet")` read it."""
+    b = p.get("bullet")
+    bullet = LoopBullet(kind=_loop_str(as_object(b, f"{where}: bullet"), "kind", where)) if b else None
+    level = p.get("level", 0)
+    return LoopParagraph(runs=tuple(loop_run(r, where) for r in as_objects(p["runs"], f"{where}: runs")),
+                         bullet=bullet, level=as_int(level, f"{where}: level"), align=_loop_str(p, "align", where),
+                         direction=_loop_str(p, "direction", where), tab_x0=_loop_number(p, "tab_x0", where),
+                         line_ends=tuple(_number(ln["x1"], f"{where}: x1")
+                                         for ln in as_objects(p.get("lines", []), f"{where}: lines") if ln.get("x1")))
+
+
+def loop_paragraphs(el: JsonObject, where: str) -> tuple[LoopParagraph, ...]:
+    return tuple(loop_paragraph(p, f"{where} paragraph {i}")
+                 for i, p in enumerate(as_objects(el["paragraphs"], f"{where}: paragraphs")))
+
+
+def loop_texts(slide: JsonObject, where: str) -> list[tuple[str | None, tuple[LoopParagraph, ...]]]:
+    """A slide's text elements as `frame_latex` reads them: each one's role and paragraphs."""
+    return [(_loop_str(e, "role", where), loop_paragraphs(e, f"{where} element {e.get('id')}"))
+            for e in as_objects(slide["elements"], f"{where}: elements") if e["kind"] == "text"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class LoopCrop:
+    """Fractions of a picture's file cut off, per side."""
+    l: float  # noqa: E741 - the JSON's own name
+    t: float
+    r: float
+    b: float
+
+
+@dataclass(frozen=True, kw_only=True)
+class LoopOutline:
+    color: str
+    weight: float
+    dash: str
+
+
+BAKED = ("brightness", "contrast", "recolor")
+
+
+@dataclass(frozen=True, kw_only=True)
+class LoopPicture:
+    """A picture element as pull writes it, from either deck shape: its file and the Slides edits
+    `picture_latex` writes as LaTeX. What the element leaves out or sets to nothing is none, as the
+    dict reads (`te.get(k)`) took it."""
+    bbox: Box
+    frame: Box                 # its unturned frame: `box`, else its bbox
+    file: str | None
+    alt: str | None
+    source_url: str | None
+    crop: LoopCrop | None
+    rotation: float | None
+    flip: bool
+    opacity: float | None
+    outline: LoopOutline | None
+    mask: str | None
+    bake: JsonObject
+    """Brightness, contrast and recolour where set, as the element says them: LaTeX has no option
+    for them, so they are baked into the file (`Planner.picture`)."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class LoopElement:
+    """An element of either deck shape (deck.json's, a target's) as the planner reads it. `json` is
+    the element itself: compare's readers take it (`text_anchor`, `para_text`), and its identity
+    keys the element's picture in the planner's `hashes`."""
+    json: JsonObject
+    id: str
+    kind: str
+    role: str | None
+    bbox: Box
+    wrap_width: float | None
+    picture: LoopPicture | None    # an image's
+
+
+def loop_picture(e: JsonObject, bbox: Box, where: str) -> LoopPicture:
+    frame = e.get("box")
+    crop = as_object(e["crop"], f"{where}: crop") if e.get("crop") else None
+    outline = as_object(e["outline"], f"{where}: outline") if e.get("outline") else None
+    return LoopPicture(
+        bbox=bbox, frame=box(frame, At(where=where, path="box")) if frame else bbox,
+        file=_loop_str(e, "file", where), alt=_loop_str(e, "alt", where), source_url=_loop_str(e, "source_url", where),
+        crop=None if crop is None else LoopCrop(l=_number(crop["l"], f"{where}: crop"), t=_number(crop["t"], f"{where}: crop"),
+                                                r=_number(crop["r"], f"{where}: crop"), b=_number(crop["b"], f"{where}: crop")),
+        rotation=_loop_number(e, "rotation", where), flip=bool(e.get("flip")), opacity=_loop_number(e, "opacity", where),
+        outline=None if outline is None else LoopOutline(
+            color=as_str(outline["color"], f"{where}: outline"), weight=_number(outline["weight"], f"{where}: outline"),
+            dash=as_str(outline.get("dash", "SOLID"), f"{where}: outline")),
+        mask=_loop_str(e, "mask", where), bake={k: v for k in BAKED if (v := e.get(k))})
+
+
+def target_picture(el: TargetImage) -> LoopPicture:
+    """`loop_picture` of a target's picture record: what its JSON (`element_json`) reads as."""
+    bake: JsonObject = {}
+    if el.brightness:
+        bake["brightness"] = el.brightness
+    if el.contrast:
+        bake["contrast"] = el.contrast
+    if el.recolor is not None:
+        bake["recolor"] = recolor_json(el.recolor)
+    crop, outline = el.crop, el.outline
+    return LoopPicture(
+        bbox=el.bbox, frame=el.bbox if el.box is None else el.box, file=el.file, alt=el.alt, source_url=el.source_url,
+        crop=None if crop is None else LoopCrop(l=crop.l, t=crop.t, r=crop.r, b=crop.b),
+        rotation=el.rotation, flip=bool(el.flip), opacity=el.opacity,
+        outline=None if outline is None else LoopOutline(color=outline.color, weight=outline.weight, dash=outline.dash),
+        mask=el.mask, bake=bake)
+
+
+def loop_element(e: JsonObject, where: str) -> LoopElement:
+    kind = as_str(e["kind"], f"{where}: kind")
+    bbox = box(e["bbox"], At(where=where, path="bbox"))
+    return LoopElement(json=e, id=as_str(e["id"], f"{where}: id"), kind=kind, role=_loop_str(e, "role", where),
+                       bbox=bbox, wrap_width=_loop_number(e, "wrap_width", where),
+                       picture=loop_picture(e, bbox, where) if kind == "image" else None)
+
+
+def loop_elements(slide: JsonObject, where: str) -> list[LoopElement]:
+    return [loop_element(e, f"{where} element {i}") for i, e in enumerate(as_objects(slide["elements"], where))]
+
+
+def element_paragraphs(el: LoopElement) -> list[JsonObject]:
+    """A text element's paragraphs as JSON, for compare's readers (`para_text`)."""
+    return as_objects(el.json["paragraphs"], f"element {el.id}: paragraphs")
+
+
+def run_latex(r: RunIn, text: str, base: TextStyle, ctx: "Context") -> str:
+    """One run's words `text` (the run's own, or a line of them) in its style, relative to `base`."""
+    text = latex_escape(text)
+    if not text:
+        return ""
+    lead = len(text) - len(text.lstrip(" "))
+    trail = len(text) - len(text.rstrip(" "))
+    core = text.strip(" ")
+    if core:
+        if r.family == "mono" and base.family != "mono":
+            core = f"\\texttt{{{core}}}"
+        if r.bold and not base.bold:
+            core = f"\\textbf{{{core}}}"
+        if r.italic and not base.italic:
+            core = f"\\emph{{{core}}}"
+        if r.underline:
+            core = f"\\underline{{{core}}}"
+        if r.script == "super":
+            core = f"\\textsuperscript{{{core}}}"
+        elif r.script == "sub":
+            core = f"\\textsubscript{{{core}}}"
+        if r.color and base.color and compare_colour(r.color, base.color):
+            core = f"\\textcolor{{{colour_name(r.color, ctx.colours)}}}{{{core}}}"
+        if r.size and base.size and abs(r.size - base.size) > 0.06 * base.size:
+            core = f"{{{size_switch(r.size, ctx.pt_option)} {core}}}"
+        if r.link and not r.link.startswith("#"):
+            # hyperref reads `#` and `%` itself only outside another command's argument: inside a
+            # frame (whose body is one) a bare `#` is a parameter number and stops the build
+            url = r.link.replace("\\", "/").replace("#", "\\#").replace("%", "\\%")
+            core = f"\\href{{{url}}}{{{core}}}"
+    return " " * lead + core + " " * trail
+
+
+def runs_latex(runs: Sequence[RunIn], base: TextStyle, ctx: "Context") -> str:
     """LaTeX for styled runs, styles written relative to `base` (size, colour, bold, italic)."""
     out = []
     for r in runs:
-        if r.get("hole"):
+        if r.hole:
             continue
-        if "\x0b" in r["text"]:
+        if "\x0b" in r.text:
             # A soft break (Shift+Enter) ends a line, which it cannot do inside the box a style puts
             # its run in (`\underline{a\\ b}`: "Not allowed in LR mode"), so the run's style goes
             # around each line's words and the break stands between them.
-            pieces = [runs_latex([{**r, "text": t}], base, ctx) if t else "" for t in r["text"].split("\x0b")]
-            out.append("\\\\ ".join(pieces))
+            out.append("\\\\ ".join(run_latex(r, t, base, ctx) if t else "" for t in r.text.split("\x0b")))
             continue
-        text = latex_escape(r["text"])
-        if not text:
-            continue
-        lead = len(text) - len(text.lstrip(" "))
-        trail = len(text) - len(text.rstrip(" "))
-        core = text.strip(" ")
-        if core:
-            if r.get("family") == "mono" and base.get("family") != "mono":
-                core = f"\\texttt{{{core}}}"
-            if r.get("bold") and not base.get("bold"):
-                core = f"\\textbf{{{core}}}"
-            if r.get("italic") and not base.get("italic"):
-                core = f"\\emph{{{core}}}"
-            if r.get("underline"):
-                core = f"\\underline{{{core}}}"
-            if r.get("script") == "super":
-                core = f"\\textsuperscript{{{core}}}"
-            elif r.get("script") == "sub":
-                core = f"\\textsubscript{{{core}}}"
-            if r.get("color") and base.get("color") and compare_colour(r["color"], base["color"]):
-                core = f"\\textcolor{{{colour_name(r['color'], ctx.colours)}}}{{{core}}}"
-            if r.get("size") and base.get("size") and abs(r["size"] - base["size"]) > 0.06 * base["size"]:
-                core = f"{{{size_switch(r['size'], ctx.pt_option)} {core}}}"
-            if r.get("link") and not str(r["link"]).startswith("#"):
-                # hyperref reads `#` and `%` itself only outside another command's argument: inside a
-                # frame (whose body is one) a bare `#` is a parameter number and stops the build
-                url = str(r["link"]).replace("\\", "/").replace("#", "\\#").replace("%", "\\%")
-                core = f"\\href{{{url}}}{{{core}}}"
-        out.append(" " * lead + core + " " * trail)
+        out.append(run_latex(r, r.text, base, ctx))
     # Two breaks in a row are an empty line, and a second `\\` with nothing on its line stops a
     # ragged or centred paragraph ("There's no line here to end"): the line gets an empty box.
     return re.sub(r"(?<=\\\\ )(\s*)(?=\\\\)", r"\1\\mbox{}", "".join(out))
 
 
-def compare_colour(a: str, b: str) -> bool:
+def compare_colour(a: str, b: str | None) -> bool:
     from .compare import colour_distance
     return colour_distance(a, b) > TOL["color"]
 
@@ -267,8 +524,8 @@ class Context:
     pt_option: int = 11
     files: dict[str, Path] = field(default_factory=dict)     # new picture files: key -> path in the work tree
     notes: list[str] = field(default_factory=list)           # what the report must say about pictures
-    pictures: dict = field(default_factory=dict)             # (deck file, edits) -> Picture
-    index: list[dict] | None = None                          # picture files of the source tree
+    pictures: dict[tuple[str, str, str | None], "Picture"] = field(default_factory=dict)  # (deck file, edits) -> Picture
+    index: "list[PictureFile] | None" = None                 # picture files of the source tree
     label_notes: list[str] = field(default_factory=list)     # what the report must say about renamed labels
 
 
@@ -292,9 +549,9 @@ class ParaLoc:
 class Candidate:
     source: Source
     pdf: Path
-    deck: dict
+    deck: JsonObject
     frames: list[Frame | None]            # per deck slide
-    locs: dict[int, dict] = field(default_factory=dict)
+    locs: dict[int, dict[tuple[str, int], ParaLoc]] = field(default_factory=dict)
     text_masked: dict[Path, str] = field(default_factory=dict)
     words: dict[int, list[str]] = field(default_factory=dict)   # PDF page -> the words it shows (extract, not classify)
 
@@ -307,11 +564,18 @@ class Candidate:
         """The current side of a comparison: the deck, and its slides' frame labels."""
         return Current(deck=self.deck, keys=self.keys())
 
-    def target(self) -> dict:
+    def slides(self) -> list[JsonObject]:
+        return as_objects(self.deck["slides"], "deck.json: slides")
+
+    def page(self, si: int) -> int:
+        """The PDF page (of the notes-free PDF) slide `si` shows."""
+        return as_int(self.slides()[si]["page"], f"deck.json: slide {si}: page")
+
+    def target(self) -> JsonObject:
         """The deck as another source's target (`ir_from_tex`): a copy whose slides carry their
         frame's label as `key`, and the frame's index, as target.json has always had them."""
         out = copy.deepcopy(self.deck)
-        for s, key, frame in zip(out["slides"], self.keys(), self.frames):
+        for s, key, frame in zip(as_objects(out["slides"], "deck.json: slides"), self.keys(), self.frames):
             s["key"] = key
             s["frame_index"] = frame.index if frame is not None else None
         return out
@@ -333,21 +597,23 @@ class Candidate:
         vis = frame_visible(self.source, frame)
         pre = title_page_visible(self)
         pos = 0
-        for para in slide_paragraphs(self.deck["slides"][si]):
-            candidates = []
+        slide = self.slides()[si]
+        for para in slide_paragraphs(slide):
+            candidates: list[tuple[Path, Visible, int, int]] = []
             is_title = para.el.get("role") == "title"
-            if is_title and vis.title and not self.deck["slides"][si].get("title_page"):
+            if is_title and vis.title and not slide.get("title_page"):
                 candidates.append((frame.file, vis, vis.title[0], vis.title[1]))
             candidates += [(frame.file, vis, pos, len(vis.text)), (frame.file, vis, 0, len(vis.text))]
             if pre is not None:
                 candidates.append((self.source.main, pre, 0, len(pre.text)))
-            best = None
+            best: tuple[Path, Visible, WordMap] | None = None
             for path, v, lo, hi in candidates:
                 wm = locate_words(para.text, v, lo, hi)
                 if best is None or wm.score > best[2].score + 1e-9:
                     best = (path, v, wm)
                 if wm.score >= 0.8:
                     break
+            assert best is not None  # there are always two candidates
             path, v, wm = best
             found = [g for g in wm.vis if g is not None]
             if wm.score < 0.34 or not found:
@@ -359,7 +625,7 @@ class Candidate:
                 inside = [it for it in v.items if it.start <= src < max(it.end, it.body)]
                 item = max(inside, key=lambda it: it.level) if inside else None
                 pos = hi
-            out[(para.el["id"], para.pi)] = ParaLoc(path, v, wm, lo, hi, item, is_title)
+            out[(as_str(para.el["id"], "element id"), para.pi)] = ParaLoc(path, v, wm, lo, hi, item, is_title)
         return out
 
 
@@ -452,7 +718,8 @@ class Workspace:
                 break
         return self.build_dir / f"{job}.pdf", ""
 
-    def build(self, out: Path, target_has_notes: bool = False, compiled=None) -> Candidate | str:
+    def build(self, out: Path, target_has_notes: bool = False,
+              compiled: tuple[Path | None, str] | None = None) -> Candidate | str:
         """Compile, extract and classify like `convert` (overlays: last step of each frame), and
         map every slide to its frame. A string is a compile error.
 
@@ -465,7 +732,7 @@ class Workspace:
 
         reuse = compiled is not None and self.notes == target_has_notes
         self.notes = target_has_notes
-        pdf, err = compiled if reuse else self.compile()
+        pdf, err = compiled if reuse and compiled is not None else self.compile()
         if pdf is None:
             return err
         out.mkdir(parents=True, exist_ok=True)
@@ -496,7 +763,7 @@ class Workspace:
         return Candidate(self.source, prepared.pdf, deck, frames, words=words)
 
 
-def original_pages(pdf: Path, prepared) -> list[int]:
+def original_pages(pdf: Path, prepared: "Prepared") -> list[int]:
     """Page index in the compiled PDF of each page of the notes-free PDF."""
     if prepared.mode != "note pages":
         return list(range(10 ** 5))
@@ -638,10 +905,13 @@ def line_span(text: str, start: int, end: int) -> tuple[int, int]:
     return ls, le
 
 
+INDENT_RE = re.compile(r"[ \t]*")
+
+
 def indent_at(text: str, pos: int) -> str:
     ls = text.rfind("\n", 0, pos) + 1
-    m = re.match(r"[ \t]*", text[ls:])
-    return m.group(0)
+    m = INDENT_RE.match(text, ls)
+    return m.group(0) if m else ""  # it always matches: nothing is an indent too
 
 
 def frame_insert_point(cand: Candidate, frame: Frame) -> int:
@@ -718,6 +988,8 @@ def plain_source(text: str) -> bool:
 TIKZ = r"\usepackage{tikz}"
 LATEX_PICTURES = (".png", ".jpg", ".jpeg", ".pdf")
 FIGURE_ENV_RE = re.compile(r"\\begin\s*\{(tikzpicture|pgfpicture)\}")
+GRAPHICS_OPTS_RE = re.compile(r"\\includegraphics\s*(\[[^\]]*\])?")
+INCLUDEGRAPHICS_RE = re.compile(r"\\includegraphics\s*(<[^>]*>)?\s*(\[([^\]]*)\])?")
 WRAPPERS = [  # (text right before the wrapped command, what closes it)
     (re.compile(r"\\reflectbox\s*\{\s*$"), "}"),
     (re.compile(r"\\rotatebox\s*(\[[^\]]*\])?\s*\{[^{}]*\}\s*\{\s*$"), "}"),
@@ -774,10 +1046,15 @@ def natural_size(path: Path) -> tuple[float, float]:
     return float(w), float(h)
 
 
-def picture_look(path: Path):
+Look = tuple[float, "Floats32", float]
+"""A picture's look (`picture_look`): aspect ratio, 64x64 grey array, pixel count."""
+
+
+def picture_look(path: Path) -> Look | None:
     """(aspect ratio, 64x64 grey array, pixel count) of a raster file or a one-page PDF; None if unreadable."""
     import numpy as np
     from PIL import Image
+    pixels: float
     try:
         if path.suffix.lower() == ".pdf":
             from .pdf import Document
@@ -797,13 +1074,14 @@ def picture_look(path: Path):
         rgba = img.convert("RGBA")
         ground = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
         ground.alpha_composite(rgba)
-        grey = np.asarray(ground.convert("L").resize((64, 64), Image.BILINEAR), np.float32) / 255
+        grey = np.asarray(np.asarray(ground.convert("L").resize((64, 64), Image.Resampling.BILINEAR), np.float32) / 255,
+                          dtype=np.float32)
         return rgba.size[0] / rgba.size[1], grey, pixels
     except Exception:  # noqa: BLE001 - any unreadable file is just not a candidate
         return None
 
 
-def same_look(a, b) -> bool:
+def same_look(a: Look | None, b: Look | None) -> bool:
     """Two pictures that are the same image at another resolution or encoding."""
     import numpy as np
     if a is None or b is None or abs(math.log(a[0] / b[0])) > 0.02:
@@ -816,67 +1094,77 @@ def same_look(a, b) -> bool:
     return float(np.corrcoef(x, y)[0, 1]) >= 0.98
 
 
-def picture_index(root: Path) -> list[dict]:
-    """Picture files of a source tree LaTeX can include: {path, sha1, look (lazy)}."""
-    out = []
+class PictureFile:
+    """A picture file of the source tree, its look read when first asked (`find_picture`)."""
+
+    def __init__(self, path: Path, sha1: str) -> None:
+        self.path = path
+        self.sha1 = sha1
+        self.looked = False
+        self.look: Look | None = None
+
+
+def picture_index(root: Path) -> list[PictureFile]:
+    """Picture files of a source tree LaTeX can include."""
+    out: list[PictureFile] = []
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
         for name in filenames:
             p = Path(dirpath) / name
             if p.suffix.lower() in LATEX_PICTURES and p.stat().st_size <= 50_000_000:
-                out.append({"path": p, "sha1": hashlib.sha1(p.read_bytes()).hexdigest(), "look": None})
+                out.append(PictureFile(p, hashlib.sha1(p.read_bytes()).hexdigest()))
     return out
 
 
-def find_picture(index: list[dict], sha: str, look) -> dict | None:
+def find_picture(index: list[PictureFile], sha: str, look: Look | None) -> PictureFile | None:
     """The same picture in the source tree: identical bytes, else the best-resolution file that
     looks the same (a PDF before any raster)."""
-    exact = next((e for e in index if e["sha1"] == sha), None)
+    exact = next((e for e in index if e.sha1 == sha), None)
     if exact or look is None:
         return exact
-    found = []
+    found: list[tuple[PictureFile, Look]] = []
     for e in index:
-        if e["look"] is None:
-            e["look"] = picture_look(e["path"]) or False
-        if e["look"] and same_look(look, e["look"]):
-            found.append(e)
-    return max(found, key=lambda e: e["look"][2]) if found else None
+        if not e.looked:
+            e.look, e.looked = picture_look(e.path), True
+        if e.look is not None and same_look(look, e.look):
+            found.append((e, e.look))
+    return max(found, key=lambda f: f[1][2])[0] if found else None
 
 
-def picture_edits(te: dict) -> bool:
-    return any(te.get(k) for k in ("crop", "rotation", "flip", "opacity", "outline", "brightness", "contrast", "recolor",
-                                   "mask"))
+def picture_edits(te: LoopPicture) -> bool:
+    return bool(te.crop is not None or te.rotation or te.flip or te.opacity or te.outline is not None or te.bake
+                or te.mask)
 
 
-def picture_latex(te: dict, pic: Picture, ctx: "Context", size: list[str] | None = None) -> str:
+def picture_latex(te: LoopPicture, pic: Picture, ctx: "Context", size: list[str] | None) -> str:
     """\\includegraphics for a deck picture with its Slides edits as LaTeX: crop -> trim/clip (in the
     file's natural bp), rotation -> angle (Slides turns clockwise about the centre; the rotated box
     is placed by its bounding box, so no origin is needed), mirroring -> \\reflectbox, transparency
     and outline -> a \\tikz node (text opacity, draw), turned as a whole by \\rotatebox."""
-    x0, y0, x1, y1 = te.get("box") or te["bbox"]
-    opts = []
-    crop = te.get("crop")
-    if crop:
+    x0, y0, x1, y1 = te.frame
+    opts: list[str] = []
+    crop = te.crop
+    if crop is not None:
         nw, nh = pic.natural
-        trim = (crop["l"] * nw, crop["b"] * nh, crop["r"] * nw, crop["t"] * nh)
+        trim = (crop.l * nw, crop.b * nh, crop.r * nw, crop.t * nh)
         opts += ["trim=" + " ".join(f"{max(0.0, v):.2f}" for v in trim), "clip"]
     opts += size or [f"width={x1 - x0:.1f}pt", f"height={y1 - y0:.1f}pt"]
-    angle = round(-(te.get("rotation") or 0.0), 2)
-    node = []
-    if te.get("opacity") is not None and te["opacity"] < 0.995:
-        node.append(f"text opacity={te['opacity']:.2f}")
-    outline = te.get("outline")
-    if outline:
-        node += [f"draw={colour_name(outline['color'], ctx.colours)}", f"line width={outline['weight']:.2f}pt"]
-        if outline.get("dash", "SOLID") != "SOLID":
-            node.append("dotted" if "DOT" in outline["dash"] and "DASH" not in outline["dash"] else "dashed")
-    wrapped = bool(node or te.get("flip") or te.get("mask"))
+    angle = round(-(te.rotation or 0.0), 2)
+    node: list[str] = []
+    if te.opacity is not None and te.opacity < 0.995:
+        node.append(f"text opacity={te.opacity:.2f}")
+    outline = te.outline
+    if outline is not None:
+        node += [f"draw={colour_name(outline.color, ctx.colours)}", f"line width={outline.weight:.2f}pt"]
+        if outline.dash != "SOLID":
+            node.append("dotted" if "DOT" in outline.dash and "DASH" not in outline.dash else "dashed")
+    wrapped = bool(node or te.flip or te.mask)
     if angle and not wrapped:
         opts.append(f"angle={angle:g}")
     cmd = f"\\includegraphics[{','.join(opts)}]{{{pic.rel}}}"
-    if te.get("flip"):
+    if te.flip:
         cmd = f"\\reflectbox{{{cmd}}}"
-    if te.get("mask") == "ellipse":
+    if te.mask == "ellipse":
         # shown only inside the ellipse its frame inscribes, the outline drawn round it too
         ctx.packages.add(TIKZ)
         radii = f"ellipse [x radius={(x1 - x0) / 2:.2f}pt,y radius={(y1 - y0) / 2:.2f}pt]"
@@ -893,12 +1181,12 @@ def picture_latex(te: dict, pic: Picture, ctx: "Context", size: list[str] | None
     return cmd
 
 
-def picture_block(te: dict, pic: Picture, ctx: "Context", ind: str) -> str:
+def picture_block(te: LoopPicture, pic: Picture, ctx: "Context", ind: str) -> str:
     """A picture at its deck position: a textblock* at the top-left of its bounding box."""
-    x0, y0, x1, y1 = te["bbox"]
-    pad = te["outline"]["weight"] / 2 if te.get("outline") and not te.get("rotation") else 0.0
+    x0, y0, x1, y1 = te.bbox
+    pad = te.outline.weight / 2 if te.outline is not None and not te.rotation else 0.0
     return (f"{ind}\\begin{{textblock*}}{{{x1 - x0 + 2 * pad:.1f}pt}}({x0 - pad:.1f}pt,{y0 - pad:.1f}pt)\n"
-            f"{ind}  {picture_latex(te, pic, ctx)}\n{ind}\\end{{textblock*}}\n")
+            f"{ind}  {picture_latex(te, pic, ctx, None)}\n{ind}\\end{{textblock*}}\n")
 
 
 def wrapper_span(text: str, a: int, b: int) -> tuple[int, int]:
@@ -959,23 +1247,29 @@ def picture_sources(text: str, frame: Frame) -> list[PictureSource]:
     return sorted(out, key=lambda p: p.start)
 
 
-def reading_order(els: list[dict]) -> list[dict]:
+class _Column:
+    def __init__(self, x0: float, x1: float, e: LoopElement) -> None:
+        self.x0, self.x1 = x0, x1
+        self.els = [e]
+
+
+def reading_order(els: Sequence[LoopElement]) -> list[LoopElement]:
     """Elements column by column (boxes overlapping horizontally share a column), top to bottom:
     the order a beamer source writes them in."""
-    cols: list[dict] = []
-    for e in sorted(els, key=lambda e: e["bbox"][0]):
-        x0, x1 = e["bbox"][0], e["bbox"][2]
+    cols: list[_Column] = []
+    for e in sorted(els, key=lambda e: e.bbox[0]):
+        x0, x1 = e.bbox[0], e.bbox[2]
         for col in cols:
-            if min(col["x1"], x1) - max(col["x0"], x0) > 0.3 * min(col["x1"] - col["x0"], x1 - x0):
-                col["els"].append(e)
-                col["x0"], col["x1"] = min(col["x0"], x0), max(col["x1"], x1)
+            if min(col.x1, x1) - max(col.x0, x0) > 0.3 * min(col.x1 - col.x0, x1 - x0):
+                col.els.append(e)
+                col.x0, col.x1 = min(col.x0, x0), max(col.x1, x1)
                 break
         else:
-            cols.append({"x0": x0, "x1": x1, "els": [e]})
-    return [e for col in cols for e in sorted(col["els"], key=lambda e: e["bbox"][1])]
+            cols.append(_Column(x0, x1, e))
+    return [e for col in cols for e in sorted(col.els, key=lambda e: e.bbox[1])]
 
 
-def overlap_share(a: list[float], b: list[float]) -> float:
+def overlap_share(a: Sequence[float], b: Sequence[float]) -> float:
     w = min(a[2], b[2]) - max(a[0], b[0])
     h = min(a[3], b[3]) - max(a[1], b[1])
     if w <= 0 or h <= 0:
@@ -992,11 +1286,23 @@ def commented_out(orig: str, a: int, b: int, ind: str, note: str) -> str:
 
 # ---------------------------------------------------------------- the planner
 
+class FlowShift:
+    """What `Planner.flow_shift` learnt of one flow move across rounds: its tries, the last error and
+    \\vspace step, and the gain those measured. It changes in place, round after round."""
+
+    def __init__(self) -> None:
+        self.tries = 0
+        self.err: float | None = None
+        self.dv = 0.0
+        self.gain: float | None = None
+
+
 class Planner:
     """Edits for one round's open residuals, and the residuals it could write none for."""
 
-    def __init__(self, cand: Candidate, comp: Comparison, target: dict, ctx: Context, ws: Workspace,
-                 blocked: set[Signature], last_values: dict, hashes: Mapping[int, PictureHash]):
+    def __init__(self, cand: Candidate, comp: Comparison, target: JsonObject, ctx: Context, ws: Workspace,
+                 blocked: set[Signature], last_values: "dict[Signature, FlowShift | int]",
+                 hashes: Mapping[int, PictureHash]) -> None:
         self.cand, self.comp, self.target, self.ctx, self.ws = cand, comp, target, ctx, ws
         self.blocked = blocked
         self.last = last_values
@@ -1007,8 +1313,8 @@ class Planner:
         self.unresolved: list[Unresolved] = []
         self.shifted: set[int] = set()  # slides whose flow got a \vspace this round
         deck = cand.deck
-        self.cur_slides = deck["slides"]
-        self.tgt_slides = target["slides"]
+        self.cur_slides = cand.slides()
+        self.tgt_slides = as_objects(target["slides"], "target: slides")
         self.t2c = {j: i for i, j in comp.slides if i is not None and j is not None}
         self.c2t = {i: j for i, j in comp.slides if i is not None and j is not None}
         self.base = body_style(deck)
@@ -1021,11 +1327,12 @@ class Planner:
     def edit(self, file: Path, start: int, end: int, text: str, r: Residual, note: str) -> None:
         self.edits.append(Edit(file, start, end, text, r.kind, signature(r), note))
 
-    def find_element(self, slide: dict, eid: str) -> dict | None:
+    def find_element(self, slide: JsonObject, eid: str) -> LoopElement | None:
         """The element `eid` of a slide, None when the slide has none."""
-        return next((e for e in slide["elements"] if e["id"] == eid), None)
+        found = next((e for e in as_objects(slide["elements"], "slide: elements") if e["id"] == eid), None)
+        return None if found is None else loop_element(found, f"element {eid}")
 
-    def element(self, slide: dict, eid: str) -> dict:
+    def element(self, slide: JsonObject, eid: str) -> LoopElement:
         """The element `eid` of a slide a residual names: compare made the residual from it, so it
         is there."""
         el = self.find_element(slide, eid)
@@ -1096,8 +1403,8 @@ class Planner:
         j = r.target_slide
         ts = self.tgt_slides[j]
         prev = next((self.t2c[k] for k in range(j - 1, -1, -1) if k in self.t2c and self.cand.frames[self.t2c[k]]), None)
-        if prev is not None:
-            frame = self.cand.frames[prev]
+        frame = None if prev is None else self.cand.frames[prev]
+        if frame is not None:
             text = self.cand.source.text(frame.file)
             pos = text.find("\n", frame.end)
             pos = len(text) if pos < 0 else pos + 1
@@ -1108,11 +1415,11 @@ class Planner:
                 self.fail(r, "no frame to insert before")
                 return
             file, pos = first.file, self.cand.source.text(first.file).rfind("\n", 0, first.start) + 1
-        key = ts.get("key")
+        key = _loop_str(ts, "key", "target slide")
         label = key
         # two slides carrying the same key (a slide duplicated in the deck) would otherwise get the
         # same \label{}: hyperref keeps only the first, silently breaking identity for later syncs
-        if is_frame_label(key) and key in self.used_labels:
+        if key is not None and is_frame_label(key) and key in self.used_labels:
             n = 2
             while f"{key}-{n}" in self.used_labels:
                 n += 1
@@ -1121,9 +1428,11 @@ class Planner:
                 f"slide {j + 1} ({slide_title(ts) or key}): another slide already carries the label "
                 f"'{key}' (a duplicated slide?) - wrote this frame as '{label}' instead of a repeated "
                 f"\\label{{{key}}}, which hyperref would silently drop")
-        if is_frame_label(label):
+        if label is not None and is_frame_label(label):
             self.used_labels.add(label)
-        self.edit(file, pos, pos, "\n" + frame_latex(ts, self.level_style, self.ctx, label=label), r, "")
+        self.edit(file, pos, pos, "\n" + frame_latex(loop_texts(ts, "target slide"), key,
+                                                     _loop_str(ts, "notes", "target slide"), self.level_style,
+                                                     self.ctx, label), r, "")
 
     def slide_extra(self, r: SlideExtra) -> None:
         frame = self.cand.frames[r.slide]
@@ -1236,20 +1545,22 @@ class Planner:
                 continue
             if op.op == "insert":
                 want = [norm_word(w) for w in op.tgt.split()]
-                near = []
-                if c0 > 0 and loc.words.vis[c0 - 1] is not None:
-                    near.append([norm_word(w) for w in loc.visible.text[loc.words.vis[c0 - 1][1]:].split()[:len(want)]])
-                if c0 < len(cur_words) and loc.words.vis[c0] is not None:
-                    near.append([norm_word(w) for w in loc.visible.text[:loc.words.vis[c0][0]].split()[-len(want):]])
+                near: list[list[str]] = []
+                before = loc.words.vis[c0 - 1] if c0 > 0 else None
+                after = loc.words.vis[c0] if c0 < len(cur_words) else None
+                if before is not None:
+                    near.append([norm_word(w) for w in loc.visible.text[before[1]:].split()[:len(want)]])
+                if after is not None:
+                    near.append([norm_word(w) for w in loc.visible.text[:after[0]].split()[-len(want):]])
                 if want in near:
                     self.fail_op(r, op, None, "the words are already in the source: the conversion splits the "
                                               "paragraph differently (box width, line breaks)")
                     continue
-                if c0 > 0 and loc.words.vis[c0 - 1] is not None:
-                    at = loc.visible.ends[loc.words.vis[c0 - 1][1] - 1]
+                if before is not None:
+                    at = loc.visible.ends[before[1] - 1]
                     self.edits.append(Edit(loc.file, at, at, " " + new, "text", signature(r) + (c0,)))
-                elif c0 < len(cur_words) and loc.words.vis[c0] is not None:
-                    at = loc.visible.starts[loc.words.vis[c0][0]]
+                elif after is not None:
+                    at = loc.visible.starts[after[0]]
                     self.edits.append(Edit(loc.file, at, at, new + " ", "text", signature(r) + (c0,)))
                 else:
                     self.fail_op(r, op, None, "insertion point not found")
@@ -1269,9 +1580,12 @@ class Planner:
             tw = op.tgt.split()
             if op.op == "replace" and len(tw) == c1 - c0:
                 ok = True
-                parts = []
+                parts: list[Edit] = []
                 for d in range(c1 - c0):
                     s = loc.words.span(c0 + d, c0 + d + 1)
+                    if s is None:  # never: the words' whole span was found
+                        ok = False
+                        break
                     wa, wb = loc.visible.starts[s[0]], loc.visible.ends[s[1] - 1]
                     if not plain_source(src[wa:wb]):
                         ok = False
@@ -1290,7 +1604,7 @@ class Planner:
             return
         cs = self.cur_slides[r.slide]
         el = self.element(cs, r.element)
-        para = el["paragraphs"][r.para]
+        para = element_paragraphs(el)[r.para]
         ptext = norm_text(para_text(para))
         # a style command (bold/italic/colour/size) is never wrapped around less than a whole word
         # by a person; only a character-level diff coincidence would suggest it - so unlike `text`,
@@ -1322,7 +1636,7 @@ class Planner:
                 self.unwrap(loc.file, src, g, a, b, r)
         elif isinstance(change, ColorChange):
             tgt = change.tgt
-            base_colour = dominant(para, "color")
+            base_colour = dominant(para, run_colour)
             g = enclosing_group(src, a, b, ("textcolor", "color", "alert"), lo)
             if g is not None and src[g[1]:g[2]].strip() == src[a:b].strip():
                 cmd_start, c_start, c_end, g_end, name = g
@@ -1347,7 +1661,7 @@ class Planner:
                 return
             self.edit(loc.file, a, b, f"\\textcolor{{{colour_name(tgt, self.ctx.colours)}}}{{{src[a:b]}}}", r, "")
         elif isinstance(change, SizeChange):
-            base_size = dominant(para, "size")
+            base_size = dominant(para, run_size)
             g = enclosing_group(src, a, b, tuple(SIZE_TABLES[11]) + ("fontsize",), lo)
             if g is not None and src[g[1]:g[2]].strip() == src[a:b].strip():
                 if base_size is not None and abs(change.tgt - base_size) <= 0.06 * base_size:
@@ -1423,14 +1737,14 @@ class Planner:
         self.rebuild_list(si, ti, loc.file, loc.visible, lst, r)
 
     def missing_paragraph(self, r: ParagraphMissing, locs: Mapping[tuple[str, int], ParaLoc],
-                          ts: dict) -> tuple[ParaLoc, ListEnv] | None:
+                          ts: JsonObject) -> tuple[ParaLoc, ListEnv] | None:
         """A missing paragraph written where it goes; the list to rebuild when it is an item of one
         (with where its predecessor's source is), None when that is all."""
         si = r.slide
         if self.target_element_is_new(ts, r.target_element, si):
             return None  # element_missing adds it as a whole
         after = r.after
-        tpara = self.element(ts, r.target_element)["paragraphs"][r.target_para]
+        tpara = element_paragraphs(self.element(ts, r.target_element))[r.target_para]
         aloc = locs.get((after.element, after.para)) if after is not None else None
         if aloc is None and after is not None:
             self.fail(r, "predecessor not found in the source")
@@ -1449,18 +1763,18 @@ class Planner:
                 text = self.cand.masked(aloc.file)
                 pos = text.find("\n", lst.end)
                 pos = len(text) if pos < 0 else pos + 1
-                self.edit(aloc.file, pos, pos, indent_at(text, lst.start) + runs_latex(tpara["runs"], self.level_style(tpara), self.ctx) + "\n", r, "")
+                self.edit(aloc.file, pos, pos, indent_at(text, lst.start) + self.paragraph_latex(tpara) + "\n", r, "")
                 return None
             self.insert_paragraph(aloc, None, tpara, r)
             return None
         return aloc, lst
 
-    def target_element_is_new(self, ts: dict, eid: str, si: int) -> bool:
+    def target_element_is_new(self, ts: JsonObject, eid: str, si: int) -> bool:
         return any(isinstance(x, (TextMissing, BoxMissing)) and x.target_element == eid and x.target_slide == self.c2t.get(si)
                    for x in self.comp.open())
 
-    def insert_paragraph(self, aloc: ParaLoc | None, frame: Frame | None, tpara: dict, r: ParagraphMissing) -> None:
-        body = runs_latex(tpara["runs"], self.level_style(tpara), self.ctx)
+    def insert_paragraph(self, aloc: ParaLoc | None, frame: Frame | None, tpara: JsonObject, r: ParagraphMissing) -> None:
+        body = self.paragraph_latex(tpara)
         if aloc is not None:
             text = self.cand.masked(aloc.file)
             _, end = aloc.src()
@@ -1502,7 +1816,7 @@ class Planner:
         items = [it for it in vis.items if lst.start <= it.start < lst.end]
         item_para: dict[int, int] = {}  # item start -> current paragraph index
         for ci, cp in enumerate(cps):
-            loc = locs.get((cp.el["id"], cp.pi))
+            loc = locs.get((as_str(cp.el["id"], "element id"), cp.pi))
             if loc is not None and loc.item is not None and loc.visible is vis and lst.start <= loc.item.start < lst.end:
                 item_para[loc.item.start] = ci
         members_c = set(item_para.values())
@@ -1511,15 +1825,16 @@ class Planner:
             self.fail(r, "list items not matched")
             return
         lo_t, hi_t = min(t_members), max(t_members)
+        tls = [loop_paragraph(tp.p, f"target paragraph {j}") for j, tp in enumerate(tps)]
         # new bulleted target paragraphs right before, inside or right after the matched range
-        while lo_t > 0 and lo_t - 1 not in c_of_t and tps[lo_t - 1].p.get("bullet") and \
-                not self.target_element_is_new(ts, tps[lo_t - 1].el["id"], si):
+        while lo_t > 0 and lo_t - 1 not in c_of_t and tls[lo_t - 1].bullet is not None and \
+                not self.target_element_is_new(ts, as_str(tps[lo_t - 1].el["id"], "element id"), si):
             lo_t -= 1
-        while hi_t + 1 < len(tps) and hi_t + 1 not in c_of_t and tps[hi_t + 1].p.get("bullet") and \
-                not self.target_element_is_new(ts, tps[hi_t + 1].el["id"], si):
+        while hi_t + 1 < len(tps) and hi_t + 1 not in c_of_t and tls[hi_t + 1].bullet is not None and \
+                not self.target_element_is_new(ts, as_str(tps[hi_t + 1].el["id"], "element id"), si):
             hi_t += 1
         by_para = {ci: it for it_start, ci in item_para.items() for it in items if it.start == it_start}
-        if self.small_list_edit(file, text, items, item_para, tps, c_of_t, lo_t, hi_t, lst, r):
+        if self.small_list_edit(file, text, items, item_para, tps, tls, c_of_t, lo_t, hi_t, lst, r):
             return
         ind0 = indent_at(text, lst.start)
         env_at_level: dict[int, str] = {}
@@ -1537,16 +1852,16 @@ class Planner:
 
         def item_indent(level: int) -> str:
             return item_ind.get(level) or env_indent(level) + "  "
-        lines = []
+        lines: list[str] = []
         stack: list[str] = []
         for j in range(lo_t, hi_t + 1):
-            tp = tps[j]
-            if not tp.p.get("bullet") and tp.p.get("tab_x0") is None:
+            tp, tl = tps[j], tls[j]
+            if tl.bullet is None and tl.tab_x0 is None:
                 continue
-            level = tp.p.get("level", 0)
-            numbered = (tp.p.get("bullet") or {}).get("kind") == "number"
+            level = tl.level
+            numbered = tl.bullet is not None and tl.bullet.kind == "number"
             env = env_at_level.get(level) or ("enumerate" if numbered else "itemize")
-            if tp.p.get("tab_x0") is not None and not tp.p.get("bullet"):
+            if tl.tab_x0 is not None and tl.bullet is None:
                 env = "description"
             elif env == "description" or (numbered != (env == "enumerate")):
                 env = "enumerate" if numbered else "itemize"
@@ -1562,13 +1877,12 @@ class Planner:
                 own = text[it.start:it.end].rstrip()
                 own = re.sub(r"\s*\n\s*", " ", own) if "\n\n" not in own and "\\begin" not in own and "%" not in own else own
             else:
-                runs = tp.p["runs"]
                 if env == "description":
-                    joined = runs_latex(runs, self.level_style(tp.p), self.ctx)
+                    joined = self.paragraph_latex(tp.p)
                     head, _, rest = joined.partition("\t")
                     own = f"\\item[{head.strip()}] {rest.strip()}"
                 else:
-                    own = "\\item " + runs_latex(runs, self.level_style(tp.p), self.ctx).strip()
+                    own = "\\item " + self.paragraph_latex(tp.p).strip()
             lines.append(item_indent(len(stack) - 1) + own)
         while stack:
             lines.append(env_indent(len(stack) - 1) + f"\\end{{{stack.pop()}}}")
@@ -1583,10 +1897,12 @@ class Planner:
         self.edit(file, a if a != lst.start else a, b, new if a != lst.start else new.lstrip(), r, "")
 
     def small_list_edit(self, file: Path, text: str, items: list[Item], item_para: dict[int, int], tps: list[Para],
-                        c_of_t: dict[int, int], lo_t: int, hi_t: int, lst: ListEnv, r: ListResidual) -> bool:
-        """Items only deleted, or only added at an existing level: edit those lines alone."""
-        desired = [(c_of_t.get(j), tps[j].p.get("level", 0), j) for j in range(lo_t, hi_t + 1)
-                   if tps[j].p.get("bullet") or tps[j].p.get("tab_x0") is not None]
+                        tls: Sequence[LoopParagraph], c_of_t: dict[int, int], lo_t: int, hi_t: int, lst: ListEnv,
+                        r: ListResidual) -> bool:
+        """Items only deleted, or only added at an existing level: edit those lines alone. `tls`: the
+        target paragraphs `tps` as the loop reads them."""
+        desired = [(c_of_t.get(j), tls[j].level, j) for j in range(lo_t, hi_t + 1)
+                   if tls[j].bullet is not None or tls[j].tab_x0 is not None]
         current = [(item_para.get(it.start), it.level, it) for it in sorted(items, key=lambda it: it.start)]
         if any(ci is None for ci, _, _ in current):
             return False
@@ -1615,7 +1931,7 @@ class Planner:
         for lv, j, k in new:
             prev = next(((by_ci[c], l) for c, l, _ in reversed(desired[:k]) if c is not None), None)
             nxt = next(((by_ci[c], l) for c, l, _ in desired[k + 1:] if c is not None), None)
-            line = "\\item " + runs_latex(tps[j].p["runs"], self.level_style(tps[j].p), self.ctx).strip()
+            line = "\\item " + self.paragraph_latex(tps[j].p).strip()
             if prev and prev[1] == lv:
                 pos = text.find("\n", len(text[:prev[0].end].rstrip()))
                 pos = len(text) if pos < 0 else pos + 1
@@ -1634,25 +1950,27 @@ class Planner:
         lo, hi = sorted((a.start, b.start))
         return not any(lo < x.start < hi and x.level < a.level for x in items)
 
-    def level_style(self, p: dict) -> dict:
+    def paragraph_latex(self, p: JsonObject) -> str:
+        """A target paragraph's runs, against the style its list level shows in the deck."""
+        para = loop_paragraph(p, "target paragraph")
+        return runs_latex(para.runs, self.level_style(para), self.ctx)
+
+    def level_style(self, p: LoopParagraph) -> TextStyle:
         """Base style for new text at a paragraph's list level: what that level shows elsewhere
         in the deck (themes shrink nested items), so no size switch is written for it."""
-        level = p.get("level", 0) if p.get("bullet") else None
-        counts: dict = {}
-        for s in self.cur_slides:
-            for e in s["elements"]:
+        level = p.level if p.bullet is not None else None
+        counts: dict[StyleKey, int] = {}
+        for si, s in enumerate(self.cur_slides):
+            for e in as_objects(s["elements"], f"slide {si}: elements"):
                 if e["kind"] != "text" or e.get("role") != "body":
                     continue
-                for q in e["paragraphs"]:
-                    if (q.get("level", 0) if q.get("bullet") else None) != level:
+                for q in loop_paragraphs(e, f"slide {si} element {e.get('id')}"):
+                    if (q.level if q.bullet is not None else None) != level:
                         continue
-                    for run in q["runs"]:
-                        k = (round(run["size"], 1), run["color"], run.get("family"))
-                        counts[k] = counts.get(k, 0) + len(run["text"])
-        if not counts:
-            return self.base
-        size, colour, family = max(counts, key=counts.get)
-        return {**self.base, "size": size, "color": colour, "family": family}
+                    for run in q.runs:
+                        k = (round(_size(run), 1), run.color, run.family)
+                        counts[k] = counts.get(k, 0) + len(run.text)
+        return common_style(counts, self.base)
 
     # -- elements and geometry
     def element_missing(self, r: TextMissing | BoxMissing) -> None:
@@ -1665,33 +1983,33 @@ class Planner:
         text = self.cand.masked(frame.file)
         pos = frame_insert_point(self.cand, frame)
         ind = indent_at(text, frame.start) + "  "
-        if te["kind"] == "text":
-            if te.get("role") == "title":
-                title = runs_latex(te["paragraphs"][0]["runs"], {**self.base, "size": None, "color": None}, self.ctx)
+        if te.kind == "text":
+            if te.role == "title":
+                title = runs_latex(loop_paragraphs(te.json, "title")[0].runs, replace(self.base, size=None, color=None), self.ctx)
                 a = frame.body
                 self.edit(frame.file, a, a, f"\n{ind}\\frametitle{{{title.strip()}}}", r, "")
                 return
             vis = frame_visible(self.cand.source, frame)
-            wanted = norm_text(" ".join(para_text(p) for p in te["paragraphs"]))
+            wanted = norm_text(" ".join(para_text(p) for p in element_paragraphs(te)))
             if wanted and locate_words(wanted, vis).score >= 0.8:
                 self.fail(r, "the text is in the frame already but doesn't convert as its own text "
                              "(covered by a figure, or merged into another box)")
                 return
             self.ctx.packages.add(TEXTPOS)
-            self.edit(frame.file, pos, pos, textblock_latex(te, self.level_style, self.ctx, ind, aligned_frame(text, frame)) + "\n", r, "")
-        elif te["kind"] == "image":
-            ref = self.replacing.get((r.slide, te["id"]))
+            self.edit(frame.file, pos, pos, textblock_latex(te.json, self.level_style, self.ctx, ind, aligned_frame(text, frame), "") + "\n", r, "")
+        elif te.picture is not None:  # an image
+            ref = self.replacing.get((r.slide, te.id))
             if ref is not None:
-                self.replace_picture(r, frame, self.find_element(self.cur_slides[r.slide], ref), te)
+                self.replace_picture(r, frame, self.find_element(self.cur_slides[r.slide], ref), te.picture)
                 return
-            pic = self.picture(te)
+            pic = self.picture(te.picture)
             if pic is None:
                 self.fail(r, "the picture file is not available")
                 return
             self.ctx.packages.add(TEXTPOS)
-            self.edit(frame.file, pos, pos, picture_block(te, pic, self.ctx, ind), r, "")
+            self.edit(frame.file, pos, pos, picture_block(te.picture, pic, self.ctx, ind), r, "")
         else:
-            self.fail(r, f"new {te['kind']} elements are not translated")
+            self.fail(r, f"new {te.kind} elements are not translated")
 
     # -- pictures
     def pair_replacements(self, res: Sequence[PairedResidual]) -> None:
@@ -1703,14 +2021,14 @@ class Planner:
                 continue
             te = self.element(self.tgt_slides[r.target_slide], r.target_element)
             best: tuple[float, BoxExtra | None] = max(
-                ((overlap_share(te["bbox"], list(x.bbox)), x) for x in extras if x.slide == r.slide
+                ((overlap_share(te.bbox, x.bbox), x) for x in extras if x.slide == r.slide
                  and (x.slide, x.element) not in self.replaced), key=lambda p: p[0], default=(0, None))
             share, hit = best
             if share >= 0.6 and hit is not None:
-                self.replacing[(r.slide, te["id"])] = hit.element
+                self.replacing[(r.slide, te.id)] = hit.element
                 self.replaced.add((r.slide, hit.element))
 
-    def picture(self, te: dict) -> Picture | None:
+    def picture(self, te: LoopPicture) -> Picture | None:
         """The file for a deck picture in the source tree: the same picture already there (identical
         bytes, else the best file that looks the same), else the deck's bytes as they are
         (`figures/<alt text slug>-<sha8>.<ext>`). Brightness, contrast and recolour are baked into
@@ -1718,30 +2036,31 @@ class Planner:
         from PIL import Image
         from .compare import adjusted_picture
         from .deck_ir import image_format
-        path = Path(te.get("file") or "")
-        if not te.get("file") or not path.exists():
+        path = Path(te.file or "")
+        if not te.file or not path.exists():
             return None
-        bake = {k: te[k] for k in ("brightness", "contrast", "recolor") if te.get(k)}
-        key = (str(path), json.dumps(bake, sort_keys=True), te.get("alt"))
+        bake = te.bake
+        key = (str(path), json.dumps(bake, sort_keys=True), te.alt)
         if key in self.ctx.pictures:
             return self.ctx.pictures[key]
-        if self.ctx.index is None:
-            self.ctx.index = picture_index(self.ws.src)
+        index = self.ctx.index
+        if index is None:
+            index = self.ctx.index = picture_index(self.ws.src)
         data = path.read_bytes()
         fmt = image_format(data)
         look = picture_look(path)
-        best = find_picture(self.ctx.index, hashlib.sha1(data).hexdigest(), look)
-        if best is None and te.get("source_url"):
+        best = find_picture(index, hashlib.sha1(data).hexdigest(), look)
+        if best is None and te.source_url:
             data, fmt, look = self.source_url_bytes(te, data, fmt, look)
         pic = None
-        if best is not None and (not bake or best["path"].suffix.lower() != ".pdf"):
-            if best["sha1"] != hashlib.sha1(data).hexdigest():
-                self.ctx.notes.append(f"{best['path'].relative_to(self.ws.src).as_posix()}: the deck's picture "
+        if best is not None and (not bake or best.path.suffix.lower() != ".pdf"):
+            if best.sha1 != hashlib.sha1(data).hexdigest():
+                self.ctx.notes.append(f"{best.path.relative_to(self.ws.src).as_posix()}: the deck's picture "
                                       f"{path.name} is the same image; the source file is kept (its resolution)")
             if not bake:
-                pic = Picture(best["path"].relative_to(self.ws.src).as_posix(), best["path"], natural_size(best["path"]))
+                pic = Picture(best.path.relative_to(self.ws.src).as_posix(), best.path, natural_size(best.path))
             else:
-                data, fmt = best["path"].read_bytes(), image_format(best["path"].read_bytes())
+                data, fmt = best.path.read_bytes(), image_format(best.path.read_bytes())
         if pic is None:
             ext = {"png": ".png", "jpeg": ".jpg"}.get(fmt)
             note = None
@@ -1764,11 +2083,11 @@ class Planner:
                 img.save(buf, "PNG")
                 data, ext = buf.getvalue(), ".png"
             sha = hashlib.sha1(data).hexdigest()
-            dest = self.ws.src / "figures" / f"{picture_slug(te.get('alt'))}-{sha[:8]}{ext}"
+            dest = self.ws.src / "figures" / f"{picture_slug(te.alt)}-{sha[:8]}{ext}"
             dest.parent.mkdir(parents=True, exist_ok=True)
             if not dest.exists():
                 dest.write_bytes(data)
-                self.ctx.index.append({"path": dest, "sha1": sha, "look": None})
+                index.append(PictureFile(dest, sha))
             self.ctx.files[str(dest)] = dest
             if note:
                 self.ctx.notes.append(f"{dest.relative_to(self.ws.src).as_posix()}: {note}")
@@ -1776,20 +2095,23 @@ class Planner:
         self.ctx.pictures[key] = pic
         return pic
 
-    def source_url_bytes(self, te: dict, data: bytes, fmt: str, look):
+    def source_url_bytes(self, te: LoopPicture, data: bytes, fmt: str, look: Look | None) -> tuple[bytes, str, Look | None]:
         """A picture inserted by URL: the original there when it is the same image with more pixels
         than Google kept (it stores at most about 2046 px on the long side)."""
         import io
         from PIL import Image
         from .deck_ir import fetch_url, image_format
+        url = te.source_url
+        if url is None:
+            return data, fmt, look
         try:
-            got = fetch_url(te["source_url"], None)
+            got = fetch_url(url, None)
             img = Image.open(io.BytesIO(got))
             cur = Image.open(io.BytesIO(data))
             tmp = self.ws.work / "source-url.bin"
             tmp.write_bytes(got)
             if img.size[0] * img.size[1] > cur.size[0] * cur.size[1] and same_look(look, picture_look(tmp)):
-                self.ctx.notes.append(f"{te['source_url']}: the original of an inserted picture, at {img.size[0]}x{img.size[1]}")
+                self.ctx.notes.append(f"{url}: the original of an inserted picture, at {img.size[0]}x{img.size[1]}")
                 return got, image_format(got), picture_look(tmp)
         except Exception:  # noqa: BLE001 - the deck's bytes are good enough
             pass
@@ -1807,18 +2129,24 @@ class Planner:
                 return Picture(rel, p, natural_size(p))
         return None
 
-    def picture_source(self, ci: int, frame: Frame, el: dict) -> PictureSource | None:
+    def picture_source(self, ci: int, frame: Frame, el: LoopElement) -> PictureSource | None:
         """The source of a picture (or diagram) of a slide: the textblock at its corner, else the
         source in the same place of the frame's order of pictures."""
         text = self.cand.masked(frame.file)
         srcs = picture_sources(text, frame)
         if not srcs:
             return None
-        els = [e for e in self.cur_slides[ci]["elements"]
-               if (e["kind"] == "image" and e.get("role") not in ("math", "icon", "highlight")) or e["kind"] == "diagram"]
-        near = lambda s, e: s.xy is not None and abs(s.xy[0] - e["bbox"][0]) + abs(s.xy[1] - e["bbox"][1]) <= 12
+        els = [e for e in loop_elements(self.cur_slides[ci], f"slide {ci}")
+               if (e.kind == "image" and e.role not in ("math", "icon", "highlight")) or e.kind == "diagram"]
+
+        def gap(s: PictureSource, e: LoopElement) -> float:
+            """How far a textblock's corner is from an element's (none: infinitely)."""
+            return math.inf if s.xy is None else abs(s.xy[0] - e.bbox[0]) + abs(s.xy[1] - e.bbox[1])
+
+        def near(s: PictureSource, e: LoopElement) -> bool:
+            return gap(s, e) <= 12
         placed = [s for s in srcs if s.xy is not None]
-        hit = min(placed, key=lambda s: abs(s.xy[0] - el["bbox"][0]) + abs(s.xy[1] - el["bbox"][1]), default=None)
+        hit = min(placed, key=lambda s: gap(s, el), default=None)
         if hit is not None and near(hit, el):
             return hit
         free_srcs = [s for s in srcs if not any(near(s, e) for e in els)]
@@ -1828,7 +2156,7 @@ class Planner:
         k = free_els.index(el)
         return free_srcs[k] if k < len(free_srcs) else None
 
-    def graphics_command(self, ci: int, frame: Frame, el: dict) -> tuple[int, int, tuple[int, int] | None] | None:
+    def graphics_command(self, ci: int, frame: Frame, el: LoopElement) -> tuple[int, int, tuple[int, int] | None] | None:
         """(start, end, enclosing textblock span or None) of the \\includegraphics showing a picture."""
         src = self.picture_source(ci, frame, el)
         if src is None or src.kind != "graphics":
@@ -1840,7 +2168,7 @@ class Planner:
             return  # a new picture replaces it (element_missing)
         frame = self.cand.frames[r.slide]
         el = self.find_element(self.cur_slides[r.slide], r.element)
-        if frame is None or el is None or el["kind"] not in ("image", "diagram"):
+        if frame is None or el is None or el.kind not in ("image", "diagram"):
             self.fail(r, "only pictures are deleted as elements")
             return
         src = self.picture_source(r.slide, frame, el)
@@ -1859,7 +2187,8 @@ class Planner:
         a, b = line_span(text, *src.block) if src.block else line_span(text, src.start, src.end)
         self.edit(frame.file, a, b, "", r, "")
 
-    def replace_picture(self, r: BoxMissing | TextMissing | ImageResidual, frame: Frame, el: dict | None, te: dict) -> None:
+    def replace_picture(self, r: BoxMissing | TextMissing | ImageResidual, frame: Frame, el: LoopElement | None,
+                        te: LoopPicture) -> None:
         """The deck shows `te` where the source draws `el`: a replaced picture gets the new file (and
         the deck's edits as options); a figure the source draws (tikzpicture, pgfplots) is commented
         out under a `% b2s pull: replaced by <file>` note, the picture in its place. When the deck's
@@ -1873,9 +2202,10 @@ class Planner:
         text = self.cand.masked(frame.file)
         orig = self.cand.source.text(frame.file)
         from .compare import hash_distance, picture_differs, picture_hash
-        raw = picture_hash(te["file"]) if el["kind"] == "image" and te.get("file") else None
-        same = raw is not None and hash_distance(self.hashes.get(id(el)), raw) is not None \
-            and not picture_differs(self.hashes.get(id(el)), raw, TOL["phash"])
+        raw = picture_hash(te.file) if el.kind == "image" and te.file else None
+        # the hashes are keyed by the current deck's element objects (`picture_hashes`)
+        same = raw is not None and hash_distance(self.hashes.get(id(el.json)), raw) is not None \
+            and not picture_differs(self.hashes.get(id(el.json)), raw, TOL["phash"])
         if same and not picture_edits(te):
             self.fail(r, "the picture looks the same as the source's; nothing to write")
             return
@@ -1885,16 +2215,17 @@ class Planner:
                 self.fail(r, "the picture file is not available")
                 return
             size = None
-            m = re.match(r"\\includegraphics\s*(<[^>]*>)?\s*(\[([^\]]*)\])?", text[src.inner[0]:src.inner[1]])
-            old = [o.strip() for o in (m.group(3) or "").split(",") if re.match(r"\s*(width|height|scale|keepaspectratio)\b", o)]
-            box = te.get("box") or te["bbox"]
-            if old and not te.get("rotation") and not te.get("crop") and \
-                    abs((box[2] - box[0]) - (el["bbox"][2] - el["bbox"][0])) <= TOL["size"] and \
-                    abs((box[3] - box[1]) - (el["bbox"][3] - el["bbox"][1])) <= TOL["size"]:
+            m = INCLUDEGRAPHICS_RE.match(text, src.inner[0], src.inner[1])
+            old = [o.strip() for o in ((m.group(3) if m else None) or "").split(",")
+                   if re.match(r"\s*(width|height|scale|keepaspectratio)\b", o)]
+            box = te.frame
+            if old and not te.rotation and te.crop is None and \
+                    abs((box[2] - box[0]) - (el.bbox[2] - el.bbox[0])) <= TOL["size"] and \
+                    abs((box[3] - box[1]) - (el.bbox[3] - el.bbox[1])) <= TOL["size"]:
                 size = old  # the source's own size (\textwidth fractions) still fits
             self.edit(frame.file, src.start, src.end, picture_latex(te, pic, self.ctx, size), r, "")
             return
-        if same and not any(te.get(k) for k in ("crop", "outline", "brightness", "contrast", "recolor")) \
+        if same and te.crop is None and te.outline is None and not te.bake \
                 and text[src.inner[0]:src.inner[1]].lstrip().startswith("\\begin{tikzpicture}"):
             self.edit(frame.file, src.start, src.end, self.tikz_edits(orig, text, src, te), r, "")
             return
@@ -1919,12 +2250,13 @@ class Planner:
                 self.edits.append(Edit(frame.file, pos, pos, picture_block(te, pic, self.ctx, ind), r.kind,
                                        signature(r) + ("block",)))
         else:
-            self.edit(frame.file, a, b, lead + commented_out(orig, a, b, ind, note) + f"{ind}{picture_latex(te, pic, self.ctx)}\n", r, "")
+            self.edit(frame.file, a, b, lead + commented_out(orig, a, b, ind, note) + f"{ind}{picture_latex(te, pic, self.ctx, None)}\n",
+                      r, "")
         self.ctx.notes.append(f"{(self.ws.root / frame.file.relative_to(self.ws.src)).as_posix()}:{line_of(text, src.inner[0])}: "
-                              f"the {'figure' if el['kind'] == 'image' else 'diagram'} was replaced in the deck by "
+                              f"the {'figure' if el.kind == 'image' else 'diagram'} was replaced in the deck by "
                               f"{pic.rel}; the original is kept as a comment")
 
-    def tikz_edits(self, orig: str, text: str, src: PictureSource, te: dict) -> str:
+    def tikz_edits(self, orig: str, text: str, src: PictureSource, te: LoopPicture) -> str:
         """A tikzpicture turned (\\rotatebox, \\reflectbox) and made translucent (a transparency group
         inside it) like its picture in the deck; earlier such edits are replaced."""
         a, b = src.inner
@@ -1937,8 +2269,8 @@ class Planner:
         if m:
             body = "\n" + m.group("inner") + "\n"
         ind = indent_at(text, a)
-        if te.get("opacity") is not None and te["opacity"] < 0.995:
-            body = f"\n{ind}  \\begin{{scope}}[transparency group,opacity={te['opacity']:.2f}]" + body.rstrip() + \
+        if te.opacity is not None and te.opacity < 0.995:
+            body = f"\n{ind}  \\begin{{scope}}[transparency group,opacity={te.opacity:.2f}]" + body.rstrip() + \
                 f"\n{ind}  \\end{{scope}}\n{ind}"
         out = env[:head] + body + env[tail:]
         # wrappers written by an earlier round go; others (\resizebox) stay around
@@ -1947,9 +2279,9 @@ class Planner:
             prefix, ours = prefix[:w.start()], ours + 1
         for _ in range(ours):
             suffix = suffix.lstrip()[1:]
-        if te.get("flip"):
+        if te.flip:
             out = f"\\reflectbox{{{out}}}"
-        angle = round(-(te.get("rotation") or 0.0), 2)
+        angle = round(-(te.rotation or 0.0), 2)
         if angle:
             out = f"\\rotatebox{{{angle:g}}}{{{out}}}"
         return prefix + out + suffix
@@ -1965,16 +2297,16 @@ class Planner:
         te = self.element(self.tgt_slides[r.target_slide], r.target_element)
         text = self.cand.masked(frame.file)
         if isinstance(r, BoxGeometry):
-            if el["kind"] == "image":
-                self.picture_geometry(r, frame, el, te)
+            if el.kind == "image" and te.picture is not None:  # compare pairs boxes of one kind
+                self.picture_geometry(r, frame, el, te.picture)
             else:
-                self.fail(r, f"{el['kind']} elements are not moved")
+                self.fail(r, f"{el.kind} elements are not moved")
             return
-        if te.get("role") == "title" or el.get("role") == "title":
+        if te.role == "title" or el.role == "title":
             self.fail(r, "frame titles are placed by the theme")
             return
         locs = self.cand.paragraph_locations(ci)
-        mine = [(k, loc) for k, loc in locs.items() if k[0] == el["id"] and k[1] >= r.para]
+        mine = [(k, loc) for k, loc in locs.items() if k[0] == el.id and k[1] >= r.para]
         if not mine:
             self.fail(r, "element not found in the source")
             return
@@ -1988,8 +2320,8 @@ class Planner:
             m, bs, be = block
             x, y = float(m.group("x")) + r.dx, float(m.group("y")) + r.dy
             w = float(m.group("w"))
-            if te.get("wrap_width") and abs(te["wrap_width"] - w) > 6 and len(te["paragraphs"]) >= 1:
-                w = te["wrap_width"]
+            if te.wrap_width and abs(te.wrap_width - w) > 6 and len(element_paragraphs(te)) >= 1:
+                w = te.wrap_width
             s = bs
             self.edit(frame.file, s, s + len(m.group(0)), f"\\begin{{textblock*}}{{{w:.1f}pt}}({x:.1f}pt,{y:.1f}pt)", r, "")
             return
@@ -2001,7 +2333,7 @@ class Planner:
         a, b = balance_span(text, a, b, frame.body, frame.body_end)
         if abs(r.dx) <= TOL["pos"] and self.flow_shift(r, frame, text, a):
             return
-        others = [loc for k, loc in locs.items() if k[0] != el["id"] and a <= loc.src()[0] < b]
+        others = [loc for k, loc in locs.items() if k[0] != el.id and a <= loc.src()[0] < b]
         if others:
             self.fail(r, "the element shares its source (a list or paragraph) with other boxes")
             return
@@ -2010,21 +2342,23 @@ class Planner:
         if "\\begin{frame}" in chunk or "\\end{frame}" in chunk:
             self.fail(r, "element source not isolated")
             return
-        size = max((run.get("size") or 10) for p in el["paragraphs"] for run in p["runs"])
-        x, y = text_anchor(te)
+        paragraphs = element_paragraphs(el)
+        size = max((run_size(run) or 10) for p in paragraphs for run in as_objects(p["runs"], "runs"))
+        x, y = text_anchor(te.json)
         align = r.align
-        left = text_anchor({**el, "anchor": None})[0]
-        right = max(l["x1"] for p in el["paragraphs"] for l in p["lines"])
-        width = te.get("wrap_width") or (1.1 * (right - left) + 12)
+        left = text_anchor({**el.json, "anchor": None})[0]
+        right = max(_number(ln["x1"], "line x1") for p in paragraphs for ln in as_objects(p["lines"], "lines"))
+        width = te.wrap_width or (1.1 * (right - left) + 12)
         bx = x - (width / 2 if align == "center" else width if align == "right" else 0)
         by = y - 0.75 * size
         ind = indent_at(text, frame.start) + "  "
         align_cmd = {"center": "\\centering ", "right": "\\raggedleft "}.get(align, "\\raggedright " if aligned_frame(text, frame) else "")
         # keep the room it took in the flow when other flow text follows
-        below = [e for e in cs["elements"] if e["kind"] == "text" and e is not el and e.get("role") not in ("title", "footer")
-                 and e["bbox"][1] >= el["bbox"][3] - 1 and not in_textblock(self.cand, ci, e, frame)]
-        room = min((e["bbox"][1] for e in below), default=None)
-        spacer = f"{indent_at(text, a)}\\vspace{{{room - el['bbox'][1]:.1f}pt}}\n" if room is not None else ""
+        below = [e for e in loop_elements(cs, f"slide {ci}") if e.kind == "text" and e.json is not el.json
+                 and e.role not in ("title", "footer")
+                 and e.bbox[1] >= el.bbox[3] - 1 and not in_textblock(self.cand, ci, e, frame)]
+        room = min((e.bbox[1] for e in below), default=None)
+        spacer = f"{indent_at(text, a)}\\vspace{{{room - el.bbox[1]:.1f}pt}}\n" if room is not None else ""
         self.ctx.packages.add(TEXTPOS)
         pos = frame_insert_point(self.cand, frame)
         self.edit(frame.file, a, b, spacer, r, "")
@@ -2037,17 +2371,19 @@ class Planner:
         a frame's content vertically, so the text moves by about half the space (secant updates
         learn the real gain). False when this isn't the way (too many tries, not converging)."""
         key = signature(r) + ("vspace",)
-        state = self.last.setdefault(key, {"tries": 0, "v": 0.0, "err": None, "gain": None})
-        if state["tries"] >= 5 or r.slide in self.shifted:
-            return state["tries"] < 5
+        found = self.last.get(key)
+        state = found if isinstance(found, FlowShift) else FlowShift()
+        self.last[key] = state
+        if state.tries >= 5 or r.slide in self.shifted:
+            return state.tries < 5
         err = r.dy
-        gain = state["gain"] or (1.0 if re.search(r"(^|,)\s*t\s*(,|$)", frame.options) else 0.5)
-        if state["err"] is not None and abs(state["dv"]) > 0.1:
-            g = (err - state["err"]) / -state["dv"] if state["dv"] else None
+        gain = state.gain or (1.0 if re.search(r"(^|,)\s*t\s*(,|$)", frame.options) else 0.5)
+        if state.err is not None and abs(state.dv) > 0.1:
+            g = (err - state.err) / -state.dv if state.dv else None
             if g is not None and 0.2 <= g <= 1.5:
                 gain = g
-        if state["err"] is not None and abs(err) > 0.8 * abs(state["err"]) and state["tries"] >= 2:
-            state["tries"] = 5
+        if state.err is not None and abs(err) > 0.8 * abs(state.err) and state.tries >= 2:
+            state.tries = 5
             return False
         dv = err / gain
         ls = text.rfind("\n", 0, a) + 1
@@ -2064,11 +2400,11 @@ class Planner:
         else:
             # \par: a column or item starts in horizontal mode, where \vspace would land after the first line
             self.edit(frame.file, ls, ls, f"{indent_at(text, a)}\\par\\vspace{{{dv:.1f}pt}}\n", r, "")
-        state.update(tries=state["tries"] + 1, err=err, dv=dv, gain=gain)
+        state.tries, state.err, state.dv, state.gain = state.tries + 1, err, dv, gain
         self.shifted.add(r.slide)
         return True
 
-    def picture_geometry(self, r: BoxGeometry, frame: Frame, el: dict, te: dict) -> None:
+    def picture_geometry(self, r: BoxGeometry, frame: Frame, el: LoopElement, te: LoopPicture) -> None:
         src = self.picture_source(r.slide, frame, el)
         if src is None or src.kind != "graphics":
             self.fail(r, "\\includegraphics not found" if src is None else "figures drawn by the source are not moved")
@@ -2081,18 +2417,24 @@ class Planner:
                 self.fail(r, "the picture file is not available")
                 return
             m = TEXTBLOCK_RE.match(text, src.block[0])
-            pad = te["outline"]["weight"] / 2 if te.get("outline") and not te.get("rotation") else 0.0
+            if m is None:  # never: picture_sources found the textblock by this pattern
+                self.fail(r, "the picture's textblock was not understood")
+                return
+            pad = te.outline.weight / 2 if te.outline is not None and not te.rotation else 0.0
             x, y = float(m.group("x")) + r.dx, float(m.group("y")) + r.dy
             self.edit(frame.file, src.block[0], src.block[0] + len(m.group(0)),
-                      f"\\begin{{textblock*}}{{{te['bbox'][2] - te['bbox'][0] + 2 * pad:.1f}pt}}({x:.1f}pt,{y:.1f}pt)", r, "")
-            self.edits.append(Edit(frame.file, src.start, src.end, picture_latex(te, pic, self.ctx), "geometry",
+                      f"\\begin{{textblock*}}{{{te.bbox[2] - te.bbox[0] + 2 * pad:.1f}pt}}({x:.1f}pt,{y:.1f}pt)", r, "")
+            self.edits.append(Edit(frame.file, src.start, src.end, picture_latex(te, pic, self.ctx, None), "geometry",
                                    signature(r) + ("size",)))
             return
         a, b, block = src.inner[0], src.inner[1], src.block
-        box = te.get("box") or te["bbox"]
+        box = te.frame
         tw, th = box[2] - box[0], box[3] - box[1]
-        cw, ch = el["bbox"][2] - el["bbox"][0], el["bbox"][3] - el["bbox"][1]
-        opts_m = re.match(r"\\includegraphics\s*(\[[^\]]*\])?", text[a:b])
+        cw, ch = el.bbox[2] - el.bbox[0], el.bbox[3] - el.bbox[1]
+        opts_m = GRAPHICS_OPTS_RE.match(text, a, b)
+        if opts_m is None:  # never: the pattern matches any \includegraphics
+            self.fail(r, "\\includegraphics not understood")
+            return
         opts = opts_m.group(1) or ""
         keep = [o.strip() for o in opts.strip("[]").split(",") if o.strip() and not re.match(r"(width|height|scale|keepaspectratio)\b", o.strip())]
         sized = abs(r.dw) > TOL["size"] or abs(r.dh) > TOL["size"]
@@ -2105,6 +2447,9 @@ class Planner:
         cmd = f"\\includegraphics[{new_opts}]" + text[a + opts_m.end():b] if new_opts else text[a:b]
         if block is not None:
             m = TEXTBLOCK_RE.match(text, block[0])
+            if m is None:  # never: picture_sources found the textblock by this pattern
+                self.fail(r, "the picture's textblock was not understood")
+                return
             x = float(m.group("x")) + r.dx
             y = float(m.group("y")) + r.dy
             self.edit(frame.file, block[0], block[0] + len(m.group(0)), f"\\begin{{textblock*}}{{{tw:.1f}pt}}({x:.1f}pt,{y:.1f}pt)", r, "")
@@ -2112,7 +2457,8 @@ class Planner:
                 self.edits.append(Edit(frame.file, a, b, cmd, "geometry", signature(r) + ("size",)))
             return
         moved = abs(r.dx) > TOL["pos"] or abs(r.dy) > TOL["pos"]
-        tries = self.last.get(signature(r) + ("flow",), 0)
+        found = self.last.get(signature(r) + ("flow",), 0)
+        tries = found if isinstance(found, int) else 0
         if sized and tries == 0:
             self.last[signature(r) + ("flow",)] = 1
             self.edit(frame.file, a, b, cmd, r, "")
@@ -2128,14 +2474,14 @@ class Planner:
         self.edit(frame.file, a, b, f"\\phantom{{{cur_cmd}}}", r, "")
         pic = f"\\includegraphics[{','.join(keep + [f'width={tw:.1f}pt', f'height={th:.1f}pt'])}]" + text[a + opts_m.end():b]
         self.edits.append(Edit(frame.file, pos, pos,
-                               f"{ind}\\begin{{textblock*}}{{{tw:.1f}pt}}({te['bbox'][0]:.1f}pt,{te['bbox'][1]:.1f}pt)\n"
+                               f"{ind}\\begin{{textblock*}}{{{tw:.1f}pt}}({te.bbox[0]:.1f}pt,{te.bbox[1]:.1f}pt)\n"
                                f"{ind}  {pic}\n{ind}\\end{{textblock*}}\n", "geometry", signature(r) + ("block",)))
 
     def image(self, r: ImageResidual) -> None:
         frame = self.cand.frames[r.slide]
         el = self.find_element(self.cur_slides[r.slide], r.element)
-        te = self.element(self.tgt_slides[r.target_slide], r.target_element)
-        if frame is None or not te.get("file") or not Path(te["file"]).exists():
+        te = self.element(self.tgt_slides[r.target_slide], r.target_element).picture
+        if frame is None or te is None or not te.file or not Path(te.file).exists():
             self.fail(r, "replacement picture not available")
             return
         self.replace_picture(r, frame, el, te)
@@ -2154,7 +2500,7 @@ def top_list(loc: ParaLoc) -> ListEnv | None:
     return outer[0] if outer else None
 
 
-def enclosing_textblock(text: str, pos: int, frame: Frame):
+def enclosing_textblock(text: str, pos: int, frame: Frame) -> "tuple[re.Match[str], int, int] | None":
     for m in TEXTBLOCK_RE.finditer(text, frame.body, frame.body_end):
         end = text.find("\\end{textblock*}", m.end())
         if m.start() < pos < end:
@@ -2162,11 +2508,11 @@ def enclosing_textblock(text: str, pos: int, frame: Frame):
     return None
 
 
-def in_textblock(cand: Candidate, si: int, el: dict, frame: Frame) -> bool:
+def in_textblock(cand: Candidate, si: int, el: LoopElement, frame: Frame) -> bool:
     locs = cand.paragraph_locations(si)
     text = cand.masked(frame.file)
     for (eid, _), loc in locs.items():
-        if eid == el["id"]:
+        if eid == el.id:
             return enclosing_textblock(text, loc.src()[0], frame) is not None
     return False
 
@@ -2232,7 +2578,7 @@ def widen_delete(src: str, a: int, b: int) -> tuple[int, int]:
     return a, b
 
 
-def char_span(ptext: str, c0: int, c1: int, loc: ParaLoc, whole_words: bool = False) -> tuple[int, int] | None:
+def char_span(ptext: str, c0: int, c1: int, loc: ParaLoc, whole_words: bool) -> tuple[int, int] | None:
     """Source span of characters c0..c1 of a paragraph's normalised text: whole words when the
     range covers them, characters inside a word when its source is plain (`whole_words=True`
     still lets a trailing/leading run of punctuation - "box by box" out of "box by box." - be left
@@ -2249,7 +2595,7 @@ def char_span(ptext: str, c0: int, c1: int, loc: ParaLoc, whole_words: bool = Fa
     a, b = loc.visible.starts[span[0]], loc.visible.ends[span[1] - 1]
     s0, e1 = words[k0][0], words[k1][1]
     if c0 > s0 or c1 < e1:
-        va, vb = loc.words.vis[k0][0], loc.words.vis[k1][1]
+        va, vb = span  # the first word's start and the last one's end
         if vb - va == e1 - s0 and all(loc.visible.ends[v] - loc.visible.starts[v] == 1 for v in range(va, vb)):
             if c0 > s0 and (not whole_words or not re.search(r"\w", ptext[s0:c0])):
                 a = loc.visible.starts[va + (c0 - s0)]
@@ -2258,27 +2604,57 @@ def char_span(ptext: str, c0: int, c1: int, loc: ParaLoc, whole_words: bool = Fa
     return a, b
 
 
-def dominant(para: dict, key: str):
-    weights: dict = {}
-    for r in para["runs"]:
-        weights[r.get(key)] = weights.get(r.get(key), 0) + len(r["text"])
-    return max(weights, key=weights.get) if weights else None
+K = TypeVar("K")
 
 
-def body_style(deck: dict) -> dict:
-    counts: dict = {}
-    for s in deck["slides"]:
-        for e in s["elements"]:
+def dominant(para: JsonObject, read: Callable[[JsonObject], K]) -> K | None:
+    """The value `read` gives most of a paragraph's letters (the first so read among equals)."""
+    weights: dict[K, int] = {}
+    for r in as_objects(para["runs"], "paragraph runs"):
+        k = read(r)
+        weights[k] = weights.get(k, 0) + len(as_str(r["text"], "run text"))
+    return max(weights.items(), key=lambda kw: kw[1])[0] if weights else None
+
+
+def run_colour(r: JsonObject) -> str | None:
+    return _loop_str(r, "color", "run")
+
+
+def run_size(r: JsonObject) -> float | None:
+    return _loop_number(r, "size", "run")
+
+
+StyleKey = tuple[float, str | None, str | None]
+
+
+def common_style(counts: Mapping[StyleKey, int], base: TextStyle) -> TextStyle:
+    """`base` in the most common (size, colour, family) of `counts`, the letters each has; `base`
+    itself when there are none."""
+    if not counts:
+        return base
+    size, colour, family = max(counts, key=counts.__getitem__)
+    return replace(base, size=size, color=colour, family=family)
+
+
+def body_style(deck: JsonObject) -> TextStyle:
+    counts: dict[StyleKey, int] = {}
+    for si, s in enumerate(as_objects(deck["slides"], "slides")):
+        for e in as_objects(s["elements"], f"slide {si}: elements"):
             if e["kind"] != "text" or e.get("role") != "body":
                 continue
-            for p in e["paragraphs"]:
-                for r in p["runs"]:
-                    k = (round(r["size"], 1), r["color"], r.get("family"))
-                    counts[k] = counts.get(k, 0) + len(r["text"])
-    if not counts:
-        return {"size": 10.91, "color": "#000000", "family": "sans", "bold": False, "italic": False}
-    size, colour, family = max(counts, key=counts.get)
-    return {"size": size, "color": colour, "family": family, "bold": False, "italic": False}
+            for p in loop_paragraphs(e, f"slide {si} element {e.get('id')}"):
+                for r in p.runs:
+                    k = (round(_size(r), 1), r.color, r.family)
+                    counts[k] = counts.get(k, 0) + len(r.text)
+    return common_style(counts, TextStyle(size=10.91, color="#000000", family="sans", bold=False, italic=False,
+                                          font=None, weight=None))
+
+
+def _size(r: LoopRun) -> float:
+    """A run's size where the count needs one, as `r["size"]` read it: a TypeError for none."""
+    if r.size is None:
+        raise TypeError("a run with no size")
+    return r.size
 
 
 SIG_LEN = 9  # an Edit's signature is its residual's signature plus translator details
@@ -2309,13 +2685,21 @@ def edit_group(sig: Signature) -> Signature:
 
 # ---------------------------------------------------------------- generated LaTeX
 
-def paragraphs_latex(paragraphs: list[dict], style_for, ctx: Context, ind: str) -> str:
+def script_paragraph(p: ParagraphIn) -> JsonObject:
+    """What `scripts`' direction helpers read of a paragraph, in the dict they read."""
+    return {"align": p.align, "direction": p.direction, "runs": [{"text": r.text} for r in p.runs]}
+
+
+def paragraphs_latex(paragraphs: Sequence[P], style_for: Callable[[P], TextStyle], ctx: Context, ind: str) -> str:
     from .scripts import align_switch, block_direction, block_rtl, paragraph_direction
-    lines, stack, items = [], [], []    # items: whether each open list has had an \item yet
-    rtl_block = block_rtl(paragraphs)
-    for p in paragraphs:
-        blank = bool(p["runs"]) and not any(r["text"].strip() for r in p["runs"])
-        runs = runs_latex(p["runs"], style_for(p), ctx).strip()
+    lines: list[str] = []
+    stack: list[str] = []
+    items: list[bool] = []    # whether each open list has had an \item yet
+    scripted = [script_paragraph(p) for p in paragraphs]
+    rtl_block = block_rtl(scripted)
+    for p, sp in zip(paragraphs, scripted):
+        blank = bool(p.runs) and not any(r.text.strip() for r in p.runs)
+        runs = runs_latex(p.runs, style_for(p), ctx).strip()
         if blank:
             # A paragraph of nothing but spaces is a blank line someone left in a text box, and it
             # takes a line of its own. Only a foreign deck has them (`deck_ir.text_paragraphs`
@@ -2324,18 +2708,18 @@ def paragraphs_latex(paragraphs: list[dict], style_for, ctx: Context, ind: str) 
             # line is a `\strut` at the size the person's Return left room for. The size stays
             # inside a group ended by the line's own `\par` (so the line keeps its pitch): what
             # follows is written against the base style and must find it still in effect.
-            size = p["runs"][0].get("size")
+            size = p.runs[0].size
             switch = size_switch(size, ctx.pt_option) if size else ""
             runs = "{" + switch + "\\strut\\par}" if switch else "\\strut"
         elif not runs:
             continue
-        if "".join(r["text"] for r in p["runs"]).startswith("\x0b"):
+        if "".join(r.text for r in p.runs).startswith("\x0b"):
             # a soft break (Shift+Enter) opening a paragraph: `\\` there has no line to end yet
             runs = "\\leavevmode" + runs
-        if p.get("bullet"):
+        if p.bullet is not None:
             # beamer nests itemize/enumerate three deep; Slides allows nine
-            level = min(p.get("level", 0), 2)
-            env = "enumerate" if p["bullet"].get("kind") == "number" else "itemize"
+            level = min(p.level, 2)
+            env = "enumerate" if p.bullet.kind == "number" else "itemize"
             while len(stack) > level + 1:
                 lines.append(ind + "  " * (len(stack) - 1) + f"\\end{{{stack.pop()}}}")
             del items[len(stack):]
@@ -2356,24 +2740,27 @@ def paragraphs_latex(paragraphs: list[dict], style_for, ctx: Context, ind: str) 
             if lines:
                 lines.append("")
             # the switch and the language group follow the paragraph's direction (scripts.py)
-            line = align_switch(p) + runs.replace("\t", " ")
-            lines.append(ind + paragraph_direction(p, line, rtl_block))
+            line = align_switch(sp) + runs.replace("\t", " ")
+            lines.append(ind + paragraph_direction(sp, line, rtl_block))
     while stack:
         lines.append(ind + "  " * (len(stack) - 1) + f"\\end{{{stack.pop()}}}")
-    return block_direction(paragraphs, "\n".join(lines), ind)
+    return block_direction(scripted, "\n".join(lines), ind)
 
 
-def textblock_latex(te: dict, style_for, ctx: Context, ind: str, reset: bool = False, lead: str = "") -> str:
+def textblock_latex(te: JsonObject, style_for: Callable[[LoopParagraph], TextStyle], ctx: Context, ind: str,
+                    reset: bool, lead: str) -> str:
     """`lead` is put at the top of the block, before the text: the switches that make the base style
     `runs_latex` writes against actually true here (`adopt.base_lead`). The loop leaves it empty,
     because in a source it is refining the surrounding document already sets that base."""
     x, y = text_anchor(te)
-    size = max((r.get("size") or 10.0) for p in te["paragraphs"] for r in p["runs"])
-    xs = [l["x1"] for p in te["paragraphs"] for l in p.get("lines", []) if l.get("x1")]
-    width = te.get("wrap_width") or ((max(xs) - x + 8) if xs else 200.0)
-    align = {p.get("align") for p in te["paragraphs"]}
+    paragraphs = loop_paragraphs(te, f"text element {te.get('id')}")
+    size = max((r.size or 10.0) for p in paragraphs for r in p.runs)
+    xs = [x1 for p in paragraphs for x1 in p.line_ends]
+    wrap = te.get("wrap_width")
+    width = (_number(wrap, "wrap_width") if wrap else 0.0) or ((max(xs) - x + 8) if xs else 200.0)
+    align = {p.align for p in paragraphs}
     bx = x - width / 2 if align == {"center"} else x - width if align == {"right"} else x
-    body = paragraphs_latex(te["paragraphs"], style_for, ctx, ind + "  ")
+    body = paragraphs_latex(paragraphs, style_for, ctx, ind + "  ")
     if reset and align not in ({"center"}, {"right"}):
         body = f"{ind}  \\raggedright\n" + body
     if lead:
@@ -2388,19 +2775,26 @@ def is_frame_label(key: str | None) -> bool:
     return bool(key) and bool(re.fullmatch(r"[A-Za-z][\w:.-]*", key)) and not re.match(r"(title|page):", key)
 
 
-def frame_latex(ts: dict, style_for, ctx: Context, label: str | None = None) -> str:
-    key = label or ts.get("key")
+# A frame title's base: the theme sets its size and colour, and it is bold sans.
+TITLE_STYLE = TextStyle(size=None, color=None, family="sans", bold=True, italic=False, font=None, weight=None)
+
+
+def frame_latex(texts: Sequence[tuple[str | None, Sequence[P]]], key: str | None, notes: str | None,
+                style_for: Callable[[P], TextStyle], ctx: Context, label: str | None) -> str:
+    """A slide as a readable frame: `texts` are its text elements' roles and paragraphs, in order;
+    `label` the frame's label, else the slide's `key`."""
+    key = label or key
     label = f"[label={key}]" if is_frame_label(key) else ""
     title = ""
     body = []
-    for e in ts["elements"]:
-        if e["kind"] == "text" and e.get("role") == "title" and not title:
-            title = runs_latex(e["paragraphs"][0]["runs"], {"size": None, "color": None, "bold": True, "family": "sans"}, ctx).strip()
-        elif e["kind"] == "text" and e.get("role") not in ("footer", "math", "icon"):
-            body.append(paragraphs_latex(e["paragraphs"], style_for, ctx, "  "))
+    for role, paragraphs in texts:
+        if role == "title" and not title:
+            title = runs_latex(paragraphs[0].runs, TITLE_STYLE, ctx).strip()
+        elif role not in ("footer", "math", "icon"):
+            body.append(paragraphs_latex(paragraphs, style_for, ctx, "  "))
     out = f"\\begin{{frame}}{label}{{{title}}}\n" + "\n\n".join(body) + "\n"
-    if ts.get("notes"):
-        out += note_latex(ts["notes"]) + "\n"
+    if notes:
+        out += note_latex(notes) + "\n"
     return out + "\\end{frame}\n"
 
 
@@ -2417,9 +2811,12 @@ def ensure_preamble(ws: Workspace, ctx: Context) -> list[Edit]:
     text = ws.source.text(ws.main)
     masked = mask_comments(text)
     pos = ws.source.preamble_end()
-    lines = []
+    lines: list[str] = []
     for pkg in sorted(ctx.packages):
-        name = re.search(r"\{([^}]+)\}$", pkg).group(1)
+        braced = re.search(r"\{([^}]+)\}$", pkg)
+        if braced is None:  # every package line pull writes ends on its name in braces
+            raise ValueError(f"not a package line: {pkg}")
+        name = braced.group(1)
         if not re.search(r"\\usepackage\s*(\[[^\]]*\])?\s*\{[^}]*\b" + re.escape(name) + r"\b", masked[:pos]):
             lines.append(pkg)
     for name, hexv in sorted(ctx.colours.items()):
@@ -2505,21 +2902,23 @@ def picture_hashes(cand: Candidate, target: TargetDeck | JsonObject, comp_out: P
         file = e.get("file")
         if isinstance(file, str) and file and Path(file).exists():
             plain = picture_hash(file)
-            shown = displayed_picture(e) if picture_edits(e) else None  # as Slides shows it: crop, turn, opacity
+            edited = picture_edits(loop_picture(e, box(e["bbox"], At(where="target picture", path="bbox")), "target picture"))
+            shown = displayed_picture(e) if edited else None  # as Slides shows it: crop, turn, opacity
             hashes[ref] = PicHash(grey16(shown), plain.coverage if plain else 1.0) if shown is not None else plain
     from .pdf import Document
     from PIL import Image
     doc = Document(cand.pdf)
     try:
-        for s in cand.deck["slides"]:
-            for e in s["elements"]:
+        for si, s in enumerate(cand.slides()):
+            for e in as_objects(s["elements"], f"deck.json slide {si}: elements"):
                 if e["kind"] != "image":
                     continue
-                page = doc[s["page"]]
-                x0, y0, x1, y1 = e["bbox"]
+                page = doc[cand.page(si)]
+                x0, y0, x1, y1 = box(e["bbox"], At(where=f"deck.json slide {si}", path="bbox"))
                 if x1 - x0 < 1 or y1 - y0 < 1:
                     continue
-                off = others_than(page, e["mark_n"]) if e.get("mark_n") is not None else []
+                mark = e.get("mark_n")
+                off = others_than(page, mark) if isinstance(mark, (int, str)) else []
                 page.set_active(off, False)
                 try:
                     img = page.render(4.0, (x0, y0, x1, y1))
@@ -2563,16 +2962,16 @@ class Later:
     """A target fetched on demand, once, and remembered: `converge` calls it on a thread of its own
     while the source compiles for the first time, and the caller reads `value` afterwards."""
 
-    def __init__(self, fn: Callable[[], dict]) -> None:
+    def __init__(self, fn: Callable[[], JsonObject]) -> None:
         self.fn = fn
-        self.value: dict | None = None
+        self.value: JsonObject | None = None
 
-    def __call__(self) -> dict:
+    def __call__(self) -> JsonObject:
         self.value = self.fn()
         return self.value
 
 
-def converge(tex: Path, target: "dict | Later", work: Path, max_iter: int, handout: bool, engine: str | None,
+def converge(tex: Path, target: "JsonObject | Later", work: Path, max_iter: int, handout: bool, engine: str | None,
              tol: Mapping[str, float], log: Callable[[str], object], guard: bool,
              thumbnails: "Callable[[int], object] | None | Literal[False]") -> Result:
     """`target`: the deck to converge to, or a `Later` fetching it - which is read on a thread of
@@ -2583,7 +2982,7 @@ def converge(tex: Path, target: "dict | Later", work: Path, max_iter: int, hando
     against `thumbnails(j)` (Google's picture of target slide j: a path, image or array) - None for
     the ones the target carries, False for none (then by weighted residuals and words)."""
     ws = Workspace(tex, work, handout, engine)
-    ready = None
+    ready: tuple[Path | None, str] | None = None
     if isinstance(target, Later):
         ws.notes = uses_notes(ws.source)   # what the first compile can know without the deck
         with ThreadPoolExecutor(1, thread_name_prefix="b2s-pull") as pool:
@@ -2596,7 +2995,7 @@ def converge(tex: Path, target: "dict | Later", work: Path, max_iter: int, hando
         deck = target
     ctx = Context(pt_option=class_pt_option(ws.source))
     typed = typed_target(deck)
-    has_notes = any(s.get("notes") for s in deck["slides"]) or uses_notes(ws.source)
+    has_notes = any(s.get("notes") for s in as_objects(deck["slides"], "target: slides")) or uses_notes(ws.source)
     iterations: list[JsonObject] = []
     blocked: set[Signature] = set()
     attempts: dict[Signature, list[float]] = {}
@@ -2605,7 +3004,7 @@ def converge(tex: Path, target: "dict | Later", work: Path, max_iter: int, hando
         # signature without the character offset: sub-ranges of the same field/paragraph are one
         # rewrite in progress, not independent edits) -> [(signature, file, text before, text
         # after), ...] in the order they were applied
-    last_values: dict = {}
+    last_values: dict[Signature, FlowShift | int] = {}
     seen: dict[tuple[str, ...], int] = {}
     unresolved: list[GivenUp] = []
     comp: Comparison | None = None
@@ -2767,7 +3166,7 @@ def converge(tex: Path, target: "dict | Later", work: Path, max_iter: int, hando
                 where=f"{(ws.root / frame.file.relative_to(ws.src)).as_posix()}:{frame.begin_line}-{frame.end_line}",
                 label=frame.label))
         final_unresolved.append(u)
-    shown = {tj: ci for ci, tj in comp.slides if ci is not None and tj is not None} if comp else {}
+    shown: dict[int, int] = {tj: ci for ci, tj in comp.slides if ci is not None and tj is not None} if comp else {}
     restored: list[JsonObject] = []
     for k, p in enumerate(put):
         # where the frame stands now, in the author's tree
@@ -2777,7 +3176,11 @@ def converge(tex: Path, target: "dict | Later", work: Path, max_iter: int, hando
             (f":{frame.begin_line}-{frame.end_line}" if frame else "")
         restored.append(put_back_json(p, now_scores[k] if now_scores else None, where))
     theme = [residual_json(r) for r in comp.residuals if is_theme(r)] if comp else []
-    used = lambda n: (m := re.match(r"(\S+\.(png|jpg|pdf)): ", n)) is None or m.group(1) in patch
+
+    def used(n: str) -> bool:
+        """A note about a picture file the patch no longer names is left out."""
+        m = re.match(r"(\S+\.(png|jpg|pdf)): ", n)
+        return m is None or m.group(1) in patch
     notes = list(dict.fromkeys(n for n in ctx.notes if used(n)))
     labels = list(dict.fromkeys(ctx.label_notes))
     return Result(converged=not open_res, iterations=iterations,
@@ -2809,7 +3212,7 @@ def put_back(ws: Workspace, fg: "FrameGuard", log: Callable[[str], object]) -> l
              for final, best in plan]
     before = {p: ws.source.text(p) for p in ws.source.order}
     ws.write(edits)
-    kept = list(range(len(plan)))
+    kept: list[int] = list(range(len(plan)))
     if ws.compile()[0] is None:
         kept = []
         for k, e in enumerate(edits):
@@ -2856,7 +3259,7 @@ def uses_notes(source: Source) -> bool:
     return any(re.search(r"\\note\b", mask_comments(t)) for t in source.texts.values())
 
 
-def ir_from_tex(tex: Path, work: Path, handout: bool = False) -> dict:
+def ir_from_tex(tex: Path, work: Path, handout: bool) -> JsonObject:
     """classify IR of a source as the loop sees it (slide keys from frame labels, pictures cropped
     into work/pictures so they can be hashed): a target made from another source."""
     ws = Workspace(tex, work, handout)
@@ -2868,12 +3271,16 @@ def ir_from_tex(tex: Path, work: Path, handout: bool = False) -> dict:
     target = cand.target()
     doc = Document(cand.pdf)
     try:
-        for s in target["slides"]:
-            for k, e in enumerate(s["elements"]):
-                if e["kind"] == "image" and e["bbox"][2] - e["bbox"][0] >= 1 and e["bbox"][3] - e["bbox"][1] >= 1:
-                    path = work / "pictures" / f"p{s['page']}-{k}.png"
+        for si, s in enumerate(as_objects(target["slides"], "target slides")):
+            for k, e in enumerate(as_objects(s["elements"], f"target slide {si}: elements")):
+                if e["kind"] != "image":
+                    continue
+                bbox = box(e["bbox"], At(where=f"target slide {si} element {k}", path="bbox"))
+                if bbox[2] - bbox[0] >= 1 and bbox[3] - bbox[1] >= 1:
+                    page = as_int(s["page"], f"target slide {si}: page")
+                    path = work / "pictures" / f"p{page}-{k}.png"
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    Image.fromarray(doc[s["page"]].render(4.0, tuple(e["bbox"]))).save(path)
+                    Image.fromarray(doc[page].render(4.0, bbox)).save(path)
                     e["file"] = str(path)
     finally:
         doc.close()
@@ -2891,11 +3298,17 @@ def class_pt_option(source: Source) -> int:
 
 # ---------------------------------------------------------------- reports
 
-def report(result: Result, target: dict) -> tuple[dict, str]:
-    data = {"converged": result.converged, "iterations": result.iterations,
-            "unresolved": [clean(u) for u in result.unresolved], "theme": [clean(u) for u in result.theme],
-            "changed_files": list(result.files), "pictures": result.notes, "labels": result.labels,
-            "restored": [clean(r) for r in result.restored]}
+def report(result: Result, target: JsonObject) -> tuple[JsonObject, str]:
+    iterations: list[Json] = [it for it in result.iterations]
+    unresolved: list[Json] = [clean(u) for u in result.unresolved]
+    theme: list[Json] = [clean(u) for u in result.theme]
+    changed: list[Json] = [f for f in result.files]
+    pictures: list[Json] = [n for n in result.notes]
+    labels: list[Json] = [n for n in result.labels]
+    restored: list[Json] = [clean(r) for r in result.restored]
+    data: JsonObject = {"converged": result.converged, "iterations": iterations, "unresolved": unresolved,
+                        "theme": theme, "changed_files": changed, "pictures": pictures, "labels": labels,
+                        "restored": restored}
     md = ["# Pull report", "", f"Converged: **{result.converged}** after {len(result.iterations) - 1} edit rounds.", ""]
     md.append("| iteration | open residuals | by kind | geometry error (pt) |")
     md.append("|---|---|---|---|")
@@ -2914,7 +3327,7 @@ def report(result: Result, target: dict) -> tuple[dict, str]:
         md += ["", "## Left for the author", ""]
         for u in result.unresolved:
             tj = u.get("target_slide")
-            ts = target["slides"][tj] if isinstance(tj, int) else None
+            ts = as_objects(target["slides"], "target slides")[tj] if isinstance(tj, int) else None
             head = f"- slide {tj + 1 if isinstance(tj, int) else '?'}"
             if ts is not None:
                 head += f" ({ts.get('key') or slide_title(ts) or 'untitled'})"
@@ -2972,8 +3385,8 @@ def unchanged_since_pull(path: Path, originals: dict[str, str]) -> bool:
     return now == was if was is not None else now is None
 
 
-def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bool, out: Path | None,
-                  log=print) -> None:
+def write_outputs(result: Result, target: JsonObject, tex: Path, work: Path, apply: bool, out: Path | None,
+                  log: Callable[[str], object]) -> None:
     """pull.patch, edits.json and edits.md in `work`; the edited files in place when `apply`, each
     with a backup that never replaces an older one (`keep_backup`), or the edited source tree in
     `out`."""
@@ -2989,7 +3402,7 @@ def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bo
             log(f"  {len(kept)} file(s) that were already there kept as .bak (e.g. {kept[0].name})")
     elif apply:
         from .faults import fail_at
-        skipped = []
+        skipped: list[Json] = []
         for path, new in result.files.items():
             path = Path(path)
             originals = getattr(result, "originals", None)
@@ -3013,7 +3426,7 @@ def write_outputs(result: Result, target: dict, tex: Path, work: Path, apply: bo
         f"report {work / 'edits.md'}")
 
 
-def run_pull(target: "dict | Later", tex: Path, work: Path, apply: bool, out: Path | None, max_iter: int,
+def run_pull(target: "JsonObject | Later", tex: Path, work: Path, apply: bool, out: Path | None, max_iter: int,
              handout: bool, engine: str | None, log: Callable[[str], object]) -> Result:
     """`target`: the deck, or a `Later` that fetches it - read while the source first compiles."""
     work = Path(work).resolve()
