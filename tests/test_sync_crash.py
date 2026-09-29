@@ -18,6 +18,8 @@ from beamer2slides.emit import SLIDE_W
 from beamer2slides import faults, snapshot, sync
 from beamer2slides.inverse import Result, replace_file, source_hashes, unchanged_since_pull, write_outputs
 
+from . import sync_work
+
 SYNC_DECKS = Path(__file__).resolve().parent / "decks" / "sync" / "out"
 
 
@@ -102,7 +104,7 @@ def test_one_slide_larger_than_a_batch_is_the_only_thing_that_is_split():
 
 
 def bare_sync(**attrs) -> sync.Sync:
-    s = sync.Sync.__new__(sync.Sync)
+    s = sync_work.bare_sync()
     s.warnings = []
     for k, v in attrs.items():
         setattr(s, k, v)
@@ -111,7 +113,7 @@ def bare_sync(**attrs) -> sync.Sync:
 
 def test_a_slide_the_source_removed_is_deleted_in_the_cleanup_phase_not_with_the_content():
     s = bare_sync()
-    work = {"slides": [{"plan": {"action": "delete", "objectId": "S1", "key": "gone"}}], "order": ["S2"]}
+    work = sync_work.work([{"plan": {"action": "delete", "objectId": "S1", "key": "gone"}}], ["S2"])
     theirs = {"slides": [{"objectId": "S1"}, {"objectId": "S2"}]}
     content, cleanup = s.main_requests(work, theirs, {}, {}, [])
     assert not [r for r in content if "deleteObject" in r]
@@ -121,7 +123,7 @@ def test_a_slide_the_source_removed_is_deleted_in_the_cleanup_phase_not_with_the
 
 def test_scratch_slides_are_sync_s_own_and_go_with_the_content():
     s = bare_sync()
-    work = {"slides": [], "order": []}
+    work = sync_work.work([], [])
     content, cleanup = s.main_requests(work, {"slides": []}, {}, {}, ["b2s_m001"])
     assert content == [{"deleteObject": {"objectId": "b2s_m001"}}]
     assert cleanup == []
@@ -153,11 +155,11 @@ def test_a_recreated_unit_deletes_nothing_in_the_content_phase():
     ukey = base_slide["elements"][0]["key"]
     plan = {"key": "policy", "base": 0, "ours": j, "objectId": "LIVE", "units": [
         {"key": ukey, "action": "recreate", "ours_members": [ukey], "base_members": [ukey], "overrides": {}}]}
-    w = {"plan": plan, "units": []}
+    w = sync_work.slide_work({"plan": plan, "units": []})
     reqs = s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {})
     assert not [r for r in reqs if "deleteObject" in r], "a recreated unit must delete nothing yet"
     assert f"OLD_{ukey.replace('/', '_')}" in s.cleanup_ids
-    assert w["doomed"]
+    assert w.doomed
 
 
 # ---------------------------------------------------------------- base validation
@@ -544,8 +546,8 @@ def test_the_pending_marker_does_not_wait_for_the_staging_deck():
     own - so a marker built before the staging deck exists says exactly what one built after it
     would, but for the staging deck's own id, which is a note for a person that nothing reads (the
     file names itself in Drive: `appProperties.b2sStaging`)."""
-    work = {"slides": [{"plan": {"action": "update", "ours": 0, "objectId": "S1"},
-                        "objects": {0: ["b2s_a_b_t1", "b2s_a_b_t1_g"]}, "groups": ["G1"]}]}
+    work = sync_work.work([{"plan": {"action": "update", "ours": 0, "objectId": "S1"},
+                            "objects": {0: ["b2s_a_b_t1", "b2s_a_b_t1_g"]}, "groups": ["G1"]}])
     ours = {"slides": [{"key": "why", "elements": [{"key": "text/body/0"}]}], "source": SYNC_DECKS / "v1.pdf"}
 
     def block(staging):

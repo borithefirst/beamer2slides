@@ -256,7 +256,7 @@ class Playground:
                 if creds is not None:
                     stack.enter_context(use_provider(lambda: creds))
                 stack.enter_context(contextlib.redirect_stdout(buf))
-                state = emit(deck, out, f"beamer2slides playground {job.id}", True, True, False, "none", source)
+                state = emit(deck, out, f"beamer2slides playground {job.id}", True, True, False, "none", source, None)
         job.log += buf.getvalue()
         if token is None:                  # one machine, one Drive: the link belongs to the job
             job.slides_url = state["url"]

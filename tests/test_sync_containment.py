@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from beamer2slides.emit import SLIDE_W
-from beamer2slides import adopt_sync, emit, identity, merge, snapshot, sync
+from beamer2slides import adopt_sync, emit, identity, merge, snapshot, sync, sync_model
 
 from . import ir_sources as S
 from .test_emitted_diff import PICTURE, one_slide
@@ -51,10 +51,11 @@ def talk_base(tmp_path: Path) -> tuple[dict, dict]:
     return S.base_of(S.Made(deck, "rendered", tmp_path / "v1", used))
 
 
-def requests_of(base: dict, ours: dict, pres: dict, home: Path) -> tuple[dict, list[dict], list[dict]]:
+def requests_of(base: dict, ours: dict, pres: dict, home: Path) -> tuple[merge.MergePlan, list[dict], list[dict]]:
     """(the merge plan, the content requests, the objects left to delete) of a dry sync."""
     theirs = snapshot.read_presentation(pres)
-    mplan = merge.plan_merge(base, ours, theirs)
+    mplan = merge.plan_merge_of(sync_model.base(base), merge.ours_of(ours), sync_model.deck_read(theirs), None, False,
+                                merge.Resolutions(()))
     s = sync.Sync(None, None, "offline", base, ours, home, dry_run=True, measure=False,
                   trust_generation=True, check_plan=None, follow_labels=False, take_source=(), facts=None,
                   way_back=None)
@@ -78,15 +79,16 @@ def test_a_sync_writes_everything_else_and_reports_the_element_it_made_a_picture
     assert el["role"] == "fallback" and (tmp_path / "ours" / el["file"]).exists(), "its picture, cut from the new PDF"
 
     mplan, content, cleanup = requests_of(base, ours, pres, tmp_path / "ours")
+    mj = merge.merge_plan_json(mplan)
     pictures = [r["createImage"]["url"] for r in content if "createImage" in r]
     assert any(u.endswith(f"fallback-{c.id}.png") for u in pictures), "the picture goes in its place"
-    written = {(p["key"], u["key"]) for p in mplan["slides"] if p["action"] == "update"
+    written = {(p["key"], u["key"]) for p in mj["slides"] if p["action"] == "update"
                for u in p["units"] if u["action"] in ("create", "recreate")}
     assert {("steps", "text/body/0"), ("convergence", "image/figure/0")} <= written, \
         "the source's other changes are still written"
     inserted = " ".join(r["insertText"]["text"] for r in content if "insertText" in r)
     assert "Deck edits" not in inserted, "the policy words are its picture, not text"
-    [policy] = [p for p in mplan["slides"] if p["key"] == "policy"]
+    [policy] = [p for p in mj["slides"] if p["key"] == "policy"]
     gone = {u["key"] for u in policy["units"] if u["action"] == "delete"}
     old = [o for s in base["slides"] if s["key"] == "policy" for e in s["elements"] if e["key"] in gone
            for o in e["objects"]]
@@ -143,7 +145,7 @@ def test_an_element_the_base_holds_that_emit_now_cannot_plan_is_kept(
     ours = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
 
     mplan, content, cleanup = requests_of(base, ours, pres, tmp_path / "ours")
-    assert {u["action"] for p in mplan["slides"] for u in p.get("units", [])} <= {"keep"}
+    assert {u["action"] for p in merge.merge_plan_json(mplan)["slides"] for u in p.get("units", [])} <= {"keep"}
     assert not [r for r in content if "createImage" in r] and cleanup == []
     [c] = ours["contained"]
     assert (held["kind"], held["key"], held["objects"], held["readback"]) == ("image", c.element, objects, read)

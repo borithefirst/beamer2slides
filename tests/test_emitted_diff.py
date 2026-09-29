@@ -18,6 +18,7 @@ from beamer2slides.classify import classify
 from beamer2slides.extract import extract, select_overlays
 from beamer2slides.notes import prepare
 
+from . import sync_work
 from .test_emit_requests import emitted
 from .test_sync import entry, text_ir
 from .test_sync import shape_ir as bare_shape_ir
@@ -298,15 +299,15 @@ def subtitle_page(authors_action: str) -> tuple:
     b = {"key": "s", "elements": [entry("text/title/0", title, "TITLE_PH"), entry("text/body/0", old, "SUB_PH")]}
     objects = {oid: rb for e in b["elements"] for oid, rb in e["readback"].items()}
     objects["TITLE_PH"]["placeholder"], objects["SUB_PH"]["placeholder"] = "TITLE", "SUBTITLE"
-    s = sync.Sync.__new__(sync.Sync)
+    s = sync_work.bare_sync()
     s.ours = {"slides": [{"key": "s", "elements": [entry("text/title/0", title), entry("text/body/0", new),
                                                    entry("text/body/1", longer)]}], "out": Path(".")}
     s.plan, s.scale, s.tok, s.warnings, s.base = plan, plan.scale, "1zz", [], {"slides": [b]}
     s.recovery, s.urls = {"restore": {}}, defaultdict(lambda: "https://example.com/x.png")
-    w = {"plan": {"key": "s", "base": 0, "ours": 0, "objectId": "LIVE", "units": [
+    w = sync_work.slide_work({"plan": {"key": "s", "base": 0, "ours": 0, "objectId": "LIVE", "units": [
         {"key": "text/body/0", "action": authors_action, "ours_members": ["text/body/0"], "base_members": ["text/body/0"],
          "overrides": {}},
-        {"key": "text/body/1", "action": "create", "ours_members": ["text/body/1"]}]}, "units": []}
+        {"key": "text/body/1", "action": "create", "ours_members": ["text/body/1"]}]}, "units": []})
     reqs = s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {})
     return s, w, objects, reqs
 
@@ -316,9 +317,9 @@ def test_a_subtitle_the_deck_keeps_keeps_its_placeholder():
     placeholder is theirs, so the longer line the source added is a box of its own, not written
     into it - and not created under its id either."""
     s, w, objects, reqs = subtitle_page("keep")
-    assert w["in_place"] == {}
+    assert w.in_place == {}
     assert not [r for r in reqs if any(v.get("objectId") in objects for v in r.values() if isinstance(v, dict))]
-    assert any(r.get("createShape", {}).get("objectId") == w["new_oid"][2] for r in reqs)
+    assert any(r.get("createShape", {}).get("objectId") == w.new_oid[2] for r in reqs)
     assert "SUB_PH" not in s.cleanup_ids
 
 
@@ -330,14 +331,15 @@ def test_a_reworded_subtitle_that_lost_the_placeholder_is_not_created_under_its_
     the subtitle, is written into the placeholder (emptied first), as a fresh conversion has it."""
     s, w, objects, reqs = subtitle_page("recreate")
     assert not [r for r in reqs if r.get("createShape", {}).get("objectId") in objects]
-    assert w["in_place"] == {2: {"id": "SUB_PH", "size": objects["SUB_PH"]["size"], "text": "Someone"}}
-    authors = w["new_oid"][1]
+    size = objects["SUB_PH"]["size"]
+    assert w.in_place == {2: sync.InPlace(id="SUB_PH", size=(size[0], size[1]), text="Someone")}
+    authors = w.new_oid[1]
     assert authors != "SUB_PH" and any(r.get("createShape", {}).get("objectId") == authors for r in reqs)
     inserted = [r["insertText"]["text"] for r in reqs if r.get("insertText", {}).get("objectId") == "SUB_PH"]
     assert "".join(inserted) == "A much longer institute line"
     assert reqs.index({"deleteText": {"objectId": "SUB_PH", "textRange": {"type": "ALL"}}}) < \
         min(i for i, r in enumerate(reqs) if r.get("insertText", {}).get("objectId") == "SUB_PH")
-    assert "SUB_PH" not in s.cleanup_ids and "SUB_PH" not in w["doomed"]
+    assert "SUB_PH" not in s.cleanup_ids and "SUB_PH" not in w.doomed
 
 
 def test_an_old_base_emit_cannot_read_marks_nothing():

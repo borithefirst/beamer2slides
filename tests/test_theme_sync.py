@@ -3,6 +3,7 @@ styles, merged three ways - offline, on the sync test talk and a made-up deck re
 
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -70,27 +71,38 @@ def talk(tmp_path_factory):
     need("v1", "retheme")
     tmp = tmp_path_factory.mktemp("theme")
     v1 = sync.build_ours(SYNC_DECKS / "v1.pdf", tmp / "v1", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
-    side1 = theme_sync.ours_side(v1)
+    side1 = theme_sync.ours_side(theme_sync.theme_ours(v1))
     out = Path(v1["out"])
     pres = made_up_deck(len(v1["deck"]["slides"]))
     state = {"scale": v1["plan"].scale, "slides": [{"objectId": f"S{i}"} for i in range(len(v1["deck"]["slides"]))],
              "theme": {"ground": "#ffffff", "master": "#ffffff",
-                       "decorations": {g: str(Path(p["path"]).relative_to(out)) for g, p in side1["pictures"].items() if p},
+                       "decorations": {g: str(Path(p.path).relative_to(out)) for g, p in side1.pictures.items() if p},
                        "layouts": {str(s["page"]): emit.slide_layout(s)[0] for s in v1["deck"]["slides"]}}}
-    rec = theme_sync.record(v1["deck"], out, pres, state)
+    record = theme_sync.record(v1["deck"], out, pres, state)
+    rec = theme_sync.theme_json(record)
     slides = copy.deepcopy(v1["slides"])
     for i, s in enumerate(slides):
         s["objectId"], s["layoutObjectId"] = f"S{i}", "LT" if i == 0 else "LO"
-    base = {"slides": slides, "theme": rec, "master_background": side1["shared"]}
+    base = {"slides": slides, "theme": rec, "master_background": side1.shared}
     retheme = sync.build_ours(SYNC_DECKS / "retheme.pdf", tmp / "retheme", {"slides": slides}, "last", SLIDE_W, snapshot.NO_PICTURES)
-    return {"v1": v1, "side1": side1, "pres": pres, "base": base, "retheme": retheme,
-            "side2": theme_sync.ours_side(retheme)}
+    return {"v1": v1, "side1": side1, "pres": pres, "base": base, "retheme": retheme, "record": record,
+            "side2": theme_sync.ours_side(theme_sync.theme_ours(retheme))}
 
 
 def plan(talk, pres=None, side=None, ours=None, base=None):
-    return theme_sync.plan(base or talk["base"], side or talk["side2"], ours or talk["retheme"],
+    return theme_sync.plan(base or talk["base"], side or talk["side2"], theme_sync.theme_ours(ours or talk["retheme"]),
                            pres or talk["pres"], "1ab", lambda p: f"url:{Path(p).name}", lambda page: f"new_{page}",
                            None)
+
+
+def picture_of(rec_picture):
+    """A base's decoration picture (JSON) as the record reads it."""
+    return theme_sync.picture_id_of(rec_picture, "picture")
+
+
+def new_record(theme, side, written, after):
+    """`theme_sync.new_record` over the base's JSON, as JSON."""
+    return theme_sync.theme_json(theme_sync.new_record(theme_sync.theme_record(theme, "theme"), side, written, after))
 
 
 def ops(reqs):
@@ -137,36 +149,39 @@ def test_the_spec_writes_what_style_layout_placeholders_writes(talk):
 
 def test_convert_records_every_layout_with_its_decoration_and_placeholders(talk):
     rec = talk["base"]["theme"]
-    assert rec["fill"] == "color:#ffffff" and rec["shared"] == talk["side1"]["shared"]
+    assert rec["fill"] == "color:#ffffff" and rec["shared"] == talk["side1"].shared
     assert {pid: p["group"] for pid, p in rec["pages"].items()} == {"M": "master", "LT": "TITLE", "LO": "*", "LB": "*"}
     assert rec["pages"]["LO"]["decoration"]["oid"] == "LO_d"
-    assert theme_sync.same_picture_id(rec["pages"]["LO"]["decoration"]["picture"], talk["side1"]["pictures"]["*"])
+    assert theme_sync.same_picture_id(picture_of(rec["pages"]["LO"]["decoration"]["picture"]), talk["side1"].pictures["*"].picture)
     assert set(rec["pages"]["M"]["placeholders"]) == {"M_t", "M_b"}
     assert rec["pages"]["LT"]["placeholders"]["LT_t"]["kind"] == "CENTERED_TITLE"
     json.dumps(rec)  # (it goes into the base: plain data)
+    # and it is read back as it was written, the header and footer words too
+    assert theme_sync.theme_record(rec, "theme") == talk["record"] and talk["record"].texts is not None
+    assert json.dumps(theme_sync.theme_json(theme_sync.theme_record(rec, "theme"))) == json.dumps(rec)
 
 
 # ---------------------------------------------------------------- the merge
 
 def test_the_same_theme_writes_nothing(talk):
     p = plan(talk, side=talk["side1"], ours=talk["v1"])
-    assert p["requests"] == [] and p["conflicts"] == [] and p["cleanup"] == [] and p["warnings"] == []
+    assert p.requests == [] and p.conflicts == [] and p.cleanup == [] and p.warnings == []
 
 
 def test_a_retheme_nobody_edited_writes_the_decoration_and_the_title_style(talk):
     p = plan(talk)
-    assert p["conflicts"] == [] and p["warnings"] == []
-    names = ops(p["requests"])
+    assert p.conflicts == [] and p.warnings == []
+    names = ops(p.requests)
     # the frames' decoration on every layout of that group, the title page's left alone
     assert [x for x in names if x[0] == "replaceImage"] == [("replaceImage", "LB_d"), ("replaceImage", "LO_d")]
     assert ("updatePageElementAltText", "LO_d") in names
     # the frame title style on the master and the TITLE_ONLY layout; the title page's is the same
     assert {x[1] for x in names if x[0] == "updateTextStyle"} == {"M_t", "LO_t"}
     assert not any(x[1] and x[1].startswith("LT") for x in names)
-    style = next(r for r in p["requests"] if "updateTextStyle" in r and r["updateTextStyle"]["objectId"] == "LO_t")
+    style = next(r for r in p.requests if "updateTextStyle" in r and r["updateTextStyle"]["objectId"] == "LO_t")
     assert style["updateTextStyle"]["style"]["fontSize"]["magnitude"] > 25  # (\huge)
-    assert set(p["stage"]) == {talk["side2"]["pictures"]["*"]["path"]}
-    assert {a["slide"] for a in p["applied"]} == {"master", "layout Blank", "layout Title Only"}
+    assert set(p.stage) == {talk["side2"].pictures["*"].path}
+    assert {a["slide"] for a in p.applied} == {"master", "layout Blank", "layout Title Only"}
 
 
 def slide_title(oid, kind, parent, runs):
@@ -203,9 +218,9 @@ def test_a_restyled_master_leaves_the_slides_titles_that_inherited_it_as_they_we
     base = copy.deepcopy(talk["base"])   # (convert wrote that master style: it is no deck edit)
     base["theme"]["pages"]["M"]["placeholders"]["M_t"]["readback"]["style"] = theme_sync.style_hash(master["pageElements"][0])
     p = plan(talk, pres=pres, base=base)
-    pins = [r for r in p["requests"] if next(iter(r.values())).get("objectId", "").startswith(("S0", "S1", "MINE"))]
+    pins = [r for r in p.requests if next(iter(r.values())).get("objectId", "").startswith(("S0", "S1", "MINE"))]
     # after the layouts change (Slides drops a run property equal to the inherited one)
-    assert pins and pins == p["requests"][-len(pins):]
+    assert pins and pins == p.requests[-len(pins):]
     s0 = [r["updateTextStyle"] for r in pins if "updateTextStyle" in r and r["updateTextStyle"]["objectId"] == "S0_t"]
     assert len(s0) == 1 and s0[0]["style"]["fontSize"] == {"magnitude": 20.7, "unit": "PT"}
     assert "foregroundColor" not in s0[0]["fields"].split(",")                  # (its own white stays its own)
@@ -215,7 +230,7 @@ def test_a_restyled_master_leaves_the_slides_titles_that_inherited_it_as_they_we
     assert not any(next(iter(r.values()))["objectId"] == "MINE_t" for r in pins)   # (the person's slide follows the theme)
     assert {"updateParagraphStyle": {"objectId": "S0_t", "fields": "alignment", "style": {"alignment": "START"},
                                      "textRange": {"type": "FIXED_RANGE", "startIndex": 0, "endIndex": 15}}} in pins
-    assert set(p["pinned"]) == {"S0_t", "S1_t"}   # (S1's alignment is inherited too)
+    assert set(p.pinned) == {"S0_t", "S1_t"}   # (S1's alignment is inherited too)
 
 
 def test_a_layout_the_person_edited_is_a_conflict_and_is_left_alone(talk):
@@ -225,14 +240,14 @@ def test_a_layout_the_person_edited_is_a_conflict_and_is_left_alone(talk):
     lb = next(l for l in pres["layouts"] if l["objectId"] == "LB")
     lb["pageElements"][0] = picture("LB_d", x=30)                                  # moved
     p = plan(talk, pres=pres)
-    names = ops(p["requests"])
+    names = ops(p.requests)
     assert ("replaceImage", "LB_d") not in names and ("replaceImage", "LO_d") in names
     assert {x[1] for x in names if x[0] == "updateTextStyle"} == {"M_t"}
-    conflicts = {(c["slide"], c["element"], c["field"]): c for c in p["conflicts"]}
+    conflicts = {(c["slide"], c["element"], c["field"]): c for c in p.conflicts}
     assert set(conflicts) == {("layout Title Only", "LO_t", "title style"), ("layout Blank", "LB_d", "theme decoration")}
     assert conflicts[("layout Title Only", "LO_t", "title style")]["resolution"] == "deck kept"
     assert "moved" in conflicts[("layout Blank", "LB_d", "theme decoration")]["theirs"]
-    assert all(c["id"] for c in p["conflicts"])
+    assert all(c["id"] for c in p.conflicts)
 
 
 def test_a_layout_edit_the_source_did_not_touch_is_nobodys_business(talk):
@@ -241,8 +256,8 @@ def test_a_layout_edit_the_source_did_not_touch_is_nobodys_business(talk):
     lt["pageElements"][0] = picture("LT_d", x=30)
     lt["pageElements"][1] = placeholder("LT_t", "CENTERED_TITLE", colour={"red": 0.5})
     p = plan(talk, pres=pres)
-    assert not any(c["slide"] == "layout Title" for c in p["conflicts"])
-    assert not any(x[1] and x[1].startswith("LT") for x in ops(p["requests"]))
+    assert not any(c["slide"] == "layout Title" for c in p.conflicts)
+    assert not any(x[1] and x[1].startswith("LT") for x in ops(p.requests))
 
 
 def test_a_deleted_decoration_is_a_conflict_and_nothing_is_created_for_it(talk):
@@ -250,29 +265,27 @@ def test_a_deleted_decoration_is_a_conflict_and_nothing_is_created_for_it(talk):
     lo = next(l for l in pres["layouts"] if l["objectId"] == "LO")
     lo["pageElements"] = lo["pageElements"][1:]
     p = plan(talk, pres=pres)
-    assert ("layout Title Only", "LO_d", "theme decoration") in {(c["slide"], c["element"], c["field"]) for c in p["conflicts"]}
-    assert not any("createImage" in r for r in p["requests"])
+    assert ("layout Title Only", "LO_d", "theme decoration") in {(c["slide"], c["element"], c["field"]) for c in p.conflicts}
+    assert not any("createImage" in r for r in p.requests)
 
 
 def test_a_theme_without_decoration_removes_the_pictures_last(talk):
-    side = copy.deepcopy(talk["side2"])
-    side["pictures"] = {}
+    side = replace(talk["side2"], pictures={})
     p = plan(talk, side=side)
-    assert sorted(p["cleanup"]) == ["LB_d", "LO_d", "LT_d"]
-    assert not any("deleteObject" in r for r in p["requests"])
+    assert sorted(p.cleanup) == ["LB_d", "LO_d", "LT_d"]
+    assert not any("deleteObject" in r for r in p.requests)
 
 
 def test_a_new_master_fill_is_written_unless_the_person_changed_it(talk):
-    side = copy.deepcopy(talk["side2"])
-    side["fill"] = "color:#fff0f0"
+    side = replace(talk["side2"], fill="color:#fff0f0")
     p = plan(talk, side=side)
-    fill = [r for r in p["requests"] if "updatePageProperties" in r]
+    fill = [r for r in p.requests if "updatePageProperties" in r]
     assert len(fill) == 1 and fill[0]["updatePageProperties"]["objectId"] == "M"
     pres = copy.deepcopy(talk["pres"])
     pres["masters"][0]["pageProperties"]["pageBackgroundFill"]["solidFill"]["color"]["rgbColor"] = {"red": 0.2}
     p = plan(talk, side=side, pres=pres)
-    assert not any("updatePageProperties" in r for r in p["requests"])
-    assert [c["field"] for c in p["conflicts"]] == ["master background"]
+    assert not any("updatePageProperties" in r for r in p.requests)
+    assert [c["field"] for c in p.conflicts] == ["master background"]
 
 
 def test_a_layout_serves_the_decoration_most_of_its_slides_have(talk):
@@ -281,11 +294,11 @@ def test_a_layout_serves_the_decoration_most_of_its_slides_have(talk):
     side = copy.deepcopy(talk["side2"])
     ours = talk["retheme"]
     odd = ours["deck"]["slides"][3]["page"]
-    side["groups"][odd] = "*_V1"
-    side["pictures"]["*_V1"] = None
+    side.groups[odd] = "*_V1"
+    side.pictures["*_V1"] = None
     p = plan(talk, side=side)
-    assert p["page_group"]["LO"] == "*"
-    assert len(p["warnings"]) == 1 and ours["slides"][3]["key"] in p["warnings"][0]
+    assert p.page_group["LO"] == "*"
+    assert len(p.warnings) == 1 and ours["slides"][3]["key"] in p.warnings[0]
 
 
 def test_the_new_record_takes_what_was_written_and_keeps_what_was_not(talk):
@@ -298,27 +311,27 @@ def test_the_new_record_takes_what_was_written_and_keeps_what_was_not(talk):
         for e in l["pageElements"]:
             if "image" in e and l["objectId"] != "LT":
                 e["image"]["contentUrl"] = "https://lh3.example/deco-b=s0"
-    rec = theme_sync.new_record(talk["base"]["theme"], talk["side2"], p["written"], after)
+    rec = new_record(talk["base"]["theme"], talk["side2"], p.written, after)
     base = talk["base"]["theme"]
     assert rec["pages"]["LO"]["placeholders"]["LO_t"] == base["pages"]["LO"]["placeholders"]["LO_t"]  # (the conflict comes back)
-    assert theme_sync.same_spec(rec["pages"]["M"]["placeholders"]["M_t"]["spec"], talk["side2"]["spec"]["TITLE"])
-    assert theme_sync.same_picture_id(rec["pages"]["LO"]["decoration"]["picture"], talk["side2"]["pictures"]["*"])
+    assert theme_sync.same_spec(rec["pages"]["M"]["placeholders"]["M_t"]["spec"], talk["side2"].spec["TITLE"])
+    assert theme_sync.same_picture_id(picture_of(rec["pages"]["LO"]["decoration"]["picture"]), talk["side2"].pictures["*"].picture)
     assert rec["pages"]["LO"]["decoration"]["readback"]["contentHash"] == snapshot.image_hash("https://lh3.example/deco-b=s0")
-    assert rec["shared"] == talk["side2"]["shared"]
+    assert rec["shared"] == talk["side2"].shared
     # and a sync on that base with the same source writes nothing more, reporting the same conflict
     again = plan(talk, pres=after, base={**talk["base"], "theme": rec})
-    assert again["requests"] == [] and [c["element"] for c in again["conflicts"]] == ["LO_t"]
-    assert again["conflicts"][0]["id"] == p["conflicts"][0]["id"]
+    assert again.requests == [] and [c["element"] for c in again.conflicts] == ["LO_t"]
+    assert again.conflicts[0]["id"] == p.conflicts[0]["id"]
 
 
 def test_a_placeholder_an_interrupted_sync_wrote_is_its_own(talk):
     pres = copy.deepcopy(talk["pres"])
     lo = next(l for l in pres["layouts"] if l["objectId"] == "LO")
     lo["pageElements"][1] = placeholder("LO_t", "TITLE", colour={"red": 0.5})
-    base = {**talk["base"], "pending": {"theme": {"LO_t": talk["side2"]["spec"]["TITLE"]}}}
+    base = {**talk["base"], "pending": {"theme": {"LO_t": talk["side2"].spec["TITLE"]}}}
     p = plan(talk, pres=pres, base=base)
-    assert p["conflicts"] == [] and "LO_t" in p["written"]
-    assert "LO_t" not in {x[1] for x in ops(p["requests"])}
+    assert p.conflicts == [] and "LO_t" in p.written
+    assert "LO_t" not in {x[1] for x in ops(p.requests)}
 
 
 # ---------------------------------------------------------------- the header and footer words
@@ -345,11 +358,11 @@ def footers(talk):
     old = talk["v1"]["deck"]["layout_texts"]
     says = theme_sync.texts_says(old)
     pres = with_footers(talk["pres"], says)
-    base = {**talk["base"], "theme": {**talk["base"]["theme"], "texts": theme_sync.texts_entry(old, pres)}}
+    base = {**talk["base"], "theme": {**talk["base"]["theme"], "texts": theme_sync.texts_json(theme_sync.texts_entry(old, pres))}}
     new = copy.deepcopy(old)
     date = next(t for t in new if identity.plain_text(t) == "September 2026")
     date["paragraphs"][0]["runs"][0]["text"] = "October 2026"
-    side = {**talk["side1"], "texts": new}
+    side = replace(talk["side1"], texts=new)
     return {"pres": pres, "base": base, "side": side, "says": says}
 
 
@@ -370,22 +383,22 @@ def test_convert_records_the_layouts_footer_words(talk, footers):
 def test_a_new_date_nobody_edited_rewrites_the_footer_on_every_layout(talk, footers):
     """The edit hunt's h5a: `\\date` changed, and the footline showed the old date on every slide."""
     p = footer_plan(talk, footers)
-    assert p["conflicts"] == [] and p["warnings"] == []
-    deleted = {r["deleteObject"]["objectId"] for r in p["requests"] if "deleteObject" in r}
+    assert p.conflicts == [] and p.warnings == []
+    deleted = {r["deleteObject"]["objectId"] for r in p.requests if "deleteObject" in r}
     assert deleted == set(footers["base"]["theme"]["texts"]["objects"])
-    created = [r["createShape"] for r in p["requests"] if "createShape" in r]
+    created = [r["createShape"] for r in p.requests if "createShape" in r]
     assert sorted(c["objectId"] for c in created) == sorted(deleted)   # (convert's ids, one batch)
     assert {c["elementProperties"]["pageObjectId"] for c in created} == {"LT", "LO", "LB"}
-    inserted = [r["insertText"]["text"] for r in p["requests"] if "insertText" in r]
+    inserted = [r["insertText"]["text"] for r in p.requests if "insertText" in r]
     assert inserted.count("October 2026") == 3 and "September 2026" not in inserted
-    assert {"slide": "layouts", "element": None, "fields": ["header and footer"]} in p["applied"]
-    assert p["pending"]["header and footer"] == theme_sync.texts_digest(footers["side"]["texts"])
+    assert {"slide": "layouts", "element": None, "fields": ["header and footer"]} in p.applied
+    assert p.pending["header and footer"] == theme_sync.texts_digest(footers["side"].texts)
 
 
 def test_the_same_footer_writes_nothing(talk, footers):
-    p = footer_plan(talk, footers, side={**footers["side"], "texts": talk["v1"]["deck"]["layout_texts"]})
-    assert not any(r.get("deleteObject", {}).get("objectId", "").startswith(emit.LAYOUT_TEXT_PREFIX) for r in p["requests"])
-    assert p["applied"] == [] and p["conflicts"] == []
+    p = footer_plan(talk, footers, side=replace(footers["side"], texts=talk["v1"]["deck"]["layout_texts"]))
+    assert not any(r.get("deleteObject", {}).get("objectId", "").startswith(emit.LAYOUT_TEXT_PREFIX) for r in p.requests)
+    assert p.applied == [] and p.conflicts == []
 
 
 def test_a_footer_the_person_retyped_is_a_conflict_and_stays(talk, footers):
@@ -393,38 +406,38 @@ def test_a_footer_the_person_retyped_is_a_conflict_and_stays(talk, footers):
     lo = next(l for l in pres["layouts"] if l["objectId"] == "LO")
     lo["pageElements"][-1] = footer_box(lo["pageElements"][-1]["objectId"], "Draft - do not share", 480)
     p = footer_plan(talk, footers, pres=pres)
-    assert not any("deleteObject" in r or "createShape" in r for r in p["requests"])
-    [c] = [c for c in p["conflicts"] if c["field"] == "header and footer"]
+    assert not any("deleteObject" in r or "createShape" in r for r in p.requests)
+    [c] = [c for c in p.conflicts if c["field"] == "header and footer"]
     assert c["resolution"] == "deck kept" and "Draft - do not share" in json.dumps(c["theirs"])
     assert "October 2026" in json.dumps(c["ours"])
 
 
 def test_after_the_write_the_next_sync_writes_no_footer(talk, footers):
     p = footer_plan(talk, footers)
-    after = with_footers(talk["pres"], theme_sync.texts_says(footers["side"]["texts"]))
-    rec = theme_sync.new_record(footers["base"]["theme"], footers["side"], p["written"], after)
+    after = with_footers(talk["pres"], theme_sync.texts_says(footers["side"].texts))
+    rec = new_record(footers["base"]["theme"], footers["side"], p.written, after)
     assert rec["texts"]["says"][2] == "October 2026"
     again = footer_plan(talk, footers, pres=after, base={**footers["base"], "theme": rec})
-    assert again["conflicts"] == [] and not any("createShape" in r for r in again["requests"])
+    assert again.conflicts == [] and not any("createShape" in r for r in again.requests)
 
 
 def test_a_footer_an_interrupted_sync_wrote_is_its_own(talk, footers):
-    after = with_footers(talk["pres"], theme_sync.texts_says(footers["side"]["texts"]))
-    digest = theme_sync.texts_digest(footers["side"]["texts"])
+    after = with_footers(talk["pres"], theme_sync.texts_says(footers["side"].texts))
+    digest = theme_sync.texts_digest(footers["side"].texts)
     base = {**footers["base"], "pending": {"theme": {"header and footer": digest}}}
     p = footer_plan(talk, footers, pres=after, base=base)
-    assert p["conflicts"] == [] and "header and footer" in p["written"]
-    assert not any("createShape" in r for r in p["requests"])
+    assert p.conflicts == [] and "header and footer" in p.written
+    assert not any("createShape" in r for r in p.requests)
 
 
 def test_a_base_older_than_footer_sync_leaves_them_and_says_so(talk, footers):
     theme = {k: v for k, v in footers["base"]["theme"].items() if k != "texts"}
     p = footer_plan(talk, footers, base={**footers["base"], "theme": theme})
-    assert not any("createShape" in r for r in p["requests"])
-    assert any("header and footer" in w and "'October 2026'" in w for w in p["warnings"])
+    assert not any("createShape" in r for r in p.requests)
+    assert any("header and footer" in w and "'October 2026'" in w for w in p.warnings)
     same = footer_plan(talk, footers, base={**footers["base"], "theme": theme},
-                       side={**footers["side"], "texts": talk["v1"]["deck"]["layout_texts"]})
-    assert not any("header and footer" in w for w in same["warnings"])
+                       side=replace(footers["side"], texts=talk["v1"]["deck"]["layout_texts"]))
+    assert not any("header and footer" in w for w in same.warnings)
 
 
 # ---------------------------------------------------------------- slides and old bases
@@ -436,7 +449,7 @@ class FakeSync(sync.Sync):
 
 def test_a_slide_showing_the_new_shared_background_inherits_the_master(talk):
     s = FakeSync(talk["base"], talk["side2"])
-    key = talk["side2"]["shared"]
+    key = talk["side2"].shared
     pres = copy.deepcopy(talk["pres"])
     assert s.background_requests("S2", key, {}, pres, False) == []   # (it inherits already)
     pres["slides"][2]["pageProperties"] = {"pageBackgroundFill": {"solidFill": {"color": {"rgbColor": {"red": 1}}}}}
@@ -449,7 +462,7 @@ def test_a_slide_showing_the_new_shared_background_inherits_the_master(talk):
 def test_an_old_base_leaves_the_layouts_alone_and_says_so(talk):
     old = {k: v for k, v in talk["base"].items() if k != "theme"}
     s = FakeSync(old, talk["side2"])
-    assert s.master_key() == talk["side1"]["shared"]   # (the old behaviour)
+    assert s.master_key() == talk["side1"].shared   # (the old behaviour)
     assert "older than theme sync" in theme_sync.old_base_warning(old, talk["side2"])
     assert theme_sync.old_base_warning(old, talk["side1"]) is None
 

@@ -11,6 +11,7 @@ import pytest
 from beamer2slides import deck_pictures, merge, snapshot
 from beamer2slides.deck_pictures import LivePictures, exported_pictures
 
+from . import sync_work
 from .test_base_storage import FakeDrive, http_error, read_deck
 from .test_guard import Request
 from .test_sync import entry, ours_entry, readback, three_slides, triple, unit
@@ -224,9 +225,8 @@ def picture_sync(monkeypatch, ours_bbox=None, drive=None):
     theirs["slides"][1]["objects"]["b2s_s001_f2"]["image"] = {"contentHash": "bbb"}
     pres = {"presentationId": "P", "slides": [page(s["objectId"], [image("b2s_s001_f2", url="u-new")] if n == 1 else [])
                                               for n, s in enumerate(base["slides"])]}
-    s = Sync.__new__(Sync)
-    s.base, s.ours, s.drive, s.follow_labels, s.take_source = base, ours, drive, False, ()
-    s.plan = object()  # (a real Sync holds its DeckPlan there: no method may be called that)
+    s = sync_work.bare_sync(base=base, ours=ours, drive=drive, slides=None, follow_labels=False, take_source=(),
+                            plan=object())  # (a real Sync holds its DeckPlan there: no method may be called that)
     monkeypatch.setattr(Sync, "picture_adopter", lambda self, pres: None)
     return s, theirs, pres
 
@@ -236,7 +236,7 @@ def test_a_picture_the_source_left_alone_is_never_read(monkeypatch, fetcher):
     an unread picture is not reported as the person's edit."""
     fetcher(lambda url: pytest.fail(f"downloaded {url}"))
     s, theirs, pres = picture_sync(monkeypatch)
-    mplan = s.merge_plan(theirs, pres)
+    mplan = merge.merge_plan_json(s.merge_plan(theirs, pres))
     assert unit(mplan, "results", "image/figure/0")["action"] == "keep"
     assert s.picture_reads == {"unchecked": 1, "asked": 0}
     assert not mplan["report"]["overrides"] and not mplan["report"]["conflicts"]
@@ -245,7 +245,7 @@ def test_a_picture_the_source_left_alone_is_never_read(monkeypatch, fetcher):
 def test_a_picture_the_source_moved_is_read_and_found_unchanged(monkeypatch, fetcher):
     fetcher(lambda url: png())
     s, theirs, pres = picture_sync(monkeypatch, ours_bbox=[200, 60, 320, 160])
-    mplan = s.merge_plan(theirs, pres)
+    mplan = merge.merge_plan_json(s.merge_plan(theirs, pres))
     assert unit(mplan, "results", "image/figure/0")["action"] != "keep"
     assert s.picture_reads == {"unchecked": 1, "asked": 1} and not mplan["report"]["conflicts"]
 
@@ -254,7 +254,7 @@ def test_an_unread_picture_the_source_moved_is_the_persons(monkeypatch, fetcher)
     """Neither a download nor an export: the new URL reads as a replaced picture, which is kept."""
     fetcher(refuse)
     s, theirs, pres = picture_sync(monkeypatch, ours_bbox=[200, 60, 320, 160])
-    mplan = s.merge_plan(theirs, pres)
+    mplan = merge.merge_plan_json(s.merge_plan(theirs, pres))
     assert unit(mplan, "results", "image/figure/0")["action"] == "keep"
     assert mplan["report"]["conflicts"][0]["field"] == "image"
 
@@ -263,15 +263,20 @@ def test_a_sync_that_may_not_download_reads_the_picture_out_of_an_export(monkeyp
     fetcher(refuse)
     drive = ExportingDrive(pptx([("", {}, None), (pic(rid="r1"), {"r1": png()}, None), ("", {}, None)]))
     s, theirs, pres = picture_sync(monkeypatch, ours_bbox=[200, 60, 320, 160], drive=drive)
-    mplan = s.merge_plan(theirs, pres)
+    mplan = merge.merge_plan_json(s.merge_plan(theirs, pres))
     assert unit(mplan, "results", "image/figure/0")["action"] != "keep" and not mplan["report"]["conflicts"]
     assert drive.exports == 1
 
 
 def test_an_unread_picture_is_not_reported_as_an_edit():
-    """merge.unchecked: a kept unit's new URL, never signed, is left out of the overrides; one
-    the person really replaced (signed, different) is in them."""
-    read = {"objects": {"x": {"image": {"contentHash": "b", "unchecked": True}}}, "background": {"picture": "p"}}
-    assert merge.unchecked(read, ["x"]) and not merge.unchecked(read)
-    read["objects"]["x"]["image"].pop("unchecked")
-    assert not merge.unchecked(read, ["x"])
+    """merge.pictures_unchecked: a kept unit's new URL, never signed, is left out of the overrides;
+    one the person really replaced (signed, different) is in them."""
+    from beamer2slides.sync_model import ObjectId, slide_read
+    rb = readback([0, 0, 10, 10], kind="image", image="b")
+    read = {"objectId": "S", "objects": {"x": rb}, "background": {"picture": "p"}}
+    rb["image"]["unchecked"] = True
+    x = ObjectId("x")
+    assert merge.pictures_unchecked(slide_read(read, "read"), [x])
+    assert not merge.background_unchecked(slide_read(read, "read"))
+    rb["image"].pop("unchecked")
+    assert not merge.pictures_unchecked(slide_read(read, "read"), [x])

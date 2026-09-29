@@ -24,8 +24,8 @@ from . import identity, snapshot
 from .ir_types import Box
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_optional_str, as_str
 from .sync_model import (Base, DeckRead, ElementEntry, ElementKey, ImageRead, JsonMap, ObjectId, ReadBack, SlideEntry,
-                         SlideKey, SlideRead, base as parse_base, deck_read, element_entry_json, readback, readback_of,
-                         readbacks, slide_entry)
+                         SlideKey, SlideRead, base as parse_base, deck_read, element_entry_json, readback, readbacks,
+                         slide_entry)
 from .typing_compat import assert_never
 
 # What `plan_merge` decides for a slide (`SlidePlan`) and for a unit on an updated one
@@ -216,7 +216,7 @@ def _hunks(base: Sequence[str], other: Sequence[str]) -> list[Hunk]:
     return [(i1, i2, list(other[j1:j2])) for op, i1, i2, j1, j2 in sm.get_opcodes() if op != "equal"]
 
 
-def text_merge(base: str, ours: str, theirs: str, take: Collection[int] = ()) -> tuple[str, list[JsonObject], bool]:
+def text_merge(base: str, ours: str, theirs: str, take: Collection[int]) -> tuple[str, list[JsonObject], bool]:
     """`text_merge_of`, its clashes as JSON ({"base", "ours", "theirs", "paragraph"?})."""
     merged, clashes, safe = text_merge_of(base, ours, theirs, take)
     return merged, [clash_json(c) for c in clashes], safe
@@ -481,11 +481,6 @@ def text_edit_requests(object_id: str, current: str, target: str, cell: JsonObje
 
 # ---------------------------------------------------------------- deck edits
 
-def object_changes(b: JsonMap, t: JsonMap) -> set[str]:
-    """`object_changes_of` two read-backs as snapshot.readback writes them."""
-    return {f for f in object_changes_of(readback_of(b, "base read-back"), readback_of(t, "live read-back"))}
-
-
 def _same_image(a: ImageRead | None, b: ImageRead | None) -> bool:
     """`snapshot.same_picture` of two image read-backs."""
     ha, hb = None if a is None else a.content_hash, None if b is None else b.content_hash
@@ -592,7 +587,7 @@ def user_objects_of(base_slide: SlideEntry, slide_read: SlideRead) -> list[UserO
 
 
 def uniform_changes(base_styles: Sequence[JsonMap], theirs_styles: Sequence[JsonMap],
-                    text_changed: bool = False) -> JsonObject | None:
+                    text_changed: bool) -> JsonObject | None:
     """Style attributes the deck set on all of an object's text ({} when nothing changed, None
     when the change isn't uniform and so can't be re-applied to new text).
 
@@ -2195,28 +2190,11 @@ def report_resolutions(res: Resolutions, report: Report) -> None:
             f"take the id from there. Nothing was written on that account and nothing is lost.")
 
 
-def unchecked(read: JsonMap | None, oids: Sequence[str] | None = None) -> bool:
-    """Whether these live pictures (`oids`; None: the slide's background) are ones sync did not
-    read (`sync.Sync.sign_changed`): a new URL, and a plan that is the same whether or not the
-    person replaced the picture. It still counts as replaced - nothing here ever writes over it -
-    but a report must not say the person did something nobody looked at."""
-    if read is None:
-        return False
-    if oids is None:
-        background = read.get("background")
-        return isinstance(background, dict) and bool(background.get("unchecked"))
-    objects = read.get("objects")
-    live: JsonObject = objects if isinstance(objects, dict) else {}
-
-    def flag(oid: str) -> bool:
-        o = live.get(oid)
-        image = o.get("image") if isinstance(o, dict) else None
-        return isinstance(image, dict) and bool(image.get("unchecked"))
-    return bool(oids) and all(flag(oid) for oid in oids)
-
-
 def pictures_unchecked(read: SlideRead, oids: Sequence[ObjectId]) -> bool:
-    """`unchecked` of these live pictures."""
+    """Whether these live pictures are ones sync did not read (`sync.Sync.sign_changed`): a new
+    URL, and a plan that is the same whether or not the person replaced the picture. It still
+    counts as replaced - nothing here ever writes over it - but a report must not say the person
+    did something nobody looked at."""
     def flag(oid: ObjectId) -> bool:
         o = read.objects.get(oid)
         return o is not None and o.image is not None and o.image.unchecked
@@ -2224,7 +2202,7 @@ def pictures_unchecked(read: SlideRead, oids: Sequence[ObjectId]) -> bool:
 
 
 def background_unchecked(read: SlideRead) -> bool:
-    """`unchecked` of the slide's background."""
+    """`pictures_unchecked` of the slide's background."""
     return bool((read.background or {}).get("unchecked"))
 
 

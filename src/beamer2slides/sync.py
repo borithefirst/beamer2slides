@@ -27,12 +27,15 @@ from .deck_pictures import WORKERS as PICTURE_WORKERS, LivePictures
 from .gapi import HttpError, status_of
 from .google_types import DriveFile, Page, PageElement, Presentation, object_id
 from .gslides import EMU_PER_PT, emu, execute, pt
-from .json_types import Json, JsonObject, as_int, as_object, as_objects, as_str
+from .json_types import (Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_optional_str,
+                         as_str)
 from .paths import out_root
+from .sync_model import (ElementEntry, ElementKey, JsonMap, ObjectId, SlideKey, SlideRead, base as parse_base, deck_read)
 from .typing_compat import assert_never
 
 if TYPE_CHECKING:
     from .emit import DeckPlan, FontMapper
+    from .theme_sync import ThemeMerge, ThemeSide
 
 MAX_ATTEMPTS = 3
 CHUNK = 450
@@ -375,9 +378,10 @@ def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_widt
     adopt_sync.fold_slides(deck, folds)
     (work / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     plan = planned(deck, prepared.pdf, work, page_width)
-    originals = contained_originals(deck, [(int(c["page"]), str(c["id"])) for c in plan.contained])
+    originals = contained_originals(deck, [(c["page"], c["id"]) for c in plan.contained])
     deck = plan.deck
-    infos = [identity.slide_info_of(s) for s in deck["slides"]]
+    ours_slides = plan.slides()
+    infos = [identity.slide_info_of(s) for s in ours_slides]
     base_slides = as_objects(base["slides"], "base.slides")
     base_keys = [as_str(b["key"], "base slide key") for b in base_slides]
     base_infos = [identity.base_slide_info(b, k) for b, k in zip(base_slides, base_keys)]
@@ -388,17 +392,19 @@ def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_widt
     near = [identity.reported_near_miss(m, base_keys, infos)
             for m in identity.near_misses_of(base_infos, infos, pairs)]
     ekeys, fps = [], []
-    for j, slide in enumerate(deck["slides"]):
+    for j, slide in enumerate(ours_slides):
         matched = identity.base_items(as_objects(base_slides[pairs[j]]["elements"], f"base slide {base_keys[pairs[j]]}: "
                                                  "elements")) if j in pairs else None
-        k, f = identity.slide_element_keys(slide["elements"], work, matched)
+        k, f = identity.slide_element_keys(as_objects(slide["elements"], "elements"), work, matched)
         ekeys.append(k)
         fps.append(f)
     entries = snapshot.slide_entries(deck, work, keys, ekeys, fps)
     # (the old forms an adopt base recorded are brought up to what the source says, contained or not)
     view_slides: list[Json] = []
-    for s in deck["slides"]:
-        elements: list[Json] = [originals.get((s["page"], e["id"]), e) for e in s["elements"]]
+    for s in ours_slides:
+        page = as_int(s["page"], "slide.page")
+        elements: list[Json] = [originals.get((page, as_str(e["id"], "element id")), e)
+                                for e in as_objects(s["elements"], "elements")]
         view_slide: JsonObject = {**s, "elements": elements}
         view_slides.append(view_slide)
     view: JsonObject = {"slides": view_slides}  # (its readers take the slides alone)
@@ -407,16 +413,16 @@ def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_widt
     unread: list[Unread] = []
     unwritten = mark_emitted(base, entries, deck, pairs, plan.scale, plan.fonts, fast=True, unread=unread)
     at: dict[tuple[int, str], tuple[str, str]] = {
-        (s["page"], el["id"]): (o["key"], e["key"]) for s, o in zip(deck["slides"], entries)
-        for el, e in zip(s["elements"], o["elements"])}
+        (as_int(s["page"], "slide.page"), as_str(el["id"], "element id")): (o["key"], e["key"])
+        for s, o in zip(ours_slides, entries) for el, e in zip(as_objects(s["elements"], "elements"), o["elements"])}
     contained: list[Contained] = []
     for c in plan.contained:
-        page, eid, kind = int(c["page"]), str(c["id"]), c["kind"]
+        page, eid, kind = c["page"], c["id"], c["kind"]
         slide_key, element_key = at.get((page, eid), (None, None))
         was = originals.get((page, eid)) or {}
         words = " ".join(identity.plain_text(was).split()) if was.get("kind") == "text" else ""
         contained.append(Contained(slide=slide_key, element=element_key, page=page, id=eid,
-                                   kind=None if kind is None else str(kind), error=str(c["error"]), words=words))
+                                   kind=kind, error=c["error"], words=words))
     return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries,
             "pairs": pairs, "label_moves": moves, "weak_pairs": weak, "near_misses": near,
             "context_unwritten": unwritten, "context_unread": unread, "contained": contained, "base_forms": forms}
@@ -486,28 +492,330 @@ class OursSlide(_OursSlideKeys, total=False):
     title: str | None
 
 
-class _UnitPlanKeys(TypedDict):
-    action: merge.UnitAction
+# ---------------------------------------------------------------- the merge plan, as sync reads it
+
+def slide_units(p: merge.SlidePlan) -> tuple[merge.PlannedUnit, ...]:
+    """The units a slide's plan decides: only an updated slide has any (a held one is written nothing)."""
+    match p:
+        case merge.UpdateSlide():
+            return p.units
+        case merge.CreateSlide() | merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide() | merge.HoldSlide():
+            return ()
+        case _:
+            assert_never(p)
 
 
-class UnitPlan(_UnitPlanKeys, total=False):
-    """What these readers take from a unit's plan (`merge.plan_unit`, on an updated slide)."""
-    ours_members: list[str]
+def ours_index(p: merge.SlidePlan) -> int | None:
+    """The new conversion's slide a plan writes or keeps its place for (None: the source dropped it)."""
+    match p:
+        case merge.CreateSlide() | merge.GoneSlide() | merge.HoldSlide() | merge.UpdateSlide():
+            return p.ours
+        case merge.KeepRemovedSlide() | merge.DeleteSlide():
+            return None
+        case _:
+            assert_never(p)
 
 
-class _SlidePlanKeys(TypedDict):
-    action: merge.SlideAction
-    ours: int | None
+def base_index(p: merge.SlidePlan) -> int | None:
+    """The base's slide a plan is about (None: a slide the source adds)."""
+    match p:
+        case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide() | merge.HoldSlide() | merge.UpdateSlide():
+            return p.base
+        case merge.CreateSlide():
+            return None
+        case _:
+            assert_never(p)
 
 
-class SlidePlan(_SlidePlanKeys, total=False):
-    """What these readers take from a slide's plan (`merge.plan_merge`'s `slides`)."""
-    units: list[UnitPlan]
+def live_id(p: merge.SlidePlan) -> str | None:
+    """The live slide a plan is about (None: one to create, or one the deck deleted)."""
+    match p:
+        case merge.KeepRemovedSlide() | merge.DeleteSlide() | merge.HoldSlide() | merge.UpdateSlide():
+            return p.object_id
+        case merge.CreateSlide() | merge.GoneSlide():
+            return None
+        case _:
+            assert_never(p)
 
 
-class MergePlan(TypedDict):
-    """What these readers take from `merge.plan_merge`'s answer."""
-    slides: list[SlidePlan]
+def new_background(p: merge.SlidePlan) -> str | None:
+    """The source's background this sync writes onto an updated slide; None where it writes none (a
+    background the source took away is not written either: `has_writes`, `update_slide`)."""
+    match p:
+        case merge.UpdateSlide():
+            return p.background if p.background_written and p.background else None
+        case merge.CreateSlide() | merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide() | merge.HoldSlide():
+            return None
+        case _:
+            assert_never(p)
+
+
+def written(d: merge.UnitDecision) -> bool:
+    """Whether the unit's objects are made anew: created, or recreated with the deck's edits back on."""
+    match d:
+        case merge.CreateUnit() | merge.Recreate():
+            return True
+        case merge.AdoptObject() | merge.GoneUnit() | merge.DeleteUnit() | merge.KeepRemoved() | merge.KeptJoined() | \
+                merge.KeepUnit() | merge.AdoptUnit() | merge.MoveUnit():
+            return False
+        case _:
+            assert_never(d)
+
+
+def kept_whole(d: merge.UnitDecision) -> bool:
+    """A unit this sync writes nothing to (the plan's JSON says `keep` or `none`)."""
+    match d:
+        case merge.GoneUnit() | merge.KeepRemoved() | merge.KeptJoined() | merge.KeepUnit():
+            return True
+        case merge.AdoptObject() | merge.CreateUnit() | merge.DeleteUnit() | merge.Recreate() | merge.AdoptUnit() | \
+                merge.MoveUnit():
+            return False
+        case _:
+            assert_never(d)
+
+
+def has_writes(mplan: merge.MergePlan, live_order: Sequence[str]) -> bool:
+    """Whether a merge plan changes the live deck at all (a sync with no changes sends nothing):
+    `merge.has_writes` over the records."""
+    for p in mplan.slides:
+        match p:
+            case merge.CreateSlide() | merge.DeleteSlide():
+                return True
+            case merge.UpdateSlide():
+                if any(isinstance(u.decision, merge.CreateUnit | merge.Recreate | merge.DeleteUnit | merge.MoveUnit)
+                       for u in p.units) or new_background(p) is not None or p.notes is not None:
+                    return True
+            case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.HoldSlide():
+                pass
+            case _:
+                assert_never(p)
+    final = [x for x in mplan.order if not x.startswith("new:")]
+    current = [s for s in live_order if s in final]
+    return current != [s for s in final if s in current]
+
+
+_ACTION_FIELDS = ("key", "action", "source", "deck", "unpaired", "inherited", "in_table")
+
+
+def plan_actions(mplan: merge.MergePlan) -> list[Json]:
+    """What the report's `actions` list says of each slide: its action and the units anything
+    happened to, in the words of the plan's JSON (`merge.slide_plan_json`)."""
+    out: list[Json] = []
+    for p in mplan.slides:
+        units: list[Json] = []
+        for u in slide_units(p):
+            j = merge.planned_unit_json(u)
+            if kept_whole(u.decision) and not any(j.get(k) for k in ("deck", "unpaired", "inherited", "in_table")):
+                continue
+            units.append({k: j[k] for k in _ACTION_FIELDS if k in j})
+        out.append({"slide": p.key, "action": merge.slide_plan_json(p)["action"], "units": units})
+    return out
+
+
+# The plan as JSON, read back into its records: for the callers that still hand sync a plan written as
+# `merge.plan_merge` writes it (the offline fuzz replays `restack`, `regroups` and `move_requests` over
+# its own plans, `fuzz_sync._stacked`), and the tests that write one by hand.
+
+_BLIND: tuple[merge.Blind, ...] = ("inherited", "in_table", "unpaired")
+
+
+def _keys(v: Json, where: str) -> tuple[str, ...]:
+    return tuple(as_str(x, f"{where}[{i}]") for i, x in enumerate(as_array(v, where)))
+
+
+def overrides_of(ov: JsonMap, where: str) -> merge.Overrides:
+    """`merge.overrides_json` read back."""
+    text: merge.TextOverride | merge.TableOverride | None = None
+    if ov.get("text") is not None:
+        t = as_object(ov["text"], f"{where}.text")
+        if t.get("table"):
+            dims = t.get("dims")
+            d = None if dims is None else as_array(dims, f"{where}.text.dims")
+            text = merge.TableOverride(base=as_str(t["base"], f"{where}.text.base"),
+                                       theirs=as_str(t["theirs"], f"{where}.text.theirs"),
+                                       dims=None if d is None else (as_int(d[0], f"{where}.dims"), as_int(d[1], f"{where}.dims")))
+        else:
+            text = merge.TextOverride(base=as_str(t["base"], f"{where}.text.base"),
+                                      theirs=as_str(t["theirs"], f"{where}.text.theirs"),
+                                      take=tuple(as_int(k, f"{where}.text.take") for k in as_array(t.get("take") or [], where)))
+    style: merge.StyleOverride | None = None
+    if ov.get("text_style") is not None:
+        s = as_object(ov["text_style"], f"{where}.text_style")
+        style = merge.StyleOverride(runs=as_object(s.get("runs") or {}, f"{where}.text_style.runs"),
+                                    paragraphs=as_object(s.get("paragraphs") or {}, f"{where}.text_style.paragraphs"),
+                                    ranges=bool(s.get("ranges")))
+    shape = ov.get("shape_style")
+    return merge.Overrides(text=text, text_style=style,
+                           shape_style=None if shape is None else as_object(shape, f"{where}.shape_style"),
+                           geometry="geometry" in ov)
+
+
+def unit_decision_of(u: JsonMap, where: str) -> merge.UnitDecision:
+    """`merge.unit_json` read back. A hand-written unit may leave out what its readers do not read."""
+    key = ElementKey(as_str(u["key"], f"{where}.key"))
+    source, deck = _keys(u.get("source") or [], f"{where}.source"), _keys(u.get("deck") or [], f"{where}.deck")
+    action = u["action"]
+    if action == "adopt_object":
+        return merge.AdoptObject(key=key, object_id=ObjectId(as_str(u["objectId"], f"{where}.objectId")))
+    if action == "create":
+        return merge.CreateUnit(key=key)
+    if action == "none":
+        return merge.GoneUnit(key=key)
+    if action == "delete":
+        return merge.DeleteUnit(key=key)
+    if action == "keep":
+        if u.get("removed"):
+            return merge.KeepRemoved(key=key, deck=deck)
+        if "source" not in u and "deck" not in u:
+            return merge.KeptJoined(key=key)
+        blind: tuple[merge.Blind, tuple[str, ...]] | None = None
+        for why in _BLIND:
+            if why in u:
+                blind = (why, _keys(u[why], f"{where}.{why}"))
+        return merge.KeepUnit(key=key, source=source, deck=deck, blind=blind)
+    if action == "recreate":
+        return merge.Recreate(key=key, source=source, deck=deck,
+                              overrides=overrides_of(as_object(u.get("overrides") or {}, f"{where}.overrides"),
+                                                     f"{where}.overrides"))
+    if action == "adopt":
+        return merge.AdoptUnit(key=key, source=source, deck=deck, adopt=_keys(u.get("adopt") or [], f"{where}.adopt"))
+    if action == "move":
+        delta = as_array(u["delta"], f"{where}.delta")
+        return merge.MoveUnit(key=key, source=source, deck=deck,
+                              delta=(_number(delta[0], f"{where}.delta"), _number(delta[1], f"{where}.delta")))
+    raise JsonShapeError(f"{where}.action: a unit's action was expected, found {action!r}")
+
+
+def planned_unit_of(u: JsonMap, where: str) -> merge.PlannedUnit:
+    """`merge.planned_unit_json` read back."""
+    return merge.PlannedUnit(
+        decision=unit_decision_of(u, where),
+        base_members=tuple(ElementKey(k) for k in _keys(u.get("base_members") or [], f"{where}.base_members")),
+        ours_members=tuple(ElementKey(k) for k in _keys(u.get("ours_members") or [], f"{where}.ours_members")))
+
+
+def slide_plan_of(p: JsonMap, where: str) -> merge.SlidePlan:
+    """`merge.slide_plan_json` read back."""
+    key = SlideKey(as_str(p["key"], f"{where}.key"))
+    action = p["action"]
+    if action == "create":
+        return merge.CreateSlide(key=key, ours=as_int(p["ours"], f"{where}.ours"))
+    if action == "gone":
+        return merge.GoneSlide(key=key, ours=as_int(p["ours"], f"{where}.ours"), base=as_int(p["base"], f"{where}.base"))
+    oid = ObjectId(as_str(p["objectId"], f"{where}.objectId"))
+    if action == "keep_removed":
+        return merge.KeepRemovedSlide(key=key, base=as_int(p["base"], f"{where}.base"), object_id=oid)
+    if action == "delete":
+        return merge.DeleteSlide(key=key, base=as_int(p["base"], f"{where}.base"), object_id=oid)
+    if action != "update":
+        raise JsonShapeError(f"{where}.action: a slide's action was expected, found {action!r}")
+    if p.get("held"):
+        return merge.HoldSlide(key=key, ours=as_int(p["ours"], f"{where}.ours"), base=as_int(p["base"], f"{where}.base"),
+                               object_id=oid)
+    return merge.UpdateSlide(
+        key=key, ours=as_int(p["ours"], f"{where}.ours"), base=as_int(p["base"], f"{where}.base"), object_id=oid,
+        units=tuple(planned_unit_of(u, f"{where}.units[{n}]") for n, u in enumerate(as_objects(p["units"], f"{where}.units"))),
+        background_written="background" in p, background=as_optional_str(p.get("background"), f"{where}.background"),
+        notes=as_optional_str(p.get("notes"), f"{where}.notes"))
+
+
+def _number(v: Json, where: str) -> float:
+    if isinstance(v, int | float) and not isinstance(v, bool):
+        return v
+    raise JsonShapeError(f"{where}: a number was expected")
+
+
+@dataclass(frozen=True, kw_only=True)
+class InPlace:
+    """A live placeholder an element of the new conversion is written into instead of a new box:
+    `size` its box (pt), `text` what it holds now (emptied first when there is any)."""
+    id: str
+    size: tuple[float, float]
+    text: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class TableFill:
+    """A live table refilled where it is (`table_refill`): the cells holding words now are emptied,
+    the row and column `steps` sent, then it is filled as emit fills an imported table. `shift`:
+    the source's move of it (slide pt); `margins`: the cell margins it then has, for the base."""
+    id: str
+    cells: list[tuple[int, int]]
+    steps: list[JsonObject]
+    shift: tuple[float, float]
+    margins: list[list[float]]
+
+
+Refilled = InPlace | TableFill
+"""A live object an element is written into instead of a new one (`SlideWork.in_place`)."""
+
+
+class Regroup(TypedDict):
+    """A group a slide's rewrite takes apart (`Sync.regroups_of`): the old roots of rewritten units
+    in it (`remove`), root -> unit key (`unit_of`). A dict, as the offline fuzz's replay reads it."""
+    remove: set[str]
+    unit_of: dict[str, str]
+
+
+def placeholder_in_place(oid: str, rb: dict) -> InPlace:
+    """A live placeholder (`rb`: its read-back) written into as it is."""
+    size = rb["size"]
+    return InPlace(id=oid, size=(size[0], size[1]), text=(rb.get("text") or "").strip())
+
+
+def updated(p: merge.SlidePlan) -> merge.UpdateSlide | merge.HoldSlide:
+    """A plan for a slide the deck keeps and the new conversion has (`Sync.update_slide`)."""
+    match p:
+        case merge.UpdateSlide() | merge.HoldSlide():
+            return p
+        case merge.CreateSlide() | merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide():
+            raise ValueError(f"slide {p.key}: only a kept slide is updated")
+        case _:
+            assert_never(p)
+
+
+class SlideWork:
+    """One slide's part of what a sync writes (`Sync.prepare`): its plan, the slide it is written on
+    (`sid`: None for one nothing is written to) and the new conversion's elements made on it
+    (`units`). `new_slide` / `update_slide` fill in what they made, which the later phases read:
+    element index -> the objects made (`objects`) and its main object (`new_oid`), the live objects
+    written into (`in_place`), unit key -> its new outermost object (`tops`), the old objects the
+    cleanup deletes (`doomed`) and the slide-level groups made (`groups`)."""
+
+    def __init__(self, plan: merge.SlidePlan, sid: str | None, units: list[int]) -> None:
+        self.plan = plan
+        self.sid = sid
+        self.units = units
+        self.objects: dict[int, list[str]] = {}
+        self.new_oid: dict[int, str] = {}
+        self.in_place: dict[int, Refilled] = {}
+        self.tops: dict[str, str] = {}
+        self.doomed: set[str] = set()
+        self.groups: list[str] = []
+
+
+@dataclass(frozen=True, kw_only=True)
+class Work:
+    """What a sync writes (`Sync.prepare`): per slide, the pictures the staging deck brings (file ->
+    "background" for a slide background, else None), the ids of the slides it creates (key -> id),
+    PDF page -> live slide for internal links, whether anything is written, and the final slide order."""
+    slides: list[SlideWork]
+    pictures: dict[str, str | None]
+    new_ids: dict[str, str]
+    page_slide: dict[int, str]
+    writes: bool
+    order: list[str]
+
+
+@dataclass(frozen=True, kw_only=True)
+class RunResult:
+    """What `Sync.run` planned and wrote: `theirs` is the deck it planned against
+    (`snapshot.read_presentation`), `revision_id` the deck's after the write (None: nothing sent)."""
+    attempts: int
+    plan: merge.MergePlan
+    work: Work
+    theirs: JsonObject
+    revision_id: str | None
 
 
 def planned(deck: dict[str, object], pdf: Path, work: Path, page_width: float) -> "DeckPlan":
@@ -519,17 +827,20 @@ def planned(deck: dict[str, object], pdf: Path, work: Path, page_width: float) -
     change. `adopt_sync.convert_source` plans the same way, for the same reason. Under
     `emit.strict()` (the offline suite) the failure is raised."""
     from .emit import DeckPlan
+    from .emit_model import box_of
     from .render import crop_region
 
     plan = DeckPlan(deck, page_width, contain=True)
     gone = {(c["page"], c["id"]) for c in plan.contained}
     # (from the PDF this deck was read from: `emit.crop_fallbacks` would take a slides.pdf an
     # earlier sync's notes left in `work`)
-    for slide in plan.deck["slides"]:
-        for el in slide["elements"]:
-            if (slide["page"], el["id"]) in gone and el.get("role") == "fallback":
-                (work / el["file"]).parent.mkdir(parents=True, exist_ok=True)
-                crop_region(pdf, slide["page"], el["bbox"], work / el["file"], 6.0)
+    for slide in plan.slides():
+        page = as_int(slide["page"], "slide.page")
+        for el in as_objects(slide["elements"], "elements"):
+            if (page, el["id"]) in gone and el.get("role") == "fallback":
+                file = work / as_str(el["file"], "file")
+                file.parent.mkdir(parents=True, exist_ok=True)
+                crop_region(pdf, page, list(box_of(el["bbox"], "bbox")), file, 6.0)
     return plan
 
 
@@ -607,27 +918,24 @@ def base_as_contained(base: JsonObject, entries: list[JsonObject], view: JsonObj
 
 
 def contained_report(contained: list[Contained], slides: list[OursSlide],
-                     mplan: MergePlan) -> tuple[list[ContainedFound], list[str]]:
+                     mplan: merge.MergePlan) -> tuple[list[ContainedFound], list[str]]:
     """build_ours' `contained` (`slides`: its keyed slides), each with whether this sync writes its
     unit, and the report's words for those it writes. A unit it leaves alone is in the deck as the
     last sync or `convert` wrote it: contained then too, or a source that has not changed it since."""
-    written: set[tuple[str, str]] = set()
-    for p in mplan["slides"]:
-        j, action = p["ours"], p["action"]
-        if j is None:
-            continue
-        o = slides[j]
-        match action:
-            case "create":
-                written |= {(o["key"], e["key"]) for e in o["elements"]}
-            case "update":
-                written |= {(o["key"], k) for u in p.get("units", []) if u["action"] in ("create", "recreate")
-                            for k in u.get("ours_members", [])}
-            case "gone" | "keep_removed" | "delete":
+    made: set[tuple[str, str]] = set()
+    for p in mplan.slides:
+        match p:
+            case merge.CreateSlide():
+                o = slides[p.ours]
+                made |= {(o["key"], e["key"]) for e in o["elements"]}
+            case merge.UpdateSlide():
+                o = slides[p.ours]
+                made |= {(o["key"], k) for u in p.units if written(u.decision) for k in u.ours_members}
+            case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide() | merge.HoldSlide():
                 pass  # (nothing of the new conversion goes onto it)
             case _:
-                assert_never(action)
-    found = [ContainedFound(item=c, written=c.slide is not None and c.element is not None and (c.slide, c.element) in written)
+                assert_never(p)
+    found = [ContainedFound(item=c, written=c.slide is not None and c.element is not None and (c.slide, c.element) in made)
              for c in contained]
 
     def name(c: Contained) -> str:  # (by its words: a person does not know "image/fallback/0")
@@ -640,7 +948,7 @@ def contained_report(contained: list[Contained], slides: list[OursSlide],
     return found, says
 
 
-def contained_json(found: list[ContainedFound]) -> list[dict[str, object]]:
+def contained_json(found: list[ContainedFound]) -> list[Json]:
     """`contained_report`'s entries as the report (JSON) carries them."""
     return [{**asdict(f.item), "written": f.written} for f in found]
 
@@ -819,10 +1127,11 @@ def emitted_elements(slide: dict, names: list[str], scale: float, fonts) -> list
     at = {f"@{name}": i for i, name in enumerate(names)}
     for _, rs in e["parts"][1 + len(ids):]:
         for r in rs:
-            gid = r.get("groupObjects", {}).get("groupObjectId", "")
+            group = as_object(r.get("groupObjects", {}), "groupObjects")
+            gid = as_str(group.get("groupObjectId", ""), "groupObjectId")
             kind = "block" if gid.startswith(f"{sid}_blk") else "rules" if gid.startswith(f"{sid}_rules") else None
             if kind:
-                members = sorted(c[:-2] if c.endswith("_g") else c for c in rename(r["groupObjects"]["childrenObjectIds"], order))
+                members = sorted(c[:-2] if c.endswith("_g") else c for c in rename(group["childrenObjectIds"], order))
                 for c in members:
                     if c in at:
                         out[at[c]]["groups"].append([kind, members])
@@ -1061,7 +1370,7 @@ def shape_style_requests(oid: str, style: dict) -> list[dict]:
     return [{"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}}] if fields else []
 
 
-def box_overlap(a: list[float] | None, b: list[float] | None) -> float:
+def box_overlap(a: Sequence[float] | None, b: Sequence[float] | None) -> float:
     """Area shared by two boxes, over the larger one's area (0 when either is empty)."""
     if not a or not b:
         return 0.0
@@ -1224,7 +1533,8 @@ def carried(base_rb: dict, theirs_rb: dict, new_rb: dict) -> list[float]:
 
 class Sync:
     way_back = None   # the recovery note being made meanwhile; None where there is none to collect
-    theme_side = theme_plan = None   # theme_sync's part (set in __init__ / plan_theme)
+    theme_side: "ThemeSide | None" = None   # theme_sync's part (set in __init__ / plan_theme)
+    theme_plan: "ThemeMerge | None" = None
     raw_after: Presentation | None = None
 
     def __init__(self, slides, drive, pid: str, base: dict, ours: dict, out: Path, dry_run: bool,
@@ -1246,8 +1556,8 @@ class Sync:
         self.tok = self.token()
         self.sent: dict[str, int] = {}
         self.warnings: list[str] = []
-        self.overruns: list[dict] = []        # warn_about_overruns, for the report
-        self.refit_moves: list[dict] = []     # what `refit` moved or grew, for the report
+        self.overruns: list[Json] = []        # warn_about_overruns, for the report
+        self.refit_moves: list[Json] = []     # what `refit` moved or grew, for the report
         self.urls: dict[str, str] = {}  # picture file (str) -> contentUrl from the staging deck
         self.recovery: dict = {}        # what an interrupted earlier sync left (plan_recovery)
         self.cleanup_ids: list[str] = []      # old objects and slides, deleted after everything else
@@ -1258,9 +1568,16 @@ class Sync:
         self.first_read: Presentation | None = None  # a `presentations.get` a caller made while we planned
         self.deleting: list = []        # staging decks on their way out (drop_staging)
         self.way_back = way_back        # made meanwhile, collected before the first write (guard.WayBack)
-        self.theme_side: dict | None = None   # what a fresh conversion writes on the master and layouts (theme_sync)
-        self.theme_plan: dict | None = None   # what this sync writes there (None: nothing, an old base)
+        self.theme_side = None   # what a fresh conversion writes on the master and layouts (theme_sync)
+        self.theme_plan = None   # what this sync writes there (None: nothing, an old base)
+        self.theme_applied: list[Json] = []   # theme_sync's part of the report (plan_theme)
+        self.theme_conflicts: list[Json] = []
         self.raw_after = None    # the deck as `finish` last read it
+        self.created: dict = {}   # the deck as read after the write (`finish`), or as planned against
+        self.staging: str | None = None       # the staging deck of this attempt, until it is dropped
+        self.picture_reads: dict[str, int] = {}   # live pictures in question, and read (merge_plan)
+        self.live_read: tuple[tuple[object, ...], LivePictures] | None = None   # (live_pictures)
+        self.reshaped: dict[str, refit.Reshape] = {}   # what `refit` moved or grew, for the base
 
     def before_write(self) -> None:
         """Collect the way back (`guard.WayBack`): the deck's revision and the .pptx backup are
@@ -1341,7 +1658,7 @@ class Sync:
 
     # ---- planning
 
-    def run(self) -> dict:
+    def run(self) -> RunResult:
         from .emit import slide_layout  # noqa: F401 (warm import before timing-sensitive steps)
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -1366,10 +1683,9 @@ class Sync:
                 self.check_plan(mplan, theirs)  # (adopt_sync: an adopted deck this may not be written to)
             self.plan_theme(mplan, pres)
             work = self.prepare(mplan, pres, theirs)
-            result = {"attempts": attempt, "plan": mplan, "work": work, "theirs": theirs}
-            if self.dry_run or not work["writes"]:
+            if self.dry_run or not work.writes:
                 self.created, self.final_revision = theirs, theirs["revisionId"]  # (a base that only adopts deck fields)
-                return result
+                return RunResult(attempts=attempt, plan=mplan, work=work, theirs=theirs, revision_id=None)
             hook = os.environ.pop("B2S_SYNC_BEFORE_WRITE", None)  # (tests: someone edits the deck now)
             if hook:
                 subprocess.run(hook, shell=True, check=False)
@@ -1386,7 +1702,7 @@ class Sync:
             asking, pending = None, None
             try:
                 if staged is None:
-                    self.staging = staging = self.stage(work)
+                    self.staging = staging = self.stage(work, None, None)
                 moves, scratch = self.measure_places(work, theirs)
                 # The revision the write will require, asked for while the staging deck is still
                 # being made: the scratch slides were the last thing to move the deck, so from here
@@ -1432,8 +1748,7 @@ class Sync:
                 if staging:  # (its pictures are only needed until the live deck has them)
                     self.drop_staging(staging)
             rev = self.finish(work, mplan, theirs, pres, rev)
-            result["revisionId"] = rev
-            return result
+            return RunResult(attempts=attempt, plan=mplan, work=work, theirs=theirs, revision_id=rev)
         raise RuntimeError(f"the deck kept changing while syncing ({MAX_ATTEMPTS} attempts)")
 
     def recover(self, pres: Presentation, attempt: int) -> Presentation:
@@ -1444,7 +1759,7 @@ class Sync:
         remove an object the deck holds a second time."""
         read = snapshot.read_presentation(pres)
         rec = plan_recovery(self.base, read, [s["key"] for s in self.ours["slides"]],
-                            getattr(self, "trust_generation", True))
+                            self.trust_generation)
         self.recovery = rec
         # A run that died left its staging deck in Drive. Its id is in `pending.staging` so a person
         # can find it; sync doesn't delete it, because an id read from a file could name anything -
@@ -1498,7 +1813,7 @@ class Sync:
                                      f"interrupted sync: {first}")
             return gone
 
-    def pending_in_background(self, work: dict, theirs: dict):
+    def pending_in_background(self, work: Work, theirs: dict):
         """`mark_pending` on a thread while the staging deck is still being imported, or None where
         it has to be run here (`in_background`).
 
@@ -1515,38 +1830,44 @@ class Sync:
         self.pending_block(work, theirs)
         return self.in_background(lambda slides, drive: self.store_pending(drive), "b2s-pend")
 
-    def mark_pending(self, work: dict, theirs: dict) -> None:
+    def mark_pending(self, work: Work, theirs: dict) -> None:
         """The marker built and stored here and now (`pending_in_background` is the other order)."""
         self.pending_block(work, theirs)
         self.store_pending(self.drive)
 
-    def pending_block(self, work: dict, theirs: dict) -> None:
+    def pending_block(self, work: Work, theirs: dict) -> None:
         """The base's `pending` block before the first write: the generation and token of
         this run, the objects it is about to create and the read-back of the objects it rewrites in
         place. The base itself is unchanged, so a run that dies leaves a valid base of the old
         generation plus a note of what it started. Only a run that gets to the end removes it."""
         objects: dict[str, list[str]] = {}
         slides: list[str] = []
-        for w in work["slides"]:
-            p = w["plan"]
-            if p["action"] not in ("create", "update") or p.get("ours") is None:
-                continue
-            o = self.ours["slides"][p["ours"]]
-            if p["action"] == "create" and w.get("sid"):
-                slides.append(w["sid"])
-            for i, oids in (w.get("objects") or {}).items():
+        for w in work.slides:
+            p = w.plan
+            match p:
+                case merge.CreateSlide():
+                    if w.sid:
+                        slides.append(w.sid)
+                case merge.UpdateSlide() | merge.HoldSlide():
+                    pass
+                case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide():
+                    continue  # (nothing is made on it)
+                case _:
+                    assert_never(p)
+            o = self.ours["slides"][p.ours]
+            for i, oids in w.objects.items():
                 objects[f"{o['key']}/{o['elements'][i]['key']}"] = list(oids)
-            if w.get("groups"):
-                objects[f"{o['key']}/~groups"] = list(w["groups"])
+            if w.groups:
+                objects[f"{o['key']}/~groups"] = list(w.groups)
         self.base["pending"] = {
             "generation": self.base.get("generation", 0) + 1, "token": self.tok,
             "revisionId": theirs.get("revisionId"), "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "source": snapshot.source_info(self.ours["source"]), "objects": objects, "slides": slides,
-            "in_place": self.in_place_readback, "staging": getattr(self, "staging", None)}
-        if self.theme_plan and self.theme_plan["pending"]:
+            "in_place": self.in_place_readback, "staging": self.staging}
+        if self.theme_plan is not None and self.theme_plan.pending:
             # the layout placeholder styles about to be written: a run that dies after them finds
             # its own writes there next time, not a person's (theme_sync.plan)
-            self.base["pending"]["theme"] = self.theme_plan["pending"]
+            self.base["pending"]["theme"] = self.theme_plan.pending
 
     def store_pending(self, drive) -> None:
         """The marker to disk and to Drive. `staging` is whatever this run knows of its staging deck
@@ -1580,7 +1901,7 @@ class Sync:
         syncs then need neither). `run` plans first and signs what the plan says is in question
         (`pictures_in_question`), then plans again. An unchecked picture still counts as replaced
         - the answer that never loses one - but is not reported as the person's edit
-        (`merge.unchecked`)."""
+        (`merge.pictures_unchecked`)."""
         images = {oid: rb["image"] for s in self.base["slides"] for e in s["elements"]
                   for oid, rb in e.get("readback", {}).items() if "image" in rb}
         backgrounds = {s.get("objectId"): s.get("background_readback") or {} for s in self.base["slides"]}
@@ -1596,42 +1917,58 @@ class Sync:
                 bg["unchecked"] = True
         return objects, slides
 
-    def pictures_in_question(self, mplan: dict, objects: set[str], slides: set[str]) -> tuple[set[str], set[str]]:
+    def pictures_in_question(self, mplan: merge.MergePlan, objects: set[str],
+                             slides: set[str]) -> tuple[set[str], set[str]]:
         """Of the unchecked pictures (`sign_changed`), those whose answer the plan depends on:
         every one on a slide the plan does anything but update or hold (a slide the source dropped
         is kept for the person's edits), and on an updated slide every one of a unit the source
         changed or dropped, and the background when the source changed it. What is left out is a
         picture of a unit kept with nothing of the source's to write - the same plan whether or not
         the person replaced it."""
-        ask_objects, ask_slides = set(), set()
-        for p in mplan["slides"]:
-            if p.get("base") is None or p.get("held"):
-                continue
-            b = self.base["slides"][p["base"]]
-            mine = {oid for e in b["elements"] for oid in (e.get("objects") or []) if oid in objects}
-            if p["action"] != "update":
-                ask_objects |= mine
-                if b.get("objectId") in slides:
-                    ask_slides.add(b["objectId"])
-                continue
-            bunits = merge.units(b["elements"])
-            for u in p.get("units", []):
-                if u["action"] == "keep" and not u.get("source") and not u.get("removed"):
+        ask_objects: set[str] = set()
+        ask_slides: set[str] = set()
+        for p in mplan.slides:
+            match p:
+                case merge.CreateSlide() | merge.HoldSlide():
                     continue
-                ask_objects |= {oid for m in bunits.get(u["key"]) or [] for oid in (m.get("objects") or [])
-                                if oid in objects}
-            o = self.ours["slides"][p["ours"]] if p.get("ours") is not None else {}
-            if b.get("objectId") in slides and b.get("background") != o.get("background"):
-                ask_slides.add(b["objectId"])
+                case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide():
+                    b = self.base["slides"][p.base]
+                    ask_objects |= {oid for e in b["elements"] for oid in (e.get("objects") or []) if oid in objects}
+                    if b.get("objectId") in slides:
+                        ask_slides.add(b["objectId"])
+                case merge.UpdateSlide():
+                    b = self.base["slides"][p.base]
+                    bunits = merge.units(b["elements"])
+                    for u in p.units:
+                        match u.decision:
+                            case merge.KeptJoined():
+                                continue
+                            case merge.KeepUnit(source=source) if not source:
+                                continue
+                            case merge.AdoptObject() | merge.CreateUnit() | merge.GoneUnit() | merge.DeleteUnit() | \
+                                    merge.KeepRemoved() | merge.KeepUnit() | merge.Recreate() | merge.AdoptUnit() | \
+                                    merge.MoveUnit():
+                                pass
+                            case _:
+                                assert_never(u.decision)
+                        ask_objects |= {oid for m in bunits.get(u.key) or [] for oid in (m.get("objects") or [])
+                                        if oid in objects}
+                    o = self.ours["slides"][p.ours]
+                    if b.get("objectId") in slides and b.get("background") != o.get("background"):
+                        ask_slides.add(b["objectId"])
+                case _:
+                    assert_never(p)
         return ask_objects, ask_slides
 
-    def merge_plan(self, theirs: dict, pres: Presentation) -> dict:
+    def merge_plan(self, theirs: dict, pres: Presentation) -> merge.MergePlan:
         """The merge plan, with the pictures it depends on signed (`sign_changed`). (`self.plan`
         is the new conversion's DeckPlan.)"""
         objects, slides = self.sign_changed(theirs, pres)
         adopter = self.picture_adopter(pres)
-        plan = lambda: merge.plan_merge(self.base, self.ours, theirs, adopter,  # noqa: E731
-                                        follow_labels=self.follow_labels, take_source=self.take_source)
+
+        def plan() -> merge.MergePlan:  # (all read again each time: signing writes into theirs)
+            return merge.plan_merge_of(parse_base(self.base), merge.ours_of(self.ours), deck_read(theirs), adopter,
+                                       self.follow_labels, merge.Resolutions(self.take_source))
         mplan = plan()
         asked_objects, asked_slides = set(), set()
         for _ in range(3):   # (signing can only settle a slide, never put a new one in question)
@@ -1652,12 +1989,12 @@ class Sync:
         Drive export is made at most once for it."""
         from .google_auth import fetcher_for_threads
         key = (pres.get("presentationId"), pres.get("revisionId"), id(pres))
-        if getattr(self, "_live_pictures", (None, None))[0] != key:
-            self._live_pictures = (key, LivePictures(pres, getattr(self, "drive", None), fetcher_for_threads(),
-                                                     PICTURE_WORKERS, None, getattr(self, "slides", None)))
-        return self._live_pictures[1]
+        if self.live_read is None or self.live_read[0] != key:
+            self.live_read = (key, LivePictures(pres, self.drive, fetcher_for_threads(),
+                                                PICTURE_WORKERS, None, self.slides))
+        return self.live_read[1]
 
-    def picture_adopter(self, pres: Presentation):
+    def picture_adopter(self, pres: Presentation) -> merge.Adopter:
         """Finds the live object that already shows a picture the source now draws, for
         merge.plan_unit. After a pull the source has an `\\includegraphics` for a picture the
         person put into the deck (or put over a figure), so the new conversion offers a picture the
@@ -1707,24 +2044,27 @@ class Sync:
                 return True
             return ours[2] is not None and got[2] is not None and not picture_differs(ours[2], got[2], TOL["phash"])
 
-        def adopt(skey: str, ours_members: list[dict], read: dict, oid: str | None = None):
-            if len(ours_members or ()) != 1 or ours_members[0]["kind"] != "image":
+        def adopt(skey: SlideKey, ours_members: Sequence[ElementEntry], read: SlideRead,
+                  oid: ObjectId | None) -> ObjectId | None:
+            if len(ours_members) != 1 or ours_members[0].kind != "image":
                 return None
             el = ours_members[0]
-            if not el.get("ir", {}).get("file"):
+            file = (el.ir or {}).get("file")
+            if not file or not isinstance(file, str):
                 return None
-            ours = our_picture(self.ours["out"] / el["ir"]["file"])
+            ours = our_picture(self.ours["out"] / file)
             if ours is None or ours[1] is None:
                 return None
             if oid is not None:  # the deck replaced this element's own picture
                 return oid if same(ours, oid) else None
-            box = [v * scale for v in el["fingerprint"]["bbox"]]
-            best, score = None, PICTURE_OVERLAP
-            for cand, rb in read["objects"].items():
-                if "image" not in rb or cand in base_ids or cand in taken or rb.get("parent_group") \
-                        or (rb.get("title") or "").startswith(snapshot.TAG_PREFIX):
+            box = [v * scale for v in el.fingerprint.bbox]
+            best: ObjectId | None = None
+            score = PICTURE_OVERLAP
+            for cand, rb in read.objects.items():
+                if rb.image is None or cand in base_ids or cand in taken or rb.parent_group \
+                        or (rb.title or "").startswith(snapshot.TAG_PREFIX):
                     continue
-                over = box_overlap(box, rb.get("box"))
+                over = box_overlap(box, rb.box)
                 if over >= score and same(ours, cand):
                     best, score = cand, over
             if best:
@@ -1734,79 +2074,106 @@ class Sync:
 
     # ---- the master and the layouts (theme_sync)
 
-    def plan_theme(self, mplan: dict, pres: Presentation) -> None:
+    def plan_theme(self, mplan: merge.MergePlan, pres: Presentation) -> None:
         """The theme's part of the merge, planned beside the slides' and reported with them. A
         deck `adopt` took over has a theme of the person's own and is left alone; a base from
         before theme sync records nothing of the layouts, so they are left alone too (said so when
-        the source's theme changed)."""
+        the source's theme changed). What it applied and its conflicts are JSON already, kept apart
+        and put behind the slides' in the report (`report_of`)."""
         from . import theme_sync
         from .adopt_sync import ORIGIN
 
         self.theme_plan = None
+        self.theme_applied, self.theme_conflicts = [], []
         if self.base.get("origin") == ORIGIN:
             return
+        ours = theme_sync.theme_ours(self.ours)
         if self.theme_side is None:
-            self.theme_side = theme_sync.ours_side(self.ours)
-        report = mplan["report"]
+            self.theme_side = theme_sync.ours_side(ours)
+        report = mplan.report
         if not self.base.get("theme"):
             why = theme_sync.old_base_warning(self.base, self.theme_side)
             if why:
-                report["warnings"].append(why)
+                report.warnings.append(why)
             return
-        tp = theme_sync.plan(self.base, self.theme_side, self.ours, pres, self.tok, self.picture_url,
-                             lambda page: f"b2s_th_{h6(page)}_{self.tok}", pictures=self.live_pictures(pres))
+        tp = theme_sync.plan(self.base, self.theme_side, ours, pres, self.tok, self.picture_url,
+                             lambda page: f"b2s_th_{h6(page)}_{self.tok}", self.live_pictures(pres))
         self.theme_plan = tp
-        report["applied"] += tp["applied"]
-        report["conflicts"] += tp["conflicts"]
-        report["warnings"] += tp["warnings"]
+        self.theme_applied = [a for a in tp.applied]
+        self.theme_conflicts = [c for c in tp.conflicts]
+        report.warnings += tp.warnings
+
+    def report_of(self, mplan: merge.MergePlan) -> JsonObject:
+        """The merge's report as the sync report starts from it: the slides' part, then the theme's."""
+        report = merge.report_json(mplan.report)
+        report["applied"] = [*as_array(report["applied"], "report.applied"), *self.theme_applied]
+        report["conflicts"] = [*as_array(report["conflicts"], "report.conflicts"), *self.theme_conflicts]
+        return report
 
     def master_key(self) -> str | None:
         """The background a slide shows by inheriting the master: the new source's shared one once
         the base records the theme (this sync writes it there, or the person's own stays, which a
         slide inheriting it shows either way), else what convert put there."""
         if self.base.get("theme") and self.theme_side is not None:
-            return self.theme_side["shared"]
+            return self.theme_side.shared
         return self.base.get("master_background")
 
-    def prepare(self, mplan: dict, pres: Presentation, theirs: dict) -> dict:
+    def prepare(self, mplan: merge.MergePlan, pres: Presentation, theirs: dict) -> Work:
         """What to write, per slide: units to (re)create with their requests' inputs, deletions,
         moves, backgrounds, notes; pictures needed from the staging deck."""
         ours_slides = self.plan.deck["slides"]
-        new_ids = {p["key"]: f"b2s_{h6(p['key'])}_{self.tok}" for p in mplan["slides"] if p["action"] == "create"}
+        new_ids: dict[str, str] = {p.key: f"b2s_{h6(p.key)}_{self.tok}" for p in mplan.slides
+                                   if isinstance(p, merge.CreateSlide)}
         # Internal links: PDF page -> live slide (existing, or created now).
-        kept = sorted((ours_slides[p["ours"]]["page"], p["objectId"] or new_ids.get(p["key"]))
-                      for p in mplan["slides"] if p.get("ours") is not None and p["action"] in ("update", "create"))
-        page_slide = {}
+        kept: list[tuple[int, str]] = []
+        for p in mplan.slides:
+            match p:
+                case merge.CreateSlide():
+                    kept.append((ours_slides[p.ours]["page"], new_ids[p.key]))
+                case merge.UpdateSlide() | merge.HoldSlide():
+                    kept.append((ours_slides[p.ours]["page"], p.object_id))
+                case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide():
+                    pass
+                case _:
+                    assert_never(p)
+        kept.sort()
+        page_slide: dict[int, str] = {}
         if kept:
             for page in range(kept[-1][0] + 1):
                 page_slide[page] = next(sid for pg, sid in kept if pg >= page)
         self.plan.page_slide = page_slide
         master = self.master_key()
-        work = {"slides": [], "pictures": {}, "new_ids": new_ids, "page_slide": page_slide,
-                "writes": merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])}
-        if self.theme_plan:
-            work["pictures"].update(self.theme_plan["stage"])
-            work["writes"] = work["writes"] or bool(self.theme_plan["requests"] or self.theme_plan["cleanup"])
-        for p in mplan["slides"]:
-            w = {"plan": p, "units": []}
-            if p["action"] == "create":
-                w["sid"] = new_ids[p["key"]]
-                w["units"] = list(range(len(ours_slides[p["ours"]]["elements"])))
-            elif p["action"] == "update":
-                w["sid"] = p["objectId"]
-                index = {e["key"]: k for k, e in enumerate(self.ours["slides"][p["ours"]]["elements"])}
-                w["units"] = [index[k] for u in p["units"] if u["action"] in ("create", "recreate") for k in u["ours_members"]]
-            if w["units"]:
-                slide = ours_slides[p["ours"]]
-                for i in w["units"]:
+        pictures: dict[str, str | None] = {}
+        writes = has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+        if self.theme_plan is not None:
+            pictures.update(self.theme_plan.stage)
+            writes = writes or bool(self.theme_plan.requests or self.theme_plan.cleanup)
+        slides: list[SlideWork] = []
+        for p in mplan.slides:
+            match p:
+                case merge.CreateSlide():
+                    w = SlideWork(p, new_ids[p.key], list(range(len(ours_slides[p.ours]["elements"]))))
+                case merge.UpdateSlide():
+                    index = {e["key"]: k for k, e in enumerate(self.ours["slides"][p.ours]["elements"])}
+                    w = SlideWork(p, p.object_id, [index[k] for u in p.units if written(u.decision) for k in u.ours_members])
+                case merge.HoldSlide():
+                    w = SlideWork(p, p.object_id, [])
+                case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide():
+                    w = SlideWork(p, None, [])
+                case _:
+                    assert_never(p)
+            j = ours_index(p)
+            if w.units and j is not None:
+                slide = ours_slides[j]
+                for i in w.units:
                     if slide["elements"][i]["kind"] == "image":
-                        work["pictures"][str(self.ours["out"] / slide["elements"][i]["file"])] = None
-            background = p.get("background") or (self.ours["slides"][p["ours"]]["background"] if p["action"] == "create" else "")
-            if background.startswith("png:") and background != master:
-                work["pictures"][str(self.ours["out"] / ours_slides[p["ours"]]["background"])] = "background"
-            work["slides"].append(w)
-        work["order"] = [new_ids.get(x[4:], x) if x.startswith("new:") else x for x in mplan["order"]]
-        return work
+                        pictures[str(self.ours["out"] / slide["elements"][i]["file"])] = None
+            background = self.background_written(p)
+            if background.startswith("png:") and background != master and j is not None:
+                pictures[str(self.ours["out"] / ours_slides[j]["background"])] = "background"
+            slides.append(w)
+        order = [new_ids.get(x[4:], x) if x.startswith("new:") else x for x in mplan.order]
+        return Work(slides=slides, pictures=pictures, new_ids=new_ids, page_slide=page_slide, writes=writes, order=order)
 
     # ---- pictures
 
@@ -1851,10 +2218,10 @@ class Sync:
 
         fill(reqs)   # every marker, wherever it sits: a picture's URL and a slide background's
 
-    def stage_in_background(self, work: dict):
+    def stage_in_background(self, work: Work):
         """`stage` on a thread of its own, or None where there is nothing to stage or it has to be
         run here (`in_background`)."""
-        if not [f for f in work["pictures"] if f not in self.urls]:
+        if not [f for f in work.pictures if f not in self.urls]:
             return None
         return self.in_background(lambda slides, drive: self.stage(work, drive, slides), "b2s-stage")
 
@@ -1879,24 +2246,25 @@ class Sync:
                 fut.result()
         self.deleting = []
 
-    def stage(self, work: dict, drive=None, slides=None) -> str | None:
+    def stage(self, work: Work, drive, slides) -> str | None:
         """Pictures go through a staging deck imported from a .pptx; its images' contentUrls are
         then used in the live deck. Returns the staging file's id: delete it once the live deck
         has the pictures (the URLs stop working with it).
 
         `drive` / `slides`: the clients to use, where this runs on a thread of its own
-        (`stage_in_background`) and may not touch the ones this sync is using meanwhile."""
+        (`stage_in_background`) and may not touch the ones this sync is using meanwhile; None:
+        this sync's own."""
         from .emit import PPTX_MIME, build_pptx
         from .gapi import media_upload
 
         drive, slides = drive or self.drive, slides or self.slides
-        needed = [f for f in work["pictures"] if f not in self.urls]
+        needed = [f for f in work.pictures if f not in self.urls]
         if not needed:
             return None
         page_w, page_h = self.plan.deck["slides"][0]["size"]
-        pages = []
-        pictures = [f for f in needed if work["pictures"][f] != "background"]
-        backgrounds = [f for f in needed if work["pictures"][f] == "background"]
+        pages: list[dict[str, object]] = []
+        pictures = [f for f in needed if work.pictures[f] != "background"]
+        backgrounds = [f for f in needed if work.pictures[f] == "background"]
         for k in range(0, len(pictures), 40):
             pages.append({"layout": "BLANK", "fill": None, "templates": False, "pictures": [
                 {"file": f, "bbox": [0, 0, *self._fit(f)], "alt": f"b2s-stage:{k + n}", "title": "stage"}
@@ -1938,17 +2306,18 @@ class Sync:
 
     # ---- measuring
 
-    def measure_places(self, work: dict, theirs: dict) -> tuple[dict, list[str]]:
+    def measure_places(self, work: Work, theirs: dict) -> tuple[dict, list[str]]:
         from .emit import measure_places, slide_holes
 
         if not self.measure:
             return {}, []
         slides = []
-        for w in work["slides"]:
-            if not w["units"]:
+        for w in work.slides:
+            j = ours_index(w.plan)
+            if not w.units or j is None:
                 continue
-            slide = self.plan.deck["slides"][w["plan"]["ours"]]
-            ids = {slide["elements"][i]["id"] for i in w["units"]}
+            slide = self.plan.deck["slides"][j]
+            ids = {slide["elements"][i]["id"] for i in w.units}
             if any(h[3] is not None and h[3]["id"] in ids for h in slide_holes(slide)) or \
                     any(e.get("marks") and e["id"] in ids for e in slide["elements"]):
                 slides.append(slide)
@@ -1975,7 +2344,7 @@ class Sync:
 
     # ---- content
 
-    def main_requests(self, work: dict, theirs: dict, pres: Presentation, moves: dict, scratch: list[str]
+    def main_requests(self, work: Work, theirs: dict, pres: Presentation, moves: dict, scratch: list[str]
                       ) -> tuple[list[dict], list[dict]]:
         """(content, cleanup). Nothing in `content` destroys anything a person could have edited:
         it creates the new objects, refills placeholders and puts the slides in order. Every
@@ -1987,48 +2356,56 @@ class Sync:
                    if (name := l.get("layoutProperties", google_types.LayoutProperties()).get("name")) is not None}
         reqs: list[dict] = []
         doomed_slides: list[str] = []
-        if self.theme_plan:
+        if self.theme_plan is not None:
             # The master and the layouts first, in the same chain of batches: a layout write and a
             # slide batch in flight together can undo each other's placeholder boxes (the last
             # commit wins), and these go out one after another.
-            if self.theme_plan["requests"]:
-                reqs += [*self.theme_plan["requests"], BREAK]
-            self.cleanup_ids = list(dict.fromkeys([*getattr(self, "cleanup_ids", ()), *self.theme_plan["cleanup"]]))
-        for w in work["slides"]:
-            p = w["plan"]
-            if p["action"] == "delete":
-                doomed_slides.append(p["objectId"])
-            elif p["action"] == "create":
-                reqs += self.new_slide(w, layouts, moves, pres) + [BREAK]
-            elif p["action"] == "update":
-                reqs += self.update_slide(w, live[p["objectId"]], moves, pres) + [BREAK]
+            if self.theme_plan.requests:
+                reqs += [*self.theme_plan.requests, BREAK]
+            self.cleanup_ids = list(dict.fromkeys([*self.cleanup_ids, *self.theme_plan.cleanup]))
+        created: list[str] = []
+        for w in work.slides:
+            p = w.plan
+            match p:
+                case merge.DeleteSlide():
+                    doomed_slides.append(p.object_id)
+                case merge.CreateSlide():
+                    reqs += self.new_slide(w, layouts, moves, pres) + [BREAK]
+                    if w.sid is not None:
+                        created.append(w.sid)
+                case merge.UpdateSlide() | merge.HoldSlide():
+                    reqs += self.update_slide(w, live[p.object_id], moves, pres) + [BREAK]
+                case merge.GoneSlide() | merge.KeepRemovedSlide():
+                    pass
+                case _:
+                    assert_never(p)
         reqs += [{"deleteObject": {"objectId": s}} for s in scratch]  # (sync's own scratch slides)
         # Slide order: created slides were appended.
         current = [s["objectId"] for s in theirs["slides"] if s["objectId"] not in set(doomed_slides)]
-        current += [w["sid"] for w in work["slides"] if w["plan"]["action"] == "create"]
-        final = [s for s in dict.fromkeys(work["order"]) if s in current]  # (an id can't be in two places)
+        current += created
+        final = [s for s in dict.fromkeys(work.order) if s in current]  # (an id can't be in two places)
         for i, sid in enumerate(final):
             if current[i] != sid:
                 reqs.append({"updateSlidesPosition": {"slideObjectIds": [sid], "insertionIndex": i}})
                 current.remove(sid)
                 current.insert(i, sid)
-        self.cleanup_ids = list(dict.fromkeys([*getattr(self, "cleanup_ids", ()), *doomed_slides]))
+        self.cleanup_ids = list(dict.fromkeys([*self.cleanup_ids, *doomed_slides]))
         cleanup = [{"deleteObject": {"objectId": oid}} for oid in self.cleanup_ids]
         return reqs, cleanup
 
-    def slide_requests(self, w: dict, sid: str, in_place: dict[int, dict], templates: dict[tuple, dict],
-                       moves: dict, new_slide: bool, ungrouped: set[int] = frozenset()
+    def slide_requests(self, ours: int, units: Sequence[int], sid: str, in_place: dict[int, Refilled],
+                       templates: dict[tuple, dict], moves: dict, new_slide: bool, ungrouped: Collection[int]
                        ) -> tuple[list[dict], dict[int, list[str]], dict[int, str], list[dict]]:
-        """emit's requests for the chosen elements of an ours slide, under live object ids.
-        in_place: element index -> {"id", "size"} of a live placeholder it goes into; templates:
-        template key -> {"id", "w", "h", "text"} of a live object (or stand-in) to duplicate;
-        ungrouped: element indices whose own group (with anchored pictures) isn't made.
+        """emit's requests for the chosen elements (`units`) of the new conversion's slide `ours`,
+        under live object ids. in_place: element index -> the live placeholder or table it goes
+        into; templates: template key -> {"id", "w", "h", "text"} of a live object (or stand-in) to
+        duplicate; ungrouped: element indices whose own group (with anchored pictures) isn't made.
         Returns (requests, element index -> objects created, element index -> new object id,
         extras: the slide-level requests (groups, z-order) for a new slide)."""
         from .emit import title_element, subtitle_element
 
-        o = self.ours["slides"][w["plan"]["ours"]]
-        slide = self.plan.deck["slides"][w["plan"]["ours"]]
+        o = self.ours["slides"][ours]
+        slide = self.plan.deck["slides"][ours]
         n = slide["page"]
         vsid = f"b2s_s{n:03}"
         # A title with no live placeholder to go into becomes a text box.
@@ -2042,8 +2419,8 @@ class Sync:
         sub_idx = subtitle_element(slide_copy, title_idx) if title_idx is not None else None
         if sub_idx is not None and sub_idx not in in_place:
             slide_copy["title_page"] = False
-        page_elements = {vsid: [{"objectId": f"{vsid}_t{i}", "size": {"width": emu(v["size"][0]), "height": emu(v["size"][1])}}
-                                for i, v in in_place.items() if not v.get("table")]}
+        page_elements = {vsid: [{"objectId": f"{vsid}_t{i}", "size": {"width": emu(v.size[0]), "height": emu(v.size[1])}}
+                                for i, v in in_place.items() if isinstance(v, InPlace)]}
         keys = self.plan.keys
         sizes = [(templates[k]["w"], templates[k]["h"]) if k in templates else (STAND_IN, STAND_IN) for k in keys]
         parts, element_ids = self.plan.slide_parts(slide_copy, page_elements, {}, moves, sizes)
@@ -2061,14 +2438,14 @@ class Sync:
         mapping = {}
         new_oid = {}
         for i, (vid, e) in enumerate(zip(element_ids, o["elements"])):
-            new_oid[i] = in_place[i]["id"] if i in in_place else f"b2s_{h6(o['key'])}_{h6(e['key'])}_{self.tok}"
+            new_oid[i] = in_place[i].id if i in in_place else f"b2s_{h6(o['key'])}_{h6(e['key'])}_{self.tok}"
             mapping[vid] = new_oid[i]
         for j, k in enumerate(keys):
             if k in templates:
                 mapping[f"{vsid}_k{j}"] = templates[k]["id"]
         mapping[vsid] = sid
         order = sorted(mapping.items(), key=lambda kv: -len(kv[0]))
-        chosen = set(w["units"])
+        chosen = set(units)
         reqs, objects = [], {}
         from .emit import created_ids
         for i, (el, rs) in enumerate(parts[1:1 + len(element_ids)]):
@@ -2086,21 +2463,23 @@ class Sync:
                     "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU", "translateX": round(x0 * EMU_PER_PT),
                                   "translateY": round(y0 * EMU_PER_PT)}}}},
                       letterbox_fix(new_oid[i], box, png_size(path))] + rs
-            if i in in_place and in_place[i].get("table"):
+            live = in_place.get(i)
+            if isinstance(live, TableFill):
                 # Refilled where it is (`table_refill`): its cells emptied, then filled as emit
                 # fills a table the .pptx brought, whose margins this one has.
                 from .emit import table_requests
                 rs = [{"deleteText": {"objectId": new_oid[i], "cellLocation": {"rowIndex": r, "columnIndex": c},
-                                      "textRange": {"type": "ALL"}}} for r, c in in_place[i]["cells"]] + \
-                     [{k: {**v, "tableObjectId": new_oid[i]} for k, v in step.items()} for step in in_place[i].get("steps", [])] + \
+                                      "textRange": {"type": "ALL"}}} for r, c in live.cells] + \
+                     [{k: {**as_object(v, "a table step"), "tableObjectId": new_oid[i]} for k, v in step.items()}
+                      for step in live.steps] + \
                      [r for r in table_requests(self.plan.placed(slide["elements"][i], n), sid, new_oid[i], self.scale,
                                                 self.plan.fonts, imported=True) if "updatePageElementsZOrder" not in r]
-                dx, dy = in_place[i].get("shift") or (0.0, 0.0)
+                dx, dy = live.shift
                 if abs(dx) > 0.01 or abs(dy) > 0.01:  # (the source moved it)
                     rs.append({"updatePageElementTransform": {"objectId": new_oid[i], "applyMode": "RELATIVE", "transform": {
                         "scaleX": 1, "scaleY": 1, "unit": "EMU",
                         "translateX": round(dx * EMU_PER_PT), "translateY": round(dy * EMU_PER_PT)}}})
-            elif i in in_place and in_place[i].get("text"):
+            elif isinstance(live, InPlace) and live.text:
                 rs = [{"deleteText": {"objectId": new_oid[i], "textRange": {"type": "ALL"}}}] + rs
             out = []
             for r in rs:  # a duplicated live object brings its text along: clear it
@@ -2155,11 +2534,11 @@ class Sync:
         converted slides with that background - found by object id, since the copies' names in the
         deck are the .pptx ones ("Title Only (no theme)"), not the b2s names."""
         key = snapshot.background_key(slide, self.ours["out"])
-        served = (self.theme_plan or {}).get("page_group") or {}
-        if served and self.theme_side:
+        served = self.theme_plan.page_group if self.theme_plan is not None else {}
+        if served and self.theme_side is not None:
             # The layout that serves the decoration a fresh conversion gives this slide now
             # (theme_sync.plan), of the kind it needs: the plain one first, then its copies.
-            want = self.theme_side["groups"].get(slide["page"])
+            want = self.theme_side.groups.get(slide["page"])
             kinds = {b.get("layoutObjectId"): b.get("layout") for b in self.base["slides"]}
             plain = layouts.get(layout_name)
             if plain is not None and served.get(object_id(plain)) == want:
@@ -2175,18 +2554,21 @@ class Sync:
                 return by_id[same[0]["layoutObjectId"]]
         return layouts.get(layout_name) or layouts.get("BLANK")
 
-    def new_slide(self, w: dict, layouts: dict[str, Page], moves: dict, pres: Presentation) -> list[dict]:
+    def new_slide(self, w: SlideWork, layouts: dict[str, Page], moves: dict, pres: Presentation) -> list[dict]:
         from .emit import element_template_keys, slide_layout, subtitle_element, title_element
 
-        p = w["plan"]
-        o = self.ours["slides"][p["ours"]]
-        slide = self.plan.deck["slides"][p["ours"]]
-        sid = w["sid"]
+        p = w.plan
+        j, sid = ours_index(p), w.sid
+        if j is None or sid is None:
+            raise ValueError(f"slide {p.key}: only a slide of the new conversion is created")
+        o = self.ours["slides"][j]
+        slide = self.plan.deck["slides"][j]
         layout_name, title_kind = slide_layout(slide)
         layout = self.new_layout(slide, layout_name, layouts, pres)
         if layout is None:
             raise RuntimeError(f"the deck has no {layout_name} layout for new slide {o['key']}")
-        mappings, in_place = [], {}
+        mappings: list[dict] = []
+        in_place: dict[int, Refilled] = {}
         title_idx = title_element(slide)
         sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
         for e in layout.get("pageElements", []):
@@ -2194,14 +2576,14 @@ class Sync:
             if not ph:
                 continue
             box = e.get("size")
-            size = [snapshot._unit(box.get("width")), snapshot._unit(box.get("height"))] if box is not None \
-                else [STAND_IN, STAND_IN]
+            size = (snapshot._unit(box.get("width")), snapshot._unit(box.get("height"))) if box is not None \
+                else (STAND_IN, STAND_IN)
             if ph.get("type") == title_kind and title_idx is not None and title_idx not in in_place:
                 oid = f"b2s_{h6(o['key'])}_{h6(o['elements'][title_idx]['key'])}_{self.tok}"
-                in_place[title_idx] = {"id": oid, "size": size}
+                in_place[title_idx] = InPlace(id=oid, size=size, text="")  # (a new slide's placeholder is empty)
             elif ph.get("type") == "SUBTITLE" and sub_idx is not None and sub_idx not in in_place:
                 oid = f"b2s_{h6(o['key'])}_{h6(o['elements'][sub_idx]['key'])}_{self.tok}"
-                in_place[sub_idx] = {"id": oid, "size": size}
+                in_place[sub_idx] = InPlace(id=oid, size=size, text="")
             else:
                 continue  # (not every layout placeholder is instantiated: the rest go after a read, in finish)
             mappings.append({"layoutPlaceholder": {"type": ph["type"], "index": ph.get("index", 0)}, "objectId": oid})
@@ -2218,38 +2600,41 @@ class Sync:
             if used:
                 self.warnings.append(f"slide {o['key']}: {len(used)} template shape(s) (shadows, exact corners) made as plain shapes")
         # Pictures first, as the .pptx brings them; emit's parts then order everything.
-        rs, objects, new_oid, extras = self.slide_requests(w, sid, in_place, templates, moves, True)
+        rs, objects, new_oid, extras = self.slide_requests(j, w.units, sid, in_place, templates, moves, True, frozenset())
         reqs += [r for r in rs if "createImage" in r]  # (a picture's other requests follow in element order)
         reqs += [r for r in rs if "createImage" not in r] + extras
-        w["objects"], w["new_oid"], w["in_place"], w["tops"], w["doomed"] = objects, new_oid, in_place, {}, set()
-        w["groups"] = [r["groupObjects"]["groupObjectId"] for r in extras if "groupObjects" in r]
+        w.objects, w.new_oid, w.in_place, w.tops, w.doomed = objects, new_oid, in_place, {}, set()
+        w.groups = [r["groupObjects"]["groupObjectId"] for r in extras if "groupObjects" in r]
         reqs += self.tag_requests(o, objects, new_oid, in_place)
         return reqs
 
-    def update_slide(self, w: dict, read: dict, moves: dict, pres: Presentation) -> list[dict]:
+    def update_slide(self, w: SlideWork, read: dict, moves: dict, pres: Presentation) -> list[dict]:
+        """A kept slide's requests: its units the plan (re)creates, deletes or moves, its background
+        and notes. A held slide (`merge.HoldSlide`) has none of those, and gets nothing."""
         from .emit import element_template_keys, label_inside, node_template_key, bend_template_key, template_key
 
-        p = w["plan"]
-        b = self.base["slides"][p["base"]]
-        o = self.ours["slides"][p["ours"]]
-        slide = self.plan.deck["slides"][p["ours"]]
-        sid = p["objectId"]
+        p = updated(w.plan)
+        units = slide_units(p)
+        b = self.base["slides"][p.base]
+        o = self.ours["slides"][p.ours]
+        slide = self.plan.deck["slides"][p.ours]
+        sid = p.object_id
         objects = read["objects"]
         bunits = merge.units(b["elements"])
         reqs: list[dict] = []
-        w["objects"], w["new_oid"], w["in_place"], w["groups"] = {}, {}, {}, []
-        recreated = [u for u in p["units"] if u["action"] in ("create", "recreate")]
+        w.objects, w.new_oid, w.in_place, w.groups = {}, {}, {}, []
+        recreated = [u for u in units if written(u.decision)]
         index = {e["key"]: k for k, e in enumerate(o["elements"])}
 
         # Placeholders: a recreated title goes back into its live placeholder.
-        in_place = {}
+        in_place: dict[int, Refilled] = {}
         for u in recreated:
-            for mk in u["ours_members"]:
+            for mk in u.ours_members:
                 i = index[mk]
-                base_el = next((m for m in bunits.get(u["key"], []) if m["key"] == mk), None)
+                base_el = next((m for m in bunits.get(u.key, []) if m["key"] == mk), None)
                 main = base_el.get("main") if base_el else None
                 if main and main in objects and objects[main].get("placeholder"):
-                    in_place[i] = {"id": main, "size": objects[main]["size"], "text": (objects[main].get("text") or "").strip()}
+                    in_place[i] = placeholder_in_place(main, objects[main])
         from .emit import subtitle_element, title_element
         title_idx = title_element(slide)
         sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
@@ -2260,43 +2645,45 @@ class Sync:
         # subtitle role from used to be. It is made a box of its own; the placeholder goes to the
         # element that has the role now (below), or out with the old unit.
         for i in [i for i, v in in_place.items()
-                  if i != (title_idx if objects[v["id"]].get("placeholder") in ("TITLE", "CENTERED_TITLE") else
-                           sub_idx if objects[v["id"]].get("placeholder") == "SUBTITLE" else None)]:
+                  if i != (title_idx if objects[v.id].get("placeholder") in ("TITLE", "CENTERED_TITLE") else
+                           sub_idx if objects[v.id].get("placeholder") == "SUBTITLE" else None)]:
             del in_place[i]
         # A new title (the source's title changed beyond recognition) or a text that took the
         # subtitle role goes into the placeholder of the element it replaces, when that one goes.
         for role, kinds in ((title_idx, ("TITLE", "CENTERED_TITLE")), (sub_idx, ("SUBTITLE",))):
-            if role is None or role in in_place or not any(role == index[mk] for u in recreated for mk in u["ours_members"]):
+            if role is None or role in in_place or not any(role == index[mk] for u in recreated for mk in u.ours_members):
                 continue
-            taken = {v["id"] for v in in_place.values()}
-            for u in p["units"]:
-                if u["action"] not in ("delete", "recreate"):
+            taken = {v.id for v in in_place.values()}
+            for u in units:
+                if not isinstance(u.decision, merge.DeleteUnit | merge.Recreate):
                     continue
-                main = next((m.get("main") for m in bunits.get(u["key"], [])[:1]), None)
+                main = next((m.get("main") for m in bunits.get(u.key, [])[:1]), None)
                 if main and main in objects and main not in taken and objects[main].get("placeholder") in kinds:
-                    in_place[role] = {"id": main, "size": objects[main]["size"],
-                                      "text": (objects[main].get("text") or "").strip()}
+                    in_place[role] = placeholder_in_place(main, objects[main])
                     break
         # A table whose words alone changed is refilled where it is (`table_refill`) - but not one an
         # interrupted sync already rewrote: what the merge compares against is then the person's
         # version put back (`restore_in_place`), not what the table holds, and cells emptied or rows
         # inserted by that picture would double words or rows. Made again, it is right whatever it holds.
-        restored = set((getattr(self, "recovery", None) or {}).get("restore") or ())
+        restored = set(self.recovery.get("restore") or ())
         for u in recreated:
-            if u["action"] == "recreate" and len(u["ours_members"]) == 1 and len(bunits.get(u["key"], [])) == 1 \
-                    and bunits[u["key"]][0].get("main") not in restored:
-                i = index[u["ours_members"][0]]
-                refill = table_refill(bunits[u["key"]][0], slide["elements"][i], objects, self.scale, self.plan.fonts)
+            d = u.decision
+            if isinstance(d, merge.Recreate) and len(u.ours_members) == 1 and len(bunits.get(u.key, [])) == 1 \
+                    and bunits[u.key][0].get("main") not in restored:
+                i = index[u.ours_members[0]]
+                refill = table_refill(bunits[u.key][0], slide["elements"][i], objects, self.scale, self.plan.fonts)
                 if refill:
-                    if "geometry" in (u.get("overrides") or {}) and "position" not in u.get("source", ()):
+                    shift = refill["shift"]
+                    if d.overrides.geometry and "position" not in d.source:
                         # The deck moved it and the source did not: where it is now is what a
                         # recreation's geometry override would give. When both moved it, the source's
                         # move goes on top of the person's place, as `carried` does for a recreation.
-                        refill["shift"] = (0.0, 0.0)
-                    in_place[i] = {**refill, "table": True}
+                        shift = (0.0, 0.0)
+                    in_place[i] = TableFill(id=refill["id"], cells=refill["cells"], steps=refill["steps"], shift=shift,
+                                            margins=refill["margins"])
 
         # Template shapes: duplicate a live object with the same key on this slide, else a stand-in.
-        needed = {k for u in recreated for mk in u["ours_members"] for k in element_template_keys(slide["elements"][index[mk]], self.scale)}
+        needed = {k for u in recreated for mk in u.ours_members for k in element_template_keys(slide["elements"][index[mk]], self.scale)}
         templates, stand_ins = {}, []
         if needed:
             for el in b["elements"]:
@@ -2324,55 +2711,54 @@ class Sync:
         # Groups the old objects were in (blocks, and groups the deck made around them): ungrouped
         # first, outermost first (a group inside a group can't be ungrouped), and regrouped with the
         # new objects under the same ids, innermost first.
-        regroup, depth, roots_removed = self.regroups(p["units"], bunits, read)
-        reqs = [{"ungroupObjects": {"objectIds": [g]}} for g in sorted(regroup, key=lambda g: depth[g])] + reqs
+        regroup, depth, roots_removed = self.regroups_of(units, bunits, read)
+        reqs[:0] = [{"ungroupObjects": {"objectIds": [g]}} for g in sorted(regroup, key=lambda g: depth[g])]
 
         # A unit whose group the deck took apart (its pictures and text still there) is rebuilt ungrouped.
         ungrouped = set()
         for u in recreated:
-            anchor = (bunits.get(u["key"]) or [{}])[0]
+            anchor = (bunits.get(u.key) or [{}])[0]
             gid = next((x for x in anchor.get("objects", []) if x == f"{anchor.get('main')}_g"), None)
-            if u["action"] == "recreate" and u["key"] in index and gid and gid not in objects and anchor.get("main") in objects:
-                ungrouped.add(index[u["key"]])
-        rs, created, new_oid, _ = self.slide_requests({**w, "units": [index[mk] for u in recreated for mk in u["ours_members"]]},
+            if isinstance(u.decision, merge.Recreate) and u.key in index and gid and gid not in objects \
+                    and anchor.get("main") in objects:
+                ungrouped.add(index[u.key])
+        rs, created, new_oid, _ = self.slide_requests(p.ours, [index[mk] for u in recreated for mk in u.ours_members],
                                                       sid, in_place, templates, moves, False, ungrouped)
         reqs += rs
-        w["objects"], w["new_oid"], w["in_place"] = created, new_oid, in_place
+        w.objects, w.new_oid, w.in_place = created, new_oid, in_place
         # Old objects out - in the cleanup phase, once their replacements are written and the
         # deck's own edits are back on them (a placeholder refilled in place stays).
-        keep_ids = {v["id"] for v in in_place.values()}
+        keep_ids = {v.id for v in in_place.values()}
         doomed = [r for _, roots in roots_removed for r in roots if r not in keep_ids]
-        w["doomed"] = set(doomed) | {c for r in doomed for c in merge._descendants(r, read)}
-        # (getattr: the offline tests drive this method on a bare Sync object)
-        self.cleanup_ids = [*getattr(self, "cleanup_ids", ()), *doomed, *stand_ins]
+        w.doomed = set(doomed) | {c for r in doomed for c in merge._descendants(r, read)}
+        self.cleanup_ids = [*self.cleanup_ids, *doomed, *stand_ins]
         # The text of a placeholder this sync overwrites: recorded so an interrupted run can be
         # told what the person had there (plan_recovery / restore_in_place).
-        saved = getattr(self, "in_place_readback", None)
-        if saved is None:
-            saved = self.in_place_readback = {}
         for v in in_place.values():
-            rb = objects.get(v["id"])
+            rb = objects.get(v.id)
             if rb:
-                saved[v["id"]] = {k: rb[k] for k in IN_PLACE_FIELDS if k in rb}
+                self.in_place_readback[v.id] = {k: rb[k] for k in IN_PLACE_FIELDS if k in rb}
         # Regroup: the unit's new top object takes its old root's place among the children.
         tops = {}
         for u in recreated:
-            if u["key"] in index:
-                i = index[u["key"]]
+            if u.key in index:
+                i = index[u.key]
                 oids = created.get(i, [])
-                tops[u["key"]] = next((x for x in oids if x.endswith("_g") and x[:-2] == new_oid[i]), new_oid[i])
+                tops[u.key] = next((x for x in oids if x.endswith("_g") and x[:-2] == new_oid[i]), new_oid[i])
         reqs += self.regroup_requests(regroup, depth, objects, tops, keep_ids, self.zrank(o, bunits, tops))
         # Moves: the deck object goes where the source moved the element.
-        reqs += self.move_requests(p["units"], bunits, read, self.scale)
+        reqs += self.move_requests_of(units, bunits, read, self.scale)
         reqs += self.tag_requests(o, created, new_oid, in_place)
-        if p.get("background"):
-            reqs += self.background_requests(sid, p["background"], slide, pres, False)
-        if p.get("notes") is not None and read.get("notes_id"):
+        background = new_background(p)
+        if background:
+            reqs += self.background_requests(sid, background, slide, pres, False)
+        notes = p.notes if isinstance(p, merge.UpdateSlide) else None
+        if notes is not None and read.get("notes_id"):
             if read.get("notes"):
                 reqs.append({"deleteText": {"objectId": read["notes_id"], "textRange": {"type": "ALL"}}})
-            if p["notes"]:
-                reqs.append({"insertText": {"objectId": read["notes_id"], "text": p["notes"]}})
-        w["tops"] = tops
+            if notes:
+                reqs.append({"insertText": {"objectId": read["notes_id"], "text": notes}})
+        w.tops = tops
         return reqs
 
     @staticmethod
@@ -2388,6 +2774,12 @@ class Sync:
 
     @staticmethod
     def regroups(units: list[dict], bunits: dict, read: dict) -> tuple[dict, dict, list]:
+        """`regroups_of` over units as `merge.plan_merge` writes them (the offline fuzz's replay)."""
+        return Sync.regroups_of([planned_unit_of(u, f"unit {n}") for n, u in enumerate(units)], bunits, read)
+
+    @staticmethod
+    def regroups_of(units: Sequence[merge.PlannedUnit], bunits: dict,
+                    read: dict) -> tuple[dict[str, Regroup], dict[str, int], list[tuple[str, list[str]]]]:
         """The groups a slide's rewrite takes apart: group id -> {"remove": old roots of rewritten
         units in it, "unit_of": root -> unit key}, with every ancestor of such a group (empty), their
         depth, and (unit key, old root ids) of every unit rewritten or deleted."""
@@ -2399,21 +2791,21 @@ class Sync:
                 chain.append(x)
                 x = objects.get(x, {}).get("parent_group")
             return chain
-        regroup: dict[str, dict] = {}
+        regroup: dict[str, Regroup] = {}
         roots_removed: list[tuple[str, list[str]]] = []
         for u in units:
-            if u["action"] not in ("recreate", "delete"):
+            if not isinstance(u.decision, merge.Recreate | merge.DeleteUnit):
                 continue
-            members = bunits.get(u["key"], [])
+            members = bunits.get(u.key, [])
             roots = merge.unit_roots(members, read)
-            roots_removed.append((u["key"], roots))
+            roots_removed.append((u.key, roots))
             for r in roots:
                 g = objects[r].get("parent_group")
                 if g and g not in roots:
-                    regroup.setdefault(g, {"remove": set(), "unit_of": {}})["remove"].add(r)
-                    regroup[g]["unit_of"][r] = u["key"]
+                    regroup.setdefault(g, Regroup(remove=set(), unit_of={}))["remove"].add(r)
+                    regroup[g]["unit_of"][r] = u.key
                     for a in ancestors(g):
-                        regroup.setdefault(a, {"remove": set(), "unit_of": {}})
+                        regroup.setdefault(a, Regroup(remove=set(), unit_of={}))
         return regroup, {g: len(ancestors(g)) for g in regroup}, roots_removed
 
     @staticmethod
@@ -2503,23 +2895,30 @@ class Sync:
 
     # ---- after the content: z-order, notes of new slides, base, deck overrides
 
-    def finish(self, work: dict, mplan: dict, theirs: dict, pres: Presentation, rev: str) -> str:
+    def finish(self, work: Work, mplan: merge.MergePlan, theirs: dict, pres: Presentation, rev: str) -> str:
         raw = self.read()
         now = snapshot.read_presentation(raw)
         live = {s["objectId"]: s for s in now["slides"]}
         before = {s["objectId"]: s for s in theirs["slides"]}
         reqs = []
-        for w in work["slides"]:
-            p = w["plan"]
-            if p["action"] == "create":
-                s = live.get(w["sid"])
-                mine = {x for oids in w["objects"].values() for x in oids} | set(w["groups"])
-                reqs += [{"deleteObject": {"objectId": oid}} for oid, rb in (s["objects"] if s else {}).items()
-                         if rb.get("placeholder") and oid not in mine]
-                if s and s.get("notes_id") and self.ours["slides"][p["ours"]].get("notes"):
-                    reqs.append({"insertText": {"objectId": s["notes_id"], "text": self.ours["slides"][p["ours"]]["notes"]}})
-            if p["action"] == "update" and w["objects"]:
-                reqs += self.restack(w, before[p["objectId"]], live[p["objectId"]])
+        for w in work.slides:
+            p = w.plan
+            match p:
+                case merge.CreateSlide():
+                    s = live.get(w.sid)
+                    mine = {x for oids in w.objects.values() for x in oids} | set(w.groups)
+                    reqs += [{"deleteObject": {"objectId": oid}} for oid, rb in (s["objects"] if s else {}).items()
+                             if rb.get("placeholder") and oid not in mine]
+                    if s and s.get("notes_id") and self.ours["slides"][p.ours].get("notes"):
+                        reqs.append({"insertText": {"objectId": s["notes_id"], "text": self.ours["slides"][p.ours]["notes"]}})
+                case merge.UpdateSlide():
+                    if w.objects:
+                        reqs += self.restack_of(p.base, p.ours, p.units, w.doomed, w.tops, before[p.object_id],
+                                                live[p.object_id])
+                case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide() | merge.HoldSlide():
+                    pass
+                case _:
+                    assert_never(p)
         if reqs:
             rev = self.send("order", reqs, rev)
             raw = self.read()
@@ -2527,8 +2926,9 @@ class Sync:
         self.warn_about_folded_hiders(work, now)
         self.raw_after = raw   # (the layouts and the master as written: theme_sync.new_record)
         # read-back of objects as the converter created them, with the new pictures' signatures
-        created = {x for w in work["slides"] for oids in (w.get("objects") or {}).values() for x in oids}
-        repainted = {w.get("sid") for w in work["slides"] if w["plan"]["action"] == "create" or w["plan"].get("background")}
+        created = {x for w in work.slides for oids in w.objects.values() for x in oids}
+        repainted = {w.sid for w in work.slides if w.sid is not None
+                     and (isinstance(w.plan, merge.CreateSlide) or new_background(w.plan) is not None)}
         snapshot.sign_pictures(now, raw, created, repainted, PICTURE_WORKERS, None, None, self.drive,
                                self.written_files(work), None)
         self.created = now
@@ -2540,26 +2940,41 @@ class Sync:
         self.warn_about_overruns(work, theirs)
         return rev
 
-    def written_files(self, work: dict) -> dict[str, Path]:
+    def written_files(self, work: Work) -> dict[str, Path]:
         """The file each picture this sync created was made from - an image's objectId, or a
         slide's for the background picture written on it - so the new base signs them from their
         bytes (`snapshot.upload_signatures`) instead of downloading what it has just uploaded."""
-        ours_slides, master, files = self.plan.deck["slides"], self.master_key(), {}
-        for w in work["slides"]:
-            p = w["plan"]
-            if p.get("ours") is None or not w.get("sid"):
+        ours_slides, master = self.plan.deck["slides"], self.master_key()
+        files: dict[str, Path] = {}
+        for w in work.slides:
+            p = w.plan
+            j = ours_index(p)
+            if j is None or not w.sid:
                 continue
-            slide = ours_slides[p["ours"]]
-            for i in w.get("units") or []:
+            slide = ours_slides[j]
+            for i in w.units:
                 el = slide["elements"][i]
-                if el["kind"] == "image" and el.get("file") and (w.get("new_oid") or {}).get(i):
-                    files[w["new_oid"][i]] = self.ours["out"] / el["file"]
-            key = p.get("background") or (self.ours["slides"][p["ours"]]["background"] if p["action"] == "create" else "")
+                if el["kind"] == "image" and el.get("file") and w.new_oid.get(i):
+                    files[w.new_oid[i]] = self.ours["out"] / el["file"]
+            key = self.background_written(p)
             if key.startswith("png:") and key != master and slide.get("background"):
-                files[w["sid"]] = self.ours["out"] / slide["background"]
+                files[w.sid] = self.ours["out"] / slide["background"]
         return files
 
-    def warn_about_overruns(self, work: dict, theirs: dict) -> None:
+    def background_written(self, p: merge.SlidePlan) -> str:
+        """The background key this sync writes onto a slide: a new slide's own, an updated slide's
+        when the source changed it; "" for none."""
+        match p:
+            case merge.CreateSlide():
+                return self.ours["slides"][p.ours]["background"] or ""
+            case merge.UpdateSlide():
+                return new_background(p) or ""
+            case merge.GoneSlide() | merge.KeepRemovedSlide() | merge.DeleteSlide() | merge.HoldSlide():
+                return ""
+            case _:
+                assert_never(p)
+
+    def warn_about_overruns(self, work: Work, theirs: dict) -> None:
         """The person's own objects, which sync never moves, that the source's words or pictures
         now run over (`text_layout.overruns`): the source reflowed onto a note the person put under a
         paragraph. Moving the note would guess at what it belongs to, so it is said instead (live
@@ -2567,22 +2982,23 @@ class Sync:
         from . import text_layout as tl
         before = {s["objectId"]: s for s in theirs["slides"]}
         todo = {}
-        for w in work["slides"]:
-            p = w["plan"]
-            b = before.get(p.get("objectId"))
-            if p["action"] != "update" or b is None or \
-                    all(u["action"] in ("keep", "none") for u in p.get("units", [])):
+        for w in work.slides:
+            p = w.plan
+            if not isinstance(p, merge.UpdateSlide):
+                continue  # (only an updated slide has units this sync wrote)
+            b = before.get(p.object_id)
+            if b is None or all(kept_whole(u.decision) for u in p.units):
                 continue
-            users = {u["objectId"] for u in merge.user_objects(self.base["slides"][p["base"]], b)}
+            users = {u["objectId"] for u in merge.user_objects(self.base["slides"][p.base], b)}
             # A unit kept as the deck has it (a conflict the deck's version won) is the deck's too:
             # a table the person gave a row, kept whole, and the source's figure moved up under it
             # (edit hunt h2-2, h4-1). Sync does not move it either.
-            kept = {u["key"] for u in p.get("units", []) if u["action"] == "keep" and u.get("deck")}
-            kept_objects = {o for e in self.base["slides"][p["base"]]["elements"]
+            kept = {u.key for u in p.units if isinstance(u.decision, merge.KeepRemoved | merge.KeepUnit) and u.decision.deck}
+            kept_objects = {o for e in self.base["slides"][p.base]["elements"]
                             if e["key"] in kept or e.get("anchor") in kept
                             for o in e.get("objects", []) if o in b["objects"]}
             if any(tl.ink(b["objects"][u]) for u in users | kept_objects if u in b["objects"]):
-                todo[p["objectId"]] = (p["key"], users, kept_objects)
+                todo[p.object_id] = (p.key, users, kept_objects)
         if not todo:
             return
         def say(rb: dict) -> str:
@@ -2603,7 +3019,7 @@ class Sync:
                        if o.object in users else
                        "kept as the deck has it for a conflict, so not where the source would put it: move one of them"))
 
-    def refit_jobs(self, work: dict, theirs: dict, created: dict) -> dict[str, list[refit.RefitJob]]:
+    def refit_jobs(self, work: Work, theirs: dict, created: dict) -> dict[str, list[refit.RefitJob]]:
         """Slide id -> the recreated text units whose deck edits `override_requests` wrote over
         them (`refit.plan`'s jobs). Only text boxes the layout model can read (explicit sizes: what
         emit makes); a table refilled in place is not a recreated box. A recreated title goes back
@@ -2615,38 +3031,42 @@ class Sync:
         pre = {s["objectId"]: s for s in created["slides"]}
         before = {s["objectId"]: s for s in theirs["slides"]}
         jobs: dict[str, list[refit.RefitJob]] = {}
-        for w in work["slides"]:
-            p = w["plan"]
-            s = pre.get(p.get("objectId"))
-            if p["action"] != "update" or s is None:
+        for w in work.slides:
+            p = w.plan
+            if not isinstance(p, merge.UpdateSlide):
+                continue  # (only an updated slide has recreated units)
+            s = pre.get(p.object_id)
+            if s is None:
                 continue
-            o = self.ours["slides"][p["ours"]]
-            ounits, bunits = merge.units(o["elements"]), merge.units(self.base["slides"][p["base"]]["elements"])
+            o = self.ours["slides"][p.ours]
+            ounits, bunits = merge.units(o["elements"]), merge.units(self.base["slides"][p.base]["elements"])
             index = {e["key"]: k for k, e in enumerate(o["elements"])}
-            for u in p["units"]:
-                if u["action"] != "recreate" or not u.get("overrides") or u["key"] not in index:
+            for u in p.units:
+                d = u.decision
+                if not isinstance(d, merge.Recreate) or not merge.overrides_json(d.overrides) or u.key not in index:
                     continue
-                i = index[u["key"]]
-                main = w["new_oid"].get(i)
+                i = index[u.key]
+                main = w.new_oid.get(i)
+                if main is None:
+                    continue  # (nothing was made for it, so there is no box to fit)
                 rb = s["objects"].get(main)
-                in_place = (w.get("in_place") or {}).get(i)
-                if (in_place and in_place.get("table")) or not rb or not tl.text_box(rb) \
+                if isinstance(w.in_place.get(i), TableFill) or not rb or not tl.text_box(rb) \
                         or tl.layout(rb) is None:
                     continue
-                members = [m for m in ounits.get(u["key"], []) if m["key"] in index]
-                pics = [w["new_oid"][index[m["key"]]] for m in members[1:]
-                        if m.get("role") == "math" and index[m["key"]] in w["new_oid"]]
-                own = {x for m in members for x in w["objects"].get(index[m["key"]], [])} | {main}
-                old_main = (bunits.get(u["key"]) or [{}])[0].get("main")
-                names = {w["new_oid"][index[m["key"]]]: m["key"] for m in members if index[m["key"]] in w["new_oid"]}
+                members = [m for m in ounits.get(u.key, []) if m["key"] in index]
+                pics = [w.new_oid[index[m["key"]]] for m in members[1:]
+                        if m.get("role") == "math" and index[m["key"]] in w.new_oid]
+                own = {x for m in members for x in w.objects.get(index[m["key"]], [])} | {main}
+                old_main = (bunits.get(u.key) or [{}])[0].get("main")
+                names = {w.new_oid[index[m["key"]]]: m["key"] for m in members if index[m["key"]] in w.new_oid}
                 jobs.setdefault(s["objectId"], []).append(refit.RefitJob(
-                    key=f"slide {p['key']}: {u['key']}", slide=p["key"], names=names,
+                    key=f"slide {p.key}: {u.key}", slide=p.key, names=names,
                     text=main, pictures=tuple(pics), own=frozenset(own),
-                    doomed=frozenset(w.get("doomed") or ()),
-                    theirs=before.get(p["objectId"], {}).get("objects", {}).get(old_main)))
+                    doomed=frozenset(w.doomed),
+                    theirs=before.get(p.object_id, {}).get("objects", {}).get(old_main)))
         return jobs
 
-    def refit(self, work: dict, theirs: dict, created: dict, rev: str) -> str:
+    def refit(self, work: Work, theirs: dict, created: dict, rev: str) -> str:
         """The recreated boxes fitted to the words written into them (`refit`, docs/project-notes.md
         "Merged text into recreated boxes"): formula pictures back over their holes, the box and a
         block panel under it as tall as the merged text needs. What moved is recorded for the base
@@ -2677,19 +3097,21 @@ class Sync:
             self.refit_moves = [refit.moved_json(m) for m in moves]
         return rev
 
-    def warn_about_folded_hiders(self, work: dict, now: dict) -> None:
+    def warn_about_folded_hiders(self, work: Work, now: dict) -> None:
         """Words this sync covered and could not uncover: `folded_hiders` says why, and nothing else
         in the report would mention it, since nothing was deleted and every write went through."""
         live = {s["objectId"]: s for s in now["slides"]}
-        for w in work["slides"]:
-            p = w["plan"]
-            s = live.get(p.get("objectId"))
-            if p["action"] != "update" or not w.get("objects") or s is None:
+        for w in work.slides:
+            p = w.plan
+            if not isinstance(p, merge.UpdateSlide):
+                continue  # (only an updated slide has objects made among the deck's)
+            s = live.get(p.object_id)
+            if not w.objects or s is None:
                 continue
-            b = self.base["slides"][p["base"]]
+            b = self.base["slides"][p.base]
             ours = {o for el in b["elements"] for o in el.get("objects", [])} | set(b.get("groups") or [])
-            made = {x for oids in w["objects"].values() for x in oids} | set(w.get("groups") or [])
-            for text, shape in folded_hiders(s, made, ours, w.get("doomed") or set()):
+            made = {x for oids in w.objects.values() for x in oids} | set(w.groups)
+            for text, shape in folded_hiders(s, made, ours, w.doomed):
                 words = (s["objects"][text].get("text") or "").strip().replace("\n", " ")[:40]
                 self.warnings.append(
                     f"slide {b['key']}: {words!r} is now under a shape the source redrew, which stands in a "
@@ -2750,28 +3172,43 @@ class Sync:
             desired[i] = oid
 
     def restack(self, w: dict, before: dict, now: dict) -> list[dict]:
+        """`restack_of` over a slide's work as JSON: {"plan" (as `merge.plan_merge` writes it),
+        "doomed", "tops"} (the offline fuzz's replay, `fuzz_sync._stacked`)."""
+        p = updated(slide_plan_of(w["plan"], "plan"))
+        return self.restack_of(p.base, p.ours, slide_units(p), w.get("doomed") or set(), w["tops"], before, now)
+
+    def restack_of(self, base: int, ours: int, units: Sequence[merge.PlannedUnit], doomed: Collection[str],
+                   tops: dict[str, str], before: dict, now: dict) -> list[dict]:
         """BRING_TO_FRONT so recreated elements take their old place in the z-order and new
         ones follow their predecessor in the source. The objects the cleanup phase will delete are
-        left out: they are still on the slide, under their replacements, until then."""
-        p = w["plan"]
-        doomed = w.get("doomed") or set()
-        b = self.base["slides"][p["base"]]
-        o = self.ours["slides"][p["ours"]]
+        left out: they are still on the slide, under their replacements, until then. `base`, `ours`:
+        the slide's index in the base and in the new conversion; `tops`: `SlideWork.tops`."""
+        b = self.base["slides"][base]
+        o = self.ours["slides"][ours]
         bunits = merge.units(b["elements"])
         top_now = {oid for oid in now["order"] if oid not in doomed}
         replace, added, oldtop = {}, [], {}
-        for u in p["units"]:
-            if u["action"] == "recreate":
-                old = merge.unit_top(bunits[u["key"]], before)
-                new = w["tops"].get(u["key"])
-                if old and new:
-                    replace[old] = new
-                    oldtop[u["key"]] = old
-            elif u["action"] == "create" and u["key"] in w["tops"]:
-                added.append(u["key"])
-            elif u["action"] not in ("delete", "gone") and u["key"] in bunits:
-                if old := merge.unit_top(bunits[u["key"]], before):
-                    oldtop[u["key"]] = old      # kept: the deck's own object stands for it
+        for u in units:
+            d = u.decision
+            match d:
+                case merge.Recreate():
+                    old = merge.unit_top(bunits[u.key], before)
+                    new = tops.get(u.key)
+                    if old and new:
+                        replace[old] = new
+                        oldtop[u.key] = old
+                case merge.CreateUnit() if u.key in tops:
+                    added.append(u.key)
+                case merge.DeleteUnit():
+                    pass
+                case merge.AdoptObject() | merge.CreateUnit() | merge.GoneUnit() | merge.KeepRemoved() | \
+                        merge.KeptJoined() | merge.KeepUnit() | merge.AdoptUnit() | merge.MoveUnit():
+                    # kept (or gone from the deck, or a creation that made nothing): the deck's own
+                    # object, where there is one, stands for it
+                    if u.key in bunits and (old := merge.unit_top(bunits[u.key], before)):
+                        oldtop[u.key] = old
+                case _:
+                    assert_never(d)
         desired = []
         for oid in before["order"]:
             oid = replace.get(oid, oid)
@@ -2780,11 +3217,11 @@ class Sync:
         keys = [e["key"] for e in o["elements"]]
         shown = now.get("objects") or {}
         stands_now = drawn_order(shown, now.get("order") or [])[1]
-        self._by_the_source(desired, oldtop, w["tops"], keys, b.get("order") or [], stands_now,
+        self._by_the_source(desired, oldtop, tops, keys, b.get("order") or [], stands_now,
                             drawn_order(before.get("objects") or {}, before.get("order") or [])[1])
 
         def placed(k):
-            return w["tops"].get(k) or (merge.unit_top(bunits[k], now) if k in bunits else None)
+            return tops.get(k) or (merge.unit_top(bunits[k], now) if k in bunits else None)
 
         # An element with no place in the deck's order takes the place the source gives it. That is
         # one this sync created - and also one a group this rewrite dissolved has freed onto the
@@ -2854,10 +3291,10 @@ class Sync:
             el = stands_now.get(oid, oid)
             stand_rank[el] = min(stand_rank.get(el, r), r)
         made_rank: dict[str, int] = {}
-        for k, t in w["tops"].items():
+        for k, t in tops.items():
             if k in rank:
                 made_rank[t] = min(made_rank.get(t, rank[k]), rank[k])
-        for made in dict.fromkeys(w["tops"].values()):
+        for made in dict.fromkeys(tops.values()):
             oid = stands_now.get(made, made)
             if oid not in desired:
                 continue
@@ -2878,6 +3315,11 @@ class Sync:
 
     @staticmethod
     def move_requests(units: list[dict], bunits: dict, read: dict, scale: float) -> list[dict]:
+        """`move_requests_of` over units as `merge.plan_merge` writes them (the offline fuzz's replay)."""
+        return Sync.move_requests_of([planned_unit_of(u, f"unit {n}") for n, u in enumerate(units)], bunits, read, scale)
+
+    @staticmethod
+    def move_requests_of(units: Sequence[merge.PlannedUnit], bunits: dict, read: dict, scale: float) -> list[dict]:
         """The source's move written onto the deck's own objects. Every *root* of the unit takes the
         step: normally that is the converter's group, which carries its children, but when the person
         has taken the group apart the roots are the text box and each picture anchored to it, and
@@ -2887,98 +3329,98 @@ class Sync:
         same step is what each root wants."""
         reqs = []
         for u in units:
-            if u["action"] == "move":
-                dx, dy = (v * scale for v in u["delta"])
-                for oid in merge.unit_roots(bunits.get(u["key"], []), read):
+            if isinstance(u.decision, merge.MoveUnit):
+                dx, dy = (v * scale for v in u.decision.delta)
+                for oid in merge.unit_roots(bunits.get(u.key, []), read):
                     reqs.append(matrix_request(oid, [1, 0, 0, 1, dx, dy]))
         return reqs
 
     @staticmethod
-    def _unit_oids(w: dict, ounits: dict, ukey: str, index: dict) -> list[str]:
+    def _unit_oids(w: SlideWork, ounits: dict, ukey: str, index: dict) -> list[str]:
         """The new objects of a recreated unit: its main object and the pictures anchored to it."""
         oids = []
         for m in ounits.get(ukey, []):
-            oid = w["new_oid"].get(index[m["key"]]) if m["key"] in index else None
+            oid = w.new_oid.get(index[m["key"]]) if m["key"] in index else None
             if oid and oid not in oids:
                 oids.append(oid)
         return oids
 
-    def override_requests(self, work: dict, theirs: dict, now: dict, raw_before: dict | None = None,
-                          raw_now: dict | None = None) -> list[dict]:
+    def override_requests(self, work: Work, theirs: dict, now: dict, raw_before: dict,
+                          raw_now: dict) -> list[dict]:
         """Deck edits re-applied to recreated elements: geometry, merged text, styles. raw_before /
         raw_now: objectId -> page element of the deck before sync and now (for run styles)."""
-        raw_before, raw_now = raw_before or {}, raw_now or {}
         before = {s["objectId"]: s for s in theirs["slides"]}
         after = {s["objectId"]: s for s in now["slides"]}
         reqs = []
-        for w in work["slides"]:
-            p = w["plan"]
-            if p["action"] != "update":
-                continue
-            b = self.base["slides"][p["base"]]
+        for w in work.slides:
+            p = w.plan
+            if not isinstance(p, merge.UpdateSlide):
+                continue  # (only an updated slide has recreated units)
+            b = self.base["slides"][p.base]
             bunits = merge.units(b["elements"])
-            ounits = merge.units(self.ours["slides"][p["ours"]]["elements"])
-            index = {e["key"]: k for k, e in enumerate(self.ours["slides"][p["ours"]]["elements"])}
-            t_read, n_read = before[p["objectId"]], after[p["objectId"]]
-            for u in p["units"]:
-                ov = u.get("overrides") or {}
-                if u["action"] != "recreate" or not ov:
+            ounits = merge.units(self.ours["slides"][p.ours]["elements"])
+            index = {e["key"]: k for k, e in enumerate(self.ours["slides"][p.ours]["elements"])}
+            t_read, n_read = before[p.object_id], after[p.object_id]
+            for u in p.units:
+                d = u.decision
+                if not isinstance(d, merge.Recreate) or not merge.overrides_json(d.overrides):
                     continue
-                i = index[u["key"]]
-                main = w["new_oid"][i]
-                top = w["tops"].get(u["key"], main)
-                anchor = bunits[u["key"]][0]
+                ov = d.overrides
+                i = index[u.key]
+                main = w.new_oid[i]
+                top = w.tops.get(u.key, main)
+                anchor = bunits[u.key][0]
                 old_main = anchor["main"]
                 final_text = None
-                if "text" in ov and ov["text"].get("table") and main in n_read["objects"]:
+                if isinstance(ov.text, merge.TableOverride) and main in n_read["objects"]:
                     new_rb = n_read["objects"][main]
-                    cells = merge.table_merge(ov["text"]["base"], new_rb.get("text") or "", ov["text"]["theirs"],
-                                              new_rb.get("table"), ov["text"]["dims"])
+                    cells = merge.table_merge(ov.text.base, new_rb.get("text") or "", ov.text.theirs,
+                                              new_rb.get("table"), ov.text.dims)
                     current = merge.table_grid(new_rb.get("text"), new_rb.get("table"))
                     if cells is None or current is None:
-                        self.warnings.append(f"slide {p['key']}: {u['key']}: deck cell edits clash with the new table; not re-applied")
+                        self.warnings.append(f"slide {p.key}: {u.key}: deck cell edits clash with the new table; not re-applied")
                     else:
                         for r, (crow, mrow) in enumerate(zip(current, cells[0])):
                             for c, (now_cell, want) in enumerate(zip(crow, mrow)):
                                 if want != now_cell:  # the cell text ends in a newline Slides keeps
                                     reqs += merge.text_edit_requests(main, now_cell + "\n", want + "\n",
                                                                      {"rowIndex": r, "columnIndex": c})
-                elif "text" in ov and main in n_read["objects"]:
+                elif isinstance(ov.text, merge.TextOverride) and main in n_read["objects"]:
                     current = n_read["objects"][main].get("text") or ""
-                    merged, clashes, safe = merge.text_merge(ov["text"]["base"], current, ov["text"]["theirs"],
-                                                             ov["text"].get("take") or ())
+                    merged, clashes, safe = merge.text_merge(ov.text.base, current, ov.text.theirs, ov.text.take)
                     if not safe:
-                        self.warnings.append(f"slide {p['key']}: {u['key']}: deck text edits clash with the new text; not re-applied")
+                        self.warnings.append(f"slide {p.key}: {u.key}: deck text edits clash with the new text; not re-applied")
                     else:
                         if not merged.endswith("\n"):
                             merged += "\n"
                         reqs += merge.text_edit_requests(main, current, merged)
                         final_text = merged
-                if "text_style" in ov:
+                if ov.text_style is not None:
                     new_raw = raw_now.get(main, {})
                     cells = None
                     if "table" in new_raw:
                         cells = [{"rowIndex": r, "columnIndex": c} for r, row in enumerate(new_raw["table"].get("tableRows", []))
                                  for c, _ in enumerate(row.get("tableCells", []))]
-                    reqs += style_override_requests(main, ov["text_style"], cells)
-                    if ov["text_style"].get("ranges"):
+                    reqs += style_override_requests(main, {"runs": ov.text_style.runs, "paragraphs": ov.text_style.paragraphs},
+                                                    cells)
+                    if ov.text_style.ranges:
                         base_styles = anchor.get("readback", {}).get(old_main, {}).get("text_styles", [])
                         if old_main in raw_before and new_raw:
                             reqs += style_range_requests(main, raw_before[old_main], new_raw, base_styles, final_text)
                         else:
-                            self.warnings.append(f"slide {p['key']}: {u['key']}: the deck's word styles could not be re-applied")
-                if "shape_style" in ov and ov["shape_style"]:
-                    reqs += shape_style_requests(main, ov["shape_style"])
-                if "geometry" in ov and top in n_read["objects"] and not (w.get("in_place") or {}).get(i, {}).get("table"):
+                            self.warnings.append(f"slide {p.key}: {u.key}: the deck's word styles could not be re-applied")
+                if ov.shape_style:
+                    reqs += shape_style_requests(main, ov.shape_style)
+                if ov.geometry and top in n_read["objects"] and not isinstance(w.in_place.get(i), TableFill):
                     # (a table refilled in place is still where, and as large as, the deck has it)
-                    old_top = merge.unit_top(bunits[u["key"]], t_read) or old_main
-                    base_rb = next((m["readback"].get(old_top) for m in bunits[u["key"]] if old_top in m.get("readback", {})), None)
+                    old_top = merge.unit_top(bunits[u.key], t_read) or old_main
+                    base_rb = next((m["readback"].get(old_top) for m in bunits[u.key] if old_top in m.get("readback", {})), None)
                     theirs_rb = t_read["objects"].get(old_top)
                     new_rb = n_read["objects"][top]
                     if not base_rb or not theirs_rb:
                         continue
-                    d = carried(base_rb, theirs_rb, new_rb)  # (merge: mode "delta", also when both moved it)
-                    if any(abs(x - y) > 1e-4 for x, y in zip(d, [1, 0, 0, 1, 0, 0])):
+                    step = carried(base_rb, theirs_rb, new_rb)  # (merge: mode "delta", also when both moved it)
+                    if any(abs(x - y) > 1e-4 for x, y in zip(step, [1, 0, 0, 1, 0, 0])):
                         # A group carries its children, so one request on it moves the whole unit.
                         # Without one - the person took this unit's group apart, and a recreation
                         # does not put it back - `top` is the main object alone, and the unit's
@@ -2987,145 +3429,161 @@ class Sync:
                         # (live fuzz seed 903 at chain depth 8: a formula picture back 15 pt above
                         # the line it belongs to). `merge.geometry_writable` has already asked that
                         # one step fits every member, so the same step is what each of them wants.
-                        for oid in ([top] if top != main else self._unit_oids(w, ounits, u["key"], index)):
-                            reqs.append(matrix_request(oid, d))
+                        for oid in ([top] if top != main else self._unit_oids(w, ounits, u.key, index)):
+                            reqs.append(matrix_request(oid, step))
         return reqs
 
     # ---- the new base
 
-    def new_base(self, result: dict) -> dict:
-        mplan, work, theirs = result["plan"], result["work"], result["theirs"]
+    def new_base(self, result: RunResult) -> dict:
+        work, theirs = result.work, result.theirs
         now = {s["objectId"]: s for s in self.created["slides"]}
-        by_plan = {id(w["plan"]): w for w in work["slides"]}
-        entries = {}
-        for p in mplan["slides"]:
-            w = by_plan[id(p)]
-            if p["action"] in ("delete",):
-                continue
-            if p["action"] == "gone":
-                # The deck deleted this slide while the source still has the frame. The entry holds
-                # the frame's key and its place in the order (`base_order`); what it says follows the
-                # source, or a frame whose label or title changed after the deletion stops looking
-                # like this entry and comes back as a new slide.
-                b, o = self.base["slides"][p["base"]], self.ours["slides"][p["ours"]]
-                entries[f"gone:{p['key']}"] = {**b, **{k: o.get(k) for k in ("label", "title", "text", "page")},
-                                               "removed": False}   # the source has this frame
-                continue
-            if p["action"] == "keep_removed":
-                # The source dropped this frame and the deck's own edits keep the slide alive. Its
-                # label goes with the frame: the source may put it on another frame tomorrow, and a
-                # slide the source no longer describes must not hold a live label hostage. And the
-                # entry says the source dropped it (`removed`), or it competes with the slide the
-                # frame really lives on for the frame that looks most like it - see `align_slides`.
-                entries[p["objectId"] or f"gone:{p['key']}"] = {**self.base["slides"][p["base"]],
-                                                                "label": None, "removed": True}
-                continue
-            if p.get("held"):
-                # Nothing was written here (`merge.hold_slide`), and the entry must not say
-                # otherwise. An entry takes its label, title and words from the source, so a held
-                # slide recorded the usual way would read next time as a change already made - and
-                # the edit this sync held back would be gone for good instead of waiting for the
-                # labels to be put right.
-                b = self.base["slides"][p["base"]]
-                entries[b["objectId"]] = dict(b)
-                continue
-            o = self.ours["slides"][p["ours"]]
-            sid = w["sid"]
+        entries: dict[str, JsonObject] = {}
+        for w in work.slides:
+            p = w.plan
+            match p:
+                case merge.DeleteSlide():
+                    continue
+                case merge.GoneSlide():
+                    # The deck deleted this slide while the source still has the frame. The entry
+                    # holds the frame's key and its place in the order (`base_order`); what it says
+                    # follows the source, or a frame whose label or title changed after the deletion
+                    # stops looking like this entry and comes back as a new slide.
+                    b, o = self.base["slides"][p.base], self.ours["slides"][p.ours]
+                    entries[f"gone:{p.key}"] = {**b, **{k: o.get(k) for k in ("label", "title", "text", "page")},
+                                                "removed": False}   # the source has this frame
+                    continue
+                case merge.KeepRemovedSlide():
+                    # The source dropped this frame and the deck's own edits keep the slide alive. Its
+                    # label goes with the frame: the source may put it on another frame tomorrow, and
+                    # a slide the source no longer describes must not hold a live label hostage. And
+                    # the entry says the source dropped it (`removed`), or it competes with the slide
+                    # the frame really lives on for the frame that looks most like it - see
+                    # `align_slides`.
+                    entries[p.object_id or f"gone:{p.key}"] = {**self.base["slides"][p.base],
+                                                               "label": None, "removed": True}
+                    continue
+                case merge.HoldSlide():
+                    # Nothing was written here (`merge.hold_slide`), and the entry must not say
+                    # otherwise. An entry takes its label, title and words from the source, so a held
+                    # slide recorded the usual way would read next time as a change already made -
+                    # and the edit this sync held back would be gone for good instead of waiting for
+                    # the labels to be put right.
+                    b = self.base["slides"][p.base]
+                    entries[b["objectId"]] = dict(b)
+                    continue
+                case merge.CreateSlide() | merge.UpdateSlide():
+                    pass
+                case _:
+                    assert_never(p)
+            o = self.ours["slides"][p.ours]
+            sid = w.sid
+            if sid is None:
+                raise ValueError(f"slide {p.key}: written on no slide")
             read = now.get(sid)
-            entry = {k: v for k, v in o.items() if k != "elements"}
+            entry: JsonObject = {k: v for k, v in o.items() if k != "elements"}
             elements = []
-            if p["action"] == "create":
+            if isinstance(p, merge.CreateSlide):
                 for i, e in enumerate(o["elements"]):
-                    oids = w["objects"].get(i, [w["new_oid"].get(i)])
+                    oids = w.objects.get(i, [w.new_oid.get(i)])
                     elements.append(self._element(e, oids, read))
+                groups: list[Json] = [g for g in w.groups]
                 entry.update(objectId=sid, layoutObjectId=read["layoutObjectId"] if read else None,
                              background_readback=read["background"] if read else None,
-                             notes_readback=read["notes"] if read else "", groups=w["groups"],
+                             notes_readback=read["notes"] if read else "", groups=groups,
                              order=read["order"] if read else [])
             else:
-                b = self.base["slides"][p["base"]]
+                b = self.base["slides"][p.base]
                 bunits, ounits = merge.units(b["elements"]), merge.units(o["elements"])
                 index = {e["key"]: k for k, e in enumerate(o["elements"])}
-                for u in p["units"]:
-                    a = u["action"]
-                    if a in ("create", "recreate"):
-                        for mk in u["ours_members"]:
-                            i = index[mk]
-                            elements.append(self._element(o["elements"][i], w["objects"].get(i, [w["new_oid"][i]]), read))
-                            if (w.get("in_place") or {}).get(i, {}).get("table"):  # (still the .pptx's table: `table_refill`)
-                                elements[-1]["table_margins"] = [list(m) for m in w["in_place"][i]["margins"]]
-                    elif a == "move":
-                        for m in ounits[u["key"]]:
-                            old = next((x for x in bunits[u["key"]] if x["key"] == m["key"]), None)
-                            if old is None:
-                                continue
-                            rb = {oid: {**v, **{k: read["objects"][oid][k] for k in ("box", "transform")}}
-                                  if read and oid in read["objects"] else v for oid, v in old["readback"].items()}
-                            elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb,
-                                             **{k: old[k] for k in ("table_margins",) if k in old}})
-                    elif a == "adopt_object":
-                        # the deck's own object is what the source now draws (a picture pull put in the source)
-                        for mk in u["ours_members"]:
-                            oid = u["objectId"]
-                            elements.append(self._element(o["elements"][index[mk]], [oid], read))
-                    elif a == "adopt":
-                        # the source now says what the deck shows: ours IR, the deck's version of those fields
-                        fields = {"text": ("text",), "geometry": ("box", "transform", "size"),
-                                  "image": ("image", "box", "transform", "size")}
-                        for m in ounits[u["key"]]:
-                            old = next((x for x in bunits[u["key"]] if x["key"] == m["key"]), None)
-                            if old is None:
-                                continue
-                            rb = copy.deepcopy(old["readback"])
-                            live_obj = (read or {}).get("objects", {}).get(old.get("main"))
-                            if live_obj and old.get("main") in rb:
-                                for f in u.get("adopt", []):
-                                    rb[old["main"]].update({k: live_obj[k] for k in fields.get(f, ()) if k in live_obj})
-                            elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb,
-                                             **{k: old[k] for k in ("table_margins",) if k in old}})
-                    elif a in ("keep",):
-                        # A unit kept because the source dropped it says so, or the next sync reads
-                        # a deck that no longer differs from the base and deletes it (merge.plan_unit).
-                        elements += [{**m, "removed": True} for m in bunits.get(u["key"], [])] \
-                            if u.get("removed") else bunits.get(u["key"], [])
-                    # delete / none: gone
-                bg_conflict = b.get("background") != o.get("background") and not p.get("background")
-                notes_kept = (b.get("notes") or "") != (o.get("notes") or "") and p.get("notes") is None
-                doomed = w.get("doomed") or set()
+                for u in p.units:
+                    d = u.decision
+                    match d:
+                        case merge.CreateUnit() | merge.Recreate():
+                            for mk in u.ours_members:
+                                i = index[mk]
+                                elements.append(self._element(o["elements"][i], w.objects.get(i, [w.new_oid[i]]), read))
+                                live = w.in_place.get(i)
+                                if isinstance(live, TableFill):  # (still the .pptx's table: `table_refill`)
+                                    elements[-1]["table_margins"] = [list(m) for m in live.margins]
+                        case merge.MoveUnit():
+                            for m in ounits[u.key]:
+                                old = next((x for x in bunits[u.key] if x["key"] == m["key"]), None)
+                                if old is None:
+                                    continue
+                                rb = {oid: {**v, **{k: read["objects"][oid][k] for k in ("box", "transform")}}
+                                      if read and oid in read["objects"] else v for oid, v in old["readback"].items()}
+                                elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb,
+                                                 **{k: old[k] for k in ("table_margins",) if k in old}})
+                        case merge.AdoptObject():
+                            # the deck's own object is what the source now draws (a picture pull put in the source)
+                            for mk in u.ours_members:
+                                elements.append(self._element(o["elements"][index[mk]], [d.object_id], read))
+                        case merge.AdoptUnit():
+                            # the source now says what the deck shows: ours IR, the deck's version of those fields
+                            fields = {"text": ("text",), "geometry": ("box", "transform", "size"),
+                                      "image": ("image", "box", "transform", "size")}
+                            for m in ounits[u.key]:
+                                old = next((x for x in bunits[u.key] if x["key"] == m["key"]), None)
+                                if old is None:
+                                    continue
+                                rb = copy.deepcopy(old["readback"])
+                                live_obj = (read or {}).get("objects", {}).get(old.get("main"))
+                                if live_obj and old.get("main") in rb:
+                                    for f in d.adopt:
+                                        rb[old["main"]].update({k: live_obj[k] for k in fields.get(f, ()) if k in live_obj})
+                                elements.append({**m, "objects": old["objects"], "main": old["main"], "readback": rb,
+                                                 **{k: old[k] for k in ("table_margins",) if k in old}})
+                        case merge.KeepRemoved():
+                            # A unit kept because the source dropped it says so, or the next sync reads
+                            # a deck that no longer differs from the base and deletes it (merge.plan_unit).
+                            elements += [{**m, "removed": True} for m in bunits.get(u.key, [])]
+                        case merge.KeptJoined() | merge.KeepUnit():
+                            elements += bunits.get(u.key, [])
+                        case merge.DeleteUnit() | merge.GoneUnit():
+                            pass
+                        case _:
+                            assert_never(d)
+                background = new_background(p)
+                bg_conflict = b.get("background") != o.get("background") and not background
+                notes_kept = (b.get("notes") or "") != (o.get("notes") or "") and p.notes is None
                 entry.update(objectId=sid, layoutObjectId=b.get("layoutObjectId"), groups=b.get("groups", []),
-                             order=[x for x in read["order"] if x not in doomed] if read else b.get("order", []))
+                             order=[x for x in read["order"] if x not in w.doomed] if read else b.get("order", []))
                 if b.get("left_alone"):
                     # the person's own unpaired objects stay theirs at every generation
                     # (`adopt_sync.build_base`, `merge.slide_touched`)
                     entry["left_alone"] = list(b["left_alone"])
-                if p.get("background"):
+                if background:
                     entry["background_readback"] = read["background"] if read else None
                 else:
                     entry["background_readback"] = b.get("background_readback")
                     if bg_conflict:
                         entry["background"] = b.get("background")
-                if p.get("notes") is not None:
+                if p.notes is not None:
                     entry["notes_readback"] = o.get("notes") or ""
                 else:
                     entry["notes_readback"] = b.get("notes_readback", "")
                     if notes_kept:
                         entry["notes"] = b.get("notes")
-            entry["elements"] = merge.keys_the_source_took(elements)
+            # (the list `keys_the_source_took` gives back, as the base's JSON takes it)
+            kept_elements: list[Json] = [dict(e) for e in merge.keys_the_source_took(elements)]
+            entry["elements"] = kept_elements
             entries[sid] = entry
-        slides = [entries.pop(sid) for sid in base_order(mplan, by_plan, [s["objectId"] for s in self.created["slides"]])
+        slides = [entries.pop(sid) for sid in base_order_of(placed_slides(work), [s["objectId"] for s in self.created["slides"]])
                   if sid in entries] + list(entries.values())
         # what `refit` moved or grew is the converter's doing, not the person's (`refit.reshape_base`)
         from .refit import reshape_base
-        slides = reshape_base(slides, getattr(self, "reshaped", None) or {})
+        slides = reshape_base(slides, self.reshaped)
         new = {**self.base, "generation": self.base.get("generation", 0) + 1, "revisionId": self.final_revision,
                "source": snapshot.source_info(self.ours["source"]), "slides": slides}
-        pinned = set((self.theme_plan or {}).get("pinned") or ())
+        pinned = set(self.theme_plan.pinned) if self.theme_plan is not None else set()
         if pinned:
             # The style theme_sync pinned onto placeholders (`inherited_pins`) looks the same and is
             # converter output: where the person had not restyled the object, the base takes it, or
             # the next sync reads the pins as the person's style edit.
             keys = ("text_styles", "paragraph_styles", "run_spans", "text_style_hash")
-            pre = {oid: o for s in theirs["slides"] for oid, o in s.get("objects", {}).items() if oid in pinned}
+            pre = {oid: as_object(o, oid) for s in as_objects(theirs["slides"], "slides")
+                   for oid, o in as_object(s.get("objects", {}), "objects").items() if oid in pinned}
             post = {oid: o for s in self.created["slides"] for oid, o in s.get("objects", {}).items() if oid in pinned}
             for entry in slides:
                 elements = as_objects(entry.get("elements", []), "elements")
@@ -3141,28 +3599,57 @@ class Sync:
         if self.base.get("theme") and self.theme_side is not None:
             from . import theme_sync
             new["master_background"] = self.master_key()
-            new["theme"] = theme_sync.new_record(self.base["theme"], self.theme_side,
-                                                 (self.theme_plan or {}).get("written") or {}, self.raw_after)
+            # (a copy: the new base shares nothing with the old one)
+            rec = theme_sync.theme_record(json.loads(json.dumps(self.base["theme"])), "the sync base's theme")
+            written = self.theme_plan.written if self.theme_plan is not None else {}
+            new["theme"] = theme_sync.theme_json(theme_sync.new_record(rec, self.theme_side, written, self.raw_after))
         return new
 
-    def _element(self, e: dict, oids: list[str], read: dict | None) -> dict:
+    def _element(self, e: dict, oids: Sequence[str | None], read: dict | None) -> dict:
+        # (a created slide's element nothing was made for is recorded with [None]: as it always was)
         objects = (read or {}).get("objects", {})
-        return {**e, "objects": oids, "main": oids[0] if oids else None,
+        return {**e, "objects": list(oids), "main": oids[0] if oids else None,
                 "readback": {oid: objects[oid] for oid in oids if oid in objects}}
 
 
 def base_order(mplan: dict, by_plan: dict, live: list[str]) -> list[str]:
+    """`base_order_of` over a plan as JSON (`merge.merge_plan_json`) and plan id -> {"sid": ...}."""
+    placed = [(p["ours"], f"gone:{p['key']}" if p["action"] == "gone" else by_plan[id(p)]["sid"])
+              for p in mplan["slides"] if p["action"] in ("update", "create", "gone")]
+    return base_order_of(placed, live)
+
+
+def placed_slides(work: Work) -> list[tuple[int, str]]:
+    """The slides of the new conversion the new base holds, as (frame index, entry id): the
+    updated, held and created ones by the slide they are written on, a deleted one by `gone:<key>`."""
+    placed: list[tuple[int, str]] = []
+    for w in work.slides:
+        p = w.plan
+        match p:
+            case merge.GoneSlide():
+                placed.append((p.ours, f"gone:{p.key}"))
+            case merge.CreateSlide() | merge.UpdateSlide() | merge.HoldSlide():
+                if w.sid is None:
+                    raise ValueError(f"slide {p.key}: written on no slide")
+                placed.append((p.ours, w.sid))
+            case merge.KeepRemovedSlide() | merge.DeleteSlide():
+                pass
+            case _:
+                assert_never(p)
+    return placed
+
+
+def base_order_of(placed: Sequence[tuple[int, str]], live: Sequence[str]) -> list[str]:
     """Slide ids of the new base in the source's order (the base is converter output: a slide
     order the deck chose must keep differing from it, or the next sync would undo it). Slides kept
-    though the source removed them stay after their live predecessor.
+    though the source removed them stay after their live predecessor. `placed`: (frame index,
+    entry id) of the slides the new conversion has (`placed_slides`), in plan order.
 
     A slide the person deleted while the source still has it (`gone`) has no live id, but it keeps
     its place here: the next conversion pairs its frames with this base in order
     (`identity.align_slides`), so an entry at the end takes the identity of every frame that
     followed it - they look new and get created again."""
-    placed = (p for p in mplan["slides"] if p["action"] in ("update", "create", "gone"))
-    order = [f"gone:{p['key']}" if p["action"] == "gone" else by_plan[id(p)]["sid"]
-             for p in sorted(placed, key=lambda p: p["ours"])]
+    order = [sid for _, sid in sorted(placed, key=lambda x: x[0])]
     for k, sid in enumerate(live):
         if sid in order:
             continue
@@ -3311,12 +3798,12 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     ours = build_ours(pdf, snapshot.sync_work(out), base, overlays, adopt_sync.deck_width(base), pictures)
     refreshed = snapshot.refresh_pictures(base, ours["slides"], ours["pairs"], ours["out"], pictures)
 
-    def check_plan(mplan: dict, theirs: dict) -> None:
+    def check_plan(mplan: merge.MergePlan, theirs: dict) -> None:
         """An adopted deck's objects are a person's, not ours: refuse rather than write beside
         them (adopt_sync.problems). A dry run plans and reports; it writes nothing, so it never
         refuses - that is how a person sees what the sync wanted to do."""
         kept = way_back.backup() if hasattr(way_back, "backup") else way_back
-        found = adopt_sync.problems(base, mplan, theirs, kept, backup_mode)
+        found = adopt_sync.problems(base, merge.merge_plan_json(mplan), theirs, kept, backup_mode)
         if found:
             raise adopt_sync.FirstSyncRefused(adopt_sync.refusal_message(pid, out, pdf, found), found)
 
@@ -3339,40 +3826,41 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     except BaseException:
         s.await_deletes()   # (a run that ends badly still owns the file it sent away)
         raise
-    report = result["plan"]["report"]
+    report = s.report_of(result.plan)
+    # (the report's own list: what is said after the base is stored lands in it too)
+    said: list[Json] = [*as_array(report["warnings"], "report.warnings")]
+    report["warnings"] = said
     # (a slide the deck deleted or the source dropped is nobody's business any more)
-    updated = {p["key"] for p in result["plan"]["slides"] if p["action"] == "update"}
-    report["warnings"] += s.warnings + warnings + unwritten_warnings(
+    updated = {p.key for p in result.plan.slides if isinstance(p, (merge.UpdateSlide, merge.HoldSlide))}
+    said += s.warnings + warnings + unwritten_warnings(
         [u for u in ours.get("context_unwritten") or [] if u.slide in updated], ours)
-    report["warnings"] += unread_warnings([u for u in ours["context_unread"] if u.slide in updated], ours["slides"])
-    contained, says = contained_report(ours["contained"], ours["slides"], result["plan"])
-    report["warnings"] += says
+    said += unread_warnings([u for u in ours["context_unread"] if u.slide in updated], ours["slides"])
+    contained, says = contained_report(ours["contained"], ours["slides"], result.plan)
+    said += says
     if contained:  # (what emit could not plan and made a picture: `planned`)
         report["contained"] = contained_json(contained)
     forms: list[snapshot.BaseForm] = ours["base_forms"]
-    report["warnings"] += snapshot.base_form_warnings(forms)
+    said += snapshot.base_form_warnings(forms)
     if forms:  # (a base in an older form, read in today's: `base_today`)
-        report["base_forms"] = snapshot.base_form_json(forms)
-    report["converged"] += [{"slide": r.slide, "element": r.element, "field": "image",
-                             "how": "the same picture, written differently"} for r in refreshed]
+        report["base_forms"] = [f for f in snapshot.base_form_json(forms)]
+    converged: list[Json] = [*as_array(report["converged"], "report.converged")]
+    for r in refreshed:
+        converged.append({"slide": r.slide, "element": r.element, "field": "image",
+                          "how": "the same picture, written differently"})
+    report["converged"] = converged
     report["overruns"] = s.overruns
     report["refit"] = s.refit_moves
     info = {"pdf": str(pdf), "presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
             "dry_run": dry_run, "base_from": where, "generation": base.get("generation", 0), "overlays": overlays,
-            "attempts": result["attempts"], "requests": s.sent, "seconds": 0.0,
+            "attempts": result.attempts, "requests": s.sent, "seconds": 0.0,
             "report": report,
-            "actions": [{"slide": p["key"], "action": p["action"],
-                         "units": [{k: u[k] for k in ("key", "action", "source", "deck", "unpaired", "inherited",
-                                                      "in_table") if k in u}
-                                   for u in p.get("units", [])
-                                   if u["action"] not in ("keep", "none") or u.get("deck") or u.get("unpaired")
-                                   or u.get("inherited") or u.get("in_table")]}
-                        for p in result["plan"]["slides"]]}
-    adopted = any(u["action"] in ("adopt", "adopt_object") for p in result["plan"]["slides"] for u in p.get("units", []))
+            "actions": plan_actions(result.plan)}
+    adopted = any(isinstance(u.decision, (merge.AdoptUnit, merge.AdoptObject))
+                  for p in result.plan.slides for u in slide_units(p))
     recovered = bool(s.recovery.get("sweep") or s.recovery.get("sweep_slides") or s.recovery.get("heal")
                      or base.get("pending") or base.get("cleanup"))
-    if not dry_run and (result["work"]["writes"] or adopted or refreshed or recovered):
-        new = s.new_base(result) if (result["work"]["writes"] or adopted or refreshed) else dict(base)
+    if not dry_run and (result.work.writes or adopted or refreshed or recovered):
+        new = s.new_base(result) if (result.work.writes or adopted or refreshed) else dict(base)
         new["overlays"] = overlays  # (the steps the deck holds now)
         new.pop("pending", None)   # this run got to the end, so nothing is half done any more
         new.pop("cleanup", None)
@@ -3382,7 +3870,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
             new["cleanup"] = list(s.cleanup_ids)
         why = snapshot.store_base(new, out, drive, "base", facts)
         if why:
-            report["warnings"].append(
+            said.append(
                 f"could not store the new base in Drive ({why}); kept locally. The {len(s.cleanup_ids)} object(s) this "
                 f"sync replaced are left in the deck: deleting them while the base another machine would read still "
                 f"points at them could lose deck edits. The next sync removes them.")
@@ -3390,8 +3878,8 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
             try:
                 s.run_cleanup(s.final_revision)
             except (RuntimeError, HttpError) as e:  # they stay in the base's `cleanup` list
-                report["warnings"].append(f"the objects this sync replaced could not be deleted ({e}); "
-                                          f"the next sync removes them")
+                said.append(f"the objects this sync replaced could not be deleted ({e}); "
+                            f"the next sync removes them")
             else:
                 # The objects are gone, so the list naming them must stop being read. That is all
                 # this says, and a flag on the deck's own appProperties says it in a third of a

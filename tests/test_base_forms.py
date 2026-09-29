@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from beamer2slides import adopt_sync, identity, snapshot, sync
+from beamer2slides import adopt_sync, identity, merge, snapshot, sync
 from beamer2slides.emit import SLIDE_W
 
 from .test_sync_containment import SYNC_DECKS, requests_of, talk_base
@@ -85,7 +85,7 @@ def test_a_form_the_converter_no_longer_writes_is_a_rewrite_of_the_base_not_a_so
     [now] = [o for s in ours["slides"] if s["key"] == slide for o in s["elements"] if o["key"] == e["key"]]
     assert identity.source_changes(e, now) == set()
     mplan, content, cleanup = requests_of(base, ours, pres, tmp_path / "ours")
-    assert {u["action"] for p in mplan["slides"] for u in p.get("units", [])} <= {"keep"}
+    assert {u["action"] for p in merge.merge_plan_json(mplan)["slides"] for u in p.get("units", [])} <= {"keep"}
     assert [r for r in content if "__b2s_break__" not in r] == [] and cleanup == []  # (breaks: batch bounds)
     [said] = snapshot.base_form_warnings(ours["base_forms"])
     assert said.startswith("1 element(s) of the sync base were recorded in an older form") and e["key"] in said

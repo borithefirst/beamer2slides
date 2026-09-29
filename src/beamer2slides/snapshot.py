@@ -9,7 +9,7 @@ import os
 import re
 from collections.abc import Callable, Collection, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, Union
 
@@ -22,9 +22,12 @@ from .google_types import (AffineTransform, DriveFile, DriveService, FileBody, L
                            children, file_id, image_url, object_id, part, parts, presentation_id)
 from .gslides import EMU_PER_PT, execute
 from .ir_types import IRError, element_json, parse_element, parse_rendered_element
-from .json_types import (Json, JsonObject, JsonShapeError, as_int, as_object, as_objects, as_optional_str,
+from .json_types import (Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_optional_str,
                          as_str)
 from .net import Fetch
+from .sync_model import (Base, DeckRead, ElementEntry, ElementKey, Fingerprint, ImageRead, ObjectId, ReadBack, RunSpan,
+                         SlideEntry, SlideKey, SlideRead, SlideSeen, Tied, base_json, deck_read_json, fingerprint,
+                         slide_entry_json, slide_read_json)
 from .typing_compat import assert_never
 
 VERSION = 1
@@ -47,16 +50,31 @@ def _unit(v: Mapping[str, object] | None) -> float:
     return magnitude / (EMU_PER_PT if v.get("unit", "EMU") == "EMU" else 1.0)
 
 
-def colour(c: dict | None) -> str | None:
+def _number(v: Json, where: str) -> float:
+    """A number of an answer as it came (an int stays one: what is written is what was read)."""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v
+    raise JsonShapeError(f"{where}: a number was expected, found {type(v).__name__}")
+
+
+def _text(v: Json, where: str) -> str:
+    if isinstance(v, str):
+        return v
+    raise JsonShapeError(f"{where}: a string was expected, found {type(v).__name__}")
+
+
+def colour(c: JsonObject | None) -> str | None:
     """An OpaqueColor / OptionalColor as '#rrggbb' or 'theme:NAME'."""
     if not c:
         return None
-    c = c.get("opaqueColor", c)
+    if "opaqueColor" in c:
+        c = part(c["opaqueColor"], "opaqueColor")
     if "themeColor" in c:
         return f"theme:{c['themeColor']}"
     if "rgbColor" in c:
-        rgb = c["rgbColor"]
-        return "#" + "".join(f"{round(rgb.get(k, 0.0) * 255):02x}" for k in ("red", "green", "blue"))
+        rgb = part(c["rgbColor"], "rgbColor")
+        return "#" + "".join(f"{round(_number(rgb.get(k, 0.0), f'rgbColor.{k}') * 255):02x}"
+                             for k in ("red", "green", "blue"))
     return None
 
 
@@ -92,75 +110,100 @@ def box(m: list[float], w: float, h: float) -> list[float]:
             round(max(p[0] for p in pts), 2), round(max(p[1] for p in pts), 2)]
 
 
-def _text_style(style: dict) -> dict:
-    out = {k: style[k] for k in TEXT_STYLE_KEYS if k in style}
+def _text_style(style: JsonObject) -> JsonObject:
+    out: JsonObject = {k: style[k] for k in TEXT_STYLE_KEYS if k in style}
     if "weightedFontFamily" in style:
-        out["fontFamily"] = style["weightedFontFamily"].get("fontFamily")
-        out["weight"] = style["weightedFontFamily"].get("weight")
+        weighted = part(style["weightedFontFamily"], "textStyle.weightedFontFamily")
+        out["fontFamily"] = weighted.get("fontFamily")
+        out["weight"] = weighted.get("weight")
     if "fontSize" in style:
-        out["fontSize"] = round(_unit(style["fontSize"]), 2)
+        out["fontSize"] = round(_unit(part(style["fontSize"], "textStyle.fontSize")), 2)
     for k in ("foregroundColor", "backgroundColor"):
         if style.get(k):
-            out[k] = colour(style[k])
-    link = style.get("link")
+            out[k] = colour(part(style[k], f"textStyle.{k}"))
+    link = part(style.get("link"), "textStyle.link")
     if link:
         out["link"] = link.get("url") or link.get("pageObjectId") or link.get("relativeLink") or str(link.get("slideIndex"))
     return out
 
 
-def _paragraph_style(marker: dict) -> dict:
-    style = marker.get("style", {})
-    out = {k: style[k] for k in PARAGRAPH_KEYS if k in style}
+def _paragraph_style(marker: JsonObject) -> JsonObject:
+    style = part(marker.get("style"), "paragraphMarker.style")
+    out: JsonObject = {k: style[k] for k in PARAGRAPH_KEYS if k in style}
     for k in ("indentStart", "indentFirstLine", "spaceAbove", "spaceBelow"):
         if k in style:
-            out[k] = round(_unit(style[k]), 2)
+            out[k] = round(_unit(part(style[k], f"paragraphStyle.{k}")), 2)
     if "bullet" in marker:
-        out["bullet"] = [marker["bullet"].get("glyph"), marker["bullet"].get("nestingLevel", 0)]
+        bullet = part(marker["bullet"], "paragraphMarker.bullet")
+        out["bullet"] = [bullet.get("glyph"), bullet.get("nestingLevel", 0)]
     return out
 
 
-def read_text(text: dict | None) -> tuple[str, list[dict], list[dict], list[list]]:
-    """(content, distinct run styles, distinct paragraph styles, run spans) of a shape's or cell's
-    text. A span is `[start, end, style]` in characters of the content, which is what says *which*
-    words a style is on - the distinct styles alone cannot (`merge.styling_lost`)."""
-    content, runs, paras, spans = [], [], [], []
+@dataclass(frozen=True, kw_only=True)
+class TextRead:
+    """A shape's or cell's text as sync compares it (`read_text`): the content, its distinct run and
+    paragraph styles, and where each run is. A span is (start, end, style) in characters of the
+    content, which is what says *which* words a style is on - the distinct styles alone cannot
+    (`merge.styling_lost`)."""
+    content: str
+    runs: list[JsonObject]
+    paragraphs: list[JsonObject]
+    spans: list[RunSpan]
+
+
+def read_text_of(text: JsonObject) -> TextRead:
+    content: list[str] = []
+    runs: list[JsonObject] = []
+    paras: list[JsonObject] = []
+    spans: list[RunSpan] = []
     at = 0
-    for te in (text or {}).get("textElements", []):
+    for te in parts(text.get("textElements"), "text.textElements"):
         if "textRun" in te:
-            piece = te["textRun"].get("content", "")
+            run = part(te["textRun"], "textRun")
+            piece = _text(run.get("content", ""), "textRun.content")
             content.append(piece)
-            s = _text_style(te["textRun"].get("style", {}))
+            s = _text_style(part(run.get("style"), "textRun.style"))
             if piece.strip("\n"):
-                spans.append([at, at + len(piece.rstrip("\n")), s])
+                spans.append((at, at + len(piece.rstrip("\n")), s))
                 if s not in runs:
                     runs.append(s)
             at += len(piece)
         elif "autoText" in te:
-            content.append(te["autoText"].get("content", ""))
-            at += len(te["autoText"].get("content", ""))
+            piece = _text(part(te["autoText"], "autoText").get("content", ""), "autoText.content")
+            content.append(piece)
+            at += len(piece)
         elif "paragraphMarker" in te:
-            s = _paragraph_style(te["paragraphMarker"])
+            s = _paragraph_style(part(te["paragraphMarker"], "paragraphMarker"))
             if s not in paras:
                 paras.append(s)
-    return "".join(content), runs, paras, spans
+    return TextRead(content="".join(content), runs=runs, paragraphs=paras, spans=spans)
 
 
-def _fill(fill: dict | None) -> dict | None:
+def read_text(text: dict | None) -> tuple[str, list[dict], list[dict], list[list]]:
+    """`read_text_of` as (content, run styles, paragraph styles, spans as [start, end, style])."""
+    t = read_text_of(text or {})
+    return t.content, t.runs, t.paragraphs, [[a, b, s] for a, b, s in t.spans]
+
+
+def _fill(fill: JsonObject) -> JsonObject | None:
     if not fill:
         return None
     if "solidFill" in fill:
-        return {"color": colour(fill["solidFill"].get("color")), "alpha": round(fill["solidFill"].get("alpha", 1.0), 3)}
+        solid = part(fill["solidFill"], "solidFill")
+        return {"color": colour(part(solid.get("color"), "solidFill.color")),
+                "alpha": round(_number(solid.get("alpha", 1.0), "solidFill.alpha"), 3)}
     return {"state": fill.get("propertyState", "RENDERED")}
 
 
-def _outline(o: dict | None) -> dict | None:
+def _outline(o: JsonObject) -> JsonObject | None:
     if not o:
         return None
-    return {"fill": _fill(o.get("outlineFill")), "weight": round(_unit(o.get("weight")), 2),
+    return {"fill": _fill(part(o.get("outlineFill"), "outline.outlineFill")),
+            "weight": round(_unit(part(o.get("weight"), "outline.weight")), 2),
             "dash": o.get("dashStyle"), "state": o.get("propertyState", "RENDERED")}
 
 
-def shape_style(e: PageElement) -> dict:
+def shape_style(e: PageElement) -> JsonObject:
     shape, line, image = e.get("shape"), e.get("line"), e.get("image")
     if shape is not None:
         props = part(shape.get("shapeProperties"), "shape.shapeProperties")
@@ -364,88 +407,135 @@ def sign_pictures(read: dict, pres: Presentation, objects: Collection[str] | Non
     when not given): downloaded, else exported. A picture signed neither way stays unsigned. An
     image read-back signed here loses the `unchecked` mark `Sync.sign_changed` gave it."""
     images, backgrounds = picture_urls(pres)
-    jobs = []
-    for s in read["slides"]:
-        bg = s.get("background") or {}
-        if "picture" in bg and s["objectId"] in backgrounds and (slides is None or s["objectId"] in slides):
-            jobs.append((s["objectId"], bg))
-        for oid, rb in s["objects"].items():
+    jobs: list[tuple[str, JsonObject]] = []
+    for s in as_objects(read["slides"], "read.slides"):
+        sid = as_str(s["objectId"], "read slide objectId")
+        bg = part(s.get("background"), f"slide {sid}: background")
+        if "picture" in bg and sid in backgrounds and (slides is None or sid in slides):
+            jobs.append((sid, bg))
+        for oid, rb in as_object(s["objects"], f"slide {sid}: objects").items():
+            rb = as_object(rb, f"slide {sid}: {oid}")
             if "image" in rb and oid in images and (objects is None or oid in objects):
-                jobs.append((oid, rb["image"]))
+                jobs.append((oid, as_object(rb["image"], f"slide {sid}: {oid}.image")))
     if not jobs:
         return 0
+    found = _signatures(pres, [oid for oid, _ in jobs], workers, ready, fetch, drive, files, pictures)
+    for oid, target in jobs:
+        if oid in found:
+            target["signature"] = found[oid]
+            target.pop("unchecked", None)
+    return len(jobs)
 
-    def put(target: dict, sig: str) -> None:
-        target["signature"] = sig
-        target.pop("unchecked", None)
 
+def sign_pictures_of(read: DeckRead, pres: Presentation, objects: Collection[str] | None,
+                     slides: Collection[str] | None, workers: int, ready: Mapping[str, str] | None,
+                     fetch: Fetch | None, drive: DriveService | None, files: Mapping[str, "Path | str"] | None,
+                     pictures: LivePictures | None) -> tuple[DeckRead, int]:
+    """`sign_pictures` of a read-back record: the read with the signatures in, and how many
+    pictures were signed or asked for."""
+    images, backgrounds = picture_urls(pres)
+    jobs: list[str] = []
+    for s in read.slides:
+        if s.background is not None and "picture" in s.background and s.object_id in backgrounds \
+                and (slides is None or s.object_id in slides):
+            jobs.append(s.object_id)
+        jobs += [oid for oid, rb in s.objects.items()
+                 if rb.image is not None and oid in images and (objects is None or oid in objects)]
+    if not jobs:
+        return read, 0
+    found = _signatures(pres, jobs, workers, ready, fetch, drive, files, pictures)
+
+    def signed_background(s: SlideRead) -> JsonObject | None:
+        if s.background is None or s.object_id not in found:   # (found holds only what was asked)
+            return s.background
+        bg = dict(s.background)
+        bg["signature"] = found[s.object_id]
+        bg.pop("unchecked", None)
+        return bg
+
+    def signed(oid: ObjectId, rb: ReadBack) -> ReadBack:
+        if rb.image is None or oid not in found:
+            return rb
+        return replace(rb, image=replace(rb.image, signature=found[oid], unchecked=False))
+
+    return replace(read, slides=tuple(replace(s, background=signed_background(s),
+                                              objects={oid: signed(oid, rb) for oid, rb in s.objects.items()})
+                                      for s in read.slides)), len(jobs)
+
+
+def _signatures(pres: Presentation, ids: Sequence[str], workers: int, ready: Mapping[str, str] | None,
+                fetch: Fetch | None, drive: DriveService | None, files: Mapping[str, "Path | str"] | None,
+                pictures: LivePictures | None) -> dict[str, str]:
+    """The signatures of the pictures `ids` names that could be had (`sign_pictures`)."""
     if ready is not None:
-        for oid, target in jobs:
-            if oid in ready:
-                put(target, ready[oid])
-        return len(jobs)
-    local = upload_signatures(pres, {oid: f for oid, f in (files or {}).items()
-                                     if oid in {j[0] for j in jobs}}) if files else {}
-    rest = [oid for oid, _ in jobs if oid not in local]
+        return {oid: ready[oid] for oid in ids if oid in ready}
+    asked = set(ids)
+    local = upload_signatures(pres, {oid: f for oid, f in files.items() if oid in asked}) if files else {}
+    rest = [oid for oid in ids if oid not in local]
     if rest:
         if pictures is None:
             pictures = LivePictures(pres, drive, _fetcher(fetch), workers, None, None)
         got = pictures.get(rest)
         local.update({i: sig for i, d in got.items() if (sig := signature(d))})
-    for oid, target in jobs:
-        if oid in local:
-            put(target, local[oid])
-    return len(jobs)
+    return local
 
 
-def readback(e: PageElement, parent: list[float], parent_group: str | None, z: int) -> dict:
-    """Normalised read-back of one page element (pt, hex colours, absolute transform)."""
+KINDS = ("shape", "image", "line", "table", "elementGroup", "sheetsChart", "video", "wordArt")
+
+
+def read_object(e: PageElement, parent: list[float], parent_group: ObjectId | None, z: int) -> ReadBack:
+    """Normalised read-back of one page element (pt, hex colours, absolute transform). A group's
+    box and children are its slide's to say (`read_slide_of`)."""
     m = compose(parent, matrix(e.get("transform")))
     size = e.get("size") or Size()
     w, h = _unit(size.get("width")), _unit(size.get("height"))
-    out: dict[str, object] = {
-        "kind": next((k for k in ("shape", "image", "line", "table", "elementGroup", "sheetsChart", "video", "wordArt")
-                      if k in e), "other"),
-        "transform": [round(v, 4) for v in m[:4]] + [round(v, 2) for v in m[4:]], "size": [round(w, 2), round(h, 2)],
-        "box": box(m, w, h), "parent_group": parent_group, "z": z, "title": e.get("title"),
-        "description": e.get("description")}
-    text, runs, paras, spans = None, [], [], []
+    x0, y0, x1, y1 = box(m, w, h)
+    text: str | None = None
+    runs: list[JsonObject] = []
+    paras: list[JsonObject] = []
+    spans: list[RunSpan] = []
+    placeholder: str | None = None
+    grid: tuple[int, int] | None = None
     shape, table, image = e.get("shape"), e.get("table"), e.get("image")
     if shape is not None:
-        text, runs, paras, spans = read_text(part(shape.get("text"), "shape.text"))
+        read = read_text_of(part(shape.get("text"), "shape.text"))
+        text, runs, paras, spans = read.content, read.runs, read.paragraphs, read.spans
         if "placeholder" in shape:
-            out["placeholder"] = part(shape["placeholder"], "shape.placeholder").get("type")
+            placeholder = as_optional_str(part(shape["placeholder"], "shape.placeholder").get("type"), "placeholder.type")
     elif table is not None:
-        rows, at = [], 0
+        rows: list[str] = []
+        at = 0
         for row in parts(table.get("tableRows"), "table.tableRows"):
-            cells = []
+            cells: list[str] = []
             for cell in parts(row.get("tableCells"), "tableRows.tableCells"):
-                t, r, p, s = read_text(part(cell.get("text"), "tableCells.text"))
-                cells.append(t.rstrip("\n"))
-                runs += [x for x in r if x not in runs]
-                paras += [x for x in p if x not in paras]
+                read = read_text_of(part(cell.get("text"), "tableCells.text"))
+                cells.append(read.content.rstrip("\n"))
+                runs += [x for x in read.runs if x not in runs]
+                paras += [x for x in read.paragraphs if x not in paras]
                 # the cells are joined below, so the spans move with their cell into that text
-                spans += [[a + at, min(b + at, at + len(cells[-1])), st] for a, b, st in s if a < len(cells[-1])]
+                spans += [(a + at, min(b + at, at + len(cells[-1])), st) for a, b, st in read.spans if a < len(cells[-1])]
                 at += len(cells[-1]) + 1                       # the tab (or, after the last cell, the newline)
             rows.append("\t".join(cells))
         text = "\n".join(rows)
-        out["table"] = [table.get("rows"), table.get("columns")]
-    out["text"] = text
-    out["text_styles"] = runs
-    out["paragraph_styles"] = paras
-    out["run_spans"] = spans
-    out["text_style_hash"] = identity.sha1(json.dumps([sorted(json.dumps(s, sort_keys=True) for s in runs),
-                                                       sorted(json.dumps(s, sort_keys=True) for s in paras)]))[:12]
+        grid = (as_int(table.get("rows"), "table.rows"), as_int(table.get("columns"), "table.columns"))
     style = shape_style(e)
-    out["shape_style"] = style
-    out["shape_style_hash"] = identity.sha1(json.dumps(style, sort_keys=True))[:12]
-    if image is not None:
-        out["image"] = {"contentHash": image_hash(as_optional_str(image.get("contentUrl"), "image.contentUrl")),
-                        "sourceUrl": image.get("sourceUrl")}
-    return out
+    return ReadBack(
+        kind=next((k for k in KINDS if k in e), "other"),
+        transform=tuple([round(v, 4) for v in m[:4]] + [round(v, 2) for v in m[4:]]), size=(round(w, 2), round(h, 2)),
+        box=(x0, y0, x1, y1), parent_group=parent_group, z=z, title=e.get("title"), description=e.get("description"),
+        placeholder=placeholder, table=grid, text=text, text_styles=tuple(runs), paragraph_styles=tuple(paras),
+        run_spans=tuple(spans),
+        text_style_hash=identity.sha1(json.dumps([sorted(json.dumps(s, sort_keys=True) for s in runs),
+                                                  sorted(json.dumps(s, sort_keys=True) for s in paras)]))[:12],
+        shape_style=style, shape_style_hash=identity.sha1(json.dumps(style, sort_keys=True))[:12],
+        image=None if image is None else ImageRead(
+            content_hash=image_hash(as_optional_str(image.get("contentUrl"), "image.contentUrl")),
+            source_url=as_optional_str(image.get("sourceUrl"), "image.sourceUrl"), signature=None, unchecked=False),
+        children=None, refit=None)
 
 
-def background(page: Page) -> dict:
+def background_of(page: Page) -> JsonObject:
+    """A page's background as sync compares it: {picture: hash} | {color} | {state}."""
     fill = background_fill(page)
     if "stretchedPictureFill" in fill:
         return {"picture": image_hash(background_url(page))}
@@ -454,26 +544,31 @@ def background(page: Page) -> dict:
     return {"state": fill.get("propertyState", "INHERIT")}
 
 
-def read_slide(slide: Page) -> dict:
-    """A slide as sync compares it: {objectId, layoutObjectId, background, notes, notes_id,
-    order (top-level ids), objects {id: readback}}."""
-    objects: dict[str, dict] = {}
+def background(page: Page) -> dict:
+    """`background_of`, for the readers that still take a dict."""
+    return background_of(page)
+
+
+def read_slide_of(slide: Page) -> SlideRead:
+    """A slide as sync compares it: its objects' read-backs by id (a group before its children, its
+    box theirs), its top-level `order`, background and speaker notes."""
+    objects: dict[ObjectId, ReadBack] = {}
     counter = [0]
 
-    def walk(elements: list[PageElement], parent: list[float], group: str | None) -> None:
+    def walk(elements: Sequence[PageElement], parent: list[float], group: ObjectId | None) -> None:
         for e in elements:
-            oid = object_id(e)
-            rb = readback(e, parent, group, counter[0])
+            oid = ObjectId(object_id(e))
+            rb = read_object(e, parent, group, counter[0])
             counter[0] += 1
             objects[oid] = rb
             if "elementGroup" in e:
                 kids = children(e, oid)
                 walk(kids, compose(parent, matrix(e.get("transform"))), oid)
-                boxes = [objects[object_id(c)]["box"] for c in kids]
-                if boxes:
-                    rb["box"] = [min(k[0] for k in boxes), min(k[1] for k in boxes),
-                                 max(k[2] for k in boxes), max(k[3] for k in boxes)]
-                rb["children"] = [object_id(c) for c in kids]
+                boxes = [objects[ObjectId(object_id(c))].box for c in kids]
+                grown = rb.box if not boxes else (min(k[0] for k in boxes), min(k[1] for k in boxes),
+                                                  max(k[2] for k in boxes), max(k[3] for k in boxes))
+                # (put back under its own key, so the group still comes before its children)
+                objects[oid] = replace(rb, box=grown, children=tuple(ObjectId(object_id(c)) for c in kids))
 
     walk(slide.get("pageElements", []), [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], None)
     props = slide.get("slideProperties") or SlideProperties()
@@ -483,10 +578,16 @@ def read_slide(slide: Page) -> dict:
     notes = ""
     for e in notes_page.get("pageElements", []):
         if e.get("objectId") == notes_id:
-            notes = read_text(part(part(e.get("shape"), "shape").get("text"), "shape.text"))[0]
-    return {"objectId": object_id(slide), "layoutObjectId": props.get("layoutObjectId"),
-            "background": background(slide), "notes": notes.rstrip("\n"), "notes_id": notes_id,
-            "order": [object_id(e) for e in slide.get("pageElements", [])], "objects": objects}
+            notes = read_text_of(part(part(e.get("shape"), "shape").get("text"), "shape.text")).content
+    return SlideRead(object_id=ObjectId(object_id(slide)), layout_object_id=props.get("layoutObjectId"),
+                     background=background_of(slide), notes=notes.rstrip("\n"), notes_id=notes_id,
+                     order=tuple(ObjectId(object_id(e)) for e in slide.get("pageElements", [])), objects=objects)
+
+
+def read_slide(slide: Page) -> dict:
+    """`read_slide_of` as JSON: {objectId, layoutObjectId, background, notes, notes_id, order,
+    objects {id: read-back}}."""
+    return slide_read_json(read_slide_of(slide))
 
 
 def page_size(pres: Presentation) -> list[float]:
@@ -498,18 +599,25 @@ def page_size(pres: Presentation) -> list[float]:
     return [_unit(size.get("width")), _unit(size.get("height"))]
 
 
-def read_presentation(pres: Presentation) -> dict:
-    layouts = {object_id(l): (l.get("layoutProperties") or LayoutProperties()).get("name") for l in pres.get("layouts", [])}
+def read_presentation_of(pres: Presentation) -> DeckRead:
+    """The live deck as sync compares it: "theirs" to the merge, and what a base records of it."""
+    layouts: JsonObject = {object_id(l): (l.get("layoutProperties") or LayoutProperties()).get("name")
+                           for l in pres.get("layouts", [])}
     masters = pres.get("masters", [])
-    return {"presentationId": presentation_id(pres), "revisionId": pres.get("revisionId"),
-            "page_size": page_size(pres),
-            "layouts": layouts, "master_background": background(masters[0]) if masters else None,
-            "slides": [read_slide(s) for s in pres.get("slides", [])]}
+    return DeckRead(presentation_id=presentation_id(pres), revision_id=pres.get("revisionId"),
+                    page_size=tuple(page_size(pres)), layouts=layouts,
+                    master_background=background_of(masters[0]) if masters else None,
+                    slides=tuple(read_slide_of(s) for s in pres.get("slides", [])))
+
+
+def read_presentation(pres: Presentation) -> dict:
+    """`read_presentation_of` as JSON, for the readers that still take it so (and change it)."""
+    return deck_read_json(read_presentation_of(pres))
 
 
 # ---------------------------------------------------------------- base
 
-def source_info(pdf: "Path | str | dict | None") -> dict:
+def source_info(pdf: "Path | str | JsonObject | None") -> JsonObject:
     """What the base records about the PDF a deck was converted from: where it was, and what it
     said. A mapping is taken as those two facts already measured, which is how the upload half of
     a split conversion (`agent.deck_tools.deck_upload`) records the same base without the PDF's
@@ -523,7 +631,7 @@ def source_info(pdf: "Path | str | dict | None") -> dict:
     return {"pdf": str(pdf), "sha1": identity.sha1(pdf.read_bytes()) if pdf.exists() else None}
 
 
-def background_key(slide: dict, out: Path) -> str:
+def background_key(slide: JsonObject, out: Path) -> str:
     kind, value = emit_background_key(slide, out)
     return f"{kind}:{value}"
 
@@ -739,23 +847,41 @@ def refresh_pictures(base: JsonObject, ours_slides: Sequence[JsonObject], pairs:
     return refreshed
 
 
+def slide_entries_of(deck: JsonObject, out: Path, keys: Sequence[SlideKey], element_keys: Sequence[Sequence[ElementKey]],
+                     fingerprints: Sequence[Sequence[Fingerprint]]) -> list[SlideEntry]:
+    """The IR part of base slides (keys, hashes, fingerprints, IR), without objects and read-back.
+    An element's `ir` is the deck's own element, not a copy."""
+    page_key = page_keys(deck, keys)
+    entries: list[SlideEntry] = []
+    for slide, key, ekeys, fps in zip(as_objects(deck["slides"], "deck.slides"), keys, element_keys, fingerprints):
+        els = as_objects(slide["elements"], f"slide {key}: elements")
+        ids = {as_str(e["id"], f"slide {key}: element id"): k for e, k in zip(els, ekeys)}
+        elements: list[ElementEntry] = []
+        for el, ek, fp in zip(els, ekeys, fps):
+            at = f"slide {key}, element {ek}"
+            anchor = el.get("anchor")
+            anchor_key = ids.get(anchor) if isinstance(anchor, str) else None
+            h, fields = identity.ir_fields_json(el, out, anchor_key, page_key)
+            elements.append(ElementEntry(
+                key=ek, id=as_str(el["id"], f"{at}: id"), kind=as_str(el["kind"], f"{at}: kind"),
+                role=as_optional_str(el.get("role"), f"{at}: role"), ir_hash=h, fields=fields, fingerprint=fp,
+                anchor=anchor_key, ir=el, tied=None, removed=None, table_margins=None, drawn_from=None,
+                from_layout=False, in_table=False))
+        entries.append(SlideEntry(
+            key=key, label=as_optional_str(slide.get("label"), f"slide {key}: label"), title=identity.slide_title(slide),
+            page=as_int(slide["page"], f"slide {key}: page"), text=identity.slide_text(slide),
+            layout=slide_layout(slide)[0], background=background_key(slide, out),
+            notes=as_optional_str(slide.get("notes"), f"slide {key}: notes") or "", elements=tuple(elements), seen=None,
+            removed=None, left_alone=None, key_order=()))
+    return entries
+
+
 def slide_entries(deck: dict, out: Path, keys: Sequence[str], element_keys: Sequence[Sequence[str]],
                   fingerprints: list[list[dict]]) -> list[dict]:
-    """The IR part of base slides (keys, hashes, fingerprints, IR), without objects and read-back."""
-    page_key = page_keys(deck, keys)
-    entries = []
-    for slide, key, ekeys, fps in zip(deck["slides"], keys, element_keys, fingerprints):
-        ids = {e["id"]: k for e, k in zip(slide["elements"], ekeys)}
-        elements = []
-        for el, ek, fp in zip(slide["elements"], ekeys, fps):
-            h, fields = identity.ir_fields(el, out, ids.get(el.get("anchor")), page_key)
-            elements.append({"key": ek, "id": el["id"], "kind": el["kind"], "role": el.get("role"), "ir_hash": h,
-                             "fields": fields, "fingerprint": fp, "anchor": ids.get(el.get("anchor")), "ir": el})
-        entries.append({"key": key, "label": slide.get("label"), "title": identity.slide_title(slide), "page": slide["page"],
-                        "text": identity.slide_text(slide), "layout": slide_layout(slide)[0],
-                        "background": background_key(slide, out), "notes": slide.get("notes") or "",
-                        "elements": elements})
-    return entries
+    """`slide_entries_of` as JSON, the fingerprints as `identity.fingerprint` writes them."""
+    return [slide_entry_json(s) for s in slide_entries_of(
+        deck, out, [SlideKey(k) for k in keys], [[ElementKey(k) for k in ks] for ks in element_keys],
+        [[fingerprint(fp, f"slide {key}: fingerprint") for fp in fps] for key, fps in zip(keys, fingerprints)])]
 
 
 def page_keys(deck: JsonObject, keys: Sequence[str]) -> Callable[[int], str]:
@@ -948,59 +1074,89 @@ def base_form_json(found: Sequence[BaseForm]) -> list[JsonObject]:
     return out
 
 
-def attach_readback(entry: dict, slide_read: dict | None, objects: list[list[str]], groups: list[str]) -> None:
-    """Objects and read-back of one base slide."""
-    entry["objectId"] = slide_read["objectId"] if slide_read else None
-    entry["layoutObjectId"] = slide_read["layoutObjectId"] if slide_read else None
-    entry["background_readback"] = slide_read["background"] if slide_read else None
-    entry["notes_readback"] = slide_read["notes"] if slide_read else ""
-    entry["groups"] = groups
-    entry["order"] = slide_read["order"] if slide_read else []
-    found = slide_read["objects"] if slide_read else {}
-    for el, oids in zip(entry["elements"], objects):
-        if slide_read and any(oid in found for oid in oids):
+def attached(entry: SlideEntry, slide_read: SlideRead | None, objects: Sequence[Sequence[ObjectId]],
+             groups: Sequence[ObjectId]) -> SlideEntry:
+    """One base slide with the objects it was written as and their read-back (None: the deck has
+    no such slide)."""
+    found: Mapping[ObjectId, ReadBack] = {} if slide_read is None else slide_read.objects
+    elements = list(entry.elements)
+    for i, (el, written) in enumerate(zip(entry.elements, objects)):
+        oids = list(written)
+        if slide_read is not None and any(oid in found for oid in oids):
             # What emit meant to create, less what the deck does not have: a diagram of one node
             # gets no group (Slides groups two objects or more), and a group id the base names
             # but the deck never had reads as deleted to every later sync and rebuild guard.
             oids = [oid for oid in oids if oid in found]
-        el["objects"] = oids
-        el["main"] = oids[0] if oids else None
-        el["readback"] = {oid: found[oid] for oid in oids if oid in found}
+        elements[i] = replace(el, tied=Tied(objects=tuple(oids), main=oids[0] if oids else None,
+                                            readback={oid: found[oid] for oid in oids if oid in found}))
+    seen = SlideSeen(object_id=None if slide_read is None else slide_read.object_id,
+                     layout_object_id=None if slide_read is None else slide_read.layout_object_id,
+                     background_readback=None if slide_read is None else slide_read.background,
+                     notes_readback="" if slide_read is None else slide_read.notes, groups=tuple(groups),
+                     order=() if slide_read is None else slide_read.order)
+    return replace(entry, elements=tuple(elements), seen=seen)
 
 
-def build_base(deck: dict, out: Path, pres: Presentation, state: dict, pdf: "Path | dict", generation: int,
-               sign: bool, overlays: str, signatures: Mapping[str, str] | None) -> dict:
+def _ids(v: Json, where: str) -> list[ObjectId]:
+    return [ObjectId(as_str(x, f"{where}[{i}]")) for i, x in enumerate(as_array(v, where))]
+
+
+def _margins(v: Json, where: str) -> tuple[tuple[float, ...], ...]:
+    return tuple(tuple(_number(x, where) for x in as_array(m, where)) for m in as_array(v, where))
+
+
+def build_base_of(deck: JsonObject, out: Path, pres: Presentation, state: JsonObject, pdf: "Path | JsonObject",
+                  generation: int, sign: bool, overlays: str, signatures: Mapping[str, str] | None) -> Base:
     """The base after `convert`: `state` is emit's (slides with element object ids); `sign`:
     download the pictures for their signatures (`signatures`: unless these were downloaded
     already); `overlays`: which overlay steps the deck was made from, so a later sync uses the
     same ones (a sync with fewer would delete the deck's slides)."""
-    infos = [identity.slide_info(s) for s in deck["slides"]]
-    keys = identity.slide_keys(infos)
-    ekeys, fps = zip(*[identity.slide_element_keys(s["elements"], out) for s in deck["slides"]]) if deck["slides"] else ((), ())
-    entries = slide_entries(deck, out, keys, list(ekeys), list(fps))
-    read = read_presentation(pres)
+    deck_slides = as_objects(deck["slides"], "deck.slides")
+    keys = identity.slide_keys([identity.slide_info(s) for s in deck_slides])
+    made = [identity.slide_element_keys_of(as_objects(s["elements"], "slide.elements"), out, None) for s in deck_slides]
+    entries = slide_entries_of(deck, out, keys, [k for k, _ in made], [f for _, f in made])
+    read = read_presentation_of(pres)
     if sign:
-        sign_pictures(read, pres, objects=None, slides=None, workers=PICTURE_WORKERS, ready=signatures, fetch=None,
-                      drive=None, files=None, pictures=None)
-    by_id = {s["objectId"]: s for s in read["slides"]}
-    for entry, s in zip(entries, state["slides"]):
-        attach_readback(entry, by_id.get(s["objectId"]), s.get("objects") or [[o] for o in s["elements"]], s.get("groups", []))
+        read, _ = sign_pictures_of(read, pres, None, None, PICTURE_WORKERS, signatures, None, None, None, None)
+    by_id = {s.object_id: s for s in read.slides}
+    for n, s in enumerate(as_objects(state["slides"], "state.slides")[:len(entries)]):
+        at = f"state slide {n}"
+        written = s.get("objects")
+        objects = [_ids(o, f"{at}: objects") for o in as_array(written, f"{at}: objects")] if written else \
+            [[o] for o in _ids(s["elements"], f"{at}: elements")]
+        oid = s.get("objectId")
+        entry = attached(entries[n], by_id.get(ObjectId(oid)) if isinstance(oid, str) else None, objects,
+                         _ids(s.get("groups", []), f"{at}: groups"))
         # The cell margins of a table the .pptx brought (emit.pptx_table), which the API can
         # neither read nor set: a sync refills such a table in place (sync.table_refill).
-        for i, margins in (s.get("table_margins") or {}).items():
-            entry["elements"][int(i)]["table_margins"] = [list(m) for m in margins]
-    return {"version": VERSION, "generation": generation, "presentationId": read["presentationId"],
-            "revisionId": read["revisionId"], "source": source_info(pdf), "overlays": overlays,
-            "scale": state.get("scale"),
-            "page_size": deck["slides"][0]["size"] if deck["slides"] else None, "deck_page_size": read["page_size"],
-            "master_background": master_key(deck, out), "master_readback": read["master_background"],
-            "slides": entries}
+        margins = part(s.get("table_margins"), f"{at}: table_margins")
+        if margins:
+            elements = list(entry.elements)
+            for i, m in margins.items():
+                elements[int(i)] = replace(elements[int(i)], table_margins=_margins(m, f"{at}: table_margins"))
+            entry = replace(entry, elements=tuple(elements))
+        entries[n] = entry
+    scale = state.get("scale")
+    size = deck_slides[0]["size"] if deck_slides else None
+    return Base(version=VERSION, generation=generation, presentation_id=read.presentation_id,
+                revision_id=read.revision_id, source=source_info(pdf), overlays=overlays,
+                scale=None if scale is None else _number(scale, "state.scale"),
+                page_size=None if size is None else tuple(_number(x, "slide.size") for x in as_array(size, "slide.size")),
+                deck_page_size=read.page_size, master_background=master_key(deck, out),
+                master_readback=read.master_background, slides=tuple(entries), theme=None, pending=None, cleanup=None,
+                origin=None, adopt=None)
 
 
-def master_key(deck: dict, out: Path) -> str | None:
+def build_base(deck: dict, out: Path, pres: Presentation, state: dict, pdf: "Path | dict", generation: int,
+               sign: bool, overlays: str, signatures: Mapping[str, str] | None) -> dict:
+    """`build_base_of` as the JSON base.json holds."""
+    return base_json(build_base_of(deck, out, pres, state, pdf, generation, sign, overlays, signatures))
+
+
+def master_key(deck: JsonObject, out: Path) -> str | None:
     """The background emit put on the master (the most common one, if shared)."""
     from collections import Counter
-    counts = Counter(background_key(s, out) for s in deck["slides"])
+    counts = Counter(background_key(s, out) for s in as_objects(deck["slides"], "deck.slides"))
     if not counts:
         return None
     key, n = counts.most_common(1)[0]
@@ -1357,8 +1513,8 @@ def snapshot_after_convert(deck: dict, out: Path, state: dict, pdf: "Path | dict
     try:
         from . import theme_sync
         theme = theme_sync.record(deck, out, pres, state)
-        if theme:
-            base["theme"] = theme
+        if theme is not None:
+            base["theme"] = theme_sync.theme_json(theme)
     except Exception as e:  # noqa: BLE001 (a missing record costs theme sync, never the conversion)
         problem(f"could not record the deck's theme for sync ({e}); a later sync leaves the "
                 f"master and layouts alone")

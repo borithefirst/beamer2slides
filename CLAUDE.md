@@ -220,7 +220,7 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
 - **A deck's pictures need no URL fetch** (docs/sync.md "signature"): what this run uploaded is
   signed from its file (`snapshot.upload_signatures`, aspect within 1%); a live picture whose URL
   changed is `unchecked` and read only when the plan depends on it (`Sync.pictures_in_question`,
-  `merge.unchecked`); reads go through `deck_pictures.LivePictures`, download else one Drive
+  `merge.pictures_unchecked`); reads go through `deck_pictures.LivePictures`, download else one Drive
   `.pptx` export paired by page/drawing order and titles. `Sync.plan` is the DeckPlan, the merge
   is `Sync.merge_plan`. `--no-downloads` / `$B2S_NO_DOWNLOADS` / `net.no_downloads` refuses every
   download (places predicted, no `fidelity`); `net.downloads_off` lets a site skip its setup.
@@ -260,8 +260,10 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   callers through thin entries (`text_box_requests` -> `text_box_requests_of`); tables, diagrams,
   holes/overlays and the theme too (`SetTable`, `NodeLook`, `HoleText`/`Anchored`/`Place`,
   `ThemePlan`/`MasterPlan`/`PlaceholderStyle`); a function handing back the caller's elements keeps
-  their type (`emit_model.ElementDict`, `merge_blocks`); DeckPlan declares its state, its
-  `deck`/`merged`/`contained` still the dicts sync and layout_oracle read. A test patching a planner patches
+  their type (`emit_model.ElementDict`, `merge_blocks`); DeckPlan declares its state (`deck`/`merged`
+  JsonObject read through `plan.slides()`, `contained` a list of `emit.ContainedEntry`); the
+  Google-facing functions take `google_types` services, and the rebuild preflight is a
+  `Preflight(presentation_id, found)` record through `plan_rebuild`/`look_again`. A test patching a planner patches
   `emit.text_element_requests` / `shape_element_requests`. Sync and `adopt_sync.convert_source` plan the same
   way (`sync.planned`, report `contained`); a base element unchanged since takes its picture's form
   in the base (`sync.base_as_contained`), so nothing churns. Slides `mark_emitted` cannot compare
@@ -302,6 +304,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   `DeckRead`, `ReadBack`; keys `SlideKey`/`ElementKey`/`ObjectId`), parsed where sync reads them
   and written back byte for byte; `merge.plan_merge_of` returns a `MergePlan` of records
   (`plan_merge` the dict entry); `refit.plan` takes `RefitJob`s, `text_layout.layout` a `Layout`.
+  snapshot builds those records and sync reads the MergePlan and `Work` records (its state declared
+  in `__init__`); theme_sync's base theme is a `ThemeRecord` (`theme_record`/`theme_json`), its side
+  a `ThemeSide`, its merge a `ThemeMerge` of `Wrote`s. `guard.survey` still reads merge's dict
+  entries: it judges bases before sync parses them, and `sync_model.base` is strict.
 - **A base's picture is its bytes, not its name**: every sync renders into `<out>/sync/ours` under
   the same names, so base pictures are found by the hash the base read (`snapshot.BasePictures`
   over `picture_folders(out)`) and held out of the next render's way first (`hold_base_pictures`);

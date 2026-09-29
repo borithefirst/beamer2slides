@@ -627,14 +627,15 @@ def ours_from_folder(folder: Path, base: dict) -> dict | None:
     extract, classify and render halves are what the folder already holds)."""
     from beamer2slides import identity, snapshot
     from beamer2slides.emit import SLIDE_W, DeckPlan, merge_blocks
+    from beamer2slides.json_types import as_objects
     from beamer2slides.sync import mark_emitted
     path = folder / "deck.json"
     if not path.exists():
         return None
     deck = json.loads(path.read_text(encoding="utf-8"))
     plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]}, SLIDE_W)
-    deck = plan.deck
-    infos = [identity.slide_info_of(s) for s in deck["slides"]]
+    deck, slides = plan.deck, plan.slides()
+    infos = [identity.slide_info_of(s) for s in slides]
     base_keys = [b["key"] for b in base["slides"]]
     base_infos = [identity.base_slide_info(b, k) for b, k in zip(base["slides"], base_keys)]
     found = identity.label_moves_of(base_infos, infos)
@@ -642,9 +643,9 @@ def ours_from_folder(folder: Path, base: dict) -> dict | None:
     weak: dict[int, str] = {}
     keys, pairs_ = identity.inherit_slide_keys(base_infos, base_keys, infos, found, weak)
     ekeys, fps = [], []
-    for j, slide in enumerate(deck["slides"]):
+    for j, slide in enumerate(slides):
         matched = identity.base_items(base["slides"][pairs_[j]]["elements"]) if j in pairs_ else None
-        k, f = identity.slide_element_keys(slide["elements"], folder, matched)
+        k, f = identity.slide_element_keys(as_objects(slide["elements"], "elements"), folder, matched)
         ekeys.append(k)
         fps.append(f)
     entries = snapshot.slide_entries(deck, folder, keys, ekeys, fps)

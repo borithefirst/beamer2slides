@@ -15,6 +15,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import copy
+from dataclasses import dataclass
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Callable, TypedDict, TypeVar
@@ -77,12 +78,13 @@ from .emit_widths import (  # noqa: F401 (callers take these from here)
 from .fonts import font_info  # noqa: F401 (callers take these from here)
 from .gapi import HttpError
 from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
+from .google_types import DriveService, SlidesService, as_json, object_id
 from .gslides import EMU_PER_PT, emu, execute, per_thread
 from .ir_types import (
     DiagramElement, Element, FallbackImage, ImageElement, MarkedShape, RenderedElement, ShapeElement, TableElement,
     TextElement, parse_element, parse_rendered_element,
 )
-from .json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
+from .json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_optional_str, as_str
 from .typing_compat import assert_never, override
 
 if TYPE_CHECKING:
@@ -126,11 +128,27 @@ def parse_slide_element(el: JsonObject, rendered: bool, where: str) -> Element |
 
 # ---------------------------------------------------------------- main entry
 
-def existing_presentation(drive, out: Path) -> str | None:
+@dataclass(frozen=True, kw_only=True)
+class Preflight:
+    """What `preflight_rebuild` found: the deck the output folder points at and the guard's finding
+    about it (`guard.check_rebuild`), which `plan_rebuild` confirms with one field of one read."""
+    presentation_id: str
+    found: JsonObject
+
+
+class ContainedEntry(TypedDict):
+    """An element `DeckPlan.contain` made the picture of its region (emit.json's "contained")."""
+    page: int
+    id: str
+    kind: str | None
+    error: str
+
+
+def existing_presentation(drive: DriveService, out: Path) -> str | None:
     """The deck from a previous run of this output folder, if it still exists (not trashed)."""
     from .guard import previous_deck
-    previous = previous_deck(drive, out)
-    return previous["presentationId"] if previous and previous["state"] == "live" else None
+    previous: JsonObject | None = previous_deck(drive, out)
+    return as_str(previous["presentationId"], "presentationId") if previous and previous["state"] == "live" else None
 
 
 def size_pt(element: JsonMap) -> tuple[float, float]:
@@ -152,7 +170,7 @@ def fallback_element(el: JsonMap) -> JsonObject:
             "file": f"figures/fallback-{el['id']}.png"}
 
 
-def crop_fallbacks(deck: dict, wanted: list[tuple[int, str]], out: Path, why: str) -> None:
+def crop_fallbacks(deck: JsonMap, wanted: list[tuple[int, str]], out: Path, why: str) -> None:
     """Crop the picture of every fallback element ((PDF page, element id) in `wanted`) out of the
     PDF the deck was built from, into `out`. `why`: what made them pictures, for the error when
     that PDF is not there."""
@@ -160,7 +178,8 @@ def crop_fallbacks(deck: dict, wanted: list[tuple[int, str]], out: Path, why: st
 
     if not wanted:
         return
-    source_pdf = out / "slides.pdf" if (out / "slides.pdf").exists() else Path(deck["source"]["pdf"])
+    source_pdf = out / "slides.pdf" if (out / "slides.pdf").exists() else \
+        Path(as_str(as_object(deck["source"], "source")["pdf"], "source.pdf"))
     if not source_pdf.exists():
         # The one step of a conversion that needs the PDF itself rather than what was classified
         # out of it, and the only reason `agent.deck_tools.deck_upload` asks for one at all. A
@@ -170,55 +189,58 @@ def crop_fallbacks(deck: dict, wanted: list[tuple[int, str]], out: Path, why: st
             f"was built from is not at {source_pdf}. Put it back beside the folder (or pass it in) "
             f"and build the deck again.")
     regions = set(wanted)
-    for slide in deck["slides"]:
-        for el in slide["elements"]:
-            if (slide["page"], el["id"]) in regions and el.get("role") == "fallback":
-                (out / el["file"]).parent.mkdir(parents=True, exist_ok=True)
-                crop_region(source_pdf, slide["page"], el["bbox"], out / el["file"], 6.0)
+    for slide in objects_of(deck["slides"], "slides"):
+        page = _page(slide)
+        for el in _elements(slide):
+            if (page, el["id"]) in regions and el.get("role") == "fallback":
+                file = out / as_str(el["file"], "file")
+                file.parent.mkdir(parents=True, exist_ok=True)
+                crop_region(source_pdf, page, list(box_of(el["bbox"], "bbox")), file, 6.0)
 
 
-def fallback_pictures(deck: dict, refused: list[tuple[int, str]], out: Path) -> dict:
+def fallback_pictures(deck: JsonMap, refused: list[tuple[int, str]], out: Path) -> JsonObject:
     """The deck with every element the API refused ((PDF page, element id)) replaced by a
     picture of its region, cropped from the PDF the deck was built from."""
-    new_slides = []
-    for slide in deck["slides"]:
+    new_slides: list[Json] = []
+    for slide in objects_of(deck["slides"], "slides"):
         ids = {eid for page, eid in refused if page == slide["page"]}
-        elements = []
-        for el in slide["elements"]:
-            if el["id"] in ids and el["kind"] != "image":
-                ids.discard(el["id"])
+        elements: list[Json] = []
+        for el in _elements(slide):
+            eid = el["id"]
+            if isinstance(eid, str) and eid in ids and el["kind"] != "image":
+                ids.discard(eid)
                 el = fallback_element(el)
             elements.append(el)
         new_slides.append({**slide, "elements": elements})
-    new = {**deck, "slides": new_slides}
+    new: JsonObject = {**deck, "slides": new_slides}
     crop_fallbacks(new, refused, out, f"the API refused {len(refused)} element(s)")
     return new
 
 
-def preflight_rebuild(out: Path, source_pdf: Path | None, new_deck: bool = False, force_rebuild: bool = False,
-                      slides=None, drive=None) -> dict | None:
+def preflight_rebuild(out: Path, source_pdf: Path | None, new_deck: bool, force_rebuild: bool,
+                      slides: SlidesService | None, drive: DriveService | None) -> Preflight | None:
     """The guard's question (guard.check_rebuild) before the conversion work starts, so a refusal
     comes in a second instead of after extract, classify and render. `emit` asks again - and backs
     the deck up - immediately before the write, in case the deck is edited in between.
 
-    Returns what it found ({"presentationId", "found"}), which that second ask confirms with one
-    field of one read instead of asking the whole question again (`plan_rebuild`'s `checked`);
-    None where there was nothing to ask."""
+    Returns what it found, which that second ask confirms with one field of one read instead of
+    asking the whole question again (`plan_rebuild`'s `checked`); None where there was nothing to
+    ask. `slides` / `drive`: the clients to ask with (None: this thread's own)."""
     from . import guard
 
     if new_deck or force_rebuild or not (out / "emit.json").exists():
         return None
     drive = drive or drive_service()
-    previous = guard.previous_deck(drive, out)
+    previous: JsonObject | None = guard.previous_deck(drive, out)
     if not previous or previous["state"] != "live":
         return None
-    pid = previous["presentationId"]
-    return {"presentationId": pid,
-            "found": guard.check_rebuild(slides or slides_service(), drive, pid, out, source_pdf, False)}
+    pid = as_str(previous["presentationId"], "presentationId")
+    found: JsonObject = guard.check_rebuild(slides or slides_service(), drive, pid, out, source_pdf, False)
+    return Preflight(presentation_id=pid, found=found)
 
 
-def preflight_in_background(out: Path, source_pdf: Path | None, new_deck: bool = False,
-                            force_rebuild: bool = False):
+def preflight_in_background(out: Path, source_pdf: Path | None, new_deck: bool,
+                            force_rebuild: bool) -> Callable[[], Preflight | None]:
     """`preflight_rebuild` on a thread of its own. Returns the function that asks for its answer:
     it raises whatever the check raised, and gives back what it found (`emit`'s `checked`).
 
@@ -231,7 +253,7 @@ def preflight_in_background(out: Path, source_pdf: Path | None, new_deck: bool =
     if new_deck or force_rebuild or not (out / "emit.json").exists() \
             or shared_service("slides", "v1") or shared_service("drive", "v3"):
         # Nothing to ask, or a caller's own clients, which are that caller's one thread's.
-        found = preflight_rebuild(out, source_pdf, new_deck, force_rebuild)
+        found = preflight_rebuild(out, source_pdf, new_deck, force_rebuild, None, None)
         return lambda: found
     creds = credentials_for_threads()  # here: a worker thread inherits no context (google_auth)
     pool = ThreadPoolExecutor(1, thread_name_prefix="b2s-preflight")
@@ -239,12 +261,13 @@ def preflight_in_background(out: Path, source_pdf: Path | None, new_deck: bool =
                                                  slides_service(creds), drive_service(creds)))
     pool.shutdown(wait=False)
 
-    def answer() -> dict | None:
+    def answer() -> Preflight | None:
         return work.result()
     return answer
 
 
-def look_again(slides, drive, out: Path, checked: dict | None) -> tuple[dict | None, dict | None]:
+def look_again(slides: SlidesService, drive: DriveService, out: Path, checked: Preflight | None
+               ) -> tuple[JsonObject | None, JsonObject | None]:
     """What the output folder points at, and the preflight's finding where it still stands.
 
     Two reads that need nothing of each other - the deck's place in Drive and its revision - so
@@ -253,21 +276,24 @@ def look_again(slides, drive, out: Path, checked: dict | None) -> tuple[dict | N
     now in the trash) gets the whole question again, in `plan_rebuild`."""
     from . import guard
 
-    pid = (checked or {}).get("presentationId")
-    if not pid or shared_service("slides", "v1"):
-        return guard.previous_deck(drive, out), None
+    previous: JsonObject | None
+    if checked is None or not checked.presentation_id or shared_service("slides", "v1"):
+        previous = guard.previous_deck(drive, out)
+        return previous, None
+    pid, finding = checked.presentation_id, checked.found
     creds = credentials_for_threads()  # here: a worker thread inherits no context (google_auth)
     with ThreadPoolExecutor(1, thread_name_prefix="b2s-recheck") as pool:
-        again = pool.submit(lambda: guard.recheck(slides_service(creds), pid, checked["found"]))
+        again = pool.submit(lambda: guard.recheck(slides_service(creds), pid, finding))
         previous = guard.previous_deck(drive, out)
-        found = again.result()
+        found: JsonObject | None = again.result()
     if previous and previous["presentationId"] == pid and previous["state"] == "live":
         return previous, found
     return previous, None
 
 
-def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, backup: str,
-                 source_pdf: Path | None, checked: dict | None = None) -> tuple[str | None, dict | None]:
+def plan_rebuild(slides: SlidesService, drive: DriveService, out: Path, new_deck: bool, force_rebuild: bool,
+                 backup: str, source_pdf: Path | None, checked: Preflight | None
+                 ) -> tuple[str | None, JsonObject | None]:
     """Decide what happens to the deck this output folder already has: rebuild it in place (the id
     is returned), or leave it alone and make a new one. Nothing destructive happens before this:
     `guard.check_rebuild` raises `guard.RebuildRefused` when the deck was edited in Slides, and a
@@ -285,10 +311,11 @@ def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, 
     previous, found = look_again(slides, drive, out, None if new_deck or force_rebuild else checked)
     if previous is None:
         return None, None
-    pid, url = previous["presentationId"], guard.deck_url(previous["presentationId"])
+    pid = as_str(previous["presentationId"], "presentationId")
+    url = guard.deck_url(pid)
     if previous["state"] != "live":
         where = {"trashed": "is in the Drive trash", "gone": "is gone (deleted, or not this app's file any more)",
-                 "other": "is not a presentation any more"}[previous["state"]]
+                 "other": "is not a presentation any more"}[as_str(previous["state"], "state")]
         print(f"the deck of the previous run ({pid}) {where}: making a new one, that deck is left as it is")
         return None, {"presentationId": pid, "state": previous["state"], "action": "new deck", "url": url}
     if new_deck:
@@ -297,15 +324,17 @@ def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, 
         return None, {"presentationId": pid, "state": "kept", "action": "new deck", "url": url}
     found = found or guard.check_rebuild(slides, drive, pid, out, source_pdf, force_rebuild)
     mode = backup if backup != "auto" else ("file" if found["reason"] else "none")
-    entry = {"presentationId": pid, "url": url, "action": "rebuilt in place", "revisionId": found.get("revisionId"),
-             "modifiedTime": previous.get("modifiedTime"), "out": str(out),  # Drive's clock, and where to restore from
-             "checked": found.get("checked"), "reason": found.get("reason") or "no deck edits",
-             "summary": guard.summary_line(found) if found.get("edited") else "no deck edits",
-             "examples": found.get("examples", []), "base_from": found.get("base_from")}
+    reason = as_str(found.get("reason") or "no deck edits", "reason")
+    entry: JsonObject = {
+        "presentationId": pid, "url": url, "action": "rebuilt in place", "revisionId": found.get("revisionId"),
+        "modifiedTime": previous.get("modifiedTime"), "out": str(out),  # Drive's clock, and where to restore from
+        "checked": found.get("checked"), "reason": reason,
+        "summary": guard.summary_line(found) if found.get("edited") else "no deck edits",
+        "examples": found.get("examples", []), "base_from": found.get("base_from")}
     if found["reason"]:
         print(f"WARNING: rebuilding a deck that {'was edited in Slides' if found['reason'] == 'edited' else found['reason']} "
               f"(--force-rebuild): {entry['summary']}")
-    entry["backup"] = guard.backup_deck(drive, pid, out, mode, entry["reason"], slides=slides)
+    entry["backup"] = guard.backup_deck(drive, pid, out, mode, reason, slides=slides)
     guard.record(out, entry)  # the attempt belongs in the log even when it failed, and what follows
     if found["reason"]:
         guard.demand_way_back(pid, out, source_pdf, entry, mode)  # no backup, no forced rebuild
@@ -315,9 +344,8 @@ def plan_rebuild(slides, drive, out: Path, new_deck: bool, force_rebuild: bool, 
     return pid, entry
 
 
-def emit(deck: dict, out: Path, title: str, new_deck: bool = False, measure: bool = True,
-         force_rebuild: bool = False, backup: str = "auto", source_pdf: Path | None = None,
-         checked: dict | None = None) -> dict:
+def emit(deck: ObjectMap, out: Path, title: str, new_deck: bool, measure: bool, force_rebuild: bool, backup: str,
+         source_pdf: Path | None, checked: Preflight | None) -> dict:
     """Build the deck. An output folder that already has a deck is rebuilt in place unless
     `new_deck`; that replaces the deck's whole content, so `guard.check_rebuild` refuses when
     the deck was edited in Slides (`force_rebuild` goes ahead, after a backup). `checked`: what
@@ -345,7 +373,7 @@ def emit(deck: dict, out: Path, title: str, new_deck: bool = False, measure: boo
     return state
 
 
-def upload_plan(deck: dict, out: Path) -> "DeckPlan":
+def upload_plan(deck: ObjectMap, out: Path) -> "DeckPlan":
     """build_deck's plan of `deck` (as classify wrote it). What the plan could not make of an
     element (a field its producer never wrote: `DeckPlan.contain`) is the picture of its region, as
     a refused element's is: each is said in a warning, listed in emit.json ("contained"), and its
@@ -359,18 +387,19 @@ def upload_plan(deck: dict, out: Path) -> "DeckPlan":
     return plan
 
 
-def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str | None,
-               measure: bool = True) -> tuple[dict, list[tuple[int, str]]]:
+def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out: Path, title: str, existing: str | None,
+               measure: bool) -> tuple[dict, list[tuple[int, str]]]:
     """Import the .pptx and fill in the content. Returns the state for emit.json and the
     elements the API refused ((PDF page, element id)). `measure`: hole and overlay pictures go
     where a thumbnail shows their gaps and words (measure_places), not only where they are predicted."""
-    page_w, page_h = deck["slides"][0]["size"]
     plan = upload_plan(deck, out)
-    deck, scale, fonts = plan.deck, plan.scale, plan.fonts
+    written, scale, fonts = plan.deck, plan.scale, plan.fonts
+    written_slides = plan.slides()
+    page_w, page_h = (json_number(v, "size") for v in as_array(written_slides[0]["size"], "size"))
 
     # Backgrounds: the most common one becomes the master's (the deck's theme): layouts and
     # slides inherit it, and slides added later too. Identical pictures are stored once.
-    mp = master_plan_of(deck, out, "plan")
+    mp = master_plan_of(written, out, "plan")
     theme = mp.theme
 
     def fill(key: BgKey) -> dict[str, str | Path]:
@@ -378,25 +407,25 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
 
     master_fill = fill(mp.fill)
     pages = [{
-        "layout": theme.layouts[s["page"]] if theme else slide_layout(s)[0],
-        "fill": None if mp.bg_key[s["page"]] == mp.shared else fill(mp.bg_key[s["page"]]),
+        "layout": theme.layouts[_page(s)] if theme else slide_layout(s)[0],
+        "fill": None if mp.bg_key[_page(s)] == mp.shared else fill(mp.bg_key[_page(s)]),
         "pictures": [{"file": out / as_str(e["file"], "file"), "bbox": bbox, "alt": e.get("alt"),
                       "title": picture_title(e)} for e, bbox in plan.pictures(s)],
         "tables": plan.tables(s),
-        "templates": plan.uses_templates[s["page"]],
-    } for s in deck["slides"]]
+        "templates": plan.uses_templates[_page(s)],
+    } for s in written_slides]
     pptx = build_pptx(page_w, page_h, plan.keys, pages, master_fill, dict(theme.decorations) if theme else None)
     pres = import_presentation(slides, drive, title, page_w, page_h, pptx, existing)
     pid = as_str(pres["presentationId"], "presentationId")
     sources = as_objects(pres.get("slides", []), "the imported slides")
-    if len(sources) != len(deck["slides"]):
-        raise RuntimeError(f"the import brought {len(sources)} slides, expected {len(deck['slides'])}")
+    if len(sources) != len(written_slides):
+        raise RuntimeError(f"the import brought {len(sources)} slides, expected {len(written_slides)}")
 
     # Phase 1: every source slide is copied under our object IDs (slide, title and subtitle
     # placeholders, pictures, template shapes); the sources are deleted at the end.
     template_sizes: list[tuple[float, float]] = []
     reqs = []
-    for slide, source in zip(deck["slides"], sources):
+    for slide, source in zip(written_slides, sources):
         request, sizes = plan.copy_request(slide, source)
         template_sizes = template_sizes or sizes
         reqs.append(request)
@@ -417,9 +446,9 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     layout_pool, layout_work = None, None
     if threaded:
         layout_pool = ThreadPoolExecutor(1, thread_name_prefix="b2s-layout")
-        layout_work = layout_pool.submit(write_layouts, client, pid, deck, scale, fonts, ground)
+        layout_work = layout_pool.submit(write_layouts, client, pid, written, scale, fonts, ground)
     else:
-        write_layouts(client, pid, deck, scale, fonts, ground)
+        write_layouts(client, pid, written, scale, fonts, ground)
 
     slide_states: list[dict[str, object]] = []  # (emit.json's "slides", which the base is read with)
     state: dict[str, object] = {"presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
@@ -435,13 +464,19 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
     created = execute(slides.presentations().get(
         presentationId=pid,
         fields="slides(objectId,pageElements(objectId,size),slideProperties/notesPage/notesProperties)"))
-    page_elements = {s["objectId"]: s.get("pageElements", []) for s in created["slides"]}
-    speaker_notes = {s["objectId"]: s.get("slideProperties", {}).get("notesPage", {})
-                     .get("notesProperties", {}).get("speakerNotesObjectId") for s in created["slides"]}
+    copied = created.get("slides")
+    if copied is None:
+        raise KeyError("slides")  # (the answer always has them: as reading it by key said before)
+    page_elements = {object_id(s): [as_json(e, "a copied slide's element") for e in s.get("pageElements", [])]
+                     for s in copied}
+    speaker_notes = {object_id(s): as_optional_str(s.get("slideProperties", {}).get("notesPage", {})
+                                                   .get("notesProperties", {}).get("speakerNotesObjectId"),
+                                                   "speakerNotesObjectId")
+                     for s in copied}
     moves: Mapping[str, Place] = {}
     scratch: list[str] = []
     if measure:
-        moves, scratch = measure_places(slides, pid, deck, scale, fonts, plan.placed, plan.page_slide, out)
+        moves, scratch = measure_places(slides, pid, written, scale, fonts, plan.placed, plan.page_slide, out)
 
     # Phase 2: content, batched over slides. Each slide's requests come in parts (one per
     # element) so that a rejected batch can be narrowed down to the element at fault.
@@ -535,7 +570,7 @@ def build_deck(slides, drive, deck: dict, out: Path, title: str, existing: str |
                 p.shutdown()
     refused.sort()                   # several threads appended to it
     batch(slides, pid, [{"deleteObject": {"objectId": oid}} for oid in [s["objectId"] for s in sources] + scratch])
-    state["deck"] = deck  # (what was built, for the sync snapshot; not written to emit.json)
+    state["deck"] = written  # (what was built, for the sync snapshot; not written to emit.json)
     return state, refused
 
 
@@ -642,18 +677,18 @@ class DeckPlan:
     The plan's own state is typed: `page_slide` (PDF page -> the slide internal links go to), `keys`
     (the template shapes the .pptx carries) and `uses_templates` per page, the predicted `shifts` of
     formula pictures and `overlays` boxes per page. `deck` (what emit writes: blocks merged, holes
-    fitted), `merged` (the same before the holes are fitted: `emit`'s rebuild) and `contained`
-    ({"page", "id", "kind", "error"} per element made a picture) are the dicts sync, the layout
-    oracle and emit.json read as they always have; the plan reads them through `slides()`."""
+    fitted) and `merged` (the same before the holes are fitted: `emit`'s rebuild) are deck.json
+    as JSON, whose slides `slides()` reads; `contained` (`ContainedEntry` per element made a
+    picture) is what emit.json writes."""
 
     page_width: float
     pptx_tables: bool
     scale: float
     fonts: FontMapper
     page_slide: Mapping[int, str]
-    contained: list[dict]
-    merged: dict
-    deck: dict
+    contained: list[ContainedEntry]
+    merged: JsonObject
+    deck: JsonObject
     keys: list[TemplateKey]
     uses_templates: dict[int, bool]
     shifts: dict[int, dict[str, float]]
@@ -992,7 +1027,7 @@ class OfflinePlan(TypedDict):
     speaker_notes: dict[str, str]
     measure: list[JsonObject]
     slides: list[tuple[str, int, list[Part], list[str]]]
-    contained: list[dict]
+    contained: list[ContainedEntry]
 
 
 def plan_offline(deck: ObjectMap, placeholder_size: tuple[float, float] = PLACEHOLDER_SIZE,
@@ -1200,7 +1235,7 @@ class _OnePage(Mapping[int, str]):
 class Emission(TypedDict):
     """`slide_emission`'s answer."""
     slide_id: str
-    parts: list[tuple[dict | None, list[dict]]]  # (as sync's emitted_elements reads them)
+    parts: list[Part]
     element_ids: list[str]
     boxes: list[list[float] | None]
     title: int | None

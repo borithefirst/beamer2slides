@@ -17,6 +17,8 @@ from googleapiclient.errors import HttpError
 
 from beamer2slides import guard, snapshot
 
+from . import sync_work
+
 SRC = Path(guard.__file__).parent  # the package as imported, whatever layout it was staged in
 
 
@@ -441,8 +443,8 @@ def test_the_preflight_hands_its_finding_to_the_write(tmp_path, monkeypatch):
 
     pres = presentation()
     out = out_with_base(tmp_path, base_of(pres))
-    checked = emit.preflight_rebuild(out, Path("talk.pdf"), slides=FakeSlides(pres), drive=FakeDrive())
-    assert checked["presentationId"] == "P1" and checked["found"]["revisionId"] == "rev1"
+    checked = emit.preflight_rebuild(out, Path("talk.pdf"), False, False, FakeSlides(pres), FakeDrive())
+    assert checked is not None and checked.presentation_id == "P1" and checked.found["revisionId"] == "rev1"
 
     slides = CountingSlides("rev1")
     monkeypatch.setattr(emit, "credentials_for_threads", lambda: None)
@@ -460,13 +462,27 @@ def test_a_deck_that_left_the_folder_between_the_two_asks_is_looked_at_properly(
 
     pres = presentation()
     out = out_with_base(tmp_path, base_of(pres))
-    checked = emit.preflight_rebuild(out, Path("talk.pdf"), slides=FakeSlides(pres), drive=FakeDrive())
+    checked = emit.preflight_rebuild(out, Path("talk.pdf"), False, False, FakeSlides(pres), FakeDrive())
     monkeypatch.setattr(emit, "credentials_for_threads", lambda: None)
     monkeypatch.setattr(emit, "slides_service", lambda creds=None: CountingSlides("rev1"))
     drive = FakeDrive(file={"id": "P1", "name": "Talk", "trashed": True,
                             "mimeType": "application/vnd.google-apps.presentation"})
     previous, found = emit.look_again(CountingSlides("rev1"), drive, out, checked)
     assert previous["state"] == "trashed" and found is None
+
+
+def test_with_no_preflight_the_second_ask_reads_drive_alone(tmp_path):
+    """No preflight finding: where the folder points, and no Slides read. The finding is a record
+    now (`emit.Preflight`), so a deck id always comes with the finding `guard.recheck` is given;
+    the dict it was could have had the one without the other."""
+    from beamer2slides import emit
+
+    pres = presentation()
+    out = out_with_base(tmp_path, base_of(pres))
+    slides = CountingSlides("rev1")
+    previous, found = emit.look_again(slides, FakeDrive(), out, None)
+    assert previous is not None and previous["presentationId"] == "P1" and previous["state"] == "live"
+    assert found is None and slides.asked == []
 
 
 # ---------------------------------------------------------------- backups and records
@@ -690,7 +706,7 @@ def test_plan_rebuild_rebuilds_an_untouched_deck(tmp_path):
     pres = presentation()
     out = out_with_base(tmp_path, base_of(pres))
     drive = FakeDrive()
-    pid, entry = plan_rebuild(FakeSlides(pres), drive, out, False, False, "auto", Path("talk.pdf"))
+    pid, entry = plan_rebuild(FakeSlides(pres), drive, out, False, False, "auto", Path("talk.pdf"), None)
     assert pid == "P1" and entry["action"] == "rebuilt in place" and entry["revisionId"] == "rev1"
     assert entry["backup"] == {"mode": "none", "warnings": []}  # nothing to lose, nothing exported
     assert json.loads((out / "backups" / "backups.json").read_text(encoding="utf-8"))[0]["reason"] == "no deck edits"
@@ -701,7 +717,7 @@ def test_plan_rebuild_backs_up_before_a_forced_rebuild(tmp_path):
     base, live = edited(lambda p: set_text(find(p, "b2s_s000_t1"), "my own words"))
     out = out_with_base(tmp_path, base)
     drive = FakeDrive()
-    pid, entry = plan_rebuild(FakeSlides(live), drive, out, False, True, "auto", Path("talk.pdf"))
+    pid, entry = plan_rebuild(FakeSlides(live), drive, out, False, True, "auto", Path("talk.pdf"), None)
     assert pid == "P1" and entry["reason"] == "edited"
     assert Path(entry["backup"]["file"]).exists() and ("export", "P1") in drive.calls
     assert entry["revisionId"] == "rev2" and entry["examples"]
@@ -713,7 +729,7 @@ def test_plan_rebuild_refuses_without_force(tmp_path):
     out = out_with_base(tmp_path, base)
     drive = FakeDrive()
     with pytest.raises(guard.RebuildRefused):
-        plan_rebuild(FakeSlides(live), drive, out, False, False, "auto", Path("talk.pdf"))
+        plan_rebuild(FakeSlides(live), drive, out, False, False, "auto", Path("talk.pdf"), None)
     assert ("export", "P1") not in drive.calls and ("update", "P1") not in drive.calls
 
 
@@ -726,7 +742,7 @@ def test_a_forced_rebuild_whose_backup_failed_is_refused(tmp_path):
     drive = FakeDrive(export=http_error(403, "exportSizeLimitExceeded"),
                       copy_error=http_error(403, "storageQuotaExceeded"))
     with pytest.raises(guard.RebuildRefused) as refused:
-        plan_rebuild(FakeSlides(live), drive, out, False, True, "auto", Path("talk.pdf"))
+        plan_rebuild(FakeSlides(live), drive, out, False, True, "auto", Path("talk.pdf"), None)
     message = str(refused.value)
     assert "refusing to rebuild" in message and "backup" in message
     assert "storageQuotaExceeded" in message and "--backup none" in message
@@ -742,7 +758,7 @@ def test_a_drive_copy_is_way_back_enough_for_a_forced_rebuild(tmp_path):
     base, live = edited(lambda p: set_text(find(p, "b2s_s000_t1"), "my own words"))
     out = out_with_base(tmp_path, base)
     drive = FakeDrive(export=http_error(403, "exportSizeLimitExceeded"))
-    pid, entry = plan_rebuild(FakeSlides(live), drive, out, False, True, "auto", Path("talk.pdf"))
+    pid, entry = plan_rebuild(FakeSlides(live), drive, out, False, True, "auto", Path("talk.pdf"), None)
     assert pid == "P1" and entry["backup"]["drive"]["presentationId"] == "COPY1"
 
 
@@ -753,7 +769,7 @@ def test_backup_none_says_out_loud_that_the_deck_may_go(tmp_path):
     out = out_with_base(tmp_path, base)
     drive = FakeDrive(export=http_error(403, "exportSizeLimitExceeded"),
                       copy_error=http_error(403, "storageQuotaExceeded"))
-    pid, entry = plan_rebuild(FakeSlides(live), drive, out, False, True, "none", Path("talk.pdf"))
+    pid, entry = plan_rebuild(FakeSlides(live), drive, out, False, True, "none", Path("talk.pdf"), None)
     assert pid == "P1" and entry["backup"] == {"mode": "none", "warnings": []}
 
 
@@ -761,7 +777,7 @@ def test_new_deck_leaves_the_old_one_alone(tmp_path, capsys):
     from beamer2slides.emit import plan_rebuild
     base, live = edited(lambda p: set_text(find(p, "b2s_s000_t1"), "my own words"))
     out = out_with_base(tmp_path, base)
-    pid, entry = plan_rebuild(FakeSlides(live), FakeDrive(), out, True, False, "auto", Path("talk.pdf"))
+    pid, entry = plan_rebuild(FakeSlides(live), FakeDrive(), out, True, False, "auto", Path("talk.pdf"), None)
     assert pid is None and entry["action"] == "new deck" and entry["state"] == "kept"
     assert "left as it is" in capsys.readouterr().out
 
@@ -771,12 +787,12 @@ def test_a_trashed_deck_is_not_resurrected(tmp_path, capsys):
     out = out_with_base(tmp_path, base_of(presentation()))
     drive = FakeDrive({"id": "P1", "name": "Talk", "trashed": True,
                        "mimeType": "application/vnd.google-apps.presentation"})
-    pid, entry = plan_rebuild(FakeSlides(presentation()), drive, out, False, False, "auto", Path("talk.pdf"))
+    pid, entry = plan_rebuild(FakeSlides(presentation()), drive, out, False, False, "auto", Path("talk.pdf"), None)
     assert pid is None and entry["state"] == "trashed"
     assert "trash" in capsys.readouterr().out
     # a deck deleted in Drive: a new one, and no attempt to write to the old id
     drive = FakeDrive({"id": "gone"})
-    pid, entry = plan_rebuild(FakeSlides(presentation()), drive, out, False, False, "auto", Path("talk.pdf"))
+    pid, entry = plan_rebuild(FakeSlides(presentation()), drive, out, False, False, "auto", Path("talk.pdf"), None)
     assert pid is None and entry["state"] == "gone"
     assert [c for c in drive.calls if c[0] != "get"] == []
 
@@ -799,7 +815,7 @@ def test_sync_deletes_only_the_staging_deck_it_just_created(tmp_path):
     drive = FakeDrive()
     me = SimpleNamespace(drive=drive, slides=FakeSlides(staged), urls={}, pid="P1", _fit=lambda f: [40.0, 30.0],
                          plan=SimpleNamespace(deck={"slides": [{"size": [720, 405]}]}))
-    fid = Sync.stage(me, {"pictures": {str(picture_file): "figure"}})
+    fid = Sync.stage(me, sync_work.work([], pictures={str(picture_file): "figure"}), None, None)
     assert fid == "NEW1" != me.pid
     assert me.urls == {str(picture_file): "https://staged"}
 
@@ -807,7 +823,7 @@ def test_sync_deletes_only_the_staging_deck_it_just_created(tmp_path):
     deletes = set(re.findall(r"files\(\)\.delete\(fileId=([\w.]+)\)", source))
     assert deletes == {"fid"}  # never self.pid, and never an id read from a file
     assert re.search(r"fid = execute\(drive\.files\(\)\.create\(", source)
-    assert re.search(r"staging = self\.stage\(work\)", source)
+    assert re.search(r"staging = self\.stage\(work, None, None\)", source)
     # Staged on a thread of its own, with clients of its own: the id still comes from that create
     # and nowhere else, and the future is collected whatever happens (run's own `finally`).
     assert re.search(r"self\.in_background\(lambda slides, drive: self\.stage\(work, drive, slides\), \"b2s-stage\"\)",

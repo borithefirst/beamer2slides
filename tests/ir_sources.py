@@ -536,7 +536,7 @@ def resync(made: Made, home: Path) -> None:
     sync.mark_emitted(base, ours["slides"], ours["deck"], ours["pairs"], ours["plan"].scale, ours["plan"].fonts,
                       fast=False, unread=[])
     merge.plan_merge(base, ours, snapshot.read_presentation(pres))
-    theme_sync.ours_side(ours)
+    theme_sync.ours_side(theme_sync.theme_ours(ours))
 
     s = sync.Sync(None, None, "offline", base, ours, home / "ours", dry_run=True, measure=False,
                   trust_generation=True, check_plan=None, follow_labels=False, take_source=(), facts=None,
@@ -545,18 +545,17 @@ def resync(made: Made, home: Path) -> None:
     for j, slide in enumerate(ours["deck"]["slides"]):
         title = title_element(slide)
         in_place = {}
-        if title is not None:
-            in_place[title] = {"id": f"live{j}_title", "size": (sync.STAND_IN, sync.STAND_IN), "text": True}
+        if title is not None:  # (a placeholder holding words, emptied first)
+            in_place[title] = sync.InPlace(id=f"live{j}_title", size=(sync.STAND_IN, sync.STAND_IN), text="x")
         for i, el in enumerate(slide["elements"]):
             if el["kind"] == "table":
-                in_place[i] = {"id": f"live{j}_tab{i}", "size": (0, 0), "table": True, "cells": [], "steps": []}
+                in_place[i] = sync.TableFill(id=f"live{j}_tab{i}", cells=[], steps=[], shift=(0.0, 0.0), margins=[])
             if el["kind"] == "image":
                 pictures[str(ours["out"] / el["file"])] = "picture"
         if slide.get("background") and not slide.get("background_color"):
             pictures[str(ours["out"] / slide["background"])] = "background"
         units = list(range(len(slide["elements"])))
-        reqs, objects, new_oid, _ = s.slide_requests({"plan": {"ours": j}, "units": units}, f"live{j}", in_place, {},
-                                                     {}, True)
+        reqs, objects, new_oid, _ = s.slide_requests(j, units, f"live{j}", in_place, {}, {}, True, frozenset())
         created = {r[k]["objectId"] for r in reqs for k in ("createShape", "createLine", "createTable", "createImage")
                    if k in r} | {v for r in reqs for v in r.get("duplicateObject", {}).get("objectIds", {}).values()} | \
             {r["groupObjects"]["groupObjectId"] for r in reqs if "groupObjects" in r}

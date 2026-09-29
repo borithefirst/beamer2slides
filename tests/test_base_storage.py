@@ -240,9 +240,9 @@ def test_asking_for_the_steps_the_deck_has_is_quiet():
 def test_convert_records_the_mode_in_the_base(monkeypatch, tmp_path):
     """build_base writes it, so the next sync can read it."""
     from beamer2slides import snapshot as snap
-    monkeypatch.setattr(snap, "read_presentation", lambda pres: {"presentationId": PID, "revisionId": "r1",
-                                                                 "page_size": [720, 405], "layouts": {},
-                                                                 "master_background": None, "slides": []})
+    from beamer2slides.sync_model import DeckRead
+    monkeypatch.setattr(snap, "read_presentation_of", lambda pres: DeckRead(
+        presentation_id=PID, revision_id="r1", page_size=(720, 405), layouts={}, master_background=None, slides=()))
     built = snap.build_base({"slides": []}, tmp_path, {"presentationId": PID}, {"slides": []},
                             tmp_path / "talk.pdf", 0, False, "all", None)
     assert built["overlays"] == "all"

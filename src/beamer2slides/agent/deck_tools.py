@@ -33,6 +33,7 @@ from .types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Refused
 
 if TYPE_CHECKING:
     from ..checks import Finding
+    from ..emit import Preflight
 
 __all__ = ["deck_inspect", "deck_convert", "deck_prepare", "deck_upload", "deck_sync", "tex_label"]
 
@@ -298,7 +299,7 @@ def deck_convert(
         # Asked before any work, so a deck that must not be replaced costs a second, not a
         # conversion. `emit` asks again immediately before the write - of what it found here,
         # so that second ask is one field of one read (emit.plan_rebuild's `checked`).
-        checked = preflight_rebuild(out_dir, source, new_deck, force_rebuild)
+        checked = preflight_rebuild(out_dir, source, new_deck, force_rebuild, None, None)
     except RebuildRefused as refused:
         _refuse_rebuild(j, refused, source, out_dir)
 
@@ -468,7 +469,7 @@ def _read_prepared(j: Job, folder: Path, ref: str) -> dict:
 
 def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: bool,
             measure: bool, force_rebuild: bool, backup: str, source: Path | None,
-            checked: dict | None = None) -> None:
+            checked: "Preflight | None" = None) -> None:
     """The Google half: build the deck from the folder, then record the base.
 
     `source` is the PDF when the caller has it and None when it does not. The guard is given the

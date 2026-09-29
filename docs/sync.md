@@ -155,7 +155,8 @@ googleusercontent capability URL a process at Google may not fetch):
   that is not a plain update, a background the source changed); `Sync.merge_plan` signs those and
   plans again. A unit kept with nothing of the source's to write is the same plan whether or not
   the person replaced its picture, so it is never read; an unchecked picture still counts as
-  replaced (never loses one) but is not reported as the person's edit (`merge.unchecked`).
+  replaced (never loses one) but is not reported as the person's edit (`merge.pictures_unchecked`,
+  `background_unchecked`).
 - **reading** goes through `deck_pictures.LivePictures`: downloaded where the fetcher allows,
   and whatever did not come out of one Drive `files.export` of the deck as .pptx, paired with the
   live objects by page order, drawing order and alt-text titles (`exported_pictures`). Measured:

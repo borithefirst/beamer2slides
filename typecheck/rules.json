@@ -84,7 +84,7 @@
   "devtools/truetype_torture.py": 7,
   "devtools/visual_hunt.py": 3,
   "drive_folder.py": 1,
-  "emit.py": 22,
+  "emit.py": 8,
   "emit_diagrams.py": 1,
   "emit_holes.py": 1,
   "emit_places.py": 1,
@@ -107,7 +107,7 @@
   "ir.py": 5,
   "labels.py": 1,
   "marked.py": 1,
-  "merge.py": 7,
+  "merge.py": 4,
   "net.py": 4,
   "pdf/api.py": 4,
   "pdf/pdfium_backend.py": 5,
@@ -141,9 +141,8 @@
   "render.py": 14,
   "scripts.py": 4,
   "snapshot.py": 3,
-  "sync.py": 30,
+  "sync.py": 24,
   "texmap.py": 8,
-  "theme_sync.py": 2,
   "type3.py": 1
  },
  "defaulted_fields": {
