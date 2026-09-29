@@ -455,8 +455,8 @@ def upgrade_shapes(base: dict, deck: dict) -> None:
             new = {**ir, "flip": False, "radius": 0.0}
             if isinstance(ir.get("outline"), str):
                 mine = (ours.get(ir["mark"]) or {}).get("outline")
-                same = isinstance(mine, dict) and mine.get("color") == ir["outline"]
-                new["outline"] = {"color": ir["outline"], "width": mine["width"] if same else 1.0}
+                width = mine["width"] if isinstance(mine, dict) and mine.get("color") == ir["outline"] else 1.0
+                new["outline"] = {"color": ir["outline"], "width": width}
             h, fields = identity.ir_fields(new, None, e.get("anchor"))
             e.update(ir=new, ir_hash=h, fields={**e.get("fields", {}), **fields})
 

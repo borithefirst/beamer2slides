@@ -30,7 +30,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, Sequence, TypedDict, runtime_checkable
+from typing import Protocol, Sequence, TypedDict, Union, runtime_checkable
 
 import numpy as np
 
@@ -131,14 +131,19 @@ COLOR_SPACES = {0: "unknown", 1: "DeviceGray", 2: "DeviceRGB", 3: "DeviceCMYK", 
                 10: "Indexed", 11: "Pattern"}
 
 
-class Drawing(TypedDict, total=False):
-    """One painted path. "f" fill, "s" stroke, "fs" both with the same items."""
+class _DrawingKeys(TypedDict):
+    """What every backend writes for every path (a total base: 3.10 has no NotRequired)."""
 
     type: str
     items: list[tuple]
     rect: Box                   # bounds of the items' points (curves by their extremes)
     object: int                 # id of the path object
-    fill: tuple[float, float, float] | None    # 0-1 RGB ("f", "fs")
+
+
+class Drawing(_DrawingKeys, total=False):
+    """One painted path. "f" fill, "s" stroke, "fs" both with the same items."""
+
+    fill:tuple[float, float, float] | None    # 0-1 RGB ("f", "fs")
     fill_opacity: float
     even_odd: bool
     soft_mask: bool             # transparency without alpha: a soft mask or a blend mode
@@ -157,10 +162,17 @@ class ImageInfo(TypedDict):
     object: int                 # id
 
 
-class Link(TypedDict, total=False):
+class PageLink(TypedDict):
     bbox: Box
     page: int                   # an internal link's target page index
+
+
+class UriLink(TypedDict):
+    bbox: Box
     uri: str                    # an external link
+
+
+Link = Union[PageLink, UriLink]  # every backend writes one of the two, never neither
 
 
 # ---------------------------------------------------------------------- the contract

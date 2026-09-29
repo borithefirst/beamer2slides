@@ -26,6 +26,12 @@ decorations) is a picture, or baked into a per-slide background picture.
   (PageClassifier's mixins, `classify_model`, `classify_text`) and `emit_*` (layered, no import
   cycle; each module's docstring says what it holds). Callers keep importing from the face; a
   test that monkeypatches a name patches the module that reads it.
+- **deck.json's contract is `ir.py`**: a TypedDict per element kind and stage (`classified`,
+  `rendered`); `ir.problems(deck, stage)` / `ir.validate` check a deck at runtime. A producer that
+  writes a new field or kind says it there first (688ebf4: marked.py wrote shapes emit could not
+  read). **pyrefly gates the types** (`[tool.pyrefly]`, `tests/test_typecheck.py`: the `GATED`
+  modules check clean and the list only grows; no TypedDict error anywhere; optional keys read by
+  subscript are errors).
 - **The PDF library is a swappable backend** (`src/beamer2slides/pdf/`, docs/pdf-backend.md).
   Nothing outside that package imports pypdfium2; answers are plain data, page objects are named
   by id. `api.py` is the contract, `pdfium_backend.py` the reference, `sandbox.py` runs any backend
@@ -227,7 +233,10 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
 - `presentations.create` ignores `pageSize` (always 16:9), hence the .pptx route. `createImage`
   needs a fetchable URL and letterboxes. Object ids are 5-50 chars. `getThumbnail` LARGE = 1600 px.
 - Emit robustness: a refused batch is retried per slide, then per element, then the deck is rebuilt
-  once with pictures of refused regions (`fallback_pictures`).
+  once with pictures of refused regions (`fallback_pictures`). An element emit cannot even *plan*
+  (a field its producer never wrote) is the picture of its region too, with a warning
+  (`DeckPlan(contain=True)`, `upload_plan`, emit.json/`state["contained"]`); the offline suite sets
+  `B2S_EMIT_STRICT` so it raises there instead.
 - Re-running `convert` into the same folder rebuilds that deck in place (same URL); `--new-deck`
   makes another. **The rebuild guard** (`guard.py`, docs/sync.md "Never lose deck edits") refuses
   when the deck was edited, has no base, or came from another PDF, and a forced rebuild keeps a
@@ -306,7 +315,9 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   no shape for (line, freeform, picture fill, outline alone) is its picture at render
   (`marked.pictured_shapes`; the read-back compare sees keeps it a shape), and a `slidetable`'s
   mark says its grid (`/xs`, `/ys`, a cell's `/rs`/`/cs`), laid out as emit's table by
-  `marked.table_grid`. An element tied to no object of the person's is kept, not
+  `marked.table_grid`. A shape an adopt base already records stays a shape for sync
+  (`marked.shape_marks`), its IR brought to today's fields before comparing
+  (`adopt_sync.upgrade_shapes`), so an old base plans no creates. An element tied to no object of the person's is kept, not
   duplicated (`merge.ADOPTED`, `field: unpaired`); layout-drawn and in-table elements are named as
   such. What the API gives no geometry or fill for is read from the thumbnail (`deck_fills`,
   `deck_freeforms`): a fill wrapped in its own outline of another colour need not reach every side

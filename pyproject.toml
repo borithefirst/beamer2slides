@@ -48,6 +48,8 @@ woff2 = ["brotli>=1.0"]
 # the suite runs without it, one worker, about three times slower (tests/conftest.py).
 dev = ["pytest>=8", "pytest-xdist>=3",
        "ruff>=0.16",       # `ruff check`, the rules in [tool.ruff] below (CI: .github/workflows/lint.yml)
+       "pyrefly==1.3.2",   # the type checker: [tool.pyrefly] below, the gate tests/test_typecheck.py
+                           # (CI: .github/workflows/typecheck.yml); pinned, as a new release brings new checks
        "fonttools>=4.40",  # themes/google/fonts/build_fonts.py cuts the theme's fonts
        "brotli>=1.0",      # tests/test_fontfiles.py writes and reads a .woff2
        # The offline suite runs without the client library (tests/test_gapi.py proves it in a
@@ -89,6 +91,31 @@ extend-exclude = ["examples", "themes", "calibration"]
 # iteration - key= functions, predicates handed to any()/sorted(), Eraser.remove_chars).
 select = ["F", "E9", "B"]
 ignore = ["B905", "B007", "B023"]
+
+[tool.pyrefly]
+# Types, for the bug class of 688ebf4: deck.json elements are plain dicts, and marked.py produced
+# ones emit could not take (a shape kind with no Slides preset, no `flip`, an outline as a bare
+# colour, a table without its layout). A TypedDict says what an element holds; the checker finds
+# who breaks it. pyrefly over pyright (2026-09-29): the same TypedDict findings, as much noise
+# (1,586 errors against 1,482 over the package, the same families), 0.8 s against 24 s, one binary
+# (no node), and a baseline file that survives line moves.
+#
+# The gate is tests/test_typecheck.py (GATED there; CI: .github/workflows/typecheck.yml), one run
+# over the whole package read module by module, not an include list here: pyrefly infers an
+# unannotated function's return type only inside the files it checks, so a module's answer depends
+# on which others are checked with it. Locally: `python -m pytest
+# tests/test_typecheck.py`, which names the interpreter; a bare `pyrefly check` lists every error in
+# the package and reads site-packages from the `python` on PATH (the activated venv, or else none).
+project-includes = ["src/beamer2slides"]
+preset = "default"          # explicit: a run that finds no config is `basic`, which found 8 errors in 180 files
+python-version = "3.10"     # the oldest Python the package runs on: 3.11 names (typing.Self, datetime.UTC) are errors
+python-platform = "linux"   # what CI checks, so Windows gets the same answers (sys.platform branches)
+use-ignore-files = false    # git ignores .claude/worktrees/, and pyrefly then skipped a worktree's own files
+
+[tool.pyrefly.errors]
+# Reading a key a TypedDict does not promise (`el["flip"]` where flip is optional): the 688ebf4
+# KeyError. Off in pyrefly's default and strict presets, on in pyright's.
+not-required-key-access = "error"
 
 [tool.pytest.ini_options]
 markers = ["slides: converts decks on real Google Slides and measures the thumbnails (opt-in: python -m pytest -m slides)",

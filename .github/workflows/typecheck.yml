@@ -1,0 +1,35 @@
+# pyrefly over the package, under pyproject.toml's [tool.pyrefly]: the gated modules
+# (tests/test_typecheck.py GATED) check clean, a module that checks clean is gated, and no module
+# breaks a TypedDict (688ebf4: marked.py wrote elements emit could not take). Seconds, so on every
+# push and pull request.
+#
+# On 3.10, the oldest Python the package runs on, with the package and its dependencies installed:
+# pyrefly reads numpy's, PIL's and python-pptx's types from the interpreter it is given, and the
+# answers change without them. Not through .github/constraints.txt, whose numpy 2.5 has no 3.10
+# wheel: a new numpy or Pillow can move an error, but on 2026-09-29 the 3.10 set (numpy 2.2) and the
+# 3.12 set (numpy 2.5) failed the same modules. B2S_TYPECHECK_REQUIRED turns the test's skips (no pyrefly, another
+# version, no pyproject.toml) into failures, so the gate cannot pass by not running.
+#
+# Locally, the same check in one command, from the repo root in the dev venv:
+#   python -m pytest -q -p no:cacheprovider tests/test_typecheck.py
+# and every error in the package, not only the gated ones: python -m pyrefly check
+name: typecheck
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  pyrefly:
+    runs-on: ubuntu-latest
+    env:
+      B2S_TYPECHECK_REQUIRED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: python -m pip install -e ".[dev]"   # pyrefly pinned there, with pytest
+      - run: python -m pytest -q -p no:cacheprovider -rs tests/test_typecheck.py

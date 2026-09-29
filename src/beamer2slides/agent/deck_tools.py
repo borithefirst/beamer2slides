@@ -506,6 +506,10 @@ def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: 
     except RebuildRefused as refused:
         # Asked again immediately before the write, in case the deck was edited in between.
         _refuse_rebuild(j, refused, source, out_dir)
+    for c in state.get("contained", []):
+        # emit.DeckPlan.contain: an element emit could not plan went up as the picture of its region.
+        j.warn(f"slide {c['page'] + 1}: {c['kind']} {c['id']} could not be planned ({c['error']}); "
+               "a picture of it instead")
     j.artifact(out_dir / "emit.json", "json", "what was built: deck id, url, per-slide objects")
 
     previous = state.get("previous") or {}

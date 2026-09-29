@@ -16,15 +16,22 @@ Run it with `-n auto --dist loadgroup`; without `-n` nothing here changes anythi
 `needs_decks(*paths)`: a test that reads files under `tests/decks/` - built PDFs, a build script -
 which a copy of the tests may leave out (Google's import does). It is skipped when one is missing,
 and `-m "not needs_decks"` leaves the lot out.
+
+`B2S_EMIT_STRICT`: emit makes an element it cannot plan the picture of its region, with a warning
+(`emit.DeckPlan.contain`); in the suite that would hide the bug, so it raises. Set at import, before
+a module-scoped fixture plans a deck; tests of the containment switch it off themselves.
 """
 
 import contextlib
+import os
 from pathlib import Path
 
 import pytest
 
 #: Not `.resolve()`d: under a runfiles tree that would leave the tree for a content store.
 DECKS = Path(__file__).parent / "decks"
+
+os.environ.setdefault("B2S_EMIT_STRICT", "1")
 
 
 @pytest.fixture
