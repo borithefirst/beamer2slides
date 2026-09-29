@@ -2841,7 +2841,8 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
 \def\slides@t@hdraw#1#2#3#4{\draw[line cap=rect,#1] (#2bp,{-\slides@t@y{#4}}) -- (#3bp,{-\slides@t@y{#4}});}
 \def\slides@t@vdraw#1#2#3#4{\draw[line cap=rect,#1] (#2bp,{-\slides@t@y{#3}}) -- (#2bp,{-\slides@t@y{#4}});}
 \def\slides@t@node#1#2#3#4{\node[anchor=#1] at (#2bp,{#3}) {\slides@literal{/B2Sc <</r \csname slides@t@#4@row\endcsname
-  \space/c \csname slides@t@#4@col\endcsname>> BDC}\copy\csname slides@t@box@#4\endcsname\slides@shut};}
+  \space/c \csname slides@t@#4@col\endcsname\space/rs \csname slides@t@#4@rows\endcsname
+  \space/cs \csname slides@t@#4@span\endcsname>> BDC}\copy\csname slides@t@box@#4\endcsname\slides@shut};}
 \ExplSyntaxOn
 \tl_new:N \l__slides_t_ix_tl
 \tl_new:N \l__slides_t_iy_tl
@@ -3011,12 +3012,15 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
     \int_step_inline:nn { \g__slides_t_rs_int }
       { \int_step_inline:nn { \g__slides_t_n_int } { \__slides_t_grow:nn {##1} {####1} } }
     \slides@t@tops { \int_use:N \g__slides_t_r_int }
-    % (its mark says its grid and its box: x y w in bp, its height in pt)
+    % (its mark says its grid and its box: x y w in bp, its height in pt; its column edges from
+    % its left in bp, its row tops from its top in pt)
     \tl_set:Ne \slides@more
       {
         ~ /rows ~ \int_use:N \g__slides_t_r_int ~ /cols ~ \int_use:N \l__slides_t_m_int ~ /box ~
         ( \clist_item:Nn \l__slides_t_xy_clist { 1 } ~ \clist_item:Nn \l__slides_t_xy_clist { 2 } ~
           \tl_use:c { slides@t@X@ \int_use:N \l__slides_t_m_int } ~ \slides@t@y { \int_use:N \g__slides_t_r_int } )
+        ~ /xs ~ ( \int_step_function:nnN { 0 } { \l__slides_t_m_int } \__slides_t_xs:n )
+        ~ /ys ~ ( \int_step_function:nnN { 0 } { \g__slides_t_r_int } \__slides_t_ys:n )
       }
     \slides@open{table}
     \use:e
@@ -3176,6 +3180,8 @@ TABLE_MACROS = r"""% --- Tables ------------------------------------------------
           }
       }
   }
+\cs_new:Npn \__slides_t_xs:n #1 { ~ \tl_use:c { slides@t@X@ #1 } }
+\cs_new:Npn \__slides_t_ys:n #1 { ~ \slides@t@y {#1} }
 \cs_new_protected:Npn \__slides_t_fill:n #1
   {
     \exp_args:Nv \str_if_eq:nnF { slides@t@ #1 @fill } { none }

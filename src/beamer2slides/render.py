@@ -574,6 +574,8 @@ def keep_visible_shapes(original: Page, slide: dict, raw_page: dict) -> None:
 
 
 def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path]:
+    from .marked import pictured_shapes
+
     doc = Document(pdf)
     original = Document(pdf)
     raw_pages = {p["index"]: p for p in raw["pages"]}  # by PDF page (overlay steps may be skipped)
@@ -583,6 +585,7 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
     paths = []
     for slide in deck["slides"]:
         eraser = Eraser(doc[slide["page"]])
+        pictured_shapes(slide, raw_pages[slide["page"]])
         texts = [e for e in slide["elements"] if e["kind"] == "text"]
         figures = [e for e in slide["elements"] if e["kind"] == "image"]
 

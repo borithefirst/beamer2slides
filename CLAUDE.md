@@ -302,7 +302,11 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
 - **Adopt** (a deck a person built in Slides -> a beamer source, `adopt*.py`,
   docs/adopt-bench.md): absolute-first `slidebox` frames in a `slides.sty` vocabulary, a recovered
   theme, a label per frame from the slide's objectId, and a base so the source can be synced back
-  into that same deck (`adopt_sync.py`). An element tied to no object of the person's is kept, not
+  into that same deck (`adopt_sync.py`). An adopted source also converts: a marked shape Slides has
+  no shape for (line, freeform, picture fill, outline alone) is its picture at render
+  (`marked.pictured_shapes`; the read-back compare sees keeps it a shape), and a `slidetable`'s
+  mark says its grid (`/xs`, `/ys`, a cell's `/rs`/`/cs`), laid out as emit's table by
+  `marked.table_grid`. An element tied to no object of the person's is kept, not
   duplicated (`merge.ADOPTED`, `field: unpaired`); layout-drawn and in-table elements are named as
   such. What the API gives no geometry or fill for is read from the thumbnail (`deck_fills`,
   `deck_freeforms`): a fill wrapped in its own outline of another colour need not reach every side

@@ -172,6 +172,69 @@ def test_a_line_runs_to_the_points_its_mark_says(tmp_path, backend):
     assert (line["role"], line["bbox"]) == ("line", [20, 20, 20, 90])
 
 
+def test_an_adopted_shape_slides_has_no_preset_for_is_uploaded_as_its_picture(tmp_path, backend):
+    """A `\\slidefreeform` outline (`custom`), a line and an outline alone have no Slides shape:
+    the conversion makes each the picture of what its mark draws, in its place in the drawing
+    order (a `custom` shape raised KeyError in the .pptx's template shapes). A filled rectangle
+    stays a shape with its outline. The read-back, which compare reads, keeps all four shapes."""
+    from beamer2slides import emit, render
+    page = (element(b"r", b"shape", b"0 0 1 RG 2 w 0 1 0 rg 10 10 40 30 re B", b" /box (10 110 40 30)") +
+            element(b"f", b"shape", b"1 0 0 rg 70 10 m 110 10 l 90 45 l h f") +
+            element(b"l", b"shape", b"0 0 0 RG 1 w 120 20 m 180 60 l S") +
+            element(b"o", b"shape", b"0 0 0 RG 1 w 20 70 50 30 re S"))
+    raw = raw_of(tmp_path, [page])
+    deck = classify.classify(raw)
+    els = lambda: {e["mark"]: e for e in deck["slides"][0]["elements"] if e.get("mark")}
+    before = [e["mark"] for e in els().values()]
+    assert {k: (e["kind"], e["shape"]) for k, e in els().items()} == {
+        "r": ("shape", "RECTANGLE"), "f": ("shape", "custom"), "l": ("shape", "line"), "o": ("shape", "RECTANGLE")}
+    render.render_backgrounds(tmp_path / "p.pdf", raw, deck, tmp_path / "out")
+    assert [e["mark"] for e in els().values()] == before
+    assert {k: e["kind"] for k, e in els().items()} == {"r": "shape", "f": "image", "l": "image", "o": "image"}
+    for k in "flo":
+        assert (tmp_path / "out" / els()[k]["file"]).is_file()
+    line = els()["l"]["bbox"]
+    assert line[0] < 120 and line[2] > 180  # (with the stroke's ink)
+    planned = emit.plan_offline(deck)
+    assert planned["plan"].keys == []
+    reqs = [r for _, _, parts, _ in planned["slides"] for _, rs in parts for r in rs]
+    assert [r["createShape"]["shapeType"] for r in reqs if "createShape" in r] == ["RECTANGLE"]
+    props = next(r["updateShapeProperties"]["shapeProperties"] for r in reqs if "updateShapeProperties" in r)
+    assert props["outline"]["propertyState"] == "RENDERED" and props["outline"]["weight"]["magnitude"] > 0
+
+
+def cell(r: int, c: int, body: bytes) -> bytes:
+    return b"/B2Sc <</r %d /c %d /rs 1 /cs 1>> BDC %s EMC " % (r, c, body)
+
+
+@pytest.mark.parametrize("grid", [b" /xs (0 80 160) /ys (0 20 40)", b""])
+def test_an_adopted_table_carries_the_layout_emit_writes_it_by(tmp_path, backend, grid):
+    """A `slidetable`'s mark says its grid (`/xs`, `/ys`; a source adopt wrote before it did: from
+    where its words stand), and the table is laid out by it: its rows where the mark puts them, a
+    column of numbers right-aligned, the shaded head row's fills and the rule under it borders of
+    the cells it runs along. Emit lays it out (an adopted table raised KeyError 'columns')."""
+    from beamer2slides import emit
+    from beamer2slides.emit_tables import pptx_table, table_requests
+    drawn = b"0.9 g 20 110 80 20 re f 100 110 80 20 re f 0 g 0 0 0 RG 1 w 20 110 m 180 110 l S "
+    words = (cell(0, 0, text(24, 116, b"Name")) + cell(0, 1, text(146, 116, b"Value")) +
+             cell(1, 0, text(24, 96, b"alpha")) + cell(1, 1, text(162, 96, b"42")))
+    page = element(b"t", b"table", drawn + words, b" /rows 2 /cols 2 /box (20 20 160 40)" + grid)
+    table = next(e for e in read_back(tmp_path, page)["elements"] if e["kind"] == "table")
+    cells = [["".join(r["text"] for r in runs) for runs in row] for row in table["cells"]]
+    assert cells == [["Name", "Value"], ["alpha", "42"]]
+    assert table["frame"] == [20, 20, 180, 60]
+    if grid:
+        assert table["bounds"] == [20, 100, 180] and [b[1:] for b in table["bands"]] == [[20, 40], [40, 60]]
+    assert [c["align"] for c in table["columns"]] == ["left", "right"]
+    assert sorted((f["row"], f["col"]) for f in table["fills"]) == [(0, 0), (0, 1)]
+    assert sorted((b["row"], b["col"], b["position"]) for b in table["borders"]) == [(0, 0, "BOTTOM"), (0, 1, "BOTTOM")] \
+        or sorted((b["row"], b["col"], b["position"]) for b in table["borders"]) == [(1, 0, "TOP"), (1, 1, "TOP")]
+    fonts = emit.FontMapper()
+    assert len(pptx_table(table, 1.0, fonts)["heights"]) == 2
+    reqs = table_requests(table, "s", "tab", 1.0, fonts, imported=True)
+    assert [r["insertText"]["text"] for r in reqs if "insertText" in r] == ["Name", "Value", "alpha", "42"]
+
+
 def test_underlined_words_are_underlined_whatever_their_rules(tmp_path, backend):
     """ulem's rules end under a word inside a span; `\\uline`'s mark cuts the span there and says
     the words are underlined."""

@@ -326,10 +326,12 @@ def shape_element(g: Group, pid: str) -> dict:
         reach = max([d.get("width") or 0.0 for d in ds] + [0.0]) / 2 + 1.5
         if Rect.of(box).expand(reach).contains_rect(Rect.of(bbox)):
             bbox = box
+    stroke = next((d for d in strokes if d.get("stroke")), None)
     el = {"id": pid, "kind": "shape", "role": "line" if line else "panel", "bbox": bbox,
           "fill": None if line or not fills else fills[0]["fill"],
-          "outline": next((d["stroke"] for d in strokes if d.get("stroke")), None),
+          "outline": {"color": stroke["stroke"], "width": stroke.get("width") or 1.0} if stroke else None,
           "shape": "line" if line else "RECTANGLE" if main and main["items"] == "re" else "custom",
+          "flip": False, "radius": 0.0,
           "drawings": [d["id"] for d in ds], "spans": [s["id"] for s in g.items["spans"]], "mark": g.mark}
     if ims and not fills:
         el["picture"] = [i["id"] for i in ims]  # a picture fill
@@ -338,18 +340,50 @@ def shape_element(g: Group, pid: str) -> dict:
     return el
 
 
+def drawn_natively(el: dict) -> bool:
+    """Whether emit has a Slides shape for a marked shape: a filled rectangle. A line (emit draws
+    lines only inside diagrams), a `\\slidepath` or `\\slidefreeform` outline (`custom`: no preset
+    has its points), a picture fill or an outline alone has none."""
+    return el["shape"] == "RECTANGLE" and bool(el.get("fill")) and not el.get("picture")
+
+
+def pictured_shapes(slide: dict, raw_page: dict) -> None:
+    """In place: each marked shape emit has no Slides shape for becomes the picture of what its
+    mark draws, where it stands in the drawing order (an adopted deck's freeform, uploaded again,
+    raised KeyError 'custom' in the .pptx's template shapes). Only a conversion does this
+    (`render.render_backgrounds`): compare pairs the read-back's shapes with the deck's, kind for
+    kind, and `adopt_sync.kind_fit` lets a picture stand for a deck's shape."""
+    drawings = {d["id"]: d for d in raw_page["drawings"]}
+    images = {i["id"]: i for i in raw_page["images"]}
+    for k, el in enumerate(slide["elements"]):
+        if el["kind"] != "shape" or not el.get("mark") or drawn_natively(el):
+            continue
+        # (a stroke's ink reaches half its width past its path)
+        rects = [Rect.of(d["bbox"]).expand(max(0.5, (d.get("width") or 0.0) / 2))
+                 for d in (drawings.get(i) for i in el.get("drawings", ())) if d] + \
+                [Rect.of(images[i]["bbox"]) for i in el.get("picture", ()) if i in images]
+        slide["elements"][k] = {"id": el["id"], "kind": "image", "role": "figure",
+                                "bbox": union_all(rects).as_list() if rects else el["bbox"],
+                                "spans": el.get("spans", []), "mark": el["mark"]}
+
+
 # ---------------------------------------------------------------------------------------------- tables
 
 def table_element(g: Group, page: dict, body: float, pid: str) -> dict:
-    """A marked table: its grid from its own mark, each cell's words from what that cell's mark holds."""
+    """A marked table: its grid from its own mark, each cell's words from what that cell's mark
+    holds, and the layout emit writes it by (`table_layout`) from its mark's grid, its cells' words
+    and what it drew (`table_grid`)."""
     rows, cols = int(g.params.get("rows") or 0), int(g.params.get("cols") or 0)
     c = PageClassifier(g.page(page), body)
     spans = c.spans()
     cells: dict = {}
+    spanning: dict = {}
     for s, raw in zip(spans, c.page["spans"]):
         p = params(raw, CELL)
         if p is not None:
-            cells.setdefault((int(p.get("r", 0)), int(p.get("c", 0))), []).append(s)
+            rc = (int(p.get("r", 0)), int(p.get("c", 0)))
+            cells.setdefault(rc, []).append(s)
+            spanning[rc] = (int(p.get("rs") or 1), int(p.get("cs") or 1))
     rows = max([rows] + [r + 1 for r, _ in cells])
     cols = max([cols] + [k + 1 for _, k in cells])
     grid = [[[] for _ in range(cols)] for _ in range(rows)]
@@ -362,9 +396,105 @@ def table_element(g: Group, page: dict, body: float, pid: str) -> dict:
             runs += span_runs(line.spans)
         grid[r][k] = runs
     bbox = box_of(g.params.get("box")) or union_box(g.items["drawings"] + g.items["spans"])
-    return {"id": pid, "kind": "table", "role": "table", "bbox": bbox, "cells": grid,
-            "spans": [s["id"] for s in g.items["spans"]], "drawings": [d["id"] for d in g.items["drawings"]],
-            "mark": g.mark}
+    el = {"id": pid, "kind": "table", "role": "table", "bbox": bbox, "cells": grid,
+          "spans": [s["id"] for s in g.items["spans"]], "drawings": [d["id"] for d in g.items["drawings"]],
+          "mark": g.mark}
+    if bbox and spans:
+        el.update(table_grid(g, bbox, rows, cols, cells, spanning, body))
+    return el
+
+
+def spread(text, n: int, start: float, scale: float = 1.0) -> list[float] | None:
+    """A mark's `/xs` or `/ys`: n + 1 edges, each from `start` (bp, or pt when it says so)."""
+    parts = BOX_PART.findall(str(text or ""))
+    if len(parts) != n + 1:
+        return None
+    return [start + float(v) * (72 / 72.27 if unit == "pt" else scale) for v, unit in parts]
+
+
+def split_between(extents: list[tuple[float, float] | None], lo: float, hi: float) -> list[float]:
+    """Edges between runs of text, midway between one's end and the next one's start, `lo` and
+    `hi` outside; beside a run with no text, evenly between the edges known on either side."""
+    n = len(extents)
+    edges: list = [lo] + [None] * (n - 1) + [hi]
+    for i in range(1, n):
+        a, b = extents[i - 1], extents[i]
+        if a and b:
+            edges[i] = (a[1] + b[0]) / 2 if b[0] >= a[1] else a[1]
+    i = 1
+    while i < n:
+        if edges[i] is None:
+            j = next(j for j in range(i, n + 1) if edges[j] is not None)
+            for k in range(i, j):
+                edges[k] = edges[i - 1] + (edges[j] - edges[i - 1]) * (k - i + 1) / (j - i + 1)
+            i = j
+        i += 1
+    return edges
+
+
+def table_grid(g: Group, bbox: list[float], rows: int, cols: int, cells: dict, spanning: dict,
+               body: float) -> dict:
+    """What emit lays a marked table out by, classify's table fields: column `bounds` and row tops
+    (`bands`, which place each row) from the mark's `/xs` and `/ys` (a source adopt wrote before
+    they were said: from where the cells' words stand), per column its words' extent and
+    alignment, per row its first baseline, and the fills and borders it drew, by the cell they
+    stand on; `merges` from each cell's `/rs` and `/cs`."""
+    x0, y0, x1, y1 = bbox
+    single = {rc: ss for rc, ss in cells.items() if spanning.get(rc, (1, 1)) == (1, 1)}
+
+    def extent(ss, lo, hi):
+        return (min(getattr(s.rect, lo) for s in ss), max(getattr(s.rect, hi) for s in ss)) if ss else None
+    xs = spread(g.params.get("xs"), cols, x0) or split_between(
+        [extent([s for (r, k), ss in single.items() if k == c for s in ss], "x0", "x1") for c in range(cols)], x0, x1)
+    ys = spread(g.params.get("ys"), rows, y0) or split_between(
+        [extent([s for (r, k), ss in single.items() if r == i for s in ss], "y0", "y1") for i in range(rows)], y0, y1)
+    sizes = Counter(round(s.size, 1) for ss in cells.values() for s in ss)
+    size = sizes.most_common(1)[0][0] if sizes else body
+    columns = []
+    for c in range(cols):
+        mine = [ss for (r, k), ss in single.items() if k == c]
+        ext = extent([s for ss in mine for s in ss], "x0", "x1")
+        votes = Counter()
+        for ss in mine:
+            left, right = min(s.rect.x0 for s in ss) - xs[c], xs[c + 1] - max(s.rect.x1 for s in ss)
+            votes["center" if abs(left - right) <= max(1.5, 0.15 * (left + right)) and left > 3 else
+                  "right" if right < left else "left"] += 1
+        a, b = ext or (xs[c] + 0.3 * size, xs[c + 1] - 0.3 * size)
+        columns.append({"x0": round(a, 2), "x1": round(b, 2), "align": votes.most_common(1)[0][0] if votes else "left"})
+    baselines = []
+    for i in range(rows):
+        firsts = [min(s.baseline for s in ss) for (r, k), ss in cells.items() if r == i]
+        baselines.append(round(min(firsts) if firsts else ys[i] + size, 2))
+    heights = [round(ys[i + 1] - ys[i], 2) for i in range(rows)]
+
+    def at(v: float, edges: list[float]) -> int:
+        return max(0, min(len(edges) - 2, sum(1 for e in edges[1:-1] if v >= e)))
+    fills, borders = [], []
+    for d in g.items["drawings"]:
+        dx0, dy0, dx1, dy1 = d["bbox"]
+        if filled(d) and d.get("fill_opacity", 1) >= 0.99:  # (the cell its corner stands in: a merge's first)
+            fills.append({"row": at(dy0 + min(4.0, (dy1 - dy0) / 4), ys), "col": at(dx0 + min(4.0, (dx1 - dx0) / 4), xs),
+                          "color": d["fill"]})
+        elif "s" in d["type"] and d.get("stroke"):
+            w = d.get("width") or 1.0
+            if dx1 - dx0 >= dy1 - dy0:  # a row edge: every column it runs along
+                k = min(range(rows + 1), key=lambda i: abs(ys[i] - (dy0 + dy1) / 2))
+                for c in range(cols):
+                    if dx0 - 1 <= (xs[c] + xs[c + 1]) / 2 <= dx1 + 1:
+                        borders.append({"row": min(k, rows - 1), "col": c, "position": "TOP" if k < rows else "BOTTOM",
+                                        "color": d["stroke"], "weight": w, "y": round(ys[k], 2)})
+            else:
+                k = min(range(cols + 1), key=lambda i: abs(xs[i] - (dx0 + dx1) / 2))
+                for r in range(rows):
+                    if dy0 - 1 <= (ys[r] + ys[r + 1]) / 2 <= dy1 + 1:
+                        borders.append({"row": r, "col": min(k, cols - 1), "position": "LEFT" if k < cols else "RIGHT",
+                                        "color": d["stroke"], "weight": w})
+    merges = [{"row": r, "col": c, "rows": rs, "cols": cs, "align": columns[c]["align"]}
+              for (r, c), (rs, cs) in sorted(spanning.items()) if (rs, cs) != (1, 1)]
+    return {"frame": [round(v, 2) for v in (xs[0], ys[0], xs[-1], ys[-1])], "size": size,
+            "row_baselines": baselines, "row_heights": heights, "columns": columns,
+            "bounds": [round(v, 2) for v in xs], "bands": [[i, round(ys[i], 2), round(ys[i + 1], 2)] for i in range(rows)],
+            "merges": merges, "rules": [], "borders": borders, "fills": fills}
 
 
 BOX_PART = re.compile(r"(-?\d*\.?\d+)\s*(bp|pt)?")

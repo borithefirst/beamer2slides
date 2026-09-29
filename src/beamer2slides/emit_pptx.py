@@ -17,13 +17,17 @@ SHADOW_BLUR = 1.0
 SHADOW_ALPHA = 0.5
 TEMPLATE_PRESETS = {"ROUND_RECTANGLE": "roundRect", "ROUND_2_SAME_RECTANGLE": "round2SameRect", "RECTANGLE": "rect"}
 TEMPLATE_LAYOUTS = {"TITLE": 0, "TITLE_ONLY": 5, "BLANK": 6}  # python-pptx default template layout indexes
+# what `_add_template_shapes` can put on a source slide
+TEMPLATE_KINDS = ("ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE", "RECTANGLE", "ELLIPSE", "DIAMOND", "TRIANGLE")
 
 
 def template_key(el: dict, scale: float) -> tuple | None:
     """Shapes the API can't make exactly: rounded corners of a given radius (the API only
     creates the default rounding) and drop shadows (read-only in the API). They are
-    duplicated from template shapes that come with the imported .pptx."""
-    if el["kind"] != "shape" or (el["shape"] == "RECTANGLE" and not el.get("shadow")):
+    duplicated from template shapes that come with the imported .pptx. A kind no template is made
+    of has none: createShape refuses it, and the refused element becomes a picture
+    (`fallback_pictures`) instead of the whole .pptx failing."""
+    if el["kind"] != "shape" or el["shape"] not in TEMPLATE_KINDS or (el["shape"] == "RECTANGLE" and not el.get("shadow")):
         return None
     x0, y0, x1, y1 = el["bbox"]
     adj = 0.0
@@ -60,9 +64,8 @@ def _add_template_shapes(slide, keys: list[tuple]) -> None:
     from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
     from pptx.util import Pt
 
-    kinds = {"ROUND_RECTANGLE": MSO_SHAPE.ROUNDED_RECTANGLE, "ROUND_2_SAME_RECTANGLE": MSO_SHAPE.ROUND_2_SAME_RECTANGLE,
-             "RECTANGLE": MSO_SHAPE.RECTANGLE, "ELLIPSE": MSO_SHAPE.OVAL, "DIAMOND": MSO_SHAPE.DIAMOND,
-             "TRIANGLE": MSO_SHAPE.ISOSCELES_TRIANGLE}
+    kinds = dict(zip(TEMPLATE_KINDS, (MSO_SHAPE.ROUNDED_RECTANGLE, MSO_SHAPE.ROUND_2_SAME_RECTANGLE, MSO_SHAPE.RECTANGLE,
+                                      MSO_SHAPE.OVAL, MSO_SHAPE.DIAMOND, MSO_SHAPE.ISOSCELES_TRIANGLE)))
     a = NS_A
     for i, (kind, adj, shadow) in enumerate(keys):
         if kind == "BENT_CONNECTOR":
