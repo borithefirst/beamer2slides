@@ -42,7 +42,9 @@ decorations) is a picture, or baked into a per-slide background picture.
   runtime check (`gapi.build`, `devtools/deep_stack.py`), never a checked import. tests/ are checked too, against
   `typecheck/tests_baseline.json`, which only shrinks (`python build_backend/beamer2slides_build.py
   prune tests`, lower `TESTS_CEILING` in `tests/test_typecheck.py`; pytest pinned in `[tool.beamer2slides.typecheck]`), so a test calling
-  a changed signature fails the gate, not the suite; a test you write type-checks;
+  a changed signature fails the gate, not the suite; a test you write type-checks (JSON read
+  through `tests/json_reads.py`'s `jobj`/`jstr`/..., Google faked by `tests/fake_google.py`'s
+  Protocol-complete `No*` classes, overriding only what the test calls);
   defaults, defaulted fields and `Any` per module in `typecheck/rules.json`, only down
   (`tests/test_typing_rules.py`). A function you touch leaves to these rules.
 - **deck.json's contract is `ir.py`** (TypedDicts per kind and stage, `ir.problems` / `ir.validate`

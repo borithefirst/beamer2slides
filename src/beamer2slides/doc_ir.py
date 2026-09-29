@@ -170,9 +170,12 @@ class TableLines(TypedDict):
 
 class Aligned(TypedDict):
     """How a rebased table's lines match the grids the two sides have now
-    (`doc_merge.rebase_tables`), so the next pass does not guess them again."""
-    live: Size | None
-    mine: Size | None
+    (`doc_merge.rebase_tables`), so the next pass does not guess them again.
+
+    The sizes are written as `Size`s and read back from a base as lists: JSON has no
+    tuple (`doc_merge._same_size`)."""
+    live: Sequence[int] | None
+    mine: Sequence[int] | None
     row_dropped: list[int]
     column_dropped: list[int]
     row_live: list[tuple[int, int]]

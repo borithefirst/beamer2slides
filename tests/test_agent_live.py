@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from .json_reads import integer, text as text_at
+from .json_reads import jint, jstr as text_at
 from .test_slides_alignment import MAIN, google_unavailable
 
 if TYPE_CHECKING:
@@ -85,7 +85,7 @@ def test_a_deck_is_converted_and_inspected_through_the_tools():
     converted = _call("deck_convert", pdf=DECK, out=ref, title="agent live: fira")
     assert converted.ok, converted.json()
     assert text_at(converted.data, "url").startswith("https://docs.google.com/presentation/")
-    assert integer(converted.data, "slides") >= 1
+    assert jint(converted.data, "slides") >= 1
     assert any(a.kind == "json" for a in converted.artifacts)   # emit.json, to act on later
 
     looked = _call("deck_inspect", pdf=DECK, out=ref)
@@ -119,7 +119,7 @@ def test_a_deck_somebody_edited_refuses_to_be_rebuilt_and_names_the_way_forward(
     merged = _call("deck_sync", pdf=DECK, deck=ref, dry_run=True)
     assert merged.ok, merged.json()
     assert merged.data["wrote"] is False
-    assert integer(merged.data, "kept") >= 1, "the typed word is a deck edit the merge must keep"
+    assert jint(merged.data, "kept") >= 1, "the typed word is a deck edit the merge must keep"
 
 
 TYPED = "EDITED "
@@ -215,7 +215,7 @@ def test_a_document_is_pushed_synced_and_then_has_nothing_left_to_say():
 
         synced = _call("doc_sync", file=ref)
         assert synced.ok, synced.json()
-        assert integer(synced.data, "requests") > 0                      # it really wrote something
+        assert jint(synced.data, "requests") > 0                      # it really wrote something
 
         again = _call("doc_sync", file=ref)
         assert again.ok, again.json()
@@ -260,7 +260,7 @@ def test_a_document_nobody_pushed_is_adopted_into_the_workspace():
         assert adopted.ok, adopted.json()
         written = OUT / text_at(adopted.data, "file")
         assert written.is_file(), f"{adopted.data['file']} is not in the workspace"
-        assert integer(adopted.data, "blocks") >= 3                      # a heading and two paragraphs
+        assert jint(adopted.data, "blocks") >= 3                      # a heading and two paragraphs
         assert adopted.data["anchored"] == adopted.data["blocks"], "every block gets a range"
         said = written.read_text(encoding="utf-8")
         assert ident in said                                    # the file names its document

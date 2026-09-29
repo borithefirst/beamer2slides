@@ -13,6 +13,7 @@ Folder `out/sync-tests/overlays-all` of the main checkout, one deck rebuilt in p
 """
 
 import json
+from collections.abc import Iterator
 
 import pytest
 
@@ -26,7 +27,7 @@ LAST = 10    # v1.pdf with the last step of each frame
 
 
 @pytest.fixture(scope="module")
-def run():
+def run() -> Iterator[Run]:
     for reason in (cli_missing("sync"), pdflatex_missing(), google_unavailable()):
         if reason:
             pytest.skip(reason)
@@ -39,7 +40,7 @@ def run():
     r.log.close()
 
 
-def test_the_deck_has_a_slide_per_step(run):
+def test_the_deck_has_a_slide_per_step(run: Run) -> None:
     assert len(run.deck.read().slides) == STEPS > LAST
     base = json.loads((run.out / "sync" / "base.json").read_text(encoding="utf-8"))
     assert base["overlays"] == "all", "the base must record the mode, or sync will use the other one"
@@ -47,20 +48,20 @@ def test_the_deck_has_a_slide_per_step(run):
     assert len(labels) != len(set(labels)), "this deck is only a test of anything while a label repeats"
 
 
-def test_syncing_the_same_source_writes_nothing(run):
+def test_syncing_the_same_source_writes_nothing(run: Run) -> None:
     from beamer2slides.devtools import sync_check as sc
     revision = run.revision()
-    report = run.sync(build("v1"))
+    report = run.sync(build("v1"), None)
     assert report["overlays"] == "all", "sync must keep the steps the deck was converted with"
     assert sc.changes(report) == 0, f"a sync of the same source changed {sc.changes(report)} things"
     assert run.revision() == revision
     assert len(run.deck.read().slides) == STEPS
 
 
-def test_a_source_change_lands_and_every_step_stays(run):
+def test_a_source_change_lands_and_every_step_stays(run: Run) -> None:
     from beamer2slides.devtools import sync_check as sc
     pdf = build("reword")
-    report = run.sync(pdf)
+    report = run.sync(pdf, None)
     model = run.deck.read()
     assert len(model.slides) == STEPS, "a step was lost"
     # count 2: the reworded bullet shows on both steps of that frame, and the change must land on both

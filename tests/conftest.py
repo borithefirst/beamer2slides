@@ -24,9 +24,12 @@ a module-scoped fixture plans a deck; tests of the containment switch it off the
 
 import contextlib
 import os
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
+
+from beamer2slides.net import Fetch
 
 #: Not `.resolve()`d: under a runfiles tree that would leave the tree for a content store.
 DECKS = Path(__file__).parent / "decks"
@@ -35,20 +38,22 @@ os.environ.setdefault("B2S_EMIT_STRICT", "1")
 
 
 @pytest.fixture
-def fetcher():
+def fetcher() -> Iterator[Callable[[Fetch], None]]:
     """`fetcher(fn)` installs `fn(url) -> bytes` for the rest of the test; installing another
     replaces it."""
     from beamer2slides import google_auth
 
     with contextlib.ExitStack() as stack:
-        yield lambda fn: stack.enter_context(google_auth.use_fetcher(fn))
+        def install(fn: Fetch) -> None:
+            stack.enter_context(google_auth.use_fetcher(fn))
+        yield install
 
 
 LIVE = {"slides", "sync", "inverse", "docs"}
 
 
 @pytest.fixture(autouse=True)
-def _drive_folder(request, monkeypatch):
+def _drive_folder(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
     """The offline fakes of Drive model files, not folders: their `files.create` bodies are
     compared as they always were, so an offline test runs with `--drive-folder none`. The default,
     `auto`, is tested in `test_drive_folder.py`, and the live suites run with it."""
@@ -56,7 +61,7 @@ def _drive_folder(request, monkeypatch):
         monkeypatch.setenv("B2S_DRIVE_FOLDER", "none")
 
 
-def pytest_collection_modifyitems(items):
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
     for item in items:
         if not any(m.name == "xdist_group" for m in item.iter_markers()):
             item.add_marker(pytest.mark.xdist_group(item.nodeid.split("::")[0]))

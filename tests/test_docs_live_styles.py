@@ -24,9 +24,20 @@ file is for.
 Skipped when the Google token needs a browser consent.
 """
 
+from __future__ import annotations
+
+from collections.abc import Iterator
+from typing import TYPE_CHECKING
+
 import pytest
 
-from .test_docs_live import OUT, Paper, find, google_unavailable  # noqa: F401
+from .doc_records import paragraph_of, rows_of, runs_of, span_of
+from .test_docs_live import OUT, Paper, find, google_unavailable, made_id  # noqa: F401
+
+if TYPE_CHECKING:
+    from beamer2slides.doc_ir import Block, Ir
+    from beamer2slides.google_types import (DocsNamedStyle, DocsParagraph, DocsParagraphElement,
+                                            DocsParagraphStyle, Document)
 
 pytestmark = pytest.mark.docs
 
@@ -56,7 +67,7 @@ data-shading="#fff2cc" data-space-above="12" data-space-below="6">A paragraph se
 
 
 @pytest.fixture
-def paper(request):
+def paper(request: pytest.FixtureRequest) -> Iterator[Paper]:
     if reason := google_unavailable():
         pytest.skip(reason)
     from beamer2slides import doc_sync
@@ -70,16 +81,16 @@ def paper(request):
     drive_service(credentials()).files().delete(fileId=info["document"]).execute()
 
 
-def document(paper) -> dict:
+def document(paper: Paper) -> Ir:
     from beamer2slides.google_auth import credentials, docs_service
     _, ir = paper.sync_module.read_document(docs_service(credentials()), paper.ident)
     return ir
 
 
-def test_a_face_and_a_size_come_back_as_themselves(paper):
+def test_a_face_and_a_size_come_back_as_themselves(paper: Paper) -> None:
     """`<code>` made every monospaced face one face; a face is now carried as itself.
     Measured: a single family name imports verbatim, a fallback list does not."""
-    runs = find(document(paper), "Two faces")["runs"]
+    runs = runs_of(find(document(paper), "Two faces"))
     faces = [r.get("font") for r in runs if r.get("font")]
     assert faces == ["Consolas", "Roboto Mono"]
     assert [r.get("fontsize") for r in runs if r.get("fontsize")] == [18]
@@ -87,41 +98,41 @@ def test_a_face_and_a_size_come_back_as_themselves(paper):
     paper.settled()
 
 
-def test_small_caps_reaches_the_document_although_no_html_carries_it(paper):
+def test_small_caps_reaches_the_document_although_no_html_carries_it(paper: Paper) -> None:
     """The import cannot make it; `tidy_requests` writes it in the settle's batch."""
-    runs = find(document(paper), "Small caps")["runs"]
+    runs = runs_of(find(document(paper), "Small caps"))
     assert [r.get("smallcaps") for r in runs] == [True, None]
     assert 'data-smallcaps="1"' in paper.text
     paper.settled()
 
 
-def test_the_measurements_of_a_paragraph_survive_the_push(paper):
+def test_the_measurements_of_a_paragraph_survive_the_push(paper: Paper) -> None:
     block = find(document(paper), "A paragraph set apart")
-    assert (block["indent"], block["indent_first"]) == (36.0, 18.0)
-    assert block["line_spacing"] == 1.5
+    assert (block.get("indent"), block.get("indent_first")) == (36.0, 18.0)
+    assert block.get("line_spacing") == 1.5
     # These three no import carries: they are written after it.
-    assert block["shading"] == "#fff2cc"
-    assert (block["space_above"], block["space_below"]) == (12.0, 6.0)
+    assert block.get("shading") == "#fff2cc"
+    assert (block.get("space_above"), block.get("space_below")) == (12.0, 6.0)
     # Never as CSS: `background-color` on a `<p>` is a character highlight (measured).
     assert 'data-shading="#fff2cc"' in paper.text
     assert "background-color:#fff2cc" not in paper.text
     paper.settled()
 
 
-def test_a_table_written_one_row_per_line_brings_no_white_space_with_it(paper):
+def test_a_table_written_one_row_per_line_brings_no_white_space_with_it(paper: Paper) -> None:
     """The newlines sit where an HTML parser has nowhere to put text. Whether Drive's
     importer agrees is what this test is here to say."""
     ir = document(paper)
     table = [b for b in ir["blocks"] if b["kind"] == "table"][0]
-    assert [[find_text(cell) for cell in row] for row in table["rows"]] == [
+    assert [[find_text(cell) for cell in row] for row in rows_of(table)] == [
         ["Region", "Sales"], ["North", "1200"], ["South", "870"]]
     assert not [b for b in ir["blocks"]
-                if b.get("runs") and not "".join(r["text"] for r in b["runs"]).strip()]
+                if b.get("runs") and not "".join(r["text"] for r in runs_of(b)).strip()]
     assert " <tr><td><p>North</p></td><td><p>1200</p></td></tr>" in paper.text.splitlines()
     paper.settled()
 
 
-def find_text(cell: list[dict]) -> str:
+def find_text(cell: list[Block]) -> str:
     return "".join(r["text"] for block in cell for r in block.get("runs", []))
 
 
@@ -142,7 +153,7 @@ THEME_DOCX = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </w:body></w:document>"""
 
 
-def test_a_heading_the_theme_centres_survives_a_source_restyle(request):
+def test_a_heading_the_theme_centres_survives_a_source_restyle(request: pytest.FixtureRequest) -> None:
     """The whole of the theme question, live: a heading whose centring, bold and
     colour live in the document's HEADING_1, restyled through the file, must come out
     centred, bold and blue still.
@@ -171,26 +182,39 @@ def test_a_heading_the_theme_centres_survives_a_source_restyle(request):
     if reason := google_unavailable():
         pytest.skip(reason)
     drive = drive_service(credentials())
-    ident = drive.files().create(
+    ident = made_id(drive.files().create(
         body={"name": f"b2s docs test: {request.node.name}", "mimeType": doc_sync.DOC_MIME},
         media_body=MediaIoBaseUpload(
             io.BytesIO(docx(THEME_DOCX, THEME_STYLES)), mimetype=(
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document")),
-        fields="id").execute()["id"]
+        fields="id").execute())
     docs = docs_service(credentials())
 
-    def raw() -> dict:
+    def raw() -> Document:
         return docs.documents().get(documentId=ident).execute()
 
-    def heading_style(doc: dict) -> dict:
-        return [s for s in doc["namedStyles"]["styles"]
-                if s["namedStyleType"] == "HEADING_1"][0]
+    def heading_style(doc: Document) -> DocsNamedStyle:
+        styles = doc.get("namedStyles", {}).get("styles")
+        assert styles is not None, "a document with no named styles"
+        return [s for s in styles if s.get("namedStyleType") == "HEADING_1"][0]
 
-    def heading_paragraph(doc: dict) -> dict:
-        return [e["paragraph"] for e in doc["body"]["content"]
+    def heading_paragraph(doc: Document) -> DocsParagraph:
+        content = doc.get("body", {}).get("content")
+        assert content is not None, "a document with no body"
+        return [paragraph_of(e) for e in content
                 if "A themed heading" in "".join(
                     el.get("textRun", {}).get("content", "")
                     for el in e.get("paragraph", {}).get("elements", []))][0]
+
+    def paragraph_style(paragraph: DocsParagraph) -> DocsParagraphStyle:
+        found = paragraph.get("paragraphStyle")
+        assert found is not None, f"a paragraph with no style: {paragraph}"
+        return found
+
+    def elements(paragraph: DocsParagraph) -> list[DocsParagraphElement]:
+        found = paragraph.get("elements")
+        assert found is not None, f"a paragraph with no elements: {paragraph}"
+        return found
 
     try:
         before = raw()
@@ -202,9 +226,9 @@ def test_a_heading_the_theme_centres_survives_a_source_restyle(request):
         # And the heading itself says none of it: that is the rule the whole answer
         # rests on — a paragraph reports what is set on it, never what it inherits.
         paragraph = heading_paragraph(before)
-        assert "alignment" not in paragraph["paragraphStyle"]
+        assert "alignment" not in paragraph_style(paragraph)
         assert not any(el.get("textRun", {}).get("textStyle", {}).get("bold")
-                       for el in paragraph["elements"])
+                       for el in elements(paragraph))
 
         OUT.mkdir(parents=True, exist_ok=True)
         path = OUT / f"{request.node.name}.html"
@@ -221,19 +245,20 @@ def test_a_heading_the_theme_centres_survives_a_source_restyle(request):
         assert paper.sync()["requests"] > 0
 
         after = raw()
-        assert heading_style(after)["paragraphStyle"]["alignment"] == "CENTER"
+        restyled = heading_style(after).get("paragraphStyle")
+        assert restyled is not None and restyled.get("alignment") == "CENTER"
         paragraph = heading_paragraph(after)
-        assert paragraph["paragraphStyle"].get("alignment") in (None, "CENTER")
-        assert paragraph["paragraphStyle"]["namedStyleType"] == "HEADING_1"
+        assert paragraph_style(paragraph).get("alignment") in (None, "CENTER")
+        assert paragraph_style(paragraph).get("namedStyleType") == "HEADING_1"
         # Nothing of ours pinned the run against the theme either.
         assert not any(el.get("textRun", {}).get("textStyle", {}).get("bold") is False
-                       for el in paragraph["elements"])
+                       for el in elements(paragraph))
         paper.settled()
     finally:
         drive.files().delete(fileId=ident).execute()
 
 
-def test_a_reader_who_changes_a_face_keeps_it_through_a_source_edit(paper):
+def test_a_reader_who_changes_a_face_keeps_it_through_a_source_edit(paper: Paper) -> None:
     """The face round-trips, so the merge may name `weightedFontFamily` on a restyle
     without undoing a choice made in the browser."""
     from beamer2slides import doc_ir
@@ -242,12 +267,12 @@ def test_a_reader_who_changes_a_face_keeps_it_through_a_source_edit(paper):
     block = find(document(paper), "The closing paragraph")
     docs.documents().batchUpdate(documentId=paper.ident, body={"requests": [
         {"updateTextStyle": {
-            "range": {"startIndex": block["span"][0], "endIndex": block["span"][1] - 1},
+            "range": {"startIndex": span_of(block)[0], "endIndex": span_of(block)[1] - 1},
             "textStyle": {"weightedFontFamily": {"fontFamily": "Georgia"}},
             "fields": "weightedFontFamily"}}]}).execute()
     paper.edit("The closing paragraph.", "The closing paragraph, rewritten.")
     paper.sync()
-    runs = find(document(paper), "The closing paragraph")["runs"]
+    runs = runs_of(find(document(paper), "The closing paragraph"))
     assert all(r.get("font") == "Georgia" for r in runs)
     assert doc_ir.runs_text(runs) == "The closing paragraph, rewritten."
     paper.settled()

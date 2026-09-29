@@ -34,7 +34,7 @@ from beamer2slides.devtools import agent_play as play
 from beamer2slides.devtools import agent_tasks as tasks
 from beamer2slides.json_types import JsonObject
 
-from .json_reads import at, obj, objs, text
+from .json_reads import jat, jobj, jobjs, jstr
 
 REPLAY = [t for t in tasks.TASKS if t.kind == "replay"]
 POLICIES = ([(t, "correct", t.correct) for t in REPLAY] +
@@ -146,7 +146,7 @@ def test_a_live_tasks_fixture_is_built_where_the_run_can_keep_it(tmp_path: Path)
     run_dir = tmp_path / "run"
     session, _ = play.start("label-the-source", run_dir, allow_google=False, force=False)
     assert (run_dir / "workspace" / "talk" / "main.tex").exists()
-    assert at(session.play, "facts", "tex") == "talk/main.tex"
+    assert jat(session.play, "facts", "tex") == "talk/main.tex"
     written = play.call(run_dir, "tex_label", {"tex": "talk/main.tex", "apply": True})
     assert written.ok and "label=introduction" in \
         (run_dir / "workspace" / "talk" / "main.tex").read_text(encoding="utf-8")
@@ -388,17 +388,17 @@ def test_the_briefing_publishes_the_schema_the_tools_actually_run(tmp_path: Path
     session, task = play.start("dry-run-first", tmp_path / "run", allow_google=False, force=False)
     data = play.briefing_json(task, session)
     assert task.script is not None
-    assert [s["name"] for s in objs(data, "tools")] == sorted(task.script)
-    sync = next(s for s in objs(data, "tools") if s["name"] == "deck_sync")
-    assert "dry_run" in obj(sync, "input_schema", "properties")
-    assert at(sync, "input_schema", "additionalProperties") is False
+    assert [s["name"] for s in jobjs(data, "tools")] == sorted(task.script)
+    sync = next(s for s in jobjs(data, "tools") if s["name"] == "deck_sync")
+    assert "dry_run" in jobj(sync, "input_schema", "properties")
+    assert jat(sync, "input_schema", "additionalProperties") is False
     assert data["max_steps"] == play.MAX_STEPS and data["prompt"] == task.prompt
 
 
 def test_a_task_whose_tools_this_checkout_lacks_is_briefed_honestly(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(bench, "registry", lambda: None)
     [stub] = play.schemas(["deck_teleport"])
-    assert stub["name"] == "deck_teleport" and "no such tool" in text(stub, "description")
+    assert stub["name"] == "deck_teleport" and "no such tool" in jstr(stub, "description")
 
 
 # ------------------------------------------------------------------------------------- the CLI

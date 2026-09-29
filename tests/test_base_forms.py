@@ -19,12 +19,13 @@ import pytest
 
 from beamer2slides import adopt_sync, identity, merge, snapshot, sync
 from beamer2slides.emit import SLIDE_W
+from beamer2slides.google_types import Presentation
 
 from .test_sync_containment import SYNC_DECKS, requests_of, talk_base
 
 
 @pytest.fixture(scope="module")
-def talk(tmp_path_factory: pytest.TempPathFactory) -> tuple[dict, dict, Path]:
+def talk(tmp_path_factory: pytest.TempPathFactory) -> tuple[dict, Presentation, Path]:
     """(the base convert records for the sync talk's v1, the deck it wrote, the folder of its files)."""
     home = tmp_path_factory.mktemp("talk")
     base, pres = talk_base(home)
@@ -53,7 +54,7 @@ def at(base: dict, *folders: Path) -> snapshot.BasePictures:
 
 
 @pytest.mark.needs_decks("sync/out/v1.pdf")
-def test_a_base_in_todays_form_is_read_as_it_is(talk: tuple[dict, dict, Path], tmp_path: Path) -> None:
+def test_a_base_in_todays_form_is_read_as_it_is(talk: tuple[dict, Presentation, Path], tmp_path: Path) -> None:
     """What convert records today: nothing to rewrite, not a hash touched - by the reading alone and
     by a whole `build_ours` of the same source."""
     base, _, v1 = copy.deepcopy(talk[0]), talk[1], talk[2]
@@ -68,7 +69,7 @@ def test_a_base_in_todays_form_is_read_as_it_is(talk: tuple[dict, dict, Path], t
 
 @pytest.mark.needs_decks("sync/out/v1.pdf")
 def test_a_form_the_converter_no_longer_writes_is_a_rewrite_of_the_base_not_a_source_change(
-        talk: tuple[dict, dict, Path], tmp_path: Path) -> None:
+        talk: tuple[dict, Presentation, Path], tmp_path: Path) -> None:
     """A text an older converter recorded with `"composite": false` written out: the same element,
     another JSON form, another hash. Read in today's form, the base's element hashes as the new
     conversion's does, and an unchanged source plans no write."""
@@ -92,7 +93,7 @@ def test_a_form_the_converter_no_longer_writes_is_a_rewrite_of_the_base_not_a_so
 
 
 @pytest.mark.needs_decks("sync/out/v1.pdf")
-def test_an_element_the_parser_refuses_is_kept_and_said(talk: tuple[dict, dict, Path]) -> None:
+def test_an_element_the_parser_refuses_is_kept_and_said(talk: tuple[dict, Presentation, Path]) -> None:
     base, _, v1 = copy.deepcopy(talk[0]), talk[1], talk[2]
     slide, e = element(base, "text", "Both versions go into the report")
     recorded_as(base, e, {**e["ir"], "wobble": 1}, v1)
@@ -107,7 +108,7 @@ def test_an_element_the_parser_refuses_is_kept_and_said(talk: tuple[dict, dict, 
 
 
 @pytest.mark.needs_decks("sync/out/v1.pdf")
-def test_a_picture_whose_file_is_gone_keeps_its_hash(talk: tuple[dict, dict, Path], tmp_path: Path) -> None:
+def test_a_picture_whose_file_is_gone_keeps_its_hash(talk: tuple[dict, Presentation, Path], tmp_path: Path) -> None:
     """A picture's hash holds its file's, and the base keeps only 12 characters of that: with the
     file gone the hash cannot be made again, so the element stays as recorded and is said. Where the
     file is, the new hash is made with it."""
@@ -130,7 +131,7 @@ def test_a_picture_whose_file_is_gone_keeps_its_hash(talk: tuple[dict, dict, Pat
 
 
 @pytest.mark.needs_decks("sync/out/v1.pdf")
-def test_a_recorded_hash_its_ir_does_not_give_is_kept(talk: tuple[dict, dict, Path]) -> None:
+def test_a_recorded_hash_its_ir_does_not_give_is_kept(talk: tuple[dict, Presentation, Path]) -> None:
     """Hashed against other inputs than these (a link to other pages, a picture written again): a new
     hash from these would say a change nobody made."""
     base, _, v1 = copy.deepcopy(talk[0]), talk[1], talk[2]

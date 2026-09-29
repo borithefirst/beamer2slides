@@ -3,8 +3,13 @@
 runs, paragraph styles and bullets, pictures, groups, speaker notes). No Google involved."""
 
 import copy
+from dataclasses import dataclass
 
 from beamer2slides.emit import SLIDE_W, plan_offline
+from beamer2slides.emit_model import ObjectMap
+from beamer2slides.json_types import Json, JsonObject
+
+from .json_reads import jint, jnum, jnums, jobj, jobjs, jstr, jstrs
 
 GLYPHS = {"BULLET_DISC_CIRCLE_SQUARE": "●", "BULLET_ARROW3D_CIRCLE_SQUARE": "➢", "BULLET_CHECKBOX": "❏",
           "BULLET_STAR_CIRCLE_SQUARE": "★", "BULLET_DIAMOND_CIRCLE_SQUARE": "◆",
@@ -23,49 +28,65 @@ def joined(chars: list[str]) -> str:
     return "".join(chars).encode("utf-16-le", "surrogatepass").decode("utf-16-le", "surrogatepass")
 
 
+@dataclass(kw_only=True)
+class Marker:
+    """A paragraph's marker: its paragraph style and its bullet (None: not a list item). Requests
+    edit both in place."""
+    style: JsonObject
+    bullet: JsonObject | None
+
+
+def no_marker() -> Marker:
+    return Marker(style={}, bullet=None)
+
+
 class Text:
     """Characters (UTF-16 code units: `units`) with their styles; a paragraph's marker sits on its
     closing newline (the last paragraph's in `end`)."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.chars: list[str] = []
-        self.styles: list[dict] = []
-        self.marks: list[dict | None] = []
-        self.end = {"style": {}, "bullet": None}
+        self.styles: list[JsonObject] = []
+        self.marks: list[Marker | None] = []
+        self.end = no_marker()
 
-    def paragraphs(self) -> list[tuple[int, int, dict]]:
-        out, start = [], 0
+    def paragraphs(self) -> list[tuple[int, int, Marker]]:
+        out: list[tuple[int, int, Marker]] = []
+        start = 0
         for i, c in enumerate(self.chars):
             if c == "\n":
-                out.append((start, i, self.marks[i]))
+                mark = self.marks[i]
+                assert mark is not None, "a newline without its paragraph's marker"
+                out.append((start, i, mark))
                 start = i + 1
         out.append((start, len(self.chars), self.end))
         return out
 
     def insert(self, at: int, text: str) -> None:
-        style = dict(self.styles[at - 1]) if at > 0 and self.styles else {}
+        style: JsonObject = dict(self.styles[at - 1]) if at > 0 and self.styles else {}
         chars = units(text)
         self.chars[at:at] = chars
         self.styles[at:at] = [dict(style) for _ in chars]
-        self.marks[at:at] = [{"style": {}, "bullet": None} if c == "\n" else None for c in chars]
+        self.marks[at:at] = [no_marker() if c == "\n" else None for c in chars]
 
     def remove(self, a: int, b: int) -> None:
         self.chars[a:b] = []
         self.styles[a:b] = []
         self.marks[a:b] = []
 
-    def ranges(self, rng: dict) -> tuple[int, int]:
+    def ranges(self, rng: JsonObject) -> tuple[int, int]:
         if rng.get("type") == "ALL":
             return 0, len(self.chars)
-        return rng.get("startIndex", 0), rng.get("endIndex", len(self.chars))
+        return (jint(rng, "startIndex") if "startIndex" in rng else 0,
+                jint(rng, "endIndex") if "endIndex" in rng else len(self.chars))
 
-    def json(self) -> dict:
-        out = []
+    def json(self) -> JsonObject:
+        out: list[Json] = []
         for a, b, marker in self.paragraphs():
-            para = {"paragraphMarker": {"style": copy.deepcopy(marker["style"])}}
-            if marker["bullet"]:
-                para["paragraphMarker"]["bullet"] = copy.deepcopy(marker["bullet"])
-            out.append(para)
+            paragraph_marker: JsonObject = {"style": copy.deepcopy(marker.style)}
+            if marker.bullet:
+                paragraph_marker["bullet"] = copy.deepcopy(marker.bullet)
+            out.append({"paragraphMarker": paragraph_marker})
             k = a
             while k < b:
                 e = k
@@ -73,52 +94,58 @@ class Text:
                     e += 1
                 out.append({"textRun": {"content": joined(self.chars[k:e]), "style": copy.deepcopy(self.styles[k])}})
                 k = e
-            out.append({"textRun": {"content": "\n", "style": copy.deepcopy(self.styles[b - 1]) if b > a else {}}})
+            last: JsonObject = copy.deepcopy(self.styles[b - 1]) if b > a else {}
+            out.append({"textRun": {"content": "\n", "style": last}})
         return {"textElements": out}
 
 
-def simulate(deck: dict) -> dict:
+def presentation_of(deck: ObjectMap) -> JsonObject:
     """presentations.get-shaped JSON of the deck emit would build (offline plan, no measured moves)."""
     plan = plan_offline(deck)
-    scale = plan["plan"].scale
-    page_w, page_h = deck["slides"][0]["size"]
-    slides, objects, placeholder_type = [], {}, {}
+    deck_plan = plan["plan"]
+    scale = deck_plan.scale
+    page_h = jnums(deck_plan.slides()[0], "size")[1]
+    slides: list[Json] = []
+    objects: dict[str, JsonObject] = {}
+    texts: dict[str, Text] = {}  # the text of each object that holds one, by objectId
+    placeholder_type: dict[str, str] = {}
     for req in plan["copies"]:
-        ids = req["duplicateObject"]["objectIds"]
-        for src, new in ids.items():
+        for src, new in jobj(req, "duplicateObject", "objectIds").items():
             for kind in ("CENTERED_TITLE", "SUBTITLE", "TITLE"):
                 if src.endswith("_" + kind):
-                    placeholder_type[new] = kind
-    for slide_id, page, parts, element_ids in plan["slides"]:
-        elements: list[dict] = []
+                    placeholder_type[jstr(new)] = kind
+    for slide_id, page, parts, _element_ids in plan["slides"]:
+        elements: list[Json] = []
         for pe in plan["page_elements"].get(slide_id, []):
-            oid = pe["objectId"]
+            oid = jstr(pe, "objectId")
             if oid in placeholder_type:
-                obj = {"objectId": oid, "size": copy.deepcopy(pe["size"]),
-                       "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU"},
-                       "shape": {"shapeType": "TEXT_BOX", "placeholder": {"type": placeholder_type[oid]}},
-                       "_text": Text()}
+                obj: JsonObject = {"objectId": oid, "size": copy.deepcopy(pe["size"]),
+                                   "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU"},
+                                   "shape": {"shapeType": "TEXT_BOX", "placeholder": {"type": placeholder_type[oid]}}}
                 objects[oid] = obj
+                texts[oid] = Text()
                 elements.append(obj)
-        slide_deck = next(s for s in plan["plan"].deck["slides"] if s["page"] == page)
+        slide_deck = next(s for s in deck_plan.slides() if s["page"] == page)
         pictures = plan["pictures"][page]
-        for i, (el, box) in zip([i for i, e in enumerate(slide_deck["elements"]) if e["kind"] == "image"], pictures):
+        images = [i for i, e in enumerate(jobjs(slide_deck, "elements")) if e["kind"] == "image"]
+        for i, (_el, box) in zip(images, pictures):
             oid = f"{slide_id}_f{i}"
-            obj = {"objectId": oid, "size": {"width": {"magnitude": (box[2] - box[0]) * 12700, "unit": "EMU"},
-                                             "height": {"magnitude": (box[3] - box[1]) * 12700, "unit": "EMU"}},
-                   "transform": {"scaleX": 1, "scaleY": 1, "translateX": box[0] * 12700, "translateY": box[1] * 12700,
-                                 "unit": "EMU"},
-                   "title": "Figure", "image": {"contentUrl": None}}
-            objects[oid] = obj
-            elements.append(obj)
+            picture: JsonObject = {
+                "objectId": oid, "size": {"width": {"magnitude": (box[2] - box[0]) * 12700, "unit": "EMU"},
+                                          "height": {"magnitude": (box[3] - box[1]) * 12700, "unit": "EMU"}},
+                "transform": {"scaleX": 1, "scaleY": 1, "translateX": box[0] * 12700, "translateY": box[1] * 12700,
+                              "unit": "EMU"},
+                "title": "Figure", "image": {"contentUrl": None}}
+            objects[oid] = picture
+            elements.append(picture)
         notes = Text()
-        for el, reqs in parts:
+        for _el, reqs in parts:
             for r in reqs:
-                apply(r, elements, objects, notes, slide_id)
-        for obj in objects.values():
-            if "_text" in obj:
-                obj["shape"]["text"] = obj["_text"].json()
-        slides.append({"objectId": slide_id, "pageElements": [strip(e) for e in elements],
+                apply(r, elements, objects, texts, notes, slide_id)
+        for oid, text in texts.items():
+            jobj(objects[oid], "shape")["text"] = text.json()
+        page_elements: list[Json] = [strip(jobj(e)) for e in elements]
+        slides.append({"objectId": slide_id, "pageElements": page_elements,
                        "slideProperties": {"notesPage": {"notesProperties": {"speakerNotesObjectId": f"{slide_id}_notes"},
                                                          "pageElements": [{"objectId": f"{slide_id}_notes", "shape": {
                                                              "text": notes.json()}}]}}})
@@ -127,60 +154,79 @@ def simulate(deck: dict) -> dict:
             "slides": slides, "layouts": [], "masters": []}
 
 
-def strip(e: dict) -> dict:
-    out = {k: v for k, v in e.items() if not k.startswith("_")}
+def simulate(deck: ObjectMap) -> dict:
+    """`presentation_of`, untyped, for the modules that read it (ir_sources, test_inverse,
+    test_fonts_weights): they index the presentation and hand it on as a `Presentation`, which a
+    JSON object would make errors of there."""
+    return presentation_of(deck)
+
+
+def strip(e: JsonObject) -> JsonObject:
+    """A page element as presentations.get gives it: a copy, its group's children copied too."""
+    out: JsonObject = {k: v for k, v in e.items() if not k.startswith("_")}
     if "elementGroup" in out:
-        out["elementGroup"] = {"children": [strip(c) for c in out["elementGroup"]["children"]]}
+        children: list[Json] = [strip(c) for c in jobjs(out, "elementGroup", "children")]
+        out["elementGroup"] = {"children": children}
     return out
 
 
-def find(elements: list[dict], oid: str) -> tuple[list[dict], int] | None:
-    for i, e in enumerate(elements):
+def find(elements: list[Json], oid: str) -> tuple[list[Json], int] | None:
+    for i, item in enumerate(elements):
+        e = jobj(item)
         if e["objectId"] == oid:
             return elements, i
         if "elementGroup" in e:
-            got = find(e["elementGroup"]["children"], oid)
+            children = jobj(e, "elementGroup")["children"]
+            assert isinstance(children, list)
+            got = find(children, oid)
             if got:
                 return got
     return None
 
 
-def apply(r: dict, elements: list[dict], objects: dict, notes: Text, slide_id: str) -> None:
-    (name, body), = r.items()
+def apply(r: JsonObject, elements: list[Json], objects: dict[str, JsonObject], texts: dict[str, Text], notes: Text,
+          slide_id: str) -> None:
+    (name, request), = r.items()
+    body = jobj(request)
     if name == "createShape":
-        props = body["elementProperties"]
-        obj = {"objectId": body["objectId"], "size": copy.deepcopy(props["size"]),
-               "transform": copy.deepcopy(props["transform"]),
-               "shape": {"shapeType": body["shapeType"], "shapeProperties": {}}, "_text": Text()}
-        objects[body["objectId"]] = obj
+        props = jobj(body, "elementProperties")
+        oid = jstr(body, "objectId")
+        obj: JsonObject = {"objectId": oid, "size": copy.deepcopy(props["size"]),
+                           "transform": copy.deepcopy(props["transform"]),
+                           "shape": {"shapeType": body["shapeType"], "shapeProperties": {}}}
+        objects[oid] = obj
+        texts[oid] = Text()
         elements.append(obj)
     elif name == "updatePageElementTransform":
-        obj = objects.get(body["objectId"])
-        if obj is None:
+        moved = objects.get(jstr(body, "objectId"))
+        if moved is None:
             return
-        t = body["transform"]
+        t = jobj(body, "transform")
         if body["applyMode"] == "ABSOLUTE":
-            obj["transform"] = copy.deepcopy(t)
+            moved["transform"] = copy.deepcopy(t)
         else:
-            obj["transform"]["translateX"] = obj["transform"].get("translateX", 0) + t.get("translateX", 0)
-            obj["transform"]["translateY"] = obj["transform"].get("translateY", 0) + t.get("translateY", 0)
+            mine = jobj(moved, "transform")
+            mine["translateX"] = jnum(mine.get("translateX", 0)) + jnum(t.get("translateX", 0))
+            mine["translateY"] = jnum(mine.get("translateY", 0)) + jnum(t.get("translateY", 0))
     elif name == "updateShapeProperties":
-        obj = objects.get(body["objectId"])
-        if obj is not None:
-            obj["shape"].setdefault("shapeProperties", {}).update(copy.deepcopy(body["shapeProperties"]))
+        shaped = objects.get(jstr(body, "objectId"))
+        if shaped is not None:
+            none_yet: JsonObject = {}
+            jobj(jobj(shaped, "shape").setdefault("shapeProperties", none_yet)).update(
+                copy.deepcopy(jobj(body, "shapeProperties")))
     elif name in ("insertText", "deleteText", "updateTextStyle", "createParagraphBullets", "updateParagraphStyle"):
-        oid = body["objectId"]
-        text = notes if oid == f"{slide_id}_notes" else objects.get(oid, {}).get("_text")
+        oid = jstr(body, "objectId")
+        text = notes if oid == f"{slide_id}_notes" else texts.get(oid)
         if text is None:
             return
         if name == "insertText":
-            i = body.get("insertionIndex", 0)
+            i = jint(body, "insertionIndex") if "insertionIndex" in body else 0
             if i > len(text.chars):
                 raise ValueError(f"Invalid insertText: The insertion index ({i}) should not be greater "
                                  f"than the existing text length ({len(text.chars)}).")
-            text.insert(i, body["text"])
+            text.insert(i, jstr(body, "text"))
         elif name == "deleteText":
-            a, b = text.ranges(body["textRange"])
+            a, b = text.ranges(jobj(body, "textRange"))
             if b > len(text.chars):
                 # Slides counts the text without the newline it ends on and refuses to delete it
                 # (`merge.text_edit_requests`); `chars` is exactly that length, so clipping the
@@ -189,7 +235,7 @@ def apply(r: dict, elements: list[dict], objects: dict, notes: Text, slide_id: s
                                  f"than the existing text length ({len(text.chars)}).")
             text.remove(a, b)
         elif name == "updateTextStyle":
-            a, b = text.ranges(body["textRange"])
+            a, b = text.ranges(jobj(body, "textRange"))
             if b > len(text.chars):
                 # A FIXED_RANGE is measured against the same length a delete is (see below), so
                 # clipping here would let through a request the API throws the batch out for.
@@ -198,44 +244,49 @@ def apply(r: dict, elements: list[dict], objects: dict, notes: Text, slide_id: s
                 # is what says so if that ever stops being true.
                 raise ValueError(f"Invalid updateTextStyle: The end index ({b}) should not be greater "
                                  f"than the existing text length ({len(text.chars)}).")
-            fields = body["fields"].split(",")
+            fields = jstr(body, "fields").split(",")
+            style = jobj(body, "style")
             for k in range(a, min(b, len(text.chars))):
                 for f in fields:
-                    if f in body["style"]:
-                        text.styles[k][f] = copy.deepcopy(body["style"][f])
+                    if f in style:
+                        text.styles[k][f] = copy.deepcopy(style[f])
                     if f == "weightedFontFamily" and "bold" not in fields:
                         # a weight reads back as bold from 700 up (tools/probe_font_weights.py)
-                        text.styles[k]["bold"] = (body["style"][f].get("weight") or 400) >= 700
+                        weight = jobj(style, f).get("weight")
+                        text.styles[k]["bold"] = (jnum(weight) if weight else 400) >= 700
         elif name == "updateParagraphStyle":
-            a, b = text.ranges(body["textRange"])
+            a, b = text.ranges(jobj(body, "textRange"))
+            style = jobj(body, "style")
             for pa, pb, marker in text.paragraphs():
                 if pa <= max(a, b - 1) and pb >= a:
-                    for f in body["fields"].split(","):
-                        if f in body["style"]:
-                            marker["style"][f] = copy.deepcopy(body["style"][f])
+                    for f in jstr(body, "fields").split(","):
+                        if f in style:
+                            marker.style[f] = copy.deepcopy(style[f])
         elif name == "createParagraphBullets":
-            a, b = text.ranges(body["textRange"])
+            a, b = text.ranges(jobj(body, "textRange"))
             paras = [(pa, pb, m) for pa, pb, m in text.paragraphs() if pa <= max(a, b - 1) and pb >= a]
-            for pa, pb, marker in reversed(paras):
+            for pa, _pb, marker in reversed(paras):
                 tabs = 0
                 while pa + tabs < len(text.chars) and text.chars[pa + tabs] == "\t":
                     tabs += 1
-                marker["bullet"] = {"listId": "l", "nestingLevel": tabs, "glyph": GLYPHS.get(body["bulletPreset"], "●")}
+                marker.bullet = {"listId": "l", "nestingLevel": tabs,
+                                 "glyph": GLYPHS.get(jstr(body, "bulletPreset"), "●")}
                 if tabs:
                     text.remove(pa, pa + tabs)
     elif name == "groupObjects":
-        children = []
-        for cid in body["childrenObjectIds"]:
+        children: list[Json] = []
+        for cid in jstrs(body, "childrenObjectIds"):
             got = find(elements, cid)
             if got:
                 lst, i = got
                 children.append(lst.pop(i))
-        group = {"objectId": body["groupObjectId"], "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU"},
-                 "elementGroup": {"children": children}}
-        objects[body["groupObjectId"]] = group
+        gid = jstr(body, "groupObjectId")
+        group: JsonObject = {"objectId": gid, "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU"},
+                             "elementGroup": {"children": children}}
+        objects[gid] = group
         elements.append(group)
     elif name == "deleteObject":
-        got = find(elements, body["objectId"])
+        got = find(elements, jstr(body, "objectId"))
         if got:
             lst, i = got
             lst.pop(i)

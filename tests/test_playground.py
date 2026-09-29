@@ -13,7 +13,7 @@ import pytest
 from beamer2slides.json_types import JsonObject, as_object
 from beamer2slides.playground import server
 
-from .json_reads import at, obj, objs, text
+from .json_reads import jat, jobj, jobjs, jstr
 
 HERE = Path(__file__).parent
 PDF = HERE / "decks" / "out" / "04_theme_blocks.pdf"
@@ -72,7 +72,7 @@ def finished(base: str, jid: str) -> JsonObject:
 def test_config_says_what_the_server_can_do(base: str):
     status, config = call(f"{base}/api/config", None, JSON)
     assert status == 200 and config["google"] is None      # no token, no client: no deck button
-    assert "demo" in [text(e, "name") for e in objs(config, "examples")]
+    assert "demo" in [jstr(e, "name") for e in jobjs(config, "examples")]
     status, tex = fetch(f"{base}/api/example/demo.tex", None, JSON)
     assert status == 200 and b"\\begin{document}" in tex
     assert fetch(f"{base}/api/example/nothing.tex", None, JSON)[0] == 404
@@ -87,37 +87,37 @@ def test_a_host_with_no_token_of_its_own_asks_the_visitor_to_sign_in(base: str, 
     # drive.file alone reaches the files the deck is made of, and needs no Google review.
     assert config["google_scopes"] == "https://www.googleapis.com/auth/drive.file"
     status, made = call(f"{base}/api/jobs", PDF.read_bytes(), "application/pdf")
-    jid = text(made, "id")
+    jid = jstr(made, "id")
     job = finished(base, jid)
     assert job["state"] == "done", job["error"]
     status, answer = call(f"{base}/api/jobs/{jid}/slides", b"{}", JSON)
-    assert status == 401 and "sign in" in text(answer, "error")
+    assert status == 401 and "sign in" in jstr(answer, "error")
 
 
 @pytest.mark.skipif(not PDF.exists(), reason="no test PDFs built")
 def test_an_uploaded_pdf_goes_through_every_stage(base: str):
     status, made = call(f"{base}/api/jobs", PDF.read_bytes(), "application/pdf")
     assert status == 201
-    jid = text(made, "id")
+    jid = jstr(made, "id")
     job = finished(base, jid)
     assert job["state"] == "done", job["error"]
-    assert set(obj(job, "timings")) == {"extract + classify", "render"}      # nothing to compile
-    slides = objs(job, "result", "slides")
+    assert set(jobj(job, "timings")) == {"extract + classify", "render"}      # nothing to compile
+    slides = jobjs(job, "result", "slides")
     assert slides and all(s["elements"] for s in slides)
-    kinds = {e["kind"] for s in slides for e in objs(s, "elements")}
+    kinds = {e["kind"] for s in slides for e in jobjs(s, "elements")}
     assert {"text", "shape"} <= kinds                                    # the blocks are panels
     first = slides[0]
-    for rel in (text(first, "files", "page"), text(first, "files", "debug"),
-                text(first, "files", "background"), "deck.json"):
+    for rel in (jstr(first, "files", "page"), jstr(first, "files", "debug"),
+                jstr(first, "files", "background"), "deck.json"):
         status, body = fetch(f"{base}/api/jobs/{jid}/files/{rel}", None, JSON)
         assert status == 200 and body, rel
     status, deck = call(f"{base}/api/jobs/{jid}/files/deck.json", None, JSON)
-    assert [s["background"] for s in objs(deck, "slides")] == [at(s, "files", "background") for s in slides]
+    assert [s["background"] for s in jobjs(deck, "slides")] == [jat(s, "files", "background") for s in slides]
     # the page's own pictures: every one the IR names is there
-    for s in objs(deck, "slides"):
-        for e in objs(s, "elements"):
+    for s in jobjs(deck, "slides"):
+        for e in jobjs(s, "elements"):
             if e.get("file"):
-                assert fetch(f"{base}/api/jobs/{jid}/files/{text(e, 'file')}", None, JSON)[0] == 200
+                assert fetch(f"{base}/api/jobs/{jid}/files/{jstr(e, 'file')}", None, JSON)[0] == 200
     # no Google on this server: converting is refused, not attempted
     assert call(f"{base}/api/jobs/{jid}/slides", b"", JSON)[0] == 403
 
@@ -134,7 +134,7 @@ def test_what_it_refuses(base: str):
     assert call(f"{base}/api/jobs", json.dumps({"tex": ["a list"]}).encode(), JSON)[0] == 400
     assert call(f"{base}/api/jobs/ffffffffffff", None, JSON)[0] == 404
     status, made = call(f"{base}/api/jobs", b"%PDF-1.4 truncated", "application/pdf")
-    jid = text(made, "id")
+    jid = jstr(made, "id")
     job = finished(base, jid)                           # a broken PDF is an error, not a dead worker
     assert job["state"] == "error" and job["error"]
     # nothing outside the job's own folders, however the path is spelled

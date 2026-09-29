@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from beamer2slides import identity, snapshot
+from beamer2slides.google_types import Presentation
 from beamer2slides.json_types import JsonObject
 from beamer2slides.sync_model import Base, ElementKey, ObjectId, SlideKey, base_json
 
@@ -48,7 +49,7 @@ def picture(eid: str, box: Sequence[float], file: str) -> JsonObject:
     return {"id": eid, "kind": "image", "role": "figure", "bbox": list(box), "file": file}
 
 
-def made_base(pres: dict, slides: Sequence[MadeSlide], pdf: str, generation: int) -> dict:
+def made_base(pres: Presentation, slides: Sequence[MadeSlide], pdf: str, generation: int) -> JsonObject:
     """The base.json `convert` would record after writing `slides` as the deck `pres` (the answer
     of presentations.get), from the PDF at `pdf`."""
     deck: JsonObject = {"slides": [{"page": n, "background_color": s.background_color, "notes": s.notes,

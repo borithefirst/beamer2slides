@@ -33,7 +33,7 @@ from beamer2slides.google_types import json_object, part
 from beamer2slides.json_types import JsonObject
 from beamer2slides.typing_compat import override
 
-from .json_reads import integer, obj, objs
+from .json_reads import jint, jobj, jobjs
 
 if TYPE_CHECKING:
     from google.auth.credentials import Credentials
@@ -314,8 +314,8 @@ def test_a_document_with_no_base_asks_which_side_to_assume(tmp_path: Path, monke
     _, path, _, service = _pair(tmp_path, monkeypatch, [], False)
     result = doc_tools.doc_sync(_ctx(tmp_path), file="doc.html")
     assert not result.ok and result.code == "base_choice_needed"
-    assert [o["value"] for o in objs(result.data, "options")] == ["document-wins", "source-wins"]
-    assert all(o["costs"] for o in objs(result.data, "options"))
+    assert [o["value"] for o in jobjs(result.data, "options")] == ["document-wins", "source-wins"]
+    assert all(o["costs"] for o in jobjs(result.data, "options"))
     assert len(result.next_steps) == 2 and all("assume_base" in s for s in result.next_steps)
     assert service.sent() == 0                       # nothing was written before it asked
 
@@ -378,10 +378,10 @@ def test_adopt_names_the_block_an_edit_through_the_file_would_cost(tmp_path: Pat
     def bordered() -> Document:
         doc = plain()
         # (A property no `google_types` read names: set through the JSON the read is.)
-        body = objs(json_object(doc, "the read"), "tabs", 0, "documentTab", "body", "content")
+        body = jobjs(json_object(doc, "the read"), "tabs", 0, "documentTab", "body", "content")
         at = next(e for e in body
                   if "The second paragraph" in str(part(e.get("paragraph"), "e").get("elements")))
-        obj(at, "paragraph", "paragraphStyle")["borderBetween"] = {"width": {"magnitude": 1}}
+        jobj(at, "paragraph", "paragraphStyle")["borderBetween"] = {"width": {"magnitude": 1}}
         return doc
 
     monkeypatch.setattr(service.world, "read", bordered)
@@ -419,8 +419,8 @@ def test_a_sync_writes_the_source_edit_and_then_has_nothing_left_to_write(tmp_pa
 
     result = doc_tools.doc_sync(ctx, file="doc.html")
     assert result.ok, result.summary
-    assert result.data["written"] and integer(result.data, "requests") > 0
-    assert integer(result.data, "applied") >= 1 and result.data["conflicts"] == 0
+    assert result.data["written"] and jint(result.data, "requests") > 0
+    assert jint(result.data, "applied") >= 1 and result.data["conflicts"] == 0
     assert result.data["open_comments"] == [
         "Ada on 'The first paragraph': 'is this still true?'"]
     assert any("open comment" in d.message for d in result.diagnostics)
@@ -471,7 +471,7 @@ def test_a_dry_run_plans_the_same_edit_and_sends_nothing(tmp_path: Path, monkeyp
 
     result = doc_tools.doc_sync(_ctx(tmp_path), file="doc.html", dry_run=True)
     assert result.ok and result.data["dry_run"] and not result.data["written"]
-    assert integer(result.data, "requests") > 0 and service.sent() == 0
+    assert jint(result.data, "requests") > 0 and service.sent() == 0
     assert json.dumps(world.read()) == before
     assert any("dry_run=False" in step for step in result.next_steps)
     assert "Nothing was written" in result.summary

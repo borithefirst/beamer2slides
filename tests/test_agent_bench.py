@@ -22,7 +22,7 @@ from beamer2slides.devtools import agent_bench as bench
 from beamer2slides.devtools import agent_tasks as tasks
 from beamer2slides.json_types import Json, JsonObject
 
-from .json_reads import arr, obj, text
+from .json_reads import jarr, jobj, jstr
 
 REPLAY = [t for t in tasks.TASKS if t.kind == "replay"]
 DEFAULT = [t for t in tasks.TASKS if t.tier == "offline"]
@@ -130,8 +130,8 @@ def test_the_summary_has_the_shape_a_history_document_can_quote(tmp_path: Path):
     assert set(shown) == {"tag", "when", "totals", "tasks"}
     for key in ("tasks", "ran", "passed", "failed", "skipped", "errors", "harm", "harmed_tasks",
                 "calls", "redundant", "google_writes", "pass_rate", "seconds"):
-        assert key in obj(shown, "totals")
-    row = obj(shown, "tasks", 0)
+        assert key in jobj(shown, "totals")
+    row = jobj(shown, "tasks", 0)
     for key in ("id", "title", "kind", "tier", "status", "failures", "calls", "redundant",
                 "google_writes", "harm", "seconds"):
         assert key in row
@@ -280,8 +280,8 @@ def test_a_cost_is_taken_however_the_harness_spells_it(tmp_path: Path):
 
 
 def test_a_bundle_asks_an_outside_harness_for_the_cost():
-    shape = obj(bench.bundle(tasks.BY_ID["read-the-conflict"]), "transcript_shape")
-    assert "model" in shape and set(obj(shape, "usage")) >= {"input", "output"}
+    shape = jobj(bench.bundle(tasks.BY_ID["read-the-conflict"]), "transcript_shape")
+    assert "model" in shape and set(jobj(shape, "usage")) >= {"input", "output"}
 
 
 def test_a_result_comes_back_from_what_it_wrote(tmp_path: Path):
@@ -350,9 +350,9 @@ def test_a_fixture_that_cannot_be_built_twice_is_handed_over_instead(tmp_path: P
 def test_a_bundle_carries_what_an_outside_harness_needs():
     b = bench.bundle(tasks.BY_ID["assume-base"])
     assert b["prompt"] == tasks.BY_ID["assume-base"].prompt
-    assert "doc_sync" in arr(b, "tools")
+    assert "doc_sync" in jarr(b, "tools")
     assert isinstance(b["instructions"], str)
-    assert text(b, "transcript_shape", "steps", 0, "tool") == "<name>"
+    assert jstr(b, "transcript_shape", "steps", 0, "tool") == "<name>"
 
 
 # ------------------------------------------------------------------------------------ the live tier

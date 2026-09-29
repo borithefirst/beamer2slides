@@ -23,7 +23,8 @@ import pytest
 from beamer2slides import identity, merge, snapshot, sync
 from beamer2slides.emit import SLIDE_W
 
-from .test_sync import _picture_deck, _picture_files, unit
+from .json_reads import jobj, jstr
+from .test_sync import _picture_deck, _picture_files, merged_view, unit
 from .test_sync_containment import SYNC_DECKS, talk_base
 
 FIGURE = ("convergence", "image/figure/0")   # (the sync talk's plot, which the `figure` variant redraws)
@@ -90,17 +91,17 @@ def test_the_last_syncs_picture_is_held_before_the_next_render(tmp_path: Path) -
     _picture_files(work, transparent=True)                  # this sync's render, over it
     _, ours, _ = _picture_deck(work, work)
 
-    el = base["slides"][0]["elements"][1]
-    assert pictures.folder(el) == snapshot.held_pictures(out) / el["fields"]["image"]
+    el = jobj(base, "slides", 0, "elements", 1)
+    assert pictures.folder(el) == snapshot.held_pictures(out) / jstr(el, "fields", "image")
     assert snapshot.refresh_pictures(base, ours["slides"], ours["pairs"], ours["out"], pictures) == [
         snapshot.Refreshed(slide="figs", element="image/math/0")]
-    assert unit(merge.plan_merge(base, ours, theirs), "figs", "image/math/0")["action"] == "keep"
+    assert unit(merge.plan_merge(base, merged_view(ours), theirs), "figs", "image/math/0")["action"] == "keep"
 
     # (by name, the file under it now is the new render: not the base's picture, so not found)
     by_name = snapshot.find_base_pictures(unheld, snapshot.PictureFolders(kept=(), rendered=work, held=None))
-    assert by_name.folder(unheld["slides"][0]["elements"][1]) is None
+    assert by_name.folder(jobj(unheld, "slides", 0, "elements", 1)) is None
     assert snapshot.refresh_pictures(unheld, ours["slides"], ours["pairs"], ours["out"], by_name) == []
-    assert unit(merge.plan_merge(unheld, ours, theirs), "figs", "image/math/0")["action"] == "recreate"
+    assert unit(merge.plan_merge(unheld, merged_view(ours), theirs), "figs", "image/math/0")["action"] == "recreate"
 
 
 def test_held_pictures_no_base_names_go(tmp_path: Path) -> None:
@@ -108,7 +109,7 @@ def test_held_pictures_no_base_names_go(tmp_path: Path) -> None:
     _picture_files(snapshot.sync_work(out), transparent=False)
     base, _, _ = _picture_deck(snapshot.sync_work(out), snapshot.sync_work(out))
     snapshot.hold_base_pictures(base, out)
-    assert [p.name for p in snapshot.held_pictures(out).iterdir()] == [base["slides"][0]["elements"][1]["fields"]["image"]]
+    assert [p.name for p in snapshot.held_pictures(out).iterdir()] == [jstr(base, "slides", 0, "elements", 1, "fields", "image")]
     snapshot.hold_base_pictures({"slides": []}, out)
     assert list(snapshot.held_pictures(out).iterdir()) == []
 
@@ -120,6 +121,6 @@ def test_an_adopt_bases_pictures_are_where_adopt_converted_the_source(tmp_path: 
     out = tmp_path / "adopted"
     folder = _picture_files(out / "sync-base" / "ours", transparent=False)
     base, _, _ = _picture_deck(folder, folder)
-    el = base["slides"][0]["elements"][1]
+    el = jobj(base, "slides", 0, "elements", 1)
     assert snapshot.find_base_pictures(base, snapshot.picture_folders(out)).folder(el) == folder
-    assert identity.ir_fields(el["ir"], folder)[0] == el["ir_hash"]
+    assert identity.ir_fields(jobj(el, "ir"), folder)[0] == el["ir_hash"]

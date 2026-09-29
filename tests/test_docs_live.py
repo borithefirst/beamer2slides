@@ -17,12 +17,23 @@ Skipped when the Google token needs a browser consent. Files stay in
 `out/docs-tests/` of the main checkout; the documents do not stay anywhere.
 """
 
+from __future__ import annotations
+
 import os
 import subprocess
 import sys
+from collections.abc import Iterator, Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
+
+from .doc_records import rows_of, runs_of, span_of, tab_content
+
+if TYPE_CHECKING:
+    from beamer2slides.doc_ir import U16, Block, Ir
+    from beamer2slides.doc_sync import SyncReport
+    from beamer2slides.google_types import DocsService, Document, DriveFile, DriveService
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -68,13 +79,13 @@ _, ir = doc_sync.read_document(docs, ident)
 block = next(b for b in ir["blocks"]
              if "".join(r["text"] for r in b.get("runs", [])).startswith(after))
 doc_sync.send(docs, ident, [{"insertText": {"location": {"index": block["span"][1] - 1},
-                                            "text": text}}])
+                                            "text": text}}], None, None)
 '''
 
 
-def find(ir: dict, starts: str) -> dict:
+def find(ir: Ir, starts: str) -> Block:
     """The block whose words begin with `starts`, wherever it is — table cells too."""
-    def walk(blocks):
+    def walk(blocks: Sequence[Block]) -> Block | None:
         for block in blocks:
             for row in block.get("rows", []):
                 for cell in row:
@@ -88,7 +99,7 @@ def find(ir: dict, starts: str) -> dict:
     return found
 
 
-def surprises(info: dict) -> list[str]:
+def surprises(info: SyncReport) -> list[str]:
     """The notes a test is about. Every live document carries properties the dialect
     never reads - a section break, `direction`, `borderBetween`, the theme's own named
     styles - so `doc_sync.unmodelled_notes` is in every report there is and says nothing
@@ -100,7 +111,7 @@ def surprises(info: dict) -> list[str]:
 class Paper:
     """A canonical file and the document it was pushed to."""
 
-    def __init__(self, path: Path, ident: str):
+    def __init__(self, path: Path, ident: str) -> None:
         from beamer2slides import doc_sync
         self.path, self.ident, self.sync_module = path, ident, doc_sync
 
@@ -120,7 +131,7 @@ class Paper:
         _, ir = self.sync_module.read_document(docs, self.ident)
         block = find(ir, after)
         self.sync_module.send(docs, self.ident, [{"insertText": {
-            "location": {"index": block["span"][1] - 1}, "text": text}}])
+            "location": {"index": span_of(block)[1] - 1}, "text": text}}], None, None)
 
     def rewrote(self, after: str, old: str, new: str) -> None:
         """What a reader rewriting a word in a paragraph does, in the document."""
@@ -129,14 +140,14 @@ class Paper:
         docs = docs_service(credentials())
         _, ir = self.sync_module.read_document(docs, self.ident)
         block = find(ir, after)
-        words = "".join(r["text"] for r in block["runs"])
-        at = block["span"][0] + doc_ir.utf16_len(words[:words.index(old)])
+        words = "".join(r["text"] for r in runs_of(block))
+        at = span_of(block)[0] + doc_ir.utf16_len(words[:words.index(old)])
         end = at + doc_ir.utf16_len(old)
         self.sync_module.send(docs, self.ident, [
             {"insertText": {"location": {"index": end}, "text": new}},
-            {"deleteContentRange": {"range": {"startIndex": at, "endIndex": end}}}])
+            {"deleteContentRange": {"range": {"startIndex": at, "endIndex": end}}}], None, None)
 
-    def moved(self, key: str, after: str | None = None) -> None:
+    def moved(self, key: str, after: str | None) -> None:
         """What moving a section in the canonical file does.
 
         `to_html` writes one block per line - except a table, which is one line per row,
@@ -156,10 +167,13 @@ class Paper:
         self.path.write_text("\n".join(lines[:where] + block + lines[where:]),
                              encoding="utf-8")
 
-    def sync(self, **kwargs) -> dict:
-        return self.sync_module.sync(self.path, **kwargs)
+    def sync(self) -> SyncReport:
+        """A sync as `docs sync <file>` runs one: the document the file names, written,
+        with no base to assume and a backup kept."""
+        return self.sync_module.sync(self.path, document=None, dry_run=False,
+                                     assume_base=None, backup=True)
 
-    def settled(self) -> dict:
+    def settled(self) -> SyncReport:
         """One more sync, which must write nothing: the convergence property."""
         again = self.sync()
         assert again["requests"] == 0, f"a second sync still writes: {again['applied']}"
@@ -168,13 +182,13 @@ class Paper:
 
 
 @pytest.fixture(scope="module")
-def google():
+def google() -> None:
     if reason := google_unavailable():
         pytest.skip(reason)
 
 
 @pytest.fixture
-def paper(google, request):
+def paper(google: None, request: pytest.FixtureRequest) -> Iterator[Paper]:
     from beamer2slides import doc_sync
     from beamer2slides.google_auth import credentials, drive_service
     OUT.mkdir(parents=True, exist_ok=True)
@@ -187,7 +201,7 @@ def paper(google, request):
     drive_service(credentials()).files().delete(fileId=info["document"]).execute()
 
 
-def test_a_push_survives_the_importer_and_a_sync_writes_nothing(paper):
+def test_a_push_survives_the_importer_and_a_sync_writes_nothing(paper: Paper) -> None:
     """What the importer built reads back as what the file said."""
     text = paper.text
     assert f'content="{paper.ident}"' in text          # the file says where it lives
@@ -200,7 +214,7 @@ def test_a_push_survives_the_importer_and_a_sync_writes_nothing(paper):
     paper.settled()
 
 
-def test_both_sides_edit_and_the_merge_keeps_both(paper):
+def test_both_sides_edit_and_the_merge_keeps_both(paper: Paper) -> None:
     paper.edit("The report", "The report, revised")
     paper.edit("<td><p>870</p></td>", "<td><p>905</p></td>")
     paper.edit("<li id=\"item:second\">the second point</li>",
@@ -224,7 +238,7 @@ def test_both_sides_edit_and_the_merge_keeps_both(paper):
     paper.settled()
 
 
-def test_a_block_added_at_the_end_becomes_its_own_paragraph(paper):
+def test_a_block_added_at_the_end_becomes_its_own_paragraph(paper: Paper) -> None:
     """The body's last newline cannot be written past: the break goes in first."""
     paper.edit("</ul>", "</ul>\n<p>A paragraph the source added at the very end.</p>")
     paper.sync()
@@ -237,12 +251,12 @@ def test_a_block_added_at_the_end_becomes_its_own_paragraph(paper):
     paper.settled()
 
 
-def test_a_section_the_source_moved_moves_in_the_document(paper):
+def test_a_section_the_source_moved_moves_in_the_document(paper: Paper) -> None:
     """The API cannot move anything: a move is a delete where the document has the
     block and a write where the file puts it. What rides along is what makes it a
     move and not a rewrite — the reader's words, the styling, and the block's key."""
     paper.typed("The opening paragraph", " Typed by a reader.")
-    paper.moved("paragraph:opening")                     # to the end of the body
+    paper.moved("paragraph:opening", None)               # to the end of the body
     info = paper.sync()
     assert info["conflicts"] == []
     assert any("moved to where the source has it" in line for line in info["applied"]), \
@@ -260,7 +274,7 @@ def test_a_section_the_source_moved_moves_in_the_document(paper):
     paper.settled()
 
 
-def test_a_table_the_source_added_and_a_row_it_added_are_written(paper):
+def test_a_table_the_source_added_and_a_row_it_added_are_written(paper: Paper) -> None:
     """A grid is not text: it goes in a batch of its own, the document is read again,
     and the words are written against the grid it then has. The reader's own edit to
     the table that gained the row has to survive all of that."""
@@ -287,7 +301,7 @@ def test_a_table_the_source_added_and_a_row_it_added_are_written(paper):
     paper.settled()
 
 
-def test_a_grid_both_sides_changed_and_a_cell_of_two_paragraphs(paper):
+def test_a_grid_both_sides_changed_and_a_cell_of_two_paragraphs(paper: Paper) -> None:
     """The source adds a column, takes a row away and splits a cell in two; the reader
     adds a row and writes in a header. Rows and columns are matched by their words,
     so all of it stands."""
@@ -302,12 +316,13 @@ def test_a_grid_both_sides_changed_and_a_cell_of_two_paragraphs(paper):
     _, ir = paper.sync_module.read_document(docs, paper.ident)
     grid = next(b for b in ir["blocks"] if b["kind"] == "table")
     paper.sync_module.send(docs, paper.ident, [{"insertTableRow": {"tableCellLocation": {
-        "tableStartLocation": {"index": grid["span"][0]}, "rowIndex": 2, "columnIndex": 0},
-        "insertBelow": True}}])
+        "tableStartLocation": {"index": span_of(grid)[0]}, "rowIndex": 2, "columnIndex": 0},
+        "insertBelow": True}}], None, None)
     _, ir = paper.sync_module.read_document(docs, paper.ident)
     grid = next(b for b in ir["blocks"] if b["kind"] == "table")
     paper.sync_module.send(docs, paper.ident, [{"insertText": {
-        "location": {"index": grid["rows"][3][0][0]["span"][0]}, "text": "West"}}])
+        "location": {"index": span_of(rows_of(grid)[3][0][0])[0]}, "text": "West"}}],
+        None, None)
     paper.typed("Sales", " (k)")
 
     info = paper.sync()
@@ -320,11 +335,11 @@ def test_a_grid_both_sides_changed_and_a_cell_of_two_paragraphs(paper):
     paper.settled()
 
 
-def test_a_table_the_source_moved_is_built_again_where_the_file_has_it(paper):
+def test_a_table_the_source_moved_is_built_again_where_the_file_has_it(paper: Paper) -> None:
     """There is no move: the table is deleted and built again, blank, and its words
     are written on the pass after. To the end of the body and back, where the empty
     paragraph a final table keeps after itself has to go with it."""
-    paper.moved("table:numbers")
+    paper.moved("table:numbers", None)
     info = paper.sync()
     assert any("moved where the source has it" in line for line in info["applied"]), \
         info["applied"]
@@ -341,7 +356,7 @@ def test_a_table_the_source_moved_is_built_again_where_the_file_has_it(paper):
     paper.settled()
 
 
-def test_a_word_the_source_bolded_in_a_paragraph_the_reader_rewrote(paper):
+def test_a_word_the_source_bolded_in_a_paragraph_the_reader_rewrote(paper: Paper) -> None:
     """The marks follow the words: the source's on its words, the reader's on theirs."""
     paper.edit("The closing paragraph.", "The <b>closing</b> paragraph.")
     paper.rewrote("The closing", "paragraph", "passage")
@@ -351,7 +366,7 @@ def test_a_word_the_source_bolded_in_a_paragraph_the_reader_rewrote(paper):
     paper.settled()
 
 
-def test_a_list_the_reader_numbered_is_numbered_in_the_file(paper):
+def test_a_list_the_reader_numbered_is_numbered_in_the_file(paper: Paper) -> None:
     """An imported list cannot say whether it is numbered, so the push gives it bullets
     of the document's own — and from then on a reader's switch in the toolbar (the same
     request the toolbar sends) is seen, where before the file silently won."""
@@ -360,8 +375,8 @@ def test_a_list_the_reader_numbered_is_numbered_in_the_file(paper):
     _, ir = paper.sync_module.read_document(docs, paper.ident)
     first, second = find(ir, "the first point"), find(ir, "the second point")
     paper.sync_module.send(docs, paper.ident, [{"createParagraphBullets": {
-        "range": {"startIndex": first["span"][0], "endIndex": second["span"][1]},
-        "bulletPreset": "NUMBERED_DECIMAL_ALPHA_ROMAN"}}])
+        "range": {"startIndex": span_of(first)[0], "endIndex": span_of(second)[1]},
+        "bulletPreset": "NUMBERED_DECIMAL_ALPHA_ROMAN"}}], None, None)
     info = paper.sync()
     assert info["conflicts"] == []
     text = paper.text
@@ -370,7 +385,7 @@ def test_a_list_the_reader_numbered_is_numbered_in_the_file(paper):
     paper.settled()
 
 
-def test_a_table_at_the_very_end_and_the_paragraphs_after_it(paper):
+def test_a_table_at_the_very_end_and_the_paragraphs_after_it(paper: Paper) -> None:
     """A body ends on a paragraph, so a table written last has an empty one after it
     that no request can delete. It is no block: the file never shows it, the block the
     source appends next is written into it, and deleting the body's last paragraph
@@ -396,7 +411,7 @@ def test_a_table_at_the_very_end_and_the_paragraphs_after_it(paper):
     paper.settled()
 
 
-def png(path: Path, colour: tuple, size=(60, 40)) -> str:
+def png(path: Path, colour: tuple[int, int, int], size: tuple[int, int]) -> str:
     """A picture file beside the canonical file; its `src` relative to it."""
     from PIL import Image
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -404,7 +419,7 @@ def png(path: Path, colour: tuple, size=(60, 40)) -> str:
     return path.relative_to(OUT).as_posix()
 
 
-def objects(paper) -> dict:
+def objects(paper: Paper) -> dict[str, float | tuple[int, ...] | None]:
     """The pictures in the document: object id -> its first pixel, fetched."""
     import io
     import urllib.request
@@ -412,19 +427,21 @@ def objects(paper) -> dict:
     from beamer2slides import doc_merge
     from beamer2slides.google_auth import credentials, docs_service
     _, ir = paper.sync_module.read_document(docs_service(credentials()), paper.ident)
-    out = {}
+    out: dict[str, float | tuple[int, ...] | None] = {}
     for run in doc_merge._image_runs(ir["blocks"]):
-        with urllib.request.urlopen(run["uri"]) as reply:
-            out[run["value"]] = Image.open(io.BytesIO(reply.read())).convert("RGB").getpixel((5, 5))
+        uri, value = run.get("uri"), run.get("value")
+        assert uri is not None and value is not None, f"a picture run with no uri or id: {run}"
+        with urllib.request.urlopen(uri) as reply:
+            out[value] = Image.open(io.BytesIO(reply.read())).convert("RGB").getpixel((5, 5))
     return out
 
 
-def test_pictures_go_in_follow_the_source_and_come_back_from_the_reader(paper, request):
+def test_pictures_go_in_follow_the_source_and_come_back_from_the_reader(paper: Paper, request: pytest.FixtureRequest) -> None:
     """`insertInlineImage` takes a URL, never bytes: the sync stages the file as a
     document of its own, inserts from the URL Docs gives it, and deletes the staging
     file. A picture the reader inserts comes back as a file beside the canonical one."""
     import re
-    src = png(OUT / f"{request.node.name}-figures" / "square.png", (200, 30, 30))
+    src = png(OUT / f"{request.node.name}-figures" / "square.png", (200, 30, 30), (60, 40))
     paper.edit('<p id="paragraph:closing">',
                f'<p id="paragraph:figure"><img src="{src}" alt="a red square" width="60" '
                f'height="40"></p>\n<p id="paragraph:closing">')
@@ -437,7 +454,7 @@ def test_pictures_go_in_follow_the_source_and_come_back_from_the_reader(paper, r
     paper.settled()
 
     # The source regenerates the figure under the same name: the picture is replaced.
-    png(OUT / src, (30, 30, 200))
+    png(OUT / src, (30, 30, 200), (60, 40))
     paper.sync()
     assert list(objects(paper).values()) == [(30, 30, 200)]
     assert f'src="{src}"' in paper.text and img.group(2) not in paper.text
@@ -447,10 +464,10 @@ def test_pictures_go_in_follow_the_source_and_come_back_from_the_reader(paper, r
     from beamer2slides.google_auth import credentials, docs_service
     docs = docs_service(credentials())
     _, ir = paper.sync_module.read_document(docs, paper.ident)
-    uri = next(r["uri"] for b in ir["blocks"] for r in b.get("runs", []) if r.get("uri"))
+    uri = next(found for b in ir["blocks"] for r in b.get("runs", []) if (found := r.get("uri")))
     closing = find(ir, "The closing paragraph")
     paper.sync_module.send(docs, paper.ident, [{"insertInlineImage": {
-        "location": {"index": closing["span"][1] - 1}, "uri": uri}}])
+        "location": {"index": span_of(closing)[1] - 1}, "uri": uri}}], None, None)
     paper.sync()
     mine = re.search(r'The closing paragraph\.<img src="([^"]+)"', paper.text)
     assert mine and (OUT / mine.group(1)).is_file(), paper.text
@@ -459,7 +476,7 @@ def test_pictures_go_in_follow_the_source_and_come_back_from_the_reader(paper, r
 
     # And the source moves the figure: a move is a delete and a write, and the
     # picture rides along from the document's own copy.
-    paper.moved("paragraph:figure")
+    paper.moved("paragraph:figure", None)
     paper.sync()
     text = paper.text
     assert text.index(f'src="{src}"') > text.index("the second point")
@@ -467,7 +484,7 @@ def test_pictures_go_in_follow_the_source_and_come_back_from_the_reader(paper, r
     paper.settled()
 
 
-def test_a_file_with_a_picture_is_pushed_with_it(google, request):
+def test_a_file_with_a_picture_is_pushed_with_it(google: None, request: pytest.FixtureRequest) -> None:
     from beamer2slides import doc_sync
     from beamer2slides.google_auth import credentials, drive_service
     src = png(OUT / f"{request.node.name}-figures" / "plot.png", (20, 160, 20), (80, 50))
@@ -499,7 +516,14 @@ EQUATION_DOCX = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 </w:body></w:document>"""
 
 
-def docx(body: str, styles: str | None = None) -> bytes:
+def made_id(made: DriveFile) -> str:
+    """The id `files.create` answered with (asked for by `fields="id"`)."""
+    ident = made.get("id")
+    assert ident is not None, f"a file made with no id: {made}"
+    return ident
+
+
+def docx(body: str, styles: str | None) -> bytes:
     """A .docx of one document part: Drive's importer turns its OMML into equations,
     which is the only way to make one — the Docs API has no request for it.
 
@@ -539,7 +563,7 @@ def docx(body: str, styles: str | None = None) -> bytes:
     return buf.getvalue()
 
 
-def test_an_equation_reaches_the_file_as_latex_and_survives_a_rewrite(google, request):
+def test_an_equation_reaches_the_file_as_latex_and_survives_a_rewrite(google: None, request: pytest.FixtureRequest) -> None:
     """The LaTeX comes from the Markdown export; a source rewrite of the words around
     the equations keeps them, and the file keeps saying what they are."""
     import io
@@ -547,11 +571,11 @@ def test_an_equation_reaches_the_file_as_latex_and_survives_a_rewrite(google, re
     from beamer2slides import doc_sync
     from beamer2slides.google_auth import credentials, docs_service, drive_service
     drive = drive_service(credentials())
-    ident = drive.files().create(
+    ident = made_id(drive.files().create(
         body={"name": f"b2s docs test: {request.node.name}", "mimeType": doc_sync.DOC_MIME},
-        media_body=MediaIoBaseUpload(io.BytesIO(docx(EQUATION_DOCX)), mimetype=(
+        media_body=MediaIoBaseUpload(io.BytesIO(docx(EQUATION_DOCX, None)), mimetype=(
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document")),
-        fields="id").execute()["id"]
+        fields="id").execute())
     try:
         OUT.mkdir(parents=True, exist_ok=True)
         path = OUT / f"{request.node.name}.html"
@@ -569,7 +593,8 @@ def test_an_equation_reaches_the_file_as_latex_and_survives_a_rewrite(google, re
         info = paper.sync()
         assert info["conflicts"] == [], info["conflicts"]
         doc, _ = doc_sync.read_document(docs_service(credentials()), ident)
-        elements = [e for tab in doc["tabs"] for c in tab["documentTab"]["body"]["content"]
+        elements = [e for index in range(len(doc.get("tabs", [])))
+                    for c in tab_content(doc, index)
                     for e in c.get("paragraph", {}).get("elements", [])]
         assert sum("equation" in e for e in elements) == 2
         assert any("costs $6 and" in e.get("textRun", {}).get("content", "") for e in elements)
@@ -581,7 +606,7 @@ def test_an_equation_reaches_the_file_as_latex_and_survives_a_rewrite(google, re
         drive.files().delete(fileId=ident).execute()
 
 
-def test_a_block_the_source_added_with_a_date_and_a_person_gets_them(paper):
+def test_a_block_the_source_added_with_a_date_and_a_person_gets_them(paper: Paper) -> None:
     """Measured: `insertDate` and `insertPerson` make the chips, so a new block that
     carries them is written with them rather than reported."""
     paper.edit('<p id="paragraph:closing">',
@@ -597,7 +622,7 @@ def test_a_block_the_source_added_with_a_date_and_a_person_gets_them(paper):
     paper.settled()
 
 
-def test_the_same_words_on_both_sides_conflict_and_the_document_wins(paper):
+def test_the_same_words_on_both_sides_conflict_and_the_document_wins(paper: Paper) -> None:
     paper.edit("The closing paragraph.", "The final paragraph.")
     paper.rewrote("The closing paragraph", "closing", "last")
     info = paper.sync()
@@ -607,7 +632,7 @@ def test_the_same_words_on_both_sides_conflict_and_the_document_wins(paper):
     paper.settled()
 
 
-def test_a_reader_typing_mid_sync_makes_it_read_again(paper):
+def test_a_reader_typing_mid_sync_makes_it_read_again(paper: Paper) -> None:
     """The re-plan: the write is refused on the revision, and the second plan keeps
     the words that arrived in between."""
     script = OUT / "type-mid-sync.py"
@@ -626,7 +651,7 @@ def test_a_reader_typing_mid_sync_makes_it_read_again(paper):
     paper.settled()
 
 
-def test_an_open_comment_in_the_document_is_named_in_the_report(paper):
+def test_an_open_comment_in_the_document_is_named_in_the_report(paper: Paper) -> None:
     """A comment lives in Drive, not in the document's content, so nothing the merge
     reads can see one. The sync reads them separately and says they are there."""
     from beamer2slides.google_auth import credentials, drive_service
@@ -636,12 +661,14 @@ def test_an_open_comment_in_the_document_is_named_in_the_report(paper):
     info = paper.sync()
     assert any("is this number still right?" in line for line in info["comments"]), \
         info["comments"]
+    report = info.get("report")
+    assert report is not None, "a sync that wrote no report"
     assert "## Open comments in the document" in \
-        Path(info["report"]).read_text(encoding="utf-8")
+        Path(report).read_text(encoding="utf-8")
     paper.settled()
 
 
-def test_a_checkout_with_no_local_state_syncs_from_the_base_in_drive(paper):
+def test_a_checkout_with_no_local_state_syncs_from_the_base_in_drive(paper: Paper) -> None:
     """`.b2s/` is scratch state a fresh clone, a colleague's machine or a second
     checkout does not have. The base itself lives in Drive, named by the document's
     own `appProperties.b2sBase`, so the sync finds it there and never has to ask
@@ -650,19 +677,19 @@ def test_a_checkout_with_no_local_state_syncs_from_the_base_in_drive(paper):
     from beamer2slides.google_auth import credentials, drive_service
     drive = drive_service(credentials())
     stored = doc_sync.load_drive(drive, paper.ident, found=None, hint=None)
-    assert stored and stored["document"] == paper.ident, "push should store the base in Drive"
+    assert stored and stored.get("document") == paper.ident, "push should store the base in Drive"
 
     doc_sync.base_path(paper.path).unlink()          # what a fresh clone looks like
     paper.typed("The opening paragraph", " Typed by a reader.")
     paper.edit("The closing paragraph.", "The closing paragraph, revised.")
     info = paper.sync()                              # no --assume-base needed
-    assert info["base"] == "drive", info.get("notes")
+    assert info.get("base") == "drive", info.get("notes")
     assert info["conflicts"] == []
     assert "Typed by a reader." in paper.text and "revised" in paper.text
     paper.settled()
 
 
-def test_the_anchors_a_batch_answers_with_are_what_a_read_would_say(paper):
+def test_the_anchors_a_batch_answers_with_are_what_a_read_would_say(paper: Paper) -> None:
     """The tail of a sync: what the plant batch answered is what a read would have said.
 
     `settle` used to read the document a third time after planting its named ranges,
@@ -676,9 +703,14 @@ def test_the_anchors_a_batch_answers_with_are_what_a_read_would_say(paper):
     from beamer2slides import doc_sync
     from beamer2slides.google_auth import credentials, docs_service
 
-    reads = []
+    reads: list[str] = []
     real = doc_sync._get
-    doc_sync._get = lambda docs, ident: (reads.append(ident), real(docs, ident))[1]
+
+    def counted(docs: DocsService, ident: str) -> Document:
+        reads.append(ident)
+        return real(docs, ident)
+
+    doc_sync._get = counted
     try:
         paper.edit("The closing paragraph.", "The closing paragraph, rewritten whole.")
         paper.edit("the second point", "the second point, and more of it")
@@ -691,9 +723,13 @@ def test_the_anchors_a_batch_answers_with_are_what_a_read_would_say(paper):
     assert len(reads) == 2, f"the document was read {len(reads)} times"
 
     base = doc_sync.load_local(paper.path, paper.ident)
+    assert base is not None, "a sync should leave its base beside the file"
     _, fresh = doc_sync.read_document(docs_service(credentials()), paper.ident)
-    anchors = lambda ir: {b["key"]: (b.get("rangeId"), tuple(b.get("range") or ()))
-                          for b in ir["blocks"] if b.get("key")}
+
+    def anchors(ir: Ir) -> dict[str, tuple[str | None, tuple[U16, ...]]]:
+        return {key: (b.get("rangeId"), tuple(b.get("range") or ()))
+                for b in ir["blocks"] if (key := b.get("key"))}
+
     patched, read = anchors(base), anchors(fresh)
     assert patched and all(rid for rid, _ in patched.values()), patched
     assert patched == read
@@ -701,7 +737,7 @@ def test_the_anchors_a_batch_answers_with_are_what_a_read_would_say(paper):
     paper.settled()
 
 
-def test_the_base_is_fetched_from_the_id_the_cache_remembers(paper):
+def test_the_base_is_fetched_from_the_id_the_cache_remembers(paper: Paper) -> None:
     """The head of a sync: the base comes back without asking the document where it is.
 
     The document's base file is the same file for the document's life — `save_drive`
@@ -714,20 +750,21 @@ def test_the_base_is_fetched_from_the_id_the_cache_remembers(paper):
     from beamer2slides.google_auth import credentials, drive_service
 
     cached = doc_sync.load_local(paper.path, paper.ident)
+    assert cached is not None, "a push should leave its base beside the file"
     hint = cached.get(doc_sync.BASE_FID)
     assert hint, "a push should leave the base file's id beside the file"
 
-    def never(*args, **kwargs):
+    def never(drive: DriveService, document: str) -> str | None:
         raise AssertionError("the document was asked where its base is")
 
     drive = drive_service(credentials())
     was, doc_sync.base_file_id = doc_sync.base_file_id, never
     try:
-        found: dict = {}
+        found: dict[str, str] = {}
         stored = doc_sync.load_drive(drive, paper.ident, found, hint)
     finally:
         doc_sync.base_file_id = was
-    assert stored and stored["document"] == paper.ident
+    assert stored and stored.get("document") == paper.ident
     assert found["fid"] == hint
     assert doc_sync.base_file_id(drive, paper.ident) == hint, "and it is the one Drive names"
 
@@ -745,7 +782,7 @@ ADOPTED = """<html><body>
 </body></html>"""
 
 
-def test_a_document_nobody_pushed_is_adopted_and_then_syncs_to_nothing(google, request):
+def test_a_document_nobody_pushed_is_adopted_and_then_syncs_to_nothing(google: None, request: pytest.FixtureRequest) -> None:
     """`push` goes file → document and refuses a file that already names one, so a
     team that has been writing a Google Doc for a year had no way in. `adopt` reads
     the document, keys its blocks, plants one named range each, writes the canonical
@@ -759,10 +796,10 @@ def test_a_document_nobody_pushed_is_adopted_and_then_syncs_to_nothing(google, r
     from beamer2slides import doc_ir, doc_sync
     from beamer2slides.google_auth import credentials, docs_service, drive_service
     drive = drive_service(credentials())
-    ident = drive.files().create(
+    ident = made_id(drive.files().create(
         body={"name": f"b2s docs test: {request.node.name}", "mimeType": doc_sync.DOC_MIME},
         media_body=MediaIoBaseUpload(io.BytesIO(ADOPTED.encode("utf-8")), mimetype="text/html"),
-        fields="id").execute()["id"]
+        fields="id").execute())
     try:
         OUT.mkdir(parents=True, exist_ok=True)
         path = OUT / f"{request.node.name}.html"
@@ -805,7 +842,7 @@ def test_a_document_nobody_pushed_is_adopted_and_then_syncs_to_nothing(google, r
         drive.files().delete(fileId=ident).execute()
 
 
-def test_the_cli_reaches_the_same_plan(paper):
+def test_the_cli_reaches_the_same_plan(paper: Paper) -> None:
     done = subprocess.run([sys.executable, "-m", "beamer2slides", "docs", "sync",
                            str(paper.path), "--dry-run"],
                           env=ENV, cwd=ROOT, capture_output=True, text=True)
@@ -813,14 +850,18 @@ def test_the_cli_reaches_the_same_plan(paper):
     assert "0 request(s)" in done.stdout
 
 
-def tabs(paper) -> list[tuple[str, str]]:
+def tabs(paper: Paper) -> list[tuple[str, str]]:
     """The document's tabs past the first, as (title, words)."""
     from beamer2slides import doc_ir
     from beamer2slides.google_auth import credentials, docs_service
     _, ir = paper.sync_module.read_document(docs_service(credentials()), paper.ident)
-    return [(part["title"], " / ".join(
-        "".join(r["text"] for r in b.get("runs", [])) or b["kind"] for b in part["blocks"]))
-        for part in doc_ir.parts(ir)[1:]]
+    found: list[tuple[str, str]] = []
+    for part in doc_ir.parts(ir)[1:]:
+        title = part.get("title")
+        assert title is not None, f"a tab with no title: {part}"
+        found.append((title, " / ".join(
+            "".join(r["text"] for r in b.get("runs", [])) or b["kind"] for b in part["blocks"])))
+    return found
 
 
 APPENDIX = """<section title="Appendix">
@@ -838,7 +879,7 @@ APPENDIX = """<section title="Appendix">
 </body>"""
 
 
-def test_tabs_the_source_adds_renames_edits_and_deletes(paper):
+def test_tabs_the_source_adds_renames_edits_and_deletes(paper: Paper) -> None:
     """Every tab is synced like the first: its own plan, its requests stamped with its
     `tabId`, created, renamed or deleted by the three-way rule one level up."""
     paper.edit("</body>", APPENDIX)
@@ -859,9 +900,11 @@ def test_tabs_the_source_adds_renames_edits_and_deletes(paper):
     _, ir = paper.sync_module.read_document(docs, paper.ident)
     appendix = next(p for p in doc_ir.parts(ir) if p.get("title") == "Appendix")
     point = next(b for b in appendix["blocks"] if b.get("runs") and
-                 b["runs"][0]["text"] == "point a")
+                 runs_of(b)[0]["text"] == "point a")
+    tab = appendix.get("tab")
+    assert tab is not None, f"the appendix has no tab id: {appendix}"
     paper.sync_module.send(docs, paper.ident, [{"insertText": {"location": {
-        "index": point["span"][1] - 1, "tabId": appendix["tab"]}, "text": " (reader)"}}])
+        "index": span_of(point)[1] - 1, "tabId": tab}, "text": " (reader)"}}], None, None)
     paper.edit("An appendix line.", "An appendix line, revised.")
     paper.edit('title="Appendix"', 'title="Appendix A"')
     text = paper.text
@@ -876,7 +919,7 @@ def test_tabs_the_source_adds_renames_edits_and_deletes(paper):
     paper.settled()
 
 
-def test_a_file_with_tabs_is_pushed_with_them(google, request):
+def test_a_file_with_tabs_is_pushed_with_them(google: None, request: pytest.FixtureRequest) -> None:
     from beamer2slides import doc_sync
     from beamer2slides.google_auth import credentials, drive_service
     path = OUT / f"{request.node.name}.html"

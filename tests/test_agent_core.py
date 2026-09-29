@@ -21,7 +21,7 @@ from beamer2slides.agent.context import Tool, tool
 from beamer2slides.agent.types import CODES, Code, Need
 from beamer2slides.json_types import Json, JsonObject
 
-from .json_reads import text
+from .json_reads import jstr
 
 if TYPE_CHECKING:
     from google.auth.credentials import Credentials
@@ -255,7 +255,7 @@ def stops(j: Job) -> None:
 def test_an_unforeseen_failure_says_where_it_happened(tmp_path: Path):
     """A bare StopIteration once reached a caller as "StopIteration: " and nothing else."""
     r = stops(_ctx(tmp_path))
-    where, traceback = text(r.data, "where"), text(r.data, "traceback")
+    where, traceback = jstr(r.data, "where"), jstr(r.data, "traceback")
     assert r.code == "failed" and "test_agent_core.py" in where and "in stops" in where
     assert where in r.summary and "next(iter(()))" in traceback
     assert ":\\" not in traceback and not traceback.startswith("/")   # no machine paths

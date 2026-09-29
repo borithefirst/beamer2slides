@@ -7,24 +7,43 @@ at each injection point and check that a second sync reaches the same deck witho
     python -m pytest -m sync -q tests/test_sync_crash.py     # the live ones (Google, ~10 min)
 """
 
+from __future__ import annotations
+
 import copy
 import json
 import os
+import subprocess
+from collections.abc import Iterator, Mapping
 from pathlib import Path
+from types import ModuleType
+from typing import TYPE_CHECKING
 
 import pytest
 
 from beamer2slides.emit import SLIDE_W
 from beamer2slides import faults, snapshot, sync
+from beamer2slides.gapi import HttpError
+from beamer2slides.google_types import BatchUpdateResponse, DriveFile, Page, Presentation, Request, object_id
+from beamer2slides.guard import WayBack
 from beamer2slides.inverse import Result, replace_file, source_hashes, unchanged_since_pull, write_outputs
+from beamer2slides.json_types import Json, JsonObject
+from beamer2slides.typing_compat import override
 
 from . import sync_work
+from .fake_google import Answer, Later, NoDrive, NoFiles, NoPresentations, NoSlides
+from .json_reads import jarr, jat, jint, jobj, jobjs, jstr
+
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
+    from beamer2slides.devtools.sync_check import Model
+    from beamer2slides.google_types import FileId, GetFile, GetPresentation, UpdatePresentation
 
 SYNC_DECKS = Path(__file__).resolve().parent / "decks" / "sync" / "out"
 
 
 @pytest.fixture(autouse=True)
-def _clean_hook():
+def _clean_hook() -> Iterator[None]:
     for var in (faults.ENV, faults.SIZE):
         os.environ.pop(var, None)
     faults.reset()
@@ -40,14 +59,14 @@ POINTS = ["plan", "journal", "measure", "content", "order", "overrides", "cleanu
           "pull:apply"]
 
 
-def test_the_fault_hook_does_nothing_without_the_variable():
+def test_the_fault_hook_does_nothing_without_the_variable() -> None:
     assert faults.ENV not in os.environ
     for point in POINTS:
         for _ in range(3):
             assert faults.fail_at(point) is None
 
 
-def test_the_fault_hook_raises_at_the_named_point_only():
+def test_the_fault_hook_raises_at_the_named_point_only() -> None:
     os.environ[faults.ENV] = "content"
     faults.fail_at("order")
     faults.fail_at("plan")
@@ -55,7 +74,7 @@ def test_the_fault_hook_raises_at_the_named_point_only():
         faults.fail_at("content")
 
 
-def test_the_fault_hook_counts_occurrences():
+def test_the_fault_hook_counts_occurrences() -> None:
     os.environ[faults.ENV] = "content:3"
     faults.fail_at("content")
     faults.fail_at("content")
@@ -64,18 +83,19 @@ def test_the_fault_hook_counts_occurrences():
     faults.fail_at("content")  # (only that one occurrence)
 
 
-def test_the_batch_size_is_the_library_s_unless_the_variable_says_otherwise():
+def test_the_batch_size_is_the_library_s_unless_the_variable_says_otherwise() -> None:
     assert faults.SIZE not in os.environ
     assert faults.batch_size(400) == 400
     os.environ[faults.SIZE] = "40"
     assert faults.batch_size(400) == 40
-    assert len(sync.batches([{"a": 1}] * 90, sync.CHUNK)) == 3
+    a: JsonObject = {"a": 1}
+    assert len(sync.batches([a] * 90, sync.CHUNK)) == 3
     os.environ[faults.SIZE] = "not a number"
     assert faults.batch_size(400) == 400
     del os.environ[faults.SIZE]
 
 
-def test_the_fault_hook_takes_several_points_and_keeps_colons_in_names():
+def test_the_fault_hook_takes_several_points_and_keeps_colons_in_names() -> None:
     os.environ[faults.ENV] = "stage,base:save"
     with pytest.raises(faults.InjectedFailure):
         faults.fail_at("base:save")
@@ -86,50 +106,47 @@ def test_the_fault_hook_takes_several_points_and_keeps_colons_in_names():
 
 # ---------------------------------------------------------------- batching and write order
 
-def test_batches_are_cut_only_where_a_slide_ends():
-    reqs = [{"a": 1}] * 3 + [sync.BREAK] + [{"b": 2}] * 3 + [sync.BREAK] + [{"c": 3}] * 2
-    assert sync.batches(reqs, size=4) == [[{"a": 1}] * 3, [{"b": 2}] * 3, [{"c": 3}] * 2]
-    assert sync.batches(reqs, size=8) == [[{"a": 1}] * 3 + [{"b": 2}] * 3 + [{"c": 3}] * 2]
+def test_batches_are_cut_only_where_a_slide_ends() -> None:
+    a: JsonObject = {"a": 1}
+    b: JsonObject = {"b": 2}
+    c: JsonObject = {"c": 3}
+    reqs = [a] * 3 + [sync.BREAK] + [b] * 3 + [sync.BREAK] + [c] * 2
+    assert sync.batches(reqs, size=4) == [[a] * 3, [b] * 3, [c] * 2]
+    assert sync.batches(reqs, size=8) == [[a] * 3 + [b] * 3 + [c] * 2]
     for size in range(1, 10):
         got = sync.batches(reqs, size)
-        assert all(sync.BREAK not in b for b in got)
-        assert [r for b in got for r in b] == [r for r in reqs if r is not sync.BREAK]
+        assert all(sync.BREAK not in batch for batch in got)
+        assert [r for batch in got for r in batch] == [r for r in reqs if r is not sync.BREAK]
 
 
-def test_one_slide_larger_than_a_batch_is_the_only_thing_that_is_split():
-    reqs = [{"a": i} for i in range(7)] + [sync.BREAK] + [{"b": 1}]
+def test_one_slide_larger_than_a_batch_is_the_only_thing_that_is_split() -> None:
+    reqs: list[JsonObject] = [{"a": i} for i in range(7)]
+    b: JsonObject = {"b": 1}
+    reqs += [sync.BREAK, b]
     got = sync.batches(reqs, size=3)
     assert [len(b) for b in got] == [3, 3, 2]
     assert got[-1] == [{"a": 6}, {"b": 1}]  # the tail keeps the whole next slide with it
 
 
-def bare_sync(**attrs) -> sync.Sync:
+def test_a_slide_the_source_removed_is_deleted_in_the_cleanup_phase_not_with_the_content() -> None:
     s = sync_work.bare_sync()
-    s.warnings = []
-    for k, v in attrs.items():
-        setattr(s, k, v)
-    return s
-
-
-def test_a_slide_the_source_removed_is_deleted_in_the_cleanup_phase_not_with_the_content():
-    s = bare_sync()
-    work = sync_work.work([{"plan": {"action": "delete", "objectId": "S1", "key": "gone"}}], ["S2"])
-    theirs = {"slides": [{"objectId": "S1"}, {"objectId": "S2"}]}
+    work = sync_work.work([sync_work.slide_work({"action": "delete", "objectId": "S1", "key": "gone"})], ["S2"])
+    theirs: JsonObject = {"slides": [{"objectId": "S1"}, {"objectId": "S2"}]}
     content, cleanup = s.main_requests(work, theirs, {}, {}, [])
     assert not [r for r in content if "deleteObject" in r]
     assert cleanup == [{"deleteObject": {"objectId": "S1"}}]
     assert s.cleanup_ids == ["S1"]
 
 
-def test_scratch_slides_are_sync_s_own_and_go_with_the_content():
-    s = bare_sync()
+def test_scratch_slides_are_sync_s_own_and_go_with_the_content() -> None:
+    s = sync_work.bare_sync()
     work = sync_work.work([], [])
     content, cleanup = s.main_requests(work, {"slides": []}, {}, {}, ["b2s_m001"])
     assert content == [{"deleteObject": {"objectId": "b2s_m001"}}]
     assert cleanup == []
 
 
-def test_a_recreated_unit_deletes_nothing_in_the_content_phase():
+def test_a_recreated_unit_deletes_nothing_in_the_content_phase() -> None:
     """The old objects of a recreated unit must still be in the deck while the content is written:
     that is what lets a killed sync be run again without the person's edit being gone."""
     from collections import defaultdict
@@ -139,24 +156,27 @@ def test_a_recreated_unit_deletes_nothing_in_the_content_phase():
     if not v1.exists():
         pytest.skip("build the sync test talk first (tests/decks/sync/build.py)")
     first = build_ours_of(v1, Path(os.environ.get("TMP", ".")) / "b2s-crash-ours", {"slides": []}, "last", SLIDE_W, snapshot.NO_PICTURES)
-    s = bare_sync(tok="1zz",
-                  urls=defaultdict(lambda: "https://example.com/staged.png"))
+    s = sync_work.bare_sync()
+    s.tok = "1zz"
+    s.urls = defaultdict(lambda: "https://example.com/staged.png")
     sync_work.with_ours(s, first)
     j = next(k for k, o in enumerate(first.slides) if o["key"] == "policy")
     base_slide = copy.deepcopy(first.slides[j])
-    objects = {}
-    for e in base_slide["elements"]:
-        oid = f"OLD_{e['key'].replace('/', '_')}"
-        rb = {"kind": "shape", "transform": [1.0, 0, 0, 1.0, 0, 0], "size": [10, 10], "box": [0, 0, 10, 10],
-              "parent_group": None, "z": 0, "title": None, "description": None, "text": "x", "text_styles": [],
-              "paragraph_styles": [], "text_style_hash": "s0", "shape_style": {}, "shape_style_hash": "h0"}
-        e.update(main=oid, objects=[oid], readback={oid: rb})
+    objects: JsonObject = {}
+    for e in jobjs(base_slide, "elements"):
+        oid = f"OLD_{jstr(e, 'key').replace('/', '_')}"
+        rb: JsonObject = {"kind": "shape", "transform": [1.0, 0, 0, 1.0, 0, 0], "size": [10, 10], "box": [0, 0, 10, 10],
+                          "parent_group": None, "z": 0, "title": None, "description": None, "text": "x", "text_styles": [],
+                          "paragraph_styles": [], "text_style_hash": "s0", "shape_style": {}, "shape_style_hash": "h0"}
+        e["main"] = oid
+        e["objects"] = [oid]
+        e["readback"] = {oid: rb}
         objects[oid] = rb
     s.base = {"slides": [base_slide]}
-    ukey = base_slide["elements"][0]["key"]
-    plan = {"key": "policy", "base": 0, "ours": j, "objectId": "LIVE", "units": [
+    ukey = jstr(base_slide, "elements", 0, "key")
+    plan: JsonObject = {"key": "policy", "base": 0, "ours": j, "objectId": "LIVE", "units": [
         {"key": ukey, "action": "recreate", "ours_members": [ukey], "base_members": [ukey], "overrides": {}}]}
-    w = sync_work.slide_work({"plan": plan, "units": []})
+    w = sync_work.slide_work(plan)
     reqs = s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {})
     assert not [r for r in reqs if "deleteObject" in r], "a recreated unit must delete nothing yet"
     assert f"OLD_{ukey.replace('/', '_')}" in s.cleanup_ids
@@ -165,108 +185,110 @@ def test_a_recreated_unit_deletes_nothing_in_the_content_phase():
 
 # ---------------------------------------------------------------- base validation
 
-def a_base(pid="P1", generation=3, version=snapshot.VERSION, slides=None):
-    return {"version": version, "generation": generation, "presentationId": pid,
-            "revisionId": "r1", "slides": slides if slides is not None else []}
+def a_base(pid: str, generation: int, version: int, slides: list[Json]) -> JsonObject:
+    return {"version": version, "generation": generation, "presentationId": pid, "revisionId": "r1", "slides": slides}
 
 
-class FakeDrive:
+def base_of(generation: int) -> JsonObject:
+    """A base of deck P1 at `generation`, of today's schema, with no slides."""
+    return a_base("P1", generation, snapshot.VERSION, [])
+
+
+class FakeDrive(NoFiles, NoDrive):
     """Just enough of the Drive service for load_base: it hands out one stored base."""
 
-    def __init__(self, base):
+    def __init__(self, base: JsonObject | None) -> None:
         self.base = base
 
-    def files(self):
+    @override
+    def files(self) -> FakeDrive:
         return self
 
-    def get(self, fileId=None, fields=None):
-        self.kind = "media" if False else "meta"
-        return _Exec({"appProperties": {snapshot.BASE_PROPERTY: "BASEFILE"}} if self.base is not None else {})
+    @override
+    def get(self, **kw: Unpack[GetFile]) -> Request[DriveFile]:
+        return Answer(DriveFile(appProperties={snapshot.BASE_PROPERTY: "BASEFILE"}) if self.base is not None else DriveFile())
 
-    def get_media(self, fileId=None):
-        return _Exec(json.dumps(self.base).encode("utf-8"))
-
-
-class _Exec:
-    def __init__(self, value):
-        self.value = value
-
-    def execute(self):
-        return self.value
+    @override
+    def get_media(self, **kw: Unpack[FileId]) -> Request[bytes]:
+        return Answer(json.dumps(self.base).encode("utf-8"))
 
 
-def test_a_missing_base_is_reported_not_guessed(tmp_path):
-    problems = []
+def test_a_missing_base_is_reported_not_guessed(tmp_path: Path) -> None:
+    problems: list[str] = []
     base, where = snapshot.load_base("P1", tmp_path, None, problems, None)
     assert base is None and where == "none" and problems == []
 
 
-def test_a_truncated_local_base_is_refused(tmp_path):
+def test_a_truncated_local_base_is_refused(tmp_path: Path) -> None:
     snapshot.local_path(tmp_path).parent.mkdir(parents=True)
     snapshot.local_path(tmp_path).write_text('{"version": 1, "slides": [', encoding="utf-8")
-    problems = []
+    problems: list[str] = []
     base, where = snapshot.load_base("P1", tmp_path, None, problems, None)
     assert base is None and where == "none"
     assert problems and "could not be read" in problems[0]
 
 
-def test_a_base_of_another_deck_is_refused(tmp_path):
-    snapshot.save_local(a_base(pid="OTHER"), tmp_path)
-    problems = []
+def test_a_base_of_another_deck_is_refused(tmp_path: Path) -> None:
+    snapshot.save_local(a_base("OTHER", 3, snapshot.VERSION, []), tmp_path)
+    problems: list[str] = []
     base, _ = snapshot.load_base("P1", tmp_path, None, problems, None)
     assert base is None
     assert "belongs to presentation OTHER" in problems[0]
 
 
-def test_a_base_from_a_newer_schema_is_refused(tmp_path):
-    snapshot.save_local(a_base(version=snapshot.VERSION + 1), tmp_path)
-    problems = []
+def test_a_base_from_a_newer_schema_is_refused(tmp_path: Path) -> None:
+    snapshot.save_local(a_base("P1", 3, snapshot.VERSION + 1, []), tmp_path)
+    problems: list[str] = []
     base, _ = snapshot.load_base("P1", tmp_path, None, problems, None)
     assert base is None
     assert "newer than this beamer2slides" in problems[0]
 
 
-def test_the_newer_of_drive_and_local_wins(tmp_path):
+def test_the_newer_of_drive_and_local_wins(tmp_path: Path) -> None:
     """A sync whose Drive upload failed leaves the local base ahead; taking Drive's would sync
     against objects that are already gone."""
-    snapshot.save_local(a_base(generation=5), tmp_path)
-    problems = []
-    base, where = snapshot.load_base("P1", tmp_path, FakeDrive(a_base(generation=4)), problems, None)
-    assert where == "local" and base["generation"] == 5
+    snapshot.save_local(base_of(5), tmp_path)
+    problems: list[str] = []
+    base, where = snapshot.load_base("P1", tmp_path, FakeDrive(base_of(4)), problems, None)
+    assert where == "local" and base is not None and base["generation"] == 5
     assert "older than the local one" in problems[0]
     problems = []
-    base, where = snapshot.load_base("P1", tmp_path, FakeDrive(a_base(generation=6)), problems, None)
-    assert where == "drive" and base["generation"] == 6 and problems == []
+    base, where = snapshot.load_base("P1", tmp_path, FakeDrive(base_of(6)), problems, None)
+    assert where == "drive" and base is not None and base["generation"] == 6 and problems == []
 
 
-def test_a_broken_drive_base_falls_back_to_the_local_one(tmp_path):
-    snapshot.save_local(a_base(generation=5), tmp_path)
-    problems = []
+def test_a_broken_drive_base_falls_back_to_the_local_one(tmp_path: Path) -> None:
+    snapshot.save_local(base_of(5), tmp_path)
+    problems: list[str] = []
     base, where = snapshot.load_base("P1", tmp_path, FakeDrive({"version": 1, "presentationId": "P1"}), problems, None)
-    assert where == "local" and base["generation"] == 5
+    assert where == "local" and base is not None and base["generation"] == 5
     assert "stored in Drive was ignored" in problems[0]
 
 
-def test_the_local_base_is_never_left_half_written(tmp_path, monkeypatch):
-    snapshot.save_local(a_base(generation=1), tmp_path)
+def test_the_local_base_is_never_left_half_written(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot.save_local(base_of(1), tmp_path)
     before = snapshot.local_path(tmp_path).read_text(encoding="utf-8")
-    monkeypatch.setattr(snapshot.os, "replace", lambda *a: (_ for _ in ()).throw(OSError("killed")))
+
+    def killed(*args: object) -> None:
+        raise OSError("killed")
+    monkeypatch.setattr(snapshot.os, "replace", killed)
     with pytest.raises(OSError):
-        snapshot.save_local(a_base(generation=2), tmp_path)
+        snapshot.save_local(base_of(2), tmp_path)
     assert snapshot.local_path(tmp_path).read_text(encoding="utf-8") == before
-    assert json.loads(before)["generation"] == 1
+    saved: Json = json.loads(before)
+    assert jint(saved, "generation") == 1
 
 
-def test_a_base_that_knows_none_of_the_deck_s_slides_is_not_a_base_for_it():
-    base = a_base(slides=[{"key": "a", "objectId": "S1", "elements": []}])
+def test_a_base_that_knows_none_of_the_deck_s_slides_is_not_a_base_for_it() -> None:
+    base = a_base("P1", 3, snapshot.VERSION, [{"key": "a", "objectId": "S1", "elements": []}])
     assert snapshot.base_matches(base, {"slides": [{"objectId": "S1"}]})
     assert not snapshot.base_matches(base, {"slides": [{"objectId": "OTHER"}]})
-    assert snapshot.base_matches(a_base(), {"slides": []})  # (nothing recorded yet)
+    assert snapshot.base_matches(base_of(3), {"slides": []})  # (nothing recorded yet)
 
 
 # ---------------------------------------------------------------- recovery from an interrupted sync
 
-def test_object_ids_say_which_sync_made_them():
+def test_object_ids_say_which_sync_made_them() -> None:
     assert sync.sync_generation("b2s_abc123_def456_2ab") == 2
     assert sync.sync_generation("b2s_abc123_def456_12ab_g") == 12
     assert sync.sync_generation("b2s_abc123_k3_4zz") == 4
@@ -276,190 +298,214 @@ def test_object_ids_say_which_sync_made_them():
     assert sync.sync_generation("") is None
 
 
-def readback(oid_title=None, text="x", **kw):
-    rb = {"kind": "shape", "transform": [1.0, 0, 0, 1.0, 0, 0], "size": [10, 10], "box": [0, 0, 10, 10],
-          "parent_group": None, "z": 0, "title": oid_title, "description": None, "text": text,
-          "text_styles": [], "paragraph_styles": [], "text_style_hash": "s0", "shape_style": {},
-          "shape_style_hash": "h0"}
-    rb.update(kw)
-    return rb
+def readback(oid_title: str | None, text: str) -> JsonObject:
+    """A shape's read-back as snapshot records it, titled `oid_title` and holding `text`."""
+    return {"kind": "shape", "transform": [1.0, 0, 0, 1.0, 0, 0], "size": [10, 10], "box": [0, 0, 10, 10],
+            "parent_group": None, "z": 0, "title": oid_title, "description": None, "text": text,
+            "text_styles": [], "paragraph_styles": [], "text_style_hash": "s0", "shape_style": {},
+            "shape_style_hash": "h0"}
 
 
-def recovery_base(generation=1, **extra):
-    base = a_base(generation=generation, slides=[{
+def plain() -> JsonObject:
+    """An untitled shape holding "x"."""
+    return readback(None, "x")
+
+
+def tagged(oid_title: str) -> JsonObject:
+    """A shape holding "x", titled `oid_title` (the tag an object a sync made carries)."""
+    return readback(oid_title, "x")
+
+
+def recovery_base(extra: JsonObject) -> JsonObject:
+    """A generation 1 base of one slide ("intro", S1) holding one element (OLD1), and `extra`."""
+    base = a_base("P1", 1, snapshot.VERSION, [{
         "key": "intro", "objectId": "S1", "groups": [],
         "elements": [{"key": "text/body/0", "main": "OLD1", "objects": ["OLD1"], "ir_hash": "h",
                       "fields": {"text": "t", "position": "p", "size": "s", "style": "y", "image": ""},
-                      "readback": {"OLD1": readback()}}]}])
-    base.update(extra)
-    return base
+                      "readback": {"OLD1": plain()}}]}])
+    return {**base, **extra}
 
 
-def live(objects, sid="S1"):
-    return {"slides": [{"objectId": sid, "objects": objects, "order": list(objects), "notes": "",
+def live(objects: JsonObject) -> JsonObject:
+    """The deck's read-back: slide S1 holding `objects`."""
+    return {"slides": [{"objectId": "S1", "objects": objects, "order": list(objects), "notes": "",
                         "background": {}, "layoutObjectId": "L1"}]}
 
 
-def test_a_leftover_object_of_an_interrupted_sync_is_swept():
-    base = recovery_base(pending={"generation": 2, "token": "2ab", "objects": {"intro/text/body/0": ["b2s_aaaaaa_bbbbbb_2ab"]}})
-    theirs = live({"OLD1": readback(), "b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0")})
+def test_a_leftover_object_of_an_interrupted_sync_is_swept() -> None:
+    base = recovery_base({"pending": {"generation": 2, "token": "2ab",
+                                      "objects": {"intro/text/body/0": ["b2s_aaaaaa_bbbbbb_2ab"]}}})
+    theirs = live({"OLD1": plain(), "b2s_aaaaaa_bbbbbb_2ab": tagged("b2s:intro/text/body/0")})
     rec = sync.plan_recovery(base, theirs, ["intro"], True)
     assert rec.sweep == ["b2s_aaaaaa_bbbbbb_2ab"]
     assert rec.heal == []
 
 
-def test_a_leftover_is_recognised_by_its_id_even_without_a_journal():
-    theirs = live({"OLD1": readback(), "b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0")})
-    rec = sync.plan_recovery(recovery_base(), theirs, ["intro"], True)
+def test_a_leftover_is_recognised_by_its_id_even_without_a_journal() -> None:
+    theirs = live({"OLD1": plain(), "b2s_aaaaaa_bbbbbb_2ab": tagged("b2s:intro/text/body/0")})
+    rec = sync.plan_recovery(recovery_base({}), theirs, ["intro"], True)
     assert rec.sweep == ["b2s_aaaaaa_bbbbbb_2ab"]
 
 
-def test_an_object_a_person_made_is_never_swept():
-    theirs = live({"OLD1": readback(), "g2abc_0_3": readback(), "b2s_s003_f1": readback()})
-    rec = sync.plan_recovery(recovery_base(), theirs, ["intro"], True)
+def test_an_object_a_person_made_is_never_swept() -> None:
+    theirs = live({"OLD1": plain(), "g2abc_0_3": plain(), "b2s_s003_f1": plain()})
+    rec = sync.plan_recovery(recovery_base({}), theirs, ["intro"], True)
     assert rec.sweep == [] and rec.heal == []
 
 
-def test_an_object_of_this_base_s_own_generation_is_not_a_leftover():
-    theirs = live({"OLD1": readback(), "b2s_aaaaaa_bbbbbb_1cd": readback("b2s:intro/text/body/0")})
-    rec = sync.plan_recovery(recovery_base(generation=1), theirs, ["intro"], True)
+def test_an_object_of_this_base_s_own_generation_is_not_a_leftover() -> None:
+    theirs = live({"OLD1": plain(), "b2s_aaaaaa_bbbbbb_1cd": tagged("b2s:intro/text/body/0")})
+    rec = sync.plan_recovery(recovery_base({}), theirs, ["intro"], True)
     assert rec.sweep == []
 
 
-def test_an_element_whose_objects_an_older_sync_deleted_takes_over_the_new_one():
+def test_an_element_whose_objects_an_older_sync_deleted_takes_over_the_new_one() -> None:
     """Deletions used to happen in the content batch: a deck left in that state has the element's
     replacement but no base entry for it. It must be adopted, not reported as deleted in the deck."""
-    theirs = live({"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", text="new"),
-                   "b2s_aaaaaa_bbbbbb_2ab_g": readback(None, kind="elementGroup")})
-    rec = sync.plan_recovery(recovery_base(), theirs, ["intro"], True)
+    theirs = live({"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", "new"),
+                   "b2s_aaaaaa_bbbbbb_2ab_g": {**plain(), "kind": "elementGroup"}})
+    rec = sync.plan_recovery(recovery_base({}), theirs, ["intro"], True)
     assert rec.sweep == []
     assert rec.heal == [sync.Heal(slide="intro", element="text/body/0", object_id="b2s_aaaaaa_bbbbbb_2ab",
                                   objects=["b2s_aaaaaa_bbbbbb_2ab", "b2s_aaaaaa_bbbbbb_2ab_g"])]
-    base = recovery_base()
+    base = recovery_base({})
     done = sync.heal_base(base, rec.heal, theirs, same_source=True)
-    el = base["slides"][0]["elements"][0]
+    el = jobj(base, "slides", 0, "elements", 0)
     assert done == ["intro/text/body/0"]
-    assert el["main"] == "b2s_aaaaaa_bbbbbb_2ab" and el["readback"]["b2s_aaaaaa_bbbbbb_2ab"]["text"] == "new"
+    assert el["main"] == "b2s_aaaaaa_bbbbbb_2ab" and jat(el, "readback", "b2s_aaaaaa_bbbbbb_2ab", "text") == "new"
     assert el["ir_hash"] == "h"
 
 
-def test_a_healed_element_of_another_source_version_is_written_over_again():
-    theirs = live({"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", text="new")})
-    base = recovery_base()
+def test_a_healed_element_of_another_source_version_is_written_over_again() -> None:
+    theirs = live({"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", "new")})
+    base = recovery_base({})
     rec = sync.plan_recovery(base, theirs, ["intro"], True)
     sync.heal_base(base, rec.heal, theirs, same_source=False)
-    el = base["slides"][0]["elements"][0]
+    el = jobj(base, "slides", 0, "elements", 0)
     assert el["ir_hash"] == "interrupted"
-    assert set(el["fields"].values()) == {"interrupted"}
+    assert set(jobj(el, "fields").values()) == {"interrupted"}
 
 
-def test_a_swept_group_takes_its_children_with_it():
+def test_a_swept_group_takes_its_children_with_it() -> None:
     """Slides deletes a group's children with the group: naming them too makes Google refuse the
     whole batch (`Invalid requests[n].deleteObject: The object could not be found`), and then
     nothing at all is swept."""
     gid = "b2s_aaaaaa_bbbbbb_2ab_g"
-    theirs = live({"OLD1": readback(),
-                   gid: readback(None, kind="elementGroup"),
-                   "b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", parent_group=gid),
-                   "b2s_aaaaaa_cccccc_2ab": readback("b2s:intro/image/figure/0", parent_group=gid)})
-    assert sync.plan_recovery(recovery_base(), theirs, ["intro"], True).sweep == [gid]
+    theirs = live({"OLD1": plain(),
+                   gid: {**plain(), "kind": "elementGroup"},
+                   "b2s_aaaaaa_bbbbbb_2ab": {**tagged("b2s:intro/text/body/0"), "parent_group": gid},
+                   "b2s_aaaaaa_cccccc_2ab": {**tagged("b2s:intro/image/figure/0"), "parent_group": gid}})
+    assert sync.plan_recovery(recovery_base({}), theirs, ["intro"], True).sweep == [gid]
 
 
-def test_objects_on_a_swept_slide_are_not_named_again():
+def test_objects_on_a_swept_slide_are_not_named_again() -> None:
     sid = f"b2s_{sync.h6('extra')}_2ab"
-    theirs = {"slides": [{"objectId": "S1", "objects": {"OLD1": readback()}, "order": ["OLD1"], "notes": "",
-                          "background": {}, "layoutObjectId": "L1"},
-                         {"objectId": sid, "notes": "", "background": {}, "layoutObjectId": "L1",
-                          "objects": {"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:extra/text/body/0")},
-                          "order": ["b2s_aaaaaa_bbbbbb_2ab"]}]}
-    rec = sync.plan_recovery(recovery_base(), theirs, ["intro", "extra"], True)
+    theirs: JsonObject = {"slides": [{"objectId": "S1", "objects": {"OLD1": plain()}, "order": ["OLD1"], "notes": "",
+                                      "background": {}, "layoutObjectId": "L1"},
+                                     {"objectId": sid, "notes": "", "background": {}, "layoutObjectId": "L1",
+                                      "objects": {"b2s_aaaaaa_bbbbbb_2ab": tagged("b2s:extra/text/body/0")},
+                                      "order": ["b2s_aaaaaa_bbbbbb_2ab"]}]}
+    rec = sync.plan_recovery(recovery_base({}), theirs, ["intro", "extra"], True)
     assert rec.sweep_slides == [sid] and rec.sweep == []
 
 
-def test_a_slide_an_interrupted_sync_created_is_swept_only_when_it_is_created_again():
+def two_slides(sid: str) -> JsonObject:
+    """The deck's read-back: S1 holding OLD1, and an empty slide `sid`."""
+    return {"slides": [{"objectId": "S1", "objects": {"OLD1": plain()}, "order": ["OLD1"], "notes": "",
+                        "background": {}, "layoutObjectId": "L1"},
+                       {"objectId": sid, "objects": {}, "order": [], "notes": "", "background": {},
+                        "layoutObjectId": "L1"}]}
+
+
+def test_a_slide_an_interrupted_sync_created_is_swept_only_when_it_is_created_again() -> None:
     sid = f"b2s_{sync.h6('extra')}_2ab"
-    theirs = {"slides": [{"objectId": "S1", "objects": {"OLD1": readback()}, "order": ["OLD1"], "notes": "",
-                          "background": {}, "layoutObjectId": "L1"},
-                         {"objectId": sid, "objects": {}, "order": [], "notes": "", "background": {},
-                          "layoutObjectId": "L1"}]}
-    assert sync.plan_recovery(recovery_base(), theirs, ["intro", "extra"], True).sweep_slides == [sid]
-    assert sync.plan_recovery(recovery_base(), theirs, ["intro"], True).sweep_slides == []
+    theirs = two_slides(sid)
+    assert sync.plan_recovery(recovery_base({}), theirs, ["intro", "extra"], True).sweep_slides == [sid]
+    assert sync.plan_recovery(recovery_base({}), theirs, ["intro"], True).sweep_slides == []
 
 
-def test_a_base_that_may_be_behind_the_deck_sweeps_nothing_on_a_guess():
+def test_a_base_that_may_be_behind_the_deck_sweeps_nothing_on_a_guess() -> None:
     """Two checkouts, one deck: when the base in Drive cannot be read, sync works from the folder's
     copy, which may be older than the deck (snapshot.stale_base_warning). Objects of a later
     generation are then not leftovers of a dead run but, just as likely, the finished work of the
     other checkout's sync - so only what this base itself names is swept. Healing still happens:
     it takes an object over instead of deleting it."""
-    theirs = live({"OLD1": readback(), "b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0")})
-    assert sync.plan_recovery(recovery_base(), theirs, ["intro"], False).sweep == []
-    named = recovery_base(cleanup=["b2s_aaaaaa_bbbbbb_2ab"])  # this base's own dead run named it
+    theirs = live({"OLD1": plain(), "b2s_aaaaaa_bbbbbb_2ab": tagged("b2s:intro/text/body/0")})
+    assert sync.plan_recovery(recovery_base({}), theirs, ["intro"], False).sweep == []
+    named = recovery_base({"cleanup": ["b2s_aaaaaa_bbbbbb_2ab"]})  # this base's own dead run named it
     assert sync.plan_recovery(named, theirs, ["intro"], False).sweep == \
         ["b2s_aaaaaa_bbbbbb_2ab"]
-    gone = live({"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", text="new")})  # OLD1 deleted
-    assert sync.plan_recovery(recovery_base(), gone, ["intro"], False).heal
+    gone = live({"b2s_aaaaaa_bbbbbb_2ab": readback("b2s:intro/text/body/0", "new")})  # OLD1 deleted
+    assert sync.plan_recovery(recovery_base({}), gone, ["intro"], False).heal
 
 
-def test_a_slide_is_swept_on_a_guess_only_when_the_base_is_the_deck_s_own():
+def test_a_slide_is_swept_on_a_guess_only_when_the_base_is_the_deck_s_own() -> None:
     sid = f"b2s_{sync.h6('extra')}_2ab"
-    theirs = {"slides": [{"objectId": "S1", "objects": {"OLD1": readback()}, "order": ["OLD1"], "notes": "",
-                          "background": {}, "layoutObjectId": "L1"},
-                         {"objectId": sid, "objects": {}, "order": [], "notes": "", "background": {},
-                          "layoutObjectId": "L1"}]}
+    theirs = two_slides(sid)
     keys = ["intro", "extra"]
-    assert sync.plan_recovery(recovery_base(), theirs, keys, True).sweep_slides == [sid]
-    assert sync.plan_recovery(recovery_base(), theirs, keys, False).sweep_slides == []
+    assert sync.plan_recovery(recovery_base({}), theirs, keys, True).sweep_slides == [sid]
+    assert sync.plan_recovery(recovery_base({}), theirs, keys, False).sweep_slides == []
 
 
-def test_the_text_an_interrupted_sync_overwrote_in_a_placeholder_comes_back_for_the_merge():
-    saved = {"OLD1": {"text": "the person's title\n", "text_styles": [], "paragraph_styles": [],
-                      "text_style_hash": "edited"}}
-    base = recovery_base(pending={"generation": 2, "token": "2ab", "objects": {}, "in_place": saved})
-    theirs = live({"OLD1": readback(text="the source's new title\n")})
+def test_the_text_an_interrupted_sync_overwrote_in_a_placeholder_comes_back_for_the_merge() -> None:
+    old1: JsonObject = {"text": "the person's title\n", "text_styles": [], "paragraph_styles": [],
+                        "text_style_hash": "edited"}
+    saved = {"OLD1": old1}
+    base = recovery_base({"pending": {"generation": 2, "token": "2ab", "objects": {}, "in_place": {"OLD1": old1}}})
+    theirs = live({"OLD1": readback(None, "the source's new title\n")})
     rec = sync.plan_recovery(base, theirs, ["intro"], True)
     assert rec.restore == saved
     assert sync.restore_in_place(theirs, rec.restore) == ["OLD1"]
-    assert theirs["slides"][0]["objects"]["OLD1"]["text"] == "the person's title\n"
-    assert theirs["slides"][0]["objects"]["OLD1"]["box"] == [0, 0, 10, 10]  # (only the text comes back)
+    assert jat(theirs, "slides", 0, "objects", "OLD1", "text") == "the person's title\n"
+    assert jat(theirs, "slides", 0, "objects", "OLD1", "box") == [0, 0, 10, 10]  # (only the text comes back)
 
 
-def test_an_untouched_placeholder_is_left_as_it_is():
-    saved = {"OLD1": {"text": "x", "text_style_hash": "s0"}}
-    theirs = live({"OLD1": readback(text="x")})
+def test_an_untouched_placeholder_is_left_as_it_is() -> None:
+    saved: dict[str, JsonObject] = {"OLD1": {"text": "x", "text_style_hash": "s0"}}
+    theirs = live({"OLD1": plain()})
     assert sync.restore_in_place(theirs, saved) == []
 
 
 # ---------------------------------------------------------------- the way back
 
-class _Note:
-    """A `guard.WayBack` that only says when it was asked for."""
+class _Note(WayBack):
+    """A `guard.WayBack` that only says how often it was asked for (it makes nothing: no thread, no
+    credentials)."""
 
-    def __init__(self):
-        self.asked = 0
+    def __init__(self) -> None:
+        self.times = 0
 
-    def result(self) -> dict:
-        self.asked += 1
+    @override
+    def result(self) -> JsonObject | None:
+        self.times += 1
         return {}
 
 
-def test_every_write_collects_the_way_back_before_it_goes_out():
+def writing_sync(api: FakeSlidesApi, urls: dict[str, str]) -> sync.Sync:
+    """A `Sync` of deck P1 writing through `api`, the staging deck having brought `urls`."""
+    s = sync_work.bare_sync()
+    s.slides, s.pid, s.urls = api, "P1", urls
+    return s
+
+
+def test_every_write_collects_the_way_back_before_it_goes_out() -> None:
     """The deck's revision and its .pptx backup are made on a thread while the sync reads and
     plans (`guard.WayBack`), and what makes that safe is that they are collected before anything
     in the deck moves - so every place that writes asks first."""
-    api, note = FakeSlidesApi(), _Note()
-    s = bare_sync(slides=api, pid="P1", way_back=note, sent={}, revision=lambda slides: "rev1")
+    api, note = FakeSlidesApi(set()), _Note()
+    s = writing_sync(api, {})
+    s.way_back = note
     s.delete_leftovers(["A"])
-    assert note.asked == 1 and api.batches == [["A"]], "an interrupted run's leftovers are a write"
+    assert note.times == 1 and api.batches == [["A"]], "an interrupted run's leftovers are a write"
     s.delete_scratch(["b2s_m000"])
-    assert note.asked == 2, "measure_places' scratch slides are a write"
+    assert note.times == 2, "measure_places' scratch slides are a write"
     s.send("content", [{"deleteObject": {"objectId": "B"}}], None)
-    assert note.asked == 3, "and so is the content batch"
+    assert note.times == 3, "and so is the content batch"
 
 
-def test_a_sync_with_no_way_back_to_collect_writes_as_it_always_did():
-    api = FakeSlidesApi()
-    bare_sync(slides=api, pid="P1").delete_leftovers(["A"])   # no way_back attribute at all
+def test_a_sync_with_no_way_back_to_collect_writes_as_it_always_did() -> None:
+    api = FakeSlidesApi(set())
+    writing_sync(api, {}).delete_leftovers(["A"])   # no way back (`way_back` None)
     assert api.batches == [["A"]]
 
 
@@ -470,92 +516,113 @@ def test_a_sync_with_no_way_back_to_collect_writes_as_it_always_did():
 # write - can go up beside it. A picture's URL is the one field in them that waits.
 
 
-def test_a_picture_url_is_a_marker_until_the_staging_deck_brings_it():
-    s = bare_sync(urls={})
+def test_a_picture_url_is_a_marker_until_the_staging_deck_brings_it() -> None:
+    s = sync_work.bare_sync()
     fig = Path("out") / "fig-1.png"
     assert s.picture_url(fig) == f"{sync.PENDING_URL}{fig}"
     s.urls[str(fig)] = "https://staging/1"
     assert s.picture_url(fig) == "https://staging/1", "once it is known it is used, as it always was"
 
 
-def test_the_staging_urls_are_filled_in_wherever_they_sit():
+def test_the_staging_urls_are_filled_in_wherever_they_sit() -> None:
     """A picture's URL and a slide background's are two different shapes of request, so `fill_urls`
     walks the batch rather than knowing where to look."""
-    s = bare_sync(urls={"a.png": "https://staging/a", "bg.png": "https://staging/bg"})
-    reqs = [{"createImage": {"objectId": "x", "url": f"{sync.PENDING_URL}a.png"}},
-            {"updatePageProperties": {"objectId": "S1", "pageProperties": {"pageBackgroundFill": {
-                "stretchedPictureFill": {"contentUrl": f"{sync.PENDING_URL}bg.png"}}}}}]
+    s = sync_work.bare_sync()
+    s.urls = {"a.png": "https://staging/a", "bg.png": "https://staging/bg"}
+    reqs: list[JsonObject] = [
+        {"createImage": {"objectId": "x", "url": f"{sync.PENDING_URL}a.png"}},
+        {"updatePageProperties": {"objectId": "S1", "pageProperties": {"pageBackgroundFill": {
+            "stretchedPictureFill": {"contentUrl": f"{sync.PENDING_URL}bg.png"}}}}}]
     s.fill_urls(reqs)
-    assert reqs[0]["createImage"]["url"] == "https://staging/a"
-    assert reqs[1]["updatePageProperties"]["pageProperties"]["pageBackgroundFill"][
-        "stretchedPictureFill"]["contentUrl"] == "https://staging/bg"
+    assert jat(reqs[0], "createImage", "url") == "https://staging/a"
+    assert jat(reqs[1], "updatePageProperties", "pageProperties", "pageBackgroundFill",
+               "stretchedPictureFill", "contentUrl") == "https://staging/bg"
 
 
-def test_nothing_goes_out_carrying_a_marker():
+def test_nothing_goes_out_carrying_a_marker() -> None:
     """A picture the staging deck did not bring fails here, loudly, rather than reaching the deck as
     a URL Google fetches nothing from."""
-    api = FakeSlidesApi()
-    s = bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda slides: "rev1")
+    api = FakeSlidesApi(set())
+    s = writing_sync(api, {})
     with pytest.raises(KeyError, match="gone.png"):   # the picture, not whatever the batch trips on
         s.send("content", [{"createImage": {"objectId": "x", "url": f"{sync.PENDING_URL}gone.png"}}], None)
     assert api.batches == [], "and before the batch, not after it"
 
 
-class _Flaky:
-    """A Slides service that refuses the first `fails` batches as Google does when it could not
-    fetch a createImage URL, then accepts."""
+FETCH_REFUSAL = ("Invalid requests[0].createImage: There was a problem retrieving the image. The provided image "
+                 "should be publicly accessible, within size limit, and in supported formats.")
 
-    def __init__(self, fails: int, message: str = "Invalid requests[0].createImage: There was a problem "
-                 "retrieving the image. The provided image should be publicly accessible, within size limit, "
-                 "and in supported formats."):
-        self.fails, self.message, self.bodies = fails, message, []
 
-    def presentations(self):
+class _Flaky(NoPresentations, NoSlides):
+    """A Slides service that refuses the first `fails` batches with `message` (as Google does when it
+    could not fetch a createImage URL: `FETCH_REFUSAL`), then accepts."""
+
+    def __init__(self, fails: int, message: str) -> None:
+        self.fails, self.message = fails, message
+        self.bodies: list[bool] = []
+
+    @override
+    def presentations(self) -> _Flaky:
         return self
 
-    def batchUpdate(self, presentationId=None, body=None):
-        return self
+    @override
+    def batchUpdate(self, **kw: Unpack[UpdatePresentation]) -> Request[BatchUpdateResponse]:
+        return Later(self.run)
 
-    def execute(self):
+    def run(self) -> BatchUpdateResponse:
         self.bodies.append(True)
         if len(self.bodies) <= self.fails:
-            raise http_error(self.message)
+            raise http_error(self.message, 400)
         return {"writeControl": {"requiredRevisionId": "rev2"}}
 
 
-def test_a_picture_google_could_not_fetch_is_asked_for_again(monkeypatch):
+def test_a_picture_google_could_not_fetch_is_asked_for_again(monkeypatch: pytest.MonkeyPatch) -> None:
     """Live fuzz seed 2603: a content batch refused because Google could not fetch a staged picture
     went through when the same sync was run again. A refused batch applied nothing, so it is sent
     again after a wait, and only for that refusal."""
-    monkeypatch.setattr(sync.time, "sleep", lambda s: None)
-    reqs = [{"createImage": {"objectId": "x", "url": "https://staging/a"}}]
-    api = _Flaky(2)
-    s = bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda slides: "rev1")
+    def no_sleep(seconds: float) -> None:
+        pass
+    monkeypatch.setattr(sync.time, "sleep", no_sleep)
+    reqs: list[JsonObject] = [{"createImage": {"objectId": "x", "url": "https://staging/a"}}]
+    api = _Flaky(2, FETCH_REFUSAL)
+    s = flaky_sync(api)
     assert s.send("content", reqs, "rev1") == "rev2" and len(api.bodies) == 3 and s.sent == {"content": 1}
-    api = _Flaky(3)
+    api = _Flaky(3, FETCH_REFUSAL)
     with pytest.raises(RuntimeError, match="problem retrieving the image"):
-        bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda slides: "rev1").send("content", reqs, "rev1")
+        flaky_sync(api).send("content", reqs, "rev1")
     assert len(api.bodies) == 1 + len(sync.FETCH_RETRY)
     api = _Flaky(1, "Invalid requests[0].deleteObject: The object (B) could not be found.")
     with pytest.raises(RuntimeError, match="could not be found"):
-        bare_sync(slides=api, pid="P1", sent={}, urls={}, revision=lambda slides: "rev1").send("content", reqs, "rev1")
+        flaky_sync(api).send("content", reqs, "rev1")
     assert len(api.bodies) == 1, "any other refusal is not sent again"
 
 
-def test_the_pending_marker_does_not_wait_for_the_staging_deck():
+def flaky_sync(api: _Flaky) -> sync.Sync:
+    s = sync_work.bare_sync()
+    s.slides, s.pid = api, "P1"
+    return s
+
+
+def test_the_pending_marker_does_not_wait_for_the_staging_deck() -> None:
     """What it records is the objects this run is about to create, and their ids are the elements'
     own - so a marker built before the staging deck exists says exactly what one built after it
     would, but for the staging deck's own id, which is a note for a person that nothing reads (the
     file names itself in Drive: `appProperties.b2sStaging`)."""
-    work = sync_work.work([{"plan": {"action": "update", "ours": 0, "objectId": "S1"},
-                            "objects": {0: ["b2s_a_b_t1", "b2s_a_b_t1_g"]}, "groups": ["G1"]}])
-    ours = {"slides": [{"key": "why", "elements": [{"key": "text/body/0"}]}]}
+    made = sync_work.slide_work({"action": "update", "ours": 0, "objectId": "S1"})
+    made.objects[0] = ["b2s_a_b_t1", "b2s_a_b_t1_g"]
+    made.groups.append("G1")
+    work = sync_work.work([made], [])
+    ours: JsonObject = {"slides": [{"key": "why", "elements": [{"key": "text/body/0"}]}]}
 
-    def block(staging):
-        s = bare_sync(base={"generation": 3}, ours=ours, source=SYNC_DECKS / "v1.pdf", tok="t1",
-                      in_place_readback={}, staging=staging)
+    def block(staging: str | None) -> JsonObject:
+        s = sync_work.bare_sync()
+        base: JsonObject = {"generation": 3}
+        s.base = base
+        s.ours, s.source, s.tok = ours, SYNC_DECKS / "v1.pdf", "t1"
+        s.in_place_readback = {}
+        s.staging = staging
         s.pending_block(work, {"revisionId": "r7"})
-        return s.base["pending"]
+        return jobj(s.base, "pending")
 
     early, late = block(None), block("STAGE1")
     assert early["objects"] == {"why/text/body/0": ["b2s_a_b_t1", "b2s_a_b_t1_g"], "why/~groups": ["G1"]}
@@ -564,92 +631,118 @@ def test_the_pending_marker_does_not_wait_for_the_staging_deck():
            {k: v for k, v in late.items() if k not in ("staging", "started")}
 
 
-class FakeSlidesApi:
-    """A Slides service that refuses a batch naming an object it doesn't know (as Google does)."""
+def deleted_id(request: Mapping[str, object]) -> str:
+    """The object a deleteObject request names."""
+    body = request.get("deleteObject")
+    assert isinstance(body, Mapping), request
+    oid = body.get("objectId")
+    assert isinstance(oid, str), request
+    return oid
 
-    def __init__(self, missing=()):
-        self.missing, self.deleted, self.batches = set(missing), [], []
 
-    def presentations(self):
+class FakeSlidesApi(NoPresentations, NoSlides):
+    """A Slides service that refuses a batch naming an object it doesn't know (`missing`), as Google
+    does; the deck is at revision rev1 when asked."""
+
+    def __init__(self, missing: set[str]) -> None:
+        self.missing = missing
+        self.deleted: list[str] = []
+        self.batches: list[list[str]] = []
+
+    @override
+    def presentations(self) -> FakeSlidesApi:
         return self
 
-    def batchUpdate(self, presentationId=None, body=None):
-        return _Call(self, [r["deleteObject"]["objectId"] for r in body["requests"]])
+    @override
+    def get(self, **kw: Unpack[GetPresentation]) -> Request[Presentation]:
+        return Answer(Presentation(revisionId="rev1"))
 
+    @override
+    def batchUpdate(self, **kw: Unpack[UpdatePresentation]) -> Request[BatchUpdateResponse]:
+        ids = [deleted_id(r) for r in kw["body"]["requests"]]
+        return Later(lambda: self.apply(ids))
 
-class _Call:
-    def __init__(self, api, ids):
-        self.api, self.ids = api, ids
-
-    def execute(self):
-        self.api.batches.append(list(self.ids))
-        bad = [i for i in self.ids if i in self.api.missing]
+    def apply(self, ids: list[str]) -> BatchUpdateResponse:
+        self.batches.append(list(ids))
+        bad = [i for i in ids if i in self.missing]
         if bad:
-            raise http_error(f"Invalid requests[0].deleteObject: The object ({bad[0]}) could not be found.")
-        self.api.deleted += self.ids
+            raise http_error(f"Invalid requests[0].deleteObject: The object ({bad[0]}) could not be found.", 400)
+        self.deleted += ids
         return {}
 
 
-def http_error(message: str, status: int = 400):
-    from googleapiclient.errors import HttpError
+def http_error(message: str, status: int) -> HttpError:
     resp = type("Resp", (), {"status": status, "reason": "Bad Request"})()
     return HttpError(resp, json.dumps({"error": {"code": status, "message": message}}).encode())
 
 
-def test_one_leftover_google_no_longer_knows_does_not_save_the_others():
-    api = FakeSlidesApi(missing={"B"})  # B went with its group
-    s = bare_sync(slides=api, pid="P1")
+def test_one_leftover_google_no_longer_knows_does_not_save_the_others() -> None:
+    api = FakeSlidesApi({"B"})  # B went with its group
+    s = writing_sync(api, {})
     assert s.delete_leftovers(["A", "B", "C"]) == {"A", "B", "C"}
     assert api.deleted == ["A", "C"]
     assert api.batches == [["A", "B", "C"], ["A"], ["B"], ["C"]]
     assert s.warnings == []
 
 
-def test_a_leftover_that_could_not_be_deleted_is_not_planned_away():
-    api = FakeSlidesApi()
-    api.batchUpdate = lambda presentationId=None, body=None: _Refusing()
-    s = bare_sync(slides=api, pid="P1")
+class _Refusing(FakeSlidesApi):
+    """A Slides service that refuses every batch: the caller may not write."""
+
+    @override
+    def batchUpdate(self, **kw: Unpack[UpdatePresentation]) -> Request[BatchUpdateResponse]:
+        def refuse() -> BatchUpdateResponse:
+            raise http_error("The caller does not have permission", 403)
+        return Later(refuse)
+
+
+def test_a_leftover_that_could_not_be_deleted_is_not_planned_away() -> None:
+    s = writing_sync(_Refusing(set()), {})
     assert s.delete_leftovers(["A"]) == set()
     assert s.warnings and "could not delete 1 leftover" in s.warnings[0]
 
 
-class _Refusing:
-    def execute(self):
-        raise http_error("The caller does not have permission", 403)
-
-
-def test_dropping_leftovers_hides_them_from_everything_downstream():
-    pres = {"presentationId": "P1", "slides": [
+def test_dropping_leftovers_hides_them_from_everything_downstream() -> None:
+    pres: Presentation = {"presentationId": "P1", "slides": [
         {"objectId": "S1", "pageElements": [{"objectId": "A"}, {"objectId": "B"},
                                             {"objectId": "G", "elementGroup": {"children": [{"objectId": "B2"}]}}]},
         {"objectId": "S2", "pageElements": []}]}
     out = sync.drop_objects(pres, {"B", "B2"}, {"S2"})
-    assert [s["objectId"] for s in out["slides"]] == ["S1"]
-    assert [e["objectId"] for e in out["slides"][0]["pageElements"]] == ["A"]  # (an empty group goes too)
-    assert pres["slides"][0]["pageElements"][1]["objectId"] == "B"  # the original is untouched
+    assert [object_id(s) for s in slides_of(out)] == ["S1"]
+    assert [object_id(e) for e in slides_of(out)[0].get("pageElements") or []] == ["A"]  # (an empty group goes too)
+    assert [object_id(e) for e in slides_of(pres)[0].get("pageElements") or []][1] == "B"  # the original is untouched
+
+
+def slides_of(pres: Presentation) -> list[Page]:
+    slides = pres.get("slides")
+    assert slides is not None
+    return slides
 
 
 # ---------------------------------------------------------------- pull --apply
 
-def a_result(files, originals=None):
+def a_result(files: dict[str, str | Path], originals: dict[str, str]) -> Result:
     return Result(converged=True, iterations=[{"iteration": 0, "open": 0, "by_kind": {}, "geometry_error": 0}],
                   unresolved=[], residuals=[], files=files, patch="", work=Path("."), theme=[], notes=[],
-                  originals=originals or {}, labels=[], restored=[])
+                  originals=originals, labels=[], restored=[])
 
 
-def test_pull_apply_backs_the_file_up_and_replaces_it_whole(tmp_path):
+def no_log(line: str) -> None:
+    pass
+
+
+def test_pull_apply_backs_the_file_up_and_replaces_it_whole(tmp_path: Path) -> None:
     tex = tmp_path / "main.tex"
     tex.write_text("old\n", encoding="utf-8")
     work = tmp_path / "work"
     work.mkdir()
     result = a_result({str(tex): "new\n"}, {str(tex): _sha1(tex)})
-    write_outputs(result, {"slides": []}, tex, work, True, None, log=lambda *a: None)
+    write_outputs(result, {"slides": []}, tex, work, True, None, log=no_log)
     assert tex.read_text(encoding="utf-8") == "new\n"
     assert (tmp_path / "main.tex.bak").read_text(encoding="utf-8") == "old\n"
     assert not list(tmp_path.glob("*.writing")) and not list(tmp_path.glob("*.b2s-writing"))
 
 
-def test_the_backup_restores_the_source_exactly(tmp_path):
+def test_the_backup_restores_the_source_exactly(tmp_path: Path) -> None:
     tex = tmp_path / "main.tex"
     original = "\\documentclass{beamer}\r\n% caf\u00e9 \u2014 no newline at the end"
     tex.write_bytes(original.encode("utf-8"))
@@ -657,7 +750,7 @@ def test_the_backup_restores_the_source_exactly(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     write_outputs(a_result({str(tex): "changed"}, {str(tex): _sha1(tex)}), {"slides": []}, tex, work, True, None,
-                  log=lambda *a: None)
+                  log=no_log)
     assert tex.read_bytes() != before
     bak = tmp_path / "main.tex.bak"
     assert bak.read_bytes() == before
@@ -665,7 +758,7 @@ def test_the_backup_restores_the_source_exactly(tmp_path):
     assert tex.read_bytes() == before
 
 
-def test_an_interrupted_apply_leaves_every_file_whole(tmp_path):
+def test_an_interrupted_apply_leaves_every_file_whole(tmp_path: Path) -> None:
     a, b = tmp_path / "a.tex", tmp_path / "b.tex"
     a.write_text("A0\n", encoding="utf-8")
     b.write_text("B0\n", encoding="utf-8")
@@ -674,13 +767,13 @@ def test_an_interrupted_apply_leaves_every_file_whole(tmp_path):
     result = a_result({str(a): "A1\n", str(b): "B1\n"}, {str(a): _sha1(a), str(b): _sha1(b)})
     os.environ[faults.ENV] = "pull:apply:2"
     with pytest.raises(faults.InjectedFailure):
-        write_outputs(result, {"slides": []}, a, work, True, None, log=lambda *a: None)
+        write_outputs(result, {"slides": []}, a, work, True, None, log=no_log)
     assert a.read_text(encoding="utf-8") == "A1\n"   # written whole
     assert b.read_text(encoding="utf-8") == "B0\n"   # not touched at all
     assert not list(tmp_path.glob("*.b2s-writing"))
 
 
-def test_a_file_edited_while_the_pull_ran_is_not_overwritten(tmp_path):
+def test_a_file_edited_while_the_pull_ran_is_not_overwritten(tmp_path: Path) -> None:
     tex = tmp_path / "main.tex"
     tex.write_text("old\n", encoding="utf-8")
     originals = {str(tex): _sha1(tex)}
@@ -688,13 +781,14 @@ def test_a_file_edited_while_the_pull_ran_is_not_overwritten(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     write_outputs(a_result({str(tex): "the pull's version\n"}, originals), {"slides": []}, tex, work, True, None,
-                  log=lambda *a: None)
+                  log=no_log)
     assert tex.read_text(encoding="utf-8") == "the person's own edit\n"
     assert (tmp_path / "main.tex.b2s-new").read_text(encoding="utf-8") == "the pull's version\n"
-    assert json.loads((work / "edits.json").read_text(encoding="utf-8"))["not_applied"] == [str(tex)]
+    edits: Json = json.loads((work / "edits.json").read_text(encoding="utf-8"))
+    assert jat(edits, "not_applied") == [str(tex)]
 
 
-def test_a_new_file_that_appeared_meanwhile_is_not_overwritten(tmp_path):
+def test_a_new_file_that_appeared_meanwhile_is_not_overwritten(tmp_path: Path) -> None:
     fig = tmp_path / "figures" / "b2s-1.png"
     fig.parent.mkdir()
     fig.write_bytes(b"someone else's picture")
@@ -703,12 +797,12 @@ def test_a_new_file_that_appeared_meanwhile_is_not_overwritten(tmp_path):
     work = tmp_path / "work"
     work.mkdir()
     write_outputs(a_result({str(fig): src}, {str(tmp_path / "main.tex"): "0" * 40}), {"slides": []},
-                  tmp_path / "main.tex", work, True, None, log=lambda *a: None)
+                  tmp_path / "main.tex", work, True, None, log=no_log)
     assert fig.read_bytes() == b"someone else's picture"
     assert (tmp_path / "figures" / "b2s-1.png.b2s-new").read_bytes() == b"the deck's picture"
 
 
-def test_source_hashes_cover_the_files_the_loop_copied(tmp_path):
+def test_source_hashes_cover_the_files_the_loop_copied(tmp_path: Path) -> None:
     root, srcdir = tmp_path / "tree", tmp_path / "copy"
     (root / "sub").mkdir(parents=True)
     (root / "main.tex").write_text("x", encoding="utf-8")
@@ -723,7 +817,7 @@ def test_source_hashes_cover_the_files_the_loop_copied(tmp_path):
     assert not unchanged_since_pull(root / "main.tex", hashes)
 
 
-def test_replace_file_leaves_no_temporary_behind_when_the_write_fails(tmp_path):
+def test_replace_file_leaves_no_temporary_behind_when_the_write_fails(tmp_path: Path) -> None:
     path = tmp_path / "a.tex"
     path.write_text("old\n", encoding="utf-8")
     with pytest.raises(OSError):
@@ -745,6 +839,8 @@ def _sha1(path: Path) -> str:
 # that second sync: every deck edit is still there, the source's changes arrived, no duplicates or
 # orphans, the slides nobody edited look like the control case's (an uninterrupted sync of the same
 # source), and a third sync writes nothing.
+#
+# `live` is the module tests/test_sync_live.py, imported only when a live case runs.
 
 CASES = {
     "plan": "planned, the staging deck made, nothing written",
@@ -762,7 +858,7 @@ MUST_DIE = {"plan", "journal", "content", "base:save", "base:drive"}  # points e
 CRASH_PARALLEL = 3
 
 
-def crash_edits(live):
+def crash_edits(live: ModuleType) -> list[JsonObject]:
     """The five edits a person made before the sync that dies. They cover what a killed write can
     lose: a word inside a bullet the source also rewrites, a moved element on a slide the source
     redraws (its override has to be re-applied), a run style, speaker notes, and an object of their
@@ -779,17 +875,16 @@ def crash_edits(live):
 class CrashRun:
     """One case folder under out/sync-crash: convert, edit, sync (with or without a kill), check."""
 
-    def __init__(self, name: str, live):
+    def __init__(self, name: str, live: ModuleType) -> None:
         self.live, self.name = live, name
         self.out = CRASH_OUT / name.replace(":", "-")
         self.out.mkdir(parents=True, exist_ok=True)
         self.log = open(CRASH_OUT / f"{name.replace(':', '-')}.log", "w", encoding="utf-8")
         self.problems: list[str] = []
 
-    def cli(self, *args, env=None, check=True):
+    def cli(self, *args: str | Path, env: dict[str, str] | None, check: bool) -> subprocess.CompletedProcess[bytes]:
         self.log.write(f"\n$ beamer2slides {' '.join(map(str, args))}\n")
         self.log.flush()
-        import subprocess
         import sys
         done = subprocess.run([sys.executable, "-m", "beamer2slides", *map(str, args)],
                               env={**self.live.ENV, **(env or {})}, cwd=self.live.ROOT,
@@ -798,18 +893,18 @@ class CrashRun:
             raise RuntimeError(f"{self.name}: beamer2slides {args[0]} failed, see {self.log.name}")
         return done
 
-    def convert(self, pdf):
+    def convert(self, pdf: Path) -> None:
         from beamer2slides.devtools.deck_edits import open_deck
         # --force-rebuild: the case folder holds the previous run's deck with its edits still on it,
         # and the rebuild guard (guard.py) would rightly refuse to replace that.
-        self.cli("convert", pdf, "--out", self.out, "--force-rebuild", "--backup", "none")
+        self.cli("convert", pdf, "--out", self.out, "--force-rebuild", "--backup", "none", env=None, check=True)
         self.deck = open_deck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"],
                               defer=False)
 
-    def edit(self, specs):
+    def edit(self, specs: list[JsonObject]) -> list[JsonObject]:
         from beamer2slides.devtools.deck_edits import verified
         self.deck.read()
-        out = []
+        out: list[JsonObject] = []
         for spec in specs:
             exp, bad = verified(self.deck, spec)
             if bad:
@@ -817,23 +912,29 @@ class CrashRun:
             out.append(exp)
         return out
 
-    def sync(self, pdf, env=None, check=True):
+    def sync(self, pdf: Path, env: dict[str, str] | None, check: bool) -> subprocess.CompletedProcess[bytes]:
         return self.cli("sync", pdf, "--deck", self.out, env=env, check=check)
 
     def revision(self) -> str:
         from beamer2slides.gslides import execute
-        return execute(self.deck.api.presentations().get(presentationId=self.deck.pid,
-                                                         fields="revisionId"))["revisionId"]
+        answer = execute(self.deck.api.presentations().get(presentationId=self.deck.pid,
+                                                           fields="revisionId"))
+        rev = answer.get("revisionId")
+        assert rev is not None, "a presentation always has a revision"
+        return rev
 
-    def base(self) -> dict | None:
+    def base(self) -> JsonObject | None:
         path = self.out / "sync" / "base.json"
-        return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+        if not path.exists():
+            return None
+        data: Json = json.loads(path.read_text(encoding="utf-8"))
+        return jobj(data)
 
 
 CRASH_OUT: Path
 
 
-def run_case(point: str, live, control) -> list[str]:
+def run_case(point: str, live: ModuleType, control: Model | None) -> list[str]:
     """Convert, edit, kill a sync at `point`, sync again, and say what is wrong with the result."""
     from beamer2slides.devtools import sync_check as sc
     run = CrashRun(point, live)
@@ -855,10 +956,10 @@ def run_case(point: str, live, control) -> list[str]:
         if point == "journal" and not (run.base() or {}).get("pending"):
             run.problems.append("the killed sync left no pending marker in the base")
 
-        run.sync(pdf)  # the recovery run: this one must reach the same deck as the control
+        run.sync(pdf, env=None, check=True)  # the recovery run: this one must reach the same deck as the control
         model = run.deck.read()
         flags = live.sync_build.VARIANTS["mixed"]
-        checks = [c for e in exps for c in e["checks"]] + live.sync_build.checks(flags) \
+        checks = [c for e in exps for c in jobjs(e, "checks")] + live.sync_build.checks(flags) \
             + [{"check": "slides", "order": live.sync_build.titles(flags)}]
         run.problems += [f"after being killed at {point}: {p}" for p in sc.check_all(model, checks)]
         base = run.base() or {}
@@ -869,13 +970,13 @@ def run_case(point: str, live, control) -> list[str]:
                 run.problems.append(f"the recovery sync left `{left}` in the base: {base[left]!r:.120}")
 
         if control is not None:  # the same end state as an uninterrupted sync of the same source
-            edited = {s.id for e in exps for sel in e["slides"] for s in model.find(sel)}
+            edited = {s.id for e in exps for sel in jarr(e, "slides") for s in model.find(sel)}
             titles = [t for t in live.sync_build.titles(flags)
                       if len(model.find(t)) == 1 and model.one(t).id not in edited and len(control.find(t)) == 1]
             run.problems += [f"unlike an uninterrupted sync: {p}" for p in sc.compare_fresh(model, control, titles)]
 
         revision = run.revision()
-        run.sync(pdf)
+        run.sync(pdf, env=None, check=True)
         if run.revision() != revision:
             run.problems.append("a third sync still changed the deck: the crash left it unconverged")
         return run.problems
@@ -883,8 +984,12 @@ def run_case(point: str, live, control) -> list[str]:
         run.log.close()
 
 
+Outcome = list[str] | BaseException
+"""A case's problems, or what stopped it (a skip, or the exception its test raises)."""
+
+
 @pytest.fixture(scope="module")
-def crashes(request):
+def crashes(request: pytest.FixtureRequest) -> dict[str, Outcome]:
     """point -> problems (or the exception / skip), every selected case run once, 3 at a time."""
     global CRASH_OUT
     from concurrent.futures import ThreadPoolExecutor
@@ -903,13 +1008,13 @@ def crashes(request):
     try:
         control.convert(live.build("v1"))
         control.edit(crash_edits(live))
-        control.sync(live.build("mixed"))
+        control.sync(live.build("mixed"), env=None, check=True)
         from beamer2slides.devtools import sync_check as sc
         model = sc.read(control.deck.pid)
     finally:
         control.log.close()
 
-    def one(point):
+    def one(point: str) -> Outcome:
         try:
             return run_case(point, live, model)
         except pytest.skip.Exception as e:
@@ -923,13 +1028,13 @@ def crashes(request):
 
 @pytest.mark.sync
 @pytest.mark.parametrize("point", list(CASES))
-def test_a_sync_killed_at(point, crashes):
+def test_a_sync_killed_at(point: str, crashes: dict[str, Outcome]) -> None:
     """Killed with os._exit at this point, the next sync of the same source must reach the deck an
     uninterrupted sync would have, with every deck edit still in it."""
     result = crashes[point]
     if isinstance(result, pytest.skip.Exception):
         pytest.skip(str(result))
-    if isinstance(result, Exception):
+    if isinstance(result, BaseException):
         raise result
     if result:
         pytest.fail(f"killed at {point} ({CASES[point]}), {CRASH_OUT / point.replace(':', '-')}:\n  "

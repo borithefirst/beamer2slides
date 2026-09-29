@@ -53,7 +53,7 @@ TESTS_BASELINE = ROOT / "typecheck" / "tests_baseline.json"
 # The legacy errors typecheck/baseline.json holds: none since 2026-09-29, and it stays so.
 CEILING = 0
 # The same for the tests (typecheck/tests_baseline.json, admitted whole on 2026-09-29).
-TESTS_CEILING = 11396
+TESTS_CEILING = 3702
 
 TYPED_DICT_KINDS = {"bad-typed-dict", "bad-typed-dict-key", "not-required-key-access"}
 

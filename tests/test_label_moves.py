@@ -7,23 +7,30 @@ duplicate. The only witness is what the slides on both sides say, so these tests
 line between "this label is somewhere else now" and the plausible edits that look like it.
 """
 
-from beamer2slides import identity, merge
+import dataclasses
+from collections.abc import Sequence
 
+from beamer2slides import identity, merge
+from beamer2slides.identity import SlideInfo
+from beamer2slides.json_types import JsonObject
+
+from .json_reads import jarr, jat, jobj, jobjs, jstr
 from .test_sync import live, many_slides, ours_of, text_ir
 
 
-def info(title, text, label=None, page=0):
-    return {"label": label, "title": title, "text": text, "page": page}
+def info(title: str, text: str, label: str | None) -> SlideInfo:
+    """A frame of the first page as `identity` pairs it (None: no label)."""
+    return SlideInfo(label=label, title=title, text=text, page=0, removed=False)
 
 
 MOVING = "we keep the label on the frame it was written for whatever else changes"
 ARRIVING = "a label that lands on another frame takes the deck slide with it"
 
 
-def moved_pair():
+def moved_pair() -> tuple[list[SlideInfo], list[SlideInfo]]:
     """The source moved `[label=mobile]` off "Moving labels" and onto the frame after it."""
-    base = [info("Moving labels", MOVING, "mobile"), info("Arriving labels", ARRIVING)]
-    ours = [info("Moving labels", MOVING), info("Arriving labels", ARRIVING, "mobile")]
+    base = [info("Moving labels", MOVING, "mobile"), info("Arriving labels", ARRIVING, None)]
+    ours = [info("Moving labels", MOVING, None), info("Arriving labels", ARRIVING, "mobile")]
     return base, ours
 
 
@@ -61,7 +68,7 @@ def test_a_label_moves_while_every_title_in_the_deck_is_renamed():
     it landed on - so the title has to count by degree (`identity._title_alike`)."""
     base = [info("Moving labels", f"Moving labels {MOVING}", "mobile"),
             info("Arriving labels", f"Arriving labels {ARRIVING}", "arriving")]
-    ours = [info("Moving labels v2", f"Moving labels v2 {MOVING}"),
+    ours = [info("Moving labels v2", f"Moving labels v2 {MOVING}", None),
             info("Arriving labels v2", f"Arriving labels v2 {ARRIVING}", "mobile")]
     (m,) = identity.label_moves(base, ours)
     assert m["verdict"] == "moved" and m["frame_is"] == 1 and m["slide_is"] == 0
@@ -73,7 +80,7 @@ def test_two_labels_swapped_between_frames_are_both_re_paired():
     is the only way a swap can be seen at all."""
     base = [info("Moving labels", MOVING, "a"), info("Arriving labels", ARRIVING, "b")]
     ours = [info("Moving labels", MOVING, "b"), info("Arriving labels", ARRIVING, "a")]
-    assert sorted(m["label"] for m in identity.label_moves(base, ours)) == ["a", "b"]
+    assert sorted(jstr(m, "label") for m in identity.label_moves(base, ours)) == ["a", "b"]
     assert identity.align_slides(base, ours) == {0: 0, 1: 1}
 
 
@@ -89,7 +96,7 @@ def test_labels_swapped_between_two_frames_that_say_nearly_the_same_thing():
     base = [info("", QUARTER3, "q3"), info("", QUARTER4, "q4")]
     ours = [info("", QUARTER3, "q4"), info("", QUARTER4, "q3")]
     moves = identity.label_moves(base, ours)
-    assert sorted(m["label"] for m in moves) == ["q3", "q4"]
+    assert sorted(jstr(m, "label") for m in moves) == ["q3", "q4"]
     assert {m["verdict"] for m in moves} == {"moved"}
     assert identity.align_slides(base, ours) == {0: 0, 1: 1}, "the words decide, and they are right"
     assert identity.label_pairs(base, ours) == {0: 1, 1: 0}, "the label alone would have crossed them"
@@ -105,7 +112,7 @@ def test_labels_swapped_between_two_frames_that_also_share_a_title():
     ours = [info("Results", QUARTER3, "q4"), info("Results", QUARTER4, "q3")]
     assert identity._evidence(base[1], ours[0]) > identity.LABEL_SURE, "no doubt on the old bar"
     moves = identity.label_moves(base, ours)
-    assert sorted(m["label"] for m in moves) == ["q3", "q4"]
+    assert sorted(jstr(m, "label") for m in moves) == ["q3", "q4"]
     assert {m["verdict"] for m in moves} == {"moved"}
     assert identity.align_slides(base, ours) == {0: 0, 1: 1}, "the words decide, and they are right"
 
@@ -152,8 +159,8 @@ def test_a_margin_is_a_share_of_what_the_pair_can_say_too():
     and an untitled pair's whole vocabulary is 1.0: those 0.36 are 0.55 of everything either could
     have said, which is what `LABEL_MARGIN` is written in. A deck `adopt` wrote is made of such
     pairs, and there a label is the only identity there is (`identity._scaled`)."""
-    base = [info("", WESTERN, "one"), info("", LAUNCHES)]
-    ours = [info("", ELSEWHERE), info("", REWORDED, "one")]
+    base = [info("", WESTERN, "one"), info("", LAUNCHES, None)]
+    ours = [info("", ELSEWHERE, None), info("", REWORDED, "one")]
     own = identity._evidence(base[0], ours[1])
     there = identity._evidence(base[1], ours[1])
     assert there - own < identity.LABEL_MARGIN, "flat, the margin sees nothing"
@@ -208,8 +215,8 @@ def test_a_label_pasted_onto_a_twin_that_carries_none_is_named_too():
     So each frame was written onto the other's slide in silence (adopt-shaped seed 1400358 at chain
     4). It is asked of the finished pairing instead, where the frame carrying no label is paired by
     the alignment like any other."""
-    base = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE)]
-    ours = [info("", TWIN_SLIDE), info("", TWIN_SLIDE, "one")]
+    base = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE, None)]
+    ours = [info("", TWIN_SLIDE, None), info("", TWIN_SLIDE, "one")]
     assert identity.label_moves(base, ours) == [], "every reading ties: there is nothing to decide"
     weak: dict[int, str] = {}
     assert identity.align_slides(base, ours, weak=weak) == {1: 0, 0: 1}, "the label is followed"
@@ -219,8 +226,8 @@ def test_a_label_pasted_onto_a_twin_that_carries_none_is_named_too():
 def test_the_same_deck_with_the_label_on_the_frame_it_belongs_to_says_nothing():
     """The counter-case, as `crossed` has one: a deck that repeats itself would otherwise carry a
     warning about every twin it has."""
-    base = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE)]
-    ours = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE)]
+    base = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE, None)]
+    ours = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE, None)]
     weak: dict[int, str] = {}
     assert identity.align_slides(base, ours, weak=weak) == {0: 0, 1: 1}
     assert weak == {}
@@ -248,8 +255,8 @@ def test_a_crossing_that_loses_nothing_is_named_though_the_two_readings_do_not_t
     frame is among the best for that slide, and the answer is no. So `label_moves` says nothing,
     the alignment produces the crossing, and only the order is left to speak."""
     a2, b2 = RETITLED_A.replace("build", "draw"), RETITLED_B.replace("build", "draw")
-    base = [info("Build with us", RETITLED_A, "one"), info("Build with us", RETITLED_B)]
-    ours = [info("Build with us", a2), info("Notes retitled", b2, "one")]
+    base = [info("Build with us", RETITLED_A, "one"), info("Build with us", RETITLED_B, None)]
+    ours = [info("Build with us", a2, None), info("Notes retitled", b2, "one")]
     assert identity.label_moves(base, ours) == [], "the title bonus refuses the exchange"
     weak: dict[int, str] = {}
     assert identity.align_slides(base, ours, weak=weak) == {1: 0, 0: 1}, "the label is followed"
@@ -265,8 +272,8 @@ def test_a_crossing_the_words_decide_against_is_not_named():
     """The counter-case that keeps the widening honest: two frames the author really moved, whose
     words tell them apart. The crossing loses 0.44 here, so the reading the labels took is the one
     the deck says - nothing is ambiguous and nothing is said."""
-    base = [info("", REVENUE3, "q3"), info("", REVENUE4)]
-    ours = [info("", REVENUE4), info("", REVENUE3, "q3")]
+    base = [info("", REVENUE3, "q3"), info("", REVENUE4, None)]
+    ours = [info("", REVENUE4, None), info("", REVENUE3, "q3")]
     assert identity.crossed_twins(base, ours, {0: 1, 1: 0}) == {}
     assert identity.label_moves(base, ours) == [], "the label's own pairing is exact"
 
@@ -276,8 +283,8 @@ def test_a_crossing_that_gains_on_one_side_and_loses_on_the_other_is_not_named()
     reads worse by the same amount, the words have an opinion - the deck is not symmetric about
     the crossing - and the rule is silent, as it is for a pairing the evidence settles."""
     longer = TWIN_SLIDE + " and by the one before"
-    base = [info("", TWIN_SLIDE, "one"), info("", longer)]
-    ours = [info("", TWIN_SLIDE), info("", TWIN_SLIDE, "one")]
+    base = [info("", TWIN_SLIDE, "one"), info("", longer, None)]
+    ours = [info("", TWIN_SLIDE, None), info("", TWIN_SLIDE, "one")]
     # Paired {0: 1, 1: 0}: frame 0 reads better against slide 0 than against the slide it got,
     # and frame 1 reads worse against slide 1 than against its own, by the same 0.135.
     assert identity._evidence(base[0], ours[0]) > identity._evidence(base[1], ours[0])
@@ -285,28 +292,29 @@ def test_a_crossing_that_gains_on_one_side_and_loses_on_the_other_is_not_named()
     assert identity.crossed_twins(base, ours, {0: 1, 1: 0}) == {}
 
 
+def crossed_warnings(labels: tuple[str | None, str | None], weak: str) -> list[str]:
+    """The merge's "changed places" warnings for slides `one` and `two` paired crosswise, the
+    source's frames labelled `labels` and the pairing `weak` (`crossed` or `traded`) both ways."""
+    base = many_slides(["one", "two"])
+    slides = [ours_of(s) for s in jobjs(base, "slides")]
+    slides[0]["label"], slides[1]["label"] = labels
+    ours: JsonObject = {"slides": [*slides], "pairs": {"0": 1, "1": 0}, "weak_pairs": {"0": weak, "1": weak}}
+    theirs: JsonObject = {"revisionId": "r", "slides": [live(s) for s in jobjs(base, "slides")]}
+    return [w for w in (jstr(x) for x in jarr(merge.plan_merge(base, ours, theirs), "report", "warnings"))
+            if "changed places" in w]
+
+
 def test_the_crossing_is_named_in_the_report():
     """It is a warning, not a conflict: the labels were followed and nothing is at risk this
     time - but which slide each frame writes to next time is the author's to settle."""
-    base = many_slides(["one", "two"])
-    ours = {"slides": [ours_of(s) for s in base["slides"]],
-            "pairs": {0: 1, 1: 0}, "weak_pairs": {0: "crossed", 1: "crossed"}}
-    ours["slides"][0]["label"], ours["slides"][1]["label"] = "two", "one"
-    theirs = {"revisionId": "r", "slides": [live(s) for s in base["slides"]]}
-    said = [w for w in merge.plan_merge(base, ours, theirs)["report"]["warnings"] if "changed places" in w]
+    said = crossed_warnings(("two", "one"), "crossed")
     assert len(said) == 2 and "`two`" in said[0] and "docs/labels.md" in said[0]
 
 
 def test_the_trade_is_named_in_the_report_and_asks_for_the_missing_label():
     """Same warning, one sentence further: the frame that crossed carries no label of its own, so
     what settles it next time is giving it one."""
-    base = many_slides(["one", "two"])
-    ours = {"slides": [ours_of(s) for s in base["slides"]],
-            "pairs": {0: 1, 1: 0}, "weak_pairs": {0: "traded", 1: "traded"}}
-    ours["slides"][0]["label"], ours["slides"][1]["label"] = None, "one"
-    theirs = {"revisionId": "r", "slides": [live(s) for s in base["slides"]]}
-    said = [w for w in merge.plan_merge(base, ours, theirs)["report"]["warnings"]
-            if "changed places" in w]
+    said = crossed_warnings((None, "one"), "traded")
     assert len(said) == 2 and all("Give the other frame a label too" in w for w in said)
 
 
@@ -326,8 +334,8 @@ def test_a_label_pasted_onto_the_twin_beside_it_is_an_exchange():
     this label's slide belongs on the slide explaining this frame, each looking there before
     anywhere else. That is two frames changing places and nothing else known to produce it
     (`identity.exchanged`, `LABEL_EXCHANGE`)."""
-    base = [info("Results", REVENUE3, "q3"), info("Results", REVENUE4)]
-    ours = [info("Results", REVENUE3.replace("rose", "climbed")),
+    base = [info("Results", REVENUE3, "q3"), info("Results", REVENUE4, None)]
+    ours = [info("Results", REVENUE3.replace("rose", "climbed"), None),
             info("Results", REVENUE4.replace("fell", "dropped"), "q3")]
     own = identity._evidence(base[0], ours[1])
     assert identity._evidence(base[0], ours[0]) - own < identity.LABEL_MARGIN, "the margin sees a tie"
@@ -368,8 +376,8 @@ def test_a_frame_reworded_on_a_deck_of_twins_is_no_exchange():
     roadmap = "the roadmap for the first half lists the launches the hires and the budget we asked for"
     twin = "the roadmap for the second half ranks the partners the regions and the budget we asked for"
     reworded = "the roadmap for the second half ranks the partners the regions and the money we put in"
-    base = [info("Roadmap", roadmap, "half1"), info("Roadmap", twin)]
-    ours = [info("Roadmap", reworded, "half1"), info("Roadmap", twin)]
+    base = [info("Roadmap", roadmap, "half1"), info("Roadmap", twin, None)]
+    ours = [info("Roadmap", reworded, "half1"), info("Roadmap", twin, None)]
     own = identity._evidence(base[0], ours[0])
     here, there = identity._evidence(base[0], ours[1]), identity._evidence(base[1], ours[0])
     assert min(here, there) >= identity._moved_bar(base[0], ours[1])
@@ -393,8 +401,8 @@ def test_the_exchange_bar_is_a_tie_and_not_a_number_of_its_own():
          "walks through the regions we sell in the partners we work with and the launches we "
          "planned for the third quarter")
     b = a.replace("third quarter", "fourth quarter")
-    base = [info("Results", a, "q3"), info("Results", b)]
-    ours = [info("Results", a.replace("monday", "friday")),
+    base = [info("Results", a, "q3"), info("Results", b, None)]
+    ours = [info("Results", a.replace("monday", "friday"), None),
             info("Results", b.replace("walks", "runs"), "q3")]
     own = identity._evidence(base[0], ours[1])
     here, there = identity._evidence(base[0], ours[0]), identity._evidence(base[1], ours[1])
@@ -414,10 +422,10 @@ def test_a_tie_in_the_look_back_does_not_refuse_an_exchange():
     nothing else, and a look back that refuses because the other one came first refuses an exchange
     on the strength of a slide order (adopt-shaped seed 1400991 at chain 3, where the label was then
     followed onto the wrong slide in silence). `among_best` counts the tie (`TWIN_TIE`) instead."""
-    base = [info("Results", REVENUE3, "q3"), info("Results", REVENUE4)]
+    base = [info("Results", REVENUE3, "q3"), info("Results", REVENUE4, None)]
     twin = REVENUE4.replace("fell", "dropped")
-    ours = [info("Results", REVENUE3.replace("rose", "climbed")),
-            info("Results", twin), info("Results", twin, "q3")]
+    ours = [info("Results", REVENUE3.replace("rose", "climbed"), None),
+            info("Results", twin, None), info("Results", twin, "q3")]
     assert identity._evidence(base[1], ours[1]) == identity._evidence(base[1], ours[2]), "a tie"
     said = [(m["verdict"], m["slide_is"], m["frame_is"]) for m in identity.label_moves(base, ours)]
     assert said == [("moved", 0, 1)], "the two readings point at each other; the tie is not a refusal"
@@ -454,7 +462,7 @@ def test_a_label_on_a_frame_that_is_word_for_word_another_slide_is_asked_about()
     it would have had to rewrite it into a copy of another one. So the question is worth asking,
     even though one side proves nothing and nothing is re-paired."""
     base = [info("", AGENDA, "agenda"), info("", ROADMAP, "roadmap")]
-    ours = [info("", NEWWORDS), info("", ROADMAP, "agenda")]
+    ours = [info("", NEWWORDS, None), info("", ROADMAP, "agenda")]
     (m,) = identity.label_moves(base, ours)
     assert m["verdict"] == "unsure" and m["label"] == "agenda"
     assert m["frame_is"] == 1 and m["slide_is"] is None
@@ -470,16 +478,16 @@ def test_the_other_side_alone_is_not_enough_when_the_deck_has_twins():
     (`test_one_twin_edited_is_not_a_swap` says the same with both frames labelled, where their own
     labels settle them and there is nothing free to explain anything.)"""
     twin = "the table notes review and export figures for the quarter just gone"
-    base = [info("", twin, "first"), info("", twin)]
-    ours = [info("", twin.replace("just gone", "now ending"), "first"), info("", twin)]
+    base = [info("", twin, "first"), info("", twin, None)]
+    ours = [info("", twin.replace("just gone", "now ending"), "first"), info("", twin, None)]
     assert identity.label_moves(base, ours) == []
 
 
 def test_a_label_moved_onto_a_frame_that_did_not_exist_before_is_only_a_question():
     """The frame that had the label is gone from the source, so only one half of the story can be
     checked. Nothing is re-paired; the report asks."""
-    base = [info("Moving labels", MOVING, "mobile"), info("Arriving labels", ARRIVING)]
-    ours = [info("Arriving labels", ARRIVING, "mobile"), info("Something else", "a page of new words entirely")]
+    base = [info("Moving labels", MOVING, "mobile"), info("Arriving labels", ARRIVING, None)]
+    ours = [info("Arriving labels", ARRIVING, "mobile"), info("Something else", "a page of new words entirely", None)]
     (m,) = identity.label_moves(base, ours)
     assert m["verdict"] == "unsure" and m["frame_is"] == 1 and m["slide_is"] is None
     assert identity.align_slides(base, ours)[0] == 0  # the label was followed
@@ -501,8 +509,8 @@ def test_overlay_steps_of_one_frame_are_never_a_move():
     word what it said - and once a pairing short of word for word is in doubt, exactness would
     have made every dropped or added step a question. A slide carrying this frame's own label is
     the frame itself, though, so it is no candidate for explaining where the label went."""
-    def step(n, page):
-        return info("Building up", " ".join(["a bullet about decks"] * (n + 1)), "build", page)
+    def step(n: int, page: int) -> SlideInfo:
+        return dataclasses.replace(info("Building up", " ".join(["a bullet about decks"] * (n + 1)), "build"), page=page)
     base = [step(0, 0), step(1, 1), step(2, 2)]
     assert identity.label_moves(base, [step(1, 0), step(2, 1)]) == []       # first step dropped
     assert identity.label_moves(base, [step(n, n) for n in range(4)]) == []  # a step added
@@ -528,7 +536,7 @@ def test_frames_that_say_nothing_are_left_to_their_labels():
 
 def test_a_label_written_into_a_frame_that_had_none_is_not_a_move():
     """What `beamer2slides label --apply` does to a source whose deck already exists."""
-    base = [info("Intro", "why we do this and what it costs"), info("End", "thanks for listening")]
+    base = [info("Intro", "why we do this and what it costs", None), info("End", "thanks for listening", None)]
     ours = [info("Intro", "why we do this and what it costs", "intro"),
             info("End", "thanks for listening", "end")]
     assert identity.label_moves(base, ours) == []
@@ -537,10 +545,22 @@ def test_a_label_written_into_a_frame_that_had_none_is_not_a_move():
 
 # ---------------------------------------------------------------- what the report says
 
-def report_of(moves, held=True):
+def report_of(moves: Sequence[JsonObject], held: bool) -> JsonObject:
     report = merge.empty_report()
     merge.report_label_moves(moves, report, held=held)
     return report
+
+
+def the_conflict(report: JsonObject) -> JsonObject:
+    """The report's one conflict."""
+    (c,) = jobjs(report, "conflicts")
+    return c
+
+
+def the_warning(report: JsonObject) -> str:
+    """The report's one warning."""
+    (w,) = jarr(report, "warnings")
+    return jstr(w)
 
 
 def test_a_move_is_reported_as_a_conflict_with_both_sides_of_the_story():
@@ -548,28 +568,28 @@ def test_a_move_is_reported_as_a_conflict_with_both_sides_of_the_story():
     moves = identity.label_moves(base, ours)
     for m in moves:  # sync puts the base's keys in before the report is written
         m["slide"], m["frame_is"], m["slide_is"] = "mobile", "title:arriving labels#1", "Moving labels"
-    (c,) = report_of(moves)["conflicts"]
+    c = the_conflict(report_of(moves, True))
     assert c["field"] == "label" and c["slide"] == "mobile"
-    assert "Moving labels" in c["base"] and "Arriving labels" in c["ours"]
-    assert "content" in c["resolution"]
+    assert "Moving labels" in jstr(c, "base") and "Arriving labels" in jstr(c, "ours")
+    assert "content" in jstr(c, "resolution")
 
 
-def unsure_move():
+def unsure_move() -> list[JsonObject]:
     return [{"label": "mobile", "verdict": "unsure", "ours": 0, "base": 0, "similarity": 0.3,
              "slide": "mobile", "base_title": "Moving labels", "ours_title": "Arriving labels",
              "slide_is": None, "slide_score": None, "frame_is": "x", "frame_score": 1.4}]
 
 
 def test_an_unsure_move_says_that_nothing_was_written_to_that_slide():
-    (c,) = report_of(unsure_move())["conflicts"]
-    assert "nothing written to this slide" in c["resolution"]
+    c = the_conflict(report_of(unsure_move(), True))
+    assert "nothing written to this slide" in jstr(c, "resolution")
 
 
 def test_an_unsure_move_under_follow_labels_says_it_followed_the_label():
     """`--follow-labels` is a person saying they have read the `.tex` and the labels are right, so
     the sync writes - and the report says that is what it did, not that the slide was left alone."""
-    (c,) = report_of(unsure_move(), held=False)["conflicts"]
-    assert "followed the label" in c["resolution"] and "nothing re-paired" in c["resolution"]
+    c = the_conflict(report_of(unsure_move(), held=False))
+    assert "followed the label" in jstr(c, "resolution") and "nothing re-paired" in jstr(c, "resolution")
 
 
 def test_an_unsure_move_names_the_slide_that_was_left_alone():
@@ -577,14 +597,14 @@ def test_an_unsure_move_names_the_slide_that_was_left_alone():
     is a slide: the frame now carrying the label would go onto the slide the label names, which is
     a slide somebody has been editing. It is held back instead, and the warning says which slide,
     what would have happened to it, and how to say that it should happen after all."""
-    (w,) = report_of(unsure_move())["warnings"]
+    w = the_warning(report_of(unsure_move(), True))
     assert "Nothing was written to the slide `mobile`" in w
     assert "edits and all" in w and "--follow-labels" in w
     assert "The rest of the deck was synced." in w
 
 
 def test_under_follow_labels_the_warning_names_the_slide_about_to_be_written_on():
-    (w,) = report_of(unsure_move(), held=False)["warnings"]
+    w = the_warning(report_of(unsure_move(), held=False))
     assert "writes the frame carrying `mobile` onto the slide `mobile`" in w
     assert "edits and all" in w and "that is the slide to look at" in w
 
@@ -596,46 +616,52 @@ def test_a_decided_move_does_not_threaten_a_slide_it_is_not_writing_on():
     moves = identity.label_moves(base, ours)
     for m in moves:
         m["slide"], m["frame_is"], m["slide_is"] = "mobile", "title:arriving labels#1", "Moving labels"
-    (w,) = report_of(moves)["warnings"]
+    w = the_warning(report_of(moves, True))
     assert "Nothing was written to the slide" not in w and "went by the content" in w
 
 
 def test_a_label_that_was_renamed_is_a_warning_not_a_conflict():
     """The content recognised the frame, so nothing is at risk this time - but the source has one
     hook fewer to hang the next version on, and that is worth saying."""
-    base = {"slides": [{"key": "intro", "label": "intro", "objectId": "s1", "elements": [], "title": "Intro",
-                        "background": None, "notes": "", "layout": "TITLE_ONLY"}]}
-    ours = {"slides": [{"key": "intro", "label": "introduction", "elements": [], "title": "Intro",
-                        "background": None, "notes": "", "layout": "TITLE_ONLY"}], "pairs": {0: 0}}
-    theirs = {"slides": [{"objectId": "s1", "objects": {}, "notes": "", "background": None}]}
-    report = merge.plan_merge(base, ours, theirs)["report"]
+    base: JsonObject = {"slides": [{"key": "intro", "label": "intro", "objectId": "s1", "elements": [], "title": "Intro",
+                                    "background": None, "notes": "", "layout": "TITLE_ONLY"}]}
+    ours: JsonObject = {"slides": [{"key": "intro", "label": "introduction", "elements": [], "title": "Intro",
+                                    "background": None, "notes": "", "layout": "TITLE_ONLY"}], "pairs": {"0": 0}}
+    theirs: JsonObject = {"slides": [{"objectId": "s1", "objects": {}, "notes": "", "background": None}]}
+    report = jobj(merge.plan_merge(base, ours, theirs), "report")
     assert report["conflicts"] == []
-    (w,) = report["warnings"]
+    w = the_warning(report)
     assert "`introduction` now" in w and "`intro`" in w
 
 
 # ---------------------------------------------------------------- what is written
 
-def three_way(unsure_slide: int | None):
+def three_way(unsure_slide: int | None) -> tuple[JsonObject, JsonObject, JsonObject]:
     """Three slides, the source rewording the middle one's body, and - if asked - a label whose
     move `identity.label_moves` could not settle sitting on that very frame."""
     base = many_slides(["intro", "results", "end"])
-    ours = {"slides": [ours_of(s) for s in base["slides"]], "pairs": {j: j for j in range(3)}}
-    body = ours["slides"][1]["elements"][1]
-    body["ir"] = text_ir("A different first point\nA different second point", (20, 60, 200, 90), "p1t1")
-    h, fields = identity.ir_fields(body["ir"], None, None)
-    body.update(ir_hash=h, fields=fields, fingerprint=identity.fingerprint(body["ir"], None, None))
+    slides = [ours_of(s) for s in jobjs(base, "slides")]
+    body = jobj(slides[1], "elements", 1)
+    ir = text_ir("A different first point\nA different second point", (20, 60, 200, 90), "p1t1", role="body")
+    h, fields = identity.ir_fields(ir, None, None)
+    body.update(ir=ir, ir_hash=h, fields=fields, fingerprint=identity.fingerprint(ir, None, None))
+    ours: JsonObject = {"slides": [*slides], "pairs": {str(j): j for j in range(3)}}
     if unsure_slide is not None:
         ours["label_moves"] = [{"label": "results", "verdict": "unsure", "ours": unsure_slide, "base": unsure_slide,
                                 "similarity": 0.4, "slide": "results", "base_title": "Results",
                                 "ours_title": "Results", "slide_is": None, "slide_score": None,
                                 "frame_is": "end", "frame_score": 1.3}]
-    theirs = {"revisionId": "r", "slides": [live(s) for s in base["slides"]]}
+    theirs: JsonObject = {"revisionId": "r", "slides": [live(s) for s in jobjs(base, "slides")]}
     return base, ours, theirs
 
 
-def writes(mplan, theirs) -> bool:
-    return merge.has_writes(mplan, [s["objectId"] for s in theirs["slides"]])
+def writes(mplan: JsonObject, theirs: JsonObject) -> bool:
+    return merge.has_writes(mplan, [jstr(s, "objectId") for s in jobjs(theirs, "slides")])
+
+
+def slides_said(mplan: JsonObject, *path: str) -> list[str]:
+    """The slides a report list (`applied`, `slides`/`held`) names."""
+    return [jstr(x, "slide") for x in jobjs(mplan, "report", *path)]
 
 
 def test_a_slide_whose_label_may_have_moved_is_not_written_to():
@@ -644,11 +670,11 @@ def test_a_slide_whose_label_may_have_moved_is_not_written_to():
     it, the report says so, and the rest of the deck is synced as usual."""
     base, ours, theirs = three_way(unsure_slide=1)
     mplan = merge.plan_merge(base, ours, theirs)
-    held = next(p for p in mplan["slides"] if p["key"] == "results")
+    held = next(p for p in jobjs(mplan, "slides") if p["key"] == "results")
     assert held.get("held") == "label" and held["units"] == []
     assert not writes(mplan, theirs), "the only source change there was is on the held slide"
-    assert mplan["report"]["slides"]["held"] == [{"slide": "results", "reason": "label", "label": "results"}]
-    assert not any(a["slide"] == "results" for a in mplan["report"]["applied"])
+    assert jat(mplan, "report", "slides", "held") == [{"slide": "results", "reason": "label", "label": "results"}]
+    assert "results" not in slides_said(mplan, "applied")
 
 
 def test_holding_one_slide_does_not_hold_the_talk():
@@ -657,8 +683,8 @@ def test_holding_one_slide_does_not_hold_the_talk():
     base, ours, theirs = three_way(unsure_slide=2)   # the doubt is about `end`, the edit about `results`
     mplan = merge.plan_merge(base, ours, theirs)
     assert writes(mplan, theirs)
-    assert [a["slide"] for a in mplan["report"]["applied"]] == ["results"]
-    assert [h["slide"] for h in mplan["report"]["slides"]["held"]] == ["end"]
+    assert slides_said(mplan, "applied") == ["results"]
+    assert slides_said(mplan, "slides", "held") == ["end"]
 
 
 def test_follow_labels_writes_the_held_slide_after_all():
@@ -667,8 +693,8 @@ def test_follow_labels_writes_the_held_slide_after_all():
     base, ours, theirs = three_way(unsure_slide=1)
     mplan = merge.plan_merge(base, ours, theirs, follow_labels=True)
     assert writes(mplan, theirs)
-    assert mplan["report"]["slides"]["held"] == []
-    assert [a["slide"] for a in mplan["report"]["applied"]] == ["results"]
+    assert jat(mplan, "report", "slides", "held") == []
+    assert slides_said(mplan, "applied") == ["results"]
 
 
 def test_a_held_slide_is_not_moved_either():
@@ -676,9 +702,10 @@ def test_a_held_slide_is_not_moved_either():
     the open question. So the order leaves it where the deck has it, like a slide the person
     dragged - nothing about a held slide changes until somebody answers the question."""
     base, ours, theirs = three_way(unsure_slide=1)
-    ours["slides"] = [ours["slides"][1], ours["slides"][0], ours["slides"][2]]   # the source moved it first
-    ours["pairs"] = {0: 1, 1: 0, 2: 2}
-    ours["label_moves"][0]["ours"] = 0
+    slides = jarr(ours, "slides")
+    ours["slides"] = [slides[1], slides[0], slides[2]]   # the source moved it first
+    ours["pairs"] = {"0": 1, "1": 0, "2": 2}
+    jobj(ours, "label_moves", 0)["ours"] = 0
     mplan = merge.plan_merge(base, ours, theirs)
     assert mplan["order"] == ["b2s_s000", "b2s_s001", "b2s_s002"], "held where the deck has it"
     assert merge.plan_merge(base, ours, theirs, follow_labels=True)["order"] \
@@ -689,6 +716,6 @@ def test_a_settled_move_writes_where_the_content_says():
     """`moved` is not `unsure`: the content decided which frame the slide is, so there is nothing
     left to wait for and the slide is written."""
     base, ours, theirs = three_way(unsure_slide=1)
-    ours["label_moves"][0]["verdict"] = "moved"
+    jobj(ours, "label_moves", 0)["verdict"] = "moved"
     mplan = merge.plan_merge(base, ours, theirs)
-    assert writes(mplan, theirs) and mplan["report"]["slides"]["held"] == []
+    assert writes(mplan, theirs) and jat(mplan, "report", "slides", "held") == []

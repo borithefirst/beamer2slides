@@ -28,7 +28,7 @@ from beamer2slides.agent.deck_tools import (deck_convert, deck_inspect, deck_pre
 from beamer2slides.agent.schema import type_hints
 from beamer2slides.json_types import JsonObject
 
-from .json_reads import arr, at, integer, obj, objs, text, texts
+from .json_reads import jarr, jat, jint, jobj, jobjs, jstr, jstrs
 
 if TYPE_CHECKING:
     from google.auth.credentials import Credentials
@@ -112,12 +112,12 @@ def test_deck_inspect_classifies_a_pdf_and_writes_the_ir(inspected: Result, work
 def test_deck_inspect_reports_what_the_agent_has_to_decide_on(inspected: Result):
     data = inspected.data
     assert data["elements"], "no element kinds counted"
-    assert len(arr(data, "slides_detail")) == data["slides"]
-    assert len(arr(data, "titles")) == data["slides"]
+    assert len(jarr(data, "slides_detail")) == data["slides"]
+    assert len(jarr(data, "titles")) == data["slides"]
     assert data["fonts"], "no fonts seen in the PDF"
-    labels = obj(data, "labels")
+    labels = jobj(data, "labels")
     assert "unlabelled" in labels and "duplicates" in labels
-    assert at(data, "overlays", "mode") == "last"
+    assert jat(data, "overlays", "mode") == "last"
     assert 2 <= len(inspected.summary.split()) < 200
     # Unlabelled frames are the thing that decides whether a later sync can work: they are in
     # `data` and said out loud, never only one of the two.
@@ -129,8 +129,8 @@ def test_deck_inspect_reports_what_the_agent_has_to_decide_on(inspected: Result)
 def test_deck_inspect_with_checks_finds_no_invariant_problems_on_a_clean_deck(workspace: Path):
     result = deck_inspect(AgentContext.offline(workspace), pdf="talk.pdf", checks=True)
     assert result.ok, result.summary
-    assert at(result.data, "checks", "ran") is True
-    assert at(result.data, "checks", "findings") == 0, at(result.data, "checks", "by_check")
+    assert jat(result.data, "checks", "ran") is True
+    assert jat(result.data, "checks", "findings") == 0, jat(result.data, "checks", "by_check")
     assert "deck_convert" in " ".join(result.next_steps)
 
 
@@ -215,9 +215,9 @@ def test_take_source_is_published_as_a_list_of_ids_a_person_chose(tmp_path: Path
 
     schema = next(s for s in all_schemas() if s["name"] == "deck_sync")
     prop = schema["input_schema"]["properties"]["take_source"]
-    assert "array" in texts(prop, "type") and text(prop, "items", "type") == "string"
+    assert "array" in jstrs(prop, "type") and jstr(prop, "items", "type") == "string"
     assert "take_source" not in schema["input_schema"].get("required", [])
-    assert "never pick an id yourself" in text(prop, "description")
+    assert "never pick an id yourself" in jstr(prop, "description")
     # and it reaches the journey: a context that may not write refuses before the ids matter
     root = tmp_path / "ws"
     root.mkdir(parents=True)
@@ -261,7 +261,7 @@ def test_a_refused_rebuild_comes_back_as_a_code_with_the_edits_named(tmp_path: P
                         root / "out" / "talk")
     assert caught.value.code == "deck_edited"
     assert caught.value.data["examples"] == survey["examples"]
-    assert text(caught.value.data, "url").endswith("PID123/edit")
+    assert jstr(caught.value.data, "url").endswith("PID123/edit")
     assert caught.value.data["revisionId"] == "r7"
     steps = " ".join(job.next_steps)
     assert "deck_sync" in steps and "new_deck=True" in steps and "force_rebuild=True" in steps
@@ -397,7 +397,7 @@ def test_deck_prepare_writes_the_folder_the_upload_half_builds_from(prepared: tu
     assert facts["version"] == 1 and facts["overlays"] == "last"
     assert facts["name"] == "talk.pdf"
     assert facts["source"]["sha1"] == identity.sha1((root / "talk.pdf").read_bytes())
-    assert facts["facts"]["slides"] == integer(result.data, "slides") > 0
+    assert facts["facts"]["slides"] == jint(result.data, "slides") > 0
     assert "deck_upload" in " ".join(result.next_steps)
 
 
@@ -442,7 +442,7 @@ def test_deck_upload_needs_nothing_from_the_workspace_but_the_prepared_folder(pr
     assert seen.based and seen.pdf == {"pdf": prepared_json["source"]["pdf"],
                                        "sha1": identity.sha1((root / "talk.pdf").read_bytes())}
     assert seen.overlays == prepared_json["overlays"]
-    assert text(result.data, "url").endswith("PID123/edit") and result.data["base_slides"] == 2
+    assert jstr(result.data, "url").endswith("PID123/edit") and result.data["base_slides"] == 2
     # And the one thing the folder alone cannot do is said, rather than found out inside a retry.
     assert result.data["can_crop_refused_elements"] is False
 
@@ -693,8 +693,8 @@ def test_the_way_back_is_reported_where_a_caller_can_branch_on_it(tmp_path: Path
         ["could not copy the deck in Drive (quota)"]
     pptx = [a for a in result.artifacts if a.kind == "pptx"]
     assert [a.ref for a in pptx] == ["out/talk/backups/20260923-before.pptx"]
-    assert at(result.data, "backup_copy", "url") == "https://copy" and result.data["backup_mode"] == "both"
-    assert at(result.data, "recovery", "revisionId") == "r7"
+    assert jat(result.data, "backup_copy", "url") == "https://copy" and result.data["backup_mode"] == "both"
+    assert jat(result.data, "recovery", "revisionId") == "r7"
 
 
 def test_a_sync_that_recorded_no_way_back_says_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -792,7 +792,7 @@ def test_tex_label_plans_without_writing(source: Path):
     assert result.ok, result.summary
     assert result.data["frames"] == 3 and result.data["labelled"] == 1
     assert result.data["planned"] == 2
-    assert [e["label"] for e in objs(result.data, "edits")] and all(e["title"] for e in objs(result.data, "edits"))
+    assert [e["label"] for e in jobjs(result.data, "edits")] and all(e["title"] for e in jobjs(result.data, "edits"))
     assert result.data["applied"] is False
     assert (source / "main.tex").read_text(encoding="utf-8") == FRAMES, "apply=False wrote"
     assert not list(source.glob("*.bak"))
@@ -822,7 +822,7 @@ def test_tex_label_reports_a_label_written_twice_as_a_conflict(source: Path):
                                      encoding="utf-8")
     result = tex_label(AgentContext.offline(source), tex="main.tex")
     assert result.ok, result.summary
-    assert [d["label"] for d in objs(result.data, "duplicates")] == ["summary"]
+    assert [d["label"] for d in jobjs(result.data, "duplicates")] == ["summary"]
     assert any(d.level == "conflict" and "summary" in d.message for d in result.diagnostics)
 
 

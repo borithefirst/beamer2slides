@@ -26,7 +26,7 @@ from beamer2slides.agent.source_tools import SOURCE_TOOLS, deck_adopt, deck_pull
 from beamer2slides.google_types import json_object
 from beamer2slides.json_types import JsonObject
 
-from .json_reads import arr, integer, num, objs, text
+from .json_reads import jarr, jint, jnum, jobjs, jstr
 
 if TYPE_CHECKING:
     from google.auth.credentials import Credentials
@@ -112,9 +112,9 @@ def test_a_sandbox_adopts_the_deck_it_was_handed_as_files(tmp_path: Path, monkey
     assert res.ok, res.json()
     assert res.data["pptx_pictures"] == 1 and res.data["slides"] == 1
     [target] = targets
-    [photo] = [e for e in objs(json_object(target, "the pulled target"), "slides", 0, "elements")
+    [photo] = [e for e in jobjs(json_object(target, "the pulled target"), "slides", 0, "elements")
                if e.get("object") == "p1"]
-    assert Path(text(photo, "file")).read_bytes() == cat
+    assert Path(jstr(photo, "file")).read_bytes() == cat
 
 
 def test_a_google_call_in_a_local_adopt_is_refused_not_made(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -376,8 +376,8 @@ def test_adopt_scores_the_source_it_wrote_for_readability(tmp_path: Path):
     (tmp_path / "beamerthemeDemo.sty").write_text("\\mode<presentation>\n", encoding="utf-8")
     j = Job("deck_adopt", AgentContext.offline(tmp_path))
     st._readability(j, tex)
-    assert 0.6 <= num(j.data, "readability") <= 1.0
-    assert integer(j.data, "readability_detail", "frames") == 5
+    assert 0.6 <= jnum(j.data, "readability") <= 1.0
+    assert jint(j.data, "readability_detail", "frames") == 5
 
 
 def base_at(work: Path, paired: int, unpaired: int, from_layout: int) -> Path:
@@ -450,7 +450,7 @@ def test_converge_runs_the_loop_on_the_inverse_fixture(tmp_path: Path):
                        work="work", max_iter=2)
     assert res.ok or res.code == "not_converged", res.json()
     assert res.data["slides"] == len(json.loads((tree / "a.deck.json").read_text(encoding="utf-8"))["slides"])
-    assert arr(res.data, "iterations") and integer(res.data, "rounds") <= 2
+    assert jarr(res.data, "iterations") and jint(res.data, "rounds") <= 2
     assert set(res.data) >= {"converged", "residuals_before", "residuals_left", "files_changed"}
     kinds = {a.kind for a in res.artifacts}
     assert {"report", "json"} <= kinds, [a.json() for a in res.artifacts]

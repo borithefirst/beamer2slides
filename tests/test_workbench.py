@@ -19,7 +19,7 @@ from beamer2slides import interpreter
 from beamer2slides.json_types import JsonObject, as_object
 from beamer2slides.playground import server, workbench
 
-from .json_reads import at, integer, num, obj, objs, text as text_at, texts
+from .json_reads import jat, jint, jnum, jobj, jobjs, jstr as text_at, jstrs
 from .test_playground import JSON, call, fetch
 
 #: How long a run is waited for, in seconds, unless a test says otherwise.
@@ -78,7 +78,7 @@ def run(ws: str, tool: str, args: JsonObject, seconds: int) -> JsonObject:
 
 def result(state: JsonObject) -> JsonObject:
     """A finished run's `Result`, as the page reads it."""
-    return obj(state, "result")
+    return jobj(state, "result")
 
 
 def summary(state: JsonObject) -> str:
@@ -98,7 +98,7 @@ def test_every_journey_is_offered_with_its_own_schema(base: str):
     """The form a visitor fills in is read off the tools themselves, so the two cannot drift."""
     status, catalogue = call(f"{base}/api/tools", None, JSON)
     assert status == 200
-    names = [text_at(t, "name") for t in objs(catalogue, "tools")]
+    names = [text_at(t, "name") for t in jobjs(catalogue, "tools")]
     assert "tex_compile" in names and "deck_convert" in names and "doc_sync" in names
     # the eleven journeys, deck_convert's two halves, and the compile step
     assert len(names) == 14
@@ -106,29 +106,29 @@ def test_every_journey_is_offered_with_its_own_schema(base: str):
     # compile first, because that is where a talk in this workspace starts.
     from beamer2slides.agent import tools as registry
     assert names == ["tex_compile", *registry.ORDER]
-    for tool in objs(catalogue, "tools"):
-        assert text_at(tool, "description").strip() and at(tool, "input_schema", "type") == "object"
-        for name, prop in obj(tool, "input_schema", "properties").items():
-            assert obj(prop).get("description"), f"{tool['name']}.{name}"
+    for tool in jobjs(catalogue, "tools"):
+        assert text_at(tool, "description").strip() and jat(tool, "input_schema", "type") == "object"
+        for name, prop in jobj(tool, "input_schema", "properties").items():
+            assert jobj(prop).get("description"), f"{tool['name']}.{name}"
     instructions = text_at(catalogue, "instructions")
     assert "never rebuild" in instructions.lower() or instructions.strip()
-    convert = next(t for t in objs(catalogue, "tools") if t["name"] == "deck_convert")
-    assert at(convert, "effects", "writes_google") and at(convert, "effects", "approval") == "required"
+    convert = next(t for t in jobjs(catalogue, "tools") if t["name"] == "deck_convert")
+    assert jat(convert, "effects", "writes_google") and jat(convert, "effects", "approval") == "required"
 
 
 def test_a_new_workspace_has_something_to_start_from(ws: str):
     status, view = call(ws, None, JSON)
     assert status == 200
-    names = {text_at(f, "path") for f in objs(view, "files")}
+    names = {text_at(f, "path") for f in jobjs(view, "files")}
     assert {"README.md", "talk.tex", "doc.html"} <= names
-    assert integer(view, "bytes") > 0 and at(view, "limits", "files") == workbench.MAX_FILES
+    assert jint(view, "bytes") > 0 and jat(view, "limits", "files") == workbench.MAX_FILES
     assert b"\\begin{frame}" in got(f"{ws}/file?path=talk.tex")
 
 
 def test_files_are_written_read_and_deleted(ws: str):
     assert request(f"{ws}/file?path=notes/one.txt", "PUT", b"hello", "text/plain")[0] == 200
     assert got(f"{ws}/file?path=notes/one.txt") == b"hello"
-    assert {"notes", "notes/one.txt"} <= {text_at(f, "path") for f in objs(call(ws, None, JSON)[1], "files")}
+    assert {"notes", "notes/one.txt"} <= {text_at(f, "path") for f in jobjs(call(ws, None, JSON)[1], "files")}
     assert request(f"{ws}/file?path=notes/one.txt", "DELETE", None, JSON)[0] == 200
     assert fetch(f"{ws}/file?path=notes/one.txt", None, JSON)[0] == 404
 
@@ -270,8 +270,8 @@ def test_a_local_journey_runs_in_the_workspace(ws: str):
     assert answer["ok"] and answer["tool"] == "b2s_status"
     assert "LaTeX source" in summary(state)
     assert text_at(answer, "data", "workspace").endswith(ws.rsplit("/", 1)[1])
-    assert at(answer, "data", "google", "available") is False
-    assert sorted(texts(answer, "data", "allows")) == ["reads", "writes"]   # no account: no Google actions
+    assert jat(answer, "data", "google", "available") is False
+    assert sorted(jstrs(answer, "data", "allows")) == ["reads", "writes"]   # no account: no Google actions
 
 
 def test_a_google_journey_on_a_server_with_no_account_says_so(ws: str):
@@ -342,11 +342,11 @@ def test_a_compile_runs_again_while_they_move(tmp_path: Path, monkeypatch: pytes
 def test_a_talk_compiles_and_then_inspects(ws: str):
     state = run(ws, "tex_compile", {"tex": "talk.tex"}, WAIT)
     assert result(state)["ok"], summary(state)
-    assert at(state, "result", "data", "pdf") == "talk.pdf"
+    assert jat(state, "result", "data", "pdf") == "talk.pdf"
     assert got(f"{ws}/file?path=talk.pdf")[:4] == b"%PDF"
     state = run(ws, "deck_inspect", {"pdf": "talk.pdf"}, WAIT)
     assert result(state)["ok"], summary(state)
-    assert at(state, "result", "data", "pages") == 3
+    assert jat(state, "result", "data", "pages") == 3
     assert "native" in summary(state)
 
 
@@ -382,9 +382,9 @@ def test_the_child_streams_its_progress_and_its_result(ws: str, tmp_path: Path, 
     monkeypatch.setattr(bench, "command", lambda: child(tmp_path, SAYS))
     state = run(ws, "b2s_status", {"out": "somewhere"}, WAIT)
     assert state["log"] == ["line 0", "line 1", "line 2"]
-    assert result(state)["ok"] and at(state, "result", "data", "args") == {"out": "somewhere"}
+    assert result(state)["ok"] and jat(state, "result", "data", "args") == {"out": "somewhere"}
     assert text_at(state, "result", "data", "root").endswith(ws.rsplit("/", 1)[1])
-    assert num(state, "seconds") >= 0
+    assert jnum(state, "seconds") >= 0
 
 
 ODD_LINES = CHILD.format(body="""
@@ -430,13 +430,13 @@ def test_a_visitors_token_goes_to_the_child_and_no_further(base: str, ws: str, t
     asked: JsonObject = {"tool": "deck_convert", "args": {"pdf": "t.pdf"}, "access_token": "ya29.thesecret"}
     status, made = request(f"{ws}/runs", "POST", json.dumps(asked).encode(), JSON)
     state = _wait(ws, text_at(made, "id"), WAIT)
-    assert at(state, "result", "data", "google") == {"mode": "signin", "token": "ya29.thesecret"}
+    assert jat(state, "result", "data", "google") == {"mode": "signin", "token": "ya29.thesecret"}
     assert "thesecret" not in json.dumps(call(ws, None, JSON)[1])       # not in the workspace's own view
 
     asked["tool"] = "deck_inspect"                          # a local journey carries nobody's
     status, made = request(f"{ws}/runs", "POST", json.dumps(asked).encode(), JSON)
     state = _wait(ws, text_at(made, "id"), WAIT)
-    assert at(state, "result", "data", "google") == {"mode": "signin", "token": None}
+    assert jat(state, "result", "data", "google") == {"mode": "signin", "token": None}
 
 
 def test_where_the_credentials_come_from(monkeypatch: pytest.MonkeyPatch):

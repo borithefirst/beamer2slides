@@ -27,18 +27,29 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
-from beamer2slides.json_types import Json
+from beamer2slides.google_types import Presentation, as_json, object_id, presentation
+from beamer2slides.json_types import Json, JsonObject
+
+if TYPE_CHECKING:
+    from beamer2slides.devtools.deck_edits import LiveDeck
+    from beamer2slides.devtools.probe_layout import Ink
+    from beamer2slides.devtools.sync_check import Element, Model
 
 ROOT = Path(__file__).resolve().parents[1]
 
+from .json_reads import jarr, jat, jnum, jnums, jobj, jobjs, jstr, jstrs
 from .test_slides_alignment import MAIN, google_unavailable
 
 _spec = importlib.util.spec_from_file_location("sync_build", ROOT / "tests" / "decks" / "sync" / "build.py")
+assert _spec is not None and _spec.loader is not None
 sync_build = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sync_build)
 
@@ -55,11 +66,11 @@ PDFIUM = threading.Lock()  # PDFium is not thread-safe (alignment measurement)
 TITLE, ALGO, MERGING, CONV = "Keeping Slides and Source in Sync", "The sync algorithm", "Merging text", "Convergence"
 POLICY, RESULTS, VERSIONS = "Merge policy", "Results", "Three versions"
 IDENTITY, CONCL = "Finding the same slide", "Conclusions"
-WHY: dict[str, Json] = {"contains": "Later the source changes again"}  # the motivation slide, whatever its title
+WHY: JsonObject = {"contains": "Later the source changes again"}  # the motivation slide, whatever its title
 
 
-def E(edit: str, **args) -> dict:
-    return {"edit": edit, "args": args}
+def E(edit: str, **args: Json) -> JsonObject:
+    return {"edit": edit, "args": {**args}}
 
 
 def pdflatex_missing() -> str | None:
@@ -79,11 +90,11 @@ def build(variant: str) -> Path:
 # ---------------------------------------------------------------- offline: source versions
 
 @pytest.mark.parametrize("variant", [v for v in sync_build.VARIANTS if v != "v1"])
-def test_variants_classify_as_intended(variant):
+def test_variants_classify_as_intended(variant: str) -> None:
     """Each source version differs from v1 in classification exactly as its flags intend."""
     if reason := pdflatex_missing():
         pytest.skip(reason)
-    folders = {}
+    folders: dict[str, Path] = {}
     for v in ("v1", variant):
         pdf = build(v)
         folders[v] = sync_build.OUT / "classified" / v
@@ -97,24 +108,55 @@ def test_variants_classify_as_intended(variant):
 
 # ---------------------------------------------------------------- live helpers
 
+@dataclass(frozen=True, kw_only=True)
+class Want:
+    """What `Run.check` holds a sync to besides the deck edits' expectations and the source's checks.
+    `drop`: edits whose own checks the source legitimately changed (the merged outcome is in
+    `checks`); `skip_source`: source checks on texts the deck overrides; `order`: the slide titles in
+    order (None: the variant's); `conflicts`: entries the report must list (else none, unless
+    `any_conflicts`); `mentions`: words the report must hold; `converged`: converged entries the
+    report must list; `no_writes_since`: the revision the sync must have left alone (and listed no
+    changes); `allow_ungrouped`: slides whose formula pictures the deck ungrouped on purpose;
+    `idempotent`: a second sync must write nothing."""
+
+    drop: tuple[str, ...]
+    checks: list[JsonObject]
+    skip_source: tuple[str, ...]
+    order: list[str] | None
+    conflicts: list[list[str]]
+    any_conflicts: bool
+    mentions: tuple[str, ...]
+    converged: list[list[str]]
+    no_writes_since: str | None
+    allow_ungrouped: set[str]
+    idempotent: bool
+
+
+PLAIN = Want(drop=(), checks=[], skip_source=(), order=None, conflicts=[], any_conflicts=False, mentions=(),
+             converged=[], no_writes_since=None, allow_ungrouped=set(), idempotent=True)
+"""Nothing more (`replace(PLAIN, ...)` says what more)."""
+
+
 class Run:
     """One scenario folder: its deck, the CLI calls (logged) and the problems found."""
 
-    def __init__(self, name: str):
+    deck: "LiveDeck"  # (from `convert` on)
+    before: "Model"   # (the deck as each `sync` found it)
+
+    def __init__(self, name: str) -> None:
         self.name, self.out = name, OUT / name
         self.out.mkdir(parents=True, exist_ok=True)
         self.log = open(OUT / f"{name}.log", "w", encoding="utf-8")
         self.problems: list[str] = []
-        self.deck = None
 
-    def cli(self, *args, env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    def cli(self, *args: str | Path, env: Mapping[str, str] | None = None) -> None:
+        """Runs `beamer2slides *args`; a failure raises."""
         self.log.write(f"\n$ beamer2slides {' '.join(map(str, args))}\n")
         self.log.flush()
         done = subprocess.run([sys.executable, "-m", "beamer2slides", *map(str, args)], env={**ENV, **(env or {})},
                               cwd=ROOT, stdout=self.log, stderr=subprocess.STDOUT)
-        if check and done.returncode:
+        if done.returncode:
             raise RuntimeError(f"{self.name}: beamer2slides {args[0]} failed, see {OUT / f'{self.name}.log'}")
-        return done
 
     def convert(self, pdf: Path) -> None:
         from beamer2slides.devtools.deck_edits import open_deck
@@ -124,26 +166,26 @@ class Run:
         self.deck = open_deck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"],
                               defer=False)
 
-    def edit(self, *specs: dict) -> list[dict]:
+    def edit(self, *specs: JsonObject) -> list[JsonObject]:
         from beamer2slides.devtools.deck_edits import verified
         self.deck.read()
-        out = []
+        out: list[JsonObject] = []
         for spec in specs:
             exp, bad = verified(self.deck, spec)
             if bad:
                 raise RuntimeError(f"{self.name}: the edit itself failed: {bad}")
-            out.append(exp)
+            out.append(jobj(exp))
             self.log.write(f"edit {json.dumps(spec, ensure_ascii=False)}\n")
         return out
 
-    def report(self) -> dict:
+    def report(self) -> JsonObject:
         found = sorted((p for p in (self.out / "sync-report.json", self.out / "sync" / "sync-report.json") if p.exists()),
                        key=lambda p: p.stat().st_mtime)
         if not found:
             raise RuntimeError(f"{self.name}: sync wrote no sync-report.json")
-        return json.loads(found[-1].read_text(encoding="utf-8"))
+        return jobj(json.loads(found[-1].read_text(encoding="utf-8")))
 
-    def sync(self, pdf: Path, env: dict | None = None) -> dict:
+    def sync(self, pdf: Path, env: Mapping[str, str] | None) -> JsonObject:
         self.before = self.deck.read()
         started = time.time()
         self.cli("sync", pdf, "--deck", self.out, env=env)
@@ -154,32 +196,30 @@ class Run:
 
     def revision(self) -> str:
         from beamer2slides.gslides import execute
-        return execute(self.deck.api.presentations().get(presentationId=self.deck.pid, fields="revisionId"))["revisionId"]
+        answer = execute(self.deck.api.presentations().get(presentationId=self.deck.pid, fields="revisionId"))
+        rev = answer.get("revisionId")
+        assert rev is not None, "a presentation always has a revision"
+        return rev
 
     def base_ids(self) -> set[str] | None:
         from beamer2slides.devtools.sync_check import ids_in
         base = next((p for p in (self.out / "sync" / "base.json", self.out / "base.json") if p.exists()), None)
         return ids_in(json.loads(base.read_text(encoding="utf-8"))) if base else None
 
-    def check(self, variant: str, pdf: Path, report: dict, expectations: list[dict], *, drop: tuple[str, ...] = (),
-              checks: list[dict] = (), skip_source: tuple[str, ...] = (), order: list | None = None,
-              conflicts: list[list[str]] = (), any_conflicts: bool = False, mentions: tuple[str, ...] = (),
-              converged: list[list[str]] = (), no_writes_since: str | None = None, allow_ungrouped: set[str] = frozenset(),
-              idempotent: bool = True) -> None:
-        """Everything a sync must leave behind. `drop`: edits whose own checks the source legitimately
-        changed (the merged outcome is in `checks`); `skip_source`: source checks on texts the deck
-        overrides; `order`: the slide titles in order (default: the variant's); `conflicts`: entries
-        the report must list (else none, unless `any_conflicts`); `mentions`: words the report must hold;
-        `converged`: converged entries the report must list; `no_writes_since`: the revision the sync
-        must have left alone (and listed no changes); `allow_ungrouped`: slides whose formula pictures
-        the deck ungrouped on purpose."""
+    def check(self, variant: str, pdf: Path, report: JsonObject, expectations: list[JsonObject], want: "Want") -> None:
+        """Everything a sync must leave behind: the expectations of the scenario's deck edits, the
+        source version's own checks and what `want` adds (see `Want`)."""
         from beamer2slides.devtools import sync_check as sc
+        drop, checks, skip_source, order = want.drop, want.checks, want.skip_source, want.order
+        conflicts, any_conflicts, mentions, converged = want.conflicts, want.any_conflicts, want.mentions, want.converged
+        no_writes_since, allow_ungrouped, idempotent = want.no_writes_since, want.allow_ungrouped, want.idempotent
         flags = sync_build.VARIANTS[variant]
         model = self.deck.read()
-        kept = [c for e in expectations if e["edit"] not in drop for c in e["checks"]]
+        kept = [c for e in expectations if e["edit"] not in drop for c in jobjs(e, "checks")]
         source = [c for c in sync_build.checks(flags) if not any(s in json.dumps(c, ensure_ascii=False) for s in skip_source)]
         order = order or sync_build.titles(flags)
-        all_checks = kept + list(checks) + source + [{"check": "slides", "order": order}]
+        slides_check: JsonObject = {"check": "slides", "order": [*order]}
+        all_checks = kept + list(checks) + source + [slides_check]
         self.problems += [f"after sync to {variant}: {p}" for p in sc.check_all(model, all_checks)]
         self.problems += sc.check_report(report, conflicts=conflicts, converged=converged, warnings=(),
                                          no_conflicts=not conflicts and not any_conflicts)
@@ -194,7 +234,7 @@ class Run:
                                       allow_groups_changed=frozenset(), allow_ungrouped=allow_ungrouped)
 
         # Slides nobody edited in the deck: like a fresh conversion of the same source.
-        edited = {s.id for e in expectations for sel in e["slides"] for s in model.find(sel)}
+        edited = {s.id for e in expectations for sel in jarr(e, "slides") for s in model.find(sel)}
         fresh_folder, fresh = fresh_conversion(variant)
         titles = [t for t in sync_build.titles(flags)
                   if len(model.find(t)) == 1 and model.one(t).id not in edited and len(fresh.find(t)) == 1]
@@ -209,7 +249,7 @@ class Run:
 
         if idempotent:
             revision = self.revision()
-            again = self.sync(pdf)
+            again = self.sync(pdf, None)
             if sc.changes(again):
                 self.problems.append(f"second sync to {variant} still lists {sc.changes(again)} changes")
             if self.revision() != revision:
@@ -220,7 +260,7 @@ _fresh_locks: dict[str, threading.Lock] = {}
 _fresh_guard = threading.Lock()
 
 
-def fresh_conversion(variant: str):
+def fresh_conversion(variant: str) -> "tuple[Path, Model]":
     """(folder, model) of a fresh conversion of a source version, converted again only when its
     PDF or the converter changed (`sync_check.converter_stamp`)."""
     from beamer2slides.devtools import sync_check as sc
@@ -243,10 +283,11 @@ def fresh_conversion(variant: str):
 
 # ---------------------------------------------------------------- scenarios
 
-SCENARIOS = {}
+Scenario = Callable[[Run], None]
+SCENARIOS: dict[str, Scenario] = {}
 
 
-def scenario(fn):
+def scenario(fn: Scenario) -> Scenario:
     SCENARIOS[fn.__name__.removeprefix("scenario_").replace("_", "-")] = fn
     return fn
 
@@ -256,7 +297,7 @@ def scenario_untouched(run: Run):
     """No deck edits: sync to the long chain of source changes equals a fresh conversion."""
     run.convert(build("v1"))
     pdf = build("chain")
-    run.check("chain", pdf, run.sync(pdf), [])
+    run.check("chain", pdf, run.sync(pdf, None), [], PLAIN)
 
 
 @scenario
@@ -272,7 +313,7 @@ def scenario_disjoint(run: Run):
         E("set_background", slide=IDENTITY, color="#fff2cc"),
         E("set_notes", slide=ALGO, text="Walk through the steps slowly."))
     pdf = build("disjoint")
-    run.check("disjoint", pdf, run.sync(pdf), exps)
+    run.check("disjoint", pdf, run.sync(pdf, None), exps, PLAIN)
 
 
 @scenario
@@ -286,13 +327,14 @@ def scenario_same_element(run: Run):
         E("resize", slide=CONV, target={"image": "largest"}, sx=0.8),
         E("append_sentence", slide=MERGING, text="writes the merged paragraph back into the deck.", sentence="Nothing is lost."),
         E("bold", slide=RESULTS, word="Disjoint"))
-    resized = next(e for e in exps if e["edit"] == "resize")["checks"][0]
+    resized = jobj(next(e for e in exps if e["edit"] == "resize"), "checks", 0)
+    origin, size = jnums(resized, "origin"), jnums(resized, "size")
     pdf = build("same-element")
-    run.check("same-element", pdf, run.sync(pdf), exps, drop=("resize_font",), checks=[
+    run.check("same-element", pdf, run.sync(pdf, None), exps, replace(PLAIN, drop=("resize_font",), checks=[
         {"check": "style", "slide": POLICY, "text": "Deck edits come first", "size": 16},
-        {"check": "image", "slide": CONV, "near": [resized["origin"][0] + resized["size"][0] / 2,
-                                                   resized["origin"][1] + resized["size"][1] / 2], "colour": "#cc0000"},
-        {"check": "image", "slide": MERGING, "count": 2}])
+        {"check": "image", "slide": CONV, "near": [origin[0] + size[0] / 2, origin[1] + size[1] / 2],
+         "colour": "#cc0000"},
+        {"check": "image", "slide": MERGING, "count": 2}]))
 
 
 @scenario
@@ -301,9 +343,9 @@ def scenario_diff3(run: Run):
     run.convert(build("v1"))
     exps = run.edit(E("replace_word", slide=WHY, text="by an author and converted once", old="converted", new="exported"))
     pdf = build("reword")
-    run.check("reword", pdf, run.sync(pdf), exps, drop=("replace_word",),
+    run.check("reword", pdf, run.sync(pdf, None), exps, replace(PLAIN, drop=("replace_word",),
               skip_source=("by an AI assistant and converted once",),
-              checks=[{"check": "text", "slide": WHY, "text": "by an AI assistant and exported once", "count": 1}])
+              checks=[{"check": "text", "slide": WHY, "text": "by an AI assistant and exported once", "count": 1}]))
 
 
 @scenario
@@ -318,16 +360,16 @@ def scenario_last_paragraph(run: Run):
     a sync that dies is worse than one that merges badly: it writes nothing and reports nothing."""
     run.convert(build("v1"))
     # (by title, not by `WHY`: the sentence that selector looks for is the paragraph being deleted)
-    motivation = {"title": "Why decks and sources diverge"}
+    motivation: JsonObject = {"title": "Why decks and sources diverge"}
     exps = run.edit(E("delete_paragraph", slide=motivation, text="Later the source changes again"))
     pdf = build("reword")
     # (the source's own check for the reworded bullet looks the slide up by the sentence this
     #  scenario deletes; the same check by title is in `checks` below)
-    run.check("reword", pdf, run.sync(pdf), exps, drop=("delete_paragraph",),
+    run.check("reword", pdf, run.sync(pdf, None), exps, replace(PLAIN, drop=("delete_paragraph",),
               skip_source=("by an AI assistant and converted once",), checks=[
         {"check": "text", "slide": motivation, "text": "Later the source changes again", "count": 0},
         {"check": "text", "slide": motivation, "text": "by an AI assistant and converted once", "count": 1},
-        {"check": "text", "slide": motivation, "text": "adding their own slides", "count": 1}])
+        {"check": "text", "slide": motivation, "text": "adding their own slides", "count": 1}]))
 
 
 @scenario
@@ -337,10 +379,10 @@ def scenario_conflict(run: Run):
     exps = run.edit(E("replace_word", slide=WHY, text="by an author and converted once", old="author", new="editor"),
                     E("replace_word", slide=POLICY, text="is reported as a conflict", old="reported", new="flagged"))
     pdf = build("conflict")
-    run.check("conflict", pdf, run.sync(pdf), exps,
+    run.check("conflict", pdf, run.sync(pdf, None), exps, replace(PLAIN,
               skip_source=("by an AI assistant and converted once", "by an author and converted once",
                            "kept aside and listed as a conflict"),
-              conflicts=[["editor", "AI assistant"], ["flagged", "kept aside"]])
+              conflicts=[["editor", "AI assistant"], ["flagged", "kept aside"]]))
 
 
 @scenario
@@ -356,11 +398,11 @@ def scenario_deletions(run: Run):
         E("replace_word", slide=WHY, text="moving pictures around", old="pictures", new="figures"))
     pdf = build("deletions")
     order = sync_build.titles(["tablecell"])  # the deleted frame stays, edited in the deck
-    run.check("deletions", pdf, run.sync(pdf), exps, order=order,
+    run.check("deletions", pdf, run.sync(pdf, None), exps, replace(PLAIN, order=order,
               skip_source=("Three versions", '"Merged"', "4.7 s", "moving pictures around"),
               checks=[{"check": "text", "slide": RESULTS, "text": "4.7 s", "count": 0},
                       {"check": "slide_count", "slide": VERSIONS, "count": 1}],
-              any_conflicts=True, mentions=("versions", "results", "moving figures around"))
+              any_conflicts=True, mentions=("versions", "results", "moving figures around")))
 
 
 @scenario
@@ -381,9 +423,9 @@ def scenario_slides(run: Run):
              "Reviewer questions", RESULTS, POLICY, "Pulling edits back", VERSIONS]
     # (the move_slide expectation names the slide "Conclusions", which the source renames in this
     # variant: the same claim is made below, by the title the frame has now)
-    run.check("slides", pdf, run.sync(pdf), exps, drop=("move_slide",), order=order,
+    run.check("slides", pdf, run.sync(pdf, None), exps, replace(PLAIN, drop=("move_slide",), order=order,
               checks=[{"check": "slide_count", "slide": IDENTITY, "count": 0},
-                      {"check": "slides", "order": [ALGO, "Takeaways"], "adjacent": True}])
+                      {"check": "slides", "order": [ALGO, "Takeaways"], "adjacent": True}]))
 
 
 @scenario
@@ -394,9 +436,9 @@ def scenario_reorder_both(run: Run):
     run.convert(build("v1"))
     exps = run.edit(E("move_slide", slide=VERSIONS, after=WHY))
     pdf = build("reorder")
-    run.check("reorder", pdf, run.sync(pdf), exps,
+    run.check("reorder", pdf, run.sync(pdf, None), exps, replace(PLAIN,
               order=[TITLE, "Why decks and sources diverge", VERSIONS, ALGO, MERGING, CONV, RESULTS, POLICY,
-                     IDENTITY, CONCL])
+                     IDENTITY, CONCL]))
 
 
 @scenario
@@ -408,16 +450,16 @@ def scenario_chain(run: Run):
         E("move", slide=CONV, target={"text": "Conflicts disappear once"}, dx=0, dy=40),
         E("add_slide", after=CONCL, title="Backup: timings", body="Sync takes seconds."))
     pdf = build("mixed")
-    run.check("mixed", pdf, run.sync(pdf), first, order=sync_build.titles(sync_build.MIXED) + ["Backup: timings"],
-              idempotent=False)
+    run.check("mixed", pdf, run.sync(pdf, None), first, replace(PLAIN, order=sync_build.titles(sync_build.MIXED) + ["Backup: timings"],
+              idempotent=False))
     second = run.edit(
         E("replace_word", slide="Pulling edits back", text="patched into the source", old="patched", new="written"),
         E("bold", slide=WHY, word="AI", context="by an AI assistant"),
         E("set_notes", slide=MERGING, text="Mention diff3."),
         E("delete_slide", slide="Backup: timings"))
     pdf = build("chain")
-    run.check("chain", pdf, run.sync(pdf), [e for e in first if e["edit"] != "add_slide"] + second,
-              skip_source=("Plain wording edits are patched into the source",))
+    run.check("chain", pdf, run.sync(pdf, None), [e for e in first if e["edit"] != "add_slide"] + second, replace(PLAIN,
+              skip_source=("Plain wording edits are patched into the source",)))
 
 
 @scenario
@@ -436,7 +478,7 @@ def scenario_concurrent(run: Run):
     report = run.sync(pdf, env={"B2S_SYNC_BEFORE_WRITE": hook})
     if not exp_file.exists():
         pytest.skip("sync doesn't run the B2S_SYNC_BEFORE_WRITE hook")
-    run.check("tablecell", pdf, report, exps + json.loads(exp_file.read_text(encoding="utf-8")))
+    run.check("tablecell", pdf, report, exps + json.loads(exp_file.read_text(encoding="utf-8")), PLAIN)
 
 
 @scenario
@@ -446,7 +488,7 @@ def scenario_table_moved(run: Run):
     would put its rows ~7 pt from a fresh conversion's (sync.table_refill)."""
     run.convert(build("v1"))
     pdf = build("table-moved")
-    run.check("table-moved", pdf, run.sync(pdf), [])
+    run.check("table-moved", pdf, run.sync(pdf, None), [], PLAIN)
     # (the added line is the slide's leftmost body text, so the title's box narrows from 707 to
     # 474 pt in a fresh conversion: sync.mark_emitted makes that a source change of the title)
     run.problems += tables_kept(run)
@@ -458,7 +500,7 @@ def scenario_table_row(run: Run):
     insertTableRows (the new row takes the margins of the one above) and is refilled."""
     run.convert(build("v1"))
     pdf = build("table-row")
-    run.check("table-row", pdf, run.sync(pdf), [])
+    run.check("table-row", pdf, run.sync(pdf, None), [], PLAIN)
     run.problems += tables_kept(run)
 
 
@@ -480,7 +522,7 @@ def scenario_converged(run: Run):
                     E("replace_word", slide=RESULTS, text="3.9 s", old="3.9", new="4.7"))
     pdf = build("converged")
     revision = run.revision()
-    run.check("converged", pdf, run.sync(pdf), exps, converged=[["AI assistant"], ["4.7"]], no_writes_since=revision)
+    run.check("converged", pdf, run.sync(pdf, None), exps, replace(PLAIN, converged=[["AI assistant"], ["4.7"]], no_writes_since=revision))
 
 
 @scenario
@@ -501,12 +543,12 @@ def scenario_many_edits(run: Run):
     # The source rewrites that box and moves it up (~3 pt): both moved it, so the person's 15 pt
     # lands on the source's new place, not on the deck's old absolute one (docs/project-notes.md
     # "Both-moved geometry").
-    later: dict[str, Json] = {"text": "Later the source changes again"}
+    later: JsonObject = {"text": "Later the source changes again"}
     fresh = fresh_conversion("many-edits")[1]
     x, y = fresh.element(fresh.one(WHY), later).box[:2]
-    run.check("many-edits", pdf, run.sync(pdf), exps, drop=("move",), skip_source=("show of hands",),
+    run.check("many-edits", pdf, run.sync(pdf, None), exps, replace(PLAIN, drop=("move",), skip_source=("show of hands",),
               conflicts=[["Keep this slide short", "show of hands"]],
-              checks=[{"check": "box", "slide": WHY, "target": later, "origin": [x, y + 15]}])
+              checks=[{"check": "box", "slide": WHY, "target": later, "origin": [x, y + 15]}]))
 
 
 @scenario
@@ -521,14 +563,14 @@ def scenario_groups(run: Run):
         E("group", slide=POLICY, targets=[{"text": "Both versions go into the report."}, {"text": "Deck edits win"}]),
         E("delete_group", slide=POLICY, target={"text": "Deck edits win"}))
     pdf = build("groups")
-    run.check("groups", pdf, run.sync(pdf), exps, drop=("group", "ungroup"),
+    run.check("groups", pdf, run.sync(pdf, None), exps, replace(PLAIN, drop=("group", "ungroup"),
               skip_source=("Deck edits come first", "kept aside and listed"),
               checks=[{"check": "grouped", "slide": CONV, "members": [{"image": "largest"}, {"text": "Conflicts disappear once"}],
                        "grouped": True},
                       {"check": "grouped", "slide": ALGO, "members": [{"text": "Read the base snapshot"}, {"image_near": [35.0, 147.7]}],
                        "grouped": False},
                       {"check": "text", "slide": POLICY, "text": "Deck edits come first", "count": 0}],
-              any_conflicts=True, mentions=("policy",), allow_ungrouped={ALGO})
+              any_conflicts=True, mentions=("policy",), allow_ungrouped={ALGO}))
 
 
 def repaint_pictures(out: Path) -> int:
@@ -540,15 +582,18 @@ def repaint_pictures(out: Path) -> int:
 
     from beamer2slides import identity, snapshot
     from beamer2slides.google_auth import drive_service
-    base, _ = snapshot.load_base(json.loads((out / "emit.json").read_text(encoding="utf-8"))["presentationId"],
-                                 out, drive_service())
-    page_key = snapshot.page_keys({"slides": [{"page": s["page"]} for s in base["slides"]]},
-                                  [s["key"] for s in base["slides"]])
+    pid = jstr(json.loads((out / "emit.json").read_text(encoding="utf-8")), "presentationId")
+    base, _ = snapshot.load_base(pid, out, drive_service(), None, None)
+    assert base is not None, "convert stored a base"
+    slides = jobjs(base, "slides")
+    page_key = snapshot.page_keys({"slides": [{"page": s["page"]} for s in slides]}, [jstr(s, "key") for s in slides])
     painted = 0
-    for s in base["slides"]:
-        for el in s["elements"]:
-            file = el["ir"].get("file")
-            if el["kind"] != "image" or not file or not (out / file).exists():
+    for s in slides:
+        for el in jobjs(s, "elements"):
+            file = jobj(el, "ir").get("file")
+            anchor = el.get("anchor")
+            assert anchor is None or isinstance(anchor, str)
+            if el["kind"] != "image" or not isinstance(file, str) or not file or not (out / file).exists():
                 continue
             with Image.open(out / file) as img:
                 if img.mode != "RGBA":
@@ -559,12 +604,13 @@ def repaint_pictures(out: Path) -> int:
             alpha = rgba[..., 3:] / 255
             flat = rgba[..., :3] * alpha + 255 * (1 - alpha)  # the pages are white under these
             Image.fromarray(flat.round().astype("uint8"), "RGB").save(out / file)
-            h, fields = identity.ir_fields(el["ir"], out, el.get("anchor"), page_key)
-            assert {k: v for k, v in fields.items() if k != "image"} == {k: v for k, v in el["fields"].items() if k != "image"}
+            h, fields = identity.ir_fields(jobj(el, "ir"), out, anchor, page_key)
+            assert {k: v for k, v in fields.items() if k != "image"} == \
+                {k: v for k, v in jobj(el, "fields").items() if k != "image"}
             el["ir_hash"], el["fields"] = h, fields
             painted += 1
     snapshot.save_local(base, out)
-    snapshot.save_drive(drive_service(), base)
+    snapshot.save_drive(drive_service(), base, None, None)
     return painted
 
 
@@ -579,11 +625,11 @@ def scenario_repainted_pictures(run: Run):
         run.problems.append(f"only {painted} anchored picture(s) to repaint: the scenario tests nothing")
     pdf = build("v1")
     revision = run.revision()
-    run.check("v1", pdf, run.sync(pdf), [], no_writes_since=revision,
-              converged=[["image", "the same picture"]])
+    run.check("v1", pdf, run.sync(pdf, None), [], replace(PLAIN, no_writes_since=revision,
+              converged=[["image", "the same picture"]]))
 
 
-XFAIL = {}  # scenario -> why it can't pass yet (docs/sync.md, Not supported yet)
+XFAIL: dict[str, str] = {}  # scenario -> why it can't pass yet (docs/sync.md, Not supported yet)
 
 
 @scenario
@@ -592,7 +638,7 @@ def scenario_table_words(run: Run):
     run.convert(build("v1"))
     exps = run.edit(E("replace_word", slide=RESULTS, text="5.1 s", old="5.1", new="5.2"))
     pdf = build("tablecell")
-    run.check("tablecell", pdf, run.sync(pdf), exps)
+    run.check("tablecell", pdf, run.sync(pdf, None), exps, PLAIN)
 
 
 @scenario
@@ -601,11 +647,11 @@ def scenario_nested_group(run: Run):
     run.convert(build("v1"))
     exps = run.edit(E("group", slide=POLICY, targets=[{"text": "Both versions go into the report."}, {"text": "Deck edits win"}]))
     pdf = build("blockedit")
-    report = run.sync(pdf)
-    run.check("blockedit", pdf, report, exps, drop=("group",), checks=[
+    report = run.sync(pdf, None)
+    run.check("blockedit", pdf, report, exps, replace(PLAIN, drop=("group",), checks=[
         {"check": "grouped", "slide": POLICY, "grouped": True,
-         "members": [{"text": "Both versions go into the report."}, {"text": "Deck edits come first"}]}])
-    run.problems += [f"report warns: {w}" for w in report.get("warnings", []) if "group" in w]
+         "members": [{"text": "Both versions go into the report."}, {"text": "Deck edits come first"}]}]))
+    run.problems += [f"report warns: {w}" for w in jstrs(report.get("warnings", [])) if "group" in w]
 
 
 @scenario
@@ -629,9 +675,9 @@ def scenario_pull_wording(run: Run):
                      if w not in source]
     pdf = sync_build.compile_tex(tex)
     revision = run.revision()
-    report = run.sync(pdf)
+    report = run.sync(pdf, None)
     from beamer2slides.devtools import sync_check as sc
-    run.problems += sc.check_all(run.deck.read(), [c for e in exps for c in e["checks"]])
+    run.problems += sc.check_all(run.deck.read(), [c for e in exps for c in jobjs(e, "checks")])
     run.problems += sc.check_report(report, conflicts=(), converged=[["mistakes"], ["sync report"]], warnings=(),
                                     no_conflicts=True)
     if sc.changes(report):
@@ -654,7 +700,9 @@ def scenario_pull_picture(run: Run):
     tex.write_text(sync_build.render([]), encoding="utf-8")
     run.convert(sync_build.compile_tex(tex))
     donor = donor_image_url(run.deck.api, fresh_conversion("v1")[1].pid)
-    pictures_of = lambda model: {e.id for e in model.one(CONCL).elements if e.kind == "image"}
+
+    def pictures_of(model: "Model") -> set[str]:
+        return {e.id for e in model.one(CONCL).elements if e.kind == "image"}
     before = pictures_of(run.deck.read())
     exps = run.edit(E("add_image", slide=CONCL, url=donor, box=[500, 270, 160, 100]))
     after = pictures_of(run.deck.read())
@@ -663,9 +711,9 @@ def scenario_pull_picture(run: Run):
     if "includegraphics" not in tex.read_text(encoding="utf-8"):
         run.problems.append("pull didn't put the picture into the source")
         return
-    report = run.sync(sync_build.compile_tex(tex))
+    report = run.sync(sync_build.compile_tex(tex), None)
     model = run.deck.read()
-    run.problems += sc.check_all(model, [c for e in exps for c in e["checks"]])
+    run.problems += sc.check_all(model, [c for e in exps for c in jobjs(e, "checks")])
     run.problems += sc.check_report(report, conflicts=(), converged=[["image"]], warnings=(), no_conflicts=True)
     run.problems += sc.integrity(model, before=run.before, base_ids=run.base_ids(), allow_groups_changed=frozenset(),
                                  allow_ungrouped=frozenset())
@@ -675,7 +723,7 @@ def scenario_pull_picture(run: Run):
                             "the pulled picture was duplicated or deleted")
     if not added <= pictures:
         run.problems.append("sync replaced the picture the person added instead of adopting their object")
-    elif run.base_ids() is not None and not added <= run.base_ids():
+    elif (owned := run.base_ids()) is not None and not added <= owned:
         run.problems.append("the new base doesn't own the adopted picture")
 
 
@@ -692,45 +740,64 @@ LAYOUT_TOL = 1.5  # pt: a box this far off is where it should be
 CLEARANCE = 1.0   # pt: two inks closer than this in some column touch (words on words, words on a figure)
 
 
-def collide(hit: dict) -> bool:
-    return hit["clearance_pt"] is not None and hit["clearance_pt"] < CLEARANCE
+def listed(report: JsonObject, key: str) -> list[Json]:
+    """The report's section `key` (none: empty)."""
+    return jarr(report.get(key, []))
+
+
+def collide(hit: JsonObject) -> bool:
+    clearance = hit["clearance_pt"]
+    assert clearance is None or isinstance(clearance, (int, float))
+    return clearance is not None and clearance < CLEARANCE
+
+
+def ink_box(ink: "Ink") -> Json:
+    """The ink's box as layout.json holds it (None: no ink)."""
+    box = ink.box
+    return None if box is None else [*box]
 
 
 class Layout:
     """The measurements of one layout scenario."""
 
-    def __init__(self, run: Run):
-        self.run, self.data = run, {}
+    def __init__(self, run: Run) -> None:
+        self.run = run
+        self.data: JsonObject = {}
 
     def _save(self) -> None:
         (self.run.out / "layout.json").write_text(json.dumps(self.data, indent=1), encoding="utf-8")
 
-    def ink(self, stage: str, title: str, targets: dict) -> tuple[dict, dict]:
+    def stage(self, stage: str) -> JsonObject:
+        """The measurements of one stage (made on first use)."""
+        return jobj(self.data.setdefault(stage, {}))
+
+    def ink(self, stage: str, title: str, targets: JsonObject) -> "tuple[dict[str, Element], dict[str, Ink]]":
         """(name -> element, name -> Ink) of the targets on slide `title`, each measured alone."""
         from beamer2slides.devtools import probe_layout as pl
         from beamer2slides.gslides import save_thumbnail
         model = self.run.deck.read()
         s = model.one(title)
-        els = {name: model.element(s, t) for name, t in targets.items()}
+        els = {name: model.element(s, jobj(t)) for name, t in targets.items()}
         folder = self.run.out / "layout" / stage
         save_thumbnail(self.run.deck.api, self.run.deck.pid, s.id, folder / "slide.png")
         inks = pl.inks(self.run.deck.api, self.run.deck.pid, s.id, {n: {e.id} for n, e in els.items()}, folder)
-        self.data.setdefault(stage, {}).update({n: {"id": e.id, "box": [round(v, 2) for v in e.box], "ink": inks[n].box}
-                                                for n, e in els.items()})
+        measured: JsonObject = {n: {"id": e.id, "box": [round(v, 2) for v in e.box], "ink": ink_box(inks[n])}
+                                for n, e in els.items()}
+        self.stage(stage).update(measured)
         self._save()
         return els, inks
 
-    def overflow(self, stage: str, name: str, el, ink) -> float:
+    def overflow(self, stage: str, name: str, el: "Element", ink: "Ink") -> float:
         """How far a text's ink runs past the bottom of its box (pt, negative: room left)."""
         value = round(ink.box[3] - el.box[3], 1) if ink.box else 0.0
-        self.data[stage][name]["overflow"] = value
+        jobj(self.stage(stage), name)["overflow"] = value
         self._save()
         return value
 
-    def overlap(self, stage: str, a: str, b: str, inks: dict) -> dict:
+    def overlap(self, stage: str, a: str, b: str, inks: "Mapping[str, Ink]") -> JsonObject:
         from beamer2slides.devtools import probe_layout as pl
-        value = pl.overlap(inks[a], inks[b])
-        self.data[stage][f"{a} x {b}"] = value
+        value = jobj(pl.overlap(inks[a], inks[b]))
+        self.stage(stage)[f"{a} x {b}"] = value
         self._save()
         return value
 
@@ -742,24 +809,24 @@ class Layout:
         problem = sc.thumbnail_diff(self.run.deck.api, (self.run.deck.pid, model.one(title).id),
                                     (fresh.pid, fresh.one(title).id),
                                     self.run.out / "layout" / "after" / f"vs-fresh-{title.replace(' ', '-').lower()}.png")
-        self.data.setdefault("vs_fresh", {})[title] = problem or "same as a fresh conversion"
+        self.stage("vs_fresh")[title] = problem or "same as a fresh conversion"
         self._save()
 
-    def sanity(self, variant: str, exps: list[dict]) -> None:
+    def sanity(self, variant: str, exps: list[JsonObject]) -> None:
         """The sync did what it is for (the deck's words kept, the source's applied): a layout verdict
         on a sync that wrote nothing would mean nothing."""
         from beamer2slides.devtools import sync_check as sc
-        text_checks = [c for e in exps for c in e["checks"] if c["check"] == "text"]
+        text_checks = [c for e in exps for c in jobjs(e, "checks") if c["check"] == "text"]
         self.run.problems += [f"sanity: {p}" for p in sc.check_all(self.run.deck.read(),
                                                                     text_checks + sync_build.checks(sync_build.VARIANTS[variant]))]
 
 
 @pytest.mark.parametrize("variant", [v for v, flags in sync_build.VARIANTS.items() if "probes" in flags and v != "probes"])
-def test_probe_variants_classify_as_intended(variant):
+def test_probe_variants_classify_as_intended(variant: str) -> None:
     """The probe edits change the probe frames as intended (against the `probes` base)."""
     if reason := pdflatex_missing():
         pytest.skip(reason)
-    folders = {}
+    folders: dict[str, Path] = {}
     for v in ("probes", variant):
         pdf = build(v)
         folders[v] = sync_build.OUT / "classified" / v
@@ -771,11 +838,11 @@ def test_probe_variants_classify_as_intended(variant):
     assert got == want, f"unintended: {sorted(got - want)}\nmissing: {sorted(want - got)}"
 
 
-GROW_TEXT = {"text": "longer version of this paragraph"}
+GROW_TEXT: JsonObject = {"text": "longer version of this paragraph"}
 GROW_SENTENCE = "The deck adds this sentence, which takes the paragraph onto a third line of its own."
 
 
-def grow_edits(run: Run, lay: Layout) -> list[dict]:
+def grow_edits(run: Run, lay: Layout) -> list[JsonObject]:
     """Room to grow, as a careful person lengthens a paragraph: a sentence typed at its end (the box
     does not grow with it: no autofit survives the import), the box made a line taller to hold it
     and the figure below moved down a line to make room."""
@@ -794,12 +861,12 @@ def grow_verdict(run: Run, lay: Layout, variant: str) -> None:
     if collide(lay.overlap("before", "text", "figure", before)):
         run.problems.append(f"the edits themselves left the words on the figure: {lay.data['before']}")
     pdf = build(variant)
-    report = run.sync(pdf)
+    report = run.sync(pdf, None)
     els, inks = lay.ink("after", GROW, {"text": GROW_TEXT, "figure": {"image": "largest"}})
     over = lay.overflow("after", "text", els["text"], inks["text"])
     hit = lay.overlap("after", "text", "figure", inks)
     lay.vs_fresh(variant, GROW)
-    lay.data["report"] = {k: [x for x in report.get(k, []) if "grow" in json.dumps(x)] for k in ("applied", "overrides", "conflicts")}
+    lay.data["report"] = {k: [x for x in listed(report, k) if "grow" in json.dumps(x)] for k in ("applied", "overrides", "conflicts")}
     lay._save()
     height = els["text"].box[3] - els["text"].box[1]
     person = before_els["text"].box[3] - before_els["text"].box[1]
@@ -808,7 +875,7 @@ def grow_verdict(run: Run, lay: Layout, variant: str) -> None:
                             f"({height:.1f} pt tall after the sync, {person:.1f} pt as the person made it)")
     if collide(hit):
         run.problems.append(f"{GROW}: the paragraph's words come within {hit['clearance_pt']} pt of the figure below "
-                            f"({lay.data['before']['text x figure']['clearance_pt']} pt before the sync; {hit})")
+                            f"({jat(lay.data, 'before', 'text x figure', 'clearance_pt')} pt before the sync; {hit})")
 
 
 @scenario
@@ -842,18 +909,19 @@ def scenario_layout_reflow(run: Run):
     does the box above grow into it (as it did when mode 'theirs' kept the person's absolute place)?"""
     lay = Layout(run)
     run.convert(build("probes"))
-    first, second = {"text": "The first box holds two lines"}, {"text": "The second box stands below it"}
+    first: JsonObject = {"text": "The first box holds two lines"}
+    second: JsonObject = {"text": "The second box stands below it"}
     exps = run.edit(E("move", slide=TWO, target=second, dx=40, dy=0))
     _, inks = lay.ink("before", TWO, {"first": first, "second": second})
     if collide(lay.overlap("before", "first", "second", inks)):
         run.problems.append(f"the edit itself put the boxes over each other: {lay.data['before']}")
-    run.sync(build("probes-push"))
+    run.sync(build("probes-push"), None)
     _, inks = lay.ink("after", TWO, {"first": first, "second": second})
     hit = lay.overlap("after", "first", "second", inks)
     lay.vs_fresh("probes-push", TWO)
     if collide(hit):
         run.problems.append(f"{TWO}: the first box's words come within {hit['clearance_pt']} pt of the second box's "
-                            f"({lay.data['before']['first x second']['clearance_pt']} pt before the sync; {hit})")
+                            f"({jat(lay.data, 'before', 'first x second', 'clearance_pt')} pt before the sync; {hit})")
     lay.sanity("probes-push", exps)
 
 
@@ -864,13 +932,13 @@ def scenario_layout_display_math(run: Run):
     equation, which pushes both down - the equation follows the source, the paragraph the person?"""
     lay = Layout(run)
     run.convert(build("probes"))
-    after_it = {"text": "and this paragraph comes after it."}
-    targets = {"above": {"text": "The equation below stands"}, "equation": {"image": "largest"}, "after": after_it}
+    after_it: JsonObject = {"text": "and this paragraph comes after it."}
+    targets: JsonObject = {"above": {"text": "The equation below stands"}, "equation": {"image": "largest"}, "after": after_it}
     exps = run.edit(E("move", slide=DISPLAY, target=after_it, dx=40, dy=0))
     _, inks_before = lay.ink("before", DISPLAY, targets)
     if collide(lay.overlap("before", "equation", "after", inks_before)):
         run.problems.append(f"the edit itself put the paragraph on the equation: {lay.data['before']}")
-    run.sync(build("probes-push"))
+    run.sync(build("probes-push"), None)
     _, inks = lay.ink("after", DISPLAY, targets)
     lay.vs_fresh("probes-push", DISPLAY)
     lay.overlap("before", "above", "equation", inks_before)
@@ -878,11 +946,11 @@ def scenario_layout_display_math(run: Run):
         hit = lay.overlap("after", a, b, inks)
         if collide(hit):
             run.problems.append(f"{DISPLAY}: the {a} comes within {hit['clearance_pt']} pt of the {b} "
-                                f"({lay.data['before'][f'{a} x {b}']['clearance_pt']} pt before the sync; {hit})")
+                                f"({jat(lay.data, 'before', f'{a} x {b}', 'clearance_pt')} pt before the sync; {hit})")
     lay.sanity("probes-push", exps)
 
 
-def formula_places(run: Run, lay: Layout, stage: str) -> list[dict]:
+def formula_places(run: Run, lay: Layout, stage: str) -> list[JsonObject]:
     """Merging text: each formula hole as Slides sets it against the picture meant to cover it."""
     from beamer2slides.devtools import probe_layout as pl
     model = run.deck.read()
@@ -893,14 +961,14 @@ def formula_places(run: Run, lay: Layout, stage: str) -> list[dict]:
     save_thumbnail(run.deck.api, run.deck.pid, s.id, folder / "slide.png")
     holes = pl.holes(run.deck.api, run.deck.pid, s.id, text.id, folder)
     pictures = pl.pictures_on(model, s.id, text.id)
-    rows = []
-    for i, (hole, pic) in enumerate(zip(holes, pictures)):
-        rows.append({"hole": hole, "picture": [round(v, 2) for v in pic.box], "picture_id": pic.id,
+    rows: list[JsonObject] = []
+    for hole, pic in zip(holes, pictures):
+        rows.append({"hole": [*hole] if hole else None, "picture": [round(v, 2) for v in pic.box], "picture_id": pic.id,
                      "dx": round((pic.box[0] + pic.box[2]) / 2 - (hole[0] + hole[2]) / 2, 1) if hole else None,
                      "dy": round((pic.box[1] + pic.box[3]) / 2 - (hole[1] + hole[3]) / 2, 1) if hole else None})
     if len(holes) != len(pictures):
         rows.append({"holes": len(holes), "pictures": len(pictures)})
-    lay.data[stage] = rows
+    lay.data[stage] = [*rows]
     lay._save()
     return rows
 
@@ -919,14 +987,14 @@ def scenario_layout_stranded_formula(run: Run):
                       new="perfectly clean"))
     formula_places(run, lay, "before")
     base = base_now(run)
-    report = run.sync(build("formula"))
+    report = run.sync(build("formula"), None)
     oracle_verdict(run, lay, base, report)
     rows = formula_places(run, lay, "after")
     lay.vs_fresh("formula", MERGING)
     for i, r in enumerate(rows):
         if "hole" not in r:
             run.problems.append(f"{MERGING}: {r['holes']} holes and {r['pictures']} pictures")
-        elif r["dx"] is None or max(abs(r["dx"]), abs(r["dy"])) > 4:
+        elif r["dx"] is None or max(abs(jnum(r, "dx")), abs(jnum(r, "dy"))) > 4:
             run.problems.append(f"{MERGING}: formula picture {i + 1} stands ({r['dx']}, {r['dy']}) pt from the hole it "
                                 f"covers (hole {r['hole']}, picture {r['picture']})")
     lay.sanity("formula", exps)
@@ -939,12 +1007,12 @@ def scenario_layout_group_moved(run: Run):
     (Sync.regroup_requests) - at the person's place and size, or at the converter's?"""
     lay = Layout(run)
     run.convert(build("v1"))
-    words = {"text": "Conflicts disappear once"}
+    words: JsonObject = {"text": "Conflicts disappear once"}
     exps = run.edit(E("group", slide=CONV, targets=[{"image": "largest"}, words]),
                     E("move", slide=CONV, target=words, dx=-20, dy=30),
                     E("resize", slide=CONV, target=words, sx=0.8))
     before, _ = lay.ink("before", CONV, {"figure": {"image": "largest"}, "words": words})
-    run.sync(build("figure"))
+    run.sync(build("figure"), None)
     after, inks = lay.ink("after", CONV, {"figure": {"image": "largest"}, "words": words})
     lay.vs_fresh("figure", CONV)
     # (the figure's PDF box is the same in v1 and `figure`: the new picture belongs where the old one stood)
@@ -969,13 +1037,15 @@ def scenario_layout_retheme(run: Run):
     run.convert(build("v1"))
     exps = run.edit(E("replace_word", slide=CONCL, text="Deck edits survive every sync", old="survive", new="outlive"))
     layouts_before = execute(run.deck.api.presentations().get(presentationId=run.deck.pid, fields="layouts(objectId,pageElements(objectId,image(contentUrl)))"))
-    run.sync(build("retheme"))
+    run.sync(build("retheme"), None)
     layouts_after = execute(run.deck.api.presentations().get(presentationId=run.deck.pid, fields="layouts(objectId,pageElements(objectId,image(contentUrl)))"))
-    pictures = lambda ls: sorted(e["objectId"] for l in ls.get("layouts", []) for e in l.get("pageElements", []) if "image" in e)
-    lay.data["layout_pictures"] = {"before": pictures(layouts_before), "after": pictures(layouts_after)}
+
+    def pictures(ls: Presentation) -> list[str]:
+        return sorted(object_id(e) for page in ls.get("layouts", []) for e in page.get("pageElements", []) if "image" in e)
+    lay.data["layout_pictures"] = {"before": [*pictures(layouts_before)], "after": [*pictures(layouts_after)]}
     fresh = fresh_conversion("retheme")[1]
     model = run.deck.read()
-    titles = {}
+    titles: JsonObject = {}
     # The whole slide as a fresh conversion draws it - the title page too, whose title inherits the
     # master's title size unless sync pins it (theme_sync.inherited_pins) - except Conclusions,
     # which carries the person's word; its title box is compared all the same.
@@ -983,33 +1053,34 @@ def scenario_layout_retheme(run: Run):
         s, f = model.one(t), fresh.one(t)
         problem = sc.thumbnail_diff(run.deck.api, (run.deck.pid, s.id), (fresh.pid, f.id),
                                     run.out / "layout" / "after" / f"vs-fresh-{t[:24].replace(' ', '-').lower()}.png")
-        lay.data.setdefault("vs_fresh", {})[t] = problem or "same as a fresh conversion"
+        lay.stage("vs_fresh")[t] = problem or "same as a fresh conversion"
         if problem:
             run.problems.append(f"{t}: {problem}")
     for t in (MERGING, CONV, CONCL):
         s, f = model.one(t), fresh.one(t)
         title = next(e for e in s.elements if e.placeholder_type == "TITLE")
         ftitle = next(e for e in f.elements if e.placeholder_type == "TITLE")
-        titles[t] = {"synced": [round(v, 1) for v in title.box], "fresh": [round(v, 1) for v in ftitle.box]}
+        synced, fresh_box = [round(v, 1) for v in title.box], [round(v, 1) for v in ftitle.box]
+        titles[t] = {"synced": [*synced], "fresh": [*fresh_box]}
         if max(abs(a - b) for a, b in zip(title.box, ftitle.box)) > LAYOUT_TOL:
-            run.problems.append(f"{t}: title box {titles[t]['synced']}, a fresh conversion's {titles[t]['fresh']}")
+            run.problems.append(f"{t}: title box {synced}, a fresh conversion's {fresh_box}")
     lay.data["titles"] = titles
     lay._save()
     lay.sanity("retheme", exps)
 
 
-def base_now(run: Run) -> dict:
+def base_now(run: Run) -> JsonObject:
     """The base the next sync starts from (the one convert or the last sync wrote)."""
-    return json.loads((run.out / "sync" / "base.json").read_text(encoding="utf-8"))
+    return jobj(json.loads((run.out / "sync" / "base.json").read_text(encoding="utf-8")))
 
 
-def oracle_verdict(run: Run, lay: Layout, base: dict, report: dict) -> None:
+def oracle_verdict(run: Run, lay: Layout, base: JsonObject, report: JsonObject) -> None:
     """The layout oracle (devtools/layout_oracle.py) over the sync just run: anything that looks broken
     after it that did not before it and that the new conversion does not draw is a problem."""
     from beamer2slides import snapshot
     from beamer2slides.devtools import layout_oracle as L
-    before = snapshot.read_presentation(run.before.pres)
-    after = snapshot.read_presentation(run.deck.read().pres)
+    before = snapshot.read_presentation(presentation(run.before.pres, "the deck before the sync"))
+    after = snapshot.read_presentation(presentation(run.deck.read().pres, "the deck after the sync"))
     try:
         ours = L.ours_from_folder(run.out / "sync" / "ours", base)
     except Exception:  # noqa: BLE001 (judged without the conversion then)
@@ -1020,11 +1091,11 @@ def oracle_verdict(run: Run, lay: Layout, base: dict, report: dict) -> None:
     run.problems += [f"layout oracle: {L.describe([f]).strip()}" for f in found]
 
 
-BLOCK_BODY = {"text": "as a conflict"}               # the block body, before and after the source rewords it
-BLOCK_NEXT = {"text": "Both versions go into the report"}  # the words below the block
+BLOCK_BODY: JsonObject = {"text": "as a conflict"}               # the block body, before and after the source rewords it
+BLOCK_NEXT: JsonObject = {"text": "Both versions go into the report"}  # the words below the block
 
 
-def block_panel(run: Run, body_target: dict) -> dict:
+def block_panel(run: Run, body_target: JsonObject) -> JsonObject:
     """The block body's panel on Merge policy: the smallest filled shape without words under the
     body's centre."""
     model = run.deck.read()
@@ -1032,45 +1103,44 @@ def block_panel(run: Run, body_target: dict) -> dict:
     body = model.element(s, body_target)
     cx, cy = body.center
     under = [e for e in s.elements if e.kind == "shape" and e.id != body.id and not e.text
-             and "placeholder" not in e.obj["shape"]
-             and e.obj["shape"].get("shapeProperties", {}).get("shapeBackgroundFill", {}).get("solidFill")
+             and not e.is_placeholder and e.solid_fill
              and e.box[0] <= cx <= e.box[2] and e.box[1] <= cy <= e.box[3]]
     if not under:
         raise RuntimeError(f"{run.name}: no panel under the block body")
     return {"id": min(under, key=lambda e: (e.box[2] - e.box[0]) * (e.box[3] - e.box[1])).id}
 
 
-def block_verdict(run: Run, lay: Layout, exps: list[dict]) -> None:
+def block_verdict(run: Run, lay: Layout, exps: list[JsonObject]) -> None:
     """The person made the block body's words need more room (a sentence, a larger font), the source
     rewords the same body: the unit is recreated for the source's words and the merged words written
     in. Do they fit their box, and does the block's panel still hold them without running into the
     words below?"""
-    targets = {"body": BLOCK_BODY, "panel": block_panel(run, BLOCK_BODY), "next": BLOCK_NEXT}
+    targets: JsonObject = {"body": BLOCK_BODY, "panel": block_panel(run, BLOCK_BODY), "next": BLOCK_NEXT}
     els, inks = lay.ink("before", POLICY, targets)
     lay.overflow("before", "body", els["body"], inks["body"])
     lay.overlap("before", "panel", "next", inks)
     base = base_now(run)
-    report = run.sync(build("blockedit"))
+    report = run.sync(build("blockedit"), None)
     targets["panel"] = block_panel(run, BLOCK_BODY)
     els, inks = lay.ink("after", POLICY, targets)
     over = lay.overflow("after", "body", els["body"], inks["body"])
     hit = lay.overlap("after", "panel", "next", inks)
     lay.vs_fresh("blockedit", POLICY)
-    warned = [w for w in report.get("warnings", []) if "panel" in w]
+    warned = [w for w in jstrs(report.get("warnings", [])) if "panel" in w]
     lay.data["warnings"] = report.get("warnings", [])
     lay._save()
     if over > LAYOUT_TOL:
         run.problems.append(f"{POLICY}: the merged block body runs {over} pt past the bottom of its box "
                             f"({els['body'].box[3] - els['body'].box[1]:.1f} pt tall)")
     past = round(inks["body"].box[3] - els["panel"].box[3], 1) if inks["body"].box else 0.0
-    lay.data["after"]["body past panel"] = past
+    lay.stage("after")["body past panel"] = past
     lay._save()
     if past > 0.5 and not warned:
         run.problems.append(f"{POLICY}: the merged block body's words run {past} pt past the bottom of the "
                             "block's panel and the report says nothing")
     if collide(hit):
         run.problems.append(f"{POLICY}: the block's panel comes within {hit['clearance_pt']} pt of the words below "
-                            f"({lay.data['before']['panel x next']['clearance_pt']} pt before the sync)")
+                            f"({jat(lay.data, 'before', 'panel x next', 'clearance_pt')} pt before the sync)")
     oracle_verdict(run, lay, base, report)
     lay.sanity("blockedit", exps)
 
@@ -1105,24 +1175,43 @@ def scenario_subtitle_role(run: Run):
     run.convert(build("v1"))
     exps = run.edit(E("recolour", slide=TITLE, word="Alice", color="#aa0000", context="Alice Author"))
     pdf = build("subtitle")
-    report = run.sync(pdf)
+    report = run.sync(pdf, None)
     model = run.deck.read()
     s = model.one(TITLE)
-    kind = lambda e: e.obj.get("shape", {}).get("placeholder", {}).get("type") if e.kind == "shape" else None
-    subtitles = [e for e in s.elements if kind(e) == "SUBTITLE"]
+
+    subtitles = [e for e in s.elements if e.placeholder_type == "SUBTITLE"]
     if len(subtitles) != 1 or "how one sync reconciles all three" not in subtitles[0].text:
         run.problems.append(f"{TITLE}: subtitle placeholders {[e.text[:60] for e in subtitles]}, expected the new line")
     authors = [e for e in s.elements if "Alice Author" in e.text]
-    if len(authors) != 1 or kind(authors[0]):
-        run.problems.append(f"{TITLE}: the authors are in {[kind(e) or 'a box' for e in authors]}, expected one box of their own")
-    run.check("subtitle", pdf, report, exps)
+    if len(authors) != 1 or authors[0].placeholder_type:
+        run.problems.append(f"{TITLE}: the authors are in {[e.placeholder_type or 'a box' for e in authors]}, expected one box of their own")
+    run.check("subtitle", pdf, report, exps, PLAIN)
 
 
-def layouts_read(run: Run) -> dict:
+def layouts_read(run: Run) -> dict[str, JsonObject]:
     """layout name -> the layout page, as the deck holds it now."""
     from beamer2slides.gslides import execute
-    pres = execute(run.deck.api.presentations().get(presentationId=run.deck.pid))
-    return {l["layoutProperties"]["name"]: l for l in pres["layouts"]}
+    pres = as_json(execute(run.deck.api.presentations().get(presentationId=run.deck.pid)), "presentations.get")
+    return {jstr(page, "layoutProperties", "name"): page for page in jobjs(pres, "layouts")}
+
+
+def got(value: Json, *path: str) -> Json:
+    """What lies at `path` in `value`, None where a step is missing (`.get(k, {})` all the way)."""
+    for k in path:
+        if not isinstance(value, dict):
+            return None
+        value = value.get(k)
+    return value
+
+
+def elements_on(layouts: Mapping[str, JsonObject], name: str) -> list[JsonObject]:
+    return jobjs(layouts[name], "pageElements")
+
+
+def rgb_of(te: JsonObject) -> JsonObject:
+    """A text element's colour as `rgbColor` (none: {})."""
+    found = got(te, "textRun", "style", "foregroundColor", "opaqueColor", "rgbColor")
+    return {} if found is None else jobj(found)
 
 
 @scenario
@@ -1136,37 +1225,39 @@ def scenario_layout_edited_retheme(run: Run):
     run.convert(build("v1"))
     exps = run.edit(E("replace_word", slide=CONCL, text="Deck edits survive every sync", old="survive", new="outlive"))
     lay = layouts_read(run)
-    title = next(e for e in lay["TITLE_ONLY"]["pageElements"] if e.get("shape", {}).get("placeholder", {}).get("type") == "TITLE")
-    blank = next(e for e in lay["BLANK"]["pageElements"] if (e.get("description") or "") == "Theme decoration")
-    frames = next(e for e in lay["TITLE_ONLY"]["pageElements"] if (e.get("description") or "") == "Theme decoration")
+    title = next(e for e in elements_on(lay, "TITLE_ONLY") if got(e, "shape", "placeholder", "type") == "TITLE")
+    blank = next(e for e in elements_on(lay, "BLANK") if (e.get("description") or "") == "Theme decoration")
+    frames = next(e for e in elements_on(lay, "TITLE_ONLY") if (e.get("description") or "") == "Theme decoration")
     execute(run.deck.api.presentations().batchUpdate(presentationId=run.deck.pid, body={"requests": [
         {"updateTextStyle": {"objectId": title["objectId"], "textRange": {"type": "ALL"}, "fields": "foregroundColor",
                              "style": {"foregroundColor": {"opaqueColor": {"rgbColor": {"green": 0.5}}}}}},
         {"updatePageElementTransform": {"objectId": blank["objectId"], "applyMode": "RELATIVE", "transform": {
             "scaleX": 1, "scaleY": 1, "translateX": 20 * 12700, "translateY": 0, "unit": "EMU"}}}]}))
     run.log.write("edit the TITLE_ONLY layout's title placeholder green, the BLANK layout's decoration 20 pt right\n")
-    moved_to = layouts_read(run)["BLANK"]
-    moved_to = next(e for e in moved_to["pageElements"] if e["objectId"] == blank["objectId"])["transform"].get("translateX", 0)
+    moved = next(e for e in elements_on(layouts_read(run), "BLANK") if e["objectId"] == blank["objectId"])
+    moved_to = jobj(moved, "transform").get("translateX", 0)
     pdf = build("retheme")
-    report = run.sync(pdf)
+    report = run.sync(pdf, None)
     lay = layouts_read(run)
-    title_now = next((e for e in lay["TITLE_ONLY"]["pageElements"] if e["objectId"] == title["objectId"]), None)
-    colours = {json.dumps({k: round(v, 2) for k, v in te["textRun"].get("style", {}).get("foregroundColor", {})
-                           .get("opaqueColor", {}).get("rgbColor", {}).items()}, sort_keys=True)
-               for te in (title_now or {}).get("shape", {}).get("text", {}).get("textElements", []) if "textRun" in te}
+    title_now = next((e for e in elements_on(lay, "TITLE_ONLY") if e["objectId"] == title["objectId"]), None)
+    text_elements = got(title_now, "shape", "text", "textElements")
+    colours = {json.dumps({k: round(jnum(v), 2) for k, v in rgb_of(te).items()}, sort_keys=True)
+               for te in jobjs([] if text_elements is None else text_elements) if "textRun" in te}
     if colours != {json.dumps({"green": 0.5})}:   # (Google gives back 0.5019608)
         run.problems.append(f"the TITLE_ONLY layout's title placeholder lost the person's colour: {colours}")
-    signature = lambda e: snapshot.signature(snapshot._download(e["image"]["contentUrl"], None) or b"")
-    blank_now = next((e for e in lay["BLANK"]["pageElements"] if e["objectId"] == blank["objectId"]), None)
-    if blank_now is None or blank_now["transform"].get("translateX", 0) != moved_to:
+
+    def signature(e: JsonObject) -> str | None:
+        return snapshot.signature(snapshot._download(jstr(e, "image", "contentUrl"), None) or b"")
+    blank_now = next((e for e in elements_on(lay, "BLANK") if e["objectId"] == blank["objectId"]), None)
+    if blank_now is None or jobj(blank_now, "transform").get("translateX", 0) != moved_to:
         run.problems.append(f"the BLANK layout's decoration is not where the person put it: {blank_now and blank_now['transform']}")
     elif not snapshot.signatures_match(signature(blank_now), signature(blank)):
         run.problems.append("the BLANK layout's decoration, which the person moved, was replaced")
-    frames_now = next((e for e in lay["TITLE_ONLY"]["pageElements"] if e["objectId"] == frames["objectId"]), None)
+    frames_now = next((e for e in elements_on(lay, "TITLE_ONLY") if e["objectId"] == frames["objectId"]), None)
     if frames_now is None or snapshot.signatures_match(signature(frames_now), signature(frames)):
         run.problems.append("the TITLE_ONLY layout's decoration is still the old theme's")
-    run.check("retheme", pdf, report, exps, conflicts=[["layout", "title style", title["objectId"]],
-                                                       ["layout", "theme decoration", blank["objectId"], "moved"]])
+    run.check("retheme", pdf, report, exps, replace(PLAIN, conflicts=[["layout", "title style", jstr(title, "objectId")],
+                                                       ["layout", "theme decoration", jstr(blank, "objectId"), "moved"]]))
 
 
 # Confirmed on Google's renderer (docs/project-notes.md "Layout probes"); each goes when sync handles it.
@@ -1179,16 +1270,17 @@ XFAIL.update({
 
 
 @pytest.fixture(scope="module")
-def outcomes(request):
+def outcomes(request: pytest.FixtureRequest) -> dict[str, list[str] | BaseException]:
     """scenario -> problems (or the exception, or a skip reason) for the scenarios selected."""
-    names = [n for n in SCENARIOS if any(getattr(i, "callspec", None) and i.callspec.params.get("name") == n
+    names = [n for n in SCENARIOS if any(isinstance(i, pytest.Function) and hasattr(i, "callspec")
+                                         and i.callspec.params.get("name") == n
                                          for i in request.session.items)]
     for reason in (cli_missing("sync"), pdflatex_missing(), google_unavailable()):
         if reason:
             pytest.skip(reason)
     OUT.mkdir(parents=True, exist_ok=True)
 
-    def run(name):
+    def run(name: str) -> list[str] | BaseException:
         r = Run(name)
         try:
             SCENARIOS[name](r)
@@ -1205,11 +1297,11 @@ def outcomes(request):
 
 @pytest.mark.parametrize("name", [pytest.param(n, marks=pytest.mark.xfail(reason=XFAIL[n], strict=True)) if n in XFAIL else n
                                   for n in SCENARIOS])
-def test_scenario(name, outcomes):
+def test_scenario(name: str, outcomes: dict[str, list[str] | BaseException]) -> None:
     result = outcomes[name]
     if isinstance(result, pytest.skip.Exception):
         pytest.skip(str(result))
-    if isinstance(result, Exception):
+    if isinstance(result, BaseException):
         raise result
     if result:
         pytest.fail(f"{name} ({OUT / name}):\n  " + "\n  ".join(result), pytrace=False)
@@ -1285,16 +1377,18 @@ def test_edit_catalogue():
     try:
         run.convert(build("v1"))
         donor = donor_image_url(run.deck.api, fresh_conversion("v1")[1].pid)
-        problems, expectations = [], []
+        problems: list[str] = []
+        expectations: list[JsonObject] = []
         from beamer2slides.devtools.deck_edits import verified
         for spec in catalogue(donor):
             exp, bad = verified(run.deck, spec)
             problems += bad
             expectations.append(exp)
         model = run.deck.read()
-        problems += [f"at the end: {p}" for p in sc.check_all(model, [c for e in expectations for c in e["checks"]])]
+        problems += [f"at the end: {p}" for p in sc.check_all(model, [c for e in expectations for c in jobjs(e, "checks")])]
+        ungrouped = {jstr(e, "args", "slide") for e in expectations if e["edit"] == "ungroup"}
         problems += sc.integrity(model, before=None, base_ids=None, allow_groups_changed=frozenset(),
-                                 allow_ungrouped={e["args"]["slide"] for e in expectations if e["edit"] == "ungroup"})
+                                 allow_ungrouped=ungrouped)
         from beamer2slides.devtools.deck_edits import EDITS
         problems += [f"edit kind not in the catalogue: {k}" for k in set(EDITS) - {e["edit"] for e in expectations}]
     finally:

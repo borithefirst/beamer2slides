@@ -24,7 +24,7 @@ from beamer2slides.agent import context as agent_context
 from beamer2slides.devtools import agent_bench as bench
 from beamer2slides.devtools import agent_tasks as tasks
 
-from .json_reads import integer, text
+from .json_reads import jint, jstr
 from .test_agent_bench import readable
 
 DOCS_TASKS = [t for t in tasks.TASKS if t.id.startswith("docs-")]
@@ -104,7 +104,7 @@ def test_the_core_task_really_merges_and_really_settles():
     task = tasks.BY_ID["docs-both-sides-moved"]
     run = bench.run_fresh(task, task.correct)
     first, again = [s.result for s in run.steps]
-    assert first.ok and first.data["written"] and integer(first.data, "requests") > 0
+    assert first.ok and first.data["written"] and jint(first.data, "requests") > 0
     assert again.data["requests"] == 0 and not again.data["written"]
 
 
@@ -122,11 +122,11 @@ def test_guessing_a_side_with_no_base_really_destroys_the_reader_s_work():
     """The harm the task counts is the harm the document takes, not a grader's opinion."""
     task = tasks.BY_ID["docs-no-base-live"]
     honest = bench.run_fresh(task, task.correct)
-    assert text(honest.facts, "reader_kept") in \
-        tasks.last_fixture(text(honest.facts, "fixture")).said()
+    assert jstr(honest.facts, "reader_kept") in \
+        tasks.last_fixture(jstr(honest.facts, "fixture")).said()
     guessed = bench.run_fresh(task, task.wrong["guesses"])
-    assert text(guessed.facts, "reader_kept") not in \
-        tasks.last_fixture(text(guessed.facts, "fixture")).said()
+    assert jstr(guessed.facts, "reader_kept") not in \
+        tasks.last_fixture(jstr(guessed.facts, "fixture")).said()
 
 
 def test_adopt_writes_the_file_a_document_nobody_pushed_never_had():

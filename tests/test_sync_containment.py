@@ -12,14 +12,21 @@ PDF, the merge treats it as any other change (the deck's edits still win), and t
 
 import copy
 import inspect
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pytest
 
-from beamer2slides.emit import SLIDE_W
+from beamer2slides.emit import SLIDE_W, FontMapper
 from beamer2slides import adopt_sync, emit, identity, merge, snapshot, sync, sync_model
+from beamer2slides.emit_model import Placeholder, Template, TemplateKey
+from beamer2slides.google_types import Presentation, presentation
+from beamer2slides.ir_types import MarkedShape, ShapeElement, TextElement
+from beamer2slides.json_types import Json, JsonObject
 
 from . import ir_sources as S
+from .fake_google import NoDrive, NoSlides
+from .json_reads import jarr, jat, jobj, jobjs, jstr, jstrs
 from .test_emitted_diff import PICTURE, one_slide
 from .test_sync import text_ir
 
@@ -38,25 +45,30 @@ def unplannable(monkeypatch: pytest.MonkeyPatch, words: str) -> None:
     (emit plans a parsed text element: `el` is its ir_types record.)"""
     real = emit.text_element_requests
 
-    def text_element_requests(el, *args, **kwargs):
+    def text_element_requests(el: TextElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
+                              placeholder: Placeholder | None, page_slide: Mapping[int, str] | None,
+                              bar: Sequence[float] | None, right_limit: float | None,
+                              marks: Sequence[str] | None) -> list[JsonObject]:
         if words in " ".join("".join(r.text for r in p.runs) for p in el.paragraphs):
             raise KeyError("lines")
-        return real(el, *args, **kwargs)
+        return real(el, slide_id, object_id, scale, fonts, placeholder, page_slide, bar, right_limit, marks)
     monkeypatch.setattr(emit, "text_element_requests", text_element_requests)
 
 
-def talk_base(tmp_path: Path) -> tuple[dict, dict]:
+def talk_base(tmp_path: Path) -> tuple[JsonObject, Presentation]:
     """The base `convert` records for the sync talk's v1, and the deck it wrote (slides_sim)."""
     deck, _raw, used = S._convert_pdf(SYNC_DECKS / "v1.pdf", tmp_path / "v1")
-    return S.base_of(S.Made(deck, "rendered", tmp_path / "v1", used))
+    base, pres = S.base_of(S.Made(deck, "rendered", tmp_path / "v1", used))
+    return base, presentation(pres, "the simulated deck")
 
 
-def requests_of(base: dict, ours: sync.Built, pres: dict, home: Path) -> tuple[merge.MergePlan, list[dict], list[dict]]:
+def requests_of(base: JsonObject, ours: sync.Built, pres: Presentation,
+                home: Path) -> tuple[merge.MergePlan, list[JsonObject], list[JsonObject]]:
     """(the merge plan, the content requests, the objects left to delete) of a dry sync."""
     theirs = snapshot.read_presentation(pres)
     mplan = merge.plan_merge_of(sync_model.base(base), merge.ours_of(sync.ours_json(ours)), sync_model.deck_read(theirs), None, False,
                                 merge.Resolutions(()))
-    s = sync.Sync(None, None, "offline", base, ours, home, dry_run=True, measure=False,
+    s = sync.Sync(NoSlides(), NoDrive(), "offline", base, ours, home, dry_run=True, measure=False,
                   trust_generation=True, check_plan=None, follow_labels=False, take_source=(), facts=None,
                   way_back=None)
     s.theme_plan = None
@@ -75,30 +87,30 @@ def test_a_sync_writes_everything_else_and_reports_the_element_it_made_a_picture
     [c] = ours.contained
     assert (c.slide, c.element, c.kind, c.error) == ("policy", "image/fallback/0", "text", "KeyError: 'lines'")
     assert POLICY in c.words
-    [el] = [e for s in ours.deck["slides"] for e in s["elements"] if e["id"] == c.id]
-    assert el["role"] == "fallback" and (tmp_path / "ours" / el["file"]).exists(), "its picture, cut from the new PDF"
+    [el] = [e for s in jobjs(ours.deck, "slides") for e in jobjs(s, "elements") if e["id"] == c.id]
+    assert el["role"] == "fallback" and (tmp_path / "ours" / jstr(el, "file")).exists(), "its picture, cut from the new PDF"
 
     mplan, content, cleanup = requests_of(base, ours, pres, tmp_path / "ours")
     mj = merge.merge_plan_json(mplan)
-    pictures = [r["createImage"]["url"] for r in content if "createImage" in r]
+    pictures = [jstr(r, "createImage", "url") for r in content if "createImage" in r]
     assert any(u.endswith(f"fallback-{c.id}.png") for u in pictures), "the picture goes in its place"
-    written = {(p["key"], u["key"]) for p in mj["slides"] if p["action"] == "update"
-               for u in p["units"] if u["action"] in ("create", "recreate")}
+    written = {(jstr(p, "key"), jstr(u, "key")) for p in jobjs(mj, "slides") if p["action"] == "update"
+               for u in jobjs(p, "units") if u["action"] in ("create", "recreate")}
     assert {("steps", "text/body/0"), ("convergence", "image/figure/0")} <= written, \
         "the source's other changes are still written"
-    inserted = " ".join(r["insertText"]["text"] for r in content if "insertText" in r)
+    inserted = " ".join(jstr(r, "insertText", "text") for r in content if "insertText" in r)
     assert "Deck edits" not in inserted, "the policy words are its picture, not text"
-    [policy] = [p for p in mj["slides"] if p["key"] == "policy"]
-    gone = {u["key"] for u in policy["units"] if u["action"] == "delete"}
-    old = [o for s in base["slides"] if s["key"] == "policy" for e in s["elements"] if e["key"] in gone
-           for o in e["objects"]]
-    deleted = {r["deleteObject"]["objectId"] for r in cleanup}
+    [policy] = [p for p in jobjs(mj, "slides") if p["key"] == "policy"]
+    gone = {jstr(u, "key") for u in jobjs(policy, "units") if u["action"] == "delete"}
+    old = [o for s in jobjs(base, "slides") if s["key"] == "policy" for e in jobjs(s, "elements") if jstr(e, "key") in gone
+           for o in jstrs(e, "objects")]
+    deleted = {jstr(r, "deleteObject", "objectId") for r in cleanup}
     assert gone and old and set(old) <= deleted, "the box it replaces goes, as any rewritten unit's does"
 
     found, says = sync.contained_report(ours.contained, ours.slides, mplan)
     assert [f.written for f in found] == [True]
     assert says and says[0].startswith("slide policy: this version of the converter could not lay out the text")
-    assert sync.contained_json(found)[0]["written"] is True
+    assert jat(sync.contained_json(found), 0, "written") is True
 
 
 @pytest.mark.needs_decks("sync/out/v1.pdf", "sync/out/disjoint.pdf")
@@ -120,7 +132,8 @@ def test_an_element_convert_contained_the_same_way_is_no_change(
     off = emit.plan_offline(copy.deepcopy(deck))
     assert [c["kind"] for c in off["contained"]] == ["text"]
     emit.crop_fallbacks(off["plan"].deck, [(c["page"], c["id"]) for c in off["contained"]], tmp_path / "v1", "test")
-    base, pres = S.base_of(S.Made(deck, "rendered", tmp_path / "v1", used))
+    base, sim = S.base_of(S.Made(deck, "rendered", tmp_path / "v1", used))
+    pres = presentation(sim, "the simulated deck")
     ours = sync.build_ours_of(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
 
     mplan, content, _ = requests_of(base, ours, pres, tmp_path / "ours")
@@ -139,13 +152,14 @@ def test_an_element_the_base_holds_that_emit_now_cannot_plan_is_kept(
     (`base_as_contained`): nothing is written, the deck's box and its read-back stay."""
     base, pres = talk_base(tmp_path)
     unplannable(monkeypatch, "Both versions go into the report")
-    [held] = [e for s in base["slides"] for e in s["elements"]
-              if e["kind"] == "text" and "Both versions go into the report" in identity.plain_text(e["ir"])]
-    objects, read = list(held["objects"]), copy.deepcopy(held["readback"])
+    [held] = [e for s in jobjs(base, "slides") for e in jobjs(s, "elements")
+              if e["kind"] == "text" and "Both versions go into the report" in identity.plain_text(jobj(e, "ir"))]
+    objects, read = list(jarr(held, "objects")), copy.deepcopy(held["readback"])
     ours = sync.build_ours_of(SYNC_DECKS / "v1.pdf", tmp_path / "ours", base, "last", SLIDE_W, snapshot.NO_PICTURES)
 
     mplan, content, cleanup = requests_of(base, ours, pres, tmp_path / "ours")
-    assert {u["action"] for p in merge.merge_plan_json(mplan)["slides"] for u in p.get("units", [])} <= {"keep"}
+    assert {u["action"] for p in jobjs(merge.merge_plan_json(mplan), "slides")
+            for u in (jobjs(p, "units") if "units" in p else [])} <= {"keep"}
     assert not [r for r in content if "createImage" in r] and cleanup == []
     [c] = ours.contained
     assert (held["kind"], held["key"], held["objects"], held["readback"]) == ("image", c.element, objects, read)
@@ -167,29 +181,29 @@ def test_an_adopt_base_older_than_its_tables_layout_is_no_source_change() -> Non
     no layout: today's same source hashes differently, and an unchanged source recreated hashing's
     table. `upgrade_tables` takes our layout when all the old form says is the same; a changed cell
     still shows."""
-    run = {"text": "Chaining", "font": "TeXGyreHeros-Bold", "family": "sans", "size": 9.4, "bold": True,
-           "italic": False, "smallcaps": False, "color": "#ffffff", "link": None, "script": None,
-           "underline": False, "strike": False, "highlight": None}
-    old = {"id": "p4m2", "kind": "table", "role": "table", "bbox": [25.2, 63.0, 289.8, 189.0],
-           "cells": [[[run], [{**run, "text": "Probing"}]]], "spans": ["p4s1", "p4s2"], "drawings": ["p4d1"],
-           "mark": "hash05_t"}
-    ours = {**old, "id": "p4m7", "columns": [[25.2, 150.0], [150.0, 289.8]], "row_heights": [126.0],
-            "rules": [], "fills": [], "merges": [], "borders": {}, "bands": [], "size": 9.4}
-    edited = {**old, "cells": [[[run], [{**run, "text": "Hopscotch"}]]], "mark": "hash05_u"}
-    deck = {"slides": [{"elements": [ours, {**ours, "mark": "hash05_u"}]}]}
+    run: JsonObject = {"text": "Chaining", "font": "TeXGyreHeros-Bold", "family": "sans", "size": 9.4, "bold": True,
+                       "italic": False, "smallcaps": False, "color": "#ffffff", "link": None, "script": None,
+                       "underline": False, "strike": False, "highlight": None}
+    old: JsonObject = {"id": "p4m2", "kind": "table", "role": "table", "bbox": [25.2, 63.0, 289.8, 189.0],
+                       "cells": [[[run], [{**run, "text": "Probing"}]]], "spans": ["p4s1", "p4s2"], "drawings": ["p4d1"],
+                       "mark": "hash05_t"}
+    ours: JsonObject = {**old, "id": "p4m7", "columns": [[25.2, 150.0], [150.0, 289.8]], "row_heights": [126.0],
+                        "rules": [], "fills": [], "merges": [], "borders": {}, "bands": [], "size": 9.4}
+    edited: JsonObject = {**old, "cells": [[[run], [{**run, "text": "Hopscotch"}]]], "mark": "hash05_u"}
+    deck: JsonObject = {"slides": [{"elements": [ours, {**ours, "mark": "hash05_u"}]}]}
 
-    def entry(ir: dict) -> dict:
+    def entry(ir: JsonObject) -> JsonObject:
         h, fields = identity.ir_fields(ir, None, None, None)
         return {"key": "table/table/0", "kind": "table", "anchor": None, "ir": ir, "ir_hash": h, "fields": fields}
-    base = {"adopt": {"boxes": {}}, "slides": [{"key": "s", "elements": [entry(old), entry(edited)]}]}
+    base: JsonObject = {"adopt": {"boxes": {}}, "slides": [{"key": "s", "elements": [entry(old), entry(edited)]}]}
     assert [(r.slide, r.how) for r in adopt_sync.upgrade_tables(base, deck, None)] == [("s", "adopt_table")]
-    same, changed = base["slides"][0]["elements"]
-    assert same["ir"]["id"] == "p4m2" and same["ir"]["columns"] == ours["columns"]
+    same, changed = jobjs(base, "slides", 0, "elements")
+    assert jat(same, "ir", "id") == "p4m2" and jat(same, "ir", "columns") == ours["columns"]
     assert identity.source_changes(same, entry(ours)) == set()
     assert changed["ir"] is edited, "a table the source changed is left for the merge to see"
-    plain = {"slides": [{"elements": [entry(old)]}]}
+    plain: JsonObject = {"slides": [{"elements": [entry(old)]}]}
     assert adopt_sync.upgrade_tables(plain, deck, None) == []  # (a convert base has no marks to upgrade)
-    assert plain["slides"][0]["elements"][0]["ir"] is old
+    assert jat(plain, "slides", 0, "elements", 0, "ir") is old
 
 
 # ---------------------------------------------------------------- mark_emitted's slides it cannot compare
@@ -198,11 +212,11 @@ def test_an_old_base_emit_cannot_read_is_said_not_raised(monkeypatch: pytest.Mon
     """A base an older converter wrote is a real deck's everyday case: no marks, never a raise (even
     under strict), and a warning, since nothing else would say the boxes kept their old places."""
     monkeypatch.setenv(emit.STRICT_ENV, "1")
-    line = text_ir("A short line", [20, 60, 90, 72], "p0t1")
-    base, _ = one_slide({"text/body/1": copy.deepcopy(line)})
-    for p in base["elements"][0]["ir"]["paragraphs"]:
+    line = text_ir("A short line", [20, 60, 90, 72], "p0t1", role="body")
+    base, _ = one_slide({"text/body/1": copy.deepcopy(line)}, title_page=False)
+    for p in jobjs(base, "elements", 0, "ir", "paragraphs"):
         del p["lines"]
-    ours, slide = one_slide({"text/body/1": line, "image/figure/0": PICTURE})
+    ours, slide = one_slide({"text/body/1": line, "image/figure/0": PICTURE}, title_page=False)
     unread: list[sync.Unread] = []
     assert sync.mark_emitted({"slides": [base]}, [ours], {"slides": [slide]}, {0: 0}, 2.0, emit.FontMapper(),
                              fast=True, unread=unread) == []
@@ -213,22 +227,24 @@ def test_an_old_base_emit_cannot_read_is_said_not_raised(monkeypatch: pytest.Mon
     assert said.startswith("slide s (Results): the sync base records it in a form this version")
 
 
-def failing_new_element(monkeypatch: pytest.MonkeyPatch) -> tuple[dict, dict, dict]:
+def failing_new_element(monkeypatch: pytest.MonkeyPatch) -> tuple[JsonObject, JsonObject, JsonObject]:
     """A slide whose new version holds an element emit's writer fails on (id p0s9), beside an
     unchanged line: (base, ours entry, planned slide)."""
     real = emit.shape_element_requests
 
-    def shape_element_requests(el, *args, **kwargs):
+    def shape_element_requests(el: ShapeElement | MarkedShape, slide_id: str, object_id: str, scale: float,
+                               template_for: Callable[[TemplateKey], Template]) -> list[JsonObject]:
         if el.id == "p0s9":
             raise KeyError("flip")
-        return real(el, *args, **kwargs)
+        return real(el, slide_id, object_id, scale, template_for)
     monkeypatch.setattr(emit, "shape_element_requests", shape_element_requests)
-    line = text_ir("A short line", [20, 60, 90, 72], "p0t1")
-    base, _ = one_slide({"text/body/1": copy.deepcopy(line)})
-    panel = {"kind": "shape", "id": "p0s9", "role": "panel", "shape": "RECTANGLE", "flip": False, "radius": 0.0,
-             "bbox": [200, 55, 300, 80], "fill": "#3366cc", "spans": [], "drawing": "p0d9"}
-    ours, slide = one_slide({"text/body/1": line, "shape/panel/0": panel})
-    return {"slides": [base]}, ours, slide
+    line = text_ir("A short line", [20, 60, 90, 72], "p0t1", role="body")
+    base, _ = one_slide({"text/body/1": copy.deepcopy(line)}, title_page=False)
+    panel: JsonObject = {"kind": "shape", "id": "p0s9", "role": "panel", "shape": "RECTANGLE", "flip": False, "radius": 0.0,
+                         "bbox": [200, 55, 300, 80], "fill": "#3366cc", "spans": [], "drawing": "p0d9"}
+    ours, slide = one_slide({"text/body/1": line, "shape/panel/0": panel}, title_page=False)
+    slides: list[Json] = [base]
+    return {"slides": slides}, ours, slide
 
 
 def test_a_new_slide_emit_cannot_write_raises_under_strict(monkeypatch: pytest.MonkeyPatch) -> None:

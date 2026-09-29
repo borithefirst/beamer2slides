@@ -8,13 +8,14 @@ deck on 2026-09-18.
 """
 
 from beamer2slides import identity
+from beamer2slides.json_types import JsonObject
 
 
-def info(label, title, text, page):
+def info(label: str, title: str, text: str, page: int) -> JsonObject:
     return {"label": label, "title": title, "text": text, "page": page}
 
 
-def frame(label, step, page):
+def frame(label: str, step: int, page: int) -> JsonObject:
     """One overlay step: same label and title, a little more text than the step before."""
     return info(label, "Why decks and sources diverge", " ".join(["a bullet"] * (step + 1)), page)
 

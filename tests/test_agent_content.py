@@ -21,7 +21,7 @@ from beamer2slides.agent import content as C
 from beamer2slides.agent.types import Artifact, READS, Need, Refused, Result, WRITES
 from beamer2slides.agent.context import Job, tool
 
-from .json_reads import arr, integer, num, text
+from .json_reads import jarr, jint, jnum, jstr
 
 LOCAL: frozenset[Need] = frozenset({READS, WRITES})
 
@@ -189,12 +189,12 @@ def test_text_comes_back_as_text_and_bytes_as_base64(ws: LocalWorkspace):
                     limit=C.INLINE_LIMIT, budget=C.INLINE_BUDGET)
 
     deck, shot = (a.json() for a in out.artifacts)
-    assert json.loads(text(deck, "text"))["slides"] == [1, 2]
+    assert json.loads(jstr(deck, "text"))["slides"] == [1, 2]
     assert "base64" not in deck
-    assert base64.b64decode(text(shot, "base64")) == b"\x89PNG\r\n\x1a\n\x00rest"
+    assert base64.b64decode(jstr(shot, "base64")) == b"\x89PNG\r\n\x1a\n\x00rest"
     assert "text" not in shot
     for art in (deck, shot):
-        assert num(art, "bytes") > 0 and len(text(art, "sha256")) == 64
+        assert jnum(art, "bytes") > 0 and len(jstr(art, "sha256")) == 64
 
 
 def test_delivering_leaves_the_result_it_was_given_as_it_was(tmp_path: Path) -> None:
@@ -215,7 +215,7 @@ def test_an_artifact_over_the_cap_says_so_and_still_carries_its_size_and_digest(
                     budget=C.INLINE_BUDGET)
     art = out.artifacts[0].json()
     assert art["truncated"] is True
-    assert art["bytes"] == 5000 and len(text(art, "sha256")) == 64
+    assert art["bytes"] == 5000 and len(jstr(art, "sha256")) == 64
     assert "text" not in art and "base64" not in art, "the cap has to actually withhold it"
 
 
@@ -357,11 +357,11 @@ def test_a_real_pdf_goes_through_a_real_journey_with_no_path_either_way():
         out = deck_inspect(ctx, pdf={"name": "talk.pdf", "base64": base64.b64encode(raw).decode()},
                            checks=False)
         assert out.ok, out.summary
-        assert integer(out.data, "pages") >= 1
+        assert jint(out.data, "pages") >= 1
         decks = [a for a in out.artifacts if a.ref.endswith("deck.json")]
         assert decks, [a.ref for a in out.artifacts]
         deck = carried(decks[0])
-        assert len(arr(json.loads(deck), "slides")) == out.data["pages"]
+        assert len(jarr(json.loads(deck), "slides")) == out.data["pages"]
         assert decks[0].sha256 and decks[0].bytes == len(deck.encode("utf-8"))
     finally:
         ctx.close()

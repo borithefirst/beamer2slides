@@ -14,25 +14,34 @@ import copy
 import dataclasses
 import json
 import random
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 from beamer2slides import adopt, adopt_sync, merge, snapshot, sync as sync_mod, sync_model
 from beamer2slides.devtools import fuzz_sync, fuzz_world as W, loss_oracle
+from beamer2slides.google_types import presentation as as_presentation
+from beamer2slides.json_types import Json, JsonObject
+
+from .json_reads import jarr, jat, jnum, jobj, jobjs, jstr, jstrs
 
 EMU = 12700
+
+Box = tuple[float, float, float, float]
+SourceOp = Callable[[random.Random, JsonObject, fuzz_sync.SourceContext], str | None]
 
 
 # ---------------------------------------------------------------- a deck and its conversion
 
-def pt(v: float) -> dict:
+def pt(v: float) -> JsonObject:
     return {"magnitude": v * EMU, "unit": "EMU"}
 
 
-def live_shape(oid: str, box, text: str | None = None) -> dict:
+def live_shape(oid: str, box: Box, text: str | None) -> JsonObject:
     x0, y0, x1, y1 = box
-    shape = {"shapeType": "TEXT_BOX"}
+    shape: JsonObject = {"shapeType": "TEXT_BOX"}
     if text is not None:
         shape["text"] = {"textElements": [{"paragraphMarker": {"style": {"alignment": "START"}}},
                                           {"textRun": {"content": text + "\n",
@@ -43,9 +52,10 @@ def live_shape(oid: str, box, text: str | None = None) -> dict:
             "shape": shape}
 
 
-def live_table(oid: str, box, rows: list[list[str]]) -> dict:
+def live_table(oid: str, box: Box, rows: list[list[str]]) -> JsonObject:
     x0, y0, x1, y1 = box
-    def cell(text):
+
+    def cell(text: str) -> JsonObject:
         return {"text": {"textElements": [{"paragraphMarker": {"style": {}}},
                                           {"textRun": {"content": text + "\n", "style": {}}}]}}
     return {"objectId": oid,   # (no alt text: Google leaves the keys out)
@@ -55,44 +65,73 @@ def live_table(oid: str, box, rows: list[list[str]]) -> dict:
                       "tableRows": [{"tableCells": [cell(c) for c in row]} for row in rows]}}
 
 
-def presentation(slides: list[list[dict]], width: float = 720.0, height: float = 405.0) -> dict:
-    """`presentations.get` of a deck a person built: object ids of their own, no alt text."""
+def presentation(slides: list[list[JsonObject]]) -> JsonObject:
+    """`presentations.get` of a deck a person built (720 x 405 pt): object ids of their own, no alt
+    text."""
+    pages: list[Json] = []
+    for n, els in enumerate(slides):
+        elements: list[Json] = [e for e in els]
+        pages.append({"objectId": f"gSLIDE{n}", "slideProperties": {"layoutObjectId": "L"}, "pageElements": elements})
     return {"presentationId": "PERSONS_DECK", "revisionId": "rev1",
-            "pageSize": {"width": pt(width), "height": pt(height)},
+            "pageSize": {"width": pt(720.0), "height": pt(405.0)},
             "masters": [{"objectId": "M", "pageProperties": {}}],
             "layouts": [{"objectId": "L", "layoutProperties": {"name": "BLANK", "masterObjectId": "M"}}],
-            "slides": [{"objectId": f"gSLIDE{n}", "slideProperties": {"layoutObjectId": "L"},
-                        "pageElements": els} for n, els in enumerate(slides)]}
+            "slides": pages}
 
 
-def deck_element(oid: str, box, text: str, **extra) -> dict:
+def deck_element(oid: str, box: Box, text: str) -> JsonObject:
     """One element of the IR `deck_ir(foreign=True)` gives adopt: the deck's own object, boxed in
-    PDF pt."""
+    PDF pt. (A test adds what else it needs, `{**deck_element(...), "kind": "table"}`.)"""
     return {"id": oid, "object": oid, "kind": "text", "role": "body", "bbox": list(box),
-            "paragraphs": [{"runs": [{"text": text}]}], **extra}
+            "paragraphs": [{"runs": [{"text": text}]}]}
 
 
-def target(slides: list[list[dict]], size=(453.54, 255.12)) -> dict:
-    return {"slides": [{"page": n, "objectId": f"gSLIDE{n}", "size": list(size), "notes": "",
-                        "background_color": "#ffffff", "elements": els} for n, els in enumerate(slides)]}
+def inherited(oid: str, box: Box, text: str) -> JsonObject:
+    """A `deck_element` the layout L draws."""
+    return {**deck_element(oid, box, text), "inherited": "L"}
 
 
-def conv_element(eid: str, box, text: str, role: str = "body") -> dict:
+PAGE: list[Json] = [453.54, 255.12]
+
+
+def target(slides: list[list[JsonObject]]) -> JsonObject:
+    pages: list[Json] = []
+    for n, els in enumerate(slides):
+        elements: list[Json] = [e for e in els]
+        pages.append({"page": n, "objectId": f"gSLIDE{n}", "size": list(PAGE), "notes": "",
+                      "background_color": "#ffffff", "elements": elements})
+    return {"slides": pages}
+
+
+def conv_element(eid: str, box: Box, text: str) -> JsonObject:
     """One element of the conversion of the source adopt wrote (classify's IR)."""
-    return {"id": eid, "kind": "text", "role": role, "bbox": list(box),
+    return {"id": eid, "kind": "text", "role": "body", "bbox": list(box),
             "paragraphs": [{"runs": [{"text": text}], "style": {}}]}
 
 
-def conversion(tgt: dict, slides: list[list[dict]], size=(453.54, 255.12)) -> dict:
+def icon(eid: str, bbox: list[Json], anchor: str) -> JsonObject:
+    """A picture the converter drew out of the text of `anchor` (an icon in its line)."""
+    return {"id": eid, "kind": "image", "role": "icon", "bbox": bbox, "anchor": anchor}
+
+
+def conversion(tgt: JsonObject, slides: list[list[JsonObject]]) -> JsonObject:
     """The classify IR of that source, labelled the way `adopt.frame_labels` labels the frames."""
     labels = adopt.frame_labels(tgt)
-    return {"slides": [{"page": n, "label": labels[n], "size": list(size), "notes": "",
-                        "background_color": "#ffffff", "elements": els} for n, els in enumerate(slides)]}
+    pages: list[Json] = []
+    for n, els in enumerate(slides):
+        elements: list[Json] = [e for e in els]
+        pages.append({"page": n, "label": labels[n], "size": list(PAGE), "notes": "",
+                      "background_color": "#ffffff", "elements": elements})
+    return {"slides": pages}
+
+
+def ids(elements: list[JsonObject]) -> list[Json]:
+    return [e["id"] for e in elements]
 
 
 # ---------------------------------------------------------------- pairing
 
-def test_an_element_pairs_with_the_object_it_was_drawn_from():
+def test_an_element_pairs_with_the_object_it_was_drawn_from() -> None:
     conv = [conv_element("a", (30, 40, 130, 56), "Why it matters"),
             conv_element("b", (30, 90, 200, 106), "Three things happened")]
     deck = [deck_element("gA", (30, 40, 130, 56), "Why it matters"),
@@ -102,7 +141,7 @@ def test_an_element_pairs_with_the_object_it_was_drawn_from():
     assert why == {}
 
 
-def test_two_objects_that_say_the_same_thing_at_the_same_place_pair_with_neither():
+def test_two_objects_that_say_the_same_thing_at_the_same_place_pair_with_neither() -> None:
     """A foreign deck is full of these (a row of cards, a table of icons). Picking one would tie
     the source to an object it was not drawn from, and a later sync would write over it."""
     conv = [conv_element("a", (30, 40, 130, 56), "Learn more")]
@@ -113,7 +152,7 @@ def test_two_objects_that_say_the_same_thing_at_the_same_place_pair_with_neither
     assert why[0] == adopt_sync.AMBIGUOUS
 
 
-def test_an_element_with_nothing_like_it_in_the_deck_pairs_with_nothing():
+def test_an_element_with_nothing_like_it_in_the_deck_pairs_with_nothing() -> None:
     conv = [conv_element("a", (30, 40, 130, 56), "Why it matters")]
     deck = [deck_element("gA", (300, 200, 420, 216), "Entirely different words here")]
     pairs, why = adopt_sync.pair_elements(conv, deck)
@@ -121,7 +160,7 @@ def test_an_element_with_nothing_like_it_in_the_deck_pairs_with_nothing():
     assert why[0] == adopt_sync.NO_CANDIDATE
 
 
-def test_one_object_is_explained_by_one_element():
+def test_one_object_is_explained_by_one_element() -> None:
     """Two elements of the source over one object of the deck: the better one takes it, the other
     is left unpaired rather than sharing it."""
     conv = [conv_element("a", (30, 40, 130, 56), "Why it matters"),
@@ -132,19 +171,19 @@ def test_one_object_is_explained_by_one_element():
     assert why[1] in (adopt_sync.NOT_BEST, adopt_sync.AMBIGUOUS)
 
 
-def test_what_the_layout_draws_is_never_paired():
+def test_what_the_layout_draws_is_never_paired() -> None:
     """`deck_ir(foreign=True)` gives a slide what its layout and master draw, because adopt has to
     draw them too - but those are not the slide's objects, and writing to one would edit the
     template under every other slide."""
     tgt = target([[deck_element("gA", (30, 40, 130, 56), "Why it matters"),
-                   deck_element("L~gDeco", (0, 0, 453, 20), "conference 2026", inherited="L")]])
-    assert [e["id"] for e in adopt_sync.deck_objects(tgt["slides"][0])] == ["gA"]
-    assert [e["id"] for e in adopt_sync.layout_elements(tgt["slides"][0])] == ["L~gDeco"]
+                   inherited("L~gDeco", (0, 0, 453, 20), "conference 2026")]])
+    assert ids(adopt_sync.deck_objects(jobj(tgt, "slides", 0))) == ["gA"]
+    assert ids(adopt_sync.layout_elements(jobj(tgt, "slides", 0))) == ["L~gDeco"]
 
 
 # ---------------------------------------------------------------- what the layout draws
 
-def test_an_element_the_layout_draws_is_recognised_and_not_counted_as_a_miss():
+def test_an_element_the_layout_draws_is_recognised_and_not_counted_as_a_miss() -> None:
     """`adopt` recovers the deck's layouts as a beamer theme, so the source draws the footer on
     every slide that inherits it and the conversion has an element for each - with nothing on the
     slide to pair with, for ever. That is not the pairing failing: the object is there, one level
@@ -153,43 +192,43 @@ def test_an_element_the_layout_draws_is_recognised_and_not_counted_as_a_miss():
     conv = [conv_element("a", (30, 40, 130, 56), "Why it matters"),
             conv_element("b", (12, 4, 118, 18), "conference 2026")]
     tgt = target([[deck_element("gA", (30, 40, 130, 56), "Why it matters"),
-                   deck_element("L~gDeco", (10, 2, 120, 20), "conference 2026", inherited="L")]])
-    slide = tgt["slides"][0]
+                   inherited("L~gDeco", (10, 2, 120, 20), "conference 2026")]])
+    slide = jobj(tgt, "slides", 0)
     pairs, why = adopt_sync.pair_elements(conv, adopt_sync.deck_objects(slide))
     assert pairs == {0: 0} and list(why) == [1]
     assert adopt_sync.explained_by_layout(conv, why, slide) == {1}
 
 
-def test_the_slides_own_object_is_asked_first():
+def test_the_slides_own_object_is_asked_first() -> None:
     """A person who put a box of their own over the template's is the one this sync writes to, so
     the layout is only ever asked about what `pair_elements` left over."""
     conv = [conv_element("a", (10, 2, 120, 20), "conference 2026")]
     tgt = target([[deck_element("gA", (10, 2, 120, 20), "conference 2026"),
-                   deck_element("L~gDeco", (10, 2, 120, 20), "conference 2026", inherited="L")]])
-    slide = tgt["slides"][0]
+                   inherited("L~gDeco", (10, 2, 120, 20), "conference 2026")]])
+    slide = jobj(tgt, "slides", 0)
     pairs, why = adopt_sync.pair_elements(conv, adopt_sync.deck_objects(slide))
     assert pairs == {0: 0} and adopt_sync.explained_by_layout(conv, why, slide) == set()
 
 
-def test_an_icon_in_the_middle_of_a_full_bleed_background_is_not_the_layouts():
+def test_an_icon_in_the_middle_of_a_full_bleed_background_is_not_the_layouts() -> None:
     """`identity._geometry` scores two boxes by the better of their overlap and how close their
     centres are, which is right for two readings of one element and wrong here: a layout that draws
     a picture over the whole slide shares its centre with everything a person put in the middle of
     it. Measured on the corpus deck sc-dark-modern, where a 35 pt icon scored 0.45 against the
     background and would have been reported as a thing to go and change on the layout."""
-    page = {"kind": "image", "bbox": [0, 1, 454, 254], "text": ""}
-    icon = {"kind": "image", "bbox": [226, 82, 261, 117], "text": ""}
-    assert adopt_sync.similarity(icon, page) >= adopt_sync.PAIR_SURE
-    assert not adopt_sync.same_drawing(icon, page)
+    page: JsonObject = {"kind": "image", "bbox": [0, 1, 454, 254], "text": ""}
+    picture: JsonObject = {"kind": "image", "bbox": [226, 82, 261, 117], "text": ""}
+    assert adopt_sync.similarity(picture, page) >= adopt_sync.PAIR_SURE
+    assert not adopt_sync.same_drawing(picture, page)
     assert adopt_sync.same_drawing({"kind": "image", "bbox": [0, 0, 453, 255], "text": ""}, page)
 
 
-def test_a_layouts_words_are_the_same_drawing_however_much_room_they_have():
+def test_a_layouts_words_are_the_same_drawing_however_much_room_they_have() -> None:
     """The one thing sizes cannot decide. A layout's `Thank you!` placeholder is 296 pt wide and
     the converter reads the words back at the 109 pt they cover (firebase-jam), so the same words
     inside the template's own box are the same drawing whatever the room around them."""
-    place = {"kind": "text", "bbox": [79, 120, 375, 164], "text": "Thank you!"}
-    ink = {"kind": "text", "bbox": [172, 128, 281, 151], "text": "Thank you!"}
+    place: JsonObject = {"kind": "text", "bbox": [79, 120, 375, 164], "text": "Thank you!"}
+    ink: JsonObject = {"kind": "text", "bbox": [172, 128, 281, 151], "text": "Thank you!"}
     assert adopt_sync.same_drawing(ink, place)
     assert not adopt_sync.same_drawing({**ink, "text": "Something else"}, place)
     assert not adopt_sync.same_drawing({**ink, "bbox": [172, 200, 281, 223]}, place), "outside it"
@@ -197,7 +236,7 @@ def test_a_layouts_words_are_the_same_drawing_however_much_room_they_have():
 
 # ---------------------------------------------------------------- a table, read back as words
 
-def test_a_cell_of_the_decks_own_table_is_named_for_what_it_is():
+def test_a_cell_of_the_decks_own_table_is_named_for_what_it_is() -> None:
     """The converter reads a table somebody drew back as the loose words of its cells (one of the
     corpus's 42 deck tables comes back as a table at all), so each of those words is an element
     with nothing on the ours side shaped like the thing it came from. The person is looking at
@@ -206,81 +245,78 @@ def test_a_cell_of_the_decks_own_table_is_named_for_what_it_is():
     conv = [conv_element("a", (40, 60, 90, 72), "Aaa"),
             conv_element("b", (120, 60, 180, 72), "AAA"),
             conv_element("c", (40, 90, 200, 102), "Highest quality")]
-    grid = deck_element("gT", (30, 50, 260, 120), "Aaa AAA Highest quality", kind="table")
+    grid = {**deck_element("gT", (30, 50, 260, 120), "Aaa AAA Highest quality"), "kind": "table"}
     pairs, why = adopt_sync.pair_elements(conv, [grid])
     assert pairs == {} and set(why) == {0, 1, 2}
     assert adopt_sync.inside_tables(conv, why, [grid]) == {0, 1, 2}
 
 
-def test_an_element_beside_the_table_is_no_cell_of_it():
+def test_an_element_beside_the_table_is_no_cell_of_it() -> None:
     conv = [conv_element("a", (40, 60, 90, 72), "Aaa"),
             conv_element("z", (300, 60, 420, 72), "Ratings, roughly")]
-    grid = deck_element("gT", (30, 50, 260, 120), "Aaa AAA Highest quality", kind="table")
+    grid = {**deck_element("gT", (30, 50, 260, 120), "Aaa AAA Highest quality"), "kind": "table"}
     _, why = adopt_sync.pair_elements(conv, [grid])
     assert adopt_sync.inside_tables(conv, why, [grid]) == {0}
 
 
 # ---------------------------------------------- a drawing the converter made out of somebody's box
 
-def test_a_picture_inside_a_paired_box_names_the_element_that_pairs():
+def test_a_picture_inside_a_paired_box_names_the_element_that_pairs() -> None:
     """The icon at the head of a person's line is no object of theirs - it is a picture this
     converter made while reading their *text box* back. Nothing on the slide is shaped like it
     alone, and nothing ever will be, but the box it came out of is right there and the words beside
     it are tied to it."""
     box = deck_element("gBOX", (30, 50, 230, 80), "Why it matters")
-    conv = [conv_element("a", (46, 54, 200, 70), "Why it matters"),
-            {"id": "ic", "kind": "image", "role": "icon", "bbox": [34, 56, 44, 66], "anchor": "a"}]
+    conv = [conv_element("a", (46, 54, 200, 70), "Why it matters"), icon("ic", [34, 56, 44, 66], "a")]
     pairs, why = adopt_sync.pair_elements(conv, [box])
     assert pairs == {0: 0} and set(why) == {1}
     assert adopt_sync.drawn_from(conv, why, pairs, [box]) == {1: 0}
 
 
-def test_a_picture_standing_in_no_object_is_drawn_out_of_nothing():
+def test_a_picture_standing_in_no_object_is_drawn_out_of_nothing() -> None:
     box = deck_element("gBOX", (30, 50, 230, 80), "Why it matters")
-    conv = [conv_element("a", (46, 54, 200, 70), "Why it matters"),
-            {"id": "ic", "kind": "image", "role": "icon", "bbox": [400, 56, 410, 66], "anchor": "a"}]
+    conv = [conv_element("a", (46, 54, 200, 70), "Why it matters"), icon("ic", [400, 56, 410, 66], "a")]
     pairs, why = adopt_sync.pair_elements(conv, [box])
     assert adopt_sync.drawn_from(conv, why, pairs, [box]) == {}
 
 
-def test_a_picture_inside_a_box_nothing_is_tied_to_is_drawn_out_of_nothing():
+def test_a_picture_inside_a_box_nothing_is_tied_to_is_drawn_out_of_nothing() -> None:
     """The rule is not "it stands inside one of the deck's boxes" but "inside one this conversion
     already accounts for". An object nothing is tied to is not going anywhere when the unit is
     written, so a picture put on top of it is the second box this whole gate is about."""
     twin_a = deck_element("gA", (30, 50, 230, 80), "Get started")
     twin_b = deck_element("gB", (33, 53, 233, 83), "Get started")
-    conv = [conv_element("a", (46, 54, 200, 70), "Get started"),
-            {"id": "ic", "kind": "image", "role": "icon", "bbox": [34, 56, 44, 66], "anchor": "a"}]
+    conv = [conv_element("a", (46, 54, 200, 70), "Get started"), icon("ic", [34, 56, 44, 66], "a")]
     pairs, why = adopt_sync.pair_elements(conv, [twin_a, twin_b])
     assert pairs == {}, "two boxes too alike to tell apart: the words pair with neither"
     assert adopt_sync.drawn_from(conv, why, pairs, [twin_a, twin_b]) == {}
 
 
-def test_only_a_member_of_the_same_unit_accounts_for_a_blind_one():
-    members = [{"key": "text/body/0", "objects": ["gBOX"]},
-               {"key": "image/icon/0", "objects": [], "drawn_from": "text/body/0"}]
+def test_only_a_member_of_the_same_unit_accounts_for_a_blind_one() -> None:
+    members: list[JsonObject] = [{"key": "text/body/0", "objects": ["gBOX"]},
+                                 {"key": "image/icon/0", "objects": [], "drawn_from": "text/body/0"}]
     assert merge.covered(members) == {"image/icon/0"} and merge.blind_members(members) == []
-    elsewhere = [{"key": "image/icon/0", "objects": [], "drawn_from": "text/body/9"}]
+    elsewhere: list[JsonObject] = [{"key": "image/icon/0", "objects": [], "drawn_from": "text/body/9"}]
     assert merge.covered(elsewhere) == set()
     assert merge.blind_members(elsewhere) == ["image/icon/0"]
 
 
 # ---------------------------------------------------------------- one box, read back as several
 
-def lined(eid: str, box, text: str, baseline: float, size: float = 14.0, **extra) -> dict:
-    """A conversion element with the line geometry `emit` lays a text box out from."""
+def lined(eid: str, box: Box, text: str, baseline: float) -> JsonObject:
+    """A conversion element with the line geometry `emit` lays a 14 pt text box out from."""
     x0, y0, x1, y1 = box
     return {"id": eid, "kind": "text", "role": "body", "bbox": [x0, y0, x1, y1],
             "paragraphs": [{"runs": [{"text": text}], "align": "left", "level": 0, "bullet": None,
-                            "size": size, "text_x0": x0, "tab_x0": None, "wrap_limit": None,
-                            "lines": [{"baseline": baseline, "x0": x0, "x1": x1}]}], **extra}
+                            "size": 14.0, "text_x0": x0, "tab_x0": None, "wrap_limit": None,
+                            "lines": [{"baseline": baseline, "x0": x0, "x1": x1}]}]}
 
 
-def records(elements: list[dict]) -> list[dict]:
+def records(elements: list[JsonObject]) -> list[JsonObject]:
     return [{"kind": e["kind"], "bbox": e["bbox"], "text": adopt_sync.conv_words(e)} for e in elements]
 
 
-def test_one_box_the_converter_read_as_two_is_folded_back_into_one():
+def test_one_box_the_converter_read_as_two_is_folded_back_into_one() -> None:
     """`adopt` wrote one `slidebox`; the deck's heading stands 44 pt above its body, which is more
     than the 1.45 em `classify` keeps a paragraph together over, so the conversion has two
     elements and neither of them is the object."""
@@ -294,12 +330,12 @@ def test_one_box_the_converter_read_as_two_is_folded_back_into_one():
     assert len(folded) == 1
     assert folded[0]["id"] == "a", "the fold stands where its first part stood"
     assert folded[0]["bbox"] == [30, 40, 260, 112], "the union of the parts"
-    assert [p["runs"][0]["text"] for p in folded[0]["paragraphs"]] == ["Why it matters",
-                                                                      "Three things happened"]
+    assert [jat(p, "runs", 0, "text") for p in jobjs(folded[0], "paragraphs")] == ["Why it matters",
+                                                                                  "Three things happened"]
     assert folded[0]["composite"] is True
 
 
-def test_the_folded_element_is_the_object_the_pairing_could_not_find():
+def test_the_folded_element_is_the_object_the_pairing_could_not_find() -> None:
     """The whole point: apart, each half pairs with nothing, because the thing it is part of is
     the whole box. Measured over the corpus, this is 455 of the pairing's 1,533 misses."""
     conv = [lined("a", (30, 40, 260, 56), "Why this matters to everyone", 52),
@@ -312,7 +348,7 @@ def test_the_folded_element_is_the_object_the_pairing_could_not_find():
     assert adopt_sync.pair_elements(folded, deck) == ({0: 0}, {})
 
 
-def test_the_gap_that_split_the_box_comes_back_out_of_the_baselines():
+def test_the_gap_that_split_the_box_comes_back_out_of_the_baselines() -> None:
     """Why a fold may be a concatenation and nothing more. `emit` lays a text box out from its
     paragraphs' own lines, so the space that made `classify` call these two elements is written
     again as the second paragraph's `spaceAbove` - nothing has to remember it, because it was
@@ -324,8 +360,8 @@ def test_the_gap_that_split_the_box_comes_back_out_of_the_baselines():
     objects = adopt_sync.object_records(
         [deck_element("gA", (30, 40, 260, 112), "Why it matters Three things happened")])
     folded, _ = adopt_sync.fold_composites(conv, objects)
-    paras = folded[0]["paragraphs"]
-    baselines = [[l["baseline"] for l in p["lines"]] for p in paras]
+    paras = jobjs(folded[0], "paragraphs")
+    baselines = [[jnum(ln, "baseline") for ln in jobjs(p, "lines")] for p in paras]
     ratios, space_above = emit.vertical_layout(paras, baselines, [14.0, 14.0])
     assert space_above[1] > 0, "the gap is written, not lost"
     # (the step snaps to whole pixels with its space: within half a pixel)
@@ -333,20 +369,20 @@ def test_the_gap_that_split_the_box_comes_back_out_of_the_baselines():
     assert abs(lands - 108) <= emit.PX_PT / 2, "the second paragraph's baseline lands where the PDF has it"
 
 
-def test_a_fold_never_turns_a_persons_filled_shape_into_a_text_box():
+def test_a_fold_never_turns_a_persons_filled_shape_into_a_text_box() -> None:
     """The one thing it may not do. A card with a title and a caption on it is a `shape` in the
     deck, and writing a text box over it would lose the fill and everything else standing on it.
     91 of the corpus's 310 candidates are an object that is not text: 39 pictures, 33 tables and
     19 shapes."""
     conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
             lined("b", (30, 96, 260, 112), "Three things happened", 108)]
-    card = adopt_sync.object_records([deck_element("gA", (28, 38, 262, 114),
-                                                   "Why it matters Three things happened",
-                                                   kind="shape")])
+    card = adopt_sync.object_records([{**deck_element("gA", (28, 38, 262, 114),
+                                                      "Why it matters Three things happened"),
+                                       "kind": "shape"}])
     assert adopt_sync.composites(records(conv), card) == {}
 
 
-def test_a_drawing_inside_the_box_is_left_where_it_is_and_the_words_are_folded():
+def test_a_drawing_inside_the_box_is_left_where_it_is_and_the_words_are_folded() -> None:
     """What is folded is the box's words. The rule under a heading, the picture of a formula in
     its prose, the icon somebody dropped on it - a fold writes a text box and a text box cannot
     carry a drawing, so those are not part of it and do not refuse it either."""
@@ -359,10 +395,10 @@ def test_a_drawing_inside_the_box_is_left_where_it_is_and_the_words_are_folded()
     assert adopt_sync.composites(records(conv), objects) == {0: [0, 2]}
     folded, gone = adopt_sync.fold_composites(conv, objects)
     assert gone == ["b"]
-    assert [e["id"] for e in folded] == ["a", "rule"], "the drawing stands where it stood"
+    assert ids(folded) == ["a", "rule"], "the drawing stands where it stood"
 
 
-def test_a_box_whose_words_are_partly_a_picture_is_not_folded():
+def test_a_box_whose_words_are_partly_a_picture_is_not_folded() -> None:
     """And the rule that carries it: the words that *are* folded still have to say what the box
     says. Where a picture holds some of them - an icon-font label, a formula the converter sent to
     the background - the texts alone do not, and the box is left as it is."""
@@ -376,7 +412,7 @@ def test_a_box_whose_words_are_partly_a_picture_is_not_folded():
     assert adopt_sync.composites(records(conv), objects) == {}
 
 
-def test_an_empty_box_is_no_composite():
+def test_an_empty_box_is_no_composite() -> None:
     """`SequenceMatcher` scores two empty strings 1.00, so an object that says nothing reads as
     one the converter split into everything drawn over it - the degenerate match `same_drawing`
     was written for, one dimension along."""
@@ -387,7 +423,7 @@ def test_an_empty_box_is_no_composite():
     assert adopt_sync.composites(records(conv), empty) == {}
 
 
-def test_an_element_that_already_says_it_all_is_the_box_and_not_a_part_of_it():
+def test_an_element_that_already_says_it_all_is_the_box_and_not_a_part_of_it() -> None:
     """The object's words are one element's; the other is a note somebody dropped on top of it."""
     conv = [lined("a", (30, 40, 260, 56), "Why it matters, and to whom", 52),
             lined("b", (200, 96, 250, 108), "p. 4", 104)]
@@ -396,7 +432,7 @@ def test_an_element_that_already_says_it_all_is_the_box_and_not_a_part_of_it():
     assert adopt_sync.composites(records(conv), objects) == {}
 
 
-def test_elements_that_do_not_add_up_to_what_the_object_says_are_left_alone():
+def test_elements_that_do_not_add_up_to_what_the_object_says_are_left_alone() -> None:
     conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
             lined("b", (30, 96, 260, 112), "Three things happened", 108)]
     objects = adopt_sync.object_records([deck_element("gA", (30, 40, 260, 112),
@@ -404,7 +440,7 @@ def test_elements_that_do_not_add_up_to_what_the_object_says_are_left_alone():
     assert adopt_sync.composites(records(conv), objects) == {}
 
 
-def test_an_element_two_objects_claim_is_folded_into_neither():
+def test_an_element_two_objects_claim_is_folded_into_neither() -> None:
     """One element cannot be part of two boxes, and which box it belongs to is exactly what is
     not known."""
     conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
@@ -416,40 +452,55 @@ def test_an_element_two_objects_claim_is_folded_into_neither():
     assert adopt_sync.composites(records(conv), objects) == {}
 
 
-def test_a_picture_anchored_to_a_folded_part_follows_it():
+def test_a_picture_anchored_to_a_folded_part_follows_it() -> None:
     """A formula or an icon in one of those paragraphs belongs to the box the paragraphs are now
     in; an anchor left pointing at an element that no longer exists is a broken deck."""
+    math: JsonObject = {"id": "m", "kind": "image", "role": "math", "bbox": [262, 96, 280, 112], "anchor": "b"}
     conv = [lined("a", (30, 40, 130, 56), "Why it matters", 52),
-            lined("b", (30, 96, 260, 112), "Three things happened", 108),
-            {"id": "m", "kind": "image", "role": "math", "bbox": [262, 96, 280, 112], "anchor": "b"}]
+            lined("b", (30, 96, 260, 112), "Three things happened", 108), math]
     objects = adopt_sync.object_records(
         [deck_element("gA", (30, 40, 260, 112), "Why it matters Three things happened")])
     folded, gone = adopt_sync.fold_composites(conv, objects)
     assert gone == ["b"]
-    assert [e["id"] for e in folded] == ["a", "m"]
+    assert ids(folded) == ["a", "m"]
     assert folded[1]["anchor"] == "a"
 
 
-def test_a_slide_is_folded_against_the_deck_slide_its_label_names():
+def test_a_slide_is_folded_against_the_deck_slide_its_label_names() -> None:
     """Folding comes before the slides are paired and pairing reads the elements folding changes,
     so the two sides find each other by the label `adopt` slugged from the slide's objectId."""
     tgt = target([[deck_element("gA", (30, 40, 260, 112), "Why it matters Three things happened")]])
     conv = conversion(tgt, [[lined("a", (30, 40, 130, 56), "Why it matters", 52),
                              lined("b", (30, 96, 260, 112), "Three things happened", 108)]])
     folds = adopt_sync.deck_folds(tgt)
-    label = conv["slides"][0]["label"]
+    label = jstr(conv, "slides", 0, "label")
     assert list(folds) == [label]
     elsewhere = copy.deepcopy(conv)
     adopt_sync.fold_slides(elsewhere, {"some-other-slide": folds[label]})
-    assert [e["id"] for e in elsewhere["slides"][0]["elements"]] == ["a", "b"], "no label, no fold"
+    assert ids(jobjs(elsewhere, "slides", 0, "elements")) == ["a", "b"], "no label, no fold"
     adopt_sync.fold_slides(conv, folds)
-    assert [e["id"] for e in conv["slides"][0]["elements"]] == ["a"]
+    assert ids(jobjs(conv, "slides", 0, "elements")) == ["a"]
 
 
 # ---------------------------------------------------------------- the base
 
+@dataclass(frozen=True, kw_only=True)
+class Adopted:
+    """A base `adopt` recorded, the target it read, the deck it read back and the conversion."""
+    base: JsonObject
+    target: JsonObject
+    pres: JsonObject
+    conv: JsonObject
+
+
+def a_pdf(folder: Path) -> Path:
+    pdf = folder / "main.pdf"
+    pdf.write_bytes(b"%PDF-1.4\n")
+    return pdf
+
+
 @pytest.fixture
-def adopted(tmp_path):
+def adopted(tmp_path: Path) -> Adopted:
     """A two-slide deck a person built, and the conversion of the source adopt wrote from it: one
     element pairs on each slide, and slide 1 has a second element nothing can be paired to."""
     tgt = target([[deck_element("gA", (30, 40, 130, 56), "Why it matters")],
@@ -463,108 +514,103 @@ def adopted(tmp_path):
     conv = conversion(tgt, [[conv_element("p0e0", (30, 40, 130, 56), "Why it matters")],
                             [conv_element("p1e0", (30, 40, 200, 56), "Three things happened"),
                              conv_element("p1e1", (30, 90, 200, 106), "Learn more")]])
-    pdf = tmp_path / "main.pdf"
-    pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", None)
-    return {"base": base, "target": tgt, "pres": pres, "conv": conv}
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, a_pdf(tmp_path), "last", None)
+    return Adopted(base=base, target=tgt, pres=pres, conv=conv)
 
 
-def test_the_base_names_the_persons_own_objects(adopted):
-    base = adopted["base"]
+def said(base: JsonObject, part: str) -> list[tuple[Json, Json]]:
+    """(element, why) of what the base's `adopt` summary lists under `part`."""
+    return [(u["element"], u["why"]) for u in jobjs(base, "adopt", part)]
+
+
+def test_the_base_names_the_persons_own_objects(adopted: Adopted) -> None:
+    base = adopted.base
     assert base["origin"] == "adopt"
     assert base["generation"] == 0, "nothing has ever been written to this deck"
-    assert [s["objectId"] for s in base["slides"]] == ["gSLIDE0", "gSLIDE1"]
-    first = base["slides"][0]["elements"][0]
+    assert [s["objectId"] for s in jobjs(base, "slides")] == ["gSLIDE0", "gSLIDE1"]
+    first = jobj(base, "slides", 0, "elements", 0)
     assert first["objects"] == ["gA"] and first["main"] == "gA"
-    assert first["readback"]["gA"]["text"] == "Why it matters\n", "the live object, read as sync reads it"
-    assert all(s["groups"] == [] for s in base["slides"]), "a group on an adopted slide is the person's"
+    assert jat(first, "readback", "gA", "text") == "Why it matters\n", "the live object, read as sync reads it"
+    assert all(s["groups"] == [] for s in jobjs(base, "slides")), "a group on an adopted slide is the person's"
 
 
-def test_the_base_refuses_to_claim_an_object_it_could_not_tell_apart(adopted):
+def test_the_base_refuses_to_claim_an_object_it_could_not_tell_apart(adopted: Adopted) -> None:
     """The deck has two boxes saying "Learn more" on top of each other; the source has one. The
     element is recorded with no object, and the base says why."""
-    el = next(e for e in adopted["base"]["slides"][1]["elements"] if e["ir"]["id"] == "p1e1")
+    el = next(e for e in jobjs(adopted.base, "slides", 1, "elements") if jat(e, "ir", "id") == "p1e1")
     assert el["objects"] == [] and el["main"] is None
-    said = adopted["base"]["adopt"]["unpaired"]
-    assert [(u["element"], u["why"]) for u in said] == [(el["key"], adopt_sync.AMBIGUOUS)]
-    assert adopted["base"]["adopt"]["paired"] == 2
+    assert said(adopted.base, "unpaired") == [(el["key"], adopt_sync.AMBIGUOUS)]
+    assert jat(adopted.base, "adopt", "paired") == 2
 
 
-def test_the_base_counts_what_the_layout_draws_apart_from_what_it_could_not_place(tmp_path):
+def test_the_base_counts_what_the_layout_draws_apart_from_what_it_could_not_place(tmp_path: Path) -> None:
     """Two different answers to "no object": one is a pairing that could not be made and refuses a
     sync that touches it, the other is an object that exists on the template. Kept apart in the
     base, because the merge reads the elements and a person reads the summary. Measured on the
     corpus: 57 of hebrew-lesson's 215 misses are its own theme drawn again, and 11 of 40 of
     apps-edu-zh's are one header."""
     tgt = target([[deck_element("gA", (30, 40, 130, 56), "Why it matters"),
-                   deck_element("L~gDeco", (10, 2, 120, 20), "conference 2026", inherited="L")]])
+                   inherited("L~gDeco", (10, 2, 120, 20), "conference 2026")]])
     pres = presentation([[live_shape("gA", (48, 64, 206, 89), "Why it matters")]])
     conv = conversion(tgt, [[conv_element("p0e0", (30, 40, 130, 56), "Why it matters"),
                              conv_element("p0e1", (12, 4, 118, 18), "conference 2026")]])
-    pdf = tmp_path / "main.pdf"
-    pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", None)
-    el = base["slides"][0]["elements"][1]
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, a_pdf(tmp_path), "last", None)
+    el = jobj(base, "slides", 0, "elements", 1)
     assert el["objects"] == [] and el["from_layout"] is True, "the merge reads this, not the summary"
-    assert base["adopt"]["unpaired"] == []
-    assert [(u["element"], u["why"]) for u in base["adopt"]["from_layout"]] == [(el["key"], adopt_sync.FROM_LAYOUT)]
+    assert jat(base, "adopt", "unpaired") == []
+    assert said(base, "from_layout") == [(el["key"], adopt_sync.FROM_LAYOUT)]
     assert adopt_sync.report_lines(base) == [
         "sync base: 1 slides, 1 of 2 elements tied to an object of the deck",
         "  1 of them are drawn by the deck's own layouts and master, which this converter never "
         "writes to: change those on the layout, in Slides"]
 
 
-def test_the_base_says_which_misses_are_cells_of_the_decks_own_tables(tmp_path):
+def test_the_base_says_which_misses_are_cells_of_the_decks_own_tables(tmp_path: Path) -> None:
     """The third of the three answers to "no object", and the biggest: 315 of the 1,078 misses the
     corpus has left are words standing in a table the deck drew and the converter read back as
     words. The merge reads the element (`merge.plan_unit`) and the person reads the summary."""
-    tgt = target([[deck_element("gT", (30, 50, 260, 120), "Aaa AAA Highest quality", kind="table",
-                                rows=[["Aaa", "AAA"], ["Highest quality", ""]])]])
+    tgt = target([[{**deck_element("gT", (30, 50, 260, 120), "Aaa AAA Highest quality"), "kind": "table",
+                    "rows": [["Aaa", "AAA"], ["Highest quality", ""]]}]])
     pres = presentation([[live_table("gT", (48, 80, 413, 190), [["Aaa", "AAA"], ["Highest quality", ""]])]])
     conv = conversion(tgt, [[conv_element("p0e0", (40, 60, 90, 72), "Aaa"),
                              conv_element("p0e1", (120, 60, 180, 72), "AAA"),
                              conv_element("p0e2", (40, 90, 200, 102), "Highest quality")]])
-    pdf = tmp_path / "main.pdf"
-    pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", None)
-    els = base["slides"][0]["elements"]
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, a_pdf(tmp_path), "last", None)
+    els = jobjs(base, "slides", 0, "elements")
     assert all(e["objects"] == [] and e["in_table"] is True for e in els)
-    assert [u["why"] for u in base["adopt"]["unpaired"]] == [adopt_sync.IN_A_TABLE] * 3
-    assert base["adopt"]["from_layout"] == []
+    assert [u["why"] for u in jobjs(base, "adopt", "unpaired")] == [adopt_sync.IN_A_TABLE] * 3
+    assert jat(base, "adopt", "from_layout") == []
 
 
-def test_the_base_says_which_miss_was_drawn_out_of_a_box_beside_it(tmp_path):
+def test_the_base_says_which_miss_was_drawn_out_of_a_box_beside_it(tmp_path: Path) -> None:
     """The fourth answer, and the only one that is not "nothing can be written here": the picture
     names the element that is tied to the box it came out of, and the merge then asks whether the
     two are one unit."""
     tgt = target([[deck_element("gBOX", (30, 50, 230, 80), "Why it matters")]])
     pres = presentation([[live_shape("gBOX", (48, 80, 365, 127), "Why it matters")]])
     conv = conversion(tgt, [[conv_element("p0e0", (46, 54, 200, 70), "Why it matters"),
-                             {"id": "p0e1", "kind": "image", "role": "icon",
-                              "bbox": [34, 56, 44, 66], "anchor": "p0e0"}]])
-    pdf = tmp_path / "main.pdf"
-    pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", None)
-    words, icon = base["slides"][0]["elements"]
-    assert words["objects"] == ["gBOX"] and icon["objects"] == []
-    assert icon["drawn_from"] == words["key"] and icon["anchor"] == words["key"]
-    assert base["adopt"]["unpaired"] == [] and base["adopt"]["from_layout"] == []
-    assert [(u["element"], u["why"]) for u in base["adopt"]["drawn_from"]] == \
-        [(icon["key"], adopt_sync.DRAWN_FROM)], "counted apart: this one is no miss to answer for"
-    assert merge.blind_members([words, icon]) == [], "so that box can still be edited from the source"
+                             icon("p0e1", [34, 56, 44, 66], "p0e0")]])
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, a_pdf(tmp_path), "last", None)
+    words, pic = jobjs(base, "slides", 0, "elements")
+    assert words["objects"] == ["gBOX"] and pic["objects"] == []
+    assert pic["drawn_from"] == words["key"] and pic["anchor"] == words["key"]
+    assert jat(base, "adopt", "unpaired") == [] and jat(base, "adopt", "from_layout") == []
+    assert said(base, "drawn_from") == \
+        [(pic["key"], adopt_sync.DRAWN_FROM)], "counted apart: this one is no miss to answer for"
+    assert merge.blind_members([words, pic]) == [], "so that box can still be edited from the source"
     assert adopt_sync.report_lines(base) == [
         "sync base: 1 slides, 1 of 2 elements tied to an object of the deck",
         "  1 of them this converter drew out of a box beside them (an icon in a line, a formula in "
         "prose): those go in with that box"]
 
 
-def test_the_base_names_the_deck_objects_the_source_does_not_draw(adopted):
+def test_the_base_names_the_deck_objects_the_source_does_not_draw(adopted: Adopted) -> None:
     """Reported, never written: `merge.user_objects` leaves them alone and so does every sync."""
-    left = {x["slide"]: x["objects"] for x in adopted["base"]["adopt"]["left_alone"]}
+    left = {jstr(x, "slide"): jstrs(x, "objects") for x in jobjs(adopted.base, "adopt", "left_alone")}
     assert sorted(o for oids in left.values() for o in oids) == ["gC", "gD"]
 
 
-def test_the_base_names_the_persons_groups_and_the_boxes_that_draw_nothing(tmp_path):
+def test_the_base_names_the_persons_groups_and_the_boxes_that_draw_nothing(tmp_path: Path) -> None:
     """Every object standing on the slide this conversion is not tied to - not only the ones the
     read made an element of. The two commonest are exactly the ones it did not: a person's own
     **group**, which is no drawing at all (`deck_ir(foreign=True)` reads its children and never
@@ -574,35 +620,34 @@ def test_the_base_names_the_persons_groups_and_the_boxes_that_draw_nothing(tmp_p
     called both an object the person had added: 2,866 groups and 3,845 blank shapes over the
     corpus, on 214 of its 912 slides, every one of them a slide nobody had touched since adopt read
     it, and the sentence that is true there ("the deck's own") never reached."""
-    group = {"objectId": "gG",
-             "size": {"width": pt(200), "height": pt(30)},
-             "transform": {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0, "unit": "EMU"},
-             "elementGroup": {"children": [live_shape("gA", (48, 64, 206, 89), "Why it matters")]}}
+    group: JsonObject = {"objectId": "gG",
+                         "size": {"width": pt(200), "height": pt(30)},
+                         "transform": {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0, "unit": "EMU"},
+                         "elementGroup": {"children": [live_shape("gA", (48, 64, 206, 89), "Why it matters")]}}
     tgt = target([[deck_element("gA", (30, 40, 130, 56), "Why it matters")]])
-    pres = presentation([[group, live_shape("gBLANK", (300, 200, 400, 240))]])
+    pres = presentation([[group, live_shape("gBLANK", (300, 200, 400, 240), None)]])
     conv = conversion(tgt, [[conv_element("p0e0", (30, 40, 130, 56), "Why it matters")]])
-    pdf = tmp_path / "main.pdf"
-    pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", None)
-    entry = base["slides"][0]
-    assert entry["elements"][0]["main"] == "gA", "the box inside the group still pairs"
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, a_pdf(tmp_path), "last", None)
+    entry = jobj(base, "slides", 0)
+    assert jat(entry, "elements", 0, "main") == "gA", "the box inside the group still pairs"
     assert entry["left_alone"] == ["gG", "gBLANK"], "the group around it and the box that draws nothing"
-    read = snapshot.read_presentation(pres)["slides"][0]
+    read = jobj(snapshot.read_presentation(as_presentation(pres, "the person's deck")), "slides", 0)
     assert [o["objectId"] for o in merge.user_objects(entry, read)] == ["gG", "gBLANK"]
     assert merge.slide_touched(entry, read) == [], "nobody has touched this slide since adopt read it"
-    read["objects"]["theirs"] = {**read["objects"]["gBLANK"], "parent_group": None}
+    objects = jobj(read, "objects")
+    objects["theirs"] = {**jobj(objects, "gBLANK"), "parent_group": None}
     assert merge.slide_touched(entry, read) == ["objects added"], "what they really add still says so"
 
 
-def test_the_base_records_the_decks_own_page_and_scale(adopted):
-    base = adopted["base"]
+def test_the_base_records_the_decks_own_page_and_scale(adopted: Adopted) -> None:
+    base = adopted.base
     assert base["deck_page_size"] == [720.0, 405.0]
     assert base["page_size"] == [453.54, 255.12]
     assert base["scale"] == pytest.approx(720.0 / 453.54)
     assert merge.deck_scale(base) == pytest.approx(720.0 / 453.54)
 
 
-def test_the_base_records_the_boxes_every_later_sync_folds_against(tmp_path):
+def test_the_base_records_the_boxes_every_later_sync_folds_against(tmp_path: Path) -> None:
     """A fold is a claim about the deck's geometry, and the deck's geometry is the one thing a
     later sync cannot read (it converts a source, it does not read Drive). So the base carries the
     boxes rather than the folds: the source changes between syncs, those do not."""
@@ -612,61 +657,62 @@ def test_the_base_records_the_boxes_every_later_sync_folds_against(tmp_path):
                              lined("b", (30, 96, 260, 112), "Three things happened", 108)]])
     folds = adopt_sync.deck_folds(tgt)
     adopt_sync.fold_slides(conv, folds)
-    pdf = tmp_path / "main.pdf"
-    pdf.write_bytes(b"%PDF-1.4\n")
-    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, pdf, "last", folds)
-    label = conv["slides"][0]["label"]
-    assert base["adopt"]["boxes"][label] == [{"object": "gA", "kind": "text", "bbox": [30, 40, 260, 112],
-                                             "text": "Why it matters Three things happened"}]
-    assert base["adopt"]["paired"] == 1, "the folded element is tied to the person's object"
-    assert base["adopt"]["unpaired"] == []
+    base = adopt_sync.build_base(conv, tmp_path, tgt, pres, a_pdf(tmp_path), "last", folds)
+    label = jstr(conv, "slides", 0, "label")
+    assert jat(base, "adopt", "boxes", label) == [{"object": "gA", "kind": "text", "bbox": [30, 40, 260, 112],
+                                                   "text": "Why it matters Three things happened"}]
+    assert jat(base, "adopt", "paired") == 1, "the folded element is tied to the person's object"
+    assert jat(base, "adopt", "unpaired") == []
 
 
-def test_a_base_with_no_boxes_folds_nothing(adopted):
+def test_a_base_with_no_boxes_folds_nothing(adopted: Adopted) -> None:
     """Every base `convert` ever wrote, and one an older `adopt` wrote: the read has to be a
     question, not an assumption."""
-    deck = {"slides": [{"label": "x", "elements": [conv_element("a", (30, 40, 130, 56), "Why")]}]}
-    adopt_sync.fold_slides(deck, (adopted["base"].get("adopt") or {}).get("boxes") or {})
+    deck: JsonObject = {"slides": [{"label": "x", "elements": [conv_element("a", (30, 40, 130, 56), "Why")]}]}
+    info = adopted.base.get("adopt")
+    boxes = jobj(info).get("boxes") if info else None
+    adopt_sync.fold_slides(deck, {label: jobjs(v) for label, v in jobj(boxes).items()} if boxes else {})
     adopt_sync.fold_slides(deck, {})
-    assert [e["id"] for e in deck["slides"][0]["elements"]] == ["a"]
+    assert ids(jobjs(deck, "slides", 0, "elements")) == ["a"]
 
 
-def test_the_base_claims_no_master_background(adopted):
+def test_the_base_claims_no_master_background(adopted: Adopted) -> None:
     """`sync.background_requests` copies the base's master background onto a slide whose background
     the source changed. On an adopted deck that master is the person's, and copying it would paint
     their template onto a slide they never asked to change."""
-    assert adopted["base"]["master_background"] is None
+    assert adopted.base["master_background"] is None
 
 
-def test_the_base_is_written_where_sync_looks_for_it(adopted, tmp_path):
+def test_the_base_is_written_where_sync_looks_for_it(adopted: Adopted, tmp_path: Path) -> None:
     out = tmp_path / "adopt-work"
-    path = adopt_sync.store(adopted["base"], out, None)
+    path = adopt_sync.store(adopted.base, out, None)
     assert path == snapshot.local_path(out) == out / "sync" / "base.json"
-    assert json.loads(path.read_text(encoding="utf-8"))["origin"] == "adopt"
+    stored: Json = json.loads(path.read_text(encoding="utf-8"))
+    assert jat(stored, "origin") == "adopt"
     assert sync_mod.resolve_deck(str(out)) == ("PERSONS_DECK", out), "sync --deck <the adopt folder>"
     assert adopt_sync.next_command("main.pdf", out) == f"python -m beamer2slides sync main.pdf --deck {out}"
 
 
-def test_a_source_whose_frames_are_not_the_decks_slides_gets_no_base(adopted):
+def test_a_source_whose_frames_are_not_the_decks_slides_gets_no_base(adopted: Adopted) -> None:
     """The labels `adopt.frame_labels` wrote are the only thing that says which frame is which
     slide. If they do not come back out of the PDF, nothing below may be believed."""
-    conv = copy.deepcopy(adopted["conv"])
-    conv["slides"][1]["label"] = "something-else"
-    why = adopt_sync.labels_match(conv, adopted["target"])
+    conv = copy.deepcopy(adopted.conv)
+    jobj(conv, "slides", 1)["label"] = "something-else"
+    why = adopt_sync.labels_match(conv, adopted.target)
     assert why and "do not carry the label adopt wrote" in why
-    assert adopt_sync.labels_match(conv["slides"] and {"slides": conv["slides"][:1]}, adopted["target"]) \
-        .startswith("the source compiles to 1 slide(s) and the deck has 2")
-    assert adopt_sync.labels_match(adopted["conv"], adopted["target"]) is None
+    short = adopt_sync.labels_match({"slides": jarr(conv, "slides")[:1]}, adopted.target)
+    assert short is not None and short.startswith("the source compiles to 1 slide(s) and the deck has 2")
+    assert adopt_sync.labels_match(adopted.conv, adopted.target) is None
 
 
-def test_a_deck_read_without_its_presentation_gets_no_base(tmp_path, adopted):
-    base, why = adopt_sync.record(tmp_path / "main.tex", tmp_path, adopted["target"], {"slides": []},
+def test_a_deck_read_without_its_presentation_gets_no_base(tmp_path: Path, adopted: Adopted) -> None:
+    base, why = adopt_sync.record(tmp_path / "main.tex", tmp_path, adopted.target, {"slides": []},
                                   None, "last", log=print)
     assert base is None
     assert why == "the deck was read without its presentation (no read-back to record)"
 
 
-def test_adopt_finds_the_presentation_stored_beside_an_offline_target(tmp_path):
+def test_adopt_finds_the_presentation_stored_beside_an_offline_target(tmp_path: Path) -> None:
     """`--deck <deck.json>` is the offline route (the corpus keeps `presentation.json` beside it)."""
     (tmp_path / "presentation.json").write_text(json.dumps({"presentationId": "P"}), encoding="utf-8")
     assert adopt.presentation_beside(tmp_path / "target.json") == {"presentationId": "P"}
@@ -686,48 +732,83 @@ def way(label: str, tail: str) -> str:
     return f"    {label.ljust(WIDTH)}  {CMD} {tail}"
 
 
-def refuse(base, mplan, theirs, way_back=None, backup_mode="auto") -> str:
-    found = adopt_sync.problems(base, mplan, theirs, way_back, backup_mode)
+def refuse(base: JsonObject, mplan: JsonObject, theirs: JsonObject, way_back: JsonObject | None) -> str:
+    """The message of a sync (`--backup auto`) that must be refused."""
+    found = adopt_sync.problems(base, mplan, theirs, way_back, "auto")
     assert found, "expected this sync to be refused"
     return adopt_sync.refusal_message("PERSONS_DECK", OUT, "new.pdf", found)
 
 
+@dataclass(frozen=True, kw_only=True)
+class World:
+    """An adopted deck in the reference world: the source's document, the base adopt recorded, the
+    deck (and its read-back as JSON) and the round's folder."""
+    doc: JsonObject
+    base: JsonObject
+    deck: W.LiveDeck
+    live: JsonObject
+    out: Path
+
+
 @pytest.fixture
-def world(tmp_path):
+def world(tmp_path: Path) -> World:
     """An adopted deck in the reference world, with a source that changed and a person who edited
     it (`fuzz_world`): everything the refusals are asked about is a real merge plan."""
     rng = random.Random(7)
     doc = W.make("adopt", rng, tmp_path)
     base = W.build_adopt_base(doc, tmp_path, random.Random(3))
     deck = W.live_of(base)
-    return {"doc": doc, "base": base, "deck": deck, "live": W.live_json(deck), "out": tmp_path}
+    return World(doc=doc, base=base, deck=deck, live=W.live_json(deck), out=tmp_path)
 
 
-def ours_of(doc, base, out):
+def ours_of(doc: JsonObject, base: JsonObject, out: Path) -> JsonObject:
     """The new conversion as the dict entries read it (`fuzz_world.build_ours` carries it typed too)."""
     return W.build_ours(doc, base, out).json
 
 
-def edit_source(op, seed, doc, out):
+def edit_source(op: SourceOp, seed: int, doc: JsonObject, out: Path) -> str | None:
     """One of the campaign's source changes, with nothing the person touched to collide with."""
     return op(random.Random(seed), doc, fuzz_sync.SourceContext(out=out, touched=()))
 
 
-def plan_of(world, doc=None):
-    ours = ours_of(doc or world["doc"], world["base"], world["out"])
-    return merge.plan_merge(world["base"], ours, world["live"])
+def plan_of(world: World, doc: JsonObject) -> JsonObject:
+    ours = ours_of(doc, world.base, world.out)
+    return merge.plan_merge(world.base, ours, world.live)
 
 
-KEPT = {"drive": {"presentationId": "a-copy"}}
+def at_generation(world: World, generation: int) -> JsonObject:
+    """A copy of the world's base, as if `generation` syncs had been written."""
+    base: JsonObject = {**copy.deepcopy(world.base), "generation": generation}
+    return base
 
 
-def test_a_first_sync_with_no_way_back_is_refused(world):
+def units(mplan: JsonObject) -> list[tuple[Json, JsonObject]]:
+    """(slide key, unit) of every unit the plan holds."""
+    out: list[tuple[Json, JsonObject]] = []
+    for p in jobjs(mplan, "slides"):
+        if p.get("units"):
+            out += [(p["key"], u) for u in jobjs(p, "units")]
+    return out
+
+
+def warnings(mplan: JsonObject) -> list[str]:
+    return jstrs(mplan, "report", "warnings")
+
+
+def live_order(world: World) -> list[str]:
+    return [jstr(s, "objectId") for s in jobjs(world.live, "slides")]
+
+
+KEPT: JsonObject = {"drive": {"presentationId": "a-copy"}}
+
+
+def test_a_first_sync_with_no_way_back_is_refused(world: World) -> None:
     """`--backup auto` exports the deck as .pptx before sync's first write. A Drive revision of a
     Slides file always exports its *current* content, so that file is the only way back - and an
     adopted deck has no earlier conversion to fall back on either."""
-    doc = copy.deepcopy(world["doc"])
-    edit_source(fuzz_sync.src_reword, 1, doc, world["out"])
-    message = refuse(world["base"], plan_of(world, doc), world["live"], {"warnings": ["could not export the deck"]})
+    doc = copy.deepcopy(world.doc)
+    edit_source(fuzz_sync.src_reword, 1, doc, world.out)
+    message = refuse(world.base, plan_of(world, doc), world.live, {"warnings": ["could not export the deck"]})
     assert message.splitlines()[0] == "refusing to sync into this adopted deck: 1 thing(s) about it cannot be trusted."
     assert "  https://docs.google.com/presentation/d/PERSONS_DECK/edit" in message
     assert ("  - no way back: no backup of the deck was kept, and Drive's version history cannot be read "
@@ -741,33 +822,33 @@ def test_a_first_sync_with_no_way_back_is_refused(world):
     assert message.count("python -m beamer2slides") == 4, "and nothing else is offered"
 
 
-def test_backup_none_is_how_one_asks_for_a_sync_with_no_way_back(world):
-    doc = copy.deepcopy(world["doc"])
-    edit_source(fuzz_sync.src_reword, 1, doc, world["out"])
-    found = adopt_sync.problems(world["base"], plan_of(world, doc), world["live"], None, "none")
+def test_backup_none_is_how_one_asks_for_a_sync_with_no_way_back(world: World) -> None:
+    doc = copy.deepcopy(world.doc)
+    edit_source(fuzz_sync.src_reword, 1, doc, world.out)
+    found = adopt_sync.problems(world.base, plan_of(world, doc), world.live, None, "none")
     assert [p["reason"] for p in found] == []
 
 
-def test_a_slide_of_the_adopted_deck_no_frame_accounts_for_is_kept(world):
+def test_a_slide_of_the_adopted_deck_no_frame_accounts_for_is_kept(world: World) -> None:
     """Those slides were made by a person. A frame that has gone out of the source is as likely to
     be a label that did not survive the round trip as a slide the author meant to drop, and on that
     evidence nothing here may take somebody's own slide - so it is kept and said out loud, and the
     rest of the sync goes in. At every generation: the base records the decision by not accounting
     for the slide, so there is nothing to reverse itself."""
     for generation in (0, 4):
-        base = {**copy.deepcopy(world["base"]), "generation": generation}
-        doc = copy.deepcopy(world["doc"])
-        edit_source(fuzz_sync.src_delete_slide, 5, doc, world["out"])
-        mplan = plan_of({**world, "base": base}, doc)
-        kept = [k for k in mplan["report"]["slides"]["kept"] if k["reason"] == ["the deck's own"]]
-        assert len(kept) == 1 and mplan["report"]["slides"]["deleted"] == []
-        assert [p["action"] for p in mplan["slides"] if p["key"] == kept[0]["slide"]] == ["keep_removed"]
+        base = at_generation(world, generation)
+        doc = copy.deepcopy(world.doc)
+        edit_source(fuzz_sync.src_delete_slide, 5, doc, world.out)
+        mplan = plan_of(dataclasses.replace(world, base=base), doc)
+        kept = [k for k in jobjs(mplan, "report", "slides", "kept") if k["reason"] == ["the deck's own"]]
+        assert len(kept) == 1 and jat(mplan, "report", "slides", "deleted") == []
+        assert [p["action"] for p in jobjs(mplan, "slides") if p["key"] == kept[0]["slide"]] == ["keep_removed"]
         assert any("accounted for by no frame of the source, and were kept" in w and
-                   "delete the slide in Slides" in w for w in mplan["report"]["warnings"])
-        assert adopt_sync.problems(base, mplan, world["live"], KEPT) == []
+                   "delete the slide in Slides" in w for w in warnings(mplan))
+        assert adopt_sync.problems(base, mplan, world.live, KEPT) == []
 
 
-def test_a_box_adopt_could_tie_to_nothing_is_not_an_object_the_person_added(world):
+def test_a_box_adopt_could_tie_to_nothing_is_not_an_object_the_person_added(world: World) -> None:
     """The slide above is kept whatever happens - the question is what the person is told, and the
     two sentences send them to different places. A deck somebody built is *made* of objects no
     element of the source is tied to (`adopt.left_alone`, 10-80% of them), and to
@@ -777,48 +858,48 @@ def test_a_box_adopt_could_tie_to_nothing_is_not_an_object_the_person_added(worl
     sentence that is actually true ("the deck's own") is never reached at all.
 
     What a person really added is still an edit, and still says so."""
-    b = next(s for s in world["base"]["slides"] if s.get("left_alone"))
-    read = next(s for s in world["live"]["slides"] if s["objectId"] == b["objectId"])
+    b = next(s for s in jobjs(world.base, "slides") if s.get("left_alone"))
+    read = next(s for s in jobjs(world.live, "slides") if s["objectId"] == b["objectId"])
     assert [o["objectId"] for o in merge.user_objects(b, read)] == b["left_alone"], \
         "the person's own boxes are on their slide, and no element of the source names one"
     assert merge.slide_touched(b, read) == [], "none of which is a thing they did to it"
-    read["objects"]["theirs"] = sync_model.readback_json(W.readback(
+    jobj(read, "objects")["theirs"] = sync_model.readback_json(W.readback(
         "shape", [10.0, 10.0, 60.0, 30.0], text=None, image=None, parent=None, title=None, z=0, table=None,
         fill=None))
     assert merge.slide_touched(b, read) == ["objects added"]
 
 
-def test_a_frame_put_back_finds_the_slide_that_was_kept_for_it(world):
+def test_a_frame_put_back_finds_the_slide_that_was_kept_for_it(world: World) -> None:
     """What keeping costs: `sync.new_base`'s `keep_removed` takes the label off that base entry - a
     slide the source no longer describes must not hold a live label hostage - so when the author
     puts the frame back, the content alone has to pair them. It does: nothing is created beside the
     kept slide, which is the one way this could have gone wrong."""
-    gone = copy.deepcopy(world["doc"])
-    edit_source(fuzz_sync.src_delete_slide, 5, gone, world["out"])
-    ours = W.build_ours(gone, world["base"], world["out"])
-    base = sync_model.base(world["base"])
-    plan = merge.plan_merge_of(base, ours.typed, W.deck_read_of(world["deck"]), None, False, merge.Resolutions(()))
+    gone = copy.deepcopy(world.doc)
+    edit_source(fuzz_sync.src_delete_slide, 5, gone, world.out)
+    ours = W.build_ours(gone, world.base, world.out)
+    base = sync_model.base(world.base)
+    plan = merge.plan_merge_of(base, ours.typed, W.deck_read_of(world.deck), None, False, merge.Resolutions(()))
     mplan = merge.merge_plan_json(plan)
-    kept = [k["slide"] for k in mplan["report"]["slides"]["kept"] if k["reason"] == ["the deck's own"]]
-    after = W.apply_plan(base, ours.json, world["deck"], plan, "t1")
-    base2 = W.rebase(world["base"], ours.json, after, plan, "t1")
-    entry = next(s for s in base2["slides"] if s["key"] == kept[0])
+    kept = [k["slide"] for k in jobjs(mplan, "report", "slides", "kept") if k["reason"] == ["the deck's own"]]
+    after = W.apply_plan(base, ours.json, world.deck, plan, "t1")
+    base2 = W.rebase(world.base, ours.json, after, plan, "t1")
+    entry = next(s for s in jobjs(base2, "slides") if s["key"] == kept[0])
     assert entry["label"] is None and entry["removed"] is True
 
-    again = merge.plan_merge(base2, ours_of(world["doc"], base2, world["out"]), W.live_json(after.deck))
-    assert again["report"]["slides"]["created"] == [] and again["report"]["slides"]["kept"] == []
-    assert again["report"]["slides"]["deleted"] == []
+    again = merge.plan_merge(base2, ours_of(world.doc, base2, world.out), W.live_json(after.deck))
+    assert jat(again, "report", "slides", "created") == [] and jat(again, "report", "slides", "kept") == []
+    assert jat(again, "report", "slides", "deleted") == []
 
 
-def test_the_slide_gate_still_stands_behind_the_merge(world):
+def test_the_slide_gate_still_stands_behind_the_merge(world: World) -> None:
     """As with an unpaired element: the merge decides, and the gate is what a plan saying otherwise
     meets on its way to a write (`adopt_sync.problems`, the first sync only)."""
-    doc = copy.deepcopy(world["doc"])
-    edit_source(fuzz_sync.src_delete_slide, 5, doc, world["out"])
+    doc = copy.deepcopy(world.doc)
+    edit_source(fuzz_sync.src_delete_slide, 5, doc, world.out)
     mplan = plan_of(world, doc)
-    p = next(p for p in mplan["slides"] if p["action"] == "keep_removed")
+    p = next(p for p in jobjs(mplan, "slides") if p["action"] == "keep_removed")
     p["action"] = "delete"
-    message = refuse(world["base"], mplan, world["live"], KEPT)
+    message = refuse(world.base, mplan, world.live, KEPT)
     assert "  - 1 slide(s) of the deck would be deleted, because no frame of the source accounts for them " \
            "any more: " in message
     assert ("      On the first sync that is usually a label that moved, not a slide the author meant to drop."
@@ -826,103 +907,118 @@ def test_the_slide_gate_still_stands_behind_the_merge(world):
     assert "    put the frame labels back where adopt wrote them (docs/labels.md), then sync again" in message
 
 
-def unpair(world, generation: int = 0) -> tuple[dict, dict]:
+def reword(doc: JsonObject, eid: Json) -> None:
+    """The source says something else now in its element `eid`."""
+    ir = next(e for s in jobjs(doc, "slides") for e in jobjs(s, "elements") if e["id"] == eid)
+    runs: list[Json] = [W.run("the source says something else now")]
+    jobjs(ir, "paragraphs")[0]["runs"] = runs
+
+
+def unpair(world: World, generation: int) -> tuple[JsonObject, JsonObject]:
     """The world's base with its first paired element tied to nothing, and a source that changes
     exactly that element - the shape `adopt_sync.pair_elements` leaves behind when two of a deck's
     boxes are too alike to tell apart."""
-    base = {**copy.deepcopy(world["base"]), "generation": generation}
-    doc = copy.deepcopy(world["doc"])
-    el = next(e for s in base["slides"] for e in s["elements"] if e["objects"])
-    el["objects"], el["main"], el["readback"] = [], None, {}
-    ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == el["ir"]["id"])
-    ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
+    base = at_generation(world, generation)
+    doc = copy.deepcopy(world.doc)
+    el = next(e for s in jobjs(base, "slides") for e in jobjs(s, "elements") if e["objects"])
+    no_objects: list[Json] = []
+    no_readback: JsonObject = {}
+    el["objects"] = no_objects
+    el["main"] = None
+    el["readback"] = no_readback
+    reword(doc, jat(el, "ir", "id"))
     return base, doc
 
 
-def test_an_element_tied_to_no_object_of_the_deck_is_kept_and_the_rest_syncs(world):
+def test_an_element_tied_to_no_object_of_the_deck_is_kept_and_the_rest_syncs(world: World) -> None:
     """Sync deletes a recreated unit's old objects through the base, and an unpaired element names
     none: writing it would leave the person's own box standing and put a second one on top of it.
     So that unit is kept and everything else goes in - one element nothing can be written to
     freezes that element, not the talk. It used to refuse the whole sync, and over 400 first-sync
     campaign rounds that was 734 of ~2,400 syncs writing nothing at all."""
-    base, doc = unpair(world)
-    edit_source(fuzz_sync.src_reword, 1, doc, world["out"])            # ... and the source changes another slide too
-    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
-    held = [(p["key"], u) for p in mplan["slides"] for u in p.get("units") or [] if u.get("unpaired")]
+    base, doc = unpair(world, 0)
+    edit_source(fuzz_sync.src_reword, 1, doc, world.out)            # ... and the source changes another slide too
+    mplan = merge.plan_merge(base, ours_of(doc, base, world.out), world.live)
+    held = [(k, u) for k, u in units(mplan) if u.get("unpaired")]
     assert len(held) == 1 and held[0][1]["action"] == "keep"
-    c = next(c for c in mplan["report"]["conflicts"] if c["field"] == "unpaired")
+    c = next(c for c in jobjs(mplan, "report", "conflicts") if c["field"] == "unpaired")
     assert (c["slide"], c["element"]) == (held[0][0], held[0][1]["key"])
     assert c["resolution"] == "kept (tied to no object of the deck)" and not c.get("takeable")
     assert any("could not be tied to any object of this deck" in w and "Change them in the deck itself"
-               in w for w in mplan["report"]["warnings"])
-    assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], "nothing left to refuse"
-    assert merge.has_writes(mplan, [s["objectId"] for s in world["live"]["slides"]]), \
+               in w for w in warnings(mplan))
+    assert adopt_sync.problems(base, mplan, world.live, KEPT) == [], "nothing left to refuse"
+    assert merge.has_writes(mplan, live_order(world)), \
         "and the rest of the deck is synced as usual"
 
 
-def test_an_element_the_decks_layout_draws_is_named_for_what_it_is(world):
+def test_an_element_the_decks_layout_draws_is_named_for_what_it_is(world: World) -> None:
     """The same decision - keep it, write nothing, say so - told in the words that lead somewhere.
     "Could not be tied to any object of this deck. Change them in the deck itself" sends a person
     to look on the slide for a footer that is not on the slide; it is on the layout, and Slides
     has a door for that."""
-    base, doc = unpair(world)
-    el = next(e for s in base["slides"] for e in s["elements"] if not e["objects"])
+    base, doc = unpair(world, 0)
+    el = next(e for s in jobjs(base, "slides") for e in jobjs(s, "elements") if not e["objects"])
     el["from_layout"] = True
-    edit_source(fuzz_sync.src_reword, 1, doc, world["out"])            # ... and the source changes another slide too
-    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
-    held = [(p["key"], u) for p in mplan["slides"] for u in p.get("units") or [] if u.get("inherited")]
+    edit_source(fuzz_sync.src_reword, 1, doc, world.out)            # ... and the source changes another slide too
+    mplan = merge.plan_merge(base, ours_of(doc, base, world.out), world.live)
+    held = [(k, u) for k, u in units(mplan) if u.get("inherited")]
     assert len(held) == 1 and held[0][1]["action"] == "keep"
-    assert not any(u.get("unpaired") for p in mplan["slides"] for u in p.get("units") or [])
-    c = next(c for c in mplan["report"]["conflicts"] if c["field"] == "inherited")
+    assert not any(u.get("unpaired") for _, u in units(mplan))
+    c = next(c for c in jobjs(mplan, "report", "conflicts") if c["field"] == "inherited")
     assert (c["slide"], c["element"]) == (held[0][0], held[0][1]["key"])
     assert c["resolution"] == "kept (the deck's layout draws this, not the slide)"
     assert any("are drawn by this deck's layouts or its master, not by the slide" in w and
-               "Slide > Edit theme" in w for w in mplan["report"]["warnings"])
-    assert not any("could not be tied to any object" in w for w in mplan["report"]["warnings"])
-    assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], "nothing left to refuse"
-    assert merge.has_writes(mplan, [s["objectId"] for s in world["live"]["slides"]]), \
+               "Slide > Edit theme" in w for w in warnings(mplan))
+    assert not any("could not be tied to any object" in w for w in warnings(mplan))
+    assert adopt_sync.problems(base, mplan, world.live, KEPT) == [], "nothing left to refuse"
+    assert merge.has_writes(mplan, live_order(world)), \
         "and the rest of the deck is synced as usual"
 
 
-def test_a_cell_of_a_table_of_the_decks_is_named_for_what_it_is(world):
+def test_a_cell_of_a_table_of_the_decks_is_named_for_what_it_is(world: World) -> None:
     """The third voice of the same decision. This one is not a box the person has to go and find:
     the table is right there in front of them, and what they cannot see is that this converter
     reads it back as loose words and so has no cell to write into."""
-    base, doc = unpair(world)
-    el = next(e for s in base["slides"] for e in s["elements"] if not e["objects"])
+    base, doc = unpair(world, 0)
+    el = next(e for s in jobjs(base, "slides") for e in jobjs(s, "elements") if not e["objects"])
     el["in_table"] = True
-    edit_source(fuzz_sync.src_reword, 1, doc, world["out"])            # ... and the source changes another slide too
-    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
-    held = [(p["key"], u) for p in mplan["slides"] for u in p.get("units") or [] if u.get("in_table")]
+    edit_source(fuzz_sync.src_reword, 1, doc, world.out)            # ... and the source changes another slide too
+    mplan = merge.plan_merge(base, ours_of(doc, base, world.out), world.live)
+    held = [(k, u) for k, u in units(mplan) if u.get("in_table")]
     assert len(held) == 1 and held[0][1]["action"] == "keep"
-    assert not any(u.get("unpaired") or u.get("inherited") for p in mplan["slides"] for u in p.get("units") or [])
-    c = next(c for c in mplan["report"]["conflicts"] if c["field"] == "in_table")
+    assert not any(u.get("unpaired") or u.get("inherited") for _, u in units(mplan))
+    c = next(c for c in jobjs(mplan, "report", "conflicts") if c["field"] == "in_table")
     assert (c["slide"], c["element"]) == (held[0][0], held[0][1]["key"])
     assert c["resolution"] == "kept (a cell of a table of the deck's)"
     assert any("stand inside a table of this deck" in w and "Edit those cells in Slides" in w
-               for w in mplan["report"]["warnings"])
-    assert not any("could not be tied to any object" in w for w in mplan["report"]["warnings"])
-    assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], "nothing left to refuse"
-    assert merge.has_writes(mplan, [s["objectId"] for s in world["live"]["slides"]]), \
+               for w in warnings(mplan))
+    assert not any("could not be tied to any object" in w for w in warnings(mplan))
+    assert adopt_sync.problems(base, mplan, world.live, KEPT) == [], "nothing left to refuse"
+    assert merge.has_writes(mplan, live_order(world)), \
         "and the rest of the deck is synced as usual"
 
 
-def an_icon_over_a_tied_box(base):
-    """An icon the converter read out of a text box, on a slide where that box really is tied to one
-    of the person's objects.
+def an_icon_over_a_tied_box(base: JsonObject) -> tuple[JsonObject, JsonObject] | None:
+    """(icon, box) for an icon the converter read out of a text box, on a slide where that box
+    really is tied to one of the person's objects.
 
     The world refuses a share of every deck's pairings (`fuzz_world.build_adopt_base`), so some of
     its icons hang off a box that went unpaired itself - a unit frozen by the words, which is not
     what the two tests below are about."""
-    for s in base["slides"]:
-        for el in s["elements"]:
-            host = next((e for e in s["elements"] if e["key"] == el.get("drawn_from")), None)
+    for s in jobjs(base, "slides"):
+        elements = jobjs(s, "elements")
+        for el in elements:
+            host = next((e for e in elements if e["key"] == el.get("drawn_from")), None)
             if host is not None and host.get("objects"):
                 return el, host
-    return None, None
+    return None
 
 
-def test_a_picture_drawn_out_of_this_units_own_box_does_not_freeze_it(world):
+def unit_of(mplan: JsonObject, key: Json) -> JsonObject:
+    return next(u for _, u in units(mplan) if u["key"] == key)
+
+
+def test_a_picture_drawn_out_of_this_units_own_box_does_not_freeze_it(world: World) -> None:
     """Not a fourth voice but the end of the question. A unit whose every member names an object is
     written; one member naming none freezes it, because sync deletes a unit's old objects through
     the base and one that names none leaves the person's box standing under what is created. An
@@ -930,36 +1026,37 @@ def test_a_picture_drawn_out_of_this_units_own_box_does_not_freeze_it(world):
     that box *is* named, by the member beside it in this very unit. The one delete takes it away
     and the unit goes in whole, with nothing left behind. Without this a person's box could never
     be edited from the source once the converter had read an icon out of it."""
-    base = copy.deepcopy(world["base"])
-    doc = copy.deepcopy(world["doc"])
-    icon, words = an_icon_over_a_tied_box(base)
-    assert icon is not None, "the world draws an adopted deck with an icon read out of a text box"
-    ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == words["ir"]["id"])
-    ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
-    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
-    unit = next(u for p in mplan["slides"] for u in p.get("units") or [] if u["key"] == words["key"])
+    base = copy.deepcopy(world.base)
+    doc = copy.deepcopy(world.doc)
+    found = an_icon_over_a_tied_box(base)
+    assert found is not None, "the world draws an adopted deck with an icon read out of a text box"
+    _, words = found
+    reword(doc, jat(words, "ir", "id"))
+    mplan = merge.plan_merge(base, ours_of(doc, base, world.out), world.live)
+    unit = unit_of(mplan, words["key"])
     assert unit["action"] == "recreate", "the person's box takes the source's new words"
     assert not unit.get("unpaired") and not any(c["field"] == "unpaired"
-                                                for c in mplan["report"]["conflicts"])
-    assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], "and the gate agrees"
+                                                for c in jobjs(mplan, "report", "conflicts"))
+    assert adopt_sync.problems(base, mplan, world.live, KEPT) == [], "and the gate agrees"
 
 
-def test_a_picture_drawn_out_of_another_units_box_still_freezes_this_one(world):
+def test_a_picture_drawn_out_of_another_units_box_still_freezes_this_one(world: World) -> None:
     """Only inside the unit. The same picture drawn out of an object some other unit is tied to
     would be created while that object stayed exactly where it is, which is the duplicate on
     somebody's slide this whole gate is about."""
-    base = copy.deepcopy(world["base"])
-    doc = copy.deepcopy(world["doc"])
-    icon, words = an_icon_over_a_tied_box(base)
-    icon["drawn_from"] = "a box of another unit"
-    ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == words["ir"]["id"])
-    ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
-    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
-    unit = next(u for p in mplan["slides"] for u in p.get("units") or [] if u["key"] == words["key"])
-    assert unit["action"] == "keep" and unit["unpaired"] == [icon["key"]]
+    base = copy.deepcopy(world.base)
+    doc = copy.deepcopy(world.doc)
+    found = an_icon_over_a_tied_box(base)
+    assert found is not None
+    pic, words = found
+    pic["drawn_from"] = "a box of another unit"
+    reword(doc, jat(words, "ir", "id"))
+    mplan = merge.plan_merge(base, ours_of(doc, base, world.out), world.live)
+    unit = unit_of(mplan, words["key"])
+    assert unit["action"] == "keep" and unit["unpaired"] == [pic["key"]]
 
 
-def test_the_gate_reads_the_unit_the_merge_planned_and_not_a_map_of_keys(world):
+def test_the_gate_reads_the_unit_the_merge_planned_and_not_a_map_of_keys(world: World) -> None:
     """The same members the merge saw, or the gate is answering about another element. A base slide
     can answer to one key twice - a unit kept though the source dropped it keeps the key the next
     conversion has since given to something else (`merge.keys_the_source_took`, which is where that
@@ -969,44 +1066,44 @@ def test_the_gate_reads_the_unit_the_merge_planned_and_not_a_map_of_keys(world):
     over a unit that was never blind: adopt-shaped seed 86066 at chain 8, 3 syncs of that round
     writing nothing at all. Here the two icons stand in one base on purpose, which is the state the
     other fix now prevents."""
-    base = copy.deepcopy(world["base"])
-    doc = copy.deepcopy(world["doc"])
-    icon, words = an_icon_over_a_tied_box(base)
-    assert icon is not None
-    slide = next(s for s in base["slides"] if any(e is icon for e in s["elements"]))
-    stale = {**copy.deepcopy(icon), "objects": [], "main": None, "removed": True,
-             "drawn_from": "a box of another unit", "anchor": "a box of another unit"}
-    slide["elements"].append(stale)                 # the kept one, under the key the source took
-    ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == words["ir"]["id"])
-    ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
-    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
-    unit = next(u for p in mplan["slides"] for u in p.get("units") or [] if u["key"] == words["key"])
+    base = copy.deepcopy(world.base)
+    doc = copy.deepcopy(world.doc)
+    found = an_icon_over_a_tied_box(base)
+    assert found is not None
+    pic, words = found
+    slide = next(s for s in jobjs(base, "slides") if any(e is pic for e in jobjs(s, "elements")))
+    stale: JsonObject = {**copy.deepcopy(pic), "objects": [], "main": None, "removed": True,
+                         "drawn_from": "a box of another unit", "anchor": "a box of another unit"}
+    jarr(slide, "elements").append(stale)           # the kept one, under the key the source took
+    reword(doc, jat(words, "ir", "id"))
+    mplan = merge.plan_merge(base, ours_of(doc, base, world.out), world.live)
+    unit = unit_of(mplan, words["key"])
     assert unit["action"] == "recreate" and not unit.get("unpaired")
-    assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], \
+    assert adopt_sync.problems(base, mplan, world.live, KEPT) == [], \
         "the unit's own members are the ones the merge read"
 
 
-def test_the_gate_still_stands_behind_the_merge(world):
+def test_the_gate_still_stands_behind_the_merge(world: World) -> None:
     """`merge.plan_unit` decides it, `adopt_sync.problems` is the last thing between a plan and a
     write into somebody's deck - for a plan that says recreate anyway, however it came to."""
-    base, doc = unpair(world)
-    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
-    u = next(u for p in mplan["slides"] for u in p.get("units") or [] if u.get("unpaired"))
+    base, doc = unpair(world, 0)
+    mplan = merge.plan_merge(base, ours_of(doc, base, world.out), world.live)
+    u = next(u for _, u in units(mplan) if u.get("unpaired"))
     u["action"] = "recreate"
-    message = refuse(base, mplan, world["live"], KEPT)
+    message = refuse(base, mplan, world.live, KEPT)
     assert "  - 1 element(s) the source changed could not be tied to any object of the deck: " in message
     assert "      Writing them would put a second object beside the person's, not over it." in message
     assert "    change those elements in the deck instead of in the source, and sync the rest" in message
 
 
-def a_deck(width: float, height: float) -> dict:
+def a_deck(width: float, height: float) -> JsonObject:
     """A one-slide classify IR whose page is `width` x `height` in PDF pt, with one picture on it."""
     return {"slides": [{"page": 0, "size": [width, height], "notes": "", "background_color": "#ffffff",
                         "elements": [{"id": "p0i0", "kind": "image", "role": "figure", "bbox": [10, 20, 110, 70],
                                       "file": "figures/a.png"}]}]}
 
 
-def test_a_deck_the_person_made_wider_is_planned_at_its_own_size():
+def test_a_deck_the_person_made_wider_is_planned_at_its_own_size() -> None:
     """The scale is the one number that carries this converter's PDF points onto the deck's page
     (`emit.DeckPlan.scale`), and it is what every box, font size and hole width is multiplied by. A
     deck a person built is whatever size they made it - 1440 x 810 is an ordinary Slides deck - so
@@ -1017,32 +1114,32 @@ def test_a_deck_the_person_made_wider_is_planned_at_its_own_size():
     ours, theirs = DeckPlan(deck), DeckPlan(deck, 1440.0)
     assert ours.page_width == SLIDE_W and ours.scale == pytest.approx(720.0 / 453.54)
     assert theirs.page_width == 1440.0 and theirs.scale == pytest.approx(1440.0 / 453.54)
-    box = theirs.pictures(theirs.deck["slides"][0])[0][1]
-    assert box == pytest.approx([v * 2 for v in ours.pictures(ours.deck["slides"][0])[0][1]]), \
+    box = theirs.pictures(jobj(theirs.deck, "slides", 0))[0][1]
+    assert box == pytest.approx([v * 2 for v in ours.pictures(jobj(ours.deck, "slides", 0))[0][1]]), \
         "twice the page, twice the box: the picture lands on the same part of the slide"
 
 
-def test_a_wider_deck_is_not_refused_anymore(world):
+def test_a_wider_deck_is_not_refused_anymore(world: World) -> None:
     """What the width used to be refused for is now planned for, so a deck of an ordinary Slides
     size takes new objects like any other."""
-    base = {**copy.deepcopy(world["base"]), "deck_page_size": [1440.0, 810.0]}
+    base: JsonObject = {**copy.deepcopy(world.base), "deck_page_size": [1440.0, 810.0]}
     assert adopt_sync.deck_width(base) == 1440.0
     assert adopt_sync.aspect_mismatch(base) is None, "1440 x 810 is the page the source compiles to, doubled"
-    doc = copy.deepcopy(world["doc"])
-    edit_source(fuzz_sync.src_add_element, 2, doc, world["out"])
-    found = adopt_sync.problems(base, plan_of({**world, "base": base}, doc), world["live"], KEPT)
+    doc = copy.deepcopy(world.doc)
+    edit_source(fuzz_sync.src_add_element, 2, doc, world.out)
+    found = adopt_sync.problems(base, plan_of(dataclasses.replace(world, base=base), doc), world.live, KEPT)
     assert [p["reason"] for p in found] == []
 
 
-def test_a_deck_of_another_shape_than_the_source_compiles_to_is_refused(world):
+def test_a_deck_of_another_shape_than_the_source_compiles_to_is_refused(world: World) -> None:
     """One number cannot carry a 16:10 plan onto a 16:9 page: everything would land at the right
     place across the slide and the wrong one down it, which is exactly the kind of wrong nobody
     sees until the deck is read."""
-    base = copy.deepcopy(world["base"])
+    base = copy.deepcopy(world.base)
     base["deck_page_size"] = [1440.0, 900.0]
-    doc = copy.deepcopy(world["doc"])
-    edit_source(fuzz_sync.src_add_element, 2, doc, world["out"])
-    message = refuse(base, plan_of({**world, "base": base}, doc), world["live"], KEPT)
+    doc = copy.deepcopy(world.doc)
+    edit_source(fuzz_sync.src_add_element, 2, doc, world.out)
+    message = refuse(base, plan_of(dataclasses.replace(world, base=base), doc), world.live, KEPT)
     assert ("  - the deck's slides are 1.600 wide for every 1 high and the page the source compiles to is 1.778,"
             in message)
     assert ("      so the 1 object(s) this sync would create land at the right place across and the wrong one down."
@@ -1050,38 +1147,38 @@ def test_a_deck_of_another_shape_than_the_source_compiles_to_is_refused(world):
     assert "    give the source back the paper adopt wrote for it (`\\geometry`, docs/sync.md)" in message
 
 
-def test_the_page_shape_refusal_outlives_the_first_sync(world):
+def test_the_page_shape_refusal_outlives_the_first_sync(world: World) -> None:
     """The way back and the deck's own slides are about a deck nothing has been written to yet.
     The shape of its page is not: it is the same on the fourth sync as on the first."""
-    base = {**copy.deepcopy(world["base"]), "generation": 4, "deck_page_size": [1440.0, 900.0]}
-    doc = copy.deepcopy(world["doc"])
-    edit_source(fuzz_sync.src_add_element, 2, doc, world["out"])
-    reasons = [p["reason"] for p in adopt_sync.problems(base, plan_of({**world, "base": base}, doc),
-                                                        world["live"], None, "none")]
+    base: JsonObject = {**copy.deepcopy(world.base), "generation": 4, "deck_page_size": [1440.0, 900.0]}
+    doc = copy.deepcopy(world.doc)
+    edit_source(fuzz_sync.src_add_element, 2, doc, world.out)
+    reasons = [p["reason"] for p in adopt_sync.problems(base, plan_of(dataclasses.replace(world, base=base), doc),
+                                                        world.live, None, "none")]
     assert reasons == ["page-shape"]
 
 
-def test_an_unpaired_element_is_held_at_every_generation(world):
+def test_an_unpaired_element_is_held_at_every_generation(world: World) -> None:
     """Nor does an unpaired element heal by itself: no sync ever writes it, so no sync ever gives
     it an object, so it is still unpaired at generation 4 and still held there. The offline
     campaign found this at chain depth 2, where the base rebased after the first sync let the
     second one duplicate the person's box (`fuzz_sync._doubled`)."""
-    base, doc = unpair(world, generation=4)
-    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
-    assert [u["action"] for p in mplan["slides"] for u in p.get("units") or [] if u.get("unpaired")] == ["keep"]
-    assert adopt_sync.problems(base, mplan, world["live"], None, "none") == []
+    base, doc = unpair(world, 4)
+    mplan = merge.plan_merge(base, ours_of(doc, base, world.out), world.live)
+    assert [u["action"] for _, u in units(mplan) if u.get("unpaired")] == ["keep"]
+    assert adopt_sync.problems(base, mplan, world.live, None, "none") == []
 
 
-def test_a_sync_that_writes_nothing_is_never_refused(world):
+def test_a_sync_that_writes_nothing_is_never_refused(world: World) -> None:
     """Not one refusal is about reading the deck: a sync whose source says what the deck already
     says has nothing to vouch for."""
-    assert adopt_sync.problems(world["base"], plan_of(world), world["live"], None, "auto") == []
+    assert adopt_sync.problems(world.base, plan_of(world, world.doc), world.live, None, "auto") == []
 
 
-def test_a_converted_deck_is_not_asked_any_of_this(world, tmp_path):
+def test_a_converted_deck_is_not_asked_any_of_this(world: World, tmp_path: Path) -> None:
     """Every object of a converted deck is one this converter made, under an id it chose."""
-    base = W.build_base(world["doc"], tmp_path)
-    ours = ours_of(world["doc"], base, tmp_path)
+    base = W.build_base(world.doc, tmp_path)
+    ours = ours_of(world.doc, base, tmp_path)
     live = W.live_json(W.live_of(base))
     assert adopt_sync.problems(base, merge.plan_merge(base, ours, live), live, None, "auto") == []
 
@@ -1106,34 +1203,39 @@ def forced(plan: merge.MergePlan) -> merge.MergePlan:
     return dataclasses.replace(plan, slides=tuple(slides))
 
 
-def test_the_typed_gate_answers_as_the_gate_over_the_plans_json(world):
+SOURCE_EDITS: dict[str, SourceOp] = {"reword": fuzz_sync.src_reword, "delete_slide": fuzz_sync.src_delete_slide,
+                                     "add_element": fuzz_sync.src_add_element}
+
+
+def test_the_typed_gate_answers_as_the_gate_over_the_plans_json(world: World) -> None:
     """`problems_of` reads a `MergePlan`, `problems` the plan's JSON (the fuzz's and these tests'):
     one gate, so over every refusal each can make they must say the same thing."""
-    live = world["live"]
+    live = world.live
     seen: set[str] = set()
+    ways_back: list[JsonObject | None] = [None, KEPT, {"warnings": ["could not export the deck"]}]
     for edit in ("none", "reword", "delete_slide", "add_element", "unpair"):
         for variant in ("first", "generation 4", "16:10"):
             generation = 4 if variant == "generation 4" else 0
             if edit == "unpair":
                 base, doc = unpair(world, generation)
             else:
-                base = {**copy.deepcopy(world["base"]), "generation": generation}
-                doc = copy.deepcopy(world["doc"])
+                base = at_generation(world, generation)
+                doc = copy.deepcopy(world.doc)
                 if edit != "none":
-                    edit_source(getattr(fuzz_sync, f"src_{edit}"), 5, doc, world["out"])
+                    edit_source(SOURCE_EDITS[edit], 5, doc, world.out)
             if variant == "16:10":
                 base["deck_page_size"] = [1440.0, 900.0]
-            ours = W.build_ours(doc, base, world["out"])
+            ours = W.build_ours(doc, base, world.out)
             plan = merge.plan_merge_of(sync_model.base(base), ours.typed, sync_model.deck_read(live),
                                        None, False, merge.Resolutions(()))
             for typed in (plan, forced(plan)):
                 mplan = merge.merge_plan_json(typed)
-                for way_back in (None, KEPT, {"warnings": ["could not export the deck"]}):
+                for way_back in ways_back:
                     for mode in ("auto", "none"):
                         want = adopt_sync.problems(base, mplan, live, way_back, mode)
                         assert adopt_sync.problems_of(base, typed, live, way_back, mode) == want, \
                             (edit, variant, way_back, mode)
-                        seen |= {p["reason"] for p in want}
+                        seen |= {jstr(p, "reason") for p in want}
     assert seen == {"no-way-back", "slides-deleted", "unpaired", "page-shape"}, "every refusal was asked"
 
 
@@ -1144,7 +1246,7 @@ def round_trip(seed: int, chain: int, work: Path) -> fuzz_sync.Chain:
 
 
 @pytest.mark.parametrize("seed", [0, 3, 11, 29, 57, 104, 211, 333])
-def test_the_first_sync_after_an_adopt_loses_nothing(seed, tmp_path):
+def test_the_first_sync_after_an_adopt_loses_nothing(seed: int, tmp_path: Path) -> None:
     """Adopt a deck, change the source, let a person edit the deck, sync: whatever the merge wrote,
     nothing the person put there is gone without the report accounting for it (`loss_oracle`), and
     nothing was written beside an object the base could not pair (`fuzz_sync._doubled`)."""
@@ -1153,12 +1255,13 @@ def test_the_first_sync_after_an_adopt_loses_nothing(seed, tmp_path):
 
 
 @pytest.mark.parametrize("seed", [1, 8, 42, 77])
-def test_a_chain_of_syncs_after_an_adopt_loses_nothing(seed, tmp_path):
+def test_a_chain_of_syncs_after_an_adopt_loses_nothing(seed: int, tmp_path: Path) -> None:
     result = round_trip(seed, 4, tmp_path / str(seed))
     assert loss_oracle.described(result.failures) == ""
 
 
-def test_the_campaign_sees_the_duplicate_the_unpaired_hold_prevents(tmp_path, monkeypatch):
+def test_the_campaign_sees_the_duplicate_the_unpaired_hold_prevents(tmp_path: Path,
+                                                                    monkeypatch: pytest.MonkeyPatch) -> None:
     """The loss oracle cannot judge this one: nothing is lost when sync writes a second object
     beside the person's, because sync deletes the old ones through the base and an unpaired element
     names none. `fuzz_sync._doubled` is what sees it - and with the hold and the gate in place it
@@ -1166,39 +1269,43 @@ def test_the_campaign_sees_the_duplicate_the_unpaired_hold_prevents(tmp_path, mo
     recognising an adopted base, and the gate stops asking about unpaired elements."""
     monkeypatch.setattr(merge, "ADOPTED", "a word no base says")
     real = adopt_sync.problems
-    monkeypatch.setattr(adopt_sync, "problems",
-                        lambda *a, **kw: [p for p in real(*a, **kw) if p["reason"] != "unpaired"])
+
+    def problems(base: JsonObject, mplan: Mapping[str, Json], theirs: Mapping[str, Json],
+                 way_back: JsonObject | None, *backup_mode: str | None) -> list[JsonObject]:
+        return [p for p in real(base, mplan, theirs, way_back, *backup_mode) if p["reason"] != "unpaired"]
+    monkeypatch.setattr(adopt_sync, "problems", problems)
     monkeypatch.setattr(fuzz_sync.adopt_sync, "problems", adopt_sync.problems)
     failures = [f for seed in range(40)
                 for f in round_trip(seed, 1, tmp_path / str(seed)).failures]
     assert [f.kind for f in failures].count("adopt_double") > 0
 
 
-def test_an_adopt_base_older_than_the_shapes_it_records_is_no_source_change():
+def test_an_adopt_base_older_than_the_shapes_it_records_is_no_source_change() -> None:
     """A marked shape an adopt base recorded before 688ebf4 had no `flip` or `radius` and its
     outline as a bare colour: the same source read today hashed differently, and an unchanged
     source recreated four of china's freeforms. `upgrade_shapes` puts the base's shape in today's
     form (the width from our shape of that mark when the colour agrees, never from the crop an
     object's outline can share its mark with); a real change still shows."""
     from beamer2slides import identity
-    ours = {"id": "p1m3", "kind": "shape", "role": "panel", "bbox": [10, 20, 60, 50], "fill": "#ff0000",
-            "outline": {"color": "#00ff00", "width": 2.02}, "shape": "custom", "flip": False, "radius": 0.0,
-            "drawings": ["d1"], "spans": [], "mark": "p80_i12"}
-    old = {k: v for k, v in ours.items() if k not in ("flip", "radius")} | {"outline": "#00ff00"}
-    moved = {**old, "bbox": [12, 20, 62, 50], "mark": "p80_i13"}
-    crop = {"id": "p1m2", "kind": "image", "role": "figure", "bbox": [10, 20, 60, 50], "spans": [], "mark": "p80_i12"}
-    deck = {"slides": [{"elements": [ours, {**ours, "mark": "p80_i13"}, crop]}]}  # (the crop: its twin, poster)
+    ours: JsonObject = {"id": "p1m3", "kind": "shape", "role": "panel", "bbox": [10, 20, 60, 50], "fill": "#ff0000",
+                        "outline": {"color": "#00ff00", "width": 2.02}, "shape": "custom", "flip": False,
+                        "radius": 0.0, "drawings": ["d1"], "spans": [], "mark": "p80_i12"}
+    old: JsonObject = {k: v for k, v in ours.items() if k not in ("flip", "radius")} | {"outline": "#00ff00"}
+    moved: JsonObject = {**old, "bbox": [12, 20, 62, 50], "mark": "p80_i13"}
+    crop: JsonObject = {"id": "p1m2", "kind": "image", "role": "figure", "bbox": [10, 20, 60, 50], "spans": [],
+                        "mark": "p80_i12"}
+    deck: JsonObject = {"slides": [{"elements": [ours, {**ours, "mark": "p80_i13"}, crop]}]}  # (the crop: its twin, poster)
 
-    def entry(ir):
+    def entry(ir: JsonObject) -> JsonObject:
         h, fields = identity.ir_fields(ir)
         return {"key": "shape/panel/0", "kind": "shape", "anchor": None, "ir": ir, "ir_hash": h, "fields": fields}
-    base = {"adopt": {"boxes": {}}, "slides": [{"key": "s", "elements": [entry(old), entry(moved)]}]}
+    base: JsonObject = {"adopt": {"boxes": {}}, "slides": [{"key": "s", "elements": [entry(old), entry(moved)]}]}
     assert [(r.slide, r.how, r.hashed) for r in adopt_sync.upgrade_shapes(base, deck, None)] == \
         [("s", "adopt_shape", True)] * 2
-    same, changed = base["slides"][0]["elements"]
+    same, changed = jobjs(base, "slides", 0, "elements")
     assert same["ir_hash"] == identity.ir_fields(ours)[0]
-    assert changed["ir"]["outline"] == {"color": "#00ff00", "width": 2.02}
-    assert changed["fields"]["position"] != identity.ir_fields({**ours, "mark": "p80_i13"})[1]["position"]
-    plain = {"slides": [{"elements": [entry(old)]}]}
+    assert jat(changed, "ir", "outline") == {"color": "#00ff00", "width": 2.02}
+    assert jat(changed, "fields", "position") != jat(identity.ir_fields({**ours, "mark": "p80_i13"})[1], "position")
+    plain: JsonObject = {"slides": [{"elements": [entry(old)]}]}
     assert adopt_sync.upgrade_shapes(plain, deck, None) == []  # (a convert base has no marks to upgrade)
-    assert plain["slides"][0]["elements"][0]["ir"] is old
+    assert jat(plain, "slides", 0, "elements", 0, "ir") is old
