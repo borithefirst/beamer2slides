@@ -320,13 +320,16 @@ def fake_google(seen: dict):
     """`emit` and `snapshot_after_convert` replaced by two functions that only remember what they
     were handed. Both are imported inside `_upload`, so the module attribute is what is called."""
 
-    def emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked=None):
+    from beamer2slides.emit_state import EmitState, Emitted
+
+    def emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked):
         seen["emit"] = {"name": name, "named": named, "slides": len(deck["slides"]),
                         "backgrounds": sorted(p.name for p in (out_dir / "backgrounds").glob("*"))}
-        return {"url": "https://docs.google.com/presentation/d/PID123/edit",
-                "presentationId": "PID123", "deck": {"presentationId": "PID123", "slides": []}}
+        state = EmitState(presentation_id="PID123", url="https://docs.google.com/presentation/d/PID123/edit",
+                          scale=1.0, slides=(), contained=None, theme=None, previous=None)
+        return Emitted(state=state, deck={"presentationId": "PID123", "slides": []})
 
-    def snapshot_after_convert(deck, out, state, pdf, overlays="last", problems=None):
+    def snapshot_after_convert(deck, out, state, pdf, overlays, problems):
         seen["base"] = {"pdf": pdf, "overlays": overlays}
         if problems is not None:
             problems.extend(seen.get("base_problems", []))
@@ -540,7 +543,7 @@ def test_a_forced_rebuild_in_a_detached_context_keeps_its_way_back_in_drive(prep
     seen: dict = {}
     emit, snapshot = fake_google(seen)
 
-    def remembering(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked=None):
+    def remembering(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked):
         seen["backup"] = backup
         return emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked)
 

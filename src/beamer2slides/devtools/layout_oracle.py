@@ -11,6 +11,11 @@ gap, something pushed off the page. Same inputs, same finding shape:
   report  the sync report (only read for which slides are uncertain)
   ours    optional: `sync.build_ours` of the new source - what a fresh conversion draws
 
+They come in as JSON and are read as `sync_model` records (`Base`, `DeckRead`, the new
+conversion's `SlideEntry`s); a text is laid out into a `text_layout.Layout`, and what each object
+puts on the slide is a `Party`. The findings go out as JSON (`Finding`), which is what the fuzzer,
+the edit hunt and the replay write.
+
 Only what THIS sync introduced is judged: a look that was already broken in `before` (the
 converter's own or the person's) is not the sync's, and neither is one the new conversion draws
 itself. Those come back separately, from `existing(before)`, never as failures.
@@ -62,133 +67,228 @@ element, or when the overlap is thin: under `NOTE_BELOW` for a picture (its box 
     python tools/layout_oracle.py <archive dir> [...] [--json] [--out f.json] [--existing] [--notes]
 """
 
+from __future__ import annotations
+
 import collections
+import itertools
 import json
 import re
 import sys
+from collections.abc import Callable, Collection, Iterable, Iterator, Mapping, Sequence, Set
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, TypedDict
 
-from beamer2slides import emit
+from beamer2slides import emit, merge
 from beamer2slides.devtools import loss_oracle
+from beamer2slides.json_types import (Json, JsonObject, JsonShapeError, as_array, as_object, as_objects,
+                                      as_optional_str, as_str)
+from beamer2slides.sync_model import (Base, DeckRead, ElementEntry, ElementKey, ObjectId, ReadBack, SlideEntry,
+                                      SlideKey, SlideRead, deck_read, element_entry_json, readback_json,
+                                      slide_entry, slide_entry_json, slide_read_json)
+from beamer2slides.sync_model import base as parse_base
 # the layout model lives in the library now (sync lays out merged text with it); names kept here
 from beamer2slides.text_layout import (  # noqa: F401
-    CAP_EM, DESC_EM, INSET_X, INSET_Y, NBSP, SOFT_BREAK, TAB_EM, UNKNOWN_EM, _para, _style_name, advance,
-    char_styles, filled, layout, layout_at, line_rects, para_style, para_styles, text_box, upright, wrap)
+    CAP_EM, DESC_EM, INSET_X, INSET_Y, NBSP, SOFT_BREAK, TAB_EM, UNKNOWN_EM, Layout, Rect, _para, _style_name,
+    advance, char_styles, filled, layout, layout_at, line_rects, meet, para_style, para_styles, rect, text_box,
+    upright, wrap)
 
-SEVERITIES = ("fail", "note")
-FAIL = ("fail",)
+if TYPE_CHECKING:
+    from typing_extensions import Required
 
-REACHED = collections.Counter()   # what check() saw and what excused it, over a whole run (`replay`)
+Severity = Literal["fail", "note"]
+Kind = Literal["text_overlap", "text_overflow", "stranded_picture", "off_page"]
+SEVERITIES: tuple[Severity, ...] = ("fail", "note")
+FAIL: tuple[Severity, ...] = ("fail",)
+
+REACHED: collections.Counter[str] = collections.Counter()   # what check() saw and what excused it, over a whole run (`replay`)
 
 OVERLAP_MIN = 2.0              # pt each way before two inks count as overlapping
 NOTE_BELOW = 4.0                # an overlap with a picture thinner than this (pt, the lesser side) is a note
 OFF_PAGE = 6.0                 # pt outside the page
 
+Placement = tuple[float, float, float]
+"""How the conversion's pt land in the deck: `x_deck = s*x + tx` (`loss_oracle.deck_placement`)."""
 
-def finding(kind: str, severity: str, detail: str, slide=None, element=None, object=None, **more) -> dict:
-    out = {"kind": kind, "severity": severity, "slide": slide, "element": element, "object": object, "detail": detail}
-    out.update(more)
+
+class History(TypedDict, total=False):
+    """What happened to one object in a sync (`Pair.history`): `was` "new", "person" or
+    "converter"; `how` (not for a new one) "moved", "text", "recreated", "person_moved",
+    "person_text"."""
+    name: Required[str]
+    was: Required[str]
+    how: list[str]
+
+
+class Finding(TypedDict, total=False):
+    """One finding, as the fuzzer, the edit hunt and the replay write it. `other`/`other_element`:
+    what it met (not for `off_page`); `existing`/`by`: set by `existing` ("converter"|"person")."""
+    kind: Required[Kind]
+    severity: Required[Severity]
+    slide: Required[str]
+    element: Required[str | None]
+    object: Required[str | None]
+    detail: Required[str]
+    other: str
+    other_element: str | None
+    depth: float
+    history: list[History]
+    existing: bool
+    by: str
+
+
+def finding(kind: Kind, severity: Severity, detail: str, slide: str, element: str | None, object: str | None,
+            other: tuple[str, str | None] | None, depth: float, history: list[History]) -> Finding:
+    out: Finding = {"kind": kind, "severity": severity, "slide": slide, "element": element, "object": object,
+                    "detail": detail}
+    if other is not None:
+        out["other"], out["other_element"] = other
+    out["depth"] = depth
+    out["history"] = history
     return out
+
+
+def _number(v: Json, where: str) -> float:
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v
+    raise JsonShapeError(f"{where}: a number was expected, found {type(v).__name__}")
+
+
+def _frame(ir: JsonObject | None) -> Rect | None:
+    """An element's frame in the conversion: its IR's `frame`, else its `bbox` (None: neither)."""
+    if not ir:
+        return None
+    v = ir.get("frame") or ir.get("bbox")
+    return rect(v, "ir.frame") if v else None
 
 
 # ---------------------------------------------------------------- what is drawn where on a slide
 
-def meet(ra: list, rb: list, tol: float = OVERLAP_MIN) -> tuple[float, int, int] | None:
-    """The deepest overlap of two lists of rectangles: (its lesser side in pt, index in ra, index in
-    rb), or None when no two overlap by `tol` pt each way."""
-    best = None
-    for i, a in enumerate(ra):
-        for j, b in enumerate(rb):
-            w = min(a[2], b[2]) - max(a[0], b[0])
-            h = min(a[3], b[3]) - max(a[1], b[1])
-            if w >= tol and h >= tol and (best is None or min(w, h) > best[0]):
-                best = (min(w, h), i, j)
-    return best
-
-
-def _size_hint(el: dict | None, scale: float) -> list[float] | None:
+def _size_hint(el: ElementEntry | None, scale: float) -> list[float] | None:
     """A text's sizes where its read-back has none (a title placeholder inherits its layout's): each
     paragraph's largest run in the element's IR, at the conversion's scale."""
-    paras = ((el or {}).get("ir") or {}).get("paragraphs") or []
-    out = [max((r.get("size") or p.get("size") or 0.0 for r in p.get("runs") or [{}]), default=0.0) * scale
-           for p in paras]
+    ir: JsonObject = el.ir if el is not None and el.ir else {}
+    out: list[float] = []
+    for p in as_objects(ir.get("paragraphs") or [], "ir.paragraphs"):
+        runs: list[JsonObject] = as_objects(p["runs"], "paragraph.runs") if p.get("runs") else []
+        sizes = [_number(r.get("size") or p.get("size") or 0.0, "run.size") for r in runs] or \
+            [_number(p.get("size") or 0.0, "paragraph.size")]
+        out.append(max(sizes, default=0.0) * scale)
     return out if out and all(out) else None
+
+
+PartyKind = Literal["picture", "text", "table"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Party:
+    """What one object puts on the slide: its ink as rectangles, whether each runs below the
+    object's own box (`beyond`), and a text's `layout`."""
+    kind: PartyKind
+    rects: tuple[Rect, ...]
+    beyond: tuple[bool, ...]
+    layout: Layout | None
+
+
+def element_of(skey: str, base_slide: SlideEntry | None, read: SlideRead,
+               ours_slide: Sequence[ElementEntry] | None) -> dict[ObjectId, ElementEntry]:
+    """`loss_oracle`'s object id -> the element it carries (a base element, or the new conversion's
+    for an object the sync just made), over records: asked of their JSON, and each answer taken
+    back to the record it was written from."""
+    base_els: list[Json] = [element_entry_json(e) for e in base_slide.elements] if base_slide is not None else []
+    ours_els: list[JsonObject] = [element_entry_json(e) for e in ours_slide] if ours_slide is not None else []
+    base_json: JsonObject | None = None if base_slide is None else {**slide_entry_json(base_slide), "elements": base_els}
+    found = loss_oracle._element_of(skey, base_json, slide_read_json(read), None if ours_slide is None else ours_els)
+    made: list[tuple[Json, ElementEntry]] = list(zip(base_els, base_slide.elements if base_slide is not None else ()))
+    made += list(zip(ours_els, ours_slide or ()))
+    out: dict[ObjectId, ElementEntry] = {}
+    for oid, el in found.items():
+        out[ObjectId(oid)] = next((r for j, r in made if j is el), None) or next(r for j, r in made if j == el)
+    return out
 
 
 class View:
     """One slide read-back as this oracle sees it: each object named (`el:<element key>` for the
     converter's, `obj:<objectId>` for the person's own) and each party's ink as rectangles."""
 
-    def __init__(self, skey: str, read: dict, base_slide: dict | None, ours_slide: list | None,
-                 user: set[str], scale: float, place):
+    def __init__(self, skey: str, read: SlideRead, base_slide: SlideEntry | None,
+                 ours_slide: Sequence[ElementEntry] | None, user: Set[str], scale: float,
+                 place: Placement | None) -> None:
         self.skey, self.read = skey, read
-        els = loss_oracle._element_of(skey, base_slide, read, ours_slide)
-        self.el = {oid: e for oid, e in els.items() if oid not in user}
-        self.name = {oid: (f"el:{self.el[oid]['key']}" if oid in self.el else f"obj:{oid}") for oid in read["objects"]}
-        self.parties: dict[str, dict] = {}
-        self.panels: dict[str, list] = {}
-        for oid, rb in read["objects"].items():
-            if not rb.get("box") or not upright(rb):
+        els = element_of(skey, base_slide, read, ours_slide)
+        self.el: dict[ObjectId, ElementEntry] = {oid: e for oid, e in els.items() if oid not in user}
+        self.name: dict[ObjectId, str] = {oid: (f"el:{self.el[oid].key}" if oid in self.el else f"obj:{oid}")
+                                          for oid in read.objects}
+        self.parties: dict[ObjectId, Party] = {}
+        self.panels: dict[ObjectId, Rect] = {}
+        for oid, rb in read.objects.items():
+            rbj = readback_json(rb)
+            if not rb.box or not upright(rbj):
                 continue
             el = self.el.get(oid)
-            if rb["kind"] == "image":
-                self.parties[oid] = {"kind": "picture", "rects": [list(rb["box"])], "beyond": [False]}
-            elif text_box(rb):
-                lay = layout_at(rb, _size_hint(el, scale))
+            if rb.kind == "image":
+                self.parties[oid] = Party(kind="picture", rects=(rb.box,), beyond=(False,), layout=None)
+            elif text_box(rbj):
+                lay = layout_at(rbj, _size_hint(el, scale))
                 if lay is None:
                     continue
-                rects = line_rects(lay)
-                self.parties[oid] = {"kind": "text", "rects": rects, "layout": lay,
-                                     "beyond": [r[3] > rb["box"][3] + 1.0 for r in rects]}
-            elif rb["kind"] == "table" and el is not None and place is not None:
-                frame = (el.get("ir") or {}).get("frame") or (el.get("ir") or {}).get("bbox")
+                rects = tuple(line_rects(lay))
+                self.parties[oid] = Party(kind="text", rects=rects, beyond=tuple(r[3] > rb.box[3] + 1.0 for r in rects),
+                                          layout=lay)
+            elif rb.kind == "table" and el is not None and place is not None:
+                frame = _frame(el.ir)
                 if frame:
                     s = place[0]
-                    x, y = rb["transform"][4], rb["transform"][5]
-                    self.parties[oid] = {"kind": "table", "rects": [[x, y, x + s * (frame[2] - frame[0]),
-                                                                     y + s * (frame[3] - frame[1])]],
-                                         "beyond": [False]}
-            elif filled(rb):
-                self.panels[oid] = list(rb["box"])
+                    x, y = rb.transform[4], rb.transform[5]
+                    self.parties[oid] = Party(kind="table", rects=((x, y, x + s * (frame[2] - frame[0]),
+                                                                    y + s * (frame[3] - frame[1])),),
+                                              beyond=(False,), layout=None)
+            elif filled(rbj):
+                self.panels[oid] = rb.box
 
-    def of(self, name: str) -> list[str]:
+    def of(self, name: str) -> list[ObjectId]:
         return [oid for oid, n in self.name.items() if n == name]
 
-    def key(self, oid: str) -> str | None:
+    def key(self, oid: ObjectId) -> ElementKey | None:
         e = self.el.get(oid)
-        return e["key"] if e else None
+        return e.key if e is not None else None
 
 
-def anchored(va: "View", a: str, b: str) -> bool:
+def anchored(va: View, a: ObjectId, b: ObjectId) -> bool:
     """`b` is a picture the converter anchors to `a`'s element (a formula over its hole, a bullet
     icon beside its line), or the other way round."""
     ea, eb = va.el.get(a), va.el.get(b)
-    if not ea or not eb:
+    if ea is None or eb is None:
         return False
-    return eb.get("anchor") == ea["key"] or ea.get("anchor") == eb["key"] or \
-        (bool(ea.get("anchor")) and ea.get("anchor") == eb.get("anchor"))
+    return eb.anchor == ea.key or ea.anchor == eb.key or (bool(ea.anchor) and ea.anchor == eb.anchor)
 
 
-def ours_inks(ours_slide: list | None, place) -> dict[str, list]:
+def ours_inks(ours_slide: Sequence[ElementEntry] | None, place: Placement | None) -> dict[ElementKey, list[Rect]]:
     """Element key -> the ink the new conversion draws for it (PDF lines and pictures, in deck pt)."""
     if not ours_slide or place is None:
         return {}
     s, tx, ty = place
-    out = {}
+    out: dict[ElementKey, list[Rect]] = {}
     for el in ours_slide:
-        ir = el.get("ir") or {}
-        rects = []
-        if el.get("kind") == "text" and ir.get("paragraphs"):
-            for p in ir["paragraphs"]:
-                for ln in p.get("lines") or []:
-                    rects.append([ln["x0"], ln["baseline"] - CAP_EM * p["size"], ln["x1"], ln["baseline"] + DESC_EM * p["size"]])
-                if p.get("bullet") and p["bullet"].get("bbox"):
-                    rects.append(list(p["bullet"]["bbox"]))
+        ir = el.ir or {}
+        rects: list[Rect] = []
+        if el.kind == "text" and ir.get("paragraphs"):
+            for p in as_objects(ir["paragraphs"], "ir.paragraphs"):
+                for ln in as_objects(p.get("lines") or [], "paragraph.lines"):
+                    size = _number(p["size"], "paragraph.size")
+                    baseline = _number(ln["baseline"], "line.baseline")
+                    rects.append((_number(ln["x0"], "line.x0"), baseline - CAP_EM * size, _number(ln["x1"], "line.x1"),
+                                  baseline + DESC_EM * size))
+                bullet = p.get("bullet")
+                if bullet:
+                    bbox = as_object(bullet, "paragraph.bullet").get("bbox")
+                    if bbox:
+                        rects.append(rect(bbox, "bullet.bbox"))
         else:
-            bb = ir.get("frame") or ir.get("bbox") or (el.get("fingerprint") or {}).get("bbox")
+            bb = _frame(ir) or el.fingerprint.bbox
             if bb:
-                rects.append(list(bb))
-        out[el["key"]] = [[s * r[0] + tx, s * r[1] + ty, s * r[2] + tx, s * r[3] + ty] for r in rects]
+                rects.append(bb)
+        out[el.key] = [(s * r[0] + tx, s * r[1] + ty, s * r[2] + tx, s * r[3] + ty) for r in rects]
     return out
 
 
@@ -197,25 +297,26 @@ def ours_inks(ours_slide: list | None, place) -> dict[str, list]:
 class Pair:
     """A slide as the sync found it and as it left it."""
 
-    def __init__(self, skey: str, base_slide: dict | None, before: dict | None, after: dict,
-                 ours_slide: list | None, have_ours: bool, unsure: bool, scale: float, place, page):
-        from beamer2slides import merge
+    def __init__(self, skey: str, base_slide: SlideEntry | None, before: SlideRead | None, after: SlideRead,
+                 ours_slide: Sequence[ElementEntry] | None, have_ours: bool, unsure: bool, scale: float,
+                 place: Placement | None, page: Sequence[float]) -> None:
         self.skey, self.base_slide, self.page = skey, base_slide, page
         self.ours_slide, self.place = ours_slide, place
-        self.told: set[str] = set()    # the person's objects the report says the source ran over
+        self.told: Set[str] = set()    # the person's objects the report says the source ran over
+        user: set[str]
         if before is None:
             user = set()
         elif base_slide is None:
-            user = set(before["objects"])       # a slide the person added: all theirs
+            user = set(before.objects)       # a slide the person added: all theirs
         else:
-            user = {u["objectId"] for u in merge.user_objects(base_slide, before)}
+            user = {u.object_id for u in merge.user_objects_of(base_slide, before)}
         self.va = View(skey, after, base_slide, ours_slide, user, scale, place)
         self.vb = View(skey, before, base_slide, None, user, scale, place) if before is not None else None
         self.inks = ours_inks(ours_slide, place)
         self.have_ours, self.unsure = have_ours and ours_slide is not None, unsure
-        self.reached = collections.Counter()
+        self.reached: collections.Counter[str] = collections.Counter()
 
-    def before_parties(self, name: str) -> list[dict] | None:
+    def before_parties(self, name: str) -> list[Party] | None:
         """The parties carrying `name` before the sync; None when nothing did (a new element)."""
         if self.vb is None:
             return None
@@ -224,27 +325,27 @@ class Pair:
             return None
         return [self.vb.parties[o] for o in oids if o in self.vb.parties]
 
-    def ours_rects(self, oid: str) -> list | None:
+    def ours_rects(self, oid: ObjectId) -> list[Rect] | None:
         k = self.va.key(oid)
         return self.inks.get(k) if k else None
 
-    def source_shift(self, oid: str) -> tuple[float, float] | None:
+    def source_shift(self, oid: ObjectId) -> tuple[float, float] | None:
         """How far the source moved `oid`'s element (its IR frame, base -> ours, deck pt); None when
         either side has no frame for it."""
         k = self.va.key(oid)
         if not k or self.base_slide is None or not self.ours_slide or self.place is None:
             return None
 
-        def frame(els):
-            ir = (next((e for e in els if e["key"] == k), None) or {}).get("ir") or {}
-            return ir.get("frame") or ir.get("bbox")
-        fb, fo = frame(self.base_slide["elements"]), frame(self.ours_slide)
+        def frame(els: Iterable[ElementEntry]) -> Rect | None:
+            e = next((e for e in els if e.key == k), None)
+            return _frame(e.ir if e is not None else None)
+        fb, fo = frame(self.base_slide.elements), frame(self.ours_slide)
         if not fb or not fo:
             return None
         s = self.place[0]
         return s * (fo[0] - fb[0]), s * (fo[1] - fb[1])
 
-    def carried_rects(self, oid: str) -> list | None:
+    def carried_rects(self, oid: ObjectId) -> list[Rect] | None:
         """Where carrying the deck as it was onto the source's move puts `oid`'s ink: its `before`
         ink moved as the source moved its element (a person's own object: not at all). What sync
         writes for a unit the person moved (`sync.carried`), in this oracle's own layout model."""
@@ -254,34 +355,35 @@ class Pair:
         d = (0.0, 0.0) if self.va.name[oid].startswith("obj:") else self.source_shift(oid)
         if d is None:
             return None
-        return [[r[0] + d[0], r[1] + d[1], r[2] + d[0], r[3] + d[1]] for p in olds for r in p["rects"]]
+        return [(r[0] + d[0], r[1] + d[1], r[2] + d[0], r[3] + d[1]) for p in olds for r in p.rects]
 
-    def history(self, oid: str) -> dict:
+    def history(self, oid: ObjectId) -> History:
         """What happened to one object in this sync, for the finding's reader (and the fuzzer)."""
         name = self.va.name[oid]
-        rb = self.va.read["objects"][oid]
-        olds = [self.vb.read["objects"][o] for o in self.vb.of(name)] if self.vb else []
-        if not olds:
+        rb = self.va.read.objects[oid]
+        vb = self.vb
+        olds: list[ReadBack] = [vb.read.objects[o] for o in vb.of(name)] if vb is not None else []
+        if not olds or vb is None:
             return {"name": name, "was": "new"}
         old = olds[0]
-        how = []
-        if not loss_oracle.same_box(old, rb):
+        how: list[str] = []
+        if not loss_oracle.same_box(readback_json(old), readback_json(rb)):
             how.append("moved")
-        if loss_oracle.norm(old.get("text")) != loss_oracle.norm(rb.get("text")):
+        if loss_oracle.norm(old.text) != loss_oracle.norm(rb.text):
             how.append("text")
-        if oid not in self.vb.read["objects"]:
+        if oid not in vb.read.objects:
             how.append("recreated")
-        base_rb = None
+        base_rb: ReadBack | None = None
         if self.base_slide is not None and name.startswith("el:"):
-            el = next((e for e in self.base_slide["elements"] if e["key"] == name[3:]), None)
-            base_rb = el and (el.get("readback") or {}).get(el.get("main"))
-        if base_rb is not None and old.get("box") and not loss_oracle.same_box(base_rb, old):
+            el = next((e for e in self.base_slide.elements if e.key == name[3:]), None)
+            base_rb = el.readback.get(el.main) if el is not None and el.main is not None else None
+        if base_rb is not None and old.box and not loss_oracle.same_box(readback_json(base_rb), readback_json(old)):
             how.append("person_moved")
-        if base_rb is not None and loss_oracle.norm(base_rb.get("text")) != loss_oracle.norm(old.get("text")):
+        if base_rb is not None and loss_oracle.norm(base_rb.text) != loss_oracle.norm(old.text):
             how.append("person_text")
         return {"name": name, "was": "person" if name.startswith("obj:") else "converter", "how": how}
 
-    def severity(self, depth: float, needs_ours: bool, least: float = None) -> tuple[str, str]:
+    def severity(self, depth: float, needs_ours: bool, least: float | None) -> tuple[Severity, str]:
         if self.unsure:
             return "note", " - on a slide the report says may be the wrong one"
         if needs_ours and not self.have_ours:
@@ -291,15 +393,17 @@ class Pair:
         return "fail", ""
 
 
-def _text(rb: dict) -> str:
-    return loss_oracle.norm(rb.get("text"))[:50]
+def _text(rb: ReadBack) -> str:
+    return loss_oracle.norm(rb.text)[:50]
 
 
-def overlap_findings(sp: Pair) -> list[dict]:
+def overlap_findings(sp: Pair) -> list[Finding]:
     """Two inks that meet after the sync, not before it, and not in the new conversion."""
-    out, va, done = [], sp.va, set()
+    out: list[Finding] = []
+    va = sp.va
+    done: set[tuple[ObjectId, ObjectId]] = set()
     for a, pa in va.parties.items():
-        if pa["kind"] != "text":
+        if pa.kind != "text":
             continue
         for b, pb in va.parties.items():
             if b == a or (b, a) in done:
@@ -308,7 +412,7 @@ def overlap_findings(sp: Pair) -> list[dict]:
             na, nb = va.name[a], va.name[b]
             if na == nb or anchored(va, a, b):
                 continue
-            m = meet(pa["rects"], pb["rects"])
+            m = meet(pa.rects, pb.rects, OVERLAP_MIN)
             if not m:
                 continue
             depth, i, j = m
@@ -318,7 +422,7 @@ def overlap_findings(sp: Pair) -> list[dict]:
                 if not olds_a or not olds_b:
                     sp.reached["overlap: not laid out before"] += 1
                     continue  # there before, but not laid out then: nothing to compare with
-                if any(meet(x["rects"], y["rects"], 0.5) for x in olds_a for y in olds_b):
+                if any(meet(x.rects, y.rects, 0.5) for x in olds_a for y in olds_b):
                     # they met before the sync already. Deliberately also when they now meet
                     # deeper: in the archive that is a person's copy laid over the original and the
                     # original gaining a line - broken before, by the person, not by the sync.
@@ -329,7 +433,7 @@ def overlap_findings(sp: Pair) -> list[dict]:
                 sp.reached["overlap: the conversion draws it"] += 1
                 continue  # the new conversion draws them so
             hist = [sp.history(a), sp.history(b)]
-            if all(h["was"] == "converter" for h in hist) and any("person_moved" in h["how"] for h in hist):
+            if all(h["was"] == "converter" for h in hist) and any("person_moved" in h.get("how", []) for h in hist):
                 ca, cb = sp.carried_rects(a), sp.carried_rects(b)
                 if ca and cb and meet(ca, cb, 0.5):
                     # the person's own arrangement carried onto the source's moves, as sync must:
@@ -339,39 +443,39 @@ def overlap_findings(sp: Pair) -> list[dict]:
                     continue
             sp.reached["overlap: judged"] += 1
             new = olds_a is None or olds_b is None
-            beyond = pa["beyond"][i] or (pb["kind"] == "text" and pb["beyond"][j])
+            beyond = pa.beyond[i] or (pb.kind == "text" and pb.beyond[j])
             # two texts' ink bands are glyphs (a picture's box has margins): 2 pt of them is touching
-            sev, why = sp.severity(depth, needs_ours=new, least=OVERLAP_MIN if pb["kind"] == "text" else None)
+            sev, why = sp.severity(depth, new, OVERLAP_MIN if pb.kind == "text" else None)
             if sev == "fail" and {a, b} & sp.told:
                 # the source ran over the person's own object, which sync never moves: the report
                 # says so (`sync.warn_about_overruns`), and that is all it can do
                 sev, why = "note", " - the report says so"
                 sp.reached["overlap: reported overrun"] += 1
-            kind = "text_overflow" if beyond else "text_overlap"
-            ra_, rb2 = va.read["objects"][a], va.read["objects"][b]
-            detail = (f"{_text(ra_)!r} and {pb['kind']} {(_text(rb2) or b)!r} overlap by {depth:.1f} pt"
+            kind: Kind = "text_overflow" if beyond else "text_overlap"
+            ra_, rb2 = va.read.objects[a], va.read.objects[b]
+            detail = (f"{_text(ra_)!r} and {pb.kind} {(_text(rb2) or b)!r} overlap by {depth:.1f} pt"
                       + (" - the text runs out of its box onto it" if beyond else "") + why)
-            out.append(finding(kind, sev, detail, slide=sp.skey, element=va.key(a), object=a,
-                               other=b, other_element=va.key(b), depth=round(depth, 1),
-                               history=[sp.history(a), sp.history(b)]))
+            out.append(finding(kind, sev, detail, sp.skey, va.key(a), a, (b, va.key(b)), round(depth, 1),
+                               [sp.history(a), sp.history(b)]))
     return out
 
 
 PANEL_SLACK = 3.0   # pt: a text box counts as sitting on a panel when it is inside it by this much
 
 
-def panel_findings(sp: Pair) -> list[dict]:
+def panel_findings(sp: Pair) -> list[Finding]:
     """A text that runs out of the bottom of the panel it sits on (a block's body out of its block)."""
-    out, va = [], sp.va
+    out: list[Finding] = []
+    va = sp.va
 
-    def spill(view, text_oid, panel_oid) -> float:
-        return max(r[3] for r in view.parties[text_oid]["rects"]) - view.panels[panel_oid][3]
+    def spill(view: View, text_oid: ObjectId, panel_oid: ObjectId) -> float:
+        return max(r[3] for r in view.parties[text_oid].rects) - view.panels[panel_oid][3]
 
     for t, pt in va.parties.items():
-        if pt["kind"] != "text" or not pt["rects"]:
+        if pt.kind != "text" or not pt.rects:
             continue
-        box = va.read["objects"][t]["box"]
-        left, right = min(r[0] for r in pt["rects"]), max(r[2] for r in pt["rects"])
+        box = va.read.objects[t].box
+        left, right = min(r[0] for r in pt.rects), max(r[2] for r in pt.rects)
         for p, pbox in va.panels.items():
             # sits on it: its words starting inside the panel and mostly across it (a box, and a
             # line wrapped at its inset, may reach past a panel), its top inside the panel, its
@@ -385,9 +489,10 @@ def panel_findings(sp: Pair) -> list[dict]:
                 continue
             sp.reached["panel"] += 1
             nt, np_ = va.name[t], va.name[p]
-            if sp.vb is not None and sp.vb.of(nt) and sp.vb.of(np_):
-                was = max((spill(sp.vb, x, y) for x in sp.vb.of(nt) for y in sp.vb.of(np_)
-                           if x in sp.vb.parties and y in sp.vb.panels), default=None)
+            vb = sp.vb
+            if vb is not None and vb.of(nt) and vb.of(np_):
+                was = max((spill(vb, x, y) for x in vb.of(nt) for y in vb.of(np_)
+                           if x in vb.parties and y in vb.panels), default=None)
                 if was is not None and was > 0.5:
                     sp.reached["panel: out before"] += 1
                     continue  # it ran out of that panel before the sync already
@@ -396,29 +501,29 @@ def panel_findings(sp: Pair) -> list[dict]:
                 sp.reached["panel: the conversion draws it"] += 1
                 continue  # the new conversion draws it past the panel
             sp.reached["panel: judged"] += 1
-            new = not (sp.vb is not None and sp.vb.of(nt) and sp.vb.of(np_))
-            sev, why = sp.severity(by, needs_ours=new)
-            out.append(finding("text_overflow", sev, f"{_text(va.read['objects'][t])!r} runs {by:.1f} pt out of the "
-                               f"bottom of the panel it sits on" + why, slide=sp.skey, element=va.key(t), object=t,
-                               other=p, other_element=va.key(p), depth=round(by, 1),
-                               history=[sp.history(t), sp.history(p)]))
+            new = not (vb is not None and vb.of(nt) and vb.of(np_))
+            sev, why = sp.severity(by, new, None)
+            out.append(finding("text_overflow", sev, f"{_text(va.read.objects[t])!r} runs {by:.1f} pt out of the "
+                               f"bottom of the panel it sits on" + why, sp.skey, va.key(t), t, (p, va.key(p)),
+                               round(by, 1), [sp.history(t), sp.history(p)]))
     return out
 
 
-def off_page_findings(sp: Pair) -> list[dict]:
-    out, va = [], sp.va
-    w, h = sp.page
+def off_page_findings(sp: Pair) -> list[Finding]:
+    out: list[Finding] = []
+    va = sp.va
+    w, h = sp.page[0], sp.page[1]
 
-    def outside(rects) -> float:
+    def outside(rects: Sequence[Rect]) -> float:
         return max(max(-r[0], r[2] - w, -r[1], r[3] - h) for r in rects) if rects else 0.0
 
     for oid, p in va.parties.items():
-        by = outside(p["rects"])
+        by = outside(p.rects)
         if by <= OFF_PAGE:
             continue
         sp.reached["off_page"] += 1
         olds = sp.before_parties(va.name[oid])
-        if olds and any(outside(x["rects"]) > OFF_PAGE / 2 for x in olds):
+        if olds and any(outside(x.rects) > OFF_PAGE / 2 for x in olds):
             # off the page before already (the person's: a footer dragged to the edge that then
             # gains a digit is where the person put it, not where the sync did)
             sp.reached["off_page: before"] += 1
@@ -431,76 +536,83 @@ def off_page_findings(sp: Pair) -> list[dict]:
             sp.reached["off_page: the conversion draws it"] += 1
             continue
         sp.reached["off_page: judged"] += 1
-        sev, why = sp.severity(by, needs_ours=olds is None)
-        out.append(finding("off_page", sev, f"{p['kind']} {(_text(va.read['objects'][oid]) or oid)!r} reaches "
-                           f"{by:.1f} pt past the page edge" + why, slide=sp.skey, element=va.key(oid), object=oid,
-                           depth=round(by, 1), history=[sp.history(oid)]))
+        sev, why = sp.severity(by, olds is None, None)
+        out.append(finding("off_page", sev, f"{p.kind} {(_text(va.read.objects[oid]) or oid)!r} reaches "
+                           f"{by:.1f} pt past the page edge" + why, sp.skey, va.key(oid), oid, None,
+                           round(by, 1), [sp.history(oid)]))
     return out
 
 
 STRANDED_X = 8.0      # pt: a formula picture this far beside its hole is not over it
 STRANDED_LINES = 0.6  # of a line: this far above or below
 
+Offset = tuple[float, float, float]
+"""A picture's (dx, dy) from its hole, and the size of the hole's line."""
 
-def hole_offsets(view: View, text_oid: str) -> dict[str, tuple[float, float, float]]:
+
+def hole_offsets(view: View, text_oid: ObjectId) -> dict[ObjectId, Offset]:
     """Picture object -> (dx, dy, line size) from the hole the layout pairs it with, for the
     formula pictures anchored to that text (the cheapest assignment of pictures to holes)."""
-    import itertools
     p = view.parties.get(text_oid)
     key = view.key(text_oid)
-    if not p or not key or p["kind"] != "text":
+    if p is None or not key or p.kind != "text" or p.layout is None:
         return {}
-    holes = p["layout"].holes
-    pics = [o for o, q in view.parties.items() if q["kind"] == "picture" and view.el.get(o)
-            and view.el[o].get("anchor") == key and view.el[o].get("role") == "math"]
+    lay = p.layout
+    holes = lay.holes
+    pics = [o for o, q in view.parties.items() if q.kind == "picture" and o in view.el
+            and view.el[o].anchor == key and view.el[o].role == "math"]
     if not pics or not holes:
         return {}
 
-    def off(o, hole):
-        b, hb = view.read["objects"][o]["box"], hole.box
+    def off(o: ObjectId, hole_at: int) -> Offset:
+        hole = holes[hole_at]
+        b, hb = view.read.objects[o].box, hole.box
         return ((b[0] + b[2]) / 2 - (hb[0] + hb[2]) / 2, (b[1] + b[3]) / 2 - (hb[1] + hb[3]) / 2,
-                p["layout"].lines[hole.line].size)
+                lay.lines[hole.line].size)
 
-    def cost(o, hole):
-        dx, dy, z = off(o, hole)
+    def cost(o: ObjectId, hole_at: int) -> float:
+        dx, dy, z = off(o, hole_at)
         return abs(dx) + abs(dy)
     if len(pics) <= 6 and len(holes) <= 8:
         # more pictures than holes (the person deleted words holding one): which pictures get the
         # holes is part of the choice - a picture left over has no hole to be judged against
-        best = None
+        best: tuple[float, list[tuple[ObjectId, int]]] | None = None
+        choices: Iterator[list[tuple[ObjectId, int]]]
         if len(pics) <= len(holes):
             choices = (list(zip(pics, perm)) for perm in itertools.permutations(range(len(holes)), len(pics)))
         else:
             choices = (list(zip((pics[i] for i in perm), range(len(holes))))
                        for perm in itertools.permutations(range(len(pics)), len(holes)))
         for pairs_ in choices:
-            c = sum(cost(o, holes[k]) for o, k in pairs_)
+            c = sum(cost(o, k) for o, k in pairs_)
             if best is None or c < best[0]:
                 best = (c, pairs_)
-        return {o: off(o, holes[k]) for o, k in best[1]}
-    return {o: off(o, min(holes, key=lambda hh: cost(o, hh))) for o in pics}
+        return {} if best is None else {o: off(o, k) for o, k in best[1]}
+    return {o: off(o, min(range(len(holes)), key=lambda hh: cost(o, hh))) for o in pics}
 
 
 def stranded(dx: float, dy: float, z: float) -> bool:
     return abs(dx) > STRANDED_X or abs(dy) > STRANDED_LINES * emit.LINE_EM * z
 
 
-def stranded_findings(sp: Pair) -> list[dict]:
+def stranded_findings(sp: Pair) -> list[Finding]:
     """A formula picture that is not over its hole after the sync. On what the converter placed the
     layout finds the hole within 2 pt of its picture (72 archived placements), so the absolute
     measure stands. Judged when it was over its hole before the sync, or when this sync wrote the
     picture (created, recreated or moved it): a sync that puts a picture down owes it its hole,
     even one the person's words had already pushed away (`history` says which) - unless the
     person had put the picture where it stands themselves (moved or resized off the base)."""
-    out, va = [], sp.va
+    out: list[Finding] = []
+    va = sp.va
     for t in va.parties:
         offs = hole_offsets(va, t)
         if not offs:
             continue
-        olds = {}
-        if sp.vb is not None:
-            for x in sp.vb.of(va.name[t]):
-                olds.update({sp.vb.name[o]: v for o, v in hole_offsets(sp.vb, x).items()})
+        olds: dict[str, Offset] = {}
+        vb = sp.vb
+        if vb is not None:
+            for x in vb.of(va.name[t]):
+                olds.update({vb.name[o]: v for o, v in hole_offsets(vb, x).items()})
         for pic, (dx, dy, z) in offs.items():
             if not stranded(dx, dy, z):
                 continue
@@ -515,76 +627,94 @@ def stranded_findings(sp: Pair) -> list[dict]:
             if was is not None and stranded(*was) and "person_moved" in how:
                 sp.reached["stranded: before, the person's place"] += 1
                 continue  # off before where the person put it; deck edits win, so it stays there
-            if was is None and not wrote and sp.vb is not None and sp.vb.of(va.name[pic]):
+            if was is None and not wrote and vb is not None and vb.of(va.name[pic]):
                 sp.reached["stranded: no hole before"] += 1
                 continue  # the picture was there, but no hole in that text to measure it by
             sp.reached["stranded: judged"] += 1
-            sev, why = sp.severity(max(abs(dx), abs(dy)), needs_ours=was is None)
+            sev, why = sp.severity(max(abs(dx), abs(dy)), was is None, None)
             if was is not None and stranded(*was):
                 why = f" - it was {was[0]:+.1f} / {was[1]:+.1f} pt off before, and the sync rewrote it there" + why
             out.append(finding("stranded_picture", sev,
                                f"the formula picture is {dx:+.1f} pt across and {dy:+.1f} pt down from its hole in "
-                               f"{_text(va.read['objects'][t])!r}" + why, slide=sp.skey, element=va.key(pic),
-                               object=pic, other=t, other_element=va.key(t), depth=round(max(abs(dx), abs(dy)), 1),
-                               history=[h, sp.history(t)]))
+                               f"{_text(va.read.objects[t])!r}" + why, sp.skey, va.key(pic), pic, (t, va.key(t)),
+                               round(max(abs(dx), abs(dy)), 1), [h, sp.history(t)]))
     return out
 
 
 # ---------------------------------------------------------------- the oracle
 
-def _slide_key(slide: dict, base_by_id: dict, ours_keys: list[str]) -> str:
+def _slide_key(slide: SlideRead, base_by_id: Mapping[ObjectId, SlideEntry], ours_keys: Sequence[SlideKey]) -> str:
     """The base's key of a slide, or - for one this sync created - the new conversion's, read off
     the ids sync gives what it creates (`b2s_<h6 slide>_...`)."""
-    b = base_by_id.get(slide["objectId"])
+    b = base_by_id.get(slide.object_id)
     if b is not None:
-        return b["key"]
+        return b.key
     for k in ours_keys:
         prefix = f"b2s_{loss_oracle.h6(k)}_"
-        if any(o.startswith(prefix) for o in slide["objects"]):
+        if any(o.startswith(prefix) for o in slide.objects):
             return k
-    return slide["objectId"]
+    return slide.object_id
 
 
-def pairs(base: dict, before: dict | None, after: dict, report: dict | None, ours: dict | None):
+def ours_slides(ours: JsonObject | None) -> tuple[SlideEntry, ...]:
+    """The new conversion's slide entries (none without one)."""
+    if ours is None:
+        return ()
+    return tuple(slide_entry(s, f"the new conversion.slides[{n}]")
+                 for n, s in enumerate(as_array(ours.get("slides", []), "the new conversion.slides")))
+
+
+def pairs(base: JsonObject, before: JsonObject | None, after: JsonObject, report: JsonObject | None,
+          ours: JsonObject | None) -> Iterator[Pair]:
     """One `Pair` per slide of `after` (before=None: every slide judged on its own)."""
+    b: Base = parse_base(base)
+    was: DeckRead | None = deck_read(before) if before else None
+    now: DeckRead = deck_read(after)
     unsure = loss_oracle.uncertain_slides(base, ours)
     # A converted deck is the PDF at `scale` from the page's corner (emit); a base without one
     # (the offline fuzz world's) is read off its own boxes.
-    place = (base["scale"], 0.0, 0.0) if base.get("scale") else loss_oracle.deck_placement(base)
-    scale = base.get("scale") or (place[0] if place else 1.0)
-    page = after.get("page_size") or base.get("deck_page_size") or [720.0, 405.0]
-    base_by_id = {s["objectId"]: s for s in base["slides"] if s.get("objectId")}
-    before_by_id = {s["objectId"]: s for s in (before or {}).get("slides", [])}
-    ours_by_key = {s["key"]: s["elements"] for s in (ours or {}).get("slides", [])}
-    told = {o["object"] for o in (report or {}).get("overruns") or []}
-    for a in after["slides"]:
+    place: Placement | None = (b.scale, 0.0, 0.0) if b.scale else loss_oracle.deck_placement(base)
+    scale = b.scale or (place[0] if place else 1.0)
+    page: Sequence[float] = now.page_size or b.deck_page_size or (720.0, 405.0)
+    base_by_id: dict[ObjectId, SlideEntry] = {oid: s for s in b.slides if (oid := s.object_id)}
+    before_by_id = {s.object_id: s for s in (was.slides if was is not None else ())}
+    ours_by_key = {s.key: s.elements for s in ours_slides(ours)}
+    told = {as_str(o["object"], "report.overruns: object")
+            for o in as_objects((report or {}).get("overruns") or [], "report.overruns")}
+    for a in now.slides:
         skey = _slide_key(a, base_by_id, list(ours_by_key))
-        sp = Pair(skey, base_by_id.get(a["objectId"]), before_by_id.get(a["objectId"]) if before else None, a,
-                  ours_by_key.get(skey), ours is not None, skey in unsure, scale, place, page)
+        sp = Pair(skey, base_by_id.get(a.object_id), before_by_id.get(a.object_id) if was is not None else None, a,
+                  ours_by_key.get(SlideKey(skey)), ours is not None, skey in unsure, scale, place, page)
         sp.told = told
         yield sp
 
 
-def check(base: dict, before: dict, after: dict, report: dict | None = None, ours: dict | None = None,
-          allow: list[str] = ()) -> list[dict]:
+def check(base: JsonObject, before: JsonObject | None, after: JsonObject, report: JsonObject | None,
+          ours: JsonObject | None) -> list[Finding]:
     """Findings of one sync: what looks broken after it that did not before it and that the new
-    conversion does not draw. `allow`: kinds, "<kind>/<slide>" or "<kind>/<slide>/<element>" to ignore."""
-    out = []
+    conversion does not draw (`allowed` leaves out the kinds a caller expects)."""
+    out: list[Finding] = []
+    ours_keys = {s.key for s in ours_slides(ours)}
     for sp in pairs(base, before, after, report, ours):
-        if sp.vb is None and sp.skey not in {s["key"] for s in (ours or {}).get("slides", [])}:
+        if sp.vb is None and sp.skey not in ours_keys:
             continue  # a slide nobody can say anything about (the person's, created meanwhile?)
         out += overlap_findings(sp) + panel_findings(sp) + off_page_findings(sp) + stranded_findings(sp)
         REACHED.update(sp.reached)
-    allowed = set(allow or ())
-    return [f for f in out if not ({f["kind"], f"{f['kind']}/{f['slide']}", f"{f['kind']}/{f['slide']}/{f['element']}"}
-                                   & allowed)]
+    return out
 
 
-def existing(base: dict, before: dict) -> list[dict]:
+def allowed(findings: Sequence[Finding], allow: Collection[str]) -> list[Finding]:
+    """`findings` less the ones `allow` names: kinds, "<kind>/<slide>" or "<kind>/<slide>/<element>"."""
+    names = set(allow)
+    return [f for f in findings if not ({f["kind"], f"{f['kind']}/{f['slide']}", f"{f['kind']}/{f['slide']}/{f['element']}"}
+                                        & names)]
+
+
+def existing(base: JsonObject, before: JsonObject) -> list[Finding]:
     """What already looks broken in `before`: the same kinds, every one a note, with `by` saying
     whose it is - "converter" when every object involved still is as the base wrote it, "person"
     otherwise. Nothing here is the sync's doing."""
-    out = []
+    out: list[Finding] = []
     for sp in pairs(base, None, before, None, None):
         sp.have_ours = True   # "no conversion to ask" is not the question here
         sp.unsure = False
@@ -599,21 +729,21 @@ def existing(base: dict, before: dict) -> list[dict]:
 def _as_written(sp: Pair, oid: str) -> bool:
     if sp.base_slide is None:
         return False
-    for el in sp.base_slide["elements"]:
-        rb = (el.get("readback") or {}).get(oid)
+    for el in sp.base_slide.elements:
+        rb = el.readback.get(ObjectId(oid))
         if rb is not None:
-            now = sp.va.read["objects"].get(oid)
-            return now is not None and loss_oracle.same_box(rb, now) and \
-                loss_oracle.norm(rb.get("text")) == loss_oracle.norm(now.get("text")) and \
-                rb.get("text_style_hash") == now.get("text_style_hash")
+            now = sp.va.read.objects.get(ObjectId(oid))
+            return now is not None and loss_oracle.same_box(readback_json(rb), readback_json(now)) and \
+                loss_oracle.norm(rb.text) == loss_oracle.norm(now.text) and \
+                rb.text_style_hash == now.text_style_hash
     return False
 
 
-def failures(findings: list[dict]) -> list[dict]:
+def failures(findings: Sequence[Finding]) -> list[Finding]:
     return [f for f in findings if f["severity"] in FAIL]
 
 
-def describe(findings: list[dict]) -> str:
+def describe(findings: Sequence[Finding]) -> str:
     return "\n".join(f"  [{f['severity']}] {f['kind']} {f['slide']}"
                      + (f" / {f['element']}" if f.get("element") else "")
                      + (f" ({f['object']})" if f.get("object") else "") + f": {f['detail']}" for f in findings)
@@ -621,41 +751,50 @@ def describe(findings: list[dict]) -> str:
 
 # ---------------------------------------------------------------- replaying an archive of fuzz steps
 
-def ours_from_folder(folder: Path, base: dict) -> dict | None:
+def ours_from_folder(folder: Path, base: JsonObject) -> JsonObject | None:
     """`sync.build_ours` from the `deck.json` a live fuzz step left in `<step>/ours`, without the
     PDF: the classify the sync used, keyed against this base the way build_ours keys it (the
-    extract, classify and render halves are what the folder already holds)."""
+    extract, classify and render halves are what the folder already holds). Its `pairs` and
+    `weak_pairs` are keyed by the index as a string, as the JSON of one would be."""
     from beamer2slides import identity, snapshot
     from beamer2slides.emit import SLIDE_W, DeckPlan, merge_blocks
-    from beamer2slides.json_types import as_objects
     from beamer2slides.sync import mark_emitted
     path = folder / "deck.json"
     if not path.exists():
         return None
-    deck = json.loads(path.read_text(encoding="utf-8"))
-    plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]}, SLIDE_W)
+    source = as_object(json.loads(path.read_text(encoding="utf-8")), str(path))
+    merged: list[Json] = []
+    for s in as_objects(source["slides"], "deck.slides"):
+        blocks: list[Json] = [e for e in merge_blocks(as_objects(s["elements"], "slide.elements"))]
+        merged.append({**s, "elements": blocks})
+    plan = DeckPlan({**source, "slides": merged}, SLIDE_W)
     deck, slides = plan.deck, plan.slides()
     infos = [identity.slide_info_of(s) for s in slides]
-    base_keys = [b["key"] for b in base["slides"]]
-    base_infos = [identity.base_slide_info(b, k) for b, k in zip(base["slides"], base_keys)]
+    base_slides = as_objects(base["slides"], "base.slides")
+    base_keys = [as_str(b["key"], "base slide key") for b in base_slides]
+    base_infos = [identity.base_slide_info(b, k) for b, k in zip(base_slides, base_keys)]
     found = identity.label_moves_of(base_infos, infos)
-    moves = [identity.reported_move(m, base_keys, infos) for m in found]
+    moves: list[Json] = [identity.reported_move(m, base_keys, infos) for m in found]
     weak: dict[int, str] = {}
     keys, pairs_ = identity.inherit_slide_keys(base_infos, base_keys, infos, found, weak)
-    ekeys, fps = [], []
+    ekeys: list[list[ElementKey]] = []
+    fps: list[list[JsonObject]] = []
     for j, slide in enumerate(slides):
-        matched = identity.base_items(base["slides"][pairs_[j]]["elements"]) if j in pairs_ else None
+        matched = identity.base_items(as_objects(base_slides[pairs_[j]]["elements"], "base slide elements")) \
+            if j in pairs_ else None
         k, f = identity.slide_element_keys(as_objects(slide["elements"], "elements"), folder, matched)
         ekeys.append(k)
         fps.append(f)
     entries = snapshot.slide_entries(deck, folder, keys, ekeys, fps)
     mark_emitted(base, entries, deck, pairs_, plan.scale, plan.fonts, fast=True, unread=[])
-    return {"slides": entries, "pairs": pairs_, "label_moves": moves, "weak_pairs": weak}
+    ours_entries: list[Json] = [as_object(e, "ours entry") for e in entries]
+    return {"slides": ours_entries, "pairs": {str(i): b for i, b in pairs_.items()}, "label_moves": moves,
+            "weak_pairs": {str(i): how for i, how in weak.items()}}
 
 
-def steps_under(paths: list[Path]) -> list[Path]:
+def steps_under(paths: Sequence[Path]) -> list[Path]:
     """Every recorded step folder (base, before and after read-backs) at or under these paths."""
-    out = []
+    out: list[Path] = []
     for p in paths:
         if (p / "after.json").exists():
             out.append(p)
@@ -670,26 +809,57 @@ def _num(name: str) -> int:
     return int(m.group()) if m else 0
 
 
-def _load(path: Path):
-    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else None
+def _load(path: Path) -> Json:
+    """The JSON of a file (None: there is none)."""
+    if not path.exists():
+        return None
+    data: Json = json.loads(path.read_text(encoding="utf-8"))
+    return data
 
 
-def edit_summary(spec: dict) -> str:
+def _loaded(path: Path) -> JsonObject | None:
+    data = _load(path)
+    return None if data is None else as_object(data, str(path))
+
+
+def edit_summary(spec: JsonObject) -> str:
     """One deck edit as `kind` plus what it aimed at, short."""
-    args = spec.get("args") or {}
+    args = as_object(spec.get("args") or {}, "edit.args")
     target = args.get("target") or {}
     what = ",".join(f"{k}={str(v)[:24]}" for k, v in target.items()) if isinstance(target, dict) else str(target)[:24]
-    return spec.get("edit", "?") + (f"[{what}]" if what else "")
+    return _edit_kind(spec) + (f"[{what}]" if what else "")
 
 
-def replay_step(step: Path, want_ours: bool = True) -> dict:
-    """The oracle over one recorded step: {"round", "step", "variant", "edits", "findings", "existing"}."""
-    base, before, after = _load(step / "base.json"), _load(step / "before.json"), _load(step / "after.json")
-    report = _load(step / "report.json")
-    rnd = _load(step.parent / "round.json") or {}
+def _edit_kind(spec: JsonObject) -> str:
+    kind = spec.get("edit", "?")
+    return kind if isinstance(kind, str) else str(kind)
+
+
+class Step(TypedDict):
+    """The oracle over one recorded step (`replay_step`)."""
+    round: str
+    archive: str
+    step: int
+    folder: str
+    variant: str | None
+    edits: list[str]
+    edit_kinds: list[str]
+    ours: bool
+    findings: list[Finding]
+    existing: list[Finding]
+
+
+def replay_step(step: Path, want_ours: bool) -> Step:
+    """The oracle over one recorded step."""
+    base, before, after = _loaded(step / "base.json"), _loaded(step / "before.json"), _loaded(step / "after.json")
+    if base is None or before is None or after is None:
+        raise FileNotFoundError(f"{step}: a step needs base.json, before.json and after.json")
+    report = _loaded(step / "report.json")
+    rnd = _loaded(step.parent / "round.json") or {}
     n = _num(step.name)
-    rec = next((s for s in rnd.get("steps", []) if s.get("step") == n), {})
-    edits = _load(step / "edits.json") or rec.get("edits") or []
+    none: JsonObject = {}
+    rec = next((s for s in as_objects(rnd.get("steps", []), "round.steps") if s.get("step") == n), none)
+    edits = as_objects(_load(step / "edits.json") or rec.get("edits") or [], "edits")
     ours = None
     if want_ours:
         try:
@@ -699,16 +869,25 @@ def replay_step(step: Path, want_ours: bool = True) -> dict:
         except Exception as e:  # noqa: BLE001 (an archived conversion today's code cannot key)
             print(f"{step}: no ours ({type(e).__name__}: {e})", file=sys.stderr)
     return {"round": step.parent.name, "archive": step.parent.parent.name, "step": n, "folder": str(step),
-            "variant": rec.get("variant"), "edits": [edit_summary(e) for e in edits],
-            "edit_kinds": sorted({e.get("edit", "?") for e in edits}), "ours": ours is not None,
+            "variant": as_optional_str(rec.get("variant"), "step.variant"), "edits": [edit_summary(e) for e in edits],
+            "edit_kinds": sorted({_edit_kind(e) for e in edits}), "ours": ours is not None,
             "findings": check(base, before, after, report, ours), "existing": existing(base, before)}
 
 
-def correlate(results: list[dict], level: str = "fail") -> dict:
+class Row(TypedDict, total=False):
+    """One edit kind's or variant's line of `correlate`: `rate` and `lift` are added last."""
+    steps: Required[int]
+    with_finding: Required[int]
+    kinds: Required[dict[str, int]]
+    rate: float
+    lift: float | None
+
+
+def correlate(results: Sequence[Step], level: Severity) -> dict[str, dict[str, Row]]:
     """Which deck edit kinds and source variants precede a finding: per edit kind and per variant,
     how many steps had it and how many of those had a finding of `level` (and of each kind)."""
-    def table(of):
-        out: dict[str, dict] = {}
+    def table(of: Callable[[Step], Sequence[str]]) -> dict[str, Row]:
+        out: dict[str, Row] = {}
         for r in results:
             hit = [f for f in r["findings"] if f["severity"] == level]
             for x in of(r):
@@ -722,11 +901,11 @@ def correlate(results: list[dict], level: str = "fail") -> dict:
         for row in out.values():
             row["rate"] = round(row["with_finding"] / row["steps"], 3)
             row["lift"] = round(row["rate"] / overall, 2) if overall else None
-        return dict(sorted(out.items(), key=lambda kv: (-(kv[1]["lift"] or 0), -kv[1]["steps"])))
+        return dict(sorted(out.items(), key=lambda kv: (-(kv[1].get("lift") or 0), -kv[1]["steps"])))
     return {"edit_kinds": table(lambda r: r["edit_kinds"]), "variants": table(lambda r: [r["variant"] or "?"])}
 
 
-def counts(results: list[dict]) -> dict:
+def counts(results: Sequence[Step]) -> dict[str, dict[str, int]]:
     out: dict[str, dict[str, int]] = {}
     for r in results:
         for f in r["findings"]:
@@ -737,9 +916,17 @@ def counts(results: list[dict]) -> dict:
     return out
 
 
-def main(argv: list[str] | None = None) -> int:
+class Summary(TypedDict):
+    steps: int
+    with_ours: int
+    counts: dict[str, dict[str, int]]
+    reached: dict[str, int]
+    correlation: dict[str, dict[str, Row]]
+
+
+def main(argv: Sequence[str] | None) -> int:
     import argparse
-    ap = argparse.ArgumentParser(prog="layout_oracle", description=__doc__.split("\n")[0])
+    ap = argparse.ArgumentParser(prog="layout_oracle", description=(__doc__ or "").split("\n")[0])
     ap.add_argument("paths", nargs="+", type=Path, help="archive roots, round folders or step folders")
     ap.add_argument("--json", action="store_true", help="one machine-readable document on stdout")
     ap.add_argument("--existing", action="store_true", help="also list what already looked broken before each sync")
@@ -747,15 +934,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--no-ours", action="store_true", help="don't rebuild the new conversion from <step>/ours")
     ap.add_argument("--out", type=Path, help="also write the --json document to this file")
     args = ap.parse_args(argv)
-    results = [replay_step(s, not args.no_ours) for s in steps_under(args.paths)]
-    summary = {"steps": len(results), "with_ours": sum(r["ours"] for r in results), "counts": counts(results),
-               "reached": dict(sorted(REACHED.items())), "correlation": correlate(results)}
-    if args.json or args.out:
-        doc = json.dumps({"summary": summary, "steps": [{k: v for k, v in r.items() if args.existing or k != "existing"}
+    paths: list[Path] = args.paths
+    as_json: bool = args.json
+    show_existing: bool = args.existing
+    notes: bool = args.notes
+    out_file: Path | None = args.out
+    results = [replay_step(s, not args.no_ours) for s in steps_under(paths)]
+    summary: Summary = {"steps": len(results), "with_ours": sum(r["ours"] for r in results), "counts": counts(results),
+                        "reached": dict(sorted(REACHED.items())), "correlation": correlate(results, "fail")}
+    if as_json or out_file:
+        doc = json.dumps({"summary": summary, "steps": [{k: v for k, v in r.items() if show_existing or k != "existing"}
                                                          for r in results]}, indent=1, ensure_ascii=False)
-        if args.out:
-            args.out.write_text(doc, encoding="utf-8")
-        if args.json:
+        if out_file:
+            out_file.write_text(doc, encoding="utf-8")
+        if as_json:
             print(doc)
             return 1 if any(failures(r["findings"]) for r in results) else 0
     print(f"{summary['steps']} steps ({summary['with_ours']} with the new conversion)")
@@ -764,22 +956,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{kind:<18}{row['fail']:>6}{row['note']:>6}{row['existing']:>10}")
     print("reached: " + ", ".join(f"{k} {v}" for k, v in summary["reached"].items()))
     for r in results:
-        shown = [f for f in r["findings"] if args.notes or f["severity"] == "fail"]
-        shown += [f for f in r["existing"]] if args.existing else []
+        shown = [f for f in r["findings"] if notes or f["severity"] == "fail"]
+        shown += [f for f in r["existing"]] if show_existing else []
         if not shown:
             continue
         print(f"\n{r['archive']}/{r['round']}/step{r['step']}  variant={r['variant']}  edits: {', '.join(r['edits'])}")
         for f in shown:
-            tag = f" [existing, {f['by']}]" if f.get("existing") else ""
+            tag = f" [existing, {f.get('by')}]" if f.get("existing") else ""
             print(describe([f]) + tag)
             for h in f.get("history") or []:
                 print(f"      {h['name']}: {h['was']} {' '.join(h.get('how') or [])}")
     for what, table in summary["correlation"].items():
         print(f"\nfail findings by {what} (steps, with a finding, lift):")
         for k, row in table.items():
-            print(f"  {k:<28}{row['steps']:>5}{row['with_finding']:>5}  {row['lift']}  {row['kinds']}")
+            print(f"  {k:<28}{row['steps']:>5}{row['with_finding']:>5}  {row.get('lift')}  {row['kinds']}")
     return 1 if any(failures(r["findings"]) for r in results) else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

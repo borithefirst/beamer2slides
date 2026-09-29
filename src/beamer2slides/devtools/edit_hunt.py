@@ -365,11 +365,19 @@ def sync(journey: str, tex: Path) -> int:
                               snap.find_base_pictures(base, snap.picture_folders(out)))
         except Exception as e:  # noqa: BLE001
             ours, summary["ours_error"] = None, f"{type(e).__name__}: {e}"
-        for name, judge in (("loss", loss_oracle), ("layout", layout_oracle)):
+        def loss() -> str:
+            found = loss_oracle.check(base, before, after, report, ours)
+            write_json(folder / "loss.json", found)
+            return loss_oracle.describe(loss_oracle.failures(found))
+
+        def layout() -> str:
+            found = layout_oracle.check(base, before, after, report, ours)
+            write_json(folder / "layout.json", found)
+            return layout_oracle.describe(layout_oracle.failures(found))
+
+        for name, judge in (("loss", loss), ("layout", layout)):
             try:
-                found = judge.check(base, before, after, report, ours)
-                write_json(folder / f"{name}.json", found)
-                summary[name] = judge.describe(judge.failures(found)).strip().splitlines()
+                summary[name] = judge().strip().splitlines()
             except Exception as e:  # noqa: BLE001 (a pre-screen never fails the round)
                 summary[name] = [f"judge crashed: {type(e).__name__}: {e}"]
         new_base = json.loads((out / "sync" / "base.json").read_text(encoding="utf-8"))

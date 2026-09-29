@@ -586,12 +586,14 @@ def alignment_compare(ref_out: Path, synced: Model, ref: Model, pid: str, titles
     """tools/alignment.py on the synced deck's slides `titles`, against the same measurement of
     the fresh conversion in `ref_out` (holes, numbers, bullets, overlays). The synced objects are
     found by kind, text and box, so the measurement can use the fresh conversion's deck.json."""
+    from dataclasses import replace
     from . import alignment
+    from beamer2slides import emit_state
     from beamer2slides.google_auth import slides_service
     from beamer2slides.gslides import save_thumbnail
 
     deck = json.loads((ref_out / "deck.json").read_text(encoding="utf-8"))
-    state = json.loads((ref_out / "emit.json").read_text(encoding="utf-8"))
+    state = emit_state.read(ref_out)
     # The measurement folders refer to the fresh conversion's PDF and pictures (alignment keeps the PDF open).
     pdf = ref_out / "slides.pdf" if (ref_out / "slides.pdf").exists() else Path(deck["source"]["pdf"])
     deck = {**deck, "source": {**deck["source"], "pdf": str(pdf)}, "slides": [
@@ -599,30 +601,30 @@ def alignment_compare(ref_out: Path, synced: Model, ref: Model, pid: str, titles
         for s in deck["slides"]]}
     api = slides_service()
     reports = {}
-    for name, model, presentation in (("fresh", ref, state["presentationId"]), ("synced", synced, pid)):
+    for name, model, presentation in (("fresh", ref, state.presentation_id), ("synced", synced, pid)):
         folder = work / name
         shutil.rmtree(folder, ignore_errors=True)
         (folder / "fidelity").mkdir(parents=True, exist_ok=True)
         for old in (folder / "fidelity").glob("*.png"):
             old.unlink()
         slides, emitted = [], []
-        for dslide, eslide in zip(deck["slides"], state["slides"]):
-            r = next((s for s in ref.slides if s.id == eslide["objectId"]), None)
+        for dslide, eslide in zip(deck["slides"], state.slides):
+            r = next((s for s in ref.slides if s.id == eslide.object_id), None)
             if r is None or r.title not in titles:
                 continue
             target = model.one(r.title)
             ids = []
-            for oid in eslide["elements"]:
+            for oid in eslide.elements:
                 re_el = next((e for e in r.elements if e.id == oid), None)
                 cands = [e for e in target.elements if re_el and e.descriptor() == re_el.descriptor()]
                 best = min(cands, key=lambda e: max(abs(a - b) for a, b in zip(e.box, re_el.box)), default=None)
                 ids.append(best.id if best else f"missing_{oid}")
             slides.append(dslide)
-            emitted.append({"page": eslide["page"], "objectId": target.id, "elements": ids})
+            emitted.append(emit_state.SlideState(page=eslide.page, object_id=target.id, elements=tuple(ids),
+                                                 objects=None, groups=None, table_margins=None))
             save_thumbnail(api, presentation, target.id, folder / "fidelity" / f"slides-{dslide['page'] + 1:03}.png")
         (folder / "deck.json").write_text(json.dumps({**deck, "slides": slides}, ensure_ascii=False), encoding="utf-8")
-        (folder / "emit.json").write_text(json.dumps({**state, "presentationId": presentation, "slides": emitted}),
-                                          encoding="utf-8")
+        emit_state.write(folder, replace(state, presentation_id=presentation, slides=tuple(emitted)))
         try:
             reports[name] = alignment.measure(folder, refresh=True)
         except Exception as e:  # noqa: BLE001 (a missing object, say)

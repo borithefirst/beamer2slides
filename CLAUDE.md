@@ -306,8 +306,12 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   (`plan_merge` the dict entry); `refit.plan` takes `RefitJob`s, `text_layout.layout` a `Layout`.
   snapshot builds those records and sync reads the MergePlan and `Work` records (its state declared
   in `__init__`); theme_sync's base theme is a `ThemeRecord` (`theme_record`/`theme_json`), its side
-  a `ThemeSide`, its merge a `ThemeMerge` of `Wrote`s. `guard.survey` still reads merge's dict
-  entries: it judges bases before sync parses them, and `sync_model.base` is strict.
+  a `ThemeSide`, its merge a `ThemeMerge` of `Wrote`s. `guard.check_rebuild` parses the base
+  (`sync_model.base`) and surveys it through merge's `*_of` entries; a base that does not parse is
+  refused (`unreadable-base`); test bases come from `tests/made_bases.py`, never partial dicts.
+  emit.json is `emit_state.EmitState`, written only by `emit_state.write`; `emit.emit` returns
+  `Emitted(state, deck)`, the base made from its slides (`snapshot.converted_base`).
+  `devtools/layout_oracle.py` reads `Base`/`DeckRead`/`SlideEntry` and returns `Finding`s.
 - **A base's picture is its bytes, not its name**: every sync renders into `<out>/sync/ours` under
   the same names, so base pictures are found by the hash the base read (`snapshot.BasePictures`
   over `picture_folders(out)`) and held out of the next render's way first (`hold_base_pictures`);

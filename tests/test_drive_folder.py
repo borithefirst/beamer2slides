@@ -100,7 +100,7 @@ def test_the_base_and_a_backup_copy_go_into_the_folder_asked_for():
     with drive_folder.use_folder("FOLD"):
         snapshot.save_drive(drive, {"presentationId": "DECK"}, None, {"name": "Talk", "parents": ["P0"]})
         assert drive.created[-1]["parents"] == ["FOLD"]
-        guard.copy_in_drive(drive, "DECK")
+        guard.copy_in_drive(drive, "DECK", None)
         assert drive.created[-1]["parents"] == ["FOLD"] and "backup" in drive.created[-1]["name"]
 
 

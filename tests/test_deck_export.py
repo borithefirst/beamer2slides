@@ -240,10 +240,10 @@ def test_a_backup_too_large_to_export_whole_is_kept_in_parts(tmp_path, monkeypat
         # a rebuild's (`fallback`): parts, and still the Drive copy - the deck whole, where parts come
         # back as presentations of their own
         copied = []
-        monkeypatch.setattr(guard, "copy_in_drive", lambda d, pid, name=None: copied.append(pid) or {"url": "u"})
-        rebuild = guard.backup_deck(world, "P", out, "file", slides=world)
+        monkeypatch.setattr(guard, "copy_in_drive", lambda d, pid, name: copied.append(pid) or {"url": "u"})
+        rebuild = guard.backup_deck(world, "P", out, "file", "", True, world)
         assert copied == ["P"] and rebuild["drive"] == {"url": "u"} and len(rebuild["parts"]) == 2
-        result = guard.backup_deck(world, "P", out, "file", slides=world, fallback=False)   # a sync's
+        result = guard.backup_deck(world, "P", out, "file", "", False, world)   # a sync's
     assert "file" not in result and "drive" not in result
     names = [p["file"].rsplit("-", 3)[-3:] for p in result["parts"]]
     assert names == [["slides", "001", "002.pptx"], ["slides", "003", "003.pptx"]]
@@ -251,10 +251,10 @@ def test_a_backup_too_large_to_export_whole_is_kept_in_parts(tmp_path, monkeypat
     assert guard.way_back_kept(result) and world.left() == []
     assert any("2 .pptx parts" in w for w in result["warnings"])
     entry = {"presentationId": "P", "backup": result}
-    assert any("slides 3-3" in line for line in guard.restore_hint(entry))
+    assert any("slides 3-3" in line for line in guard.restore_hint(entry, "rebuild"))
     guard.record(out, entry)
     assert len(guard.backup_files(guard.read_log(out))) == 2
-    assert guard.prune_backups(out, keep=1)["doomed"] == [], "a backup in parts is one backup"
+    assert guard.prune_backups(out, 1, None, False)["doomed"] == [], "a backup in parts is one backup"
 
 
 def test_a_backup_missing_a_slide_is_no_way_back(tmp_path):
@@ -262,6 +262,6 @@ def test_a_backup_missing_a_slide_is_no_way_back(tmp_path):
     world.export_media = (lambda real: lambda fileId, mimeType:
                           Request(too_large()) if fileId == "P" else real(fileId, mimeType))(world.export_media)
     with google_auth.use_services({"drive": world, "slides": world}):
-        result = guard.backup_deck(world, "P", tmp_path / "talk", "file", slides=world, fallback=False)
+        result = guard.backup_deck(world, "P", tmp_path / "talk", "file", "", False, world)
     assert result["parts_missing"] == [[2, 2]] and not guard.way_back_kept(result)
     assert any("slides 2-2 are in no part" in w for w in result["warnings"])

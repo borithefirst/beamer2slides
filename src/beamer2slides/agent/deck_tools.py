@@ -481,6 +481,7 @@ def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: 
     """
     from ..emit import emit
     from ..guard import RebuildRefused
+    from ..json_types import as_array
     from ..snapshot import snapshot_after_convert
 
     deck = json.loads((out_dir / "deck.json").read_text(encoding="utf-8"))
@@ -506,21 +507,22 @@ def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: 
     backup = _way_back(j, backup, needed=force_rebuild)
 
     try:
-        state = emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked)
+        built = emit(deck, out_dir, name, new_deck, measure, force_rebuild, backup, named, checked)
     except RebuildRefused as refused:
         # Asked again immediately before the write, in case the deck was edited in between.
         _refuse_rebuild(j, refused, source, out_dir)
-    for c in state.get("contained", []):
+    state = built.state
+    for c in state.contained or ():
         # emit.DeckPlan.contain: an element emit could not plan went up as the picture of its region.
-        j.warn(f"slide {c['page'] + 1}: {c['kind']} {c['id']} could not be planned ({c['error']}); "
+        j.warn(f"slide {c.page + 1}: {c.kind} {c.id} could not be planned ({c.error}); "
                "a picture of it instead")
     j.artifact(out_dir / "emit.json", "json", "what was built: deck id, url, per-slide objects")
 
-    previous = state.get("previous") or {}
+    previous = state.previous or {}
     rebuilt = previous.get("action") == "rebuilt in place"
     j.data.update({
-        "url": state["url"],
-        "presentationId": state["presentationId"],
+        "url": state.url,
+        "presentationId": state.presentation_id,
         "title": name,
         "rebuilt": rebuilt,
         "new_deck": not rebuilt,
@@ -534,10 +536,10 @@ def _upload(j: Job, out_dir: Path, prepared: dict, title: str | None, new_deck: 
     base_slides = None
     problems: list[str] = []
     try:
-        base = snapshot_after_convert(state["deck"], out_dir, state,
+        base = snapshot_after_convert(built.deck, out_dir, state,
                                       source if source is not None else prepared.get("source"),
-                                      overlays, problems=problems)
-        base_slides = len(base["slides"])
+                                      overlays, problems)
+        base_slides = len(as_array(base["slides"], "base.slides"))
         j.artifact(out_dir / "sync" / "base.json", "json",
                    "the sync base: what this conversion put in the deck")
         # Printed, these were only the log: a conversion reported success with no base in Drive,
@@ -735,8 +737,9 @@ def deck_sync(
     # A sync that wrote nothing never asked for its way back (`guard.WayBack.kept`): nothing to
     # report, and nothing to wait for.
     if note is not None and note.asked:
-        if note.kept():
-            _cli().add_recovery(note.kept(), info)
+        kept = note.kept()
+        if kept:
+            _cli().add_recovery(kept, info)
         _report_way_back(j, note.kept())
 
     report = info["report"]

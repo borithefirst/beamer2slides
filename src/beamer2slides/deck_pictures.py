@@ -30,6 +30,7 @@ import posixpath
 import zipfile
 from collections.abc import Collection
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from xml.etree import ElementTree as ET
 
@@ -73,9 +74,17 @@ def picture_urls(pres: Presentation) -> dict[str, str]:
     return urls
 
 
-def _exported_objects(tree) -> list[dict]:
-    """A shape tree's objects depth first: {"title", "embed" (the relationship of its own picture)}."""
-    out = []
+@dataclass(frozen=True, kw_only=True)
+class Exported:
+    """One object of an exported shape tree: its alt-text title and the relationship of its own
+    picture (None: it has none)."""
+    title: str | None
+    embed: str | None
+
+
+def _exported_objects(tree: ET.Element) -> list[Exported]:
+    """A shape tree's objects depth first."""
+    out: list[Exported] = []
     for node in tree:
         if node.tag not in OBJECTS:
             continue
@@ -84,8 +93,8 @@ def _exported_objects(tree) -> list[dict]:
         blip = node.find("p:blipFill/a:blip", NS)
         if blip is None:
             blip = node.find("p:spPr/a:blipFill/a:blip", NS)
-        out.append({"title": c_nv.get("title") if c_nv is not None else None,
-                    "embed": blip.get(EMBED) if blip is not None else None})
+        out.append(Exported(title=c_nv.get("title") if c_nv is not None else None,
+                            embed=blip.get(EMBED) if blip is not None else None))
         if node.tag == GROUP:
             out += _exported_objects(node)
     return out
@@ -98,8 +107,17 @@ def _rels(z: zipfile.ZipFile, part: str) -> dict[str, str]:
     if path not in z.namelist():
         return {}
     root = ET.fromstring(z.read(path))
-    return {r.get("Id"): posixpath.normpath(posixpath.join(folder, r.get("Target")))
-            for r in root.findall("rel:Relationship", NS) if r.get("TargetMode") != "External"}
+    rels: dict[str, str] = {}
+    for r in root.findall("rel:Relationship", NS):
+        rid, target = r.get("Id"), r.get("Target")
+        if r.get("TargetMode") != "External" and rid is not None and target is not None:
+            rels[rid] = posixpath.normpath(posixpath.join(folder, target))
+    return rels
+
+
+def _targets(rels: dict[str, str], nodes: list[ET.Element]) -> list[str]:
+    """The parts `nodes` name by their relationship id, those the relationships hold, in order."""
+    return [rels[rid] for n in nodes if (rid := n.get(RID)) is not None and rid in rels]
 
 
 def _parts(z: zipfile.ZipFile) -> dict[str, list[str]]:
@@ -107,13 +125,12 @@ def _parts(z: zipfile.ZipFile) -> dict[str, list[str]]:
     pres_part = "ppt/presentation.xml"
     root = ET.fromstring(z.read(pres_part))
     rels = _rels(z, pres_part)
-    slides = [rels[s.get(RID)] for s in root.findall("p:sldIdLst/p:sldId", NS) if s.get(RID) in rels]
-    masters = [rels[m.get(RID)] for m in root.findall("p:sldMasterIdLst/p:sldMasterId", NS) if m.get(RID) in rels]
-    layouts = []
+    slides = _targets(rels, root.findall("p:sldIdLst/p:sldId", NS))
+    masters = _targets(rels, root.findall("p:sldMasterIdLst/p:sldMasterId", NS))
+    layouts: list[str] = []
     for m in masters:
-        mrels = _rels(z, m)
         mroot = ET.fromstring(z.read(m))
-        layouts += [mrels[l.get(RID)] for l in mroot.findall("p:sldLayoutIdLst/p:sldLayoutId", NS) if l.get(RID) in mrels]
+        layouts += _targets(_rels(z, m), mroot.findall("p:sldLayoutIdLst/p:sldLayoutId", NS))
     return {"slide": slides, "master": masters, "layout": layouts}
 
 
@@ -132,7 +149,9 @@ def exported_pictures(data: bytes, pres: Presentation, wanted: Collection[str] |
         if len(live_pages) != len(parts[kind]):
             continue  # (the pages cannot be told apart by their place)
         for page, part in zip(live_pages, parts[kind]):
-            want = lambda oid: wanted is None or oid in wanted  # noqa: E731
+            def want(oid: str) -> bool:
+                return wanted is None or oid in wanted
+
             try:
                 root = ET.fromstring(z.read(part))
             except (KeyError, ET.ParseError):
@@ -153,16 +172,16 @@ def exported_pictures(data: bytes, pres: Presentation, wanted: Collection[str] |
                 if picture:
                     got[pid] = picture
             tree = root.find("p:cSld/p:spTree", NS)
-            exported = _exported_objects(tree) if tree is not None else []
+            exported: list[Exported] = _exported_objects(tree) if tree is not None else []
             live = all_elements(page.get("pageElements", []), pid)   # (depth first, a group first: the export's order)
-            if len(exported) == len(live) and all((x["title"] or None) == (e.get("title") or None)
+            if len(exported) == len(live) and all((x.title or None) == (e.get("title") or None)
                                                   for x, e in zip(exported, live)):
                 pairs = list(zip(live, exported))
             else:
-                by_title: dict[str, list[dict]] = {}
+                by_title: dict[str, list[Exported]] = {}
                 for x in exported:
-                    if x["title"]:
-                        by_title.setdefault(x["title"], []).append(x)
+                    if x.title:
+                        by_title.setdefault(x.title, []).append(x)
                 titled: dict[str, list[PageElement]] = {}
                 for e in live:
                     if title := e.get("title"):
@@ -171,7 +190,7 @@ def exported_pictures(data: bytes, pres: Presentation, wanted: Collection[str] |
                          if len(es) == 1 and len(by_title.get(t, ())) == 1]
             for e, x in pairs:
                 if "image" in e and want(object_id(e)):
-                    picture = media(x["embed"])
+                    picture = media(x.embed)
                     if picture:
                         got[object_id(e)] = picture
     return got
@@ -234,7 +253,7 @@ class LivePictures:
                 self.exported = done.pictures(self.pres, None)
         return self.exported
 
-    def get(self, ids) -> dict[str, bytes]:
+    def get(self, ids: Collection[str]) -> dict[str, bytes]:
         """The bytes of these pictures (ids as `picture_urls`), those that could be had."""
         todo = [i for i in dict.fromkeys(ids) if i in self.urls and i not in self.got]
         if todo:
@@ -250,4 +269,4 @@ class LivePictures:
                 exported = self.export()
                 for i in missing:
                     self.got[i] = exported.get(i)
-        return {i: self.got[i] for i in ids if self.got.get(i)}
+        return {i: picture for i in ids if (picture := self.got.get(i))}

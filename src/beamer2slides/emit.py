@@ -9,17 +9,18 @@ prediction, then by measurement) and `emit_theme` (the presentation, master and 
 callers have always taken from here still are.
 """
 
-import json
 import os
 from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from concurrent.futures import Future, ThreadPoolExecutor
 from copy import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import FrameType
 from typing import TYPE_CHECKING, Callable, TypedDict, TypeVar
 
+from . import emit_state
+from .emit_state import Emitted
 from .emit_diagrams import block_groups, diagram_requests_of, element_template_keys, rule_groups
 from .emit_diagrams import (  # noqa: F401 (callers take these from here)
     bend_template_key, connection, diagram_requests, label_inside, node_template_key,
@@ -334,18 +335,18 @@ def plan_rebuild(slides: SlidesService, drive: DriveService, out: Path, new_deck
     if found["reason"]:
         print(f"WARNING: rebuilding a deck that {'was edited in Slides' if found['reason'] == 'edited' else found['reason']} "
               f"(--force-rebuild): {entry['summary']}")
-    entry["backup"] = guard.backup_deck(drive, pid, out, mode, reason, slides=slides)
+    entry["backup"] = guard.backup_deck(drive, pid, out, mode, reason, True, slides)
     guard.record(out, entry)  # the attempt belongs in the log even when it failed, and what follows
     if found["reason"]:
         guard.demand_way_back(pid, out, source_pdf, entry, mode)  # no backup, no forced rebuild
     print(f"updating existing deck {pid} (revision {found.get('revisionId')})")
-    for line in guard.restore_hint(entry) if found["reason"] else []:
+    for line in guard.restore_hint(entry, "rebuild") if found["reason"] else []:
         print(line)
     return pid, entry
 
 
 def emit(deck: ObjectMap, out: Path, title: str, new_deck: bool, measure: bool, force_rebuild: bool, backup: str,
-         source_pdf: Path | None, checked: Preflight | None) -> dict:
+         source_pdf: Path | None, checked: Preflight | None) -> Emitted:
     """Build the deck. An output folder that already has a deck is rebuilt in place unless
     `new_deck`; that replaces the deck's whole content, so `guard.check_rebuild` refuses when
     the deck was edited in Slides (`force_rebuild` goes ahead, after a backup). `checked`: what
@@ -353,24 +354,25 @@ def emit(deck: ObjectMap, out: Path, title: str, new_deck: bool, measure: bool, 
     slides, drive = slides_service(), drive_service()
     # (blocks are merged by the plan, `DeckPlan.contain`, where a block it trips over is a picture)
     existing, previous_entry = plan_rebuild(slides, drive, out, new_deck, force_rebuild, backup, source_pdf, checked)
-    state, refused = build_deck(slides, drive, deck, out, title, existing, measure)
+    built, refused = build_deck(slides, drive, deck, out, title, existing, measure)
     if refused:
         # A picture can only come with the imported .pptx (the API inserts images from public
         # URLs only), so the deck is built once more with the refused elements as pictures.
         print(f"rebuilding the deck with {len(refused)} refused element(s) as pictures")
         # The refused ids are the built deck's (blocks merged, and what emit could not plan made
         # pictures already): the rebuild starts from that deck, so nothing is contained or said twice.
-        merged, contained = DeckPlan(deck, pptx_tables=True, contain=True).merged, state.get("contained")
-        state, again = build_deck(slides, drive, fallback_pictures(merged, refused, out), out, title,
-                                  state["presentationId"], measure)
+        merged, contained = DeckPlan(deck, pptx_tables=True, contain=True).merged, built.state.contained
+        built, again = build_deck(slides, drive, fallback_pictures(merged, refused, out), out, title,
+                                  built.state.presentation_id, measure)
         if contained:
-            state["contained"] = contained
+            built = replace(built, state=replace(built.state, contained=contained))
         for page, eid in again:
             print(f"warning: slide {page + 1}: {eid} was refused again and is missing")
     if previous_entry:
-        state["previous"] = previous_entry  # what this run replaced, and how to get it back
-    (out / "emit.json").write_text(json.dumps({k: v for k, v in state.items() if k != "deck"}, indent=1), encoding="utf-8")
-    return state
+        # what this run replaced, and how to get it back
+        built = replace(built, state=replace(built.state, previous=previous_entry))
+    emit_state.write(out, built.state)
+    return built
 
 
 def upload_plan(deck: ObjectMap, out: Path) -> "DeckPlan":
@@ -388,9 +390,9 @@ def upload_plan(deck: ObjectMap, out: Path) -> "DeckPlan":
 
 
 def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out: Path, title: str, existing: str | None,
-               measure: bool) -> tuple[dict, list[tuple[int, str]]]:
-    """Import the .pptx and fill in the content. Returns the state for emit.json and the
-    elements the API refused ((PDF page, element id)). `measure`: hole and overlay pictures go
+               measure: bool) -> tuple[Emitted, list[tuple[int, str]]]:
+    """Import the .pptx and fill in the content. Returns the state for emit.json with the deck
+    as written, and the elements the API refused ((PDF page, element id)). `measure`: hole and overlay pictures go
     where a thumbnail shows their gaps and words (measure_places), not only where they are predicted."""
     plan = upload_plan(deck, out)
     written, scale, fonts = plan.deck, plan.scale, plan.fonts
@@ -450,16 +452,15 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
     else:
         write_layouts(client, pid, written, scale, fonts, ground)
 
-    slide_states: list[dict[str, object]] = []  # (emit.json's "slides", which the base is read with)
-    state: dict[str, object] = {"presentationId": pid, "url": f"https://docs.google.com/presentation/d/{pid}/edit",
-                                "scale": scale, "slides": slide_states}
-    if plan.contained:  # (emit.json: which elements are pictures because emit could not plan them)
-        state["contained"] = plan.contained
-    if theme:
-        state["theme"] = {"ground": theme.ground, "master": master_fill.get("color"),
-                          "decorations": {k: str(p.relative_to(out)).replace("\\", "/") if p else None
-                                          for k, p in theme.decorations.items()},
-                          "layouts": {str(k): v for k, v in theme.layouts.items()}}
+    slide_states: list[emit_state.SlideState] = []  # (emit.json's "slides", which the base is read with)
+    master_color = master_fill.get("color")
+    theme_state = None if not theme else emit_state.ThemeState(
+        ground=theme.ground, master=master_color if isinstance(master_color, str) else None,
+        decorations={k: str(p.relative_to(out)).replace("\\", "/") if p else None for k, p in theme.decorations.items()},
+        layouts={str(k): v for k, v in theme.layouts.items()})
+    # (emit.json's "contained": which elements are pictures because emit could not plan them)
+    contained = tuple(emit_state.Contained(page=c["page"], id=c["id"], kind=c["kind"], error=c["error"])
+                      for c in plan.contained) or None
     # Placeholder sizes (needed to resize them) and any extra layout placeholders.
     created = execute(slides.presentations().get(
         presentationId=pid,
@@ -552,11 +553,13 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
             pending.append((slide_id, n, parts))
             pending_size += size
             objects, groups = element_objects(parts, element_ids)
-            slide_states.append({"page": n, "objectId": slide_id, "elements": element_ids, "objects": objects,
-                                 "groups": groups})
-            if plan.pptx_tables:  # the base records them: a sync refills such a table in place (sync.table_refill)
-                slide_states[-1]["table_margins"] = {str(i): [list(m) for m in plan.pptx_table(el).margins]
-                                                     for i, el in enumerate(_elements(slide)) if el["kind"] == "table"}
+            # the base records the margins: a sync refills such a table in place (sync.table_refill)
+            margins: dict[str, emit_state.Margins] | None = {
+                str(i): tuple(tuple(m) for m in plan.pptx_table(el).margins)
+                for i, el in enumerate(_elements(slide)) if el["kind"] == "table"} if plan.pptx_tables else None
+            slide_states.append(emit_state.SlideState(
+                page=n, object_id=slide_id, elements=tuple(element_ids), objects=tuple(tuple(o) for o in objects),
+                groups=tuple(groups), table_margins=margins))
             kinds = [el["kind"] for el in _elements(slide)]
             print(f"  slide {n + 1}: {kinds.count('text')} text boxes, {kinds.count('image')} pictures, "
                   f"{kinds.count('shape')} shapes, {kinds.count('table')} tables")
@@ -570,8 +573,10 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
                 p.shutdown()
     refused.sort()                   # several threads appended to it
     batch(slides, pid, [{"deleteObject": {"objectId": oid}} for oid in [s["objectId"] for s in sources] + scratch])
-    state["deck"] = written  # (what was built, for the sync snapshot; not written to emit.json)
-    return state, refused
+    state = emit_state.EmitState(presentation_id=pid, url=f"https://docs.google.com/presentation/d/{pid}/edit",
+                                 scale=scale, slides=tuple(slide_states), contained=contained, theme=theme_state,
+                                 previous=None)
+    return Emitted(state=state, deck=written), refused  # (the deck as built, for the sync snapshot)
 
 
 def created_ids(reqs: Sequence[JsonMap]) -> list[str]:

@@ -701,7 +701,7 @@ def live_signature(url: str | None, oid: str | None, pictures: LivePictures | No
     if pictures is not None and oid:
         data = pictures.get([oid]).get(oid)
     else:
-        data = snapshot._download(url) if url else None
+        data = snapshot._download(url, None) if url else None
     return snapshot.signature(data) if data else None
 
 

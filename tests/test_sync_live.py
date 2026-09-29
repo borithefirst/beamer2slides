@@ -1150,7 +1150,7 @@ def scenario_layout_edited_retheme(run: Run):
                for te in (title_now or {}).get("shape", {}).get("text", {}).get("textElements", []) if "textRun" in te}
     if colours != {json.dumps({"green": 0.5})}:   # (Google gives back 0.5019608)
         run.problems.append(f"the TITLE_ONLY layout's title placeholder lost the person's colour: {colours}")
-    signature = lambda e: snapshot.signature(snapshot._download(e["image"]["contentUrl"]) or b"")
+    signature = lambda e: snapshot.signature(snapshot._download(e["image"]["contentUrl"], None) or b"")
     blank_now = next((e for e in lay["BLANK"]["pageElements"] if e["objectId"] == blank["objectId"]), None)
     if blank_now is None or blank_now["transform"].get("translateX", 0) != moved_to:
         run.problems.append(f"the BLANK layout's decoration is not where the person put it: {blank_now and blank_now['transform']}")

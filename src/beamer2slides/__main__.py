@@ -21,7 +21,7 @@ import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TypeVar
+from typing import TYPE_CHECKING, TypeVar
 
 from .classify import classify
 from .debug import render_debug
@@ -29,6 +29,10 @@ from .extract import extract, select_overlays
 from .notes import prepare as prepare_notes
 from .paths import out_root
 from .raw_types import RawDoc
+
+if TYPE_CHECKING:  # (the Google side is imported where it is used, as the CLI always has)
+    from .google_types import DriveService, SlidesService
+    from .json_types import JsonObject
 
 BACKUP_MODES = ("auto", "none", "file", "drive", "both")  # = guard.BACKUP_MODES (imported lazily)
 _V = TypeVar("_V")
@@ -79,8 +83,8 @@ def cmd_classify(pdf: Path, out: Path, overlays: str = "last", check: str = "off
     return pdf, raw, deck
 
 
-def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlays: str, measure: bool = True,
-                force_rebuild: bool = False, backup: str = "auto", check: str = "off") -> None:
+def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlays: str, measure: bool,
+                force_rebuild: bool, backup: str, check: str) -> None:
     from .emit import emit, preflight_in_background
     from .render import render_backgrounds
 
@@ -95,12 +99,14 @@ def cmd_convert(pdf: Path, out: Path, title: str | None, new_deck: bool, overlay
     (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     checked = preflight()  # RebuildRefused comes out here, with nothing yet written to Drive
     title = title or raw["source"]["title"] or source.stem
-    state = emit(deck, out, title, new_deck, measure, force_rebuild, backup, source, checked)
-    print(f"Google Slides: {state['url']}")
+    built = emit(deck, out, title, new_deck, measure, force_rebuild, backup, source, checked)
+    print(f"Google Slides: {built.state.url}")
+    from .json_types import as_array
     from .snapshot import snapshot_after_convert
     try:
-        base = snapshot_after_convert(state["deck"], out, state, source, overlays)
-        print(f"sync base: {len(base['slides'])} slides recorded ({out / 'sync' / 'base.json'})")
+        base = snapshot_after_convert(built.deck, out, built.state, source, overlays, None)
+        print(f"sync base: {len(as_array(base['slides'], 'base.slides'))} slides recorded "
+              f"({out / 'sync' / 'base.json'})")
     except Exception as e:  # the deck is complete; only a later sync needs the base
         print(f"warning: could not record the sync base ({type(e).__name__}: {e})")
 
@@ -113,25 +119,28 @@ def record_sync_point(pdf: Path, deck: str, out: Path | None, backup: str):
     need nothing of the sync's reading and planning, and `sync` collects them at the one moment
     they are a promise about - before anything in the deck moves."""
     from .guard import WayBack
-    return WayBack(lambda slides, drive: sync_point(pdf, deck, out, backup, slides, drive))
+    return WayBack(lambda slides, drive: sync_point(pdf, deck, out, backup, slides, drive), "b2s-back")
 
 
-def sync_point(pdf: Path, deck: str, out: Path | None, backup: str, slides, drive) -> dict | None:
+def sync_point(pdf: Path, deck: str, out: Path | None, backup: str, slides: "SlidesService",
+               drive: "DriveService") -> "JsonObject | None":
     from .guard import backup_deck, deck_url, record
     from .gslides import execute
     from .sync import resolve_deck
     try:
-        pid, folder = resolve_deck(str(deck))
+        pid, folder = resolve_deck(deck)
         out = out or folder or out_root() / pdf.stem
-        rev = execute(slides.presentations().get(presentationId=pid, fields="revisionId"))["revisionId"]
+        rev = execute(slides.presentations().get(presentationId=pid, fields="revisionId")).get("revisionId")
+        if rev is None:   # (asked for by name: never so; said as the missing key it was)
+            raise KeyError("revisionId")
         info = execute(drive.files().get(fileId=pid, fields="modifiedTime"))
         # A sync only ever rewrites the parts the source changed, but the deck as a whole can only
         # be recovered from a file: Drive's version history is not readable back (docs/sync.md).
-        entry = {"presentationId": pid, "url": deck_url(pid), "action": "synced", "revisionId": rev,
-                 "modifiedTime": info.get("modifiedTime"), "out": str(out),
-                 "checked": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": f"sync {pdf.name}",
-                 "backup": backup_deck(drive, pid, Path(out), "file" if backup == "auto" else backup,
-                                       fallback=False, slides=slides)}
+        entry: JsonObject = {
+            "presentationId": pid, "url": deck_url(pid), "action": "synced", "revisionId": rev,
+            "modifiedTime": info.get("modifiedTime"), "out": str(out),
+            "checked": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": f"sync {pdf.name}",
+            "backup": backup_deck(drive, pid, Path(out), "file" if backup == "auto" else backup, "", False, slides)}
         record(Path(out), entry)
         return {"out": str(out), "entry": entry}
     except Exception as e:  # noqa: BLE001 (a missing recovery note is no reason not to sync)
@@ -139,15 +148,16 @@ def sync_point(pdf: Path, deck: str, out: Path | None, backup: str, slides, driv
         return None
 
 
-def add_recovery(note: dict, info: dict) -> None:
-    """The recovery note on screen and in sync's report."""
+def add_recovery(note: "JsonObject", info: dict[str, object]) -> None:
+    """The recovery note (`sync_point`'s) on screen and in sync's report."""
     from .guard import restore_hint
-    entry = note["entry"]
+    from .json_types import as_object, as_str
+    entry = as_object(note["entry"], "the recovery note's entry")
     print("recovery:")
     for line in restore_hint(entry, "sync"):
         print(line)
     info.setdefault("recovery", entry)
-    path = Path(note["out"]) / "sync" / "sync-report.json"
+    path = Path(as_str(note["out"], "the recovery note's out")) / "sync" / "sync-report.json"
     if path.exists():
         try:
             report = json.loads(path.read_text(encoding="utf-8"))
@@ -518,8 +528,9 @@ def main() -> None:
         except FirstSyncRefused as refused:
             raise SystemExit(str(refused)) from None
         # Only a sync that wrote asked for its way back; one that did not is not kept waiting.
-        if note and note.kept():
-            add_recovery(note.kept(), info)
+        kept = note.kept() if note else None
+        if kept:
+            add_recovery(kept, info)
         r = info["report"]
         sent = info["requests"] or {}          # Sync.sent counts them per phase, not in total
         held = r["slides"].get("held") or []

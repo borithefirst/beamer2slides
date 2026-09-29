@@ -3786,7 +3786,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
                                     *problems]))
     stale = snapshot.stale_base_warning(where, drive, pid, facts)
     warnings = problems + ([stale] if stale else [])
-    overlays, mismatch = overlay_mode(overlays, base.get("overlays"))
+    overlays, mismatch = overlay_mode(overlays, as_optional_str(base.get("overlays"), "base.overlays"))
     warnings += [mismatch] if mismatch else []
     for w in warnings:
         print(f"warning: {w}")
@@ -3887,7 +3887,7 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
                 # where the flag will not land, the base goes up again as it always did.
                 new.pop("cleanup", None)
                 snapshot.save_local(new, out)
-                if snapshot.mark_cleaned(drive, pid, new["generation"], facts):
+                if snapshot.mark_cleaned(drive, pid, as_int(new["generation"], "base.generation"), facts):
                     snapshot.store_base(new, out, drive, "base", facts)
         info["generation"] = new["generation"]
     elif not dry_run and where == "drive":

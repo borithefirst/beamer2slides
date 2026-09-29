@@ -1943,12 +1943,14 @@ the PDF was being converted - that second ask is `guard.recheck`, which confirms
 with one field of one read where the deck is still at the revision it was read at, and asks the
 whole question again where it is not), `guard.check_rebuild` reads the live deck with
 `presentations.get` and compares it with the sync base (`<out>/sync/base.json`, or Drive `appProperties.b2sBase` -
-whichever `snapshot.load_base` finds; Drive wins). It refuses for three reasons:
+whichever `snapshot.load_base` finds; Drive wins). The base is parsed first (`sync_model.base`,
+the same strict reader sync uses). It refuses for four reasons:
 
 | reason | when | message says |
 |---|---|---|
 | `edited` | someone changed the deck since the converter wrote it | what was edited, with up to 3 examples |
 | `no-base` | there is no base, so the question cannot be answered | the base is written by `convert`; older decks have none |
+| `unreadable-base` | a base was found but does not parse (an old or damaged base.json; `found["base_problem"]` says where) | whether the deck was edited cannot be checked; like `no-base`, it is never rebuilt over without `--force-rebuild` |
 | `other-source` | the base says this folder's deck came from another PDF | rebuilding here would replace that deck with this PDF's slides |
 
 A refusal exits non-zero (`RebuildRefused` → `SystemExit`) and nothing is written. It looks like
@@ -1969,10 +1971,13 @@ refusing to rebuild: this deck was edited in Google Slides after beamer2slides w
 
 ### What counts as an edit
 
-Exactly what sync would keep, through the same code: `merge.deck_edits` (geometry, text, text
-style, shape style, image, group, deleted, part_deleted), `merge.user_objects` (objects the
-converter never made), `merge.background_edited`, speaker notes, plus slides added, deleted or
-reordered. There is one notion of "edited" in the tool, not two.
+Exactly what sync would keep, through the same code: `merge.deck_edits_of` (geometry, text, text
+style, shape style, image, group, deleted, part_deleted), `merge.user_objects_of` (objects the
+converter never made), `merge.background_edited_of`, speaker notes, plus slides added, deleted or
+reordered. There is one notion of "edited" in the tool, not two. `guard.survey` reads the parsed
+base (`sync_model.Base`) and the read-back (`sync_model.DeckRead`); its tests build their bases the
+way `convert` does (`tests/made_bases.py`: real IR through `snapshot.slide_entries_of`,
+`attached` and `base_json`), so a base that could not be written cannot pass a test either.
 
 Deliberately **not** an edit:
 - a new `revisionId` - Google bumps it on its own (opening the deck is enough);

@@ -17,7 +17,7 @@
   "playground/runner.py": 1
  },
  "default_arguments": {
-  "__main__.py": 6,
+  "__main__.py": 2,
   "adopt.py": 39,
   "adopt_shapes.py": 10,
   "adopt_sync.py": 13,
@@ -55,7 +55,6 @@
   "devtools/fuzz_sync.py": 43,
   "devtools/fuzz_world.py": 18,
   "devtools/grind.py": 5,
-  "devtools/layout_oracle.py": 11,
   "devtools/loss_oracle.py": 13,
   "devtools/plain_decks.py": 1,
   "devtools/platform_check.py": 1,
@@ -99,7 +98,6 @@
   "gapi.py": 3,
   "google_auth.py": 5,
   "gslides.py": 1,
-  "guard.py": 17,
   "identity.py": 12,
   "ink.py": 3,
   "interpreter.py": 1,
@@ -140,7 +138,6 @@
   "playground/workbench.py": 11,
   "render.py": 14,
   "scripts.py": 4,
-  "snapshot.py": 3,
   "sync.py": 24,
   "texmap.py": 8,
   "type3.py": 1

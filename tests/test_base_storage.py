@@ -113,6 +113,19 @@ def test_a_drive_base_naming_another_deck_is_refused(tmp_path):
     assert (where, got["generation"]) == ("local", 5)
 
 
+def test_a_drive_base_that_is_no_json_object_is_reported_not_read_into(tmp_path):
+    """The file the deck names holds JSON, but not an object (a list): it was swept for a
+    `cleanup` list before it was judged, and `.get` on a list crashed the load (fixed
+    2026-09-29, when the load was typed). It is ignored and said so, and the cache stands in."""
+    drive = FakeDrive(props={PID: {snapshot.BASE_PROPERTY: "base-0", snapshot.CLEANED_PROPERTY: "0"}},
+                      blobs={"base-0": b"[1, 2]"})
+    snapshot.save_local(base(generation=2), tmp_path)
+    problems: list[str] = []
+    got, where = snapshot.load_base(PID, tmp_path, drive, problems, None)
+    assert (where, got["generation"]) == ("local", 2)
+    assert problems == ["the base stored in Drive was ignored: not a JSON object"]
+
+
 def test_no_base_anywhere(tmp_path):
     assert snapshot.load_base(PID, tmp_path, FakeDrive(props={PID: {}}), None, None) == (None, "none")
 
@@ -470,19 +483,18 @@ def test_a_failed_drive_save_of_the_base_is_said_not_only_printed(monkeypatch, t
         def files(self):
             raise http_error(403)
 
-    monkeypatch.setattr(snapshot, "build_base", lambda *a, **k: {"slides": [], "generation": 0,
-                                                                   "presentationId": PID})
+    from beamer2slides.emit_state import EmitState
+    monkeypatch.setattr(snapshot, "converted_base", lambda *a: {"slides": [], "generation": 0, "presentationId": PID})
+    state = EmitState(presentation_id=PID, url="u", scale=1.0, slides=(), contained=None, theme=None, previous=None)
     monkeypatch.setattr(snapshot, "write_tags", lambda *a: ([], None))
     monkeypatch.setattr("beamer2slides.theme_sync.record", lambda *a: None)
     slides = type("S", (), {"presentations": lambda self: self,
                             "get": lambda self, presentationId: FakeDrive._request(read_deck())})()
     with google_auth.use_services({"slides": slides, "drive": Refusing()}):
         problems: list[str] = []
-        snapshot.snapshot_after_convert({"slides": []}, tmp_path, {"presentationId": PID}, {"pdf": "x",
-                                        "sha1": None}, problems=problems)
+        snapshot.snapshot_after_convert({"slides": []}, tmp_path, state, {"pdf": "x", "sha1": None}, "last", problems)
         assert len(problems) == 1 and "could not store the sync base in Drive" in problems[0]
         assert "no_base" in problems[0] and snapshot.local_path(tmp_path).exists()
         assert capsys.readouterr().out == ""
-        snapshot.snapshot_after_convert({"slides": []}, tmp_path, {"presentationId": PID}, {"pdf": "x",
-                                        "sha1": None})
+        snapshot.snapshot_after_convert({"slides": []}, tmp_path, state, {"pdf": "x", "sha1": None}, "last", None)
         assert "warning: could not store the sync base in Drive" in capsys.readouterr().out

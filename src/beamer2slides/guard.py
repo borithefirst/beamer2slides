@@ -6,12 +6,15 @@ question `sync` asks - what did the person change since the converter wrote this
 the sync base (`<out>/sync/base.json`, or Drive `appProperties.b2sBase`), and refuses the rebuild
 when the answer isn't "nothing".
 
-What counts as an edit is `merge.deck_edits` / `merge.user_objects` / `merge.slide_touched`, i.e.
-exactly what sync would keep:
+What counts as an edit is `merge.deck_edits_of` / `merge.user_objects_of` /
+`merge.background_edited_of`, read off the parsed base (`sync_model.base`), i.e. exactly what sync
+would keep:
   - a new `revisionId` is not an edit (Google bumps it on its own, e.g. when a deck is opened),
   - a new `contentUrl` for the same picture is not an edit (pixel signatures decide, `snapshot`),
   - a thumbnail export is not an edit,
   - `measure_places`' scratch slides (`b2s_mNNN`) left by an interrupted run are not an edit.
+A base that does not parse is refused as no base at all is (`Refusal`): nothing can say whether
+the deck was edited against it.
 
 Before a destructive write the deck's `revisionId` is recorded (`<out>/backups/backups.json`,
 `emit.json` "previous") and a backup can be kept: an exported .pptx next to the output folder
@@ -23,17 +26,22 @@ import os
 import re
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TypedDict
+from typing import Literal, TypedDict
 
-from . import merge, snapshot
+from . import merge, snapshot, sync_model
 from .gapi import HttpError, message_of
 from .deck_pictures import WORKERS
-from .google_types import DriveFile, DriveService, FileBody, Presentation, SlidesService, file_id, object_id
+from .google_types import (DriveFile, DriveService, FileBody, Presentation, SlidesService, as_json, file_id,
+                           object_id)
 from .gslides import execute
+from .json_types import Json, JsonObject, JsonShapeError
+from .merge import Edit
+from .sync_model import Base, DeckRead, ElementEntry, ImageRead, ObjectId, SlideEntry, SlideRead
+from .typing_compat import assert_never
 
 SCRATCH = re.compile(r"b2s_m\d{3}")  # emit.measure_places' scratch slides
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
@@ -57,7 +65,7 @@ EXAMPLES = 3
 class RebuildRefused(Exception):
     """Raised instead of replacing a deck that must not be replaced. `survey` is the finding."""
 
-    def __init__(self, message: str, survey: dict):
+    def __init__(self, message: str, survey: JsonObject):
         super().__init__(message)
         self.survey = survey
 
@@ -66,19 +74,32 @@ def deck_url(pid: str) -> str:
     return f"https://docs.google.com/presentation/d/{pid}/edit"
 
 
+def _object(v: Json) -> JsonObject:
+    """A log's or a backup's nested object, absent (or not one) read as empty: these are notes a
+    person may have edited, read to say what can be said, never refused."""
+    return v if isinstance(v, dict) else {}
+
+
+def _array(v: Json) -> list[Json]:
+    return v if isinstance(v, list) else []
+
+
 # ---------------------------------------------------------------- the previous deck
 
 
-def previous_deck(drive: DriveService, out: Path) -> dict | None:
+def previous_deck(drive: DriveService, out: Path) -> JsonObject | None:
     """What the output folder's emit.json points at: {"presentationId", "state", "name",
     "modifiedTime"}. state: "live", "trashed", "gone" (deleted or not ours any more),
-    "other" (not a presentation)."""
+    "other" (not a presentation). An emit.json naming no presentation id points at nothing."""
     state_file = out / "emit.json"
     if not state_file.exists():
         return None
     try:
-        pid = json.loads(state_file.read_text(encoding="utf-8"))["presentationId"]
-    except (ValueError, KeyError):
+        written: Json = json.loads(state_file.read_text(encoding="utf-8"))
+    except ValueError:
+        return None
+    pid = _object(written).get("presentationId")
+    if not isinstance(pid, str):
         return None
     try:
         f = execute(drive.files().get(fileId=pid, fields="id,name,trashed,mimeType,modifiedTime"))
@@ -93,131 +114,151 @@ def previous_deck(drive: DriveService, out: Path) -> dict | None:
 # ---------------------------------------------------------------- detection
 
 
-def sign_changed(base: dict, theirs: dict, pres: Presentation, drive: DriveService | None) -> None:
-    """Pixel signatures for the live pictures whose contentUrl differs from the base's. Google
-    issues new URLs for pictures nobody touched, so only the pixels tell a replaced one apart
-    (sync.Sync.sign_changed does the same before planning). A rebuild writes over every one of
-    them, so all are read: downloaded, else out of a Drive export through `drive`
+def sign_changed(base: Base, theirs: DeckRead, pres: Presentation, drive: DriveService | None) -> DeckRead:
+    """`theirs` with pixel signatures for the live pictures whose contentUrl differs from the
+    base's. Google issues new URLs for pictures nobody touched, so only the pixels tell a replaced
+    one apart (sync.Sync.sign_changed does the same before planning). A rebuild writes over every
+    one of them, so all are read: downloaded, else out of a Drive export through `drive`
     (`deck_pictures.LivePictures`)."""
-    images = {oid: rb["image"] for s in base["slides"] for e in s["elements"]
-              for oid, rb in e.get("readback", {}).items() if "image" in rb}
-    backgrounds = {s.get("objectId"): s.get("background_readback") or {} for s in base["slides"]}
-    objects, slides = set(), set()
-    for s in theirs["slides"]:
-        for oid, rb in s["objects"].items():
-            if "image" in rb and oid in images and images[oid].get("contentHash") != rb["image"].get("contentHash"):
+    images = {oid: rb.image for s in base.slides for e in s.elements for oid, rb in e.readback.items()
+              if rb.image is not None}
+    backgrounds = {s.object_id: _background_seen(s) for s in base.slides}
+    objects: set[str] = set()
+    slides: set[str] = set()
+    for s in theirs.slides:
+        for oid, rb in s.objects.items():
+            old_image = images.get(oid)
+            if rb.image is not None and old_image is not None and old_image.content_hash != rb.image.content_hash:
                 objects.add(oid)
-        bg, old = s.get("background") or {}, backgrounds.get(s["objectId"], {})
+        bg, old = s.background or {}, backgrounds.get(s.object_id, {})
         if "picture" in bg and "picture" in old and old["picture"] != bg["picture"]:
-            slides.add(s["objectId"])
-    if objects or slides:
-        snapshot.sign_pictures(theirs, pres, objects, slides, WORKERS, None, None, drive, None, None)
+            slides.add(s.object_id)
+    if not (objects or slides):
+        return theirs
+    return snapshot.sign_pictures_of(theirs, pres, objects, slides, WORKERS, None, None, drive, None, None)[0]
+
+
+def _background_seen(s: SlideEntry) -> JsonObject:
+    """The background the base read of its slide ({}: none)."""
+    return (None if s.seen is None else s.seen.background_readback) or {}
 
 
 UNVERIFIABLE = ("image_unverified", "background_unverified")
 
 
-def _unverifiable(field: str, el: dict, oids: list[str]) -> str:
+def _unverifiable(field: Edit, el: ElementEntry, oids: Sequence[ObjectId]) -> str:
     """A picture edit that is only a new URL against a base with no pixel signature: bases
     written before signatures were recorded (2026-09-17 and older) cannot say whether a picture
     Google re-issued is the same one, so it counts - the rule does not bend - but as a picture
     that cannot be compared, not as one somebody replaced."""
     if field != "image":
         return field
-    old = [el.get("readback", {}).get(oid, {}).get("image") or {} for oid in oids]
-    return "image_unverified" if old and all(o and not o.get("signature") for o in old) else field
+    old = [_image_seen(el, oid) for oid in oids]
+    return "image_unverified" if old and all(o is not None and not o.signature for o in old) else field
 
 
-def _never_made(el: dict, oids: list[str], read: dict) -> bool:
+def _image_seen(el: ElementEntry, oid: ObjectId) -> ImageRead | None:
+    rb = el.readback.get(oid)
+    return None if rb is None else rb.image
+
+
+def _never_made(el: ElementEntry, oids: Sequence[ObjectId], read: SlideRead) -> bool:
     """A "deleted" main object the base's own read-back never had, while the element's other
     objects stand: a group emit named and Slides never made (a diagram of one node). Bases
     written before `snapshot.attach_readback` left such ids out still name them."""
-    readback = el.get("readback", {})
+    readback = el.readback
     return bool(readback) and all(oid not in readback for oid in oids) and \
-        all(oid in read.get("objects", {}) for oid in readback)
+        all(oid in read.objects for oid in readback)
 
 
-def _snippet(text: str | None, length: int = 40) -> str:
+def _snippet(text: str | None, length: int) -> str:
     text = " ".join((text or "").split())
     return text if len(text) <= length else text[:length - 1] + "…"
 
 
-def survey(base: dict, pres: Presentation, sign: bool, drive: DriveService | None) -> dict:
+def _count(counts: dict[str, int], kind: str, n: int) -> None:
+    counts[kind] = counts.get(kind, 0) + n
+
+
+def survey(base: Base, pres: Presentation, sign: bool, drive: DriveService | None) -> JsonObject:
     """What the person changed in the live deck since the base was recorded (`drive`: see
     `sign_changed`).
 
     {"edited": bool, "revisionId", "counts": {field/kind: n}, "slides": [{"slide", "why", "edits"}],
      "slides_added", "slides_deleted", "reordered", "examples": [readable lines]}"""
     pres = {**pres, "slides": [s for s in pres.get("slides", []) if not SCRATCH.fullmatch(object_id(s))]}
-    theirs = snapshot.read_presentation(pres)
+    theirs = snapshot.read_presentation_of(pres)
     if sign:
-        sign_changed(base, theirs, pres, drive)
-    live = {s["objectId"]: s for s in theirs["slides"]}
-    titles = {s.get("objectId"): (s.get("title") or s.get("key")) for s in base["slides"]}
+        theirs = sign_changed(base, theirs, pres, drive)
+    live = {s.object_id: s for s in theirs.slides}
     counts: dict[str, int] = {}
-    slides, examples = [], []
-    for n, b in enumerate(base["slides"], start=1):
-        read = live.get(b.get("objectId"))
+    slides: list[Json] = []
+    examples: list[str] = []
+    for n, b in enumerate(base.slides, start=1):
+        # (a slide's own title: two slides the deck never had share no objectId to be named by)
+        title = f"slide {n} \"{_snippet(b.title or b.key, 30)}\""
+        read = None if b.object_id is None else live.get(b.object_id)
         if read is None:
-            counts["slides_deleted"] = counts.get("slides_deleted", 0) + 1
-            slides.append({"slide": b["key"], "page": n, "why": ["slide deleted"], "edits": []})
-            examples.append(f"slide {n} \"{_snippet(titles.get(b.get('objectId')), 30)}\": deleted in Slides")
+            _count(counts, "slides_deleted", 1)
+            slides.append({"slide": b.key, "page": n, "why": ["slide deleted"], "edits": []})
+            examples.append(f"{title}: deleted in Slides")
             continue
-        entry = {"slide": b["key"], "page": n, "why": [], "edits": []}
-        for el in b["elements"]:
-            for field, oids in merge.deck_edits(el, read).items():
-                if field == "deleted" and _never_made(el, oids, read):
+        edits: list[Json] = []
+        why: list[Json] = []
+        for el in b.elements:
+            for edit, oids in merge.deck_edits_of(el, read).items():
+                if edit == "deleted" and _never_made(el, oids, read):
                     continue
-                field = _unverifiable(field, el, oids)
-                counts[field] = counts.get(field, 0) + 1
-                entry["edits"].append({"element": el["key"], "field": field, "objects": oids})
+                field = _unverifiable(edit, el, oids)
+                _count(counts, field, 1)
+                edits.append({"element": el.key, "field": field, "objects": [o for o in oids]})
                 if len(examples) < EXAMPLES:
                     what = FIELD_WORDS.get(field, field)
-                    shown = read["objects"].get(oids[0], {}).get("text") if field == "text" else None
-                    examples.append(f"slide {n} \"{_snippet(titles.get(b.get('objectId')), 30)}\": {what}"
-                                    f" ({el['key']}{f': “{_snippet(shown)}”' if shown else ''})")
-        added = merge.user_objects(b, read)
+                    looked = read.objects.get(oids[0])
+                    shown = looked.text if field == "text" and looked is not None else None
+                    examples.append(f"{title}: {what} ({el.key}{f': “{_snippet(shown, 40)}”' if shown else ''})")
+        added = merge.user_objects_of(b, read)
         if added:
-            counts["objects_added"] = counts.get("objects_added", 0) + len(added)
-            entry["why"].append(f"{len(added)} object(s) added")
+            _count(counts, "objects_added", len(added))
+            why.append(f"{len(added)} object(s) added")
             if len(examples) < EXAMPLES:
-                examples.append(f"slide {n} \"{_snippet(titles.get(b.get('objectId')), 30)}\": "
-                                f"{len(added)} object(s) added in Slides")
-        if b.get("notes_readback", "") != read.get("notes", ""):
-            counts["notes"] = counts.get("notes", 0) + 1
-            entry["why"].append("notes edited")
+                examples.append(f"{title}: {len(added)} object(s) added in Slides")
+        if ("" if b.seen is None else b.seen.notes_readback) != read.notes:
+            _count(counts, "notes", 1)
+            why.append("notes edited")
             if len(examples) < EXAMPLES:
-                examples.append(f"slide {n} \"{_snippet(titles.get(b.get('objectId')), 30)}\": speaker notes edited")
-        if merge.background_edited(b, read):
-            old, new = b.get("background_readback") or {}, read.get("background") or {}
+                examples.append(f"{title}: speaker notes edited")
+        if merge.background_edited_of(b, read):
+            old, new = _background_seen(b), read.background or {}
             unknown = "picture" in old and "picture" in new and not old.get("signature")
             kind = "background_unverified" if unknown else "background"
             words = "background picture cannot be compared" if unknown else "background changed"
-            counts[kind] = counts.get(kind, 0) + 1
-            entry["why"].append(words)
+            _count(counts, kind, 1)
+            why.append(words)
             if len(examples) < EXAMPLES:
-                examples.append(f"slide {n} \"{_snippet(titles.get(b.get('objectId')), 30)}\": {words}")
-        if entry["edits"]:
-            entry["why"].insert(0, f"{len(entry['edits'])} element edit(s)")
-        if entry["why"]:
-            slides.append(entry)
-    base_ids = {b.get("objectId") for b in base["slides"]}
-    extra = [s["objectId"] for s in theirs["slides"] if s["objectId"] not in base_ids]
+                examples.append(f"{title}: {words}")
+        if edits:
+            why.insert(0, f"{len(edits)} element edit(s)")
+        if why:
+            slides.append({"slide": b.key, "page": n, "why": why, "edits": edits})
+    base_ids = {b.object_id for b in base.slides}
+    extra = [s.object_id for s in theirs.slides if s.object_id not in base_ids]
     if extra:
         counts["slides_added"] = len(extra)
         if len(examples) < EXAMPLES:
             examples.append(f"{len(extra)} slide(s) added in Slides")
     # Reorder: the base slides that are still there, in the live order.
-    live_order = [s["objectId"] for s in theirs["slides"] if s["objectId"] in base_ids]
-    base_order = [b["objectId"] for b in base["slides"] if b.get("objectId") in set(live_order)]
+    live_order = [s.object_id for s in theirs.slides if s.object_id in base_ids]
+    base_order = [b.object_id for b in base.slides if b.object_id in set(live_order)]
     reordered = live_order != base_order
     if reordered:
         counts["slides_reordered"] = 1
         if len(examples) < EXAMPLES:
             examples.append("the slides were reordered in Slides")
-    return {"edited": bool(slides or extra or reordered), "revisionId": theirs.get("revisionId"),
-            "counts": counts, "slides": slides, "slides_added": len(extra),
-            "slides_deleted": counts.get("slides_deleted", 0), "reordered": reordered, "examples": examples}
+    return {"edited": bool(slides or extra or reordered), "revisionId": theirs.revision_id,
+            "counts": {k: n for k, n in counts.items()}, "slides": slides, "slides_added": len(extra),
+            "slides_deleted": counts.get("slides_deleted", 0), "reordered": reordered,
+            "examples": [e for e in examples]}
 
 
 SUMMARY_WORDS = {"text": "text edit", "text_style": "style change", "geometry": "move or resize",
@@ -229,13 +270,24 @@ SUMMARY_WORDS = {"text": "text edit", "text_style": "style change", "geometry": 
                  "slides_added": "slide added", "slides_deleted": "slide deleted"}
 
 
-def summary_line(found: dict) -> str:
+def _counts(found: JsonObject) -> JsonObject:
+    counts = found.get("counts")
+    return counts if isinstance(counts, dict) else {}
+
+
+def _lines(found: JsonObject, key: str) -> list[str]:
+    said = found.get(key)
+    return [e for e in said if isinstance(e, str)] if isinstance(said, list) else []
+
+
+def summary_line(found: JsonObject) -> str:
     """"3 slides edited: 2 text edits, 1 object added in Slides, slides reordered"."""
     parts = [f"{n} {SUMMARY_WORDS[k]}{'s' if n > 1 and not SUMMARY_WORDS[k].endswith('ed') else ''}"
-             for k, n in found["counts"].items() if k in SUMMARY_WORDS and n]
+             for k, n in _counts(found).items() if k in SUMMARY_WORDS and isinstance(n, int) and n]
     if found["reordered"]:
         parts.append("slides reordered")
-    slides = len(found["slides"])
+    edited = found["slides"]
+    slides = len(edited) if isinstance(edited, list) else 0
     head = f"{slides} slide{'s' if slides != 1 else ''} edited" if slides else "the deck was edited"
     return f"{head}: {', '.join(parts)}" if parts else head
 
@@ -243,42 +295,55 @@ def summary_line(found: dict) -> str:
 # ---------------------------------------------------------------- the check
 
 
-def command_line(command: str, pdf: Path | str | None, out: Path, extra: str = "") -> str:
-    pdf = str(pdf) if pdf else "<pdf>"
-    return f"python -m beamer2slides {command} {pdf} {'--deck' if command == 'sync' else '--out'} {out}{extra}"
+def command_line(command: str, pdf: Path | str | None, out: Path, extra: str) -> str:
+    named = str(pdf) if pdf else "<pdf>"
+    return f"python -m beamer2slides {command} {named} {'--deck' if command == 'sync' else '--out'} {out}{extra}"
 
 
-def refusal_message(pid: str, out: Path, pdf: Path | str | None, found: dict, reason: str) -> str:
-    lines = []
-    only_unknown = reason == "edited" and found["counts"] and set(found["counts"]) <= set(UNVERIFIABLE)
-    if only_unknown:
+Refusal = Literal["edited", "no-base", "unreadable-base", "other-source"]
+"""Why `check_rebuild` will not replace a deck. `unreadable-base`: a base this version cannot
+parse (`sync_model.base`: an old or damaged base.json that still says it is one), which no sync
+can merge against either - so, like no base at all, nothing can say whether the deck was edited."""
+
+
+def refusal_message(pid: str, out: Path, pdf: Path | str | None, found: JsonObject, reason: Refusal) -> str:
+    lines: list[str] = []
+    counts = _counts(found)
+    if reason == "edited" and counts and set(counts) <= set(UNVERIFIABLE):
         lines.append("refusing to rebuild: this deck's sync base was written before beamer2slides recorded "
                      "picture signatures, so its pictures cannot be compared with the live deck (Google gives "
                      "unchanged pictures new URLs).")
         lines.append(f"  {deck_url(pid)}")
         lines.append(f"  {summary_line(found)}; nothing else differs.")
-        lines += [f"    - {e}" for e in found["examples"]]
+        lines += [f"    - {e}" for e in _lines(found, "examples")]
         lines.append("  If nobody replaced a picture or a background in Slides, a forced rebuild loses nothing "
                      "(the base it writes carries signatures, so the next rebuild is checked in full).")
     elif reason == "edited":
         lines.append("refusing to rebuild: this deck was edited in Google Slides after beamer2slides wrote it.")
         lines.append(f"  {deck_url(pid)}")
         lines.append(f"  {summary_line(found)}")
-        lines += [f"    - {e}" for e in found["examples"]]
+        lines += [f"    - {e}" for e in _lines(found, "examples")]
     elif reason == "no-base":
         lines.append("refusing to rebuild: there is no sync base for this deck, so whether someone "
                      "edited it cannot be checked.")
         lines.append(f"  {deck_url(pid)}")
         lines.append("  (the base is written by convert; an older deck, or a convert whose base "
                      "recording failed, has none)")
+    elif reason == "unreadable-base":
+        lines.append("refusing to rebuild: this deck's sync base cannot be read by this version of beamer2slides, "
+                     "so whether someone edited the deck cannot be checked.")
+        lines.append(f"  {deck_url(pid)}")
+        lines.append(f"  ({found.get('base_problem')})")
     elif reason == "other-source":
         lines.append(f"refusing to rebuild: the deck in {out} was converted from "
                      f"{found.get('base_source')}, not from {pdf}.")
         lines.append(f"  {deck_url(pid)}")
         lines.append("  rebuilding it here would replace that deck with this PDF's slides.")
+    else:
+        assert_never(reason)
     lines.append("  A rebuild replaces the whole deck. What to do instead:")
     if reason == "edited":
-        lines.append(f"    merge the PDF into the deck, keeping the edits:  {command_line('sync', pdf, out)}")
+        lines.append(f"    merge the PDF into the deck, keeping the edits:  {command_line('sync', pdf, out, '')}")
     lines.append(f"    leave that deck alone and make a new one:        {command_line('convert', pdf, out, ' --new-deck')}")
     lines.append(f"    rebuild anyway (the deck's content is replaced): {command_line('convert', pdf, out, ' --force-rebuild')}")
     if found.get("revisionId"):
@@ -287,41 +352,55 @@ def refusal_message(pid: str, out: Path, pdf: Path | str | None, found: dict, re
     return "\n".join(lines)
 
 
-def check_rebuild(slides: SlidesService, drive: DriveService, pid: str, out: Path, pdf: Path | str | None = None,
-                  force: bool = False,
-                  base: dict | None = None) -> dict:
+def _source_name(base: Base) -> str | None:
+    """The file name of the PDF the base says the deck came from."""
+    pdf = (base.source or {}).get("pdf")
+    return (Path(pdf).name or None) if isinstance(pdf, str) and pdf else None
+
+
+def check_rebuild(slides: SlidesService, drive: DriveService, pid: str, out: Path, pdf: Path | str | None,
+                  force: bool) -> JsonObject:
     """Look at the live deck before replacing its content. Returns the finding
     ({"reason", "revisionId", ...}); raises RebuildRefused unless `force`."""
-    if base is None:
-        # Two reads that need nothing but the id, so they are made at once: the base out of Drive
-        # on a thread of its own while the live deck comes down here. One client per thread, which
-        # is all a service object asks - these two are different services.
-        with ThreadPoolExecutor(1, thread_name_prefix="b2s-guard") as pool:
-            loading = pool.submit(snapshot.load_base, pid, out, drive, None, None)
-            pres = execute(slides.presentations().get(presentationId=pid))
-            base, where = loading.result()
-    else:
-        where = "given"
+    # Two reads that need nothing but the id, so they are made at once: the base out of Drive on a
+    # thread of its own while the live deck comes down here. One client per thread, which is all a
+    # service object asks - these two are different services.
+    with ThreadPoolExecutor(1, thread_name_prefix="b2s-guard") as pool:
+        loading = pool.submit(snapshot.load_base, pid, out, drive, None, None)
         pres = execute(slides.presentations().get(presentationId=pid))
-    found = {"presentationId": pid, "revisionId": pres.get("revisionId"), "base_from": where,
-             "checked": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": "", "edited": False, "examples": [],
-             "counts": {}, "slides": [], "slides_added": 0, "slides_deleted": 0, "reordered": False}
-    if base is None:
-        found["reason"] = "no-base"
+        stored, where = loading.result()
+    found: JsonObject = {
+        "presentationId": pid, "revisionId": pres.get("revisionId"), "base_from": where,
+        "checked": time.strftime("%Y-%m-%d %H:%M:%S"), "reason": "", "edited": False, "examples": [],
+        "counts": {}, "slides": [], "slides_added": 0, "slides_deleted": 0, "reordered": False}
+    reason: Refusal | None = None
+    base: Base | None = None
+    if stored is None:
+        reason = "no-base"
     else:
+        try:
+            base = sync_model.base(stored)
+        except JsonShapeError as e:
+            # Never a rebuild over the deck: a base nobody can read is no answer to "was it edited?"
+            reason = "unreadable-base"
+            found["base_problem"] = str(e)
+    if base is not None:
         found.update(survey(base, pres, True, drive))
-        found["base_generation"] = base.get("generation", 0)
-        found["base_source"] = Path(base.get("source", {}).get("pdf") or "").name or None
+        found["base_generation"] = 0 if base.generation is None else base.generation
+        source = _source_name(base)
+        found["base_source"] = source
         if found["edited"]:
-            found["reason"] = "edited"
-        elif pdf is not None and found["base_source"] and Path(pdf).name != found["base_source"]:
-            found["reason"] = "other-source"
-    if found["reason"] and not force:
-        raise RebuildRefused(refusal_message(pid, out, pdf, found, found["reason"]), found)
+            reason = "edited"
+        elif pdf is not None and source and Path(pdf).name != source:
+            reason = "other-source"
+    if reason is not None:
+        found["reason"] = reason
+        if not force:
+            raise RebuildRefused(refusal_message(pid, out, pdf, found, reason), found)
     return found
 
 
-def recheck(slides: SlidesService, pid: str, found: dict | None) -> dict | None:
+def recheck(slides: SlidesService, pid: str, found: JsonObject | None) -> JsonObject | None:
     """`found` again, where the deck is still at the revision it was found at - one field of one
     read instead of the whole deck, the sync base and the survey (None: ask the question again).
 
@@ -413,8 +492,9 @@ def write_whole(path: Path, data: bytes) -> None:
     os.replace(part, path)
 
 
-def copy_in_drive(drive: DriveService, pid: str, name: str | None = None) -> dict:
-    """A Drive copy of the presentation, which stays a full deck with its own URL."""
+def copy_in_drive(drive: DriveService, pid: str, name: str | None) -> JsonObject:
+    """A Drive copy of the presentation, which stays a full deck with its own URL. `name`: the
+    copy's (None: the deck's own, stamped as a backup)."""
     info = execute(drive.files().get(fileId=pid, fields="name,parents"))
     body: FileBody = {"name": name or f"{info.get('name', 'deck')} (beamer2slides backup "
                                       f"{time.strftime('%Y-%m-%d %H:%M')})",
@@ -426,16 +506,23 @@ def copy_in_drive(drive: DriveService, pid: str, name: str | None = None) -> dic
     return {"presentationId": cid, "name": copy.get("name"), "url": deck_url(cid)}
 
 
-def backup_deck(drive: DriveService, pid: str, out: Path, mode: str, note: str = "", fallback: bool = True,
-                slides: SlidesService | None = None) -> dict:
-    """Keep a way back before a destructive write. mode: none | file | drive | both.
+def _part_json(p: PartFile) -> JsonObject:
+    slides: list[Json] = [n for n in p["slides"]]
+    return {"file": p["file"], "slides": slides, "bytes": p["bytes"]}
+
+
+def backup_deck(drive: DriveService, pid: str, out: Path, mode: str | None, note: str, fallback: bool,
+                slides: SlidesService | None) -> JsonObject:
+    """Keep a way back before a destructive write. mode: none | file | drive | both. `note`: why,
+    kept in the result when there is one ("": none).
     `slides`: a Slides client, with which a deck Drive will not export whole (its size, a timeout)
     is kept in .pptx parts instead (`export_parts`; `parts` in the result, no `file`).
     `fallback`: a refused .pptx export (the 10 MB limit) that no parts made up for is answered
     with a Drive copy - what a rebuild wants, while a sync, which only ever rewrites parts, settles
     for the warning. Returns {"file" | "parts", "drive", "warnings"} (paths/ids as strings)."""
     from .deck_export import too_large
-    result: dict = {"mode": mode, "warnings": []}
+    warnings: list[Json] = []
+    result: JsonObject = {"mode": mode, "warnings": warnings}
     if mode in ("none", None):
         return result
     stamp = time.strftime("%Y%m%d-%H%M%S")
@@ -447,36 +534,38 @@ def backup_deck(drive: DriveService, pid: str, out: Path, mode: str, note: str =
             result["bytes"] = size
         except (HttpError, TimeoutError) as e:
             why = api_message(e) if isinstance(e, HttpError) else "the export timed out"
-            kept = None
+            kept: Parts | None = None
             if slides is not None and too_large(e):
                 try:
                     kept = export_parts(drive, slides, pid, path)
                 except (HttpError, OSError) as err:
-                    result["warnings"].append(f"could not export the deck in parts either ({type(err).__name__}: {err})")
+                    warnings.append(f"could not export the deck in parts either ({type(err).__name__}: {err})")
             if kept and kept["parts"]:
-                result["parts"] = kept["parts"]
+                result["parts"] = [_part_json(p) for p in kept["parts"]]
                 result["bytes"] = sum(p["bytes"] for p in kept["parts"])
                 if kept["missing"]:
-                    result["parts_missing"] = [m["slides"] for m in kept["missing"]]
+                    missing: list[Json] = [[n for n in m["slides"]] for m in kept["missing"]]
+                    result["parts_missing"] = missing
             if kept and kept["parts"] and not kept["missing"]:
-                result["warnings"].append(f"the deck is too large to export whole ({why}); it was kept in "
-                                          f"{len(kept['parts'])} .pptx parts, each one restorable on its own")
+                warnings.append(f"the deck is too large to export whole ({why}); it was kept in "
+                                f"{len(kept['parts'])} .pptx parts, each one restorable on its own")
             else:
-                result["warnings"].append(f"could not export the deck as .pptx ({why}; {EXPORT_LIMIT_NOTE})")
-                for m in (kept or {}).get("missing", []):
-                    result["warnings"].append(f"slides {m['slides'][0]}-{m['slides'][1]} are in no part ({m['reason']})")
+                warnings.append(f"could not export the deck as .pptx ({why}; {EXPORT_LIMIT_NOTE})")
+                for m in kept["missing"] if kept else []:
+                    warnings.append(f"slides {m['slides'][0]}-{m['slides'][1]} are in no part ({m['reason']})")
             if mode == "file" and fallback:
                 # never replace a deck's content without a way back to it whole: parts come back as
                 # separate presentations, a Drive copy as the deck itself
                 mode = "drive"
-            if kept and kept.get("leftovers"):
-                result["warnings"].append(f"temporary copies Drive would not delete: {', '.join(kept['leftovers'])} "
-                                          f"(tools/drive_usage.py --delete-staging)")
+            leftovers = kept.get("leftovers") if kept else None
+            if leftovers:
+                warnings.append(f"temporary copies Drive would not delete: {', '.join(leftovers)} "
+                                f"(tools/drive_usage.py --delete-staging)")
     if mode in ("drive", "both"):
         try:
-            result["drive"] = copy_in_drive(drive, pid)
+            result["drive"] = copy_in_drive(drive, pid, None)
         except HttpError as e:
-            result["warnings"].append(f"could not copy the deck in Drive ({api_message(e)})")
+            warnings.append(f"could not copy the deck in Drive ({api_message(e)})")
     if note:
         result["note"] = note
     return result
@@ -512,13 +601,14 @@ class WayBack:
     interpreter's exit does not join it, and what it writes goes down whole or not at all
     (`write_whole`)."""
 
-    def __init__(self, fn: Callable[[SlidesService, DriveService], dict[str, object] | None], name: str = "b2s-back"):
+    def __init__(self, fn: Callable[[SlidesService, DriveService], JsonObject | None], name: str):
+        """`fn` makes the note ({"out", "entry"}: `__main__.sync_point`); `name`: its thread's."""
         from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
 
-        self.note: dict | None = None
+        self.note: JsonObject | None = None
         self.asked = False
-        self.job = None
-        self.make = lambda: fn(slides_service(), drive_service())
+        self.job: Future[JsonObject | None] | None = None
+        self.make: Callable[[], JsonObject | None] = lambda: fn(slides_service(), drive_service())
         if shared_service("slides", "v1") or shared_service("drive", "v3"):
             return
         try:
@@ -528,14 +618,15 @@ class WayBack:
         from .drive_folder import spec, use_folder
         where = spec()   # (so is the folder a `--backup drive` copy goes into)
 
-        def make():
+        def make() -> JsonObject | None:
             with use_folder(where):
                 return fn(slides_service(creds), drive_service(creds))
 
         self.make = make
-        self.job = job = Future()
+        job: Future[JsonObject | None] = Future()
+        self.job = job
 
-        def run():
+        def run() -> None:
             if job.set_running_or_notify_cancel():
                 try:
                     job.set_result(make())
@@ -544,12 +635,12 @@ class WayBack:
 
         threading.Thread(target=run, name=name, daemon=True).start()
 
-    def kept(self) -> dict | None:
+    def kept(self) -> JsonObject | None:
         """The recovery note if the sync asked for one - that is, if it wrote - else None, without
         waiting for a way back nobody needed."""
         return self.note if self.asked else None
 
-    def result(self) -> dict | None:
+    def result(self) -> JsonObject | None:
         """The recovery note, made once and remembered."""
         if not self.asked:
             self.asked = True
@@ -561,27 +652,28 @@ class WayBack:
             self.job = None
         return self.note
 
-    def backup(self) -> dict:
+    def backup(self) -> JsonObject:
         """What was kept, for the refusal that asks whether there is any way back at all."""
-        return ((self.result() or {}).get("entry") or {}).get("backup") or {}
+        return _object(_object(_object(self.result()).get("entry")).get("backup"))
 
 
-def way_back_kept(backup: dict) -> bool:
+def way_back_kept(backup: JsonObject) -> bool:
     """Whether this backup can actually be put back: a .pptx file that is there and not empty, or
     .pptx parts that are all there and hold every slide (`export_parts`), or a Drive copy.
     `backup_deck` only warns when Drive refuses the export or the copy."""
     if backup.get("drive"):
         return True
 
-    def there(name) -> bool:
-        path = Path(name) if name else None
+    def there(name: Json) -> bool:
+        path = Path(name) if isinstance(name, str) and name else None
         return bool(path and path.exists() and path.stat().st_size > 0)
-    if backup.get("parts") and not backup.get("parts_missing"):
-        return all(there(p.get("file")) for p in backup["parts"])
+    parts = _array(backup.get("parts"))
+    if parts and not backup.get("parts_missing"):
+        return all(there(_object(p).get("file")) for p in parts)
     return there(backup.get("file"))
 
 
-def demand_way_back(pid: str, out: Path, pdf: Path | str | None, entry: dict, mode: str) -> None:
+def demand_way_back(pid: str, out: Path, pdf: Path | str | None, entry: JsonObject, mode: str | None) -> None:
     """Refuse a forced rebuild whose backup did not happen.
 
     A forced rebuild replaces the content of a deck someone edited, and the offer that makes that
@@ -590,66 +682,72 @@ def demand_way_back(pid: str, out: Path, pdf: Path | str | None, entry: dict, mo
     nothing else brings that content back, because every Drive revision of a Slides file exports
     the file's *current* content (docs/sync.md, tools/probe_revision_history.py).
     `--backup none` is how one says out loud that the deck may go."""
-    backup = entry.get("backup") or {}
+    backup = _object(entry.get("backup"))
     if mode in ("none", None) or way_back_kept(backup):
         return
     lines = ["refusing to rebuild: the backup that makes a forced rebuild safe could not be kept, "
              "and a rebuild replaces the whole deck.",
              f"  {deck_url(pid)}"]
-    lines += [f"  {w}" for w in backup.get("warnings", [])] or ["  no backup file was written"]
+    lines += [f"  {w}" for w in _array(backup.get("warnings"))] or ["  no backup file was written"]
     lines.append("  What to do instead:")
     if entry.get("reason") == "edited":
-        lines.append(f"    merge the PDF into the deck, keeping the edits:  {command_line('sync', pdf, out)}")
+        lines.append(f"    merge the PDF into the deck, keeping the edits:  {command_line('sync', pdf, out, '')}")
     lines.append(f"    leave that deck alone and make a new one:        {command_line('convert', pdf, out, ' --new-deck')}")
     lines.append(f"    try the other backup:                            "
                  f"{command_line('convert', pdf, out, ' --force-rebuild --backup drive')}")
     lines.append(f"    rebuild with no way back (says it out loud):     "
                  f"{command_line('convert', pdf, out, ' --force-rebuild --backup none')}")
-    raise RebuildRefused("\n".join(lines), dict(entry, reason="backup-failed"))
+    raise RebuildRefused("\n".join(lines), {**entry, "reason": "backup-failed"})
 
 
 def api_message(e: HttpError) -> str:
     return message_of(e)
 
 
-def record(out: Path, entry: dict) -> Path:
+def record(out: Path, entry: JsonObject) -> Path:
     """Append one line to <out>/backups/backups.json: what the deck was before this write."""
     path = backup_dir(out) / "backups.json"
     path.parent.mkdir(parents=True, exist_ok=True)
-    log = []
+    log: list[Json] = []
     if path.exists():
         try:
-            log = json.loads(path.read_text(encoding="utf-8"))
+            written: Json = json.loads(path.read_text(encoding="utf-8"))
         except ValueError:
-            log = []
+            written = []
+        if not isinstance(written, list):
+            # (appending to it would lose it: a log that is not one is no log to write over)
+            raise ValueError(f"{path} is not a list of backups")
+        log = written
     log.append(entry)
     write_whole(path, json.dumps(log, indent=1, ensure_ascii=False).encode("utf-8"))
     return path
 
 
-def read_log(out: Path) -> list[dict]:
+def read_log(out: Path) -> list[Json]:
+    """backups.json's lines as written (a line that is not an object is left for its reader)."""
     path = backup_dir(out) / "backups.json"
     try:
-        log = json.loads(path.read_text(encoding="utf-8"))
+        log: Json = json.loads(path.read_text(encoding="utf-8"))
         return log if isinstance(log, list) else []
     except (OSError, ValueError):
         return []
 
 
-def backup_files(entries: list[dict]) -> list[tuple[Path, dict]]:
+def backup_files(entries: Sequence[Json]) -> list[tuple[Path, JsonObject]]:
     """The .pptx files the log says this program wrote, in the order they were written. Nothing
     else in the folder is ever a candidate for deletion: a file someone put there is theirs."""
-    found = []
+    found: list[tuple[Path, JsonObject]] = []
     for e in entries:
-        backup = e.get("backup") or {}
-        for name in [backup.get("file")] + [p.get("file") for p in backup.get("parts", [])]:
-            if name and Path(name).exists():
+        if not isinstance(e, dict):
+            continue
+        backup = _object(e.get("backup"))
+        for name in [backup.get("file")] + [_object(p).get("file") for p in _array(backup.get("parts"))]:
+            if isinstance(name, str) and name and Path(name).exists():
                 found.append((Path(name), e))
     return found
 
 
-def prune_backups(out: Path, keep: int = 10, older_than_days: float | None = None,
-                  delete: bool = False) -> dict:
+def prune_backups(out: Path, keep: int, older_than_days: float | None, delete: bool) -> JsonObject:
     """Which backup files of this output folder are past what it keeps, and delete them when asked.
 
     Every sync writes a .pptx of the deck before its first write, so a folder synced often grows
@@ -658,19 +756,23 @@ def prune_backups(out: Path, keep: int = 10, older_than_days: float | None = Non
     when, is worth keeping as evidence even when the way back is not."""
     entries = read_log(out)
     files = backup_files(entries)
-    kept_entries = list({id(e): e for _, e in files}.values())   # (a backup in parts is one backup)
-    kept_entries = {id(e) for e in (kept_entries[-keep:] if keep else [])}
+    backups = list({id(e): e for _, e in files}.values())   # (a backup in parts is one backup)
+    kept_entries = {id(e) for e in (backups[-keep:] if keep else [])}
     doomed = [(p, e) for p, e in files if id(e) not in kept_entries]
     if older_than_days is not None:
         cutoff = time.time() - older_than_days * 86400
         doomed = [(p, e) for p, e in doomed if p.stat().st_mtime < cutoff]
-    result = {"files": len(files), "bytes": sum(p.stat().st_size for p, _ in files),
-              "doomed": [{"file": str(p), "bytes": p.stat().st_size, "entry": e} for p, e in doomed],
-              "freed": sum(p.stat().st_size for p, _ in doomed), "deleted": False}
+    listed: list[Json] = [{"file": str(p), "bytes": p.stat().st_size, "entry": e} for p, e in doomed]
+    result: JsonObject = {"files": len(files), "bytes": sum(p.stat().st_size for p, _ in files), "doomed": listed,
+                          "freed": sum(p.stat().st_size for p, _ in doomed), "deleted": False}
     if delete and doomed:
         for p, e in doomed:
             p.unlink()
-            e.setdefault("backup", {})["deleted"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            backup = e.get("backup")   # (an object: backup_files found the file there)
+            if not isinstance(backup, dict):
+                backup = {}
+                e["backup"] = backup
+            backup["deleted"] = time.strftime("%Y-%m-%d %H:%M:%S")
         (backup_dir(out) / "backups.json").write_text(json.dumps(entries, indent=1, ensure_ascii=False),
                                                       encoding="utf-8")
         result["deleted"] = True
@@ -693,8 +795,8 @@ def drive_backups(drive: DriveService, pid: str) -> list[DriveFile]:
             return sorted(found, key=lambda f: f.get("createdTime", ""))
 
 
-def prune_drive_backups(drive: DriveService, pid: str, keep: int = 10, older_than_days: float | None = None,
-                        trash: bool = False) -> dict:
+def prune_drive_backups(drive: DriveService, pid: str, keep: int, older_than_days: float | None,
+                        trash: bool) -> JsonObject:
     """`prune_backups` for the Drive copies: every sync with `backup="drive"` (a detached agent
     context's `auto`) leaves one, so they accumulate like the .pptx files do. The newest `keep`
     are kept, and with `older_than_days` everything younger; the rest go to Drive's **trash**
@@ -706,7 +808,9 @@ def prune_drive_backups(drive: DriveService, pid: str, keep: int = 10, older_tha
         # datetime, not time.gmtime: Windows refuses a negative timestamp (a cutoff before 1970).
         cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).strftime("%Y-%m-%dT%H:%M:%S")
         doomed = [c for c in doomed if c.get("createdTime", "") < cutoff]
-    result = {"copies": len(copies), "doomed": doomed, "trashed": False, "warnings": []}
+    warnings: list[Json] = []
+    listed: list[Json] = [as_json(c, "a Drive backup") for c in doomed]
+    result: JsonObject = {"copies": len(copies), "doomed": listed, "trashed": False, "warnings": warnings}
     if trash and doomed:
         for c in doomed:
             cid = c.get("id")
@@ -715,38 +819,41 @@ def prune_drive_backups(drive: DriveService, pid: str, keep: int = 10, older_tha
             try:
                 execute(drive.files().update(fileId=cid, body={"trashed": True}, fields="id"))
             except HttpError as e:
-                result["warnings"].append(f"could not move {c.get('name', cid)} to the trash ({api_message(e)})")
+                warnings.append(f"could not move {c.get('name', cid)} to the trash ({api_message(e)})")
         result["trashed"] = True
     return result
 
 
-def restore_hint(entry: dict, what: str = "rebuild") -> list[str]:
+def restore_hint(entry: JsonObject, what: str) -> list[str]:
     """What to print (and to put in a report) so the person can get the old deck back.
 
     The .pptx backup is the way back that was measured to work: Drive keeps a revision row per
     editing session of a converted deck, but every revision's export gives the file's *current*
     content, so `files.update` leaves nothing the API can fetch (tools/probe_revision_history.py,
     docs/sync.md). Version history in the Slides UI is worth a try, never a promise."""
-    lines = []
-    rev, pid = entry.get("revisionId"), entry.get("presentationId")
-    backup = entry.get("backup") or {}
+    lines: list[str] = []
+    rev, pid, modified = entry.get("revisionId"), entry.get("presentationId"), entry.get("modifiedTime")
+    backup = _object(entry.get("backup"))
+    file, parts, drive = backup.get("file"), _array(backup.get("parts")), backup.get("drive")
     if rev:
         lines.append(f"  the deck before this {what} was revision {rev}"
-                     f"{' (Drive revision at ' + entry['modifiedTime'] + ')' if entry.get('modifiedTime') else ''}")
-    if backup.get("file"):
-        lines.append(f"  backup: {backup['file']}")
+                     f"{f' (Drive revision at {modified})' if modified else ''}")
+    if file:
+        lines.append(f"  backup: {file}")
         lines.append(f"    put it back with: python tools/deck_backup.py restore --deck {entry.get('out', '<out folder>')} "
-                     f"--from \"{backup['file']}\"")
-    if backup.get("parts"):
-        lines.append(f"  backup in {len(backup['parts'])} parts (the deck was too large to export whole):")
-        lines += [f"    slides {p['slides'][0]}-{p['slides'][1]}: {p['file']}" for p in backup["parts"]]
+                     f"--from \"{file}\"")
+    if parts:
+        lines.append(f"  backup in {len(parts)} parts (the deck was too large to export whole):")
+        for p in parts:
+            first, last = (_array(_object(p).get("slides")) + [None, None])[:2]
+            lines.append(f"    slides {first}-{last}: {_object(p).get('file')}")
         lines.append("    each one restores as a presentation of its own (python tools/deck_backup.py restore "
                      "--deck ... --from PART); Slides' File > Import slides puts them together")
-    if backup.get("drive"):
-        lines.append(f"  backup copy in Drive: {backup['drive']['url']}")
-    for w in backup.get("warnings", []):
+    if drive:
+        lines.append(f"  backup copy in Drive: {_object(drive).get('url')}")
+    for w in _array(backup.get("warnings")):
         lines.append(f"  warning: {w}")
-    if pid and not backup.get("file") and not backup.get("parts") and not backup.get("drive"):
+    if pid and not file and not parts and not drive:
         lines.append("  no backup file was kept (--backup file|drive|both keeps one); Drive's version history "
                      "cannot be read back through the API (docs/sync.md)")
     return lines

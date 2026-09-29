@@ -10,6 +10,7 @@ import pytest
 
 from beamer2slides import deck_pictures, merge, snapshot
 from beamer2slides.deck_pictures import LivePictures, exported_pictures
+from beamer2slides.emit_state import EmitState, SlideState
 
 from . import sync_work
 from .test_base_storage import FakeDrive, http_error, read_deck
@@ -187,19 +188,22 @@ def test_convert_signs_what_it_uploaded_without_downloading_it(monkeypatch, tmp_
     pres["slides"] = [page("S1", [image("A", size=(80, 40)), image("B", size=(80, 50))], background=True)]
     deck = {"slides": [{"background": "backgrounds/b.png",
                         "elements": [{"kind": "image", "file": "figures/f.png"}, {"kind": "image", "file": "figures/g.png"}]}]}
-    state = {"presentationId": pres["presentationId"], "slides": [{"objectId": "S1", "elements": ["A", "B"]}]}
+    state = EmitState(presentation_id=pres["presentationId"], url="u", scale=1.0,
+                      slides=(SlideState(page=0, object_id="S1", elements=("A", "B"), objects=None, groups=None,
+                                         table_margins=None),),
+                      contained=None, theme=None, previous=None)
     asked = []
     fetcher(lambda url: asked.append(url) or png(size=(80, 50)))
     seen = {}
-    # (signatures: build_base's last argument)
-    monkeypatch.setattr(snapshot, "build_base", lambda *a: seen.update(signatures=a[-1]) or {"slides": [], "generation": 0,
-                                                                            "presentationId": pres["presentationId"]})
+    # (signatures: converted_base's last argument)
+    monkeypatch.setattr(snapshot, "converted_base", lambda *a: seen.update(signatures=a[-1]) or {
+        "slides": [], "generation": 0, "presentationId": pres["presentationId"]})
     monkeypatch.setattr(snapshot, "write_tags", lambda *a: ([], None))
     monkeypatch.setattr("beamer2slides.theme_sync.record", lambda *a: None)
     slides = type("S", (), {"presentations": lambda self: self,
                             "get": lambda self, presentationId: FakeDrive._request(pres)})()
     with google_auth.use_services({"slides": slides, "drive": FakeDrive()}):
-        snapshot.snapshot_after_convert(deck, tmp_path, state, {"pdf": "x", "sha1": None}, problems=[])
+        snapshot.snapshot_after_convert(deck, tmp_path, state, {"pdf": "x", "sha1": None}, "last", [])
     assert asked == ["u-B"]
     sigs = seen["signatures"]
     assert sigs["A"] == snapshot.signature((tmp_path / "figures" / "f.png").read_bytes())

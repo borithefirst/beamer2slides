@@ -15,9 +15,9 @@ from types import SimpleNamespace
 import pytest
 from googleapiclient.errors import HttpError
 
-from beamer2slides import guard, snapshot
+from beamer2slides import guard, snapshot, sync_model
 
-from . import sync_work
+from . import made_bases, sync_work
 
 SRC = Path(guard.__file__).parent  # the package as imported, whatever layout it was staged in
 
@@ -72,29 +72,33 @@ def presentation(revision: str = "rev1") -> dict:
             "slides": slides}
 
 
+def made_element(e: dict) -> made_bases.Made:
+    """The element convert wrote `e` from, under the key its alt-text title names (a picture is
+    untitled: image/figure/0)."""
+    x, y = e["transform"]["translateX"], e["transform"]["translateY"]
+    box = (x, y, x + e["size"]["width"]["magnitude"], y + e["size"]["height"]["magnitude"])
+    if "image" in e:
+        return made_bases.Made(key="image/figure/0", object_id=e["objectId"],
+                               element=made_bases.picture(e["objectId"], box, f"figures/{e['objectId']}.png"))
+    key = e["title"].removeprefix("b2s:").split("/", 1)[1]
+    words = e["shape"]["text"]["textElements"][1]["textRun"]["content"].rstrip("\n")
+    return made_bases.Made(key=key, object_id=e["objectId"],
+                           element=made_bases.text(e["objectId"], key.split("/")[1], box, words))
+
+
 def base_of(pres: dict, pdf: str = "talk.pdf") -> dict:
-    """The sync base as `convert` records it: IR keys plus Google's read-back (snapshot.build_base
-    does the same around the real IR)."""
-    read = snapshot.read_presentation(pres)
-    slides = []
-    for s, r in zip(pres["slides"], read["slides"]):
-        elements = []
-        for e in s["pageElements"]:
-            key = (e.get("title") or "").removeprefix("b2s:").split("/", 1)[-1] or "image/figure/0"
-            elements.append({"key": key, "id": e["objectId"], "kind": "image" if "image" in e else "text",
-                             "role": key.split("/")[-2] if "/" in key else "figure", "ir_hash": "h", "fields": {},
-                             "fingerprint": {}, "anchor": None, "ir": {},
-                             "objects": [e["objectId"]], "main": e["objectId"],
-                             "readback": {e["objectId"]: copy.deepcopy(r["objects"][e["objectId"]])}})
-        slides.append({"key": s["objectId"].replace("b2s_s", "slide"), "label": None,
-                       "title": elements[0]["readback"][elements[0]["main"]]["text"].strip(), "page": len(slides),
-                       "text": "", "layout": "TITLE_ONLY", "background": "color:#ffffff", "notes": r["notes"],
-                       "objectId": s["objectId"], "layoutObjectId": "L", "background_readback": r["background"],
-                       "notes_readback": r["notes"], "groups": [], "order": list(r["order"]), "elements": elements})
-    return {"version": 1, "generation": 0, "presentationId": pres["presentationId"], "revisionId": pres["revisionId"],
-            "source": {"pdf": f"C:/talks/{pdf}", "sha1": "abc"}, "scale": 1.0, "page_size": [720, 405],
-            "deck_page_size": [720, 405], "master_background": "color:#ffffff",
-            "master_readback": read["master_background"], "slides": slides}
+    """The sync base as `convert` records it after writing `pres` (tests/made_bases.py): slide keys
+    slide000, slide001, ..., element keys from the objects' alt-text titles."""
+    slides = [made_bases.MadeSlide(key=s["objectId"].replace("b2s_s", "slide"), object_id=s["objectId"],
+                                   notes=r["notes"], background_color="#ffffff",
+                                   elements=[made_element(e) for e in s["pageElements"]])
+              for s, r in zip(pres["slides"], snapshot.read_presentation(pres)["slides"])]
+    return made_bases.made_base(pres, slides, f"C:/talks/{pdf}", 0)
+
+
+def surveyed(base: dict, pres: dict, sign: bool, drive) -> dict:
+    """`guard.survey` of a base as base.json holds it: parsed first, as `check_rebuild` does."""
+    return guard.survey(sync_model.base(base), pres, sign, drive)
 
 
 def edited(change) -> tuple[dict, dict]:
@@ -119,7 +123,7 @@ def set_text(e: dict, text: str) -> None:
 
 def test_untouched_deck_is_not_edited():
     pres = presentation()
-    found = guard.survey(base_of(pres), pres, True, None)
+    found = surveyed(base_of(pres), pres, True, None)
     assert found == {"edited": False, "revisionId": "rev1", "counts": {}, "slides": [], "slides_added": 0,
                      "slides_deleted": 0, "reordered": False, "examples": []}
 
@@ -129,13 +133,13 @@ def test_a_new_revision_alone_is_not_an_edit():
     pres = presentation()
     base = base_of(pres)
     later = {**copy.deepcopy(pres), "revisionId": "rev999"}
-    assert guard.survey(base, later, True, None)["edited"] is False
+    assert surveyed(base, later, True, None)["edited"] is False
 
 
 def test_scratch_slides_of_an_interrupted_run_are_not_an_edit():
     """measure_places' scratch slides (b2s_mNNN) are the converter's own leftovers, not the person's."""
     base, live = edited(lambda p: p["slides"].append(slide("b2s_m003", [shape("x", (0, 0, 10, 10), "scratch")])))
-    assert guard.survey(base, live, True, None)["edited"] is False
+    assert surveyed(base, live, True, None)["edited"] is False
 
 
 def png(colour: tuple[int, int, int], size=(8, 8)) -> bytes:
@@ -164,9 +168,9 @@ def test_a_new_content_url_for_the_same_picture_is_not_an_edit(fetcher):
         base["slides"][0]["elements"][2]["readback"]["b2s_s000_f0"]["image"]["contentHash"]
 
     fetcher(lambda url: same)
-    assert guard.survey(base, live, True, None)["edited"] is False
+    assert surveyed(base, live, True, None)["edited"] is False
     fetcher(lambda url: other)
-    found = guard.survey(base, live, True, None)
+    found = surveyed(base, live, True, None)
     assert found["edited"] and found["counts"]["image"] == 2
 
 
@@ -187,7 +191,7 @@ def test_a_base_older_than_picture_signatures_cannot_clear_a_new_url_but_says_so
             if "image" in e:
                 e["image"]["contentUrl"] = f"https://lh3.google.com/reissued-{e['objectId']}=s0"
     fetcher(lambda url: png((240, 240, 240)))
-    found = guard.survey(base, live, True, None)
+    found = surveyed(base, live, True, None)
     assert found["edited"] and found["counts"] == {"image_unverified": 2}
     message = guard.refusal_message(pres["presentationId"], Path("out/x"), "x.pdf", found, "edited")
     assert message.startswith("refusing to rebuild: this deck's sync base was written before beamer2slides "
@@ -205,20 +209,20 @@ def test_a_group_emit_named_and_slides_never_made_is_not_a_deletion():
     el = next(e for s in base["slides"] for e in s["elements"] if e.get("readback"))
     el["objects"] = ["never_made_g"] + el["objects"]
     el["main"] = "never_made_g"
-    assert guard.survey(base, pres, True, None)["edited"] is False
+    assert surveyed(base, pres, True, None)["edited"] is False
     real = next(iter(el["readback"]))
     el["main"] = real
     live = copy.deepcopy(pres)
     for s in live["slides"]:
         s["pageElements"] = [e for e in s["pageElements"] if e["objectId"] != real]
-    assert guard.survey(base, live, True, None)["edited"] is True
+    assert surveyed(base, live, True, None)["edited"] is True
 
 
 # ---------------------------------------------------------------- what is an edit
 
 def test_reworded_text_is_an_edit_with_a_readable_example():
     base, live = edited(lambda p: set_text(find(p, "b2s_s001_t1"), "Rewritten by hand"))
-    found = guard.survey(base, live, True, None)
+    found = surveyed(base, live, True, None)
     assert found["edited"] and found["counts"] == {"text": 1}
     assert [s["slide"] for s in found["slides"]] == ["slide001"]
     assert found["slides"][0]["edits"] == [{"element": "text/body/0", "field": "text", "objects": ["b2s_s001_t1"]}]
@@ -232,7 +236,7 @@ def test_moved_and_restyled_objects_are_edits():
         e["transform"]["translateY"] = 200
         find(p, "b2s_s001_t0")["shape"]["text"]["textElements"][1]["textRun"]["style"]["bold"] = True
     base, live = edited(change)
-    found = guard.survey(base, live, True, None)
+    found = surveyed(base, live, True, None)
     assert found["counts"] == {"geometry": 1, "text_style": 1}
     assert guard.summary_line(found) == "2 slides edited: 1 move or resize, 1 style change"
 
@@ -245,19 +249,19 @@ def test_added_object_deleted_object_notes_and_background():
             "textRun"]["content"] = "new notes\n"
         p["slides"][0]["pageProperties"]["pageBackgroundFill"] = {"solidFill": {"color": {"rgbColor": {"red": 1}}}}
     base, live = edited(change)
-    found = guard.survey(base, live, True, None)
+    found = surveyed(base, live, True, None)
     assert found["counts"] == {"objects_added": 1, "background": 1, "deleted": 1, "notes": 1}
     assert "1 object added in Slides" in guard.summary_line(found)
 
 
 def test_slides_added_deleted_and_reordered():
     base, live = edited(lambda p: p["slides"].append(slide("mine", [shape("m0", (0, 0, 10, 10), "a slide I added")])))
-    assert guard.survey(base, live, True, None)["slides_added"] == 1
+    assert surveyed(base, live, True, None)["slides_added"] == 1
     base, live = edited(lambda p: p["slides"].pop(0))
-    found = guard.survey(base, live, True, None)
+    found = surveyed(base, live, True, None)
     assert found["slides_deleted"] == 1 and "deleted in Slides" in found["examples"][0]
     base, live = edited(lambda p: p["slides"].reverse())
-    assert guard.survey(base, live, True, None)["reordered"] is True
+    assert surveyed(base, live, True, None)["reordered"] is True
 
 
 # ---------------------------------------------------------------- the refusal
@@ -337,7 +341,7 @@ def test_check_rebuild_refuses_an_edited_deck_and_says_what_to_do(tmp_path):
     base, live = edited(lambda p: set_text(find(p, "b2s_s001_t1"), "reworded in Slides"))
     out = out_with_base(tmp_path, base)
     with pytest.raises(guard.RebuildRefused) as refused:
-        guard.check_rebuild(FakeSlides(live), FakeDrive(), "P1", out, Path("talk.pdf"))
+        guard.check_rebuild(FakeSlides(live), FakeDrive(), "P1", out, Path("talk.pdf"), False)
     message = str(refused.value)
     assert "refusing to rebuild" in message and "edited in Google Slides" in message
     assert "1 slide edited: 1 text edit" in message
@@ -349,14 +353,14 @@ def test_check_rebuild_refuses_an_edited_deck_and_says_what_to_do(tmp_path):
 def test_check_rebuild_lets_an_untouched_deck_through(tmp_path):
     pres = presentation()
     out = out_with_base(tmp_path, base_of(pres))
-    found = guard.check_rebuild(FakeSlides(pres), FakeDrive(), "P1", out, Path("talk.pdf"))
+    found = guard.check_rebuild(FakeSlides(pres), FakeDrive(), "P1", out, Path("talk.pdf"), False)
     assert found["reason"] == "" and found["edited"] is False and found["revisionId"] == "rev1"
 
 
 def test_force_returns_the_finding_instead_of_raising(tmp_path):
     base, live = edited(lambda p: p["slides"].pop())
     out = out_with_base(tmp_path, base)
-    found = guard.check_rebuild(FakeSlides(live), FakeDrive(), "P1", out, Path("talk.pdf"), force=True)
+    found = guard.check_rebuild(FakeSlides(live), FakeDrive(), "P1", out, Path("talk.pdf"), True)
     assert found["reason"] == "edited" and found["slides_deleted"] == 1
 
 
@@ -364,7 +368,7 @@ def test_a_deck_without_a_base_is_never_silently_rebuilt(tmp_path):
     """Without a base nobody can say whether the deck was edited, so it isn't replaced by default."""
     out = out_with_base(tmp_path, None)
     with pytest.raises(guard.RebuildRefused) as refused:
-        guard.check_rebuild(FakeSlides(presentation()), FakeDrive(), "P1", out, Path("talk.pdf"))
+        guard.check_rebuild(FakeSlides(presentation()), FakeDrive(), "P1", out, Path("talk.pdf"), False)
     assert refused.value.survey["reason"] == "no-base"
     assert "no sync base" in str(refused.value)
 
@@ -374,12 +378,53 @@ def test_a_folder_holding_another_pdfs_deck_is_not_rebuilt(tmp_path):
     pres = presentation()
     out = out_with_base(tmp_path, base_of(pres, pdf="other-talk.pdf"))
     with pytest.raises(guard.RebuildRefused) as refused:
-        guard.check_rebuild(FakeSlides(pres), FakeDrive(), "P1", out, Path("talk.pdf"))
+        guard.check_rebuild(FakeSlides(pres), FakeDrive(), "P1", out, Path("talk.pdf"), False)
     assert refused.value.survey["reason"] == "other-source"
     assert "other-talk.pdf" in str(refused.value)
     # the same PDF under a longer path is the same source
     assert guard.check_rebuild(FakeSlides(pres), FakeDrive(), "P1", out,
-                               Path("C:/elsewhere/other-talk.pdf"))["reason"] == ""
+                               Path("C:/elsewhere/other-talk.pdf"), False)["reason"] == ""
+
+
+def test_a_base_that_does_not_parse_is_refused_never_rebuilt_over(tmp_path):
+    """A base.json that still says it is a base (version, slides, the deck's id: `load_base` takes
+    it) but that `sync_model.base` refuses - an older form, a damaged file - answers nothing about
+    the deck, and no sync could merge against it either. So it is refused as no base is, with the
+    reason it could not be read; only the person's --force-rebuild goes past it."""
+    pres = presentation()
+    base = base_of(pres)
+    del base["slides"][1]["elements"][0]["fields"]["text"]
+    out = out_with_base(tmp_path, base)
+    with pytest.raises(guard.RebuildRefused) as refused:
+        guard.check_rebuild(FakeSlides(pres), FakeDrive(), "P1", out, Path("talk.pdf"), False)
+    assert refused.value.survey["reason"] == "unreadable-base"
+    message = str(refused.value)
+    assert message.startswith("refusing to rebuild: this deck's sync base cannot be read")
+    assert "slide slide001" in message and "'text' is missing" in message
+    assert "--new-deck" in message and "--force-rebuild" in message and "beamer2slides sync" not in message
+    found = guard.check_rebuild(FakeSlides(pres), FakeDrive(), "P1", out, Path("talk.pdf"), True)
+    assert found["reason"] == "unreadable-base" and found["edited"] is False and found["slides"] == []
+
+
+def test_the_bases_here_are_ones_convert_could_write():
+    """base_of goes through snapshot's own steps (tests/made_bases.py): the base parses, and is the
+    same JSON once read and written back - so what these tests show holds for a real base."""
+    base = base_of(presentation())
+    assert sync_model.base_json(sync_model.base(base)) == base
+    assert sync_model.unread(base) == []
+
+
+def test_slides_the_deck_never_had_are_each_named_by_their_own_title():
+    """Two base slides with no objectId (a conversion whose deck lost them) are both deleted slides.
+    The examples named each by the title of whichever such slide came last: the titles were looked
+    up by objectId, and both had none."""
+    pres = presentation()
+    base = base_of(pres)
+    for s in base["slides"]:
+        s["objectId"] = None
+    found = surveyed(base, pres, True, None)
+    assert found["slides_deleted"] == 2
+    assert found["examples"][:2] == ['slide 1 "Intro": deleted in Slides', 'slide 2 "Results": deleted in Slides']
 
 
 # ---------------------------------------------------------------- the second ask
@@ -407,7 +452,7 @@ class CountingSlides:
 def a_finding(tmp_path: Path, **change) -> dict:
     pres = presentation()
     out = out_with_base(tmp_path, base_of(pres))
-    return {**guard.check_rebuild(FakeSlides(pres), FakeDrive(), "P1", out, Path("talk.pdf")), **change}
+    return {**guard.check_rebuild(FakeSlides(pres), FakeDrive(), "P1", out, Path("talk.pdf"), False), **change}
 
 
 def test_a_deck_still_at_its_revision_is_not_surveyed_again(tmp_path):
@@ -490,11 +535,11 @@ def test_with_no_preflight_the_second_ask_reads_drive_alone(tmp_path):
 def test_backup_modes(tmp_path):
     out = tmp_path / "talk"
     drive = FakeDrive()
-    assert guard.backup_deck(drive, "P1", out, "none") == {"mode": "none", "warnings": []}
+    assert guard.backup_deck(drive, "P1", out, "none", "", True, None) == {"mode": "none", "warnings": []}
     assert drive.calls == []
-    result = guard.backup_deck(drive, "P1", out, "file")
+    result = guard.backup_deck(drive, "P1", out, "file", "", True, None)
     assert Path(result["file"]).read_bytes() == b"PPTX" and result["bytes"] == 4
-    result = guard.backup_deck(drive, "P1", out, "both")
+    result = guard.backup_deck(drive, "P1", out, "both", "", True, None)
     assert result["drive"]["url"].endswith("COPY1/edit") and Path(result["file"]).exists()
     assert ("copy", "P1") in drive.calls
 
@@ -502,7 +547,7 @@ def test_backup_modes(tmp_path):
 def test_a_refused_export_falls_back_to_a_drive_copy(tmp_path):
     """A deck over Drive's 10 MB export limit must still leave a way back."""
     drive = FakeDrive(export=http_error(403, "exportSizeLimitExceeded"))
-    result = guard.backup_deck(drive, "P1", tmp_path / "talk", "file")
+    result = guard.backup_deck(drive, "P1", tmp_path / "talk", "file", "", True, None)
     assert "file" not in result and result["drive"]["presentationId"] == "COPY1"
     assert result["warnings"] and "10 MB" in result["warnings"][0]
 
@@ -523,24 +568,24 @@ def test_prune_keeps_the_newest_backups_and_only_touches_its_own_files(tmp_path)
     stranger = guard.backup_dir(out) / "someone-elses.pptx"
     stranger.write_bytes(b"not ours")
     (guard.backup_dir(out) / "backups.json").write_text(json.dumps(log), encoding="utf-8")
-    dry = guard.prune_backups(out, keep=2)
+    dry = guard.prune_backups(out, 2, None, False)
     assert dry["files"] == 5 and [Path(d["file"]).name for d in dry["doomed"]] == ["00.pptx", "01.pptx", "02.pptx"]
     assert dry["deleted"] is False and all(p.exists() for p in guard.backup_dir(out).glob("*.pptx"))
-    done = guard.prune_backups(out, keep=2, delete=True)
+    done = guard.prune_backups(out, 2, None, True)
     assert done["deleted"] and done["freed"] == 3000
     assert sorted(p.name for p in guard.backup_dir(out).glob("*.pptx")) == \
         ["03.pptx", "04.pptx", "someone-elses.pptx"], "a file this program did not write is never deleted"
     kept = json.loads((guard.backup_dir(out) / "backups.json").read_text(encoding="utf-8"))
     assert len(kept) == 5, "the record of what the deck was stays, even when its file is gone"
     assert [bool(e["backup"].get("deleted")) for e in kept] == [True, True, True, False, False]
-    assert guard.prune_backups(out, keep=2)["doomed"] == []  # nothing left to prune
+    assert guard.prune_backups(out, 2, None, False)["doomed"] == []  # nothing left to prune
 
 
 def test_prune_can_be_asked_to_keep_everything_recent(tmp_path):
     out = tmp_path / "talk"
     log = [a_backup(out, "old.pptx", age_days=30), a_backup(out, "new.pptx", age_days=1)]
     (guard.backup_dir(out) / "backups.json").write_text(json.dumps(log), encoding="utf-8")
-    r = guard.prune_backups(out, keep=0, older_than_days=7)
+    r = guard.prune_backups(out, 0, 7, False)
     assert [Path(d["file"]).name for d in r["doomed"]] == ["old.pptx"]
 
 
@@ -548,7 +593,7 @@ def test_a_backup_neither_kind_of_which_worked_is_no_way_back(tmp_path):
     """Both refused: the .pptx export (over 10 MB) and the Drive copy (a full Drive)."""
     drive = FakeDrive(export=http_error(403, "exportSizeLimitExceeded"),
                       copy_error=http_error(403, "storageQuotaExceeded"))
-    result = guard.backup_deck(drive, "P1", tmp_path / "talk", "file")
+    result = guard.backup_deck(drive, "P1", tmp_path / "talk", "file", "", True, None)
     assert "file" not in result and "drive" not in result and len(result["warnings"]) == 2
     assert not guard.way_back_kept(result)
 
@@ -583,7 +628,7 @@ def test_the_way_back_is_made_on_a_thread_with_clients_of_its_own(monkeypatch):
         made.append((slides, drive, threading.current_thread().name))
         return {"entry": {"backup": {"file": "x.pptx"}}}
 
-    point = guard.WayBack(make)
+    point = guard.WayBack(make, "b2s-back")
     assert point.backup() == {"file": "x.pptx"}
     assert point.result() is point.result(), "made once and remembered"
     assert len(made) == 1 and made[0][:2] == (("slides", "CREDS"), ("drive", "CREDS"))
@@ -601,7 +646,7 @@ def test_a_way_back_nobody_asked_for_is_not_waited_for(monkeypatch, tmp_path):
         release.wait(10)
         return {"entry": {}}
 
-    point = guard.WayBack(make)
+    point = guard.WayBack(make, "b2s-back")
     assert point.kept() is None and not point.asked, "not asked, not waited for"
     release.set()
     assert point.result() == {"entry": {}} and point.kept() == {"entry": {}}
@@ -616,7 +661,7 @@ def test_a_lent_client_makes_the_way_back_on_the_asking_thread(monkeypatch):
     (`emit.measure_places`' rule): no thread, and the work happens on the first ask."""
     a_way_back(monkeypatch, lent=True)
     made = []
-    point = guard.WayBack(lambda slides, drive: made.append(threading.current_thread().name) or {})
+    point = guard.WayBack(lambda slides, drive: made.append(threading.current_thread().name) or {}, "b2s-back")
     assert made == [], "nothing is done until somebody is about to write"
     point.result()
     assert made == [threading.current_thread().name]
@@ -628,7 +673,7 @@ def test_a_way_back_that_could_not_be_made_is_no_reason_not_to_sync(monkeypatch,
     def boom(slides, drive):
         raise RuntimeError("Drive said no")
 
-    point = guard.WayBack(boom)
+    point = guard.WayBack(boom, "b2s-back")
     assert point.result() is None and point.backup() == {}
     assert "Drive said no" in capsys.readouterr().out
 
@@ -664,16 +709,16 @@ def test_a_prune_of_drive_backups_keeps_the_newest_and_only_ever_trashes():
     copies = [{"id": f"C{i}", "name": f"backup {i}", "createdTime": f"2026-09-{10 + i:02d}T00:00:00Z"}
               for i in (4, 1, 3, 0, 2)]
     drive = TaggedCopies(copies, refuse={"C1"})
-    looked = guard.prune_drive_backups(drive, "P1", keep=2)
+    looked = guard.prune_drive_backups(drive, "P1", 2, None, False)
     assert "key='b2sBackupOf' and value='P1'" in drive.queries[0] and "trashed = false" in drive.queries[0]
     assert [c["id"] for c in looked["doomed"]] == ["C0", "C1", "C2"], "oldest first, the newest two kept"
     assert looked["copies"] == 5 and not looked["trashed"] and drive.trashed == [], "looking trashes nothing"
 
-    done = guard.prune_drive_backups(drive, "P1", keep=2, trash=True)
+    done = guard.prune_drive_backups(drive, "P1", 2, None, True)
     assert drive.trashed == ["C0", "C2"] and done["trashed"]
     assert len(done["warnings"]) == 1 and "backup 1" in done["warnings"][0]
 
-    young = guard.prune_drive_backups(TaggedCopies(copies), "P1", keep=0, older_than_days=365 * 100)
+    young = guard.prune_drive_backups(TaggedCopies(copies), "P1", 0, 365 * 100, False)
     assert young["doomed"] == [], "nothing is older than a century"
 
 
@@ -685,11 +730,11 @@ def test_record_appends_and_restore_hint_reads(tmp_path):
     guard.record(out, {**entry, "revisionId": "rev8"})
     log = json.loads((out / "backups" / "backups.json").read_text(encoding="utf-8"))
     assert [e["revisionId"] for e in log] == ["rev7", "rev8"]
-    hint = "\n".join(guard.restore_hint(entry))
+    hint = "\n".join(guard.restore_hint(entry, "rebuild"))
     # The .pptx backup is the way back, and the hint says exactly how (Drive's version history
     # gives the deck's current content back for every revision, docs/sync.md).
     assert "rev7" in hint and "x.pptx" in hint and "deck_backup.py restore" in hint
-    bare = "\n".join(guard.restore_hint({"presentationId": "P1", "revisionId": "rev7"}))
+    bare = "\n".join(guard.restore_hint({"presentationId": "P1", "revisionId": "rev7"}, "rebuild"))
     assert "no backup file was kept" in bare and "version history" in bare
 
 

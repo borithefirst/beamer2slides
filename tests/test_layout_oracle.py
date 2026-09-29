@@ -14,6 +14,8 @@ BODY = {"fontFamily": "Lato", "bold": False, "italic": False, "baselineOffset": 
 MONO = {**BODY, "fontFamily": "Roboto Mono"}
 PARA = {"alignment": "START", "lineSpacing": 100, "indentStart": 0.0, "indentFirstLine": 0.0,
         "spaceAbove": 0.0, "spaceBelow": 0.0}
+# what an element entry carries besides its place (`sync_model.element_entry` reads it strictly)
+HASHES = {"ir_hash": "i", "fields": {"text": "t", "position": "p", "size": "s", "style": "y", "image": "m"}}
 
 
 def text_rb(key, box, text, spans=None, paras=None):
@@ -22,18 +24,20 @@ def text_rb(key, box, text, spans=None, paras=None):
             "box": list(box), "parent_group": None, "z": 1, "title": snapshot.tag(SKEY, key), "text": text + "\n",
             "run_spans": [list(s) for s in (spans or [(0, len(text), BODY)])],
             "text_styles": [BODY], "paragraph_styles": paras or [PARA], "text_style_hash": f"h{len(text)}",
-            "shape_style": {"type": "TEXT_BOX", "align": "TOP"}}
+            "shape_style": {"type": "TEXT_BOX", "align": "TOP"}, "shape_style_hash": "box"}
 
 
 def picture_rb(key, box):
     return {"kind": "image", "transform": [1.0, 0.0, 0.0, 1.0, box[0], box[1]], "size": [box[2] - box[0], box[3] - box[1]],
-            "box": list(box), "parent_group": None, "z": 2, "title": snapshot.tag(SKEY, key), "text": None}
+            "box": list(box), "parent_group": None, "z": 2, "title": snapshot.tag(SKEY, key), "text": None,
+            "text_style_hash": "", "shape_style_hash": ""}
 
 
 def panel_rb(key, box):
     return {"kind": "shape", "transform": [1.0, 0.0, 0.0, 1.0, box[0], box[1]], "size": [box[2] - box[0], box[3] - box[1]],
             "box": list(box), "parent_group": None, "z": 0, "title": snapshot.tag(SKEY, key), "text": "\n",
-            "shape_style": {"type": "RECTANGLE", "fill": {"color": "#dddddd", "alpha": 1.0}, "align": "TOP"}}
+            "text_style_hash": "", "shape_style": {"type": "RECTANGLE", "fill": {"color": "#dddddd", "alpha": 1.0},
+                                                   "align": "TOP"}, "shape_style_hash": "panel"}
 
 
 def moved(rb, dx=0.0, dy=0.0, **more):
@@ -54,8 +58,8 @@ class Deck:
 
     def add(self, key, kind, oid, rb, anchor=None, role=None, ours_rb=None):
         self.elements.append({"key": key, "kind": kind, "role": role or key.split("/")[1], "anchor": anchor,
-                              "objects": [oid], "main": oid, "readback": {oid: rb},
-                              "fingerprint": {"bbox": list(rb["box"])}, "ir": {}})
+                              "objects": [oid], "main": oid, "readback": {oid: rb}, **HASHES,
+                              "fingerprint": {"text": "", "bbox": list(rb["box"])}, "ir": {}})
         drawn = ours_rb or rb
         ir = {"bbox": list(drawn["box"])}
         if kind == "text":
@@ -64,8 +68,8 @@ class Deck:
                                   "lines": [{"x0": ln.box[0], "x1": ln.box[2], "baseline": ln.baseline}
                                             for ln in lay.lines if ln.para == p]}
                                  for p in sorted({ln.para for ln in lay.lines})]}
-        self.ours.append({"key": key, "kind": kind, "role": role, "anchor": anchor, "ir": ir,
-                          "fingerprint": {"bbox": list(drawn["box"])}})
+        self.ours.append({"key": key, "kind": kind, "role": role, "anchor": anchor, "ir": ir, **HASHES,
+                          "fingerprint": {"text": "", "bbox": list(drawn["box"])}})
         return rb
 
     def base(self):
@@ -174,7 +178,7 @@ def test_what_the_new_conversion_draws_overlapping_is_not_the_syncs():
 def test_boxes_that_overlap_with_their_words_clear_of_each_other_are_fine():
     d, before, grown, person = reflow_deck()
     beside = text_rb("text/body/1", [300.0, 80.0, 702.7, 120.0], "The second box.")   # right of box 1's short lines
-    assert L.meet([grown["box"]], [beside["box"]])       # the boxes do meet
+    assert L.meet([grown["box"]], [beside["box"]], L.OVERLAP_MIN)       # the boxes do meet
     assert d.check({"t1": before["t1"], "t2": beside}, {"t1": grown, "t2": beside}) == []
 
 
@@ -386,8 +390,10 @@ def test_allow_silences_a_kind_on_a_slide():
     d = Deck()
     footer = d.add("text/footer/0", "text", "t9", text_rb("text/footer/0", [640.0, 370.0, 700.0, 400.0], "4 / 10"))
     read = lambda objs: {"page_size": [720.0, 405.0], "slides": [{"objectId": "p1", "objects": objs}]}
-    assert L.check(d.base(), read({"t9": footer}), read({"t9": moved(footer, dx=40)}), None, d.conversion(),
-                   allow=["off_page/s"]) == []
+    found = L.check(d.base(), read({"t9": footer}), read({"t9": moved(footer, dx=40)}), None, d.conversion())
+    assert [f["kind"] for f in found] == ["off_page"]
+    assert L.allowed(found, ["off_page/s"]) == []
+    assert L.allowed(found, ["off_page/s/text/footer/0"]) == [] and L.allowed(found, ["off_page/other"]) == found
 
 
 # ---------------------------------------------------------------- the replay's tables
@@ -396,7 +402,7 @@ def test_correlate_counts_steps_with_a_finding_per_edit_kind_and_variant():
     fail = {"kind": "off_page", "severity": "fail"}
     results = [{"findings": [fail], "existing": [], "edit_kinds": ["move"], "variant": "a"},
                {"findings": [], "existing": [fail], "edit_kinds": ["move", "bold"], "variant": "b"}]
-    table = L.correlate(results)
+    table = L.correlate(results, "fail")
     assert table["edit_kinds"]["move"] == {"steps": 2, "with_finding": 1, "kinds": {"off_page": 1}, "rate": 0.5, "lift": 1.0}
     assert table["variants"]["b"]["with_finding"] == 0
     assert L.counts(results) == {"off_page": {"fail": 1, "note": 0, "existing": 1}}
