@@ -165,8 +165,8 @@ def test_a_japanese_line_may_break_after_any_character():
     """The next line's first word is its first character, not the whole line: a wrap limit past
     the page had Slides keep lines TeX broke."""
     first = span(JA2, 20, 113.5, w=len(JA2) * 11, font=CJK_FONT)
-    assert abs(first_word_width(first) - 11) < 0.5
-    assert 20 < first_word_width(span("BERT）を", 20, 100, w=60)) < 40  # the Latin word before them
+    assert abs(first_word_width(first, False) - 11) < 0.5
+    assert 20 < first_word_width(span("BERT）を", 20, 100, w=60), False) < 40  # the Latin word before them
     (par,) = paragraphs(ja_paragraph())
     assert par["wrap_limit"] <= W
     assert par["wrap_limit"] >= 20 + len(JA1) * 11

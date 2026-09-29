@@ -324,7 +324,7 @@ def shape_element(g: Group, pid: str) -> dict:
         # a curve's ink falls short of its box, the page's edge cuts one off, a shadow shows it only
         # in part; none of them is another box.
         reach = max([d.get("width") or 0.0 for d in ds] + [0.0]) / 2 + 1.5
-        if Rect.of(box).expand(reach).contains_rect(Rect.of(bbox)):
+        if Rect.of(box).expand(reach).contains_rect(Rect.of(bbox), tol=0.5):
             bbox = box
     stroke = next((d for d in strokes if d.get("stroke")), None)
     el = {"id": pid, "kind": "shape", "role": "line" if line else "panel", "bbox": bbox,

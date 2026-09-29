@@ -716,7 +716,7 @@ def test_framed_paragraphs_are_shapes_with_wrapped_text():
     # \fcolorbox: a panel with its frame as the outline, its words a text box on it
     panel = [e for e in slide["elements"] if e["kind"] == "shape"]
     assert [(p["fill"], p["outline"]["color"]) for p in panel] == [("#e6e6ff", "#0000ff")]
-    words = [e for e in texts(slide) if Rect.of(panel[0]["bbox"]).contains_rect(Rect.of(e["bbox"]))]
+    words = [e for e in texts(slide) if Rect.of(panel[0]["bbox"]).contains_rect(Rect.of(e["bbox"]), tol=0.5)]
     assert len(words) == 1 and [p["align"] for p in words[0]["paragraphs"]] == ["left", "left"]
     # \fbox: a one-cell table framed by its rules, the paragraph wrapped in its cell
     table = [e for e in slide["elements"] if e["kind"] == "table"]

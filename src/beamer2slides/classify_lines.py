@@ -6,6 +6,7 @@ import re
 from dataclasses import replace
 
 from . import bidi
+from .classify_graphics import GraphicsMixin
 from .classify_model import Line, Rect, Span, extension_font
 from .classify_text import (
     BULLET_GLYPHS, DISPLAY_WORD_SHARE, ENUM_RE, LABEL_SEP_EM, MATH_OPERATORS, compose_accents, is_code,
@@ -20,15 +21,16 @@ GUTTER_PROSE_EM = 8.0  # a column's line beside a gutter is wider than this; tic
 DELIMITERS = set("|‖∣∥()[]{}⟨⟩⌊⌋⌈⌉")
 
 
-class LinesMixin:
-    """Methods of classify.PageClassifier, which holds the state they share."""
+class LinesMixin(GraphicsMixin):
+    """PageClassifier's lines (after its graphics: words on different panels or artwork are
+    different lines)."""
 
     def spans(self) -> list[Span]:
         # External links keep their URL; internal ones become "#page=N" (PDF page index).
-        links = [(Rect.of(l["bbox"]), l.get("uri") or f"#page={l['page']}") for l in self.page["links"]]
-        out = []
-        type3_words = type3_text_page(self.page["spans"])
-        for s in self.page["spans"]:
+        links = [(Rect.of(l["bbox"]), l.get("uri") or f"#page={l.get('page')}") for l in self.raw["links"]]
+        out: list[Span] = []
+        type3_words = type3_text_page(self.raw["spans"])
+        for s in self.raw["spans"]:
             r = Rect.of(s["bbox"])
             dx, dy = s["dir"]
             color = s["color"]
@@ -55,7 +57,7 @@ class LinesMixin:
         n = len(spans)
         parent = list(range(n))
 
-        def find(i):
+        def find(i: int) -> int:
             while parent[i] != i:
                 parent[i] = parent[parent[i]]
                 i = parent[i]
@@ -65,8 +67,8 @@ class LinesMixin:
         panel = [self.panel_of(s.rect) for s in spans]
         # a listing's panel: monospaced text but for its line numbers (a block with a table of
         # \texttt cells is not)
-        listing = set()
-        for k in set(panel) - {None}:
+        listing: set[int] = set()
+        for k in {p for p in panel if p is not None}:
             words = [s for s, p in zip(spans, panel) if p == k and s.text.strip() and not re.fullmatch(r"\d{1,4}", s.text.strip())]
             mono = sum(len(s.text.strip()) for s in words if s.info.family == "mono")
             if mono and mono >= 0.9 * sum(len(s.text.strip()) for s in words):
@@ -76,6 +78,7 @@ class LinesMixin:
         artwork = [self.artwork_of(s.rect) for s in spans]
         for i in range(n):
             a = spans[i]
+            pi = panel[i]
             for j in range(i + 1, n):
                 b = spans[j]
                 big = max(a.size, b.size)
@@ -111,7 +114,7 @@ class LinesMixin:
                         and not (gap > 0.8 * big and self.gutter(spans, a, b, big)) \
                         and not self.figure_label_apart(spans, a, b, gap, big):
                     parent[find(i)] = find(j)
-                elif same_row and panel[i] in listing and panel[i] == panel[j] and gap <= 0.6 * self.panels[panel[i]]["bbox"].w \
+                elif same_row and pi is not None and pi in listing and pi == panel[j] and gap <= 0.6 * self.panels[pi].bbox.w \
                         and not any(s.info.family != "mono" and re.fullmatch(r"\d{1,4}", s.text.strip()) for s in (a, b)):
                     parent[find(i)] = find(j)  # a listing's line: a comment far right of its code is spaces
         groups: dict[int, list[Span]] = {}
@@ -134,7 +137,9 @@ class LinesMixin:
                 continue  # (a line that took a glyph of the line above is done)
             for g in [s for s in a.spans if extension_font(s.font) or s.text.strip() == "√"]:
                 size = g.size
-                over = lambda w: min(w.rect.x1, g.rect.x1) - max(w.rect.x0, g.rect.x0) > 1.0
+
+                def over(w: Span) -> bool:
+                    return min(w.rect.x1, g.rect.x1) - max(w.rect.x0, g.rect.x0) > 1.0
                 if not any(w is not g and w.size >= 0.8 * size and over(w) for w in a.spans):
                     continue
                 for b in out:
@@ -157,10 +162,12 @@ class LinesMixin:
             if len(ext) != 1 or any(s is not ext[0] and s.size > 0.8 * ext[0].size for s in g_line.spans):
                 continue
             g, size = ext[0], ext[0].size
-            over = lambda w: min(w.rect.x1, g.rect.x1) - max(w.rect.x0, g.rect.x0) > 1.0
+
+            def across(w: Span) -> bool:
+                return min(w.rect.x1, g.rect.x1) - max(w.rect.x0, g.rect.x0) > 1.0
             for b in out:
                 if b is g_line or not (g.baseline + 0.3 * size < b.baseline <= g.baseline + 2.5 * size) \
-                        or g.rect.y1 < b.rect.y0 - 0.5 * size or any(map(over, b.spans)):
+                        or g.rect.y1 < b.rect.y0 - 0.5 * size or any(map(across, b.spans)):
                     continue
                 before = [w for w in b.spans if g.rect.x0 - 1.5 * size <= w.rect.x1 <= g.rect.x0 + 1]
                 after = [w for w in b.spans if g.rect.x1 - 1 <= w.rect.x0 <= g.rect.x1 + 1.5 * size]
@@ -198,7 +205,7 @@ class LinesMixin:
         em space or a tab, whichever the gap made it, the code moved off its column, and the
         numbers of lines whose code starts further right were left alone, pictures under the
         listing's panels (r2_code_v1, r2_code_v4)."""
-        found = []
+        found: list[tuple[Line, Span, bool]] = []
         for line in lines:
             content = sorted(line.content, key=lambda s: s.rect.x0)
             if not content or line.bullet or not re.fullmatch(r"\d{1,4}", content[0].text.strip()):
@@ -210,7 +217,7 @@ class LinesMixin:
             beside = rest or [s for o in lines if o is not line and is_code(o.content)
                               and abs(o.baseline - num.baseline) <= 0.3 * num.size for s in o.content if s.rect.x0 > num.rect.x1]
             found.append((line, num, bool(beside)))
-        columns: list[list[tuple]] = []
+        columns: list[list[tuple[Line, Span, bool]]] = []
         for item in sorted(found, key=lambda f: f[1].rect.x1):
             col = next((c for c in columns if abs(c[0][1].rect.x1 - item[1].rect.x1) <= 1.0), None)
             (col.append(item) if col else columns.append([item]))
@@ -310,18 +317,18 @@ class LinesMixin:
         prior = bidi.page_direction(s.visual or "" for s in spans)
         for n, line in enumerate(lines):
             items = sorted(line.spans, key=lambda s: s.rect.x0)
-            if not all(s.visual is not None and s.horizontal for s in items) or \
-                    not any(bidi.has_rtl(s.visual) for s in items):
+            texts = [s.visual for s in items if s.visual is not None]
+            if len(texts) < len(items) or not all(s.horizontal for s in items) or \
+                    not any(bidi.has_rtl(t) for t in texts):
                 continue
-            texts = [s.visual for s in items]
             widths = [max(b.rect.x0 - a.rect.x1, a.rect.x0 - b.rect.x1) for a, b in zip(items, items[1:])]
-            joins = [" " if w > 0.15 * b.size and not a.visual.endswith(" ") and not b.visual.startswith(" ")
-                     else "" for w, a, b in zip(widths, items, items[1:])]
+            joins = [" " if w > 0.15 * b.size and not ta.endswith(" ") and not tb.startswith(" ")
+                     else "" for w, ta, tb, b in zip(widths, texts, texts[1:], items[1:])]
             base = bidi.line_base(texts, prior)
             spaced = bidi.spaced(texts, base, joins)
             for rank, (i, text) in enumerate(bidi.logical_line(texts, base, joins)):
                 s = items[i]
-                if s.text == bidi.logical_text(s.visual):
+                if s.text == bidi.logical_text(texts[i]):
                     s.text = text
                 s.reading = (n, rank, base, widths[spaced[i]] if i in spaced else 0.0)
 
@@ -334,7 +341,7 @@ class LinesMixin:
         for inner, outer, p in ((a, b, pa), (b, a, pb)):
             if p is None:
                 continue
-            box = self.panels[p]["bbox"]
+            box = self.panels[p].bbox
             r = outer.rect
             if box.contains(r.x0 + 0.1, r.cy) and not box.contains(r.cx, r.cy) and r.w <= 1.5 * size:
                 return True
@@ -347,7 +354,7 @@ class LinesMixin:
         column's other lines start. More than a word space apart, they are no line - joined, the
         label opened the list's line and the item split there. The label is a word: an item's
         own label (a dingbat, '1.', '(a)') stands its labelsep (0.5 em) before the same edge."""
-        if gap <= 0.6 * size or not getattr(self, "regions", None):
+        if gap <= 0.6 * size or not self.regions:
             return False
         left, right = (a, b) if a.rect.x0 < b.rect.x0 else (b, a)
         if sum(c.isalnum() for c in left.text) < 2 or re.fullmatch(r"\(?\w{1,3}[.):]", left.text.strip()):
@@ -357,7 +364,8 @@ class LinesMixin:
         # below it the same column), and apart from its item the ball lost its number.
         if sum(c.isalnum() for c in right.text) < 2:
             return False
-        near = lambda s: any(r.distance(s.rect) <= 0.5 * size for r in self.regions)
+        def near(s: Span) -> bool:
+            return any(r.distance(s.rect) <= 0.5 * size for r in self.regions)
         if not near(left) or near(right):
             return False
         edge = {round(s.baseline) for s in spans if s is not right and abs(s.rect.x0 - right.rect.x0) <= 1.0
@@ -392,8 +400,8 @@ class LinesMixin:
             if rows_left & rows_right:
                 return True
         # (as build_lines has it: a script, a table cell a little off the paragraph's baseline)
-        same_line = lambda s, t: abs(s.baseline - t.baseline) <= 0.5 * size and \
-            min(s.rect.y1, t.rect.y1) > max(s.rect.y0, t.rect.y0)
+        def same_line(s: Span, t: Span) -> bool:
+            return abs(s.baseline - t.baseline) <= 0.5 * size and min(s.rect.y1, t.rect.y1) > max(s.rect.y0, t.rect.y0)
         pool = band + [a, b]
         if not any(s.rect.x1 <= left.rect.x0 + 0.5 and same_line(s, left) for s in band):
             return False  # a label at the start of its line
@@ -415,7 +423,7 @@ class LinesMixin:
         others = [s for s in band if not (same_line(s, left) or same_line(s, right))]
         on_left = [s for s in others if s.rect.x1 <= mid]
         on_right = [s for s in others if s.rect.x0 >= mid]
-        pairs = []
+        pairs: list[tuple[Span, Span]] = []
         for l in on_left:
             if any(s.rect.x1 > l.rect.x1 for s in on_left if same_line(s, l)):
                 continue  # (l: the last word left of the gap on its line)
@@ -495,20 +503,20 @@ class LinesMixin:
         # the widest of right-aligned ones) pair with no neighbour above, but a label ending where
         # an item's label ends, its text starting at that item's text, hangs the same way - and
         # so does a label too wide for the label column, its text \labelsep after it.
-        tabbed = [l for l in out if l.tab is not None and any(s.rect.x1 <= l.tab.rect.x0 + 0.5 for s in l.spans)]
+        tabbed = [(l, tab) for l in out if (tab := l.tab) is not None and any(s.rect.x1 <= tab.rect.x0 + 0.5 for s in l.spans)]
         for line in out:
             if line.tab is not None or not tabbed:
                 continue
             for k, span in splits(line).items():
                 end = line.spans[k - 1].rect.x1
                 sep = span.rect.x0 - end
-                for o in tabbed:
+                for o, o_tab in tabbed:
                     if abs(o.size - line.size) > 0.5 or abs(o.baseline - line.baseline) > 6 * line.size:
                         continue
-                    o_end = max(s.rect.x1 for s in o.spans if s.rect.x1 <= o.tab.rect.x0 + 0.5)
-                    same = abs(span.rect.x0 - o.tab.rect.x0) <= 0.6 and abs(end - o_end) <= 0.6
+                    o_end = max(s.rect.x1 for s in o.spans if s.rect.x1 <= o_tab.rect.x0 + 0.5)
+                    same = abs(span.rect.x0 - o_tab.rect.x0) <= 0.6 and abs(end - o_end) <= 0.6
                     wide = end > o_end + 0.6 and abs(line.spans[0].rect.x0 - o.spans[0].rect.x0) <= 0.6 and \
-                        abs(sep - (o.tab.rect.x0 - o_end)) <= 0.1 * line.size
+                        abs(sep - (o_tab.rect.x0 - o_end)) <= 0.1 * line.size
                     if same or wide:
                         line.tab = span
                         break
@@ -521,9 +529,12 @@ class LinesMixin:
         """\\underbrace / \\overbrace in a line of prose: the brace (big-operator glyphs, a line
         of its own just below or above) and its small label join the line, so the formula
         becomes one hole with them."""
-        cmex = lambda s: extension_font(s.font)
-        words = lambda l: sum(len(s.text.strip()) >= 2 and s.text.strip().isalpha() and s.info.family not in ("math", "icon")
-                              for s in l.spans)
+        def cmex(s: Span) -> bool:
+            return extension_font(s.font)
+
+        def words(l: Line) -> int:
+            return sum(len(s.text.strip()) >= 2 and s.text.strip().isalpha() and s.info.family not in ("math", "icon")
+                       for s in l.spans)
         taken: set[int] = set()
         for host in lines:
             if words(host) < 3 or not all(s.horizontal for s in host.spans):

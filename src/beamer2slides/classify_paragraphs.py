@@ -3,6 +3,7 @@ runs a paragraph is written as.
 """
 
 import re
+from collections.abc import Mapping
 from dataclasses import replace
 
 from .classify_model import (
@@ -14,6 +15,7 @@ from .classify_text import (
     math_pieces, math_text, negate, prose_spaces, raised_mark, reading_order, script_of, script_size,
     stretched, thin_span, with_accent,
 )
+from .classify_lines import LinesMixin
 from .fonts import serif_math_letters
 
 
@@ -22,8 +24,8 @@ TRAILING_PUNCT = re.compile(r"(?<=\w)[,.;:!?)\]]+\s*$")
 BOX_PAD = " "   # a padded \colorbox's \fboxsep, highlighted (a no-break space: the box never breaks)
 
 
-class ParagraphsMixin:
-    """Methods of classify.PageClassifier, which holds the state they share."""
+class ParagraphsMixin(LinesMixin):
+    """Methods of classify.PageClassifier; the state they share is `classify_state.PageState`."""
 
     def has_side_content(self, a: Line, b: Line) -> bool:
         """Is there text or graphics right of these two lines (a column, a picture next to
@@ -41,7 +43,7 @@ class ParagraphsMixin:
         lb, rb = self.text_margin, self.W - self.text_margin
         panel = self.panel_of(r)
         if panel is not None:
-            box = self.panels[panel]["bbox"]
+            box = self.panels[panel].bbox
             lb, rb = max(lb, box.x0), min(rb, box.x1)
         mine = {id(l) for l in par.lines}
         beside = [l.rect for l in self.all_lines if id(l) not in mine and l.reason != "theme"] + list(self.regions)
@@ -59,10 +61,11 @@ class ParagraphsMixin:
     def links_apart(a: Line, b: Line) -> bool:
         """Two lines each linked as a whole to a different page: two entries of a table of
         contents (a section and its subsection, two subsections), not one wrapped title."""
-        target = lambda l: {s.link for s in l.content if s.text.strip()}
+        def target(l: Line) -> set[str | None]:
+            return {s.link for s in l.content if s.text.strip()}
         ta, tb = target(a), target(b)
-        return len(ta) == 1 and len(tb) == 1 and ta != tb and None not in ta | tb and \
-            all(t.startswith("#page=") for t in ta | tb)
+        return len(ta) == 1 and len(tb) == 1 and ta != tb and \
+            all(t is not None and t.startswith("#page=") for t in ta | tb)
 
     def find_hfill_pieces(self, lines: list[Line]) -> None:
         """`hfill_pieces`: id of a line -> the piece an \\hfill pushed to the right end of its row
@@ -71,13 +74,14 @@ class ParagraphsMixin:
         short, and ending at the right edge of the text area (the page's text margin, or the
         panel it is in). TeX ended the row there: nothing on the next line continues the words
         before the gap - where the piece itself wrapped, its tail opens the next line."""
-        self.hfill_pieces, self.hfill_hosts = {}, {}
+        self.hfill_pieces = {}
+        self.hfill_hosts = set()
         native = [l for l in lines if l.reason is None and all(s.horizontal for s in l.spans)]
         for a in native:
             right = self.W - self.text_margin
             panel = self.panel_of(a.rect)
             if panel is not None:
-                box = self.panels[panel]["bbox"]
+                box = self.panels[panel].bbox
                 right = min(right, box.x1 - min(max(0.0, a.x0 - box.x0), 1.5 * a.size))
             # (or, in a quotation set in on both sides, where its left indent mirrors)
             # (a piece is short: two columns' lines side by side are no host and piece)
@@ -90,7 +94,7 @@ class ParagraphsMixin:
             if pieces and id(a) not in self.hfill_hosts:
                 piece = min(pieces, key=lambda b: b.x0)
                 self.hfill_pieces[id(a)] = piece
-                self.hfill_hosts[id(piece)] = a
+                self.hfill_hosts.add(id(piece))
 
     def stacked_above(self, par: Paragraph, line: Line) -> list[Line]:
         """The lines stacked above `line` at the paragraph's left edge, one after another (a
@@ -105,7 +109,8 @@ class ParagraphsMixin:
         above = sorted((l for l in self.all_lines if l.baseline < line.baseline and at_edge(l)
                         and abs(l.size - par.size) <= 0.5 and l.reason is None),  # (not a figure's label)
                        key=lambda l: -l.baseline)
-        stack, at = [], line.baseline
+        stack: list[Line] = []
+        at = line.baseline
         for l in above:
             if at - l.baseline > 3 * par.size:
                 break
@@ -184,7 +189,7 @@ class ParagraphsMixin:
             # its first word - the rightmost - would have fitted at the end of the line above.
             col_left = min(l.x0 for l in par.lines + [line])
             head = max(line.content, key=lambda s: s.rect.x1)
-            if last.x0 - 0.3 * par.size - first_word_width(head) > col_left + 0.5:
+            if last.x0 - 0.3 * par.size - first_word_width(head, False) > col_left + 0.5:
                 return None
             return "right"
         center = abs((line.x0 + line.x1) / 2 - (last.x0 + last.x1) / 2) <= 1.5
@@ -220,7 +225,7 @@ class ParagraphsMixin:
                 col_right = max([col_right] + [l.x1 for l in self.stacked_above(par, line)])
             # (a span's first word; where its spaces are thin, the whole span: "48 000 EUR")
             head = line.content[0]
-            first_word = head.rect.w if thin_span(head, line, par.lines + [line]) else line_word_width(line)
+            first_word = head.rect.w if thin_span(head, line, par.lines + [line]) else line_word_width(line, False)
             if not right and last.x1 + 0.3 * par.size + first_word < col_right - 0.5:
                 return None
             if not right and not par.bullet and par.first.tab is None and col_right - last.x1 > 1.5 and \
@@ -259,12 +264,12 @@ class ParagraphsMixin:
                 return False  # (flush with the measure: justified prose, wrapped)
             if any(len(p.lines) > 1 and u in p.lines for p in self.built_paragraphs):
                 return False  # (the end of a wrapped paragraph above: prose, paragraph after paragraph)
-            if u.x1 - u.x0 >= 0.5 * (col_right - u.x0) and u.x1 + 0.3 * size + line_word_width(below) < col_right - 0.5:
+            if u.x1 - u.x0 >= 0.5 * (col_right - u.x0) and u.x1 + 0.3 * size + line_word_width(below, False) < col_right - 0.5:
                 return True
             below = u
         return False
 
-    def single_line_align(self, line: Line, margin: float, neighbours: list["Paragraph"] = ()) -> str:
+    def single_line_align(self, line: Line, margin: float, neighbours: list[Paragraph]) -> str:
         """A line alone is centred when it is centred on the page, right-aligned when it ends at
         the right margin - unless it starts where text next to it starts (the other items of
         its list, the block title above it, the column it is in): then it is left-aligned and
@@ -324,7 +329,7 @@ class ParagraphsMixin:
         for line in lines:
             if line.reason not in (None, "math"):
                 continue
-            best = None
+            best: tuple[Paragraph, str] | None = None
             for par in reversed(paragraphs):
                 how = self.continues(par, line)
                 if how:
@@ -430,23 +435,26 @@ class ParagraphsMixin:
         for box in boxes:
             # (a right-to-left list nests leftwards: its level is how far its bullet's right
             # edge stands in from the list's)
-            start = (lambda b: -Rect.of(b["bbox"]).x1) if all(reads_rtl(p.first) for p in box) else \
-                (lambda b: Rect.of(b["bbox"]).x0)
-            xs = sorted({round(start(p.bullet), 0) for p in box if p.bullet})
+            rtl = all(reads_rtl(p.first) for p in box)
+
+            def start(bbox: list[float]) -> float:
+                return -Rect.of(bbox).x1 if rtl else Rect.of(bbox).x0
+            xs = sorted({round(start(p.bullet["bbox"]), 0) for p in box if p.bullet})
             levels: list[float] = []
             for x in xs:
                 if not levels or x - levels[-1] > 2:
                     levels.append(x)
             for p in box:
                 if p.bullet:
-                    bx = start(p.bullet)
+                    bx = start(p.bullet["bbox"])
                     p.level = min(range(len(levels)), key=lambda i: abs(levels[i] - bx))
         return boxes
 
     @staticmethod
-    def runs(par: Paragraph, indent: str = "", soft_breaks: bool = False, pitch: float | None = None,
-             x_ref: float = 0.0) -> list[dict]:
-        """`pitch`, `x_ref`: a code block's column grid (`code_pitch`), which its spaces keep."""
+    def runs(par: Paragraph, indent: str, soft_breaks: bool, pitch: float | None, x_ref: float) -> list[dict]:
+        """`indent`: spaces a code line starts with (`code_indent`, else ""); `soft_breaks`: its
+        lines keep their breaks (a title's); `pitch`, `x_ref`: a code block's column grid
+        (`code_pitch`), which its spaces keep, else None and 0."""
         runs: list[dict] = []
         prev: Span | None = None
         hole_x1 = 0.0
@@ -458,10 +466,10 @@ class ParagraphsMixin:
             word_space = min(gaps) if par.justified and gaps and li < len(par.lines) - 1 else 0.33
             order = reading_order(line)
             # (not in code, whose spaces are columns)
-            formulas = {} if pitch else formula_groups(line, max(l.x1 - l.x0 for l in par.lines))
+            formulas: dict[int, int] = {} if pitch else formula_groups(line, max(l.x1 - l.x0 for l in par.lines))
             accent = ""  # an accent at the end of a span, for the letter under it in the next one
             for si, (span, forced) in enumerate(order):
-                if span == FRACTION_SLASH:
+                if isinstance(span, str):  # (FRACTION_SLASH, the only string)
                     main = line.main
                     runs.append({"text": FRACTION_SLASH, "font": main.font, "family": main.info.family,
                                  "size": round(line.size, 2), "bold": False, "italic": False, "smallcaps": False,
@@ -533,6 +541,7 @@ class ParagraphsMixin:
                 if forced == "sub":  # denominator: follows the slash directly
                     pass
                 elif prev is not None:
+                    gap = 0.0
                     if si == 0:
                         tail = runs[-1]["text"]
                         if len(tail) >= 2 and tail.endswith("-") and tail[-2].isalpha() and text[:1].islower() \
@@ -545,7 +554,7 @@ class ParagraphsMixin:
                             # Slides breaks no line at a hyphen: a compound longer than every line
                             # TeX set it among keeps its break, or Slides cut it inside a word
                             # ("Datenschutz-Folgenabsch / ätzung" in a narrow column's heading)
-                            longer = last_word_width(prev) + first_word_width(span) > \
+                            longer = last_word_width(prev) + first_word_width(span, False) > \
                                 max(l.x1 - l.x0 for l in par.lines) + 0.5
                             sep = chr(11) if par.role == "title" or soft_breaks or longer else ""
                         elif par.role == "title" or soft_breaks:
@@ -569,8 +578,8 @@ class ParagraphsMixin:
                             # In a code block the spaces are the columns between where the span
                             # before ends and this one starts (listings' columns=fixed sets
                             # tokens a few tenths of a column apart with no space between).
-                            col = lambda s: round((s.rect.x0 - x_ref) / pitch)
-                            runs[-1]["text"] += " " * max(0, col(span) - col(prev) - len(prev.text))
+                            cols = round((span.rect.x0 - x_ref) / pitch) - round((prev.rect.x0 - x_ref) / pitch)
+                            runs[-1]["text"] += " " * max(0, cols - len(prev.text))
                             sep = ""
                         elif sep and mono:
                             # (a one-letter span's own box is no measure of the advance)
@@ -619,7 +628,7 @@ class ParagraphsMixin:
                 if id(span) in formulas:
                     # Inside a short inline formula: no line break (formula_groups).
                     glue = si > 0 and prev is not None and formulas.get(id(prev)) == formulas[id(span)] \
-                        and runs and not runs[-1].get("hole")
+                        and bool(runs) and not runs[-1].get("hole")
                     if glue:
                         before = runs[-1]["text"]
                         runs[-1]["text"] = before.rstrip(" ") + NBSP * (len(before) - len(before.rstrip(" ")))
@@ -635,7 +644,9 @@ class ParagraphsMixin:
                         "underline": span.underline and not plain, "strike": span.strike and not plain,
                         "highlight": None if plain else span.highlight,
                     }
-                    marks = lambda r: (r["underline"], r.get("strike", False), r["highlight"])
+                    def marks(r: Mapping[str, object]) -> tuple[object, object, object]:
+                        return r["underline"], r.get("strike", False), r["highlight"]
+
                     if runs and runs[-1]["text"].endswith(" ") and marks(runs[-1]) != marks(style) and any(marks(runs[-1])):
                         runs[-1]["text"] = runs[-1]["text"][:-1]  # an underline, strike or highlight ends at the word
                         if any(marks(style)):  # and the next one starts at its word: the space between is plain
@@ -666,9 +677,11 @@ class ParagraphsMixin:
         line of a paragraph's words - whatever edge it happens to share with them (a \\left(
         ending under "The structural similarity is" continued that line right-aligned, and the
         paragraph, math now, became a picture of the words). It goes to a paragraph of its own."""
-        out = []
+        out: list[Paragraph] = []
+
+        def piece(l: Line) -> bool:
+            return l.reason == "math" and bool(l.content) and all(extension_font(s.font) for s in l.content)
         for par in paragraphs:
-            piece = lambda l: l.reason == "math" and l.content and all(extension_font(s.font) for s in l.content)
             pieces = [l for l in par.lines if piece(l)]
             if not pieces or len(pieces) == len(par.lines) or any(l.reason == "math" for l in par.lines if not piece(l)):
                 out.append(par)
@@ -686,7 +699,7 @@ class ParagraphsMixin:
         formula's line, and a paragraph holding a hole is not measured, so its box did not grow
         to keep them on one line: the formula's picture printed over "theorems" (r3_dense_v4 s3).
         Apart, the words are measured and the formula starts its own line, as in the PDF."""
-        out = []
+        out: list[Paragraph] = []
         for par in paragraphs:
             last = par.lines[-1]
             words = [s for s in last.content if s.text.strip()]

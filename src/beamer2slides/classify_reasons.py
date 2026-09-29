@@ -6,13 +6,14 @@ import re
 import statistics
 
 from .classify_model import (
-    ACCENTS, SMALL_IMAGE_PT, Line, Rect, Span, cluster_rects, extension_font, overlap, reads_rtl, union_all,
+    ACCENTS, SMALL_IMAGE_PT, Fraction, Line, Rect, Span, cluster_rects, extension_font, overlap, reads_rtl, union_all,
 )
 from .classify_text import (
     BULLET_GLYPHS, DISPLAY_WORD_SHARE, ENUM_RE, EQ_NUMBER_RE, LABEL_SEP_EM, MATH_OPERATORS, OPERATOR_NAMES,
     WORD_RE, accent_beside, bullet_shape, is_code, label_of, long_arrow_groups, math_content, prose_share,
     script_of, unmeasured_symbols,
 )
+from .classify_figures import FiguresMixin
 
 
 PRESET_GLYPHS = set("▶►▸‣•●★⋆")  # glyphs with a close Slides bullet preset (see emit.bullet_preset)
@@ -24,8 +25,8 @@ RELATIONS = set("=<>≤≥≈≠≡∼≃≅∝⇒⇔→")
 TICK_NUMBER_RE = re.compile(r"[-−+]?\d[\d.,−%]*")
 
 
-class ReasonsMixin:
-    """Methods of classify.PageClassifier, which holds the state they share."""
+class ReasonsMixin(FiguresMixin):
+    """Methods of classify.PageClassifier; the state they share is `classify_state.PageState`."""
 
     def inside_figure_share(self, line: Line) -> float:
         """Share of the line's characters whose span centre lies in a figure region. A list
@@ -90,7 +91,7 @@ class ReasonsMixin:
         for im, ir in self.small_images:
             # A block shadow's corner piece may just graze a ball at the bottom of a block.
             if not 0.8 <= ir.w / max(ir.h, 0.01) <= 1.25 or \
-                    any(o is not im and max(orr.w, orr.h) <= 20 and (overlap(orr, ir) > 0.2 * ir.w * ir.h or ir.contains_rect(orr))
+                    any(o is not im and max(orr.w, orr.h) <= 20 and (overlap(orr, ir) > 0.2 * ir.w * ir.h or ir.contains_rect(orr, tol=0.5))
                         for o, orr in self.small_images):
                 continue  # icons (beamer's bibliography article, composite images): kept as pictures
             on_image = [s for s in spans if ir.expand(0.5).contains(s.rect.cx, s.rect.cy)]
@@ -117,7 +118,7 @@ class ReasonsMixin:
                     and self.stands_alone(g, spans[0].rect):
                 shape = bullet_shape(self.graphic_paths.get(tuple(g.as_list())))
                 # (a mark with parts drawn inside it - a globe's meridians in its disc - is no glyph)
-                if shape and not any(g.contains_rect(o) and not o.contains_rect(g) for o in self.graphics if o is not g):
+                if shape and not any(g.contains_rect(o, tol=0.5) and not o.contains_rect(g, tol=0.5) for o in self.graphics if o is not g):
                     line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True, **shape}
                 else:  # no Slides glyph looks like it (beamer's bibliography icon): a picture
                     icon = union_all([g] + [ir for _, ir in self.small_images if ir.intersects(g)])
@@ -141,14 +142,15 @@ class ReasonsMixin:
                                "label": label_of([last])}
                 line.bullet_spans = [last]
                 return
-        level = lambda r: line.baseline - 0.9 * line.size <= r.cy <= line.baseline + 0.1 * line.size
+        def level(r: Rect) -> bool:
+            return line.baseline - 0.9 * line.size <= r.cy <= line.baseline + 0.1 * line.size
         # (a numbered ball comes out 11 or 12 pt as its image's box is rounded: one of 12 pt is no
         # small image, and was taken for a graphic around a word, a hole)
-        balls = self.small_images + [(im, r) for im, r in ((im, Rect.of(im["bbox"])) for im in self.page["images"])
+        balls = self.small_images + [(im, r) for im, r in ((im, Rect.of(im["bbox"])) for im in self.raw["images"])
                                      if min(r.w, r.h) >= SMALL_IMAGE_PT and max(r.w, r.h) <= 1.25 * line.size]
         for im, ir in balls:
             if not 0.8 <= ir.w / max(ir.h, 0.01) <= 1.25 or \
-                    any(o is not im and max(orr.w, orr.h) <= 20 and (overlap(orr, ir) > 0.2 * ir.w * ir.h or ir.contains_rect(orr))
+                    any(o is not im and max(orr.w, orr.h) <= 20 and (overlap(orr, ir) > 0.2 * ir.w * ir.h or ir.contains_rect(orr, tol=0.5))
                         for o, orr in self.small_images):
                 continue
             on_image = [s for s in spans if ir.expand(0.5).contains(s.rect.cx, s.rect.cy)]
@@ -168,7 +170,7 @@ class ReasonsMixin:
                     and 0.5 <= g.w / g.h <= 2.0 and g.x0 >= x1 - 0.5 and g.x0 - x1 <= 2.0 * line.size \
                     and level(g) and self.stands_alone(g, spans[-1].rect):
                 shape = bullet_shape(self.graphic_paths.get(tuple(g.as_list())))
-                if shape and not any(g.contains_rect(o) and not o.contains_rect(g) for o in self.graphics if o is not g):
+                if shape and not any(g.contains_rect(o, tol=0.5) and not o.contains_rect(g, tol=0.5) for o in self.graphics if o is not g):
                     line.bullet = {"kind": "shape", "text": "", "bbox": g.as_list(), "patch": True, **shape}
                 else:
                     icon = union_all([g] + [ir for _, ir in self.small_images if ir.intersects(g)])
@@ -183,8 +185,8 @@ class ReasonsMixin:
         patched out of the background broke. (A rail running over half the page is taken
         for theme decoration.)"""
         for o in self.graphics + self.decorations:
-            if o is g or not o.intersects(g.expand(1.0)) or g.contains_rect(o) or \
-                    (o.contains_rect(g) and o.contains_rect(word)):
+            if o is g or not o.intersects(g.expand(1.0)) or g.contains_rect(o, tol=0.5) or \
+                    (o.contains_rect(g, tol=0.5) and o.contains_rect(word, tol=0.5)):
                 continue
             return False
         return True
@@ -193,17 +195,17 @@ class ReasonsMixin:
     def label_tabs(lines: list[Line]) -> None:
         """Any short label (\\item[\\textbf{Q:}]) ending where a neighbouring item's hanging label
         ends, with its text starting where that item's text does, hangs the same way."""
-        tabbed = [l for l in lines if l.tab is not None and l.reason is None]
+        tabbed = [(l, tab) for l in lines if (tab := l.tab) is not None and l.reason is None]
         for line in lines:
             if line.reason is not None or line.tab is not None or line.bullet or len(line.spans) < 2:
                 continue
             label, text = line.spans[0], line.spans[1]
             if len(label.text.strip()) > 6 or text.rect.x0 - label.rect.x1 < LABEL_SEP_EM * line.size:
                 continue
-            for other in tabbed:
-                before = [s for s in other.spans if s.rect.x1 <= other.tab.rect.x0]
+            for other, tab in tabbed:
+                before = [s for s in other.spans if s.rect.x1 <= tab.rect.x0]
                 if before and abs(other.baseline - line.baseline) <= 5 * line.size and abs(other.size - line.size) <= 0.5 \
-                        and abs(other.tab.rect.x0 - text.rect.x0) <= 0.6 and abs(before[-1].rect.x1 - label.rect.x1) <= 0.6:
+                        and abs(tab.rect.x0 - text.rect.x0) <= 0.6 and abs(before[-1].rect.x1 - label.rect.x1) <= 0.6:
                     line.tab = text
                     break
 
@@ -318,8 +320,9 @@ class ReasonsMixin:
             return False
         size = line.size
         # (where the line's words start: its first, or the one after its hanging label)
-        starts = lambda o: [min((s.rect.x0 for s in o.content if s.text.strip()), default=o.rect.x0)] + \
-            ([o.tab.rect.x0] if o.tab is not None else [])
+        def starts(o: Line) -> list[float]:
+            return [min((s.rect.x0 for s in o.content if s.text.strip()), default=o.rect.x0)] + \
+                ([o.tab.rect.x0] if o.tab is not None else [])
         return any(o is not line and o.spans[0].horizontal and o.reason not in ("theme", "figure", "rotated", "math")
                    and abs(o.size - size) <= 0.2 * size
                    and 0.8 * size <= line.baseline - o.baseline <= 1.6 * size
@@ -331,7 +334,7 @@ class ReasonsMixin:
         and set apart from any paragraph's flow."""
         return prose_share(math_content(line)) < DISPLAY_WORD_SHARE and not self.in_prose_flow(line)
 
-    def simple_fraction(self, line: Line, bar: Rect):
+    def simple_fraction(self, line: Line, bar: Rect) -> Fraction | None:
         """(bar, numerator spans, denominator spans) for a small inline fraction such as
         \\frac{1}{2}: short text directly above and below a short bar, no radical sign."""
         above = [s for s in line.content if s.rect.x0 >= bar.x0 - 1 and s.rect.x1 <= bar.x1 + 1
@@ -344,7 +347,9 @@ class ReasonsMixin:
             return None
         if any("√" in s.text for s in line.content if abs(s.rect.x1 - bar.x0) < 3):
             return None  # radical overbar
-        by_x = lambda group: sorted(group, key=lambda s: s.rect.x0)
+
+        def by_x(group: list[Span]) -> list[Span]:
+            return sorted(group, key=lambda s: s.rect.x0)
         return bar, by_x(above), by_x(below)
 
     def line_bars(self, line: Line) -> list[Rect]:
@@ -356,7 +361,7 @@ class ReasonsMixin:
         return [b for b in self.bars if b.expand(1).intersects(line.rect) and not any(
             abs(s.rect.x1 - b.x0) <= 1 and s.rect.y0 - 1 <= b.y0 <= s.rect.y1 for s in signs)]
 
-    def formula_holes(self, line: Line, fractions: list) -> list[list[Span]]:
+    def formula_holes(self, line: Line, fractions: list[Fraction]) -> list[list[Span]]:
         """Complex formulas inside a line of prose, as groups of spans; [] if there are none or
         if the line is not mostly prose (a display equation stays one picture)."""
         spans = sorted(math_content(line), key=lambda s: s.rect.x0)
@@ -415,7 +420,7 @@ class ReasonsMixin:
             return any(a is not b and script_of(a, line) != script_of(b, line)
                        and a.rect.x0 < b.rect.x1 - 0.5 and b.rect.x0 < a.rect.x1 - 0.5 for a in scripts for b in scripts)
 
-        holes = []
+        holes: list[list[Span]] = []
         for seg in segments:
             if complex_segment(seg):
                 # Trailing punctuation is prose again.
@@ -433,12 +438,12 @@ class ReasonsMixin:
         spans = [s for s in line.spans if s.text.strip()]
         if len(spans) < 3:
             return False
-        if not hasattr(self, "_word_graphics"):
+        if self._word_graphics is None:
             # (an \fbox's top and bottom rules look like a table of one line)
-            frames = [f for f in (union_all(r["rect"] for r in g).expand(1) for g in self.table_rules) if f.h > 2.5 * self.body]
+            frames = [f for f in (union_all(r.rect for r in g).expand(1) for g in self.table_rules) if f.h > 2.5 * self.body]
             self._word_graphics = [c for c in cluster_rects(self.graphics, gap=0.5)
-                                   if not any(f.contains_rect(c) for f in frames)] if self.graphics else []
-        groups = []
+                                   if not any(f.contains_rect(c, tol=0.5) for f in frames)] if self.graphics else []
+        groups: list[tuple[list[Span], Rect]] = []
         for g in self._word_graphics:
             if g.h > 2.2 * size or not line.baseline - size <= g.cy <= line.baseline + 0.4 * size:
                 continue
@@ -573,7 +578,9 @@ class ReasonsMixin:
         # gutter, a scale's with its axis, and they are no figure for the code beside them.)
         regions = [r for r in self.regions if not self.band_ornament(r)] + \
             [l.rect for l in self.axis_label_column(lines)]
-        bare_rule = lambda r: r.w <= 4 and r.h >= 25
+
+        def bare_rule(r: Rect) -> bool:
+            return r.w <= 4 and r.h >= 25
         joined: list[Line] = []
         changed = True
         while changed:
@@ -583,10 +590,10 @@ class ReasonsMixin:
                         not (len(line.text.replace(" ", "")) <= 12 or self.tick_row(line)) or self.wrapped_end(line, lines):
                     continue
                 words = [s for s in line.content if s.text.strip() and not TICK_NUMBER_RE.fullmatch(s.text.strip())]
-                near = [reg for reg in regions if reg.distance(line.rect) <= 0.8 * line.size]
-                if any(not bare_rule(reg) for reg in near) or (near and not words):
+                nearby = [reg for reg in regions if reg.distance(line.rect) <= 0.8 * line.size]
+                if any(not bare_rule(reg) for reg in nearby) or (nearby and not words):
                     line.reason = "figure"
-                    if any(not bare_rule(reg) for reg in near):
+                    if any(not bare_rule(reg) for reg in nearby):
                         regions.append(line.rect)
                     joined.append(line)
                     changed = True
@@ -652,7 +659,7 @@ class ReasonsMixin:
                     continue
                 txt = line.text.replace(" ", "")
                 # Big operators (CMEX) reach further than their glyph boxes: limits sit below them.
-                near = any(m.rect.expand(1.0 * max(m.size, line.size)
+                touching = any(m.rect.expand(1.0 * max(m.size, line.size)
                                          if any(extension_font(s.font) for s in m.spans)
                                          else 0.6 * line.size).intersects(line.rect) for m in maths)
                 # Numerator or denominator: a short line right at a fraction bar next to a display
@@ -674,7 +681,7 @@ class ReasonsMixin:
                     g.rect.x0 - 0.5 * line.size <= line.rect.cx <= g.rect.x1 + 0.5 * line.size
                     and max(line.rect.y0 - m.rect.y1, m.rect.y0 - line.rect.y1) <= 1.0 * max(m.size, line.size)
                     for m in maths for g in m.spans if extension_font(g.font))
-                if (near and small and len(txt) <= 6) or eqno or limit or self.same_formula(line, maths) or fraction_part:
+                if (touching and small and len(txt) <= 6) or eqno or limit or self.same_formula(line, maths) or fraction_part:
                     line.reason = "math"
                     line.inline_math = False
                     line.holes = []
@@ -691,7 +698,7 @@ class ReasonsMixin:
         def inside(s: Span) -> bool:
             return any(reg.expand(0.5).contains(s.rect.cx, s.rect.cy) for reg in self.regions)
 
-        rows = []
+        rows: list[tuple[Line, float, list[Rect]]] = []
         for line in lines:
             outside = [s for s in line.content if s.text.strip() and not inside(s)]
             if line.reason is not None or line.bullet or line.tab is not None or not outside or \
@@ -702,7 +709,7 @@ class ReasonsMixin:
                     reg.y0 - line.size <= line.rect.cy <= reg.y1 + line.size]
             if plot:
                 rows.append((line, x1, plot))
-        out = []
+        out: list[Line] = []
         self.column_bridges = []  # a label up to an em off its plot: what `figures` clusters by
         for line, x1, plot in rows:
             column = [(l, e) for l, e, _ in rows if abs(e - x1) <= 0.6]
@@ -723,13 +730,13 @@ class ReasonsMixin:
         (month names, years: "Jan Feb Mar" sit half an em apart under their bars); or two a
         whole em apart (the part of a date axis that joined up, "01/2026   03/2026"). A number
         is one label however long ("1,0001,0501,100": labels that touch)."""
-        pieces: list[list] = []  # [text, x0, x1]: spans that touch are one label ("1" "," "000")
+        pieces: list[tuple[str, float, float]] = []  # (text, x0, x1): spans that touch are one label ("1" "," "000")
         for s in (s for s in line.content if s.text.strip()):
             if pieces and s.rect.x0 - pieces[-1][2] < 0.25 * line.size:
-                pieces[-1][0] += s.text.strip()
-                pieces[-1][2] = max(pieces[-1][2], s.rect.x1)
+                text, x0, x1 = pieces[-1]
+                pieces[-1] = (text + s.text.strip(), x0, max(x1, s.rect.x1))
             else:
-                pieces.append([s.text.strip(), s.rect.x0, s.rect.x1])
+                pieces.append((s.text.strip(), s.rect.x0, s.rect.x1))
         if len(pieces) < 2 or not all(len(p[0]) <= 10 or TICK_NUMBER_RE.fullmatch(p[0]) for p in pieces):
             return False
         gaps = [b[1] - a[2] for a, b in zip(pieces, pieces[1:])]
@@ -757,10 +764,10 @@ class ReasonsMixin:
         # off than the clustering gap, and a label no picture holds would stay in the background.
         self.title_bridges = []
         labels = [l for l in lines if l.reason in ("figure", "rotated")]
-        plots = []
+        plots: list[tuple[Rect, Rect]] = []
         for reg in self.regions:
             box, marks, grown = reg, 0, True
-            members = set()
+            members: set[int] = set()
             while grown:
                 grown = False
                 for l in labels:

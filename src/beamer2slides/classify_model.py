@@ -2,10 +2,12 @@
 
 import math
 import re
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
 from . import bidi
 from .fonts import FontInfo
+from .raw_types import PathItem, RawDrawing
 
 
 # Math extension fonts: big operators, big delimiters, radical signs - glyphs that hang from their
@@ -25,7 +27,7 @@ class Rect:
     y1: float
 
     @classmethod
-    def of(cls, values) -> "Rect":
+    def of(cls, values: Sequence[float]) -> "Rect":
         return cls(*values)
 
     @property
@@ -53,7 +55,8 @@ class Rect:
     def contains(self, x: float, y: float) -> bool:
         return self.x0 <= x <= self.x1 and self.y0 <= y <= self.y1
 
-    def contains_rect(self, o: "Rect", tol: float = 0.5) -> bool:
+    def contains_rect(self, o: "Rect", tol: float) -> bool:
+        """`o` lies within this rectangle grown by `tol` (0.5: a stroke's half width, rounding)."""
         return self.x0 - tol <= o.x0 and self.y0 - tol <= o.y0 and o.x1 <= self.x1 + tol and o.y1 <= self.y1 + tol
 
     def union(self, o: "Rect") -> "Rect":
@@ -72,10 +75,10 @@ def overlap(a: Rect, b: Rect) -> float:
     return max(0.0, min(a.x1, b.x1) - max(a.x0, b.x0)) * max(0.0, min(a.y1, b.y1) - max(a.y0, b.y0))
 
 
-def union_all(rects) -> Rect:
-    rects = list(rects)
-    out = rects[0]
-    for r in rects[1:]:
+def union_all(rects: Iterable[Rect]) -> Rect:
+    items = list(rects)
+    out = items[0]
+    for r in items[1:]:
         out = out.union(r)
     return out
 
@@ -84,7 +87,7 @@ def cluster_rects(rects: list[Rect], gap: float) -> list[Rect]:
     """Merge rectangles that come within `gap` of each other, transitively."""
     parent = list(range(len(rects)))
 
-    def find(i):
+    def find(i: int) -> int:
         while parent[i] != i:
             parent[i] = parent[parent[i]]
             i = parent[i]
@@ -120,7 +123,16 @@ class Span:
     pad_left: bool = False         # the first / last word of a padded \colorbox highlight
     pad_right: bool = False
     visual: str | None = None     # the text as the page shows it, left to right (bidi: RTL lines)
-    reading: tuple | None = None  # (line, rank, base, gap before) on a right-to-left line (read_lines)
+    reading: "Reading | None" = None  # on a right-to-left line (read_lines)
+
+
+Reading = tuple[int, int, int, float]
+"""Where a span stands in its line's reading order (`PageClassifier.read_lines`): the line's
+index, the span's rank in it, the line's base direction (`bidi.RIGHT`...), and the width of the
+space before it that reading order moved."""
+
+Fraction = tuple[Rect, list[Span], list[Span]]
+"""A small inline fraction Slides text carries: its bar, its numerator's and denominator's spans."""
 
 
 @dataclass(eq=False)
@@ -130,35 +142,39 @@ class Line:
     bullet_spans: list[Span] = field(default_factory=list)
     reason: str | None = None
     inline_math: bool = False
-    fractions: list = field(default_factory=list)  # (bar, numerator spans, denominator spans)
+    fractions: list[Fraction] = field(default_factory=list)
     tab: Span | None = None  # content after a line label ("4:") starts here, reached by a tab
-    holes: list = field(default_factory=list)  # complex inline formulas: pictures over gaps in the text
-    hole_pads: list = field(default_factory=list)  # graphics drawn around words of a hole (a circle, a badge)
-    limits: list = field(default_factory=list)  # lines of the limits of a big operator in a hole (∑ with n=1 and ∞)
+    holes: list[list[Span]] = field(default_factory=list)  # complex inline formulas: pictures over gaps in the text
+    hole_pads: list[Rect] = field(default_factory=list)  # graphics drawn around words of a hole (a circle, a badge)
+    limits: list["Line"] = field(default_factory=list)  # lines of the limits of a big operator in a hole (∑ with n=1 and ∞)
     code_number: bool = False  # a listing's line number (split_line_numbers): a paragraph of its own
-    def hole_rect(self, hole: list) -> "Rect":
+    def hole_rect(self, hole: list[Span]) -> "Rect":
         """A hole's extent: its glyphs and the graphics drawn around them."""
         rect = union_all(s.rect for s in hole)
         return union_all([rect] + [g for g in self.hole_pads if g.intersects(rect.expand(0.5))])
 
-    def add_holes(self, groups: list[list]) -> None:
+    def add_holes(self, groups: list[list[Span]]) -> None:
         """Merge new holes with the line's: overlapping holes become one, and a word lying over
         or under a hole (a wavy underline's glyphs below it) or kerned into it (the "TEX" of the
         LaTeX logo) joins it."""
         holes = [list(h) for h in self.holes + groups]
-        off_baseline = lambda s: abs(s.baseline - self.baseline) > 0.1 * self.size
+
+        def off_baseline(s: Span) -> bool:
+            return abs(s.baseline - self.baseline) > 0.1 * self.size
         for h in holes:
             grown = True
             while grown:
                 r = self.hole_rect(h)
-                overlap_x = lambda s: min(s.rect.x1, r.x1) - max(s.rect.x0, r.x0)
+
+                def overlap_x(s: Span) -> float:
+                    return min(s.rect.x1, r.x1) - max(s.rect.x0, r.x0)
                 # (a letter raised or lowered into its neighbour, not an italic overhang)
                 more = [s for s in self.content if s not in h and s.text.strip() and s.rect.w > 0
                         and (overlap_x(s) >= 0.5 * s.rect.w or
                              (overlap_x(s) >= min(1.0, 0.5 * s.rect.w) and (off_baseline(s) or any(map(off_baseline, h)))))]
                 h += more
                 grown = bool(more)
-        def side_by_side(a: list, b: list) -> bool:
+        def side_by_side(a: list[Span], b: list[Span]) -> bool:
             """Two holes with no word between them (\\uwave{all benchmarks}: a picture per word,
             kerned together): Slides' text has one gap there, as wide as both, and each picture
             was measured into the same gap, one over the other. They are one hole."""
@@ -183,7 +199,7 @@ class Line:
                     break
         self.holes = [sorted(h, key=lambda s: s.rect.x0) for h in holes]
 
-    def __post_init__(self):
+    def __post_init__(self) -> None:
         self.spans.sort(key=lambda s: s.rect.x0)
         # An accent reaching left of its letter follows the letter (it becomes a combining mark).
         for i in range(len(self.spans) - 1):
@@ -206,8 +222,11 @@ class Line:
         # the longest span ("*)NULL);", "_exit(127);") put the whole line 2 pt off, and
         # Slides set two code lines almost touching (r2_code_v3 s2). The line's baseline is the
         # one most of its letters stand on.
-        letters = lambda ss: sum(len(s.text.strip()) for s in ss)
-        on = lambda b: [s for s in big if abs(s.baseline - b) <= 0.05 * top]
+        def letters(ss: list[Span]) -> int:
+            return sum(len(s.text.strip()) for s in ss)
+
+        def on(b: float) -> list[Span]:
+            return [s for s in big if abs(s.baseline - b) <= 0.05 * top]
         if 2 * letters(on(main.baseline)) >= letters(big):
             return main
         return max(big, key=lambda s: (not extension_font(s.font), letters(on(s.baseline)), len(s.text.strip())))
@@ -300,11 +319,11 @@ ACCENTS = {"¯": "̄", "ˆ": "̂", "˜": "̃", "˙": "̇", "¨": "̈", "´": "́
            "`": "̀", "ˇ": "̌", "˘": "̆", "˚": "̊", "˝": "̋", "¸": "̧", "˛": "̨"}
 
 
-def polygon_shape(points: list, r: "Rect") -> str | None:
+def polygon_shape(points: Sequence[Sequence[float]], r: "Rect") -> str | None:
     """Slides shape for a closed polygon path: a diamond touching the middle of each side of its
     bounding box, or a triangle with its apex centred on the top or bottom side."""
     tol = 0.08 * max(r.w, r.h)
-    def near(p, x, y):
+    def near(p: Sequence[float], x: float, y: float) -> bool:
         return abs(p[0] - x) <= tol and abs(p[1] - y) <= tol
     corners = {(round(p[0], 1), round(p[1], 1)) for p in points}
     mids = [(r.cx, r.y0), (r.x1, r.cy), (r.cx, r.y1), (r.x0, r.cy)]
@@ -320,14 +339,15 @@ def polygon_shape(points: list, r: "Rect") -> str | None:
 MITER_LIMIT = 10.0  # PDF's default, and TikZ's
 
 
-def miter_reach(points: list, direction: tuple[float, float], width: float) -> float:
+def miter_reach(points: Sequence[Sequence[float]], direction: tuple[float, float], width: float) -> float:
     """How far an arrow head's outline, stroked `width` wide with mitred joins, reaches past the
     point of its path furthest along `direction`: half the width over the sine of half the angle
     at that point (a bevel's half width beyond the miter limit)."""
     if width <= 0 or len(points) < 3:
         return 0.0
     ux, uy = direction
-    along = lambda p: (p[0] * ux + p[1] * uy)
+    def along(p: Sequence[float]) -> float:
+        return p[0] * ux + p[1] * uy
     corners = [tuple(p) for k, p in enumerate(points) if k == 0 or math.dist(p, points[k - 1]) > 1e-6]
     if len(corners) > 2 and math.dist(corners[0], corners[-1]) <= 1e-6:
         corners.pop()
@@ -346,7 +366,7 @@ def miter_reach(points: list, direction: tuple[float, float], width: float) -> f
     return width / 2 / math.sin(half)
 
 
-def upright_ellipse(path: list, r: Rect) -> bool:
+def upright_ellipse(path: list[PathItem], r: Rect) -> bool:
     """Four curves closing an ellipse whose axes are the box's: they join end to start, and
     meet the box at the middle of each side. A sine wave is four curves too (TikZ's sin cos
     sin cos), and a rotated or sheared ellipse touches its box elsewhere: as an ELLIPSE of the
@@ -361,7 +381,7 @@ def upright_ellipse(path: list, r: Rect) -> bool:
     return all(any(math.dist(e, m) <= tol for e in ends) for m in mids)
 
 
-def box_outline(d: dict, r: Rect) -> bool:
+def box_outline(d: RawDrawing, r: Rect) -> bool:
     """A path that outlines its own bounding box: one rectangle, or one outline of axis-aligned
     edges with rounded corners (a beamer block). A panel is rebuilt as a shape of its box, so
     a funnel's trapezium, a band between two curves or a bar series (one path, a rectangle per
@@ -375,8 +395,9 @@ def box_outline(d: dict, r: Rect) -> bool:
     if not ops <= {"l", "c"} or "l" not in ops:
         return False
     tol = max(0.1, 0.01 * max(r.w, r.h))
-    on_border = lambda x, y: min(abs(x - r.x0), abs(x - r.x1)) <= tol or min(abs(y - r.y0), abs(y - r.y1)) <= tol
-    end = None
+    def on_border(x: float, y: float) -> bool:
+        return min(abs(x - r.x0), abs(x - r.x1)) <= tol or min(abs(y - r.y0), abs(y - r.y1)) <= tol
+    end: list[float] | None = None
     for op, pts in path:
         if end is not None and math.dist(pts[0], end) > tol:
             return False  # a second outline (another bar)

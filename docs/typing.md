@@ -141,6 +141,17 @@ this caller is two functions, or raises.
 is `Any` inside. A parameter a function only reads is `Sequence[...]` / `Mapping[...]`: it says the
 function will not change it, and it accepts a tuple.
 
+### A class split into mixins has one declared state
+
+The attributes its mixins share are declared, with their types, in one base class
+(`classify_state.PageState`), and the mixins inherit from it in a line (`Tables <- Graphics <-
+Lines <- Paragraphs <- Figures <- Reasons <- PageClassifier`). Every `self.x` is checked against
+one declaration, a mixin's calls into the ones before it are checked with their signatures, and an
+attribute set in one mixin and read in another cannot drift. A Protocol for `self` is not checked
+against the class that uses it; declarations repeated per mixin drift apart. A value passed as
+something it only resembles gets a Protocol of what is read (`classify_text.Row`), rather than
+either type widened to fit the other.
+
 ### Make illegal states unrepresentable
 
 An outline that is "a colour string or a `{color, width}` dict" is two types for one thing, and

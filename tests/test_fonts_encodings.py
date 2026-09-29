@@ -65,7 +65,7 @@ def test_stand_ins_set_the_pdfs_widths():
     ("x ˆ y", "x ˆ y"),  # an accent that is over no letter stays
 ])
 def test_ot1_accents_are_composed_with_their_letter(raw, composed):
-    assert compose_accents(raw) == composed
+    assert compose_accents(raw, False) == composed
 
 
 def test_a_backquote_in_code_is_no_accent():
@@ -124,7 +124,7 @@ def raw_span(i, text, font, x0, x1, baseline=100.0, size=10.0):
 def runs_of(raw_spans: list[dict]) -> list[dict]:
     page = PageClassifier({"size": [364, 273], "spans": raw_spans, "links": []}, 10)
     line = Line(page.spans())
-    return PageClassifier.runs(Paragraph([line]))
+    return PageClassifier.runs(Paragraph([line]), "", False, None, 0.0)
 
 
 def test_page_spans_compose_accents_and_ts1_symbols():
@@ -170,5 +170,5 @@ def test_math_family_falls_back_to_the_paragraph_then_serif():
     formula = Span("m", "x", "CMMI10", 10, "#000000", Rect(0, 0, 5, 10), 10, True, info)
     words = Span("w", "some words", "CMSS10", 10, "#000000", Rect(0, 20, 50, 30), 30, True, font_info("CMSS10"))
     alone = Line([formula])
-    assert math_family(alone) == "serif"
+    assert math_family(alone, None) == "serif"
     assert math_family(alone, Paragraph([alone, Line([words])])) == "sans"

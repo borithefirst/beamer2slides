@@ -23,7 +23,8 @@ decorations) is a picture, or baked into a per-slide background picture.
   `render` (background PNG per slide with converted objects switched off; figure crops) -> `emit`
   (one python-pptx upload carrying all pictures, imported by Drive, then the Slides API).
   `classify.py` and `emit.py` are each stage's face; the code lives by topic in `classify_*`
-  (PageClassifier's mixins, `classify_model`, `classify_text`) and `emit_*` (layered, no import
+  (PageClassifier's mixins over one declared state, `classify_state.PageState`; raw.json is
+  `raw_types`; `classify_model`, `classify_text`) and `emit_*` (layered, no import
   cycle; each module's docstring says what it holds). Callers keep importing from the face; a
   test that monkeypatches a name patches the module that reads it.
 - **Types first (docs/typing.md - read it before writing code here).** The code type-checks under

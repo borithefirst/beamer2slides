@@ -18,14 +18,9 @@ read off its text `classify_text`, and PageClassifier's methods live by topic in
 import re
 from dataclasses import replace
 
-from .classify_figures import FiguresMixin
-from .classify_graphics import GraphicsMixin
-from .classify_lines import LinesMixin
 from .classify_model import HOLE_PAD, Line, Paragraph, Rect, Span, union_all
 from .classify_model import box_outline, upright_ellipse  # noqa: F401 (callers take these from here)
-from .classify_paragraphs import ParagraphsMixin
 from .classify_reasons import ReasonsMixin
-from .classify_tables import TablesMixin
 from .classify_text import (
     body_size, code_indent, code_pitch, first_word_width, is_code, line_starts, line_word_width, math_text,
 )
@@ -33,25 +28,26 @@ from .classify_text import (  # noqa: F401 (callers take these from here)
     bullet_shape, card_text, compose_accents, gap_between, hyphen_cut, label_of, math_family, math_pieces,
     negate, span_runs, type3_symbol,
 )
+from .raw_types import RawPage, RawSpan
 
 FRAME_COUNTER_RE =re.compile(r"^\d{1,4}( ?/ ?\d{1,4})?$")
 
 
-class PageClassifier(GraphicsMixin, LinesMixin, ReasonsMixin, ParagraphsMixin, FiguresMixin, TablesMixin):
+class PageClassifier(ReasonsMixin):
     """One page's classification. Its state (the page, its panels, regions and bars, what
-    decorates which span) is set up here and in `classify`; the mixins' methods share it."""
+    decorates which span) is declared in `classify_state.PageState` and found in `classify`; the
+    mixins' methods, inherited one from the next, share it."""
 
-    def __init__(self, page: dict, body: float):
-        self.page = page
-        self.body = body
-        self.W, self.H = page["size"]
-        self.panels: list[dict] = []
-        self.regions: list[Rect] = []
-        self.bars: list[Rect] = []
-        self.small_images: list[tuple[dict, Rect]] = []
-        self.leftovers: list[dict] = []
+    def __init__(self, page: dict, body: float) -> None:
+        # The page is trusted to be what extract writes (`raw_types.RawPage`): a page read from
+        # raw.json is not checked key by key yet. (A test's hand-built page holds only what its
+        # method reads.)
+        super().__init__(RawPage(**page), body)
+        self.page = page  # (marked.py reads the spans of the page it built through this)
+        self.raw_spans: dict[str, RawSpan] = {s["id"]: s for s in self.raw["spans"]}
+        # marked.py's view of the same spans, untyped: its `params` takes a plain dict, which a
+        # RawSpan is not. (Goes once `params` takes the raw types.)
         self._raw_spans = {s["id"]: s for s in page["spans"]}
-        self.icon_bullets: list[Rect] = []  # item labels that became pictures
 
     # -- output -----------------------------------------------------------------
 
@@ -78,16 +74,18 @@ class PageClassifier(GraphicsMixin, LinesMixin, ReasonsMixin, ParagraphsMixin, F
             turned = [replace(s, rect=Rect(-s.rect.y1, s.rect.x0, -s.rect.y0, s.rect.x1) if up else
                               Rect(s.rect.y0, -s.rect.x1, s.rect.y1, -s.rect.x0),
                               baseline=self.page_origin(s)[0] * (1 if up else -1), horizontal=True) for s in row]
-            el = self.text_element([Paragraph([Line(turned)])], f"p{self.page['index']}rt{len(out)}")
+            el = self.text_element([Paragraph([Line(turned)])], f"p{self.raw['index']}rt{len(out)}")
             out.append({**el, "bbox": union_all(s.rect for s in row).as_list(), "panel": self.panel_of(union_all(s.rect for s in row)),
                         "rotation": -90 if up else 90})
         return out
 
     def page_dir(self, s: Span) -> tuple[float, float]:
-        return tuple(self._raw_spans[s.id]["dir"])
+        dx, dy = self.raw_spans[s.id]["dir"]
+        return dx, dy
 
     def page_origin(self, s: Span) -> tuple[float, float]:
-        return tuple(self._raw_spans[s.id]["origin"])
+        x, y = self.raw_spans[s.id]["origin"]
+        return x, y
 
     def text_element(self, box: list[Paragraph], element_id: str) -> dict:
         rect = union_all([p.rect for p in box] + [Rect.of(p.bullet["bbox"]) for p in box if p.bullet])
@@ -104,10 +102,9 @@ class PageClassifier(GraphicsMixin, LinesMixin, ReasonsMixin, ParagraphsMixin, F
                 return False
             widest = max(l.x1 - l.x0 for l in p.lines)
             room = max(widest + 0.5 * p.size, self.free_width(p) - 0.5 * p.size)
-            return any(a.x1 - a.x0 + 0.2 * p.size + first_word_width(b.content[0]) <= room
+            return any(a.x1 - a.x0 + 0.2 * p.size + first_word_width(b.content[0], False) <= room
                        for a, b in zip(p.lines, p.lines[1:]))
-        runs = [self.runs(p, code_indent(p, rect.x0, pitch) if code else "", soft_breaks=unbalanced(p),
-                          pitch=pitch, x_ref=rect.x0) for p in box]
+        runs = [self.runs(p, code_indent(p, rect.x0, pitch) if code else "", unbalanced(p), pitch, rect.x0) for p in box]
         # (said only where it is known, on a left-aligned wrapped paragraph: line_starts)
         starts = [line_starts(p.lines, r) if p.align == "left" and not code and not p.direction else None
                   for p, r in zip(box, runs)]
@@ -170,11 +167,12 @@ class PageClassifier(GraphicsMixin, LinesMixin, ReasonsMixin, ParagraphsMixin, F
                 par.align = "right"  # listings sets its numbers flush right against the code
         boxes = self.build_boxes(paragraphs)
 
-        n = self.page["index"]
+        n = self.raw["index"]
         elements = [self.text_element(box, f"p{n}t{bi}") for bi, box in enumerate(boxes)]
         self.line_owner = {id(l): (f"p{n}t{bi}", p.align) for bi, box in enumerate(boxes) for p in box for l in p.lines}
         holes = [(f"p{n}t{bi}", l, h) for bi, box in enumerate(boxes) for p in box for l in p.lines for h in l.holes]
         hole_pictures = []
+        hole_boxes: list[Rect] = []  # (each picture's box, as written)
         for anchor, line, h in holes:
             rect = line.hole_rect(h)
             # Radical signs and big-operator parts sit off the baseline, in lines of their own.
@@ -182,21 +180,24 @@ class PageClassifier(GraphicsMixin, LinesMixin, ReasonsMixin, ParagraphsMixin, F
             h = h + [s for lim in line.limits for s in lim.spans if s not in h
                      and rect.x0 - line.size <= lim.rect.cx <= rect.x1 + line.size]  # a big operator's limits
             rect = union_all([rect] + [s.rect for s in h] + [b for b in self.bars if b.expand(1).intersects(rect)])
+            bbox = rect.expand(HOLE_PAD).as_list()
+            hole_boxes.append(Rect.of(bbox))
             hole_pictures.append({"id": f"p{n}h{len(hole_pictures)}", "kind": "image", "role": "math",
-                                  "bbox": rect.expand(HOLE_PAD).as_list(), "spans": [s.id for s in h],
+                                  "bbox": bbox, "spans": [s.id for s in h],
                                   "anchor": anchor})  # grouped with this text element
         self.icon_bullets = [Rect.of(p["bullet"]["bbox"]) for e in elements for p in e["paragraphs"]
                              if p["bullet"] and p["bullet"]["kind"] == "icon"]
         for e in elements:  # icon bullets: pictures grouped with their item
             for p in e["paragraphs"]:
                 if p["bullet"] and p["bullet"]["kind"] == "icon":
+                    bbox = Rect.of(p["bullet"]["bbox"]).expand(0.5).as_list()
+                    hole_boxes.append(Rect.of(bbox))
                     hole_pictures.append({"id": f"p{n}u{len(hole_pictures)}", "kind": "image", "role": "icon",
-                                          "bbox": Rect.of(p["bullet"]["bbox"]).expand(0.5).as_list(),
-                                          "spans": p["bullet"]["spans"], "anchor": e["id"]})
+                                          "bbox": bbox, "spans": p["bullet"]["spans"], "anchor": e["id"]})
                     p["bullet"] = None
 
         text_spans = {sid for e in elements for sid in e["spans"]}
-        self.hole_boxes = [Rect.of(h["bbox"]) for h in hole_pictures]
+        self.hole_boxes = hole_boxes
         elements = self.figures(lines, elements) + self.icons(elements) + hole_pictures + plain_tables + elements  # pictures below text
         elements += self.rotated_texts(lines, {sid for e in elements for sid in e["spans"]})
         text_spans |= {sid for e in elements if e["kind"] == "table" for sid in e["spans"]}
@@ -236,7 +237,7 @@ class PageClassifier(GraphicsMixin, LinesMixin, ReasonsMixin, ParagraphsMixin, F
                                     "text_x0": round(line.x0, 2),
                                     "lines": [{"baseline": round(line.baseline, 2), "x0": round(line.x0, 2),
                                                "x1": round(line.x1, 2)}],
-                                    "runs": self.runs(par),
+                                    "runs": self.runs(par, "", False, None, 0.0),
                                     **({"direction": par.direction} if par.direction else {})}],
                     "spans": [s.id for s in line.spans],
                 })
@@ -246,13 +247,16 @@ class PageClassifier(GraphicsMixin, LinesMixin, ReasonsMixin, ParagraphsMixin, F
         for e in elements:
             if e["kind"] == "image" and e["spans"]:
                 # formulas left to right (scripts follow their base); figure labels by rows
-                order = (lambda s: s.rect.x0) if e["role"] == "math" else (lambda s: (round(s.baseline / 4), s.rect.x0))
+                math = e["role"] == "math"
+
+                def order(s: Span) -> tuple[float, float]:
+                    return (0, s.rect.x0) if math else (round(s.baseline / 4), s.rect.x0)
                 shown = sorted((by_id[i] for i in e["spans"] if i in by_id), key=order)
                 words = [math_text(s.font, s.text)[0] if s.info.family == "math" else s.text for s in shown]
                 e["alt"] = " ".join(w.strip() for w in words if w.strip() and "�" not in w)[:500]
 
-        chars_total = sum(len(s["text"].strip()) for s in self.page["spans"])
-        chars_native = sum(len(s["text"].strip()) for s in self.page["spans"] if s["id"] in text_spans)
+        chars_total = sum(len(s["text"].strip()) for s in self.raw["spans"])
+        chars_native = sum(len(s["text"].strip()) for s in self.raw["spans"] if s["id"] in text_spans)
         # Span ids name page objects (render switches them off, checks look them up): a character
         # the page draws as a rule has none, and is in the text through its runs alone.
         drawn = {s.id for s in spans if s.drawn}
@@ -261,10 +265,10 @@ class PageClassifier(GraphicsMixin, LinesMixin, ReasonsMixin, ParagraphsMixin, F
                 if isinstance(holder.get("spans"), list):
                     holder["spans"] = [i for i in holder["spans"] if i not in drawn]
         return {
-            "page": n, "frame": self.page["label"], "label": self.page.get("frame_label"), "size": self.page["size"],
-            "notes": self.page.get("notes"),
+            "page": n, "frame": self.raw["label"], "label": self.raw.get("frame_label"), "size": self.raw["size"],
+            "notes": self.raw.get("notes"),
             "elements": elements, "left_in_background": left, "theme_texts": theme_texts,
-            "panels": [{"bbox": p["bbox"].as_list(), "fill": p["fill"], "rounded": p["rounded"]} for p in self.panels],
+            "panels": [{"bbox": p.bbox.as_list(), "fill": p.fill, "rounded": p.rounded} for p in self.panels],
             "figure_regions": [r.as_list() for r in self.regions],
             "stats": {"chars": chars_total, "chars_native": chars_native},
         }
@@ -370,7 +374,8 @@ def literal_list_numbers(slides: list[dict]) -> None:
 def mark_title_page(slides: list[dict], doc_title: str) -> None:
     """On the title page, the box showing the document title (from the PDF metadata, which
     beamer fills as "Title - Subtitle") becomes the slide's title."""
-    norm = lambda s: " ".join(s.casefold().split())
+    def norm(s: str) -> str:
+        return " ".join(s.casefold().split())
     wanted = norm(doc_title)
     if len(wanted) < 3:
         return

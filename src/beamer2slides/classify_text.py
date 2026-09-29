@@ -4,10 +4,14 @@ import re
 import statistics
 import unicodedata
 from collections import Counter
+from collections.abc import Iterable
+from typing import Protocol, TypedDict
 
 from . import bidi
 from .classify_model import ACCENTS, OUTLINE_MIN, Line, Paragraph, Rect, Span
 from .fonts import MATH_ITALIC_RE, font_info
+from .ir import BulletShape, Script
+from .raw_types import RawDrawing, RawSpan
 
 
 # Operator names set upright inside formulas (\min, \lim, \log, \operatorname{Var}): words of a
@@ -32,7 +36,7 @@ TS1_SYMBOLS = {
 }
 
 
-def type3_text_page(spans: list[dict]) -> bool:
+def type3_text_page(spans: list[RawSpan]) -> bool:
     """The page's text itself is in bitmap fonts (T1 without cm-super): Type 3 words. Then a lone
     Type 3 glyph may be a letter of that encoding (T1's 0xBF is £), not a TS1 symbol."""
     return any(s["font"] == "Type3" and sum(c.isalpha() for c in s["text"]) >= 2 for s in spans)
@@ -55,7 +59,18 @@ def type3_symbol(text: str, type3_words: bool) -> str:
 SLIDES_SCRIPT = 0.665
 
 
-def script_of(span: Span, line: "Line") -> str | None:
+class Row(Protocol):
+    """What a script is measured against: its line, or in a cell or label the largest span,
+    which stands for the line (`span_runs`)."""
+
+    @property
+    def size(self) -> float: ...
+
+    @property
+    def baseline(self) -> float: ...
+
+
+def script_of(span: Span, line: Row) -> Script | None:
     """'super' / 'sub' for a smaller span raised / lowered from the line's baseline.
 
     TeX lowers a subscript 0.15 em (0.25 beside a superscript) and \\textsubscript in a subtitle
@@ -73,7 +88,7 @@ def script_of(span: Span, line: "Line") -> str | None:
     return None
 
 
-def script_size(span: Span, line: "Line") -> float:
+def script_size(span: Span, line: Row) -> float:
     """The IR size of a script run: its line's, which Slides draws at 2/3 - or larger than the
     span by that factor when the span is smaller still (a subscript of a subscript, 0.5-0.55;
     a script is 0.66-0.73 of its line)."""
@@ -144,10 +159,11 @@ def accent_beside(accent: "Span", base: "Span") -> bool:
         and letter not in "ıȷ" and len(unicodedata.normalize("NFC", letter + mark)) > 1
 
 
-def compose_accents(text: str, mono: bool = False) -> str:
+def compose_accents(text: str, mono: bool) -> str:
     """Spacing accents built with their letter (OT1: accent glyph, then the letter under it;
     a cedilla after a tall letter) as the accented letter: "Schr¨odinger" -> "Schrödinger",
-    "Garc´ıa" -> "García", "S¸." -> "Ş.". In a monospaced face ` is a backquote, not an accent."""
+    "Garc´ıa" -> "García", "S¸." -> "Ş.". In a monospaced face (`mono`) ` is a backquote, not
+    an accent."""
     if not any(c in ACCENTS for c in text):
         return text
     out: list[str] = []
@@ -205,7 +221,7 @@ def long_arrow_groups(spans: list["Span"]) -> list[list["Span"]]:
         if b.rect.x0 < a.rect.x1 - 0.2 and a.rect.x0 < b.rect.x1 and \
                 LONG_ARROWS & set(compose_symbols(a.text.strip()[-1:] + b.text.strip()[:1])):
             groups.append([a, b])
-    merged: list[list] = []
+    merged: list[list[Span]] = []
     for g in groups:
         into = next((m for m in merged if any(s in m for s in g)), None)
         if into is None:
@@ -271,12 +287,14 @@ def math_text(font: str, text: str) -> tuple[str, bool]:
     return "".join(t for t, _ in pieces), any(i for _, i in pieces)
 
 
-def math_family(line: "Line", par: "Paragraph | None" = None) -> str:
+def math_family(line: "Line", par: "Paragraph | None") -> str:
     """The text family math is shown in: the family most of the words around it are set in -
-    on its line, else in its paragraph - never a monospaced one (a formula after \\texttt{x} is
-    not code), and serif when there are no words (TeX's math is Computer Modern's)."""
-    for spans in ([line.content], [l.content for l in par.lines] if par else []):
-        weight = Counter()
+    on its line, else in its paragraph (None: none around it) - never a monospaced one (a
+    formula after \\texttt{x} is not code), and serif when there are no words (TeX's math is
+    Computer Modern's)."""
+    around: list[list[Span]] = [l.content for l in par.lines] if par else []
+    for spans in ([line.content], around):
+        weight: Counter[str] = Counter()
         for s in (s for group in spans for s in group):
             if s.info.family in ("sans", "serif"):
                 weight[s.info.family] += len(s.text.strip())
@@ -288,19 +306,23 @@ def math_family(line: "Line", par: "Paragraph | None" = None) -> str:
 FRACTION_SLASH = "⁄"
 
 
-def reading_order(line: "Line") -> list[tuple]:
+def reading_order(line: "Line") -> list[tuple[Span | str, Script | None]]:
     """The line's content spans in reading order - left to right, or right to left where that is
     how the line reads (`bidi.logical_spans`) - except that each simple fraction becomes
-    numerator (superscript), fraction slash, denominator (subscript)."""
+    numerator (superscript), fraction slash, denominator (subscript). The slash is the only
+    string, and each span's script the one its fraction forces on it."""
     owner = {id(s): f for f in line.fractions for s in f[1] + f[2]}
-    out, emitted = [], set()
+    out: list[tuple[Span | str, Script | None]] = []
+    emitted: set[int] = set()
     for s in bidi.logical_spans(line.content):
         f = owner.get(id(s))
         if f is None:
             out.append((s, None))
         elif id(f) not in emitted:
             emitted.add(id(f))
-            out += [(x, "super") for x in f[1]] + [(FRACTION_SLASH, None)] + [(x, "sub") for x in f[2]]
+            out.extend((x, "super") for x in f[1])
+            out.append((FRACTION_SLASH, None))
+            out.extend((x, "sub") for x in f[2])
     return out
 
 
@@ -320,11 +342,15 @@ def span_runs(spans: list[Span]) -> list[dict]:
     reading order first. Simple math works as in text lines: symbols from math fonts,
     sub/superscripts."""
     runs: list[dict] = []
-    main = max(spans, key=lambda s: s.size) if spans else None
+    if not spans:
+        return runs
+    main = max(spans, key=lambda s: s.size)
     base_family = next((s.info.family for s in spans if s.info.family not in ("math", "icon")), "sans")
     spans = list(bidi.logical_spans(spans))
     lead = bidi.lead_mark(spans)
-    over =lambda a, b: b.rect.x0 < a.rect.x1 - 0.2 and a.rect.x0 < b.rect.x1 - 0.2
+
+    def over(a: Span, b: Span) -> bool:
+        return b.rect.x0 < a.rect.x1 - 0.2 and a.rect.x0 < b.rect.x1 - 0.2
     for i in range(len(spans) - 1):  # (an accent reaching left of its letter follows it, as in Line)
         a, b = spans[i], spans[i + 1]
         if a.text.strip() in ACCENTS and b.text.strip() not in ACCENTS and \
@@ -334,9 +360,10 @@ def span_runs(spans: list[Span]) -> list[dict]:
     for i, s in enumerate(spans):
         text = s.text
         if accent:  # (carried from the span before: see below)
-            lead = len(text) - len(text.lstrip())
-            if text[lead:lead + 1].isalpha():
-                text = text[:lead] + with_accent(text[lead], accent) + text[lead + 1:]
+            # (`pad`: this was `lead` too, the direction mark below, which then crashed or was lost)
+            pad = len(text) - len(text.lstrip())
+            if text[pad:pad + 1].isalpha():
+                text = text[:pad] + with_accent(text[pad], accent) + text[pad + 1:]
             accent = ""
         body = text.rstrip()
         if len(body) >= 2 and body[-1] in ACCENTS and i + 1 < len(spans) and over(s, spans[i + 1]) and \
@@ -417,7 +444,7 @@ def formula_groups(line: "Line", measure: float) -> dict[int, int]:
     return out
 
 
-def glued(text: str, lead: bool, trail: bool = False) -> str:
+def glued(text: str, lead: bool, trail: bool) -> str:
     """A formula's text with its spaces no-break: those between its characters, with `lead` its
     leading ones (the space between it and the formula's span or piece before) and with `trail`
     its trailing ones (a piece the formula's next piece follows)."""
@@ -478,28 +505,38 @@ def label_of(spans: list[Span]) -> dict | None:
             "bold": s.info.bold, "italic": s.info.italic, "color": s.color}
 
 
-def bullet_shape(d: dict | None) -> dict:
+class BulletLook(TypedDict, total=False):
+    """`bullet_shape`'s answer: both keys, or none for a mark with no Slides glyph. A shape
+    bullet takes them as they are (`**look`)."""
+    shape: BulletShape
+    color: str
+
+
+def bullet_shape(d: RawDrawing | None) -> BulletLook:
     """Shape and colour of a bullet drawn as a path (emit picks the Slides glyph): a filled
     rectangle is a square, curves are a disc (a circle when only stroked), three corners a
     triangle. A filled mark outlined in another colour (a legend's swatch) has no Slides glyph:
     none (it becomes a picture beside its text, r3_charts_v1 s9)."""
     if not d:
         return {}
-    filled = d["type"] in ("f", "fs") and d.get("fill")
-    if filled and d["type"] == "fs" and d.get("stroke") and d["stroke"] != d["fill"] and \
-            (d.get("width") or 0.0) >= OUTLINE_MIN and (d.get("stroke_opacity") or 0.0) > 0.5:
+    fill = d["fill"] if d["type"] in ("f", "fs") else None
+    stroke = d["stroke"]
+    if fill and d["type"] == "fs" and stroke and stroke != fill and \
+            (d["width"] or 0.0) >= OUTLINE_MIN and d["stroke_opacity"] > 0.5:
         return {}
     ops = set(d["items"])
-    points = {(round(x, 1), round(y, 1)) for op, pts in d.get("path", []) for x, y in pts}
+    # (a drawing of more than 20 pieces has no path: it crashed here, and its page became a picture)
+    points = {(round(x, 1), round(y, 1)) for _, pts in d["path"] or [] for x, y in pts}
+    shape: BulletShape
     if ops <= {"r", "e", "q", "u"}:
-        shape = "square" if filled else "open_square"
+        shape = "square" if fill else "open_square"
     elif "c" in ops:
-        shape = "disc" if filled else "circle"
+        shape = "disc" if fill else "circle"
     elif ops == {"l"} and len(points) == 3:
         shape = "triangle"
     else:
         return {}
-    return {"shape": shape, "color": d["fill"] if filled else d.get("stroke") or "#000000"}
+    return {"shape": shape, "color": fill or stroke or "#000000"}
 
 
 WORD_RE = re.compile(r"[^\W\d_]{2,}")
@@ -532,7 +569,7 @@ def math_content(line: "Line") -> list[Span]:
 
 
 # Relative glyph widths (Helvetica, per mille) to share a span's width out among its words.
-_WIDTHS = dict(zip("abcdefghijklmnopqrstuvwxyz", (556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833,
+_WIDTHS: dict[str, int] = dict(zip("abcdefghijklmnopqrstuvwxyz", (556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500, 222, 833,
                                                   556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500)))
 _WIDTHS.update(zip("ABCDEFGHIJKLMNOPQRSTUVWXYZ", (667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833,
                                                   722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611)))
@@ -556,7 +593,12 @@ def hyphen_cut(word: str) -> int | None:
     return None
 
 
-def first_word_width(span: Span, hyphens: bool = False) -> float:
+def text_weight(text: str) -> int:
+    """`text`'s width in `_WIDTHS` units (an ideograph 1000, an unknown letter 556)."""
+    return sum(1000 if cjk(c) else _WIDTHS.get(c, 556) for c in text)
+
+
+def first_word_width(span: Span, hyphens: bool) -> float:
     """Width of a span's first word: a span can hold one word or a whole line of them. In Chinese
     or Japanese a line can break after any character, so a word there is one character. With
     `hyphens`, the word ends after a hyphen inside it, where Slides may break a line
@@ -564,17 +606,16 @@ def first_word_width(span: Span, hyphens: bool = False) -> float:
     text = span.text.strip()
     if not text:
         return span.rect.w
-    weight = lambda t: sum(1000 if cjk(c) else _WIDTHS.get(c, 556) for c in t)
     word = text.split()[0]
     cut = next((i for i, c in enumerate(word) if cjk(c)), None)
     if cut is not None:
         word = word[:max(cut, 1)]  # up to the first ideograph, or that one alone
-    elif hyphens and hyphen_cut(word):
-        word = word[:hyphen_cut(word)]
-    return span.rect.w * weight(word) / weight(text)
+    elif hyphens:
+        word = word[:hyphen_cut(word)]  # (None: the whole word)
+    return span.rect.w * text_weight(word) / text_weight(text)
 
 
-def line_word_width(line: "Line", hyphens: bool = False) -> float:
+def line_word_width(line: "Line", hyphens: bool) -> float:
     """Width of a line's first word, across the spans it is set in: a small-caps word is its
     capital in one span and its small letters in the next ('G' + 'oldbach', r2_fonts_pazo s5),
     and the capital alone looked short enough to have ended the line above - the paragraph was
@@ -597,8 +638,7 @@ def last_word_width(span: Span) -> float:
     text = span.text.strip()
     if not text:
         return span.rect.w
-    weight = lambda t: sum(1000 if cjk(c) else _WIDTHS.get(c, 556) for c in t)
-    return span.rect.w * weight(text.split()[-1]) / weight(text)
+    return span.rect.w * text_weight(text.split()[-1]) / text_weight(text)
 
 
 def line_starts(lines: list["Line"], runs: list[dict]) -> list[int] | None:
@@ -613,7 +653,8 @@ def line_starts(lines: list["Line"], runs: list[dict]) -> list[int] | None:
     text = "".join(r["text"] for r in runs)
     if len(lines) < 2 or chr(11) in text or "\t" in text:
         return None
-    starts, at = [], 0
+    starts: list[int] = []
+    at = 0
     for above, line in zip(lines, lines[1:]):
         first = next((s for s, _ in reading_order(line) if isinstance(s, Span) and s.text.strip()), None)
         if first is None:
@@ -664,8 +705,9 @@ def stretched(lines: list["Line"]) -> bool:
         return False
     font = fonts.most_common(1)[0][0]
     # (not a quantity's thin spaces, see thin_span)
-    whole = lambda l: not font_gaps(l, font) and any(
-        s.font == font and s.text.strip().count(" ") >= 3 and not any(c.isdigit() for c in s.text) for s in l.content)
+    def whole(l: "Line") -> bool:
+        return not font_gaps(l, font) and any(
+            s.font == font and s.text.strip().count(" ") >= 3 and not any(c.isdigit() for c in s.text) for s in l.content)
     return any(map(whole, lines)) and any(len(font_gaps(l, font)) >= 2 for l in lines)
 
 
@@ -730,10 +772,10 @@ def explicit_hyphen(tail: str) -> bool:
     return "-" in word or word.lstrip("([{“‘\"'").casefold() in COMPOUND_HEADS
 
 
-def card_text(node: Rect, rows: list[list[Span]]) -> dict | None:
+def card_text(node: Rect, rows: list[list[Span]]) -> list[dict[str, list[dict]]] | None:
     """The text on a node that is more than a centred label (a card: a big number over a
-    caption, a heading over wrapped body copy) as a text element placed on its baselines, or
-    None for a simple label (one size, centred on the node)."""
+    caption, a heading over wrapped body copy) as its text boxes ({"paragraphs": [...]}, each
+    placed on its baselines), or None for a simple label (one size, centred on the node)."""
     if not rows:
         return None
     rows = [sorted(row, key=lambda s: s.rect.x0) for row in rows]
@@ -742,8 +784,9 @@ def card_text(node: Rect, rows: list[list[Span]]) -> dict | None:
     sizes = [r["size"] for r in info]
     top, bottom = rows[0][0].rect.y0, max(s.rect.y1 for s in rows[-1])
     # (lines of a justified paragraph start together and end apart, even when nearly centred)
-    flush_left = lambda ls: len(ls) > 1 and all(abs(l["x0"] - ls[0]["x0"]) <= 0.5 for l in ls) and \
-        any(abs(l["x1"] - ls[0]["x1"]) > 2 for l in ls)
+    def flush_left(ls: list[dict[str, float]]) -> bool:
+        return len(ls) > 1 and all(abs(l["x0"] - ls[0]["x0"]) <= 0.5 for l in ls) and \
+            any(abs(l["x1"] - ls[0]["x1"]) > 2 for l in ls)
     centred = all(abs((r["x0"] + r["x1"]) / 2 - node.cx) <= 2 for r in info) and not flush_left(info)
     if max(sizes) <= 1.1 * min(sizes) and centred and abs((top + bottom) / 2 - node.cy) <= 0.15 * node.h:
         return None
@@ -802,7 +845,8 @@ def is_code(spans: list[Span]) -> bool:
     content = sorted((s for s in spans if s.text.strip()), key=lambda s: s.rect.x0)
     if not content or content[0].info.family != "mono":
         return False
-    letters = lambda ss: sum(len(s.text.strip()) for s in ss)
+    def letters(ss: Iterable[Span]) -> int:
+        return sum(len(s.text.strip()) for s in ss)
     return letters(s for s in content if s.info.family == "mono") >= 0.6 * letters(content)
 
 
@@ -837,8 +881,9 @@ def code_pitch(spans: list[Span], x0: float) -> float | None:
     return statistics.median(fits)
 
 
-def code_indent(par: Paragraph, box_x0: float, pitch: float | None = None) -> str:
-    """Leading spaces that reproduce a code line's indentation (monospace advance per char)."""
+def code_indent(par: Paragraph, box_x0: float, pitch: float | None) -> str:
+    """Leading spaces that reproduce a code line's indentation: the block's column `pitch`
+    (`code_pitch`) per space, else (None) the line's monospace advance per char."""
     return " " * max(0, round((par.x0 - box_x0) / (pitch or mono_advance(par.first.content))))
 
 
@@ -848,13 +893,15 @@ def body_size(raw: dict) -> float:
     ("Author (Inst.)  Short title  date"). In a Madrid/Boadilla deck with little prose - a deck
     of charts - the \\tiny footline outweighed the words, the body came out 6 pt, and every
     size gate measured against it (tick labels belong to their chart) failed on 11 pt ticks."""
-    key = lambda s: (s["text"].strip(), round(s["bbox"][0]), round(s["bbox"][1]), round(s["size"], 1))
-    frames_of: dict[tuple, set] = {}
+    def key(s: RawSpan) -> tuple[str, int, int, float]:
+        return s["text"].strip(), round(s["bbox"][0]), round(s["bbox"][1]), round(s["size"], 1)
+    frames_of: dict[tuple[str, int, int, float], set[str | None]] = {}
     for page in raw["pages"]:
         for s in page["spans"]:
             frames_of.setdefault(key(s), set()).add(page.get("label"))
     frames = len({page.get("label") for page in raw["pages"]})
-    counts, furniture = Counter(), Counter()
+    counts: Counter[float] = Counter()
+    furniture: Counter[float] = Counter()
     for page in raw["pages"]:
         for s in page["spans"]:
             if font_info(s["font"]).family != "math":

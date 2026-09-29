@@ -1,14 +1,20 @@
 """PageClassifier's tables: ruled, shaded and rule-less grids of text that become native tables."""
 
 import statistics
-from dataclasses import dataclass, field
+from dataclasses import dataclass, replace
 
 from .classify_model import Line, Rect, Span, union_all
+from .classify_state import Fill, PageState, Rule
 from .classify_text import cell_runs, is_mono, justified_cells, span_runs
+from .ir import Align, Merge
+from .raw_types import RawSpan
+
+Chunk = tuple[int, int, list[Span]]
+"""A table's chunk: (row index in the grid's rows, rows it spans, its words)."""
 
 
-class TablesMixin:
-    """Methods of classify.PageClassifier, which holds the state they share."""
+class TablesMixin(PageState):
+    """PageClassifier's tables (the first of its mixins: they call no other)."""
 
     def table_hairlines(self) -> set[str]:
         """Rules of a table wider than half the page, which `is_decoration` would take for theme
@@ -18,7 +24,7 @@ class TablesMixin:
         0.55-0.7 of the page wide; left as decoration its rules stayed in the background and its
         cells became text boxes that overlapped and reflowed across columns.)"""
         rules: dict[tuple[int, int], list[tuple[str, Rect]]] = {}
-        for d in self.page["drawings"]:
+        for d in self.raw["drawings"]:
             r = Rect.of(d["bbox"])
             # (an overfull table's rules start at its margin and run off the page's right edge,
             # where TeX lets an overfull line go: r2_tables_v2 slide 6, r2_tables_v3 slide 2 fell
@@ -30,7 +36,7 @@ class TablesMixin:
                     (d["type"] == "f" and d["items"] == "re" and r.h <= 1.5):
                 rules.setdefault((round(r.x0), round(r.x1)), []).append((d["id"], r))
         out: set[str] = set()
-        cells = [Rect.of(d["bbox"]) for d in self.page["drawings"] if d["type"] == "f" and d["items"] == "re"
+        cells = [Rect.of(d["bbox"]) for d in self.raw["drawings"] if d["type"] == "f" and d["items"] == "re"
                  and d.get("fill_opacity", 1.0) >= 0.99 and min(Rect.of(d["bbox"]).w, Rect.of(d["bbox"]).h) > 3
                  and Rect.of(d["bbox"]).w < 0.5 * self.W]
         for group in rules.values():
@@ -43,17 +49,17 @@ class TablesMixin:
                 continue
             x0, x1 = min(r.x0 for _, r in group), max(r.x1 for _, r in group)
             y0, y1 = min(r.cy for _, r in group), max(r.cy for _, r in group)
-            inside = [s for s in self.page["spans"] if s["text"].strip() and y0 < (s["bbox"][1] + s["bbox"][3]) / 2 < y1
+            inside = [s for s in self.raw["spans"] if s["text"].strip() and y0 < (s["bbox"][1] + s["bbox"][3]) / 2 < y1
                       and s["bbox"][0] < x1 and x0 < s["bbox"][2]]
             if not inside or any(s["bbox"][0] < x0 - 1 or s["bbox"][2] > x1 + 1 for s in inside):
                 continue
-            rows: list[list[dict]] = []
+            rows: list[list[RawSpan]] = []
             for s in sorted(inside, key=lambda s: s["origin"][1]):
                 if rows and abs(rows[-1][0]["origin"][1] - s["origin"][1]) <= 0.3 * s["size"]:
                     rows[-1].append(s)
                 else:
                     rows.append([s])
-            def cells_apart(row: list[dict]) -> bool:
+            def cells_apart(row: list[RawSpan]) -> bool:
                 row = sorted(row, key=lambda s: s["bbox"][0])
                 return any(b["bbox"][0] - a["bbox"][2] >= max(a["size"], b["size"]) for a, b in zip(row, row[1:]))
             if len(rows) >= 2 and any(map(cells_apart, rows)):
@@ -65,9 +71,9 @@ class TablesMixin:
         shading of a table that has fewer than two full rules (a heatmap, \\rowcolors stripes).
         Two or more rows and columns of them; empty when there is no such grid."""
         box = c.expand(0.5)
-        fills = [Rect.of(d["bbox"]) for d in self.page["drawings"]
+        fills = [Rect.of(d["bbox"]) for d in self.raw["drawings"]
                  if d["type"] == "f" and d["items"] == "re" and d.get("fill_opacity", 1.0) >= 0.99
-                 and d["id"] not in self.decor_ids and box.contains_rect(Rect.of(d["bbox"]))
+                 and d["id"] not in self.decor_ids and box.contains_rect(Rect.of(d["bbox"]), tol=0.5)
                  and Rect.of(d["bbox"]).w * Rect.of(d["bbox"]).h < 0.95 * self.W * self.H
                  and min(Rect.of(d["bbox"]).w, Rect.of(d["bbox"]).h) > 3]
         if len(fills) < 4:
@@ -93,7 +99,7 @@ class TablesMixin:
             if not n["shape"]:
                 continue
             r = Rect.of(n["bbox"])
-            words = [s for s in label_spans if r.contains_rect(s.rect)]
+            words = [s for s in label_spans if r.contains_rect(s.rect, tol=0.5)]
             for ln in verticals:
                 x, (y0, y1) = ln["from"][0], sorted((ln["from"][1], ln["to"][1]))
                 if r.x0 + 1 < x < r.x1 - 1 and any(y0 <= s.rect.cy <= y1 and s.rect.x1 <= x for s in words) and \
@@ -116,9 +122,9 @@ class TablesMixin:
             return None
         frame, horizontal, vertical, fills = ruling
         box = c.expand(0.5)
-        spans = sorted((s for s in label_spans if box.contains_rect(s.rect)), key=lambda s: s.baseline)
+        spans = sorted((s for s in label_spans if box.contains_rect(s.rect, tol=0.5)), key=lambda s: s.baseline)
         if not spans or any(not s.horizontal or s.font.upper().startswith("CMEX") or "�" in s.text for s in spans) or \
-                any(box.contains_rect(b) for b in self.bars):  # big operators, fractions: keep the picture
+                any(box.contains_rect(b, tol=0.5) for b in self.bars):  # big operators, fractions: keep the picture
             return None
         rows = TableRows(spans, vertical)
         if any(i - 1 in rows.between for i in rows.between):
@@ -128,16 +134,16 @@ class TablesMixin:
         items, columns = rows.chunks()
         if not columns:
             return None
-        if any(f["rect"].x0 < frame.x0 - 1.5 or f["rect"].x1 > frame.x1 + 1.5 for f in fills):
+        if any(f.rect.x0 < frame.x0 - 1.5 or f.rect.x1 > frame.x1 + 1.5 for f in fills):
             return None  # shading beyond the table: a coloured box around it
         bounds = column_bounds(frame, columns, vertical, fills)
-        cells = place_cells(items, bounds, rows.grid_rows())
-        if cells is None:
+        placed = place_cells(items, bounds, rows.grid_rows())
+        if placed is None:
             return None
         n_cols = len(columns)
-        col_info = column_info(columns, cells)
-        align_merges(cells, col_info)
-        cells.join_wrapped({sum(1 for j in range(i) if j not in rows.between) for i in rows.continued})
+        col_info = column_info(columns, placed)
+        align_merges(placed, col_info)
+        cells = placed.join_wrapped({sum(1 for j in range(i) if j not in rows.between) for i in rows.continued})
         n_rows = len(cells.rows)
         baselines = [line_base(row) for row in cells.rows]
         ruled = table_borders(horizontal, vertical, frame, bounds, columns, baselines, size)
@@ -148,22 +154,23 @@ class TablesMixin:
         bottom = slides_bottom(baselines, heights, cells.row_lines, size, self.W)
         grown = Rect(frame.x0, frame.y1, frame.x1, bottom)
         if bottom > self.H - 2 or any(t.intersects(grown) for t in text_rects) or \
-                any(reg.intersects(grown) and not c.expand(0.5).contains_rect(reg) for reg in self.regions):
+                any(reg.intersects(grown) and not c.expand(0.5).contains_rect(reg, tol=0.5) for reg in self.regions):
             return None
 
         cell_text = [[cell_runs(lines) for lines in row] for row in cells.cell_lines]
-        page_color = next((d["fill"].lower() for d in self.page["drawings"] if d["type"] == "f" and d["fill"]
+        page_color = next((d["fill"].lower() for d in self.raw["drawings"] if d["type"] == "f" and d["fill"]
                            and Rect.of(d["bbox"]).w * Rect.of(d["bbox"]).h >= 0.95 * self.W * self.H), "#ffffff")
         # [row, col, where each line after the first starts in the cell's text]: emit makes the
         # column wide enough for every line of the PDF, a hyphenated word whole.
-        wrapped_cells = [[r, cc, starts] for r, row in enumerate(cell_text) for cc, (_, starts) in enumerate(row) if starts]
+        wrapped = [(r, cc, starts) for r, row in enumerate(cell_text) for cc, (_, starts) in enumerate(row) if starts]
+        wrapped_cells = [[r, cc, starts] for r, cc, starts in wrapped]
         set_justified = {cc for cc in range(n_cols) if col_info[cc]["align"] == "left" and justified_cells(
-            [cells.cell_lines[r][c2] for r, c2, _ in wrapped_cells if c2 == cc], columns[cc][1])}
-        justified = [[r, cc] for r, cc, _ in wrapped_cells if cc in set_justified]
-        bands = row_bands([f for f in fills if f["color"].lower() != page_color], baselines)
+            [cells.cell_lines[r][c2] for r, c2, _ in wrapped if c2 == cc], columns[cc][1])}
+        justified = [[r, cc] for r, cc, _ in wrapped if cc in set_justified]
+        bands = row_bands([f for f in fills if f.color.lower() != page_color], baselines)
         merges, extent_of = cells.merges, cells.extent_of
         table = {
-            "id": f"p{self.page['index']}tab{index}", "kind": "table", "role": "table",
+            "id": f"p{self.raw['index']}tab{index}", "kind": "table", "role": "table",
             "bbox": c.expand(1.0).as_list(), "frame": frame.as_list(), "size": round(size, 2),
             "row_baselines": [round(b, 2) for b in baselines],
             "row_heights": [round(p, 2) for p in heights],
@@ -181,16 +188,16 @@ class TablesMixin:
             **({"merge_x": [[round(extent_of[k][0], 2), round(extent_of[k][1], 2)] for k in range(len(merges))]}
                if merges else {}),
             "rules": [{"row": min(k, n_rows - 1), "position": "TOP" if k < n_rows else "BOTTOM",
-                       "color": r["color"], "weight": round(r["weight"], 2), "y": round(r["rect"].cy, 2)}
-                      for r in rules for k in [row_boundary(baselines, r["rect"].cy)]],
+                       "color": r.color, "weight": round(r.weight, 2), "y": round(r.rect.cy, 2)}
+                      for r in rules for k in [row_boundary(baselines, r.rect.cy)]],
             "borders": borders,
             # Shading per cell: the rows whose baseline and the columns whose middle it covers.
             # (white \rowcolors stripes on an off-white page show: only the page's own colour
             # is left out)
-            "fills": [{"row": rr, "col": cc, "color": f["color"]}
-                      for f in fills if f["color"].lower() != page_color
-                      for rr, b in enumerate(baselines) if f["rect"].y0 <= b <= f["rect"].y1
-                      for cc in range(n_cols) if f["rect"].x0 <= (bounds[cc] + bounds[cc + 1]) / 2 <= f["rect"].x1],
+            "fills": [{"row": rr, "col": cc, "color": f.color}
+                      for f in fills if f.color.lower() != page_color
+                      for rr, b in enumerate(baselines) if f.rect.y0 <= b <= f.rect.y1
+                      for cc in range(n_cols) if f.rect.x0 <= (bounds[cc] + bounds[cc + 1]) / 2 <= f.rect.x1],
             **({"bands": bands} if bands else {}),
             "spans": [s.id for s in spans],
         }
@@ -200,52 +207,59 @@ class TablesMixin:
         from .emit import table_fits  # (emit imports this module)
         return table if table_fits(table, self.W) else None
 
-    def table_ruling(self, c: Rect) -> tuple[Rect, list[dict], list[dict], list[dict]] | None:
+    def table_ruling(self, c: Rect) -> tuple[Rect, list[Rule], list[Rule], list[Fill]] | None:
         """The rules and shading that make the cluster c a table: (its frame, horizontal rules,
-        vertical rules, fills), each rule {rect, color, weight} and fill {rect, color}. None
-        when there are no such rules, or c holds an image or any other drawing."""
-        groups = [g for g in self.table_rules if c.expand(1).contains_rect(union_all(r["rect"] for r in g))]
+        vertical rules, fills). None when there are no such rules, or c holds an image or any
+        other drawing."""
+        groups = [g for g in self.table_rules if c.expand(1).contains_rect(union_all(r.rect for r in g), tol=0.5)]
         # Fewer than two full rules, but cell shading edge to edge (a heatmap, \rowcolors): the
         # shading and the rules there are frame the table.
-        grid = [] if groups else self.fill_grid(c)
+        grid: list[Rect] = [] if groups else self.fill_grid(c)
         if grid:
             frame = union_all(grid)
         elif groups:
             # \cline{2-3} twice over the same columns is a group of equal-extent rules of its own:
             # inside the widest group's frame it is one of that table's partial rules, not a second
             # table (refused, the grid became a diagram with each row's words in one box).
-            outer = max(groups, key=lambda g: (union_all(r["rect"] for r in g).w, len(g)))
-            frame = union_all(r["rect"] for r in outer)
-            if any(g is not outer and not frame.expand(1).contains_rect(union_all(r["rect"] for r in g)) for g in groups):
+            outer = max(groups, key=lambda g: (union_all(r.rect for r in g).w, len(g)))
+            frame = union_all(r.rect for r in outer)
+            if any(g is not outer and not frame.expand(1).contains_rect(union_all(r.rect for r in g), tol=0.5) for g in groups):
                 return None
-            if any(g not in groups and union_all(r["rect"] for r in g).expand(1).contains_rect(frame.expand(1))
+            if any(g not in groups and union_all(r.rect for r in g).expand(1).contains_rect(frame.expand(1), tol=0.5)
                    for g in self.table_rules):
                 return None  # the \cline pieces of a larger table: that table's, whole
         else:
             return None
         box = c.expand(0.5)
-        if any(box.contains_rect(Rect.of(im["bbox"])) for im in self.page["images"]):
+        if any(box.contains_rect(Rect.of(im["bbox"]), tol=0.5) for im in self.raw["images"]):
             return None
         # Every drawing must be a horizontal or vertical rule (\hline, \cline, |, booktabs);
         # cell shading and anything else keep the table a picture.
-        horizontal, vertical, fills = [], [], []
-        for d in self.page["drawings"]:
+        horizontal: list[Rule] = []
+        vertical: list[Rule] = []
+        fills: list[Fill] = []
+        for d in self.raw["drawings"]:
             r = Rect.of(d["bbox"])
-            if d["id"] in self.decor_ids or not box.contains_rect(r) or r.w * r.h >= 0.95 * self.W * self.H:
+            if d["id"] in self.decor_ids or not box.contains_rect(r, tol=0.5) or r.w * r.h >= 0.95 * self.W * self.H:
                 continue
             color = (d["fill"] if d["type"] == "f" else d["stroke"]) or "#000000"
             stroke = d["type"] == "s" and d["items"] == "l"
             fill = d["type"] == "f" and d["items"] == "re"
             if (stroke and r.h <= 1.0) or (fill and r.h <= 1.5 and r.w >= 3):
-                horizontal.append({"rect": r, "color": color, "weight": r.h if fill else (d["width"] or 0.4)})
+                horizontal.append(Rule(rect=r, color=color, weight=r.h if fill else (d["width"] or 0.4)))
             elif (stroke and r.w <= 1.0) or (fill and r.w <= 1.5 and r.h >= 3):
-                vertical.append({"rect": r, "color": color, "weight": r.w if fill else (d["width"] or 0.4)})
+                vertical.append(Rule(rect=r, color=color, weight=r.w if fill else (d["width"] or 0.4)))
             elif fill and d.get("fill_opacity", 1.0) >= 0.99:
-                fills.append({"rect": r, "color": d["fill"]})  # \rowcolor, \cellcolor
+                shade = d["fill"]
+                if shade is None:
+                    # (a fill of no colour extract could read, a shading: as a cell's colour
+                    # it failed the whole page)
+                    return None
+                fills.append(Fill(rect=r, color=shade))  # \rowcolor, \cellcolor
             else:
                 return None
         if vertical or grid:
-            frame = union_all([frame] + [v["rect"] for v in vertical + (horizontal if grid else [])])
+            frame = union_all([frame] + [v.rect for v in vertical + (horizontal if grid else [])])
         return frame, horizontal, vertical, fills
 
     def plain_tables(self, lines: list[Line]) -> list[dict]:
@@ -286,19 +300,19 @@ class TablesMixin:
                     out.append([s])
             return out
 
-        def extent(chunk):
-            return chunk[0].rect.x0, chunk[-1].rect.x1
-
         # (a tabular set inside an item has cells that start elsewhere too: its rows stay)
         rows = [row for row in rows if not all(id(l) in run_on and len(cells([l])) == 1 for l in row)]
         split = [(row, cells(row)) for row in rows]
-        tables, i = [], 0
+        tables: list[dict] = []
+        i = 0
         while i < len(split):
             j = i
             k = len(split[i][1])
             size = split[i][0][0].size
-            ok = lambda r: len(r[1]) == k >= 2 and all(len("".join(s.text for s in c).strip()) <= 30 for c in r[1]) \
-                and abs(r[0][0].size - size) <= 0.5
+
+            def ok(r: tuple[list[Line], list[list[Span]]]) -> bool:
+                return len(r[1]) == k >= 2 and all(len("".join(s.text for s in c).strip()) <= 30 for c in r[1]) \
+                    and abs(r[0][0].size - size) <= 0.5
             while j + 1 < len(split) and ok(split[i]) and ok(split[j + 1]) and \
                     split[j + 1][0][0].baseline - split[j][0][0].baseline <= 2.0 * size:
                 j += 1
@@ -319,7 +333,7 @@ class TablesMixin:
                 return len(a.split()) >= 3 and b[:1].islower() and (a[-1:].isalnum() or a[-1:] == ",")
             if sum(any(wraps(a[1][c], b[1][c]) for a, b in zip(group, group[1:])) for c in range(k)) >= min(2, k):
                 continue  # columns of wrapped prose side by side, not a table
-            col_info = []
+            col_info: list[dict] = []
             for c, (x0, x1) in enumerate(columns):
                 chunks = [r[1][c] for r in group]
                 left = all(abs(extent(ch)[0] - x0) <= 1 for ch in chunks)
@@ -337,7 +351,7 @@ class TablesMixin:
                 for l in r[0]:
                     l.reason = "table"
             tables.append({
-                "id": f"p{self.page['index']}pt{len(tables)}", "kind": "table", "role": "table",
+                "id": f"p{self.raw['index']}pt{len(tables)}", "kind": "table", "role": "table",
                 "bbox": rect.expand(1.0).as_list(), "frame": [bounds[0], rect.y0, bounds[-1], rect.y1],
                 "size": round(size, 2), "row_baselines": [round(b, 2) for b in baselines],
                 "row_heights": [round(p, 2) for p in pitches + [pitches[-1]]], "columns": col_info,
@@ -352,21 +366,21 @@ class TableRows:
     """A table's words by row, the rows of its \\multirow cells (`between`) and of its wrapped
     cells' further lines (`wrapped`, `continued`), and the chunks the rows fall into."""
 
-    def __init__(self, spans: list[Span], vertical: list[dict]):
-        self.size = max(s.size for s in spans)
-        self.vertical = vertical
+    def __init__(self, spans: list[Span], vertical: list[Rule]) -> None:
+        self.size: float = max(s.size for s in spans)
+        self.vertical: list[Rule] = vertical
         # Rows by baseline. A row sitting halfway between its neighbours is a \multirow cell
         # spanning both of them.
         rows: list[list[Span]] = []
         for s in spans:
             anchor = max(rows[-1], key=lambda x: x.size) if rows else None  # the row's normal-size text
-            if rows and abs(s.baseline - anchor.baseline) <= 0.5 * max(s.size, anchor.size):
+            if anchor is not None and abs(s.baseline - anchor.baseline) <= 0.5 * max(s.size, anchor.size):
                 rows[-1].append(s)
             else:
                 rows.append([s])
-        self.rows = rows
-        self.base = [statistics.fmean(s.baseline for s in row) for row in rows]
-        self.between = {i for i in range(1, len(rows) - 1)
+        self.rows: list[list[Span]] = rows
+        self.base: list[float] = [statistics.fmean(s.baseline for s in row) for row in rows]
+        self.between: set[int] = {i for i in range(1, len(rows) - 1)
                         if self.halfway(i) and not any(a.rect.x0 < b.rect.x1 and b.rect.x0 < a.rect.x1
                                                        for a in rows[i] for b in rows[i - 1] + rows[i + 1])}
         self.wrapped: dict[int, list[list[float]]] = {}  # row index -> its wrapped cells' [x0, x1]
@@ -392,10 +406,10 @@ class TableRows:
         """A vertical rule between two words of a row (not one of another row: a
         \\multicolumn's words run across the rule the rows above and below have there)."""
         y = b.baseline - 0.3 * b.size
-        return any(a.rect.x1 < v["rect"].cx < b.rect.x0 and v["rect"].y0 <= y <= v["rect"].y1 for v in self.vertical)
+        return any(a.rect.x1 < v.rect.cx < b.rect.x0 and v.rect.y0 <= y <= v.rect.y1 for v in self.vertical)
 
     def phrase(self, spans: list[Span], x0: float) -> list[Span]:
-        out = []
+        out: list[Span] = []
         for s in sorted(spans, key=lambda s: s.rect.x0):
             if not out and abs(s.rect.x0 - x0) <= 0.5 or out and s.rect.x0 - out[-1].rect.x1 <= s.size and not self.ruled(out[-1], s):
                 out.append(s)
@@ -475,7 +489,7 @@ class TableRows:
 
     def chunks_of(self, row: list[Span], i: int) -> list[list[Span]]:
         chunks: list[list[Span]] = []
-        cells = []
+        cells: list[list[Span]] = []
         for x0, x1 in self.wrapped.get(i, []):
             cell = sorted((s for s in row if s.rect.x0 >= x0 - 0.5 and s.rect.x1 <= x1 + 0.5), key=lambda s: s.rect.x0)
             row = [s for s in row if s not in cell]
@@ -487,11 +501,11 @@ class TableRows:
                 chunks.append([s])
         return sorted(chunks + cells, key=lambda ch: ch[0].rect.x0) if cells else chunks
 
-    def chunks(self) -> tuple[list[tuple[int, int, list[Span]]], list[list[float]]]:
+    def chunks(self) -> tuple[list[Chunk], list[list[float]]]:
         """The rows' chunks as (row index in grid_rows, row span, chunk), and the columns
         [x0, x1] the chunks that span no other fall into."""
         rows, between, vertical = self.rows, self.between, self.vertical
-        items = []
+        items: list[Chunk] = []
         for i, row in enumerate(rows):
             r = sum(1 for j in range(i) if j not in between)
             for ch in self.chunks_of(row, i):
@@ -499,10 +513,10 @@ class TableRows:
 
         # A chunk overlapping two separate chunks of another row (\multicolumn), or crossing a
         # vertical rule, spans several columns; columns come from the other chunks.
-        def spanning(item) -> bool:
+        def spanning(item: Chunk) -> bool:
             r, _, ch = item
             x0, x1 = extent(ch)
-            if any(x0 + 1 < v["rect"].cx < x1 - 1 for v in vertical):
+            if any(x0 + 1 < v.rect.cx < x1 - 1 for v in vertical):
                 return True
             for r2 in {it[0] for it in items if it[0] != r}:
                 under = sorted(extent(it[2]) for it in items if it[0] == r2 and extent(it[2])[0] < x1 and x0 < extent(it[2])[1])
@@ -518,11 +532,12 @@ class TableRows:
         # other row (left, right or centre edge: a \multicolumn header centred over two columns has
         # its word gap on the column gap too, and its words line up with nothing - or with one
         # cell somewhere by chance, which is why it is every row) and no piece spans anything.
-        def cut(item) -> list:
+        def cut(item: Chunk) -> list[Chunk]:
             r, rs, ch = item
             others = [extent(it[2]) for it in items if it[0] != r]
             rows_of = [[extent(it[2]) for it in items if it[0] == r2] for r2 in {it[0] for it in items if it[0] != r}]
-            pieces, start = [], 0
+            pieces: list[list[Span]] = []
+            start = 0
             for k in range(1, len(ch)):
                 a, b = ch[k - 1].rect.x1, ch[k].rect.x0
                 x = (a + b) / 2
@@ -532,7 +547,7 @@ class TableRows:
                     start = k
             pieces.append(ch[start:])
 
-            def lined_up(p) -> bool:
+            def lined_up(p: list[Span]) -> bool:
                 x0, x1 = extent(p)
                 under = [(o0, o1) for row in rows_of for o0, o1 in row if o0 < x1 and x0 < o1]
                 return bool(under) and all(abs(x0 - o0) <= 0.5 or abs(x1 - o1) <= 0.5 or abs(x0 + x1 - o0 - o1) <= 1
@@ -550,7 +565,7 @@ class TableRows:
         intervals = sorted(extent(it[2]) for it in items if it not in wide)
         columns: list[list[float]] = []
         for x0, x1 in intervals:
-            if columns and x0 < columns[-1][1] + 1 and not any(columns[-1][1] - 1 < v["rect"].cx < x0 + 1 for v in vertical):
+            if columns and x0 < columns[-1][1] + 1 and not any(columns[-1][1] - 1 < v.rect.cx < x0 + 1 for v in vertical):
                 columns[-1][1] = max(columns[-1][1], x1)
             else:
                 columns.append([x0, x1])
@@ -561,39 +576,39 @@ def extent(ch: list[Span]) -> tuple[float, float]:
     return ch[0].rect.x0, ch[-1].rect.x1
 
 
-def column_bounds(frame: Rect, columns: list[list[float]], vertical: list[dict], fills: list[dict]) -> list[float]:
+def column_bounds(frame: Rect, columns: list[list[float]], vertical: list[Rule], fills: list[Fill]) -> list[float]:
     """Where the table's columns part: on a vertical rule between them, else where cell
     shading starts (exactly at TeX's column edges), else halfway; the frame at both ends."""
     bounds = [frame.x0]
-    fill_edges = sorted({round(f["rect"].x0, 2) for f in fills})
+    fill_edges = sorted({round(f.rect.x0, 2) for f in fills})
     for a, b in zip(columns, columns[1:]):
-        rule = [v["rect"].cx for v in vertical if a[1] - 1 <= v["rect"].cx <= b[0] + 1] or \
+        rule = [v.rect.cx for v in vertical if a[1] - 1 <= v.rect.cx <= b[0] + 1] or \
             [x for x in fill_edges if a[1] - 1 <= x <= b[0] + 1]
         bounds.append(rule[0] if rule else (a[1] + b[0]) / 2)
     bounds.append(frame.x1)
     return bounds
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class TableCells:
     """A table's chunks set in its grid: `cells[row][col]` the words of the cell starting there,
     `merges` the cells spanning several rows or columns (`extent_of`: where their words run, by
     index in merges), `placed` each column's single cells, `heads` its cell in the first row and
-    `row_of` a single cell's row (by id). `join_wrapped` makes a wrapped cell's lines one cell:
-    `rows` the grid's rows, `cell_lines` each cell's lines, `row_lines` and `last_line` each
-    row's number of lines and last baseline."""
+    `row_of` a single cell's row (by id). `rows` are the grid's rows, `cell_lines` each cell's
+    lines, `row_lines` and `last_line` each row's number of lines and last baseline: one line a
+    row as `place_cells` sets them, a wrapped cell's lines one cell after `join_wrapped`."""
     rows: list[list[Span]]
     cells: list[list[list[Span]]]
     placed: list[list[list[Span]]]
     heads: list[list[Span] | None]
-    merges: list[dict]
+    merges: list[Merge]
     extent_of: dict[int, tuple[float, float]]
     row_of: dict[int, int]
-    row_lines: list[int] = field(default_factory=list)
-    last_line: list[float] = field(default_factory=list)
-    cell_lines: list[list[list[list[Span]]]] = field(default_factory=list)
+    row_lines: list[int]
+    last_line: list[float]
+    cell_lines: list[list[list[list[Span]]]]
 
-    def join_wrapped(self, cont: set[int]) -> None:
+    def join_wrapped(self, cont: set[int]) -> "TableCells":
         """A wrapped cell's next lines were rows of their own up to here (columns, merges and
         alignments are found line by line); now they join the cell they continue, one cell of
         several lines that Slides wraps in its column as TeX did - and wraps again when a person
@@ -601,40 +616,42 @@ class TableCells:
         line. cont: the grid rows holding a wrapped cell's further lines."""
         n_rows, n_cols = len(self.rows), len(self.placed)
         cells = self.cells
-        row_lines = [1] * n_rows
-        last_line = [line_base(row) for row in self.rows]  # a row's last baseline
-        cell_lines = [[[cell] if cell else [] for cell in row] for row in cells]
         merged_rows = {g for m in self.merges for g in range(m["row"], m["row"] + m["rows"])}
-        if cont and not cont & merged_rows and 0 not in cont:
-            keep, head_of = [], {}
-            for g in range(n_rows):
-                if g in cont:
-                    head_of[g] = keep[-1]
-                else:
-                    keep.append(g)
-            for g, h in sorted(head_of.items()):
-                row_lines[h] += 1
-                last_line[h] = last_line[g]
-                for cc in range(n_cols):
-                    if cells[g][cc]:
-                        cell_lines[h][cc].append(cells[g][cc])
-            at = {g: k for k, g in enumerate(keep)}
-            self.merges = [{**m, "row": at[m["row"]]} for m in self.merges]
-            self.rows, cell_lines = [self.rows[g] for g in keep], [cell_lines[g] for g in keep]
-            row_lines, last_line = [row_lines[g] for g in keep], [last_line[g] for g in keep]
-        self.row_lines, self.last_line, self.cell_lines = row_lines, last_line, cell_lines
+        if not cont or cont & merged_rows or 0 in cont:
+            return self
+        row_lines = list(self.row_lines)
+        last_line = list(self.last_line)
+        cell_lines = [[list(lines) for lines in row] for row in self.cell_lines]
+        keep: list[int] = []
+        head_of: dict[int, int] = {}
+        for g in range(n_rows):
+            if g in cont:
+                head_of[g] = keep[-1]
+            else:
+                keep.append(g)
+        for g, h in sorted(head_of.items()):
+            row_lines[h] += 1
+            last_line[h] = last_line[g]
+            for cc in range(n_cols):
+                if cells[g][cc]:
+                    cell_lines[h][cc].append(cells[g][cc])
+        at = {g: k for k, g in enumerate(keep)}
+        return replace(self, merges=[Merge(row=at[m["row"]], col=m["col"], rows=m["rows"], cols=m["cols"], align=m["align"])
+                                     for m in self.merges],
+                       rows=[self.rows[g] for g in keep], cell_lines=[cell_lines[g] for g in keep],
+                       row_lines=[row_lines[g] for g in keep], last_line=[last_line[g] for g in keep])
 
 
-def place_cells(items: list[tuple[int, int, list[Span]]], bounds: list[float],
-                grid_rows: list[list[Span]]) -> TableCells | None:
+def place_cells(items: list[Chunk], bounds: list[float], grid_rows: list[list[Span]]) -> TableCells | None:
     """Each chunk (row, row span, words) in the cells its words cover, or None when a chunk
     covers no column or two chunks the same cell."""
     n_cols = len(bounds) - 1
-    cells = [[[] for _ in range(n_cols)] for _ in grid_rows]
+    cells: list[list[list[Span]]] = [[[] for _ in range(n_cols)] for _ in grid_rows]
     placed: list[list[list[Span]]] = [[] for _ in range(n_cols)]
     heads: list[list[Span] | None] = [None] * n_cols  # (each column's cell in the first row)
     extent_of: dict[int, tuple[float, float]] = {}  # (a merged cell's words, by its index in merges)
-    merges, covered = [], {}
+    merges: list[Merge] = []
+    covered: dict[tuple[int, int], Chunk] = {}
     row_of: dict[int, int] = {}  # (a single cell's words, by id: its row)
     for it in items:
         r, rs, ch = it
@@ -651,18 +668,22 @@ def place_cells(items: list[tuple[int, int, list[Span]]], bounds: list[float],
         cells[r][c0].extend(ch)
         if rs > 1 or cs > 1:
             mid = (bounds[c0] + bounds[c0 + cs]) / 2
-            align = "center" if abs((x0 + x1) / 2 - mid) <= 2 else "left" if x0 - bounds[c0] < bounds[c0 + cs] - x1 else "right"
-            merges.append({"row": r, "col": c0, "rows": rs, "cols": cs, "align": align})
+            align: Align = "center" if abs((x0 + x1) / 2 - mid) <= 2 else "left" if x0 - bounds[c0] < bounds[c0 + cs] - x1 \
+                else "right"
+            merges.append(Merge(row=r, col=c0, rows=rs, cols=cs, align=align))
             extent_of[len(merges) - 1] = (x0, x1)
         else:
             placed[c0].append(ch)
             row_of[id(ch)] = r
             if r == 0 and rs == 1:
                 heads[c0] = ch
-    return TableCells(grid_rows, cells, placed, heads, merges, extent_of, row_of)
+    # (one line a row until join_wrapped: a row's last baseline is its baseline)
+    return TableCells(rows=grid_rows, cells=cells, placed=placed, heads=heads, merges=merges, extent_of=extent_of,
+                      row_of=row_of, row_lines=[1] * len(grid_rows), last_line=[line_base(row) for row in grid_rows],
+                      cell_lines=[[[cell] if cell else [] for cell in row] for row in cells])
 
 
-def aligned(chunks: list[list[Span]], x0: float, x1: float) -> str:
+def aligned(chunks: list[list[Span]], x0: float, x1: float) -> Align:
     left = all(abs(ch[0].rect.x0 - x0) <= 1 for ch in chunks)
     right = all(abs(ch[-1].rect.x1 - x1) <= 1 for ch in chunks)
     digits = sum(c.isdigit() for ch in chunks for s in ch for c in s.text)
@@ -674,9 +695,11 @@ def aligned(chunks: list[list[Span]], x0: float, x1: float) -> str:
 
 def column_info(columns: list[list[float]], cells: TableCells) -> list[dict]:
     """Each column's extent and alignment, its head's and body's when they differ."""
-    col_info = []
+    col_info: list[dict] = []
     for (x0, x1), chunks, head in zip(columns, cells.placed, cells.heads):
-        info = {"x0": round(x0, 2), "x1": round(x1, 2), "align": aligned(chunks, x0, x1)}
+        # (ir.Column says `body` is a pair; it is written as a list, which the base read back
+        # compares equal to: this stays the element's dict until deck.json is parsed)
+        info: dict[str, object] = {"x0": round(x0, 2), "x1": round(x1, 2), "align": aligned(chunks, x0, x1)}
         # A column head set otherwise than its body (\thead centred over a left column, an S
         # column's head centred over numbers set flush right): the head row keeps its own
         # alignment (`head`) and the body its own, to the body's edges (`body`). As one, a
@@ -688,8 +711,12 @@ def column_info(columns: list[list[float]], cells: TableCells) -> list[dict]:
         # body's alignment is its numbers'.
         if head is not None:
             hc = (head[0].rect.x0 + head[-1].rect.x1) / 2
-            numeric = lambda ch: any(c.isdigit() for s in ch for c in s.text)
-            on_axis = lambda ch: abs((ch[0].rect.x0 + ch[-1].rect.x1) / 2 - hc) <= 1
+
+            def numeric(ch: list[Span]) -> bool:
+                return any(c.isdigit() for s in ch for c in s.text)
+
+            def on_axis(ch: list[Span]) -> bool:
+                return abs((ch[0].rect.x0 + ch[-1].rect.x1) / 2 - hc) <= 1
             odd = [ch for ch in body if not numeric(ch) and on_axis(ch)]
             rest = [ch for ch in body if not any(ch is o for o in odd)]
             if odd and len(rest) >= 2 and all(numeric(ch) and not on_axis(ch) for ch in rest):
@@ -734,38 +761,38 @@ def row_boundary(baselines: list[float], y: float) -> int:
     return sum(b < y for b in baselines)
 
 
-def table_borders(horizontal: list[dict], vertical: list[dict], frame: Rect, bounds: list[float],
-                  columns: list[list[float]], baselines: list[float], size: float) -> tuple[list[dict], list[dict]] | None:
+def table_borders(horizontal: list[Rule], vertical: list[Rule], frame: Rect, bounds: list[float],
+                  columns: list[list[float]], baselines: list[float], size: float) -> tuple[list[Rule], list[dict]] | None:
     """Borders: rules across the whole table stay row rules; partial rules (\\cline,
     \\cmidrule) and vertical rules become the borders of the cells they run along. Returns
     (row rules, cell borders), or None for a vertical rule inside a column."""
     n_rows, n_cols = len(baselines), len(columns)
-    borders = []
-    full = [h for h in horizontal if h["rect"].x0 <= frame.x0 + 1.5 and h["rect"].x1 >= frame.x1 - 1.5]
+    borders: list[dict] = []
+    full = [h for h in horizontal if h.rect.x0 <= frame.x0 + 1.5 and h.rect.x1 >= frame.x1 - 1.5]
     for h in horizontal:
         if h in full:
             continue
-        k = row_boundary(baselines, h["rect"].cy)
+        k = row_boundary(baselines, h.rect.cy)
         for cc in range(n_cols):
             # (\cmidrule(l) is trimmed by half an em at its left end: it still underlines
             # every word of the column)
-            if (h["rect"].x0 <= bounds[cc] + 2.5 or h["rect"].x0 <= columns[cc][0] + 1) and \
-                    (h["rect"].x1 >= bounds[cc + 1] - 2.5 or h["rect"].x1 >= columns[cc][1] - 1):
+            if (h.rect.x0 <= bounds[cc] + 2.5 or h.rect.x0 <= columns[cc][0] + 1) and \
+                    (h.rect.x1 >= bounds[cc + 1] - 2.5 or h.rect.x1 >= columns[cc][1] - 1):
                 borders.append({"row": min(k, n_rows - 1), "col": cc, "position": "TOP" if k < n_rows else "BOTTOM",
-                                "color": h["color"], "weight": round(h["weight"], 2), "y": round(h["rect"].cy, 2)})
+                                "color": h.color, "weight": round(h.weight, 2), "y": round(h.rect.cy, 2)})
     for v in vertical:
-        k = min(range(len(bounds)), key=lambda i: abs(bounds[i] - v["rect"].cx))
-        if abs(bounds[k] - v["rect"].cx) > 1.5:
+        k = min(range(len(bounds)), key=lambda i: abs(bounds[i] - v.rect.cx))
+        if abs(bounds[k] - v.rect.cx) > 1.5:
             # The second stroke of a double rule (||, \doublerulesep 2 pt beside the first):
             # a Slides border is one line, the one on the bound is written.
-            if any(u is not v and abs(bounds[k] - u["rect"].cx) <= 1.5 and abs(u["rect"].cx - v["rect"].cx) <= 4
-                   and u["rect"].y0 < v["rect"].y1 and v["rect"].y0 < u["rect"].y1 for u in vertical):
+            if any(u is not v and abs(bounds[k] - u.rect.cx) <= 1.5 and abs(u.rect.cx - v.rect.cx) <= 4
+                   and u.rect.y0 < v.rect.y1 and v.rect.y0 < u.rect.y1 for u in vertical):
                 continue
             return None  # a rule inside a column
         for rr, b in enumerate(baselines):
-            if v["rect"].y0 <= b - 0.5 * size and v["rect"].y1 >= b:
+            if v.rect.y0 <= b - 0.5 * size and v.rect.y1 >= b:
                 borders.append({"row": rr, "col": min(k, n_cols - 1), "position": "LEFT" if k < n_cols else "RIGHT",
-                                "color": v["color"], "weight": round(v["weight"], 2)})
+                                "color": v.color, "weight": round(v.weight, 2)})
     return full, borders
 
 
@@ -795,15 +822,15 @@ def slides_bottom(baselines: list[float], heights: list[float], row_lines: list[
     return top + sum(row_h)
 
 
-def row_bands(shown: list[dict], baselines: list[float]) -> list[list[float]]:
+def row_bands(shown: list[Fill], baselines: list[float]) -> list[list[float]]:
     """[row, top, bottom] of a row shaded by a band of its own (\\rowcolor, \\rowcolors: fills
     that hold its baseline and no other row's): emit puts the Slides row's edges there, as on
     a rule. Set just above its words instead, a shaded row began ~3 pt below its band and
     the words sat at the top of their fill (r2_tables_v1 slide 4)."""
-    bands = []
+    bands: list[list[float]] = []
     for rr, b in enumerate(baselines):
-        own = [f["rect"] for f in shown if f["rect"].y0 <= b <= f["rect"].y1
-               and sum(f["rect"].y0 <= b2 <= f["rect"].y1 for b2 in baselines) == 1]
+        own = [f.rect for f in shown if f.rect.y0 <= b <= f.rect.y1
+               and sum(f.rect.y0 <= b2 <= f.rect.y1 for b2 in baselines) == 1]
         if own:
             bands.append([rr, round(min(r.y0 for r in own), 2), round(max(r.y1 for r in own), 2)])
     return bands
