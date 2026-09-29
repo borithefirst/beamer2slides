@@ -67,7 +67,9 @@ def cell(rec, obj, ctx) -> Cell:
     """The pattern stream parsed as CPDF_Form(doc, no page resources, stream) does it: the /Matrix
     as the objects' first CTM, the /BBox as their clip, the painted object's general state on top
     of default states, and the pattern's own /Resources reaching nothing else."""
-    from .content import Parser, State, _Run
+    from dataclasses import replace
+
+    from .content import Parser, _Run, initial_state
     from .render_transparency import form_transparency
     key = _general(obj)
     cells = rec.__dict__.setdefault("_cells", {})
@@ -75,9 +77,9 @@ def cell(rec, obj, ctx) -> Cell:
         x_step, y_step, bbox = rec.tiling
         objs: list = []
         parser = Parser(rec.a.doc, {}, objs, ctx.fonts if ctx is not None else {}, {})
-        state = State(fill_alpha=F(obj.fill_alpha), stroke_alpha=F(obj.stroke_alpha),
-                      blend=obj.blend, soft_mask=obj.smask is not None, smask=obj.smask,
-                      smask_matrix=obj.smask_matrix, transfer=obj.transfer)
+        state = replace(initial_state(), fill_alpha=F(obj.fill_alpha), stroke_alpha=F(obj.stroke_alpha),
+                        blend=obj.blend, soft_mask=obj.smask is not None, smask=obj.smask,
+                        smask_matrix=obj.smask_matrix, transfer=obj.transfer)
         run = _Run(parser, {}, state, (0.0, 0.0, 0.0, 0.0), None)
         try:
             run._form(rec.obj, "")

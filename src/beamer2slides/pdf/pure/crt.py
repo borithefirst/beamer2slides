@@ -10,8 +10,14 @@ import ctypes.util
 import math
 import platform
 import sys
+from typing import TYPE_CHECKING, Callable, Sequence, TypeVar
 
-_lib = None
+if TYPE_CHECKING:
+    from ...arrays import Floats, Floats32, Ints
+
+T = TypeVar("T")
+
+_lib: ctypes.CDLL | None = None
 
 
 def lib() -> ctypes.CDLL:
@@ -26,20 +32,39 @@ def lib() -> ctypes.CDLL:
     return _lib
 
 
-def float_fn(name: str, n: int):
-    """A float(float, ...) function of the platform's C runtime. `hypotf` is `_hypotf` in ucrtbase
-    (its `hypotf` is an inline wrapper in the headers)."""
+def _c_function(name: str, n: int) -> ctypes._NamedFuncPointer:
+    """The C runtime's function `name`, taking `n` floats and giving a float. `hypotf` is `_hypotf`
+    in ucrtbase (its `hypotf` is an inline wrapper in the headers)."""
     crt = lib()
-    fn = getattr(crt, name, None) or getattr(crt, name.lstrip("_"))
+    try:
+        fn = crt[name]
+    except AttributeError:
+        fn = crt[name.lstrip("_")]
     fn.restype = ctypes.c_float
     fn.argtypes = [ctypes.c_float] * n
     return fn
 
 
+def float_fn(name: str, n: int) -> Callable[..., float]:
+    """A float(float, ...) function of `n` arguments of the platform's C runtime (`float_fn1` and
+    `float_fn2` say their arity to the checker)."""
+    return _c_function(name, n)
+
+
+def float_fn1(name: str) -> Callable[[float], float]:
+    """A float(float) function of the platform's C runtime (sinf, logf...)."""
+    return _c_function(name, 1)
+
+
+def float_fn2(name: str) -> Callable[[float, float], float]:
+    """A float(float, float) function of the platform's C runtime (powf, atan2f, _hypotf)."""
+    return _c_function(name, 2)
+
+
 _CMP = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_int))
 
 
-def qsort(a: list, cmp) -> None:
+def qsort(a: list[T], cmp: Callable[[T, T], int]) -> None:
     """The C runtime's own qsort, in place (`cmp(x, y)` -> <0, 0, >0): which of two equal items comes
     first is the library's (glibc's merge sort keeps their order, the BSD and UCRT quicksorts don't).
     The C side sorts the indices of `a`, so it sees the same comparisons and makes the same moves."""
@@ -51,19 +76,25 @@ def qsort(a: list, cmp) -> None:
     fn.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, _CMP]
     idx = (ctypes.c_int * n)(*range(n))
     items = list(a)
-    callback = _CMP(lambda p, q: max(-1, min(1, cmp(items[p[0]], items[q[0]]))))
+
+    def compare(p: ctypes._Pointer[ctypes.c_int], q: ctypes._Pointer[ctypes.c_int]) -> int:
+        return max(-1, min(1, cmp(items[p.contents.value], items[q.contents.value])))
+
+    callback = _CMP(compare)
     fn(idx, n, ctypes.sizeof(ctypes.c_int), callback)
     a[:] = [items[i] for i in idx]
 
 
-_cg = None
+_cg: ctypes.CDLL | None = None
 
 
 def quartz_font(data: bytes | None) -> bool:
     """Whether CQuartz2D::CreateFont makes a CGFont of these bytes (macOS only; False elsewhere and
     for no bytes): CPDF_Type1Font::LoadGlyphMap takes its Apple-only `bCoreText` path when it does."""
     global _cg
-    if sys.platform != "darwin" or not data:
+    if not data:
+        return False
+    if sys.platform != "darwin":
         return False
     if _cg is None:
         _cg = ctypes.CDLL("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")
@@ -74,7 +105,7 @@ def quartz_font(data: bytes | None) -> bool:
         _cg.CGFontCreateWithDataProvider.argtypes = [ctypes.c_void_p]
         _cg.CGDataProviderRelease.argtypes = [ctypes.c_void_p]
         _cg.CGFontRelease.argtypes = [ctypes.c_void_p]
-    buf = ctypes.create_string_buffer(bytes(data), len(data))
+    buf = ctypes.create_string_buffer(data, len(data))
     provider = _cg.CGDataProviderCreateWithData(None, buf, len(data), None)
     if not provider:
         return False
@@ -136,12 +167,12 @@ def roundf(v: float) -> int:
     return int(math.copysign(math.floor(abs(v) + 0.5), v))
 
 
-def rect_valid(rect) -> bool:
+def rect_valid(rect: Sequence[int]) -> bool:
     """FX_RECT::Valid: the width and height of (left, top, right, bottom) fit an int32."""
     return INT_MIN <= rect[2] - rect[0] <= INT_MAX and INT_MIN <= rect[3] - rect[1] <= INT_MAX
 
 
-def i32_array(t):
+def i32_array(t: Floats | Floats32) -> Ints:
     """static_cast<int32_t> over a float numpy array (int64 result)."""
     import numpy as np
     with np.errstate(invalid="ignore"):

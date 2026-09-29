@@ -39,7 +39,7 @@ def resolve(spec: str | None) -> PdfBackend:
         return PureBackend()
     if spec == "sandbox" or spec.startswith("sandbox:"):
         from .sandbox import SandboxBackend
-        return SandboxBackend(inner=spec.partition(":")[2] or "pdfium")
+        return SandboxBackend(inner=spec.partition(":")[2] or "pdfium", command=None, timeout=None)
     module, _, attr = spec.partition(":")
     if not module or not attr:
         raise ValueError(f"{ENV}={spec!r}: expected pdfium, sandbox[:<spec>] or package.module:attribute")

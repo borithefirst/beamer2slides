@@ -785,7 +785,9 @@ class ColorSpace:
     def default_range(self, i: int) -> tuple:
         """GetDefaultValue's (min, max) of component i."""
         if self.family == "Lab":
-            return cie.lab_default(self.params, i)[1:]
+            ranges = self.params
+            assert ranges is not None, "a Lab space always carries its /Range (_lab)"
+            return cie.lab_default(ranges, i)[1:]
         return 0.0, 1.0
 
     @property
@@ -885,7 +887,7 @@ def _cs_load(a: _Access, obj, visited: set):
         if isinstance(obj, Name):
             return _stock(str(obj))
         if isinstance(obj, Stream):
-            for key in sorted(obj.dict, key=lambda k: str(k).encode("latin-1")):
+            for key in sorted(obj.dict, key=lambda k: k.encode("latin-1")):
                 v = obj.dict[key]
                 if isinstance(v, Name) and _stock(str(v)) is not None:
                     return _stock(str(v))

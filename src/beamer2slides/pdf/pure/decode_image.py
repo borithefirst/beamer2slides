@@ -15,16 +15,25 @@ from __future__ import annotations
 import io
 import math
 import struct
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Literal, Union
 
 import numpy as np
 
-from ...arrays import Bytes, Floats32, Pixels, UInt32
+from ...arrays import Bytes, Floats32, Mask, Pixels, UInt32
+from ...typing_compat import assert_never
 from . import filters as FL
 from .colors import adobe_cmyk_to_srgb_array, icc_openable, icc_srgb
 from .crt import roundf
-from .syntax import Name, Stream
+from .syntax import InlineImage, Name, PdfArray, PdfDict, PdfObject, Stream, String
+
+if TYPE_CHECKING:
+    from .document import PdfFile
 
 F32 = np.float32
+
+ImageStream = Union[Stream, InlineImage]
+"""What an image is read from: an image XObject, or an inline image (BI ... ID ... EI)."""
 
 
 class Unsupported(Exception):
@@ -41,74 +50,155 @@ def argb(a: int, r: int, g: int, b: int) -> int:
             | (b & 0xFFFFFFFF)) & 0xFFFFFFFF
 
 
-class DIB:
-    __slots__ = ("fmt", "w", "h", "rows", "palette", "mask", "matte", "interpolate")
+DibFormat = Literal["mask1", "rgb1", "rgb8", "bgr", "bgra"]
+"""The CFX_DIBBase formats an image loads as: k1bppMask, k1bppRgb, k8bppRgb, kBgr, kBgra."""
 
-    def __init__(self, fmt, rows, palette=None):
-        self.fmt, self.rows, self.palette = fmt, rows, palette
-        self.h, self.w = rows.shape[:2]
-        self.mask, self.matte, self.interpolate = None, 0xFFFFFFFF, False
+NO_MATTE = 0xFFFFFFFF
+"""A DIB's `matte` when its soft mask has no /Matte (CPDF_DIB's m_MatteColor starts there)."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class DIB:
+    """A loaded image (CPDF_DIB): `rows` are h x w (x channels) bytes in `fmt`'s layout, 1-bit
+    formats unpacked to 0/1 per pixel; `palette` its ARGB colours (None: the format's own), `mask`
+    its soft mask (/SMask or a /Mask stream, loaded as a DIB of its own), `matte` the /Matte colour
+    (`NO_MATTE` for none) and `interpolate` its /Interpolate."""
+    fmt: DibFormat
+    rows: Pixels
+    palette: list[int] | None
+    mask: DIB | None
+    matte: int
+    interpolate: bool
+
+    @property
+    def h(self) -> int:
+        return self.rows.shape[0]
+
+    @property
+    def w(self) -> int:
+        return self.rows.shape[1]
 
     @property
     def bpp(self) -> int:
-        return {"mask1": 1, "rgb1": 1, "rgb8": 8, "mask8": 8, "bgr": 24, "bgra": 32}[self.fmt]
+        fmt = self.fmt
+        match fmt:
+            case "mask1" | "rgb1":
+                return 1
+            case "rgb8":
+                return 8
+            case "bgr":
+                return 24
+            case "bgra":
+                return 32
+            case _:
+                assert_never(fmt)
+
+
+def _unmasked(fmt: DibFormat, rows: Pixels, palette: list[int] | None, interpolate: bool) -> DIB:
+    """A DIB with no mask of its own (a mask, a stencil, or an image loaded without its mask)."""
+    return DIB(fmt=fmt, rows=rows, palette=palette, mask=None, matte=NO_MATTE, interpolate=interpolate)
 
 
 # ---------------------------------------------------------------------- colour spaces
 
+Channels = tuple[Floats32, Floats32, Floats32, Mask]
+"""GetRGB over an array of colours: r, g and b (float32, 0-1) and where the colour is valid
+(GetRGBOrZerosOnError gives zeros where it is not)."""
 
-class CS:
-    """The image-relevant part of a CPDF_ColorSpace."""
+DeviceFamily = Literal["DeviceGray", "DeviceRGB", "DeviceCMYK"]
 
-    def __init__(self, family: str, n: int, base: "CS | None" = None, stock: bool = False, srgb: bool = False):
-        self.family, self.n, self.base, self.stock, self.srgb = family, n, base, stock, srgb
-        self.lookup = b""
-        self.max_index = 0
 
-    def default(self, i):
-        """GetDefaultValue: (min, max)."""
-        return 0.0, 1.0
+def default_range(i: int) -> tuple[float, float]:
+    """GetDefaultValue's (min, max) of component `i`: (0, 1) in every space an image loads here
+    (the device spaces, and the bases an ICC or Indexed space reads through)."""
+    return 0.0, 1.0
 
-    def rgb(self, v: Floats32, std: bool = False):
-        """GetRGB over (..., n) float32 values: (r, g, b) float32 arrays and a validity mask
-        (GetRGBOrZerosOnError gives zeros where it is False). `std` is IsStdConversionEnabled(),
-        which a colour space passes on to its base (CPDF_BasedCS::EnableStdConversion)."""
-        f = self.family
-        if f == "DeviceGray":
-            g = np.clip(v[..., 0], F32(0), F32(1))
-            return g, g, g, np.ones(g.shape, bool)
-        if f == "DeviceRGB":
-            c = np.clip(v[..., :3], F32(0), F32(1))
-            return c[..., 0], c[..., 1], c[..., 2], np.ones(c.shape[:-1], bool)
-        if f == "DeviceCMYK":
-            return _cmyk_std_f(v) if std else _cmyk_rgb_f(v)
-        if f == "ICCBased":
-            if self.srgb:   # GetRGB hands the first three components back: no clamp, always valid
-                c = v[..., :3].astype(F32)
+
+@dataclass(frozen=True, kw_only=True)
+class DeviceCS:
+    """CPDF_DeviceCS: one of the three stock spaces (`GRAY`, `RGB`, `CMYK`)."""
+    family: DeviceFamily
+    n: int
+
+    def rgb(self, v: Floats32, std: bool) -> Channels:
+        """GetRGB over (..., n) float32 values. `std` is IsStdConversionEnabled(), which only the
+        CMYK conversion reads."""
+        family = self.family
+        match family:
+            case "DeviceGray":
+                g = np.clip(v[..., 0], F32(0), F32(1))
+                return g, g, g, np.ones(g.shape, bool)
+            case "DeviceRGB":
+                c = np.clip(v[..., :3], F32(0), F32(1))
                 return c[..., 0], c[..., 1], c[..., 2], np.ones(c.shape[:-1], bool)
-            if self.n == 1 and self.base.n > 1:
-                v = np.repeat(v[..., :1], self.base.n, axis=-1)
-            return self.base.rgb(v, std)
-        if f == "Indexed":
-            x = v[..., 0]
-            finite = np.isfinite(x) & (x > -2147483648.0) & (x < 2147483648.0)
-            idx = np.where(finite, x, -1).astype(np.int64)
-            n = self.base.n
-            ok = (idx >= 0) & (idx <= self.max_index) & ((idx + 1) * n <= len(self.lookup))
-            table = np.frombuffer(self.lookup, np.uint8)
-            safe = np.where(ok, idx, 0)
-            comps = np.zeros(idx.shape + (max(n, 1),), F32)
-            for i in range(n):
-                lo, hi = self.base.default(i)
-                mx = F32(F(hi - lo))
-                byte = table[np.minimum(safe * n + i, len(table) - 1)] if len(table) else np.zeros(idx.shape, np.uint8)
-                comps[..., i] = F32(lo) + (mx * byte.astype(F32)) / F32(255)
-            r, g, b, valid = self.base.rgb(comps, std)
-            return r, g, b, valid & ok
-        raise Unsupported(f"{f} image colours")
+            case "DeviceCMYK":
+                return _cmyk_std_f(v) if std else _cmyk_rgb_f(v)
+            case _:
+                assert_never(family)
 
 
-def _cmyk_rgb_f(v: Floats32):
+@dataclass(frozen=True, kw_only=True)
+class IccCS:
+    """CPDF_ICCBasedCS with `n` components: an sRGB profile (`srgb`: the first three components are
+    the colour) or, with no transform ported, the device space it reads through (`base`)."""
+    n: int
+    srgb: bool
+    base: DeviceCS
+
+    @property
+    def family(self) -> Literal["ICCBased"]:
+        return "ICCBased"
+
+    def rgb(self, v: Floats32, std: bool) -> Channels:
+        """GetRGB; `std` is passed on to the base (CPDF_BasedCS::EnableStdConversion)."""
+        if self.srgb:   # GetRGB hands the first three components back: no clamp, always valid
+            c = v[..., :3].astype(F32)
+            return c[..., 0], c[..., 1], c[..., 2], np.ones(c.shape[:-1], bool)
+        if self.n == 1 and self.base.n > 1:
+            v = np.repeat(v[..., :1], self.base.n, axis=-1)
+        return self.base.rgb(v, std)
+
+
+@dataclass(frozen=True, kw_only=True)
+class IndexedCS:
+    """CPDF_IndexedCS: one component, an index up to `max_index` into `lookup`, the base space's
+    colours as bytes."""
+    base: DeviceCS | IccCS
+    max_index: int
+    lookup: bytes
+
+    @property
+    def family(self) -> Literal["Indexed"]:
+        return "Indexed"
+
+    @property
+    def n(self) -> int:
+        return 1
+
+    def rgb(self, v: Floats32, std: bool) -> Channels:
+        """GetRGB: an index out of range or past the lookup's bytes is an error (not valid)."""
+        x = v[..., 0]
+        finite = np.isfinite(x) & (x > -2147483648.0) & (x < 2147483648.0)
+        idx = np.where(finite, x, -1).astype(np.int64)
+        n = self.base.n
+        ok = (idx >= 0) & (idx <= self.max_index) & ((idx + 1) * n <= len(self.lookup))
+        table = np.frombuffer(self.lookup, np.uint8)
+        safe = np.where(ok, idx, 0)
+        comps = np.zeros(idx.shape + (max(n, 1),), F32)
+        for i in range(n):
+            lo, hi = default_range(i)
+            mx = F32(F(hi - lo))
+            byte = table[np.minimum(safe * n + i, len(table) - 1)] if len(table) else np.zeros(idx.shape, np.uint8)
+            comps[..., i] = F32(lo) + (mx * byte.astype(F32)) / F32(255)
+        r, g, b, valid = self.base.rgb(comps, std)
+        return r, g, b, valid & ok
+
+
+CS = Union[DeviceCS, IccCS, IndexedCS]
+"""The image-relevant part of a CPDF_ColorSpace: the spaces an image loads in."""
+
+
+def _cmyk_rgb_f(v: Floats32) -> Channels:
     """CPDF_DeviceCS::GetRGB for CMYK without std conversion: AdobeCmykToStandardRgbF, each
     channel clamped, rounded to a byte with the 0.49999997f offset, looked up, times 1/255.f."""
     c = np.clip(np.nan_to_num(v[..., :4].astype(F32), nan=0.0), F32(0), F32(1))
@@ -118,39 +208,44 @@ def _cmyk_rgb_f(v: Floats32):
     return rgb[..., 0], rgb[..., 1], rgb[..., 2], np.ones(q.shape[:-1], bool)
 
 
-def _cmyk_std_f(v: Floats32):
+def _cmyk_std_f(v: Floats32) -> Channels:
     """CPDF_DeviceCS::GetRGB for CMYK with std conversion (the colours of an image loaded inside a
     soft mask, or of a /SMask stream): 1 - min(1, c + k) per channel, the components not normalised,
     and std::min(1.0f, x) keeping 1.0f where x is NaN. Always valid."""
     c = v[..., :4].astype(F32)
     k = c[..., 3]
-    out = []
+    out: list[Floats32] = []
     for i in range(3):
         t = F32(1) - np.where(c[..., i] + k < F32(1), c[..., i] + k, F32(1))
         out.append(t.astype(F32))
     return out[0], out[1], out[2], np.ones(c.shape[:-1], bool)
 
 
-GRAY, RGB, CMYK = CS("DeviceGray", 1, stock=True), CS("DeviceRGB", 3, stock=True), CS("DeviceCMYK", 4, stock=True)
+GRAY = DeviceCS(family="DeviceGray", n=1)
+RGB = DeviceCS(family="DeviceRGB", n=3)
+CMYK = DeviceCS(family="DeviceCMYK", n=4)
 _STOCK = {"DeviceGray": GRAY, "G": GRAY, "DeviceRGB": RGB, "RGB": RGB, "DeviceCMYK": CMYK, "CMYK": CMYK}
+_BY_COMPONENTS = {1: GRAY, 3: RGB, 4: CMYK}
 
 
-def load_cs(doc, obj, resources, depth=0) -> CS | None:
-    """CPDF_DocPageData::GetColorSpace for an image: None when it doesn't load."""
+def load_cs(doc: PdfFile, obj: PdfObject, resources: PdfDict | None, depth: int) -> CS | None:
+    """CPDF_DocPageData::GetColorSpace for an image: None when it doesn't load. `depth` counts the
+    names and arrays followed to get here (0 for an image's own /ColorSpace)."""
     r = doc.resolve
     obj = r(obj)
     if depth > 8:
         return None
     if isinstance(obj, Name):
         name = str(obj)
-        if name in _STOCK:
-            spaces = r(resources.get("ColorSpace")) if isinstance(resources, dict) else None
+        stock = _STOCK.get(name)
+        if stock is not None:
+            spaces = r(resources.get("ColorSpace")) if resources is not None else None
             if isinstance(spaces, dict) and any(k in spaces for k in ("DefaultGray", "DefaultRGB", "DefaultCMYK")):
                 raise Unsupported("Default colour spaces")
-            return _STOCK[name]
+            return stock
         if name == "Pattern":
             raise Unsupported("Pattern image colour spaces")
-        if not isinstance(resources, dict):
+        if resources is None:
             return None
         spaces = r(resources.get("ColorSpace"))
         if not isinstance(spaces, dict) or name not in spaces:
@@ -165,7 +260,7 @@ def load_cs(doc, obj, resources, depth=0) -> CS | None:
     return None
 
 
-def _load_array(doc, arr, depth) -> CS | None:
+def _load_array(doc: PdfFile, arr: PdfArray, depth: int) -> CS | None:
     r = doc.resolve
     fam = r(arr[0]) if arr else None
     if not isinstance(fam, Name):
@@ -174,24 +269,25 @@ def _load_array(doc, arr, depth) -> CS | None:
     if f in ("Indexed", "I"):
         if len(arr) < 4:
             return None
-        base = _guarded(doc, arr[1], depth)
-        if base is None or base.family in ("Indexed", "Pattern"):
+        base = load_cs(doc, arr[1], None, depth + 1)
+        if base is None or isinstance(base, IndexedCS):
             return None
-        cs = CS("Indexed", 1, base)
         hi = r(arr[2])
-        cs.max_index = max(0, min(255, int(hi))) if isinstance(hi, (int, float)) and not isinstance(hi, bool) else 0
+        max_index = max(0, min(255, int(hi))) if isinstance(hi, (int, float)) and not isinstance(hi, bool) else 0
         lk = r(arr[3])
+        lookup = b""
         if isinstance(lk, Stream):
             data = doc.stream_data(lk)
-            if FL.decoder_array(lk.dict, r):
-                last = FL.decoder_array(lk.dict, r)[-1][0]
+            decoders = FL.decoder_array(lk.dict, r)
+            if decoders:
+                last = decoders[-1][0]
                 if FL.ABBREVIATIONS.get(last, last) not in ("FlateDecode", "LZWDecode", "ASCII85Decode",
                                                             "ASCIIHexDecode", "RunLengthDecode"):
                     raise Unsupported("an image-coded palette")
-            cs.lookup = bytes(data)
-        elif isinstance(lk, (bytes, bytearray)) or type(lk).__name__ == "String":
-            cs.lookup = bytes(lk)
-        return cs
+            lookup = data
+        elif isinstance(lk, String):
+            lookup = bytes(lk)
+        return IndexedCS(base=base, max_index=max_index, lookup=lookup)
     if f == "ICCBased":
         st = r(arr[1]) if len(arr) > 1 else None
         if not isinstance(st, Stream):
@@ -202,29 +298,26 @@ def _load_array(doc, arr, depth) -> CS | None:
         data = doc.stream_data(st)
         if icc_srgb(data, n):
             # No lcms transform and no clamping: the alternate PDFium still loads is never read.
-            return CS("ICCBased", 3, RGB, srgb=True)
+            return IccCS(n=3, srgb=True, base=RGB)
         if icc_openable(data):
             raise Unsupported("ICC profiles")
-        alt = None
+        device: DeviceCS | None = None
         if st.get("Alternate") is not None:
-            try:
-                alt = load_cs(doc, st.get("Alternate"), None, depth + 1)
-            except Unsupported:
-                raise
-            if alt is not None and (alt.family not in ("DeviceGray", "DeviceRGB", "DeviceCMYK") or alt.n != n):
-                if alt.n == n:
+            alt = load_cs(doc, st.get("Alternate"), None, depth + 1)
+            if alt is not None:
+                if isinstance(alt, DeviceCS) and alt.n == n:
+                    device = alt
+                elif alt.n == n:
                     raise Unsupported("ICC alternates that are not device spaces")
-                alt = None
-        if alt is None:
-            alt = {1: GRAY, 3: RGB, 4: CMYK}[n]
-        return CS("ICCBased", n, alt)
+        return IccCS(n=n, srgb=False, base=device if device is not None else _BY_COMPONENTS[n])
     if f[:4] in ("Devi", "CalG", "CalR", "Lab", "Sepa", "Patt", "Inde"):
         raise Unsupported(f"{f} image colour spaces")
     return None
 
 
-def _guarded(doc, obj, depth):
-    return load_cs(doc, obj, None, depth + 1)
+def _is_cmyk(cs: CS) -> bool:
+    """A DeviceCMYK image, or an ICC one read through DeviceCMYK."""
+    return cs.family == "DeviceCMYK" or (isinstance(cs, IccCS) and cs.base.family == "DeviceCMYK")
 
 
 # ---------------------------------------------------------------------- stream decoding
@@ -242,7 +335,7 @@ def _png_predict(raw: bytes, colors: int, bpc: int, columns: int, rows: int) -> 
     raw = raw[:need] + bytes(max(0, need - len(raw)))
     tags = raw[::row + 1][:rows]
     if colors in (1, 2, 3, 4) and bpc == 8 and all(t <= 4 for t in tags) and rows > 0:
-        fast = FL._png_unfilter(b"", raw, {"Colors": colors, "BitsPerComponent": 8, "Columns": columns})
+        fast = FL.png_unfilter(raw, colors, 8, columns)
         if fast is not None and len(fast) == rows * row:
             return fast
     out = bytearray()
@@ -273,12 +366,14 @@ def _png_predict(raw: bytes, colors: int, bpc: int, columns: int, rows: int) -> 
     return bytes(out)
 
 
-def _num(d, key, default, r):
+def _num(d: PdfDict, key: str, missing: int, r: FL.Resolve) -> int:
+    """A number of `d` truncated to an int; `missing` when it has none (or something else)."""
     v = r(d.get(key))
-    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else default
+    return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else missing
 
 
-def _flate_lines(data: bytes, params: dict, r, bpc: int, comps: int, width: int, height: int) -> bytes:
+def _flate_lines(data: bytes, params: PdfDict, r: FL.Resolve, bpc: int, comps: int, width: int,
+                 height: int) -> bytes:
     """FlateScanlineDecoder (with its predictor): `height` lines of the image's pitch."""
     pitch = pitch8(bpc, comps, width)
     raw = FL.flate(data)
@@ -304,15 +399,15 @@ def _flate_lines(data: bytes, params: dict, r, bpc: int, comps: int, width: int,
             px = a[:, :usable].reshape(height, -1, colors)
             out[:, :usable] = np.cumsum(px, axis=1, dtype=np.uint8).reshape(height, usable)
         return out.tobytes()
-    if pred not in (0, 1) and params:
-        pass    # an unknown predictor: none
+    # any other predictor is none
     return raw
 
 
-def _jpeg(data: bytes, params: dict, r, width: int, height: int, comps: int, dev_size):
+def _jpeg(data: bytes, params: PdfDict, r: FL.Resolve, width: int, height: int, comps: int,
+          dev_size: tuple[int, int]) -> tuple[bytes, int, int] | None:
     """CJpegDecoder through Pillow's libjpeg (both ISLOW with fancy upsampling): the decoded
     bytes, width and height, or None when PDFium's decoder would not be created."""
-    from PIL import Image, ImageFile
+    from PIL import Image, ImageFile, JpegImagePlugin
     if params and _num(params, "ColorTransform", 1, r) == 0:
         raise Unsupported("JPEG /ColorTransform 0")
     start = data.find(b"\xff\xd8")
@@ -324,7 +419,7 @@ def _jpeg(data: bytes, params: dict, r, width: int, height: int, comps: int, dev
     ImageFile.LOAD_TRUNCATED_IMAGES = False
     try:
         img = Image.open(io.BytesIO(data))
-        if img.format != "JPEG":
+        if img.format != "JPEG" or not isinstance(img, JpegImagePlugin.JpegImageFile):
             raise Unsupported("a JPEG Pillow reads as something else")
         ncomp = len(img.layer)
         if (ncomp, img.mode) not in ((1, "L"), (3, "RGB"), (4, "CMYK")):
@@ -366,16 +461,28 @@ def _jpeg(data: bytes, params: dict, r, width: int, height: int, comps: int, dev
         raise Unsupported(f"a JPEG libjpeg complains about ({type(e).__name__})") from e
 
 
-def image_bytes(doc, d: dict, raw: bytes, bpc: int, comps: int, width: int, height: int, dev_size):
-    """CPDF_StreamAcc::LoadAllDataImageAcc + CreateDecoder: (bytes, width, height, rows present,
-    last filter) with `rows present` the lines GetScanline finds data for (the rest come back as
-    a zeroed buffer); None when PDFium's load fails."""
+@dataclass(frozen=True, kw_only=True)
+class ImageBytes:
+    """What `image_bytes` decoded: the lines (`height` of the image's pitch), the size the decoder
+    gives (a JPEG may come smaller), how many lines GetScanline finds data for (the rest are a
+    zeroed buffer) and the last filter (None: the data as it was left)."""
+    data: bytes
+    width: int
+    height: int
+    present: int
+    codec: str | None
+
+
+def image_bytes(doc: PdfFile, d: PdfDict, raw: bytes, bpc: int, comps: int, width: int, height: int,
+                dev_size: tuple[int, int]) -> ImageBytes | None:
+    """CPDF_StreamAcc::LoadAllDataImageAcc + CreateDecoder; None when PDFium's load fails."""
     r = doc.resolve
     decoders = FL.decoder_array(d, r)
     if decoders is None:
         return None
     data = raw
-    codec, params = None, {}
+    codec: str | None = None
+    params: PdfDict = {}
     for i, (name, p) in enumerate(decoders):
         name = FL.ABBREVIATIONS.get(name, name)
         last = i == len(decoders) - 1
@@ -396,7 +503,7 @@ def image_bytes(doc, d: dict, raw: bytes, bpc: int, comps: int, width: int, heig
             elif name == "LZWDecode":
                 if (pr.get("Predictor") or 1) != 1:
                     raise Unsupported("LZW predictors")
-                data = FL.lzw(data, pr.get("EarlyChange", 1))
+                data = FL.lzw(data, FL.early_change(pr))
             elif name == "ASCII85Decode":
                 data = FL.ascii85(data)
             elif name == "ASCIIHexDecode":
@@ -419,17 +526,18 @@ def image_bytes(doc, d: dict, raw: bytes, bpc: int, comps: int, width: int, heig
     pitch = pitch8(bpc, comps, width)
     if codec == "FlateDecode":
         lines = _flate_lines(data, params, r, bpc, comps, width, height)
-        return _pad(lines, pitch, height), width, height, height, codec
+        return ImageBytes(data=_pad(lines, pitch, height), width=width, height=height, present=height, codec=codec)
     if codec == "RunLengthDecode":
-        return _pad(FL.run_length(data), pitch, height), width, height, height, codec
+        return ImageBytes(data=_pad(FL.run_length(data), pitch, height), width=width, height=height,
+                          present=height, codec=codec)
     if codec == "DCTDecode":
         got = _jpeg(data, params, r, width, height, comps, dev_size)
         if got is None:
             return None
         out, w, h = got
-        return out, w, h, h, codec
+        return ImageBytes(data=out, width=w, height=h, present=h, codec=codec)
     present = min(height, -(-len(data) // pitch)) if pitch else 0
-    return _pad(data, pitch, height), width, height, present, codec
+    return ImageBytes(data=_pad(data, pitch, height), width=width, height=height, present=present, codec=codec)
 
 
 def _rl_dest_size_ok(src: bytes, bpc: int, comps: int, width: int, height: int) -> bool:
@@ -471,19 +579,19 @@ def _bits(rows: Bytes, bpc: int, count: int) -> UInt32:
     return (bits * weights).sum(axis=2).astype(np.uint32)
 
 
-def _float_array(v, r) -> list:
+def _float_array(v: PdfObject, r: FL.Resolve) -> PdfArray | None:
     v = r(v)
     return v if isinstance(v, list) else None
 
 
-def _get_float(arr, i, r) -> float:
+def _get_float(arr: PdfArray | None, i: int, r: FL.Resolve) -> float:
     if arr is None or i >= len(arr):
         return 0.0
     x = r(arr[i])
     return F(float(x)) if isinstance(x, (int, float)) and not isinstance(x, bool) else 0.0
 
 
-def _get_int(arr, i, r) -> int:
+def _get_int(arr: PdfArray | None, i: int, r: FL.Resolve) -> int:
     if arr is None or i >= len(arr):
         return 0
     x = r(arr[i])
@@ -492,15 +600,31 @@ def _get_int(arr, i, r) -> int:
     return int(x)
 
 
-def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True,
-         std_cs=False, group_cmyk=False) -> DIB | None:
-    """CPDF_DIB::Load (+ the mask, when the image has one and `with_mask`).
+def load(doc: PdfFile, stream: ImageStream, resources: PdfDict | None, dev_size: tuple[int, int], *,
+         std_cs: bool, group_cmyk: bool) -> DIB | None:
+    """CPDF_DIB::Load of an image to draw, with its mask when it has one.
 
     `std_cs` is StartLoadDIBBase's bStdCS: an image drawn inside a soft mask (and every /SMask or
     /Mask stream) has EnableStdConversion on while it loads, which is over again by the time its
     lines are translated, so it reaches LoadPalette and the /Matte colour and nothing else.
     `group_cmyk` is the other half of TransMask(): a luminosity mask whose group colour space is
     DeviceCMYK makes a DeviceCMYK image's lines the naive (1-c)(1-k) instead of Adobe's table."""
+    return _load(doc, stream, resources, dev_size, is_mask=False, with_mask=True, std_cs=std_cs,
+                 group_cmyk=group_cmyk)
+
+
+def load_unmasked(doc: PdfFile, stream: ImageStream, resources: PdfDict | None,
+                  dev_size: tuple[int, int]) -> DIB | None:
+    """CPDF_DIB::Load of the image alone (no mask, no std conversion): what FPDFImageObj_GetBitmap
+    gives."""
+    return _load(doc, stream, resources, dev_size, is_mask=False, with_mask=False, std_cs=False,
+                 group_cmyk=False)
+
+
+def _load(doc: PdfFile, stream: ImageStream, resources: PdfDict | None, dev_size: tuple[int, int], *,
+          is_mask: bool, with_mask: bool, std_cs: bool, group_cmyk: bool) -> DIB | None:
+    """CPDF_DIB::Load (+ the mask, when the image has one and `with_mask`); `is_mask` loads an
+    /SMask or /Mask stream (which never has one of its own)."""
     r = doc.resolve
     d = stream.dict
     raw = stream.raw if isinstance(stream, Stream) else stream.data
@@ -518,48 +642,45 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True,
     bpc = _num(d, "BitsPerComponent", 0, r)
     if not 0 <= bpc <= 16:
         return None
-    image_mask = bool(r(d.get("ImageMask")) is True)
-    cs = None
+    image_mask = r(d.get("ImageMask")) is True
+    cs: CS | None = None        # None: an image mask (a stencil)
     decode = _float_array(d.get("Decode"), r)
     default_decode = True
     if image_mask or d.get("ColorSpace") is None:
-        image_mask, bpc, comps = True, 1, 1
+        bpc, comps = 1, 1
         default_decode = decode is None or not _get_int(decode, 0, r)
-        family = None
     else:
-        cs = load_cs(doc, d.get("ColorSpace"), resources)
+        cs = load_cs(doc, d.get("ColorSpace"), resources, 0)
         if cs is None:
             return None
         comps = cs.n
-        family = cs.family
         if last == "DCTDecode":
             bpc = 8
         if bpc not in (1, 2, 4, 8, 16):
             return None
-    if family == "DeviceCMYK" or (family == "ICCBased" and cs.base.family == "DeviceCMYK"):
-        if is_mask:
+        if _is_cmyk(cs) and is_mask:
             raise Unsupported("CMYK soft masks")
     got = image_bytes(doc, d, raw, bpc, comps, w, h, dev_size)
     if got is None:
         return None
-    data, w, h, present, codec = got
+    w, h, present = got.width, got.height, got.present
     pitch = pitch8(bpc, comps, w)
-    rows = np.frombuffer(data, np.uint8)[:pitch * h].reshape(h, pitch) if pitch else np.zeros((h, 0), np.uint8)
+    rows = np.frombuffer(got.data, np.uint8)[:pitch * h].reshape(h, pitch) if pitch else np.zeros((h, 0), np.uint8)
 
-    if image_mask:
+    if cs is None:
         bits = np.unpackbits(rows, axis=1)[:, :w]
         if default_decode:
             bits = 1 - bits
         bits[present:] = 0
-        dib = DIB("mask1", bits.astype(np.uint8))
-        dib.interpolate = bool(r(d.get("Interpolate")) is True)
-        return dib
+        return _unmasked("mask1", bits.astype(np.uint8), None, r(d.get("Interpolate")) is True)
 
+    family = cs.family
     # GetDecodeAndMaskArray
     max_data = (1 << bpc) - 1
-    comp_min, comp_step = [], []
+    comp_min: list[float] = []
+    comp_step: list[float] = []
     for i in range(comps):
-        lo, hi = cs.default(i)
+        lo, hi = default_range(i)
         if decode is not None:
             mn = _get_float(decode, 2 * i, r)
             mx = _get_float(decode, 2 * i + 1, r)
@@ -589,7 +710,7 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True,
     trans_mask = group_cmyk and family == "DeviceCMYK"   # CPDF_DIB::TransMask()
 
     # LoadPalette
-    palette = None
+    palette: list[int] | None = None
     if bits == 1:
         if not (default_decode and family in ("DeviceGray", "DeviceRGB")) and cs.n <= 3:
             vals = np.array([[comp_min[0]] * 3, [F(comp_min[0] + comp_step[0])] * 3], F32)
@@ -597,7 +718,7 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True,
             cols = [argb(255, roundf(F(float(pr[k]) * 255)) if ok[k] else 0,
                          roundf(F(float(pg[k]) * 255)) if ok[k] else 0,
                          roundf(F(float(pb[k]) * 255)) if ok[k] else 0) for k in range(2)]
-            if family == "Indexed" and cs.max_index == 0:
+            if isinstance(cs, IndexedCS) and cs.max_index == 0:
                 cols[1] = 0xFF000000
             if cols[0] != 0xFF000000 or cols[1] != 0xFFFFFFFF:
                 palette = cols
@@ -620,18 +741,19 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True,
                 palette.append(argb(255, 0, 0, 0))
 
     # GetScanline
+    fmt: DibFormat
     if bits == 1:
         b1 = np.unpackbits(rows, axis=1)[:, :w].astype(np.uint8)
         if not color_key:
             b1[present:] = 0
-            dib = DIB("rgb1", b1, palette)
+            fmt, pixels = "rgb1", b1
         else:
             set_v = 0 if key_max[0] == 1 else (palette[1] if palette else 0xFFFFFFFF)
             reset_v = 0 if key_min[0] == 0 else (palette[0] if palette else 0xFF000000)
             v = np.where(b1 == 1, np.uint32(set_v), np.uint32(reset_v)).astype("<u4")
             out = v.view(np.uint8).reshape(h, w, 4).copy()
             out[present:] = 0
-            dib = DIB("bgra", out)
+            fmt, pixels, palette = "bgra", out, None
     elif bits <= 8:
         if bpc == 8:
             idx = rows[:, :w].astype(np.uint32)
@@ -640,22 +762,22 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True,
             idx = np.zeros((h, w), np.uint32)
             for c in range(comps):
                 idx |= s[..., c] << (c * bpc)
-        idx = (idx & 255).astype(np.uint8)
+        idx8 = (idx & 255).astype(np.uint8)
         if not color_key:
-            idx[present:] = 0
-            dib = DIB("rgb8", idx, palette)
+            idx8[present:] = 0
+            fmt, pixels = "rgb8", idx8
         else:
             out = np.zeros((h, w, 4), np.uint8)
             if palette:
-                pal = np.array(palette, np.uint32)[idx]
+                pal = np.array(palette, np.uint32)[idx8]
                 out[..., 0], out[..., 1], out[..., 2] = pal & 255, (pal >> 8) & 255, (pal >> 16) & 255
             else:
-                out[..., 0] = out[..., 1] = out[..., 2] = idx
-            out[..., 3] = np.where((idx < key_min[0]) | (idx > key_max[0]), 255, 0)
+                out[..., 0] = out[..., 1] = out[..., 2] = idx8
+            out[..., 3] = np.where((idx8 < key_min[0]) | (idx8 > key_max[0]), 255, 0)
             out[present:] = 0
-            dib = DIB("bgra", out)
+            fmt, pixels, palette = "bgra", out, None
     else:
-        bgr = _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, comp_step, trans_mask)
+        bgr = _translate24(rows, cs, bpc, comps, w, h, default_decode, comp_min, comp_step, trans_mask)
         if color_key:
             s = _bits(rows, bpc, w * comps).reshape(h, w, comps)
             out_of = np.zeros((h, w), bool)
@@ -665,57 +787,57 @@ def load(doc, stream, resources, dev_size=(0, 0), is_mask=False, with_mask=True,
             out[..., :3] = bgr
             out[..., 3] = np.where(out_of, 255, 0)
             out[present:] = 0
-            dib = DIB("bgra", out)
+            fmt, pixels, palette = "bgra", out, None
         else:
             bgr[present:] = 0
-            dib = DIB("bgr", bgr)
-    dib.interpolate = bool(r(d.get("Interpolate")) is True)
+            fmt, pixels, palette = "bgr", bgr, None
+    interpolate = r(d.get("Interpolate")) is True
     if is_mask or not with_mask:
-        return dib
+        return _unmasked(fmt, pixels, palette, interpolate)
 
     # StartLoadMask
+    matte = NO_MATTE
     smask = r(d.get("SMask"))
-    mstream = None
+    mstream: Stream | None = None
     if isinstance(smask, Stream):
         mstream = smask
-        matte = _float_array(smask.dict.get("Matte"), r)
-        if matte is not None and len(matte) == comps and cs.n <= comps and cs.family != "Pattern":
-            vals = np.array([[_get_float(matte, i, r) for i in range(comps)]], F32)
+        matte_array = _float_array(smask.dict.get("Matte"), r)
+        # (a Pattern space, which PDFium also leaves out here, never loads for an image)
+        if matte_array is not None and len(matte_array) == comps and cs.n <= comps:
+            vals = np.array([[_get_float(matte_array, i, r) for i in range(comps)]], F32)
             pr, pg, pb, ok = cs.rgb(vals, std_cs)     # StartLoadMask runs inside the std window
             if ok[0]:
-                dib.matte = argb(0, roundf(float(F32(pr[0]) * F32(255))), roundf(float(F32(pg[0]) * F32(255))),
-                                 roundf(float(F32(pb[0]) * F32(255))))
+                matte = argb(0, roundf(float(F32(pr[0]) * F32(255))), roundf(float(F32(pg[0]) * F32(255))),
+                             roundf(float(F32(pb[0]) * F32(255))))
             else:
-                dib.matte = 0
+                matte = 0
     else:
         m = r(d.get("Mask"))
         if isinstance(m, Stream):
             mstream = m
+    mask: DIB | None = None
     if mstream is not None:
         # StartLoadMaskDIB loads the mask with bStdCS true, whatever the image itself was loaded with
-        mdib = load(doc, mstream, None, (0, 0), is_mask=True, std_cs=True)
-        if mdib is not None:
-            if mdib.fmt not in ("rgb1", "rgb8", "mask1"):
-                raise Unsupported("soft masks that are not gray")
-            dib.mask = mdib
-    return dib
+        mask = _load(doc, mstream, None, (0, 0), is_mask=True, with_mask=True, std_cs=True, group_cmyk=False)
+        if mask is not None and mask.fmt not in ("rgb1", "rgb8", "mask1"):
+            raise Unsupported("soft masks that are not gray")
+    return DIB(fmt=fmt, rows=pixels, palette=palette, mask=mask, matte=matte, interpolate=interpolate)
 
 
-def _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, comp_step,
-                 trans_mask=False) -> Pixels:
+def _translate24(rows: Bytes, cs: CS, bpc: int, comps: int, w: int, h: int, default_decode: bool,
+                 comp_min: list[float], comp_step: list[float], trans_mask: bool) -> Pixels:
     """TranslateScanline24bpp: BGR bytes. Under TransMask() the CMYK lines are (1-c)(1-k) and no
     colour space is asked: the default-decode path writes that byte-wise through
     CPDF_DeviceCS::TranslateImageLine, which fills an FX_RGB_STRUCT laid over the BGR bytes in its
     own order, so the cyan channel lands where blue goes - the float path below does not."""
     out = np.zeros((h, w, 3), np.uint8)
     if default_decode:
-        if family != "DeviceRGB":
+        if cs.family != "DeviceRGB":
             if bpc == 8:
                 if comps != cs.n:
                     raise Unsupported("a stale translation line")
                 src = rows[:, :w * comps].reshape(h, w, comps)
-                base = cs.base if family == "ICCBased" else cs
-                bf = base.family
+                bf = cs.base.family if isinstance(cs, IccCS) else cs.family
                 if bf == "DeviceGray":
                     out[..., 0] = out[..., 1] = out[..., 2] = src[..., 0]
                 elif bf == "DeviceRGB":
@@ -751,10 +873,10 @@ def _translate24(rows, cs, family, bpc, comps, w, h, default_decode, comp_min, c
         vals[..., c] = F32(comp_min[c]) + F32(comp_step[c]) * s[..., c].astype(F32)
     if trans_mask:
         k = F32(1) - vals[..., 3]
-        pr, pg, pb = ((F32(1) - vals[..., i]) * k for i in range(3))
+        pr, pg, pb = (F32(1) - vals[..., 0]) * k, (F32(1) - vals[..., 1]) * k, (F32(1) - vals[..., 2]) * k
         ok = np.ones((h, w), bool)
     else:
-        pr, pg, pb, ok = cs.rgb(vals)
+        pr, pg, pb, ok = cs.rgb(vals, False)
     for k, ch in ((0, pb), (1, pg), (2, pr)):
         v = np.where(ok, np.clip(ch, F32(0), F32(1)), F32(0)).astype(F32)
         out[..., k] = (v * F32(255)).astype(np.uint8)

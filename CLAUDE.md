@@ -52,7 +52,10 @@ decorations) is a picture, or baked into a per-slide background picture.
   by id. `api.py` is the contract, `pdfium_backend.py` the reference, `sandbox.py` runs any backend
   in a worker process, `pdf/pure/` is a from-scratch Python port of the PDFium parts we use,
   byte-identical on every test page (docs/pdf-from-scratch.md). Pick with `pdf.set_backend` or
-  `$B2S_PDF_BACKEND`. **PDFium is not thread-safe**: every PDF read stays on the main thread.
+  `$B2S_PDF_BACKEND`. The contract is typed (api's `Metadata`/`Link`/`ImageInfo`, `DrawingKind`;
+  sandbox ops Literals, `wire.Reader`/`Writer` parse at the boundary, a malformed answer is a
+  `PdfError`); pure's content parser starts every graphics state from `content.initial_state()`
+  (`State` has no defaults), a different one being its `dataclasses.replace`. **PDFium is not thread-safe**: every PDF read stays on the main thread.
 - **No public links**: pictures reach Slides inside the imported .pptx, never as shared Drive files.
 - **Fidelity is measured on Google's own renderer** (`getThumbnail` vs the PDF page), never a local
   preview. Font substitutes are calibrated (`tools/calibrate.py`, `calibration/fonts.json`,

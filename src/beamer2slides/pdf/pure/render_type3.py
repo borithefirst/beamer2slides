@@ -76,7 +76,9 @@ def load_char(font, code: int) -> Char | None:
 
 
 def _load_char(font, code: int) -> Char | None:
-    from .content import Parser, State, check_clip
+    from dataclasses import replace
+
+    from .content import Parser, check_clip, initial_state
     from .syntax import InlineImage, Name, Stream, operations
     doc = font.doc
     r = doc.resolve
@@ -115,7 +117,7 @@ def _load_char(font, code: int) -> Char | None:
     objects: list = []
     parser = Parser(doc, font_res if isinstance(font_res, dict) else {}, objects, _fonts(doc), {})
     parser.parsed.append(stream)
-    state = State(fill_set=False, stroke_set=False)
+    state = replace(initial_state(), fill_set=False, stroke_set=False)
     try:
         parser._run(data, proc_res if isinstance(proc_res, dict) else font_res, state,
                     (0.0, 0.0, 0.0, 0.0), None)
@@ -134,7 +136,7 @@ def _independent_bitmap(font, img):
         raise PdfError("the pure reader cannot render inline images whose codec's end is not "
                        "found as PDFium finds it (DCT, CCITT) yet")
     try:
-        dib = DI.load(font.doc, stream, {}, (0, 0))
+        dib = DI.load(font.doc, stream, {}, (0, 0), std_cs=False, group_cmyk=False)
     except DI.Unsupported as e:
         raise PdfError(f"the pure reader cannot render {e} yet") from e
     if dib is None:

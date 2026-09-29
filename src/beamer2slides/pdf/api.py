@@ -30,12 +30,27 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Protocol, Sequence, TypedDict, Union, runtime_checkable
+from typing import Iterator, Literal, Mapping, Protocol, Sequence, TypedDict, Union, runtime_checkable
 
 from ..arrays import Pixels
+from ..typing_compat import assert_never
 
+Point = tuple[float, float]
 Box = tuple[float, float, float, float]
 Matrix = tuple[float, float, float, float, float, float]  # [a b c d e f], PDF row-vector convention
+Rgb = tuple[float, float, float]  # 0-1
+Segment = tuple[int, float, float, bool]  # a path segment: (SEG_* kind, x, y, closes), page space
+
+# A drawing's items (see the module docstring), told apart by their first element.
+LineItem = tuple[Literal["l"], Point, Point]
+CurveItem = tuple[Literal["c"], Point, Point, Point, Point]
+RectItem = tuple[Literal["re"], Box]
+QuadItem = tuple[Literal["qu"], tuple[Point, Point, Point, Point]]
+DrawingItem = Union[LineItem, CurveItem, RectItem, QuadItem]
+DrawingKind = Literal["f", "s", "fs"]
+
+MarkParams = dict[str, Union[str, int]]
+Mark = tuple[str, MarkParams]  # (tag, {key: value}) of one marked-content sequence
 
 OBJ_TEXT, OBJ_PATH, OBJ_IMAGE, OBJ_SHADING, OBJ_FORM = 1, 2, 3, 4, 5
 SEG_LINE, SEG_BEZIER, SEG_MOVE = 0, 1, 2
@@ -90,7 +105,7 @@ class PageObject:
     # (tag, {key: value}): only string values (UTF-8, invalid bytes dropped) and numbers (as C int,
     # truncated) of the property dictionary, the rest left out. A form's contents start afresh:
     # the marks around the form are its own, not its children's (FPDFPageObj_GetMark).
-    marks: tuple = ()
+    marks: tuple[Mark, ...] = ()
 
 
 @dataclass
@@ -134,8 +149,8 @@ COLOR_SPACES = {0: "unknown", 1: "DeviceGray", 2: "DeviceRGB", 3: "DeviceCMYK", 
 class _DrawingKeys(TypedDict):
     """What every backend writes for every path (a total base: 3.10 has no NotRequired)."""
 
-    type: str
-    items: list[tuple]
+    type: DrawingKind
+    items: list[DrawingItem]
     rect: Box                   # bounds of the items' points (curves by their extremes)
     object: int                 # id of the path object
 
@@ -143,13 +158,35 @@ class _DrawingKeys(TypedDict):
 class Drawing(_DrawingKeys, total=False):
     """One painted path. "f" fill, "s" stroke, "fs" both with the same items."""
 
-    fill:tuple[float, float, float] | None    # 0-1 RGB ("f", "fs")
+    fill: Rgb | None            # 0-1 RGB ("f", "fs")
     fill_opacity: float
     even_odd: bool
     soft_mask: bool             # transparency without alpha: a soft mask or a blend mode
-    color: tuple[float, float, float] | None   # 0-1 RGB stroke ("s", "fs")
+    color: Rgb | None           # 0-1 RGB stroke ("s", "fs")
     stroke_opacity: float
     width: float                # stroke width as drawn
+
+
+def fill_drawing(*, items: list[DrawingItem], rect: Box, even_odd: bool, fill: Rgb | None, fill_opacity: float,
+                 obj: int, soft_mask: bool) -> Drawing:
+    """A path's fill as every backend writes it."""
+    return {"type": "f", "items": items, "rect": rect, "even_odd": even_odd, "fill": fill,
+            "fill_opacity": fill_opacity, "object": obj, "soft_mask": soft_mask}
+
+
+def add_stroke(out: list[Drawing], *, items: list[DrawingItem], rect: Box, color: Rgb | None,
+               stroke_opacity: float, width: float, obj: int) -> None:
+    """A path's stroke onto `out`: its own drawing, or - when the drawing before it is the same
+    path's fill with the same items - that fill made "fs" (its keys kept, the stroke's added)."""
+    prev = out[-1] if out else None
+    if prev is not None and prev["type"] == "f" and prev["items"] == items:
+        prev["color"] = color
+        prev["stroke_opacity"] = stroke_opacity
+        prev["width"] = width
+        prev["type"] = "fs"
+    else:
+        out.append({"type": "s", "items": items, "rect": rect, "color": color, "stroke_opacity": stroke_opacity,
+                    "width": width, "object": obj})
 
 
 class ImageInfo(TypedDict):
@@ -173,6 +210,11 @@ class UriLink(TypedDict):
 
 
 Link = Union[PageLink, UriLink]  # every backend writes one of the two, never neither
+
+
+class Metadata(TypedDict):
+    title: str                  # "" when absent
+    producer: str
 
 
 # ---------------------------------------------------------------------- the contract
@@ -239,11 +281,11 @@ class PdfDocument(Protocol):
     def __getitem__(self, index: int) -> PdfPage:
         """Page `index` (negative counts from the end); the same object each time."""
 
-    def __iter__(self): ...
+    def __iter__(self) -> Iterator[PdfPage]: ...
 
     @property
-    def metadata(self) -> dict:
-        """{"title": str, "producer": str}, "" when absent."""
+    def metadata(self) -> Metadata:
+        """The title and the producer, "" when absent."""
 
     def label(self, index: int) -> str:
         """The page label ("" when the document has none; possibly a raw <FEFF...> string)."""
@@ -251,7 +293,7 @@ class PdfDocument(Protocol):
     def named_dests(self) -> list[tuple[str, int]]:
         """(name, page index) of the named destinations; -1 for a deleted page."""
 
-    def save(self, pages: Sequence[int] | None = None, boxes: dict[int, Box] | None = None) -> bytes:
+    def save(self, pages: Sequence[int] | None = None, boxes: Mapping[int, Box] | None = None) -> bytes:
         """A new PDF file: only `pages` (original indices, in document order; all when None),
         each page in `boxes` cut to that area (page space) as its media and crop box. The
         document itself is left as it is."""
@@ -267,7 +309,7 @@ class PdfBackend(Protocol):
         """A PDF file by path, or its bytes. Raises PdfError for anything unreadable."""
 
 
-def renders(backend) -> bool:
+def renders(backend: PdfBackend) -> bool:
     """Whether a backend draws pages. One that does not says so with `renders = False` (the pure
     Python reader: extract and classify run on it; render, fidelity and the checks do not);
     `render` then raises PdfError where it cannot draw, and `EmbeddedImage.pixels`/`rendered` may be
@@ -278,9 +320,11 @@ def renders(backend) -> bool:
 # ---------------------------------------------------------------------- helpers every backend shares
 
 
-def char_box(ox, oy, ux, uy, advance, size, ascent, descent) -> Box:
+def char_box(ox: float, oy: float, ux: float, uy: float, advance: float, size: float, ascent: float,
+             descent: float) -> Box:
     vx, vy = uy, -ux  # "up" in glyph space
-    xs, ys = [], []
+    xs: list[float] = []
+    ys: list[float] = []
     for along in (0.0, advance):
         for up in (ascent * size, descent * size):
             xs.append(ox + ux * along + vx * up)
@@ -288,12 +332,13 @@ def char_box(ox, oy, ux, uy, advance, size, ascent, descent) -> Box:
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def cff_font_bbox(data: bytes) -> list[float] | None:
-    """FontBBox from the top DICT of a bare CFF font program (FontFile3/Type1C)."""
+def cff_font_bbox(data: bytes) -> Box | None:
+    """FontBBox from the top DICT of a bare CFF font program (FontFile3/Type1C); None when the
+    program is cut short or its FontBBox has fewer than four numbers."""
     try:
         pos = data[2]
 
-        def index(pos):  # -> (entries, position after the INDEX)
+        def index(pos: int) -> tuple[list[bytes], int]:  # -> (entries, position after the INDEX)
             count = int.from_bytes(data[pos:pos + 2], "big")
             if count == 0:
                 return [], pos + 2
@@ -304,12 +349,15 @@ def cff_font_bbox(data: bytes) -> list[float] | None:
 
         _, pos = index(pos)  # names
         tops, _ = index(pos)
-        d, i, operands = tops[0], 0, []
+        d, i = tops[0], 0
+        operands: list[float] = []
         while i < len(d):
             b0 = d[i]
             if b0 <= 21:  # operator
                 if b0 == 5:
-                    return operands[:4]
+                    if len(operands) < 4:
+                        return None
+                    return operands[0], operands[1], operands[2], operands[3]
                 i += 2 if b0 == 12 else 1
                 operands = []
             elif b0 == 28:
@@ -327,7 +375,7 @@ def cff_font_bbox(data: bytes) -> list[float] | None:
                 operands.append((b0 - 247) * 256 + d[i + 1] + 108); i += 2
             else:
                 operands.append(-(b0 - 251) * 256 - d[i + 1] - 108); i += 2
-        return [0, 0, 0, 0]  # not given: the default
+        return 0, 0, 0, 0  # not given: the default
     except (IndexError, ValueError):
         return None
 
@@ -385,26 +433,35 @@ def join_surrogates(s: str) -> str:
         return "".join(chr(0xFFFD) if "\ud800" <= u <= "\udfff" else u for u in s)
 
 
-def mul(m: tuple, n: tuple) -> Matrix:
+def mul(m: Matrix, n: Matrix) -> Matrix:
     """m then n (PDF row-vector convention: [a b c d e f])."""
     a, b, c, d, e, f = m
     A, B, C, D, E, F = n
     return (a * A + b * C, a * B + b * D, c * A + d * C, c * B + d * D, e * A + f * C + E, e * B + f * D + F)
 
 
-def transform_box(box: tuple, m: tuple) -> Box:
+def transform_box(box: Box, m: Matrix) -> Box:
     x0, y0, x1, y1 = box
     pts = [(m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]) for x in (x0, x1) for y in (y0, y1)]
     return min(p[0] for p in pts), min(p[1] for p in pts), max(p[0] for p in pts), max(p[1] for p in pts)
 
 
-def _commands(segments) -> list[tuple]:
+# What `_commands` makes of a path's segments, told apart by their first element.
+_Move = tuple[Literal["m"], Point]
+_LineTo = tuple[Literal["l"], Point]
+_CurveTo = tuple[Literal["c"], Point, Point, Point]
+_Close = tuple[Literal["h"]]
+_Command = Union[_Move, _LineTo, _CurveTo, _Close]
+
+
+def _commands(segments: Sequence[Segment]) -> list[_Command]:
     """Path segments (kind, x, y, closes) as move / line / curve / close commands. A subpath is
     closed with a line back to its start carrying the close flag; that line is the close itself.
     Degenerate curves become lines and lines that go nowhere are dropped."""
-    out: list[tuple] = []
-    start = current = None
-    bezier: list = []
+    out: list[_Command] = []
+    start: Point | None = None
+    current: Point | None = None
+    bezier: list[Point] = []
     for kind, x, y, closes in segments:
         p = (x, y)
         if kind == SEG_MOVE:
@@ -447,7 +504,12 @@ def _commands(segments) -> list[tuple]:
     return out
 
 
-def curve_extremes(p0, p1, p2, p3) -> list[tuple[float, float]]:
+def _bezier(u: float, t: float, a: float, b: float, c: float, d: float) -> float:
+    """One coordinate of a cubic Bézier curve at t (u = 1 - t)."""
+    return u ** 3 * a + 3 * u * u * t * b + 3 * u * t * t * c + t ** 3 * d
+
+
+def curve_extremes(p0: Point, p1: Point, p2: Point, p3: Point) -> list[Point]:
     """The points bounding a cubic Bézier curve: its ends and where it turns in x or y. (Its
     control points can lie far outside: a curved arrow's reach up into the frame title.)"""
     out = [p3]
@@ -455,6 +517,7 @@ def curve_extremes(p0, p1, p2, p3) -> list[tuple[float, float]]:
         a = -p0[k] + 3 * p1[k] - 3 * p2[k] + p3[k]
         b = 2 * (p0[k] - 2 * p1[k] + p2[k])
         c = p1[k] - p0[k]
+        roots: list[float]
         if abs(a) < 1e-9:
             roots = [-c / b] if abs(b) > 1e-9 else []
         else:
@@ -463,65 +526,71 @@ def curve_extremes(p0, p1, p2, p3) -> list[tuple[float, float]]:
         for t in roots:
             if 0 < t < 1:
                 u = 1 - t
-                out.append(tuple(u ** 3 * p0[i] + 3 * u * u * t * p1[i] + 3 * u * t * t * p2[i] + t ** 3 * p3[i]
-                                 for i in (0, 1)))
+                out.append((_bezier(u, t, p0[0], p1[0], p2[0], p3[0]), _bezier(u, t, p0[1], p1[1], p2[1], p3[1])))
     return out
 
 
-def trace(segments, filled: bool):
+def _grown(rect: Box | None, p: Point) -> Box:
+    """`rect` grown to take in `p` (the point itself when there is no rect yet)."""
+    if rect is None:
+        return p[0], p[1], p[0], p[1]
+    return min(rect[0], p[0]), min(rect[1], p[1]), max(rect[2], p[0]), max(rect[3], p[1])
+
+
+def trace(segments: Sequence[Segment], filled: bool) -> tuple[list[DrawingItem], Box] | None:
     """Path items and the bounding box of their points, for one way of painting the path, from
     segments (SEG_* kind, x, y, closes) in page space. None for a path with nothing to draw."""
-    items: list[tuple] = []
-    rect = None
+    items: list[DrawingItem] = []
+    rect: Box | None = None
     first = last = (0.0, 0.0)
     have_move = False
-    lines = 0  # consecutive lines
-
-    def include(p):
-        nonlocal rect
-        rect = [p[0], p[1], p[0], p[1]] if rect is None else \
-            [min(rect[0], p[0]), min(rect[1], p[1]), max(rect[2], p[0]), max(rect[3], p[1])]
+    lines: list[LineItem] = []  # the lines drawn one after another since the last move, curve, close or quad
 
     for cmd in _commands(segments):
         if cmd[0] == "m":
             last = first = cmd[1]
             if rect is None:
-                include(last)
-            have_move, lines = True, 0
+                rect = _grown(rect, last)
+            have_move = True
+            lines = []
         elif cmd[0] == "l":
             p = cmd[1]
-            include(p)
-            items.append(("l", last, p))
+            rect = _grown(rect, p)
+            line: LineItem = ("l", last, p)
+            items.append(line)
+            lines.append(line)
             last = p
-            lines += 1
-            if lines == 4 and not filled and _to_quad(items):
-                lines = 0
+            if len(lines) == 4 and not filled and _to_quad(items, lines):
+                lines = []
         elif cmd[0] == "c":
-            lines = 0
-            for q in curve_extremes(last, *cmd[1:]):
-                include(q)
-            items.append(("c", last, *cmd[1:]))
-            last = cmd[3]
-        else:  # close
-            if lines == 3:
-                lines = 0
-                if _to_rect(items):
-                    continue
-            lines = 0
+            _, c1, c2, to = cmd
+            lines = []
+            for q in curve_extremes(last, c1, c2, to):
+                rect = _grown(rect, q)
+            items.append(("c", last, c1, c2, to))
+            last = to
+        elif cmd[0] == "h":
+            closed = lines
+            lines = []
+            if len(closed) == 3 and _to_rect(items, closed):
+                continue
             if have_move and last != first:
                 items.append(("l", last, first))
                 last = first
             have_move = False
-    if not items:
+        else:
+            assert_never(cmd)
+    if not items or rect is None:  # (a path with items has a rect: its first move is in it)
         return None
-    return items, tuple(rect)
+    return items, rect
 
 
-def _to_rect(items: list) -> bool:
-    """The last three lines plus the closing line form an axis-aligned rectangle drawn the way
-    the PDF `re` operator draws one (horizontal edge first): one "re" item. Rectangles drawn
-    as explicit lines starting with a vertical edge (PGF's) stay four lines."""
-    (_, p0, p1), (_, _, p2), (_, _, p3) = items[-3:]
+def _to_rect(items: list[DrawingItem], lines: Sequence[LineItem]) -> bool:
+    """The last three lines (`lines`, the last three items) plus the closing line form an
+    axis-aligned rectangle drawn the way the PDF `re` operator draws one (horizontal edge first):
+    one "re" item. Rectangles drawn as explicit lines starting with a vertical edge (PGF's) stay
+    four lines."""
+    (_, p0, p1), (_, _, p2), (_, _, p3) = lines
     if not (p0[1] == p1[1] and p1[0] == p2[0] and p2[1] == p3[1] and p3[0] == p0[0]):
         return False
     xs, ys = [p0[0], p2[0]], [p0[1], p2[1]]
@@ -530,11 +599,11 @@ def _to_rect(items: list) -> bool:
     return True
 
 
-def _to_quad(items: list) -> bool:
-    """Four lines of a stroked path that end where they started: one "qu" item."""
-    last4 = items[-4:]
-    if last4[-1][2] != last4[0][1]:
+def _to_quad(items: list[DrawingItem], lines: Sequence[LineItem]) -> bool:
+    """Four lines of a stroked path (`lines`, the last four items) that end where they started:
+    one "qu" item."""
+    if lines[-1][2] != lines[0][1]:
         return False
     del items[-4:]
-    items.append(("qu", tuple(line[1] for line in last4)))
+    items.append(("qu", (lines[0][1], lines[1][1], lines[2][1], lines[3][1])))
     return True

@@ -6,17 +6,24 @@ products - extract and classify through it write the deck.json PDFium's backend 
 raw.json whose numbers differ at most in the last rounded digit (PDFium computes in float32; the
 reader rounds where PDFium stores a float, but not after every operation)."""
 
+from __future__ import annotations
+
 import dataclasses
 import json
 import re
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Callable, Iterable, Sequence, TypedDict
 
 import numpy as np
 import pytest
 
 from beamer2slides import pdf
-from beamer2slides.pdf.api import OBJ_IMAGE, PdfError
+from beamer2slides.arrays import Pixels
+from beamer2slides.pdf.api import OBJ_IMAGE, Box, Char, PdfError, PdfPage
+
+if TYPE_CHECKING:
+    from beamer2slides.devtools.render_torture_text import FontSpec
 
 HERE = Path(__file__).parent
 OUT = HERE / "decks" / "out"
@@ -31,25 +38,27 @@ IMAGE_FIELDS = ("px", "box", "matrix", "filters", "colorspace", "bpp", "dpi", "r
                 "upright", "blended", "transparent")
 
 
-def close(a, b, where=""):
+def close(a: object, b: object, where: str) -> None:
     """Equal, floats up to float32 noise (PDFium's values are C floats)."""
     if isinstance(a, dict):
         assert isinstance(b, dict) and a.keys() == b.keys(), where
         for k in a:
             close(a[k], b[k], f"{where}[{k!r}]")
     elif isinstance(a, (list, tuple)):
-        assert isinstance(b, (list, tuple)) and len(a) == len(b), f"{where}: {len(a)} != {len(b)}"
+        assert isinstance(b, (list, tuple)), f"{where}: {b!r} is no sequence"
+        assert len(a) == len(b), f"{where}: {len(a)} != {len(b)}"
         for k, (x, y) in enumerate(zip(a, b)):
             close(x, y, f"{where}[{k}]")
     elif isinstance(a, float) or isinstance(b, float):
-        assert a is not None and b is not None and abs(a - b) <= 1e-3 * max(1.0, abs(b)), f"{where}: {a!r} != {b!r}"
+        assert isinstance(a, (int, float)) and isinstance(b, (int, float)), f"{where}: {a!r} != {b!r}"
+        assert abs(a - b) <= 1e-3 * max(1.0, abs(b)), f"{where}: {a!r} != {b!r}"
     else:
         assert a == b, f"{where}: {a!r} != {b!r}"
 
 
 @built
 @pytest.mark.parametrize("path", DECKS, ids=lambda p: p.stem)
-def test_the_pure_reader_answers_what_pdfium_answers(path):
+def test_the_pure_reader_answers_what_pdfium_answers(path: Path) -> None:
     ours, theirs = pdf.resolve("pure").open(path), pdf.resolve("pdfium").open(path)
     try:
         assert len(ours) == len(theirs)
@@ -61,11 +70,12 @@ def test_the_pure_reader_answers_what_pdfium_answers(path):
             close((a.width, a.height), (b.width, b.height), where)
             close([dataclasses.astuple(o) for o in a.objects()], [dataclasses.astuple(o) for o in b.objects()],
                   f"{where} objects")
-            for call in ("object_bounds", "drawings", "images", "links"):
-                close(getattr(a, call)(), getattr(b, call)(), f"{where} {call}")
+            close(a.object_bounds(), b.object_bounds(), f"{where} object_bounds")
+            close(a.drawings(), b.drawings(), f"{where} drawings")
+            close(a.images(), b.images(), f"{where} images")
+            close(a.links(), b.links(), f"{where} links")
             chars_a, chars_b = a.chars(), b.chars()
-            drop = lambda c: {k: v for k, v in dataclasses.asdict(c).items() if k != "font_id"}  # noqa: E731
-            close([drop(c) for c in chars_a], [drop(c) for c in chars_b], f"{where} chars")
+            close([_without_font_id(c) for c in chars_a], [_without_font_id(c) for c in chars_b], f"{where} chars")
             close(a.glyph_widths([(c.font_id, c.c, c.size) for c in chars_a]),
                   b.glyph_widths([(c.font_id, c.c, c.size) for c in chars_b]), f"{where} glyph_widths")
             for po in a.objects():
@@ -92,13 +102,14 @@ def test_an_images_dpi_is_pdfiums_to_the_last_bit():
             for a, b in zip(ours, theirs):
                 for po in a.objects():
                     if po.type == OBJ_IMAGE:
-                        assert a.embedded_image(po.id).dpi == b.embedded_image(po.id).dpi, (path.stem, a.index)
+                        x, y = a.embedded_image(po.id), b.embedded_image(po.id)
+                        assert x is not None and y is not None and x.dpi == y.dpi, (path.stem, a.index)
         finally:
             ours.close()
             theirs.close()
 
 
-def numbers_apart(a, b, where="") -> int:
+def numbers_apart(a: object, b: object, where: str) -> int:
     """How many numbers of two JSON trees differ (each by at most 0.01); anything else must be equal."""
     if isinstance(a, dict):
         assert isinstance(b, dict) and a.keys() == b.keys(), where
@@ -172,7 +183,7 @@ def test_whole_beamer_pages_render_as_pdfium_renders_them():
 # ---------------------------------------------------------------------- rendering (paths so far)
 
 # pages the torture harness (devtools/render_torture.py) found apart once, shrunk
-RENDER_CASES = {
+RENDER_CASES: dict[str, tuple[bytes, list[tuple[bytes, bytes]], float, bool]] = {
     # DrawFillStrokePath: a translucent stroke is a knockout over the fill, on a sub-bitmap
     "fill_stroke_knockout": (b"q 0.2 0.5 0.8 rg 0.9 0.1 0.1 RG 8 w /A0 gs 20 20 m 180 40 l 100 130 l h B Q", [], 1.37, False),
     "fill_stroke_knockout_clear": (b"q 0.2 0.5 0.8 rg 0.9 0.1 0.1 RG 8 w /A2 gs 20 20 m 180 40 l 100 130 l h b* Q", [], 2, True),
@@ -204,7 +215,7 @@ RENDER_CASES = {
 
 
 @pytest.mark.parametrize("name", RENDER_CASES)
-def test_the_pure_renderer_draws_pdfiums_pixels(name):
+def test_the_pure_renderer_draws_pdfiums_pixels(name: str) -> None:
     from beamer2slides.devtools.render_torture import compare
     content, forms, zoom, transparent = RENDER_CASES[name]
     assert compare(content, zoom, transparent, forms)[0] == 0
@@ -212,11 +223,11 @@ def test_the_pure_renderer_draws_pdfiums_pixels(name):
 
 @pytest.mark.parametrize("forms,page,mutated", [(False, False, False), (True, False, False), (False, True, False),
                                                 (True, True, True)], ids=["pages", "forms", "geometry", "mutated"])
-def test_the_pure_renderer_survives_torture_seeds(forms, page, mutated):
+def test_the_pure_renderer_survives_torture_seeds(forms: bool, page: bool, mutated: bool) -> None:
     """A slice of the random pages the renderer was made exact on (5,500 seeds of pages, 3,000
     with forms, when it was written; 2,000 mutated): any pixel apart fails."""
     from beamer2slides.devtools.render_torture import case, compare
-    apart = {}
+    apart: dict[int, int] = {}
     for seed in range(40):
         content, fs, zoom, transparent, geometry = case(seed, forms, page, mutated)
         n = compare(content, zoom, transparent, fs, geometry)[0]
@@ -231,7 +242,7 @@ def test_the_pure_renderer_survives_torture_seeds(forms, page, mutated):
 _GROUND = b"q 0.9 0.6 0.1 rg 10 10 150 110 re f Q\n"
 # (page content, items, zoom, transparent): items as devtools/render_torture_transparency.pdf_bytes
 # takes them; /A0-/A4 are constant alphas 0.5 0.25 0.8 0 1, /B<k> the blend mode BLENDS[k]
-TRANSPARENCY_CASES = {
+TRANSPARENCY_CASES: dict[str, tuple[bytes, list[tuple[str, bytes, bytes, bytes]], float, bool]] = {
     # CPDF_ContentParser::CheckClip: a form's /BBox that holds its fill drops the clip, which moves
     # the fill's edge pixels where both edges coincide (torture seeds 172 and 241)
     "check_clip": (b"q\n0.6381 -1.2322 0.0402 -1.8177 83.337 100.751 cm\n/X0 Do\nQ",
@@ -270,18 +281,18 @@ TRANSPARENCY_CASES = {
 
 
 @pytest.mark.parametrize("name", TRANSPARENCY_CASES)
-def test_the_pure_renderer_draws_pdfiums_transparency(name):
+def test_the_pure_renderer_draws_pdfiums_transparency(name: str) -> None:
     from beamer2slides.devtools.render_torture_transparency import compare
     content, items, zoom, transparent = TRANSPARENCY_CASES[name]
     assert compare(content, zoom, transparent, items)[0] == 0
 
 
 @pytest.mark.parametrize("page", [False, True], ids=["pages", "geometry"])
-def test_the_pure_renderer_survives_transparency_torture_seeds(page):
+def test_the_pure_renderer_survives_transparency_torture_seeds(page: bool) -> None:
     """A slice of the random pages with soft masks, groups, alphas and blend modes the renderer
     was made exact on (6,000 seeds, half with page geometry, when it was written)."""
     from beamer2slides.devtools.render_torture_transparency import case, compare
-    apart = {}
+    apart: dict[int, int] = {}
     for seed in range(40):
         content, items, zoom, transparent, geometry = case(seed, page)
         n = compare(content, zoom, transparent, items, geometry)[0]
@@ -291,7 +302,7 @@ def test_the_pure_renderer_survives_transparency_torture_seeds(page):
     assert not apart, f"seeds apart (python tools/render_torture_transparency.py SEED 1{flags}): {apart}"
 
 
-def _render_with(backend: str, data: bytes, zoom: float = 1.37):
+def _render_with(backend: str, data: bytes, zoom: float) -> Pixels:
     doc = pdf.resolve(backend).open(data)
     try:
         return doc[0].render(zoom)
@@ -308,7 +319,7 @@ def test_the_pure_renderer_draws_soft_mask_transfer_functions():
              b"0.5 g 0 0 100 100 re f 0.2 g 60 40 120 90 re f",
              b"/S /Luminosity /TR << /FunctionType 2 /Domain [0 1] /C0 [1] /C1 [0] /N 1.6 >>")]
     data = pdf_bytes(b"q /S0 gs 0 0 1 rg 0 0 200 150 re f Q", mask)
-    a, b = (_render_with(name, data) for name in ("pdfium", "pure"))
+    a, b = (_render_with(name, data, 1.37) for name in ("pdfium", "pure"))
     assert np.array_equal(a, b)
     assert len({tuple(p) for p in a.reshape(-1, 4)}) >= 3
 
@@ -327,8 +338,8 @@ def test_the_pure_renderer_draws_transfer_functions_as_pdfium_does():
                b" q /T1 gs 0.9 0.3 0.1 rg 100 10 90 60 re f 0.3 0.1 0.7 0.2 k 30 80 60 60 re f Q"
                b" q /T2 gs 0.1 0.8 0.4 rg 120 80 60 60 re f Q q /T0 gs 1 0 0 1 0 60 cm /S0 sh Q")
     shading = b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 200 0] /Function 3 0 R >>"
-    data = pdf_bytes([content], _SHADING_OBJECTS, (_shading_resources({b"S0": shading}), gs))
-    a, b = (_render_with(name, data) for name in ("pdfium", "pure"))
+    data = pdf_bytes([content], _SHADING_OBJECTS, (_shading_resources({b"S0": shading}, None), gs))
+    a, b = (_render_with(name, data, 1.37) for name in ("pdfium", "pure"))
     assert np.array_equal(a, b)
     assert len({tuple(p) for p in a.reshape(-1, 4)}) > 10
 
@@ -350,7 +361,7 @@ _SHADING_OBJECTS = [
 ]
 
 
-def _shading_resources(shadings: dict, patterns: dict | None = None) -> bytes:
+def _shading_resources(shadings: dict[bytes, bytes], patterns: dict[bytes, bytes] | None) -> bytes:
     out = b" /Shading << " + b" ".join(b"/%s %s" % kv for kv in shadings.items()) + b" >>"
     if patterns:
         out += b" /Pattern << " + b" ".join(b"/%s %s" % kv for kv in patterns.items()) + b" >>"
@@ -364,7 +375,7 @@ SHADING_CASES = {
     "radial_decreasing_by_the_truncated_distance": (
         b"q 1 0 0 1 20 10 cm /S0 sh Q", _SHADING_OBJECTS, _shading_resources({
             b"S0": b"<< /ShadingType 3 /ColorSpace /DeviceCMYK /Coords [80 60 13.2 83.5 60 10] /Extend [true true]"
-                   b" /Function 3 0 R >>"}), 3.1, False, ()),
+                   b" /Function 3 0 R >>"}, None), 3.1, False, ()),
     # a sampled function (Decode, 7 samples) and a PostScript one (sin, exp, roll, ifelse) through
     # a Separation and a DeviceN colour space, clipped, on a clear bitmap
     "sampled_and_postscript_functions": (
@@ -372,7 +383,7 @@ SHADING_CASES = {
             b"S0": b"<< /ShadingType 2 /ColorSpace [/Separation /Ink /DeviceRGB 1 0 R] /Coords [10 10 190 140]"
                    b" /Function << /FunctionType 2 /Domain [0 1] /C0 [0] /C1 [1] /N 1 >> >>",
             b"S1": b"<< /ShadingType 3 /ColorSpace [/DeviceN [/A] /DeviceRGB 2 0 R] /Coords [60 60 0 90 70 50]"
-                   b" /Domain [0.2 0.9] /Function %s /Extend [false true] >>" % _TINT}), 1.37, True, ()),
+                   b" /Domain [0.2 0.9] /Function %s /Extend [false true] >>" % _TINT}, None), 1.37, True, ()),
     # shading patterns: a fill with /Matrix and /Background and a /BBox, a translucent stroke, and
     # a pattern used inside a form, whose /Matrix is the pattern's parent matrix
     "patterns_filled_stroked_and_in_forms": (
@@ -400,12 +411,12 @@ SHADING_CASES = {
                    b" /Coords [50 125 0 50 125 40] /Function << /FunctionType 2 /Domain [0 1] /C0 [0.05] /C1 [0.95]"
                    b" /N 1 >> /Extend [true true] >>",
             b"S3": b"<< /ShadingType 1 /ColorSpace [/Lab << /WhitePoint [0.9505 1 1.089] >>] /Domain [0 1 0 1]"
-                   b" /Matrix [100 0 0 50 100 100] /Function 4 0 R >>"}), 1.37, False, ()),
+                   b" /Matrix [100 0 0 50 100 100] /Function 4 0 R >>"}, None), 1.37, False, ()),
 }
 
 
 @pytest.mark.parametrize("name", sorted(SHADING_CASES))
-def test_the_pure_renderer_draws_pdfiums_shadings(name):
+def test_the_pure_renderer_draws_pdfiums_shadings(name: str) -> None:
     from beamer2slides.devtools.render_torture_shading import compare
     content, objects, resources, zoom, transparent, forms = SHADING_CASES[name]
     n, a, _, _ = compare(content, objects, resources, zoom, transparent, forms)
@@ -437,14 +448,14 @@ _SHADING_SEEDS = [("cie", 5), ("cie", 48), ("mesh", 21), ("mesh", 35), ("mesh", 
 
 
 @pytest.mark.parametrize("mode, seed", _SHADING_SEEDS)
-def test_the_pure_renderer_draws_these_shading_torture_seeds(mode, seed):
+def test_the_pure_renderer_draws_these_shading_torture_seeds(mode: str, seed: int) -> None:
     from beamer2slides.devtools.render_torture_shading import run
     stats = run(seed, 1, verbose=False, mode=mode)
     assert stats["drawn"] == 1, stats
 
 
 @pytest.mark.parametrize("mode", ["cie", "func", "mesh", "transfer"])
-def test_the_pure_renderer_survives_new_shading_torture_modes(mode):
+def test_the_pure_renderer_survives_new_shading_torture_modes(mode: str) -> None:
     """CIE colour spaces, function-based and mesh shadings, transfer functions: a slice of the
     random pages each mode was made exact on (1,200+ seeds per mode when it was written, none apart)."""
     from beamer2slides.devtools.render_torture_shading import run
@@ -483,7 +494,7 @@ IMAGE_SEEDS = [(4, s) for s in (144, 229, 230, 283, 325, 351, 788, 2626, 4459, 6
 
 
 @pytest.mark.parametrize("level,seed", IMAGE_SEEDS)
-def test_the_pure_renderer_draws_image_torture_seeds_as_pdfium(level, seed):
+def test_the_pure_renderer_draws_image_torture_seeds_as_pdfium(level: int, seed: int) -> None:
     from beamer2slides.devtools.render_torture_image import case, compare
     n, _a, _b, d = compare(*case(seed, level))
     assert n == 0, f"python tools/render_torture_image.py {seed} 1 --level {level}: {n if n is not None else d}"
@@ -530,10 +541,10 @@ _FAILS_VALIDATION = b"<< /ShadingType 2 /ColorSpace /DeviceRGB /Coords [0 0 200 
     # second call (shading_type_ is kept), so the second `sh` is drawn from a half-loaded pattern
     (_FAILS_VALIDATION, "fails validation"),
 ])
-def test_the_pure_renderer_refuses_shadings_it_cannot_draw_exactly(shading, reason):
+def test_the_pure_renderer_refuses_shadings_it_cannot_draw_exactly(shading: bytes, reason: str) -> None:
     from beamer2slides.devtools.render_torture_shading import pdf_bytes
     from beamer2slides.pdf.pure.backend import PureBackend
-    data = pdf_bytes([b"/S0 sh /S0 sh"], _SHADING_OBJECTS, _shading_resources({b"S0": shading}))
+    data = pdf_bytes([b"/S0 sh /S0 sh"], _SHADING_OBJECTS, _shading_resources({b"S0": shading}, None))
     with pytest.raises(PdfError, match=reason):
         PureBackend().open(data)[0].render(1.0)
 
@@ -545,7 +556,7 @@ def test_a_shading_that_fails_validation_is_dropped_at_its_first_sh_only():
     from beamer2slides.devtools.render_torture_shading import pdf_bytes
     from beamer2slides.pdf.api import OBJ_SHADING
     for content, count in ((b"/S0 sh", 0), (b"/S0 sh /S0 sh", 1), (b"/S0 sh /S0 sh /S0 sh", 2)):
-        data = pdf_bytes([content], _SHADING_OBJECTS, _shading_resources({b"S0": _FAILS_VALIDATION}))
+        data = pdf_bytes([content], _SHADING_OBJECTS, _shading_resources({b"S0": _FAILS_VALIDATION}, None))
         for name in ("pdfium", "pure"):
             doc = pdf.resolve(name).open(data)
             objs = doc[0].objects()
@@ -555,7 +566,7 @@ def test_a_shading_that_fails_validation_is_dropped_at_its_first_sh_only():
 
 # ---------------------------------------------------------------------- text
 
-def _text_font(stem, base):
+def _text_font(stem: str, base: str) -> FontSpec:
     """A font the text torture harvests from the test decks (devtools/render_torture_text.py),
     found by its deck and base name (the subset tag changes whenever the deck does)."""
     from beamer2slides.devtools.render_torture_text import harvest
@@ -580,14 +591,14 @@ TEXT_CASES = {
 
 
 @pytest.mark.parametrize("name", TEXT_CASES)
-def test_the_pure_renderer_draws_pdfiums_text(name):
+def test_the_pure_renderer_draws_pdfiums_text(name: str) -> None:
     from beamer2slides.devtools.render_torture_text import compare
     content, fonts, zoom, transparent = TEXT_CASES[name]
     assert compare(content, [_text_font(*f) for f in fonts], zoom, transparent)[0] == 0
 
 
 @pytest.mark.parametrize("simple", [1, 2], ids=["plain", "anything"])
-def test_the_pure_renderer_survives_text_torture_seeds(simple):
+def test_the_pure_renderer_survives_text_torture_seeds(simple: int) -> None:
     """A slice of the random text pages the renderer was made exact on (2,500 seeds when it was
     written: Tm, cm, clips, Tz/Tc/Tw/Ts, Tr 0..7, alpha, zooms). Char widths rounded once instead
     of after every float32 operation move a glyph by one ulp, which is enough to change coverage:
@@ -595,7 +606,8 @@ def test_the_pure_renderer_survives_text_torture_seeds(simple):
     from beamer2slides.devtools.render_torture_text import case, compare, harvest
     if not harvest():
         pytest.skip("no fonts to harvest (build the test decks)")
-    apart, refused = {}, 0
+    apart: dict[int, int] = {}
+    refused = 0
     for seed in range(80):
         content, fonts, zoom, transparent = case(seed, "any", simple)
         try:
@@ -612,11 +624,11 @@ def test_the_pure_renderer_survives_text_torture_seeds(simple):
 TRUETYPE_SEEDS = (1, 8, 11, 14, 16)
 
 
-def _truetype_seeds_apart():
+def _truetype_seeds_apart() -> dict[int, int]:
     from beamer2slides.devtools.render_torture_text import case, compare, harvest
     if not any(s.kind == "cid-truetype" for s in harvest()):
         pytest.skip("no embedded TrueType fonts to harvest (build 26_truetype_fonts)")
-    apart = {}
+    apart: dict[int, int] = {}
     for seed in TRUETYPE_SEEDS:
         n = compare(*case(seed, "cid-truetype", 2))[0]
         if n:
@@ -632,11 +644,11 @@ def test_the_pure_renderer_hints_truetype_text_as_pdfium_does():
     assert not apart, f"seeds apart (python tools/render_torture_text.py SEED 1 --kind cid-truetype): {apart}"
 
 
-def test_truetype_seeds_need_the_hinter(monkeypatch):
+def test_truetype_seeds_need_the_hinter(monkeypatch: pytest.MonkeyPatch) -> None:
     """The same seeds drawn from unhinted outlines differ from PDFium: the hinter is really exercised."""
     from beamer2slides.pdf.pure import truetype
 
-    def unhinted(self, gid):
+    def unhinted(self: truetype.TrueTypeFace, gid: int) -> object:
         try:
             return self._load(gid, False)
         except truetype._Fail:
@@ -645,7 +657,7 @@ def test_truetype_seeds_need_the_hinter(monkeypatch):
     assert 1 in _truetype_seeds_apart()
 
 
-def _sfnt_around_cff(spec, tag):
+def _sfnt_around_cff(spec: FontSpec, tag: str) -> FontSpec:
     """`spec` (a simple Type1C font) with its CFF wrapped in an sfnt (/Subtype /OpenType) tagged `tag`."""
     import io
     import zlib
@@ -723,8 +735,8 @@ def test_text_clips_clip_what_follows_them_as_in_pdfium():
     body = b"BT /F0 60 Tf 7 Tr 10 30 Td <%s> Tj ET 1 0 0 rg 0 0 200 150 re f" % (
         b"%02x" % cff[0].codes[0] * 3)
     n, a, b, _ = compare(body, cff, 1, False)
-    assert n == 0
-    red = (b[..., 0] == 255) & (b[..., 1] == 0)
+    assert n == 0 and b is not None
+    red =(b[..., 0] == 255) & (b[..., 1] == 0)
     assert 0 < red.sum() < red.size // 4           # the glyphs, not the page
 
 
@@ -764,7 +776,9 @@ def test_vertical_writing_reads_and_draws_as_pdfium():
         from beamer2slides.devtools.render_torture_text import FontSpec
         spec = cff[0]
         head = spec.objects[0].replace(b"/Identity-H", b"/Identity-V")
-        k = int(re.search(rb"/DescendantFonts\s*\[\s*@(\d+)@", head).group(1))
+        found = re.search(rb"/DescendantFonts\s*\[\s*@(\d+)@", head)
+        assert found is not None
+        k = int(found.group(1))
         objs = [head, *spec.objects[1:]]
         objs[k] = objs[k].replace(b"<<", b"<</W2 [%d %d -500 250 800] /DW2 [900 -1200]" % (
             spec.codes[0], spec.codes[0]), 1)
@@ -800,10 +814,12 @@ def test_the_pure_renderer_draws_system_substitutes_and_type3_text():
 # ---------------------------------------------------------------------- Type 3 text
 
 
-def _type3_pdf(glyphs: dict, page: bytes, matrix=b"1 0 0 1 0 0", widths=None, fonts_in_glyphs=()):
+def _type3_pdf(glyphs: dict[str, list[bytes]], page: bytes, matrix: bytes, widths: dict[str, bytes] | None,
+               fonts_in_glyphs: Sequence[str]) -> tuple[bytes, list[bytes], list[tuple[bytes, int]]]:
     """A page over made-up Type 3 fonts: `glyphs` {font name: [glyph procedures]}; the first font
     is /T0 and every font's /Resources name the others as /N<i> (in order)."""
-    objects, procs = [], {}
+    objects: list[bytes] = []
+    procs: dict[str, list[int]] = {}
     names = list(glyphs)
     for name in names:
         procs[name] = []
@@ -828,7 +844,7 @@ def _type3_pdf(glyphs: dict, page: bytes, matrix=b"1 0 0 1 0 0", widths=None, fo
 
 
 # (fonts, page, font matrix, widths, fonts named in glyphs): pages found apart once, shrunk
-TYPE3_CASES = {
+TYPE3_CASES: dict[str, tuple[dict[str, list[bytes]], bytes, bytes, dict[str, bytes] | None, tuple[str, ...]]] = {
     # a /Widths entry of 0.5025 under FontMatrix 1 is 502.5 in floats and rounds to 503, not 502
     "widths_rounded_in_floats": ({"T0": [b"0.2777 0 0 0 0 1 d1\nBT /N0 0.6518 Tf 0.0225 0.0237 Td <00> Tj ET"],
                                   "T1": [b"0.7199 0 0 0 1 1 d1\n0.1895 0.5222 0.0914 -0.18 re f\n0.7165 0.0603 m "
@@ -855,7 +871,7 @@ TYPE3_CASES = {
 
 
 @pytest.mark.parametrize("name", TYPE3_CASES)
-def test_the_pure_renderer_draws_pdfiums_type3_text(name):
+def test_the_pure_renderer_draws_pdfiums_type3_text(name: str) -> None:
     from beamer2slides.devtools.render_torture_type3 import compare
     glyphs, page, matrix, widths, inner = TYPE3_CASES[name]
     content, objects, fonts = _type3_pdf(glyphs, page, matrix, widths, inner)
@@ -884,20 +900,21 @@ def test_a_type3_font_box_is_truncated_toward_zero():
     0.01204 x 1000 = 445.48 is 445, not 446; -5 gives -60, not -61). The loose char boxes show it."""
     from beamer2slides.devtools.render_torture_type3 import pdf_bytes
     content, objects, fonts = _type3_pdf({"T0": [b"0 0 d0\n0 0 0.5 0.5 re f"]},
-                                         b"BT /T0 20 Tf 20 60 Td <0000> Tj ET", b"0.01204 0 0 0.01204 0 0")
+                                         b"BT /T0 20 Tf 20 60 Td <0000> Tj ET", b"0.01204 0 0 0.01204 0 0",
+                                         None, ())
     objects = [o.replace(b"/FontBBox [0 0 1 1]", b"/FontBBox [-5 -5 36 37]") for o in objects]
     data = pdf_bytes(content, objects, fonts)
     a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
     assert [dataclasses.astuple(c) for c in a.chars()] == [dataclasses.astuple(c) for c in b.chars()]
 
 
-def _needs_foxit():
+def _needs_foxit() -> None:
     from beamer2slides.pdf.pure import foxit
     if foxit.missing():
         pytest.skip(f"the Foxit faces are not in {foxit.cache_dir()}: python -m beamer2slides.pdf.pure.foxit")
 
 
-def _subst_font(base, flags, extra=b"", desc=b"", subtype=b"Type1"):
+def _subst_font(base: bytes, flags: int, extra: bytes, desc: bytes, subtype: bytes) -> FontSpec:
     from beamer2slides.devtools.render_torture_text import FontSpec
     return FontSpec(base.decode(), "unknown", [
         b"<< /Type /Font /Subtype /%s /BaseFont /%s %s /FontDescriptor @1@ >>" % (subtype, base, extra),
@@ -911,19 +928,20 @@ SUBST_TEXT_CASES = {
     # FoxitSansMM at weight 900 (kFontWeightExtraBold is 900, not 800: seed 67 of the subst torture)
     # skewed by the italic angle, each glyph blended to its /Widths width (AdjustVariationParams)
     "sans_mm_black_italic": (b"BT /F0 40 Tf 10 60 Td (AMWgy) Tj ET",
-                             [_subst_font(b"Wibble-Black", 0, _WIDTHS, b"/ItalicAngle -12 /FontWeight 900")], 1.37),
+                             [_subst_font(b"Wibble-Black", 0, _WIDTHS, b"/ItalicAngle -12 /FontWeight 900", b"Type1")], 1.37),
     # FoxitSerifMM (serif flag) at weight 300 * 4/5, no /Widths: the face's own advances, stroked too
     "serif_mm_light_no_widths": (b"BT /F0 30 Tf 5 40 Td 2 Tr 0.5 w (Quartz fig) Tj ET",
-                                 [_subst_font(b"Serifish-Light", 34, b"", b"/FontWeight 300")], 2),
+                                 [_subst_font(b"Serifish-Light", 34, b"", b"/FontWeight 300", b"Type1")], 2),
     # Symbol and ZapfDingbats: Foxit's CFF faces as they are
     "symbol_and_dingbats": (b"BT /F0 24 Tf 10 20 Td (abgpW) Tj /F1 24 Tf 10 80 Td (3456AZ) Tj ET",
-                            [_subst_font(b"Symbol", 4), _subst_font(b"ZapfDingbats", 4)], 1.37),
+                            [_subst_font(b"Symbol", 4, b"", b"", b"Type1"),
+                             _subst_font(b"ZapfDingbats", 4, b"", b"", b"Type1")], 1.37),
     # a styled ZapfDingbats keeps Foxit's face under a name that is not standard: glyphs whose /Widths
     # are wider move by half the excess, narrower ones are squeezed (the glyph spacing heuristic)
     # (the face's builtin encoding has no glyph for these codes: glyphs by name)
     "dingbats_spacing_heuristic": (b"BT /F0 30 Tf 5 60 Td (ABCDEF) Tj ET",
                                    [_subst_font(b"ZapfDingbats,Bold", 4, _WIDTHS + b" /Encoding << /Differences "
-                                                b"[65 /a1 /a2 /a10 /a20 /a71 /a100] >>")], 1.37),
+                                                b"[65 /a1 /a2 /a10 /a20 /a71 /a100] >>", b"", b"Type1")], 1.37),
     # letters Foxit's dingbats face has no glyph for: a non-embedded TrueType font with glyph 0 and
     # no /ToUnicode fails CPDF_Font::ShouldUseFont, so every one of them is drawn from the font's
     # fallback CFX_Font - LoadSubstFace("Arial", ...), GDI's Arial here - at its Unicode
@@ -938,7 +956,7 @@ SUBST_TEXT_CASES = {
 
 
 @pytest.mark.parametrize("name", SUBST_TEXT_CASES)
-def test_the_pure_renderer_draws_substituted_text_as_pdfium(name):
+def test_the_pure_renderer_draws_substituted_text_as_pdfium(name: str) -> None:
     from beamer2slides.devtools.render_torture_subst import compare
     _needs_foxit()
     content, fonts, zoom = SUBST_TEXT_CASES[name]
@@ -956,7 +974,8 @@ def test_the_pure_renderer_survives_substituted_text_torture_seeds():
     refused for one any more."""
     from beamer2slides.devtools.render_torture_subst import case, compare
     _needs_foxit()
-    apart, drawn = {}, 0
+    apart: dict[tuple[int, str], int] = {}
+    drawn = 0
     for seed, pool in [*((s, "any") for s in range(40)), *((s, "installed") for s in (18, 21, 29, *range(8)))]:
         try:
             n = compare(*case(seed, 2, pool))[0]
@@ -1109,11 +1128,11 @@ def test_a_damaged_flate_stream_keeps_what_decoded_before_the_damage():
     import random
     import zlib
 
-    def one_page(stream):
+    def one_page(stream: bytes) -> bytes:
         objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
                 b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 150] /Contents 4 0 R >>",
                 b"<< /Length %d /Filter /FlateDecode >>\nstream\n" % len(stream) + stream + b"\nendstream"]
-        out, offsets = bytearray(b"%PDF-1.7\n"), []
+        out, offsets = bytearray(b"%PDF-1.7\n"), list[int]()
         for i, o in enumerate(objs):
             offsets.append(len(out))
             out += b"%d 0 obj\n" % (i + 1) + o + b"\nendobj\n"
@@ -1138,9 +1157,11 @@ def test_a_damaged_flate_stream_keeps_what_decoded_before_the_damage():
         assert len(ours.objects()) == len(theirs.objects()), f"trial {trial}: damage at {k}"
 
 
-def _objects_pdf(objs: dict, root: int = 1, trailer: bytes = b"") -> bytes:
-    """A PDF of these object bodies with a correct cross-reference table (`trailer`: more entries)."""
-    out, offsets = bytearray(b"%PDF-1.4\n"), {}
+def _objects_pdf(objs: dict[int, bytes], trailer: bytes) -> bytes:
+    """A PDF of these object bodies, object 1 the catalog, with a correct cross-reference table
+    (`trailer`: more entries)."""
+    root = 1
+    out, offsets = bytearray(b"%PDF-1.4\n"), dict[int, int]()
     for n, body in objs.items():
         offsets[n] = len(out)
         out += b"%d 0 obj\n" % n + body + b"\nendobj\n"
@@ -1152,13 +1173,16 @@ def _objects_pdf(objs: dict, root: int = 1, trailer: bytes = b"") -> bytes:
                  % (size, root, trailer, xref))
 
 
-def _pages_said(backend, data, order):
+PagesSaid = tuple[int, list[tuple[int, int | None]]]
+
+
+def _pages_said(backend: str, data: bytes, order: Iterable[int]) -> str | PagesSaid:
     """(page count, [(index, width or None when the page does not load)]), or the refusal."""
     try:
         doc = pdf.resolve(backend).open(data)
     except PdfError:
         return "refused"
-    said = []
+    said: list[tuple[int, int | None]] = []
     try:
         for i in order:
             if i < len(doc):
@@ -1173,7 +1197,7 @@ def _pages_said(backend, data, order):
 
 _CAT = b"<< /Type /Catalog /Pages 2 0 R >>"
 _LEAF = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d 100] >>"
-PAGE_TREES = {
+PAGE_TREES: dict[str, dict[int, bytes]] = {
     # /Count is believed when 0 < Count < 0xFFFFF, else the kids are counted
     "count_more": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 3 >>", 3: _LEAF % 10},
     "count_less": {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 1 >>", 3: _LEAF % 10, 4: _LEAF % 20},
@@ -1222,34 +1246,58 @@ PAGE_TREES = {
 
 
 @pytest.mark.parametrize("name", PAGE_TREES)
-def test_page_trees_are_walked_as_pdfium_walks_them(name):
+def test_page_trees_are_walked_as_pdfium_walks_them(name: str) -> None:
     """CPDF_Document's page count and TraversePDFPages: which dictionary is page i depends on /Count,
     on kids that are no dictionaries, and on the order the pages were asked for (the traversal is
     stateful and caches what it passed)."""
-    data = _objects_pdf(PAGE_TREES[name])
+    data = _objects_pdf(PAGE_TREES[name], b"")
     for order in (range(8), range(7, -1, -1), [1, 0, 2, 1, 3, 0]):
         assert _pages_said("pure", data, order) == _pages_said("pdfium", data, order), list(order)
 
 
-def _nav_pdf(catalog=b"", annots=b"", objs=None, trailer=b"", last=False) -> bytes:
-    """Three pages; `annots` go on the first page (on the last one with `last`, so that a link's
-    destination is looked up before the pages it names were loaded)."""
+class NavCase(TypedDict, total=False):
+    """One navigation file: what its catalog, first page's /Annots, extra objects and trailer add; a
+    key left out adds nothing. `last` puts the annotations on the last page instead."""
+    catalog: bytes
+    annots: bytes
+    objs: dict[int, bytes]
+    trailer: bytes
+    last: bool
+
+
+def _nav_pdf(case: NavCase) -> bytes:
+    """Three pages; the annotations go on the first page (on the last one with `last`, so that a
+    link's destination is looked up before the pages it names were loaded)."""
+    annots = case.get("annots", b"")
     extras = [b"", b"", b""]
-    extras[2 if last else 0] = b"/Annots [" + annots + b"]" if annots else b""
-    o = {1: b"<< /Type /Catalog /Pages 2 0 R " + catalog + b" >>",
+    extras[2 if case.get("last", False) else 0] = b"/Annots [" + annots + b"]" if annots else b""
+    o = {1: b"<< /Type /Catalog /Pages 2 0 R " + case.get("catalog", b"") + b" >>",
          2: b"<< /Type /Pages /Kids [3 0 R 4 0 R 5 0 R] /Count 3 >>"}
     for i, extra in enumerate(extras):
         o[3 + i] = b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 200 100] " + extra + b" >>"
-    o.update(objs or {})
-    return _objects_pdf(o, trailer=trailer)
+    o.update(case.get("objs", {}))
+    return _objects_pdf(o, case.get("trailer", b""))
 
 
-def _link(dest=b"", action=b"", rect=b"[10 20 30 40]", subtype=b"/Link") -> bytes:
+_RECT = b"[10 20 30 40]"
+
+
+def _link(dest: bytes, action: bytes, rect: bytes, subtype: bytes) -> bytes:
     return (b"<< /Subtype " + subtype + b" /Rect " + rect + (b" /Dest " + dest if dest else b"")
             + (b" /A " + action if action else b"") + b" >>")
 
 
-def _stream(data: bytes, extra: bytes = b"") -> bytes:
+def _goto(dest: bytes) -> bytes:
+    """A /Link at `_RECT` going to `dest`."""
+    return _link(dest, b"", _RECT, b"/Link")
+
+
+def _act(action: bytes) -> bytes:
+    """A /Link at `_RECT` doing `action`."""
+    return _link(b"", action, _RECT, b"/Link")
+
+
+def _nav_stream(data: bytes, extra: bytes) -> bytes:
     return b"<< /Length %d %s >>\nstream\n%s\nendstream" % (len(data), extra, data)
 
 
@@ -1262,85 +1310,85 @@ def _names(tree: bytes) -> bytes:
 
 
 _TREE_OBJS = {30: b"[3 0 R /Fit]", 31: b"[4 0 R /Fit]", 32: b"[5 0 R /Fit]"}
-NAVIGATION = {
+NAVIGATION: dict[str, NavCase] = {
     # FPDFLink_GetAnnotRect: GetRectFor needs four numbers and normalises nothing; the rect's items
     # are read raw (a reference counts 0), a boolean is 0, numbers are C floats
-    "rect_reversed": {"annots": _link(b"[3 0 R]", rect=b"[30 40 10 20]")},
-    "rect_three": {"annots": _link(b"[3 0 R]", rect=b"[1 2 3]")},
-    "rect_ref_item": {"annots": _link(b"[3 0 R]", rect=b"[10 0 R 2 3 4]"), "objs": {10: b"7.5"}},
-    "rect_ref": {"annots": _link(b"[3 0 R]", rect=b"10 0 R"), "objs": {10: b"[5 6 7 8]"}},
-    "rect_bool": {"annots": _link(b"[3 0 R]", rect=b"[true 2 3 4]")},
+    "rect_reversed": {"annots": _link(b"[3 0 R]", b"", b"[30 40 10 20]", b"/Link")},
+    "rect_three": {"annots": _link(b"[3 0 R]", b"", b"[1 2 3]", b"/Link")},
+    "rect_ref_item": {"annots": _link(b"[3 0 R]", b"", b"[10 0 R 2 3 4]", b"/Link"), "objs": {10: b"7.5"}},
+    "rect_ref": {"annots": _link(b"[3 0 R]", b"", b"10 0 R", b"/Link"), "objs": {10: b"[5 6 7 8]"}},
+    "rect_bool": {"annots": _link(b"[3 0 R]", b"", b"[true 2 3 4]", b"/Link")},
     # FPDFLink_Enumerate: /Subtype read as a byte string (a string or a reference counts), a stream's
     # dictionary is an annotation too
-    "subtype_string": {"annots": _link(b"[3 0 R]", subtype=b"(Link)")},
-    "subtype_ref": {"annots": _link(b"[3 0 R]", subtype=b"10 0 R"), "objs": {10: b"/Link"}},
-    "subtype_widget": {"annots": _link(b"[3 0 R]", subtype=b"/Widget")},
-    "annot_stream": {"annots": b"10 0 R", "objs": {10: _stream(b"x", b"/Subtype /Link /Rect [1 2 3 4] /Dest [4 0 R]")}},
+    "subtype_string": {"annots": _link(b"[3 0 R]", b"", _RECT, b"(Link)")},
+    "subtype_ref": {"annots": _link(b"[3 0 R]", b"", _RECT, b"10 0 R"), "objs": {10: b"/Link"}},
+    "subtype_widget": {"annots": _link(b"[3 0 R]", b"", _RECT, b"/Widget")},
+    "annot_stream": {"annots": b"10 0 R", "objs": {10: _nav_stream(b"x", b"/Subtype /Link /Rect [1 2 3 4] /Dest [4 0 R]")}},
     # FPDFDest_GetDestPageIndex: a number is the index as is, a dictionary is found by object number
     # (a direct one has number 0: the first page not loaded yet), anything else is -1
-    "dest_number": {"annots": _link(b"[5 /Fit]")},
-    "dest_negative": {"annots": _link(b"[-7 /Fit]")},
-    "dest_real": {"annots": _link(b"[1.7 /Fit]")},
-    "dest_uint": {"annots": _link(b"[4294967295 /Fit]")},
-    "dest_direct_page": {"annots": _link(b"[<< /Type /Page >> /Fit]")},
-    "dest_direct_page_late": {"annots": _link(b"[<< /Type /Page >> /Fit]"), "last": True},
-    "dest_untyped_page": {"annots": _link(b"[10 0 R]"), "objs": {10: b"<< /Parent 2 0 R >>"}},
-    "dest_pages_node": {"annots": _link(b"[2 0 R /Fit]")},
-    "dest_ref_to_ref": {"annots": _link(b"[10 0 R]"), "objs": {10: b"4 0 R"}},
-    "dest_stream": {"annots": _link(b"[10 0 R]"), "objs": {10: _stream(b"x", b"/Type /Page")}},
+    "dest_number": {"annots": _goto(b"[5 /Fit]")},
+    "dest_negative": {"annots": _goto(b"[-7 /Fit]")},
+    "dest_real": {"annots": _goto(b"[1.7 /Fit]")},
+    "dest_uint": {"annots": _goto(b"[4294967295 /Fit]")},
+    "dest_direct_page": {"annots": _goto(b"[<< /Type /Page >> /Fit]")},
+    "dest_direct_page_late": {"annots": _goto(b"[<< /Type /Page >> /Fit]"), "last": True},
+    "dest_untyped_page": {"annots": _goto(b"[10 0 R]"), "objs": {10: b"<< /Parent 2 0 R >>"}},
+    "dest_pages_node": {"annots": _goto(b"[2 0 R /Fit]")},
+    "dest_ref_to_ref": {"annots": _goto(b"[10 0 R]"), "objs": {10: b"4 0 R"}},
+    "dest_stream": {"annots": _goto(b"[10 0 R]"), "objs": {10: _nav_stream(b"x", b"/Type /Page")}},
     # an empty destination is still one: no URI fallback
-    "dest_empty": {"annots": _link(b"[]", _uri(b"(http://x)"))},
-    "dest_ref_array": {"annots": _link(b"10 0 R"), "objs": {10: b"[5 0 R /Fit]"}},
-    "dest_dict": {"annots": _link(b"<< /D [4 0 R] >>")},
+    "dest_empty": {"annots": _link(b"[]", _uri(b"(http://x)"), _RECT, b"/Link")},
+    "dest_ref_array": {"annots": _goto(b"10 0 R"), "objs": {10: b"[5 0 R /Fit]"}},
+    "dest_dict": {"annots": _goto(b"<< /D [4 0 R] >>")},
     # FPDFAction_GetType / GetDest: /Type, when there, must be /Action; only GoTo, GoToR and GoToE
     # carry a destination; /S read raw
-    "action_goto": {"annots": _link(action=b"<< /S /GoTo /D [4 0 R] >>")},
-    "action_gotor": {"annots": _link(action=b"<< /S /GoToR /D [4 0 R] /F (x.pdf) >>")},
-    "action_launch": {"annots": _link(action=b"<< /S /Launch /D [4 0 R] >>")},
-    "action_bad_type": {"annots": _link(action=b"<< /Type /Foo /S /GoTo /D [4 0 R] >>")},
-    "action_string_s": {"annots": _link(action=b"<< /S (GoTo) /D [4 0 R] >>")},
-    "action_ref": {"annots": _link(action=b"10 0 R"), "objs": {10: b"<< /S /GoTo /D [5 0 R] >>"}},
-    "action_named": {"annots": _link(action=b"<< /S /GoTo /D (a) >>"), "catalog": _names(b"<< /Names [(a) 30 0 R] >>"),
+    "action_goto": {"annots": _act(b"<< /S /GoTo /D [4 0 R] >>")},
+    "action_gotor": {"annots": _act(b"<< /S /GoToR /D [4 0 R] /F (x.pdf) >>")},
+    "action_launch": {"annots": _act(b"<< /S /Launch /D [4 0 R] >>")},
+    "action_bad_type": {"annots": _act(b"<< /Type /Foo /S /GoTo /D [4 0 R] >>")},
+    "action_string_s": {"annots": _act(b"<< /S (GoTo) /D [4 0 R] >>")},
+    "action_ref": {"annots": _act(b"10 0 R"), "objs": {10: b"<< /S /GoTo /D [5 0 R] >>"}},
+    "action_named": {"annots": _act(b"<< /S /GoTo /D (a) >>"), "catalog": _names(b"<< /Names [(a) 30 0 R] >>"),
                      "objs": _TREE_OBJS},
     # FPDFAction_GetURIPath: GetString of any object (numbers as FormatInteger / SkFloatToDecimal)
-    "uri_real": {"annots": _link(action=_uri(b"0.000012345"))},
-    "uri_uint": {"annots": _link(action=_uri(b"4294967295"))},
-    "uri_bool": {"annots": _link(action=_uri(b"true"))},
-    "uri_name": {"annots": _link(action=_uri(b"/abc"))},
-    "uri_ref": {"annots": _link(action=_uri(b"10 0 R")), "objs": {10: b"(http://ref)"}},
-    "uri_nul": {"annots": _link(action=_uri(b"(a\\000b)"))},
+    "uri_real": {"annots": _act(_uri(b"0.000012345"))},
+    "uri_uint": {"annots": _act(_uri(b"4294967295"))},
+    "uri_bool": {"annots": _act(_uri(b"true"))},
+    "uri_name": {"annots": _act(_uri(b"/abc"))},
+    "uri_ref": {"annots": _act(_uri(b"10 0 R")), "objs": {10: b"(http://ref)"}},
+    "uri_nul": {"annots": _act(_uri(b"(a\\000b)"))},
     # ... and the catalog's /URI /Base goes in front when the URI has no ':' past its first byte
-    "uri_base": {"annots": _link(action=_uri(b"(a.html)")), "catalog": b"/URI << /Base (http://b/) >>"},
-    "uri_base_colon0": {"annots": _link(action=_uri(b"(:x)")), "catalog": b"/URI << /Base (http://b/) >>"},
-    "uri_base_scheme": {"annots": _link(action=_uri(b"(mailto:x)")), "catalog": b"/URI << /Base (http://b/) >>"},
-    "uri_base_name": {"annots": _link(action=_uri(b"(a)")), "catalog": b"/URI << /Base /http >>"},
-    "uri_base_stream": {"annots": _link(action=_uri(b"(a)")), "catalog": b"/URI << /Base 10 0 R >>",
-                        "objs": {10: _stream(b"http://s/")}},
-    "uri_base_ref": {"annots": _link(action=_uri(b"(a)")), "catalog": b"/URI << /Base 10 0 R >>",
+    "uri_base": {"annots": _act(_uri(b"(a.html)")), "catalog": b"/URI << /Base (http://b/) >>"},
+    "uri_base_colon0": {"annots": _act(_uri(b"(:x)")), "catalog": b"/URI << /Base (http://b/) >>"},
+    "uri_base_scheme": {"annots": _act(_uri(b"(mailto:x)")), "catalog": b"/URI << /Base (http://b/) >>"},
+    "uri_base_name": {"annots": _act(_uri(b"(a)")), "catalog": b"/URI << /Base /http >>"},
+    "uri_base_stream": {"annots": _act(_uri(b"(a)")), "catalog": b"/URI << /Base 10 0 R >>",
+                        "objs": {10: _nav_stream(b"http://s/", b"")}},
+    "uri_base_ref": {"annots": _act(_uri(b"(a)")), "catalog": b"/URI << /Base 10 0 R >>",
                      "objs": {10: b"(http://r/)"}},
     # CPDF_NameTree: keys compared as UTF-16 units (Windows wchar_t), Limits padded and swapped in
     # place, a null value ends the search, cycles cut by object number
     "tree_unsorted": {"catalog": _names(b"<< /Names [(c) 32 0 R (a) 30 0 R (b) 31 0 R] >>"), "objs": _TREE_OBJS,
-                      "annots": _link(b"(b)") + _link(b"/c")},
+                      "annots": _goto(b"(b)") + _goto(b"/c")},
     "tree_limits_reversed": {"catalog": _names(b"<< /Kids [<< /Limits [(b) (a)] /Names [(a) 30 0 R (b) 31 0 R] >>] >>"),
-                             "objs": _TREE_OBJS, "annots": _link(b"(a)") + _link(b"(b)")},
+                             "objs": _TREE_OBJS, "annots": _goto(b"(a)") + _goto(b"(b)")},
     "tree_limits_short": {"catalog": _names(b"<< /Kids [<< /Limits [(b)] /Names [(a) 30 0 R (b) 31 0 R] >>] >>"),
-                          "objs": _TREE_OBJS, "annots": _link(b"(a)") + _link(b"(b)")},
+                          "objs": _TREE_OBJS, "annots": _goto(b"(a)") + _goto(b"(b)")},
     "tree_limits_wrong": {"catalog": _names(b"<< /Kids [<< /Limits [(x) (z)] /Names [(a) 30 0 R] >> "
                                             b"<< /Names [(a) 32 0 R] >>] >>"), "objs": _TREE_OBJS,
-                          "annots": _link(b"(a)")},
+                          "annots": _goto(b"(a)")},
     "tree_null_first": {"catalog": _names(b"<< /Kids [<< /Names [(a) null] >> << /Names [(a) 30 0 R] >>] >>"),
-                        "objs": _TREE_OBJS, "annots": _link(b"(a)")},
+                        "objs": _TREE_OBJS, "annots": _goto(b"(a)")},
     "tree_cycle": {"catalog": _names(b"<< /Kids [10 0 R] >>"), "objs": {**_TREE_OBJS, 10: b"<< /Kids [10 0 R 11 0 R] >>",
-                   11: b"<< /Names [(c) 32 0 R] >>"}, "annots": _link(b"(c)")},
+                   11: b"<< /Names [(c) 32 0 R] >>"}, "annots": _goto(b"(c)")},
     # names compare as UTF-16 code units (wchar_t on Windows): an astral name sorts below U+FF01
     "tree_utf16_order": {"catalog": _names(b"<< /Kids [<< /Limits [<FEFFD83DDE00> <FEFFFF01>] "
                                            b"/Names [<FEFFD83DDE00> 30 0 R <FEFFFF01> 31 0 R] >>] >>"),
-                         "objs": _TREE_OBJS, "annots": _link(b"<FEFFFF01>") + _link(b"<FEFFD83DDE00>")},
+                         "objs": _TREE_OBJS, "annots": _goto(b"<FEFFFF01>") + _goto(b"<FEFFD83DDE00>")},
     "tree_shared_kid": {"catalog": _names(b"<< /Kids [10 0 R 10 0 R] >>"),
                         "objs": {**_TREE_OBJS, 10: b"<< /Names [(a) 30 0 R] >>"}},
     "tree_names_and_kids": {"catalog": _names(b"<< /Names [(a) 30 0 R] /Kids [<< /Names [(c) 32 0 R] >>] >>"),
-                            "objs": _TREE_OBJS, "annots": _link(b"(c)")},
+                            "objs": _TREE_OBJS, "annots": _goto(b"(c)")},
     "tree_values": {"catalog": _names(b"<< /Names [(a) null (b) 10 0 R (c) << /D 31 0 R >> (d) /x (e) 11 0 R "
                                       b"(f) 12 0 R] >>"),
                     "objs": {**_TREE_OBJS, 10: b"[4 0 R]", 11: b"null", 12: b"10 0 R"}},
@@ -1349,7 +1397,7 @@ NAVIGATION = {
                                     b"(a\\000) 30 0 R <FEFF00> 32 0 R] >>"), "objs": _TREE_OBJS},
     # the old /Dests dictionary: entries in key order, a reference value skipped by FPDF_GetNamedDest
     "old_dests": {"catalog": b"/Dests << /zeta [3 0 R] /Alpha [4 0 R] /ref 10 0 R /dict << /D [5 0 R] >> /num 5 >>",
-                  "objs": {10: b"[3 0 R]"}, "annots": _link(b"/ref") + _link(b"(zeta)")},
+                  "objs": {10: b"[3 0 R]"}, "annots": _goto(b"/ref") + _goto(b"(zeta)")},
     # CPDF_PageLabel: the lower bound in the number tree, St wrapping to int32, the styles' own limits
     "labels_styles": {"catalog": b"/PageLabels << /Nums [0 << /S /r >> 1 << /S /D /St 5 >> 2 << /P (x-) /S /A >>] >>"},
     "labels_roman_big": {"catalog": b"/PageLabels << /Nums [0 << /S /R /St 1003999 >>] >>"},
@@ -1369,7 +1417,7 @@ NAVIGATION = {
                       "objs": {10: b"<< /S /D /St 9 >>", 11: b"10 0 R"}},
     "labels_kids": {"catalog": b"/PageLabels << /Kids [<< /Limits [0 0] /Nums [0 << /S /r >>] >> "
                                b"<< /Limits [1 2] /Nums [1 << /S /D >> 2 << /S /a >>] >>] >>"},
-    "labels_stream": {"catalog": b"/PageLabels 10 0 R", "objs": {10: _stream(b"", b"/Nums [0 << /S /A >>]")}},
+    "labels_stream": {"catalog": b"/PageLabels 10 0 R", "objs": {10: _nav_stream(b"", b"/Nums [0 << /S /A >>]")}},
     # FPDF_GetMetaText: /Info must be a reference to a dictionary; values decoded like PDF text
     "info": {"trailer": b"/Info 10 0 R ", "objs": {10: b"<< /Title (Hello) /Producer <FEFF00480069D83DDE00> >>"}},
     "info_pdfdoc": {"trailer": b"/Info 10 0 R ", "objs": {10: b"<< /Title (\\177\\237\\255\\200\\030\\240) >>"}},
@@ -1382,7 +1430,7 @@ NAVIGATION = {
 }
 
 
-def _navigation_said(backend, data):
+def _navigation_said(backend: str, data: bytes) -> dict[str, object]:
     doc = pdf.resolve(backend).open(data)
     try:
         return {"links": [page.links() for page in doc], "named_dests": doc.named_dests(),
@@ -1392,10 +1440,10 @@ def _navigation_said(backend, data):
 
 
 @pytest.mark.parametrize("name", NAVIGATION)
-def test_links_destinations_labels_and_metadata_are_read_as_pdfium_reads_them(name):
+def test_links_destinations_labels_and_metadata_are_read_as_pdfium_reads_them(name: str) -> None:
     """The document-level calls (pure/navigation.py): FPDFLink_*, FPDFAction_*, FPDFDest_GetDestPageIndex,
     CPDF_NameTree, FPDF_GetNamedDest, CPDF_PageLabel and FPDF_GetMetaText, quirks included."""
-    data = _nav_pdf(**NAVIGATION[name])
+    data = _nav_pdf(NAVIGATION[name])
     close(_navigation_said("pure", data), _navigation_said("pdfium", data), name)
 
 
@@ -1404,7 +1452,7 @@ def test_a_broken_file_is_rebuilt_as_pdfium_rebuilds_it():
     scanned word by word (strings skipped, so an `obj` in a string is none), damaged objects end
     where CPDF_SyntaxParser ends them, and a catalog is all a rebuilt file needs."""
     good = _objects_pdf({1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", 3: _LEAF % 10,
-                         4: b"<< /S (9 0 obj << /Type /Catalog >> endobj) >>"})
+                         4: b"<< /S (9 0 obj << /Type /Catalog >> endobj) >>"}, b"")
     cases = {
         "first_offset_wrong": good.replace(b"0000000009 00000 n", b"0000000019 00000 n"),
         "no_xref": good[:good.index(b"xref")] + b"trailer\n<< /Root 1 0 R >>\n%%EOF\n",
@@ -1418,14 +1466,16 @@ def test_a_broken_file_is_rebuilt_as_pdfium_rebuilds_it():
         assert _pages_said("pure", data, order) == _pages_said("pdfium", data, order), name
 
 
-def _xref_stream_file(objs: dict, packed: dict, extra: dict | None = None, size: int | None = None) -> bytes:
+def _xref_stream_file(objs: dict[int, bytes], packed: dict[int, bytes], extra: dict[int, tuple[int, int, int]],
+                      size: int | None) -> bytes:
     """A PDF 1.5 file: `objs` as plain objects, `packed` (number -> body) in one object stream
-    (number 20), found through a cross-reference stream (number 21, W [1 4 2], uncompressed)."""
-    out, rows = bytearray(b"%PDF-1.5\n"), {}
+    (number 20), found through a cross-reference stream (number 21, W [1 4 2], uncompressed);
+    `extra` rows override, `size` (None: one past the last row) is the stream's /Size."""
+    out, rows = bytearray(b"%PDF-1.5\n"), dict[int, tuple[int, int, int]]()
     for n, body in objs.items():
         rows[n] = (1, len(out), 0)
         out += b"%d 0 obj\n" % n + body + b"\nendobj\n"
-    parts, offs = [], []
+    parts, offs = list[bytes](), list[int]()
     for n, body in packed.items():
         offs.append(sum(len(p) + 1 for p in parts))
         parts.append(body)
@@ -1436,7 +1486,7 @@ def _xref_stream_file(objs: dict, packed: dict, extra: dict | None = None, size:
             + data + b"\nendstream\nendobj\n")
     for i, n in enumerate(packed):
         rows[n] = (2, 20, i)
-    for n, row in (extra or {}).items():
+    for n, row in extra.items():
         rows[n] = row
     rows[21] = (1, len(out), 0)
     size = size if size is not None else max(rows) + 1
@@ -1456,10 +1506,11 @@ def test_cross_references_are_read_as_pdfium_reads_them():
     of it fails. The whole-file fuzz found the old reader refusing files PDFium opens (seed 680: one
     damaged row made the table unbelieved, and the rebuild then lost the trailer)."""
     tree = {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>", 3: _LEAF % 10, 4: _LEAF % 20}
-    good = _objects_pdf(tree)
+    good = _objects_pdf(tree, b"")
     row3 = b"%010d 00000 n" % good.index(b"3 0 obj")
 
-    def update(base: bytes, body: bytes, prev: int | None = None) -> bytes:
+    def update(base: bytes, body: bytes, prev: int | None) -> bytes:
+        """`base` with object 3 rewritten in an update whose /Prev is `prev` (None: `base`'s table)."""
         prev = base.rindex(b"xref\n") if prev is None else prev
         at = len(base)
         piece = base + b"3 0 obj\n" + body + b"\nendobj\n"
@@ -1477,67 +1528,69 @@ def test_cross_references_are_read_as_pdfium_reads_them():
         "startxref_not_a_word": good.replace(b"startxref", b"xstartxref"),
         "startxref_small": good[:good.rindex(b"startxref")] + b"startxref\n5\n%%EOF\n",
         "startxref_far": good + b" " * 5000,
-        "prev_chain": update(good, _LEAF % 30),
-        "prev_chain_twice": update(update(good, _LEAF % 30), _LEAF % 40),
-        "prev_wrong": update(good, _LEAF % 30, prev=7),
-        "prev_negative": update(good, _LEAF % 30, prev=-4),
-        "objstm": _xref_stream_file({1: _CAT, 2: tree[2]}, {3: tree[3], 4: tree[4]}),
-        "objstm_zero": _xref_stream_file({1: _CAT, 2: tree[2]}, {0: _LEAF % 50, 3: tree[3], 4: tree[4]}),
-        "objstm_newer_plain": _xref_stream_file({1: _CAT, 2: tree[2], 3: _LEAF % 70}, {3: tree[3], 4: tree[4]}),
-        "objstm_bad_archive": _xref_stream_file({1: _CAT, 2: tree[2]}, {3: tree[3], 4: tree[4]}, {4: (2, 99, 0)}),
-        "xref_size_small": _xref_stream_file({1: _CAT, 2: tree[2]}, {3: tree[3], 4: tree[4]}, size=3),
+        "prev_chain": update(good, _LEAF % 30, None),
+        "prev_chain_twice": update(update(good, _LEAF % 30, None), _LEAF % 40, None),
+        "prev_wrong": update(good, _LEAF % 30, 7),
+        "prev_negative": update(good, _LEAF % 30, -4),
+        "objstm": _xref_stream_file({1: _CAT, 2: tree[2]}, {3: tree[3], 4: tree[4]}, {}, None),
+        "objstm_zero": _xref_stream_file({1: _CAT, 2: tree[2]}, {0: _LEAF % 50, 3: tree[3], 4: tree[4]}, {}, None),
+        "objstm_newer_plain": _xref_stream_file({1: _CAT, 2: tree[2], 3: _LEAF % 70}, {3: tree[3], 4: tree[4]}, {},
+                                                None),
+        "objstm_bad_archive": _xref_stream_file({1: _CAT, 2: tree[2]}, {3: tree[3], 4: tree[4]}, {4: (2, 99, 0)},
+                                                None),
+        "xref_size_small": _xref_stream_file({1: _CAT, 2: tree[2]}, {3: tree[3], 4: tree[4]}, {}, 3),
     }
     for name, data in cases.items():
         order = range(3)
         assert _pages_said("pure", data, order) == _pages_said("pdfium", data, order), name
 
 
-def _text_page(content: bytes, resources: bytes, extra: dict | None = None, stream_dict: bytes = b"") -> bytes:
+def _text_page(content: bytes, resources: bytes, extra: dict[int, bytes], stream_dict: bytes) -> bytes:
     body = b"<< /Length %d %s >>\nstream\n" % (len(content), stream_dict) + content + b"\nendstream"
     objs = {1: _CAT, 2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
             3: b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Resources %s /Contents 4 0 R >>" % resources,
-            4: body, **(extra or {})}
-    return _objects_pdf(objs)
+            4: body, **extra}
+    return _objects_pdf(objs, b"")
 
 
 _HELV = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
 _BT = b"BT /F1 12 Tf 20 100 Td (Hello, World) Tj ET"
 FONT_AND_FILTER_CASES = {
     # FindFont: a missing (or non-dictionary) font is the stock Helvetica, the size is set anyway
-    "missing_font": _text_page(b"BT /F9 12 Tf 20 100 Td (Hello) Tj ET", b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}),
-    "stream_font": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: b"<< /Length 0 >>\nstream\n\nendstream"}),
+    "missing_font": _text_page(b"BT /F9 12 Tf 20 100 Td (Hello) Tj ET", b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}, b""),
+    "stream_font": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: b"<< /Length 0 >>\nstream\n\nendstream"}, b""),
     # a form with a Font dictionary of its own does not look in the page's
     "form_font_not_inherited": _text_page(
         b"/X1 Do", b"<< /Font << /F1 5 0 R >> /XObject << /X1 6 0 R >> >>",
         {5: _HELV, 6: b"<< /Subtype /Form /BBox [0 0 300 200] /Resources << /Font << /F2 5 0 R >> >> /Length %d >>\n"
-                      b"stream\n%s\nendstream" % (len(_BT), _BT)}),
+                      b"stream\n%s\nendstream" % (len(_BT), _BT)}, b""),
     # /Widths are uint16: -1502 is 64034
     "negative_width": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {
-        5: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 72 /LastChar 72 /Widths [-1502] >>"}),
+        5: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FirstChar 72 /LastChar 72 /Widths [-1502] >>"}, b""),
     # a filter PDFium does not decode is an image codec: the stored bytes; so is a /Filter that is no name
     "unknown_filter": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}, b"/Filter /Foo"),
     "filter_not_a_name": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}, b"/Filter 7"),
     "failing_then_codec": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}, b"/Filter [/DCTDecode /FlateDecode]"),
     # a zero length is checked like any other: no endstream after it, the end is searched for
-    "zero_length_stray_word": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}).replace(
+    "zero_length_stray_word": _text_page(_BT, b"<< /Font << /F1 5 0 R >> >>", {5: _HELV}, b"").replace(
         b"/Length %d  >>" % len(_BT), b"/Length 0 R1 >>"),
 }
 
 
 @pytest.mark.parametrize("name", FONT_AND_FILTER_CASES)
-def test_fonts_and_filters_resolve_as_pdfium_resolves_them(name):
+def test_fonts_and_filters_resolve_as_pdfium_resolves_them(name: str) -> None:
     """Fonts that are missing, not inherited or carry impossible widths, and streams whose filters
     PDFium won't decode. A non-embedded base-14 font is drawn with the system's Arial / Times New
     Roman / Courier New (the platform's font info, `fontmapper`)."""
     data = FONT_AND_FILTER_CASES[name]
     a, b = pdf.resolve("pure").open(data)[0], pdf.resolve("pdfium").open(data)[0]
     close([dataclasses.astuple(o) for o in a.objects()], [dataclasses.astuple(o) for o in b.objects()], name)
-    for call in ("object_bounds", "chars"):
-        close(getattr(a, call)(), getattr(b, call)(), f"{name} {call}")
+    close(a.object_bounds(), b.object_bounds(), f"{name} object_bounds")
+    close(a.chars(), b.chars(), f"{name} chars")
 
 
-def _subst_case(name: bytes, subtype: bytes = b"TrueType", flags: int = 32, widths: bool = True,
-                bbox: bool = True, desc: bytes = b"", program: bytes | None = None, encoding: bytes = b"") -> bytes:
+def _subst_case(name: bytes, subtype: bytes, flags: int, widths: bool, bbox: bool, desc: bytes,
+                program: bytes | None, encoding: bytes) -> bytes:
     """A page of text in a font the file does not embed (or embeds broken): PDFium draws it with a
     face its font mapper picks, and every box and advance comes from that face."""
     ws = b" ".join(b"%d" % (400 + (i * 37) % 400) for i in range(32, 256))
@@ -1554,10 +1607,10 @@ def _subst_case(name: bytes, subtype: bytes = b"TrueType", flags: int = 32, widt
         extra[7] = b"<< /Length %d >>\nstream\n" % len(program) + program + b"\nendstream"
     extra[6] = d + b" >>"
     text = b"BT /F1 12 Tf 20 100 Td (Hello, World! Ag {}|~ fi) Tj 0 -20 Td (\\351\\374\\200\\225 1+2=3) Tj ET"
-    return _text_page(text, b"<< /Font << /F1 5 0 R >> >>", extra)
+    return _text_page(text, b"<< /Font << /F1 5 0 R >> >>", extra, b"")
 
 
-SUBST_CASES = {}
+SUBST_CASES: dict[str, bytes] = {}
 for _name, _sub, _flags in [(b"Georgia", b"TrueType", 32), (b"Calibri-Bold", b"TrueType", 32),
                             (b"Verdana,Italic", b"TrueType", 96), (b"Wingdings", b"TrueType", 4),
                             (b"CMSS8", b"Type1", 32), (b"CMSS8", b"Type1", 2 | 32), (b"CMSS8", b"Type1", 1 | 32),
@@ -1566,24 +1619,24 @@ for _name, _sub, _flags in [(b"Georgia", b"TrueType", 32), (b"Calibri-Bold", b"T
     for _w in (True, False):
         for _b in (True, False):
             SUBST_CASES[f"{_name.decode()}-{_sub.decode()}-f{_flags}-{'w' if _w else 'nw'}-{'b' if _b else 'nb'}"] = \
-                _subst_case(_name, _sub, _flags, _w, _b)
+                _subst_case(_name, _sub, _flags, _w, _b, b"", None, b"")
 for _desc in (b"/FontWeight 300", b"/FontWeight 700", b"/FontWeight 900", b"/FontWeight -5", b"/StemV 50",
               b"/StemV 100", b"/StemV 200", b"/StemV 200 /FontWeight 300"):
     for _name, _sub in [(b"CMSS8", b"Type1"), (b"Georgia", b"TrueType")]:
-        SUBST_CASES[f"{_name.decode()}-{_desc.decode()}"] = _subst_case(_name, _sub, 32, desc=_desc)
+        SUBST_CASES[f"{_name.decode()}-{_desc.decode()}"] = _subst_case(_name, _sub, 32, True, True, _desc, None, b"")
 # FontWeight/StemV count only when the descriptor has every metric (ExternAttr)
-SUBST_CASES["CMSS8-weight-without-capheight"] = _subst_case(b"CMSS8", b"Type1", 32, desc=b"/FontWeight 700").replace(
+SUBST_CASES["CMSS8-weight-without-capheight"] = _subst_case(b"CMSS8", b"Type1", 32, True, True, b"/FontWeight 700", None, b"").replace(
     b"/CapHeight 700", b"")
-SUBST_CASES["Georgia-winansi"] = _subst_case(b"Georgia", encoding=b"/Encoding /WinAnsiEncoding")
-SUBST_CASES["CMSS8-macroman"] = _subst_case(b"CMSS8", b"Type1", encoding=b"/Encoding /MacRomanEncoding")
+SUBST_CASES["Georgia-winansi"] = _subst_case(b"Georgia", b"TrueType", 32, True, True, b"", None, b"/Encoding /WinAnsiEncoding")
+SUBST_CASES["CMSS8-macroman"] = _subst_case(b"CMSS8", b"Type1", 32, True, True, b"", None, b"/Encoding /MacRomanEncoding")
 # a program FreeType cannot open is dropped, and the font is substituted as if never embedded
-SUBST_CASES["damaged-truetype"] = _subst_case(b"ABCDEF+Georgia", program=b"\x00\x01\x00\x00junk" * 20)
-SUBST_CASES["damaged-type1"] = _subst_case(b"ABCDEF+CMSS8", b"Type1", program=b"%!PS-AdobeFont-1.0: junk" * 5)
-SUBST_CASES["damaged-type1-no-widths"] = _subst_case(b"CMSS8", b"Type1", widths=False, bbox=False, program=b"\x80\x01junk")
+SUBST_CASES["damaged-truetype"] = _subst_case(b"ABCDEF+Georgia", b"TrueType", 32, True, True, b"", b"\x00\x01\x00\x00junk" * 20, b"")
+SUBST_CASES["damaged-type1"] = _subst_case(b"ABCDEF+CMSS8", b"Type1", 32, True, True, b"", b"%!PS-AdobeFont-1.0: junk" * 5, b"")
+SUBST_CASES["damaged-type1-no-widths"] = _subst_case(b"CMSS8", b"Type1", 32, False, False, b"", b"\x80\x01junk", b"")
 
 
 @pytest.mark.parametrize("name", SUBST_CASES)
-def test_substituted_fonts_are_measured_with_pdfiums_face(name):
+def test_substituted_fonts_are_measured_with_pdfiums_face(name: str) -> None:
     """CPDF_Font::LoadSubstFont -> CFX_FontMapper::FindSubstFace -> CFX_Win32FontInfo (GDI's own
     choice of face) or the built-in Foxit faces, FoxitSerifMM/FoxitSansMM blended by weight and
     width. Object boxes, char boxes and advances all come from the face picked."""
@@ -1599,28 +1652,31 @@ def test_substituted_fonts_are_measured_with_pdfiums_face(name):
     close([dataclasses.astuple(o) for o in a.objects()], [dataclasses.astuple(o) for o in b.objects()], name)
     close(a.object_bounds(), b.object_bounds(), f"{name} object_bounds")
     ca, cb = a.chars(), b.chars()
-    drop = lambda c: {k: v for k, v in dataclasses.asdict(c).items() if k != "font_id"}  # noqa: E731
-    close([drop(c) for c in ca], [drop(c) for c in cb], f"{name} chars")
+    close([_without_font_id(c) for c in ca], [_without_font_id(c) for c in cb], f"{name} chars")
     queries = [(c.font_id, c.c, c.size) for c in ca if len(c.c) == 1]
     close(a.glyph_widths(queries), b.glyph_widths(queries), f"{name} glyph_widths")
 
 
 @pytest.mark.parametrize("name", [b"Courier-Bold", b"Times-Roman", b"Arial", b"Symbol", b"Foo"])
 @pytest.mark.parametrize("flags", [0, 2, 4, 6, 32, 36, 262150])
-def test_a_base14_fonts_encoding_follows_its_descriptors_flags(name, flags):
+def test_a_base14_fonts_encoding_follows_its_descriptors_flags(name: bytes, flags: int) -> None:
     """CPDF_Type1Font::Load reads m_Flags from the descriptor before it picks the base encoding of a
     base 14 name (aliases like Arial too), and only the nonsymbolic bit makes it Standard: a symbolic
     Courier without /Encoding stays builtin and becomes WinAnsi (seed 81 of platform_check's
     subst-extract read D5 as Otilde there, and the pure reader as Standard's nothing). Text only,
     so it holds whatever face the platform substitutes."""
-    data = _subst_case(name, b"Type1", flags).replace(b"\\351\\374\\200\\225", b"\\325\\246\\370\\207\\177\\227\\265")
+    data = _subst_case(name, b"Type1", flags, True, True, b"", None, b"").replace(b"\\351\\374\\200\\225", b"\\325\\246\\370\\207\\177\\227\\265")
     said = [[c.c for c in pdf.resolve(b).open(data)[0].chars()] for b in ("pure", "pdfium")]
     assert said[0] == said[1]
 
 
-def _chars_and_bounds(page):
-    chars = [{k: v for k, v in dataclasses.asdict(c).items() if k != "font_id"} for c in page.chars()]
-    return chars, page.object_bounds()
+def _without_font_id(c: Char) -> dict[str, object]:
+    """A char's fields but its font id (each backend numbers its fonts its own way)."""
+    return {k: v for k, v in dataclasses.asdict(c).items() if k != "font_id"}
+
+
+def _chars_and_bounds(page: PdfPage) -> tuple[list[dict[str, object]], list[Box]]:
+    return [_without_font_id(c) for c in page.chars()], page.object_bounds()
 
 
 @built
@@ -1650,7 +1706,7 @@ def test_chars_and_object_boxes_are_pdfiums_to_the_last_bit():
 # (bfuzz seed 246); a CID font with no /ToUnicode answers FPDFFont_GetGlyphWidth with code 0
 # (Identity is kCID with no CID-to-Unicode map); a Type0 font without /Encoding fails to load, so
 # its text is stock Helvetica; a Type 3 font without /FontBBox takes the union of its char boxes.
-FONT_VARIANTS = {
+FONT_VARIANTS: dict[str, tuple[str, Callable[[bytes], bytes]]] = {
     "nonsymbolic": ("01_basic", lambda d: re.sub(rb"/Flags \d+", b"/Flags 32", d)),
     "no_flags": ("01_basic", lambda d: d.replace(b"/Flags", b"/FlagX")),
     "cid_no_tounicode": ("06_wide_lualatex", lambda d: d.replace(b"/ToUnicode", b"/ToUnicodX")),
@@ -1661,7 +1717,7 @@ FONT_VARIANTS = {
 
 
 @pytest.mark.parametrize("name", FONT_VARIANTS)
-def test_font_dictionaries_edited_deck_wide_read_as_pdfium_reads_them(name):
+def test_font_dictionaries_edited_deck_wide_read_as_pdfium_reads_them(name: str) -> None:
     deck, edit = FONT_VARIANTS[name]
     path = OUT / f"{deck}.pdf"
     if not path.exists():
@@ -1759,13 +1815,21 @@ def test_made_up_truetype_fonts_extract_as_pdfium_does():
     assert not apart, f"seeds apart (python tools/truetype_torture.py SEED 1 [--directory|--os2]): {apart}"
 
 
+def _key_above(x: tuple[int, int], y: tuple[int, int]) -> bool:
+    return x[0] > y[0]
+
+
+def _key_equal(x: tuple[int, int], y: tuple[int, int]) -> bool:
+    return x[0] == y[0]
+
+
 def test_the_ucrt_qsort_port_sorts():
     from beamer2slides.pdf.pure.sfnt import msvc_qsort
     import random
     r = random.Random(3)
     for n in [0, 1, 2, 7, 8, 9, 30, 200]:
         a = [(r.randrange(5), i) for i in range(n)]
-        msvc_qsort(a, lambda x, y: x[0] > y[0], lambda x, y: x[0] == y[0])
+        msvc_qsort(a, _key_above, _key_equal)
         assert [k for k, _ in a] == sorted(k for k, _ in a)
 
 
@@ -1784,7 +1848,7 @@ def test_the_c_runtimes_qsort_is_called_as_freetype_calls_it():
         crt.qsort(b, lambda x, y: (x[0] > y[0]) - (x[0] < y[0]))
         assert [k for k, _ in b] == sorted(k for k, _ in a)
         if sys.platform == "win32":
-            msvc_qsort(a, lambda x, y: x[0] > y[0], lambda x, y: x[0] == y[0])
+            msvc_qsort(a, _key_above, _key_equal)
             assert a == b
 
 
@@ -1820,7 +1884,7 @@ def test_actual_text_reads_as_pdfium_reads_it():
 
 
 @pytest.mark.parametrize("direction", ["", "R2L"])
-def test_right_to_left_text_is_ordered_as_pdfium_orders_it(direction):
+def test_right_to_left_text_is_ordered_as_pdfium_orders_it(direction: str) -> None:
     """TrueType subsets (26_truetype_fonts, xelatex) carry glyph ids with no Unicode, so the text page
     reads the code itself - Hebrew, Arabic and Syriac code points, unassigned ones included. 78 of 100
     such pages were apart: PDFium classifies, mirrors and decomposes with its own old tables (U+00A8
@@ -1867,7 +1931,11 @@ def _entry(data: bytes, num: int, new: bytes) -> bytes:
     return data[:at] + new + data[at + 20:]
 
 
-def _obj(num: int, body: bytes, gen: int = 0) -> bytes:
+def _obj(num: int, body: bytes) -> bytes:
+    return _obj_of_generation(num, 0, body)
+
+
+def _obj_of_generation(num: int, gen: int, body: bytes) -> bytes:
     return b"%d %d obj\n%s\nendobj\n" % (num, gen, body)
 
 
@@ -1875,8 +1943,12 @@ def _stream(d: bytes, data: bytes) -> bytes:
     return b"<< %s /Length %d >>\nstream\n%s\nendstream" % (d, len(data), data)
 
 
-def _objstm(members: dict, d: bytes = b"/Type /ObjStm /N %(n)d /First %(first)d", lead: bytes = b"") -> bytes:
-    """An object stream holding `members` (number -> body), uncompressed."""
+_OBJSTM_DICT = b"/Type /ObjStm /N %(n)d /First %(first)d"
+
+
+def _objstm(members: dict[int, bytes], d: bytes, lead: bytes) -> bytes:
+    """An object stream holding `members` (number -> body), uncompressed: `d` its dictionary (with
+    %(n)d and %(first)d), `lead` in front of its number pairs."""
     bodies, header = b"", lead
     for num, body in members.items():
         header += b"%d %d " % (num, len(bodies))
@@ -1884,40 +1956,62 @@ def _objstm(members: dict, d: bytes = b"/Type /ObjStm /N %(n)d /First %(first)d"
     return _stream(d % {b"n": len(members), b"first": len(header)}, header + bodies)
 
 
-def _xref_stream_pdf(objs: dict, packed: dict, w=(1, 2, 1), override=None, index=None,
-                     objstm: dict | None = None, size: int | None = None) -> bytes:
+XrefRow = tuple[int, int, int]
+
+
+@dataclasses.dataclass(frozen=True, kw_only=True)
+class XrefStreamPdf:
     """A PDF whose cross-reference is a stream: `objs` as plain objects, `packed` in an object
-    stream (numbered after them, the stream last); `override` replaces entries (number -> (type,
-    field 2, field 3)), `index` is the /Index subsections (else one from 0)."""
-    out, entries = bytearray(b"%PDF-1.5\n"), {}
-    for num, body in objs.items():
-        entries[num] = (1, len(out), 0)
-        out += _obj(num, body)
-    archive = max(list(objs) + list(packed)) + 1
-    entries[archive] = (1, len(out), 0)
-    out += _obj(archive, _objstm(packed, **(objstm or {})))
-    for i, num in enumerate(packed):
-        entries[num] = (2, archive, i)
-    xref = archive + 1
-    entries[xref] = (1, len(out), 0)
-    entries.update(override or {})
-    index = index or [0, xref + 1]
-    numbers = [n for start, count in zip(index[::2], index[1::2]) for n in range(start, start + count)]
-    rows = b"".join(b"".join(v.to_bytes(width, "big") for v, width in zip(entries.get(n, (0, 0, 0)), w) if width)
-                    for n in numbers)
-    words = b"/W [%s] /Index [%s]" % (b" ".join(b"%d" % x for x in w), b" ".join(b"%d" % x for x in index))
-    out += _obj(xref, _stream(b"/Type /XRef /Size %d %s /Root 1 0 R" % (size or xref + 1, words), rows))
-    return bytes(out + b"startxref\n%d\n%%%%EOF\n" % entries[xref][1])
+    stream (numbered after them, the stream last, its dictionary `objstm` and `lead` as `_objstm`
+    takes them); `override` replaces entries (number -> (type, field 2, field 3)), `w` is /W,
+    `index` the /Index subsections (None: one from 0) and `size` /Size (None: one past the stream)."""
+    objs: dict[int, bytes]
+    packed: dict[int, bytes]
+    w: tuple[int, ...]
+    override: dict[int, XrefRow]
+    index: list[int] | None
+    objstm: bytes
+    lead: bytes
+    size: int | None
+
+    def data(self) -> bytes:
+        out, entries = bytearray(b"%PDF-1.5\n"), dict[int, XrefRow]()
+        for num, body in self.objs.items():
+            entries[num] = (1, len(out), 0)
+            out += _obj(num, body)
+        archive = max(list(self.objs) + list(self.packed)) + 1
+        entries[archive] = (1, len(out), 0)
+        out += _obj(archive, _objstm(self.packed, self.objstm, self.lead))
+        for i, num in enumerate(self.packed):
+            entries[num] = (2, archive, i)
+        xref = archive + 1
+        entries[xref] = (1, len(out), 0)
+        entries.update(self.override)
+        index = self.index or [0, xref + 1]
+        w = self.w
+        numbers = [n for start, count in zip(index[::2], index[1::2]) for n in range(start, start + count)]
+        rows = b"".join(b"".join(v.to_bytes(width, "big") for v, width in zip(entries.get(n, (0, 0, 0)), w) if width)
+                        for n in numbers)
+        words = b"/W [%s] /Index [%s]" % (b" ".join(b"%d" % x for x in w), b" ".join(b"%d" % x for x in index))
+        out += _obj(xref, _stream(b"/Type /XRef /Size %d %s /Root 1 0 R" % (self.size or xref + 1, words), rows))
+        return bytes(out + b"startxref\n%d\n%%%%EOF\n" % entries[xref][1])
 
 
-def _updated(first: bytes, objs: dict, trailer: bytes = b"") -> bytes:
+def _xref_stream(objs: dict[int, bytes], packed: dict[int, bytes]) -> XrefStreamPdf:
+    """The plain case (W [1 2 1], one subsection, a well-formed object stream); variants `replace` it."""
+    return XrefStreamPdf(objs=objs, packed=packed, w=(1, 2, 1), override={}, index=None, objstm=_OBJSTM_DICT,
+                         lead=b"", size=None)
+
+
+def _updated(first: bytes, objs: dict[int, tuple[int, bytes]], trailer: bytes) -> bytes:
     """An incremental update of `first` rewriting `objs` (number -> (generation, body)), its
-    table in one section per object and its trailer pointing back with /Prev."""
+    table in one section per object and its trailer pointing back with /Prev (`trailer`: more
+    entries)."""
     prev = int(first[first.rindex(b"startxref") + 10:].split()[0])
     out, table = bytearray(first), b""
     for num, (gen, body) in objs.items():
         table += b"%d 1\n%010d %05d n \n" % (num, len(out), gen)
-        out += _obj(num, body, gen)
+        out += _obj_of_generation(num, gen, body)
     xref = len(out)
     size = max(max(objs) + 1, 5)
     return bytes(out + b"xref\n" + table + b"trailer\n<< /Size %d /Root 1 0 R /Prev %d %s>>\nstartxref\n%d\n%%%%EOF\n"
@@ -1932,18 +2026,18 @@ def _rebuilt_pdf(*parts: bytes) -> bytes:
 _HIDDEN = _stream(b"", _obj(4, _LEAF % 20))   # object 4 written inside a stream's data
 
 
-def _xref_cases() -> dict:
-    good = _objects_pdf(_TWO_PAGES)
-    older = _objects_pdf({**_TWO_PAGES, 5: b"<< /Title (older) >>"}, trailer=b"/Info 5 0 R")
+def _xref_cases() -> dict[str, bytes]:
+    good = _objects_pdf(_TWO_PAGES, b"")
+    older = _objects_pdf({**_TWO_PAGES, 5: b"<< /Title (older) >>"}, b"/Info 5 0 R")
     at = good.index(b"xref")   # the first table
-    updated = _updated(good, {4: (0, _LEAF % 30)})
-    hidden = _objects_pdf({1: _CAT, 2: _TWO_PAGES[2], 3: _LEAF % 10, 5: _HIDDEN})
+    updated = _updated(good, {4: (0, _LEAF % 30)}, b"")
+    hidden = _objects_pdf({1: _CAT, 2: _TWO_PAGES[2], 3: _LEAF % 10, 5: _HIDDEN}, b"")
     into_stream = _entry(hidden, 4, b"%010d 00000 n \n" % hidden.index(b"4 0 obj"))
     rows = good[good.index(b"xref"):good.index(b"trailer")]
     packed = {3: _LEAF % 10, 4: _LEAF % 20}
     tree = {1: _CAT, 2: _TWO_PAGES[2]}
-    plain = _xref_stream_pdf(_TWO_PAGES, {})
-    newer = _updated(older, {6: (0, b"<< /Title (newer) >>")}, trailer=b"/Info 6 0 R")
+    plain = _xref_stream(_TWO_PAGES, {}).data()
+    newer = _updated(older, {6: (0, b"<< /Title (newer) >>")}, b"/Info 6 0 R")
     return {
         # ParseAndAppendCrossRefSubsectionData: 20 bytes an entry, read blind. The offset is
         # FXSYS_atoi64 of what the entry starts with (a letter ends it); only the first object
@@ -1955,49 +2049,49 @@ def _xref_cases() -> dict:
         "entry_first_wrong": _entry(good, 1, b"%010d 00000 n \n" % good.index(b"2 0 obj")),
         # the /Prev chain: the oldest table first, an entry of a lower generation than one known
         # ignored; the newer trailer's keys over the older one's, which keeps what it alone has
-        "prev_lower_generation_ignored": _updated(_updated(good, {3: (5, _LEAF % 30)}), {3: (0, _LEAF % 40)}),
-        "prev_higher_generation_wins": _updated(_updated(good, {3: (0, _LEAF % 30)}), {3: (2, _LEAF % 40)}),
-        "prev_older_trailer_info": _updated(older, {4: (0, _LEAF % 30)}),
+        "prev_lower_generation_ignored": _updated(_updated(good, {3: (5, _LEAF % 30)}, b""), {3: (0, _LEAF % 40)}, b""),
+        "prev_higher_generation_wins": _updated(_updated(good, {3: (0, _LEAF % 30)}, b""), {3: (2, _LEAF % 40)}, b""),
+        "prev_older_trailer_info": _updated(older, {4: (0, _LEAF % 30)}, b""),
         "prev_newer_trailer_info": newer,
         "prev_loop": updated.replace(b"/Prev %d" % at, b"/Prev %d" % (updated.rindex(b"\nxref\n") + 1)),
         "prev_to_nothing": updated.replace(b"/Prev %d" % at, b"/Prev 3"),
         # cross-reference streams and object streams (CPDF_ObjectStream::Create and Init)
-        "stream_packed": _xref_stream_pdf(tree, packed),
-        "stream_type_3_ignored": _xref_stream_pdf(_TWO_PAGES, {}, override={4: (3, plain.index(b"4 0 obj"), 0)}),
-        "stream_archive_past_last": _xref_stream_pdf(tree, packed, override={4: (2, 99, 1)}),
+        "stream_packed": _xref_stream(tree, packed).data(),
+        "stream_type_3_ignored": dataclasses.replace(_xref_stream(_TWO_PAGES, {}), override={4: (3, plain.index(b"4 0 obj"), 0)}).data(),
+        "stream_archive_past_last": dataclasses.replace(_xref_stream(tree, packed), override={4: (2, 99, 1)}).data(),
         # an archive is checked against the numbers known so far (/Size, then each subsection):
         # here it comes in a later subsection
-        "stream_archive_later": _xref_stream_pdf({**tree, 3: _LEAF % 10}, {4: _LEAF % 20}, index=[0, 5, 5, 2],
-                                                 size=5),
-        "stream_archive_earlier": _xref_stream_pdf({**tree, 3: _LEAF % 10}, {4: _LEAF % 20}, index=[5, 2, 0, 5],
-                                                   size=5),
-        "stream_generation_past_16_bits": _xref_stream_pdf({**tree, 3: _LEAF % 10}, {4: _LEAF % 20}, w=(1, 2, 3),
-                                                           override={3: (1, 0, 0x10000)}),
-        "stream_two_widths": _xref_stream_pdf(tree, packed, w=(1, 2)),
-        "stream_no_type_field": _xref_stream_pdf({**tree, **packed}, {}, w=(0, 2, 1)),   # all type 1
-        "objstm_n_real": _xref_stream_pdf(tree, packed, objstm={"d": b"/Type /ObjStm /N %(n)d.0 /First %(first)d"}),
-        "objstm_no_type": _xref_stream_pdf(tree, packed, objstm={"d": b"/N %(n)d /First %(first)d"}),
-        "objstm_member_zero": _xref_stream_pdf(tree, packed, objstm={"lead": b"0 0 "}),
-        "objstm_n_short": _xref_stream_pdf(tree, packed, objstm={"d": b"/Type /ObjStm /N 1 /First %(first)d"}),
+        "stream_archive_later": dataclasses.replace(_xref_stream({**tree, 3: _LEAF % 10}, {4: _LEAF % 20}), index=[0, 5, 5, 2],
+                                                     size=5).data(),
+        "stream_archive_earlier": dataclasses.replace(_xref_stream({**tree, 3: _LEAF % 10}, {4: _LEAF % 20}), index=[5, 2, 0, 5],
+                                                       size=5).data(),
+        "stream_generation_past_16_bits": dataclasses.replace(_xref_stream({**tree, 3: _LEAF % 10}, {4: _LEAF % 20}), w=(1, 2, 3),
+                                                               override={3: (1, 0, 0x10000)}).data(),
+        "stream_two_widths": dataclasses.replace(_xref_stream(tree, packed), w=(1, 2)).data(),
+        "stream_no_type_field": dataclasses.replace(_xref_stream({**tree, **packed}, {}), w=(0, 2, 1)).data(),   # all type 1
+        "objstm_n_real": dataclasses.replace(_xref_stream(tree, packed), objstm=b"/Type /ObjStm /N %(n)d.0 /First %(first)d").data(),
+        "objstm_no_type": dataclasses.replace(_xref_stream(tree, packed), objstm=b"/N %(n)d /First %(first)d").data(),
+        "objstm_member_zero": dataclasses.replace(_xref_stream(tree, packed), lead=b"0 0 ").data(),
+        "objstm_n_short": dataclasses.replace(_xref_stream(tree, packed), objstm=b"/Type /ObjStm /N 1 /First %(first)d").data(),
         # RebuildCrossRef: each object added as a table adds it, the object stream's members
         # after it; the table rebuilt goes over the one read, which keeps what the scan missed
         "table_into_stream": into_stream,
         "rebuild_over_table": _entry(into_stream, 2, b"%010d 00000 n \n" % hidden.index(b"3 0 obj")),
-        "rebuild_packed_then_plain": _rebuilt_pdf(_obj(1, _CAT), _obj(2, _TWO_PAGES[2]), _obj(5, _objstm(packed)),
+        "rebuild_packed_then_plain": _rebuilt_pdf(_obj(1, _CAT), _obj(2, _TWO_PAGES[2]), _obj(5, _objstm(packed, _OBJSTM_DICT, b"")),
                                                   _obj(3, _LEAF % 30)),
         "rebuild_plain_then_packed": _rebuilt_pdf(_obj(1, _CAT), _obj(2, _TWO_PAGES[2]), _obj(3, _LEAF % 30),
-                                                  _obj(5, _objstm(packed))),
+                                                  _obj(5, _objstm(packed, _OBJSTM_DICT, b""))),
         # an object stream is never made a member of another one
-        "rebuild_objstm_in_objstm": _rebuilt_pdf(_obj(1, _CAT), _obj(2, _TWO_PAGES[2]), _obj(5, _objstm(packed)),
-                                                 _obj(6, _objstm({5: b"<< >>"}))),
-        "rebuild_higher_generation_first": _rebuilt_pdf(_obj(1, _CAT), _obj(2, _TWO_PAGES[2]), _obj(3, _LEAF % 10, 5),
+        "rebuild_objstm_in_objstm": _rebuilt_pdf(_obj(1, _CAT), _obj(2, _TWO_PAGES[2]), _obj(5, _objstm(packed, _OBJSTM_DICT, b"")),
+                                                 _obj(6, _objstm({5: b"<< >>"}, _OBJSTM_DICT, b""))),
+        "rebuild_higher_generation_first": _rebuilt_pdf(_obj(1, _CAT), _obj(2, _TWO_PAGES[2]), _obj_of_generation(3, 5, _LEAF % 10),
                                                         _obj(3, _LEAF % 30), _obj(4, _LEAF % 20)),
     }
 
 
-def _xref_said(backend, data):
+def _xref_said(backend: str, data: bytes) -> str | tuple[PagesSaid, str | None]:
     said = _pages_said(backend, data, range(3))
-    if said == "refused":
+    if isinstance(said, str):
         return said
     doc = pdf.resolve(backend).open(data)
     try:
@@ -2007,7 +2101,7 @@ def _xref_said(backend, data):
 
 
 @pytest.mark.parametrize("name", list(_xref_cases()))
-def test_cross_references_are_loaded_as_pdfium_loads_them(name):
+def test_cross_references_are_loaded_as_pdfium_loads_them(name: str) -> None:
     """CPDF_Parser::LoadAllCrossRefTablesAndStreams, CPDF_CrossRefTable, RebuildCrossRef and
     CPDF_ObjectStream as PDFium 7999 has them (document.py)."""
     data = _xref_cases()[name]
@@ -2015,9 +2109,9 @@ def test_cross_references_are_loaded_as_pdfium_loads_them(name):
 
 
 def test_content_operands_are_read_as_pdfiums_stream_parser_reads_them():
-    from beamer2slides.pdf.pure.syntax import Name, operations
+    from beamer2slides.pdf.pure.syntax import Name, Operand, operations
 
-    def ops(data):
+    def ops(data: bytes) -> list[tuple[str, list[Operand]]]:
         return [(op, list(args)) for op, args in operations(data)]
 
     # a nested array at the top level is nothing: its ']' closes the outer one, the next is stray
@@ -2039,9 +2133,10 @@ def test_reals_are_c_floats():
     """CPDF_Number keeps a real as a float: 387.695 is 387.69500732..., which rounds up."""
     from beamer2slides.pdf.pure.syntax import Lexer
 
-    value = Lexer(b"387.695").next()
+    value = Lexer(b"387.695", 0).next()
+    assert isinstance(value, float)
     assert value != 387.695 and round(value, 2) == 387.7
-    assert Lexer(b"12").next() == 12 and isinstance(Lexer(b"12").next(), int)
+    assert Lexer(b"12", 0).next() == 12 and isinstance(Lexer(b"12", 0).next(), int)
 
 
 def test_glyph_names_follow_freetypes_full_glyph_list():

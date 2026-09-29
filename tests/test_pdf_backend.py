@@ -10,18 +10,21 @@
   test decks when the sandbox was written (docs/pdf-backend.md); here one deck keeps it honest."""
 
 import dataclasses
+import io
 import json
 import os
 import textwrap
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from beamer2slides import interpreter, pdf
+from beamer2slides.json_types import Json
 from beamer2slides.pdf import api, wire
 from beamer2slides.pdf.api import (NO_OBJECT, OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT,
-                                   PdfDocument, PdfError, PdfPage, char_box, pixel_bounds)
+                                   PdfBackend, PdfDocument, PdfError, PdfPage, char_box, pixel_bounds)
 from beamer2slides.pdf.sandbox import SandboxBackend, Worker
 
 pytestmark = pytest.mark.xdist_group("pdf_backend")  # one worker: the sandbox processes are shared
@@ -36,25 +39,27 @@ built = pytest.mark.skipif(not all(p.exists() for p in PDFS), reason="no test PD
 
 SPECS = [s.strip() for s in os.environ.get("B2S_TEST_PDF_BACKENDS", "pdfium,sandbox,pure").split(",")
          if s.strip()]
-_backends: dict[str, object] = {}
+_backends: dict[str, PdfBackend] = {}
 
 
-def get_backend(spec: str):
+def get_backend(spec: str) -> PdfBackend:
     if spec not in _backends:
         _backends[spec] = pdf.resolve(spec)
     return _backends[spec]
 
 
 @pytest.fixture(params=SPECS)
-def backend(request):
-    return get_backend(request.param)
+def backend(request: pytest.FixtureRequest) -> PdfBackend:
+    spec = request.param
+    assert isinstance(spec, str)
+    return get_backend(spec)
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _shutdown():
+def _shutdown() -> Iterator[None]:
     yield
     for b in _backends.values():
-        if hasattr(b, "shutdown"):
+        if isinstance(b, SandboxBackend):
             b.shutdown()
 
 
@@ -63,7 +68,7 @@ def _shutdown():
 
 @built
 @pytest.mark.parametrize("path", PDFS, ids=lambda p: p.stem)
-def test_documents_and_pages_keep_the_contract(backend, path):
+def test_documents_and_pages_keep_the_contract(backend: PdfBackend, path: Path) -> None:
     doc = backend.open(path)
     try:
         assert isinstance(doc, PdfDocument) and len(doc) > 0
@@ -80,7 +85,7 @@ def test_documents_and_pages_keep_the_contract(backend, path):
         doc.close()
 
 
-def check_page(page):
+def check_page(page: PdfPage) -> None:
     assert page.rect == (0.0, 0.0, page.width, page.height)
     objects = page.objects()
     assert [po.id for po in objects] == list(range(len(objects)))
@@ -95,7 +100,8 @@ def check_page(page):
     chars = page.chars()
     for ch in chars:
         assert ch.obj == NO_OBJECT or objects[ch.obj].type == OBJ_TEXT
-        assert ch.box == pytest.approx(char_box(*ch.origin, *ch.dir, ch.advance, ch.size, ch.ascent, ch.descent))
+        (ox, oy), (ux, uy) = ch.origin, ch.dir
+        assert ch.box == pytest.approx(char_box(ox, oy, ux, uy, ch.advance, ch.size, ch.ascent, ch.descent))
         assert 0 <= ch.color <= 0xFFFFFF and ch.ascent > 0 >= ch.descent and not ch.synthetic
         assert not any("\ud800" <= u <= "\udfff" for u in ch.c)
         assert not any(u < " " for u in ch.c), f"a control character {ch.c!r}"
@@ -124,7 +130,7 @@ MISC = OUT / "14_misc.pdf"                # its "Hyphenation" frame breaks words
 
 
 @pytest.mark.skipif(not MISC.exists(), reason="no test PDFs built")
-def test_a_hyphen_ending_a_line_is_a_hyphen(backend):
+def test_a_hyphen_ending_a_line_is_a_hyphen(backend: PdfBackend) -> None:
     """PDFium's text page marks a hyphen that ends a line and reports it as U+0002: the hyphen
     the page shows must come back, not a control character in the middle of a word."""
     doc = backend.open(MISC)
@@ -163,7 +169,7 @@ def marked_pdf() -> bytes:
     return pdf_bytes([MARKED], MARKED_FORMS, extra_resources=MARKED_RESOURCES)
 
 
-def test_page_objects_carry_their_marked_content(backend):
+def test_page_objects_carry_their_marked_content(backend: PdfBackend) -> None:
     """What PDFium says (FPDFPageObj_GetMark): the marks open around each object, outermost first,
     their string and number parameters; the /Missing mark opens nothing, so the EMC after it
     closes B2S and the rectangle after that EMC is unmarked."""
@@ -192,7 +198,7 @@ def test_page_objects_carry_their_marked_content(backend):
 
 
 @built
-def test_render_follows_pixel_bounds_and_active_objects(backend):
+def test_render_follows_pixel_bounds_and_active_objects(backend: PdfBackend) -> None:
     if not api.renders(backend):
         # a backend that cannot draw everything yet draws a page as PDFium does or refuses it
         ref = pdf.resolve("pdfium")
@@ -232,7 +238,7 @@ def test_render_follows_pixel_bounds_and_active_objects(backend):
 
 
 @pytest.mark.parametrize("rotate", [0, 90, 180, 270, -90])
-def test_a_turned_page_renders_where_its_geometry_says(backend, rotate):
+def test_a_turned_page_renders_where_its_geometry_says(backend: PdfBackend, rotate: int) -> None:
     """/Rotate turns PDFium's display matrix, while objects, drawings and chars stay in unrotated
     page space: a render must stay there too, or backgrounds and crops miss their elements (the
     PDFium backend drew a /Rotate 90 page turned into a bitmap of the unturned size)."""
@@ -255,7 +261,7 @@ def test_a_turned_page_renders_where_its_geometry_says(backend, rotate):
 
 
 @built
-def test_bytes_open_like_the_file_and_save_writes_new_files(backend, tmp_path):
+def test_bytes_open_like_the_file_and_save_writes_new_files(backend: PdfBackend, tmp_path: Path) -> None:
     doc = backend.open(BASIC)
     same = backend.open(BASIC.read_bytes())
     try:
@@ -283,7 +289,7 @@ def test_bytes_open_like_the_file_and_save_writes_new_files(backend, tmp_path):
         same.close()
 
 
-def test_unreadable_files_are_pdf_errors(backend):
+def test_unreadable_files_are_pdf_errors(backend: PdfBackend) -> None:
     with pytest.raises(PdfError):
         backend.open(b"%PDF-1.4 truncated")
 
@@ -291,7 +297,8 @@ def test_unreadable_files_are_pdf_errors(backend):
 # ---------------------------------------------------------------------- the sandbox is PDFium
 
 
-def same(a, b, where=""):
+def same(a: object, b: object, where: str) -> None:
+    """Equal value for value, and of the same types all the way down (an int is no float)."""
     if isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
         assert isinstance(a, np.ndarray) and isinstance(b, np.ndarray) and a.dtype == b.dtype, where
         assert np.array_equal(a, b), where
@@ -304,7 +311,8 @@ def same(a, b, where=""):
         for k in a:
             same(a[k], b[k], f"{where}[{k!r}]")
     elif isinstance(a, (list, tuple)):
-        assert type(a) is type(b) and len(a) == len(b), f"{where}: {type(a).__name__} {type(b).__name__}"
+        assert isinstance(b, (list, tuple)) and type(a) is type(b) and len(a) == len(b), \
+            f"{where}: {type(a).__name__} {type(b).__name__}"
         for k, (x, y) in enumerate(zip(a, b)):
             same(x, y, f"{where}[{k}]")
     else:
@@ -313,18 +321,21 @@ def same(a, b, where=""):
 
 @built
 @pytest.mark.parametrize("path", PDFS, ids=lambda p: p.stem)
-def test_the_sandbox_answers_what_pdfium_answers(path):
+def test_the_sandbox_answers_what_pdfium_answers(path: Path) -> None:
     ours, theirs = get_backend("pdfium").open(path), get_backend("sandbox").open(path)
     try:
-        for call in ("metadata", "named_dests"):
-            same(getattr(ours, call) if call == "metadata" else ours.named_dests(),
-                 getattr(theirs, call) if call == "metadata" else theirs.named_dests(), call)
+        same(ours.metadata, theirs.metadata, "metadata")
+        same(ours.named_dests(), theirs.named_dests(), "named_dests")
         same([ours.label(i) for i in range(len(ours))], [theirs.label(i) for i in range(len(theirs))], "labels")
         for a, b in zip(ours, theirs):
             where = f"page {a.index}"
             same((a.width, a.height), (b.width, b.height), where)
-            for call in ("objects", "object_bounds", "chars", "drawings", "images", "links"):
-                same(getattr(a, call)(), getattr(b, call)(), f"{where} {call}")
+            same(a.objects(), b.objects(), f"{where} objects")
+            same(a.object_bounds(), b.object_bounds(), f"{where} object_bounds")
+            same(a.chars(), b.chars(), f"{where} chars")
+            same(a.drawings(), b.drawings(), f"{where} drawings")
+            same(a.images(), b.images(), f"{where} images")
+            same(a.links(), b.links(), f"{where} links")
             queries = [(ch.font_id, ch.c, ch.size) for ch in a.chars() if len(ch.c) == 1]
             same(a.glyph_widths(queries), b.glyph_widths(queries), f"{where} glyph_widths")
             for po in a.objects():
@@ -339,12 +350,12 @@ def test_the_sandbox_answers_what_pdfium_answers(path):
 
 
 @built
-def test_the_pipeline_through_the_sandbox_writes_the_same_files(tmp_path):
+def test_the_pipeline_through_the_sandbox_writes_the_same_files(tmp_path: Path) -> None:
     from beamer2slides import render
     from beamer2slides.classify import classify
     from beamer2slides.extract import extract
 
-    def run(spec, out):
+    def run(spec: str, out: Path) -> tuple[str, dict[str, bytes]]:
         with pdf.use_backend(get_backend(spec)):
             raw = extract(BLOCKS, None)
             deck = classify(raw)
@@ -360,12 +371,14 @@ def test_the_pipeline_through_the_sandbox_writes_the_same_files(tmp_path):
 # ---------------------------------------------------------------------- how the sandbox fails
 
 
-def test_a_killed_worker_costs_its_documents_only():
-    backend = SandboxBackend()
+def test_a_killed_worker_costs_its_documents_only() -> None:
+    backend = SandboxBackend("pdfium", None, None)
     try:
         doc = backend.open(BLOCKS.read_bytes()) if BLOCKS.exists() else pytest.skip("no test PDFs built")
-        backend._proc.kill()
-        backend._proc.wait()
+        proc = backend._proc
+        assert proc is not None
+        proc.kill()
+        proc.wait()
         with pytest.raises(PdfError):
             doc[0].chars()
         with pytest.raises(PdfError, match="restarted"):
@@ -378,7 +391,7 @@ def test_a_killed_worker_costs_its_documents_only():
         backend.shutdown()
 
 
-def test_a_hanging_worker_is_killed_after_the_timeout(tmp_path):
+def test_a_hanging_worker_is_killed_after_the_timeout(tmp_path: Path) -> None:
     (tmp_path / "slowpdf.py").write_text(textwrap.dedent("""
         import time
         class Slow:
@@ -389,7 +402,7 @@ def test_a_hanging_worker_is_killed_after_the_timeout(tmp_path):
     """))
     command = [interpreter.python(), "-c", f"import sys; sys.path.insert(0, {str(tmp_path)!r}); "
                "from beamer2slides.pdf.sandbox import main; main(['--backend', 'slowpdf:backend'])"]
-    backend = SandboxBackend(command=command, timeout=3)
+    backend = SandboxBackend("pdfium", command, 3)
     try:
         with pytest.raises(PdfError, match="took too long"):
             backend.open(b"%PDF")
@@ -397,35 +410,95 @@ def test_a_hanging_worker_is_killed_after_the_timeout(tmp_path):
         backend.shutdown()
 
 
-def test_the_worker_serves_the_api_and_nothing_else():
+def test_the_worker_serves_the_api_and_nothing_else() -> None:
     worker = Worker(get_backend("pdfium"))
     with pytest.raises(PdfError, match="no document"):
         worker.handle({"op": "chars", "doc": 7, "page": 0})
     if not BLOCKS.exists():
         pytest.skip("no test PDFs built")
-    doc = worker.handle({"op": "open", "args": [BLOCKS.read_bytes()]})["doc"]
+    opened = worker.handle({"op": "open", "args": [BLOCKS.read_bytes()]})
+    assert isinstance(opened, dict)
+    doc = opened["doc"]
+    assert isinstance(doc, int)
     for op, page in (("__class__", None), ("_handle", 0), ("page", 0), ("close", 0), ("textpage", 0), ("pdf", None)):
         with pytest.raises(PdfError, match="unknown"):
             worker.handle({"op": op, "doc": doc, "page": page, "args": []})
-    assert worker.handle({"op": "page", "doc": doc, "page": None, "args": [0]})[0] > 0
+    size = worker.handle({"op": "page", "doc": doc, "page": None, "args": [0]})
+    assert isinstance(size, tuple)
+    width = size[0]
+    assert isinstance(width, float) and width > 0
     with pytest.raises(TypeError):
         worker.handle({"op": "open", "args": ["C:/Windows/win.ini"]})  # bytes only: no paths into the worker
 
 
-def test_the_wire_carries_data_and_refuses_the_rest():
-    value = {"a": (1, 2.5, None, True), 3: [b"\x00\xff", np.arange(6, dtype=np.uint8).reshape(2, 3)],
-             "char": api.Char("ﬁ", "LMRoman10", 10.0, 0xFF0000, 255, (1.0, 2.0), (1, 2, 3, 4), (1.0, 0.0), 4, 2),
-             "nan": float("inf"), "np": np.float32(0.5)}
-    import io
+def test_the_worker_reads_its_requests_as_the_api_types() -> None:
+    """A request's arguments are read as the method's parameters, so a wrong one is refused in
+    the worker (and goes back as an error answer) instead of reaching the PDF library."""
+    worker = Worker(get_backend("pdfium"))
+    if not BLOCKS.exists():
+        pytest.skip("no test PDFs built")
+    opened = worker.handle({"op": "open", "args": [BLOCKS.read_bytes()]})
+    assert isinstance(opened, dict)
+    doc = opened["doc"]
+    assert isinstance(doc, int)
+    wrong: list[tuple[str, list[wire.Wire]]] = [("set_active", [[0], 1]), ("embedded_image", ["0"]),
+                                                ("render", [1.0, (0, 0, 1), False]), ("objects", [True])]
+    for op, args in wrong:
+        with pytest.raises((wire.WireError, PdfError)):
+            worker.handle({"op": op, "doc": doc, "page": 0, "args": args})
+    widths = worker.handle({"op": "glyph_widths", "doc": doc, "page": 0, "args": [[[0, "A", 10.0]]]})
+    assert isinstance(widths, list) and len(widths) == 1, "a request sent as a list reads as its tuple"
+
+
+def test_an_answer_of_the_wrong_shape_is_a_pdf_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The client reads every answer as its api type: a worker answering something else (a
+    hostile PDF may own it) is a PdfError at the call, not a wrong value further on."""
+    backend = SandboxBackend("pdfium", None, None)
+    try:
+        if not BLOCKS.exists():
+            pytest.skip("no test PDFs built")
+        doc = backend.open(BLOCKS.read_bytes())
+        page = doc[0]
+        real = wire.read_frame
+
+        def lying(stream: wire.Reader) -> wire.Wire:
+            real(stream)
+            return {"ok": [{"type": "x", "items": [], "rect": (0, 0, 1, 1), "object": 0}]}
+
+        monkeypatch.setattr(wire, "read_frame", lying)
+        with pytest.raises(PdfError, match="drawings"):
+            page.drawings()
+        monkeypatch.setattr(wire, "read_frame", real)
+        assert isinstance(page.drawings(), list), "the worker itself is still there"
+        doc.close()
+    finally:
+        backend.shutdown()
+
+
+def test_the_wire_carries_data_and_refuses_the_rest() -> None:
+    array = np.arange(6, dtype=np.uint8).reshape(2, 3)
+    char = api.Char("ﬁ", "LMRoman10", 10.0, 0xFF0000, 255, (1.0, 2.0), (1, 2, 3, 4), (1.0, 0.0), 4, 2)
+    value = {"a": (1, 2.5, None, True), 3: [b"\x00\xff", array], "char": char, "nan": float("inf"),
+             "np": np.float32(0.5)}
     buf = io.BytesIO()
     wire.write_frame(buf, value)
     buf.seek(0)
     back = wire.read_frame(buf)
-    assert back["a"] == (1, 2.5, None, True) and back[3][0] == b"\x00\xff"
-    assert np.array_equal(back[3][1], value[3][1]) and back["char"] == value["char"] and back["np"] == 0.5
+    assert isinstance(back, dict)
+    listed = back[3]
+    assert isinstance(listed, list)
+    got = listed[1]
+    assert back["a"] == (1, 2.5, None, True) and listed[0] == b"\x00\xff"
+    assert isinstance(got, np.ndarray) and np.array_equal(got, array)
+    assert back["char"] == char and back["np"] == 0.5
     with pytest.raises(EOFError):
         wire.read_frame(buf)
-    for bad in ({"X": 1}, {"A": ["|O", [1], 0]}, {"C": ["Popen", {}]}, {"T": [1], "D": []}, {"B": 5}):
+    bad_values: list[Json] = [{"X": 1}, {"A": ["|O", [1], 0]}, {"C": ["Popen", {}]}, {"T": [1], "D": []}, {"B": 5},
+                              {"C": ["Char", {"c": "x"}]},             # a field missing
+                              {"C": ["PageObject", {"id": "0", "type": 2, "matrix": {"T": [1, 0, 0, 1, 0, 0]},
+                                                    "parent": None, "children": [], "clip": None,
+                                                    "marks": {"T": []}}]}]  # a field of the wrong type
+    for bad in bad_values:
         with pytest.raises(wire.WireError):
             wire.decode(bad, [b"\x00" * 8])
     with pytest.raises(wire.WireError):
@@ -434,10 +507,24 @@ def test_the_wire_carries_data_and_refuses_the_rest():
         wire.encode(np.array([object()]), [])
 
 
+def test_a_font_bbox_of_too_few_numbers_is_no_bbox() -> None:
+    """A CFF top DICT whose FontBBox holds fewer than four numbers is no box: font_metrics goes on
+    with what the font reports. It was the numbers there were, and font_metrics' `bbox[3]` then
+    raised IndexError out of extract."""
+
+    def cff(top: bytes) -> bytes:  # header, a name INDEX of "A", a top DICT INDEX of `top`
+        return bytes([1, 0, 4, 1]) + bytes([0, 1, 1, 1, 2]) + b"A" + bytes([0, 1, 1, 1, 1 + len(top)]) + top
+
+    assert api.cff_font_bbox(cff(bytes([139, 239, 139, 239, 5]))) == (0, 100, 0, 100)  # 0 100 0 100 FontBBox
+    short = cff(bytes([139, 239, 5]))                                                   # 0 100 FontBBox
+    assert api.cff_font_bbox(short) is None
+    assert api.font_metrics(0.8, -0.2, short) == api.font_metrics(0.8, -0.2, b"")
+
+
 # ---------------------------------------------------------------------- choosing the backend
 
 
-def test_the_backend_is_chosen_from_outside(tmp_path, monkeypatch):
+def test_the_backend_is_chosen_from_outside(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "fakepdf.py").write_text(textwrap.dedent("""
         opened = []
         class Fake:

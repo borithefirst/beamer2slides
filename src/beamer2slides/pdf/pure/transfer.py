@@ -13,48 +13,58 @@
 
 from __future__ import annotations
 
+import weakref
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
 from .crt import roundf
-from .render_shading import Unsupported, _Access, load_function
-from .syntax import Stream
+from .render_shading import Function, Unsupported, _Access, load_function
+from .syntax import PdfObject, Stream
 from .syntax import float32 as F
+
+if TYPE_CHECKING:
+    from .document import PdfFile
 
 MAX_OUTPUTS = 16
 
 
+@dataclass(frozen=True, kw_only=True)
 class Transfer:
-    """CPDF_TransferFunc: `identity` and the r, g, b sample tables."""
-
-    def __init__(self, identity: bool, r: list, g: list, b: list):
-        self.identity, self.r, self.g, self.b = identity, r, g, b
+    """CPDF_TransferFunc: `identity` and the r, g, b sample tables (256 bytes each)."""
+    identity: bool
+    r: list[int]
+    g: list[int]
+    b: list[int]
 
     def translate(self, rgb: int) -> int:
         """TranslateColor on a 0xRRGGBB colour."""
         return (self.r[(rgb >> 16) & 0xFF] << 16) | (self.g[(rgb >> 8) & 0xFF] << 8) | self.b[rgb & 0xFF]
 
 
-def _call(f, x: float, out: list) -> None:
+def _call(f: Function, x: float, out: list[float]) -> None:
     try:
         f.call([x], out, 0)
     except (IndexError, ValueError, ZeroDivisionError, OverflowError, RecursionError) as e:
         raise Unsupported(f"a transfer function PDFium would read past its outputs ({type(e).__name__})") from e
 
 
-def create(doc, obj) -> Transfer | None:
+def create(doc: PdfFile, obj: PdfObject) -> Transfer | None:
     """CPDF_DocRenderData::CreateTransferFunc."""
     a = _Access(doc)
+    funcs: list[Function] = []
     if isinstance(obj, list):
         if len(obj) < 3:
             return None
-        funcs = [None, None, None]
         for i in range(3):
-            funcs[2 - i] = load_function(a, a.r(obj[i]), set())
-            if funcs[2 - i] is None:
+            loaded = load_function(a, a.r(obj[i]), set())
+            if loaded is None:
                 return None
+            funcs.insert(0, loaded)     # the first function lands last: it maps blue
     else:
         f = load_function(a, obj, set())
         if f is None:
             return None
-        funcs = [f]
+        funcs.append(f)
     output = [0.0] * MAX_OUTPUTS
     identity = True
     samples = [[0] * 256 for _ in range(3)]
@@ -78,18 +88,22 @@ def create(doc, obj) -> Transfer | None:
                 identity = False
             for ch in samples:
                 ch[v] = o & 0xFF
-    return Transfer(identity, *samples)
+    return Transfer(identity=identity, r=samples[0], g=samples[1], b=samples[2])
 
 
-def of(doc, obj) -> Transfer | None:
+Made = dict[int, tuple[PdfObject, Transfer | None]]
+"""id(transfer object) -> (the object, what `create` made of it)."""
+
+# one per document, gone with it
+_CACHES: weakref.WeakKeyDictionary[PdfFile, Made] = weakref.WeakKeyDictionary()
+
+
+def of(doc: PdfFile, obj: PdfObject) -> Transfer | None:
     """CPDF_DocRenderData::GetTransferFunc: `create`, once per object of the document."""
-    cache = getattr(doc, "_b2s_transfer_cache", None)
+    cache = _CACHES.get(doc)
     if cache is None:
-        cache = {}
-        try:
-            doc._b2s_transfer_cache = cache
-        except AttributeError:
-            pass
+        cache = Made()
+        _CACHES[doc] = cache
     hit = cache.get(id(obj))
     if hit is not None and hit[0] is obj:
         return hit[1]
@@ -98,7 +112,7 @@ def of(doc, obj) -> Transfer | None:
     return t
 
 
-def smask_table(doc, tr) -> list | None:
+def smask_table(doc: PdfFile, tr: PdfObject) -> list[int] | None:
     """LoadSMask's `transfers` for a soft mask whose /TR is `tr` (resolved), or None for none."""
     if not isinstance(tr, (dict, Stream)):
         return None

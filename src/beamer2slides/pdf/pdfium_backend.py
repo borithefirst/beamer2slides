@@ -10,8 +10,9 @@ import ctypes
 import gc
 import io
 import math
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING, Callable, Iterator, Mapping, Sequence
 
 import numpy as np
 import pypdfium2 as pdfium
@@ -19,8 +20,20 @@ import pypdfium2.raw as R
 
 from ..arrays import Pixels
 from .api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
-                  EmbeddedImage, PageObject, PdfError, char_box, font_metrics, join_surrogates, mul,
-                  pixel_bounds, render_matrix, trace, transform_box)
+                  Drawing, EmbeddedImage, ImageInfo, Link, Mark, MarkParams, Matrix, Metadata, PageLink,
+                  PageObject, PdfError, Point, Segment, UriLink, add_stroke, char_box, fill_drawing, font_metrics,
+                  join_surrogates, mul, pixel_bounds, render_matrix, trace, transform_box)
+
+if TYPE_CHECKING:
+    from ctypes import _Pointer
+    from typing import TypeAlias
+
+    # PDFium's handles as pypdfium2's bindings declare them (FPDF_PAGEOBJECT, ...): they never
+    # leave this module.
+    ObjHandle: TypeAlias = _Pointer[R.struct_fpdf_pageobject_t__]
+    FontHandle: TypeAlias = _Pointer[R.struct_fpdf_font_t__]
+    BitmapHandle: TypeAlias = _Pointer[R.struct_fpdf_bitmap_t__]
+    TextPageHandle: TypeAlias = _Pointer[R.struct_fpdf_textpage_t__]
 
 # Document._pages and Page.doc are a cycle: a document dropped without close() waits for the
 # garbage collector, which may not have run when pypdfium2's exit hook lists what is still open
@@ -28,18 +41,20 @@ from .api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_FORM, OBJ_IMAGE, OBJ_P
 atexit.register(gc.collect)
 
 
-def _addr(handle) -> int:
+def _addr(handle: ObjHandle | FontHandle | None) -> int:
+    if handle is None:
+        return 0
     return ctypes.cast(handle, ctypes.c_void_p).value or 0
 
 
-def _obj_matrix(obj) -> tuple:
+def _obj_matrix(obj: ObjHandle) -> Matrix:
     m = R.FS_MATRIX()
     if not R.FPDFPageObj_GetMatrix(obj, m):
         return (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
     return (m.a, m.b, m.c, m.d, m.e, m.f)
 
 
-def _font_program(font) -> bytes:
+def _font_program(font: FontHandle) -> bytes:
     n = ctypes.c_size_t()
     if not R.FPDFFont_GetFontData(font, None, 0, n) or not n.value:
         return b""
@@ -48,19 +63,19 @@ def _font_program(font) -> bytes:
     return buf.raw
 
 
-def _is_active(obj) -> bool:
+def _is_active(obj: ObjHandle) -> bool:
     active = ctypes.c_int()      # FPDF_BOOL*
     return bool(R.FPDFPageObj_GetIsActive(obj, active)) and bool(active.value)
 
 
-def _rgba(getter, obj) -> tuple[int, int, int, int] | None:
+def _rgba(getter: Callable[..., int], obj: ObjHandle) -> tuple[int, int, int, int] | None:
     r, g, b, a = (ctypes.c_uint() for _ in range(4))
     if not getter(obj, r, g, b, a):
         return None
     return r.value, g.value, b.value, a.value
 
 
-def _bitmap_array(bitmap) -> Pixels | None:
+def _bitmap_array(bitmap: BitmapHandle) -> Pixels | None:
     """A PDFium bitmap as RGB or RGBA pixels (uint8, h x w x 3/4). Unknown formats give None."""
     if not bitmap:
         return None
@@ -82,7 +97,7 @@ def _bitmap_array(bitmap) -> Pixels | None:
     return None
 
 
-def _buffer(getter, *args) -> bytes:
+def _buffer(getter: Callable[..., int], *args: object) -> bytes:
     """A PDFium byte getter called twice: once for the length, once for the data."""
     n = getter(*args, None, 0)
     if not n:
@@ -92,7 +107,7 @@ def _buffer(getter, *args) -> bytes:
     return buf.raw[:n]
 
 
-def _wide(getter, *args) -> str | None:
+def _wide(getter: Callable[..., int], *args: object) -> str | None:
     """A PDFium UTF-16 getter that reports the length it needs through its last argument (bytes,
     terminating NUL included); None when it refuses."""
     need = ctypes.c_ulong()
@@ -106,18 +121,18 @@ def _wide(getter, *args) -> str | None:
     return join_surrogates(buf.raw[:need.value].decode("utf-16-le", "surrogatepass")[:-1])
 
 
-def _marks(obj) -> tuple:
+def _marks(obj: ObjHandle) -> tuple[Mark, ...]:
     """api.PageObject.marks: FPDFPageObj_GetMark, outermost first, with each mark's string and
     number parameters."""
     n = R.FPDFPageObj_CountMarks(obj)
     if n <= 0:
         return ()
-    out = []
+    out: list[Mark] = []
     for m in range(n):
         mark = R.FPDFPageObj_GetMark(obj, m)
         if not mark:
             continue
-        params = {}
+        params: MarkParams = {}
         for p in range(max(0, R.FPDFPageObjMark_CountParams(mark))):
             need = ctypes.c_ulong()
             if not R.FPDFPageObjMark_GetParamKey(mark, p, None, 0, ctypes.byref(need)):
@@ -139,12 +154,23 @@ def _marks(obj) -> tuple:
     return tuple(out)
 
 
-def _intersect(box: tuple, clip: tuple) -> tuple:
+def _intersect(box: Box, clip: Box) -> Box:
     return max(box[0], clip[0]), max(box[1], clip[1]), min(box[2], clip[2]), min(box[3], clip[3])
 
 
+@dataclass(frozen=True, kw_only=True)
+class _FontInfo:
+    """What chars reads of a font once per page: its page-local id (-1 for no font), base name
+    and api.font_metrics."""
+
+    font_id: int
+    name: str
+    ascent: float
+    descent: float
+
+
 class Page:
-    def __init__(self, doc: "Document", index: int):
+    def __init__(self, doc: Document, index: int) -> None:
         self.doc = doc
         self.index = index
         try:
@@ -154,24 +180,28 @@ class Page:
         self.raw = self.page.raw
         box = R.FS_RECTF()  # the visible area: crop box within media box, inherited boxes included
         R.FPDF_GetPageBoundingBox(self.raw, box)
-        left, bottom, right, top = box.left, box.bottom, box.right, box.top
+        left: float = box.left
+        bottom: float = box.bottom
+        right: float = box.right
+        top: float = box.top
         self.left, self.top = left, top
-        self.width, self.height = right - left, top - bottom
+        self.width: float = right - left
+        self.height: float = top - bottom
         # PDF user space (y up) -> our page space (y down, crop box origin)
-        self.to_page = (1.0, 0.0, 0.0, -1.0, -left, top)
+        self.to_page: Matrix = (1.0, 0.0, 0.0, -1.0, -left, top)
         self._objects: list[PageObject] | None = None
-        self._handles: list = []
+        self._handles: list[ObjHandle] = []
         self._ids: dict[int, int] = {}      # handle address -> id
-        self._bounds: list | None = None
-        self._fonts: list = []               # font_id -> PDFium font handle
-        self._font_info: dict[int, tuple] = {}  # font address -> (font_id, name, ascent, descent)
-        self._textpage = None
+        self._bounds: list[Box] | None = None
+        self._fonts: list[FontHandle] = []   # font_id -> PDFium font handle
+        self._font_info: dict[int, _FontInfo] = {}  # font address -> what chars reads of it
+        self._textpage: pdfium.PdfTextPage | None = None
 
     @property
     def rect(self) -> Box:
         return 0.0, 0.0, self.width, self.height
 
-    def point(self, x: float, y: float) -> tuple[float, float]:
+    def point(self, x: float, y: float) -> Point:
         return x - self.left, self.top - y
 
     # ------------------------------------------------------------------ objects
@@ -179,21 +209,7 @@ class Page:
     def objects(self) -> list[PageObject]:
         if self._objects is None:
             out: list[PageObject] = []
-
-            def walk(count, get, parent_matrix, parent):
-                for i in range(count):
-                    obj = get(i)
-                    kind = R.FPDFPageObj_GetType(obj)
-                    matrix = mul(_obj_matrix(obj), parent_matrix)
-                    po = PageObject(len(out), kind, matrix, parent.id if parent else None, marks=_marks(obj))
-                    out.append(po)
-                    self._handles.append(obj)
-                    if parent is not None:
-                        parent.children.append(po.id)
-                    if kind == OBJ_FORM:
-                        walk(R.FPDFFormObj_CountObjects(obj), lambda j, o=obj: R.FPDFFormObj_GetObject(o, j), matrix, po)
-
-            walk(R.FPDFPage_CountObjects(self.raw), lambda i: R.FPDFPage_GetObject(self.raw, i), self.to_page, None)
+            self._walk(out, None, self.to_page, None)
             self._ids = {_addr(h): k for k, h in enumerate(self._handles)}
             self._objects = out
             for po in out:  # a form comes before its contents: its clip is known
@@ -202,7 +218,24 @@ class Page:
                 po.clip = own if outer is None else outer if own is None else _intersect(own, outer)
         return self._objects
 
-    def _handle(self, obj: int):
+    def _walk(self, out: list[PageObject], form: ObjHandle | None, parent_matrix: Matrix,
+              parent: PageObject | None) -> None:
+        """The objects of the page (form None) or of a form object, in content order, each
+        followed by what it holds."""
+        count = R.FPDFPage_CountObjects(self.raw) if form is None else R.FPDFFormObj_CountObjects(form)
+        for i in range(count):
+            obj: ObjHandle = R.FPDFPage_GetObject(self.raw, i) if form is None else R.FPDFFormObj_GetObject(form, i)
+            kind = R.FPDFPageObj_GetType(obj)
+            matrix = mul(_obj_matrix(obj), parent_matrix)
+            po = PageObject(len(out), kind, matrix, parent.id if parent is not None else None, marks=_marks(obj))
+            out.append(po)
+            self._handles.append(obj)
+            if parent is not None:
+                parent.children.append(po.id)
+            if kind == OBJ_FORM:
+                self._walk(out, obj, matrix, po)
+
+    def _handle(self, obj: int) -> ObjHandle:
         self.objects()
         if not isinstance(obj, int) or not 0 <= obj < len(self._handles):
             raise PdfError(f"page {self.index} has no object {obj!r}")
@@ -210,17 +243,19 @@ class Page:
 
     def set_active(self, objects: Sequence[int], active: bool) -> None:
         for obj in objects:
-            R.FPDFPageObj_SetIsActive(self._handle(obj), bool(active))
+            R.FPDFPageObj_SetIsActive(self._handle(obj), active)
 
     # ------------------------------------------------------------------ text
 
-    def textpage(self):
+    def textpage(self) -> pdfium.PdfTextPage:
         if self._textpage is None:
             self._textpage = self.page.get_textpage()
         return self._textpage
 
-    def _font(self, font, tp, i, fonts: dict, name_buf, flags) -> tuple[int, str, float, float]:
+    def _font(self, font: FontHandle | None, tp: TextPageHandle, i: int, name_buf: ctypes.Array[ctypes.c_char],
+              flags: ctypes.c_int) -> _FontInfo:
         key = _addr(font)
+        fonts = self._font_info
         if key not in fonts:
             length = R.FPDFText_GetFontInfo(tp, i, name_buf, 256, flags)
             name = name_buf.raw[:max(0, length - 1)].decode("utf-8", "replace")
@@ -237,16 +272,17 @@ class Page:
             if font:
                 font_id = len(self._fonts)
                 self._fonts.append(font)
-            fonts[key] = (font_id, name, ascent, descent)
+            fonts[key] = _FontInfo(font_id=font_id, name=name, ascent=ascent, descent=descent)
         return fonts[key]
 
     def chars(self) -> list[Char]:
         self.objects()
-        tp = self.textpage().raw
+        tp: TextPageHandle | None = self.textpage().raw
+        if tp is None:
+            raise PdfError(f"page {self.index}: its text page is closed")
         n = R.FPDFText_CountChars(tp)
         name_buf = ctypes.create_string_buffer(256)
         flags = ctypes.c_int()
-        fonts = self._font_info
         x, y = ctypes.c_double(), ctypes.c_double()
         loose = R.FS_RECTF()
         m = R.FS_MATRIX()
@@ -258,8 +294,9 @@ class Page:
             if R.FPDFText_IsGenerated(tp, i):
                 continue
             obj = R.FPDFText_GetTextObject(tp, i)
-            font = R.FPDFTextObj_GetFont(obj) if obj else None
-            font_id, name, ascent, descent = self._font(font, tp, i, fonts, name_buf, flags)
+            font: FontHandle | None = R.FPDFTextObj_GetFont(obj) if obj else None
+            info = self._font(font, tp, i, name_buf, flags)
+            name, ascent, descent = info.name, info.ascent, info.descent
             text = chr(u)
             if R.FPDFText_IsHyphen(tp, i):
                 text = "-"  # a hyphen ending a line: the text page reports it as U+0002
@@ -268,14 +305,16 @@ class Page:
             R.FPDFText_GetCharOrigin(tp, i, x, y)
             R.FPDFText_GetLooseCharBox(tp, i, loose)
             R.FPDFText_GetMatrix(tp, i, m)
-            size = R.FPDFText_GetFontSize(tp, i) * math.sqrt(abs(m.a * m.d - m.b * m.c))  # as drawn
-            norm = math.hypot(m.a, m.b) or 1.0
-            ux, uy = m.a / norm, -m.b / norm  # baseline direction, y down
+            size: float = R.FPDFText_GetFontSize(tp, i) * math.sqrt(abs(m.a * m.d - m.b * m.c))  # as drawn
+            norm: float = math.hypot(m.a, m.b) or 1.0
+            ux: float = m.a / norm
+            uy: float = -m.b / norm  # baseline direction, y down
             ox, oy = self.point(x.value, y.value)
             # PDFium's loose box reaches to the advance or to the glyph's ink, whichever is
             # further (an italic f overhangs). Where the ink stops short, it is the advance;
             # otherwise the font's width for the character is (alternate glyphs aside).
-            advance = loose_advance = abs((loose.right - loose.left) * ux) + abs((loose.top - loose.bottom) * uy)
+            loose_advance: float = abs((loose.right - loose.left) * ux) + abs((loose.top - loose.bottom) * uy)
+            advance = loose_advance
             exact = True
             if ux > 0.999:
                 R.FPDFText_GetCharBox(tp, i, tl, tr, tb, tt)
@@ -290,7 +329,7 @@ class Page:
             box = char_box(ox, oy, ux, uy, advance, size, ascent, descent)
             oid = self._ids.get(_addr(obj), NO_OBJECT) if obj else NO_OBJECT
             prev = out[-1] if out else None
-            if prev and prev.obj == oid and prev.origin == (ox, oy):
+            if prev is not None and prev.obj == oid and prev.origin == (ox, oy):
                 # One glyph for several characters (a ligature): PDFium repeats the glyph's
                 # position and box for each of them. The glyph's advance is the loose box.
                 prev.c = LIGATURES.get(prev.c + text, prev.c + text)
@@ -298,7 +337,7 @@ class Page:
                 prev.exact_advance = True
                 prev.box = char_box(ox, oy, ux, uy, prev.advance, size, ascent, descent)
                 continue
-            out.append(Char(text, name, size, color, a.value, (ox, oy), box, (ux, uy), oid, font_id, advance,
+            out.append(Char(text, name, size, color, a.value, (ox, oy), box, (ux, uy), oid, info.font_id, advance,
                             ascent=ascent, descent=descent, exact_advance=exact))
         for ch in out:
             if any("\ud800" <= u <= "\udfff" for u in ch.c):
@@ -308,21 +347,21 @@ class Page:
         return [ch for _, ch in sorted(enumerate(out), key=lambda e: (e[1].obj, e[0]))]
 
     def glyph_widths(self, requests: Sequence[tuple[int, str, float]]) -> list[float | None]:
-        out = []
+        out: list[float | None] = []
         w = ctypes.c_float()
         for font_id, c, size in requests:
             font = self._fonts[font_id] if isinstance(font_id, int) and 0 <= font_id < len(self._fonts) else None
             # PDFium looks the character up as a wchar_t, 16 bits on Windows: a character past
             # U+FFFF would be measured as another one (U+1D400 as U+D400), so it has no width here
-            ok = font and len(c) == 1 and ord(c) <= 0xFFFF and \
-                R.FPDFFont_GetGlyphWidth(font, ord(c), ctypes.c_float(size), w)
+            ok = font is not None and len(c) == 1 and ord(c) <= 0xFFFF and \
+                bool(R.FPDFFont_GetGlyphWidth(font, ord(c), ctypes.c_float(size), w))
             out.append(w.value if ok else None)
         return out
 
     # ------------------------------------------------------------------ paths
 
-    def drawings(self) -> list[dict]:
-        out: list[dict] = []
+    def drawings(self) -> list[Drawing]:
+        out: list[Drawing] = []
         for po in self.objects():
             handle = self._handles[po.id]
             if po.type != OBJ_PATH or not _is_active(handle):
@@ -333,41 +372,35 @@ class Page:
             segments = self._segments(po)
             if fillmode.value:
                 fill = _rgba(R.FPDFPageObj_GetFillColor, handle)
-                path = trace(segments, filled=True)
+                path = trace(segments, True)
                 if path:
                     items, rect = path
-                    opacity = fill[3] / 255 if fill else 1.0
-                    out.append({"type": "f", "items": items, "rect": rect, "even_odd": fillmode.value == 1,
-                                "fill": tuple(v / 255 for v in fill[:3]) if fill else None,
-                                "fill_opacity": opacity, "object": po.id,
-                                # transparency without alpha: a soft mask (or a blend mode)
-                                "soft_mask": opacity == 1.0 and bool(R.FPDFPageObj_HasTransparency(handle))})
+                    opacity = fill[3] / 255 if fill is not None else 1.0
+                    out.append(fill_drawing(
+                        items=items, rect=rect, even_odd=fillmode.value == 1,
+                        fill=(fill[0] / 255, fill[1] / 255, fill[2] / 255) if fill is not None else None,
+                        fill_opacity=opacity, obj=po.id,
+                        # transparency without alpha: a soft mask (or a blend mode)
+                        soft_mask=opacity == 1.0 and bool(R.FPDFPageObj_HasTransparency(handle))))
             if stroke.value:
                 color = _rgba(R.FPDFPageObj_GetStrokeColor, handle)
                 width = ctypes.c_float()
                 R.FPDFPageObj_GetStrokeWidth(handle, width)
                 a, b, c, d, _, _ = po.matrix
-                path = trace(segments, filled=False)
+                path = trace(segments, False)
                 if path:
                     items, rect = path
-                    entry = {"type": "s", "items": items, "rect": rect,
-                             "color": tuple(v / 255 for v in color[:3]) if color else None,
-                             "stroke_opacity": color[3] / 255 if color else 1.0,
-                             "width": width.value * math.sqrt(abs(a * d - b * c)), "object": po.id}
-                    prev = out[-1] if out else None
-                    if prev and prev["type"] == "f" and prev["items"] == items:
-                        for k, v in entry.items():
-                            prev.setdefault(k, v)
-                        prev["type"] = "fs"
-                    else:
-                        out.append(entry)
+                    add_stroke(out, items=items, rect=rect,
+                               color=(color[0] / 255, color[1] / 255, color[2] / 255) if color is not None else None,
+                               stroke_opacity=color[3] / 255 if color is not None else 1.0,
+                               width=width.value * math.sqrt(abs(a * d - b * c)), obj=po.id)
         return out
 
-    def _segments(self, po: PageObject) -> list[tuple[int, float, float, bool]]:
+    def _segments(self, po: PageObject) -> list[Segment]:
         handle = self._handles[po.id]
         a, b, c, d, e, f = po.matrix
         x, y = ctypes.c_float(), ctypes.c_float()
-        out = []
+        out: list[Segment] = []
         for i in range(R.FPDFPath_CountSegments(handle)):
             seg = R.FPDFPath_GetPathSegment(handle, i)
             R.FPDFPathSegment_GetPoint(seg, x, y)
@@ -378,8 +411,8 @@ class Page:
 
     # ------------------------------------------------------------------ images, links
 
-    def _container_matrix(self, po: PageObject) -> tuple:
-        return self._objects[po.parent].matrix if po.parent is not None else self.to_page
+    def _container_matrix(self, po: PageObject) -> Matrix:
+        return self.objects()[po.parent].matrix if po.parent is not None else self.to_page
 
     def object_bounds(self) -> list[Box]:
         if self._bounds is None:
@@ -389,7 +422,7 @@ class Page:
     def _bounds_of(self, po: PageObject) -> Box:
         handle = self._handles[po.id]
         if po.type == OBJ_PATH:
-            path = trace(self._segments(po), filled=True)
+            path = trace(self._segments(po), True)
             width = ctypes.c_float()
             if path and R.FPDFPageObj_GetStrokeWidth(handle, width):
                 a, b, c, d, _, _ = po.matrix
@@ -401,16 +434,16 @@ class Page:
             return 0.0, 0.0, 0.0, 0.0
         return transform_box((l.value, b.value, r.value, t.value), self._container_matrix(po))
 
-    def _clip_box(self, po: PageObject) -> tuple | None:
+    def _clip_box(self, po: PageObject) -> Box | None:
         """Bounding box of an object's clip path in page space (paths of a clip intersect)."""
         clip = R.FPDFPageObj_GetClipPath(self._handles[po.id])
         if not clip:
             return None
         m = self._container_matrix(po)
         x, y = ctypes.c_float(), ctypes.c_float()
-        box = None
+        box: Box | None = None
         for k in range(R.FPDFClipPath_CountPaths(clip)):
-            pts = []
+            pts: list[Point] = []
             for s in range(R.FPDFClipPath_CountPathSegments(clip, k)):
                 R.FPDFPathSegment_GetPoint(R.FPDFClipPath_GetPathSegment(clip, k, s), x, y)
                 pts.append((x.value, y.value))
@@ -421,24 +454,25 @@ class Page:
             box = b if box is None else _intersect(box, b)
         return box
 
-    def _clipped(self, po: PageObject, box: tuple) -> tuple:
+    def _clipped(self, po: PageObject, box: Box) -> Box:
         """The box cut by the object's clip and those of the forms around it."""
-        node = po
+        objects = self.objects()
+        node: PageObject | None = po
         while node is not None:
             clip = self._clip_box(node)
             if clip:
                 box = _intersect(box, clip)
-            node = self._objects[node.parent] if node.parent is not None else None
+            node = objects[node.parent] if node.parent is not None else None
         return box
 
     @staticmethod
-    def _unit_box(po: PageObject) -> tuple:
+    def _unit_box(po: PageObject) -> Box:
         a, b, c, d, e, f = po.matrix
         xs, ys = [e, a + e, c + e, a + c + e], [f, b + f, d + f, b + d + f]
         return min(xs), min(ys), max(xs), max(ys)
 
-    def images(self) -> list[dict]:
-        out = []
+    def images(self) -> list[ImageInfo]:
+        out: list[ImageInfo] = []
         w, h = ctypes.c_uint(), ctypes.c_uint()
         for po in self.objects():
             handle = self._handles[po.id]
@@ -449,7 +483,7 @@ class Page:
                 x0, y0 = math.floor(box[0] + 1e-3), math.floor(box[1] + 1e-3)
                 x1, y1 = math.ceil(box[2] - 1e-3), math.ceil(box[3] - 1e-3)
                 if x1 > x0 and y1 > y0:
-                    out.append({"bbox": (x0, y0, x1, y1), "width": x1 - x0, "height": y1 - y0, "object": po.id})
+                    out.append(ImageInfo(bbox=(x0, y0, x1, y1), width=x1 - x0, height=y1 - y0, object=po.id))
                 continue
             if po.type != OBJ_IMAGE or not _is_active(handle):
                 continue
@@ -458,19 +492,19 @@ class Page:
             if box[2] <= box[0] or box[3] <= box[1]:
                 box = full
             R.FPDFImageObj_GetImagePixelSize(handle, w, h)
-            out.append({"bbox": box, "width": w.value, "height": h.value, "object": po.id})
+            out.append(ImageInfo(bbox=box, width=w.value, height=h.value, object=po.id))
         return out
 
     def embedded_image(self, obj: int) -> EmbeddedImage | None:
         handle = self._handle(obj)
-        po = self._objects[obj]
+        po = self.objects()[obj]
         if po.type != OBJ_IMAGE:
             return None
         w, h = ctypes.c_uint(), ctypes.c_uint()
         R.FPDFImageObj_GetImagePixelSize(handle, w, h)
         meta = R.FPDF_IMAGEOBJ_METADATA()
         R.FPDFImageObj_GetImageMetadata(handle, self.raw, meta)
-        filters = []
+        filters: list[str] = []
         for i in range(R.FPDFImageObj_GetImageFilterCount(handle)):
             size = R.FPDFImageObj_GetImageFilter(handle, i, None, 0)
             buf = ctypes.create_string_buffer(size)
@@ -500,27 +534,27 @@ class Page:
             pixels=img, rendered=drawn)
 
     @staticmethod
-    def _image_pixels(handle) -> Pixels | None:
-        bitmap = R.FPDFImageObj_GetBitmap(handle)
+    def _image_pixels(handle: ObjHandle) -> Pixels | None:
+        bitmap: BitmapHandle = R.FPDFImageObj_GetBitmap(handle)
         try:
             return _bitmap_array(bitmap)
         finally:
             if bitmap:
                 R.FPDFBitmap_Destroy(bitmap)
 
-    def _rendered_image(self, handle) -> Pixels | None:
+    def _rendered_image(self, handle: ObjHandle) -> Pixels | None:
         """The image object rasterised by PDFium with its matrix, mask and colour space applied:
         upright, in page orientation, on a transparent ground where a mask makes it see-through."""
-        bitmap = R.FPDFImageObj_GetRenderedBitmap(self.doc.pdf.raw, self.raw, handle)
+        bitmap: BitmapHandle = R.FPDFImageObj_GetRenderedBitmap(self.doc.pdf.raw, self.raw, handle)
         try:
             return _bitmap_array(bitmap)
         finally:
             if bitmap:
                 R.FPDFBitmap_Destroy(bitmap)
 
-    def links(self) -> list[dict]:
+    def links(self) -> list[Link]:
         pdf = self.doc.pdf.raw
-        out = []
+        out: list[Link] = []
         pos = ctypes.c_int(0)
         link = R.FPDF_LINK()
         rect = R.FS_RECTF()
@@ -535,20 +569,21 @@ class Page:
             if not dest and action and R.FPDFAction_GetType(action) == R.PDFACTION_GOTO:
                 dest = R.FPDFAction_GetDest(pdf, action)
             if dest:
-                page = R.FPDFDest_GetDestPageIndex(pdf, dest)
+                page: int = R.FPDFDest_GetDestPageIndex(pdf, dest)
                 if page >= 0:
-                    out.append({"bbox": bbox, "page": page})
+                    out.append(PageLink(bbox=bbox, page=page))
             elif action and R.FPDFAction_GetType(action) == R.PDFACTION_URI:
                 size = R.FPDFAction_GetURIPath(pdf, action, None, 0)
                 buf = ctypes.create_string_buffer(size)
                 R.FPDFAction_GetURIPath(pdf, action, buf, size)
                 uri = buf.raw[:max(0, size - 1)].decode("utf-8", "replace")
                 if uri:
-                    out.append({"bbox": bbox, "uri": uri})
+                    out.append(UriLink(bbox=bbox, uri=uri))
         return out
 
     # ------------------------------------------------------------------ rendering
 
+    # The contract's defaults (api.PdfPage.render): its callers are outside pdf/.
     def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
         ix0, iy0, w, h = pixel_bounds(zoom, clip if clip is not None else self.rect)
         bitmap = R.FPDFBitmap_Create(w, h, 1 if transparent else 0)
@@ -573,9 +608,13 @@ class Page:
 
 
 class Document:
-    def __init__(self, source: str | Path | bytes):
-        self.path = None if isinstance(source, (bytes, bytearray)) else Path(source)
-        self._source = bytes(source) if self.path is None else str(source)
+    def __init__(self, source: str | Path | bytes) -> None:
+        self.path: Path | None
+        self._source: bytes | str
+        if isinstance(source, bytes):
+            self.path, self._source = None, source
+        else:
+            self.path, self._source = Path(source), str(source)
         try:
             self.pdf = pdfium.PdfDocument(self._source)
         except pdfium.PdfiumError as e:
@@ -594,26 +633,26 @@ class Document:
             self._pages[index] = Page(self, index)
         return self._pages[index]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Page]:
         return (self[i] for i in range(len(self)))
 
-    def __enter__(self):
+    def __enter__(self) -> Document:
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc: object) -> None:
         self.close()
 
     @property
-    def metadata(self) -> dict:
+    def metadata(self) -> Metadata:
         # FPDF_GetMetaText itself: pypdfium2's get_metadata_dict reads six more keys and decodes
         # strictly, so a lone surrogate in any of them (a UTF-16 /Author cut in half) raises
-        return {"title": self._utf16(R.FPDF_GetMetaText, b"Title\x00"),
-                "producer": self._utf16(R.FPDF_GetMetaText, b"Producer\x00")}
+        return Metadata(title=self._utf16(R.FPDF_GetMetaText, b"Title\x00"),
+                        producer=self._utf16(R.FPDF_GetMetaText, b"Producer\x00"))
 
     def label(self, index: int) -> str:
         return self._utf16(R.FPDF_GetPageLabel, index)
 
-    def _utf16(self, call, arg) -> str:
+    def _utf16(self, call: Callable[..., int], arg: bytes | int) -> str:
         """A UTF-16LE answer with its terminator, errors replaced (pypdfium2 decodes strictly)."""
         size = call(self.pdf.raw, arg, None, 0)
         buf = ctypes.create_string_buffer(size)
@@ -621,7 +660,7 @@ class Document:
         return buf.raw[:max(0, size - 2)].decode("utf-16-le", "replace")
 
     def named_dests(self) -> list[tuple[str, int]]:
-        out = []
+        out: list[tuple[str, int]] = []
         for i in range(R.FPDF_CountNamedDests(self.pdf.raw)):
             size = ctypes.c_long(0)
             R.FPDF_GetNamedDest(self.pdf.raw, i, None, ctypes.byref(size))
@@ -634,14 +673,15 @@ class Document:
                 out.append((name, R.FPDFDest_GetDestPageIndex(self.pdf.raw, dest)))
         return out
 
-    def save(self, pages: Sequence[int] | None = None, boxes: dict[int, Box] | None = None) -> bytes:
-        keep = set(range(len(self))) if pages is None else {int(p) for p in pages}
+    # The contract's defaults (api.PdfDocument.save): its callers are outside pdf/.
+    def save(self, pages: Sequence[int] | None = None, boxes: Mapping[int, Box] | None = None) -> bytes:
+        keep = set(range(len(self))) if pages is None else set(pages)
         edited = pdfium.PdfDocument(self._source)  # a copy: this document stays as it is
         try:
-            for index, (x0, y0, x1, y1) in (boxes or {}).items():
-                page = self[int(index)]
+            for index, (x0, y0, x1, y1) in (boxes.items() if boxes is not None else ()):
+                page = self[index]
                 box = (page.left + x0, page.top - y1, page.left + x1, page.top - y0)
-                raw = edited[int(index)].raw
+                raw = edited[index].raw
                 R.FPDFPage_SetMediaBox(raw, *box)
                 R.FPDFPage_SetCropBox(raw, *box)
             for index in reversed(range(len(self))):

@@ -16,15 +16,31 @@ from __future__ import annotations
 import copy
 import math
 import struct
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Callable, Sequence, Union
 
 from ..api import OBJ_FORM, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, OBJ_TEXT
 from .colors import DEVICE, PATTERN, ColorSpace, load_colorspace
-from .fonts import Font, load_font
+from .fonts import CIDFont, Font, Type3Font, load_font
 from .raster import concat, path_is_rect
-from .syntax import F32X2, F32X3, F32X4, F32X6, InlineImage, Name, Ref, Stream, String, float32 as f32, operations
+from .syntax import (F32X2, F32X3, F32X4, F32X6, InlineImage, Name, Operand, Operands, PdfDict, PdfObject, Ref,
+                     Stream, String, content_operations, float32 as f32)
 
-IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+if TYPE_CHECKING:
+    from .document import PdfFile
+
+Matrix = tuple[float, float, float, float, float, float]   # a CFX_Matrix (a, b, c, d, e, f)
+Rect = tuple[float, float, float, float]                    # (left, bottom, right, top)
+Point = tuple[float, float]
+PathPoint = tuple[float, float, int, bool]                  # (x, y, PT_*, closes the figure)
+ClipPath = tuple[tuple[PathPoint, ...], int]                # (points, FILL_* type)
+TextItem = tuple[int, float]                                # (char code, x in text space)
+FontCache = dict[Union[int, str], Union[Font, None]]        # id(font dictionary), or "stock"
+ColorSpaceCache = dict[int, Union[ColorSpace, None]]        # id(colour space object)
+XObject = Union[Stream, InlineImage]
+Args = Sequence[Operand]                                    # an operator's operands, last one last
+
+IDENTITY: Matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
 
 # Several floats rounded in one pack/unpack (syntax.F32X*); `pack` refuses what `f32` makes an
@@ -35,15 +51,16 @@ _p4, _u4 = F32X4.pack, F32X4.unpack
 _p6, _u6 = F32X6.pack, F32X6.unpack
 
 
-def f32m(m: tuple) -> tuple:
+def f32m(m: Matrix) -> Matrix:
     """A CFX_Matrix: six floats."""
+    a, b, c, d, e, f = m
     try:
-        return _u6(_p6(*m))
+        return _u6(_p6(a, b, c, d, e, f))
     except (OverflowError, TypeError, struct.error):
-        return tuple(f32(v) for v in m)
+        return f32(a), f32(b), f32(c), f32(d), f32(e), f32(f)
 
 
-def f32p(p: tuple) -> tuple:
+def f32p(p: Point) -> Point:
     """A CFX_PointF."""
     try:
         return _u2(_p2(p[0], p[1]))
@@ -55,11 +72,11 @@ MAX_FORM_LEVEL = 40
 WHITE = 0xFFFFFF
 
 
-def transform(m, x, y):
+def transform(m: Matrix, x: float, y: float) -> Point:
     return m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]
 
 
-def transform_rect(m, rect):
+def transform_rect(m: Matrix, rect: Rect) -> Rect:
     """CFX_Matrix::TransformRect of (left, bottom, right, top), in float: corners in its order,
     std::min/max keeping the first of equals (and a NaN out, unless it comes first)."""
     l, b, r, t = rect
@@ -72,7 +89,7 @@ def transform_rect(m, rect):
     return left, bottom, right, top
 
 
-def intersect(a, b):
+def intersect(a: Rect, b: Rect) -> Rect:
     """CFX_FloatRect::Intersect: an empty result collapses to zero."""
     l, bt, r, t = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
     if l > r or bt > t:
@@ -80,17 +97,17 @@ def intersect(a, b):
     return l, bt, r, t
 
 
-def point_bbox(points):
+def point_bbox(points: Sequence[Point | PathPoint]) -> Rect:
     xs = [p[0] for p in points]
     ys = [p[1] for p in points]
     return min(xs), min(ys), max(xs), max(ys)
 
 
-def is_identity(m) -> bool:
-    return tuple(m) == (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+def is_identity(m: Matrix) -> bool:
+    return m == (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
 
 
-def transform32(m, x, y):
+def transform32(m: Matrix, x: float, y: float) -> Point:
     """CFX_Matrix::Transform in float, one rounding per operation."""
     a, b, c, d, e, f = m
     try:
@@ -101,13 +118,14 @@ def transform32(m, x, y):
         return f32(f32(f32(a * x) + f32(c * y)) + e), f32(f32(f32(b * x) + f32(d * y)) + f)
 
 
-def rect_points(left, bottom, right, top) -> tuple:
+def rect_points(left: float, bottom: float, right: float, top: float) -> tuple[PathPoint, ...]:
     """CFX_Path::AppendRect."""
     return ((left, bottom, PT_MOVE, False), (left, top, PT_LINE, False), (right, top, PT_LINE, False),
             (right, bottom, PT_LINE, False), (left, bottom, PT_LINE, True))
 
 
-def append_clip(clip_paths: tuple, points: tuple, fill_type: int) -> tuple:
+def append_clip(clip_paths: tuple[ClipPath, ...], points: tuple[PathPoint, ...],
+                fill_type: int) -> tuple[ClipPath, ...]:
     """CPDF_ClipPath::AppendPathWithAutoMerge: a new path inside the last one, when that one is
     a rectangle, replaces it."""
     if clip_paths:
@@ -124,71 +142,74 @@ def append_clip(clip_paths: tuple, points: tuple, fill_type: int) -> tuple:
 MAX_CLIP_TEXTS = 1024       # CPDF_ClipPath::AppendTexts' kMaxTextObjects
 
 
-def append_texts(clip_texts: tuple, texts: list) -> tuple:
+def append_texts(clip_texts: tuple[PObj | None, ...], texts: list[PObj]) -> tuple[PObj | None, ...]:
     """CPDF_ClipPath::AppendTexts: one BT..ET's clip-mode texts and a None closing the group
     (ProcessClipPath clips once per group), unless the list would pass 1024 entries: then none
     (the reference is made private all the same, which only a renderer comparing clips sees)."""
     if len(clip_texts) + len(texts) <= MAX_CLIP_TEXTS:
         return clip_texts + tuple(texts) + (None,)
-    return tuple(clip_texts)
+    return clip_texts
 
 
 # ---------------------------------------------------------------------- page objects
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, kw_only=True)
 class PObj:
+    """A page object: every field is set by `new_object` (PDFium's initial states), then by the
+    parser as the object is made; nothing but this module builds one."""
     type: int
-    matrix: tuple                  # PDFium's matrix for the object (identity for a shading)
-    parent: "PObj | None" = None
-    clips: list | None = None      # point bounding boxes of the clip paths, container space
-    clip_paths: tuple = ()         # ((points, fill type), ...) in container space, float32 (render)
-    clip_texts: tuple = ()         # CPDF_ClipPath's text list: text PObj copies, None ends a group
-    fill: int | None = None       # 0xRRGGBB; None when the object has no colour state
-    stroke: int | None = None
-    fill_alpha: float = 1.0
-    stroke_alpha: float = 1.0
-    blend: str = "Normal"
-    soft_mask: bool = False
-    line_width: float = 1.0
-    line_cap: int = 0
-    line_join: int = 0
-    miter: float = 10.0
-    dash: tuple = ()
-    dash_phase: float = 0.0
-    smask: dict | None = None      # the ExtGState's /SMask dictionary (render)
-    smask_matrix: tuple = IDENTITY  # the CTM when it was set
-    transfer: object = None        # /TR or /TR2 (not a name)
-    pattern: bool = False          # a pattern colour space for fill or stroke (render)
+    matrix: Matrix                 # PDFium's matrix for the object (identity for a shading)
+    parent: PObj | None
+    clips: list[Rect] | None       # point bounding boxes of the clip paths, container space
+    clip_paths: tuple[ClipPath, ...]    # in container space, float32 (render)
+    clip_texts: tuple[PObj | None, ...]  # CPDF_ClipPath's text list: text PObj copies, None ends a group
+    fill: int | None               # 0xRRGGBB; None when the object has no colour state
+    stroke: int | None
+    fill_alpha: float
+    stroke_alpha: float
+    blend: str
+    soft_mask: bool
+    line_width: float
+    line_cap: int
+    line_join: int
+    miter: float
+    dash: tuple[float, ...]
+    dash_phase: float
+    smask: PdfDict | None          # the ExtGState's /SMask dictionary (render)
+    smask_matrix: Matrix           # the CTM when it was set
+    transfer: PdfObject            # /TR or /TR2 (not a name)
+    pattern: bool                  # a pattern colour space for fill or stroke (render)
     # render_shading: the pattern each side paints with (None: no pattern colour; False: a pattern
     # colour space without a pattern), and a shading object's CTM and pattern record
-    fill_pattern: object = None
-    stroke_pattern: object = None
-    shading_matrix: tuple = IDENTITY
-    shading_record: object = None
-    rect: tuple = (0.0, 0.0, 0.0, 0.0)   # GetRect, container space
+    fill_pattern: object
+    stroke_pattern: object
+    shading_matrix: Matrix
+    shading_record: object
+    mesh_box: Rect | None          # a mesh shading's bounds (render_mesh.shading_bbox), else None
+    rect: Rect                     # GetRect, container space
     # paths
-    points: list = field(default_factory=list)   # (x, y, PT_*, closes), path space
-    fill_type: int = FILL_NONE
-    stroked: bool = False
+    points: list[PathPoint]        # path space
+    fill_type: int
+    stroked: bool
     # text
-    font: Font | None = None
-    font_size: float = 0.0
-    items: list = field(default_factory=list)    # [code, x] per character (x in text space)
-    kernings: list = field(default_factory=list)  # TJ kerning after each character (0 inside a string)
-    text_mode: int = 0
-    char_space: float = 0.0
-    word_space: float = 0.0
-    text_ctm: tuple = (1.0, 0.0, 0.0, 1.0)   # CPDF_TextState's CTM: (a, c, b, d), stroke modes only
-    original_rect: tuple = (0.0, 0.0, 0.0, 0.0)
+    font: Font | None
+    font_size: float
+    items: list[TextItem]          # per character (x in text space)
+    kernings: list[float]          # TJ kerning after each character (0 inside a string)
+    text_mode: int
+    char_space: float
+    word_space: float
+    text_ctm: Rect                 # CPDF_TextState's CTM: (a, c, b, d), stroke modes only
+    original_rect: Rect
     # images and forms
-    stream: object = None          # Stream, or InlineImage
-    name: str = ""
-    resources: object = None       # an inline image's: its colour space is looked up there
-    children: list = field(default_factory=list)
-    group: bool = False            # a form with a transparency group (/Group /S /Transparency)
-    active: bool = True
-    marks: tuple = ()              # CPDF_ContentMarks: the MarkItems open around the object, outermost first
+    stream: XObject | PdfDict | None    # an image's or form's; a shading's dictionary or stream
+    name: str
+    resources: PdfObject           # an inline image's: its colour space is looked up there
+    children: list[PObj]
+    group: bool                    # a form with a transparency group (/Group /S /Transparency)
+    active: bool
+    marks: tuple[MarkItem, ...]    # CPDF_ContentMarks: the MarkItems open around the object, outermost first
 
     @property
     def has_transparency(self) -> bool:
@@ -200,18 +221,32 @@ class PObj:
         return self.type == OBJ_FORM and self.group
 
 
+def new_object(kind: int, matrix: Matrix) -> PObj:
+    """A page object of `kind` before the parser sets its states: PDFium's initial ones."""
+    return PObj(type=kind, matrix=matrix, parent=None, clips=None, clip_paths=(), clip_texts=(),
+                fill=None, stroke=None, fill_alpha=1.0, stroke_alpha=1.0, blend="Normal", soft_mask=False,
+                line_width=1.0, line_cap=0, line_join=0, miter=10.0, dash=(), dash_phase=0.0, smask=None,
+                smask_matrix=IDENTITY, transfer=None, pattern=False, fill_pattern=None, stroke_pattern=None,
+                shading_matrix=IDENTITY, shading_record=None, mesh_box=None, rect=(0.0, 0.0, 0.0, 0.0),
+                points=[], fill_type=FILL_NONE, stroked=False, font=None, font_size=0.0, items=[],
+                kernings=[], text_mode=0, char_space=0.0, word_space=0.0, text_ctm=(1.0, 0.0, 0.0, 1.0),
+                original_rect=(0.0, 0.0, 0.0, 0.0), stream=None, name="", resources=None, children=[],
+                group=False, active=True, marks=())
+
+
+@dataclass(frozen=True, kw_only=True, eq=False)
 class MarkItem:
-    """CPDF_ContentMarkItem: BMC's (no parameters), BDC's with a dictionary written in the content
-    stream, or BDC's naming one in /Properties - which GetParam looks up again on every call."""
-
-    __slots__ = ("direct", "holder", "name", "doc", "tag")
-
-    def __init__(self, direct: dict | None = None, holder: dict | None = None, name: str = "", doc=None,
-                 tag: bytes = b""):
-        self.direct, self.holder, self.name, self.doc, self.tag = direct, holder, name, doc, tag
+    """CPDF_ContentMarkItem: BMC's (no parameters: `direct` and `holder` None), BDC's with a
+    dictionary written in the content stream (`direct`), or BDC's naming one in /Properties
+    (`holder`, `name`, `doc`) - which GetParam looks up again on every call."""
+    direct: PdfDict | None
+    holder: PdfDict | None
+    name: str
+    doc: PdfFile | None
+    tag: bytes
 
     @staticmethod
-    def operand_string(value) -> bytes:
+    def operand_string(value: Operand) -> bytes:
         """CPDF_StreamContentParser::GetString: a name's bytes, a string object's, else nothing."""
         if isinstance(value, Name):
             return str(value).encode("latin-1", "replace")
@@ -219,24 +254,24 @@ class MarkItem:
             return bytes(value)
         return b""
 
-    def info(self) -> tuple[str, dict]:
+    def info(self) -> tuple[str, dict[str, str | int]]:
         """(tag, {key: value}) as FPDFPageObjMark_GetName / GetParamKey / GetParamStringValue /
         GetParamIntValue answer: text is the bytes read as UTF-8 (WideString::FromUTF8: invalid
         bytes dropped), a number its C int, keys in the dictionary's (sorted) order; any other
         value (a name, a reference, an array...) is left out, as api.PageObject.marks says."""
-        params = {}
+        params: dict[str, str | int] = {}
         d = self.param()
-        if isinstance(d, dict):
-            for key in sorted(d, key=lambda k: str(k).encode("latin-1", "replace")):
+        if d is not None:
+            for key in sorted(d, key=_latin1):
                 v = d[key]
                 if isinstance(v, String):
-                    params[_utf8(str(key).encode("latin-1", "replace"))] = _utf8(bytes(v))
+                    params[_utf8(_latin1(key))] = _utf8(bytes(v))
                 elif isinstance(v, (int, float)) and not isinstance(v, bool):
-                    params[_utf8(str(key).encode("latin-1", "replace"))] = _c_int(v)
+                    params[_utf8(_latin1(key))] = _c_int(v)
         return _utf8(self.tag), params
 
     @staticmethod
-    def dict_for(doc, holder: dict, name: str) -> dict | None:
+    def dict_for(doc: PdfFile, holder: PdfDict, name: str) -> PdfDict | None:
         """CPDF_Dictionary::GetDictFor: one reference followed, a stream's dictionary."""
         value = holder.get(name)
         if isinstance(value, Ref):
@@ -245,90 +280,118 @@ class MarkItem:
             return value.dict
         return value if isinstance(value, dict) else None
 
-    def param(self) -> dict | None:
+    def param(self) -> PdfDict | None:
         if self.direct is not None:
             return self.direct
-        if self.holder is not None:
+        if self.holder is not None and self.doc is not None:
             return self.dict_for(self.doc, self.holder, self.name)
         return None
+
+
+def _latin1(key: str) -> bytes:
+    """A dictionary key's bytes (a Name holds them as latin-1 characters)."""
+    return key.encode("latin-1", "replace")
 
 
 def _utf8(b: bytes) -> str:
     return b.decode("utf-8", "ignore")
 
 
-def _c_int(v) -> int:
+def _c_int(v: int | float) -> int:
     """CPDF_Number::GetInteger: an integer as it is, a real truncated (saturated to int32)."""
     if isinstance(v, int):
         return max(-2 ** 31, min(2 ** 31 - 1, v))
     if v != v:
         return 0
-    return int(max(-2 ** 31, min(2 ** 31 - 1, math.trunc(v)))) if math.isfinite(v) else \
+    return max(-2 ** 31, min(2 ** 31 - 1, math.trunc(v))) if math.isfinite(v) else \
         (2 ** 31 - 1 if v > 0 else -2 ** 31)
 
 
 # ---------------------------------------------------------------------- graphics state
 
 
-@dataclass
+@dataclass(kw_only=True)
 class State:
-    ctm: tuple = IDENTITY
-    clips: tuple = ()                  # point bboxes (container space), tuple so copies are cheap
-    clip_paths: tuple = ()             # CPDF_ClipPath's paths: ((points, fill type), ...)
-    clip_texts: tuple = ()             # and its texts (append_texts)
-    fill_cs: ColorSpace = DEVICE["DeviceGray"]
-    fill_values: tuple = (0.0,)
-    fill_ref: int = 0
-    stroke_cs: ColorSpace = DEVICE["DeviceGray"]
-    stroke_values: tuple = (0.0,)
-    stroke_ref: int = 0
-    fill_alpha: float = 1.0
-    stroke_alpha: float = 1.0
-    blend: str = "Normal"
-    soft_mask: bool = False
-    line_width: float = 1.0
-    line_cap: int = 0
-    line_join: int = 0
-    miter: float = 10.0
-    dash: tuple = ()
-    dash_phase: float = 0.0
-    smask: dict | None = None
-    smask_matrix: tuple = IDENTITY
-    transfer: object = None
-    font: Font | None = None
-    font_size: float = 0.0
-    char_space: float = 0.0
-    word_space: float = 0.0
-    horz_scale: float = 1.0
-    leading: float = 0.0
-    rise: float = 0.0
-    text_mode: int = 0
+    """The parser's graphics state (changed in place as operators run, copied by q). Every field is
+    set where one is made: `initial_state` for PDFium's initial states, `copy` for q."""
+    ctm: Matrix
+    clips: tuple[Rect, ...]         # point bboxes (container space), tuple so copies are cheap
+    clip_paths: tuple[ClipPath, ...]    # CPDF_ClipPath's paths
+    clip_texts: tuple[PObj | None, ...]   # and its texts (append_texts)
+    fill_cs: ColorSpace
+    fill_values: tuple[float, ...]
+    fill_ref: int
+    stroke_cs: ColorSpace
+    stroke_values: tuple[float, ...]
+    stroke_ref: int
+    fill_alpha: float
+    stroke_alpha: float
+    blend: str
+    soft_mask: bool
+    line_width: float
+    line_cap: int
+    line_join: int
+    miter: float
+    dash: tuple[float, ...]
+    dash_phase: float
+    smask: PdfDict | None
+    smask_matrix: Matrix
+    transfer: PdfObject
+    font: Font | None
+    font_size: float
+    char_space: float
+    word_space: float
+    horz_scale: float
+    leading: float
+    rise: float
+    text_mode: int
     # text positioning (not saved by q/Q in PDFium's parser either: it lives on cur_states_,
     # which q copies, so it is saved - kept here for the same effect)
-    text_matrix: tuple = IDENTITY
-    text_pos: tuple = (0.0, 0.0)
-    text_line_pos: tuple = (0.0, 0.0)
+    text_matrix: Matrix
+    text_pos: Point
+    text_line_pos: Point
     # render_shading: the colour state's patterns (see PObj) and the parser's parent matrix
-    fill_pattern: object = None
-    stroke_pattern: object = None
-    parent_matrix: tuple = IDENTITY
+    fill_pattern: object
+    stroke_pattern: object
+    parent_matrix: Matrix
     # whether the colour is set (CPDF_Color::IsNull): a Type 3 glyph starts without one, which
     # the renderer replaces with the text's fill colour (render_type3)
-    fill_set: bool = True
-    stroke_set: bool = True
+    fill_set: bool
+    stroke_set: bool
 
     def copy(self) -> "State":
         return State(**self.__dict__)
 
 
-def _num(v, default=0.0) -> float:
-    """GetNumber: an integer operand as a float (16777217 -> 16777216), a real as it is."""
+def initial_state() -> State:
+    """PDFium's initial graphics state: identity CTM, no clip, DeviceGray black both sides, opaque,
+    Normal blend, 1-unit lines, no font; a state that differs is `dataclasses.replace` of this."""
+    return State(ctm=IDENTITY, clips=(), clip_paths=(), clip_texts=(), fill_cs=DEVICE["DeviceGray"],
+                 fill_values=(0.0,), fill_ref=0, stroke_cs=DEVICE["DeviceGray"], stroke_values=(0.0,),
+                 stroke_ref=0, fill_alpha=1.0, stroke_alpha=1.0, blend="Normal", soft_mask=False, line_width=1.0,
+                 line_cap=0, line_join=0, miter=10.0, dash=(), dash_phase=0.0, smask=None, smask_matrix=IDENTITY,
+                 transfer=None, font=None, font_size=0.0, char_space=0.0, word_space=0.0, horz_scale=1.0,
+                 leading=0.0, rise=0.0, text_mode=0, text_matrix=IDENTITY, text_pos=(0.0, 0.0),
+                 text_line_pos=(0.0, 0.0), fill_pattern=None, stroke_pattern=None, parent_matrix=IDENTITY,
+                 fill_set=True, stroke_set=True)
+
+
+def _num(v: Operand) -> float:
+    """GetNumber: an integer operand as a float (16777217 -> 16777216), a real as it is, anything
+    else 0 (`_num_or` without the call: the path operators' hot loop reads every number here)."""
     if isinstance(v, float):
         return v
-    return f32(float(v)) if isinstance(v, int) and not isinstance(v, bool) else default
+    return f32(float(v)) if isinstance(v, int) and not isinstance(v, bool) else 0.0
 
 
-def _is_number(v) -> bool:
+def _num_or(v: Operand, missing: float) -> float:
+    """`_num`, with `missing` for what is no number."""
+    if isinstance(v, float):
+        return v
+    return f32(float(v)) if isinstance(v, int) and not isinstance(v, bool) else missing
+
+
+def _is_number(v: Operand) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
@@ -338,28 +401,30 @@ PATH_FAST = frozenset(("m", "l", "c", "v", "y", "h", "re"))
 class Parser:
     """One page's (or form's) content, appended to `objects` in painting order."""
 
-    def __init__(self, doc, page_resources: dict, objects: list, fonts: dict, colorspaces: dict):
+    def __init__(self, doc: PdfFile, page_resources: PdfObject, objects: list[PObj], fonts: FontCache,
+                 colorspaces: ColorSpaceCache):
         self.doc = doc
-        self.page_resources = page_resources if isinstance(page_resources, dict) else {}
+        self.page_resources: PdfDict = page_resources if isinstance(page_resources, dict) else {}
         self.objects = objects
         self.fonts = fonts
         self.colorspaces = colorspaces
-        self.parsed: list = []          # streams being parsed (the recursion chain)
+        self.parsed: list[Stream] = []          # form streams being parsed (the recursion chain)
 
     # ------------------------------------------------------------------ entry points
 
-    def parse_page(self, contents: bytes, bbox: tuple) -> None:
+    def parse_page(self, contents: bytes, bbox: Rect) -> None:
         start = len(self.objects)
-        self._run(contents, self.page_resources, State(), bbox, None)
+        self._run(contents, self.page_resources, initial_state(), bbox, None)
         check_clip([o for o in self.objects[start:] if o.parent is None])
 
-    def _run(self, data: bytes, resources: dict, state: State, bbox: tuple, parent: PObj | None) -> None:
+    def _run(self, data: bytes, resources: PdfObject, state: State, bbox: Rect, parent: PObj | None) -> None:
+        """`data` run with `resources` (the page's when that is no dictionary)."""
         run = _Run(self, resources if isinstance(resources, dict) else self.page_resources, state, bbox, parent)
         run.execute(data)
 
     # ------------------------------------------------------------------ resources
 
-    def font(self, obj) -> Font | None:
+    def font(self, obj: PdfObject) -> Font | None:
         d = self.doc.resolve(obj)
         if not isinstance(d, dict):
             return None
@@ -379,7 +444,7 @@ class Parser:
 class _Run:
     """The state of one content stream being executed."""
 
-    def __init__(self, parser: Parser, resources: dict, state: State, bbox: tuple, parent: PObj | None):
+    def __init__(self, parser: Parser, resources: PdfDict, state: State, bbox: Rect, parent: PObj | None):
         self.p = parser
         self.doc = parser.doc
         self.resources = resources
@@ -387,37 +452,36 @@ class _Run:
         self.stack: list[State] = []
         self.bbox = bbox
         self.parent = parent
-        self.path: list = []
-        self.path_start = (0.0, 0.0)
-        self.path_current = (0.0, 0.0)
+        self.path: list[PathPoint] = []
+        self.path_start: Point = (0.0, 0.0)
+        self.path_current: Point = (0.0, 0.0)
         self.clip_type = FILL_NONE
-        self.last_image_name = None
-        self.last_image = None
-        self.clip_text_list: list = []   # clip_text_list_: this stream's clip-mode texts since ET
-        self.marks: list[tuple] = [()]   # content_marks_stack_, with its sentinel (a form starts afresh)
+        self.last_image_name: Operand = None
+        self.last_image: Stream | None = None
+        self.clip_text_list: list[PObj] = []   # clip_text_list_: this stream's clip-mode texts since ET
+        # content_marks_stack_, with its sentinel (a form starts afresh)
+        self.marks: list[tuple[MarkItem, ...]] = [()]
 
     # ------------------------------------------------------------------ resources
 
-    def _direct(self, value):
+    def _direct(self, value: PdfObject) -> PdfObject:
         """CPDF_Object::GetDirect: one reference followed; one leading to another reference is nothing."""
         if isinstance(value, Ref):
             value = self.doc.get(value.num)
             return None if isinstance(value, Ref) else value
         return value
 
-    def resource_holder(self, category: str) -> dict | None:
+    def resource_holder(self, category: str) -> PdfDict | None:
         """FindResourceHolder: this stream's dictionary for the category when it has one, else the page's."""
-        holder = None
+        holder: PdfObject = None
         for res in (self.resources, self.p.page_resources):
-            if not isinstance(res, dict):
-                continue
             group = self._direct(res.get(category))
             holder = group.dict if isinstance(group, Stream) else group
             if isinstance(holder, dict) or res is self.p.page_resources:
                 break
         return holder if isinstance(holder, dict) else None
 
-    def resource(self, category: str, name) -> object:
+    def resource(self, category: str, name: Operand | str) -> PdfObject:
         """FindResourceObj: the name in FindResourceHolder's dictionary for the category - this stream's
         own when it has one (even without the name: the page's is not asked then), else the page's."""
         holder = self.resource_holder(category)
@@ -425,21 +489,21 @@ class _Run:
             return None
         return self._direct(holder.get(str(name)))
 
-    def colorspace(self, name) -> ColorSpace | None:
-        name = str(name)
-        if name == "Pattern":
+    def colorspace(self, name: Operand) -> ColorSpace | None:
+        key = str(name)
+        if key == "Pattern":
             return PATTERN
-        if name in ("DeviceGray", "DeviceRGB", "DeviceCMYK", "G", "RGB", "CMYK"):
-            return load_colorspace(self.doc, Name(name), self.resources)
-        obj = self.resource("ColorSpace", name)
+        if key in ("DeviceGray", "DeviceRGB", "DeviceCMYK", "G", "RGB", "CMYK"):
+            return load_colorspace(self.doc, Name(key), self.resources, 0)
+        obj = self.resource("ColorSpace", key)
         if obj is None:
             return None
-        key = id(obj)
-        if key not in self.p.colorspaces:
-            self.p.colorspaces[key] = load_colorspace(self.doc, obj, None)
-        return self.p.colorspaces[key]
+        known = id(obj)
+        if known not in self.p.colorspaces:
+            self.p.colorspaces[known] = load_colorspace(self.doc, obj, None, 0)
+        return self.p.colorspaces[known]
 
-    def _inline_components(self, cs):
+    def _inline_components(self, cs: PdfObject) -> int | None:
         """Handle_BeginImage's colour space object for ReadInlineStream: a name other than the three
         device ones is looked up in the resources (None: not there, and the data is then read as
         one bit per pixel), and GetColorSpace(obj, nullptr) gives the component count, 3 when it
@@ -449,7 +513,7 @@ class _Run:
             if cs is None:
                 return None
         try:
-            space = load_colorspace(self.doc, cs, None)
+            space = load_colorspace(self.doc, cs, None, 0)
         except Exception:  # noqa: BLE001 - a colour space that does not load
             space = None
         return space.n if space is not None else 3
@@ -484,10 +548,10 @@ class _Run:
     # ------------------------------------------------------------------ execution
 
     def execute(self, data: bytes) -> None:
-        fast = None  # ParsePathObject's params while in its fast path
-        for op, args in operations(data, self._inline_components):
+        fast: list[float] | None = None  # ParsePathObject's params while in its fast path
+        for op, args in content_operations(data, self._inline_components):
             if fast is not None:
-                raw = getattr(args, "raw", args)  # the fast path reads numbers, not the buffer
+                raw = args.raw if isinstance(args, Operands) else args  # the fast path reads numbers, not the buffer
                 if op in PATH_FAST and all(_is_number(a) for a in raw):
                     self._fast_path(op, raw, fast)
                     continue
@@ -502,7 +566,7 @@ class _Run:
             if op == "m" and len(args) == 2:
                 fast = [0.0] * 6
 
-    def _fast_path(self, op: str, args: list, params: list) -> None:
+    def _fast_path(self, op: str, args: Args, params: list[float]) -> None:
         """CPDF_StreamContentParser::ParsePathObject, entered after a valid `m`: path operators
         take the *first* numbers read (up to six; more are dropped), without counting them - a
         missing one is whatever the previous operator left in `params` (zeros at first) - until
@@ -532,50 +596,55 @@ class _Run:
             self.op_re(p[:4])
 
     @staticmethod
-    def number(args, i: int) -> float:
+    def number(args: Args, i: int) -> float:
         """GetNumber(i): the i-th operand from the end, 0 when missing."""
         return _num(args[-1 - i]) if i < len(args) else 0.0
 
-    def numbers(self, args, n: int) -> list[float]:
+    def numbers(self, args: Args, n: int) -> list[float]:
         return [self.number(args, n - 1 - k) for k in range(n)]
 
+    def matrix(self, args: Args) -> Matrix:
+        """Six numbers (`cm`, `Tm`)."""
+        a, b, c, d, e, f = self.numbers(args, 6)
+        return a, b, c, d, e, f
+
     # ---- graphics state
-    def op_q(self, args):
+    def op_q(self, args: Args) -> None:
         self.stack.append(self.state.copy())
 
-    def op_Q(self, args):
+    def op_Q(self, args: Args) -> None:
         if self.stack:
             self.state = self.stack.pop()
 
-    def op_cm(self, args):
-        m = tuple(self.numbers(args, 6))
+    def op_cm(self, args: Args) -> None:
         # CFX_Matrix::operator* in float: rounding after every step, not once at the end
-        self.state.ctm = concat(f32m(m), self.state.ctm)
+        self.state.ctm = concat(f32m(self.matrix(args)), self.state.ctm)
         self._text_matrix_changed()
 
-    def op_w(self, args):
+    def op_w(self, args: Args) -> None:
         self.state.line_width = self.number(args, 0)
 
-    def op_J(self, args):
+    def op_J(self, args: Args) -> None:
         self.state.line_cap = int(self.number(args, 0))
 
-    def op_j(self, args):
+    def op_j(self, args: Args) -> None:
         self.state.line_join = int(self.number(args, 0))
 
-    def op_M(self, args):
+    def op_M(self, args: Args) -> None:
         self.state.miter = self.number(args, 0)
 
-    def op_d(self, args):
+    def op_d(self, args: Args) -> None:
         dash = args[-2] if len(args) >= 2 else None
         if not isinstance(dash, list):
             return
         self.state.dash = tuple(_num(self.doc.resolve(v)) for v in dash)
         self.state.dash_phase = self.number(args, 0)
 
-    def op_BMC(self, args):
-        self.marks.append(self.marks[-1] + (MarkItem(tag=MarkItem.operand_string(args[-1]) if args else b""),))
+    def op_BMC(self, args: Args) -> None:
+        tag = MarkItem.operand_string(args[-1]) if args else b""
+        self.marks.append(self.marks[-1] + (MarkItem(direct=None, holder=None, name="", doc=None, tag=tag),))
 
-    def op_BDC(self, args):
+    def op_BDC(self, args: Args) -> None:
         """Handle_BeginMarkedContent_Dictionary: a dictionary written here, or a name in the
         /Properties resources; anything else (or a name not there) opens nothing, so the EMC that
         follows closes the enclosing sequence."""
@@ -585,18 +654,18 @@ class _Run:
             holder = self.resource_holder("Properties")
             if holder is None or MarkItem.dict_for(self.doc, holder, str(prop)) is None:
                 return
-            item = MarkItem(holder=holder, name=str(prop), doc=self.doc, tag=tag)
+            item = MarkItem(direct=None, holder=holder, name=str(prop), doc=self.doc, tag=tag)
         elif isinstance(prop, dict):
-            item = MarkItem(direct=prop, tag=tag)
+            item = MarkItem(direct=prop, holder=None, name="", doc=None, tag=tag)
         else:
             return
         self.marks.append(self.marks[-1] + (item,))
 
-    def op_EMC(self, args):
+    def op_EMC(self, args: Args) -> None:
         if len(self.marks) > 1:
             self.marks.pop()
 
-    def op_gs(self, args):
+    def op_gs(self, args: Args) -> None:
         gs = self.resource("ExtGState", args[-1]) if args else None
         if not isinstance(gs, dict):
             return
@@ -623,15 +692,15 @@ class _Run:
                 s.smask = value if isinstance(value, dict) else None
                 if s.smask is not None:
                     s.smask_matrix = s.ctm
-            elif key == "D" and isinstance(value, list) and value and isinstance(r(value[0]), list):
-                s.dash = tuple(_num(r(v)) for v in r(value[0]))
+            elif key == "D" and isinstance(value, list) and value and isinstance(dashes := r(value[0]), list):
+                s.dash = tuple(_num(r(v)) for v in dashes)
                 s.dash_phase = _num(r(value[1])) if len(value) > 1 else 0.0
             elif key == "TR2" or key == "TR" and "TR2" not in gs:
                 s.transfer = None if isinstance(value, Name) else value
             elif key == "CA":
-                s.stroke_alpha = min(1.0, max(0.0, _num(value, 1.0)))
+                s.stroke_alpha = min(1.0, max(0.0, _num_or(value, 1.0)))
             elif key == "ca":
-                s.fill_alpha = min(1.0, max(0.0, _num(value, 1.0)))
+                s.fill_alpha = min(1.0, max(0.0, _num_or(value, 1.0)))
 
     # ---- colour
     def _set_color(self, fill: bool, cs: ColorSpace | None, values: list[float]) -> None:
@@ -664,29 +733,29 @@ class _Run:
         else:
             s.stroke_cs, s.stroke_values, s.stroke_ref = current, tuple(values), ref
 
-    def op_g(self, args):
+    def op_g(self, args: Args) -> None:
         self._set_color(True, DEVICE["DeviceGray"], self.numbers(args, 1))
 
-    def op_G(self, args):
+    def op_G(self, args: Args) -> None:
         self._set_color(False, DEVICE["DeviceGray"], self.numbers(args, 1))
 
-    def op_rg(self, args):
+    def op_rg(self, args: Args) -> None:
         if len(args) == 3:
             self._set_color(True, DEVICE["DeviceRGB"], self.numbers(args, 3))
 
-    def op_RG(self, args):
+    def op_RG(self, args: Args) -> None:
         if len(args) == 3:
             self._set_color(False, DEVICE["DeviceRGB"], self.numbers(args, 3))
 
-    def op_k(self, args):
+    def op_k(self, args: Args) -> None:
         if len(args) == 4:
             self._set_color(True, DEVICE["DeviceCMYK"], self.numbers(args, 4))
 
-    def op_K(self, args):
+    def op_K(self, args: Args) -> None:
         if len(args) == 4:
             self._set_color(False, DEVICE["DeviceCMYK"], self.numbers(args, 4))
 
-    def _set_space(self, fill: bool, args):
+    def _set_space(self, fill: bool, args: Args) -> None:
         cs = self.colorspace(args[-1]) if args else None
         if cs is None:
             return
@@ -700,29 +769,29 @@ class _Run:
             self.state.stroke_pattern = False if cs.is_pattern else None
             self.state.stroke_set = True
 
-    def op_cs(self, args):
+    def op_cs(self, args: Args) -> None:
         self._set_space(True, args)
 
-    def op_CS(self, args):
+    def op_CS(self, args: Args) -> None:
         self._set_space(False, args)
 
-    def _colors(self, args) -> list[float]:
+    def _colors(self, args: Args) -> list[float]:
         n = min(len(args), 4)
         return self.numbers(args, n)
 
-    def op_sc(self, args):
+    def op_sc(self, args: Args) -> None:
         if args:
             self._set_color(True, None, self._colors(args))
         else:
             self.state.fill_set = True      # SetColor with no values: the colour is no longer null
 
-    def op_SC(self, args):
+    def op_SC(self, args: Args) -> None:
         if args:
             self._set_color(False, None, self._colors(args))
         else:
             self.state.stroke_set = True
 
-    def _set_pattern(self, fill: bool, args):
+    def _set_pattern(self, fill: bool, args: Args) -> None:
         if not args:
             return
         if not isinstance(args[-1], Name):
@@ -759,14 +828,14 @@ class _Run:
         else:
             s.stroke_cs, s.stroke_values, s.stroke_ref = cs, tuple(values), ref
 
-    def op_scn(self, args):
+    def op_scn(self, args: Args) -> None:
         self._set_pattern(True, args)
 
-    def op_SCN(self, args):
+    def op_SCN(self, args: Args) -> None:
         self._set_pattern(False, args)
 
     # ---- path construction
-    def _point(self, x, y, kind):
+    def _point(self, x: float, y: float, kind: int) -> None:
         """AddPathPoint."""
         pt = (x, y)
         path = self.path
@@ -782,38 +851,38 @@ class _Run:
             return
         path.append((x, y, kind, False))
 
-    def _point_close(self, x, y, kind):
+    def _point_close(self, x: float, y: float, kind: int) -> None:
         self.path_current = (x, y)
         if self.path:
             self.path.append((x, y, kind, True))
 
-    def op_m(self, args):
+    def op_m(self, args: Args) -> None:
         if len(args) == 2:
             self._point(self.number(args, 1), self.number(args, 0), PT_MOVE)
 
-    def op_l(self, args):
+    def op_l(self, args: Args) -> None:
         if len(args) == 2:
             self._point(self.number(args, 1), self.number(args, 0), PT_LINE)
 
-    def op_c(self, args):
+    def op_c(self, args: Args) -> None:
         n = self.numbers(args, 6)
         self._point(n[0], n[1], PT_BEZIER)
         self._point(n[2], n[3], PT_BEZIER)
         self._point(n[4], n[5], PT_BEZIER)
 
-    def op_v(self, args):
+    def op_v(self, args: Args) -> None:
         n = self.numbers(args, 4)
         self._point(*self.path_current, PT_BEZIER)
         self._point(n[0], n[1], PT_BEZIER)
         self._point(n[2], n[3], PT_BEZIER)
 
-    def op_y(self, args):
+    def op_y(self, args: Args) -> None:
         n = self.numbers(args, 4)
         self._point(n[0], n[1], PT_BEZIER)
         self._point(n[2], n[3], PT_BEZIER)
         self._point(n[2], n[3], PT_BEZIER)
 
-    def op_h(self, args):
+    def op_h(self, args: Args) -> None:
         if not self.path:
             return
         if self.path_start != self.path_current:
@@ -822,7 +891,7 @@ class _Run:
             x, y, kind, _ = self.path[-1]
             self.path[-1] = (x, y, kind, True)
 
-    def op_re(self, args):
+    def op_re(self, args: Args) -> None:
         x, y, w, h = self.numbers(args, 4)
         right, top = f32(x + w), f32(y + h)
         self._point(x, y, PT_MOVE)
@@ -831,17 +900,18 @@ class _Run:
         self._point(x, top, PT_LINE)
         self._point_close(x, y, PT_LINE)
 
-    def op_W(self, args):
+    def op_W(self, args: Args) -> None:
         self.clip_type = FILL_WINDING
 
-    def op_Wstar(self, args):
+    def op_Wstar(self, args: Args) -> None:
         self.clip_type = FILL_EVENODD
 
     # ---- path painting
-    def _paint(self, fill_type: int, stroke: bool, close: bool = False):
+    def _paint(self, fill_type: int, stroke: bool, close: bool) -> None:
         if close:
             self.op_h([])
-        points, self.path = self.path, []
+        points: list[PathPoint] = self.path
+        self.path = []
         clip_type, self.clip_type = self.clip_type, FILL_NONE
         if not points:
             return
@@ -861,7 +931,8 @@ class _Run:
             points.pop()
         matrix = s.ctm
         if stroke or fill_type != FILL_NONE:
-            obj = PObj(OBJ_PATH, matrix, points=points, fill_type=fill_type, stroked=stroke)
+            obj = new_object(OBJ_PATH, matrix)
+            obj.points, obj.fill_type, obj.stroked = points, fill_type, stroke
             self.add(obj, True, True)
             obj.rect = path_rect(obj)
         if clip_type != FILL_NONE:
@@ -871,48 +942,48 @@ class _Run:
             s.clips = s.clips + (box,)
             s.clip_paths = append_clip(s.clip_paths, tuple(points), clip_type)
 
-    def op_f(self, args):
-        self._paint(FILL_WINDING, False)
+    def op_f(self, args: Args) -> None:
+        self._paint(FILL_WINDING, False, False)
 
     op_F = op_f
 
-    def op_fstar(self, args):
-        self._paint(FILL_EVENODD, False)
+    def op_fstar(self, args: Args) -> None:
+        self._paint(FILL_EVENODD, False, False)
 
-    def op_S(self, args):
-        self._paint(FILL_NONE, True)
+    def op_S(self, args: Args) -> None:
+        self._paint(FILL_NONE, True, False)
 
-    def op_s(self, args):
-        self._paint(FILL_NONE, True, close=True)
+    def op_s(self, args: Args) -> None:
+        self._paint(FILL_NONE, True, True)
 
-    def op_B(self, args):
-        self._paint(FILL_WINDING, True)
+    def op_B(self, args: Args) -> None:
+        self._paint(FILL_WINDING, True, False)
 
-    def op_Bstar(self, args):
-        self._paint(FILL_EVENODD, True)
+    def op_Bstar(self, args: Args) -> None:
+        self._paint(FILL_EVENODD, True, False)
 
-    def op_b(self, args):
-        self._paint(FILL_WINDING, True, close=True)
+    def op_b(self, args: Args) -> None:
+        self._paint(FILL_WINDING, True, True)
 
-    def op_bstar(self, args):
+    def op_bstar(self, args: Args) -> None:
         # Handle_CloseEOFillStrokePath: unlike b and s, a closing line to the start always
         # (a lone `m` then paints a dot)
         self._point_close(*self.path_start, PT_LINE)
-        self._paint(FILL_EVENODD, True)
+        self._paint(FILL_EVENODD, True, False)
 
-    def op_n(self, args):
-        self._paint(FILL_NONE, False)
+    def op_n(self, args: Args) -> None:
+        self._paint(FILL_NONE, False, False)
 
     # ---- text state
-    def _text_matrix_changed(self):
+    def _text_matrix_changed(self) -> None:
         pass  # the text object's matrix is computed when it is made (OnChangeTextMatrix's result)
 
-    def op_BT(self, args):
+    def op_BT(self, args: Args) -> None:
         s = self.state
         s.text_matrix = IDENTITY
         s.text_pos = s.text_line_pos = (0.0, 0.0)
 
-    def op_ET(self, args):
+    def op_ET(self, args: Args) -> None:
         """Handle_EndText: the clip-mode texts shown since the last ET join the clip path, if the
         mode is still a clip mode now."""
         if not self.clip_text_list:
@@ -922,29 +993,29 @@ class _Run:
             s.clip_texts = append_texts(s.clip_texts, self.clip_text_list)
         self.clip_text_list = []
 
-    def op_Tc(self, args):
+    def op_Tc(self, args: Args) -> None:
         self.state.char_space = self.number(args, 0)
 
-    def op_Tw(self, args):
+    def op_Tw(self, args: Args) -> None:
         self.state.word_space = self.number(args, 0)
 
-    def op_Tz(self, args):
+    def op_Tz(self, args: Args) -> None:
         if len(args) == 1:
             self.state.horz_scale = f32(self.number(args, 0) / 100)
 
-    def op_TL(self, args):
+    def op_TL(self, args: Args) -> None:
         self.state.leading = self.number(args, 0)
 
-    def op_Tr(self, args):
+    def op_Tr(self, args: Args) -> None:
         # SetTextRenderingModeFromInt: a mode outside 0..7 leaves the current one
         mode = int(self.number(args, 0))
         if 0 <= mode <= 7:
             self.state.text_mode = mode
 
-    def op_Ts(self, args):
+    def op_Ts(self, args: Args) -> None:
         self.state.rise = self.number(args, 0)
 
-    def op_Tf(self, args):
+    def op_Tf(self, args: Args) -> None:
         s = self.state
         s.font_size = self.number(args, 0)
         # FindFont: no font dictionary under the name (a stream is none either) is the stock Helvetica;
@@ -954,57 +1025,60 @@ class _Run:
         font = self.p.font(font_dict) if isinstance(font_dict, dict) else self.p.stock_font()
         if font is not None:
             s.font = font
-            if font.is_type3:
+            if isinstance(font, Type3Font):
                 font.check_metrics()
 
-    def op_Td(self, args):
+    def op_Td(self, args: Args) -> None:
         s = self.state
         x, y = self.number(args, 1), self.number(args, 0)
         s.text_line_pos = (f32(s.text_line_pos[0] + x), f32(s.text_line_pos[1] + y))
         s.text_pos = s.text_line_pos
 
-    def op_TD(self, args):
+    def op_TD(self, args: Args) -> None:
         self.state.leading = -self.number(args, 0)
         self.op_Td(args)
 
-    def op_Tm(self, args):
+    def op_Tm(self, args: Args) -> None:
         s = self.state
-        s.text_matrix = tuple(self.numbers(args, 6))
+        s.text_matrix = self.matrix(args)
         s.text_pos = s.text_line_pos = (0.0, 0.0)
 
-    def op_Tstar(self, args):
+    def op_Tstar(self, args: Args) -> None:
         s = self.state
         s.text_line_pos = (s.text_line_pos[0], f32(s.text_line_pos[1] - s.leading))
         s.text_pos = s.text_line_pos
 
     # ---- text showing
-    def op_Tj(self, args):
-        if args and isinstance(args[-1], (bytes, String)) and len(args[-1]):
-            self._add_text([bytes(args[-1])], 0.0, [])
+    def op_Tj(self, args: Args) -> None:
+        text = args[-1] if args else None
+        if isinstance(text, String) and len(text):
+            self._add_text([bytes(text)], 0.0, [])
 
-    def op_quote(self, args):
+    def op_quote(self, args: Args) -> None:
         self.op_Tstar([])
         self.op_Tj(args)
 
-    def op_dquote(self, args):
+    def op_dquote(self, args: Args) -> None:
         self.state.word_space = self.number(args, 2)
         self.state.char_space = self.number(args, 1)
         self.op_quote(args)
 
-    def op_TJ(self, args):
-        array = args[-1] if args and isinstance(args[-1], list) else None
-        if array is None:
+    def op_TJ(self, args: Args) -> None:
+        array = args[-1] if args else None
+        if not isinstance(array, list):
             return
         s = self.state
-        if not any(isinstance(v, (bytes, String)) for v in array):
+        if not any(isinstance(v, String) for v in array):
             for v in array:
                 k = f32(_num(v))
                 if k != 0:
                     s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(k)), s.text_pos[1])
             return
-        strings, kernings, initial = [], [], 0.0
+        strings: list[bytes] = []
+        kernings: list[float] = []
+        initial = 0.0
         for v in array:
-            if isinstance(v, (bytes, String)):
+            if isinstance(v, String):
                 if not len(v):
                     continue
                 strings.append(bytes(v))
@@ -1028,7 +1102,7 @@ class _Run:
         if font is None:
             return
         if initial != 0:
-            self._kern(initial)
+            self._kern(font, initial)
         if not strings:
             return
         # a Type 3 font is filled whatever Tr says (the stroke CTM, the clip list), but the object
@@ -1037,23 +1111,23 @@ class _Run:
         # OnChangeTextMatrix: [Tz 0 0 1] x Tm x CTM (content_to_user is the identity here)
         tm = concat(concat((f32(s.horz_scale), 0.0, 0.0, 1.0, 0.0, 0.0), s.text_matrix), s.ctm)
         pos = transform32(s.ctm, *transform32(s.text_matrix, s.text_pos[0], f32(s.text_pos[1] + s.rise)))
-        items: list = []
-        kerns: list = []
+        items: list[TextItem] = []
+        kerns: list[float] = []
         for k, string in enumerate(strings):
             for code in font.codes(string):
-                items.append([code, 0.0])
+                items.append((code, 0.0))
                 kerns.append(0.0)
             if k != len(strings) - 1 and kerns:
                 kerns[-1] = kernings[k]
         if not items:
             return
-        obj = PObj(OBJ_TEXT, (tm[0], tm[1], tm[2], tm[3], pos[0], pos[1]), font=font, font_size=s.font_size,
-                   items=items, kernings=kerns, text_mode=s.text_mode, char_space=s.char_space,
-                   word_space=s.word_space)
+        obj = new_object(OBJ_TEXT, (tm[0], tm[1], tm[2], tm[3], pos[0], pos[1]))
+        obj.font, obj.font_size, obj.items, obj.kernings = font, s.font_size, items, kerns
+        obj.text_mode, obj.char_space, obj.word_space = s.text_mode, s.char_space, s.word_space
         if mode in (1, 2, 5, 6):
             obj.text_ctm = (s.ctm[0], s.ctm[2], s.ctm[1], s.ctm[3])
         self.add(obj, True, True)
-        advance = text_positions(obj)
+        advance = text_positions(obj, font)
         if font.vertical:   # CalcPositionData: (0, advance), no Tz
             s.text_pos = (s.text_pos[0], f32(s.text_pos[1] + advance))
         else:
@@ -1062,50 +1136,50 @@ class _Run:
             # a clone: switching the object off later leaves the clip as it is
             self.clip_text_list.append(copy.copy(obj))
         if kernings and kernings[-1] != 0:
-            self._kern(kernings[-1])
+            self._kern(font, kernings[-1])
 
-    def _kern(self, kerning: float) -> None:
+    def _kern(self, font: Font, kerning: float) -> None:
         """AddTextObject's kerning before and after the strings: down the line (GetVerticalTextSize,
         no Tz) in vertical writing, else along it."""
         s = self.state
-        if s.font.vertical:
+        if font.vertical:
             s.text_pos = (s.text_pos[0], f32(s.text_pos[1] - f32(f32(kerning * s.font_size) / 1000)))
         else:
             s.text_pos = (f32(s.text_pos[0] - self._horizontal_size(kerning)), s.text_pos[1])
 
     # ---- XObjects, images, shadings
-    def op_Do(self, args):
+    def op_Do(self, args: Args) -> None:
         if not args:
             return
         name = args[-1]
         if name == self.last_image_name and self.last_image is not None:
-            self._image(self.last_image, name)
+            self._image(self.last_image, str(name))
             return
         xobj = self.resource("XObject", name)
         if not isinstance(xobj, Stream):
             return
         subtype = self.doc.resolve(xobj.get("Subtype"))
         if subtype == "Form":
-            self._form(xobj, name)
+            self._form(xobj, str(name))
         elif subtype == "Image":
-            self._image(xobj, name)
+            self._image(xobj, str(name))
             self.last_image_name, self.last_image = name, xobj
 
-    def _image(self, stream, name):
-        d = stream.dict if isinstance(stream, Stream) else stream.dict
-        mask = bool(self.doc.resolve(d.get("ImageMask")))
-        obj = PObj(OBJ_IMAGE, self.state.ctm, stream=stream, name=str(name),
-                   resources=None if isinstance(stream, Stream) else self.resources)
+    def _image(self, stream: XObject, name: str) -> None:
+        mask = bool(self.doc.resolve(stream.dict.get("ImageMask")))
+        obj = new_object(OBJ_IMAGE, self.state.ctm)
+        obj.stream, obj.name = stream, name
+        obj.resources = None if isinstance(stream, Stream) else self.resources
         self.add(obj, mask, False)
         if not mask:
             obj.fill = obj.stroke = None
         obj.rect = transform_rect(obj.matrix, (0.0, 0.0, 1.0, 1.0))
 
-    def op_BI(self, args):
+    def op_BI(self, args: Args) -> None:
         if args and isinstance(args[0], InlineImage):
             self._image(args[0], "")
 
-    def op_sh(self, args):
+    def op_sh(self, args: Args) -> None:
         from .render_shading import find_shading
         shading = self.resource("Shading", args[-1]) if args else None
         if not isinstance(shading, (dict, Stream)):
@@ -1116,7 +1190,8 @@ class _Run:
         record = find_shading(self.p, shading, s.parent_matrix)
         if record.kind != "shading" or not record.shade_load():
             return
-        obj = PObj(OBJ_SHADING, IDENTITY, stream=shading)
+        obj = new_object(OBJ_SHADING, IDENTITY)
+        obj.stream = shading
         self.add(obj, False, False)
         obj.shading_matrix = s.ctm
         obj.shading_record = record
@@ -1132,13 +1207,14 @@ class _Run:
             rect = float_intersect(rect, obj.mesh_box)
         obj.rect = rect
 
-    def _form(self, stream: Stream, name) -> None:
+    def _form(self, stream: Stream, name: str) -> None:
         """AddForm: the form object first, its contents after it (pre-order), parsed with a
         fresh CTM (/Matrix), its /BBox as the clip and only the general, graph, colour and text
         states of the caller."""
         r = self.doc.resolve
         s = self.state
-        obj = PObj(OBJ_FORM, s.ctm, stream=stream, name=str(name))
+        obj = new_object(OBJ_FORM, s.ctm)
+        obj.stream, obj.name = stream, name
         group = r(stream.get("Group"))
         # LoadTransparencyInfo: /I counts only in a /S /Transparency group
         obj.group = isinstance(group, dict) and r(group.get("S")) == "Transparency"
@@ -1146,7 +1222,10 @@ class _Run:
         data = self.doc.stream_data(stream)
         chain = self.p.parsed
         if len(chain) <= MAX_FORM_LEVEL and not any(x is stream for x in chain):
-            child = State(fill_cs=s.fill_cs, fill_values=s.fill_values, fill_ref=s.fill_ref,
+            # a fresh CTM, clip and text position; the parent matrix is set below
+            child = State(ctm=IDENTITY, clips=(), clip_paths=(), clip_texts=(), text_matrix=IDENTITY,
+                          text_pos=(0.0, 0.0), text_line_pos=(0.0, 0.0), parent_matrix=IDENTITY,
+                          fill_cs=s.fill_cs, fill_values=s.fill_values, fill_ref=s.fill_ref,
                           stroke_cs=s.stroke_cs, stroke_values=s.stroke_values, stroke_ref=s.stroke_ref,
                           fill_alpha=s.fill_alpha, stroke_alpha=s.stroke_alpha, blend=s.blend,
                           soft_mask=s.soft_mask, line_width=s.line_width, line_cap=s.line_cap,
@@ -1158,20 +1237,23 @@ class _Run:
                           fill_pattern=s.fill_pattern, stroke_pattern=s.stroke_pattern,
                           fill_set=s.fill_set, stroke_set=s.stroke_set)
             m = r(stream.get("Matrix"))
-            fm = tuple(_num(r(v)) for v in m[:6]) if isinstance(m, list) and len(m) >= 6 else IDENTITY
+            fm = IDENTITY
+            if isinstance(m, list) and len(m) >= 6:
+                ma, mb, mc, md, me, mf = [_num(r(v)) for v in m[:6]]
+                fm = (ma, mb, mc, md, me, mf)
             child.ctm = fm
             child.parent_matrix = fm
             bbox = (0.0, 0.0, 0.0, 0.0)
             b = r(stream.get("BBox"))
             if isinstance(b, list) and len(b) >= 4:
-                v = [_num(r(x)) for x in b[:4]]
-                rect = (min(v[0], v[2]), min(v[1], v[3]), max(v[0], v[2]), max(v[1], v[3]))
+                v0, v1, v2, v3 = [_num(r(x)) for x in b[:4]]
+                rect = (min(v0, v2), min(v1, v3), max(v0, v2), max(v1, v3))
                 pts = [transform(fm, x, y) for x, y in ((rect[0], rect[1]), (rect[2], rect[1]),
                                                        (rect[2], rect[3]), (rect[0], rect[3]))]
                 child.clips = (point_bbox(pts),)
                 # CPDF_Array::GetRect does not normalise: the clip starts at the first corner
                 # given, which decides the order the rasteriser walks its edges in
-                clip = tuple((*transform32(fm, x, y), k, c) for x, y, k, c in rect_points(*v))
+                clip = tuple((*transform32(fm, x, y), k, c) for x, y, k, c in rect_points(v0, v1, v2, v3))
                 child.clip_paths = append_clip((), clip, FILL_WINDING)
                 bbox = transform_rect(fm, rect)
             if obj.group:
@@ -1187,55 +1269,63 @@ class _Run:
         obj.rect = form_rect(obj)
 
 
-def _op_name(op: str) -> str:
-    return {"W*": "Wstar", "f*": "fstar", "B*": "Bstar", "b*": "bstar", "T*": "Tstar",
-            "'": "quote", '"': "dquote"}.get(op, op)
+Handler = Callable[[_Run, Args], None]
 
-
-OPS = {}
-for _op in ("q Q cm w J j M d gs g G rg RG k K cs CS sc SC scn SCN m l c v y h re W W* f F f* S s B B* b b* n "
-            "BT ET Tc Tw Tz TL Tr Ts Tf Td TD Tm T* Tj ' \" TJ Do BI sh BMC BDC EMC").split():
-    OPS[_op] = getattr(_Run, "op_" + _op_name(_op))
+OPS: dict[str, Handler] = {
+    "q": _Run.op_q, "Q": _Run.op_Q, "cm": _Run.op_cm, "w": _Run.op_w, "J": _Run.op_J, "j": _Run.op_j,
+    "M": _Run.op_M, "d": _Run.op_d, "gs": _Run.op_gs, "g": _Run.op_g, "G": _Run.op_G, "rg": _Run.op_rg,
+    "RG": _Run.op_RG, "k": _Run.op_k, "K": _Run.op_K, "cs": _Run.op_cs, "CS": _Run.op_CS, "sc": _Run.op_sc,
+    "SC": _Run.op_SC, "scn": _Run.op_scn, "SCN": _Run.op_SCN, "m": _Run.op_m, "l": _Run.op_l,
+    "c": _Run.op_c, "v": _Run.op_v, "y": _Run.op_y, "h": _Run.op_h, "re": _Run.op_re, "W": _Run.op_W,
+    "W*": _Run.op_Wstar, "f": _Run.op_f, "F": _Run.op_F, "f*": _Run.op_fstar, "S": _Run.op_S,
+    "s": _Run.op_s, "B": _Run.op_B, "B*": _Run.op_Bstar, "b": _Run.op_b, "b*": _Run.op_bstar,
+    "n": _Run.op_n, "BT": _Run.op_BT, "ET": _Run.op_ET, "Tc": _Run.op_Tc, "Tw": _Run.op_Tw,
+    "Tz": _Run.op_Tz, "TL": _Run.op_TL, "Tr": _Run.op_Tr, "Ts": _Run.op_Ts, "Tf": _Run.op_Tf,
+    "Td": _Run.op_Td, "TD": _Run.op_TD, "Tm": _Run.op_Tm, "T*": _Run.op_Tstar, "Tj": _Run.op_Tj,
+    "'": _Run.op_quote, '"': _Run.op_dquote, "TJ": _Run.op_TJ, "Do": _Run.op_Do, "BI": _Run.op_BI,
+    "sh": _Run.op_sh, "BMC": _Run.op_BMC, "BDC": _Run.op_BDC, "EMC": _Run.op_EMC,
+}
 
 
 # ---------------------------------------------------------------------- bounds
 
 
-def item_origin(obj: PObj, item) -> tuple[float, float]:
+def item_origin(obj: PObj, item: TextItem) -> tuple[float, float]:
     """CPDF_TextObject::GetItemInfo's origin (text space): (x, 0), or in vertical writing
     (0, y) less the font size times the char's vertical origin / 1000, in floats."""
     font = obj.font
-    if not font.vertical:
+    if not isinstance(font, CIDFont) or not font.vertical:   # only a CID font writes vertically
         return item[1], 0.0
     vx, vy = font.vert_origin(item[0])
     size = f32(obj.font_size)
     return f32(0.0 - f32(f32(size * vx) / 1000)), f32(item[1] - f32(f32(size * vy) / 1000))
 
 
-def text_positions(obj: PObj) -> float:
-    """CPDF_TextObject::CalcPositionDataInternal: fills each item's x (text space, before the
-    horizontal scale), sets the original and page rectangles, returns the advance. Every `a * size
-    / 1000` is C float arithmetic: rounded after the product and again after the division."""
-    font, size = obj.font, f32(obj.font_size)
+def text_positions(obj: PObj, font: Font) -> float:
+    """CPDF_TextObject::CalcPositionDataInternal: sets each item's x (text space, before the
+    horizontal scale) and the original and page rectangles, returns the advance. `font` is the
+    object's. Every `a * size / 1000` is C float arithmetic: rounded after the product and again
+    after the division."""
+    size = f32(obj.font_size)
 
-    def scaled(v):
+    def scaled(v: float) -> float:
         return f32(f32(v * size) / 1000)
     cur = 0.0
     min_x, max_x, min_y, max_y = 10000.0, -10000.0, 10000.0, -10000.0
-    cid = font.subtype == "Type0"
-    vertical = font.vertical
-    for item, kerning in zip(obj.items, obj.kernings):
-        code = item[0]
-        item[1] = cur
+    cid = font if isinstance(font, CIDFont) else None       # a Type0 font
+    vertical = cid if cid is not None and cid.vertical else None
+    positioned: list[TextItem] = []
+    for (code, _x), kerning in zip(obj.items, obj.kernings):
+        positioned.append((code, cur))
         l, b, r, t = font.char_bbox(code)
-        if vertical:
+        if vertical is not None:
             # the box moved by minus the vertical origin (FX_RECT::Offset, in ints), x unscaled
-            vx, vy = font.vert_origin(code)
+            vx, vy = vertical.vert_origin(code)
             l, r, b, t = l - vx, r - vx, b - vy, t - vy
             min_x, max_x = min(min_x, l, r), max(max_x, l, r)
             top, bottom = f32(cur + scaled(t)), f32(cur + scaled(b))
             min_y, max_y = min(min_y, top, bottom), max(max_y, top, bottom)
-            cur = f32(cur + scaled(font.vert_width(code)))
+            cur = f32(cur + scaled(vertical.vert_width(code)))
         else:
             min_y, max_y = min(min_y, min(t, b)), max(max_y, max(t, b))
             w = font.char_width(code)
@@ -1248,12 +1338,13 @@ def text_positions(obj: PObj) -> float:
                 nxt = f32(cur + scaled(w))
             min_x, max_x = min(min_x, left, right), max(max_x, left, right)
             cur = nxt
-        if code == 32 and (not cid or font.char_size(32) == 1):
+        if code == 32 and (cid is None or cid.char_size(32) == 1):
             cur = f32(cur + obj.word_space)
         cur = f32(cur + obj.char_space)
         if kerning:
             cur = f32(cur - scaled(kerning))
-    if vertical:
+    obj.items = positioned
+    if vertical is not None:
         min_x, max_x = scaled(min_x), scaled(max_x)
     else:
         min_y, max_y = scaled(min_y), scaled(max_y)
@@ -1266,7 +1357,7 @@ def text_positions(obj: PObj) -> float:
     return cur
 
 
-def path_rect(obj: PObj) -> tuple:
+def path_rect(obj: PObj) -> Rect:
     """CPDF_PathObject::CalcBoundingBox."""
     width = obj.line_width
     if obj.stroked and width != 0:
@@ -1281,7 +1372,7 @@ def path_rect(obj: PObj) -> tuple:
     return rect
 
 
-def check_clip(objects) -> None:
+def check_clip(objects: Sequence[PObj]) -> None:
     """CPDF_ContentParser::CheckClip, run over one holder's objects (a page's top level, a form's
     direct children) when its content is parsed: an object whose only clip path is a rectangle
     containing the object's rectangle loses that clip. It changes pixels where the object's edge
@@ -1303,7 +1394,7 @@ def check_clip(objects) -> None:
             o.clips = None
 
 
-def form_rect(obj: PObj) -> tuple:
+def form_rect(obj: PObj) -> Rect:
     """CPDF_FormObject::CalcBoundingBox: the form matrix over the union of its children's
     rectangles (only the direct children: theirs already include their own)."""
     kids = [c for c in obj.children if c.parent is obj and c.active]
@@ -1322,10 +1413,10 @@ def form_rect(obj: PObj) -> tuple:
 class _Rect:
     __slots__ = ("l", "b", "r", "t")
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.l, self.b, self.r, self.t = 100000.0, 100000.0, -100000.0, -100000.0
 
-    def update(self, x, y):
+    def update(self, x: float, y: float) -> None:
         """CFX_FloatRect::UpdateRect: std::min/max, so a NaN never gets in."""
         if x < self.l:
             self.l = x
@@ -1356,7 +1447,7 @@ def _hypot(x: float, y: float) -> float:
 # the line (a Bezier ending on its own control point) is decided by the last bit.
 
 
-def _end_points(rect: _Rect, start, end, hw):
+def _end_points(rect: _Rect, start: Point, end: Point, hw: float) -> None:
     """UpdateLineEndPoints (cfx_path.cpp), in float32 like every step there."""
     if start[0] == end[0]:
         if start[1] == end[1]:
@@ -1381,7 +1472,7 @@ def _end_points(rect: _Rect, start, end, hw):
     rect.update(f32(mx + dx1), f32(my - dy1))
 
 
-def _join_points(rect: _Rect, start, mid, end, hw):
+def _join_points(rect: _Rect, start: Point, mid: Point, end: Point, hw: float) -> None:
     """UpdateLineJoinPoints (cfx_path.cpp); the miter limit is not used there either."""
     tw = f32(1.0 / 20)
     start_vert = abs(f32(start[0] - mid[0])) < tw
@@ -1404,7 +1495,7 @@ def _join_points(rect: _Rect, start, mid, end, hw):
         end_c = f32(mid[1] - f32(end_k * mid[0]))
         end_dc = abs(_div(f32(hw * _hypot(ex, ey)), ex))
 
-    def line(k, x, c):
+    def line(k: float, x: float, c: float) -> float:
         return f32(f32(k * x) + c)
 
     if start_vert:
@@ -1437,8 +1528,11 @@ def _join_points(rect: _Rect, start, mid, end, hw):
     rect.update(jx, line(start_k, jx, so))
 
 
-def stroke_bbox(points: list, line_width: float) -> tuple:
+def stroke_bbox(points: Sequence[PathPoint], line_width: float) -> Rect:
     """CFX_Path::GetBoundingBoxForStrokePath: half_width is the whole line width there."""
+
+    def p(k: int) -> Point:
+        return points[k][0], points[k][1]
     rect = _Rect()
     hw = line_width
     n = len(points)
@@ -1464,7 +1558,6 @@ def stroke_bbox(points: list, line_width: float) -> tuple:
                 start, end, join = i - 1, i, False
             else:
                 start, mid, end, join = i - 1, i, i + 1, True
-        p = lambda k: (points[k][0], points[k][1])  # noqa: E731
         if join:
             _join_points(rect, p(start), p(mid), p(end), hw)
         else:

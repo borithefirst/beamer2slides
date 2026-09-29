@@ -5,18 +5,67 @@ says which it was."""
 from __future__ import annotations
 
 import zlib
+from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
-from .syntax import Name, Stream
+from .syntax import Name, PdfDict, PdfObject, Stream
 
 IMAGE_CODECS = {"DCTDecode", "JPXDecode", "CCITTFaxDecode", "JBIG2Decode"}
 ABBREVIATIONS = {"AHx": "ASCIIHexDecode", "A85": "ASCII85Decode", "LZW": "LZWDecode", "Fl": "FlateDecode",
                  "RL": "RunLengthDecode", "CCF": "CCITTFaxDecode", "DCT": "DCTDecode"}
 
+Resolve = Callable[[PdfObject], PdfObject]
+"""`PdfFile.resolve`: the object a value stands for, references followed."""
+
+
+def direct(value: PdfObject) -> PdfObject:
+    """The `Resolve` of values that hold no references (an inline image's dictionary)."""
+    return value
+
 
 class FilterError(Exception):
     pass
+
+
+def integer_value(v: PdfObject) -> int:
+    """CPDF_Object::GetInteger of a direct value: a number truncated (a real outside the int range
+    is 0), anything else 0."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return 0
+    if isinstance(v, float):
+        return int(v) if -2147483648.0 < v < 2147483648.0 else 0
+    return v
+
+
+def integer_for(params: PdfDict, key: str, missing: int) -> int:
+    """CPDF_Dictionary::GetIntegerFor over resolved values: `missing` when the key has no value."""
+    v = params.get(key)
+    return missing if v is None else integer_value(v)
+
+
+@dataclass(frozen=True, kw_only=True)
+class Prediction:
+    """A Flate or LZW filter's /DecodeParms as the predictor reads them (a value of 0 counts as its
+    default, as it always has here)."""
+    predictor: int
+    colors: int
+    bpc: int
+    columns: int
+
+
+def prediction(params: PdfDict) -> Prediction:
+    """The predictor's parameters of resolved /DecodeParms."""
+    return Prediction(predictor=integer_for(params, "Predictor", 1) or 1,
+                      colors=integer_for(params, "Colors", 1) or 1,
+                      bpc=integer_for(params, "BitsPerComponent", 8) or 8,
+                      columns=integer_for(params, "Columns", 1) or 1)
+
+
+def early_change(params: PdfDict) -> int:
+    """FlateOrLZWDecode's bEarlyChange, `!!GetIntegerFor("EarlyChange", 1)`: 1 or 0 (a 2 is 1)."""
+    return 1 if integer_for(params, "EarlyChange", 1) else 0
 
 
 def flate(data: bytes) -> bytes:
@@ -47,7 +96,8 @@ def flate(data: bytes) -> bytes:
         return bytes(out)
 
 
-def lzw(data: bytes, early: int = 1) -> bytes:
+def lzw(data: bytes, early: int) -> bytes:
+    """LZWDecode; `early` is 1 when the code length grows one code early (/EarlyChange), else 0."""
     out = bytearray()
     table = [bytes([i]) for i in range(256)] + [b"", b""]
     bits, nbits = 0, 9
@@ -152,13 +202,12 @@ def run_length(data: bytes) -> bytes:
     return bytes(out)
 
 
-def predict(data: bytes, parms: dict) -> bytes:
-    predictor = parms.get("Predictor", 1) or 1
+def predict(data: bytes, how: Prediction) -> bytes:
+    """Undo a TIFF (2) or PNG (10 and up) predictor; any other predictor leaves the data alone."""
+    predictor = how.predictor
     if predictor == 1:
         return data
-    colors = parms.get("Colors", 1) or 1
-    bpc = parms.get("BitsPerComponent", 8) or 8
-    columns = parms.get("Columns", 1) or 1
+    colors, bpc, columns = how.colors, how.bpc, how.columns
     bpp = max(1, colors * bpc // 8)
     row = (colors * bpc * columns + 7) // 8
     if predictor == 2:  # TIFF: horizontal differencing (8-bit components)
@@ -208,14 +257,12 @@ def predict(data: bytes, parms: dict) -> bytes:
 _PNG_TYPES = {1: 0, 2: 4, 3: 2, 4: 6}  # components -> PNG colour type (the bytes are what matter)
 
 
-def _png_unfilter(compressed: bytes, raw: bytes, parms: dict) -> bytes | None:
-    """PNG-predicted Flate data is a PNG's IDAT: let Pillow undo the filters (a Paeth row in Python
-    costs a second per megapixel). None when the layout is not one PNG can hold."""
+def png_unfilter(raw: bytes, colors: int, bpc: int, columns: int) -> bytes | None:
+    """PNG-predicted Flate data is a PNG's IDAT: let Pillow undo the filters of `raw`, the inflated
+    rows with their filter bytes (a Paeth row in Python costs a second per megapixel). None when
+    the layout is not one PNG can hold."""
     import struct
     import io
-    colors = parms.get("Colors", 1) or 1
-    bpc = parms.get("BitsPerComponent", 8) or 8
-    columns = parms.get("Columns", 1) or 1
     if colors not in _PNG_TYPES or bpc != 8 or len(raw) < 2048:
         return None
     stride = colors * columns + 1
@@ -227,7 +274,7 @@ def _png_unfilter(compressed: bytes, raw: bytes, parms: dict) -> bytes | None:
         return struct.pack(">I", len(body)) + kind + body + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF)
 
     png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", columns, rows, 8, _PNG_TYPES[colors], 0, 0, 0)) \
-        + chunk(b"IDAT", zlib.compress(raw, 1) if raw is not None else compressed) + chunk(b"IEND", b"")
+        + chunk(b"IDAT", zlib.compress(raw, 1)) + chunk(b"IEND", b"")
     try:
         from PIL import Image
         with Image.open(io.BytesIO(png)) as img:
@@ -240,7 +287,7 @@ _PIPELINE = {"FlateDecode", "Fl", "LZWDecode", "LZW", "ASCII85Decode", "A85", "A
              "RunLengthDecode", "RL"}
 
 
-def _params_dict(p, resolve) -> dict:
+def _params_dict(p: PdfObject, resolve: Resolve) -> PdfDict:
     """CPDF_Object::GetDict: a dictionary, or a stream's; anything else is none."""
     p = resolve(p)
     if isinstance(p, dict):
@@ -248,7 +295,7 @@ def _params_dict(p, resolve) -> dict:
     return p.dict if isinstance(p, Stream) else {}
 
 
-def decoder_array(d: dict, resolve=lambda v: v) -> list[tuple[str, dict]] | None:
+def decoder_array(d: PdfDict, resolve: Resolve) -> list[tuple[str, PdfDict]] | None:
     """GetDecoderArray: (filter name, parameters) pairs; None when /Filter is not a name or an
     array of names (and, for several filters, only the last one may be something other than
     Flate, LZW, ASCII85, ASCIIHex or RunLength: ValidateDecoderPipeline)."""
@@ -257,20 +304,21 @@ def decoder_array(d: dict, resolve=lambda v: v) -> list[tuple[str, dict]] | None
         return []
     params = resolve(d.get("DecodeParms"))
     if isinstance(names, list):
-        names = [resolve(n) for n in names]
-        if not all(isinstance(n, Name) for n in names):
+        resolved = [resolve(n) for n in names]
+        filters = [n for n in resolved if isinstance(n, Name)]
+        if len(filters) != len(resolved):
             return None
-        if len(names) > 1 and any(str(n) not in _PIPELINE for n in names[:-1]):
+        if len(filters) > 1 and any(str(n) not in _PIPELINE for n in filters[:-1]):
             return None
         plist = params if isinstance(params, list) else None
         return [(str(n), _params_dict(plist[i], resolve) if plist is not None and i < len(plist) else {})
-                for i, n in enumerate(names)]
+                for i, n in enumerate(filters)]
     if not isinstance(names, Name):
         return None
     return [(str(names), _params_dict(params, resolve) if params is not None else {})]
 
 
-def decode(data: bytes, d: dict, resolve=lambda v: v) -> tuple[bytes, str | None]:
+def decode(data: bytes, d: PdfDict, resolve: Resolve) -> tuple[bytes, str | None]:
     """CPDF_StreamAcc::LoadAllDataFiltered over PDF_DataDecode: the stream's bytes through its
     filters, up to an image codec; (bytes, codec or None). Any name PDFium doesn't decode itself
     counts as an image codec. The bytes as stored are what comes back when the filters can't be
@@ -288,10 +336,11 @@ def decode(data: bytes, d: dict, resolve=lambda v: v) -> tuple[bytes, str | None
         try:
             if name == "FlateDecode":
                 raw = flate(current)
-                current = (_png_unfilter(current, raw, p) if (p.get("Predictor") or 1) >= 10 else None) \
-                    or predict(raw, p)
+                how = prediction(p)
+                current = (png_unfilter(raw, how.colors, how.bpc, how.columns) if how.predictor >= 10 else None) \
+                    or predict(raw, how)
             elif name == "LZWDecode":
-                current = predict(lzw(current, p.get("EarlyChange", 1)), p)
+                current = predict(lzw(current, early_change(p)), prediction(p))
             elif name == "ASCII85Decode":
                 current = ascii85(current)
             elif name == "ASCIIHexDecode":

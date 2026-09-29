@@ -69,10 +69,10 @@ class Context:
         objects, every object) of G's content."""
         key = id(stream)
         if key not in self._forms:
-            from .content import Parser, State, _Run
+            from .content import Parser, _Run, initial_state
             objs: list = []
             parser = Parser(self.doc, self.page_resources, objs, self.fonts, {})
-            run = _Run(parser, self.page_resources, State(), (0.0, 0.0, 0.0, 0.0), None)
+            run = _Run(parser, self.page_resources, initial_state(), (0.0, 0.0, 0.0, 0.0), None)
             try:
                 run._form(stream, "")
             except RecursionError:
@@ -613,7 +613,7 @@ def group_cs(doc, smask: dict, g: Stream):
         return None
     group = r(g.get("Group"))
     cs_obj = r(group.get("CS")) if isinstance(group, dict) else None
-    cs = load_colorspace(doc, cs_obj, None) if cs_obj is not None else None
+    cs = load_colorspace(doc, cs_obj, None, 0) if cs_obj is not None else None
     if cs is None or cs.family in ("Lab", "Indexed", "Separation", "DeviceN", "Pattern"):
         return None
     if cs.family == "ICCBased" and not cs.srgb:   # kICCBased && !IsNormal()
@@ -732,7 +732,7 @@ def unsupported(obj, ctx, check) -> str | None:
     if lum and isinstance(r(smask.get("BC")), list):
         group = r(g.get("Group"))
         cs_obj = r(group.get("CS")) if isinstance(group, dict) else None
-        cs = load_colorspace(doc, cs_obj, None) if cs_obj is not None else None
+        cs = load_colorspace(doc, cs_obj, None, 0) if cs_obj is not None else None
         if (cs is not None and cs.family not in ("DeviceGray", "DeviceRGB", "DeviceCMYK")
                 and not _srgb_backdrop(doc, smask, cs)):
             return "soft mask backdrop colour spaces"

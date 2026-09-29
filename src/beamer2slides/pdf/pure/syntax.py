@@ -1,12 +1,18 @@
-"""PDF syntax: tokens, objects, content-stream operations (ISO 32000-1, 7.2-7.3, 7.8.2)."""
+"""PDF syntax: tokens, objects, content-stream operations (ISO 32000-1, 7.2-7.3, 7.8.2).
+
+A PDF object is a closed union (`PdfObject`): null (None), a boolean, an integer, a real, a Name,
+a String, a reference (Ref), an array (a list of objects), a dictionary (str keys, each a Name, to
+objects) or a Stream. Readers narrow it with isinstance where they read it."""
 
 from __future__ import annotations
 
+import enum
 import re
 import struct
 import zlib
+from dataclasses import dataclass
 from fractions import Fraction
-from typing import Iterator, NamedTuple
+from typing import Callable, Iterator, NamedTuple, Union
 
 WHITESPACE = b"\x00\t\n\x0c\r "
 DELIMITERS = b"()<>[]{}/%"
@@ -20,7 +26,7 @@ class Name(str):
     """/Name (decoded: #xx escapes resolved)."""
     __slots__ = ()
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "/" + str.__str__(self)
 
 
@@ -28,7 +34,7 @@ class Op(str):
     """A bare keyword: a content-stream operator, or true/false/null/R/obj... in a file."""
     __slots__ = ()
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return "Op(" + str.__str__(self) + ")"
 
 
@@ -36,27 +42,49 @@ class Ref(NamedTuple):
     num: int
     gen: int
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"{self.num} {self.gen} R"
 
 
 class String(bytes):
-    """A string object (bytes); `hex` tells how it was written."""
-    hex: bool = False
+    """A string object (bytes), literal or hexadecimal as written."""
 
 
 class Stream:
     """A stream object: its dictionary and its bytes as stored (still encoded)."""
     __slots__ = ("dict", "raw", "_decoded")
 
-    def __init__(self, d: dict, raw: bytes):
-        self.dict, self.raw, self._decoded = d, raw, None
+    def __init__(self, d: PdfDict, raw: bytes) -> None:
+        self.dict: PdfDict = d
+        self.raw: bytes = raw
+        self._decoded: bytes | None = None      # document.PdfFile.stream_data's, once decoded
 
-    def get(self, key, default=None):
-        return self.dict.get(key, default)
+    def get(self, key: str) -> PdfObject:
+        """The dictionary's value for `key`, None when it has none."""
+        return self.dict.get(key)
 
-    def __repr__(self):
+    def __repr__(self) -> str:
         return f"Stream({self.dict!r}, {len(self.raw)} bytes)"
+
+
+PdfObject = Union[None, bool, int, float, Name, String, Ref, list["PdfObject"], dict[str, "PdfObject"], Stream]
+PdfArray = list[PdfObject]
+PdfDict = dict[str, PdfObject]     # keys are Names; a plain str looks one up
+
+
+class EndOfData(enum.Enum):
+    """The end of the data, where a token or an element was asked for."""
+    END = "end"
+
+
+class _Junk(enum.Enum):
+    """ReadNextObject's nullptr: an operand that is no object (unlike `null`, never kept in an array)."""
+    NOTHING = "nothing"
+
+
+END = EndOfData.END
+Number = Union[int, float]
+Token = Union[Number, Name, String, Op, EndOfData]
 
 
 # One token: a number, a name, a keyword, or a delimiter. Strings and comments are scanned by hand.
@@ -79,8 +107,10 @@ _NAME_ESCAPE = re.compile(rb"#([0-9A-Fa-f]{2})")
 _STRING_ESCAPES = {ord("n"): b"\n", ord("r"): b"\r", ord("t"): b"\t", ord("b"): b"\b", ord("f"): b"\f",
                    ord("("): b"(", ord(")"): b")", ord("\\"): b"\\"}
 
-END = object()        # end of data
-ARRAY_END, DICT_END = Op("]"), Op(">>")
+
+def _unescape(m: re.Match[bytes]) -> bytes:
+    """One #xx of a name."""
+    return bytes([int(m.group(1), 16)])
 
 
 def _literal_string(data: bytes, pos: int) -> tuple[bytes, int]:
@@ -209,7 +239,7 @@ def _nearest_float32(q: Fraction) -> float:
     return a if bits % 2 == 0 else b
 
 
-def _number(token: bytes):
+def _number(token: bytes) -> Number:
     """FX_Number: a real (a '.' in it) through StringToFloat; else an integer read as uint32,
     0 when that overflows, or, with a sign, 0 beyond int32."""
     if b"." in token:
@@ -234,10 +264,10 @@ def _number(token: bytes):
 class Lexer:
     """Tokens from `data` starting at `pos`: numbers, Name, String, Op, and the delimiters as Op."""
 
-    def __init__(self, data: bytes, pos: int = 0):
+    def __init__(self, data: bytes, pos: int) -> None:
         self.data, self.pos = data, pos
 
-    def next(self):
+    def next(self) -> Token:
         data = self.data
         while True:
             m = _TOKEN.match(data, self.pos)
@@ -253,15 +283,13 @@ class Lexer:
             if kind == "name":
                 raw = m.group("name")
                 if b"#" in raw:
-                    raw = _NAME_ESCAPE.sub(lambda e: bytes([int(e.group(1), 16)]), raw)
+                    raw = _NAME_ESCAPE.sub(_unescape, raw)
                 return Name(raw.decode("latin-1"))
             if kind == "str":
                 value, self.pos = _literal_string(data, self.pos)
                 return String(value)
             if kind == "hex":
-                s = String(_hex_string(m.group("hex")))
-                s.hex = True
-                return s
+                return String(_hex_string(m.group("hex")))
             if kind == "comment" or kind == "junk":
                 continue
             if kind == "dict":
@@ -271,60 +299,22 @@ class Lexer:
             return Op(m.group("word").decode("latin-1"))
 
 
-def parse_object(lexer: Lexer, token=None):
-    """One object, with `R` references resolved into Ref (file syntax). Returns END at the end."""
-    if token is None:
-        token = lexer.next()
-    if isinstance(token, int) and not isinstance(token, bool):
-        # an indirect reference "n g R" needs two tokens of lookahead
-        save = lexer.pos
-        t2 = lexer.next()
-        if isinstance(t2, int):
-            save2 = lexer.pos
-            t3 = lexer.next()
-            if t3 == "R" and type(t3) is Op:
-                return Ref(token, t2)
-            lexer.pos = save2
-        lexer.pos = save
-        return token
-    if type(token) is Op:
-        if token == "[":
-            out = []
-            while True:
-                t = lexer.next()
-                if t is END or (type(t) is Op and t == "]"):
-                    return out
-                out.append(parse_object(lexer, t))
-        if token == "<<":
-            d = {}
-            while True:
-                t = lexer.next()
-                if t is END or (type(t) is Op and t == ">>"):
-                    return d
-                if not isinstance(t, Name):
-                    continue  # junk where a key should be: skip it
-                value = parse_object(lexer)
-                if type(value) is Op and value == ">>":
-                    d[t] = None
-                    return d
-                d[t] = value
-        if token == "true":
-            return True
-        if token == "false":
-            return False
-        if token == "null":
-            return None
-    return token
-
-
 # ---------------------------------------------------------------------- content streams
 
 
-class InlineImage(NamedTuple):
-    dict: dict
+@dataclass(frozen=True, kw_only=True)
+class InlineImage:
+    """BI ... ID ... EI: the image's dictionary (keys and values unabbreviated) and its data."""
+    dict: PdfDict
     data: bytes
-    exact: bool = True    # False: a codec whose end PDFium finds differently may have cut the data
+    exact: bool     # False: a codec whose end PDFium finds differently may have cut the data
 
+
+# What a content-stream operator is given: objects, and BI's image
+Operand = Union[PdfObject, InlineImage]
+# `components(colour space object)`: the component count GetColorSpace gives an inline image's
+# /ColorSpace (None: not found, and the data is read as one bit per pixel)
+Components = Callable[[PdfObject], "int | None"]
 
 _INLINE_ABBREV = {"BPC": "BitsPerComponent", "CS": "ColorSpace", "D": "Decode", "DP": "DecodeParms",
                   "F": "Filter", "H": "Height", "IM": "ImageMask", "I": "Interpolate", "W": "Width",
@@ -334,7 +324,7 @@ _INLINE_VALUES = {"G": "DeviceGray", "RGB": "DeviceRGB", "CMYK": "DeviceCMYK", "
                   "RL": "RunLengthDecode", "CCF": "CCITTFaxDecode", "DCT": "DCTDecode"}
 
 
-def _inline_value(v):
+def _inline_value(v: PdfObject) -> PdfObject:
     if isinstance(v, Name) and v in _INLINE_VALUES:
         return Name(_INLINE_VALUES[v])
     if isinstance(v, list):
@@ -355,12 +345,17 @@ _FAST = re.compile(
     rb"(?=((?:[\x00\t\n\x0c\r ]|%[^\r\n]*)*))\1"
     rb"(?:([0-9+\-.]+)(?![^\x00\t\n\x0c\r ()<>\[\]{}/%])|(/[^\x00\t\n\x0c\r ()<>\[\]{}/%]*)"
     rb"|([^\x00\t\n\x0c\r ()<>\[\]{}/%]+))")
-_NUMBERS: dict = {}   # `_number` of a word: a pure function, and content streams repeat their numbers
+_NUMBERS: dict[bytes, Number] = {}   # `_number` of a word: pure, and content streams repeat their numbers
 _NUMBERS_MAX = 1 << 16
 _MAX_WORD = 255      # kMaxWordLength: longer words are cut (the stream is still read to their end)
 _MAX_NESTING = 512   # kMaxNestedParsingLevel
-_NOTHING = object()  # ReadNextObject's nullptr (unlike a `null` object, never kept in an array)
+_NOTHING = _Junk.NOTHING
 _PARAM_SLOTS = 16    # the content parser's circular operand buffer: older operands fall out
+_CONSTANTS: dict[bytes, bool | None] = {b"true": True, b"false": False, b"null": None}
+
+# ParseNextElement's answer: the end, a keyword (an Op), or an operand - a number, a name, or an
+# object that starts with a delimiter (or true/false/null), _NOTHING for a delimiter that starts none
+Element = Union[EndOfData, Op, PdfObject, _Junk]
 
 
 class _StreamParser:
@@ -372,39 +367,45 @@ class _StreamParser:
     without a value, is nothing, read up to that point; a stray ']', '>>', ')', '{' is an operand
     that is no object at all."""
 
-    def __init__(self, data: bytes, pos: int = 0):
+    def __init__(self, data: bytes, pos: int) -> None:
         self.data, self.pos, self.word = data, pos, b""
+        self.exact = True    # False once an inline image's end was only guessed (`InlineImage.exact`)
+
+    def _match(self) -> re.Match[bytes]:
+        m = _WORD.match(self.data, self.pos)
+        if m is None:   # every part of _WORD is optional: it always matches
+            raise PdfSyntaxError("no word")
+        return m
 
     def next_word(self) -> bytes:
-        m = _WORD.match(self.data, self.pos)
+        m = self._match()
         self.pos = m.end()
         w = m.group(1) or b""
         self.word = w[:_MAX_WORD]
         return self.word
 
-    def element(self):
-        """ParseNextElement: ("end",) | ("num", n) | ("name", Name) | ("kw", str) | ("obj", value),
-        where value is _NOTHING for a delimiter that starts no object."""
-        m = _WORD.match(self.data, self.pos)
+    def element(self) -> Element:
+        """ParseNextElement."""
+        m = self._match()
         w = m.group(1)
         if not w:
             self.pos = len(self.data)
-            return ("end",)
+            return END
         if w[0] in b"()<>[]{}":
             self.pos = m.start(1)
-            return ("obj", self.read_object(False, False, 0))
+            return self.read_object(False, False, 0)
         self.pos = m.end()
         w = w[:_MAX_WORD]
         self.word = w
         if _NUMERIC.match(w):
-            return ("num", _number(w))
+            return _number(w)
         if w[0] == 0x2F:
-            return ("name", _name(w))
+            return _name(w)
         if w == b"true" or w == b"false" or w == b"null":
-            return ("obj", {b"true": True, b"false": False, b"null": None}[w])
-        return ("kw", w.decode("latin-1"))
+            return _CONSTANTS[w]
+        return Op(w.decode("latin-1"))
 
-    def read_object(self, allow_nested: bool, in_array: bool, level: int):
+    def read_object(self, allow_nested: bool, in_array: bool, level: int) -> PdfObject | _Junk:
         """ReadNextObject."""
         w = self.next_word()
         if not w or level > _MAX_NESTING:
@@ -423,10 +424,8 @@ class _StreamParser:
                 end = len(self.data) if end < 0 else end
                 digits = bytes(b for b in self.data[self.pos:end] if b in _HEX_DIGITS)
                 self.pos = min(end + 1, len(self.data))
-                s = String(bytes.fromhex((digits + b"0" if len(digits) % 2 else digits).decode()))
-                s.hex = True
-                return s
-            d = {}
+                return String(bytes.fromhex((digits + b"0" if len(digits) % 2 else digits).decode()))
+            d: PdfDict = {}
             while True:
                 k = self.next_word()
                 if k == b">>":
@@ -440,7 +439,7 @@ class _StreamParser:
         if c == 0x5B:  # [
             if not allow_nested and in_array:
                 return _NOTHING
-            out = []
+            out: PdfArray = []
             while True:
                 value = self.read_object(allow_nested, True, level + 1)
                 if value is not _NOTHING:
@@ -462,16 +461,19 @@ _HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 def _name(word: bytes) -> Name:
     raw = word[1:]
     if b"#" in raw:
-        raw = _NAME_ESCAPE.sub(lambda e: bytes([int(e.group(1), 16)]), raw)
+        raw = _NAME_ESCAPE.sub(_unescape, raw)
     return Name(raw.decode("latin-1"))
 
 
-class Operands(list):
+class Operands(list[Operand]):
     """What an operator gets after more than 16 operands: `raw` is every operand as written."""
-    raw: list
+
+    def __init__(self, held: list[Operand], raw: list[Operand]) -> None:
+        super().__init__(held)
+        self.raw = raw
 
 
-def _ring(operands: list) -> list:
+def _ring(operands: list[Operand]) -> Operands:
     """The operands CPDF_StreamContentParser's 16-slot buffer holds after `operands`: once it is
     full, each new one advances the start *and then* goes into the new start slot, so it
     overwrites the second oldest and the oldest stays, read as the last one (GetNextParamPos)."""
@@ -479,24 +481,26 @@ def _ring(operands: list) -> list:
     for value in operands[_PARAM_SLOTS:]:
         start = (start + 1) % _PARAM_SLOTS
         slots[start] = value
-    out = Operands(slots[start:] + slots[:start])
-    out.raw = operands
-    return out
+    return Operands(slots[start:] + slots[:start], operands)
 
 
-def operations(data: bytes, components=None) -> Iterator[tuple[str, list]]:
+def operations(data: bytes) -> Iterator[tuple[str, list[Operand]]]:
+    """`content_operations` of a stream whose inline images' colour spaces need no resources."""
+    return content_operations(data, _device_components)
+
+
+def content_operations(data: bytes, components: Components) -> Iterator[tuple[str, list[Operand]]]:
     """(operator, operands) of a content stream as CPDF_StreamContentParser::Parse reads it;
     BI...ID...EI comes as ("BI", [InlineImage]). An operand that is no object is None; after more
     than 16 operands the operator gets what PDFium's buffer holds (`_ring`)."""
-    parser = _StreamParser(data)
-    operands: list = []
+    parser = _StreamParser(data, 0)
+    operands: list[Operand] = []
     fast, numbers = _FAST.match, _NUMBERS
     while True:
-        # what `element` reads for a number, a name or a keyword, without the tuple
+        # what `element` reads for a number, a name or a keyword, done here
         m = fast(data, parser.pos)
-        if m is not None and m.end() - m.start(m.lastindex) <= _MAX_WORD:   # a cut word: `element`
-            g = m.lastindex
-            w = m.group(g)
+        if m is not None and (g := m.lastindex) is not None and m.end() - m.start(g) <= _MAX_WORD:
+            w = m.group(g)      # (longer: a cut word, which `element` reads)
             parser.pos = m.end()
             parser.word = w
             if g == 2:
@@ -511,19 +515,17 @@ def operations(data: bytes, components=None) -> Iterator[tuple[str, list]]:
                 operands.append(_name(w))
                 continue
             if w == b"true" or w == b"false" or w == b"null":
-                operands.append({b"true": True, b"false": False, b"null": None}[w])
+                operands.append(_CONSTANTS[w])
                 continue
-            e = ("kw", w.decode("latin-1"))
+            op = w.decode("latin-1")
         else:
             e = parser.element()
-        kind = e[0]
-        if kind == "end":
-            return
-        if kind != "kw":
-            value = e[1]
-            operands.append(None if value is _NOTHING else value)
-            continue
-        op = e[1]
+            if e is END:
+                return
+            if not isinstance(e, Op):
+                operands.append(None if e is _NOTHING else e)
+                continue
+            op = str.__str__(e)
         if op == "BI":
             image = _begin_image(parser, data, components)
             if image is not None:
@@ -534,41 +536,41 @@ def operations(data: bytes, components=None) -> Iterator[tuple[str, list]]:
         operands = []
 
 
-def _begin_image(parser: _StreamParser, data: bytes, components=None):
+def _begin_image(parser: _StreamParser, data: bytes, components: Components) -> InlineImage | None:
     """Handle_BeginImage: /Key value pairs up to ID (any other keyword abandons the image and
     parsing goes on after BI), the data (ReadInlineStream), then every element up to the keyword EI;
     no EI before the end of the stream, or data that does not read, and there is no image.
     `components(colour space object)` is the component count GetColorSpace gives for the image's
     /ColorSpace (the name looked up in the resources first, as FindResourceObj does)."""
     save = parser.pos
-    d = {}
+    d: PdfDict = {}
     while True:
         e = parser.element()
-        if e[0] == "kw" and e[1] != "ID":
-            parser.pos = save
-            return None
-        if e[0] != "name":
+        if not isinstance(e, Name):
+            if isinstance(e, Op) and e != "ID":
+                parser.pos = save
+                return None
             break
         value = parser.read_object(False, False, 0)
         if value is not _NOTHING:
-            d[Name(_INLINE_ABBREV.get(e[1], e[1]))] = _inline_value(value)
+            d[Name(_INLINE_ABBREV.get(e, e))] = _inline_value(value)
     parser.exact = True
     got = _read_inline_stream(parser, data, d, components)
     while True:
         e = parser.element()
-        if e[0] == "end":
+        if e is END:
             return None
-        if e[0] == "kw" and e[1] == "EI":
+        if isinstance(e, Op) and e == "EI":
             break
     if got is None:
         return None
-    return InlineImage(d, got, parser.exact)
+    return InlineImage(dict=d, data=got, exact=parser.exact)
 
 
 _WHITESPACE = b"\x00\t\n\x0c\r "
 
 
-def _int_value(v) -> int:
+def _int_value(v: PdfObject) -> int:
     """CPDF_Object::GetInteger of a direct value."""
     if isinstance(v, bool) or not isinstance(v, (int, float)):
         return 0
@@ -577,7 +579,7 @@ def _int_value(v) -> int:
     return v
 
 
-def _device_components(cs) -> int | None:
+def _device_components(cs: PdfObject) -> int | None:
     """Without resources: the device spaces, nothing for another name, 3 for anything else."""
     if isinstance(cs, Name):
         return {"DeviceGray": 1, "DeviceRGB": 3, "DeviceCMYK": 4}.get(str(cs))
@@ -586,7 +588,7 @@ def _device_components(cs) -> int | None:
     return 3
 
 
-def _read_inline_stream(parser: _StreamParser, data: bytes, d: dict, components) -> bytes | None:
+def _read_inline_stream(parser: _StreamParser, data: bytes, d: PdfDict, components: Components) -> bytes | None:
     """CPDF_StreamParser::ReadInlineStream: the data bytes, the parser left after them."""
     pos = parser.pos
     if pos >= len(data):
@@ -597,7 +599,8 @@ def _read_inline_stream(parser: _StreamParser, data: bytes, d: dict, components)
             parser.pos = pos
             return None
     parser.pos = pos
-    decoder, params = "", None
+    decoder: str = ""
+    params: PdfDict | None = None
     filt = d.get("Filter")
     if isinstance(filt, list):
         decoder = str(filt[0]) if filt and isinstance(filt[0], (Name, String)) else ""
@@ -611,7 +614,7 @@ def _read_inline_stream(parser: _StreamParser, data: bytes, d: dict, components)
     height = _int_value(d.get("Height")) & 0xFFFFFFFF
     bpc, comps = 1, 1
     if "ColorSpace" in d:
-        n = (components or _device_components)(d["ColorSpace"])
+        n = components(d["ColorSpace"])
         if n is not None:
             comps = n
             bpc = _int_value(d.get("BitsPerComponent")) & 0xFFFFFFFF
@@ -636,17 +639,17 @@ def _read_inline_stream(parser: _StreamParser, data: bytes, d: dict, components)
     while True:
         before = parser.pos
         e = parser.element()
-        if e[0] == "end":
+        if e is END:
             parser.pos = pos
             return None
-        if e[0] == "kw" and e[1] == "EI":
+        if isinstance(e, Op) and e == "EI":
             break
         used += parser.pos - before
     parser.pos = pos + used
     return data[pos:pos + used]
 
 
-def _inline_consumed(src: bytes, decoder: str, params) -> int | None:
+def _inline_consumed(src: bytes, decoder: str, params: PdfDict | None) -> int | None:
     """DecodeInlineStream: the bytes the first decoder reads (None = FX_INVALID_OFFSET)."""
     if decoder == "FlateDecode":
         z = zlib.decompressobj()

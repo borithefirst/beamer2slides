@@ -14,24 +14,28 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
-from typing import Sequence
+from typing import Iterator, Mapping, Sequence
 
 import numpy as np
 
 from ...arrays import Pixels, RGBA
 from ..api import (COLOR_SPACES, LIGATURES, NO_OBJECT, OBJ_IMAGE, OBJ_PATH, OBJ_SHADING, Box, Char,
-                   EmbeddedImage, PageObject, PdfError, char_box, font_metrics, join_surrogates, mul,
-                   pixel_bounds, render_matrix, trace, transform_box)
-from .content import Parser, PObj
+                   EmbeddedImage, Link, PageLink, PageObject, PdfError, UriLink, char_box, font_metrics,
+                   join_surrogates, mul, pixel_bounds, render_matrix, trace, transform_box)
+from ..api import Drawing, ImageInfo, Matrix, Metadata, Rgb, Segment, add_stroke, fill_drawing
+from .content import FontCache, Parser, PObj
+from .fonts import Font
 from .render import render_page
 from . import navigation
 from .document import PdfFile, read, write_file
 from .filters import ABBREVIATIONS, decode
-from .syntax import InlineImage, Name, Stream, String, float32
+from .syntax import InlineImage, Name, PdfDict, PdfObject, Stream, String, float32
 from .textpage import GENERATED, HYPHEN, NOT_UNICODE, TextPage
 
 _CS_ABBREVIATIONS = {"G": "DeviceGray", "RGB": "DeviceRGB", "CMYK": "DeviceCMYK", "I": "Indexed"}
 _CS_CODES = {name: code for code, name in COLOR_SPACES.items()}
+
+FontInfo = tuple[int, str, float, float]  # (font_id, name, ascent, descent)
 
 
 def _direction_r2l(pdf: PdfFile) -> bool:
@@ -45,21 +49,35 @@ def _direction_r2l(pdf: PdfFile) -> bool:
             else "") == "R2L"
 
 
+def _rgb(color: int | None) -> Rgb | None:
+    """0xRRGGBB as 0-1 RGB."""
+    if color is None:
+        return None
+    return ((color >> 16) & 0xFF) / 255, ((color >> 8) & 0xFF) / 255, (color & 0xFF) / 255
+
+
 def _alpha255(a: float) -> int:
     """FXSYS_GetUnsignedAlpha."""
     return int(min(max(a, 0.0), 1.0) * 255 + 0.5)
 
 
-def _intersect(box: tuple, clip: tuple) -> tuple:
+def _intersect(box: Box, clip: Box) -> Box:
     return max(box[0], clip[0]), max(box[1], clip[1]), min(box[2], clip[2]), min(box[3], clip[3])
 
 
-def _rect(v, r) -> tuple | None:
-    v = r(v)
-    if isinstance(v, list) and len(v) == 4 and all(isinstance(r(x), (int, float)) for x in v):
-        x0, y0, x1, y1 = (float(r(x)) for x in v)
-        return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
-    return None
+def _rect(pdf: PdfFile, value: PdfObject) -> Box | None:
+    """A four-number array as a normalised box, or None."""
+    v = pdf.resolve(value)
+    if not isinstance(v, list) or len(v) != 4:
+        return None
+    numbers: list[float] = []
+    for x in v:
+        n = pdf.resolve(x)
+        if not isinstance(n, (int, float)):
+            return None
+        numbers.append(float(n))
+    x0, y0, x1, y1 = numbers
+    return min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)
 
 
 class Page:
@@ -74,10 +92,10 @@ class Page:
             raise PdfError(f"page {index}: no page dictionary")
         self._ref, self.dict = found
         # CPDF_Page: the crop box within the media box (an empty one: the media box; none: Letter)
-        media = _rect(self.dict.get("MediaBox"), r)
+        media = _rect(pdf, self.dict.get("MediaBox"))
         if media is None or media[0] >= media[2] or media[1] >= media[3]:
             media = (0.0, 0.0, 612.0, 792.0)
-        crop = _rect(self.dict.get("CropBox"), r)
+        crop = _rect(pdf, self.dict.get("CropBox"))
         if crop is None or crop[0] >= crop[2] or crop[1] >= crop[3]:
             box = media
         else:
@@ -86,9 +104,9 @@ class Page:
                 box = (0.0, 0.0, 0.0, 0.0)
         self.box = box
         # CPDF_Page::GetPageRotation: C integer division and remainder
-        rot = r(self.dict.get("Rotate"))
-        rot = int(math.trunc(rot / 90)) if isinstance(rot, (int, float)) and math.isfinite(rot) else 0
-        rot = int(math.fmod(rot, 4))
+        turn = r(self.dict.get("Rotate"))
+        quarters = math.trunc(turn / 90) if isinstance(turn, (int, float)) and math.isfinite(turn) else 0
+        rot = int(math.fmod(quarters, 4))
         self.rotation = rot + 4 if rot < 0 else rot
         left, bottom, right, top = box
         self.left, self.top = left, top
@@ -96,10 +114,13 @@ class Page:
         self.to_page = (1.0, 0.0, 0.0, -1.0, -left, top)
         self._pobjs: list[PObj] | None = None
         self._objects: list[PageObject] | None = None
-        self._bounds: list | None = None
+        self._ids: dict[int, int] = {}           # id(PObj) -> object id, once objects() ran
+        self._bounds: list[Box] | None = None
         self._textpage: TextPage | None = None
-        self._fonts: list = []                   # font_id -> Font
-        self._font_info: dict[int, tuple] = {}   # id(Font) -> (font_id, name, ascent, descent)
+        self._fonts: list[Font] = []             # font_id -> Font
+        self._font_info: dict[int, FontInfo] = {}   # id(Font) -> (font_id, name, ascent, descent)
+        # CPDF_PageImageCache lives as long as the page: a JPEG decoded smaller stays so
+        self._image_cache: dict[int, object] = {}
 
     @property
     def rect(self) -> Box:
@@ -116,7 +137,7 @@ class Page:
             r = pdf.resolve
             contents = r(self.dict.get("Contents"))
             parts = contents if isinstance(contents, list) else [contents]
-            data = b" ".join(pdf.stream_data(r(p)) for p in parts if isinstance(r(p), Stream))
+            data = b" ".join(pdf.stream_data(s) for p in parts if isinstance(s := r(p), Stream))
             objs: list[PObj] = []
             try:
                 Parser(pdf, r(self.dict.get("Resources")), objs, self.doc._font_cache, {}).parse_page(data, self.box)
@@ -147,13 +168,14 @@ class Page:
 
     def _obj(self, obj: int) -> PObj:
         self.objects()
-        if not isinstance(obj, int) or not 0 <= obj < len(self._pobjs):
+        pobjs = self._parse()
+        if not isinstance(obj, int) or not 0 <= obj < len(pobjs):
             raise PdfError(f"page {self.index} has no object {obj!r}")
-        return self._pobjs[obj]
+        return pobjs[obj]
 
     def set_active(self, objects: Sequence[int], active: bool) -> None:
         for obj in objects:
-            self._obj(obj).active = bool(active)
+            self._obj(obj).active = active
 
     # ------------------------------------------------------------------ text
 
@@ -163,7 +185,7 @@ class Page:
                                       _direction_r2l(self.doc.pdf))
         return self._textpage
 
-    def _font(self, font) -> tuple[int, str, float, float]:
+    def _font(self, font: Font) -> FontInfo:
         """FPDFText_GetFontInfo, FPDFFont_GetAscent/Descent and FPDFFont_GetFontData, as
         pdfium_backend._font reads them."""
         key = id(font)
@@ -232,23 +254,26 @@ class Page:
         return [ch for _, ch in sorted(enumerate(out), key=lambda e: (e[1].obj, e[0]))]
 
     def glyph_widths(self, requests: Sequence[tuple[int, str, float]]) -> list[float | None]:
-        out = []
+        out: list[float | None] = []
         for font_id, c, size in requests:
             font = self._fonts[font_id] if isinstance(font_id, int) and 0 <= font_id < len(self._fonts) else None
-            ok = font is not None and len(c) == 1 and ord(c) <= 0xFFFF
-            out.append(float(font.glyph_width(ord(c), size)) if ok else None)
+            if font is not None and len(c) == 1 and ord(c) <= 0xFFFF:
+                out.append(float(font.glyph_width(ord(c), size)))
+            else:
+                out.append(None)
         return out
 
     # ------------------------------------------------------------------ paths
 
-    def _segments(self, k: int) -> list[tuple[int, float, float, bool]]:
-        a, b, c, d, e, f = self._objects[k].matrix
-        return [(kind, a * x + c * y + e, b * x + d * y + f, closes) for x, y, kind, closes in self._pobjs[k].points]
+    def _segments(self, k: int) -> list[Segment]:
+        a, b, c, d, e, f = self.objects()[k].matrix
+        return [(kind, a * x + c * y + e, b * x + d * y + f, closes) for x, y, kind, closes in self._parse()[k].points]
 
-    def drawings(self) -> list[dict]:
-        out: list[dict] = []
+    def drawings(self) -> list[Drawing]:
+        out: list[Drawing] = []
+        pobjs = self._parse()
         for po in self.objects():
-            o = self._pobjs[po.id]
+            o = pobjs[po.id]
             if po.type != OBJ_PATH or not o.active:
                 continue
             segments = self._segments(po.id)
@@ -256,33 +281,24 @@ class Page:
                 path = trace(segments, filled=True)
                 if path:
                     items, rect = path
-                    fill = None if o.fill is None else tuple(((o.fill >> s) & 0xFF) / 255 for s in (16, 8, 0))
                     opacity = _alpha255(o.fill_alpha) / 255 if o.fill is not None else 1.0
-                    out.append({"type": "f", "items": items, "rect": rect, "even_odd": o.fill_type == 1,
-                                "fill": fill, "fill_opacity": opacity, "object": po.id,
-                                "soft_mask": opacity == 1.0 and o.has_transparency})
+                    out.append(fill_drawing(items=items, rect=rect, even_odd=o.fill_type == 1, fill=_rgb(o.fill),
+                                            fill_opacity=opacity, obj=po.id,
+                                            soft_mask=opacity == 1.0 and o.has_transparency))
             if o.stroked:
                 a, b, c, d, _, _ = po.matrix
                 path = trace(segments, filled=False)
                 if path:
                     items, rect = path
-                    color = None if o.stroke is None else tuple(((o.stroke >> s) & 0xFF) / 255 for s in (16, 8, 0))
-                    entry = {"type": "s", "items": items, "rect": rect, "color": color,
-                             "stroke_opacity": _alpha255(o.stroke_alpha) / 255 if o.stroke is not None else 1.0,
-                             "width": o.line_width * math.sqrt(abs(a * d - b * c)), "object": po.id}
-                    prev = out[-1] if out else None
-                    if prev and prev["type"] == "f" and prev["items"] == items:
-                        for key, v in entry.items():
-                            prev.setdefault(key, v)
-                        prev["type"] = "fs"
-                    else:
-                        out.append(entry)
+                    add_stroke(out, items=items, rect=rect, color=_rgb(o.stroke),
+                               stroke_opacity=_alpha255(o.stroke_alpha) / 255 if o.stroke is not None else 1.0,
+                               width=o.line_width * math.sqrt(abs(a * d - b * c)), obj=po.id)
         return out
 
     # ------------------------------------------------------------------ bounds, images
 
-    def _container_matrix(self, po: PageObject) -> tuple:
-        return self._objects[po.parent].matrix if po.parent is not None else self.to_page
+    def _container_matrix(self, po: PageObject) -> Matrix:
+        return self.objects()[po.parent].matrix if po.parent is not None else self.to_page
 
     def object_bounds(self) -> list[Box]:
         if self._bounds is None:
@@ -290,7 +306,7 @@ class Page:
         return list(self._bounds)
 
     def _bounds_of(self, po: PageObject) -> Box:
-        o = self._pobjs[po.id]
+        o = self._parse()[po.id]
         if po.type == OBJ_PATH:
             path = trace(self._segments(po.id), filled=True)
             if path:
@@ -300,34 +316,35 @@ class Page:
                 return x0 - half, y0 - half, x1 + half, y1 + half
         return transform_box(o.rect, self._container_matrix(po))
 
-    def _clip_box(self, po: PageObject) -> tuple | None:
-        clips = self._pobjs[po.id].clips
+    def _clip_box(self, po: PageObject) -> Box | None:
+        clips = self._parse()[po.id].clips
         if not clips:
             return None
         m = self._container_matrix(po)
-        box = None
+        box: Box | None = None
         for c in clips:
             b = transform_box(c, m)
             box = b if box is None else _intersect(box, b)
         return box
 
-    def _clipped(self, po: PageObject, box: tuple) -> tuple:
-        node = po
+    def _clipped(self, po: PageObject, box: Box) -> Box:
+        objects = self.objects()
+        node: PageObject | None = po
         while node is not None:
             clip = self._clip_box(node)
             if clip:
                 box = _intersect(box, clip)
-            node = self._objects[node.parent] if node.parent is not None else None
+            node = objects[node.parent] if node.parent is not None else None
         return box
 
     @staticmethod
-    def _unit_box(po: PageObject) -> tuple:
+    def _unit_box(po: PageObject) -> Box:
         a, b, c, d, e, f = po.matrix
         xs, ys = [e, a + e, c + e, a + c + e], [f, b + f, d + f, b + d + f]
         return min(xs), min(ys), max(xs), max(ys)
 
     @staticmethod
-    def _image_dict(o: PObj) -> dict:
+    def _image_dict(o: PObj) -> PdfDict:
         """The image's dictionary (an inline image's keys come expanded from the lexer)."""
         return o.stream.dict if isinstance(o.stream, (Stream, InlineImage)) else {}
 
@@ -337,10 +354,11 @@ class Page:
         w, h = r(d.get("Width")), r(d.get("Height"))
         return (w if isinstance(w, int) and w > 0 else 0), (h if isinstance(h, int) and h > 0 else 0)
 
-    def images(self) -> list[dict]:
-        out = []
+    def images(self) -> list[ImageInfo]:
+        out: list[ImageInfo] = []
+        pobjs = self._parse()
         for po in self.objects():
-            o = self._pobjs[po.id]
+            o = pobjs[po.id]
             if po.type == OBJ_SHADING and o.active:
                 box = self._clipped(po, self._bounds_of(po))
                 x0, y0 = math.floor(box[0] + 1e-3), math.floor(box[1] + 1e-3)
@@ -362,14 +380,14 @@ class Page:
         """The stream, what its dictionary says, and PDFium's two bitmaps (GetBitmap, GetRenderedBitmap)
         where render_image ports what they need; else None, and `transparent` from the dictionaries."""
         o = self._obj(obj)
-        po = self._objects[obj]
+        po = self.objects()[obj]
         if po.type != OBJ_IMAGE:
             return None
         r = self.doc.pdf.resolve
         d = self._image_dict(o)
         f = r(d.get("Filter"))
-        filters = [str(r(x)) for x in f] if isinstance(f, list) else [str(f)] if f is not None else []
-        filters = [ABBREVIATIONS.get(x, x) for x in filters]
+        names: list[str] = [str(r(x)) for x in f] if isinstance(f, list) else [str(f)] if f is not None else []
+        filters = [ABBREVIATIONS.get(x, x) for x in names]
         mask = bool(r(d.get("ImageMask")))
         cs = r(d.get("ColorSpace"))
         family = cs[0] if isinstance(cs, list) and cs else cs
@@ -399,8 +417,7 @@ class Page:
         turned = abs(b) >= 1e-6 * max(1.0, abs(a)) or abs(c) >= 1e-6 * max(1.0, abs(dd))
         upright = not turned and a > 0 and dd < 0
         stream = o.stream
-        raw = bytes(stream.raw if isinstance(stream, Stream) else stream.data if isinstance(stream, InlineImage)
-                    else b"")
+        raw = stream.raw if isinstance(stream, Stream) else stream.data if isinstance(stream, InlineImage) else b""
         try:  # FPDFImageObj_GetImageDataDecoded: through the filters, up to the image codec
             decoded, _ = decode(raw, d, r)
         except Exception:  # noqa: BLE001 - defensive: decode itself gives the stored bytes when a filter fails
@@ -424,14 +441,17 @@ class Page:
             raw=raw, decoded_size=len(decoded), clipped=clipped,
             upright=upright, blended=blended, transparent=see_through, pixels=pixels, rendered=drawn)
 
-    def _image_pixels(self, o) -> Pixels | None:
+    def _image_pixels(self, o: PObj) -> Pixels | None:
         """FPDFImageObj_GetBitmap: CPDF_Image::LoadDIBBase (CPDF_DIB::Load with no resources, so a
         named colour space doesn't load, and no mask) at the image's native size, a 1 bpp or palette
         format converted to one without a palette. As pdfium_backend gives it: 8bppRgb as gray
         repeated to RGB, kBgr as RGB, kBgra as RGBA. PdfError when the decoder is not ported."""
         from . import decode_image as DI
+        stream = o.stream
+        if not isinstance(stream, (Stream, InlineImage)):  # an image object always holds its stream
+            return None
         try:
-            dib = DI.load(self.doc.pdf, o.stream, None, (0, 0), with_mask=False)
+            dib = DI.load_unmasked(self.doc.pdf, stream, None, (0, 0))
         except DI.Unsupported as e:
             raise PdfError(f"the pure reader cannot decode {e} yet") from e
         if dib is None:
@@ -449,7 +469,7 @@ class Page:
             return dib.rows[..., [2, 1, 0, 3]].copy()
         return np.repeat(gray[..., None], 3, axis=2)
 
-    def _rendered_image(self, o) -> RGBA | None:
+    def _rendered_image(self, o: PObj) -> RGBA | None:
         """FPDFImageObj_GetRenderedBitmap: the image object alone through CPDF_ImageRenderer onto a
         clear BGRA bitmap of ceil(hypot) of its own matrix's columns, flipped and moved to its
         lowest corner, under its clip matched onto that bitmap; its ExtGState soft mask and blend
@@ -487,15 +507,19 @@ class Page:
 
     # ------------------------------------------------------------------ links
 
-    def links(self) -> list[dict]:
+    def links(self) -> list[Link]:
         """The reference backend's loop over FPDFLink_Enumerate (navigation.links): a link's
         /Rect as written (float32, not normalised) turned into page space."""
-        out = []
+        out: list[Link] = []
         for link in navigation.links(self.doc.pdf, self.dict):
-            left, bottom, right, top = link.pop("rect")
+            left, bottom, right, top = link.rect
             x0, y0 = self.point(left, top)
             x1, y1 = self.point(right, bottom)
-            out.append({"bbox": (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1)), **link})
+            bbox = (min(x0, x1), min(y0, y1), max(x0, x1), max(y0, y1))
+            if isinstance(link, navigation.PageTarget):
+                out.append(PageLink(bbox=bbox, page=link.page))
+            else:
+                out.append(UriLink(bbox=bbox, uri=link.uri))
         return out
 
     # ------------------------------------------------------------------ rendering
@@ -509,8 +533,7 @@ class Page:
         group = pdf.resolve(self.dict.get("Group"))
         page_group = isinstance(group, dict) and str(pdf.resolve(group.get("S"))) == "Transparency"
         ctx = Context(pdf, pdf.resolve(self.dict.get("Resources")), self.doc._font_cache, page_group)
-        # CPDF_PageImageCache lives as long as the page: a JPEG decoded smaller stays so
-        ctx.images = self.__dict__.setdefault("_image_cache", {})
+        ctx.images = self._image_cache
         bgra = render_page(self._parse(), self.box, self.rotation, fs, w, h, transparent, ctx)
         if transparent:
             return bgra[..., [2, 1, 0, 3]].copy()
@@ -529,7 +552,7 @@ class Document:
             raise PdfError("a PDF without pages")
         self._pages: dict[int, Page] = {}
         from .fonts import doc_fonts
-        self._font_cache: dict = doc_fonts(self.pdf)
+        self._font_cache: FontCache = doc_fonts(self.pdf)
         self._open = True
 
     def __len__(self) -> int:
@@ -544,17 +567,17 @@ class Document:
             self._pages[index] = Page(self, index)
         return self._pages[index]
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[Page]:
         return (self[i] for i in range(len(self)))
 
-    def __enter__(self):
+    def __enter__(self) -> Document:
         return self
 
-    def __exit__(self, *exc):
+    def __exit__(self, *exc: object) -> None:
         self.close()
 
     @property
-    def metadata(self) -> dict:
+    def metadata(self) -> Metadata:
         """FPDF_GetMetaText of /Title and /Producer."""
         return {"title": navigation.meta_text(self.pdf, "Title"),
                 "producer": navigation.meta_text(self.pdf, "Producer")}
@@ -569,12 +592,12 @@ class Document:
         return [(navigation.text(name).rstrip("\x00"), navigation.dest_page_index(self.pdf, dest))
                 for name, dest in navigation.named_dests(self.pdf)]
 
-    def save(self, pages: Sequence[int] | None = None, boxes: dict[int, Box] | None = None) -> bytes:
-        keep = list(range(len(self))) if pages is None else sorted({int(p) for p in pages})
-        user = {}
+    def save(self, pages: Sequence[int] | None = None, boxes: Mapping[int, Box] | None = None) -> bytes:
+        keep = list(range(len(self))) if pages is None else sorted(set(pages))
+        user: dict[int, Box] = {}
         for index, (x0, y0, x1, y1) in (boxes or {}).items():
-            page = self[int(index)]
-            user[int(index)] = (page.left + x0, page.top - y1, page.left + x1, page.top - y0)
+            page = self[index]
+            user[index] = (page.left + x0, page.top - y1, page.left + x1, page.top - y0)
         return write_file(self.pdf, keep, user)
 
     def close(self) -> None:

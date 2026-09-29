@@ -309,12 +309,15 @@ def _pure_glyph(content: bytes, fonts) -> str:
     """The glyph index the pure reader maps that one code to, or '?'."""
     try:
         from ..pdf.pure.backend import PureBackend
+        from ..pdf.pure.fonts import SimpleFont
         doc = PureBackend().open(pdf_bytes(content, fonts))
         try:
             page = doc[0]
             page.chars()
             font = page._fonts[0]
             code = bytes.fromhex(content.split(b"<")[1].split(b">")[0].decode())[0]
+            if not isinstance(font, SimpleFont):    # a CID font has no code -> glyph table
+                return "?"
             return str(font.glyphs[code])
         finally:
             doc.close()
@@ -369,26 +372,30 @@ def anatomy(content: bytes, fonts) -> list[str]:
     try:
         from ..pdf.pure import render_text
         from ..pdf.pure.backend import PureBackend
+        from ..pdf.pure.fonts import SimpleFont
         doc = PureBackend().open(pdf_bytes(content, fonts))
         try:
             page = doc[0]
             page.chars()
             for i, font in enumerate(page._fonts):
-                if getattr(font, "subst", None) is None:
+                subst = font.subst
+                if subst is None:
                     continue
                 face = render_text.subst_face(font)
                 if face is None or not hasattr(face, "blend_key"):
                     continue
+                if not isinstance(font, SimpleFont):    # as reading its glyphs failed before
+                    raise AttributeError(f"'{type(font).__name__}' object has no attribute 'glyphs'")
                 said = []
                 for code in sorted(_string_bytes(content))[:6]:
                     glyph = font.glyphs[code]
                     width = font.char_width(code)
-                    if font.subst.flag_mm:
-                        face.adjust_variation(glyph, width, font.subst.weight)
+                    if subst.flag_mm:
+                        face.adjust_variation(glyph, width, subst.weight)
                     outline = face.outline(glyph, (0x10000, 0, 0, 0x10000))
                     points = [p for contour in (outline or []) for p in contour[0]]
                     bitmap = render_text.render_glyph(face, glyph, (40.0, 0.0, 0.0, 40.0),
-                                                      font.subst, width)
+                                                      subst, width)
                     ink = (f"{bitmap[2]}x{bitmap[3]}@{bitmap[0]},{bitmap[1]} ink {int(bitmap[4].sum())}"
                            if bitmap else "no bitmap")
                     said.append(f"{code}->{glyph} w {width} blend {face.blend_key()} "

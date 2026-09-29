@@ -6,9 +6,16 @@ is the C runtime's (`crt.py`: the one PDFium links on each platform)."""
 
 from __future__ import annotations
 
+from typing import Callable, Sequence
+
 from .crt import ARM as _ARM
 from .crt import i32 as _i32
 from .syntax import float32 as F
+
+Vector3 = tuple[float, float, float]
+"""Three float32 values: a colour's r, g, b (0-1), a point in XYZ, a white point, CalRGB's gamma."""
+Matrix3 = tuple[float, float, float, float, float, float, float, float, float]
+"""A 3x3 float32 matrix, row by row (Matrix_3by3's a..i; CalRGB's /Matrix as written)."""
 
 _SAMPLES1 = (
     0, 3, 6, 10, 13, 15, 18, 20, 22, 23, 25, 27, 28, 30, 31,
@@ -42,15 +49,15 @@ _SAMPLES2 = (
     250, 250, 251, 251, 251, 252, 252, 253, 253, 254, 254, 255, 255)
 
 FLT_EPSILON = 1.1920928955078125e-07
-_powf_fn = None
+_powf_fn: Callable[[float, float], float] | None = None
 
 
 def powf(x: float, y: float) -> float:
     global _powf_fn
     if _powf_fn is None:
-        from .crt import float_fn
-        _powf_fn = float_fn("powf", 2)
-    return float(_powf_fn(x, y))
+        from .crt import float_fn2
+        _powf_fn = float_fn2("powf")
+    return _powf_fn(x, y)
 
 
 def rgb_conversion(c: float) -> float:
@@ -62,7 +69,7 @@ def rgb_conversion(c: float) -> float:
     return F(_SAMPLES2[scale // 4 - 48] / 255.0)
 
 
-def _srgb3(r: float, g: float, b: float) -> tuple:
+def _srgb3(r: float, g: float, b: float) -> Vector3:
     """RGB_Conversion for the three channels of one colour. A NaN - CalRGB's powf of a negative
     component - reaches std::clamp, and what clamp makes of a NaN is its compiler's business: the
     x86-64 builds keep the NaN (the cast to int then gives INT_MIN, max() takes that to 0 and the
@@ -75,34 +82,37 @@ def _srgb3(r: float, g: float, b: float) -> tuple:
     return rgb_conversion(r), rgb_conversion(g), rgb_conversion(b)
 
 
-def xyz_to_srgb(x: float, y: float, z: float) -> tuple:
+def xyz_to_srgb(x: float, y: float, z: float) -> Vector3:
     r = F(F(F(F(3.2410) * x) -F(F(1.5374) * y)) - F(F(0.4986) * z))
     g = F(F(F(F(-0.9692) * x) + F(F(1.8760) * y)) + F(F(0.0416) * z))
     b = F(F(F(F(0.0556) * x) - F(F(0.2040) * y)) + F(F(1.0570) * z))
     return rgb_conversion(r), rgb_conversion(g), rgb_conversion(b)
 
 
-def _inverse(m: tuple) -> tuple:
+_ZERO3X3: Matrix3 = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+
+def _inverse(m: Matrix3) -> Matrix3:
     """Matrix_3by3::Inverse (all zeros when |det| < FLT_EPSILON)."""
     a, b, c, d, e, f, g, h, i = m
     det = F(F(F(a * F(F(e * i) - F(f * h))) - F(b * F(F(i * d) - F(f * g)))) + F(c * F(F(d * h) - F(e * g))))
     if abs(det) < FLT_EPSILON:
-        return (0.0,) * 9
+        return _ZERO3X3
     return (F(F(F(e * i) - F(f * h)) / det), F(-F(F(b * i) - F(c * h)) / det), F(F(F(b * f) - F(c * e)) / det),
             F(-F(F(d * i) - F(f * g)) / det), F(F(F(a * i) - F(c * g)) / det), F(-F(F(a * f) - F(c * d)) / det),
             F(F(F(d * h) - F(e * g)) / det), F(-F(F(a * h) - F(b * g)) / det), F(F(F(a * e) - F(b * d)) / det))
 
 
-def _dot3(p, q, r, u, v, w) -> float:
+def _dot3(p: float, q: float, r: float, u: float, v: float, w: float) -> float:
     return F(F(F(p * u) + F(q * v)) + F(r * w))
 
 
-def _transform(m: tuple, v: tuple) -> tuple:
+def _transform(m: Matrix3, v: Vector3) -> Vector3:
     a, b, c, d, e, f, g, h, i = m
     return _dot3(a, b, c, *v), _dot3(d, e, f, *v), _dot3(g, h, i, *v)
 
 
-def _multiply(m: tuple, n: tuple) -> tuple:
+def _multiply(m: Matrix3, n: Matrix3) -> Matrix3:
     a, b, c, d, e, f, g, h, i = m
     na, nb, nc, nd, ne, nf, ng, nh, ni = n
     return (_dot3(a, b, c, na, nd, ng), _dot3(a, b, c, nb, ne, nh), _dot3(a, b, c, nc, nf, ni),
@@ -111,18 +121,18 @@ def _multiply(m: tuple, n: tuple) -> tuple:
 
 
 _RX, _RY, _GX, _GY, _BX, _BY = F(0.64), F(0.33), F(0.30), F(0.60), F(0.15), F(0.06)
-_RGB_XYZ = (_RX, _GX, _BX, _RY, _GY, _BY,
-            F(F(1.0 - _RX) - _RY), F(F(1.0 - _GX) - _GY), F(F(1.0 - _BX) - _BY))
+_RGB_XYZ: Matrix3 = (_RX, _GX, _BX, _RY, _GY, _BY,
+                     F(F(1.0 - _RX) - _RY), F(F(1.0 - _GX) - _GY), F(F(1.0 - _BX) - _BY))
 
 
-def xyz_to_srgb_whitepoint(x, y, z, xw, yw, zw) -> tuple:
+def xyz_to_srgb_whitepoint(x: float, y: float, z: float, xw: float, yw: float, zw: float) -> Vector3:
     s = _transform(_inverse(_RGB_XYZ), (xw, yw, zw))
     m = _multiply(_RGB_XYZ, (s[0], 0.0, 0.0, 0.0, s[1], 0.0, 0.0, 0.0, s[2]))
     r, g, b = _transform(_inverse(m), (x, y, z))
     return _srgb3(r, g, b)
 
 
-def calrgb(white: tuple, gamma: tuple | None, matrix: tuple | None, buf) -> tuple:
+def calrgb(white: Vector3, gamma: Vector3 | None, matrix: Matrix3 | None, buf: Sequence[float]) -> Vector3:
     """CPDF_CalRGB::GetRGB."""
     a, b, c = buf[0], buf[1], buf[2]
     if gamma is not None:
@@ -138,7 +148,7 @@ def calrgb(white: tuple, gamma: tuple | None, matrix: tuple | None, buf) -> tupl
 _C0957, _C12842, _C1379, _C2069, _C10889 = F(0.957), F(0.12842), F(0.1379), F(0.2069), F(1.0889)
 
 
-def lab(buf) -> tuple:
+def lab(buf: Sequence[float]) -> Vector3:
     """CPDF_LabCS::GetRGB."""
     ls, a_, b_ = buf[0], buf[1], buf[2]
     m = F(F(ls + 16.0) / 116.0)
@@ -159,8 +169,9 @@ def lab(buf) -> tuple:
     return xyz_to_srgb(x, y, z)
 
 
-def lab_default(ranges: tuple, i: int) -> tuple:
-    """CPDF_LabCS::GetDefaultValue: (value, min, max) of component i."""
+def lab_default(ranges: Sequence[float], i: int) -> Vector3:
+    """CPDF_LabCS::GetDefaultValue: (value, min, max) of component i; `ranges` is /Range's four
+    numbers (a* min and max, b* min and max)."""
     if i > 0:
         lo, hi = ranges[i * 2 - 2], ranges[i * 2 - 1]
         if lo <= hi:
@@ -169,9 +180,9 @@ def lab_default(ranges: tuple, i: int) -> tuple:
     return 0.0, 0.0, 100.0
 
 
-def white_point(get_array) -> tuple | None:
+def white_point(get_array: Callable[[], Sequence[float] | None]) -> Vector3 | None:
     """GetWhitePoint: three numbers, X > 0, Y == 1, Z > 0; `get_array()` gives them as floats."""
     w = get_array()
     if w is None or len(w) != 3:
         return None
-    return tuple(w) if w[0] > 0.0 and w[1] == 1.0 and w[2] > 0.0 else None
+    return (w[0], w[1], w[2]) if w[0] > 0.0 and w[1] == 1.0 and w[2] > 0.0 else None
