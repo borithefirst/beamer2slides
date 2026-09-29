@@ -37,8 +37,9 @@ Protocol) and returns it as that Protocol. A client a caller injected is taken a
 
 from __future__ import annotations
 
+import importlib
 import json
-from typing import IO, TYPE_CHECKING, Literal, Union, overload
+from typing import IO, TYPE_CHECKING, Literal, Protocol, Union, overload, runtime_checkable
 
 from .google_types import DocsService, DriveService, MediaBody, SlidesService
 from .json_types import Json
@@ -70,7 +71,7 @@ except ImportError:                    # no client library: nothing here can mak
         constructor's shape, and `status_of` reads it as it reads the real one.
         """
 
-        def __init__(self, resp: object = None, content: bytes = b"", *args: object) -> None:
+        def __init__(self, resp: object, content: bytes, *args: object) -> None:
             super().__init__(resp, content, *args)
             self.resp, self.content = resp, content
 
@@ -135,10 +136,20 @@ def patient_http(request: object, seconds: float) -> object | None:
         return None
     try:
         import google_auth_httplib2
-        import httplib2
+        httplib2: object = importlib.import_module("httplib2")   # a module would pass for any Protocol
     except ImportError:
         return None
+    if not isinstance(httplib2, Httplib2):
+        return None
     return google_auth_httplib2.AuthorizedHttp(creds, http=httplib2.Http(timeout=seconds))
+
+
+@runtime_checkable
+class Httplib2(Protocol):
+    """What `patient_http` calls of `httplib2`, which ships no types (it is imported by name, so no
+    import statement asks the checker for them): a connection that waits `timeout` seconds."""
+
+    def Http(self, *, timeout: float) -> object: ...
 
 
 def media_upload(data: IO[bytes], mimetype: str) -> MediaBody:

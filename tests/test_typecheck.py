@@ -50,8 +50,8 @@ PYPROJECT = ROOT / "pyproject.toml"
 BASELINE = ROOT / "typecheck" / "baseline.json"
 TESTS_BASELINE = ROOT / "typecheck" / "tests_baseline.json"
 
-# The legacy errors typecheck/baseline.json holds: lower it with every prune, never raise it.
-CEILING = 15
+# The legacy errors typecheck/baseline.json holds: none since 2026-09-29, and it stays so.
+CEILING = 0
 # The same for the tests (typecheck/tests_baseline.json, admitted whole on 2026-09-29).
 TESTS_CEILING = 11396
 

@@ -249,6 +249,11 @@ unknowable. The order:
    `element()` that callers know is present; adopt's `Context` attributes set dynamically.
 3. **Units and ids** as NewTypes, from the IR outward.
 4. **Module by module to zero**: annotations, defaults removed, `Any` replaced, the baseline pruned.
+   *The package at zero* (2026-09-29): `typecheck/baseline.json` is empty and `CEILING` is 0, so
+   every error in src/ fails the build; no `Any` is left, 172 default arguments and 79 defaulted
+   fields are. Libraries without types are reached through Protocols after a runtime check
+   (`gapi.build`, `gapi.Httplib2`, `devtools/deep_stack.py` for torch, lpips and transformers),
+   never imported by a statement the checker would have to follow.
 5. **tests/ and tools/** under the same checker. *tests/ admitted* (2026-09-29, its own baseline
    above). tools/ is next: 30 of its 79 files are runpy shims over devtools (checked with the
    package), the other 49 (probes, calibration, proofs) are checked by nothing yet.

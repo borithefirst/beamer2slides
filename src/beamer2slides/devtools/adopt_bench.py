@@ -769,7 +769,8 @@ def line(res: BenchResult) -> str:
 
 def last_seconds(name: str) -> float:
     """How long the deck's newest run took (0 when it never ran)."""
-    runs = [p / "result.json" for p in (CORPUS / name / "runs").glob("*")] if (CORPUS / name / "runs").is_dir() else []
+    runs: list[Path] = [p / "result.json" for p in (CORPUS / name / "runs").glob("*")] \
+        if (CORPUS / name / "runs").is_dir() else []
     runs = [p for p in runs if p.exists()]
     if not runs:
         return 0.0

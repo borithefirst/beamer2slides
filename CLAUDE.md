@@ -37,11 +37,11 @@ decorations) is a picture, or baked into a per-slide background picture.
   **functions take no default arguments**; closed sets are Literals matched to `assert_never`
   (`typing_compat`); JSON is parsed into typed values where it enters; ids and units are NewTypes;
   a stage is a type; JSON not yet parsed is a `json_types.JsonObject` read through its narrowings.
-  Legacy errors live in `typecheck/baseline.json`, counted per file and message (pyrefly's own
-  matching lets one entry excuse many), which only shrinks (`python
-  build_backend/beamer2slides_build.py prune`, lower `CEILING` in `tests/test_typecheck.py`; never
-  `--update-baseline`); tests/ are checked too, against `typecheck/tests_baseline.json` (`prune
-  tests`, `TESTS_CEILING`; pytest pinned in `[tool.beamer2slides.typecheck]`), so a test calling
+  The package's baseline (`typecheck/baseline.json`) is empty and `CEILING` 0: any error in src/
+  fails the build (never `--update-baseline`); a library without types is a Protocol after a
+  runtime check (`gapi.build`, `devtools/deep_stack.py`), never a checked import. tests/ are checked too, against
+  `typecheck/tests_baseline.json`, which only shrinks (`python build_backend/beamer2slides_build.py
+  prune tests`, lower `TESTS_CEILING` in `tests/test_typecheck.py`; pytest pinned in `[tool.beamer2slides.typecheck]`), so a test calling
   a changed signature fails the gate, not the suite; a test you write type-checks;
   defaults, defaulted fields and `Any` per module in `typecheck/rules.json`, only down
   (`tests/test_typing_rules.py`). A function you touch leaves to these rules.

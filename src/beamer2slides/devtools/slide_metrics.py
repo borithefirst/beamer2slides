@@ -59,6 +59,8 @@ import numpy as np
 from PIL import Image
 
 from beamer2slides.arrays import RGB, Floats32, Int16, Mask, SignedRGB
+from beamer2slides.devtools.deep_stack import (ClipNet, ClipProcessor, DinoNet, LpipsNet, Pooled, Tensor,
+                                               load_auto_models, load_clip_models, load_lpips, load_torch)
 from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_int, as_object, as_objects, as_str
 from beamer2slides.page_score import covered_mask, ink_masks, overlap
 
@@ -280,10 +282,11 @@ class Gpu:
     `lpips` and `transformers` packages): see docs/adopt-bench.md "Metrics"."""
 
     def __init__(self, device: str | None) -> None:
-        import torch
-        self.torch = torch
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        self._lpips = self._dino = self._clip = None
+        self.torch = load_torch()
+        self.device = device or ("cuda" if self.torch.cuda.is_available() else "cpu")
+        self._lpips: LpipsNet | None = None
+        self._dino: DinoNet | None = None
+        self._clip: tuple[ClipNet, ClipProcessor] | None = None
 
     # -- unbalanced optimal transport of ink mass, log-domain Sinkhorn on a separable grid
     def ot(self, m_ref: Mask, m_got: Mask) -> dict[str, float]:
@@ -296,7 +299,7 @@ class Gpu:
         t = self.torch
         dev, dt = self.device, t.float64
 
-        def pool(m: Mask):
+        def pool(m: Mask) -> Tensor:
             x = t.as_tensor(m, dtype=dt, device=dev)[None, None]
             return t.nn.functional.avg_pool2d(x, OT_CELL, ceil_mode=True)[0, 0]
         a, b = pool(m_ref), pool(m_got)
@@ -313,26 +316,26 @@ class Gpu:
         cy, cx = (iy[:, None] - iy[None]) ** 2, (ix[:, None] - ix[None]) ** 2
         ly, lx = -cy / eps, -cx / eps          # log kernels, separable
 
-        def apply(log_v, ky=ly, kx=lx):
-            # log sum_j K_ij v_j with K = ky (x) kx, as two log-sum-exps
+        def apply(log_v: Tensor, ky: Tensor, kx: Tensor) -> Tensor:
+            # log sum_j K_ij v_j with K = ky (x) kx, as two log-sum-exps (ly, lx: the plain kernels)
             s = t.logsumexp(log_v[:, None, :] + kx[None], dim=2)            # over x: (h, w)
             return t.logsumexp(s[None, :, :] + ky[:, :, None], dim=1)        # over y: (h, w)
         wy = t.where(cy > 0, ly + t.log(cy.clamp_min(1e-300)), t.full_like(cy, -float("inf")))
         wx = t.where(cx > 0, lx + t.log(cx.clamp_min(1e-300)), t.full_like(cx, -float("inf")))
 
-        def plan(a, b):
+        def plan(a: Tensor, b: Tensor) -> tuple[Tensor, Tensor, float]:
             """The plan's two marginals and its cost per unit of mass moved (cells^2)."""
             la, lb = t.log(a), t.log(b)
             f = t.zeros_like(a)                 # log u
             g = t.zeros_like(b)                 # log v
             for _ in range(OT_ITERS):
-                f = fi * (la - apply(g))
-                g = fi * (lb - apply(f))
+                f = fi * (la - apply(g, ly, lx))
+                g = fi * (lb - apply(f, ly, lx))
             f = t.where(a > 0, f, t.full_like(f, -float("inf")))
             g = t.where(b > 0, g, t.full_like(g, -float("inf")))
-            moved_a, moved_b = t.exp(f + apply(g)), t.exp(g + apply(f))
+            moved_a, moved_b = t.exp(f + apply(g, ly, lx)), t.exp(g + apply(f, ly, lx))
             # sum_ij pi_ij C_ij, C = dy^2 + dx^2: the kernels weighted by each term apart
-            cost = t.exp(f + apply(g, ky=wy)).sum() + t.exp(f + apply(g, kx=wx)).sum()
+            cost = t.exp(f + apply(g, wy, lx)).sum() + t.exp(f + apply(g, ly, wx)).sum()
             return moved_a, moved_b, float(cost) / max(float(moved_a.sum()), 1e-12)
         with t.no_grad():
             moved_ref, moved_got, c_ab = plan(a, b)
@@ -345,14 +348,16 @@ class Gpu:
     # -- structural similarity
     def ssim(self, ref: SignedRGB, got: SignedRGB) -> tuple[dict[str, float], Floats32]:
         t = self.torch
-        def y(a: SignedRGB):
+        def y(a: SignedRGB) -> Tensor:
             return t.as_tensor(a[..., :3] @ np.array([0.299, 0.587, 0.114]), dtype=t.float32,
                                device=self.device)[None, None] / 255
         x1, x2 = y(ref), y(got)
         k = t.exp(-(t.arange(11, device=self.device, dtype=t.float32) - 5) ** 2 / (2 * 1.5 ** 2))
         k = (k / k.sum())
         win = (k[:, None] * k[None])[None, None]
-        blur = lambda z: t.nn.functional.conv2d(z, win, padding=5)                            # noqa: E731
+
+        def blur(z: Tensor) -> Tensor:
+            return t.nn.functional.conv2d(z, win, padding=5)
         mu1, mu2 = blur(x1), blur(x2)
         s11, s22, s12 = blur(x1 * x1) - mu1 ** 2, blur(x2 * x2) - mu2 ** 2, blur(x1 * x2) - mu1 * mu2
         c1, c2 = 0.01 ** 2, 0.03 ** 2
@@ -364,13 +369,14 @@ class Gpu:
     # -- learned perceptual distance
     def lpips(self, ref: SignedRGB, got: SignedRGB) -> tuple[dict[str, float], Floats32]:
         t = self.torch
-        if self._lpips is None:
-            import lpips
-            self._lpips = lpips.LPIPS(net="alex", spatial=True, verbose=False).to(self.device).eval()
-        def im(a: SignedRGB):
+        net = self._lpips
+        if net is None:
+            net = self._lpips = load_lpips().LPIPS(net="alex", spatial=True, verbose=False).to(self.device).eval()
+
+        def im(a: SignedRGB) -> Tensor:
             return t.as_tensor(a[..., :3], dtype=t.float32, device=self.device).permute(2, 0, 1)[None] / 127.5 - 1
         with t.no_grad():
-            d = self._lpips(im(ref), im(got))[0, 0]
+            d = net(im(ref), im(got))[0, 0]
         tiled = t.nn.functional.avg_pool2d(d[None, None], TILE, ceil_mode=True)
         return {"lpips": round(float(d.mean()), 5), "tile_lpips": round(float(tiled.max()), 5)}, d.cpu().numpy()
 
@@ -379,17 +385,17 @@ class Gpu:
         """DINOv2 (small) at 37 x 21 patches: 1 - cosine of the pooled embeddings, and of the least
         alike patch."""
         t = self.torch
-        if self._dino is None:
-            from transformers import AutoModel
-            self._dino = AutoModel.from_pretrained("facebook/dinov2-small").to(self.device).eval()
+        net = self._dino
+        if net is None:
+            net = self._dino = load_auto_models().AutoModel.from_pretrained("facebook/dinov2-small").to(self.device).eval()
         mean = t.tensor([0.485, 0.456, 0.406], device=self.device)[:, None, None]
         std = t.tensor([0.229, 0.224, 0.225], device=self.device)[:, None, None]
 
-        def feats(a: SignedRGB):
+        def feats(a: SignedRGB) -> tuple[Tensor, Tensor]:
             x = t.as_tensor(a[..., :3], dtype=t.float32, device=self.device).permute(2, 0, 1) / 255
             x = t.nn.functional.interpolate(x[None], size=(294, 518), mode="bilinear", antialias=True, align_corners=False)
             with t.no_grad():
-                o = self._dino(pixel_values=(x - mean) / std).last_hidden_state[0]
+                o = net(pixel_values=(x - mean) / std).last_hidden_state[0]
             return o[0], o[1:]
         c1, p1 = feats(ref)
         c2, p2 = feats(got)
@@ -400,17 +406,18 @@ class Gpu:
 
     def clip(self, ref: SignedRGB, got: SignedRGB) -> dict[str, float]:
         t = self.torch
-        if self._clip is None:
-            from transformers import CLIPModel, CLIPProcessor
-            self._clip = (CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device).eval(),
-                          CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32"))
-        model, proc = self._clip
+        loaded = self._clip
+        if loaded is None:
+            clip = load_clip_models()
+            loaded = self._clip = (clip.CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device).eval(),
+                                   clip.CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32"))
+        model, proc = loaded
         with t.no_grad():
             x = proc(images=[Image.fromarray(ref.astype(np.uint8)), Image.fromarray(got.astype(np.uint8))],
                      return_tensors="pt")["pixel_values"].to(self.device)
-            e = model.get_image_features(pixel_values=x)
-        if not isinstance(e, t.Tensor):              # transformers 5 answers with a model output
-            e = e.pooler_output
+            features = model.get_image_features(pixel_values=x)
+        # transformers 5 answers with a model output where 4 gave the tensor
+        e = features.pooler_output if isinstance(features, Pooled) else features
         return {"clip": round(float(1 - t.nn.functional.cosine_similarity(e[0], e[1], dim=0)), 5)}
 
     def metrics(self, ref: SignedRGB, got: SignedRGB, m_ref: Mask, m_got: Mask) -> dict[str, float]:
