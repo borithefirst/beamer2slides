@@ -4,7 +4,8 @@ import math
 
 from .emit_metrics import PAD_X, FontMapper, rgb, u16
 from .emit_pptx import template_key
-from .emit_text import in_sentence, text_box_requests
+from .emit_text import in_sentence_of, text_box_requests
+from .emit_widths import set_runs_of
 from .gslides import EMU_PER_PT, emu, pt
 
 
@@ -186,17 +187,17 @@ def diagram_requests(el: dict, slide_id: str, object_id: str, scale: float, font
             target = oid if inside else label
             reqs.append({"insertText": {"objectId": target, "text": text}})
             start = 0
-            for runs in map(in_sentence, node["paragraphs"]):
-                line_text = "".join(r["text"] for r in runs).strip()
+            for runs in (in_sentence_of(set_runs_of(line)) for line in node["paragraphs"]):
+                line_text = "".join(r.text for r in runs).strip()
                 offset = 0
                 for run in runs:
-                    piece = run["text"].strip() if len(runs) == 1 else run["text"]
+                    piece = run.text.strip() if len(runs) == 1 else run.text
                     if offset == 0:
                         piece = piece.lstrip()
                     if not piece:
                         continue
-                    style, sfields = fonts.text_style(run, scale)
-                    style["foregroundColor"] = rgb(run["color"])
+                    style, sfields = fonts.style_of(run, scale)
+                    style["foregroundColor"] = rgb(run.color)
                     reqs.append({"updateTextStyle": {  # (UTF-16 units: u16)
                         "objectId": target, "style": style, "fields": ",".join(sfields + ["foregroundColor"]),
                         "textRange": {"type": "FIXED_RANGE", "startIndex": start + offset,

@@ -20,7 +20,7 @@ from beamer2slides.emit import SLIDE_W
 from beamer2slides import adopt_sync, emit, identity, merge, snapshot, sync
 
 from . import ir_sources as S
-from .test_emitted_diff import one_slide
+from .test_emitted_diff import PICTURE, one_slide
 from .test_sync import text_ir
 
 SYNC_DECKS = Path(__file__).resolve().parent / "decks" / "sync" / "out"
@@ -34,14 +34,15 @@ def lenient(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def unplannable(monkeypatch: pytest.MonkeyPatch, words: str) -> None:
-    """emit's text boxes failing, as a field no producer wrote would, for the text holding `words`."""
-    real = emit.text_box_requests
+    """emit's text boxes failing, as a field no producer wrote would, for the text holding `words`.
+    (emit plans a parsed text element: `el` is its ir_types record.)"""
+    real = emit.text_element_requests
 
-    def text_box_requests(el, *args, **kwargs):
-        if words in identity.plain_text(el):
+    def text_element_requests(el, *args, **kwargs):
+        if words in " ".join("".join(r.text for r in p.runs) for p in el.paragraphs):
             raise KeyError("lines")
         return real(el, *args, **kwargs)
-    monkeypatch.setattr(emit, "text_box_requests", text_box_requests)
+    monkeypatch.setattr(emit, "text_element_requests", text_element_requests)
 
 
 def talk_base(tmp_path: Path) -> tuple[dict, dict]:
@@ -197,12 +198,13 @@ def test_an_old_base_emit_cannot_read_is_said_not_raised(monkeypatch: pytest.Mon
     base, _ = one_slide({"text/body/1": copy.deepcopy(line)})
     for p in base["elements"][0]["ir"]["paragraphs"]:
         del p["lines"]
-    picture = {"id": "p0f2", "kind": "image", "role": "figure", "bbox": [200, 55, 300, 80], "file": "figures/x.png"}
-    ours, slide = one_slide({"text/body/1": line, "image/figure/0": picture})
+    ours, slide = one_slide({"text/body/1": line, "image/figure/0": PICTURE})
     unread: list[sync.Unread] = []
     assert sync.mark_emitted({"slides": [base]}, [ours], {"slides": [slide]}, {0: 0}, 2.0, emit.FontMapper(),
                              fast=True, unread=unread) == []
-    assert [(u.slide, u.side) for u in unread] == [("s", "base")] and unread[0].error.startswith("KeyError")
+    # (emit parses each element before planning it: the missing field is said where it is read)
+    assert [(u.slide, u.side) for u in unread] == [("s", "base")]
+    assert unread[0].error.startswith("IRError") and "lacks required key 'lines'" in unread[0].error
     [said] = sync.unread_warnings(unread, [{"key": "s", "title": "Results", "elements": []}])
     assert said.startswith("slide s (Results): the sync base records it in a form this version")
 
@@ -210,17 +212,17 @@ def test_an_old_base_emit_cannot_read_is_said_not_raised(monkeypatch: pytest.Mon
 def failing_new_element(monkeypatch: pytest.MonkeyPatch) -> tuple[dict, dict, dict]:
     """A slide whose new version holds an element emit's writer fails on (id p0s9), beside an
     unchanged line: (base, ours entry, planned slide)."""
-    real = emit.shape_requests
+    real = emit.shape_element_requests
 
-    def shape_requests(el, *args, **kwargs):
-        if el["id"] == "p0s9":
+    def shape_element_requests(el, *args, **kwargs):
+        if el.id == "p0s9":
             raise KeyError("flip")
         return real(el, *args, **kwargs)
-    monkeypatch.setattr(emit, "shape_requests", shape_requests)
+    monkeypatch.setattr(emit, "shape_element_requests", shape_element_requests)
     line = text_ir("A short line", [20, 60, 90, 72], "p0t1")
     base, _ = one_slide({"text/body/1": copy.deepcopy(line)})
-    panel = {"kind": "shape", "id": "p0s9", "shape": "RECTANGLE", "flip": False, "radius": 0.0,
-             "bbox": [200, 55, 300, 80], "fill": "#3366cc"}
+    panel = {"kind": "shape", "id": "p0s9", "role": "panel", "shape": "RECTANGLE", "flip": False, "radius": 0.0,
+             "bbox": [200, 55, 300, 80], "fill": "#3366cc", "spans": [], "drawing": "p0d9"}
     ours, slide = one_slide({"text/body/1": line, "shape/panel/0": panel})
     return {"slides": [base]}, ours, slide
 

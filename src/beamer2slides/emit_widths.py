@@ -1,17 +1,23 @@
 """How wide Slides sets words and where it breaks lines: measured advances per face, and a
 paragraph's lines in the PDF and in Slides.
+
+Each measure works on emit's `SetRun`s and `SetParagraph`s (the `_of` twins). The names without it
+take the dicts tables, classify and the tests still hold, read once through `emit_model`.
 """
 
 import functools
 import math
 import re
 import unicodedata
+from collections.abc import Sequence
+from dataclasses import replace
 
 from . import bidi
 from .emit_metrics import (
     ADVANCES, CM_ADVANCES, DESIGN_WIDTH, FONT_FOR_FAMILY, ROBOTO_MONO_ADVANCE_EM, SOFT_BREAK,
-    SYMBOL_ADVANCE_EM, UNMEASURED_ADVANCE_EM, FontMapper, advance_widths, cm_face, design_width,
+    SYMBOL_ADVANCE_EM, UNMEASURED_ADVANCE_EM, FontMapper, advance_widths, cm_face_of, design_width,
 )
+from .emit_model import JsonMap, SetParagraph, SetRun, paragraph_of, run_of, runs_of
 from .fonts import font_info
 
 
@@ -21,7 +27,15 @@ WRAP_MARGIN = 1.0            # Slides pt kept free in a cell so kerning or round
 SMALL_CAPS_SIZE = 0.70       # Slides draws a small capital at 70% of its capital (tools/probe_text_fit_fonts.py)
 
 
-def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float | None:
+def set_runs_of(runs: Sequence[JsonMap]) -> tuple[SetRun, ...]:
+    return tuple(run_of(r) for r in runs)
+
+
+def slides_width(runs: Sequence[JsonMap], scale: float, fonts: FontMapper) -> float | None:
+    return slides_width_of(set_runs_of(runs), scale, fonts)
+
+
+def slides_width_of(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> float | None:
     """Advance width (Slides pt) of one line of these runs as Slides sets them, or None when a
     run is in a font the probe did not measure (a Google font the PDF itself uses).
 
@@ -30,8 +44,9 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
     number column comes out ~14% wider than the PDF's, more than a column's slack."""
     total = 0.0
     for run in runs:
-        family, size = fonts(run, scale)
-        style = fonts.face(run)  # (the face Slides draws a small optical cut's weight in: FontMapper.face)
+        family, size = fonts.size_of(run, scale)
+        style = fonts.face_of(run)  # (the face Slides draws a small optical cut's weight in: FontMapper.face)
+        table: dict[str, float]
         if family == FONT_FOR_FAMILY["mono"]:
             table = {}
             unmeasured = ROBOTO_MONO_ADVANCE_EM
@@ -42,13 +57,13 @@ def slides_width(runs: list[dict], scale: float, fonts: "FontMapper") -> float |
             table, unmeasured = face_advances(family, style), UNMEASURED_ADVANCE_EM
         else:
             return None
-        if run.get("script"):
+        if run.script:
             size *= SCRIPT_SIZE
-        for ch in run["text"]:
+        for ch in run.text:
             ch = " " if ch == " " else ch  # (a no-break space, a \colorbox's padding, is a space's width)
             if unicodedata.combining(ch):
                 continue  # (a macron over its letter: no advance of its own)
-            if run.get("smallcaps") and ch.islower():
+            if run.smallcaps and ch.islower():
                 total += table.get(ch.upper(), unmeasured) * size * SMALL_CAPS_SIZE
             else:
                 total += table.get(ch, wide_advance(ch, unmeasured)) * size
@@ -72,53 +87,62 @@ def wide_advance(ch: str, unmeasured: float) -> float:
     return 1.0 if unicodedata.east_asian_width(ch) in "WF" else unmeasured
 
 
-def runs_between(runs: list[dict], a: int, b: int) -> list[dict]:
+def runs_between(runs: Sequence[SetRun], a: int, b: int) -> list[SetRun]:
     """The runs' characters a to b (indices into their joined text)."""
-    out, at = [], 0
+    out: list[SetRun] = []
+    at = 0
     for run in runs:
-        text = run["text"]
+        text = run.text
         lo, hi = max(a, at), min(b, at + len(text))
         if lo < hi:
-            out.append({**run, "text": text[lo - at:hi - at]})
+            out.append(replace(run, text=text[lo - at:hi - at]))
         at += len(text)
     return out
 
 
-def wrapped_width(runs: list[dict], starts: list[int], scale: float, fonts: "FontMapper") -> float | None:
+def wrapped_width(runs: Sequence[JsonMap], starts: Sequence[int], scale: float, fonts: FontMapper) -> float | None:
     """Slides width of the widest of a wrapped cell's PDF lines (`starts`: where each line after
     the first begins), a word TeX hyphenated at a line's end taken whole: Slides does not
     hyphenate, and a column that holds each of the PDF's lines so wraps the cell in as many lines
     or fewer - never more, which would grow its row."""
-    text = "".join(r["text"] for r in runs)
+    set_runs = set_runs_of(runs)
+    text = "".join(r.text for r in set_runs)
     bounds = [0, *starts, len(text)]
-    widths = []
+    widths: list[float] = []
     for a, b in zip(bounds, bounds[1:]):
         while b < len(text) and not text[b - 1].isspace() and not text[b].isspace():
             b += 1  # (the line ended inside a word)
         while b > a and text[b - 1].isspace():
             b -= 1
-        widths.append(slides_width(runs_between(runs, a, b), scale, fonts))
-    return None if None in widths else max(widths)
+        w = slides_width_of(runs_between(set_runs, a, b), scale, fonts)
+        if w is None:
+            return None
+        widths.append(w)
+    return max(widths)
 
 
-def wrap_joins(runs: list[dict], starts: list[int], scale: float, fonts: "FontMapper") -> float | None:
+def wrap_joins(runs: Sequence[JsonMap], starts: Sequence[int], scale: float, fonts: FontMapper) -> float | None:
     """Slides width of the narrowest of a wrapped cell's PDF lines with the next line's first
     word joined to it: a column whose text room is less than that breaks the cell where TeX did
     (table_columns). None when a run is in a font the probe did not measure."""
-    text = "".join(r["text"] for r in runs)
+    set_runs = set_runs_of(runs)
+    text = "".join(r.text for r in set_runs)
     bounds = [len(text) - len(text.lstrip()), *starts]
-    joins = []
+    joins: list[float] = []
     for a, s in zip(bounds, bounds[1:]):
         b = s
         while b < len(text) and text[b].isspace():
             b += 1
         while b < len(text) and not text[b].isspace():
             b += 1  # (through the next word; a word TeX hyphenated is taken whole by wrapped_width)
-        joins.append(slides_width(runs_between(runs, a, b), scale, fonts))
-    return None if not joins or None in joins else min(joins)
+        w = slides_width_of(runs_between(set_runs, a, b), scale, fonts)
+        if w is None:
+            return None
+        joins.append(w)
+    return min(joins) if joins else None
 
 
-def wrap_window(runs: list[dict], lines: int, scale: float, fonts: "FontMapper") -> tuple[float, float] | None:
+def wrap_window(runs: Sequence[JsonMap], lines: int, scale: float, fonts: FontMapper) -> tuple[float, float] | None:
     """(least text width at which Slides breaks these runs' words into no more than `lines`
     lines, least width at which it breaks them into fewer), Slides pt: Slides breaks greedily at
     spaces, so a column whose text room lies between the two keeps a wrapped cell's row as many
@@ -126,13 +150,14 @@ def wrap_window(runs: list[dict], lines: int, scale: float, fonts: "FontMapper")
     go down to the next line: taken whole on its line (wrapped_width), it widened a column by
     the hyphen's second half and the table past its frame (r2_tables_v1 slide 2, r2_tables_v2
     slide 10). None when a run is in a font the probe did not measure."""
-    text = "".join(r["text"] for r in runs)
+    set_runs = set_runs_of(runs)
+    text = "".join(r.text for r in set_runs)
     words = [(m.start(), m.end()) for m in re.finditer(r"\S+", text)]
     if not words:
         return None
     at = [0.0]
     for k in range(len(text)):
-        w = slides_width(runs_between(runs, k, k + 1), scale, fonts)
+        w = slides_width_of(runs_between(set_runs, k, k + 1), scale, fonts)
         if w is None:
             return None
         at.append(at[-1] + w)
@@ -158,20 +183,24 @@ def wrap_window(runs: list[dict], lines: int, scale: float, fonts: "FontMapper")
     return least(lines), (least(lines - 1) if lines > 1 else math.inf)
 
 
-def pdf_width(runs: list[dict]) -> float | None:
+def pdf_width(runs: Sequence[JsonMap]) -> float | None:
+    return pdf_width_of(set_runs_of(runs))
+
+
+def pdf_width_of(runs: Sequence[SetRun]) -> float | None:
     """Width (PDF pt) TeX sets these Computer Modern runs at, from CM's own advances (within
     0.3% on one-line paragraphs: test_computer_modern_advances_give_the_pdf_its_own_line_widths),
     or None for a run in another font or with characters the tables lack."""
     total = 0.0
     for run in runs:
-        face, info = cm_face(run), font_info(run["font"])
-        if face is None or run.get("hole") or run.get("smallcaps"):
+        face, info = cm_face_of(run), font_info(run.font)
+        if face is None or run.hole or run.smallcaps:
             return None
-        slides = ADVANCES.get(FONT_FOR_FAMILY.get(run["family"], ""), ADVANCES["Lato"])["regular"]
-        _, em, _, skipped = advance_widths(run["text"], CM_ADVANCES[face], slides)
+        slides = ADVANCES.get(FONT_FOR_FAMILY.get(run.family, ""), ADVANCES["Lato"])["regular"]
+        _, em, _, skipped = advance_widths(run.text, CM_ADVANCES[face], slides)
         if skipped:
             return None
-        total += em * design_width(DESIGN_WIDTH.get(run["family"], DESIGN_WIDTH["sans"]), info.design_size) * run["size"]
+        total += em * design_width(DESIGN_WIDTH.get(run.family, DESIGN_WIDTH["sans"]), info.design_size) * run.size
     return total
 
 
@@ -183,19 +212,30 @@ GUESSED_RUN_CHARS = 2  # a run without CM metrics this short (≈, ×, a math-it
 GUESSED_TOL = 0.3      # the share an estimated run's width may be off by
 
 
-def pdf_line_breaks(p: dict, scale: float | None = None, fonts: "FontMapper | None" = None) -> list[int] | None:
+def paragraph_dict(p: JsonMap) -> SetParagraph:
+    """A paragraph dict with its runs, as the measures here read it."""
+    return paragraph_of(p, runs_of(p["runs"]))
+
+
+def pdf_line_breaks(p: JsonMap, scale: float | None = None, fonts: FontMapper | None = None) -> list[int] | None:
+    return pdf_line_breaks_of(paragraph_dict(p), scale, fonts)
+
+
+def pdf_line_breaks_of(p: SetParagraph, scale: float | None, fonts: FontMapper | None) -> list[int] | None:
     """Where each of a paragraph's PDF lines after the first starts (indices into its runs'
     joined text, at a word), found by setting its words with CM's advances into the lines'
     extents; None when the paragraph's words cannot be measured or do not come out as its lines
-    (a hyphenated line end, a font without CM metrics). With `fonts`, a symbol or two in a font
-    without CM metrics (≈, ×, a barred letter) is estimated from its Slides advance, which the
-    calibration makes about as wide as the PDF's: a whole paragraph went unmeasured for one ≈."""
-    runs, lines = p["runs"], p["lines"]
-    text = "".join(r["text"] for r in runs)
-    if any(SOFT_BREAK in r["text"] or "\t" in r["text"] for r in runs):
+    (a hyphenated line end, a font without CM metrics). With `fonts` (and the `scale` it sets
+    at), a symbol or two in a font without CM metrics (≈, ×, a barred letter) is estimated from
+    its Slides advance, which the calibration makes about as wide as the PDF's: a whole paragraph
+    went unmeasured for one ≈."""
+    runs, lines = p.runs, p.lines
+    text = "".join(r.text for r in runs)
+    if any(SOFT_BREAK in r.text or "\t" in r.text for r in runs):
         return None
     spaces = [i for i, ch in enumerate(text) if ch == " "]
-    starts, a = [], 0
+    starts: list[int] = []
+    a = 0
     while text[a:a + 1] == " ":
         a += 1
 
@@ -203,14 +243,14 @@ def pdf_line_breaks(p: dict, scale: float | None = None, fonts: "FontMapper | No
         """(PDF width of the characters a to b, how far off it may be)."""
         total = guessed = 0.0
         for run in runs_between(runs, a, b):
-            w = pdf_width([run])
+            w = pdf_width_of([run])
             if w is None:
-                bare = "".join(ch for ch in run["text"] if not unicodedata.combining(ch))  # (no advance)
-                if fonts is None or run.get("hole") or len(bare.strip()) > GUESSED_RUN_CHARS:
+                bare = "".join(ch for ch in run.text if not unicodedata.combining(ch))  # (no advance)
+                if fonts is None or scale is None or run.hole or len(bare.strip()) > GUESSED_RUN_CHARS:
                     return None
-                w = pdf_width([{**run, "text": bare}])
+                w = pdf_width_of([replace(run, text=bare)])
                 if w is None:
-                    s = slides_width([{**run, "text": bare}], scale, fonts)
+                    s = slides_width_of([replace(run, text=bare)], scale, fonts)
                     if s is None:
                         return None
                     w = s / scale
@@ -219,21 +259,22 @@ def pdf_line_breaks(p: dict, scale: float | None = None, fonts: "FontMapper | No
         return total, GUESSED_TOL * guessed
 
     for k, line in enumerate(lines):
-        extent = line["x1"] - line["x0"]
-        thin = THIN_SPACE_EM * max(r["size"] for r in runs)
+        extent = line.x1 - line.x0
+        thin = THIN_SPACE_EM * max(r.size for r in runs)
         if k == len(lines) - 1:
             end = len(text.rstrip())
         else:
-            end = None
+            found: int | None = None
             for b in (s for s in spaces if s > a):
                 got = width(a, b)
                 if got is None:
                     return None
                 if got[0] - got[1] > extent * (1 + 0.01) + 0.5 + thin:
                     break
-                end = b
-            if end is None:
+                found = b
+            if found is None:
                 return None
+            end = found
         got = width(a, end)
         if got is None or not extent * (1 - LINE_FIT_TOL) - 0.5 - got[1] <= got[0] <= extent * 1.01 + 0.5 + thin + got[1]:
             return None
@@ -245,37 +286,37 @@ def pdf_line_breaks(p: dict, scale: float | None = None, fonts: "FontMapper | No
     return starts
 
 
-def recorded_starts(p: dict, text: str) -> list[int] | None:
+def recorded_starts(p: SetParagraph, text: str) -> list[int] | None:
     """Where classify found the paragraph's lines after the first start in `text`
     (`classify.line_starts`: each at a word, then the text's length), or None when it said
     nothing or said it of another text or other lines (merged words, an IR from elsewhere).
     What the page says wins over setting the words into the lines' extents (pdf_line_breaks),
     which needs TeX's widths: a Palatino paragraph, or one with a formula's letters, was not
     measured and Slides re-broke it (V-control-16, V-fonts-8, lang-18)."""
-    got = p.get("line_starts")
-    if not got or len(got) != len(p["lines"]) or got[-1] != len(text):
+    got = p.line_starts
+    if not got or len(got) != len(p.lines) or got[-1] != len(text):
         return None
-    starts = got[:-1]
+    starts = list(got[:-1])
     if any(not 0 < b < len(text) or text[b - 1] != " " or text[b] == " " for b in starts) or \
             any(b <= a for a, b in zip(starts, starts[1:])):
         return None
     return starts
 
 
-def guessed_chars(runs: list[dict], scale: float, fonts: "FontMapper") -> int:
+def guessed_chars(runs: Sequence[SetRun], scale: float, fonts: FontMapper) -> int:
     """How many of the runs' characters slides_width guesses (no measured advance: polytonic
     Greek in PT Serif). Where TeX's widths did not confirm the lines (recorded_starts), a box
     measured from guesses is no better than the PDF's extents: Greek at 0.6 em came out wider
     than Slides sets it (r1_lang_v1 s4, 4 lines of 5 either way)."""
     count = 0
     for run in runs:
-        family, _ = fonts(run, scale)
+        family, _ = fonts.size_of(run, scale)
         if family == FONT_FOR_FAMILY["mono"]:
             continue
         if family not in ADVANCES:
-            return len(run["text"])
-        table = face_advances(family, fonts.face(run))
-        count += sum(1 for ch in run["text"] if (ch.upper() if run.get("smallcaps") else ch) not in table
+            return len(run.text)
+        table = face_advances(family, fonts.face_of(run))
+        count += sum(1 for ch in run.text if (ch.upper() if run.smallcaps else ch) not in table
                      and ch not in " " and not unicodedata.combining(ch) and ch not in bidi.MARKS
                      and ch != ZWSP and unicodedata.east_asian_width(ch) not in "WF")
     return count
@@ -295,36 +336,40 @@ def first_break(text: str, a: int, end: int) -> int:
     return space
 
 
-def slides_lines(p: dict, scale: float, fonts: "FontMapper") -> tuple[float, float] | None:
+def slides_lines(p: JsonMap, scale: float, fonts: FontMapper) -> tuple[float, float] | None:
+    return slides_lines_of(paragraph_dict(p), scale, fonts)
+
+
+def slides_lines_of(p: SetParagraph, scale: float, fonts: FontMapper) -> tuple[float, float] | None:
     """(right edge of the widest line, the least right edge at which a line's next word would
     join it) in Slides pt, of a left-aligned paragraph's PDF lines as Slides sets their words
     (measured advances: slides_width); None when that is not known. A text box whose text ends
     between the two breaks the paragraph where TeX did."""
-    runs, lines = p["runs"], p["lines"]
-    text = "".join(r["text"] for r in runs)
-    if any(r.get("hole") or SOFT_BREAK in r["text"] or "\t" in r["text"] for r in runs) or not text.strip():
+    runs, lines = p.runs, p.lines
+    text = "".join(r.text for r in runs)
+    if any(r.hole or SOFT_BREAK in r.text or "\t" in r.text for r in runs) or not text.strip():
         return None
     # (a justified paragraph TeX's widths cannot measure keeps its own edge, flowed into it:
     # flowed_justified_right; measured by its lines, one set a hair wider in Slides than TeX's
     # shrunk line gave up JUSTIFIED for START)
-    recorded = recorded_starts(p, text) if len(lines) > 1 and not p.get("justified") and \
+    recorded = recorded_starts(p, text) if len(lines) > 1 and not p.justified and \
         guessed_chars(runs, scale, fonts) <= GUESSED_RUN_CHARS else None
-    starts = [] if len(lines) == 1 else recorded or pdf_line_breaks(p, scale, fonts)
+    starts: list[int] | None = [] if len(lines) == 1 else recorded or pdf_line_breaks_of(p, scale, fonts)
     if starts is None:
         return None
     end = len(text.rstrip())
     bounds = [len(text) - len(text.lstrip()), *starts, end]
     widest, joins = 0.0, math.inf
     for k, (a, b) in enumerate(zip(bounds, bounds[1:])):
-        x0 = lines[k]["x0"] * scale
+        x0 = lines[k].x0 * scale
         b = a + len(text[a:b].rstrip())  # (Slides lets a line's last space hang past the edge)
-        w = slides_width(runs_between(runs, a, b), scale, fonts)
+        w = slides_width_of(runs_between(runs, a, b), scale, fonts)
         if w is None:
             return None
         widest = max(widest, x0 + w)
         if k + 1 < len(lines):
             nxt = first_break(text, bounds[k + 1], end)
-            j = slides_width(runs_between(runs, a, nxt), scale, fonts)
+            j = slides_width_of(runs_between(runs, a, nxt), scale, fonts)
             if j is None:
                 return None
             joins = min(joins, x0 + j)

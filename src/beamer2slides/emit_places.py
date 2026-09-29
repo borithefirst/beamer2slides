@@ -7,6 +7,7 @@ import math
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -18,10 +19,12 @@ from .emit_holes import (
 )
 from .emit_metrics import LINE_EM, PAD_X, SLIDE_W, SYMBOL_ADVANCE_EM, FontMapper, rgb, u16
 from .emit_pptx import api_error, batch, template_key
-from .emit_text import box_lines, hole_runs, hugs, in_sentence, text_box_requests
+from .emit_text import box_lines_of, hole_runs_of, hugs_of, in_sentence_of, text_box_requests
+from .emit_widths import paragraph_dict, set_runs_of
 from .gapi import HttpError
 from .google_auth import credentials_for_threads, fetcher_for_threads, shared_service, slides_service
 from .gslides import per_thread
+from .json_types import JsonObject
 
 # The prediction (emit_holes) is off by several points now and then (fallback fonts, kerning,
 # wraps). So each slide with holes or overlays gets a scratch copy of those text boxes on a white
@@ -100,7 +103,7 @@ def ink_end(img: RGB, px_per_pt: float, y0: float, y1: float, x0: float, x1: flo
 
 def slides_texts(el: dict, scale: float, fonts: FontMapper) -> list[str]:
     """Each paragraph's text as its text box ends up holding it (holes as their no-break spaces)."""
-    return ["".join(r["text"] for r in hole_runs(p["runs"], scale, fonts)) for p in el["paragraphs"]]
+    return ["".join(r.text for r in hole_runs_of(set_runs_of(p["runs"]), scale, fonts)) for p in el["paragraphs"]]
 
 
 def mark_words(overlay: dict, text: dict, scale: float, fonts: FontMapper) -> list[dict]:
@@ -208,17 +211,18 @@ def grown_panels(slide: dict, scale: float, fonts: FontMapper) -> dict:
             pads[group[i]] = min(pads.get(group[i], math.inf), pad)
     over: dict[int, float] = {}
     for i, panel, el in homes:
-        paras = [{**p, "runs": hole_runs(in_sentence(p["runs"]), scale, fonts)} for p in el["paragraphs"]]
-        measured = box_lines(paras, [hugs(p) for p in paras], scale, fonts)
+        paras = [replace(p, runs=tuple(hole_runs_of(in_sentence_of(p.runs), scale, fonts)))
+                 for p in map(paragraph_dict, el["paragraphs"])]
+        measured = box_lines_of(paras, [hugs_of(p) for p in paras], scale, fonts)
         if not measured or any(g is None for g in measured):
             continue  # (every paragraph measured: an unmeasured one could be the widest)
-        right = max(line["x1"] for p in paras for line in p["lines"])
+        right = max(line.x1 for p in paras for line in p.lines)
         if right >= panel["bbox"][2]:
             continue
         slides_right = max(g[0] for g in measured) / scale
         # (a list's indent or a tcolorbox's wide padding is no margin the words need: half an em
         # keeps them off the edge)
-        em = max(p["size"] for p in paras)
+        em = max(p.size for p in paras)
         margin = min(pads.get(group[i], 0.0), panel["bbox"][2] - right, PANEL_MARGIN_EM * em)
         grow = min(slides_right - right, slides_right + margin - panel["bbox"][2])
         if grow > 0.5:
@@ -298,7 +302,7 @@ def measure_jobs(deck: dict, scale: float, fonts: FontMapper, placed, page_slide
                 continue
             colours = [HOLE_MARKS[(len(found) + k) % len(HOLE_MARKS)] for k in range(len(mine))]
             oid = f"{sid}_t{i}"
-            plain = {**el, "paragraphs": [{**p, "runs": [{**r, "highlight": None} for r in p["runs"]]} for p in el["paragraphs"]]}
+            plain: JsonObject = {**el, "paragraphs": [{**p, "runs": [{**r, "highlight": None} for r in p["runs"]]} for p in el["paragraphs"]]}
             reqs += text_box_requests(plain, sid, oid, scale, fonts, None, page_slide, title_bar_under(el, slide),
                                       text_right_limit(el, slide), colours)
             reqs.append({"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"}, "fields": "foregroundColor",

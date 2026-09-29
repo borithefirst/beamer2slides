@@ -3,9 +3,13 @@ Slides; shape requests; a batch of requests.
 """
 
 import io
+from collections.abc import Callable
 from pathlib import Path
 
 from .emit_metrics import SLIDE_W, rgb, xml_text
+from .emit_model import JsonMap, SetShape, Template, TemplateKey, set_shape, shape_measures_of, shape_of, template_of
+from .ir_types import Box, MarkedShape, ShapeElement
+from .json_types import JsonObject
 from .gapi import HttpError, message_of
 from .gslides import EMU_PER_PT, emu, execute, pt
 
@@ -21,20 +25,28 @@ TEMPLATE_LAYOUTS = {"TITLE": 0, "TITLE_ONLY": 5, "BLANK": 6}  # python-pptx defa
 TEMPLATE_KINDS = ("ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE", "RECTANGLE", "ELLIPSE", "DIAMOND", "TRIANGLE")
 
 
-def template_key(el: dict, scale: float) -> tuple | None:
-    """Shapes the API can't make exactly: rounded corners of a given radius (the API only
-    creates the default rounding) and drop shadows (read-only in the API). They are
-    duplicated from template shapes that come with the imported .pptx. A kind no template is made
-    of has none: createShape refuses it, and the refused element becomes a picture
-    (`fallback_pictures`) instead of the whole .pptx failing."""
-    if el["kind"] != "shape" or el["shape"] not in TEMPLATE_KINDS or (el["shape"] == "RECTANGLE" and not el.get("shadow")):
+def template_key(el: JsonMap, scale: float) -> TemplateKey | None:
+    """`template_key_of` an element dict (sync's base elements, diagrams, element_template_keys)."""
+    shape = el["shape"] if el["kind"] == "shape" else None
+    if not isinstance(shape, str) or shape not in TEMPLATE_KINDS:
         return None
-    x0, y0, x1, y1 = el["bbox"]
+    bbox, radius, shadow = shape_measures_of(el)
+    return template_key_of(shape, bbox, radius, shadow, scale)
+
+
+def template_key_of(shape: str, bbox: Box, radius: float, shadow: float | None, scale: float) -> TemplateKey | None:
+    """Shapes the API can't make exactly: rounded corners of a given radius (the API only
+    creates the default rounding) and drop shadows (read-only in the API, `shadow` its size in
+    PDF pt). They are duplicated from template shapes that come with the imported .pptx. A kind no
+    template is made of has none: createShape refuses it, and the refused element becomes a
+    picture (`fallback_pictures`) instead of the whole .pptx failing."""
+    if shape not in TEMPLATE_KINDS or (shape == "RECTANGLE" and shadow is None):
+        return None
+    x0, y0, x1, y1 = bbox
     adj = 0.0
-    if el["shape"] != "RECTANGLE":
-        adj = min(0.5, round(el.get("radius", 0.0) / max(min(x1 - x0, y1 - y0), 0.01), 2))
-    shadow = round(2 * el["shadow"]["size"] * scale) / 2 if el.get("shadow") else None
-    return el["shape"], adj, shadow
+    if shape != "RECTANGLE":
+        adj = min(0.5, round(radius / max(min(x1 - x0, y1 - y0), 0.01), 2))
+    return shape, adj, None if shadow is None else round(2 * shadow * scale) / 2
 
 
 NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -245,25 +257,43 @@ def build_pptx(page_w: float, page_h: float, keys: list[tuple], pages: list[dict
     return buf
 
 
-def shape_requests(el: dict, slide_id: str, object_id: str, scale: float, template: dict | None = None) -> list[dict]:
-    """A filled shape, outlined only with the frame it carries (`outline`). With a template ({"id", "w", "h"}: a template shape
-    on this slide and its size in pt) the shape is a duplicate of it, else a new shape."""
-    x0, y0, x1, y1 = (v * scale for v in el["bbox"])
+def shape_requests(el: JsonMap, slide_id: str, object_id: str, scale: float,
+                   template: JsonMap | None = None) -> list[JsonObject]:
+    """`shape_requests_of` a shape dict (a diagram's node, the tests' panels), with a template
+    dict ({"id", "w", "h"})."""
+    return shape_requests_of(shape_of(el), slide_id, object_id, scale, template_of(template) if template else None)
+
+
+def shape_element_requests(el: ShapeElement | MarkedShape, slide_id: str, object_id: str, scale: float,
+                           template_for: Callable[[TemplateKey], Template]) -> list[JsonObject]:
+    """The requests of a parsed shape (a panel, rule or marked shape): a duplicate of the slide's
+    template shape its key names (`template_for`), where it has one."""
+    shape = set_shape(el)
+    key = template_key_of(shape.shape, shape.bbox, shape.radius, shape.shadow, scale)
+    return shape_requests_of(shape, slide_id, object_id, scale, None if key is None else template_for(key))
+
+
+def shape_requests_of(el: SetShape, slide_id: str, object_id: str, scale: float,
+                      template: Template | None) -> list[JsonObject]:
+    """A filled shape, outlined only with the frame it carries (`outline`). With a template (a
+    template shape on this slide and its size in pt) the shape is a duplicate of it, else a new shape."""
+    x0, y0, x1, y1 = (v * scale for v in el.bbox)
     # ROUND_2_SAME_RECTANGLE rounds the top corners; for bottom corners flip both axes
     # (a 180° rotation), which moves the origin to the opposite corner.
-    flip = -1 if el["flip"] else 1
-    tx, ty = (x1, y1) if el["flip"] else (x0, y0)
-    if template:
+    flip = -1 if el.flip else 1
+    tx, ty = (x1, y1) if el.flip else (x0, y0)
+    reqs: list[JsonObject]
+    if template is not None:
         reqs = [
-            {"duplicateObject": {"objectId": template["id"], "objectIds": {template["id"]: object_id}}},
+            {"duplicateObject": {"objectId": template.id, "objectIds": {template.id: object_id}}},
             {"updatePageElementTransform": {"objectId": object_id, "applyMode": "ABSOLUTE", "transform": {
-                "scaleX": flip * (x1 - x0) / template["w"], "scaleY": flip * (y1 - y0) / template["h"], "unit": "EMU",
+                "scaleX": flip * (x1 - x0) / template.w, "scaleY": flip * (y1 - y0) / template.h, "unit": "EMU",
                 "translateX": round(tx * EMU_PER_PT), "translateY": round(ty * EMU_PER_PT)}}},
             {"updatePageElementsZOrder": {"pageElementObjectIds": [object_id], "operation": "BRING_TO_FRONT"}},
         ]
     else:
         reqs = [{"createShape": {
-            "objectId": object_id, "shapeType": el["shape"],
+            "objectId": object_id, "shapeType": el.shape,
             "elementProperties": {
                 "pageObjectId": slide_id,
                 "size": {"width": emu(x1 - x0), "height": emu(y1 - y0)},
@@ -274,17 +304,17 @@ def shape_requests(el: dict, slide_id: str, object_id: str, scale: float, templa
     # A framed panel (classify.frame_of, framed_panels: \fcolorbox, tcolorbox, a listing's
     # frame=single) carries its frame as the outline, on the frame's centre line; the rules
     # themselves left the background with the panel.
-    frame = el.get("outline")
-    outline = {"outlineFill": {"solidFill": {"color": rgb(frame["color"])["opaqueColor"]}},
-               "weight": pt(round(max(0.25, frame["width"] * scale), 2)), "propertyState": "RENDERED"} \
-        if frame else {"propertyState": "NOT_RENDERED"}
-    outline_fields = "outline.outlineFill.solidFill.color,outline.weight,outline.propertyState" if frame \
+    frame = el.outline
+    outline: JsonObject = {"outlineFill": {"solidFill": {"color": rgb(frame.color)["opaqueColor"]}},
+                           "weight": pt(round(max(0.25, frame.width * scale), 2)), "propertyState": "RENDERED"} \
+        if frame is not None else {"propertyState": "NOT_RENDERED"}
+    outline_fields = "outline.outlineFill.solidFill.color,outline.weight,outline.propertyState" if frame is not None \
         else "outline.propertyState"
-    return reqs + [
+    return [*reqs,
         {"updateShapeProperties": {
             "objectId": object_id,
-            "shapeProperties": {"shapeBackgroundFill": {"solidFill": {"color": rgb(el["fill"])["opaqueColor"],
-                                                                      "alpha": el.get("opacity", 1.0)}},
+            "shapeProperties": {"shapeBackgroundFill": {"solidFill": {"color": rgb(el.fill)["opaqueColor"],
+                                                                      "alpha": el.opacity}},
                                 "outline": outline},
             "fields": "shapeBackgroundFill.solidFill.color,shapeBackgroundFill.solidFill.alpha," + outline_fields,
         }},

@@ -19,10 +19,19 @@ from beamer2slides.extract import extract, select_overlays
 from beamer2slides.notes import prepare
 
 from .test_emit_requests import emitted
-from .test_sync import entry, shape_ir, text_ir
+from .test_sync import entry, text_ir
+from .test_sync import shape_ir as bare_shape_ir
 
 SYNC_DECKS = Path(__file__).resolve().parent / "decks" / "sync" / "out"
 SCALE = 2.0
+# A figure as render leaves it (emit parses each element, so a picture carries what render writes).
+PICTURE = {"id": "p0f2", "kind": "image", "role": "figure", "bbox": [200, 55, 300, 80], "spans": [],
+           "file": "figures/x.png", "px": [200, 50]}
+
+
+def shape_ir(bbox, eid):
+    """test_sync's panel with the fields classify writes that its merge tests do without."""
+    return {**bare_shape_ir(bbox, eid), "spans": [], "drawing": f"d-{eid}"}
 
 
 # ---------------------------------------------------------------- helpers
@@ -134,9 +143,11 @@ def marks(base: dict, ours: list[dict], slide: dict, scale: float = SCALE, fonts
 
 
 def one_slide(elements: dict[str, dict], title_page: bool = False) -> tuple[dict, dict]:
-    """(slide entry, planned slide) of synthetic IR elements, keyed by name."""
+    """(slide entry, planned slide) of synthetic IR elements, keyed by name. A planned slide is a
+    rendered one (its background says so), and emit parses its elements as such."""
     irs = list(elements.values())
-    slide = {"page": 0, "size": [360.0, 270.0], "title_page": title_page, "elements": irs}
+    slide = {"page": 0, "size": [360.0, 270.0], "title_page": title_page, "elements": irs,
+             "background": "backgrounds/bg-001.png"}
     return {"key": "s", "page": 0, "layout": emit.slide_layout(slide)[0],
             "elements": [entry(k, ir) for k, ir in elements.items()]}, slide
 
@@ -181,7 +192,7 @@ def test_a_picture_beside_a_line_narrows_its_box():
     heading = text_ir("Heading", [20, 20, 120, 34], "p0t0")
     line = text_ir("A short line", [20, 60, 90, 72], "p0t1")
     base, slide0 = one_slide({"text/body/0": heading, "text/body/1": line})
-    picture = {"id": "p0f2", "kind": "image", "role": "figure", "bbox": [200, 55, 300, 80], "file": "figures/x.png"}
+    picture = PICTURE
     ours, slide = one_slide({"text/body/0": heading, "text/body/1": line, "image/figure/0": picture})
     found, unwritten = marks({"slides": [base]}, [ours], slide)
     assert found == {"text/body/1": {"width"}} and unwritten == []
@@ -335,6 +346,6 @@ def test_an_old_base_emit_cannot_read_marks_nothing():
     base, _ = one_slide({"text/body/1": copy.deepcopy(line)})
     for p in base["elements"][0]["ir"]["paragraphs"]:
         del p["lines"]
-    picture = {"id": "p0f2", "kind": "image", "role": "figure", "bbox": [200, 55, 300, 80], "file": "figures/x.png"}
+    picture = PICTURE
     ours, slide = one_slide({"text/body/1": line, "image/figure/0": picture})
     assert marks({"slides": [base]}, [ours], slide) == ({}, [])

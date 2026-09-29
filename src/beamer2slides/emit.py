@@ -37,7 +37,9 @@ from .emit_places import grown_panels, measure_jobs, measure_places, title_bar_u
 from .emit_places import (  # noqa: F401 (callers take these from here)
     find_marks, ink_end, mark_alpha, overlay_move, pick_gap, slides_texts,
 )
-from .emit_pptx import TEMPLATE_LAYOUTS, api_error, batch, build_pptx, shape_requests, template_key
+from .emit_model import Placeholder, Template, TemplateKey
+from .emit_pptx import TEMPLATE_LAYOUTS, api_error, batch, build_pptx, shape_element_requests
+from .emit_pptx import shape_requests, template_key  # noqa: F401 (callers take these from here)
 from .emit_pptx import _add_table, _add_template_shapes  # (DeckPlan.contain tries what the .pptx carries)
 from .emit_pptx import NO_TABLE_STYLE, NS_A, VARIANT  # noqa: F401 (callers take these from here)
 from .emit_tables import pptx_table, table_requests
@@ -45,7 +47,10 @@ from .emit_tables import (  # noqa: F401 (callers take these from here)
     TABLE_CELL_PAD, TABLE_MARGIN, TABLE_MIN_SHRINK, TABLE_TEXT_TOP, fit_columns, squeezed_columns,
     table_columns, table_fits, table_layout,
 )
-from .emit_text import merge_blocks, number_box_requests, text_box_requests
+from .emit_text import merge_blocks, number_requests, text_element_requests
+from .emit_text import (  # noqa: F401 (callers take these from here)
+    number_box_requests, text_box_requests,
+)
 from .emit_text import (  # noqa: F401 (callers take these from here)
     HOLE_BREAK, HOLE_FONT, HOLE_SPACE_EM, LINE_MARGIN, extra_above, extra_below, hole_run, hole_runs,
     in_sentence, inner_pitch, line_pitch, line_size, line_sizes, pitch_between, run_sizes, snap,
@@ -67,6 +72,12 @@ from .fonts import font_info  # noqa: F401 (callers take these from here)
 from .gapi import HttpError
 from .google_auth import credentials_for_threads, drive_service, shared_service, slides_service
 from .gslides import EMU_PER_PT, emu, execute, per_thread
+from .ir_types import (
+    DiagramElement, Element, FallbackImage, ImageElement, MarkedShape, RenderedElement, ShapeElement, TableElement,
+    TextElement, parse_element, parse_rendered_element,
+)
+from .json_types import JsonObject
+from .typing_compat import assert_never
 
 BATCH_MAX_REQUESTS = 400  # slides are sent together until a batch reaches this size
 # A round trip to Google costs about a second whatever it carries, so the wall clock of a
@@ -87,6 +98,15 @@ _T = TypeVar("_T")
 def strict() -> bool:
     """Whether a failure planning one element is raised rather than contained (STRICT_ENV)."""
     return os.environ.get(STRICT_ENV, "") not in ("", "0")
+
+
+def parse_slide_element(el: JsonObject, rendered: bool, where: str) -> Element | RenderedElement:
+    """An element of a slide emit plans, parsed at the stage its slide is at (`rendered`: the slide
+    has its background). A picture `DeckPlan.contain` put in an element's place is a rendered
+    one whatever its slide's stage: it is made of the region's crop (`fallback_element`)."""
+    if rendered or (el.get("kind") == "image" and el.get("role") == "fallback"):
+        return parse_rendered_element(el, where)
+    return parse_element(el, where)
 
 
 # ---------------------------------------------------------------- main entry
@@ -723,35 +743,48 @@ class DeckPlan:
             {"deleteObject": {"objectId": e["objectId"]}}
             for e in page_elements.get(slide_id, [])
             if e["objectId"] not in (title_oid, subtitle_oid) and not e["objectId"].startswith(ours)])]
-        def element_requests(el: dict, oid: str) -> list[dict]:
-            if el["kind"] == "shape":
-                key = template_key(el, scale)
-                return shape_requests(el, slide_id, oid, scale, template_on_slide(slide_id, key) if key else None)
-            if el["kind"] == "table":
-                return table_requests(el, slide_id, oid, scale, fonts, self.pptx_tables)
-            if el["kind"] == "diagram":
-                return diagram_requests(el, slide_id, oid, scale, fonts,
-                                        (lambda key, s=slide_id: template_on_slide(s, key)) if keys else None)
-            if el["kind"] == "image":
-                # The picture came with the slide: move it to its place in the z-order.
-                reqs = [{"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}]
-                if el["id"] in moves:  # to the gap or words measured for it (measure_places)
-                    dx, dy, sx = (*moves[el["id"]], 1.0)[:3]
-                    # (a relative transform scales about the page origin: the left edge keeps its dx)
-                    reqs.insert(0, {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
-                        "scaleX": sx, "scaleY": 1, "unit": "EMU",
-                        "translateX": round((dx + (1 - sx) * el["bbox"][0] * scale) * EMU_PER_PT),
-                        "translateY": round(dy * EMU_PER_PT)}}})
-                if el.get("number"):
-                    reqs += number_box_requests(el["number"], slide_id, f"{oid}n", scale, fonts)
-                return reqs
-            placeholder = None
-            if oid in (title_oid, subtitle_oid):
-                size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
-                placeholder = {"base_w": size["width"]["magnitude"] / EMU_PER_PT,
-                               "base_h": size["height"]["magnitude"] / EMU_PER_PT, "dy": placeholder_dy}
-            return text_box_requests(el, slide_id, oid, scale, fonts, placeholder, page_slide,
-                                     title_bar_under(el, slide), text_right_limit(el, slide))
+        def template_record(key: TemplateKey) -> Template:
+            """`template_on_slide`, for the typed shape planner."""
+            j = keys.index(key)
+            w, h = template_sizes[j]
+            return Template(id=f"{slide_id}_k{j}", w=w, h=h)
+
+        def element_requests(el: dict, oid: str) -> list[JsonObject]:
+            """The requests of one element, planned from its parsed IR: a field its producer never
+            wrote or wrote in another type raises `IRError` here, which `failed` contains."""
+            typed = parse_slide_element(el, "background" in slide, f"slide page {n}")
+            match typed:
+                case ShapeElement() | MarkedShape():
+                    return shape_element_requests(typed, slide_id, oid, scale, template_record)
+                case TableElement():
+                    return table_requests(el, slide_id, oid, scale, fonts, self.pptx_tables)
+                case DiagramElement():
+                    return diagram_requests(el, slide_id, oid, scale, fonts,
+                                            (lambda key, s=slide_id: template_on_slide(s, key)) if keys else None)
+                case ImageElement() | FallbackImage():
+                    # The picture came with the slide: move it to its place in the z-order.
+                    reqs: list[JsonObject] = [
+                        {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}]
+                    if typed.id in moves:  # to the gap or words measured for it (measure_places)
+                        dx, dy, sx = (*moves[typed.id], 1.0)[:3]
+                        # (a relative transform scales about the page origin: the left edge keeps its dx)
+                        reqs.insert(0, {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
+                            "scaleX": sx, "scaleY": 1, "unit": "EMU",
+                            "translateX": round((dx + (1 - sx) * typed.bbox[0] * scale) * EMU_PER_PT),
+                            "translateY": round(dy * EMU_PER_PT)}}})
+                    if isinstance(typed, ImageElement) and typed.number is not None:
+                        reqs += number_requests(typed.number, slide_id, f"{oid}n", scale, fonts)
+                    return reqs
+                case TextElement():
+                    placeholder = None
+                    if oid in (title_oid, subtitle_oid):
+                        size = next(e["size"] for e in page_elements[slide_id] if e["objectId"] == oid)
+                        placeholder = Placeholder(base_w=size["width"]["magnitude"] / EMU_PER_PT,
+                                                  base_h=size["height"]["magnitude"] / EMU_PER_PT, dy=placeholder_dy)
+                    return text_element_requests(typed, slide_id, oid, scale, fonts, placeholder, page_slide,
+                                                 title_bar_under(el, slide), text_right_limit(el, slide), None)
+                case _:
+                    assert_never(typed)
 
         element_ids = []
         for i, el in enumerate(slide["elements"]):  # shapes, then pictures, then text on top

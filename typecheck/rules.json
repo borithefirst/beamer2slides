@@ -101,7 +101,7 @@
   "emit_places.py": 1,
   "emit_pptx.py": 2,
   "emit_tables.py": 13,
-  "emit_text.py": 12,
+  "emit_text.py": 7,
   "emit_theme.py": 3,
   "emit_widths.py": 2,
   "extract.py": 5,

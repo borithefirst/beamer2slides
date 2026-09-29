@@ -251,7 +251,13 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   once with pictures of refused regions (`fallback_pictures`). An element emit cannot even *plan*
   (a field its producer never wrote) is the picture of its region too, with a warning
   (`DeckPlan(contain=True)`, `upload_plan`, emit.json/`state["contained"]`); the offline suite sets
-  `B2S_EMIT_STRICT` so it raises there instead. Sync and `adopt_sync.convert_source` plan the same
+  `B2S_EMIT_STRICT` so it raises there instead. DeckPlan parses each element
+  (`emit.parse_slide_element`, rendered when its slide has `background`), so a missing field is an
+  `IRError` contained the same way; text and shapes are planned from `emit_model`'s records
+  (`SetText`, `SetShape`; derived fields such as `in_sentence` live there, never in the IR), dict
+  callers through thin entries (`text_box_requests` -> `text_box_requests_of`); tables, diagrams,
+  holes and the theme still plan dicts. A test patching a planner patches
+  `emit.text_element_requests` / `shape_element_requests`. Sync and `adopt_sync.convert_source` plan the same
   way (`sync.planned`, report `contained`); a base element unchanged since takes its picture's form
   in the base (`sync.base_as_contained`), so nothing churns. Slides `mark_emitted` cannot compare
   are warnings (`Unread`, `context_unread`), raised under `B2S_EMIT_STRICT` on the new side only.

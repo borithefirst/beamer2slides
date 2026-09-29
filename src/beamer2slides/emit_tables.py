@@ -6,6 +6,7 @@ import functools
 
 from . import bidi
 from .emit_metrics import ASCENT_EM, BASELINE_A, LINE_EM, PAD_X, SLIDE_W, FontMapper, rgb, u16
+from .emit_model import json_number
 from .emit_text import extra_above, in_sentence, run_sizes
 from .emit_widths import WRAP_MARGIN, slides_width, wrap_joins, wrap_window, wrapped_width
 from .gslides import EMU_PER_PT, emu, pt
@@ -307,7 +308,7 @@ def table_layout(el: dict, scale: float, fonts: FontMapper, imported: bool = Fal
         tight = table_columns(el, cells, scale, fonts, tight=True)
 
         def shrunk(s: float) -> list[list[list[dict]]]:
-            return [[[{**r, "size": r["size"] * s} for r in runs] for runs in row] for row in cells]
+            return [[[{**r, "size": json_number(r["size"], "size") * s} for r in runs] for runs in row] for row in cells]
 
         least = table_columns(el, shrunk(TABLE_MIN_SHRINK), scale, fonts, tight=True)
         # The margin if the smallest size reaches it, else the page edge - never past the page,

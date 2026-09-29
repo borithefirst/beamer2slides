@@ -7,8 +7,10 @@ import re
 import unicodedata
 from importlib import resources
 
+from .emit_model import BulletFace, JsonMap, SetBullet, SetRun, bullet_of, run_of
 from .fonts import font_info, google_font
 from .gslides import pt
+from .json_types import JsonObject
 
 
 # Found through the package, never through the checkout: an installed wheel, a zip import and
@@ -52,7 +54,7 @@ BULLET_PRESETS = {
 # whatever the preset. A bullet shape is a preset plus the level showing it (bullet_level).
 # Ink height and the gap between ink and indentFirstLine are per em of the bullet's size
 # (tools/probe_bullets.py).
-BULLET_SHAPES = {  # shape: (preset, level, ink height em, gap em)
+BULLET_SHAPES: dict[str, tuple[str, int, float, float]] = {  # shape: (preset, level, ink height em, gap em)
     "disc": ("BULLET_DISC_CIRCLE_SQUARE", 0, 0.413, 0.08),
     "circle": ("BULLET_DISC_CIRCLE_SQUARE", 1, 0.43, 0.08),
     "square": ("BULLET_DISC_CIRCLE_SQUARE", 2, 0.45, 0.07),
@@ -62,9 +64,10 @@ BULLET_SHAPES = {  # shape: (preset, level, ink height em, gap em)
     "diamond": ("BULLET_DIAMOND_CIRCLE_SQUARE", 0, 0.81, 0.08),
     "open_diamond": ("BULLET_DIAMONDX_HOLLOWDIAMOND_SQUARE", 1, 0.87, 0.06),
 }
-GLYPH_SHAPES = {**dict.fromkeys("▶►▸‣", "triangle"), **dict.fromkeys("•●", "disc"), **dict.fromkeys("◦○", "circle"),
-                **dict.fromkeys("■▪", "square"), "□": "open_square", **dict.fromkeys("★⋆", "star"),
-                **dict.fromkeys("◆♦", "diamond"), **dict.fromkeys("◇⋄", "open_diamond")}
+_GLYPH_FACES: tuple[tuple[str, BulletFace], ...] = (
+    ("▶►▸‣", "triangle"), ("•●", "disc"), ("◦○", "circle"), ("■▪", "square"), ("□", "open_square"), ("★⋆", "star"),
+    ("◆♦", "diamond"), ("◇⋄", "open_diamond"))
+GLYPH_SHAPES: dict[str, BulletFace] = {ch: face for chars, face in _GLYPH_FACES for ch in chars}
 
 
 # Width per em of Computer Modern's optical sizes relative to the 10 pt cut, from the glyph
@@ -189,12 +192,17 @@ STYLE_KEY = {(False, False): "regular", (True, False): "bold", (False, True): "i
 SLANTED = re.compile(r"CMB?X?SL\d|SFSL\d|SFBL\d|LMROMANSLANT")  # slanted roman: upright widths
 
 
-def cm_face(run: dict) -> str | None:
+def cm_face(run: JsonMap) -> str | None:
+    """`cm_face_of` a run dict."""
+    return cm_face_of(run_of(run))
+
+
+def cm_face_of(run: SetRun) -> str | None:
     """The CM_ADVANCES face a Computer Modern (EC, Latin Modern) run is set in, or None."""
-    if font_info(run["font"]).design_size is None:
+    if font_info(run.font).design_size is None:
         return None
-    slanted = bool(SLANTED.match(re.sub(r"[^A-Z0-9]", "", run["font"].split("+", 1)[-1].upper())))
-    return CM_FACE.get((run["family"], bool(run["bold"]), bool(run["italic"]) and not slanted))
+    slanted = bool(SLANTED.match(re.sub(r"[^A-Z0-9]", "", run.font.split("+", 1)[-1].upper())))
+    return CM_FACE.get((run.family, run.bold, run.italic and not slanted))
 
 
 def _advance(table: dict, ch: str) -> float | None:
@@ -275,36 +283,49 @@ class FontMapper:
             self.factors[family] = (ratios["text_mean"], ratios["by_row"]["title"])
             self.style[family] = {k: ratios["relative_to_text"][k] for k in ("bold", "italic")}
 
-    def text_style(self, run: dict, scale: float) -> tuple[dict, list[str]]:
+    # A run dict (classify's lines, deck_ir's read of a deck, the tests) reaches each method through
+    # its twin on a `SetRun` (`emit_model.run_of`), which emit's planners call.
+
+    def text_style(self, run: JsonMap, scale: float) -> tuple[JsonObject, list[str]]:
+        return self.style_of(run_of(run), scale)
+
+    def style_of(self, run: SetRun, scale: float) -> tuple[JsonObject, list[str]]:
         """Font part of a Slides TextStyle. Google fonts used by the PDF itself keep their
         family and weight (e.g. Fira Sans Light); TeX fonts get a calibrated substitute."""
-        family, size = self(run, scale)
-        google = google_font(run["font"])
+        family, size = self.size_of(run, scale)
+        google = google_font(run.font)
         if google:
             return ({"weightedFontFamily": {"fontFamily": google[0], "weight": google[1]},
-                     "fontSize": pt(size), "italic": google[2] or run["italic"]},
+                     "fontSize": pt(size), "italic": google[2] or run.italic},
                     ["weightedFontFamily", "fontSize", "italic"])
-        if self.optical_weight(run):
+        if self.optical_weight_of(run):
             return ({"weightedFontFamily": {"fontFamily": family, "weight": OPTICAL_WEIGHT}, "fontSize": pt(size),
-                     "italic": run["italic"]},
+                     "italic": run.italic},
                     ["weightedFontFamily", "fontSize", "italic"])
-        return ({"fontFamily": family, "fontSize": pt(size), "bold": run["bold"], "italic": run["italic"]},
+        return ({"fontFamily": family, "fontSize": pt(size), "bold": run.bold, "italic": run.italic},
                 ["fontFamily", "fontSize", "bold", "italic"])
 
     @staticmethod
-    def optical_weight(run: dict) -> bool:
+    def optical_weight(run: JsonMap) -> bool:
+        return FontMapper.optical_weight_of(run_of(run))
+
+    @staticmethod
+    def optical_weight_of(run: SetRun) -> bool:
         """Whether a regular run is written at OPTICAL_WEIGHT for its small optical cut
         (OPTICAL_WEIGHT_DESIGN)."""
-        if run["bold"] or google_font(run["font"]) or run["family"] not in OPTICAL_WEIGHT_DESIGN:
+        if run.bold or google_font(run.font) or run.family not in OPTICAL_WEIGHT_DESIGN:
             return False
-        design = font_info(run["font"]).design_size
-        return design is not None and design <= OPTICAL_WEIGHT_DESIGN[run["family"]]
+        design = font_info(run.font).design_size
+        return design is not None and design <= OPTICAL_WEIGHT_DESIGN[run.family]
 
-    def face(self, run: dict) -> str:
+    def face(self, run: JsonMap) -> str:
+        return self.face_of(run_of(run))
+
+    def face_of(self, run: SetRun) -> str:
         """The ADVANCES style Slides draws a run in: a run written at OPTICAL_WEIGHT takes the bold
         face only where Slides draws that weight bold (DRAWN_BOLD_WEIGHT)."""
-        heavy = OPTICAL_WEIGHT >= DRAWN_BOLD_WEIGHT and self.optical_weight(run)
-        return STYLE_KEY[(bool(run["bold"]) or heavy, bool(run["italic"]))]
+        heavy = OPTICAL_WEIGHT >= DRAWN_BOLD_WEIGHT and self.optical_weight_of(run)
+        return STYLE_KEY[(run.bold or heavy, run.italic)]
 
     def width_ratio(self, font: str, family: str, bold: bool, italic: bool) -> float:
         """Expected Slides width / PDF width of a run after the size correction: bold and
@@ -318,37 +339,44 @@ class FontMapper:
                 ratio *= rel / (1 + (rel - 1) / 2)
         return ratio
 
-    def __call__(self, run: dict, scale: float) -> tuple[str, float]:
-        google = google_font(run["font"])
+    def __call__(self, run: JsonMap, scale: float) -> tuple[str, float]:
+        return self.size_of(run_of(run), scale)
+
+    def size_of(self, run: SetRun, scale: float) -> tuple[str, float]:
+        """The Slides family and size (pt) a run is set in."""
+        google = google_font(run.font)
         if google:  # same font in Slides: no width correction
-            return google[0], round(run["size"] * scale, 1)
-        info = font_info(run["font"])
-        family = FONT_FOR_FAMILY.get(run["family"], "Lato")
+            return google[0], round(run.size * scale, 1)
+        info = font_info(run.font)
+        family = FONT_FOR_FAMILY.get(run.family, "Lato")
         design = info.design_size or 10
-        if run["family"] == "mono":
+        if run.family == "mono":
             factor = ROBOTO_MONO_ADVANCE_EM / (CMTT_ADVANCE_EM * design_width(DESIGN_WIDTH["mono"], design))
         else:
-            text, title = self.factors.get(run["family"], self.factors["sans"])
-            if run["family"] != "serif" and 11.5 <= design < 14:
+            text, title = self.factors.get(run.family, self.factors["sans"])
+            if run.family != "serif" and 11.5 <= design < 14:
                 factor = title  # calibrated directly on CMSS12 titles
             else:
                 # Other optical sizes: CM's small cuts are wider per em (up to OPTICAL_WIDTH_MAX),
                 # its large ones narrower.
-                factor = text / optical_width(run["family"], design)
+                factor = text / optical_width(run.family, design)
             # Bold and italic substitutes run 4-8% narrower than CM's; correct half of that, so
             # widths come closer without emphasised words looking visibly larger.
-            style = self.style.get(run["family"], self.style["sans"])
-            for key in ("bold", "italic"):
-                if run[key]:
+            style = self.style.get(run.family, self.style["sans"])
+            for key, on in (("bold", run.bold), ("italic", run.italic)):
+                if on:
                     factor *= 1 + (style[key] - 1) / 2
             if info.design_size is not None:  # Computer Modern metrics (CM, EC, Latin Modern)
-                if run.get("smallcaps"):
-                    factor /= SMALL_CAPS_WIDTH.get(run["family"], 1.0)
+                if run.smallcaps:
+                    factor /= SMALL_CAPS_WIDTH.get(run.family, 1.0)
                 else:
-                    factor *= self.shape_ratio(run, family, factor, design)
-        return family, round(run["size"] * scale / factor, 1)
+                    factor *= self.shape_ratio_of(run, family, factor, design)
+        return family, round(run.size * scale / factor, 1)
 
-    def shape_ratio(self, run: dict, family: str, factor: float, design: float) -> float:
+    def shape_ratio(self, run: JsonMap, family: str, factor: float, design: float) -> float:
+        return self.shape_ratio_of(run_of(run), family, factor, design)
+
+    def shape_ratio_of(self, run: SetRun, family: str, factor: float, design: float) -> float:
         """How much wider than the PDF's Slides sets this run for its letters, beyond what the
         size factor corrects; 1.0 when that is within tolerance (ordinary prose, a word), not
         known (a character neither table has) or not this run's to fix (scripts, holes).
@@ -358,26 +386,27 @@ class FontMapper:
         run of SHAPE_MIN_CHARS counted characters or more is judged against the calibration
         sentences in its own face and gets the ratio when it is off by more than SHAPE_TOL, unless
         it shares its paragraph with other runs (`in_sentence`: sized like them)."""
-        text = run.get("text", "")
-        cm = CM_ADVANCES.get(cm_face(run) or "")
+        text = run.text
+        face = cm_face_of(run)
+        cm = CM_ADVANCES.get(face or "")
         # (a table cell's run keeps the table's size: its column is made as wide as Slides sets
         # it (fit_columns), and a number set smaller rode high in its top-anchored cell)
-        if cm is None or not text.strip() or run.get("script") or run.get("hole") or run.get("cell") or \
+        if face is None or cm is None or not text.strip() or run.script or run.hole or run.cell or \
                 family not in ADVANCES:
             return 1.0
-        slides = ADVANCES[family][self.face(run)]
+        slides = ADVANCES[family][self.face_of(run)]
         number = "".join(text.split())
         if any(c in DIGITS for c in number) and all(c in NUMBER_CHARS for c in number):
             s_em = sum(slides.get(c, UNMEASURED_ADVANCE_EM) for c in number)
             p_em = sum(cm["advances"][c] for c in number)
-            return max(1.0, s_em / factor / (p_em * optical_width(run["family"], design)))
-        if run.get("in_sentence"):  # (a run among others keeps their size: in_sentence)
+            return max(1.0, s_em / factor / (p_em * optical_width(run.family, design)))
+        if run.in_sentence:  # (a run among others keeps their size: in_sentence)
             return 1.0
         s_em, p_em, counted, skipped = advance_widths(text, cm, slides)
         if counted < SHAPE_MIN_CHARS or skipped > 0.1 * counted or p_em <= 0:
             return 1.0
-        title = run["family"] != "serif" and 11.5 <= design < 14  # sized by the title factor
-        ratio = s_em / p_em / self.reference_ratio(cm_face(run), slides, title)
+        title = run.family != "serif" and 11.5 <= design < 14  # sized by the title factor
+        ratio = s_em / p_em / self.reference_ratio(face, slides, title)
         return ratio if abs(ratio - 1) > SHAPE_TOL else 1.0
 
     def reference_ratio(self, face: str, slides: dict, title: bool) -> float:
@@ -393,23 +422,30 @@ class FontMapper:
         return self._reference[key]
 
 
-def bullet_shape(bullet: dict) -> str | None:
+# A bullet dict (the tests, devtools.alignment, classify's reading of a page) reaches each bullet
+# function through its twin on a `SetBullet` (`emit_model.bullet_of`), which emit's planners call.
+
+def bullet_shape(bullet: JsonMap) -> BulletFace | None:
+    return bullet_shape_of(bullet_of(bullet))
+
+
+def bullet_shape_of(bullet: SetBullet) -> BulletFace | None:
     """The BULLET_SHAPES entry for a bullet; None for numbers. A glyph's is its character's,
     except a bullet character the PDF draws as a filled square (LM Sans's \\textbullet)."""
-    text = bullet.get("text", "")
-    if bullet["kind"] == "number" or (bullet["kind"] == "image" and text.isdigit()):
+    text = bullet.text
+    if bullet.kind == "number" or (bullet.kind == "image" and text.isdigit()):
         return None
-    if bullet["kind"] == "glyph":
+    if bullet.kind == "glyph":
         shape = GLYPH_SHAPES.get(text, "disc")
         return "square" if shape == "disc" and inked_square(bullet) else shape
-    return bullet.get("shape") if bullet.get("shape") in BULLET_SHAPES else "disc"
+    return "disc" if bullet.shape is None else bullet.shape
 
 
-def inked_square(bullet: dict) -> bool:
-    ink, fill = bullet.get("ink"), bullet.get("fill") or 0.0
-    if not ink or fill < 0.9:  # (a disc fills 0.79 of its box)
+def inked_square(bullet: SetBullet) -> bool:
+    ink = bullet.ink
+    if ink is None or ink.fill < 0.9:  # (a disc fills 0.79 of its box)
         return False
-    w, h = ink[2] - ink[0], ink[3] - ink[1]
+    w, h = ink.box[2] - ink.box[0], ink.box[3] - ink.box[1]
     return 0.8 <= w / h <= 1.25 if h > 0 else False
 
 
@@ -419,66 +455,86 @@ def inked_square(bullet: dict) -> bool:
 INK_SIZED = 0.75
 
 
-def ink_sized(bullet: dict, size: float, scale: float) -> float | None:
+def _label_size(bullet: SetBullet, size: float, scale: float) -> float:
+    """The size (Slides pt) of the font the bullet's label is drawn in, no larger than `size`."""
+    return min(size, (size / scale if bullet.label_size is None else bullet.label_size) * scale)
+
+
+def ink_sized(bullet: SetBullet, size: float, scale: float) -> float | None:
     """The size that gives a glyph bullet its PDF ink height, when it is to be used."""
-    if bullet["kind"] != "glyph" or not bullet.get("ink"):
+    shape = bullet_shape_of(bullet)
+    if bullet.kind != "glyph" or bullet.ink is None or shape is None:  # (a glyph always has a shape)
         return None
-    shape = bullet_shape(bullet)
-    label = bullet.get("label") or {}
-    full = min(size, label.get("size", size / scale) * scale)
-    height = (bullet["ink"][3] - bullet["ink"][1]) * scale
+    full = _label_size(bullet, size, scale)
+    height = (bullet.ink.box[3] - bullet.ink.box[1]) * scale
     inked = max(0.3 * size, min(size, height / BULLET_SHAPES[shape][2]))
-    return inked if inked < INK_SIZED * full or shape != GLYPH_SHAPES.get(bullet.get("text", ""), "disc") else None
+    return inked if inked < INK_SIZED * full or shape != GLYPH_SHAPES.get(bullet.text, "disc") else None
 
 
-def bullet_preset(bullet: dict) -> str:
-    shape = bullet_shape(bullet)
+def bullet_preset(bullet: JsonMap) -> str:
+    return bullet_preset_of(bullet_of(bullet))
+
+
+def bullet_preset_of(bullet: SetBullet) -> str:
+    shape = bullet_shape_of(bullet)
     if shape is None:
-        return BULLET_PRESETS["number_parens" if ")" in bullet.get("text", "") else "number"]
+        return BULLET_PRESETS["number_parens" if ")" in bullet.text else "number"]
     return BULLET_SHAPES[shape][0]
 
 
-def bullet_level(bullet: dict, level: int) -> int:
+def bullet_level(bullet: JsonMap, level: int) -> int:
+    return bullet_level_of(bullet_of(bullet), level)
+
+
+def bullet_level_of(bullet: SetBullet, level: int) -> int:
     """Slides nesting level: numbers count by depth (1., a., i.), glyphs pick their shape.
     ● ○ ■ keep the depth (they repeat every 3 levels); other glyphs exist at one level only.
     (Indents are set explicitly, so the level only decides the glyph and what Tab does.)"""
-    shape = bullet_shape(bullet)
+    shape = bullet_shape_of(bullet)
     if shape is None:
         return level
     preset, first = BULLET_SHAPES[shape][:2]
     return 3 * min(level, 2) + first if preset == "BULLET_DISC_CIRCLE_SQUARE" else first
 
 
-def bullet_size(bullet: dict, size: float, scale: float) -> float:
+def bullet_size(bullet: JsonMap, size: float, scale: float) -> float:
+    return bullet_size_of(bullet_of(bullet), size, scale)
+
+
+def bullet_size_of(bullet: SetBullet, size: float, scale: float) -> float:
     """Font size giving the bullet its PDF height (at most the text's: a larger bullet would
     push the line down). Glyph and number boxes are font boxes: their size is the font's, or
     their ink's where that is much smaller (`ink_sized`)."""
-    shape = bullet_shape(bullet)
+    shape = bullet_shape_of(bullet)
     inked = ink_sized(bullet, size, scale)
     if inked is not None:
         return round(inked, 1)
-    if bullet["kind"] in ("glyph", "number") or shape is None:
-        label = bullet.get("label") or {}
-        return round(min(size, label.get("size", size / scale) * scale), 1)
-    height = (bullet["bbox"][3] - bullet["bbox"][1]) * scale
+    if bullet.kind in ("glyph", "number") or shape is None:
+        return round(_label_size(bullet, size, scale), 1)
+    height = (bullet.bbox[3] - bullet.bbox[1]) * scale
     return round(max(0.3 * size, min(size, height / BULLET_SHAPES[shape][2])), 1)
 
 
-def bullet_gap(bullet: dict, size: float) -> float:
+def bullet_gap(bullet: SetBullet, size: float) -> float:
     """Distance from the bullet box's right edge to indentFirstLine."""
-    shape = bullet_shape(bullet)
-    if bullet["kind"] in ("glyph", "number") or shape is None:
+    shape = bullet_shape_of(bullet)
+    if bullet.kind in ("glyph", "number") or shape is None:
         return BULLET_GAP
     return BULLET_SHAPES[shape][3] * size
 
 
-def bullet_extent(bullet: dict, size: float, scale: float) -> tuple[float, float, float]:
+def bullet_extent(bullet: JsonMap, size: float, scale: float) -> tuple[float, float, float]:
+    return bullet_extent_of(bullet_of(bullet), size, scale)
+
+
+def bullet_extent_of(bullet: SetBullet, size: float, scale: float) -> tuple[float, float, float]:
     """(PDF x0, PDF x1, gap after it in Slides pt) of what the Slides bullet stands for: the
     ink of a glyph sized by its ink (then placed as a vector bullet is), else the bullet's box."""
-    z = bullet_size(bullet, size, scale)
-    if ink_sized(bullet, size, scale) is not None:
-        return bullet["ink"][0], bullet["ink"][2], BULLET_SHAPES[bullet_shape(bullet)][3] * z
-    return bullet["bbox"][0], bullet["bbox"][2], bullet_gap(bullet, z)
+    z = bullet_size_of(bullet, size, scale)
+    shape = bullet_shape_of(bullet)
+    if bullet.ink is not None and shape is not None and ink_sized(bullet, size, scale) is not None:
+        return bullet.ink.box[0], bullet.ink.box[2], BULLET_SHAPES[shape][3] * z
+    return bullet.bbox[0], bullet.bbox[2], bullet_gap(bullet, z)
 
 
 def rgb(hex_color: str) -> dict:

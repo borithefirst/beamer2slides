@@ -115,6 +115,16 @@ written back once where it leaves. Inside, nothing is `dict[str, Any]`. Reading 
 parser's job too: upgrading an adopt base's shapes (`adopt_sync.upgrade_shapes`) is parsing, and
 belongs where the base is read.
 
+### Moving a module that others call with dicts: an entry and a typed twin
+
+Keep `f(d: JsonMap, ...)` with its old signature as one line, `return f_of(parse(d), ...)`, and
+write the body in `f_of`, which takes records and has no defaults; callers move to `f_of` one by
+one, and the entry goes when the last has. `JsonMap = Mapping[str, Json]` (emit_model) is
+read-only, so covariant: a caller's `dict[str, str | float]` is accepted where `JsonObject` is
+refused. A value a stage derives (a run marked in-sentence, a hole's spaces) is
+`dataclasses.replace` on its record, never a key added to the IR dict another stage diffs. Prove
+the move with the module's output recorded before and after over every deck: 0 may differ.
+
 ### Different meanings are different types
 
 A Slides objectId, an element key and a slide key are all strings; points, pixels, EMU and ems are

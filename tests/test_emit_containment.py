@@ -11,7 +11,9 @@ No Google API.
 import pytest
 
 from beamer2slides import emit
+from beamer2slides.emit_pptx import shape_element_requests as real_shape_element_requests
 from beamer2slides.emit_pptx import shape_requests as real_shape_requests
+from beamer2slides.ir_types import IRError
 
 from .test_classify import deck
 
@@ -23,17 +25,29 @@ def lenient(monkeypatch):
 
 
 def raising_for(target: str):
-    """`shape_requests` failing for the element `target` as a missing field would."""
-    def shape_requests(el, *args, **kwargs):
-        if el["id"] == target:
+    """`shape_element_requests` failing for the element `target` as a missing field would. (emit
+    plans a parsed shape: `el` is its ir_types record.)"""
+    def shape_element_requests(el, *args, **kwargs):
+        if el.id == target:
             raise KeyError("flip")
-        return real_shape_requests(el, *args, **kwargs)
-    return shape_requests
+        return real_shape_element_requests(el, *args, **kwargs)
+    return shape_element_requests
 
 
 def shape(eid: str, x0: float, **fields) -> dict:
-    return {"kind": "shape", "id": eid, "shape": "RECTANGLE", "flip": False, "radius": 0.0,
-            "bbox": [x0, 30.0, x0 + 100.0, 90.0], "fill": "#3366cc", **fields}
+    return {"kind": "shape", "id": eid, "role": "panel", "shape": "RECTANGLE", "flip": False, "radius": 0.0,
+            "bbox": [x0, 30.0, x0 + 100.0, 90.0], "fill": "#3366cc", "spans": [], "drawing": f"d-{eid}", **fields}
+
+
+def adopted_custom(**fields) -> dict:
+    """688ebf4's element: a marked shape of a kind no Slides preset has, with no `flip`."""
+    return {"kind": "shape", "id": "p0-custom", "role": "panel", "shape": "custom", "bbox": [20.0, 30.0, 120.0, 90.0],
+            "fill": "#ff0000", "outline": None, "radius": 0.0, "spans": [], "drawings": ["d0"], "mark": "p0-custom",
+            **fields}
+
+
+# What parsing says of adopted_custom (emit parses each element before planning it: ir_types).
+NO_FLIP = "IRError: slide page 0, element p0-custom: lacks required key 'flip'"
 
 
 def synthetic(*elements: dict) -> dict:
@@ -58,7 +72,7 @@ def test_an_element_emit_cannot_plan_is_the_picture_of_its_region(lenient, monke
     before = emit.plan_offline(classified)
     page, target = next((s["page"], e["id"]) for s in before["plan"].deck["slides"] for e in s["elements"]
                         if e["kind"] == "shape" and e.get("block") is None)
-    monkeypatch.setattr(emit, "shape_requests", raising_for(target))
+    monkeypatch.setattr(emit, "shape_element_requests", raising_for(target))
     after = emit.plan_offline(classified)
 
     assert after["contained"] == [{"page": page, "id": target, "kind": "shape", "error": "KeyError: 'flip'"}]
@@ -100,8 +114,7 @@ def test_the_refused_rebuild_starts_from_the_merged_deck(lenient):
     classified = deck("04_theme_blocks")
     merged = emit.DeckPlan(classified, pptx_tables=True, contain=True).merged
     assert merged["slides"] == [{**s, "elements": emit.merge_blocks(s["elements"])} for s in classified["slides"]]
-    custom = {"kind": "shape", "id": "p0-custom", "shape": "custom", "bbox": [20.0, 30.0, 120.0, 90.0], "fill": "#ff0000"}
-    merged = emit.DeckPlan(synthetic(custom, shape("p0-panel", 150.0)), pptx_tables=True, contain=True).merged
+    merged = emit.DeckPlan(synthetic(adopted_custom(), shape("p0-panel", 150.0)), pptx_tables=True, contain=True).merged
     assert [e["kind"] for e in merged["slides"][0]["elements"]] == ["image", "shape"]
 
 
@@ -109,17 +122,17 @@ def test_the_refused_rebuild_starts_from_the_merged_deck(lenient):
 def test_strict_raises_what_would_be_contained(monkeypatch):
     classified = deck("04_theme_blocks")
     target = next(e["id"] for s in classified["slides"] for e in s["elements"] if e["kind"] == "shape")
-    monkeypatch.setattr(emit, "shape_requests", raising_for(target))
+    monkeypatch.setattr(emit, "shape_element_requests", raising_for(target))
     monkeypatch.setenv(emit.STRICT_ENV, "1")
     with pytest.raises(KeyError, match="flip"):
         emit.plan_offline(classified)
 
 
 def test_an_adopted_custom_shape_without_flip_is_contained(lenient):
-    """688ebf4's element: a shape kind no Slides preset has, no `flip`, reaching emit."""
-    custom = {"kind": "shape", "id": "p0-custom", "shape": "custom", "bbox": [20.0, 30.0, 120.0, 90.0], "fill": "#ff0000"}
-    planned = emit.plan_offline(synthetic(custom, shape("p0-panel", 150.0)))
-    assert planned["contained"] == [{"page": 0, "id": "p0-custom", "kind": "shape", "error": "KeyError: 'flip'"}]
+    """688ebf4's element: a shape kind no Slides preset has, no `flip`, reaching emit. It fails
+    where emit parses it, and is contained as a planning failure was."""
+    planned = emit.plan_offline(synthetic(adopted_custom(), shape("p0-panel", 150.0)))
+    assert planned["contained"] == [{"page": 0, "id": "p0-custom", "kind": "shape", "error": NO_FLIP}]
     (_, _, parts, ids), = planned["slides"]
     assert ids == ["b2s_s000_f0", "b2s_s000_s1"]
     assert [el["kind"] for el, _ in parts[1:3]] == ["image", "shape"]
@@ -129,9 +142,8 @@ def test_an_adopted_custom_shape_without_flip_is_contained(lenient):
 
 def test_the_same_element_strict_is_the_same_error(monkeypatch):
     monkeypatch.setenv(emit.STRICT_ENV, "1")
-    custom = {"kind": "shape", "id": "p0-custom", "shape": "custom", "bbox": [20.0, 30.0, 120.0, 90.0], "fill": "#ff0000"}
-    with pytest.raises(KeyError, match="flip"):
-        emit.plan_offline(synthetic(custom))
+    with pytest.raises(IRError, match="lacks required key 'flip'"):
+        emit.plan_offline(synthetic(adopted_custom()))
 
 
 def shape_requests_of(el: dict, oid: str) -> list[dict]:
@@ -164,8 +176,7 @@ def test_two_elements_missing_the_same_field_are_both_pictures(lenient):
 
 def test_containment_is_deterministic(lenient):
     """sync diffs what emit would write (`sync.mark_emitted`): the same deck, the same pictures."""
-    custom = {"kind": "shape", "id": "p0-custom", "shape": "custom", "bbox": [20.0, 30.0, 120.0, 90.0], "fill": "#ff0000"}
-    one, two = (emit.plan_offline(synthetic(custom, shape("p0-panel", 150.0))) for _ in range(2))
+    one, two = (emit.plan_offline(synthetic(adopted_custom(), shape("p0-panel", 150.0))) for _ in range(2))
     assert one["contained"] == two["contained"] and one["slides"] == two["slides"]
     assert emit.slide_emission(one["plan"].deck["slides"][0], one["plan"].scale, one["plan"].fonts)["parts"] == \
         emit.slide_emission(two["plan"].deck["slides"][0], two["plan"].scale, two["plan"].fonts)["parts"]
@@ -177,7 +188,7 @@ def test_an_element_that_trips_only_on_googles_sizes_goes_the_refused_way(lenien
     the rebuild with pictures follows (`emit`). Without that list, the error is raised."""
     planned = emit.plan_offline(synthetic(shape("p0-a", 20.0), shape("p0-b", 150.0)))
     plan, slide = planned["plan"], planned["plan"].deck["slides"][0]
-    monkeypatch.setattr(emit, "shape_requests", raising_for("p0-a"))
+    monkeypatch.setattr(emit, "shape_element_requests", raising_for("p0-a"))
     late: list = []
     parts, ids = plan.slide_parts(slide, planned["page_elements"], planned["speaker_notes"], {}, [], late)
     assert [(i, type(e)) for i, e in late] == [(0, KeyError)]
@@ -191,6 +202,7 @@ def test_an_element_that_trips_only_on_googles_sizes_goes_the_refused_way(lenien
 
 def test_an_element_with_no_box_is_never_lost_silently(lenient):
     """No region, no picture: the planning error is raised rather than the element dropped."""
-    custom = {"kind": "shape", "id": "p0-custom", "shape": "custom", "fill": "#ff0000"}
-    with pytest.raises(KeyError):
+    custom = adopted_custom()
+    del custom["bbox"]
+    with pytest.raises(IRError, match="lacks required key 'bbox'"):
         emit.plan_offline(synthetic(custom, shape("p0-panel", 150.0)))
