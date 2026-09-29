@@ -157,9 +157,17 @@ table. When a combination of fields must not happen, choose types in which it ca
   package whose types it reads, so every machine gets the same answer. It checks on the Python
   building it: the code must type-check against numpy 2.2 on 3.10 as well as numpy 2.5 on 3.11+.
 - **`typecheck/baseline.json`**: the errors older than these rules - and nothing else. It only
-  shrinks. After fixing errors, `python -m pyrefly check --prune-baseline` drops them, and
-  `tests/test_typecheck.py`'s `CEILING` goes down to match. Never `--update-baseline`: new code
-  type-checks; it is never added to the baseline.
+  shrinks. It is compared as a count - in each file, each kind of error (its message) at most as
+  often as the baseline lists it - not by pyrefly's own `--baseline`, which lets one entry excuse
+  every error of its column and message (a new bare `dict` at an old one's column went through) and
+  loses an old error a retyped line moved. After fixing errors, `python
+  build_backend/beamer2slides_build.py prune` drops them, and `tests/test_typecheck.py`'s `CEILING`
+  goes down to match. Never `pyrefly --update-baseline`: new code type-checks; it is never added to
+  the baseline.
+- **JSON not yet parsed** is a `json_types.JsonObject`, read through its narrowings (`as_object`,
+  `as_str`, ...), which name where a value of the wrong shape was. That is the interim form of
+  "parse at the boundary" until a record's parser exists; a TypedDict view of a dict cannot be passed
+  to the legacy `dict` parameters, a `JsonObject` can.
 - **`typecheck/rules.json`**: per module, how many default arguments, defaulted dataclass fields
   and uses of `Any` remain. Only goes down (`tests/test_typing_rules.py`; `python
   tests/test_typing_rules.py` rewrites it, and refuses to raise a count). A new module has none.

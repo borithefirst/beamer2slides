@@ -34,8 +34,11 @@ decorations) is a picture, or baked into a per-slide background picture.
   work: records with static keys are `@dataclass(frozen=True, kw_only=True)` with no field defaults;
   **functions take no default arguments**; closed sets are Literals matched to `assert_never`
   (`typing_compat`); JSON is parsed into typed values where it enters; ids and units are NewTypes;
-  a stage is a type. Legacy errors live in `typecheck/baseline.json`, which only shrinks (`pyrefly
-  check --prune-baseline`, lower `CEILING` in `tests/test_typecheck.py`; never `--update-baseline`);
+  a stage is a type; JSON not yet parsed is a `json_types.JsonObject` read through its narrowings.
+  Legacy errors live in `typecheck/baseline.json`, counted per file and message (pyrefly's own
+  matching lets one entry excuse many), which only shrinks (`python
+  build_backend/beamer2slides_build.py prune`, lower `CEILING` in `tests/test_typecheck.py`; never
+  `--update-baseline`);
   defaults, defaulted fields and `Any` per module in `typecheck/rules.json`, only down
   (`tests/test_typing_rules.py`). A function you touch leaves to these rules.
 - **deck.json's contract is `ir.py`** (TypedDicts per kind and stage, `ir.problems` / `ir.validate`
@@ -244,7 +247,10 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
   once with pictures of refused regions (`fallback_pictures`). An element emit cannot even *plan*
   (a field its producer never wrote) is the picture of its region too, with a warning
   (`DeckPlan(contain=True)`, `upload_plan`, emit.json/`state["contained"]`); the offline suite sets
-  `B2S_EMIT_STRICT` so it raises there instead.
+  `B2S_EMIT_STRICT` so it raises there instead. Sync and `adopt_sync.convert_source` plan the same
+  way (`sync.planned`, report `contained`); a base element unchanged since takes its picture's form
+  in the base (`sync.base_as_contained`), so nothing churns. Slides `mark_emitted` cannot compare
+  are warnings (`Unread`, `context_unread`), raised under `B2S_EMIT_STRICT` on the new side only.
 - Re-running `convert` into the same folder rebuilds that deck in place (same URL); `--new-deck`
   makes another. **The rebuild guard** (`guard.py`, docs/sync.md "Never lose deck edits") refuses
   when the deck was edited, has no base, or came from another PDF, and a forced rebuild keeps a
@@ -325,7 +331,8 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   mark says its grid (`/xs`, `/ys`, a cell's `/rs`/`/cs`), laid out as emit's table by
   `marked.table_grid`. A shape an adopt base already records stays a shape for sync
   (`marked.shape_marks`), its IR brought to today's fields before comparing
-  (`adopt_sync.upgrade_shapes`), so an old base plans no creates. An element tied to no object of the person's is kept, not
+  (`adopt_sync.upgrade_shapes`, a marked table's layout `upgrade_tables`), so an old base plans no
+  creates. An element tied to no object of the person's is kept, not
   duplicated (`merge.ADOPTED`, `field: unpaired`); layout-drawn and in-table elements are named as
   such. What the API gives no geometry or fill for is read from the thumbnail (`deck_fills`,
   `deck_freeforms`): a fill wrapped in its own outline of another colour need not reach every side

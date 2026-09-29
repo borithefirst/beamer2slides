@@ -17,12 +17,19 @@ import string
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, Literal, TypedDict
 
 from . import faults, identity, merge, snapshot
 from .gapi import HttpError, status_of
 from .gslides import EMU_PER_PT, emu, execute, pt
+from .json_types import Json, JsonObject, as_int, as_object, as_objects, as_str
 from .paths import out_root
+from .typing_compat import assert_never
+
+if TYPE_CHECKING:
+    from .emit import DeckPlan, FontMapper
 
 MAX_ATTEMPTS = 3
 CHUNK = 450
@@ -330,10 +337,13 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
     A base `adopt` recorded also carries the deck's own boxes (`adopt_sync.deck_folds`), and what
     one of them the converter reads back as several is put together again before anything is keyed
     (`adopt_sync.fold_slides`) - the same fold the base's own side was built with, or the two sides
-    of the merge would not be describing the same boxes."""
+    of the merge would not be describing the same boxes.
+
+    An element emit cannot plan is the picture of its region, as `convert` makes it (`planned`):
+    listed in "contained" with its slide and element keys, for the report."""
     from . import adopt_sync
     from .classify import classify
-    from .emit import SLIDE_W, DeckPlan, merge_blocks
+    from .emit import SLIDE_W
     from .extract import extract, select_overlays
     from .marked import shape_marks
     from .notes import prepare
@@ -349,8 +359,8 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
     render_backgrounds(prepared.pdf, raw, deck, work, shape_marks(base))
     adopt_sync.fold_slides(deck, (base.get("adopt") or {}).get("boxes") or {})
     (work / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
-    plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]},
-                    page_width or SLIDE_W)
+    plan = planned(deck, prepared.pdf, work, page_width or SLIDE_W)
+    originals = contained_originals(deck, [(int(c["page"]), str(c["id"])) for c in plan.contained])
     deck = plan.deck
     infos = [identity.slide_info(s) for s in deck["slides"]]
     base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "",
@@ -374,15 +384,268 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
         ekeys.append(k)
         fps.append(f)
     entries = snapshot.slide_entries(deck, work, keys, ekeys, fps)
-    adopt_sync.upgrade_shapes(base, deck)
-    unwritten = mark_emitted(base, entries, deck, pairs, plan.scale, plan.fonts)
+    # (the old forms an adopt base recorded are brought up to what the source says, contained or not)
+    view_slides: list[Json] = []
+    for s in deck["slides"]:
+        elements: list[Json] = [originals.get((s["page"], e["id"]), e) for e in s["elements"]]
+        view_slide: JsonObject = {**s, "elements": elements}
+        view_slides.append(view_slide)
+    view: JsonObject = {"slides": view_slides}  # (its readers take the slides alone)
+    adopt_sync.upgrade_shapes(base, view)
+    adopt_sync.upgrade_tables(base, view)
+    base_as_contained(base, entries, view, pairs, keys, work, originals)
+    unread: list[Unread] = []
+    unwritten = mark_emitted(base, entries, deck, pairs, plan.scale, plan.fonts, fast=True, unread=unread)
+    at: dict[tuple[int, str], tuple[str, str]] = {
+        (s["page"], el["id"]): (o["key"], e["key"]) for s, o in zip(deck["slides"], entries)
+        for el, e in zip(s["elements"], o["elements"])}
+    contained: list[Contained] = []
+    for c in plan.contained:
+        page, eid, kind = int(c["page"]), str(c["id"]), c["kind"]
+        slide_key, element_key = at.get((page, eid), (None, None))
+        was = originals.get((page, eid)) or {}
+        words = " ".join(identity.plain_text(was).split()) if was.get("kind") == "text" else ""
+        contained.append(Contained(slide=slide_key, element=element_key, page=page, id=eid,
+                                   kind=None if kind is None else str(kind), error=str(c["error"]), words=words))
     return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries,
             "pairs": pairs, "label_moves": moves, "weak_pairs": weak, "near_misses": near,
-            "context_unwritten": unwritten}
+            "context_unwritten": unwritten, "context_unread": unread, "contained": contained}
 
 
-def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict, scale: float, fonts,
-                 fast: bool = True) -> list[dict]:
+@dataclass(frozen=True, kw_only=True)
+class Contained:
+    """An element of the new conversion emit could not plan, the picture of its region now
+    (`planned`). `slide` / `element`: its keys (None when it is not in the keyed deck); `page`, `id`:
+    where emit has it; `words`: what it said when it was text, since a person does not know
+    "image/fallback/0"."""
+    slide: str | None
+    element: str | None
+    page: int
+    id: str
+    kind: str | None
+    error: str
+    words: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class ContainedFound:
+    """A `Contained` element, and whether this sync writes its unit (else the deck keeps what the
+    last sync or `convert` wrote there)."""
+    item: Contained
+    written: bool
+
+
+# Which of `mark_emitted`'s two emissions of a slide could not be worked out.
+UnreadSide = Literal["base", "ours"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Unread:
+    """A slide `mark_emitted` could not compare, and why (`unread_warnings` says it)."""
+    slide: str
+    side: UnreadSide
+    error: str
+
+
+class _KeyedElement(TypedDict):
+    """What these readers take from an element entry of build_ours' slides (`snapshot.slide_entries`)."""
+    key: str
+
+
+class _OursSlideKeys(TypedDict):
+    key: str
+    elements: list[_KeyedElement]
+
+
+class OursSlide(_OursSlideKeys, total=False):
+    """What these readers take from a slide entry of build_ours' `slides`."""
+    title: str | None
+
+
+class _UnitPlanKeys(TypedDict):
+    action: merge.UnitAction
+
+
+class UnitPlan(_UnitPlanKeys, total=False):
+    """What these readers take from a unit's plan (`merge.plan_unit`, on an updated slide)."""
+    ours_members: list[str]
+
+
+class _SlidePlanKeys(TypedDict):
+    action: merge.SlideAction
+    ours: int | None
+
+
+class SlidePlan(_SlidePlanKeys, total=False):
+    """What these readers take from a slide's plan (`merge.plan_merge`'s `slides`)."""
+    units: list[UnitPlan]
+
+
+class MergePlan(TypedDict):
+    """What these readers take from `merge.plan_merge`'s answer."""
+    slides: list[SlidePlan]
+
+
+def planned(deck: dict[str, object], pdf: Path, work: Path, page_width: float) -> "DeckPlan":
+    """`deck` (as classify wrote it) planned as sync writes it, its blocks merged (`emit.DeckPlan`).
+    An element emit cannot plan (a field its producer never wrote, 688ebf4) is the picture of its
+    region, as `convert` makes it (`DeckPlan.contain`, the plan's `contained`), cut out of `pdf` into
+    `work`: the rest of the sync goes ahead instead of the whole of it dying before a write, and
+    the picture is what a fresh conversion puts there, so a base convert recorded with it is no
+    change. `adopt_sync.convert_source` plans the same way, for the same reason. Under
+    `emit.strict()` (the offline suite) the failure is raised."""
+    from .emit import DeckPlan
+    from .render import crop_region
+
+    plan = DeckPlan(deck, page_width, contain=True)
+    gone = {(c["page"], c["id"]) for c in plan.contained}
+    # (from the PDF this deck was read from: `emit.crop_fallbacks` would take a slides.pdf an
+    # earlier sync's notes left in `work`)
+    for slide in plan.deck["slides"]:
+        for el in slide["elements"]:
+            if (slide["page"], el["id"]) in gone and el.get("role") == "fallback":
+                (work / el["file"]).parent.mkdir(parents=True, exist_ok=True)
+                crop_region(pdf, slide["page"], el["bbox"], work / el["file"], 6.0)
+    return plan
+
+
+def contained_originals(deck: JsonObject, gone: list[tuple[int, str]]) -> dict[tuple[int, str], JsonObject]:
+    """(page, element id) -> the element `planned` made a picture of, as classify wrote it (a block's
+    merged: the plan merges them; `emit.fallback_element` keeps the id)."""
+    from .emit import merge_blocks
+
+    wanted = set(gone)
+    out: dict[tuple[int, str], JsonObject] = {}
+    for slide in as_objects(deck["slides"], "deck.slides") if wanted else []:
+        page = as_int(slide["page"], "slide.page")
+        elements = as_objects(slide["elements"], f"slide {page}: elements")
+        merged: list[JsonObject] = merge_blocks(elements)
+        for el in [*merged, *elements]:
+            at = (page, as_str(el["id"], f"slide {page}: element id"))
+            if at in wanted and at not in out:
+                out[at] = el
+    return out
+
+
+def base_as_contained(base: JsonObject, entries: list[JsonObject], view: JsonObject, pairs: dict[int, int],
+                      keys: list[str], work: Path, originals: dict[tuple[int, str], JsonObject]
+                      ) -> list[tuple[str, str]]:
+    """In place: a base element the source has not changed since, which `planned` made a picture of
+    this time, recorded as that picture - so the merge keeps what the deck has there.
+
+    Containment happens before anything is keyed, and a picture is another element than the one the
+    base records (another key), so an element the base holds in a form today's emit cannot write -
+    an adopt base's line kept a shape by `marked.shape_marks`, a text an older converter wrote - was
+    deleted from the deck and its picture put in, though neither side had changed it: the person's
+    own objects in an adopted deck (hashing's six lines, audit 2026-09-29). The element as classify
+    read it (`view`: the plan with each picture's original back) is keyed and hashed as the base's
+    were; where the base's element of that key says the same, the base takes the picture's key and
+    IR, and its objects and read-back stay (the deck side is compared by those alone). A source that
+    did change it still has its picture written. Returns [(slide key, element key)] so recorded."""
+    page_key = snapshot.page_keys(view, keys)
+    base_slides = as_objects(base["slides"], "base.slides")
+    done: list[tuple[str, str]] = []
+    for j, slide in enumerate(as_objects(view["slides"], "deck.slides")):
+        page = as_int(slide["page"], "slide.page")
+        elements = as_objects(slide["elements"], f"slide {page}: elements")
+        ids = [as_str(el["id"], f"slide {page}: element id") for el in elements]
+        here = [i for i, eid in enumerate(ids) if (page, eid) in originals]
+        if not here or j not in pairs:
+            continue
+        b_slide = base_slides[pairs[j]]
+        slide_key = as_str(b_slide["key"], "base slide key")
+        b_elements = as_objects(b_slide["elements"], f"base slide {slide_key}: elements")
+        n_elements = as_objects(entries[j]["elements"], f"slide {page}: keyed elements")
+        okeys, _ = identity.slide_element_keys(elements, work, identity.base_items(b_elements))
+        key_of = dict(zip(ids, okeys))
+        base_by = {as_str(e["key"], f"base slide {slide_key}: element key"): e for e in b_elements}
+        for i in here:
+            el, now = elements[i], n_elements[i]
+            now_key = as_str(now["key"], f"slide {page}: element key")
+            b = base_by.get(okeys[i])
+            if b is None or b.get("removed"):
+                continue  # (not the base's)
+            b_key = as_str(b["key"], f"base slide {slide_key}: element key")
+            if now_key != b_key and now_key in base_by:
+                continue  # (another base element holds the picture's key)
+            anchor = el.get("anchor")
+            h, _ = identity.ir_fields(el, work, key_of.get(anchor) if isinstance(anchor, str) else None, page_key)
+            if h != b.get("ir_hash"):
+                continue  # the source changed it: its picture is written
+            for other in b_elements:  # (what is anchored to it follows its key)
+                if other.get("anchor") == b_key:
+                    other["anchor"] = now_key
+            base_by.pop(b_key)
+            b.update({f: now[f] for f in ("key", "kind", "role", "ir", "ir_hash", "fields", "fingerprint", "anchor")})
+            base_by[now_key] = b
+            done.append((slide_key, now_key))
+    return done
+
+
+def contained_report(contained: list[Contained], slides: list[OursSlide],
+                     mplan: MergePlan) -> tuple[list[ContainedFound], list[str]]:
+    """build_ours' `contained` (`slides`: its keyed slides), each with whether this sync writes its
+    unit, and the report's words for those it writes. A unit it leaves alone is in the deck as the
+    last sync or `convert` wrote it: contained then too, or a source that has not changed it since."""
+    written: set[tuple[str, str]] = set()
+    for p in mplan["slides"]:
+        j, action = p["ours"], p["action"]
+        if j is None:
+            continue
+        o = slides[j]
+        match action:
+            case "create":
+                written |= {(o["key"], e["key"]) for e in o["elements"]}
+            case "update":
+                written |= {(o["key"], k) for u in p.get("units", []) if u["action"] in ("create", "recreate")
+                            for k in u.get("ours_members", [])}
+            case "gone" | "keep_removed" | "delete":
+                pass  # (nothing of the new conversion goes onto it)
+            case _:
+                assert_never(action)
+    found = [ContainedFound(item=c, written=c.slide is not None and c.element is not None and (c.slide, c.element) in written)
+             for c in contained]
+
+    def name(c: Contained) -> str:  # (by its words: a person does not know "image/fallback/0")
+        if not c.words:
+            return f"the {c.kind or 'element'} {c.id}"
+        return f"the text \"{c.words[:40]}{'...' if len(c.words) > 40 else ''}\""
+    says = [f"slide {f.item.slide}: this version of the converter could not lay out {name(f.item)} ({f.item.error}); "
+            f"it goes into the deck as a picture of its region, as a fresh conversion makes it"
+            for f in found if f.written]
+    return found, says
+
+
+def contained_json(found: list[ContainedFound]) -> list[dict[str, object]]:
+    """`contained_report`'s entries as the report (JSON) carries them."""
+    return [{**asdict(f.item), "written": f.written} for f in found]
+
+
+def unread_warnings(unread: list[Unread], slides: list[OursSlide]) -> list[str]:
+    """The report's words for the slides `mark_emitted` could not compare (`slides`: build_ours'
+    keyed slides, for their titles): nothing is lost, but boxes the source left alone there keep
+    the size and place they had, even where the source's changes beside them give them others in
+    a fresh conversion - and nothing else says so."""
+    titles = {s["key"]: s.get("title") for s in slides}
+    out = []
+    for u in unread:
+        title = titles.get(u.slide)
+        where = f"slide {u.slide}" + (f" ({title})" if title and title != u.slide else "")
+        match u.side:
+            case "base":
+                why = ("the sync base records it in a form this version of the converter cannot lay out (an "
+                       "older version wrote it)")
+            case "ours":
+                why = "this version of the converter could not lay it out"
+            case _:
+                assert_never(u.side)
+        out.append(f"{where}: {why} ({u.error}), so the boxes the source did not change there keep their "
+                   f"size and place, even where the source's changes beside them would give them others")
+    return out
+
+
+def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict[int, int], scale: float, fonts: "FontMapper",
+                 fast: bool, unread: list[Unread]) -> list["Unwritten"]:
     """Give an element whose own IR the source left alone (or only moved) a source change when emit
     now writes it differently all the same, because of what stands around it.
 
@@ -404,7 +667,13 @@ def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict, scale
     stays one is written, `context_changes`) and "grouping"
     (the block or rule groups it belongs to, `emit.block_groups` / `rule_groups`: a recreated unit
     goes back into its old group, `Sync.regroups`). `fast`: skip slides on which nothing changed
-    (the tests turn it off to prove two emissions of the same slide compare equal)."""
+    (the tests turn it off to prove two emissions of the same slide compare equal).
+
+    A slide whose emission cannot be worked out on one side is left unmarked and put in `unread`
+    (`Unread`; `unread_warnings` says it): a base an older converter wrote is a real deck's
+    everyday case, and the marks are all it costs."""
+    from .emit import strict
+
     unwritten = []
     for j, i in pairs.items():
         b, o, slide = base["slides"][i], entries[j], deck["slides"][j]
@@ -427,9 +696,20 @@ def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict, scale
         try:
             before = dict(zip(base_by, emitted_elements({**slide, "title_page": title_page, "elements": [e["ir"] for e in was]},
                                                         list(base_by), scale, fonts)))
-        except Exception:  # noqa: BLE001 - an IR an older converter wrote that today's emit cannot read
-            continue       # says nothing either way: no marks
-        now = emitted_elements(slide, [oe["key"] for oe in o["elements"]], scale, fonts)
+        except Exception as e:  # noqa: BLE001 - an IR an older converter wrote that today's emit cannot read
+            # says nothing either way: no marks - but said, since nothing else would
+            unread.append(Unread(slide=str(o["key"]), side="base", error=f"{type(e).__name__}: {e}"))
+            continue
+        try:
+            now = emitted_elements(slide, [oe["key"] for oe in o["elements"]], scale, fonts)
+        except Exception as e:  # noqa: BLE001 - the plan's own slide, which `planned` rehearsed
+            # (a slide emit could not write would have had the element at fault made a picture, so
+            # this is a difference between that rehearsal and `slide_emission`: a bug to see where
+            # the suite runs, and in a person's sync the marks it costs, said, not the whole sync)
+            if strict():
+                raise
+            unread.append(Unread(slide=str(o["key"]), side="ours", error=f"{type(e).__name__}: {e}"))
+            continue
         for k in candidates:
             oe, el = o["elements"][k], slide["elements"][k]
             be = base_by[oe["key"]]
@@ -440,8 +720,17 @@ def mark_emitted(base: dict, entries: list[dict], deck: dict, pairs: dict, scale
                 be["fields"] = {**be["fields"], f: "base"}
                 oe["fields"] = {**oe["fields"], f: "ours"}
             if cannot:
-                unwritten.append({"slide": o["key"], "element": oe["key"], "fields": sorted(cannot)})
+                unwritten.append(Unwritten(slide=str(o["key"]), element=str(oe["key"]), fields=tuple(sorted(cannot))))
     return unwritten
+
+
+@dataclass(frozen=True, kw_only=True)
+class Unwritten:
+    """An element whose emission changed with what stands around it in a way recreating its unit
+    cannot write (`mark_emitted`; `fields`: "placeholder", "grouping"). `unwritten_warnings` says it."""
+    slide: str
+    element: str
+    fields: tuple[str, ...]
 
 
 UNWRITTEN_SAYS = {
@@ -454,21 +743,23 @@ UNWRITTEN_SAYS = {
 }
 
 
-def unwritten_warnings(unwritten: list[dict], ours: dict) -> list[str]:
+def unwritten_warnings(unwritten: list[Unwritten], ours: JsonObject) -> list[str]:
     """The report's words for `mark_emitted`'s changes a sync cannot write: one warning per slide and
     kind, naming the elements by their words (a person does not know "text/body/1"). Nothing is lost
     by them - the deck keeps what it has - but the deck no longer looks like a fresh conversion there,
     and nothing else says so."""
-    slides = {s["key"]: s for s in ours.get("slides", [])}
-    by: dict[tuple, list[str]] = {}
+    slides = {as_str(s["key"], "slide key"): s for s in as_objects(ours.get("slides", []), "slides")}
+    by: dict[tuple[str, str], list[str]] = {}
     for u in unwritten:
-        slide = slides.get(u["slide"]) or {}
-        el = next((e for e in slide.get("elements", []) if e["key"] == u["element"]), None)
-        words = " ".join(identity.plain_text(el["ir"]).split()) if el and el.get("ir") and el["ir"].get("kind") == "text" else ""
+        slide = slides.get(u.slide)
+        elements: list[JsonObject] = as_objects(slide.get("elements", []), f"slide {u.slide}: elements") if slide else []
+        el = next((e for e in elements if e["key"] == u.element), None)
+        ir = as_object(el["ir"], f"{u.element}: ir") if el and el.get("ir") else None
+        words = " ".join(identity.plain_text(ir).split()) if ir and ir.get("kind") == "text" else ""
         name = f"\"{words[:40]}{'...' if len(words) > 40 else ''}\"" if words else \
-            f"the {el['kind'] if el else 'element'} {u['element']}"
-        for f in u["fields"]:
-            by.setdefault((u["slide"], f), []).append(name)
+            f"the {el['kind'] if el else 'element'} {u.element}"
+        for f in u.fields:
+            by.setdefault((u.slide, f), []).append(name)
     out = []
     for (key, field), names in by.items():
         title = (slides.get(key) or {}).get("title")
@@ -3019,7 +3310,12 @@ def sync(pdf: Path, deck: str, out: Path | None = None, dry_run: bool = False, o
     # (a slide the deck deleted or the source dropped is nobody's business any more)
     updated = {p["key"] for p in result["plan"]["slides"] if p["action"] == "update"}
     report["warnings"] += s.warnings + warnings + unwritten_warnings(
-        [u for u in ours.get("context_unwritten") or [] if u["slide"] in updated], ours)
+        [u for u in ours.get("context_unwritten") or [] if u.slide in updated], ours)
+    report["warnings"] += unread_warnings([u for u in ours["context_unread"] if u.slide in updated], ours["slides"])
+    contained, says = contained_report(ours["contained"], ours["slides"], result["plan"])
+    report["warnings"] += says
+    if contained:  # (what emit could not plan and made a picture: `planned`)
+        report["contained"] = contained_json(contained)
     report["converged"] += [{**r, "field": "image", "how": "the same picture, written differently"} for r in refreshed]
     report["overruns"] = s.overruns
     report["refit"] = s.refit_moves

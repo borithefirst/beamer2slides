@@ -87,7 +87,7 @@ def same_emission(name: str, plan) -> list[str]:
         found += [f"{name} slide {j + 1} {k}: emitted differently" for k, a, c in zip(names, was, now) if a != c]
         found += [f"{name} slide {j + 1} {k}: {sorted(sync.context_changes(a, c, [0.0, 0.0], e['kind'])[0])}"
                   for k, a, c, e in zip(names, was, now, o["elements"]) if any(sync.context_changes(a, c, [0.0, 0.0], e["kind"]))]
-    unwritten = sync.mark_emitted(base, ours, deck, {j: j for j in range(len(ours))}, plan.scale, plan.fonts, fast=False)
+    unwritten = sync.mark_emitted(base, ours, deck, {j: j for j in range(len(ours))}, plan.scale, plan.fonts, fast=False, unread=[])
     found += [f"{name}: unwritten {u}" for u in unwritten]
     found += [f"{name} {s['key']} {e['key']}: marked {f}" for s in ours + base["slides"] for e in s["elements"]
               for f in identity.CONTEXT_FIELDS if f in e["fields"]]
@@ -120,7 +120,8 @@ def test_the_sync_talk_emits_the_same_against_its_own_saved_base():
 
 def marks(base: dict, ours: list[dict], slide: dict, scale: float = SCALE, fonts=None) -> tuple[dict, list[dict]]:
     """{element key: the context fields `source_changes` reports} of one slide, and what cannot be written."""
-    unwritten = sync.mark_emitted(base, ours, {"slides": [slide]}, {0: 0}, scale, fonts or emit.FontMapper())
+    unwritten = sync.mark_emitted(base, ours, {"slides": [slide]}, {0: 0}, scale, fonts or emit.FontMapper(),
+                                  fast=True, unread=[])
     base_by = {e["key"]: e for e in base["slides"][0]["elements"]}
     found = {}
     for oe in ours[0]["elements"]:
@@ -211,8 +212,8 @@ def test_a_new_text_on_a_block_changes_its_grouping_which_sync_cannot_write():
                              "text/body/1": text_ir("Also inside", [20, 90, 100, 102], "p0t3")})
     found, unwritten = marks({"slides": [base]}, [ours], slide)
     assert found == {}
-    assert {u["element"]: u["fields"] for u in unwritten} == \
-        {"shape/panel/0": ["grouping"], "shape/panel/1": ["grouping"], "text/body/0": ["grouping"]}
+    assert {u.element: u.fields for u in unwritten} == \
+        {"shape/panel/0": ("grouping",), "shape/panel/1": ("grouping",), "text/body/0": ("grouping",)}
 
 
 def test_a_longer_text_below_the_title_takes_the_subtitle_placeholder():
@@ -241,8 +242,8 @@ def test_a_slide_that_changes_layout_is_a_placeholder_change_sync_cannot_write()
     ours, slide = one_slide({"text/title/0": title, "text/body/0": authors}, title_page=False)
     found, unwritten = marks({"slides": [base]}, [ours], slide)
     assert "text/body/0" not in found
-    assert [u for u in unwritten if u["element"] == "text/body/0"] == [
-        {"slide": "s", "element": "text/body/0", "fields": ["placeholder"]}]
+    assert [u for u in unwritten if u.element == "text/body/0"] == [
+        sync.Unwritten(slide="s", element="text/body/0", fields=("placeholder",))]
 
 
 def test_what_sync_cannot_write_is_a_warning_in_words():

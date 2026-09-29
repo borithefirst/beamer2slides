@@ -650,7 +650,7 @@ def ours_from_folder(folder: Path, base: dict) -> dict | None:
         ekeys.append(k)
         fps.append(f)
     entries = snapshot.slide_entries(deck, folder, keys, ekeys, fps)
-    mark_emitted(base, entries, deck, pairs_, plan.scale, plan.fonts)
+    mark_emitted(base, entries, deck, pairs_, plan.scale, plan.fonts, fast=True, unread=[])
     return {"slides": entries, "pairs": pairs_, "label_moves": moves, "weak_pairs": weak}
 
 

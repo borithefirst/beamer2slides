@@ -345,7 +345,8 @@ class _ImageOptional(TypedDict, total=False):
     mark_n: Union[int, str]
     """Its mark's `/n`, the element's number on the page slides.sty counts: `inverse.others_than`
     switches every other object off by it to judge the picture alone. A mark with no `/n` (only
-    hand-written PDFs) gives its key here instead, which `others_than` matches to nothing."""
+    hand-written PDFs) gives its key here instead, as `marked.group_id` does, which is what
+    `others_than` matches it by."""
 
 
 class ImageElement(_ImageKeys, _ImageOptional):

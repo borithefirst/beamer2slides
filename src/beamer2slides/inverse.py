@@ -40,12 +40,16 @@ import zlib
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .compare import (HOLE, TOL, Comparison, Para, PicHash, compare, grey16, norm_text, para_text,
                       picture_hash, residual_line, slide_paragraphs, slide_title, text_anchor)
 from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, frame_visible,
                      line_of, locate_words, mask_comments, match_group, norm_word, page_frames, read_args, skip_space,
                      synctex_pages)
+
+if TYPE_CHECKING:
+    from .pdf import Page
 
 MIKTEX_BIN = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "MiKTeX" / "miktex" / "bin" / "x64"
 SKIP_DIRS = {"out", ".git", ".venv", "build", "__pycache__", "node_modules", ".b2s"}
@@ -2343,20 +2347,31 @@ def picture_hashes(cand: Candidate, target: dict, comp_out: Path) -> dict:
     return hashes
 
 
-def others_than(page, n) -> list[int]:
+def others_than(page: "Page", n: int | str) -> list[int]:
     """The page's objects that are not marked element `n`'s (`marked.py`), and hold none of its:
     a picture adopt wrote is judged by what it drew alone - a layout's picture over the slide's own
-    full-page one showed both, and neither matched its file."""
+    full-page one showed both, and neither matched its file.
+
+    `n` is the element's `mark_n`, which `marked.split` groups by `marked.group_id` (the mark's `/n`,
+    else its `/k`), so an object is its element's by that same reading: by `/n` alone, a mark with no
+    `/n` matched no object and every object went off - the picture judged blank. When no object is
+    the element's, nothing goes off (the crop as the page draws it, as before marks)."""
     from .extract import page_marks
+    from .marked import ELEMENT, group_id
     marks = page_marks(page)
     objects = page.objects()
-    top = lambda po: next((p.get("n") for t, p in marks.get(po.id, ()) if t == "B2S"), None)
-    keep = {po.id for po in objects if top(po) == n}
+
+    def top(oid: int) -> int | str | None:  # (the outermost element mark says whose it is, as in marked.split)
+        return next((group_id(p) for t, p in marks.get(oid, ()) if t == ELEMENT), None)
+    keep = {po.id for po in objects if top(po.id) == n}
+    if not keep:
+        return []
     parent = {po.id: po.parent for po in objects}
     for k in list(keep):
-        while parent.get(k) is not None:
-            k = parent[k]
-            keep.add(k)
+        up = parent.get(k)
+        while up is not None:
+            keep.add(up)
+            up = parent.get(up)
     return [po.id for po in objects if po.id not in keep]
 
 

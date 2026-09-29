@@ -6,8 +6,9 @@ under pyproject.toml's [tool.pyrefly]: strict preset, every warning an error, no
 honoured, and typecheck/baseline.json holding the errors older than the rule. This file runs that
 check where the suite runs (a module that stops type-checking fails before a push, in seconds) and
 adds what the build cannot say:
-  * the baseline holds no stale entry: an error fixed is pruned from it (`pyrefly check
-    --prune-baseline`), so the list only shrinks, and CEILING below goes down with it;
+  * the baseline holds no stale entry: an error fixed is pruned from it (`python
+    build_backend/beamer2slides_build.py prune`), so the list only shrinks, and CEILING below goes
+    down with it (a count per error, not pyrefly's --baseline, which lets one entry excuse many);
   * the baseline never grows: it holds exactly CEILING entries, so adding one is a visible edit of
     this file, not a quiet regeneration;
   * no baseline entry is about a TypedDict (688ebf4: the element contract holds everywhere);
@@ -24,9 +25,11 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from importlib.metadata import PackageNotFoundError, version
-from importlib.util import find_spec
+from importlib.util import find_spec, module_from_spec, spec_from_file_location
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from packaging.requirements import Requirement
@@ -44,7 +47,7 @@ PYPROJECT = ROOT / "pyproject.toml"
 BASELINE = ROOT / "typecheck" / "baseline.json"
 
 # The legacy errors typecheck/baseline.json holds: lower it with every prune, never raise it.
-CEILING = 13713
+CEILING = 13700
 
 TYPED_DICT_KINDS = {"bad-typed-dict", "bad-typed-dict-key", "not-required-key-access"}
 
@@ -150,30 +153,58 @@ def check(command: list[str], *args: str) -> subprocess.CompletedProcess[str]:
                           env=interpreter.env())
 
 
-def diagnostics(done: subprocess.CompletedProcess[str]) -> list[str]:
-    assert done.stdout.strip(), done.stderr
-    return [f"{d['path']}:{d['line']} [{d['name']}] {d['concise_description']}"
-            for d in json.loads(done.stdout)["errors"]]
-
-
 @pytest.fixture(scope="module")
 def command() -> list[str]:
     return pyrefly_command()
 
 
-def test_the_package_type_checks_as_the_build_checks_it(command: list[str]) -> None:
-    """Every diagnostic, whatever its severity, outside the baseline: the build's own refusal."""
-    done = check(command, "--min-severity", "info", "--output-format", "json")
-    found = diagnostics(done)
-    assert not found and done.returncode == 0, "\n".join(found or [done.stderr])
+def backend() -> ModuleType:
+    """build_backend/beamer2slides_build.py, whose comparison the build refuses by."""
+    spec = spec_from_file_location("beamer2slides_build", ROOT / "build_backend" / "beamer2slides_build.py")
+    assert spec is not None and spec.loader is not None
+    module = module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def test_the_baseline_only_shrinks(command: list[str]) -> None:
-    """An error fixed leaves the baseline (`pyrefly check --prune-baseline`), and CEILING follows
-    it down; nothing is ever added to it."""
-    done = check(command, "--error-stale-baseline", "--output-format", "omit-errors")
-    assert done.returncode == 0, ("the baseline holds errors that are fixed: run `python -m pyrefly check "
-                                  "--prune-baseline` and lower CEILING\n" + done.stderr)
+@pytest.fixture(scope="module")
+def found(command: list[str]) -> list[dict[str, object]]:
+    """Every diagnostic, with no baseline (as the build asks for them)."""
+    empty = Path(tempfile.mkdtemp()) / "baseline.json"
+    empty.write_text('{"errors": []}', encoding="utf-8")
+    done = check(command, "--baseline", str(empty), "--min-severity", "info", "--output-format", "json")
+    assert done.stdout.strip(), done.stderr
+    errors: list[dict[str, object]] = json.loads(done.stdout)["errors"]
+    return errors
+
+
+def test_the_package_type_checks_as_the_build_checks_it(found: list[dict[str, object]]) -> None:
+    """Every diagnostic, whatever its severity, past what the baseline lists: the build's own refusal."""
+    build = backend()
+    fresh = build.new_errors(found, build.baseline())
+    assert not fresh, "\n".join(f"{d['path']}:{d['line']} [{d['name']}] {d['concise_description']}" for d in fresh)
+
+
+def test_a_baseline_entry_excuses_one_error_not_all_its_kind() -> None:
+    """pyrefly's own --baseline lets one entry excuse every error of its path, column, kind and
+    message: a new bare `dict` at an old one's column went through. The build counts instead, per file
+    and message - so an old error a retyped line moved to another column is still the old one."""
+    build = backend()
+    old = {"path": "src/beamer2slides/m.py", "column": 5, "name": "implicit-any-type-argument",
+           "concise_description": "Cannot determine `_KT`", "severity": "error"}
+    again = dict(old, line=40)
+    assert build.new_errors([dict(old, line=3), again], [old]) == [again]
+    assert build.new_errors([dict(old, line=3, column=31)], [old]) == []
+    assert build.stale_entries([], [old]) == [old]
+
+
+def test_the_baseline_only_shrinks(found: list[dict[str, object]]) -> None:
+    """An error fixed leaves the baseline (`python build_backend/beamer2slides_build.py prune`), and
+    CEILING follows it down; nothing is ever added to it."""
+    build = backend()
+    stale = build.stale_entries(found, build.baseline())
+    assert not stale, (f"the baseline holds {len(stale)} errors that are fixed: run `python "
+                       "build_backend/beamer2slides_build.py prune` and lower CEILING")
     entries = json.loads(BASELINE.read_text(encoding="utf-8"))["errors"]
     assert len(entries) <= CEILING, (f"the baseline grew to {len(entries)} entries: new code type-checks, "
                                      "it is never added to the baseline")

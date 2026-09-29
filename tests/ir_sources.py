@@ -529,7 +529,7 @@ def resync(made: Made, home: Path) -> None:
     for s, entry in zip(ours["deck"]["slides"], ours["slides"]):
         assert [e["id"] for e in entry["elements"]] == [e["id"] for e in s["elements"]]
     sync.mark_emitted(base, ours["slides"], ours["deck"], ours["pairs"], ours["plan"].scale, ours["plan"].fonts,
-                      fast=False)
+                      fast=False, unread=[])
     merge.plan_merge(base, ours, snapshot.read_presentation(pres))
     theme_sync.ours_side(ours)
 

@@ -29,6 +29,7 @@ from pathlib import Path
 
 from . import guard, identity, merge, snapshot
 from .emit import SLIDE_W
+from .json_types import JsonObject, as_object, as_objects
 
 ORIGIN = merge.ADOPTED   # (the word itself lives there: the merge plans by it and cannot import this)
 # A pair is a claim that one converted element *is* one object of the deck. Both numbers are about
@@ -461,6 +462,38 @@ def upgrade_shapes(base: dict, deck: dict) -> None:
             e.update(ir=new, ir_hash=h, fields={**e.get("fields", {}), **fields})
 
 
+def upgrade_tables(base: JsonObject, deck: JsonObject) -> None:
+    """In place: a marked table (`slidetable`) an adopt base recorded before 688ebf4 - its cells and
+    box, no layout (`columns`, `rows`, rules...) - in today's form, so an unchanged source is no
+    change. The layout is taken from our table of the same mark, and only when everything the old
+    form did say is the same there: a source that changed the table still reads as changed. Without
+    this, syncing hashing's unchanged source into its adopted deck recreated the person's table
+    (`source_changes` {'style'}, audit 2026-09-29)."""
+    if base.get("adopt") is None:
+        return
+    ours: dict[str, JsonObject] = {}
+    for s in as_objects(deck.get("slides", []), "deck.slides"):
+        for e in as_objects(s["elements"], "deck slide elements"):
+            mark = e.get("mark")
+            if isinstance(mark, str) and mark and e["kind"] == "table":
+                ours[mark] = e
+    for slide in as_objects(base.get("slides", []), "base.slides"):
+        for e in as_objects(slide.get("elements", []), "base slide elements"):
+            ir = as_object(e.get("ir") or {}, "base element ir")
+            mark = ir.get("mark")
+            now = ours.get(mark) if isinstance(mark, str) else None
+            if e.get("kind") != "table" or now is None or "columns" in ir or "columns" not in now:
+                continue
+            same = all(json.dumps(v, sort_keys=True) == json.dumps(now.get(k), sort_keys=True)
+                       for k, v in ir.items() if k != "id")
+            if not same:
+                continue
+            new: JsonObject = {**now, "id": ir.get("id", now["id"])}
+            anchor = e.get("anchor")
+            h, fields = identity.ir_fields(new, None, anchor if isinstance(anchor, str) else None)
+            e.update(ir=new, ir_hash=h, fields={**as_object(e.get("fields", {}), "base element fields"), **fields})
+
+
 # ---------------------------------------------------------------- the base
 
 def convert_source(tex: Path, work: Path, engine: str | None = None,
@@ -473,14 +506,15 @@ def convert_source(tex: Path, work: Path, engine: str | None = None,
     every hole width it fits, is PDF pt to *that* deck's points. `folds` is the deck's own boxes
     per frame label (`object_records`), which put back together what one of them the converter read
     as several (`fold_composites`) - applied after the backgrounds are rendered, so a fold changes
-    what is *paired*, never what is painted.
+    what is *paired*, never what is painted. An element emit cannot plan is the picture of its
+    region (`sync.planned`), as the sync's own conversion will make it: the plan's `contained`.
     Returns ({"deck", "out", "pdf", "plan"}, "") or (None, the compile error)."""
     from .classify import classify
-    from .emit import DeckPlan, merge_blocks
     from .extract import extract, select_overlays
     from .inverse import Workspace
     from .notes import prepare
     from .render import render_backgrounds
+    from .sync import planned
 
     ws = Workspace(Path(tex), work / "compile", engine=engine)
     pdf, err = ws.compile()
@@ -497,8 +531,7 @@ def convert_source(tex: Path, work: Path, engine: str | None = None,
     render_backgrounds(prepared.pdf, raw, deck, out)
     if folds:
         fold_slides(deck, folds)
-    plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]},
-                    page_width)
+    plan = planned(deck, prepared.pdf, out, page_width)
     return {"deck": plan.deck, "out": out, "pdf": pdf, "plan": plan}, ""
 
 
@@ -620,6 +653,9 @@ def record(tex: Path, work: Path, target: dict, pres: dict, engine: str | None =
     conv, err = convert_source(Path(tex), Path(work), engine, float(snapshot.page_size(pres)[0]), folds)
     if conv is None:
         return None, f"the source does not compile:\n{err}"
+    for c in conv["plan"].contained:
+        log(f"warning: slide {c['page'] + 1}: {c['kind']} {c['id']} could not be planned ({c['error']}); "
+            f"the base records a picture of it, as a sync will write it")
     problem = labels_match(conv["deck"], target)
     if problem:
         return None, problem

@@ -64758,27 +64758,6 @@
       "severity": "error"
     },
     {
-      "column": 17,
-      "path": "src/beamer2slides/inverse.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`others_than` is missing an annotation for parameter `page`",
-      "severity": "error"
-    },
-    {
-      "column": 23,
-      "path": "src/beamer2slides/inverse.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`others_than` is missing an annotation for parameter `n`",
-      "severity": "error"
-    },
-    {
-      "column": 18,
-      "path": "src/beamer2slides/inverse.py",
-      "name": "implicit-any-lambda",
-      "concise_description": "Type of lambda parameter `po` is unknown",
-      "severity": "error"
-    },
-    {
       "column": 24,
       "path": "src/beamer2slides/inverse.py",
       "name": "implicit-any-parameter",
@@ -90476,13 +90455,6 @@
       "severity": "error"
     },
     {
-      "column": 90,
-      "path": "src/beamer2slides/sync.py",
-      "name": "implicit-any-parameter",
-      "concise_description": "`mark_emitted` is missing an annotation for parameter `fonts`",
-      "severity": "error"
-    },
-    {
       "column": 45,
       "path": "src/beamer2slides/sync.py",
       "name": "implicit-any-type-argument",
@@ -90522,13 +90494,6 @@
       "path": "src/beamer2slides/sync.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 14,
-      "path": "src/beamer2slides/sync.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter for generic class `tuple`",
       "severity": "error"
     },
     {
@@ -91215,20 +91180,6 @@
       "path": "src/beamer2slides/sync.py",
       "name": "implicit-any-parameter",
       "concise_description": "`__init__` is missing an annotation for parameter `take_source`",
-      "severity": "error"
-    },
-    {
-      "column": 70,
-      "path": "src/beamer2slides/sync.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 70,
-      "path": "src/beamer2slides/sync.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
       "severity": "error"
     },
     {
@@ -92751,20 +92702,6 @@
       "severity": "error"
     },
     {
-      "column": 45,
-      "path": "src/beamer2slides/sync.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 45,
-      "path": "src/beamer2slides/sync.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 57,
       "path": "src/beamer2slides/sync.py",
       "name": "implicit-any-type-argument",
@@ -93388,20 +93325,6 @@
       "severity": "error"
     },
     {
-      "column": 40,
-      "path": "src/beamer2slides/sync.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 40,
-      "path": "src/beamer2slides/sync.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
       "column": 51,
       "path": "src/beamer2slides/sync.py",
       "name": "implicit-any-type-argument",
@@ -93564,20 +93487,6 @@
     },
     {
       "column": 39,
-      "path": "src/beamer2slides/sync.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 53,
-      "path": "src/beamer2slides/sync.py",
-      "name": "implicit-any-type-argument",
-      "concise_description": "Cannot determine the type parameter `_KT` for generic class `dict[_KT, _VT]`",
-      "severity": "error"
-    },
-    {
-      "column": 53,
       "path": "src/beamer2slides/sync.py",
       "name": "implicit-any-type-argument",
       "concise_description": "Cannot determine the type parameter `_VT` for generic class `dict[_KT, _VT]`",

@@ -9,8 +9,15 @@ import json
 import re
 from collections import Counter
 from difflib import SequenceMatcher
+from typing import Literal
 
 from . import identity, snapshot
+
+# What `plan_merge` decides for a slide (itself, `hold_slide`, `plan_slide`) and for a unit on an updated
+# one (`plan_unit`): the plans are still plain dicts, and these name their `action` words for the
+# readers that are typed (`sync.contained_report`).
+SlideAction = Literal["create", "update", "gone", "keep_removed", "delete"]
+UnitAction = Literal["adopt_object", "create", "none", "delete", "keep", "recreate", "adopt", "move"]
 
 GEOMETRY_TOLERANCE = 0.05  # pt
 SCALE_TOLERANCE = 1e-3
