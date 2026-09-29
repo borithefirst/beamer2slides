@@ -436,6 +436,31 @@ def fold_slides(deck: dict, folds: dict[str, list[dict]]) -> None:
             slide["elements"], _ = fold_composites(slide["elements"], objects)
 
 
+def upgrade_shapes(base: dict, deck: dict) -> None:
+    """In place: a marked shape an adopt base recorded before 688ebf4 (no `flip` or `radius`, its
+    outline a bare colour) in today's form, and hashed again, so an unchanged source is no change.
+    The width the old form left out is taken from our element of the same mark when its outline
+    is the same colour, and from a shape: one object's crop and outline can share a mark (poster's
+    fills). Without this, syncing an unchanged source into china's adopted deck recreated four of
+    the person's freeforms (audit, 2026-09-29)."""
+    if base.get("adopt") is None:
+        return
+    ours = {e["mark"]: e for s in deck.get("slides", ()) for e in s["elements"]
+            if e.get("mark") and e["kind"] == "shape"}
+    for slide in base.get("slides", ()):
+        for e in slide.get("elements", ()):
+            ir = e.get("ir") or {}
+            if e.get("kind") != "shape" or not ir.get("mark") or "flip" in ir:
+                continue
+            new = {**ir, "flip": False, "radius": 0.0}
+            if isinstance(ir.get("outline"), str):
+                mine = (ours.get(ir["mark"]) or {}).get("outline")
+                same = isinstance(mine, dict) and mine.get("color") == ir["outline"]
+                new["outline"] = {"color": ir["outline"], "width": mine["width"] if same else 1.0}
+            h, fields = identity.ir_fields(new, None, e.get("anchor"))
+            e.update(ir=new, ir_hash=h, fields={**e.get("fields", {}), **fields})
+
+
 # ---------------------------------------------------------------- the base
 
 def convert_source(tex: Path, work: Path, engine: str | None = None,

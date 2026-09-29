@@ -573,7 +573,9 @@ def keep_visible_shapes(original: Page, slide: dict, raw_page: dict) -> None:
     slide["elements"] = keep
 
 
-def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path]:
+def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path,
+                       kept_shapes: frozenset = frozenset()) -> list[Path]:
+    """`kept_shapes`: marks `marked.pictured_shapes` leaves shapes (sync over an old adopt base)."""
     from .marked import pictured_shapes
 
     doc = Document(pdf)
@@ -585,7 +587,7 @@ def render_backgrounds(pdf: Path, raw: dict, deck: dict, out: Path) -> list[Path
     paths = []
     for slide in deck["slides"]:
         eraser = Eraser(doc[slide["page"]])
-        pictured_shapes(slide, raw_pages[slide["page"]])
+        pictured_shapes(slide, raw_pages[slide["page"]], kept_shapes)
         texts = [e for e in slide["elements"] if e["kind"] == "text"]
         figures = [e for e in slide["elements"] if e["kind"] == "image"]
 

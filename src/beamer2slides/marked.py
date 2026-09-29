@@ -347,16 +347,21 @@ def drawn_natively(el: dict) -> bool:
     return el["shape"] == "RECTANGLE" and bool(el.get("fill")) and not el.get("picture")
 
 
-def pictured_shapes(slide: dict, raw_page: dict) -> None:
+def pictured_shapes(slide: dict, raw_page: dict, keep: frozenset = frozenset()) -> None:
     """In place: each marked shape emit has no Slides shape for becomes the picture of what its
     mark draws, where it stands in the drawing order (an adopted deck's freeform, uploaded again,
     raised KeyError 'custom' in the .pptx's template shapes). Only a conversion does this
     (`render.render_backgrounds`): compare pairs the read-back's shapes with the deck's, kind for
-    kind, and `adopt_sync.kind_fit` lets a picture stand for a deck's shape."""
+    kind, and `adopt_sync.kind_fit` lets a picture stand for a deck's shape.
+
+    `keep`: marks that stay shapes, those an adopt base written before this recorded as shapes
+    (`shape_marks`). Sync pairs a base's element with ours kind for kind, so the same mark as a
+    picture read as the source removing the person's freeform and adding a picture: an unchanged
+    source deleted four of china's freeforms and stacked pictures on them (audit, 2026-09-29)."""
     drawings = {d["id"]: d for d in raw_page["drawings"]}
     images = {i["id"]: i for i in raw_page["images"]}
     for k, el in enumerate(slide["elements"]):
-        if el["kind"] != "shape" or not el.get("mark") or drawn_natively(el):
+        if el["kind"] != "shape" or not el.get("mark") or drawn_natively(el) or el["mark"] in keep:
             continue
         # (a stroke's ink reaches half its width past its path)
         rects = [Rect.of(d["bbox"]).expand(max(0.5, (d.get("width") or 0.0) / 2))
@@ -365,6 +370,15 @@ def pictured_shapes(slide: dict, raw_page: dict) -> None:
         slide["elements"][k] = {"id": el["id"], "kind": "image", "role": "figure",
                                 "bbox": union_all(rects).as_list() if rects else el["bbox"],
                                 "spans": el.get("spans", []), "mark": el["mark"]}
+
+
+def shape_marks(base: dict) -> frozenset:
+    """The marks a sync base records as shapes: what `pictured_shapes` keeps shapes for that base's
+    deck. Only an adopt base has marks; one written since 688ebf4 has its pictured ones as images."""
+    if base.get("adopt") is None:
+        return frozenset()
+    return frozenset(e["ir"]["mark"] for s in base.get("slides", ()) for e in s.get("elements", ())
+                     if e.get("kind") == "shape" and (e.get("ir") or {}).get("mark"))
 
 
 # ---------------------------------------------------------------------------------------------- tables
@@ -399,7 +413,7 @@ def table_element(g: Group, page: dict, body: float, pid: str) -> dict:
     el = {"id": pid, "kind": "table", "role": "table", "bbox": bbox, "cells": grid,
           "spans": [s["id"] for s in g.items["spans"]], "drawings": [d["id"] for d in g.items["drawings"]],
           "mark": g.mark}
-    if bbox and spans:
+    if bbox:  # (a table of empty cells too: emit reads its columns, KeyError 'columns' - audit)
         el.update(table_grid(g, bbox, rows, cols, cells, spanning, body))
     return el
 
@@ -450,17 +464,20 @@ def table_grid(g: Group, bbox: list[float], rows: int, cols: int, cells: dict, s
         [extent([s for (r, k), ss in single.items() if r == i for s in ss], "y0", "y1") for i in range(rows)], y0, y1)
     sizes = Counter(round(s.size, 1) for ss in cells.values() for s in ss)
     size = sizes.most_common(1)[0][0] if sizes else body
+    def align(ss, lo: float, hi: float) -> str:  # one cell's words between its edges
+        left, right = min(s.rect.x0 for s in ss) - lo, hi - max(s.rect.x1 for s in ss)
+        return "center" if abs(left - right) <= max(1.5, 0.15 * (left + right)) and left > 3 else \
+            "right" if right < left else "left"
+
+    def words(ss, lo: float, hi: float) -> list[float]:  # (no words: a padding in from its edges)
+        a, b = extent(ss, "x0", "x1") or (lo + 0.3 * size, hi - 0.3 * size)
+        return [round(a, 2), round(b, 2)]
     columns = []
     for c in range(cols):
-        mine = [ss for (r, k), ss in single.items() if k == c]
-        ext = extent([s for ss in mine for s in ss], "x0", "x1")
-        votes = Counter()
-        for ss in mine:
-            left, right = min(s.rect.x0 for s in ss) - xs[c], xs[c + 1] - max(s.rect.x1 for s in ss)
-            votes["center" if abs(left - right) <= max(1.5, 0.15 * (left + right)) and left > 3 else
-                  "right" if right < left else "left"] += 1
-        a, b = ext or (xs[c] + 0.3 * size, xs[c + 1] - 0.3 * size)
-        columns.append({"x0": round(a, 2), "x1": round(b, 2), "align": votes.most_common(1)[0][0] if votes else "left"})
+        mine = [ss for (r, k), ss in single.items() if k == c and ss]
+        votes = Counter(align(ss, xs[c], xs[c + 1]) for ss in mine)
+        a, b = words([s for ss in mine for s in ss], xs[c], xs[c + 1])
+        columns.append({"x0": a, "x1": b, "align": votes.most_common(1)[0][0] if votes else "left"})
     baselines = []
     for i in range(rows):
         firsts = [min(s.baseline for s in ss) for (r, k), ss in cells.items() if r == i]
@@ -489,12 +506,18 @@ def table_grid(g: Group, bbox: list[float], rows: int, cols: int, cells: dict, s
                     if dy0 - 1 <= (ys[r] + ys[r + 1]) / 2 <= dy1 + 1:
                         borders.append({"row": r, "col": min(k, cols - 1), "position": "LEFT" if k < cols else "RIGHT",
                                         "color": d["stroke"], "weight": w})
-    merges = [{"row": r, "col": c, "rows": rs, "cols": cs, "align": columns[c]["align"]}
-              for (r, c), (rs, cs) in sorted(spanning.items()) if (rs, cs) != (1, 1)]
+    # A merged cell is aligned by its own words across the columns it spans, as classify's are
+    # (`place_cells`): its first column's alignment wrote a centred spanning head START (audit).
+    spans_of = [((r, c), (rs, cs)) for (r, c), (rs, cs) in sorted(spanning.items()) if (rs, cs) != (1, 1)]
+    merges = [{"row": r, "col": c, "rows": rs, "cols": cs,
+               "align": align(cells[(r, c)], xs[c], xs[min(c + cs, cols)]) if cells.get((r, c)) else columns[c]["align"]}
+              for (r, c), (rs, cs) in spans_of]
     return {"frame": [round(v, 2) for v in (xs[0], ys[0], xs[-1], ys[-1])], "size": size,
             "row_baselines": baselines, "row_heights": heights, "columns": columns,
             "bounds": [round(v, 2) for v in xs], "bands": [[i, round(ys[i], 2), round(ys[i + 1], 2)] for i in range(rows)],
-            "merges": merges, "rules": [], "borders": borders, "fills": fills}
+            "merges": merges, **({"merge_x": [words(cells.get((r, c)), xs[c], xs[min(c + cs, cols)])
+                                              for (r, c), (rs, cs) in spans_of]} if merges else {}),
+            "rules": [], "borders": borders, "fills": fills}
 
 
 BOX_PART = re.compile(r"(-?\d*\.?\d+)\s*(bp|pt)?")

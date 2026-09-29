@@ -235,6 +235,45 @@ def test_an_adopted_table_carries_the_layout_emit_writes_it_by(tmp_path, backend
     assert [r["insertText"]["text"] for r in reqs if "insertText" in r] == ["Name", "Value", "alpha", "42"]
 
 
+def test_a_marked_table_of_empty_cells_and_a_centred_merge_are_laid_out(tmp_path, backend):
+    """A table adopt wrote with no words in it still gets its layout (it raised KeyError 'columns'),
+    and a cell spanning both columns is aligned by its own words, not its first column's: a head
+    centred across the table was written START (audit, 2026-09-29)."""
+    from beamer2slides import emit
+    from beamer2slides.emit_tables import pptx_table, table_requests
+    fonts = emit.FontMapper()
+    empty = element(b"e", b"table", b"0 g 0 0 0 RG 1 w 20 110 m 180 110 l S ", b" /rows 2 /cols 2 /box (20 20 160 40)")
+    table = next(e for e in read_back(tmp_path, empty)["elements"] if e["kind"] == "table")
+    assert table["bounds"][0] == 20 and table["bounds"][-1] == 180 and len(table["columns"]) == 2
+    assert len(pptx_table(table, 1.0, fonts)["heights"]) == 2
+    head = b"/B2Sc <</r 0 /c 0 /rs 1 /cs 2>> BDC %s EMC " % text(60, 116, b"Centred head")
+    words = head + cell(1, 0, text(24, 96, b"alpha")) + cell(1, 1, text(162, 96, b"42"))
+    page = element(b"t", b"table", words, b" /rows 2 /cols 2 /box (20 20 160 40) /xs (0 80 160) /ys (0 20 40)")
+    table = next(e for e in read_back(tmp_path, page)["elements"] if e["kind"] == "table")
+    assert [(m["row"], m["col"], m["cols"], m["align"]) for m in table["merges"]] == [(0, 0, 2, "center")]
+    assert len(table["merge_x"]) == 1 and 55 < table["merge_x"][0][0] < table["merge_x"][0][1] < 145
+    reqs = table_requests(table, "s", "tab", 1.0, fonts, imported=True)
+    head_align = [r["updateParagraphStyle"]["style"]["alignment"] for r in reqs if "updateParagraphStyle" in r
+                  and r["updateParagraphStyle"]["cellLocation"] == {"rowIndex": 0, "columnIndex": 0}]
+    assert head_align and set(head_align) == {"CENTER"}
+
+
+def test_a_shape_an_old_adopt_base_holds_stays_a_shape_for_sync(tmp_path, backend):
+    """Sync pairs the base's elements with ours kind for kind: a freeform an adopt base written
+    before pictured shapes recorded as a shape stays one (`kept_shapes`, `marked.shape_marks`), or
+    an unchanged source deleted the person's freeform for a picture of it (audit, 2026-09-29)."""
+    from beamer2slides import marked, render
+    page = (element(b"f", b"shape", b"1 0 0 rg 70 10 m 110 10 l 90 45 l h f") +
+            element(b"l", b"shape", b"0 0 0 RG 1 w 120 20 m 180 60 l S"))
+    raw = raw_of(tmp_path, [page])
+    deck = classify.classify(raw)
+    base = {"adopt": {}, "slides": [{"elements": [{"kind": "shape", "ir": {"kind": "shape", "mark": "f"}},
+                                                  {"kind": "image", "ir": {"kind": "image", "mark": "l"}}]}]}
+    assert marked.shape_marks(base) == {"f"} and marked.shape_marks({**base, "adopt": None}) == frozenset()
+    render.render_backgrounds(tmp_path / "p.pdf", raw, deck, tmp_path / "out", marked.shape_marks(base))
+    assert {e["mark"]: e["kind"] for e in deck["slides"][0]["elements"] if e.get("mark")} == {"f": "shape", "l": "image"}
+
+
 def test_underlined_words_are_underlined_whatever_their_rules(tmp_path, backend):
     """ulem's rules end under a word inside a span; `\\uline`'s mark cuts the span there and says
     the words are underlined."""

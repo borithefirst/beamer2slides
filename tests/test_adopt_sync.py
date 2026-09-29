@@ -1106,3 +1106,32 @@ def test_the_campaign_sees_the_duplicate_the_unpaired_hold_prevents(tmp_path, mo
                 for f in fuzz_sync.offline_chain(seed, 1, shape="adopt", first_sync=True,
                                                  work=tmp_path / str(seed))["failures"]]
     assert [f["kind"] for f in failures].count("adopt_double") > 0
+
+
+def test_an_adopt_base_older_than_the_shapes_it_records_is_no_source_change():
+    """A marked shape an adopt base recorded before 688ebf4 had no `flip` or `radius` and its
+    outline as a bare colour: the same source read today hashed differently, and an unchanged
+    source recreated four of china's freeforms. `upgrade_shapes` puts the base's shape in today's
+    form (the width from our shape of that mark when the colour agrees, never from the crop an
+    object's outline can share its mark with); a real change still shows."""
+    from beamer2slides import identity
+    ours = {"id": "p1m3", "kind": "shape", "role": "panel", "bbox": [10, 20, 60, 50], "fill": "#ff0000",
+            "outline": {"color": "#00ff00", "width": 2.02}, "shape": "custom", "flip": False, "radius": 0.0,
+            "drawings": ["d1"], "spans": [], "mark": "p80_i12"}
+    old = {k: v for k, v in ours.items() if k not in ("flip", "radius")} | {"outline": "#00ff00"}
+    moved = {**old, "bbox": [12, 20, 62, 50], "mark": "p80_i13"}
+    crop = {"id": "p1m2", "kind": "image", "role": "figure", "bbox": [10, 20, 60, 50], "spans": [], "mark": "p80_i12"}
+    deck = {"slides": [{"elements": [ours, {**ours, "mark": "p80_i13"}, crop]}]}  # (the crop: its twin, poster)
+
+    def entry(ir):
+        h, fields = identity.ir_fields(ir)
+        return {"key": "shape/panel/0", "kind": "shape", "anchor": None, "ir": ir, "ir_hash": h, "fields": fields}
+    base = {"adopt": {"boxes": {}}, "slides": [{"elements": [entry(old), entry(moved)]}]}
+    adopt_sync.upgrade_shapes(base, deck)
+    same, changed = base["slides"][0]["elements"]
+    assert same["ir_hash"] == identity.ir_fields(ours)[0]
+    assert changed["ir"]["outline"] == {"color": "#00ff00", "width": 2.02}
+    assert changed["fields"]["position"] != identity.ir_fields({**ours, "mark": "p80_i13"})[1]["position"]
+    plain = {"slides": [{"elements": [entry(old)]}]}
+    adopt_sync.upgrade_shapes(plain, deck)  # (a convert base has no marks to upgrade)
+    assert plain["slides"][0]["elements"][0]["ir"] is old

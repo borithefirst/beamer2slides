@@ -335,6 +335,7 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
     from .classify import classify
     from .emit import SLIDE_W, DeckPlan, merge_blocks
     from .extract import extract, select_overlays
+    from .marked import shape_marks
     from .notes import prepare
     from .render import render_backgrounds
 
@@ -345,7 +346,7 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
         page["notes"] = prepared.notes.get(page["index"])
     raw = select_overlays(raw, overlays)
     deck = classify(raw)
-    render_backgrounds(prepared.pdf, raw, deck, work)
+    render_backgrounds(prepared.pdf, raw, deck, work, shape_marks(base))
     adopt_sync.fold_slides(deck, (base.get("adopt") or {}).get("boxes") or {})
     (work / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]},
@@ -373,6 +374,7 @@ def build_ours(pdf: Path, work: Path, base: dict, overlays: str = "last",
         ekeys.append(k)
         fps.append(f)
     entries = snapshot.slide_entries(deck, work, keys, ekeys, fps)
+    adopt_sync.upgrade_shapes(base, deck)
     unwritten = mark_emitted(base, entries, deck, pairs, plan.scale, plan.fonts)
     return {"source": pdf, "pdf": prepared.pdf, "out": work, "plan": plan, "deck": deck, "slides": entries,
             "pairs": pairs, "label_moves": moves, "weak_pairs": weak, "near_misses": near,
