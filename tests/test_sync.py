@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from beamer2slides.emit import SLIDE_W
-from beamer2slides import identity, merge, snapshot
+from beamer2slides import identity, merge, refit, snapshot
 from beamer2slides.extract import frame_labels
 from beamer2slides.sync import letterbox_fix, rename
 
@@ -741,6 +741,38 @@ def test_every_takeable_conflict_is_about_what_something_says():
     """The line is drawn once, in `merge.TAKEABLE_FIELDS`, and a field added to a report later has
     to be put on one side of it on purpose."""
     assert set(merge.TAKEABLE_FIELDS).isdisjoint({"removed", "deleted", "part_deleted", "slide", "label"})
+
+
+def test_every_conflict_carries_an_id():
+    """An id is on every conflict, since it is also how one talks about one that cannot be taken.
+    Three kinds were built without one until the report became records (`merge.Conflict` has no
+    conflict without an id): a unit the source changed whose object the deck deleted (`deleted`),
+    one the deck took a part of (`part_deleted`), and a label found on another frame (`label`)."""
+    reworded = text_ir("First point of end, reworded\nSecond point of end", (20, 60, 200, 90), "p2t1")
+    # the deck deleted the object the source rewrote
+    base = three_slides()
+    ours, theirs = triple(base)
+    ours["slides"][2]["elements"][1] = ours_entry("text/body/0", reworded)
+    del theirs["slides"][2]["objects"]["b2s_s002_t1"]
+    (c,) = merge.plan_merge(base, ours, theirs)["report"]["conflicts"]
+    assert c["field"] == "deleted" and c["id"] and "takeable" not in c
+    assert list(c) == ["slide", "element", "id", "field", "base", "ours", "theirs", "resolution"]
+    # the deck deleted a part of it
+    base = three_slides()
+    el = base["slides"][2]["elements"][1]
+    el["objects"].append("b2s_s002_t1_pic")
+    el["readback"]["b2s_s002_t1_pic"] = readback([40, 120, 60, 140], kind="image", image="aaa")
+    ours, theirs = triple(base)
+    ours["slides"][2]["elements"][1] = ours_entry("text/body/0", reworded)
+    del theirs["slides"][2]["objects"]["b2s_s002_t1_pic"]
+    (c,) = merge.plan_merge(base, ours, theirs)["report"]["conflicts"]
+    assert c["field"] == "part_deleted" and c["id"] and c["theirs"] == ["b2s_s002_t1_pic"]
+    # a label on another frame
+    report = merge.empty_report()
+    merge.report_label_moves([{"label": "end", "verdict": "unsure", "ours": 2, "slide": "end", "frame_is": None,
+                               "slide_is": None, "base_title": "End", "ours_title": "Results"}], report, held=True)
+    (c,) = report["conflicts"]
+    assert c["field"] == "label" and c["id"] == merge.conflict_id("end", None, "label", c["base"], c["ours"], None)
 
 
 def test_the_report_shows_three_sides_and_how_to_take_the_source():
@@ -2430,9 +2462,9 @@ def test_refit_jobs_reaches_a_recreated_title_in_its_placeholder():
     created = {"slides": [{"objectId": "SID", "objects": {"TITLE_PH": rb}}]}
     theirs = {"slides": [{"objectId": "SID", "objects": {"TITLE_PH": rb}}]}
     jobs = s.refit_jobs(work, theirs, created)
-    assert jobs == {"SID": [{"key": "slide title: text/title/0", "slide": "title",
-                             "names": {"TITLE_PH": "text/title/0"}, "text": "TITLE_PH", "pictures": [],
-                             "own": {"TITLE_PH"}, "doomed": set(), "theirs": rb}]}
+    assert jobs == {"SID": [refit.RefitJob(key="slide title: text/title/0", slide="title",
+                                           names={"TITLE_PH": "text/title/0"}, text="TITLE_PH", pictures=(),
+                                           own=frozenset({"TITLE_PH"}), doomed=frozenset(), theirs=rb)]}
 
     # A table refilled in place stays excluded: it is not a recreated box either.
     w2 = {**w, "in_place": {0: {"id": "TITLE_PH", "table": True}}}

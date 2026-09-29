@@ -739,7 +739,8 @@ def refresh_pictures(base: JsonObject, ours_slides: Sequence[JsonObject], pairs:
     return refreshed
 
 
-def slide_entries(deck: dict, out: Path, keys: list[str], element_keys: list[list[str]], fingerprints: list[list[dict]]) -> list[dict]:
+def slide_entries(deck: dict, out: Path, keys: Sequence[str], element_keys: Sequence[Sequence[str]],
+                  fingerprints: list[list[dict]]) -> list[dict]:
     """The IR part of base slides (keys, hashes, fingerprints, IR), without objects and read-back."""
     page_key = page_keys(deck, keys)
     entries = []

@@ -38,6 +38,16 @@ converter never made has one only where `adopt` put it, so `--deck` is then the 
 storage), `merge.py` (pure planning and diff3), `sync.py` (requests and the write loop),
 `adopt_sync.py` (the base adopt records and the refusals a sync into such a deck makes).
 
+The planners read typed values. `sync_model.py` holds the records the base and the read-back are
+parsed into where sync reads them (`Base`, `SlideEntry`, `ElementEntry`, `DeckRead`, `SlideRead`,
+`ReadBack`; `SlideKey`, `ElementKey`, `ObjectId` NewTypes), each with a `*_json` writer that gives
+back the same JSON byte for byte (measured on 1,164 bases). `merge.plan_merge_of` plans over them
+and returns a `MergePlan` of records (a slide's `CreateSlide`/`UpdateSlide`/..., a unit's
+`CreateUnit`/`Recreate`/`KeepUnit`/..., `Conflict` with a `ConflictField` Literal); `plan_merge`
+is the dict entry adopt_sync, guard, the oracles and the tests call, giving the same JSON as
+before. `refit.plan` takes `RefitJob`s and returns `Reshape` steps; `text_layout.layout` returns a
+`Layout` of `Line`s and `Hole`s, `overruns` a list of `Overrun`.
+
 ## Identity
 - **Slide key**: the beamer frame label (`\begin{frame}[label=results]` → PDF named destinations
   `results` and `results<n>` per overlay step; hyperref's own destinations have no `<n>` form,
@@ -828,7 +838,8 @@ and its place stay); and a renamed label used to cost the slide its identity out
 what `align_slides.pairable` now allows the content to fix.
 
 ## Reports
-`sync-report.json` (top level: `applied`, `overrides`, `conflicts` with id, field, base, ours, theirs,
+`sync-report.json` (top level: `applied`, `overrides`, `conflicts` with id (every one, a deleted
+object's, a part's and a label's too), field, base, ours, theirs,
 resolution and whether it is `takeable`, `resolved` (what `--take-source` settled, each keeping the
 deck's own version of that spot), `converged`, `user_objects`, `slides_created`, `slides_deleted`,
 `slides_moved`, `slides_kept`, `slides_user_added`, `warnings`, plus pdf, url, attempts, requests per

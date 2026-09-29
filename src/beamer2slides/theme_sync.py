@@ -144,7 +144,8 @@ def moved(a: list | None, b: list | None) -> bool:
 def texts_digest(texts: list[dict]) -> str:
     """What classify's `layout_texts` (the header and footer words every slide shares, which
     `emit.write_layout_texts` puts on every layout) say and look like."""
-    return identity.sha1(json.dumps(identity.normalise_ir(texts), sort_keys=True))[:12]
+    said: list[Json] = [t for t in texts]   # (a list of dicts is no Json list to the checker)
+    return identity.sha1(json.dumps(identity.normalise_ir(said), sort_keys=True))[:12]
 
 
 def texts_says(texts: list[dict]) -> list[str]:
@@ -365,7 +366,7 @@ def plan(base: dict, side: dict, ours: dict, pres: Presentation, tok: str, pictu
                     f"a sync cannot move a live slide to another layout, so it shows its layout's decoration")
 
     def conflict(where: str, element: str | None, field: str, b, o, t) -> None:
-        entry, _ = conflict_entry(None, where, element, field, b, o, t)
+        entry, _ = conflict_entry(None, where, element, field, b, o, t, "deck kept", False)
         out["conflicts"].append(entry)
 
     # ---- the master's background
@@ -525,7 +526,9 @@ def plan_texts(rec: dict, side: dict, ours: dict, pres: Presentation, pending: d
         out["written"][TEXTS_FIELD] = {"digest": digest, "says": says}   # (an interrupted sync wrote them)
         return
     if edits:
-        entry, _ = conflict_entry(None, "layouts", None, TEXTS_FIELD, texts["says"], says, edits)
+        new_says: list[Json] = [s for s in says]
+        edited: list[Json] = [e for e in edits]
+        entry, _ = conflict_entry(None, "layouts", None, TEXTS_FIELD, texts["says"], new_says, edited, "deck kept", False)
         out["conflicts"].append(entry)
         return
     from .emit import LAYOUT_TEXT_PREFIX, text_box_requests

@@ -438,26 +438,20 @@ def build_adopt_base(doc, out: Path, rng: random.Random) -> dict:
 
 
 def build_ours(doc, base, out: Path) -> dict:
-    infos = [slide_info(s) for s in doc["slides"]]
-    base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "",
-                   "page": b["page"], "removed": b.get("removed")}   # `align_slides`: a slide the source dropped
-                  for b in base["slides"]]
-    moves = identity.label_moves(base_infos, infos)
-    for m in moves:
-        m["slide"] = base["slides"][m["base"]]["key"]
-        m["frame_is"] = base["slides"][m["frame_is"]]["key"] if m["frame_is"] is not None else None
-        m["slide_is"] = infos[m["slide_is"]]["title"] if m["slide_is"] is not None else None
+    infos = identity.slide_infos([slide_info(s) for s in doc["slides"]])
+    base_keys = [b["key"] for b in base["slides"]]
+    base_infos = [identity.base_slide_info(b, k) for b, k in zip(base["slides"], base_keys)]
+    found = identity.label_moves_of(base_infos, infos)
+    moves = [identity.reported_move(m, base_keys, infos) for m in found]
     # `weak_pairs` and `near_misses` are what `merge.plan_merge` turns into the two warnings about
     # identity - a pairing the words could as well have made elsewhere, and a frame nothing could
     # pair at all. Leaving them out here made the campaign judge a world where the person is never
     # told that, so a frame the alignment put on a look-alike slide read as a loss in silence when
     # the product would have named the slide and asked for a label (`identity.align_slides`).
     weak: dict[int, str] = {}
-    keys, pairs = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos, moves, weak)
-    near = identity.near_misses(base_infos, infos, pairs)
-    for m in near:
-        m["slide"] = base["slides"][m["base"]]["key"]
-        m["title"] = infos[m["ours"]]["title"]
+    keys, pairs = identity.inherit_slide_keys(base_infos, base_keys, infos, found, weak)
+    near = [identity.reported_near_miss(m, base_keys, infos)
+            for m in identity.near_misses_of(base_infos, infos, pairs)]
     ekeys, fps = [], []
     for j, s in enumerate(doc["slides"]):
         matched = identity.base_items(base["slides"][pairs[j]]["elements"]) if j in pairs else None

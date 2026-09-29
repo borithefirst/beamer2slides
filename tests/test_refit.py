@@ -35,7 +35,7 @@ def shape_rb(box, fill="#dddddd", parent=None, z=1):
 def picture_over(rb, k=0, parent=None, w=30.0, h=20.0):
     """A formula picture where measuring puts it: centred on hole k, its middle on the band's."""
     lay = tl.layout(rb)
-    hb = lay["holes"][k]["box"]
+    hb = lay.holes[k].box
     cx, cy = (hb[0] + hb[2]) / 2, (hb[1] + hb[3]) / 2
     box = [cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2]
     return {"kind": "image", "box": box, "transform": [1.0, 0.0, 0.0, 1.0, box[0], box[1]], "size": [w, h],
@@ -43,7 +43,7 @@ def picture_over(rb, k=0, parent=None, w=30.0, h=20.0):
 
 
 def offset(rb, pic_box, k=0):
-    hb = tl.layout(rb)["holes"][k]["box"]
+    hb = tl.layout(rb).holes[k].box
     return ((pic_box[0] + pic_box[2]) / 2 - (hb[0] + hb[2]) / 2, (pic_box[1] + pic_box[3]) / 2 - (hb[1] + hb[3]) / 2)
 
 
@@ -52,13 +52,13 @@ def stepped(rb, step):
     return {**rb, "transform": m, "box": snapshot.box(m, *rb["size"])}
 
 
-def job(**kw):
-    return {"key": "slide s: text/body/0", "text": "t", "pictures": [], "own": {"t"}, "doomed": set(),
-            "theirs": None, **kw}
+def job(pictures=(), own=("t",), theirs=None, slide=None, names=None):
+    return refit.RefitJob(key="slide s: text/body/0", slide=slide, names=names or {}, text="t",
+                          pictures=tuple(pictures), own=frozenset(own), doomed=frozenset(), theirs=theirs)
 
 
 def apply_all(slide, reshaped):
-    return {**slide, "objects": {oid: stepped(rb, reshaped[oid][0]) if oid in reshaped else rb
+    return {**slide, "objects": {oid: stepped(rb, reshaped[oid].step) if oid in reshaped else rb
                                  for oid, rb in slide["objects"].items()}}
 
 
@@ -76,10 +76,10 @@ def test_a_formula_picture_follows_its_hole_into_the_words_as_merged():
     fin_t = text_rb(MERGED, BOX)
     pre = {"objects": {"t": pre_t, "p": pic}}
     fin = {"objects": {"t": fin_t, "p": pic}}
-    reqs, reshaped, warnings = refit.plan([job(pictures=["p"], own={"t", "p"})], pre, fin, [720, 405])
+    reqs, reshaped, warnings = refit.plan([job(pictures=["p"], own={"t", "p"})], pre, fin, [720, 405], None)
     assert not warnings and list(reshaped) == ["p"] and len(reqs) == 1
     before = offset(fin_t, pic["box"])
-    after = offset(fin_t, stepped(pic, reshaped["p"][0])["box"])
+    after = offset(fin_t, stepped(pic, reshaped["p"].step)["box"])
     assert abs(before[0]) > 80
     assert max(abs(after[0]), abs(after[1])) < 0.5
     t = reqs[0]["updatePageElementTransform"]
@@ -93,8 +93,8 @@ def test_a_picture_follows_onto_the_next_line():
     pic = picture_over(pre_t)
     fin_t = text_rb(long, [10, 100, 700, 170])
     reqs, reshaped, _ = refit.plan([job(pictures=["p"], own={"t", "p"})], {"objects": {"t": pre_t, "p": pic}},
-                                   {"objects": {"t": fin_t, "p": pic}}, [720, 405])
-    moved = stepped(pic, reshaped["p"][0])["box"]
+                                   {"objects": {"t": fin_t, "p": pic}}, [720, 405], None)
+    moved = stepped(pic, reshaped["p"].step)["box"]
     assert moved[1] > pic["box"][1] + 15
     assert max(map(abs, offset(fin_t, moved))) < 0.5
 
@@ -134,12 +134,12 @@ def test_a_groups_child_takes_the_step_in_page_space():
     longer = MERGED[:2] + [(MERGED[2][0] + " And a sentence of the person's, long enough to take the words"
                             " onto a second line of the box.", False)]
     fin["objects"]["t"] = {**text_rb(longer, fin["objects"]["t"]["box"]), "parent_group": "g"}
-    reqs, reshaped, warnings = refit.plan([job(pictures=["p"], own={"t", "p", "g"})], pre, fin, [720, 405])
+    reqs, reshaped, warnings = refit.plan([job(pictures=["p"], own={"t", "p", "g"})], pre, fin, [720, 405], None)
     assert not warnings and set(reshaped) == {"t", "p", "panel"}
     deck = dict(fin["objects"])
     for r in reqs:                                   # what Slides does with each: M . absolute
         oid = r["updatePageElementTransform"]["objectId"]
-        assert close(request_matrix(r), reshaped[oid][0])
+        assert close(request_matrix(r), reshaped[oid].step)
         deck[oid] = stepped(deck[oid], request_matrix(r))
     assert deck["t"]["transform"][3] > 1.05                                  # it did grow
     assert abs(deck["t"]["box"][1] - fin["objects"]["t"]["box"][1]) < 0.01   # about its own top
@@ -159,7 +159,7 @@ def test_in_a_group_the_person_scaled_a_picture_keeps_the_persons_scale():
     pre = {"objects": {"t": pre_t, "p": picture_over(pre_t)}}
     fin = in_group(pre, person, ["t", "p"])
     fin["objects"]["t"] = {**stepped(text_rb(MERGED, BOX), person), "parent_group": "g"}
-    reqs, reshaped, warnings = refit.plan([job(pictures=["p"], own={"t", "p", "g"})], pre, fin, [720, 405])
+    reqs, reshaped, warnings = refit.plan([job(pictures=["p"], own={"t", "p", "g"})], pre, fin, [720, 405], None)
     assert not warnings and list(reshaped) == ["p"] and len(reqs) == 1
     moved = stepped(fin["objects"]["p"], request_matrix(reqs[0]))
     dx = offset(text_rb(MERGED, BOX), pre["objects"]["p"]["box"])[0]       # the hole's move, converter's frame
@@ -174,7 +174,7 @@ def test_in_a_group_the_person_scaled_a_picture_keeps_the_persons_scale():
     assert close(snapshot.compose(person, note["transform"]), moved["transform"], 0.05)
     said = refit.moves([job(pictures=["p"], slide="s", names={"t": "text/body/0", "p": "image/math/0"})],
                        reshaped, pre, fin)                                  # the report's `refit`
-    assert said == [{"slide": "s", "element": "image/math/0", "object": "p", "what": "picture",
+    assert [refit.moved_json(m) for m in said] == [{"slide": "s", "element": "image/math/0", "object": "p", "what": "picture",
                      "shift": note["refit"], "grown": 0.0}]
 
 
@@ -183,7 +183,7 @@ def test_a_hole_the_person_deleted_leaves_its_picture_and_says_so():
     pic = picture_over(pre_t)
     fin_t = text_rb([("The words around the formula went.", False)], BOX)
     reqs, reshaped, warnings = refit.plan([job(pictures=["p"], own={"t", "p"})], {"objects": {"t": pre_t, "p": pic}},
-                                          {"objects": {"t": fin_t, "p": pic}}, [720, 405])
+                                          {"objects": {"t": fin_t, "p": pic}}, [720, 405], None)
     assert not reqs and not reshaped
     assert len(warnings) == 1 and "lost its place" in warnings[0]
 
@@ -195,7 +195,7 @@ def test_what_the_geometry_alone_did_stays_the_persons():
     pic = picture_over(pre_t)
     fin_t = text_rb(SOURCE, [10, 100, 200, 140])
     reqs, reshaped, _ = refit.plan([job(pictures=["p"], own={"t", "p"})], {"objects": {"t": pre_t, "p": pic}},
-                                   {"objects": {"t": fin_t, "p": pic}}, [720, 405])
+                                   {"objects": {"t": fin_t, "p": pic}}, [720, 405], None)
     assert not reqs and not reshaped
 
 
@@ -221,15 +221,15 @@ def test_a_box_and_its_panel_grow_with_the_words_written_into_them():
     the box grows to what emit would have made it, the panel keeps its margin under the words."""
     pre = block(SHORT)
     fin = {"objects": {**pre["objects"], "t": text_rb(LONG, pre["objects"]["t"]["box"])}}
-    reqs, reshaped, warnings = refit.plan([job()], pre, fin, [720, 405])
+    reqs, reshaped, warnings = refit.plan([job()], pre, fin, [720, 405], None)
     assert not warnings and set(reshaped) == {"t", "panel"}
     grown = apply_all(fin, reshaped)["objects"]
     lay = tl.layout(grown["t"])
-    assert len(lay["lines"]) == 2
+    assert len(lay.lines) == 2
     assert abs(grown["t"]["box"][3] - tl.needed_bottom(lay)) < 0.05
     assert grown["t"]["box"][1] == fin["objects"]["t"]["box"][1]          # grown downwards
-    pad = pre["objects"]["panel"]["box"][3] - tl.layout(pre["objects"]["t"])["bottom"]
-    assert abs(grown["panel"]["box"][3] - (lay["bottom"] + pad)) < 0.05
+    pad = pre["objects"]["panel"]["box"][3] - tl.layout(pre["objects"]["t"]).bottom
+    assert abs(grown["panel"]["box"][3] - (lay.bottom + pad)) < 0.05
     assert grown["panel"]["box"][1] == 150.0
 
 
@@ -237,10 +237,10 @@ def test_a_larger_font_grows_them_too():
     pre = block(SHORT)
     rb = text_rb(SHORT, pre["objects"]["t"]["box"], size=30)
     fin = {"objects": {**pre["objects"], "t": rb}}
-    _, reshaped, _ = refit.plan([job()], pre, fin, [720, 405])
+    _, reshaped, _ = refit.plan([job()], pre, fin, [720, 405], None)
     grown = apply_all(fin, reshaped)["objects"]
     assert grown["t"]["box"][3] >= tl.needed_bottom(tl.layout(grown["t"])) - 0.05
-    assert grown["panel"]["box"][3] > tl.layout(grown["t"])["bottom"]
+    assert grown["panel"]["box"][3] > tl.layout(grown["t"]).bottom
 
 
 def test_a_placeholder_titles_own_box_never_grows_but_its_panel_does():
@@ -254,21 +254,21 @@ def test_a_placeholder_titles_own_box_never_grows_but_its_panel_does():
     pre["objects"]["t"] = {**pre["objects"]["t"], "placeholder": "CENTERED_TITLE"}
     fin_t = {**text_rb(SHORT, pre["objects"]["t"]["box"], size=30), "placeholder": "CENTERED_TITLE"}
     fin = {"objects": {**pre["objects"], "t": fin_t}}
-    _, reshaped, warnings = refit.plan([job()], pre, fin, [720, 405])
+    _, reshaped, warnings = refit.plan([job()], pre, fin, [720, 405], None)
     assert "t" not in reshaped
     assert not warnings
     assert "panel" in reshaped
     grown = apply_all(fin, reshaped)["objects"]
     assert grown["t"]["box"] == fin_t["box"]                       # its own box untouched
-    assert grown["panel"]["box"][3] > tl.layout(grown["t"])["bottom"]
+    assert grown["panel"]["box"][3] > tl.layout(grown["t"]).bottom
 
 
 def test_a_panel_stops_short_of_the_words_below_it_and_the_report_says_so():
     pre = block(SHORT, below="Both versions go into the report.")
     fin = {"objects": {**pre["objects"], "t": text_rb(LONG * 2, pre["objects"]["t"]["box"])}}
-    _, reshaped, warnings = refit.plan([job()], pre, fin, [720, 405])
+    _, reshaped, warnings = refit.plan([job()], pre, fin, [720, 405], None)
     grown = apply_all(fin, reshaped)["objects"]
-    ink_top = min(ln["box"][1] for ln in tl.layout(grown["next"])["lines"])
+    ink_top = min(ln.box[1] for ln in tl.layout(grown["next"]).lines)
     assert grown["panel"]["box"][3] <= ink_top - refit.CLEAR + 0.05
     assert len(warnings) == 1 and "'Both versions go into the report.'" in warnings[0]
 
@@ -280,14 +280,14 @@ def test_the_persons_own_overflow_stays_theirs():
     theirs = text_rb(SHORT, pre["objects"]["t"]["box"], size=30)
     fin = {"objects": {**pre["objects"], "t": text_rb(SHORT, pre["objects"]["t"]["box"], size=30)}}
     reqs, reshaped, _ = refit.plan([job(theirs=theirs)], pre, fin, [720, 405],
-                                   before={"objects": {"panel": pre["objects"]["panel"], "old": theirs}})
+                                   {"objects": {"panel": pre["objects"]["panel"], "old": theirs}})
     assert not reqs and not reshaped
 
 
 def test_a_box_is_not_grown_off_the_page():
     rb = text_rb(SHORT, [600, 380, 700, 400])
     fin_rb = text_rb(LONG, [600, 380, 700, 400])
-    _, reshaped, warnings = refit.plan([job()], {"objects": {"t": rb}}, {"objects": {"t": fin_rb}}, [720, 405])
+    _, reshaped, warnings = refit.plan([job()], {"objects": {"t": rb}}, {"objects": {"t": fin_rb}}, [720, 405], None)
     grown = apply_all({"objects": {"t": fin_rb}}, reshaped)["objects"]["t"]
     assert grown["box"][3] <= 405.05
     assert any("the page ends" in w for w in warnings)
@@ -309,7 +309,7 @@ def test_the_base_records_the_step_as_the_converters():
                                         {"key": "image/math/0", "main": "p", "objects": ["p"], "readback": {"p": r_pic}}]}]
     f = snapshot.compose(person, r_pic["transform"])     # where the picture stood after the overrides
     step = [1, 0, 0, 1, 250.0, 25.0]                      # and the refit step on the page
-    out = refit.reshape_base(slides, {"p": (step, f)})
+    out = refit.reshape_base(slides, {"p": refit.Reshape(step=step, before=f)})
     new_pic = out[0]["elements"][1]["readback"]["p"]
     deck = snapshot.compose(step, f)
     assert all(abs(a - b) < 1e-6 for a, b in zip(snapshot.compose(person, new_pic["transform"]), deck))

@@ -73,7 +73,7 @@ from beamer2slides.devtools import loss_oracle
 # the layout model lives in the library now (sync lays out merged text with it); names kept here
 from beamer2slides.text_layout import (  # noqa: F401
     CAP_EM, DESC_EM, INSET_X, INSET_Y, NBSP, SOFT_BREAK, TAB_EM, UNKNOWN_EM, _para, _style_name, advance,
-    char_styles, filled, layout, para_style, para_styles, text_box, upright, wrap)
+    char_styles, filled, layout, layout_at, line_rects, para_style, para_styles, text_box, upright, wrap)
 
 SEVERITIES = ("fail", "note")
 FAIL = ("fail",)
@@ -134,10 +134,10 @@ class View:
             if rb["kind"] == "image":
                 self.parties[oid] = {"kind": "picture", "rects": [list(rb["box"])], "beyond": [False]}
             elif text_box(rb):
-                lay = layout(rb, _size_hint(el, scale))
+                lay = layout_at(rb, _size_hint(el, scale))
                 if lay is None:
                     continue
-                rects = [ln["box"] for ln in lay["lines"] if ln["box"][2] - ln["box"][0] > 0.5]
+                rects = line_rects(lay)
                 self.parties[oid] = {"kind": "text", "rects": rects, "layout": lay,
                                      "beyond": [r[3] > rb["box"][3] + 1.0 for r in rects]}
             elif rb["kind"] == "table" and el is not None and place is not None:
@@ -450,16 +450,16 @@ def hole_offsets(view: View, text_oid: str) -> dict[str, tuple[float, float, flo
     key = view.key(text_oid)
     if not p or not key or p["kind"] != "text":
         return {}
-    holes = p["layout"]["holes"]
+    holes = p["layout"].holes
     pics = [o for o, q in view.parties.items() if q["kind"] == "picture" and view.el.get(o)
             and view.el[o].get("anchor") == key and view.el[o].get("role") == "math"]
     if not pics or not holes:
         return {}
 
     def off(o, hole):
-        b, hb = view.read["objects"][o]["box"], hole["box"]
+        b, hb = view.read["objects"][o]["box"], hole.box
         return ((b[0] + b[2]) / 2 - (hb[0] + hb[2]) / 2, (b[1] + b[3]) / 2 - (hb[1] + hb[3]) / 2,
-                p["layout"]["lines"][hole["line"]]["size"])
+                p["layout"].lines[hole.line].size)
 
     def cost(o, hole):
         dx, dy, z = off(o, hole)
@@ -634,15 +634,13 @@ def ours_from_folder(folder: Path, base: dict) -> dict | None:
     deck = json.loads(path.read_text(encoding="utf-8"))
     plan = DeckPlan({**deck, "slides": [{**s, "elements": merge_blocks(s["elements"])} for s in deck["slides"]]}, SLIDE_W)
     deck = plan.deck
-    infos = [identity.slide_info(s) for s in deck["slides"]]
-    base_infos = [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "",
-                   "page": b["page"], "removed": b.get("removed")} for b in base["slides"]]
-    moves = identity.label_moves(base_infos, infos)
-    for m in moves:
-        m["slide"] = base["slides"][m["base"]]["key"]
-        m["frame_is"] = base["slides"][m["frame_is"]]["key"] if m["frame_is"] is not None else None
+    infos = [identity.slide_info_of(s) for s in deck["slides"]]
+    base_keys = [b["key"] for b in base["slides"]]
+    base_infos = [identity.base_slide_info(b, k) for b, k in zip(base["slides"], base_keys)]
+    found = identity.label_moves_of(base_infos, infos)
+    moves = [identity.reported_move(m, base_keys, infos) for m in found]
     weak: dict[int, str] = {}
-    keys, pairs_ = identity.inherit_slide_keys(base_infos, [b["key"] for b in base["slides"]], infos, moves, weak)
+    keys, pairs_ = identity.inherit_slide_keys(base_infos, base_keys, infos, found, weak)
     ekeys, fps = [], []
     for j, slide in enumerate(deck["slides"]):
         matched = identity.base_items(base["slides"][pairs_[j]]["elements"]) if j in pairs_ else None

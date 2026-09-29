@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
-from . import faults, google_types, identity, merge, snapshot
+from . import faults, google_types, identity, merge, refit, snapshot
 from .deck_pictures import WORKERS as PICTURE_WORKERS, LivePictures
 from .gapi import HttpError, status_of
 from .google_types import DriveFile, Page, PageElement, Presentation, object_id
@@ -377,24 +377,16 @@ def build_ours(pdf: Path, work: Path, base: JsonObject, overlays: str, page_widt
     plan = planned(deck, prepared.pdf, work, page_width)
     originals = contained_originals(deck, [(int(c["page"]), str(c["id"])) for c in plan.contained])
     deck = plan.deck
-    infos = [identity.slide_info(s) for s in deck["slides"]]
+    infos = [identity.slide_info_of(s) for s in deck["slides"]]
     base_slides = as_objects(base["slides"], "base.slides")
     base_keys = [as_str(b["key"], "base slide key") for b in base_slides]
-    base_infos: list[JsonObject] = [
-        {"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "",
-         "page": as_int(b["page"], f"base slide {k}: page"), "removed": b.get("removed")}   # `align_slides`: a slide the source dropped
-        for b, k in zip(base_slides, base_keys)]
-    moves = identity.label_moves(base_infos, infos)
-    for m in moves:  # indices are no use to a reader of the report; the base's keys are
-        m["slide"] = base_keys[m["base"]]
-        m["frame_is"] = base_keys[m["frame_is"]] if m["frame_is"] is not None else None
-        m["slide_is"] = infos[m["slide_is"]]["title"] if m["slide_is"] is not None else None
+    base_infos = [identity.base_slide_info(b, k) for b, k in zip(base_slides, base_keys)]
+    found = identity.label_moves_of(base_infos, infos)
+    moves = [identity.reported_move(m, base_keys, infos) for m in found]
     weak: dict[int, str] = {}
-    keys, pairs = identity.inherit_slide_keys(base_infos, base_keys, infos, moves, weak)
-    near = identity.near_misses(base_infos, infos, pairs)
-    for m in near:  # as with the moves: the report reads better with the base's key than an index
-        m["slide"] = base_keys[m["base"]]
-        m["title"] = infos[m["ours"]]["title"]
+    keys, pairs = identity.inherit_slide_keys(base_infos, base_keys, infos, found, weak)
+    near = [identity.reported_near_miss(m, base_keys, infos)
+            for m in identity.near_misses_of(base_infos, infos, pairs)]
     ekeys, fps = [], []
     for j, slide in enumerate(deck["slides"]):
         matched = identity.base_items(as_objects(base_slides[pairs[j]]["elements"], f"base slide {base_keys[pairs[j]]}: "
@@ -560,7 +552,7 @@ def contained_originals(deck: JsonObject, gone: list[tuple[int, str]]) -> dict[t
 
 
 def base_as_contained(base: JsonObject, entries: list[JsonObject], view: JsonObject, pairs: dict[int, int],
-                      keys: list[str], work: Path, originals: dict[tuple[int, str], JsonObject]
+                      keys: Sequence[str], work: Path, originals: dict[tuple[int, str], JsonObject]
                       ) -> list[tuple[str, str]]:
     """In place: a base element the source has not changed since, which `planned` made a picture of
     this time, recorded as that picture - so the merge keeps what the deck has there.
@@ -2603,15 +2595,15 @@ class Sync:
                 continue
             key, users, kept_objects = todo[s["objectId"]]
             for o in tl.overruns(before[s["objectId"]], s, users | kept_objects, set(self.cleanup_ids)):
-                self.overruns.append({"slide": key, **o})
-                mine, theirs_ = before[s["objectId"]]["objects"][o["object"]], s["objects"][o["other"]]
+                self.overruns.append({"slide": key, **tl.overrun_json(o)})
+                mine, theirs_ = before[s["objectId"]]["objects"][o.object], s["objects"][o.other]
                 self.warnings.append(
-                    f"slide {key}: the source's {say(theirs_)} now runs {o['depth']:.0f} pt over your {say(mine)}, "
+                    f"slide {key}: the source's {say(theirs_)} now runs {o.depth:.0f} pt over your {say(mine)}, "
                     + ("which stays where you put it (sync never moves your own objects): move one of them"
-                       if o["object"] in users else
+                       if o.object in users else
                        "kept as the deck has it for a conflict, so not where the source would put it: move one of them"))
 
-    def refit_jobs(self, work: dict, theirs: dict, created: dict) -> dict[str, list[dict]]:
+    def refit_jobs(self, work: dict, theirs: dict, created: dict) -> dict[str, list[refit.RefitJob]]:
         """Slide id -> the recreated text units whose deck edits `override_requests` wrote over
         them (`refit.plan`'s jobs). Only text boxes the layout model can read (explicit sizes: what
         emit makes); a table refilled in place is not a recreated box. A recreated title goes back
@@ -2622,7 +2614,7 @@ class Sync:
         from . import text_layout as tl
         pre = {s["objectId"]: s for s in created["slides"]}
         before = {s["objectId"]: s for s in theirs["slides"]}
-        jobs: dict[str, list[dict]] = {}
+        jobs: dict[str, list[refit.RefitJob]] = {}
         for w in work["slides"]:
             p = w["plan"]
             s = pre.get(p.get("objectId"))
@@ -2647,11 +2639,11 @@ class Sync:
                 own = {x for m in members for x in w["objects"].get(index[m["key"]], [])} | {main}
                 old_main = (bunits.get(u["key"]) or [{}])[0].get("main")
                 names = {w["new_oid"][index[m["key"]]]: m["key"] for m in members if index[m["key"]] in w["new_oid"]}
-                jobs.setdefault(s["objectId"], []).append({
-                    "key": f"slide {p['key']}: {u['key']}", "slide": p["key"], "names": names,
-                    "text": main, "pictures": pics, "own": own,
-                    "doomed": set(w.get("doomed") or ()),
-                    "theirs": before.get(p["objectId"], {}).get("objects", {}).get(old_main)})
+                jobs.setdefault(s["objectId"], []).append(refit.RefitJob(
+                    key=f"slide {p['key']}: {u['key']}", slide=p["key"], names=names,
+                    text=main, pictures=tuple(pics), own=frozenset(own),
+                    doomed=frozenset(w.get("doomed") or ()),
+                    theirs=before.get(p["objectId"], {}).get("objects", {}).get(old_main)))
         return jobs
 
     def refit(self, work: dict, theirs: dict, created: dict, rev: str) -> str:
@@ -2661,7 +2653,6 @@ class Sync:
         (`self.reshaped`, `refit.reshape_base`), and said in the report (`self.refit_moves`, report
         `refit`): which object moved how far in the converter's frame - the place the person's
         carried geometry then stands on, which the loss oracle holds the sync to."""
-        from . import refit
         self.reshaped = {}
         jobs = self.refit_jobs(work, theirs, created)
         if not jobs:
@@ -2683,7 +2674,7 @@ class Sync:
         if reqs:
             rev = self.send("refit", reqs, rev)
             self.reshaped = reshaped
-            self.refit_moves = moves
+            self.refit_moves = [refit.moved_json(m) for m in moves]
         return rev
 
     def warn_about_folded_hiders(self, work: dict, now: dict) -> None:
@@ -3137,14 +3128,16 @@ class Sync:
             pre = {oid: o for s in theirs["slides"] for oid, o in s.get("objects", {}).items() if oid in pinned}
             post = {oid: o for s in self.created["slides"] for oid, o in s.get("objects", {}).items() if oid in pinned}
             for entry in slides:
-                elements = list(entry.get("elements", []))
+                elements = as_objects(entry.get("elements", []), "elements")
                 for i, el in enumerate(elements):   # (copies: a kept element is the old base's own dict)
-                    rbs = el.get("readback") or {}
+                    rbs = as_object(el.get("readback") or {}, "readback")
                     for oid in pinned & set(rbs):
-                        if oid in pre and oid in post and all(rbs[oid].get(k) == pre[oid].get(k) for k in keys):
-                            rbs = {**rbs, oid: {**rbs[oid], **{k: post[oid][k] for k in keys if k in post[oid]}}}
+                        rb = as_object(rbs[oid], oid)
+                        if oid in pre and oid in post and all(rb.get(k) == pre[oid].get(k) for k in keys):
+                            rbs = {**rbs, oid: {**rb, **{k: post[oid][k] for k in keys if k in post[oid]}}}
                             elements[i] = {**el, "readback": rbs}
-                entry["elements"] = elements
+                kept: list[Json] = [e for e in elements]
+                entry["elements"] = kept
         if self.base.get("theme") and self.theme_side is not None:
             from . import theme_sync
             new["master_background"] = self.master_key()

@@ -45,6 +45,7 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from beamer2slides import adopt_sync, merge, snapshot
+from beamer2slides.json_types import JsonObject, as_object, as_objects
 from beamer2slides.paths import CHECKOUT as ROOT  # live rounds build tests/decks/sync from the checkout
 
 from . import fuzz_world as W
@@ -712,9 +713,11 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
     # What this sync left alone because it is a person's deck and nothing here may write there
     # (`merge.plan_unit`'s unpaired unit, `plan_merge`'s slide no frame accounts for). Counted for
     # the same reason as `refused` below: it is how one sees the campaign's own reach.
-    held = (["element"] * sum(1 for p in mplan["slides"] for u in p.get("units") or []
+    kept = as_objects(as_object(as_object(mplan["report"], "report")["slides"], "report.slides")["kept"], "kept")
+    held = (["element"] * sum(1 for p in as_objects(mplan["slides"], "slides")
+                              for u in as_objects(p.get("units") or [], "units")
                               if u.get("unpaired") or u.get("inherited") or u.get("in_table"))
-            + ["slide"] * sum(1 for k in mplan["report"]["slides"]["kept"] if k["reason"] == ["the deck's own"]))
+            + ["slide"] * sum(1 for k in kept if k["reason"] == ["the deck's own"]))
     # `--backup auto` keeps a .pptx of the deck before sync's first write, so the campaign asks what
     # the other refusals do; the no-way-back one has its own test (tests/test_adopt_sync.py).
     refused = adopt_sync.problems(base, mplan, live, {"drive": {"presentationId": "way-back"}})
@@ -730,7 +733,7 @@ def _sync_step(seed: int, step: int, doc: dict, base: dict, live: dict, tmp: Pat
                           "ours": ours, "next_base": None, "doc": doc2, "work": tmp}}
     tok = f"{step}zz"  # a token per run, like sync's
     after = W.apply_plan(base, ours, live, mplan, tok)
-    report = mplan["report"]
+    report = as_object(mplan["report"], "report")
     findings = (loss_oracle.check(base, live, after, report, ours) + _writable(ours, mplan)
                 + _movable(base, live, mplan) + _stacked(base, live, after, ours, mplan, tok)
                 + _doubled(base, live, after, mplan))
@@ -780,7 +783,7 @@ def _writable_cells(skey: str, ekey: str, ir: dict, current: str, ov: dict) -> l
         for c, (now_cell, want) in enumerate(zip(crow, mrow)):
             if want == now_cell:
                 continue
-            loc = {"rowIndex": r, "columnIndex": c}
+            loc: JsonObject = {"rowIndex": r, "columnIndex": c}
             try:
                 written = _apply_text_requests(
                     now_cell + "\n", merge.text_edit_requests("oid", now_cell + "\n", want + "\n", loc))
@@ -1094,11 +1097,12 @@ def _settled(doc: dict, next_base: dict | None, after: dict, tmp: Path, unsure: 
     again = merge.plan_merge(next_base, W.build_ours(doc, next_base, tmp), after)
     if not merge.has_writes(again, [s["objectId"] for s in after["slides"]]):
         return []
-    busy = [f"{p['key']}: {p['action']}" + (f" {[u['key'] for u in p['units'] if u['action'] != 'keep']}"
+    plans = [(p, as_objects(p.get("units") or [], "units")) for p in as_objects(again["slides"], "slides")]
+    busy = [f"{p['key']}: {p['action']}" + (f" {[u['key'] for u in units if u['action'] != 'keep']}"
                                             if p["action"] == "update" else "")
-            for p in again["slides"]
+            for p, units in plans
             if p["action"] in ("create", "delete") or (p["action"] == "update" and (
-                any(u["action"] in ("create", "recreate", "delete", "move") for u in p["units"])
+                any(u["action"] in ("create", "recreate", "delete", "move") for u in units)
                 or p.get("background") or p.get("notes") is not None))]
     return [loss_oracle.finding("second_sync_writes", "note" if unsure else "report",
                                 "the same source synced again would write: " + ("; ".join(busy) or "another slide order"),

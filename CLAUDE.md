@@ -295,6 +295,10 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   on groups). Element keys pair by text, geometry, a shape's fill (`identity.look`) and a figure
   across diagram/image (`FIGURE_KINDS`). Text merges paragraph by paragraph, unequal counts through
   a line diff3 (`merge.paragraph_merge`); only a paragraph both sides rewrote is a conflict.
+  The planners read typed values: `sync_model.py` records (`Base`, `SlideEntry`, `ElementEntry`,
+  `DeckRead`, `ReadBack`; keys `SlideKey`/`ElementKey`/`ObjectId`), parsed where sync reads them
+  and written back byte for byte; `merge.plan_merge_of` returns a `MergePlan` of records
+  (`plan_merge` the dict entry); `refit.plan` takes `RefitJob`s, `text_layout.layout` a `Layout`.
 - **A base's picture is its bytes, not its name**: every sync renders into `<out>/sync/ours` under
   the same names, so base pictures are found by the hash the base read (`snapshot.BasePictures`
   over `picture_folders(out)`) and held out of the next render's way first (`hold_base_pictures`);

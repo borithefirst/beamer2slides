@@ -61,9 +61,9 @@ class Deck:
         if kind == "text":
             lay = L.layout(drawn)
             ir = {"paragraphs": [{"size": 17.0, "runs": [{"size": 17.0}],
-                                  "lines": [{"x0": ln["box"][0], "x1": ln["box"][2], "baseline": ln["baseline"]}
-                                            for ln in lay["lines"] if ln["para"] == p]}
-                                 for p in sorted({ln["para"] for ln in lay["lines"]})]}
+                                  "lines": [{"x0": ln.box[0], "x1": ln.box[2], "baseline": ln.baseline}
+                                            for ln in lay.lines if ln.para == p]}
+                                 for p in sorted({ln.para for ln in lay.lines})]}
         self.ours.append({"key": key, "kind": kind, "role": role, "anchor": anchor, "ir": ir,
                           "fingerprint": {"bbox": list(drawn["box"])}})
         return rb
@@ -91,11 +91,11 @@ def kinds(findings, severity="fail"):
 
 def test_a_line_that_fits_is_one_line_and_a_long_one_wraps():
     short = L.layout(text_rb("text/body/0", [10, 50, 710, 90], "A short line."))
-    assert len(short["lines"]) == 1
+    assert len(short.lines) == 1
     long = L.layout(text_rb("text/body/0", [10, 50, 310, 90], "A line far too long for a box this narrow, so it wraps"))
-    assert len(long["lines"]) >= 2
-    assert long["lines"][1]["baseline"] > long["lines"][0]["baseline"]
-    assert long["lines"][1]["box"][3] > 90          # and runs out of its box
+    assert len(long.lines) >= 2
+    assert long.lines[1].baseline > long.lines[0].baseline
+    assert long.lines[1].box[3] > 90          # and runs out of its box
 
 
 def test_a_word_before_a_formula_hole_goes_down_with_it_unless_a_zero_width_space_parts_them():
@@ -114,14 +114,14 @@ def test_a_word_before_a_formula_hole_goes_down_with_it_unless_a_zero_width_spac
 def test_each_paragraph_takes_its_own_style_when_the_read_back_can_say_which():
     two = [PARA, {**PARA, "spaceAbove": 10.75}]
     rb = text_rb("text/body/0", [10, 50, 710, 150], "First.\nSecond.", paras=two)
-    spaced = L.layout(rb)["lines"][1]["baseline"]
-    tight = L.layout(text_rb("text/body/0", [10, 50, 710, 150], "First.\nSecond."))["lines"][1]["baseline"]
+    spaced = L.layout(rb).lines[1].baseline
+    tight = L.layout(text_rb("text/body/0", [10, 50, 710, 150], "First.\nSecond.")).lines[1].baseline
     # (the step snaps to whole pixels with its space, emit.pitch_between: within a pixel)
     assert abs(spaced - tight - 10.75) < 0.75
     # three paragraphs, two distinct styles: which one has the space is unknown, so none gets it
     three = L.layout(text_rb("text/body/0", [10, 50, 710, 150], "A.\nB.\nC.", paras=two))
-    assert L.para_styles(text_rb("x/y/0", [0, 0, 1, 1], "A.\nB.\nC.", paras=two), 3)[2]["spaceAbove"] == 0.0
-    assert three["lines"][1]["baseline"] - three["lines"][0]["baseline"] < 21
+    assert L.para_styles(text_rb("x/y/0", [0, 0, 1, 1], "A.\nB.\nC.", paras=two), 3)[2].space_above == 0.0
+    assert three.lines[1].baseline - three.lines[0].baseline < 21
 
 
 # ---------------------------------------------------------------- text_overlap / text_overflow
@@ -207,14 +207,14 @@ def test_the_source_running_over_the_persons_own_note_fails_unless_the_report_sa
 def test_overruns_names_the_persons_object_the_source_now_runs_over():
     from beamer2slides import text_layout
     d, before, after = note_deck()
-    found = text_layout.overruns({"objects": before}, {"objects": after}, {"u1"})
-    assert [(o["object"], o["other"]) for o in found] == [("u1", "n1")] and found[0]["depth"] > 2
+    found = text_layout.overruns({"objects": before}, {"objects": after}, {"u1"}, set())
+    assert [(o.object, o.other) for o in found] == [("u1", "n1")] and found[0].depth > 2
     # already over it before the sync: not this sync's doing; about to be deleted: not there
-    assert text_layout.overruns({"objects": after}, {"objects": after}, {"u1"}) == []
-    assert text_layout.overruns({"objects": before}, {"objects": after}, {"u1"}, skip={"n1"}) == []
+    assert text_layout.overruns({"objects": after}, {"objects": after}, {"u1"}, set()) == []
+    assert text_layout.overruns({"objects": before}, {"objects": after}, {"u1"}, {"n1"}) == []
     # recreated under a new id but over it as far before: found by its title, not new
     was_over = {"t1": after["n1"], "u1": after["u1"]}
-    assert text_layout.overruns({"objects": was_over}, {"objects": after}, {"u1"}) == []
+    assert text_layout.overruns({"objects": was_over}, {"objects": after}, {"u1"}, set()) == []
 
 
 def test_the_sources_picture_grown_over_the_persons_copy_is_an_overrun():
@@ -225,11 +225,11 @@ def test_the_sources_picture_grown_over_the_persons_copy_is_an_overrun():
     pic = lambda box, title=None: {"kind": "image", "box": box, "title": title}
     before = {"f1": pic([150, 90, 400, 240], "b2s:ex/image/figure/0"), "u1": pic([420, 250, 620, 310], "b2s:ex/image/figure/0")}
     after = {"f2": pic([150, 90, 640, 470], "b2s:ex/image/figure/0"), "u1": before["u1"]}
-    found = text_layout.overruns({"objects": before}, {"objects": after}, {"u1"})
-    assert [(o["object"], o["other"]) for o in found] == [("u1", "f2")]
+    found = text_layout.overruns({"objects": before}, {"objects": after}, {"u1"}, set())
+    assert [(o.object, o.other) for o in found] == [("u1", "f2")]
     # a sticker the person put on the figure: over it as deep before as after
     collage = {**before, "u1": pic([300, 200, 380, 230])}
-    assert text_layout.overruns({"objects": collage}, {"objects": {**after, "u1": collage["u1"]}}, {"u1"}) == []
+    assert text_layout.overruns({"objects": collage}, {"objects": {**after, "u1": collage["u1"]}}, {"u1"}, set()) == []
 
 
 def test_an_old_deep_overlap_does_not_hide_the_new_one():
@@ -238,8 +238,8 @@ def test_an_old_deep_overlap_does_not_hide_the_new_one():
     from beamer2slides import text_layout
     d, before, after = note_deck()
     counter = {**text_rb("x", [40.0, 80.0, 260.0, 104.0], "slide 3 of 9 in words"), "title": "b2s:s/counter"}
-    found = text_layout.overruns({"objects": {**before, "c1": counter}}, {"objects": {**after, "c1": counter}}, {"u1"})
-    assert [(o["object"], o["other"]) for o in found] == [("u1", "n1")]
+    found = text_layout.overruns({"objects": {**before, "c1": counter}}, {"objects": {**after, "c1": counter}}, {"u1"}, set())
+    assert [(o.object, o.other) for o in found] == [("u1", "n1")]
 
 
 def test_a_paragraphs_indent_end_narrows_its_lines():
@@ -249,10 +249,10 @@ def test_a_paragraphs_indent_end_narrows_its_lines():
     words = "one two three four five six seven eight nine ten"
     free = text_layout.layout(text_rb("x", [0.0, 0.0, 400.0, 200.0], words))
     held = text_layout.layout(text_rb("x", [0.0, 0.0, 400.0, 200.0], words, paras=[{**PARA, "indentEnd": 300.0}]))
-    assert len(free["lines"]) == 1 and len(held["lines"]) > 1
+    assert len(free.lines) == 1 and len(held.lines) > 1
     end = text_layout.layout(text_rb("x", [0.0, 0.0, 400.0, 200.0], "one",
                                      paras=[{**PARA, "alignment": "END", "indentEnd": 50.0}]))
-    assert abs(end["lines"][0]["box"][2] - (400.0 - text_layout.INSET_X - 50.0)) < 0.01
+    assert abs(end.lines[0].box[2] - (400.0 - text_layout.INSET_X - 50.0)) < 0.01
 
 
 def test_the_persons_own_arrangement_carried_onto_the_sources_move_is_theirs():
@@ -321,7 +321,7 @@ def formula_rb(words_before_hole: str, box=(10.62, 140.8, 709.5, 200.0)):
 
 
 def hole_box(rb):
-    return L.layout(rb)["holes"][0]["box"]
+    return L.layout(rb).holes[0].box
 
 
 def formula_deck():
