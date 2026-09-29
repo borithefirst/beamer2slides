@@ -174,10 +174,9 @@ def test_focus_draws_aimed_edits_on_the_aimed_slides():
     assert on_s2 > len(aimed) * 0.5
     # no aimed edit writes in a title or the frame counter
     assert not [s for s in aimed if "Merging text" == s["args"].get("text") or "Results" == s["args"].get("text")]
-    # the default draw is untouched: the same seed draws the same specs as before focus existed
-    a = [F.random_spec(model, random.Random(9)) for _ in range(1)]
-    b = [F.random_spec(model, random.Random(9), None, None, ()) for _ in range(1)]
-    assert a == b and not any("aim" in (s or {}) for s in a)
+    # the default draw is unaimed: no focus, no aimed edit
+    a = [F.random_spec(model, random.Random(9), None, None, ()) for _ in range(1)]
+    assert not any("aim" in (s or {}) for s in a)
 
 
 def test_hole_aim_types_in_front_of_the_hole():
@@ -236,10 +235,10 @@ def test_reach_sees_each_precondition_it_names():
     base, before, after, report = _step()
     got = R.step_reach(base, before, after, report)
     # (the words typed in front of the hole made that text longer too)
-    assert [w["unit"] for w in got["text_into_relaid"]] == ["text/body/0", "text/body/1"]
-    assert [w["unit"] for w in got["hole_reworded"]] == ["text/body/1"]
+    assert [w.unit for w in got["text_into_relaid"]] == ["text/body/0", "text/body/1"]
+    assert [w.unit for w in got["hole_reworded"]] == ["text/body/1"]
     assert got["moved_vs_reflow"] and got["moved_overlapped"]
-    assert [w["unit"] for w in got["table_grows"]] == ["table/0"]
+    assert [w.unit for w in got["table_grows"]] == ["table/0"]
 
 
 def test_reach_needs_the_persons_side():

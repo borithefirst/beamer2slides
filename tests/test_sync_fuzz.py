@@ -52,22 +52,31 @@ ADOPT_REGRESSIONS = (82, 328, 441, 568, 629)
 
 # ---------------------------------------------------------------- the fuzz itself
 
+def offline_round(seed, source_ops=None, deck_ops=None, work=None, shape="converted"):
+    """`fuzz_sync.offline_round` of a converted deck's sync (not an adopted deck's first)."""
+    return fuzz_sync.offline_round(seed, source_ops, deck_ops, work, shape, False)
+
+
+def offline_chain(seed, chain, ops=None):
+    return fuzz_sync.offline_chain(seed, chain, ops, None, "converted", False)
+
+
 @pytest.mark.parametrize("seed", [*range(ROUNDS), *REGRESSIONS])
 def test_offline_round_loses_nothing(seed):
-    result = fuzz_sync.offline_round(seed)
-    if result["failures"]:
-        small = fuzz_sync.shrink_offline(result)
-        pytest.fail(f"seed {seed} lost something\n{loss_oracle.describe(small['failures'])}\n"
-                    f"  deck:   {'; '.join(small['deck'])}\n  source: {'; '.join(small['source'])}")
+    result = offline_round(seed)
+    if result.failures:
+        small = fuzz_sync.shrink_offline(result, 200, "converted", False)
+        pytest.fail(f"seed {seed} lost something\n{loss_oracle.described(small.failures)}\n"
+                    f"  deck:   {'; '.join(small.deck)}\n  source: {'; '.join(small.source)}")
 
 
 @pytest.mark.parametrize("seed", [*range(ADOPT_ROUNDS), *ADOPT_REGRESSIONS])
 def test_offline_round_on_an_adopt_shaped_deck_loses_nothing(seed):
-    result = fuzz_sync.offline_round(seed, shape="adopt")
-    if result["failures"]:
-        small = fuzz_sync.shrink_offline(result, shape="adopt")
-        pytest.fail(f"adopt seed {seed} lost something\n{loss_oracle.describe(small['failures'])}\n"
-                    f"  deck:   {'; '.join(small['deck'])}\n  source: {'; '.join(small['source'])}")
+    result = offline_round(seed, shape="adopt")
+    if result.failures:
+        small = fuzz_sync.shrink_offline(result, 200, "adopt", False)
+        pytest.fail(f"adopt seed {seed} lost something\n{loss_oracle.described(small.failures)}\n"
+                    f"  deck:   {'; '.join(small.deck)}\n  source: {'; '.join(small.source)}")
 
 
 def test_the_first_sync_world_leaves_the_persons_unpaired_boxes_on_their_slide(tmp_path):
@@ -86,7 +95,7 @@ def test_the_first_sync_world_leaves_the_persons_unpaired_boxes_on_their_slide(t
     rng = random.Random(11)
     doc = W.make("adopt", rng, tmp_path)
     base = W.build_adopt_base(doc, tmp_path, rng)
-    live = {s["objectId"]: s for s in W.live_of(base)["slides"]}
+    live = {s["objectId"]: s for s in W.live_json(W.live_of(base))["slides"]}
     left = [el for s in base["slides"] for el in s["elements"] if el.get("left_object")]
     drawn = [el for s in base["slides"] for el in s["elements"] if el.get("drawn_from")]
     assert left and drawn, "the world draws both kinds of element tied to no object"
@@ -115,20 +124,20 @@ def test_a_broken_label_invariant_sends_far_fewer_slides_to_the_wrong_frame(tmp_
     written from scratch."""
     from beamer2slides.devtools import fuzz_labels
 
-    rounds = [r for seed in range(100) for r in fuzz_labels.round_once(seed, 0.5, tmp_path)]
-    sound = [r for r in rounds if not r["broke"]]
-    broken = [r for r in rounds if r["broke"] and not r["reordered"]]
+    rounds = [r for seed in range(100) for r in fuzz_labels.round_once(seed, 0.5, tmp_path, 1, "converted")]
+    sound = [r for r in rounds if not r.broke]
+    broken = [r for r in rounds if r.broke and not r.reordered]
     assert len(sound) > 30 and len(broken) > 30  # the harness really does break labels, and not always
-    assert [r["said"] for r in sound] == ["quiet"] * len(sound)  # never a word about a sound source
-    assert sum(r["wrong"]["now"] for r in rounds if not r["broke"]) == 0, \
+    assert [r.said for r in sound] == ["quiet"] * len(sound)  # never a word about a sound source
+    assert sum(r.wrong["now"] for r in rounds if not r.broke) == 0, \
         "a source that kept its labels lost a frame's slide anyway"
-    was, now = (sum(r["wrong"][k] for r in broken) for k in ("before", "now"))
+    was, now = (sum(r.wrong[k] for r in broken) for k in ("before", "now"))
     assert now * 5 < was, f"the check is not earning its place: {was} -> {now}"
-    wrong = [r for r in broken if r["wrong"]["now"]]
-    silent = [r for r in wrong if r["said"] == "quiet"]
+    wrong = [r for r in broken if r.wrong["now"]]
+    silent = [r for r in wrong if r.said == "quiet"]
     assert len(silent) <= 1 and len(wrong) <= 2, \
-        f"too much goes wrong unsaid: {[(r['seed'], r['ops']) for r in wrong]}"
-    assert all(r["wrong"]["now"] <= r["wrong"]["before"] for r in rounds)  # never worse than before
+        f"too much goes wrong unsaid: {[(r.seed, r.ops) for r in wrong]}"
+    assert all(r.wrong["now"] <= r.wrong["before"] for r in rounds)  # never worse than before
 
 
 def test_labels_are_the_only_thing_holding_an_adopt_shaped_deck_together(tmp_path):
@@ -148,13 +157,13 @@ def test_labels_are_the_only_thing_holding_an_adopt_shaped_deck_together(tmp_pat
     best identity, it is the only one."""
     from beamer2slides.devtools import fuzz_labels
 
-    rounds = [r for seed in range(150) for r in fuzz_labels.round_once(seed, 0.5, tmp_path, shape="adopt")]
-    sound = [r for r in rounds if not r["broke"]]
-    broken = [r for r in rounds if r["broke"]]
+    rounds = [r for seed in range(150) for r in fuzz_labels.round_once(seed, 0.5, tmp_path, 1, "adopt")]
+    sound = [r for r in rounds if not r.broke]
+    broken = [r for r in rounds if r.broke]
     assert len(sound) > 30 and len(broken) > 30
-    assert sum(r["wrong"]["now"] for r in sound) == 0, "a source that kept its labels lost a frame's slide"
-    assert [r["said"] for r in sound] == ["quiet"] * len(sound)   # and never a word about a sound one
-    order, before, now = (sum(r["wrong"][k] for r in broken) for k in ("order", "before", "now"))
+    assert sum(r.wrong["now"] for r in sound) == 0, "a source that kept its labels lost a frame's slide"
+    assert [r.said for r in sound] == ["quiet"] * len(sound)   # and never a word about a sound one
+    order, before, now = (sum(r.wrong[k] for r in broken) for k in ("order", "before", "now"))
     assert order > 10, "the harness stopped breaking labels, so this proves nothing"
     assert before == order, f"the leftover passes now recover something here ({order} -> {before}): say so"
     assert now * 2 < order, f"the moved-label check is not earning its place: {order} -> {now}"
@@ -171,14 +180,14 @@ def test_a_frame_the_source_moved_across_another_keeps_its_slide(tmp_path):
     when a label was broken in the same round. The 300 seeds here hold that where it matters."""
     from beamer2slides.devtools import fuzz_labels
 
-    rounds = [r for seed in range(300) for r in fuzz_labels.round_once(seed, 0.5, tmp_path)]
-    moved = [r for r in rounds if r["reordered"]]
+    rounds = [r for seed in range(300) for r in fuzz_labels.round_once(seed, 0.5, tmp_path, 1, "converted")]
+    moved = [r for r in rounds if r.reordered]
     assert len(moved) >= 15, "the harness stopped moving frames, so this proves nothing"
-    assert sum(r["wrong"]["order"] for r in moved) > 0, \
+    assert sum(r.wrong["order"] for r in moved) > 0, \
         "the order-keeping pass alone gets these right: the leftovers pass is not earning its place"
-    assert sum(r["wrong"]["now"] for r in moved) == 0, \
-        f"frames lost their slide: {[(r['seed'], r['wrong'], r['ops']) for r in moved if r['wrong']['now']]}"
-    assert all(r["wrong"]["before"] <= r["wrong"]["order"] for r in rounds)  # never worse than the order alone
+    assert sum(r.wrong["now"] for r in moved) == 0, \
+        f"frames lost their slide: {[(r.seed, r.wrong, r.ops) for r in moved if r.wrong['now']]}"
+    assert all(r.wrong["before"] <= r.wrong["order"] for r in rounds)  # never worse than the order alone
 
 
 def test_the_applier_keeps_styling_the_real_sync_would_put_back():
@@ -190,29 +199,36 @@ def test_the_applier_keeps_styling_the_real_sync_would_put_back():
     accused the merge of losing it (offline seed 23599 --shape adopt, chained: the person bolded a
     word, reworded that very sentence themselves two syncs later - which clips the bold to two
     letters inside another word, as Slides does - and the source then reworded it too)."""
+    from dataclasses import replace
+
     from beamer2slides.devtools import fuzz_world
 
+    def rb(text, styles, spans):
+        made = fuzz_world.readback("shape", [0, 0, 100, 40], text=text, image=None, parent=None, title=None, z=0,
+                                   table=None, fill=None)
+        return replace(made, text_styles=tuple(styles), run_spans=tuple(spans))
+
     plain, bold = {"fontFamily": "Lato"}, {"fontFamily": "Lato", "bold": True}
-    base_rb = {"text_styles": [plain]}
-    live = {"text": "policy-theirs colleague source\n", "run_spans": [[11, 13, bold], [13, 30, plain]]}
+    base_rb = rb("", [plain], [])
+    live = rb("policy-theirs colleague source\n", [], [(11, 13, bold), (13, 30, plain)])
     assert not fuzz_world._styling_ends(base_rb, live, "policy-theirs colleague-ours source\n")
     # The other way: the source replaced the word those letters were in, so the styling really ends.
     assert fuzz_world._styling_ends(base_rb, live, "wording colleague source\n")
     # The converter's own styling is not the person's, and never counts as lost.
-    only_ours = {"text": live["text"], "run_spans": [[0, 30, plain]]}
+    only_ours = rb(live.text, [], [(0, 30, plain)])
     assert not fuzz_world._styling_ends(base_rb, only_ours, "wording colleague source\n")
 
 
 def test_the_round_notices_a_base_that_would_not_settle(tmp_path):
     """The settle check with a base broken on purpose: one that has forgotten a slide makes the next
     sync create it again, and the round has to say so."""
-    result = fuzz_sync.offline_round(3, source_ops=["reword"], deck_ops=["add_text_box", "reword"], work=tmp_path)
-    st = result["state"]
-    assert fuzz_sync._settled(st["doc"], st["next_base"], st["after"], tmp_path) == []
-    forgetful = copy.deepcopy(st["next_base"])
+    result = offline_round(3, source_ops=["reword"], deck_ops=["add_text_box", "reword"], work=tmp_path)
+    st = result.state
+    assert fuzz_sync._settled(st.doc, st.next_base, st.after, tmp_path, False) == []
+    forgetful = copy.deepcopy(st.next_base)
     forgetful["slides"] = forgetful["slides"][1:]
-    found = fuzz_sync._settled(st["doc"], forgetful, st["after"], tmp_path)
-    assert [f["kind"] for f in found] == ["second_sync_writes"] and found[0]["severity"] == "report"
+    found = fuzz_sync._settled(st.doc, forgetful, st.after, tmp_path, False)
+    assert [f.kind for f in found] == ["second_sync_writes"] and found[0].severity == "report"
 
 
 def test_the_fuzzer_only_makes_decks_slides_could_hand_back():
@@ -224,62 +240,118 @@ def test_the_fuzzer_only_makes_decks_slides_could_hand_back():
     `fuzz_sync._fresh` gives a drawn id a tail rather than drawing again, so an op still takes
     exactly one number from its rng and a campaign's every other round is unchanged."""
     import random
+
+    from beamer2slides import sync_model
     from beamer2slides.devtools import fuzz_world
 
+    def box(b, text):
+        return fuzz_world.readback("shape", b, text=text, image=None, parent=None, title=None, z=0, table=None,
+                                   fill=None)
+
     def slide(sid, text):
-        return {"objectId": sid, "layoutObjectId": "L", "background": None, "notes": "",
-                "notes_id": f"{sid}_n", "order": [f"{sid}_t"],
-                "objects": {f"{sid}_t": fuzz_world.readback("shape", [0, 0, 100, 40], text=text)}}
+        return fuzz_world.LiveSlide(object_id=sid, layout_object_id="L", background=None, notes="",
+                                    notes_id=f"{sid}_n", order=[f"{sid}_t"],
+                                    objects={f"{sid}_t": box([0, 0, 100, 40], text)})
+
+    def deck(*slides):
+        return fuzz_world.LiveDeck(presentation_id="P", revision_id="r0", page_size=None, layouts=None,
+                                   master_background=None, slides=list(slides))
 
     class Stuck(random.Random):
         """An rng whose every draw is the collision."""
         def randrange(self, start, stop=None, step=1):
             return 790791 % start if stop is None else start
 
-    live = {"slides": [slide("b2s_s000", "the converter's own\n")]}
+    nobody = sync_model.base({"slides": []})
+    live = deck(slide("b2s_s000", "the converter's own\n"))
     for _ in range(3):
-        fuzz_sync.deck_duplicate_slide(Stuck(), {"slides": []}, live)
-        fuzz_sync.deck_add_slide(Stuck(), {"slides": []}, live)
-    ids = [x for s in live["slides"] for x in [s["objectId"], s["notes_id"], *s["objects"]]]
+        fuzz_sync.deck_duplicate_slide(Stuck(), nobody, live)
+        fuzz_sync.deck_add_slide(Stuck(), nobody, live)
+    ids = [x for s in live.slides for x in [s.object_id, s.notes_id, *s.objects]]
     assert len(set(ids)) == len(ids), sorted(ids)
     # ... nor makes a group a child of itself, which is what `_take_place` did while the group's
     # `children` was the very list the op still held: it put the new id wherever the old one stood,
     # its own children among them, and the op said so out loud (`group [a, g] as g`).
-    one = {"slides": [slide("b2s_s000", "a\n")]}
-    one["slides"][0]["objects"]["b2s_s000_u"] = fuzz_world.readback("shape", [0, 50, 100, 90], text="b\n")
-    one["slides"][0]["order"].append("b2s_s000_u")
-    fuzz_sync.deck_group(Stuck(), {"slides": []}, one)
-    gid, rb = next((o, r) for o, r in one["slides"][0]["objects"].items() if r["kind"] == "elementGroup")
-    assert sorted(rb["children"]) == ["b2s_s000_t", "b2s_s000_u"] and gid not in rb["children"]
+    one = deck(slide("b2s_s000", "a\n"))
+    one.slides[0].objects["b2s_s000_u"] = box([0, 50, 100, 90], "b\n")
+    one.slides[0].order.append("b2s_s000_u")
+    fuzz_sync.deck_group(Stuck(), nobody, one)
+    gid, rb = next((o, r) for o, r in one.slides[0].objects.items() if r.kind == "elementGroup")
+    assert sorted(rb.children) == ["b2s_s000_t", "b2s_s000_u"] and gid not in rb.children
     # and the campaign says so out loud rather than blaming the merge for what it did itself
-    live["slides"].append(copy.deepcopy(live["slides"][0]))
+    live.slides.append(fuzz_world.copy_slide(live.slides[0]))
     with pytest.raises(AssertionError, match="two things at once"):
         fuzz_sync._sync_step(3, 0, {}, {"slides": []}, live, Path("."), [], [], False)
 
 
 def test_the_rounds_really_exercise_sync():
     """A guard on the harness: a round that edited nothing would pass the oracle for free."""
-    result = fuzz_sync.offline_round(3, source_ops=["reword", "move_element"],
-                                     deck_ops=["add_text_box", "reword", "add_slide"])
-    report = result["state"]["report"]
+    result = offline_round(3, source_ops=["reword", "move_element"], deck_ops=["add_text_box", "reword", "add_slide"])
+    report = result.state.report
     assert report["applied"] and report["overrides"] and report["user_objects"]
-    assert any("not applicable" not in d for d in result["deck"])
+    assert any("not applicable" not in d for d in result.deck)
 
 
 # ---------------------------------------------------------------- the oracle, on a clean round
 
 @pytest.fixture(scope="module")
 def clean():
-    """A round with a user object, a user slide, a reworded converter text and a moved element."""
-    result = fuzz_sync.offline_round(3, source_ops=["reword", "move_element"],
-                                     deck_ops=["add_text_box", "reword", "add_slide"])
-    assert not result["failures"], loss_oracle.describe(result["failures"])
-    return result["state"]
+    """A round with a user object, a user slide, a reworded converter text and a moved element, as
+    the JSON the oracle's dict entries take."""
+    result = offline_round(3, source_ops=["reword", "move_element"], deck_ops=["add_text_box", "reword", "add_slide"])
+    assert not result.failures, loss_oracle.described(result.failures)
+    st = result.state
+    return {"base": st.base, "before": W.live_json(st.before), "after": W.live_json(st.after), "report": st.report,
+            "ours": st.ours.json}
 
 
 def checked(state, **changed):
     st = {**state, **changed}
-    return loss_oracle.check(st["base"], st["before"], st["after"], st["report"], st["ours"])
+    return O.check(st["base"], st["before"], st["after"], st["report"], st["ours"])
+
+
+def _read_back(rb):
+    """A read-back as a test writes it, with what it leaves out filled in: no transform (nothing to
+    compare), a box at the origin, no style hashes - what a dict reader read as absent."""
+    return {"kind": "shape", "transform": [], "box": [0, 0, 0, 0], "parent_group": None, "text_style_hash": "",
+            "shape_style_hash": "", **rb}
+
+
+def _entry(el):
+    """An element entry as a test writes it (a key, and what the check needs), filled in: its kind is
+    its key's first part."""
+    out = {"kind": el["key"].split("/")[0], "ir_hash": "", "fields": dict.fromkeys(("text", "position", "size",
+                                                                                   "style", "image"), ""), **el}
+    out["fingerprint"] = {"text": "", "bbox": [0, 0, 0, 0], **el.get("fingerprint", {})}
+    if "readback" in el:
+        out["readback"] = {o: _read_back(rb) for o, rb in el["readback"].items()}
+    return out
+
+
+def full(snap):
+    """A base, a read-back or a new conversion as a test writes it, filled in for the parsers the
+    oracle's dict entries read it with (a report or anything else is handed on as it is)."""
+    if not isinstance(snap, dict) or not isinstance(snap.get("slides"), list):
+        return snap
+    slides = []
+    for s in snap["slides"]:
+        s = dict(s)
+        if "elements" in s:
+            s["elements"] = [_entry(e) for e in s["elements"]]
+        if isinstance(s.get("objects"), dict):
+            s["objects"] = {o: _read_back(rb) for o, rb in s["objects"].items()}
+        slides.append(s)
+    return {"pairs": {}, **snap, "slides": slides}
+
+
+class _Oracle:
+    """`loss_oracle`'s dict entries over fixtures as the tests write them (`full`)."""
+    def __getattr__(self, name):
+        fn = getattr(loss_oracle, name)
+        return lambda *args: fn(*(full(a) for a in args))
+
+
+O = _Oracle()
 
 
 def kinds(findings):
@@ -482,11 +554,11 @@ def test_catches_the_notes_of_a_slide_the_person_added_being_dropped():
                                                             "notes": "ask about the budget", "background": {"solid": "#102030"}}]}
     after = copy.deepcopy(before)
     after["slides"][1]["notes"] = ""
-    found = [f["kind"] for f in loss_oracle.user_slide_findings(base, before, after)]
+    found = [f["kind"] for f in O.user_slide_findings(base, before, after)]
     assert set(found) == {"notes_word_lost"} and len(found) == 4  # one per word of the note
     after["slides"][1]["background"] = {"solid": "#ffffff"}
-    assert "background_lost" in [f["kind"] for f in loss_oracle.user_slide_findings(base, before, after)]
-    assert loss_oracle.user_slide_findings(base, before, before) == []
+    assert "background_lost" in [f["kind"] for f in O.user_slide_findings(base, before, after)]
+    assert O.user_slide_findings(base, before, before) == []
 
 
 # ---------------------------------------------------------------- oracle units
@@ -572,8 +644,8 @@ def test_a_carried_move_is_judged_where_the_words_are():
             **{k: v for k, v in live.items() if k != "b"},
             "a": frame([10, 100, 150, 110], "SUBTITLE", snapshot.tag("title", "text/body/1")),
             made: {"box": box, "transform": [2, 0, 0, 2, 80, authors_top], "title": snapshot.tag("title", "text/body/0")}}}]}
-    assert loss_oracle.geometry_findings(base, before, after(100), promised, ours) == []        # 110 - 10
-    wrong = loss_oracle.geometry_findings(base, before, after(100 + dy), promised, ours)      # the frame by the bbox alone
+    assert O.geometry_findings(base, before, after(100), promised, ours) == []        # 110 - 10
+    wrong = O.geometry_findings(base, before, after(100 + dy), promised, ours)      # the frame by the bbox alone
     assert [(f["kind"], f["element"]) for f in wrong] == [("geometry_not_carried", "text/body/0")]
 
     # deletions: the longer line is gone and the authors (a box the person moved) go back into the
@@ -594,14 +666,14 @@ def test_a_carried_move_is_judged_where_the_words_are():
               "title": snapshot.tag("title", "text/body/0")}
         return {"slides": [{"objectId": "s1", "objects": {
             **{k: v for k, v in live.items() if k != made}, "b": ph}}]}
-    assert loss_oracle.geometry_findings(base, before, handed(120 + dy), report, ours) == []   # 110 + 10
-    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, handed(120), report, ours)] \
+    assert O.geometry_findings(base, before, handed(120 + dy), report, ours) == []   # 110 + 10
+    assert [f["kind"] for f in O.geometry_findings(base, before, handed(120), report, ours)] \
         == ["geometry_not_carried"]
     # text/body/1 is gone from the slide: its placeholder carries the authors now
-    assert loss_oracle.report_findings(base, before, handed(120 + dy), report) == []
+    assert O.report_findings(base, before, handed(120 + dy), report) == []
     kept = handed(120 + dy)
     kept["slides"][0]["objects"]["b"]["title"] = snapshot.tag("title", "text/body/1")
-    assert [f["kind"] for f in loss_oracle.report_findings(base, before, kept, report)] == ["reported_remove_not_done"]
+    assert [f["kind"] for f in O.report_findings(base, before, kept, report)] == ["reported_remove_not_done"]
 
 
 def test_catches_a_picture_the_person_chose_being_overwritten():
@@ -614,11 +686,11 @@ def test_catches_a_picture_the_person_chose_being_overwritten():
     before = {"slides": [{"objectId": "s1", "objects": {"o": {"image": mine}}}]}
     after = {"slides": [{"objectId": "s1", "objects": {"o": {"image": theirs}}}]}
     empty = loss_oracle.normalise_report({})
-    assert [f["kind"] for f in loss_oracle.picture_findings(base, before, after, empty)] == ["picture_reverted"]
+    assert [f["kind"] for f in O.picture_findings(base, before, after, empty)] == ["picture_reverted"]
     kept = {"slides": [{"objectId": "s1", "objects": {"o": {"image": mine}}}]}
-    assert loss_oracle.picture_findings(base, before, kept, empty) == []
+    assert O.picture_findings(base, before, kept, empty) == []
     said = loss_oracle.normalise_report({"conflicts": [{"slide": "f1", "element": "image/figure/0", "field": "image"}]})
-    assert loss_oracle.picture_findings(base, before, after, said) == []
+    assert O.picture_findings(base, before, after, said) == []
 
 
 def test_the_placement_is_the_scale_the_base_recorded():
@@ -631,9 +703,9 @@ def test_the_placement_is_the_scale_the_base_recorded():
     title = {"key": "text/title/0", "main": "t", "fingerprint": {"bbox": [10, 5, 200, 20]},
              "readback": {"t": {"box": [10, 11, 698, 54]}}}
     base = {"scale": 1.9844, "slides": [{"key": "f", "elements": [text, title, dict(text, key="text/body/1")]}]}
-    assert loss_oracle.deck_placement(base) == (1.9844, 0.0, 0.0)
+    assert O.deck_placement(base) == (1.9844, 0.0, 0.0)
     del base["scale"]
-    assert loss_oracle.deck_placement(base)[0] > 2.2, "the fit a base without a scale falls back to"
+    assert O.deck_placement(base)[0] > 2.2, "the fit a base without a scale falls back to"
 
 
 def test_catches_an_element_put_back_at_the_converters_box():
@@ -651,33 +723,33 @@ def test_catches_an_element_put_back_at_the_converters_box():
     before = {"slides": [{"objectId": "s1", "objects": {"o": moved}}]}
     after = {"slides": [{"objectId": "s1", "objects": {"o": dict(base["slides"][0]["elements"][0]["readback"]["o"])}}]}
     empty = loss_oracle.normalise_report({})
-    assert loss_oracle.deck_placement(base) == (2.0, 0.0, 0.0)
+    assert O.deck_placement(base) == (2.0, 0.0, 0.0)
     # The source left the element where it was: the base's box is the converter's, plainly a revert.
     still = {"slides": [{"key": "f1", "elements": [{"key": "text/body/0", "fingerprint": {"bbox": [10, 10, 60, 30]}}]}]}
-    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, after, empty, still)] == ["geometry_reverted"]
+    assert [f["kind"] for f in O.geometry_findings(base, before, after, empty, still)] == ["geometry_reverted"]
     # The source moved it to where the person's step lands it on the old box: nothing was reverted.
     there = {"slides": [{"key": "f1", "elements": [{"key": "text/body/0", "fingerprint": {"bbox": [5, 20, 55, 40]}}]}]}
-    assert loss_oracle.geometry_findings(base, before, after, empty, there) == []
+    assert O.geometry_findings(base, before, after, empty, there) == []
     # ... but the person's step still has to be on top of it.
-    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, after, empty, None)] == ["geometry_reverted"]
+    assert [f["kind"] for f in O.geometry_findings(base, before, after, empty, None)] == ["geometry_reverted"]
     # A conflict excuses it - except the one that promises the person's move was carried onto the
     # source's new place (both moved it): that is a promise to keep, not an excuse.
     def said(resolution):
         return loss_oracle.normalise_report({"conflicts": [
             {"slide": "f1", "element": "text/body/0", "field": "geometry", "resolution": resolution}]})
-    assert loss_oracle.geometry_findings(base, before, after, said("deck kept"), still) == []
-    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, after, said(merge.GEOMETRY_CARRIED), None)] \
+    assert O.geometry_findings(base, before, after, said("deck kept"), still) == []
+    assert [f["kind"] for f in O.geometry_findings(base, before, after, said(merge.GEOMETRY_CARRIED), None)] \
         == ["geometry_reverted"]
     # ... and it says where: the person's corner plus the source's move of the IR corner.
     promised = said(merge.GEOMETRY_CARRIED)
-    assert loss_oracle.geometry_findings(base, before, after, promised, there) == []   # (-10, +20) from (30, 0)
-    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, after, promised, still)] \
+    assert O.geometry_findings(base, before, after, promised, there) == []   # (-10, +20) from (30, 0)
+    assert [f["kind"] for f in O.geometry_findings(base, before, after, promised, still)] \
         == ["geometry_not_carried"]
     # the deck's absolute place, which geometry mode `theirs` wrote, is not what was promised either
     pinned = {"slides": [{"objectId": "s1", "objects": {"o": dict(moved)}}]}
-    assert [f["kind"] for f in loss_oracle.geometry_findings(base, before, pinned, promised, there)] \
+    assert [f["kind"] for f in O.geometry_findings(base, before, pinned, promised, there)] \
         == ["geometry_not_carried"]
-    assert loss_oracle.geometry_findings(base, before, pinned, empty, there) == []
+    assert O.geometry_findings(base, before, pinned, empty, there) == []
 
 
 def _refit_round(person, pic_note=None, source_dy=10.0):
@@ -726,7 +798,7 @@ def test_a_picture_refit_moved_is_held_to_what_the_sync_recorded():
     base, before, ours, after = _refit_round([1, 0, 0, 1, 20.0, -20.0])
     t_at = [30.0, 90.0]                                            # (10, 100) + person + source
     right = after(t_at, [420.0 + 154.1, 100.0])
-    kinds = lambda rep, aft: [(f["kind"], f["element"]) for f in loss_oracle.geometry_findings(base, before, aft, rep, ours)]
+    kinds = lambda rep, aft: [(f["kind"], f["element"]) for f in O.geometry_findings(base, before, aft, rep, ours)]
     assert kinds(_carried_report([154.1, 0.0]), right) == []
     assert kinds(_carried_report(), right) == [("geometry_not_carried", "image/math/0")]
     assert kinds(_carried_report([154.1, 0.0]), after(t_at, [420.0 + 134.0, 100.0])) == \
@@ -743,7 +815,7 @@ def test_a_refit_the_last_sync_recorded_is_the_converters_under_the_persons_scal
     base, before, ours, after = _refit_round(person, pic_note=[154.1, 0.0], source_dy=-7.6)
     was_t, was_p = (before["slides"][0]["objects"][o]["box"] for o in ("t", "p"))
     t_at = [was_t[0], was_t[1] - 7.6]
-    kinds = lambda rep, aft: [(f["kind"], f["element"]) for f in loss_oracle.geometry_findings(base, before, aft, rep, ours)]
+    kinds = lambda rep, aft: [(f["kind"], f["element"]) for f in O.geometry_findings(base, before, aft, rep, ours)]
     assert kinds(_carried_report([154.1, 0.0]), after(t_at, [was_p[0], was_p[1] - 7.6])) == []
     assert kinds(_carried_report([184.1, 0.0]), after(t_at, [was_p[0] + 34.5, was_p[1] - 7.6])) == []
     assert kinds(_carried_report([184.1, 0.0]), after(t_at, [was_p[0] + 30.0, was_p[1] - 7.6])) == \
@@ -769,12 +841,12 @@ def test_catches_a_resize_dropped_where_the_source_moved_the_element():
     def after(box):
         return {"slides": [{"objectId": "s1", "objects": {"new": {"box": box, "transform": [1, 0, 0, 1, box[0], box[1]],
                                                                   "title": snapshot.tag("f1", "text/body/0")}}}]}
-    dropped = loss_oracle.geometry_findings(base, before, after([10, 41, 110, 71]), report, ours)
+    dropped = O.geometry_findings(base, before, after([10, 41, 110, 71]), report, ours)
     assert [f["kind"] for f in dropped] == ["geometry_reverted"] and "size" in dropped[0]["detail"]
-    assert loss_oracle.geometry_findings(base, before, after([10, 41, 110, 86]), report, ours) == []
+    assert O.geometry_findings(base, before, after([10, 41, 110, 86]), report, ours) == []
     # the source resized it too: nothing to hold the converter's size against
     grown = {"slides": [{"key": "f1", "elements": [{"key": "text/body/0", "fingerprint": {"bbox": [10, 41, 110, 90]}}]}]}
-    assert loss_oracle.geometry_findings(base, before, after([10, 41, 110, 71]), report, grown) == []
+    assert O.geometry_findings(base, before, after([10, 41, 110, 71]), report, grown) == []
 
 
 def test_catches_styling_put_back_the_way_the_converter_had_it():
@@ -783,15 +855,15 @@ def test_catches_styling_put_back_the_way_the_converter_had_it():
     before = {"slides": [{"objectId": "s1", "objects": {"o": {"text_style_hash": "person"}}}]}
     after = {"slides": [{"objectId": "s1", "objects": {"o": {"text_style_hash": "converter"}}}]}
     empty = loss_oracle.normalise_report({})
-    assert [f["kind"] for f in loss_oracle.style_findings(base, before, after, empty)] == ["style_reverted"]
+    assert [f["kind"] for f in O.style_findings(base, before, after, empty)] == ["style_reverted"]
     kept = {"slides": [{"objectId": "s1", "objects": {"o": {"text_style_hash": "person"}}}]}
-    assert loss_oracle.style_findings(base, before, kept, empty) == []
+    assert O.style_findings(base, before, kept, empty) == []
     # An `overrides` entry claims the deck's styling was kept, so it excuses nothing: only a
     # conflict (the report saying the styling gave way) accounts for the loss.
     claimed = loss_oracle.normalise_report({"overrides": [{"slide": "f1", "element": "text/body/0", "fields": ["text_style"]}]})
-    assert [f["kind"] for f in loss_oracle.style_findings(base, before, after, claimed)] == ["style_reverted"]
+    assert [f["kind"] for f in O.style_findings(base, before, after, claimed)] == ["style_reverted"]
     said = loss_oracle.normalise_report({"conflicts": [{"slide": "f1", "element": "text/body/0", "field": "text_style"}]})
-    assert loss_oracle.style_findings(base, before, after, said) == []
+    assert O.style_findings(base, before, after, said) == []
 
 
 def test_a_reported_swap_does_not_accuse_the_slides_between_it():
@@ -800,9 +872,9 @@ def test_a_reported_swap_does_not_accuse_the_slides_between_it():
     base = {"slides": [{"key": f"k{i}", "objectId": f"s{i}", "elements": []} for i in range(5)]}
     read = lambda order: {"slides": [{"objectId": s, "objects": {}} for s in order]}  # noqa: E731
     before, after = read(["s0", "s1", "s2", "s3", "s4"]), read(["s0", "s3", "s2", "s1", "s4"])
-    assert loss_oracle.order_findings(base, before, after, loss_oracle.normalise_report(
+    assert O.order_findings(base, before, after, loss_oracle.normalise_report(
         {"slides": {"moved": ["k1", "k3"]}})) == []
-    half = loss_oracle.order_findings(base, before, after, loss_oracle.normalise_report({"slides": {"moved": ["k1"]}}))
+    half = O.order_findings(base, before, after, loss_oracle.normalise_report({"slides": {"moved": ["k1"]}}))
     assert [f["kind"] for f in half] == ["slide_moved_unreported"]
 
 
@@ -816,20 +888,22 @@ def test_a_copy_travelling_with_the_slide_it_follows_accuses_nobody():
     # k2 moves up past k1; "u", the person's copy of k2, keeps sitting behind it.
     before, after = read(["s0", "s1", "s2", "u", "s3"]), read(["s0", "s2", "u", "s1", "s3"])
     rep = loss_oracle.normalise_report({"slides": {"moved": ["k2"]}})
-    assert loss_oracle.order_findings(base, before, after, rep) == []
+    assert O.order_findings(base, before, after, rep) == []
     # A copy that went somewhere of its own, behind a slide it never followed, is still caught.
     away = read(["u", "s0", "s1", "s2", "s3"])
-    assert [f["kind"] for f in loss_oracle.order_findings(base, before, away, rep)] == ["user_slide_moved"]
+    assert [f["kind"] for f in O.order_findings(base, before, away, rep)] == ["user_slide_moved"]
 
 
 def test_a_word_the_source_put_in_another_element_is_no_undone_deletion():
-    el, was, now = {"key": "text/body/1", "main": "o"}, {"text": "the author wrote this"}, {"text": "the wrote this"}
-    args = dict(before_words=loss_oracle.words(now["text"]), after_words={"the", "wrote", "this", "author", "retitled"},
-                conflicts=[], ours_el=None)
+    was, now = "the author wrote this", "the wrote this"
+    after_words = {"the", "wrote", "this", "author", "retitled"}
+
+    def findings(after_el_words):
+        return loss_oracle.word_findings("f4", "text/body/1", "o", was, now, loss_oracle.words(now), after_words,
+                                         after_el_words, [], None)
     # 'author' is back on the slide, but in the retitled frame title, not where the person deleted it
-    assert loss_oracle.word_findings("f4", el, was, now, after_el_words={"the", "wrote", "this"}, **args) == []
-    back = loss_oracle.word_findings("f4", el, was, now, after_el_words={"the", "author", "wrote", "this"}, **args)
-    assert [f["kind"] for f in back] == ["deletion_undone"]
+    assert findings({"the", "wrote", "this"}) == []
+    assert [f.kind for f in findings({"the", "author", "wrote", "this"})] == ["deletion_undone"]
 
 
 def _occlusion_world():
@@ -865,20 +939,20 @@ def test_catches_text_hidden_under_a_shape_the_sync_created():
         objects["g"]["children"] = children
         return after
     ours_order = {"slides": [{"key": "f1", "elements": [{"key": "shape/panel/0"}, {"key": "text/body/0"}]}]}
-    found = loss_oracle.occlusion_findings(base, before, synced(["t", new]), ours_order)
+    found = O.occlusion_findings(base, before, synced(["t", new]), ours_order)
     assert [(f["kind"], f["object"], f["element"]) for f in found] == [("text_hidden", "t", "text/body/0")]
     assert "loss" in {f["severity"] for f in found}
-    assert loss_oracle.occlusion_findings(base, before, synced([new, "t"]), ours_order) == []   # the fix
+    assert O.occlusion_findings(base, before, synced([new, "t"]), ours_order) == []   # the fix
     # A text the sync rebuilt as well counts through its element (its new object is not `t`).
     after = synced(["t", new])
     text = f"b2s_{loss_oracle.h6('f1')}_{loss_oracle.h6('text/body/0')}_1zz"
     objs = after["slides"][0]["objects"]
     objs[text] = objs.pop("t")
     objs["g"]["children"] = [text, new]
-    assert [f["object"] for f in loss_oracle.occlusion_findings(base, before, after, ours_order)] == [text]
+    assert [f["object"] for f in O.occlusion_findings(base, before, after, ours_order)] == [text]
     # The new conversion stacking the shape above that text itself: the sync kept the source's order.
     above = {"slides": [{"key": "f1", "elements": [{"key": "text/body/0"}, {"key": "shape/panel/0"}]}]}
-    assert loss_oracle.occlusion_findings(base, before, synced(["t", new]), above) == []
+    assert O.occlusion_findings(base, before, synced(["t", new]), above) == []
 
 
 def test_the_fuzz_world_hands_the_merge_everything_sync_does_about_identity(tmp_path):
@@ -897,7 +971,7 @@ def test_the_fuzz_world_hands_the_merge_everything_sync_does_about_identity(tmp_
     wanted = {k for k in ("pairs", "label_moves", "weak_pairs", "near_misses") if f'"{k}"' in said}
     assert wanted == {"pairs", "label_moves", "weak_pairs", "near_misses"}, "sync stopped saying one"
     doc = W.make("adopt", random.Random(7), tmp_path)
-    ours = W.build_ours(doc, W.build_base(doc, tmp_path), tmp_path)
+    ours = W.build_ours(doc, W.build_base(doc, tmp_path), tmp_path).json
     assert wanted <= set(ours), f"the harness says less than sync does: {wanted - set(ours)}"
 
 
@@ -916,18 +990,18 @@ def test_hidden_text_on_a_slide_the_report_calls_uncertain_is_a_note():
     after["slides"][0]["objects"][new] = {**before["slides"][0]["objects"]["p"], "parent_group": "g"}
     after["slides"][0]["objects"]["g"]["children"] = ["t", new]
     ours = {"slides": [{"key": "f1", "elements": [{"key": "shape/panel/0"}, {"key": "text/body/0"}]}]}
-    assert [f["severity"] for f in loss_oracle.occlusion_findings(base, before, after, ours)] == ["loss"]
+    assert [f["severity"] for f in O.occlusion_findings(base, before, after, ours)] == ["loss"]
 
     # a label the content says is on another frame now: the report carries a conflict per slide
-    moved = {**ours, "label_moves": [{"label": "x", "verdict": "unsure", "slide": "f1", "frame_is": None}]}
-    found = loss_oracle.occlusion_findings(base, before, after, moved)
+    moved = {**ours, "label_moves": [{"label": "x", "verdict": "unsure", "ours": 0, "slide": "f1", "frame_is": None}]}
+    found = O.occlusion_findings(base, before, after, moved)
     assert [f["severity"] for f in found] == ["note"] and "may be the wrong one" in found[0]["detail"]
     # ... and a pairing the words could as well have made next door, for an unlabelled frame
     twins = {**ours, "pairs": {0: 0}, "weak_pairs": {0: "twins"}}
-    assert [f["severity"] for f in loss_oracle.occlusion_findings(base, before, after, twins)] == ["note"]
+    assert [f["severity"] for f in O.occlusion_findings(base, before, after, twins)] == ["note"]
     # the same frame with a label of its own is not what `merge.plan_merge` warns about
     labelled = {"slides": [{**ours["slides"][0], "label": "f1"}], "pairs": {0: 0}, "weak_pairs": {0: "twins"}}
-    assert [f["severity"] for f in loss_oracle.occlusion_findings(base, before, after, labelled)] == ["loss"]
+    assert [f["severity"] for f in O.occlusion_findings(base, before, after, labelled)] == ["loss"]
 
 
 def _folded_world():
@@ -965,7 +1039,7 @@ def test_a_shape_in_a_group_the_person_made_is_a_note_not_a_loss():
     objs[new] = {**objs.pop("p"), "box": [50, 272, 370, 352]}   # the source redrew it taller
     objs["ug"]["children"] = ["mine", new]
     ours = {"slides": [{"key": "f1", "elements": [{"key": "shape/panel/0"}, {"key": "text/body/0"}]}]}
-    found = loss_oracle.occlusion_findings(base, before, after, ours)
+    found = O.occlusion_findings(base, before, after, ours)
     assert [(f["kind"], f["severity"], f["object"]) for f in found] == [("text_hidden", "note", "t")]
     assert "in a group the person made" in found[0]["detail"]
     # ... and the very same panel standing on the page itself is a loss: `restack` could order it.
@@ -973,7 +1047,7 @@ def test_a_shape_in_a_group_the_person_made_is_a_note_not_a_loss():
     page["slides"][0]["order"] = ["g", new]
     page["slides"][0]["objects"][new]["parent_group"] = None
     del page["slides"][0]["objects"]["ug"], page["slides"][0]["objects"]["mine"]
-    assert [f["severity"] for f in loss_oracle.occlusion_findings(base, before, page, ours)] == ["loss"]
+    assert [f["severity"] for f in O.occlusion_findings(base, before, page, ours)] == ["loss"]
 
 
 def test_a_shape_the_source_itself_added_above_the_text_is_no_finding():
@@ -988,9 +1062,9 @@ def test_a_shape_the_source_itself_added_above_the_text_is_no_finding():
     objs[added] = {**objs["p"], "box": [50, 96, 400, 160], "parent_group": None}
     after["slides"][0]["order"].append(added)
     els = [{"key": "shape/panel/0"}, {"key": "text/body/0"}, {"key": "shape/panel/1"}]
-    assert loss_oracle.occlusion_findings(base, before, after, {"slides": [{"key": "f1", "elements": els}]}) == []
+    assert O.occlusion_findings(base, before, after, {"slides": [{"key": "f1", "elements": els}]}) == []
     below = [els[0], els[2], els[1]]   # ... and it is a loss again when the source draws it under
-    found = loss_oracle.occlusion_findings(base, before, after, {"slides": [{"key": "f1", "elements": below}]})
+    found = O.occlusion_findings(base, before, after, {"slides": [{"key": "f1", "elements": below}]})
     assert [(f["kind"], f["object"]) for f in found] == [("text_hidden", "t")]
 
 
@@ -1005,12 +1079,12 @@ def test_text_already_hidden_or_under_something_else_is_no_finding():
     after = copy.deepcopy(covered)
     after["slides"][0]["objects"][new] = {**opaque, "box": [290, 290, 470, 340]}
     after["slides"][0]["order"].append(new)
-    assert loss_oracle.occlusion_findings(base, covered, after) == []
+    assert O.occlusion_findings(base, covered, after, None) == []
     # ... but on the readable slide the same new shape hides the note
     after = copy.deepcopy(before)
     after["slides"][0]["objects"][new] = {**opaque, "box": [290, 290, 470, 340]}
     after["slides"][0]["order"].append(new)
-    assert [f["object"] for f in loss_oracle.occlusion_findings(base, before, after)] == ["u"]
+    assert [f["object"] for f in O.occlusion_findings(base, before, after, None)] == ["u"]
     # a see-through fill, a corner overlap and a shape below it hide nothing
     for rb, where in (({**opaque, "shape_style": {"fill": {"color": "#000000", "alpha": 0.5}}, "box": [290, 290, 470, 340]}, "top"),
                       ({**opaque, "box": [440, 320, 520, 400]}, "top"),
@@ -1019,7 +1093,7 @@ def test_text_already_hidden_or_under_something_else_is_no_finding():
         after["slides"][0]["objects"][new] = rb
         order = after["slides"][0]["order"]
         order.insert(0, new) if where == "bottom" else order.append(new)
-        assert loss_oracle.occlusion_findings(base, before, after) == [], rb
+        assert O.occlusion_findings(base, before, after, None) == [], rb
 
 
 def test_the_offline_fuzz_stacks_a_rebuilt_block_as_sync_does(monkeypatch):
@@ -1029,19 +1103,19 @@ def test_the_offline_fuzz_stacks_a_rebuilt_block_as_sync_does(monkeypatch):
     a block's panel, sync rebuilds it, and the text it kept is under it. With the restack, clean."""
     from beamer2slides.sync import Sync
     ops = dict(source_ops=["resize_element"], deck_ops=["edit_cell"])   # seed 373, as the fuzz shrank it
-    result = fuzz_sync.offline_round(373, **ops)
-    assert not result["failures"], loss_oracle.describe(result["failures"])
-    assert any("resize p0k0" in s for s in result["source"])   # (p<page>k0: a block's panel)
+    result = offline_round(373, **ops)
+    assert not result.failures, loss_oracle.described(result.failures)
+    assert any("resize p0k0" in s for s in result.source)   # (p<page>k0: a block's panel)
     kept = Sync.regroup_requests
 
     def unstacked(*args):
         return [r for r in kept(*args) if "updatePageElementsZOrder" not in r]
     monkeypatch.setattr(Sync, "regroup_requests", staticmethod(unstacked))
-    found = fuzz_sync.offline_round(373, **ops)["failures"]
-    assert [f["kind"] for f in found] == ["text_hidden"], loss_oracle.describe(found)
-    assert "regroup_requests" in found[0]["detail"]
+    found = offline_round(373, **ops).failures
+    assert [f.kind for f in found] == ["text_hidden"], loss_oracle.described(found)
+    assert "regroup_requests" in found[0].detail
     # and over the default rounds too, not only on a seed picked for it
-    assert any(fuzz_sync.offline_round(seed)["failures"] for seed in (156, 250, 263, 290, 349))
+    assert any(offline_round(seed).failures for seed in (156, 250, 263, 290, 349))
 
 
 def test_the_offline_fuzz_orders_the_page_as_sync_does(monkeypatch):
@@ -1055,10 +1129,10 @@ def test_the_offline_fuzz_orders_the_page_as_sync_does(monkeypatch):
     sync made; with it, clean. It reaches what the group rule cannot: an element that stands on the
     page itself, which no `groupObjects` can reorder."""
     from beamer2slides.sync import Sync
-    assert not fuzz_sync.offline_chain(19, 6)["failures"]
+    assert not offline_chain(19, 6).failures
     monkeypatch.setattr(Sync, "restack", lambda self, w, before, now: [])
-    found = fuzz_sync.offline_chain(19, 6)["failures"]
-    assert [f["kind"] for f in found] == ["text_hidden"], loss_oracle.describe(found)
+    found = offline_chain(19, 6).failures
+    assert [f.kind for f in found] == ["text_hidden"], loss_oracle.described(found)
 
 
 def test_the_offline_base_is_what_the_sync_made_not_what_it_left(monkeypatch):
@@ -1070,29 +1144,70 @@ def test_the_offline_base_is_what_the_sync_made_not_what_it_left(monkeypatch):
     and a second move of it was carried twice (converted seed 93863 at chain 4,
     `geometry_not_carried`). Here: the person moves `p5t2`'s box, then the source rewords it twice
     with the deck left alone - the box stays where the person put it."""
-    assert not fuzz_sync.offline_chain(93863, 4)["failures"]
+    assert not offline_chain(93863, 4).failures
 
-    def reword(rng, doc):
+    def reword(rng, doc, ctx):
         el = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == "p5t2")
         el["paragraphs"][0]["runs"][0]["text"] += " again-ours"
         return "reword p5t2"
     monkeypatch.setitem(fuzz_sync.SOURCE_OPS, "pinned", reword)
     monkeypatch.setitem(fuzz_sync.DECK_OPS, "nothing", lambda rng, base, live: None)
-    ops = fuzz_sync.offline_chain(93863, 1)["ops"] + [{"deck": ["nothing"], "source": ["pinned"]}] * 2
-    steps = fuzz_sync.offline_chain(93863, 3, ops)["steps"]
+    ops = [*offline_chain(93863, 1).ops, *[fuzz_sync.Ops(deck=("nothing",), source=("pinned",))] * 2]
+    steps = offline_chain(93863, 3, ops).steps
     moved = [40.0, 140.0, 390.0, 212.0]           # step 0: the person moved it 10, 20 up and left
     for s in steps[1:]:
-        f5 = next(b for b in s["state"]["next_base"]["slides"] if b["key"] == "f5")
+        f5 = next(b for b in s.state.next_base["slides"] if b["key"] == "f5")
         el = next(e for e in f5["elements"] if e["key"] == "text/body/1")
         assert el["readback"][el["main"]]["box"] == [50.0, 160.0, 400.0, 232.0]   # the converter's
-        after = next(a for a in s["state"]["after"]["slides"] if a["objectId"] == f5["objectId"])
-        assert after["objects"][el["main"]]["box"] == moved, f"step {s['step']}"
+        after = next(a for a in s.state.after.slides if a.object_id == f5["objectId"])
+        assert list(after.objects[el["main"]].box) == moved, f"step {s.step}"
 
 
 def test_failures_are_the_severities_that_matter():
-    made = [loss_oracle.finding("x", "note", "unverified"), loss_oracle.finding("y", "loss", "gone")]
-    assert [f["kind"] for f in loss_oracle.failures(made)] == ["y"]
-    assert "gone" in loss_oracle.describe(made)
+    def finding(kind, severity, detail):
+        return loss_oracle.Finding(kind=kind, severity=severity, slide="f1", element=None, object=None, detail=detail)
+    made = [finding("picture_unverified", "note", "unverified"), finding("word_lost", "loss", "gone")]
+    assert [f.kind for f in loss_oracle.failing(made)] == ["word_lost"]
+    assert "gone" in loss_oracle.described(made)
+    # ... and the same over the JSON the archives hold
+    as_json = [loss_oracle.finding_json(f) for f in made]
+    assert [f["kind"] for f in loss_oracle.failures(as_json)] == ["word_lost"]
+    assert loss_oracle.describe(as_json) == loss_oracle.described(made)
+
+
+def test_a_finding_reads_back_as_it_was_written():
+    """`finding_of` reads the kinds `FindingKind` names and nothing else: the two lists are one."""
+    import typing
+    assert set(loss_oracle.KINDS) == set(typing.get_args(loss_oracle.FindingKind))
+    assert len(loss_oracle.KINDS) == len(set(loss_oracle.KINDS))
+    f = loss_oracle.Finding(kind="text_hidden", severity="loss", slide="f1", element="text/body/0", object="t",
+                            detail="under a panel")
+    assert loss_oracle.finding_of(loss_oracle.finding_json(f), "f") == f
+    with pytest.raises(ValueError):
+        loss_oracle.finding_of({**loss_oracle.finding_json(f), "kind": "no_such_kind"}, "f")
+
+
+def test_a_live_round_record_writes_back_the_bytes_it_was_read_from():
+    """round.json is read back by tools/layout_oracle.py and tools/fuzz_reach.py, so `record_json`
+    writes the keys in the order the file has always had: a record read and written back is the same
+    text, with the late cost of a round that died after its steps and without a reuse or a deck."""
+    import json
+
+    step = {"step": 0, "variant": "reword", "edits": [{"kind": "move", "dx": 10}],
+            "findings": [{"kind": "word_lost", "severity": "loss", "slide": "f1", "element": "text/body/0",
+                          "object": "o", "detail": "'raw', typed by the person, is nowhere on the slide any more"}],
+            "cost": {"seconds": 1.5, "phases": {"sync": {"seconds": 1.0}}}, "layout": {"text_overlap:loss": 1},
+            "reach": {"hole": 1}}
+    whole = {"seed": 7, "steps": [step, {"step": 1, "variant": "addbullet", "edits": [], "findings": []}],
+             "edits_mode": "batched", "focus": "layout", "reuse": True, "reuse_ids": {"named": 3, "missing": 0},
+             "deck": "https://docs.google.com/presentation/d/x", "cost": {"seconds": 12.5, "phases": {}},
+             "problems": ["step 0 (reword): gone"]}
+    late = {"seed": 8, "steps": [], "edits_mode": "reread", "focus": None, "reuse": False,
+            "problems": ["crashed: boom"], "cost": {"phases": {"build": {"seconds": 3.0}}}}
+    for record in (whole, late):
+        text = json.dumps(record, indent=1, ensure_ascii=False)
+        back = fuzz_sync.record_json(fuzz_sync.live_record(json.loads(text), "round.json"))
+        assert json.dumps(back, indent=1, ensure_ascii=False) == text
 
 
 # ---------------------------------------------------------------- live campaign (opt-in)
@@ -1103,5 +1218,5 @@ def test_live_fuzz_rounds():
     rounds = int(os.environ.get("B2S_FUZZ_LIVE_ROUNDS", "3"))
     out = Path(os.environ.get("B2S_FUZZ_OUT", ROOT / "out" / "sync-fuzz"))
     bad = fuzz_sync.run_live(rounds, int(os.environ.get("B2S_FUZZ_LIVE_SEED", "0")), 3,
-                             int(os.environ.get("B2S_FUZZ_LIVE_CHAIN", "1")), False, out, False)
-    assert not bad, "\n".join(f"seed {r['seed']} ({r.get('deck')}): " + "; ".join(r["problems"]) for r in bad)
+                             int(os.environ.get("B2S_FUZZ_LIVE_CHAIN", "1")), False, out, False, "batched", None, False)
+    assert not bad, "\n".join(f"seed {r.seed} ({r.deck}): " + "; ".join(r.problems) for r in bad)

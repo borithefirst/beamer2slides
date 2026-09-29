@@ -417,7 +417,12 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   (`merge.plan_unit` -> `move`); only a person's own move of it outranks the source's.
 - Proving nothing is lost: `tools/loss_oracle.py` judges one sync; `tools/fuzz_sync.py offline`
   fuzzes the merge through a reference applier (`fuzz_world.py`), `live` against real decks;
-  `tools/fuzz_labels.py` measures label pairing. Fixed seeds in `tests/test_sync_fuzz.py`.
+  `tools/fuzz_labels.py` measures label pairing. Fixed seeds in `tests/test_sync_fuzz.py`. The
+  fuzzers are typed: `fuzz_sync.offline_chain` returns a `Chain` of `Step`s whose findings are
+  `loss_oracle.Finding` records; source ops take a `SourceContext`; the world is
+  `fuzz_world.LiveDeck`/`WorldOurs`; round.json is a `LiveRecord` (`record_json`/`live_record`).
+  They call sync and adopt_sync internals by name (`Sync.regroups`, `restack`, `adopt_sync.problems`):
+  rename them together.
 - Proving nothing *looks* broken: `devtools/layout_oracle.py` lays text out like emit (exact line
   counts on converter boxes) and fails `text_overlap` / `text_overflow` / `stranded_picture` /
   `off_page` a sync introduced; `tools/layout_oracle.py <archive> [--json]` replays recorded live

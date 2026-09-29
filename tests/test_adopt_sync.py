@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from beamer2slides import adopt, adopt_sync, merge, snapshot, sync as sync_mod
+from beamer2slides import adopt, adopt_sync, merge, snapshot, sync as sync_mod, sync_model
 from beamer2slides.devtools import fuzz_sync, fuzz_world as W, loss_oracle
 
 EMU = 12700
@@ -697,12 +697,22 @@ def world(tmp_path):
     rng = random.Random(7)
     doc = W.make("adopt", rng, tmp_path)
     base = W.build_adopt_base(doc, tmp_path, random.Random(3))
-    live = W.live_of(base)
-    return {"doc": doc, "base": base, "live": live, "out": tmp_path}
+    deck = W.live_of(base)
+    return {"doc": doc, "base": base, "deck": deck, "live": W.live_json(deck), "out": tmp_path}
+
+
+def ours_of(doc, base, out):
+    """The new conversion as the dict entries read it (`fuzz_world.build_ours` carries it typed too)."""
+    return W.build_ours(doc, base, out).json
+
+
+def edit_source(op, seed, doc, out):
+    """One of the campaign's source changes, with nothing the person touched to collide with."""
+    return op(random.Random(seed), doc, fuzz_sync.SourceContext(out=out, touched=()))
 
 
 def plan_of(world, doc=None):
-    ours = W.build_ours(doc or world["doc"], world["base"], world["out"])
+    ours = ours_of(doc or world["doc"], world["base"], world["out"])
     return merge.plan_merge(world["base"], ours, world["live"])
 
 
@@ -714,7 +724,7 @@ def test_a_first_sync_with_no_way_back_is_refused(world):
     Slides file always exports its *current* content, so that file is the only way back - and an
     adopted deck has no earlier conversion to fall back on either."""
     doc = copy.deepcopy(world["doc"])
-    fuzz_sync.src_reword(random.Random(1), doc)
+    edit_source(fuzz_sync.src_reword, 1, doc, world["out"])
     message = refuse(world["base"], plan_of(world, doc), world["live"], {"warnings": ["could not export the deck"]})
     assert message.splitlines()[0] == "refusing to sync into this adopted deck: 1 thing(s) about it cannot be trusted."
     assert "  https://docs.google.com/presentation/d/PERSONS_DECK/edit" in message
@@ -731,7 +741,7 @@ def test_a_first_sync_with_no_way_back_is_refused(world):
 
 def test_backup_none_is_how_one_asks_for_a_sync_with_no_way_back(world):
     doc = copy.deepcopy(world["doc"])
-    fuzz_sync.src_reword(random.Random(1), doc)
+    edit_source(fuzz_sync.src_reword, 1, doc, world["out"])
     found = adopt_sync.problems(world["base"], plan_of(world, doc), world["live"], None, "none")
     assert [p["reason"] for p in found] == []
 
@@ -745,7 +755,7 @@ def test_a_slide_of_the_adopted_deck_no_frame_accounts_for_is_kept(world):
     for generation in (0, 4):
         base = {**copy.deepcopy(world["base"]), "generation": generation}
         doc = copy.deepcopy(world["doc"])
-        fuzz_sync.src_delete_slide(random.Random(5), doc)
+        edit_source(fuzz_sync.src_delete_slide, 5, doc, world["out"])
         mplan = plan_of({**world, "base": base}, doc)
         kept = [k for k in mplan["report"]["slides"]["kept"] if k["reason"] == ["the deck's own"]]
         assert len(kept) == 1 and mplan["report"]["slides"]["deleted"] == []
@@ -770,7 +780,9 @@ def test_a_box_adopt_could_tie_to_nothing_is_not_an_object_the_person_added(worl
     assert [o["objectId"] for o in merge.user_objects(b, read)] == b["left_alone"], \
         "the person's own boxes are on their slide, and no element of the source names one"
     assert merge.slide_touched(b, read) == [], "none of which is a thing they did to it"
-    read["objects"]["theirs"] = W.readback("shape", [10.0, 10.0, 60.0, 30.0])
+    read["objects"]["theirs"] = sync_model.readback_json(W.readback(
+        "shape", [10.0, 10.0, 60.0, 30.0], text=None, image=None, parent=None, title=None, z=0, table=None,
+        fill=None))
     assert merge.slide_touched(b, read) == ["objects added"]
 
 
@@ -780,16 +792,18 @@ def test_a_frame_put_back_finds_the_slide_that_was_kept_for_it(world):
     puts the frame back, the content alone has to pair them. It does: nothing is created beside the
     kept slide, which is the one way this could have gone wrong."""
     gone = copy.deepcopy(world["doc"])
-    fuzz_sync.src_delete_slide(random.Random(5), gone)
+    edit_source(fuzz_sync.src_delete_slide, 5, gone, world["out"])
     ours = W.build_ours(gone, world["base"], world["out"])
-    mplan = merge.plan_merge(world["base"], ours, world["live"])
+    base = sync_model.base(world["base"])
+    plan = merge.plan_merge_of(base, ours.typed, W.deck_read_of(world["deck"]), None, False, merge.Resolutions(()))
+    mplan = merge.merge_plan_json(plan)
     kept = [k["slide"] for k in mplan["report"]["slides"]["kept"] if k["reason"] == ["the deck's own"]]
-    after = W.apply_plan(world["base"], ours, world["live"], mplan, "t1")
-    base2 = W.rebase(world["base"], ours, after, mplan, "t1")
+    after = W.apply_plan(base, ours.json, world["deck"], plan, "t1")
+    base2 = W.rebase(world["base"], ours.json, after, plan, "t1")
     entry = next(s for s in base2["slides"] if s["key"] == kept[0])
     assert entry["label"] is None and entry["removed"] is True
 
-    again = merge.plan_merge(base2, W.build_ours(world["doc"], base2, world["out"]), after)
+    again = merge.plan_merge(base2, ours_of(world["doc"], base2, world["out"]), W.live_json(after.deck))
     assert again["report"]["slides"]["created"] == [] and again["report"]["slides"]["kept"] == []
     assert again["report"]["slides"]["deleted"] == []
 
@@ -798,7 +812,7 @@ def test_the_slide_gate_still_stands_behind_the_merge(world):
     """As with an unpaired element: the merge decides, and the gate is what a plan saying otherwise
     meets on its way to a write (`adopt_sync.problems`, the first sync only)."""
     doc = copy.deepcopy(world["doc"])
-    fuzz_sync.src_delete_slide(random.Random(5), doc)
+    edit_source(fuzz_sync.src_delete_slide, 5, doc, world["out"])
     mplan = plan_of(world, doc)
     p = next(p for p in mplan["slides"] if p["action"] == "keep_removed")
     p["action"] = "delete"
@@ -830,8 +844,8 @@ def test_an_element_tied_to_no_object_of_the_deck_is_kept_and_the_rest_syncs(wor
     freezes that element, not the talk. It used to refuse the whole sync, and over 400 first-sync
     campaign rounds that was 734 of ~2,400 syncs writing nothing at all."""
     base, doc = unpair(world)
-    fuzz_sync.src_reword(random.Random(1), doc)            # ... and the source changes another slide too
-    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    edit_source(fuzz_sync.src_reword, 1, doc, world["out"])            # ... and the source changes another slide too
+    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
     held = [(p["key"], u) for p in mplan["slides"] for u in p.get("units") or [] if u.get("unpaired")]
     assert len(held) == 1 and held[0][1]["action"] == "keep"
     c = next(c for c in mplan["report"]["conflicts"] if c["field"] == "unpaired")
@@ -852,8 +866,8 @@ def test_an_element_the_decks_layout_draws_is_named_for_what_it_is(world):
     base, doc = unpair(world)
     el = next(e for s in base["slides"] for e in s["elements"] if not e["objects"])
     el["from_layout"] = True
-    fuzz_sync.src_reword(random.Random(1), doc)            # ... and the source changes another slide too
-    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    edit_source(fuzz_sync.src_reword, 1, doc, world["out"])            # ... and the source changes another slide too
+    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
     held = [(p["key"], u) for p in mplan["slides"] for u in p.get("units") or [] if u.get("inherited")]
     assert len(held) == 1 and held[0][1]["action"] == "keep"
     assert not any(u.get("unpaired") for p in mplan["slides"] for u in p.get("units") or [])
@@ -875,8 +889,8 @@ def test_a_cell_of_a_table_of_the_decks_is_named_for_what_it_is(world):
     base, doc = unpair(world)
     el = next(e for s in base["slides"] for e in s["elements"] if not e["objects"])
     el["in_table"] = True
-    fuzz_sync.src_reword(random.Random(1), doc)            # ... and the source changes another slide too
-    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    edit_source(fuzz_sync.src_reword, 1, doc, world["out"])            # ... and the source changes another slide too
+    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
     held = [(p["key"], u) for p in mplan["slides"] for u in p.get("units") or [] if u.get("in_table")]
     assert len(held) == 1 and held[0][1]["action"] == "keep"
     assert not any(u.get("unpaired") or u.get("inherited") for p in mplan["slides"] for u in p.get("units") or [])
@@ -920,7 +934,7 @@ def test_a_picture_drawn_out_of_this_units_own_box_does_not_freeze_it(world):
     assert icon is not None, "the world draws an adopted deck with an icon read out of a text box"
     ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == words["ir"]["id"])
     ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
-    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
     unit = next(u for p in mplan["slides"] for u in p.get("units") or [] if u["key"] == words["key"])
     assert unit["action"] == "recreate", "the person's box takes the source's new words"
     assert not unit.get("unpaired") and not any(c["field"] == "unpaired"
@@ -938,7 +952,7 @@ def test_a_picture_drawn_out_of_another_units_box_still_freezes_this_one(world):
     icon["drawn_from"] = "a box of another unit"
     ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == words["ir"]["id"])
     ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
-    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
     unit = next(u for p in mplan["slides"] for u in p.get("units") or [] if u["key"] == words["key"])
     assert unit["action"] == "keep" and unit["unpaired"] == [icon["key"]]
 
@@ -963,7 +977,7 @@ def test_the_gate_reads_the_unit_the_merge_planned_and_not_a_map_of_keys(world):
     slide["elements"].append(stale)                 # the kept one, under the key the source took
     ir = next(e for s in doc["slides"] for e in s["elements"] if e["id"] == words["ir"]["id"])
     ir["paragraphs"][0]["runs"] = [W.run("the source says something else now")]
-    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
     unit = next(u for p in mplan["slides"] for u in p.get("units") or [] if u["key"] == words["key"])
     assert unit["action"] == "recreate" and not unit.get("unpaired")
     assert adopt_sync.problems(base, mplan, world["live"], KEPT) == [], \
@@ -974,7 +988,7 @@ def test_the_gate_still_stands_behind_the_merge(world):
     """`merge.plan_unit` decides it, `adopt_sync.problems` is the last thing between a plan and a
     write into somebody's deck - for a plan that says recreate anyway, however it came to."""
     base, doc = unpair(world)
-    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
     u = next(u for p in mplan["slides"] for u in p.get("units") or [] if u.get("unpaired"))
     u["action"] = "recreate"
     message = refuse(base, mplan, world["live"], KEPT)
@@ -1013,7 +1027,7 @@ def test_a_wider_deck_is_not_refused_anymore(world):
     assert adopt_sync.deck_width(base) == 1440.0
     assert adopt_sync.aspect_mismatch(base) is None, "1440 x 810 is the page the source compiles to, doubled"
     doc = copy.deepcopy(world["doc"])
-    fuzz_sync.src_add_element(random.Random(2), doc)
+    edit_source(fuzz_sync.src_add_element, 2, doc, world["out"])
     found = adopt_sync.problems(base, plan_of({**world, "base": base}, doc), world["live"], KEPT)
     assert [p["reason"] for p in found] == []
 
@@ -1025,7 +1039,7 @@ def test_a_deck_of_another_shape_than_the_source_compiles_to_is_refused(world):
     base = copy.deepcopy(world["base"])
     base["deck_page_size"] = [1440.0, 900.0]
     doc = copy.deepcopy(world["doc"])
-    fuzz_sync.src_add_element(random.Random(2), doc)
+    edit_source(fuzz_sync.src_add_element, 2, doc, world["out"])
     message = refuse(base, plan_of({**world, "base": base}, doc), world["live"], KEPT)
     assert ("  - the deck's slides are 1.600 wide for every 1 high and the page the source compiles to is 1.778,"
             in message)
@@ -1039,7 +1053,7 @@ def test_the_page_shape_refusal_outlives_the_first_sync(world):
     The shape of its page is not: it is the same on the fourth sync as on the first."""
     base = {**copy.deepcopy(world["base"]), "generation": 4, "deck_page_size": [1440.0, 900.0]}
     doc = copy.deepcopy(world["doc"])
-    fuzz_sync.src_add_element(random.Random(2), doc)
+    edit_source(fuzz_sync.src_add_element, 2, doc, world["out"])
     reasons = [p["reason"] for p in adopt_sync.problems(base, plan_of({**world, "base": base}, doc),
                                                         world["live"], None, "none")]
     assert reasons == ["page-shape"]
@@ -1051,7 +1065,7 @@ def test_an_unpaired_element_is_held_at_every_generation(world):
     campaign found this at chain depth 2, where the base rebased after the first sync let the
     second one duplicate the person's box (`fuzz_sync._doubled`)."""
     base, doc = unpair(world, generation=4)
-    mplan = merge.plan_merge(base, W.build_ours(doc, base, world["out"]), world["live"])
+    mplan = merge.plan_merge(base, ours_of(doc, base, world["out"]), world["live"])
     assert [u["action"] for p in mplan["slides"] for u in p.get("units") or [] if u.get("unpaired")] == ["keep"]
     assert adopt_sync.problems(base, mplan, world["live"], None, "none") == []
 
@@ -1065,15 +1079,15 @@ def test_a_sync_that_writes_nothing_is_never_refused(world):
 def test_a_converted_deck_is_not_asked_any_of_this(world, tmp_path):
     """Every object of a converted deck is one this converter made, under an id it chose."""
     base = W.build_base(world["doc"], tmp_path)
-    ours = W.build_ours(world["doc"], base, tmp_path)
-    live = W.live_of(base)
+    ours = ours_of(world["doc"], base, tmp_path)
+    live = W.live_json(W.live_of(base))
     assert adopt_sync.problems(base, merge.plan_merge(base, ours, live), live, None, "auto") == []
 
 
 # ---------------------------------------------------------------- the round trip
 
-def round_trip(seed: int, chain: int = 1) -> dict:
-    return fuzz_sync.offline_chain(seed, chain, shape="adopt", first_sync=True)
+def round_trip(seed: int, chain: int, work: Path) -> fuzz_sync.Chain:
+    return fuzz_sync.offline_chain(seed, chain, None, work, "adopt", True)
 
 
 @pytest.mark.parametrize("seed", [0, 3, 11, 29, 57, 104, 211, 333])
@@ -1081,14 +1095,14 @@ def test_the_first_sync_after_an_adopt_loses_nothing(seed, tmp_path):
     """Adopt a deck, change the source, let a person edit the deck, sync: whatever the merge wrote,
     nothing the person put there is gone without the report accounting for it (`loss_oracle`), and
     nothing was written beside an object the base could not pair (`fuzz_sync._doubled`)."""
-    result = fuzz_sync.offline_chain(seed, 1, shape="adopt", first_sync=True, work=tmp_path / str(seed))
-    assert loss_oracle.describe(result["failures"]) == ""
+    result = round_trip(seed, 1, tmp_path / str(seed))
+    assert loss_oracle.described(result.failures) == ""
 
 
 @pytest.mark.parametrize("seed", [1, 8, 42, 77])
 def test_a_chain_of_syncs_after_an_adopt_loses_nothing(seed, tmp_path):
-    result = fuzz_sync.offline_chain(seed, 4, shape="adopt", first_sync=True, work=tmp_path / str(seed))
-    assert loss_oracle.describe(result["failures"]) == ""
+    result = round_trip(seed, 4, tmp_path / str(seed))
+    assert loss_oracle.described(result.failures) == ""
 
 
 def test_the_campaign_sees_the_duplicate_the_unpaired_hold_prevents(tmp_path, monkeypatch):
@@ -1103,9 +1117,8 @@ def test_the_campaign_sees_the_duplicate_the_unpaired_hold_prevents(tmp_path, mo
                         lambda *a, **kw: [p for p in real(*a, **kw) if p["reason"] != "unpaired"])
     monkeypatch.setattr(fuzz_sync.adopt_sync, "problems", adopt_sync.problems)
     failures = [f for seed in range(40)
-                for f in fuzz_sync.offline_chain(seed, 1, shape="adopt", first_sync=True,
-                                                 work=tmp_path / str(seed))["failures"]]
-    assert [f["kind"] for f in failures].count("adopt_double") > 0
+                for f in round_trip(seed, 1, tmp_path / str(seed)).failures]
+    assert [f.kind for f in failures].count("adopt_double") > 0
 
 
 def test_an_adopt_base_older_than_the_shapes_it_records_is_no_source_change():

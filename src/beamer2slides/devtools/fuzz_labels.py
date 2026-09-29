@@ -58,12 +58,17 @@ import random
 import shutil
 import tempfile
 from collections import Counter
+from collections.abc import Generator, Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from beamer2slides import identity
+from beamer2slides.identity import SlideInfo, WeakHow
+from beamer2slides.json_types import JsonObject, as_int
 
 from . import fuzz_world as W
-from .fuzz_sync import SOURCE_OPS
+from .fuzz_sync import SOURCE_OPS, SourceContext, set_title
 
 LABEL_OPS = ["move_label", "rename_label", "drop_label"]
 # `collide` needs a deck to collide with, and there is none here; `edit_cell` was added to the sync
@@ -72,14 +77,46 @@ LABEL_OPS = ["move_label", "rename_label", "drop_label"]
 # every number ever measured with it.
 PLAIN_OPS = sorted(set(SOURCE_OPS) - set(LABEL_OPS) - {"collide", "edit_cell"})
 
+Said = Literal["moved", "unsure", "quiet"]
+"""What the moved-label check said of a step: a verdict, a doubt (the slide is held back), or nothing."""
+Pairing = Literal["order", "before", "now"]
+Pairs = dict[int, int]   # ours index -> base index
 
-def _infos(base):
-    return [{"label": b.get("label"), "title": b.get("title") or "", "text": b.get("text") or "", "page": b["page"]}
-            for b in base["slides"]]
+
+@dataclass(frozen=True, kw_only=True)
+class LabelStep:
+    """One revision of a round, measured (the module docstring says what each count is). `weak`:
+    wrong frames the report warns about; `weak_all`: the pairings it warns about; `silent`: the
+    frames written onto the wrong slide that nothing in the report names; `wrong`: per pairing, the
+    frames it gets wrong."""
+    seed: int
+    step: int
+    broke: bool
+    said: Said
+    ops: tuple[str, ...]
+    weak: int
+    weak_all: int
+    costly: int
+    written: int
+    doubled: int
+    silent: tuple[int, ...]
+    reordered: bool
+    wrong: dict[Pairing, int]
+    frames: int
+
+
+def _infos(base: JsonObject) -> list[SlideInfo]:
+    out: list[SlideInfo] = []
+    for b in W.objs(base["slides"], "base.slides"):
+        page = b["page"]
+        out.append(SlideInfo(label=W.opt_text(b.get("label"), "slide.label"),
+                             title=W.text(b.get("title") or "", "slide.title"), text=W.text(b.get("text") or "", "slide.text"),
+                             page=None if page is None else as_int(page, "slide.page"), removed=False))
+    return out
 
 
 @contextlib.contextmanager
-def _order_only():
+def _order_only() -> Generator[None, None, None]:
     """The alignment without the leftover passes (`identity.cross_pairs`, `identity.gap_pairs`):
     what the labels and the order-keeping alignment pair between them."""
     sure, gap = identity.CROSS_SURE, identity.GAP_SURE
@@ -90,17 +127,18 @@ def _order_only():
         identity.CROSS_SURE, identity.GAP_SURE = sure, gap
 
 
-def _wrong_frames(pairs, ours_truth, base_truth) -> list[int]:
+def _wrong_frames(pairs: Mapping[int, int], ours_truth: Sequence[str | None], base_truth: Sequence[str]) -> list[int]:
     """Frames the pairing reads as another frame, or as new when the base knows them."""
     return [j for j, truth in enumerate(ours_truth)
-            if pairs.get(j) != (base_truth.index(truth) if truth in base_truth else None)]
+            if pairs.get(j) != (base_truth.index(truth) if truth is not None and truth in base_truth else None)]
 
 
-def _wrong(pairs, ours_truth, base_truth) -> int:
+def _wrong(pairs: Mapping[int, int], ours_truth: Sequence[str | None], base_truth: Sequence[str]) -> int:
     return len(_wrong_frames(pairs, ours_truth, base_truth))
 
 
-def _costly(wrong, pairs, ours_truth, base_truth, ours) -> list[int]:
+def _costly(wrong: Sequence[int], pairs: Mapping[int, int], ours_truth: Sequence[str | None],
+            base_truth: Sequence[str], ours: Sequence[SlideInfo]) -> list[int]:
     """Of the frames on the wrong slide, the ones a person would see.
 
     Two frames that say *word for word* the same thing are interchangeable: sync writes this
@@ -110,10 +148,10 @@ def _costly(wrong, pairs, ours_truth, base_truth, ours) -> list[int]:
     campaign counting those frames is reporting a number nobody can feel. What is left is a frame
     whose words or title differ from the frame that should have had this slide: a slide that really
     does end up saying something else."""
-    def words(info: dict) -> tuple:
-        return info.get("title", ""), tuple(info["text"].split())
+    def words(info: SlideInfo) -> tuple[str, tuple[str, ...]]:
+        return info.title, tuple(info.text.split())
 
-    costly = []
+    costly: list[int] = []
     for j in wrong:
         i = pairs.get(j)
         mate = None
@@ -124,8 +162,7 @@ def _costly(wrong, pairs, ours_truth, base_truth, ours) -> list[int]:
     return costly
 
 
-def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
-               shape: str = "converted") -> list[dict]:
+def round_once(seed: int, label_chance: float, tmp: Path, chain: int, shape: W.Shape) -> list[LabelStep]:
     """One deck, `chain` revisions of it in a row. Each revision is measured against the one before
     it - which is what sync does, and what a talk revised over a term looks like: the second version
     is not edited from the pristine deck but from a source already reworded, reordered and retitled,
@@ -137,13 +174,14 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
     campaign measures (`cross_pairs`, `gap_pairs`, `near_misses`) have almost nothing to work with."""
     rng = random.Random(seed)
     doc = W.make(shape, rng, tmp)
-    for i, s in enumerate(doc["slides"]):
+    for i, s in enumerate(W.slides(doc)):
         s["truth"] = f"t{i}"                      # what frame this really is, whatever its label
-    fresh = len(doc["slides"])
-    steps = []
+    fresh = len(W.slides(doc))
+    ctx = SourceContext(out=tmp, touched=())   # (`collide`, which reads `touched`, is not drawn here)
+    steps: list[LabelStep] = []
     for step in range(chain):
         base = W.build_base(doc, tmp)
-        base_truth = [s["truth"] for s in doc["slides"]]
+        base_truth = [W.text(s["truth"], "slide.truth") for s in W.slides(doc)]
 
         doc2 = copy.deepcopy(doc)
         revision = rng.random() < 0.25   # the whole talk revised at once, every title amended
@@ -151,33 +189,33 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
         broke = rng.random() < label_chance
         if broke:
             ops.insert(rng.randint(0, len(ops)), rng.choice(LABEL_OPS))
-        done = []
+        done: list[str] = []
         for k, name in enumerate(ops):
             fn = SOURCE_OPS[name]
             r = random.Random(seed * 7919 + 101 * step + k)
-            got = fn(r, doc2, tmp) if name == "repaint" else fn(r, doc2)
+            got = fn(r, doc2, ctx)
             done.append(f"{name}: {got}")
             if got is None and name in LABEL_OPS:
                 broke = False                      # nothing to move: the invariant still holds
         if revision:
-            for s in doc2["slides"]:
+            for s in W.slides(doc2):
                 el = W.title_element(s)     # a deck adopt wrote has slides with no title to amend
                 if el is None:
                     continue
-                s["title"] += " v2"
-                el["paragraphs"] = [{**el["paragraphs"][0], "runs": [W.run(s["title"])]}]
+                set_title(s, el, W.text(s["title"], "slide.title") + " v2")
             done.append("revision: every title amended")
-        ours_truth = [s.get("truth") for s in doc2["slides"]]
+        ours_truth = [W.opt_text(s.get("truth"), "slide.truth") for s in W.slides(doc2)]
 
-        base_infos, infos = _infos(base), [W.slide_info(s) for s in doc2["slides"]]
-        moves = identity.label_moves(base_infos, infos)
+        base_infos, infos = _infos(base), identity.slide_infos([W.slide_info(s) for s in W.slides(doc2)])
+        moves = identity.label_moves_of(base_infos, infos)
         with _order_only():
-            order = identity.align_slides(base_infos, infos, moves=[])
-        weak: dict[int, str] = {}
-        pairings = {"order": order,
-                    "before": identity.align_slides(base_infos, infos, moves=[]),
-                    "now": identity.align_slides(base_infos, infos, moves, weak)}
-        said = "moved" if any(m["verdict"] == "moved" for m in moves) else ("unsure" if moves else "quiet")
+            order = identity.align_slides_of(base_infos, infos, [], None)
+        weak: dict[int, WeakHow] = {}
+        pairings: dict[Pairing, Pairs] = {"order": order,
+                                          "before": identity.align_slides_of(base_infos, infos, [], None),
+                                          "now": identity.align_slides_of(base_infos, infos,
+                                                                          identity.moved_pairs(moves), weak)}
+        said: Said = "moved" if any(m.verdict == "moved" for m in moves) else ("unsure" if moves else "quiet")
         # A frame the report warns about is not a frame the sync moved in silence, whatever the
         # label verdict says. `merge.plan_merge` warns on two things besides the label moves: a
         # pairing `weak` marks (matched by content, by place, or between twins) and a slide whose
@@ -187,26 +225,25 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
         # A frame no pass would pair, named beside the slide it says much of the same thing as,
         # is the third: `identity.near_misses` is in the report for exactly this - the person is
         # asked whether the new slide and the old one are one frame (docs/sync.md).
-        near = {m["ours"] for m in identity.near_misses(base_infos, infos, pairings["now"])}
+        near = {m.ours for m in identity.near_misses_of(base_infos, infos, pairings["now"])}
 
         def warned(j: int) -> bool:
             i = pairings["now"].get(j)
             if j in weak or j in near:
                 return True
-            return i is not None and bool(base_infos[i].get("label")) \
-                and infos[j].get("label") != base_infos[i].get("label")
+            return i is not None and bool(base_infos[i].label) and infos[j].label != base_infos[i].label
         # A slide `merge.plan_merge` holds back is a slide nothing is written to, so a frame paired
         # with it lands nowhere: the pairing is wrong and the person is asked, but their edits are
         # not merged with another frame's sentences. `written` is what is left of `costly` once the
         # held ones are taken out - the frames sync really does put on the wrong slide.
-        held = {m["ours"] for m in moves if m["verdict"] == "unsure"}
+        held = {m.ours for m in moves if m.verdict == "unsure"}
         costly = _costly(wrong_now, pairings["now"], ours_truth, base_truth, infos)
         # A frame the pairing reads as **new** is not written onto anybody's slide either: it is
         # created as a slide of its own, so the deck gains a duplicate and the slide it belongs on
         # keeps every word the person put there. That is a cost of another kind (`doubled`), and
         # counting it as a write counts one event twice - the slide it should have had is either
         # held, or taken by the frame that really did overwrite it, which is a write already here.
-        spoken = {m["ours"] for m in moves}
+        spoken = {m.ours for m in moves}
         left = [j for j in costly if j not in held]
         written = [j for j in left if pairings["now"].get(j) is not None]
         # And the one number every claim about this check is really about: of the frames written
@@ -214,16 +251,16 @@ def round_once(seed: int, label_chance: float, tmp: Path, chain: int = 1,
         # round - a `moved` verdict about the frame two slides down tells a person nothing about
         # this one - so a frame is spoken for by a warning of its own (`warned`) or by a verdict
         # carrying its index (`m["ours"]`, which `merge.plan_merge` raises as a conflict).
-        steps.append({"seed": seed, "step": step, "broke": broke, "said": said, "ops": done,
-                      "weak": sum(1 for j in wrong_now if warned(j)), "weak_all": len(weak),
-                      "costly": len(costly), "written": len(written),
-                      "doubled": len(left) - len(written),
-                      "silent": [j for j in written if j not in spoken and not warned(j)],
-                      "reordered": any(line.startswith("move_slide") and not line.endswith("None") for line in done),
-                      "wrong": {k: _wrong(p, ours_truth, base_truth) for k, p in pairings.items()},
-                      "frames": len(ours_truth)})
+        steps.append(LabelStep(seed=seed, step=step, broke=broke, said=said, ops=tuple(done),
+                               weak=sum(1 for j in wrong_now if warned(j)), weak_all=len(weak),
+                               costly=len(costly), written=len(written),
+                               doubled=len(left) - len(written),
+                               silent=tuple(j for j in written if j not in spoken and not warned(j)),
+                               reordered=any(line.startswith("move_slide") and not line.endswith("None") for line in done),
+                               wrong={k: _wrong(p, ours_truth, base_truth) for k, p in pairings.items()},
+                               frames=len(ours_truth)))
         # A frame the source wrote in this revision is a frame in its own right for the next one.
-        for s in doc2["slides"]:
+        for s in W.slides(doc2):
             if "truth" not in s:
                 s["truth"] = f"t{fresh}"
                 fresh += 1
@@ -241,33 +278,39 @@ def main() -> int:
     ap.add_argument("--shape", choices=sorted(W.SHAPES), default="converted",
                     help="what the deck looks like: a talk convert wrote, or a deck adopt did")
     args = ap.parse_args()
+    rounds_wanted: int = args.rounds
+    seed0: int = args.seed
+    label_chance: float = args.label_chance
+    shown: int = args.show
+    chain: int = args.chain
+    shape = W.shape_of(args.shape)
 
     tmp = Path(tempfile.mkdtemp(prefix="b2s-labels-"))
-    tally: Counter = Counter()
-    frames = Counter()
-    worst = []
+    tally: Counter[str] = Counter()
+    frames: Counter[str] = Counter()
+    worst: list[LabelStep] = []
     try:
-        for n in range(args.rounds):
-            for r in round_once(args.seed + n, args.label_chance, tmp, args.chain, args.shape):
-                group = ("broken" if r["broke"] else "sound") + (", frame moved" if r["reordered"] else "")
+        for n in range(rounds_wanted):
+            for r in round_once(seed0 + n, label_chance, tmp, chain, shape):
+                group = ("broken" if r.broke else "sound") + (", frame moved" if r.reordered else "")
                 tally[f"{group}/rounds"] += 1
-                tally[f"{group}/said:{r['said']}"] += 1
-                for how, w in r["wrong"].items():
+                tally[f"{group}/said:{r.said}"] += 1
+                for how, w in r.wrong.items():
                     frames[f"{group}/{how}"] += w
-                frames[f"{group}/frames"] += r["frames"]
-                frames[f"{group}/costly"] += r["costly"]
-                frames[f"{group}/written"] += r["written"]
-                frames[f"{group}/doubled"] += r["doubled"]
-                frames[f"{group}/silent writes"] += len(r["silent"])
-                if r["silent"]:
+                frames[f"{group}/frames"] += r.frames
+                frames[f"{group}/costly"] += r.costly
+                frames[f"{group}/written"] += r.written
+                frames[f"{group}/doubled"] += r.doubled
+                frames[f"{group}/silent writes"] += len(r.silent)
+                if r.silent:
                     tally[f"{group}/silent rounds"] += 1
-                tally[f"{group}/warned"] += r["weak_all"]
-                if r["wrong"]["now"]:
-                    told = r["said"] != "quiet" or r["weak"]
+                tally[f"{group}/warned"] += r.weak_all
+                if r.wrong["now"]:
+                    told = r.said != "quiet" or r.weak
                     tally[f"{group}/{'said so' if told else 'silent'}"] += 1
-                if r["wrong"]["now"] > r["wrong"]["before"]:
+                if r.wrong["now"] > r.wrong["before"]:
                     tally[f"{group}/worse"] += 1
-                if r["wrong"]["now"] or (not r["broke"] and r["said"] != "quiet"):
+                if r.wrong["now"] or (not r.broke and r.said != "quiet"):
                     worst.append(r)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -275,7 +318,8 @@ def main() -> int:
     groups = ("sound", "sound, frame moved", "broken", "broken, frame moved")
 
     def show(label: str, parts: tuple[str, ...]) -> None:
-        count = lambda c, k: sum(c[f"{g}/{k}"] for g in parts)  # noqa: E731
+        def count(c: Counter[str], k: str) -> int:
+            return sum(c[f"{g}/{k}"] for g in parts)
         rounds = count(tally, "rounds")
         if not rounds:
             return
@@ -311,9 +355,9 @@ def main() -> int:
             show(f"{kind}, in all", both)
     if worst:
         print(f"\n{len(worst)} round(s) left wrong or noisy:")
-        for r in worst[:args.show]:
-            print(f"  seed {r['seed']} step {r['step']} broke={r['broke']} said={r['said']} wrong={r['wrong']}")
-            for line in r["ops"]:
+        for r in worst[:shown]:
+            print(f"  seed {r.seed} step {r.step} broke={r.broke} said={r.said} wrong={r.wrong}")
+            for line in r.ops:
                 print(f"      {line}")
     return 0
 
