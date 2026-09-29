@@ -32,6 +32,8 @@ from pathlib import Path
 
 import pytest
 
+from beamer2slides.json_types import Json
+
 ROOT = Path(__file__).resolve().parents[1]
 
 from .test_slides_alignment import MAIN, google_unavailable
@@ -53,7 +55,7 @@ PDFIUM = threading.Lock()  # PDFium is not thread-safe (alignment measurement)
 TITLE, ALGO, MERGING, CONV = "Keeping Slides and Source in Sync", "The sync algorithm", "Merging text", "Convergence"
 POLICY, RESULTS, VERSIONS = "Merge policy", "Results", "Three versions"
 IDENTITY, CONCL = "Finding the same slide", "Conclusions"
-WHY = {"contains": "Later the source changes again"}  # the motivation slide, whatever its title
+WHY: dict[str, Json] = {"contains": "Later the source changes again"}  # the motivation slide, whatever its title
 
 
 def E(edit: str, **args) -> dict:
@@ -115,11 +117,12 @@ class Run:
         return done
 
     def convert(self, pdf: Path) -> None:
-        from beamer2slides.devtools.deck_edits import LiveDeck
+        from beamer2slides.devtools.deck_edits import open_deck
         # --force-rebuild: a scenario folder holds the deck of the previous run, with that run's
         # deck edits still on it, and the rebuild guard would refuse to replace it (guard.py).
         self.cli("convert", pdf, "--out", self.out, "--force-rebuild")
-        self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
+        self.deck = open_deck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"],
+                              defer=False)
 
     def edit(self, *specs: dict) -> list[dict]:
         from beamer2slides.devtools.deck_edits import verified
@@ -178,7 +181,7 @@ class Run:
         order = order or sync_build.titles(flags)
         all_checks = kept + list(checks) + source + [{"check": "slides", "order": order}]
         self.problems += [f"after sync to {variant}: {p}" for p in sc.check_all(model, all_checks)]
-        self.problems += sc.check_report(report, conflicts=conflicts, converged=converged,
+        self.problems += sc.check_report(report, conflicts=conflicts, converged=converged, warnings=(),
                                          no_conflicts=not conflicts and not any_conflicts)
         text = json.dumps(report, ensure_ascii=False).lower()
         self.problems += [f"report doesn't mention {m!r}" for m in mentions if m.lower() not in text]
@@ -187,7 +190,8 @@ class Run:
                 self.problems.append(f"sync to {variant} lists {sc.changes(report)} changes, expected none")
             if model.revision != no_writes_since:
                 self.problems.append(f"sync to {variant} changed the presentation revision")
-        self.problems += sc.integrity(model, before=self.before, base_ids=self.base_ids(), allow_ungrouped=allow_ungrouped)
+        self.problems += sc.integrity(model, before=self.before, base_ids=self.base_ids(),
+                                      allow_groups_changed=frozenset(), allow_ungrouped=allow_ungrouped)
 
         # Slides nobody edited in the deck: like a fresh conversion of the same source.
         edited = {s.id for e in expectations for sel in e["slides"] for s in model.find(sel)}
@@ -196,7 +200,7 @@ class Run:
                   if len(model.find(t)) == 1 and model.one(t).id not in edited and len(fresh.find(t)) == 1]
         self.problems += sc.compare_fresh(model, fresh, titles)
         for t in titles:
-            problem = sc.thumbnail_diff(self.deck.api, (self.deck.pid, model.one(t).id), (fresh.pres["presentationId"], fresh.one(t).id),
+            problem = sc.thumbnail_diff(self.deck.api, (self.deck.pid, model.one(t).id), (fresh.pid, fresh.one(t).id),
                                         self.out / "check" / f"thumb-{sync_build.titles(flags).index(t) + 1:02}.png")
             if problem:
                 self.problems.append(f"fresh {t}: {problem}")
@@ -347,7 +351,7 @@ def scenario_deletions(run: Run):
     fresh = fresh_conversion("v1")[1]
     from beamer2slides.devtools.deck_edits import donor_image_url
     exps = run.edit(
-        E("add_image", slide=VERSIONS, url=donor_image_url(run.deck.api, fresh.pres["presentationId"]), box=[540, 250, 150, 100]),
+        E("add_image", slide=VERSIONS, url=donor_image_url(run.deck.api, fresh.pid), box=[540, 250, 150, 100]),
         E("delete_element", slide=RESULTS, target={"text": "Same element"}),
         E("replace_word", slide=WHY, text="moving pictures around", old="pictures", new="figures"))
     pdf = build("deletions")
@@ -497,7 +501,7 @@ def scenario_many_edits(run: Run):
     # The source rewrites that box and moves it up (~3 pt): both moved it, so the person's 15 pt
     # lands on the source's new place, not on the deck's old absolute one (docs/project-notes.md
     # "Both-moved geometry").
-    later = {"text": "Later the source changes again"}
+    later: dict[str, Json] = {"text": "Later the source changes again"}
     fresh = fresh_conversion("many-edits")[1]
     x, y = fresh.element(fresh.one(WHY), later).box[:2]
     run.check("many-edits", pdf, run.sync(pdf), exps, drop=("move",), skip_source=("show of hands",),
@@ -628,7 +632,8 @@ def scenario_pull_wording(run: Run):
     report = run.sync(pdf)
     from beamer2slides.devtools import sync_check as sc
     run.problems += sc.check_all(run.deck.read(), [c for e in exps for c in e["checks"]])
-    run.problems += sc.check_report(report, converged=[["mistakes"], ["sync report"]], no_conflicts=True)
+    run.problems += sc.check_report(report, conflicts=(), converged=[["mistakes"], ["sync report"]], warnings=(),
+                                    no_conflicts=True)
     if sc.changes(report):
         run.problems.append(f"sync after pull lists {sc.changes(report)} changes")
     if run.revision() != revision:
@@ -648,7 +653,7 @@ def scenario_pull_picture(run: Run):
     tex = src / "talk.tex"
     tex.write_text(sync_build.render([]), encoding="utf-8")
     run.convert(sync_build.compile_tex(tex))
-    donor = donor_image_url(run.deck.api, fresh_conversion("v1")[1].pres["presentationId"])
+    donor = donor_image_url(run.deck.api, fresh_conversion("v1")[1].pid)
     pictures_of = lambda model: {e.id for e in model.one(CONCL).elements if e.kind == "image"}
     before = pictures_of(run.deck.read())
     exps = run.edit(E("add_image", slide=CONCL, url=donor, box=[500, 270, 160, 100]))
@@ -661,8 +666,9 @@ def scenario_pull_picture(run: Run):
     report = run.sync(sync_build.compile_tex(tex))
     model = run.deck.read()
     run.problems += sc.check_all(model, [c for e in exps for c in e["checks"]])
-    run.problems += sc.check_report(report, converged=[["image"]], no_conflicts=True)
-    run.problems += sc.integrity(model, before=run.before, base_ids=run.base_ids())
+    run.problems += sc.check_report(report, conflicts=(), converged=[["image"]], warnings=(), no_conflicts=True)
+    run.problems += sc.integrity(model, before=run.before, base_ids=run.base_ids(), allow_groups_changed=frozenset(),
+                                 allow_ungrouped=frozenset())
     pictures = pictures_of(model)
     if len(pictures) != len(after):
         run.problems.append(f"{len(after)} picture(s) on {CONCL} before the sync, {len(pictures)} after: "
@@ -734,7 +740,7 @@ class Layout:
         fresh = fresh_conversion(variant)[1]
         model = self.run.deck.read()
         problem = sc.thumbnail_diff(self.run.deck.api, (self.run.deck.pid, model.one(title).id),
-                                    (fresh.pres["presentationId"], fresh.one(title).id),
+                                    (fresh.pid, fresh.one(title).id),
                                     self.run.out / "layout" / "after" / f"vs-fresh-{title.replace(' ', '-').lower()}.png")
         self.data.setdefault("vs_fresh", {})[title] = problem or "same as a fresh conversion"
         self._save()
@@ -975,15 +981,15 @@ def scenario_layout_retheme(run: Run):
     # which carries the person's word; its title box is compared all the same.
     for t in (TITLE, MERGING, CONV):
         s, f = model.one(t), fresh.one(t)
-        problem = sc.thumbnail_diff(run.deck.api, (run.deck.pid, s.id), (fresh.pres["presentationId"], f.id),
+        problem = sc.thumbnail_diff(run.deck.api, (run.deck.pid, s.id), (fresh.pid, f.id),
                                     run.out / "layout" / "after" / f"vs-fresh-{t[:24].replace(' ', '-').lower()}.png")
         lay.data.setdefault("vs_fresh", {})[t] = problem or "same as a fresh conversion"
         if problem:
             run.problems.append(f"{t}: {problem}")
     for t in (MERGING, CONV, CONCL):
         s, f = model.one(t), fresh.one(t)
-        title = next(e for e in s.elements if e.kind == "shape" and e.obj["shape"].get("placeholder", {}).get("type") == "TITLE")
-        ftitle = next(e for e in f.elements if e.kind == "shape" and e.obj["shape"].get("placeholder", {}).get("type") == "TITLE")
+        title = next(e for e in s.elements if e.placeholder_type == "TITLE")
+        ftitle = next(e for e in f.elements if e.placeholder_type == "TITLE")
         titles[t] = {"synced": [round(v, 1) for v in title.box], "fresh": [round(v, 1) for v in ftitle.box]}
         if max(abs(a - b) for a, b in zip(title.box, ftitle.box)) > LAYOUT_TOL:
             run.problems.append(f"{t}: title box {titles[t]['synced']}, a fresh conversion's {titles[t]['fresh']}")
@@ -1224,9 +1230,9 @@ def test_checker_controls():
         fresh_folder, fresh = fresh_conversion("v1")
         titles = sync_build.titles([])
         model = run.deck.read()
-        problems = [f"clean: {p}" for p in sc.compare_fresh(model, fresh, titles) + sc.integrity(model)]
+        problems = [f"clean: {p}" for p in sc.compare_fresh(model, fresh, titles) + sc.integrity_alone(model)]
         for t in titles:
-            if p := sc.thumbnail_diff(run.deck.api, (run.deck.pid, model.one(t).id), (fresh.pres["presentationId"], fresh.one(t).id),
+            if p := sc.thumbnail_diff(run.deck.api, (run.deck.pid, model.one(t).id), (fresh.pid, fresh.one(t).id),
                                       run.out / "check" / f"clean-{titles.index(t) + 1:02}.png"):
                 problems.append(f"clean: {t}: {p}")
         with PDFIUM:
@@ -1247,18 +1253,20 @@ def test_checker_controls():
         caught = {
             "moved text": sc.compare_fresh(broken, fresh, [CONCL]),
             "moved text thumbnail": [sc.thumbnail_diff(run.deck.api, (run.deck.pid, broken.one(CONCL).id),
-                                                       (fresh.pres["presentationId"], fresh.one(CONCL).id),
+                                                       (fresh.pid, fresh.one(CONCL).id),
                                                        run.out / "check" / "broken-concl.png")],
-            "duplicate": [p for p in sc.integrity(broken) if "duplicate" in p],
-            "group taken apart": [p for p in sc.integrity(broken, before=model) if "came apart" in p],
+            "duplicate": [p for p in sc.integrity_alone(broken) if "duplicate" in p],
+            "group taken apart": [p for p in sc.integrity(broken, before=model, base_ids=None, allow_groups_changed=frozenset(),
+                                                          allow_ungrouped=frozenset()) if "came apart" in p],
             "report without the conflict": sc.check_report({"conflicts": [{"ours": "a", "theirs": "b"}]},
-                                                           conflicts=[["editor", "AI assistant"]]),
+                                                           conflicts=[["editor", "AI assistant"]], converged=(),
+                                                           warnings=(), no_conflicts=False),
         }
         with PDFIUM:
             caught["moved formula picture"] = sc.alignment_compare(fresh_folder, broken, fresh, run.deck.pid, [MERGING],
                                                                    run.out / "check")
         run.deck.batch([{"ungroupObjects": {"objectIds": [formula.parent]}}])
-        caught["ungrouped formula"] = [p for p in sc.integrity(run.deck.read()) if "not grouped" in p]
+        caught["ungrouped formula"] = [p for p in sc.integrity_alone(run.deck.read()) if "not grouped" in p]
         problems += [f"not caught: {k}" for k, found in caught.items() if not any(found)]
     finally:
         run.log.close()
@@ -1276,7 +1284,7 @@ def test_edit_catalogue():
     run = Run("edit-catalogue")
     try:
         run.convert(build("v1"))
-        donor = donor_image_url(run.deck.api, fresh_conversion("v1")[1].pres["presentationId"])
+        donor = donor_image_url(run.deck.api, fresh_conversion("v1")[1].pid)
         problems, expectations = [], []
         from beamer2slides.devtools.deck_edits import verified
         for spec in catalogue(donor):
@@ -1285,7 +1293,8 @@ def test_edit_catalogue():
             expectations.append(exp)
         model = run.deck.read()
         problems += [f"at the end: {p}" for p in sc.check_all(model, [c for e in expectations for c in e["checks"]])]
-        problems += sc.integrity(model, allow_ungrouped={e["args"]["slide"] for e in expectations if e["edit"] == "ungroup"})
+        problems += sc.integrity(model, before=None, base_ids=None, allow_groups_changed=frozenset(),
+                                 allow_ungrouped={e["args"]["slide"] for e in expectations if e["edit"] == "ungroup"})
         from beamer2slides.devtools.deck_edits import EDITS
         problems += [f"edit kind not in the catalogue: {k}" for k in set(EDITS) - {e["edit"] for e in expectations}]
     finally:

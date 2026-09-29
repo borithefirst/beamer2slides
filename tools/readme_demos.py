@@ -47,10 +47,10 @@ def pdflatex(tex: Path, runs: int = 2) -> None:
 
 def shot(name: str) -> None:
     """Thumbnail and read-back of the slide, as they are now."""
-    from beamer2slides.devtools.deck_edits import LiveDeck
+    from beamer2slides.devtools.deck_edits import open_deck
     from beamer2slides.devtools.sync_check import presentation_id
     from beamer2slides.gslides import save_thumbnail
-    deck = LiveDeck(presentation_id(str(SYNC)))
+    deck = open_deck(presentation_id(str(SYNC)), defer=False)
     (SYNC / "shots").mkdir(parents=True, exist_ok=True)
     save_thumbnail(deck.api, deck.pid, deck.model.one(SLIDE).id, SYNC / "shots" / f"{name}.png")
     (SYNC / "shots" / f"{name}.json").write_text(json.dumps(deck.model.pres), encoding="utf-8")
@@ -66,9 +66,9 @@ def sync_step(step: str) -> None:
         beamer2slides("convert", src / "demo.pdf", "--out", SYNC, "--force-rebuild", "--backup", "none")
         shot("1-converted")
     elif step == "edit":
-        from beamer2slides.devtools.deck_edits import LiveDeck, add_text_box, bold, recolour
+        from beamer2slides.devtools.deck_edits import add_text_box, bold, open_deck, recolour
         from beamer2slides.devtools.sync_check import presentation_id
-        deck = LiveDeck(presentation_id(str(SYNC)))
+        deck = open_deck(presentation_id(str(SYNC)), defer=False)
         recolour(deck, SLIDE, "Slides elements", "#188038", BODY)
         bold(deck, SLIDE, "Slides elements", BODY)
         add_text_box(deck, SLIDE, "Love this slide! — Sam", [470, 322, 230, 30])

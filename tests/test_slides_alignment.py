@@ -39,6 +39,7 @@ for var, name in (("B2S_TOKEN", "token.json"), ("B2S_CLIENT_SECRET", "client_sec
         os.environ.setdefault(var, str(MAIN / name))
 
 from beamer2slides.devtools import alignment
+from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_object
 
 pytestmark = pytest.mark.slides
 
@@ -95,11 +96,19 @@ def convert(deck: str) -> float:
     return time.monotonic() - started
 
 
+Reports = dict[str, alignment.Alignment | Exception]
+"""deck -> its alignment report, or what stopped it."""
+
+
+def selected(item: pytest.Item, deck: str) -> bool:
+    """Whether a collected test is one parametrized with `deck`."""
+    return isinstance(item, pytest.Function) and hasattr(item, "callspec") and item.callspec.params.get("deck") == deck
+
+
 @pytest.fixture(scope="module")
-def reports(request, pytestconfig):
+def reports(request: pytest.FixtureRequest, pytestconfig: pytest.Config) -> Reports:
     """deck -> alignment report (or the exception), for the decks this session selected."""
-    decks = [d for d in DECKS if any(getattr(item, "callspec", None) and item.callspec.params.get("deck") == d
-                                     for item in request.session.items)]
+    decks = [d for d in DECKS if any(selected(item, d) for item in request.session.items)]
     missing = [d for d in decks if pdf_for(d) is None]
     if missing:
         pytest.skip(f"PDFs not built: {missing} (tests/decks/build.py, examples/demo)")
@@ -108,64 +117,90 @@ def reports(request, pytestconfig):
         pytest.skip(reason)
     OUT.mkdir(parents=True, exist_ok=True)
     started = time.monotonic()
-    results, seconds = {}, {}
+    results: Reports = {}
+    seconds: dict[str, float] = {}
     if not REUSE:
-        def run(deck):
+        def run(deck: str) -> float | Exception:
             try:
                 return convert(deck)
             except Exception as e:  # reported by that deck's test
                 return e
         with ThreadPoolExecutor(max_workers=PARALLEL) as pool:
             for deck, done in zip(decks, pool.map(run, decks)):
-                (results if isinstance(done, Exception) else seconds)[deck] = done
+                if isinstance(done, Exception):
+                    results[deck] = done
+                else:
+                    seconds[deck] = done
     for deck in decks:  # (PDFium is not thread-safe: measured one after another)
         if deck not in results:
             try:
-                results[deck] = alignment.measure(OUT / deck, refresh=not REUSE)
+                results[deck] = alignment.measure(OUT / deck, refresh=not REUSE, crops="failures")
             except Exception as e:
                 results[deck] = e
     writer = pytestconfig.pluginmanager.get_plugin("terminalreporter")
-    if writer:
+    if isinstance(writer, pytest.TerminalReporter):
         writer.write_line(f"\nslides alignment: {len(decks)} decks in {time.monotonic() - started:.0f} s"
                           + (f" (conversions: {', '.join(f'{d} {s:.0f} s' for d, s in seconds.items())})" if seconds else ""))
     return results
 
 
-def failure_keys(report: dict) -> list[tuple[str, str, dict]]:
+def failure_keys(report: alignment.Alignment) -> list[tuple[str, str, alignment.Row]]:
     """(baseline key `page:item metric`, message, row) of every failure."""
     return [(f"{key} {msg.split(' ')[0].rstrip(':')}", f"{kind} {key}: {msg}", row)
-            for kind, key, row in alignment.items(report) for msg in alignment.row_failures(kind, row)]
+            for kind, key, row in alignment.items(report) for msg in alignment.row_failures(row)]
+
+
+def baseline() -> JsonObject:
+    """tests/slides_baseline.json: `known_failures` and `text_fit_known` (deck -> key -> reason),
+    `decks` (deck -> key -> metric -> value)."""
+    if not BASELINE.exists():
+        return {"known_failures": {}, "decks": {}}
+    return as_object(json.loads(BASELINE.read_text(encoding="utf-8")), str(BASELINE))
+
+
+def number(v: Json, where: str) -> float:
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v
+    raise JsonShapeError(f"{where}: a number was expected")
+
+
+def write_baseline(base: JsonObject) -> None:
+    BASELINE.write_text(json.dumps(base, indent=1, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
 
 
 @pytest.mark.parametrize("deck", DECKS)
-def test_alignment(deck, reports):
+def test_alignment(deck: str, reports: Reports) -> None:
     report = reports[deck]
     if isinstance(report, Exception):
         raise report
-    base = json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else {"known_failures": {}, "decks": {}}
-    known = base["known_failures"].get(deck, {})
-    values = {key: m for kind, key, row in alignment.items(report) if (m := alignment.metrics(kind, row))}
+    base = baseline()
+    known_failures = as_object(base["known_failures"], "known_failures")
+    known = as_object(known_failures.get(deck, {}), f"known_failures.{deck}")
+    values = {key: m for _, key, row in alignment.items(report) if (m := alignment.metrics(row))}
     current = failure_keys(report)
     if os.environ.get("B2S_UPDATE_BASELINE"):
-        base["decks"][deck] = values
-        base["known_failures"][deck] = {k: known.get(k, f"UNVERIFIED: {msg}") for k, msg, _ in current}
-        BASELINE.write_text(json.dumps(base, indent=1, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+        decks = as_object(base["decks"], "decks")
+        decks[deck] = {key: {name: value for name, value in m.items()} for key, m in values.items()}
+        known_failures[deck] = {k: known.get(k, f"UNVERIFIED: {msg}") for k, msg, _ in current}
+        write_baseline(base)
         return
-    problems = [msg + (f" (evidence: {OUT / deck / row['evidence']})" if row.get("evidence") else "")
+    problems = [msg + (f" (evidence: {OUT / deck / row.evidence})" if row.evidence else "")
                 for k, msg, row in current if k not in known]
-    old = base["decks"].get(deck, {})
-    problems += [f"{key} {name} grew from {old[key][name]} to {value} (baseline + {GROWTH})"
-                 for key, metrics in values.items() for name, value in metrics.items()
-                 if name in old.get(key, {}) and value > old[key][name] + GROWTH]
+    old = as_object(as_object(base["decks"], "decks").get(deck, {}), f"decks.{deck}")
+    for key, metrics in values.items():
+        was = as_object(old.get(key, {}), f"decks.{deck}.{key}")
+        problems += [f"{key} {name} grew from {was[name]} to {value} (baseline + {GROWTH})"
+                     for name, value in metrics.items()
+                     if name in was and value > number(was[name], f"decks.{deck}.{key}.{name}") + GROWTH]
     fixed = sorted(set(known) - {k for k, _, _ in current})
     if fixed:
         warnings.warn(f"{deck}: known failures no longer fail, update the baseline: {fixed}", stacklevel=2)
     if problems:
-        pytest.fail(f"{deck} ({report['url']}):\n  " + "\n  ".join(problems), pytrace=False)
+        pytest.fail(f"{deck} ({report.url}):\n  " + "\n  ".join(problems), pytrace=False)
 
 
 @pytest.mark.parametrize("deck", TEXT_FIT)
-def test_text_fit(deck, reports):
+def test_text_fit(deck: str, reports: Reports) -> None:
     """Text in Slides takes the room it takes in the PDF (tools/text_fit.py): every finding is
     either in the baseline's `text_fit_known` with a reason, or a failure. Keys are
     `page:element kind`, element ids being classify's (stable while the deck is)."""
@@ -173,15 +208,18 @@ def test_text_fit(deck, reports):
     report = reports[deck]
     if isinstance(report, Exception):
         raise report
-    found = text_fit.measure(pdf_for(deck), OUT / deck, crops=True)
-    current = {f"{s['page'] + 1}:{f['element'].split()[0]} {f['kind']}": f
-               for s in found["slides"] for f in s["findings"]}
-    base = json.loads(BASELINE.read_text(encoding="utf-8")) if BASELINE.exists() else {"known_failures": {}, "decks": {}}
-    known = base.get("text_fit_known", {}).get(deck, {})
+    pdf = pdf_for(deck)
+    assert pdf is not None  # (the fixture skips a deck with no PDF)
+    found = text_fit.measure(pdf, OUT / deck, crops=True)
+    current = {f"{s.page + 1}:{f.element.split()[0]} {f.kind}": f.json() for s in found.slides for f in s.findings}
+    base = baseline()
+    text_fit_known = as_object(base.get("text_fit_known", {}), "text_fit_known")
+    known = as_object(text_fit_known.get(deck, {}), f"text_fit_known.{deck}")
     if os.environ.get("B2S_UPDATE_BASELINE"):
-        base.setdefault("text_fit_known", {})[deck] = {k: known.get(k, f"UNVERIFIED: {json.dumps(f, ensure_ascii=False)}")
-                                                      for k, f in current.items()}
-        BASELINE.write_text(json.dumps(base, indent=1, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+        text_fit_known[deck] = {k: known.get(k, f"UNVERIFIED: {json.dumps(f, ensure_ascii=False)}")
+                                for k, f in current.items()}
+        base["text_fit_known"] = text_fit_known
+        write_baseline(base)
         return
     fixed = sorted(set(known) - set(current))
     if fixed:

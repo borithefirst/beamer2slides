@@ -799,11 +799,12 @@ class CrashRun:
         return done
 
     def convert(self, pdf):
-        from beamer2slides.devtools.deck_edits import LiveDeck
+        from beamer2slides.devtools.deck_edits import open_deck
         # --force-rebuild: the case folder holds the previous run's deck with its edits still on it,
         # and the rebuild guard (guard.py) would rightly refuse to replace that.
         self.cli("convert", pdf, "--out", self.out, "--force-rebuild", "--backup", "none")
-        self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
+        self.deck = open_deck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"],
+                              defer=False)
 
     def edit(self, specs):
         from beamer2slides.devtools.deck_edits import verified
@@ -861,7 +862,8 @@ def run_case(point: str, live, control) -> list[str]:
             + [{"check": "slides", "order": live.sync_build.titles(flags)}]
         run.problems += [f"after being killed at {point}: {p}" for p in sc.check_all(model, checks)]
         base = run.base() or {}
-        run.problems += sc.integrity(model, base_ids=sc.ids_in(base) if base else None)
+        run.problems += sc.integrity(model, before=None, base_ids=sc.ids_in(base) if base else None,
+                                     allow_groups_changed=frozenset(), allow_ungrouped=frozenset())
         for left in ("pending", "cleanup"):
             if base.get(left):
                 run.problems.append(f"the recovery sync left `{left}` in the base: {base[left]!r:.120}")

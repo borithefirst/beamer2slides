@@ -1722,7 +1722,7 @@ def _maybe(rng: random.Random, items: Sequence[T]) -> T | None:
 
 
 def _placeholder(e: sc.Element) -> str | None:
-    return (e.obj.get("shape", {}).get("placeholder") or {}).get("type") if e.kind == "shape" else None
+    return e.placeholder_type
 
 
 def _body_texts(s: sc.Slide) -> list[sc.Element]:
@@ -1866,7 +1866,7 @@ def _aim_row(rng: random.Random, model: sc.Model, s: sc.Slide, sel: JsonObject,
     n = rng.randrange(1000)
     words = [f"Case {n}", f"{rng.randint(50, 100)}%", f"{rng.randint(10, 99) / 10} s", "by hand"]
     return {"edit": "insert_table_row", "args": {"slide": sel, "text": text,
-                                                 "cells": W.jstrs(words[:table.obj["table"]["columns"]])}}
+                                                 "cells": W.jstrs(words[:table.table_size[1]])}}
 
 
 def _aim_column(rng: random.Random, model: sc.Model, s: sc.Slide, sel: JsonObject,
@@ -1876,7 +1876,7 @@ def _aim_column(rng: random.Random, model: sc.Model, s: sc.Slide, sel: JsonObjec
         return None
     table, text = anchor
     n = rng.randrange(1000)
-    cells = [f"Note {n}"] + [f"r{n}-{i}" for i in range(1, table.obj["table"]["rows"])]
+    cells = [f"Note {n}"] + [f"r{n}-{i}" for i in range(1, table.table_size[0])]
     return {"edit": "insert_table_column", "args": {"slide": sel, "text": text, "cells": W.jstrs(cells)}}
 
 
@@ -2320,7 +2320,7 @@ class LiveRound:
             self.cost.stop(mark, {}, {})
         pid = pid or _presentation_id(self.out)
         mark = self.cost.start("edits")
-        self.deck = deck_edits.LiveDeck(pid, defer=self.edits == "batched")
+        self.deck = deck_edits.open_deck(pid, defer=self.edits == "batched")
         self.cost.stop(mark, {}, {"reads": 1})
         base = _load(self.out / "sync" / "base.json")
         slides = W.objs(base["slides"], "base.slides")
@@ -2382,7 +2382,7 @@ class LiveRound:
         else:
             deck.read()
         try:
-            donor: str | None = deck_edits.donor_from(deck.model.pres)
+            donor: str | None = deck_edits.donor_from(deck.model.presentation, deck.pid)
         except Exception:  # noqa: BLE001 (a deck with no picture left to borrow)
             donor = None
         done: list[JsonObject] = []

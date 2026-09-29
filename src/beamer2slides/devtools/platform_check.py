@@ -19,7 +19,10 @@ import platform
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
+
+from ..json_types import Json, JsonObject
 
 DECKS = Path(__file__).resolve().parents[3] / "tests" / "decks" / "out"
 
@@ -49,7 +52,51 @@ WITH_DECKS = [
 ]
 
 
-def font_folders() -> dict:
+@dataclass(frozen=True, kw_only=True)
+class CheckRun:
+    """One torture oracle's run in its own process: its exit code (-1: timed out), and the last
+    lines it printed."""
+
+    check: str
+    exit: int
+    seconds: float
+    tail: list[str]
+
+    def json(self) -> JsonObject:
+        return {"check": self.check, "exit": self.exit, "seconds": self.seconds, "tail": list[Json](self.tail)}
+
+
+@dataclass(frozen=True, kw_only=True)
+class Apart:
+    """A seed whose chars or glyph widths PDFium and the pure reader read apart."""
+
+    seed: int
+    fonts: list[str]
+    why: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class Crashed:
+    seed: int
+    error: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class SubstExtract:
+    """`subst_extract`'s answer over `n` seeds."""
+
+    n: int
+    apart: list[Apart]
+    crashed: list[Crashed]
+
+    def json(self, check: str, seconds: float) -> JsonObject:
+        """As summary.json holds it, with the check's name, time and exit code."""
+        return {"n": self.n, "apart": [[a.seed, list[Json](a.fonts), a.why] for a in self.apart],
+                "crashed": [[c.seed, c.error] for c in self.crashed],
+                "check": check, "seconds": seconds, "exit": 1 if self.apart or self.crashed else 0}
+
+
+def font_folders() -> dict[str, list[str]]:
     """What CFX_LinuxFontInfo / CFX_MacFontInfo would scan (their default folders), for the
     summary: which faces this machine has decides what substitution PDFium does."""
     home = Path.home()
@@ -57,7 +104,7 @@ def font_folders() -> dict:
                          "/usr/local/share/fonts"],
                "darwin": [str(home / "Library/Fonts"), "/Library/Fonts", "/System/Library/Fonts"],
                "win32": [os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts")]}
-    out = {}
+    out: dict[str, list[str]] = {}
     for folder in folders.get("linux" if sys.platform.startswith("linux") else sys.platform, []):
         p = Path(folder)
         files = sorted(str(f.relative_to(p)) for f in p.rglob("*") if f.is_file()
@@ -77,12 +124,13 @@ def folder_faces() -> list[str]:
     return list(info.font_list)
 
 
-def subst_extract(seed0: int, n: int, pool: str) -> dict:
+def subst_extract(seed0: int, n: int, pool: str) -> SubstExtract:
     """Chars (font ids aside) and glyph widths of render_torture_subst's pages, both backends."""
     from .. import pdf
     from .render_torture_subst import case
     from .render_torture_text import pdf_bytes
-    apart, crashed = [], []
+    apart: list[Apart] = []
+    crashed: list[Crashed] = []
     for seed in range(seed0, seed0 + n):
         content, fonts, _, _ = case(seed, 2, pool)
         data = pdf_bytes(content, fonts)
@@ -98,18 +146,27 @@ def subst_extract(seed0: int, n: int, pool: str) -> dict:
                 finally:
                     doc.close()
         except Exception as e:  # noqa: BLE001
-            crashed.append((seed, repr(e)[:200]))
+            crashed.append(Crashed(seed=seed, error=repr(e)[:200]))
             continue
         if said[0] != said[1]:
             a, b = said
             k = next((i for i, (x, y) in enumerate(zip(a[0], b[0])) if x != y), None)
             why = (f"char {k}: pdfium {a[0][k]} pure {b[0][k]}" if k is not None
                    else f"{len(a[0])} chars vs {len(b[0])}" if len(a[0]) != len(b[0]) else "glyph widths")
-            apart.append((seed, [f.name for f in fonts], why[:400]))
-    return {"n": n, "apart": apart, "crashed": crashed}
+            apart.append(Apart(seed=seed, fonts=[f.name for f in fonts], why=why[:400]))
+    return SubstExtract(n=n, apart=apart, crashed=crashed)
 
 
-def run(name: str, module: str, args: list[str], out: Path, timeout: float) -> dict:
+def printed(out: str | bytes | None) -> str:
+    """What a process printed before its timeout. `subprocess.run(text=True)` hands it over as
+    bytes where it read it itself (POSIX) and as str where it read it again after the kill
+    (Windows); None: nothing."""
+    if out is None:
+        return ""
+    return out if isinstance(out, str) else out.decode("utf-8", "replace")
+
+
+def run(name: str, module: str, args: list[str], out: Path, timeout: float) -> CheckRun:
     folder = out / name
     folder.mkdir(parents=True, exist_ok=True)
     cmd = [sys.executable, "-m", f"beamer2slides.devtools.{module}", *[a.replace("{out}", str(folder)) for a in args]]
@@ -118,7 +175,7 @@ def run(name: str, module: str, args: list[str], out: Path, timeout: float) -> d
         p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout)
         code, text = p.returncode, (p.stdout + p.stderr)
     except subprocess.TimeoutExpired as e:
-        code, text = -1, f"timeout after {timeout} s\n" + (e.stdout or b"").decode("utf-8", "replace")[-4000:]
+        code, text = -1, f"timeout after {timeout} s\n" + printed(e.stdout)[-4000:]
     (folder / "log.txt").write_text(text, encoding="utf-8")
     # truetype/marked-content print their counts and exit 0: an APART line or a non-empty tally fails
     lines = text.strip().splitlines()
@@ -126,15 +183,17 @@ def run(name: str, module: str, args: list[str], out: Path, timeout: float) -> d
         last = next((ln for ln in reversed(lines) if ln.startswith("done")), "")
         if not last or "APART" in text or "crash" in text or (last.endswith("}") and not last.endswith("{}")):
             code = 1
-    return {"check": name, "exit": code, "seconds": round(time.time() - t, 1), "tail": lines[-12:]}
+    return CheckRun(check=name, exit=code, seconds=round(time.time() - t, 1), tail=lines[-12:])
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--out", default="out/platform-check")
     ap.add_argument("--only", nargs="*", help="names of the checks to run")
     ap.add_argument("--timeout", type=float, default=1800)
     args = ap.parse_args(argv)
+    only: list[str] | None = args.only
+    timeout: float = args.timeout
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     import pypdfium2.version as pv
@@ -142,34 +201,40 @@ def main(argv=None) -> int:
     decks = DECKS.is_dir() and any(DECKS.glob("*.pdf"))
     if decks:
         checks += WITH_DECKS
-    if args.only:
-        checks = [c for c in checks if c[0] in args.only]
-    summary = {"platform": platform.platform(), "python": sys.version, "pdfium": str(pv.PDFIUM_INFO),
-               "pypdfium2": str(pv.PYPDFIUM_INFO), "decks": decks, "fonts": font_folders(), "faces": folder_faces(), "checks": []}
-    failed = []
+    if only:
+        checks = [c for c in checks if c[0] in only]
+    ran: list[Json] = []
+    fonts = font_folders()
+    summary: JsonObject = {"platform": platform.platform(), "python": sys.version, "pdfium": str(pv.PDFIUM_INFO),
+                           "pypdfium2": str(pv.PYPDFIUM_INFO), "decks": decks,
+                           "fonts": {k: list[Json](v) for k, v in fonts.items()},
+                           "faces": list[Json](folder_faces()), "checks": ran}
+    failed: list[str] = []
     for name, module, cargs in checks:
-        r = run(name, module, cargs, out, args.timeout)
-        summary["checks"].append(r)
-        print(f"{name:22s} exit {r['exit']:3d}  {r['seconds']:7.1f} s  {r['tail'][-1] if r['tail'] else ''}", flush=True)
-        if r["exit"] != 0:
+        r = run(name, module, cargs, out, timeout)
+        ran.append(r.json())
+        print(f"{name:22s} exit {r.exit:3d}  {r.seconds:7.1f} s  {r.tail[-1] if r.tail else ''}", flush=True)
+        if r.exit != 0:
             failed.append(name)
     for pool in ("any", "installed"):
         name = f"subst-extract-{pool}"
-        if args.only and name not in args.only:
+        if only and name not in only:
             continue
         t = time.time()
-        r = subst_extract(0, 150, pool)
-        r.update(check=name, seconds=round(time.time() - t, 1), exit=1 if r["apart"] or r["crashed"] else 0)
-        summary["checks"].append(r)
-        print(f"{name:22s} exit {r['exit']:3d}  {r['seconds']:7.1f} s  apart {len(r['apart'])} crashed {len(r['crashed'])}",
+        found = subst_extract(0, 150, pool)
+        seconds = round(time.time() - t, 1)
+        entry = found.json(name, seconds)
+        ran.append(entry)
+        code = 1 if found.apart or found.crashed else 0
+        print(f"{name:22s} exit {code:3d}  {seconds:7.1f} s  apart {len(found.apart)} crashed {len(found.crashed)}",
               flush=True)
-        if r["exit"]:
+        if code:
             failed.append(name)
-    summary["failed"] = failed
+    summary["failed"] = list[Json](failed)
     (out / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     print("failed:", failed or "none")
     return 1 if failed else 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

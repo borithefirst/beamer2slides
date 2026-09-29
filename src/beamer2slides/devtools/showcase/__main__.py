@@ -11,28 +11,35 @@
 import argparse
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Literal
 
 from beamer2slides.devtools.showcase.decks import CORPUS
+from beamer2slides.json_types import Json, as_array, as_object
+from beamer2slides.typing_compat import assert_never
 
 FIXTURE = Path("tests/decks/foreign/showcase")
 FIXTURE_SIDE = 64          # px: the compile test needs a picture of the right kind, not its detail
 
 
-def write_fixture(out: Path = FIXTURE, names=None) -> None:
-    """Each captured deck's target.json with its pictures beside it as `images/<name>`, shrunk to
-    FIXTURE_SIDE and named relative to the deck's folder: every deck we own and publish, for a
-    test that compiles what adopt writes on whatever TeX is installed (docs/showcase.md)."""
+def write_fixture(out: Path, names: Sequence[str]) -> None:
+    """Each captured deck (those in `names`, every one when it is empty) as its target.json with its
+    pictures beside it as `images/<name>`, shrunk to FIXTURE_SIDE and named relative to the deck's
+    folder: every deck we own and publish, for a test that compiles what adopt writes on whatever TeX
+    is installed (docs/showcase.md)."""
     from PIL import Image
     for deck in sorted(p for p in CORPUS.iterdir() if (p / "target.json").exists()):
         if names and deck.name not in names:
             continue
-        target = json.loads((deck / "target.json").read_text(encoding="utf-8"))
-        target["source"] = {"title": target.get("source", {}).get("title")}
+        where = str(deck / "target.json")
+        target = as_object(json.loads((deck / "target.json").read_text(encoding="utf-8")), where)
+        source = target.get("source")
+        target["source"] = {"title": None if source is None else as_object(source, f"{where}: source").get("title")}
         dest = out / deck.name
         (dest / "images").mkdir(parents=True, exist_ok=True)
 
-        def shrink(node):
+        def shrink(node: Json) -> None:
             if isinstance(node, dict):
                 for k, v in node.items():
                     if k in ("file", "background_file") and isinstance(v, str) and Path(v).exists():
@@ -53,10 +60,25 @@ def write_fixture(out: Path = FIXTURE, names=None) -> None:
         shrink(target)
         (dest / "target.json").write_text(json.dumps(target, ensure_ascii=False, indent=1) + "\n",
                                           encoding="utf-8")
-        print(f"{dest}: {len(target['slides'])} slides")
+        print(f"{dest}: {len(as_array(target.get('slides'), f'{where}: slides'))} slides")
 
 
-def main(argv=None) -> None:
+Command = Literal["decks", "capture", "run", "gallery", "swipe", "fixture"]
+
+
+class Args(argparse.Namespace):
+    """The command line, parsed; each command sets its own fields only."""
+    cmd: Command
+    names: list[str]
+    tag: str
+    jobs: int
+    out: str
+    site: str
+    dest: str
+
+
+def main(argv: list[str] | None) -> None:
+    """`argv` None: the process's own arguments."""
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("decks").add_argument("names", nargs="*")
@@ -72,33 +94,33 @@ def main(argv=None) -> None:
     s.add_argument("site")
     s.add_argument("dest", nargs="?", default="docs/media/adopt-swipe.gif")
     sub.add_parser("fixture").add_argument("names", nargs="*")
-    a = ap.parse_args(argv)
+    a = ap.parse_args(argv, namespace=Args())
     if a.cmd == "fixture":
-        write_fixture(FIXTURE, a.names or None)
+        write_fixture(FIXTURE, a.names)
         return
     # the adopt bench reads its corpus folder at import
     os.environ["B2S_ADOPT_CORPUS"] = str(CORPUS)
     if a.cmd == "decks":
         from beamer2slides.devtools.showcase.decks import build
-        build(a.names or None)
+        build(a.names)
     elif a.cmd == "capture":
-        import json
-
         from beamer2slides.devtools import adopt_bench
-        from beamer2slides.devtools.showcase.decks import MANIFEST
-        for name, d in json.loads(MANIFEST.read_text(encoding="utf-8")).items():
+        from beamer2slides.devtools.showcase.decks import MANIFEST, built_decks
+        for name, d in built_decks(MANIFEST).items():
             if not a.names or name in a.names:
-                adopt_bench.capture(d["id"], name, refresh=True)
+                adopt_bench.capture(d.id, name, refresh=True)
     elif a.cmd == "run":
         from beamer2slides.devtools import adopt_bench
         adopt_bench.main(["run", *a.names, "--tag", a.tag, "--jobs", str(a.jobs)])
     elif a.cmd == "swipe":
-        from beamer2slides.devtools.showcase.gallery import swipe_gif
-        swipe_gif(Path(a.site), Path(a.dest))
-    else:
+        from beamer2slides.devtools.showcase.gallery import SWIPE_WIDTH, swipe_gif
+        swipe_gif(Path(a.site), Path(a.dest), SWIPE_WIDTH)
+    elif a.cmd == "gallery":
         from beamer2slides.devtools.showcase.gallery import write
         write(Path(a.out), a.tag)
+    else:
+        assert_never(a.cmd)
 
 
 if __name__ == "__main__":
-    main()
+    main(None)

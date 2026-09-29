@@ -18,85 +18,142 @@ Usage: python tools/plain_decks.py make [NAME...]    creates the decks, captures
 import argparse
 import json
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 
 from beamer2slides.devtools.adopt_bench import MANIFEST, capture
 from beamer2slides.google_types import as_json
-from beamer2slides.json_types import JsonObject, as_int, as_object, as_objects, as_str
+from beamer2slides.json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
 
-# a slide: (predefined layout, {(placeholder type, index): paragraphs}); a paragraph is a string or
-# a list of (text, style) runs, style keys: bold, italic, weight, font
+
+@dataclass(frozen=True, kw_only=True)
+class Style:
+    """A run's style: bold, italic, a weight of the paragraph's font (None: as the text has it)."""
+
+    bold: bool | None
+    italic: bool | None
+    weight: int | None
+
+    def said(self) -> bool:
+        return self.bold is not None or self.italic is not None or self.weight is not None
+
+
+PLAIN = Style(bold=None, italic=None, weight=None)
+BOLD = Style(bold=True, italic=None, weight=None)
+ITALIC = Style(bold=None, italic=True, weight=None)
+
+
+def weight(w: int) -> Style:
+    return Style(bold=None, italic=None, weight=w)
+
+
+# a paragraph is a string or a list of (text, style) runs
+Paragraph = str | list[tuple[str, Style]]
+Placeholder = tuple[str, int]    # (placeholder type, index)
+
+
+@dataclass(frozen=True, kw_only=True)
+class PlainSlide:
+    """A slide: its predefined layout, and the paragraphs typed into its placeholders."""
+
+    layout: str
+    fill: dict[Placeholder, list[Paragraph]]
+
+
 LAYOUTS = [
-    ("TITLE", {("CENTERED_TITLE", 0): ["Hello"], ("SUBTITLE", 0): ["A simple deck"]}),
-    ("SECTION_HEADER", {("TITLE", 0): ["Part one"]}),
-    ("TITLE_AND_BODY", {("TITLE", 0): ["Agenda"],
-                        ("BODY", 0): ["Why we measure what people see",
-                                      "What a deck made in Slides looks like when nobody designed it, "
-                                      "with a line long enough to wrap",
-                                      "Questions"]}),
-    ("TITLE_AND_TWO_COLUMNS", {("TITLE", 0): ["Before and after"],
-                               ("BODY", 0): ["Left column", "Two items"],
-                               ("BODY", 1): ["Right column", "Three", "Items"]}),
-    ("TITLE_ONLY", {("TITLE", 0): ["Just a title"]}),
-    ("ONE_COLUMN_TEXT", {("TITLE", 0): ["One column"],
-                         ("BODY", 0): ["A paragraph of prose in the body of a one-column layout, long enough "
-                                       "to wrap over two or three lines of the box it sits in."]}),
-    ("MAIN_POINT", {("TITLE", 0): ["The main point"]}),
-    ("SECTION_TITLE_AND_DESCRIPTION", {("TITLE", 0): ["A section"], ("SUBTITLE", 0): ["and its subtitle"],
-                                       ("BODY", 0): ["A description of the section, in the body box."]}),
-    ("CAPTION_ONLY", {("BODY", 0): ["A caption at the bottom of an empty slide"]}),
-    ("BIG_NUMBER", {("TITLE", 0): ["42%"], ("BODY", 0): ["of the decks people make start here"]}),
+    PlainSlide(layout="TITLE", fill={("CENTERED_TITLE", 0): ["Hello"], ("SUBTITLE", 0): ["A simple deck"]}),
+    PlainSlide(layout="SECTION_HEADER", fill={("TITLE", 0): ["Part one"]}),
+    PlainSlide(layout="TITLE_AND_BODY", fill={("TITLE", 0): ["Agenda"],
+                                              ("BODY", 0): ["Why we measure what people see",
+                                                            "What a deck made in Slides looks like when nobody "
+                                                            "designed it, with a line long enough to wrap",
+                                                            "Questions"]}),
+    PlainSlide(layout="TITLE_AND_TWO_COLUMNS", fill={("TITLE", 0): ["Before and after"],
+                                                     ("BODY", 0): ["Left column", "Two items"],
+                                                     ("BODY", 1): ["Right column", "Three", "Items"]}),
+    PlainSlide(layout="TITLE_ONLY", fill={("TITLE", 0): ["Just a title"]}),
+    PlainSlide(layout="ONE_COLUMN_TEXT",
+               fill={("TITLE", 0): ["One column"],
+                     ("BODY", 0): ["A paragraph of prose in the body of a one-column layout, long enough "
+                                   "to wrap over two or three lines of the box it sits in."]}),
+    PlainSlide(layout="MAIN_POINT", fill={("TITLE", 0): ["The main point"]}),
+    PlainSlide(layout="SECTION_TITLE_AND_DESCRIPTION",
+               fill={("TITLE", 0): ["A section"], ("SUBTITLE", 0): ["and its subtitle"],
+                     ("BODY", 0): ["A description of the section, in the body box."]}),
+    PlainSlide(layout="CAPTION_ONLY", fill={("BODY", 0): ["A caption at the bottom of an empty slide"]}),
+    PlainSlide(layout="BIG_NUMBER", fill={("TITLE", 0): ["42%"], ("BODY", 0): ["of the decks people make start here"]}),
 ]
 
 
-def styled(font: str) -> list:
+def styled(font: str) -> list[PlainSlide]:
     """The layouts again, every run in `font`, with weights, italics, quotes and right-to-left lines."""
-    body = ["Plain words at the family's regular weight",
-            [("A ", {}), ("bold", {"bold": True}), (" word and an ", {}), ("italic", {"italic": True}), (" one", {})],
-            [("Medium weight 500 all along", {"weight": 500})],
-            [("Light weight 300 all along", {"weight": 300})],
-            "It's the cats' \"quotes\", straight as typed"]
+    body: list[Paragraph] = [
+        "Plain words at the family's regular weight",
+        [("A ", PLAIN), ("bold", BOLD), (" word and an ", PLAIN), ("italic", ITALIC), (" one", PLAIN)],
+        [("Medium weight 500 all along", weight(500))],
+        [("Light weight 300 all along", weight(300))],
+        "It's the cats' \"quotes\", straight as typed"]
     return [
-        ("TITLE", {("CENTERED_TITLE", 0): [[(font, {"bold": True})]], ("SUBTITLE", 0): ["in its own family"]}),
-        ("TITLE_AND_BODY", {("TITLE", 0): [[("Weights of " + font, {"weight": 600})]], ("BODY", 0): body}),
-        ("SECTION_HEADER", {("TITLE", 0): [[("A section in ", {}), (font, {"bold": True})]]}),
-        ("TITLE_AND_BODY", {("TITLE", 0): ["Right to left"],
-                            ("BODY", 0): ["Thanks: شكراً لكم", "Hebrew: תודה רבה", "Latin words again"]}),
-        ("BIG_NUMBER", {("TITLE", 0): [[("7", {"bold": True})]], ("BODY", 0): ["slides in this family"]}),
+        PlainSlide(layout="TITLE", fill={("CENTERED_TITLE", 0): [[(font, BOLD)]], ("SUBTITLE", 0): ["in its own family"]}),
+        PlainSlide(layout="TITLE_AND_BODY", fill={("TITLE", 0): [[("Weights of " + font, weight(600))]],
+                                                  ("BODY", 0): body}),
+        PlainSlide(layout="SECTION_HEADER", fill={("TITLE", 0): [[("A section in ", PLAIN), (font, BOLD)]]}),
+        PlainSlide(layout="TITLE_AND_BODY", fill={("TITLE", 0): ["Right to left"],
+                                                  ("BODY", 0): ["Thanks: شكراً لكم", "Hebrew: תודה רבה",
+                                                                "Latin words again"]}),
+        PlainSlide(layout="BIG_NUMBER", fill={("TITLE", 0): [[("7", BOLD)]], ("BODY", 0): ["slides in this family"]}),
     ]
 
 
-def fonts_deck() -> list:
-    return [s for font in ("Montserrat", "Raleway", "Inter", "Open Sans") for s in styled(font)]
+FONTS = ("Montserrat", "Raleway", "Inter", "Open Sans")
 
 
-DECKS = {"plain-layouts": ("b2s plain deck: layouts", lambda: LAYOUTS, None),
-         "plain-fonts": ("b2s plain deck: Google Fonts", fonts_deck, "table")}
+def fonts_deck() -> list[PlainSlide]:
+    return [s for font in FONTS for s in styled(font)]
 
 
-def paragraphs_requests(oid: str, paragraphs: list, font: str | None) -> list:
-    text, runs = "", []
+def layouts_deck() -> list[PlainSlide]:
+    return LAYOUTS
+
+
+@dataclass(frozen=True, kw_only=True)
+class DeckSpec:
+    title: str
+    slides: Callable[[], list[PlainSlide]]
+    table: bool      # a last TITLE_ONLY slide holding a 3 by 3 table
+
+
+DECKS = {"plain-layouts": DeckSpec(title="b2s plain deck: layouts", slides=layouts_deck, table=False),
+         "plain-fonts": DeckSpec(title="b2s plain deck: Google Fonts", slides=fonts_deck, table=True)}
+
+
+def paragraphs_requests(oid: str, paragraphs: Sequence[Paragraph], font: str | None) -> list[JsonObject]:
+    text = ""
+    runs: list[tuple[int, int, Style]] = []
     for k, para in enumerate(paragraphs):
-        for piece, style in ([(para, {})] if isinstance(para, str) else para):
+        for piece, style in ([(para, PLAIN)] if isinstance(para, str) else para):
             runs.append((len(text), len(text) + len(piece), style))
             text += piece
         if k < len(paragraphs) - 1:
             text += "\n"
-    reqs = [{"insertText": {"objectId": oid, "text": text}}]
+    reqs: list[JsonObject] = [{"insertText": {"objectId": oid, "text": text}}]
     if font:
         reqs.append({"updateTextStyle": {"objectId": oid, "textRange": {"type": "ALL"},
                                          "style": {"fontFamily": font}, "fields": "fontFamily"}})
     for a, b, style in runs:
-        if not style or a == b:
+        if not style.said() or a == b:
             continue
-        s, fields = {}, []
-        if "weight" in style:
-            s["weightedFontFamily"] = {"fontFamily": font or "Arial", "weight": style["weight"]}
+        s: JsonObject = {}
+        fields: list[str] = []
+        if style.weight is not None:
+            s["weightedFontFamily"] = {"fontFamily": font or "Arial", "weight": style.weight}
             fields.append("weightedFontFamily")
-        for key in ("bold", "italic"):
-            if key in style:
-                s[key] = style[key]
-                fields.append(key)
+        if style.bold is not None:
+            s["bold"] = style.bold
+            fields.append("bold")
+        if style.italic is not None:
+            s["italic"] = style.italic
+            fields.append("italic")
         # UTF-16 indices: every text here is in the BMP, so Python's are the same
         reqs.append({"updateTextStyle": {"objectId": oid, "textRange": {"type": "FIXED_RANGE", "startIndex": a,
                                                                         "endIndex": b},
@@ -112,19 +169,19 @@ def _placeholder(element: JsonObject) -> JsonObject:
 def make(name: str) -> str:
     from beamer2slides.google_auth import slides_service
     from beamer2slides.gslides import execute
-    title, spec, extra = DECKS[name]
-    slides = spec()
+    spec = DECKS[name]
+    slides = spec.slides()
     s = slides_service()
-    made = execute(s.presentations().create(body={"title": title}))
+    made = execute(s.presentations().create(body={"title": spec.title}))
     first = made.get("slides", [])
     pid, blank = made.get("presentationId"), first[0].get("objectId") if first else None
     if pid is None or blank is None:
         raise ValueError(f"presentations.create answered no deck id or no first slide: {sorted(made)}")
-    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": blank}}]
-    for k, (layout, _) in enumerate(slides):
+    reqs: list[JsonObject] = [{"deleteObject": {"objectId": blank}}]
+    for k, slide in enumerate(slides):
         reqs.append({"createSlide": {"objectId": f"b2s_plain_{k:02d}", "insertionIndex": k,
-                                     "slideLayoutReference": {"predefinedLayout": layout}}})
-    if extra == "table":
+                                     "slideLayoutReference": {"predefinedLayout": slide.layout}}})
+    if spec.table:
         reqs.append({"createSlide": {"objectId": "b2s_plain_table", "insertionIndex": len(slides),
                                      "slideLayoutReference": {"predefinedLayout": "TITLE_ONLY"}}})
         reqs.append({"createTable": {"objectId": "b2s_plain_tbl", "rows": 3, "columns": 3,
@@ -132,14 +189,14 @@ def make(name: str) -> str:
     execute(s.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     pres = as_json(execute(s.presentations().get(presentationId=pid)), pid)
     reqs = []
-    font_of = {}
+    font_of: dict[str, str] = {}
     if name == "plain-fonts":
-        order = [f for f in ("Montserrat", "Raleway", "Inter", "Open Sans") for _ in range(5)]
+        order = [f for f in FONTS for _ in range(5)]
         font_of = {f"b2s_plain_{k:02d}": f for k, f in enumerate(order)}
     elements = {as_str(p.get("objectId"), "a slide's id"):
                 as_objects(p.get("pageElements", []), "a slide's elements")
                 for p in as_objects(pres.get("slides", []), f"{name}'s slides")}
-    for k, (layout, fill) in enumerate(slides):
+    for k, slide in enumerate(slides):
         page = f"b2s_plain_{k:02d}"
         held: dict[tuple[str, int], str] = {}
         for pe in elements[page]:
@@ -147,11 +204,11 @@ def make(name: str) -> str:
             if ph:
                 held[(as_str(ph.get("type"), "a placeholder's type"),
                       as_int(ph.get("index", 0), "a placeholder's index"))] = as_str(pe.get("objectId"), "an id")
-        for key, paragraphs in fill.items():
+        for key, paragraphs in slide.fill.items():
             if key not in held:
-                raise KeyError(f"{name} slide {k} ({layout}) has no {key} placeholder: {sorted(held)}")
+                raise KeyError(f"{name} slide {k} ({slide.layout}) has no {key} placeholder: {sorted(held)}")
             reqs += paragraphs_requests(held[key], paragraphs, font_of.get(page))
-    if extra == "table":
+    if spec.table:
         title = next(as_str(pe.get("objectId"), "an id") for pe in elements["b2s_plain_table"]
                      if _placeholder(pe).get("type") == "TITLE")
         reqs += paragraphs_requests(title, ["A table"], "Montserrat")
@@ -170,21 +227,22 @@ def make(name: str) -> str:
     return pid
 
 
-def main(argv=None) -> None:
+def main(argv: list[str] | None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     m = sub.add_parser("make")
     m.add_argument("names", nargs="*")
     args = ap.parse_args(argv)
-    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
-    for name in args.names or list(DECKS):
+    names: list[str] = args.names
+    manifest = as_array(json.loads(MANIFEST.read_text(encoding="utf-8")), str(MANIFEST))
+    for name in names or list(DECKS):
         pid = make(name)
         capture(pid, name)
-        manifest = [d for d in manifest if d["name"] != name] + [
-            {"name": name, "id": pid, "title": DECKS[name][0], "features": ["16:9", "plain", "made"]}]
+        manifest = [d for d in manifest if as_object(d, str(MANIFEST))["name"] != name] + [
+            {"name": name, "id": pid, "title": DECKS[name].title, "features": list[Json](["16:9", "plain", "made"])}]
         print(f"{name}: https://docs.google.com/presentation/d/{pid}/edit", flush=True)
     MANIFEST.write_text(json.dumps(manifest, indent=1, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

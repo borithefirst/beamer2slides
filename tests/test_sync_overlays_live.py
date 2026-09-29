@@ -32,9 +32,9 @@ def run():
             pytest.skip(reason)
     OUT.mkdir(parents=True, exist_ok=True)
     r = Run("overlays-all")
-    from beamer2slides.devtools.deck_edits import LiveDeck
+    from beamer2slides.devtools.deck_edits import open_deck
     r.cli("convert", build("v1"), "--out", r.out, "--overlays", "all", "--force-rebuild")
-    r.deck = LiveDeck(json.loads((r.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
+    r.deck = open_deck(json.loads((r.out / "emit.json").read_text(encoding="utf-8"))["presentationId"], defer=False)
     yield r
     r.log.close()
 
@@ -66,6 +66,7 @@ def test_a_source_change_lands_and_every_step_stays(run):
     # count 2: the reworded bullet shows on both steps of that frame, and the change must land on both
     assert not sc.check_all(model, [{"check": "text", "slide": {"contains": "Why decks and sources diverge"},
                                      "text": "by an AI assistant and converted once", "count": 2}])
-    assert sc.integrity(model, base_ids=run.base_ids()) == []
+    assert sc.integrity(model, before=None, base_ids=run.base_ids(), allow_groups_changed=frozenset(),
+                        allow_ungrouped=frozenset()) == []
     assert sc.changes(report) >= 1
     run.cli("convert", build("v1"), "--out", run.out, "--overlays", "all", "--force-rebuild")  # (leave it at v1)

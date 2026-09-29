@@ -30,11 +30,13 @@ from __future__ import annotations
 import math
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
 from ..arrays import Mask, SignedRGB
 from ..deck_ir_types import TargetElement, TargetShape
+from ..json_types import JsonObject
 
 POINT_RE = r"\(([-\d.]+)pt,([-\d.]+)pt\)"
 ARC_RE = r"arc \[start angle=([-\d.]+), end angle=([-\d.]+), x radius=([-\d.]+)pt, y radius=([-\d.]+)pt\]"
@@ -81,8 +83,31 @@ FITTED_ELSEWHERE = {"ROUND_RECTANGLE", "ROUND_1_RECTANGLE", "ROUND_2_SAME_RECTAN
                     "ROUND_2_DIAGONAL_RECTANGLE", "FLOW_CHART_ALTERNATE_PROCESS", "PIE"}
 
 
-def _bezier(p0, c1, c2, p1, steps: int = BEZIER_STEPS):
-    pts = []
+Point = tuple[float, float]
+Ring = list[Point]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Score:
+    """`match_score`'s answer: intersection over union of our default polygon and the thumbnail's
+    own fill-coloured, visible pixels in the box (`iou`), the share of our polygon they fill
+    (`p_in`), the share of the rest they fill (`p_out`), how many there are (`n_true`) and the
+    box's pixel count (`n_box`)."""
+
+    kind: str
+    iou: float
+    p_in: float
+    p_out: float
+    n_true: int
+    n_box: int
+
+    def json(self) -> JsonObject:
+        return {"kind": self.kind, "iou": self.iou, "p_in": self.p_in, "p_out": self.p_out,
+                "n_true": self.n_true, "n_box": self.n_box}
+
+
+def _bezier(p0: Point, c1: Point, c2: Point, p1: Point, steps: int) -> Ring:
+    pts: Ring = []
     for i in range(1, steps + 1):
         t = i / steps
         mt = 1 - t
@@ -111,7 +136,8 @@ def path_polygons(path: str) -> list[list[tuple[float, float]]]:
         if text == "cycle":
             if ring:
                 rings.append(ring)
-            ring, cur = [], None
+            ring = []
+            cur = None
             continue
         cm = CONTROLS.fullmatch(text)
         if cm:
@@ -125,7 +151,7 @@ def path_polygons(path: str) -> list[list[tuple[float, float]]]:
                 break
             pos = nm.end()
             p1 = (float(nm.group(1)), -float(nm.group(2)))
-            ring.extend(_bezier(cur, c1, c2, p1))
+            ring.extend(_bezier(cur, c1, c2, p1, BEZIER_STEPS))
             cur = p1
             continue
         am = ARC.fullmatch(text)
@@ -153,7 +179,8 @@ def path_polygons(path: str) -> list[list[tuple[float, float]]]:
             if ring:
                 rings.append(ring)
             rings.append(pts)
-            ring, cur = [], None
+            ring = []
+            cur = None
             continue
         pm = POINT.fullmatch(text)
         if pm:
@@ -167,11 +194,11 @@ def path_polygons(path: str) -> list[list[tuple[float, float]]]:
     return rings
 
 
-def default_rings(kind: str, w: float, h: float,
-                  corner: float | None = None) -> list[list[tuple[float, float]]] | None:
+def default_rings(kind: str, w: float, h: float, corner: float | None) -> list[Ring] | None:
     """Every ring of `adopt_shapes.preset`'s fill paths ("fs", "f" or an "-eo" fill mode) for
     `kind` in its own w by h frame - the silhouette the *default* adjustment draws - or None when
-    the preset is unknown, or draws no fill at all (stroke-only: brackets, braces)."""
+    the preset is unknown, or draws no fill at all (stroke-only: brackets, braces). `corner`: a
+    rounded rectangle's radius read off the thumbnail (None: the preset's default)."""
     from .. import adopt_shapes
     paths = adopt_shapes.preset(kind, w, h, corner)
     if not paths:
@@ -212,11 +239,11 @@ MIN_TRUE_PX = 30  # a shape with fewer visible fill-coloured pixels than this sa
 
 
 def match_score(a: SignedRGB, el: TargetShape, above: Sequence[TargetElement], px: float,
-                own_words: bool) -> dict | None:
+                own_words: bool) -> Score | None:
     """How well `adopt_shapes`' default geometry for `el` (a foreign deck's shape element, as
     `deck_ir.read_presentation` + `deck_fills.settle` leave it: `fill` already read off the
     thumbnail where the API said nothing) agrees with what the thumbnail `a` actually shows in its
-    box - `{"iou", "p_in", "p_out", "n_true", "n_box", "kind"}`, or None when there is nothing to
+    box - a `Score`, or None when there is nothing to
     judge: an unknown or non-adjustable preset, no fill, a turned or sheared frame (its box is not
     its face - `deck_fills.sample_element` skips these for the same reason), or too little of the
     box visible (`deck_fills.SEEN`, mirroring "skip shapes under text or pictures") or too little
@@ -257,11 +284,7 @@ def match_score(a: SignedRGB, el: TargetShape, above: Sequence[TargetElement], p
     inter = int((theirs & ours_seen).sum())
     union = int((theirs | ours_seen).sum())
     n_seen = int(seen.sum()) or 1
-    return {
-        "kind": kind,
-        "iou": inter / union if union else 0.0,
-        "p_in": inter / max(1, int(ours_seen.sum())),
-        "p_out": (n_true - inter) / max(1, n_seen - int(ours_seen.sum())),
-        "n_true": n_true,
-        "n_box": int(region.size),
-    }
+    return Score(kind=kind, iou=inter / union if union else 0.0,
+                 p_in=inter / max(1, int(ours_seen.sum())),
+                 p_out=(n_true - inter) / max(1, n_seen - int(ours_seen.sum())),
+                 n_true=n_true, n_box=region.size)

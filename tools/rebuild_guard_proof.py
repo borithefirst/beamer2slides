@@ -117,7 +117,7 @@ def main() -> int:
                                       "said": [l for l in again.stdout.splitlines() if "existing deck" in l]}
 
         # 2. a person edits the deck, then someone re-runs convert.
-        deck = deck_edits.LiveDeck(pid, slides)
+        deck = deck_edits.LiveDeck(pid, slides, sc.read_with(slides, pid).pres, False)
         target = max((e for e in deck.model.slides[1].elements if e.kind == "shape" and len(e.text.split()) > 3),
                      key=lambda e: len(e.text))
         phrase = " ".join(target.text.split()[:6])
@@ -241,7 +241,7 @@ def main() -> int:
                 "slides": len(after.slides),
                 "holds_the_edit": "HANDWRITTEN" in " ".join(s.all_text for s in after.slides),
                 "lost_words": lost_words(recovered, after),
-                "integrity": sc.integrity(after) if report else []}
+                "integrity": sc.integrity_alone(after) if report else []}
             if not note["holds_the_edit"]:
                 problems.append("the sync after the recovery undid the recovered edit")
             if note["lost_words"]:

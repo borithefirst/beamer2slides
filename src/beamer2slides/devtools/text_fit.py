@@ -30,34 +30,252 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from PIL import Image
 
 from ..arrays import Ints, Mask, SignedRGB
 from ..fidelity import rgb_array, bands
-from ..json_types import JsonObject
+from ..json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_optional_str, as_str
 from ..pdf import Document
 
 DRIFT_PT = 2.0
 GROWN_PT = 2.0
 WIDTH_TOL = 0.08  # the calibrated substitutes land within a few per cent
-
+NO_SIZE = 10.0    # the size an element without paragraphs (a table, a picture) is measured at
 
 # A box in pixels: x0, y0, x1, y1.
 PxBox = tuple[int, int, int, int]
+# A box in PDF points: x0, y0, x1, y1.
+PtBox = tuple[float, float, float, float]
 
+# The element kinds measured: what Slides sets or scales (a shape is only its fill).
+FitKind = Literal["text", "table", "image", "diagram"]
+
+
+# --- deck.json, as far as text_fit reads it ---------------------------------------------------
+
+@dataclass(frozen=True, kw_only=True)
+class FitParagraph:
+    size: float
+    align: str               # "left" when the paragraph says none
+    baselines: list[float]   # its PDF lines' baselines, pt
+
+
+@dataclass(frozen=True, kw_only=True)
+class FitElement:
+    id: str
+    kind: FitKind
+    bbox: PtBox
+    paragraphs: list[FitParagraph]
+    name: str                # how findings name it: its id and its first words, or its kind
+
+
+@dataclass(frozen=True, kw_only=True)
+class FitSlide:
+    page: int                # 0-based
+    label: str | None
+    width: float             # pt
+    elements: list[FitElement]   # the measured kinds, footers left out
+
+
+def _number(value: Json, where: str) -> float:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value
+    raise JsonShapeError(f"{where}: a number was expected")
+
+
+def _fit_kind(value: str) -> FitKind | None:
+    if value == "text" or value == "table" or value == "image" or value == "diagram":
+        return value
+    return None
+
+
+def _paragraph(o: JsonObject, where: str) -> FitParagraph:
+    lines: list[JsonObject] = as_objects(o["lines"], f"{where}.lines") if "lines" in o else []
+    return FitParagraph(size=_number(o["size"], f"{where}.size"),
+                        align=as_optional_str(o.get("align"), f"{where}.align") or "left",
+                        baselines=[_number(ln["baseline"], f"{where}.lines[{i}].baseline") for i, ln in enumerate(lines)])
+
+
+def _element(o: JsonObject, kind: FitKind, where: str) -> FitElement:
+    eid = as_str(o["id"], f"{where}.id")
+    box = [_number(v, f"{where}.bbox") for v in as_array(o["bbox"], f"{where}.bbox")]
+    if len(box) != 4:
+        raise JsonShapeError(f"{where}.bbox: four numbers were expected")
+    raw: list[JsonObject] = as_objects(o["paragraphs"], f"{where}.paragraphs") if "paragraphs" in o else []
+    name = f"{eid} [{kind}]"
+    if kind == "text" and raw:
+        runs = as_objects(raw[0]["runs"], f"{where}.paragraphs[0].runs")
+        text = "".join(as_str(r.get("text", ""), f"{where}.paragraphs[0].runs.text") for r in runs).strip()
+        name = f"{eid} {text[:30]!r}"
+    return FitElement(id=eid, kind=kind, bbox=(box[0], box[1], box[2], box[3]),
+                      paragraphs=[_paragraph(p, f"{where}.paragraphs[{i}]") for i, p in enumerate(raw)],
+                      name=name)
+
+
+def fit_slide(o: JsonObject, where: str) -> FitSlide:
+    """A deck.json slide as text_fit reads it: its page, label, width and the elements measured."""
+    elements: list[FitElement] = []
+    for i, e in enumerate(as_objects(o["elements"], f"{where}.elements")):
+        kind = _fit_kind(as_str(e["kind"], f"{where}.elements[{i}].kind"))
+        if kind is None or e.get("role") == "footer":
+            continue
+        elements.append(_element(e, kind, f"{where}.elements[{i}]"))
+    size = as_array(o["size"], f"{where}.size")
+    return FitSlide(page=as_int(o["page"], f"{where}.page"), label=as_optional_str(o.get("label"), f"{where}.label"),
+                    width=_number(size[0], f"{where}.size"), elements=elements)
+
+
+# --- findings --------------------------------------------------------------------------------
+
+@dataclass(frozen=True, kw_only=True)
+class Missing:
+    """The element has no ink on one side."""
+    element: str
+    where: Literal["slides", "pdf"]
+
+    @property
+    def kind(self) -> Literal["missing"]:
+        return "missing"
+
+    def json(self) -> JsonObject:
+        return {"kind": self.kind, "element": self.element, "where": self.where}
+
+
+@dataclass(frozen=True, kw_only=True)
+class Wrap:
+    element: str
+    lines_pdf: int
+    lines_slides: int
+    height_pt: float
+
+    @property
+    def kind(self) -> Literal["wrap"]:
+        return "wrap"
+
+    def json(self) -> JsonObject:
+        return {"kind": self.kind, "element": self.element, "lines_pdf": self.lines_pdf,
+                "lines_slides": self.lines_slides, "height_pt": self.height_pt}
+
+
+@dataclass(frozen=True, kw_only=True)
+class Crowded:
+    element: str
+    lines_pdf: int
+    lines_slides: int
+
+    @property
+    def kind(self) -> Literal["crowded"]:
+        return "crowded"
+
+    def json(self) -> JsonObject:
+        return {"kind": self.kind, "element": self.element, "lines_pdf": self.lines_pdf,
+                "lines_slides": self.lines_slides}
+
+
+@dataclass(frozen=True, kw_only=True)
+class Drift:
+    element: str
+    line: int      # 1-based
+    align: str     # the paragraph's alignment, or "top" for the first line's vertical drift
+    pt: float
+
+    @property
+    def kind(self) -> Literal["drift"]:
+        return "drift"
+
+    def json(self) -> JsonObject:
+        return {"kind": self.kind, "element": self.element, "line": self.line, "align": self.align, "pt": self.pt}
+
+
+@dataclass(frozen=True, kw_only=True)
+class Width:
+    element: str
+    line: int      # 1-based
+    ratio: float   # Slides' width over the PDF's
+
+    @property
+    def kind(self) -> Literal["width"]:
+        return "width"
+
+    def json(self) -> JsonObject:
+        return {"kind": self.kind, "element": self.element, "line": self.line, "ratio": self.ratio}
+
+
+@dataclass(frozen=True, kw_only=True)
+class Grown:
+    element: str
+    pt: float
+
+    @property
+    def kind(self) -> Literal["grown"]:
+        return "grown"
+
+    def json(self) -> JsonObject:
+        return {"kind": self.kind, "element": self.element, "pt": self.pt}
+
+
+@dataclass(frozen=True, kw_only=True)
+class Touch:
+    element: str
+    other: str
+    direction: Literal["below", "right"]
+    gap_pdf_pt: float
+    gap_slides_pt: float
+
+    @property
+    def kind(self) -> Literal["touch"]:
+        return "touch"
+
+    def json(self) -> JsonObject:
+        return {"kind": self.kind, "element": self.element, "other": self.other, "direction": self.direction,
+                "gap_pdf_pt": self.gap_pdf_pt, "gap_slides_pt": self.gap_slides_pt}
+
+
+Finding = Missing | Wrap | Crowded | Drift | Width | Grown | Touch
+
+
+@dataclass(frozen=True, kw_only=True)
+class SlideFit:
+    page: int
+    label: str | None
+    findings: list[Finding]
+
+    def json(self) -> JsonObject:
+        return {"page": self.page, "label": self.label, "findings": [f.json() for f in self.findings]}
+
+
+@dataclass(frozen=True, kw_only=True)
+class FitReport:
+    pdf: str
+    slides: list[SlideFit]
+
+    def json(self) -> JsonObject:
+        return {"pdf": self.pdf, "slides": [s.json() for s in self.slides]}
+
+
+# --- measuring -------------------------------------------------------------------------------
 
 @dataclass(frozen=True, kw_only=True)
 class _Measured:
     """One element's ink on both sides (`r` the PDF's, `s` Slides'), within its window `win`."""
-    el: JsonObject
+    el: FitElement
     size: float
     ref: PxBox | None
     slides: PxBox | None
     r: Mask
     s: Mask
     win: PxBox
+
+
+@dataclass(frozen=True, kw_only=True)
+class _Worst:
+    """The worst line so far of one kind of line finding."""
+    value: float
+    line: int      # 0-based
+    align: str
 
 
 def _box(mask: Mask) -> PxBox | None:
@@ -67,7 +285,7 @@ def _box(mask: Mask) -> PxBox | None:
     return int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1
 
 
-def _ink(ref: SignedRGB, sl: SignedRGB, win: tuple, box: tuple) -> tuple[Mask, Mask]:
+def _ink(ref: SignedRGB, sl: SignedRGB, win: PxBox, box: PxBox) -> tuple[Mask, Mask]:
     """Ink in a window of both images, against the ground the text stands on: the commonest
     colour inside its own box (`box`, pixels) in the PDF render - a block's title bar, not the
     body panel the window also reaches into. A native panel is in both images and in neither
@@ -88,13 +306,20 @@ def _ink(ref: SignedRGB, sl: SignedRGB, win: tuple, box: tuple) -> tuple[Mask, M
 def _runs(on: Ints, join: int) -> list[tuple[int, int]]:
     """Runs of True in a profile, given as the indices `on` where it is True, joined across gaps
     shorter than `join`."""
-    out: list[list[int]] = []
-    for i in on:
+    out: list[tuple[int, int]] = []
+    for v in on:
+        i = int(v)
         if out and i - out[-1][1] < join:
-            out[-1][1] = i + 1
+            out[-1] = (out[-1][0], i + 1)
         else:
-            out.append([i, i + 1])
-    return [tuple(r) for r in out]
+            out.append((i, i + 1))
+    return out
+
+
+def _on(profile: Mask | np.bool_) -> Ints:
+    """The indices where a profile is True (numpy's older stubs, those Python 3.10 gets, say a
+    mask's `any(axis=...)` may be a scalar)."""
+    return np.flatnonzero(profile).astype(np.int64)
 
 
 def _own(m: Mask, x0: int, x1: int, size_px: float) -> None:
@@ -102,75 +327,76 @@ def _own(m: Mask, x0: int, x1: int, size_px: float) -> None:
     panel's corner or rim), and in each line the runs of words - joined across word spaces -
     that reach into the element's own columns. A line spilling past its box stays whole; a
     neighbour's word beyond a gap does not come with it."""
-    for top, bottom in _runs(np.flatnonzero(m.any(axis=1)), max(1, round(0.12 * size_px))):
+    for top, bottom in _runs(_on(m.any(axis=1)), max(1, round(0.12 * size_px))):
         if bottom - top < 0.3 * size_px:
             m[top:bottom] = False
             continue
-        for a, b in _runs(np.flatnonzero(m[top:bottom].any(axis=0)), max(1, round(0.6 * size_px))):
+        for a, b in _runs(_on(m[top:bottom].any(axis=0)), max(1, round(0.6 * size_px))):
             if b < x0 - 0.3 * size_px or a > x1 + 0.3 * size_px:
                 m[top:bottom, a:b] = False
 
 
-def _line_findings(e: dict, name: str, r: Mask, s: Mask, gap: int, size: float,
-                   scale: float) -> list[dict]:
+def _pt(px: float, scale: float) -> float:
+    return round(px / scale, 1)
+
+
+def _line_findings(e: FitElement, r: Mask, s: Mask, gap: int, size: float, scale: float) -> list[Finding]:
     """With the same number of lines on both sides, line i of the PDF against line i of Slides:
     the worst drift of the edge its paragraph is aligned to, the worst width ratio, the first
     line's vertical drift and how much further the last one went (the pitch)."""
-    pt = lambda px: round(float(px) / scale, 1)
-    rows_r, rows_s = _runs(np.flatnonzero(r.any(axis=1)), gap), _runs(np.flatnonzero(s.any(axis=1)), gap)
-    marks = [(ln["baseline"] * scale, p.get("align") or "left", ln.get("x0"), ln.get("x1"))
-             for p in e.get("paragraphs", []) for ln in p.get("lines", [])]
-    worst: dict[str, tuple] = {}
+    rows_r, rows_s = _runs(_on(r.any(axis=1)), gap), _runs(_on(s.any(axis=1)), gap)
+    marks = [(baseline * scale, p.align) for p in e.paragraphs for baseline in p.baselines]
+    first_align = e.paragraphs[0].align if e.paragraphs else "left"
+    drift_worst: _Worst | None = None
+    width_worst: _Worst | None = None
     for i, ((t, b), (t2, b2)) in enumerate(zip(rows_r, rows_s)):
-        xr, xs = np.flatnonzero(r[t:b].any(axis=0)), np.flatnonzero(s[t2:b2].any(axis=0))
+        xr, xs = _on(r[t:b].any(axis=0)), _on(s[t2:b2].any(axis=0))
         if not len(xr) or not len(xs):
             continue
-        (r0, r1), (s0, s1) = (xr[0], xr[-1] + 1), (xs[0], xs[-1] + 1)
+        r0, r1 = int(xr[0]), int(xr[-1]) + 1
+        s0, s1 = int(xs[0]), int(xs[-1]) + 1
         near = min(marks, key=lambda m: abs(m[0] - b), default=None)
-        align = near[1] if near else ((e.get("paragraphs") or [{}])[0].get("align") or "left")
+        align = near[1] if near else first_align
         drift = ((s0 + s1) - (r0 + r1)) / 2 if align == "center" else (s1 - r1) if align == "right" else (s0 - r0)
         ratio = (s1 - s0) / max(1, r1 - r0)
-        for kind, value, bad in (("drift", drift, abs(drift) / scale > DRIFT_PT),
-                                 ("width", ratio, abs(ratio - 1) > WIDTH_TOL and (r1 - r0) > 2 * size * scale)):
-            if bad and (kind not in worst or abs(value - (kind == "width")) > abs(worst[kind][0] - (kind == "width"))):
-                worst[kind] = (value, i, align)
-    out = []
-    if "drift" in worst:
-        v, i, align = worst["drift"]
-        out.append({"kind": "drift", "element": name, "line": i + 1, "align": align, "pt": pt(float(v))})
-    if "width" in worst:
-        v, i, _ = worst["width"]
-        out.append({"kind": "width", "element": name, "line": i + 1, "ratio": round(float(v), 3)})
+        if abs(drift) / scale > DRIFT_PT and (drift_worst is None or abs(drift) > abs(drift_worst.value)):
+            drift_worst = _Worst(value=drift, line=i, align=align)
+        if abs(ratio - 1) > WIDTH_TOL and (r1 - r0) > 2 * size * scale and \
+                (width_worst is None or abs(ratio - 1) > abs(width_worst.value - 1)):
+            width_worst = _Worst(value=ratio, line=i, align=align)
+    out: list[Finding] = []
+    if drift_worst is not None:
+        out.append(Drift(element=e.name, line=drift_worst.line + 1, align=drift_worst.align,
+                         pt=_pt(drift_worst.value, scale)))
+    if width_worst is not None:
+        out.append(Width(element=e.name, line=width_worst.line + 1, ratio=round(width_worst.value, 3)))
     if rows_r and rows_s:
         top = rows_s[0][0] - rows_r[0][0]
         if abs(top) / scale > DRIFT_PT:
-            out.append({"kind": "drift", "element": name, "line": 1, "align": "top", "pt": pt(top)})
+            out.append(Drift(element=e.name, line=1, align="top", pt=_pt(top, scale)))
         pitch = (rows_s[-1][1] - rows_r[-1][1]) - top
         if abs(pitch) / scale > GROWN_PT:
-            out.append({"kind": "grown", "element": name, "pt": pt(pitch)})
+            out.append(Grown(element=e.name, pt=_pt(pitch, scale)))
     return out
 
 
-def measure_slide(slide: dict, ref: SignedRGB, sl: SignedRGB, scale: float, crops: Path | None = None) -> dict:
+def measure_slide(slide: FitSlide, ref: SignedRGB, sl: SignedRGB, scale: float, crops: Path | None) -> SlideFit:
     """Findings for one slide. `scale` = pixels per PDF point; `ref` and `sl` are RGB arrays of
-    the PDF page and Google's thumbnail at the same size."""
-    pt = lambda px: round(px / scale, 1)
-    els = [e for e in slide["elements"] if e["kind"] in ("text", "table", "image", "diagram")
-           and e.get("role") not in ("footer",)]
+    the PDF page and Google's thumbnail at the same size; each finding's window is saved to
+    `crops` when given."""
+    els = slide.elements
     info: list[_Measured] = []
     h, w = ref.shape[:2]
-    full_r = np.zeros((h, w), bool)
-    full_s = np.zeros((h, w), bool)
     for e in els:
-        size = max((p["size"] for p in e.get("paragraphs", [])), default=10.0)
-        x0, y0, x1, y1 = e["bbox"]
+        size = max((p.size for p in e.paragraphs), default=NO_SIZE)
+        x0, y0, x1, y1 = e.bbox
         # The element's own window: its box, generous to the right and a line and a half below,
         # where a wider font spills and a wrapped line lands, but stopping at the nearest element on each side (their ink is theirs).
         l, t, rt, bt = x0 - 0.5 * size, y0 - 0.3 * size, x1 + 3 * size, y1 + 1.5 * size
         for o in els:
             if o is e:
                 continue
-            ox0, oy0, ox1, oy1 = o["bbox"]
+            ox0, oy0, ox1, oy1 = o.bbox
             if oy0 < y1 and y0 < oy1:  # beside it
                 if ox0 >= x1 - 0.5:
                     rt = min(rt, ox0)
@@ -183,38 +409,33 @@ def measure_slide(slide: dict, ref: SignedRGB, sl: SignedRGB, scale: float, crop
                     t = max(t, oy1, y0 - 0.5)
         win = (max(0, int(l * scale)), max(0, int(t * scale)), min(w, int(rt * scale)), min(h, int(bt * scale)))
         mr, ms = _ink(ref, sl, win, (int(x0 * scale), int(y0 * scale), int(x1 * scale) + 1, int(y1 * scale) + 1))
-        if e["kind"] == "text":
+        if e.kind == "text":
             for m in (mr, ms):
                 _own(m, int(x0 * scale) - win[0], int(x1 * scale) - win[0], size * scale)
         r, s = np.zeros((h, w), bool), np.zeros((h, w), bool)
         r[win[1]:win[3], win[0]:win[2]], s[win[1]:win[3], win[0]:win[2]] = mr, ms
-        full_r |= r
-        full_s |= s
         info.append(_Measured(el=e, size=size, ref=_box(r), slides=_box(s), r=r, s=s, win=win))
-    ref, sl = full_r, full_s  # for the collision walks: the elements' own ink, nothing else
 
-    findings = []
+    findings: list[Finding] = []
     for it in info:
         e, br, bs, size = it.el, it.ref, it.slides, it.size
-        name = _name(e)
         if br is None or bs is None:
-            findings.append({"kind": "missing", "element": name, "where": "slides" if bs is None else "pdf"})
+            findings.append(Missing(element=e.name, where="slides" if bs is None else "pdf"))
             continue
         gap = max(1, round(0.12 * size * scale))
-        if e["kind"] == "text":
+        if e.kind == "text":
             lr, ls = bands(it.r, gap), bands(it.s, gap)
             # A wrap adds (or takes away) a line of height too: bands alone also change where
             # Slides' deeper subscripts or a panel's corner join or split two runs of rows.
             grew = (bs[3] - bs[1]) - (br[3] - br[1])
             if lr != ls and abs(grew) >= 0.5 * size * scale:
-                findings.append({"kind": "wrap", "element": name, "lines_pdf": lr, "lines_slides": ls,
-                                 "height_pt": pt(grew)})
+                findings.append(Wrap(element=e.name, lines_pdf=lr, lines_slides=ls, height_pt=_pt(grew, scale)))
             elif ls < lr:
-                findings.append({"kind": "crowded", "element": name, "lines_pdf": lr, "lines_slides": ls})
+                findings.append(Crowded(element=e.name, lines_pdf=lr, lines_slides=ls))
             if lr == ls:
-                findings += _line_findings(e, name, it.r, it.s, gap, size, scale)
+                findings += _line_findings(e, it.r, it.s, gap, size, scale)
         elif (bs[3] - br[3]) / scale > GROWN_PT:
-            findings.append({"kind": "grown", "element": name, "pt": pt(bs[3] - br[3])})
+            findings.append(Grown(element=e.name, pt=_pt(bs[3] - br[3], scale)))
 
     # Collisions: A before B (above it, or left of it, overlapping across the other axis). A's
     # window runs up to B's box and B's starts at it, so A's ink in Slides is measured right up
@@ -230,76 +451,77 @@ def measure_slide(slide: dict, ref: SignedRGB, sl: SignedRGB, scale: float, crop
                     continue  # not facing each other across this axis
                 gap_pdf, gap_sl = rb[axis] - ra[axis + 2], rb[axis] - sa[axis + 2]
                 if gap_pdf >= scale and gap_sl < min(1.5 * scale, 0.25 * gap_pdf):
-                    findings.append({"kind": "touch", "element": _name(a.el), "other": _name(b.el),
-                                     "direction": "below" if axis == 1 else "right",
-                                     "gap_pdf_pt": pt(gap_pdf), "gap_slides_pt": pt(gap_sl)})
+                    findings.append(Touch(element=a.el.name, other=b.el.name,
+                                          direction="below" if axis == 1 else "right",
+                                          gap_pdf_pt=_pt(gap_pdf, scale), gap_slides_pt=_pt(gap_sl, scale)))
     if crops is not None:
         crops.mkdir(parents=True, exist_ok=True)
-        named = {_name(it.el): it for it in info}
+        named = {it.el.name: it for it in info}
         for i, f in enumerate(findings):
-            it = named.get(f["element"])
-            if it is None:
+            found = named.get(f.element)
+            if found is None:
                 continue
-            a0, b0, a1, b1 = it.win
-            pair = np.vstack([it.r[b0:b1, a0:a1], np.ones((3, a1 - a0), bool), it.s[b0:b1, a0:a1]])
-            Image.fromarray(~pair).save(crops / f"{slide['page'] + 1:03}-{i}-{f['kind']}.png")
-    return {"page": slide["page"], "label": slide.get("label"), "findings": findings}
+            a0, b0, a1, b1 = found.win
+            pair = np.vstack([found.r[b0:b1, a0:a1], np.ones((3, a1 - a0), bool), found.s[b0:b1, a0:a1]])
+            Image.fromarray(~pair).save(crops / f"{slide.page + 1:03}-{i}-{f.kind}.png")
+    return SlideFit(page=slide.page, label=slide.label, findings=findings)
 
 
-def _name(e: dict) -> str:
-    if e["kind"] == "text" and e.get("paragraphs"):
-        text = "".join(r.get("text", "") for r in e["paragraphs"][0]["runs"]).strip()
-        return f"{e['id']} {text[:30]!r}"
-    return f"{e['id']} [{e['kind']}]"
-
-
-def measure(pdf: Path, out: Path, crops: bool = False) -> dict:
-    deck = json.loads((out / "deck.json").read_text(encoding="utf-8"))
+def measure(pdf: Path, out: Path, crops: bool) -> FitReport:
+    """Every slide of the deck converted into `out` (its deck.json, the thumbnails `fidelity`
+    saved and the backgrounds' size) against the PDF; writes `<out>/text_fit.json`, and each
+    finding's window into `<out>/text_fit/` when `crops`."""
+    where = str(out / "deck.json")
+    deck = as_object(json.loads((out / "deck.json").read_text(encoding="utf-8")), where)
     doc = Document(pdf)
-    slides = []
-    for slide in deck["slides"]:
-        n = slide["page"]
+    slides: list[SlideFit] = []
+    for k, raw in enumerate(as_objects(deck["slides"], f"{where}: slides")):
+        slide = fit_slide(raw, f"{where}: slides[{k}]")
+        n = slide.page
         thumb_path = out / "fidelity" / f"slides-{n + 1:03}.png"
         if not thumb_path.exists():
             raise SystemExit(f"{thumb_path} missing: run `python -m beamer2slides fidelity {pdf} --out {out}` first")
-        thumb = rgb_array(Image.open(thumb_path))
+        thumb = rgb_array(Image.open(thumb_path), None)
         h, w = thumb.shape[:2]
         # The PDF page rendered as the background was, then scaled to the thumbnail's size.
         bg_width = Image.open(out / "backgrounds" / f"bg-{n + 1:03}.png").width
         ref = rgb_array(Image.fromarray(doc[n].render(bg_width / doc[n].width)), (w, h))
-        slides.append(measure_slide(slide, ref, thumb, w / slide["size"][0], out / "text_fit" if crops else None))
-    report = {"pdf": str(pdf), "slides": slides}
-    (out / "text_fit.json").write_text(json.dumps(report, indent=1, ensure_ascii=False), encoding="utf-8")
+        slides.append(measure_slide(slide, ref, thumb, w / slide.width, out / "text_fit" if crops else None))
+    report = FitReport(pdf=str(pdf), slides=slides)
+    (out / "text_fit.json").write_text(json.dumps(report.json(), indent=1, ensure_ascii=False), encoding="utf-8")
     return report
 
 
-def print_report(report: dict) -> int:
+def print_report(report: FitReport) -> int:
     bad = 0
-    for s in report["slides"]:
-        if not s["findings"]:
+    for s in report.slides:
+        if not s.findings:
             continue
         bad += 1
-        print(f"slide {s['page'] + 1}" + (f" ({s['label']})" if s.get("label") else ""))
-        for f in s["findings"]:
-            rest = {k: v for k, v in f.items() if k not in ("kind", "element")}
-            print(f"  {f['kind']:<7} {f['element']}  {rest}")
-    counts = {}
-    for s in report["slides"]:
-        for f in s["findings"]:
-            counts[f["kind"]] = counts.get(f["kind"], 0) + 1
-    print(f"{bad} of {len(report['slides'])} slides with findings: {counts or 'none'}")
+        print(f"slide {s.page + 1}" + (f" ({s.label})" if s.label else ""))
+        for f in s.findings:
+            rest = {k: v for k, v in f.json().items() if k not in ("kind", "element")}
+            print(f"  {f.kind:<7} {f.element}  {rest}")
+    counts: dict[str, int] = {}
+    for s in report.slides:
+        for f in s.findings:
+            counts[f.kind] = counts.get(f.kind, 0) + 1
+    print(f"{bad} of {len(report.slides)} slides with findings: {counts or 'none'}")
     return bad
 
 
-def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+def main(argv: list[str] | None) -> int:
+    ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     ap.add_argument("pdf", type=Path)
     ap.add_argument("--out", type=Path, required=True, help="the convert/fidelity output folder")
     ap.add_argument("--crops", action="store_true",
                     help="save each finding's window to <out>/text_fit/: the PDF's ink above, Slides' below")
     args = ap.parse_args(argv)
-    return print_report(measure(args.pdf, args.out, args.crops))
+    pdf: Path = args.pdf
+    out: Path = args.out
+    crops: bool = args.crops
+    return print_report(measure(pdf, out, crops))
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(None))

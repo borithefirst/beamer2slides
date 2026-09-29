@@ -52,20 +52,30 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PIL import Image, ImageDraw
 
+from ..google_types import part, presentation
+from ..json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_str
 from .visual_hunt import PANEL, ROOT, compile_tex, google_turn
+
+if TYPE_CHECKING:
+    from .sync_check import Element
 
 HUNT = ROOT / "out" / "edithunt"
 LOCKS = HUNT / "locks"
 EMU = 12700
+CLI_TIMEOUT = 3600   # s: a convert or a sync of a hunt deck
+EMPTY_PANEL_HEIGHT = 563   # px: a missing picture's panel, as tall as a 16:9 slide's
 
 
 # ---------------------------------------------------------------- plumbing
 
-def cli(*args: str, timeout: int = 3600) -> subprocess.CompletedProcess:
+def cli(*args: str | Path, timeout: int) -> subprocess.CompletedProcess[str]:
     """One `python -m beamer2slides ...`, never interactive, one Google turn."""
     cmd = [sys.executable, "-m", "beamer2slides.devtools.counted", *map(str, args)]
     with google_turn(LOCKS):
@@ -77,30 +87,94 @@ def journey_dir(journey: str) -> Path:
     return HUNT / "j" / journey
 
 
-def load_state(journey: str) -> dict:
-    return json.loads((journey_dir(journey) / "state.json").read_text(encoding="utf-8"))
+def _flag(v: Json, where: str) -> bool:
+    if isinstance(v, bool):
+        return v
+    raise JsonShapeError(f"{where}: true or false was expected, found {v!r}")
 
 
-def save_state(journey: str, state: dict) -> None:
-    (journey_dir(journey) / "state.json").write_text(json.dumps(state, indent=1, ensure_ascii=False), encoding="utf-8")
+def _jsons(xs: Sequence[JsonObject] | Sequence[str]) -> list[Json]:
+    """A list of objects or strings as the JSON array it is written as."""
+    return [x for x in xs]
 
 
-def write_json(path: Path, data) -> None:
+@dataclass(frozen=True, kw_only=True)
+class Round:
+    """One round of a journey: the person's edits, then (once `synced`) the author's revision."""
+    n: int
+    edits: tuple[JsonObject, ...]   # the edits.json items Google applied, in order
+    synced: bool
+
+    def json(self) -> JsonObject:
+        return {"n": self.n, "edits": _jsons(self.edits), "synced": self.synced}
+
+
+@dataclass(frozen=True, kw_only=True)
+class Journey:
+    """A journey's state.json: its deck, its slot and the rounds so far."""
+    journey: str
+    slot: str
+    pid: str
+    out: str   # the slot's output folder
+    pdf: str   # the slot's PDF, which each revision is copied over
+    sources: tuple[str, ...]   # the .tex of each version, oldest first
+    rounds: tuple[Round, ...]
+
+    def json(self) -> JsonObject:
+        return {"journey": self.journey, "slot": self.slot, "pid": self.pid, "out": self.out, "pdf": self.pdf,
+                "sources": _jsons(self.sources), "rounds": [r.json() for r in self.rounds]}
+
+    def open_round(self) -> Journey:
+        """The journey with a round open for edits: its last one, unless that one was synced."""
+        if self.rounds and not self.rounds[-1].synced:
+            return self
+        return replace(self, rounds=(*self.rounds, Round(n=len(self.rounds) + 1, edits=(), synced=False)))
+
+    def with_last(self, rnd: Round) -> Journey:
+        return replace(self, rounds=(*self.rounds[:-1], rnd))
+
+
+def journey_state(o: JsonObject, where: str) -> Journey:
+    rounds = tuple(Round(n=as_int(r.get("n"), f"{where} round n"),
+                         edits=tuple(as_objects(r.get("edits"), f"{where} round edits")),
+                         synced=_flag(r.get("synced"), f"{where} round synced"))
+                   for r in as_objects(o.get("rounds"), f"{where} rounds"))
+    return Journey(journey=as_str(o.get("journey"), f"{where} journey"), slot=as_str(o.get("slot"), f"{where} slot"),
+                   pid=as_str(o.get("pid"), f"{where} pid"), out=as_str(o.get("out"), f"{where} out"),
+                   pdf=as_str(o.get("pdf"), f"{where} pdf"),
+                   sources=tuple(as_str(s, f"{where} sources") for s in as_array(o.get("sources"), f"{where} sources")),
+                   rounds=rounds)
+
+
+def read_json(path: Path) -> Json:
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def load_state(journey: str) -> Journey:
+    path = journey_dir(journey) / "state.json"
+    return journey_state(as_object(read_json(path), str(path)), str(path))
+
+
+def save_state(state: Journey) -> None:
+    (journey_dir(state.journey) / "state.json").write_text(json.dumps(state.json(), indent=1, ensure_ascii=False),
+                                                           encoding="utf-8")
+
+
+def write_json(path: Path, data: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=1, ensure_ascii=False, default=str), encoding="utf-8")
 
 
-def read_pres(pid: str) -> dict:
+def read_pres(pid: str) -> JsonObject:
     from beamer2slides.google_auth import slides_service
     from beamer2slides.google_types import as_json
     from beamer2slides.gslides import execute
     return as_json(execute(slides_service().presentations().get(presentationId=pid)), pid)
 
 
-def snapshot(pid: str) -> tuple[dict, dict]:
+def snapshot(pid: str) -> tuple[JsonObject, JsonObject]:
     from beamer2slides import snapshot as snap
     from beamer2slides.deck_pictures import WORKERS
-    from beamer2slides.google_types import presentation
     pres = read_pres(pid)
     typed = presentation(pres, pid)
     read = snap.read_presentation(typed)
@@ -108,9 +182,8 @@ def snapshot(pid: str) -> tuple[dict, dict]:
     return pres, read
 
 
-def thumbs(pid: str, pres: dict, folder: Path) -> None:
+def thumbs(pid: str, pres: JsonObject, folder: Path) -> None:
     from beamer2slides.deck_ir import slide_thumbnails
-    from beamer2slides.google_types import presentation
     if folder.exists():
         shutil.rmtree(folder)
     slide_thumbnails(pid, presentation(pres, pid), folder)
@@ -124,9 +197,9 @@ def drop_slot(slot: str) -> None:
         from beamer2slides import snapshot as snap
         from beamer2slides.google_auth import drive_service
         from beamer2slides.gslides import execute
-        pid = json.loads(emit.read_text(encoding="utf-8")).get("presentationId")
         drive = drive_service()
         try:
+            pid = as_str(as_object(read_json(emit), str(emit)).get("presentationId"), f"{emit} presentationId")
             info = execute(drive.files().get(fileId=pid, fields="appProperties"))
             props = info.get("appProperties")
             fid = props.get(snap.BASE_PROPERTY) if isinstance(props, dict) else None
@@ -141,12 +214,25 @@ def drop_slot(slot: str) -> None:
 
 # ---------------------------------------------------------------- the deck as an editor reads it
 
-def dump(pres: dict) -> str:
+def what_it_is(e: Element) -> str:
+    """An element's kind as the dump names it: a shape by its type (and placeholder), a table by
+    its grid."""
+    if e.kind == "shape":
+        what = e.shape_type if e.shape_type is not None else "shape"
+        placeholder = part(e.shape.get("placeholder"), "shape.placeholder")
+        return what + (f"/{placeholder.get('type')}" if placeholder else "")
+    if e.kind == "table":
+        rows, columns = e.table_size
+        return f"table {rows}x{columns}"
+    return e.kind
+
+
+def dump(pres: JsonObject) -> str:
     """Every slide's objects with ids, absolute boxes in pt and their text: what raw requests
     address. Text is shown with its paragraphs split by ' | ', a table cell by [r,c]."""
     from .sync_check import Model
-    size = pres.get("pageSize", {})
-    w, h = (round(size.get(k, {}).get("magnitude", 0) / EMU, 1) for k in ("width", "height"))
+    size = presentation(pres, "dump").get("pageSize", {})
+    w, h = (round(d.get("magnitude", 0) / EMU, 1) for d in (size.get("width", {}), size.get("height", {})))
     lines = [f"# {pres.get('title', '')}  ({pres['presentationId']})",
              f"boxes: [x, y, w, h] pt on a {w} x {h} pt slide (a raw request's EMU = pt x 12700); "
              "ids are what raw requests name. A table's box height is not its rows' height.", ""]
@@ -156,23 +242,14 @@ def dump(pres: dict) -> str:
         for e in s.elements:
             x0, y0, x1, y1 = (round(v, 1) for v in e.box)
             depth = "  " * len(e.groups)
-            what = e.kind
-            shape = e.obj.get("shape", {})
-            if e.kind == "shape":
-                what = shape.get("shapeType", "shape")
-                if shape.get("placeholder"):
-                    what += f"/{shape['placeholder'].get('type')}"
-            if e.kind == "table":
-                t = e.obj["table"]
-                what = f"table {t.get('rows')}x{t.get('columns')}"
             title = e.obj.get("title") or ""
-            head = f"{depth}- {e.id} {what} [{x0}, {y0}, {round(x1 - x0, 1)}, {round(y1 - y0, 1)}]" + \
+            head = f"{depth}- {e.id} {what_it_is(e)} [{x0}, {y0}, {round(x1 - x0, 1)}, {round(y1 - y0, 1)}]" + \
                 (f" alt={title}" if title else "")
-            texts = []
+            texts: list[str] = []
             for text, cell in e.texts:
                 t = " | ".join(p for p in text.rstrip("\n").split("\n"))
                 if t.strip():
-                    where = f"[{cell.get('rowIndex')},{cell.get('columnIndex')}] " if cell else ""
+                    where = f"[{cell.row},{cell.column}] " if cell is not None else ""
                     texts.append(where + t)
             if texts:
                 body = "; ".join(texts)
@@ -182,15 +259,15 @@ def dump(pres: dict) -> str:
     return "\n".join(lines)
 
 
-def save_dump(pres: dict, path: Path) -> None:
+def save_dump(pres: JsonObject, path: Path) -> None:
     path.write_text(dump(pres), encoding="utf-8")
 
 
 # ---------------------------------------------------------------- pictures
 
-def panel(image: Image.Image | None, label: str, height: int | None = None) -> Image.Image:
+def panel(image: Image.Image | None, label: str) -> Image.Image:
     if image is None:
-        canvas = Image.new("RGB", (PANEL, (height or 563) + 28), (90, 90, 90))
+        canvas = Image.new("RGB", (PANEL, EMPTY_PANEL_HEIGHT + 28), (90, 90, 90))
         ImageDraw.Draw(canvas).text((8, 6), label, fill=(255, 255, 255))
         return canvas
     image = image.convert("RGB")
@@ -243,19 +320,19 @@ def start(tex: Path, journey: str, slot: str) -> int:
     pdf = HUNT / "pdfs" / f"{slot}.pdf"
     shutil.copyfile(built, pdf)
     out = HUNT / slot
-    r = cli("convert", pdf, "--out", out, "--title", f"edit hunt {journey}")
+    r = cli("convert", pdf, "--out", out, "--title", f"edit hunt {journey}", timeout=CLI_TIMEOUT)
     (j / "convert.log").write_text(r.stdout[-20000:] + "\n--- stderr\n" + r.stderr[-20000:], encoding="utf-8")
     if r.returncode:
         print(f"convert failed ({r.returncode}); see {j / 'convert.log'}\n{r.stderr[-2000:]}")
         return 1
-    pid = json.loads((out / "emit.json").read_text(encoding="utf-8"))["presentationId"]
+    emit = out / "emit.json"
+    pid = as_str(as_object(read_json(emit), str(emit)).get("presentationId"), f"{emit} presentationId")
     pres = read_pres(pid)
     thumbs(pid, pres, j / "thumbs" / "v1")
     render_pages(built, j / "pdf" / "v1")
     save_dump(pres, j / "deck-v1.md")
-    save_state(journey, {"journey": journey, "slot": slot, "pid": pid, "out": str(out), "pdf": str(pdf),
-                         "sources": [str(tex)], "rounds": []})
-    print(f"{journey}: {len(pres.get('slides', []))} slides in {time.time() - t0:.0f}s\n"
+    save_state(Journey(journey=journey, slot=slot, pid=pid, out=str(out), pdf=str(pdf), sources=(str(tex),), rounds=()))
+    print(f"{journey}: {len(as_array(pres.get('slides', []), 'slides'))} slides in {time.time() - t0:.0f}s\n"
           f"https://docs.google.com/presentation/d/{pid}/edit\n"
           f"read {j / 'deck-v1.md'} and {j / 'thumbs' / 'v1'}")
     return 0
@@ -263,47 +340,47 @@ def start(tex: Path, journey: str, slot: str) -> int:
 
 def edit(journey: str, edits_path: Path) -> int:
     from beamer2slides.gslides import execute
-    from .deck_edits import LiveDeck, apply
-    state = load_state(journey)
+    from .deck_edits import apply, open_deck
+    state = load_state(journey).open_round()
     j = journey_dir(journey)
-    rounds = state["rounds"]
-    if not rounds or rounds[-1].get("synced"):
-        rounds.append({"n": len(rounds) + 1, "edits": [], "synced": False})
-    rnd = rounds[-1]
-    n = rnd["n"]
-    items = json.loads(edits_path.read_text(encoding="utf-8-sig"))
-    deck = LiveDeck(state["pid"])
-    applied, refused, expectations = [], [], []
+    rnd = state.rounds[-1]
+    n = rnd.n
+    items = as_objects(json.loads(edits_path.read_text(encoding="utf-8-sig")), str(edits_path))
+    deck = open_deck(state.pid, defer=False)
+    applied: list[JsonObject] = []
+    refused: list[tuple[JsonObject, str]] = []   # (item, why)
+    expectations: list[JsonObject] = []
     with google_turn(LOCKS):
         for item in items:
             try:
                 if "raw" in item:
-                    execute(deck.api.presentations().batchUpdate(presentationId=state["pid"],
-                                                                 body={"requests": item["raw"]}))
+                    execute(deck.api.presentations().batchUpdate(
+                        presentationId=state.pid, body={"requests": as_objects(item["raw"], "raw")}))
                     deck.read()
                 else:
-                    expectations.append(apply(deck, item))
+                    expectations.append(apply(deck, item).json())
                 applied.append(item)
             except Exception as e:  # noqa: BLE001 (an edit Google refused or that found nothing)
-                refused.append({"item": item, "error": f"{type(e).__name__}: {e}"[:1500]})
+                refused.append((item, f"{type(e).__name__}: {e}"[:1500]))
                 deck.read()
-    rnd["edits"] += applied
+    rnd = replace(rnd, edits=(*rnd.edits, *applied))
+    state = state.with_last(rnd)
     folder = j / f"r{n}"
-    write_json(folder / "edits.json", rnd["edits"])
+    write_json(folder / "edits.json", list(rnd.edits))
     exp_path = folder / "expectations.json"
-    earlier = json.loads(exp_path.read_text(encoding="utf-8")) if exp_path.exists() else []
+    earlier = as_objects(read_json(exp_path), str(exp_path)) if exp_path.exists() else []
     write_json(exp_path, earlier + expectations)
     if refused:
-        write_json(folder / "refused.json", refused)
-    pres = read_pres(state["pid"])
-    thumbs(state["pid"], pres, j / "thumbs" / f"r{n}-edited")
+        write_json(folder / "refused.json", [{"item": item, "error": why} for item, why in refused])
+    pres = read_pres(state.pid)
+    thumbs(state.pid, pres, j / "thumbs" / f"r{n}-edited")
     save_dump(pres, j / f"deck-r{n}-edited.md")
-    save_state(journey, state)
+    save_state(state)
     print(f"round {n}: {len(applied)} edits applied, {len(refused)} refused"
           + (f" (see {folder / 'refused.json'})" if refused else "")
           + f"\nread {j / f'deck-r{n}-edited.md'} and {j / 'thumbs' / f'r{n}-edited'}")
-    for r in refused:
-        print("  refused:", r["error"][:300])
+    for _, why in refused:
+        print("  refused:", why[:300])
     return 0
 
 
@@ -319,14 +396,13 @@ def sync(journey: str, tex: Path) -> int:
     from . import layout_oracle, loss_oracle
     from . import sync_check as sc
 
-    state = load_state(journey)
+    loaded = load_state(journey)
     j = journey_dir(journey)
-    rounds = state["rounds"]
-    if not rounds or rounds[-1].get("synced"):
-        rounds.append({"n": len(rounds) + 1, "edits": [], "synced": False})
-        thumbs(state["pid"], read_pres(state["pid"]), j / "thumbs" / f"r{rounds[-1]['n']}-edited")
-    rnd = rounds[-1]
-    n = rnd["n"]
+    state = loaded.open_round()
+    rnd = state.rounds[-1]
+    n = rnd.n
+    if state is not loaded:   # no edits this round: the deck as it is is how the person left it
+        thumbs(state.pid, read_pres(state.pid), j / "thumbs" / f"r{n}-edited")
     folder = j / f"r{n}"
     folder.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
@@ -334,37 +410,41 @@ def sync(journey: str, tex: Path) -> int:
     built = compile_tex(tex)
     shutil.copyfile(tex, folder / f"v{n + 1}.tex")
     shutil.copyfile(built, folder / f"v{n + 1}.pdf")
-    pdf = Path(state["pdf"])
+    pdf = Path(state.pdf)
     shutil.copyfile(built, pdf)
-    out = Path(state["out"])
-    base = json.loads((out / "sync" / "base.json").read_text(encoding="utf-8"))
+    out = Path(state.out)
+    base_path = out / "sync" / "base.json"
+    base = as_object(read_json(base_path), str(base_path))
     write_json(folder / "base.json", base)
-    pres_before, before = snapshot(state["pid"])
+    pres_before, before = snapshot(state.pid)
     write_json(folder / "before.json", before)
-    r = cli("sync", pdf, "--deck", out)
+    r = cli("sync", pdf, "--deck", out, timeout=CLI_TIMEOUT)
     (folder / "sync.log").write_text(r.stdout[-30000:] + "\n--- stderr\n" + r.stderr[-20000:], encoding="utf-8")
-    summary: dict = {"journey": journey, "round": n, "sync_code": r.returncode, "requests": requests_of(r.stdout),
-                     "url": f"https://docs.google.com/presentation/d/{state['pid']}/edit"}
+    summary: JsonObject = {"journey": journey, "round": n, "sync_code": r.returncode, "requests": requests_of(r.stdout),
+                           "url": f"https://docs.google.com/presentation/d/{state.pid}/edit"}
     if r.returncode:
         summary["sync_error"] = (r.stdout[-1500:] + r.stderr[-2500:])
-    report = {}
-    if (out / "sync" / "sync-report.json").exists() and not r.returncode:
-        report = json.loads((out / "sync" / "sync-report.json").read_text(encoding="utf-8"))
+    report: JsonObject = {}
+    report_path = out / "sync" / "sync-report.json"
+    if report_path.exists() and not r.returncode:
+        report = as_object(read_json(report_path), str(report_path))
         write_json(folder / "report.json", report)
         if (out / "sync" / "sync-report.md").exists():
             shutil.copyfile(out / "sync" / "sync-report.md", folder / "sync-report.md")
-    pres_after, after = snapshot(state["pid"])
+    pres_after, after = snapshot(state.pid)
     write_json(folder / "after.json", after)
-    thumbs(state["pid"], pres_after, j / "thumbs" / f"r{n}-synced")
+    thumbs(state.pid, pres_after, j / "thumbs" / f"r{n}-synced")
     save_dump(pres_after, j / f"deck-r{n}-synced.md")
     pages = render_pages(built, j / "pdf" / f"v{n + 1}")
 
     if not r.returncode:
+        ours: JsonObject | None
         try:
             ours = build_ours(pdf, folder / "ours", base, "last", SLIDE_W,
                               snap.find_base_pictures(base, snap.picture_folders(out)))
         except Exception as e:  # noqa: BLE001
             ours, summary["ours_error"] = None, f"{type(e).__name__}: {e}"
+
         def loss() -> str:
             found = loss_oracle.check(base, before, after, report, ours)
             write_json(folder / "loss.json", found)
@@ -377,62 +457,89 @@ def sync(journey: str, tex: Path) -> int:
 
         for name, judge in (("loss", loss), ("layout", layout)):
             try:
-                summary[name] = judge().strip().splitlines()
+                summary[name] = _jsons(judge().strip().splitlines())
             except Exception as e:  # noqa: BLE001 (a pre-screen never fails the round)
                 summary[name] = [f"judge crashed: {type(e).__name__}: {e}"]
-        new_base = json.loads((out / "sync" / "base.json").read_text(encoding="utf-8"))
+        new_base = as_object(read_json(base_path), str(base_path))
         try:
-            summary["integrity"] = sc.integrity(sc.Model(pres_after), before=sc.Model(pres_before),
-                                                base_ids=sc.ids_in(new_base))
+            summary["integrity"] = _jsons(sc.integrity(sc.Model(pres_after), before=sc.Model(pres_before),
+                                                       base_ids=sc.ids_in(new_base), allow_groups_changed=frozenset(),
+                                                       allow_ungrouped=frozenset()))
         except Exception as e:  # noqa: BLE001
             summary["integrity"] = [f"crashed: {type(e).__name__}: {e}"]
         exp_path = folder / "expectations.json"
         if exp_path.exists():
-            checks = [c for x in json.loads(exp_path.read_text(encoding="utf-8")) for c in x.get("checks", [])]
-            summary["expectations_failing"] = sc.check_all(sc.Model(pres_after), checks)
+            checks = [c for x in as_objects(read_json(exp_path), str(exp_path))
+                      for c in as_objects(x.get("checks", []), f"{exp_path} checks")]
+            summary["expectations_failing"] = _jsons(sc.check_all(sc.Model(pres_after), checks))
         # The same PDF again: a sync that settled writes nothing.
-        r2 = cli("sync", pdf, "--deck", out)
+        r2 = cli("sync", pdf, "--deck", out, timeout=CLI_TIMEOUT)
         (folder / "settle.log").write_text(r2.stdout[-30000:] + "\n--- stderr\n" + r2.stderr[-20000:], encoding="utf-8")
-        summary["settle_code"], summary["settle_requests"] = r2.returncode, requests_of(r2.stdout)
-        if summary["settle_requests"]:
-            shutil.copyfile(out / "sync" / "sync-report.json", folder / "settle-report.json")
-            pres_settled = read_pres(state["pid"])
-            thumbs(state["pid"], pres_settled, j / "thumbs" / f"r{n}-resynced")
-        summary["conflicts"] = [f"{c.get('slide')} / {c.get('element')}: {c.get('field')} ({c.get('resolution')})"
-                                for c in report.get("conflicts", [])]
+        settle_requests = requests_of(r2.stdout)
+        summary["settle_code"], summary["settle_requests"] = r2.returncode, settle_requests
+        if settle_requests:
+            shutil.copyfile(report_path, folder / "settle-report.json")
+            pres_settled = read_pres(state.pid)
+            thumbs(state.pid, pres_settled, j / "thumbs" / f"r{n}-resynced")
+        summary["conflicts"] = _jsons([f"{c.get('slide')} / {c.get('element')}: {c.get('field')} ({c.get('resolution')})"
+                                       for c in as_objects(report.get("conflicts", []), "report conflicts")])
         summary["warnings"] = report.get("warnings", [])
-        summary["counts"] = {k: len(report.get(k) or []) for k in ("applied", "overrides", "conflicts", "warnings")}
+        summary["counts"] = {k: _count(report, k) for k in ("applied", "overrides", "conflicts", "warnings")}
     else:
         new_base = base
 
-    # Which slide is which: the synced slide, the same slide as the person left it, its new PDF page.
-    edited_idx = {s["objectId"]: i for i, s in enumerate(pres_before.get("slides", []))}
-    page_of = {s.get("objectId"): s.get("page") for s in new_base.get("slides", [])}
+    listing, gone = which_slide_is_which(pres_before, pres_after, new_base, pages, j, n)
+    slides_gone: list[Json] = [g for g in gone]
+    summary["slides"], summary["slides_gone"] = _jsons(listing), slides_gone
+    summary["seconds"] = round(time.time() - t0)
+    write_json(j / f"summary-r{n}.json", summary)
+    state = replace(state.with_last(replace(rnd, synced=True)), sources=(*state.sources, str(tex)))
+    save_state(state)
+    print(json.dumps({k: v for k, v in summary.items() if k != "slides"}, indent=1, ensure_ascii=False)[:6000])
+    print(f"pictures: {j / 'cmp' / f'r{n}-NNN.png'}")
+    return 0
+
+
+def _count(report: JsonObject, key: str) -> int:
+    """How many entries the report lists under `key` (absent or null: none)."""
+    v = report.get(key)
+    return len(as_array(v, f"report {key}")) if v else 0
+
+
+def _slide_ids(pres: JsonObject, where: str) -> list[str]:
+    return [as_str(s.get("objectId"), f"{where} objectId") for s in as_objects(pres.get("slides", []), f"{where} slides")]
+
+
+def which_slide_is_which(pres_before: JsonObject, pres_after: JsonObject, new_base: JsonObject, pages: list[Path],
+                         j: Path, n: int) -> tuple[list[JsonObject], list[int]]:
+    """Per synced slide, the pictures `cmp/rN-NNN.png`: the same slide as the person left it | its
+    new PDF page | the synced slide; and the listing of which is which, with the slides the sync
+    took away (numbered as the person left them)."""
+    edited_idx = {sid: i for i, sid in enumerate(_slide_ids(pres_before, "before"))}
+    page_of: dict[str, int | None] = {}
+    for s in as_objects(new_base.get("slides", []), "base slides"):
+        oid, p = s.get("objectId"), s.get("page")
+        if isinstance(oid, str):
+            page_of[oid] = None if p is None else as_int(p, "base slide page")
     cmp = j / "cmp"
     cmp.mkdir(exist_ok=True)
-    listing = []
-    for i, s in enumerate(pres_after.get("slides", [])):
-        sid = s["objectId"]
+    listing: list[JsonObject] = []
+    after_ids = _slide_ids(pres_after, "after")
+    for i, sid in enumerate(after_ids):
         e = edited_idx.get(sid)
         p = page_of.get(sid)
         edited = _open(j / "thumbs" / f"r{n}-edited" / f"{e + 1:03d}.png") if e is not None else None
-        page = _open(pages[p]) if isinstance(p, int) and p < len(pages) else None
+        page = _open(pages[p]) if p is not None and p < len(pages) else None
         synced = _open(j / "thumbs" / f"r{n}-synced" / f"{i + 1:03d}.png")
-        row([panel(edited, f"AS THE PERSON LEFT IT (slide {e + 1})" if e is not None else "(no such slide before the sync)"),
-             panel(page, f"NEW SOURCE PDF page {p + 1}" if page is not None else "(no source page: the person's slide)"),
+        edited_label = f"AS THE PERSON LEFT IT (slide {e + 1})" if e is not None else "(no such slide before the sync)"
+        page_label = f"NEW SOURCE PDF page {p + 1}" if page is not None and p is not None \
+            else "(no source page: the person's slide)"
+        row([panel(edited, edited_label), panel(page, page_label),
              panel(synced, f"AFTER SYNC slide {i + 1}")]).save(cmp / f"r{n}-{i + 1:03d}.png")
         listing.append({"synced": i + 1, "id": sid, "edited": None if e is None else e + 1,
                         "page": None if p is None else p + 1})
-    gone = [i + 1 for sid, i in edited_idx.items() if sid not in {s["objectId"] for s in pres_after.get("slides", [])}]
-    summary["slides"], summary["slides_gone"] = listing, gone
-    summary["seconds"] = round(time.time() - t0)
-    write_json(j / f"summary-r{n}.json", summary)
-    rnd["synced"] = True
-    state["sources"].append(str(tex))
-    save_state(journey, state)
-    print(json.dumps({k: v for k, v in summary.items() if k != "slides"}, indent=1, ensure_ascii=False)[:6000])
-    print(f"pictures: {cmp / f'r{n}-NNN.png'}")
-    return 0
+    gone = [i + 1 for sid, i in edited_idx.items() if sid not in set(after_ids)]
+    return listing, gone
 
 
 def pull(journey: str) -> int:
@@ -442,11 +549,11 @@ def pull(journey: str) -> int:
     folder = j / f"pull{k}"
     if folder.exists():
         shutil.rmtree(folder)
-    src = Path(state["sources"][-1])
+    src = Path(state.sources[-1])
     work, edited = folder / "work", folder / "src"
-    r = cli("pull", "--deck", state["out"], "--tex", src, "--out", edited, "--work", work)
+    r = cli("pull", "--deck", state.out, "--tex", src, "--out", edited, "--work", work, timeout=CLI_TIMEOUT)
     (folder / "pull.log").write_text(r.stdout[-30000:] + "\n--- stderr\n" + r.stderr[-20000:], encoding="utf-8")
-    result = {"pull_code": r.returncode}
+    result: JsonObject = {"pull_code": r.returncode}
     out_tex = next(iter(edited.rglob(src.name)), None) if edited.exists() else None
     if out_tex is None:
         result["error"] = "pull wrote no source" + (r.stderr[-1500:] if r.returncode else "")
@@ -460,9 +567,9 @@ def pull(journey: str) -> int:
                 shutil.copyfile(found, folder / name)
         try:
             pages = render_pages(compile_tex(out_tex), folder / "pages")
-            pres = read_pres(state["pid"])
-            thumbs(state["pid"], pres, folder / "deck")
-            for i in range(max(len(pages), len(pres.get("slides", [])))):
+            pres = read_pres(state.pid)
+            thumbs(state.pid, pres, folder / "deck")
+            for i in range(max(len(pages), len(as_array(pres.get("slides", []), "slides")))):
                 row([panel(_open(folder / "deck" / f"{i + 1:03d}.png"), f"DECK slide {i + 1}"),
                      panel(_open(pages[i]) if i < len(pages) else None, f"PULLED SOURCE page {i + 1}")]
                     ).save(folder / f"cmp-{i + 1:03d}.png")
@@ -473,8 +580,8 @@ def pull(journey: str) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+def main(argv: list[str] | None) -> int:
+    p = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("start")
     s.add_argument("tex", type=Path)
@@ -491,20 +598,26 @@ def main(argv: list[str] | None = None) -> int:
     d = sub.add_parser("dump")
     d.add_argument("--journey", required=True)
     a = p.parse_args(argv)
-    if a.cmd == "start":
-        return start(a.tex, a.journey, a.slot)
-    if a.cmd == "edit":
-        return edit(a.journey, a.edits)
-    if a.cmd == "sync":
-        return sync(a.journey, a.tex)
-    if a.cmd == "pull":
-        return pull(a.journey)
-    state = load_state(a.journey)
-    pres = read_pres(state["pid"])
-    save_dump(pres, journey_dir(a.journey) / "deck-now.md")
-    print(journey_dir(a.journey) / "deck-now.md")
+    cmd: str = a.cmd
+    journey: str = a.journey
+    if cmd == "start":
+        tex: Path = a.tex
+        slot: str = a.slot
+        return start(tex, journey, slot)
+    if cmd == "edit":
+        edits: Path = a.edits
+        return edit(journey, edits)
+    if cmd == "sync":
+        revision: Path = a.tex
+        return sync(journey, revision)
+    if cmd == "pull":
+        return pull(journey)
+    state = load_state(journey)
+    pres = read_pres(state.pid)
+    save_dump(pres, journey_dir(journey) / "deck-now.md")
+    print(journey_dir(journey) / "deck-now.md")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

@@ -33,6 +33,8 @@ Blind spots: the judge sees Google's thumbnail, not the editor (selection boxes,
 text, speaker notes are invisible); a thumbnail is 1600 px, so sub-pt drift is below its eye.
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -41,9 +43,16 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from PIL import Image, ImageDraw
+
+from ..json_types import Json, JsonObject, JsonShapeError, as_int, as_object, as_objects, as_str
+
+if TYPE_CHECKING:
+    from .. import checks
 
 ROOT = Path(__file__).resolve().parents[3]
 HUNT = ROOT / "out" / "hunt"
@@ -86,11 +95,12 @@ class google_turn:
     A lock whose process is gone is taken over. `folder`: where the locks live (another campaign's
     own, `edit_hunt`)."""
 
-    def __init__(self, folder: Path | None = None):
+    def __init__(self, folder: Path) -> None:
         self.folder = folder
+        self.path: Path | None = None   # the lock held, once entered
 
-    def __enter__(self):
-        locks = self.folder or HUNT / "locks"
+    def __enter__(self) -> google_turn:
+        locks = self.folder
         locks.mkdir(parents=True, exist_ok=True)
         while True:
             for k in range(GOOGLE_SLOTS):
@@ -111,8 +121,10 @@ class google_turn:
                 return self
             time.sleep(5)
 
-    def __exit__(self, *exc):
-        self.path.unlink(missing_ok=True)
+    def __exit__(self, *exc: object) -> None:
+        if self.path is not None:
+            self.path.unlink(missing_ok=True)
+            self.path = None
 
 
 def _alive(pid: int) -> bool:
@@ -126,10 +138,10 @@ def _alive(pid: int) -> bool:
     return True
 
 
-def b2s(*args: str) -> subprocess.CompletedProcess:
+def b2s(*args: str) -> subprocess.CompletedProcess[str]:
     """One `python -m beamer2slides ...` under devtools.counted: never interactive."""
     cmd = [sys.executable, "-m", "beamer2slides.devtools.counted", *args]
-    with google_turn():
+    with google_turn(HUNT / "locks"):
         return subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True, errors="replace",
                               stdin=subprocess.DEVNULL, timeout=3600)
 
@@ -143,21 +155,80 @@ def labelled(image: Image.Image, label: str) -> Image.Image:
     return canvas
 
 
-def compose(out: Path, pdf: Path, into: Path) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class SlideSummary:
+    """What the deterministic judges saw on one slide (summary.json's `slides` entry)."""
+    slide: int
+    page: int
+    kinds: tuple[tuple[str, int], ...]   # element kind -> how many, in the order met
+    text_overlap: Json
+    fidelity_odd: tuple[JsonObject, ...]
+    text_fit: Json
+    invariants: tuple[JsonObject, ...] | None   # None: not run
+
+    def json(self) -> JsonObject:
+        out: JsonObject = {"slide": self.slide, "page": self.page, "kinds": {k: n for k, n in self.kinds},
+                           "text_overlap": self.text_overlap, "fidelity_odd": list(_jsons(self.fidelity_odd)),
+                           "text_fit": self.text_fit}
+        if self.invariants is not None:
+            out["invariants"] = list(_jsons(self.invariants))
+        return out
+
+
+@dataclass(frozen=True, kw_only=True)
+class Summary:
+    """An archive's summary.json."""
+    url: str
+    pdf: str
+    slides: tuple[SlideSummary, ...]
+
+    def json(self) -> JsonObject:
+        return {"url": self.url, "pdf": self.pdf, "slides": [s.json() for s in self.slides]}
+
+
+def _jsons(objects: tuple[JsonObject, ...]) -> tuple[Json, ...]:
+    return objects
+
+
+def _read(path: Path) -> JsonObject:
+    return as_object(json.loads(path.read_text(encoding="utf-8")), str(path))
+
+
+def _number(o: JsonObject, key: str, absent: float) -> float:
+    """`o[key]`, a number, or `absent` when it is not there."""
+    v = o.get(key, absent)
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise JsonShapeError(f"{key}: a number was expected, found {v!r}")
+    return v
+
+
+def _by_page(report: JsonObject, where: str) -> dict[int, JsonObject]:
+    return {as_int(s.get("page"), f"{where}.page"): s for s in as_objects(report.get("slides", []), where)}
+
+
+def odd_elements(fidelity_slide: JsonObject) -> tuple[JsonObject, ...]:
+    """fidelity's elements whose ink moved, grew or wrapped differently past the pre-screen's bar."""
+    return tuple(e for e in as_objects(fidelity_slide.get("elements", []), "fidelity elements")
+                 if e.get("missing") or abs(_number(e, "dx_pt", 0)) > 3 or abs(_number(e, "dy_top_pt", 0)) > 3
+                 or abs(_number(e, "dy_bottom_pt", 0)) > 3 or abs(_number(e, "width_ratio", 1) - 1) > 0.06
+                 or e.get("lines_ref") != e.get("lines_slides"))
+
+
+def compose(out: Path, pdf: Path, into: Path) -> Summary:
     """The archive for one converted deck: side-by-side pictures and the deterministic pre-screen."""
     from ..pdf import Document
 
     into.mkdir(parents=True, exist_ok=True)
-    deck = json.loads((out / "deck.json").read_text(encoding="utf-8"))
-    emit = json.loads((out / "emit.json").read_text(encoding="utf-8"))
-    fid = json.loads((out / "fidelity.json").read_text(encoding="utf-8")) if (out / "fidelity.json").exists() else {}
-    fit = json.loads((out / "text_fit.json").read_text(encoding="utf-8")) if (out / "text_fit.json").exists() else {}
-    fid_by_page = {s["page"]: s for s in fid.get("slides", [])}
-    fit_by_page = {s["page"]: s for s in fit.get("slides", [])}
+    deck = _read(out / "deck.json")
+    emit = _read(out / "emit.json")
+    fid = _read(out / "fidelity.json") if (out / "fidelity.json").exists() else {}
+    fit = _read(out / "text_fit.json") if (out / "text_fit.json").exists() else {}
+    fid_by_page = _by_page(fid, "fidelity.json slides")
+    fit_by_page = _by_page(fit, "text_fit.json slides")
     doc = Document(pdf)
-    slides = []
-    for i, slide in enumerate(deck["slides"]):
-        n = slide["page"]
+    slides: list[SlideSummary] = []
+    for i, slide in enumerate(as_objects(deck.get("slides"), "deck.json slides")):
+        n = as_int(slide.get("page"), "deck.json page")
         thumb_path = out / "fidelity" / f"slides-{n + 1:03}.png"
         if not thumb_path.exists():
             continue
@@ -172,45 +243,47 @@ def compose(out: Path, pdf: Path, into: Path) -> dict:
         pair.paste(b, (PANEL + 12, 0))
         pair.save(into / f"cmp-{i + 1:03}.png")
         kinds: dict[str, int] = {}
-        for el in slide["elements"]:
-            kinds[el["kind"]] = kinds.get(el["kind"], 0) + 1
+        for el in as_objects(slide.get("elements"), "deck.json elements"):
+            kind = as_str(el.get("kind"), "deck.json kind")
+            kinds[kind] = kinds.get(kind, 0) + 1
         f = fid_by_page.get(n, {})
-        odd = [e for e in f.get("elements", [])
-               if e.get("missing") or abs(e.get("dx_pt", 0)) > 3 or abs(e.get("dy_top_pt", 0)) > 3
-               or abs(e.get("dy_bottom_pt", 0)) > 3 or abs(e.get("width_ratio", 1) - 1) > 0.06
-               or e.get("lines_ref") != e.get("lines_slides")]
-        slides.append({"slide": i + 1, "page": n + 1, "kinds": kinds,
-                       "text_overlap": f.get("text_overlap"), "fidelity_odd": odd,
-                       "text_fit": fit_by_page.get(n, {}).get("findings", [])})
+        slides.append(SlideSummary(slide=i + 1, page=n + 1, kinds=tuple(kinds.items()),
+                                   text_overlap=f.get("text_overlap"), fidelity_odd=odd_elements(f),
+                                   text_fit=fit_by_page.get(n, {}).get("findings", []), invariants=None))
     # The slot is rebuilt by the next deck: keep what the converter made of this one.
     for name in ("deck.json", "emit.json", "fidelity.json", "text_fit.json"):
         if (out / name).exists():
             shutil.copyfile(out / name, into / name)
     if (out / "debug").is_dir():
         shutil.copytree(out / "debug", into / "debug", dirs_exist_ok=True)
-    summary = {"url": f"https://docs.google.com/presentation/d/{emit['presentationId']}/edit",
-               "pdf": pdf.name, "slides": slides}
-    (into / "summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False), encoding="utf-8")
+    pid = as_str(emit.get("presentationId"), "emit.json presentationId")
+    summary = Summary(url=f"https://docs.google.com/presentation/d/{pid}/edit", pdf=pdf.name, slides=tuple(slides))
+    (into / "summary.json").write_text(json.dumps(summary.json(), indent=1, ensure_ascii=False), encoding="utf-8")
     return summary
 
 
-def add_invariants(summary: dict, pdf: Path, into: Path) -> dict:
+def invariant(f: checks.Finding) -> JsonObject:
+    """One of checks.py's findings as summary.json lists it."""
+    bbox: Json = None if f["bbox"] is None else [v for v in f["bbox"]]
+    return {"check": f["check"], "element": f["element"], "bbox": bbox, "detail": f["detail"]}
+
+
+def add_invariants(summary: Summary, pdf: Path, into: Path) -> Summary:
     """checks.py's offline invariants (stray_ink, lost_ink, junk_text...) per slide of the summary."""
     from .. import checks
 
     found = checks.run_checks(checks.convert_locally(pdf))
-    by_page: dict[int, list] = {}
+    by_page: dict[int, list[JsonObject]] = {}
     for f in found:
-        by_page.setdefault(f["page"] + 1, []).append(
-            {k: f.get(k) for k in ("check", "element", "bbox", "detail")})
-    for s in summary["slides"]:
-        s["invariants"] = by_page.get(s["page"], [])
-    (into / "summary.json").write_text(json.dumps(summary, indent=1, ensure_ascii=False, default=str),
+        by_page.setdefault(f["page"] + 1, []).append(invariant(f))
+    summary = replace(summary, slides=tuple(replace(s, invariants=tuple(by_page.get(s.page, [])))
+                                            for s in summary.slides))
+    (into / "summary.json").write_text(json.dumps(summary.json(), indent=1, ensure_ascii=False, default=str),
                                        encoding="utf-8")
     return summary
 
 
-def run(tex: Path, slot: str, skip_convert: bool = False) -> int:
+def run(tex: Path, slot: str, skip_convert: bool) -> int:
     tex = tex.resolve()
     t0 = time.time()
     # A built PDF is taken as it is (an archived one whose fonts today's TeX would not reproduce,
@@ -225,7 +298,7 @@ def run(tex: Path, slot: str, skip_convert: bool = False) -> int:
     if built is not tex:
         shutil.copyfile(tex, into / tex.name)
     shutil.copyfile(built, into / built.name)
-    log = []
+    log: list[JsonObject] = []
     if not skip_convert:
         for args in (["convert", str(pdf), "--out", str(out), "--title", f"hunt {tex.stem}"],
                      ["fidelity", str(pdf), "--out", str(out)]):
@@ -244,26 +317,53 @@ def run(tex: Path, slot: str, skip_convert: bool = False) -> int:
         summary = add_invariants(summary, pdf, into)
     except Exception as e:  # a pre-screen: never lose the run over it
         print(f"invariants skipped: {type(e).__name__}: {e}")
-    print(f"{tex.stem}: {len(summary['slides'])} slides in {time.time() - t0:.0f}s -> {into}\n{summary['url']}")
+    print(f"{tex.stem}: {len(summary.slides)} slides in {time.time() - t0:.0f}s -> {into}\n{summary.url}")
     return 0
 
 
-def ledger(verified: Path) -> list[dict]:
+FINDING_KEYS = ("id", "deck", "slide", "severity", "realism", "title", "mechanism")
+
+
+@dataclass(frozen=True, kw_only=True)
+class FindingClass:
+    """The confirmed findings of one class (ledger.json's entry)."""
+    name: str
+    findings: tuple[JsonObject, ...]   # hunter, then FINDING_KEYS
+
+    @property
+    def worst(self) -> int:
+        """The highest severity x realism of its findings (0: none scored)."""
+        return max((_score(x.get("severity")) * _score(x.get("realism")) for x in self.findings), default=0)
+
+    def json(self) -> JsonObject:
+        return {"class": self.name, "findings": list(_jsons(self.findings)), "worst": self.worst}
+
+
+def _score(v: Json) -> int:
+    """A severity or realism as a skeptic wrote it: a number, a numeral, or nothing (0)."""
+    if not v:
+        return 0
+    if isinstance(v, (int, float, str)):
+        return int(v)
+    raise JsonShapeError(f"a score was expected, found {v!r}")
+
+
+def ledger(verified: Path) -> list[FindingClass]:
     """Confirmed findings of every skeptic file, grouped by class, worst first."""
-    classes: dict[str, dict] = {}
+    classes: dict[str, list[JsonObject]] = {}
     for f in sorted(verified.glob("*.json")):
-        for x in json.loads(f.read_text(encoding="utf-8")):
+        for x in as_objects(json.loads(f.read_text(encoding="utf-8")), str(f)):
             if x.get("verdict") != "CONFIRMED":
                 continue
-            c = classes.setdefault(x.get("class") or "?", {"class": x.get("class") or "?", "findings": []})
-            c["findings"].append({"hunter": f.stem, **{k: x.get(k) for k in
-                                  ("id", "deck", "slide", "severity", "realism", "title", "mechanism")}})
-    for c in classes.values():
-        c["worst"] = max((int(x["severity"] or 0) * int(x["realism"] or 0) for x in c["findings"]), default=0)
-    return sorted(classes.values(), key=lambda c: (-c["worst"], -len(c["findings"]), c["class"]))
+            name = x.get("class")
+            finding: JsonObject = {"hunter": f.stem}
+            finding.update((k, x.get(k)) for k in FINDING_KEYS)
+            classes.setdefault(str(name) if name else "?", []).append(finding)
+    found = [FindingClass(name=name, findings=tuple(xs)) for name, xs in classes.items()]
+    return sorted(found, key=lambda c: (-c.worst, -len(c.findings), c.name))
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None) -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("run", help="compile, convert, fidelity, text_fit and compose one deck")
@@ -277,18 +377,27 @@ def main(argv: list[str] | None = None) -> int:
     g = sub.add_parser("ledger", help="confirmed findings of out/hunt/verified/*.json by class")
     g.add_argument("--verified", type=Path, default=HUNT / "verified")
     a = p.parse_args(argv)
-    if a.cmd == "run":
-        return run(a.tex, a.slot, a.skip_convert)
-    if a.cmd == "ledger":
-        rows = ledger(a.verified)
-        (a.verified.parent / "ledger.json").write_text(json.dumps(rows, indent=1, ensure_ascii=False), encoding="utf-8")
+    cmd: str = a.cmd
+    if cmd == "run":
+        tex: Path = a.tex
+        slot: str = a.slot
+        skip: bool = a.skip_convert
+        return run(tex, slot, skip)
+    if cmd == "ledger":
+        verified: Path = a.verified
+        rows = ledger(verified)
+        (verified.parent / "ledger.json").write_text(json.dumps([c.json() for c in rows], indent=1, ensure_ascii=False),
+                                                     encoding="utf-8")
         for c in rows:
-            where = ", ".join(sorted({f"{x['deck']}#{x['slide']}" for x in c["findings"]}))[:90]
-            print(f"{c['worst']:>2} {len(c['findings']):>2}  {c['class'][:44]:<44} {where}")
+            where = ", ".join(sorted({f"{x.get('deck')}#{x.get('slide')}" for x in c.findings}))[:90]
+            print(f"{c.worst:>2} {len(c.findings):>2}  {c.name[:44]:<44} {where}")
         return 0
-    compose(a.out, a.pdf, a.into)
+    out: Path = a.out
+    pdf: Path = a.pdf
+    into: Path = a.into
+    compose(out, pdf, into)
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

@@ -389,13 +389,13 @@ def test_integrity_does_not_ask_display_maths_to_be_grouped():
     display = sc.Model({"slides": [{"objectId": "s1", "pageElements": [
         _text_box("b2s_s034_t0", "b2s:displaymath/text/body/0", [60, 100, 660, 130], "The equation below:\n"),
         _picture("b2s_s034_f0", "b2s:displaymath/image/math/0", [260, 160, 460, 200])]}]})
-    assert sc.integrity(display) == []
+    assert sc.integrity_alone(display) == []
 
     # The same picture moved up onto the line of that text, and still not grouped with it.
     inline = sc.Model({"slides": [{"objectId": "s1", "pageElements": [
         _text_box("b2s_s034_t0", "b2s:displaymath/text/body/0", [60, 100, 660, 130], "The equation   here:\n"),
         _picture("b2s_s034_f0", "b2s:displaymath/image/math/0", [260, 106, 300, 124])]}]})
-    assert [p for p in sc.integrity(inline) if "not grouped with its text" in p]
+    assert [p for p in sc.integrity_alone(inline) if "not grouped with its text" in p]
 
 
 def test_integrity_excuses_a_slide_by_id_when_the_source_retitled_it():
@@ -413,9 +413,11 @@ def test_integrity_excuses_a_slide_by_id_when_the_source_retitled_it():
                              "text": {"textElements": [{"textRun": {"content": "Why decks drift away\n"}}]}}),
         _text_box("b2s_s002_t0", "b2s:diverge/text/body/0", [60, 100, 660, 130], "The source says   this:\n"),
         _picture("b2s_s002_f0", "b2s:diverge/image/math/0", [260, 106, 300, 124])]}]})
-    assert [p for p in sc.integrity(model) if "not grouped" in p]
-    assert sc.integrity(model, allow_ungrouped={"b2s_s002"}) == []
-    assert sc.integrity(model, allow_ungrouped={"Why decks drift away"}) == []   # the title still works
+    assert [p for p in sc.integrity_alone(model) if "not grouped" in p]
+    assert sc.integrity(model, before=None, base_ids=None, allow_groups_changed=frozenset(),
+                        allow_ungrouped={"b2s_s002"}) == []
+    assert sc.integrity(model, before=None, base_ids=None, allow_groups_changed=frozenset(),
+                        allow_ungrouped={"Why decks drift away"}) == []   # the title still works
 
 
 def save_timings() -> None:
@@ -476,18 +478,19 @@ class Run:
     def start(self) -> None:
         """The v1 deck, as a Drive copy of the fresh v1 conversion: one conversion for every
         scenario instead of one each (`fuzz_sync.Template`, the live fuzz's `--reuse`)."""
-        from beamer2slides.devtools.deck_edits import LiveDeck
+        from beamer2slides.devtools.deck_edits import open_deck
         from beamer2slides.devtools.fuzz_sync import Template
         folder, _ = fresh_conversion("v1", read=False)
         self.clear()
         pid = self.timed("copy", lambda: Template.at(folder).copy_into(self.out, f"b2s stress: {self.name}"))
-        self.deck = LiveDeck(pid)
+        self.deck = open_deck(pid, defer=False)
 
     def convert(self, pdf: Path) -> None:
         """A conversion of its own (after `clear`: the guard refuses to rebuild an edited deck)."""
-        from beamer2slides.devtools.deck_edits import LiveDeck
+        from beamer2slides.devtools.deck_edits import open_deck
         self.timed("convert", lambda: self.cli("convert", pdf, "--out", self.out))
-        self.deck = LiveDeck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"])
+        self.deck = open_deck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"],
+                              defer=False)
 
     def edit(self, *specs: dict) -> list[dict]:
         from beamer2slides.devtools.deck_edits import verified
@@ -531,7 +534,8 @@ class Run:
         sentence filtered out, the one it said about every deck with display maths; the checker
         now tells a display equation from an inline formula itself (`sync_check.on_a_text_line`)."""
         from beamer2slides.devtools import sync_check as sc
-        return sc.integrity(model, before=self.before, base_ids=self.base_ids())
+        return sc.integrity(model, before=self.before, base_ids=self.base_ids(), allow_groups_changed=frozenset(),
+                            allow_ungrouped=frozenset())
 
     def check(self, variant: str, pdf: Path, report: dict, expectations: list[dict], *, drop: tuple[str, ...] = (),
               checks: list[dict] = (), conflicts: list[list[str]] = (), any_conflicts: bool = False,
@@ -567,12 +571,13 @@ class Run:
         # (Sub-pixel placement is the sync suite's job; this deck is about identity and merging,
         # so only a few untouched slides are compared, and two of them pixel by pixel.)
         fresh_folder, fresh = fresh_conversion(variant)
+        assert fresh is not None   # (read: the default)
         titles = [t for t in fresh_titles(flags) if t not in edited
                   and len(model.find(t)) == 1 and len(fresh.find(t)) == 1]
         self.problems += sc.compare_fresh(model, fresh, titles)
         for t in titles[:2]:
             problem = sc.thumbnail_diff(self.deck.api, (self.deck.pid, model.one(t).id),
-                                        (fresh.pres["presentationId"], fresh.one(t).id),
+                                        (fresh.pid, fresh.one(t).id),
                                         self.out / "check" / f"thumb-{titles.index(t) + 1:02}.png")
             if problem:
                 self.problems.append(f"fresh {t}: {problem}")
@@ -848,7 +853,8 @@ def scenario_pull(run: Run):
         {"check": "text", "slide": None, "text": "the source changed again", "count": 1},
         {"check": "text", "slide": None, "text": "tell these two slides apart", "count": 1},
         {"check": "text", "slide": None, "text": "tell these two frames apart", "count": 1}])
-    run.problems += sc.check_report(report, converged=[["polished"], ["slides"], ["hopeless"]], no_conflicts=True)
+    run.problems += sc.check_report(report, conflicts=(), converged=[["polished"], ["slides"], ["hopeless"]], warnings=(),
+                                    no_conflicts=True)
     if sc.changes(report):
         run.problems.append(f"sync after pull lists {sc.changes(report)} changes")
     if run.revision() != revision:
