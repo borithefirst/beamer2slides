@@ -58,6 +58,22 @@ def test_visible_maps_back_to_source():
     assert wm.score == 1.0
 
 
+def test_words_after_an_ellipsis_map_to_their_own_letters():
+    """NORMALISE makes "…" three characters: offsets counted after it ran two letters late, and
+    past the visible text for a frame's last word (test_ir_matrix's hashing-ellipsis)."""
+    for latex in ("Wait… Enough said", "Wait… E", "ﬁne… then"):
+        vis = build_visible(latex, 0, len(latex))
+        last = latex.split()[-1]
+        a, b = locate_words(last, vis).vis[0]
+        assert vis.text[a:b] == last and b <= len(vis.starts)
+
+
+def test_a_note_opening_on_a_soft_break_leaves_vertical_mode_first():
+    """`\\\\` opening a paragraph has no line to end (test_ir_matrix's hashing-note_break)."""
+    out = frame_latex({"key": "k", "elements": [], "notes": "\x0bHeads up\nand \x0b more"}, None, Context())
+    assert "\\note{\\leavevmode\\\\ Heads up\n\nand \\\\  more}" in out
+
+
 def test_read_args_and_comments():
     s = r"\begin{frame}[fragile,label=x]{Title}{Sub} rest"
     args, end = read_args(s, len(r"\begin{frame}"), "oMM")

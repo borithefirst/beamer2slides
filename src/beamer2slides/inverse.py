@@ -2259,8 +2259,17 @@ def frame_latex(ts: dict, style_for, ctx: Context, label: str | None = None) -> 
             body.append(paragraphs_latex(e["paragraphs"], style_for, ctx, "  "))
     out = f"\\begin{{frame}}{label}{{{title}}}\n" + "\n\n".join(body) + "\n"
     if ts.get("notes"):
-        out += "  \\note{" + "\n\n".join(latex_escape(p) for p in ts["notes"].split("\n") if p.strip()) + "}\n"
+        out += note_latex(ts["notes"]) + "\n"
     return out + "\\end{frame}\n"
+
+
+def note_latex(notes: str) -> str:
+    """A slide's speaker notes as `\\note{...}`, a paragraph per line. A paragraph opening on a
+    soft break starts with `\\leavevmode`, as paragraphs_latex's do: `\\\\` there has no line to
+    end, and the notes=show compile the pull loop runs stopped on it."""
+    paragraphs = [latex_escape(p) for p in notes.split("\n") if p.strip()]
+    return "  \\note{" + "\n\n".join(("\\leavevmode" if p.startswith("\\\\") else "") + p
+                                     for p in paragraphs) + "}"
 
 
 def ensure_preamble(ws: Workspace, ctx: Context) -> list[Edit]:

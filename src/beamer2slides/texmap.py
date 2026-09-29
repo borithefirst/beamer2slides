@@ -724,8 +724,10 @@ def norm_word(w: str) -> str:
 
 
 def words_with_spans(text: str) -> list[tuple[str, int, int]]:
-    t = text.translate(NORMALISE)
-    return [(m.group(0), m.start(), m.end()) for m in WORD_RE.finditer(t)]
+    """The words of `text`, normalised, with their places in `text` itself: NORMALISE lengthens
+    ("…" is "..."), so offsets into the translated text ran past every word after one (every
+    character it makes a space is already `\\s`, so the words are the same)."""
+    return [(m.group(0).translate(NORMALISE), m.start(), m.end()) for m in WORD_RE.finditer(text)]
 
 
 @dataclass

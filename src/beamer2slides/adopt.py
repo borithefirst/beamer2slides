@@ -3890,8 +3890,8 @@ def slide_latex(s: dict, style_for, ctx: Context, flow: bool, tree: Path | None 
         if piece and not (plan and k in plan.drawn):
             out.append(piece)
     if s.get("notes"):
-        from .inverse import latex_escape
-        out.append("  \\note{" + "\n\n".join(latex_escape(p) for p in s["notes"].split("\n") if p.strip()) + "}")
+        from .inverse import note_latex
+        out.append(note_latex(s["notes"]))
     out.append("\\end{frame}")
     text = "\n".join(x for x in out if x.strip()) + "\n"
     if plan:

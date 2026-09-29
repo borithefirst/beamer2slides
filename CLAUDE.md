@@ -433,7 +433,10 @@ markers.
 - Offline highlights: `test_emit_requests.py` replays what emit would send (`emit.plan_offline`);
   `test_invariants.py` (`checks.py`: stray_ink, stray_labels, lost_ink, structure, junk_text over all
   decks and theme talks; allowed exceptions in `tests/invariants_allow.json`, stale ones fail);
-  `test_classify.py` against the built decks.
+  `test_classify.py` against the built decks. `test_ir_matrix.py`: every deck.json producer x
+  consumer pair offline (built decks, the showcase decks, one-slide variants holding what crashed
+  a corpus deck, `ir_sources.VARIANTS`); a producer is one `PRODUCERS` entry, `KNOWN` holds strict
+  xfails (empty: keep it so).
 - Opt-in live suites (real Google, fixed folders under `out/` that are rebuilt): `-m slides`
   (alignment/fidelity of the stress decks vs `tests/slides_baseline.json`), `-m sync`
   (`test_sync_live.py` scenarios, ~17 min; `test_stress_live.py`, the 48-frame ambiguous deck),
