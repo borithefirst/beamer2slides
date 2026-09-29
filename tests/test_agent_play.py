@@ -23,36 +23,40 @@ a temporary run dir.
 """
 
 import ast
-import inspect
 import json
 from pathlib import Path
 
 import pytest
 
+from beamer2slides.agent import Workspace
 from beamer2slides.devtools import agent_bench as bench
 from beamer2slides.devtools import agent_play as play
 from beamer2slides.devtools import agent_tasks as tasks
+from beamer2slides.json_types import JsonObject
+
+from .json_reads import at, obj, objs, text
 
 REPLAY = [t for t in tasks.TASKS if t.kind == "replay"]
 POLICIES = ([(t, "correct", t.correct) for t in REPLAY] +
             [(t, name, pol) for t in REPLAY for name, pol in t.wrong.items()])
 
 
-def play_through(task, policy, run_dir: Path):
+def play_through(task: tasks.Task, policy: bench.Policy, run_dir: Path):
     """Drive the CLI's own API the way a model drives its commands: start, call*, answer, score."""
-    play.start(task.id, run_dir)
+    assert isinstance(policy, bench.Scripted), "a replay task's policies are scripts"
+    play.start(task.id, run_dir, allow_google=False, force=False)
     for one in policy.calls:
         play.call(run_dir, one.tool, one.arguments)
     play.answer(run_dir, policy.answer or "(nothing)")
-    return play.score(run_dir)
+    return play.score(run_dir, unfinished=False)
 
 
 # --------------------------------------------------------------- the verdict is the benchmark's
 
 @pytest.mark.parametrize("task,name,policy", POLICIES,
                          ids=[f"{t.id}-{n}" for t, n, _ in POLICIES])
-def test_a_played_run_scores_exactly_as_the_benchmark_scores_it(task, name, policy, tmp_path):
-    expected = bench.run_task(task, policy)
+def test_a_played_run_scores_exactly_as_the_benchmark_scores_it(task: tasks.Task, name: str, policy: bench.Policy, tmp_path: Path):
+    expected = bench.run_fresh(task, policy)
     run, verdict = play_through(task, policy, tmp_path / f"{task.id}-{name}")
     assert run.status == expected.status
     assert run.failures == expected.failures, "the graders must be the benchmark's own, not a copy"
@@ -60,30 +64,32 @@ def test_a_played_run_scores_exactly_as_the_benchmark_scores_it(task, name, poli
     assert [c.json() for c in run.calls] == [c.json() for c in expected.calls]
 
 
-def test_the_transcript_is_the_shape_recorded_already_reads(tmp_path):
+def test_the_transcript_is_the_shape_recorded_already_reads(tmp_path: Path):
     task = tasks.BY_ID["dry-run-first"]
+    correct = task.correct
+    assert isinstance(correct, bench.Scripted)
     run_dir = tmp_path / "run"
-    play_through(task, task.correct, run_dir)
+    play_through(task, correct, run_dir)
 
     # `recorded_dir` globs the folder and keys by file stem, so a run dir *is* a transcript
     # folder: the file can be scored here, replayed with --policy recorded:DIR, or committed.
     loaded = bench.recorded_dir(run_dir)
     assert set(loaded) == {task.id}
-    again = bench.run_task(task, loaded[task.id])
-    assert again.status == "passed" and again.answer == task.correct.answer
+    again = bench.run_fresh(task, loaded[task.id])
+    assert again.status == "passed" and again.answer == correct.answer
 
     written = json.loads((run_dir / f"{task.id}.json").read_text(encoding="utf-8"))
     assert written["task"] == task.id and written["answer"]
-    assert [s["tool"] for s in written["steps"]] == [c.tool for c in task.correct.calls]
+    assert [s["tool"] for s in written["steps"]] == [c.tool for c in correct.calls]
     assert all({"tool", "arguments", "result"} <= set(s) for s in written["steps"])
     assert written["play"]["finished"] is True          # this CLI's own state stays out of the way
 
 
-def test_scoring_twice_says_the_same_thing(tmp_path):
+def test_scoring_twice_says_the_same_thing(tmp_path: Path):
     task = tasks.BY_ID["read-the-conflict"]
     run_dir = tmp_path / "run"
     _, first = play_through(task, task.correct, run_dir)
-    _, second = play.score(run_dir)
+    _, second = play.score(run_dir, unfinished=False)
     # Everything but the clock: `seconds` is measured afresh by each scoring, and under a loaded
     # machine the two measurements of the same replay differ in the second decimal.
     assert {k: v for k, v in first.items() if k != "seconds"} == \
@@ -91,7 +97,7 @@ def test_scoring_twice_says_the_same_thing(tmp_path):
     assert (run_dir / "verdict.txt").read_text(encoding="utf-8").startswith(f"{task.id}: PASSED")
 
 
-def test_a_harmful_run_is_counted_as_harm_and_exits_on_it(tmp_path):
+def test_a_harmful_run_is_counted_as_harm_and_exits_on_it(tmp_path: Path):
     task = tasks.BY_ID["respect-the-refusal"]
     run, verdict = play_through(task, task.wrong["forces"], tmp_path / "run")
     assert run.harm == 1 and verdict["status"] == "failed"
@@ -111,23 +117,23 @@ def test_the_exit_codes_tell_a_harness_which_kind_of_outcome_it_was():
 def test_the_step_budget_is_the_one_the_benchmark_replays_under():
     # A transcript this CLI accepted but `run_task` truncates would fail for a reason the model
     # was never told, so the two numbers are one number.
-    assert inspect.signature(bench.run_task).parameters["max_steps"].default == play.MAX_STEPS
+    assert play.MAX_STEPS == bench.MAX_STEPS
 
 
 # --------------------------------------------------------------------- a model cannot reach past
 
-def test_a_tool_the_task_did_not_offer_runs_nothing(tmp_path):
+def test_a_tool_the_task_did_not_offer_runs_nothing(tmp_path: Path):
     task = tasks.BY_ID["read-the-conflict"]                 # its script has deck_sync alone
-    play.start(task.id, tmp_path / "run")
+    play.start(task.id, tmp_path / "run", allow_google=False, force=False)
     result = play.call(tmp_path / "run", "deck_convert", {"pdf": "talk.pdf"})
     assert result.ok is False and result.code == "bad_request"
     assert result.json() == bench.missing_tool("deck_convert").json()
 
 
-def test_a_live_task_has_no_google_at_all(tmp_path):
+def test_a_live_task_has_no_google_at_all(tmp_path: Path):
     task = tasks.BY_ID["label-the-source"]                  # its tools really run
     run_dir = tmp_path / "run"
-    play.start(task.id, run_dir)
+    play.start(task.id, run_dir, allow_google=False, force=False)
     session = play.load(run_dir)
     ctx = play._context(session)
     assert ctx.permits("writes_google") is False
@@ -136,29 +142,29 @@ def test_a_live_task_has_no_google_at_all(tmp_path):
     assert refused.ok is False and refused.code == "offline"
 
 
-def test_a_live_tasks_fixture_is_built_where_the_run_can_keep_it(tmp_path):
+def test_a_live_tasks_fixture_is_built_where_the_run_can_keep_it(tmp_path: Path):
     run_dir = tmp_path / "run"
-    session, _ = play.start("label-the-source", run_dir)
+    session, _ = play.start("label-the-source", run_dir, allow_google=False, force=False)
     assert (run_dir / "workspace" / "talk" / "main.tex").exists()
-    assert session.play["facts"]["tex"] == "talk/main.tex"
+    assert at(session.play, "facts", "tex") == "talk/main.tex"
     written = play.call(run_dir, "tex_label", {"tex": "talk/main.tex", "apply": True})
     assert written.ok and "label=introduction" in \
         (run_dir / "workspace" / "talk" / "main.tex").read_text(encoding="utf-8")
 
 
-def test_a_google_writing_tier_cannot_be_started_without_saying_so(tmp_path, monkeypatch):
+def test_a_google_writing_tier_cannot_be_started_without_saying_so(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     spendthrift = tasks.Task(id="spends-a-deck", title="t", kind="replay", tier=play.GATED_TIER,
-                             prompt="p", script={}, grade=lambda run: [], note="x" * 30)
+                             prompt="p", script={}, grade=lambda run: [], note="x" * 30, setup=None, needs_tools=(), process_bound=False, correct=bench.Scripted(answer=""), wrong={})
     monkeypatch.setitem(tasks.BY_ID, spendthrift.id, spendthrift)
     with pytest.raises(play.PlayError) as refusal:
-        play.start(spendthrift.id, tmp_path / "run")
+        play.start(spendthrift.id, tmp_path / "run", allow_google=False, force=False)
     assert "--allow-google" in str(refusal.value)
     assert not list((tmp_path / "run").glob("*.json")), "a refused start leaves no session behind"
-    session, _ = play.start(spendthrift.id, tmp_path / "run", allow_google=True)
+    session, _ = play.start(spendthrift.id, tmp_path / "run", allow_google=True, force=False)
     assert session.play["allow_google"] is True
 
 
-def test_a_run_that_wrote_to_google_is_scored_without_being_run_again(tmp_path, monkeypatch):
+def test_a_run_that_wrote_to_google_is_scored_without_being_run_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The one run that cannot be graded by replaying it into the tools.
 
     Every other transcript is scored by running its calls again - that is what makes a run made
@@ -166,36 +172,36 @@ def test_a_run_that_wrote_to_google_is_scored_without_being_run_again(tmp_path, 
     so scoring it that way would either write a second time or, against a fresh workspace,
     build the whole fixture again. Its own answers are the registry, and its own fixture stands.
     """
-    built = []
+    built: list[Workspace] = []
 
-    def setup(ws):
+    def setup(ws: Workspace) -> JsonObject:
         built.append(ws)
         path = Path(ws.root) / "talk" / "main.tex"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\\begin{frame}{Introduction}\\end{frame}", encoding="utf-8")
         return {"tex": "talk/main.tex", "deck": "a real deck id"}
 
-    def grade(run):
+    def grade(run: bench.Run) -> list[str]:
         assert run.facts["deck"] == "a real deck id", "the fixture is the one the run was played on"
         return [] if run.result_of("tex_label") and run.said("labelled") else ["nothing happened"]
 
     spendthrift = tasks.Task(id="spends-a-deck-live", title="t", kind="live",
                              tier=play.GATED_TIER, prompt="p", grade=grade, setup=setup,
-                             needs_tools=("tex_label", "deck_sync"), note="x" * 30)
+                             needs_tools=("tex_label", "deck_sync"), note="x" * 30, script=None, process_bound=False, correct=bench.Scripted(answer=""), wrong={})
     monkeypatch.setitem(tasks.BY_ID, spendthrift.id, spendthrift)
     run_dir = tmp_path / "run"
-    play.start(spendthrift.id, run_dir, allow_google=True)
+    play.start(spendthrift.id, run_dir, allow_google=True, force=False)
     assert len(built) == 1
     play.call(run_dir, "tex_label", {"tex": "talk/main.tex", "apply": True})
     play.answer(run_dir, "I labelled the frame that had none.")
 
-    run, verdict = play.score(run_dir)
+    run, verdict = play.score(run_dir, unfinished=False)
     assert verdict["status"] == "passed", run.failures
     assert len(built) == 1, "scoring must not build the fixture a second time"
     assert run.results[0].ok, "the result the run really got is what the grader sees"
 
 
-def test_a_task_whose_fixture_dies_with_the_process_is_refused_rather_than_played(tmp_path):
+def test_a_task_whose_fixture_dies_with_the_process_is_refused_rather_than_played(tmp_path: Path):
     """One process per turn is the design, and it is also what these tasks' world does not survive.
 
     The Google Docs tasks hold their document in `devtools.doc_world` and lend the account by
@@ -207,7 +213,7 @@ def test_a_task_whose_fixture_dies_with_the_process_is_refused_rather_than_playe
         if not getattr(task, "process_bound", False):
             continue
         with pytest.raises(play.PlayError) as refusal:
-            play.start(task.id, tmp_path / task.id)
+            play.start(task.id, tmp_path / task.id, allow_google=False, force=False)
         said = str(refusal.value)
         assert "agent_bench run" in said, said              # where it *can* be scored
         assert refusal.value.code == play.EXIT_UNGRADED     # not a failure of the model's
@@ -231,22 +237,22 @@ def test_no_model_is_called_from_this_repo():
 
 # ------------------------------------------------------------- what a confused model does instead
 
-def test_scoring_before_answering_is_refused_unless_asked_for(tmp_path):
+def test_scoring_before_answering_is_refused_unless_asked_for(tmp_path: Path):
     task = tasks.BY_ID["dry-run-first"]
     run_dir = tmp_path / "run"
-    play.start(task.id, run_dir)
+    play.start(task.id, run_dir, allow_google=False, force=False)
     play.call(run_dir, "b2s_status", {})
     with pytest.raises(play.PlayError) as refusal:
-        play.score(run_dir)
+        play.score(run_dir, unfinished=False)
     assert "answer" in str(refusal.value)
     run, verdict = play.score(run_dir, unfinished=True)     # graded as it stands, and it fails
     assert run.status == "failed" and verdict["answered"] is False
     assert "no answer was given" in play.verdict_text(verdict)
 
 
-def test_a_run_ends_once(tmp_path):
+def test_a_run_ends_once(tmp_path: Path):
     run_dir = tmp_path / "run"
-    play.start("dry-run-first", run_dir)
+    play.start("dry-run-first", run_dir, allow_google=False, force=False)
     play.answer(run_dir, "Nothing was written; the deck is untouched.")
     with pytest.raises(play.PlayError, match="already been answered"):
         play.answer(run_dir, "actually, something else")
@@ -255,49 +261,66 @@ def test_a_run_ends_once(tmp_path):
     assert len(play.load(run_dir).steps) == 0
 
 
-def test_an_empty_answer_is_not_an_answer(tmp_path):
+def test_an_empty_answer_is_not_an_answer(tmp_path: Path):
     run_dir = tmp_path / "run"
-    play.start("dry-run-first", run_dir)
+    play.start("dry-run-first", run_dir, allow_google=False, force=False)
     with pytest.raises(play.PlayError, match="not an answer"):
         play.answer(run_dir, "   ")
     assert play.load(run_dir).finished is False
 
 
-def test_a_second_task_in_the_same_run_dir_is_refused_and_force_starts_again(tmp_path):
+def test_a_second_task_in_the_same_run_dir_is_refused_and_force_starts_again(tmp_path: Path):
     run_dir = tmp_path / "run"
-    play.start("dry-run-first", run_dir)
+    play.start("dry-run-first", run_dir, allow_google=False, force=False)
     play.call(run_dir, "b2s_status", {})
     with pytest.raises(play.PlayError, match="already playing dry-run-first"):
-        play.start("no-base", run_dir)
+        play.start("no-base", run_dir, allow_google=False, force=False)
     assert play.load(run_dir).task == "dry-run-first"
-    play.start("no-base", run_dir, force=True)
+    play.start("no-base", run_dir, force=True, allow_google=False)
     session = play.load(run_dir)
     assert session.task == "no-base" and session.steps == []
     assert sorted(p.name for p in run_dir.glob("*.json")) == ["no-base.json"]
 
 
-def test_the_budget_stops_a_run_that_is_getting_nowhere(tmp_path):
+def test_the_budget_stops_a_run_that_is_getting_nowhere(tmp_path: Path):
     run_dir = tmp_path / "run"
-    play.start("consent-expired", run_dir)
+    play.start("consent-expired", run_dir, allow_google=False, force=False)
     for _ in range(play.MAX_STEPS):
         play.call(run_dir, "deck_sync", {"pdf": "talk.pdf", "deck": tasks.DECK})
     with pytest.raises(play.PlayError, match="budget"):
         play.call(run_dir, "deck_sync", {"pdf": "talk.pdf", "deck": tasks.DECK})
 
 
-def test_a_run_dir_holding_two_transcripts_is_named_rather_than_guessed_at(tmp_path):
+def test_a_run_dir_holding_two_transcripts_is_named_rather_than_guessed_at(tmp_path: Path):
     run_dir = tmp_path / "run"
-    play.start("dry-run-first", run_dir)
+    play.start("dry-run-first", run_dir, allow_google=False, force=False)
     (run_dir / "smuggled.json").write_text("{}", encoding="utf-8")
     with pytest.raises(play.PlayError, match="holds 2 transcripts"):
         play.load(run_dir)
 
 
-def test_an_unknown_task_and_an_unstarted_folder_say_what_to_do(tmp_path):
+def test_an_unknown_task_and_an_unstarted_folder_say_what_to_do(tmp_path: Path):
     with pytest.raises(play.PlayError, match="There is no task called"):
         play.task_by_id("convert-everything")
     with pytest.raises(play.PlayError, match="Start a task first"):
         play.load(tmp_path / "nothing-here")
+
+
+def test_a_transcript_someone_else_edited_out_of_shape_is_refused_not_a_crash(
+        tmp_path: Path) -> None:
+    """A transcript is read where it enters: `steps` that are no list of objects (or no
+    object at all) once reached the run as whatever they were and broke a later call."""
+    run_dir = tmp_path / "run"
+    play.start("dry-run-first", run_dir, allow_google=False, force=False)
+    path = play.transcript_path(run_dir)
+    for broken in ('{"task": "dry-run-first", "steps": {"tool": "x"}}',
+                   '{"task": "dry-run-first", "steps": [3]}',
+                   '{"task": "dry-run-first", "answer": 7}',
+                   '["dry-run-first"]'):
+        path.write_text(broken, encoding="utf-8")
+        with pytest.raises(play.PlayError) as refusal:
+            play.load(run_dir)
+        assert refusal.value.code == play.EXIT_REFUSED, broken
 
 
 # ------------------------------------------------------------------------------ the arguments
@@ -311,7 +334,7 @@ def test_arguments_are_read_as_json_where_they_can_be_and_as_strings_where_they_
     assert play.parse_arguments([], None, None) == {}
 
 
-def test_arguments_no_shell_could_have_meant_are_refused_by_name(tmp_path):
+def test_arguments_no_shell_could_have_meant_are_refused_by_name(tmp_path: Path):
     with pytest.raises(play.PlayError, match="not JSON"):
         play.parse_arguments([], "{pdf: talk.pdf}", None)
     with pytest.raises(play.PlayError, match="has to be a JSON object"):
@@ -324,21 +347,21 @@ def test_arguments_no_shell_could_have_meant_are_refused_by_name(tmp_path):
         play.parse_arguments([], None, str(tmp_path / "gone.json"))
 
 
-def test_an_argument_a_scripted_tool_cannot_take_is_a_bad_request_not_a_crash(tmp_path):
+def test_an_argument_a_scripted_tool_cannot_take_is_a_bad_request_not_a_crash(tmp_path: Path):
     # The fakes have no `@tool` wrapper to catch this; a real tool's own wrapper does.
     run_dir = tmp_path / "run"
-    play.start("read-the-conflict", run_dir)
+    play.start("read-the-conflict", run_dir, allow_google=False, force=False)
     result = play.call(run_dir, "deck_sync", {"ctx": "not a chance"})
     assert result.ok is False and result.code == "bad_request"
 
 
 # -------------------------------------------------------------- the replayed script keeps counting
 
-def test_a_canned_answer_that_counts_its_calls_still_counts_across_processes(tmp_path):
+def test_a_canned_answer_that_counts_its_calls_still_counts_across_processes(tmp_path: Path):
     # `second-sync-is-quiet` answers the *second* doc_sync with 0 requests, and that counter died
     # with the process that made the first call. Replaying the transcript is what rebuilds it.
     run_dir = tmp_path / "run"
-    play.start("second-sync-is-quiet", run_dir)
+    play.start("second-sync-is-quiet", run_dir, allow_google=False, force=False)
     first = play.call(run_dir, "doc_sync", {"file": "notes.html"})
     second = play.call(run_dir, "doc_sync", {"file": "notes.html", "dry_run": True})
     assert first.data["requests"] == 24 and second.data["requests"] == 0
@@ -346,9 +369,9 @@ def test_a_canned_answer_that_counts_its_calls_still_counts_across_processes(tmp
 
 # ---------------------------------------------------------------------------- what `start` prints
 
-def test_the_briefing_carries_everything_an_operator_pastes_into_a_harness(tmp_path):
+def test_the_briefing_carries_everything_an_operator_pastes_into_a_harness(tmp_path: Path):
     task = tasks.BY_ID["assume-base"]
-    session, started = play.start(task.id, tmp_path / "run")
+    session, started = play.start(task.id, tmp_path / "run", allow_google=False, force=False)
     text = play.briefing(started, session)
     assert task.prompt in " ".join(text.split())            # verbatim, modulo the wrapping
     assert "Never rebuild a deck somebody has edited" in text
@@ -361,25 +384,26 @@ def test_the_briefing_carries_everything_an_operator_pastes_into_a_harness(tmp_p
         assert name in text
 
 
-def test_the_briefing_publishes_the_schema_the_tools_actually_run(tmp_path):
-    session, task = play.start("dry-run-first", tmp_path / "run")
+def test_the_briefing_publishes_the_schema_the_tools_actually_run(tmp_path: Path):
+    session, task = play.start("dry-run-first", tmp_path / "run", allow_google=False, force=False)
     data = play.briefing_json(task, session)
-    assert [s["name"] for s in data["tools"]] == sorted(task.script)
-    sync = next(s for s in data["tools"] if s["name"] == "deck_sync")
-    assert "dry_run" in sync["input_schema"]["properties"]
-    assert sync["input_schema"]["additionalProperties"] is False
+    assert task.script is not None
+    assert [s["name"] for s in objs(data, "tools")] == sorted(task.script)
+    sync = next(s for s in objs(data, "tools") if s["name"] == "deck_sync")
+    assert "dry_run" in obj(sync, "input_schema", "properties")
+    assert at(sync, "input_schema", "additionalProperties") is False
     assert data["max_steps"] == play.MAX_STEPS and data["prompt"] == task.prompt
 
 
-def test_a_task_whose_tools_this_checkout_lacks_is_briefed_honestly(monkeypatch):
+def test_a_task_whose_tools_this_checkout_lacks_is_briefed_honestly(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(bench, "registry", lambda: None)
     [stub] = play.schemas(["deck_teleport"])
-    assert stub["name"] == "deck_teleport" and "no such tool" in stub["description"]
+    assert stub["name"] == "deck_teleport" and "no such tool" in text(stub, "description")
 
 
 # ------------------------------------------------------------------------------------- the CLI
 
-def test_the_commands_exit_the_way_a_harness_expects(tmp_path, capsys):
+def test_the_commands_exit_the_way_a_harness_expects(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     run_dir = str(tmp_path / "run")
     assert play.main(["start", "dry-run-first", "--run-dir", run_dir]) == play.EXIT_OK
     capsys.readouterr()
@@ -397,13 +421,13 @@ def test_the_commands_exit_the_way_a_harness_expects(tmp_path, capsys):
     assert play.main(["tasks"]) == play.EXIT_OK
 
 
-def test_a_refused_move_prints_a_sentence_and_exits_four(tmp_path, capsys):
+def test_a_refused_move_prints_a_sentence_and_exits_four(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     code = play.main(["call", "b2s_status", "--run-dir", str(tmp_path / "nothing")])
     assert code == play.EXIT_REFUSED
     assert "Start a task first" in capsys.readouterr().out
 
 
-def test_the_cli_scores_a_harmful_run_with_the_harm_exit_code(tmp_path):
+def test_the_cli_scores_a_harmful_run_with_the_harm_exit_code(tmp_path: Path):
     task = tasks.BY_ID["assume-base"]
     run_dir = str(tmp_path / "run")
     play.main(["start", task.id, "--run-dir", run_dir])

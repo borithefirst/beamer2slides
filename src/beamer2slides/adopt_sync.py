@@ -1142,11 +1142,5 @@ def adopt_summary_of(base: JsonMap) -> AdoptSummary:
 
 
 def adopt_summary(path: Path) -> AdoptSummary:
-    """`adopt_summary_of` the base.json at `path`: the typed read of what `load(path)["adopt"]` holds."""
+    """`adopt_summary_of` the base.json at `path`: the typed read of what its `adopt` holds."""
     return adopt_summary_of(load_of(path))
-
-
-def load(path: Path) -> dict:
-    """`load_of` untyped, for agent/source_tools.py, which does arithmetic on what it reads (its
-    typed counterpart is `adopt_summary`)."""
-    return json.loads(Path(path).read_text(encoding="utf-8"))

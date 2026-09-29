@@ -38,6 +38,7 @@ from pathlib import Path
 from .. import interpreter
 from ..agent.types import Refused
 from ..agent.workspace import LocalWorkspace
+from ..json_types import Json, JsonObject, as_object, as_objects
 
 SID = re.compile(r"[0-9a-f]{12}")
 RUN_ID = re.compile(r"[0-9a-f]{8}")
@@ -54,12 +55,14 @@ LOG_LINES = 800
 RUN_SLOTS = 1                 # journeys at a time on this server; the rest queue
 RUN_TIMEOUT = int(os.environ.get("B2S_WORKBENCH_TIMEOUT") or 420)
 TEX_TIMEOUT = int(os.environ.get("B2S_WORKBENCH_TEX_TIMEOUT") or 90)
+TEX_PASSES = 3                # at most, per compile (`run_latex`)
+QUOTE_ROOM = 90               # characters of somebody's file a refusal quotes
 
 #: TeX Live's paranoid mode plus shell escape off, for everything a run starts - the playground's
 #: own compile sets these, and so must the library's (`inverse.Compiler` passes neither).
 FENCE = {"openin_any": "p", "openout_any": "p", "shell_escape": "f"}
 
-COMPILE_TOOL = {
+COMPILE_TOOL: JsonObject = {
     "name": "tex_compile",
     "description": "Compile a LaTeX source in the workspace with the server's TeX engine and "
                    "leave the PDF beside it.\n\nNot one of the journeys: it is how a source "
@@ -91,7 +94,7 @@ COMPILE_TOOL = {
 class Denied(Exception):
     """Something the workbench refuses, carrying the status the page should be told."""
 
-    def __init__(self, message: str, status: int = 400) -> None:
+    def __init__(self, message: str, status: int) -> None:
         super().__init__(message)
         self.status = status
 
@@ -107,8 +110,7 @@ def tex_engine(source: str, engines: list[str]) -> str:
         and "lualatex" in engines else engines[0]
 
 
-def run_latex(folder: Path, main: str, engines: list[str], timeout: int = TEX_TIMEOUT,
-              passes: int = 3) -> Path:
+def run_latex(folder: Path, main: str, engines: list[str], timeout: int, passes: int) -> Path:
     """Run a TeX engine on `main` inside `folder` and return the PDF it wrote.
 
     The fence is the same wherever a compile happens on this server: no shell escape, no file
@@ -154,11 +156,11 @@ def run_latex(folder: Path, main: str, engines: list[str], timeout: int = TEX_TI
 class Run:
     """One journey in flight, and what the page polls for."""
 
-    def __init__(self, rid: str, tool: str, args: dict) -> None:
+    def __init__(self, rid: str, tool: str, args: JsonObject) -> None:
         self.id, self.tool, self.args = rid, tool, args
         self.state = "queued"                 # queued | running | done
         self.log: list[str] = []
-        self.result: dict | None = None
+        self.result: JsonObject | None = None
         self.started = time.time()
         self.seconds = 0.0
 
@@ -166,10 +168,10 @@ class Run:
         self.log.append(line)
         del self.log[:-LOG_LINES]
 
-    def view(self, since: int = 0) -> dict:
+    def view(self, since: int) -> JsonObject:
         return {"id": self.id, "tool": self.tool, "state": self.state, "result": self.result,
                 "seconds": round(self.seconds, 2), "lines": len(self.log),
-                "log": self.log[max(0, since):]}
+                "log": list[Json](self.log[max(0, since):])}
 
 
 class Session:
@@ -198,9 +200,9 @@ class Session:
                 del self.seen[old]
         return stamp
 
-    def view(self) -> dict:
+    def view(self) -> JsonObject:
         files, total = listing(self.root)
-        return {"id": self.id, "files": files, "bytes": total,
+        return {"id": self.id, "files": list[Json](files), "bytes": total,
                 "limits": {"files": MAX_FILES, "bytes": MAX_BYTES, "file_bytes": MAX_FILE,
                            "seconds": RUN_TIMEOUT},
                 "runs": [{"id": r.id, "tool": r.tool, "state": r.state,
@@ -208,13 +210,13 @@ class Session:
                          for r in self.runs.values()]}
 
 
-def listing(root: Path) -> tuple[list[dict], int]:
+def listing(root: Path) -> tuple[list[JsonObject], int]:
     """Every file under the workspace, with its size, and the bytes they come to together.
 
     The count is of everything; the list stops at `MAX_LIST`, because a conversion of forty
     pages writes more rows than a person can read and the page says so rather than sending them.
     """
-    rows: list[dict] = []
+    rows: list[JsonObject] = []
     total = 0
     for path in sorted(root.rglob("*"), key=lambda p: p.as_posix()):
         rel = path.relative_to(root).as_posix()
@@ -250,13 +252,13 @@ def version(path: Path) -> str:
         return ""
 
 
-def _short(text: str, room: int = 90) -> str:
+def _short(text: str) -> str:
     """A piece of somebody's file, small enough to stand in a sentence."""
     said = " ".join(text.split())
-    return repr(said if len(said) <= room else said[:room - 1] + "…")
+    return repr(said if len(said) <= QUOTE_ROOM else said[:QUOTE_ROOM - 1] + "…")
 
 
-def _around(whole: str, piece: str, room: int = 90) -> str:
+def _around(whole: str, piece: str) -> str:
     """A piece one side changed, in the line it stands in.
 
     The merge is word-level, so a clash can be one word long - and one word is not a place
@@ -264,10 +266,10 @@ def _around(whole: str, piece: str, room: int = 90) -> str:
     """
     at = whole.find(piece) if piece else -1
     if at < 0:
-        return _short(piece or "(nothing)", room)
+        return _short(piece or "(nothing)")
     start = whole.rfind("\n", 0, at) + 1
     end = whole.find("\n", at + len(piece))
-    return _short(whole[start:end if end >= 0 else len(whole)], room)
+    return _short(whole[start:end if end >= 0 else len(whole)])
 
 
 def usage(root: Path) -> tuple[int, int]:
@@ -329,10 +331,10 @@ class Workbench:
 
     # -- files ------------------------------------------------------------------------
 
-    def resolve(self, session: Session, ref: str, *, write: bool = False) -> Path:
+    def resolve(self, session: Session, ref: str, *, write: bool) -> Path:
         """The agent layer's own boundary: a path that climbs out is refused there, not here."""
         if not ref or ref.strip() in (".", ""):
-            raise Denied("name a file")
+            raise Denied("name a file", 400)
         try:
             return LocalWorkspace(session.root).resolve(ref, write=write)
         except Refused as exc:
@@ -341,14 +343,13 @@ class Workbench:
     def read(self, session: Session, ref: str) -> tuple[Path, bytes, str]:
         """One file, and the stamp the editor is to hold while it types - remembered here,
         because what this server handed out is the base a later save is merged against."""
-        path = self.resolve(session, ref)
+        path = self.resolve(session, ref, write=False)
         if not path.is_file():
             raise Denied("no such file", 404)
         data = path.read_bytes()
         return path, data, session.remember(ref, data)
 
-    def write(self, session: Session, ref: str, data: bytes,
-              expected: str | None = None) -> dict:
+    def write(self, session: Session, ref: str, data: bytes, expected: str | None) -> JsonObject:
         path = self.resolve(session, ref, write=True)
         if len(data) > MAX_FILE:
             raise Denied(f"over {MAX_FILE // 2**20} MB", 413)
@@ -433,8 +434,8 @@ class Workbench:
 
     # -- runs -------------------------------------------------------------------------
 
-    def start(self, session: Session, tool: str, args: dict, *, mode: str | None = None,
-              token: str | None = None) -> Run:
+    def start(self, session: Session, tool: str, args: JsonObject, *, mode: str | None,
+              token: str | None) -> Run:
         if sum(r.state != "done" for r in session.runs.values()) >= 2:
             raise Denied("this workspace already has a run waiting", 429)
         run = Run(uuid.uuid4().hex[:8], tool, args)
@@ -449,29 +450,31 @@ class Workbench:
         with self.slots:                      # one journey at a time on this server
             started = time.time()
             run.state = "running"
+            result: JsonObject
             try:
                 if run.tool == COMPILE_TOOL["name"]:
-                    run.result = self._compile(session, run)
+                    result = self._compile(session, run)
                 else:
-                    run.result = self._journey(session, run, mode, token)
+                    result = self._journey(session, run, mode, token)
             except Exception as exc:          # a run that breaks is a finding, not a dead server
-                run.result = failed(run.tool, f"{type(exc).__name__}: {exc}")
+                result = failed(run.tool, f"{type(exc).__name__}: {exc}", "failed")
             run.seconds = time.time() - started
-            run.result.setdefault("seconds", round(run.seconds, 2))
+            result.setdefault("seconds", round(run.seconds, 2))
+            run.result = result
             run.state = "done"
             session.touched = time.time()
 
-    def _compile(self, session: Session, run: Run) -> dict:
+    def _compile(self, session: Session, run: Run) -> JsonObject:
         if not self.engines:
             return failed(run.tool, "this server has no TeX distribution: upload a compiled PDF "
-                                    "instead", code="refused")
+                                    "instead", "refused")
         ref = str(run.args.get("tex") or "")
-        self.resolve(session, ref)            # the boundary, before anything runs
+        self.resolve(session, ref, write=False)   # the boundary, before anything runs
         try:
-            pdf = run_latex(session.root, ref, self.engines,
-                            passes=int(run.args.get("passes") or 3))
+            pdf = run_latex(session.root, ref, self.engines, TEX_TIMEOUT,
+                            _count(run.args.get("passes"), TEX_PASSES))
         except TexError as exc:
-            return failed(run.tool, str(exc), code="compile_failed")
+            return failed(run.tool, str(exc), "compile_failed")
         name = LocalWorkspace(session.root).ref(pdf)
         return {"tool": run.tool, "ok": True, "code": None,
                 "summary": f"{ref} compiled; {name} is {pdf.stat().st_size // 1024} kB.",
@@ -484,37 +487,44 @@ class Workbench:
         """How a journey's process is started. A seam: the tests put a stand-in child here."""
         return [interpreter.python(), "-u", "-m", "beamer2slides.playground.runner"]
 
-    def _journey(self, session: Session, run: Run, mode: str | None, token: str | None) -> dict:
-        job = {"tool": run.tool, "args": run.args, "root": str(session.root),
-               "google": {"mode": mode, "token": token}}
+    def _journey(self, session: Session, run: Run, mode: str | None, token: str | None) -> JsonObject:
+        job: JsonObject = {"tool": run.tool, "args": run.args, "root": str(session.root),
+                           "google": {"mode": mode, "token": token}}
+        # In a group of its own where there are groups, so killing it kills the TeX run under it.
         proc = subprocess.Popen(
             self.command(),
             cwd=session.root, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace",
-            env=interpreter.env_over({**os.environ, **FENCE}), **_own_group())
+            env=interpreter.env_over({**os.environ, **FENCE}), start_new_session=os.name != "nt")
+        stdin, stdout, stderr = proc.stdin, proc.stdout, proc.stderr
+        if stdin is None or stdout is None or stderr is None:     # asked for PIPE: never
+            kill(proc)
+            raise RuntimeError("the journey's process has no pipes")
         stopped: list[str] = []
         noise: list[str] = []
         watchdog = threading.Timer(RUN_TIMEOUT, lambda: (stopped.append("timeout"), kill(proc)))
         watchdog.start()
-        drain = threading.Thread(target=lambda: noise.append(proc.stderr.read() or ""), daemon=True)
+        drain = threading.Thread(target=lambda: noise.append(stderr.read() or ""), daemon=True)
         drain.start()
-        result: dict | None = None
+        result: JsonObject | None = None
         try:
-            proc.stdin.write(json.dumps(job))
-            proc.stdin.close()
-            for line in proc.stdout:
-                line = line.strip()
+            stdin.write(json.dumps(job))
+            stdin.close()
+            for raw in stdout:
+                line = raw.strip()
                 if not line:
                     continue
                 try:
-                    message = json.loads(line)
+                    message: Json = json.loads(line)
                 except ValueError:
                     run.say(line)
                     continue
-                if "progress" in message:
+                if not isinstance(message, dict):      # a line of the child's that is no message
+                    run.say(line)
+                elif "progress" in message:
                     run.say(str(message["progress"]))
                 elif "result" in message:
-                    result = message["result"]
+                    result = as_object(message["result"], "the journey's result")
             proc.wait()
         finally:
             watchdog.cancel()
@@ -523,24 +533,29 @@ class Workbench:
             return result
         if stopped:
             return failed(run.tool, f"the run was stopped after {RUN_TIMEOUT} s. A journey that "
-                                    f"takes this long on a shared server is one to run at home.")
+                                    f"takes this long on a shared server is one to run at home.",
+                          "failed")
         said = ("".join(noise)).strip()[-1500:]
         return failed(run.tool, f"the run died without an answer (exit {proc.returncode})"
-                                + (f":\n{said}" if said else ""))
+                                + (f":\n{said}" if said else ""), "failed")
 
 
-def failed(tool: str, summary: str, code: str = "failed") -> dict:
+def failed(tool: str, summary: str, code: str) -> JsonObject:
     """A refusal in the shape every tool answers in, so the page renders it like any other."""
     return {"tool": tool, "ok": False, "code": code, "summary": summary, "data": {},
             "artifacts": [], "diagnostics": [], "next_steps": [], "seconds": 0.0}
 
 
-def _own_group() -> dict:
-    """Start the child in a group of its own, so killing it kills the TeX run under it."""
-    return {} if os.name == "nt" else {"start_new_session": True}
+def _count(value: Json, missing: int) -> int:
+    """A count a page sent, as `int()` reads one; `missing` where it sent none."""
+    if not value:
+        return missing
+    if isinstance(value, (int, float, str)):
+        return int(value)
+    raise TypeError(f"a count was expected, not {type(value).__name__}")
 
 
-def kill(proc: subprocess.Popen) -> None:
+def kill(proc: "subprocess.Popen[str]") -> None:
     """Take down the child *and what it started*: a journey's LaTeX run is not its last breath."""
     try:
         if os.name == "nt":
@@ -639,10 +654,10 @@ def seed(root: Path) -> None:
 
 # ---------------------------------------------------------------- the catalogue
 
-_CATALOGUE: dict | None = None
+_CATALOGUE: JsonObject | None = None
 
 
-def catalogue() -> dict:
+def catalogue() -> JsonObject:
     """The tools as the page draws them: the published schemas, plus the compile step.
 
     `agent.schema` reads these off the tools themselves, so the form a visitor fills in and the
@@ -652,13 +667,14 @@ def catalogue() -> dict:
     global _CATALOGUE
     if _CATALOGUE is None:
         from ..agent import schema, tools
-        _CATALOGUE = {"tools": [COMPILE_TOOL, *schema.all_schemas(tools.TOOLS)],
-                      "instructions": tools.INSTRUCTIONS}
+        published: list[Json] = [COMPILE_TOOL]
+        published.extend(schema.described_json(d) for d in schema.all_schemas(tools.TOOLS))
+        _CATALOGUE = {"tools": published, "instructions": tools.INSTRUCTIONS}
     return _CATALOGUE
 
 
 def needs_google(tool: str) -> bool:
-    for published in catalogue()["tools"]:
+    for published in as_objects(catalogue()["tools"], "the catalogue's tools"):
         if published["name"] == tool:
-            return bool(published["effects"]["google"])
+            return bool(as_object(published["effects"], f"{tool}'s effects")["google"])
     raise Denied(f"there is no tool called {tool!r}", 404)

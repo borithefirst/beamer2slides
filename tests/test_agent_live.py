@@ -24,11 +24,18 @@ Skipped when the Google token needs a browser consent.
 """
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
+from .json_reads import integer, text as text_at
 from .test_slides_alignment import MAIN, google_unavailable
+
+if TYPE_CHECKING:
+    from beamer2slides.agent import AgentContext, Result
+    from beamer2slides.google_types import SlidesService
 
 OUT = Path(os.environ.get("B2S_AGENT_LIVE_OUT", MAIN / "out" / "agent-live"))
 #: Small on purpose - this suite is about the seam, not about conversion fidelity.
@@ -46,19 +53,19 @@ DOCUMENT = """<!DOCTYPE html>
 """
 
 
-def _context(allow=None, root: Path | None = None):
+def _context(root: Path) -> "AgentContext":
     """A context over the main checkout (or a folder inside it), with this machine's token."""
     from beamer2slides.agent import ALL_ACTIONS, AgentContext, LocalWorkspace
 
-    return AgentContext(workspace=LocalWorkspace(root or MAIN), allow=allow or ALL_ACTIONS)
+    return AgentContext(workspace=LocalWorkspace(root), allow=ALL_ACTIONS)
 
 
-def _call(tool: str, **args):
+def _call(tool: str, **args: object) -> "Result":
     # Not `name`: `doc_push` has an argument of that name, and a helper must never be the
     # reason a tool cannot be called the way its schema says.
     from beamer2slides.agent import tools
 
-    return tools.TOOLS[tool](_context(), **args)
+    return tools.TOOLS[tool](_context(MAIN), **args)
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -77,8 +84,8 @@ def test_a_deck_is_converted_and_inspected_through_the_tools():
     ref = "out/agent-live/fira"
     converted = _call("deck_convert", pdf=DECK, out=ref, title="agent live: fira")
     assert converted.ok, converted.json()
-    assert converted.data["url"].startswith("https://docs.google.com/presentation/")
-    assert converted.data["slides"] >= 1
+    assert text_at(converted.data, "url").startswith("https://docs.google.com/presentation/")
+    assert integer(converted.data, "slides") >= 1
     assert any(a.kind == "json" for a in converted.artifacts)   # emit.json, to act on later
 
     looked = _call("deck_inspect", pdf=DECK, out=ref)
@@ -100,7 +107,7 @@ def test_a_deck_somebody_edited_refuses_to_be_rebuilt_and_names_the_way_forward(
     first = _call("deck_convert", pdf=DECK, out=ref, title="agent live: edited")
     assert first.ok, first.json()
 
-    _type_into(first.data["url"])
+    _type_into(text_at(first.data, "url"))
 
     refused = _call("deck_convert", pdf=DECK, out=ref)
     assert not refused.ok and refused.code == "deck_edited", refused.json()
@@ -112,7 +119,7 @@ def test_a_deck_somebody_edited_refuses_to_be_rebuilt_and_names_the_way_forward(
     merged = _call("deck_sync", pdf=DECK, deck=ref, dry_run=True)
     assert merged.ok, merged.json()
     assert merged.data["wrote"] is False
-    assert merged.data["kept"] >= 1, "the typed word is a deck edit the merge must keep"
+    assert integer(merged.data, "kept") >= 1, "the typed word is a deck edit the merge must keep"
 
 
 TYPED = "EDITED "
@@ -166,15 +173,20 @@ def _id(url: str) -> str:
     return url.rstrip("/").split("/d/")[1].split("/")[0]
 
 
-def _texts(api, ident: str):
+def _texts(api: "SlidesService", ident: str) -> Iterator[tuple[str, str, str]]:
     """(slide, objectId, text) for every shape on the deck that holds text."""
+    from beamer2slides.google_types import object_id, part, parts
+    from beamer2slides.json_types import as_str
+
     deck = api.presentations().get(presentationId=ident).execute()
-    for slide in deck["slides"]:
+    for slide in deck.get("slides", []):
         for element in slide.get("pageElements", []):
-            runs = element.get("shape", {}).get("text", {}).get("textElements", [])
-            text = "".join(r.get("textRun", {}).get("content", "") for r in runs)
+            body = part(part(element.get("shape"), "shape").get("text"), "shape.text")
+            runs = parts(body.get("textElements"), "text.textElements")
+            text = "".join(as_str(part(r.get("textRun"), "textRun").get("content", ""), "content")
+                           for r in runs)
             if text:
-                yield slide["objectId"], element["objectId"], text
+                yield object_id(slide), object_id(element), text
 
 
 # ---------------------------------------------------------------- the docs journeys
@@ -195,7 +207,7 @@ def test_a_document_is_pushed_synced_and_then_has_nothing_left_to_say():
 
     pushed = _call("doc_push", file=ref, name="agent live: what an agent pushed")
     assert pushed.ok, pushed.json()
-    ident = pushed.data["document"]
+    ident = text_at(pushed.data, "document")
     try:
         text = path.read_text(encoding="utf-8")
         path.write_text(text.replace("which the source will reword",
@@ -203,7 +215,7 @@ def test_a_document_is_pushed_synced_and_then_has_nothing_left_to_say():
 
         synced = _call("doc_sync", file=ref)
         assert synced.ok, synced.json()
-        assert synced.data["requests"] > 0                      # it really wrote something
+        assert integer(synced.data, "requests") > 0                      # it really wrote something
 
         again = _call("doc_sync", file=ref)
         assert again.ok, again.json()
@@ -244,17 +256,17 @@ def test_a_document_nobody_pushed_is_adopted_into_the_workspace():
     OUT.mkdir(parents=True, exist_ok=True)
     ident = _import_html(FOREIGN, "agent live: a document nobody pushed")
     try:
-        adopted = agent_tools.TOOLS["doc_adopt"](_context(root=OUT), doc=ident)
+        adopted = agent_tools.TOOLS["doc_adopt"](_context(OUT), doc=ident)
         assert adopted.ok, adopted.json()
-        written = OUT / adopted.data["file"]
+        written = OUT / text_at(adopted.data, "file")
         assert written.is_file(), f"{adopted.data['file']} is not in the workspace"
-        assert adopted.data["blocks"] >= 3                      # a heading and two paragraphs
+        assert integer(adopted.data, "blocks") >= 3                      # a heading and two paragraphs
         assert adopted.data["anchored"] == adopted.data["blocks"], "every block gets a range"
         said = written.read_text(encoding="utf-8")
         assert ident in said                                    # the file names its document
 
         # Idempotent: a second run plants no second set of anchors and writes the same file.
-        again = agent_tools.TOOLS["doc_adopt"](_context(root=OUT), doc=ident)
+        again = agent_tools.TOOLS["doc_adopt"](_context(OUT), doc=ident)
         assert again.ok, again.json()
         assert again.data["anchored"] == adopted.data["anchored"]
         assert written.read_text(encoding="utf-8") == said
@@ -279,11 +291,12 @@ def _import_html(html: str, name: str) -> str:
     from googleapiclient.http import MediaIoBaseUpload
 
     from beamer2slides.google_auth import credentials, drive_service
+    from beamer2slides.google_types import file_id
 
     media = MediaIoBaseUpload(io.BytesIO(html.encode("utf-8")), mimetype="text/html")
-    return drive_service(credentials()).files().create(
+    return file_id(drive_service(credentials()).files().create(
         body={"name": name, "mimeType": "application/vnd.google-apps.document"},
-        media_body=media, fields="id").execute()["id"]
+        media_body=media, fields="id").execute(), "the imported document")
 
 
 def _forget(path: Path) -> None:

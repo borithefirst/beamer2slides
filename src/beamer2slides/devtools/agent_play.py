@@ -51,29 +51,34 @@ Exit codes, because a harness will branch on them:
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import shutil
+import tempfile
 import time
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
 
 from beamer2slides.agent import schema as agent_schema
-from beamer2slides.agent.context import AgentContext
-from beamer2slides.agent.types import CODES, Result
+from beamer2slides.agent.context import AgentContext, Journey
+from beamer2slides.agent.types import CODES, Result, refusal
 from beamer2slides.agent.workspace import LocalWorkspace
+from beamer2slides.json_types import (Json, JsonObject, JsonShapeError, as_array, as_object,
+                                      as_objects, as_str)
 from beamer2slides.paths import out_root
 
 from . import agent_bench as bench
 from . import agent_tasks
+from .agent_tasks import Task
 
 PLAY_VERSION = 1
 
 #: The step budget. It has to be the one `run_task` replays under, or a transcript this CLI
-#: accepted would be truncated at scoring time and fail for a reason the model never saw;
-#: `tests/test_agent_play.py` pins the two together.
-MAX_STEPS = 24
+#: accepted would be truncated at scoring time and fail for a reason the model never saw: it is
+#: the benchmark's own number, and `score` hands it to `run_task` by name.
+MAX_STEPS = bench.MAX_STEPS
 
 PLAY_ROOT = Path(os.environ.get("B2S_AGENT_PLAY") or out_root() / "agent-play")
 
@@ -96,14 +101,19 @@ CLI = "python -m beamer2slides.devtools.agent_play"
 class PlayError(Exception):
     """A move the CLI refuses: always a sentence saying what to do instead, never a traceback."""
 
-    def __init__(self, message: str, *, code: int = EXIT_REFUSED) -> None:
+    def __init__(self, message: str, *, code: int) -> None:
         super().__init__(message)
         self.code = code
 
 
+def refused(message: str) -> PlayError:
+    """The move the CLI refuses outright (exit 4): the common case, said without a code."""
+    return PlayError(message, code=EXIT_REFUSED)
+
+
 # ------------------------------------------------------------------------------------ the session
 
-@dataclass
+@dataclass(kw_only=True)
 class Session:
     """One played task, held in one JSON file - the transcript and the state are the same thing.
 
@@ -111,22 +121,25 @@ class Session:
     `{tool, arguments, result}`), which is also what `Run.json()` writes, so the file can be
     scored here, replayed with `--policy recorded:<run dir>`, or committed as a fixture with no
     conversion. Everything this CLI needs and the benchmark does not lives under `play`.
+
+    Filled in as the run goes (a step per call, then the answer), so not frozen.
     """
 
     path: Path
     task: str
-    steps: list[dict] = field(default_factory=list)
-    answer: str = ""
-    play: dict[str, Any] = field(default_factory=dict)
+    steps: list[JsonObject]
+    answer: str
+    play: JsonObject
 
     @property
     def finished(self) -> bool:
         return bool(self.play.get("finished"))
 
-    def json(self) -> dict:
-        return {"task": self.task, "answer": self.answer, "steps": self.steps, "play": self.play}
+    def json(self) -> JsonObject:
+        return {"task": self.task, "answer": self.answer, "steps": list[Json](self.steps),
+                "play": self.play}
 
-    def record(self) -> dict:
+    def record(self) -> JsonObject:
         """What `Recorded` is built from: the calls and the answer, without any of the results."""
         return {"answer": self.answer,
                 "steps": [{"tool": s["tool"], "arguments": s.get("arguments") or {}}
@@ -147,7 +160,7 @@ def default_run_dir(task_id: str) -> Path:
     return PLAY_ROOT / task_id
 
 
-def run_dir_of(given: str | None, *, for_task: str | None = None) -> Path:
+def run_dir_of(given: str | None, *, for_task: str | None) -> Path:
     """`--run-dir`, else `$B2S_AGENT_PLAY_DIR`, else (starting only) a folder named for the task.
 
     A later command cannot derive the folder from the task, since it does not know the task yet -
@@ -160,60 +173,68 @@ def run_dir_of(given: str | None, *, for_task: str | None = None) -> Path:
         return Path(from_env)
     if for_task:
         return default_run_dir(for_task)
-    raise PlayError(f"Say which run this is: --run-dir DIR (or set $B2S_AGENT_PLAY_DIR). "
-                    f"`{CLI} start <task-id>` prints the folder it made.")
+    raise refused(f"Say which run this is: --run-dir DIR (or set $B2S_AGENT_PLAY_DIR). "
+                  f"`{CLI} start <task-id>` prints the folder it made.")
 
 
 def transcript_path(run_dir: Path) -> Path:
     """The one transcript in a run dir. One session per folder, enforced by there being one file."""
     folder = Path(run_dir)
     if not folder.is_dir():
-        raise PlayError(f"{folder} is not a run dir. Start a task first: "
-                        f"`{CLI} start <task-id> --run-dir {folder}`.")
+        raise refused(f"{folder} is not a run dir. Start a task first: "
+                      f"`{CLI} start <task-id> --run-dir {folder}`.")
     found = sorted(p for p in folder.glob("*.json") if not p.name.endswith(".tmp"))
     if not found:
-        raise PlayError(f"{folder} holds no transcript, so no task is being played there. "
-                        f"`{CLI} start <task-id> --run-dir {folder}` begins one.")
+        raise refused(f"{folder} holds no transcript, so no task is being played there. "
+                      f"`{CLI} start <task-id> --run-dir {folder}` begins one.")
     if len(found) > 1:
         names = ", ".join(p.name for p in found)
-        raise PlayError(f"{folder} holds {len(found)} transcripts ({names}) and a run dir holds "
-                        f"one session. Give each task a folder of its own.")
+        raise refused(f"{folder} holds {len(found)} transcripts ({names}) and a run dir holds "
+                      f"one session. Give each task a folder of its own.")
     return found[0]
 
 
 def load(run_dir: Path) -> Session:
     path = transcript_path(run_dir)
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data: Json = json.loads(path.read_text(encoding="utf-8"))
     except ValueError as exc:
-        raise PlayError(f"{path} is not readable as JSON ({exc}). It was written by this CLI, so "
-                        f"something else has edited it; start the task again with --force.") from None
-    if not isinstance(data, dict) or not data.get("task"):
-        raise PlayError(f"{path} does not name a task, so it is not a transcript of a played run.")
-    return Session(path=path, task=data["task"], steps=list(data.get("steps") or []),
-                   answer=data.get("answer", ""), play=dict(data.get("play") or {}))
+        raise refused(f"{path} is not readable as JSON ({exc}). It was written by this CLI, so "
+                      f"something else has edited it; start the task again with --force.") from None
+    task = data.get("task") if isinstance(data, dict) else None
+    if not isinstance(data, dict) or not isinstance(task, str) or not task:
+        raise refused(f"{path} does not name a task, so it is not a transcript of a played run.")
+    where = str(path)
+    try:
+        return Session(path=path, task=task,
+                       steps=as_objects(data.get("steps") or [], f"{where}: steps"),
+                       answer=as_str(data.get("answer", ""), f"{where}: answer"),
+                       play=dict(as_object(data.get("play") or {}, f"{where}: play")))
+    except JsonShapeError as exc:
+        raise refused(f"{exc}. It was written by this CLI, so something else has edited it; "
+                      f"start the task again with --force.") from None
 
 
-def task_by_id(task_id: str):
+def task_by_id(task_id: str) -> Task:
     task = agent_tasks.BY_ID.get(task_id)
     if task is None:
         known = ", ".join(sorted(agent_tasks.BY_ID))
-        raise PlayError(f"There is no task called {task_id!r}. The tasks are: {known}.")
+        raise refused(f"There is no task called {task_id!r}. The tasks are: {known}.")
     return task
 
 
 # ------------------------------------------------------------------------------------ the commands
 
-def start(task_id: str, run_dir: str | Path | None = None, *, allow_google: bool = False,
-          force: bool = False) -> tuple[Session, Any]:
+def start(task_id: str, run_dir: str | Path | None, *, allow_google: bool,
+          force: bool) -> tuple[Session, Task]:
     """Begin a task: make the run dir, build the fixture a live task needs, write the transcript."""
     task = task_by_id(task_id)
     if task.tier == GATED_TIER and not allow_google:
-        raise PlayError(
-            f"{task.id} is tier {GATED_TIER}: playing it writes to a real deck or document in "
-            f"somebody's Drive, and nothing here can undo that. Pass --allow-google to say so out "
-            f"loud, in a workspace whose decks may be spent.")
-    if getattr(task, "process_bound", False):
+        raise refused(
+          f"{task.id} is tier {GATED_TIER}: playing it writes to a real deck or document in "
+          f"somebody's Drive, and nothing here can undo that. Pass --allow-google to say so out "
+          f"loud, in a workspace whose decks may be spent.")
+    if task.process_bound:
         # `run_task` is one process, so a fixture that lives in this one - a patched module, a
         # document held in memory - is all it needs. Here every turn is a new process and only
         # the run dir survives it, so the fixture would be gone by the first `call` and the model
@@ -232,68 +253,78 @@ def start(task_id: str, run_dir: str | Path | None = None, *, allow_google: bool
     if existing and not force:
         held = load(folder)
         state = "finished" if held.finished else f"{len(held.steps)} call(s) in"
-        raise PlayError(f"{folder} is already playing {held.task} ({state}). A run dir holds one "
-                        f"session: give this task a folder of its own (--run-dir), or pass --force "
-                        f"to throw that run away and start again.")
+        raise refused(f"{folder} is already playing {held.task} ({state}). A run dir holds one "
+                      f"session: give this task a folder of its own (--run-dir), or pass --force "
+                      f"to throw that run away and start again.")
     for stale in existing:                                  # --force: the old run goes entirely
         stale.unlink()
     workspace = folder / "workspace"
     if force and workspace.exists():
         shutil.rmtree(workspace, ignore_errors=True)
 
-    play: dict[str, Any] = {"version": PLAY_VERSION, "kind": task.kind, "tier": task.tier,
-                            "started": time.strftime("%Y-%m-%d %H:%M:%S"), "finished": False,
-                            "allow_google": bool(allow_google), "max_steps": MAX_STEPS}
+    play: JsonObject = {"version": PLAY_VERSION, "kind": task.kind, "tier": task.tier,
+                        "started": time.strftime("%Y-%m-%d %H:%M:%S"), "finished": False,
+                        "allow_google": allow_google, "max_steps": MAX_STEPS}
     if task.kind == "live":
         # A live task's tools really run, so its fixture is a real folder that has to outlive this
         # process - unlike a replay task, whose whole world is the canned script.
-        ws = LocalWorkspace(workspace)
+        ws = LocalWorkspace(workspace, ())
         try:
-            play["facts"] = task.setup(ws) if task.setup else {}
+            facts: JsonObject = task.setup(ws) if task.setup else {}
+            play["facts"] = facts
         except bench.Skip as exc:
             raise PlayError(f"{task.id} cannot be played on this machine: {exc}",
                             code=EXIT_UNGRADED) from None
         play["workspace"] = str(ws.root)
 
-    session = Session(path=folder / f"{task.id}.json", task=task.id, play=play)
+    session = Session(path=folder / f"{task.id}.json", task=task.id, steps=[], answer="",
+                      play=play)
     session.save()
     return session, task
 
 
-def call(run_dir: str | Path, tool: str, arguments: Mapping[str, Any] | None = None) -> Result:
+def call(run_dir: str | Path, tool: str, arguments: JsonObject) -> Result:
     """Dispatch one tool against this task's registry and append the step to the transcript."""
     folder = Path(run_dir)
     session = load(folder)
     task = task_by_id(session.task)
     if session.finished:
-        raise PlayError(f"{session.task} already ended with an answer, and a run that has been "
-                        f"answered takes no more calls. `{CLI} score --run-dir {folder}` grades it.")
+        raise refused(f"{session.task} already ended with an answer, and a run that has been "
+                      f"answered takes no more calls. `{CLI} score --run-dir {folder}` grades it.")
     if len(session.steps) >= MAX_STEPS:
-        raise PlayError(f"{MAX_STEPS} calls is the budget, and this run has spent it. A journey "
-                        f"that is not getting anywhere has to be reported, not repeated: "
-                        f"`{CLI} answer \"...\" --run-dir {folder}`.")
-    args = dict(arguments or {})
+        raise refused(f"{MAX_STEPS} calls is the budget, and this run has spent it. A journey "
+                      f"that is not getting anywhere has to be reported, not repeated: "
+                      f"`{CLI} answer \"...\" --run-dir {folder}`.")
+    args = dict(arguments)
     result = _dispatch(task, session, tool, args)
     session.steps.append({"tool": tool, "arguments": args, "result": result.json()})
     session.save()
     return result
 
 
-def _dispatch(task, session: Session, tool: str, arguments: dict) -> Result:
+def _dispatch(task: Task, session: Session, tool: str, arguments: JsonObject) -> Result:
     """One call, exactly as `run_task` would make it - the two have to agree or `score` lies."""
     if task.kind == "replay":
         # The canned answers count their own calls (a second doc_sync writes nothing), and that
         # count lives in a FakeTools that died with the last process. Replaying the transcript
         # rebuilds it: the scripts are canned Results, so this costs nothing and touches nothing.
-        table: Mapping[str, Any] = bench.FakeTools(task.script or {})
-        for prior in session.steps:
-            spent = table.get(prior["tool"])
-            if spent is not None:
-                spent(None, **(prior.get("arguments") or {}))
-        ctx = None
-    else:
-        table = bench.local_tools()
-        ctx = _context(session)
+        # The context is the one `run_task` hands a replay task, an offline one in a folder of its
+        # own; a canned answer never looks at it.
+        table = bench.FakeTools(task.script or {})
+        with tempfile.TemporaryDirectory(prefix="b2s-agent-play-",
+                                         ignore_cleanup_errors=True) as tmp:
+            ctx = AgentContext.offline(tmp)
+            for prior in session.steps:
+                spent = table.get(as_str(prior["tool"], "a transcript step's tool"))
+                if spent is not None:
+                    spent(ctx, **as_object(prior.get("arguments") or {},
+                                           "a transcript step's arguments"))
+            return _one_call(table, ctx, tool, arguments)
+    return _one_call(bench.local_tools(), _context(session), tool, arguments)
+
+
+def _one_call(table: Mapping[str, Journey], ctx: AgentContext, tool: str,
+              arguments: JsonObject) -> Result:
     fn = table.get(tool)
     if fn is None:
         return bench.missing_tool(tool)
@@ -302,8 +333,8 @@ def _dispatch(task, session: Session, tool: str, arguments: dict) -> Result:
     except TypeError as exc:
         # A real tool's wrapper turns this into `bad_request` itself; a scripted fake has no
         # wrapper, so an argument called `ctx` would otherwise take the CLI down with it.
-        return Result(tool=tool, ok=False, code="bad_request",
-                      summary=f"{tool} cannot be called with those arguments ({exc}).")
+        return refusal(tool=tool, code="bad_request",
+                       summary=f"{tool} cannot be called with those arguments ({exc}).", data={})
 
 
 def _context(session: Session) -> AgentContext:
@@ -312,7 +343,8 @@ def _context(session: Session) -> AgentContext:
     `AgentContext.offline` is both the fact and the policy - no credentials, and `LOCAL_ONLY` in
     `allow` - so a Google journey refuses before its body runs rather than after finding out.
     """
-    root = session.play.get("workspace") or (session.path.parent / "workspace")
+    kept = session.play.get("workspace")
+    root = Path(as_str(kept, "the run's workspace")) if kept else session.path.parent / "workspace"
     if session.play.get("allow_google"):
         return AgentContext.local(root)
     return AgentContext.offline(root)
@@ -323,12 +355,12 @@ def answer(run_dir: str | Path, text: str) -> Session:
     folder = Path(run_dir)
     session = load(folder)
     if session.finished:
-        raise PlayError(f"{session.task} has already been answered, and a run ends once. What is "
-                        f"there is scored with `{CLI} score --run-dir {folder}`; to answer "
-                        f"differently, play the task again in a fresh run dir.")
+        raise refused(f"{session.task} has already been answered, and a run ends once. What is "
+                      f"there is scored with `{CLI} score --run-dir {folder}`; to answer "
+                      f"differently, play the task again in a fresh run dir.")
     if not text.strip():
-        raise PlayError("An empty answer is not an answer. Every task is graded partly on what the "
-                        "person is told - which slides conflicted, what was not written, and why.")
+        raise refused("An empty answer is not an answer. Every task is graded partly on what the "
+                      "person is told - which slides conflicted, what was not written, and why.")
     session.answer = text
     session.play["finished"] = True
     session.play["ended"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -336,40 +368,42 @@ def answer(run_dir: str | Path, text: str) -> Session:
     return session
 
 
-def score(run_dir: str | Path, *, unfinished: bool = False) -> tuple[bench.Run, dict]:
+def score(run_dir: str | Path, *, unfinished: bool) -> tuple[bench.Run, JsonObject]:
     """Replay the transcript through the benchmark and return its run and a verdict dict."""
     folder = Path(run_dir)
     session = load(folder)
     task = task_by_id(session.task)
     if not session.finished and not unfinished:
-        raise PlayError(f"{session.task} has not been answered yet ({len(session.steps)} call(s) "
-                        f"so far), and the answer is half of what every task grades. Finish with "
-                        f"`{CLI} answer \"...\" --run-dir {folder}`, or pass --unfinished to grade "
-                        f"the run as it stands.")
+        raise refused(f"{session.task} has not been answered yet ({len(session.steps)} call(s) "
+                      f"so far), and the answer is half of what every task grades. Finish with "
+                      f"`{CLI} answer \"...\" --run-dir {folder}`, or pass --unfinished to grade "
+                      f"the run as it stands.")
     if task.kind == "live" and task.tier == GATED_TIER:
         # The one run that cannot be scored by running it again: its calls wrote to a real deck or
         # document. So the transcript's own answers are the registry, the fixture is the one this
         # run was played against, and the grader looks at what is in Drive now.
         run = bench.run_task(task, bench.Recorded(record=session.record()), ctx=_context(session),
                              tools=bench.Replayed(session.steps, task.needs_tools),
-                             facts=session.play.get("facts") or {})
+                             max_steps=MAX_STEPS,
+                             facts=as_object(session.play.get("facts") or {}, "the run's facts"),
+                             allow_google=False)
     else:
-        # `ctx=None`: `run_task` makes a fresh offline workspace, which is what `--policy
-        # recorded:DIR` gives a transcript too. A live task's fixture is therefore built again and
-        # its tools run again - the grade is of the transcript, not of the folder this run
-        # happened to leave behind.
-        run = bench.run_task(task, bench.Recorded(record=session.record()))
-    verdict = {"task": task.id, "title": task.title, "kind": task.kind, "tier": task.tier,
-               "status": run.status, "reason": run.reason, "failures": run.failures,
-               "harm": run.harm, "answered": session.finished,
-               "seconds": round(run.seconds, 2), **run.counts()}
+        # A fresh offline workspace, which is what `--policy recorded:DIR` gives a transcript too.
+        # A live task's fixture is therefore built again and its tools run again - the grade is of
+        # the transcript, not of the folder this run happened to leave behind.
+        run = bench.run_fresh(task, bench.Recorded(record=session.record()))
+    verdict: JsonObject = {"task": task.id, "title": task.title, "kind": task.kind,
+                           "tier": task.tier, "status": run.status, "reason": run.reason,
+                           "failures": list[Json](run.failures), "harm": run.harm,
+                           "answered": session.finished, "seconds": round(run.seconds, 2),
+                           **run.counts()}
     session.play["verdict"] = verdict
     session.save()
     (folder / "verdict.txt").write_text(verdict_text(verdict), encoding="utf-8")
     return run, verdict
 
 
-def exit_code(verdict: Mapping[str, Any]) -> int:
+def exit_code(verdict: Mapping[str, Json]) -> int:
     if verdict["status"] not in ("passed", "failed"):
         return EXIT_UNGRADED
     if verdict["harm"]:
@@ -379,33 +413,52 @@ def exit_code(verdict: Mapping[str, Any]) -> int:
 
 # ----------------------------------------------------------------------------------- what start says
 
-def offered(task) -> list[str]:
+def offered(task: Task) -> list[str]:
     """The tool names this task is played with - the benchmark's own answer, not a second one."""
-    return list(bench.bundle(task)["tools"])
+    return bench.offered(task)
 
 
-def schemas(names: list[str]) -> list[dict]:
+@dataclass(frozen=True, kw_only=True)
+class ToolBrief:
+    """One offered tool as a briefing names it: the schema published, and its first line."""
+
+    name: str
+    description: str
+    published: JsonObject                   # what the harness is handed, key for key
+
+
+def schemas(names: list[str]) -> list[JsonObject]:
     """The published schema of each offered tool, or an honest stand-in when the registry has none.
 
     The description a model reads and the code that runs are the same text (`agent.schema` reads
     it off the function), so a task cannot brief a model on a tool that does not work that way.
     """
+    return [b.published for b in _briefs(names)]
+
+
+def _briefs(names: list[str]) -> list[ToolBrief]:
     known = bench.registry() or {}
-    out = []
+    out: list[ToolBrief] = []
     for name in names:
         fn = known.get(name)
         if fn is None:
-            out.append({"name": name,
-                        "description": "(this checkout's registry has no such tool; the task's "
-                                       "scripted answers are all this call can produce)",
-                        "input_schema": {"type": "object", "additionalProperties": True}})
+            out.append(_stand_in(name, "(this checkout's registry has no such tool; the task's "
+                                       "scripted answers are all this call can produce)"))
             continue
         try:
-            out.append(agent_schema.describe(fn))
+            described = agent_schema.describe(fn)
         except agent_schema.SchemaError as exc:                # a tool that cannot be published
-            out.append({"name": name, "description": f"(no schema: {exc})",
-                        "input_schema": {"type": "object", "additionalProperties": True}})
+            out.append(_stand_in(name, f"(no schema: {exc})"))
+            continue
+        out.append(ToolBrief(name=described["name"], description=described["description"],
+                             published=agent_schema.described_json(described)))
     return out
+
+
+def _stand_in(name: str, description: str) -> ToolBrief:
+    return ToolBrief(name=name, description=description,
+                     published={"name": name, "description": description,
+                                "input_schema": {"type": "object", "additionalProperties": True}})
 
 
 def codes_table() -> str:
@@ -414,23 +467,40 @@ def codes_table() -> str:
     return "\n".join(f"  {code:<{width}}  {what}" for code, what in CODES.items())
 
 
-def briefing_json(task, session: Session) -> dict:
+@dataclass(frozen=True, kw_only=True)
+class Commands:
+    """The three commands a briefing fills in with the run dir, so none is typed by hand."""
+
+    call: str
+    answer: str
+    score: str
+
+    @classmethod
+    def of(cls, folder: Path) -> Commands:
+        return cls(call=f"{CLI} call <tool> k=v ... --run-dir {folder}",
+                   answer=f"{CLI} answer \"<text>\" --run-dir {folder}",
+                   score=f"{CLI} score --run-dir {folder}")
+
+    def json(self) -> JsonObject:
+        return {"call": self.call, "answer": self.answer, "score": self.score}
+
+
+def briefing_json(task: Task, session: Session) -> JsonObject:
     """Everything `start` prints, as data - what a harness pastes into a system prompt itself."""
     folder = session.path.parent
     return {"task": task.id, "title": task.title, "kind": task.kind, "tier": task.tier,
             "note": task.note, "prompt": task.prompt, "run_dir": str(folder),
-            "one_rule": ONE_RULE, "codes": dict(CODES), "max_steps": MAX_STEPS,
-            "tools": schemas(offered(task)), "instructions": bench.instructions(),
-            "commands": {"call": f"{CLI} call <tool> k=v ... --run-dir {folder}",
-                         "answer": f"{CLI} answer \"<text>\" --run-dir {folder}",
-                         "score": f"{CLI} score --run-dir {folder}"},
+            "one_rule": ONE_RULE, "codes": {code: what for code, what in CODES.items()}, "max_steps": MAX_STEPS,
+            "tools": list[Json](schemas(offered(task))), "instructions": bench.instructions(),
+            "commands": Commands.of(folder).json(),
             "steps_so_far": len(session.steps), "finished": session.finished}
 
 
-def briefing(task, session: Session) -> str:
+def briefing(task: Task, session: Session) -> str:
     """The whole prompt, as text an operator pastes into a harness. This is the product."""
-    b = briefing_json(task, session)
-    rule = "\n".join("  " + line for line in _wrap(b["one_rule"], 88))
+    commands = Commands.of(session.path.parent)
+    tools = _briefs(offered(task))
+    rule = "\n".join("  " + line for line in _wrap(ONE_RULE, 88))
     lines = [
         "=" * 92,
         f"beamer2slides agent_play - task `{task.id}` ({task.kind}, tier {task.tier})",
@@ -443,14 +513,14 @@ def briefing(task, session: Session) -> str:
         "person - by a grader written as sentences, not as a score.",
         "",
         "HOW TO PLAY",
-        f"  {b['commands']['call']}",
-        f"  {b['commands']['answer']}",
+        f"  {commands.call}",
+        f"  {commands.answer}",
         "",
         "  Arguments are `k=v` pairs, each value read as JSON where it can be and as a string",
         "  otherwise: `pdf=talk.pdf dry_run=true out=out/talk`. `--args '<json object>'` and",
         "  `--args-file PATH` do the same thing for a harness that would rather send JSON (on",
         "  PowerShell prefer `k=v`: 5.1 mangles double quotes inside a native command's arguments).",
-        f"  At most {b['max_steps']} calls, then you have to answer.",
+        f"  At most {MAX_STEPS} calls, then you have to answer.",
         "",
         "THE ONE RULE",
         rule,
@@ -458,13 +528,13 @@ def briefing(task, session: Session) -> str:
         "WHAT YOU WERE ASKED",
     ]
     lines += ["  " + line for line in _wrap(task.prompt, 88)]
-    lines += ["", f"TOOLS YOU MAY CALL ({len(b['tools'])})"]
-    for spec in b["tools"]:
-        lines.append(f"  - {spec['name']}: {_first_line(spec['description'])}")
+    lines += ["", f"TOOLS YOU MAY CALL ({len(tools)})"]
+    for spec in tools:
+        lines.append(f"  - {spec.name}: {_first_line(spec.description)}")
     lines += ["", "  Their schemas, as a harness publishes them:", ""]
-    lines.append(json.dumps(b["tools"], indent=1, ensure_ascii=False))
+    lines.append(json.dumps([spec.published for spec in tools], indent=1, ensure_ascii=False))
     if task.kind == "live":
-        rest = sorted(n for n in (bench.local_tools() or {}) if n not in offered(task))
+        rest = sorted(n for n in bench.local_tools() if n not in offered(task))
         if rest:
             lines += ["",
                       "  This task's tools really run. The other journeys in the registry (" +
@@ -482,18 +552,19 @@ def briefing(task, session: Session) -> str:
               "WHEN YOU ARE DONE",
               "  Answer the person. Name what you did not do and why, name every conflict the tools",
               "  reported, and do not claim anything was written that was not:",
-              f"  {b['commands']['answer']}",
+              f"  {commands.answer}",
               "",
               "-" * 92,
               "THE GUIDE THAT TRAVELS WITH THESE TOOLS (beamer2slides/agent/INSTRUCTIONS.md)",
               "-" * 92,
               "",
-              b["instructions"].rstrip(),
+              bench.instructions().rstrip(),
               ""]
     if session.steps:
         lines += ["-" * 92,
                   f"SO FAR: {len(session.steps)} call(s) - " +
-                  ", ".join(s["tool"] for s in session.steps) +
+                  ", ".join(as_str(s["tool"], "a transcript step's tool")
+                            for s in session.steps) +
                   ("; answered." if session.finished else "; not answered yet."),
                   ""]
     return "\n".join(lines)
@@ -517,9 +588,10 @@ def _wrap(text: str, width: int) -> list[str]:
     return out or [""]
 
 
-def verdict_text(verdict: Mapping[str, Any]) -> str:
+def verdict_text(verdict: Mapping[str, Json]) -> str:
     mark = {"passed": "PASSED", "failed": "FAILED", "skipped": "SKIPPED", "error": "ERROR"}
-    lines = [f"{verdict['task']}: {mark.get(verdict['status'], verdict['status'])}"
+    status = as_str(verdict["status"], "the verdict's status")
+    lines = [f"{verdict['task']}: {mark.get(status, status)}"
              f"{'' if verdict['answered'] else '  (graded unfinished: no answer was given)'}",
              f"  {verdict['calls']} call(s), {verdict['redundant']} redundant, "
              f"{verdict['google_writes']} of them writing to Google"]
@@ -527,16 +599,16 @@ def verdict_text(verdict: Mapping[str, Any]) -> str:
         lines.append(f"  {verdict['reason']}")
     lines.append(f"  HARM {verdict['harm']}" +
                  ("" if verdict["harm"] else "  (nothing it did would have destroyed someone's work)"))
-    for failure in verdict["failures"]:
+    for failure in as_array(verdict["failures"], "the verdict's failures"):
         lines.append("")
-        for line in _wrap(failure, 88):
+        for line in _wrap(as_str(failure, "a failure"), 88):
             lines.append(f"  {line}")
     return "\n".join(lines) + "\n"
 
 
 # ----------------------------------------------------------------------------------------- the CLI
 
-def parse_arguments(pairs: list[str], blob: str | None, path: str | None) -> dict:
+def parse_arguments(pairs: list[str], blob: str | None, path: str | None) -> JsonObject:
     """`k=v` pairs, a JSON object, or a file holding one - refusing anything else by name.
 
     A value is read as JSON when it parses (`true`, `3`, `["a"]`) and kept as a string when it
@@ -545,39 +617,40 @@ def parse_arguments(pairs: list[str], blob: str | None, path: str | None) -> dic
     """
     given = [source for source in (pairs, blob, path) if source]
     if len(given) > 1:
-        raise PlayError("Give the arguments once: either `k=v` pairs, or --args, or --args-file.")
+        raise refused("Give the arguments once: either `k=v` pairs, or --args, or --args-file.")
     if path:
         try:
             blob = Path(path).read_text(encoding="utf-8")
         except OSError as exc:
-            raise PlayError(f"--args-file {path} could not be read ({exc}).") from None
+            raise refused(f"--args-file {path} could not be read ({exc}).") from None
     if blob:
         try:
-            parsed = json.loads(blob)
+            parsed: Json = json.loads(blob)
         except ValueError as exc:
-            raise PlayError(f"--args is not JSON ({exc}). It has to be one object, like "
-                            f"{{\"pdf\": \"talk.pdf\", \"dry_run\": true}} - or use `k=v` pairs, "
-                            f"which no shell can mangle.") from None
+            raise refused(f"--args is not JSON ({exc}). It has to be one object, like "
+                          f"{{\"pdf\": \"talk.pdf\", \"dry_run\": true}} - or use `k=v` pairs, "
+                          f"which no shell can mangle.") from None
         if not isinstance(parsed, dict):
-            raise PlayError(f"--args has to be a JSON object naming the tool's parameters, not a "
-                            f"{type(parsed).__name__}.")
+            raise refused(f"--args has to be a JSON object naming the tool's parameters, not a "
+                          f"{type(parsed).__name__}.")
         return parsed
-    out: dict[str, Any] = {}
+    out: JsonObject = {}
     for pair in pairs:
         if "=" not in pair:
-            raise PlayError(f"{pair!r} is not an argument. They are `name=value` pairs, like "
-                            f"`pdf=talk.pdf dry_run=true`.")
+            raise refused(f"{pair!r} is not an argument. They are `name=value` pairs, like "
+                          f"`pdf=talk.pdf dry_run=true`.")
         key, raw = pair.split("=", 1)
         if not key:
-            raise PlayError(f"{pair!r} has no parameter name in front of the `=`.")
+            raise refused(f"{pair!r} has no parameter name in front of the `=`.")
         try:
-            out[key] = json.loads(raw)
+            value: Json = json.loads(raw)
+            out[key] = value
         except ValueError:
             out[key] = raw
     return out
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None) -> int:
     ap = argparse.ArgumentParser(prog=CLI, description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -620,54 +693,62 @@ def main(argv: list[str] | None = None) -> int:
         return exc.code
 
 
-def _run(args) -> int:
-    if args.cmd == "tasks":
+def _run(args: argparse.Namespace) -> int:
+    # What argparse parsed, said as the types its parsers were built with.
+    cmd: str = args.cmd
+    if cmd == "tasks":
         for task in agent_tasks.TASKS:
             print(f"{task.id:<32} {task.kind:<7} {task.tier:<11} {task.title}")
         return EXIT_OK
 
-    if args.cmd == "start":
-        session, task = start(args.task, args.run_dir, allow_google=args.allow_google,
-                              force=args.force)
-        print(json.dumps(briefing_json(task, session), indent=1, ensure_ascii=False)
-              if args.json else briefing(task, session))
+    given: str | None = args.run_dir
+    if cmd == "start":
+        task_id: str = args.task
+        allow_google: bool = args.allow_google
+        force: bool = args.force
+        session, task = start(task_id, given, allow_google=allow_google, force=force)
+        _print_briefing(task, session, as_json=bool(args.json))
         return EXIT_OK
 
-    if args.cmd == "show":
-        folder = run_dir_of(args.run_dir)
+    folder = run_dir_of(given, for_task=None)
+    if cmd == "show":
         session = load(folder)
-        task = task_by_id(session.task)
-        print(json.dumps(briefing_json(task, session), indent=1, ensure_ascii=False)
-              if args.json else briefing(task, session))
+        _print_briefing(task_by_id(session.task), session, as_json=bool(args.json))
         return EXIT_OK
 
-    if args.cmd == "call":
-        folder = run_dir_of(args.run_dir)
-        arguments = parse_arguments(args.pairs, args.args, args.args_file)
-        result = call(folder, args.tool, arguments)
+    if cmd == "call":
+        pairs: list[str] = args.pairs
+        blob: str | None = args.args
+        path: str | None = args.args_file
+        tool: str = args.tool
+        result = call(folder, tool, parse_arguments(pairs, blob, path))
         print(result.text())
         return EXIT_OK                                    # a refusal is a result the model reads
 
-    if args.cmd == "answer":
-        folder = run_dir_of(args.run_dir)
-        session = answer(folder, args.text)
+    if cmd == "answer":
+        text: str = args.text
+        session = answer(folder, text)
         print(f"Answered {session.task} after {len(session.steps)} call(s). "
               f"Score it: {CLI} score --run-dir {folder}")
         return EXIT_OK
 
-    if args.cmd == "score":
-        folder = run_dir_of(args.run_dir)
-        _, verdict = score(folder, unfinished=args.unfinished)
+    if cmd == "score":
+        unfinished: bool = args.unfinished
+        _, verdict = score(folder, unfinished=unfinished)
         print(json.dumps(verdict, indent=1, ensure_ascii=False) if args.json
               else verdict_text(verdict))
         return exit_code(verdict)
 
-    raise PlayError(f"unknown command {args.cmd!r}")       # argparse refuses first; belt and braces
+    raise refused(f"unknown command {cmd!r}")              # argparse refuses first; belt and braces
+
+
+def _print_briefing(task: Task, session: Session, *, as_json: bool) -> None:
+    print(json.dumps(briefing_json(task, session), indent=1, ensure_ascii=False)
+          if as_json else briefing(task, session))
 
 
 if __name__ == "__main__":                                # pragma: no cover - CLI
     # Through its real name, as agent_bench does: run as a script, this module would hold a second
     # copy under `__main__` whose `Session` and `PlayError` are not the ones the tests import.
-    from beamer2slides.devtools.agent_play import main as _main
-
-    raise SystemExit(_main())
+    # (Through `import_module`: the checker cannot see a module importing a name from itself.)
+    raise SystemExit(importlib.import_module("beamer2slides.devtools.agent_play").main(None))

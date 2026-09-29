@@ -30,6 +30,10 @@ from typing import Protocol, runtime_checkable
 
 from .types import Refused
 
+#: Where a file brought in from outside lands: staged (`LocalWorkspace.stage`) or sent inline
+#: (`content.take_in`). Named so an agent reading a ref back can tell what it is.
+INBOX = "inbox"
+
 
 @runtime_checkable
 class Workspace(Protocol):
@@ -43,7 +47,7 @@ class Workspace(Protocol):
 
     root: Path
 
-    def resolve(self, ref: str, *, write: bool = False) -> Path: ...
+    def resolve(self, ref: str, *, write: bool) -> Path: ...
     def ref(self, path: Path | str) -> str: ...
     def out_dir(self, name: str) -> Path: ...
     def exists(self, ref: str) -> bool: ...
@@ -69,8 +73,9 @@ class LocalWorkspace:
 
     # -- paths --------------------------------------------------------------------------
 
-    def resolve(self, ref: str, *, write: bool = False) -> Path:
-        """An absolute path for `ref`, or `Refused("outside_workspace")`."""
+    def resolve(self, ref: str, *, write: bool) -> Path:
+        """An absolute path for `ref`, or `Refused("outside_workspace")`. `write`: whether it is
+        about to be written, which only the root allows (`readable` folders are read-only)."""
         raw = Path(ref)
         path = (raw if raw.is_absolute() else self.root / raw).resolve()
         # (a drive or share was meant as a place of its own; on Linux it would name a folder `C:`
@@ -108,7 +113,7 @@ class LocalWorkspace:
 
     def exists(self, ref: str) -> bool:
         try:
-            return self.resolve(ref).exists()
+            return self.resolve(ref, write=False).exists()
         except Refused:
             return False
 
@@ -116,10 +121,10 @@ class LocalWorkspace:
         return sorted(self.ref(p) for p in self.root.glob(pattern))
 
     def read_bytes(self, ref: str) -> bytes:
-        return self.resolve(ref).read_bytes()
+        return self.resolve(ref, write=False).read_bytes()
 
     def read_text(self, ref: str) -> str:
-        return self.resolve(ref).read_text(encoding="utf-8")
+        return self.resolve(ref, write=False).read_text(encoding="utf-8")
 
     def write_bytes(self, ref: str, data: bytes) -> str:
         path = self.resolve(ref, write=True)
@@ -130,11 +135,11 @@ class LocalWorkspace:
     def write_text(self, ref: str, text: str) -> str:
         return self.write_bytes(ref, text.encode("utf-8"))
 
-    def stage(self, path: Path | str, into: str = "inbox") -> str:
-        """Copy a file from outside into the workspace and return its ref.
+    def stage(self, path: Path | str, into: str) -> str:
+        """Copy a file from outside into the workspace, into the folder `into`, and return its ref.
 
         How a harness brings in a PDF the user named somewhere else, without widening what a
-        journey is allowed to touch.
+        journey is allowed to touch. `INBOX` is where inline content lands too.
         """
         src = Path(path).resolve()
         if not src.is_file():

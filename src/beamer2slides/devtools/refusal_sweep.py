@@ -26,6 +26,9 @@ patterns. No page needed JPX, JBIG2, CCITTFaxDecode or a transfer function on an
 why none of those is ported. sRGB ICCBased profiles, images inside soft masks and coloured tiling
 patterns were ported after it; what a real document still refuses is 9 pages of 3 PDFs carrying one
 536-byte v4.3 matrix/TRC RGB profile, everything else being a file the tortures wrote themselves.
+
+A part file's line is JSON written by `sweep_one` (or by the watchdog), read back as a `Swept`
+record where it enters (`swept`); the commands are typed functions, argparse only their front.
 """
 
 from __future__ import annotations
@@ -39,12 +42,23 @@ import sys
 import threading
 import time
 from collections import Counter
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, TextIO
+
+from beamer2slides.json_types import Json, JsonObject, as_array, as_object, as_str
+
+if TYPE_CHECKING:
+    from ..pdf.pure.backend import Page
 
 SKIP = {"$recycle.bin", "winsxs", "system volume information", "windows.old", "driverstore"}
 
+#: How many reasons one page is asked for: the first is `unported`'s, the rest what stands behind.
+REASONS_PER_PAGE = 4
 
-def walk(roots):
+
+def walk(roots: Iterable[str]) -> Iterator[str]:
     for root in roots:
         for dirpath, dirnames, names in os.walk(root, onerror=lambda e: None):
             dirnames[:] = [d for d in dirnames if d.lower() not in SKIP]
@@ -67,17 +81,17 @@ def digest(path: str) -> str | None:
     return h.hexdigest()
 
 
-def cmd_list(args):
+def list_files(roots: list[str], out: str, max_size: int) -> None:
     """The distinct PDFs under the roots: same size and sha1 = one file, whatever it is called."""
     seen: dict[str, str] = {}
     n = 0
-    for p in walk(args.roots):
+    for p in walk(roots):
         n += 1
         try:
             size = os.path.getsize(p)
         except OSError:
             continue
-        if size < 32 or size > args.max_size:
+        if size < 32 or size > max_size:
             continue
         d = digest(p)
         if d is None:
@@ -86,14 +100,20 @@ def cmd_list(args):
         if n % 500 == 0:
             print(f"  {n} seen, {len(seen)} distinct", file=sys.stderr)
     files = sorted(seen.values())
-    Path(args.out).write_text(json.dumps(files, indent=0), encoding="utf-8")
-    print(f"{n} pdf files, {len(files)} distinct -> {args.out}")
+    Path(out).write_text(json.dumps(files, indent=0), encoding="utf-8")
+    print(f"{n} pdf files, {len(files)} distinct -> {out}")
+
+
+def read_list(path: Path) -> list[str]:
+    """A list `list_files` wrote."""
+    loaded: Json = json.loads(path.read_text(encoding="utf-8"))
+    return [as_str(p, f"{path}: a file") for p in as_array(loaded, str(path))]
 
 
 # ---------------------------------------------------------------------- the refusal check
 
 
-def page_reasons(page, limit: int = 4) -> list[str]:
+def page_reasons(page: Page, limit: int) -> list[str]:
     """Every reason `render.unported` would have to give for this page, in its own order (it stops
     at the first; this mirrors its loop to show what stands behind it). Empty = the page renders."""
     from ..pdf.pure import render_shading
@@ -107,11 +127,12 @@ def page_reasons(page, limit: int = 4) -> list[str]:
     pdf = page.doc.pdf
     group = pdf.resolve(page.dict.get("Group"))
     page_group = isinstance(group, dict) and str(pdf.resolve(group.get("S"))) == "Transparency"
+    # A fresh context holds no image cache, as `Page.unported`'s does not: the loader makes one
+    # the first time a picture is decoded, and nothing here decodes one.
     ctx = Context(pdf, pdf.resolve(page.dict.get("Resources")), page.doc._font_cache, page_group)
-    ctx.images = {}
     out: list[str] = []
 
-    def add(why):
+    def add(why: str | None) -> None:
         if why is not None and why not in out:
             out.append(why)
 
@@ -133,19 +154,17 @@ def page_reasons(page, limit: int = 4) -> list[str]:
             add("objects")
         if o.smask is not None or o.blend != "Normal" or o.transfer is not None:
             add(tr_unsupported(o, ctx, unported))
-        if o.type == OBJ_FORM and o.group and ctx is None:
-            add("transparency groups")
         if o.type in (OBJ_PATH, OBJ_SHADING):
             add(render_shading.refusal(o, ctx))
     return out
 
 
-def sweep_one(path: str, pages: int) -> dict:
-    """{path, pages, reasons: [[reason, ...] per page]} - or {path, open_error}."""
+def sweep_one(path: str, pages: int) -> JsonObject:
+    """{path, pages, reasons: [[reason, ...] per page], secs} - or {path, open_error}."""
     from ..pdf.api import PdfError
     from ..pdf.pure.backend import Document
 
-    rec: dict = {"path": path}
+    rec: JsonObject = {"path": path}
     t0 = time.time()
     try:
         doc = Document(path)
@@ -154,10 +173,10 @@ def sweep_one(path: str, pages: int) -> dict:
         return rec
     try:
         rec["pages"] = len(doc)
-        got = []
+        got: list[Json] = []
         for i in range(min(len(doc), pages)):
             try:
-                got.append(page_reasons(doc[i]))
+                got.append(list[Json](page_reasons(doc[i], REASONS_PER_PAGE)))
             except PdfError as e:
                 got.append([f"!PdfError {e}"[:160]])
             except Exception as e:  # noqa: BLE001
@@ -172,16 +191,47 @@ def sweep_one(path: str, pages: int) -> dict:
     return rec
 
 
+@dataclass(frozen=True, kw_only=True)
+class Swept:
+    """One line of a part file: a document checked, one that would not open, or one that timed out.
+
+    `reasons` has a list per page checked (empty: the page renders); an unopened or timed-out
+    document has none.
+    """
+
+    path: str
+    open_error: str | None
+    timed_out: bool
+    reasons: list[list[str]]
+
+
+def swept(line: str) -> Swept | None:
+    """A part file's line as the record it says, or None for one a killed worker left half-written
+    or that is not a record of this sweep's."""
+    try:
+        loaded: Json = json.loads(line)
+        rec = as_object(loaded, "a part file's line")
+        error = rec.get("open_error")
+        return Swept(path=as_str(rec["path"], "a swept path"),
+                     open_error=None if error is None else as_str(error, "an open error"),
+                     timed_out="timeout" in rec,
+                     reasons=[[as_str(r, "a reason") for r in as_array(page, "a page's reasons")]
+                              for page in as_array(rec.get("reasons") or [], "the reasons")])
+    except (ValueError, KeyError):              # JsonShapeError is a ValueError, as JSON's own is
+        return None
+
+
 class Watchdog:
     """A document that takes longer than `limit` kills this worker; the line it wrote first says so,
     and the parent's next run of the same slice resumes past it."""
 
-    def __init__(self, limit, out):
+    def __init__(self, limit: float, out: TextIO) -> None:
         self.limit, self.out = limit, out
-        self.path, self.start = None, None
+        self.path: str | None = None
+        self.start = 0.0
         threading.Thread(target=self._loop, daemon=True).start()
 
-    def _loop(self):
+    def _loop(self) -> None:
         while True:
             time.sleep(2)
             if self.path is not None and time.time() - self.start > self.limit:
@@ -190,56 +240,82 @@ class Watchdog:
                 os._exit(3)
 
 
-def cmd_slice(args):
+@dataclass(frozen=True, kw_only=True)
+class Slice:
+    """Which files one worker checks and how: every `n`th of the list from the `i`th."""
+
+    files: Path
+    n: int
+    i: int
+    out: Path
+    pages: int
+    timeout: float
+    budget: float
+
+
+def run_slice(s: Slice) -> None:
     """Every `n`th file of the list, appended to `out` as one line per document."""
-    files = json.loads(Path(args.files).read_text(encoding="utf-8"))
-    mine = [p for k, p in enumerate(files) if k % args.n == args.i]
-    done = set()
-    outp = Path(args.out)
-    if outp.exists():
-        for line in outp.read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                done.add(json.loads(line)["path"])
-            except Exception:  # noqa: BLE001
-                pass
-    with outp.open("a", encoding="utf-8") as f:
-        dog = Watchdog(args.timeout, f)
-        deadline = time.time() + args.budget
+    mine = [p for k, p in enumerate(read_list(s.files)) if k % s.n == s.i]
+    done: set[str] = set()
+    if s.out.exists():
+        for line in s.out.read_text(encoding="utf-8", errors="replace").splitlines():
+            rec = swept(line)
+            if rec is not None:
+                done.add(rec.path)
+    with s.out.open("a", encoding="utf-8") as f:
+        dog = Watchdog(s.timeout, f)
+        deadline = time.time() + s.budget
         for p in mine:
             if p in done:
                 continue
             if time.time() > deadline:
-                print(f"slice {args.i}: budget spent", file=sys.stderr)
+                print(f"slice {s.i}: budget spent", file=sys.stderr)
                 break
             dog.path, dog.start = p, time.time()
-            rec = sweep_one(p, args.pages)
+            rec = sweep_one(p, s.pages)
             dog.path = None
             f.write(json.dumps(rec) + "\n")
             f.flush()
 
 
-def cmd_sweep(args):
+@dataclass(frozen=True, kw_only=True)
+class Sweep:
+    """`list` + `jobs` slices in their own processes + `tally`, with every knob each of them takes."""
+
+    roots: list[str]
+    out: Path
+    jobs: int
+    pages: int
+    max_files: int                   # 0: the whole list
+    max_size: int
+    timeout: float
+    budget: float
+    relist: bool
+    top: int
+    docs: bool
+
+
+def run_sweep(s: Sweep) -> None:
     """list + `jobs` slices in their own processes (a wedged one only loses its own slice) + tally."""
-    out = Path(args.out)
-    out.mkdir(parents=True, exist_ok=True)
-    files = out / "files.json"
-    if not files.exists() or args.relist:
-        cmd_list(argparse.Namespace(roots=args.roots, out=str(files), max_size=args.max_size))
-    if args.max_files:
-        every = json.loads(files.read_text(encoding="utf-8"))
-        files = out / "files-some.json"
-        files.write_text(json.dumps(every[:args.max_files], indent=0), encoding="utf-8")
-    parts = [out / f"part{i}.ndjson" for i in range(args.jobs)]
-    running = []
+    s.out.mkdir(parents=True, exist_ok=True)
+    files = s.out / "files.json"
+    if not files.exists() or s.relist:
+        list_files(s.roots, str(files), s.max_size)
+    if s.max_files:
+        every = read_list(files)
+        files = s.out / "files-some.json"
+        files.write_text(json.dumps(every[:s.max_files], indent=0), encoding="utf-8")
+    parts = [s.out / f"part{i}.ndjson" for i in range(s.jobs)]
+    running: list[subprocess.Popen[bytes]] = []
     for i, part in enumerate(parts):
         cmd = [sys.executable, "-m", "beamer2slides.devtools.refusal_sweep",
                "slice", "--files", str(files), "--n",
-               str(args.jobs), "--i", str(i), "--out", str(part), "--pages", str(args.pages),
-               "--timeout", str(args.timeout), "--budget", str(args.budget)]
+               str(s.jobs), "--i", str(i), "--out", str(part), "--pages", str(s.pages),
+               "--timeout", str(s.timeout), "--budget", str(s.budget)]
         running.append(subprocess.Popen(cmd))
     for p in running:
         p.wait()
-    cmd_tally(argparse.Namespace(parts=[str(p) for p in parts], top=args.top, docs=args.docs))
+    tally([str(p) for p in parts], top=s.top, docs=s.docs)
 
 
 # ---------------------------------------------------------------------- the histogram
@@ -258,30 +334,29 @@ def normalise(reason: str) -> str:
     return r
 
 
-def cmd_tally(args):
+def tally(parts: list[str], *, top: int, docs: bool) -> None:
     """The table: how many pages each reason refused, how often it was the *first* one, and how
     many documents hold it. Counts and reasons only - no document's contents, none of its text."""
-    docs = pages = refused_pages = refused_docs = timeouts = 0
-    doc_reason: Counter = Counter()
-    page_reason: Counter = Counter()
-    first_reason: Counter = Counter()
-    open_errors: Counter = Counter()
+    documents = pages = refused_pages = refused_docs = timeouts = 0
+    doc_reason: Counter[str] = Counter()
+    page_reason: Counter[str] = Counter()
+    first_reason: Counter[str] = Counter()
+    open_errors: Counter[str] = Counter()
     worst: list[tuple[int, int, str, str]] = []
-    for part in args.parts:
+    for part in parts:
         for line in Path(part).read_text(encoding="utf-8", errors="replace").splitlines():
-            try:
-                rec = json.loads(line)
-            except Exception:  # noqa: BLE001
+            rec = swept(line)
+            if rec is None:
                 continue
-            if "timeout" in rec:
+            if rec.timed_out:
                 timeouts += 1
                 continue
-            docs += 1
-            if "open_error" in rec:
-                open_errors[rec["open_error"].split(":")[0]] += 1
+            documents += 1
+            if rec.open_error is not None:
+                open_errors[rec.open_error.split(":")[0]] += 1
                 continue
-            here = set()
-            for reasons in rec.get("reasons", []):
+            here: set[str] = set()
+            for reasons in rec.reasons:
                 pages += 1
                 if reasons:
                     refused_pages += 1
@@ -291,35 +366,35 @@ def cmd_tally(args):
                     here.add(normalise(r))
             if here:
                 refused_docs += 1
-                bad = [x for x in rec["reasons"] if x]
-                worst.append((len(bad), len(rec["reasons"]), Path(rec["path"]).name, bad[0][0]))
+                bad = [x for x in rec.reasons if x]
+                worst.append((len(bad), len(rec.reasons), Path(rec.path).name, bad[0][0]))
             for r in here:
                 doc_reason[r] += 1
-    print(f"documents {docs} ({refused_docs} with a refused page), pages {pages} "
+    print(f"documents {documents} ({refused_docs} with a refused page), pages {pages} "
           f"({refused_pages} refused, {100.0 * refused_pages / max(pages, 1):.2f}%), "
           f"timeouts {timeouts}")
     if open_errors:
         print("open errors:", dict(open_errors.most_common(8)))
     print(f"\n{'pages':>7} {'first':>7} {'docs':>6}  reason")
-    for r, n in page_reason.most_common(args.top):
+    for r, n in page_reason.most_common(top):
         print(f"{n:>7} {first_reason.get(r, 0):>7} {doc_reason.get(r, 0):>6}  {r}")
-    if args.docs:
+    if docs:
         print("\ndocuments with a refused page")
-        for bad, all_pages, name, why in sorted(worst, reverse=True):
-            print(f"  {name[:56]:56} {bad}/{all_pages}  {why[:60]}")
+        for bad_pages, all_pages, name, why in sorted(worst, reverse=True):
+            print(f"  {name[:56]:56} {bad_pages}/{all_pages}  {why[:60]}")
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(prog="refusal_sweep", description=__doc__.split("\n\n")[0],
+def main(argv: list[str] | None) -> int:
+    doc = __doc__ or ""
+    ap = argparse.ArgumentParser(prog="refusal_sweep", description=doc.split("\n\n")[0],
                                  formatter_class=argparse.RawDescriptionHelpFormatter,
-                                 epilog="\n".join(__doc__.splitlines()[-9:]))
+                                 epilog="\n".join(doc.splitlines()[-12:-3]))
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     a = sub.add_parser("list", help="the distinct PDFs under the roots -> files.json")
     a.add_argument("roots", nargs="*", default=[str(Path.home())])
     a.add_argument("--out", default="files.json")
     a.add_argument("--max-size", type=int, default=200 << 20)
-    a.set_defaults(fn=cmd_list)
 
     b = sub.add_parser("slice", help="check every nth file of a list, appending to a part file")
     b.add_argument("--files", required=True)
@@ -329,7 +404,6 @@ def main(argv=None) -> int:
     b.add_argument("--pages", type=int, default=10, help="pages per document (default 10)")
     b.add_argument("--timeout", type=float, default=90.0, help="seconds one document may take")
     b.add_argument("--budget", type=float, default=3600.0, help="seconds this slice may take")
-    b.set_defaults(fn=cmd_slice)
 
     c = sub.add_parser("sweep", help="list, then the slices in their own processes, then the table")
     c.add_argument("roots", nargs="*", default=[str(Path.home())])
@@ -343,18 +417,31 @@ def main(argv=None) -> int:
     c.add_argument("--relist", action="store_true", help="walk the roots again")
     c.add_argument("--top", type=int, default=40)
     c.add_argument("--docs", action="store_true", help="also name every document with a refusal")
-    c.set_defaults(fn=cmd_sweep)
 
     d = sub.add_parser("tally", help="the table, from the part files")
     d.add_argument("parts", nargs="+")
     d.add_argument("--top", type=int, default=40)
     d.add_argument("--docs", action="store_true", help="also name every document with a refusal")
-    d.set_defaults(fn=cmd_tally)
 
     args = ap.parse_args(argv)
-    args.fn(args)
+    # What argparse parsed, said as the types its parsers were built with.
+    cmd: str = args.cmd
+    if cmd == "list":
+        list_files(list(args.roots), str(args.out), int(args.max_size))
+    elif cmd == "slice":
+        run_slice(Slice(files=Path(args.files), n=int(args.n), i=int(args.i), out=Path(args.out),
+                        pages=int(args.pages), timeout=float(args.timeout),
+                        budget=float(args.budget)))
+    elif cmd == "sweep":
+        run_sweep(Sweep(roots=list(args.roots), out=Path(args.out), jobs=int(args.jobs),
+                        pages=int(args.pages), max_files=int(args.max_files),
+                        max_size=int(args.max_size), timeout=float(args.timeout),
+                        budget=float(args.budget), relist=bool(args.relist), top=int(args.top),
+                        docs=bool(args.docs)))
+    elif cmd == "tally":
+        tally(list(args.parts), top=int(args.top), docs=bool(args.docs))
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main(None))

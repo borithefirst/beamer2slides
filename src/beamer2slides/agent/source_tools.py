@@ -21,13 +21,20 @@ import json
 import re
 import zipfile
 from collections import Counter
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Annotated, Any, Callable
+from typing import TYPE_CHECKING, Annotated, TypeVar
 
 from ..deck_files import FOLDERS as DECK_FILES
 from ..deck_files import PARTS
+from ..json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
 from .context import Job, tool
 from .types import READS, READS_GOOGLE, WRITES, Refused
+
+if TYPE_CHECKING:
+    from ..inverse import Result
+
+_T = TypeVar("_T")
 
 __all__ = ["deck_pull", "tex_converge", "deck_adopt", "SOURCE_TOOLS"]
 
@@ -39,7 +46,7 @@ _SLIDES_READ = re.compile(r"deck: (\d+) slides read")
 
 # ---------------------------------------------------------------- the tools
 
-@tool("deck_pull", needs=(READS, WRITES, READS_GOOGLE))
+@tool("deck_pull", needs=(READS, WRITES, READS_GOOGLE), local=None)
 def deck_pull(
     j: Job,
     deck: Annotated[str, "The deck to pull from: a Slides URL, a presentation id, or a workspace "
@@ -71,7 +78,7 @@ def deck_pull(
     could not express in LaTeX is left in `edits.md`, which is written for an AI to act on next.
     """
     tex_path = _existing(j, tex, "tex")
-    target_ref, folder = _deck_argument(j, deck)
+    target_ref, folder = _deck_argument(j, deck, allow_json=False)
     work_path = _work_dir(j, work, folder / "pull" if folder else tex_path.parent / "out" / "pull")
     out_path = j.path(out, write=True) if out else None
 
@@ -82,7 +89,7 @@ def deck_pull(
     log = _logger(j)
     j.data["deck"] = target_ref
 
-    def read():
+    def read() -> JsonObject:
         # On a thread of its own while the source first compiles (`inverse.converge`): the read
         # needs no PDF and the compile needs no deck.
         deck = read_deck(target_ref, work_path / "target-images", None, None, None, False, None, None)
@@ -95,7 +102,7 @@ def deck_pull(
     _finish(j, result, work_path, out_path, apply, max_iter, "deck_pull")
 
 
-@tool("tex_converge", needs=(READS, WRITES))
+@tool("tex_converge", needs=(READS, WRITES), local=None)
 def tex_converge(
     j: Job,
     target: Annotated[str, "Workspace ref of the deck.json-shaped file to converge onto: classify's "
@@ -132,12 +139,16 @@ def tex_converge(
 
     log = _logger(j)
     try:
-        doc = json.loads(target_path.read_text(encoding="utf-8"))
+        doc: Json = json.loads(target_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise Refused("bad_request", f"{target} is not JSON: {exc}", target=target) from None
     if not isinstance(doc, dict) or "slides" not in doc:
         raise Refused("bad_request", f"{target} is not a deck.json (no 'slides' key).", target=target)
-    j.data["slides"] = len(doc["slides"])
+    slides = doc["slides"]
+    if not isinstance(slides, list):
+        raise Refused("bad_request", f"{target} is not a deck.json ('slides' is not a list).",
+                      target=target)
+    j.data["slides"] = len(slides)
     j.data["target"] = j.ctx.workspace.ref(target_path)
 
     result = _loop(lambda: run_pull(doc, tex_path, work_path, apply, out_path, max_iter,
@@ -145,13 +156,13 @@ def tex_converge(
     _finish(j, result, work_path, out_path, apply, max_iter, "tex_converge")
 
 
-def _reads_files(j: Job, kw: dict) -> bool:
+def _reads_files(j: Job, kw: Mapping[str, object]) -> bool:
     """Whether `deck_adopt` was handed the deck as files, and so makes no Google call at all."""
     deck = str(kw.get("deck") or "")
     if deck.lower().endswith((".json", ".zip")):
         return True
     try:
-        path = j.path(deck)
+        path = j.path(deck, write=False)
     except Exception:  # noqa: BLE001 - a URL or an id is no path
         return False
     return path.is_dir() and (path / DECK_FILES["presentation"]).is_file()
@@ -241,7 +252,7 @@ def deck_adopt(
 
     log = _logger(j)
 
-    def watch(line: str = "") -> None:
+    def watch(line: object) -> None:
         # The slide count is only said out loud, and it is said before the loop that may die:
         # read it as it goes past, so a run that broke mid-compile still reports what it read.
         if m := _SLIDES_READ.search(str(line)):
@@ -250,13 +261,17 @@ def deck_adopt(
 
     from ..fontfiles import ForeignFolder
 
-    found: dict = {}
+    # What cmd_adopt fills in as it goes (its docstring names the keys), as plain data: checked as
+    # the JSON it is here, then read through the narrowings in `_fonts_report`.
+    filled: dict[str, object] = {}
     try:
         result = _loop(lambda: cmd_adopt(target_ref, tex_path, work_path, apply, out_path,
                                          max_iter, engine, flow, target_path, log=watch,
-                                         fonts=font_paths, found=found, pptx=pptx_path, files=files))
+                                         fonts=font_paths, found=filled, pptx=pptx_path, files=files))
     except ForeignFolder as exc:
         raise Refused("bad_request", str(exc), work=j.ctx.workspace.ref(work_path)) from None
+    from ..google_types import json_object
+    found = json_object(filled, "what adopt found")
     _fonts_report(j, found)
     if "offline" in found:
         j.data["offline"] = found["offline"]
@@ -276,7 +291,7 @@ SOURCE_TOOLS = (deck_pull, tex_converge, deck_adopt)
 
 # ---------------------------------------------------------------- arguments
 
-def _fonts_report(j: Job, found: dict) -> None:
+def _fonts_report(j: Job, found: JsonObject) -> None:
     """What adopt made of the fonts given, and which of the deck's fonts it had to stand in for.
 
     A font set in a stand-in breaks lines in other places than the deck does, and every such
@@ -284,11 +299,15 @@ def _fonts_report(j: Job, found: dict) -> None:
     file, which only the caller can hand over. So it is data to act on, not a line in the log."""
     supplied = found.get("supplied")
     if supplied is not None:
-        j.data["fonts_supplied"] = {f: got["styles"] for f, got in supplied.get("families", {}).items()}
-        for s in supplied.get("skipped", []):
+        report = as_object(supplied, "adopt's fonts supplied")
+        families = as_object(report.get("families", {}), "adopt's fonts supplied.families")
+        styles: JsonObject = {f: as_object(got, f"adopt's fonts supplied.families.{f}")["styles"]
+                              for f, got in families.items()}
+        j.data["fonts_supplied"] = styles
+        for s in as_objects(report.get("skipped", []), "adopt's fonts supplied.skipped"):
             j.warn(f"{s['file']} was not used: {s['reason']}", where="fonts")
-    missing = found.get("missing") or []
-    j.data["fonts_missing"] = [dict(m) for m in missing]
+    missing = as_objects(found.get("missing") or [], "adopt's missing fonts")
+    j.data["fonts_missing"] = list[Json]([dict(m) for m in missing])
     for m in missing:
         j.warn(f"{m['font']} ({m['letters']} letters) is not here and was set in {m['set_in']}, so its "
                f"lines break elsewhere than the deck's", where="fonts")
@@ -296,8 +315,8 @@ def _fonts_report(j: Job, found: dict) -> None:
         j.suggest("ask the person for the files of the fonts in data['fonts_missing'] and adopt again "
                   "with fonts=[...] (into a new tex path), if the deck's line breaks matter")
     # A picture the deck would not give is a frame without it: said, never left to be noticed.
-    pictures = found.get("pictures_missing") or []
-    j.data["pictures_missing"] = [dict(p) for p in pictures]
+    pictures = as_objects(found.get("pictures_missing") or [], "adopt's missing pictures")
+    j.data["pictures_missing"] = list[Json]([dict(p) for p in pictures])
     for p in pictures:
         j.warn(f"slide {p['slide']}: picture {p['alt']!r} is not in the source ({p['why']})", where="pictures")
     if "pptx_pictures" in found:
@@ -305,19 +324,21 @@ def _fonts_report(j: Job, found: dict) -> None:
     # A picture whose own file never came (downloads refused, a sign-in page, a dead link) still
     # made it in, cropped from Google's thumbnail instead: said, so a lower-resolution or slightly
     # cropped picture is not mistaken for a faithful one. A .pptx brings the files of both kinds.
-    recovered = found.get("pictures_from_thumbnail") or []
-    if (recovered or any(not p["why"].startswith("LaTeX can't") for p in pictures)) and not found.get("pptx_pictures"):
+    recovered = as_objects(found.get("pictures_from_thumbnail") or [], "adopt's thumbnail pictures")
+    if ((recovered or any(not as_str(p["why"], "a missing picture's why").startswith("LaTeX can't")
+                          for p in pictures))
+            and not found.get("pptx_pictures")):
         j.suggest("ask the person to download the deck as .pptx (File > Download > Microsoft PowerPoint) "
                   "and adopt again with pptx=... (into a new tex path): its pictures need no download")
     if recovered:
-        j.data["pictures_from_thumbnail"] = [dict(p) for p in recovered]
+        j.data["pictures_from_thumbnail"] = list[Json]([dict(p) for p in recovered])
         for p in recovered:
             j.warn(f"slide {p['slide']}: picture {p['alt']!r} came from Google's thumbnail, not its own "
                    f"download", where="pictures")
 
 
 def _existing(j: Job, ref: str, what: str) -> Path:
-    path = j.path(ref)
+    path = j.path(ref, write=False)
     if not path.exists():
         raise Refused("not_found", f"No {what} at {ref} (looked in {path}).", **{what: ref})
     return path
@@ -329,16 +350,17 @@ def _work_dir(j: Job, ref: str | None, default: Path) -> Path:
     return path
 
 
-def _deck_argument(j: Job, deck: str, allow_json: bool = False) -> tuple[str, Path | None]:
+def _deck_argument(j: Job, deck: str, allow_json: bool) -> tuple[str, Path | None]:
     """What `read_deck`/`cmd_adopt` get, and the out folder if the ref named one.
 
     A deck is a URL, a bare presentation id, or a path in the workspace - a conversion's out
-    folder (which carries deck.json and the sync base), or, for adopt, a saved deck.json.
+    folder (which carries deck.json and the sync base), or, for adopt (`allow_json`), a saved
+    deck.json or a deck-files .zip.
     """
     if _URL.match(deck):
         return deck, None
     try:
-        path = j.path(deck)
+        path = j.path(deck, write=False)
     except Refused:
         raise
     except OSError:                       # a presentation id Windows will not make a path of
@@ -361,10 +383,10 @@ def _deck_argument(j: Job, deck: str, allow_json: bool = False) -> tuple[str, Pa
 
 # ---------------------------------------------------------------- the loop and its report
 
-def _logger(j: Job) -> Callable[[str], None]:
+def _logger(j: Job) -> Callable[[object], None]:
     """What the loop prints its progress through: the job's log, not stdout."""
 
-    def log(line: str = "") -> None:
+    def log(line: object) -> None:
         for one in str(line).split("\n"):
             j.log.append(one)
             if j.ctx.progress:
@@ -376,7 +398,7 @@ def _logger(j: Job) -> Callable[[str], None]:
     return log
 
 
-def _loop(run: Callable[[], Any]) -> Any:
+def _loop(run: Callable[[], _T]) -> _T:
     """Run the convergence loop, turning its one fatal failure into a refusal with the place in it."""
     try:
         return run()
@@ -384,7 +406,7 @@ def _loop(run: Callable[[], Any]) -> Any:
         text = str(exc)
         if "does not compile" not in text:
             raise
-        data: dict[str, Any] = {"latex_error": text}
+        data: JsonObject = {"latex_error": text}
         if m := _FILE_LINE.search(text):
             data["file"] = m.group("file")
             data["line"] = int(m.group("line"))
@@ -392,40 +414,42 @@ def _loop(run: Callable[[], Any]) -> Any:
         raise Refused("compile_failed", text.strip(), **data) from None
 
 
-def _finish(j: Job, result: Any, work: Path, out: Path | None, apply: bool, max_iter: int,
+def _finish(j: Job, result: "Result", work: Path, out: Path | None, apply: bool, max_iter: int,
             tool_name: str) -> None:
     """Everything the three journeys say the same way: data, artifacts, warnings, summary."""
     rounds = max(len(result.iterations) - 1, 0)
     left = _by_kind(result.residuals)
-    first = result.iterations[0]["by_kind"] if result.iterations else {}
+    first: dict[str, int] = (_counts(result.iterations[0]["by_kind"], "the first iteration's by_kind")
+             if result.iterations else {})
     changed = [j.ctx.workspace.ref(p) for p in sorted(result.files)]
-    j.data.update({
-        "converged": bool(result.converged),
+    said: JsonObject = {
+        "converged": result.converged,
         "rounds": rounds,
         "max_iter": max_iter,
-        "residuals_before": dict(first),
-        "residuals_left": left,
+        "residuals_before": dict[str, Json](first),
+        "residuals_left": dict[str, Json](left),
         "residuals_total": sum(left.values()),
-        "unresolved": [_unresolved(u) for u in result.unresolved],
-        "iterations": [dict(it) for it in result.iterations],
-        "files_changed": changed,
-        "applied": bool(apply),
+        "unresolved": list[Json]([_unresolved(u) for u in result.unresolved]),
+        "iterations": list[Json]([dict(it) for it in result.iterations]),
+        "files_changed": list[Json](changed),
+        "applied": apply,
         "work": j.ctx.workspace.ref(work),
-    })
-    restored = list(getattr(result, "restored", None) or [])
-    if restored:
+    }
+    j.data.update(said)
+    if result.restored:
         # The loop's own view said these got better or no worse; the page said otherwise, so the
         # frame has its best round's text. An agent must not "fix" it again from the residuals.
-        j.data["restored"] = [dict(r) for r in restored]
-        for r in restored:
-            j.note("note", f"slide {', '.join(str(k + 1) for k in r['target_slides'])}: {r['why']}",
-                   where=str(r.get("where") or ""))
+        j.data["restored"] = list[Json]([dict(r) for r in result.restored])
+        for r in result.restored:
+            slides = ", ".join(str(as_int(k, "a restored frame's target_slides") + 1)
+                               for k in as_array(r["target_slides"], "a restored frame's target_slides"))
+            j.note("note", f"slide {slides}: {r['why']}", where=str(r.get("where") or ""))
     if result.notes:
-        j.data["pictures"] = list(result.notes)
+        j.data["pictures"] = list[Json](result.notes)
     if result.theme:
         j.data["theme_differences"] = len(result.theme)
         j.note("note", f"{len(result.theme)} difference(s) the beamer theme owns were left alone: "
-                       f"they belong in the theme, not in a frame.")
+                       f"they belong in the theme, not in a frame.", "")
 
     report = work / "edits.md"
     if report.exists():
@@ -446,15 +470,15 @@ def _finish(j: Job, result: Any, work: Path, out: Path | None, apply: bool, max_
         j.conflict(f"{path} changed while the pull was running, so it was left alone; this run's "
                    f"version is {path}.b2s-new", where=path)
     if skipped:
-        j.data["not_applied"] = skipped
+        j.data["not_applied"] = list[Json](skipped)
         j.suggest("diff each <file>.b2s-new against the file and merge by hand")
 
     for u in result.unresolved[:20]:
         j.warn(_residual_text(u), where=str(u.get("where") or ""))
     if len(result.unresolved) > 20:
-        j.warn(f"{len(result.unresolved) - 20} further unresolved residual(s) are in edits.md.")
+        j.warn(f"{len(result.unresolved) - 20} further unresolved residual(s) are in edits.md.", "")
 
-    if not result.converged and _stalled(result):
+    if not result.converged and _stalled(result.iterations):
         # A loop that ran its rounds and got *somewhere* has written a source that compiles and a
         # report worth acting on, so that is ok=True with a loud warning: refusing would throw the
         # work away. `not_converged` is kept for the case where nothing moved at all - the first
@@ -491,21 +515,20 @@ def _sync_base(j: Job, work: Path) -> None:
     if not path.exists():
         j.warn("no sync base was recorded, so the source this wrote cannot be merged back into the "
                "deck it came from: deck_sync will say there is none, and deck_convert would make a "
-               "second deck and leave the person's behind.")
+               "second deck and leave the person's behind.", "")
         return
-    info = (adopt_sync.load(path).get("adopt") or {})
-    tied, loose = info.get("paired", 0), len(info.get("unpaired") or [])
-    drawn = len(info.get("from_layout") or [])
+    info = adopt_sync.adopt_summary(path)
+    tied, loose, drawn = info.paired, info.unpaired, info.from_layout
     total = tied + loose + drawn
-    j.data["sync_base"] = {"path": j.ctx.workspace.ref(path), "slides": info.get("slides"),
+    j.data["sync_base"] = {"path": j.ctx.workspace.ref(path), "slides": info.slides,
                            "elements": total, "paired": tied, "unpaired": loose, "from_layout": drawn}
     if loose:
         j.warn(f"{loose} of {total} element(s) are tied to no object of this deck, and no sync ever "
                f"gives one an object: a source edit to one of them is kept as the deck has it and "
-               f"reported. Change those in Slides rather than in the source.")
+               f"reported. Change those in Slides rather than in the source.", "")
     if drawn:
         j.warn(f"{drawn} of {total} element(s) are drawn by the deck's own layouts or master and "
-               f"not by a slide. Change those in Slides under Slide > Edit theme.")
+               f"not by a slide. Change those in Slides under Slide > Edit theme.", "")
     if total:
         j.summary += (f" {tied} of {total} element(s) are tied to an object of the deck, which is "
                       f"what a later sync can write; the base is at {j.ctx.workspace.ref(path)}.")
@@ -513,8 +536,8 @@ def _sync_base(j: Job, work: Path) -> None:
               f"to see what the merge would write before anything is written")
 
 
-def _summary(j: Job, result: Any, rounds: int, left: dict, changed: list[str], apply: bool,
-             out: Path | None, report: Path) -> str:
+def _summary(j: Job, result: "Result", rounds: int, left: dict[str, int], changed: list[str],
+             apply: bool, out: Path | None, report: Path) -> str:
     where = ("written in place (what was there is kept as .bak)" if apply
              else f"copied to {j.ctx.workspace.ref(out)}" if out is not None
              else "not written: the patch is in pull.patch")
@@ -531,23 +554,29 @@ def _summary(j: Job, result: Any, rounds: int, left: dict, changed: list[str], a
     return f"{head} {files} {tail}"
 
 
-def _by_kind(residuals: list[dict]) -> dict[str, int]:
-    return dict(sorted(Counter(r.get("kind", "?") for r in residuals).items()))
+def _by_kind(residuals: list[JsonObject]) -> dict[str, int]:
+    return dict(sorted(Counter(as_str(r.get("kind", "?"), "a residual's kind")
+                               for r in residuals).items()))
+
+
+def _counts(value: Json, where: str) -> dict[str, int]:
+    """An iteration's `by_kind`: residuals of each kind."""
+    return {kind: as_int(n, f"{where}.{kind}") for kind, n in as_object(value, where).items()}
 
 
 def _phrase(counts: dict[str, int]) -> str:
     return ", ".join(f"{n} {k}" for k, n in counts.items()) or "none"
 
 
-def _unresolved(u: dict) -> dict:
-    out = {"kind": u.get("kind"), "why": u.get("why"), "text": _residual_text(u)}
+def _unresolved(u: JsonObject) -> JsonObject:
+    out: JsonObject = {"kind": u.get("kind"), "why": u.get("why"), "text": _residual_text(u)}
     for key in ("where", "frame_label", "target_slide", "slide"):
         if u.get(key) is not None:
             out[key] = u[key]
     return out
 
 
-def _residual_text(u: dict) -> str:
+def _residual_text(u: JsonObject) -> str:
     from ..compare import residual_line
     try:
         line = residual_line(u)
@@ -562,14 +591,16 @@ def _not_applied(data_file: Path) -> list[str]:
     if not data_file.exists():
         return []
     try:
-        return list(json.loads(data_file.read_text(encoding="utf-8")).get("not_applied", []))
+        report: Json = json.loads(data_file.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return []
+    left = as_object(report, str(data_file)).get("not_applied", [])
+    return [as_str(p, f"{data_file}: not_applied") for p in as_array(left, f"{data_file}: not_applied")]
 
 
-def _stalled(result: Any) -> bool:
+def _stalled(iterations: list[JsonObject]) -> bool:
     """Whether the loop never beat the residual count it started with."""
-    opens = [it["open"] for it in result.iterations]
+    opens = [as_int(it["open"], "an iteration's open") for it in iterations]
     return bool(opens) and min(opens) >= opens[0] and opens[-1] > 0
 
 
@@ -582,11 +613,12 @@ def _readability(j: Job, tex_path: Path) -> None:
         text = tex_path.read_text(encoding="utf-8", errors="replace")
         m = measure(text, tree_vocabulary(tree), tree_theme(tree))
     except Exception as exc:                                       # never lose a whole adopt to this
-        j.note("note", f"the source could not be measured for readability ({type(exc).__name__}).")
+        j.note("note", f"the source could not be measured for readability ({type(exc).__name__}).", "")
         return
     if not m:
         return
     j.data["readability"] = round(score(m), 3)
-    j.data["readability_detail"] = {k: m[k] for k in ("frames", "words", "lines", "numbers",
-                                                      "plumbing", "bloat", "author", "repeat")
-                                    if k in m}
+    # (Named one by one: `measure` reads every one of them off a source with frames.)
+    j.data["readability_detail"] = {
+        "frames": m["frames"], "words": m["words"], "lines": m["lines"], "numbers": m["numbers"],
+        "plumbing": m["plumbing"], "bloat": m["bloat"], "author": m["author"], "repeat": m["repeat"]}

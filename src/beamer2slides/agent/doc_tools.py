@@ -38,6 +38,7 @@ from typing import Annotated
 
 from .. import doc_ir
 from .. import doc_sync as docs
+from ..json_types import Json, JsonObject
 from .context import Job, tool
 from .types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Refused
 
@@ -103,7 +104,7 @@ def report_diagnostics(j: Job, info: docs.SyncReport) -> SyncCounts:
             j.warn(f"{note}. Nothing on our side can put it back, since the file has no "
                    f"spelling for it.", "what is lost")
         else:
-            j.warn(note)
+            j.warn(note, "")
     if lost:
         j.suggest("set the property again by hand on the block(s) named above, or, next "
                   "time, leave that block to the document and make the change where the "
@@ -163,7 +164,7 @@ def _report_artifacts(j: Job, info: docs.SyncReport) -> dict[str, str]:
     return out
 
 
-def _options() -> list[dict[str, str]]:
+def _options() -> list[JsonObject]:
     return [{"value": mode, "costs": docs.ASSUME_MEANS[mode]} for mode in docs.ASSUME_MODES]
 
 
@@ -183,7 +184,7 @@ def _exit(j: Job, exc: SystemExit, file: str | None) -> None:
                       ".b2s/ beside the file - so nothing can tell a source change from a "
                       "reader's change. Say which side to assume; each answer throws the "
                       "other side's work since the last sync away.\n" + said,
-                      options=_options(), file=file)
+                      options=list[Json](_options()), file=file)
     if "already names document" in said:
         j.suggest("doc_sync to merge into the document it already names")
         raise Refused("already_pushed", said, file=file)
@@ -195,7 +196,7 @@ def _exit(j: Job, exc: SystemExit, file: str | None) -> None:
                   "doc_push to create the document this file belongs to")
         raise Refused("bad_request", said, file=file)
     if "--assume-base" in said:
-        raise Refused("bad_request", said, options=_options())
+        raise Refused("bad_request", said, options=list[Json](_options()))
     if "could not be exported as a backup" in said:
         raise Refused("no_way_back", said, file=file)
     if "no such file" in said:
@@ -211,7 +212,7 @@ def _exit(j: Job, exc: SystemExit, file: str | None) -> None:
 
 # ---------------------------------------------------------------- push
 
-@tool("doc_push", needs=(READS, WRITES, WRITES_GOOGLE))
+@tool("doc_push", needs=(READS, WRITES, WRITES_GOOGLE), local=None)
 def doc_push(
     j: Job,
     file: Annotated[str, "Workspace ref of the canonical HTML file to create the document "
@@ -270,7 +271,7 @@ def doc_push(
 
 # ---------------------------------------------------------------- sync
 
-@tool("doc_sync", needs=(READS, WRITES, READS_GOOGLE))
+@tool("doc_sync", needs=(READS, WRITES, READS_GOOGLE), local=None)
 def doc_sync(
     j: Job,
     file: Annotated[str, "Workspace ref of the canonical HTML file; it normally names the "
@@ -303,7 +304,7 @@ def doc_sync(
     if assume_base is not None and assume_base not in ASSUME_VALUES:
         raise Refused("bad_request",
                       f"assume_base={assume_base!r} is not one of {', '.join(ASSUME_VALUES)}.",
-                      options=_options())
+                      options=list[Json](_options()))
     if not dry_run:
         # `@tool` declares the least this journey does, so a read-only context can still
         # plan a merge. A real write says so here, before the first request goes out.
@@ -338,10 +339,10 @@ def doc_sync(
         # Blocks the document had that this run takes away, the file no longer having
         # them. The one number here about words that are gone for good.
         "deleted": len(info.get("removed") or []),
-        "base": info.get("base"), "open_comments": list(info.get("comments") or []),
-        "applied_examples": list(info["applied"])[:20],
-        "kept_examples": list(info["kept"])[:20],
-        "deleted_examples": list(info.get("removed") or [])[:20],
+        "base": info.get("base"), "open_comments": list[Json](info.get("comments") or []),
+        "applied_examples": list[Json](info["applied"][:20]),
+        "kept_examples": list[Json](info["kept"][:20]),
+        "deleted_examples": list[Json]((info.get("removed") or [])[:20]),
         "file": j.ctx.workspace.ref(path), **refs})
     if info.get("blocks") is not None:
         j.data["blocks"] = info["blocks"]
@@ -370,7 +371,7 @@ def doc_sync(
 
 # ---------------------------------------------------------------- adopt
 
-@tool("doc_adopt", needs=(READS, WRITES, READS_GOOGLE))
+@tool("doc_adopt", needs=(READS, WRITES, READS_GOOGLE), local=None)
 def doc_adopt(
     j: Job,
     doc: Annotated[str, "The document's URL or id: the Google Doc nobody ever pushed."],
@@ -408,7 +409,7 @@ def doc_adopt(
         _exit(j, exc, file)
         return
 
-    written = j.path(info["file"]) if target is None else target
+    written = j.path(info["file"], write=False) if target is None else target
     ref = j.ctx.workspace.ref(written)
     for note in info.get("notes") or []:
         j.warn(note, ref)

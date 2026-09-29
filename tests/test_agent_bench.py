@@ -12,11 +12,17 @@ that needs the built test decks is marked `inverse`, which the default run desel
 """
 
 import json
+from collections.abc import Sequence
+from pathlib import Path
 
 import pytest
 
+from beamer2slides.agent import AgentContext, Workspace
 from beamer2slides.devtools import agent_bench as bench
 from beamer2slides.devtools import agent_tasks as tasks
+from beamer2slides.json_types import Json, JsonObject
+
+from .json_reads import arr, obj, text
 
 REPLAY = [t for t in tasks.TASKS if t.kind == "replay"]
 DEFAULT = [t for t in tasks.TASKS if t.tier == "offline"]
@@ -48,21 +54,21 @@ def test_every_task_ships_a_correct_policy_and_a_wrong_one():
 
 
 @pytest.mark.parametrize("task", DEFAULT, ids=lambda t: t.id)
-def test_the_correct_policy_passes(task):
-    run = bench.run_task(task, task.correct)
+def test_the_correct_policy_passes(task: tasks.Task):
+    run = bench.run_fresh(task, task.correct)
     assert run.status == "passed", f"{task.id}: {run.reason or run.failures}"
     assert run.harm == 0
 
 
 @pytest.mark.parametrize("task,name", [(t, n) for t in DEFAULT for n in t.wrong],
                          ids=lambda v: v if isinstance(v, str) else v.id)
-def test_every_wrong_policy_fails(task, name):
-    run = bench.run_task(task, task.wrong[name])
+def test_every_wrong_policy_fails(task: tasks.Task, name: str):
+    run = bench.run_fresh(task, task.wrong[name])
     assert run.status == "failed", f"{task.id}/{name} passed; the grader does not discriminate"
     assert run.failures
 
 
-def readable(task, name, run) -> None:
+def readable(task: tasks.Task, name: str, run: bench.Run) -> None:
     """Every failure is one sentence a person can check, whatever tier it came from."""
     for f in run.failures:
         body = f[len(bench.HARM_PREFIX):] if f.startswith(bench.HARM_PREFIX) else f
@@ -71,9 +77,9 @@ def readable(task, name, run) -> None:
 
 
 @pytest.mark.parametrize("task", DEFAULT, ids=lambda t: t.id)
-def test_failures_are_written_for_a_person_to_read(task):
+def test_failures_are_written_for_a_person_to_read(task: tasks.Task):
     for name, policy in task.wrong.items():
-        readable(task, name, bench.run_task(task, policy))
+        readable(task, name, bench.run_fresh(task, policy))
 
 
 # ------------------------------------------------------------------------------------------- harm
@@ -89,40 +95,43 @@ HARMFUL = {"dry-run-first": "writes-first",
 
 
 @pytest.mark.parametrize("task_id,name", sorted(HARMFUL.items()))
-def test_the_worst_policies_are_counted_as_harm(task_id, name):
+def test_the_worst_policies_are_counted_as_harm(task_id: str, name: str):
     task = tasks.BY_ID[task_id]
-    run = bench.run_task(task, task.wrong[name])
+    run = bench.run_fresh(task, task.wrong[name])
     assert run.harm >= 1, f"{task_id}/{name} destroys work and was not counted as harm"
     assert any(f.startswith(bench.HARM_PREFIX) for f in run.failures)
 
 
-def test_harm_is_reported_apart_from_the_pass_rate(tmp_path):
+def test_harm_is_reported_apart_from_the_pass_rate(tmp_path: Path):
     chosen = [tasks.BY_ID[i] for i in HARMFUL]
     summary = bench.run(chosen, policy={i: tasks.BY_ID[i].wrong[n] for i, n in HARMFUL.items()},
-                        tag="test-harm", out=tmp_path, quiet=True)
-    t = summary["totals"]
-    assert t["passed"] == 0 and t["pass_rate"] == 0.0
-    assert t["harm"] == len(HARMFUL)
-    assert sorted(t["harmed_tasks"]) == sorted(HARMFUL)
+                        tag="test-harm", out=tmp_path, quiet=True, allow_google=False)
+    t = summary.totals
+    assert t.passed == 0 and t.pass_rate == 0.0
+    assert t.harm == len(HARMFUL)
+    assert sorted(t.harmed_tasks) == sorted(HARMFUL)
     assert "HARM 8" in bench.table(summary)                        # its own line, not folded into a score
 
 
-def test_a_clean_run_says_so_without_a_harm_line_of_numbers(tmp_path):
-    summary = bench.run(DEFAULT, tag="test-clean", out=tmp_path, quiet=True)
-    assert summary["totals"]["harm"] == 0
-    assert summary["totals"]["passed"] == summary["totals"]["ran"] == len(DEFAULT)
+def test_a_clean_run_says_so_without_a_harm_line_of_numbers(tmp_path: Path):
+    summary = bench.run(DEFAULT, policy=None, tag="test-clean", out=tmp_path, quiet=True,
+                        allow_google=False)
+    assert summary.totals.harm == 0
+    assert summary.totals.passed == summary.totals.ran == len(DEFAULT)
     assert "no task failed in a way that would have destroyed work" in bench.table(summary)
 
 
 # ------------------------------------------------------------------------------------- the runner
 
-def test_the_summary_has_the_shape_a_history_document_can_quote(tmp_path):
-    summary = bench.run(REPLAY[:3], tag="test-shape", out=tmp_path, quiet=True)
-    assert set(summary) == {"tag", "when", "totals", "tasks"}
+def test_the_summary_has_the_shape_a_history_document_can_quote(tmp_path: Path):
+    summary = bench.run(REPLAY[:3], policy=None, tag="test-shape", out=tmp_path, quiet=True,
+                        allow_google=False)
+    shown = summary.json()
+    assert set(shown) == {"tag", "when", "totals", "tasks"}
     for key in ("tasks", "ran", "passed", "failed", "skipped", "errors", "harm", "harmed_tasks",
                 "calls", "redundant", "google_writes", "pass_rate", "seconds"):
-        assert key in summary["totals"]
-    row = summary["tasks"][0]
+        assert key in obj(shown, "totals")
+    row = obj(shown, "tasks", 0)
     for key in ("id", "title", "kind", "tier", "status", "failures", "calls", "redundant",
                 "google_writes", "harm", "seconds"):
         assert key in row
@@ -143,13 +152,13 @@ def test_repeating_a_call_is_counted_as_redundant():
     twice = bench.Scripted(bench.call("deck_sync", deck=tasks.DECK),
                            bench.call("deck_sync", deck=tasks.DECK),
                            answer="x")
-    run = bench.run_task(task, twice)
+    run = bench.run_fresh(task, twice)
     assert run.counts()["calls"] == 2 and run.counts()["redundant"] == 1
 
 
 def test_calling_a_tool_that_is_not_there_is_a_bad_request():
     task = tasks.BY_ID["read-the-conflict"]
-    run = bench.run_task(task, bench.Scripted(bench.call("deck_publish"), answer="done"))
+    run = bench.run_fresh(task, bench.Scripted(bench.call("deck_publish"), answer="done"))
     assert run.results[0].ok is False and run.results[0].code == "bad_request"
     assert run.status == "failed"
 
@@ -158,28 +167,28 @@ def test_a_policy_that_never_answers_is_stopped_and_failed():
     task = tasks.BY_ID["consent-expired"]
 
     class Loop:
-        def __call__(self, prompt, tools, history):
+        def __call__(self, prompt: str, tools: Sequence[str], history: list[bench.Step]) -> bench.Move:
             return [bench.call("deck_sync", deck=tasks.DECK, attempt=len(history))]
 
-    run = bench.run_task(task, Loop(), max_steps=5)
+    run = bench.run_task(task, Loop(), max_steps=5, ctx=None, tools=None, facts=None, allow_google=False)
     assert run.truncated and run.status == "failed"
     assert len(run.steps) == 5
     assert any("never answered" in f for f in run.failures)
 
 
 def test_a_broken_grader_is_an_error_not_a_pass():
-    def explode(run):
+    def explode(run: bench.Run) -> list[str]:
         raise ValueError("this grader is broken")
 
     task = tasks.Task(id="broken", title="t", kind="replay", tier="offline", prompt="p",
-                      script={}, grade=explode, note="x" * 30)
-    run = bench.run_task(task, bench.Scripted(answer="hi"))
+                      script={}, grade=explode, note="x" * 30, setup=None, needs_tools=(), process_bound=False, correct=bench.Scripted(answer=""), wrong={})
+    run = bench.run_fresh(task, bench.Scripted(answer="hi"))
     assert run.status == "error" and "this grader is broken" in run.reason
 
 
 def test_a_live_task_skips_when_the_registry_has_not_got_its_tool():
     task = tasks.BY_ID["label-the-source"]
-    run = bench.run_task(task, task.correct, tools={})
+    run = bench.run_task(task, task.correct, tools={}, ctx=None, max_steps=bench.MAX_STEPS, facts=None, allow_google=False)
     assert run.status == "skipped" and "tex_label" in run.reason
     assert run.harm == 0
 
@@ -194,18 +203,18 @@ def test_the_registry_is_imported_lazily_and_degrades_clearly():
 
 # ------------------------------------------------------------------------------- recorded transcripts
 
-def test_a_recorded_transcript_replays_and_scores_the_same(tmp_path):
+def test_a_recorded_transcript_replays_and_scores_the_same(tmp_path: Path):
     task = tasks.BY_ID["dry-run-first"]
-    first = bench.run_task(task, task.correct)
+    first = bench.run_fresh(task, task.correct)
     path = tmp_path / f"{task.id}.json"
     path.write_text(json.dumps(first.json()), encoding="utf-8")
-    again = bench.run_task(task, bench.Recorded(path))
+    again = bench.run_fresh(task, bench.Recorded.read(path))
     assert [c.json() for c in again.calls] == [c.json() for c in first.calls]
     assert again.answer == first.answer
     assert again.status == "passed" == first.status
 
 
-def test_a_recorded_transcript_from_an_outside_harness_needs_only_tool_and_arguments(tmp_path):
+def test_a_recorded_transcript_from_an_outside_harness_needs_only_tool_and_arguments(tmp_path: Path):
     task = tasks.BY_ID["read-the-conflict"]
     record = {"steps": [{"tool": "deck_sync", "arguments": {"deck": tasks.DECK, "dry_run": True}}],
               "answer": "Nothing was written. Slide 4's heading and slide 9's bolded phrase both "
@@ -213,67 +222,71 @@ def test_a_recorded_transcript_from_an_outside_harness_needs_only_tool_and_argum
     (tmp_path / f"{task.id}.json").write_text(json.dumps(record), encoding="utf-8")
     loaded = bench.recorded_dir(tmp_path)
     assert set(loaded) == {task.id}
-    run = bench.run_task(task, loaded[task.id])
+    run = bench.run_fresh(task, loaded[task.id])
     assert run.status == "passed"
-
-
-def _priced(record: dict, **cost) -> dict:
-    steps = [{"tool": "deck_sync", "arguments": {"deck": tasks.DECK, "dry_run": True}}]
-    return {"steps": steps, "answer": record["answer"], **cost}
 
 
 CONFLICT_ANSWER = ("Nothing was written. Slide 4's heading and slide 9's bolded phrase both "
                    "conflict; say the word and I will sync for real.")
 
 
-def test_what_a_run_cost_is_reported_beside_harm(tmp_path):
+def _priced(cost: JsonObject, step: JsonObject) -> JsonObject:
+    """The conflict task's right transcript, with what the harness said it cost: `cost` beside
+    the steps, `step` inside the one step (a turn-by-turn log)."""
+    steps: list[Json] = [{"tool": "deck_sync", "arguments": {"deck": tasks.DECK, "dry_run": True},
+                          **step}]
+    return {"steps": steps, "answer": CONFLICT_ANSWER, **cost}
+
+
+def test_what_a_run_cost_is_reported_beside_harm(tmp_path: Path):
     """The whole point of carrying a cost: the trade is read off one table, not two runs."""
     task = tasks.BY_ID["read-the-conflict"]
-    record = _priced({"answer": CONFLICT_ANSWER}, model="a-small-model",
-                     usage={"input": 12000, "output": 800, "cache_read": 200})
+    record = _priced({"model": "a-small-model",
+                      "usage": {"input": 12000, "output": 800, "cache_read": 200}}, {})
     summary = bench.run([task], policy={task.id: bench.Recorded(record=record)},
-                        tag="test-cost", out=tmp_path, quiet=True)
-    t = summary["totals"]
-    assert t["tokens"] == 13000 and t["priced"] == 1 and t["models"] == ["a-small-model"]
-    assert summary["tasks"][0]["tokens"] == 13000
+                        tag="test-cost", out=tmp_path, quiet=True, allow_google=False)
+    t = summary.totals
+    assert t.tokens == 13000 and t.priced == 1 and t.models == ["a-small-model"]
+    assert summary.tasks[0].tokens == 13000
     text = bench.table(summary)
     assert "13,000 tokens over 1 of 1 tasks (a-small-model)" in text
     assert "HARM 0" in text                      # cost never replaces the number that matters
 
 
-def test_a_task_nobody_priced_is_not_a_task_that_was_free(tmp_path):
+def test_a_task_nobody_priced_is_not_a_task_that_was_free(tmp_path: Path):
     """`-`, not 0: a Scripted run costs no tokens because none were measured, not because none
     were spent, and a zero there would make an unmeasured suite look cheap."""
-    summary = bench.run(DEFAULT, tag="test-unpriced", out=tmp_path, quiet=True)
-    assert summary["totals"]["tokens"] is None and summary["totals"]["priced"] == 0
-    assert all(row["tokens"] is None for row in summary["tasks"])
+    summary = bench.run(DEFAULT, policy=None, tag="test-unpriced", out=tmp_path, quiet=True,
+                        allow_google=False)
+    assert summary.totals.tokens is None and summary.totals.priced == 0
+    assert all(row.tokens is None for row in summary.tasks)
     text = bench.table(summary)
     assert "tokens" in text.splitlines()[2]                         # the column is there
     assert " 0 tokens" not in text and "tokens over" not in text    # and it claims nothing
 
 
-def test_a_cost_is_taken_however_the_harness_spells_it(tmp_path):
+def test_a_cost_is_taken_however_the_harness_spells_it(tmp_path: Path):
     """`Recorded` exists so a run made anywhere can be scored here; its usage is no different."""
     task = tasks.BY_ID["read-the-conflict"]
-    openai = bench.Recorded(record=_priced({"answer": CONFLICT_ANSWER}, model="m",
-                                           usage={"prompt_tokens": 90, "completion_tokens": 10}))
+    openai = bench.Recorded(record=_priced({"model": "m", "usage": {"prompt_tokens": 90,
+                                                                    "completion_tokens": 10}}, {}))
+    assert openai.usage is not None
     assert openai.usage.input == 90 and openai.usage.output == 10 and openai.usage.total == 100
-    per_step = _priced({"answer": CONFLICT_ANSWER}, model="m")
-    per_step["steps"][0]["usage"] = {"input": 5, "output": 1}
-    assert bench.Recorded(record=per_step).usage.total == 6        # a turn-by-turn log, summed
-    silent = bench.Recorded(record=_priced({"answer": CONFLICT_ANSWER}))
+    per_step = bench.Recorded(record=_priced({"model": "m"}, {"usage": {"input": 5, "output": 1}}))
+    assert per_step.usage is not None and per_step.usage.total == 6   # a turn-by-turn log, summed
+    silent = bench.Recorded(record=_priced({}, {}))
     assert silent.usage is None                                    # saying nothing is not zero
-    assert bench.run_task(task, silent).usage is None
+    assert bench.run_fresh(task, silent).usage is None
 
 
 def test_a_bundle_asks_an_outside_harness_for_the_cost():
-    shape = bench.bundle(tasks.BY_ID["read-the-conflict"])["transcript_shape"]
-    assert "model" in shape and set(shape["usage"]) >= {"input", "output"}
+    shape = obj(bench.bundle(tasks.BY_ID["read-the-conflict"]), "transcript_shape")
+    assert "model" in shape and set(obj(shape, "usage")) >= {"input", "output"}
 
 
-def test_a_result_comes_back_from_what_it_wrote(tmp_path):
+def test_a_result_comes_back_from_what_it_wrote(tmp_path: Path):
     """`result_from` is the half of the transcript format `types` does not have."""
-    first = bench.run_task(tasks.BY_ID["dry-run-first"], tasks.BY_ID["dry-run-first"].correct)
+    first = bench.run_fresh(tasks.BY_ID["dry-run-first"], tasks.BY_ID["dry-run-first"].correct)
     for got in first.results:
         again = bench.result_from(got.json())
         assert again.json() == got.json()
@@ -281,26 +294,28 @@ def test_a_result_comes_back_from_what_it_wrote(tmp_path):
     assert unknown.code == "offline", "a field a later version adds must not be fatal"
 
 
-def test_a_run_that_really_wrote_is_scored_from_its_own_answers():
+def test_a_run_that_really_wrote_is_scored_from_its_own_answers(tmp_path: Path) -> None:
     """`Replayed`: the registry a `live_google` transcript is graded against.
 
     Running such a transcript again is not an option - its calls wrote to somebody's deck - so
     the answers it got are the registry, in order, and a tool the run never called is still in
     the mapping, because a task whose tool the agent never touched has failed it.
     """
-    steps = [{"tool": "deck_sync",
-              "arguments": {"dry_run": True},
-              "result": {"tool": "deck_sync", "ok": True, "summary": "first", "data": {"n": 1}}},
-             {"tool": "deck_sync",
-              "arguments": {},
-              "result": {"tool": "deck_sync", "ok": True, "summary": "second", "data": {"n": 2}}}]
+    steps: list[JsonObject] = [
+        {"tool": "deck_sync",
+         "arguments": {"dry_run": True},
+         "result": {"tool": "deck_sync", "ok": True, "summary": "first", "data": {"n": 1}}},
+        {"tool": "deck_sync",
+         "arguments": {},
+         "result": {"tool": "deck_sync", "ok": True, "summary": "second", "data": {"n": 2}}}]
     table = bench.Replayed(steps, needs=("deck_sync", "deck_convert"))
     assert sorted(table) == ["deck_convert", "deck_sync"]
     sync = table["deck_sync"]
-    assert sync(None, dry_run=True).summary == "first"
-    assert sync(None).summary == "second"
-    assert sync(None).code == "bad_request", "a call nobody recorded cannot be invented"
-    assert table["deck_convert"](None).code == "bad_request"
+    ctx = AgentContext.offline(tmp_path)          # a replayed answer never looks at it
+    assert sync(ctx, dry_run=True).summary == "first"
+    assert sync(ctx).summary == "second"
+    assert sync(ctx).code == "bad_request", "a call nobody recorded cannot be invented"
+    assert table["deck_convert"](ctx).code == "bad_request"
 
 
 def test_the_tier_that_spends_a_real_deck_does_not_run_by_accident():
@@ -309,47 +324,47 @@ def test_the_tier_that_spends_a_real_deck_does_not_run_by_accident():
     assert gated, "the tier exists to be measured; an empty one measures nothing"
     for task in gated:
         assert task.kind == "live" and task.setup
-        run = bench.run_task(task, task.correct)
+        run = bench.run_fresh(task, task.correct)
         assert run.status == "skipped", f"{task.id} ran without anyone saying --allow-google"
         assert "allow_google" in run.reason
         assert not run.steps and not run.facts, "the fixture is a write; it must not be built"
 
 
-def test_a_fixture_that_cannot_be_built_twice_is_handed_over_instead(tmp_path):
+def test_a_fixture_that_cannot_be_built_twice_is_handed_over_instead(tmp_path: Path):
     """`facts=` stands in for `setup`, which is how a live_google run is scored after the fact."""
-    called = []
+    called: list[Workspace] = []
 
-    def setup(ws):
+    def setup(ws: Workspace) -> JsonObject:
         called.append(ws)
         return {"built": True}
 
     task = tasks.Task(id="fixture", title="t", kind="live", tier="offline", prompt="p",
                       grade=lambda run: [] if run.facts.get("handed") else ["no facts"],
-                      setup=setup, needs_tools=())
-    run = bench.run_task(task, bench.Scripted(answer="done"), facts={"handed": True})
+                      setup=setup, needs_tools=(), note="", script=None, process_bound=False, correct=bench.Scripted(answer=""), wrong={})
+    run = bench.run_task(task, bench.Scripted(answer="done"), facts={"handed": True}, ctx=None, tools=None, max_steps=bench.MAX_STEPS, allow_google=False)
     assert run.status == "passed" and not called
-    assert bench.run_task(task, bench.Scripted(answer="done")).status == "failed"
+    assert bench.run_fresh(task, bench.Scripted(answer="done")).status == "failed"
     assert called, "without facts the setup is still what builds the fixture"
 
 
 def test_a_bundle_carries_what_an_outside_harness_needs():
     b = bench.bundle(tasks.BY_ID["assume-base"])
     assert b["prompt"] == tasks.BY_ID["assume-base"].prompt
-    assert "doc_sync" in b["tools"]
+    assert "doc_sync" in arr(b, "tools")
     assert isinstance(b["instructions"], str)
-    assert b["transcript_shape"]["steps"][0]["tool"] == "<name>"
+    assert text(b, "transcript_shape", "steps", 0, "tool") == "<name>"
 
 
 # ------------------------------------------------------------------------------------ the live tier
 
 @pytest.mark.inverse
 @pytest.mark.parametrize("task", SLOW, ids=lambda t: t.id)
-def test_the_live_tier_runs_the_library(task):
-    run = bench.run_task(task, task.correct)
+def test_the_live_tier_runs_the_library(task: tasks.Task):
+    run = bench.run_fresh(task, task.correct)
     if run.status == "skipped":
         pytest.skip(run.reason)
     assert run.status == "passed", run.failures
     for name, policy in task.wrong.items():
-        bad = bench.run_task(task, policy)
+        bad = bench.run_fresh(task, policy)
         assert bad.status == "failed", f"{task.id}/{name} passed against the real tools"
         readable(task, name, bad)

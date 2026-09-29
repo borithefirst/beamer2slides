@@ -38,16 +38,20 @@ from __future__ import annotations
 
 import base64 as _b64
 import binascii
+import dataclasses
 import hashlib
 import re
 import shutil
 import tempfile
+from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Any, Callable, Mapping
 from urllib.parse import unquote_to_bytes
 
 from .types import Artifact, Refused, Result
-from .workspace import LocalWorkspace
+from .workspace import INBOX, LocalWorkspace, Workspace
+
+#: A harness's fetcher: a URL in, its bytes out.
+Fetch = Callable[[str], bytes]
 
 __all__ = ["MemoryWorkspace", "take_in", "deliver", "content_bytes", "is_content",
            "INLINE_NOTE", "TEXT_KINDS"]
@@ -79,8 +83,8 @@ _SUFFIX = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
     "application/zip": ".zip", "application/x-zip-compressed": ".zip",
 }
-#: Where inline content lands. Named so an agent reading a ref back can tell what it is.
-INBOX = "inbox"
+#: The keys that make a dict inline content rather than an argument of some other shape.
+_CONTENT_KEYS = frozenset({"base64", "text", "bytes", "url", "content"})
 
 
 # -- a workspace nobody outside this process can name ------------------------------------------
@@ -101,13 +105,14 @@ class MemoryWorkspace(LocalWorkspace):
     #: Nothing written here outlives the call (`AgentContext.ephemeral`).
     ephemeral = True
 
-    def __init__(self, prefix: str = "b2s-agent-") -> None:
+    def __init__(self, prefix: str) -> None:
+        """`prefix`: how the temporary directory's name starts (`b2s-agent-` for a context's)."""
         self._temp = Path(tempfile.mkdtemp(prefix=prefix))
         super().__init__(self._temp)
 
     def put(self, name: str, data: bytes | str) -> str:
         """Write one file in and return the ref that names it from here on."""
-        raw = data.encode("utf-8") if isinstance(data, str) else bytes(data)
+        raw = data.encode("utf-8") if isinstance(data, str) else data
         return self.write_bytes(_safe_name(name), raw)
 
     def get(self, ref: str) -> bytes:
@@ -119,13 +124,21 @@ class MemoryWorkspace(LocalWorkspace):
     def __enter__(self) -> "MemoryWorkspace":
         return self
 
-    def __exit__(self, *exc: Any) -> None:
+    def __exit__(self, *exc: object) -> None:
         self.close()
 
 
 # -- coming in ---------------------------------------------------------------------------------
 
-def is_content(value: Any) -> bool:
+def _content_dict(value: object) -> dict[str, object] | None:
+    """`value` as a content dict - a mapping holding one of `_CONTENT_KEYS` - or None."""
+    if not isinstance(value, Mapping):
+        return None
+    fields: dict[str, object] = {str(k): v for k, v in value.items()}
+    return fields if _CONTENT_KEYS & set(fields) else None
+
+
+def is_content(value: object) -> bool:
     """Whether `take_in` would materialise this value rather than pass it through.
 
     A plain string is content only as a `data:` URI. Everything else that is a string - a ref, a
@@ -133,51 +146,64 @@ def is_content(value: Any) -> bool:
     """
     if isinstance(value, str):
         return bool(_DATA_URI.match(value))
-    return isinstance(value, Mapping) and bool(
-        {"base64", "text", "bytes", "url", "content"} & set(value))
+    return _content_dict(value) is not None
 
 
-def holds_content(value: Any) -> bool:
+def _items(value: object) -> list[object] | None:
+    """A list argument's items, or None when it is not a list."""
+    if isinstance(value, (list, tuple)):
+        items: list[object] = list(value)
+        return items
+    return None
+
+
+def holds_content(value: object) -> bool:
     """`is_content`, or a list with content among its items (`deck_adopt(fonts=[...])`)."""
-    return is_content(value) or (isinstance(value, (list, tuple)) and any(is_content(v) for v in value))
+    items = _items(value)
+    return is_content(value) or (items is not None and any(is_content(v) for v in items))
 
 
-def take_in(ws: Any, arguments: Mapping[str, Any],
-            fetch: Callable[[str], bytes] | None = None) -> dict[str, Any]:
+def take_in(ws: Workspace, arguments: Mapping[str, object],
+            fetch: Fetch | None) -> dict[str, object]:
     """Materialise every inline argument into the workspace; return the arguments with refs.
 
     Idempotent, and cheap when there is nothing to do: a call whose arguments are all plain
     strings walks the dict once and returns a copy. Runs *before* the schema check, so a
     content dict never has to be a publishable parameter type - by the time a tool's schema
     sees the argument it is the string ref the schema says it is. A list argument is taken in
-    item by item, so a list of files may mix refs and content.
+    item by item, so a list of files may mix refs and content. `fetch` opens a `{"url": ...}`
+    (the harness's own fetcher); None refuses one by name.
     """
-    out: dict[str, Any] = {}
-    for key, value in (arguments or {}).items():
+    out: dict[str, object] = {}
+    for key, value in arguments.items():
+        items = _items(value)
         if is_content(value):
             out[key] = _one(ws, key, value, fetch)
-        elif holds_content(value):
+        elif items is not None and holds_content(value):
             # numbered, so that two items sent with no name are not one file
             out[key] = [_one(ws, f"{key}-{i}", v, fetch) if is_content(v) else v
-                        for i, v in enumerate(value, 1)]
+                        for i, v in enumerate(items, 1)]
         else:
             out[key] = value
     return out
 
 
-def _one(ws: Any, key: str, value: Any, fetch: Callable[[str], bytes] | None) -> str:
+def _one(ws: Workspace, key: str, value: object, fetch: Fetch | None) -> str:
     name, raw = content_bytes(key, value, fetch)
     return ws.write_bytes(f"{INBOX}/{_safe_name(name)}", raw)
 
 
-def content_bytes(key: str, value: Any,
-                  fetch: Callable[[str], bytes] | None = None) -> tuple[str, bytes]:
+def content_bytes(key: str, value: object, fetch: Fetch | None) -> tuple[str, bytes]:
     """One inline value as `(filename, bytes)`. Refuses with `bad_request` and says what it wanted."""
     if isinstance(value, str):
         return _from_data_uri(key, value)
-    if not isinstance(value, Mapping):                          # `is_content` already said no
+    fields = _content_dict(value)
+    if fields is None:                                          # `is_content` already said no
         raise Refused("bad_request", f"{key} is not inline content.", parameter=key)
+    return _from_fields(key, fields, fetch)
 
+
+def _from_fields(key: str, value: dict[str, object], fetch: Fetch | None) -> tuple[str, bytes]:
     name = str(value.get("name") or "").strip()
     if "url" in value and not {"base64", "text", "bytes", "content"} & set(value):
         return _from_url(key, str(value["url"]), name, fetch)
@@ -210,7 +236,8 @@ def content_bytes(key: str, value: Any,
     else:                                                       # unreachable via `is_content`
         raise Refused("bad_request", f"{key} carries no content.", parameter=key)
 
-    return (name or _named(key, value.get("mime") or value.get("type"), raw)), raw
+    mime = value.get("mime") or value.get("type")
+    return (name or _named(key, mime if isinstance(mime, str) else None, raw)), raw
 
 
 def _from_data_uri(key: str, uri: str) -> tuple[str, bytes]:
@@ -231,8 +258,7 @@ def _from_data_uri(key: str, uri: str) -> tuple[str, bytes]:
     return _named(key, mime, raw), raw
 
 
-def _from_url(key: str, url: str, name: str,
-              fetch: Callable[[str], bytes] | None) -> tuple[str, bytes]:
+def _from_url(key: str, url: str, name: str, fetch: Fetch | None) -> tuple[str, bytes]:
     if fetch is None:
         raise Refused("bad_request",
                       f"{key} was given a url ({url}) and this context has no fetcher, so "
@@ -240,18 +266,21 @@ def _from_url(key: str, url: str, name: str,
                       f"context a `fetch` that knows which hosts it is allowed to reach.",
                       parameter=key, url=url)
     try:
-        raw = fetch(url)
+        # the harness's own code: what it answers is checked, whatever its signature promised
+        got: object = fetch(url)
     except Refused:
         raise
     except Exception as exc:
         raise Refused("not_found", f"{key}: {url} could not be fetched "
                                    f"({type(exc).__name__}: {exc}).",
                       parameter=key, url=url) from None
-    if not isinstance(raw, (bytes, bytearray)):
-        raise Refused("failed", f"the context's fetch returned {type(raw).__name__}, not bytes.",
+    if isinstance(got, bytearray):
+        got = bytes(got)
+    if not isinstance(got, bytes):
+        raise Refused("failed", f"the context's fetch returned {type(got).__name__}, not bytes.",
                       parameter=key)
     tail = Path(url.split("?", 1)[0].split("#", 1)[0]).name
-    return (name or tail or _named(key, None, bytes(raw))), bytes(raw)
+    return (name or tail or _named(key, None, got)), got
 
 
 def _named(key: str, mime: str | None, raw: bytes) -> str:
@@ -285,45 +314,53 @@ def _safe_name(name: str) -> str:
     `Workspace.resolve` refuses anything outside the root anyway; this is so that a name a model
     invented cannot land the file somewhere surprising *inside* it either.
     """
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(str(name)).name).strip("-.")
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", Path(name).name).strip("-.")
     return cleaned or "content.bin"
 
 
 # -- going out ---------------------------------------------------------------------------------
 
-def deliver(ws: Any, result: Result, *, limit: int = INLINE_LIMIT,
-            budget: int = INLINE_BUDGET) -> Result:
-    """Put each artifact's own content into it, so a harness never has to open a file.
+def deliver(ws: Workspace, result: Result, *, limit: int, budget: int) -> Result:
+    """`result` with each artifact's own content in it, so a harness never has to open a file.
 
     Text arrives as `text`, everything else as `base64`; every artifact carries its size and
     sha256 whether or not its content fitted. What did not fit says so (`truncated`) and is read
     with `workspace.read_bytes(ref)` - the ref being a name the harness hands back, not a path
-    it has to resolve. Folders are named and never inlined.
+    it has to resolve. Folders are named and never inlined. `limit` caps one artifact and
+    `budget` the call (`INLINE_LIMIT`, `INLINE_BUDGET` unless the context says otherwise).
     """
     spent = 0
+    delivered: list[Artifact] = []
     for art in result.artifacts:
-        try:
-            path = ws.resolve(art.ref)
-        except Exception:                                       # a ref outside, or gone
+        raw = _readable(ws, art.ref)
+        if raw is None:
+            delivered.append(art)
             continue
-        if path.is_dir() or not path.exists():
-            continue
-        try:
-            raw = path.read_bytes()
-        except OSError:
-            continue
-        art.bytes = len(raw)
-        art.sha256 = hashlib.sha256(raw).hexdigest()
+        sized = dataclasses.replace(art, bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest())
         if len(raw) > limit or spent + len(raw) > budget:
-            art.truncated = True
+            delivered.append(dataclasses.replace(sized, truncated=True))
             continue
         text = _as_text(art.kind, raw)
         if text is None:
-            art.base64 = _b64.b64encode(raw).decode("ascii")
+            delivered.append(dataclasses.replace(sized, base64=_b64.b64encode(raw).decode("ascii")))
         else:
-            art.text = text
+            delivered.append(dataclasses.replace(sized, text=text))
         spent += len(raw)
-    return result
+    return dataclasses.replace(result, artifacts=delivered)
+
+
+def _readable(ws: Workspace, ref: str) -> bytes | None:
+    """The file a ref names, or None for a folder, a ref outside, or a file that is gone."""
+    try:
+        path = ws.resolve(ref, write=False)
+    except Exception:                                           # a ref outside, or gone
+        return None
+    if path.is_dir() or not path.exists():
+        return None
+    try:
+        return path.read_bytes()
+    except OSError:
+        return None
 
 
 def _as_text(kind: str, raw: bytes) -> str | None:
@@ -350,9 +387,14 @@ def _mostly_printable(text: str) -> bool:
     return odd / len(sample) < 0.01
 
 
-def inline_artifact(ws: Any, ref: str, kind: str = "", description: str = "",
-                    *, limit: int = INLINE_LIMIT) -> Artifact:
-    """One artifact with its content in it: what a harness calls to fetch what did not fit."""
-    art = Artifact(ref=ref, kind=kind, description=description)
-    deliver(ws, Result(tool="", artifacts=[art]), limit=limit, budget=limit)
-    return art
+def inline_artifact(ws: Workspace, ref: str, kind: str, description: str,
+                    *, limit: int) -> Artifact:
+    """One artifact with its content in it: what a harness calls to fetch what did not fit.
+
+    `kind` may be "" (the bytes decide whether it is text), and `limit` is the cap it may now
+    exceed the call's one by (`INLINE_LIMIT` is the default cap)."""
+    art = Artifact.named(ref=ref, kind=kind, description=description)
+    carried = deliver(ws, Result(tool="", ok=True, code=None, summary="", data={}, artifacts=[art],
+                                 diagnostics=[], next_steps=[], seconds=0.0),
+                      limit=limit, budget=limit)
+    return carried.artifacts[0]

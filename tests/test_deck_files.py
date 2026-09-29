@@ -16,6 +16,7 @@ import pytest
 from beamer2slides import adopt, deck_files, fontfetch
 from beamer2slides.deck_files import Recording, gather, replay
 
+from .json_reads import at
 from .test_adopt import text_shape
 from .test_adopt_media import VARIABLE_META, cat_deck, png_bytes, tiny_font
 
@@ -310,7 +311,7 @@ def test_the_agent_adopts_the_files_as_one_zip_with_no_google(tmp_path, monkeypa
     res = deck_adopt(AgentContext.offline(ws), tex="main.tex",
                      deck={"base64": base64.b64encode(buf.getvalue()).decode()})
     assert res.ok, res.json()
-    assert res.data["local_target"] and res.data["offline"]["pictures"]["count"] == 1
+    assert res.data["local_target"] and at(res.data, "offline", "pictures", "count") == 1
     [el] = [e for e in seen["target"]["slides"][0]["elements"] if not e.get("inherited")]
     assert Path(el["file"]).read_bytes() == cat
     assert "https://example.invalid/cat.png" not in asked

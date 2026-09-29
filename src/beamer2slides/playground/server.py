@@ -45,10 +45,13 @@ import time
 import traceback
 import urllib.parse
 import uuid
+from collections.abc import Mapping
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from ..json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
+from ..typing_compat import override
 from . import workbench
 
 STATIC = Path(__file__).parent / "static"
@@ -133,14 +136,20 @@ def examples() -> dict[str, tuple[Path, str]]:
 class Job:
     def __init__(self, jid: str, folder: Path):
         self.id, self.dir = jid, folder
-        self.state, self.error, self.log = "queued", None, ""
+        self.state, self.log = "queued", ""
+        self.error: str | None = None
         self.timings: dict[str, float] = {}
-        self.result: dict | None = None
+        self.result: JsonObject | None = None
         self.slides_url: str | None = None
 
-    def view(self) -> dict:
+    def view(self) -> JsonObject:
         return {"id": self.id, "state": self.state, "error": self.error, "log": self.log[-6000:],
-                "timings": self.timings, "result": self.result, "slides_url": self.slides_url}
+                "timings": dict[str, Json](self.timings), "result": self.result,
+                "slides_url": self.slides_url}
+
+
+#: What the worker takes off the queue: the job, and its talk as TeX or as a PDF.
+Queued = tuple[Job, str | None, bytes | None]
 
 
 class Playground:
@@ -148,7 +157,7 @@ class Playground:
         self.jobs: dict[str, Job] = {}
         self.lock = threading.Lock()
         self.google_lock = threading.Lock()   # one Google conversion at a time (to_slides)
-        self.queue: queue.Queue = queue.Queue()
+        self.queue: queue.Queue[Queued] = queue.Queue()
         # One folder per port: the sweep below must not take the jobs of another server running beside this one.
         self.root = jobs_root() / str(port)
         self.root.mkdir(parents=True, exist_ok=True)
@@ -229,13 +238,13 @@ class Playground:
         pdf, raw, deck = cmd_classify(pdf, out, "last", "warn")
         t = self.stage(job, "extract + classify", t)
         job.state = "rendering"
-        render_backgrounds(pdf, raw, deck, out, frozenset())
+        render_backgrounds(pdf, raw, deck, out, frozenset())      # (no adopt base: no kept shapes)
         (out / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
         t = self.stage(job, "render", t)
         page_pngs(pdf, deck, out / "pages")
         job.result = summary(deck, pages)
 
-    def to_slides(self, job: Job, token: str | None = None) -> str:
+    def to_slides(self, job: Job, token: str | None) -> str:
         """Build the deck. `token`: a visitor's access token, which goes no further than this call.
 
         One conversion runs at a time. `google_auth.use_provider` is per context now, so it is
@@ -247,7 +256,7 @@ class Playground:
         from ..google_auth import use_provider
         from google.oauth2.credentials import Credentials
         out = job.dir / "out"
-        deck = json.loads((out / "deck.json").read_text(encoding="utf-8"))
+        deck = _read_json(out / "deck.json")
         source = next(job.dir.glob("*.pdf"))
         creds = Credentials(token=token, scopes=WEB_SCOPES) if token else None
         buf = io.StringIO()
@@ -282,54 +291,78 @@ def compile_tex(job: Job, tex: str) -> Path:
         raise JobError("no TeX distribution on this server: upload a compiled PDF instead")
     (job.dir / "talk.tex").write_text(tex, encoding="utf-8")
     try:              # a fresh folder, so the second run settles navigation and the third is rare
-        return workbench.run_latex(job.dir, "talk.tex", engines, TEX_TIMEOUT)
+        return workbench.run_latex(job.dir, "talk.tex", engines, TEX_TIMEOUT, workbench.TEX_PASSES)
     except workbench.TexError as e:
         raise JobError(str(e)) from None
 
 
-def page_pngs(pdf: Path, deck: dict, folder: Path) -> None:
+def _read_json(path: Path) -> JsonObject:
+    read: Json = json.loads(path.read_text(encoding="utf-8"))
+    return as_object(read, str(path))
+
+
+def page_pngs(pdf: Path, deck: JsonObject, folder: Path) -> None:
     from PIL import Image
     from ..pdf import Document
     folder.mkdir(parents=True, exist_ok=True)
     doc = Document(pdf)
     try:
-        for s in deck["slides"]:
-            page = doc[s["page"]]
+        for s in as_objects(deck["slides"], "deck.json's slides"):
+            number = as_int(s["page"], "a slide's page")
+            page = doc[number]
             Image.fromarray(page.render(PAGE_PX / page.width)).convert("RGB").save(
-                folder / f"page-{s['page'] + 1:03}.png")
+                folder / f"page-{number + 1:03}.png")
     finally:
         doc.close()
 
 
-def run_text(runs: list[dict]) -> str:
-    return "".join(r.get("text", "") for r in runs)
+def run_text(runs: Json) -> str:
+    """A paragraph's words: `runs` as deck.json has them, a list of runs each with its `text`."""
+    return "".join(as_str(r.get("text", ""), "a run's text")
+                   for r in as_objects(runs, "a paragraph's runs"))
 
 
-def label_of(el: dict) -> str:
+def _paragraphs(holder: JsonObject, where: str) -> list[JsonObject]:
+    return as_objects(holder.get("paragraphs", []), where)
+
+
+def label_of(el: JsonObject) -> str:
     """A few words saying what an element is, for the page's tooltips."""
     if el["kind"] == "text":
-        return " / ".join(run_text(p["runs"]) for p in el.get("paragraphs", []))[:140]
+        return " / ".join(run_text(p["runs"]) for p in _paragraphs(el, "a text's paragraphs"))[:140]
     if el["kind"] == "table":
-        return f"{len(el['cells'])} rows × {len(el['columns'])} columns"
+        rows = as_array(el["cells"], "a table's cells")
+        columns = as_array(el["columns"], "a table's columns")
+        return f"{len(rows)} rows × {len(columns)} columns"
     if el["kind"] == "diagram":
-        return f"{len(el['nodes'])} nodes, {len(el['lines'])} lines: " + \
-            ", ".join(run_text(p) for n in el["nodes"] for p in n.get("paragraphs", []))[:100]
+        nodes = as_objects(el["nodes"], "a diagram's nodes")
+        # A node's paragraph is its list of runs (`ir.Node`), a text box's a record of them.
+        lines = as_array(el["lines"], "a diagram's lines")
+        return f"{len(nodes)} nodes, {len(lines)} lines: " + \
+            ", ".join(run_text(p) for n in nodes
+                      for p in as_array(n.get("paragraphs", []), "a node's paragraphs"))[:100]
     if el["kind"] == "shape":
-        return f"{el.get('shape', '').lower()} {el.get('fill') or ''}"
-    return el.get("role") or ""
+        shape = as_str(el.get("shape", ""), "a shape's shape")
+        return f"{shape.lower()} {el.get('fill') or ''}"
+    return as_str(el.get("role") or "", "an element's role")
 
 
-def summary(deck: dict, pages: int) -> dict:
-    slides = []
-    for s in deck["slides"]:
-        n = f"{s['page'] + 1:03}"
+def summary(deck: JsonObject, pages: int) -> JsonObject:
+    slides: list[Json] = []
+    for s in as_objects(deck["slides"], "deck.json's slides"):
+        page = as_int(s["page"], "a slide's page")
+        n = f"{page + 1:03}"
         slides.append({
             "page": s["page"], "frame": s.get("frame"), "size": s["size"],
             "files": {"page": f"pages/page-{n}.png", "debug": f"debug/slide-{n}.png",
                       "background": s.get("background")},
-            "elements": [{"id": e["id"], "kind": e["kind"], "role": e.get("role"), "bbox": e["bbox"],
-                          "label": label_of(e)} for e in s["elements"]],
-            "left": [{"reason": l["reason"], "spans": len(l["spans"])} for l in s.get("left_in_background", [])],
+            "elements": list[Json]([{"id": e["id"], "kind": e["kind"], "role": e.get("role"),
+                                     "bbox": e["bbox"], "label": label_of(e)}
+                                    for e in as_objects(s["elements"], "a slide's elements")]),
+            "left": list[Json]([{"reason": l["reason"],
+                                 "spans": len(as_array(l["spans"], "left_in_background's spans"))}
+                                for l in as_objects(s.get("left_in_background", []),
+                                                    "a slide's left_in_background")]),
             "notes": s.get("notes")})
     return {"pages": pages, "stats": deck.get("stats", {}), "slides": slides}
 
@@ -340,35 +373,36 @@ class Handler(BaseHTTPRequestHandler):
     app: Playground
     server_version = "beamer2slides-playground"
 
-    def log_message(self, fmt, *args):
+    @override
+    def log_message(self, format: str, *args: object) -> None:
         # stderr: a job's stages print while the worker holds stdout (redirect_stdout is process-wide)
-        sys.stderr.write(f"{self.address_string()} {fmt % args}\n")
+        sys.stderr.write(f"{self.address_string()} {format % args}\n")
 
-    def send(self, body: bytes, ctype: str, status: int = 200, cache: bool = False,
-             headers: dict | None = None) -> None:
+    def send(self, body: bytes, ctype: str, status: int, cache: bool,
+             headers: Mapping[str, str]) -> None:
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "max-age=3600" if cache else "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        for name, value in (headers or {}).items():
+        for name, value in headers.items():
             self.send_header(name, value)
         self.end_headers()
         self.wfile.write(body)
 
-    def json(self, data, status: int = 200) -> None:
-        self.send(json.dumps(data, ensure_ascii=False).encode(), "application/json", status)
+    def json(self, data: Json, status: int) -> None:
+        self.send(json.dumps(data, ensure_ascii=False).encode(), "application/json", status, False, {})
 
-    def file(self, base: Path, rel: str, cache: bool = False) -> None:
+    def file(self, base: Path, rel: str, cache: bool) -> None:
         path = (base / rel).resolve()
         if not path.is_relative_to(base.resolve()) or not path.is_file():
             return self.json({"error": "not found"}, 404)
         ctype = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        self.send(path.read_bytes(), ctype, cache=cache)
+        self.send(path.read_bytes(), ctype, 200, cache, {})
 
     # ---- the workbench: a folder per visitor and the journeys run in it (workbench.py)
 
-    def query(self) -> dict:
+    def query(self) -> dict[str, str]:
         # Blank values are kept: `&version=` is a page saying "there was nothing of that
         # name when I read it", which is not the same as naming no version at all.
         return {k: v[0] for k, v in
@@ -385,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
     def bench_route(self, method: str, path: str, body: bytes) -> None:
         bench = self.app.bench
         if path == "/api/tools" and method == "GET":
-            return self.json(workbench.catalogue())
+            return self.json(workbench.catalogue(), 200)
         if path == "/api/ws" and method == "POST":
             return self.json({"id": bench.open().id}, 201)
         m = re.fullmatch(r"/api/ws/([0-9a-f]{12})(?:/(file|runs)(?:/(\w+))?)?", path)
@@ -394,7 +428,7 @@ class Handler(BaseHTTPRequestHandler):
         session = bench.get(m.group(1))
         part, rest = m.group(2), m.group(3)
         if part is None and method == "GET":
-            return self.json(session.view())
+            return self.json(session.view(), 200)
         if part == "file":
             ref = self.query().get("path", "")
             if method == "GET":
@@ -403,13 +437,13 @@ class Handler(BaseHTTPRequestHandler):
                 # file is merged with what the run wrote, not refused and not reverted.
                 here, data, stamp = bench.read(session, ref)
                 ctype = mimetypes.guess_type(here.name)[0] or "application/octet-stream"
-                return self.send(data, ctype, headers={"X-B2S-Version": stamp})
+                return self.send(data, ctype, 200, False, {"X-B2S-Version": stamp})
             if method == "PUT":
                 return self.json(bench.write(session, ref, body,
-                                             self.query().get("version")))
+                                             self.query().get("version")), 200)
             if method == "DELETE":
                 bench.remove(session, ref)
-                return self.json({"deleted": ref})
+                return self.json({"deleted": ref}, 200)
         if part == "runs":
             if method == "POST" and not rest:
                 return self.json({"id": self.start_run(session, body).id}, 201)
@@ -417,68 +451,69 @@ class Handler(BaseHTTPRequestHandler):
                 run = session.runs.get(rest)
                 if run is None:
                     return self.json({"error": "no such run"}, 404)
-                return self.json(run.view(int(self.query().get("since") or 0)))
+                return self.json(run.view(int(self.query().get("since") or 0)), 200)
         return self.json({"error": "not found"}, 404)
 
-    def start_run(self, session, body: bytes):
+    def start_run(self, session: workbench.Session, body: bytes) -> workbench.Run:
         """One journey, asked for by name. The token, where there is one, goes no further than
         the child process it is handed to on stdin."""
-        try:
-            asked = json.loads(body or b"{}")
-            tool, args = asked.get("tool"), asked.get("args") or {}
-        except (ValueError, AttributeError):
-            tool, args = None, None
+        asked = _json_body(body)
+        tool, args = asked.get("tool"), asked.get("args") or {}
         if not isinstance(tool, str) or not isinstance(args, dict):
-            raise workbench.Denied('send {"tool": ..., "args": {...}}')
-        mode, token = google_mode(), asked.get("access_token")
+            raise workbench.Denied('send {"tool": ..., "args": {...}}', 400)
+        mode, given = google_mode(), asked.get("access_token")
+        token = given if isinstance(given, str) else None
         if not workbench.needs_google(tool):
             token = None                        # a local journey carries nobody's credentials
-        elif mode == "signin" and not isinstance(token, str):
+        elif mode == "signin" and token is None:
             raise workbench.Denied("sign in with Google first", 401)
         return self.app.bench.start(session, tool, args, mode=mode, token=token)
 
     # ---- routes
 
-    def do_GET(self):
+    def do_GET(self) -> None:
         path = self.path.split("?")[0]
         if path == "/api/tools" or path == "/api/ws" or path.startswith("/api/ws/"):
             return self.bench("GET", path, b"")
         if path == "/":
-            return self.file(STATIC, "index.html")
+            return self.file(STATIC, "index.html", False)
         # A published OAuth app must show the visitor a privacy policy, on its own domain.
         if path == "/privacy":
-            return self.file(STATIC, "privacy.html")
+            return self.file(STATIC, "privacy.html", False)
         if path.startswith("/static/"):
-            return self.file(STATIC, path[len("/static/"):])
+            return self.file(STATIC, path[len("/static/"):], False)
         if path.startswith("/media/"):
-            return self.file(MEDIA, path[len("/media/"):], cache=True)
+            return self.file(MEDIA, path[len("/media/"):], True)
         if path == "/api/config":
-            return self.json({"engines": tex_engines(), "google": google_mode(),
+            offered: list[Json] = [{"name": n, "about": a, "pdf": t.with_suffix(".pdf").is_file()}
+                                   for n, (t, a) in examples().items()]
+            gallery: list[Json] = [{"file": f, "caption": c} for f, c in GALLERY if (MEDIA / f).exists()]
+            return self.json({"engines": list[Json](tex_engines()), "google": google_mode(),
                               "google_client_id": google_client_id(), "google_scopes": " ".join(WEB_SCOPES),
                               "google_api_key": google_api_key(), "max_pages": MAX_PAGES,
-                              "examples": [{"name": n, "about": a, "pdf": t.with_suffix(".pdf").is_file()}
-                                           for n, (t, a) in examples().items()],
-                              "gallery": [{"file": f, "caption": c} for f, c in GALLERY if (MEDIA / f).exists()]})
+                              "examples": offered, "gallery": gallery}, 200)
         m = re.fullmatch(r"/api/example/([\w-]+)\.(tex|pdf)", path)
         if m:
-            tex = examples().get(m.group(1), (None,))[0]
-            wanted = tex.with_suffix("." + m.group(2)) if tex else None
+            example = examples().get(m.group(1))
+            wanted = example[0].with_suffix("." + m.group(2)) if example else None
             if wanted is None or not wanted.is_file():
                 return self.json({"error": "no such example"}, 404)
-            return self.send(wanted.read_bytes(), "text/plain; charset=utf-8" if m.group(2) == "tex" else "application/pdf")
+            return self.send(wanted.read_bytes(),
+                             "text/plain; charset=utf-8" if m.group(2) == "tex" else "application/pdf",
+                             200, False, {})
         m = re.fullmatch(r"/api/jobs/(\w+)(?:/files/(.+)|/(source))?", path)
         if m:
             job = self.app.jobs.get(m.group(1))
             if job is None:
                 return self.json({"error": "no such job"}, 404)
             if m.group(3):
-                return self.file(job.dir, "talk.tex")
+                return self.file(job.dir, "talk.tex", False)
             if m.group(2):
-                return self.file(job.dir / "out", m.group(2), cache=True)
-            return self.json(job.view())
+                return self.file(job.dir / "out", m.group(2), True)
+            return self.json(job.view(), 200)
         self.json({"error": "not found"}, 404)
 
-    def do_POST(self):
+    def do_POST(self) -> None:
         path = self.path.split("?")[0]
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_UPLOAD:
@@ -487,18 +522,17 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/ws" or path.startswith("/api/ws/"):
             return self.bench("POST", path, body)
         if path == "/api/jobs":
-            tex = pdf = None
+            tex: str | None = None
+            pdf: bytes | None = None
             if (self.headers.get("Content-Type") or "").startswith("application/pdf"):
                 if not body.startswith(b"%PDF"):
                     return self.json({"error": "that is not a PDF"}, 400)
                 pdf = body
             else:
-                try:
-                    tex = json.loads(body or b"{}").get("tex")
-                except (ValueError, AttributeError):
-                    pass
-                if not isinstance(tex, str) or not tex.strip():
+                sent = _json_body(body).get("tex")
+                if not isinstance(sent, str) or not sent.strip():
                     return self.json({"error": "send {\"tex\": ...} or a PDF"}, 400)
+                tex = sent
             try:
                 return self.json({"id": self.app.submit(tex, pdf).id}, 201)
             except Busy as e:
@@ -511,16 +545,14 @@ class Handler(BaseHTTPRequestHandler):
             mode = google_mode()
             if mode is None:
                 return self.json({"error": "this server does not convert into Google Slides"}, 403)
-            token = None
+            token: str | None = None
             if mode == "signin":
-                try:
-                    token = json.loads(body or b"{}").get("access_token")
-                except ValueError:
-                    token = None
-                if not isinstance(token, str) or not token:
+                given = _json_body(body).get("access_token")
+                if not isinstance(given, str) or not given:
                     return self.json({"error": "sign in with Google first"}, 401)
+                token = given
             try:
-                return self.json({"url": job.slides_url or self.app.to_slides(job, token)})
+                return self.json({"url": job.slides_url or self.app.to_slides(job, token)}, 200)
             except Exception as e:
                 # Never echo the token back, whatever the library put in the message.
                 message = f"{type(e).__name__}: {e}"
@@ -530,18 +562,28 @@ class Handler(BaseHTTPRequestHandler):
                                   "signin": status == 401}, status)
         self.json({"error": "not found"}, 404)
 
-    def do_PUT(self):
+    def do_PUT(self) -> None:
         length = int(self.headers.get("Content-Length") or 0)
         if length > MAX_UPLOAD:
             return self.json({"error": f"over {MAX_UPLOAD // 2**20} MB"},
                              HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
         self.bench("PUT", self.path.split("?")[0], self.rfile.read(length))
 
-    def do_DELETE(self):
+    def do_DELETE(self) -> None:
         self.bench("DELETE", self.path.split("?")[0], b"")
 
 
-def serve(host: str = "127.0.0.1", port: int = 7860) -> None:
+def _json_body(body: bytes) -> JsonObject:
+    """A request's JSON object, or an empty one where the body is not one: every route then
+    finds its field missing and says what it wants."""
+    try:
+        sent: Json = json.loads(body or b"{}")
+    except ValueError:
+        return {}
+    return sent if isinstance(sent, dict) else {}
+
+
+def serve(host: str, port: int) -> None:
     httpd = ThreadingHTTPServer((host, port), Handler)     # first: a port in use fails before any sweep
     Handler.app = Playground(port)
     print(f"beamer2slides playground on http://{host}:{port}/  (TeX: {', '.join(tex_engines()) or 'none'};"

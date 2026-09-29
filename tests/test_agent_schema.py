@@ -10,10 +10,13 @@ tools written in this file, which is also the only way to test the refusal paths
 Offline, no Google, no files touched.
 """
 
+from pathlib import Path
 import asyncio
+import importlib.util
 import sys
+from collections.abc import Awaitable, Callable, Sequence
 from types import ModuleType
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
 import pytest
 
@@ -21,27 +24,32 @@ from beamer2slides.agent import mcp, schema
 from beamer2slides.agent.context import (LOCAL_ONLY, READ_ONLY, AgentContext, Job, tool)
 from beamer2slides.agent.types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Refused
 from beamer2slides.agent.workspace import LocalWorkspace
+from beamer2slides.json_types import JsonObject
+
+if TYPE_CHECKING:
+    from google.auth.credentials import Credentials
 
 
 class _Available:
     """A credential source that has an account, so the gate answers about permission."""
 
-    def credentials(self):
-        return object()
+    def credentials(self) -> "Credentials":
+        from google.oauth2.credentials import Credentials as UserCredentials
+        return UserCredentials(token=None)
 
-    def describe(self):
+    def describe(self) -> JsonObject:
         return {"available": True, "source": "test"}
 
 
 # -- the stubs ---------------------------------------------------------------------------------
 
-@tool("stub_inspect", needs=(READS,))
+@tool("stub_inspect", needs=(READS,), local=None)
 def stub_inspect(j: Job,
                  pdf: Annotated[str, "The PDF to look at, as a workspace-relative path."],
                  pages: Annotated[int, "How many pages to read."] = 3,
                  deep: Annotated[bool, "Classify as well as extract."] = False,
                  out: Annotated[str | None, "Where to write the report; omitted means nowhere."] = None,
-                 only: Annotated[list[str], "Element kinds to keep."] = (),
+                 only: Annotated[Sequence[str], "Element kinds to keep."] = (),
                  ) -> None:
     """Look at a PDF and say what is in it.
 
@@ -51,7 +59,7 @@ def stub_inspect(j: Job,
     j.data = {"pdf": pdf, "pages": pages, "deep": deep, "out": out, "only": list(only)}
 
 
-@tool("stub_sync", needs=(READS, WRITES, READS_GOOGLE, WRITES_GOOGLE))
+@tool("stub_sync", needs=(READS, WRITES, READS_GOOGLE, WRITES_GOOGLE), local=None)
 def stub_sync(j: Job,
               pdf: Annotated[str, "The recompiled PDF."],
               deck: Annotated[str, "A Slides URL, an id, or an out folder."],
@@ -61,7 +69,7 @@ def stub_sync(j: Job,
     j.summary = f"{pdf} -> {deck}"
 
 
-@tool("stub_refuses", needs=(READS,))
+@tool("stub_refuses", needs=(READS,), local=None)
 def stub_refuses(j: Job,
                  deck: Annotated[str, "The deck that will be refused."],
                  ) -> None:
@@ -69,7 +77,7 @@ def stub_refuses(j: Job,
     raise Refused("deck_edited", f"{deck} was edited in Slides.", slides=[4])
 
 
-@tool("stub_local_write", needs=(READS, WRITES))
+@tool("stub_local_write", needs=(READS, WRITES), local=None)
 def stub_local_write(j: Job) -> None:
     """Write a file and nothing else; takes no parameters at all."""
     j.summary = "wrote nothing, being a stub"
@@ -80,7 +88,7 @@ STUBS = {"stub_inspect": stub_inspect, "stub_sync": stub_sync,
 
 
 @pytest.fixture
-def ctx(tmp_path) -> AgentContext:
+def ctx(tmp_path: Path) -> AgentContext:
     return AgentContext.offline(tmp_path)
 
 
@@ -128,7 +136,7 @@ def test_a_tool_with_no_parameters_publishes_an_empty_object():
 
 
 def test_a_parameter_with_no_description_is_refused_by_name():
-    @tool("stub_bare", needs=(READS,))
+    @tool("stub_bare", needs=(READS,), local=None)
     def stub_bare(j: Job, pdf: str) -> None:
         """A tool whose author forgot the description."""
 
@@ -139,7 +147,7 @@ def test_a_parameter_with_no_description_is_refused_by_name():
 
 
 def test_an_empty_description_is_refused_too():
-    @tool("stub_empty", needs=(READS,))
+    @tool("stub_empty", needs=(READS,), local=None)
     def stub_empty(j: Job, pdf: Annotated[str, "   "]) -> None:
         """A tool whose description is whitespace."""
 
@@ -149,8 +157,8 @@ def test_an_empty_description_is_refused_too():
 
 
 def test_a_type_this_layer_cannot_publish_is_refused_by_name():
-    @tool("stub_odd", needs=(READS,))
-    def stub_odd(j: Job, when: Annotated[dict, "A dict, which no tool takes."]) -> None:
+    @tool("stub_odd", needs=(READS,), local=None)
+    def stub_odd(j: Job, when: Annotated[dict[str, str], "A dict, which no tool takes."]) -> None:
         """A tool with a parameter this layer does not publish."""
 
     with pytest.raises(schema.SchemaError) as caught:
@@ -159,7 +167,7 @@ def test_a_type_this_layer_cannot_publish_is_refused_by_name():
 
 
 def test_a_tool_with_no_docstring_is_refused():
-    @tool("stub_mute", needs=(READS,))
+    @tool("stub_mute", needs=(READS,), local=None)
     def stub_mute(j: Job) -> None:
         pass
 
@@ -187,7 +195,7 @@ def test_describe_reports_google_and_writing_per_tool():
 
 
 def test_a_google_reader_counts_as_touching_google_without_writing():
-    @tool("stub_fetch", needs=(READS, READS_GOOGLE))
+    @tool("stub_fetch", needs=(READS, READS_GOOGLE), local=None)
     def stub_fetch(j: Job) -> None:
         """Read a deck and change nothing."""
 
@@ -271,7 +279,7 @@ def test_no_arguments_at_all_is_a_missing_required_argument():
     ({"pdf": "a.pdf", "only": "titles"}, "only"),      # a bare string is not a list
     ({"pdf": "a.pdf", "only": [1]}, "only[0]"),
 ])
-def test_a_value_of_the_wrong_type_is_refused_naming_the_parameter(arguments, parameter):
+def test_a_value_of_the_wrong_type_is_refused_naming_the_parameter(arguments: dict[str, object], parameter: str):
     with pytest.raises(Refused) as caught:
         schema.validate(stub_inspect, arguments)
     assert caught.value.code == "bad_request"
@@ -287,21 +295,21 @@ def test_an_integral_float_becomes_an_integer():
 
 # -- dispatch ----------------------------------------------------------------------------------
 
-def test_dispatch_runs_a_tool_and_returns_its_result(ctx):
+def test_dispatch_runs_a_tool_and_returns_its_result(ctx: AgentContext):
     r = mcp.dispatch(ctx, "stub_inspect", {"pdf": "talk.pdf", "pages": 9}, STUBS)
     assert r.ok and r.tool == "stub_inspect"
     assert r.data["pdf"] == "talk.pdf" and r.data["pages"] == 9
     assert r.data["deep"] is False and r.data["out"] is None      # the body's own defaults
 
 
-def test_dispatch_refuses_an_unknown_tool_without_raising(ctx):
+def test_dispatch_refuses_an_unknown_tool_without_raising(ctx: AgentContext):
     r = mcp.dispatch(ctx, "deck_inspekt", {"pdf": "a.pdf"}, STUBS)
     assert not r.ok and r.code == "bad_request"
     assert "stub_inspect" in r.summary
     assert r.data["tools"] == sorted(STUBS)
 
 
-def test_dispatch_refuses_bad_arguments_without_raising(ctx):
+def test_dispatch_refuses_bad_arguments_without_raising(ctx: AgentContext):
     r = mcp.dispatch(ctx, "stub_inspect", {"pdf": "a.pdf", "nope": 1}, STUBS)
     assert not r.ok and r.code == "bad_request" and "nope" in r.summary
 
@@ -309,12 +317,12 @@ def test_dispatch_refuses_bad_arguments_without_raising(ctx):
     assert not missing.ok and missing.code == "bad_request"
 
 
-def test_dispatch_passes_a_tools_own_refusal_through(ctx):
+def test_dispatch_passes_a_tools_own_refusal_through(ctx: AgentContext):
     r = mcp.dispatch(ctx, "stub_refuses", {"deck": "talk"}, STUBS)
     assert not r.ok and r.code == "deck_edited" and r.data["slides"] == [4]
 
 
-def test_dispatch_is_gated_by_what_the_context_allows(tmp_path):
+def test_dispatch_is_gated_by_what_the_context_allows(tmp_path: Path):
     """A workspace with no account says `offline`; one that withholds permission, `forbidden`."""
     r = mcp.dispatch(AgentContext.offline(tmp_path), "stub_sync", {"pdf": "a.pdf", "deck": "x"},
                      STUBS)
@@ -326,7 +334,7 @@ def test_dispatch_is_gated_by_what_the_context_allows(tmp_path):
     assert not r.ok and r.code == "forbidden"
 
 
-def test_a_refused_result_is_an_mcp_error_with_the_whole_result_in_it(ctx):
+def test_a_refused_result_is_an_mcp_error_with_the_whole_result_in_it(ctx: AgentContext):
     r = mcp.dispatch(ctx, "stub_refuses", {"deck": "talk"}, STUBS)
     blocks, is_error = mcp.tool_response(r)
     assert is_error is True
@@ -338,21 +346,21 @@ def test_a_refused_result_is_an_mcp_error_with_the_whole_result_in_it(ctx):
 
 # -- the server's own setup --------------------------------------------------------------------
 
-def test_the_context_a_server_builds_honours_read_only_and_offline(tmp_path):
-    plain = mcp.build_context(tmp_path)
+def test_the_context_a_server_builds_honours_read_only_and_offline(tmp_path: Path):
+    plain = mcp.build_context(tmp_path, read_only=False, offline=False, progress=None, allow=None)
     assert plain.workspace.root == tmp_path.resolve()
     assert plain.permits(WRITES_GOOGLE)
 
-    read = mcp.build_context(tmp_path, read_only=True)
+    read = mcp.build_context(tmp_path, read_only=True, offline=False, progress=None, allow=None)
     assert read.allow == READ_ONLY and not read.permits(WRITES)
 
-    off = mcp.build_context(tmp_path, offline=True)
+    off = mcp.build_context(tmp_path, offline=True, read_only=False, progress=None, allow=None)
     assert not off.permits(READS_GOOGLE) and off.google.describe()["available"] is False
 
 
-def test_the_root_falls_back_to_the_environment(tmp_path, monkeypatch):
+def test_the_root_falls_back_to_the_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("B2S_AGENT_ROOT", str(tmp_path))
-    assert mcp.build_context().workspace.root == tmp_path.resolve()
+    assert mcp.build_context(root=None, read_only=False, offline=False, progress=None, allow=None).workspace.root == tmp_path.resolve()
 
 
 def test_instructions_are_there_even_before_the_registry_is():
@@ -363,39 +371,64 @@ def test_instructions_are_there_even_before_the_registry_is():
 class _Thing:
     """Any of the SDK's models: what it was handed, and nothing else."""
 
-    def __init__(self, **kw):
+    def __init__(self, **kw: object) -> None:
         self.__dict__.update(kw)
+
+
+#: A handler as the server hands it over: whatever it is called with, something to await.
+Handler = Callable[..., Awaitable[object]]
+
+
+def field(model: object, name: str) -> object:
+    """A field of one of the SDK's models (a `_Thing` here), which the server builds untyped."""
+    got: object = getattr(model, name)
+    return got
+
+
+def items(value: object) -> list[object]:
+    """A list the server answered with (its models, or a model's list field)."""
+    assert isinstance(value, list), f"{value!r} is no list"
+    listed: list[object] = list(value)
+    return listed
+
+
+def ran(awaited: Awaitable[object]) -> object:
+    """What a handler answers, run to the end (the server's own loop is never started)."""
+    async def wait() -> object:
+        return await awaited
+    return asyncio.run(wait())
 
 
 class _ServerV1:
     """The 1.x low-level server: the handlers arrive through decorators."""
 
-    made: list = []
+    made: ClassVar[list["_ServerV1"]] = []
 
-    def __init__(self, name, instructions=None):
-        self.name, self.instructions, self.handlers = name, instructions, {}
-        self.request_context = None                            # asked outside a request
+    def __init__(self, name: str, instructions: str) -> None:
+        self.name, self.instructions = name, instructions
+        self.handlers: dict[str, Handler] = {}
+        self.request_context: object = None                    # asked outside a request
         _ServerV1.made.append(self)
 
-    def _take(self, kind):
-        def deco(fn):
+    def _take(self, kind: str) -> Callable[[Handler], Handler]:
+        def deco(fn: Handler) -> Handler:
             self.handlers[kind] = fn
             return fn
         return deco
 
-    def list_tools(self):
+    def list_tools(self) -> Callable[[Handler], Handler]:
         return self._take("list_tools")
 
-    def call_tool(self):
+    def call_tool(self) -> Callable[[Handler], Handler]:
         return self._take("call_tool")
 
-    def list_resources(self):
+    def list_resources(self) -> Callable[[Handler], Handler]:
         return self._take("list_resources")
 
-    def read_resource(self):
+    def read_resource(self) -> Callable[[Handler], Handler]:
         return self._take("read_resource")
 
-    def create_initialization_options(self):
+    def create_initialization_options(self) -> JsonObject:
         return {}
 
 
@@ -403,20 +436,28 @@ class _ServerV2:
     """The 2.x low-level server: the handlers are constructor arguments, and there is no
     `list_tools` on the class at all - which is how `serve` tells the two apart."""
 
-    made: list = []
+    made: ClassVar[list["_ServerV2"]] = []
 
-    def __init__(self, name, *, instructions=None, on_list_tools=None, on_call_tool=None,
-                 on_list_resources=None, on_read_resource=None):
+    def __init__(self, name: str, *, instructions: str, on_list_tools: Handler, on_call_tool: Handler,
+                 on_list_resources: Handler, on_read_resource: Handler) -> None:
         self.name, self.instructions = name, instructions
-        self.handlers = {"list_tools": on_list_tools, "call_tool": on_call_tool,
-                         "list_resources": on_list_resources, "read_resource": on_read_resource}
+        self.handlers: dict[str, Handler] = {
+            "list_tools": on_list_tools, "call_tool": on_call_tool,
+            "list_resources": on_list_resources, "read_resource": on_read_resource}
         _ServerV2.made.append(self)
 
-    def create_initialization_options(self):
+    def create_initialization_options(self) -> JsonObject:
         return {}
 
 
-def _fake_sdk(monkeypatch, Server):
+def _module(name: str, members: dict[str, object]) -> ModuleType:
+    """A module holding `members`, as an import of `name` would find it."""
+    module = ModuleType(name)
+    module.__dict__.update(members)
+    return module
+
+
+def _fake_sdk(monkeypatch: pytest.MonkeyPatch, Server: type[_ServerV1] | type[_ServerV2]) -> list[object]:
     """`mcp` and `anyio` enough for `serve` to wire itself up, with neither installed.
 
     `anyio.run` records the coroutine rather than running it: what is being tested is the wiring,
@@ -424,27 +465,23 @@ def _fake_sdk(monkeypatch, Server):
     """
     models = ["Tool", "Resource", "TextContent", "ListToolsResult", "CallToolResult",
               "ListResourcesResult", "ReadResourceResult", "TextResourceContents"]
-    types_mod = ModuleType("mcp.types")
-    for name in models:
-        setattr(types_mod, name, type(name, (_Thing,), {}))
-    sdk = ModuleType("mcp")
-    sdk.types = types_mod
-    server_mod = ModuleType("mcp.server")
-    lowlevel = ModuleType("mcp.server.lowlevel")
-    lowlevel.Server = Server
-    stdio = ModuleType("mcp.server.stdio")
-    stdio.stdio_server = None                                  # never reached: `run` is not run
+    types_mod = _module("mcp.types", {name: type(name, (_Thing,), {}) for name in models})
+    sdk = _module("mcp", {"types": types_mod})
+    server_mod = _module("mcp.server", {})
+    lowlevel = _module("mcp.server.lowlevel", {"Server": Server})
+    stdio = _module("mcp.server.stdio", {"stdio_server": None})    # never reached: `run` is not run
 
     class _ToThread:
         @staticmethod
-        async def run_sync(fn):
+        async def run_sync(fn: Callable[[], object]) -> object:
             return fn()
 
-    anyio_mod = ModuleType("anyio")
-    anyio_mod.to_thread = _ToThread
-    anyio_mod.from_thread = _Thing(run=lambda *a, **k: None)
-    served: list = []
-    anyio_mod.run = served.append
+    def run_nothing(*a: object, **k: object) -> None:
+        return None
+
+    served: list[object] = []
+    anyio_mod = _module("anyio", {"to_thread": _ToThread, "from_thread": _Thing(run=run_nothing),
+                                  "run": served.append})
     for name, module in [("mcp", sdk), ("mcp.types", types_mod), ("mcp.server", server_mod),
                          ("mcp.server.lowlevel", lowlevel), ("mcp.server.stdio", stdio),
                          ("anyio", anyio_mod)]:
@@ -452,14 +489,14 @@ def _fake_sdk(monkeypatch, Server):
     return served
 
 
-def test_the_server_speaks_to_either_generation_of_the_sdk(tmp_path, monkeypatch):
+def test_the_server_speaks_to_either_generation_of_the_sdk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # The SDK's 2.x took the decorators away and takes the handlers in the constructor instead,
     # so `pip install beamer2slides[mcp]` fetched an SDK this server died on. Both shapes are
     # wired here from fakes, since the real one is an optional extra the suite cannot count on.
     for Server, v1 in ((_ServerV1, True), (_ServerV2, False)):
         Server.made = []
         served = _fake_sdk(monkeypatch, Server)
-        mcp.serve(tmp_path, offline=True, tools=STUBS)
+        mcp.serve(tmp_path, offline=True, tools=STUBS, read_only=False, allow=None)
         assert served, "the server was built but never run"
         [server] = Server.made
         assert "beamer2slides" in server.instructions       # the rules travel with the tools
@@ -467,29 +504,29 @@ def test_the_server_speaks_to_either_generation_of_the_sdk(tmp_path, monkeypatch
         assert set(handlers) == {"list_tools", "call_tool", "list_resources", "read_resource"}
         assert all(handlers.values())
 
-        listed = asyncio.run(handlers["list_tools"]() if v1 else handlers["list_tools"](None, None))
-        tools = listed if v1 else listed.tools
-        assert sorted(t.name for t in tools) == sorted(STUBS)
-        assert all(getattr(t, "inputSchema" if v1 else "input_schema")["type"] == "object"
-                   for t in tools)
+        listed = ran(handlers["list_tools"]() if v1 else handlers["list_tools"](None, None))
+        tools = items(listed if v1 else field(listed, "tools"))
+        assert sorted(str(field(t, "name")) for t in tools) == sorted(STUBS)
+        for t in tools:
+            published = field(t, "inputSchema" if v1 else "input_schema")
+            assert isinstance(published, dict) and published["type"] == "object"
 
-        held = asyncio.run(handlers["read_resource"](mcp.INSTRUCTIONS_URI) if v1 else
-                           handlers["read_resource"](None, _Thing(uri=mcp.INSTRUCTIONS_URI)))
-        assert "beamer2slides" in (held if v1 else held.contents[0].text)
+        held = ran(handlers["read_resource"](mcp.INSTRUCTIONS_URI) if v1 else
+                   handlers["read_resource"](None, _Thing(uri=mcp.INSTRUCTIONS_URI)))
+        assert "beamer2slides" in str(held if v1 else field(items(field(held, "contents"))[0], "text"))
         with pytest.raises(ValueError):
-            asyncio.run(handlers["read_resource"]("b2s://nowhere") if v1 else
-                        handlers["read_resource"](None, _Thing(uri="b2s://nowhere")))
+            ran(handlers["read_resource"]("b2s://nowhere") if v1 else
+                handlers["read_resource"](None, _Thing(uri="b2s://nowhere")))
 
-        def call(name, arguments):
+        def call(name: str, arguments: JsonObject) -> object:
             if v1:
-                return asyncio.run(handlers["call_tool"](name, arguments))
-            return asyncio.run(handlers["call_tool"](None, _Thing(name=name,
-                                                                  arguments=arguments)))
+                return ran(handlers["call_tool"](name, arguments))
+            return ran(handlers["call_tool"](None, _Thing(name=name, arguments=arguments)))
 
         good = call("stub_local_write", {})
-        blocks = good if v1 else good.content
-        assert "stub_local_write" in blocks[0].text
-        assert v1 or good.is_error is False
+        blocks = items(good if v1 else field(good, "content"))
+        assert "stub_local_write" in str(field(blocks[0], "text"))
+        assert v1 or field(good, "is_error") is False
 
         # A refusal is `isError` and carries the whole Result, whichever way the SDK says it.
         if v1:
@@ -498,16 +535,13 @@ def test_the_server_speaks_to_either_generation_of_the_sdk(tmp_path, monkeypatch
             assert "deck_edited" in str(caught.value)
         else:
             bad = call("stub_refuses", {"deck": "talk"})
-            assert bad.is_error is True and "deck_edited" in bad.content[0].text
+            assert field(bad, "is_error") is True
+            assert "deck_edited" in str(field(items(field(bad, "content"))[0], "text"))
 
 
-def test_serving_without_the_sdk_says_how_to_install_it(tmp_path):
-    try:
-        import mcp as _sdk                                       # noqa: F401
-    except ImportError:
-        pass
-    else:
+def test_serving_without_the_sdk_says_how_to_install_it(tmp_path: Path):
+    if importlib.util.find_spec("mcp") is not None:
         pytest.skip("the MCP SDK is installed, so serve() would try to run")
     with pytest.raises(mcp.MissingSDK) as caught:
-        mcp.serve(tmp_path, tools=STUBS)
+        mcp.serve(tmp_path, tools=STUBS, read_only=False, offline=False, allow=None)
     assert "pip install beamer2slides[mcp]" in str(caught.value)

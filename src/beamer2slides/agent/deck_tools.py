@@ -29,6 +29,7 @@ from pathlib import Path
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, NoReturn
 
+from ..json_types import Json, JsonObject
 from .context import Job, tool
 from .types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Refused
 
@@ -36,7 +37,6 @@ if TYPE_CHECKING:
     from ..checks import Finding
     from ..emit import Preflight
     from ..guard import RebuildRefused
-    from ..json_types import Json, JsonObject
     from ..raw_types import RawDoc
 
 __all__ = ["deck_inspect", "deck_convert", "deck_prepare", "deck_upload", "deck_sync", "tex_label"]
@@ -60,7 +60,7 @@ def _merge():
 
 
 def _pdf(j: Job, ref: str) -> Path:
-    path = j.path(ref)
+    path = j.path(ref, write=False)
     if not path.is_file():
         raise Refused("not_found", f"{ref}: no such PDF in the workspace.", ref=ref)
     if path.suffix.lower() != ".pdf":
@@ -84,7 +84,7 @@ def _check_backup(mode: str) -> str:
     return mode
 
 
-def _way_back(j: Job, backup: str, needed: bool = True) -> str:
+def _way_back(j: Job, backup: str, needed: bool) -> str:
     """The backup mode to pass the library: `backup`, except that `auto` in a context whose
     workspace goes away with the call means a Drive copy.
 
@@ -184,7 +184,7 @@ def _label_survey(j: Job, deck: "Mapping[str, Json]") -> "JsonObject":
 # ---------------------------------------------------------------- the tools
 
 
-@tool("deck_inspect", needs=(READS, WRITES))
+@tool("deck_inspect", needs=(READS, WRITES), local=None)
 def deck_inspect(
     j: Job,
     pdf: Annotated[str, "Workspace ref of the compiled beamer PDF to look at (not the .tex)."],
@@ -222,8 +222,8 @@ def deck_inspect(
     j.data.update(facts)
     j.data["out"] = j.ctx.workspace.ref(out_dir)
     j.data["title"] = raw["source"].get("title")
-    j.data["elements"] = totals
-    j.data["slides_detail"] = slides
+    j.data["elements"] = dict[str, Json](totals)
+    j.data["slides_detail"] = list[Json](slides)
     j.data["titles"] = [row["title"] for row in slides]
 
     survey = _label_survey(j, deck)
@@ -273,7 +273,7 @@ def deck_inspect(
     j.data["seconds"] = round(time.time() - started, 2)
 
 
-@tool("deck_convert", needs=(READS, WRITES, WRITES_GOOGLE))
+@tool("deck_convert", needs=(READS, WRITES, WRITES_GOOGLE), local=None)
 def deck_convert(
     j: Job,
     pdf: Annotated[str, "Workspace ref of the compiled beamer PDF to convert."],
@@ -328,7 +328,7 @@ def deck_convert(
               "deck_inspect with checks=True if anything on the slides looks wrong")
 
 
-@tool("deck_prepare", needs=(READS, WRITES))
+@tool("deck_prepare", needs=(READS, WRITES), local=None)
 def deck_prepare(
     j: Job,
     pdf: Annotated[str, "Workspace ref of the compiled beamer PDF to prepare."],
@@ -366,7 +366,7 @@ def deck_prepare(
               "deck_inspect with checks=True if you want the local invariants run first")
 
 
-@tool("deck_upload", needs=(READS, WRITES, WRITES_GOOGLE))
+@tool("deck_upload", needs=(READS, WRITES, WRITES_GOOGLE), local=None)
 def deck_upload(
     j: Job,
     out: Annotated[str, "Folder a deck_prepare wrote (deck.json, backgrounds/, prepared.json)."],
@@ -397,7 +397,7 @@ def deck_upload(
     folder = j.path(out, write=True)
     prepared = _read_prepared(j, folder, out)
     source = _pdf(j, pdf) if pdf else None
-    _upload(j, folder, prepared, title, new_deck, measure, force_rebuild, backup, source)
+    _upload(j, folder, prepared, title, new_deck, measure, force_rebuild, backup, source, None)
     j.data["seconds"] = round(time.time() - started, 2)
     j.summary = _convert_summary(j, prepared, j.data["seconds"])
     j.suggest("deck_sync when the source changes, to merge into this deck instead of rebuilding it",
@@ -427,7 +427,7 @@ def _prepare(j: Job, source: Path, out_dir: Path, overlays: str) -> "JsonObject"
     from ..snapshot import source_info
 
     pdf_path, raw, deck, facts = _classify_into(j, source, out_dir, overlays, debug_images=False)
-    render_backgrounds(pdf_path, raw, deck, out_dir, frozenset())
+    render_backgrounds(pdf_path, raw, deck, out_dir, frozenset())      # (no adopt base: no kept shapes)
     (out_dir / "deck.json").write_text(json.dumps(deck, indent=1, ensure_ascii=False), encoding="utf-8")
     j.artifact(out_dir / "backgrounds", "folder", "one background picture per slide")
     survey = _label_survey(j, deck)
@@ -490,10 +490,11 @@ def _read_prepared(j: Job, folder: Path, ref: str) -> "JsonObject":
 
 def _upload(j: Job, out_dir: Path, prepared: "Mapping[str, Json]", title: str | None, new_deck: bool,
             measure: bool, force_rebuild: bool, backup: str, source: Path | None,
-            checked: "Preflight | None" = None) -> None:
+            checked: "Preflight | None") -> None:
     """The Google half: build the deck from the folder, then record the base.
 
-    `source` is the PDF when the caller has it and None when it does not. The guard is given the
+    `checked` is what `deck_convert`'s preflight found, None where nothing asked yet. `source`
+    is the PDF when the caller has it and None when it does not. The guard is given the
     **name** either way (it compares it with the one the base recorded, to catch a folder whose
     deck came from another PDF), and the base is given the digest `_prepare` measured. The one
     thing that really wants the file is `emit.fallback_pictures`, the retry that crops a refused
@@ -539,7 +540,7 @@ def _upload(j: Job, out_dir: Path, prepared: "Mapping[str, Json]", title: str | 
     for c in state.contained or ():
         # emit.DeckPlan.contain: an element emit could not plan went up as the picture of its region.
         j.warn(f"slide {c.page + 1}: {c.kind} {c.id} could not be planned ({c.error}); "
-               "a picture of it instead")
+               "a picture of it instead", "")
     j.artifact(out_dir / "emit.json", "json", "what was built: deck id, url, per-slide objects")
 
     previous = state.previous or {}
@@ -674,7 +675,7 @@ def _rebuild_message(refused: "RebuildRefused", survey: "JsonObject", reason: st
             f"the person who made those edits, not for you.")
 
 
-@tool("deck_sync", needs=(READS, WRITES, READS_GOOGLE))
+@tool("deck_sync", needs=(READS, WRITES, READS_GOOGLE), local=None)
 def deck_sync(
     j: Job,
     pdf: Annotated[str, "Workspace ref of the recompiled PDF: the new version of the source."],
@@ -713,7 +714,7 @@ def deck_sync(
     from ..sync import BaseMismatch, NoSyncBase, sync as run_sync
 
     _check_backup(backup)
-    backup = _way_back(j, backup)
+    backup = _way_back(j, backup, needed=True)
     if overlays not in (None, "last", "all"):
         raise Refused("bad_request", f"overlays={overlays!r} is not 'last', 'all' or unset.", overlays=overlays)
     if not dry_run:
@@ -797,6 +798,10 @@ def deck_sync(
     sent = result.requests
     requests = sum(sent.values())
     wrote = bool(requests) and not dry_run
+    held: list[Json] = [h["slide"] for h in report.slides.held]
+    # What `take_source` settled, each carrying the deck's own version of that spot: the report
+    # file keeps it too, and there is nowhere else it still exists.
+    resolved = report.resolved
     j.data.update({
         "dry_run": dry_run,
         "wrote": wrote,
@@ -805,13 +810,11 @@ def deck_sync(
         "applied": len(report.applied),
         "kept": len(report.overrides),
         "conflicts": len(report.conflicts),
-        "held": [h["slide"] for h in report.slides.held],
-        # What `take_source` settled, each carrying the deck's own version of that spot: the
-        # report file keeps it too, and there is nowhere else it still exists.
-        "resolved": report.resolved,
+        "held": held,
+        "resolved": list[Json](resolved),
         "warnings": len(report.warnings),
         "requests": requests,
-        "requests_by_phase": sent,
+        "requests_by_phase": dict[str, Json](sent),
         "actions": result.actions,
         "overlays": result.overlays,
         "base_from": result.base_from,
@@ -830,13 +833,13 @@ def deck_sync(
                     f"recovery block.")
                  + (" Every conflict is a place both sides changed, where the deck won - read them "
                     "before deciding the source is right." if report.conflicts else "")
-                 + (f" {len(j.data['resolved'])} conflict(s) were settled for the source because "
+                 + (f" {len(resolved)} conflict(s) were settled for the source because "
                     f"take_source named them; what was written over is in `resolved` and in the "
-                    f"report, and nowhere else." if j.data.get("resolved") else "")
-                 + (f" {len(j.data['held'])} slide(s) were held back with nothing written: a frame label "
+                    f"report, and nowhere else." if resolved else "")
+                 + (f" {len(held)} slide(s) were held back with nothing written: a frame label "
                     f"may have moved onto another frame, so which frame those slides belong to is in "
                     f"doubt. That is a question for the person, not for you - ask them to check the "
-                    f"`.tex`." if j.data.get("held") else ""))
+                    f"`.tex`." if held else ""))
     if dry_run and not report.conflicts:
         j.suggest("run deck_sync again with dry_run=False")
     elif dry_run:
@@ -879,7 +882,7 @@ def _deck_arg(j: Job, deck: str) -> tuple[str, Path | None]:
     if "/" in deck and "docs.google.com" in deck:
         return deck, None
     try:
-        path = j.path(deck)
+        path = j.path(deck, write=False)
     except Refused:
         return deck, None
     if path.is_dir():
@@ -893,7 +896,7 @@ def _deck_arg(j: Job, deck: str) -> tuple[str, Path | None]:
     return deck, None
 
 
-@tool("tex_label", needs=(READS, WRITES))
+@tool("tex_label", needs=(READS, WRITES), local=None)
 def tex_label(
     j: Job,
     tex: Annotated[str, "Workspace ref of the document's main .tex (its \\input files are read "
@@ -913,7 +916,8 @@ def tex_label(
     from .. import labels, texmap
     from ..inverse import keep_backup, replace_file
 
-    path = j.path(tex)
+    # Read-only here: each file the labels are written into is asked for again as a write.
+    path = j.path(tex, write=False)
     if not path.is_file():
         raise Refused("not_found", f"{tex}: no such file (this tool reads the .tex, not the PDF).",
                       ref=tex)
@@ -930,7 +934,7 @@ def tex_label(
     # a name), so the second frame arrives at every later stage looking unlabelled. Reading the
     # .tex is the only place this is visible at all.
     seen: dict[str, str] = {}
-    duplicates: list[dict[str, str | None]] = []
+    duplicates: list[Json] = []
     for frame in source.frames:
         if not frame.label:
             continue
@@ -946,16 +950,17 @@ def tex_label(
         else:
             seen[frame.label] = where
 
-    planned = [{"label": e["label"], "title": e["title"],
-                "where": f"{e['file'].name}:{e['line']}",
-                "file": j.ctx.workspace.ref(e["file"])} for e in edits]
+    planned: list[Json] = [{"label": e["label"], "title": e["title"],
+                            "where": f"{e['file'].name}:{e['line']}",
+                            "file": j.ctx.workspace.ref(e["file"])} for e in edits]
+    refs: list[Json] = list(sorted({j.ctx.workspace.ref(e["file"]) for e in edits}))
     j.data.update({
         "tex": j.ctx.workspace.ref(path),
         "frames": len(source.frames),
         "labelled": have,
         "planned": len(edits),
         "edits": planned,
-        "refs": sorted({p["file"] for p in planned}),
+        "refs": refs,
         "duplicates": duplicates,
         "applied": False,
     })
@@ -978,7 +983,7 @@ def tex_label(
         j.suggest("tex_label with apply=True to write them, then recompile and convert")
         return
 
-    written = []
+    written: list[Json] = []
     for file_path, text in labels.apply(source, edits).items():
         j.path(str(file_path), write=True)  # an \input outside the workspace is refused, not written
         bak = keep_backup(file_path, text)

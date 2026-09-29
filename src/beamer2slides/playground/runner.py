@@ -20,7 +20,14 @@ import json
 import os
 import sys
 import threading
-from typing import Any
+from typing import TYPE_CHECKING
+
+from ..json_types import Json, JsonObject, as_object, as_str
+
+if TYPE_CHECKING:
+    from google.auth.credentials import Credentials
+
+    from ..agent.auth import GoogleAccess
 
 #: What the visitor's browser asked Google for. The same list the page signs in with
 #: (`server.WEB_SCOPES`); a token cannot be widened here, so this only says what it is.
@@ -38,12 +45,13 @@ class VisitorToken:
     def __init__(self, token: str) -> None:
         self._token = token
 
-    def credentials(self) -> Any:
-        from google.oauth2.credentials import Credentials
-        return Credentials(token=self._token, scopes=SCOPES)
+    def credentials(self) -> Credentials:
+        from google.oauth2.credentials import Credentials as UserCredentials
+        return UserCredentials(token=self._token, scopes=SCOPES)
 
-    def describe(self) -> dict:
-        return {"available": True, "source": "the visitor's own Google sign-in", "scopes": list(SCOPES)}
+    def describe(self) -> JsonObject:
+        return {"available": True, "source": "the visitor's own Google sign-in",
+                "scopes": list[Json](SCOPES)}
 
 
 #: What a visitor of a `signin` host is told instead of "offline". The server hands a token to a
@@ -57,16 +65,17 @@ SIGN_IN = ("A journey that touches Slides, Docs or Drive is given the token from
            "whether you are signed in.")
 
 
-def access(spec: dict):
+def access(spec: JsonObject) -> GoogleAccess:
     """Where this run's Google credentials come from, or `NoGoogle` when there are none."""
-    from ..agent.auth import NoGoogle, default_access
+    from ..agent.auth import NoGoogle, default_access, offline
 
     mode, token = spec.get("mode"), spec.get("token")
     if mode == "signin":
-        return VisitorToken(token) if token else NoGoogle("no token in this run", SIGN_IN)
+        return VisitorToken(token) if isinstance(token, str) and token else NoGoogle(
+            "no token in this run", SIGN_IN)
     if mode == "local":
         return default_access()
-    return NoGoogle()
+    return offline()
 
 
 def main() -> int:
@@ -75,26 +84,28 @@ def main() -> int:
     sys.stdout = sys.stderr
     lock = threading.Lock()   # the progress callback runs on whatever thread printed
 
-    def emit(message: dict) -> None:
+    def emit(message: JsonObject) -> None:
         with lock:
             channel.write(json.dumps(message, ensure_ascii=False, default=str) + "\n")
             channel.flush()
 
-    job = json.loads(sys.stdin.read() or "{}")
+    read: Json = json.loads(sys.stdin.read() or "{}")
+    job = as_object(read, "the job")
 
     from ..agent.auth import NoGoogle
     from ..agent.context import ALL_ACTIONS, LOCAL_ONLY, AgentContext
     from ..agent.mcp import dispatch
     from ..agent.workspace import LocalWorkspace
 
-    google = access(job.get("google") or {})
-    ctx = AgentContext(workspace=LocalWorkspace(job["root"]),
+    google = access(as_object(job.get("google") or {}, "the job's google"))
+    ctx = AgentContext(workspace=LocalWorkspace(as_str(job["root"], "the job's root")),
                        google=google,
                        # A workspace with no account may still do everything local; the tools
                        # that need Google then refuse with `offline`, which says why.
                        allow=LOCAL_ONLY if isinstance(google, NoGoogle) else ALL_ACTIONS,
                        progress=lambda line: emit({"progress": line}))
-    result = dispatch(ctx, job.get("tool") or "", job.get("args") or {})
+    result = dispatch(ctx, as_str(job.get("tool") or "", "the job's tool"),
+                      as_object(job.get("args") or {}, "the job's args"), None)
     emit({"result": result.json()})
     return 0
 

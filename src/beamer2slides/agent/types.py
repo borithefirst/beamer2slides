@@ -8,17 +8,34 @@ to make (a deck someone edited, a sync with no base, a document that needs a sid
 back as a `code` the agent can branch on rather than a sentence it has to read.
 
 `summary` is the one thing written for the model to read; `data` is written for it to act on.
+
+The records are frozen and every field is said where one is made: an artifact whose content was
+delivered is a new artifact (`Artifact.named`, `dataclasses.replace`), and a result is made once,
+by the wrapper (`context.Job.result`). `data` is a `JsonObject`, so what a tool puts there is
+serialisable by construction rather than by `json.dumps(default=str)` at the edge.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
-from typing import Any
+from dataclasses import dataclass
+from typing import Final, Literal, get_args
+
+from ..json_types import Json, JsonObject
+
+#: The refusal codes, a closed set: `Result.code`, `Refused.code` and every place that makes one
+#: are checked against it, and `CODES` below must say each in words (`tests/test_agent_core.py`).
+Code = Literal[
+    "needs_consent", "no_credentials", "offline", "rate_limited",
+    "deck_edited", "no_way_back", "no_base", "base_mismatch", "base_choice_needed",
+    "already_pushed", "source_exists", "labels",
+    "compile_failed", "not_converged", "not_found",
+    "forbidden", "outside_workspace", "bad_request", "refused", "failed",
+]
 
 # Refusals, in the library's own terms. A tool returns exactly one of these when `ok` is False,
 # and an agent is expected to branch on the code, not on the words.
-CODES = {
+CODES: dict[Code, str] = {
     # Nothing is wrong with the request; something about this machine or this account is.
     "needs_consent": "Google sign-in has expired or was never given, and it needs a browser.",
     "no_credentials": "No OAuth client secret is installed, so no Google call can be made.",
@@ -46,15 +63,36 @@ CODES = {
     "failed": "Something unforeseen went wrong; the summary carries the exception.",
 }
 
+
+def code_of(value: str) -> Code | None:
+    """`value` as a refusal code, or None when it is not one (a recorded transcript's)."""
+    for known in get_args(Code):
+        if known == value:
+            return known
+    return None
+
+
 # What a tool does to the world. A harness that wants to ask before letting an agent act needs
 # this more than it needs the tool's name: `writes_google` is the one that spends someone's deck.
-READS = "reads"                  # local files only
-READS_GOOGLE = "reads_google"     # fetches from Drive/Slides/Docs, changes nothing there
-WRITES = "writes"                 # writes local files (source trees, out folders)
-WRITES_GOOGLE = "writes_google"   # changes a deck or document someone may be looking at
+Need = Literal["reads", "reads_google", "writes", "writes_google"]
+READS: Final = "reads"                  # local files only
+READS_GOOGLE: Final = "reads_google"     # fetches from Drive/Slides/Docs, changes nothing there
+WRITES: Final = "writes"                 # writes local files (source trees, out folders)
+WRITES_GOOGLE: Final = "writes_google"   # changes a deck or document someone may be looking at
+
+#: What a diagnostic is.
+Level = Literal["conflict", "warning", "note"]
 
 
-@dataclass
+def level_of(value: str) -> Level | None:
+    """`value` as a diagnostic level, or None when it is not one."""
+    for known in get_args(Level):
+        if known == value:
+            return known
+    return None
+
+
+@dataclass(frozen=True, kw_only=True)
 class Artifact:
     """A file a journey produced, named the way the workspace names things.
 
@@ -66,68 +104,75 @@ class Artifact:
 
     ref: str                      # workspace-relative, the form the agent passes back in
     kind: str                     # json | image | pdf | tex | html | report | folder | pptx
-    description: str = ""
+    description: str
     #: Filled in only when the context delivers content inline; see `agent/content.py`.
-    text: str | None = None
-    base64: str | None = None
-    bytes: int | None = None      # the file's size, whether or not its content is carried
-    sha256: str | None = None
-    truncated: bool = False       # over the cap: read it with `workspace.read_bytes(ref)`
+    text: str | None
+    base64: str | None
+    bytes: int | None             # the file's size, whether or not its content is carried
+    sha256: str | None
+    truncated: bool               # over the cap: read it with `workspace.read_bytes(ref)`
 
-    #: The shape every artifact has had, and still has when no content is delivered.
-    _ALWAYS = ("ref", "kind", "description")
+    @classmethod
+    def named(cls, *, ref: str, kind: str, description: str) -> Artifact:
+        """An artifact that is a name alone: what every journey hands back before delivery."""
+        return cls(ref=ref, kind=kind, description=description, text=None, base64=None,
+                   bytes=None, sha256=None, truncated=False)
 
-    def json(self) -> dict:
+    def json(self) -> JsonObject:
         # The content fields are left out rather than sent as nulls: a conversion's thirty
         # artifacts would otherwise carry five empty keys each into the model's context. The
         # three original fields are always there, so a reader written before this still works.
-        out = {k: getattr(self, k) for k in self._ALWAYS}
-        for key in ("text", "base64", "bytes", "sha256"):
-            if getattr(self, key) is not None:
-                out[key] = getattr(self, key)
+        out: JsonObject = {"ref": self.ref, "kind": self.kind, "description": self.description}
+        if self.text is not None:
+            out["text"] = self.text
+        if self.base64 is not None:
+            out["base64"] = self.base64
+        if self.bytes is not None:
+            out["bytes"] = self.bytes
+        if self.sha256 is not None:
+            out["sha256"] = self.sha256
         if self.truncated:
             out["truncated"] = True
         return out
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class Diagnostic:
     """Something worth saying that is not the result: a conflict, a warning, a note."""
 
-    level: str                    # conflict | warning | note
+    level: Level
     message: str
-    where: str = ""               # slide 4, main.tex:112, the block a conflict is in
+    where: str                    # slide 4, main.tex:112, the block a conflict is in; "" if none
 
-    def json(self) -> dict:
-        return asdict(self)
+    def json(self) -> JsonObject:
+        return {"level": self.level, "message": self.message, "where": self.where}
 
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class Result:
     """What every tool returns. Serialise with `.json()`; never raise across this boundary."""
 
     tool: str
-    ok: bool = True
-    code: str | None = None       # one of CODES when ok is False
-    summary: str = ""             # for the model to read: what happened, in one paragraph
-    data: dict[str, Any] = field(default_factory=dict)          # for the model to act on
-    artifacts: list[Artifact] = field(default_factory=list)
-    diagnostics: list[Diagnostic] = field(default_factory=list)
-    next_steps: list[str] = field(default_factory=list)          # what to consider doing now
-    seconds: float = 0.0
+    ok: bool
+    code: Code | None             # one of CODES when ok is False
+    summary: str                  # for the model to read: what happened, in one paragraph
+    data: JsonObject              # for the model to act on
+    artifacts: list[Artifact]
+    diagnostics: list[Diagnostic]
+    next_steps: list[str]         # what to consider doing now
+    seconds: float
 
-    def json(self) -> dict:
-        return {
-            "tool": self.tool,
-            "ok": self.ok,
-            **({"code": self.code} if self.code else {}),
-            "summary": self.summary,
-            "data": self.data,
-            "artifacts": [a.json() for a in self.artifacts],
-            "diagnostics": [d.json() for d in self.diagnostics],
-            "next_steps": self.next_steps,
-            "seconds": round(self.seconds, 2),
-        }
+    def json(self) -> JsonObject:
+        out: JsonObject = {"tool": self.tool, "ok": self.ok}
+        if self.code:
+            out["code"] = self.code
+        out["summary"] = self.summary
+        out["data"] = self.data
+        out["artifacts"] = [a.json() for a in self.artifacts]
+        out["diagnostics"] = [d.json() for d in self.diagnostics]
+        out["next_steps"] = list(self.next_steps)
+        out["seconds"] = round(self.seconds, 2)
+        return out
 
     def text(self) -> str:
         """The form a harness with no structured channel can paste into the model's context."""
@@ -140,10 +185,16 @@ class Result:
         return out
 
 
+def refusal(*, tool: str, code: Code, summary: str, data: JsonObject) -> Result:
+    """A result that says no and did nothing: no artifacts, no diagnostics, no time."""
+    return Result(tool=tool, ok=False, code=code, summary=summary, data=data, artifacts=[],
+                  diagnostics=[], next_steps=[], seconds=0.0)
+
+
 class Refused(Exception):
     """A refusal a tool makes on purpose, carrying the code an agent will branch on."""
 
-    def __init__(self, code: str, message: str, **data: Any) -> None:
+    def __init__(self, code: Code, message: str, **data: Json) -> None:
         super().__init__(message)
-        self.code = code
-        self.data = data
+        self.code: Code = code
+        self.data: JsonObject = data

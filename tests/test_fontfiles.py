@@ -11,16 +11,22 @@ import base64
 import io
 import json
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 import pytest
 
 from beamer2slides import adopt, fontfetch, fontfiles, net
 from beamer2slides.adopt_context import MissingFont
 from beamer2slides.agent import ALL_ACTIONS, AgentContext, LocalWorkspace
+from beamer2slides.json_types import JsonObject
 from .irs import deck_ir
+from .json_reads import at
 
 from .test_adopt import text_shape
 from .test_adopt_media import STATIC_META, VARIABLE_META, deck_with, tiny_font
+
+if TYPE_CHECKING:
+    from google.auth.credentials import Credentials
 
 pytest.importorskip("fontTools")
 
@@ -265,15 +271,16 @@ def fake_adopt(monkeypatch, seen: dict, missing=(), skipped=()):
         else:
             found["pptx_pictures"] = 1
         return SimpleNamespace(converged=True, iterations=[], residuals=[], unresolved=[], files=[],
-                               notes=[], theme=[])
+                               notes=[], theme=[], restored=[])
     monkeypatch.setattr("beamer2slides.adopt.cmd_adopt", cmd_adopt)
 
 
 class FakeGoogle:
-    def credentials(self):
-        return object()
+    def credentials(self) -> "Credentials":
+        from google.oauth2.credentials import Credentials as UserCredentials
+        return UserCredentials(token=None)
 
-    def describe(self) -> dict:
+    def describe(self) -> JsonObject:
         return {"available": True, "source": "test", "scopes": []}
 
 
@@ -296,7 +303,7 @@ def test_deck_adopt_takes_fonts_as_refs_or_content_and_names_what_it_lacked(tmp_
     assert names[0] == "fonts" and names[1] != names[2], "two unnamed files are two files"
     assert seen["source"] == tmp_path, "the context's local google/fonts, for the call"
     assert res.data["fonts_supplied"] == {"Tiny Sans": ["Regular"]}
-    assert res.data["fonts_missing"][0]["font"] == "Montserrat"
+    assert at(res.data, "fonts_missing", 0, "font") == "Montserrat"
     fonts = [d for d in res.diagnostics if d.where == "fonts"]
     assert any("Montserrat" in d.message and "texgyreheros" in d.message for d in fonts)
     assert any("not used" in d.message for d in fonts)

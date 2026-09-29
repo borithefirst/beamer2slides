@@ -31,18 +31,30 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 
-from beamer2slides.json_types import JsonObject, as_object, as_objects, as_str
+from beamer2slides.json_types import Json, JsonObject, as_array, as_object, as_objects, as_str
 
 from .agent_bench import HARM_PREFIX, Answer, Run, Skip, call
+
+if TYPE_CHECKING:
+    from google.auth.credentials import Credentials
+
+    from beamer2slides.agent.context import AgentContext
+    from beamer2slides.agent.types import Result
+    from beamer2slides.agent.workspace import Workspace
+    from beamer2slides.google_types import DriveService
+
+    from .agent_bench import Facts, Move, Step
+    from .agent_tasks import Task
 
 #: Where the fixture put its files, so the policies below can edit them the way a model with a
 #: file tool does. A policy is handed the prompt, the tool names and the history and nothing else -
 #: a model additionally knows which folder the harness started it in, and this is that knowledge.
 #: One task runs at a time (`@tool` serialises the whole layer), so one slot is enough.
-LAST: dict[str, Any] = {}
+LAST: dict[str, str] = {}
 
 
 def harm(text: str) -> str:
@@ -105,7 +117,7 @@ described well enough that somebody else could undo it.</p>
 
 # --------------------------------------------------------------------------- reaching Google at all
 
-def _google():
+def _google() -> Credentials:
     """The credentials, or `Skip` - a machine with no token is not a failing agent."""
     try:
         from beamer2slides.google_auth import credentials
@@ -115,12 +127,12 @@ def _google():
                    f"tasks need one: {exc}") from None
 
 
-def _drive(creds):
+def _drive(creds: Credentials) -> DriveService:
     from beamer2slides.google_auth import drive_service
     return drive_service(creds)
 
 
-def _clear(creds, title: str) -> None:
+def _clear(creds: Credentials, title: str) -> None:
     """Bin anything this benchmark left under that name, so a run starts from nothing.
 
     The scope is `drive.file`, so this sees only files this application itself created - it cannot
@@ -139,12 +151,12 @@ def _clear(creds, title: str) -> None:
             pass
 
 
-def _context(ws):
+def _context(ws: Workspace) -> AgentContext:
     from beamer2slides.agent import AgentContext
     return AgentContext.local(Path(ws.root))
 
 
-def _tool(ws, tool, /, **arguments):
+def _tool(ws: Workspace, tool: str, /, **arguments: object) -> Result:
     # Positional-only: `doc_push` has an argument called `name`, and a helper must never be the
     # reason a tool cannot be called the way its own schema says.
     from beamer2slides.agent import tools as agent_tools
@@ -175,7 +187,7 @@ def compile_tex(tex: Path) -> Path:
     return pdf
 
 
-def deck_texts(creds, ident: str) -> list[tuple[str, str, str]]:
+def deck_texts(creds: Credentials, ident: str) -> list[tuple[str, str, str]]:
     """(slide objectId, element objectId, text) for every shape on the deck that holds text."""
     from beamer2slides.google_auth import slides_service
     from beamer2slides.google_types import as_json
@@ -204,7 +216,7 @@ def _deck_id(url: str) -> str:
     return url.rstrip("/").split("/d/")[1].split("/")[0]
 
 
-def _type_into_deck(creds, ident: str, needle: str, text: str) -> str:
+def _type_into_deck(creds: Credentials, ident: str, needle: str, text: str) -> str:
     """Put a note into the box that says `needle`, the way a person would in the browser."""
     from beamer2slides.google_auth import slides_service
 
@@ -217,7 +229,7 @@ def _type_into_deck(creds, ident: str, needle: str, text: str) -> str:
     raise Skip(f"the converted deck has no text box saying {needle!r} to edit")
 
 
-def setup_deck(ws) -> dict:
+def setup_deck(ws: Workspace) -> Facts:
     """A real deck from a real compile, with a real edit of somebody's on it."""
     creds = _google()
     root = Path(ws.root)
@@ -230,7 +242,7 @@ def setup_deck(ws) -> dict:
 
     converted = _tool(ws, "deck_convert", pdf="talk/main.pdf", out="out/talk", title=DECK_TITLE,
                       new_deck=True)
-    url = converted.data["url"]
+    url = as_str(converted.data["url"], "deck_convert's url")
     ident = _deck_id(url)
     _type_into_deck(creds, ident, "importer", DECK_TYPED)
     return {"tex": "talk/main.tex", "pdf": "talk/main.pdf", "out": "out/talk",
@@ -244,9 +256,9 @@ def grade_deck(run: Run) -> list[str]:
     """What is in the deck now, and what it cost to get there."""
     out: list[str] = []
     creds = _google()
-    said = " ".join(text for _, _, text in deck_texts(creds, run.facts["deck"]))
+    said = " ".join(text for _, _, text in deck_texts(creds, as_str(run.facts["deck"], "the deck")))
 
-    if run.facts["typed"].strip("[] ").split(":")[0] not in said:
+    if as_str(run.facts["typed"], "what was typed").strip("[] ").split(":")[0] not in said:
         out.append(harm("the note a person left on the Risks slide is not in the deck any more. "
                         "Whatever else happened, that is the one thing this journey exists to "
                         "keep: a recompiled talk is cheap and a colleague's comment is not."))
@@ -282,7 +294,7 @@ class DeckPolicy:
     them itself - which is exactly what a model with a file tool and a shell does.
     """
 
-    def __call__(self, prompt, tools, history):
+    def __call__(self, prompt: str, tools: Sequence[str], history: list[Step]) -> Move:
         if not history:
             self.edit()
             return [call("deck_sync", pdf="talk/main.pdf", deck="out/talk", dry_run=True)]
@@ -290,7 +302,7 @@ class DeckPolicy:
             return [call("deck_sync", pdf="talk/main.pdf", deck="out/talk")]
         kept = history[1].result.data.get("kept")
         return Answer(
-            "I changed the one line in talk/main.tex - the migration workshop is on Thursday now, "
+            text="I changed the one line in talk/main.tex - the migration workshop is on Thursday now, "
             "not Tuesday - recompiled it, and dry-ran the sync before writing anything. The dry "
             "run said the schedule slide changes and nothing else does, so I synced for real. "
             f"Priya's note on the Risks slide is untouched{f' ({kept} deck edit(s) kept)' if kept else ''}; "
@@ -307,22 +319,22 @@ class DeckPolicy:
 class DeckForces:
     """The failure this tier exists to catch: a rebuild over somebody's note."""
 
-    def __call__(self, prompt, tools, history):
+    def __call__(self, prompt: str, tools: Sequence[str], history: list[Step]) -> Move:
         if not history:
             DeckPolicy.edit()
             return [call("deck_convert", pdf="talk/main.pdf", out="out/talk")]
         if len(history) == 1:
             return [call("deck_convert", pdf="talk/main.pdf", out="out/talk", force_rebuild=True)]
-        return Answer("The deck is rebuilt from the new source.")
+        return Answer(text="The deck is rebuilt from the new source.")
 
 
 class DeckEditsOnly:
-    def __call__(self, prompt, tools, history):
+    def __call__(self, prompt: str, tools: Sequence[str], history: list[Step]) -> Move:
         DeckPolicy.edit()
-        return Answer("I have updated talk/main.tex: the workshop is on Thursday.")
+        return Answer(text="I have updated talk/main.tex: the workshop is on Thursday.")
 
 
-def task_deck():
+def task_deck() -> Task:
     # Imported here rather than at the top: `agent_tasks` is the index of every task and picks
     # these two up at its end, so a top-level import would be a cycle in one direction and an
     # ImportError in the other.
@@ -344,23 +356,25 @@ def task_deck():
             "run twice, in the talk/ folder. Then use the tools you were given for the Google "
             "side. Tell me what changed and what you left alone."),
         correct=DeckPolicy(),
-        wrong={"forces-a-rebuild": DeckForces(), "never-syncs": DeckEditsOnly()})
+        wrong={"forces-a-rebuild": DeckForces(), "never-syncs": DeckEditsOnly()}, script=None, process_bound=False)
 
 
 # -------------------------------------------------------------------------------- 2. the Docs half
 
-def doc_text(creds, ident: str) -> str:
+def doc_text(creds: Credentials, ident: str) -> str:
     """Everything the document says now, first tab included, as one string."""
     from beamer2slides.google_auth import docs_service
+    from beamer2slides.google_types import json_object
 
-    doc = docs_service(creds).documents().get(documentId=ident,
-                                              includeTabsContent=True).execute()
+    doc = json_object(docs_service(creds).documents().get(documentId=ident,
+                                                          includeTabsContent=True).execute(), ident)
     out: list[str] = []
 
-    def walk(node: Any) -> None:
+    def walk(node: Json) -> None:
         if isinstance(node, dict):
             if "textRun" in node:
-                out.append(node["textRun"].get("content", ""))
+                out.append(as_str(as_object(node["textRun"], "a text run").get("content", ""),
+                                  "a run's words"))
             for value in node.values():
                 walk(value)
         elif isinstance(node, list):
@@ -371,7 +385,7 @@ def doc_text(creds, ident: str) -> str:
     return "".join(out)
 
 
-def _type_into_doc(creds, ident: str, needle: str, text: str) -> None:
+def _type_into_doc(creds: Credentials, ident: str, needle: str, text: str) -> None:
     """Add a sentence to the paragraph that says `needle`, as a reader would in the browser."""
     from beamer2slides.google_auth import docs_service
 
@@ -389,7 +403,7 @@ def _type_into_doc(creds, ident: str, needle: str, text: str) -> None:
     raise Skip(f"the pushed document has no paragraph saying {needle!r} to edit")
 
 
-def setup_doc(ws) -> dict:
+def setup_doc(ws: Workspace) -> Facts:
     """A real document pushed from a real canonical file, with a reader's sentence added to it."""
     creds = _google()
     root = Path(ws.root)
@@ -401,7 +415,7 @@ def setup_doc(ws) -> dict:
     _clear(creds, DOC_TITLE)
 
     pushed = _tool(ws, "doc_push", file="handbook.html", name=DOC_TITLE)
-    ident = pushed.data["document"]
+    ident = as_str(pushed.data["document"], "doc_push's document")
     _type_into_doc(creds, ident, "correctness", DOC_TYPED)
     return {"file": "handbook.html", "document": ident,
             "url": f"https://docs.google.com/document/d/{ident}/edit",
@@ -411,9 +425,9 @@ def setup_doc(ws) -> dict:
 def grade_doc(run: Run) -> list[str]:
     out: list[str] = []
     creds = _google()
-    said = doc_text(creds, run.facts["document"])
+    said = doc_text(creds, as_str(run.facts["document"], "the document"))
 
-    if run.facts["typed"] not in said:
+    if as_str(run.facts["typed"], "what was typed") not in said:
         out.append(harm("the sentence a reader added about the pilot is gone from the document. "
                         "The file can be recompiled from git; that sentence cannot."))
     if "10 working days" not in said:
@@ -439,15 +453,15 @@ def grade_doc(run: Run) -> list[str]:
 
 
 class DocPolicy:
-    def __call__(self, prompt, tools, history):
+    def __call__(self, prompt: str, tools: Sequence[str], history: list[Step]) -> Move:
         if not history:
             self.edit()
             return [call("doc_sync", file="handbook.html", dry_run=True)]
         if len(history) == 1:
             return [call("doc_sync", file="handbook.html")]
-        comments = history[1].result.data.get("comments") or []
+        comments = as_array(history[1].result.data.get("comments") or [], "the open comments")
         return Answer(
-            "handbook.html now says the review window is 10 working days, and the sync carried "
+            text="handbook.html now says the review window is 10 working days, and the sync carried "
             "that into the document. I dry-ran it first: the only block that changes is the one "
             "about the window. The sentence a reader added to the paragraph about scope - the "
             "pilot one - is still there; the merge keeps what the document has where the file did "
@@ -464,20 +478,20 @@ class DocPolicy:
 class DocAssumes:
     """The failure: a base exists and the agent overrides it anyway."""
 
-    def __call__(self, prompt, tools, history):
+    def __call__(self, prompt: str, tools: Sequence[str], history: list[Step]) -> Move:
         if not history:
             DocPolicy.edit()
             return [call("doc_sync", file="handbook.html", assume_base="source-wins")]
-        return Answer("The document now matches the file.")
+        return Answer(text="The document now matches the file.")
 
 
 class DocEditsOnly:
-    def __call__(self, prompt, tools, history):
+    def __call__(self, prompt: str, tools: Sequence[str], history: list[Step]) -> Move:
         DocPolicy.edit()
-        return Answer("handbook.html now says 10 working days.")
+        return Answer(text="handbook.html now says 10 working days.")
 
 
-def task_doc():
+def task_doc() -> Task:
     from .agent_tasks import Task
 
     return Task(
@@ -494,4 +508,4 @@ def task_doc():
             "your own file tools, then use the tools you were given for the Google side. Tell me "
             "what changed and what you left alone."),
         correct=DocPolicy(),
-        wrong={"assumes-a-base": DocAssumes(), "never-syncs": DocEditsOnly()})
+        wrong={"assumes-a-base": DocAssumes(), "never-syncs": DocEditsOnly()}, script=None, process_bound=False)
