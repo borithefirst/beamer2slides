@@ -317,16 +317,16 @@ def test_words_a_later_picture_hides_are_still_the_box_words(tmp_path, backend):
 def test_compare_pairs_marked_elements_by_their_key():
     """Two boxes with the same words: by words and place the upper pairs with the upper. When the
     read-back says the upper box was written from the lower object, compare believes the key."""
-    from beamer2slides.compare import compare
+    from beamer2slides.compare import BoxGeometry, TextGeometry
     from .inverse_edits import move
-    from .test_inverse import fixture_deck, slide_of
+    from .test_inverse import compared, fixture_deck, slide_of
     deck = fixture_deck()
     s = slide_of(deck, "method")
     body = next(e for e in deck["slides"][s]["elements"] if e["id"] == "p2t1")
     twin = {**copy.deepcopy(body), "id": "p2t9"}
     deck["slides"][s]["elements"].append(twin)
     tgt = move(deck, s, twin, 0, 60)
-    geometry = lambda cur: sorted(round(r["dy"]) for r in compare(cur, tgt).open() if r["kind"] == "geometry")
+    geometry = lambda cur: sorted(round(r.dy) for r in compared(cur, tgt).open() if isinstance(r, (TextGeometry, BoxGeometry)))
     assert geometry(tgt) == []
     cur = copy.deepcopy(tgt)
     for e in cur["slides"][s]["elements"]:
@@ -337,9 +337,8 @@ def test_compare_pairs_marked_elements_by_their_key():
 def test_marked_boxes_are_not_in_reading_order_again():
     """A box moved above another reads first: by reading order a paragraph_order residual, though
     the move is the box's place. Paired by key, the move is its geometry and nothing else."""
-    from beamer2slides.compare import compare
     from .inverse_edits import move
-    from .test_inverse import fixture_deck, slide_of
+    from .test_inverse import compared, fixture_deck, slide_of
     deck = fixture_deck()
     s = slide_of(deck, "method")
     body = next(e for e in deck["slides"][s]["elements"] if e["id"] == "p2t1")
@@ -349,7 +348,7 @@ def test_marked_boxes_are_not_in_reading_order_again():
     deck["slides"][s]["elements"].append(twin)
     tgt = move(deck, s, twin, 0, 60)
     cur = move(tgt, s, twin, 0, -120)
-    kinds = lambda c: sorted(r["kind"] for r in compare(c, tgt).open())
+    kinds = lambda c: sorted(r.kind for r in compared(c, tgt).open())
     assert "paragraph_order" in kinds(cur)
     for e in cur["slides"][s]["elements"]:
         e["mark"] = e["id"]
@@ -358,8 +357,8 @@ def test_marked_boxes_are_not_in_reading_order_again():
 
 def test_a_target_object_off_the_page_is_no_missing_element():
     """A deck object parked beside its slide reaches no PDF: it is not an open residual."""
-    from beamer2slides.compare import compare
-    from .test_inverse import fixture_deck, slide_of
+    from beamer2slides.compare import residual_json
+    from .test_inverse import compared, fixture_deck, slide_of
     deck = fixture_deck()
     s = slide_of(deck, "method")
     tgt = copy.deepcopy(deck)
@@ -367,9 +366,9 @@ def test_a_target_object_off_the_page_is_no_missing_element():
     w = deck["slides"][s]["size"][0]
     parked["bbox"] = [w + 10, 10, w + 100, 40]
     tgt["slides"][s]["elements"].append(parked)
-    got = [r for r in compare(deck, tgt).residuals if r.get("target_element") == "p2t8"]
+    got = [j for j in map(residual_json, compared(deck, tgt).residuals) if j.get("target_element") == "p2t8"]
     assert got and all(r["within"] and r["off_page"] for r in got)
-    assert not [r for r in compare(deck, tgt).open() if r.get("target_element") == "p2t8"]
+    assert not [j for j in map(residual_json, compared(deck, tgt).open()) if j.get("target_element") == "p2t8"]
 
 
 # ------------------------------------------------------------------------------------------ notes

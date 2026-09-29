@@ -3,6 +3,7 @@ picture translators). Offline: no TeX, no Google. The compile loop on synthetic 
 opt-in (`python -m pytest -m inverse -k pictures`)."""
 
 import copy
+import dataclasses
 import hashlib
 import json
 import math
@@ -13,7 +14,8 @@ import numpy as np
 import pytest
 from PIL import Image
 
-from beamer2slides.compare import compare, displayed_picture, grey16, hash_distance, picture_hash
+from .test_inverse import current
+from beamer2slides.compare import TOL, compare, displayed_picture, grey16, hash_distance, picture_hash
 from beamer2slides.deck_ir import element_of, image_format, picture_props
 from beamer2slides.inverse import (Candidate, Context, Picture, Planner, Workspace, ensure_preamble, picture_latex,
                                    picture_slug, picture_sources, reading_order)
@@ -149,8 +151,8 @@ def planner_for(tmp_path: Path, cur: dict, target: dict, hashes: dict | None = N
     frames = [ws.source.frames[0] for _ in cur["slides"]]
     cand = Candidate(ws.source, tmp_path / "talk.pdf", cur, frames)
     ctx = Context()
-    comp = compare(cur, target, None, hashes)
-    return Planner(cand, comp, target, ctx, ws, set(), {}, hashes), ws, ctx
+    comp = compare(current(cur), target, TOL, hashes or {})
+    return Planner(cand, comp, target, ctx, ws, set(), {}, hashes or {}), ws, ctx
 
 
 def deck_with(elements):
@@ -208,7 +210,7 @@ def test_replace_tikz_figure_keeps_it_commented(tmp_path):
     hashes = {id(cur["slides"][0]["elements"][0]): [128] * 256, id(target["slides"][0]["elements"][0]): [128] * 256,
               id(cur["slides"][0]["elements"][1]): tikz_look, id(target["slides"][0]["elements"][1]): picture_hash(new)}
     p, ws, ctx = planner_for(tmp_path, cur, target, hashes)
-    assert [r["kind"] for r in p.comp.open()] == ["image"]
+    assert [r.kind for r in p.comp.open()] == ["image"]
     edits, failed = p.plan()
     assert failed == [] and len(edits) == 1
     ws.write(edits)
@@ -229,7 +231,7 @@ def test_new_picture_over_a_diagram_replaces_it(tmp_path):
     target = deck_with([copy.deepcopy(left), {"id": "img9", "kind": "image", "role": "figure", "bbox": [238, 92, 421, 189],
                                               "file": str(new)}])
     p, ws, ctx = planner_for(tmp_path, cur, target)
-    kinds = sorted(r["kind"] for r in p.comp.open() if r["kind"] != "geometry")
+    kinds = sorted(r.kind for r in p.comp.open() if r.kind != "geometry")
     assert kinds == ["element_extra", "element_missing"]
     edits, failed = p.plan()
     assert failed == []
@@ -249,8 +251,8 @@ def test_translucent_turned_tikz_keeps_its_source(tmp_path):
               id(target["slides"][0]["elements"][1]): [255] * 256,
               id(cur["slides"][0]["elements"][0]): [128] * 256, id(target["slides"][0]["elements"][0]): [128] * 256}
     p, ws, ctx = planner_for(tmp_path, cur, target, hashes)
-    assert [r["kind"] for r in p.comp.open() if r["kind"] == "image"] == ["image"]
-    p.comp.residuals = [r for r in p.comp.residuals if r["kind"] == "image"]
+    assert [r.kind for r in p.comp.open() if r.kind == "image"] == ["image"]
+    p.comp = dataclasses.replace(p.comp, residuals=tuple(r for r in p.comp.residuals if r.kind == "image"))
     edits, failed = p.plan()
     assert failed == []
     ws.write(edits)
@@ -261,7 +263,8 @@ def test_translucent_turned_tikz_keeps_its_source(tmp_path):
     p2, _, _ = planner_for(tmp_path / "again", cur, target, hashes)
     p2.ws, p2.cand = ws, Candidate(ws.source, tmp_path / "talk.pdf", cur, [ws.source.frames[0]])
     target["slides"][0]["elements"][1].update(opacity=0.25, rotation=-5.0)
-    p2.comp.residuals = [r for r in compare(cur, target, None, hashes).residuals if r["kind"] == "image"]
+    p2.comp = dataclasses.replace(p2.comp, residuals=tuple(
+        r for r in compare(current(cur), target, TOL, hashes).residuals if r.kind == "image"))
     p2.target, p2.tgt_slides = target, target["slides"]
     edits, failed = p2.plan()
     ws.write(edits)
@@ -278,7 +281,7 @@ def test_replaced_formula_picture_is_reported(tmp_path):
     hashes = {id(cur["slides"][0]["elements"][0]): [255] * 256, id(target["slides"][0]["elements"][0]): [0] * 256}
     p, ws, _ = planner_for(tmp_path, cur, target, hashes)
     edits, failed = p.plan()
-    assert edits == [] and len(failed) == 1 and "formula" in failed[0]["why"]
+    assert edits == [] and len(failed) == 1 and "formula" in failed[0].why
 
 
 def test_new_picture_with_edits_goes_into_a_textblock(tmp_path):
@@ -337,7 +340,7 @@ def loop_deck(tmp_path_factory):
     work = root / "base"
     built = Workspace(root / "src" / "talk.tex", work).build(work / "classify")
     assert not isinstance(built, str), built
-    return root, built.deck
+    return root, built.target()
 
 
 def record(name: str, res, seconds: float) -> None:
@@ -394,7 +397,7 @@ def test_converge_pictures(name, rounds, loop_deck, tmp_path):
     root, deck = loop_deck
     target = picture_targets(root, deck)[name]
     t = time.time()
-    res = converge(root / "src" / "talk.tex", target, tmp_path / "loop", max_iter=8)
+    res = converge(root / "src" / "talk.tex", target, tmp_path / "loop", 8, False, None, TOL, print, True, None)
     record(f"pictures:{name}", res, time.time() - t)
     assert res.converged, res.unresolved
     assert len(res.iterations) - 1 <= rounds

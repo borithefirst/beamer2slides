@@ -628,8 +628,9 @@ def test_dropping_leftovers_hides_them_from_everything_downstream():
 # ---------------------------------------------------------------- pull --apply
 
 def a_result(files, originals=None):
-    return Result(True, [{"iteration": 0, "open": 0, "by_kind": {}, "geometry_error": 0}], [], [], files, "",
-                  Path("."), [], [], originals or {})
+    return Result(converged=True, iterations=[{"iteration": 0, "open": 0, "by_kind": {}, "geometry_error": 0}],
+                  unresolved=[], residuals=[], files=files, patch="", work=Path("."), theme=[], notes=[],
+                  originals=originals or {}, labels=[], restored=[])
 
 
 def test_pull_apply_backs_the_file_up_and_replaces_it_whole(tmp_path):

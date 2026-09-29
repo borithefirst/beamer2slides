@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from beamer2slides import checks
-from beamer2slides.compare import compare, text_anchor
+from beamer2slides.compare import TOL, compare, residual_json, text_anchor, without_keys
 from beamer2slides.ir_types import parse_deck
 
 HERE = Path(__file__).resolve().parent
@@ -50,7 +50,7 @@ def hashes_of(decks: list, elements_of) -> dict:
 
 
 def plain(comp) -> str:
-    return json.dumps({"slides": comp.slides, "residuals": comp.residuals,
+    return json.dumps({"slides": comp.slides, "residuals": [residual_json(r) for r in comp.residuals],
                        "elements": sorted(comp.elements.items())}, default=str)
 
 
@@ -60,10 +60,10 @@ def test_typed_decks_compare_as_their_dicts(name):
     cur = checks.convert_locally(HERE / "decks" / "out" / f"{name}.pdf").deck
     tgt = edited(cur)
     typed_cur, typed_tgt = parse_deck(cur, "rendered"), parse_deck(tgt, "rendered")
-    by_dict = compare(cur, tgt, None, hashes_of([cur, tgt], lambda s: s["elements"]))
-    by_type = compare(typed_cur, typed_tgt, None, hashes_of([typed_cur, typed_tgt], lambda s: s.elements))
+    by_dict = compare(without_keys(cur), tgt, TOL, hashes_of([cur, tgt], lambda s: s["elements"]))
+    by_type = compare(without_keys(typed_cur), typed_tgt, TOL, hashes_of([typed_cur, typed_tgt], lambda s: s.elements))
     assert plain(by_type) == plain(by_dict)
-    kinds = {r["kind"] for r in by_dict.open()}
+    kinds = {r.kind for r in by_dict.open()}
     assert kinds, "the edits made no difference compare saw"
 
 

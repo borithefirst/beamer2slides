@@ -330,6 +330,7 @@ def run_one(name: str, iters: int = 0, flow: bool = False, slides: str | None = 
 
 def _run(name, folder, run, res, t0, iters, flow, slides, cache, guard, blind, files) -> dict:
     from beamer2slides import adopt
+    from beamer2slides.compare import TOL
     from beamer2slides.inverse import Workspace, converge
     try:
         target = load_target(folder, slides, run, files)
@@ -371,8 +372,8 @@ def _run(name, folder, run, res, t0, iters, flow, slides, cache, guard, blind, f
         store(hit, run, {**{k: res[k] for k in ("bootstrap", "frame_errors") if k in res},
                          "full_s": round(time.perf_counter() - t0, 1)})
         if iters:
-            result = converge(tex, target, run / "loop", max_iter=iters, log=lambda *_: None, guard=guard,
-                              thumbnails=False if blind else None)
+            result = converge(tex, target, run / "loop", max_iter=iters, handout=False, engine=None, tol=TOL,
+                              log=lambda *_: None, guard=guard, thumbnails=False if blind else None)
             # the promise is convergence, so say it per deck: did it, and did the rounds bring the
             # open residuals down or up (the saudi-cats deck went 127 -> 138 and nothing said so)
             res["loop"] = {"iterations": result.iterations, "converged": result.converged,

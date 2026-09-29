@@ -66,7 +66,7 @@ def test_an_optically_heavier_footline_pulls_back_with_no_residual():
     # the whole round trip on a deck whose footline is a 6 pt EC sans cut: emit's requests replayed
     # the way Google stores them (a weight of 700 and up reads back bold), read by deck_ir, compared
     import copy
-    from beamer2slides.compare import compare
+    from beamer2slides.compare import TOL, compare, without_keys
     from beamer2slides.deck_ir import deck_ir
     from .slides_sim import simulate
     from .test_inverse import TEXT_KINDS, built_pdf
@@ -88,8 +88,8 @@ def test_an_optically_heavier_footline_pulls_back_with_no_residual():
               for te in pe.get("shape", {}).get("text", {}).get("textElements", []) if "textRun" in te]
     assert any((st.get("weightedFontFamily") or {}).get("weight") == emit.OPTICAL_WEIGHT and not st.get("bold")
                for st in styles)
-    comp = compare(deck, deck_ir(pres, deck["slides"][0]["size"]))
-    assert [r for r in comp.open() if r["kind"] in TEXT_KINDS] == []
+    comp = compare(without_keys(deck), deck_ir(pres, deck["slides"][0]["size"]), TOL, {})
+    assert [r for r in comp.open() if r.kind in TEXT_KINDS] == []
 
 
 def test_a_weight_is_laid_out_in_the_face_slides_draws_it_in():

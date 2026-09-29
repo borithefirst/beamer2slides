@@ -113,11 +113,11 @@ def target_for(folder: Path, slides: str | None, fresh: bool) -> dict:
     return target
 
 
-def replay(spec: str, fresh: bool = False) -> dict:
+def replay(spec: str, fresh: bool) -> dict:
     """Round 0 of the loop on one deck (or a slide range of it). Never raises."""
     from beamer2slides import adopt
-    from beamer2slides.compare import compare
-    from beamer2slides.inverse import Workspace, picture_hashes, uses_notes
+    from beamer2slides.compare import TOL, SlideExtra, compare, target_slide_of
+    from beamer2slides.inverse import Workspace, picture_hashes, typed_target, uses_notes
     from beamer2slides.texmap import Source
     name, _, slides = spec.partition(":")
     folder = CORPUS / name
@@ -177,16 +177,18 @@ def replay(spec: str, fresh: bool = False) -> dict:
                 score_file.write_text(json.dumps(ink), encoding="utf-8")
         times["ink"] = time.perf_counter() - t
         t = time.perf_counter()
-        comp = compare(cand.deck, target, None, picture_hashes(cand, target, home / "work"))
+        typed = typed_target(target)
+        comp = compare(cand.current(), typed, TOL, picture_hashes(cand, typed, home / "work"))
         found = comp.open()
         times["compare"] = time.perf_counter() - t
-        per_slide = Counter(r.get("target_slide", r.get("slide")) for r in found)
-        suspect = [r for r in found if (j := r.get("target_slide", r.get("slide"))) is not None
+        # a residual's slide: the target's, or for a page the target lacks, the page's own index
+        per_slide = Counter(r.slide if isinstance(r, SlideExtra) else target_slide_of(r) for r in found)
+        suspect = [r for r in found if (j := r.slide if isinstance(r, SlideExtra) else target_slide_of(r)) is not None
                    and j < len(ink) and ink[j] >= SUSPECT_INK]
         res.update(pages=len(cand.deck["slides"]), ink=round(sum(ink) / max(1, len(ink)), 3),
                    open=len(found), suspect=len(suspect),
-                   kinds=dict(Counter(r["kind"] for r in found).most_common()),
-                   suspect_kinds=dict(Counter(r["kind"] for r in suspect).most_common()),
+                   kinds=dict(Counter(r.kind for r in found).most_common()),
+                   suspect_kinds=dict(Counter(r.kind for r in suspect).most_common()),
                    slides=[{"slide": j + 1, "ink": ink[j] if j < len(ink) else None, "open": per_slide.get(j, 0)}
                            for j in range(res["n"])])
     except Exception as exc:                            # noqa: BLE001 - the crash is the finding

@@ -19,7 +19,8 @@ from pathlib import Path
 import pytest
 
 from . import inverse_edits as ed
-from beamer2slides.compare import bullet_sig, compare, match_slides, style_diffs, word_diff
+from beamer2slides.compare import (TOL, BoxGeometry, Current, TextGeometry, WordOp, bullet_sig, compare, match_slides,
+                                   residual_json, style_diffs, target_slide_of, without_keys, word_diff)
 from beamer2slides.inverse import (Candidate, Context, Planner, Workspace, balance_span, colour_name, enclosing_group,
                                    ensure_preamble, frame_latex, latex_escape, runs_latex, size_switch)
 from beamer2slides.texmap import (OPAQUE, Source, build_visible, locate_words, mask_comments, page_frames,
@@ -35,6 +36,16 @@ def fixture_deck() -> dict:
 
 def slide_of(deck: dict, key: str) -> int:
     return next(i for i, s in enumerate(deck["slides"]) if s.get("key") == key)
+
+
+def current(deck: dict) -> Current:
+    """A fixture deck as the loop's current side: its slides known by the keys the fixture gives
+    them (the loop's own come from the frames' labels, `Candidate.keys`)."""
+    return Current(deck=deck, keys=tuple(s.get("key") for s in deck["slides"]))
+
+
+def compared(cur: dict, tgt: dict):
+    return compare(current(cur), tgt, TOL, {})
 
 
 # ---------------------------------------------------------------- texmap
@@ -109,23 +120,23 @@ def test_source_frames_inputs_and_labels(tmp_path):
 
 def test_self_comparison_is_clean():
     deck = fixture_deck()
-    assert compare(deck, copy.deepcopy(deck)).open() == []
+    assert compared(deck, copy.deepcopy(deck)).open() == []
 
 
 def residual_kinds(target: dict) -> dict:
-    return compare(fixture_deck(), target).summary()
+    return compared(fixture_deck(), target).summary()
 
 
 def test_residuals_of_synthetic_edits():
     d = fixture_deck()
     method, results, motivation = slide_of(d, "method"), slide_of(d, "results"), slide_of(d, "motivation")
     moved = ed.move(d, method, ed.element(d, method, text="Residuals turn"), 0, 40)
-    geo = [r for r in compare(d, moved).open() if r["kind"] == "geometry"]
-    assert len(geo) == 1 and abs(geo[0]["dy"] - 40) < 0.5 and abs(geo[0]["dx"]) < 0.5
+    geo = [r for r in compared(d, moved).open() if isinstance(r, (TextGeometry, BoxGeometry))]
+    assert len(geo) == 1 and abs(geo[0].dy - 40) < 0.5 and abs(geo[0].dx) < 0.5
     assert residual_kinds(ed.split_style(d, method, "classify", bold=True)) == {"style": 1}
-    recoloured = compare(d, ed.split_style(d, method, "classify", color="#ff0000")).open()
+    recoloured = [residual_json(r) for r in compared(d, ed.split_style(d, method, "classify", color="#ff0000")).open()]
     assert [(r["field"], r["tgt"], r["text"]) for r in recoloured] == [("color", "#ff0000", "classify")]
-    text = compare(d, ed.reword(d, results, "second round", "third round")).open()
+    text = [residual_json(r) for r in compared(d, ed.reword(d, results, "second round", "third round")).open()]
     assert [r["kind"] for r in text] == ["text"] and text[0]["ops"][0]["tgt"] == "third"
     # a new box is also a new paragraph of the slide's text
     assert residual_kinds(ed.add_text_box(d, method, "Added in Slides", 190, 230)) == {"element_missing": 1,
@@ -184,15 +195,15 @@ def test_a_note_hyphenated_at_a_line_end_is_the_same_note():
 
 def residual_kinds_between(cur: dict, tgt: dict) -> dict:
     from collections import Counter
-    return dict(Counter(r["kind"] for r in compare(cur, tgt).open()))
+    return dict(Counter(r.kind for r in compared(cur, tgt).open()))
 
 
 def test_word_and_style_diffs():
-    assert word_diff("a b c", "a x c") == [{"op": "replace", "cur": "b", "tgt": "x", "c": [1, 2], "t": [1, 2]}]
+    assert word_diff("a b c", "a x c") == [WordOp(op="replace", cur="b", tgt="x", c=(1, 2), t=(1, 2))]
     run = {"text": "one two", "size": 10.9, "color": "#000000"}
     cur = {"runs": [run]}
     tgt = {"runs": [{**run, "text": "one "}, {**run, "text": "two", "bold": True}]}
-    assert [(d["field"], d["text"]) for d in style_diffs(cur, tgt, {"font": 0.06, "color": 24})] == [("bold", "two")]
+    assert [(d.change.field, d.text) for d in style_diffs(cur, tgt, {"font": 0.06, "color": 24})] == [("bold", "two")]
     # formula holes and script sizes aren't styles the source controls
     hole_c = {"runs": [{"text": "a ", "size": 10.9}, {"text": " ", "hole": 20, "size": 10.9}]}
     hole_t = {"runs": [{"text": "a ", "size": 10.9}, {"text": " ", "hole": 20, "size": 12.4, "family": "mono"}]}
@@ -236,7 +247,7 @@ def plan_offline(tmp_path: Path, target: dict) -> str:
     frames = [ws.source.frames[s["frame_index"]] for s in deck["slides"]]
     cand = Candidate(ws.source, tmp_path / "a.pdf", deck, frames)
     ctx = Context()
-    edits, failed = Planner(cand, compare(deck, target), target, ctx, ws, set(), {}).plan()
+    edits, failed = Planner(cand, compared(deck, target), target, ctx, ws, set(), {}, {}).plan()
     assert edits, failed
     ws.write(edits)
     pre = ensure_preamble(ws, ctx)
@@ -305,11 +316,11 @@ def test_deck_ir_reads_back_what_emit_writes(name):
     from beamer2slides.extract import extract, select_overlays
     deck = classify(select_overlays(extract(built_pdf(name), None), "last"))
     ir = deck_ir(simulate(deck), deck["slides"][0]["size"])
-    comp = compare(deck, ir)
-    bad = [r for r in comp.open() if r["kind"] in TEXT_KINDS or (r["kind"] == "geometry" and "dw" not in r)]
+    comp = compare(without_keys(deck), ir, TOL, {})
+    bad = [r for r in comp.open() if r.kind in TEXT_KINDS or isinstance(r, TextGeometry)]
     assert bad == []
-    anchors = [r for r in comp.residuals if r["kind"] == "geometry" and "dw" not in r]
-    assert all(abs(r["dx"]) < 0.05 and abs(r["dy"]) < 0.05 for r in anchors)
+    anchors = [r for r in comp.residuals if isinstance(r, TextGeometry)]
+    assert all(abs(r.dx) < 0.05 and abs(r.dy) < 0.05 for r in anchors)
 
 
 def test_deck_ir_sees_slides_edits():
@@ -338,11 +349,11 @@ def test_deck_ir_sees_slides_edits():
     assert start >= 0
     scale = pres["pageSize"]["width"]["magnitude"] / 12700 / deck["slides"][0]["size"][0]
     box["transform"]["translateY"] += 30 * scale * 12700
-    comp = compare(deck, deck_ir(pres, deck["slides"][0]["size"]))
-    styles = [r for r in comp.open() if r["kind"] == "style"]
+    comp = compare(without_keys(deck), deck_ir(pres, deck["slides"][0]["size"]), TOL, {})
+    styles = [residual_json(r) for r in comp.open() if r.kind == "style"]
     assert [(r["field"], r["text"]) for r in styles] == [("bold", "Plain")]
-    geo = [r for r in comp.open() if r["kind"] == "geometry" and r["target_slide"] == si]
-    assert len(geo) == 1 and abs(geo[0]["dy"] - 30) < 0.05
+    geo = [r for r in comp.open() if isinstance(r, (TextGeometry, BoxGeometry)) and target_slide_of(r) == si]
+    assert len(geo) == 1 and abs(geo[0].dy - 30) < 0.05
 
 
 # ---------------------------------------------------------------- the compile loop (opt-in)
@@ -374,7 +385,7 @@ def test_converge_source_pairs(name, rounds, tmp_path):
     from beamer2slides.inverse import converge, ir_from_tex
     target = ir_from_tex(INV / f"{name}.tex", tmp_path / "target")
     t = time.time()
-    res = converge(INV / "a.tex", target, tmp_path / "loop", max_iter=8)
+    res = converge(INV / "a.tex", target, tmp_path / "loop", 8, False, None, TOL, print, True, None)
     record(f"pair:{name}", res, time.time() - t)
     assert res.converged, res.unresolved
     assert len(res.iterations) - 1 <= rounds
@@ -401,7 +412,7 @@ def basic_deck(tmp_path_factory):
     work = tmp_path_factory.mktemp("basic")
     built = Workspace(TESTS / "decks" / "01_basic.tex", work).build(work / "classify")
     assert not isinstance(built, str), built
-    return built.deck
+    return built.target()
 
 
 @pytest.mark.inverse
@@ -411,7 +422,7 @@ def test_converge_synthetic_edits(name, basic_deck, tmp_path):
     make, rounds = SYNTHETIC[name]
     target = make(basic_deck)
     t = time.time()
-    res = converge(TESTS / "decks" / "01_basic.tex", target, tmp_path / "loop", max_iter=8)
+    res = converge(TESTS / "decks" / "01_basic.tex", target, tmp_path / "loop", 8, False, None, TOL, print, True, None)
     record(f"synthetic:{name}", res, time.time() - t)
     assert res.converged, res.unresolved
     assert len(res.iterations) - 1 <= rounds

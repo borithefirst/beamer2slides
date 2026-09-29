@@ -36,6 +36,11 @@ import hashlib
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .compare import Comparison
+    from .inverse import Candidate
 
 # boxes score a frame may lose before it is put back: float noise only. At 0.005 five micro-corpus
 # slides kept rounds that cost 0.001-0.002 of ink and bought no residual (apps-edu-zh:9 13 -> 13,
@@ -149,9 +154,10 @@ class FrameGuard:
             self.cache[key] = boxes_score(doc[0][cand.deck["slides"][ci]["page"]], ref, self.target["slides"][j])
         return self.cache[key]
 
-    def penalty(self, cand, comp, cis: list[int], slides: tuple[int, ...]) -> float:
+    def penalty(self, cand: Candidate, comp: Comparison, cis: list[int], slides: tuple[int, ...]) -> float:
+        from .compare import target_slide_of
         wanted = set(slides)
-        res = sum(RESIDUAL_WEIGHT.get(r["kind"], 1.0) for r in comp.open() if r.get("target_slide") in wanted)
+        res = sum(RESIDUAL_WEIGHT.get(r.kind, 1.0) for r in comp.open() if target_slide_of(r) in wanted)
         got = [w for ci in cis for w in words_of(" ".join(cand.words.get(cand.deck["slides"][ci]["page"], [])))]
         want = [w for j in slides for w in self.target_words(j)]
         return res + WORD_WEIGHT * word_error(want, got)

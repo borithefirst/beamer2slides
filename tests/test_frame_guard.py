@@ -13,6 +13,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from beamer2slides import inverse
+from beamer2slides.compare import TOL
 from beamer2slides.frame_guard import FrameGuard, Seen, slide_words, why, word_error
 from beamer2slides.inverse import Candidate, Edit, converge, report
 
@@ -110,7 +111,7 @@ def test_a_frame_the_loop_made_worse_is_put_back(tmp_path, stand_ins, thumbnails
     tree.mkdir()
     (tree / "main.tex").write_text(SOURCE, encoding="utf-8")
     tgt = target(tmp_path, thumbnails)
-    res = converge(tree / "main.tex", tgt, tmp_path / "loop", max_iter=3, log=lambda *_: None)
+    res = converge(tree / "main.tex", tgt, tmp_path / "loop", 3, False, None, TOL, lambda *_: None, True, None)
 
     assert len(stand_ins) == 2                                  # one bad round, then nothing to write
     assert [it["open"] for it in res.iterations] == [1, 2]      # the loop's own view: one more residual
@@ -136,8 +137,8 @@ def test_without_the_guard_the_bad_edit_stays(tmp_path, stand_ins):
     tree = tmp_path / "tree"
     tree.mkdir()
     (tree / "main.tex").write_text(SOURCE, encoding="utf-8")
-    res = converge(tree / "main.tex", target(tmp_path, True), tmp_path / "loop", max_iter=3,
-                   log=lambda *_: None, guard=False)
+    res = converge(tree / "main.tex", target(tmp_path, True), tmp_path / "loop", 3, False, None, TOL,
+                   lambda *_: None, False, None)
     assert res.restored == [] and "Beta BAD" in next(iter(res.files.values()))
 
 

@@ -581,10 +581,11 @@ def resync(made: Made, home: Path) -> None:
 def compare_read_back(made: Made, home: Path) -> None:
     """`compare` of a converted deck with what `deck_ir` reads from it (the pull of a converted,
     unedited deck): it runs, and every element of the source is compared."""
-    from beamer2slides.compare import compare
+    from beamer2slides.compare import TOL, compare, without_keys
+    from beamer2slides.inverse import typed_target
 
     source = made.extra["source"]
-    comp = compare(copy.deepcopy(source.deck), copy.deepcopy(made.deck))
+    comp = compare(without_keys(copy.deepcopy(source.deck)), typed_target(copy.deepcopy(made.deck)), TOL, {})
     comp.open()
     comp.summary()
 
@@ -593,13 +594,14 @@ def round0(made: Made, home: Path) -> None:
     """The pull loop's first round on an adopted source (`inverse.converge`, `adopt_replay`):
     picture hashes, `compare` with the deck adopt read, the frame guard's look (no thumbnails:
     residuals and words) and the planner's edits."""
-    from beamer2slides.compare import compare
+    from beamer2slides.compare import TOL, compare
     from beamer2slides.frame_guard import FrameGuard
-    from beamer2slides.inverse import Context, Planner, class_pt_option, picture_hashes
+    from beamer2slides.inverse import Context, Planner, class_pt_option, picture_hashes, typed_target
 
     cand, target, ws = made.extra["candidate"], made.extra["target"], made.extra["workspace"]
-    hashes = picture_hashes(cand, target, home / "work")
-    comp = compare(cand.deck, target, None, hashes)
+    typed = typed_target(target)
+    hashes = picture_hashes(cand, typed, home / "work")
+    comp = compare(cand.current(), typed, TOL, hashes)
     comp.summary()
     FrameGuard(target, None, lambda *a: None).observe(0, cand, comp)
     Planner(cand, comp, target, Context(pt_option=class_pt_option(ws.source)), ws, set(), {}, hashes).plan()

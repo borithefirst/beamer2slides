@@ -7,12 +7,13 @@ paragraphs they hold; pictures and shapes by kind, box and picture hash.
 
 Residual kinds: slide_missing, slide_extra, slide_order, notes, background, paragraph_missing,
 paragraph_extra, paragraph_order, text, style, bullet, align, element_missing, element_extra,
-geometry, image, shape, table. Every residual carries `within` (inside the tolerance).
+geometry, image, shape, table, diagram: one record each (`Residual`, written as JSON by
+`residual_json`). Every residual carries `within` (inside the tolerance).
 
 What compare reads it reads into records of its own (`SlideView` and the element views), not into
-`ir_types`: the two sides are not one stage of deck.json. The current side is classify's, but a
-pull candidate's slides also carry `key` and `frame_index`, which the IR has no place for; the
-target is often `deck_ir`'s reading of a live deck (a Slides box's `anchor`, `box` and
+`ir_types`: the two sides are not one stage of deck.json. The current side is classify's, with the
+frame label of each slide beside it (`Current`: a pull candidate knows them from SyncTeX, and the
+IR has no place for them); the target is often `deck_ir`'s reading of a live deck (a Slides box's `anchor`, `box` and
 `wrap_width`, tables as rows of strings, keys like `objectId` and `shape_type`), which the IR does
 not model. So a deck given as a dict is read here key by key, as far as compare reads it, and a
 deck already parsed (`ir_types.Deck` or `RenderedDeck`) is written back to its JSON and read the
@@ -28,13 +29,14 @@ import unicodedata
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar, Union
+from typing import TYPE_CHECKING, Literal, TypeVar, Union
 
 from .classify import FRAME_COUNTER_RE
 from .emit import merge_blocks
 from .fonts import google_font
+from .deck_ir_types import TargetDeck, target_json
 from .ir_types import At, Box, Deck, Parse, RenderedDeck, box, deck_json, integer, number, one_of, pair, point, string
-from .json_types import Json, JsonObject, JsonShapeError, as_array, as_object, as_objects, as_str
+from .json_types import Json, JsonArray, JsonObject, JsonShapeError, as_array, as_object, as_objects, as_str
 from .typing_compat import assert_never
 
 if TYPE_CHECKING:
@@ -345,18 +347,20 @@ def slide_view(s: JsonObject, refs: Sequence[int], where: str) -> SlideView:
                      elements=views, shapes=shapes)
 
 
-DeckInput = Union[JsonObject, Deck, RenderedDeck]
+DeckInput = Union[JsonObject, Deck, RenderedDeck, TargetDeck]
+"""A side of a comparison: deck.json as a dict or parsed, or `deck_ir`'s read of a deck (a pull's
+target, `deck_ir_types`)."""
 
 
 def deck_views(deck: DeckInput, side: str) -> list[SlideView]:
-    """Each slide of a deck given as deck.json's dict, or parsed: written back to its JSON and read
-    the same way, its elements named by the typed values' identities (what a caller holding them
-    keys `hashes` by)."""
+    """Each slide of a deck given as deck.json's dict, or parsed (deck.json's types or a target's):
+    written back to its JSON and read the same way, its elements named by the typed values'
+    identities (what a caller holding them keys `hashes` by)."""
     if isinstance(deck, dict):
         slides = as_objects(deck["slides"], f"{side} slides")
         return [slide_view(s, [id(e) for e in as_objects(s["elements"], f"{side} slide {i}")], f"{side} slide {i}")
                 for i, s in enumerate(slides)]
-    data = deck_json(deck)
+    data = target_json(deck) if isinstance(deck, TargetDeck) else deck_json(deck)
     slides = as_objects(data["slides"], f"{side} slides")
     return [slide_view(s, [id(e) for e in typed.elements], f"{side} slide {i}")
             for i, (s, typed) in enumerate(zip(slides, deck.slides))]
@@ -683,7 +687,7 @@ def match_paragraphs(cur: Sequence[Para], tgt: Sequence[Para]) -> list[tuple[int
 
 StyleField = Literal["bold", "italic", "underline", "color", "size", "mono"]
 STYLE_FIELDS: tuple[StyleField, ...] = ("bold", "italic", "underline", "color", "size", "mono")
-StyleValue = Union[bool, str, float, None]
+FlagField = Literal["bold", "italic", "underline", "mono"]
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -697,19 +701,54 @@ class CharStyle:
     script: bool
 
 
-def style_value(st: CharStyle, fld: StyleField) -> StyleValue:
-    if fld == "bold":
-        return st.bold
-    if fld == "italic":
-        return st.italic
-    if fld == "underline":
-        return st.underline
+@dataclass(frozen=True, kw_only=True)
+class FlagChange:
+    """Bold, italic, underline or monospace on one side and not on the other."""
+    field: FlagField
+    cur: bool
+    tgt: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class ColorChange:
+    field: Literal["color"]
+    cur: str
+    tgt: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class SizeChange:
+    """Both sides say a size (a size only one side says is no difference)."""
+    field: Literal["size"]
+    cur: float
+    tgt: float
+
+
+StyleChange = Union[FlagChange, ColorChange, SizeChange]
+
+
+def flag_change(fld: FlagField, cur: bool, tgt: bool) -> FlagChange | None:
+    return FlagChange(field=fld, cur=cur, tgt=tgt) if cur != tgt else None
+
+
+def style_change(fld: StyleField, c: CharStyle, t: CharStyle, tol: Mapping[str, float]) -> StyleChange | None:
+    """How one character's `fld` differs between the current and the target side, beyond `tol`."""
     if fld == "color":
-        return st.color
+        return ColorChange(field="color", cur=c.color, tgt=t.color) \
+            if colour_distance(c.color, t.color) > tol["color"] else None
     if fld == "size":
-        return st.size
+        a, b = c.size, t.size
+        if a and b and abs(a - b) > tol["font"] * max(a, b):
+            return SizeChange(field="size", cur=a, tgt=b)
+        return None
+    if fld == "bold":
+        return flag_change("bold", c.bold, t.bold)
+    if fld == "italic":
+        return flag_change("italic", c.italic, t.italic)
+    if fld == "underline":
+        return flag_change("underline", c.underline, t.underline)
     if fld == "mono":
-        return st.mono
+        return flag_change("mono", c.mono, t.mono)
     assert_never(fld)
 
 
@@ -725,12 +764,12 @@ def char_styles(runs: Sequence[RunView], size: float | None) -> tuple[str, list[
     return text, styles
 
 
-class StyleDiff(TypedDict):
+@dataclass(frozen=True, kw_only=True)
+class StyleDiff:
     """A range of equal text whose style differs (offsets in the target's and the current
-    paragraph's text): one `style` residual's own keys."""
-    field: StyleField
-    cur: StyleValue
-    tgt: StyleValue
+    paragraph's text), and how it differs where the range starts: one `style` residual's own
+    fields."""
+    change: StyleChange
     t0: int
     t1: int
     c0: int
@@ -745,28 +784,28 @@ def run_style_diffs(cur: tuple[str, list[CharStyle]], tgt: tuple[str, list[CharS
     sm = difflib.SequenceMatcher(None, ct, tt, autojunk=False)
     out: list[StyleDiff] = []
 
-    def off(k: int, fld: StyleField, a: int, b: int) -> bool:
+    def off(k: int, fld: StyleField, a: int, b: int) -> StyleChange | None:
         c, t = cs[a + k], ts[b + k]
         if tt[b + k] == HOLE or (fld == "size" and (c.script or t.script)):
-            return False
-        return differs(fld, c, t, tol)
+            return None
+        return style_change(fld, c, t, tol)
 
     for a, b, n in sm.get_matching_blocks():
         for fld in STYLE_FIELDS:
             k = 0
             while k < n:
-                c, t = cs[a + k], ts[b + k]
-                if not off(k, fld, a, b) or tt[b + k].isspace():
+                change = off(k, fld, a, b)
+                if change is None or tt[b + k].isspace():
                     k += 1
                     continue
                 start = k
-                while k < n and (off(k, fld, a, b) or tt[b + k].isspace()):
+                while k < n and (off(k, fld, a, b) is not None or tt[b + k].isspace()):
                     k += 1
                 end = k
                 while end > start and tt[b + end - 1].isspace():
                     end -= 1
-                out.append({"field": fld, "cur": style_value(c, fld), "tgt": style_value(t, fld), "t0": b + start,
-                            "t1": b + end, "c0": a + start, "c1": a + end, "text": tt[b + start:b + end]})
+                out.append(StyleDiff(change=change, t0=b + start, t1=b + end, c0=a + start, c1=a + end,
+                                     text=tt[b + start:b + end]))
     return out
 
 
@@ -777,30 +816,44 @@ def style_diffs(cp: JsonObject, tp: JsonObject, tol: Mapping[str, float]) -> lis
     return run_style_diffs(styled(cp), styled(tp), tol)
 
 
-def differs(fld: StyleField, c: CharStyle, t: CharStyle, tol: Mapping[str, float]) -> bool:
-    if fld == "color":
-        return colour_distance(c.color, t.color) > tol["color"]
-    if fld == "size":
-        a, b = c.size, t.size
-        return bool(a and b) and a is not None and b is not None and abs(a - b) > tol["font"] * max(a, b)
-    return style_value(c, fld) != style_value(t, fld)
+WordOpKind = Literal["replace", "delete", "insert"]
 
 
-class WordOp(TypedDict):
-    op: str
+@dataclass(frozen=True, kw_only=True)
+class WordOp:
+    """Words `c` of the current paragraph become words `t` of the target's (half-open ranges)."""
+    op: WordOpKind
     cur: str
     tgt: str
-    c: list[int]
-    t: list[int]
+    c: tuple[int, int]
+    t: tuple[int, int]
+
+
+def word_op_kind(tag: str) -> WordOpKind | None:
+    """difflib's opcode tag; None for "equal"."""
+    if tag == "replace":
+        return "replace"
+    if tag == "delete":
+        return "delete"
+    if tag == "insert":
+        return "insert"
+    if tag == "equal":
+        return None
+    raise ValueError(f"difflib opcode {tag!r}")
 
 
 def word_diff(a: str, b: str) -> list[WordOp]:
     wa, wb = a.split(), b.split()
     ops: list[WordOp] = []
     for tag, a0, a1, b0, b1 in difflib.SequenceMatcher(None, wa, wb, autojunk=False).get_opcodes():
-        if tag != "equal":
-            ops.append({"op": tag, "cur": " ".join(wa[a0:a1]), "tgt": " ".join(wb[b0:b1]), "c": [a0, a1], "t": [b0, b1]})
+        op = word_op_kind(tag)
+        if op is not None:
+            ops.append(WordOp(op=op, cur=" ".join(wa[a0:a1]), tgt=" ".join(wb[b0:b1]), c=(a0, a1), t=(b0, b1)))
     return ops
+
+
+def word_op_json(o: WordOp) -> JsonObject:
+    return {"op": o.op, "cur": o.cur, "tgt": o.tgt, "c": [o.c[0], o.c[1]], "t": [o.t[0], o.t[1]]}
 
 
 BulletSig = tuple[Literal["number", "bullet"] | None, int]
@@ -1036,58 +1089,522 @@ def displayed_picture(el: Mapping[str, Json]) -> "Image.Image | None":
 
 # ---------------------------------------------------------------- compare
 
-@dataclass(kw_only=True)
-class Comparison:
-    """`residuals` are the one untyped value left here, on purpose: inverse reads them key by key
-    through `dict` parameters, and no typed form passes those (a TypedDict is refused by a `dict`
-    parameter, and a `dict[str, object]` makes each of inverse's reads an error). A record per
-    residual kind comes with inverse's reading them by kind. Not frozen: test_pull_images narrows
-    a planner's comparison to its picture residuals in place."""
-    slides: list[tuple[int | None, int | None]]
-    residuals: list[dict]
-    elements: dict[tuple[int, str], tuple[int, str]]   # (ci, element id) -> (ti, target element id)
+# Each residual kind is a record of its own (`Residual`, the union), its `kind` the one it has in
+# the JSON reports and agents read (`residual_json`: key for key, in the order compare always wrote
+# them). `within`: inside the tolerance, or owned by the theme; `Comparison.open` leaves those out.
+# A residual of a slide both sides have names it on both (`slide`, `target_slide`); an element or a
+# paragraph by its id and index on the side it is on.
 
-    def open(self) -> list[dict]:
-        return [r for r in self.residuals if not r["within"]]
+BoxKind = Literal["image", "shape", "table", "diagram"]
+
+
+@dataclass(frozen=True, kw_only=True)
+class After:
+    """The current paragraph a missing or moved one goes after."""
+    element: str
+    para: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class SlideOrder:
+    kind: Literal["slide_order"]
+    within: bool
+    slide: int
+    target_slide: int
+
+
+@dataclass(frozen=True, kw_only=True)
+class SlideMissing:
+    kind: Literal["slide_missing"]
+    within: bool
+    target_slide: int
+    title: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class SlideExtra:
+    kind: Literal["slide_extra"]
+    within: bool
+    slide: int
+    title: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class NotesResidual:
+    kind: Literal["notes"]
+    within: bool
+    slide: int
+    target_slide: int
+    cur: str | None
+    tgt: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class BackgroundResidual:
+    kind: Literal["background"]
+    within: bool
+    slide: int
+    target_slide: int
+    cur: str
+    tgt: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class ParagraphMissing:
+    kind: Literal["paragraph_missing"]
+    within: bool
+    slide: int
+    target_slide: int
+    target_element: str
+    target_para: int
+    text: str
+    after: After | None
+    off_page: bool         # its element lies wholly off the page (then `within`)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ParagraphExtra:
+    kind: Literal["paragraph_extra"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    para: int
+    text: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class ParagraphOrder:
+    kind: Literal["paragraph_order"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    para: int
+    target_element: str
+    target_para: int
+    text: str
+    after: After | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class TextResidual:
+    kind: Literal["text"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    para: int
+    target_element: str
+    target_para: int
+    cur: str
+    tgt: str
+    ops: tuple[WordOp, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class StyleResidual:
+    kind: Literal["style"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    para: int
+    target_element: str
+    target_para: int
+    change: StyleChange
+    t0: int
+    t1: int
+    c0: int
+    c1: int
+    text: str
+    theme: bool            # a whole title's size or colour: the theme's (then `within`)
+
+
+@dataclass(frozen=True, kw_only=True)
+class BulletResidual:
+    kind: Literal["bullet"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    para: int
+    target_element: str
+    target_para: int
+    cur: "BulletSig"
+    tgt: "BulletSig"
+
+
+@dataclass(frozen=True, kw_only=True)
+class AlignResidual:
+    kind: Literal["align"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    para: int
+    target_element: str
+    target_para: int
+    cur: str
+    tgt: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class TextMissing:
+    kind: Literal["element_missing"]
+    within: bool
+    slide: int
+    target_slide: int
+    target_element: str
+    el_kind: Literal["text"]
+    text: str
+    role: str | None
+    off_page: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class BoxMissing:
+    kind: Literal["element_missing"]
+    within: bool
+    slide: int
+    target_slide: int
+    target_element: str
+    el_kind: BoxKind
+    bbox: Box
+    file: str | None
+    off_page: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class TextGeometry:
+    """A text element's anchor (`anchor_of`) moved: `cur` and `tgt` are (x, baseline)."""
+    kind: Literal["geometry"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    target_element: str
+    para: int
+    dx: float
+    dy: float
+    cur: tuple[float, float]
+    tgt: tuple[float, float]
+    align: str
+    wrap_width: float | None
+    mixed: bool
+    theme: bool            # a frame title moved beyond the tolerance: the theme places it
+
+
+@dataclass(frozen=True, kw_only=True)
+class BoxGeometry:
+    kind: Literal["geometry"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    target_element: str
+    el_kind: BoxKind
+    dx: float
+    dy: float
+    dw: float
+    dh: float
+    cur: Box
+    tgt: Box
+
+
+@dataclass(frozen=True, kw_only=True)
+class TextExtra:
+    kind: Literal["element_extra"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    el_kind: Literal["text"]
+    text: str
+
+
+@dataclass(frozen=True, kw_only=True)
+class BoxExtra:
+    kind: Literal["element_extra"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    el_kind: BoxKind
+    bbox: Box
+
+
+@dataclass(frozen=True, kw_only=True)
+class DiagramResidual:
+    kind: Literal["diagram"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    target_element: str
+    cur: tuple[str, ...]
+    tgt: tuple[str, ...]
+
+
+@dataclass(frozen=True, kw_only=True)
+class ImageResidual:
+    """A paired picture shows something else."""
+    kind: Literal["image"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    target_element: str
+    distance: float
+    file: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class InlineImage:
+    """A formula or icon picture in a text line shows something else (never written back)."""
+    kind: Literal["image"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    target_element: str
+    distance: float
+    role: str | None
+    file: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class ShapeResidual:
+    kind: Literal["shape"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    target_element: str
+    cur: str | None
+    tgt: str | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class TableResidual:
+    kind: Literal["table"]
+    within: bool
+    slide: int
+    target_slide: int
+    element: str
+    target_element: str
+    cur: tuple[tuple[str, ...], ...]
+    tgt: tuple[tuple[str, ...], ...]
+
+
+SlideResidual = Union[SlideOrder, SlideMissing, SlideExtra]
+ListResidual = Union[ParagraphMissing, ParagraphExtra, ParagraphOrder, BulletResidual]
+ElementMissing = Union[TextMissing, BoxMissing]
+ElementExtra = Union[TextExtra, BoxExtra]
+Geometry = Union[TextGeometry, BoxGeometry]
+ImageChange = Union[ImageResidual, InlineImage]
+# every residual of a slide both sides have
+PairedResidual = Union[NotesResidual, BackgroundResidual, ParagraphMissing, ParagraphExtra, ParagraphOrder,
+                       TextResidual, StyleResidual, BulletResidual, AlignResidual, TextMissing, BoxMissing,
+                       TextGeometry, BoxGeometry, TextExtra, BoxExtra, DiagramResidual, ImageResidual, InlineImage,
+                       ShapeResidual, TableResidual]
+Residual = Union[SlideOrder, SlideMissing, SlideExtra, PairedResidual]
+
+
+def split_residuals(rs: Iterable[Residual]) -> tuple[list[SlideResidual], list[PairedResidual]]:
+    """Residuals about which slides there are, and those about slides both sides have."""
+    slides: list[SlideResidual] = []
+    paired: list[PairedResidual] = []
+    for r in rs:
+        if isinstance(r, (SlideOrder, SlideMissing, SlideExtra)):
+            slides.append(r)
+        else:
+            paired.append(r)
+    return slides, paired
+
+
+def target_slide_of(r: Residual) -> int | None:
+    """The target slide a residual is about; None for a current slide the target does not have."""
+    return None if isinstance(r, SlideExtra) else r.target_slide
+
+
+def current_slide_of(r: Residual) -> int | None:
+    """The current slide a residual is about; None for a target slide the current deck lacks."""
+    return None if isinstance(r, SlideMissing) else r.slide
+
+
+def is_theme(r: Residual) -> bool:
+    """A difference the beamer theme owns (a frame title's size, colour or place)."""
+    return isinstance(r, (StyleResidual, TextGeometry)) and r.theme
+
+
+def _pair(p: tuple[float, float]) -> JsonArray:
+    return [p[0], p[1]]
+
+
+def _box(b: Box) -> JsonArray:
+    return [b[0], b[1], b[2], b[3]]
+
+
+def _strs(v: tuple[str, ...]) -> JsonArray:
+    return [s for s in v]
+
+
+def _after(a: After | None) -> Json:
+    return None if a is None else {"element": a.element, "para": a.para}
+
+
+def _bullet(b: "BulletSig") -> JsonArray:
+    return [b[0], b[1]]
+
+
+def _change(c: StyleChange) -> JsonObject:
+    return {"field": c.field, "cur": c.cur, "tgt": c.tgt}
+
+
+def residual_json(r: Residual) -> JsonObject:
+    """A residual as the reports, edits.json and agents have always read it: its kind, `within`,
+    then its own keys in compare's order (`off_page` and `theme` only when true)."""
+    out: JsonObject = {"kind": r.kind, "within": r.within}
+    if isinstance(r, SlideOrder):
+        out.update({"slide": r.slide, "target_slide": r.target_slide})
+    elif isinstance(r, SlideMissing):
+        out.update({"target_slide": r.target_slide, "title": r.title})
+    elif isinstance(r, SlideExtra):
+        out.update({"slide": r.slide, "title": r.title})
+    elif isinstance(r, (NotesResidual, BackgroundResidual)):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "cur": r.cur, "tgt": r.tgt})
+    elif isinstance(r, ParagraphMissing):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "target_element": r.target_element,
+                    "target_para": r.target_para, "text": r.text, "after": _after(r.after)})
+        if r.off_page:
+            out["off_page"] = True
+    elif isinstance(r, ParagraphExtra):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element, "para": r.para,
+                    "text": r.text})
+    elif isinstance(r, ParagraphOrder):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element, "para": r.para,
+                    "target_element": r.target_element, "target_para": r.target_para, "text": r.text,
+                    "after": _after(r.after)})
+    elif isinstance(r, (TextResidual, StyleResidual, BulletResidual, AlignResidual)):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element, "para": r.para,
+                    "target_element": r.target_element, "target_para": r.target_para})
+        if isinstance(r, TextResidual):
+            out.update({"cur": r.cur, "tgt": r.tgt, "ops": [word_op_json(o) for o in r.ops]})
+        elif isinstance(r, StyleResidual):
+            out.update(_change(r.change))
+            out.update({"t0": r.t0, "t1": r.t1, "c0": r.c0, "c1": r.c1, "text": r.text})
+            if r.theme:
+                out["theme"] = True
+        elif isinstance(r, BulletResidual):
+            out.update({"cur": _bullet(r.cur), "tgt": _bullet(r.tgt)})
+        else:
+            out.update({"cur": r.cur, "tgt": r.tgt})
+    elif isinstance(r, TextMissing):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "target_element": r.target_element,
+                    "el_kind": r.el_kind, "text": r.text, "role": r.role})
+        if r.off_page:
+            out["off_page"] = True
+    elif isinstance(r, BoxMissing):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "target_element": r.target_element,
+                    "el_kind": r.el_kind, "bbox": _box(r.bbox), "file": r.file})
+        if r.off_page:
+            out["off_page"] = True
+    elif isinstance(r, TextGeometry):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element,
+                    "target_element": r.target_element, "para": r.para, "dx": r.dx, "dy": r.dy,
+                    "cur": _pair(r.cur), "tgt": _pair(r.tgt), "align": r.align, "wrap_width": r.wrap_width,
+                    "mixed": r.mixed})
+        if r.theme:
+            out["theme"] = True
+    elif isinstance(r, BoxGeometry):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element,
+                    "target_element": r.target_element, "el_kind": r.el_kind, "dx": r.dx, "dy": r.dy,
+                    "dw": r.dw, "dh": r.dh, "cur": _box(r.cur), "tgt": _box(r.tgt)})
+    elif isinstance(r, TextExtra):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element,
+                    "el_kind": r.el_kind, "text": r.text})
+    elif isinstance(r, BoxExtra):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element,
+                    "el_kind": r.el_kind, "bbox": _box(r.bbox)})
+    elif isinstance(r, DiagramResidual):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element,
+                    "target_element": r.target_element, "cur": _strs(r.cur), "tgt": _strs(r.tgt)})
+    elif isinstance(r, ImageResidual):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element,
+                    "target_element": r.target_element, "distance": r.distance, "file": r.file})
+    elif isinstance(r, InlineImage):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element,
+                    "target_element": r.target_element, "distance": r.distance, "role": r.role, "file": r.file})
+    elif isinstance(r, ShapeResidual):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element,
+                    "target_element": r.target_element, "cur": r.cur, "tgt": r.tgt})
+    elif isinstance(r, TableResidual):
+        out.update({"slide": r.slide, "target_slide": r.target_slide, "element": r.element,
+                    "target_element": r.target_element, "cur": [_strs(row) for row in r.cur],
+                    "tgt": [_strs(row) for row in r.tgt]})
+    else:
+        assert_never(r)
+    return out
+
+
+@dataclass(frozen=True, kw_only=True)
+class Comparison:
+    slides: tuple[tuple[int | None, int | None], ...]       # (current index, target index) pairs
+    residuals: tuple[Residual, ...]
+    elements: Mapping[tuple[int, str], tuple[int, str]]   # (ci, element id) -> (ti, target element id)
+
+    def open(self) -> list[Residual]:
+        return [r for r in self.residuals if not r.within]
 
     def summary(self) -> dict[str, int]:
         out: dict[str, int] = {}
         for r in self.open():
-            kind = as_str(r["kind"], "residual kind")
-            out[kind] = out.get(kind, 0) + 1
+            out[r.kind] = out.get(r.kind, 0) + 1
         return out
 
 
-Residual = dict[str, object]
-Add = Callable[[str, bool, Residual], None]
+@dataclass(frozen=True, kw_only=True)
+class Current:
+    """The current side: a deck as classify reads the candidate's PDF, and the label of the frame
+    each of its slides comes from (None: an unlabelled frame, or no frame). The labels pair slides
+    first (`pair_slides`); deck.json has no place for them, a pull candidate knowing them from
+    SyncTeX (`inverse.Candidate.keys`)."""
+    deck: DeckInput
+    keys: tuple[str | None, ...]
 
 
-def compare(cur: DeckInput, tgt: DeckInput, tol: Mapping[str, float] | None = None,
-            hashes: Mapping[int, PictureHash] | None = None) -> Comparison:
-    """`hashes`: id(element) -> picture_hash, for pictures on either side (the element's dict, or
-    its typed value when the deck is given parsed)."""
-    limits = {**TOL, **(tol or {})}
-    cs, ts = deck_views(cur, "current"), deck_views(tgt, "target")
+def without_keys(deck: DeckInput) -> Current:
+    """A deck compared as it is: no slide is known by a frame label."""
+    n = len(as_array(deck["slides"], "slides")) if isinstance(deck, dict) else len(deck.slides)
+    return Current(deck=deck, keys=(None,) * n)
+
+
+def compare(cur: Current, tgt: DeckInput, tol: Mapping[str, float], hashes: Mapping[int, PictureHash]) -> Comparison:
+    """`tol`: every limit of `TOL`. `hashes`: id(element) -> picture_hash, for pictures on either
+    side (the element's dict, or its typed value when the deck is given parsed); empty for none."""
+    views = deck_views(cur.deck, "current")
+    if len(cur.keys) != len(views):
+        raise ValueError(f"{len(cur.keys)} frame labels for {len(views)} current slides")
+    cs = [dataclasses.replace(v, summary=dataclasses.replace(v.summary, key=k)) for v, k in zip(views, cur.keys)]
+    ts = deck_views(tgt, "target")
     pairs = pair_slides([s.summary for s in cs], [s.summary for s in ts])
     res: list[Residual] = []
     elements: dict[tuple[int, str], tuple[int, str]] = {}
-
-    def add(kind: str, within: bool, fields: Residual) -> None:
-        res.append({"kind": kind, "within": within, **fields})
 
     matched = sorted((j, i) for i, j in pairs if i is not None and j is not None)
     lis = longest_increasing([i for _, i in matched])
     for k, (j, i) in enumerate(matched):
         if k not in lis:
-            add("slide_order", False, {"slide": i, "target_slide": j})
+            res.append(SlideOrder(kind="slide_order", within=False, slide=i, target_slide=j))
     for i, j in pairs:
         if i is None and j is not None:
-            add("slide_missing", False, {"target_slide": j, "title": ts[j].summary.title})
+            res.append(SlideMissing(kind="slide_missing", within=False, target_slide=j, title=ts[j].summary.title))
         elif j is None and i is not None:
-            add("slide_extra", False, {"slide": i, "title": cs[i].summary.title})
+            res.append(SlideExtra(kind="slide_extra", within=False, slide=i, title=cs[i].summary.title))
         elif i is not None and j is not None:
-            compare_slide(cs[i], ts[j], i, j, limits, add, elements, hashes)
-    return Comparison(slides=pairs, residuals=list(res), elements=elements)
+            res += compare_slide(cs[i], ts[j], i, j, tol, elements, hashes)
+    return Comparison(slides=tuple(pairs), residuals=tuple(res), elements=elements)
 
 
 # A hyphen between letters, and the line break after it: TeX breaks a note's lines where Slides
@@ -1109,22 +1626,23 @@ def off_page(el: ElementView, size: tuple[float, float] | None) -> bool:
     return x0 >= size[0] or x1 <= 0 or y0 >= size[1] or y1 <= 0
 
 
-def compare_slide(c: SlideView, t: SlideView, ci: int, ti: int, tol: Mapping[str, float], add: Add,
-                  elements: dict[tuple[int, str], tuple[int, str]], hashes: Mapping[int, PictureHash] | None) -> None:
-    where: Residual = {"slide": ci, "target_slide": ti}
+def compare_slide(c: SlideView, t: SlideView, ci: int, ti: int, tol: Mapping[str, float],
+                  elements: dict[tuple[int, str], tuple[int, str]],
+                  hashes: Mapping[int, PictureHash]) -> list[PairedResidual]:
+    """The residuals of one pair of slides, in the order compare has always reported them; each
+    element the two share goes into `elements`."""
+    res: list[PairedResidual] = []
 
     def parked(el: ElementView) -> bool:
         return off_page(el, c.size)
 
-    def off(el: ElementView) -> Residual:
-        return {"off_page": True} if parked(el) else {}
-
     cn, tn = norm_notes(c.notes or ""), norm_notes(t.notes or "")
     if cn != tn:
-        add("notes", False, {**where, "cur": c.notes, "tgt": t.notes})
+        res.append(NotesResidual(kind="notes", within=False, slide=ci, target_slide=ti, cur=c.notes, tgt=t.notes))
     if t.background_color and c.background_color and \
             colour_distance(c.background_color, t.background_color) > tol["color"]:
-        add("background", False, {**where, "cur": c.background_color, "tgt": t.background_color})
+        res.append(BackgroundResidual(kind="background", within=False, slide=ci, target_slide=ti,
+                                      cur=c.background_color, tgt=t.background_color))
 
     cps, tps = paragraphs_of(c), paragraphs_of(t)
     pmatch = pair_paragraphs(cps, tps)
@@ -1132,12 +1650,13 @@ def compare_slide(c: SlideView, t: SlideView, ci: int, ti: int, tol: Mapping[str
     t_of_c = {i: j for i, j, _ in pmatch}
     for j, tp in enumerate(tps):
         if j not in c_of_t:
-            add("paragraph_missing", parked(tp.el), {**where, "target_element": tp.el.id, "target_para": tp.pi,
-                                                     "text": tp.text, "after": _previous_match(j, c_of_t, cps),
-                                                     **off(tp.el)})
+            res.append(ParagraphMissing(kind="paragraph_missing", within=parked(tp.el), slide=ci, target_slide=ti,
+                                        target_element=tp.el.id, target_para=tp.pi, text=tp.text,
+                                        after=_previous_match(j, c_of_t, cps), off_page=parked(tp.el)))
     for i, cp in enumerate(cps):
         if i not in t_of_c:
-            add("paragraph_extra", False, {**where, "element": cp.el.id, "para": cp.pi, "text": cp.text})
+            res.append(ParagraphExtra(kind="paragraph_extra", within=False, slide=ci, target_slide=ti,
+                                      element=cp.el.id, para=cp.pi, text=cp.text))
 
     # paragraph order within the slide (reading order of the matched pairs); a marked box's
     # paragraphs only among themselves: which box reads first is where each stands, and a box
@@ -1151,27 +1670,35 @@ def compare_slide(c: SlideView, t: SlideView, ci: int, ti: int, tol: Mapping[str
         kept = {order[k][0]: order[k][1] for k in lis}
         for k, (j, i) in enumerate(order):
             if k not in lis:
-                add("paragraph_order", False, {**where, "element": cps[i].el.id, "para": cps[i].pi,
-                                               "target_element": tps[j].el.id, "target_para": tps[j].pi,
-                                               "text": tps[j].text, "after": _previous_match(j, kept, cps)})
+                res.append(ParagraphOrder(kind="paragraph_order", within=False, slide=ci, target_slide=ti,
+                                          element=cps[i].el.id, para=cps[i].pi, target_element=tps[j].el.id,
+                                          target_para=tps[j].pi, text=tps[j].text,
+                                          after=_previous_match(j, kept, cps)))
 
     for i, j, _ in pmatch:
         cp, tp = cps[i], tps[j]
-        pw: Residual = {**where, "element": cp.el.id, "para": cp.pi, "target_element": tp.el.id, "target_para": tp.pi}
+        el, para, t_el, t_para = cp.el.id, cp.pi, tp.el.id, tp.pi
         if cp.text != tp.text:
-            add("text", False, {**pw, "cur": cp.text, "tgt": tp.text, "ops": word_diff(cp.text, tp.text)})
+            res.append(TextResidual(kind="text", within=False, slide=ci, target_slide=ti, element=el, para=para,
+                                    target_element=t_el, target_para=t_para, cur=cp.text, tgt=tp.text,
+                                    ops=tuple(word_diff(cp.text, tp.text))))
         titles = cp.el.role == "title" and tp.el.role == "title"
         for d in run_style_diffs(char_styles(cp.p.runs, cp.p.size), char_styles(tp.p.runs, tp.p.size), tol):
             # a whole title's size or colour is the theme's (a slide added in Slides takes its layout's)
-            theme = titles and d["field"] in ("size", "color") and d["t1"] - d["t0"] >= 0.9 * len(tp.text)
-            add("style", theme, {**pw, **d, **({"theme": True} if theme else {})})
+            theme = titles and d.change.field in ("size", "color") and d.t1 - d.t0 >= 0.9 * len(tp.text)
+            res.append(StyleResidual(kind="style", within=theme, slide=ci, target_slide=ti, element=el, para=para,
+                                     target_element=t_el, target_para=t_para, change=d.change, t0=d.t0, t1=d.t1,
+                                     c0=d.c0, c1=d.c1, text=d.text, theme=theme))
         c_sig = signature(cp.p.bullet, cp.p.level, bullet_base(cp.el))
         t_sig = signature(tp.p.bullet, tp.p.level, bullet_base(tp.el))
         if c_sig != t_sig:
-            add("bullet", False, {**pw, "cur": c_sig, "tgt": t_sig})
+            res.append(BulletResidual(kind="bullet", within=False, slide=ci, target_slide=ti, element=el, para=para,
+                                      target_element=t_el, target_para=t_para, cur=c_sig, tgt=t_sig))
         if cp.p.align != tp.p.align and len(tp.text) > 0:
-            add("align", len(tp.p.lines) <= 1 and "center" not in (cp.p.align, tp.p.align),
-                {**pw, "cur": cp.p.align, "tgt": tp.p.align})
+            res.append(AlignResidual(kind="align",
+                                     within=len(tp.p.lines) <= 1 and "center" not in (cp.p.align, tp.p.align),
+                                     slide=ci, target_slide=ti, element=el, para=para, target_element=t_el,
+                                     target_para=t_para, cur=cp.p.align, tgt=tp.p.align))
 
     # elements: a target text element corresponds to the current element holding most of its paragraphs
     for _, te in compared_texts(t):
@@ -1180,8 +1707,9 @@ def compare_slide(c: SlideView, t: SlideView, ci: int, ti: int, tol: Mapping[str
             continue
         hits = [cps[c_of_t[j]] for j in mine if j in c_of_t]
         if not hits:
-            add("element_missing", parked(te), {**where, "target_element": te.id, "el_kind": "text",
-                                                "text": view_text(te), "role": te.role, **off(te)})
+            res.append(TextMissing(kind="element_missing", within=parked(te), slide=ci, target_slide=ti,
+                                   target_element=te.id, el_kind="text", text=view_text(te), role=te.role,
+                                   off_page=parked(te)))
             continue
         first = cps[c_of_t[mine[0]]] if mine[0] in c_of_t else hits[0]
         ce = first.el
@@ -1201,16 +1729,18 @@ def compare_slide(c: SlideView, t: SlideView, ci: int, ti: int, tol: Mapping[str
         dx, dy = tx - cx, ty - cy
         # frame titles sit where the theme puts them: a moved title is noted, not written back
         theme = te.role == "title" and ce.role == "title"
-        add("geometry", theme or (abs(dx) <= tol["pos"] and abs(dy) <= tol["pos"]),
-            {**where, "element": ce.id, "target_element": te.id, "para": first.pi, "dx": round(dx, 2),
-             "dy": round(dy, 2), "cur": [round(cx, 2), round(cy, 2)], "tgt": [round(tx, 2), round(ty, 2)],
-             "align": anchor_align(te), "wrap_width": te.wrap_width, "mixed": len({id(h.el) for h in hits}) > 1,
-             **({"theme": True} if theme and (abs(dx) > tol["pos"] or abs(dy) > tol["pos"]) else {})})
+        res.append(TextGeometry(kind="geometry", within=theme or (abs(dx) <= tol["pos"] and abs(dy) <= tol["pos"]),
+                                slide=ci, target_slide=ti, element=ce.id, target_element=te.id, para=first.pi,
+                                dx=round(dx, 2), dy=round(dy, 2), cur=(round(cx, 2), round(cy, 2)),
+                                tgt=(round(tx, 2), round(ty, 2)), align=anchor_align(te), wrap_width=te.wrap_width,
+                                mixed=len({id(h.el) for h in hits}) > 1,
+                                theme=theme and (abs(dx) > tol["pos"] or abs(dy) > tol["pos"])))
     for _, ce in compared_texts(c):
         if not any(p.el is ce and k in t_of_c for k, p in enumerate(cps)) and any(p.el is ce for p in cps):
-            add("element_extra", False, {**where, "element": ce.id, "el_kind": "text", "text": view_text(ce)})
+            res.append(TextExtra(kind="element_extra", within=False, slide=ci, target_slide=ti, element=ce.id,
+                                 el_kind="text", text=view_text(ce)))
 
-    def compare_boxes(kind: Literal["image", "shape", "table", "diagram"], cc: Sequence[B], tt: Sequence[B]) -> None:
+    def compare_boxes(kind: BoxKind, cc: Sequence[B], tt: Sequence[B]) -> None:
         got = match_boxes(cc, tt, hashes)
         for a, b in got:
             ce, te = cc[a], tt[b]
@@ -1222,35 +1752,41 @@ def compare_slide(c: SlideView, t: SlideView, ci: int, ti: int, tol: Mapping[str
                 within = abs(d[0]) <= 1.5 * tol["pos"] and abs(d[1]) <= 1.5 * tol["pos"]
             else:
                 within = abs(d[0]) <= tol["pos"] and abs(d[1]) <= tol["pos"] and abs(dw) <= tol["size"] and abs(dh) <= tol["size"]
-            add("geometry", within, {**where, "element": ce.id, "target_element": te.id, "el_kind": kind, "dx": d[0],
-                                     "dy": d[1], "dw": round(dw, 2), "dh": round(dh, 2), "cur": list(cb), "tgt": list(tb)})
+            res.append(BoxGeometry(kind="geometry", within=within, slide=ci, target_slide=ti, element=ce.id,
+                                   target_element=te.id, el_kind=kind, dx=d[0], dy=d[1], dw=round(dw, 2),
+                                   dh=round(dh, 2), cur=cb, tgt=tb))
             box_residuals(ce, te)
         for b, te in enumerate(tt):
             if b not in {y for _, y in got}:
-                add("element_missing", parked(te), {**where, "target_element": te.id, "el_kind": kind,
-                                                    "bbox": list(te.bbox), "file": te.file, **off(te)})
+                res.append(BoxMissing(kind="element_missing", within=parked(te), slide=ci, target_slide=ti,
+                                      target_element=te.id, el_kind=kind, bbox=te.bbox, file=te.file,
+                                      off_page=parked(te)))
         for a, ce in enumerate(cc):
             if a not in {x for x, _ in got}:
-                add("element_extra", False, {**where, "element": ce.id, "el_kind": kind, "bbox": list(ce.bbox)})
+                res.append(BoxExtra(kind="element_extra", within=False, slide=ci, target_slide=ti, element=ce.id,
+                                    el_kind=kind, bbox=ce.bbox))
 
     def box_residuals(ce: BoxView, te: BoxView) -> None:
         """What differs between two paired elements of one kind besides their box."""
-        pw: Residual = {**where, "element": ce.id, "target_element": te.id}
         if isinstance(ce, DiagramView):
             if isinstance(te, DiagramView) and ce.texts != te.texts:
-                add("diagram", False, {**pw, "cur": list(ce.texts), "tgt": list(te.texts)})
+                res.append(DiagramResidual(kind="diagram", within=False, slide=ci, target_slide=ti, element=ce.id,
+                                           target_element=te.id, cur=ce.texts, tgt=te.texts))
         elif isinstance(ce, ImageView):
             if hashes:
                 hc, ht = picture_of(hashes, ce), picture_of(hashes, te)
                 distance = hash_distance(hc, ht)
                 if distance is not None and picture_differs(hc, ht, tol["phash"]):
-                    add("image", False, {**pw, "distance": round(distance, 3), "file": te.file})
+                    res.append(ImageResidual(kind="image", within=False, slide=ci, target_slide=ti, element=ce.id,
+                                             target_element=te.id, distance=round(distance, 3), file=te.file))
         elif isinstance(ce, ShapeView):
             if colour_distance(ce.fill, te.fill) > tol["color"]:
-                add("shape", False, {**pw, "cur": ce.fill, "tgt": te.fill})
+                res.append(ShapeResidual(kind="shape", within=False, slide=ci, target_slide=ti, element=ce.id,
+                                         target_element=te.id, cur=ce.fill, tgt=te.fill))
         elif isinstance(ce, TableView):
             if isinstance(te, TableView) and ce.cells != te.cells:
-                add("table", False, {**pw, "cur": [list(row) for row in ce.cells], "tgt": [list(row) for row in te.cells]})
+                res.append(TableResidual(kind="table", within=False, slide=ci, target_slide=ti, element=ce.id,
+                                         target_element=te.id, cur=ce.cells, tgt=te.cells))
         else:
             assert_never(ce)
 
@@ -1267,8 +1803,10 @@ def compare_slide(c: SlideView, t: SlideView, ci: int, ti: int, tol: Mapping[str
         for a, b in match_boxes(cm, tm, hashes):
             h = hash_distance(picture_of(hashes, cm[a]), picture_of(hashes, tm[b]))
             if h is not None and h > tol["inline_phash"]:  # the mean alone: they are transparent
-                add("image", False, {**where, "element": cm[a].id, "target_element": tm[b].id, "distance": round(h, 3),
-                                     "role": cm[a].role, "file": tm[b].file})
+                res.append(InlineImage(kind="image", within=False, slide=ci, target_slide=ti, element=cm[a].id,
+                                       target_element=tm[b].id, distance=round(h, 3), role=cm[a].role,
+                                       file=tm[b].file))
+    return res
 
 
 StackRule = tuple[Literal["middle", "bottom"], float, float]
@@ -1335,12 +1873,12 @@ def diagram_text(el: JsonObject) -> list[str]:
     return sorted(t for t in texts if t)
 
 
-def _previous_match(j: int, c_of_t: Mapping[int, int], cps: Sequence[SlidePara]) -> Residual | None:
+def _previous_match(j: int, c_of_t: Mapping[int, int], cps: Sequence[SlidePara]) -> After | None:
     """The current paragraph matched to the nearest earlier target paragraph."""
     for k in range(j - 1, -1, -1):
         if k in c_of_t:
             cp = cps[c_of_t[k]]
-            return {"element": cp.el.id, "para": cp.pi}
+            return After(element=cp.el.id, para=cp.pi)
     return None
 
 
