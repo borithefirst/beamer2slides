@@ -6,17 +6,27 @@ lost at span joins. Synthetic runs and spans, no PDF."""
 import pytest
 
 from beamer2slides import emit
+from beamer2slides.emit_model import JsonMap
 from beamer2slides.fonts import google_font
+from beamer2slides.google_types import PageElement
+from beamer2slides.json_types import JsonObject
 
+from .json_reads import jnum, jobj, jobjs, jstr
 from .test_emit_hunt import styled, text_element
-from .test_emit_requests import FONTS, SCALE, run_of
+from .test_emit_requests import BODY, FONTS, SCALE, text_run
+
+
+def written_weight(style: JsonMap) -> float | None:
+    """The weight a text style writes (`weightedFontFamily`), None when it writes none."""
+    family = style.get("weightedFontFamily")
+    return jnum(family, "weight") if isinstance(family, dict) and family.get("weight") is not None else None
 
 
 # ---------------------------------------------------------------- optical weight
 
 def test_a_six_point_sans_cut_is_written_at_its_marker_weight():
     # sci v1, control c1 (r6): beamer's \tiny footline in SFSS0600 ('M. Keller', 'June 2026').
-    style, fields = FONTS.text_style(run_of("June 2026", 5.98, font="SFSS0600"), SCALE)
+    style, fields = FONTS.text_style(text_run("June 2026", 5.98, font="SFSS0600"), SCALE)
     assert style["weightedFontFamily"] == {"fontFamily": "Lato", "weight": emit.OPTICAL_WEIGHT}
     assert "weightedFontFamily" in fields and "fontFamily" not in fields
     # Wave 4 wrote 800, which Slides draws Bold: too heavy (r9, test_fonts_wave5). 600 draws
@@ -24,27 +34,27 @@ def test_a_six_point_sans_cut_is_written_at_its_marker_weight():
     # writes. No `bold` field: the API applies it after the weight, and a `bold: false` could take
     # the weight back to 400.
     assert emit.OPTICAL_WEIGHT < emit.DRAWN_BOLD_WEIGHT and "bold" not in fields and "bold" not in style
-    assert FONTS.text_style(run_of("June 2026", 5.98, font="ECSS0600"), SCALE)[0].get("weightedFontFamily")  # Type 3
+    assert FONTS.text_style(text_run("June 2026", 5.98, font="ECSS0600"), SCALE)[0].get("weightedFontFamily")  # Type 3
     # The body text, an 8 pt cut and a bold footline keep the plain family.
-    for run in (run_of("June 2026"), run_of("June 2026", 7.97, font="SFSS0800"), run_of("June 2026", 5.98, font="LMSans8-Regular"),
-                run_of("June 2026", 5.98, font="SFSX0600", bold=True), run_of("June 2026", 5.98, font="SFRM0600", family="serif")):
+    for run in (text_run("June 2026", BODY), text_run("June 2026", 7.97, font="SFSS0800"), text_run("June 2026", 5.98, font="LMSans8-Regular"),
+                text_run("June 2026", 5.98, font="SFSX0600", bold=True), text_run("June 2026", 5.98, font="SFRM0600", family="serif")):
         style = FONTS.text_style(run, SCALE)[0]
         assert "weightedFontFamily" not in style and style["bold"] is run["bold"], run["font"]
 
 
 def test_a_small_optical_cut_is_measured_in_the_face_slides_draws():
-    tiny = run_of("Fatigue of Welded Joints", 5.98, font="SFSS0600")
+    tiny = text_run("Fatigue of Welded Joints", 5.98, font="SFSS0600")
     table = emit.ADVANCES["Lato"]["regular"]  # (600 draws Regular)
     size = FONTS(tiny, SCALE)[1]
-    assert emit.slides_width([tiny], SCALE, FONTS) == pytest.approx(sum(table[c] for c in tiny["text"]) * size)
+    assert emit.slides_width([tiny], SCALE, FONTS) == pytest.approx(sum(table[c] for c in jstr(tiny, "text")) * size)
 
 
-def read_back_runs(style: dict, foreign: bool = False) -> list[dict]:
+def read_back_runs(style: JsonObject, foreign: bool) -> list[JsonObject]:
     from beamer2slides.deck_ir import StyleResolver, text_paragraphs
     from beamer2slides.deck_ir_types import run_json as element_run
-    text = {"textElements": [{"startIndex": 0, "endIndex": 10, "paragraphMarker": {"style": {}}},
+    text: JsonObject = {"textElements": [{"startIndex": 0, "endIndex": 10, "paragraphMarker": {"style": {}}},
                              {"startIndex": 0, "endIndex": 10, "textRun": {"content": "June 2026\n", "style": style}}]}
-    pe = {"objectId": "b2s_s001_t0", "shape": {"shapeType": "TEXT_BOX", "text": text}}
+    pe: PageElement = {"objectId": "b2s_s001_t0", "shape": {"shapeType": "TEXT_BOX", "text": text}}
     return [element_run(r.run) for p in text_paragraphs(pe, text, StyleResolver({}), FONTS, SCALE, False, 1.0, 0.0, False, foreign)
             for r in p.runs]
 
@@ -52,16 +62,16 @@ def read_back_runs(style: dict, foreign: bool = False) -> list[dict]:
 def test_a_small_optical_cut_reads_back_regular():
     # deck_ir counted weight 600 as bold: pull would have written the footline as \textbf. Slides
     # reads 600 back `bold: false` with the weight as written (probe_font_weights).
-    style = {**FONTS.text_style(run_of("June 2026", 5.98, font="SFSS0600"), SCALE)[0], "bold": False}
-    runs = read_back_runs(style)
+    style: JsonObject = {**FONTS.text_style(text_run("June 2026", 5.98, font="SFSS0600"), SCALE)[0], "bold": False}
+    runs = read_back_runs(style, False)
     assert runs and not any(r["bold"] for r in runs)
     # what the decks of wave 4 wrote (800, read back `bold: true`) stays regular too; our own bold
     # (700) is bold, and so is someone's 800 in a deck we did not write
-    legacy = {**style, "weightedFontFamily": {"fontFamily": "Lato", "weight": 800}, "bold": True}
-    assert not any(r["bold"] for r in read_back_runs(legacy))
+    legacy: JsonObject = {**style, "weightedFontFamily": {"fontFamily": "Lato", "weight": 800}, "bold": True}
+    assert not any(r["bold"] for r in read_back_runs(legacy, False))
     assert all(r["bold"] for r in read_back_runs(legacy, foreign=True))
-    bold = {**style, "weightedFontFamily": {"fontFamily": "Lato", "weight": 700}}
-    assert all(r["bold"] for r in read_back_runs(bold))
+    bold: JsonObject = {**style, "weightedFontFamily": {"fontFamily": "Lato", "weight": 700}}
+    assert all(r["bold"] for r in read_back_runs(bold, False))
 
 
 def test_an_optically_heavier_footline_pulls_back_with_no_residual():
@@ -70,7 +80,7 @@ def test_an_optically_heavier_footline_pulls_back_with_no_residual():
     import copy
     from beamer2slides.compare import TOL, compare, without_keys
     from .irs import deck_ir
-    from .slides_sim import simulate
+    from .slides_sim import presentation_of
     from .test_inverse import TEXT_KINDS, built_pdf
     from beamer2slides.classify import classify
     from beamer2slides.extract import extract, select_overlays
@@ -87,11 +97,10 @@ def test_an_optically_heavier_footline_pulls_back_with_no_residual():
                             tiny += 1
     assert tiny
     data = deck_json(deck)
-    pres = simulate(data)
-    styles = [te["textRun"]["style"] for s in pres["slides"] for pe in s["pageElements"]
-              for te in pe.get("shape", {}).get("text", {}).get("textElements", []) if "textRun" in te]
-    assert any((st.get("weightedFontFamily") or {}).get("weight") == emit.OPTICAL_WEIGHT and not st.get("bold")
-               for st in styles)
+    pres = presentation_of(data)
+    styles = [jobj(te, "textRun", "style") for s in jobjs(pres, "slides") for pe in jobjs(s, "pageElements")
+              if "text" in jobj(pe, "shape") for te in jobjs(pe, "shape", "text", "textElements") if "textRun" in te]
+    assert any(written_weight(st) == emit.OPTICAL_WEIGHT and not st.get("bold") for st in styles)
     comp = compare(without_keys(data), deck_ir(pres, deck["slides"][0]["size"]), TOL, {})
     assert [r for r in comp.open() if r.kind in TEXT_KINDS] == []
 
@@ -110,7 +119,7 @@ def test_a_weight_is_laid_out_in_the_face_slides_draws_it_in():
 def test_cm_sans_cuts_below_eight_points_have_their_own_width():
     # a 6 pt EC sans cut is 1.17 times as wide per em as the 10 pt one (sfss0600.pfb), not the
     # 8 pt cut's 1.06: the footline came out ~10% narrower than the PDF's
-    six = run_of("Nanoparticle catalysis", 5.98, font="SFSS0600")
+    six = text_run("Nanoparticle catalysis", 5.98, font="SFSS0600")
     ten = {**six, "font": "SFSS1000"}
     assert FONTS(six, SCALE)[1] / FONTS(ten, SCALE)[1] == pytest.approx(emit.OPTICAL_WIDTH_MAX, abs=0.02)
     seven = {**six, "font": "SFSS0700"}
@@ -130,18 +139,18 @@ def test_cm_sans_cuts_below_eight_points_have_their_own_width():
     ("SourceHanSansSC-Bold", ("Noto Sans SC", 700, False)),
     ("MalgunGothic", ("Noto Sans KR", 400, False)),
 ])
-def test_a_cjk_face_is_its_noto_face(name, face):
+def test_a_cjk_face_is_its_noto_face(name: str, face: tuple[str, int, bool]) -> None:
     # scripts ja (r6): YuGothic was set in Lato, whose CJK fallback Slides draws bold and with
     # proportional full-width brackets: every Japanese run looked bold, （医療） became (医療)
     assert google_font(name) == face
-    style = FONTS.text_style(run_of("分類（BERT）", font=name, bold=face[1] >= 700), SCALE)[0]
+    style = FONTS.text_style(text_run("分類（BERT）", BODY, font=name, bold=face[1] >= 700), SCALE)[0]
     assert style["weightedFontFamily"] == {"fontFamily": face[0], "weight": face[1]}
 
 
 def test_a_math_letter_among_japanese_words_keeps_its_substitute():
-    words = dict(font="YuGothic-Regular", family="sans")
-    el = text_element([run_of("入力文 ", **words), run_of("x", font="CMMI10", family="sans", italic=True),
-                       run_of(" に対し", **words)])
+    el = text_element([text_run("入力文 ", BODY, font="YuGothic-Regular", family="sans"),
+                       text_run("x", BODY, font="CMMI10", family="sans", italic=True),
+                       text_run(" に対し", BODY, font="YuGothic-Regular", family="sans")])
     x = next(style for text, style in styled(emit.text_box_requests(el, "b2s_s001", "b2s_s001_t0", SCALE, FONTS))
              if text == "x")
     assert x.get("fontFamily") == "Lato" and x["italic"] is True

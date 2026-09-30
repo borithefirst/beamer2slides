@@ -23,12 +23,16 @@ import pytest
 
 from beamer2slides import checks
 
+from .json_reads import jobjs, jstr
+
 HERE = Path(__file__).resolve().parent
 PDFS = sorted(p for p in (HERE / "decks" / "out").glob("*.pdf") if not p.stem.endswith("-handout")) + \
        sorted((HERE / "themes" / "out").glob("*/talk.pdf"))
 # Through the tests package, like emit's calibration: a build that stages the sources elsewhere
 # keeps the data beside the module, not beside __file__.
-ALLOW = json.loads((resources.files(__package__) / "invariants_allow.json").read_text(encoding="utf-8"))
+PACKAGE = __package__
+assert PACKAGE, "tests/ is a package"
+ALLOW = jobjs(json.loads((resources.files(PACKAGE) / "invariants_allow.json").read_text(encoding="utf-8")))
 
 
 def name(pdf: Path) -> str:
@@ -52,18 +56,18 @@ def rendered(pdf: Path) -> checks.Rendered:
     return _last[pdf]
 
 
-def test_allowlist_entries_have_reasons():
+def test_allowlist_entries_have_reasons() -> None:
     for entry in ALLOW:
-        assert {"deck", "page", "check", "reason"} <= set(entry) and entry["reason"].strip(), entry
+        assert {"deck", "page", "check", "reason"} <= set(entry) and jstr(entry, "reason").strip(), entry
         assert entry.get("element") or entry.get("bbox"), f"entry names no element or region: {entry}"
 
 
 @pytest.mark.skipif(not PDFS, reason="no test PDFs built")
 @pytest.mark.parametrize("pdf,check", CASES)
-def test_invariant(pdf, check):
+def test_invariant(pdf: Path, check: checks.CheckName) -> None:
     r = rendered(pdf)
     deck = name(pdf)
-    findings = [f for slide in r.deck["slides"] for f in checks.CHECKS[check](r, slide)]
+    findings = [f for slide in jobjs(r.deck, "slides") for f in checks.CHECKS[check](r, slide)]
     used = [checks.allowed(f, deck, ALLOW) for f in findings]
     new = [f for f, entry in zip(findings, used) if entry is None]
     stale = [e for e in ALLOW if e["deck"] == deck and e["check"] == check and not any(e is u for u in used)]

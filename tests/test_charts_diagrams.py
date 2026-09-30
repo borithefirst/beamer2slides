@@ -3,11 +3,13 @@ chart, legend boxes, bar series and funnels that are no panels, curves that are 
 marks that are no bullets, node labels, Venn diagrams, and labels no picture would hold."""
 
 import math
+from collections.abc import Sequence
 
 from beamer2slides import classify as C
+from beamer2slides import ir
 from beamer2slides.classify import Line, PageClassifier, Rect, Span, body_size, classify
 from beamer2slides.fonts import font_info
-from beamer2slides.ir import deck_json
+from beamer2slides.raw_types import DrawingType, PathItem, RawDoc, RawDrawing, RawImage, RawPage, RawSpan
 
 W, H = 453.54, 255.12
 SANS, MONO = "LMSans10-Regular", "LMMono10-Regular"
@@ -16,16 +18,19 @@ SANS, MONO = "LMSans10-Regular", "LMMono10-Regular"
 # ---------------------------------------------------------------- synthetic pages
 
 class Page:
-    def __init__(self, index: int = 0, label: str = "1"):
+    def __init__(self, index: int = 0, label: str = "1") -> None:
         self.index, self.label = index, label
-        self.spans, self.drawings, self.images = [], [], []
+        self.spans: list[RawSpan] = []
+        self.drawings: list[RawDrawing] = []
+        self.images: list[RawImage] = []
 
     def text(self, text: str, x0: float, baseline: float, size: float = 10.91, font: str = SANS,
-             w: float | None = None, color: str = "#000000") -> dict:
+             w: float | None = None, color: str = "#000000") -> RawSpan:
         w = len(text) * 0.5 * size if w is None else w
-        s = {"id": f"p{self.index}s{len(self.spans)}", "text": text, "font": font, "size": size, "color": color,
-             "alpha": 255, "origin": [x0, baseline], "bbox": [x0, baseline - 0.75 * size, x0 + w, baseline + 0.25 * size],
-             "dir": [1.0, -0.0], "smallcaps": False}
+        s: RawSpan = {"id": f"p{self.index}s{len(self.spans)}", "text": text, "font": font, "size": size,
+                      "color": color, "alpha": 255, "origin": [x0, baseline],
+                      "bbox": [x0, baseline - 0.75 * size, x0 + w, baseline + 0.25 * size],
+                      "dir": [1.0, -0.0], "smallcaps": False}
         self.spans.append(s)
         return s
 
@@ -35,37 +40,47 @@ class Page:
             x0 = self.text(word, x0, baseline, size, font)["bbox"][2] + 0.33 * size
         return x0
 
-    def draw(self, path: list, type: str = "f", fill: str | None = "#1f77b4", stroke: str | None = None,
-             width: float | None = None) -> dict:
+    def draw(self, path: list[PathItem], type: DrawingType = "f", fill: str | None = "#1f77b4",
+             stroke: str | None = None, width: float | None = None) -> RawDrawing:
         points = [p for _, pts in path for p in pts]
-        d = {"id": f"p{self.index}d{len(self.drawings)}", "type": type, "items": "".join(op for op, _ in path),
-             "bbox": [min(x for x, _ in points), min(y for _, y in points), max(x for x, _ in points), max(y for _, y in points)],
-             "fill": fill if "f" in type else None, "stroke": stroke if "s" in type else None,
-             "width": width if "s" in type else None, "fill_opacity": 1.0, "corners": {}, "path": path}
+        d: RawDrawing = {
+            "id": f"p{self.index}d{len(self.drawings)}", "type": type, "items": "".join(op for op, _ in path),
+            "bbox": [min(x for x, _ in points), min(y for _, y in points), max(x for x, _ in points), max(y for _, y in points)],
+            "fill": fill if "f" in type else None, "stroke": stroke if "s" in type else None,
+            "width": width if "s" in type else None, "fill_opacity": 1.0, "stroke_opacity": 1.0, "soft_mask": False,
+            "corners": {}, "path": path}
         self.drawings.append(d)
         return d
 
-    def raw(self) -> dict:
+    def raw(self) -> RawPage:
         return {"index": self.index, "label": self.label, "size": [W, H], "spans": self.spans,
                 "images": self.images, "drawings": self.drawings, "links": [], "frame_label": None}
 
 
-def rect(x0, y0, x1, y1) -> list:
-    return [["re", [[x0, y0], [x1, y1]]]]
+def raw_doc(pages: list[RawPage]) -> RawDoc:
+    """raw.json of `pages`, from a PDF that has no name, producer or title."""
+    return {"version": 1, "source": {"pdf": "", "producer": "", "pages": len(pages), "title": ""}, "pages": pages}
 
 
-def lines(*points, closed: bool = False) -> list:
+def rect(x0: float, y0: float, x1: float, y1: float) -> list[PathItem]:
+    return [("re", [[x0, y0], [x1, y1]])]
+
+
+Point = tuple[float, float]
+
+
+def lines(*points: Point, closed: bool = False) -> list[PathItem]:
     pts = list(points) + ([points[0]] if closed else [])
-    return [["l", [list(a), list(b)]] for a, b in zip(pts, pts[1:])]
+    return [("l", [list(a), list(b)]) for a, b in zip(pts, pts[1:])]
 
 
-def ellipse(cx, cy, rx, ry) -> list:
+def ellipse(cx: float, cy: float, rx: float, ry: float) -> list[PathItem]:
     k = 0.5523
     e, s, w, n = [cx + rx, cy], [cx, cy + ry], [cx - rx, cy], [cx, cy - ry]
-    return [["c", [e, [cx + rx, cy - k * ry], [cx + k * rx, cy - ry], n]],
-            ["c", [n, [cx - k * rx, cy - ry], [cx - rx, cy - k * ry], w]],
-            ["c", [w, [cx - rx, cy + k * ry], [cx - k * rx, cy + ry], s]],
-            ["c", [s, [cx + k * rx, cy + ry], [cx + rx, cy + k * ry], e]]]
+    return [("c", [e, [cx + rx, cy - k * ry], [cx + k * rx, cy - ry], n]),
+            ("c", [n, [cx - k * rx, cy - ry], [cx - rx, cy - k * ry], w]),
+            ("c", [w, [cx - rx, cy + k * ry], [cx - k * rx, cy + ry], s]),
+            ("c", [s, [cx + k * rx, cy + ry], [cx + rx, cy + k * ry], e])]
 
 
 def body_text(page: Page, y: float = 225) -> None:
@@ -73,16 +88,37 @@ def body_text(page: Page, y: float = 225) -> None:
     page.words("Body text that sets the size of the deck", 30, y)
 
 
-def deck(*pages: Page) -> dict:
-    return deck_json(classify({"version": 1, "source": {"title": ""}, "pages": [p.raw() for p in pages]}))
+def deck(*pages: Page) -> ir.Deck:
+    return classify(raw_doc([p.raw() for p in pages]))
 
 
-def elements(page: Page) -> list[dict]:
+def elements(page: Page) -> list[ir.Element]:
     return deck(page)["slides"][0]["elements"]
 
 
-def texts(els: list[dict]) -> list[str]:
-    return [" / ".join("".join(r["text"] for r in p["runs"]) for p in e["paragraphs"]) for e in els if e["kind"] == "text"]
+def paragraphs_of(e: ir.Element) -> list[ir.Paragraph]:
+    """A text element's paragraphs; none for another kind."""
+    return e["paragraphs"] if e["kind"] == "text" else []
+
+
+def run_texts(runs: Sequence[ir.Run]) -> str:
+    return "".join(r["text"] for r in runs)
+
+
+def texts(els: Sequence[ir.Element]) -> list[str]:
+    return [" / ".join(run_texts(p["runs"]) for p in e["paragraphs"]) for e in els if e["kind"] == "text"]
+
+
+def text_elements(els: Sequence[ir.Element]) -> list[ir.TextElement]:
+    return [e for e in els if e["kind"] == "text"]
+
+
+def images(els: Sequence[ir.Element]) -> list[ir.ImageElement]:
+    return [e for e in els if e["kind"] == "image"]
+
+
+def diagrams(els: Sequence[ir.Element]) -> list[ir.DiagramElement]:
+    return [e for e in els if e["kind"] == "diagram"]
 
 
 def span(text: str, x0: float, size: float = 7.97, baseline: float = 180.0, font: str = SANS) -> Span:
@@ -92,11 +128,14 @@ def span(text: str, x0: float, size: float = 7.97, baseline: float = 180.0, font
                 baseline=baseline, horizontal=True, info=font_info(font))
 
 
-def row(labels: list[str], x0: float, gap_em: float, size: float = 7.97) -> Line:
-    out = []
+TICK = 7.97  # a tick label's size (pt)
+
+
+def row(labels: Sequence[str], x0: float, gap_em: float) -> Line:
+    out: list[Span] = []
     for t in labels:
-        out.append(span(t, x0, size))
-        x0 = out[-1].rect.x1 + gap_em * size
+        out.append(span(t, x0, TICK))
+        x0 = out[-1].rect.x1 + gap_em * TICK
     return Line(out)
 
 
@@ -111,8 +150,7 @@ def test_body_size_ignores_the_footline_on_every_frame():
         p.words("Priya Raman (Department of Astronomy) DEEPSKY-5 photometric pipeline Survey team meeting", 20, 250, 5.98)
         p.words(f"Slide {i} says a few words", 30, 80 + i)
         pages.append(p)
-    raw = {"pages": [p.raw() for p in pages]}
-    assert body_size(raw) == 10.9
+    assert body_size(raw_doc([p.raw() for p in pages])) == 10.9
 
 
 # ---------------------------------------------------------------- tick rows
@@ -152,7 +190,7 @@ def test_tick_row_under_a_plot_is_part_of_its_picture():
     body_text(p)
     els = elements(p)
     assert not any("300" in t for t in texts(els)), texts(els)
-    fig = next(e for e in els if e["kind"] == "image" and e["role"] == "figure")
+    fig = next(e for e in images(els) if e["role"] == "figure")
     assert not fig.get("anchor") and fig["bbox"][3] >= 182
 
 
@@ -161,13 +199,14 @@ def test_tick_row_under_a_plot_is_part_of_its_picture():
 def test_upright_ellipse_is_closed_and_meets_its_box_at_the_middles():
     assert C.upright_ellipse(ellipse(100, 100, 30, 20), Rect(70, 80, 130, 120))
     # a sine wave drawn as four curves: open
-    wave = [["c", [[0, 50], [10, 30], [20, 30], [30, 50]]], ["c", [[30, 50], [40, 70], [50, 70], [60, 50]]],
-            ["c", [[60, 50], [70, 30], [80, 30], [90, 50]]], ["c", [[90, 50], [100, 70], [110, 70], [120, 50]]]]
+    wave: list[PathItem] = [
+        ("c", [[0, 50], [10, 30], [20, 30], [30, 50]]), ("c", [[30, 50], [40, 70], [50, 70], [60, 50]]),
+        ("c", [[60, 50], [70, 30], [80, 30], [90, 50]]), ("c", [[90, 50], [100, 70], [110, 70], [120, 50]])]
     assert not C.upright_ellipse(wave, Rect(0, 35, 120, 65))
     # an ellipse turned 45 degrees: its curve ends are no longer at the box's middles
-    turned = [[op, [[100 + (x - 100) * math.cos(0.8) - (y - 100) * math.sin(0.8),
-                     100 + (x - 100) * math.sin(0.8) + (y - 100) * math.cos(0.8)] for x, y in pts]]
-              for op, pts in ellipse(100, 100, 40, 15)]
+    turned: list[PathItem] = [(op, [[100 + (x - 100) * math.cos(0.8) - (y - 100) * math.sin(0.8),
+                                     100 + (x - 100) * math.sin(0.8) + (y - 100) * math.cos(0.8)] for x, y in pts])
+                              for op, pts in ellipse(100, 100, 40, 15)]
     xs = [x for _, pts in turned for x, _ in pts]
     ys = [y for _, pts in turned for _, y in pts]
     assert not C.upright_ellipse(turned, Rect(min(xs), min(ys), max(xs), max(ys)))
@@ -228,7 +267,7 @@ def test_dots_on_a_timeline_rail_are_no_bullets():
         p.draw(ellipse(65.6, y - 4, 4.25, 4.25), fill="#2a9d8f")
         p.words(item, 78, y)
     for e in elements(p):
-        for par in e.get("paragraphs", []):
+        for par in paragraphs_of(e):
             assert not par.get("bullet"), par["bullet"]
 
 
@@ -241,7 +280,7 @@ def test_title_accent_bar_is_no_bullet_and_takes_no_title():
     p.words("Lab setup", 38.5, 24, 11.96)
     body_text(p)
     els = elements(p)
-    title = next(e for e in els if e["kind"] == "text" and "Lab" in texts([e])[0])
+    title = next(e for e in text_elements(els) if "Lab" in texts([e])[0])
     assert not title["paragraphs"][0]["bullet"]
 
 
@@ -251,7 +290,7 @@ def test_bar_chart_category_labels_belong_to_the_chart():
     """Category labels set flush right against a horizontal bar chart, some too long for a
     tick label: as text boxes they re-wrapped over the next one."""
     p = Page()
-    bars = []
+    bars: list[PathItem] = []
     for i, (name, length) in enumerate([("Warehouse picking backlog", 150), ("Carrier handover delayed", 120),
                                         ("Customer not available", 90), ("Other", 30)]):
         y = 60 + 28 * i
@@ -314,7 +353,7 @@ def test_redrawn_node_label_goes_to_the_copy_on_top():
     p.text("Parser", 216, 77, 8.97)
     p.draw(lines((140, 74), (200, 74)), type="s", stroke="#000000", width=0.4)
     body_text(p)
-    diagram = next(e for e in elements(p) if e["kind"] == "diagram")
+    diagram = next(iter(diagrams(elements(p))))
     labelled = {"".join(r["text"] for par in n["paragraphs"] for r in par): n for n in diagram["nodes"] if n["paragraphs"]}
     assert "LexerLexer" not in labelled and labelled["Lexer"]["fill"] == "#ffff00", list(labelled)
 
@@ -332,7 +371,7 @@ def test_crossing_circles_are_a_venn_picture_not_a_diagram():
     body_text(p)
     els = elements(p)
     assert not any(e["kind"] == "diagram" or e["kind"] == "shape" for e in els), [e["kind"] for e in els]
-    fig = next(e for e in els if e["kind"] == "image")
+    fig = next(iter(images(els)))
     assert not fig.get("anchor")
     assert not any("Carbon" in t or "Renewables" in t for t in texts(els))
 
@@ -341,12 +380,14 @@ def test_open_curves_are_no_ellipse_nodes():
     """Four curves in a row (a logo's arch, a wave) became an ELLIPSE node of their box."""
     p = Page()
     p.draw(rect(398, 28, 437, 67), type="s", stroke="#000000", width=0.4)
-    arch = [["c", [[402, 60], [402, 45], [410, 35], [417, 35]]], ["c", [[417, 35], [424, 35], [432, 45], [432, 60]]],
-            ["c", [[432, 60], [428, 50], [422, 42], [417, 42]]], ["c", [[417, 42], [412, 42], [406, 50], [402, 60]]]]
-    p.draw(arch[:2] + [["c", [[432, 60], [430, 62], [428, 63], [426, 63]]], ["c", [[426, 63], [420, 63], [410, 63], [404, 62]]]],
-           type="s", stroke="#003366", width=1.2)
+    arch: list[PathItem] = [
+        ("c", [[402, 60], [402, 45], [410, 35], [417, 35]]), ("c", [[417, 35], [424, 35], [432, 45], [432, 60]]),
+        ("c", [[432, 60], [428, 50], [422, 42], [417, 42]]), ("c", [[417, 42], [412, 42], [406, 50], [402, 60]])]
+    tail: list[PathItem] = [("c", [[432, 60], [430, 62], [428, 63], [426, 63]]),
+                            ("c", [[426, 63], [420, 63], [410, 63], [404, 62]])]
+    p.draw(arch[:2] + tail, type="s", stroke="#003366", width=1.2)
     body_text(p)
-    assert not any(e["kind"] == "diagram" and any(n["shape"] == "ELLIPSE" for n in e["nodes"]) for e in elements(p))
+    assert not any(any(n["shape"] == "ELLIPSE" for n in e["nodes"]) for e in diagrams(elements(p)))
 
 
 def test_script_labels_keep_a_circuit_a_picture():
@@ -383,5 +424,5 @@ def test_label_well_inside_a_filled_node_is_not_what_an_overlay_follows():
     p.text("Questions?", 196.59, 123.51, 24.79, font="LMSans10-Bold", w=123.9)
     p.text("l.meyer@icr-kiel.example", 196.59, 144.22, 9.96, w=100.2)
     body_text(p)
-    overlays = [e for e in elements(p) if e.get("overlay")]
+    overlays = [e for e in images(elements(p)) if e.get("overlay")]  # (only a picture is an overlay)
     assert overlays and not any(o.get("anchor") for o in overlays)

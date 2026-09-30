@@ -1,18 +1,21 @@
 """The numpy slide metrics each see their own kind of defect (devtools/slide_metrics.py)."""
 
 import json
+from collections.abc import Sequence
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-from beamer2slides.json_types import JsonObject
+from beamer2slides.arrays import SignedRGB
+from beamer2slides.json_types import Json, JsonObject
 
 from beamer2slides.devtools.slide_metrics import (SEVERITY, SEVERITY_CAP, auc, auc_within, content_lost_auc,
                                                    content_lost_split, distance_to, fit_missing_weight,
                                                    numpy_metrics, severity)
 
 
-def test_severity_counts_what_passes_its_threshold_each_capped():
+def test_severity_counts_what_passes_its_threshold_each_capped() -> None:
     """A gradient's ground_de sixty times its threshold is one defect, not sixty: each metric counts
     at most SEVERITY_CAP, and one below its threshold counts nothing."""
     th = {"ground_de": 1.0, "missing": 0.1, "dino": 0.2}
@@ -21,7 +24,7 @@ def test_severity_counts_what_passes_its_threshold_each_capped():
     assert total == pytest.approx(SEVERITY_CAP + 3.0)
 
 
-def test_severity_weights_scale_a_ratio_before_its_cap():
+def test_severity_weights_scale_a_ratio_before_its_cap() -> None:
     """weights=None is exactly the unweighted 1x sum; a weight on one metric scales its
     ratio before SEVERITY_CAP, so a big enough weight can push it past the cap while an unweighted
     metric elsewhere is unaffected."""
@@ -34,7 +37,7 @@ def test_severity_weights_scale_a_ratio_before_its_cap():
     assert total1 > total0
 
 
-def test_content_lost_split_separates_words_or_a_picture_gone_from_other_defects_and_identical():
+def test_content_lost_split_separates_words_or_a_picture_gone_from_other_defects_and_identical() -> None:
     """CONTENT_LOST (text_missing, picture_missing) slides are `pos`; some other named defect is `neg`;
     a judged-identical slide (an empty category set) is neither - a threshold already separates those."""
     labels = {("d", 1): {"text_missing"}, ("d", 2): {"picture_missing", "shape"},
@@ -44,7 +47,7 @@ def test_content_lost_split_separates_words_or_a_picture_gone_from_other_defects
     assert neg == [("d", 3)]
 
 
-def test_fit_missing_weight_ranks_a_content_lost_slide_over_a_drift_one():
+def test_fit_missing_weight_ranks_a_content_lost_slide_over_a_drift_one() -> None:
     """Two slides cross their thresholds by the same total at 1x - one because words are gone
     (missing, local_missing), the other only from drift (graded, extra). Unweighted, severity ranks
     the drift one worse (`SEVERITY`'s plain sum has no opinion about which metric it came from);
@@ -65,7 +68,7 @@ def test_fit_missing_weight_ranks_a_content_lost_slide_over_a_drift_one():
     assert severity(rows[("a", 1)], thresholds, weighted)[0] > severity(rows[("b", 1)], thresholds, weighted)[0]
 
 
-def test_fit_missing_weight_needs_a_content_lost_example_to_calibrate_against():
+def test_fit_missing_weight_needs_a_content_lost_example_to_calibrate_against() -> None:
     """With no CONTENT_LOST-labelled slide (or nothing to rank it over) there is nothing to fit: the
     weight stays 1x rather than guessed."""
     thresholds = {"missing": 0.1}
@@ -78,26 +81,27 @@ def test_fit_missing_weight_needs_a_content_lost_example_to_calibrate_against():
     assert (weight, a, pairs) == (1.0, None, 0)               # ("b", 1) is identical, not "some other defect"
 
 
-def test_content_lost_auc_falls_back_to_every_pair_without_a_same_deck_one():
+def test_content_lost_auc_falls_back_to_every_pair_without_a_same_deck_one() -> None:
     thresholds = {"missing": 0.1}
     rows = {("a", 1): {"missing": 1.0}, ("b", 1): {"missing": 0.0}}
     a, pairs = content_lost_auc(rows, [("a", 1)], [("b", 1)], thresholds, None)
     assert a == 1.0 and pairs == 1
 
 
-def _write_metrics(root, deck, tag, slides):
+def _write_metrics(root: Path, deck: str, tag: str, slides: list[JsonObject]) -> None:
     d = root / deck / "runs" / tag
     d.mkdir(parents=True)
     (d / "metrics.json").write_text(json.dumps({"deck": deck, "tag": tag, "slides": slides}), encoding="utf-8")
 
 
-def _write_verdict(root, deck, sheets):
+def _write_verdict(root: Path, deck: str, sheets: list[JsonObject]) -> None:
     d = root / "judging" / deck
     d.mkdir(parents=True)
     (d / "verdict-1.json").write_text(json.dumps({"sheets": sheets}), encoding="utf-8")
 
 
-def test_calibrate_fits_a_missing_weight_and_reports_before_and_after(tmp_path, monkeypatch):
+def test_calibrate_fits_a_missing_weight_and_reports_before_and_after(tmp_path: Path,
+                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     """A miniature corpus: one deck's worst slide is real content loss (heavy missing/local_missing,
     nothing else off), another's is pure drift (graded/extra, no missing), and a handful of identical
     decks to set thresholds near zero. `calibrate` should learn a MISSING_METRICS weight from the
@@ -108,7 +112,7 @@ def test_calibrate_fits_a_missing_weight_and_reports_before_and_after(tmp_path, 
     # identical decks sit at 0.01 on every SEVERITY metric, so each threshold lands there too (a
     # constant array's 95th percentile is the constant); the two defect rows cross it 5x on their own
     # metrics only, a tie at 1x (10 + 10) that a weight on missing/local_missing alone should break.
-    zero = {m: 0.01 for m in SEVERITY}
+    zero: dict[str, Json] = {m: 0.01 for m in SEVERITY}
     corpus = tmp_path / "corpus"
     _write_metrics(corpus, "content-lost", "t", [{"slide": 1, **zero, "missing": 0.05, "local_missing": 0.05}])
     _write_metrics(corpus, "drift-only", "t", [{"slide": 1, **zero, "graded": 0.05, "extra": 0.05}])
@@ -124,7 +128,10 @@ def test_calibrate_fits_a_missing_weight_and_reports_before_and_after(tmp_path, 
         {"deck": "content-lost", "sheet": 1, "category": "text_missing"},
         {"deck": "drift-only", "sheet": 1, "category": "line_breaks"}]}), encoding="utf-8")
 
-    monkeypatch.setattr(sm, "corpus_dir", lambda: corpus)
+    def corpus_dir() -> Path:
+        return corpus
+
+    monkeypatch.setattr(sm, "corpus_dir", corpus_dir)
     table = sm.calibrate("t", verdicts)
 
     assert table["severity_weights"]["missing"] > 1.0
@@ -145,8 +152,14 @@ W, H = 400, 225
 SLIDE: JsonObject = {"size": [W, H], "elements": [{"bbox": [0, 0, W, H]}]}
 
 
-def page(words=((40, 40), (40, 100), (40, 160)), colour=(0, 0, 0), ground=(255, 255, 255)):
-    """A white page with a few 'words', 120 x 10 px: a row of 2 px stems 6 px apart, like letters."""
+WORDS = ((40, 40), (40, 100), (40, 160))
+BLACK = (0, 0, 0)
+WHITE = (255, 255, 255)
+
+
+def page(words: Sequence[tuple[int, int]], colour: tuple[int, int, int], ground: tuple[int, int, int]) -> SignedRGB:
+    """A page of `ground` with a few 'words' in `colour`, 120 x 10 px: a row of 2 px stems 6 px apart,
+    like letters."""
     a = np.empty((H, W, 3), np.int16)
     a[:] = ground
     for x, y in words:
@@ -155,49 +168,49 @@ def page(words=((40, 40), (40, 100), (40, 160)), colour=(0, 0, 0), ground=(255, 
     return a
 
 
-def test_distance_to_counts_pixels_up_to_its_reach():
+def test_distance_to_counts_pixels_up_to_its_reach() -> None:
     m = np.zeros((20, 40), bool)
     m[10, 5] = True
     d = distance_to(m, reach=6)
     assert d[10, 5] == 0 and d[10, 8] == 3 and d[10, 30] == 7
 
 
-def test_the_same_page_scores_zero_everywhere():
-    s, _ = numpy_metrics(page(), page(), SLIDE)
+def test_the_same_page_scores_zero_everywhere() -> None:
+    s, _ = numpy_metrics(page(WORDS, BLACK, WHITE), page(WORDS, BLACK, WHITE), SLIDE)
     assert all(v == 0 for v in s.values()), s
 
 
-def test_a_small_shift_is_drift_not_missing_ink():
-    s, _ = numpy_metrics(page(), page(((44, 43), (44, 103), (44, 163))), SLIDE)
+def test_a_small_shift_is_drift_not_missing_ink() -> None:
+    s, _ = numpy_metrics(page(WORDS, BLACK, WHITE), page(((44, 43), (44, 103), (44, 163)), BLACK, WHITE), SLIDE)
     assert s["overlap"] > 0.2                    # overlap's cliff: 3-4 px off reads as ink gone
     assert s["missing"] == 0 and s["extra"] == 0
     assert 1 < s["drift"] < 6
     assert s["graded"] < s["overlap"] / 2
 
 
-def test_a_lost_word_is_missing_and_one_too_many_is_extra():
-    s, _ = numpy_metrics(page(), page(((40, 40), (40, 100))), SLIDE)
+def test_a_lost_word_is_missing_and_one_too_many_is_extra() -> None:
+    s, _ = numpy_metrics(page(WORDS, BLACK, WHITE), page(((40, 40), (40, 100)), BLACK, WHITE), SLIDE)
     assert 0.3 < s["missing"] < 0.36 and s["extra"] == 0
-    s, _ = numpy_metrics(page(), page(((40, 40), (40, 100), (40, 160), (240, 100))), SLIDE)
+    s, _ = numpy_metrics(page(WORDS, BLACK, WHITE), page(((40, 40), (40, 100), (40, 160), (240, 100)), BLACK, WHITE), SLIDE)
     assert s["missing"] == 0 and 0.22 < s["extra"] < 0.28
 
 
-def test_a_recoloured_word_shows_in_ink_de_only():
-    s, _ = numpy_metrics(page(), page(colour=(160, 0, 0)), SLIDE)
+def test_a_recoloured_word_shows_in_ink_de_only() -> None:
+    s, _ = numpy_metrics(page(WORDS, BLACK, WHITE), page(WORDS, (160, 0, 0), WHITE), SLIDE)
     assert s["overlap"] == 0 and s["missing"] == 0
     assert s["ink_de"] > 30 and s["ground_de"] == 0
 
 
-def test_a_tinted_page_shows_in_ground_de():
-    s, _ = numpy_metrics(page(), page(ground=(235, 240, 255)), SLIDE)
+def test_a_tinted_page_shows_in_ground_de() -> None:
+    s, _ = numpy_metrics(page(WORDS, BLACK, WHITE), page(WORDS, BLACK, (235, 240, 255)), SLIDE)
     assert s["ground_de"] > 5 and s["ink_de"] == 0
 
 
-def test_words_moved_on_a_panel_are_local_ink_moved():
+def test_words_moved_on_a_panel_are_local_ink_moved() -> None:
     """A yellow panel is ink against the white page, so the words on it hide inside it; against
     their own surroundings they are words that moved."""
-    def on_panel(words):
-        a = page(())
+    def on_panel(words: Sequence[tuple[int, int]]) -> SignedRGB:
+        a = page((), BLACK, WHITE)
         a[30:200, 20:380] = (250, 190, 0)
         for x, y in words:
             for s in range(x, x + 120, 6):
@@ -210,33 +223,33 @@ def test_words_moved_on_a_panel_are_local_ink_moved():
     assert s["missing"] < 0.02 and 0.4 < s["local_missing"] < 0.6
 
 
-def test_the_worst_tile_finds_one_wrong_word():
+def test_the_worst_tile_finds_one_wrong_word() -> None:
     words = [(x, y) for x in (20, 200) for y in (20, 60, 100, 140, 180)]
     moved = words[:-1] + [(215, 195)]
-    s, _ = numpy_metrics(page(words), page(moved), SLIDE)
+    s, _ = numpy_metrics(page(words, BLACK, WHITE), page(moved, BLACK, WHITE), SLIDE)
     assert s["tile_overlap"] > 3 * s["overlap"]
 
 
-def test_transport_is_debiased_so_the_same_page_has_moved_nowhere():
+def test_transport_is_debiased_so_the_same_page_has_moved_nowhere() -> None:
     """Entropy alone smears a page onto itself by about a cell; the shift takes that off."""
     pytest.importorskip("torch")
     from beamer2slides.devtools.slide_metrics import Gpu
     gpu = Gpu(device="cpu")
-    ink = page()[..., 0] < 128
+    ink = page(WORDS, BLACK, WHITE)[..., 0] < 128
     same = gpu.ot(ink, ink)
     assert same == {"ot_shift": 0.0, "ot_missing": 0.0, "ot_extra": 0.0}
-    down = gpu.ot(ink, page(((40, 56), (40, 116), (40, 176)))[..., 0] < 128)
+    down = gpu.ot(ink, page(((40, 56), (40, 116), (40, 176)), BLACK, WHITE)[..., 0] < 128)
     assert 10 < down["ot_shift"] < 22 and down["ot_missing"] < 0.01
 
 
-def test_auc_ranks_positives_above_negatives():
+def test_auc_ranks_positives_above_negatives() -> None:
     assert auc([3, 4], [1, 2]) == 1.0
     assert auc([1, 2], [3, 4]) == 0.0
     assert auc([1, 1], [1, 1]) == 0.5
     assert auc([], [1]) is None
 
 
-def test_auc_within_decks_does_not_score_a_decks_style():
+def test_auc_within_decks_does_not_score_a_decks_style() -> None:
     """Deck b's slides all score high, its defects included: across decks that looks like skill."""
     scores = {("a", 1): 1, ("a", 2): 2, ("a", 3): 3, ("b", 1): 9, ("b", 2): 8, ("b", 3): 9}
 

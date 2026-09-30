@@ -1,14 +1,17 @@
 """Long arrows and the formulas around them (visual hunt, wave 4 fixer M)."""
-from .test_charts_diagrams import Page, body_text, deck
+from collections.abc import Sequence
+
+from beamer2slides import ir
+
+from .test_charts_diagrams import Page, body_text, deck, images, raw_doc, run_texts, text_elements
 
 
-def runs_text(slide: dict) -> str:
-    return " / ".join("".join(r["text"] for r in par["runs"]) for e in slide["elements"] if e["kind"] == "text"
-                      for par in e["paragraphs"])
+def runs_text(elements: Sequence[ir.Element]) -> str:
+    return " / ".join(run_texts(par["runs"]) for e in text_elements(elements) for par in e["paragraphs"])
 
 
-def holes(slide: dict) -> list[dict]:
-    return [e for e in slide["elements"] if e["kind"] == "image" and e.get("anchor") is not None]
+def holes(slide: ir.Slide) -> list[ir.ImageElement]:
+    return [e for e in images(slide["elements"]) if e.get("anchor") is not None]
 
 
 def test_a_long_arrow_is_a_hole_not_a_short_glyph():
@@ -28,7 +31,7 @@ def test_a_long_arrow_is_a_hole_not_a_short_glyph():
     p.words("follows from the lemma above", x + 17, 100)
     body_text(p)
     slide = deck(p)["slides"][0]
-    text = runs_text(slide)
+    text = runs_text(slide["elements"])
     assert "Oxidation: water" in text and "peroxide released" in text and "accepts the input" in text
     assert not any(c in text for c in "⟶⟺−⇐⇒")
     assert "→ follows" in text
@@ -62,7 +65,7 @@ def test_a_matrix_parenthesis_under_a_word_stays_with_its_display():
     body_text(p, 260)
     slide = deck(p)["slides"][0]
     assert not holes(slide)
-    assert "\uf8eb" not in runs_text(slide)
+    assert "\uf8eb" not in runs_text(slide["elements"])
 
 
 def test_an_items_formula_wrapped_alone_is_a_paragraph_of_its_own():
@@ -106,10 +109,11 @@ def test_an_items_formula_wrapped_alone_is_a_paragraph_of_its_own():
         s = p.text(text, bbox[0], baseline, 8.97, font=font, color="#3333b3" if text == "▶" else "#000000")
         s["bbox"] = bbox
     p.draw(lines((288.78, 118.15), (293.69, 118.15)), type="s", stroke="#000000", width=0.38)
-    raw = {**p.raw(), "size": [362.83, 272.13]}  # (the deck's page: the item fills its column)
-    d = classify({"version": 1, "source": {"title": ""}, "pages": [raw]})
+    raw = p.raw()
+    raw["size"] = [362.83, 272.13]  # (the deck's page: the item fills its column)
+    d = classify(raw_doc([raw]))
     slide = d["slides"][0]
-    [box] = [e for e in slide["elements"] if e["kind"] == "text" and "Separator" in runs_text({"elements": [e]})]
+    [box] = [e for e in text_elements(slide["elements"]) if "Separator" in runs_text([e])]
     k = next(i for i, par in enumerate(box["paragraphs"]) if par["runs"][0]["text"].startswith("Separator"))
     item, formula = box["paragraphs"][k:k + 2]
     assert not any(r.get("hole") for r in item["runs"])
@@ -208,7 +212,7 @@ def test_a_wrapped_formula_line_with_words_after_it_keeps_the_words():
         s = p.text(text, bbox[0], baseline, size, font=font)
         s["bbox"] = bbox
     body_text(p, 250)
-    text = runs_text(deck(p)["slides"][0])
+    text = runs_text(deck(p)["slides"][0]["elements"])
     assert "with" in text and "for the plain" in text
 
 
@@ -246,7 +250,7 @@ def test_a_label_between_two_arrows_is_the_nearer_ones():
     slide = deck(p)["slides"][0]
     upper, lower = sorted(holes(slide), key=lambda h: h["bbox"][1])
     assert upper["bbox"][3] <= lower["bbox"][1] + 1.0  # (no picture over the other's)
-    assert lower["bbox"][1] <= 117.36 + 0.5 and "L" not in runs_text(slide).replace("Body", "")
+    assert lower["bbox"][1] <= 117.36 + 0.5 and "L" not in runs_text(slide["elements"]).replace("Body", "")
 
 
 def test_a_table_cells_accent_is_over_its_letter():
@@ -322,7 +326,7 @@ def test_an_arrows_labels_are_in_its_picture():
     p.words("to a dry film of it", x + 42, 100)
     body_text(p)
     slide = deck(p)["slides"][0]
-    text = runs_text(slide)
+    text = runs_text(slide["elements"])
     assert "120" not in text and "vacuo" not in text and "Anneal the crystals" in text
     (hole,) = holes(slide)
     assert hole["bbox"][1] < 92.5 - 0.75 * 7.97 + 0.5 and hole["bbox"][3] > 106.5

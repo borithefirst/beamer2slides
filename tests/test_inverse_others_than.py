@@ -49,7 +49,9 @@ def test_an_element_numbered_by_slides_sty_keeps_its_objects(tmp_path: Path, bac
 
 def test_a_mark_with_only_a_key_is_its_element_by_that_key(tmp_path: Path, backend: None) -> None:
     page = element(b"/k (logo)", b"/X0 Do") + element(b"/k (photo)", b"1 0 0 rg 10 10 20 20 re f") + BACKGROUND
-    assert others(tmp_path, page, FORM, group_id({"k": "logo"})) == [2, 3], "by /n alone every object went off"
+    logo = group_id({"k": "logo"})
+    assert logo is not None
+    assert others(tmp_path, page, FORM, logo) == [2, 3], "by /n alone every object went off"
 
 
 def test_the_form_around_a_marked_object_stays_on(tmp_path: Path, backend: None) -> None:

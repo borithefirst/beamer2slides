@@ -4,14 +4,18 @@ never ends past the slide's right edge; one that cannot fit even set smaller sta
 
 from beamer2slides import emit as E
 from beamer2slides.emit import FontMapper
+from beamer2slides.emit_model import JsonMap
+from beamer2slides.emit_tables import TableLayout
+from beamer2slides.ir import TableElement
 
-from .test_tables_hunt import W, Page, tables
+from .json_reads import jarr, jint, jnum, jobj, jobjs
+from .test_tables_hunt import W, Page, as_json, some, tables
 from .test_tables_wave4 import overfull_table
 
 
-def layout(t: dict) -> tuple[dict, float, FontMapper]:
+def layout(t: TableElement) -> tuple[TableLayout, float, FontMapper]:
     scale, fonts = 720.0 / W, FontMapper()
-    return E.table_layout(t, scale, fonts, imported=True, page_w=W), scale, fonts
+    return E.table_layout(as_json(t), scale, fonts, imported=True, page_w=W), scale, fonts
 
 
 def test_an_overfull_table_ends_on_the_page_with_every_column():
@@ -31,10 +35,12 @@ def test_an_overfull_table_ends_on_the_page_with_every_column():
             assert lay.widths[c] >= w + 2 * E.TABLE_CELL_PAD + E.WRAP_MARGIN - 0.01, (r, c)
     # the text is no smaller than it has to be: a little larger and the columns no longer close up
     if lay.shrink < 1:
-        cells = [[[{**r, "cell": True, "size": r["size"] * (lay.shrink + 0.01)} for r in E.in_sentence(runs)]
-                  for runs in row] for row in t["cells"]]
-        got = E.table_columns(t, cells, scale, fonts, tight=True)
-        assert E.squeezed_columns(t, cells, got, scale, W) is None
+        table = as_json(t)
+        cells: list[list[list[JsonMap]]] = [
+            [[{**r, "cell": True, "size": jnum(r["size"]) * (lay.shrink + 0.01)} for r in E.in_sentence(jobjs(runs))]
+             for runs in jarr(row)] for row in jarr(table, "cells")]
+        got = E.table_columns(table, cells, scale, fonts, tight=True)
+        assert E.squeezed_columns(table, cells, got, scale, W) is None
 
 
 def test_a_squeezed_columns_words_move_with_it():
@@ -43,10 +49,17 @@ def test_a_squeezed_columns_words_move_with_it():
     page, xs = overfull_table()
     (t,) = tables(page.elements())
     lay, scale, fonts = layout(t)
-    reqs = E.table_requests(t, "s", "tab", scale, fonts, imported=True, page_w=W)
-    indents = {(q["cellLocation"]["rowIndex"], q["cellLocation"]["columnIndex"]): q["style"]["indentStart"]["magnitude"]
-               for q in (r.get("updateParagraphStyle") for r in reqs) if q and "cellLocation" in q}
-    pdf_offset = [max(0.0, (c["x0"] - b) * scale - E.PAD_X) for c, b in zip(t["columns"], t["bounds"])]
+    reqs = E.table_requests(as_json(t), "s", "tab", scale, fonts, imported=True, page_w=W)
+    indents: dict[tuple[int, int], float] = {}
+    for r in reqs:
+        q = r.get("updateParagraphStyle")
+        if not q:
+            continue
+        style = jobj(q)
+        if "cellLocation" in style:
+            indents[(jint(style, "cellLocation", "rowIndex"), jint(style, "cellLocation", "columnIndex"))] = \
+                jnum(style, "style", "indentStart", "magnitude")
+    pdf_offset = [max(0.0, (c["x0"] - b) * scale - E.PAD_X) for c, b in zip(t["columns"], some(t.get("bounds")))]
     for c, col in enumerate(t["columns"]):
         if col["align"] == "left":
             assert indents[(1, c)] <= pdf_offset[c] + 0.5, c

@@ -5,24 +5,42 @@ Offline: a fake Slides API, a fake google/fonts and a fake picture host; no TeX 
 stubbed), no network.
 """
 
+from __future__ import annotations
+
+import email.message
 import io
 import json
 import urllib.error
 import zipfile
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 
 from beamer2slides import adopt, deck_files, fontfetch
-from beamer2slides.deck_files import Recording, gather, replay
+from beamer2slides.deck_files import DeckFiles, Recording, gather, replay
+from beamer2slides.deck_ir import Thumbnails
+from beamer2slides.google_types import Presentation, Presentations, Request, json_object, presentation
+from beamer2slides.inverse import Later
+from beamer2slides.json_types import JsonObject
+from beamer2slides.net import Fetch
+from beamer2slides.typing_compat import override
 
-from .json_reads import jat
+from .fake_google import Answer, Fetcher, NoPresentations, NoSlides
+from .json_reads import jarr, jat, jnum, jobj, jobjs, jstr
 from .test_adopt import text_shape
 from .test_adopt_media import VARIABLE_META, cat_deck, png_bytes, tiny_font
 
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
+    from beamer2slides.google_types import GetPresentation
+
 
 @pytest.fixture(autouse=True)
-def clean_fonts(monkeypatch, tmp_path):
+def clean_fonts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     monkeypatch.delenv("B2S_FONTS", raising=False)
     monkeypatch.delenv("B2S_FONT_SOURCE", raising=False)
     monkeypatch.setenv("B2S_FONT_CACHE", str(tmp_path / "font-cache"))
@@ -31,22 +49,38 @@ def clean_fonts(monkeypatch, tmp_path):
     adopt.forget_fonts()
 
 
-def refuse(asked: list):
-    def fetch(url):
+def refuse(asked: list[str]) -> Fetch:
+    def fetch(url: str) -> bytes:
         asked.append(url)
         raise PermissionError(f"no network here: {url}")
     return fetch
 
 
+def quiet(line: str) -> None:
+    """A log nobody reads."""
+
+
+def found_files(files: DeckFiles | None) -> DeckFiles:
+    """What `gather` found, which a test gave it."""
+    assert files is not None
+    return files
+
+
+def name_of(picture: object) -> str:
+    """The file name of a thumbnail `given_thumbnails` answers with (a path)."""
+    assert isinstance(picture, Path)
+    return picture.name
+
+
 # ---------------------------------------------------------------- recordings
 
-def test_a_recording_answers_what_it_holds_and_404s_what_was_absent(tmp_path):
+def test_a_recording_answers_what_it_holds_and_404s_what_was_absent(tmp_path: Path):
     rec = Recording(tmp_path / "rec")
     rec.put("https://a/pic.png", png_bytes(4, 3))
     rec.gone("https://a/gone.png")
     rec.save()
     back = Recording(tmp_path / "rec")
-    below = []
+    below: list[str] = []
     fetch = replay([back], refuse(below))
     assert fetch("https://a/pic.png") == png_bytes(4, 3) and back.answered == {"https://a/pic.png"}
     with pytest.raises(urllib.error.HTTPError) as err:
@@ -57,7 +91,7 @@ def test_a_recording_answers_what_it_holds_and_404s_what_was_absent(tmp_path):
     assert below == ["https://a/other.png"], "what it does not hold goes on to the fetcher underneath"
 
 
-def test_a_page_fetched_in_place_of_a_picture_is_not_named_like_one(tmp_path):
+def test_a_page_fetched_in_place_of_a_picture_is_not_named_like_one(tmp_path: Path):
     """octopus.energy's dead asset link, fosdem-green-web: a URL ending `.jpg` that actually answers
     with a Next.js error page (or a Google sign-in page for a Drive link) is recorded as `.html`, not
     `.jpg` - naming it a picture would let it be mistaken for one later."""
@@ -70,7 +104,7 @@ def test_a_page_fetched_in_place_of_a_picture_is_not_named_like_one(tmp_path):
     assert rec.files["https://fonts.gstatic.com/s/tiny/v1/tiny.woff2"].endswith(".woff2")
 
 
-def test_font_files_read_from_a_local_copy_are_seen_too(tmp_path):
+def test_font_files_read_from_a_local_copy_are_seen_too(tmp_path: Path):
     """A producer with a google/fonts checkout reads files from disk: they are recorded all the same."""
     (tmp_path / "gf" / "ofl" / "tiny").mkdir(parents=True)
     (tmp_path / "gf" / "ofl" / "tiny" / "METADATA.pb").write_bytes(b"name: \"Tiny\"")
@@ -88,33 +122,34 @@ def test_font_files_read_from_a_local_copy_are_seen_too(tmp_path):
 
 # ---------------------------------------------------------------- the files, named
 
-def test_the_parts_come_from_the_folder_or_each_on_its_own(tmp_path):
+def test_the_parts_come_from_the_folder_or_each_on_its_own(tmp_path: Path):
     folder = tmp_path / "files"
     (folder / "thumbnails").mkdir(parents=True)
     (folder / "pictures").mkdir()
     (folder / "presentation.json").write_text("{}", encoding="utf-8")
-    files = gather(folder, None, (), None, None)
+    files = found_files(gather(folder, None, (), None, None))
     assert files.presentation == folder / "presentation.json" and files.thumbnails == [folder / "thumbnails"]
     assert files.pictures == folder / "pictures" and files.google_fonts is None
     assert files.given() == {"presentation": True, "thumbnails": True, "pictures": True,
                              "google_fonts": False, "pptx": False, "fonts": False}
     (tmp_path / "gf").mkdir()
-    assert gather(folder, None, (), None, tmp_path / "gf").google_fonts == tmp_path / "gf"
+    assert found_files(gather(folder, None, (), None, tmp_path / "gf")).google_fonts == tmp_path / "gf"
     assert gather("1AbCdEf", None, (), None, None) is None, "a live deck"
     (tmp_path / "deck.json").write_text("{}", encoding="utf-8")
-    assert gather(tmp_path / "deck.json", None, [tmp_path / "t"], None, None).thumbnails == [tmp_path / "t"]
+    assert found_files(gather(tmp_path / "deck.json", None, [tmp_path / "t"], None, None)).thumbnails == [
+        tmp_path / "t"]
     with pytest.raises(SystemExit, match="deck read from files"):
         gather("1AbCdEf", None, (), tmp_path / "gf", None)
     with pytest.raises(SystemExit, match="not a folder"):
         gather(folder, None, (), tmp_path / "nothing", None)
 
 
-def test_a_zip_is_unpacked_and_never_outside_its_folder(tmp_path):
+def test_a_zip_is_unpacked_and_never_outside_its_folder(tmp_path: Path):
     folder = tmp_path / "files"
     folder.mkdir()
     (folder / "presentation.json").write_text("{}", encoding="utf-8")
     deck_files.zip_folder(folder, tmp_path / "files.zip")
-    files = gather(tmp_path / "files.zip", tmp_path / "unpacked", (), None, None)
+    files = found_files(gather(tmp_path / "files.zip", tmp_path / "unpacked", (), None, None))
     assert files.presentation == tmp_path / "unpacked" / "presentation.json"
     evil = tmp_path / "evil.zip"
     with zipfile.ZipFile(evil, "w") as z:
@@ -125,133 +160,210 @@ def test_a_zip_is_unpacked_and_never_outside_its_folder(tmp_path):
     assert not (tmp_path / "outside.txt").exists()
 
 
-def test_thumbnails_are_a_slides_by_number_or_id_and_of_its_shape(tmp_path):
+def test_thumbnails_are_a_slides_by_number_or_id_and_of_its_shape(tmp_path: Path):
     from beamer2slides.deck_ir import given_thumbnails
-    pres = {"pageSize": {"width": {"magnitude": 9144000, "unit": "EMU"}, "height": {"magnitude": 5143500, "unit": "EMU"}},
+    pres: JsonObject = {"pageSize": {"width": {"magnitude": 9144000, "unit": "EMU"}, "height": {"magnitude": 5143500, "unit": "EMU"}},
             "slides": [{"objectId": "a"}, {"objectId": "b"}, {"objectId": "c"}]}
     (tmp_path / "t").mkdir()
     (tmp_path / "t" / "001.png").write_bytes(png_bytes(160, 90))
     (tmp_path / "t" / "c.png").write_bytes(png_bytes(160, 90))
     (tmp_path / "t" / "002.png").write_bytes(png_bytes(100, 100))       # another deck's page shape
-    said = []
+    said: list[str] = []
     get, n = given_thumbnails(pres, [tmp_path / "t"], said.append)
-    assert (get(0).name, get(1), get(2).name, n) == ("001.png", None, "c.png", 1 + 1)
+    assert (name_of(get(0)), get(1), name_of(get(2)), n) == ("001.png", None, "c.png", 1 + 1)
     assert any("not the deck's page shape" in s for s in said)
     loose = tmp_path / "loose"
     loose.mkdir()
     for name in ("x.png", "y.png", "z.png"):
         (loose / name).write_bytes(png_bytes(160, 90))
     get, n = given_thumbnails(pres, [loose], said.append)
-    assert [get(i).name for i in range(3)] == ["x.png", "y.png", "z.png"], "one per slide, in order"
+    assert [name_of(get(i)) for i in range(3)] == ["x.png", "y.png", "z.png"], "one per slide, in order"
 
 
 # ---------------------------------------------------------------- saved, then adopted with nothing
 
-def fake_google(monkeypatch, pres):
+class OneDeck(NoPresentations):
+    """`presentations()` answering `get` with the one deck, whatever id is asked."""
+
+    def __init__(self, pres: Presentation) -> None:
+        self.pres = pres
+
+    @override
+    def get(self, **kw: Unpack[GetPresentation]) -> Request[Presentation]:
+        return Answer(self.pres)
+
+
+class OneDeckSlides(NoSlides):
+    """A Slides client holding the one deck."""
+
+    def __init__(self, pres: Presentation) -> None:
+        self.decks = OneDeck(pres)
+
+    @override
+    def presentations(self) -> Presentations:
+        return self.decks
+
+
+def no_slides(*a: object, **k: object) -> NoReturn:
+    pytest.fail("Slides")
+
+
+def no_drive(*a: object, **k: object) -> NoReturn:
+    pytest.fail("Drive")
+
+
+def fake_google(monkeypatch: pytest.MonkeyPatch, pres: JsonObject) -> None:
     from beamer2slides import google_auth
+    slides = OneDeckSlides(presentation(pres, "the deck the fake Slides holds"))
 
-    from .test_guard import Request
-    slides = type("S", (), {"presentations": lambda self: self,
-                            "get": lambda self, presentationId: Request(pres)})()
-    monkeypatch.setattr(google_auth, "slides_service", lambda *a, **k: slides)
-    monkeypatch.setattr(google_auth, "drive_service", lambda *a, **k: pytest.fail("Drive"))
+    def slides_service(*a: object, **k: object) -> OneDeckSlides:
+        return slides
+    monkeypatch.setattr(google_auth, "slides_service", slides_service)
+    monkeypatch.setattr(google_auth, "drive_service", no_drive)
 
-    def thumbnails(pid, pres, folder):
+    def thumbnails(pid: str, pres: Presentation, folder: Path) -> Thumbnails:
         folder.mkdir(parents=True, exist_ok=True)
-        paths = []
-        for i, _ in enumerate(pres["slides"]):
+        paths: list[Path] = []
+        for i, _ in enumerate(pres.get("slides", [])):
             (folder / f"{i + 1:03d}.png").write_bytes(png_bytes(160, 90, colour=(30, 90, 200)))
             paths.append(folder / f"{i + 1:03d}.png")
-        return lambda n: paths[n] if 0 <= n < len(paths) else None
+
+        def shot(n: int) -> Path | None:
+            return paths[n] if 0 <= n < len(paths) else None
+        return shot
     monkeypatch.setattr("beamer2slides.deck_ir.slide_thumbnails", thumbnails)
 
 
-def web():
+def the_cat_deck() -> tuple[JsonObject, bytes, bytes]:
+    """`cat_deck`'s presentation, its photo and its .pptx, the presentation read as JSON."""
+    pres, cat, data = cat_deck()
+    return jobj(pres), cat, data
+
+
+def web() -> tuple[JsonObject, Fetch, list[str]]:
     """The picture host and google/fonts as the producer reaches them."""
-    pres, cat, _ = cat_deck()
-    pres["slides"][0]["pageElements"].append(
+    pres, cat, _ = the_cat_deck()
+    jarr(pres, "slides", 0, "pageElements").append(
         text_shape("t", "Words in a fetched face", 10, 10, 300, 40, font="Tiny Flex"))
     answers = {"https://example.invalid/cat.png": cat, "https://example.invalid/backdrop.png": png_bytes(32, 18),
                f"{fontfetch.RAW}ofl/tinyflex/METADATA.pb": VARIABLE_META.encode(),
                f"{fontfetch.RAW}ofl/tinyflex/OFL.txt": b"licence",
                f"{fontfetch.RAW}ofl/tinyflex/TinyFlex%5Bwght%5D.ttf": tiny_font("Tiny Flex", variable=True)}
-    asked = []
+    asked: list[str] = []
 
-    def fetch(url):
+    def fetch(url: str) -> bytes:
         asked.append(url)
         if url not in answers:
-            raise urllib.error.HTTPError(url, 404, "Not Found", {}, None)
+            raise urllib.error.HTTPError(url, 404, "Not Found", email.message.Message(), None)
         return answers[url]
     return pres, fetch, asked
 
 
-def adopted(monkeypatch, tmp_path, name, deck, **kw):
-    seen = {}
-    monkeypatch.setattr("beamer2slides.inverse.run_pull", lambda target, *a, **k: seen.setdefault("target", target))
-    monkeypatch.setattr(adopt, "record_base", lambda target, pres, *a, **k: seen.setdefault("pres", pres))
+@dataclass(frozen=True, kw_only=True)
+class Adoption:
+    """What one `cmd_adopt` wrote and said: the source, the tree's figures and fonts by name, what it
+    found, what it handed the loop (`target`) and the sync base (`pres`), and its log."""
+    text: str
+    figures: dict[str, bytes]
+    fonts: dict[str, bytes]
+    found: dict[str, object]
+    seen: dict[str, JsonObject]
+    log: list[str]
+
+    def offline(self) -> JsonObject:
+        """`found["offline"]`: each part of the deck's files as the report says it."""
+        return json_object(self.found["offline"], "found['offline']")
+
+
+def files_in(folder: Path) -> dict[str, bytes]:
+    """The files of `folder` by name (none when there is no such folder)."""
+    if not folder.is_dir():
+        return {}
+    return {p.name: p.read_bytes() for p in folder.iterdir()}
+
+
+def adopted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, deck: str, pptx: Path | None) -> Adoption:
+    seen: dict[str, JsonObject] = {}
+
+    def run_pull(target: JsonObject | Later, tex: Path, work: Path, apply: bool, out: Path | None, max_iter: int,
+                 handout: bool, engine: str | None, log: Callable[[str], object]) -> None:
+        assert not isinstance(target, Later)
+        seen.setdefault("target", target)
+
+    def record_base(target: JsonObject, pres: JsonObject | None, tex: Path, work: Path, engine: str | None,
+                    base_in_drive: bool, log: Callable[[str], None]) -> None:
+        assert pres is not None
+        seen.setdefault("pres", pres)
+    monkeypatch.setattr("beamer2slides.inverse.run_pull", run_pull)
+    monkeypatch.setattr(adopt, "record_base", record_base)
     monkeypatch.setenv("B2S_FONT_CACHE", str(tmp_path / name / "font-cache"))
-    found: dict = {}
-    log = []
+    found: dict[str, object] = {}
+    log: list[str] = []
     tex = tmp_path / name / "tree" / "main.tex"
     with adopt.no_machine_fonts():
         adopt.cmd_adopt(deck, tex, tmp_path / name / "work", False, None, 1, None, False,
-                        log=log.append, found=found, **kw)
-    figures = {p.name: p.read_bytes() for p in (tex.parent / "figures").iterdir()} if (tex.parent / "figures").is_dir() else {}
-    fonts = {p.name: p.read_bytes() for p in (tex.parent / "fonts").iterdir()} if (tex.parent / "fonts").is_dir() else {}
-    return tex.read_text(encoding="utf-8"), figures, fonts, found, seen, log
+                        log=log.append, found=found, pptx=pptx)
+    return Adoption(text=tex.read_text(encoding="utf-8"), figures=files_in(tex.parent / "figures"),
+                    fonts=files_in(tex.parent / "fonts"), found=found, seen=seen, log=log)
 
 
-def test_an_adopt_from_the_saved_files_is_the_live_adopt(tmp_path, monkeypatch, fetcher):
+def test_an_adopt_from_the_saved_files_is_the_live_adopt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                         fetcher: Fetcher):
     """Everything a live adopt reads - Google's answer, its thumbnails, the pictures and the deck's
     typeface from google/fonts - saved by `deck-files`, then adopted where nothing may be fetched:
     the same source, pictures and fonts, and not one download asked for."""
     pytest.importorskip("fontTools")
     import itertools
     clock = itertools.count(3_000_000_000, 1000)    # every font saved in another second: a cut must not say when
-    monkeypatch.setattr("fontTools.ttLib.tables._h_e_a_d.timestampNow", lambda: next(clock))
+
+    def stamp() -> int:
+        return next(clock)
+    monkeypatch.setattr("fontTools.ttLib.tables._h_e_a_d.timestampNow", stamp)
     pres, fetch, _ = web()
     fake_google(monkeypatch, pres)
     fetcher(fetch)
-    live = adopted(monkeypatch, tmp_path, "live", "P")
-    manifest = deck_files.save("P", tmp_path / "files", None, lambda *a: None)
+    live = adopted(monkeypatch, tmp_path, "live", "P", None)
+    manifest = deck_files.save("P", tmp_path / "files", None, quiet)
     assert manifest["counts"] == {"slides": 1, "thumbnails": 1, "pictures": 2, "google_fonts": 3}
     assert set(manifest["parts"]) == {"presentation", "thumbnails", "pictures", "google_fonts"}
     deck_files.zip_folder(tmp_path / "files", tmp_path / "files.zip")
 
-    asked = []
+    asked: list[str] = []
     fetcher(refuse(asked))
-    monkeypatch.setattr("beamer2slides.google_auth.slides_service", lambda *a, **k: pytest.fail("Slides"))
+    monkeypatch.setattr("beamer2slides.google_auth.slides_service", no_slides)
+    seen: dict[str, JsonObject] = {}
     for name, deck in (("folder", tmp_path / "files"), ("zip", tmp_path / "files.zip")):
-        text, figures, fonts, found, seen, log = adopted(monkeypatch, tmp_path, name, str(deck))
-        assert text == live[0], name
-        assert figures == live[1] and fonts == live[2] and fonts, name
-        assert seen["pres"]["presentationId"] == "P", "the sync base pairs with the deck's own ids"
+        run = adopted(monkeypatch, tmp_path, name, str(deck), None)
+        seen = run.seen
+        assert run.text == live.text, name
+        assert run.figures == live.figures and run.fonts == live.fonts and run.fonts, name
+        assert jat(seen["pres"], "presentationId") == "P", "the sync base pairs with the deck's own ids"
         assert asked == [], f"{name}: nothing fetched ({asked[:3]})"
-        report = found["offline"]
+        report = run.offline()
         assert report["thumbnails"] == {"given": True, "adds": deck_files.PARTS["thumbnails"], "count": 1}
-        assert report["pictures"]["count"] == 2 and report["google_fonts"]["count"] >= 3
-        assert not report["pptx"]["given"] and "deck read from files:" in log
-    assert seen["target"]["slides"][0].get("thumbnail"), "frames are scored against Google's render"
+        assert jat(report, "pictures", "count") == 2 and jnum(report, "google_fonts", "count") >= 3
+        assert not jat(report, "pptx", "given") and "deck read from files:" in run.log
+    assert jobj(seen["target"], "slides", 0).get("thumbnail"), "frames are scored against Google's render"
 
 
-def test_a_part_left_out_is_said_with_what_it_costs(tmp_path, monkeypatch, fetcher):
-    pres, cat, data = cat_deck()
+def test_a_part_left_out_is_said_with_what_it_costs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                    fetcher: Fetcher):
+    pres, cat, data = the_cat_deck()
     (tmp_path / "files").mkdir()
     (tmp_path / "files" / "presentation.json").write_text(json.dumps(pres), encoding="utf-8")
     (tmp_path / "deck.pptx").write_bytes(data)
     fetcher(refuse([]))
-    text, figures, _, found, seen, log = adopted(monkeypatch, tmp_path, "run", str(tmp_path / "files"),
-                                                 pptx=tmp_path / "deck.pptx")
-    assert cat in figures.values(), "the picture out of the .pptx"
-    report = found["offline"]
-    assert report["pptx"]["given"] and report["pptx"]["count"] == 1
-    assert not report["thumbnails"]["given"] and "gradients" in report["thumbnails"]["without"]
-    assert any(line.startswith("  pictures: not given - ") for line in log)
+    run = adopted(monkeypatch, tmp_path, "run", str(tmp_path / "files"), tmp_path / "deck.pptx")
+    assert cat in run.figures.values(), "the picture out of the .pptx"
+    report = run.offline()
+    assert jat(report, "pptx", "given") and jat(report, "pptx", "count") == 1
+    assert not jat(report, "thumbnails", "given") and "gradients" in jstr(report, "thumbnails", "without")
+    assert any(line.startswith("  pictures: not given - ") for line in run.log)
 
 
-def test_recorded_pictures_come_before_the_pptx(tmp_path, monkeypatch, fetcher):
+def test_recorded_pictures_come_before_the_pptx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fetcher: Fetcher):
     """Google's own bytes, where a .pptx may hold a re-encoded copy."""
-    pres, cat, data = cat_deck()
+    pres, cat, data = the_cat_deck()
     folder = tmp_path / "files"
     folder.mkdir()
     (folder / "presentation.json").write_text(json.dumps(pres), encoding="utf-8")
@@ -261,9 +373,9 @@ def test_recorded_pictures_come_before_the_pptx(tmp_path, monkeypatch, fetcher):
     rec.save()
     (folder / "deck.pptx").write_bytes(data)
     fetcher(refuse([]))
-    _, figures, _, found, _, _ = adopted(monkeypatch, tmp_path, "run", str(folder))
-    assert served in figures.values() and cat not in figures.values()
-    assert found["offline"]["pictures"]["count"] == 1
+    run = adopted(monkeypatch, tmp_path, "run", str(folder), None)
+    assert served in run.figures.values() and cat not in run.figures.values()
+    assert jat(run.offline(), "pictures", "count") == 1
 
 
 def test_the_cli_labels_every_part_with_what_it_adds():
@@ -278,19 +390,20 @@ def test_the_cli_labels_every_part_with_what_it_adds():
     assert "--google-fonts" in out and "--thumbnails" in out
 
 
-def test_a_deck_is_not_saved_over_other_files(tmp_path):
+def test_a_deck_is_not_saved_over_other_files(tmp_path: Path):
     (tmp_path / "busy").mkdir()
     (tmp_path / "busy" / "x").write_text("x")
     with pytest.raises(SystemExit, match="not empty"):
         deck_files.save("P", tmp_path / "busy", None, print)
 
 
-def test_the_agent_adopts_the_files_as_one_zip_with_no_google(tmp_path, monkeypatch, fetcher):
+def test_the_agent_adopts_the_files_as_one_zip_with_no_google(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                              fetcher: Fetcher):
     import base64
 
     from beamer2slides.agent import AgentContext
     from beamer2slides.agent.source_tools import deck_adopt
-    pres, cat, _ = cat_deck()
+    pres, cat, _ = the_cat_deck()
     folder = tmp_path / "made"
     folder.mkdir()
     (folder / "presentation.json").write_text(json.dumps(pres), encoding="utf-8")
@@ -300,18 +413,26 @@ def test_the_agent_adopts_the_files_as_one_zip_with_no_google(tmp_path, monkeypa
     buf = io.BytesIO()
     deck_files.zip_folder(folder, tmp_path / "made.zip")
     buf.write((tmp_path / "made.zip").read_bytes())
-    asked = []
+    asked: list[str] = []
     fetcher(refuse(asked))
-    seen = {}
-    monkeypatch.setattr("beamer2slides.inverse.run_pull", lambda target, *a, **k: seen.setdefault("target", target))
-    monkeypatch.setattr(adopt, "record_base", lambda *a, **k: None)
-    monkeypatch.setattr("beamer2slides.agent.source_tools._finish", lambda *a, **k: None)
+    seen: dict[str, JsonObject] = {}
+
+    def run_pull(target: JsonObject | Later, tex: Path, work: Path, apply: bool, out: Path | None, max_iter: int,
+                 handout: bool, engine: str | None, log: Callable[[str], object]) -> None:
+        assert not isinstance(target, Later)
+        seen.setdefault("target", target)
+
+    def nothing(*a: object, **k: object) -> None:
+        return None
+    monkeypatch.setattr("beamer2slides.inverse.run_pull", run_pull)
+    monkeypatch.setattr(adopt, "record_base", nothing)
+    monkeypatch.setattr("beamer2slides.agent.source_tools._finish", nothing)
     ws = tmp_path / "ws"
     ws.mkdir()
     res = deck_adopt(AgentContext.offline(ws), tex="main.tex",
                      deck={"base64": base64.b64encode(buf.getvalue()).decode()})
     assert res.ok, res.json()
     assert res.data["local_target"] and jat(res.data, "offline", "pictures", "count") == 1
-    [el] = [e for e in seen["target"]["slides"][0]["elements"] if not e.get("inherited")]
-    assert Path(el["file"]).read_bytes() == cat
+    [el] = [e for e in jobjs(seen["target"], "slides", 0, "elements") if not e.get("inherited")]
+    assert Path(jstr(el, "file")).read_bytes() == cat
     assert "https://example.invalid/cat.png" not in asked

@@ -74,7 +74,7 @@ def comments(source: str) -> list[tuple[int, str]]:
 
 
 def test_no_suppression_comment_and_no_cast() -> None:
-    found = []
+    found: list[str] = []
     for name, path in modules().items():
         source = path.read_text(encoding="utf-8")
         found += [f"{name}:{line}: {text}" for line, text in comments(source) if SUPPRESSION.search(text)]
@@ -90,7 +90,8 @@ def test_no_suppression_comment_and_no_cast() -> None:
 
 def test_the_counted_patterns_only_go_down() -> None:
     now, allowed = today(), ledger()
-    grew, fell = [], []
+    grew: list[str] = []
+    fell: list[str] = []
     for rule in RULES:
         for name in sorted(set(now[rule]) | set(allowed[rule])):
             n, cap = now[rule].get(name, 0), allowed[rule].get(name, 0)

@@ -17,8 +17,10 @@ from beamer2slides.deck_ir_types import (ABSENT, TargetImage, TargetShape, Targe
                                          parse_target, target_json)
 from beamer2slides.inverse import target_pictures, typed_target
 from beamer2slides.ir_types import IRError
+from beamer2slides.json_types import JsonObject
 
 from .irs import deck_ir
+from .json_reads import jarr, jobj, jobjs
 from .test_adopt import blank_line_deck, presentation, text_shape
 from .test_adopt_compiles import NAMES, SHOWCASE
 
@@ -27,11 +29,11 @@ def dumped(v: object) -> str:
     return json.dumps(v, sort_keys=True)
 
 
-def round_trip(d: dict) -> None:
+def round_trip(d: JsonObject) -> None:
     assert dumped(target_json(parse_target(json.loads(json.dumps(d))))) == dumped(d)
 
 
-def small() -> dict:
+def small() -> JsonObject:
     return {"version": 1, "source": {"presentationId": "p", "title": None, "revisionId": None},
             "page_size": [720, 405.0], "scale": 1.0,
             "slides": [{"page": 0, "frame": "s1", "size": [720, 405.0], "objectId": "g1", "key": None,
@@ -43,12 +45,12 @@ def small() -> dict:
 
 @pytest.mark.needs_decks(*(f"foreign/showcase/{n}/target.json" for n in NAMES))
 @pytest.mark.parametrize("name", NAMES)
-def test_a_showcase_target_round_trips(name):
+def test_a_showcase_target_round_trips(name: str):
     round_trip(json.loads((SHOWCASE / name / "target.json").read_text(encoding="utf-8")))
 
 
 @pytest.mark.parametrize("foreign", [True, False], ids=["adopt", "pull"])
-def test_what_deck_ir_reads_round_trips(foreign):
+def test_what_deck_ir_reads_round_trips(foreign: bool):
     round_trip(deck_ir(presentation(), foreign=foreign))
     round_trip(deck_ir(blank_line_deck(), foreign=foreign))
 
@@ -59,10 +61,10 @@ def test_a_text_box_with_a_see_through_outline_is_a_target():
     # inverse.typed_target refused the whole deck with an IRError. Found by the typed builder.
     pres = presentation()
     box = text_shape("s0_node", "A node", 300, 200, 120, 40, outline="FF0000")
-    box["shape"]["shapeProperties"]["outline"]["outlineFill"]["solidFill"]["alpha"] = 0.5
-    pres["slides"][0]["pageElements"].append(box)
+    jobj(box, "shape", "shapeProperties", "outline", "outlineFill", "solidFill")["alpha"] = 0.5
+    jarr(pres, "slides", 0, "pageElements").append(box)
     d = deck_ir(pres, foreign=True)
-    [el] = [e for e in d["slides"][0]["elements"] if e.get("object") == "s0_node"]
+    [el] = [e for e in jobjs(d, "slides", 0, "elements") if e.get("object") == "s0_node"]
     assert el["kind"] == "text" and el["outline_alpha"] == 0.5
     round_trip(d)
     [typed] = [e for e in parse_target(d).slides[0].elements if e.object == "s0_node"]
@@ -75,8 +77,8 @@ def test_a_key_left_out_and_a_null_one_stay_apart():
     shape = typed.slides[0].elements[0]
     assert isinstance(shape, TargetShape) and shape.key is ABSENT and shape.weight is ABSENT
     assert typed.slides[0].background_file is ABSENT and typed.slides[0].key is None
-    d["slides"][0]["elements"][0].update(key=None, weight=None)
-    d["slides"][0]["background_file"] = None
+    jobj(d, "slides", 0, "elements", 0).update(key=None, weight=None)
+    jobj(d, "slides", 0)["background_file"] = None
     typed = parse_target(d)
     shape = typed.slides[0].elements[0]
     assert isinstance(shape, TargetShape) and shape.key is None and shape.weight is None
@@ -87,14 +89,14 @@ def test_a_key_left_out_and_a_null_one_stay_apart():
 
 def test_a_key_deck_ir_never_wrote_is_refused():
     d = small()
-    d["slides"][0]["elements"][0]["colour"] = "#000000"
+    jobj(d, "slides", 0, "elements", 0)["colour"] = "#000000"
     with pytest.raises(IRError, match="slides\\[0\\].elements\\[0\\].*'colour'"):
         parse_target(d)
 
 
 def test_only_deck_irs_read_is_parsed_as_a_target():
     assert is_target(small())
-    stand_in = {"slides": []}                        # a test's target, or classify's deck.json
+    stand_in: JsonObject = {"slides": []}                      # a test's target, or classify's deck.json
     assert not is_target(stand_in) and typed_target(stand_in) is stand_in
 
 

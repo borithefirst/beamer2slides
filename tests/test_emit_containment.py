@@ -15,6 +15,7 @@ import pytest
 
 from beamer2slides import emit
 from beamer2slides.emit_model import Template, TemplateKey
+from beamer2slides.ir import slide_json
 from beamer2slides.emit_pptx import shape_element_requests as real_shape_element_requests
 from beamer2slides.emit_pptx import shape_requests as real_shape_requests
 from beamer2slides.ir_types import IRError, MarkedShape, ShapeElement
@@ -138,7 +139,8 @@ def test_the_refused_rebuild_starts_from_the_merged_deck(lenient: None) -> None:
     under its title bar), and a contained element a picture already."""
     classified = deck("04_theme_blocks")
     merged = emit.DeckPlan(classified, pptx_tables=True, contain=True).merged
-    assert merged["slides"] == [{**s, "elements": emit.merge_blocks(s["elements"])} for s in classified["slides"]]
+    assert merged["slides"] == [{**s, "elements": list[Json](emit.merge_blocks(jobjs(s, "elements")))}
+                                for s in map(slide_json, classified["slides"])]
     merged = emit.DeckPlan(synthetic(adopted_custom(), shape("p0-panel", 150.0)), pptx_tables=True, contain=True).merged
     assert [e["kind"] for e in jobjs(merged, "slides", 0, "elements")] == ["image", "shape"]
 

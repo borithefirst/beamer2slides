@@ -39,9 +39,9 @@ decorations) is a picture, or baked into a per-slide background picture.
   a stage is a type; JSON not yet parsed is a `json_types.JsonObject` read through its narrowings.
   The package's baseline (`typecheck/baseline.json`) is empty and `CEILING` 0: any error in src/
   fails the build (never `--update-baseline`); a library without types is a Protocol after a
-  runtime check (`gapi.build`, `devtools/deep_stack.py`), never a checked import. tests/ are checked too, against
-  `typecheck/tests_baseline.json`, which only shrinks (`python build_backend/beamer2slides_build.py
-  prune tests`, lower `TESTS_CEILING` in `tests/test_typecheck.py`; pytest pinned in `[tool.beamer2slides.typecheck]`), so a test calling
+  runtime check (`gapi.build`, `devtools/deep_stack.py`), never a checked import. tests/ are checked too, and are at
+  zero as well (`typecheck/tests_baseline.json` empty, `TESTS_CEILING` 0 in `tests/test_typecheck.py`;
+  pytest pinned in `[tool.beamer2slides.typecheck]`), so a test calling
   a changed signature fails the gate, not the suite; a test you write type-checks (JSON read
   through `tests/json_reads.py`'s `jobj`/`jstr`/..., Google faked by `tests/fake_google.py`'s
   Protocol-complete `No*` classes, overriding only what the test calls);

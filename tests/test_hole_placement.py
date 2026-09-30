@@ -1,14 +1,21 @@
 """Hole pictures: gap detection in a marks thumbnail and the offline placement model (no Google API)."""
 
+from collections.abc import Sequence
+
 import numpy as np
 
+from beamer2slides.arrays import RGB
 from beamer2slides.emit import (FontMapper, SLIDE_W, find_marks, fit_holes, formula_shifts, hole_offset, ink_end,
                                 mark_alpha, pick_gap, slide_holes, space_shift)
+from beamer2slides.json_types import JsonObject
+
+from .json_reads import jnum, jnums, jstr
 
 K = 1600 / SLIDE_W  # px per pt of a LARGE thumbnail
+Rect = tuple[float, float, float, float]
 
 
-def paint(img, x0, y0, x1, y1, color):
+def paint(img: RGB, x0: float, y0: float, x1: float, y1: float, color: tuple[int, int, int]) -> None:
     """A rectangle (pt) with anti-aliased left and right edges, like Google's renderer draws a highlight."""
     c = np.array(color, dtype=float)
     a, b = x0 * K, x1 * K
@@ -18,11 +25,18 @@ def paint(img, x0, y0, x1, y1, color):
         img[rows, col] = np.round(255 * (1 - cover) + c * cover)
 
 
-def thumbnail():
+def thumbnail() -> RGB:
     return np.full((900, 1600, 3), 255, dtype=np.uint8)
 
 
-def test_marks_are_found_to_a_fraction_of_a_point():
+def gap(marks: Sequence[Rect], x0: float, cy: float, width: float, pitch: float) -> tuple[float, float]:
+    """`pick_gap` where a mark is found."""
+    got = pick_gap(marks, x0, cy, width, pitch)
+    assert got is not None
+    return got
+
+
+def test_marks_are_found_to_a_fraction_of_a_point() -> None:
     img = thumbnail()
     paint(img, 100.3, 50, 160.8, 66, (255, 0, 255))
     img[int(55 * K):int(60 * K), int(120 * K):int(125 * K)] = 0  # a glyph overhanging the highlight
@@ -34,35 +48,38 @@ def test_marks_are_found_to_a_fraction_of_a_point():
     assert abs(y0 - 50) < 0.6 and abs(y1 - 66) < 0.6
 
 
-def test_black_text_is_no_mark():
+def test_black_text_is_no_mark() -> None:
     img = thumbnail()
     img[100:140, 200:400] = 0
     img[200:240, 200:400] = 128  # anti-aliased grey glyph edges
     assert find_marks(mark_alpha(img, "#ffff00"), K) == []
 
 
-def test_pick_gap_takes_the_mark_as_wide_as_the_hole_nearest_the_prediction():
+def test_pick_gap_takes_the_mark_as_wide_as_the_hole_nearest_the_prediction() -> None:
     marks = [(90.0, 50.0, 130.0, 66.0), (200.0, 50.0, 240.0, 66.0), (95.0, 50.0, 110.0, 66.0)]
-    dx, dy = pick_gap(marks, 100.0, 58.0, 40.0, 20.0)
+    dx, dy = gap(marks, 100.0, 58.0, 40.0, 20.0)
     assert (dx, dy) == (-10.0, 0.0)
     assert pick_gap(marks, 100.0, 58.0, 60.0, 20.0) is None, "no mark of that width: keep the prediction"
 
 
-def test_pick_gap_follows_a_hole_slides_wrapped_onto_the_next_line():
+def test_pick_gap_follows_a_hole_slides_wrapped_onto_the_next_line() -> None:
     marks = [(12.0, 70.5, 52.0, 86.5)]
-    dx, dy = pick_gap(marks, 300.0, 58.0, 40.0, 20.0)
+    dx, dy = gap(marks, 300.0, 58.0, 40.0, 20.0)
     assert (dx, dy) == (-288.0, 20.0)
 
 
-def test_ink_end_finds_the_last_word_before_a_hanging_hole():
+def test_ink_end_finds_the_last_word_before_a_hanging_hole() -> None:
     img = thumbnail()
     img[int(52 * K):int(62 * K), int(40 * K):int(180.4 * K)] = 0
     img[int(80 * K):int(90 * K), int(40 * K):int(300 * K)] = 0  # the next line
-    assert abs(ink_end(img, K, 54, 60, 0, 400) - 180.4) < 0.5
+    end = ink_end(img, K, 54, 60, 0, 400)
+    assert end is not None and abs(end - 180.4) < 0.5
 
 
 # Deck 19, slide 9: a circled word, then a boxed formula on the same line.
-RUNS = [
+RUN_DEFAULTS: JsonObject = {"font": "CMSS10", "family": "sans", "size": 10.91, "bold": False, "italic": False,
+                            "smallcaps": False, "color": "#000000", "link": None}
+GIVEN: list[JsonObject] = [
     {"text": "A "},
     {"text": "\xa0", "font": "CMSS10", "family": "sans", "size": 10.91, "hole": 17.67, "hole_x0": 21.82,
      "before": [[7.26, "CMSS10", "sans", False, False, "A", 10.91]], "next_x0": 37.49},
@@ -73,13 +90,11 @@ RUNS = [
                 [26.6, "CMSS10", "sans", False, False, "boxed", 97.85]], "next_x0": 163.39},
     {"text": "formula and here."},
 ]
-for r in RUNS:
-    r.update({k: v for k, v in {"font": "CMSS10", "family": "sans", "size": 10.91, "bold": False, "italic": False,
-                                "smallcaps": False, "color": "#000000", "link": None}.items() if k not in r})
+RUNS: list[JsonObject] = [{**r, **{k: v for k, v in RUN_DEFAULTS.items() if k not in r}} for r in GIVEN]
 
 
-def slide(runs=RUNS):
-    para = {"align": "left", "runs": runs, "lines": [{"baseline": 104.07, "x0": 10.91, "x1": 318.11}]}
+def slide(runs: list[JsonObject]) -> JsonObject:
+    para: JsonObject = {"align": "left", "runs": list(runs), "lines": [{"baseline": 104.07, "x0": 10.91, "x1": 318.11}]}
     return {"size": [453.54, 255.12], "elements": [
         {"id": "p8h0", "kind": "image", "anchor": "p8t1", "bbox": [127.17, 92.73, 160.76, 109.16]},
         {"id": "p8h1", "kind": "image", "anchor": "p8t1", "bbox": [20.82, 94.2, 34.86, 108.07]},
@@ -87,8 +102,14 @@ def slide(runs=RUNS):
     ]}
 
 
-def test_an_earlier_hole_on_the_line_is_no_stretched_space():
-    s = slide()
+def picture(pic: JsonObject | None) -> JsonObject:
+    """A hole's picture, which every hole of these slides has."""
+    assert pic is not None
+    return pic
+
+
+def test_an_earlier_hole_on_the_line_is_no_stretched_space() -> None:
+    s = slide(RUNS)
     em = FontMapper()(RUNS[3], SLIDE_W / 453.54)[1] / (SLIDE_W / 453.54)
     assert space_shift(RUNS[3], em) < -10, "the gap around the circled word taken for one stretched space"
     assert abs(space_shift(RUNS[3], em, [(21.82, 17.67)])) < 3
@@ -96,20 +117,22 @@ def test_an_earlier_hole_on_the_line_is_no_stretched_space():
     assert abs(shift["p8h0"]) < 3, "the circled word's gap counts as a space plus its hole, not one wide space"
 
 
-def test_pictures_pair_with_their_holes():
-    holes = slide_holes(slide())
-    assert [pic["id"] for _, _, _, pic in holes] == ["p8h1", "p8h0"]
+def test_pictures_pair_with_their_holes() -> None:
+    holes = slide_holes(slide(RUNS))
+    assert [jstr(picture(pic), "id") for _, _, _, pic in holes] == ["p8h1", "p8h0"]
 
 
-def test_holes_reach_to_the_next_word_and_pictures_share_the_spaces():
+def test_holes_reach_to_the_next_word_and_pictures_share_the_spaces() -> None:
     scale = SLIDE_W / 453.54
     fonts = FontMapper()
-    fitted = fit_holes(slide(), scale, fonts)
-    _, p, run, pic = slide_holes(fitted)[1]
+    fitted = fit_holes(slide(RUNS), scale, fonts)
+    _, p, run, found = slide_holes(fitted)[1]
+    pic = picture(found)
+    hole, (px0, _, px1, _) = jnum(run, "hole"), jnums(pic, "bbox")
     space = 0.19 * fonts(run, scale)[1]
     # Slides: word space + hole == the PDF's room between "boxed" and "formula"
-    assert abs(space / scale + run["hole"] - (163.39 - (97.85 + 26.6))) < 0.05
+    assert abs(space / scale + hole - (163.39 - (97.85 + 26.6))) < 0.05
     o = hole_offset(p, run, pic, scale, fonts(run, scale)[1])
-    left, right = space + o, (run["hole"] - (pic["bbox"][2] - pic["bbox"][0])) * scale - o
-    pdf_left, pdf_right = pic["bbox"][0] - (97.85 + 26.6), 163.39 - pic["bbox"][2]
+    left, right = space + o, (hole - (px1 - px0)) * scale - o
+    pdf_left, pdf_right = px0 - (97.85 + 26.6), 163.39 - px1
     assert abs(left / right - pdf_left / pdf_right) < 0.01

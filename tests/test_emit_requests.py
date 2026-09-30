@@ -736,14 +736,6 @@ def text_run(text: str, size: float, **extra: Json) -> JsonObject:
     return run
 
 
-def run_of(text: str = "", size: float = 10.91, **extra: object) -> dict:
-    """`text_run`, untyped, for the modules that build their runs with it (test_wave5_text,
-    test_fonts_weights, test_fonts_wave5, test_rtl_lists, test_justified): they index the run and
-    put it in their own dicts, which a typed run would make errors of there."""
-    return {"text": text, "font": "CMSS10", "family": "sans", "size": size, "bold": False, "italic": False,
-            "smallcaps": False, "color": "#000000", "link": None, **extra}
-
-
 @pytest.mark.parametrize("text", ["7", "12", "123"])
 def test_number_box_is_centred_on_the_ball(text: str) -> None:
     number: JsonObject = {**text_run(text, 8.0), "center": [40.3, 120.7], "height": 9.5, "baseline": 123.4, "x0": 37.0}
@@ -785,11 +777,6 @@ def three_holes_json() -> JsonObject:
     para: JsonObject = {"align": "left", "runs": [r for r in runs], "lines": [{"baseline": 104.0, "x0": 10.91, "x1": 152.25}]}
     elements.append({"id": "p0t0", "kind": "text", "paragraphs": [para]})
     return {"page": 0, "size": [453.54, 255.12], "elements": elements}
-
-
-def three_holes() -> dict:
-    """`three_holes_json`, untyped, for test_wave5_text, which reads into it as it comes."""
-    return three_holes_json()
 
 
 def text_runs_of(slide: JsonObject) -> list[JsonObject]:

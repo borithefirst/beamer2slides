@@ -1,10 +1,17 @@
 """Wave 5, fixer C (text, formulas, layout): the regressions wave 4 brought and two open ones."""
 
-from beamer2slides import emit, emit_text
-from beamer2slides.emit import SLIDE_W
+from pathlib import Path
 
+import pytest
+
+from beamer2slides import emit, emit_text
+from beamer2slides.classify import Span
+from beamer2slides.emit import SLIDE_W
+from beamer2slides.json_types import JsonObject, as_str
+
+from .json_reads import jint, jnum, jobj, jobjs, jstr
 from .test_columns import paragraphs, span, text
-from .test_emit_requests import FONTS, run_of
+from .test_emit_requests import FONTS, text_run
 
 
 # -- a hyphen is where Slides may break ---------------------------------------------------------
@@ -35,10 +42,14 @@ def test_slides_lines_joins_the_next_line_up_to_its_hyphen():
     word; Slides takes 'Saint-' alone."""
     scale = SLIDE_W / 362.83
     first, second = "The institute of physics and technology of the ", "Saint-Petersburg State University"
-    p = {"lines": [{"x0": 30.0, "x1": 250.0, "baseline": 100.0}, {"x0": 30.0, "x1": 180.0, "baseline": 113.5}],
-         "runs": [run_of(first + second)], "line_starts": [len(first), len(first + second)]}
-    widest, joins = emit.slides_lines(p, scale, FONTS)
-    upto = emit.slides_width([run_of(first + "Saint-")], scale, FONTS)
+    p: JsonObject = {
+        "lines": [{"x0": 30.0, "x1": 250.0, "baseline": 100.0}, {"x0": 30.0, "x1": 180.0, "baseline": 113.5}],
+        "runs": [text_run(first + second, 10.91)], "line_starts": [len(first), len(first + second)]}
+    measured = emit.slides_lines(p, scale, FONTS)
+    assert measured is not None
+    widest, joins = measured
+    upto = emit.slides_width([text_run(first + "Saint-", 10.91)], scale, FONTS)
+    assert upto is not None
     assert abs(joins - (30.0 * scale + upto)) < 0.01, (joins, 30.0 * scale + upto)
     assert emit.first_break("a b-c d", 2, 7) == 4 and emit.first_break("a b-5 d", 2, 7) == 5
 
@@ -48,8 +59,10 @@ def test_slides_lines_joins_the_next_line_up_to_its_hyphen():
 MI, SY, RM = "LMMathItalic10-Regular", "LMMathSymbols10-Regular", "LMRoman10-Regular"
 
 
-def formula_line(x: float = 30.0, y: float = 100.0, size: float = 11.0) -> list:
-    """'and the mean wait is W = C − λ.': prose, then math spans 3 pt (0.27 em) apart."""
+def formula_line(x: float) -> list[Span]:
+    """'and the mean wait is W = C − λ.': prose, then math spans 3 pt (0.27 em) apart, at 11 pt on
+    the baseline y = 100."""
+    y, size = 100.0, 11.0
     out = [span("and the mean wait is", x, y, size, w=100.0)]
     x += 103.0
     for t, font in (("W", MI), ("=", RM), ("C", MI), ("−", SY), ("λ", MI), (".", "LMSans10-Regular")):
@@ -61,7 +74,7 @@ def formula_line(x: float = 30.0, y: float = 100.0, size: float = 11.0) -> list:
 def test_spaces_inside_a_short_formula_are_no_break_spaces():
     """r2_fonts_segoe s3: Slides broke 'W_q = C/(cμ' from '− λ).' at the space before the minus,
     which TeX never does; TeX kept the formula on one line, so Slides must too."""
-    got = [text(p) for p in paragraphs(formula_line())]
+    got = [text(p) for p in paragraphs(formula_line(30.0))]
     assert got == ["and the mean wait is W = C − λ."], got
 
 
@@ -95,7 +108,7 @@ def test_text_italic_letters_inside_a_formula_are_in_its_hole():
     assert holes[0][0] + holes[0][1] >= 184.0, holes
 
 
-def test_a_display_crop_leaves_out_the_hanging_ink_of_a_hole_above(tmp_path):
+def test_a_display_crop_leaves_out_the_hanging_ink_of_a_hole_above(tmp_path: Path) -> None:
     """r1_math_v2 s5: 'As ∫2g dμ' over the display 'lim sup ∫|f_n − f| dμ ≤ 0.'; the display's
     picture reached into the line above and showed the tail of the inline integral's hook at
     the PDF place, a piece floating under the hole's own integral once Slides set the words a
@@ -103,22 +116,31 @@ def test_a_display_crop_leaves_out_the_hanging_ink_of_a_hole_above(tmp_path):
     hole. (Here a 'g' hangs into the box of an 'x' below it.)"""
     import numpy as np
     from PIL import Image
+    from beamer2slides import pdf
+    from beamer2slides.extract import extract_page
+    from beamer2slides.raw_types import RawDoc
     from beamer2slides.render import render_backgrounds
     from .test_hidden_text import one_page
-    from beamer2slides.json_types import JsonObject, as_str
-    from .test_pictures_hunt import num_list, raw_of
+    from .test_pictures_hunt import num_list
 
     content = (b"BT /F1 12 Tf 10 120 Td (As) Tj ET\nBT /F1 30 Tf 60 120 Td (g) Tj ET\n"
                b"BT /F1 20 Tf 60 95 Td (x) Tj ET\n")
     path = tmp_path / "hook.pdf"
     path.write_bytes(one_page(content))
-    raw = raw_of(path)
-    words, g, x = raw["pages"][0]["spans"]
+    doc = pdf.Document(path)  # raw.json as extract writes it (test_pictures_hunt's raw_of, typed)
+    try:
+        page = extract_page(doc[0], "1")
+    finally:
+        doc.close()
+    page["frame_label"] = None
+    raw: RawDoc = {"version": 1, "source": {"pdf": str(path), "producer": "", "pages": 1, "title": ""},
+                   "pages": [page]}
+    words, g, x = page["spans"]
     assert (g["text"], x["text"]) == ("g", "x")
-    text_el: JsonObject = {"id": "t0", "kind": "text", "role": "body", "bbox": list(words["bbox"]),
+    text_el: JsonObject = {"id": "t0", "kind": "text", "role": "body", "bbox": [float(v) for v in words["bbox"]],
                            "spans": [words["id"]], "paragraphs": []}
-    hole: JsonObject = {"id": "h0", "kind": "image", "role": "math", "anchor": "t0", "bbox": list(g["bbox"]),
-                        "spans": [g["id"]]}
+    hole: JsonObject = {"id": "h0", "kind": "image", "role": "math", "anchor": "t0",
+                        "bbox": [float(v) for v in g["bbox"]], "spans": [g["id"]]}
     top = g["bbox"][3] - 3.0  # the display's box reaches 3 pt into the g's descender
     display: JsonObject = {"id": "m0", "kind": "image", "role": "math", "bbox": [50.0, top, 120.0, x["bbox"][3] + 1],
                            "spans": [x["id"]]}
@@ -134,27 +156,31 @@ def test_a_display_crop_leaves_out_the_hanging_ink_of_a_hole_above(tmp_path):
 
 # -- a word space before a hole may break (emit.HOLE_BREAK) -------------------------------------
 
-def holes_box() -> dict:
-    from .test_emit_requests import three_holes
-    el = three_holes()["elements"][-1]
+def holes_box() -> JsonObject:
+    from .test_emit_requests import three_holes_json
+    el = jobj(three_holes_json(), "elements", -1)
     el.update({"bbox": [10.91, 92.0, 152.25, 106.0], "role": "body"})
-    for p in el["paragraphs"]:
+    for p in jobjs(el, "paragraphs"):
         p.update({"size": 10.91, "bullet": None, "text_x0": 10.91})
     return el
 
 
-def written(el: dict) -> tuple[str, list[tuple[str, int, int]]]:
+def written(el: JsonObject) -> tuple[str, list[tuple[str, int, int]]]:
     from .test_emit_requests import SCALE
     reqs = emit.text_box_requests(el, "s", "t", SCALE, FONTS)
-    text = "".join(r["insertText"]["text"] for r in reqs if "insertText" in r)
-    fonts = [(r["updateTextStyle"]["style"]["fontFamily"], r["updateTextStyle"]["textRange"]["startIndex"],
-              r["updateTextStyle"]["textRange"]["endIndex"]) for r in reqs
-             if "updateTextStyle" in r and r["updateTextStyle"]["style"].get("fontFamily")
-             and r["updateTextStyle"]["textRange"]["type"] == "FIXED_RANGE"]
+    text = "".join(jstr(r, "insertText", "text") for r in reqs if "insertText" in r)
+    fonts: list[tuple[str, int, int]] = []
+    for r in reqs:
+        if "updateTextStyle" not in r:
+            continue
+        family = jobj(r, "updateTextStyle", "style").get("fontFamily")
+        if family and jstr(r, "updateTextStyle", "textRange", "type") == "FIXED_RANGE":
+            fonts.append((as_str(family, "fontFamily"), jint(r, "updateTextStyle", "textRange", "startIndex"),
+                          jint(r, "updateTextStyle", "textRange", "endIndex")))
     return text, fonts
 
 
-def test_a_word_space_before_a_hole_is_followed_by_a_zero_width_break(monkeypatch):
+def test_a_word_space_before_a_hole_is_followed_by_a_zero_width_break(monkeypatch: pytest.MonkeyPatch) -> None:
     """r1_math_v2 s6 'but', r3_textfx_v1 s3 'than': Slides keeps a space and the no-break spaces
     after it together, so the word before a formula went down with it. A zero-width space after
     the word space would allow a break there (it did not, live: HOLE_BREAK is off); switched on,
@@ -165,7 +191,7 @@ def test_a_word_space_before_a_hole_is_followed_by_a_zero_width_break(monkeypatc
     k = text.index("​")
     assert [f for f, a, b in fonts if a <= k < b][-1] == "Lato", fonts
     glued = holes_box()
-    glued["paragraphs"][0]["runs"][0]["text"] = "A"  # no word space: no break before its formula
+    jobj(glued, "paragraphs", 0, "runs", 0)["text"] = "A"  # no word space: no break before its formula
     assert written(glued)[0].count("​") == 2
 
 
@@ -182,10 +208,13 @@ def test_the_word_before_a_hole_stays_on_its_line_in_the_layout_model():
     from .test_emit_requests import SCALE
     el = holes_box()
     [chars] = emit.slides_texts(el, SCALE, FONTS)
-    runs = emit.hole_runs(el["paragraphs"][0]["runs"], SCALE, FONTS)
-    styles = [{"fontFamily": emit.HOLE_FONT, "fontSize": r["hole_size"]} if r.get("hole") else
-              {"fontFamily": FONTS(r, SCALE)[0], "fontSize": FONTS(r, SCALE)[1]} for r in runs for _ in r["text"]]
-    a = text_layout.advance("A", styles[0], styles[0]["fontSize"]) + text_layout.advance(" ", styles[1], styles[1]["fontSize"])
+    runs = emit.hole_runs(jobjs(el, "paragraphs", 0, "runs"), SCALE, FONTS)
+    styles: list[JsonObject] = [
+        {"fontFamily": emit.HOLE_FONT, "fontSize": r["hole_size"]} if r.get("hole") else
+        {"fontFamily": FONTS(r, SCALE)[0], "fontSize": FONTS(r, SCALE)[1]}
+        for r in runs for _ in as_str(r["text"], "text")]
+    a = (text_layout.advance("A", styles[0], jnum(styles[0], "fontSize"))
+         + text_layout.advance(" ", styles[1], jnum(styles[1], "fontSize")))
     lines = text_layout.wrap(chars, styles, a + 5.0)  # 'A' and its space fit, its formula does not
     assert chars[lines[0][0]:lines[0][1]].rstrip("​ ") == "A", [chars[s:e] for s, e, _ in lines]
 
@@ -205,7 +234,8 @@ def test_pull_and_merge_read_the_break_before_a_hole_as_nothing():
     assert [r["text"] for r in runs if r.get("hole")] == [" "] and runs[0]["text"] == "pointwise, but "
     assert merge.collapse_holes("but ​\xa0\xa0\xa0 is\n") == merge.collapse_holes("but \xa0\xa0 is\n") == "but \xa0 is\n"
     assert inverse.latex_escape("but ​~") == r"but \textasciitilde{}"
-    assert deck_edits.HOLE.search("but ​\xa0\xa0 is").start() == 4  # typed in front of the break
+    found = deck_edits.HOLE.search("but ​\xa0\xa0 is")
+    assert found is not None and found.start() == 4  # typed in front of the break
 
 
 def test_one_math_letter_among_words_keeps_the_word_spaces_around_it():

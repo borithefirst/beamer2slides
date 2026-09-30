@@ -22,15 +22,16 @@ import pytest
 
 from beamer2slides import identity, merge, snapshot, sync
 from beamer2slides.emit import SLIDE_W
+from beamer2slides.json_types import JsonObject
 
-from .json_reads import jobj, jstr
+from .json_reads import jarr, jobj, jobjs, jstr
 from .test_sync import _picture_deck, _picture_files, merged_view, unit
 from .test_sync_containment import SYNC_DECKS, talk_base
 
 FIGURE = ("convergence", "image/figure/0")   # (the sync talk's plot, which the `figure` variant redraws)
 
 
-def converted_for_sync(pdf: Path, out: Path, base: dict) -> tuple[sync.Built, list[snapshot.Refreshed]]:
+def converted_for_sync(pdf: Path, out: Path, base: JsonObject) -> tuple[sync.Built, list[snapshot.Refreshed]]:
     """What `sync.sync` does before it plans: the base's pictures held, the new PDF converted into
     the deck folder's `sync_work`, and the pictures written differently taken into the base."""
     pictures = snapshot.hold_base_pictures(base, out)
@@ -38,16 +39,16 @@ def converted_for_sync(pdf: Path, out: Path, base: dict) -> tuple[sync.Built, li
     return ours, snapshot.refresh_pictures(base, ours.slides, ours.pairs, ours.out, pictures)
 
 
-def written_by_a_sync(base: dict, ours: sync.Built) -> dict:
+def written_by_a_sync(base: JsonObject, ours: sync.Built) -> JsonObject:
     """The base a sync that recreated every unit the source changed leaves behind, as
     `Sync.new_base` records one: the new conversion's element, with the object the deck now holds
     for it (read back as the base had it: the person has not touched it)."""
     after = copy.deepcopy(base)
     for j, i in ours.pairs.items():
-        now = {e["key"]: e for e in ours.slides[j]["elements"]}
-        elements = after["slides"][i]["elements"]
-        for k, e in enumerate(elements):
-            o = now.get(e["key"])
+        now = {jstr(e, "key"): e for e in jobjs(ours.slides[j], "elements")}
+        elements = jarr(after, "slides", i, "elements")
+        for k, e in enumerate(jobjs(after, "slides", i, "elements")):
+            o = now.get(jstr(e, "key"))
             if o is not None and o["ir_hash"] != e["ir_hash"]:
                 elements[k] = {**o, "objects": e["objects"], "main": e["main"], "readback": e["readback"]}
     return after
@@ -72,7 +73,8 @@ def test_a_figure_the_source_changed_back_is_written_back(tmp_path: Path) -> Non
     assert unit(merge.plan_merge(copy.deepcopy(base), sync.ours_json(ours), theirs), *FIGURE)["action"] == "recreate"
     # ... and the redrawn plot the base records was held before the render wrote v1's over it
     [held] = [snapshot.find_base_pictures(base, snapshot.picture_folders(out)).folder(e)
-              for s in base["slides"] if s["key"] == FIGURE[0] for e in s["elements"] if e["key"] == FIGURE[1]]
+              for s in jobjs(base, "slides") if s["key"] == FIGURE[0]
+              for e in jobjs(s, "elements") if e["key"] == FIGURE[1]]
     assert held is not None and held.parent == snapshot.held_pictures(out)
 
 

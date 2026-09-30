@@ -8,6 +8,7 @@ has to see that with Google's picture of the slide (ink) and without it (residua
 
 import json
 from pathlib import Path
+from typing import Literal
 
 import pytest
 from PIL import Image, ImageDraw
@@ -17,9 +18,12 @@ from beamer2slides.compare import TOL
 from beamer2slides.deck_ir_types import parse_target
 from beamer2slides.frame_guard import (FrameGuard, Seen, slide_words, target_slide_words, target_thumbnails, why,
                                        word_error)
-from beamer2slides.inverse import Candidate, Edit, converge, report
+from beamer2slides.inverse import Candidate, Edit, Planner, Unresolved, Workspace, converge, report
+from beamer2slides.json_types import Json, JsonObject
 from beamer2slides.page_score import json_boxes, target_boxes
+from beamer2slides.texmap import Frame
 
+from .json_reads import jarr, jat, jobj, jobjs, jstr
 from .test_adopt_compiles import NAMES, SHOWCASE
 
 W, H = 400, 225                     # page, pt (= PDF pixels at 72 dpi)
@@ -39,16 +43,17 @@ Beta GOOD
 """
 
 
-def text_el(eid: str, text: str) -> dict:
+def text_el(eid: str, text: str) -> JsonObject:
     x0, y0, x1, y1 = BOX
-    run = {"text": text, "font": "Arial", "family": "sans", "size": 20.0, "bold": False, "italic": False,
+    run: JsonObject = {"text": text, "font": "Arial", "family": "sans", "size": 20.0, "bold": False, "italic": False,
            "color": "#000000", "underline": False, "strike": False, "script": None, "link": None, "highlight": None}
-    return {"id": eid, "kind": "text", "role": "body", "bbox": list(BOX),
+    bbox: list[Json] = [v for v in BOX]
+    return {"id": eid, "kind": "text", "role": "body", "bbox": bbox,
             "paragraphs": [{"align": "left", "level": 0, "bullet": None, "size": 20.0, "text_x0": x0,
                             "lines": [{"baseline": y0 + 20, "x0": x0, "x1": x1}], "runs": [run]}]}
 
 
-def slide_ir(page: int, key: str, text: str) -> dict:
+def slide_ir(page: int, key: str | None, text: str) -> JsonObject:
     return {"page": page, "size": [W, H], "key": key, "notes": None, "elements": [text_el(f"e{page}", text)]}
 
 
@@ -59,33 +64,38 @@ def page_image(scale: int, good: bool) -> Image.Image:
     return img
 
 
-def fake_compile(self):
+def fake_compile(self: Workspace) -> tuple[Path | None, str]:
     pages = [page_image(1, "GOOD" in self.source.text(f.file)[f.body:f.body_end]) for f in self.source.frames]
     pdf = self.build_dir / f"{self.main.stem}.pdf"
     pages[0].save(pdf, save_all=True, append_images=pages[1:], resolution=72.0)
     return pdf, ""
 
 
-def fake_build(self, out, target_has_notes=False, compiled=None):
-    """classify as a stand-in: one slide per frame, its words the frame's body."""
+def fake_build(self: Workspace, out: Path, target_has_notes: bool,
+               compiled: tuple[Path | None, str] | None) -> Candidate:
+    """classify as a stand-in: one slide per frame, its words the frame's body (the loop hands
+    `build` every argument)."""
     pdf, _ = compiled if compiled is not None else self.compile()
-    slides, words = [], {}
+    assert pdf is not None
+    slides: list[Json] = []
+    words: dict[int, list[str]] = {}
     for k, f in enumerate(self.source.frames):
         body = " ".join(self.source.text(f.file)[f.body:f.body_end].split())
         slides.append(slide_ir(k, f.label, body))
         words[k] = body.split()
-    return Candidate(self.source, pdf, {"slides": slides}, list(self.source.frames), words=words)
+    frames: list[Frame | None] = [f for f in self.source.frames]
+    return Candidate(self.source, pdf, {"slides": slides}, frames, words=words)
 
 
 @pytest.fixture
-def stand_ins(monkeypatch):
+def stand_ins(monkeypatch: pytest.MonkeyPatch) -> list[int]:
     """Compile and read-back stood in for; the translators write one bad edit (GOOD -> BAD in the
     second frame) the first time they are asked, and nothing after."""
     monkeypatch.setattr(inverse.Workspace, "compile", fake_compile)
     monkeypatch.setattr(inverse.Workspace, "build", fake_build)
-    calls = []
+    calls: list[int] = []
 
-    def plan(self):
+    def plan(self: Planner) -> tuple[list[Edit], list[Unresolved]]:
         calls.append(1)
         if len(calls) > 1:
             return [], []
@@ -98,7 +108,7 @@ def stand_ins(monkeypatch):
     return calls
 
 
-def target(tmp_path: Path, thumbnails: bool) -> dict:
+def target(tmp_path: Path, thumbnails: bool) -> JsonObject:
     # slide 1's words differ, so the loop has something open to plan for
     slides = [slide_ir(0, "f1", "Alpha GOOD more"), slide_ir(1, "f2", "Beta GOOD")]
     if thumbnails:
@@ -107,11 +117,12 @@ def target(tmp_path: Path, thumbnails: bool) -> dict:
             path.parent.mkdir(exist_ok=True)
             page_image(2, True).save(path)          # Google's picture: twice the size, the box right
             s["thumbnail"] = str(path)
-    return {"slides": slides}
+    listed: list[Json] = [s for s in slides]
+    return {"slides": listed}
 
 
 @pytest.mark.parametrize("thumbnails", [True, False], ids=["ink", "residuals"])
-def test_a_frame_the_loop_made_worse_is_put_back(tmp_path, stand_ins, thumbnails):
+def test_a_frame_the_loop_made_worse_is_put_back(tmp_path: Path, stand_ins: list[int], thumbnails: bool):
     tree = tmp_path / "tree"
     tree.mkdir()
     (tree / "main.tex").write_text(SOURCE, encoding="utf-8")
@@ -131,27 +142,36 @@ def test_a_frame_the_loop_made_worse_is_put_back(tmp_path, stand_ins, thumbnails
     [r] = res.restored
     assert r["target_slides"] == [1] and r["frame_label"] == "f2" and r["iteration"] == 0
     assert r["mode"] == ("ink" if thumbnails else "residuals")
-    assert "first draft" in r["why"] and r["where"].endswith("main.tex:6-8")
+    assert "first draft" in jstr(r, "why") and jstr(r, "where").endswith("main.tex:6-8")
     assert r["score_now"] == r["score_best"]
     data, md = report(res, tgt)
     json.dumps(data)                                            # the agent layer's result stays data
-    assert data["restored"][0]["frame_label"] == "f2" and "## Frames put back" in md
+    assert jat(data, "restored", 0, "frame_label") == "f2" and "## Frames put back" in md
 
 
-def test_without_the_guard_the_bad_edit_stays(tmp_path, stand_ins):
+def test_without_the_guard_the_bad_edit_stays(tmp_path: Path, stand_ins: list[int]):
     tree = tmp_path / "tree"
     tree.mkdir()
     (tree / "main.tex").write_text(SOURCE, encoding="utf-8")
     res = converge(tree / "main.tex", target(tmp_path, True), tmp_path / "loop", 3, False, None, TOL,
                    lambda *_: None, False, None)
-    assert res.restored == [] and "Beta BAD" in next(iter(res.files.values()))
+    edited = next(iter(res.files.values()))
+    assert res.restored == [] and isinstance(edited, str) and "Beta BAD" in edited
 
 
-def seen(round_: int, text: str, score: float, mode: str = "residuals", penalty: float | None = None) -> Seen:
-    if penalty is None:
-        penalty = -score if mode == "residuals" else 0.0
+def seen(round_: int, text: str, score: float, mode: Literal["ink", "residuals"], penalty: float) -> Seen:
     return Seen(round=round_, file=Path("main.tex"), span=(0, len(text)), text=text, slides=(0,), mode=mode,
                 score=score, label="f", penalty=penalty)
+
+
+def by_residuals(round_: int, text: str, score: float) -> Seen:
+    """A frame scored by its residuals: the score is minus their weight, which is the penalty too."""
+    return seen(round_, text, score, "residuals", -score)
+
+
+def by_ink(round_: int, text: str, score: float, penalty: float) -> Seen:
+    """A frame scored by its ink against the thumbnail, `penalty` its weighted residuals."""
+    return seen(round_, text, score, "ink", penalty)
 
 
 def guard_with(*history: Seen) -> FrameGuard:
@@ -163,37 +183,37 @@ def guard_with(*history: Seen) -> FrameGuard:
 
 def test_gains_are_kept_and_ties_go_to_the_earliest_text():
     # the loop's rounds made it better: nothing to put back
-    assert guard_with(seen(0, "a", -10), seen(1, "b", -4), seen(2, "c", -3)).plan() == []
+    assert guard_with(by_residuals(0, "a", -10), by_residuals(1, "b", -4), by_residuals(2, "c", -3)).plan() == []
     # float noise in the ink, and fewer residuals: the loop's text stays (a notes fix, say)
-    assert guard_with(seen(0, "a", 0.9900, "ink", 5), seen(1, "b", 0.9897, "ink", 4)).plan() == []
+    assert guard_with(by_ink(0, "a", 0.9900, 5), by_ink(1, "b", 0.9897, 4)).plan() == []
     # a thousandth of ink lost is a worse page, whatever the residuals say (apps-edu-zh:9)
-    [(_, best)] = guard_with(seen(0, "a", 0.987, "ink", 5), seen(1, "b", 0.986, "ink", 1)).plan()
+    [(_, best)] = guard_with(by_ink(0, "a", 0.987, 5), by_ink(1, "b", 0.986, 1)).plan()
     assert best.round == 0
     # worse than two rounds that scored the same: the earlier one (round 1 changed nothing the score
     # could see - sc-functions:8 lost ink there with the same residuals)
-    [(final, best)] = guard_with(seen(0, "a", -5), seen(1, "b", -5), seen(2, "c", -9)).plan()
+    [(final, best)] = guard_with(by_residuals(0, "a", -5), by_residuals(1, "b", -5), by_residuals(2, "c", -9)).plan()
     assert final.text == "c" and best.round == 0
     # no worse, but no better either: the loop's edits earned nothing and go (arabic-training:6 read
     # 29 residuals and 29 while its ink fell from 0.960 to 0.805)
-    [(final, best)] = guard_with(seen(0, "a", -29), seen(1, "b", -29)).plan()
+    [(final, best)] = guard_with(by_residuals(0, "a", -29), by_residuals(1, "b", -29)).plan()
     assert final.text == "b" and best.round == 0
     # the same ink and the same residuals: the same
-    [(_, best)] = guard_with(seen(0, "a", 0.99, "ink", 3), seen(1, "b", 0.99, "ink", 3)).plan()
+    [(_, best)] = guard_with(by_ink(0, "a", 0.99, 3), by_ink(1, "b", 0.99, 3)).plan()
     assert best.round == 0
     # a round that really was better is the one taken
-    [(_, best)] = guard_with(seen(0, "a", 0.90, "ink"), seen(1, "b", 0.97, "ink"), seen(2, "c", 0.5, "ink")).plan()
+    [(_, best)] = guard_with(by_ink(0, "a", 0.90, 0.0), by_ink(1, "b", 0.97, 0.0), by_ink(2, "c", 0.5, 0.0)).plan()
     assert best.round == 1
 
 
 def test_the_reason_names_what_was_measured():
-    assert "picture less (ink 0.500, 0.970" in why(seen(2, "c", 0.5, "ink", 3), seen(1, "b", 0.97, "ink", 3))
-    assert "further from the deck (9 weighted" in why(seen(2, "c", -9), seen(0, "a", -5))
+    assert "picture less (ink 0.500, 0.970" in why(by_ink(2, "c", 0.5, 3), by_ink(1, "b", 0.97, 3))
+    assert "further from the deck (9 weighted" in why(by_residuals(2, "c", -9), by_residuals(0, "a", -5))
     assert "nothing better that can be measured (ink 0.990 and 3 weighted" in why(
-        seen(1, "b", 0.99, "ink", 3), seen(0, "a", 0.99, "ink", 3))
+        by_ink(1, "b", 0.99, 3), by_ink(0, "a", 0.99, 3))
 
 
 def test_words_the_page_has_wrong():
-    slide = {"elements": [text_el("t", "Hello, world (again)"),
+    slide: JsonObject = {"elements": [text_el("t", "Hello, world (again)"),
                           {"kind": "table", "rows": [["One", "two"]], "bbox": [0, 0, 1, 1]},
                           {"kind": "image", "role": "math", "paragraphs": [{"runs": [{"text": "x"}]}]}]}
     assert slide_words(slide) == ["hello", "world", "again", "one", "two"]
@@ -202,16 +222,17 @@ def test_words_the_page_has_wrong():
 
 @pytest.mark.needs_decks(*(f"foreign/showcase/{n}/target.json" for n in NAMES))
 @pytest.mark.parametrize("name", NAMES)
-def test_a_typed_target_reads_as_its_json(name):
+def test_a_typed_target_reads_as_its_json(name: str):
     """The guard reads deck_ir's typed read (`inverse.typed_target`) where it once read the JSON: the
     same words, the same boxes and the same thumbnails, slide by slide."""
-    d = json.loads((SHOWCASE / name / "target.json").read_text(encoding="utf-8"))
+    d = jobj(json.loads((SHOWCASE / name / "target.json").read_text(encoding="utf-8")))
     typed = parse_target(d)
-    assert len(typed.slides) == len(d["slides"])
-    for s, j in zip(typed.slides, d["slides"]):
+    n = len(jarr(d, "slides"))
+    assert len(typed.slides) == n
+    for s, j in zip(typed.slides, jobjs(d, "slides")):
         assert target_slide_words(s) == slide_words(j)
         assert target_boxes(s) == json_boxes(j)
     a, b = target_thumbnails(typed), target_thumbnails(d)
     assert (a is None) == (b is None)
     if a is not None and b is not None:
-        assert [a(k) for k in range(-1, len(d["slides"]) + 1)] == [b(k) for k in range(-1, len(d["slides"]) + 1)]
+        assert [a(k) for k in range(-1, n + 1)] == [b(k) for k in range(-1, n + 1)]

@@ -8,32 +8,60 @@ picture's original `source_url` (`deck_ir.fetch_url`, `inverse`), a Doc's insert
 to fail the test if it is ever reached.
 """
 
+from __future__ import annotations
+
 import io
-from types import SimpleNamespace
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import TYPE_CHECKING, NoReturn
 
 import pytest
 
 from beamer2slides import google_auth, net
+from beamer2slides.doc_ir import Ir, Run
+from beamer2slides.google_types import Files, Pages, Presentations, Thumbnail
+from beamer2slides.json_types import JsonObject
+from beamer2slides.typing_compat import override
+
+from .fake_google import Answer, Fetcher, NoDrive, NoFiles, NoPages, NoPresentations, NoSlides
+
+if TYPE_CHECKING:
+    from typing_extensions import Unpack
+
+    from beamer2slides import google_types
+    from beamer2slides.google_types import ExportFile, GetThumbnail, SlidesService
+
+Colour = tuple[int, int, int]
+SQUARE = (8, 8)
+RED: Colour = (200, 30, 30)
+
+
+def _no_urllib(url: str) -> bytes:
+    pytest.fail(f"urllib fetched {url}")
+
+
+def _no_sleep(seconds: float) -> None:
+    pass
 
 
 @pytest.fixture(autouse=True)
-def no_sockets(monkeypatch):
-    monkeypatch.setattr(net, "urllib_fetch", lambda url: pytest.fail(f"urllib fetched {url}"))
-    monkeypatch.setattr(net.time, "sleep", lambda s: None)
+def no_sockets(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(net, "urllib_fetch", _no_urllib)
+    monkeypatch.setattr(net.time, "sleep", _no_sleep)
 
 
-def png(size=(8, 8), colour=(200, 30, 30)) -> bytes:
+def png(*, size: tuple[int, int], colour: Colour) -> bytes:
     from PIL import Image
     buf = io.BytesIO()
     Image.new("RGB", size, colour).save(buf, format="PNG")
     return buf.getvalue()
 
 
-def test_nothing_installed_is_urllib():
+def test_nothing_installed_is_urllib() -> None:
     assert google_auth.fetcher_for_threads() is net.urllib_fetch
 
 
-def test_downloads_can_be_switched_off(monkeypatch):
+def test_downloads_can_be_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """`$B2S_NO_DOWNLOADS` (the CLI's `--no-downloads`) makes `no_downloads` the default: asked
     once, never retried. A fetcher a caller installed still wins."""
     monkeypatch.setenv(net.NO_DOWNLOADS, "0")
@@ -46,20 +74,31 @@ def test_downloads_can_be_switched_off(monkeypatch):
         assert net.download("u") == b"mine" and not net.downloads_off()
 
 
-def test_with_downloads_off_no_place_is_measured(monkeypatch):
+def test_with_downloads_off_no_place_is_measured(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Measuring a hole's place is a thumbnail download: with downloads off not even the scratch
     slides are made, and every picture keeps its predicted place."""
     from beamer2slides import emit, emit_places
-    monkeypatch.setattr(emit_places, "measure_jobs", lambda *a: ([{"createSlide": {}}], [("job",)]))
-    monkeypatch.setattr(emit_places, "batch",lambda *a: pytest.fail("scratch slides written"))
+
+    def measure_jobs(*a: object) -> tuple[list[JsonObject], list[tuple[str]]]:
+        return [{"createSlide": {}}], [("job",)]
+
+    def batch(*a: object) -> NoReturn:
+        pytest.fail("scratch slides written")
+
+    def placed(e: JsonObject, page: int) -> JsonObject:
+        return e
+
+    monkeypatch.setattr(emit_places, "measure_jobs", measure_jobs)
+    monkeypatch.setattr(emit_places, "batch", batch)
     monkeypatch.setenv(net.NO_DOWNLOADS, "1")
-    assert emit.measure_places(None, "P", {"slides": []}, 1.0, None, {}, {}, None) == ({}, [])
+    assert emit.measure_places(NoSlides(), "P", {"slides": []}, 1.0, emit.FontMapper(), placed, {},
+                               tmp_path) == ({}, [])
 
 
-def test_a_download_is_retried_and_the_last_failure_raised():
-    tries = []
+def test_a_download_is_retried_and_the_last_failure_raised() -> None:
+    tries: list[str] = []
 
-    def flaky(url):
+    def flaky(url: str) -> bytes:
         tries.append(url)
         if len(tries) < 3:
             raise ConnectionError("blip")
@@ -67,15 +106,20 @@ def test_a_download_is_retried_and_the_last_failure_raised():
 
     assert net.download("u", flaky, tries=3) == b"ok" and len(tries) == 3
     tries.clear()
+
+    def failing(url: str) -> bytes:
+        tries.append(url)
+        raise ConnectionError("x")
+
     with pytest.raises(ConnectionError):
-        net.download("u", lambda url: tries.append(url) or (_ for _ in ()).throw(ConnectionError("x")), tries=2)
+        net.download("u", failing, tries=2)
     assert len(tries) == 2
 
 
-def test_not_allowed_is_asked_once():
-    tries = []
+def test_not_allowed_is_asked_once() -> None:
+    tries: list[str] = []
 
-    def forbid(url):
+    def forbid(url: str) -> bytes:
         tries.append(url)
         raise PermissionError(url)
 
@@ -84,61 +128,94 @@ def test_not_allowed_is_asked_once():
     assert tries == ["u"]
 
 
-def test_a_fetcher_must_hand_back_bytes():
+class Handing:
+    """A harness's fetcher, typed to hand back bytes: what it really hands back is `answer`, which
+    a test replaces (`monkeypatch`) with what a harness breaking its word would give."""
+
+    def __init__(self) -> None:
+        self.answer = b""
+
+    def __call__(self, url: str) -> bytes:
+        return self.answer
+
+
+def test_a_fetcher_must_hand_back_bytes(monkeypatch: pytest.MonkeyPatch) -> None:
+    fetch = Handing()
+    monkeypatch.setattr(fetch, "answer", "text")
     with pytest.raises(TypeError, match="not bytes"):
-        net.download("u", lambda url: "text", tries=1)
-    assert net.download("u", lambda url: bytearray(b"ab"), tries=1) == b"ab"
+        net.download("u", fetch, tries=1)
+    monkeypatch.setattr(fetch, "answer", bytearray(b"ab"))
+    assert net.download("u", fetch, tries=1) == b"ab"
 
 
-def test_the_installed_fetcher_is_used_when_none_is_passed(fetcher):
+def test_the_installed_fetcher_is_used_when_none_is_passed(fetcher: Fetcher) -> None:
     fetcher(lambda url: f"<{url}>".encode())
     assert net.download("u") == b"<u>"
 
 
-@pytest.mark.parametrize("data, suffix", [(png(), ".png"), (b"\xff\xd8\xff\xe0rest", ".jpg"),
+@pytest.mark.parametrize("data, suffix", [(png(size=SQUARE, colour=RED), ".png"), (b"\xff\xd8\xff\xe0rest", ".jpg"),
                                           (b"GIF89a...", ".gif"), (b"RIFF\0\0\0\0WEBPVP8 ", ".webp"),
                                           (b"<?xml version='1.0'?><svg/>", ".svg"), (b"??", ".png")])
-def test_a_picture_names_its_own_type(data, suffix):
+def test_a_picture_names_its_own_type(data: bytes, suffix: str) -> None:
     assert net.picture_suffix(data) == suffix
 
 
-def test_a_thumbnail_is_downloaded_through_the_fetcher(tmp_path, fetcher):
-    class Slides:
-        def presentations(self):
-            return self
+class ThumbnailPages(NoPages):
+    """Every thumbnail is at https://thumb/1, 1600 x 900."""
 
-        def pages(self):
-            return self
+    @override
+    def getThumbnail(self, **kw: Unpack[GetThumbnail]) -> google_types.Request[Thumbnail]:
+        return Answer(Thumbnail(contentUrl="https://thumb/1", width=1600, height=900))
 
-        def getThumbnail(self, **kw):
-            return SimpleNamespace(execute=lambda: {"contentUrl": "https://thumb/1", "width": 1600,
-                                                    "height": 900})
 
+class ThumbnailSlides(NoPresentations, NoSlides):
+    """A Slides client whose pages are `ThumbnailPages`."""
+
+    @override
+    def presentations(self) -> Presentations:
+        return self
+
+    @override
+    def pages(self) -> Pages:
+        return ThumbnailPages()
+
+
+def test_a_thumbnail_is_downloaded_through_the_fetcher(tmp_path: Path, fetcher: Fetcher) -> None:
     from beamer2slides.gslides import save_thumbnail
 
-    fetcher(lambda url: png() if url == "https://thumb/1" else pytest.fail(url))
-    assert save_thumbnail(Slides(), "pid", "p1", tmp_path / "t" / "1.png") == (1600, 900)
-    assert (tmp_path / "t" / "1.png").read_bytes() == png()
+    def thumb(url: str) -> bytes:
+        assert url == "https://thumb/1", url
+        return png(size=SQUARE, colour=RED)
+
+    slides: SlidesService = ThumbnailSlides()
+    fetcher(thumb)
+    assert save_thumbnail(slides, "pid", "p1", tmp_path / "t" / "1.png") == (1600, 900)
+    assert (tmp_path / "t" / "1.png").read_bytes() == png(size=SQUARE, colour=RED)
     assert not list((tmp_path / "t").glob("*.part"))
 
 
-def test_a_read_deck_s_pictures_come_through_the_fetcher(tmp_path, fetcher):
+def test_a_read_deck_s_pictures_come_through_the_fetcher(tmp_path: Path, fetcher: Fetcher) -> None:
     from beamer2slides import deck_ir
 
-    fetcher(lambda url: png())
+    fetcher(lambda url: png(size=SQUARE, colour=RED))
     got = deck_ir.stash_picture("https://lh3/pic=s0", lambda u: deck_ir.fetch_url(u, None), tmp_path)
-    assert got.format and (tmp_path / got.file).read_bytes() == png()
+    assert got.format and got.file is not None
+    assert (tmp_path / got.file).read_bytes() == png(size=SQUARE, colour=RED)
 
     class Refused(Exception):
         pass
 
-    fetcher(lambda url: (_ for _ in ()).throw(Refused("egress denied")))
-    assert "egress denied" in deck_ir.stash_picture("https://lh3/pic=s0", lambda u: deck_ir.fetch_url(u, None), tmp_path).error
+    def refuse(url: str) -> bytes:
+        raise Refused("egress denied")
+
+    fetcher(refuse)
+    error = deck_ir.stash_picture("https://lh3/pic=s0", lambda u: deck_ir.fetch_url(u, None), tmp_path).error
+    assert error is not None and "egress denied" in error
 
 
 def _s15f16(x: float) -> bytes:
     import struct
-    return struct.pack(">i", int(round(x * 65536)))
+    return struct.pack(">i", round(x * 65536))
 
 
 def _xyztype(x: float, y: float, z: float) -> bytes:
@@ -147,7 +224,7 @@ def _xyztype(x: float, y: float, z: float) -> bytes:
 
 def _curv_gamma(gamma: float) -> bytes:
     import struct
-    data = b"curv" + b"\x00" * 4 + struct.pack(">I", 1) + struct.pack(">H", int(round(gamma * 256)))
+    data = b"curv" + b"\x00" * 4 + struct.pack(">I", 1) + struct.pack(">H", round(gamma * 256))
     while len(data) % 4:
         data += b"\x00"
     return data
@@ -185,7 +262,9 @@ def icc_gamma_profile(gamma: float) -> bytes:
     }
     order = ["desc", "cprt", "wtpt", "rXYZ", "gXYZ", "bXYZ", "rTRC", "gTRC", "bTRC"]
     offset = 128 + 4 + 12 * len(order)
-    entries, blob, written = [], b"", {}
+    entries: list[tuple[bytes, int, int]] = []
+    blob = b""
+    written: dict[bytes, tuple[int, int]] = {}
     for name in order:
         data = tags[name]
         if data in written:
@@ -207,14 +286,14 @@ def icc_gamma_profile(gamma: float) -> bytes:
     return bytes(header) + table + blob
 
 
-def png_with_icc(colour, icc: bytes) -> bytes:
+def png_with_icc(colour: Colour, icc: bytes) -> bytes:
     from PIL import Image
     buf = io.BytesIO()
     Image.new("RGB", (8, 8), colour).save(buf, format="PNG", icc_profile=icc)
     return buf.getvalue()
 
 
-def test_a_picture_s_embedded_colour_profile_is_applied_and_dropped(tmp_path, fetcher):
+def test_a_picture_s_embedded_colour_profile_is_applied_and_dropped(tmp_path: Path, fetcher: Fetcher) -> None:
     """firebase-jam slide 23's page-background picture (a `stretchedPictureFill`) carries a
     "Display" ICC profile: read raw, its teal is (94, 204, 209); colour-managed, Google's own
     saturated (16, 207, 211) - the live thumbnail's colour. LaTeX/PDF only ever draws the raw bytes
@@ -227,6 +306,7 @@ def test_a_picture_s_embedded_colour_profile_is_applied_and_dropped(tmp_path, fe
 
     fetcher(lambda url: data)
     got = deck_ir.stash_picture("https://lh3/pic=s0", lambda u: deck_ir.fetch_url(u, None), tmp_path)
+    assert got.file is not None
     saved = (tmp_path / got.file).read_bytes()
     from PIL import Image
     import numpy as np
@@ -237,52 +317,80 @@ def test_a_picture_s_embedded_colour_profile_is_applied_and_dropped(tmp_path, fe
     assert px == (188, 188, 188)                                # deterministic: lcms2's own transform
 
 
-def test_a_picture_with_no_colour_profile_is_untouched(tmp_path, fetcher):
+def test_a_picture_with_no_colour_profile_is_untouched(tmp_path: Path, fetcher: Fetcher) -> None:
     from beamer2slides import deck_ir
 
-    fetcher(lambda url: png())
+    fetcher(lambda url: png(size=SQUARE, colour=RED))
     got = deck_ir.stash_picture("https://lh3/pic=s0", lambda u: deck_ir.fetch_url(u, None), tmp_path)
-    assert (tmp_path / got.file).read_bytes() == png()
+    assert got.file is not None
+    assert (tmp_path / got.file).read_bytes() == png(size=SQUARE, colour=RED)
 
 
-def test_a_picture_s_source_url_on_any_host_goes_through_the_fetcher(tmp_path, fetcher):
+def test_a_picture_s_source_url_on_any_host_goes_through_the_fetcher(tmp_path: Path, fetcher: Fetcher) -> None:
     """The original of a picture inserted by URL: a host chosen by whoever inserted it, which is
     exactly the egress a backend has to see."""
-    from beamer2slides.inverse import Planner, loop_picture, picture_look
+    from beamer2slides.inverse import Context, Planner, Workspace, loop_picture, picture_look
 
-    big, small = png((64, 64)), png((16, 16))
-    asked = []
-    fetcher(lambda url: asked.append(url) or big)
+    big, small = png(size=(64, 64), colour=RED), png(size=(16, 16), colour=RED)
+    asked: list[str] = []
+
+    def fetch(url: str) -> bytes:
+        asked.append(url)
+        return big
+
+    fetcher(fetch)
     cur = tmp_path / "cur.png"
     cur.write_bytes(small)
-    planner = SimpleNamespace(ws=SimpleNamespace(work=tmp_path), ctx=SimpleNamespace(notes=[]))
+    # A planner holding only what `source_url_bytes` reads: its work folder and the notes.
+    ws = Workspace.__new__(Workspace)
+    ws.work = tmp_path
+    planner = Planner.__new__(Planner)
+    planner.ws, planner.ctx = ws, Context()
     te = loop_picture({"source_url": "https://example.org/figure.png"}, (0.0, 0.0, 1.0, 1.0), "test")
-    data, _, _ = Planner.source_url_bytes(planner, te, small, "png", picture_look(cur))
+    data, _, _ = planner.source_url_bytes(te, small, "png", picture_look(cur))
     assert asked == ["https://example.org/figure.png"]
     assert data == big and planner.ctx.notes, "the larger original was taken"
 
 
-def test_a_doc_s_inserted_pictures_come_through_the_fetcher(tmp_path, monkeypatch, fetcher):
+def _runs_are(runs: list[Run]) -> object:
+    """A stand-in for `doc_sync._pictures`: every picture run is one of `runs`."""
+    def pictures(live: Ir) -> list[Run]:
+        return runs
+    return pictures
+
+
+NO_DOCUMENT = Ir(blocks=[])   # (the picture runs come from `_runs_are`)
+
+
+def _src(run: Run) -> str:
+    """The file a picture run was saved to."""
+    src = run.get("src")
+    assert src is not None, f"{run.get('value')} was not saved"
+    return src
+
+
+def test_a_doc_s_inserted_pictures_come_through_the_fetcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                            fetcher: Fetcher) -> None:
     """A fetcher hands over bytes and no Content-Type, so the file is named by what it holds."""
     from beamer2slides import doc_sync
 
-    runs = [{"uri": "https://lh7/one", "value": "kix.one"}, {"uri": "https://lh7/two", "value": "kix.two"},
-            {"uri": "https://lh7/gone", "value": "kix.gone"}]
-    monkeypatch.setattr(doc_sync, "_pictures", lambda live: runs)
-    answers = {"https://lh7/one": png(), "https://lh7/two": b"\xff\xd8\xff\xe0jpeg"}
+    runs = [Run(text="", uri="https://lh7/one", value="kix.one"), Run(text="", uri="https://lh7/two", value="kix.two"),
+            Run(text="", uri="https://lh7/gone", value="kix.gone")]
+    monkeypatch.setattr(doc_sync, "_pictures", _runs_are(runs))
+    answers = {"https://lh7/one": png(size=SQUARE, colour=RED), "https://lh7/two": b"\xff\xd8\xff\xe0jpeg"}
 
-    def fetch(url):
+    def fetch(url: str) -> bytes:
         if url not in answers:
             raise LookupError(url)
         return answers[url]
 
     fetcher(fetch)
-    assert doc_sync.fetch_pictures(tmp_path / "talk.html", {}, drive=None, ident=None) == 2
-    assert runs[0]["src"] == "talk.media/kix.one.png" and runs[1]["src"] == "talk.media/kix.two.jpg"
+    assert doc_sync.fetch_pictures(tmp_path / "talk.html", NO_DOCUMENT, drive=None, ident=None) == 2
+    assert runs[0].get("src") == "talk.media/kix.one.png" and runs[1].get("src") == "talk.media/kix.two.jpg"
     assert "src" not in runs[2]
 
 
-def _doc_export(tags, files):
+def _doc_export(tags: Sequence[tuple[str, float, float]], files: Mapping[str, bytes]) -> NoDrive:
     """What Drive's zip export of a document holds: one HTML page and its images/."""
     import zipfile
 
@@ -294,61 +402,66 @@ def _doc_export(tags, files):
         for name, data in files.items():
             z.writestr(name, data)
 
-    class Request:
-        def execute(self):
-            return buf.getvalue()
+    class Exported(NoFiles):
+        @override
+        def export(self, **kw: Unpack[ExportFile]) -> google_types.Request[bytes]:
+            assert kw["mimeType"] == "application/zip"
+            return Answer(buf.getvalue())
 
-    class Files:
-        def export(self, fileId, mimeType):
-            assert mimeType == "application/zip"
-            return Request()
-
-    class Drive:
-        def files(self):
-            return Files()
+    class Drive(NoDrive):
+        @override
+        def files(self) -> Files:
+            return Exported()
 
     return Drive()
 
 
-def test_a_doc_s_pictures_come_out_of_its_export_when_nothing_downloads(tmp_path, monkeypatch):
+def test_a_doc_s_pictures_come_out_of_its_export_when_nothing_downloads(tmp_path: Path,
+                                                                        monkeypatch: pytest.MonkeyPatch) -> None:
     """Downloads off: the pictures pair with the export's `<img>` tags by document order,
     and only when the count and every size agree (a mismatch saves nothing, not the wrong one)."""
     from beamer2slides import doc_sync
 
-    red, green = png(colour=(200, 0, 0)), png(colour=(0, 200, 0))
+    red, green = png(size=SQUARE, colour=(200, 0, 0)), png(size=SQUARE, colour=(0, 200, 0))
     monkeypatch.setenv(net.NO_DOWNLOADS, "1")
 
-    def runs():
-        return [{"uri": "https://lh7/a", "value": "kix.a", "size": [13, 9]},
-                {"src": "talk.media/mine.png", "value": "kix.mine", "size": [30, 20]},
-                {"uri": "https://lh7/b", "value": "kix.b", "size": [40, 20]}]
+    def runs() -> list[Run]:
+        return [Run(text="", uri="https://lh7/a", value="kix.a", size=[13, 9]),
+                Run(text="", src="talk.media/mine.png", value="kix.mine", size=[30, 20]),
+                Run(text="", uri="https://lh7/b", value="kix.b", size=[40, 20])]
 
-    tags = [("images/image1.png", 13.33, 8.89), ("images/image2.png", 30, 20),
-            ("images/image3.png", 40, 20)]
+    tags: list[tuple[str, float, float]] = [("images/image1.png", 13.33, 8.89), ("images/image2.png", 30, 20),
+                                            ("images/image3.png", 40, 20)]
     files = {"images/image1.png": red, "images/image2.png": b"not ours", "images/image3.png": green}
     found = runs()
-    monkeypatch.setattr(doc_sync, "_pictures", lambda live: found)
-    assert doc_sync.fetch_pictures(tmp_path / "talk.html", {}, _doc_export(tags, files), "doc") == 2
-    assert (tmp_path / found[0]["src"]).read_bytes() == red
-    assert (tmp_path / found[2]["src"]).read_bytes() == green
-    assert found[1]["src"] == "talk.media/mine.png", "a picture the file carries is left alone"
+    monkeypatch.setattr(doc_sync, "_pictures", _runs_are(found))
+    assert doc_sync.fetch_pictures(tmp_path / "talk.html", NO_DOCUMENT, _doc_export(tags, files), "doc") == 2
+    assert (tmp_path / _src(found[0])).read_bytes() == red
+    assert (tmp_path / _src(found[2])).read_bytes() == green
+    assert found[1].get("src") == "talk.media/mine.png", "a picture the file carries is left alone"
 
     for tags_now in (tags[:2], [tags[0], tags[1], ("images/image3.png", 20, 20)]):
         found = runs()
-        assert doc_sync.fetch_pictures(tmp_path / "talk.html", {}, _doc_export(tags_now, files),
+        monkeypatch.setattr(doc_sync, "_pictures", _runs_are(found))
+        assert doc_sync.fetch_pictures(tmp_path / "talk.html", NO_DOCUMENT, _doc_export(tags_now, files),
                                        "doc") == 0
         assert "src" not in found[0] and "src" not in found[2]
 
 
-def test_two_contexts_each_download_through_their_own(fetcher):
+def test_two_contexts_each_download_through_their_own(fetcher: Fetcher) -> None:
     """Per context, like credentials: a server with two requests in the air hands each its own."""
     import contextvars
     import threading
 
-    got = {}
+    got: dict[str, bytes] = {}
 
-    def request(name):
-        with google_auth.use_fetcher(lambda url, name=name: name.encode()):
+    def own(name: str) -> net.Fetch:
+        def fetch(url: str) -> bytes:
+            return name.encode()
+        return fetch
+
+    def request(name: str) -> None:
+        with google_auth.use_fetcher(own(name)):
             barrier.wait()
             got[name] = net.download("u")
 

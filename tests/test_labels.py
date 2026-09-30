@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from beamer2slides import labels, texmap
+from beamer2slides.json_types import JsonObject
 
 
 def source(tmp_path: Path, body: str, name: str = "main.tex") -> texmap.Source:
@@ -50,7 +51,7 @@ def test_a_very_long_title_is_cut_but_stays_distinct():
 
 # ---------------------------------------------------------------- where the label is written
 
-def test_a_frame_with_no_options_gets_its_own_bracket(tmp_path):
+def test_a_frame_with_no_options_gets_its_own_bracket(tmp_path: Path) -> None:
     src = source(tmp_path, frame("Intro"))
     (edit,) = labels.plan(src)
     assert edit["text"] == "[label=intro]"
@@ -58,20 +59,20 @@ def test_a_frame_with_no_options_gets_its_own_bracket(tmp_path):
     assert "\\begin{frame}[label=intro]{Intro}" in text
 
 
-def test_a_frame_that_has_options_keeps_them(tmp_path):
+def test_a_frame_that_has_options_keeps_them(tmp_path: Path) -> None:
     src = source(tmp_path, frame("Intro", opts="[t,allowframebreaks]"))
     (edit,) = labels.plan(src)
     (_, text), = labels.apply(src, [edit]).items()
     assert "\\begin{frame}[t,allowframebreaks,label=intro]{Intro}" in text
 
 
-def test_an_empty_option_list_does_not_get_a_stray_comma(tmp_path):
+def test_an_empty_option_list_does_not_get_a_stray_comma(tmp_path: Path) -> None:
     src = source(tmp_path, frame("Intro", opts="[]"))
     (_, text), = labels.apply(src, labels.plan(src)).items()
     assert "\\begin{frame}[label=intro]{Intro}" in text
 
 
-def test_the_label_goes_after_an_overlay_specification(tmp_path):
+def test_the_label_goes_after_an_overlay_specification(tmp_path: Path) -> None:
     """`\\begin{frame}<2->[t]{...}`: the `<...>` is not an option list, and a label written before
     it would not be one either."""
     src = source(tmp_path, frame("Intro", overlay="<2->"))
@@ -79,7 +80,7 @@ def test_the_label_goes_after_an_overlay_specification(tmp_path):
     assert "\\begin{frame}<2->[label=intro]{Intro}" in text
 
 
-def test_a_frame_that_already_has_a_label_is_left_alone(tmp_path):
+def test_a_frame_that_already_has_a_label_is_left_alone(tmp_path: Path) -> None:
     """The promise this module exists to keep: an existing label is what some deck was converted
     from, and rewriting it would tell sync that a frame it knows is a different frame."""
     src = source(tmp_path, frame("Intro", opts="[label=whatever-they-chose]") + frame("Next"))
@@ -89,7 +90,7 @@ def test_a_frame_that_already_has_a_label_is_left_alone(tmp_path):
     assert "label=whatever-they-chose" in text and text.count("label=") == 2
 
 
-def test_several_frames_in_one_file_are_all_labelled_correctly(tmp_path):
+def test_several_frames_in_one_file_are_all_labelled_correctly(tmp_path: Path) -> None:
     """Every edit is an offset into the file as it was read, so they have to be written back to
     front or each one moves the next."""
     src = source(tmp_path, "".join(frame(t) for t in ("One", "Two", "Three")))
@@ -98,7 +99,7 @@ def test_several_frames_in_one_file_are_all_labelled_correctly(tmp_path):
         assert f"\\begin{{frame}}[label={t}]{{{t.title()}}}" in text
 
 
-def test_frames_of_an_input_file_are_labelled_too(tmp_path):
+def test_frames_of_an_input_file_are_labelled_too(tmp_path: Path) -> None:
     (tmp_path / "part.tex").write_text(frame("Included"), encoding="utf-8")
     src = source(tmp_path, frame("Main") + "\\input{part}\n")
     plan = labels.plan(src)
@@ -108,14 +109,14 @@ def test_frames_of_an_input_file_are_labelled_too(tmp_path):
     assert "[label=included]" in written[tmp_path / "part.tex"]
 
 
-def test_two_untitled_frames_get_labels_of_their_own(tmp_path):
+def test_two_untitled_frames_get_labels_of_their_own(tmp_path: Path) -> None:
     src = source(tmp_path, "\\begin{frame}\na\n\\end{frame}\n\\begin{frame}\nb\n\\end{frame}\n")
     assert [e["label"] for e in labels.plan(src)] == ["frame", "frame-2"]
 
 
 # ---------------------------------------------------------------- what a converted deck says
 
-def info(label=None, title="A title"):
+def info(label: str | None, title: str) -> JsonObject:
     return {"label": label, "title": title, "text": ""}
 
 
@@ -154,7 +155,7 @@ def test_a_label_that_comes_back_later_in_the_deck_is_reported():
 
 # ---------------------------------------------------------------- the whole way round
 
-def test_a_written_label_is_read_back_as_that_frames_label(tmp_path):
+def test_a_written_label_is_read_back_as_that_frames_label(tmp_path: Path) -> None:
     """What `label` writes is what `extract.frame_labels` looks for: beamer turns `label=x` into
     the destination `x` on the frame's first page and `x<n>` on step n. (The compiled half of this
     is proved live; here the two halves are held against each other.)"""
@@ -166,6 +167,6 @@ def test_a_written_label_is_read_back_as_that_frames_label(tmp_path):
 
 
 @pytest.mark.parametrize("title", ["Résumé", "数据分析", "C++ & you", "   ", "---"])
-def test_any_title_produces_a_usable_label(title):
+def test_any_title_produces_a_usable_label(title: str) -> None:
     name = labels.slug(title, set(), "frame")
     assert name and labels.SAFE.sub("", name) == name and not name.startswith("-") and not name.endswith("-")

@@ -3,27 +3,37 @@ thumbnails=...)): the API says nothing of a freeform's geometry, so its outline 
 picture and written as a filled TikZ path. Offline: hand-made `presentations.get` answers and numpy
 thumbnails 720 px wide, so a thumbnail pixel is a Slides point."""
 
+from pathlib import Path
+
 import numpy as np
 import pytest
 
 from beamer2slides import adopt, adopt_shapes, deck_freeforms
 from beamer2slides.adopt_context import adopt_context
 from beamer2slides.deck_ir_types import TargetShape
+from beamer2slides.json_types import Json, JsonObject
 
 from .deck_records import as_dict, parsed, record, records
+from .json_reads import jarr, jnums, jobj, jstr
 from .test_adopt_fills import EMU, UNREAD, at, deck, elements, page, pt, settle, shape, solid
 
 NONE = {"propertyState": "NOT_RENDERED"}
+WHITE = "FFFFFF"                                            # the page `deck` and `page` are given
+Ring = list[list[float]]
+
+
+def as_written(text: str) -> str:
+    return text
 
 
 @pytest.fixture(autouse=True)
-def lengths_as_written(monkeypatch):
-    monkeypatch.setattr(adopt, "to_bp", lambda text: text)
+def lengths_as_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(adopt, "to_bp", as_written)
 
 
-def outlined(pe: dict, hexc: str, weight: float) -> dict:
-    pe["shape"]["shapeProperties"]["outline"] = {"outlineFill": solid(hexc), "weight": pt(weight),
-                                                 "propertyState": "RENDERED"}
+def outlined(pe: JsonObject, hexc: str, weight: float) -> JsonObject:
+    jobj(pe, "shape", "shapeProperties")["outline"] = {"outlineFill": solid(hexc), "weight": pt(weight),
+                                                       "propertyState": "RENDERED"}
     return pe
 
 
@@ -32,28 +42,49 @@ def paint(a: np.ndarray, mask: np.ndarray, hexc: str) -> np.ndarray:
     return a
 
 
-def disc(cx, cy, r) -> np.ndarray:
+def disc(cx: float, cy: float, r: float) -> np.ndarray:
     y, x = np.mgrid[0:405, 0:720] + 0.5
     return (x - cx) ** 2 + (y - cy) ** 2 <= r * r
 
 
-def ring_area(rings) -> float:
+def traced(pres: JsonObject, thumb: np.ndarray | None) -> list[JsonObject]:
+    """The slide's elements as deck_ir reads them, `thumb` its thumbnail (none: no thumbnails)."""
+    return [jobj(e) for e in elements(pres, thumb)]
+
+
+def trace_of(el: Json) -> JsonObject:
+    return jobj(el, "trace")
+
+
+def rings(tr: JsonObject) -> list[Ring]:
+    """A trace's rings, each a list of (x, y) points."""
+    return [[jnums(p) for p in jarr(r)] for r in jarr(tr, "rings")]
+
+
+def ring_area(rs: list[Ring]) -> float:
     """In Slides pt² (the IR draws the 720 pt deck on a 453.54 pt beamer page)."""
-    areas = sorted((abs(deck_freeforms.area(r)) for r in rings), reverse=True)
+    areas = sorted((abs(deck_freeforms.area(r)) for r in rs), reverse=True)
     return (areas[0] - sum(areas[1:])) / K ** 2              # one outline and the holes in it
+
+
+def drawn(el: JsonObject) -> str:
+    """What adopt writes for a shape element."""
+    sh = parsed(el)
+    assert isinstance(sh, TargetShape)
+    return adopt_shapes.shape_block(sh, adopt_context(), "", None)
 
 
 K = 453.54 / 720
 
 
 def test_a_solid_freeform_is_traced_as_its_outline_not_its_box():
-    thumb = paint(page(), disc(140, 140, 40), "#3366cc")
-    [el] = elements(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC"))), thumb)
-    tr = el["trace"]
-    assert len(tr["rings"]) == 1 and tr["fill"].lower() == "#3366cc" and tr["source"] == "thumbnail"
-    assert abs(ring_area(tr["rings"]) - np.pi * 40 ** 2) < 0.03 * np.pi * 40 ** 2
-    assert len(tr["rings"][0]) < 80                         # simplified, not one point per pixel
-    out = adopt_shapes.shape_block(parsed(el), adopt_context(), "", None)
+    thumb = paint(page(bg=WHITE), disc(140, 140, 40), "#3366cc")
+    [el] = traced(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC")), bg=WHITE), thumb)
+    tr = trace_of(el)
+    assert len(rings(tr)) == 1 and jstr(tr, "fill").lower() == "#3366cc" and tr["source"] == "thumbnail"
+    assert abs(ring_area(rings(tr)) - np.pi * 40 ** 2) < 0.03 * np.pi * 40 ** 2
+    assert len(rings(tr)[0]) < 80                         # simplified, not one point per pixel
+    out = drawn(el)
     assert "even odd rule" in out and "rectangle (80" not in out and "cycle" in out
     assert "_traced" not in el
 
@@ -74,71 +105,71 @@ def test_a_ring_of_one_noisy_colour_is_that_colour():
 
 
 def test_without_thumbnails_nothing_is_traced():
-    [el] = elements(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC"))))
+    [el] = traced(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC")), bg=WHITE), None)
     assert "trace" not in el
 
 
 def test_a_squiggle_the_api_reads_as_empty_gets_its_colour_and_its_outline():
     y, x = np.mgrid[0:405, 0:720] + 0.5
     band = (np.abs((y - 100) - (x - 100) * 0.5) < 8) & (x >= 100) & (x < 300)
-    [el] = elements(deck(shape("a", None, 100, 92, 200, 116, UNREAD)), paint(page(), band, "#fac2bd"))
+    [el] = traced(deck(shape("a", None, 100, 92, 200, 116, UNREAD), bg=WHITE), paint(page(bg=WHITE), band, "#fac2bd"))
     assert el["fill"] == "#fac2bd" and el["fill_source"] == "thumbnail"
-    assert el["trace"]["fill"] == "#fac2bd"
-    assert ring_area(el["trace"]["rings"]) < 0.25 * 200 * 116      # a band, not the box
+    assert trace_of(el)["fill"] == "#fac2bd"
+    assert ring_area(rings(trace_of(el))) < 0.25 * 200 * 116      # a band, not the box
 
 
 def test_a_freeform_that_fills_its_box_stays_a_rectangle():
-    [el] = elements(deck(shape("a", "CUSTOM", 100, 100, 80, 60, solid("3366CC"))),
-                    page((100, 100, 80, 60, "#3366cc")))
+    [el] = traced(deck(shape("a", "CUSTOM", 100, 100, 80, 60, solid("3366CC")), bg=WHITE),
+                  page((100, 100, 80, 60, "#3366cc"), bg=WHITE))
     assert "trace" not in el
 
 
 def test_what_an_opaque_shape_above_hides_is_the_freeforms():
     """A square over the middle of the disc leaves no hole in it."""
-    thumb = paint(page(), disc(140, 140, 40), "#3366cc")
+    thumb = paint(page(bg=WHITE), disc(140, 140, 40), "#3366cc")
     thumb[130:150, 130:150] = [255, 170, 0]
-    els = elements(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC")),
-                        shape("b", "RECTANGLE", 130, 130, 20, 20, solid("FFAA00"))), thumb)
-    assert len(els[0]["trace"]["rings"]) == 1
+    els = traced(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC")),
+                      shape("b", "RECTANGLE", 130, 130, 20, 20, solid("FFAA00")), bg=WHITE), thumb)
+    assert len(rings(trace_of(els[0]))) == 1
 
 
 def test_a_hole_showing_the_page_is_the_shapes_own_and_one_showing_art_is_not():
     donut = disc(140, 140, 40) & ~disc(140, 140, 15)
-    [el] = elements(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC"))),
-                    paint(page(), donut, "#3366cc"))
-    assert len(el["trace"]["rings"]) == 2
+    [el] = traced(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC")), bg=WHITE),
+                  paint(page(bg=WHITE), donut, "#3366cc"))
+    assert len(rings(trace_of(el))) == 2
     # the same hole showing ink no element of the deck accounts for: something above it the API did
     # not tell (Canva's art on sc-memphis' panel), so the disc goes on under it
-    thumb = paint(paint(page(), donut, "#3366cc"), disc(140, 140, 15), "#ffa49c")
-    [el] = elements(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC"))), thumb)
-    assert len(el["trace"]["rings"]) == 1
+    thumb = paint(paint(page(bg=WHITE), donut, "#3366cc"), disc(140, 140, 15), "#ffa49c")
+    [el] = traced(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC")), bg=WHITE), thumb)
+    assert len(rings(trace_of(el))) == 1
 
 
 def test_a_hole_under_a_shape_nobody_could_read_is_not_the_freeforms():
     """A `{}` shape above that shows two colours (Canva art) has no fill anyone can say and is dropped;
     what shows in its box, page colour included, may be its own."""
-    thumb = paint(page(), disc(140, 140, 40), "#3366cc")
+    thumb = paint(page(bg=WHITE), disc(140, 140, 40), "#3366cc")
     thumb[125:155, 125:140] = [255, 255, 255]
     thumb[125:155, 140:155] = [0, 170, 0]
-    els = elements(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC")),
-                        shape("art", "CUSTOM", 125, 125, 30, 30, UNREAD)), thumb)
-    assert [e["id"] for e in els] == ["a"] and len(els[0]["trace"]["rings"]) == 1
+    els = traced(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("3366CC")),
+                      shape("art", "CUSTOM", 125, 125, 30, 30, UNREAD), bg=WHITE), thumb)
+    assert [e["id"] for e in els] == ["a"] and len(rings(trace_of(els[0]))) == 1
 
 
 def test_ink_of_the_same_colour_running_on_outside_the_box_is_a_neighbours():
     """A tile over a band of its own colour that crosses the whole slide: the band is not the tile."""
-    [el] = elements(deck(shape("a", "CUSTOM", 100, 100, 100, 100, solid("FAC2BD"))),
-                    page((0, 130, 720, 40, "#fac2bd")))
+    [el] = traced(deck(shape("a", "CUSTOM", 100, 100, 100, 100, solid("FAC2BD")), bg=WHITE),
+                  page((0, 130, 720, 40, "#fac2bd"), bg=WHITE))
     assert "trace" not in el
 
 
 def test_an_outline_only_ring_is_traced_as_the_stroke():
     ring = disc(140, 140, 41) & ~disc(140, 140, 38)
     pe = outlined(shape("a", "CUSTOM", 101, 101, 78, 78, NONE), "C8253C", 3)
-    [el] = elements(deck(pe), paint(page(), ring, "#c8253c"))
-    tr = el["trace"]
-    assert tr["fill"].lower() == "#c8253c" and len(tr["rings"]) == 2
-    assert abs(ring_area(tr["rings"]) - np.pi * (41 ** 2 - 38 ** 2)) < 0.25 * np.pi * (41 ** 2 - 38 ** 2)
+    [el] = traced(deck(pe, bg=WHITE), paint(page(bg=WHITE), ring, "#c8253c"))
+    tr = trace_of(el)
+    assert jstr(tr, "fill").lower() == "#c8253c" and len(rings(tr)) == 2
+    assert abs(ring_area(rings(tr)) - np.pi * (41 ** 2 - 38 ** 2)) < 0.25 * np.pi * (41 ** 2 - 38 ** 2)
 
 
 def test_a_traced_path_keeps_its_points_below_the_top_edge():
@@ -155,12 +186,12 @@ def test_a_fill_the_page_already_shows_is_traced_by_its_outline_not_left_a_recta
     are page colour too - comes out a disc, not its 80 x 80 box."""
     ring = disc(140, 140, 41) & ~disc(140, 140, 38)
     pe = outlined(shape("a", "CUSTOM", 100, 100, 80, 80, solid("FFFFFF")), "A8DADC", 1.5)
-    [el] = elements(deck(pe, bg="F7FBFC"), paint(page(bg="F7FBFC"), ring, "#a8dadc"))
-    tr = el["trace"]
-    assert tr["fill"].lower() == "#ffffff" and tr["stroke"].lower() == "#a8dadc"
-    assert len(tr["rings"]) == 1
-    assert abs(ring_area(tr["rings"]) - np.pi * 40 ** 2) < 0.25 * np.pi * 40 ** 2
-    out = adopt_shapes.shape_block(parsed(el), adopt_context(), "", None)
+    [el] = traced(deck(pe, bg="F7FBFC"), paint(page(bg="F7FBFC"), ring, "#a8dadc"))
+    tr = trace_of(el)
+    assert jstr(tr, "fill").lower() == "#ffffff" and jstr(tr, "stroke").lower() == "#a8dadc"
+    assert len(rings(tr)) == 1
+    assert abs(ring_area(rings(tr)) - np.pi * 40 ** 2) < 0.25 * np.pi * 40 ** 2
+    out = drawn(el)
     assert "rectangle (80" not in out and "cycle" in out
 
 
@@ -168,8 +199,8 @@ def test_a_fill_the_page_shows_with_no_outline_still_falls_back_to_the_box():
     """No outline at all (the title slide's own cloud, drawn with `line=None`): there is nothing left
     to trace an edge from, so the shape is refused as before - a real limit, not a regression."""
     deck_freeforms.REFUSED.clear()
-    [el] = elements(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("FFFFFF")), bg="F7FBFC"),
-                    page(bg="F7FBFC"))
+    [el] = traced(deck(shape("a", "CUSTOM", 100, 100, 80, 80, solid("FFFFFF")), bg="F7FBFC"),
+                  page(bg="F7FBFC"))
     assert "trace" not in el
 
 
@@ -178,7 +209,7 @@ def test_shared_boxes_finds_freeform_siblings_at_one_box():
     the diagram's own canvas box in the API's answer - the geometry that tells them apart is a path
     the API never gives. Two or more shapes of the same source group declaring the exact same box
     is that, not a coincidence; a lone shape, or shapes in different groups, is not a cluster."""
-    els = [
+    els: list[JsonObject] = [
         {"kind": "shape", "shape_type": "CUSTOM", "group": "g1", "bbox": [10, 10, 50, 50]},
         {"kind": "shape", "shape_type": "TEXT_BOX", "group": "g1", "bbox": [15, 15, 45, 25]},
         {"kind": "shape", "shape_type": "CUSTOM", "group": "g1", "bbox": [10, 10, 50, 50]},
@@ -188,47 +219,47 @@ def test_shared_boxes_finds_freeform_siblings_at_one_box():
     assert deck_freeforms.shared_boxes(records(els)) == [[0, 2]]
 
 
-def test_a_box_two_freeforms_share_is_baked_as_one_picture_not_two_rectangles(tmp_path):
+def test_a_box_two_freeforms_share_is_baked_as_one_picture_not_two_rectangles(tmp_path: Path):
     """en-smartart's water-cycle diagram: two (of the real deck's five) curved arrows report the
     identical box. Tracing each alone reads the other as an opaque shape covering that whole shared
     box (`deck_fills.opaque`), so both used to fall back to "the box, solid" - two identical, stacked,
     opaque rectangles hiding the label between them. Baked once instead, under the diagram's own
     picture behind its label, which stays native and keeps its words."""
-    thumb = page()
+    thumb = page(bg=WHITE)
     thumb[100:300, 100:300] = [191, 162, 42]                   # the two arrows' ink, painted as one
     thumb[120:140, 150:250] = [126, 225, 255]                  # a label's words, inside the shared box
-    arrow_a = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
-              "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a1", "object": "a1"}
-    label = {"kind": "text", "role": "body", "group": "dia", "bbox": [140, 120, 260, 150], "id": "lbl",
-             "object": "lbl", "paragraphs": [{"runs": [{"text": "Precipitacion", "color": "#7ee1ff"}]}]}
-    arrow_b = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
-              "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a2", "object": "a2"}
-    got = settle([arrow_a, label, arrow_b], thumb, 1.0, "#ffffff", False, tmp_path)
+    arrow_a: JsonObject = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
+                           "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a1", "object": "a1"}
+    label: JsonObject = {"kind": "text", "role": "body", "group": "dia", "bbox": [140, 120, 260, 150], "id": "lbl",
+                         "object": "lbl", "paragraphs": [{"runs": [{"text": "Precipitacion", "color": "#7ee1ff"}]}]}
+    arrow_b: JsonObject = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
+                           "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a2", "object": "a2"}
+    got = [jobj(e) for e in settle([arrow_a, label, arrow_b], thumb, 1.0, "#ffffff", False, tmp_path)]
     assert [e["kind"] for e in got] == ["image", "text"]
     assert got[0]["id"] == "dia~arrows" and got[0]["group"] == "dia" and got[0]["bbox"] == [100, 100, 300, 300]
     assert got[1]["id"] == "lbl" and got[1]["paragraphs"] == as_dict(record(label))["paragraphs"]   # untouched
 
 
-def test_a_lone_freeform_that_fills_its_box_is_still_left_a_rectangle(tmp_path):
+def test_a_lone_freeform_that_fills_its_box_is_still_left_a_rectangle(tmp_path: Path):
     """A single freeform at its own true box (no sibling sharing it) is not this cluster: the old
     "the box, solid" fallback still applies, and the new bake path leaves it alone."""
-    el = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
-          "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a1", "object": "a1"}
-    thumb = page((100, 100, 200, 200, "2AA2BF"))
-    got = settle([el], thumb, 1.0, "#ffffff", False, tmp_path)
+    el: JsonObject = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
+                      "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a1", "object": "a1"}
+    thumb = page((100, 100, 200, 200, "2AA2BF"), bg=WHITE)
+    got = [jobj(e) for e in settle([el], thumb, 1.0, "#ffffff", False, tmp_path)]
     assert len(got) == 1 and got[0]["kind"] == "shape" and "trace" not in got[0]
 
 
 def test_without_a_pictures_folder_a_shared_box_cluster_is_left_for_tracing():
     """Offline reads with no folder to write to (`pull`) never bake a picture: the cluster is left as
     it was, exactly as any other unread fill would be without one."""
-    thumb = page()
+    thumb = page(bg=WHITE)
     thumb[100:300, 100:300] = [191, 162, 42]
-    arrow_a = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
-              "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a1", "object": "a1"}
-    arrow_b = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
-              "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a2", "object": "a2"}
-    got = settle([arrow_a, arrow_b], thumb, 1.0, "#ffffff")
+    arrow_a: JsonObject = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
+                           "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a1", "object": "a1"}
+    arrow_b: JsonObject = {"kind": "shape", "shape_type": "CUSTOM", "group": "dia", "bbox": [100, 100, 300, 300],
+                           "fill": "#2aa2bf", "fill_alpha": 1.0, "outline": None, "id": "a2", "object": "a2"}
+    got = [jobj(e) for e in settle([arrow_a, arrow_b], thumb, 1.0, "#ffffff", False, None)]
     assert [e["id"] for e in got] == ["a1", "a2"]
 
 
@@ -248,20 +279,20 @@ def test_ink_in_its_own_fill_and_outline_need_not_reach_every_side_of_the_box():
     the fill's colour does not wear the outline too - so it is traced; a dark hair running on from it
     (a branch against the sky) is left out, being no rim of either paint."""
     band, fill = curved_arrow()
-    thumb = paint(paint(page(), band, "#5d992b"), fill, "#ff0000")
+    thumb = paint(paint(page(bg=WHITE), band, "#5d992b"), fill, "#ff0000")
     thumb[180:182, 150:230] = 0                              # a black hair from the ring outwards
     pe = outlined(shape("a", "CUSTOM", 100, 100, 160, 160, solid("FF0000")), "5D992B", 3)
-    [el] = elements(deck(pe), thumb)
-    tr = el["trace"]
-    assert tr["fill"].lower() == "#ff0000" and tr["stroke"].lower() == "#5d992b"
-    assert abs(ring_area(tr["rings"]) - band.sum()) < 0.1 * band.sum()
-    assert max(p[0] for r in tr["rings"] for p in r) / K < 214          # the hair is not the arrow's
+    [el] = traced(deck(pe, bg=WHITE), thumb)
+    tr = trace_of(el)
+    assert jstr(tr, "fill").lower() == "#ff0000" and jstr(tr, "stroke").lower() == "#5d992b"
+    assert abs(ring_area(rings(tr)) - band.sum()) < 0.1 * band.sum()
+    assert max(p[0] for r in rings(tr) for p in r) / K < 214          # the hair is not the arrow's
     # the same ink with no outline round it vouches for nothing: the box is left as before
-    [el] = elements(deck(pe), paint(page(), band, "#ff0000"))
+    [el] = traced(deck(pe, bg=WHITE), paint(page(bg=WHITE), band, "#ff0000"))
     assert "trace" not in el
 
 
-def elbow(oid: str, x0: float, x1: float) -> dict:
+def elbow(oid: str, x0: float, x1: float) -> JsonObject:
     """A SmartArt connector as the API gives it: a line with no type from (x0, 130) to (x1, 170), its
     box all we are told of the elbow drawn in it."""
     return {"objectId": oid, "size": {"width": pt(x1 - x0), "height": pt(40)}, "transform": at(x0, 130),
@@ -274,19 +305,19 @@ def test_connectors_sharing_a_bar_are_each_traced():
     sibling's (`continues`), or a sibling traced first hid the stub they share (`sides`). A line of
     the same group in the same paint is kin: what runs on into its box, or lies under its ink, is
     their common ink."""
-    thumb = page()
+    thumb = page(bg=WHITE)
     navy = [0x47, 0x4B, 0x78]
     thumb[130:150, 198:202] = navy                          # the parent's stub
     thumb[148:152, 98:302] = navy                           # the bar
     for x in (100, 150, 300):                               # the children's stubs
         thumb[150:170, x - 2:x + 2] = navy
-    lines = [elbow("a", 100, 200), elbow("b", 200, 300), elbow("c", 150, 200)]
-    group = {"objectId": "g", "transform": at(0, 0), "size": {"width": pt(720), "height": pt(405)},
-             "elementGroup": {"children": lines}}
-    els = elements(deck(group), thumb)
+    lines: list[Json] = [elbow("a", 100, 200), elbow("b", 200, 300), elbow("c", 150, 200)]
+    group: JsonObject = {"objectId": "g", "transform": at(0, 0), "size": {"width": pt(720), "height": pt(405)},
+                         "elementGroup": {"children": lines}}
+    els = traced(deck(group, bg=WHITE), thumb)
     assert [e["id"] for e in els if e.get("trace")] == ["a", "b", "c"]
     a = next(e for e in els if e["id"] == "a")
-    xs = [p[0] / K for r in a["trace"]["rings"] for p in r]
+    xs = [p[0] / K for r in rings(trace_of(a)) for p in r]
     assert min(xs) < 100 and max(xs) > 200                  # its whole run, the stub c shares included
 
 
@@ -294,29 +325,32 @@ def test_a_kins_own_piece_in_the_box_stays_the_kins():
     """drawing-workshop 14: each letter of a word is a freeform line of one group in black, and the
     edge of the next letter lies in this one's box. Ink a kin shares is the line's only where it runs
     on from the line's own: a piece apart that the kin above already traced is the kin's."""
-    thumb = page()
+    thumb = page(bg=WHITE)
     for x0, y0, x1, y1 in ((100, 100, 160, 160), (120, 120, 140, 140)):
         thumb[y0 - 2:y1 + 2, x0 - 2:x1 + 2] = 0
         thumb[y0 + 2:y1 - 2, x0 + 2:x1 - 2] = 255
 
-    def outline(oid, x0, y0, x1, y1):
+    def outline(oid: str, x0: float, y0: float, x1: float, y1: float) -> JsonObject:
         return {"objectId": oid, "size": {"width": pt(x1 - x0), "height": pt(y1 - y0)}, "transform": at(x0, y0),
                 "line": {"lineProperties": {"lineFill": solid("000000"), "weight": pt(4)}}}
 
-    group = {"objectId": "g", "transform": at(0, 0), "size": {"width": pt(720), "height": pt(405)},
-             "elementGroup": {"children": [outline("big", 100, 100, 160, 160), outline("small", 120, 120, 140, 140)]}}
-    els = {e["id"]: e for e in elements(deck(group), thumb)}
-    assert len(els["small"]["trace"]["rings"]) == 2 and len(els["big"]["trace"]["rings"]) == 2
+    group: JsonObject = {"objectId": "g", "transform": at(0, 0), "size": {"width": pt(720), "height": pt(405)},
+                         "elementGroup": {"children": [outline("big", 100, 100, 160, 160),
+                                                       outline("small", 120, 120, 140, 140)]}}
+    els = {jstr(e, "id"): e for e in traced(deck(group, bg=WHITE), thumb)}
+    assert len(rings(trace_of(els["small"]))) == 2 and len(rings(trace_of(els["big"]))) == 2
 
 
-def slope(x0: float = 100, x1: float = 300) -> np.ndarray:
-    """A 4 px stroke from (x0, 130) down to (x1, 150)."""
+def slope() -> np.ndarray:
+    """A 4 px stroke from (100, 130) down to (300, 150)."""
+    x0, x1 = 100, 300
     y, x = np.mgrid[0:405, 0:720] + 0.5
     return (np.abs(y - 132 - (x - x0) * 16 / (x1 - x0)) <= 2) & (x >= x0) & (x < x1)
 
 
-def sloped(oid: str = "a") -> dict:
-    return {"objectId": oid, "size": {"width": pt(200), "height": pt(20)}, "transform": at(100, 130),
+def sloped() -> JsonObject:
+    """The line `slope` draws, as the API gives it: "a"."""
+    return {"objectId": "a", "size": {"width": pt(200), "height": pt(20)}, "transform": at(100, 130),
             "line": {"lineProperties": {"lineFill": solid("474B78"), "weight": pt(4)}}}
 
 
@@ -324,12 +358,12 @@ def test_a_strokes_ink_is_its_paint_and_an_edge_of_something_else_beside_it_is_n
     """jeb-arch 4: a connector's end meets a box outline of a lighter blue, which read as the stroke's
     paint well enough to become a hook of it. Ink more than an antialiased rim from any pixel of the
     stroke's own paint is not the stroke's."""
-    thumb = paint(page(), slope(), "#474b78")
+    thumb = paint(page(bg=WHITE), slope(), "#474b78")
     thumb[100:200, 300:303] = [0x5B, 0x9B, 0xD5]            # the box's left edge, where the stroke ends
     box = outlined(shape("box", "RECTANGLE", 300, 100, 100, 100, NONE), "5B9BD5", 3)
-    els = {e["id"]: e for e in elements(deck(box, sloped()), thumb)}
-    tr = els["a"]["trace"]
-    assert not [p for r in tr["rings"] for p in r if p[0] / K > 299 and p[1] / K < 140]
+    els = {jstr(e, "id"): e for e in traced(deck(box, sloped(), bg=WHITE), thumb)}
+    tr = trace_of(els["a"])
+    assert not [p for r in rings(tr) for p in r if p[0] / K > 299 and p[1] / K < 140]
 
 
 def test_a_hairline_that_rarely_shows_its_paint_is_not_cut_into_dashes():
@@ -338,25 +372,26 @@ def test_a_hairline_that_rarely_shows_its_paint_is_not_cut_into_dashes():
     pixels tall here so that its steps stay joined.)"""
     y, x = np.mgrid[0:405, 0:720] + 0.5
     hair = (np.abs(y - 132 - (x - 100) * 16 / 200) <= 1) & (x >= 100) & (x < 300)
-    thumb = paint(paint(page(), hair, "#9193ae"), hair & (x.astype(int) % 8 == 0), "#474b78")
+    thumb = paint(paint(page(bg=WHITE), hair, "#9193ae"), hair & (x.astype(int) % 8 == 0), "#474b78")
     pe = sloped()
-    pe["line"]["lineProperties"]["weight"] = pt(0.5)
-    [el] = elements(deck(pe), thumb)
-    assert len(el["trace"]["rings"]) == 1
+    jobj(pe, "line", "lineProperties")["weight"] = pt(0.5)
+    [el] = traced(deck(pe, bg=WHITE), thumb)
+    assert len(rings(trace_of(el))) == 1
 
 
 def test_a_stroke_whose_end_is_mixed_with_another_line_is_asked_whole():
     """journey-maps 4: three curves leave one origin, and where they run together no pixel is any one
     curve's paint. Cut back to its paint the curve no longer reached the box's side and was refused;
     asked whole, it is traced."""
-    thumb = paint(page(), slope(), "#474b78")
+    thumb = paint(page(bg=WHITE), slope(), "#474b78")
     y, x = np.mgrid[0:405, 0:720] + 0.5
     thumb[slope() & (x < 108)] = [82, 114, 82]              # navy and green, half and half
-    [el] = elements(deck(sloped()), thumb)
-    assert min(p[0] for r in el["trace"]["rings"] for p in r) / K < 101
+    [el] = traced(deck(sloped(), bg=WHITE), thumb)
+    assert min(p[0] for r in rings(trace_of(el)) for p in r) / K < 101
 
 
-def connector(oid: str, origin, axis, length: float, height: float, weight: float) -> dict:
+def connector(oid: str, origin: tuple[float, float], axis: tuple[float, float], length: float, height: float,
+              weight: float) -> JsonObject:
     """A SmartArt connector as the API gives it: a line with no type, its frame `length` by `height`
     turned so that its first axis runs along `axis` (a unit vector, y down)."""
     (ox, oy), (cx, cy) = origin, axis
@@ -366,7 +401,7 @@ def connector(oid: str, origin, axis, length: float, height: float, weight: floa
             "line": {"lineProperties": {"lineFill": solid("207F97"), "weight": pt(weight)}}}
 
 
-def band(p, q, half: float) -> np.ndarray:
+def band(p: tuple[float, float], q: tuple[float, float], half: float) -> np.ndarray:
     """The pixels within `half` of the segment p-q (a stroke with butt ends)."""
     y, x = np.mgrid[0:405, 0:720] + 0.5
     (px_, py), (qx, qy) = p, q
@@ -382,18 +417,19 @@ def test_a_line_ending_under_a_photo_disc_above_it_is_traced_to_the_disc():
     colour or ramp explains). The disc's rim cuts each line's end off short of its box's side, and
     that side mostly lies beside the disc, so it was not unseen: all three were refused (`sides`)
     and left out. Ink that ends against something drawn above it runs on under it."""
-    thumb = paint(page(), band((165, 130), (240, 60), 2), "#207f97")
+    thumb = paint(page(bg=WHITE), band((165, 130), (240, 60), 2), "#207f97")
     photo = disc(140, 140, 40)
     y, x = np.mgrid[0:405, 0:720]
     for k, colour in enumerate(("#ffd90f", "#ffffff", "#d1b271")):
         paint(thumb, photo & (x // 6 % 3 == k), colour)
     n = np.hypot(75, 70)
     line = connector("line", (165, 130), (75 / n, -70 / n), n, 0, 4)
-    els = {e["id"]: e for e in elements(deck(line, shape("homer", "ELLIPSE", 100, 100, 80, 80, UNREAD)), thumb)}
-    xs = [p[0] / K for r in els["line"]["trace"]["rings"] for p in r]
+    els = {jstr(e, "id"): e for e in traced(deck(line, shape("homer", "ELLIPSE", 100, 100, 80, 80, UNREAD), bg=WHITE),
+                                            thumb)}
+    xs = [p[0] / K for r in rings(trace_of(els["line"])) for p in r]
     assert 170 < min(xs) < 178 and max(xs) > 238                    # from the disc's rim to its end
     # the same ink with nothing above it that could hide its end: a piece of something, left as before
-    assert "trace" not in elements(deck(line), thumb)[0]
+    assert "trace" not in traced(deck(line, bg=WHITE), thumb)[0]
 
 
 def test_a_turned_connectors_ink_is_looked_for_in_its_whole_frame():
@@ -404,8 +440,9 @@ def test_a_turned_connectors_ink_is_looked_for_in_its_whole_frame():
     c, s = np.cos(np.radians(30)), np.sin(np.radians(30))
     ox, oy = 200, 150
     ink = band((ox + 6 * s, oy + 6 * c), (ox + 80 * c + 6 * s, oy - 80 * s + 6 * c), 6)
-    [el] = elements(deck(connector("line", (ox, oy), (c, -s), 80, 12, 12)), paint(page(), ink, "#207f97"))
-    ys = [p[1] / K for r in el["trace"]["rings"] for p in r]
+    [el] = traced(deck(connector("line", (ox, oy), (c, -s), 80, 12, 12), bg=WHITE),
+                  paint(page(bg=WHITE), ink, "#207f97"))
+    ys = [p[1] / K for r in rings(trace_of(el)) for p in r]
     assert min(ys) < oy - 80 * s + 1 and max(ys) > oy + 12 * c - 1  # both far corners of the frame
 
 

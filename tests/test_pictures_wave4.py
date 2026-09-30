@@ -1,5 +1,7 @@
 """Visual hunt, wave 4 fixer P: pictures, bullets and diagrams - on synthetic pages."""
 
+from pathlib import Path
+
 import numpy as np
 from PIL import Image
 
@@ -14,7 +16,7 @@ def first_slide(deck: JsonObject) -> JsonObject:
     return as_objects(deck["slides"], "slides")[0]
 
 
-def ball_under_a_figure_edge(tmp_path) -> tuple[JsonObject, list[float], JsonObject]:
+def ball_under_a_figure_edge(tmp_path: Path) -> tuple[JsonObject, list[float], JsonObject]:
     """The rendered slide, the ball image's box and the bullet render filled in."""
     path = tmp_path / "bullets.pdf"
     # the ball bullet an image, as beamer's shaded balls come back
@@ -35,7 +37,7 @@ def ball_under_a_figure_edge(tmp_path) -> tuple[JsonObject, list[float], JsonObj
     return first_slide(deck), [float(v) for v in image["bbox"]], bullet
 
 
-def test_a_ball_bullet_a_figure_box_reaches_keeps_its_colour(tmp_path):
+def test_a_ball_bullet_a_figure_box_reaches_keeps_its_colour(tmp_path: Path) -> None:
     """r3_charts_v3 s8 (r8 regression): the pie's box, widened to its pin label, reached half over
     the list's balls; the figure's removal took the half of each ball inside it from the
     background, the colour read from what was left found no ball, and the Slides bullets came
@@ -48,7 +50,7 @@ def test_a_ball_bullet_a_figure_box_reaches_keeps_its_colour(tmp_path):
     assert abs(r - 0x33) < 24 and abs(g - 0x33) < 24 and abs(b - 0xb3) < 24
 
 
-def test_a_ball_bullet_a_figure_box_reaches_leaves_the_background(tmp_path):
+def test_a_ball_bullet_a_figure_box_reaches_leaves_the_background(tmp_path: Path) -> None:
     """The same ball is patched out of the background whole: no half ball beside the Slides one."""
     slide, ball, _ = ball_under_a_figure_edge(tmp_path)
     bg = np.array(Image.open(tmp_path / "out" / as_str(slide["background"], "background")).convert("RGB")).astype(int)
@@ -73,7 +75,7 @@ def test_every_numbered_hebrew_ball_keeps_its_number():
     # and the first item's words end near the second's ball)
     for im in pg["images"][1:3]:
         x0, y0, x1, y1 = im["bbox"]
-        im["bbox"], im["px"] = [x0, y0 - 0.5, x1, y1 + 0.5], [12, 12]
+        im["bbox"], im["px"] = [x0, y0 - 0.5, x1, y1 + 0.5], [12.0, 12.0]
     slide = classify_page(pg, SIZE)
     numbers = sorted(b["text"] for e in slide["elements"] if e["kind"] == "text" for p in e["paragraphs"]
                      if (b := p["bullet"]) and b["text"])
@@ -83,7 +85,7 @@ def test_every_numbered_hebrew_ball_keeps_its_number():
     assert not loose
 
 
-def test_an_icon_bullet_picture_takes_its_whole_glyph(tmp_path):
+def test_an_icon_bullet_picture_takes_its_whole_glyph(tmp_path: Path) -> None:
     """r1_design_v3 s1, s6, s10 (design-v8, WORSE in r8): an icon bullet's picture was its
     span's box; FontAwesome under xelatex gives the warning triangle an advance of half its
     ink, and the crop cut off the right half with the '!'. An icon's picture is grown to its
@@ -107,7 +109,7 @@ def test_an_icon_bullet_picture_takes_its_whole_glyph(tmp_path):
     assert (right < 128).any()  # the right strokes of the W are in the picture
 
 
-def test_a_line_running_through_a_picture_stays_in_the_background_at_its_edges(tmp_path):
+def test_a_line_running_through_a_picture_stays_in_the_background_at_its_edges(tmp_path: Path) -> None:
     """r2_code_v2 s6 (r8 regression): a git graph's main line is one path through the branch
     picture's box. Painting the box out of the background took the line one pixel past the box
     edge, and the crop began a pixel later: white nicks in the line either side of the picture.
@@ -188,7 +190,7 @@ def test_a_label_of_a_row_centred_over_a_callout_stays_with_its_row():
     assert weeks == ["Week 0", "Week 1", "Week 2\u20133", "Week 4", "Week 6"], texts
 
 
-def test_a_hole_on_a_photo_keeps_the_photo_under_it(tmp_path):
+def test_a_hole_on_a_photo_keeps_the_photo_under_it(tmp_path: Path) -> None:
     """r1_design_v2 s1 (design-v5): '|' and icon holes on a full-bleed title photo. The photo's
     part inside each hole box was cut out of the background (white boxes), and the hole pictures
     were opaque crops of the photo: once Slides set the words off the PDF's place, each picture

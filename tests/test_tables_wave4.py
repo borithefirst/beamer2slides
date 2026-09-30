@@ -6,6 +6,9 @@ import pytest
 
 from beamer2slides import emit as E
 from beamer2slides.emit import FontMapper
+from beamer2slides.emit_model import JsonMap
+from beamer2slides.ir import run_json
+from beamer2slides.json_types import Json, JsonObject
 
 from .test_tables_hunt import W, Page, alignments, ruled_table, shaded_grid, tables
 
@@ -19,8 +22,10 @@ def test_a_shaded_row_starts_and_ends_on_its_band():
     page = Page()
     shaded_grid(page, ["#bfbfff", "#f0f0f0", "#e0e0f8"])
     (t,) = tables(page.elements())
-    assert [b[0] for b in t["bands"]] == [0, 1, 2, 3]
-    assert t["bands"][0][1:] == [50, 68]
+    bands = t.get("bands")
+    assert bands is not None
+    assert [b[0] for b in bands] == [0, 1, 2, 3]
+    assert bands[0][1:] == [50, 68]
     fonts, scale = FontMapper(), 720.0 / 453.54
     lay = E.table_layout(t, scale, fonts, imported=True, page_w=453.54)
     assert lay.y / scale == pytest.approx(50, abs=0.05)
@@ -37,8 +42,10 @@ def test_a_band_spanning_two_rows_is_no_row_edge():
     table) says nothing about where either row starts."""
     page = Page()
     shaded_grid(page, ["#c8d4e8", "#eef2f8"])
-    page.drawings.insert(0, {**page.drawings[0], "id": "p0dback", "bbox": [60, 68, 390, 104],
-                             "path": [["re", [[60, 68], [390, 104]]]]})
+    page.fill(60, 68, 390, 104, "#c8d4e8")  # (the first row's fill, over the two rows below it)
+    back = page.drawings.pop()
+    back["id"] = "p0dback"
+    page.drawings.insert(0, back)
     for d in page.drawings[1:]:
         if d["bbox"][1] in (68, 86):
             d["fill"] = "#ffffff"  # (the rows over the panel are left the page's colour)
@@ -55,14 +62,15 @@ def test_measured_columns_that_fit_the_frame_keep_the_pdf_width():
     and WRAP_MARGIN."""
     scale = 1.9844
     bounds = [24.14, 100.57, 149.93, 196.15, 253.71, 338.69]
-    cols = [{"x0": 30.12, "x1": 94.53, "align": "left"}, {"x0": 106.54, "x1": 143.95, "align": "right"},
+    cols: list[dict[str, Json]] = [{"x0": 30.12, "x1": 94.53, "align": "left"}, {"x0": 106.54, "x1": 143.95, "align": "right"},
             {"x0": 155.91, "x1": 190.16, "align": "right"}, {"x0": 202.12, "x1": 247.73, "align": "right"},
             {"x0": 259.68, "x1": 332.62, "align": "left"}]
-    need = [64.62, 39.28, 35.59, 41.73, 74.1]
+    need: list[float | None] = [64.62, 39.28, 35.59, 41.73, 74.1]
     out = E.fit_columns(bounds, cols, scale, need)
     assert out[0] == pytest.approx(24.14) and out[-1] == pytest.approx(338.69)
     pad = E.TABLE_CELL_PAD / scale
     for c, n, a, b in zip(cols, need, out, out[1:]):
+        assert n is not None
         assert b - a >= n + 2 * pad + E.WRAP_MARGIN / scale  # no cell wraps
     # an unmeasured column still keeps its 8% for the substitute font
     loose = E.fit_columns(bounds, cols, scale, [None] * 5)
@@ -76,13 +84,13 @@ def test_a_dash_siunitx_centres_among_numbers_is_a_centred_cell_of_its_own():
     PDF's. Now the numbers are the body (flush right at their edge) and the dash a cell set
     centred over the column like the head."""
     page = Page()
-    rows = [[(55, "Model"), (150, "Params (M)")], [(55, "Forest"), (170.05, "–")], [(55, "CGCNN"), (172.2, "0.4")],
+    rows: list[list[tuple[float, str]]] = [[(55, "Model"), (150, "Params (M)")], [(55, "Forest"), (170.05, "–")], [(55, "CGCNN"), (172.2, "0.4")],
             [(55, "MEGNet"), (172.2, "0.2")], [(55, "ALIGNN"), (172.2, "4.0")]]
     ruled_table(page, rows, [70, 86, 100, 114, 128], x1=210)
     (t,) = tables(page.elements())
     col = t["columns"][1]
-    assert (col["align"], col["head"], col["centred"]) == ("right", "center", [1])
-    assert col["body"] == [172.2, 186.0]
+    assert (col["align"], col.get("head"), col.get("centred")) == ("right", "center", [1])
+    assert col.get("body") == [172.2, 186.0]
     got = alignments(t)
     assert got[(0, 1)][0] == got[(1, 1)][0] == "CENTER"
     assert {got[(r, 1)][0] for r in (2, 3, 4)} == {"END"}
@@ -97,7 +105,7 @@ def overfull_table() -> tuple[Page, list[float]]:
     heads = ["Set", "Layers", "Hidden", "Heads", "Cutoff", "Neighb", "Batches", "LRate", "Decays", "Epochs",
              "Dropout", "EMA"]
     body = [[name] + [f"{i}.{j:02}e3" for j in range(11)] for i, name in enumerate(["mp_e", "gap", "jdft"])]
-    xs = [16 + 39 * j for j in range(12)]
+    xs = [16.0 + 39 * j for j in range(12)]
     for y, width in ((58, 0.8), (74, 0.5), (130, 0.8)):
         page.hline(11, xs[-1] + 40, y, width)
     for j, word in enumerate(heads):
@@ -137,8 +145,9 @@ def test_an_overfull_table_is_set_smaller_to_end_on_the_page():
     scale = 720.0 / W
     fonts = FontMapper()
     lay = E.table_layout(t, scale, fonts, imported=True, page_w=W)
-    grown = E.table_columns(t, [[[{**r, "cell": True} for r in E.in_sentence(c)] for c in row] for row in t["cells"]],
-                            scale, fonts, tight=True)[0]
+    cells: list[list[list[JsonMap]]] = [[[{**r, "cell": True} for r in E.in_sentence([run_json(x) for x in c])]
+                                         for c in row] for row in t["cells"]]
+    grown = E.table_columns(t, cells, scale, fonts, tight=True)[0]
     assert grown[-1] > t["frame"][2] + 5  # (the case: at its size it runs past the PDF's end)
     assert lay.bounds[-1] <= W + 0.01 < t["frame"][2]
     assert E.TABLE_MIN_SHRINK <= lay.shrink < 1
@@ -155,7 +164,7 @@ def google_steps(z: float, space_above: list[float]) -> list[float]:
 
 
 @pytest.mark.parametrize("font, z", [("Lato", 11.6), ("Roboto Mono", 13.4), ("Roboto Mono", 12.5), ("Lato", 8.7)])
-def test_a_listings_numbers_and_code_keep_the_pdf_pitch(font, z):
+def test_a_listings_numbers_and_code_keep_the_pdf_pitch(font: str, z: float) -> None:
     """r2_code_v3 slide 2, r2_code_v4 slides 2 and 6: a listing's line numbers (Lato 11.6 pt, one
     right-aligned box) and its code (Roboto Mono 12.5-13.4 pt, another box), 20 Slides pt apart
     in the PDF. The spaceAbove was written against the natural pitch snapped alone (14.25 pt for
@@ -164,11 +173,12 @@ def test_a_listings_numbers_and_code_keep_the_pdf_pitch(font, z):
     every line of either box stays within half a pixel of its PDF baseline."""
     pitch = 12.6 * 720.0 / 453.54  # the PDF's 12.6 pt listing pitch in Slides pt
     blank = {4, 9}  # empty source lines: a double step
-    targets, y = [], 100.0
+    targets: list[float] = []
+    y = 100.0
     for k in range(14):
         targets.append(y)
         y += pitch * (2 if k in blank else 1)
-    paras = [{"bullet": None, "lines": [{"baseline": t}]} for t in targets]
+    paras: list[JsonObject] = [{"bullet": None, "lines": [{"baseline": t}]} for t in targets]
     ratios, space_above = E.vertical_layout(paras, [[t] for t in targets], [z] * len(targets))
     assert set(ratios) == {1.0}
     landed = [targets[0] + s for s in google_steps(z, space_above)]

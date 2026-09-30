@@ -192,7 +192,8 @@ table. When a combination of fields must not happen, choose types in which it ca
   environment has no pytest), so `tests/test_typecheck.py` is its gate, with pytest pinned in
   `[tool.beamer2slides.typecheck] tests-requires`. What it buys: a test left calling a function
   the old way after its signature changed is an error at the call, not a failure found when the
-  suite runs - and when retyping the package makes a test's error disappear, prune it.
+  suite runs - and when retyping the package makes a test's error disappear, prune it. Empty since
+  2026-09-30 and `TESTS_CEILING` 0: a test that does not type-check fails the gate like src/.
 - **JSON not yet parsed** is a `json_types.JsonObject`, read through its narrowings (`as_object`,
   `as_str`, ...), which name where a value of the wrong shape was. That is the interim form of
   "parse at the boundary" until a record's parser exists; a TypedDict view of a dict cannot be passed
@@ -255,7 +256,16 @@ unknowable. The order:
    (`gapi.build`, `gapi.Httplib2`, `devtools/deep_stack.py` for torch, lpips and transformers),
    never imported by a statement the checker would have to follow.
 5. **tests/ and tools/** under the same checker. *tests/ admitted* (2026-09-29, its own baseline
-   above). tools/ is next: 30 of its 79 files are runpy shims over devtools (checked with the
+   above). *tests/ at zero* (2026-09-30, from 3,702): helpers return the package's records
+   (`ir.Deck`, `raw_types.RawPage`, `TableElement`...) instead of `dict`, JSON is read through
+   `tests/json_reads.py`, fakes subclass `tests/fake_google.py`'s Protocol-complete classes, and a
+   TOML reader is imported by name behind a Protocol (`test_typecheck.Toml`). Typing them found
+   three tests that checked less than they said: a font lookup faked with a dict made
+   `deck_thumbs.face_glyphs`' broad `except` swallow the AttributeError, so the test never reached
+   its branch (the `except` now covers only reading the font file); `test_request_budget` counted
+   the tuples of a plan, not its requests; `tests/decks/sync/build.py`'s drawings hash says
+   position-free and is not (paths are tuples after `parse_raw`, so its relative step never ran).
+   tools/ is next: 30 of its 79 files are runpy shims over devtools (checked with the
    package), the other 49 (probes, calibration, proofs) are checked by nothing yet.
 
 When you touch a function for any reason, leave it to these rules: fully annotated, no defaults,

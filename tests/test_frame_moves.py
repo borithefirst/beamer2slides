@@ -11,6 +11,8 @@ frame does, so it is settled the same way: by what the two sides say, and where 
 only when they say it clearly.
 """
 
+import dataclasses
+
 from beamer2slides import identity
 
 MOTIV = "decks and sources drift apart as soon as somebody opens the deck in slides"
@@ -23,11 +25,16 @@ SAME = "the table below repeats the measured numbers row after row after row"
 METHOD_HALF = "the merge reads the base and then decides field by field for you"
 
 
-def info(title, text, label=None, page=0):
-    return {"label": label, "title": title, "text": text, "page": page}
+def info(title: str, text: str) -> identity.SlideInfo:
+    """An unlabelled frame on page 0."""
+    return labelled(title, text, None)
 
 
-def talk():
+def labelled(title: str, text: str, label: str | None) -> identity.SlideInfo:
+    return identity.SlideInfo(label=label, title=title, text=text, page=0, removed=False)
+
+
+def talk() -> list[identity.SlideInfo]:
     return [info("Motivation", MOTIV), info("Method", METHOD), info("Results", RESULTS), info("Takeaways", SUMMARY)]
 
 
@@ -76,7 +83,7 @@ def test_a_retitled_frame_between_two_that_paired_keeps_its_slide():
     no label, half its words are new, and that is under `SLIDE_MATCH` - but both its neighbours
     paired, on both sides, and the gap they leave holds exactly one slide and exactly one frame.
     `identity.gap_pairs` is that: the place says what the words no longer do."""
-    base = [info("Motivation", MOTIV, "intro"), info("Method", METHOD), info("Results", RESULTS, "results")]
+    base = [labelled("Motivation", MOTIV, "intro"), info("Method", METHOD), labelled("Results", RESULTS, "results")]
     ours = [base[0], info("How the merge decides", METHOD_HALF), base[2]]
     assert identity.align_slides(base, ours) == {0: 0, 1: 1, 2: 2}
     assert identity.cross_pairs(base, ours, {0: 0, 2: 2}, lambda i, j: True) == {}   # not by the words alone
@@ -102,8 +109,8 @@ def test_a_frame_deleted_and_another_written_in_its_place_is_not_that_frame():
 def test_two_frames_left_over_in_one_gap_are_left_alone():
     """The gap pairs one with one. Two of each is a question the place cannot answer - which of
     them is which - and `cross_pairs` has already refused it on the content."""
-    base = [info("Motivation", MOTIV, "intro"), info("Method", METHOD), info("Results", RESULTS),
-            info("Takeaways", SUMMARY, "end")]
+    base = [labelled("Motivation", MOTIV, "intro"), info("Method", METHOD), info("Results", RESULTS),
+            labelled("Takeaways", SUMMARY, "end")]
     ours = [base[0], info("How it decides", METHOD), info("What came out", RESULTS), base[3]]
     assert identity.gap_pairs(base, ours, {0: 0, 3: 3}, lambda i, j: True) == {}
     # Take the second of each out, and the one left in the gap is paired (the rule, the other way).
@@ -153,15 +160,15 @@ def test_an_unlabelled_frame_between_twins_is_matched_and_said_out_loud():
     and a coin toss that decides whose edits get written over must not pass in silence
     (`fuzz_labels --shape adopt` seed 32773: two frames of 20,080 misidentified, both silent).
     """
-    base = [info("Results", SAME, "one"), info("Results", SAME), info("Results", SAME),
-            info("Takeaways", SUMMARY, "end")]
+    base = [labelled("Results", SAME, "one"), info("Results", SAME), info("Results", SAME),
+            labelled("Takeaways", SUMMARY, "end")]
     ours = [base[0], info("Results", SAME), base[3]]          # one of the twins is gone; which one?
     weak: dict[int, str] = {}
     pairs = identity.align_slides(base, ours, weak=weak)
     assert pairs == {0: 0, 1: 1, 2: 3} and weak == {1: "twins"}
     # The same frame with a label of its own is no coin toss: the label pairs it and nothing is said.
-    named = [base[0], info("Results", SAME, "middle"), base[3]]
-    base_named = [base[0], info("Results", SAME, "middle"), base[2], base[3]]
+    named = [base[0], labelled("Results", SAME, "middle"), base[3]]
+    base_named = [base[0], labelled("Results", SAME, "middle"), base[2], base[3]]
     weak = {}
     assert identity.align_slides(base_named, named, weak=weak) == {0: 0, 1: 1, 2: 3} and weak == {}
 
@@ -177,12 +184,12 @@ def test_twins_with_a_frame_between_them_are_a_coin_toss_the_walk_can_never_offe
     well against this frame as the one it got?
     """
     base = [info("Results", SAME), info("Method", METHOD), info("Results", SAME),
-            info("Takeaways", SUMMARY, "end")]
+            labelled("Takeaways", SUMMARY, "end")]
     weak: dict[int, str] = {}
     assert identity.align_slides(base, list(base), weak=weak) == {0: 0, 1: 1, 2: 2, 3: 3}
     assert weak == {0: "twins", 2: "twins"}                   # both of them, and neither is moved
     # A label of their own ends the coin toss: each frame pairs by its label and nothing is said.
-    named = [info("Results", SAME, "first"), base[1], info("Results", SAME, "third"), base[3]]
+    named = [labelled("Results", SAME, "first"), base[1], labelled("Results", SAME, "third"), base[3]]
     weak = {}
     assert identity.align_slides(named, list(named), weak=weak) == {0: 0, 1: 1, 2: 2, 3: 3}
     assert weak == {}
@@ -196,7 +203,7 @@ def test_a_frame_prefers_the_slide_the_source_still_describes_to_the_one_it_drop
     two alignments of one score, and the frame flips onto the dead entry: the next sync then plans
     to *delete* the slide this one has just written, with the person's edits on it (converted fuzz
     seed 2100403 at chain 6, and 2100135). `removed` breaks the tie towards the living slide."""
-    base = [info("Motivation", MOTIV), {**info("Results", RESULTS), "removed": True},
+    base = [info("Motivation", MOTIV), dataclasses.replace(info("Results", RESULTS), removed=True),
             info("Results", RESULTS), info("Takeaways", SUMMARY)]
     ours = [base[0], info("Results", RESULTS), base[3]]
     assert identity.align_slides(base, ours) == {0: 0, 1: 2, 2: 3}
@@ -209,7 +216,7 @@ def test_a_frame_prefers_the_slide_the_source_still_describes_to_the_one_it_drop
 def test_the_leftovers_obey_the_labels_too():
     """Two labels that both exist on both sides belong to two frames that both exist, so the
     leftovers are no more free to pair across them than the alignment is (`align_slides.pairable`)."""
-    base = [info("Motivation", MOTIV, "intro")]
-    ours = [info("Motivation", MOTIV, "opening")]
+    base = [labelled("Motivation", MOTIV, "intro")]
+    ours = [labelled("Motivation", MOTIV, "opening")]
     assert identity.cross_pairs(base, ours, {}, lambda i, j: False) == {}
     assert identity.cross_pairs(base, ours, {}, lambda i, j: True) == {0: 0}

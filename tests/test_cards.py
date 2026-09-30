@@ -8,7 +8,7 @@ import pytest
 from beamer2slides.classify import PageClassifier, Rect, Span, card_text, classify
 from beamer2slides.extract import extract, select_overlays
 from beamer2slides.fonts import font_info
-from beamer2slides.ir import deck_json
+from beamer2slides import ir
 
 GDG = Path(__file__).resolve().parents[1] / "out" / "themes" / "gdg"
 FONT = "GoogleSansFlex-Regular"
@@ -25,34 +25,38 @@ def centred(text: str, cx: float, baseline: float, size: float) -> Span:
     return span(text, cx - len(text) * 0.25 * size, baseline, size)
 
 
-def test_centred_label_is_not_card_text():
+def test_centred_label_is_not_card_text() -> None:
     node = Rect(400, 100, 700, 200)
     assert card_text(node, [[centred("Label", node.cx, 155, 14)]]) is None
 
 
-def test_caption_tucked_under_a_big_number_gets_its_own_box():
+def test_caption_tucked_under_a_big_number_gets_its_own_box() -> None:
     node = Rect(300, 100, 700, 380)
     number, cx = centred("92%", 500, 250, 96), 500
     tight = card_text(node, [[number], [centred("of summaries", cx, 280, 14)]])
+    assert tight is not None
     assert [len(b["paragraphs"]) for b in tight] == [1, 1]
     loose = card_text(node, [[number], [centred("of summaries", cx, 300, 14)]])
+    assert loose is not None
     assert [len(b["paragraphs"]) for b in loose] == [2]
     assert all(p["align"] == "center" for p in loose[0]["paragraphs"])
 
 
-def test_left_card_joins_wrapped_body_lines():
+def test_left_card_joins_wrapped_body_lines() -> None:
     node = Rect(400, 140, 735, 472)
     rows = [[span("Next steps", 420, 180, 24)],
             [span("Personalised summaries, more", 420, 215, 14)],
             [span("languages, and a smaller model", 420, 231.1, 14)]]
-    (box,) = card_text(node, rows)
+    boxes = card_text(node, rows)
+    assert boxes is not None
+    (box,) = boxes
     heading, body = box["paragraphs"]
     assert heading["align"] == body["align"] == "left"
     assert "".join(r["text"] for r in body["runs"]) == "Personalised summaries, more languages, and a smaller model"
     assert body.get("wrap_limit") is not None and len(body["lines"]) == 2
 
 
-def test_gutter_between_columns():
+def test_gutter_between_columns() -> None:
     a, b = span("quantisation.", 50, 200, 14, w=80), span("Peak", 260, 200, 14, w=30)
     others = [span("The model ships", 50, 183, 14, w=100), span("RAM must leave", 260, 183, 14, w=100)]
     assert PageClassifier.gutter([a, b] + others, a, b, 14)
@@ -63,14 +67,14 @@ def test_gutter_between_columns():
     assert not PageClassifier.gutter([label, b] + others, label, b, 14)
 
 
-def talk() -> dict:
+def talk() -> ir.Deck:
     pdf = GDG / "gdg-talk.pdf"
     if not pdf.exists():
         pytest.skip(f"{pdf.name} not built")
-    return deck_json(classify(select_overlays(extract(pdf, None), "last")))
+    return classify(select_overlays(extract(pdf, None), "last"))
 
 
-def test_gdg_talk_columns_stay_apart_and_cards_are_text():
+def test_gdg_talk_columns_stay_apart_and_cards_are_text() -> None:
     d = talk()
     columns = d["slides"][3]
     paragraphs = ["".join(r["text"] for r in p["runs"])
@@ -78,9 +82,9 @@ def test_gdg_talk_columns_stay_apart_and_cards_are_text():
     assert "Size" in paragraphs and "Memory" in paragraphs and "Quality" in paragraphs
     assert not any("quantisation." in p and "Peak" in p for p in paragraphs)
 
-    def card_texts(slide: dict) -> list[str]:
-        return ["".join(r["text"] for box in n["text"] for p in box["paragraphs"] for r in p["runs"])
-                for e in slide["elements"] if e["kind"] == "diagram" for n in e["nodes"] if n.get("text")]
+    def card_texts(slide: ir.Slide) -> list[str]:
+        return ["".join(r["text"] for box in text for p in box["paragraphs"] for r in p["runs"])
+                for e in slide["elements"] if e["kind"] == "diagram" for n in e["nodes"] if (text := n["text"])]
 
     assert card_texts(d["slides"][4]) == ["4×smaller download\x0bwith 4-bit weights"]  # balanced breaks kept
     assert card_texts(d["slides"][8]) == ["0%more crashes", "1.4%battery per day"]

@@ -24,6 +24,7 @@ versions the test skips - unless $B2S_TYPECHECK_REQUIRED is set, as in CI, where
 gate that silently let everything through. Skipped too where the tree has no pyproject.toml (Google's
 monorepo, which checks with its own tools)."""
 
+import importlib
 import json
 import os
 import shutil
@@ -33,16 +34,31 @@ from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec, module_from_spec, spec_from_file_location
 from pathlib import Path
 from types import ModuleType
+from typing import Protocol, runtime_checkable
 
 import pytest
 from packaging.requirements import Requirement
 
 from beamer2slides import google_auth, interpreter
 
-try:
-    import tomllib
-except ImportError:  # 3.10: pytest brings tomli there
-    import tomli as tomllib
+
+@runtime_checkable
+class Toml(Protocol):
+    """`tomllib`, or on 3.10 the `tomli` pytest brings there: imported by name, as the checker reads
+    this file for 3.10 and the interpreter it runs under may have no tomli (devtools/deep_stack.py)."""
+
+    def loads(self, s: str, /) -> dict[str, object]: ...
+
+
+def toml() -> Toml:
+    for name in ("tomllib", "tomli"):
+        try:
+            module: object = importlib.import_module(name)
+        except ImportError:
+            continue
+        assert isinstance(module, Toml), f"{name} has no loads()"
+        return module
+    raise ImportError("no TOML reader: tomllib (3.11+) or tomli (which pytest requires on 3.10)")
 
 SRC = Path(google_auth.__file__).parent   # (not resolved: see tests/test_gapi.py)
 ROOT = SRC.parent.parent
@@ -52,8 +68,9 @@ TESTS_BASELINE = ROOT / "typecheck" / "tests_baseline.json"
 
 # The legacy errors typecheck/baseline.json holds: none since 2026-09-29, and it stays so.
 CEILING = 0
-# The same for the tests (typecheck/tests_baseline.json, admitted whole on 2026-09-29).
-TESTS_CEILING = 3702
+# The same for the tests (typecheck/tests_baseline.json, admitted whole on 2026-09-29 at 3,702):
+# none since 2026-09-30, and it stays so.
+TESTS_CEILING = 0
 
 TYPED_DICT_KINDS = {"bad-typed-dict", "bad-typed-dict-key", "not-required-key-access"}
 
@@ -114,7 +131,7 @@ def skip(reason: str) -> None:
 
 
 def config() -> dict[str, object]:
-    return tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    return toml().loads(PYPROJECT.read_text(encoding="utf-8"))
 
 
 def build_pins() -> list[Requirement]:

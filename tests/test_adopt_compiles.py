@@ -17,12 +17,16 @@ import os
 import re
 import shutil
 import subprocess
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from beamer2slides import adopt
 from beamer2slides.inverse import tex_env
+from beamer2slides.json_types import Json, JsonObject
+
+from .json_reads import jarr, jobj
 
 SHOWCASE = Path(__file__).parent / "decks" / "foreign" / "showcase"
 NAMES = ["bees", "hashing", "portfolio", "review", "talk", "water"]
@@ -36,12 +40,12 @@ def engine(text: str) -> str:
     return "lualatex" if re.search(r"\\usepackage(\[[^\]]*\])?\{(fontspec|unicode-math)\}", text) else "pdflatex"
 
 
-def target_of(name: str) -> dict:
+def target_of(name: str) -> JsonObject:
     """The fixture's target with its pictures' paths made whole again."""
     folder = SHOWCASE / name
-    target = json.loads((folder / "target.json").read_text(encoding="utf-8"))
+    target = jobj(json.loads((folder / "target.json").read_text(encoding="utf-8")))
 
-    def whole(node):
+    def whole(node: Json) -> None:
         if isinstance(node, dict):
             for k, v in node.items():
                 if k in ("file", "background_file") and isinstance(v, str):
@@ -56,7 +60,7 @@ def target_of(name: str) -> dict:
 
 
 @pytest.fixture
-def fonts(monkeypatch, tmp_path):
+def fonts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     if os.environ.get("B2S_TEST_FETCH_FONTS"):
         monkeypatch.delenv("B2S_FONTS", raising=False)
         monkeypatch.setenv("B2S_FONT_FETCH", "1")
@@ -69,7 +73,7 @@ def fonts(monkeypatch, tmp_path):
 
 @pytest.mark.needs_decks(*(f"foreign/showcase/{n}/target.json" for n in NAMES))
 @pytest.mark.parametrize("name", NAMES)
-def test_the_source_adopt_writes_compiles(name, tmp_path, fonts):
+def test_the_source_adopt_writes_compiles(name: str, tmp_path: Path, fonts: None) -> None:
     target = target_of(name)
     main = tmp_path / "tree" / "main.tex"
     text = adopt.bootstrap(target, main, False, None)
@@ -85,6 +89,6 @@ def test_the_source_adopt_writes_compiles(name, tmp_path, fonts):
     from beamer2slides import pdf
     doc = pdf.Document(main.with_suffix(".pdf"))
     try:
-        assert len(doc) == len(target["slides"]), "a page per slide, and no notes pages"
+        assert len(doc) == len(jarr(target, "slides")), "a page per slide, and no notes pages"
     finally:
         doc.close()

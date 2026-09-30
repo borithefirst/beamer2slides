@@ -2,92 +2,142 @@
 touching glyphs, letterspaced words, an italic accent reaching past its advance, and text a font's
 ToUnicode misnames. Synthetic characters, no PDF."""
 
+import dataclasses
+from collections.abc import Mapping, Sequence
+from typing import NoReturn
+
 from beamer2slides import extract
+from beamer2slides.arrays import Pixels
 from beamer2slides.extract import readable
 from beamer2slides.pdf import Char, char_box
+from beamer2slides.pdf.api import Box, Drawing, EmbeddedImage, ImageInfo, Link, PageObject
+from beamer2slides.raw_types import RawSpan
+
+BOLD = "LMSans10-Bold"
+SIZE = 10.0
+X0 = 20.0        # where the first piece starts
+WIDTH = 0.5      # em, every glyph's advance
+BASELINE = 100.0
 
 
-def glyphs(pieces: list[tuple[str, float]], font: str = "LMSans10-Bold", size: float = 10.0, x: float = 20.0,
-           width: float = 0.5, baseline: float = 100.0) -> list[Char]:
-    """Characters of (text, gap before it in em) pieces: each glyph `width` em wide, the pieces'
+def glyphs(pieces: list[tuple[str, float]], *, font: str, size: float) -> list[Char]:
+    """Characters of (text, gap before it in em) pieces: each glyph `WIDTH` em wide, the pieces'
     glyphs touching, the first glyph of a piece `gap` em after the one before."""
-    out = []
+    out: list[Char] = []
+    x = X0
     for text, gap in pieces:
         x += gap * size
         for c in text:
-            adv = width * size
-            out.append(Char(c, font, size, 0, 255, (x, baseline), char_box(x, baseline, 1.0, 0.0, adv, size, 0.8, -0.2),
+            adv = WIDTH * size
+            out.append(Char(c, font, size, 0, 255, (x, BASELINE), char_box(x, BASELINE, 1.0, 0.0, adv, size, 0.8, -0.2),
                             (1.0, 0.0), len(out), 0, adv))
             x += adv
     return out
 
 
+def unasked(what: str) -> NoReturn:
+    raise AssertionError(f"extract.spans was not expected to ask the page for {what}")
+
+
 class Page:
-    rect = (0, 0, 400, 300)
+    """A page of characters only (`PdfPage`), and the fonts' widths for them."""
 
-    def __init__(self, chars, widths=None):
-        self._chars, self.widths = chars, widths or {}
+    index = 0
+    width = 400.0
+    height = 300.0
 
-    def chars(self):
+    def __init__(self, chars: list[Char], widths: Mapping[str, float]) -> None:
+        self._chars, self.widths = chars, widths
+
+    @property
+    def rect(self) -> Box:
+        return (0.0, 0.0, self.width, self.height)
+
+    def objects(self) -> list[PageObject]:
+        unasked("objects")
+
+    def object_bounds(self) -> list[Box]:
+        unasked("object bounds")
+
+    def set_active(self, objects: Sequence[int], active: bool) -> None:
+        unasked("set_active")
+
+    def chars(self) -> list[Char]:
         return self._chars
 
-    def glyph_widths(self, requests):
+    def glyph_widths(self, requests: Sequence[tuple[int, str, float]]) -> list[float | None]:
         return [self.widths.get(c) for _, c, _ in requests]
+
+    def drawings(self) -> list[Drawing]:
+        unasked("drawings")
+
+    def images(self) -> list[ImageInfo]:
+        unasked("images")
+
+    def embedded_image(self, obj: int) -> EmbeddedImage | None:
+        unasked("an embedded image")
+
+    def links(self) -> list[Link]:
+        unasked("links")
+
+    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
+        # (the defaults are `PdfPage.render`'s: the Protocol dictates them)
+        unasked("a render")
 
 
 class Shown:
-    def hidden(self, ch):
+    def hidden(self, ch: Char) -> bool:
         return False
 
 
-def texts(chars, widths=None) -> list[str]:
+def texts(chars: list[Char], widths: Mapping[str, float]) -> list[str]:
     return [s.text for s in extract.spans(Page(chars, widths), Shown(), False, chars, {})]
 
 
-def test_a_narrow_space_between_touching_glyphs_is_a_space():
+def test_a_narrow_space_between_touching_glyphs_is_a_space() -> None:
     # design v1 s2: '18 mo' at 26 pt in LMSans10-Bold, the space 0.14 em (below JOIN_GAP)
-    assert texts(glyphs([("18", 0), ("mo", 0.14)])) == ["18 mo"]
+    assert texts(glyphs([("18", 0), ("mo", 0.14)], font=BOLD, size=SIZE), {}) == ["18 mo"]
     # polyglossia's French thin space after « (0.124 em, Palatino italic)
-    assert texts(glyphs([("«", 0), ("Le", 0.124)], font="PalatinoLinotype-Italic")) == ["« Le"]
+    assert texts(glyphs([("«", 0), ("Le", 0.124)], font="PalatinoLinotype-Italic", size=SIZE), {}) == ["« Le"]
     # a kern or italic correction stays inside the word, and math is left alone
-    assert texts(glyphs([("Ta", 0), ("ble", 0.09)])) == ["Table"]
-    assert texts(glyphs([("M", 0), ("x", 0.109)], font="CMMI10")) == ["Mx"]
+    assert texts(glyphs([("Ta", 0), ("ble", 0.09)], font=BOLD, size=SIZE), {}) == ["Table"]
+    assert texts(glyphs([("M", 0), ("x", 0.109)], font="CMMI10", size=SIZE), {}) == ["Mx"]
 
 
-def test_tracked_small_caps_take_no_space_at_a_kern():
+def test_tracked_small_caps_take_no_space_at_a_kern() -> None:
     # textfx v2 s2: \textsc 'Results' tracked by 0.11 em, 't' and 's' kerned closer (0.044):
     # the 's' after it is no word
     chars = glyphs([("R", 0), ("e", 0.11), ("s", 0.11), ("u", 0.11), ("l", 0.11), ("t", 0.044), ("s", 0.111)],
-                   font="LMRomanCaps10-Regular")
-    assert texts(chars) == ["Results"]
+                   font="LMRomanCaps10-Regular", size=SIZE)
+    assert texts(chars, {}) == ["Results"]
 
 
-def test_letterspaced_words_keep_their_word_gaps():
+def test_letterspaced_words_keep_their_word_gaps() -> None:
     # textfx v3 s5: soul's \so{less is more}, letters 0.25 em apart (a kern 0.222), words 0.65:
     # Slides has no letter spacing, so a no-break space (Lato 0.192 em) stands between letters
     # and before each word gap (wave 3 had joined them tight: 'less is more')
     so = glyphs([(":", 0), ("l", 0.55), ("e", 0.25), ("s", 0.25), ("s", 0.25), ("i", 0.65), ("s", 0.25),
-                 ("m", 0.65), ("o", 0.25), ("r", 0.222), ("e", 0.25)], font="LMSans10-Regular")
-    assert " ".join(texts(so)) == ":  l e s s  i s  m o r e"
+                 ("m", 0.65), ("o", 0.25), ("r", 0.222), ("e", 0.25)], font="LMSans10-Regular", size=SIZE)
+    assert " ".join(texts(so, {})) == ":\u00a0 l\u00a0e\u00a0s\u00a0s\u00a0 i\u00a0s\u00a0 m\u00a0o\u00a0r\u00a0e"
     # textfx v1 s8: \textls[200]{SPACED} among ordinary words, P-A kerned to 0.116; the PDF line
     # is 361.8 Slides pt, with the spaces 362.2, tight 339.3
     line = glyphs([("The", 0), ("word", 0.33), ("S", 0.5), ("P", 0.2), ("A", 0.116), ("C", 0.173), ("E", 0.2),
-                   ("D", 0.2), ("is", 0.5), ("letterspaced", 0.33)], font="LMSans10-Regular")
-    assert " ".join(texts(line)) == "The word  S P A C E D  is letterspaced"
+                   ("D", 0.2), ("is", 0.5), ("letterspaced", 0.33)], font="LMSans10-Regular", size=SIZE)
+    assert " ".join(texts(line, {})) == "The word\u00a0 S\u00a0P\u00a0A\u00a0C\u00a0E\u00a0D\u00a0 is letterspaced"
     # textfx v2 s1: a title tracked by 0.147 em (READABLE SLIDES: PDF 236.8 pt, spaced 235.2, tight 181.5)
     title = glyphs([("R", 0), ("E", 0.147), ("A", 0.147), ("D", 0.147), ("S", 0.52), ("L", 0.147), ("I", 0.147)],
-                   font="LMSans10-Bold")
-    assert " ".join(texts(title)) == "R E A D  S L I"
+                   font=BOLD, size=SIZE)
+    assert " ".join(texts(title, {})) == "R\u00a0E\u00a0A\u00a0D\u00a0 S\u00a0L\u00a0I"
     # before wave 3: 'S PA C E D' and 'l e s s i s m o r e'
 
 
-def test_ordinary_single_letter_words_are_no_letterspacing():
+def test_ordinary_single_letter_words_are_no_letterspacing() -> None:
     # CM's word space (0.333 em) is past any tracking: 'a b c d e' stays five words
     assert " ".join(texts(glyphs([("a", 0), ("b", 0.333), ("c", 0.333), ("d", 0.333), ("e", 0.333)],
-                                 font="LMSans10-Regular"))) == "a b c d e"
+                                 font="LMSans10-Regular", size=SIZE), {})) == "a b c d e"
 
 
-def test_an_italic_accent_past_its_advance_leaves_the_word_space():
+def test_an_italic_accent_past_its_advance_leaves_the_word_space() -> None:
     # lang v2 s5: Calibri Italic 'ì' reported 3.51 pt wide (its grave accent's ink), the font
     # says 2.5: the word space after it read 0.133 em and 'yì yuè' became 'yìyuè'
     chars = glyphs([("y", 0), ("ì", 0), ("yu", 0.226)], font="Calibri-Italic", size=10.91)
@@ -101,11 +151,11 @@ def test_an_italic_accent_past_its_advance_leaves_the_word_space():
     assert extract._accent_overhang(Page(chars, {"ì": 2.5}), chars)[1].advance == 2.5
     # an upright letter, or one whose width the font agrees with, keeps its advance
     assert extract._accent_overhang(Page(chars, {"ì": 3.5}), chars)[1].advance == 3.51
-    upright = [Char(**{**ch.__dict__, "font": "Calibri"}) for ch in chars]
+    upright = [dataclasses.replace(ch, font="Calibri") for ch in chars]
     assert extract._accent_overhang(Page(upright, {"ì": 2.5}), upright)[1].advance == 3.51
 
 
-def test_misnamed_characters_read_as_their_words():
+def test_misnamed_characters_read_as_their_words() -> None:
     # design v3: Calibri's U+2010 HYPHEN, which the Google substitutes lack
     assert readable("state‐of‐the‐art", "Calibri") == "state-of-the-art"
     # lang v1 s2-4: old-style small-cap figures whose ToUnicode says 'inferior'
@@ -118,18 +168,26 @@ def test_misnamed_characters_read_as_their_words():
     assert readable("ﬁrst", "Calibri") == "first"
 
 
-def test_a_quad_before_a_graphic_in_the_words_stays_wide():
+def raw_span(i: int, text: str, font: str, x0: float, x1: float, *, size: float) -> RawSpan:
+    """A span of raw.json on the baseline at 100 pt."""
+    baseline = 100.0
+    return {"id": f"s{i}", "text": text, "font": font, "size": size, "color": "#000000", "alpha": 255,
+            "origin": [x0, baseline], "bbox": [x0, baseline - 0.75 * size, x1, baseline + 0.25 * size],
+            "dir": [1.0, 0.0], "smallcaps": False}
+
+
+def test_a_quad_before_a_graphic_in_the_words_stays_wide() -> None:
     # textfx v3 s9: 'Questions? \quad \ding{46}\,e-mail' - the quad before the dingbat's hole
     # became one space and the centred line came out narrower
-    from beamer2slides.classify import Line, Paragraph, PageClassifier
+    from beamer2slides.classify import Line, PageClassifier, Paragraph
 
-    from .test_fonts_encodings import raw_span
-
-    def texts_around(gap):
+    def texts_around(gap: float) -> list[str]:
         spans = [raw_span(0, "Questions?", "LMSans10-Bold", 10, 62, size=14),
                  raw_span(1, "\u270e", "PZDR", 62 + gap, 74 + gap, size=14),
                  raw_span(2, "elise.martin", "LMSans10-Bold", 76 + gap, 150 + gap, size=14)]
-        line = Line(PageClassifier({"size": [364, 273], "spans": spans, "links": []}, 10).spans())
+        page = PageClassifier({"index": 0, "label": "", "size": [364, 273], "spans": spans, "images": [],
+                               "drawings": [], "links": []}, 10)
+        line = Line(page.spans())
         line.holes = [[s for s in line.spans if s.font == "PZDR"]]
         return [r["text"] for r in PageClassifier.runs(Paragraph([line]), "", False, None, 0.0)]
 

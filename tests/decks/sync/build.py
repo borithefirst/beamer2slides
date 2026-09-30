@@ -13,11 +13,17 @@ import json
 import re
 import subprocess
 import sys
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
+
+from beamer2slides.json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
+from beamer2slides.raw_types import RawPage, parse_raw
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "out"
 MASTER = HERE / "talk.tex"
+RUNS = 2  # pdflatex passes (`compile_tex`)
 
 FLAGS = {
     "reword": "reword a bullet",
@@ -63,9 +69,9 @@ VARIANTS = {"v1": [], **{f: [f] for f in FLAGS if f not in PROBE_EDITS}, "mixed"
             "probes-reword": ["probes", "probereword"],
             "probes-push": ["probes", "probereword", "probepush"]}
 
-MOTIVATION = {"contains": "Later the source changes again"}  # (no scenario edits these words)
-TITLE_PAGE = {"title": "Keeping Slides and Source in Sync"}
-CHECKS = {
+MOTIVATION: JsonObject = {"contains": "Later the source changes again"}  # (no scenario edits these words)
+TITLE_PAGE: JsonObject = {"title": "Keeping Slides and Source in Sync"}
+CHECKS: dict[str, list[JsonObject]] = {
     "reword": [{"check": "text", "slide": MOTIVATION, "text": "by an AI assistant and converted once", "count": 1},
                {"check": "text", "slide": MOTIVATION, "text": "by an author and converted once", "count": 0}],
     "addbullet": [{"check": "text", "slide": MOTIVATION, "text": "Converting again would throw away every manual edit",
@@ -112,7 +118,7 @@ CHECKS = {
 
 
 WHY, ALGO = "Why decks and sources diverge", "The sync algorithm"
-INTENDED = {  # classification_diff(v1, variant) items per flag
+INTENDED: dict[str, list[str]] = {  # classification_diff(v1, variant) items per flag
     "reword": [f"{WHY}: text- The source is written in by an author and converted once",
                f"{WHY}: text+ The source is written in by an AI assistant and converted once"],
     "addbullet": [f"{WHY}: text+ Converting again would throw away every manual edit"],
@@ -162,7 +168,7 @@ def intended_diff(flags: list[str]) -> set[str]:
     return out
 
 
-def checks(flags: list[str]) -> list[dict]:
+def checks(flags: list[str]) -> list[JsonObject]:
     """What a deck synced to this source must show (source side only)."""
     return [c for f in flags for c in CHECKS[f]]
 
@@ -178,67 +184,93 @@ def titles(flags: list[str]) -> list[str]:
     return order + ["Room to grow", "Two boxes", "Display math"] * ("probes" in flags)
 
 
-def _runs_text(runs: list[dict]) -> str:
-    return "".join(r.get("text", "") for r in runs)
+@dataclass(frozen=True, kw_only=True)
+class Summary:
+    """What a classified folder says of one slide (`summary`): its title, its texts (paragraphs,
+    table cells, diagram labels, whitespace collapsed), its pictures (role and a content hash) and
+    its speaker notes."""
+    title: str | None
+    texts: tuple[str, ...]
+    pictures: tuple[str, ...]
+    notes: str
 
 
-def _drawings_hash(raw_page: dict, ids: list[str], origin: list[float]) -> str:
+def _runs_text(runs: Json, where: str) -> str:
+    return "".join(as_str(r.get("text", ""), f"{where}.text") for r in as_objects(runs, where))
+
+
+def _strs(value: Json, where: str) -> list[str]:
+    return [as_str(v, f"{where}[{i}]") for i, v in enumerate(as_array(value, where))]
+
+
+def numbers(value: Json, where: str) -> list[float]:
+    """A JSON array of numbers (a box, a point)."""
+    out: list[float] = []
+    for i, v in enumerate(as_array(value, where)):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"{where}[{i}]: a number was expected, found {v!r}")
+        out.append(v)
+    return out
+
+
+def _drawings_hash(raw_page: RawPage, ids: Sequence[str]) -> str:
+    """The drawings `ids` of a page, hashed without their ids and boxes."""
     by_id = {d["id"]: d for d in raw_page["drawings"]}
-    x, y = origin[0], origin[1]
-
-    def rel(v):
-        if isinstance(v, (int, float)):
-            return v
-        if isinstance(v, list) and len(v) == 2 and all(isinstance(c, (int, float)) for c in v):
-            return [round((v[0] - x) * 2) / 2, round((v[1] - y) * 2) / 2]
-        return [rel(c) for c in v] if isinstance(v, list) else v
-
-    items = [{k: rel(v) for k, v in by_id[i].items() if k not in ("id", "bbox")} for i in ids if i in by_id]
+    items = [{k: v for k, v in by_id[i].items() if k not in ("id", "bbox")} for i in ids if i in by_id]
     return hashlib.sha1(json.dumps(items, sort_keys=True).encode()).hexdigest()[:10]
 
 
-def summary(folder: Path) -> list[dict]:
-    """What a classified folder (deck.json, raw.json) says per slide: title, texts (paragraphs,
-    table cells, diagram labels), pictures (role and a position-free content hash), notes."""
-    deck = json.loads((folder / "deck.json").read_text(encoding="utf-8"))
-    from beamer2slides.raw_types import parse_raw  # (raw.json becomes pages only through its parser)
-    raw_json = folder / "raw.json"
+def summary(folder: Path) -> list[Summary]:
+    """What a classified folder (deck.json, raw.json) says per slide (`Summary`)."""
+    deck = as_object(json.loads((folder / "deck.json").read_text(encoding="utf-8")), "deck.json")
+    raw_json = folder / "raw.json"  # (raw.json becomes pages only through its parser)
     raw = {p["index"]: p for p in parse_raw(json.loads(raw_json.read_text(encoding="utf-8")), str(raw_json))["pages"]}
-    slides = []
-    for s in deck["slides"]:
-        title, texts, pictures = None, [], []
-        for e in s["elements"]:
+    slides: list[Summary] = []
+    for n, s in enumerate(as_objects(deck["slides"], "deck.json.slides")):
+        title: str | None = None
+        texts: list[str] = []
+        pictures: list[str] = []
+        for k, e in enumerate(as_objects(s["elements"], f"slides[{n}].elements")):
+            where = f"slides[{n}].elements[{k}]"
             if e["kind"] == "text" and e.get("role") == "title" and title is None:
-                title = _runs_text(e["paragraphs"][0]["runs"]).strip()
+                first = as_objects(e["paragraphs"], f"{where}.paragraphs")[0]
+                title = _runs_text(first["runs"], f"{where}.paragraphs[0].runs").strip()
             elif e["kind"] == "text" and e.get("role") != "footer":
-                texts += [_runs_text(p["runs"]).strip() for p in e["paragraphs"]]
+                texts += [_runs_text(p["runs"], f"{where}.paragraphs.runs").strip()
+                          for p in as_objects(e["paragraphs"], f"{where}.paragraphs")]
             elif e["kind"] == "table":
-                texts += [_runs_text(c).strip() for row in e["cells"] for c in row]
+                texts += [_runs_text(c, f"{where}.cells").strip()
+                          for row in as_array(e["cells"], f"{where}.cells") for c in as_array(row, f"{where}.cells")]
             elif e["kind"] == "diagram":
-                texts += [_runs_text(p).strip() for n in e["nodes"] for p in n.get("paragraphs") or []]
+                texts += [_runs_text(p, f"{where}.nodes.paragraphs").strip()
+                          for node in as_objects(e["nodes"], f"{where}.nodes")
+                          for p in as_array(node.get("paragraphs") or [], f"{where}.nodes.paragraphs")]
             elif e["kind"] == "image":
-                page = raw[s["page"]]
+                page = raw[as_int(s["page"], f"slides[{n}].page")]
                 spans = {sp["id"]: sp for sp in page["spans"]}
-                x0, y0, x1, y1 = e["bbox"]
-                inside = e.get("drawings") or [d["id"] for d in page["drawings"] if d["bbox"][0] >= x0 - 1 and
-                                               d["bbox"][1] >= y0 - 1 and d["bbox"][2] <= x1 + 1 and d["bbox"][3] <= y1 + 1]
-                content = _drawings_hash(page, inside, e["bbox"]) + "|" + \
-                    "".join(spans[i]["text"] + spans[i]["font"] for i in e.get("spans", []) if i in spans)
+                x0, y0, x1, y1 = numbers(e["bbox"], f"{where}.bbox")
+                inside = _strs(e.get("drawings") or [], f"{where}.drawings") or [
+                    d["id"] for d in page["drawings"]
+                    if d["bbox"][0] >= x0 - 1 and d["bbox"][1] >= y0 - 1 and d["bbox"][2] <= x1 + 1 and d["bbox"][3] <= y1 + 1]
+                content = _drawings_hash(page, inside) + "|" + \
+                    "".join(spans[i]["text"] + spans[i]["font"] for i in _strs(e.get("spans", []), f"{where}.spans")
+                            if i in spans)
                 pictures.append(f"{e.get('role')}:{content}")
-        slides.append({"title": title, "texts": [" ".join(t.split()) for t in texts if t.strip()], "pictures": pictures,
-                       "notes": s.get("notes") or ""})
+        notes = s.get("notes") or ""
+        slides.append(Summary(title=title, texts=tuple(" ".join(t.split()) for t in texts if t.strip()),
+                              pictures=tuple(pictures), notes=as_str(notes, f"slides[{n}].notes")))
     return slides
 
 
-def classification_diff(a: list[dict], b: list[dict]) -> list[str]:
+def classification_diff(a: list[Summary], b: list[Summary]) -> list[str]:
     """Differences from summary `a` to summary `b`, slides named by their title in `a`."""
-    def sim(x, y):
-        wx, wy = set(" ".join(x["texts"]).split()), set(" ".join(y["texts"]).split())
+    def sim(x: Summary, y: Summary) -> float:
+        wx, wy = set(" ".join(x.texts).split()), set(" ".join(y.texts).split())
         return len(wx & wy) / max(1, len(wx | wy))
 
     match: dict[int, int] = {}
     for i, x in enumerate(a):
-        same = [j for j, y in enumerate(b) if y["title"] == x["title"] and j not in match.values()]
+        same = [j for j, y in enumerate(b) if y.title == x.title and j not in match.values()]
         if len(same) == 1:
             match[i] = same[0]
     for i, x in enumerate(a):
@@ -246,35 +278,36 @@ def classification_diff(a: list[dict], b: list[dict]) -> list[str]:
             free = [(sim(x, y), j) for j, y in enumerate(b) if j not in match.values()]
             if free and max(free)[0] > 0.5:
                 match[i] = max(free)[1]
-    out = [f"slide- {x['title']}" for i, x in enumerate(a) if i not in match]
-    out += [f"slide+ {y['title']}" for j, y in enumerate(b) if j not in match.values()]
+    out = [f"slide- {x.title}" for i, x in enumerate(a) if i not in match]
+    out += [f"slide+ {y.title}" for j, y in enumerate(b) if j not in match.values()]
     kept = [i for i in range(len(a)) if i in match]
     if [match[i] for i in kept] != sorted(match[i] for i in kept):
-        out.append("order " + " / ".join(b[j]["title"] for j in sorted(match.values())))
+        out.append("order " + " / ".join(str(b[j].title) for j in sorted(match.values())))
     for i in kept:
-        x, y, name = a[i], b[match[i]], a[i]["title"]
-        if x["title"] != y["title"]:
-            out.append(f"{name}: title -> {y['title']}")
-        out += [f"{name}: text- {t}" for t in x["texts"] if t not in y["texts"]]
-        out += [f"{name}: text+ {t}" for t in y["texts"] if t not in x["texts"]]
-        if sorted(x["pictures"]) != sorted(y["pictures"]):
-            out.append(f"{name}: pictures {len(x['pictures'])} -> {len(y['pictures'])} changed")
-        if x["notes"] != y["notes"]:
-            out.append(f"{name}: notes -> {y['notes']}")
+        x, y, name = a[i], b[match[i]], a[i].title
+        if x.title != y.title:
+            out.append(f"{name}: title -> {y.title}")
+        out += [f"{name}: text- {t}" for t in x.texts if t not in y.texts]
+        out += [f"{name}: text+ {t}" for t in y.texts if t not in x.texts]
+        if sorted(x.pictures) != sorted(y.pictures):
+            out.append(f"{name}: pictures {len(x.pictures)} -> {len(y.pictures)} changed")
+        if x.notes != y.notes:
+            out.append(f"{name}: notes -> {y.notes}")
     return out
 
 
 GUARD = re.compile(r"^\s*%<(\*|/)?(!?)(\w+)>(.*)$")
 
 
-def render(flags: list[str], master: Path = MASTER) -> str:
+def render(flags: list[str]) -> str:
     """talk.tex with the guards resolved for these flags."""
     unknown = set(flags) - set(FLAGS)
     if unknown:
         raise ValueError(f"unknown flags {sorted(unknown)}")
-    lines = master.read_text(encoding="utf-8").splitlines()
+    lines = MASTER.read_text(encoding="utf-8").splitlines()
     start = next(i for i, l in enumerate(lines) if l.startswith(r"\documentclass"))
-    out, blocks = [f"% Sync test talk, flags: {', '.join(flags) or 'none'}"], []  # blocks: (guard, included)
+    out = [f"% Sync test talk, flags: {', '.join(flags) or 'none'}"]
+    blocks: list[tuple[str, bool]] = []  # (guard, included)
     for line in lines[start:]:
         m = GUARD.match(line)
         if not m:
@@ -296,10 +329,10 @@ def render(flags: list[str], master: Path = MASTER) -> str:
     return "\n".join(out) + "\n"
 
 
-def compile_tex(tex: Path, runs: int = 2) -> Path:
-    """pdflatex with SyncTeX in the file's folder (two passes); the PDF."""
+def compile_tex(tex: Path) -> Path:
+    """pdflatex with SyncTeX in the file's folder (`RUNS` passes); the PDF."""
     cmd = ["pdflatex", "-interaction=nonstopmode", "-halt-on-error", "-synctex=1", tex.name]
-    for _ in range(runs):
+    for _ in range(RUNS):
         done = subprocess.run(cmd, cwd=tex.parent, capture_output=True, text=True, errors="replace")
         if done.returncode:
             log = tex.with_suffix(".log")
@@ -308,8 +341,8 @@ def compile_tex(tex: Path, runs: int = 2) -> Path:
     return tex.with_suffix(".pdf")
 
 
-def build(variant: str, force: bool = False) -> Path:
-    """out/<variant>.pdf, compiled again only when talk.tex changed since."""
+def compiled(variant: str, *, force: bool) -> Path:
+    """out/<variant>.pdf, compiled again when `force` or when talk.tex changed since."""
     OUT.mkdir(exist_ok=True)
     tex, pdf = OUT / f"{variant}.tex", OUT / f"{variant}.pdf"
     text = render(VARIANTS[variant])
@@ -319,11 +352,16 @@ def build(variant: str, force: bool = False) -> Path:
     return compile_tex(tex)
 
 
+def build(variant: str) -> Path:
+    """out/<variant>.pdf, compiled again only when talk.tex changed since."""
+    return compiled(variant, force=False)
+
+
 def main(names: list[str]) -> int:
     failed = 0
     for name in names or VARIANTS:
         try:
-            print(f"OK   {build(name, force=True).name}")
+            print(f"OK   {compiled(name, force=True).name}")
         except (RuntimeError, KeyError) as e:
             failed += 1
             print(f"FAIL {name}: {e}")

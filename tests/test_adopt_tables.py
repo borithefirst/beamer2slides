@@ -6,106 +6,159 @@ a merged header, cell fills (one with no `propertyState`, which Slides draws), b
 """
 
 import re
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, replace
+from pathlib import Path
 
+import numpy as np
 import pytest
 
 from beamer2slides import adopt
+from beamer2slides.arrays import SignedRGB
 from beamer2slides.deck_ir import cell_pad, guess_lines
+from beamer2slides.deck_ir_types import TargetElement
+from beamer2slides.google_types import PageElement, is_page_element
+from beamer2slides.json_types import Json, JsonObject
 from .deck_records import cell as cell_record
 from .deck_records import dicts, records
 from .deck_records import table as table_record
 from .irs import deck_ir
+from .json_reads import jarr, jint, jnum, jnums, jobj, jobjs, jstr
 
 from .test_adopt import at, pt, presentation
 
 SCALE = 720 / 453.54          # Slides pt per PDF pt on a 16:9 deck
 
 
-@pytest.fixture(autouse=True)
-def lengths_as_written(monkeypatch):
-    """These tests read the writers' lengths; their rewriting into bp is test_adopt's
-    `test_lengths_are_written_in_pdf_points_and_the_deck_words_are_left_alone`."""
-    monkeypatch.setattr(adopt, "to_bp", lambda text: text)
+def as_written(text: str) -> str:
+    return text
+
 
 @pytest.fixture(autouse=True)
-def no_machine_fonts(monkeypatch, tmp_path):
+def lengths_as_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests read the writers' lengths; their rewriting into bp is test_adopt's
+    `test_lengths_are_written_in_pdf_points_and_the_deck_words_are_left_alone`."""
+    monkeypatch.setattr(adopt, "to_bp", as_written)
+
+@pytest.fixture(autouse=True)
+def no_machine_fonts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("B2S_FONTS", str(tmp_path / "no-fonts-here"))
 
 
-def rgb(hexc: str) -> dict:
+def rgb(hexc: str) -> JsonObject:
     return {"rgbColor": {"red": int(hexc[0:2], 16) / 255, "green": int(hexc[2:4], 16) / 255,
                          "blue": int(hexc[4:6], 16) / 255}}
 
 
-def cell(r: int, c: int, words: str, *, size: float = 12, bold: bool = False, align: str = "START",
-         fill: str | None = None, state: str | None = None, rowspan: int = 1, colspan: int = 1,
-         valign: str | None = None) -> dict:
-    loc = {k: v for k, v in (("rowIndex", r), ("columnIndex", c)) if v}   # Slides leaves out a 0
-    props: dict = {}
-    if fill:
-        props["tableCellBackgroundFill"] = {"solidFill": {"color": rgb(fill)}}
-        if state:
-            props["tableCellBackgroundFill"]["propertyState"] = state
-    if valign:
-        props["contentAlignment"] = valign
-    out = {"location": loc, "rowSpan": rowspan, "columnSpan": colspan, "tableCellProperties": props}
+@dataclass(frozen=True, kw_only=True)
+class Look:
+    """How one cell of `table` is set: 12 pt Arial, `PLAIN` but for what a cell says otherwise."""
+    bold: bool
+    align: str
+    fill: str | None
+    state: str | None           # the fill's propertyState, when it says one
+    rowspan: int
+    colspan: int
+    valign: str | None
+
+
+PLAIN = Look(bold=False, align="START", fill=None, state=None, rowspan=1, colspan=1, valign=None)
+
+
+def cell(r: int, c: int, words: str, look: Look) -> JsonObject:
+    loc: JsonObject = {k: v for k, v in (("rowIndex", r), ("columnIndex", c)) if v}   # Slides leaves out a 0
+    props: JsonObject = {}
+    if look.fill:
+        fill: JsonObject = {"solidFill": {"color": rgb(look.fill)}}
+        if look.state:
+            fill["propertyState"] = look.state
+        props["tableCellBackgroundFill"] = fill
+    if look.valign:
+        props["contentAlignment"] = look.valign
+    out: JsonObject = {"location": loc, "rowSpan": look.rowspan, "columnSpan": look.colspan,
+                       "tableCellProperties": props}
     if words:
         out["text"] = {"textElements": [
-            {"paragraphMarker": {"style": {"alignment": align}}},
+            {"paragraphMarker": {"style": {"alignment": look.align}}},
             {"textRun": {"content": words + "\n",
-                         "style": {"fontFamily": "Arial", "fontSize": pt(size), "bold": bold,
+                         "style": {"fontFamily": "Arial", "fontSize": pt(12), "bold": look.bold,
                                    "foregroundColor": {"opaqueColor": rgb("222222")}}}}]}
     return out
 
 
-def border(r: int, c: int, colour: str | None, weight: float = 1.0, dash: str = "SOLID",
-           alpha: float = 1.0) -> dict:
-    props: dict = {"weight": pt(weight), "dashStyle": dash}
+def border(r: int, c: int, colour: str | None, weight: float, dash: str, alpha: float) -> JsonObject:
+    props: JsonObject = {"weight": pt(weight), "dashStyle": dash}
     if colour:
         props["tableBorderFill"] = {"solidFill": {"color": rgb(colour), "alpha": alpha}}
-    loc = {k: v for k, v in (("rowIndex", r), ("columnIndex", c)) if v}
+    loc: JsonObject = {k: v for k, v in (("rowIndex", r), ("columnIndex", c)) if v}
     return {"location": loc, "tableBorderProperties": props}
 
 
-def table(oid: str = "g1a2b3c_0_7", widths=(100, 60, 60), heights=(30, 30, 30)) -> dict:
+# Its defaults stay: test_adopt_fills calls `table()` and test_adopt_macros `table(heights=...)`.
+# The tests here say every argument, through `table_of`.
+def table(oid: str = "g1a2b3c_0_7", widths: Sequence[float] = (100, 60, 60),
+          heights: Sequence[float] = (30, 30, 30)) -> JsonObject:
+    """`table_of`, by default as Slides made it with rows of 30 pt."""
+    return table_of(oid, widths, heights)
+
+
+def table_of(oid: str, widths: Sequence[float], heights: Sequence[float]) -> JsonObject:
     """Three rows by three columns at (50, 80): a header merged across columns 1-2, a first column
     merged down rows 1-2, a filled cell with no propertyState and one NOT_RENDERED, and borders -
     black under the header, a dashed red column rule, one invisible (alpha 0) and one with no fill."""
-    rows = [
+    right = replace(PLAIN, align="END")
+    rows: list[Json] = [
         {"rowHeight": pt(heights[0]), "tableCells": [
-            cell(0, 0, "Name", bold=True, fill="CCE5FF"),
-            cell(0, 1, "Quarter", align="CENTER", fill="FFEEAA", state="NOT_RENDERED", colspan=2)]},
+            cell(0, 0, "Name", replace(PLAIN, bold=True, fill="CCE5FF")),
+            cell(0, 1, "Quarter", replace(PLAIN, align="CENTER", fill="FFEEAA", state="NOT_RENDERED",
+                                          colspan=2))]},
         {"rowHeight": pt(heights[1]), "tableCells": [
-            cell(1, 0, "Revenue", rowspan=2, valign="MIDDLE"),
-            cell(1, 1, "10", align="END"), cell(1, 2, "12", align="END", valign="BOTTOM")]},
+            cell(1, 0, "Revenue", replace(PLAIN, rowspan=2, valign="MIDDLE")),
+            cell(1, 1, "10", right), cell(1, 2, "12", replace(right, valign="BOTTOM"))]},
         {"rowHeight": pt(heights[2]), "tableCells": [
-            cell(2, 1, "20", align="END"), cell(2, 2, "", fill="00FF00")]},
+            cell(2, 1, "20", right), cell(2, 2, "", replace(PLAIN, fill="00FF00"))]},
     ]
-    horizontal = [{"tableBorderCells": [border(i, c, "000000" if i == 1 else None) for c in range(3)]}
+    horizontal = [[border(i, c, "000000" if i == 1 else None, 1.0, "SOLID", 1.0) for c in range(3)]
                   for i in range(4)]
-    horizontal[2]["tableBorderCells"][0] = border(2, 0, "000000")        # inside the merged column
-    horizontal[3]["tableBorderCells"][1] = border(3, 1, "0000FF", alpha=0.0)
+    horizontal[2][0] = border(2, 0, "000000", 1.0, "SOLID", 1.0)        # inside the merged column
+    horizontal[3][1] = border(3, 1, "0000FF", 1.0, "SOLID", 0.0)
     # one entry per table row, each with a cell per column boundary (the API's grid)
-    vertical = [{"tableBorderCells": [border(r, i, "FF0000" if i == 1 else None, 2.0,
-                                             "DASH" if i == 1 else "SOLID") for i in range(4)]}
+    vertical = [[border(r, i, "FF0000" if i == 1 else None, 2.0, "DASH" if i == 1 else "SOLID", 1.0)
+                 for i in range(4)]
                 for r in range(3)]
-    vertical[0]["tableBorderCells"][2] = border(0, 2, "FF0000", 2.0, "DASH")   # inside the header
+    vertical[0][2] = border(0, 2, "FF0000", 2.0, "DASH", 1.0)   # inside the header
     return {"objectId": oid, "size": {"width": pt(236.22), "height": pt(236.22)},   # 3,000,000 EMU
             "transform": at(50, 80),
             "table": {"rows": 3, "columns": 3,
                       "tableColumns": [{"columnWidth": pt(w)} for w in widths],
-                      "tableRows": rows, "horizontalBorderRows": horizontal,
-                      "verticalBorderRows": vertical}}
+                      "tableRows": rows,
+                      "horizontalBorderRows": [{"tableBorderCells": list[Json](row)} for row in horizontal],
+                      "verticalBorderRows": [{"tableBorderCells": list[Json](row)} for row in vertical]}}
 
 
-def deck(*tables: dict) -> dict:
-    pres = presentation()
-    pres["slides"][0]["pageElements"].extend(tables)
+def element(o: JsonObject) -> PageElement:
+    """`o` as the page element it is."""
+    assert is_page_element(o)
+    return o
+
+
+def deck(*tables: JsonObject) -> JsonObject:
+    pres = jobj(presentation())
+    jarr(pres, "slides", 0, "pageElements").extend(tables)
     return pres
 
 
-def the_table(pres: dict, foreign: bool = True) -> dict:
-    return next(e for e in deck_ir(pres, foreign=foreign)["slides"][0]["elements"] if e["kind"] == "table")
+def table_in(pres: JsonObject, foreign: bool) -> JsonObject:
+    return next(e for e in jobjs(deck_ir(pres, foreign=foreign), "slides", 0, "elements") if e["kind"] == "table")
+
+
+def the_table(pres: JsonObject) -> JsonObject:
+    """The table adopt reads of `pres` (`deck_ir(foreign=True)`)."""
+    return table_in(pres, True)
+
+
+def cells_by_place(pres: JsonObject) -> dict[tuple[int, int], JsonObject]:
+    return {(jint(c, "row"), jint(c, "col")): c for c in jobjs(the_table(pres), "table_cells")}
 
 
 # ---------------------------------------------------------------- what the IR reads
@@ -113,7 +166,7 @@ def the_table(pres: dict, foreign: bool = True) -> dict:
 def test_the_box_is_the_grid_not_the_size_slides_reports():
     """Slides says 3,000,000 EMU square for every table; the grid is 220 x 90 pt."""
     el = the_table(deck(table()))
-    x0, y0, x1, y1 = el["bbox"]
+    x0, y0, x1, y1 = jnums(el, "bbox")
     assert (x0, y0) == pytest.approx((50 / SCALE, 80 / SCALE), abs=0.01)
     assert (x1 - x0, y1 - y0) == pytest.approx((220 / SCALE, 90 / SCALE), abs=0.02)
     assert el["col_widths"] == pytest.approx([w / SCALE for w in (100, 60, 60)], abs=0.01)
@@ -122,65 +175,71 @@ def test_the_box_is_the_grid_not_the_size_slides_reports():
 
 def test_rows_stay_what_pull_and_sync_compare():
     """`rows` is the plain text grid it always was, and pull's IR gets nothing else."""
-    pull = the_table(deck(table()), foreign=False)
+    pull = table_in(deck(table()), False)
     assert pull["rows"] == [["Name", "Quarter"], ["Revenue", "10", "12"], ["20", ""]]
     assert not any(k.startswith(("table_", "col_", "row_", "cell_")) for k in pull)
     assert the_table(deck(table()))["rows"] == pull["rows"]
 
 
 def test_only_the_head_of_a_merged_range_is_a_cell_and_a_missing_index_is_zero():
-    cells = {(c["row"], c["col"]): c for c in the_table(deck(table()))["table_cells"]}
+    cells = cells_by_place(deck(table()))
     assert sorted(cells) == [(0, 0), (0, 1), (1, 0), (1, 1), (1, 2), (2, 1), (2, 2)]
     assert (cells[0, 1]["rowspan"], cells[0, 1]["colspan"]) == (1, 2)
     assert (cells[1, 0]["rowspan"], cells[1, 0]["colspan"]) == (2, 1)
 
 
 def test_a_fill_with_no_property_state_is_drawn_and_a_not_rendered_one_is_not():
-    cells = {(c["row"], c["col"]): c for c in the_table(deck(table()))["table_cells"]}
-    assert cells[0, 0]["fill"].lower() == "#cce5ff" and cells[0, 0]["fill_alpha"] == 1
+    cells = cells_by_place(deck(table()))
+    assert jstr(cells[0, 0], "fill").lower() == "#cce5ff" and cells[0, 0]["fill_alpha"] == 1
     assert cells[0, 1]["fill"] is None
-    assert cells[2, 2]["fill"].lower() == "#00ff00" and cells[2, 2]["paragraphs"] == []
+    assert jstr(cells[2, 2], "fill").lower() == "#00ff00" and cells[2, 2]["paragraphs"] == []
 
 
 def test_cell_text_reads_like_a_text_box():
-    cells = {(c["row"], c["col"]): c for c in the_table(deck(table()))["table_cells"]}
-    head = cells[0, 0]["paragraphs"][0]
-    assert head["runs"][0]["text"] == "Name" and head["runs"][0]["bold"] is True
-    assert head["runs"][0]["size"] == pytest.approx(12 / SCALE, abs=0.01)
-    assert cells[0, 1]["paragraphs"][0]["align"] == "center"
-    assert cells[1, 1]["paragraphs"][0]["align"] == "right"
+    cells = cells_by_place(deck(table()))
+    head = jobj(cells[0, 0], "paragraphs", 0)
+    assert run_value(head, "text") == "Name" and run_value(head, "bold") is True
+    assert run_value(head, "size") == pytest.approx(12 / SCALE, abs=0.01)
+    assert jobj(cells[0, 1], "paragraphs", 0)["align"] == "center"
+    assert jobj(cells[1, 1], "paragraphs", 0)["align"] == "right"
     assert (cells[1, 0]["valign"], cells[1, 2]["valign"], cells[1, 1]["valign"]) == ("middle", "bottom", "top")
-    assert not any("slides_font" in r for c in cells.values() for p in c["paragraphs"] for r in p["runs"])
+    assert not any("slides_font" in r for c in cells.values() for p in jobjs(c, "paragraphs")
+                   for r in jobjs(p, "runs"))
+
+
+def run_value(paragraph: JsonObject, key: str) -> Json:
+    """`key` of the paragraph's first run."""
+    return jobj(paragraph, "runs", 0)[key]
 
 
 def test_borders_keep_colour_weight_and_dash_and_invisible_ones_are_dropped():
-    borders = the_table(deck(table()))["table_borders"]
-    horizontal = [(b["row"], b["col"]) for b in borders if b["dir"] == "h"]
+    borders = jobjs(the_table(deck(table())), "table_borders")
+    horizontal = [(jint(b, "row"), jint(b, "col")) for b in borders if b["dir"] == "h"]
     assert sorted(horizontal) == [(1, 0), (1, 1), (1, 2), (2, 0)], "no fill and alpha 0 are not drawn"
     red = [b for b in borders if b["dir"] == "v"]
     assert {(b["col"], b["row"]) for b in red} == {(1, 0), (1, 1), (1, 2), (2, 0)}
-    assert all(b["dash"] == "DASH" and b["color"].lower() == "#ff0000" for b in red)
+    assert all(b["dash"] == "DASH" and jstr(b, "color").lower() == "#ff0000" for b in red)
     assert red[0]["weight"] == pytest.approx(2 / SCALE, abs=0.001)
 
 
 def test_insets_follow_where_the_table_came_from_and_its_rows():
     # made in Slides, rows with room: Slides' own 7.2 pt
-    assert cell_pad(table()) == pytest.approx((7.2, 7.2))
+    assert cell_pad(element(table())) == pytest.approx((7.2, 7.2))
     # brought by a .pptx (its ids): at most the file's 3.6 pt
-    assert cell_pad(table("i32")) == pytest.approx((5.8, 3.6))
+    assert cell_pad(element(table_of("i32", (100, 60, 60), (30, 30, 30)))) == pytest.approx((5.8, 3.6))
     # rows that hold 12 pt text in 16 pt: the inset cannot be more than (16 - 14.4) / 2, floored at 1.5
-    assert cell_pad(table("i32", heights=(16, 16, 16)))[1] == pytest.approx(1.5)
+    assert cell_pad(element(table_of("i32", (100, 60, 60), (16, 16, 16))))[1] == pytest.approx(1.5)
     # a Slides table whose row is smaller than one line of its text was dragged: the heights say
     # nothing and the inset is Slides' own
-    assert cell_pad(table(heights=(9, 30, 30))) == pytest.approx((7.2, 7.2))
+    assert cell_pad(element(table_of("g1a2b3c_0_7", (100, 60, 60), (9, 30, 30)))) == pytest.approx((7.2, 7.2))
 
 
 def test_a_row_a_little_short_of_its_text_at_the_cap_keeps_the_cap():
     """creandum-board: 22.0 pt rows of 7 pt text leave 6.8 pt a side, and Slides draws them 22.8 tall
     with its own 7.2; less than a point short is a row Slides grew, not a smaller inset."""
-    assert cell_pad(table("i32", heights=(20, 20, 20)))[1] == pytest.approx(3.6)   # 2.8 would be the rows' room
-    assert cell_pad(table(heights=(28, 28, 28)))[1] == pytest.approx(7.2)          # 6.8
-    assert cell_pad(table(heights=(24, 24, 24)))[1] == pytest.approx(4.8)          # well short: the rows say it
+    assert cell_pad(element(table_of("i32", (100, 60, 60), (20, 20, 20))))[1] == pytest.approx(3.6)   # 2.8 would be the rows' room
+    assert cell_pad(element(table_of("g1a2b3c_0_7", (100, 60, 60), (28, 28, 28))))[1] == pytest.approx(7.2)          # 6.8
+    assert cell_pad(element(table_of("g1a2b3c_0_7", (100, 60, 60), (24, 24, 24))))[1] == pytest.approx(4.8)          # well short: the rows say it
 
 
 # ---------------------------------------------------------------- what the thumbnail says of a table
@@ -188,40 +247,53 @@ def test_a_row_a_little_short_of_its_text_at_the_cap_keeps_the_cap():
 PX = 2.0          # thumbnail pixels per IR pt
 
 
-def grid_element(heights=(10, 10, 10), widths=(40, 40), color="#000000") -> dict:
-    """A bare table element at (10, 10) with a border under every row and a left-aligned cell each."""
-    borders = [{"dir": "h", "row": r, "col": c, "color": color, "alpha": 1.0, "weight": 1.0, "dash": "SOLID"}
-               for r in range(len(heights) + 1) for c in range(len(widths))]
-    cells = [{"row": r, "col": c, "rowspan": 1, "colspan": 1,
-              "paragraphs": [{"align": "left", "runs": [{"text": "Word", "size": 10.0}]}]}
-             for r in range(len(heights)) for c in range(len(widths))]
-    return {"kind": "table", "bbox": [10, 10, 10 + sum(widths), 10 + sum(heights)], "row_heights": list(heights),
-            "col_widths": list(widths), "table_borders": borders, "table_cells": cells, "cell_pad": [5.8, 3.6]}
+def grid_element(heights: Sequence[float], color: str) -> JsonObject:
+    """A bare table element at (10, 10), two columns of 40, with a border under every row in `color`
+    and a left-aligned cell each."""
+    widths = (40.0, 40.0)
+    borders: list[Json] = [{"dir": "h", "row": r, "col": c, "color": color, "alpha": 1.0, "weight": 1.0,
+                            "dash": "SOLID"}
+                           for r in range(len(heights) + 1) for c in range(len(widths))]
+    cells: list[Json] = [{"row": r, "col": c, "rowspan": 1, "colspan": 1,
+                          "paragraphs": [{"align": "left", "runs": [{"text": "Word", "size": 10.0}]}]}
+                         for r in range(len(heights)) for c in range(len(widths))]
+    return {"kind": "table", "bbox": [10, 10, 10 + sum(widths), 10 + sum(heights)], "row_heights": list[Json](heights),
+            "col_widths": list[Json](widths), "table_borders": borders, "table_cells": cells, "cell_pad": [5.8, 3.6]}
 
 
-def through(step, el: dict, img) -> dict:
+BLACK = "#000000"
+ROWS_OF_10 = (10.0, 10.0, 10.0)
+
+Pass = Callable[[Sequence[TargetElement], SignedRGB | None, float], list[TargetElement]]
+
+
+def through(step: Pass, el: JsonObject, img: SignedRGB) -> JsonObject:
     """One thumbnail pass (`deck_thumbs`) over the record `el` stands for, handed back as a dict."""
     got, = dicts(step(records([el]), img, PX))
-    return got
+    return jobj(got)
 
 
-def blank(h=100, w=120, colour=(255, 255, 255)):
-    import numpy as np
-    img = np.zeros((int(h * PX), int(w * PX), 3), dtype=np.int16)
+WHITE = (255, 255, 255)
+
+
+def blank(colour: tuple[int, int, int]) -> SignedRGB:
+    """A 100 x 120 pt thumbnail in `colour`."""
+    img = np.zeros((int(100 * PX), int(120 * PX), 3), dtype=np.int16)
     img[:] = colour
     return img
 
 
-def rule(img, y, x0=10, x1=90, colour=(0, 0, 0)):
-    img[int(y * PX):int(y * PX) + 2, int(x0 * PX):int(x1 * PX)] = colour
+def rule(img: SignedRGB, y: float) -> None:
+    """A black rule 2 px tall across the grid (x 10 to 90) at `y`."""
+    img[int(y * PX):int(y * PX) + 2, int(10 * PX):int(90 * PX)] = (0, 0, 0)
 
 
 def test_rows_are_as_tall_as_the_thumbnail_draws_them_and_held_there():
     """Stored rows of 10 pt that Slides grew to 14 (an empty cell's line, a .pptx's insets): the
     borders on the thumbnail say so, and `\\adoptfix` keeps TeX from growing them again."""
     from beamer2slides.deck_thumbs import thumbnail_rows
-    el = grid_element()
-    img = blank()
+    el = grid_element(ROWS_OF_10, BLACK)
+    img = blank(WHITE)
     for y in (10, 24, 38, 52):
         rule(img, y)
     el = through(thumbnail_rows, el, img)
@@ -231,21 +303,21 @@ def test_rows_are_as_tall_as_the_thumbnail_draws_them_and_held_there():
 
 def test_measuring_stops_at_a_boundary_it_cannot_see():
     from beamer2slides.deck_thumbs import thumbnail_rows
-    el = grid_element()
-    img = blank()
+    el = grid_element(ROWS_OF_10, BLACK)
+    img = blank(WHITE)
     for y in (10, 24):                    # the rule under row 1 is not drawn: rows 1 and 2 could be anything
         rule(img, y)
     el = through(thumbnail_rows, el, img)
     assert el["rows_fixed"] == [0]
-    assert el["row_heights"][1:] == [10, 10]
+    assert jarr(el, "row_heights")[1:] == [10, 10]
 
 
 def test_a_step_between_two_fills_is_no_border():
     """hebrew-lesson: a brown header over pale rows, white borders nobody sees. The step down to the
     paler fill turns towards white but never comes back: no row is measured."""
     from beamer2slides.deck_thumbs import thumbnail_rows
-    el = grid_element(color="#ffffff")
-    img = blank(colour=(250, 240, 235))
+    el = grid_element(ROWS_OF_10, "#ffffff")
+    img = blank((250, 240, 235))
     img[int(10 * PX):int(24 * PX), int(10 * PX):int(90 * PX)] = (120, 70, 40)
     el = through(thumbnail_rows, el, img)
     assert "rows_fixed" not in el and el["row_heights"] == [10, 10, 10]
@@ -255,11 +327,11 @@ def test_a_border_colour_that_is_no_rgb_hex_is_not_looked_for():
     """A border whose colour is not #rrggbb has no pixel colour to look for: the row is measured by
     the borders that have one. Reading it raised a TypeError (None[None, :]) before 485d624."""
     from beamer2slides.deck_thumbs import thumbnail_rows
-    el = grid_element()
-    for b in el["table_borders"]:
+    el = grid_element(ROWS_OF_10, BLACK)
+    for b in jobjs(el, "table_borders"):
         if b["col"] == 1:
             b["color"] = "#000"
-    img = blank()
+    img = blank(WHITE)
     for y in (10, 24, 38, 52):
         rule(img, y)
     el = through(thumbnail_rows, el, img)
@@ -270,8 +342,8 @@ def test_a_border_colour_that_is_no_rgb_hex_is_not_looked_for():
 def test_the_side_inset_is_where_the_cells_words_begin():
     """comps-analysis' .pptx cells start their words 3 pt in where the guess said 5.8."""
     from beamer2slides.deck_thumbs import thumbnail_cell_pad, thumbnail_rows
-    el = grid_element(heights=(14, 14, 14))
-    img = blank()
+    el = grid_element((14, 14, 14), BLACK)
+    img = blank(WHITE)
     for y in (10, 24, 38, 52):
         rule(img, y)
     for r in range(3):
@@ -280,13 +352,13 @@ def test_the_side_inset_is_where_the_cells_words_begin():
             img[int((14 + 14 * r) * PX):int((20 + 14 * r) * PX), int(x * PX):int((x + 20) * PX)] = (0, 0, 0)
     el = through(thumbnail_rows, el, img)
     el = through(thumbnail_cell_pad, el, img)
-    assert el["cell_pad"][0] == pytest.approx(3.0, abs=0.5) and el["cell_pad"][1] == 3.6
+    assert jnum(el, "cell_pad", 0) == pytest.approx(3.0, abs=0.5) and jnum(el, "cell_pad", 1) == 3.6
 
 
-def test_measured_rows_are_written_fixed(tmp_path):
+def test_measured_rows_are_written_fixed(tmp_path: Path):
     """Most rows measured: `fixed` is the table's, and the one row TeX may still grow says `grow`."""
     ir = deck_ir(deck(table()), foreign=True)
-    next(e for e in ir["slides"][0]["elements"] if e["kind"] == "table")["rows_fixed"] = [0, 1]
+    next(e for e in jobjs(ir, "slides", 0, "elements") if e["kind"] == "table")["rows_fixed"] = [0, 1]
     head, rows = table_rows(adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None))
     assert ", fixed," in head
     assert [r.startswith("\\row[grow]") for r in rows] == [False, False, True]
@@ -301,11 +373,11 @@ def test_guess_lines_tells_one_line_from_several():
 
 # ---------------------------------------------------------------- the source it writes
 
-def source(tmp_path, *tables) -> str:
+def source(tmp_path: Path, *tables: JsonObject) -> str:
     return adopt.bootstrap(deck_ir(deck(*tables), foreign=True), tmp_path / "tree" / "main.tex", False, None)
 
 
-def macros(tmp_path) -> str:
+def macros(tmp_path: Path) -> str:
     """The macro layer `bootstrap` writes beside main.tex (slides.sty)."""
     return (tmp_path / "tree" / "slides.sty").read_text(encoding="utf-8")
 
@@ -327,19 +399,21 @@ def cells_of(row: str) -> list[str]:
     return [c.strip() for c in row.split("&")]
 
 
-def test_a_table_is_written_at_its_place_with_its_macros(tmp_path):
+def test_a_table_is_written_at_its_place_with_its_macros(tmp_path: Path):
     text = source(tmp_path, table())
     assert "\\NewDocumentEnvironment { slidetable }" in macros(tmp_path) and "\\usepackage{tikz}" in text
     assert "\\usepackage{slides}" in text and "slides@t@" not in table_source(text)
     head, _ = table_rows(text)
     # the corner, then the columns once, to the thousandth
-    corner, cols = re.search(r"\]\{([\d.,]+)\}\{([\d.,]+)\}$", head).groups()
+    m = re.search(r"\]\{([\d.,]+)\}\{([\d.,]+)\}$", head)
+    assert m is not None
+    corner, cols = m.groups()
     assert corner == f"{50 / SCALE:.1f},{80 / SCALE:.1f}"
     widths = [float(w) for w in cols.split(",")]
     assert widths == pytest.approx([w / SCALE for w in (100, 60, 60)], abs=0.002)
 
 
-def test_every_row_is_a_minimum_and_every_cell_with_words_a_box(tmp_path):
+def test_every_row_is_a_minimum_and_every_cell_with_words_a_box(tmp_path: Path):
     """Three rows as in a tabular, each at least its stored height (the table's `h`, no row differs),
     and a cell per grid place its merges leave: the empty filled one is `{}`."""
     head, rows = table_rows(source(tmp_path, table()))
@@ -351,7 +425,7 @@ def test_every_row_is_a_minimum_and_every_cell_with_words_a_box(tmp_path):
     assert sum(1 for row in cells for c in row if re.search(r"\w\}?$", c)) == 6
 
 
-def test_a_merged_cell_spans_its_rows_and_columns(tmp_path):
+def test_a_merged_cell_spans_its_rows_and_columns(tmp_path: Path):
     _, rows = table_rows(source(tmp_path, table()))
     head, revenue, last = (cells_of(r) for r in rows)
     assert re.fullmatch(r"\\multicell\{2\}\[[^\]]*\]\{Quarter\}", head[1]), "columns 1-2 merged"
@@ -359,12 +433,12 @@ def test_a_merged_cell_spans_its_rows_and_columns(tmp_path):
     assert last[0] == "20", "the row under it leaves its column out"
 
 
-def test_fills_are_drawn_and_not_rendered_ones_are_not(tmp_path):
+def test_fills_are_drawn_and_not_rendered_ones_are_not(tmp_path: Path):
     t = table_source(source(tmp_path, table()))
     assert re.findall(r"fill=(\w+)", t) == ["PaleBlue", "green"]
 
 
-def test_no_border_is_drawn_inside_a_merged_cell(tmp_path):
+def test_no_border_is_drawn_inside_a_merged_cell(tmp_path: Path):
     """Each line is said once, whole: the rule under the header runs across its three cells (the piece
     inside "Revenue" is gone), the dashed one left of column 1 down all three rows (the piece inside
     the header is gone), and nothing else is drawn."""
@@ -375,7 +449,7 @@ def test_no_border_is_drawn_inside_a_merged_cell(tmp_path):
     assert "border=" not in t, "no border is the table's"
 
 
-def test_cells_sit_where_their_vertical_alignment_says(tmp_path):
+def test_cells_sit_where_their_vertical_alignment_says(tmp_path: Path):
     head, rows = table_rows(source(tmp_path, table()))
     assert "valign" not in head, "top is the default"
     cells = [c for r in rows for c in cells_of(r)]
@@ -384,7 +458,7 @@ def test_cells_sit_where_their_vertical_alignment_says(tmp_path):
 
 
 def test_segments_join_runs_of_one_style():
-    el = {"bbox": [0, 0, 3, 2], "row_heights": [1, 1], "col_widths": [1, 1, 1], "table_cells": [],
+    el: JsonObject = {"bbox": [0, 0, 3, 2], "row_heights": [1, 1], "col_widths": [1, 1, 1], "table_cells": [],
           "table_borders": [{"dir": "h", "row": 1, "col": c, "color": "#000000", "alpha": 1, "weight": 1,
                              "dash": "SOLID"} for c in (0, 1)]
           + [{"dir": "h", "row": 1, "col": 2, "color": "#ff0000", "alpha": 1, "weight": 1, "dash": "SOLID"},
@@ -393,15 +467,15 @@ def test_segments_join_runs_of_one_style():
     assert [(k[2], spans) for k, spans in segs] == [("#000000", [(0, 2)]), ("#ff0000", [(2, 3)])]
 
 
-def test_a_right_to_left_cell_is_read_and_written_right_to_left(tmp_path):
+def test_a_right_to_left_cell_is_read_and_written_right_to_left(tmp_path: Path):
     """hebrew-lesson's cells: set left to right, a Hebrew line ended on the wrong side of its full stop."""
     t = table()
-    head = t["table"]["tableRows"][1]["tableCells"][1]
-    head["text"]["textElements"][0]["paragraphMarker"]["style"]["direction"] = "RIGHT_TO_LEFT"
-    head["text"]["textElements"][1]["textRun"]["content"] = "שלום עולם.\n"
-    cells = {(c["row"], c["col"]): c for c in the_table(deck(t))["table_cells"]}
-    assert cells[1, 1]["paragraphs"][0]["direction"] == "rtl"
-    assert "direction" not in cells[1, 2]["paragraphs"][0]
+    head = jobjs(t, "table", "tableRows", 1, "tableCells")[1]
+    jobj(head, "text", "textElements", 0, "paragraphMarker", "style")["direction"] = "RIGHT_TO_LEFT"
+    jobj(head, "text", "textElements", 1, "textRun")["content"] = "שלום עולם.\n"
+    cells = cells_by_place(deck(t))
+    assert jobj(cells[1, 1], "paragraphs", 0)["direction"] == "rtl"
+    assert "direction" not in jobj(cells[1, 2], "paragraphs", 0)
     text = source(tmp_path, t)
     assert "\\babelprovide" in text and "hebrew" in text
     rtl = next(c for r in table_rows(text)[1] for c in cells_of(r) if "שלום" in c)
@@ -409,7 +483,7 @@ def test_a_right_to_left_cell_is_read_and_written_right_to_left(tmp_path):
     assert "\\begin{otherlanguage}" in macros(tmp_path)
 
 
-def test_cell_lines_are_as_far_apart_as_slides_sets_them(tmp_path):
+def test_cell_lines_are_as_far_apart_as_slides_sets_them(tmp_path: Path):
     """The size switch alone spaced a cell's lines by the class's leading (hebrew-lesson: 14.0 pt where
     the thumbnail shows 14.45); `pitch` sets Slides' pitch, and leaves the one-line height (the strut)
     to the size switch, since the row height says it already."""
@@ -420,7 +494,7 @@ def test_cell_lines_are_as_far_apart_as_slides_sets_them(tmp_path):
     assert "\\strutbox" not in t
 
 
-def test_a_cell_is_set_again_without_insets_when_its_rows_are_too_short(tmp_path):
+def test_a_cell_is_set_again_without_insets_when_its_rows_are_too_short(tmp_path: Path):
     """creandum-board keeps "+1 months" on one line in a 40 pt column: the macro sets a cell again at
     its full width, shifted back by the inset, when its rows are too short for it (`\\slides@t@grow`
     gets both widths and both shifts); the source says nothing of it."""
@@ -431,7 +505,7 @@ def test_a_cell_is_set_again_without_insets_when_its_rows_are_too_short(tmp_path
     assert "aligns={left,right,right}" in t, "the numbers are right-aligned, said once for their columns"
 
 
-def test_a_one_word_cell_too_wide_for_its_insets_stays_on_its_line(tmp_path):
+def test_a_one_word_cell_too_wide_for_its_insets_stays_on_its_line(tmp_path: Path):
     """creandum-board's P&L: "(1,234)" in a narrow column is one word Slides never breaks - wider than
     the room inside the insets, it takes the cell's whole width, aligned as it says. TeX finds such a
     word itself, so a one-word cell says nothing; one whose line has no break for another reason says
@@ -447,7 +521,7 @@ def test_a_one_word_cell_too_wide_for_its_insets_stays_on_its_line(tmp_path):
     assert opts["word"] is False and adopt.option_text("word", False) == "wrap"
 
 
-def test_a_middle_aligned_cell_drops_by_its_own_line_box_and_no_other_does(tmp_path):
+def test_a_middle_aligned_cell_drops_by_its_own_line_box_and_no_other_does(tmp_path: Path):
     """Slides centres a cell's line box, whose ascent is 0.968 of 1.2 em, where TeX's strut is 0.7 of
     1.0: creandum-board's middle cells stood 0.125 em high. Top and bottom ones are placed right."""
     text = source(tmp_path, table())
@@ -459,35 +533,38 @@ def test_a_middle_aligned_cell_drops_by_its_own_line_box_and_no_other_does(tmp_p
 
 # ---------------------------------------------------------------- where the cells' lines stand
 
-def cell_thumb(el, inset, valign, z=10.0, fixed=3):
+def cell_thumb(el: JsonObject, inset: float, valign: str, fixed: int) -> SignedRGB:
     """A thumbnail of `grid_element` whose cells' lines stand where a Slides line box `inset` under
-    the row's top (over its bottom) puts them: letters 0.7 em tall on the baseline."""
+    the row's top (over its bottom) puts them: letters 0.7 em tall on the baseline, of 10 pt. The
+    first `fixed` rows are the ones measured."""
     from beamer2slides.emit import ASCENT_EM, LINE_EM
-    img = blank()
+    z = 10.0
+    img = blank(WHITE)
     tops = [10.0]
-    for h in el["row_heights"]:
+    for h in jnums(el, "row_heights"):
         tops.append(tops[-1] + h)
     for y in tops:
         rule(img, y)
-    for c in el["table_cells"]:
+    for c in jobjs(el, "table_cells"):
         c["valign"] = valign
-        base = tops[c["row"]] + inset + ASCENT_EM * z if valign == "top" \
-            else tops[c["row"] + 1] - inset - (LINE_EM - ASCENT_EM) * z
-        x = 10 + 40 * c["col"] + 4
+        row = jint(c, "row")
+        base = tops[row] + inset + ASCENT_EM * z if valign == "top" \
+            else tops[row + 1] - inset - (LINE_EM - ASCENT_EM) * z
+        x = 10 + 40 * jint(c, "col") + 4
         for k in range(5):
-            img[int(round((base - 0.7 * z) * PX)):int(round(base * PX)), int((x + 5 * k) * PX):int((x + 5 * k + 2) * PX)] = 0
-    el["rows_fixed"] = list(range(fixed))
+            img[round((base - 0.7 * z) * PX):round(base * PX),int((x + 5 * k) * PX):int((x + 5 * k + 2) * PX)] = 0
+    el["rows_fixed"] = list[Json](range(fixed))
     return img
 
 
 @pytest.mark.parametrize("valign", ["top", "bottom"])
-def test_the_thumbnail_says_how_far_in_a_cells_line_box_stands(valign):
+def test_the_thumbnail_says_how_far_in_a_cells_line_box_stands(valign: str):
     """hebrew-lesson's cells show their baselines 1.45 pt + 0.968 em under the row's top where the
     strut and the guessed inset put them 5 pt off; comps-analysis' bottom-aligned ones 1.0 pt + the
     line box's descent over the row's bottom."""
     from beamer2slides.deck_thumbs import thumbnail_cell_text
-    el = grid_element(heights=(24, 24, 24))
-    img = cell_thumb(el, 1.5, valign)
+    el = grid_element((24, 24, 24), BLACK)
+    img = cell_thumb(el, 1.5, valign, 3)
     el = through(thumbnail_cell_text, el, img)
     assert el["cell_text_y"] == pytest.approx(1.5, abs=0.6)
 
@@ -496,11 +573,11 @@ def test_cells_in_rows_the_thumbnail_could_not_place_say_nothing():
     """With no row measured only the first row's top is known: two top-aligned cells are too few to
     go by. With one measured, its bottom is known too, and its two bottom-aligned cells still too few."""
     from beamer2slides.deck_thumbs import thumbnail_cell_text
-    el = grid_element(heights=(24, 24, 24))
+    el = grid_element((24, 24, 24), BLACK)
     img = cell_thumb(el, 1.5, "top", fixed=0)
     el = through(thumbnail_cell_text, el, img)
     assert "cell_text_y" not in el
-    el = grid_element(heights=(24, 24, 24))
+    el = grid_element((24, 24, 24), BLACK)
     img = cell_thumb(el, 1.5, "bottom", fixed=1)
     el = through(thumbnail_cell_text, el, img)
     assert "cell_text_y" not in el
@@ -515,13 +592,13 @@ def test_a_cells_line_stands_the_measured_inset_plus_its_line_box():
     assert adopt.cell_line_place(cell_record({"valign": "top", "paragraphs": []}), 1.0) is None
 
 
-def test_a_measured_inset_places_a_cell_by_its_first_or_last_baseline(tmp_path):
+def test_a_measured_inset_places_a_cell_by_its_first_or_last_baseline(tmp_path: Path):
     """The box TeX builds for a cell is placed by its first baseline (`\\slides@t@ht`, from its top to
     there - its height reaches its last) or its last (`\\slides@t@dp`), not by the strut's edge: the
     source says where that baseline stands, `baseline=`, once for the table's top cells and again for
     a bottom one."""
     ir = deck_ir(deck(table()), foreign=True)
-    el = next(e for e in ir["slides"][0]["elements"] if e["kind"] == "table")
+    el = next(e for e in jobjs(ir, "slides", 0, "elements") if e["kind"] == "table")
     el["cell_text_y"] = 1.0
     text = adopt.bootstrap(ir, tmp_path / "tree" / "main.tex", False, None)
     sty = macros(tmp_path)

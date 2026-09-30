@@ -2,22 +2,34 @@
 figures against theme furniture - on synthetic pages."""
 
 import math
+from pathlib import Path
+
+import numpy as np
+import numpy.typing as npt
 
 from beamer2slides import pdf
 from beamer2slides.classify import classify
+from beamer2slides.emit_model import JsonMap, TemplateKey
 from beamer2slides.extract import extract_page, select_overlays
-from beamer2slides.ir import deck_json
+from beamer2slides.ir import DiagramElement, Element, Slide, deck_json, element_json
+from beamer2slides.raw_types import PathItem, RawDoc, RawPage
 from beamer2slides.render import load_png, render_backgrounds
 
-from .test_charts_diagrams import H, W, Page, body_text, deck, elements, lines, rect
+from .json_reads import jnum, jobj, jstr
+from .test_charts_diagrams import H, W, Page, body_text, deck, lines, rect
 from .test_hidden_text import one_page
 
 
 # ---------------------------------------------------------------- overlay steps
 
-def step(index: int, label: str, title: str, words: str, extra_top: str = "", title_size: float = 14.35) -> dict:
+TITLE_SIZE = 14.35
+
+
+def step(index: int, label: str, title: str, words: str, extra_top: str) -> RawPage:
+    """One overlay step's page: its title, `extra_top` (if any) in the top fifth, its words and a
+    footline."""
     page = Page(index, label)
-    page.text(title, 10, 20, size=title_size)
+    page.text(title, 10, 20, size=TITLE_SIZE)
     if extra_top:
         page.text(extra_top, 200, 40, size=8)  # a label or subtitle inside the top fifth
     page.words(words, 30, 120)
@@ -25,8 +37,9 @@ def step(index: int, label: str, title: str, words: str, extra_top: str = "", ti
     return page.raw()
 
 
-def kept(*pages: dict) -> list[int]:
-    raw = {"version": 1, "source": {}, "pages": list(pages)}
+def kept(*pages: RawPage) -> list[int]:
+    raw: RawDoc = {"version": 1, "source": {"pdf": "", "producer": "", "pages": len(pages), "title": ""},
+                   "pages": list(pages)}
     return [p["index"] for p in select_overlays(raw, "last")["pages"]]
 
 
@@ -38,39 +51,51 @@ def test_a_label_drawn_in_the_top_band_on_one_step_does_not_split_the_frame():
 
 
 def test_a_framesubtitle_that_changes_per_step_does_not_split_the_frame():
-    a = step(0, "3", "Regular expressions", "identifiers letters digits", "Identifiers", title_size=14.35)
+    a = step(0, "3", "Regular expressions", "identifiers letters digits", "Identifiers")
     b = step(1, "3", "Regular expressions", "identifiers letters digits numbers", "Numbers")
     assert kept(a, b) == [1]
 
 
 def test_a_step_that_swaps_most_of_its_words_under_the_same_title_is_the_same_frame():
-    a = step(0, "4", "Three noise regimes", "Read noise dominated at low flux the variance is constant")
-    b = step(1, "4", "Three noise regimes", "Shot noise grows with the signal at low flux Poisson applies")
+    a = step(0, "4", "Three noise regimes", "Read noise dominated at low flux the variance is constant", "")
+    b = step(1, "4", "Three noise regimes", "Shot noise grows with the signal at low flux Poisson applies", "")
     assert kept(a, b) == [1]
 
 
 def test_a_title_changed_by_only_keeps_the_frame_when_nearly_everything_else_stays():
     words = "Which of these sorts is stable merge quick heap insertion selection"
-    assert kept(step(0, "10", "Quiz", words), step(1, "10", "Quiz: answer", words)) == [1]
+    assert kept(step(0, "10", "Quiz", words, ""), step(1, "10", "Quiz: answer", words, "")) == [1]
 
 
 def test_uncounted_frames_sharing_a_number_stay_apart():
-    title = step(0, "1", "", "Fatigue of welded joints Maria Lindqvist University")
-    outline = step(1, "1", "Outline", "Motivation Method Results Conclusion")
+    title = step(0, "1", "", "Fatigue of welded joints Maria Lindqvist University", "")
+    outline = step(1, "1", "Outline", "Motivation Method Results Conclusion", "")
     assert kept(title, outline) == [0, 1]
     # the pages of a frame with allowframebreaks: beamer's continuation text on the second
-    a = step(0, "9", "References", "Smith 2019 Deep sets Jones 2020 Graph networks Brown 2021")
-    b = step(1, "9", "References (cont.)", "Kipf 2017 Semi supervised Velickovic 2018 attention Xu 2019")
+    a = step(0, "9", "References", "Smith 2019 Deep sets Jones 2020 Graph networks Brown 2021", "")
+    b = step(1, "9", "References (cont.)", "Kipf 2017 Semi supervised Velickovic 2018 attention Xu 2019", "")
     assert kept(a, b) == [0, 1]
 
 
 # ---------------------------------------------------------------- diagrams
 
-def diagram_of(p) -> dict:
-    return next(e for e in elements(p) if e["kind"] == "diagram")
+def page_slide(p: Page) -> Slide:
+    """The page classified: the contract's slide, as classify returns it."""
+    return deck(p)["slides"][0]
 
 
-def node_texts(diagram: dict) -> list[str]:
+def elements(p: Page) -> list[Element]:
+    return page_slide(p)["elements"]
+
+
+def diagram_of(p: Page) -> DiagramElement:
+    for e in elements(p):
+        if e["kind"] == "diagram":
+            return e
+    raise AssertionError("no diagram on the page")
+
+
+def node_texts(diagram: DiagramElement) -> list[str]:
     return ["".join(r["text"] for par in n["paragraphs"] for r in par) for n in diagram["nodes"] if n["paragraphs"]]
 
 
@@ -91,15 +116,15 @@ def test_edge_labels_whose_baselines_round_apart_stay_two_labels():
     assert "connect" in labels and "SYN+ACK" in labels, labels
 
 
-def pipeline(p: Page) -> list[dict]:
-    """Two boxes and an arrow between them: a native diagram when nothing is see-through."""
-    boxes = [p.draw(rect(x0, 70, x0 + 62, 100), type="fs", fill="#ffffff", stroke="#23373b", width=0.8)
-             for x0 in (62, 150)]
+def pipeline(p: Page) -> None:
+    """Two boxes and an arrow between them: a native diagram when nothing is see-through. The
+    page's drawings 0 and 1 are the boxes, 2 the arrow."""
+    for x0 in (62, 150):
+        p.draw(rect(x0, 70, x0 + 62, 100), type="fs", fill="#ffffff", stroke="#23373b", width=0.8)
     p.text("Raw", 80, 88, 7.97)
     p.text("Model", 165, 88, 7.97)
-    arrow = p.draw(lines((124, 85), (150, 85)), type="s", stroke="#23373b", width=0.8)
+    p.draw(lines((124, 85), (150, 85)), type="s", stroke="#23373b", width=0.8)
     body_text(p)
-    return boxes + [arrow]
 
 
 def test_see_through_nodes_and_lines_keep_a_diagram_a_picture():
@@ -107,9 +132,15 @@ def test_see_through_nodes_and_lines_keep_a_diagram_a_picture():
     p = Page()
     pipeline(p)
     assert any(e["kind"] == "diagram" for e in elements(p))
-    for key, value in (("fill_opacity", 0.302), ("stroke_opacity", 0.302), ("soft_mask", True)):
+    for key in ("fill_opacity", "stroke_opacity", "soft_mask"):
         p = Page()
-        pipeline(p)[1 if key == "fill_opacity" else 2][key] = value
+        pipeline(p)
+        if key == "fill_opacity":
+            p.drawings[1]["fill_opacity"] = 0.302  # a box
+        elif key == "stroke_opacity":
+            p.drawings[2]["stroke_opacity"] = 0.302  # the arrow
+        else:
+            p.drawings[2]["soft_mask"] = True
         els = elements(p)
         assert not any(e["kind"] == "diagram" for e in els) and any(e["kind"] == "image" for e in els), key
 
@@ -169,7 +200,7 @@ def test_bars_of_an_xbar_chart_are_part_of_its_picture():
     p.words("Food", 110, 108)
     p.words("Rent", 110, 161)
     body_text(p)
-    slide = deck(p)["slides"][0]
+    slide = page_slide(p)
     els = slide["elements"]
     assert not slide["panels"] and not any(e["kind"] == "shape" for e in els), [e["kind"] for e in els]
     fig = next(e for e in els if e["kind"] in ("image", "diagram"))  # (a picture in a real chart, with its ticks)
@@ -180,7 +211,7 @@ def test_bars_of_an_xbar_chart_are_part_of_its_picture():
     p.draw(rect(12.91, 184.08, 252.43, 187.47), fill="#f5f5f5")
     p.draw(lines((13.11, 184.08), (13.11, 187.47)), type="s", stroke="#b3b3b3", width=0.4)
     body_text(p)
-    assert len(deck(p)["slides"][0]["panels"]) == 2
+    assert len(page_slide(p)["panels"]) == 2
 
 
 def test_a_box_of_a_footline_of_boxes_is_theme_not_a_figure():
@@ -192,12 +223,12 @@ def test_a_box_of_a_footline_of_boxes_is_theme_not_a_figure():
         p.draw(rect(x0, 246.09, x1, H), fill=fill)
         p.words(text, x0 + 6, 252.3, size=5.98)
     body_text(p, 120)
-    slide = deck(p)["slides"][0]
+    slide = page_slide(p)
     assert not any(e["kind"] in ("image", "shape") for e in slide["elements"]), [e["kind"] for e in slide["elements"]]
     assert not any(b["reason"] == "figure" for b in slide["left_in_background"]), slide["left_in_background"]
 
 
-def chart_over_footline(band_first: bool) -> dict:
+def chart_over_footline(band_first: bool) -> Element:
     p = Page()
     footline = lambda: [p.draw(rect(x0, 246.48, x1, H), fill=fill) for x0, x1, fill in
                         ((0, 151.18, "#a30000"), (151.18, 302.36, "#ececec"), (302.36, W, "#d9d9d9"))]
@@ -210,7 +241,7 @@ def chart_over_footline(band_first: bool) -> dict:
     if not band_first:
         footline()
     body_text(p, 30)
-    return next(e for e in deck(p)["slides"][0]["elements"] if e["kind"] == "image")
+    return next(e for e in elements(p) if e["kind"] == "image")
 
 
 def test_a_figure_ends_where_a_footline_drawn_after_it_begins():
@@ -231,8 +262,12 @@ def test_a_logo_in_the_sidebar_corner_is_not_the_first_word_of_the_title():
     p.text("UofT", 10.54, 26.0, size=9.96, color="#000080")
     p.words("Sensor network", 53.34, 26.0, size=14.35)
     body_text(p, 120)
-    titles = [e for e in elements(p) if e.get("role") == "title"]
-    assert [" ".join("".join(r["text"] for r in par["runs"]) for par in t["paragraphs"]) for t in titles] == ["Sensor network"]
+    titles: list[str] = []
+    for e in elements(p):
+        if e.get("role") == "title":
+            assert e["kind"] == "text", e["kind"]
+            titles.append(" ".join("".join(r["text"] for r in par["runs"]) for par in e["paragraphs"]))
+    assert titles == ["Sensor network"]
 
 
 def test_a_logo_beside_the_last_line_is_no_hole_in_it():
@@ -250,12 +285,12 @@ def test_a_logo_beside_the_last_line_is_no_hole_in_it():
     assert last["bbox"][2] <= end + 1
 
 
-def rounded(x0, y0, x1, y1, r) -> list:
+def rounded(x0: float, y0: float, x1: float, y1: float, r: float) -> list[PathItem]:
     k = 0.448 * r
-    return [["l", [[x0 + r, y0], [x1 - r, y0]]], ["c", [[x1 - r, y0], [x1 - r + k, y0], [x1, y0 + r - k], [x1, y0 + r]]],
-            ["l", [[x1, y0 + r], [x1, y1 - r]]], ["c", [[x1, y1 - r], [x1, y1 - r + k], [x1 - r + k, y1], [x1 - r, y1]]],
-            ["l", [[x1 - r, y1], [x0 + r, y1]]], ["c", [[x0 + r, y1], [x0 + r - k, y1], [x0, y1 - r + k], [x0, y1 - r]]],
-            ["l", [[x0, y1 - r], [x0, y0 + r]]], ["c", [[x0, y0 + r], [x0, y0 + r - k], [x0 + r - k, y0], [x0 + r, y0]]]]
+    return [("l", [[x0 + r, y0], [x1 - r, y0]]), ("c", [[x1 - r, y0], [x1 - r + k, y0], [x1, y0 + r - k], [x1, y0 + r]]),
+            ("l", [[x1, y0 + r], [x1, y1 - r]]), ("c", [[x1, y1 - r], [x1, y1 - r + k], [x1 - r + k, y1], [x1 - r, y1]]),
+            ("l", [[x1 - r, y1], [x0 + r, y1]]), ("c", [[x0 + r, y1], [x0 + r - k, y1], [x0, y1 - r + k], [x0, y1 - r]]),
+            ("l", [[x0, y1 - r], [x0, y0 + r]]), ("c", [[x0, y0 + r], [x0, y0 + r - k], [x0 + r - k, y0], [x0 + r, y0]])]
 
 
 def test_rounded_nodes_keep_their_corner_radius():
@@ -271,12 +306,16 @@ def test_rounded_nodes_keep_their_corner_radius():
     body_text(p)
     el = diagram_of(p)
     assert [n.get("radius") for n in el["nodes"] if n["shape"]] == [3.0, 3.0]
-    assert element_template_keys(el, 1.0) == [("ROUND_RECTANGLE", 0.1, None)] * 2
-    asked = []
-    reqs = diagram_requests(el, "s", "d", 1.0, FontMapper(),
-                            template=lambda key: asked.append(key) or {"id": "tpl", "w": 100, "h": 100})
+    assert element_template_keys(element_json(el), 1.0) == [("ROUND_RECTANGLE", 0.1, None)] * 2
+    asked: list[TemplateKey] = []
+
+    def template(key: TemplateKey) -> JsonMap:
+        asked.append(key)
+        return {"id": "tpl", "w": 100, "h": 100}
+
+    reqs = diagram_requests(element_json(el), "s", "d", 1.0, FontMapper(), template=template)
     assert asked == [("ROUND_RECTANGLE", 0.1, None)] * 2
-    made = [r["createShape"]["shapeType"] for r in reqs if "createShape" in r]
+    made = [jstr(r, "createShape", "shapeType") for r in reqs if "createShape" in r]
     assert made and set(made) == {"TEXT_BOX"}, made  # labels in their own boxes; both nodes copied
 
 
@@ -296,20 +335,25 @@ def test_a_horizontal_first_elbow_is_written_from_its_other_end():
     el = diagram_of(p)
     (ln,) = el["lines"]
     # (the head's tip, where its 0.4 pt mitred outline ends: 0.38 pt past its path)
-    assert ln["bend"] == "vh" and ln["from"] == [140, 100.38] and ln["via"] == [140, 50] and ln["to"] == [60, 50]
+    assert ln.get("bend") == "vh" and ln["from"] == [140, 100.38] and ln.get("via") == [140, 50] and ln["to"] == [60, 50]
     assert (ln["arrow_from"], ln["arrow_to"]) == ("STEALTH_ARROW", None)
-    assert element_template_keys(el, 1.0)[-1] == ("BENT_CONNECTOR", 0.0, None)
-    reqs = diagram_requests(el, "s", "d", 1.0, FontMapper(), template=lambda key: {"id": "tpl", "w": 100, "h": 100})
-    move = next(r["updatePageElementTransform"]["transform"] for r in reqs if "updatePageElementTransform" in r)
+    assert element_template_keys(element_json(el), 1.0)[-1] == ("BENT_CONNECTOR", 0.0, None)
+
+    def template(key: TemplateKey) -> JsonMap:
+        return {"id": "tpl", "w": 100, "h": 100}
+
+    reqs = diagram_requests(element_json(el), "s", "d", 1.0, FontMapper(), template=template)
+    move = next(jobj(r, "updatePageElementTransform", "transform") for r in reqs if "updatePageElementTransform" in r)
     assert (move["translateX"], move["translateY"]) == (140 * 12700, round(100.38 * 12700))
-    assert move["scaleX"] == -0.8 and abs(move["scaleY"] + 0.5038) < 1e-6
-    heads = next(r["updateLineProperties"]["lineProperties"] for r in reqs if "updateLineProperties" in r)
+    assert move["scaleX"] == -0.8 and abs(jnum(move, "scaleY") + 0.5038) < 1e-6
+    heads = next(jobj(r, "updateLineProperties", "lineProperties") for r in reqs if "updateLineProperties" in r)
     assert (heads["startArrow"], heads["endArrow"]) == ("STEALTH_ARROW", "NONE")
-    ends = [r["updateLineProperties"]["lineProperties"] for r in reqs if "updateLineProperties" in r][-1]
-    assert ends["startConnection"]["connectedObjectId"] == "d_n1" and ends["endConnection"]["connectedObjectId"] == "d_n0"
+    ends = [jobj(r, "updateLineProperties", "lineProperties") for r in reqs if "updateLineProperties" in r][-1]
+    assert (jstr(ends, "startConnection", "connectedObjectId") == "d_n1"
+            and jstr(ends, "endConnection", "connectedObjectId") == "d_n0")
 
 
-def test_a_turned_stamp_keeps_its_letters_where_it_crosses_native_words(tmp_path):
+def test_a_turned_stamp_keeps_its_letters_where_it_crosses_native_words(tmp_path: Path) -> None:
     """A pink DRAFT turned 25 degrees over the bullets (tikz overlay): a turned glyph's box is far
     larger than its ink, and the words' x-height bands switched off the F and T it met."""
     c, s = math.cos(math.radians(25)), math.sin(math.radians(25))
@@ -318,13 +362,14 @@ def test_a_turned_stamp_keeps_its_letters_where_it_crosses_native_words(tmp_path
                b"BT 1 0.4 0.6 rg /F1 48 Tf %.4f %.4f %.4f %.4f 90 25 Tm (DRAFT) Tj ET\n" % (c, s, -s, c))
     path = tmp_path / "stamp.pdf"
     path.write_bytes(one_page(content))
-    raw = {"version": 1, "source": {"pdf": str(path), "producer": "", "pages": 1, "title": ""}, "pages": []}
     doc = pdf.Document(path)
     try:
-        raw["pages"] = [extract_page(doc[0], "1")]
-        raw["pages"][0]["frame_label"] = None
+        page = extract_page(doc[0], "1")
     finally:
         doc.close()
+    page["frame_label"] = None
+    raw: RawDoc = {"version": 1, "source": {"pdf": str(path), "producer": "", "pages": 1, "title": ""},
+                   "pages": [page]}
     deck = classify(raw)
     assert [e["kind"] for e in deck["slides"][0]["elements"]] == ["text"]  # both lines native, the stamp not
     [png] = render_backgrounds(path, raw, deck_json(deck), tmp_path / "bg", frozenset())
@@ -334,5 +379,7 @@ def test_a_turned_stamp_keeps_its_letters_where_it_crosses_native_words(tmp_path
         original = doc[0].render(bg.shape[1] / 400)
     finally:
         doc.close()
-    pink = lambda im: int(((im[..., 0] > 200) & (im[..., 1] < 150) & (im[..., 2] > 100) & (im[..., 2] < 200)).sum())
+    def pink(im: npt.NDArray[np.uint8]) -> int:
+        return int(((im[..., 0] > 200) & (im[..., 1] < 150) & (im[..., 2] > 100) & (im[..., 2] < 200)).sum())
+
     assert pink(bg) >= 0.99 * pink(original)

@@ -10,6 +10,7 @@ from beamer2slides.classify import (Line, PageClassifier, Paragraph, Rect, Span,
                                     math_pieces, math_text, negate, type3_symbol)
 from beamer2slides.fonts import FontInfo, font_info, google_font
 from beamer2slides.ir import Run
+from beamer2slides.raw_types import RawSpan
 
 
 @pytest.mark.parametrize("name, family, bold, italic, smallcaps", [
@@ -36,13 +37,13 @@ from beamer2slides.ir import Run
     ("FiraSans-Medium", "sans", False, False, False),                # Medium is not bold
     ("LMRomanCaps10-Regular", "serif", False, False, True),
 ])
-def test_a_font_name_says_its_class_and_style(name, family, bold, italic, smallcaps):
+def test_a_font_name_says_its_class_and_style(name: str, family: str, bold: bool, italic: bool, smallcaps: bool) -> None:
     info = font_info(name)
     assert (info.family, info.bold, info.italic, info.smallcaps) == (family, bold, italic, smallcaps)
 
 
 @pytest.mark.parametrize("name", ["NewTXMI", "txsys", "txmiaX", "PazoMath-Italic", "LibertinusT1Math"])
-def test_newtx_and_friends_math_fonts_are_math(name):
+def test_newtx_and_friends_math_fonts_are_math(name: str) -> None:
     assert font_info(name).family == "math"
 
 
@@ -54,7 +55,8 @@ def test_stand_ins_set_the_pdfs_widths():
     assert google_font("BeraSansMono-Bold") == ("Roboto Mono", 700, False)
     assert google_font("LinLibertineMT") == ("Roboto Mono", 400, False)
     # a math font drawn to match a text face is shown in that face
-    assert google_font("FiraMath-Regular")[0] == "Fira Sans"
+    fira = google_font("FiraMath-Regular")
+    assert fira is not None and fira[0] == "Fira Sans"
     # CMTT-like typewriters stay the calibrated mono substitute
     assert google_font("t1xtt") is None and google_font("CMTT10") is None
 
@@ -65,7 +67,7 @@ def test_stand_ins_set_the_pdfs_widths():
     ("Var(¯", "Var(¯"),  # an accent for the next span's letter is the runs' business
     ("x ˆ y", "x ˆ y"),  # an accent that is over no letter stays
 ])
-def test_ot1_accents_are_composed_with_their_letter(raw, composed):
+def test_ot1_accents_are_composed_with_their_letter(raw: str, composed: str) -> None:
     assert compose_accents(raw, False) == composed
 
 
@@ -97,7 +99,7 @@ def test_opentype_math_slants_its_letters_only():
 
 
 @pytest.mark.parametrize("font", ["CMMI10", "LMMathItalic10-Regular", "NewTXMI", "PazoMath-Italic"])
-def test_tex_math_italic_fonts_are_italic(font):
+def test_tex_math_italic_fonts_are_italic(font: str) -> None:
     assert math_text(font, "τ") == ("τ", True)
 
 
@@ -116,14 +118,16 @@ def test_a_bitmap_ts1_glyph_is_its_symbol_unless_the_page_text_is_bitmap():
     assert type3_symbol("\x88", type3_words=True) == "•"
 
 
-def raw_span(i, text, font, x0, x1, baseline=100.0, size=10.0):
+def raw_span(i: int, text: str, font: str, x0: float, x1: float, baseline: float = 100.0,
+             size: float = 10.0) -> RawSpan:
     return {"id": f"s{i}", "text": text, "font": font, "size": size, "color": "#000000", "alpha": 255,
             "origin": [x0, baseline], "bbox": [x0, baseline - 0.75 * size, x1, baseline + 0.25 * size],
             "dir": [1.0, 0.0], "smallcaps": False}
 
 
-def runs_of(raw_spans: list[dict]) -> list[Run]:
-    page = PageClassifier({"size": [364, 273], "spans": raw_spans, "links": []}, 10)
+def runs_of(raw_spans: list[RawSpan]) -> list[Run]:
+    page = PageClassifier({"index": 0, "label": "1", "size": [364, 273], "spans": raw_spans, "images": [],
+                           "drawings": [], "links": []}, 10)
     line = Line(page.spans())
     return PageClassifier.runs(Paragraph([line]), "", False, None, 0.0)
 

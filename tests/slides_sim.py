@@ -154,7 +154,7 @@ def presentation_of(deck: ObjectMap) -> JsonObject:
             "slides": slides, "layouts": [], "masters": []}
 
 
-def simulate(deck: ObjectMap) -> dict:
+def simulate(deck: ObjectMap) -> JsonObject:
     """`presentation_of`, untyped, for the modules that read it (ir_sources, test_inverse,
     test_fonts_weights): they index the presentation and hand it on as a `Presentation`, which a
     JSON object would make errors of there."""

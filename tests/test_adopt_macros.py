@@ -9,13 +9,20 @@ forms and compared page against page, where lualatex is at hand.
 import re
 import shutil
 import subprocess
+from collections.abc import Sequence
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-from beamer2slides import adopt, adopt_shapes
+from beamer2slides import adopt, adopt_shapes, pdf
+from beamer2slides.adopt_context import Metrics
+from beamer2slides.arrays import Int32
+from beamer2slides.deck_ir_types import TargetShape
+from beamer2slides.json_types import JsonObject
 from .irs import deck_ir
 from beamer2slides.inverse import tex_env
+from beamer2slides.pdf.api import DrawingItem
 from beamer2slides.texmap import build_visible
 
 from . import test_adopt_text as T
@@ -24,11 +31,18 @@ from .test_adopt_shapes import shape, transform
 
 
 @pytest.fixture(autouse=True)
-def no_machine_fonts(monkeypatch, tmp_path):
+def no_machine_fonts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("B2S_FONTS", str(tmp_path / "no-fonts-here"))
 
 
-def sample_deck() -> dict:
+def found(pattern: str, text: str, flags: int) -> re.Match[str]:
+    """The first match of `pattern` in `text`, which the test says is there."""
+    m = re.search(pattern, text, flags)
+    assert m is not None, pattern
+    return m
+
+
+def sample_deck() -> JsonObject:
     """A one-paragraph middle-aligned box, a bulleted two-paragraph one, a rectangle and an ellipse."""
     return T.deck(
         T.box("s_one", T.para("One middle paragraph", runs=[("One middle paragraph", {"fontSize": T.pt(24)})]),
@@ -39,12 +53,12 @@ def sample_deck() -> dict:
         shape("e", "ELLIPSE", 120, 80, transform(420, 180), fill="EA4335"))
 
 
-def written(tmp_path) -> tuple[str, str]:
+def written(tmp_path: Path) -> tuple[str, str]:
     text = adopt.bootstrap(deck_ir(sample_deck(), foreign=True), tmp_path / "tree" / "main.tex", False, None)
     return text, (tmp_path / "tree" / "slides.sty").read_text(encoding="utf-8")
 
 
-def test_the_macros_are_a_package_beside_main_tex(tmp_path):
+def test_the_macros_are_a_package_beside_main_tex(tmp_path: Path) -> None:
     text, sty = written(tmp_path)
     assert sty.startswith("%% slides.sty") and "\\ProvidesPackage{slides}" in sty
     assert "\\makeatletter" not in sty and "\\makeatother" not in sty, "@ is a letter in a .sty"
@@ -59,7 +73,7 @@ def test_the_macros_are_a_package_beside_main_tex(tmp_path):
     assert not re.search(r"^\\slidestyle\{", sty, re.M), "the deck's own styles are in main.tex"
 
 
-def test_a_nested_list_resets_through_babel_s_own_family_selectors(tmp_path):
+def test_a_nested_list_resets_through_babel_s_own_family_selectors(tmp_path: Path) -> None:
     """`\\slides@list` resets a list nested in an open item back to the box's own font and colour
     (`\\slides@basefont`) so an item's own style does not leak into it (`slidebox`'s comment: "a list
     nested in an item starts from the box's own font and colour, not its item's"). Under babel's
@@ -71,7 +85,7 @@ def test_a_nested_list_resets_through_babel_s_own_family_selectors(tmp_path):
     family key, keeps babel's own font-switching commands - which patch those very selectors - in the
     loop; series, shape and colour still reset exactly as they did before."""
     _, sty = written(tmp_path)
-    basefont = re.search(r"\\edef\\slides@basefont\{(.*?)\\let\\slides@basecolor", sty, re.S)[1]
+    basefont = found(r"\\edef\\slides@basefont\{(.*?)\\let\\slides@basecolor", sty, re.S)[1]
     assert "\\fontfamily{\\f@family}" not in basefont, "bypasses babel's rm/sf/tt tracking: " + basefont
     for selector in ("\\rmfamily", "\\sffamily", "\\ttfamily"):
         assert selector in basefont, basefont
@@ -82,7 +96,7 @@ def test_a_nested_list_resets_through_babel_s_own_family_selectors(tmp_path):
     assert "\\ifslides@item\\slides@basefont" in list_def, list_def
 
 
-def test_a_frame_reads_as_boxes_styles_and_words(tmp_path):
+def test_a_frame_reads_as_boxes_styles_and_words(tmp_path: Path) -> None:
     text, _ = written(tmp_path)
     frame = T.frame_of(text)
     assert "\\slidetext[middle]{" in frame and "{One middle paragraph}" in frame
@@ -100,35 +114,41 @@ def test_a_frame_reads_as_boxes_styles_and_words(tmp_path):
     assert marks and marks <= set(re.findall(r"^\\slidemark\{([\w-]+)\}", text, re.M))
 
 
-def test_words_ending_in_a_tie_keep_it_from_par():
+def test_words_ending_in_a_tie_keep_it_from_par() -> None:
     """\\par takes the last glue off a paragraph. Spelled out, a line end followed the words and \\par
     took that; in `\\slidepar{words}` nothing follows, so a closing space stands in for it
     (arabic-training's "Meeting~~~~~~" moved its line, comps-analysis' underlined "Pros ~ ~")."""
-    def words_of(text):
-        el = {"kind": "text", "bbox": [0, 0, 100, 40], "box": {"scale": 1.0, "valign": "top"},
-              "paragraphs": [{"runs": [{"text": text, "size": 10.0}], "slides": {}}]}
+    def words_of(text: str) -> str:
+        el: JsonObject = {"kind": "text", "bbox": [0, 0, 100, 40], "box": {"scale": 1.0, "valign": "top"},
+                          "paragraphs": [{"runs": [{"text": text, "size": 10.0}], "slides": {}}]}
         # a run record always says its colour, so the style is named for black
-        return re.search(r"\{body-black\}\{(.*)\}$", T.box_latex(el, adopt.adopt_context(), ""))[1]
+        return found(r"\{body-black\}\{(.*)\}$", T.box_latex(el, adopt.adopt_context(), ""), 0)[1]
     assert words_of("Meeting  ") == "Meeting~~ "
     assert words_of("Plain words") == "Plain words", "nothing to take: nothing added"
 
 
-def test_text_styles_are_named_by_size_and_what_sets_them_apart():
+def test_text_styles_are_named_by_size_and_what_sets_them_apart() -> None:
     ctx = adopt.adopt_context()
     ctx.body_size, ctx.main_colour = 10.0, "#202124"
-    m = ("9.68", "12", "2.32")
-    def style(size, family="", weight="", italic=False, colour=None, metrics=None):
+    m: Metrics = ("9.68", "12", "2.32")
+
+    def style(size: float, *, family: str, weight: str, italic: bool, colour: str | None,
+              metrics: Metrics | None) -> str:
         return adopt.text_style(ctx, size, family, "", weight, italic, colour, metrics)
-    assert style(10.0, colour="#202124", metrics=m) == "body"
-    assert style(10.0, colour="#202124", metrics=m) == "body", "one name per style"
-    assert style(24.0, weight="bold", colour="#202124", metrics=m) == "title-bold"
-    assert style(15.0, colour="#4285f4", metrics=m) == "heading-blue"
-    assert style(8.0, family="mono", italic=True, metrics=m) == "small-mono-italic"
-    assert style(10.0, weight="w600", colour="#202124", metrics=m) == "body-semibold"
-    assert style(10.0, colour="#202124") == "label", "a bullet's style has no line box"
+    grey = "#202124"
+    assert style(10.0, family="", weight="", italic=False, colour=grey, metrics=m) == "body"
+    assert style(10.0, family="", weight="", italic=False, colour=grey, metrics=m) == "body", "one name per style"
+    assert style(24.0, family="", weight="bold", italic=False, colour=grey, metrics=m) == "title-bold"
+    assert style(15.0, family="", weight="", italic=False, colour="#4285f4", metrics=m) == "heading-blue"
+    assert style(8.0, family="mono", weight="", italic=True, colour=None, metrics=m) == "small-mono-italic"
+    assert style(10.0, family="", weight="w600", italic=False, colour=grey, metrics=m) == "body-semibold"
+    assert style(10.0, family="", weight="", italic=False, colour=grey, metrics=None) == "label", \
+        "a bullet's style has no line box"
     # the same name for another style is told apart by its size, then by a number
-    assert style(10.0, colour="#202124", metrics=("9.68", "14", "4.32")) == "body-10"
-    assert style(10.0, colour="#202124", metrics=("9.68", "15", "5.32")) == "body-10-2"
+    assert style(10.0, family="", weight="", italic=False, colour=grey,
+                 metrics=("9.68", "14", "4.32")) == "body-10"
+    assert style(10.0, family="", weight="", italic=False, colour=grey,
+                 metrics=("9.68", "15", "5.32")) == "body-10-2"
     lines = adopt.style_definitions(ctx)
     assert lines[0] == "\\slidestyle{body}{size=10, color=b2s202124, ascent=9.68, pitch=12, depth=2.32}"
     assert "\\slidestyle{small-mono-italic}{size=8, family=mono, italic, ascent=9.68, pitch=12, depth=2.32}" in lines
@@ -145,19 +165,25 @@ def test_colours_are_named_by_what_they_look_like():
     assert renamed.endswith("b2s4285F4x"), "only whole names"
 
 
-def test_a_rectangle_or_an_ellipse_is_one_line_only_when_the_macro_draws_the_same_path():
+def shape_record(e: JsonObject) -> TargetShape:
+    el = parsed(e)
+    assert isinstance(el, TargetShape), el
+    return el
+
+
+def test_a_rectangle_or_an_ellipse_is_one_line_only_when_the_macro_draws_the_same_path() -> None:
     ctx = adopt.adopt_context()
-    rect, turned, rounded, oval = (adopt_shapes.shape_block(parsed(e), ctx, "", None) for e in shapes_ir())
+    rect, turned, rounded, oval = (adopt_shapes.shape_block(shape_record(e), ctx, "", None) for e in shapes_ir())
     assert rect.startswith("\\sliderect[") and "cycle" not in rect
     # a turned or rounded one too: TikZ turns and rounds the macro's path as it did the spelled one
     assert turned.startswith("\\sliderect[") and "rotate=-30" in turned and "cm=" not in turned
     assert rounded.startswith("\\sliderect[") and "rounded=" in rounded and "controls" not in rounded
     assert oval.startswith("\\slideellipse[")
-    x, y, rx, ry = (float(v) for v in re.search(r"\{([^}]*)\}\s*$", oval)[1].split(","))
+    x, y, rx, ry = (float(v) for v in found(r"\{([^}]*)\}\s*$", oval, 0)[1].split(","))
     assert abs(rx - 120 / 720 * 453.54 / 2) < 0.01 and abs(ry - 80 / 720 * 453.54 / 2) < 0.01
 
 
-def shapes_ir() -> list[dict]:
+def shapes_ir() -> list[JsonObject]:
     from .test_adopt_shapes import elements
     return elements(shape("r", "RECTANGLE", 120, 60, transform(100, 60)),
                     shape("t", "RECTANGLE", 120, 60, transform(100, 160, deg=30)),
@@ -165,7 +191,7 @@ def shapes_ir() -> list[dict]:
                     shape("e", "ELLIPSE", 120, 80, transform(300, 160)))
 
 
-def test_pull_reads_the_words_of_a_slidepar_and_nothing_else():
+def test_pull_reads_the_words_of_a_slidepar_and_nothing_else() -> None:
     latex = ("\\setslidepar{style=body}\n"
              "\\setslidelist{itemize}{1}{style=large,indent=22.68,mark=dot-red,gap=12.25}\n"
              "\\begin{slidebox}[middle,style=body-bold]{29.4,50.4,369.57,157.5}\n"
@@ -189,7 +215,7 @@ def long_form(frame: str) -> str:
     `\\sliderect` / `\\slideellipse` as the `\\slideshape` path they stand for."""
     box_keys = ("top", "middle", "bottom", "inset", "tail")
 
-    def group(s, i):
+    def group(s: str, i: int) -> tuple[str, int]:
         depth = 0
         for j in range(i, len(s)):
             depth += {"{": 1, "}": -1}.get(s[j], 0)
@@ -197,7 +223,8 @@ def long_form(frame: str) -> str:
                 return s[i + 1:j], j + 1
         raise ValueError(s[i:])
 
-    out, i = [], 0
+    out: list[str] = []
+    i = 0
     while True:
         m = re.compile(r"\\slide(text|rect|ellipse)(?:\[([^\]]*)\])?\{").search(frame, i)
         if not m:
@@ -223,12 +250,19 @@ def long_form(frame: str) -> str:
         i = j
 
 
-def lualatex():
+def lualatex_found() -> str | None:
     return shutil.which("lualatex", path=tex_env()["PATH"])
 
 
-@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
-def test_the_short_forms_draw_what_their_long_forms_draw(tmp_path):
+def lualatex() -> str:
+    """lualatex, which a test run only where it was found."""
+    exe = lualatex_found()
+    assert exe is not None
+    return exe
+
+
+@pytest.mark.skipif(not lualatex_found(), reason="lualatex not found")
+def test_the_short_forms_draw_what_their_long_forms_draw(tmp_path: Path) -> None:
     text, _ = written(tmp_path)
     start, end = text.index("\\begin{frame}"), text.index("\\end{frame}") + len("\\end{frame}")
     frame = text[start:end]
@@ -239,7 +273,6 @@ def test_the_short_forms_draw_what_their_long_forms_draw(tmp_path):
     r = subprocess.run([lualatex(), "-interaction=nonstopmode", "-halt-on-error", "main.tex"], cwd=main.parent,
                        capture_output=True, text=True, errors="replace", env=tex_env(), timeout=300)
     assert r.returncode == 0, r.stdout[-3000:]
-    from beamer2slides import pdf
     doc = pdf.Document(main.with_suffix(".pdf"))
     assert len(doc) == 2
     short, spelled = (np.asarray(doc[k].render(3.0)) for k in (0, 1))
@@ -293,8 +326,8 @@ LEVELS = r"""
 """
 
 
-@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
-def test_lists_and_defaults_draw_what_each_paragraph_spelled_out_draws(tmp_path):
+@pytest.mark.skipif(not lualatex_found(), reason="lualatex not found")
+def test_lists_and_defaults_draw_what_each_paragraph_spelled_out_draws(tmp_path: Path) -> None:
     """Nested itemize, an enumerate starting at 3 with one typed label, a paragraph between lists,
     box defaults (style, space), list options, level defaults (`\\setslidelist`) and the deck's
     (`\\setslidepar`) against the same paragraphs each saying everything: pixel for pixel."""
@@ -306,7 +339,6 @@ def test_lists_and_defaults_draw_what_each_paragraph_spelled_out_draws(tmp_path)
     r = subprocess.run([lualatex(), "-interaction=nonstopmode", "-halt-on-error", "main.tex"], cwd=main.parent,
                        capture_output=True, text=True, errors="replace", env=tex_env(), timeout=300)
     assert r.returncode == 0, r.stdout[-3000:]
-    from beamer2slides import pdf
     doc = pdf.Document(main.with_suffix(".pdf"))
     assert len(doc) == 2
     short, spelled = (np.asarray(doc[k].render(3.0)) for k in (0, 1))
@@ -314,12 +346,14 @@ def test_lists_and_defaults_draw_what_each_paragraph_spelled_out_draws(tmp_path)
     assert short.shape == spelled.shape and (short == spelled).all()
 
 
-def test_an_enumerate_counts_and_types_only_the_numbers_it_cannot_count():
+def test_an_enumerate_counts_and_types_only_the_numbers_it_cannot_count() -> None:
     assert adopt.number_format("3.") == ("\\arabic*.", 3)
     assert adopt.number_format("B)") == ("\\Alph*)", 2)
     assert adopt.number_format("iv.") == ("\\roman*.", 4)
     assert adopt.number_format("01.") is None and adopt.number_format("•") is None
-    bullet = lambda n: {"text": n, "size": 10.0, "kind": "number"}
+
+    def bullet(n: str) -> JsonObject:
+        return {"text": n, "size": 10.0, "kind": "number"}
     el = T.prose(*({"runs": [T.words(w)], "bullet": bullet(n), "slides": {"indent_start": 18}}
                    for n, w in (("2.", "Two"), ("3.", "Three"), ("7.", "Seven"))))
     ctx = adopt.adopt_context()
@@ -329,12 +363,11 @@ def test_an_enumerate_counts_and_types_only_the_numbers_it_cannot_count():
     level, = (ln for ln in adopt.level_definitions(ctx) if ln.startswith("\\setslidelist{enumerate}{1}"))
     assert "label={\\arabic*.}" in level, "the level counts"
 
-def compiled(main):
+def compiled(main: Path) -> pdf.PdfDocument:
     r = subprocess.run([lualatex(), "-interaction=nonstopmode", "-halt-on-error", main.name], cwd=main.parent,
                        capture_output=True, text=True, errors="replace", env=tex_env(), timeout=300)
     trouble = "\n".join(l for l in r.stdout.splitlines() if l.startswith(("!", "l.")))
     assert r.returncode == 0, trouble or r.stdout[-3000:]
-    from beamer2slides import pdf
     return pdf.Document(main.with_suffix(".pdf"))
 
 
@@ -344,12 +377,21 @@ def with_frames(text: str, *bodies: str) -> str:
     return text[:start] + "\n".join(f"\\begin{{frame}}[plain]\n{b}\n\\end{{frame}}" for b in bodies) + text[end:]
 
 
-def flat(items) -> list[float]:
-    return [v for it in items for p in it[1:] if isinstance(p, tuple) for v in p]
+def flat(items: Sequence[DrawingItem]) -> list[float]:
+    """Every coordinate of a drawing's items, in order."""
+    out: list[float] = []
+    for it in items:
+        for p in it[1:]:
+            for v in p:
+                if isinstance(v, tuple):
+                    out.extend(v)
+                else:
+                    out.append(v)
+    return out
 
 
-@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
-def test_line_rounded_turned_and_freeform_shapes_draw_the_paths_they_stand_for(tmp_path):
+@pytest.mark.skipif(not lualatex_found(), reason="lualatex not found")
+def test_line_rounded_turned_and_freeform_shapes_draw_the_paths_they_stand_for(tmp_path: Path) -> None:
     """`\\slideline`, `rounded=`, `rotate=`/`flip` and `\\slidefreeform` against the paths they stand
     for, written out with no help from the macros: a line from its first point, TikZ's rounded corners
     from where the top left corner's arc begins (a dash pattern runs from there), the mirror-then-turn
@@ -389,11 +431,11 @@ def test_line_rounded_turned_and_freeform_shapes_draw_the_paths_they_stand_for(t
     assert flat(got[0]["items"]) == pytest.approx([140, 70, 40, 30], abs=0.01), "from the first point to the second"
     assert flat(got[1]["items"])[:2] == pytest.approx([40, 96], abs=0.01), \
         "a rounded rectangle starts where the top left corner's arc begins, 6 bp down the left edge"
-    assert got[3]["fill_opacity"] == pytest.approx(0.5, abs=0.01) and got[3]["even_odd"]
+    assert got[3].get("fill_opacity") == pytest.approx(0.5, abs=0.01) and got[3].get("even_odd")
 
 
-@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
-def test_an_oval_picture_shows_only_its_inscribed_ellipse_and_is_outlined_round(tmp_path):
+@pytest.mark.skipif(not lualatex_found(), reason="lualatex not found")
+def test_an_oval_picture_shows_only_its_inscribed_ellipse_and_is_outlined_round(tmp_path: Path) -> None:
     """yc-seed-white's round portraits (`deck_thumbs.thumbnail_picture_masks`): `oval` clips the
     picture to the ellipse its box inscribes and draws the outline on that ellipse, not the box."""
     from PIL import Image
@@ -404,12 +446,13 @@ def test_an_oval_picture_shows_only_its_inscribed_ellipse_and_is_outlined_round(
     main = tmp_path / "tree" / "main.tex"
     main.write_text(with_frames(text, "\\slidepicture[outline=black,outline width=4,oval]{38,28,104,64}{red.png}\n"
                                       "\\slidepicture{200,30,100,60}{red.png}"), encoding="utf-8")
-    im = np.asarray(compiled(main)[0].render(2.0)).astype(int)
+    im: Int32 = np.asarray(compiled(main)[0].render(2.0)).astype(np.int32)
 
-    def at(x, y):
+    def at(x: float, y: float) -> Int32:
         return im[int(y * 2), int(x * 2), :3]
 
-    red = lambda p: p[0] > 200 and p[1] < 60 and p[2] < 60
+    def red(p: Int32) -> bool:
+        return bool(p[0] > 200 and p[1] < 60 and p[2] < 60)
     # the picture is 104 x 64 from (40, 30), x,y being the outline's outer corner: centre (92, 62)
     assert red(at(92, 62)), "the middle shows the picture"
     assert (at(44, 34) > 240).all(), "a corner of the box is the page"
@@ -418,8 +461,8 @@ def test_an_oval_picture_shows_only_its_inscribed_ellipse_and_is_outlined_round(
     assert red(at(202, 32)) and red(at(298, 88)), "without `oval` the picture fills its box"
 
 
-@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
-def test_straight_quotes_and_double_hyphens_reach_the_pdf_as_typed(tmp_path):
+@pytest.mark.skipif(not lualatex_found(), reason="lualatex not found")
+def test_straight_quotes_and_double_hyphens_reach_the_pdf_as_typed(tmp_path: Path) -> None:
     """saudi-cats' 'Bissas' came out curly: fontspec's TeX ligatures turn ' " ` -- into ’ ” ‘ – whatever
     spelling reaches the font, so adopt's escapes alone never kept them (`TEX_LIGATURES_OFF`)."""
     text, _ = written(tmp_path)
@@ -430,9 +473,9 @@ def test_straight_quotes_and_double_hyphens_reach_the_pdf_as_typed(tmp_path):
     assert re.sub(r"\s", "", got) == words.replace(" ", "")
 
 
-def lines_of(page) -> list[str]:
+def lines_of(page: pdf.PdfPage) -> list[str]:
     """The page's words line by line, top to bottom."""
-    rows: dict[float, list] = {}
+    rows: dict[float, list[pdf.Char]] = {}
     for ch in page.chars():
         if ch.c.strip():
             rows.setdefault(round(ch.origin[1], 1), []).append(ch)
@@ -444,8 +487,8 @@ JUSTIFIED = ("The board does not make operational, product feature prioritizatio
              "board level.")
 
 
-@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
-def test_a_justified_paragraph_breaks_where_its_ragged_twin_breaks(tmp_path):
+@pytest.mark.skipif(not lualatex_found(), reason="lualatex not found")
+def test_a_justified_paragraph_breaks_where_its_ragged_twin_breaks(tmp_path: Path) -> None:
     """Slides fills a justified line as it fills a ragged one and only then spreads its spaces. TeX's
     `\\tolerance` broke that both ways: at 9999 a line that needed more stretch than its spaces had was
     refused and the one before it ran overfull, past the page (ua-space's hand-indented Ukrainian); at
@@ -453,8 +496,8 @@ def test_a_justified_paragraph_breaks_where_its_ragged_twin_breaks(tmp_path):
     across the box (creandum-board 23). A justified space stretches without limit instead: every line
     is as good as any, and the lines are the ragged paragraph's."""
     text, _ = written(tmp_path)
-    style = re.search(r"^\\slidestyle\{([^}]+)\}", text, re.M).group(1)
-    bodies = []
+    style = found(r"^\\slidestyle\{([^}]+)\}", text, re.M).group(1)
+    bodies: list[str] = []
     for w in range(150, 290, 6):
         par = f"\\slidepar[style={style}]{{\\ \\ \\ {JUSTIFIED}}}"
         bodies.append(f"\\begin{{slidebox}}[justify]{{10,10,{w},120}}{par}\\end{{slidebox}}")
@@ -470,8 +513,8 @@ def test_a_justified_paragraph_breaks_where_its_ragged_twin_breaks(tmp_path):
         assert all(ch.box[2] <= right for ch in doc[k].chars()), (w, "past the box")
 
 
-@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
-def test_a_slidetable_puts_its_cells_fills_and_borders_where_the_deck_has_them(tmp_path):
+@pytest.mark.skipif(not lualatex_found(), reason="lualatex not found")
+def test_a_slidetable_puts_its_cells_fills_and_borders_where_the_deck_has_them(tmp_path: Path) -> None:
     """test_adopt_tables' table (a header over two columns, a first cell over two rows, a fill Slides
     does not draw, a border inside a merge) compiled: every word, fill and rule where Slides has it."""
     from .irs import deck_ir as read
@@ -484,10 +527,10 @@ def test_a_slidetable_puts_its_cells_fills_and_borders_where_the_deck_has_them(t
     x0, y0 = round(50 / scale, 1), round(80 / scale, 1)
     xs = [x0, x0 + 100 / scale, x0 + 160 / scale, x0 + 220 / scale]
     ys = [y0, y0 + 30 / scale, y0 + 90 / scale, y0 + 120 / scale]
-    inset = float(re.search(r"inset=([\d.]+)", text)[1])
+    inset = float(found(r"inset=([\d.]+)", text, 0)[1])
     chars = page.chars()
 
-    def word(w):
+    def word(w: str) -> tuple[float, float, float, list[pdf.Char]]:
         s = "".join(ch.c for ch in chars)
         i = s.index(w)
         run = chars[i:i + len(w)]
@@ -506,7 +549,7 @@ def test_a_slidetable_puts_its_cells_fills_and_borders_where_the_deck_has_them(t
     assert (top + bottom) / 2 == pytest.approx((ys[1] + ys[3]) / 2, abs=1.5), "in the middle of its two rows"
     draws = page.drawings()
 
-    def filled(rgb):
+    def filled(rgb: str) -> list[pdf.Drawing]:
         return [dr for dr in draws if dr.get("fill") and all(abs(v * 255 - int(rgb[k:k + 2], 16)) < 1.5
                                                              for v, k in zip(dr["fill"], (0, 2, 4)))]
     (blue,), (green,) = filled("CCE5FF"), filled("00FF00")
@@ -547,8 +590,8 @@ def test_only_a_script_s_own_fallback_face_asks_the_tab_macro_to_forgive_it():
     assert "\\slidestabf{36.00pt}{" in tex and "余暇" in tex, tex
 
 
-@pytest.mark.skipif(not lualatex(), reason="lualatex not found")
-def test_the_forgiving_tab_macro_snaps_a_small_overshoot_back_but_the_plain_one_never_does(tmp_path):
+@pytest.mark.skipif(not lualatex_found(), reason="lualatex not found")
+def test_the_forgiving_tab_macro_snaps_a_small_overshoot_back_but_the_plain_one_never_does(tmp_path: Path) -> None:
     """Direct probes of `\\slidestab` and `\\slidestabf`'s own arithmetic (`adopt.SLIDES_TABS`), the
     widths they see stood in for by `\\hbox to`, so the result depends on nothing but the macros: a
     pen already on a stop (two tabs back to back, `TAB0`/`PLAIN0`) always advances a full stop for
@@ -562,7 +605,7 @@ def test_the_forgiving_tab_macro_snaps_a_small_overshoot_back_but_the_plain_one_
     stop = adopt.TAB_STOP
     tol = stop * adopt.TAB_TOLERANCE
 
-    def probe(name, macro, width, tag):
+    def probe(name: str, macro: str, width: float, tag: str) -> str:
         return (f"\\global\\slidesx=0pt\\leavevmode\\hbox{{\\{macro}{{{stop:.2f}pt}}"
                 f"{{\\hbox to {width:.2f}pt{{}}}}}}\\typeout{{{tag}=\\the\\slidesx}}")
 

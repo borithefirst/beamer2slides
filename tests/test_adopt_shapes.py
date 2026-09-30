@@ -3,75 +3,124 @@ adopt_shapes). Offline: hand-made `presentations.get` answers, no TeX and no Goo
 
 import math
 import re
+from pathlib import Path
 
 import pytest
 
 from beamer2slides import adopt, adopt_shapes
 from beamer2slides.deck_ir import frame
+from beamer2slides.deck_ir_types import TargetShape
+from beamer2slides.json_types import Json, JsonObject
 from .irs import deck_ir
 from beamer2slides.adopt_context import adopt_context
 from .deck_records import parsed, record
+from .json_reads import jnum, jnums, jobj, jobjs
 
 EMU = 12700
+BLUE = "4285F4"                          # the fill a shape of these tests has unless it says
+STRAIGHT = ("STRAIGHT_CONNECTOR_1", "STRAIGHT")   # a line's type and category unless it says
+
+
+def as_written(text: str) -> str:
+    return text
 
 
 @pytest.fixture(autouse=True)
-def lengths_as_written(monkeypatch):
+def lengths_as_written(monkeypatch: pytest.MonkeyPatch) -> None:
     """These tests read the writers' lengths; their rewriting into bp is test_adopt's
     `test_lengths_are_written_in_pdf_points_and_the_deck_words_are_left_alone`."""
-    monkeypatch.setattr(adopt, "to_bp", lambda text: text)
+    monkeypatch.setattr(adopt, "to_bp", as_written)
 
 @pytest.fixture(autouse=True)
-def no_machine_fonts(monkeypatch, tmp_path):
+def no_machine_fonts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("B2S_FONTS", str(tmp_path / "no-fonts-here"))
 
 
-def pt(v: float) -> dict:
+def pt(v: float) -> JsonObject:
     return {"magnitude": v * EMU, "unit": "EMU"}
 
 
-def solid(hexc: str, alpha: float = 1.0) -> dict:
+def solid(hexc: str, alpha: float) -> JsonObject:
     r, g, b = (int(hexc[i:i + 2], 16) / 255 for i in (0, 2, 4))
     return {"solidFill": {"color": {"rgbColor": {"red": r, "green": g, "blue": b}}, "alpha": alpha}}
 
 
-def transform(x: float, y: float, deg: float = 0.0, flip_h: bool = False, flip_v: bool = False) -> dict:
-    """Slides' transform for an element turned `deg` clockwise (y down) about its corner, mirrored first."""
+def transform(x: float, y: float, deg: float = 0.0, flip_h: bool = False, flip_v: bool = False) -> JsonObject:
+    """Slides' transform for an element turned `deg` clockwise (y down) about its corner, mirrored first.
+
+    (Its defaults, and `shape`'s, are kept for test_adopt_macros, which calls both without them.)"""
     c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg))
     fx, fy = (-1 if flip_h else 1), (-1 if flip_v else 1)
     return {"scaleX": c * fx, "shearX": -s * fy, "shearY": s * fx, "scaleY": c * fy,
             "translateX": x * EMU, "translateY": y * EMU, "unit": "EMU"}
 
 
-def shape(oid, kind, w, h, tf, fill="4285F4", outline=None, **props) -> dict:
-    sp = {"shapeBackgroundFill": solid(fill) if isinstance(fill, str) else (fill or {"propertyState": "NOT_RENDERED"})}
+def turned(x: float, y: float, deg: float) -> JsonObject:
+    """`transform` turned `deg`, not mirrored."""
+    return transform(x, y, deg=deg, flip_h=False, flip_v=False)
+
+
+def at(x: float, y: float) -> JsonObject:
+    """`transform` of an upright element with its corner at (x, y)."""
+    return turned(x, y, 0.0)
+
+
+def shape(oid: str, kind: str | None, w: float, h: float, tf: JsonObject, fill: str | JsonObject | None = BLUE,
+          outline: str | None = None, **props: Json) -> JsonObject:
+    """A shape element: `fill` a colour, a whole fill, or None for none; `outline` a colour or None, `props`
+    more of the outline's properties."""
+    sp: JsonObject = {"shapeBackgroundFill": solid(fill, 1.0) if isinstance(fill, str)
+                      else (fill or {"propertyState": "NOT_RENDERED"})}
     if outline:
-        sp["outline"] = {"outlineFill": solid(outline), "weight": pt(3), "propertyState": "RENDERED", **props}
-    pe = {"objectId": oid, "size": {"width": pt(w), "height": pt(h)}, "transform": tf,
-          "shape": {"shapeProperties": sp}}
+        sp["outline"] = {"outlineFill": solid(outline, 1.0), "weight": pt(3), "propertyState": "RENDERED", **props}
+    body: JsonObject = {"shapeProperties": sp}
     if kind:
-        pe["shape"]["shapeType"] = kind
-    return pe
+        body["shapeType"] = kind
+    return {"objectId": oid, "size": {"width": pt(w), "height": pt(h)}, "transform": tf, "shape": body}
 
 
-def line(oid, w, h, tf, **lp) -> dict:
-    kind, category = lp.pop("line_type", "STRAIGHT_CONNECTOR_1"), lp.pop("category", "STRAIGHT")
-    props = {"lineFill": solid("EA4335"), "weight": pt(2), **lp}
+def line(oid: str, w: float, h: float, tf: JsonObject, *, line_type: str, category: str, **lp: Json) -> JsonObject:
+    props: JsonObject = {"lineFill": solid("EA4335", 1.0), "weight": pt(2), **lp}
     return {"objectId": oid, "size": {"width": pt(w), "height": pt(h)}, "transform": tf,
-            "line": {"lineType": kind, "lineCategory": category, "lineProperties": props}}
+            "line": {"lineType": line_type, "lineCategory": category, "lineProperties": props}}
 
 
-def deck(*elements) -> dict:
+def straight(oid: str, w: float, h: float, tf: JsonObject) -> JsonObject:
+    """A straight connector with no heads."""
+    kind, category = STRAIGHT
+    return line(oid, w, h, tf, line_type=kind, category=category)
+
+
+def deck(*elements: JsonObject) -> JsonObject:
     """A 720 x 405 pt deck with one slide holding `elements` (IR units are pt / 720 * 453.54)."""
+    pes: list[Json] = list(elements)
     return {"presentationId": "p", "title": "t", "pageSize": {"width": pt(720), "height": pt(405)},
             "masters": [{"objectId": "m", "pageElements": []}],
             "layouts": [{"objectId": "L", "layoutProperties": {"masterObjectId": "m"}, "pageElements": []}],
             "slides": [{"objectId": "s", "slideProperties": {"layoutObjectId": "L"},
-                        "pageElements": list(elements)}]}
+                        "pageElements": pes}]}
 
 
-def elements(*pes) -> list[dict]:
-    return deck_ir(deck(*pes), foreign=True)["slides"][0]["elements"]
+def foreign(pres: JsonObject) -> JsonObject:
+    """`pres` read as adopt reads a foreign deck."""
+    return jobj(deck_ir(pres, foreign=True))
+
+
+def elements(*pes: JsonObject) -> list[JsonObject]:
+    return jobjs(foreign(deck(*pes)), "slides", 0, "elements")
+
+
+def shape_record(el: JsonObject) -> TargetShape:
+    sh = parsed(el)
+    assert isinstance(sh, TargetShape)
+    return sh
+
+
+def shape_of(d: JsonObject) -> TargetShape:
+    """The record of a test's partial shape element."""
+    sh = record(d)
+    assert isinstance(sh, TargetShape)
+    return sh
 
 
 # ---------------------------------------------------------------- the frame of an element
@@ -112,62 +161,62 @@ def test_a_line_with_no_height_still_has_a_frame():
 
 def test_a_shape_keeps_its_preset_fill_alpha_outline_and_dashes():
     fill = solid("34A853", 0.5)
-    el, = elements(shape("a", "STAR_5", 100, 100, transform(10, 10), fill=fill, outline="000000",
+    el, = elements(shape("a", "STAR_5", 100, 100, at(10, 10), fill=fill, outline="000000",
                          dashStyle="DASH"))
     assert el["shape_type"] == "STAR_5" and el["fill"] == "#34a853" and el["fill_alpha"] == 0.5
     assert el["outline"] == "#000000" and el["dash"] == "DASH"
-    assert el["weight"] == pytest.approx(3 * 453.54 / 720, abs=1e-3)
+    assert jnum(el, "weight") == pytest.approx(3 * 453.54 / 720, abs=1e-3)
     assert "frame" not in el, "an upright shape needs no frame"
 
 
 def test_a_fill_at_alpha_zero_is_no_fill():
     """How Slides hides a fill without switching it off (sc-memphis' rings, sc-dark-modern's frames):
     drawn, it was a black square."""
-    el, = elements(shape("a", "RECTANGLE", 50, 50, transform(0, 0), fill=solid("000000", 0.0), outline="FFFFFF"))
+    el, = elements(shape("a", "RECTANGLE", 50, 50, at(0, 0), fill=solid("000000", 0.0), outline="FFFFFF"))
     assert el["fill"] is None and el["outline"] == "#ffffff"
-    assert elements(shape("b", "RECTANGLE", 50, 50, transform(0, 0), fill=solid("000000", 0.0))) == []
+    assert elements(shape("b", "RECTANGLE", 50, 50, at(0, 0), fill=solid("000000", 0.0), outline=None)) == []
 
 
 def test_a_freeform_is_a_custom_shape():
-    el, = elements(shape("a", None, 40, 40, transform(0, 0)))
+    el, = elements(shape("a", None, 40, 40, at(0, 0), fill=BLUE, outline=None))
     assert el["shape_type"] == "CUSTOM"
 
 
 def test_a_turned_shape_carries_its_frame_and_a_bbox_on_the_page():
-    el, = elements(shape("a", "RECTANGLE", 100, 20, transform(200, 100, deg=90)))
-    assert el["frame"]["rotation"] == pytest.approx(90.0)
-    x0, y0, x1, y1 = el["bbox"]
+    el, = elements(shape("a", "RECTANGLE", 100, 20, turned(200, 100, 90), fill=BLUE, outline=None))
+    assert jnum(el, "frame", "rotation") == pytest.approx(90.0)
+    x0, y0, x1, y1 = jnums(el, "bbox")
     assert (x1 - x0) < (y1 - y0), "the bounding box is the turned one"
 
 
 def test_a_text_box_on_a_panel_keeps_its_fill_and_outline():
-    pe = shape("t", "TEXT_BOX", 200, 50, transform(10, 10), fill="FFEEAA", outline="333333")
-    pe["shape"]["text"] = {"textElements": [{"paragraphMarker": {"style": {}}},
-                                            {"textRun": {"content": "words\n", "style": {}}}]}
+    pe = shape("t", "TEXT_BOX", 200, 50, at(10, 10), fill="FFEEAA", outline="333333")
+    jobj(pe, "shape")["text"] = {"textElements": [{"paragraphMarker": {"style": {}}},
+                                                  {"textRun": {"content": "words\n", "style": {}}}]}
     el, = elements(pe)
     assert el["kind"] == "text" and el["fill"] == "#ffeeaa" and el["outline_color"] == "#333333"
 
 
 def test_pull_reads_shapes_as_before():
     """Nothing of this reaches a converted deck's read: no frame, no alpha, no shape_type on panels."""
-    pe = shape("a", "RECTANGLE", 100, 20, transform(200, 100, deg=30), fill=solid("000000", 0.0))
-    for el in deck_ir(deck(pe))["slides"][0]["elements"]:
+    pe = shape("a", "RECTANGLE", 100, 20, turned(200, 100, 30), fill=solid("000000", 0.0), outline=None)
+    for el in jobjs(jobj(deck_ir(deck(pe))), "slides", 0, "elements"):
         assert "frame" not in el and "fill_alpha" not in el
 
 
 # ---------------------------------------------------------------- lines
 
 def test_a_line_says_what_its_heads_dashes_and_route_are():
-    el, = elements(line("l", 100, 50, transform(10, 10), startArrow="OPEN_CIRCLE", endArrow="STEALTH_ARROW",
+    el, = elements(line("l", 100, 50, at(10, 10), startArrow="OPEN_CIRCLE", endArrow="STEALTH_ARROW",
                         dashStyle="DOT", line_type="BENT_CONNECTOR_3", category="BENT"))
     assert el["start_arrow"] == "OPEN_CIRCLE" and el["end_arrow"] == "STEALTH_ARROW"
     assert el["dash"] == "DOT" and el["line_type"] == "BENT_CONNECTOR_3" and el["category"] == "BENT"
-    assert el["frame"]["size"][0] > 0
+    assert jnum(el, "frame", "size", 0) > 0
 
 
-def test_an_elbow_connector_is_drawn_in_its_frame_with_its_heads(tmp_path):
-    text = adopt.bootstrap(deck_ir(deck(line("l", 100, 50, transform(10, 10), endArrow="FILL_ARROW",
-                                             line_type="BENT_CONNECTOR_3", category="BENT")), foreign=True),
+def test_an_elbow_connector_is_drawn_in_its_frame_with_its_heads(tmp_path: Path):
+    text = adopt.bootstrap(foreign(deck(line("l", 100, 50, at(10, 10), endArrow="FILL_ARROW",
+                                             line_type="BENT_CONNECTOR_3", category="BENT"))),
                            tmp_path / "main.tex", False, None)
     path = next(l for l in text.splitlines() if "\\path" in l)
     assert path.count("--") == 3, "three legs"
@@ -176,11 +225,12 @@ def test_an_elbow_connector_is_drawn_in_its_frame_with_its_heads(tmp_path):
     assert ">={Triangle[" in (tmp_path / "slides.sty").read_text(encoding="utf-8")
 
 
-def test_a_line_that_says_nothing_of_its_kind_is_a_freeform_and_not_drawn(tmp_path):
+def test_a_line_that_says_nothing_of_its_kind_is_a_freeform_and_not_drawn(tmp_path: Path):
     """journey-maps s2: the corner-to-corner segment of a filled polygon's box is ink it does not have."""
-    pe = line("l", 100, 50, transform(10, 10))
-    del pe["line"]["lineType"], pe["line"]["lineCategory"]
-    text = adopt.bootstrap(deck_ir(deck(pe), foreign=True), tmp_path / "main.tex", False, None)
+    pe = straight("l", 100, 50, at(10, 10))
+    body = jobj(pe, "line")
+    del body["lineType"], body["lineCategory"]
+    text = adopt.bootstrap(foreign(deck(pe)), tmp_path / "main.tex", False, None)
     assert "\\path" not in text
 
 
@@ -190,7 +240,7 @@ def test_a_line_that_says_nothing_of_its_kind_is_a_freeform_and_not_drawn(tmp_pa
                                   "RIGHT_ARROW", "CHEVRON", "HEXAGON", "DONUT", "PIE", "ARC", "CAN", "CUBE",
                                   "WEDGE_ROUND_RECTANGLE_CALLOUT", "FLOW_CHART_DOCUMENT", "HEART", "PLUS",
                                   "SNIP_2_DIAGONAL_RECTANGLE", "IRREGULAR_SEAL_1", "BRACE_PAIR", "CLOUD"])
-def test_a_preset_is_drawn_inside_its_box(kind):
+def test_a_preset_is_drawn_inside_its_box(kind: str):
     """Every point a preset's paths pass through stays (nearly) in the frame (0,0)-(w,-h), callout
     tails aside. (Bezier control points may lie outside: OOXML's document wave and heart have them.)"""
     import re
@@ -213,60 +263,61 @@ def test_known_preset_tells_a_real_geometry_from_the_rectangle_fallback():
     assert adopt_shapes.known_preset("star_5")     # case-insensitive
     assert not adopt_shapes.known_preset("CURVED_UP_ARROW")
     assert not adopt_shapes.known_preset("NOT_A_SHAPE")
-    assert adopt_shapes.known_preset(None)         # no name at all: shape_block's own RECTANGLE default
+    assert adopt_shapes.known_preset("")           # no name at all: shape_block's own RECTANGLE default
 
 
 def test_an_unknown_preset_is_a_rectangle():
     assert adopt_shapes.preset("NOT_A_SHAPE", 10, 10, None) is None
-    out = adopt_shapes.shape_block(record({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "NOT_A_SHAPE",
-                                           "fill": "#ff0000"}), adopt_context(), "", None)
+    out = adopt_shapes.shape_block(shape_of({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "NOT_A_SHAPE",
+                                             "fill": "#ff0000"}), adopt_context(), "", None)
     assert out.strip() == "\\sliderect[fill=red]{0,0,10,10}", out
 
 
 def test_a_turned_shape_is_drawn_through_its_transform():
-    el, = elements(shape("a", "RECTANGLE", 100, 20, transform(200, 100, deg=30), outline="000000"))
-    out = adopt_shapes.shape_block(parsed(el), adopt_context(), "", None)
+    el, = elements(shape("a", "RECTANGLE", 100, 20, turned(200, 100, 30), fill=BLUE, outline="000000"))
+    out = adopt_shapes.shape_block(shape_record(el), adopt_context(), "", None)
     assert out.startswith("\\sliderect[") and "fill=" in out and "draw=" in out
     # turned by its angle (TikZ counts the other way) about the centre of its upright box, which is
     # the shape's own size and has the centre of the turned shape's bounds
     assert "rotate=-30]" in out and "cm=" not in out
     x, y, w, h = (float(v) for v in out.split("{")[1].split("}")[0].split(","))
     assert (w, h) == pytest.approx((100 * 453.54 / 720, 20 * 453.54 / 720), abs=0.01)
-    bx0, by0, bx1, by1 = el["bbox"]
+    bx0, by0, bx1, by1 = jnums(el, "bbox")
     assert (x + w / 2, y + h / 2) == pytest.approx(((bx0 + bx1) / 2, (by0 + by1) / 2), abs=0.06)
 
 
 def test_transparency_and_dashes_become_tikz_options():
     ctx = adopt_context()
-    fo, so = adopt_shapes.style_options(record({"kind": "shape", "bbox": [0, 0, 10, 10], "fill": "#00ff00",
-                                                "fill_alpha": 0.25, "outline": "#000000", "outline_alpha": 0.5,
-                                                "weight": 2.0, "dash": "DASH"}), ctx, False)
+    fo, so = adopt_shapes.style_options(shape_of({"kind": "shape", "bbox": [0, 0, 10, 10], "fill": "#00ff00",
+                                                  "fill_alpha": 0.25, "outline": "#000000", "outline_alpha": 0.5,
+                                                  "weight": 2.0, "dash": "DASH"}), ctx, False)
     assert "fill opacity=0.250" in fo and "draw opacity=0.500" in so
     assert "dash pattern=on 8pt off 6pt" in so and "line width=2pt" in so
 
 
 def test_a_freeform_is_drawn_as_its_box():
-    out = adopt_shapes.shape_block(record({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "CUSTOM",
-                                           "fill": "#ff0000"}), adopt_context(), "", None)
+    out = adopt_shapes.shape_block(shape_of({"kind": "shape", "bbox": [0, 0, 10, 10], "shape_type": "CUSTOM",
+                                             "fill": "#ff0000"}), adopt_context(), "", None)
     assert "\\sliderect" in out and "controls" not in out
 
 
 # ------------------------------------------- the deck's own names, and points that belong in a file
 
-def alike(n: int, kind: str = "STAR_5", fill: str = "FFCC00", outline: str = "0000FF") -> list[dict]:
-    """`n` shapes of one size drawn in one look, at places of their own."""
-    return [shape(f"s{i}", kind, 40, 40, transform(10 + 50 * i, 10), fill=fill, outline=outline)
+def alike(n: int) -> list[JsonObject]:
+    """`n` five-pointed stars of one size drawn in one look (yellow, outlined blue), at places of their own."""
+    return [shape(f"s{i}", "STAR_5", 40, 40, at(10 + 50 * i, 10), fill="FFCC00", outline="0000FF")
             for i in range(n)]
 
 
-def boxes(n: int) -> list[dict]:
-    return [shape(f"r{i}", "RECTANGLE", 60, 20, transform(10, 200 + 30 * i), fill="123456") for i in range(n)]
+def boxes(n: int) -> list[JsonObject]:
+    return [shape(f"r{i}", "RECTANGLE", 60, 20, at(10, 200 + 30 * i), fill="123456", outline=None)
+            for i in range(n)]
 
 
-def test_a_look_the_deck_draws_again_and_again_becomes_a_name(tmp_path):
+def test_a_look_the_deck_draws_again_and_again_becomes_a_name(tmp_path: Path):
     """A person reading the source should meet a shape once: shapes drawn alike name the look, and
     the preamble says once what the name is. Twice is not a repetition - those keep their keys."""
-    text = adopt.bootstrap(deck_ir(deck(*alike(3), *boxes(2)), foreign=True), tmp_path / "main.tex", False, None)
+    text = adopt.bootstrap(foreign(deck(*alike(3), *boxes(2))), tmp_path / "main.tex", False, None)
     keys = dict(re.findall(r"\\slideshapestyle\{([\w-]+)\}\{([^}]*)\}", text))
     assert keys == {"fill-yellow-outline-blue": "fill=Yellow,draw=blue,line width=1.89pt"}
     assert text.count("[fill-yellow-outline-blue]") == 3
@@ -276,7 +327,7 @@ def test_a_look_the_deck_draws_again_and_again_becomes_a_name(tmp_path):
 def test_a_style_name_is_never_a_word_tikz_reads_as_a_colour():
     """TikZ reads a bare `red` among a path's options as the colour red, so a style called `red`
     would take that word away from anyone editing the frame."""
-    taken: set = set()
+    taken: set[str] = set()
     assert adopt_shapes.style_word("fill=red", taken) == "fill-red"
     assert adopt_shapes.style_word("draw=red,line width=1pt", taken) == "outline-red"
     # two looks alike but for the weight are told apart by it, as `adopt.text_style` uses the size
@@ -285,22 +336,24 @@ def test_a_style_name_is_never_a_word_tikz_reads_as_a_colour():
         == "fill-red-faded-dashed"
 
 
-def test_a_named_look_can_still_be_changed_on_one_shape(tmp_path):
+def test_a_named_look_can_still_be_changed_on_one_shape(tmp_path: Path):
     """A name must make an edit cheaper, not dearer: `\\sliderect[card,fill=Red]{...}` recolours one
     card and leaves the rest, because TikZ takes the last key that sets a property."""
-    adopt.bootstrap(deck_ir(deck(*alike(3)), foreign=True), tmp_path / "main.tex", False, None)
+    adopt.bootstrap(foreign(deck(*alike(3))), tmp_path / "main.tex", False, None)
     sty = (tmp_path / "slides.sty").read_text(encoding="utf-8")
     assert "\\newcommand\\slideshapestyle[2]{\\tikzset{#1/.style={#2}}}" in sty
 
 
-def test_a_path_of_too_many_points_to_read_keeps_them_in_a_file(tmp_path):
+def test_a_path_of_too_many_points_to_read_keeps_them_in_a_file(tmp_path: Path):
     """As a traced freeform's outline does (`traced_block`): a five-pointed star is twenty numbers
     that nobody edits by hand, and in the frame they bury the slide's words. `\\slidepath` expands to
     the very `\\path` the frame held, so nothing moves, and the shape is still a `\\slideshape`."""
-    text = adopt.bootstrap(deck_ir(deck(*alike(3)), foreign=True), tmp_path / "main.tex", False, None)
+    text = adopt.bootstrap(foreign(deck(*alike(3))), tmp_path / "main.tex", False, None)
     drawn = [ln.strip() for ln in text.splitlines() if "\\slidepath" in ln]
     assert len(drawn) == 3 and all(ln.startswith("\\slideshape{") for ln in drawn)
-    rel = re.search(r"\{(shapes/star5-\w+\.tex)\}", drawn[0]).group(1)
+    found = re.search(r"\{(shapes/star5-\w+\.tex)\}", drawn[0])
+    assert found is not None
+    rel = found.group(1)
     points = (tmp_path / rel).read_text(encoding="utf-8").strip()
     assert len(adopt_shapes.NUMBER.findall(points)) == 20 and ";" not in points
     assert len(adopt_shapes.NUMBER.findall(drawn[0].split("{shapes/")[0])) == 4, "the box, and nothing else"
@@ -312,43 +365,47 @@ def test_a_path_of_too_many_points_to_read_keeps_them_in_a_file(tmp_path):
     assert "\\newcommand\\slidepath[2][]" in sty and "\\noexpand\\path[#1]" in sty
 
 
-def test_a_path_short_enough_to_read_stays_in_the_frame(tmp_path):
+def test_a_path_short_enough_to_read_stays_in_the_frame(tmp_path: Path):
     """The file is for coordinates nobody reads; an elbow connector's three legs are the shape."""
-    text = adopt.bootstrap(deck_ir(deck(line("l", 100, 50, transform(10, 10), line_type="BENT_CONNECTOR_3",
-                                             category="BENT")), foreign=True), tmp_path / "main.tex", False, None)
+    text = adopt.bootstrap(foreign(deck(line("l", 100, 50, at(10, 10), line_type="BENT_CONNECTOR_3",
+                                             category="BENT"))), tmp_path / "main.tex", False, None)
     assert "\\slidepath" not in text and "\\path[" in text
     assert not (tmp_path / "shapes").exists()
 
 
 # ---------------------------------------------------------------- turned text
 
-def turned_text_deck(deg: float, **kw) -> dict:
-    pe = shape("t", "TEXT_BOX", 200, 120, transform(100, 100, deg=deg, **kw), fill=None)
-    pe["shape"]["text"] = {"textElements": [{"paragraphMarker": {"style": {}}},
-                                            {"textRun": {"content": "turned words\n", "style": {}}}]}
+def turned_text_deck(deg: float, *, flip_h: bool, flip_v: bool) -> JsonObject:
+    pe = shape("t", "TEXT_BOX", 200, 120, transform(100, 100, deg=deg, flip_h=flip_h, flip_v=flip_v), fill=None,
+               outline=None)
+    jobj(pe, "shape")["text"] = {"textElements": [{"paragraphMarker": {"style": {}}},
+                                                  {"textRun": {"content": "turned words\n", "style": {}}}]}
     return deck(pe)
 
 
-def test_turned_words_are_written_upright_and_set_turned(tmp_path):
+def test_turned_words_are_written_upright_and_set_turned(tmp_path: Path):
     """The text writer lays the words out in the box the element would have upright (its own width,
     not the bounding box's), and `\\adoptturned` sets that turned about the centre."""
-    ir = deck_ir(turned_text_deck(30), foreign=True)
-    el = ir["slides"][0]["elements"][0]
+    ir = foreign(turned_text_deck(30, flip_h=False, flip_v=False))
+    el = jobj(ir, "slides", 0, "elements", 0)
     text = adopt.bootstrap(ir, tmp_path / "main.tex", False, None)
     assert "\\adoptturned{-30.00}" in text
     assert "\\newsavebox\\adopt@box" in (tmp_path / "slides.sty").read_text(encoding="utf-8")
     width = float(text.split("\\slidetext{")[1].split("}")[0].split(",")[2])
-    upright, across = el["frame"]["size"][0], el["bbox"][2] - el["bbox"][0]
+    bbox, box = jnums(el, "bbox"), jnums(el, "frame", "box")
+    upright, across = jnum(el, "frame", "size", 0), bbox[2] - bbox[0]
     assert upright - 12 < width <= upright < across, "the upright width less the insets, not the bbox's"
-    cx = (el["frame"]["box"][0] + el["frame"]["box"][2]) / 2
+    cx = (box[0] + box[2]) / 2
     assert f"{{{cx:.2f}pt}}" in text
 
 
-def test_upright_and_mirrored_words_are_not_wrapped(tmp_path):
-    for ir in (deck_ir(turned_text_deck(0), foreign=True), deck_ir(turned_text_deck(0, flip_h=True), foreign=True)):
+def test_upright_and_mirrored_words_are_not_wrapped(tmp_path: Path):
+    for ir in (foreign(turned_text_deck(0, flip_h=False, flip_v=False)),
+               foreign(turned_text_deck(0, flip_h=True, flip_v=False))):
         assert "adoptturned" not in adopt.bootstrap(ir, tmp_path / "main.tex", False, None)
 
 
-def test_upside_down_words_are_turned_half_way(tmp_path):
-    text = adopt.bootstrap(deck_ir(turned_text_deck(0, flip_v=True), foreign=True), tmp_path / "main.tex", False, None)
+def test_upside_down_words_are_turned_half_way(tmp_path: Path):
+    text = adopt.bootstrap(foreign(turned_text_deck(0, flip_h=False, flip_v=True)), tmp_path / "main.tex", False,
+                           None)
     assert "\\adoptturned{180.00}" in text or "\\adoptturned{-180.00}" in text

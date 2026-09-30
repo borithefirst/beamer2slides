@@ -144,12 +144,6 @@ def column_list_of() -> JsonObject:
                                 [116.29, 143.5, 133.92], 147.48)]}
 
 
-def column_list() -> dict:
-    """`column_list_of`, untyped, for test_justified: it indexes and edits the element, which a
-    typed one would make errors of there."""
-    return column_list_of()
-
-
 def box_right(el: JsonMap, scale: float) -> float:
     """Where the box's text ends (Slides pt): its right edge less the inset."""
     reqs = text_box_requests_of(text_of(el), "b2s_s003", "b2s_s003_t1", scale, FONTS, None, None, None, None, None)

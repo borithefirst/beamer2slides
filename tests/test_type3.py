@@ -5,18 +5,81 @@ without cm-super embeds EC/LH/TC fonts as Type 3 fonts PDFium reads as raw codes
 one serif. `type3` names each font from its glyphs' advances (the TFM widths) and reads its codes
 through its encoding. Synthetic characters set at the fonts' own widths, no PDF."""
 
+from collections.abc import Sequence
+
 import pytest
 
 from beamer2slides import extract, type3
+from beamer2slides.arrays import Pixels
 from beamer2slides.fonts import font_info
-from beamer2slides.pdf import Char, char_box
+from beamer2slides.pdf import Box, Char, Drawing, EmbeddedImage, ImageInfo, Link, PageObject, char_box
 
 X0, Y = 30.0, 100.0
 WORD_SPACE = 3.6
 
 
-def setline(words: list[str], font: str, size: float, font_id: int, y: float = Y, x: float = X0,
-            lean: float = 0.0, direction=(1.0, 0.0)) -> list[Char]:
+class CharsPage:
+    """A page that is only its characters (`PdfPage`): nothing drawn, no objects, no links."""
+
+    def __init__(self, chars: list[Char]) -> None:
+        self.index = 0
+        self.width = 400.0
+        self.height = 300.0
+        self._chars = chars
+
+    @property
+    def rect(self) -> Box:
+        return (0.0, 0.0, self.width, self.height)
+
+    def objects(self) -> list[PageObject]:
+        return []
+
+    def object_bounds(self) -> list[Box]:
+        return []
+
+    def set_active(self, objects: Sequence[int], active: bool) -> None:
+        pass
+
+    def chars(self) -> list[Char]:
+        return self._chars
+
+    def glyph_widths(self, requests: Sequence[tuple[int, str, float]]) -> list[float | None]:
+        return [None for _ in requests]
+
+    def drawings(self) -> list[Drawing]:
+        return []
+
+    def images(self) -> list[ImageInfo]:
+        return []
+
+    def embedded_image(self, obj: int) -> EmbeddedImage | None:
+        return None
+
+    def links(self) -> list[Link]:
+        return []
+
+    # the defaults are PdfPage's own (pdf/api.py): a page is called as the contract says
+    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
+        raise AssertionError("a page of characters is never drawn")
+
+
+class Shown:
+    """Every character shows (`extract.Sight`)."""
+
+    def hidden(self, ch: Char) -> bool:
+        return False
+
+
+RIGHT = (1.0, 0.0)
+
+
+def setline(words: list[str], font: str, size: float, font_id: int) -> list[Char]:
+    """`set_at` upright from (X0, Y), glyphs as wide as their advances."""
+    return set_at(words, font, size, font_id, y=Y, x=X0, lean=0.0, direction=RIGHT)
+
+
+def set_at(words: list[str], font: str, size: float, font_id: int, *, y: float, x: float,
+           lean: float, direction: tuple[float, float]) -> list[Char]:
     """Words of character codes (a str of code points 0-255) set in the TeX font `font` as a Type 3
     font: the pen moves by each glyph's TFM width, PDFium's box is that wide (`lean`: this much
     wider, as a slanted glyph's ink reaches out)."""
@@ -36,7 +99,7 @@ def setline(words: list[str], font: str, size: float, font_id: int, y: float = Y
     return out
 
 
-def read(chars: list[Char]) -> tuple[dict, list[Char]]:
+def read(chars: list[Char]) -> tuple[dict[int, type3.PageFont], list[Char]]:
     found = type3.page_fonts(chars)
     return found, type3.decode(chars, found)
 
@@ -63,21 +126,11 @@ def test_body_and_bold_are_two_fonts_and_split_the_spans():
     """The hunt's 'bold lost' and 'styles shift': one "Type3" font for all, no split at the bold
     word; a dropped U+0015 moved every later style one character."""
     body = setline(["Wi\xB1niewska", "proved", "the", "\x1Crst"], "ecrm1095", 10.95, 0)
-    bold = setline(["claim", "\x15", "twice"], "ecbx1095", 10.95, 1, x=body[-1].origin[0] + 10)
+    bold = set_at(["claim", "\x15", "twice"], "ecbx1095", 10.95, 1, y=Y, x=body[-1].origin[0] + 10, lean=0.0, direction=RIGHT)
 
-    class Page:
-        rect = (0, 0, 400, 300)
-
-        def chars(self):
-            return body + bold
-
-    class Shown:
-        def hidden(self, ch):
-            return False
-
-    chars, decoded = extract.page_chars(Page())
+    chars, decoded = extract.page_chars(CharsPage(body + bold))
     assert decoded == {0, 1}
-    spans = extract.spans(Page(), Shown(), False, chars, {})
+    spans = extract.spans(CharsPage(body + bold), Shown(), False, chars, {})
     assert [(s.text, s.font) for s in spans] == [
         ("Wiśniewska", "ECRM1095"), ("proved", "ECRM1095"), ("the", "ECRM1095"), ("ﬁrst", "ECRM1095"),
         ("claim", "ECBX1095"), ("–", "ECBX1095"), ("twice", "ECBX1095")]
@@ -86,14 +139,14 @@ def test_body_and_bold_are_two_fonts_and_split_the_spans():
 def test_slanted_glyphs_are_the_slanted_twin():
     """ecsi has ecss's widths; its letters' ink leans past their advances."""
     upright, _ = read(setline(["Mean", "earnings"], "ecss1095", 10.95, 0))
-    slanted, decoded = read(setline(["Mean", "earnings"], "ecss1095", 10.95, 0, lean=0.12))
+    slanted, decoded = read(set_at(["Mean", "earnings"], "ecss1095", 10.95, 0, y=Y, x=X0, lean=0.12, direction=RIGHT))
     assert upright[0].name == "ecss1095" and slanted[0].name == "ecsi1095"
     assert font_info(decoded[0].font).italic and font_info(decoded[0].font).family == "sans"
 
 
 def test_small_caps_and_typewriter_are_their_own_faces():
     found, decoded = read(setline(["Sat", "Circuit-Sat"], "eccc1095", 10.95, 0)
-                          + setline(["git", "switch", "-c", "feature"], "ectt1095", 10.95, 1, y=120))
+                          + set_at(["git", "switch", "-c", "feature"], "ectt1095", 10.95, 1, y=120, x=X0, lean=0.0, direction=RIGHT))
     assert (found[0].name, found[1].name) == ("eccc1095", "ectt1095")
     assert font_info("ECCC1095").smallcaps and font_info("ECTT1095").family == "mono"
 
@@ -101,7 +154,7 @@ def test_small_caps_and_typewriter_are_their_own_faces():
 def test_digits_every_face_fits_take_the_page_face():
     """Digits are as wide in every face: a line number takes the family of the page's words."""
     words = setline(["Querying", "the", "orders", "table"], "ecsx1200", 11.96, 0)
-    numbers = setline(["1", "2", "3", "4", "5", "6", "7", "8"], "ecss0800", 7.97, 1, y=140)
+    numbers = set_at(["1", "2", "3", "4", "5", "6", "7", "8"], "ecss0800", 7.97, 1, y=140, x=X0, lean=0.0, direction=RIGHT)
     found, _ = read(words + numbers)
     assert found[0].name == "ecsx1200"
     assert found[1].name[2:4] == "ss" and found[1].name.endswith("0800")
@@ -118,7 +171,7 @@ def test_a_lone_micro_sign_is_no_t1_letter():
     ectt's 0xB5 (ţ) and tctt's (µ); T1 came first and 'µs-scale' read 'ţs-scale'. A font of codes
     above 0x7F only is no T1 text font (T1's accents are in their words' font)."""
     body = setline(["Lifetime"], "ecss1095", 10.91, 0)
-    found, decoded = read(body + setline(["\xB5"], "ectt1095", 10.91, 9, x=73.07))
+    found, decoded = read(body + set_at(["\xB5"], "ectt1095", 10.91, 9, y=Y, x=73.07, lean=0.0, direction=RIGHT))
     assert found[9].encoding == "TS1" and decoded[-1].c == "µ"
     # a T1 accented letter among its word's letters is still T1
     found, decoded = read(setline(["Wi\xB1niewska"], "ecrm1095", 10.95, 0))
@@ -139,15 +192,15 @@ def test_cyrillic_of_a_size_without_widths_is_read_through_its_latin_letters():
     ec = next(n for n in sorted(fonts) if n.startswith("ecss") and "la" + n[2:] not in fonts)
     size = fonts[ec].size
     latin = setline(["Newton"], ec, size, 0)
-    cyrillic = setline(["\xEC\xE5\xF2\xEE\xE4"], "lass1095", size, 0, x=latin[-1].box[2] + WORD_SPACE)
-    found, decoded = read(latin + cyrillic + setline(["Runge-Kutta"], ec, size, 0, x=cyrillic[-1].box[2] + WORD_SPACE))
+    cyrillic = set_at(["\xEC\xE5\xF2\xEE\xE4"], "lass1095", size, 0, y=Y, x=latin[-1].box[2] + WORD_SPACE, lean=0.0, direction=RIGHT)
+    found, decoded = read(latin + cyrillic + set_at(["Runge-Kutta"], ec, size, 0, y=Y, x=cyrillic[-1].box[2] + WORD_SPACE, lean=0.0, direction=RIGHT))
     assert found[0] == type3.PageFont("la" + ec[2:], "T2A")
     assert "".join(ch.c for ch in decoded) == "NewtonметодRunge-Kutta"
 
 
 def test_rotated_chart_labels_are_read_from_their_pen_moves():
-    found, _ = read(setline(["Restaurants", "Retail", "Manufacturing"], "ecss0800", 7.97, 0,
-                            direction=(0.9397, -0.342)))
+    found, _ = read(set_at(["Restaurants", "Retail", "Manufacturing"], "ecss0800", 7.97, 0,
+                           y=Y, x=X0, lean=0.0, direction=(0.9397, -0.342)))
     assert found[0].name == "ecss0800"
 
 
@@ -174,6 +227,7 @@ def test_an_unknown_font_stays_type3():
     ("ECSO1095", "sans", True, True, False), ("ECST1095", "mono", False, True, False),
     ("LASX1095", "sans", True, False, False), ("TCSS1095", "sans", False, False, False),
 ])
-def test_tex_bitmap_font_names_say_their_face(name, family, bold, italic, smallcaps):
+def test_tex_bitmap_font_names_say_their_face(name: str, family: str, bold: bool, italic: bool,
+                                              smallcaps: bool) -> None:
     info = font_info(name)
     assert (info.family, info.bold, info.italic, info.smallcaps) == (family, bold, italic, smallcaps)

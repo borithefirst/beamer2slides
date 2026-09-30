@@ -10,6 +10,8 @@ the test if it is ever reached, and no TeX runs.
 import base64
 import io
 import json
+from collections.abc import Callable, Iterator, Sequence
+from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
@@ -18,7 +20,10 @@ import pytest
 from beamer2slides import adopt, fontfetch, fontfiles, net
 from beamer2slides.adopt_context import MissingFont
 from beamer2slides.agent import ALL_ACTIONS, AgentContext, LocalWorkspace
+from beamer2slides.deck_files import DeckFiles
+from beamer2slides.fontfiles import Skipped
 from beamer2slides.json_types import JsonObject
+from beamer2slides.net import Fetch
 from .irs import deck_ir
 from .json_reads import jat
 
@@ -31,16 +36,24 @@ if TYPE_CHECKING:
 pytest.importorskip("fontTools")
 
 
+def urllib_refused(url: str) -> bytes:
+    pytest.fail(f"urllib fetched {url}")
+
+
 @pytest.fixture(autouse=True)
-def no_machine_fonts(monkeypatch, tmp_path):
+def no_machine_fonts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     """No machine font, a cache of the test's own, and no socket."""
     monkeypatch.setenv("B2S_FONTS", str(tmp_path / "no-fonts-here"))
     monkeypatch.setenv("B2S_FONT_CACHE", str(tmp_path / "font-cache"))
     monkeypatch.delenv("B2S_FONT_SOURCE", raising=False)
-    monkeypatch.setattr(net, "urllib_fetch", lambda url: pytest.fail(f"urllib fetched {url}"))
+    monkeypatch.setattr(net, "urllib_fetch", urllib_refused)
     adopt.forget_fonts()
     yield
     adopt.forget_fonts()
+
+
+def quiet(line: str) -> None:
+    pass
 
 
 def web(data: bytes, flavor: str) -> bytes:
@@ -55,13 +68,13 @@ def web(data: bytes, flavor: str) -> bytes:
 def italic(data: bytes) -> bytes:
     from fontTools.ttLib import TTFont
     font = TTFont(io.BytesIO(data))
-    font["OS/2"].fsSelection |= 1
+    fontfetch.set_table_int(font, "OS/2", "fsSelection", fontfetch.table_int(font, "OS/2", "fsSelection") | 1)
     buf = io.BytesIO()
     font.save(buf)
     return buf.getvalue()
 
 
-def given(folder, **files: bytes):
+def given(folder: Path, **files: bytes) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     for name, data in files.items():
         (folder / name.replace("_", ".")).write_bytes(data)
@@ -70,7 +83,7 @@ def given(folder, **files: bytes):
 
 # ---------------------------------------------------------------- files a person hands over
 
-def test_web_fonts_are_unwrapped_and_named_by_what_they_say(tmp_path):
+def test_web_fonts_are_unwrapped_and_named_by_what_they_say(tmp_path: Path):
     """A web font's file name is often a hash; lualatex reads neither wrapper."""
     src = given(tmp_path / "given", a81f_woff=web(tiny_font("Tiny Sans", 400), "woff"),
                 c02d_ttf=tiny_font("Tiny Sans", 700), e9_otf_part=b"not a font at all")
@@ -81,7 +94,7 @@ def test_web_fonts_are_unwrapped_and_named_by_what_they_say(tmp_path):
     assert report["skipped"] == [], "only font suffixes are read out of a folder"
 
 
-def test_a_woff2_needs_brotli_or_says_so(tmp_path):
+def test_a_woff2_needs_brotli_or_says_so(tmp_path: Path):
     try:
         import brotli  # noqa: F401
     except ImportError:
@@ -93,7 +106,7 @@ def test_a_woff2_needs_brotli_or_says_so(tmp_path):
     assert fontfiles.install([f], tmp_path / "laid")["families"]["Tiny Sans"]["styles"] == ["Regular"]
 
 
-def test_a_file_that_is_no_font_and_a_family_given_twice_are_said_not_used(tmp_path):
+def test_a_file_that_is_no_font_and_a_family_given_twice_are_said_not_used(tmp_path: Path):
     junk = tmp_path / "notes.ttf"
     junk.write_bytes(b"%PDF-1.7 not a font")
     one, two = given(tmp_path / "a", r_ttf=tiny_font("Tiny Sans")), given(tmp_path / "b", r_ttf=tiny_font("Tiny Sans"))
@@ -104,7 +117,7 @@ def test_a_file_that_is_no_font_and_a_family_given_twice_are_said_not_used(tmp_p
     assert report["families"]["Tiny Sans"]["files"] == ["r.ttf"]
 
 
-def test_a_variable_font_is_cut_into_styles_and_weights_between(tmp_path):
+def test_a_variable_font_is_cut_into_styles_and_weights_between(tmp_path: Path):
     from fontTools.ttLib import TTFont
     f = tmp_path / "3fa9.woff"
     f.write_bytes(web(tiny_font("Tiny Flex", variable=True), "woff"))
@@ -114,10 +127,11 @@ def test_a_variable_font_is_cut_into_styles_and_weights_between(tmp_path):
     regular = tmp_path / "laid" / "tinyflex" / "TinyFlex-Regular.ttf"
     assert "fvar" not in TTFont(regular)
     w600 = fontfetch.weight_file(regular, 600, False)
-    assert w600 == regular.with_name("TinyFlex-W600.ttf") and TTFont(w600)["OS/2"].usWeightClass == 600
+    assert w600 == regular.with_name("TinyFlex-W600.ttf")
+    assert fontfetch.table_int(TTFont(w600), "OS/2", "usWeightClass") == 600
 
 
-def test_static_weights_become_the_styles_and_the_faces_between(tmp_path):
+def test_static_weights_become_the_styles_and_the_faces_between(tmp_path: Path):
     src = given(tmp_path / "given", r_ttf=tiny_font("Tiny Sans", 400), m_ttf=tiny_font("Tiny Sans", 500),
                 b_ttf=tiny_font("Tiny Sans", 700), i_ttf=italic(tiny_font("Tiny Sans", 400)))
     report = fontfiles.install([src], tmp_path / "laid")
@@ -128,14 +142,14 @@ def test_static_weights_become_the_styles_and_the_faces_between(tmp_path):
     assert fontfetch.weight_file(regular, 300, False) is None, "nothing to cut a static family's 300 from"
 
 
-def test_a_family_with_no_upright_is_no_family(tmp_path):
+def test_a_family_with_no_upright_is_no_family(tmp_path: Path):
     f = given(tmp_path / "given", i_ttf=italic(tiny_font("Slanted Only")))
     report = fontfiles.install([f], tmp_path / "laid")
     assert "Slanted Only" not in report["families"]
     assert "no upright" in report["skipped"][0]["reason"]
 
 
-def test_the_folder_is_emptied_only_when_it_is_ours(tmp_path):
+def test_the_folder_is_emptied_only_when_it_is_ours(tmp_path: Path):
     root = tmp_path / "laid"
     fontfiles.install([given(tmp_path / "a", r_ttf=tiny_font("Tiny Sans"))], root)
     fontfiles.install([given(tmp_path / "b", r_ttf=tiny_font("Other Sans"))], root)
@@ -148,7 +162,7 @@ def test_the_folder_is_emptied_only_when_it_is_ours(tmp_path):
     assert (theirs / "keep.txt").read_bytes() == b"a person's file"
 
 
-def test_supplied_fonts_are_found_first_and_set_the_deck(tmp_path):
+def test_supplied_fonts_are_found_first_and_set_the_deck(tmp_path: Path):
     root = tmp_path / "laid"
     fontfiles.install([given(tmp_path / "given", r_ttf=tiny_font("Tiny Sans"), b_ttf=tiny_font("Tiny Sans", 700))], root)
     assert adopt.font_family("Tiny Sans", "sans", "") is None, "not before it is supplied"
@@ -167,7 +181,7 @@ def test_supplied_fonts_are_found_first_and_set_the_deck(tmp_path):
 
 # ---------------------------------------------------------------- what adopt says it lacked
 
-def test_a_font_that_is_nowhere_is_named_with_what_it_was_set_in(tmp_path):
+def test_a_font_that_is_nowhere_is_named_with_what_it_was_set_in(tmp_path: Path):
     ir = deck_ir(deck_with(text_shape("t", "Words in a face nobody has", 10, 10, 300, 40, font="Nowhere Sans")),
                  foreign=True)
     missing: list[MissingFont] = []
@@ -180,7 +194,7 @@ def test_a_font_that_is_nowhere_is_named_with_what_it_was_set_in(tmp_path):
     assert lines[1].endswith("letters): set in texgyreheros")
 
 
-def test_a_metric_twin_is_still_a_font_the_deck_lacks(tmp_path):
+def test_a_metric_twin_is_still_a_font_the_deck_lacks(tmp_path: Path):
     """Arimo sets Arial's widths, not its shapes: worth saying, since the file would do better."""
     root = tmp_path / "laid"
     fontfiles.install([given(tmp_path / "given", r_ttf=tiny_font("Arimo"))], root)
@@ -194,7 +208,7 @@ def test_a_metric_twin_is_still_a_font_the_deck_lacks(tmp_path):
 
 # ---------------------------------------------------------------- google/fonts without GitHub
 
-def google_fonts_copy(root):
+def google_fonts_copy(root: Path) -> Path:
     """A local google/fonts checkout holding Tiny Sans (static) and Tiny Flex (variable)."""
     given(root / "ofl" / "tinysans", METADATA_pb=STATIC_META.encode(), OFL_txt=b"licence",
           **{f"TinySans-{s}_ttf": tiny_font("Tiny Sans", w) for s, w in (("Regular", 400), ("Bold", 700), ("Italic", 400))})
@@ -204,31 +218,33 @@ def google_fonts_copy(root):
     return root
 
 
-def test_a_local_copy_of_google_fonts_is_read_and_nothing_downloaded(tmp_path, monkeypatch):
+def test_a_local_copy_of_google_fonts_is_read_and_nothing_downloaded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     src = google_fonts_copy(tmp_path / "google-fonts")
     monkeypatch.setenv("B2S_FONT_FETCH", "0")               # no network, and still the fonts
     with fontfetch.use_source(src):
         assert fontfetch.enabled()
-        got = fontfetch.fetch_family("Tiny Sans", log=lambda *_: None)
-        assert set(got) == {"Regular", "Bold", "Italic"}
+        got = fontfetch.fetch_family("Tiny Sans", log=quiet)
+        assert got is not None and set(got) == {"Regular", "Bold", "Italic"}
         assert (fontfetch.cache_dir() / "tinysans" / "TinySans-LICENSE.txt").read_text() == "licence"
-        assert set(fontfetch.fetch_family("Tiny Flex", log=lambda *_: None)) == {"Regular", "Bold"}
-        assert fontfetch.fetch_family("Calibri", log=lambda *_: None) is None
+        flex = fontfetch.fetch_family("Tiny Flex", log=quiet)
+        assert flex is not None and set(flex) == {"Regular", "Bold"}
+        assert fontfetch.fetch_family("Calibri", log=quiet) is None
     assert not (fontfetch.cache_dir() / "missing.json").exists(), "a partial copy says nothing of GitHub"
     assert not fontfetch.enabled()
 
 
-def test_the_environment_names_the_local_copy_too(tmp_path, monkeypatch):
+def test_the_environment_names_the_local_copy_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("B2S_FONT_SOURCE", str(google_fonts_copy(tmp_path / "google-fonts")))
     assert fontfetch.source_root() == tmp_path / "google-fonts"
-    assert fontfetch.fetch_family("Tiny Sans", log=lambda *_: None)["Regular"].exists()
+    got = fontfetch.fetch_family("Tiny Sans", log=quiet)
+    assert got is not None and got["Regular"].exists()
 
 
-def test_github_is_reached_through_the_callers_fetcher(tmp_path, fetcher):
+def test_github_is_reached_through_the_callers_fetcher(tmp_path: Path, fetcher: Callable[[Fetch], None]):
     src = google_fonts_copy(tmp_path / "google-fonts")
-    asked = []
+    asked: list[str] = []
 
-    def serve(url):
+    def serve(url: str) -> bytes:
         asked.append(url)
         path = src / url.removeprefix(fontfetch.RAW).replace("%5B", "[").replace("%5D", "]")
         if not path.is_file():
@@ -236,20 +252,25 @@ def test_github_is_reached_through_the_callers_fetcher(tmp_path, fetcher):
         return path.read_bytes()
 
     fetcher(serve)
-    got = fontfetch.fetch_family("Tiny Flex", log=lambda *_: None)
+    got = fontfetch.fetch_family("Tiny Flex", log=quiet)
     assert got is not None and got["Bold"].exists()
     assert asked and all(u.startswith(fontfetch.RAW) for u in asked)
-    assert fontfetch.fetch_family("Calibri", log=lambda *_: None) is None
+    assert fontfetch.fetch_family("Calibri", log=quiet) is None
     assert "calibri" in json.loads((fontfetch.cache_dir() / "missing.json").read_text())
 
 
-def test_a_fetcher_that_refuses_github_is_no_fetch_and_no_error(fetcher):
+def test_a_fetcher_that_refuses_github_is_no_fetch_and_no_error(fetcher: Callable[[Fetch], None]):
     class EgressDenied(Exception):
         pass
 
+    def refusing(refusal: Exception) -> Fetch:
+        def fetch(url: str) -> bytes:
+            raise refusal
+        return fetch
+
     for refusal in (PermissionError("not allowed"), EgressDenied("github.com is not on the list")):
-        fetcher(lambda url, refusal=refusal: (_ for _ in ()).throw(refusal))
-        said = []
+        fetcher(refusing(refusal))
+        said: list[str] = []
         assert fontfetch.fetch_family("Open Sans", log=said.append) is None
         assert "could not fetch" in said[0]
     assert not (fontfetch.cache_dir() / "missing.json").exists(), "refused is not 'missing'"
@@ -257,9 +278,20 @@ def test_a_fetcher_that_refuses_github_is_no_fetch_and_no_error(fetcher):
 
 # ---------------------------------------------------------------- the agent tool
 
-def fake_adopt(monkeypatch, seen: dict, missing=(), skipped=()):
-    def cmd_adopt(deck, tex, work, apply, out, max_iter, engine, flow, target_path, log=print,
-                  fonts=None, found=None, pptx=None, files=None):
+def fake_adopt(monkeypatch: pytest.MonkeyPatch, seen: dict[str, object]) -> None:
+    """`adopt.cmd_adopt` noting in `seen` what the tool handed it, and lacking nothing."""
+    fake_adopt_lacking(monkeypatch, seen, missing=(), skipped=())
+
+
+def fake_adopt_lacking(monkeypatch: pytest.MonkeyPatch, seen: dict[str, object], *,
+                       missing: Sequence[MissingFont], skipped: Sequence[Skipped]) -> None:
+    """`fake_adopt`, whose adopt stood in for the fonts `missing` and could not use `skipped`."""
+    # Called as `deck_adopt` calls it: every argument, the last five by keyword.
+    def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
+                  engine: str | None, flow: bool, target_path: Path | None, *, log: Callable[[str], None],
+                  fonts: Sequence[Path] | None, found: dict[str, object] | None, pptx: Path | None,
+                  files: DeckFiles | None) -> SimpleNamespace:
+        assert found is not None
         seen["fonts"] = list(fonts or [])
         seen["files"] = files
         seen["source"] = fontfetch.source_root()
@@ -275,6 +307,16 @@ def fake_adopt(monkeypatch, seen: dict, missing=(), skipped=()):
     monkeypatch.setattr("beamer2slides.adopt.cmd_adopt", cmd_adopt)
 
 
+def paths(noted: object) -> list[Path]:
+    """What the fake noted as a list of paths, checked to be one."""
+    assert isinstance(noted, list)
+    out: list[Path] = []
+    for p in noted:
+        assert isinstance(p, Path)
+        out.append(p)
+    return out
+
+
 class FakeGoogle:
     def credentials(self) -> "Credentials":
         from google.oauth2.credentials import Credentials as UserCredentials
@@ -284,12 +326,12 @@ class FakeGoogle:
         return {"available": True, "source": "test", "scopes": []}
 
 
-def test_deck_adopt_takes_fonts_as_refs_or_content_and_names_what_it_lacked(tmp_path, monkeypatch):
+def test_deck_adopt_takes_fonts_as_refs_or_content_and_names_what_it_lacked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from beamer2slides.agent.source_tools import deck_adopt
-    seen: dict = {}
-    fake_adopt(monkeypatch, seen, missing=[{"font": "Montserrat", "kind": "sans", "letters": 812,
-                                            "set_in": "texgyreheros"}],
-               skipped=[{"file": "fonts-2.bin", "reason": fontfiles.NOT_A_FONT}])
+    seen: dict[str, object] = {}
+    fake_adopt_lacking(monkeypatch, seen, missing=[{"font": "Montserrat", "kind": "sans", "letters": 812,
+                                                    "set_in": "texgyreheros"}],
+                       skipped=[{"file": "fonts-2.bin", "reason": fontfiles.NOT_A_FONT}])
     ws = tmp_path / "ws"
     given(ws / "fonts", r_ttf=tiny_font("Tiny Sans"))
     (ws / "deck.json").write_text(json.dumps({"slides": []}), encoding="utf-8")
@@ -299,7 +341,7 @@ def test_deck_adopt_takes_fonts_as_refs_or_content_and_names_what_it_lacked(tmp_
                      fonts=["fonts", {"base64": base64.b64encode(web(tiny_font("X"), "woff")).decode()},
                             {"base64": base64.b64encode(b"junk").decode()}])
     assert res.ok, res.json()
-    names = [p.name for p in seen["fonts"]]
+    names = [p.name for p in paths(seen["fonts"])]
     assert names[0] == "fonts" and names[1] != names[2], "two unnamed files are two files"
     assert seen["source"] == tmp_path, "the context's local google/fonts, for the call"
     assert res.data["fonts_supplied"] == {"Tiny Sans": ["Regular"]}
@@ -315,24 +357,26 @@ def test_deck_adopt_takes_fonts_as_refs_or_content_and_names_what_it_lacked(tmp_
     assert any("pptx=" in s for s in res.next_steps), "the fix for them: the deck as a .pptx"
 
 
-def test_deck_adopt_takes_the_decks_pptx_as_content(tmp_path, monkeypatch):
+def test_deck_adopt_takes_the_decks_pptx_as_content(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """The harness hands the deck's download along with the deck: no path, just its bytes."""
     from beamer2slides.agent.source_tools import deck_adopt
-    seen: dict = {}
+    seen: dict[str, object] = {}
     fake_adopt(monkeypatch, seen)
     (tmp_path / "deck.json").write_text(json.dumps({"slides": []}), encoding="utf-8")
     ctx = AgentContext(workspace=LocalWorkspace(tmp_path), google=FakeGoogle(), allow=ALL_ACTIONS)
     res = deck_adopt(ctx, deck="deck.json", tex="new.tex",
                      pptx={"name": "cats.pptx", "base64": base64.b64encode(b"PK-zip").decode()})
     assert res.ok, res.json()
-    assert seen["pptx"].name == "cats.pptx" and seen["pptx"].read_bytes() == b"PK-zip"
+    pptx = seen["pptx"]
+    assert isinstance(pptx, Path)
+    assert pptx.name == "cats.pptx" and pptx.read_bytes() == b"PK-zip"
     assert res.data["pptx_pictures"] == 1 and res.data["pictures_missing"] == []
     assert not any("pptx=" in s for s in res.next_steps)
     res = deck_adopt(ctx, deck="deck.json", tex="new2.tex", pptx="nosuch.pptx")
     assert not res.ok and res.code == "not_found" and "nosuch.pptx" in res.summary
 
 
-def test_deck_adopt_refuses_a_font_ref_that_is_not_there(tmp_path, monkeypatch):
+def test_deck_adopt_refuses_a_font_ref_that_is_not_there(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from beamer2slides.agent.source_tools import deck_adopt
     fake_adopt(monkeypatch, {})
     ctx = AgentContext(workspace=LocalWorkspace(tmp_path), google=FakeGoogle(), allow=ALL_ACTIONS)

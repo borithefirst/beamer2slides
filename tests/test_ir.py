@@ -17,16 +17,25 @@ import pytest
 from beamer2slides import classify as classify_mod
 from beamer2slides import emit, emit_pptx, ir, pdf, render
 from beamer2slides.classify import classify
+from beamer2slides.devtools.render_torture import MEDIA, pdf_bytes
 from beamer2slides.emit_diagrams import CONNECTION_SITES, TEXT_RECT_WIDTH
 from beamer2slides.emit_metrics import BULLET_SHAPES, FONT_FOR_FAMILY, GLYPH_SHAPES
 from beamer2slides.extract import extract, select_overlays
-from beamer2slides.json_types import JsonObject, as_objects, as_str
+from beamer2slides.json_types import Json, JsonObject, as_objects, as_str
 from beamer2slides.notes import prepare
 from beamer2slides.raw_types import RawDoc
 
-from .test_marks import INLINE_IMAGE, cell, element, paragraph, raw_of, text
+from .json_reads import jarr, jobj, jobjs
+from .test_marks import FONT, INLINE_IMAGE, cell, element, paragraph, text
 
 TESTS = Path(__file__).parent
+
+
+def raw_pages(tmp_path: Path, pages: list[bytes]) -> RawDoc:
+    """`test_marks.raw_of`, typed: the pages written as p.pdf (Helvetica as F0) and extracted."""
+    path = tmp_path / "p.pdf"
+    path.write_bytes(pdf_bytes(pages, (), MEDIA, FONT, b""))
+    return extract(path, None)
 
 
 def pdfs() -> list[Path]:
@@ -45,8 +54,8 @@ def read(pdf: Path, tmp: Path) -> tuple[RawDoc, JsonObject, Path]:
 
 
 @lru_cache(maxsize=None)
-def classified() -> tuple[tuple[str, dict], ...]:
-    out = []
+def classified() -> tuple[tuple[str, JsonObject], ...]:
+    out: list[tuple[str, JsonObject]] = []
     for path in pdfs():
         with tempfile.TemporaryDirectory() as tmp:
             out.append((str(path.relative_to(TESTS)).replace("\\", "/"), read(path, Path(tmp))[1]))
@@ -77,7 +86,7 @@ RENDERED = ["out/03_figures.pdf", "out/04_theme_blocks.pdf", "out/07_images.pdf"
 
 
 @pytest.mark.parametrize("name", RENDERED)
-def test_a_rendered_deck_holds_to_the_rendered_contract(name, tmp_path):
+def test_a_rendered_deck_holds_to_the_rendered_contract(name: str, tmp_path: Path) -> None:
     pdf = TESTS / "decks" / name
     if not pdf.exists():
         pytest.skip(f"not built: {name}")
@@ -106,15 +115,15 @@ def marked_pages() -> list[bytes]:
 
 
 @pytest.mark.parametrize("backend", ["pdfium", "pure"])
-def test_marked_pages_hold_to_both_contracts(tmp_path, backend):
+def test_marked_pages_hold_to_both_contracts(tmp_path: Path, backend: str) -> None:
     """The read-back of an adopted PDF: its freeform and line are legal shapes as classified (compare
     reads them) and pictures once rendered (`marked.pictured_shapes`)."""
     with pdf.use_backend(backend):
         check_marked_pages(tmp_path)
 
 
-def check_marked_pages(tmp_path):
-    raw = raw_of(tmp_path, marked_pages())
+def check_marked_pages(tmp_path: Path) -> None:
+    raw = raw_pages(tmp_path, marked_pages())
     classified = classify(raw)
     shapes = {e.get("mark"): e["shape"] for e in classified["slides"][0]["elements"] if e["kind"] == "shape"}
     assert {shapes["f"], shapes["l"]} == {"custom", "line"}
@@ -125,15 +134,15 @@ def check_marked_pages(tmp_path):
     assert not (found := ir.problems(deck, "rendered", unknown_keys=True)), report(found)
 
 
-def test_a_marked_table_with_no_words_is_still_a_table_emit_can_lay_out(tmp_path):
+def test_a_marked_table_with_no_words_is_still_a_table_emit_can_lay_out(tmp_path: Path) -> None:
     page = element(b"t", b"table", b"0 0 0 RG 1 w 20 110 m 180 110 l S ", b" /rows 2 /cols 2 /box (20 20 160 40)")
-    deck = classify(raw_of(tmp_path, [page]))
+    deck = classify(raw_pages(tmp_path, [page]))
     assert not (found := ir.problems(deck, "classified", unknown_keys=True)), report(found)
 
 
 # ------------------------------------------------------------------------------ lookup tables
 
-def args(tp) -> set:
+def args(tp: object) -> set[object]:
     return set(typing.get_args(tp))
 
 
@@ -170,31 +179,34 @@ def test_every_type_resolves_and_says_each_key_once():
 
 # ------------------------------------------------------------------------------ what a problem says
 
-def small_deck() -> dict:
+def small_typed() -> ir.Deck:
     """A one-slide deck as classify writes one, by hand."""
-    run = {"text": "Hello", "font": "CMSS10", "family": "sans", "size": 10.9, "bold": False, "italic": False,
-           "smallcaps": False, "color": "#000000", "link": None, "script": None, "underline": False,
-           "strike": False, "highlight": None}
-    para = {"align": "left", "level": 0, "bullet": None, "size": 10.9, "text_x0": 20.0,
-            "tab_x0": None, "lines": [{"baseline": 40.0, "x0": 20.0, "x1": 50.0}], "wrap_limit": None, "runs": [run]}
-    return {
-        "version": 1, "source": {"pdf": "d.pdf", "pages": 1, "producer": "pdfTeX", "title": "T"},
-        "body_size": 10.9, "stats": {"chars": 5, "chars_native": 5, "native_share": 1.0}, "layout_texts": [],
-        "slides": [{
-            "page": 0, "frame": "1", "label": None, "size": [362.83, 272.13], "notes": None,
-            "left_in_background": [], "theme_texts": [], "panels": [], "figure_regions": [],
-            "stats": {"chars": 5, "chars_native": 5}, "on_layout": [],
-            "elements": [
-                {"id": "p0s0", "kind": "shape", "role": "panel", "bbox": [10.0, 10.0, 100.0, 60.0], "fill": "#e6e6ff",
-                 "shape": "RECTANGLE", "flip": False, "radius": 0.0, "drawing": "p0d0", "spans": []},
-                {"id": "p0t0", "kind": "text", "role": "body", "bbox": [20.0, 30.0, 50.0, 42.0], "panel": 0,
-                 "paragraphs": [para], "code": False, "spans": ["s0"], "strokes": []},
-            ]}],
-    }
+    run: ir.Run = {"text": "Hello", "font": "CMSS10", "family": "sans", "size": 10.9, "bold": False, "italic": False,
+                   "smallcaps": False, "color": "#000000", "link": None, "script": None, "underline": False,
+                   "strike": False, "highlight": None}
+    para: ir.Paragraph = {"align": "left", "level": 0, "bullet": None, "size": 10.9, "text_x0": 20.0,
+                          "tab_x0": None, "lines": [{"baseline": 40.0, "x0": 20.0, "x1": 50.0}], "wrap_limit": None,
+                          "runs": [run]}
+    shape: ir.ShapeElement = {"id": "p0s0", "kind": "shape", "role": "panel", "bbox": [10.0, 10.0, 100.0, 60.0],
+                              "fill": "#e6e6ff", "shape": "RECTANGLE", "flip": False, "radius": 0.0,
+                              "drawing": "p0d0", "spans": []}
+    words: ir.TextElement = {"id": "p0t0", "kind": "text", "role": "body", "bbox": [20.0, 30.0, 50.0, 42.0],
+                             "panel": 0, "paragraphs": [para], "code": False, "spans": ["s0"], "strokes": []}
+    slide: ir.Slide = {"page": 0, "frame": "1", "label": None, "size": [362.83, 272.13], "notes": None,
+                       "left_in_background": [], "theme_texts": [], "panels": [], "figure_regions": [],
+                       "stats": {"chars": 5, "chars_native": 5}, "on_layout": [], "elements": [shape, words]}
+    return {"version": 1, "source": {"pdf": "d.pdf", "pages": 1, "producer": "pdfTeX", "title": "T"},
+            "body_size": 10.9, "stats": {"chars": 5, "chars_native": 5, "native_share": 1.0}, "layout_texts": [],
+            "slides": [slide]}
 
 
-def rendered(deck: dict) -> dict:
-    for s in deck["slides"]:
+def small_deck() -> JsonObject:
+    """`small_typed` as deck.json holds it: JSON a test may break key by key."""
+    return ir.deck_json(small_typed())
+
+
+def rendered(deck: JsonObject) -> JsonObject:
+    for s in jobjs(deck, "slides"):
         s.update(background="backgrounds/bg-001.png", background_color=None)
     return deck
 
@@ -210,7 +222,7 @@ def test_the_shape_marked_pages_wrote_before_688ebf4_is_a_problem():
     outline a colour. emit's template shapes raised KeyError 'custom' on it; the check says so
     at the element, key by key."""
     deck = small_deck()
-    deck["slides"][0]["elements"][0] = {
+    jarr(deck, "slides", 0, "elements")[0] = {
         "id": "p0m0", "kind": "shape", "role": "panel", "bbox": [70.0, 10.0, 110.0, 45.0], "fill": None,
         "outline": "#000000", "shape": "custom", "radius": 0.0, "drawings": ["p0d0"], "spans": [], "mark": "f"}
     found = ir.problems(deck, "classified", unknown_keys=True)
@@ -227,16 +239,17 @@ def test_the_shape_marked_pages_wrote_before_688ebf4_is_a_problem():
 
 def test_a_problem_names_its_slide_element_key_and_what_is_wrong():
     deck = small_deck()
-    slide = deck["slides"][0]
+    slide = jobj(deck, "slides", 0)
     slide["page"] = 4
-    text_el = slide["elements"][1]
+    text_el = jobj(slide, "elements", 1)
     text_el["id"] = "p4t0"
-    text_el["paragraphs"][0]["align"] = "justify"
-    text_el["paragraphs"][0]["runs"][0]["color"] = "#FFF"
-    text_el["paragraphs"][0]["bullet"] = {"kind": "glyph", "text": "•", "bbox": [1.0, 2.0, 3.0]}
+    para = jobj(text_el, "paragraphs", 0)
+    para["align"] = "justify"
+    jobj(para, "runs", 0)["color"] = "#FFF"
+    para["bullet"] = {"kind": "glyph", "text": "•", "bbox": [1.0, 2.0, 3.0]}
     del text_el["bbox"]
     text_el["colour"] = "#000000"
-    slide["elements"].append({"id": "p4x0", "kind": "blob"})
+    jarr(slide, "elements").append({"id": "p4x0", "kind": "blob"})
     del deck["body_size"]
     assert ir.problems(deck, "classified", unknown_keys=True) == [
         "deck: lacks required key 'body_size' (float)",
@@ -255,7 +268,7 @@ def test_a_problem_names_its_slide_element_key_and_what_is_wrong():
 def test_numbers_and_flags_are_told_apart():
     """JSON's numbers: an int is a float's value, but a bool is neither, nor a number a bool."""
     deck = small_deck()
-    el = deck["slides"][0]["elements"][0]
+    el = jobj(deck, "slides", 0, "elements", 0)
     el["radius"] = 3          # fine: an int where a float goes
     el["flip"] = 0            # not a bool
     el["bbox"] = [10, 10, True, 60]
@@ -267,11 +280,14 @@ def test_numbers_and_flags_are_told_apart():
 
 def test_checking_a_long_deck_takes_well_under_a_second():
     deck = small_deck()
-    slide = deck["slides"][0]
-    para = slide["elements"][1]["paragraphs"][0]
-    slide["elements"][1]["paragraphs"] = [copy.deepcopy(para) for _ in range(12)]
-    slide["elements"] *= 10
-    deck["slides"] = [dict(slide, page=i) for i in range(60)]
+    slide = jobj(deck, "slides", 0)
+    text_el = jobj(slide, "elements", 1)
+    para = jobj(text_el, "paragraphs", 0)
+    paras: list[Json] = [copy.deepcopy(para) for _ in range(12)]
+    text_el["paragraphs"] = paras
+    slide["elements"] = jarr(slide, "elements") * 10
+    slides: list[Json] = [{**slide, "page": i} for i in range(60)]
+    deck["slides"] = slides
     ir.problems(deck, "classified", unknown_keys=True)  # (the first call compiles the checks)
     start = time.perf_counter()
     assert ir.problems(deck, "classified", unknown_keys=True) == []
@@ -283,11 +299,12 @@ def test_a_stage_is_one_the_contract_knows():
         ir.problems(small_deck(), "emitted", unknown_keys=True)
 
 
-def test_classify_page_output_is_a_slide_of_the_contract(tmp_path):
+def test_classify_page_output_is_a_slide_of_the_contract(tmp_path: Path) -> None:
     """The slide `classify_page` returns alone (the read-back compare uses) is a contract slide."""
-    raw = raw_of(tmp_path, [text(20, 100, b"First box words") + text(20, 86, b"Second box words")])
+    raw = raw_pages(tmp_path, [text(20, 100, b"First box words") + text(20, 86, b"Second box words")])
     slide = classify_mod.classify_page(raw["pages"][0], classify_mod.body_size(raw))
-    slide.setdefault("on_layout", [])
-    deck = small_deck()
+    if "on_layout" not in slide:
+        slide["on_layout"] = []
+    deck = small_typed()
     deck["slides"] = [slide]
     assert not (found := ir.problems(deck, "classified", unknown_keys=True)), report(found)

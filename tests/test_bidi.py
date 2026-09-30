@@ -94,7 +94,7 @@ class Piece:
         return self.text
 
 
-def order(*texts) -> list[str]:
+def order(*texts: str) -> list[str]:
     return [p.text for p in bidi.logical_spans([Piece(t) for t in texts])]
 
 

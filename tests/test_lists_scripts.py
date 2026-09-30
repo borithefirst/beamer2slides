@@ -2,6 +2,7 @@
 
 from beamer2slides import ir
 from beamer2slides.classify import literal_list_numbers
+from beamer2slides.raw_types import DrawingType, RawDrawing
 
 
 def run(text: str) -> ir.Run:
@@ -73,9 +74,14 @@ def test_a_swatch_outlined_in_another_colour_is_no_slides_glyph():
     """r3_charts_v1 s9: legend swatches, filled squares with a black 0.8 pt outline, became
     square bullets: no outline, and smaller. With no glyph they become pictures by their text."""
     from beamer2slides.classify import bullet_shape
-    swatch = {"type": "fs", "items": "re", "fill": "#1f77b4", "stroke": "#000000", "width": 0.8, "stroke_opacity": 1.0,
-              "path": [["re", [[156.43, 88.95], [163.7, 96.22]]]]}
-    assert bullet_shape(swatch) == {}
-    assert bullet_shape({**swatch, "stroke": "#1f77b4"}) == {"shape": "square", "color": "#1f77b4"}
-    assert bullet_shape({**swatch, "width": 0.1}) == {"shape": "square", "color": "#1f77b4"}, "a hairline shows no outline"
-    assert bullet_shape({**swatch, "type": "f"}) == {"shape": "square", "color": "#1f77b4"}
+
+    def swatch(kind: DrawingType, stroke: str, width: float) -> RawDrawing:
+        return {"id": "p0d0", "type": kind, "items": "re", "bbox": [156.43, 88.95, 163.7, 96.22], "fill": "#1f77b4",
+                "stroke": stroke, "width": width, "fill_opacity": 1.0, "stroke_opacity": 1.0, "soft_mask": False,
+                "corners": {}, "path": [("re", [[156.43, 88.95], [163.7, 96.22]])]}
+
+    assert bullet_shape(swatch("fs", "#000000", 0.8)) == {}
+    assert bullet_shape(swatch("fs", "#1f77b4", 0.8)) == {"shape": "square", "color": "#1f77b4"}
+    assert bullet_shape(swatch("fs", "#000000", 0.1)) == {"shape": "square", "color": "#1f77b4"}, \
+        "a hairline shows no outline"
+    assert bullet_shape(swatch("f", "#000000", 0.8)) == {"shape": "square", "color": "#1f77b4"}

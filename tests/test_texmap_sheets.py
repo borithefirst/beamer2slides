@@ -44,24 +44,24 @@ def resource(number: int, line: int) -> str:
     return f"{{{number}\n(1,{line}:0,16782118:526254,526254,0\n)\n}}0\n"
 
 
-def test_box_resources_are_not_pages(tmp_path):
+def test_box_resources_are_not_pages(tmp_path: Path) -> None:
     body = resource(1, 31) + sheet(1, 10) + sheet(2, 20) + resource(2, 49) + sheet(3, 30)
     pages = synctex_pages(write(tmp_path, body))
     assert len(pages) == 3
     assert [sorted(p.votes)[0][1] for p in pages] == [10, 20, 30]
 
 
-def test_a_box_resource_inside_a_sheet_counts_for_that_page(tmp_path):
+def test_a_box_resource_inside_a_sheet_counts_for_that_page(tmp_path: Path) -> None:
     body = "{1\n(1,10:0,16782118:526254,526254,0\n)\n" + resource(1, 11) + "}1\n"
     pages = synctex_pages(write(tmp_path, body))
     assert len(pages) == 1
     assert sorted(pages[0].votes) == [("talk.tex", 10), ("talk.tex", 11)]
 
 
-def test_plain_sheets_are_unchanged(tmp_path):
+def test_plain_sheets_are_unchanged(tmp_path: Path) -> None:
     pages = synctex_pages(write(tmp_path, "".join(sheet(n, n * 10) for n in range(1, 6)), gz=True))
     assert [sorted(p.votes)[0][1] for p in pages] == [10, 20, 30, 40, 50]
 
 
-def test_a_missing_file_gives_no_pages(tmp_path):
+def test_a_missing_file_gives_no_pages(tmp_path: Path) -> None:
     assert synctex_pages(tmp_path / "nothing.synctex.gz") == []

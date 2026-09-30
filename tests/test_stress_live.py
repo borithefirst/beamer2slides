@@ -25,7 +25,8 @@ v1 is converted once for all of them; pull converts its own. The fresh conversio
 are made while the scenarios run. Timings land in out/stress-tests/perf.json.
 """
 
-import importlib.util
+from __future__ import annotations
+
 import json
 import os
 import shutil
@@ -33,29 +34,35 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import TYPE_CHECKING, TypeVar
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
+from beamer2slides.json_types import Json, JsonObject
 
+from .decks.stress import build as stress
+from .json_reads import jint, jobj, jobjs, jstr
 from .test_slides_alignment import MAIN, google_unavailable
 
-_spec = importlib.util.spec_from_file_location("stress_build", ROOT / "tests" / "decks" / "stress" / "build.py")
-stress = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(stress)
-_build, _build_lock = stress.build, threading.Lock()
+if TYPE_CHECKING:
+    from beamer2slides.devtools.deck_edits import LiveDeck
+    from beamer2slides.devtools.sync_check import Model
+
+ROOT = Path(__file__).resolve().parents[1]
+T = TypeVar("T")
+
+_build_lock = threading.Lock()
 
 
-def _locked_build(variant: str, force: bool = False) -> Path:
+def built(variant: str) -> Path:
     """`stress.build`, one at a time: fresh conversions are made while the scenarios run, and two
     threads compiling one variant would write the same .tex and .pdf (a cache hit costs nothing)."""
     with _build_lock:
-        return _build(variant, force)
+        return stress.build(variant)
 
-
-stress.build = _locked_build
 
 pytestmark = pytest.mark.sync
 
@@ -69,7 +76,7 @@ MIKTEX = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "MiKTeX" / "mik
 ENV = {**os.environ, "PYTHONPATH": str(ROOT / "src"),
        "PATH": os.pathsep.join([os.environ.get("PATH", "")] + ([str(MIKTEX)] if MIKTEX.exists() else []))}
 os.environ["PATH"] = ENV["PATH"]  # (stress.build compiles with the inherited environment)
-TIMINGS: dict[str, dict] = {}
+TIMINGS: dict[str, dict[str, float]] = {}
 TIMINGS_LOCK = threading.Lock()
 
 
@@ -132,16 +139,16 @@ BACKUP_V1 = "Timings are measured on the stress deck itself"
 BACKUP_V2 = "Every timing below comes from this deck and no other"
 
 
-def S(name: str) -> dict:
+def S(name: str) -> JsonObject:
     """The selector for a frame, by its v1 label."""
     return {"contains": SEL[name]}
 
 
-def backup(flags: list[str]) -> dict:
+def backup(flags: list[str]) -> JsonObject:
     return {"contains": BACKUP_V2 if "rewritebullets" in flags else BACKUP_V1}
 
 
-def order_check(flags: list[str], gone: tuple[str, ...] = (), dragged: tuple[tuple[str, str], ...] = ()) -> dict:
+def order_check(flags: list[str], gone: Sequence[str], dragged: Sequence[tuple[str, str]]) -> JsonObject:
     """The slides of this variant in source order, named by phrases, not by titles. `gone`: frames
     the scenario deleted in the deck - the source still has them and deck edits win, so they are
     not there to be in any order. `dragged`: (frame, the frame it was dropped behind) - the deck
@@ -161,7 +168,7 @@ def fresh_titles(flags: list[str]) -> list[str]:
     return [f"{t} v2" if "retitleall" in flags else t for t in FRESH_TITLES]
 
 
-def E(edit: str, **args) -> dict:
+def E(edit: str, **args: Json) -> JsonObject:
     return {"edit": edit, "args": args}
 
 
@@ -179,7 +186,7 @@ def cli_missing(command: str) -> str | None:
 
 def classified(variant: str) -> Path:
     """tests/decks/stress/out/classified/<variant>, classified again when the PDF is newer."""
-    pdf = stress.build(variant)
+    pdf = built(variant)
     folder = stress.OUT / "classified" / variant
     deck = folder / "deck.json"
     if not deck.exists() or deck.stat().st_mtime < pdf.stat().st_mtime:
@@ -188,8 +195,15 @@ def classified(variant: str) -> Path:
     return folder
 
 
+def infos(name: str) -> list[JsonObject]:
+    """`identity.slide_info` of every slide of a variant's classified deck."""
+    from beamer2slides import identity
+    deck = json.loads((classified(name) / "deck.json").read_text(encoding="utf-8"))
+    return [identity.slide_info(s) for s in jobjs(deck, "slides")]
+
+
 @pytest.mark.parametrize("variant", [v for v in stress.VARIANTS if v != "v1" and v not in stress.DIFF_EXEMPT])
-def test_stress_variants_classify_as_intended(variant):
+def test_stress_variants_classify_as_intended(variant: str) -> None:
     """Each source version differs from v1 in classification exactly as its flags intend - with
     three frames called Results and two with no title, the slides are paired by content, so an
     unintended difference here means the deck moved text between slides that look alike."""
@@ -203,7 +217,7 @@ def test_stress_variants_classify_as_intended(variant):
 
 
 @pytest.mark.parametrize("variant", sorted(stress.DIFF_EXEMPT))
-def test_exempt_variants_still_build_and_classify(variant):
+def test_exempt_variants_still_build_and_classify(variant: str) -> None:
     """4:3 is a page size, not an edit: every paragraph rewraps, so there is no diff to pin down.
     It still has to compile and classify into the same frames."""
     if reason := latex_missing():
@@ -213,7 +227,7 @@ def test_exempt_variants_still_build_and_classify(variant):
 
 
 @pytest.mark.parametrize("variant", [v for v in stress.VARIANTS if v not in ("v1", "recastmoved")])
-def test_every_variant_pairs_with_v1_frame_for_frame(variant):
+def test_every_variant_pairs_with_v1_frame_for_frame(variant: str) -> None:
     """Identity itself, against a truth this deck knows: `stress.frames` says which frame of the
     variant is which frame of v1, whatever the source did to it. So the pairing `sync` would use
     (`identity.label_moves` + `align_slides`, on the real classified PDFs, no Google) can be asked
@@ -226,15 +240,11 @@ def test_every_variant_pairs_with_v1_frame_for_frame(variant):
         pytest.skip(reason)
     from beamer2slides import identity
 
-    def infos(name):
-        deck = json.loads((classified(name) / "deck.json").read_text(encoding="utf-8"))
-        return [identity.slide_info(s) for s in deck["slides"]]
-
     base, ours = infos("v1"), infos(variant)
     base_names, names = stress.names([]), stress.names(stress.VARIANTS[variant])
     assert len(ours) == len(names), f"{len(ours)} slides for {len(names)} frames"
     pairs = identity.align_slides(base, ours, identity.label_moves(base, ours))
-    wrong = []
+    wrong: list[str] = []
     for j, name in enumerate(names):
         want = base_names.index(name) if name in base_names else None
         if pairs.get(j) != want:
@@ -250,12 +260,12 @@ def test_every_variant_pairs_with_v1_frame_for_frame(variant):
     # variants pairs frame for frame, so it has nothing to say. `strangers` is the one that can
     # get this wrong - a frame the source added, two it dropped, and nothing in common between
     # them - and the only variant besides `recastmoved` where a near miss is possible at all.
-    said = [(names[m["ours"]], base_names[m["base"]], m["evidence"])
+    said = [(names[jint(m, "ours")], base_names[jint(m, "base")], m["evidence"])
             for m in identity.near_misses(base, ours, pairs)]
     assert not said, f"near_misses names {said} on a variant whose frames all pair"
 
 
-def test_the_one_frame_nothing_can_follow_is_named_in_the_report():
+def test_the_one_frame_nothing_can_follow_is_named_in_the_report() -> None:
     """`recastmoved`, the exception to the test above and the reason it has one: the frame with no
     label gets another title, half its words rewritten *and* a ride across nine other frames, all in
     one version. No label, not enough words, no gap to stand in - so it pairs with nothing, which is
@@ -265,10 +275,6 @@ def test_the_one_frame_nothing_can_follow_is_named_in_the_report():
     if reason := latex_missing():
         pytest.skip(reason)
     from beamer2slides import identity
-
-    def infos(name):
-        deck = json.loads((classified(name) / "deck.json").read_text(encoding="utf-8"))
-        return [identity.slide_info(s) for s in deck["slides"]]
 
     base, ours = infos("v1"), infos("recastmoved")
     base_names, names = stress.names([]), stress.names(stress.VARIANTS["recastmoved"])
@@ -281,7 +287,7 @@ def test_the_one_frame_nothing_can_follow_is_named_in_the_report():
             and pairs.get(k) != (base_names.index(name) if name in base_names else None)] == []
 
 
-def test_a_label_written_twice_reaches_the_pdf_as_no_label_at_all():
+def test_a_label_written_twice_reaches_the_pdf_as_no_label_at_all() -> None:
     """`duplabel` writes `label=mobile` on the `arriving` frame as well, and changes nothing else.
     What comes out is not two slides sharing a label: hyperref refuses the second destination, so
     the PDF has one `mobile` (on the first frame) and no `arriving` at all, and the second frame
@@ -294,15 +300,11 @@ def test_a_label_written_twice_reaches_the_pdf_as_no_label_at_all():
     that keys slides by label would suddenly be looking at two slides called `mobile`."""
     if reason := latex_missing():
         pytest.skip(reason)
-    from beamer2slides import identity, labels
+    from beamer2slides import labels
     from beamer2slides.pdf import Document
 
-    dests = Document(stress.build("duplabel")).named_dests()
+    dests = Document(built("duplabel")).named_dests()
     assert sorted(n for n, _ in dests if n.startswith(("mobile", "arriving"))) == ["mobile", "mobile<1>"]
-
-    def infos(name):
-        deck = json.loads((classified(name) / "deck.json").read_text(encoding="utf-8"))
-        return [identity.slide_info(s) for s in deck["slides"]]
 
     ours = infos("duplabel")
     j = next(k for k, i in enumerate(ours) if i["title"] == "Arriving labels")
@@ -314,50 +316,53 @@ def test_a_label_written_twice_reaches_the_pdf_as_no_label_at_all():
     assert [u["title"] for u in labels.survey(infos("v1"))["unlabelled"]] == ["Results"]
 
 
-def test_selectors_are_unique():
+def test_selectors_are_unique() -> None:
     """Every phrase this file finds a slide by is on exactly one slide of v1 (and of the variants
     that add or change text). Without this the live scenarios would edit the wrong slide."""
     if reason := latex_missing():
         pytest.skip(reason)
-    problems = []
+    problems: list[str] = []
     for variant in ("v1", "insertframe", "rewritebullets", "everyrow"):
         flags = stress.VARIANTS[variant]
         slides = stress.summary(classified(variant))
         wanted = {n: p for n, p in SEL.items() if n in stress.names(flags)}
-        wanted["backup"] = backup(flags)["contains"]
+        wanted["backup"] = jstr(backup(flags), "contains")
         for name, phrase in wanted.items():
             hits = [i for i, s in enumerate(slides)
-                    if phrase.lower() in " ".join([s["title"] or ""] + s["texts"]).lower()]
+                    if phrase.lower() in " ".join([s.title or "", *s.texts]).lower()]
             if len(hits) != 1:
                 problems.append(f"{variant}: {name!r} phrase {phrase!r} is on {len(hits)} slides {hits}")
     assert not problems, "\n".join(problems)
 
 
-def test_request_budget():
+def test_request_budget() -> None:
     """What a 48 frame deck costs: elements, planned API requests and the scratch slides the
     picture measurement needs. A data point, with bounds wide enough to only catch a blow-up."""
     if reason := latex_missing():
         pytest.skip(reason)
     from beamer2slides.emit import plan_offline
-    deck = json.loads((classified("v1") / "deck.json").read_text(encoding="utf-8"))
+    deck = jobj(json.loads((classified("v1") / "deck.json").read_text(encoding="utf-8")))
+    slides = jobjs(deck, "slides")
     started = time.time()
     plan = plan_offline(deck)
     planned = time.time() - started
-    requests = sum(len(part) for _, _, parts, _ in plan["slides"] for part in parts)
-    elements = sum(len(s["elements"]) for s in deck["slides"])
-    stats = {"slides": len(deck["slides"]), "elements": elements, "phase1_requests": len(plan["copies"]),
-             "content_requests": requests, "measure_requests": len(plan["measure"]),
-             "measure_slides": sum("createSlide" in r for r in plan["measure"]),
-             "batches": -(-requests // 400), "plan_seconds": round(planned, 2)}
+    # (a part is (element, its requests): what counts is its requests, not the pair)
+    requests = sum(len(rs) for _, _, parts, _ in plan["slides"] for _, rs in parts)
+    elements = sum(len(jobjs(s, "elements")) for s in slides)
+    stats: dict[str, float] = {
+        "slides": len(slides), "elements": elements, "phase1_requests": len(plan["copies"]),
+        "content_requests": requests, "measure_requests": len(plan["measure"]),
+        "measure_slides": sum("createSlide" in r for r in plan["measure"]),
+        "batches": -(-requests // 400), "plan_seconds": round(planned, 2)}
     with TIMINGS_LOCK:
         TIMINGS["plan"] = stats
         save_timings()
     print("\nstress deck request budget: " + json.dumps(stats))
     assert stats["slides"] == len(stress.names([]))
-    assert requests < 40 * len(deck["slides"]), f"{requests} content requests for {len(deck['slides'])} slides"
+    assert requests < 40 * len(slides), f"{requests} content requests for {len(slides)} slides"
 
 
-def _page_element(oid: str, tag: str, box: list[float], **kind) -> dict:
+def _page_element(oid: str, tag: str, box: list[float], **kind: Json) -> JsonObject:
     """One `presentations.get` page element at an absolute box, in pt."""
     x0, y0, x1, y1 = box
     return {"objectId": oid, "title": tag, **kind,
@@ -365,16 +370,16 @@ def _page_element(oid: str, tag: str, box: list[float], **kind) -> dict:
             "transform": {"scaleX": 1, "scaleY": 1, "translateX": x0, "translateY": y0, "unit": "PT"}}
 
 
-def _text_box(oid: str, tag: str, box: list[float], text: str) -> dict:
+def _text_box(oid: str, tag: str, box: list[float], text: str) -> JsonObject:
     return _page_element(oid, tag, box, shape={"shapeType": "TEXT_BOX", "text": {
         "textElements": [{"textRun": {"content": text}}]}})
 
 
-def _picture(oid: str, tag: str, box: list[float]) -> dict:
+def _picture(oid: str, tag: str, box: list[float]) -> JsonObject:
     return _page_element(oid, tag, box, image={"contentUrl": "https://example.invalid/equation.png"})
 
 
-def test_integrity_does_not_ask_display_maths_to_be_grouped():
+def test_integrity_does_not_ask_display_maths_to_be_grouped() -> None:
     """A display equation becomes a picture of its own (`classify`: role math, anchor None), tagged
     `.../image/math/N` exactly like an inline formula. The checker used to ask every such picture to
     be grouped with its text, so every deck holding display maths reported a problem that was not
@@ -398,7 +403,7 @@ def test_integrity_does_not_ask_display_maths_to_be_grouped():
     assert [p for p in sc.integrity_alone(inline) if "not grouped with its text" in p]
 
 
-def test_integrity_excuses_a_slide_by_id_when_the_source_retitled_it():
+def test_integrity_excuses_a_slide_by_id_when_the_source_retitled_it() -> None:
     """A person who takes a converter group apart owns that slide's grouping from then on, and the
     caller says so by naming the slide in `allow_ungrouped`. Naming it by title alone is not enough
     when the source retitles the frame in the same step - which is exactly what a chained fuzz round
@@ -430,25 +435,32 @@ def save_timings() -> None:
 class Run:
     """One scenario folder: its deck, the CLI calls (logged), timings and the problems found."""
 
-    def __init__(self, name: str):
+    def __init__(self, name: str) -> None:
         self.name, self.out = name, OUT / name
         self.out.mkdir(parents=True, exist_ok=True)
         self.log = open(OUT / f"{name}.log", "w", encoding="utf-8")
         self.problems: list[str] = []
-        self.deck = None
-        self.before = None
+        self.deck: LiveDeck | None = None
+        self.before: Model | None = None
         self.times: dict[str, float] = {}
 
-    def cli(self, *args, env: dict | None = None, check: bool = True) -> subprocess.CompletedProcess:
+    def live(self) -> LiveDeck:
+        """The deck this scenario edits and syncs (`start` or `convert` opened it)."""
+        if self.deck is None:
+            raise RuntimeError(f"{self.name}: no deck yet (start or convert first)")
+        return self.deck
+
+    def cli(self, *args: str | Path) -> subprocess.CompletedProcess[bytes]:
+        """`beamer2slides <args>`, logged; a failure raises."""
         self.log.write(f"\n$ beamer2slides {' '.join(map(str, args))}\n")
         self.log.flush()
-        done = subprocess.run([sys.executable, "-m", "beamer2slides", *map(str, args)], env={**ENV, **(env or {})},
+        done = subprocess.run([sys.executable, "-m", "beamer2slides", *map(str, args)], env=ENV,
                               cwd=ROOT, stdout=self.log, stderr=subprocess.STDOUT)
-        if check and done.returncode:
+        if done.returncode:
             raise RuntimeError(f"{self.name}: beamer2slides {args[0]} failed, see {OUT / f'{self.name}.log'}")
         return done
 
-    def timed(self, what: str, fn):
+    def timed(self, what: str, fn: Callable[[], T]) -> T:
         started = time.time()
         try:
             return fn()
@@ -468,7 +480,7 @@ class Run:
         if emitted.exists():
             try:
                 execute(drive_service().files().delete(
-                    fileId=json.loads(emitted.read_text(encoding="utf-8"))["presentationId"]))
+                    fileId=jstr(json.loads(emitted.read_text(encoding="utf-8")), "presentationId")))
             except HttpError as e:
                 if status_of(e) != 404:
                     raise
@@ -489,30 +501,31 @@ class Run:
         """A conversion of its own (after `clear`: the guard refuses to rebuild an edited deck)."""
         from beamer2slides.devtools.deck_edits import open_deck
         self.timed("convert", lambda: self.cli("convert", pdf, "--out", self.out))
-        self.deck = open_deck(json.loads((self.out / "emit.json").read_text(encoding="utf-8"))["presentationId"],
+        self.deck = open_deck(jstr(json.loads((self.out / "emit.json").read_text(encoding="utf-8")), "presentationId"),
                               defer=False)
 
-    def edit(self, *specs: dict) -> list[dict]:
+    def edit(self, *specs: JsonObject) -> list[JsonObject]:
         from beamer2slides.devtools.deck_edits import verified
-        self.deck.read()
-        out = []
+        self.live().read()
+        out: list[JsonObject] = []
         for spec in specs:
-            exp, bad = verified(self.deck, spec)
+            exp, bad = verified(self.live(), spec)
             if bad:
                 raise RuntimeError(f"{self.name}: the edit itself failed: {bad}")
             out.append(exp)
             self.log.write(f"edit {json.dumps(spec, ensure_ascii=False)}\n")
         return out
 
-    def report(self) -> dict:
+    def report(self) -> JsonObject:
         found = sorted((p for p in (self.out / "sync-report.json", self.out / "sync" / "sync-report.json") if p.exists()),
                        key=lambda p: p.stat().st_mtime)
         if not found:
             raise RuntimeError(f"{self.name}: sync wrote no sync-report.json")
-        return json.loads(found[-1].read_text(encoding="utf-8"))
+        return jobj(json.loads(found[-1].read_text(encoding="utf-8")))
 
-    def sync(self, pdf: Path, what: str = "sync") -> dict:
-        self.before = self.deck.read()
+    def sync(self, pdf: Path, what: str) -> JsonObject:
+        """`beamer2slides sync` of `pdf` into this deck, timed as `what`; its report."""
+        self.before = self.live().read()
         started = time.time()
         self.timed(what, lambda: self.cli("sync", pdf, "--deck", self.out))
         report = self.report()
@@ -522,14 +535,18 @@ class Run:
 
     def revision(self) -> str:
         from beamer2slides.gslides import execute
-        return execute(self.deck.api.presentations().get(presentationId=self.deck.pid, fields="revisionId"))["revisionId"]
+        deck = self.live()
+        revision = execute(deck.api.presentations().get(presentationId=deck.pid, fields="revisionId")).get("revisionId")
+        if revision is None:
+            raise RuntimeError(f"{self.name}: presentations.get answered no revisionId")
+        return revision
 
     def base_ids(self) -> set[str] | None:
         from beamer2slides.devtools.sync_check import ids_in
         base = next((p for p in (self.out / "sync" / "base.json", self.out / "base.json") if p.exists()), None)
         return ids_in(json.loads(base.read_text(encoding="utf-8"))) if base else None
 
-    def integrity(self, model) -> list[str]:
+    def integrity(self, model: Model) -> list[str]:
         """What the checker says about the deck's structure - all of it. It used to have one
         sentence filtered out, the one it said about every deck with display maths; the checker
         now tells a display equation from an inline formula itself (`sync_check.on_a_text_line`)."""
@@ -537,11 +554,11 @@ class Run:
         return sc.integrity(model, before=self.before, base_ids=self.base_ids(), allow_groups_changed=frozenset(),
                             allow_ungrouped=frozenset())
 
-    def check(self, variant: str, pdf: Path, report: dict, expectations: list[dict], *, drop: tuple[str, ...] = (),
-              checks: list[dict] = (), conflicts: list[list[str]] = (), any_conflicts: bool = False,
-              converged: list[list[str]] = (), no_writes_since: str | None = None, edited: list[str] = (),
-              gone: tuple[str, ...] = (), overridden: tuple[str, ...] = (), warnings: list[list[str]] = (),
-              dragged: tuple[tuple[str, str], ...] = (), idempotent: bool = True) -> None:
+    def check(self, variant: str, pdf: Path, report: JsonObject, expectations: list[JsonObject], *,
+              drop: Sequence[str], checks: Sequence[JsonObject], conflicts: Sequence[Sequence[str]],
+              any_conflicts: bool, converged: Sequence[Sequence[str]], no_writes_since: str | None,
+              edited: Sequence[str], gone: Sequence[str], overridden: Sequence[str],
+              warnings: Sequence[Sequence[str]], dragged: Sequence[tuple[str, str]], idempotent: bool) -> None:
         """Everything a sync of this deck must leave behind: the deck edits (minus `drop`, whose
         own checks the source legitimately changed), the source's own checks, the slide order of
         the variant, the report, integrity, and untouched slides against a fresh conversion.
@@ -553,8 +570,8 @@ class Run:
         deck kept instead. All three are the scenario declaring which side of a conflict it arranged."""
         from beamer2slides.devtools import sync_check as sc
         flags = stress.VARIANTS[variant]
-        model = self.deck.read()
-        kept = [c for e in expectations if e["edit"] not in drop for c in e["checks"]]
+        model = self.live().read()
+        kept = [c for e in expectations if e["edit"] not in drop for c in jobjs(e, "checks")]
         source_checks = [c for c in stress.checks(flags) if c.get("text") not in overridden]
         all_checks = kept + list(checks) + source_checks + [order_check(flags, gone, dragged)]
         self.problems += [f"after sync to {variant}: {p}" for p in sc.check_all(model, all_checks)]
@@ -570,13 +587,13 @@ class Run:
         # Slides nobody edited: still element for element a fresh conversion of the same source.
         # (Sub-pixel placement is the sync suite's job; this deck is about identity and merging,
         # so only a few untouched slides are compared, and two of them pixel by pixel.)
-        fresh_folder, fresh = fresh_conversion(variant)
-        assert fresh is not None   # (read: the default)
+        fresh_folder, fresh = fresh_conversion(variant, read=True)
+        assert fresh is not None   # (read)
         titles = [t for t in fresh_titles(flags) if t not in edited
                   and len(model.find(t)) == 1 and len(fresh.find(t)) == 1]
         self.problems += sc.compare_fresh(model, fresh, titles)
         for t in titles[:2]:
-            problem = sc.thumbnail_diff(self.deck.api, (self.deck.pid, model.one(t).id),
+            problem = sc.thumbnail_diff(self.live().api, (self.live().pid, model.one(t).id),
                                         (fresh.pid, fresh.one(t).id),
                                         self.out / "check" / f"thumb-{titles.index(t) + 1:02}.png")
             if problem:
@@ -595,7 +612,7 @@ _fresh_locks: dict[str, threading.Lock] = {}
 _fresh_guard = threading.Lock()
 
 
-def fresh_conversion(variant: str, read: bool = True):
+def fresh_conversion(variant: str, *, read: bool) -> tuple[Path, Model | None]:
     """(folder, model) of a fresh conversion of a source version, converted again only when its
     PDF or the converter changed (`sync_check.converter_stamp`). Nobody edits these decks: `v1`'s
     is also every scenario's starting deck, as a copy (`Run.start`)."""
@@ -604,7 +621,7 @@ def fresh_conversion(variant: str, read: bool = True):
         lock = _fresh_locks.setdefault(variant, threading.Lock())
     with lock:
         folder = OUT / "_fresh" / variant
-        pdf = stress.build(variant)
+        pdf = built(variant)
         done = folder / ".converted"
         stamp = f"{pdf.stat().st_mtime} {sc.converter_stamp()}"
         if not done.exists() or done.read_text(encoding="utf-8") != stamp:
@@ -617,25 +634,26 @@ def fresh_conversion(variant: str, read: bool = True):
             with TIMINGS_LOCK:
                 TIMINGS.setdefault("convert", {})[variant] = round(time.time() - started, 1)
                 save_timings()
-        pid = json.loads((folder / "emit.json").read_text(encoding="utf-8"))["presentationId"]
+        pid = jstr(json.loads((folder / "emit.json").read_text(encoding="utf-8")), "presentationId")
         return folder, (sc.read(pid) if read else None)
 
 
 # ---------------------------------------------------------------- scenarios
 
-SCENARIOS = {}
+Scenario = Callable[["Run"], None]
+SCENARIOS: dict[str, Scenario] = {}
 # scenario -> the variant its check compares with a fresh conversion (`Run.check`)
 CHECKED = {"ambiguous": "ambiguous", "identity": "identity", "recast-moved": "recastmoved", "churn": "churn",
            "pictures": "pictures", "kitchen": "kitchen"}
 
 
-def scenario(fn):
+def scenario(fn: Scenario) -> Scenario:
     SCENARIOS[fn.__name__.removeprefix("scenario_").replace("_", "-")] = fn
     return fn
 
 
 @scenario
-def scenario_ambiguous(run: Run):
+def scenario_ambiguous(run: Run) -> None:
     """The hardest identity case: two frames one word apart are swapped, a third frame is
     inserted between them, and a cell changes in every row of a table whose rows all say the same
     - while the deck has edits on exactly those slides and on one of three identical paragraphs."""
@@ -651,17 +669,19 @@ def scenario_ambiguous(run: Run):
         E("replace_word", slide=S("repeatcells"), text="Three", old="Three", new="Third"),
         E("add_text_box", slide=S("results-b"), text="Reviewed", box=[560, 60, 130, 28]),
         E("set_notes", slide=S("notes-b"), text="Only the second of the two notes slides says this."))
-    pdf = stress.build("ambiguous")
-    run.check("ambiguous", pdf, run.sync(pdf), exps, checks=[
+    pdf = built("ambiguous")
+    run.check("ambiguous", pdf, run.sync(pdf, "sync"), exps, checks=[
         {"check": "text", "slide": None, "text": "sameness", "count": 1},
         {"check": "text", "slide": S("twin-a"), "text": "sameness", "count": 1},
         {"check": "text", "slide": None, "text": "Only the second echo says this.", "count": 1},
         {"check": "text", "slide": None, "text": "Nothing in this paragraph says which slide it is on", "count": 3},
-        {"check": "notes", "slide": S("notes-a"), "text": "Remember to slow down here; the audience needs a moment."}])
+        {"check": "notes", "slide": S("notes-a"), "text": "Remember to slow down here; the audience needs a moment."}],
+        drop=(), conflicts=(), any_conflicts=False, converged=(), no_writes_since=None, edited=(), gone=(),
+        overridden=(), warnings=(), dragged=(), idempotent=True)
 
 
 @scenario
-def scenario_identity(run: Run):
+def scenario_identity(run: Run) -> None:
     """Identity itself moves: a label moves to the next frame, another disappears, and every
     title in the deck is renamed at once. Nothing the person did may follow the labels.
 
@@ -681,8 +701,8 @@ def scenario_identity(run: Run):
         E("set_background", slide=S("arriving"), color="#fff2cc"),
         E("recolour", slide=S("#27"), word="Results", context="This third slide called Results", color="#c00000"),
         E("add_text_box", slide=S("astral"), text="Two code units", box=[540, 300, 150, 28]))
-    pdf = stress.build("identity")
-    run.check("identity", pdf, run.sync(pdf), exps, checks=[
+    pdf = built("identity")
+    run.check("identity", pdf, run.sync(pdf, "sync"), exps, checks=[
         {"check": "title", "slide": S("agenda"), "text": "Agenda v2"},
         {"check": "title", "slide": S("mobile"), "text": "Moving labels v2"},
         {"check": "title", "slide": S("vanishing"), "text": "Disappearing label v2"},
@@ -691,11 +711,13 @@ def scenario_identity(run: Run):
         {"check": "title", "slide": S("#27"), "text": "The third table of numbers v2"},
         {"check": "slide_count", "slide": S("#27"), "count": 1}],
         conflicts=[["label", "mobile", "Arriving labels v2", "identity taken from the content"]],
-        edited=["Characters outside the BMP"])
+        edited=["Characters outside the BMP"],
+        drop=(), any_conflicts=False, converged=(), no_writes_since=None, gone=(), overridden=(), warnings=(),
+        dragged=(), idempotent=True)
 
 
 @scenario
-def scenario_recast_moved(run: Run):
+def scenario_recast_moved(run: Run) -> None:
     """The frame nothing can follow, end to end. The unlabelled third Results frame gets another
     title, half its words rewritten *and* a ride across nine other frames, in one version - while
     the person has coloured a word on its slide.
@@ -706,13 +728,13 @@ def scenario_recast_moved(run: Run):
     that looks like it (`identity.near_misses`), so an AI author reading the report can put a label
     on that frame and have a person move the edits over."""
     run.start()
-    old = {"contains": "so only its content can identify it"}   # the sentence only the old slide has
-    new = {"contains": "the source has now given it"}           # and the one only the new slide has
+    old: JsonObject = {"contains": "so only its content can identify it"}   # the sentence only the old slide has
+    new: JsonObject = {"contains": "the source has now given it"}           # and the one only the new slide has
     exps = run.edit(
         E("recolour", slide=old, word="Results", context="This third slide called Results", color="#c00000"),
         E("add_text_box", slide=S("astral"), text="Mine, on a frame nothing touches", box=[540, 300, 150, 28]))
-    pdf = stress.build("recastmoved")
-    run.check("recastmoved", pdf, run.sync(pdf), exps, checks=[
+    pdf = built("recastmoved")
+    run.check("recastmoved", pdf, run.sync(pdf, "sync"), exps, checks=[
         # Both slides say "no label at all", so the source's own checks (which name the frame by
         # that phrase) cannot tell them apart any more: `overridden` drops them and these take over.
         {"check": "slide_count", "slide": old, "count": 1},
@@ -725,11 +747,12 @@ def scenario_recast_moved(run: Run):
         overridden=("so only its content can identify it",
                     "another title and rewritten the rest of what it says about itself."),
         warnings=[["no frame this slide could be matched to", "The third table of numbers"]],
-        edited=["Characters outside the BMP"])
+        edited=["Characters outside the BMP"],
+        drop=(), conflicts=(), any_conflicts=False, converged=(), no_writes_since=None, dragged=(), idempotent=True)
 
 
 @scenario
-def scenario_churn(run: Run):
+def scenario_churn(run: Run) -> None:
     """Ten frames reordered, the first and the last deleted, every bullet of one frame and the
     whole of one block rewritten - on a deck that has edits on the moved frames and on the very
     bullets the source rewrites."""
@@ -743,8 +766,8 @@ def scenario_churn(run: Run):
         E("replace_word", slide={"contains": BACKUP_V1}, text="The numbers are rounded to whole seconds",
           old="whole", new="full"),
         E("delete_slide", slide=S("echo-three")))
-    pdf = stress.build("churn")
-    run.check("churn", pdf, run.sync(pdf), exps, drop=("replace_word",), checks=[
+    pdf = built("churn")
+    run.check("churn", pdf, run.sync(pdf, "sync"), exps, drop=("replace_word",), checks=[
         {"check": "slide_count", "slide": S("summary"), "count": 0},
         {"check": "slide_count", "slide": S("title"), "count": 0},
         {"check": "slide_count", "slide": S("echo-three"), "count": 0},
@@ -754,30 +777,33 @@ def scenario_churn(run: Run):
         any_conflicts=True, edited=["A code block"],
         # The deck deleted echo-three and rewrote the third backup bullet; both are arranged here
         # so that the deck wins, so neither of the source's own checks for them can hold.
-        gone=("echo-three",), overridden=("Seconds are rounded, milliseconds are dropped",))
+        gone=("echo-three",), overridden=("Seconds are rounded, milliseconds are dropped",),
+        conflicts=(), converged=(), no_writes_since=None, warnings=(), dragged=(), idempotent=True)
 
 
 @scenario
-def scenario_pictures(run: Run):
+def scenario_pictures(run: Run) -> None:
     """One of two identical pictures is replaced in the source while the person has moved the
     other one and resized the same file on another slide; identical notes change on one frame."""
     run.start()
-    model = run.deck.read()
+    model = run.live().read()
     left = min((e for e in model.one(S("twinpics")).elements if e.kind == "image"), key=lambda e: e.box[0])
     exps = run.edit(
         E("move", slide=S("twinpics"), target={"id": left.id}, dx=0, dy=-18),
         E("resize", slide=S("picagain"), target={"image": "largest"}, sx=0.8),
         E("set_notes", slide=S("notes-b"), text="This one keeps the deck's notes."))
-    pdf = stress.build("pictures")
-    run.check("pictures", pdf, run.sync(pdf), exps, checks=[
+    pdf = built("pictures")
+    run.check("pictures", pdf, run.sync(pdf, "sync"), exps, checks=[
         {"check": "image", "slide": S("twinpics"), "count": 2},
         {"check": "notes", "slide": S("notes-a"),
          "text": "Slow right down here; give the audience a moment to catch up."},
-        {"check": "notes", "slide": S("notes-b"), "text": "This one keeps the deck's notes."}])
+        {"check": "notes", "slide": S("notes-b"), "text": "This one keeps the deck's notes."}],
+        drop=(), conflicts=(), any_conflicts=False, converged=(), no_writes_since=None, edited=(), gone=(),
+        overridden=(), warnings=(), dragged=(), idempotent=True)
 
 
 @scenario
-def scenario_kitchen(run: Run):
+def scenario_kitchen(run: Run) -> None:
     """Everything at once: twins swapped, a frame inserted between them, a label moved, every
     title renamed, ten frames reordered, a frame's bullets rewritten, a cell changed in every
     row, a picture replaced and notes changed - against a deck edited in every way."""
@@ -794,8 +820,8 @@ def scenario_kitchen(run: Run):
         E("set_notes", slide=S("gaps"), text="Mention the empty item."),
         E("add_slide", after=S("figcaption"), title="Reviewer questions", body="Does the caption survive?"),
         E("move_slide", slide=S("footnotes"), after=S("description")))
-    pdf = stress.build("kitchen")
-    run.check("kitchen", pdf, run.sync(pdf), exps, checks=[
+    pdf = built("kitchen")
+    run.check("kitchen", pdf, run.sync(pdf, "sync"), exps, checks=[
         {"check": "title", "slide": S("summary"), "text": "Takeaways v2"},
         {"check": "text", "slide": None, "text": "A frame added exactly where identity is hardest", "count": 1},
         {"check": "text", "slide": S("twin-b"), "text": "This bullet is about sameness, not about wording", "count": 0},
@@ -807,11 +833,13 @@ def scenario_kitchen(run: Run):
         dragged=(("footnotes", "description"),),
         # "One very long line" carries the deck's bold: it cannot be element for element, let alone
         # pixel for pixel, what a fresh conversion of the source makes of that frame.
-        edited=["A figure with a caption v2", "Footnotes and small print v2", "One very long line v2"])
+        edited=["A figure with a caption v2", "Footnotes and small print v2", "One very long line v2"],
+        drop=(), any_conflicts=False, converged=(), no_writes_since=None, gone=(), overridden=(), warnings=(),
+        idempotent=True)
 
 
 @scenario
-def scenario_pull(run: Run):
+def scenario_pull(run: Run) -> None:
     """Wording edits on the ambiguous slides pulled back into the source: the .tex has to receive
     them on the right frames (three slides carry the same paragraph, two the same notes), and the
     sync that follows must call them converged and write nothing."""
@@ -845,9 +873,9 @@ def scenario_pull(run: Run):
         run.problems.append("pull rewrote the sentence on both twins")
     pdf = run.timed("compile_again", lambda: stress.compile_tex(tex))
     revision = run.revision()
-    report = run.sync(pdf)
-    model = run.deck.read()
-    run.problems += sc.check_all(model, [c for e in exps for c in e["checks"]] + [
+    report = run.sync(pdf, "sync")
+    model = run.live().read()
+    run.problems += sc.check_all(model, [c for e in exps for c in jobjs(e, "checks")] + [
         {"check": "text", "slide": None, "text": "the deck was polished by hand", "count": 1},
         {"check": "text", "slide": None, "text": "the deck was converted once", "count": 1},
         {"check": "text", "slide": None, "text": "the source changed again", "count": 1},
@@ -862,20 +890,20 @@ def scenario_pull(run: Run):
     run.problems += run.integrity(model)
 
 
-XFAIL = {}  # scenario -> why it cannot pass yet
+XFAIL: dict[str, str] = {}  # scenario -> why it cannot pass yet
 
 
 @pytest.fixture(scope="module")
-def outcomes(request):
+def outcomes(request: pytest.FixtureRequest) -> dict[str, list[str] | BaseException]:
     """scenario -> problems (or the exception, or a skip reason) for the scenarios selected."""
-    names = [n for n in SCENARIOS if any(getattr(i, "callspec", None) and i.callspec.params.get("name") == n
-                                         for i in request.session.items)]
+    names = [n for n in SCENARIOS if any(isinstance(i, pytest.Function) and hasattr(i, "callspec")
+                                         and i.callspec.params.get("name") == n for i in request.session.items)]
     for reason in (cli_missing("sync"), latex_missing(), google_unavailable()):
         if reason:
             pytest.skip(reason)
     OUT.mkdir(parents=True, exist_ok=True)
 
-    def run(name):
+    def run(name: str) -> list[str] | BaseException:
         r = Run(name)
         try:
             SCENARIOS[name](r)
@@ -891,7 +919,7 @@ def outcomes(request):
     # goes first: every scenario but pull starts from a copy of it.
     wanted = ["v1"] * any(n != "pull" for n in names) + [CHECKED[n] for n in names if n in CHECKED]
     with ThreadPoolExecutor(max_workers=FRESH_PARALLEL) as fresh, ThreadPoolExecutor(max_workers=PARALLEL) as pool:
-        warm = [fresh.submit(fresh_conversion, v, False) for v in wanted]
+        warm = [fresh.submit(fresh_conversion, v, read=False) for v in wanted]
         if warm:
             warm[0].result()   # (a failed v1 would fail every scenario the same way: say so once)
         found = dict(zip(names, pool.map(run, names)))
@@ -902,11 +930,11 @@ def outcomes(request):
 
 @pytest.mark.parametrize("name", [pytest.param(n, marks=pytest.mark.xfail(reason=XFAIL[n], strict=True)) if n in XFAIL else n
                                   for n in SCENARIOS])
-def test_scenario(name, outcomes):
+def test_scenario(name: str, outcomes: dict[str, list[str] | BaseException]) -> None:
     result = outcomes[name]
     if isinstance(result, pytest.skip.Exception):
         pytest.skip(str(result))
-    if isinstance(result, Exception):
+    if isinstance(result, BaseException):   # (`run` catches nothing else than a skip or an Exception)
         raise result
     if result:
         pytest.fail(f"{name} ({OUT / name}):\n  " + "\n  ".join(result), pytrace=False)

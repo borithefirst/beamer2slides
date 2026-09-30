@@ -6,6 +6,9 @@ magnified copies, the trimmed-away panel of an `\\includegraphics[trim, clip]`, 
 white callout, an opacity=0 node on an overlay step)."""
 
 import zlib
+from collections.abc import Mapping
+from pathlib import Path
+from typing import overload
 
 import numpy as np
 import pytest
@@ -13,6 +16,7 @@ import pytest
 from beamer2slides import pdf
 from beamer2slides.extract import Visibility, extract_page, select_overlays
 from beamer2slides.pdf.pure import foxit
+from beamer2slides.raw_types import RawDoc, RawPage
 
 # The pages set unembedded Helvetica, which the pure reader draws with PDFium's own faces from
 # their user cache: without them its text is empty, which is no finding about hidden text.
@@ -20,23 +24,44 @@ needs_faces = pytest.mark.skipif(not foxit.available(),
                                  reason="no PDFium font cache: python -m beamer2slides.pdf.pure.foxit")
 BACKENDS = ["pdfium", pytest.param("pure", marks=needs_faces)]
 HELV = b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+WIDTH, HEIGHT = 400, 200  # the page, pt
+SIZE = 12                 # every text's, pt
+RED = (255, 0, 0)
 
 
-def one_page(content: bytes, xobjects: dict[str, bytes] | None = None, width=400, height=200) -> bytes:
-    """A one-page PDF: Helvetica as /F1, transparency states /T0 (alpha 0), /T5 (alpha 0.5) and
+@overload
+def one_page(content: bytes, /) -> bytes: ...
+
+
+@overload
+def one_page(content: bytes, xobjects: Mapping[str, bytes], width: int, height: int, /) -> bytes: ...
+
+
+def one_page(content: bytes, /, *given: Mapping[str, bytes] | int) -> bytes:
+    """`pdf_page` of `content` alone, WIDTH x HEIGHT with no XObjects, or with all three said
+    (other tests' pages call it both ways)."""
+    if not given:
+        return pdf_page(content, {}, WIDTH, HEIGHT)
+    xobjects, width, height = given
+    assert isinstance(xobjects, Mapping) and isinstance(width, int) and isinstance(height, int)
+    return pdf_page(content, xobjects, width, height)
+
+
+def pdf_page(content: bytes, xobjects: Mapping[str, bytes], width: int, height: int) -> bytes:
+    """A one-page PDF, `width` x `height` pt: Helvetica as /F1, transparency states /T0 (alpha 0), /T5 (alpha 0.5) and
     /F0 (fill alpha 0),
     and XObjects given as whole object bodies."""
-    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", None,
+    objs = [b"<< /Type /Catalog /Pages 2 0 R >>", b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>", b"",  # (the page, below)
             b"<< /Length %d >>\nstream\n" % len(content) + content + b"\nendstream", HELV]
-    names = []
-    for name, body in (xobjects or {}).items():
+    names: list[bytes] = []
+    for name, body in xobjects.items():
         objs.append(body)
         names.append(b"/%s %d 0 R" % (name.encode(), len(objs)))
     objs[2] = (b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 %d %d] /Contents 4 0 R /Resources << "
                b"/Font << /F1 5 0 R >> /ExtGState << /T0 << /ca 0 /CA 0 >> /T5 << /ca 0.5 /CA 0.5 >> /F0 << /ca 0 >> >> "
                b"/XObject << %s >> >> >>" % (width, height, b" ".join(names)))
     out = bytearray(b"%PDF-1.7\n")
-    offsets = []
+    offsets: list[int] = []
     for k, body in enumerate(objs, 1):
         offsets.append(len(out))
         out += b"%d 0 obj\n" % k + body + b"\nendobj\n"
@@ -47,12 +72,12 @@ def one_page(content: bytes, xobjects: dict[str, bytes] | None = None, width=400
     return bytes(out)
 
 
-def form(content: bytes, bbox=b"0 0 400 200") -> bytes:
+def form(content: bytes, bbox: bytes) -> bytes:
     return b"<< /Type /XObject /Subtype /Form /BBox [%s] /Resources << /Font << /F1 5 0 R >> >> /Length %d >>\n" \
            b"stream\n%s\nendstream" % (bbox, len(content), content)
 
 
-def image(rgb=(255, 0, 0)) -> bytes:
+def image(rgb: tuple[int, int, int]) -> bytes:
     data = zlib.compress(bytes(rgb) * 4)
     return b"<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 " \
            b"/Filter /FlateDecode /Length %d >>\nstream\n" % len(data) + data + b"\nendstream"
@@ -68,123 +93,126 @@ def words(data: bytes, backend: str) -> str:
             doc.close()
 
 
-def text(x, y, s: bytes, size=12) -> bytes:
+def text(x: float, y: float, s: bytes, size: int) -> bytes:
     return b"BT /F1 %d Tf %g %g Td (%s) Tj ET\n" % (size, x, y, s)
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_text_outside_its_clip_is_not_text_of_the_slide(backend):
+def test_text_outside_its_clip_is_not_text_of_the_slide(backend: str) -> None:
     # the other panel of an \includegraphics[trim, clip]: a rectangle clip around a form
-    data = one_page(b"q 0 0 150 200 re W n " + text(20, 100, b"Shown") + text(200, 100, b"Trimmed") + b"Q\n")
+    data = one_page(b"q 0 0 150 200 re W n " + text(20, 100, b"Shown", SIZE) + text(200, 100, b"Trimmed", SIZE) + b"Q\n")
     assert words(data, backend) == "Shown"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_a_word_cut_at_the_clip_keeps_the_letters_mostly_inside(backend):
+def test_a_word_cut_at_the_clip_keeps_the_letters_mostly_inside(backend: str) -> None:
     # Helvetica 12: "Author" is ~37 pt wide from x 20; the clip ends at x 45, inside the "o"
     # (26.7 + ... the letters whose box is mostly left of 45 stay)
-    data = one_page(b"q 0 0 45 200 re W n " + text(20, 100, b"Author") + b"Q\n")
+    data = one_page(b"q 0 0 45 200 re W n " + text(20, 100, b"Author", SIZE) + b"Q\n")
     kept = words(data, backend)
     assert "Author".startswith(kept) and 2 <= len(kept) < 6
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_a_letter_the_page_edge_cuts_is_still_text(backend):
+def test_a_letter_the_page_edge_cuts_is_still_text(backend: str) -> None:
     # an overfull table cell at the right edge (r2_code_v2 slide 9): the last "e" of "see"
     # (398.4 - 405.1 on a 400 pt page) shows its part on the page. Judged by samples off the
     # page it went, and the word came out "se" with the half letter left in the background.
-    data = one_page(text(20, 100, b"Visible") + text(385, 100, b"see"))
+    data = one_page(text(20, 100, b"Visible", SIZE) + text(385, 100, b"see", SIZE))
     assert words(data, backend) == "Visible see"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_a_form_bbox_clips_its_text(backend):
-    data = one_page(b"/X1 Do\n" + text(20, 150, b"Page"),
-                    {"X1": form(text(20, 100, b"Inside") + text(250, 100, b"Outside"), b"0 0 200 200")})
+def test_a_form_bbox_clips_its_text(backend: str) -> None:
+    data = one_page(b"/X1 Do\n" + text(20, 150, b"Page", SIZE),
+                    {"X1": form(text(20, 100, b"Inside", SIZE) + text(250, 100, b"Outside", SIZE), b"0 0 200 200")},
+                    WIDTH, HEIGHT)
     assert words(data, backend) == "Inside Page"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_text_under_an_opaque_fill_painted_after_it_is_hidden(backend):
+def test_text_under_an_opaque_fill_painted_after_it_is_hidden(backend: str) -> None:
     # Boadilla: the author box's text runs on under the title box, which is painted after it
-    data = one_page(text(20, 100, b"Visible") + text(120, 100, b"Covered") + b"0.8 0.8 0.9 rg 110 90 200 30 re f\n")
+    data = one_page(text(20, 100, b"Visible", SIZE) + text(120, 100, b"Covered", SIZE) + b"0.8 0.8 0.9 rg 110 90 200 30 re f\n")
     assert words(data, backend) == "Visible"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_a_fill_painted_before_the_text_is_its_ground(backend):
-    data = one_page(b"0.8 0.8 0.9 rg 110 90 200 30 re f 0 g\n" + text(120, 100, b"OnPanel"))
+def test_a_fill_painted_before_the_text_is_its_ground(backend: str) -> None:
+    data = one_page(b"0.8 0.8 0.9 rg 110 90 200 30 re f 0 g\n" + text(120, 100, b"OnPanel", SIZE))
     assert words(data, backend) == "OnPanel"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_a_translucent_fill_does_not_hide(backend):
-    data = one_page(text(120, 100, b"Tinted") + b"q /T5 gs 1 0 0 rg 110 90 200 30 re f Q\n")
+def test_a_translucent_fill_does_not_hide(backend: str) -> None:
+    data = one_page(text(120, 100, b"Tinted", SIZE) + b"q /T5 gs 1 0 0 rg 110 90 200 30 re f Q\n")
     assert words(data, backend) == "Tinted"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_two_fills_that_meet_cover_together(backend):
+def test_two_fills_that_meet_cover_together(backend: str) -> None:
     # a caption under the footline's two colour bars
-    data = one_page(text(120, 100, b"Caption") + b"0.9 g 100 104 200 20 re f 0.6 0 0 rg 100 84 200 20 re f\n")
+    data = one_page(text(120, 100, b"Caption", SIZE) + b"0.9 g 100 104 200 20 re f 0.6 0 0 rg 100 84 200 20 re f\n")
     assert words(data, backend) == ""
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_a_rounded_panel_covers_what_is_inside_its_outline(backend):
+def test_a_rounded_panel_covers_what_is_inside_its_outline(backend: str) -> None:
     # a white callout with rounded corners (curves) painted over a legend
     panel = (b"1 g 110 80 m 290 80 l 300 80 300 90 300 90 c 300 120 l 300 130 290 130 290 130 c "
              b"110 130 l 100 130 100 120 100 120 c 100 90 l 100 80 110 80 110 80 c f\n")
-    data = one_page(text(130, 100, b"legend") + text(320, 100, b"beside") + panel)
+    data = one_page(text(130, 100, b"legend", SIZE) + text(320, 100, b"beside", SIZE) + panel)
     assert words(data, backend) == "beside"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_a_fill_its_clip_cuts_does_not_count(backend):
+def test_a_fill_its_clip_cuts_does_not_count(backend: str) -> None:
     # a mindmap's connection bar: the clip is only known by its box, so a cover it cuts is unsure
-    data = one_page(text(120, 100, b"Governance") + b"q 100 90 60 30 re W n 1 0 0 rg 100 80 150 50 re f Q\n")
+    data = one_page(text(120, 100, b"Governance", SIZE) + b"q 100 90 60 30 re W n 1 0 0 rg 100 80 150 50 re f Q\n")
     assert words(data, backend) == "Governance"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_text_under_an_opaque_image_painted_after_it_is_hidden(backend):
+def test_text_under_an_opaque_image_painted_after_it_is_hidden(backend: str) -> None:
     # a frame title under a full-page photo
-    data = one_page(text(20, 170, b"Title") + b"q 400 0 0 200 0 0 cm /Im1 Do Q\n" + text(20, 100, b"Over"),
-                    {"Im1": image()})
+    data = one_page(text(20, 170, b"Title", SIZE) + b"q 400 0 0 200 0 0 cm /Im1 Do Q\n" + text(20, 100, b"Over", SIZE),
+                    {"Im1": image(RED)}, WIDTH, HEIGHT)
     assert words(data, backend) == "Over"
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_text_at_alpha_zero_is_not_there(backend):
-    data = one_page(b"q /T0 gs " + text(20, 100, b"Invisible") + b"Q " + text(20, 150, b"Seen"))
+def test_text_at_alpha_zero_is_not_there(backend: str) -> None:
+    data = one_page(b"q /T0 gs " + text(20, 100, b"Invisible", SIZE) + b"Q " + text(20, 150, b"Seen", SIZE))
     assert words(data, backend) == "Seen"
 
 
 def test_overlay_steps_still_know_the_words_they_do_not_show():
     """r2_overlays_v2: step 1 of a frame shows its first node and an \\only caption, the nodes of
     steps 2 and 3 are drawn at alpha 0. Their words tell step 1 is the same frame as step 3."""
-    step = lambda caption, shown, hidden: one_page(
-        text(10, 180, b"The pipeline") + text(10, 120, shown) +
-        b"q /T0 gs " + text(10, 100, hidden) + b"Q " + text(10, 30, caption))
+    def step(caption: bytes, shown: bytes, hidden: bytes) -> bytes:
+        return one_page(text(10, 180, b"The pipeline", SIZE) + text(10, 120, shown, SIZE) +
+                        b"q /T0 gs " + text(10, 100, hidden, SIZE) + b"Q " + text(10, 30, caption, SIZE))
+
     pages = [step(b"We start from the raw detector counts, without any preprocessing.",
                   b"Raw stack 16-bit TIFF", b"Noise model PoissonGauss Denoiser U-Net, 4 levels Clean stack"),
              step(b"The output keeps the photon budget and reports a per-pixel uncertainty.",
                   b"Raw stack 16-bit TIFF Noise model PoissonGauss Denoiser U-Net, 4 levels Clean stack", b"")]
-    raw = {"pages": []}
+    raw: RawDoc = {"version": 1, "source": {"pdf": "", "producer": "", "pages": len(pages), "title": ""},
+                   "pages": []}
     for data in pages:
         doc = pdf.Document(data)
         try:
             raw["pages"].append(extract_page(doc[0], "1"))
         finally:
             doc.close()
-    assert raw["pages"][0]["hidden_text"] == ["Noise model PoissonGauss Denoiser U-Net, 4 levels Clean stack"]
+    assert raw["pages"][0].get("hidden_text") == ["Noise model PoissonGauss Denoiser U-Net, 4 levels Clean stack"]
     assert "hidden_text" not in raw["pages"][1]
     assert [p["spans"][-1]["text"] for p in select_overlays(raw, "last")["pages"]] == \
            ["The output keeps the photon budget and reports a per-pixel uncertainty."]
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_a_drawing_at_opacity_zero_is_left_out(backend):
+def test_a_drawing_at_opacity_zero_is_left_out(backend: str) -> None:
     # an opacity=0 tikz node: neither its fill nor its stroke shows
     content = (b"q /T0 gs 1 0.5 0 rg 1 0 0 RG 20 20 60 30 re B Q\n"       # invisible: gone
                b"q /T0 gs 0 0 1 RG 20 80 60 30 re S Q\n"                   # invisible stroke: gone
@@ -202,7 +230,7 @@ def test_a_drawing_at_opacity_zero_is_left_out(backend):
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_a_drawing_keeps_the_half_that_shows(backend):
+def test_a_drawing_keeps_the_half_that_shows(backend: str) -> None:
     # fill-opacity=0 with a visible draw: filled and stroked in one path, only its outline shows
     content = b"q /F0 gs 1 0.5 0 rg 1 0 0 RG 20 20 60 30 re B Q\n"
     with pdf.use_backend(backend):
@@ -217,11 +245,11 @@ def test_a_drawing_keeps_the_half_that_shows(backend):
 @needs_faces
 def test_clip_boxes_are_pdfiums_on_both_backends():
     # every clip cuts its text (a clip around the whole object is no clip: see the next test)
-    content = (b"q 0.5 0 0 0.5 10.3 10.7 cm 0 0 40 200 re W n " + text(20, 100, b"Scaled") + b"Q\n"
-               b"q 30 30 300 100 re W n 50 40 30 50 re W n " + text(60, 60, b"Nested") + b"Q\n"
-               b"q 200 90 m 280 90 l 240 130.3 l h W n " + text(210, 100, b"Triangle") + b"Q\n"
-               b"/X1 Do\n" + text(20, 180, b"Free"))
-    data = one_page(content, {"X1": form(text(20, 20, b"Form"), b"10 10 35 60")})
+    content = (b"q 0.5 0 0 0.5 10.3 10.7 cm 0 0 40 200 re W n " + text(20, 100, b"Scaled", SIZE) + b"Q\n"
+               b"q 30 30 300 100 re W n 50 40 30 50 re W n " + text(60, 60, b"Nested", SIZE) + b"Q\n"
+               b"q 200 90 m 280 90 l 240 130.3 l h W n " + text(210, 100, b"Triangle", SIZE) + b"Q\n"
+               b"/X1 Do\n" + text(20, 180, b"Free", SIZE))
+    data = one_page(content, {"X1": form(text(20, 20, b"Form", SIZE), b"10 10 35 60")}, WIDTH, HEIGHT)
     docs = [pdf.resolve(spec).open(data) for spec in ("pdfium", "pure")]
     try:
         clips = [[po.clip for po in d[0].objects()] for d in docs]
@@ -234,9 +262,9 @@ def test_clip_boxes_are_pdfiums_on_both_backends():
 
 
 @pytest.mark.parametrize("backend", BACKENDS)
-def test_a_clip_that_clips_nothing_is_none(backend):
+def test_a_clip_that_clips_nothing_is_none(backend: str) -> None:
     # CPDF_ContentParser::CheckClip: a single rectangle clip around the whole object is dropped
-    data = one_page(b"q 0 0 400 200 re W n " + text(20, 100, b"Inside") + b"Q\n")
+    data = one_page(b"q 0 0 400 200 re W n " + text(20, 100, b"Inside", SIZE) + b"Q\n")
     with pdf.use_backend(backend):
         doc = pdf.Document(data)
         try:
@@ -245,7 +273,7 @@ def test_a_clip_that_clips_nothing_is_none(backend):
             doc.close()
 
 
-def test_hidden_text_stays_as_hidden_in_the_background(tmp_path):
+def test_hidden_text_stays_as_hidden_in_the_background(tmp_path: Path) -> None:
     """Classify never makes a hidden character native, so render leaves its object on: it is
     under its cover in the background picture exactly as in the PDF, and the native words are
     switched off."""
@@ -253,16 +281,16 @@ def test_hidden_text_stays_as_hidden_in_the_background(tmp_path):
     from beamer2slides.ir import deck_json
     from beamer2slides.render import load_png, render_backgrounds
 
-    content = (text(20, 150, b"Native words") + text(20, 60, b"Buried") +
+    content = (text(20, 150, b"Native words", SIZE) + text(20, 60, b"Buried", SIZE) +
                b"0.2 0.2 0.2 rg 0 40 400 40 re f\n")                    # a dark band over "Buried"
     path = tmp_path / "hidden.pdf"
     path.write_bytes(one_page(content))
-    raw = {"version": 1, "source": {"pdf": str(path), "producer": "", "pages": 1, "title": ""},
-           "pages": []}
     doc = pdf.Document(path)
     try:
-        raw["pages"] = [extract_page(doc[0], "1")]
-        raw["pages"][0]["frame_label"] = None
+        extracted: RawPage = extract_page(doc[0], "1")
+        extracted["frame_label"] = None
+        raw: RawDoc = {"version": 1, "source": {"pdf": str(path), "producer": "", "pages": 1, "title": ""},
+                       "pages": [extracted]}
         page = doc[0]
         vis = Visibility(page)
         hidden = [ch for ch in page.chars() if vis.hidden(ch)]

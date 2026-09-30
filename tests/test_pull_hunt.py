@@ -13,19 +13,22 @@ from pathlib import Path
 import pytest
 
 from . import inverse_edits as ed
+from .json_reads import jint, jobjs, jstr
 from .test_inverse import INV, compared, fixture_deck, pdflatex_missing, slide_of
 from beamer2slides.compare import TOL
-from beamer2slides.inverse import Candidate, Context, Planner, Workspace, converge, ensure_preamble
+from beamer2slides.inverse import Candidate, Context, Planner, Unresolved, Workspace, converge, ensure_preamble
+from beamer2slides.json_types import JsonObject, as_str
+from beamer2slides.texmap import Frame
 
 TESTS = Path(__file__).resolve().parent
 
 
-def plan_offline_ctx(tmp_path: Path, target: dict) -> tuple[str, Context, list]:
+def plan_offline_ctx(tmp_path: Path, target: JsonObject) -> tuple[str, Context, list[Unresolved]]:
     """Like test_inverse.plan_offline, but also returns the Context (for ctx.label_notes) and the
     unresolved residuals `plan()` gave up on."""
     ws = Workspace(INV / "a.tex", tmp_path)
     deck = fixture_deck()
-    frames = [ws.source.frames[s["frame_index"]] for s in deck["slides"]]
+    frames: list[Frame | None] = [ws.source.frames[jint(s, "frame_index")] for s in jobjs(deck, "slides")]
     cand = Candidate(ws.source, tmp_path / "a.pdf", deck, frames)
     ctx = Context()
     edits, failed = Planner(cand, compared(deck, target), target, ctx, ws, set(), {}, {}).plan()
@@ -39,7 +42,7 @@ def plan_offline_ctx(tmp_path: Path, target: dict) -> tuple[str, Context, list]:
 
 # ---------------------------------------------------------------- h2: duplicated slide, duplicate label
 
-def test_a_new_frame_never_repeats_an_existing_label(tmp_path):
+def test_a_new_frame_never_repeats_an_existing_label(tmp_path: Path):
     """A slide duplicated onto an *existing*, unmatched frame's key (h2a: the deck carries two
     slides tagged "results", one of them the untouched original) must not produce two
     `[label=results]` frames."""
@@ -52,7 +55,7 @@ def test_a_new_frame_never_repeats_an_existing_label(tmp_path):
     assert ctx.label_notes and "results" in ctx.label_notes[0]
 
 
-def test_two_new_frames_sharing_a_key_get_different_labels(tmp_path):
+def test_two_new_frames_sharing_a_key_get_different_labels(tmp_path: Path):
     """Two slides duplicated onto a key that exists nowhere in the source yet (h2b: both copies are
     "slide_missing") must still not collide with each other. They anchor after different existing
     frames (results, picture) so Workspace.write's same-position dedup - a separate, correct
@@ -70,7 +73,7 @@ def test_two_new_frames_sharing_a_key_get_different_labels(tmp_path):
     assert len(ctx.label_notes) == 1
 
 
-def test_an_unlabelled_new_slide_is_left_alone(tmp_path):
+def test_an_unlabelled_new_slide_is_left_alone(tmp_path: Path):
     """A slide_missing whose key is one of sync's synthetic keys (title:..., page:N - no real
     \\label in the deck) is never treated as a label collision."""
     d = fixture_deck()
@@ -114,7 +117,7 @@ B_REPRO_TEX = """\\documentclass{beamer}
 
 
 @pytest.mark.inverse
-def test_a_colour_rewrite_that_cannot_converge_never_splits_a_word(tmp_path):
+def test_a_colour_rewrite_that_cannot_converge_never_splits_a_word(tmp_path: Path):
     """h6b: the deck kept "efficiently, with a bounded residual" but wanted it reworded and
     un-alerted at the same time - words the new text can't be matched to word-for-word (the
     residual `converge` reports as "the words span LaTeX commands"), so the \\alert{} coloured
@@ -131,12 +134,13 @@ def test_a_colour_rewrite_that_cannot_converge_never_splits_a_word(tmp_path):
     assert not isinstance(built, str), built
     target = built.target()
     found = False
-    for s in target["slides"]:
-        for e in s["elements"]:
-            for p in e.get("paragraphs", []):
-                for r in p["runs"]:
-                    if "efficiently, with a bounded residual" in r["text"]:
-                        r["text"] = r["text"].replace("efficiently, with a bounded residual", "cheaply for replay")
+    for s in jobjs(target, "slides"):
+        for e in jobjs(s, "elements"):
+            for p in jobjs(e, "paragraphs") if "paragraphs" in e else []:
+                for r in jobjs(p, "runs"):
+                    said = jstr(r, "text")
+                    if "efficiently, with a bounded residual" in said:
+                        r["text"] = said.replace("efficiently, with a bounded residual", "cheaply for replay")
                         r["color"] = "#000000"
                         found = True
     assert found
@@ -146,7 +150,7 @@ def test_a_colour_rewrite_that_cannot_converge_never_splits_a_word(tmp_path):
 
 
 @pytest.mark.inverse
-def test_a_colour_edit_that_can_never_converge_is_reverted_not_left_half_applied(tmp_path):
+def test_a_colour_edit_that_can_never_converge_is_reverted_not_left_half_applied(tmp_path: Path):
     """A colour residual that keeps coming back unchanged (here: the target wants only part of a
     word - "rst" inside "First" - recoloured, which a whole-word `\\textcolor{}` can never satisfy)
     is reverted to the author's original text once `converge` gives up on it, rather than left as
@@ -161,5 +165,5 @@ def test_a_colour_edit_that_can_never_converge_is_reverted_not_left_half_applied
     res = converge(TESTS / "decks" / "01_basic.tex", target, tmp_path / "loop", 8, False, None, TOL, print, True, None)
     assert not res.converged
     assert res.patch == ""
-    reverted = [u for u in res.unresolved if u["kind"] == "style" and "reverted" in u.get("why", "")]
+    reverted = [u for u in res.unresolved if u["kind"] == "style" and "reverted" in as_str(u.get("why", ""), "unresolved: why")]
     assert reverted, res.unresolved

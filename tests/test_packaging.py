@@ -28,14 +28,14 @@ def test_the_wheel_declares_the_calibration_and_the_command():
     assert meta["project"]["scripts"]["beamer2slides"] == "beamer2slides.__main__:main"
 
 
-def test_out_root_is_the_checkout_here_and_the_current_folder_when_installed(monkeypatch, tmp_path):
+def test_out_root_is_the_checkout_here_and_the_current_folder_when_installed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     assert paths.in_checkout() and paths.out_root() == ROOT / "out"
     monkeypatch.setattr(paths, "in_checkout", lambda: False)
     monkeypatch.chdir(tmp_path)
     assert paths.out_root() == tmp_path / "out"
 
 
-def test_credentials_come_from_the_override_then_a_home_then_the_default(monkeypatch, tmp_path):
+def test_credentials_come_from_the_override_then_a_home_then_the_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("B2S_TOKEN", str(tmp_path / "given.json"))
     assert google_auth.credential_file("B2S_TOKEN", "token.json") == tmp_path / "given.json"
     monkeypatch.delenv("B2S_TOKEN")

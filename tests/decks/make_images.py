@@ -1,5 +1,6 @@
 """Generate raster test images for the decks (deterministic, no extra dependencies)."""
 
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -12,7 +13,7 @@ def save_rgb(arr: np.ndarray, path: Path) -> None:
     Image.fromarray(np.clip(arr, 0, 255).astype(np.uint8)).save(path)
 
 
-def photo(w=1200, h=800) -> np.ndarray:
+def photo(w: int, h: int) -> np.ndarray:
     """Smooth colour field with soft blobs and noise: behaves like a photograph (JPEG)."""
     rng = np.random.default_rng(7)
     y, x = np.mgrid[0:h, 0:w] / max(w, h)
@@ -24,7 +25,7 @@ def photo(w=1200, h=800) -> np.ndarray:
     return np.clip(img, 0, 255)
 
 
-def plot(w=800, h=600) -> np.ndarray:
+def plot(w: int, h: int) -> np.ndarray:
     """A flat-colour bar chart with axes: behaves like an exported matplotlib PNG."""
     img = np.full((h, w, 3), 255.0)
     img[h - 60:h - 57, 60:w - 20] = 40  # x axis
@@ -38,7 +39,7 @@ def plot(w=800, h=600) -> np.ndarray:
     return img
 
 
-def badge(w=600, h=400) -> np.ndarray:
+def badge(w: int, h: int) -> np.ndarray:
     """Flat shapes on a transparent ground: behaves like a logo (RGBA PNG)."""
     y, x = np.mgrid[0:h, 0:w]
     img = np.zeros((h, w, 4), np.uint8)
@@ -56,14 +57,42 @@ def rgb(arr: np.ndarray) -> "Image.Image":
 # Cases for the lossless `\includegraphics` route (deck 23_raster_images): a high-resolution
 # photo, the same photo as a CMYK JPEG (whose PDF stream carries a decode array), a logo with
 # an alpha channel, a greyscale and an indexed-palette PNG.
-FILES = {
-    "photo.jpg": lambda p: save_rgb(photo(), p),
-    "plot.png": lambda p: save_rgb(plot(), p),
-    "photo_big.jpg": lambda p: rgb(photo(2400, 1600)).save(p, quality=80),
-    "photo_cmyk.jpg": lambda p: rgb(photo(600, 400)).convert("CMYK").save(p, quality=80),
-    "logo.png": lambda p: Image.fromarray(badge()).save(p),
-    "plot_gray.png": lambda p: rgb(plot()).convert("L").save(p),
-    "plot_indexed.png": lambda p: rgb(plot()).convert("P", palette=Image.ADAPTIVE, colors=16).save(p),
+def photo_jpg(p: Path) -> None:
+    save_rgb(photo(1200, 800), p)
+
+
+def plot_png(p: Path) -> None:
+    save_rgb(plot(800, 600), p)
+
+
+def photo_big_jpg(p: Path) -> None:
+    rgb(photo(2400, 1600)).save(p, quality=80)
+
+
+def photo_cmyk_jpg(p: Path) -> None:
+    rgb(photo(600, 400)).convert("CMYK").save(p, quality=80)
+
+
+def logo_png(p: Path) -> None:
+    Image.fromarray(badge(600, 400)).save(p)
+
+
+def plot_gray_png(p: Path) -> None:
+    rgb(plot(800, 600)).convert("L").save(p)
+
+
+def plot_indexed_png(p: Path) -> None:
+    rgb(plot(800, 600)).convert("P", palette=Image.Palette.ADAPTIVE, colors=16).save(p)
+
+
+FILES: dict[str, Callable[[Path], None]] = {
+    "photo.jpg": photo_jpg,
+    "plot.png": plot_png,
+    "photo_big.jpg": photo_big_jpg,
+    "photo_cmyk.jpg": photo_cmyk_jpg,
+    "logo.png": logo_png,
+    "plot_gray.png": plot_gray_png,
+    "plot_indexed.png": plot_indexed_png,
 }
 
 

@@ -1,121 +1,152 @@
-"""Synthetic deck edits made directly on a classified IR (targets for the inverse loop tests)."""
+"""Synthetic deck edits made directly on a classified IR (targets for the inverse loop tests).
+
+A deck here is deck.json as the loop reads it (with the fixture's `key` and `frame_index`), so a
+`JsonObject` read through `json_reads`; each edit returns an edited copy."""
 
 import copy
 
-RUN_DEFAULTS = {"font": "CMSS10", "family": "sans", "bold": False, "italic": False, "smallcaps": False,
-                "color": "#000000", "link": None, "script": None, "underline": False, "strike": False,
-                "highlight": None}
+from beamer2slides.json_types import Json, JsonObject
+
+from .json_reads import jarr, jnum, jnums, jobj, jobjs, jstr
+
+RUN_DEFAULTS: JsonObject = {"font": "CMSS10", "family": "sans", "bold": False, "italic": False, "smallcaps": False,
+                            "color": "#000000", "link": None, "script": None, "underline": False, "strike": False,
+                            "highlight": None}
 
 
-def element(deck: dict, slide: int, eid: str | None = None, text: str | None = None) -> dict:
-    els = deck["slides"][slide]["elements"]
+def _paragraphs(e: JsonObject) -> list[JsonObject]:
+    """A text element's paragraphs; none for a picture or a shape."""
+    return jobjs(e, "paragraphs") if "paragraphs" in e else []
+
+
+def _text(p: JsonObject) -> str:
+    return "".join(jstr(r, "text") for r in jobjs(p, "runs"))
+
+
+def element(deck: JsonObject, slide: int, eid: str | None, text: str | None) -> JsonObject:
+    """The element `eid` of the slide, else its first text element saying `text`."""
+    els = jobjs(deck, "slides", slide, "elements")
     if eid:
         return next(e for e in els if e["id"] == eid)
-    return next(e for e in els if e["kind"] == "text" and any(text in "".join(r["text"] for r in p["runs"])
-                                                            for p in e["paragraphs"]))
+    assert text is not None, "an element is found by its id or by its text"
+    return next(e for e in els if e["kind"] == "text" and any(text in _text(p) for p in _paragraphs(e)))
 
 
-def move(deck: dict, slide: int, el: dict, dx: float, dy: float) -> dict:
+def move(deck: JsonObject, slide: int, el: JsonObject, dx: float, dy: float) -> JsonObject:
     out = copy.deepcopy(deck)
-    e = next(x for x in out["slides"][slide]["elements"] if x["id"] == el["id"])
-    e["bbox"] = [e["bbox"][0] + dx, e["bbox"][1] + dy, e["bbox"][2] + dx, e["bbox"][3] + dy]
-    for p in e.get("paragraphs", []):
-        p["text_x0"] += dx
+    e = next(x for x in jobjs(out, "slides", slide, "elements") if x["id"] == el["id"])
+    x0, y0, x1, y1 = jnums(e, "bbox")
+    e["bbox"] = [x0 + dx, y0 + dy, x1 + dx, y1 + dy]
+    for p in _paragraphs(e):
+        p["text_x0"] = jnum(p, "text_x0") + dx
         if p.get("tab_x0") is not None:
-            p["tab_x0"] += dx
-        for line in p["lines"]:
-            line["baseline"] += dy
-            line["x0"] += dx
-            line["x1"] += dx
+            p["tab_x0"] = jnum(p, "tab_x0") + dx
+        for line in jobjs(p, "lines"):
+            line["baseline"] = jnum(line, "baseline") + dy
+            line["x0"] = jnum(line, "x0") + dx
+            line["x1"] = jnum(line, "x1") + dx
         if p.get("wrap_limit"):
-            p["wrap_limit"] += dx
-        if p.get("bullet") and p["bullet"].get("bbox"):
-            b = p["bullet"]["bbox"]
-            p["bullet"]["bbox"] = [b[0] + dx, b[1] + dy, b[2] + dx, b[3] + dy]
+            p["wrap_limit"] = jnum(p, "wrap_limit") + dx
+        bullet = p.get("bullet")
+        if isinstance(bullet, dict) and bullet.get("bbox"):
+            b0, b1, b2, b3 = jnums(bullet, "bbox")
+            bullet["bbox"] = [b0 + dx, b1 + dy, b2 + dx, b3 + dy]
     return out
 
 
-def split_style(deck: dict, slide: int, word: str, **style) -> dict:
+def split_style(deck: JsonObject, slide: int, word: str, **style: Json) -> JsonObject:
     """The first occurrence of `word` on the slide gets `style`."""
     out = copy.deepcopy(deck)
-    for e in out["slides"][slide]["elements"]:
-        for p in e.get("paragraphs", []):
-            for k, r in enumerate(p["runs"]):
-                i = r["text"].find(word)
+    for e in jobjs(out, "slides", slide, "elements"):
+        for p in _paragraphs(e):
+            runs = jarr(p, "runs")
+            for k, r in enumerate(jobjs(p, "runs")):
+                said = jstr(r, "text")
+                i = said.find(word)
                 if i < 0 or r.get("hole"):
                     continue
-                parts = [(r["text"][:i], {}), (word, style), (r["text"][i + len(word):], {})]
-                p["runs"][k:k + 1] = [{**r, "text": t, **st} for t, st in parts if t]
+                parts: list[tuple[str, JsonObject]] = [(said[:i], {}), (word, style), (said[i + len(word):], {})]
+                pieces: list[Json] = [{**r, "text": t, **st} for t, st in parts if t]
+                runs[k:k + 1] = pieces
                 return out
     raise ValueError(word)
 
 
-def reword(deck: dict, slide: int, old: str, new: str) -> dict:
+def reword(deck: JsonObject, slide: int, old: str, new: str) -> JsonObject:
     out = copy.deepcopy(deck)
-    for e in out["slides"][slide]["elements"]:
-        for p in e.get("paragraphs", []):
-            for r in p["runs"]:
-                if old in r["text"]:
-                    r["text"] = r["text"].replace(old, new, 1)
+    for e in jobjs(out, "slides", slide, "elements"):
+        for p in _paragraphs(e):
+            for r in jobjs(p, "runs"):
+                said = jstr(r, "text")
+                if old in said:
+                    r["text"] = said.replace(old, new, 1)
                     return out
     raise ValueError(old)
 
 
-def add_text_box(deck: dict, slide: int, text: str, x: float, baseline: float, size: float = 10.91,
-                 color: str = "#000000", width: float = 120.0) -> dict:
+def add_text_box(deck: JsonObject, slide: int, text: str, x: float, baseline: float, size: float,
+                 color: str, width: float) -> JsonObject:
     out = copy.deepcopy(deck)
-    s = out["slides"][slide]
-    run = {**RUN_DEFAULTS, "text": text, "size": size, "color": color}
-    s["elements"].append({"id": f"p{s['page']}new{len(s['elements'])}", "kind": "text", "role": "body",
-                          "bbox": [x, baseline - 0.75 * size, x + width, baseline + 0.25 * size],
-                          "paragraphs": [{"align": "left", "level": 0, "bullet": None, "size": size, "text_x0": x,
-                                          "tab_x0": None, "lines": [{"baseline": baseline, "x0": x, "x1": x + width}],
-                                          "runs": [run]}]})
+    s = jobj(out, "slides", slide)
+    elements = jarr(s, "elements")
+    run: JsonObject = {**RUN_DEFAULTS, "text": text, "size": size, "color": color}
+    paragraph: JsonObject = {"align": "left", "level": 0, "bullet": None, "size": size, "text_x0": x, "tab_x0": None,
+                             "lines": [{"baseline": baseline, "x0": x, "x1": x + width}], "runs": [run]}
+    box: JsonObject = {"id": f"p{s['page']}new{len(elements)}", "kind": "text", "role": "body",
+                       "bbox": [x, baseline - 0.75 * size, x + width, baseline + 0.25 * size],
+                       "paragraphs": [paragraph]}
+    elements.append(box)
     return out
 
 
-def delete_paragraph(deck: dict, slide: int, text: str) -> dict:
+def delete_paragraph(deck: JsonObject, slide: int, text: str) -> JsonObject:
     out = copy.deepcopy(deck)
-    for e in out["slides"][slide]["elements"]:
-        for i, p in enumerate(e.get("paragraphs", [])):
-            if "".join(r["text"] for r in p["runs"]) == text:
-                del e["paragraphs"][i]
+    for e in jobjs(out, "slides", slide, "elements"):
+        for i, p in enumerate(_paragraphs(e)):
+            if _text(p) == text:
+                del jarr(e, "paragraphs")[i]
                 return out
     raise ValueError(text)
 
 
-def add_slide(deck: dict, after: int, title: str, items: list[str], key: str | None = None) -> dict:
+def add_slide(deck: JsonObject, after: int, title: str, items: list[str], key: str | None) -> JsonObject:
     out = copy.deepcopy(deck)
-    ref = out["slides"][after]
-    tref = next(e for e in ref["elements"] if e["role"] == "title")
+    ref = jobj(out, "slides", after)
+    tref = next(e for e in jobjs(ref, "elements") if e["role"] == "title")
     title_el = copy.deepcopy(tref)
     title_el["id"] = "new-title"
-    title_el["paragraphs"] = [{**title_el["paragraphs"][0], "runs": [{**title_el["paragraphs"][0]["runs"][0], "text": title}]}]
-    body = {"id": "new-body", "kind": "text", "role": "body", "bbox": [30, 90, 300, 150], "paragraphs": [
+    first = jobj(title_el, "paragraphs", 0)
+    title_el["paragraphs"] = [{**first, "runs": [{**jobj(first, "runs", 0), "text": title}]}]
+    paragraphs: list[Json] = [
         {"align": "left", "level": 0, "bullet": {"kind": "glyph", "text": "▶", "color": "#3333b3"}, "size": 10.91,
          "text_x0": 44.7, "tab_x0": None, "lines": [{"baseline": 100 + 15 * k, "x0": 44.7, "x1": 200}],
-         "runs": [{**RUN_DEFAULTS, "text": t, "size": 10.91}]} for k, t in enumerate(items)]}
-    new = {**{k: v for k, v in ref.items() if k not in ("elements", "notes", "key")}, "page": -1, "key": key,
-           "notes": None, "elements": [title_el, body]}
-    out["slides"].insert(after + 1, new)
+         "runs": [{**RUN_DEFAULTS, "text": t, "size": 10.91}]} for k, t in enumerate(items)]
+    body: JsonObject = {"id": "new-body", "kind": "text", "role": "body", "bbox": [30, 90, 300, 150],
+                        "paragraphs": paragraphs}
+    new: JsonObject = {**{k: v for k, v in ref.items() if k not in ("elements", "notes", "key")}, "page": -1,
+                       "key": key, "notes": None, "elements": [title_el, body]}
+    jarr(out, "slides").insert(after + 1, new)
     return out
 
 
-def swap_slides(deck: dict, i: int, j: int) -> dict:
+def swap_slides(deck: JsonObject, i: int, j: int) -> JsonObject:
     out = copy.deepcopy(deck)
-    out["slides"][i], out["slides"][j] = out["slides"][j], out["slides"][i]
+    slides = jarr(out, "slides")
+    slides[i], slides[j] = slides[j], slides[i]
     return out
 
 
-def set_notes(deck: dict, slide: int, text: str | None) -> dict:
+def set_notes(deck: JsonObject, slide: int, text: str | None) -> JsonObject:
     out = copy.deepcopy(deck)
-    out["slides"][slide]["notes"] = text
+    jobj(out, "slides", slide)["notes"] = text
     return out
 
 
-def add_image(deck: dict, slide: int, file: str, bbox: list[float]) -> dict:
+def add_image(deck: JsonObject, slide: int, file: str, bbox: list[float]) -> JsonObject:
     out = copy.deepcopy(deck)
-    s = out["slides"][slide]
-    s["elements"].append({"id": f"p{s['page']}img{len(s['elements'])}", "kind": "image", "role": "figure",
-                          "bbox": bbox, "file": file})
+    s = jobj(out, "slides", slide)
+    elements = jarr(s, "elements")
+    image: JsonObject = {"id": f"p{s['page']}img{len(elements)}", "kind": "image", "role": "figure",
+                         "bbox": [float(v) for v in bbox], "file": file}
+    elements.append(image)
     return out

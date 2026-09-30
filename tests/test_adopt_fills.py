@@ -2,90 +2,119 @@
 deck_ir(foreign=True, thumbnails=...)). Offline: hand-made `presentations.get` answers and numpy
 thumbnails 720 px wide, so a thumbnail pixel is a Slides point."""
 
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from beamer2slides import adopt, adopt_shapes, deck_fills
-from beamer2slides.deck_ir import page_size_for
+from beamer2slides.arrays import RGB, Floats, Mask, SignedRGB
+from beamer2slides.deck_ir import Fetch, page_size_for
 from beamer2slides.deck_ir_types import TargetImage, TargetShape, parse_page_gradient
+from beamer2slides.google_types import presentation
+from beamer2slides.json_types import Json, JsonArray, JsonObject
 from .irs import deck_ir
 from beamer2slides.adopt_context import adopt_context
 from beamer2slides.inverse import Context
 
 from .deck_records import dicts, parsed, record, records
+from .json_reads import jarr, jat, jint, jnum, jnums, jobj, jobjs, jstr, jstrs
 from .test_adopt_tables import table
 
 EMU = 12700
-UNREAD = {}                                  # what the API says of a gradient, picture or texture fill
+UNREAD: JsonObject = {}                      # what the API says of a gradient, picture or texture fill
+WHITE = "FFFFFF"                             # the page `deck` and `page` are given in most tests
+Rect = tuple[int, int, int, int, str]        # x, y, w, h and a "#rrggbb" colour, painted by `page`
 
 
 @pytest.fixture(autouse=True)
-def lengths_as_written(monkeypatch):
-    monkeypatch.setattr(adopt, "to_bp", lambda text: text)
+def lengths_as_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    def as_written(text: str) -> str:
+        return text
+    monkeypatch.setattr(adopt, "to_bp", as_written)
 
 
-def pt(v: float) -> dict:
+def pt(v: float) -> JsonObject:
     return {"magnitude": v * EMU, "unit": "EMU"}
 
 
-def at(x: float, y: float) -> dict:
+def at(x: float, y: float) -> JsonObject:
     return {"scaleX": 1.0, "scaleY": 1.0, "translateX": x * EMU, "translateY": y * EMU, "unit": "EMU"}
 
 
-def solid(hexc: str) -> dict:
+def solid(hexc: str) -> JsonObject:
     r, g, b = (int(hexc[i:i + 2], 16) / 255 for i in (0, 2, 4))
     return {"solidFill": {"color": {"rgbColor": {"red": r, "green": g, "blue": b}}}}
 
 
-def shape(oid, kind, x, y, w, h, fill) -> dict:
-    pe = {"objectId": oid, "size": {"width": pt(w), "height": pt(h)}, "transform": at(x, y),
-          "shape": {"shapeProperties": {"shapeBackgroundFill": fill}}}
+def shape(oid: str, kind: str | None, x: float, y: float, w: float, h: float, fill: Mapping[str, Json]
+          ) -> JsonObject:
+    pe: JsonObject = {"objectId": oid, "size": {"width": pt(w), "height": pt(h)}, "transform": at(x, y),
+                      "shape": {"shapeProperties": {"shapeBackgroundFill": dict(fill)}}}
     if kind:
-        pe["shape"]["shapeType"] = kind
+        jobj(pe, "shape")["shapeType"] = kind
     return pe
 
 
-def deck(*elements, bg: str = "FFFFFF") -> dict:
-    """A 720 x 405 pt deck, `bg` background (white by default), one slide holding `elements`."""
+def deck(*elements: JsonObject, bg: str) -> JsonObject:
+    """A 720 x 405 pt deck, `bg` background, one slide holding `elements`."""
     return {"presentationId": "p", "title": "t", "pageSize": {"width": pt(720), "height": pt(405)},
             "masters": [{"objectId": "m", "pageElements": [],
                          "pageProperties": {"pageBackgroundFill": solid(bg)}}],
             "layouts": [{"objectId": "L", "layoutProperties": {"masterObjectId": "m"}, "pageElements": []}],
             "slides": [{"objectId": "s", "slideProperties": {"layoutObjectId": "L"},
-                        "pageElements": list(elements)}]}
+                        "pageElements": [*elements]}]}
 
 
-def page(*rects, bg: str = "FFFFFF") -> np.ndarray:
-    """A `bg`-coloured (white by default) 720 x 405 thumbnail with (x, y, w, h, colour) rectangles
-    painted in order."""
-    a = np.full((405, 720, 3), [int(bg[i:i + 2], 16) for i in (0, 2, 4)], dtype=np.uint8)
+def page(*rects: Rect, bg: str) -> RGB:
+    """A `bg`-coloured 720 x 405 thumbnail with (x, y, w, h, colour) rectangles painted in order."""
+    a: RGB = np.full((405, 720, 3), [int(bg[i:i + 2], 16) for i in (0, 2, 4)], dtype=np.uint8)
     for x, y, w, h, c in rects:
         a[y:y + h, x:x + w] = [int(c[i:i + 2], 16) for i in (1, 3, 5)]
     return a
 
 
-def elements(pres: dict, thumb=None) -> list[dict]:
-    return deck_ir(pres, foreign=True, thumbnails=(lambda n: thumb) if thumb is not None else None
-                   )["slides"][0]["elements"]
+def elements(pres: JsonObject, thumb: RGB | None) -> list[JsonObject]:
+    return jobjs(deck_ir(pres, foreign=True, thumbnails=(lambda n: thumb) if thumb is not None else None),
+                 "slides", 0, "elements")
 
 
-def settle(els: list[dict], a, px: float, background, picture: bool = False, pictures=None) -> list[dict]:
+def settle(els: Sequence[JsonObject], a: object, px: float, background: str | None, picture: bool,
+           pictures: Path | None) -> list[JsonObject]:
     """`deck_fills.settle` over the records `els` stand for, handed back as dicts."""
-    return dicts(deck_fills.settle(records(els), a, px, background, picture, pictures))
+    return [jobj(d) for d in dicts(deck_fills.settle(records(list(els)), a, px, background, picture, pictures))]
 
 
-def no_marks_left(els: list[dict]) -> bool:
-    return not any("fill_unread" in e or any("fill_unread" in c for c in e.get("table_cells", []))
+def no_marks_left(els: Sequence[JsonObject]) -> bool:
+    return not any("fill_unread" in e or any("fill_unread" in c for c in (jobjs(e, "table_cells")
+                                                                            if "table_cells" in e else []))
                    for e in els)
+
+
+def rgb(hexc: str) -> SignedRGB:
+    """`deck_fills.rgb` of a colour the test knows is one."""
+    got = deck_fills.rgb(hexc)
+    assert got is not None
+    return got
+
+
+def shape_record(e: JsonObject) -> TargetShape:
+    got = parsed(e)
+    assert isinstance(got, TargetShape)
+    return got
+
+
+def the_table() -> JsonObject:
+    """test_adopt_tables' table: three rows of 30 at (50, 80), columns 100/60/60."""
+    return jobj(table("g1a2b3c_0_7", (100, 60, 60), (30, 30, 30)))
 
 
 # ---------------------------------------------------------------- shapes
 
 def test_a_fill_the_api_cannot_say_is_read_from_a_flat_box():
-    els = elements(deck(shape("a", "CUSTOM", 100, 100, 200, 100, UNREAD)),
-                   page((100, 100, 200, 100, "#3366cc")))
+    els = elements(deck(shape("a", "CUSTOM", 100, 100, 200, 100, UNREAD), bg=WHITE),
+                   page((100, 100, 200, 100, "#3366cc"), bg=WHITE))
     assert len(els) == 1 and els[0]["fill"] == "#3366cc" and els[0]["fill_source"] == "thumbnail"
     assert no_marks_left(els)
 
@@ -95,62 +124,64 @@ def test_without_thumbnails_nothing_changes():
     stays, and no marker reaches the IR."""
     els = elements(deck(shape("a", "CUSTOM", 100, 100, 200, 100, UNREAD),
                         shape("b", "RECTANGLE", 400, 100, 50, 50, solid("FF0000")),
-                        table()))
-    assert [e["kind"] for e in els] == ["shape", "table"] and els[0]["fill"].lower() == "#ff0000"
+                        the_table(), bg=WHITE), None)
+    assert [e["kind"] for e in els] == ["shape", "table"] and jstr(els[0], "fill").lower() == "#ff0000"
     assert no_marks_left(els)
-    assert all(c.get("fill_source") is None for c in els[1]["table_cells"])
+    assert all(c.get("fill_source") is None for c in jobjs(els[1], "table_cells"))
 
 
-def test_a_picture_fill_becomes_the_thumbnails_picture_of_it(tmp_path):
+def test_a_picture_fill_becomes_the_thumbnails_picture_of_it(tmp_path: Path):
     """sc-memphis: a photo cut to a freeform comes back as `{}` and is no colour at all. With a folder
     to write to it becomes the thumbnail's pixels in its box, letters of a text above painted out
     (the text draws them) and the page round the photo transparent; without one it is dropped."""
     from PIL import Image
     rng = np.random.default_rng(1)
-    thumb = page()
+    thumb = page(bg=WHITE)
     thumb[100:200, 100:300] = rng.integers(0, 256, (100, 200, 3))          # the photo
     thumb[140:150, 150:250] = [255, 225, 126]                               # yellow words on it
-    photo = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [90, 90, 310, 210],
-             "fill": None, "outline": None, "fill_unread": True, "id": "ph", "object": "ph", "group": None}
-    words = {"kind": "text", "role": "body", "bbox": [140, 130, 260, 160], "id": "t", "object": "t",
-             "paragraphs": [{"runs": [{"text": "Gallery", "color": "#ffe17e"}]}]}
-    assert settle([photo, words], thumb, 1.0, "#ffffff") == dicts(records([words]))
+    photo: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [90, 90, 310, 210],
+                         "fill": None, "outline": None, "fill_unread": True, "id": "ph", "object": "ph",
+                         "group": None}
+    words: JsonObject = {"kind": "text", "role": "body", "bbox": [140, 130, 260, 160], "id": "t", "object": "t",
+                         "paragraphs": [{"runs": [{"text": "Gallery", "color": "#ffe17e"}]}]}
+    assert settle([photo, words], thumb, 1.0, "#ffffff", False, None) == dicts(records([words]))
     got = settle([dict(photo), dict(words)], thumb, 1.0, "#ffffff", False, tmp_path)
     assert [e["kind"] for e in got] == ["image", "text"]
     pic = got[0]
     assert pic["id"] == "ph" and pic["fill_source"] == "thumbnail" and pic["bbox"] == [90, 90, 310, 210]
-    im = np.asarray(Image.open(pic["file"]))
+    im = np.asarray(Image.open(jstr(pic, "file")))
     assert im.shape == (120, 220, 4)
     assert im[5, 5, 3] == 0 and im[50, 50, 3] == 255                        # page out, photo in
     yellow = (np.abs(im[50:60, 60:160, :3].astype(int) - [255, 225, 126]).max(axis=2) <= 14).mean()
     assert yellow < 0.05                                                    # the words are painted out
 
 
-def test_a_preset_adopt_cannot_draw_becomes_the_thumbnails_picture(tmp_path):
+def test_a_preset_adopt_cannot_draw_becomes_the_thumbnails_picture(tmp_path: Path):
     """en-mos: a rotated CURVED_UP_ARROW has no geometry in `adopt_shapes.preset`, and drawing it as
     a plain rectangle (`shape_block`'s fallback) turns a curled arrow icon into a solid diamond. With
     a folder to write to, `deck_fills.settle` bakes it as the thumbnail's own pixels in its (already
     rotated) bounding box instead, so the arrow's true outline survives."""
     from PIL import Image
-    thumb = page((100, 100, 80, 80, "#3366cc"))
-    arrow = {"kind": "shape", "role": "panel", "shape_type": "CURVED_UP_ARROW", "bbox": [100, 100, 180, 180],
-             "fill": "#3366cc", "outline": None, "id": "ar", "object": "ar", "group": None}
-    assert settle([arrow], thumb, 1.0, "#ffffff") == dicts(records([arrow]))
+    thumb = page((100, 100, 80, 80, "#3366cc"), bg=WHITE)
+    arrow: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "CURVED_UP_ARROW",
+                         "bbox": [100, 100, 180, 180], "fill": "#3366cc", "outline": None, "id": "ar",
+                         "object": "ar", "group": None}
+    assert settle([arrow], thumb, 1.0, "#ffffff", False, None) == dicts(records([arrow]))
     got = settle([dict(arrow)], thumb, 1.0, "#ffffff", False, tmp_path)
     assert [e["kind"] for e in got] == ["image"]
     pic = got[0]
     assert pic["id"] == "ar~shape" and pic["fill_source"] == "thumbnail" and pic["bbox"] == [100, 100, 180, 180]
-    im = np.asarray(Image.open(pic["file"]))
+    im = np.asarray(Image.open(jstr(pic, "file")))
     assert im.shape[:2] == (80, 80)
 
 
-def test_a_known_preset_is_never_replaced_by_a_picture(tmp_path):
+def test_a_known_preset_is_never_replaced_by_a_picture(tmp_path: Path):
     """A shape `adopt_shapes.preset` already knows how to draw (a plain RECTANGLE) is left as a shape
     even with a pictures folder handed in - the fallback is only for a name `preset` returns None
     for, never a chance to lose an editable shape's geometry."""
-    thumb = page((100, 100, 80, 80, "#3366cc"))
-    rect = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [100, 100, 180, 180],
-            "fill": "#3366cc", "outline": None, "id": "rc", "object": "rc", "group": None}
+    thumb = page((100, 100, 80, 80, "#3366cc"), bg=WHITE)
+    rect: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [100, 100, 180, 180],
+                        "fill": "#3366cc", "outline": None, "id": "rc", "object": "rc", "group": None}
     got = settle([dict(rect)], thumb, 1.0, "#ffffff", False, tmp_path)
     assert [e["kind"] for e in got] == ["shape"]
 
@@ -159,15 +190,15 @@ def test_a_not_rendered_fill_with_a_bogus_solid_colour_is_unread_too():
     """china-pptx: a .pptx gradient or theme fill on a shape can come back `NOT_RENDERED` with a
     default `solidFill` alongside it that is not what is drawn (deck_ir.unread_fill) - the same
     "nowhere in the answer" state a .pptx table style's cell colour comes back in."""
-    fill = {"propertyState": "NOT_RENDERED",
-            "solidFill": {"color": {"rgbColor": {"red": 1, "green": 1, "blue": 1}}}}
-    els = elements(deck(shape("a", "RECTANGLE", 100, 100, 200, 100, fill)),
-                   page((100, 100, 200, 100, "#3366cc")))
+    fill: JsonObject = {"propertyState": "NOT_RENDERED",
+                        "solidFill": {"color": {"rgbColor": {"red": 1, "green": 1, "blue": 1}}}}
+    els = elements(deck(shape("a", "RECTANGLE", 100, 100, 200, 100, fill), bg=WHITE),
+                   page((100, 100, 200, 100, "#3366cc"), bg=WHITE))
     assert len(els) == 1 and els[0]["fill"] == "#3366cc" and els[0]["fill_source"] == "thumbnail"
     assert no_marks_left(els)
 
 
-def test_a_text_boxs_own_fill_no_ramp_fits_is_baked_behind_it(tmp_path):
+def test_a_text_boxs_own_fill_no_ramp_fits_is_baked_behind_it(tmp_path: Path):
     """china-pptx's tall panel: a `NOT_RENDERED` fill behind a text box's own words, shaded in a way
     `read_region`'s single-axis ramp cannot fit at all (neither "x" nor "y" reaches half its pixels
     there). The text stays native with no fill of its own; what is behind it becomes a picture of the
@@ -175,28 +206,28 @@ def test_a_text_boxs_own_fill_no_ramp_fits_is_baked_behind_it(tmp_path):
     (`<id>~fill`) so it never collides with the text box it sits behind."""
     from PIL import Image
     rng = np.random.default_rng(2)
-    thumb = page()
+    thumb = page(bg=WHITE)
     thumb[90:310, 90:310] = rng.integers(0, 256, (220, 220, 3))              # neither flat nor a ramp
     thumb[150:160, 120:280] = [255, 225, 126]                                # its own word, drawn on top
-    panel = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [90, 90, 310, 310],
-             "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
-             "paragraphs": [{"runs": [{"text": "Word", "color": "#ffe17e"}]}]}
-    assert settle([dict(panel)], thumb, 1.0, "#ffffff")[0]["id"] == "t"    # no folder: unchanged
+    panel: JsonObject = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [90, 90, 310, 310],
+                         "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t",
+                         "group": None, "paragraphs": [{"runs": [{"text": "Word", "color": "#ffe17e"}]}]}
+    assert settle([dict(panel)], thumb, 1.0, "#ffffff", False, None)[0]["id"] == "t"    # no folder: unchanged
     got = settle([dict(panel)], thumb, 1.0, "#ffffff", False, tmp_path)
     assert [e["kind"] for e in got] == ["image", "text"]
     pic, text = got
     assert pic["id"] == "t~fill" and text["id"] == "t"
     assert not text.get("fill") and not text.get("fill_gradient")
     assert "object" not in pic and "key" not in pic
-    im = np.asarray(Image.open(pic["file"]))
+    im = np.asarray(Image.open(jstr(pic, "file")))
     yellow = (np.abs(im[50:70, 20:180, :3].astype(int) - [255, 225, 126]).max(axis=2) <= 14).mean()
     assert yellow < 0.05                                                      # its own words painted out
 
 
 def test_a_placeholder_is_never_a_candidate():
     pe = shape("a", "RECTANGLE", 100, 100, 200, 100, UNREAD)
-    pe["shape"]["placeholder"] = {"type": "BODY"}
-    assert elements(deck(pe), page((100, 100, 200, 100, "#3366cc"))) == []
+    jobj(pe, "shape")["placeholder"] = {"type": "BODY"}
+    assert elements(deck(pe, bg=WHITE), page((100, 100, 200, 100, "#3366cc"), bg=WHITE)) == []
 
 
 def test_a_placeholders_own_unsaid_fill_is_read_from_the_thumbnail():
@@ -204,35 +235,36 @@ def test_a_placeholders_own_unsaid_fill_is_read_from_the_thumbnail():
     API says of it only `{}` (RENDERED, no solidFill) - unlike the 772 placeholders whose own
     NOT_RENDERED is no fill at all. Read as nothing, the caption stood on the bare photo."""
     pe = shape("cap", "RECTANGLE", 0, 100, 720, 120, UNREAD)
-    pe["shape"]["placeholder"] = {"type": "BODY"}
-    pe["shape"]["text"] = {"textElements": [{"paragraphMarker": {"style": {}}},
-                                            {"textRun": {"content": "Why is this city relevant?\n",
-                                                         "style": {"fontSize": pt(28)}}}]}
-    thumb = page()
+    jobj(pe, "shape")["placeholder"] = {"type": "BODY"}
+    jobj(pe, "shape")["text"] = {"textElements": [{"paragraphMarker": {"style": {}}},
+                                                  {"textRun": {"content": "Why is this city relevant?\n",
+                                                               "style": {"fontSize": pt(28)}}}]}
+    thumb = page(bg=WHITE)
     t = (np.arange(720) + 0.5) / 720
     ramp = np.array([250, 250, 245]) + (np.array([190, 205, 235]) - np.array([250, 250, 245])) * t[:, None]
     thumb[100:220] = ramp.round().astype(np.uint8)[None]
-    el = next(e for e in elements(deck(pe), thumb) if e.get("id") == "cap")
+    el = next(e for e in elements(deck(pe, bg=WHITE), thumb) if e.get("id") == "cap")
     assert el.get("fill_gradient") or el.get("fill_source") == "thumbnail"
     none = shape("none", "RECTANGLE", 0, 100, 720, 120, {"propertyState": "NOT_RENDERED"})
-    none["shape"]["placeholder"], none["shape"]["text"] = pe["shape"]["placeholder"], pe["shape"]["text"]
-    kept = next(e for e in elements(deck(none), thumb) if e.get("id") == "none")
+    jobj(none, "shape")["placeholder"], jobj(none, "shape")["text"] = (jat(pe, "shape", "placeholder"),
+                                                                     jat(pe, "shape", "text"))
+    kept = next(e for e in elements(deck(none, bg=WHITE), thumb) if e.get("id") == "none")
     assert not kept.get("fill_gradient") and not kept.get("fill")        # its own NOT_RENDERED: no fill
 
 
 def test_a_gradient_bar_becomes_an_axis_shading():
     """cs161's header bar: black to red along x, which TikZ draws as left/middle/right colours."""
-    thumb = page()
+    thumb = page(bg=WHITE)
     t = (np.arange(720) + 0.5) / 720
     ramp = np.array([8, 3, 2]) + (np.array([226, 89, 82]) - np.array([8, 3, 2])) * t[:, None]
     thumb[80:110] = ramp.round().astype(np.uint8)[None]
-    els = elements(deck(shape("bar", "RECTANGLE", 0, 80, 720, 30, UNREAD)), thumb)
-    g = els[0]["fill_gradient"]
+    els = elements(deck(shape("bar", "RECTANGLE", 0, 80, 720, 30, UNREAD), bg=WHITE), thumb)
+    g = jobj(els[0], "fill_gradient")
     assert g["axis"] == "x" and els[0].get("fill") is None
-    first, middle, last = (deck_fills.rgb(c) for c in g["colors"])
+    first, middle, last = (rgb(c) for c in jstrs(g, "colors"))
     assert np.abs(first - [8, 3, 2]).max() <= 8 and np.abs(last - [226, 89, 82]).max() <= 8
     assert np.abs(middle - [117, 46, 42]).max() <= 8
-    out = adopt_shapes.shape_block(parsed(els[0]), adopt_context(), "", None)
+    out = adopt_shapes.shape_block(shape_record(els[0]), adopt_context(), "", None)
     assert "left color=" in out and "right color=" in out and "middle color=" in out
     assert "fill=" not in out
 
@@ -241,47 +273,47 @@ def test_ink_under_a_candidate_is_never_painted_over():
     """A green square under the box shows through it: the box is no flat panel, and filling it would
     hide the square."""
     pres = deck(shape("under", "RECTANGLE", 150, 130, 30, 30, solid("00AA00")),
-                shape("a", "CUSTOM", 100, 100, 200, 100, UNREAD))
-    els = elements(pres, page((100, 100, 200, 100, "#3366cc"), (150, 130, 30, 30, "#00aa00")))
-    assert [e["fill"].lower() for e in els] == ["#00aa00"]
+                shape("a", "CUSTOM", 100, 100, 200, 100, UNREAD), bg=WHITE)
+    els = elements(pres, page((100, 100, 200, 100, "#3366cc"), (150, 130, 30, 30, "#00aa00"), bg=WHITE))
+    assert [jstr(e, "fill").lower() for e in els] == ["#00aa00"]
 
 
 def test_a_box_whose_colour_runs_on_around_it_is_not_filled():
     """What an unfilled squiggle tile on a panel shows is the panel: no edge of its own is seen."""
     pres = deck(shape("panel", "RECTANGLE", 50, 50, 500, 300, solid("3366CC")),
-                shape("a", "CUSTOM", 100, 100, 200, 100, UNREAD))
-    els = elements(pres, page((50, 50, 500, 300, "#3366cc")))
-    assert [e["fill"].lower() for e in els] == ["#3366cc"] and len(els) == 1
+                shape("a", "CUSTOM", 100, 100, 200, 100, UNREAD), bg=WHITE)
+    els = elements(pres, page((50, 50, 500, 300, "#3366cc"), bg=WHITE))
+    assert [jstr(e, "fill").lower() for e in els] == ["#3366cc"] and len(els) == 1
 
 
 def test_the_background_colour_is_no_fill():
-    assert elements(deck(shape("a", "CUSTOM", 100, 100, 200, 100, UNREAD)), page()) == []
+    assert elements(deck(shape("a", "CUSTOM", 100, 100, 200, 100, UNREAD), bg=WHITE), page(bg=WHITE)) == []
 
 
 def test_a_candidate_settled_above_hides_the_one_under_it():
     """Settled from the top down: the upper panel takes the colour and covers the tile under it,
     which is not given that colour too."""
     pres = deck(shape("tile", "CUSTOM", 50, 50, 50, 50, UNREAD),       # in the wave's corner
-                shape("wave", "CUSTOM", 50, 50, 300, 200, UNREAD))
+                shape("wave", "CUSTOM", 50, 50, 300, 200, UNREAD), bg=WHITE)
     # the pink starts at the tile's first whole pixel, so the tile's own edges show on two sides
-    els = elements(pres, page((51, 51, 299, 199, "#fac2bd")))
-    assert len(els) == 1 and els[0]["fill"] == "#fac2bd" and els[0]["bbox"][2] > 200
+    els = elements(pres, page((51, 51, 299, 199, "#fac2bd"), bg=WHITE))
+    assert len(els) == 1 and els[0]["fill"] == "#fac2bd" and jnum(els[0], "bbox", 2) > 200
 
 
 def test_a_box_where_the_page_shows_is_no_panel_even_with_nothing_under_it():
     """With nothing under an element its own texture may carry a border (the stray check is waived),
     but a box 80% pink and 20% page is a tile over a pink shape's edge, not a pink tile."""
-    pres = deck(shape("tile", "CUSTOM", 100, 100, 100, 100, UNREAD))
-    assert elements(pres, page((100, 120, 100, 80, "#fac2bd"))) == []
+    pres = deck(shape("tile", "CUSTOM", 100, 100, 100, 100, UNREAD), bg=WHITE)
+    assert elements(pres, page((100, 120, 100, 80, "#fac2bd"), bg=WHITE)) == []
     # the same box all pink but for a darker printed border of its own is its fill
-    els = elements(pres, page((100, 100, 100, 100, "#fac2bd"), (104, 104, 92, 3, "#b08070")))
+    els = elements(pres, page((100, 100, 100, 100, "#fac2bd"), (104, 104, 92, 3, "#b08070"), bg=WHITE))
     assert [e["fill"] for e in els] == ["#fac2bd"]
 
 
 def test_a_turned_shape_is_not_read():
     pe = shape("a", "RECTANGLE", 100, 100, 200, 100, UNREAD)
-    pe["transform"].update({"scaleX": 0.866, "shearX": -0.5, "shearY": 0.5, "scaleY": 0.866})
-    assert elements(deck(pe), page((100, 100, 200, 100, "#3366cc"))) == []
+    jobj(pe, "transform").update({"scaleX": 0.866, "shearX": -0.5, "shearY": 0.5, "scaleY": 0.866})
+    assert elements(deck(pe, bg=WHITE), page((100, 100, 200, 100, "#3366cc"), bg=WHITE)) == []
 
 
 # ---------------------------------------------------------------- table cells
@@ -289,20 +321,20 @@ def test_a_turned_shape_is_not_read():
 def test_cells_a_table_style_colours_are_read_and_the_page_colour_is_not():
     """test_adopt_tables' table at (50, 80), columns 100/60/60, rows of 30: its header cell over
     columns 1-2 is NOT_RENDERED but drawn #ffeeaa by a .pptx style; the unfilled cells show the page."""
-    thumb = page((150, 80, 120, 30, "#ffeeaa"), (200, 90, 30, 8, "#222222"))    # the header's words
-    el = next(e for e in elements(deck(table()), thumb) if e["kind"] == "table")
-    cells = {(c["row"], c["col"]): c for c in el["table_cells"]}
+    thumb = page((150, 80, 120, 30, "#ffeeaa"), (200, 90, 30, 8, "#222222"), bg=WHITE)    # the header's words
+    el = next(e for e in elements(deck(the_table(), bg=WHITE), thumb) if e["kind"] == "table")
+    cells = {(jint(c, "row"), jint(c, "col")): c for c in jobjs(el, "table_cells")}
     assert cells[0, 1]["fill"] == "#ffeeaa" and cells[0, 1]["fill_source"] == "thumbnail"
     assert cells[1, 1]["fill"] is None and cells[2, 1]["fill"] is None
-    assert cells[0, 0]["fill"].lower() == "#cce5ff" and cells[0, 0].get("fill_source") is None
+    assert jstr(cells[0, 0], "fill").lower() == "#cce5ff" and cells[0, 0].get("fill_source") is None
     assert no_marks_left([el])
 
 
 def test_cells_over_a_page_of_another_colour_take_nothing():
     """comps-analysis: a table standing on a grey page shows the grey in every unfilled cell."""
-    thumb = page((0, 0, 720, 405, "#444444"))
-    el = next(e for e in elements(deck(table()), thumb) if e["kind"] == "table")
-    assert all(c.get("fill_source") is None for c in el["table_cells"])
+    thumb = page((0, 0, 720, 405, "#444444"), bg=WHITE)
+    el = next(e for e in elements(deck(the_table(), bg=WHITE), thumb) if e["kind"] == "table")
+    assert all(c.get("fill_source") is None for c in jobjs(el, "table_cells"))
 
 
 # ---------------------------------------------------------------- the reading itself
@@ -324,25 +356,28 @@ def test_a_pie_takes_the_angles_its_thumbnail_shows():
     """intro-lecture's grading chart: five PIE shapes in one box, whose dragged angles the API does
     not give - each was drawn as the preset's 270 degree slice. The colours around the centre say
     them: a slice under another shows only its own part, and the smallest arc holding it is drawn."""
-    a = page()
+    a = page(bg=WHITE)
     yy, xx = np.mgrid[0:405, 0:720]
     ang = np.degrees(np.arctan2(yy - 200, xx - 300)) % 360        # clockwise from +x, y down
     disc = (xx - 300) ** 2 + (yy - 200) ** 2 <= 100 ** 2
     a[disc & (ang < 90)] = [208, 224, 227]                          # top: 0-90
     a[disc & (ang >= 90)] = [69, 129, 142]                          # under it: 90-360 shows
-    box = [200, 100, 400, 300]
-    under = {"kind": "shape", "shape_type": "PIE", "bbox": box, "fill": "#45818e", "id": "u", "object": "u"}
-    top = {"kind": "shape", "shape_type": "PIE", "bbox": box, "fill": "#d0e0e3", "id": "t", "object": "t"}
-    out = settle([under, top], a, 1.0, "#ffffff")
-    start, sweep = next(e for e in out if e["id"] == "t")["pie"]
+    box: JsonArray = [200, 100, 400, 300]
+    under: JsonObject = {"kind": "shape", "shape_type": "PIE", "bbox": box, "fill": "#45818e", "id": "u",
+                         "object": "u"}
+    top: JsonObject = {"kind": "shape", "shape_type": "PIE", "bbox": box, "fill": "#d0e0e3", "id": "t",
+                       "object": "t"}
+    out = settle([under, top], a, 1.0, "#ffffff", False, None)
+    start, sweep = jnums(next(e for e in out if e["id"] == "t"), "pie")
     assert min(start, 360 - start) < 1 and abs(sweep - 90) < 1.5
-    start, sweep = next(e for e in out if e["id"] == "u")["pie"]
+    start, sweep = jnums(next(e for e in out if e["id"] == "u"), "pie")
     assert abs(start - 90) < 1 and abs(sweep - 270) < 1.5
-    block = adopt_shapes.shape_block(parsed(next(e for e in out if e["id"] == "t")), adopt_context(), "", None)
+    block = adopt_shapes.shape_block(shape_record(next(e for e in out if e["id"] == "t")), adopt_context(), "",
+                                     None)
     assert "end angle=-" in block and "270" not in block
 
 
-def draw_rounded(a, x0, y0, x1, y1, r, colour):
+def draw_rounded(a: Floats, x0: float, y0: float, x1: float, y1: float, r: float, colour: Sequence[int]) -> None:
     """A rounded box painted into `a` (float), 4x4 supersampled as a renderer's antialiasing draws it."""
     yy, xx = np.mgrid[0:a.shape[0], 0:a.shape[1]] + 0.5
     cover = np.zeros(a.shape[:2])
@@ -359,28 +394,34 @@ def test_a_rounded_rectangle_takes_the_corners_its_thumbnail_shows():
     """journey-maps' title bars are ROUND_RECTANGLEs whose corners were dragged square; the API gives
     no adjustment, and the preset's default drew them a sixth of their height round. A pill keeps
     its half-height corners, and a corner hidden under another shape says nothing."""
-    a = page().astype(float)
+    a: Floats = page(bg=WHITE).astype(float)
 
-    def rounded(*args):
-        draw_rounded(a, *args)
+    def rounded(x0: float, y0: float, x1: float, y1: float, r: float, colour: Sequence[int]) -> None:
+        draw_rounded(a, x0, y0, x1, y1, r, colour)
     rounded(0, 0, 720, 45, 0, [204, 255, 0])
     rounded(100, 100, 400, 160, 30, [66, 133, 244])
     rounded(450, 100, 650, 200, 16, [219, 68, 55])
     rounded(0, 250, 200, 330, 12, [15, 157, 88])                    # on the page's left edge
-    tab = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [0, 250, 200, 330], "fill": "#0f9d58", "id": "t", "object": "t"}
+    tab: JsonObject = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [0, 250, 200, 330],
+                       "fill": "#0f9d58", "id": "t", "object": "t"}
     tab_shape = record(tab)
     assert isinstance(tab_shape, TargetShape)
     radius = deck_fills.corner_radius(a.astype(np.int16), tab_shape, [], 1.0)
     assert radius is not None and abs(radius - 12) < 1
-    bar ={"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [0, 0, 720, 45], "fill": "#ccff00", "id": "b", "object": "b"}
-    pill = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [100, 100, 400, 160], "fill": "#4285f4", "id": "p", "object": "p"}
-    card = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [450, 100, 650, 200], "fill": "#db4437", "id": "c", "object": "c"}
-    lid = {"kind": "shape", "shape_type": "RECTANGLE", "bbox": [440, 90, 720, 300], "fill": "#db4437", "id": "l", "object": "l"}
-    out = {e["id"]: e for e in settle([bar, pill, card], a.astype(np.int16), 1.0, "#ffffff")}
-    assert out["b"]["corner_radius"] < 0.5 and abs(out["p"]["corner_radius"] - 30) < 1 and abs(out["c"]["corner_radius"] - 16) < 1
-    assert "rounded" not in adopt_shapes.shape_block(parsed(out["b"]), adopt_context(), "", None)
-    assert "rounded=30" in adopt_shapes.shape_block(parsed(out["p"]), adopt_context(), "", None)
-    hidden = {e["id"]: e for e in settle([card, lid], a.astype(np.int16), 1.0, "#ffffff")}
+    bar: JsonObject = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [0, 0, 720, 45], "fill": "#ccff00",
+                       "id": "b", "object": "b"}
+    pill: JsonObject = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [100, 100, 400, 160],
+                        "fill": "#4285f4", "id": "p", "object": "p"}
+    card: JsonObject = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [450, 100, 650, 200],
+                        "fill": "#db4437", "id": "c", "object": "c"}
+    lid: JsonObject = {"kind": "shape", "shape_type": "RECTANGLE", "bbox": [440, 90, 720, 300], "fill": "#db4437",
+                       "id": "l", "object": "l"}
+    out = {jstr(e, "id"): e for e in settle([bar, pill, card], a.astype(np.int16), 1.0, "#ffffff", False, None)}
+    assert jnum(out["b"], "corner_radius") < 0.5 and abs(jnum(out["p"], "corner_radius") - 30) < 1 \
+        and abs(jnum(out["c"], "corner_radius") - 16) < 1
+    assert "rounded" not in adopt_shapes.shape_block(shape_record(out["b"]), adopt_context(), "", None)
+    assert "rounded=30" in adopt_shapes.shape_block(shape_record(out["p"]), adopt_context(), "", None)
+    hidden = {jstr(e, "id"): e for e in settle([card, lid], a.astype(np.int16), 1.0, "#ffffff", False, None)}
     assert "corner_radius" not in hidden["c"]
 
 
@@ -393,36 +434,35 @@ def test_an_outlined_box_is_read_by_its_outline_and_not_on_another_ones():
         x0, y0, x1, y1 = box
         draw_rounded(a, x0 - 2, y0 - 2, x1 + 2, y1 + 2, r + 2, [0, 0, 0])      # a 4 px outline on the edge
         draw_rounded(a, x0 + 2, y0 + 2, x1 - 2, y1 - 2, r - 2, fill)
-    yellow = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [200, 200, 400, 330], "fill": "#fbbc04",
-              "outline": "#000000", "weight": 4, "id": "y", "object": "y"}
-    pink = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [260, 60, 460, 200], "fill": "#f8d8d8",
-            "outline": "#000000", "weight": 4, "id": "p", "object": "p"}
-    out = {e["id"]: e for e in settle([yellow, pink], a.astype(np.int16), 1.0, "#eeeeee")}
-    assert abs(out["p"]["corner_radius"] - 30) < 1.5 and abs(out["y"]["corner_radius"] - 30) < 1.5
+    yellow: JsonObject = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [200, 200, 400, 330],
+                          "fill": "#fbbc04", "outline": "#000000", "weight": 4, "id": "y", "object": "y"}
+    pink: JsonObject = {"kind": "shape", "shape_type": "ROUND_RECTANGLE", "bbox": [260, 60, 460, 200],
+                        "fill": "#f8d8d8", "outline": "#000000", "weight": 4, "id": "p", "object": "p"}
+    out = {jstr(e, "id"): e for e in settle([yellow, pink], a.astype(np.int16), 1.0, "#eeeeee", False, None)}
+    assert abs(jnum(out["p"], "corner_radius") - 30) < 1.5 and abs(jnum(out["y"], "corner_radius") - 30) < 1.5
 
 
 # ---------------------------------------------------------------- the page background
 
-def picture_fill(url: str) -> dict:
+def picture_fill(url: str) -> JsonObject:
     return {"stretchedPictureFill": {"contentUrl": url}}
 
 
-def bg_deck(slide_fill, *elements, layout_fill=None, master_fill=None) -> dict:
-    """Like `deck`, but the slide (and optionally its layout or master) carries its own
+def bg_deck(slide_fill: JsonObject, *elements: JsonObject, layout_fill: JsonObject | None) -> JsonObject:
+    """Like `deck`, but the slide (and its layout, when `layout_fill` is given) carries its own
     `pageBackgroundFill`, so a mismatch between what the API reports and what the thumbnail shows
     can be built without depending on the master's default white."""
-    pres = deck(*elements)
-    pres["slides"][0]["pageProperties"] = {"pageBackgroundFill": slide_fill}
+    pres = deck(*elements, bg=WHITE)
+    jobj(pres, "slides", 0)["pageProperties"] = {"pageBackgroundFill": slide_fill}
     if layout_fill is not None:
-        pres["layouts"][0]["pageProperties"] = {"pageBackgroundFill": layout_fill}
-    if master_fill is not None:
-        pres["masters"][0]["pageProperties"] = {"pageBackgroundFill": master_fill}
+        jobj(pres, "layouts", 0)["pageProperties"] = {"pageBackgroundFill": layout_fill}
     return pres
 
 
-def slide0(pres: dict, thumb=None, foreign: bool = True, fetch=None, images=None) -> dict:
-    return deck_ir(pres, foreign=foreign, fetch=fetch, images=images,
-                   thumbnails=(lambda n: thumb) if thumb is not None else None)["slides"][0]
+def slide0(pres: JsonObject, thumb: RGB | None, foreign: bool, fetch: Fetch | None, images: Path | None
+           ) -> JsonObject:
+    return jobj(deck_ir(pres, foreign=foreign, fetch=fetch, images=images,
+                        thumbnails=(lambda n: thumb) if thumb is not None else None), "slides", 0)
 
 
 def test_a_linear_gradient_at_an_angle_is_recovered():
@@ -433,12 +473,12 @@ def test_a_linear_gradient_at_an_angle_is_recovered():
     t = (xx + yy) / (719 + 404)
     c0, c1 = np.array([10.0, 10.0, 10.0]), np.array([240.0, 80.0, 30.0])
     thumb = (c0 + (c1 - c0) * t[..., None]).round().astype(np.uint8)
-    s = slide0(bg_deck(solid("808080")), thumb)
+    s = slide0(bg_deck(solid("808080"), layout_fill=None), thumb, True, None, None)
     assert s["background_color"] == "#808080"                  # the API's own (wrong) answer, kept
-    g = s["background_gradient"]
+    g = jobj(s, "background_gradient")
     assert g["type"] == "linear"
-    assert abs(g["angle"] - (-45.0)) < 5
-    got0, got1 = deck_fills.rgb(g["colors"][0]), deck_fills.rgb(g["colors"][1])
+    assert abs(jnum(g, "angle") - (-45.0)) < 5
+    got0, got1 = rgb(jstr(g, "colors", 0)), rgb(jstr(g, "colors", 1))
     assert np.abs(got0 - c0).max() <= 12 and np.abs(got1 - c1).max() <= 12
 
 
@@ -448,8 +488,8 @@ def test_a_radial_gradient_is_recovered():
     two differ by the deck's `scale` even for this 720 px wide thumbnail. The centre is chosen in IR
     pt and only turned into pixels to paint the thumbnail, exactly as `adopt`'s px_box math does the
     other way round for every other candidate in this file."""
-    pres = bg_deck(solid("406090"))
-    page_w, _, _ = page_size_for(pres, None, True)
+    pres = bg_deck(solid("406090"), layout_fill=None)
+    page_w, _, _ = page_size_for(presentation(pres, "test"), None, True)
     px = 720 / page_w
     cx, cy = page_w * 0.55, page_w * 0.3         # IR pt, comfortably inside the page either way
     yy, xx = np.mgrid[0:405, 0:720]
@@ -457,11 +497,11 @@ def test_a_radial_gradient_is_recovered():
     r_out = r.max()
     inner, outer = np.array([250.0, 240.0, 200.0]), np.array([30.0, 30.0, 60.0])
     thumb = (inner + (outer - inner) * np.clip(r / r_out, 0, 1)[..., None]).round().astype(np.uint8)
-    s = slide0(pres, thumb)
-    g = s["background_gradient"]
+    s = slide0(pres, thumb, True, None, None)
+    g = jobj(s, "background_gradient")
     assert g["type"] == "radial"
-    assert abs(g["center"][0] - cx) <= 10 and abs(g["center"][1] - cy) <= 10
-    got_in, got_out = deck_fills.rgb(g["colors"][0]), deck_fills.rgb(g["colors"][1])
+    assert abs(jnum(g, "center", 0) - cx) <= 10 and abs(jnum(g, "center", 1) - cy) <= 10
+    got_in, got_out = rgb(jstr(g, "colors", 0)), rgb(jstr(g, "colors", 1))
     assert np.abs(got_in - inner).max() <= 14 and np.abs(got_out - outer).max() <= 14
 
 
@@ -479,8 +519,8 @@ def test_a_sliver_beside_a_full_width_picture_still_fits_a_gradient():
     SCALE = W / 720
     title = shape("title", "TEXT_BOX", 0, 0, 720, 108, solid("ffffff"))
     picture = shape("pic", "CUSTOM", 30, 108, 665, 297, solid("ffffff"))
-    pres = bg_deck(solid("ddebcf"), title, picture)
-    page_w, page_h, _ = page_size_for(pres, None, True)
+    pres = bg_deck(solid("ddebcf"), title, picture, layout_fill=None)
+    page_w, page_h, _ = page_size_for(presentation(pres, "test"), None, True)
     px = W / page_w
     title_h = round(108 * SCALE)
     pic_x0, pic_x1 = round(30 * SCALE), round(695 * SCALE)
@@ -495,21 +535,22 @@ def test_a_sliver_beside_a_full_width_picture_still_fits_a_gradient():
     thumb = (inner + (outer - inner) * np.clip(r_full / r_out, 0, 1)[..., None]).round().astype(np.uint8)
     thumb[0:title_h, 0:W] = [255, 255, 255]             # the title's own white box
     thumb[title_h:H, pic_x0:pic_x1] = [255, 255, 255]   # the picture's own white box
-    s = slide0(pres, thumb)
+    s = slide0(pres, thumb, True, None, None)
     assert s["background_color"] is None or s["background_color"] == "#ddebcf"
-    g = s["background_gradient"]
-    assert g is not None and g["type"] == "radial"
-    assert abs(g["center"][0] - cx) <= 15 and abs(g["center"][1] - cy) <= 15
-    got_in, got_out = deck_fills.rgb(g["colors"][0]), deck_fills.rgb(g["colors"][1])
+    assert s["background_gradient"] is not None
+    g = jobj(s, "background_gradient")
+    assert g["type"] == "radial"
+    assert abs(jnum(g, "center", 0) - cx) <= 15 and abs(jnum(g, "center", 1) - cy) <= 15
+    got_in, got_out = rgb(jstr(g, "colors", 0)), rgb(jstr(g, "colors", 1))
     assert np.abs(got_in - inner).max() <= 25 and np.abs(got_out - outer).max() <= 25
 
 
 def test_a_matching_flat_colour_is_left_alone():
     """The ordinary case - almost every slide's: nothing is fitted when the reported colour already
     explains the thumbnail's background."""
-    thumb = page()
+    thumb = page(bg=WHITE)
     thumb[:, :] = [0x33, 0x66, 0x99]
-    s = slide0(bg_deck(solid("336699")), thumb)
+    s = slide0(bg_deck(solid("336699"), layout_fill=None), thumb, True, None, None)
     assert s["background_gradient"] is None and s["background_color"] == "#336699"
 
 
@@ -519,15 +560,15 @@ def test_artwork_fits_no_gradient():
     than drawn as a false gradient."""
     checker = (np.indices((405, 720)).sum(axis=0) // 20) % 2
     thumb = np.where(checker[..., None].astype(bool), [20, 20, 20], [230, 90, 40]).astype(np.uint8)
-    s = slide0(bg_deck(solid("808080")), thumb)
+    s = slide0(bg_deck(solid("808080"), layout_fill=None), thumb, True, None, None)
     assert s["background_gradient"] is None and s["background_color"] == "#808080"
 
 
 def test_without_a_thumbnail_the_background_is_unchanged():
-    pres = bg_deck(solid("336699"))
-    s = slide0(pres, None)
+    pres = bg_deck(solid("336699"), layout_fill=None)
+    s = slide0(pres, None, True, None, None)
     assert s["background_color"] == "#336699" and s["background_gradient"] is None
-    s = slide0(pres, None, foreign=False)
+    s = slide0(pres, None, False, None, None)
     assert s["background_color"] == "#336699" and s["background_gradient"] is None
 
 
@@ -548,16 +589,16 @@ def test_a_fine_texture_is_never_drawn_as_a_smooth_gradient():
     assert deck_fills.page_textured(thumb, np.ones((405, 720), dtype=bool))
 
 
-def test_page_gradient_refuses_that_texture_and_a_picture_is_kept_instead(tmp_path):
+def test_page_gradient_refuses_that_texture_and_a_picture_is_kept_instead(tmp_path: Path):
     yy, xx = np.mgrid[0:405, 0:720]
     t = xx / 719
     c0, c1 = np.array([200.0, 180.0, 120.0]), np.array([120.0, 90.0, 40.0])
     base = c0 + (c1 - c0) * t[..., None]
     stripe = np.where((xx // 4) % 2 == 0, 15.0, -15.0)
     thumb = np.clip(base + stripe[..., None], 0, 255).astype(np.uint8)
-    s = slide0(bg_deck(solid("FFFFFF")), thumb, images=tmp_path)
+    s = slide0(bg_deck(solid("FFFFFF"), layout_fill=None), thumb, True, None, tmp_path)
     assert s["background_gradient"] is None
-    assert s.get("background_file") and Path(s["background_file"]).exists()
+    assert s.get("background_file") and Path(jstr(s, "background_file")).exists()
 
 
 def test_a_clean_gradient_still_a_gradient_past_the_texture_check():
@@ -568,32 +609,39 @@ def test_a_clean_gradient_still_a_gradient_past_the_texture_check():
     c0, c1 = np.array([10.0, 10.0, 10.0]), np.array([240.0, 80.0, 30.0])
     thumb = (c0 + (c1 - c0) * t[..., None]).round().astype(np.uint8)
     assert not deck_fills.page_textured(thumb, np.ones((405, 720), dtype=bool))
-    s = slide0(bg_deck(solid("808080")), thumb)
+    s = slide0(bg_deck(solid("808080"), layout_fill=None), thumb, True, None, None)
     assert s["background_gradient"] is not None
 
 
 # ---------------------------------------------------------------- inherited elements
 
-def group(oid: str, *children) -> dict:
-    return {"objectId": oid, "transform": at(0, 0), "elementGroup": {"children": list(children)}}
+def group(oid: str, *children: JsonObject) -> JsonObject:
+    return {"objectId": oid, "transform": at(0, 0), "elementGroup": {"children": [*children]}}
 
 
-def multi(master_elements, n_slides: int, layout_elements=()) -> dict:
+def multi(master_elements: Sequence[JsonObject], n_slides: int, layout_elements: Sequence[JsonObject]
+          ) -> JsonObject:
     """An `n_slides`-slide 720x405 deck whose every slide shares one layout and master, the master
-    (and optionally the layout) carrying `master_elements`/`layout_elements` - `deck_ir`'s `foreign`
+    (and the layout) carrying `master_elements`/`layout_elements` - `deck_ir`'s `foreign`
     path (`inherited_chain`) adds these to every slide with no check of its own; the tests below are
     that check (`deck_ir.vote_inherited`, `decide_drops`)."""
     return {"presentationId": "p", "title": "t", "pageSize": {"width": pt(720), "height": pt(405)},
-            "masters": [{"objectId": "m", "pageElements": list(master_elements),
+            "masters": [{"objectId": "m", "pageElements": [*master_elements],
                          "pageProperties": {"pageBackgroundFill": solid("FFFFFF")}}],
             "layouts": [{"objectId": "L", "layoutProperties": {"masterObjectId": "m"},
-                        "pageElements": list(layout_elements)}],
+                        "pageElements": [*layout_elements]}],
             "slides": [{"objectId": f"s{i}", "slideProperties": {"layoutObjectId": "L"},
                        "pageElements": []} for i in range(n_slides)]}
 
 
-def inherited_ids(slides: list[dict]) -> set[str]:
-    return {e["id"] for s in slides for e in s["elements"] if e.get("inherited")}
+def inherited_ids(slides: Sequence[JsonObject]) -> set[str]:
+    return {jstr(e, "id") for s in slides for e in jobjs(s, "elements") if e.get("inherited")}
+
+
+def slides_of(pres: JsonObject, thumbnails: Callable[[int], RGB] | None, fetch: Fetch | None,
+              images: Path | None) -> list[JsonObject]:
+    """Every slide of `pres` as a foreign deck's read gives them."""
+    return jobjs(deck_ir(pres, foreign=True, fetch=fetch, images=images, thumbnails=thumbnails), "slides")
 
 
 def test_an_inherited_element_never_shown_is_dropped_everywhere():
@@ -602,8 +650,8 @@ def test_an_inherited_element_never_shown_is_dropped_everywhere():
     cannot say at all. Checked on both slides, confirmed shown on neither: dropped from both, not
     left standing because any one slide's own read was inconclusive."""
     band = shape("band", "RECTANGLE", 0, 0, 720, 60, solid("CC9966"))
-    pres = multi([band], 2)
-    slides = deck_ir(pres, foreign=True, thumbnails=lambda n: page())["slides"]
+    pres = multi([band], 2, ())
+    slides = slides_of(pres, lambda n: page(bg=WHITE), None, None)
     assert inherited_ids(slides) == set()
 
 
@@ -613,11 +661,11 @@ def test_an_inherited_element_shown_on_one_slide_is_kept_on_all():
     the other, where nothing but a mismatch would otherwise be read, keeps it rather than being
     guessed missing from a single slide's own vote."""
     band = shape("band", "RECTANGLE", 0, 0, 720, 60, solid("CC9966"))
-    pres = multi([band], 2)
-    thumbs = [page((0, 0, 720, 60, "#CC9966")), page()]
-    slides = deck_ir(pres, foreign=True, thumbnails=lambda n: thumbs[n])["slides"]
+    pres = multi([band], 2, ())
+    thumbs = [page((0, 0, 720, 60, "#CC9966"), bg=WHITE), page(bg=WHITE)]
+    slides = slides_of(pres, lambda n: thumbs[n], None, None)
     assert len(inherited_ids(slides)) == 1
-    assert all(any(e.get("inherited") for e in s["elements"]) for s in slides)
+    assert all(any(e.get("inherited") for e in jobjs(s, "elements")) for s in slides)
 
 
 def test_a_group_is_dropped_or_kept_as_one_piece():
@@ -627,15 +675,15 @@ def test_a_group_is_dropped_or_kept_as_one_piece():
     the group is one decision, not two, so the never-checkable line leaves with it."""
     band = shape("band", "RECTANGLE", 0, 0, 720, 60, solid("CC9966"))
     thin = shape("line", "RECTANGLE", 0, 0, 720, 4, solid("112233"))
-    pres = multi([group("g1", band, thin)], 2)
+    pres = multi([group("g1", band, thin)], 2, ())
     cover = shape("cover", "RECTANGLE", 0, 0, 720, 4, solid("336699"))
-    for s in pres["slides"]:
+    for s in jobjs(pres, "slides"):
         s["pageElements"] = [cover]
-    slides = deck_ir(pres, foreign=True, thumbnails=lambda n: page((0, 0, 720, 4, "#336699")))["slides"]
+    slides = slides_of(pres, lambda n: page((0, 0, 720, 4, "#336699"), bg=WHITE), None, None)
     assert inherited_ids(slides) == set()
 
 
-def test_an_inherited_picture_is_judged_by_its_cropped_piece(tmp_path):
+def test_an_inherited_picture_is_judged_by_its_cropped_piece(tmp_path: Path):
     """instagram: the master draws six pieces of one screenshot, each through its own
     `cropProperties`. The thumbnail shows only the piece; the whole sheet squeezed into the box
     matched a quarter of it, so every piece voted absent and was dropped from every slide."""
@@ -647,15 +695,15 @@ def test_an_inherited_picture_is_judged_by_its_cropped_piece(tmp_path):
     png = io.BytesIO()
     sheet.save(png, format="PNG")
     url = "https://example.test/sheet.png"
-    piece = {"objectId": "piece", "size": {"width": pt(200), "height": pt(100)}, "transform": at(0, 0),
-             "image": {"contentUrl": url, "imageProperties": {"cropProperties": {"leftOffset": 0.75}}}}
-    pres = multi([piece], 2)
-    slides = deck_ir(pres, foreign=True, fetch=lambda u: png.getvalue(), images=tmp_path,
-                     thumbnails=lambda n: page((0, 0, 200, 100, "#0000FF")))["slides"]
-    assert all(any(e.get("inherited") for e in s["elements"]) for s in slides)
+    piece: JsonObject = {"objectId": "piece", "size": {"width": pt(200), "height": pt(100)}, "transform": at(0, 0),
+                         "image": {"contentUrl": url, "imageProperties": {"cropProperties": {"leftOffset": 0.75}}}}
+    pres = multi([piece], 2, ())
+    slides = slides_of(pres, lambda n: page((0, 0, 200, 100, "#0000FF"), bg=WHITE), lambda u: png.getvalue(),
+                       tmp_path)
+    assert all(any(e.get("inherited") for e in jobjs(s, "elements")) for s in slides)
 
 
-def test_a_piece_drawn_over_is_judged_by_what_its_own_crop_shows(tmp_path):
+def test_a_piece_drawn_over_is_judged_by_what_its_own_crop_shows(tmp_path: Path):
     """instagram: the master's bottom bar is one piece of a screenshot whose middle is transparent,
     and another opaque piece of the same sheet is drawn over the bar's middle. Read as the whole
     sheet, that cover was see-through ink, the bar was judged under it, voted absent and dropped:
@@ -669,15 +717,14 @@ def test_a_piece_drawn_over_is_judged_by_what_its_own_crop_shows(tmp_path):
     sheet.save(png, format="PNG")
     url = "https://example.test/sheet.png"
 
-    def piece(oid, x, w, crop):
+    def piece(oid: str, x: float, w: float, crop: JsonObject) -> JsonObject:
         return {"objectId": oid, "size": {"width": pt(w), "height": pt(60)}, "transform": at(x, 300),
                 "image": {"contentUrl": url, "imageProperties": {"cropProperties": crop}}}
 
     bar = piece("bar", 0, 720, {"bottomOffset": 2 / 3})
     cover = piece("cover", 100, 520, {"topOffset": 2 / 3})
-    thumb = page((0, 300, 720, 60, "#282828"), (100, 300, 520, 60, "#005aa0"))
-    slides = deck_ir(multi([bar, cover], 2), foreign=True, fetch=lambda u: png.getvalue(), images=tmp_path,
-                     thumbnails=lambda n: thumb)["slides"]
+    thumb = page((0, 300, 720, 60, "#282828"), (100, 300, 520, 60, "#005aa0"), bg=WHITE)
+    slides = slides_of(multi([bar, cover], 2, ()), lambda n: thumb, lambda u: png.getvalue(), tmp_path)
     assert all(inherited_ids([s]) == {"m~bar", "m~cover"} for s in slides)
 
 
@@ -686,15 +733,15 @@ def test_a_layouts_unsaid_placeholder_fill_is_read_from_the_thumbnail():
     and the API gives that fill as `{}` (a gradient or picture fill). The slide's placeholder says
     INHERIT; the `{}` it inherits was taken for no fill at all, and white words stood on white."""
     lay = shape("lt", "TEXT_BOX", 200, 0, 520, 30, UNREAD)
-    lay["shape"]["placeholder"] = {"type": "TITLE"}
+    jobj(lay, "shape")["placeholder"] = {"type": "TITLE"}
     title = shape("t", "TEXT_BOX", 200, 0, 520, 30, {"propertyState": "INHERIT"})
-    title["shape"]["placeholder"] = {"type": "TITLE", "parentObjectId": "lt"}
-    title["shape"]["text"] = {"textElements": [{"paragraphMarker": {"style": {}}},
-                                               {"textRun": {"content": "Contrasting analyses\n",
-                                                            "style": {"fontSize": pt(14)}}}]}
-    pres = deck(title)
-    pres["layouts"][0]["pageElements"] = [lay]
-    el = next(e for e in elements(pres, page((200, 0, 520, 30, "#434343"))) if e.get("id") == "t")
+    jobj(title, "shape")["placeholder"] = {"type": "TITLE", "parentObjectId": "lt"}
+    jobj(title, "shape")["text"] = {"textElements": [{"paragraphMarker": {"style": {}}},
+                                                     {"textRun": {"content": "Contrasting analyses\n",
+                                                                  "style": {"fontSize": pt(14)}}}]}
+    pres = deck(title, bg=WHITE)
+    jobj(pres, "layouts", 0)["pageElements"] = [lay]
+    el = next(e for e in elements(pres, page((200, 0, 520, 30, "#434343"), bg=WHITE)) if e.get("id") == "t")
     assert el.get("fill") == "#434343" and el.get("fill_source") == "thumbnail"
 
 
@@ -702,12 +749,12 @@ def test_an_inconclusive_element_is_never_dropped():
     """Without a thumbnail at all, `vote_inherited` never runs - nothing casts a vote, so nothing can
     be dropped, whatever `inherited_chain` found."""
     odd = shape("odd", "RECTANGLE", 0, 0, 720, 60, solid("445566"))
-    pres = multi([odd], 1)
-    slides = deck_ir(pres, foreign=True, thumbnails=None)["slides"]
+    pres = multi([odd], 1, ())
+    slides = slides_of(pres, None, None, None)
     assert len(inherited_ids(slides)) == 1
 
 
-def test_a_solid_the_thumbnail_disagrees_with_falls_through_to_the_layout_picture(tmp_path):
+def test_a_solid_the_thumbnail_disagrees_with_falls_through_to_the_layout_picture(tmp_path: Path):
     """china-pptx: the slide's own solidFill sits over the layout's radial picture, which Slides
     actually draws instead of it. The picture is taken only once confirmed on the page's own pixels
     (fetched and resampled to the page) - offered on its say-so alone, the layout's or master's
@@ -715,18 +762,18 @@ def test_a_solid_the_thumbnail_disagrees_with_falls_through_to_the_layout_pictur
     own, unrelated to it (thai-history, found live in the corpus)."""
     from PIL import Image
     import io
-    thumb = page()
+    thumb = page(bg=WHITE)
     thumb[:, :] = [23, 108, 20]                     # the picture's own green, nothing like the fill
     green = io.BytesIO()
     Image.new("RGB", (8, 8), (23, 108, 20)).save(green, format="PNG")
     url = "https://example.test/green.png"
     pres = bg_deck(solid("ddebcf"), layout_fill=picture_fill(url))
-    s = slide0(pres, thumb, fetch=lambda u: green.getvalue(), images=tmp_path)
+    s = slide0(pres, thumb, True, lambda u: green.getvalue(), tmp_path)
     assert s["background_picture"] == url
     assert s["background_color"] is None and s["background_gradient"] is None
 
 
-def test_a_layout_picture_that_does_not_match_is_left_for_the_gradient_fit(tmp_path):
+def test_a_layout_picture_that_does_not_match_is_left_for_the_gradient_fit(tmp_path: Path):
     """A layout's or master's picture shared across slides that do not actually draw it (a different
     layout's own gradient, thai-history's real defect): the picture is confirmed against the page's
     own pixels and, failing that, the mismatch still goes to `page_gradient` rather than painting a
@@ -740,17 +787,17 @@ def test_a_layout_picture_that_does_not_match_is_left_for_the_gradient_fit(tmp_p
     grey = io.BytesIO()
     Image.new("RGB", (8, 8), (150, 150, 150)).save(grey, format="PNG")   # unrelated shared photo
     pres = bg_deck(solid("000082"), layout_fill=picture_fill("https://example.test/shared.jpg"))
-    s = slide0(pres, thumb, fetch=lambda u: grey.getvalue(), images=tmp_path)
+    s = slide0(pres, thumb, True, lambda u: grey.getvalue(), tmp_path)
     assert s["background_picture"] is None
-    g = s["background_gradient"]
-    assert g is not None and g["type"] == "linear"
+    assert s["background_gradient"] is not None
+    assert jat(s, "background_gradient", "type") == "linear"
 
 
 def test_a_solid_the_thumbnail_disagrees_with_falls_through_to_the_layout_colour():
-    thumb = page()
+    thumb = page(bg=WHITE)
     thumb[:, :] = [0x11, 0x22, 0x33]
     pres = bg_deck(solid("ddebcf"), layout_fill=solid("112233"))
-    s = slide0(pres, thumb)
+    s = slide0(pres, thumb, True, None, None)
     assert s["background_color"] == "#112233" and s["background_gradient"] is None
     assert s["background_picture"] is None
 
@@ -766,17 +813,17 @@ def test_the_gradient_is_drawn_as_a_clipped_shading():
     assert "shading=radial" in out2 and "inner color=" in out2 and "outer color=" in out2
 
 
-def test_a_drive_videos_poster_frame_is_read_off_the_thumbnail(tmp_path):
+def test_a_drive_videos_poster_frame_is_read_off_the_thumbnail(tmp_path: Path):
     """No API gives a Drive video's poster frame (a play panel stood in); the slide's thumbnail shows it."""
     a = np.random.default_rng(1).integers(0, 256, (405, 720, 3)).astype(np.int16)
-    video = {"kind": "image", "role": "figure", "bbox": [100, 100, 300, 220], "id": "v", "object": "v",
-             "video": {"source": "DRIVE", "id": "x", "url": None}}
-    tube = {**video, "id": "y", "file": "hq.jpg", "video": {"source": "YOUTUBE", "id": "y"}}
-    out = settle([video, tube], a, 1.0, "#ffffff", pictures=tmp_path)
+    video: JsonObject = {"kind": "image", "role": "figure", "bbox": [100, 100, 300, 220], "id": "v", "object": "v",
+                         "video": {"source": "DRIVE", "id": "x", "url": None}}
+    tube: JsonObject = {**video, "id": "y", "file": "hq.jpg", "video": {"source": "YOUTUBE", "id": "y"}}
+    out = settle([video, tube], a, 1.0, "#ffffff", False, tmp_path)
     v = next(e for e in out if e["id"] == "v")
-    assert v["poster"] == "thumbnail" and v["video"]["source"] == "DRIVE"
+    assert v["poster"] == "thumbnail" and jat(v, "video", "source") == "DRIVE"
     from PIL import Image
-    assert (np.asarray(Image.open(v["file"]).convert("RGB")) == a[100:220, 100:300]).all()
+    assert (np.asarray(Image.open(jstr(v, "file")).convert("RGB")) == a[100:220, 100:300]).all()
     assert "poster" not in next(e for e in out if e["id"] == "y"), "YouTube's own thumbnail stays"
 
 
@@ -790,7 +837,7 @@ def test_a_themed_frame_takes_its_gradient_as_its_own_backdrop_option():
     assert opts == "[label=p6,backdrop=figures/g.png]"
 
 
-def test_a_gradient_backdrop_is_drawn_from_the_fitted_model(tmp_path):
+def test_a_gradient_backdrop_is_drawn_from_the_fitted_model(tmp_path: Path):
     import hashlib
     import json
     from PIL import Image
@@ -800,21 +847,23 @@ def test_a_gradient_backdrop_is_drawn_from_the_fitted_model(tmp_path):
     # named by the gradient as target.json writes it, as when it was read as a dict: a file made
     # before is found again
     tag = hashlib.sha1(json.dumps([as_read, 720.0, 405.0], sort_keys=True).encode()).hexdigest()[:10]
-    assert rel == f"figures/gradient-{tag}.png"
+    assert rel is not None and rel == f"figures/gradient-{tag}.png"
     img = np.asarray(Image.open(tmp_path / rel).convert("RGB")).astype(int)
     top, bottom = img[0, img.shape[1] // 2], img[-1, img.shape[1] // 2]
     assert top[2] > 200 and bottom[0] > 200, "90 degrees runs up the page: colour 0 at the bottom"
     assert adopt.gradient_backdrop(linear, (720.0, 405.0), tmp_path) == rel     # one file per ramp
     radial = parse_page_gradient({"type": "radial", "center": [360.0, 202.5], "radius": 400.0,
                                   "colors": ["#ffffff", "#000000"]}, "test")
-    img = np.asarray(Image.open(tmp_path / adopt.gradient_backdrop(radial, (720.0, 405.0), tmp_path)))
+    made = adopt.gradient_backdrop(radial, (720.0, 405.0), tmp_path)
+    assert made is not None
+    img = np.asarray(Image.open(tmp_path / made))
     assert img[img.shape[0] // 2, img.shape[1] // 2].min() > 250 and img[0, 0].max() < 160
     assert adopt.gradient_backdrop(linear, (720.0, 405.0), None) is None
 
 
 # ---------------------------------------------------------------- round things (en-smartart, yc-seed-white)
 
-def noisy(a: np.ndarray, x: int, y: int, w: int, h: int, seed: int = 3, oval: bool = False) -> None:
+def noisy(a: RGB, x: int, y: int, w: int, h: int, seed: int, oval: bool) -> None:
     """Paint noise (neither a flat colour nor a ramp) into `a`'s (x, y, w, h), only inside the
     inscribed ellipse when `oval`."""
     rng = np.random.default_rng(seed)
@@ -827,56 +876,62 @@ def noisy(a: np.ndarray, x: int, y: int, w: int, h: int, seed: int = 3, oval: bo
         a[y:y + h, x:x + w] = patch
 
 
-def ball(oid="b", box=(200, 100, 300, 200)) -> dict:
-    return {"kind": "shape", "role": "panel", "shape_type": "ELLIPSE", "bbox": list(box), "fill": None,
+Box = tuple[float, float, float, float]
+BALL: Box = (200, 100, 300, 200)             # where the tests below put their ball
+UNDER: Box = (150, 50, 350, 250)             # and the panel under it
+
+
+def ball(oid: str, box: Box) -> JsonObject:
+    return {"kind": "shape", "role": "panel", "shape_type": "ELLIPSE", "bbox": [*box], "fill": None,
             "outline": None, "fill_unread": True, "id": oid, "object": oid, "group": None}
 
 
-def panel_under(box=(150, 50, 350, 250)) -> dict:
-    return {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": list(box), "fill": "#3366cc",
+def panel_under(box: Box) -> JsonObject:
+    return {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [*box], "fill": "#3366cc",
             "outline": None, "id": "u", "object": "u", "group": None}
 
 
-def test_a_gradient_ellipse_is_a_picture_of_only_its_ellipse(tmp_path):
+def test_a_gradient_ellipse_is_a_picture_of_only_its_ellipse(tmp_path: Path):
     """en-smartart's balls: an ELLIPSE with a `{}` fill over another shape was cut square from the
     thumbnail, its corners printing the panel under it over whatever else was there."""
     from PIL import Image
-    a = page((150, 50, 200, 200, "#3366cc"))
-    noisy(a, 200, 100, 100, 100, oval=True)
-    got = settle([panel_under(), ball()], a, 1.0, "#ffffff", False, tmp_path)
+    a = page((150, 50, 200, 200, "#3366cc"), bg=WHITE)
+    noisy(a, 200, 100, 100, 100, 3, True)
+    got = settle([panel_under(UNDER), ball("b", BALL)], a, 1.0, "#ffffff", False, tmp_path)
     pic, = (e for e in got if e["kind"] == "image")
-    im = np.asarray(Image.open(pic["file"]))
+    im = np.asarray(Image.open(jstr(pic, "file")))
     assert im.shape == (100, 100, 4)
     assert im[2, 2, 3] == 0 and im[97, 97, 3] == 0, "the corners are not the ball's"
     assert im[50, 50, 3] == 255 and im[50, 1, 3] > 0, "its middle and rim are"
 
 
-def test_a_nodes_see_through_text_box_on_its_shape_is_no_picture_of_it(tmp_path):
+def test_a_nodes_see_through_text_box_on_its_shape_is_no_picture_of_it(tmp_path: Path):
     """A SmartArt node is a shape and a NOT_RENDERED text box of exactly its box: the text box's
     unread fill is the shape under it, and a picture of it would hide the ball square."""
-    a = page((150, 50, 200, 200, "#3366cc"))
-    noisy(a, 200, 100, 100, 100, oval=True)
-    words = {"kind": "text", "role": "body", "bbox": [200, 100, 300, 200], "id": "t", "object": "t",
-             "fill_unread": True, "paragraphs": [{"runs": [{"text": "Facebook", "color": "#ffffff"}]}]}
-    got = settle([panel_under(), ball(), words], a, 1.0, "#ffffff", False, tmp_path)
+    a = page((150, 50, 200, 200, "#3366cc"), bg=WHITE)
+    noisy(a, 200, 100, 100, 100, 3, True)
+    words: JsonObject = {"kind": "text", "role": "body", "bbox": [200, 100, 300, 200], "id": "t", "object": "t",
+                         "fill_unread": True, "paragraphs": [{"runs": [{"text": "Facebook", "color": "#ffffff"}]}]}
+    got = settle([panel_under(UNDER), ball("b", BALL), words], a, 1.0, "#ffffff", False, tmp_path)
     assert [e["id"] for e in got if e["kind"] == "image"] == ["b"], "the ball's picture, no `t~fill`"
     assert not next(e for e in got if e["id"] == "t").get("fill")
 
 
-def test_a_picture_under_a_see_through_shape_does_not_take_its_tint_twice(tmp_path):
+def test_a_picture_under_a_see_through_shape_does_not_take_its_tint_twice(tmp_path: Path):
     """en-smartart's funnel is white at 0.4 over the balls: the thumbnail shows the balls through it,
     and the funnel is drawn again above their picture, so the crop has that tint taken back out."""
     from PIL import Image
-    a = page((150, 50, 200, 200, "#3366cc"))
-    noisy(a, 200, 100, 100, 100)
+    a = page((150, 50, 200, 200, "#3366cc"), bg=WHITE)
+    noisy(a, 200, 100, 100, 100, 3, False)
     truth = a[100:200, 200:300].astype(float).copy()
     a[100:150, 200:300] = np.round(0.6 * a[100:150, 200:300] + 0.4 * 255).astype(np.uint8)
-    blob = {**ball(), "shape_type": "CUSTOM"}
-    veil = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [180, 90, 320, 150],
-            "fill": "#ffffff", "fill_alpha": 0.4, "outline": None, "id": "v", "object": "v", "group": None}
-    got = settle([panel_under(), blob, veil], a, 1.0, "#ffffff", False, tmp_path)
+    blob: JsonObject = {**ball("b", BALL), "shape_type": "CUSTOM"}
+    veil: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [180, 90, 320, 150],
+                        "fill": "#ffffff", "fill_alpha": 0.4, "outline": None, "id": "v", "object": "v",
+                        "group": None}
+    got = settle([panel_under(UNDER), blob, veil], a, 1.0, "#ffffff", False, tmp_path)
     pic, = (e for e in got if e["kind"] == "image")
-    im = np.asarray(Image.open(pic["file"]).convert("RGB")).astype(float)
+    im = np.asarray(Image.open(jstr(pic, "file")).convert("RGB")).astype(float)
     assert np.abs(im[5:45, 5:95] - truth[5:45, 5:95]).max() <= 2, "under the veil: the picture itself"
     assert np.abs(im[55:95] - truth[55:95]).max() <= 1, "outside it: untouched"
 
@@ -885,7 +940,7 @@ def test_a_see_through_freeform_is_traced_by_its_opaque_outline():
     """en-smartart's funnel: white at 0.4 over other shapes, so its fill has no one colour to key on
     ("alpha-over"); its red outline does, and what that encloses is the shape."""
     from PIL import Image, ImageDraw
-    img = Image.fromarray(page((100, 50, 300, 250, "#3366cc")))
+    img = Image.fromarray(page((100, 50, 300, 250, "#3366cc"), bg=WHITE))
     tri = [(150, 100), (350, 100), (250, 250)]
     inner = Image.new("L", img.size, 0)
     ImageDraw.Draw(inner).polygon(tri, fill=255)
@@ -894,101 +949,111 @@ def test_a_see_through_freeform_is_traced_by_its_opaque_outline():
     arr[m] = 0.6 * arr[m] + 0.4 * 255
     img = Image.fromarray(arr.round().astype(np.uint8))
     ImageDraw.Draw(img).polygon(tri, outline=(218, 28, 39), width=2)
-    funnel = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [150, 100, 350, 250],
-              "fill": "#ffffff", "fill_alpha": 0.4, "outline": "#da1c27", "weight": 2.0, "id": "f",
-              "object": "f", "group": None}
-    got = settle([panel_under((100, 50, 400, 300)), funnel], np.asarray(img), 1.0, "#ffffff")
+    funnel: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [150, 100, 350, 250],
+                          "fill": "#ffffff", "fill_alpha": 0.4, "outline": "#da1c27", "weight": 2.0, "id": "f",
+                          "object": "f", "group": None}
+    got = settle([panel_under((100, 50, 400, 300)), funnel], np.asarray(img), 1.0, "#ffffff", False, None)
     f = next(e for e in got if e["id"] == "f")
     assert f.get("trace"), "traced"
-    xs = [x for ring in f["trace"]["rings"] for x, _ in ring]
-    ys = [y for ring in f["trace"]["rings"] for _, y in ring]
+    points = [jnums(p) for ring in jarr(f, "trace", "rings") for p in jarr(ring)]
+    xs = [x for x, _ in points]
+    ys = [y for _, y in points]
     assert min(xs) == pytest.approx(150, abs=3) and max(xs) == pytest.approx(350, abs=3)
     assert max(ys) == pytest.approx(250, abs=4), "down to the point, not the box's corners"
-    assert f["trace"]["fill"] == "#ffffff" and f["trace"]["alpha"] == 0.4
+    assert jat(f, "trace", "fill") == "#ffffff" and jat(f, "trace", "alpha") == 0.4
 
 
-NO_FILL = {"propertyState": "NOT_RENDERED", "solidFill": {"color": {"rgbColor": {"red": 1, "green": 1, "blue": 1}}}}
-TEAL = (51, 183, 191)
+NO_FILL: JsonObject = {"propertyState": "NOT_RENDERED",
+                       "solidFill": {"color": {"rgbColor": {"red": 1, "green": 1, "blue": 1}}}}
+Colour = tuple[int, int, int]
+TEAL: Colour = (51, 183, 191)
+STRIPE_RED: Colour = (140, 20, 40)           # `striped`'s two colours when a test has no others to try
+STRIPE_YELLOW: Colour = (240, 192, 32)
 
 
-def outlined(pe: dict, colour=TEAL, weight: float = 2.0) -> dict:
+def outlined(pe: JsonObject, colour: Colour, weight: float) -> JsonObject:
     r, g, b = (v / 255 for v in colour)
-    pe["shape"]["shapeProperties"]["outline"] = {
+    jobj(pe, "shape", "shapeProperties")["outline"] = {
         "outlineFill": {"solidFill": {"color": {"rgbColor": {"red": r, "green": g, "blue": b}}}}, "weight": pt(weight)}
     return pe
 
 
-def striped(a: np.ndarray, x: int, y: int, w: int, h: int, one=(140, 20, 40), two=(240, 192, 32)) -> None:
-    """Stripes 3 px wide in `a`'s (x, y, w, h), dark red and yellow unless told: neither one colour, a
-    ramp nor a single paint over a ground, like the many colours of en-mos' wavy header."""
+def striped(a: RGB, x: int, y: int, w: int, h: int, one: Colour, two: Colour) -> None:
+    """Stripes 3 px wide in `a`'s (x, y, w, h), `one` and `two`: neither one colour, a ramp nor a
+    single paint over a ground, like the many colours of en-mos' wavy header."""
     cols = (np.arange(w) // 3) % 2
     a[y:y + h, x:x + w] = np.where(cols[None, :, None] == 0, one, two)
 
 
-def test_an_outline_only_freeform_is_traced_as_its_line(tmp_path):
+def test_an_outline_only_freeform_is_traced_as_its_line(tmp_path: Path):
     """en-mos' master: two thin curves over the wavy header, outline only, whose fill comes back
     NOT_RENDERED - which is also how Slides says "no fill". The box holds the header's many colours,
     so no fill reads; it was a picture of the whole box with the box's rectangle drawn round it (a
     straight line across the header on 80 slides). Its outline alone is what is traced."""
     from PIL import Image, ImageDraw
-    a = page()
-    striped(a, 0, 40, 720, 50)
+    a = page(bg=WHITE)
+    striped(a, 0, 40, 720, 50, STRIPE_RED, STRIPE_YELLOW)
     img = Image.fromarray(a)
     xs = np.linspace(100, 600, 200)
     ImageDraw.Draw(img).line([(x, 80 + 20 * np.sin((x - 100) / 500 * 4 * np.pi)) for x in xs], fill=TEAL, width=2)
     pres = deck(shape("wave", "CUSTOM", 0, 40, 720, 50, UNREAD),
-                outlined(shape("curve", "CUSTOM", 100, 60, 500, 40, NO_FILL)))
-    els = deck_ir(pres, foreign=True, thumbnails=lambda n: np.asarray(img), images=tmp_path)["slides"][0]["elements"]
-    mine = [e for e in els if e["id"].startswith("curve")]
+                outlined(shape("curve", "CUSTOM", 100, 60, 500, 40, NO_FILL), TEAL, 2.0), bg=WHITE)
+    els = slide_elements(pres, np.asarray(img), tmp_path)
+    mine = [e for e in els if jstr(e, "id").startswith("curve")]
     assert [e["kind"] for e in mine] == ["shape"], "no picture of its box, no rectangle round it"
-    tr = mine[0]["trace"]
+    tr = jobj(mine[0], "trace")
     assert tr["fill"] == "#33b7bf" and not mine[0].get("fill")
-    ys = [y for ring in tr["rings"] for _, y in ring]
-    x0, y0, x1, y1 = mine[0]["bbox"]                                    # IR pt: 453.54 across
+    ys = [jnum(p, 1) for ring in jarr(tr, "rings") for p in jarr(ring)]
+    x0, y0, x1, y1 = jnums(mine[0], "bbox")                             # IR pt: 453.54 across
     assert min(ys) == pytest.approx(y0, abs=1.5) and max(ys) == pytest.approx(y1, abs=1.5)
     assert no_marks_left(els) and not any("_not_rendered" in e for e in els)
 
 
-def test_an_outlined_freeform_round_an_unread_fill_keeps_its_picture_and_no_box(tmp_path):
+def slide_elements(pres: JsonObject, thumb: RGB, images: Path) -> list[JsonObject]:
+    """The first slide's elements, read with `thumb` for every slide and pictures kept in `images`."""
+    return jobjs(deck_ir(pres, foreign=True, thumbnails=lambda n: thumb, images=images), "slides", 0, "elements")
+
+
+def test_an_outlined_freeform_round_an_unread_fill_keeps_its_picture_and_no_box(tmp_path: Path):
     """A NOT_RENDERED freeform whose outline goes round what no reading explains (a .pptx gradient,
     china-pptx) is no outline-only line: traced with its outline as the paint, what it holds is taken
     in with the ring (thicker than any stroke), so it stays the thumbnail's picture, which holds its
     outline too - and not also its box's rectangle, all an untraced freeform's outline could draw."""
     from PIL import Image, ImageDraw
-    a = page()
-    striped(a, 200, 100, 200, 100)
+    a = page(bg=WHITE)
+    striped(a, 200, 100, 200, 100, STRIPE_RED, STRIPE_YELLOW)
     yy, xx = np.mgrid[0:405, 0:720]
     a[((xx - 300) / 100) ** 2 + ((yy - 150) / 50) ** 2 > 1] = 255        # an oval blob, not its box
     img = Image.fromarray(a)
     ImageDraw.Draw(img).ellipse([200, 100, 399, 199], outline=TEAL, width=2)
-    pres = deck(outlined(shape("blob", "CUSTOM", 200, 100, 200, 100, NO_FILL)))
-    els = deck_ir(pres, foreign=True, thumbnails=lambda n: np.asarray(img), images=tmp_path)["slides"][0]["elements"]
+    pres = deck(outlined(shape("blob", "CUSTOM", 200, 100, 200, 100, NO_FILL), TEAL, 2.0), bg=WHITE)
+    els = slide_elements(pres, np.asarray(img), tmp_path)
     assert [e["kind"] for e in els] == ["image"] and not els[0].get("trace")
 
 
-def test_an_outline_ring_on_a_picture_is_no_line(tmp_path):
+def test_an_outline_ring_on_a_picture_is_no_line(tmp_path: Path):
     """On a slide with a background picture, over a picture, any colour may show: what a thin ring
     holds may be what is under it or a fill of its own no reading explained, which tracing leaves a
     hole. A ring that encloses something is left to the thumbnail's picture."""
     from PIL import Image, ImageDraw
     ramp = np.linspace(0, 1, 400)[None, :, None]
-    a = page()
+    a = page(bg=WHITE)
     a[50:350, 100:500] = np.round((1 - ramp) * [30, 40, 120] + ramp * [120, 30, 60]).astype(np.uint8)
     photo = Image.fromarray(a[50:350, 100:500].copy())
     photo.save(tmp_path / "photo.png")
     striped(a, 200, 100, 200, 100, (240, 192, 32), (250, 180, 200))
     img = Image.fromarray(a)
     ImageDraw.Draw(img).ellipse([200, 100, 399, 199], outline=TEAL, width=2)
-    under = {"kind": "image", "role": "figure", "bbox": [100, 50, 500, 350], "file": str(tmp_path / "photo.png"),
-             "id": "p", "object": "p", "group": None}
-    ring = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [200, 100, 400, 200], "fill": None,
-            "outline": "#33b7bf", "weight": 2.0, "fill_unread": True, "_not_rendered": True, "id": "r",
-            "object": "r", "group": None}
+    under: JsonObject = {"kind": "image", "role": "figure", "bbox": [100, 50, 500, 350],
+                         "file": str(tmp_path / "photo.png"), "id": "p", "object": "p", "group": None}
+    ring: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [200, 100, 400, 200],
+                        "fill": None, "outline": "#33b7bf", "weight": 2.0, "fill_unread": True, "_not_rendered": True,
+                        "id": "r", "object": "r", "group": None}
     got = settle([under, ring], np.asarray(img), 1.0, None, True, tmp_path)
     assert [(e["kind"], e["id"]) for e in got] == [("image", "p"), ("image", "r")]
 
 
-def test_a_ring_cut_by_a_caption_in_its_colour_is_still_a_ring(tmp_path):
+def test_a_ring_cut_by_a_caption_in_its_colour_is_still_a_ring(tmp_path: Path):
     """cs161-net 13: a red ring round the houses and their wires, a caption in the same red across its
     rim. The trace leaves the rim under those words out (they may be the letters), which opened the
     ring into a line: drawn so, the wires only its crop held were gone. Under words of its colour the
@@ -996,8 +1061,8 @@ def test_a_ring_cut_by_a_caption_in_its_colour_is_still_a_ring(tmp_path):
     to close the traced ring with (`closed_under_words`), and the ring is the thumbnail's picture."""
     from PIL import Image, ImageDraw
     red = (200, 30, 50)
-    a = page()
-    noisy(a, 260, 120, 80, 40)
+    a = page(bg=WHITE)
+    noisy(a, 260, 120, 80, 40, 3, False)
     house = Image.fromarray(a[120:160, 260:340].copy())
     house.save(tmp_path / "house.png")
     img = Image.fromarray(a)
@@ -1005,30 +1070,30 @@ def test_a_ring_cut_by_a_caption_in_its_colour_is_still_a_ring(tmp_path):
     draw.rounded_rectangle([200, 100, 399, 209], radius=20, outline=red, width=2)
     for x in range(262, 340, 9):                         # the caption's letters, over the rim
         draw.rectangle([x, 200, x + 5, 214], fill=red)
-    ring = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [200, 100, 400, 210], "fill": None,
-            "outline": "#c81e32", "weight": 2.0, "fill_unread": True, "_not_rendered": True, "id": "r",
-            "object": "r", "group": None}
-    pic = {"kind": "image", "role": "figure", "bbox": [260, 120, 340, 160], "file": str(tmp_path / "house.png"),
-           "id": "h", "object": "h", "group": None}
-    caption = {"kind": "text", "role": "body", "bbox": [255, 196, 350, 218], "id": "t", "object": "t",
-               "paragraphs": [{"runs": [{"text": "local network", "color": "#c81e32"}]}]}
+    ring: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [200, 100, 400, 210],
+                        "fill": None, "outline": "#c81e32", "weight": 2.0, "fill_unread": True, "_not_rendered": True,
+                        "id": "r", "object": "r", "group": None}
+    pic: JsonObject = {"kind": "image", "role": "figure", "bbox": [260, 120, 340, 160],
+                       "file": str(tmp_path / "house.png"), "id": "h", "object": "h", "group": None}
+    caption: JsonObject = {"kind": "text", "role": "body", "bbox": [255, 196, 350, 218], "id": "t", "object": "t",
+                           "paragraphs": [{"runs": [{"text": "local network", "color": "#c81e32"}]}]}
     got = settle([ring, pic, caption], np.asarray(img), 1.0, "#ffffff", False, tmp_path)
-    r = next(e for e in got if e["id"].startswith("r"))
+    r = next(e for e in got if jstr(e, "id").startswith("r"))
     assert r["kind"] == "image" and not r.get("trace"), "the ring's picture, not an open line"
 
 
-def drawn(rings, size=(720, 405)) -> np.ndarray:
+def drawn(rings: JsonArray, size: tuple[int, int]) -> Mask:
     """The pixels a trace's rings fill, even-odd (at 1 px per pt)."""
     from PIL import Image, ImageDraw
-    out = np.zeros(size[::-1], dtype=bool)
+    out: Mask = np.zeros(size[::-1], dtype=bool)
     for ring in rings:
         im = Image.new("1", size, 0)
-        ImageDraw.Draw(im).polygon([tuple(p) for p in ring], fill=1)
+        ImageDraw.Draw(im).polygon([(jnum(p, 0), jnum(p, 1)) for p in jarr(ring)], fill=1)
         out ^= np.asarray(im, dtype=bool)
     return out
 
 
-def test_a_ring_round_what_shows_the_slide_is_its_line_closed_under_its_caption(tmp_path):
+def test_a_ring_round_what_shows_the_slide_is_its_line_closed_under_its_caption(tmp_path: Path):
     """cs161-net 13: a green ring round two red rings, their houses and wires, drawn above them, and
     a caption box with green and red words across its rim. What it holds shows the white slide
     wherever nothing under it lies, so its NOT_RENDERED fill is no fill: it is its line, all round.
@@ -1037,40 +1102,40 @@ def test_a_ring_round_what_shows_the_slide_is_its_line_closed_under_its_caption(
     from PIL import Image, ImageDraw
     green, red = (0, 136, 43), (200, 37, 60)
     a = page((230, 158, 170, 4, "#0063c0"),                 # a wire, under the ring
-             (150, 130, 60, 60, "#fde29a"), (172, 165, 14, 25, "#c0604a"))    # a house, under it too
+             (150, 130, 60, 60, "#fde29a"), (172, 165, 14, 25, "#c0604a"), bg=WHITE)    # a house, under it too
     Image.fromarray(a[130:190, 150:210].copy()).save(tmp_path / "house.png")
     img = Image.fromarray(a)
     draw = ImageDraw.Draw(img)
     draw.rounded_rectangle([100, 100, 499, 259], radius=25, outline=green, width=3)
     for x in range(170, 320, 8):                            # the caption's red words, inside the ring
         draw.rectangle([x, 238, x + 1, 248], fill=red)
-    house = {"kind": "image", "role": "figure", "bbox": [150, 130, 210, 190], "file": str(tmp_path / "house.png"),
-             "id": "h", "object": "h", "group": None}
-    wire = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [230, 158, 400, 162],
-            "fill": "#0063c0", "outline": None, "id": "w", "object": "w", "group": None}
-    ring = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [100, 100, 500, 260], "fill": None,
-            "outline": "#00882b", "weight": 3.0, "fill_unread": True, "_not_rendered": True, "id": "r",
-            "object": "r", "group": None}
-    caption = {"kind": "text", "role": "body", "bbox": [160, 232, 340, 290], "id": "t", "object": "t",
-               "paragraphs": [{"runs": [{"text": "local network", "color": "#c8253c"}]},
-                              {"runs": [{"text": "wide area network", "color": "#00882b"}]}]}
+    house: JsonObject = {"kind": "image", "role": "figure", "bbox": [150, 130, 210, 190],
+                         "file": str(tmp_path / "house.png"), "id": "h", "object": "h", "group": None}
+    wire: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [230, 158, 400, 162],
+                        "fill": "#0063c0", "outline": None, "id": "w", "object": "w", "group": None}
+    ring: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [100, 100, 500, 260],
+                        "fill": None, "outline": "#00882b", "weight": 3.0, "fill_unread": True, "_not_rendered": True,
+                        "id": "r", "object": "r", "group": None}
+    caption: JsonObject = {"kind": "text", "role": "body", "bbox": [160, 232, 340, 290], "id": "t", "object": "t",
+                           "paragraphs": [{"runs": [{"text": "local network", "color": "#c8253c"}]},
+                                          {"runs": [{"text": "wide area network", "color": "#00882b"}]}]}
     got = settle([house, wire, ring, caption], np.asarray(img), 1.0, "#ffffff", False, tmp_path)
     r = next(e for e in got if e["id"] == "r")
     assert r["kind"] == "shape" and r.get("trace"), "its line, not a picture of its box"
-    ink = drawn(r["trace"]["rings"])
+    ink = drawn(jarr(r, "trace", "rings"), (720, 405))
     assert ink[256:260, 170:330].any(axis=0).all(), "closed under the caption's box"
     assert ink[100:104, 150:450].any(axis=0).all() and not ink[130:230, 130:470].any(), "a line, holding nothing"
     assert [e["id"] for e in got if e["kind"] == "image"] == ["h"]
 
 
-def test_a_ring_an_opaque_bar_crosses_still_holds_what_it_holds(tmp_path):
+def test_a_ring_an_opaque_bar_crosses_still_holds_what_it_holds(tmp_path: Path):
     """cs161-net 13: a wire drawn above a ring hides it where it crosses, and the trace takes in only
     3 px of what it hides - a pixel's gap left in the ring opened it, and a ring that holds nothing
     is no ring: taken for a line. Round a fill no reading explains, over a picture, the fill was
     lost. The ring goes on under what hides it, and stays the thumbnail's picture."""
     from PIL import Image, ImageDraw
     ramp = np.linspace(0, 1, 400)[None, :, None]
-    a = page()
+    a = page(bg=WHITE)
     a[50:350, 100:500] = np.round((1 - ramp) * [30, 40, 120] + ramp * [120, 30, 60]).astype(np.uint8)
     Image.fromarray(a[50:350, 100:500].copy()).save(tmp_path / "photo.png")
     striped(a, 200, 100, 200, 100, (240, 192, 32), (250, 180, 200))
@@ -1078,49 +1143,50 @@ def test_a_ring_an_opaque_bar_crosses_still_holds_what_it_holds(tmp_path):
     draw = ImageDraw.Draw(img)
     draw.ellipse([200, 100, 399, 199], outline=TEAL, width=2)
     draw.rectangle([380, 145, 419, 154], fill=(68, 68, 68))   # the bar, above the ring
-    under = {"kind": "image", "role": "figure", "bbox": [100, 50, 500, 350], "file": str(tmp_path / "photo.png"),
-             "id": "p", "object": "p", "group": None}
-    ring = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [200, 100, 400, 200], "fill": None,
-            "outline": "#33b7bf", "weight": 2.0, "fill_unread": True, "_not_rendered": True, "id": "r",
-            "object": "r", "group": None}
-    bar = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [380, 145, 420, 155],
-           "fill": "#444444", "outline": None, "id": "b", "object": "b", "group": None}
+    under: JsonObject = {"kind": "image", "role": "figure", "bbox": [100, 50, 500, 350],
+                         "file": str(tmp_path / "photo.png"), "id": "p", "object": "p", "group": None}
+    ring: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [200, 100, 400, 200],
+                        "fill": None, "outline": "#33b7bf", "weight": 2.0, "fill_unread": True, "_not_rendered": True,
+                        "id": "r", "object": "r", "group": None}
+    bar: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "RECTANGLE", "bbox": [380, 145, 420, 155],
+                       "fill": "#444444", "outline": None, "id": "b", "object": "b", "group": None}
     got = settle([under, ring, bar], np.asarray(img), 1.0, None, True, tmp_path)
     r = next(e for e in got if e["id"] == "r")
     assert r["kind"] == "image" and not r.get("trace"), "the ring's picture, not an open line"
 
 
-def test_a_crop_keeps_its_own_outline_where_words_of_another_colour_lie(tmp_path):
+def test_a_crop_keeps_its_own_outline_where_words_of_another_colour_lie(tmp_path: Path):
     """cs161-net 10: a red frame round a box of grey words, its crop taken from the thumbnail. A
     pixel nearer the words' grey than their white ground was taken for a letter and painted out of
     the crop, rims and all, which left the frame with gaps wherever a text box lay on it."""
     from PIL import Image
-    a = page()
+    a = page(bg=WHITE)
     a[100:103, 100:200:4] = 34                           # grey letters
     a[104:106, 90:210] = (200, 30, 50)                   # the frame's rim, across their box, 2 px below
-    words = {"kind": "text", "role": "body", "bbox": [95, 95, 205, 117], "id": "t", "object": "t",
-             "paragraphs": [{"runs": [{"text": "words", "color": "#222222"}]}]}
-    frame = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [80, 60, 220, 140],
-             "outline": "#c81e32", "id": "f", "object": "f", "group": None}
-    pic = deck_fills.thumbnail_picture(a, record(frame), [record(words)], 1.0, None, tmp_path)
+    words: JsonObject = {"kind": "text", "role": "body", "bbox": [95, 95, 205, 117], "id": "t", "object": "t",
+                         "paragraphs": [{"runs": [{"text": "words", "color": "#222222"}]}]}
+    frame: JsonObject = {"kind": "shape", "role": "panel", "shape_type": "CUSTOM", "bbox": [80, 60, 220, 140],
+                         "outline": "#c81e32", "id": "f", "object": "f", "group": None}
+    # as deck_ir hands it the thumbnail: widened to int16 (`deck_fills.load`)
+    pic = deck_fills.thumbnail_picture(a.astype(np.int16), record(frame), [record(words)], 1.0, None, tmp_path)
     assert pic is not None and pic.file is not None
     im = np.asarray(Image.open(pic.file).convert("RGB")).astype(int)
     assert np.abs(im[44:46, 20:120] - (200, 30, 50)).max() <= 1, "the frame is no letter"
     assert np.abs(im[40:43, 20:120:4] - 34).min() > 100, "the letters are painted out"
 
 
-def test_a_presets_outline_is_drawn_above_its_picture(tmp_path):
+def test_a_presets_outline_is_drawn_above_its_picture(tmp_path: Path):
     """A preset whose `{}` fill is a picture keeps its outline, drawn above the thumbnail's picture of
     it: the preset's geometry is known, unlike a freeform's."""
-    a = page()
-    noisy(a, 200, 100, 200, 100, oval=True)
-    pres = deck(outlined(shape("o", "ELLIPSE", 200, 100, 200, 100, UNREAD)))
-    els = deck_ir(pres, foreign=True, thumbnails=lambda n: a, images=tmp_path)["slides"][0]["elements"]
+    a = page(bg=WHITE)
+    noisy(a, 200, 100, 200, 100, 3, True)
+    pres = deck(outlined(shape("o", "ELLIPSE", 200, 100, 200, 100, UNREAD), TEAL, 2.0), bg=WHITE)
+    els = slide_elements(pres, a, tmp_path)
     assert [e["kind"] for e in els] == ["image", "shape"]
     assert els[1]["outline"] == "#33b7bf" and not els[1].get("fill")
 
 
-def test_a_picture_google_shows_round_is_masked_to_its_ellipse(tmp_path):
+def test_a_picture_google_shows_round_is_masked_to_its_ellipse(tmp_path: Path):
     """yc-seed-white slide 10: a .pptx picture with an ellipse geometry comes through the API as a
     plain picture; its thumbnail shows it only inside the ellipse, the page in the corners."""
     from PIL import Image
@@ -1131,8 +1197,8 @@ def test_a_picture_google_shows_round_is_masked_to_its_ellipse(tmp_path):
     Image.fromarray(photo.astype(np.uint8)).save(file)
     src = np.asarray(Image.open(file).convert("RGB"))
 
-    def shown(oval):
-        a = page()
+    def shown(oval: bool) -> str | None:
+        a = page(bg=WHITE)
         patch = a[100:200, 200:300]
         if oval:
             yy, xx = np.mgrid[0:100, 0:100]
@@ -1141,7 +1207,8 @@ def test_a_picture_google_shows_round_is_masked_to_its_ellipse(tmp_path):
         else:
             patch[:] = src
         el = record({"kind": "image", "bbox": [200, 100, 300, 200], "file": str(file), "id": "p"})
-        got, = thumbnail_picture_masks([el], a, 1.0)
+        # as deck_ir hands it the thumbnail: widened to int16 (`deck_fills.load`)
+        got, = thumbnail_picture_masks([el], a.astype(np.int16), 1.0)
         assert isinstance(got, TargetImage)
         return got.mask
 
@@ -1149,7 +1216,7 @@ def test_a_picture_google_shows_round_is_masked_to_its_ellipse(tmp_path):
     assert shown(False) is None, "a picture shown whole is a rectangle"
 
 
-def test_a_see_through_text_box_on_a_photo_takes_no_picture_of_it(tmp_path):
+def test_a_see_through_text_box_on_a_photo_takes_no_picture_of_it(tmp_path: Path):
     """china-pptx 183: a full-width NOT_RENDERED text box over the Qing gate's photo shows the photo
     running on across its edges, so its fill is nothing; baked, it smeared the words' band. The dark
     pines along its edges are nearer the words' black than the sky is, so the seam test must not take
@@ -1161,14 +1228,14 @@ def test_a_see_through_text_box_on_a_photo_takes_no_picture_of_it(tmp_path):
     a[pines] = np.dstack([25 + 15 * wave, 45 + 15 * wave, 25 + 15 * wave])[pines]
     a = a.round().astype(np.uint8)
     a[125:135, 200:520] = 0                                                              # its words
-    words = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [0, 100, 720, 160],
-             "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
-             "paragraphs": [{"runs": [{"text": "European spheres", "color": "#000000"}]}]}
+    words: JsonObject = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [0, 100, 720, 160],
+                         "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
+                         "paragraphs": [{"runs": [{"text": "European spheres", "color": "#000000"}]}]}
     got = settle([dict(words)], a, 1.0, "#ffffff", False, tmp_path)
     assert [e["id"] for e in got] == ["t"], "no `t~fill`"
 
 
-def test_a_text_boxs_fill_picture_leaves_a_picture_under_it_showing(tmp_path):
+def test_a_text_boxs_fill_picture_leaves_a_picture_under_it_showing(tmp_path: Path):
     """china-pptx 138: a page-sized text box whose fill is baked took the portrait beside the poem
     into its picture (its black hat painted out as a letter) and drew that over the portrait. Where
     the thumbnail shows a picture under the box as that picture is, the fill picture is clear."""
@@ -1179,17 +1246,18 @@ def test_a_text_boxs_fill_picture_leaves_a_picture_under_it_showing(tmp_path):
     file = tmp_path / "portrait.png"
     Image.fromarray(photo).save(file)
     rng = np.random.default_rng(2)
-    a = page()
+    a = page(bg=WHITE)
     a[90:310, 90:310] = rng.integers(0, 256, (220, 220, 3))                        # its panel, edge to edge
     a[150:160, 120:200] = 0                                                            # the poem
     a[200:280, 210:290] = photo
-    portrait = {"kind": "image", "bbox": [210, 200, 290, 280], "file": str(file), "id": "p", "object": "p"}
-    poem = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [90, 90, 310, 310],
-            "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
-            "paragraphs": [{"runs": [{"text": "A cup of wine", "color": "#000000"}]}]}
+    portrait: JsonObject = {"kind": "image", "bbox": [210, 200, 290, 280], "file": str(file), "id": "p",
+                            "object": "p"}
+    poem: JsonObject = {"kind": "text", "role": "body", "shape_type": "TEXT_BOX", "bbox": [90, 90, 310, 310],
+                        "fill": None, "outline": None, "fill_unread": True, "id": "t", "object": "t", "group": None,
+                        "paragraphs": [{"runs": [{"text": "A cup of wine", "color": "#000000"}]}]}
     got = settle([dict(portrait), dict(poem)], a, 1.0, "#ffffff", False, tmp_path)
     pic = next(e for e in got if e["id"] == "t~fill")
-    im = np.asarray(Image.open(pic["file"]))
+    im = np.asarray(Image.open(jstr(pic, "file")))
     assert (im[110:190, 120:200, 3] == 0).mean() > 0.95, "the portrait shows through"
     assert (im[117:128, 142:178, 3] == 0).all(), "the hat too, not painted out as a letter"
     assert (im[20:40, 20:100, 3] == 255).all(), "the rest is the fill"

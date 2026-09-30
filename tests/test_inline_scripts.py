@@ -4,7 +4,8 @@ own degree sign and asterisk, and where the word space after smaller words goes.
 
 from beamer2slides.classify import Rect, Span, classify_page
 from beamer2slides.fonts import font_info
-from beamer2slides.ir import Run
+from beamer2slides.ir import Run, Script
+from beamer2slides.raw_types import RawSpan
 
 W, H = 362.83, 272.13
 FONT = "LMSans10-Regular"
@@ -25,7 +26,7 @@ def after(s: Span, text: str, rise: float = 0.0, size: float = 11.0, gap: float 
 
 
 def runs(spans: list[Span]) -> list[Run]:
-    raw = [{"id": f"p0s{i}", "text": s.text, "font": s.font, "size": s.size, "color": s.color, "alpha": 255,
+    raw: list[RawSpan] = [{"id": f"p0s{i}", "text": s.text, "font": s.font, "size": s.size, "color": s.color, "alpha": 255,
             "origin": [s.rect.x0, s.baseline], "bbox": s.rect.as_list(), "dir": [1.0, 0.0], "smallcaps": False}
            for i, s in enumerate(spans)]
     slide = classify_page({"index": 0, "label": "1", "size": [W, H], "spans": raw, "images": [], "drawings": [],
@@ -36,7 +37,7 @@ def runs(spans: list[Span]) -> list[Run]:
     return par["runs"]
 
 
-def plain(rs: list[Run]) -> list[tuple]:
+def plain(rs: list[Run]) -> list[tuple[str, Script | None, float]]:
     return [(r["text"], r["script"], r["size"]) for r in rs]
 
 

@@ -3,19 +3,38 @@ where a paragraph ends, how words are spaced, justified text and \\hfill pieces.
 
 from functools import lru_cache
 
-from .test_classify import deck, paragraph_text, texts
+import pytest
+
+from beamer2slides.classify import classify
+from beamer2slides.extract import extract, select_overlays
+from beamer2slides.ir import Deck, Paragraph, Slide, TextElement, element_json
+
+from .json_reads import jnum, jobj
+from .test_classify import DECKS
 
 
 @lru_cache(maxsize=None)
-def lines_deck() -> dict:
-    return deck("28_line_breaks")
+def lines_deck() -> Deck:
+    """The handout deck as classify gives it (`test_classify.deck`, read here as ir's records)."""
+    pdf = DECKS / "28_line_breaks-handout.pdf"
+    if not pdf.exists():
+        pytest.skip(f"{pdf.name} not built")
+    return classify(select_overlays(extract(pdf, None), "last"))
 
 
-def paras(slide: int) -> list[dict]:
+def texts(slide: Slide) -> list[TextElement]:
+    return [e for e in slide["elements"] if e["kind"] == "text"]
+
+
+def paragraph_text(p: Paragraph) -> str:
+    return "".join(r["text"] for r in p["runs"])
+
+
+def paras(slide: int) -> list[Paragraph]:
     return [p for e in texts(lines_deck()["slides"][slide]) for p in e["paragraphs"]]
 
 
-def para(slide: int, start: str) -> dict:
+def para(slide: int, start: str) -> Paragraph:
     return next(p for p in paras(slide) if paragraph_text(p).startswith(start))
 
 
@@ -30,7 +49,7 @@ def test_hfill_attribution_is_its_own_line_not_a_label():
     quote = para(1, "“Upzoning")
     assert paragraph_text(quote).endswith("renters.”")
     attribution = para(1, "— Op-ed")
-    assert "\t" not in paragraph_text(attribution) and attribution["tab_x0"] is None
+    assert "\t" not in paragraph_text(attribution) and "tab_x0" in attribution and attribution["tab_x0"] is None
 
 
 def test_quotation_is_justified_and_its_indented_first_line_joins():
@@ -38,14 +57,14 @@ def test_quotation_is_justified_and_its_indented_first_line_joins():
     justified lines are one paragraph, marked justified."""
     p = para(1, "Local opposition")
     assert paragraph_text(p).endswith("construction costs (13%).") and len(p["lines"]) == 3
-    assert p["justified"] and p["lines"][0]["x0"] > p["text_x0"] + 0.2 * p["size"]
+    assert p.get("justified") and p["lines"][0]["x0"] > p["text_x0"] + 0.2 * p["size"]
 
 
 def test_justified_parbox_columns():
     """Two \\parbox columns side by side: lines ending together with stretched word spaces."""
     for start in ("Streams differ", "Randomise"):
         p = para(2, start)
-        assert p["justified"] and len(p["lines"]) == 4, start
+        assert p.get("justified") and len(p["lines"]) == 4, start
     assert not para(2, "Limitations").get("justified"), "a one-line heading is not justified"
 
 
@@ -53,11 +72,11 @@ def test_justified_paragraph_is_written_justified_with_its_first_line_indent():
     from beamer2slides.emit import FontMapper, text_box_requests
 
     el = next(e for e in texts(lines_deck()["slides"][1]) if paragraph_text(e["paragraphs"][0]).startswith("Local"))
-    reqs = text_box_requests(el, "s", "b", 1.5, FontMapper())
-    styles = [r["updateParagraphStyle"]["style"] for r in reqs if "updateParagraphStyle" in r]
+    reqs = text_box_requests(element_json(el), "s", "b", 1.5, FontMapper())
+    styles = [jobj(r, "updateParagraphStyle", "style") for r in reqs if "updateParagraphStyle" in r]
     assert any(s.get("alignment") == "JUSTIFIED" for s in styles)
-    firsts = [s["indentFirstLine"]["magnitude"] for s in styles if "indentFirstLine" in s]
-    starts = [s["indentStart"]["magnitude"] for s in styles if "indentStart" in s]
+    firsts = [jnum(s, "indentFirstLine", "magnitude") for s in styles if "indentFirstLine" in s]
+    starts = [jnum(s, "indentStart", "magnitude") for s in styles if "indentStart" in s]
     assert firsts and starts and firsts[0] - starts[0] > 3, "the \\parindent is the first line's indent"
 
 
@@ -124,7 +143,7 @@ def test_a_word_set_in_two_spans_is_one_word_when_it_would_end_the_line_above():
 
 def test_nested_numbers_are_labels_like_their_parents():
     """\\item[2.1] under an enumerate item: its label and text are a tab apart like 1. and 2."""
-    got = [paragraph_text(p) for p in paras(5) if p["tab_x0"]]
+    got = [paragraph_text(p) for p in paras(5) if p.get("tab_x0")]
     assert "2.1\tClean the survey answers" in got and "2.2\tMerge the two waves" in got
 
 
@@ -134,4 +153,4 @@ def test_quote_on_an_untitled_frame_is_no_title():
     slide = lines_deck()["slides"][6]
     assert not [e for e in texts(slide) if e["role"] == "title"]
     attribution = para(6, "— a teaching")
-    assert attribution["tab_x0"] is None
+    assert "tab_x0" in attribution and attribution["tab_x0"] is None

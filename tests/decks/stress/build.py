@@ -17,37 +17,47 @@ combining most of them.
 Usage: python tests/decks/stress/build.py [variant ...]    (default: all) -> out/<variant>.pdf
 """
 
-import importlib.util
+import json
 import re
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
+
+if not __package__:  # run as a script (the usage above): imported as the package module it is
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+    __package__ = "tests.decks.stress"
+
+from beamer2slides.json_types import JsonObject, as_object, as_objects  # noqa: E402
+
+from ..sync import build as sync_build  # noqa: E402
+from ..sync.build import Summary  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "out"
 FIGURES = OUT / "figures"
 MASTER = HERE / "talk.tex"
 ENGINE = "lualatex"  # fontspec: the unicode frames load Cambria Math, YaHei, Segoe UI Emoji
-
-_spec = importlib.util.spec_from_file_location("sync_build", HERE.parent / "sync" / "build.py")
-sync_build = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(sync_build)
+RUNS = 3  # at most this many lualatex passes (`compile_tex`)
 
 GUARD = sync_build.GUARD
 
+Frame = tuple[str, str | None, str | None]
+"""(name, label, title) of a frame: the name is its v1 label (else #index in v1)."""
 
-def summary(folder: Path) -> list[dict]:
+
+def summary(folder: Path) -> list[Summary]:
     """What a classified folder says per slide: title, texts, pictures, notes (sync/build.py),
     with each picture's box size added - two `\\includegraphics` of different files hold no
     drawings and no spans, so nothing else tells them apart."""
-    import json
-    slides = sync_build.summary(folder)
-    deck = json.loads((folder / "deck.json").read_text(encoding="utf-8"))
-    for s, ir in zip(slides, deck["slides"]):
-        sizes = [f"{round(e['bbox'][2] - e['bbox'][0])}x{round(e['bbox'][3] - e['bbox'][1])}"
-                 for e in ir["elements"] if e["kind"] == "image"]
-        s["pictures"] = [f"{p}@{z}" for p, z in zip(s["pictures"], sizes)]
-    return slides
+    deck = as_object(json.loads((folder / "deck.json").read_text(encoding="utf-8")), "deck.json")
+    out: list[Summary] = []
+    for n, (s, ir) in enumerate(zip(sync_build.summary(folder), as_objects(deck["slides"], "deck.json.slides"))):
+        boxes = [sync_build.numbers(e["bbox"], f"slides[{n}].elements.bbox")
+                 for e in as_objects(ir["elements"], f"slides[{n}].elements") if e["kind"] == "image"]
+        sizes = [f"{round(b[2] - b[0])}x{round(b[3] - b[1])}" for b in boxes]
+        out.append(replace(s, pictures=tuple(f"{p}@{z}" for p, z in zip(s.pictures, sizes))))
+    return out
 
 FLAGS = {
     "swaptwins": "swap the two frames that differ by one word",
@@ -92,16 +102,16 @@ VARIANTS = {"v1": [], **{f: [f] for f in FLAGS}, "kitchen": KITCHEN,
 # ---------------------------------------------------------------- the frames of v1
 
 # The twenty-row table was a picture; since the table work of 2026-09-24 it is a native table.
-TWENTY = {"contains": "Twenty rows, one verdict"}
-REPEAT = {"contains": "Geometry"}
-TWINPICS = {"contains": "The same file twice"}
-NOTES_A = {"contains": "A slide whose speaker notes are shared"}
-NOLABEL = {"contains": "no label at all"}       # the frame `recast` retitles and half rewrites
-BLOCKCOL = {"contains": "A block that lives in a column"}
-AGENDA = {"contains": "Characters that break naive indexing"}
-SUMMARY = {"contains": "Labels decide identity"}
+TWENTY: JsonObject = {"contains": "Twenty rows, one verdict"}
+REPEAT: JsonObject = {"contains": "Geometry"}
+TWINPICS: JsonObject = {"contains": "The same file twice"}
+NOTES_A: JsonObject = {"contains": "A slide whose speaker notes are shared"}
+NOLABEL: JsonObject = {"contains": "no label at all"}       # the frame `recast` retitles and half rewrites
+BLOCKCOL: JsonObject = {"contains": "A block that lives in a column"}
+AGENDA: JsonObject = {"contains": "Characters that break naive indexing"}
+SUMMARY: JsonObject = {"contains": "Labels decide identity"}
 
-FRAMES = [  # (label in v1, title in v1); None = an untitled frame
+FRAMES: list[tuple[str | None, str | None]] = [  # (label in v1, title in v1); None = an untitled frame
     ("title", "A Deck Built to Break the Merge"),
     ("agenda", "Agenda"),
     ("twin-a", "Twin slides"),
@@ -151,11 +161,11 @@ FRAMES = [  # (label in v1, title in v1); None = an untitled frame
     ("backup", "Backup material"),
     ("summary", "Takeaways"),
 ]
-V1 = [(lab or f"#{i}", lab, t) for i, (lab, t) in enumerate(FRAMES)]  # (name, label, title)
-INSERTED = ("between", "between", "Inserted between the twins")
+V1: list[Frame] = [(lab or f"#{i}", lab, t) for i, (lab, t) in enumerate(FRAMES)]  # (name, label, title)
+INSERTED: Frame = ("between", "between", "Inserted between the twins")
 
 
-def frames(flags: list[str]) -> list[tuple[str, str | None, str | None]]:
+def frames(flags: list[str]) -> list[Frame]:
     """(name, label, title) of every frame of the variant, in order. The name is the frame's v1
     label (else #index in v1): what `classification_diff` calls it, whatever the variant does."""
     out = list(V1)
@@ -195,7 +205,7 @@ def names(flags: list[str]) -> list[str]:
 
 # ---------------------------------------------------------------- what a synced deck must show
 
-CHECKS = {
+CHECKS: dict[str, list[JsonObject]] = {
     "swaptwins": [],      # an order change only (titles())
     "movelabel": [],      # identity only: nothing visible changes
     "duplabel": [],       # same: the deck looks identical, the report does not
@@ -236,7 +246,7 @@ CHECKS = {
 }
 
 
-def checks(flags: list[str]) -> list[dict]:
+def checks(flags: list[str]) -> list[JsonObject]:
     """What a deck synced to this source must show (source side only)."""
     return [c for f in flags for c in CHECKS[f]]
 
@@ -247,7 +257,7 @@ BACKUP_BULLETS = [("Timings are measured on the stress deck itself", "Every timi
                   ("Nothing here is shown in the talk", "None of it is shown while the talk is running"),
                   ("The numbers are rounded to whole seconds", "Seconds are rounded, milliseconds are dropped")]
 
-INTENDED = {  # classification_diff(v1, variant) items per flag
+INTENDED: dict[str, list[str]] = {  # classification_diff(v1, variant) items per flag
     "swaptwins": ["order twin-b / twin-a"],
     "insertframe": ["slide+ between"],
     "movelabel": [],
@@ -264,8 +274,7 @@ INTENDED = {  # classification_diff(v1, variant) items per flag
                       [f"backup: text+ {new}" for _, new in BACKUP_BULLETS],
     "rewriteblock": ["blockcol: text- Rule", "blockcol: text- Deck edits win, and the source is told so in the report.",
                      "blockcol: text+ Rule, restated", "blockcol: text+ The deck always wins, and the report explains why."],
-    "everyrow": ["bigtable: pictures 1 -> 1 changed"] +
-                [f"repeatcells: text- {v}" for v in []] + ["repeatcells: text+ moved"],
+    "everyrow": ["bigtable: pictures 1 -> 1 changed", "repeatcells: text+ moved"],
     "swappicture": ["twinpics: pictures 2 -> 2 changed"],
     "notesedit": ["notes-a: notes -> Slow right down here; give the audience a moment to catch up."],
     "recast": ["#27: title -> The third table of numbers",
@@ -296,8 +305,7 @@ def intended_diff(flags: list[str]) -> set[str]:
 
 # ---------------------------------------------------------------- classification diff
 
-def classification_diff(a: list[dict], b: list[dict], a_names: list[str] | None = None,
-                        b_names: list[str] | None = None) -> list[str]:
+def classification_diff(a: list[Summary], b: list[Summary], a_names: list[str], b_names: list[str]) -> list[str]:
     """Differences from summary `a` to summary `b`, slides named by their frame label.
 
     Like the sync deck's, but titles repeat and some frames have none here, so slides are named
@@ -306,21 +314,22 @@ def classification_diff(a: list[dict], b: list[dict], a_names: list[str] | None 
     a_names = a_names or [f"#{i}" for i in range(len(a))]
     b_names = b_names or [f"#{i}" for i in range(len(b))]
 
-    def sim(x, y):
-        wx, wy = set(" ".join(x["texts"]).split()), set(" ".join(y["texts"]).split())
+    def sim(x: Summary, y: Summary) -> float:
+        wx, wy = set(" ".join(x.texts).split()), set(" ".join(y.texts).split())
         if not wx and not wy:
-            return 1.0 if x["title"] == y["title"] else 0.0
+            return 1.0 if x.title == y.title else 0.0
         # The notes carry most of the weight: a frame whose every bullet is rewritten still has
         # them, while titles and words repeat all over this deck.
-        return (len(wx & wy) / max(1, len(wx | wy)) + 0.05 * (x["title"] == y["title"])
-                + 0.4 * bool(x["notes"] and x["notes"] == y["notes"]))
+        return (len(wx & wy) / max(1, len(wx | wy)) + 0.05 * (x.title == y.title)
+                + 0.4 * bool(x.notes and x.notes == y.notes))
 
     match: dict[int, int] = {}
     pairs = sorted(((sim(x, y), i, j) for i, x in enumerate(a) for j, y in enumerate(b)), reverse=True)
     taken: set[int] = set()
     for s, i, j in pairs:
         if s > 0.5 and i not in match and j not in taken:
-            match[i], _ = j, taken.add(j)
+            match[i] = j
+            taken.add(j)
     out = [f"slide- {a_names[i]}" for i in range(len(a)) if i not in match]
     out += [f"slide+ {b_names[j]}" for j in range(len(b)) if j not in taken]
     kept = sorted(match)
@@ -328,14 +337,14 @@ def classification_diff(a: list[dict], b: list[dict], a_names: list[str] | None 
         out.append("order " + " / ".join(b_names[j] for j in sorted(match.values())))
     for i in kept:
         x, y, name = a[i], b[match[i]], a_names[i]
-        if x["title"] != y["title"]:
-            out.append(f"{name}: title -> {y['title']}")
-        out += [f"{name}: text- {t}" for t in x["texts"] if t not in y["texts"]]
-        out += [f"{name}: text+ {t}" for t in y["texts"] if t not in x["texts"]]
-        if sorted(x["pictures"]) != sorted(y["pictures"]):
-            out.append(f"{name}: pictures {len(x['pictures'])} -> {len(y['pictures'])} changed")
-        if x["notes"] != y["notes"]:
-            out.append(f"{name}: notes -> {y['notes']}")
+        if x.title != y.title:
+            out.append(f"{name}: title -> {y.title}")
+        out += [f"{name}: text- {t}" for t in x.texts if t not in y.texts]
+        out += [f"{name}: text+ {t}" for t in y.texts if t not in x.texts]
+        if sorted(x.pictures) != sorted(y.pictures):
+            out.append(f"{name}: pictures {len(x.pictures)} -> {len(y.pictures)} changed")
+        if x.notes != y.notes:
+            out.append(f"{name}: notes -> {y.notes}")
     return out
 
 
@@ -351,7 +360,8 @@ def _reorder_frames(lines: list[str], first_label: str, count: int) -> list[str]
     Ten frames swapped around is a source change no guard can express readably (it would mean a
     second copy of every one of them), so it is a transformation of the rendered file instead.
     """
-    spans, i = [], 0
+    spans: list[tuple[int, int]] = []
+    i = 0
     while i < len(lines):
         if FRAME_START.match(lines[i]):
             j = i
@@ -372,14 +382,15 @@ def _reorder_frames(lines: list[str], first_label: str, count: int) -> list[str]
     return out
 
 
-def render(flags: list[str], master: Path = MASTER) -> str:
+def render(flags: list[str]) -> str:
     """talk.tex with the guards resolved for these flags."""
     unknown = set(flags) - set(FLAGS)
     if unknown:
         raise ValueError(f"unknown flags {sorted(unknown)}")
-    lines = master.read_text(encoding="utf-8").splitlines()
+    lines = MASTER.read_text(encoding="utf-8").splitlines()
     start = next(i for i, l in enumerate(lines) if "\\documentclass" in l)
-    out, blocks = [], []  # blocks: (guard, included)
+    out: list[str] = []
+    blocks: list[tuple[str, bool]] = []  # (guard, included)
     for line in lines[start:]:
         m = GUARD.match(line)
         if not m:
@@ -406,7 +417,7 @@ def render(flags: list[str], master: Path = MASTER) -> str:
 
 # ---------------------------------------------------------------- pictures
 
-def write_figures(folder: Path = FIGURES) -> None:
+def write_figures(folder: Path) -> None:
     """The pictures the talk includes: one used twice on a slide and again on another, one that
     replaces it in a variant, and one full-page background. Written once, byte for byte the same."""
     from PIL import Image, ImageDraw
@@ -425,6 +436,8 @@ def write_figures(folder: Path = FIGURES) -> None:
     if not (folder / "wide.png").exists():
         img = Image.new("RGB", (960, 540))
         px = img.load()
+        if px is None:
+            raise RuntimeError("PIL gave no pixel access to a new image")
         for y in range(540):
             for x in range(0, 960, 8):
                 c = (200 - y // 6, 210 - y // 8, 240)
@@ -435,10 +448,10 @@ def write_figures(folder: Path = FIGURES) -> None:
 
 # ---------------------------------------------------------------- compiling
 
-def compile_tex(tex: Path, runs: int = 3) -> Path:
-    """lualatex with SyncTeX in the file's folder; the PDF."""
+def compile_tex(tex: Path) -> Path:
+    """lualatex with SyncTeX in the file's folder (until it asks for no rerun, `RUNS` passes at most); the PDF."""
     cmd = [ENGINE, "-interaction=nonstopmode", "-halt-on-error", "-synctex=1", tex.name]
-    for _ in range(runs):
+    for _ in range(RUNS):
         done = subprocess.run(cmd, cwd=tex.parent, capture_output=True, text=True, errors="replace")
         if done.returncode:
             log = tex.with_suffix(".log")
@@ -449,10 +462,10 @@ def compile_tex(tex: Path, runs: int = 3) -> Path:
     return tex.with_suffix(".pdf")
 
 
-def build(variant: str, force: bool = False) -> Path:
-    """out/<variant>.pdf, compiled again only when talk.tex changed since."""
+def compiled(variant: str, *, force: bool) -> Path:
+    """out/<variant>.pdf, compiled again when `force` or when talk.tex changed since."""
     OUT.mkdir(exist_ok=True)
-    write_figures()
+    write_figures(FIGURES)
     tex, pdf = OUT / f"{variant}.tex", OUT / f"{variant}.pdf"
     text = render(VARIANTS[variant])
     if not force and pdf.exists() and tex.exists() and tex.read_text(encoding="utf-8") == text:
@@ -461,11 +474,16 @@ def build(variant: str, force: bool = False) -> Path:
     return compile_tex(tex)
 
 
+def build(variant: str) -> Path:
+    """out/<variant>.pdf, compiled again only when talk.tex changed since."""
+    return compiled(variant, force=False)
+
+
 def main(names_: list[str]) -> int:
     failed = 0
     for name in names_ or VARIANTS:
         try:
-            print(f"OK   {build(name, force=True).name}")
+            print(f"OK   {compiled(name, force=True).name}")
         except (RuntimeError, KeyError, ValueError) as e:
             failed += 1
             print(f"FAIL {name}: {e}")

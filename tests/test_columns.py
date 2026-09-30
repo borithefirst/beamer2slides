@@ -3,8 +3,9 @@ subtitle touching a heading), which lines continue a paragraph (a column below i
 how a lone line is aligned, and how Chinese or Japanese lines are joined and wrapped."""
 
 from beamer2slides import ir
-from beamer2slides.classify import PageClassifier, Rect, Span, classify_page, first_word_width
+from beamer2slides.classify import Line, PageClassifier, Rect, Span, classify_page, first_word_width
 from beamer2slides.fonts import font_info
+from beamer2slides.raw_types import RawPage, RawSpan
 
 W, H = 362.83, 272.13
 FONT = "LMSans10-Regular"
@@ -19,12 +20,12 @@ def span(text: str, x0: float, baseline: float, size: float = 11.0, w: float | N
                 baseline=baseline, horizontal=True, info=font_info(font))
 
 
-def raw(s: Span) -> dict:
+def raw(s: Span) -> RawSpan:
     return {"id": s.id, "text": s.text, "font": s.font, "size": s.size, "color": s.color, "alpha": 255,
             "origin": [s.rect.x0, s.baseline], "bbox": s.rect.as_list(), "dir": [1.0, 0.0], "smallcaps": False}
 
 
-def page(spans: list[Span]) -> dict:
+def page(spans: list[Span]) -> RawPage:
     for i, s in enumerate(spans):
         s.id = f"p0s{i}"
     return {"index": 0, "label": "1", "size": [W, H], "spans": [raw(s) for s in spans], "images": [],
@@ -36,7 +37,7 @@ def paragraphs(spans: list[Span], body: float = 11.0) -> list[ir.Paragraph]:
     return [p for el in slide["elements"] if el["kind"] == "text" for p in el["paragraphs"]]
 
 
-def build_lines(spans: list[Span]):
+def build_lines(spans: list[Span]) -> list[Line]:
     return PageClassifier(page(spans), 11.0).build_lines(spans)
 
 

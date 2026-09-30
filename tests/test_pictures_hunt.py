@@ -1,14 +1,19 @@
 """Visual hunt, fixer W: pictures, overlays and math pictures against the native text around
 them - on synthetic pages."""
 
+from pathlib import Path
+
 import numpy as np
 from PIL import Image
 
-from beamer2slides import pdf
+from beamer2slides import ir, pdf
+from beamer2slides.arrays import Ints, Mask
 from beamer2slides.extract import extract_page
 from beamer2slides.json_types import Json, JsonObject, as_array, as_str
+from beamer2slides.raw_types import RawDoc, RawSpan
 from beamer2slides.render import render_backgrounds
 
+from .test_charts_diagrams import Page, images, run_texts, text_elements
 from .test_hidden_text import one_page
 
 
@@ -17,18 +22,17 @@ def num_list(value: Json) -> list[float]:
     return [float(v) for v in as_array(value, "numbers") if isinstance(v, (int, float))]
 
 
-def raw_of(path) -> dict:
-    raw = {"version": 1, "source": {"pdf": str(path), "producer": "", "pages": 1, "title": ""}, "pages": []}
+def raw_of(path: Path) -> RawDoc:
     doc = pdf.Document(path)
     try:
-        raw["pages"] = [extract_page(doc[0], "1")]
-        raw["pages"][0]["frame_label"] = None
+        page = extract_page(doc[0], "1")
+        page["frame_label"] = None
     finally:
         doc.close()
-    return raw
+    return {"version": 1, "source": {"pdf": str(path), "producer": "", "pages": 1, "title": ""}, "pages": [page]}
 
 
-def test_a_formula_glyph_hanging_into_the_line_above_stays_in_its_picture(tmp_path):
+def test_a_formula_glyph_hanging_into_the_line_above_stays_in_its_picture(tmp_path: Path) -> None:
     """r1_math_v1 s8: `d - 2\\sqrt{d-1}` on the second line of an item, the first line native.
     CMSY's radical hangs from an origin an em above its formula's baseline, so its glyph box lies
     in the first line's x-height band: the native words' band switched it off before the
@@ -63,7 +67,7 @@ def test_a_formula_glyph_hanging_into_the_line_above_stays_in_its_picture(tmp_pa
     assert above.sum() > 20  # the sign's top is in the picture
 
 
-def test_a_logo_wordmark_set_tight_above_a_native_line_stays_in_its_overlay(tmp_path):
+def test_a_logo_wordmark_set_tight_above_a_native_line_stays_in_its_overlay(tmp_path: Path) -> None:
     """r3_univ_v3 s10: the 'ICR' wordmark of a TikZ logo, with 'Institute for Coastal Research'
     in 6 pt just under it (native). The wordmark's font box reaches the small line's x-height band,
     so it went with the native words before the overlay's crop was taken: the logo came without
@@ -115,7 +119,7 @@ def test_an_ultra_thick_arrow_reaches_the_node_its_head_touches():
     assert abs(blue["to"][0] - 201.88) < 0.1  # where the black edge ends, at the node
 
 
-def uline(p, text: str, x0: float, baseline: float, size: float = 10.91) -> None:
+def uline(p: Page, text: str, x0: float, baseline: float, size: float) -> None:
     """Words underlined as ulem's \\uline draws them: a rule under each word and each space,
     overlapping end to end."""
     from .test_charts_diagrams import lines
@@ -138,18 +142,18 @@ def test_a_long_uline_wrapped_over_two_lines_is_an_underline():
     from .test_charts_diagrams import Page, deck
 
     p = Page()
-    uline(p, "Please add the sample size and the confidence interval to every chart", 30, 150)
-    uline(p, "results section", 30, 165.5)
+    uline(p, "Please add the sample size and the confidence interval to every chart", 30, 150, 10.91)
+    uline(p, "results section", 30, 165.5, 10.91)
     p.words("as requested in the first round.", 120, 165.5)
     p.words("Body text that sets the size of the deck", 30, 225)
     slide = deck(p)["slides"][0]
     assert not slide["left_in_background"] and all(e["kind"] == "text" for e in slide["elements"])
-    runs = [r for e in slide["elements"] for par in e["paragraphs"] for r in par["runs"]]
-    underlined = "".join(r["text"] for r in runs if r["underline"])
+    runs = [r for e in text_elements(slide["elements"]) for par in e["paragraphs"] for r in par["runs"]]
+    underlined = "".join(r["text"] for r in runs if r.get("underline"))
     assert underlined.split() == "Please add the sample size and the confidence interval to every chart results section".split()
 
 
-def test_words_a_thin_picture_grazes_stay_in_the_background(tmp_path):
+def test_words_a_thin_picture_grazes_stay_in_the_background(tmp_path: Path) -> None:
     """A figure only a rule tall under words left in the background (r3_textfx_v3 s4, one
     underline piece): the words' font boxes reach into the figure's box by their descent, so they
     went off the background with it while the crop showed only the rule."""
@@ -192,14 +196,16 @@ def test_symbols_tex_builds_from_overlapped_pieces_are_one_character():
     p.text("−−→", x + 3, 100, font="CMSY10", w=21.8)
     p.words("iodide and water.", x + 28, 100)
     body_text(p)
-    runs = lambda e: "".join(r["text"] for par in e["paragraphs"] for r in par["runs"])
+    def runs(e: ir.TextElement) -> str:
+        return "".join(r["text"] for par in e["paragraphs"] for r in par["runs"])
+
     elements = deck(p)["slides"][0]["elements"]
-    text = " / ".join(runs(e) for e in elements if e["kind"] == "text")
+    text = " / ".join(runs(e) for e in text_elements(elements))
     assert "L ≅ M" in text
     # (a long arrow is no glyph at all: Slides draws ⟶ and ⟹ short, so it is a formula hole,
     # tests/test_math_arrows.py - never the pieces set apart)
     assert "=⇒" not in text and "−−→" not in text and "⟹" not in text and "⟶" not in text
-    assert sum(e["kind"] == "image" and e.get("anchor") is not None for e in elements) == 2
+    assert sum(e.get("anchor") is not None for e in images(elements)) == 2
 
 
 def test_an_accent_over_a_greek_letter_is_a_formula_hole():
@@ -217,9 +223,9 @@ def test_an_accent_over_a_greek_letter_is_a_formula_hole():
     p.words("are the residualised controls of the model", 60.5, 80)
     body_text(p)
     slide = deck(p)["slides"][0]
-    holes = [e for e in slide["elements"] if e["kind"] == "image" and e.get("anchor")]
+    holes = [e for e in images(slide["elements"]) if e.get("anchor")]
     assert len(holes) == 1 and holes[0]["bbox"][1] < 60 < holes[0]["bbox"][3]
-    runs = [r for e in slide["elements"] if e["kind"] == "text" for par in e["paragraphs"] for r in par["runs"]]
+    runs = [r for e in text_elements(slide["elements"]) for par in e["paragraphs"] for r in par["runs"]]
     assert not any("β" in r["text"] for r in runs) and any("X̃" in r["text"] for r in runs)
 
 
@@ -276,8 +282,7 @@ def test_a_line_opening_with_an_icon_stays_text():
     body_text(p)
     slide = deck(p)["slides"][0]
     assert not any(e.get("role") == "math" for e in slide["elements"])
-    texts = [" ".join("".join(r["text"] for r in par["runs"]) for par in e["paragraphs"])
-             for e in slide["elements"] if e["kind"] == "text"]
+    texts = [" ".join(run_texts(par["runs"]) for par in e["paragraphs"]) for e in text_elements(slide["elements"])]
     assert "Next update: 12 January 2027" in texts
 
 
@@ -303,14 +308,13 @@ def test_an_items_formula_wrapped_onto_its_own_line_stays_in_the_item():
     p.text("n))", x + 8.6, 153.2, font="LMSans10-Oblique", w=13)
     body_text(p)
     slide = deck(p)["slides"][0]
-    assert not any(e.get("role") == "math" and not e.get("anchor") for e in slide["elements"])
-    text = " / ".join("".join(r["text"] for r in par["runs"]) for e in slide["elements"] if e["kind"] == "text"
-                      for par in e["paragraphs"])
+    assert not any(e["role"] == "math" and not e.get("anchor") for e in images(slide["elements"]))  # (math: a picture)
+    text = " / ".join(run_texts(par["runs"]) for e in text_elements(slide["elements"]) for par in e["paragraphs"])
     # (TeX's 0.28 em space around = is narrower than a word space: thin_span may keep it no-break)
     assert "now C = 1.0" in text.replace("\xa0", " ") and "Separator theorems" in text
 
 
-def pie_beside_a_list():
+def pie_beside_a_list() -> tuple[Page, RawSpan]:
     """r3_charts_v3 s8, as the page has it: a pgf-pie whose 'Agriculture' pin label ends 8 pt short
     of a ball-bullet list, on the baseline of the list's fourth line."""
     from .test_charts_diagrams import Page, lines
@@ -348,15 +352,14 @@ def test_a_pie_label_beside_a_list_is_the_pies_not_the_lines():
 
     p, label = pie_beside_a_list()
     slide = deck(p)["slides"][0]
-    lines = [" ".join("".join(r["text"] for r in par["runs"]).split()) for e in slide["elements"] if e["kind"] == "text"
-             for par in e["paragraphs"]]
+    lines = [" ".join(run_texts(par["runs"]).split()) for e in text_elements(slide["elements"]) for par in e["paragraphs"]]
     assert not any("Agriculture" in ln for ln in lines)
     assert any("EVs reached 38% of new sales" in ln for ln in lines)
-    (pie,) = [e for e in slide["elements"] if e["kind"] == "image"]
+    (pie,) = images(slide["elements"])
     assert label["id"] in pie["spans"] and pie["bbox"][2] >= label["bbox"][2]
 
 
-def test_a_figure_crop_leaves_out_the_ball_bullets_its_box_reaches(tmp_path):
+def test_a_figure_crop_leaves_out_the_ball_bullets_its_box_reaches(tmp_path: Path) -> None:
     """r3_charts_v3 s8: the pie's box ends past its pin label, over the edge of the list's ball
     bullets: the crop showed slivers of the balls beside the Slides bullets."""
     path = tmp_path / "bullets.pdf"
@@ -385,7 +388,7 @@ def test_a_figure_crop_leaves_out_the_ball_bullets_its_box_reaches(tmp_path):
     assert not ball.any()  # no piece of the ball
 
 
-def ink(path) -> np.ndarray:
+def ink(path: Path) -> Mask:
     """Dark opaque pixels of a picture (an anchored one has a transparent ground)."""
-    px = np.array(Image.open(path).convert("RGBA")).astype(int)
+    px: Ints = np.array(Image.open(path).convert("RGBA")).astype(np.int64)
     return (px[..., 3] > 128) & (px[..., :3].min(axis=2) < 100)

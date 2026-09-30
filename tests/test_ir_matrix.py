@@ -69,10 +69,12 @@ Runs in about 25 s at -n 4 on an idle machine, 45 s on a loaded one (the showcas
 .pptx builds dominate; each case is one xdist group so its compile and conversion are made once).
 """
 
-from collections import namedtuple
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from _pytest.mark import ParameterSet
 
 from . import ir_sources as src
 
@@ -93,8 +95,35 @@ CONSUMERS = {
     "adopt_read": src.adopt_read,
 }
 
-# make(case, home, get): get(producer, case) is another producer's (cached) Made.
-Producer = namedtuple("Producer", "make cases consumers")
+_made: dict[tuple[str, str], src.Made] = {}
+_sources: dict[str, src.AdoptedSource] = {}
+
+
+class Getter:
+    """get(producer, case): another producer's Made, and get.source(case): a showcase deck's
+    adopted source; each made once per session (per xdist worker), under the session's tmp."""
+
+    def __init__(self, factory: pytest.TempPathFactory) -> None:
+        self.factory = factory
+
+    def __call__(self, name: str, case: str) -> src.Made:
+        key = (name, case)
+        if key not in _made:
+            _made[key] = PRODUCERS[name].make(case, self.factory.mktemp(f"{name}-{case}"), self)
+        return _made[key]
+
+    def source(self, case: str) -> src.AdoptedSource:
+        if case not in _sources:
+            _sources[case] = src.adopted_source(case, self.factory.mktemp(f"source-{case}"), None)
+        return _sources[case]
+
+
+@dataclass(frozen=True, kw_only=True)
+class Producer:
+    """make(case, home, get): get(producer, case) is another producer's (cached) Made."""
+    make: Callable[[str, Path, Getter], src.Made]
+    cases: list[str]
+    consumers: tuple[str, ...]
 
 
 def parent(case: str) -> str:
@@ -102,19 +131,23 @@ def parent(case: str) -> str:
 
 
 PRODUCERS = {
-    "convert": Producer(lambda case, home, get: src.converted(case, home), NORMAL,
-                        ("convert", "emission", "convert_base", "resync")),
-    "adopted": Producer(lambda case, home, get: src.adopted(case, home, get("source", case)), ADOPTED,
-                        ("convert", "emission")),
-    "folded": Producer(lambda case, home, get: src.folded(get("adopted", case)), ADOPTED,
-                       ("emission", "adopt_base", "resync")),
-    "deck_json": Producer(lambda case, home, get: src.json_round_trip(get(parent(case), case)), NORMAL + ADOPTED,
-                          ("convert", "emission")),
-    "fallback": Producer(lambda case, home, get: src.with_fallbacks(get(parent(case), case)),
-                         ["04_theme_blocks", "19_labels_on_graphics", "review", "water"], ("convert",)),
-    "candidate": Producer(lambda case, home, get: src.candidate(get("adopted", case), home), ADOPTED, ("round0",)),
-    "target": Producer(lambda case, home, get: src.target(case, home), ADOPTED, ("adopt_read",)),
-    "read_back": Producer(lambda case, home, get: src.read_back(get("convert", case)), NORMAL, ("compare",)),
+    "convert": Producer(make=lambda case, home, get: src.converted(case, home), cases=NORMAL,
+                        consumers=("convert", "emission", "convert_base", "resync")),
+    "adopted": Producer(make=lambda case, home, get: src.adopted(case, home, get.source(case)), cases=ADOPTED,
+                        consumers=("convert", "emission")),
+    "folded": Producer(make=lambda case, home, get: src.folded(get("adopted", case)), cases=ADOPTED,
+                       consumers=("emission", "adopt_base", "resync")),
+    "deck_json": Producer(make=lambda case, home, get: src.json_round_trip(get(parent(case), case)),
+                          cases=NORMAL + ADOPTED, consumers=("convert", "emission")),
+    "fallback": Producer(make=lambda case, home, get: src.with_fallbacks(get(parent(case), case)),
+                         cases=["04_theme_blocks", "19_labels_on_graphics", "review", "water"],
+                         consumers=("convert",)),
+    "candidate": Producer(make=lambda case, home, get: src.candidate(get("adopted", case), home), cases=ADOPTED,
+                          consumers=("round0",)),
+    "target": Producer(make=lambda case, home, get: src.target(case, home), cases=ADOPTED,
+                       consumers=("adopt_read",)),
+    "read_back": Producer(make=lambda case, home, get: src.read_back(get("convert", case)), cases=NORMAL,
+                          consumers=("compare",)),
 }
 
 # (producer, case, consumer) -> why it fails today. Strict: a fixed pair fails until it goes.
@@ -123,13 +156,13 @@ PRODUCERS = {
 KNOWN: dict[tuple[str, str, str], str] = {}
 
 
-def needs(case: str):
+def needs(case: str) -> pytest.MarkDecorator:
     if case in ADOPTED:
         return pytest.mark.needs_decks(f"foreign/showcase/{src.showcase_of(case)}/target.json")
     return pytest.mark.needs_decks(f"out/{case}.pdf")
 
 
-def params():
+def params() -> Iterator[ParameterSet]:
     for name, p in PRODUCERS.items():
         for case in p.cases:
             for consumer in p.consumers:
@@ -140,26 +173,14 @@ def params():
                 yield pytest.param(name, case, consumer, marks=marks, id=f"{name}-{case}-{consumer}")
 
 
-_made: dict[tuple[str, str], object] = {}
-
-
 @pytest.fixture(scope="session")
-def made(tmp_path_factory):
+def made(tmp_path_factory: pytest.TempPathFactory) -> Getter:
     """get(producer, case): made once per session (per xdist worker), under the session's tmp."""
-    def get(name: str, case: str):
-        key = (name, case)
-        if key not in _made:
-            home = tmp_path_factory.mktemp(f"{name}-{case}")
-            if name == "source":
-                _made[key] = src.adopted_source(case, home)
-            else:
-                _made[key] = PRODUCERS[name].make(case, home, get)
-        return _made[key]
-    return get
+    return Getter(tmp_path_factory)
 
 
 @pytest.mark.parametrize("producer, case, consumer", list(params()))
-def test_pair(producer, case, consumer, made, tmp_path):
+def test_pair(producer: str, case: str, consumer: str, made: Getter, tmp_path: Path) -> None:
     m = made(producer, case)
     assert isinstance(m, src.Made)
     CONSUMERS[consumer](m, tmp_path)
