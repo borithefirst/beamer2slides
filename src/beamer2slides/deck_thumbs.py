@@ -467,24 +467,24 @@ def face_glyphs(font: str, bold: bool, italic: bool) -> Glyphs | None:
     if key in _FACES:
         return _FACES[key]
     _FACES[key] = None
+    from fontTools.pens.boundsPen import BoundsPen
+    from fontTools.ttLib import TTFont
+    from .adopt import FontFace, font_family
+    from .fontfetch import table_int
+    from .deck_ir import family_of
+    got = font_family(font, family_of(font), "")
+    if got is None:
+        return None
+    have = flatten(got.match)
+    if not (have.startswith(key[0]) or key[0].startswith(have)) or got.files.index:
+        return None
+    style: FontFace = ("BoldItalicFont" if italic else "BoldFont") if bold else \
+        ("ItalicFont" if italic else "UprightFont")
     try:
-        from fontTools.pens.boundsPen import BoundsPen
-        from fontTools.ttLib import TTFont
-        from .adopt import FontFace, font_family
-        from .fontfetch import table_int
-        from .deck_ir import family_of
-        got = font_family(font, family_of(font), "")
-        if got is None:
-            return None
-        have = flatten(got.match)
-        if not (have.startswith(key[0]) or key[0].startswith(have)) or got.files.index:
-            return None
-        style: FontFace = ("BoldItalicFont" if italic else "BoldFont") if bold else \
-            ("ItalicFont" if italic else "UprightFont")
         f = TTFont(got.files.faces.get(style) or got.files.upright, lazy=True)
         cmap, glyphs, hmtx, upem = f.getBestCmap(), f.getGlyphSet(), f["hmtx"], table_int(f, "head", "unitsPerEm")
-    except Exception:                                   # noqa: BLE001 - no metrics is an answer
-        return None
+    except Exception:                                   # noqa: BLE001 - a font file fontTools cannot read
+        return None                                     # (any error of a malformed table) has no metrics
     if cmap is None:
         return None                                     # no Unicode cmap: no glyph is found by its character
     seen: dict[str, Glyph | None] = {}

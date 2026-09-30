@@ -3407,10 +3407,9 @@ def write_outputs(result: Result, target: JsonObject, tex: Path, work: Path, app
     elif apply:
         from .faults import fail_at
         skipped: list[Json] = []
-        for path, new in result.files.items():
-            path = Path(path)
-            originals = getattr(result, "originals", None)
-            if originals and not unchanged_since_pull(path, originals):
+        for name, new in result.files.items():
+            path = Path(name)
+            if result.originals and not unchanged_since_pull(path, result.originals):
                 # Someone wrote to this file while the pull was compiling: their version wins.
                 side = path.with_name(path.name + ".b2s-new")
                 replace_file(side, new)
