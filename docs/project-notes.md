@@ -403,6 +403,32 @@ a per-slide background picture.
   picture, or inherit the master's); the master becomes the ground colour when the shared background
   is exactly ground plus decoration. Thumbnails match the old structure except 1 px rows at bar edges.
   emit.json `theme`: ground, master colour, decoration files, page → layout name.
+- **An inset page border (2026-09-30, reported from the llm-extension import).** A parchment theme
+  drew a radial `\shade` over the page and two stroked rectangles 0.18 and 0.30 cm in from its
+  edges in `background canvas`. The rectangles cover 0.94 and 0.90 of the page, under the 0.95 a
+  drawing needs to be the page's ground, so they were graphics: one figure region the size of the
+  page, every line in it a figure label, the figure dropped as bigger than 0.8 of the page, and
+  every slide one picture (native share 0.88 -> 0.0). Drawn as eight lines, the top and bottom ones
+  framed rows of cells and passed `table_hairlines`: each slide one page-sized table. A stroked
+  outline of its own box, or stroked lines along all four edges, within `PAGE_FRAME_INSET` (7.5%)
+  of every edge is now `classify_graphics.page_frame` and leaves the page classify reads
+  (`without_page_frame`, at the start of `PageClassifier.classify`; never a marked drawing). Not
+  added to `decorations`: a page-sized decoration contains every line (`on_edge_artwork` made each
+  small line theme text, `stands_alone` refused every graphic bullet). Theme sweep unchanged.
+  Two more defects under the same deck. (1) Render cut every image or shading a figure's or native
+  table's box reaches (`Eraser.remove_images_in`), the page's background canvas too: a white box
+  under each table, and behind a picture wherever the page around it is not flat
+  (`paint_out_leftovers` repaints only flat ground). A page-covering one (`PAGE_GROUND`, 0.95) now
+  stays whole. (2) Those white boxes and the words left in each background made every background
+  differ; each still agreed with 90% of the decoration, so the layout's picture was the canvas with
+  every slide's words and boxes cut out, and a slide made in Slides showed them etched in the
+  master's flat ground. Harmful holes are the cut-outs where most of the group's backgrounds show
+  decoration (a formula one background keeps on the ground is cut out rightly). Measured as a share
+  of the page: Frankfurt mini frames 0.14%, Warsaw with a `\Roman` footer 0.11%, a gradient canvas
+  with display math 3.9% before (1) and 0.16% after, the parchment deck 3.5% before any fix. Above
+  `DECORATION_HOLES` (1%) the group gets no decoration (`theme_decoration` answers None). The
+  report's own proposal, no decoration when no background is shared, would have taken it from
+  Frankfurt and every mini-frame or progress-bar theme (each frame's background differs).
 - Fonts: `fonts.google_font` passes Google fonts used in the PDF through with their weight
   (weightedFontFamily, no width correction) and maps Helvetica/Times/Courier clones to
   metric-compatible Arial/Times New Roman/Courier New. CM fonts use the calibrated substitutes.

@@ -678,6 +678,30 @@ def test_theme_decoration_keeps_what_backgrounds_share() -> None:
     assert theme_decoration([bare, bare], white)[0] is None
 
 
+def test_theme_decoration_is_not_every_slides_words_cut_out() -> None:
+    """A decoration over most of the page (a shaded canvas) on backgrounds that each keep their own
+    words on it (a page border read as a figure left them there): cut out of it, they showed
+    etched into every slide made in Slides, the master's ground through each. What one background
+    keeps on the ground (a formula), or a highlight small as a mini frame's, is cut out as before."""
+    from beamer2slides.render import theme_decoration
+    white = np.array([255, 255, 255])
+    shaded = np.full((60, 80, 3), 255, np.uint8)
+    shaded[:40] = (200, 180, 140)
+    formula = shaded.copy()
+    formula[45:50, 20:60] = (0, 0, 0)  # (on the ground: 4% of the page)
+
+    def words(at: int, size: int) -> np.ndarray:
+        img = shaded.copy()
+        img[5:5 + size, at:at + 2 * size] = (40, 30, 20)
+        return img
+    picture, inside, _ = theme_decoration([formula, shaded, words(10, 1)], white)
+    assert picture is not None and inside == [True, True, True]
+    assert (picture[45:50, 20:60, 3] == 0).all() and (picture[:40, :, 3] == 255).sum() == 40 * 80 - 2
+    etched = [words(at, 5) for at in (5, 30, 55)]  # (each 1% of the page, all on the decoration)
+    picture, inside, exact = theme_decoration(etched, white)
+    assert picture is None and inside == [False, False, False] and not exact
+
+
 def test_pptx_layouts_carry_the_theme(tmp_path: Path) -> None:
     """Decorations at the bottom of the layouts; a _V1 page layout is a copy with its own decoration."""
     from PIL import Image

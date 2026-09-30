@@ -29,6 +29,7 @@ FIGURE_PX_PER_PT = 8.0     # ~ 4 px per Slides point on a 4:3 deck: sharp on hig
 SMALL_FIGURE_PX_PER_PT = 12.0  # inline formulas and other small pictures: crisper text
 FIGURE_MAX_PX = 3000
 GLYPH_MARGIN = 0.15        # em around a removed glyph's box that its ink may reach (accents, italics)
+PAGE_GROUND = 0.95         # share of the page an image or shading covers to be its ground (classify's too)
 
 Box = tuple[float, float, float, float]
 GlyphTest = Callable[[Char], bool]
@@ -134,11 +135,16 @@ class Eraser:
 
     def remove_images_in(self, area: Box, keep: Collection[int]) -> None:
         """Images and shadings: switched off inside the area, their pixels there removed when they
-        reach out of it. What is in `keep` (ids) stays whole."""
+        reach out of it. What is in `keep` (ids) stays whole, and so does the page's own ground
+        (`PAGE_GROUND` of it or more: a background canvas's shading or picture, no figure's): cut,
+        it left a white box on the page under a native table or behind a picture."""
+        page_area = self.page.width * self.page.height
         for key, po in self.objects.items():
             if po.type not in (OBJ_IMAGE, OBJ_SHADING) or key in self.removed or key in keep:
                 continue
             b = self.bounds[key]
+            if (b[2] - b[0]) * (b[3] - b[1]) >= PAGE_GROUND * page_area:
+                continue
             if _inside(b, _grow(area, 0.5)):
                 self._remove(key)
             elif _intersects(b, area):
@@ -803,6 +809,7 @@ def render_backgrounds(pdf: Path, raw: RawDoc, deck: JsonObject, out: Path,
 DECORATION_MIN = 0.002    # share of the page: less is no theme decoration
 DECORATION_AGREE = 0.9    # share of the decoration a background must show to be decorated alike
 DECORATION_TOLERANCE = 2  # levels
+DECORATION_HOLES = 0.01   # share of the page: more cut out of decoration is slide content, not the theme's
 
 
 def page_ground(img: RGB) -> Ints:
@@ -820,21 +827,32 @@ def theme_decoration(images: Iterable[RGB], ground: Ints) -> tuple[RGBA | None, 
     from the ground and every background taking it shows the same pixels, transparent elsewhere.
     Drawn over those backgrounds it changes nothing, and over another ground colour it keeps the
     bars and lines. Returns (picture or None, per image whether it shows the decoration, whether
-    the first image is exactly the ground plus the picture)."""
+    the first image is exactly the ground plus the picture).
+
+    Where the backgrounds taking it differ the picture is cut out, and a slide made in Slides shows
+    the master's ground there: right where most of them show the ground (a formula one of them
+    keeps), wrong where most show decoration. Cut out of decoration over more than
+    `DECORATION_HOLES` of the page, it is what every slide keeps in its background etched into the
+    theme (a page border read as a figure left every slide's words there), and is no decoration."""
     rest = iter(images)
     first = next(rest)
     ref = first.astype(np.int16)
     mask = np.abs(ref - ground).max(axis=2) > DECORATION_TOLERANCE
+    start = mask.copy()
     total = int(mask.sum())
     if total < DECORATION_MIN * mask.size:
         return None, [False] * (1 + sum(1 for _ in rest)), False
     inside = [True]
+    shown = start.astype(np.int32)  # per pixel: how many of the backgrounds taking it show no ground there
     for img in rest:
         same = np.abs(img.astype(np.int16) - ref).max(axis=2) <= DECORATION_TOLERANCE if img.shape == ref.shape else None
         ok = same is not None and (same & mask).sum() >= DECORATION_AGREE * mask.sum()
         inside.append(bool(ok))
         if ok:
             mask &= same
+            shown += (np.abs(img.astype(np.int16) - ground).max(axis=2) > DECORATION_TOLERANCE).astype(np.int32)
+    if int((start & ~mask & (2 * shown > sum(inside))).sum()) > DECORATION_HOLES * mask.size:
+        return None, [False] * len(inside), False
     # (binary alpha: over a background showing the same pixels, any soft edge would change them)
     return np.dstack([first, np.where(mask, 255, 0).astype(np.uint8)]), inside, int(mask.sum()) == total
 

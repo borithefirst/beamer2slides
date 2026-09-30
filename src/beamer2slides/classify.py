@@ -24,6 +24,7 @@ from dataclasses import replace
 from . import ir
 from .classify_model import HOLE_PAD, Line, Paragraph, Rect, Span, union_all
 from .classify_model import box_outline, upright_ellipse  # noqa: F401 (callers take these from here)
+from .classify_graphics import without_page_frame
 from .classify_reasons import ReasonsMixin
 from .classify_text import body_size, math_text
 from .classify_text import (  # noqa: F401 (callers take these from here)
@@ -87,6 +88,7 @@ class PageClassifier(ReasonsMixin):
         return x, y
 
     def classify(self) -> ir.Slide:
+        self.raw = without_page_frame(self.raw)  # (background, as the page's own fill is)
         spans = self.spans()
         self.text_decorations(spans)
         self.underscores(spans)
