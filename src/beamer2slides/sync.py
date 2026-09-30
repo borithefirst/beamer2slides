@@ -1440,7 +1440,7 @@ def api_colour(hex_or_theme: str | None) -> JsonObject | None:
     return as_object(rgb(hex_or_theme)["opaqueColor"], "rgb")
 
 
-def api_text_style(runs: JsonMap) -> tuple[JsonObject, list[str]]:
+def api_text_style(runs: JsonMap) -> tuple[google_types.SlidesTextStyle, list[str]]:
     """A normalised run style (snapshot._text_style attributes) as an API TextStyle and its fields."""
     style: JsonObject = {}
     fields: list[str] = []
@@ -1463,7 +1463,7 @@ def api_text_style(runs: JsonMap) -> tuple[JsonObject, list[str]]:
         else:
             style[k] = v
             fields.append(k)
-    return style, list(dict.fromkeys(fields))
+    return google_types.slides_text_style(style, "a run style"), list(dict.fromkeys(fields))
 
 
 def style_override_requests(oid: str, change: JsonMap, cells: Sequence[google_types.SlidesTableCellLocation] | None
@@ -1486,12 +1486,13 @@ def style_override_requests(oid: str, change: JsonMap, cells: Sequence[google_ty
     if fields:
         reqs += [text_style_request(oid, c, {"type": "ALL"}, style, ",".join(fields)) for c in every]
     if pfields:
-        reqs += [paragraph_style_request(oid, c, {"type": "ALL"}, pstyle, ",".join(pfields)) for c in every]
+        typed = google_types.slides_paragraph_style(pstyle, "a paragraph style")
+        reqs += [paragraph_style_request(oid, c, {"type": "ALL"}, typed, ",".join(pfields)) for c in every]
     return reqs
 
 
 def text_style_request(oid: str, cell: google_types.SlidesTableCellLocation | None, text_range: google_types.SlidesRange,
-                       style: JsonObject, fields: str) -> JsonObject:
+                       style: google_types.SlidesTextStyle, fields: str) -> JsonObject:
     """An updateTextStyle, its keys in the order sync always wrote them."""
     request: google_types.SlidesUpdateTextStyleRequest = (
         {"objectId": oid, "textRange": text_range, "style": style, "fields": fields} if cell is None else
@@ -1500,7 +1501,8 @@ def text_style_request(oid: str, cell: google_types.SlidesTableCellLocation | No
 
 
 def paragraph_style_request(oid: str, cell: google_types.SlidesTableCellLocation | None,
-                            text_range: google_types.SlidesRange, style: JsonObject, fields: str) -> JsonObject:
+                            text_range: google_types.SlidesRange, style: google_types.SlidesParagraphStyle,
+                            fields: str) -> JsonObject:
     """An updateParagraphStyle, its keys in the order sync always wrote them."""
     request: google_types.SlidesUpdateParagraphStyleRequest = (
         {"objectId": oid, "textRange": text_range, "style": style, "fields": fields} if cell is None else
@@ -1617,7 +1619,7 @@ def shape_style_requests(oid: str, style: JsonMap) -> list[JsonObject]:
         props["outline"] = line
     if not fields:
         return []
-    return [google_types.slides_json({"updateShapeProperties": {"objectId": oid, "shapeProperties": props,
+    return [google_types.slides_json({"updateShapeProperties": {"objectId": oid, "shapeProperties": google_types.shape_properties(props, "a shape style"),
                                                                 "fields": ",".join(fields)}})]
 
 
@@ -1810,7 +1812,7 @@ def ungroup_request(gid: str) -> JsonObject:
     return google_types.slides_json({"ungroupObjects": {"objectIds": [gid]}})
 
 
-def page_properties_request(sid: str, fields: str, properties: JsonObject) -> JsonObject:
+def page_properties_request(sid: str, fields: str, properties: google_types.PageProperties) -> JsonObject:
     return google_types.slides_json({"updatePageProperties": {"objectId": sid, "fields": fields,
                                                               "pageProperties": properties}})
 
@@ -2950,7 +2952,7 @@ class Sync:
         layout = self.new_layout(slide, layout_name, layouts, pres)
         if layout is None:
             raise RuntimeError(f"the deck has no {layout_name} layout for new slide {okey}")
-        mappings: list[JsonObject] = []
+        mappings: list[google_types.LayoutPlaceholderIdMapping] = []
         in_place: dict[int, Refilled] = {}
         title_idx = title_element(slide)
         sub_idx = subtitle_element(slide, title_idx) if title_idx is not None else None
@@ -2970,7 +2972,8 @@ class Sync:
                 in_place[sub_idx] = InPlace(id=oid, size=size, text="")
             else:
                 continue  # (not every layout placeholder is instantiated: the rest go after a read, in finish)
-            mappings.append({"layoutPlaceholder": {"type": ph["type"], "index": ph.get("index", 0)}, "objectId": oid})
+            mappings.append(google_types.layout_placeholder_id_mapping(
+                {"layoutPlaceholder": {"type": ph["type"], "index": ph.get("index", 0)}, "objectId": oid}, "a layout placeholder"))
         reqs = [google_types.slides_json({"createSlide": {
             "objectId": sid, "slideLayoutReference": {"layoutId": object_id(layout)}, "placeholderIdMappings": mappings}})]
         reqs += self.background_requests(sid, as_str(o["background"], "ours slide background"), slide, pres, True)
@@ -3299,11 +3302,13 @@ class Sync:
                                                 {"pageBackgroundFill": {"stretchedPictureFill": {"contentUrl": url}}})]
             if "solidFill" in fill:
                 return [page_properties_request(sid, "pageBackgroundFill.solidFill.color",
-                                                {"pageBackgroundFill": {"solidFill": fill["solidFill"]}})]
+                                                google_types.page_properties({"pageBackgroundFill": {"solidFill": fill["solidFill"]}},
+                                                                             "the master's background"))]
             return []
         if key.startswith("color:"):
             return [page_properties_request(sid, "pageBackgroundFill.solidFill.color",
-                                            {"pageBackgroundFill": {"solidFill": {"color": api_colour(key[6:])}}})]
+                                            google_types.page_properties({"pageBackgroundFill": {"solidFill": {"color": api_colour(key[6:])}}},
+                                                                         "a slide background"))]
         url = self.picture_url(self.ours_out / as_str(slide["background"], "slide background"))
         return [page_properties_request(sid, "pageBackgroundFill.stretchedPictureFill.contentUrl",
                                         {"pageBackgroundFill": {"stretchedPictureFill": {"contentUrl": url}}})]
@@ -4167,7 +4172,7 @@ def stand_in_request(oid: str, sid: str, preset: str) -> JsonObject:
     if preset == "BENT_CONNECTOR":
         return google_types.slides_json({"createLine": {"objectId": oid, "lineCategory": "BENT", "elementProperties": {
             "pageObjectId": sid, "size": size, "transform": transform}}})
-    return google_types.slides_json({"createShape": {"objectId": oid, "shapeType": preset, "elementProperties": {
+    return google_types.slides_json({"createShape": {"objectId": oid, "shapeType": google_types.shape_type(preset, "a stand-in"), "elementProperties": {
         "pageObjectId": sid, "size": size, "transform": transform}}})
 
 

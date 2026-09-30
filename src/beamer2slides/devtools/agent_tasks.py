@@ -1356,6 +1356,12 @@ class _DriveService:
     def permissions(self) -> NoReturn:
         _unused("permissions()")
 
+    def revisions(self) -> NoReturn:
+        _unused("revisions()")
+
+    def about(self) -> NoReturn:
+        _unused("about()")
+
     def list(self, **kw: object) -> NoReturn:
         _unused("files().list")
 

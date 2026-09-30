@@ -30,7 +30,7 @@ from . import doc_ir
 from .doc_ir import (Aligned, Block, BulletFix, Dropped, GridLine, GridOp, Ir, Kind, LineName,
                      MarkApi, Measure, MeasureValue, Measures, Run, Size, Style, StyledRange,
                      TableLines, U16, WholeStyle)
-from .google_types import (DocsDimension, DocsEndOfSegmentLocation, DocsLocation,
+from .google_types import (DocsBulletPreset, DocsDimension, DocsEndOfSegmentLocation, DocsLocation,
                            DocsParagraphBorder, DocsParagraphStyle,
                            DocsRangeWrite, DocsRequest, DocsRgbColor, DocsTabProperties,
                            DocsTableCellLocation, DocsTextStyle, InsertInlineImageRequest,
@@ -46,8 +46,8 @@ FROZEN = "￼"
 BLOCK_MATCH = 0.5  # least similarity for an unkeyed block to inherit a key
 TABLE_MATCH = 0.5  # least similarity for a table that lost its anchor to be known again
 TABLE_MARGIN = 0.1  # and how far clear of the runner-up, on both sides, it has to be
-BULLETS: Final[dict[bool, str]] = {False: "BULLET_DISC_CIRCLE_SQUARE",
-                                   True: "NUMBERED_DECIMAL_ALPHA_ROMAN"}
+BULLETS: Final[dict[bool, DocsBulletPreset]] = {False: "BULLET_DISC_CIRCLE_SQUARE",
+                                                True: "NUMBERED_DECIMAL_ALPHA_ROMAN"}
 # The textStyle fields this merge owns: named on a restyle whether or not the run
 # carries them, so that a mark the source took away is taken away in the document.
 #
@@ -4405,6 +4405,48 @@ def _on_tab(request: DocsRequest, tab: str) -> DocsRequest:
             return {"updateDocumentTabProperties": renamed}
         case "deleteTab":
             return {"deleteTab": _given(request.get("deleteTab")).copy()}
+        case "createHeader":
+            header = _given(request.get("createHeader")).copy()
+            if (location := header.get("sectionBreakLocation")) is not None:
+                header["sectionBreakLocation"] = _location_on(location, tab)
+            return {"createHeader": header}
+        case "createFooter":
+            footer = _given(request.get("createFooter")).copy()
+            if (location := footer.get("sectionBreakLocation")) is not None:
+                footer["sectionBreakLocation"] = _location_on(location, tab)
+            return {"createFooter": footer}
+        case "createFootnote":
+            note = _given(request.get("createFootnote")).copy()
+            if (location := note.get("location")) is not None:
+                note["location"] = _location_on(location, tab)
+            if (end := note.get("endOfSegmentLocation")) is not None:
+                note["endOfSegmentLocation"] = _end_on(end, tab)
+            return {"createFootnote": note}
+        case "insertPageBreak":
+            page = _given(request.get("insertPageBreak")).copy()
+            if (location := page.get("location")) is not None:
+                page["location"] = _location_on(location, tab)
+            if (end := page.get("endOfSegmentLocation")) is not None:
+                page["endOfSegmentLocation"] = _end_on(end, tab)
+            return {"insertPageBreak": page}
+        case "insertSectionBreak":
+            section = _given(request.get("insertSectionBreak")).copy()
+            if (location := section.get("location")) is not None:
+                section["location"] = _location_on(location, tab)
+            if (end := section.get("endOfSegmentLocation")) is not None:
+                section["endOfSegmentLocation"] = _end_on(end, tab)
+            return {"insertSectionBreak": section}
+        case "insertRichLink":
+            link = _given(request.get("insertRichLink")).copy()
+            if (location := link.get("location")) is not None:
+                link["location"] = _location_on(location, tab)
+            if (end := link.get("endOfSegmentLocation")) is not None:
+                link["endOfSegmentLocation"] = _end_on(end, tab)
+            return {"insertRichLink": link}
+        case "updateDocumentStyle":
+            page_style = _given(request.get("updateDocumentStyle")).copy()
+            page_style["tabId"] = tab
+            return {"updateDocumentStyle": page_style}
         case _:
             assert_never(kind)
 

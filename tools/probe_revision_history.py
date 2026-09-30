@@ -33,7 +33,7 @@ from beamer2slides.google_auth import drive_service, slides_service  # noqa: E40
 from beamer2slides.google_types import Request, file_id, json_object, object_id, part  # noqa: E402
 from beamer2slides.gslides import execute  # noqa: E402
 from beamer2slides.json_types import Json, JsonObject, as_str  # noqa: E402
-from tools.deck_backup import download, revised, revisions  # noqa: E402
+from tools.deck_backup import download, revisions  # noqa: E402
 
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 SLIDES_MIME = "application/vnd.google-apps.presentation"
@@ -130,7 +130,7 @@ def main() -> int:
         steps.append({"step": "files.update (the rebuild)", "at": time.strftime("%H:%M:%S"), "marker": "BETA"})
         time.sleep(wait)
 
-        revs = revisions(revised(drive), pid)
+        revs = revisions(drive, pid)
         entries: list[Json] = []
         report["revisions"] = entries
         holds_edit: list[str] = []          # the ids of the revisions whose export holds the edit

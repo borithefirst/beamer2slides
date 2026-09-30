@@ -38,7 +38,9 @@ where an id a `fields=` mask left out, or a group's child that is no page elemen
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, TypeGuard, TypeVar, runtime_checkable
+from types import UnionType
+from typing import (TYPE_CHECKING, ForwardRef, Literal, Protocol, TypedDict, TypeGuard, TypeVar, Union, get_args,
+                    get_origin, get_type_hints, is_typeddict, runtime_checkable)
 
 from .json_types import Json, JsonObject, JsonShapeError, as_objects
 
@@ -358,10 +360,283 @@ def all_elements(elements: Sequence[PageElement], where: str) -> list[PageElemen
     return out
 
 
-# ------------------------------------------------------------------------------ Slides: requests
-# The requests sync builds itself, one TypedDict per kind and the oneof `SlidesRequest`. A batch
-# also carries emit's requests, which are still JSON, so a built request joins it through
-# `slides_json`. A part copied from a read-back or from emit (a text style, a fill) stays JSON.
+# ------------------------------------------------------------------------------ Slides: payloads
+# The parts a request carries, as slides.v1.json names them (a `Slides` prefix where Docs has a
+# schema of the same name). Every field is optional, as Google's open schema has it; an enum is a
+# Literal of the discovery document's values. `tests/test_google_schema.py` holds each of these to
+# the discovery document, field by field. A part a request copies from a read-back is parsed where
+# it is read (`slides_text_style`, `shape_properties`, ... below), never handed on as JSON.
+
+ThemeColorType = Literal[
+    "THEME_COLOR_TYPE_UNSPECIFIED", "DARK1", "LIGHT1", "DARK2", "LIGHT2", "ACCENT1", "ACCENT2", "ACCENT3",
+    "ACCENT4", "ACCENT5", "ACCENT6", "HYPERLINK", "FOLLOWED_HYPERLINK", "TEXT1", "BACKGROUND1", "TEXT2",
+    "BACKGROUND2"]
+PropertyState = Literal["RENDERED", "NOT_RENDERED", "INHERIT"]
+DashStyle = Literal["DASH_STYLE_UNSPECIFIED", "SOLID", "DOT", "DASH", "DASH_DOT", "LONG_DASH", "LONG_DASH_DOT"]
+ContentAlignment = Literal["CONTENT_ALIGNMENT_UNSPECIFIED", "CONTENT_ALIGNMENT_UNSUPPORTED", "TOP", "MIDDLE",
+                           "BOTTOM"]
+ArrowStyle = Literal["ARROW_STYLE_UNSPECIFIED", "NONE", "STEALTH_ARROW", "FILL_ARROW", "FILL_CIRCLE", "FILL_SQUARE",
+                     "FILL_DIAMOND", "OPEN_ARROW", "OPEN_CIRCLE", "OPEN_SQUARE", "OPEN_DIAMOND"]
+LineCategory = Literal["STRAIGHT", "BENT", "CURVED"]
+RectanglePosition = Literal["RECTANGLE_POSITION_UNSPECIFIED", "TOP_LEFT", "TOP_CENTER", "TOP_RIGHT", "LEFT_CENTER",
+                            "CENTER", "RIGHT_CENTER", "BOTTOM_LEFT", "BOTTOM_CENTER", "BOTTOM_RIGHT"]
+ShapeType = Literal[
+    "TYPE_UNSPECIFIED", "TEXT_BOX", "RECTANGLE", "ROUND_RECTANGLE", "ELLIPSE", "ARC", "BENT_ARROW", "BENT_UP_ARROW",
+    "BEVEL", "BLOCK_ARC", "BRACE_PAIR", "BRACKET_PAIR", "CAN", "CHEVRON", "CHORD", "CLOUD", "CORNER", "CUBE",
+    "CURVED_DOWN_ARROW", "CURVED_LEFT_ARROW", "CURVED_RIGHT_ARROW", "CURVED_UP_ARROW", "DECAGON", "DIAGONAL_STRIPE",
+    "DIAMOND", "DODECAGON", "DONUT", "DOUBLE_WAVE", "DOWN_ARROW", "DOWN_ARROW_CALLOUT", "FOLDED_CORNER", "FRAME",
+    "HALF_FRAME", "HEART", "HEPTAGON", "HEXAGON", "HOME_PLATE", "HORIZONTAL_SCROLL", "IRREGULAR_SEAL_1",
+    "IRREGULAR_SEAL_2", "LEFT_ARROW", "LEFT_ARROW_CALLOUT", "LEFT_BRACE", "LEFT_BRACKET", "LEFT_RIGHT_ARROW",
+    "LEFT_RIGHT_ARROW_CALLOUT", "LEFT_RIGHT_UP_ARROW", "LEFT_UP_ARROW", "LIGHTNING_BOLT", "MATH_DIVIDE", "MATH_EQUAL",
+    "MATH_MINUS", "MATH_MULTIPLY", "MATH_NOT_EQUAL", "MATH_PLUS", "MOON", "NO_SMOKING", "NOTCHED_RIGHT_ARROW",
+    "OCTAGON", "PARALLELOGRAM", "PENTAGON", "PIE", "PLAQUE", "PLUS", "QUAD_ARROW", "QUAD_ARROW_CALLOUT", "RIBBON",
+    "RIBBON_2", "RIGHT_ARROW", "RIGHT_ARROW_CALLOUT", "RIGHT_BRACE", "RIGHT_BRACKET", "ROUND_1_RECTANGLE",
+    "ROUND_2_DIAGONAL_RECTANGLE", "ROUND_2_SAME_RECTANGLE", "RIGHT_TRIANGLE", "SMILEY_FACE", "SNIP_1_RECTANGLE",
+    "SNIP_2_DIAGONAL_RECTANGLE", "SNIP_2_SAME_RECTANGLE", "SNIP_ROUND_RECTANGLE", "STAR_10", "STAR_12", "STAR_16",
+    "STAR_24", "STAR_32", "STAR_4", "STAR_5", "STAR_6", "STAR_7", "STAR_8", "STRIPED_RIGHT_ARROW", "SUN", "TRAPEZOID",
+    "TRIANGLE", "UP_ARROW", "UP_ARROW_CALLOUT", "UP_DOWN_ARROW", "UTURN_ARROW", "VERTICAL_SCROLL", "WAVE",
+    "WEDGE_ELLIPSE_CALLOUT", "WEDGE_RECTANGLE_CALLOUT", "WEDGE_ROUND_RECTANGLE_CALLOUT",
+    "FLOW_CHART_ALTERNATE_PROCESS", "FLOW_CHART_COLLATE", "FLOW_CHART_CONNECTOR", "FLOW_CHART_DECISION",
+    "FLOW_CHART_DELAY", "FLOW_CHART_DISPLAY", "FLOW_CHART_DOCUMENT", "FLOW_CHART_EXTRACT", "FLOW_CHART_INPUT_OUTPUT",
+    "FLOW_CHART_INTERNAL_STORAGE", "FLOW_CHART_MAGNETIC_DISK", "FLOW_CHART_MAGNETIC_DRUM",
+    "FLOW_CHART_MAGNETIC_TAPE", "FLOW_CHART_MANUAL_INPUT", "FLOW_CHART_MANUAL_OPERATION", "FLOW_CHART_MERGE",
+    "FLOW_CHART_MULTIDOCUMENT", "FLOW_CHART_OFFLINE_STORAGE", "FLOW_CHART_OFFPAGE_CONNECTOR",
+    "FLOW_CHART_ONLINE_STORAGE", "FLOW_CHART_OR", "FLOW_CHART_PREDEFINED_PROCESS", "FLOW_CHART_PREPARATION",
+    "FLOW_CHART_PROCESS", "FLOW_CHART_PUNCHED_CARD", "FLOW_CHART_PUNCHED_TAPE", "FLOW_CHART_SORT",
+    "FLOW_CHART_SUMMING_JUNCTION", "FLOW_CHART_TERMINATOR", "ARROW_EAST", "ARROW_NORTH_EAST", "ARROW_NORTH", "SPEECH",
+    "STARBURST", "TEARDROP", "ELLIPSE_RIBBON", "ELLIPSE_RIBBON_2", "CLOUD_CALLOUT", "CUSTOM"]
+SHAPE_TYPES: frozenset[str] = frozenset(get_args(ShapeType))
+
+
+def is_shape_type(value: str) -> TypeGuard[ShapeType]:
+    return value in SHAPE_TYPES
+
+
+def shape_type(value: str, where: str) -> ShapeType:
+    """`value` as a `createShape` shape type, or an error naming `where` (a preset Slides has no
+    shape for would be refused with the whole batch)."""
+    if not is_shape_type(value):
+        raise JsonShapeError(f"{where}: {value!r} is no Slides shape type")
+    return value
+
+
+class SlidesRgbColor(TypedDict, total=False):
+    red: float
+    green: float
+    blue: float
+
+
+class OpaqueColor(TypedDict, total=False):
+    rgbColor: SlidesRgbColor
+    themeColor: ThemeColorType
+
+
+class SlidesOptionalColor(TypedDict, total=False):
+    """A colour that may be none: `{}` is transparent (a text style's background cleared)."""
+    opaqueColor: OpaqueColor
+
+
+class SolidFill(TypedDict, total=False):
+    color: OpaqueColor
+    alpha: float
+
+
+class SlidesLink(TypedDict, total=False):
+    url: str
+    relativeLink: Literal["RELATIVE_SLIDE_LINK_UNSPECIFIED", "NEXT_SLIDE", "PREVIOUS_SLIDE", "FIRST_SLIDE",
+                          "LAST_SLIDE"]
+    pageObjectId: str
+    slideIndex: int
+
+
+class SlidesWeightedFontFamily(TypedDict, total=False):
+    fontFamily: str
+    weight: int
+
+
+class SlidesTextStyle(TypedDict, total=False):
+    backgroundColor: SlidesOptionalColor
+    foregroundColor: SlidesOptionalColor
+    bold: bool
+    italic: bool
+    fontFamily: str
+    fontSize: Dimension
+    link: SlidesLink
+    baselineOffset: Literal["BASELINE_OFFSET_UNSPECIFIED", "NONE", "SUPERSCRIPT", "SUBSCRIPT"]
+    smallCaps: bool
+    strikethrough: bool
+    underline: bool
+    weightedFontFamily: SlidesWeightedFontFamily
+
+
+class SlidesParagraphStyle(TypedDict, total=False):
+    lineSpacing: float
+    alignment: Literal["ALIGNMENT_UNSPECIFIED", "START", "CENTER", "END", "JUSTIFIED"]
+    indentStart: Dimension
+    indentEnd: Dimension
+    spaceAbove: Dimension
+    spaceBelow: Dimension
+    indentFirstLine: Dimension
+    direction: Literal["TEXT_DIRECTION_UNSPECIFIED", "LEFT_TO_RIGHT", "RIGHT_TO_LEFT"]
+    spacingMode: Literal["SPACING_MODE_UNSPECIFIED", "NEVER_COLLAPSE", "COLLAPSE_LISTS"]
+
+
+class SlidesBullet(TypedDict, total=False):
+    """A paragraph's bullet as a read-back has it (no request writes one: `createParagraphBullets`)."""
+    listId: str
+    nestingLevel: int
+    glyph: str
+    bulletStyle: SlidesTextStyle
+
+
+class OutlineFill(TypedDict, total=False):
+    solidFill: SolidFill
+
+
+class Outline(TypedDict, total=False):
+    outlineFill: OutlineFill
+    weight: Dimension
+    dashStyle: DashStyle
+    propertyState: PropertyState
+
+
+class Shadow(TypedDict, total=False):
+    """(Read-only to the API: Slides refuses a shadow in a write; a .pptx import keeps one.)"""
+    type: Literal["SHADOW_TYPE_UNSPECIFIED", "OUTER"]
+    transform: AffineTransform
+    alignment: RectanglePosition
+    blurRadius: Dimension
+    color: OpaqueColor
+    alpha: float
+    rotateWithShape: bool
+    propertyState: PropertyState
+
+
+class ShapeBackgroundFill(TypedDict, total=False):
+    propertyState: PropertyState
+    solidFill: SolidFill
+
+
+class Autofit(TypedDict, total=False):
+    autofitType: Literal["AUTOFIT_TYPE_UNSPECIFIED", "NONE", "TEXT_AUTOFIT", "SHAPE_AUTOFIT"]
+    fontScale: float
+    lineSpacingReduction: float
+
+
+class ShapeProperties(TypedDict, total=False):
+    shapeBackgroundFill: ShapeBackgroundFill
+    outline: Outline
+    shadow: Shadow
+    link: SlidesLink
+    contentAlignment: ContentAlignment
+    autofit: Autofit
+
+
+class StretchedPictureFill(TypedDict, total=False):
+    contentUrl: str
+    size: Size
+
+
+class PageBackgroundFill(TypedDict, total=False):
+    propertyState: PropertyState
+    solidFill: SolidFill
+    stretchedPictureFill: StretchedPictureFill
+
+
+class ThemeColorPair(TypedDict, total=False):
+    type: ThemeColorType
+    color: SlidesRgbColor
+
+
+class ColorScheme(TypedDict, total=False):
+    colors: list[ThemeColorPair]
+
+
+class PageProperties(TypedDict, total=False):
+    pageBackgroundFill: PageBackgroundFill
+    colorScheme: ColorScheme
+
+
+class LineFill(TypedDict, total=False):
+    solidFill: SolidFill
+
+
+class LineConnection(TypedDict, total=False):
+    connectedObjectId: str
+    connectionSiteIndex: int
+
+
+class LineProperties(TypedDict, total=False):
+    lineFill: LineFill
+    weight: Dimension
+    dashStyle: DashStyle
+    startArrow: ArrowStyle
+    endArrow: ArrowStyle
+    link: SlidesLink
+    startConnection: LineConnection
+    endConnection: LineConnection
+
+
+class SlidesCropProperties(TypedDict, total=False):
+    leftOffset: float
+    rightOffset: float
+    topOffset: float
+    bottomOffset: float
+    angle: float
+
+
+class ColorStop(TypedDict, total=False):
+    color: OpaqueColor
+    alpha: float
+    position: float
+
+
+class Recolor(TypedDict, total=False):
+    recolorStops: list[ColorStop]
+    name: Literal["NONE", "LIGHT1", "LIGHT2", "LIGHT3", "LIGHT4", "LIGHT5", "LIGHT6", "LIGHT7", "LIGHT8", "LIGHT9",
+                  "LIGHT10", "DARK1", "DARK2", "DARK3", "DARK4", "DARK5", "DARK6", "DARK7", "DARK8", "DARK9", "DARK10",
+                  "GRAYSCALE", "NEGATIVE", "SEPIA", "CUSTOM"]
+
+
+class SlidesImageProperties(TypedDict, total=False):
+    """(Slides documents crop, recolor and shadow as read-only; `tools/probe_images` writes them
+    anyway to see what Slides does.)"""
+    cropProperties: SlidesCropProperties
+    transparency: float
+    brightness: float
+    contrast: float
+    recolor: Recolor
+    outline: Outline
+    shadow: Shadow
+    link: SlidesLink
+
+
+class TableCellBackgroundFill(TypedDict, total=False):
+    propertyState: PropertyState
+    solidFill: SolidFill
+
+
+class TableCellProperties(TypedDict, total=False):
+    tableCellBackgroundFill: TableCellBackgroundFill
+    contentAlignment: ContentAlignment
+
+
+class TableBorderFill(TypedDict, total=False):
+    solidFill: SolidFill
+
+
+class TableBorderProperties(TypedDict, total=False):
+    tableBorderFill: TableBorderFill
+    weight: Dimension
+    dashStyle: DashStyle
+
+
+class TableRowProperties(TypedDict, total=False):
+    minRowHeight: Dimension
+
+
+class SlidesTableColumnProperties(TypedDict, total=False):
+    columnWidth: Dimension
 
 
 class SlidesTableCellLocation(TypedDict, total=False):
@@ -369,16 +644,187 @@ class SlidesTableCellLocation(TypedDict, total=False):
     columnIndex: int
 
 
+class SlidesTableRange(TypedDict, total=False):
+    location: SlidesTableCellLocation
+    rowSpan: int
+    columnSpan: int
+
+
 class SlidesRange(TypedDict, total=False):
-    type: Required[Literal["ALL", "FIXED_RANGE", "FROM_START_INDEX"]]
+    type: Required[Literal["ALL", "FIXED_RANGE", "FROM_START_INDEX"]]   # (every range we write says its type)
     startIndex: int
     endIndex: int
 
 
 class SlidesPageElementProperties(TypedDict, total=False):
-    pageObjectId: Required[str]
+    pageObjectId: Required[str]      # (a created element always names its page)
     size: Size
     transform: AffineTransform
+
+
+PlaceholderType = Literal["NONE", "BODY", "CHART", "CLIP_ART", "CENTERED_TITLE", "DIAGRAM", "DATE_AND_TIME", "FOOTER",
+                          "HEADER", "MEDIA", "OBJECT", "PICTURE", "SLIDE_NUMBER", "SUBTITLE", "TABLE", "TITLE",
+                          "SLIDE_IMAGE"]
+PLACEHOLDER_TYPES: frozenset[str] = frozenset(get_args(PlaceholderType))
+
+
+def is_placeholder_type(value: str) -> TypeGuard[PlaceholderType]:
+    return value in PLACEHOLDER_TYPES
+
+
+class Placeholder(TypedDict, total=False):
+    type: PlaceholderType
+    index: int
+    parentObjectId: str
+
+
+class LayoutReference(TypedDict, total=False):
+    layoutId: str
+    predefinedLayout: Literal["PREDEFINED_LAYOUT_UNSPECIFIED", "BLANK", "CAPTION_ONLY", "TITLE", "TITLE_AND_BODY",
+                              "TITLE_AND_TWO_COLUMNS", "TITLE_ONLY", "SECTION_HEADER",
+                              "SECTION_TITLE_AND_DESCRIPTION", "ONE_COLUMN_TEXT", "MAIN_POINT", "BIG_NUMBER"]
+
+
+class LayoutPlaceholderIdMapping(TypedDict, total=False):
+    layoutPlaceholder: Placeholder
+    layoutPlaceholderObjectId: str
+    objectId: str
+
+
+# ------------------------------------------------------------------------------ parsing a part
+# A part read back from Slides (or Docs) and written again (a text style sync copies, a fill a
+# layout had) is parsed where it is read: checked against its TypedDict, key by key and value by
+# value, all the way down, and handed on as that type. One walker reads every TypedDict's own
+# annotations (its field table), so a field added to a TypedDict is checked with no code to add
+# here. It checks what a value holds, not what it lacks: a `Required` field left out is not said.
+
+TD = TypeVar("TD")
+_FIELDS: dict[object, dict[str, object]] = {}
+
+
+class _Bare:
+    """`Required[X]` read as X: `Required` is imported for the checker only, and a field that is
+    required is still just an X to the walker (which checks what is there, not what is missing)."""
+
+    def __getitem__(self, item: object) -> object:
+        return item
+
+
+def _fields_of(shape: object) -> dict[str, object]:
+    fields = _FIELDS.get(shape)
+    if fields is None:
+        fields = _FIELDS[shape] = dict(get_type_hints(shape, localns={"Required": _Bare()}))
+    return fields
+
+
+def _name_of(hint: object) -> str:
+    name = getattr(hint, "__name__", None)
+    return name if isinstance(name, str) else str(hint)
+
+
+def _check(value: object, hint: object, where: str) -> None:
+    """`value` holds what `hint` says, or a JsonShapeError naming where it does not."""
+    if hint == Json or hint is object:
+        return                          # (JSON the type leaves unmodelled: it came from JSON)
+    if isinstance(hint, ForwardRef):    # (`Json` inside itself, as `get_type_hints` leaves it)
+        if hint.__forward_arg__ == "Json" and _is_json(value):
+            return
+        raise JsonShapeError(f"{where}: {type(value).__name__} is no {hint.__forward_arg__}")
+    if is_typeddict(hint):
+        if not isinstance(value, dict):
+            raise JsonShapeError(f"{where}: a {_name_of(hint)} object was expected, found {type(value).__name__}")
+        fields = _fields_of(hint)
+        for key, v in value.items():
+            if key not in fields:
+                raise JsonShapeError(f"{where}: {key!r} is no field of {_name_of(hint)}")
+            _check(v, fields[key], f"{where}.{key}")
+        return
+    origin, args = get_origin(hint), get_args(hint)
+    if origin is Literal:
+        if not any(type(value) is type(a) and value == a for a in args):
+            raise JsonShapeError(f"{where}: {value!r} is none of {', '.join(map(repr, args))}")
+    elif origin is Union or origin is UnionType:
+        problems: list[str] = []
+        for arm in args:
+            try:
+                _check(value, arm, where)
+                return
+            except JsonShapeError as e:
+                problems.append(str(e))
+        raise JsonShapeError(" / ".join(problems))
+    elif origin is list or origin is Sequence:
+        if not isinstance(value, list):
+            raise JsonShapeError(f"{where}: an array was expected, found {type(value).__name__}")
+        for i, item in enumerate(value):
+            _check(item, args[0], f"{where}[{i}]")
+    elif origin is dict or origin is Mapping:
+        if not isinstance(value, dict):
+            raise JsonShapeError(f"{where}: an object was expected, found {type(value).__name__}")
+        for key, item in value.items():
+            _check(key, args[0], f"{where} (a key)")
+            _check(item, args[1], f"{where}[{key!r}]")
+    elif hint is type(None):
+        if value is not None:
+            raise JsonShapeError(f"{where}: null was expected, found {type(value).__name__}")
+    elif hint is float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise JsonShapeError(f"{where}: a number was expected, found {type(value).__name__}")
+    elif hint is int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise JsonShapeError(f"{where}: an integer was expected, found {type(value).__name__}")
+    elif hint is bool or hint is str:
+        if not isinstance(value, hint):
+            raise JsonShapeError(f"{where}: a {_name_of(hint)} was expected, found {type(value).__name__}")
+    else:
+        raise TypeError(f"{where}: no runtime check for {hint!r}")
+
+
+def _holds(o: JsonObject, shape: type[TD], where: str) -> TypeGuard[TD]:
+    _check(o, shape, where)
+    return True
+
+
+def typed_part(o: JsonObject, shape: type[TD], where: str) -> TD:
+    """`o` as the TypedDict `shape` of this module (checked all the way down, not copied), or a
+    JsonShapeError naming where in `where` it is not."""
+    if not _holds(o, shape, where):
+        raise JsonShapeError(f"{where}: not a {_name_of(shape)}")   # (unreached: _holds raises first)
+    return o
+
+
+def slides_text_style(o: JsonObject, where: str) -> SlidesTextStyle:
+    return typed_part(o, SlidesTextStyle, where)
+
+
+def slides_paragraph_style(o: JsonObject, where: str) -> SlidesParagraphStyle:
+    return typed_part(o, SlidesParagraphStyle, where)
+
+
+def shape_properties(o: JsonObject, where: str) -> ShapeProperties:
+    return typed_part(o, ShapeProperties, where)
+
+
+def page_properties(o: JsonObject, where: str) -> PageProperties:
+    return typed_part(o, PageProperties, where)
+
+
+def solid_fill(o: JsonObject, where: str) -> SolidFill:
+    return typed_part(o, SolidFill, where)
+
+
+def opaque_color(o: JsonObject, where: str) -> OpaqueColor:
+    return typed_part(o, OpaqueColor, where)
+
+
+def layout_placeholder_id_mapping(o: JsonObject, where: str) -> LayoutPlaceholderIdMapping:
+    return typed_part(o, LayoutPlaceholderIdMapping, where)
+
+
+# ------------------------------------------------------------------------------ Slides: requests
+# Every request kind this package sends, one TypedDict per kind, and the oneof `SlidesRequest`.
+# `Required` marks what the API needs to act (the object an update names, its field mask, the
+# text an insert writes) and every one of our producers sends; the rest is optional, as Google's
+# schema has it. A batch built as JSON still takes a built request through `slides_json`.
 
 
 class DeleteObjectRequest(TypedDict, total=False):
@@ -410,8 +856,8 @@ class UpdateSlidesPositionRequest(TypedDict, total=False):
 class CreateSlideRequest(TypedDict, total=False):
     objectId: str
     insertionIndex: int
-    slideLayoutReference: JsonObject
-    placeholderIdMappings: list[JsonObject]
+    slideLayoutReference: LayoutReference
+    placeholderIdMappings: list[LayoutPlaceholderIdMapping]
 
 
 class CreateImageRequest(TypedDict, total=False):
@@ -422,15 +868,107 @@ class CreateImageRequest(TypedDict, total=False):
 
 class CreateShapeRequest(TypedDict, total=False):
     objectId: str
-    shapeType: Required[str]
+    shapeType: Required[ShapeType]
     elementProperties: SlidesPageElementProperties
 
 
 class CreateLineRequest(TypedDict, total=False):
     objectId: str
-    category: str
-    lineCategory: str
+    category: Literal["LINE_CATEGORY_UNSPECIFIED", "STRAIGHT", "BENT", "CURVED"]   # (deprecated: lineCategory)
+    lineCategory: LineCategory
     elementProperties: SlidesPageElementProperties
+
+
+class CreateTableRequest(TypedDict, total=False):
+    objectId: str
+    elementProperties: SlidesPageElementProperties
+    rows: Required[int]
+    columns: Required[int]
+
+
+class DuplicateObjectRequest(TypedDict, total=False):
+    objectId: Required[str]
+    objectIds: Mapping[str, str]
+
+
+class UpdateImagePropertiesRequest(TypedDict, total=False):
+    objectId: Required[str]
+    imageProperties: Required[SlidesImageProperties]
+    fields: Required[str]
+
+
+class UpdateLinePropertiesRequest(TypedDict, total=False):
+    objectId: Required[str]
+    lineProperties: Required[LineProperties]
+    fields: Required[str]
+
+
+class UpdateSlidePropertiesRequest(TypedDict, total=False):
+    objectId: Required[str]
+    slideProperties: Required[SlideProperties]
+    fields: Required[str]
+
+
+class UpdateTableBorderPropertiesRequest(TypedDict, total=False):
+    objectId: Required[str]
+    tableRange: SlidesTableRange
+    borderPosition: Literal["ALL", "BOTTOM", "INNER", "INNER_HORIZONTAL", "INNER_VERTICAL", "LEFT", "OUTER", "RIGHT",
+                            "TOP"]
+    tableBorderProperties: Required[TableBorderProperties]
+    fields: Required[str]
+
+
+class UpdateTableCellPropertiesRequest(TypedDict, total=False):
+    objectId: Required[str]
+    tableRange: SlidesTableRange
+    tableCellProperties: Required[TableCellProperties]
+    fields: Required[str]
+
+
+class UpdateTableRowPropertiesRequest(TypedDict, total=False):
+    objectId: Required[str]
+    rowIndices: list[int]
+    tableRowProperties: Required[TableRowProperties]
+    fields: Required[str]
+
+
+class SlidesUpdateTableColumnPropertiesRequest(TypedDict, total=False):
+    objectId: Required[str]
+    columnIndices: list[int]
+    tableColumnProperties: Required[SlidesTableColumnProperties]
+    fields: Required[str]
+
+
+BulletPreset = Literal[
+    "BULLET_DISC_CIRCLE_SQUARE", "BULLET_DIAMONDX_ARROW3D_SQUARE", "BULLET_CHECKBOX", "BULLET_ARROW_DIAMOND_DISC",
+    "BULLET_STAR_CIRCLE_SQUARE", "BULLET_ARROW3D_CIRCLE_SQUARE", "BULLET_LEFTTRIANGLE_DIAMOND_DISC",
+    "BULLET_DIAMONDX_HOLLOWDIAMOND_SQUARE", "BULLET_DIAMOND_CIRCLE_SQUARE", "NUMBERED_DIGIT_ALPHA_ROMAN",
+    "NUMBERED_DIGIT_ALPHA_ROMAN_PARENS", "NUMBERED_DIGIT_NESTED", "NUMBERED_UPPERALPHA_ALPHA_ROMAN",
+    "NUMBERED_UPPERROMAN_UPPERALPHA_DIGIT", "NUMBERED_ZERODIGIT_ALPHA_ROMAN"]
+
+
+class SlidesCreateParagraphBulletsRequest(TypedDict, total=False):
+    objectId: Required[str]
+    cellLocation: SlidesTableCellLocation
+    textRange: SlidesRange
+    bulletPreset: BulletPreset
+
+
+class SlidesDeleteParagraphBulletsRequest(TypedDict, total=False):
+    objectId: Required[str]
+    cellLocation: SlidesTableCellLocation
+    textRange: SlidesRange
+
+
+class SlidesMergeTableCellsRequest(TypedDict, total=False):
+    objectId: Required[str]
+    tableRange: Required[SlidesTableRange]
+
+
+class SlidesReplaceImageRequest(TypedDict, total=False):
+    imageObjectId: Required[str]
+    url: Required[str]
+    imageReplaceMethod: Literal["IMAGE_REPLACE_METHOD_UNSPECIFIED", "CENTER_INSIDE", "CENTER_CROP"]
 
 
 class SlidesDeleteTextRequest(TypedDict, total=False):
@@ -449,7 +987,7 @@ class SlidesInsertTextRequest(TypedDict, total=False):
 class SlidesUpdateTextStyleRequest(TypedDict, total=False):
     objectId: Required[str]
     cellLocation: SlidesTableCellLocation
-    style: Required[JsonObject]
+    style: Required[SlidesTextStyle]
     textRange: SlidesRange
     fields: Required[str]
 
@@ -457,20 +995,20 @@ class SlidesUpdateTextStyleRequest(TypedDict, total=False):
 class SlidesUpdateParagraphStyleRequest(TypedDict, total=False):
     objectId: Required[str]
     cellLocation: SlidesTableCellLocation
-    style: Required[JsonObject]
+    style: Required[SlidesParagraphStyle]
     textRange: SlidesRange
     fields: Required[str]
 
 
 class UpdatePagePropertiesRequest(TypedDict, total=False):
     objectId: Required[str]
-    pageProperties: Required[JsonObject]
+    pageProperties: Required[PageProperties]
     fields: Required[str]
 
 
 class UpdateShapePropertiesRequest(TypedDict, total=False):
     objectId: Required[str]
-    shapeProperties: Required[JsonObject]
+    shapeProperties: Required[ShapeProperties]
     fields: Required[str]
 
 
@@ -509,28 +1047,73 @@ class UngroupObjectsRequest(TypedDict, total=False):
 
 
 class SlidesRequest(TypedDict, total=False):
-    """One request of a `presentations.batchUpdate` that sync builds: exactly one of these is set."""
-    deleteObject: DeleteObjectRequest
-    updatePageElementTransform: UpdatePageElementTransformRequest
-    updatePageElementsZOrder: UpdatePageElementsZOrderRequest
-    updatePageElementAltText: UpdatePageElementAltTextRequest
-    updateSlidesPosition: UpdateSlidesPositionRequest
-    createSlide: CreateSlideRequest
+    """One request of a `presentations.batchUpdate`: exactly one of these is set
+    (`slides_request_kind` says which)."""
     createImage: CreateImageRequest
-    createShape: CreateShapeRequest
     createLine: CreateLineRequest
+    createShape: CreateShapeRequest
+    createSlide: CreateSlideRequest
+    createTable: CreateTableRequest
+    deleteObject: DeleteObjectRequest
     deleteText: SlidesDeleteTextRequest
-    insertText: SlidesInsertTextRequest
-    updateTextStyle: SlidesUpdateTextStyleRequest
-    updateParagraphStyle: SlidesUpdateParagraphStyleRequest
-    updatePageProperties: UpdatePagePropertiesRequest
-    updateShapeProperties: UpdateShapePropertiesRequest
-    insertTableRows: InsertTableRowsRequest
-    insertTableColumns: InsertTableColumnsRequest
-    deleteTableRow: DeleteTableRowRequest
-    deleteTableColumn: DeleteTableColumnRequest
+    duplicateObject: DuplicateObjectRequest
     groupObjects: GroupObjectsRequest
     ungroupObjects: UngroupObjectsRequest
+    insertTableColumns: InsertTableColumnsRequest
+    insertTableRows: InsertTableRowsRequest
+    insertText: SlidesInsertTextRequest
+    updateImageProperties: UpdateImagePropertiesRequest
+    updateLineProperties: UpdateLinePropertiesRequest
+    updatePageElementAltText: UpdatePageElementAltTextRequest
+    updatePageElementTransform: UpdatePageElementTransformRequest
+    updatePageElementsZOrder: UpdatePageElementsZOrderRequest
+    updatePageProperties: UpdatePagePropertiesRequest
+    updateShapeProperties: UpdateShapePropertiesRequest
+    updateSlideProperties: UpdateSlidePropertiesRequest
+    updateSlidesPosition: UpdateSlidesPositionRequest
+    updateTableBorderProperties: UpdateTableBorderPropertiesRequest
+    updateTableCellProperties: UpdateTableCellPropertiesRequest
+    updateTableRowProperties: UpdateTableRowPropertiesRequest
+    updateTableColumnProperties: SlidesUpdateTableColumnPropertiesRequest
+    createParagraphBullets: SlidesCreateParagraphBulletsRequest
+    deleteParagraphBullets: SlidesDeleteParagraphBulletsRequest
+    deleteTableColumn: DeleteTableColumnRequest
+    deleteTableRow: DeleteTableRowRequest
+    mergeTableCells: SlidesMergeTableCellsRequest
+    replaceImage: SlidesReplaceImageRequest
+    updateParagraphStyle: SlidesUpdateParagraphStyleRequest
+    updateTextStyle: SlidesUpdateTextStyleRequest
+
+
+SlidesRequestKind = Literal[
+    "createImage", "createLine", "createShape", "createSlide", "createTable", "deleteObject", "deleteText",
+    "duplicateObject", "groupObjects", "ungroupObjects", "insertTableColumns", "insertTableRows", "insertText",
+    "updateImageProperties", "updateLineProperties", "updatePageElementAltText", "updatePageElementTransform",
+    "updatePageElementsZOrder", "updatePageProperties", "updateShapeProperties", "updateSlideProperties",
+    "updateSlidesPosition", "updateTableBorderProperties", "updateTableCellProperties", "updateTableRowProperties",
+    "updateTableColumnProperties", "createParagraphBullets", "deleteParagraphBullets", "deleteTableColumn",
+    "deleteTableRow", "mergeTableCells", "replaceImage", "updateParagraphStyle", "updateTextStyle"]
+SLIDES_REQUEST_KINDS: tuple[SlidesRequestKind, ...] = (
+    "createImage", "createLine", "createShape", "createSlide", "createTable", "deleteObject", "deleteText",
+    "duplicateObject", "groupObjects", "ungroupObjects", "insertTableColumns", "insertTableRows", "insertText",
+    "updateImageProperties", "updateLineProperties", "updatePageElementAltText", "updatePageElementTransform",
+    "updatePageElementsZOrder", "updatePageProperties", "updateShapeProperties", "updateSlideProperties",
+    "updateSlidesPosition", "updateTableBorderProperties", "updateTableCellProperties", "updateTableRowProperties",
+    "updateTableColumnProperties", "createParagraphBullets", "deleteParagraphBullets", "deleteTableColumn",
+    "deleteTableRow", "mergeTableCells", "replaceImage", "updateParagraphStyle", "updateTextStyle")
+"""(Held equal to `SlidesRequestKind` and to `SlidesRequest`'s keys by `tests/test_google_schema.py`.)"""
+
+
+def slides_request_kind(request: SlidesRequest) -> SlidesRequestKind:
+    """Which kind `request` is: the one key it sets, or a ValueError when it sets none or several
+    (Google refuses a request that is not exactly one kind)."""
+    kinds: list[SlidesRequestKind] = []
+    for kind in SLIDES_REQUEST_KINDS:
+        if kind in request:
+            kinds.append(kind)
+    if len(kinds) != 1:
+        raise ValueError(f"a Slides request of {sorted(request)} is {len(kinds)} kinds, not one")
+    return kinds[0]
 
 
 def slides_json(request: SlidesRequest) -> JsonObject:
@@ -551,6 +1134,7 @@ class BatchUpdateBody(TypedDict, total=False):
 
 class NewPresentation(TypedDict, total=False):
     title: str
+    pageSize: Size          # (ignored: every presentation Slides creates is 16:9, hence the .pptx route)
 
 
 class GetPresentation(TypedDict, total=False):
@@ -611,6 +1195,7 @@ class DriveFile(TypedDict, total=False):
     trashed: bool
     createdTime: str
     modifiedTime: str
+    size: str               # (bytes, as a decimal string: Drive's int64; none for a Google document)
 
 
 class FileList(TypedDict, total=False):
@@ -748,6 +1333,94 @@ class Comments(Protocol):
     def create(self, **kw: Unpack[CreateComment]) -> Request[Comment]: ...
 
 
+class DriveUser(TypedDict, total=False):
+    displayName: str
+    emailAddress: str
+    me: bool
+    permissionId: str
+    photoLink: str
+    kind: str
+
+
+class Revision(TypedDict, total=False):
+    """One revision of a file's content (`revisions.list` / `get`)."""
+    id: str
+    kind: str
+    mimeType: str
+    modifiedTime: str
+    keepForever: bool
+    published: bool
+    publishAuto: bool
+    publishedOutsideDomain: bool
+    publishedLink: str
+    lastModifyingUser: DriveUser
+    originalFilename: str
+    md5Checksum: str
+    size: str               # (Drive's int64, as for a file)
+    exportLinks: dict[str, str]
+
+
+class RevisionList(TypedDict, total=False):
+    kind: str
+    revisions: list[Revision]
+    nextPageToken: str
+
+
+class RevisionBody(TypedDict, total=False):
+    """What `revisions.update` writes: the settings a person can change on a revision."""
+    keepForever: bool
+    published: bool
+    publishAuto: bool
+    publishedOutsideDomain: bool
+
+
+class ListRevisions(TypedDict, total=False):
+    fileId: Required[str]
+    fields: str
+    pageSize: int
+    pageToken: str | None
+
+
+class GetRevision(TypedDict, total=False):
+    fileId: Required[str]
+    revisionId: Required[str]
+    fields: str
+    acknowledgeAbuse: bool
+
+
+class UpdateRevision(TypedDict, total=False):
+    fileId: Required[str]
+    revisionId: Required[str]
+    body: Required[RevisionBody]
+    fields: str
+
+
+class Revisions(Protocol):
+    def list(self, **kw: Unpack[ListRevisions]) -> Request[RevisionList]: ...
+    def get(self, **kw: Unpack[GetRevision]) -> Request[Revision]: ...
+    def update(self, **kw: Unpack[UpdateRevision]) -> Request[Revision]: ...
+
+
+class About(TypedDict, total=False):
+    """`about.get`, as far as `fields=` (which Drive requires here) asked for it."""
+    kind: str
+    user: DriveUser
+    appInstalled: bool
+    exportFormats: dict[str, list[str]]
+    importFormats: dict[str, list[str]]
+    maxImportSizes: dict[str, str]
+    maxUploadSize: str
+    storageQuota: JsonObject
+
+
+class GetAbout(TypedDict, total=False):
+    fields: Required[str]           # (Drive refuses an about call without a field mask)
+
+
+class AboutResource(Protocol):
+    def get(self, **kw: Unpack[GetAbout]) -> Request[About]: ...
+
+
 @runtime_checkable
 class DriveService(Protocol):
     """The Drive API v3 client (`google_auth.drive_service`)."""
@@ -755,6 +1428,8 @@ class DriveService(Protocol):
     def files(self) -> Files: ...
     def permissions(self) -> Permissions: ...
     def comments(self) -> Comments: ...
+    def revisions(self) -> Revisions: ...
+    def about(self) -> AboutResource: ...
 
 
 # ------------------------------------------------------------------------------ Docs
@@ -772,7 +1447,7 @@ class DocsWriteControl(TypedDict, total=False):
 
 class DocsDimension(TypedDict, total=False):
     magnitude: float
-    unit: str
+    unit: Literal["UNIT_UNSPECIFIED", "PT"]
 
 
 class DocsRgbColor(TypedDict, total=False):
@@ -804,7 +1479,7 @@ class DocsTextStyle(TypedDict, total=False):
     underline: bool
     strikethrough: bool
     smallCaps: bool
-    baselineOffset: str
+    baselineOffset: str                  # (an enum: str until doc_ir's TO_SCRIPT says it, test_google_schema.EXEMPT)
     weightedFontFamily: DocsWeightedFontFamily
     fontSize: DocsDimension
     foregroundColor: DocsOptionalColor
@@ -816,16 +1491,20 @@ class DocsParagraphBorder(TypedDict, total=False):
     color: DocsOptionalColor
     width: DocsDimension
     padding: DocsDimension
-    dashStyle: str
+    dashStyle: str                       # (an enum, as baselineOffset)
 
 
 class DocsShading(TypedDict, total=False):
     backgroundColor: DocsOptionalColor
 
 
+DocsNamedStyleType = Literal["NAMED_STYLE_TYPE_UNSPECIFIED", "NORMAL_TEXT", "TITLE", "SUBTITLE", "HEADING_1",
+                           "HEADING_2", "HEADING_3", "HEADING_4", "HEADING_5", "HEADING_6"]
+
+
 class DocsParagraphStyle(TypedDict, total=False):
-    namedStyleType: str
-    alignment: str
+    namedStyleType: str                  # (DocsNamedStyleType, as baselineOffset)
+    alignment: str                       # (an enum, as baselineOffset)
     indentStart: DocsDimension
     indentFirstLine: DocsDimension
     lineSpacing: float
@@ -843,13 +1522,16 @@ class DocsParagraphStyle(TypedDict, total=False):
 class DocsTextRun(TypedDict, total=False):
     content: str
     textStyle: DocsTextStyle
+    suggestedInsertionIds: list[str]     # (suggestions, as `suggestionsViewMode=SUGGESTIONS_INLINE` shows them)
+    suggestedDeletionIds: list[str]
 
 
 class DocsDateElementProperties(TypedDict, total=False):
     displayText: str
     timestamp: str
-    dateFormat: str
-    timeFormat: str
+    dateFormat: str                      # (an enum; doc_world's read-back writes "")
+    timeFormat: Literal["TIME_FORMAT_UNSPECIFIED", "TIME_FORMAT_DISABLED", "TIME_FORMAT_HOUR_MINUTE",
+                        "TIME_FORMAT_HOUR_MINUTE_TIMEZONE"]
     locale: str
 
 
@@ -915,16 +1597,33 @@ class DocsTableCell(TypedDict, total=False):
     content: list[DocsStructuralElement]
 
 
+class DocsTableRowStyle(TypedDict, total=False):
+    minRowHeight: DocsDimension
+    tableHeader: bool
+    preventOverflow: bool
+
+
 class DocsTableRow(TypedDict, total=False):
     startIndex: int
     endIndex: int
     tableCells: list[DocsTableCell]
+    tableRowStyle: DocsTableRowStyle
+
+
+class DocsTableColumnProperties(TypedDict, total=False):
+    width: DocsDimension
+    widthType: Literal["WIDTH_TYPE_UNSPECIFIED", "EVENLY_DISTRIBUTED", "FIXED_WIDTH"]
+
+
+class DocsTableStyle(TypedDict, total=False):
+    tableColumnProperties: list[DocsTableColumnProperties]
 
 
 class DocsTable(TypedDict, total=False):
     rows: int
     columns: int
     tableRows: list[DocsTableRow]
+    tableStyle: DocsTableStyle
 
 
 class DocsStructuralElement(TypedDict, total=False):
@@ -942,8 +1641,10 @@ class DocsBody(TypedDict, total=False):
 
 class DocsNestingLevel(TypedDict, total=False):
     glyphSymbol: str
-    glyphType: str
+    glyphType: Literal["GLYPH_TYPE_UNSPECIFIED", "NONE", "DECIMAL", "ZERO_DECIMAL", "UPPER_ALPHA", "ALPHA",
+                       "UPPER_ROMAN", "ROMAN"]
     glyphFormat: str
+    startNumber: int
 
 
 class DocsListProperties(TypedDict, total=False):
@@ -980,7 +1681,7 @@ class DocsInlineObject(TypedDict, total=False):
 
 
 class DocsNamedStyle(TypedDict, total=False):
-    namedStyleType: str
+    namedStyleType: str                  # (DocsNamedStyleType once doc_world's theme names are)
     textStyle: DocsTextStyle
     paragraphStyle: DocsParagraphStyle
 
@@ -1023,6 +1724,10 @@ class DocsDocumentTab(TypedDict, total=False):
     namedStyles: DocsNamedStyles
     namedRanges: dict[str, DocsNamedRanges]
     documentStyle: JsonObject
+    headers: dict[str, DocsHeader]
+    footers: dict[str, DocsFooter]
+    footnotes: dict[str, DocsFootnote]
+    positionedObjects: dict[str, DocsPositionedObject]
 
 
 class DocsTab(TypedDict, total=False):
@@ -1031,14 +1736,89 @@ class DocsTab(TypedDict, total=False):
     childTabs: list[DocsTab]
 
 
+class DocsBackground(TypedDict, total=False):
+    color: DocsOptionalColor
+
+
+class DocsDocumentFormat(TypedDict, total=False):
+    documentMode: Literal["DOCUMENT_MODE_UNSPECIFIED", "PAGES", "PAGELESS"]
+
+
+class DocsDocumentStyle(TypedDict, total=False):
+    """A document's page setup: what `updateDocumentStyle` writes (read back as `documentStyle`,
+    still JSON there: `doc_ir` does not read it yet)."""
+    background: DocsBackground
+    defaultHeaderId: str
+    defaultFooterId: str
+    evenPageHeaderId: str
+    evenPageFooterId: str
+    firstPageHeaderId: str
+    firstPageFooterId: str
+    documentFormat: DocsDocumentFormat
+    flipPageOrientation: bool
+    marginTop: DocsDimension
+    marginBottom: DocsDimension
+    marginLeft: DocsDimension
+    marginRight: DocsDimension
+    marginHeader: DocsDimension
+    marginFooter: DocsDimension
+    pageNumberStart: int
+    pageSize: DocsSize
+    useCustomHeaderFooterMargins: bool
+    useEvenPageHeaderFooter: bool
+    useFirstPageHeaderFooter: bool
+
+
+class DocsHeader(TypedDict, total=False):
+    headerId: str
+    content: list[DocsStructuralElement]
+
+
+class DocsFooter(TypedDict, total=False):
+    footerId: str
+    content: list[DocsStructuralElement]
+
+
+class DocsFootnote(TypedDict, total=False):
+    footnoteId: str
+    content: list[DocsStructuralElement]
+
+
+class DocsPositionedObjectPositioning(TypedDict, total=False):
+    layout: Literal["POSITIONED_OBJECT_LAYOUT_UNSPECIFIED", "WRAP_TEXT", "BREAK_LEFT", "BREAK_RIGHT",
+                    "BREAK_LEFT_RIGHT", "IN_FRONT_OF_TEXT", "BEHIND_TEXT"]
+    leftOffset: DocsDimension
+    topOffset: DocsDimension
+
+
+class DocsPositionedObjectProperties(TypedDict, total=False):
+    embeddedObject: DocsEmbeddedObject
+    positioning: DocsPositionedObjectPositioning
+
+
+class DocsPositionedObject(TypedDict, total=False):
+    """A picture anchored to a paragraph rather than in its text (Docs' "wrap text")."""
+    objectId: str
+    positionedObjectProperties: DocsPositionedObjectProperties
+
+
+SuggestionsViewMode = Literal["DEFAULT_FOR_CURRENT_ACCESS", "SUGGESTIONS_INLINE", "PREVIEW_SUGGESTIONS_ACCEPTED",
+                              "PREVIEW_WITHOUT_SUGGESTIONS"]
+
+
 class Document(TypedDict, total=False):
-    """`documents.get`. With `includeTabsContent` the content is under `tabs`, not `body`."""
+    """`documents.get`. With `includeTabsContent` the content is under `tabs`, not `body`; the
+    headers, footers, footnotes and positioned objects of a document without tabs are here."""
     documentId: str
     title: str
     revisionId: str
-    suggestionsViewMode: str
+    suggestionsViewMode: SuggestionsViewMode
     body: DocsBody
     tabs: list[DocsTab]
+    headers: dict[str, DocsHeader]
+    footers: dict[str, DocsFooter]
+    footnotes: dict[str, DocsFootnote]
+    positionedObjects: dict[str, DocsPositionedObject]
     namedRanges: dict[str, DocsNamedRanges]
     inlineObjects: dict[str, DocsInlineObject]
     lists: dict[str, DocsList]
@@ -1096,9 +1876,18 @@ class UpdateParagraphStyleRequest(TypedDict, total=False):
     fields: Required[str]
 
 
+DocsBulletPreset = Literal[
+    "BULLET_GLYPH_PRESET_UNSPECIFIED", "BULLET_DISC_CIRCLE_SQUARE", "BULLET_DIAMONDX_ARROW3D_SQUARE", "BULLET_CHECKBOX",
+    "BULLET_ARROW_DIAMOND_DISC", "BULLET_STAR_CIRCLE_SQUARE", "BULLET_ARROW3D_CIRCLE_SQUARE",
+    "BULLET_LEFTTRIANGLE_DIAMOND_DISC", "BULLET_DIAMONDX_HOLLOWDIAMOND_SQUARE", "BULLET_DIAMOND_CIRCLE_SQUARE",
+    "NUMBERED_DECIMAL_ALPHA_ROMAN", "NUMBERED_DECIMAL_ALPHA_ROMAN_PARENS", "NUMBERED_DECIMAL_NESTED",
+    "NUMBERED_UPPERALPHA_ALPHA_ROMAN", "NUMBERED_UPPERROMAN_UPPERALPHA_DECIMAL", "NUMBERED_ZERODECIMAL_ALPHA_ROMAN"]
+"""(Not Slides' presets: Docs numbers with DECIMAL where Slides says DIGIT.)"""
+
+
 class CreateParagraphBulletsRequest(TypedDict, total=False):
     range: Required[DocsRangeWrite]
-    bulletPreset: Required[str]
+    bulletPreset: Required[DocsBulletPreset]
 
 
 class DeleteParagraphBulletsRequest(TypedDict, total=False):
@@ -1179,6 +1968,44 @@ class DeleteTabRequest(TypedDict, total=False):
     tabId: Required[str]
 
 
+class CreateHeaderRequest(TypedDict, total=False):
+    type: Required[Literal["HEADER_FOOTER_TYPE_UNSPECIFIED", "DEFAULT"]]
+    sectionBreakLocation: DocsLocation
+
+
+class CreateFooterRequest(TypedDict, total=False):
+    type: Required[Literal["HEADER_FOOTER_TYPE_UNSPECIFIED", "DEFAULT"]]
+    sectionBreakLocation: DocsLocation
+
+
+class CreateFootnoteRequest(TypedDict, total=False):
+    location: DocsLocation
+    endOfSegmentLocation: DocsEndOfSegmentLocation
+
+
+class InsertPageBreakRequest(TypedDict, total=False):
+    location: DocsLocation
+    endOfSegmentLocation: DocsEndOfSegmentLocation
+
+
+class InsertSectionBreakRequest(TypedDict, total=False):
+    sectionType: Required[Literal["SECTION_TYPE_UNSPECIFIED", "CONTINUOUS", "NEXT_PAGE"]]
+    location: DocsLocation
+    endOfSegmentLocation: DocsEndOfSegmentLocation
+
+
+class InsertRichLinkRequest(TypedDict, total=False):
+    richLinkProperties: Required[DocsRichLinkProperties]
+    location: DocsLocation
+    endOfSegmentLocation: DocsEndOfSegmentLocation
+
+
+class UpdateDocumentStyleRequest(TypedDict, total=False):
+    documentStyle: Required[DocsDocumentStyle]
+    fields: Required[str]
+    tabId: str
+
+
 class DocsRequest(TypedDict, total=False):
     """One request of a `documents.batchUpdate`: exactly one of these is set."""
     insertText: InsertTextRequest
@@ -1200,21 +2027,31 @@ class DocsRequest(TypedDict, total=False):
     addDocumentTab: AddDocumentTabRequest
     updateDocumentTabProperties: UpdateDocumentTabPropertiesRequest
     deleteTab: DeleteTabRequest
+    createHeader: CreateHeaderRequest
+    createFooter: CreateFooterRequest
+    createFootnote: CreateFootnoteRequest
+    insertPageBreak: InsertPageBreakRequest
+    insertSectionBreak: InsertSectionBreakRequest
+    insertRichLink: InsertRichLinkRequest
+    updateDocumentStyle: UpdateDocumentStyleRequest
 
 
-# Every kind of request above, by the key that says it.
+# Every kind of request above, by the key that says it (held equal to `DocsRequest`'s keys by
+# `tests/test_google_schema.py`).
 DocsRequestKind = Literal[
     "insertText", "deleteContentRange", "updateTextStyle", "updateParagraphStyle",
     "createParagraphBullets", "deleteParagraphBullets", "createNamedRange", "deleteNamedRange",
     "insertTable", "insertTableRow", "insertTableColumn", "deleteTableRow", "deleteTableColumn",
     "insertInlineImage", "insertPerson", "insertDate", "addDocumentTab",
-    "updateDocumentTabProperties", "deleteTab"]
+    "updateDocumentTabProperties", "deleteTab", "createHeader", "createFooter", "createFootnote",
+    "insertPageBreak", "insertSectionBreak", "insertRichLink", "updateDocumentStyle"]
 DOCS_REQUEST_KINDS: tuple[DocsRequestKind, ...] = (
     "insertText", "deleteContentRange", "updateTextStyle", "updateParagraphStyle",
     "createParagraphBullets", "deleteParagraphBullets", "createNamedRange", "deleteNamedRange",
     "insertTable", "insertTableRow", "insertTableColumn", "deleteTableRow", "deleteTableColumn",
     "insertInlineImage", "insertPerson", "insertDate", "addDocumentTab",
-    "updateDocumentTabProperties", "deleteTab")
+    "updateDocumentTabProperties", "deleteTab", "createHeader", "createFooter", "createFootnote",
+    "insertPageBreak", "insertSectionBreak", "insertRichLink", "updateDocumentStyle")
 
 
 def docs_request_kind(request: DocsRequest) -> DocsRequestKind:
@@ -1239,6 +2076,7 @@ class DocsBatchUpdateBody(TypedDict, total=False):
 class GetDocument(TypedDict, total=False):
     documentId: Required[str]
     includeTabsContent: bool
+    suggestionsViewMode: SuggestionsViewMode
 
 
 class UpdateDocument(TypedDict, total=False):

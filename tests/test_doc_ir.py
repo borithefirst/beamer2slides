@@ -44,14 +44,6 @@ class _ParagraphStyle(DocsParagraphStyle, total=False):
     direction: str
 
 
-class _Table(DocsTable, total=False):
-    tableStyle: JsonObject
-
-
-class _TableRow(DocsTableRow, total=False):
-    tableRowStyle: JsonObject
-
-
 class _TableCell(DocsTableCell, total=False):
     tableCellStyle: JsonObject
 
@@ -65,12 +57,6 @@ class _ImageProperties(DocsImageProperties, total=False):
 class _EmbeddedObject(DocsEmbeddedObject, total=False):
     marginTop: DocsDimension
     embeddedObjectBorder: JsonObject
-
-
-class _Document(Document, total=False):
-    headers: JsonObject
-    footnotes: JsonObject
-    positionedObjects: JsonObject
 
 
 def _clean(block: Block) -> dict[str, object]:
@@ -913,10 +899,10 @@ _UNREAD_STYLE: _ParagraphStyle = {
     "direction": "LEFT_TO_RIGHT", "pageBreakBefore": True}
 _UNREAD_CELL: _TableCell = {"startIndex": 10, "endIndex": 20, "content": [],
                             "tableCellStyle": {"rowSpan": 1, "columnSpan": 2}}
-_UNREAD_ROW: _TableRow = {"startIndex": 9, "endIndex": 40,
+_UNREAD_ROW: DocsTableRow = {"startIndex": 9, "endIndex": 40,
                           "tableRowStyle": {"minRowHeight": {"magnitude": 20}},
                           "tableCells": [_UNREAD_CELL]}
-_UNREAD_TABLE: _Table = {
+_UNREAD_TABLE: DocsTable = {
     "rows": 1, "columns": 2,
     "tableStyle": {"tableColumnProperties": [{"width": {"magnitude": 100}}]},
     "tableRows": [_UNREAD_ROW]}
@@ -930,7 +916,7 @@ _UNREAD_OBJECT: _EmbeddedObject = {"title": "t",
 _UNREAD_LEVEL: _NestingLevel = {"glyphSymbol": "-", "startNumber": 7, "indentStart": {"magnitude": 36},
                                 "textStyle": {"bold": True}}
 
-UNMODELLED_LIVE: _Document = {
+UNMODELLED_LIVE: Document = {
     "documentId": "d1", "title": "Report", "revisionId": "r1",
     "documentStyle": {"marginTop": {"magnitude": 72, "unit": "PT"}},
     "headers": {"h1": {"content": []}},
@@ -1042,7 +1028,7 @@ def test_a_block_the_dialect_reads_whole_carries_no_risk() -> None:
 def test_a_property_outside_the_blocks_is_no_block_s_risk() -> None:
     """`documentStyle`, `headers`, `footnotes` are the page, not a paragraph: no
     rewrite of a block can drop them, and naming a block for them would be a lie."""
-    doc: _Document = {"documentId": "d", "documentStyle": {"marginTop": {"magnitude": 72}},
+    doc: Document = {"documentId": "d", "documentStyle": {"marginTop": {"magnitude": 72}},
            "headers": {"h1": {"content": []}},
            "body": {"content": [{"startIndex": 1, "endIndex": 5, "paragraph": {
                "elements": [{"startIndex": 1, "endIndex": 5,

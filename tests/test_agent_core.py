@@ -26,8 +26,8 @@ from .json_reads import jstr
 if TYPE_CHECKING:
     from google.auth.credentials import Credentials
 
-    from beamer2slides.google_types import (Comments, DocsService, Documents, DriveService, Files,
-                                            Permissions, Presentations, SlidesService)
+    from beamer2slides.google_types import (AboutResource, Comments, DocsService, Documents, DriveService, Files,
+                                            Permissions, Presentations, Revisions, SlidesService)
 
 _T = TypeVar("_T")
 
@@ -492,6 +492,12 @@ class _Untouchable:
         raise AssertionError("a sentinel client was called")
 
     def comments(self) -> "Comments":
+        raise AssertionError("a sentinel client was called")
+
+    def revisions(self) -> "Revisions":
+        raise AssertionError("a sentinel client was called")
+
+    def about(self) -> "AboutResource":
         raise AssertionError("a sentinel client was called")
 
     def documents(self) -> "Documents":

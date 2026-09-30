@@ -10,18 +10,20 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Generic, NoReturn, TypeVar
 
-from beamer2slides.google_types import (BatchUpdateResponse, Comment, CommentList, Comments, DocsBatchUpdateResponse,
-                                        Document, Documents, DriveFile, Empty, FileList, Files, Page, Pages,
-                                        Permissions, Presentation, Presentations, Request, Thumbnail)
+from beamer2slides.google_types import (About, AboutResource, BatchUpdateResponse, Comment, CommentList, Comments,
+                                        DocsBatchUpdateResponse, Document, Documents, DriveFile, Empty, FileList,
+                                        Files, Page, Pages, Permissions, Presentation, Presentations, Request,
+                                        Revision, RevisionList, Revisions, Thumbnail)
 from beamer2slides.net import Fetch
 
 if TYPE_CHECKING:
     from typing_extensions import Unpack
 
     from beamer2slides.google_types import (CopyFile, CreateComment, CreateFile, CreatePresentation, ExecuteOptions,
-                                            ExportFile, FileId, GetDocument, GetFile, GetPage, GetPresentation,
-                                            GetThumbnail, ListComments, ListFiles, UpdateDocument, UpdateFile,
-                                            UpdatePresentation)
+                                            ExportFile, FileId, GetAbout, GetDocument, GetFile, GetPage,
+                                            GetPresentation, GetRevision, GetThumbnail, ListComments, ListFiles,
+                                            ListRevisions, UpdateDocument, UpdateFile, UpdatePresentation,
+                                            UpdateRevision)
 
 T = TypeVar("T")
 
@@ -98,6 +100,12 @@ class NoDrive:
     def comments(self) -> Comments:
         unfaked("drive.comments()")
 
+    def revisions(self) -> Revisions:
+        unfaked("drive.revisions()")
+
+    def about(self) -> AboutResource:
+        unfaked("drive.about()")
+
 
 class NoPresentations:
     """`slides.presentations()`, refusing every call."""
@@ -140,6 +148,26 @@ class NoComments:
 
     def create(self, **kw: Unpack[CreateComment]) -> Request[Comment]:
         unfaked("comments().create")
+
+
+class NoRevisions:
+    """`drive.revisions()`, refusing every call."""
+
+    def list(self, **kw: Unpack[ListRevisions]) -> Request[RevisionList]:
+        unfaked("revisions().list")
+
+    def get(self, **kw: Unpack[GetRevision]) -> Request[Revision]:
+        unfaked("revisions().get")
+
+    def update(self, **kw: Unpack[UpdateRevision]) -> Request[Revision]:
+        unfaked("revisions().update")
+
+
+class NoAbout:
+    """`drive.about()`, refusing every call."""
+
+    def get(self, **kw: Unpack[GetAbout]) -> Request[About]:
+        unfaked("about().get")
 
 
 class NoDocuments:

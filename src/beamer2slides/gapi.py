@@ -161,6 +161,16 @@ def media_upload(data: IO[bytes], mimetype: str) -> MediaBody:
     return MediaIoBaseUpload(data, mimetype=mimetype, resumable=False)
 
 
+def resumable_media_upload(data: IO[bytes], mimetype: str) -> MediaBody:
+    """`MediaIoBaseUpload` sent in resumable chunks (`uploadType=resumable`), for a large file's
+    `media_body`: a dropped connection resumes where it stopped instead of starting over."""
+    try:
+        from googleapiclient.http import MediaIoBaseUpload
+    except ImportError:
+        raise ModuleNotFoundError(MISSING) from None
+    return MediaIoBaseUpload(data, mimetype=mimetype, resumable=True)
+
+
 def status_of(error: BaseException) -> int | None:
     """The HTTP status an API error carries, or None if it carries none."""
     status = getattr(getattr(error, "resp", None), "status", None)

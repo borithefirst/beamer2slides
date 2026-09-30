@@ -21,8 +21,9 @@ from beamer2slides import deck_export, google_auth, guard
 from beamer2slides.deck_pictures import LivePictures
 from beamer2slides.gapi import HttpError
 from beamer2slides.google_auth import Services
-from beamer2slides.google_types import (BatchUpdateResponse, Comments, DriveFile, DriveService, Empty, Pages,
-                                        Permissions, Presentation, Presentations, SlidesService, presentation)
+from beamer2slides.google_types import (AboutResource, BatchUpdateResponse, Comments, DriveFile, DriveService, Empty,
+                                        Pages, Permissions, Presentation, Presentations, Revisions, SlidesService,
+                                        presentation)
 from beamer2slides.json_types import Json, JsonObject, as_array, as_objects, as_str
 
 from .test_deck_pictures import pptx
@@ -207,6 +208,12 @@ class FakeDrive:
 
     def comments(self) -> Comments:
         unused("comments()")
+
+    def revisions(self) -> Revisions:
+        unused("revisions()")
+
+    def about(self) -> AboutResource:
+        unused("about()")
 
 
 def doomed(requests: Sequence[Mapping[str, object]]) -> list[str]:

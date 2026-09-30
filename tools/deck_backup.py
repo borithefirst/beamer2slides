@@ -35,74 +35,15 @@ import io
 import json
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypedDict, runtime_checkable
 
 from beamer2slides import guard
 from beamer2slides.gapi import media_upload
 from beamer2slides.google_auth import credentials, drive_service
-from beamer2slides.google_types import DriveFile, DriveService, Request, file_id
+from beamer2slides.google_types import DriveFile, DriveService, Revision, file_id
 from beamer2slides.guard import PPTX_MIME, backup_dir, deck_url
 from beamer2slides.gslides import execute
 from beamer2slides.json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
 from beamer2slides.sync import resolve_deck
-
-if TYPE_CHECKING:
-    from typing_extensions import Required, Unpack
-
-
-# ---------------------------------------------------------------- Drive's revisions
-# `revisions` is a Drive call only this tool makes, so its Protocol is here rather than in
-# google_types (which lists what the package calls); `revised` checks a client has it.
-
-
-class RevisionUser(TypedDict, total=False):
-    displayName: str
-
-
-class Revision(TypedDict, total=False):
-    """A revision of a Drive file, as far as `fields=` asked for it."""
-    id: str
-    modifiedTime: str
-    keepForever: bool
-    published: bool
-    lastModifyingUser: RevisionUser
-    exportLinks: dict[str, str]
-
-
-class RevisionList(TypedDict, total=False):
-    revisions: list[Revision]
-    nextPageToken: str
-
-
-class ListRevisions(TypedDict, total=False):
-    fileId: Required[str]
-    pageSize: int
-    pageToken: str | None
-    fields: str
-
-
-class GetRevision(TypedDict, total=False):
-    fileId: Required[str]
-    revisionId: Required[str]
-    fields: str
-
-
-class Revisions(Protocol):
-    def list(self, **kw: Unpack[ListRevisions]) -> Request[RevisionList]: ...
-    def get(self, **kw: Unpack[GetRevision]) -> Request[Revision]: ...
-
-
-@runtime_checkable
-class RevisedDrive(DriveService, Protocol):
-    """A Drive v3 client with its `revisions` collection."""
-
-    def revisions(self) -> Revisions: ...
-
-
-def revised(drive: DriveService) -> RevisedDrive:
-    if isinstance(drive, RevisedDrive):
-        return drive
-    raise TypeError("this Drive client has no revisions() collection")
 
 
 def revision_id(revision: Revision) -> str:
@@ -126,7 +67,7 @@ def file_name(info: DriveFile, pid: str) -> str:
     return name
 
 
-def revisions(drive: RevisedDrive, pid: str) -> list[Revision]:
+def revisions(drive: DriveService, pid: str) -> list[Revision]:
     out: list[Revision] = []
     token: str | None = None
     while True:
@@ -147,7 +88,7 @@ def download(url: str) -> bytes:
     return r.content
 
 
-def revision_pptx(drive: RevisedDrive, pid: str, revision: Revision) -> bytes:
+def revision_pptx(drive: DriveService, pid: str, revision: Revision) -> bytes:
     links = revision.get("exportLinks") or execute(
         drive.revisions().get(fileId=pid, revisionId=revision_id(revision), fields="exportLinks")).get("exportLinks", {})
     if PPTX_MIME not in links:
@@ -287,7 +228,7 @@ def main() -> None:
         return prune_drive(pid, keep, older_than_days, yes)
     if action == "prune":  # no Google call: this is about files on disk
         return prune(folder, keep, older_than_days, yes)
-    drive = revised(drive_service(None))
+    drive = drive_service(None)
     revs = revisions(drive, pid)
     if action == "list":
         info = execute(drive.files().get(fileId=pid, fields="name,modifiedTime"))
