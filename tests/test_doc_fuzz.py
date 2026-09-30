@@ -3649,9 +3649,12 @@ def test_a_block_the_merge_will_not_write_is_asked_about_by_the_key_it_is_refuse
 
 class _PickKeys(random.Random):
     """An rng that picks the blocks it is told to, by key: the part's own blocks, found
-    in the sequence it is asked to choose from by identity."""
+    in the sequence it is asked to choose from by identity.
 
-    def __init__(self, part: Ir, keys: list[str]) -> None:
+    Its arguments are keywords: 3.10's `Random.__new__` refuses a second positional one,
+    whatever `__init__` takes."""
+
+    def __init__(self, *, part: Ir, keys: list[str]) -> None:
         super().__init__(0)
         by_key = {b.get("key"): b for b in part["blocks"]}
         self.picks: list[Block] = [by_key[key] for key in keys]
@@ -3683,7 +3686,7 @@ def test_a_block_dragged_below_the_cut_lands_where_the_reader_let_go_of_it() -> 
     part = doc_ir.from_document(world.read(), None)
     doc_ir.apply_keys(part, doc_ir.named_ranges_of(world.read(), None))
     batches, _ = fuzz_docs.read_move_block(
-        _PickKeys(part, ["paragraph:second-one", "paragraph:third-one"]), part, None)
+        _PickKeys(part=part, keys=["paragraph:second-one", "paragraph:third-one"]), part, None)
     for batch in batches:
         world.apply(batch)
     assert [oracle.text_of(b) for b in doc_world.read_ir(world, ours, base)["blocks"]] \
