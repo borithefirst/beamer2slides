@@ -381,7 +381,7 @@ def table_refill(base_el: JsonObject | None, el: JsonObject, objects: Mapping[st
     too when inserted and deleted rows can give it the margins it needs (`table_steps`: a new row
     or column takes those of the one it is inserted beside, tools/probe_pptx_table_margins.py);
     `steps` are those requests, sent after the cells are emptied and before they are filled."""
-    from .emit import pptx_table
+    from .emit import SLIDE_W, pptx_table
     if not base_el or el.get("kind") != "table" or base_el.get("kind") != "table":
         return None
     old = _obj(base_el.get("ir"), "base element ir")
@@ -403,7 +403,7 @@ def table_refill(base_el: JsonObject | None, el: JsonObject, objects: Mapping[st
     grid = merge.table_grid(as_optional_str(live.get("text"), "read-back text"), live_dims)
     if grid is None:
         return None
-    new, was = pptx_table(el, scale, fonts), pptx_table(old, scale, fonts)
+    new, was = pptx_table(el, scale, fonts, SLIDE_W / scale), pptx_table(old, scale, fonts, SLIDE_W / scale)
     have = [_nums(m, "table_margins") for m in as_array(margins, "table_margins")]
     steps = table_steps(have, new["margins"], was_dims[1], dims[1])
     if steps is None:
@@ -998,7 +998,7 @@ def planned(deck: JsonObject, pdf: Path, work: Path, page_width: float) -> "Deck
     from .emit_model import box_of
     from .render import crop_region
 
-    plan = DeckPlan(deck, page_width, contain=True)
+    plan = DeckPlan(deck, page_width, pptx_tables=False, contain=True)
     gone = {(c["page"], c["id"]) for c in plan.contained}
     # (from the PDF this deck was read from: `emit.crop_fallbacks` would take a slides.pdf an
     # earlier sync's notes left in `work`)
@@ -2635,7 +2635,7 @@ class Sync:
         fid = google_types.file_id(execute(drive.files().create(
             body=place({"name": "beamer2slides sync staging (temporary)",
                         "mimeType": "application/vnd.google-apps.presentation",
-                        "appProperties": {"b2sStaging": self.pid}}, drive),
+                        "appProperties": {"b2sStaging": self.pid}}, drive, beside=None),
             media_body=media_upload(pptx, PPTX_MIME), fields="id")), "the staging deck")
         try:
             staged = execute(slides.presentations().get(presentationId=fid))
@@ -2768,7 +2768,7 @@ class Sync:
         ungrouped: element indices whose own group (with anchored pictures) isn't made.
         Returns (requests, element index -> objects created, element index -> new object id,
         extras: the slide-level requests (groups, z-order) for a new slide)."""
-        from .emit import created_ids, subtitle_element, table_requests, title_element
+        from .emit import SLIDE_W, created_ids, subtitle_element, table_requests, title_element
 
         o = _slides(self.ours, "ours")[ours]
         okey = as_str(o["key"], "ours slide key")
@@ -2793,7 +2793,7 @@ class Sync:
                    for i, v in in_place.items() if isinstance(v, InPlace)]}
         keys = self.plan.keys
         sizes = [(templates[k].w, templates[k].h) if k in templates else (STAND_IN, STAND_IN) for k in keys]
-        parts, element_ids = self.plan.slide_parts(slide_copy, page_elements, {}, moves, sizes)
+        parts, element_ids = self.plan.slide_parts(slide_copy, page_elements, {}, moves, sizes, None)
         if demoted and not new_slide:
             # The other elements as on a slide with its title (a title demoted to body text
             # would widen their right limits, emit.text_right_limit): a stand-in placeholder size.
@@ -2801,7 +2801,7 @@ class Sync:
             orig_sub = subtitle_element(slide, orig_title) if orig_title is not None else None
             stand: list[JsonObject] = [{"objectId": f"{vsid}_t{i}", "size": emu_size_json(STAND_IN, STAND_IN)}
                                        for i in (orig_title, orig_sub) if i is not None and i not in in_place]
-            full, _ = self.plan.slide_parts(slide, {vsid: page_elements[vsid] + stand}, {}, moves, sizes)
+            full, _ = self.plan.slide_parts(slide, {vsid: page_elements[vsid] + stand}, {}, moves, sizes, None)
             demoted_idx = {i for i in (orig_title, orig_sub) if i is not None and i not in in_place}
             parts = [full[0]] + [parts[1 + i] if i in demoted_idx else full[1 + i] for i in range(len(element_ids))] + \
                 parts[1 + len(element_ids):]
@@ -2843,7 +2843,7 @@ class Sync:
                 rs = [delete_text_request(new_oid[i], {"rowIndex": r, "columnIndex": c}) for r, c in live.cells] + \
                      [named_step(step, new_oid[i]) for step in live.steps] + \
                      [r for r in table_requests(self.plan.placed(source[i], n), sid, new_oid[i], self.scale,
-                                                self.plan.fonts, imported=True) if "updatePageElementsZOrder" not in r]
+                                                self.plan.fonts, imported=True, page_w=SLIDE_W / self.scale) if "updatePageElementsZOrder" not in r]
                 dx, dy = live.shift
                 if abs(dx) > 0.01 or abs(dy) > 0.01:  # (the source moved it)
                     rs.append(google_types.slides_json({"updatePageElementTransform": {
@@ -4420,7 +4420,7 @@ def sync(pdf: Path, deck: str, out: Path | None, dry_run: bool, overlays: str | 
     started = time.monotonic()
     pid, folder = resolve_deck(deck)
     out = out or folder or out_root() / pdf.stem
-    slides, drive = slides_service(), drive_service()
+    slides, drive = slides_service(None), drive_service(None)
     problems: list[str] = []
     # The deck is read while the base is loaded and the new PDF is converted: three things that
     # need nothing of each other, and a round trip costs about the same whatever else is in the

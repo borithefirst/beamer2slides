@@ -608,9 +608,15 @@ def moved_pairs(moves: Iterable[MoveLike]) -> list[tuple[int, int]]:
     return out
 
 
-def align_slides(base: Sequence[SlideLike], ours: Sequence[SlideLike], moves: Sequence[MoveLike] | None = None,
-                 weak: dict[int, str] | None = None) -> dict[int, int]:
-    """`align_slides_of`, for callers with dicts. `moves`: None looks for them (`label_moves`)."""
+def align_slides(base: Sequence[SlideLike], ours: Sequence[SlideLike]) -> dict[int, int]:
+    """`align_slides_with` the label moves looked for (`label_moves`), the weak pairings not asked."""
+    return align_slides_with(base, ours, moves=None, weak=None)
+
+
+def align_slides_with(base: Sequence[SlideLike], ours: Sequence[SlideLike], *, moves: Sequence[MoveLike] | None,
+                      weak: dict[int, str] | None) -> dict[int, int]:
+    """`align_slides_of`, for callers with dicts. `moves`: None looks for them (`label_moves`);
+    `weak`, if given, is filled as `align_slides_of` says."""
     bs, os_ = slide_infos(base), slide_infos(ours)
     found: dict[int, WeakHow] = {}
     pairs = align_slides_of(bs, os_, moved_pairs(label_moves_of(bs, os_) if moves is None else moves),
@@ -888,11 +894,11 @@ def near_misses_of(base: Sequence[SlideInfo], ours: Sequence[SlideInfo], pairs: 
 
 
 def inherit_slide_keys(base: Sequence[SlideLike], base_keys: Sequence[str], ours: Sequence[SlideLike],
-                       moves: Sequence[MoveLike] | None = None,
-                       weak: dict[int, str] | None = None) -> tuple[list[SlideKey], dict[int, int]]:
+                       moves: Sequence[MoveLike] | None,
+                       weak: dict[int, str] | None) -> tuple[list[SlideKey], dict[int, int]]:
     """Keys for ours slides (matched ones inherit the base key) and the match (ours -> base index).
-    `weak`: see `align_slides`."""
-    pairs = align_slides(base, ours, moves, weak)
+    `moves`, `weak`: see `align_slides_with`."""
+    pairs = align_slides_with(base, ours, moves=moves, weak=weak)
     taken = set(base_keys)
     keys: list[SlideKey] = []
     for j, info in enumerate(ours):
@@ -927,7 +933,7 @@ def fingerprint_of(el: JsonMap, out: Path | None, anchor_key: ElementKey | None)
                        image_sha1=image_sha1(el, out), anchor=anchor_key, look=look(el) or None)
 
 
-def fingerprint(el: JsonMap, out: Path | None = None, anchor_key: str | None = None) -> JsonObject:
+def fingerprint(el: JsonMap, out: Path | None, anchor_key: str | None) -> JsonObject:
     """`fingerprint_of` as a base entry stores it."""
     return fingerprint_json(fingerprint_of(el, out, None if anchor_key is None else ElementKey(anchor_key)))
 
@@ -1064,7 +1070,7 @@ def match_elements(base: Sequence[BaseItem], ours: Sequence[MatchItem], reserved
 
 
 def slide_element_keys(elements: Sequence[JsonMap], out: Path | None,
-                       base: Sequence[JsonMap] | None = None) -> tuple[list[ElementKey], list[JsonObject]]:
+                       base: Sequence[JsonMap] | None) -> tuple[list[ElementKey], list[JsonObject]]:
     """`slide_element_keys_of`, with `base` as `base_items` gives it and the fingerprints as a base
     entry stores them."""
     keys, fps = slide_element_keys_of(elements, out, None if base is None else [_base_item(b) for b in base])
@@ -1118,7 +1124,7 @@ PageKey = Callable[[int], object]
 """A page index -> the key of the slide it became: what a `#page=` link is hashed as."""
 
 
-def normalise_ir(value: Json, anchor_key: str | None = None, page_key: PageKey | None = None) -> Json:
+def normalise_ir(value: Json, anchor_key: str | None, page_key: PageKey | None) -> Json:
     """The element's IR without ids and page-specific numbering (links to pages become slide keys)."""
     if isinstance(value, dict):
         out: JsonObject = {}
@@ -1156,8 +1162,8 @@ def _styles(value: Json, found: set[tuple[str, str]]) -> None:
             _styles(v, found)
 
 
-def ir_fields(el: JsonMap, out: Path | None = None, anchor_key: str | None = None,
-              page_key: PageKey | None = None) -> tuple[str, JsonObject]:
+def ir_fields(el: JsonMap, out: Path | None, anchor_key: str | None,
+              page_key: PageKey | None) -> tuple[str, JsonObject]:
     """`ir_fields_json`, the field hashes as a base entry stores them."""
     whole, fields = ir_fields_json(el, out, anchor_key, page_key)
     return whole, element_fields_json(fields)

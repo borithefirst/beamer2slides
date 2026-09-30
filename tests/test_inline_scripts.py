@@ -2,7 +2,7 @@
 the size the IR gives them (Slides draws a script at 2/3), raised marks drawn as the text face's
 own degree sign and asterisk, and where the word space after smaller words goes."""
 
-from beamer2slides.classify import Rect, Span, classify_page
+from beamer2slides.classify import Rect, Span, classify_page, new_span
 from beamer2slides.fonts import font_info
 from beamer2slides.ir import Run, Script
 from beamer2slides.raw_types import RawSpan
@@ -15,9 +15,9 @@ SYMBOLS = "CMSY8"
 def span(text: str, x0: float, baseline: float, size: float = 11.0, w: float | None = None,
          font: str = FONT) -> Span:
     w = len(text) * 0.5 * size if w is None else w
-    return Span(id="", text=text, font=font, size=size, color="#000000",
+    return new_span(id="", text=text, font=font, size=size, color="#000000",
                 rect=Rect(x0, baseline - 0.75 * size, x0 + w, baseline + 0.25 * size),
-                baseline=baseline, horizontal=True, info=font_info(font))
+                baseline=baseline, horizontal=True, info=font_info(font), link=None, drawn=False, visual=None)
 
 
 def after(s: Span, text: str, rise: float = 0.0, size: float = 11.0, gap: float = 0.0, font: str = FONT) -> Span:

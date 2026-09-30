@@ -511,8 +511,8 @@ def main() -> None:
         files = gather(args.deck, work / "deck-files", args.thumbnails, args.pictures, args.google_fonts)
         target = Path(args.deck) if files is None and Path(args.deck).suffix == ".json" else None
         cmd_adopt(args.deck, args.tex, args.work, args.apply, args.out, args.max_iter, args.engine,
-                  args.flow, target, args.base, args.base_in_drive, fonts=args.fonts, pptx=args.pptx,
-                  files=files)
+                  args.flow, target, base=args.base, base_in_drive=args.base_in_drive, log=print, fonts=args.fonts,
+                  found=None, pptx=args.pptx, files=files)
         return
     if args.command in ("pull", "converge"):
         from .inverse import cmd_converge, cmd_pull

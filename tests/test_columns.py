@@ -3,7 +3,7 @@ subtitle touching a heading), which lines continue a paragraph (a column below i
 how a lone line is aligned, and how Chinese or Japanese lines are joined and wrapped."""
 
 from beamer2slides import ir
-from beamer2slides.classify import Line, PageClassifier, Rect, Span, classify_page, first_word_width
+from beamer2slides.classify import Line, PageClassifier, Rect, Span, classify_page, first_word_width, new_span
 from beamer2slides.fonts import font_info
 from beamer2slides.raw_types import RawPage, RawSpan
 
@@ -15,9 +15,9 @@ CJK_FONT = "HaranoAjiGothic-Medium"
 def span(text: str, x0: float, baseline: float, size: float = 11.0, w: float | None = None,
          font: str = FONT) -> Span:
     w = len(text) * 0.5 * size if w is None else w
-    return Span(id=f"s{x0:.0f}-{baseline:.0f}", text=text, font=font, size=size, color="#000000",
+    return new_span(id=f"s{x0:.0f}-{baseline:.0f}", text=text, font=font, size=size, color="#000000",
                 rect=Rect(x0, baseline - 0.75 * size, x0 + w, baseline + 0.25 * size),
-                baseline=baseline, horizontal=True, info=font_info(font))
+                baseline=baseline, horizontal=True, info=font_info(font), link=None, drawn=False, visual=None)
 
 
 def raw(s: Span) -> RawSpan:

@@ -28,7 +28,7 @@ items follow the conventions the pipeline was tuned on:
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, Literal, Mapping, Protocol, Sequence, TypedDict, Union, runtime_checkable
 
@@ -67,7 +67,7 @@ class PdfError(Exception):
 # ---------------------------------------------------------------------- data
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Char:
     """One character as drawn: PDFium's generated spaces and line breaks are not characters."""
 
@@ -80,35 +80,36 @@ class Char:
     box: Box            # char_box of origin, dir, advance, size, ascent and descent
     dir: tuple[float, float]  # unit baseline direction, y down
     obj: int            # id of the text object drawing it; NO_OBJECT for synthetic characters
-    font_id: int = -1   # page-local font key for PdfPage.glyph_widths; -1 when unknown
-    advance: float = 0.0
-    synthetic: bool = False   # made by the pipeline (a word space), not drawn
-    ascent: float = 0.8       # em, positive
-    descent: float = -0.2     # em, negative
-    exact_advance: bool = True  # the advance of the glyph actually drawn (not the font's default glyph's)
+    font_id: int        # page-local font key for PdfPage.glyph_widths; -1 when unknown
+    advance: float
+    synthetic: bool     # made by the pipeline (a word space), not drawn
+    ascent: float       # em, positive
+    descent: float      # em, negative
+    exact_advance: bool  # the advance of the glyph actually drawn (not the font's default glyph's)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class PageObject:
     """A page object, form XObject contents included. `id` is its index in `objects()`."""
 
     id: int
     type: int           # OBJ_*
     matrix: Matrix      # object space -> page space (y down)
-    parent: int | None = None       # id of the form it is drawn in
-    children: list[int] = field(default_factory=list)  # ids, for a form
+    parent: int | None  # id of the form it is drawn in
+    children: list[int]  # ids, for a form (filled in as its contents are found)
     # What its clip paths and those of the forms it is drawn in leave of the page: the bounding
     # boxes of the clip paths (their points), intersected, page space; None when nothing clips it.
-    # An empty box (x1 <= x0 or y1 <= y0): nothing of the object shows.
-    clip: Box | None = None
+    # An empty box (x1 <= x0 or y1 <= y0): nothing of the object shows. (A backend finds it once
+    # every object is known, and sets it then.)
+    clip: Box | None
     # The marked-content sequences open around it (BMC / BDC ... EMC), outermost first, as
     # (tag, {key: value}): only string values (UTF-8, invalid bytes dropped) and numbers (as C int,
     # truncated) of the property dictionary, the rest left out. A form's contents start afresh:
     # the marks around the form are its own, not its children's (FPDFPageObj_GetMark).
-    marks: tuple[Mark, ...] = ()
+    marks: tuple[Mark, ...]
 
 
-@dataclass
+@dataclass(kw_only=True)
 class EmbeddedImage:
     """One image XObject as it is drawn on a page: its own file data and pixels, plus what
     decides whether that data may stand in for a render of the page (see render.image_file).
@@ -132,8 +133,8 @@ class EmbeddedImage:
     upright: bool                       # axis aligned and not mirrored (a y flip is the PDF norm)
     blended: bool                       # drawn with a constant alpha or a blend mode
     transparent: bool                   # anything see-through: a soft mask, a stencil mask, `blended`
-    pixels: Pixels | None = None    # uint8, h x w x 3 or 4
-    rendered: Pixels | None = None  # uint8, h x w x 3 or 4
+    pixels: Pixels | None           # uint8, h x w x 3 or 4
+    rendered: Pixels | None         # uint8, h x w x 3 or 4
 
     @property
     def jpeg(self) -> bytes:
@@ -263,10 +264,10 @@ class PdfPage(Protocol):
     def links(self) -> list[Link]:
         """Link annotations with a target page or a URI."""
 
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
-        """uint8 pixels of the page (or of `clip`, page space), `zoom` pixels per point, pixel
-        bounds rounded outwards (`pixel_bounds`): h x w x 3 on white, or h x w x 4 on a
-        transparent ground if `transparent`. Annotations are drawn; inactive objects are not.
+    def render(self, zoom: float, clip: Box | None, transparent: bool) -> Pixels:
+        """uint8 pixels of the page (or of `clip`, page space; None: the whole page), `zoom` pixels
+        per point, pixel bounds rounded outwards (`pixel_bounds`): h x w x 3 on white, or h x w x 4
+        on a transparent ground if `transparent`. Annotations are drawn; inactive objects are not.
         Page space is unrotated like every other call: /Rotate is not applied (`render_matrix`).
         A backend that cannot draw (`renders(backend)` is False) raises PdfError; one that draws
         only some pages raises it for the others."""
@@ -293,7 +294,7 @@ class PdfDocument(Protocol):
     def named_dests(self) -> list[tuple[str, int]]:
         """(name, page index) of the named destinations; -1 for a deleted page."""
 
-    def save(self, pages: Sequence[int] | None = None, boxes: Mapping[int, Box] | None = None) -> bytes:
+    def save(self, *, pages: Sequence[int] | None, boxes: Mapping[int, Box] | None) -> bytes:
         """A new PDF file: only `pages` (original indices, in document order; all when None),
         each page in `boxes` cut to that area (page space) as its media and crop box. The
         document itself is left as it is."""

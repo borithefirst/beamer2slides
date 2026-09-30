@@ -29,31 +29,51 @@ Usage: python tools/probe_deck_tables.py [deck ...] [--tag T] [--detail]
 import json
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from difflib import SequenceMatcher
 from pathlib import Path
 
 from beamer2slides import adopt_sync, snapshot
 from beamer2slides.devtools.adopt_bench import CORPUS, build_target
+from beamer2slides.google_types import presentation
+from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_array, as_object, as_objects, as_str
+from beamer2slides.sync_model import SlideRead
+
+Box = tuple[float, float, float, float]
 
 
-def bands(held, conv):
+def number(v: Json, where: str) -> float:
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v
+    raise JsonShapeError(f"{where}: a number was expected, found {type(v).__name__}")
+
+
+def bbox(e: JsonObject) -> Box:
+    """An element's (or a deck object's) box, x0 y0 x1 y1."""
+    x0, y0, x1, y1 = (number(v, "bbox") for v in as_array(e["bbox"], "bbox"))
+    return x0, y0, x1, y1
+
+
+def bands(held: Sequence[int], conv: Sequence[JsonObject]) -> list[list[int]]:
     """The held elements grouped into rows: a new band where an element starts below every element
     of the one before it."""
-    out = []
-    for i in sorted(held, key=lambda i: (round(conv[i]["bbox"][1], 1), conv[i]["bbox"][0])):
-        box = conv[i]["bbox"]
-        if out and box[1] < max(conv[j]["bbox"][3] for j in out[-1]):
+    out: list[list[int]] = []
+    for i in sorted(held, key=lambda i: (round(bbox(conv[i])[1], 1), bbox(conv[i])[0])):
+        box = bbox(conv[i])
+        if out and box[1] < max(bbox(conv[j])[3] for j in out[-1]):
             out[-1].append(i)
         else:
             out.append([i])
-    return [sorted(b, key=lambda i: conv[i]["bbox"][0]) for b in out]
+    return [sorted(b, key=lambda i: bbox(conv[i])[0]) for b in out]
 
 
-def columns(obj):
-    xs, x = [], obj["bbox"][0]
-    for w in obj["col_widths"]:
-        xs.append((x, x + w))
-        x += w
+def columns(obj: JsonObject) -> list[tuple[float, float]]:
+    xs: list[tuple[float, float]] = []
+    x = bbox(obj)[0]
+    for w in as_array(obj["col_widths"], "col_widths"):
+        width = number(w, "col_widths")
+        xs.append((x, x + width))
+        x += width
     return xs
 
 
@@ -66,12 +86,14 @@ def alike(a: str, b: str) -> bool:
     return SequenceMatcher(None, a, b, autojunk=False).ratio() >= 0.9
 
 
-def rebuild(obj, held, conv):
+def rebuild(obj: JsonObject, held: Sequence[int],
+            conv: Sequence[JsonObject]) -> tuple[list[list[str]] | None, str | None]:
     """(cells, why not) - the table the held elements make, or the first thing that stopped it."""
-    rows = obj.get("rows") or []
+    rows = [[as_str(c, "a cell's words") for c in as_array(r, "a row")] for r in as_array(obj.get("rows") or [], "rows")]
     if not rows or not obj.get("col_widths"):
         return None, "no grid"
-    if any(c.get("rowspan", 1) > 1 or c.get("colspan", 1) > 1 for c in obj.get("table_cells") or []):
+    if any(number(c.get("rowspan", 1), "rowspan") > 1 or number(c.get("colspan", 1), "colspan") > 1
+           for c in as_objects(obj.get("table_cells") or [], "table_cells")):
         return None, "merged cells"
     if any(conv[i]["kind"] != "text" for i in held):
         return None, "something in it is not words"
@@ -83,12 +105,12 @@ def rebuild(obj, held, conv):
     out = [["" for _ in rows[r]] for r in range(len(rows))]
     for r, band in zip(full, lines):
         for i in band:
-            box = conv[i]["bbox"]
+            box = bbox(conv[i])
             mid = (box[0] + box[2]) / 2
             c = next((k for k, (x0, x1) in enumerate(cols) if x0 <= mid < x1), None)
             if c is None or c >= len(out[r]):
                 return None, "a word stands outside every column"
-            out[r][c] = (out[r][c] + " " + conv[i]["text"]).strip()
+            out[r][c] = (out[r][c] + " " + as_str(conv[i]["text"], "an element's text")).strip()
     for r, row in enumerate(rows):
         for c, said in enumerate(row):
             if not alike(out[r][c], said):
@@ -96,12 +118,16 @@ def rebuild(obj, held, conv):
     return out, None
 
 
-def has_table(target: dict) -> bool:
+def slides_of(deck: JsonObject, where: str) -> list[JsonObject]:
+    return as_objects(deck.get("slides") or [], f"{where}.slides")
+
+
+def has_table(target: JsonObject) -> bool:
     return any(e["kind"] == "table"
-               for s in target.get("slides") or [] for e in s.get("elements") or [])
+               for s in slides_of(target, "target") for e in as_objects(s.get("elements") or [], "target elements"))
 
 
-def look(name: str, tag: str, work: Path, tally: Counter, detail: bool) -> None:
+def look(name: str, tag: str, work: Path, tally: Counter[str], detail: bool) -> None:
     cache = CORPUS / name
     tex = cache / "runs" / tag / "tree" / "main.tex"
     if not tex.exists() or not (cache / "presentation.json").exists():
@@ -109,24 +135,26 @@ def look(name: str, tag: str, work: Path, tally: Counter, detail: bool) -> None:
     target = build_target(cache, None, None)
     if not has_table(target):
         return
-    pres = json.loads((cache / "presentation.json").read_text(encoding="utf-8"))
+    where = f"{name}/presentation.json"
+    pres = presentation(as_object(json.loads((cache / "presentation.json").read_text(encoding="utf-8")), where), where)
     page_width = float(snapshot.page_size(pres)[0])
     folds = adopt_sync.deck_folds(target)
-    made, err = adopt_sync.convert_source(tex, work / name, page_width=page_width, folds=folds)
+    made, err = adopt_sync.convert_source_of(tex, work / name, None, page_width, folds)
     if made is None:
         print(f"{name}: does not compile, skipped\n{err}")
         return
-    conv_deck = made["deck"]
+    conv_deck = made.deck
     problem = adopt_sync.labels_match(conv_deck, target)
     if problem:
         print(f"{name}: {problem}, skipped")
         return
-    read = snapshot.read_presentation(pres)
-    by_id = {s["objectId"]: s for s in read["slides"]}
-    for conv_slide, tgt in zip(conv_deck["slides"], target["slides"]):
-        live = by_id.get(tgt.get("objectId"))
-        objs = [e for e in adopt_sync.deck_objects(tgt) if live and e["object"] in live["objects"]]
-        conv = conv_slide["elements"]
+    read = snapshot.read_presentation_of(pres)
+    by_id: dict[str, SlideRead] = {s.object_id: s for s in read.slides}
+    for conv_slide, tgt in zip(slides_of(conv_deck, "conversion"), slides_of(target, "target")):
+        tgt_id = tgt.get("objectId")
+        live = by_id.get(tgt_id) if isinstance(tgt_id, str) else None
+        objs = [e for e in adopt_sync.deck_objects(tgt) if live and e["object"] in live.objects]
+        conv = as_objects(conv_slide["elements"], "conversion elements")
         pairs, _why = adopt_sync.pair_elements(conv, objs)
         tied = set(pairs.values())
         for k, obj in enumerate(objs):
@@ -136,8 +164,8 @@ def look(name: str, tag: str, work: Path, tally: Counter, detail: bool) -> None:
             if k in tied:
                 tally["paired"] += 1
                 continue
-            held = [i for i, e in enumerate(conv) if adopt_sync._holds(e["bbox"], obj["bbox"])]
-            kinds = sorted({conv[i]["kind"] for i in held})
+            held = [i for i, e in enumerate(conv) if adopt_sync._holds(bbox(e), bbox(obj))]
+            kinds = sorted({as_str(conv[i]["kind"], "an element's kind") for i in held})
             tally[f"read back as {'a table' if 'table' in kinds else 'no table'}"] += 1
             cells, why = rebuild(obj, held, conv)
             tally["rebuilt" if cells else "refused"] += 1
@@ -155,7 +183,7 @@ def main(argv: list[str]) -> None:
         tag, argv = argv[i + 1], argv[:i] + argv[i + 2:]
     names = argv or sorted(p.name for p in CORPUS.iterdir()
                            if p.is_dir() and (p / "presentation.json").exists())
-    tally: Counter = Counter()
+    tally: Counter[str] = Counter()
     work = Path("out") / "probe-deck-tables"
     for name in names:
         look(name, tag, work, tally, detail)

@@ -5,13 +5,24 @@ from dataclasses import dataclass
 from functools import lru_cache
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, kw_only=True)
 class FontInfo:
     family: str  # sans | serif | mono | math | icon
-    bold: bool = False
-    italic: bool = False
-    smallcaps: bool = False
-    design_size: float | None = None  # TeX optical size (CMSS10 -> 10, SFSS1200 -> 12)
+    bold: bool
+    italic: bool
+    smallcaps: bool
+    design_size: float | None  # TeX optical size (CMSS10 -> 10, SFSS1200 -> 12)
+
+
+def plain_face(family: str) -> FontInfo:
+    """A face of `family` with no style and no optical size (a math or icon font as a whole)."""
+    return FontInfo(family=family, bold=False, italic=False, smallcaps=False, design_size=None)
+
+
+def variant_face(variant: tuple[str, bool, bool, bool], design_size: float) -> FontInfo:
+    """A CM or EC face from its CM_VARIANTS / EC_VARIANTS entry (family, bold, italic, small caps)."""
+    family, bold, italic, smallcaps = variant
+    return FontInfo(family=family, bold=bold, italic=italic, smallcaps=smallcaps, design_size=design_size)
 
 
 MATH_PREFIXES = (
@@ -217,16 +228,16 @@ def font_info(name: str) -> FontInfo:
     base = name.split("+", 1)[-1]
     key = re.sub(r"[^A-Z0-9]", "", base.upper())
     if ICON_FONT_RE.search(key):
-        return FontInfo("icon")
+        return plain_face("icon")
     if key.startswith(MATH_PREFIXES) or "MATH" in key:
-        return FontInfo("math")
+        return plain_face("math")
 
     m = re.fullmatch(r"CM([A-Z]+)(\d+)", key)
     if m and m.group(1) in CM_VARIANTS:
-        return FontInfo(*CM_VARIANTS[m.group(1)], design_size=float(m.group(2)))
+        return variant_face(CM_VARIANTS[m.group(1)], float(m.group(2)))
     m = EC_NAME_RE.fullmatch(key)
     if m and m.group(2) in EC_VARIANTS:
-        return FontInfo(*EC_VARIANTS[m.group(2)], design_size=int(m.group(3)) / 100)
+        return variant_face(EC_VARIANTS[m.group(2)], int(m.group(3)) / 100)
 
     # Latin Modern (LMSans10-Bold, LMRomanCaps10-Regular, LMMono10-Italic, ...) and
     # anything else: read the class and the style from the name.
@@ -238,8 +249,8 @@ def font_info(name: str) -> FontInfo:
     m = LIBERTINE_RE.fullmatch(key)
     if m:  # LinBiolinumTBO: Type 1 (T), bold (B), oblique (O)
         face, variant, _, weight, slant = m.groups()
-        return FontInfo("mono" if variant == "M" else "sans" if face == "BIOLINUM" else "serif",
-                        bold=bool(weight), italic=bool(slant))
+        return FontInfo(family="mono" if variant == "M" else "sans" if face == "BIOLINUM" else "serif",
+                        bold=bool(weight), italic=bool(slant), smallcaps=False, design_size=None)
     if any(k in lower for k in ("mono", "courier", "consol", "typewriter")) or re.search(r"(?<!uni)code", lower) \
             or family_part.startswith(MONO_FAMILIES) or key.startswith("LMTT") or TEX_TT_RE.fullmatch(key):
         family = "mono"
@@ -250,7 +261,7 @@ def font_info(name: str) -> FontInfo:
         family = "serif"
     words = re.findall(r"[a-z]+", style)
     return FontInfo(
-        family,
+        family=family,
         bold=any(k in lower for k in ("bold", "black", "heavy", "demi", "semibold", "dark"))
         # URW's Medi is Times' bold (NimbusRomNo9L-Medi, -MediItal); Medium is not bold
         or any(w.startswith("medi") and not w.startswith("medium") for w in words),

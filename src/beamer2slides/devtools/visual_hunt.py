@@ -234,7 +234,7 @@ def compose(out: Path, pdf: Path, into: Path) -> Summary:
             continue
         thumb = Image.open(thumb_path).convert("RGB")
         page = doc[n]
-        ref = Image.fromarray(page.render(thumb.width / page.width)).convert("RGB").resize(thumb.size)
+        ref = Image.fromarray(page.render(thumb.width / page.width, clip=None, transparent=False)).convert("RGB").resize(thumb.size)
         ref.save(into / f"pdf-{i + 1:03}.png")
         thumb.save(into / f"slides-{i + 1:03}.png")
         a, b = labelled(ref, f"PDF page {n + 1}"), labelled(thumb, f"GOOGLE SLIDES slide {i + 1}")

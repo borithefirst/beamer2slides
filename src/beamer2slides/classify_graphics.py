@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from .classify_model import (
-    SMALL_IMAGE_PT, Line, Rect, Span, box_outline, cluster_rects, extension_font, overlap, union_all,
+    SMALL_IMAGE_PT, Line, Rect, Span, box_outline, cluster_rects, extension_font, new_span, overlap, union_all,
 )
 from .classify_state import BareFrame, Frame, Panel, PathKey, Rule
 from .classify_tables import TablesMixin
@@ -249,8 +249,9 @@ class GraphicsMixin(TablesMixin):
                     any(abs(s.rect.x1 - r.x0) <= 1 or abs(r.x1 - s.rect.x0) <= 1 for s in signs):
                 continue  # an overbar or a fraction bar: something is set under it
             like = beside[0]
-            span = Span(f"{d['id']}u", "_", like.font, like.size, like.color, Rect(r.x0, like.rect.y0, r.x1, like.rect.y1),
-                        like.baseline, True, like.info, link=like.link, drawn=True)
+            span = new_span(id=f"{d['id']}u", text="_", font=like.font, size=like.size, color=like.color,
+                            rect=Rect(r.x0, like.rect.y0, r.x1, like.rect.y1), baseline=like.baseline,
+                            horizontal=True, info=like.info, link=like.link, drawn=True, visual=None)
             spans.append(span)
             self.decor_ids.add(d["id"])
             self.decor_rects[span.id] = [r]

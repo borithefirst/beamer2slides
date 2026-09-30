@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TypedDict
 
-from .inverse import Context
+from .inverse import BEAMER_PT, Context
 
 
 class _MissingFontKeys(TypedDict):
@@ -72,6 +72,7 @@ class AdoptContext(Context):
 
 def adopt_context() -> AdoptContext:
     """A context that has learnt nothing about the deck yet."""
-    return AdoptContext(font_switches={}, font_weights={}, missing_fonts=[], font_lines=None, line_struts=None,
+    return AdoptContext(colours={}, packages=set(), pt_option=BEAMER_PT, files={}, notes=[], pictures={}, index=None,
+                        label_notes=[], font_switches={}, font_weights={}, missing_fonts=[], font_lines=None, line_struts=None,
                         text_styles={}, last_style_key=None, bullet_marks={}, body_size=None, main_colour=None,
                         slide_inset=None, deck_style=None, list_levels={}, shape_styles={}, shape_style_count=None)

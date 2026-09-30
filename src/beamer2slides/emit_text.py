@@ -19,7 +19,7 @@ from .emit_metrics import (
 )
 from .emit_model import (
     ElementDict, JsonMap, Placeholder, SetParagraph, SetRun, SetText, block_of, box_of, json_number, number_box,
-    number_box_of, placeholder_of, run_of, set_text, text_of,
+    number_box_of, run_of, set_text, text_of,
 )
 from .emit_widths import (
     SCRIPT_SIZE, SMALL_CAPS_SIZE, paragraph_dict, runs_between, set_runs_of, slides_lines_of, slides_width_of,
@@ -142,10 +142,10 @@ def snap(v: float) -> float:
     return round(v / PX_PT) * PX_PT
 
 
-def line_pitch(z: float, r: float, z2: float | None = None) -> float:
+def line_pitch(z: float, r: float, z2: float) -> float:
     """Baseline distance between wrapped lines of one paragraph (from a line of size z to one of
-    size z2, by default the same)."""
-    return snap(inner_pitch(z, r, z if z2 is None else z2))
+    size z2)."""
+    return snap(inner_pitch(z, r, z2))
 
 
 def inner_pitch(z1: float, r: float, z2: float) -> float:
@@ -155,7 +155,7 @@ def inner_pitch(z1: float, r: float, z2: float) -> float:
     return DESCENT_EM * z1 + ASCENT_EM * z2 + extra_below(r, z1) + extra_above(r, z2)
 
 
-def pitch_between(z1: float, r1: float, z2: float, r2: float, gap: float = 0.0) -> float:
+def pitch_between(z1: float, r1: float, z2: float, r2: float, gap: float) -> float:
     """Baseline distance from the last line of one paragraph to the first line of the next, `gap`
     (spaceBelow + spaceAbove) apart. The step snaps to whole pixels as a whole, space included:
     over the hunt's r8 renders (18 boxes of 5-14 single-line paragraphs, Lato, Roboto Mono,
@@ -358,12 +358,12 @@ def _vertical_pass(bulleted: Sequence[bool], baselines: Sequence[Sequence[float]
             r = pulled.get(i, 1.0)
         r = round(min(3.0, max(0.5, r)), 4)
         ratios.append(r)
-        last = first + ((n - 1) * line_pitch(z, r) if uniform else sum(line_pitch(a, r, b) for a, b in zip(zs, zs[1:])))
+        last = first + ((n - 1) * line_pitch(z, r, z) if uniform else sum(line_pitch(a, r, b) for a, b in zip(zs, zs[1:])))
         if has_next:
             zn = lines[i + 1][0]
-            natural = pitch_between(z, r, zn, next_r)
+            natural = pitch_between(z, r, zn, next_r, 0.0)
             if not list_link:
-                gap = baselines[i + 1][0] - last - pitch_between(z, r, zn, 1.0)
+                gap = baselines[i + 1][0] - last - pitch_between(z, r, zn, 1.0, 0.0)
                 free = len(baselines[i + 1]) == 1 and not (bulleted[i + 1] and i + 2 < len(bulleted) and bulleted[i + 2])
                 if gap < -PX_PT and free:
                     # Tighter than Slides' natural pitch (block title right above its body):
@@ -584,15 +584,10 @@ def flowed_lines(p: SetParagraph, scale: float, fonts: FontMapper, right: float,
     return count
 
 
-def text_box_requests(el: JsonMap, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                      placeholder: JsonMap | None = None, page_slide: Mapping[int, str] | None = None,
-                      bar: Sequence[float] | None = None, right_limit: float | None = None,
-                      marks: Sequence[str] | None = None) -> list[JsonObject]:
-    """`text_box_requests_of` a text dict: a layout's text (theme), a diagram's card, a text
-    whose holes are measured (emit_places), the tests' texts."""
-    return text_box_requests_of(text_of(el), slide_id, object_id, scale, fonts,
-                                placeholder_of(placeholder) if placeholder else None, page_slide, bar, right_limit,
-                                marks)
+def text_box_requests(el: JsonMap, slide_id: str, object_id: str, scale: float, fonts: FontMapper) -> list[JsonObject]:
+    """`text_box_requests_of` a text dict in a box of its own (no placeholder, no internal links, no
+    block bar, right limit or marks): a layout's text (theme), the tests' texts."""
+    return text_box_requests_of(text_of(el), slide_id, object_id, scale, fonts, None, None, None, None, None)
 
 
 def text_element_requests(el: TextElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,

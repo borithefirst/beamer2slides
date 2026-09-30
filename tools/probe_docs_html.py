@@ -22,16 +22,45 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import Protocol, TypedDict, runtime_checkable
 
+from google.auth.credentials import Credentials
 from googleapiclient.errors import HttpError
 from googleapiclient.http import MediaIoBaseUpload
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from beamer2slides import gapi, google_types  # noqa: E402
 from beamer2slides.google_auth import credentials, drive_service  # noqa: E402
+from beamer2slides.google_types import DriveService, Request  # noqa: E402
 
 OUT = Path(__file__).resolve().parents[1] / "out" / "docs-probe"
 DOC_MIME = "application/vnd.google-apps.document"
+
+
+# Drive's `about.get`, which google_types' DriveService does not list yet: described here, after
+# a runtime check, until it does.
+class About(TypedDict, total=False):
+    importFormats: dict[str, list[str]]
+    exportFormats: dict[str, list[str]]
+    maxImportSizes: dict[str, str]
+
+
+class AboutResource(Protocol):
+    def get(self, *, fields: str) -> Request[About]: ...
+
+
+@runtime_checkable
+class DriveAbout(Protocol):
+    """The Drive client, as far as asking it what it converts calls it."""
+
+    def about(self) -> AboutResource: ...
+
+
+def with_about(drive: object) -> DriveAbout:
+    if not isinstance(drive, DriveAbout):
+        raise TypeError(f"{type(drive).__name__} is no Drive client")
+    return drive
 
 
 def stress_png() -> bytes:
@@ -299,17 +328,17 @@ def feature_report(html: str) -> None:
     print("  level-0 list markers:", sorted(set(glyphs)))
 
 
-def upload_html(drive, html: str, name: str) -> str:
+def upload_html(drive: DriveService, html: str, name: str) -> str:
     media = MediaIoBaseUpload(io.BytesIO(html.encode("utf-8")), mimetype="text/html",
                               resumable=False)
     got = drive.files().create(
         body={"name": name, "mimeType": DOC_MIME},
         media_body=media, fields="id,name,mimeType,size",
     ).execute()
-    return got["id"]
+    return google_types.file_id(got, name)
 
 
-def export(drive, file_id: str, mime: str) -> bytes | None:
+def export(drive: DriveService, file_id: str, mime: str) -> bytes | None:
     try:
         return drive.files().export(fileId=file_id, mimeType=mime).execute()
     except HttpError as err:
@@ -329,7 +358,7 @@ EXPORTS = {
 }
 
 
-def round_trip(drive, html: str, tag: str, out: Path) -> tuple[str, str | None]:
+def round_trip(drive: DriveService, html: str, tag: str, out: Path) -> tuple[str, str | None]:
     """Upload `html`, save every export. Returns (file id, exported html)."""
     print(f"  uploading {tag} ({len(html)} bytes of HTML)")
     file_id = upload_html(drive, html, f"b2s docs probe {tag}")
@@ -347,18 +376,16 @@ def round_trip(drive, html: str, tag: str, out: Path) -> tuple[str, str | None]:
     return file_id, exported_html
 
 
-def try_docs_api(creds, file_id: str, out: Path) -> None:
+def try_docs_api(creds: Credentials, file_id: str, out: Path) -> None:
     """Does the drive.file scope reach documents.get, and what does the model look like?"""
-    from googleapiclient.discovery import build
-
     try:
-        docs = build("docs", "v1", credentials=creds, cache_discovery=False)
+        docs = gapi.build("docs", "v1", creds)      # googleapiclient's build, cache_discovery=False
         doc = docs.documents().get(documentId=file_id, includeTabsContent=True).execute()
     except HttpError as err:
         print(f"  docs.documents.get: {err.resp.status} {err.reason}")
         print("  -> the documents scope is needed (re-consent), or tabs are unsupported")
         try:
-            docs = build("docs", "v1", credentials=creds, cache_discovery=False)
+            docs = gapi.build("docs", "v1", creds)
             doc = docs.documents().get(documentId=file_id).execute()
         except HttpError as err2:
             print(f"  docs.documents.get (no tabs): {err2.resp.status} {err2.reason}")
@@ -383,7 +410,7 @@ def main() -> int:
 
     creds = credentials()
     drive = drive_service(creds)
-    ids = []
+    ids: list[str] = []
 
     print("pass 1: source HTML -> Doc")
     id1, html1 = round_trip(drive, source, "pass1", OUT)
@@ -415,11 +442,11 @@ def main() -> int:
         feature_report(data.decode("utf-8"))
 
     print("\nformats Drive itself admits to (the only authoritative list)")
-    about = drive.about().get(
+    about = with_about(drive).about().get(
         fields="importFormats,exportFormats,maxImportSizes").execute()
-    imports = [m for m, t in about["importFormats"].items() if DOC_MIME in t]
+    imports = [m for m, t in about.get("importFormats", {}).items() if DOC_MIME in t]
     print("  import ->Doc:", ", ".join(sorted(imports)))
-    print("  export Doc->:", ", ".join(about["exportFormats"].get(DOC_MIME, [])))
+    print("  export Doc->:", ", ".join(about.get("exportFormats", {}).get(DOC_MIME, [])))
     print("  max import size:", about.get("maxImportSizes", {}).get(DOC_MIME))
 
     if args.keep:

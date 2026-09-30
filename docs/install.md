@@ -110,7 +110,7 @@ with google_auth.use_services(make):
 ```
 
 `creds` is the credentials the *call site* passed, which on the main path is nothing: `emit()`
-opens with `slides_service(), drive_service()` and passes none, because the built-in fallback
+opens with `slides_service(None), drive_service(None)` - no credentials of its own - because the built-in fallback
 resolves them itself. A builder that trusts the argument therefore builds an unauthenticated
 client. Either do `creds or google_auth.credentials()` as above, or say so once:
 

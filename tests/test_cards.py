@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from beamer2slides.classify import PageClassifier, Rect, Span, card_text, classify
+from beamer2slides.classify import PageClassifier, Rect, Span, card_text, classify, new_span
 from beamer2slides.extract import extract, select_overlays
 from beamer2slides.fonts import font_info
 from beamer2slides import ir
@@ -16,9 +16,9 @@ FONT = "GoogleSansFlex-Regular"
 
 def span(text: str, x0: float, baseline: float, size: float, w: float | None = None) -> Span:
     w = len(text) * 0.5 * size if w is None else w
-    return Span(id=f"s{x0:.0f}-{baseline:.0f}", text=text, font=FONT, size=size, color="#000000",
+    return new_span(id=f"s{x0:.0f}-{baseline:.0f}", text=text, font=FONT, size=size, color="#000000",
                 rect=Rect(x0, baseline - 0.75 * size, x0 + w, baseline + 0.25 * size),
-                baseline=baseline, horizontal=True, info=font_info(FONT))
+                baseline=baseline, horizontal=True, info=font_info(FONT), link=None, drawn=False, visual=None)
 
 
 def centred(text: str, cx: float, baseline: float, size: float) -> Span:

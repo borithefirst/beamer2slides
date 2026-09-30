@@ -637,7 +637,8 @@ def test_adopt_refuses_to_write_over_a_source(tmp_path: Path) -> None:
     (tmp_path / "target.json").write_text(json.dumps(target), encoding="utf-8")
     try:
         adopt.cmd_adopt("", tmp_path / "main.tex", tmp_path / "w", False, None, 0, None, False,
-                        tmp_path / "target.json")
+                        tmp_path / "target.json", base=True, base_in_drive=False, log=print, fonts=None, found=None,
+                        pptx=None, files=None)
     except SystemExit as exc:
         assert "exists already" in str(exc)
     else:

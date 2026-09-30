@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Annotated, TypeVar
 from ..deck_files import FOLDERS as DECK_FILES
 from ..deck_files import PARTS
 from ..json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_str
+from .content import File
 from .context import Job, tool
 from .types import READS, READS_GOOGLE, WRITES, Refused
 
@@ -49,10 +50,11 @@ _SLIDES_READ = re.compile(r"deck: (\d+) slides read")
 @tool("deck_pull", needs=(READS, WRITES, READS_GOOGLE), local=None)
 def deck_pull(
     j: Job,
+    *,
     deck: Annotated[str, "The deck to pull from: a Slides URL, a presentation id, or a workspace "
                          "ref to the out/<deck> folder a conversion wrote. Read only, never written."],
-    tex: Annotated[str, "Workspace ref of the main .tex the deck was converted from. It must exist; "
-                        "pull refines a source, it does not write one (that is deck_adopt)."],
+    tex: Annotated[File, "Workspace ref of the main .tex the deck was converted from. It must exist; "
+                         "pull refines a source, it does not write one (that is deck_adopt)."],
     work: Annotated[str | None, "Workspace ref of the loop's scratch folder (compiles, target.json, "
                                 "the reports). Default: <deck folder>/pull when `deck` is a folder, "
                                 "else <tex parent>/out/pull."] = None,
@@ -77,7 +79,7 @@ def deck_pull(
     Use it when someone edited the deck in Slides and the source has to catch up. What the loop
     could not express in LaTeX is left in `edits.md`, which is written for an AI to act on next.
     """
-    tex_path = _existing(j, tex, "tex")
+    tex_path = _existing(j, j.ref("tex", tex), "tex")
     target_ref, folder = _deck_argument(j, deck, allow_json=False)
     work_path = _work_dir(j, work, folder / "pull" if folder else tex_path.parent / "out" / "pull")
     out_path = j.path(out, write=True) if out else None
@@ -105,10 +107,11 @@ def deck_pull(
 @tool("tex_converge", needs=(READS, WRITES), local=None)
 def tex_converge(
     j: Job,
-    target: Annotated[str, "Workspace ref of the deck.json-shaped file to converge onto: classify's "
-                           "deck.json, or a deck_ir read of a live deck saved earlier."],
-    tex: Annotated[str, "Workspace ref of the main .tex to edit until its conversion matches the "
-                        "target."],
+    *,
+    target: Annotated[File, "Workspace ref of the deck.json-shaped file to converge onto: classify's "
+                            "deck.json, or a deck_ir read of a live deck saved earlier."],
+    tex: Annotated[File, "Workspace ref of the main .tex to edit until its conversion matches the "
+                         "target."],
     work: Annotated[str | None, "Workspace ref of the loop's scratch folder. Default: "
                                 "<target parent>/pull."] = None,
     apply: Annotated[bool, "Write the converged source over the real files, keeping what was there "
@@ -130,8 +133,9 @@ def tex_converge(
     source match a classification without spending an account's quota. `data` carries the
     residual counts before and after and one row per iteration, for scoring.
     """
-    target_path = _existing(j, target, "target")
-    tex_path = _existing(j, tex, "tex")
+    target_ref = j.ref("target", target)
+    target_path = _existing(j, target_ref, "target")
+    tex_path = _existing(j, j.ref("tex", tex), "tex")
     work_path = _work_dir(j, work, target_path.parent / "pull")
     out_path = j.path(out, write=True) if out else None
 
@@ -141,13 +145,13 @@ def tex_converge(
     try:
         doc: Json = json.loads(target_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
-        raise Refused("bad_request", f"{target} is not JSON: {exc}", target=target) from None
+        raise Refused("bad_request", f"{target_ref} is not JSON: {exc}", target=target_ref) from None
     if not isinstance(doc, dict) or "slides" not in doc:
-        raise Refused("bad_request", f"{target} is not a deck.json (no 'slides' key).", target=target)
+        raise Refused("bad_request", f"{target_ref} is not a deck.json (no 'slides' key).", target=target_ref)
     slides = doc["slides"]
     if not isinstance(slides, list):
-        raise Refused("bad_request", f"{target} is not a deck.json ('slides' is not a list).",
-                      target=target)
+        raise Refused("bad_request", f"{target_ref} is not a deck.json ('slides' is not a list).",
+                      target=target_ref)
     j.data["slides"] = len(slides)
     j.data["target"] = j.ctx.workspace.ref(target_path)
 
@@ -171,7 +175,8 @@ def _reads_files(j: Job, kw: Mapping[str, object]) -> bool:
 @tool("deck_adopt", needs=(READS, WRITES, READS_GOOGLE), local=_reads_files)
 def deck_adopt(
     j: Job,
-    deck: Annotated[str, "The deck to adopt. Live: a Slides URL or presentation id (needs Google). "
+    *,
+    deck: Annotated[File, "The deck to adopt. Live: a Slides URL or presentation id (needs Google). "
                          "As files, with no Google call and no network at all: the folder or .zip "
                          "`deck-files` saved (a workspace ref, or the .zip as content) - everything a "
                          "live read takes, so the source is as faithful as a live adopt's; or a "
@@ -192,17 +197,17 @@ def deck_adopt(
     flow: Annotated[bool, "Write the readable version - text that flows in lists and paragraphs - "
                           "instead of the absolute geometry a foreign deck's dragged boxes are. "
                           "Costs fidelity, gains a source a person can edit."] = False,
-    fonts: Annotated[list[str] | None, "Font files the deck is written in (.ttf, .otf, .ttc, .woff, "
+    fonts: Annotated[list[File] | None, "Font files the deck is written in (.ttf, .otf, .ttc, .woff, "
                                        ".woff2), each a workspace ref (a folder: every font in it) or "
                                        "the file itself as content. Preferred to any other copy. "
                                        "Give the ones a previous adopt listed in data['fonts_missing']."] = None,
-    pptx: Annotated[str | None, "The deck as a .pptx the person downloaded (File > Download > "
+    pptx: Annotated[File | None, "The deck as a .pptx the person downloaded (File > Download > "
                                 "Microsoft PowerPoint), a workspace ref or the file itself as content: "
                                 + PARTS["pptx"] + ". Used before any download, so a harness that may "
                                 "not download still gets them. Ask for it when data['pictures_missing'] "
                                 "or data['pictures_from_thumbnail'] is not empty. (A deck.json target pairs it through the "
                                 "presentation.json beside it.)"] = None,
-    thumbnails: Annotated[list[str] | None, "With a deck given as files: " + PARTS["thumbnails"] + ". "
+    thumbnails: Annotated[list[File] | None, "With a deck given as files: " + PARTS["thumbnails"] + ". "
                                             "Pictures (refs or content) or folders of them, named by "
                                             "slide number (001.png) or objectId. Default: the "
                                             "folder's thumbnails/."] = None,
@@ -223,9 +228,9 @@ def deck_adopt(
     """
     from ..adopt import written_already
 
-    font_paths = [_existing(j, ref, "fonts") for ref in fonts or []]
-    pptx_path = _existing(j, pptx, "pptx") if pptx else None
-    thumb_paths = [_existing(j, ref, "thumbnails") for ref in thumbnails or []]
+    font_paths = [_existing(j, j.ref("fonts", ref), "fonts") for ref in fonts or []]
+    pptx_path = _existing(j, j.ref("pptx", pptx), "pptx") if pptx else None
+    thumb_paths = [_existing(j, j.ref("thumbnails", ref), "thumbnails") for ref in thumbnails or []]
     pictures_path = _existing(j, pictures, "pictures") if pictures else None
     google_fonts_path = _existing(j, google_fonts, "google_fonts") if google_fonts else None
     tex_path = j.path(tex, write=True)
@@ -236,14 +241,15 @@ def deck_adopt(
                       f"{j.ctx.workspace.ref(tex_path)} is already there and adopt writes a new "
                       f"source tree. Use deck_pull to refine the source you have, or name a path "
                       f"nothing is at.", tex=j.ctx.workspace.ref(tex_path))
-    target_ref, folder = _deck_argument(j, deck, allow_json=True)
+    deck_ref = j.ref("deck", deck)
+    target_ref, folder = _deck_argument(j, deck_ref, allow_json=True)
     work_path = _work_dir(j, work, tex_path.parent / "out" / "adopt")
     out_path = j.path(out, write=True) if out else None
     from ..deck_files import gather
     try:
         files = gather(target_ref, work_path / "deck-files", thumb_paths, pictures_path, google_fonts_path)
     except (SystemExit, OSError, ValueError, zipfile.BadZipFile) as exc:
-        raise Refused("bad_request", str(exc), deck=deck) from None
+        raise Refused("bad_request", str(exc), deck=deck_ref) from None
     target_path = Path(target_ref) if files is None and target_ref.lower().endswith(".json") else None
     j.data["deck"] = target_ref
     j.data["local_target"] = target_path is not None or files is not None
@@ -266,7 +272,8 @@ def deck_adopt(
     filled: dict[str, object] = {}
     try:
         result = _loop(lambda: cmd_adopt(target_ref, tex_path, work_path, apply, out_path,
-                                         max_iter, engine, flow, target_path, log=watch,
+                                         max_iter, engine, flow, target_path, base=True,
+                                         base_in_drive=False, log=watch,
                                          fonts=font_paths, found=filled, pptx=pptx_path, files=files))
     except ForeignFolder as exc:
         raise Refused("bad_request", str(exc), work=j.ctx.workspace.ref(work_path)) from None

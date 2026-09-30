@@ -332,7 +332,7 @@ def capture(pid: str, name: str, refresh: bool) -> Path:
     folder.mkdir(parents=True, exist_ok=True)
     # Always read again: picture contentUrls expire within the hour, so a cached answer can no
     # longer fetch its pictures (403). Thumbnails are kept unless --refresh.
-    pres = as_json(execute(slides_service().presentations().get(presentationId=pid)), pid)
+    pres = as_json(execute(slides_service(None).presentations().get(presentationId=pid)), pid)
     (folder / "presentation.json").write_text(json.dumps(pres, indent=1), encoding="utf-8")
     creds = credentials()
 
@@ -343,7 +343,7 @@ def capture(pid: str, name: str, refresh: bool) -> Path:
             path.parent.mkdir(parents=True, exist_ok=True)
             for attempt in range(8):           # thumbnails are "expensive reads": 60 a minute per user
                 try:
-                    save_thumbnail(slides_service(creds), pid, as_str(s["objectId"], "a slide's id"), path)
+                    save_thumbnail(slides_service(creds), pid, as_str(s["objectId"], "a slide's id"), path, fetch=None)
                     return
                 except Exception as exc:                          # noqa: BLE001
                     if "429" not in str(exc) or attempt == 7:
@@ -482,7 +482,7 @@ def score_pdf(pdf: Path, folder: Path, target: JsonObject, sheets: Path | None) 
             if i >= len(doc):
                 out.append({"slide": i + 1, "boxes": 0.0, "page": 0.0, "pixels": 0.0, "missing": True})
                 continue
-            got_img = Image.fromarray(doc[i].render(w / doc[i].width)).convert("RGB").resize((w, h))
+            got_img = Image.fromarray(doc[i].render(w / doc[i].width, clip=None, transparent=False)).convert("RGB").resize((w, h))
             got = rgb_array(got_img)
             scores, diff = score_page(ref, got, slides[i])
             out.append({"slide": i + 1, "boxes": scores["boxes"], "page": scores["page"], "pixels": scores["pixels"],
@@ -603,7 +603,7 @@ def _run(name: str, folder: Path, run: Path, res: BenchResult, t0: float, iters:
             if (hit / "sheets").is_dir():
                 shutil.copytree(hit / "sheets", run / "sheets")
             return finish(run, res, t0)
-        ws = Workspace(tex, run / "work")
+        ws = Workspace(tex, run / "work", handout=False, engine=None, fresh=True)
         pdf, err = ws.compile()
         if pdf is None:
             # One broken frame should not hide the other slides: find the frames that do not compile
@@ -611,7 +611,7 @@ def _run(name: str, folder: Path, run: Path, res: BenchResult, t0: float, iters:
             broken = res["frame_errors"] = broken_frames(tex, run / "frames", 4)
             if broken:
                 blank_frames(tex, [f["frame"] for f in broken])
-                ws = Workspace(tex, run / "work")
+                ws = Workspace(tex, run / "work", handout=False, engine=None, fresh=True)
                 pdf, err = ws.compile()
         res["compile_s"] = round(time.perf_counter() - t0, 1)
         if pdf is None:
@@ -708,7 +708,7 @@ def broken_frames(tex: Path, work: Path, jobs: int) -> list[FrameError]:
         shutil.rmtree(tree, ignore_errors=True)
         copy_tree(tex.parent, tree)
         (tree / tex.name).write_text(head + body + tail, encoding="utf-8")
-        pdf, err = Workspace(tree / tex.name, tree / "work").compile()
+        pdf, err = Workspace(tree / tex.name, tree / "work", handout=False, engine=None, fresh=True).compile()
         return None if pdf else {"frame": n, "error": err[-800:]}
 
     with ThreadPoolExecutor(jobs) as pool:

@@ -175,7 +175,7 @@ def render_like(page: Page, ref: SignedRGB) -> SignedRGB:
     from PIL import Image
     from .fidelity import rgb_array_at
     h, w = ref.shape[:2]
-    img = Image.fromarray(page.render(w / page.width)).convert("RGB")
+    img = Image.fromarray(page.render(w / page.width, clip=None, transparent=False)).convert("RGB")
     return rgb_array_at(img, (w, h))
 
 

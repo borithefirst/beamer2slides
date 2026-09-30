@@ -284,13 +284,14 @@ def test_a_detached_context_closes_its_workspace_and_delivers_inline():
 @tool("fake_journey", needs=(READS, WRITES), local=None)
 def fake_journey(
     j: Job,
-    file: Annotated[str, "Workspace ref of a file to read, or the file itself."],
+    file: Annotated[C.File, "Workspace ref of a file to read, or the file itself."],
     note: Annotated[str, "Anything to record beside it."] = "",
 ) -> None:
     """A journey that reads one file and writes one, so the seam can be tested without PDFium."""
-    path = j.path(file, write=False)
+    taken = j.ref("file", file)
+    path = j.path(taken, write=False)
     j.data["said"] = path.read_text(encoding="utf-8")
-    j.data["ref"] = file
+    j.data["ref"] = taken
     out = j.path("out/answer.json", write=True)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps({"said": j.data["said"], "note": note}), encoding="utf-8")

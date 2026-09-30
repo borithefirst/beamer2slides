@@ -145,7 +145,7 @@ def _prepare(doc: PdfDocument, pdf: Path, out: Path) -> Prepared:
                 if text:
                     notes[page.index] = text
         # keep the left half: the slide
-        path.write_bytes(doc.save(boxes={page.index: (0.0, 0.0, page.width / 2, page.height) for page in doc}))
+        path.write_bytes(doc.save(pages=None, boxes={page.index: (0.0, 0.0, page.width / 2, page.height) for page in doc}))
         return Prepared(path, notes, "second screen", None)
 
     keep: list[int] = []
@@ -164,7 +164,7 @@ def _prepare(doc: PdfDocument, pdf: Path, out: Path) -> Prepared:
             notes[keep[-1]] = (notes.get(keep[-1], "") + "\n" + text).strip()
     if len(keep) == len(doc):
         return Prepared(pdf, {}, None, None)
-    path.write_bytes(doc.save(pages=keep))
+    path.write_bytes(doc.save(pages=keep, boxes=None))
     # The saved page label tree still counts the deleted pages.
     labels = [doc.label(k) or str(k + 1) for k in keep]
     return Prepared(path, {keep.index(k): v for k, v in notes.items()}, "note pages", labels)

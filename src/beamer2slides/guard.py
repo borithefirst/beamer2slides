@@ -465,12 +465,12 @@ def export_parts(drive: DriveService, slides: SlidesService, pid: str, path: Pat
     will not export whole (`deck_export`): halves first, since the whole was just refused, each
     halved again while it is. A slide no part brought is in `missing`, and then the parts are no
     way back to the whole deck (`way_back_kept`)."""
-    from .deck_export import deck_ids, export_deck
+    from .deck_export import WORKERS as EXPORTS, deck_ids, export_deck
     pres = execute(slides.presentations().get(presentationId=pid, fields="presentationId,slides.objectId"))
     n = len(deck_ids(pres)[1])
     if n < 2:
         return {"parts": [], "missing": [{"slides": [1, n], "reason": "a deck of one slide has no parts"}]}
-    done = export_deck(drive, slides, pres, per_part=(n + 1) // 2)
+    done = export_deck(drive, slides, pres, per_part=(n + 1) // 2, workers=EXPORTS, clients=None)
     parts: list[PartFile] = []
     for part in done.parts:
         file = path.with_name(f"{path.stem}-{part.name}.pptx")
@@ -608,7 +608,7 @@ class WayBack:
         self.note: JsonObject | None = None
         self.asked = False
         self.job: Future[JsonObject | None] | None = None
-        self.make: Callable[[], JsonObject | None] = lambda: fn(slides_service(), drive_service())
+        self.make: Callable[[], JsonObject | None] = lambda: fn(slides_service(None), drive_service(None))
         if shared_service("slides", "v1") or shared_service("drive", "v3"):
             return
         try:

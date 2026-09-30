@@ -798,9 +798,10 @@ def test_curve_bounds_skip_control_points():
 
 
 def test_cuts_words():
-    from beamer2slides.classify import PageClassifier, Rect, Span
+    from beamer2slides.classify import PageClassifier, Rect, new_span
     from beamer2slides.fonts import font_info
-    word = Span("w", "word", "CMSS10", 10.0, "#000000", Rect(100, 10, 140, 20), 18.0, True, font_info("CMSS10"))
+    word = new_span(id="w", text="word", font="CMSS10", size=10.0, color="#000000", rect=Rect(100, 10, 140, 20),
+                    baseline=18.0, horizontal=True, info=font_info("CMSS10"), link=None, drawn=False, visual=None)
     assert PageClassifier.cuts_words(Rect(90, 5, 120, 25), [word]), "an ellipse reaching into the word"
     assert not PageClassifier.cuts_words(Rect(98, 8, 142, 22), [word]), "a box set around the word"
 
@@ -900,11 +901,12 @@ CMSS_SIZE = 10.909
 
 def words_line(words: list[tuple[str, float, float]], baseline: float, size: float) -> Line:
     """A classify Line of word spans ((text, x0, x1), CMSS10) on one baseline."""
-    from beamer2slides.classify import Rect, Span
+    from beamer2slides.classify import Rect, new_line, new_span
     from beamer2slides.fonts import font_info
-    return Line([Span(f"s{x0:.0f}-{baseline:.0f}", t, "CMSS10", size, "#000000",
-                      Rect(x0, baseline - 0.78 * size, x1, baseline + 0.22 * size), baseline, True, font_info("CMSS10"))
-                 for t, x0, x1 in words])
+    return new_line([new_span(id=f"s{x0:.0f}-{baseline:.0f}", text=t, font="CMSS10", size=size, color="#000000",
+                              rect=Rect(x0, baseline - 0.78 * size, x1, baseline + 0.22 * size), baseline=baseline,
+                              horizontal=True, info=font_info("CMSS10"), link=None, drawn=False, visual=None)
+                     for t, x0, x1 in words])
 
 
 def test_paragraph_under_a_list_is_no_description_item():

@@ -155,7 +155,7 @@ def test_the_pure_reader_refuses_a_page_it_cannot_draw_exactly():
     data = pdf_bytes(b"q 100 0 0 80 20 20 cm /Im0 Do Q", [image], [(b"Im0", 1)], MEDIA, ())
     doc = pdf.resolve("pure").open(data)
     with pytest.raises(PdfError, match="JPXDecode"):
-        doc[0].render(1.0)
+        doc[0].render(1.0, clip=None, transparent=False)
 
 
 @built
@@ -170,11 +170,11 @@ def test_whole_beamer_pages_render_as_pdfium_renders_them():
         try:
             for i in range(len(ref)):
                 try:
-                    ours = pure[i].render(1.37)
+                    ours = pure[i].render(1.37, clip=None, transparent=False)
                 except PdfError:
                     assert path.stem != "23_raster_images", f"{path.stem} page {i} refused"
                     continue
-                assert np.array_equal(ours, ref[i].render(1.37)), f"{path.stem} page {i}"
+                assert np.array_equal(ours, ref[i].render(1.37, clip=None, transparent=False)), f"{path.stem} page {i}"
                 drawn += 1
         finally:
             ref.close()
@@ -308,7 +308,7 @@ def test_the_pure_renderer_survives_transparency_torture_seeds(page: bool) -> No
 def _render_with(backend: str, data: bytes, zoom: float) -> Pixels:
     doc = pdf.resolve(backend).open(data)
     try:
-        return doc[0].render(zoom)
+        return doc[0].render(zoom, clip=None, transparent=False)
     finally:
         doc.close()
 
@@ -535,7 +535,7 @@ def test_the_pure_renderer_draws_the_test_decks_shadings():
         off = [k for k, o in enumerate(objs) if o.type not in (OBJ_PATH, OBJ_FORM, OBJ_SHADING)]
         for page in (ref[i], pure[i]):
             page.set_active(off, False)
-        a, b = ref[i].render(1.37), pure[i].render(1.37)
+        a, b = ref[i].render(1.37, clip=None, transparent=False), pure[i].render(1.37, clip=None, transparent=False)
         assert np.array_equal(a, b), f"page {i}"
         seen += 1
     assert seen
@@ -555,7 +555,7 @@ def test_the_pure_renderer_refuses_shadings_it_cannot_draw_exactly(shading: byte
     from beamer2slides.pdf.pure.backend import PureBackend
     data = pdf_bytes([b"/S0 sh /S0 sh"], _SHADING_OBJECTS, _shading_resources({b"S0": shading}, None), (), MEDIA)
     with pytest.raises(PdfError, match=reason):
-        PureBackend().open(data)[0].render(1.0)
+        PureBackend().open(data)[0].render(1.0, clip=None, transparent=False)
 
 
 def test_a_shading_that_fails_validation_is_dropped_at_its_first_sh_only():
@@ -717,7 +717,7 @@ def test_cff_in_an_otto_sfnt_draws_unhinted_as_pdfium_does():
     spec = _sfnt_around_cff(next(s for s in harvest() if s.kind == "cff"), "\x00\x01\x00\x00")
     page = PureBackend().open(pdf_bytes(b"BT /F0 12 Tf 10 10 Td <%02x> Tj ET" % spec.codes[0], [spec]))[0]
     with pytest.raises(PdfError, match="not tagged OTTO"):
-        page.render(1.0)
+        page.render(1.0, clip=None, transparent=False)
 
 
 def test_text_clips_clip_what_follows_them_as_in_pdfium():
@@ -1026,7 +1026,7 @@ def test_a_generic_face_keeps_its_blend_between_documents():
         before = doc[0].object_bounds()
         doc.close()
         doc = backend().open(first)
-        doc[0].render(1)
+        doc[0].render(1, clip=None, transparent=False)
         doc.close()
         doc = backend().open(second)
         bounds.append((before, doc[0].object_bounds()))
@@ -1061,14 +1061,14 @@ def test_a_cached_system_face_lives_while_a_document_holds_it():
     data = pdf_bytes(b"BT /F0 20 Tf 10 10 Td (Arial) Tj ET", [spec])
     m = fontmapper.mapper()
     first = PureBackend().open(data)
-    first[0].render(1)
+    first[0].render(1, clip=None, transparent=False)
     held = set(first.pdf.__dict__.get("_b2s_held_faces", ()))
     if not held:
         first.close()
         pytest.skip("this platform's font info gave no system face")
     counts = {key: m.holders[key] for key in held}
     second = PureBackend().open(data)
-    second[0].render(1)
+    second[0].render(1, clip=None, transparent=False)
     assert all(m.holders[key] == counts[key] + 1 for key in held)
     first.close()
     assert all(m.holders[key] == counts[key] for key in held)

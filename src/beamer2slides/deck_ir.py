@@ -2097,8 +2097,8 @@ def picture_fetch(pres: Presentation, pptx: bytes | None, keep: dict[str, Json] 
                 return exported[oid]
             if oid is None or live.supplied or not drive:
                 raise  # (a supplied .pptx is the export: Drive is not asked for another)
-            live.drive = live.drive or drive_service()
-            live.slides = live.slides or slides_service  # (made only if the deck needs parts)
+            live.drive = live.drive or drive_service(None)
+            live.slides = live.slides or (lambda: slides_service(None))  # (made only if the deck needs parts)
             data = live.export().get(oid)
             if not data:
                 raise

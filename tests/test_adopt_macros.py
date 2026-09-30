@@ -203,7 +203,7 @@ def test_pull_reads_the_words_of_a_slidepar_and_nothing_else() -> None:
              "\\end{slidebox}\n"
              "\\sliderect[fill=Blue]{10,10,20,20}\n"
              "\\slidetext[center]{67.2,63,243.57,37.8}{heading-blue}{Slide 2}\n")
-    vis = build_visible(latex, 0, len(latex))
+    vis = build_visible(latex, 0, len(latex), title_frame=False)
     words = vis.text.split()
     assert words == ["Lead", "Goals", "Confidentiality:", "read", "more", "Slide", "2"], words
 
@@ -275,7 +275,7 @@ def test_the_short_forms_draw_what_their_long_forms_draw(tmp_path: Path) -> None
     assert r.returncode == 0, r.stdout[-3000:]
     doc = pdf.Document(main.with_suffix(".pdf"))
     assert len(doc) == 2
-    short, spelled = (np.asarray(doc[k].render(3.0)) for k in (0, 1))
+    short, spelled = (np.asarray(doc[k].render(3.0, clip=None, transparent=False)) for k in (0, 1))
     assert (short < 250).any(), "the page has ink"
     assert short.shape == spelled.shape and (short == spelled).all()
 
@@ -341,7 +341,7 @@ def test_lists_and_defaults_draw_what_each_paragraph_spelled_out_draws(tmp_path:
     assert r.returncode == 0, r.stdout[-3000:]
     doc = pdf.Document(main.with_suffix(".pdf"))
     assert len(doc) == 2
-    short, spelled = (np.asarray(doc[k].render(3.0)) for k in (0, 1))
+    short, spelled = (np.asarray(doc[k].render(3.0, clip=None, transparent=False)) for k in (0, 1))
     assert (short < 250).any(), "the page has ink"
     assert short.shape == spelled.shape and (short == spelled).all()
 
@@ -446,7 +446,7 @@ def test_an_oval_picture_shows_only_its_inscribed_ellipse_and_is_outlined_round(
     main = tmp_path / "tree" / "main.tex"
     main.write_text(with_frames(text, "\\slidepicture[outline=black,outline width=4,oval]{38,28,104,64}{red.png}\n"
                                       "\\slidepicture{200,30,100,60}{red.png}"), encoding="utf-8")
-    im: Int32 = np.asarray(compiled(main)[0].render(2.0)).astype(np.int32)
+    im: Int32 = np.asarray(compiled(main)[0].render(2.0, clip=None, transparent=False)).astype(np.int32)
 
     def at(x: float, y: float) -> Int32:
         return im[int(y * 2), int(x * 2), :3]

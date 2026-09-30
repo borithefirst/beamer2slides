@@ -50,7 +50,7 @@ def test_a_step_removed_leaves_one_base_slide_unpaired():
 def test_keys_stay_distinct_when_a_label_repeats():
     base = [frame("motivation", 0, 0), frame("motivation", 1, 1)]
     base_keys = ["motivation", "motivation~2"]
-    keys, pairs = identity.inherit_slide_keys(base, base_keys, [dict(b) for b in base])
+    keys, pairs = identity.inherit_slide_keys(base, base_keys, [dict(b) for b in base], moves=None, weak=None)
     assert keys == base_keys and pairs == {0: 0, 1: 1}
 
 

@@ -45,7 +45,7 @@ only ever what the transcript reports; a task nobody priced reads `-`, never 0.
 The records are frozen and said whole where they are made (`ToolCall`, `Step`, `Usage`, `Row`,
 `Totals`, `Summary`); `Run` is the one that is filled in as it goes, and it too is made with every
 field said. A registry is a `Mapping[str, Journey]`: the real tools, the stand-ins below, or one of
-the two fakes (`FakeTools`, `Replayed`), all called the same way.
+the two fakes (`FakeTools`, `Replayed`), all called the same way: `dispatch(ctx, arguments)`.
 """
 
 from __future__ import annotations
@@ -114,7 +114,7 @@ def tier_of(text: str) -> Tier | Literal["all"]:
 def json_value(value: object) -> Json:
     """`value` as JSON, the way `json.dumps(value, default=str)` would write it.
 
-    What a tool was called with arrives as `object` (`Journey` takes keyword arguments of any
+    What a tool was called with arrives as `object` (`Journey.dispatch` takes arguments of any
     type); a transcript and a script's reply read it as the JSON it will be written as.
     """
     if value is None or isinstance(value, (bool, int, float, str)):
@@ -484,7 +484,7 @@ class Replayed(Mapping[str, Journey]):
                 return missing_tool(name)
             return copy.deepcopy(got[n])
 
-        return run_tool
+        return ByKeywords(run_tool)
 
 
 def recorded_dir(folder: Path) -> dict[str, Recorded]:
@@ -494,7 +494,7 @@ def recorded_dir(folder: Path) -> dict[str, Recorded]:
 
 # -------------------------------------------------------------------------------------- the registry
 
-def registry() -> dict[str, Tool] | None:
+def registry() -> dict[str, Tool[...]] | None:
     """`beamer2slides.agent.tools.TOOLS`, or None while it is not importable.
 
     Imported here and nowhere near module scope: the benchmark has to be usable (and its offline
@@ -518,7 +518,7 @@ def instructions() -> str:
                 "harness generating a transcript has to supply the guide itself.)")
 
 
-def local_tools() -> dict[str, Tool]:
+def local_tools() -> dict[str, Tool[...]]:
     """What a live task runs: the real registry when it is there, else the stand-ins below.
 
     The stand-ins exist so the live tasks and their graders can be written and proved before
@@ -537,7 +537,7 @@ def _finding_json(f: Finding) -> JsonObject:
             "bbox": None if bbox is None else list[Json](bbox), "detail": f["detail"]}
 
 
-def _stand_ins() -> dict[str, Tool]:
+def _stand_ins() -> dict[str, Tool[...]]:
     """Minimal, honest implementations of the three Google-free journeys, on the frozen wrapper.
 
     Their bodies' defaults are their schemas' optional parameters, as a real tool's are.
@@ -546,7 +546,7 @@ def _stand_ins() -> dict[str, Tool]:
     from beamer2slides.agent.types import READS, WRITES
 
     @_tool("b2s_status", needs=(READS,), local=None)
-    def b2s_status(job: Job, out: str | None = None) -> None:
+    def b2s_status(job: Job, *, out: str | None = None) -> None:
         root = job.ctx.workspace.root
         pdfs = sorted(job.ctx.workspace.glob("**/*.pdf"))
         texs = sorted(job.ctx.workspace.glob("**/*.tex"))
@@ -558,7 +558,7 @@ def _stand_ins() -> dict[str, Tool]:
                        f"{root}. Google: {'available' if google.get('available') else 'no'}.")
 
     @_tool("deck_inspect", needs=(READS, WRITES), local=None)
-    def deck_inspect(job: Job, pdf: str, out: str | None = None, overlays: str = "last",
+    def deck_inspect(job: Job, *, pdf: str, out: str | None = None, overlays: str = "last",
                      checks: bool = True, debug_images: bool = False) -> None:
         from beamer2slides.checks import convert_pages, run_checks
         path = job.path(pdf, write=False)
@@ -581,7 +581,7 @@ def _stand_ins() -> dict[str, Tool]:
                        f"{len(findings)} invariant finding(s).")
 
     @_tool("tex_label", needs=(READS, WRITES), local=None)
-    def tex_label(job: Job, tex: str, apply: bool = False) -> None:
+    def tex_label(job: Job, *, tex: str, apply: bool = False) -> None:
         from beamer2slides import labels, texmap
         from beamer2slides.inverse import keep_backup, replace_file
         path = job.path(tex, write=apply)
@@ -655,8 +655,8 @@ class FakeTools(Mapping[str, Journey]):
     def __getitem__(self, name: str) -> Journey:
         entry = self.script[name]
 
-        # `ctx` is not positional-only, as a real tool's is not: an argument called `ctx` is a
-        # TypeError here too.
+        # `ctx` is not positional-only: an argument called `ctx` is a TypeError here, which
+        # `agent_play` answers as `bad_request` (tests/test_agent_play.py).
         def run_tool(ctx: AgentContext, **arguments: object) -> Result:
             n = self.counts.get(name, 0)
             self.counts[name] = n + 1
@@ -665,7 +665,24 @@ class FakeTools(Mapping[str, Journey]):
                 item = item(ToolCall(tool=name, arguments=json_arguments(arguments)), n)
             return copy.deepcopy(item)
 
-        return run_tool
+        return ByKeywords(run_tool)
+
+
+class Keywords(Protocol):
+    """A fake journey written as a function of the context and the arguments by name."""
+
+    def __call__(self, ctx: AgentContext, **arguments: object) -> Result: ...
+
+
+class ByKeywords:
+    """A `Journey` made of a `Keywords` function: `dispatch` calls it with the arguments spread
+    out by name, so an argument it cannot take is the `TypeError` a Python call would raise."""
+
+    def __init__(self, run: Keywords) -> None:
+        self.run = run
+
+    def dispatch(self, ctx: AgentContext, arguments: Mapping[str, object]) -> Result:
+        return self.run(ctx, **arguments)
 
 
 def missing_tool(name: str) -> Result:
@@ -729,7 +746,7 @@ def run_task(task: Task, policy: Policy, *, ctx: AgentContext | None,
                 break
             for one in move:
                 fn = table.get(one.tool)
-                result = fn(ctx, **one.arguments) if fn else missing_tool(one.tool)
+                result = fn.dispatch(ctx, one.arguments) if fn else missing_tool(one.tool)
                 run.steps.append(Step(call=one, result=result))
         run.failures = list(task.grade(run))
         if run.truncated:

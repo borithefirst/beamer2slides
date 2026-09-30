@@ -16,65 +16,92 @@ from __future__ import annotations
 
 import argparse
 import json
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from beamer2slides import gslides
 from beamer2slides.google_auth import slides_service
+from beamer2slides.google_types import Page, object_id, part
+from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_int, as_object, as_objects, as_str
 
 
-def _colour(style: dict) -> str | None:
-    rgb = (((style.get("foregroundColor") or {}).get("opaqueColor") or {}).get("rgbColor"))
+@dataclass(frozen=True, kw_only=True)
+class Paragraph:
+    """One paragraph of a shape's text: its range, words, paragraphMarker and first run's style."""
+    start: int
+    end: int
+    text: str
+    marker: JsonObject
+    first: JsonObject
+
+
+def num(v: Json) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise JsonShapeError(f"a number was expected, found {v!r}")
+    return v
+
+
+def _colour(style: JsonObject) -> str | None:
+    rgb = part(part(style.get("foregroundColor"), "foregroundColor").get("opaqueColor"), "opaqueColor").get("rgbColor")
     if rgb is None:
         return None
-    return "#%02x%02x%02x" % tuple(round(255 * rgb.get(c, 0.0)) for c in ("red", "green", "blue"))
+    colour = as_object(rgb, "rgbColor")
+    return "#%02x%02x%02x" % tuple(round(255 * num(colour.get(c, 0.0))) for c in ("red", "green", "blue"))
 
 
-def _style(style: dict) -> str:
-    size = (style.get("fontSize") or {}).get("magnitude")
+def _style(style: JsonObject) -> str:
+    size = part(style.get("fontSize"), "fontSize").get("magnitude")
     return f"{style.get('fontFamily')} {size} {_colour(style)}"
 
 
-def paragraphs(shape: dict):
+def paragraphs(shape: JsonObject) -> list[Paragraph]:
     """(start, end, text, paragraphMarker, first run style) per paragraph of a shape."""
-    elements = shape.get("text", {}).get("textElements", [])
-    out = []
+    elements = as_objects(part(shape.get("text"), "text").get("textElements", []), "textElements")
+    out: list[Paragraph] = []
     for i, te in enumerate(elements):
         if "paragraphMarker" not in te:
             continue
-        start, end = te.get("startIndex", 0), te["endIndex"]
+        start = as_int(te.get("startIndex", 0), "startIndex")
+        end = as_int(te.get("endIndex"), "endIndex")
         text, first = "", None
         for run in elements[i + 1:]:
             if "paragraphMarker" in run:
                 break
             if "textRun" in run:
-                text += run["textRun"]["content"]
+                text_run = as_object(run["textRun"], "textRun")
+                text += as_str(text_run.get("content"), "textRun.content")
                 if first is None:
-                    first = run["textRun"].get("style", {})
-        out.append((start, end, text, te["paragraphMarker"], first or {}))
+                    first = part(text_run.get("style"), "textRun.style")
+        out.append(Paragraph(start=start, end=end, text=text,
+                             marker=as_object(te["paragraphMarker"], "paragraphMarker"),
+                             first=first if first is not None else {}))
     return out
 
 
-def report(shape: dict) -> None:
-    lists = shape.get("text", {}).get("lists", {})
-    for start, end, text, marker, first in paragraphs(shape):
-        bullet = marker.get("bullet")
-        ps = marker.get("style", {})
-        indent = [(ps.get(k) or {}).get("magnitude") for k in ("indentStart", "indentFirstLine")]
-        line = f"  [{start:3}-{end:3}] {text.strip()[:24]!r:28}"
+def report(shape: JsonObject) -> None:
+    lists = part(part(shape.get("text"), "text").get("lists"), "lists")
+    for p in paragraphs(shape):
+        bullet = part(p.marker.get("bullet"), "bullet")
+        ps = part(p.marker.get("style"), "paragraph style")
+        indent = [part(ps.get(k), k).get("magnitude") for k in ("indentStart", "indentFirstLine")]
+        line = f"  [{p.start:3}-{p.end:3}] {p.text.strip()[:24]!r:28}"
         if bullet:
-            level = bullet.get("nestingLevel", 0)
-            lvl = lists.get(bullet["listId"], {}).get("nestingLevel", {}).get(str(level), {})
-            line += (f" L{level} glyph={bullet.get('glyph')!r} own=({_style(bullet.get('bulletStyle', {}))})"
-                     f" list=({_style(lvl.get('bulletStyle', {}))})")
-        line += f" indent={indent} text=({_style(first)})"
+            level = as_int(bullet.get("nestingLevel", 0), "nestingLevel")
+            listed = part(lists.get(as_str(bullet.get("listId"), "listId")), "list")
+            lvl = part(part(listed.get("nestingLevel"), "nestingLevel").get(str(level)), "nesting level")
+            line += (f" L{level} glyph={bullet.get('glyph')!r}"
+                     f" own=({_style(part(bullet.get('bulletStyle'), 'bulletStyle'))})"
+                     f" list=({_style(part(lvl.get('bulletStyle'), 'bulletStyle'))})")
+        line += f" indent={indent} text=({_style(p.first)})"
         print(line)
 
 
-def bulleted(slide: dict):
+def bulleted(slide: Page) -> Iterator[tuple[str, JsonObject]]:
     for el in slide.get("pageElements", []):
         shape = el.get("shape")
-        if shape and any(p[3].get("bullet") for p in paragraphs(shape)):
-            yield el["objectId"], shape
+        if shape and any(p.marker.get("bullet") for p in paragraphs(shape)):
+            yield object_id(el), shape
 
 
 def main() -> None:
@@ -84,34 +111,39 @@ def main() -> None:
     ap.add_argument("--add", action="store_true", help="insert new bullets (writes to the deck)")
     ap.add_argument("--text", default="New point")
     args = ap.parse_args()
-    pid = json.loads((args.out / "emit.json").read_text(encoding="utf-8"))["presentationId"]
-    slides = slides_service()
+    out: Path = args.out
+    number: int = args.slide
+    add: bool = args.add
+    new_text: str = args.text
+    emitted = as_object(json.loads((out / "emit.json").read_text(encoding="utf-8")), "emit.json")
+    pid = as_str(emitted.get("presentationId"), "emit.json's presentationId")
+    slides = slides_service(None)
 
-    def read():
+    def read() -> Page:
         pres = gslides.execute(slides.presentations().get(presentationId=pid))
-        return pres["slides"][args.slide - 1]
+        return pres.get("slides", [])[number - 1]
 
     slide = read()
     boxes = list(bulleted(slide))
     for oid, shape in boxes:
         print(f"{oid}:")
         report(shape)
-    if not args.add or not boxes:
+    if not add or not boxes:
         return
     oid, shape = boxes[0]
-    items = [p for p in paragraphs(shape) if p[3].get("bullet")]
+    items = [p for p in paragraphs(shape) if p.marker.get("bullet")]
     # One after the last item (before the shape's final newline) and one after the first.
-    spots = sorted({items[-1][1] - 1, items[0][1] - 1}, reverse=True)
-    reqs = [{"insertText": {"objectId": oid, "insertionIndex": at,
-                            "text": f"\n{args.text} {n}"}} for n, at in enumerate(spots)]
+    spots = sorted({items[-1].end - 1, items[0].end - 1}, reverse=True)
+    reqs: list[Mapping[str, object]] = [{"insertText": {"objectId": oid, "insertionIndex": at,
+                                                        "text": f"\n{new_text} {n}"}} for n, at in enumerate(spots)]
     gslides.execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     print(f"after inserting at {spots}:")
     for o, s in bulleted(read()):
         if o == oid:
             report(s)
-    path = args.out / "probe_new_bullet" / f"slide-{args.slide:03}.png"
+    path = out / "probe_new_bullet" / f"slide-{number:03}.png"
     path.parent.mkdir(parents=True, exist_ok=True)
-    gslides.save_thumbnail(slides, pid, slide["objectId"], path)
+    gslides.save_thumbnail(slides, pid, object_id(slide), path, None)
     print(f"thumbnail: {path}")
 
 

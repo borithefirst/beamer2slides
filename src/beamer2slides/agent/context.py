@@ -27,7 +27,11 @@ have to repeat:
 
 What it makes is a `Tool`: the journey callable as `tool(ctx, **arguments)`, carrying its name,
 what it needs and the undecorated body the schema is read from - declared attributes of a type,
-not attributes set on a function after the fact.
+not attributes set on a function after the fact. A `Tool` is generic over its body's parameters,
+so a Python call is checked against them (a file parameter says `content.File`: a ref, or the
+file itself); a call off the wire - an MCP request, a replayed transcript - holds whatever a
+model sent and goes through `Tool.dispatch(ctx, arguments)`, where nothing is checked but at
+run time, into the same refusals.
 """
 
 from __future__ import annotations
@@ -40,11 +44,12 @@ from contextlib import ExitStack, redirect_stdout
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import RLock
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Concatenate, Generic, Literal, ParamSpec, Protocol, runtime_checkable
 
 from ..json_types import JsonObject
 from ..typing_compat import override
 from .auth import GoogleAccess, NoGoogle, default_access
+from .content import File, holds_content, is_content, take_in, take_one
 from .types import (READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Artifact, Code, Diagnostic, Level,
                     Need, Refused, Result)
 from .workspace import LocalWorkspace, Workspace
@@ -208,6 +213,18 @@ class Job:
     def path(self, ref: str, *, write: bool) -> Path:
         return self.ctx.workspace.resolve(ref, write=write)
 
+    def ref(self, param: str, value: File) -> str:
+        """A file argument as the workspace ref a body works with.
+
+        `@tool` has taken inline content in before the body runs (`content.take_in`), so by
+        then the argument is the ref it wrote and this hands it back; it is where the checker
+        learns so. Content that is still content (a body called by other means than its `Tool`)
+        is taken in here, under `param`'s name, as the wrapper would have.
+        """
+        if isinstance(value, str) and not is_content(value):
+            return value
+        return take_one(self.ctx.workspace, param, value, self.ctx.fetch)
+
     def note(self, level: Level, message: str, where: str) -> None:
         """Say something that is not the result; `where` is "" when it is about no one place."""
         self.diagnostics.append(Diagnostic(level=level, message=message, where=where))
@@ -281,35 +298,56 @@ LocalTest = Callable[[Job, Mapping[str, object]], bool]
 
 
 class Journey(Protocol):
-    """What a registry maps a name to: called with a context and keyword arguments, answering a
-    `Result`. A `Tool` is one; a benchmark's scripted fake is another."""
+    """What a registry maps a name to, called the way the wire calls it: a context and the
+    arguments a model sent, answering a `Result`. A `Tool` is one (`Tool.dispatch`); a
+    benchmark's scripted fake is another."""
 
-    def __call__(self, ctx: AgentContext, /, **arguments: object) -> Result: ...
+    def dispatch(self, ctx: AgentContext, arguments: Mapping[str, object]) -> Result: ...
 
 
-class Tool:
+#: A tool body's parameters after its `Job`: what a Python call to its `Tool` is checked against.
+P = ParamSpec("P")
+
+
+class Tool(Generic[P]):
     """A journey: `tool(ctx, **arguments) -> Result`, never raising.
 
     `tool_name` is the name it is published under, `needs` what it does to the world, `body` the
     function it was written as (the schema is read from its signature and docstring), and `local`
     the test for a call that needs no Google. It wraps `body` the way `functools.wraps` would, so
     `inspect.signature` and `typing.get_type_hints` read the body through it.
+
+    Two ways in, one journey: `tool(ctx, pdf=..., dry_run=True)` is checked against the body's
+    parameters, and `tool.dispatch(ctx, arguments)` takes a mapping nobody could check - what came
+    off the wire - and refuses at run time what the checker would have refused (`bad_request`).
     """
 
     def __init__(self, *, name: str, needs: tuple[Need, ...], local: LocalTest | None,
-                 body: Callable[..., None]) -> None:
+                 body: Callable[Concatenate[Job, P], None]) -> None:
         self.tool_name = name
         self.needs = needs
         self.local = local
         self.body = body
+        #: The body as the wire calls it: with whatever names arrived, checked only by running.
+        self._wire: Callable[..., None] = body
         functools.update_wrapper(self, body)
 
     @override
     def __repr__(self) -> str:
         return f"<tool {self.tool_name}>"
 
-    def __call__(self, ctx: AgentContext, *args: object, **kw: object) -> Result:
+    def __call__(self, ctx: AgentContext, /, *args: P.args, **kw: P.kwargs) -> Result:
+        return self._run(ctx, args, kw)
+
+    def dispatch(self, ctx: AgentContext, arguments: Mapping[str, object]) -> Result:
+        """The call a harness makes with what a model sent: `arguments` by name, unchecked until
+        now. An unknown or missing one is `bad_request`, as every other refusal is a code."""
+        return self._run(ctx, (), arguments)
+
+    def _run(self, ctx: AgentContext, args: tuple[object, ...],
+             arguments: Mapping[str, object]) -> Result:
         name, needs, local = self.tool_name, self.needs, self.local
+        kw = dict(arguments)
         job = Job(name, ctx)
         started = time.time()
         with _LOCK:
@@ -338,7 +376,7 @@ class Tool:
                     if ctx.drive_folder:
                         from .. import drive_folder
                         hooks.enter_context(drive_folder.use_folder(ctx.drive_folder))
-                    self.body(job, *args, **kw)
+                    self._wire(job, *args, **kw)
             except Refused as exc:
                 _refuse(job, exc.code, str(exc), exc.data)
             except FileNotFoundError as exc:
@@ -365,12 +403,24 @@ class Tool:
         return _deliver(job.result, ctx)
 
 
-def tool(name: str, *, needs: tuple[Need, ...],
-         local: LocalTest | None) -> Callable[[Callable[..., None]], Tool]:
+class _MakeTool:
+    """What `tool(...)` answers: the decorator, generic over the function it is given."""
+
+    def __init__(self, *, name: str, needs: tuple[Need, ...], local: LocalTest | None) -> None:
+        self.name = name
+        self.needs = needs
+        self.local = local
+
+    def __call__(self, fn: Callable[Concatenate[Job, P], None]) -> Tool[P]:
+        return Tool(name=self.name, needs=self.needs, local=self.local, body=fn)
+
+
+def tool(name: str, *, needs: tuple[Need, ...], local: LocalTest | None) -> _MakeTool:
     """Make a journey out of a function that takes a `Job` and fills it in.
 
     The decorated function is called `f(ctx, **arguments)` and returns a `Result`; it never
-    raises. `needs` names what the journey will do (`types.READS`, `WRITES`, `READS_GOOGLE`,
+    raises. Its parameters after the `Job` are best keyword-only: every caller names them, and
+    the wire can do nothing else. `needs` names what the journey will do (`types.READS`, `WRITES`, `READS_GOOGLE`,
     `WRITES_GOOGLE`), which decides both the policy check and whether credentials are fetched -
     both **before** the body runs, so a forbidden or unauthenticated journey does no work at
     all rather than stopping halfway through someone's deck.
@@ -380,11 +430,7 @@ def tool(name: str, *, needs: tuple[Need, ...],
     credentials, and runs with a provider that refuses, so a Google call it did make would be a
     refusal, not a quiet use of whatever token the machine has. None: every call may need Google.
     """
-
-    def wrap(fn: Callable[..., None]) -> Tool:
-        return Tool(name=name, needs=needs, local=local, body=fn)
-
-    return wrap
+    return _MakeTool(name=name, needs=needs, local=local)
 
 
 def _take_in(job: Job, arguments: dict[str, object]) -> dict[str, object]:
@@ -393,8 +439,6 @@ def _take_in(job: Job, arguments: dict[str, object]) -> dict[str, object]:
     Inside the `try`, so a malformed `base64` comes back as `bad_request` with the parameter
     named rather than as a traceback the harness has to catch.
     """
-    from .content import holds_content, take_in
-
     if not any(holds_content(v) for v in arguments.values()):
         return arguments
     return take_in(job.ctx.workspace, arguments, job.ctx.fetch)

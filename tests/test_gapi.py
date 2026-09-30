@@ -111,14 +111,14 @@ assert guard.HttpError is gapi.HttpError is snapshot.HttpError is gslides.HttpEr
 assert "deck_prepare" in TOOLS and len(TOOLS) == 13
 
 try:                                  # what a caller who has not injected anything is told
-    google_auth.slides_service()
+    google_auth.slides_service(None)
 except ModuleNotFoundError as exc:
     assert "beamer2slides[google]" in str(exc) and "use_services" in str(exc)
 else:
     raise AssertionError("a client was built with no client library installed")
 
 with google_auth.use_services({"slides": "SLIDES"}):   # ... and what an injecting one gets
-    assert google_auth.slides_service() == "SLIDES"
+    assert google_auth.slides_service(None) == "SLIDES"
 
 print("ok")
 """
@@ -240,13 +240,13 @@ class _Builder:
 
 def test_a_builder_is_handed_no_credentials_unless_it_asks(monkeypatch: pytest.MonkeyPatch) -> None:
     """The documented default, and the edge a caller reported: `emit()` opens with
-    `slides_service(), drive_service()` and passes nothing, so a builder that trusts the argument
+    `slides_service(None), drive_service(None)` and passes nothing, so a builder that trusts the argument
     builds an unauthenticated client while the library's own fallback would have fetched a token."""
     seen: Seen = []
     token = _creds()
     monkeypatch.setattr(google_auth, "credentials", lambda: token)
     with google_auth.use_services(_Builder(seen=seen, made=_Client())):
-        google_auth.slides_service()
+        google_auth.slides_service(None)
     assert seen == [("slides", None)]
 
 
@@ -261,7 +261,7 @@ def test_a_builder_that_asks_for_credentials_is_given_the_librarys(monkeypatch: 
 
     monkeypatch.setattr(google_auth, "credentials", credentials)
     with google_auth.use_services(_Builder(seen=seen, made=_Client()), needs_credentials=True):
-        google_auth.slides_service()
+        google_auth.slides_service(None)
         google_auth.drive_service(own)               # a caller's own still wins
         assert google_auth.credentials_for_threads() is token
         # Asked twice to find out whether it caches, but credentials are resolved once for both.
@@ -279,9 +279,9 @@ def test_an_injected_client_is_still_no_reason_to_look_for_a_token(monkeypatch: 
                         lambda: pytest.fail("a token was looked for"))
     ready = _Client()
     with google_auth.use_services({"slides": ready}):
-        assert google_auth.slides_service() is ready
+        assert google_auth.slides_service(None) is ready
         assert google_auth.credentials_for_threads() is None
     made = _Client()
     with google_auth.use_services(_Builder(seen=[], made=made)):
-        assert google_auth.slides_service() is made
+        assert google_auth.slides_service(None) is made
         assert google_auth.credentials_for_threads() is None

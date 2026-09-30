@@ -69,9 +69,9 @@ def test_downloads_can_be_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(net.NO_DOWNLOADS, "1")
     assert google_auth.fetcher_for_threads() is net.no_downloads and net.downloads_off()
     with pytest.raises(PermissionError, match="switched off"):
-        net.download("u")
+        net.download("u", None, net.TRIES)
     with google_auth.use_fetcher(lambda url: b"mine"):
-        assert net.download("u") == b"mine" and not net.downloads_off()
+        assert net.download("u", None, net.TRIES) == b"mine" and not net.downloads_off()
 
 
 def test_with_downloads_off_no_place_is_measured(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -92,7 +92,7 @@ def test_with_downloads_off_no_place_is_measured(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(emit_places, "batch", batch)
     monkeypatch.setenv(net.NO_DOWNLOADS, "1")
     assert emit.measure_places(NoSlides(), "P", {"slides": []}, 1.0, emit.FontMapper(), placed, {},
-                               tmp_path) == ({}, [])
+                               tmp_path, emit.SLIDE_W) == ({}, [])
 
 
 def test_a_download_is_retried_and_the_last_failure_raised() -> None:
@@ -150,14 +150,14 @@ def test_a_fetcher_must_hand_back_bytes(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_the_installed_fetcher_is_used_when_none_is_passed(fetcher: Fetcher) -> None:
     fetcher(lambda url: f"<{url}>".encode())
-    assert net.download("u") == b"<u>"
+    assert net.download("u", None, net.TRIES) == b"<u>"
 
 
 @pytest.mark.parametrize("data, suffix", [(png(size=SQUARE, colour=RED), ".png"), (b"\xff\xd8\xff\xe0rest", ".jpg"),
                                           (b"GIF89a...", ".gif"), (b"RIFF\0\0\0\0WEBPVP8 ", ".webp"),
                                           (b"<?xml version='1.0'?><svg/>", ".svg"), (b"??", ".png")])
 def test_a_picture_names_its_own_type(data: bytes, suffix: str) -> None:
-    assert net.picture_suffix(data) == suffix
+    assert net.picture_suffix(data, ".png") == suffix
 
 
 class ThumbnailPages(NoPages):
@@ -189,7 +189,7 @@ def test_a_thumbnail_is_downloaded_through_the_fetcher(tmp_path: Path, fetcher: 
 
     slides: SlidesService = ThumbnailSlides()
     fetcher(thumb)
-    assert save_thumbnail(slides, "pid", "p1", tmp_path / "t" / "1.png") == (1600, 900)
+    assert save_thumbnail(slides, "pid", "p1", tmp_path / "t" / "1.png", fetch=None) == (1600, 900)
     assert (tmp_path / "t" / "1.png").read_bytes() == png(size=SQUARE, colour=RED)
     assert not list((tmp_path / "t").glob("*.part"))
 
@@ -329,7 +329,7 @@ def test_a_picture_with_no_colour_profile_is_untouched(tmp_path: Path, fetcher: 
 def test_a_picture_s_source_url_on_any_host_goes_through_the_fetcher(tmp_path: Path, fetcher: Fetcher) -> None:
     """The original of a picture inserted by URL: a host chosen by whoever inserted it, which is
     exactly the egress a backend has to see."""
-    from beamer2slides.inverse import Context, Planner, Workspace, loop_picture, picture_look
+    from beamer2slides.inverse import BEAMER_PT, Planner, Workspace, fresh_context, loop_picture, picture_look
 
     big, small = png(size=(64, 64), colour=RED), png(size=(16, 16), colour=RED)
     asked: list[str] = []
@@ -345,7 +345,7 @@ def test_a_picture_s_source_url_on_any_host_goes_through_the_fetcher(tmp_path: P
     ws = Workspace.__new__(Workspace)
     ws.work = tmp_path
     planner = Planner.__new__(Planner)
-    planner.ws, planner.ctx = ws, Context()
+    planner.ws, planner.ctx = ws, fresh_context(BEAMER_PT)
     te = loop_picture({"source_url": "https://example.org/figure.png"}, (0.0, 0.0, 1.0, 1.0), "test")
     data, _, _ = planner.source_url_bytes(te, small, "png", picture_look(cur))
     assert asked == ["https://example.org/figure.png"]
@@ -463,7 +463,7 @@ def test_two_contexts_each_download_through_their_own(fetcher: Fetcher) -> None:
     def request(name: str) -> None:
         with google_auth.use_fetcher(own(name)):
             barrier.wait()
-            got[name] = net.download("u")
+            got[name] = net.download("u", None, net.TRIES)
 
     barrier = threading.Barrier(2)
     threads = [threading.Thread(target=contextvars.copy_context().run, args=(request, n)) for n in "ab"]

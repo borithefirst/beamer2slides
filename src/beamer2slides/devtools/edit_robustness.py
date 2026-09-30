@@ -996,7 +996,7 @@ def render(pdf: Path) -> tuple[Pixels, str, int, tuple[float, float]]:
     doc = Document(pdf)
     try:
         page = doc[0]
-        return (page.render(WIDTH_PX / page.width), "".join(c.c for c in page.chars()),
+        return (page.render(WIDTH_PX / page.width, clip=None, transparent=False), "".join(c.c for c in page.chars()),
                 len(doc), (page.width, page.height))
     finally:
         doc.close()
@@ -1008,7 +1008,7 @@ class Builder:
     def __init__(self, tree: Path, work: Path) -> None:
         from beamer2slides.inverse import Workspace
         shutil.rmtree(work, ignore_errors=True)
-        self.ws = Workspace(tree / "main.tex", work)
+        self.ws = Workspace(tree / "main.tex", work, handout=False, engine=None, fresh=True)
 
     def build(self, text: str) -> tuple[Path | None, str]:
         pdf = self.ws.build_dir / "main.pdf"

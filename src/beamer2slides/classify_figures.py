@@ -9,8 +9,8 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from .classify_model import (
-    HOLE_PAD, Line, Paragraph, Rect, Span, cluster_rects, miter_reach, overlap, polygon_shape, union_all,
-    upright_ellipse,
+    HOLE_PAD, Line, Paragraph, Rect, Span, cluster_rects, miter_reach, new_line, new_paragraph, overlap,
+    polygon_shape, union_all, upright_ellipse,
 )
 from .classify_paragraphs import ParagraphsMixin
 from .classify_text import EQ_NUMBER_RE, card_text, family_of, math_text, span_runs
@@ -98,7 +98,7 @@ class FiguresMixin(ParagraphsMixin):
                 continue  # only a stray bar, or tangled with native content: leave it in the background
             if len(members) == 1 and EQ_NUMBER_RE.match(members[0].text.strip()) and members[0].info.family != "math":
                 # An equation number beside its equation is plain text.
-                par = Paragraph([Line(members)], align="right")
+                par = new_paragraph([new_line(members)], align="right", reason=None)
                 out.append(self.text_element([par], f"p{self.raw['index']}eq{len(out)}"))
                 continue
             picture: ImageElement = {"id": f"p{self.raw['index']}m{len(out)}", "kind": "image", "role": "math",

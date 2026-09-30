@@ -231,12 +231,12 @@ def preflight_rebuild(out: Path, source_pdf: Path | None, new_deck: bool, force_
 
     if new_deck or force_rebuild or not (out / "emit.json").exists():
         return None
-    drive = drive or drive_service()
+    drive = drive or drive_service(None)
     previous: JsonObject | None = guard.previous_deck(drive, out)
     if not previous or previous["state"] != "live":
         return None
     pid = as_str(previous["presentationId"], "presentationId")
-    found: JsonObject = guard.check_rebuild(slides or slides_service(), drive, pid, out, source_pdf, False)
+    found: JsonObject = guard.check_rebuild(slides or slides_service(None), drive, pid, out, source_pdf, False)
     return Preflight(presentation_id=pid, found=found)
 
 
@@ -351,7 +351,7 @@ def emit(deck: ObjectMap, out: Path, title: str, new_deck: bool, measure: bool, 
     `new_deck`; that replaces the deck's whole content, so `guard.check_rebuild` refuses when
     the deck was edited in Slides (`force_rebuild` goes ahead, after a backup). `checked`: what
     the preflight found (`preflight_rebuild`), which saves the second ask a read of the deck."""
-    slides, drive = slides_service(), drive_service()
+    slides, drive = slides_service(None), drive_service(None)
     # (blocks are merged by the plan, `DeckPlan.contain`, where a block it trips over is a picture)
     existing, previous_entry = plan_rebuild(slides, drive, out, new_deck, force_rebuild, backup, source_pdf, checked)
     built, refused = build_deck(slides, drive, deck, out, title, existing, measure)
@@ -361,7 +361,7 @@ def emit(deck: ObjectMap, out: Path, title: str, new_deck: bool, measure: bool, 
         print(f"rebuilding the deck with {len(refused)} refused element(s) as pictures")
         # The refused ids are the built deck's (blocks merged, and what emit could not plan made
         # pictures already): the rebuild starts from that deck, so nothing is contained or said twice.
-        merged, contained = DeckPlan(deck, pptx_tables=True, contain=True).merged, built.state.contained
+        merged, contained = DeckPlan(deck, SLIDE_W, pptx_tables=True, contain=True).merged, built.state.contained
         built, again = build_deck(slides, drive, fallback_pictures(merged, refused, out), out, title,
                                   built.state.presentation_id, measure)
         if contained:
@@ -380,7 +380,7 @@ def upload_plan(deck: ObjectMap, out: Path) -> "DeckPlan":
     element (a field its producer never wrote: `DeckPlan.contain`) is the picture of its region, as
     a refused element's is: each is said in a warning, listed in emit.json ("contained"), and its
     picture cut out of the page here, before the .pptx is built."""
-    plan = DeckPlan(deck, pptx_tables=True, contain=True)
+    plan = DeckPlan(deck, SLIDE_W, pptx_tables=True, contain=True)
     for c in plan.contained:
         print(f"warning: slide {c['page'] + 1}: {c['kind']} {c['id']} could not be planned ({c['error']}); "
               f"using a picture of it instead")
@@ -477,7 +477,7 @@ def build_deck(slides: SlidesService, drive: DriveService, deck: ObjectMap, out:
     moves: Mapping[str, Place] = {}
     scratch: list[str] = []
     if measure:
-        moves, scratch = measure_places(slides, pid, written, scale, fonts, plan.placed, plan.page_slide, out)
+        moves, scratch = measure_places(slides, pid, written, scale, fonts, plan.placed, plan.page_slide, out, SLIDE_W)
 
     # Phase 2: content, batched over slides. Each slide's requests come in parts (one per
     # element) so that a rejected batch can be narrowed down to the element at fault.
@@ -700,7 +700,7 @@ class DeckPlan:
     overlays: dict[int, dict[str, tuple[float, float]]]
     _scratch: "Slide | None"
 
-    def __init__(self, deck: ObjectMap, page_width: float = SLIDE_W, pptx_tables: bool = False, contain: bool = False):
+    def __init__(self, deck: ObjectMap, page_width: float, *, pptx_tables: bool, contain: bool):
         # `page_width`: the width of the deck this plan is for, in slide pt. A deck `convert` makes
         # is always SLIDE_W wide (it uploads the .pptx that says so), but `sync` may be writing into
         # a deck a person built at any size (`adopt_sync`), and every box, font size and hole width
@@ -889,7 +889,7 @@ class DeckPlan:
 
     def slide_parts(self, slide: JsonObject, page_elements: Mapping[str, Sequence[JsonMap]],
                     speaker_notes: Mapping[str, str | None], moves: Mapping[str, Place],
-                    template_sizes: Sequence[tuple[float, float]], failed: list[tuple[int, Exception]] | None = None
+                    template_sizes: Sequence[tuple[float, float]], failed: list[tuple[int, Exception]] | None
                     ) -> tuple[list[Part], list[str]]:
         """Phase 2 for one slide after its copy: requests in parts ((element, requests), so a
         rejected batch can be narrowed down to the element at fault) and the element object IDs.
@@ -1035,28 +1035,28 @@ class OfflinePlan(TypedDict):
     contained: list[ContainedEntry]
 
 
-def plan_offline(deck: ObjectMap, placeholder_size: tuple[float, float] = PLACEHOLDER_SIZE,
-                 template_size: tuple[float, float] = TEMPLATE_SIZE) -> OfflinePlan:
+def plan_offline(deck: ObjectMap) -> OfflinePlan:
     """What emit would send for a classified deck, without Google: the imported slides are made
     up as the .pptx brings them (layout placeholders, pictures, template shapes) and hole
     pictures keep their predicted places. {"plan": DeckPlan, "pictures": {page: [(element, .pptx
     box)]}, "copies": phase 1 requests, "page_elements" and "speaker_notes": the copied slides,
     "measure": measure_places' scratch slide requests, "slides": [(slide id, page, parts, element ids)],
     "contained": the elements it could not plan, pictures now (`DeckPlan.contain`)}. `deck`: as
-    classify wrote it (the plan merges its blocks)."""
-    plan = DeckPlan(deck, pptx_tables=True, contain=True)
+    classify wrote it (the plan merges its blocks). The made-up sizes are PLACEHOLDER_SIZE and
+    TEMPLATE_SIZE."""
+    plan = DeckPlan(deck, SLIDE_W, pptx_tables=True, contain=True)
     copies: list[JsonObject] = []
     page_elements: dict[str, list[JsonObject]] = {}
     template_sizes: list[tuple[float, float]] = []
     for slide in plan.slides():
-        request, sizes, copied = _offline_copy(plan, slide, placeholder_size, template_size)
+        request, sizes, copied = _offline_copy(plan, slide, PLACEHOLDER_SIZE, TEMPLATE_SIZE)
         copies.append(request)
         template_sizes = template_sizes or sizes
         page_elements[_slide_id(_page(slide))] = copied
     speaker_notes = {slide_id: f"{slide_id}_notes" for slide_id in page_elements}
     slides: list[tuple[str, int, list[Part], list[str]]] = []
     for slide in plan.slides():
-        parts, element_ids = plan.slide_parts(slide, page_elements, speaker_notes, {}, template_sizes)
+        parts, element_ids = plan.slide_parts(slide, page_elements, speaker_notes, {}, template_sizes, None)
         slides.append((_slide_id(_page(slide)), _page(slide), parts, element_ids))
     return {"plan": plan, "pictures": {_page(s): plan.pictures(s) for s in plan.slides()}, "copies": copies,
             "page_elements": page_elements, "speaker_notes": speaker_notes,
@@ -1248,16 +1248,14 @@ class Emission(TypedDict):
     templates: dict[str, TemplateKey]
 
 
-def slide_emission(slide: JsonObject, scale: float, fonts: FontMapper,
-                   placeholder_size: tuple[float, float] = PLACEHOLDER_SIZE,
-                   template_size: tuple[float, float] = TEMPLATE_SIZE) -> Emission:
+def slide_emission(slide: JsonObject, scale: float, fonts: FontMapper) -> Emission:
     """What emit writes for one slide of a DeckPlan (blocks merged, holes fitted: `DeckPlan.deck`),
     worked out from that slide alone, so the same slide gives the same answer in whichever deck it
     stands: {"slide_id", "parts" and "element_ids" (`DeckPlan.slide_parts`), "boxes" (each
     picture's predicted place in slide pt, None for other kinds), "title" and "subtitle" (element
     indices of the layout placeholders' texts), "templates" ({object id of the slide's copy: its
     template key})}. As in `plan_offline` the layout's placeholders and the template shapes have
-    made-up sizes; unlike it, links to other slides all go to one page and measure_places' moves
+    made-up sizes (PLACEHOLDER_SIZE, TEMPLATE_SIZE); unlike it, links to other slides all go to one page and measure_places' moves
     are left out (only Google's renderer knows them), so pictures keep their predicted places.
     For sync.mark_emitted, which compares a base slide's emission with the new one's.
 
@@ -1271,11 +1269,11 @@ def slide_emission(slide: JsonObject, scale: float, fonts: FontMapper,
     keys = plan.keys
     title = title_element(slide)
     subtitle = subtitle_element(slide, title) if title is not None else None
-    w, h = placeholder_size
+    w, h = PLACEHOLDER_SIZE
     page_elements: dict[str, list[JsonObject]] = {
         slide_id: [{"objectId": f"{slide_id}_t{i}", "size": {"width": emu(w), "height": emu(h)}}
                    for i in (title, subtitle) if i is not None]}
-    parts, element_ids = plan.slide_parts(slide, page_elements, {}, {}, [template_size] * len(keys))
+    parts, element_ids = plan.slide_parts(slide, page_elements, {}, {}, [TEMPLATE_SIZE] * len(keys), None)
     boxes: list[list[float] | None] = [
         [v * scale for v in box_of(plan.placed(e, n)["bbox"], "bbox")] if e["kind"] == "image" else None
         for e in _elements(slide)]

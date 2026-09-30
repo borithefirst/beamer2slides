@@ -16,7 +16,8 @@ adds what the build cannot say:
     built without one of its fields, a case left out of an exhaustive match;
   * the tests type-check too, against typecheck/tests_baseline.json (TESTS_CEILING, `prune tests`),
     so a test still calling a function the old way is an error where it calls it. The suite is not
-    built, so this is their only gate.
+    built, so this is their only gate;
+  * tools/ type-checks with nothing excused (typecheck/tools_baseline.json is empty).
 
 The checker's answers depend on the types of the packages it reads, so they are checked against one
 environment: the versions the build pins ([build-system] requires). Where this interpreter has other
@@ -229,6 +230,18 @@ def found_in_tests(tests_command: list[str]) -> list[dict[str, object]]:
     return errors
 
 
+@pytest.fixture(scope="module")
+def found_in_tools(command: list[str]) -> list[dict[str, object]]:
+    """Every diagnostic in tools/, as the build backend's "tools" target asks for them."""
+    empty = Path(tempfile.mkdtemp()) / "baseline.json"
+    empty.write_text('{"errors": []}', encoding="utf-8")
+    done = check(command, "--baseline", str(empty), "--min-severity", "info", "--output-format", "json",
+                 *backend().ARGUMENTS["tools"])
+    assert done.stdout.strip(), done.stderr
+    errors: list[dict[str, object]] = json.loads(done.stdout)["errors"]
+    return errors
+
+
 def described(fresh: list[dict[str, object]]) -> str:
     return "\n".join(f"{d['path']}:{d['line']} [{d['name']}] {d['concise_description']}" for d in fresh)
 
@@ -257,6 +270,15 @@ def test_the_tests_baseline_only_shrinks(found_in_tests: list[dict[str, object]]
     assert len(entries) <= TESTS_CEILING, (f"the tests' baseline grew to {len(entries)} entries: new code "
                                            "type-checks, it is never added to the baseline")
     assert len(entries) == TESTS_CEILING, f"the tests' baseline shrank to {len(entries)}: lower TESTS_CEILING to match"
+
+
+def test_the_tools_type_check(found_in_tools: list[dict[str, object]]) -> None:
+    """tools/ too, with nothing excused: its baseline was empty the day it was admitted and stays so,
+    so a probe still calling a package function the old way is named here, not when it is next run
+    against Google."""
+    build = backend()
+    assert build.baseline("tools") == [], "tools/ has no legacy errors: new code type-checks"
+    assert not found_in_tools, described(found_in_tools)
 
 
 def test_a_baseline_entry_excuses_one_error_not_all_its_kind() -> None:

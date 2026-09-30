@@ -7,7 +7,7 @@ column keeping its line break."""
 from collections.abc import Sequence
 
 from beamer2slides import emit
-from beamer2slides.classify import Line, PageClassifier, Paragraph, Span
+from beamer2slides.classify import Line, PageClassifier, Span, new_line, new_paragraph
 from beamer2slides.emit_model import JsonMap
 from beamer2slides.json_types import Json, JsonObject
 
@@ -34,11 +34,11 @@ def line(words: Sequence[str], y: float, *, x0: float, gaps: list[float] | None,
     for w, wd, g in zip(words, widths, gaps + [0.0]):
         spans.append(span(w, x, y, SIZE, wd, font))
         x += wd + g * SIZE
-    return Line(spans=spans)
+    return new_line(spans)
 
 
 def justified(*lines: Line) -> bool:
-    return PageClassifier.is_justified(Paragraph(lines=list(lines)))
+    return PageClassifier.is_justified(new_paragraph(list(lines), align="left", reason=None))
 
 
 # ---------------------------------------------------------------- which paragraphs are justified
@@ -193,7 +193,7 @@ def test_a_word_tex_hyphenated_does_not_cost_a_line() -> None:
                           "bullet": None, "runs": [text_run("Robots deployed in 9 sites", 8.97)],
                           "lines": [{"baseline": 150.0, "x0": centre - w1 / 2, "x1": centre + w1 / 2},
                                     {"baseline": 161.0, "x0": centre - w2 / 2, "x1": centre + w2 / 2}]}]}
-    assert emit.pdf_line_breaks(jobj(el, "paragraphs", 0)) is None  # (the hyphen: not measured line by line)
+    assert emit.pdf_line_breaks(jobj(el, "paragraphs", 0), None, None) is None  # (the hyphen: not measured line by line)
     props = next(jobj(r, "createShape") for r in emit.text_box_requests(el, "s", "b", scale, FONTS) if "createShape" in r)
     width = pt_of(jobj(props, "elementProperties", "size", "width")) - 2 * emit.PAD_X
     assert width >= slides_w([text_run("Robots deployed", 8.97)], scale) + emit.LINE_MARGIN
@@ -206,7 +206,7 @@ def test_a_compound_longer_than_its_column_keeps_its_line_break() -> None:
     # dense v3 s5: 'Datenschutz-' over 'Folgenabschätzung' in a narrow column became one word
     # Slides cannot fit and breaks in the middle ('Datenschutz-Folgenabsc / hätzung').
     def text(*lines: str) -> str:
-        par = Paragraph(lines=[Line(spans=[span(t, 11.4, 100.0 + 11 * i, 9.0)]) for i, t in enumerate(lines)])
+        par = new_paragraph([new_line([span(t, 11.4, 100.0 + 11 * i, 9.0)]) for i, t in enumerate(lines)], align="left", reason=None)
         return "".join(r["text"] for r in PageClassifier.runs(par, "", False, None, 0.0))
 
     assert text("Datenschutz-", "Folgenabschätzung") == "Datenschutz-\vFolgenabschätzung"

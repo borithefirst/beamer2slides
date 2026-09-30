@@ -39,6 +39,7 @@ from typing import Annotated
 from .. import doc_ir
 from .. import doc_sync as docs
 from ..json_types import Json, JsonObject
+from .content import File
 from .context import Job, tool
 from .types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Refused
 
@@ -215,8 +216,9 @@ def _exit(j: Job, exc: SystemExit, file: str | None) -> None:
 @tool("doc_push", needs=(READS, WRITES, WRITES_GOOGLE), local=None)
 def doc_push(
     j: Job,
-    file: Annotated[str, "Workspace ref of the canonical HTML file to create the document "
-                         "from, e.g. 'notes/spec.html'."],
+    *,
+    file: Annotated[File, "Workspace ref of the canonical HTML file to create the document "
+                          "from, e.g. 'notes/spec.html'."],
     name: Annotated[str | None, "Title for the new Google Doc; the file's own <title>, or "
                                 "its filename, when this is not given."] = None,
     new_doc: Annotated[bool, "Create a second document even though the file already names "
@@ -231,6 +233,7 @@ def doc_push(
     Use it once per file. Every step after it is `doc_sync`: a re-import would destroy the
     named ranges, and those are the only thing that says which block is which.
     """
+    file = j.ref("file", file)
     path = j.path(file, write=True)
     if not path.is_file():
         raise Refused("not_found", f"{file} is not there; doc_push reads the canonical HTML "
@@ -274,8 +277,9 @@ def doc_push(
 @tool("doc_sync", needs=(READS, WRITES, READS_GOOGLE), local=None)
 def doc_sync(
     j: Job,
-    file: Annotated[str, "Workspace ref of the canonical HTML file; it normally names the "
-                         "document it belongs to."],
+    *,
+    file: Annotated[File, "Workspace ref of the canonical HTML file; it normally names the "
+                          "document it belongs to."],
     doc: Annotated[str | None, "The document's URL or id, when the file does not name one "
                                "(or to merge into a different one)."] = None,
     dry_run: Annotated[bool, "Plan the merge and write the report, but send nothing to the "
@@ -297,6 +301,7 @@ def doc_sync(
     the document and the base all say the same thing, so a second sync writes 0 requests -
     which is the property worth checking.
     """
+    file = j.ref("file", file)
     path = j.path(file, write=True)
     if not path.is_file():
         raise Refused("not_found", f"{file} is not there; doc_sync reads the canonical HTML "
@@ -374,6 +379,7 @@ def doc_sync(
 @tool("doc_adopt", needs=(READS, WRITES, READS_GOOGLE), local=None)
 def doc_adopt(
     j: Job,
+    *,
     doc: Annotated[str, "The document's URL or id: the Google Doc nobody ever pushed."],
     file: Annotated[str | None, "Workspace ref for the canonical HTML file to write; a slug "
                                 "of the document's title when not given."] = None,

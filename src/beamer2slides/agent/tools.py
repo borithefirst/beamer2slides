@@ -31,8 +31,8 @@ from .workspace import Workspace
 SURVEY_LIMIT = 40
 
 
-def _collect(*modules: ModuleType) -> dict[str, Tool]:
-    found: dict[str, Tool] = {}
+def _collect(*modules: ModuleType) -> dict[str, Tool[...]]:
+    found: dict[str, Tool[...]] = {}
     for module in modules:
         for value in vars(module).values():
             if isinstance(value, Tool):
@@ -43,7 +43,7 @@ def _collect(*modules: ModuleType) -> dict[str, Tool]:
 
 
 @tool("b2s_status", needs=(READS,), local=None)
-def b2s_status(j: Job,
+def b2s_status(j: Job, *,
                out: Annotated[str | None, "A single conversion folder to report on, instead of "
                                           "surveying the whole workspace."] = None,
                ) -> None:
@@ -279,7 +279,7 @@ def _ordered(found: Mapping[str, _T]) -> dict[str, _T]:
     return {name: found[name] for name in ORDER}
 
 
-TOOLS: dict[str, Tool] = _ordered({
+TOOLS: dict[str, Tool[...]] = _ordered({
     "b2s_status": b2s_status,
     **_collect(deck_tools, source_tools, doc_tools),
 })

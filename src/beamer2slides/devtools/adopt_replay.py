@@ -212,7 +212,7 @@ def replay(spec: str, fresh: bool) -> Replayed:
         notes = any(s.get("notes") for s in pages) or uses_notes(Source(tex))
         times["bootstrap"] = time.perf_counter() - t
         t = time.perf_counter()
-        ws = Workspace(tex, home / "work")
+        ws = Workspace(tex, home / "work", handout=False, engine=None, fresh=True)
         ws.notes = notes
         cache = folder / "compiled" / tree_hash(tex.parent, notes)
         pdf, err, cached = compiled(ws, cache)
@@ -249,7 +249,7 @@ def replay(spec: str, fresh: bool) -> Replayed:
             # without them (the loop's own PDF may still hold notes pages it failed to take out)
             shown = cand.pdf
             if notes:
-                plain = Workspace(tex, home / "plain")
+                plain = Workspace(tex, home / "plain", handout=False, engine=None, fresh=True)
                 shown, err, _ = compiled(plain, folder / "compiled" / tree_hash(tex.parent, False))
                 if shown is None:
                     raise RuntimeError(f"compile without notes: {err[-300:]}")

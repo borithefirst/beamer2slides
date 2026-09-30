@@ -13,15 +13,17 @@ Usage: python tools/probe_diagram.py
 
 import io
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
-from googleapiclient.http import MediaIoBaseUpload
 from lxml import etree
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Emu, Pt
 
+from beamer2slides.gapi import media_upload
 from beamer2slides.google_auth import drive_service, slides_service
+from beamer2slides.google_types import file_id, object_id, part
 from beamer2slides.gslides import EMU_PER_PT, execute, pt, save_thumbnail
 
 OUT = Path(__file__).resolve().parents[1] / "out"
@@ -44,15 +46,15 @@ def main() -> None:
     buf = io.BytesIO()
     prs.save(buf)
     buf.seek(0)
-    drive, slides = drive_service(), slides_service()
-    pid = execute(drive.files().create(
+    drive, slides = drive_service(None), slides_service(None)
+    pid = file_id(execute(drive.files().create(
         body={"name": "b2s probe diagram", "mimeType": "application/vnd.google-apps.presentation"},
-        media_body=MediaIoBaseUpload(buf, mimetype=PPTX_MIME), fields="id"))["id"]
+        media_body=media_upload(buf, PPTX_MIME), fields="id")), "the probe deck")
     pres = execute(slides.presentations().get(presentationId=pid))
-    page = pres["slides"][0]
-    rect_tpl, oval_tpl = [e["objectId"] for e in page["pageElements"]]
+    page = pres.get("slides", [])[0]
+    rect_tpl, oval_tpl = [object_id(e) for e in page.get("pageElements", [])]
 
-    def node(tpl: str, oid: str, x: float, y: float, w: float, h: float, text: str, size: float) -> list[dict]:
+    def node(tpl: str, oid: str, x: float, y: float, w: float, h: float, text: str, size: float) -> list[Mapping[str, object]]:
         return [
             {"duplicateObject": {"objectId": tpl, "objectIds": {tpl: oid}}},
             {"updatePageElementTransform": {"objectId": oid, "applyMode": "ABSOLUTE", "transform": {
@@ -72,7 +74,7 @@ def main() -> None:
         + node(rect_tpl, "node_c", 60, 250, 140, 34, "Convert all", 22)
     reqs += [
         {"createLine": {"objectId": "line_ab", "lineCategory": "STRAIGHT", "elementProperties": {
-            "pageObjectId": page["objectId"], "size": {"width": {"magnitude": 165 * EMU_PER_PT, "unit": "EMU"},
+            "pageObjectId": object_id(page), "size": {"width": {"magnitude": 165 * EMU_PER_PT, "unit": "EMU"},
                                                          "height": {"magnitude": 83 * EMU_PER_PT, "unit": "EMU"}},
             "transform": {"scaleX": 1, "scaleY": 1, "translateX": 135 * EMU_PER_PT, "translateY": 97 * EMU_PER_PT, "unit": "EMU"}}}},
         {"updateLineProperties": {"objectId": "line_ab", "fields": "endArrow,startConnection,endConnection",
@@ -86,11 +88,14 @@ def main() -> None:
     except Exception as e:
         print("batch failed:", str(e)[:400])
     pres = execute(slides.presentations().get(presentationId=pid))
-    for e in pres["slides"][0]["pageElements"]:
-        kind = "line" if "line" in e else e["shape"]["shapeType"]
-        extra = json.dumps({k: v for k, v in e["line"]["lineProperties"].items() if "onnection" in k}) if "line" in e else ""
-        print(e["objectId"], kind, e.get("size"), e["transform"], extra)
-    save_thumbnail(slides, pid, pres["slides"][0]["objectId"], OUT / "probe_diagram.png")
+    shown = pres.get("slides", [])[0]
+    for e in shown.get("pageElements", []):
+        line = e.get("line")
+        kind = "line" if line is not None else part(e.get("shape"), "shape").get("shapeType")
+        extra = "" if line is None else json.dumps(
+            {k: v for k, v in part(line.get("lineProperties"), "line.lineProperties").items() if "onnection" in k})
+        print(object_id(e), kind, e.get("size"), e.get("transform"), extra)
+    save_thumbnail(slides, pid, object_id(shown), OUT / "probe_diagram.png", None)
     print(f"https://docs.google.com/presentation/d/{pid}/edit")
 
 

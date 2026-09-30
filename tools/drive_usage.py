@@ -33,21 +33,44 @@ import argparse
 import calendar
 import re
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 
 from beamer2slides.google_auth import drive_service
+from beamer2slides.google_types import DriveFile, DriveService, as_json, file_id
 from beamer2slides.gslides import execute
+from beamer2slides.json_types import as_str
 
 STAGING_NAME = "beamer2slides sync staging (temporary)"
 ID_WORD = re.compile(r"[A-Za-z0-9_-]{20,}")
 READABLE = (".json", ".md", ".txt", ".html", ".csv")
 
 
-def list_all(drive, q: str, fields: str) -> list[dict]:
-    out, token = [], None
+@dataclass(frozen=True, kw_only=True)
+class Deck:
+    """A deck of the app's, as `files.list` answered it with the fields `main` asks for."""
+    id: str
+    name: str
+    created: str
+    """createdTime"""
+    properties: Mapping[str, str]
+    """appProperties (none when Drive answered none)"""
+
+
+def deck_of(f: DriveFile) -> Deck:
+    fid, name, created = f.get("id"), f.get("name"), f.get("createdTime")
+    if fid is None or name is None or created is None:
+        raise ValueError(f"files.list answered a deck without its id, name or createdTime: {sorted(f)}")
+    return Deck(id=fid, name=name, created=created, properties=f.get("appProperties") or {})
+
+
+def list_all(drive: DriveService, q: str, fields: str) -> list[DriveFile]:
+    out: list[DriveFile] = []
+    token: str | None = None
     while True:
         r = execute(drive.files().list(q=q, fields=f"nextPageToken,files({fields})", pageSize=1000, pageToken=token))
-        out += r["files"]
+        out += r.get("files", [])
         token = r.get("nextPageToken")
         if not token:
             return out
@@ -58,11 +81,11 @@ def hours_old(created: str) -> float:
     return (time.time() - calendar.timegm(time.strptime(created[:19], "%Y-%m-%dT%H:%M:%S"))) / 3600
 
 
-def is_staging(d: dict) -> bool:
+def is_staging(d: Deck) -> bool:
     """A staging deck goes by the name sync gives it. Only files this app created are visible at
     all (the `drive.file` scope), so a file of this app with exactly that name is one of them;
     syncs from now on also write an `appProperties` marker, shown as `marked` in the report."""
-    return d.get("name") == STAGING_NAME or bool((d.get("appProperties") or {}).get("b2sStaging"))
+    return d.name == STAGING_NAME or bool(d.properties.get("b2sStaging"))
 
 
 def named_anywhere(roots: list[Path]) -> tuple[set[str], list[Path]]:
@@ -83,21 +106,22 @@ def named_anywhere(roots: list[Path]) -> tuple[set[str], list[Path]]:
     return words, unreadable
 
 
-def orphans(decks: list[dict], backups: list[dict], roots: list[Path], hours: float) -> tuple[list[dict], list[str]]:
+def orphans(decks: list[Deck], backups: list[Deck], roots: list[Path], hours: float) -> tuple[list[Deck], list[str]]:
     """The decks nothing under `roots` names, and a line for each one spared and why."""
     named, unreadable = named_anywhere(roots)
     if unreadable:  # a file we cannot read may be the one naming a deck: judge nothing
         return [], [f"{len(unreadable)} file(s) under the roots could not be read "
                     f"(first: {unreadable[0]}): nothing is deleted"]
-    kept_for = {(d.get("appProperties") or {}).get("b2sBackupOf") for d in backups}
-    out, why = [], []
-    for d in sorted(decks, key=lambda d: d["createdTime"]):
-        if d["id"] in named:
+    kept_for = {d.properties.get("b2sBackupOf") for d in backups}
+    out: list[Deck] = []
+    why: list[str] = []
+    for d in sorted(decks, key=lambda d: d.created):
+        if d.id in named:
             continue
-        if d["id"] in kept_for:
-            why.append(f"{d['id'][:12]} spared: a backup copy in Drive points at it")
-        elif hours_old(d["createdTime"]) < hours:
-            why.append(f"{d['id'][:12]} spared: only {hours_old(d['createdTime']):.1f} h old")
+        if d.id in kept_for:
+            why.append(f"{d.id[:12]} spared: a backup copy in Drive points at it")
+        elif hours_old(d.created) < hours:
+            why.append(f"{d.id[:12]} spared: only {hours_old(d.created):.1f} h old")
         else:
             out.append(d)
     return out, why
@@ -114,39 +138,40 @@ def main() -> None:
                     help="only files older than this (default 12), so a run in progress is never touched")
     args = ap.parse_args()
     roots = [r for r in (args.root or [Path("out")]) if r.is_dir()]
-    drive = drive_service()
+    drive = drive_service(None)
     folders = list_all(drive, "name = 'beamer2slides assets' and mimeType = 'application/vnd.google-apps.folder' "
                               "and trashed = false", "id")
     for folder in folders:
-        files = list_all(drive, f"'{folder['id']}' in parents and trashed = false", "size")
-        print(f"assets folder: {len(files)} files, {sum(int(f.get('size', 0)) for f in files) / 1e6:.1f} MB")
-    decks = list_all(drive, "mimeType = 'application/vnd.google-apps.presentation' and trashed = false",
-                     "id,name,createdTime,appProperties")
+        files = list_all(drive, f"'{file_id(folder, 'the assets folder')}' in parents and trashed = false", "size")
+        size = sum(int(as_str(as_json(f, 'an asset').get('size', '0'), 'size')) for f in files)
+        print(f"assets folder: {len(files)} files, {size / 1e6:.1f} MB")
+    decks = [deck_of(f) for f in list_all(drive, "mimeType = 'application/vnd.google-apps.presentation' and trashed = false",
+                                          "id,name,createdTime,appProperties")]
     staging = [d for d in decks if is_staging(d)]
-    backups = [d for d in decks if (d.get("appProperties") or {}).get("b2sBackupOf")]
-    aside = {d["id"] for d in staging} | {d["id"] for d in backups}
-    own = [d for d in decks if d["id"] not in aside]
+    backups = [d for d in decks if d.properties.get("b2sBackupOf")]
+    aside = {d.id for d in staging} | {d.id for d in backups}
+    own = [d for d in decks if d.id not in aside]
     print(f"decks created by the app: {len(decks)} ({len(own)} decks, {len(backups)} backup copies, "
           f"{len(staging)} staging leftovers)")
-    for d in sorted(own, key=lambda d: d["createdTime"]):
-        print(f"  {d['createdTime'][:16]}  {d['name']}")
-    for d in sorted(backups, key=lambda d: d["createdTime"]):
-        print(f"  {d['createdTime'][:16]}  [backup of {d['appProperties']['b2sBackupOf'][:12]}] {d['name']}")
+    for d in sorted(own, key=lambda d: d.created):
+        print(f"  {d.created[:16]}  {d.name}")
+    for d in sorted(backups, key=lambda d: d.created):
+        print(f"  {d.created[:16]}  [backup of {d.properties['b2sBackupOf'][:12]}] {d.name}")
     if staging:
         print(f"\n{len(staging)} staging deck(s) of a sync that was interrupted (safe to delete: the live decks "
               f"hold their own copies of the pictures):")
-        for d in sorted(staging, key=lambda d: d["createdTime"]):
-            marker = (d.get("appProperties") or {}).get("b2sStaging")
-            print(f"  {d['createdTime'][:16]}  {d['id']}"
+        for d in sorted(staging, key=lambda d: d.created):
+            marker = d.properties.get("b2sStaging")
+            print(f"  {d.created[:16]}  {d.id}"
                   f"{f'  marked, for deck {marker[:12]}' if marker else ''}")
-        old = [d for d in staging if hours_old(d["createdTime"]) >= args.older_than_hours]
+        old = [d for d in staging if hours_old(d.created) >= args.older_than_hours]
         if not args.delete_staging:
             print(f"  delete them with: python tools/drive_usage.py --delete-staging "
                   f"({len(old)} of them are over {args.older_than_hours:g} h old)")
         else:
             for d in old:
-                execute(drive.files().delete(fileId=d["id"]))
-                print(f"  deleted {d['id']}")
+                execute(drive.files().delete(fileId=d.id))
+                print(f"  deleted {d.id}")
             print(f"deleted {len(old)} staging deck(s); {len(staging) - len(old)} left "
                   f"(younger than {args.older_than_hours:g} h: a sync may be using them)")
     if not args.delete_orphans:
@@ -162,9 +187,9 @@ def main() -> None:
         print(f"no orphaned decks: every one of the {len(own)} is named by a file under the roots")
         return
     for d in doomed:
-        print(f"  {'trashed' if args.yes else 'would trash'}  {d['createdTime'][:16]}  {d['id'][:12]}  {d['name']}")
+        print(f"  {'trashed' if args.yes else 'would trash'}  {d.created[:16]}  {d.id[:12]}  {d.name}")
         if args.yes:  # trashed, not deleted: Drive keeps it restorable for 30 days
-            execute(drive.files().update(fileId=d["id"], body={"trashed": True}))
+            execute(drive.files().update(fileId=d.id, body={"trashed": True}))
     if args.yes:
         print(f"moved {len(doomed)} deck(s) nothing here named to the Drive trash (restorable for 30 days); "
               f"{len(own) - len(doomed)} kept")

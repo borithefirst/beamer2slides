@@ -113,7 +113,7 @@ def test_a_rendered_deck_and_its_emit_plan_come_back_as_they_were_written(name: 
     raw, deck, read_pdf = read(pdf, tmp_path)
     render.render_backgrounds(read_pdf, raw, deck, tmp_path / "out", frozenset())
     assert_same(deck, "rendered")
-    planned = emit.DeckPlan(deck).deck
+    planned = emit.DeckPlan(deck, emit.SLIDE_W, pptx_tables=False, contain=False).deck
     assert_same(planned, "rendered")
     for s in jobjs(planned, "slides"):
         for e in jobjs(s, "elements"):

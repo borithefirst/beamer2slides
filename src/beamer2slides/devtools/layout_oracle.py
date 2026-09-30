@@ -767,7 +767,7 @@ def ours_from_folder(folder: Path, base: JsonObject) -> JsonObject | None:
     for s in as_objects(source["slides"], "deck.slides"):
         blocks: list[Json] = [e for e in merge_blocks(as_objects(s["elements"], "slide.elements"))]
         merged.append({**s, "elements": blocks})
-    plan = DeckPlan({**source, "slides": merged}, SLIDE_W)
+    plan = DeckPlan({**source, "slides": merged}, SLIDE_W, pptx_tables=False, contain=False)
     deck, slides = plan.deck, plan.slides()
     infos = [identity.slide_info_of(s) for s in slides]
     base_slides = as_objects(base["slides"], "base.slides")

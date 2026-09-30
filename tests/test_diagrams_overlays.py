@@ -376,7 +376,7 @@ def test_a_turned_stamp_keeps_its_letters_where_it_crosses_native_words(tmp_path
     bg = load_png(png)
     doc = pdf.Document(path)
     try:
-        original = doc[0].render(bg.shape[1] / 400)
+        original = doc[0].render(bg.shape[1] / 400, clip=None, transparent=False)
     finally:
         doc.close()
     def pink(im: npt.NDArray[np.uint8]) -> int:

@@ -368,7 +368,7 @@ def save(ref: str, out: Path, pptx: Path | None, log: Callable[[str], None]) -> 
     out.mkdir(parents=True, exist_ok=True)
     pid = presentation_id(ref)
     # Saved and read on as JSON, like a presentation.json read back from disk.
-    read = execute(slides_service().presentations().get(presentationId=pid))
+    read = execute(slides_service(None).presentations().get(presentationId=pid))
     pres = as_json(read, pid)
     (out / FOLDERS["presentation"]).write_text(json.dumps(pres, ensure_ascii=False), encoding="utf-8")
     log(f"presentation: {len(as_array(pres.get('slides', []), 'the presentation slides'))} slides")

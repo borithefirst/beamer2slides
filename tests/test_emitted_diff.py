@@ -49,13 +49,13 @@ def entries_of(deck: JsonObject) -> list[JsonObject]:
     out: list[JsonObject] = []
     for slide, key in zip(slides, keys):
         irs = jobjs(slide, "elements")
-        ekeys, _ = identity.slide_element_keys(irs, None)
+        ekeys, _ = identity.slide_element_keys(irs, None, None)
         ids = {jstr(e, "id"): k for e, k in zip(irs, ekeys)}
         elements: list[Json] = []
         for el, k in zip(irs, ekeys):
             anchor = el.get("anchor")
             anchor_key = ids.get(anchor) if isinstance(anchor, str) else None
-            h, fields = identity.ir_fields(el, None, anchor_key)
+            h, fields = identity.ir_fields(el, None, anchor_key, None)
             elements.append({"key": k, "id": el["id"], "kind": el["kind"], "role": el.get("role"), "ir_hash": h,
                              "fields": fields, "anchor": anchor_key, "ir": el})
         out.append({"key": key, "page": slide["page"], "layout": emit.slide_layout(slide)[0], "elements": elements})
@@ -97,7 +97,7 @@ def sync_talk() -> tuple[tuple[str, emit.DeckPlan], ...]:
         for s in jobjs(deck, "slides"):
             merged: list[Json] = [e for e in emit.merge_blocks(jobjs(s, "elements"))]
             slides.append({**s, "elements": merged})
-        plan = emit.DeckPlan({**deck, "slides": slides})
+        plan = emit.DeckPlan({**deck, "slides": slides}, emit.SLIDE_W, pptx_tables=False, contain=False)
         out.append((pdf.stem, plan))
     return tuple(out)
 
@@ -347,7 +347,7 @@ def subtitle_page(authors_action: str) -> tuple[sync.Sync, sync.SlideWork, JsonO
     title = text_ir("A talk", [20, 20, 200, 40], "p0t0", role="title")
     old, new = text_ir("Someone", [20, 60, 90, 72], "p0t1", role="body"), text_ir("Someone else", [20, 60, 100, 72], "p0t1", role="body")
     longer = text_ir("A much longer institute line", [20, 90, 200, 102], "p0t2", role="body")
-    plan = emit.DeckPlan({"slides": [{"page": 0, "size": [360.0, 270.0], "title_page": True, "elements": [title, new, longer]}]}, 720.0)
+    plan = emit.DeckPlan({"slides": [{"page": 0, "size": [360.0, 270.0], "title_page": True, "elements": [title, new, longer]}]}, 720.0, pptx_tables=False, contain=False)
     b: JsonObject = {"key": "s", "elements": [entry("text/title/0", title, "TITLE_PH"), entry("text/body/0", old, "SUB_PH")]}
     objects: JsonObject = {oid: rb for e in jobjs(b, "elements") for oid, rb in jobj(e, "readback").items()}
     jobj(objects, "TITLE_PH")["placeholder"], jobj(objects, "SUB_PH")["placeholder"] = "TITLE", "SUBTITLE"

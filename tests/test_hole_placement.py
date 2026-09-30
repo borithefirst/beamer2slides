@@ -111,7 +111,7 @@ def picture(pic: JsonObject | None) -> JsonObject:
 def test_an_earlier_hole_on_the_line_is_no_stretched_space() -> None:
     s = slide(RUNS)
     em = FontMapper()(RUNS[3], SLIDE_W / 453.54)[1] / (SLIDE_W / 453.54)
-    assert space_shift(RUNS[3], em) < -10, "the gap around the circled word taken for one stretched space"
+    assert space_shift(RUNS[3], em, ()) < -10, "the gap around the circled word taken for one stretched space"
     assert abs(space_shift(RUNS[3], em, [(21.82, 17.67)])) < 3
     shift = formula_shifts(s, SLIDE_W / 453.54, FontMapper())
     assert abs(shift["p8h0"]) < 3, "the circled word's gap counts as a space plus its hole, not one wide space"

@@ -227,7 +227,8 @@ class Page:
             obj: ObjHandle = R.FPDFPage_GetObject(self.raw, i) if form is None else R.FPDFFormObj_GetObject(form, i)
             kind = R.FPDFPageObj_GetType(obj)
             matrix = mul(_obj_matrix(obj), parent_matrix)
-            po = PageObject(len(out), kind, matrix, parent.id if parent is not None else None, marks=_marks(obj))
+            po = PageObject(id=len(out), type=kind, matrix=matrix, parent=parent.id if parent is not None else None,
+                            children=[], clip=None, marks=_marks(obj))
             out.append(po)
             self._handles.append(obj)
             if parent is not None:
@@ -337,7 +338,8 @@ class Page:
                 prev.exact_advance = True
                 prev.box = char_box(ox, oy, ux, uy, prev.advance, size, ascent, descent)
                 continue
-            out.append(Char(text, name, size, color, a.value, (ox, oy), box, (ux, uy), oid, info.font_id, advance,
+            out.append(Char(c=text, font=name, size=size, color=color, alpha=a.value, origin=(ox, oy), box=box,
+                            dir=(ux, uy), obj=oid, font_id=info.font_id, advance=advance, synthetic=False,
                             ascent=ascent, descent=descent, exact_advance=exact))
         for ch in out:
             if any("\ud800" <= u <= "\udfff" for u in ch.c):
@@ -584,7 +586,7 @@ class Page:
     # ------------------------------------------------------------------ rendering
 
     # The contract's defaults (api.PdfPage.render): its callers are outside pdf/.
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
+    def render(self, zoom: float, clip: Box | None, transparent: bool) -> Pixels:
         ix0, iy0, w, h = pixel_bounds(zoom, clip if clip is not None else self.rect)
         bitmap = R.FPDFBitmap_Create(w, h, 1 if transparent else 0)
         try:
@@ -674,7 +676,7 @@ class Document:
         return out
 
     # The contract's defaults (api.PdfDocument.save): its callers are outside pdf/.
-    def save(self, pages: Sequence[int] | None = None, boxes: Mapping[int, Box] | None = None) -> bytes:
+    def save(self, *, pages: Sequence[int] | None, boxes: Mapping[int, Box] | None) -> bytes:
         keep = set(range(len(self))) if pages is None else set(pages)
         edited = pdfium.PdfDocument(self._source)  # a copy: this document stays as it is
         try:

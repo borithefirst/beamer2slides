@@ -125,9 +125,9 @@ def _right(align: Align, room: float) -> float:
 
 
 def fit_columns(bounds: list[float], cols: list[dict[str, Json]], scale: float,
-                need: list[float | None] | None = None, tight: bool = False,
-                cap: list[float | None] | None = None) -> list[float]:
-    """`fit_columns_of` column dicts (the tests')."""
+                need: list[float | None] | None, tight: bool,
+                cap: list[float | None] | None) -> list[float]:
+    """`fit_columns_of` column dicts (the tests'). `need`, `cap`: None is None for every column."""
     return fit_columns_of(bounds, columns_of(cols), scale, need or [None] * len(cols), tight, cap or [None] * len(cols))
 
 
@@ -287,7 +287,7 @@ def table_rows(t: SetTable, z: float, scale: float, imported: bool, sizes: Seque
 
 
 def table_columns(el: ObjectMap, cells: list[list[list[JsonMap]]], scale: float, fonts: FontMapper,
-                  tight: bool = False) -> tuple[list[float], dict[tuple[int, int], float | None], list[float | None]]:
+                  tight: bool) -> tuple[list[float], dict[tuple[int, int], float | None], list[float | None]]:
     """`table_columns_of` a table dict whose cells hold run dicts (the tests')."""
     grid = tuple(tuple(set_runs_of(runs) for runs in row) for row in cells)
     got = table_columns_of(table_of(el), grid, scale, fonts, tight)
@@ -405,11 +405,10 @@ def _shrunk(cells: CellGrid, s: float) -> CellGrid:
     return tuple(tuple(tuple(replace(r, size=r.size * s) for r in runs) for runs in row) for row in cells)
 
 
-def table_layout(el: ObjectMap, scale: float, fonts: FontMapper, imported: bool = False,
-                 page_w: float | None = None) -> TableLayout:
-    """`table_layout_of` a table dict (the tests'). `page_w`: the PDF page's width, by default
-    that of a deck SLIDE_W wide (what every Slides page size is)."""
-    return table_layout_of(table_of(el), scale, fonts, imported, SLIDE_W / scale if page_w is None else page_w)
+def table_layout(el: ObjectMap, scale: float, fonts: FontMapper, imported: bool, page_w: float) -> TableLayout:
+    """`table_layout_of` a table dict (the tests'). `page_w`: the PDF page's width (on a deck
+    SLIDE_W wide, what every Slides page size is: SLIDE_W / scale)."""
+    return table_layout_of(table_of(el), scale, fonts, imported, page_w)
 
 
 def table_layout_of(t: SetTable, scale: float, fonts: FontMapper, imported: bool, page_w: float) -> TableLayout:
@@ -607,9 +606,10 @@ class PptxTableDict(TypedDict):
     middle: list[list[int]]
 
 
-def pptx_table(el: ObjectMap, scale: float, fonts: FontMapper, page_w: float | None = None) -> PptxTableDict:
-    """`pptx_table_of` a table dict, as a dict (sync's refill, the tests)."""
-    table = pptx_table_of(table_of(el), scale, fonts, SLIDE_W / scale if page_w is None else page_w)
+def pptx_table(el: ObjectMap, scale: float, fonts: FontMapper, page_w: float) -> PptxTableDict:
+    """`pptx_table_of` a table dict, as a dict (sync's refill, the tests). `page_w`: see
+    `table_layout`."""
+    table = pptx_table_of(table_of(el), scale, fonts, page_w)
     return {"x": table.x, "y": table.y, "widths": list(table.widths), "heights": list(table.heights),
             "margins": [list(m) for m in table.margins], "middle": [list(rc) for rc in table.middle]}
 
@@ -673,10 +673,10 @@ def _moved(c: Column, dx: float, m: float) -> Column:
 
 
 def table_requests(el: ObjectMap, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                   imported: bool = False, page_w: float | None = None) -> list[JsonObject]:
-    """`table_requests_of` a table dict (sync's recreated tables, the tests)."""
-    return table_requests_of(table_of(el), slide_id, object_id, scale, fonts, imported,
-                             SLIDE_W / scale if page_w is None else page_w)
+                   imported: bool, page_w: float) -> list[JsonObject]:
+    """`table_requests_of` a table dict (sync's recreated tables, the tests). `page_w`: see
+    `table_layout`."""
+    return table_requests_of(table_of(el), slide_id, object_id, scale, fonts, imported, page_w)
 
 
 def table_element_requests(el: TableElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,

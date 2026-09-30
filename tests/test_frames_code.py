@@ -56,13 +56,13 @@ def test_a_numbered_listing_is_one_box_in_its_columns_beside_its_numbers():
 def test_a_line_whose_longest_span_opens_with_a_lowered_star_keeps_its_baseline():
     # (listings lowers '*' and raises '_': "*)NULL);" and "_exit(127);" put r2_code_v3 s2's
     # lines 6 and 7 2 pt off and Slides set them almost touching)
-    from beamer2slides.classify import Line
+    from beamer2slides.classify import new_line
     from .test_columns import span
     mono = "BeraSansMono-Roman"
     words = [span("execlp(", 48.0, 125.13, 8.47, font=mono), span('"ls"', 84.0, 125.13, 8.47, font=mono),
              span("char", 180.8, 125.13, 8.47, font=mono), span("*)NULL);", 206.3, 126.82, 8.47, font=mono)]
-    assert Line(words).baseline == 125.13
-    assert Line([span("_exit(127);", 48.0, 135.08, 8.47, font=mono), span("/*", 180.8, 137.08, 8.47, font=mono),
+    assert new_line(words).baseline == 125.13
+    assert new_line([span("_exit(127);", 48.0, 135.08, 8.47, font=mono), span("/*", 180.8, 137.08, 8.47, font=mono),
                  span("only", 196.0, 137.08, 8.47, font=mono), span("reached", 221.6, 137.08, 8.47, font=mono),
                  span("failed", 303.1, 137.08, 8.47, font=mono)]).baseline == 137.08
 

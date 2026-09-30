@@ -46,7 +46,7 @@ def array(src: str, name: str) -> list[int]:
     return [int(x, 16) for x in re.findall(r"0x[0-9A-Fa-f]+", body)]
 
 
-def build(local: Path | None = None) -> str:
+def build(local: Path | None) -> str:
     rows = re.findall(r"CHARPROP____\((0x[0-9a-fA-F]+)u?, (\w+), (\w+), (\w+)\)",
                       fetch(FILES[0], local))
     assert len(rows) == 65536, len(rows)
@@ -74,8 +74,9 @@ def build(local: Path | None = None) -> str:
 
     pieces = {u: normalization(u) for u in range(65536) if main[u]}
 
-    def lines(items: list[str], width: int = 96) -> str:
-        out, line = [], ""
+    def lines(items: list[str], width: int) -> str:
+        out: list[str] = []
+        line = ""
         for it in items:
             if len(line) + len(it) + 1 > width:
                 out.append(line)
@@ -95,15 +96,15 @@ do not edit by hand.
   table has nothing)."""
 
 _DIRECTION_RUNS = """
-{lines([f"{u:04X}:{d}" for u, d in runs])}
+{lines([f"{u:04X}:{d}" for u, d in runs], 96)}
 """
 
 _MIRRORS = """
-{lines([f"{u:04X}:{v:04X}" for u, v in mirrors.items()])}
+{lines([f"{u:04X}:{v:04X}" for u, v in mirrors.items()], 96)}
 """
 
 _PIECES = """
-{lines([f"{u:04X}:" + ",".join(f"{p:04X}" for p in ps) for u, ps in pieces.items()])}
+{lines([f"{u:04X}:" + ",".join(f"{p:04X}" for p in ps) for u, ps in pieces.items()], 96)}
 """
 
 

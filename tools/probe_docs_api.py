@@ -27,6 +27,8 @@ from googleapiclient.http import MediaIoBaseUpload
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from beamer2slides.google_auth import credentials, docs_service, drive_service  # noqa: E402
+from beamer2slides.google_types import (DocsBatchUpdateResponse, DocsRequest, DocsService,  # noqa: E402
+                                        Document, DriveService, file_id)
 
 OUT = Path(__file__).resolve().parents[1] / "out" / "docs-probe"
 DOC_MIME = "application/vnd.google-apps.document"
@@ -41,42 +43,44 @@ SOURCE = """<!DOCTYPE html><html><head><meta charset="utf-8"></head><body>
 """
 
 
-def text_of(doc: dict) -> str:
+def text_of(doc: Document) -> str:
     """The body as one string."""
-    out = []
-    for el in doc["body"]["content"]:
+    out: list[str] = []
+    for el in doc.get("body", {}).get("content", []):
         for run in el.get("paragraph", {}).get("elements", []):
             out.append(run.get("textRun", {}).get("content", ""))
     return "".join(out)
 
 
-def find(doc: dict, needle: str) -> tuple[int, int]:
-    """Start/end index of `needle`, in the API's UTF-16 index space."""
-    for el in doc["body"]["content"]:
+def find(doc: Document, needle: str) -> tuple[int, int]:
+    """Start/end index of `needle`, in the API's UTF-16 index space (an index the API leaves out
+    is 0)."""
+    for el in doc.get("body", {}).get("content", []):
         for run in el.get("paragraph", {}).get("elements", []):
             content = run.get("textRun", {}).get("content")
             if content and needle in content:
-                at = run["startIndex"] + content.index(needle)
+                at = run.get("startIndex", 0) + content.index(needle)
                 return at, at + len(needle)
     raise LookupError(needle)
 
 
-def ranges_of(docs, doc_id: str) -> dict[str, list[tuple[int, int]]]:
+def ranges_of(docs: DocsService, doc_id: str) -> dict[str, list[tuple[int, int]]]:
+    """Each name's first named range, as its (start, end) pieces (an index the API leaves out is 0)."""
     doc = docs.documents().get(documentId=doc_id).execute()
-    return {name: [(r["startIndex"], r["endIndex"]) for r in nr["namedRanges"][0]["ranges"]]
+    return {name: [(r.get("startIndex", 0), r.get("endIndex", 0)) for r in nr.get("namedRanges", [])[0].get("ranges", [])]
             for name, nr in sorted(doc.get("namedRanges", {}).items())}
 
 
-def batch(docs, doc_id: str, requests: list[dict]) -> dict:
+def batch(docs: DocsService, doc_id: str, requests: list[DocsRequest]) -> DocsBatchUpdateResponse:
     return docs.documents().batchUpdate(
         documentId=doc_id, body={"requests": requests}).execute()
 
 
-def stage0(drive, docs) -> str | None:
+def stage0(drive: DriveService, docs: DocsService) -> str | None:
     """Create a doc and see whether drive.file alone reaches documents.get."""
     media = MediaIoBaseUpload(io.BytesIO(SOURCE.encode("utf-8")), mimetype="text/html")
-    doc_id = drive.files().create(body={"name": "b2s anchor probe", "mimeType": DOC_MIME},
-                                  media_body=media, fields="id").execute()["id"]
+    doc_id = file_id(drive.files().create(body={"name": "b2s anchor probe", "mimeType": DOC_MIME},
+                                          media_body=media, fields="id").execute(), "the probe document")
     print(f"created {doc_id}")
     try:
         doc = docs.documents().get(documentId=doc_id).execute()
@@ -117,15 +121,15 @@ def main() -> int:
     try:
         print("\n=== stage 1: plant an anchor on each paragraph ===")
         doc = docs.documents().get(documentId=doc_id).execute()
-        reqs = []
+        reqs: list[DocsRequest] = []
         for word in ("ALPHA", "BRAVO", "CHARLIE", "DELTA"):
             start, _ = find(doc, word)
             # Anchor the whole paragraph: from the word to just before its newline.
-            para = next(el for el in doc["body"]["content"]
+            para = next(el for el in doc.get("body", {}).get("content", [])
                         if el.get("startIndex", -1) <= start < el.get("endIndex", -1))
             reqs.append({"createNamedRange": {
                 "name": f"b2s:{word.lower()}",
-                "range": {"startIndex": start, "endIndex": para["endIndex"] - 1}}})
+                "range": {"startIndex": start, "endIndex": para.get("endIndex", 0) - 1}}})
         batch(docs, doc_id, reqs)
         planted = ranges_of(docs, doc_id)
         print(f"  planted {len(planted)}: {json.dumps(planted)}")
@@ -163,8 +167,8 @@ def main() -> int:
         results["deleted_all_text"] = None if gone else left["b2s:charlie"]
 
         print("\n=== stage 4: does a Drive copy carry the anchors? ===")
-        copy_id = drive.files().copy(fileId=doc_id, body={"name": "b2s anchor probe copy"},
-                                     fields="id").execute()["id"]
+        copy_id = file_id(drive.files().copy(fileId=doc_id, body={"name": "b2s anchor probe copy"},
+                                             fields="id").execute(), "the probe copy")
         made.append(copy_id)
         copied = ranges_of(docs, copy_id)
         print(f"  copy has {len(copied)} named ranges: {sorted(copied)}")
@@ -202,7 +206,9 @@ def main() -> int:
 
         print("\n=== stage 7: revision control ===")
         doc = docs.documents().get(documentId=doc_id).execute()
-        stale = doc["revisionId"]
+        stale = doc.get("revisionId")
+        if stale is None:
+            raise ValueError("documents.get answered no revisionId")
         batch(docs, doc_id, [{"insertText": {"location": {"index": 1}, "text": "Z"}}])
         try:
             docs.documents().batchUpdate(

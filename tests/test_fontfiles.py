@@ -286,9 +286,10 @@ def fake_adopt(monkeypatch: pytest.MonkeyPatch, seen: dict[str, object]) -> None
 def fake_adopt_lacking(monkeypatch: pytest.MonkeyPatch, seen: dict[str, object], *,
                        missing: Sequence[MissingFont], skipped: Sequence[Skipped]) -> None:
     """`fake_adopt`, whose adopt stood in for the fonts `missing` and could not use `skipped`."""
-    # Called as `deck_adopt` calls it: every argument, the last five by keyword.
+    # Called as `deck_adopt` calls it: every argument, the last seven by keyword.
     def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
-                  engine: str | None, flow: bool, target_path: Path | None, *, log: Callable[[str], None],
+                  engine: str | None, flow: bool, target_path: Path | None, *, base: bool, base_in_drive: bool,
+                  log: Callable[[str], None],
                   fonts: Sequence[Path] | None, found: dict[str, object] | None, pptx: Path | None,
                   files: DeckFiles | None) -> SimpleNamespace:
         assert found is not None

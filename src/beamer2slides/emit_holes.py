@@ -108,8 +108,9 @@ def earlier_holes_of(p: HoleParagraph, at: int) -> list[tuple[float, float]]:
     return [(g.x0, g.width) for g in p.gaps[:at] if g is not None and min(words) <= g.x0 < gap.x0]
 
 
-def space_shift(run: JsonMap, em: float, holes: Sequence[tuple[float, float]] = ()) -> float:
-    """`space_shift_of` a run dict (the tests): a run with no hole has no gap to shift."""
+def space_shift(run: JsonMap, em: float, holes: Sequence[tuple[float, float]]) -> float:
+    """`space_shift_of` a run dict (the tests): a run with no hole has no gap to shift. `holes`:
+    see `space_shift_of`, () for none."""
     gap = gap_of(run)
     return 0.0 if gap is None else space_shift_of(run_of(run), gap, em, holes)
 

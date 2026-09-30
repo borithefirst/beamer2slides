@@ -157,7 +157,7 @@ def arrow_style(arrow: Arrow | None) -> str:
 
 
 def diagram_requests(el: JsonMap, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
-                     template: Callable[[TemplateKey], JsonMap] | None = None) -> list[JsonObject]:
+                     template: Callable[[TemplateKey], JsonMap] | None) -> list[JsonObject]:
     """`diagram_requests_of` a diagram dict (the tests'), `template(key)` giving a dict ({"id",
     "w", "h"})."""
     typed = ir_types.parse_element(el, "diagram")

@@ -100,7 +100,7 @@ def import_presentation(slides: SlidesService, drive: DriveService, title: str, 
     else:
         from .drive_folder import place
         pid = file_id(execute(drive.files().create(
-            body=place({"name": title, "mimeType": "application/vnd.google-apps.presentation"}, drive),
+            body=place({"name": title, "mimeType": "application/vnd.google-apps.presentation"}, drive, beside=None),
             media_body=media, fields="id")), f"the deck {title!r}")
     pres = as_json(execute(slides.presentations().get(presentationId=pid)), "the imported deck")
     got = _magnitude(pres["pageSize"], "height") / _magnitude(pres["pageSize"], "width")
@@ -282,7 +282,7 @@ class MasterPlanDict(TypedDict):
     ground: Ground
 
 
-def master_plan(deck: JsonMap, out: Path, theme: ThemeDict | None | Literal["plan"] = "plan") -> MasterPlanDict:
+def master_plan(deck: JsonMap, out: Path, theme: ThemeDict | None | Literal["plan"]) -> MasterPlanDict:
     """`master_plan_of` a deck dict, as the dict theme_sync reads (`theme` as a dict too)."""
     given: ThemePlan | None | Literal["plan"]
     if theme is None or isinstance(theme, str):

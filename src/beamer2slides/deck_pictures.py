@@ -244,8 +244,8 @@ class LivePictures:
         if self.exported is None:
             self.exported = {}
             if self.drive is not None and self.pres.get("presentationId"):
-                from .deck_export import export_deck
-                done = export_deck(self.drive, self.slides, self.pres)
+                from .deck_export import WORKERS as EXPORTS, export_deck
+                done = export_deck(self.drive, self.slides, self.pres, per_part=None, workers=EXPORTS, clients=None)
                 self.exports += done.exports
                 self.copies += done.copies
                 self.parts += len(done.parts)

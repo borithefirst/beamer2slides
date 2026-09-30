@@ -21,8 +21,8 @@ from beamer2slides.compare import (TOL, PictureHash, compare, displayed_picture,
                                    picture_hash)
 from beamer2slides.deck_ir import element_of, image_format, picture_props
 from beamer2slides.google_types import AffineTransform, PageElement
-from beamer2slides.inverse import (Candidate, Context, LoopPicture, Picture, Planner, Result, Workspace,
-                                   ensure_preamble, loop_element, loop_picture, picture_latex, picture_slug,
+from beamer2slides.inverse import (BEAMER_PT, Candidate, Context, LoopPicture, Picture, Planner, Result, Workspace,
+                                   ensure_preamble, fresh_context, loop_element, loop_picture, picture_latex, picture_slug,
                                    picture_sources, reading_order)
 from beamer2slides.ir_types import At, box
 from beamer2slides.json_types import Json, JsonObject
@@ -152,7 +152,7 @@ def test_image_formats():
 # ---------------------------------------------------------------- LaTeX options
 
 def test_picture_latex_crop_angle_opacity_outline():
-    ctx = Context()
+    ctx = fresh_context(BEAMER_PT)
     pic = Picture("figures/photo-12345678.png", Path("x.png"), (300.0, 200.0))
     te: JsonObject = {"bbox": [10, 20, 110, 70], "box": [10, 20, 110, 70], "crop": {"l": 0.1, "t": 0.2, "r": 0.3, "b": 0.05}}
     assert picture_latex(looped(te), pic, ctx, None) == \
@@ -195,10 +195,10 @@ def planner_for(tmp_path: Path, cur: JsonObject, target: JsonObject,
     src.mkdir(parents=True, exist_ok=True)
     (src / "talk.tex").write_text(TEX, encoding="utf-8")
     photo(src / "figures" / "photo.png", (600, 400), seed=5)
-    ws = Workspace(src / "talk.tex", tmp_path / "work")
+    ws = Workspace(src / "talk.tex", tmp_path / "work", handout=False, engine=None, fresh=True)
     frames: list[Frame | None] = [ws.source.frames[0] for _ in jarr(cur, "slides")]
-    cand = Candidate(ws.source, tmp_path / "talk.pdf", cur, frames)
-    ctx = Context()
+    cand = Candidate(ws.source, tmp_path / "talk.pdf", cur, frames, locs={}, text_masked={}, words={})
+    ctx = fresh_context(BEAMER_PT)
     comp = compare(current(cur), target, TOL, hashes)
     return Planner(cand, comp, target, ctx, ws, set(), {}, hashes), ws, ctx
 
@@ -318,7 +318,7 @@ def test_translucent_turned_tikz_keeps_its_source(tmp_path: Path):
     assert "\\end{scope}\n    \\end{tikzpicture}}" in text
     # a second round with other values replaces the first edits instead of stacking them
     p2, _, _ = planner_for(tmp_path / "again", cur, target, hashes)
-    p2.ws, p2.cand = ws, Candidate(ws.source, tmp_path / "talk.pdf", cur, [ws.source.frames[0]])
+    p2.ws, p2.cand = ws, Candidate(ws.source, tmp_path / "talk.pdf", cur, [ws.source.frames[0]], locs={}, text_masked={}, words={})
     element_at(target, 1).update(opacity=0.25, rotation=-5.0)
     p2.comp = dataclasses.replace(p2.comp, residuals=tuple(
         r for r in compare(current(cur), target, TOL, hashes).residuals if r.kind == "image"))
@@ -395,7 +395,7 @@ def loop_deck(tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, JsonObjec
     photo(root / "deck" / "new.png", (800, 500), seed=12)
     Image.open(root / "src" / "figures" / "bench.png").resize((450, 300)).save(root / "deck" / "bench-down.png")
     work = root / "base"
-    built = Workspace(root / "src" / "talk.tex", work).build(work / "classify")
+    built = Workspace(root / "src" / "talk.tex", work, handout=False, engine=None, fresh=True).build(work / "classify", False, None)
     assert not isinstance(built, str), built
     return root, built.target()
 

@@ -444,7 +444,7 @@ def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def text_edit_requests(object_id: str, current: str, target: str, cell: JsonObject | None = None) -> list[JsonObject]:
+def text_edit_requests(object_id: str, current: str, target: str, cell: JsonObject | None) -> list[JsonObject]:
     """deleteText / insertText turning an object's text `current` into `target` (UTF-16 indices,
     applied back to front so earlier indices stay valid). `cell`: {"rowIndex", "columnIndex"} of a
     table cell instead of the object's own text.
@@ -884,8 +884,8 @@ def source_style_keys(base_el: ElementEntry, ours_el: ElementEntry) -> set[str]:
     """Style attributes (API names) whose values differ between two versions of an element's IR."""
     a: set[tuple[str, str]] = set()
     b: set[tuple[str, str]] = set()
-    identity._styles(identity.normalise_ir(base_el.ir or {}), a)
-    identity._styles(identity.normalise_ir(ours_el.ir or {}), b)
+    identity._styles(identity.normalise_ir(base_el.ir or {}, None, None), a)
+    identity._styles(identity.normalise_ir(ours_el.ir or {}, None, None), b)
     return {IR_STYLE_TO_API.get(k, k) for k, _ in a ^ b}
 
 
@@ -1944,8 +1944,13 @@ def _dict_adopter(adopt: DictAdopter, reads: Mapping[str, JsonObject]) -> Adopte
     return typed
 
 
-def plan_merge(base: JsonMap, ours: JsonMap, theirs: JsonMap, adopt: DictAdopter | None = None,
-               follow_labels: bool = False, take_source: Iterable[str] | None = ()) -> JsonObject:
+def plan_merge(base: JsonMap, ours: JsonMap, theirs: JsonMap) -> JsonObject:
+    """`plan_merge_with` nothing adopted, no unsure label followed and no conflict settled."""
+    return plan_merge_with(base, ours, theirs, adopt=None, follow_labels=False, take_source=())
+
+
+def plan_merge_with(base: JsonMap, ours: JsonMap, theirs: JsonMap, *, adopt: DictAdopter | None,
+                    follow_labels: bool, take_source: Iterable[str] | None) -> JsonObject:
     """ours: {"slides": [slide entries with inherited keys], "pairs": {ours index: base index}}.
     `adopt`: see plan_unit (a picture the deck already shows).
     `follow_labels`: write to a slide whose label `identity.label_moves` is unsure about anyway.

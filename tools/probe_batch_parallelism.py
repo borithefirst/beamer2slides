@@ -25,17 +25,19 @@ Run it with `.venv\\Scripts\\python.exe tools/probe_batch_parallelism.py`.
 """
 
 import time
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 
 from beamer2slides.google_auth import credentials, drive_service, slides_service
+from beamer2slides.google_types import object_id, presentation_id
 from beamer2slides.gslides import execute, per_thread
 
 BATCHES = 8
 PER_BATCH = 100  # requests are 2 per shape, so ~200 each, the size of a real content batch
 
 
-def shape_requests(page: str, tag: str, n: int) -> list[dict]:
-    reqs = []
+def shape_requests(page: str, tag: str, n: int) -> list[Mapping[str, object]]:
+    reqs: list[Mapping[str, object]] = []
     for i in range(n):
         oid = f"{tag}_{i:03}"
         reqs.append({"createShape": {"objectId": oid, "shapeType": "TEXT_BOX", "elementProperties": {
@@ -51,7 +53,7 @@ def main() -> None:
     creds = credentials()
     slides, drive = slides_service(creds), drive_service(creds)
     client = per_thread(lambda: slides_service(creds))  # a service object is not thread-safe
-    pid = execute(slides.presentations().create(body={"title": "b2s batch parallelism probe"}))["presentationId"]
+    pid = presentation_id(execute(slides.presentations().create(body={"title": "b2s batch parallelism probe"})))
     print(f"scratch deck {pid}")
     try:
         execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": [
@@ -70,14 +72,17 @@ def main() -> None:
 
         for r, workers in enumerate((1, 2, 4, 8), start=1):
             t0 = time.perf_counter()
+            def batch(i: int) -> float:
+                return send(f"r{r}b{i}", pages[i])
+
             with ThreadPoolExecutor(workers) as pool:
-                each = list(pool.map(lambda i: send(f"r{r}b{i}", pages[i]), range(BATCHES)))
+                each = list(pool.map(batch, range(BATCHES)))
             print(f"{BATCHES} batches x {2 * PER_BATCH} requests, {workers} at a time: "
                   f"{time.perf_counter() - t0:5.2f} s wall, each {min(each):.2f}-{max(each):.2f} s")
 
         # A layout batch beside slide batches: the two halves `build_deck` overlaps.
-        lay = execute(slides.presentations().get(
-            presentationId=pid, fields="layouts(objectId)"))["layouts"][0]["objectId"]
+        lay = object_id(execute(slides.presentations().get(
+            presentationId=pid, fields="layouts(objectId)")).get("layouts", [])[0])
 
         def layout_batch() -> float:
             t = time.perf_counter()
@@ -95,8 +100,8 @@ def main() -> None:
         # Everything there? A silently dropped batch would be the whole worry.
         pres = execute(slides.presentations().get(
             presentationId=pid, fields="slides(pageElements(objectId)),layouts(pageElements(objectId))"))
-        made = {e["objectId"] for s in pres["slides"] for e in s.get("pageElements", [])}
-        made |= {e["objectId"] for l in pres["layouts"] for e in l.get("pageElements", [])}
+        made = {object_id(e) for s in pres.get("slides", []) for e in s.get("pageElements", [])}
+        made |= {object_id(e) for l in pres.get("layouts", []) for e in l.get("pageElements", [])}
         want = {f"r{r}b{i}_{k:03}" for r in range(1, 5) for i in range(BATCHES) for k in range(PER_BATCH)}
         want |= {f"lay_{i:03}" for i in range(40)}
         want |= {f"mix{i}_{k:03}" for i in range(4) for k in range(PER_BATCH)}

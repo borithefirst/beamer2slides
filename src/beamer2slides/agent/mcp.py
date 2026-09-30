@@ -63,7 +63,7 @@ _NO_SDK = ("The MCP SDK is not installed in this interpreter, so the server cann
 # -- the part that is not the protocol -----------------------------------------------------
 
 def dispatch(ctx: AgentContext, name: str, arguments: Mapping[str, object] | None,
-             tools: Mapping[str, Tool] | None) -> Result:
+             tools: Mapping[str, Tool[...]] | None) -> Result:
     """Run one named tool with one argument dict, and never raise.
 
     The whole of a binding that is not protocol: look the tool up, check the arguments against
@@ -95,7 +95,7 @@ def dispatch(ctx: AgentContext, name: str, arguments: Mapping[str, object] | Non
         return _refusal(name, exc.code, str(exc), exc.data)
     except schema.SchemaError as exc:                          # the tool itself is unpublishable
         return _refusal(name, "failed", str(exc), {})
-    return fn(ctx, **cleaned)
+    return fn.dispatch(ctx, cleaned)
 
 
 def _refusal(tool: str, code: Code, summary: str, data: JsonObject) -> Result:
@@ -127,7 +127,7 @@ def build_context(root: str | Path | None, *, read_only: bool, offline: bool,
                         allow=permitted, progress=progress)
 
 
-def instructions(tools: Mapping[str, Tool] | None) -> str:
+def instructions(tools: Mapping[str, Tool[...]] | None) -> str:
     """`agent.tools.INSTRUCTIONS` for the real registry (`tools` None), else an honest stand-in:
     a registry of someone else's tools is not the one those rules were written for."""
     if tools is None:
@@ -319,7 +319,7 @@ class _Live:
 # -- the protocol binding ------------------------------------------------------------------
 
 def serve(root: str | Path | None, *, read_only: bool, offline: bool,
-          tools: Mapping[str, Tool] | None, allow: frozenset[Need] | None) -> None:
+          tools: Mapping[str, Tool[...]] | None, allow: frozenset[Need] | None) -> None:
     """Run the stdio server until the client closes it. Needs the `mcp` SDK.
 
     `tools` None serves the real registry, `allow` None every action (then narrowed by

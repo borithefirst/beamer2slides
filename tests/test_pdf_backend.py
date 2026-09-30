@@ -207,10 +207,10 @@ def test_render_follows_pixel_bounds_and_active_objects(backend: PdfBackend) -> 
             try:
                 for i in range(min(len(doc), 3)):
                     try:
-                        img = doc[i].render(1.0)
+                        img = doc[i].render(1.0, clip=None, transparent=False)
                     except PdfError:
                         continue
-                    assert np.array_equal(img, theirs[i].render(1.0)), f"{path.name} page {i}"
+                    assert np.array_equal(img, theirs[i].render(1.0, clip=None, transparent=False)), f"{path.name} page {i}"
             finally:
                 doc.close()
                 theirs.close()
@@ -218,21 +218,21 @@ def test_render_follows_pixel_bounds_and_active_objects(backend: PdfBackend) -> 
     doc = backend.open(BLOCKS)
     try:
         page = doc[1]
-        full = page.render(1.0)
+        full = page.render(1.0, clip=None, transparent=False)
         assert full.dtype == np.uint8 and full.shape == (pixel_bounds(1.0, page.rect)[3], pixel_bounds(1.0, page.rect)[2], 3)
         clip = (10.3, 20.7, 110.2, 60.1)
         _, _, w, h = pixel_bounds(2.0, clip)
-        assert page.render(2.0, clip).shape == (h, w, 3)
+        assert page.render(2.0, clip, transparent=False).shape == (h, w, 3)
         clear = page.render(2.0, clip, transparent=True)
         assert clear.shape == (h, w, 4)
         ids = [po.id for po in page.objects()]
         page.set_active(ids, False)
         try:
-            assert (page.render(1.0) == 255).all(), "every object off: a white page"
+            assert (page.render(1.0, clip=None, transparent=False) == 255).all(), "every object off: a white page"
             assert page.drawings() == [] and page.images() == []
         finally:
             page.set_active(ids, True)
-        assert np.array_equal(page.render(1.0), full), "switched on again: the same page"
+        assert np.array_equal(page.render(1.0, clip=None, transparent=False), full), "switched on again: the same page"
     finally:
         doc.close()
 
@@ -251,7 +251,7 @@ def test_a_turned_page_renders_where_its_geometry_says(backend: PdfBackend, rota
         (drawing,) = page.drawings()
         if not api.renders(backend):
             return
-        img = page.render(2.0)
+        img = page.render(2.0, clip=None, transparent=False)
         assert img.shape == (300, 400, 3)
         ys, xs = np.nonzero(img[..., 1] < 128)
         x0, y0, x1, y1 = drawing["rect"]
@@ -267,18 +267,18 @@ def test_bytes_open_like_the_file_and_save_writes_new_files(backend: PdfBackend,
     try:
         assert len(same) == len(doc) and same.path is None
         assert [c.c for c in same[1].chars()] == [c.c for c in doc[1].chars()]
-        kept = backend.open(doc.save(pages=[0, 2]))
+        kept = backend.open(doc.save(pages=[0, 2], boxes=None))
         try:
             assert len(kept) == 2 and len(doc) == 5, "the document itself is left as it is"
             assert [c.c for c in kept[1].chars()] == [c.c for c in doc[2].chars()]
         finally:
             kept.close()
-        half = backend.open(doc.save(boxes={0: (0.0, 0.0, doc[0].width / 2, doc[0].height)}))
+        half = backend.open(doc.save(pages=None, boxes={0: (0.0, 0.0, doc[0].width / 2, doc[0].height)}))
         try:
             assert half[0].width == pytest.approx(doc[0].width / 2) and half[1].width == pytest.approx(doc[1].width)
             if api.renders(backend):
-                left = doc[0].render(1.0, (0.0, 0.0, doc[0].width / 2, doc[0].height))
-                assert np.abs(half[0].render(1.0).astype(int) - left.astype(int)).max() <= 1
+                left = doc[0].render(1.0, (0.0, 0.0, doc[0].width / 2, doc[0].height), transparent=False)
+                assert np.abs(half[0].render(1.0, clip=None, transparent=False).astype(int) - left.astype(int)).max() <= 1
             else:  # what the cut page still shows: the characters in its left half
                 inside = [c.c for c in doc[0].chars() if c.box[2] <= doc[0].width / 2 - 1]
                 assert set(inside) <= {c.c for c in half[0].chars()}
@@ -341,7 +341,7 @@ def test_the_sandbox_answers_what_pdfium_answers(path: Path) -> None:
             for po in a.objects():
                 if po.type == OBJ_IMAGE:
                     same(a.embedded_image(po.id), b.embedded_image(po.id), f"{where} image {po.id}")
-            same(a.render(0.5), b.render(0.5), f"{where} render")
+            same(a.render(0.5, clip=None, transparent=False), b.render(0.5, clip=None, transparent=False), f"{where} render")
             same(a.render(2.0, (5.5, 5.5, 60.25, 40.75), transparent=True),
                  b.render(2.0, (5.5, 5.5, 60.25, 40.75), transparent=True), f"{where} render clip")
     finally:
@@ -478,7 +478,9 @@ def test_an_answer_of_the_wrong_shape_is_a_pdf_error(monkeypatch: pytest.MonkeyP
 
 def test_the_wire_carries_data_and_refuses_the_rest() -> None:
     array = np.arange(6, dtype=np.uint8).reshape(2, 3)
-    char = api.Char("ﬁ", "LMRoman10", 10.0, 0xFF0000, 255, (1.0, 2.0), (1, 2, 3, 4), (1.0, 0.0), 4, 2)
+    char = api.Char(c="ﬁ", font="LMRoman10", size=10.0, color=0xFF0000, alpha=255, origin=(1.0, 2.0), box=(1, 2, 3, 4),
+                    dir=(1.0, 0.0), obj=4, font_id=2, advance=0.0, synthetic=False, ascent=0.8, descent=-0.2,
+                    exact_advance=True)
     value = {"a": (1, 2.5, None, True), 3: [b"\x00\xff", array], "char": char, "nan": float("inf"),
              "np": np.float32(0.5)}
     buf = io.BytesIO()

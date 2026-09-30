@@ -46,7 +46,8 @@ def miktex_root() -> Path:
 
 
 def afm(path: Path) -> tuple[dict[str, float], dict[str, float]]:
-    widths, kerns = {}, {}
+    widths: dict[str, float] = {}
+    kerns: dict[str, float] = {}
     for line in path.read_text(encoding="latin-1").splitlines():
         if line.startswith("C "):
             fields = dict(f.strip().split(" ", 1) for f in line.split(";") if f.strip())

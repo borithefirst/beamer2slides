@@ -125,4 +125,4 @@ def test_an_adopt_bases_pictures_are_where_adopt_converted_the_source(tmp_path: 
     base, _, _ = _picture_deck(folder, folder)
     el = jobj(base, "slides", 0, "elements", 1)
     assert snapshot.find_base_pictures(base, snapshot.picture_folders(out)).folder(el) == folder
-    assert identity.ir_fields(jobj(el, "ir"), folder)[0] == el["ir_hash"]
+    assert identity.ir_fields(jobj(el, "ir"), folder, None, None)[0] == el["ir_hash"]

@@ -42,11 +42,13 @@ decorations) is a picture, or baked into a per-slide background picture.
   runtime check (`gapi.build`, `devtools/deep_stack.py`), never a checked import. tests/ are checked too, and are at
   zero as well (`typecheck/tests_baseline.json` empty, `TESTS_CEILING` 0 in `tests/test_typecheck.py`;
   pytest pinned in `[tool.beamer2slides.typecheck]`), so a test calling
-  a changed signature fails the gate, not the suite; a test you write type-checks (JSON read
+  a changed signature fails the gate, not the suite; tools/ likewise (`tools_baseline.json` empty,
+  `test_the_tools_type_check`: fix a probe's call when you change a signature); a test you write type-checks (JSON read
   through `tests/json_reads.py`'s `jobj`/`jstr`/..., Google faked by `tests/fake_google.py`'s
   Protocol-complete `No*` classes, overriding only what the test calls);
   defaults, defaulted fields and `Any` per module in `typecheck/rules.json`, only down
-  (`tests/test_typing_rules.py`). A function you touch leaves to these rules.
+  (`tests/test_typing_rules.py`); the defaults left are published calling forms (agent tool
+  parameters, `AgentContext`, `use_services`), none internal. A function you touch leaves to these rules.
 - **deck.json's contract is `ir.py`** (TypedDicts per kind and stage, `ir.problems` / `ir.validate`
   at runtime), to become dataclasses parsed from and written to today's JSON (docs/typing.md).
 - **The PDF library is a swappable backend** (`src/beamer2slides/pdf/`, docs/pdf-backend.md).
@@ -466,6 +468,8 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
 - Every tool is written inside `@tool(name, needs)`: one journey per process, prints captured,
   `SystemExit` -> a code, permission (`READS`/`WRITES`/`READS_GOOGLE`/`WRITES_GOOGLE`) checked
   **before** the body runs, and Google **never interactive** (a dead token is `needs_consent`).
+  A Python call is type-checked (`Tool[P]` over `Concatenate[Job, P]`, bodies keyword-only, a file
+  parameter a `content.File` narrowed by `j.ref`); a JSON call goes through `Tool.dispatch`.
 - One result shape (`types.Result`), a closed refusal vocabulary (`types.CODES`), `INSTRUCTIONS.md`
   in the wheel. **The layer runs at Google in a harness with no filesystem**: every file argument
   also takes content (`content.py`), results can be inline; keep every input and output

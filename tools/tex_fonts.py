@@ -139,7 +139,7 @@ def main() -> None:
                     help="where fonts made on demand live (LH fonts are generated, not shipped)")
     args = ap.parse_args()
     root = args.miktex or miktex_root()
-    fonts: dict[str, dict] = {}
+    fonts: dict[str, dict[str, str | float | int]] = {}
     tables: list[bytes] = []
     index: dict[bytes, int] = {}
     encodings = {}

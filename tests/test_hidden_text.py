@@ -306,9 +306,9 @@ def test_hidden_text_stays_as_hidden_in_the_background(tmp_path: Path) -> None:
     doc = pdf.Document(path)
     try:
         page = doc[0]
-        original = page.render(z)
+        original = page.render(z, clip=None, transparent=False)
         page.set_active(sorted({ch.obj for ch in hidden}), False)  # the band without the word under it
-        unburied = page.render(z)
+        unburied = page.render(z, clip=None, transparent=False)
     finally:
         doc.close()
     band = (slice(round(z * 121), round(z * 159)), slice(0, bg.shape[1]))  # y down

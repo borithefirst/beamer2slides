@@ -59,7 +59,7 @@ class CharsPage:
         return []
 
     # the defaults are PdfPage's own (pdf/api.py): a page is called as the contract says
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
+    def render(self, zoom: float, clip: Box | None, transparent: bool) -> Pixels:
         raise AssertionError("a page of characters is never drawn")
 
 
@@ -92,8 +92,10 @@ def set_at(words: list[str], font: str, size: float, font_id: int, *, y: float, 
             box_w = w * (1 + lean) if c.isalpha() else w
             if ux < 0.999:  # a rotated glyph's box is its ink's upright bounds, not its advance
                 box_w = w * abs(ux) + size * 0.7 * abs(uy)
-            out.append(Char(c, "Type3", size, 0, 255, (x, y), char_box(x, y, ux, uy, box_w, size, 0.8, -0.2),
-                            direction, 1, font_id, box_w))
+            out.append(Char(c=c, font="Type3", size=size, color=0, alpha=255, origin=(x, y),
+                            box=char_box(x, y, ux, uy, box_w, size, 0.8, -0.2), dir=direction, obj=1,
+                            font_id=font_id, advance=box_w, synthetic=False, ascent=0.8, descent=-0.2,
+                            exact_advance=True))
             x, y = x + w * ux, y + w * uy
         x, y = x + WORD_SPACE * ux, y + WORD_SPACE * uy
     return out

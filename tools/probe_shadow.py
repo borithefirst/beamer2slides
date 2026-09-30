@@ -13,17 +13,29 @@ import io
 import json
 from pathlib import Path
 
-from googleapiclient.http import MediaIoBaseUpload
 from lxml import etree
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Emu, Pt
 
+from beamer2slides.gapi import media_upload
 from beamer2slides.google_auth import drive_service, slides_service
+from beamer2slides.google_types import PageElement, file_id, object_id, part
 from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
+from beamer2slides.json_types import Json, JsonObject
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
+
+
+def shape_of(pe: PageElement) -> JsonObject:
+    """A page element's shape part ({} for an element that is no shape)."""
+    return part(pe.get("shape"), f"{pe.get('objectId')}.shape")
+
+
+def shadow_of(pe: PageElement) -> Json:
+    """The shadow the API reports on a shape (None: it reports none)."""
+    return part(shape_of(pe).get("shapeProperties"), f"{pe.get('objectId')}.shapeProperties").get("shadow")
 
 
 def shadow_xml(blur: float, dist: float, alpha: int) -> etree._Element:
@@ -45,29 +57,30 @@ def main() -> None:
     buf = io.BytesIO()
     prs.save(buf)
     buf.seek(0)
-    drive, slides = drive_service(), slides_service()
+    drive, slides = drive_service(None), slides_service(None)
     f = execute(drive.files().create(
         body={"name": "b2s probe shadow", "mimeType": "application/vnd.google-apps.presentation"},
-        media_body=MediaIoBaseUpload(buf, mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+        media_body=media_upload(buf, "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         fields="id"))
-    pid = f["id"]
+    pid = file_id(f, "the probe deck")
     pres = execute(slides.presentations().get(presentationId=pid))
-    tpl = pres["slides"][0]
-    for pe in tpl["pageElements"]:
-        print(pe["objectId"], pe["shape"].get("shapeType"), pe["shape"].get("placeholder"),
-              json.dumps(pe["shape"]["shapeProperties"].get("shadow")))
-    box = next(pe for pe in tpl["pageElements"] if "placeholder" not in pe["shape"])
-    title = next(pe for pe in tpl["pageElements"] if "placeholder" in pe["shape"])
+    tpl = pres.get("slides", [])[0]
+    elements = tpl.get("pageElements", [])
+    for pe in elements:
+        shape = shape_of(pe)
+        print(object_id(pe), shape.get("shapeType"), shape.get("placeholder"), json.dumps(shadow_of(pe)))
+    box = next(pe for pe in elements if "placeholder" not in shape_of(pe))
+    title = next(pe for pe in elements if "placeholder" in shape_of(pe))
     reqs = [
-        {"duplicateObject": {"objectId": tpl["objectId"], "objectIds": {
-            tpl["objectId"]: "probe_slide2", box["objectId"]: "probe_tpl2", title["objectId"]: "probe_title2"}}},
+        {"duplicateObject": {"objectId": object_id(tpl), "objectIds": {
+            object_id(tpl): "probe_slide2", object_id(box): "probe_tpl2", object_id(title): "probe_title2"}}},
         {"duplicateObject": {"objectId": "probe_tpl2", "objectIds": {"probe_tpl2": "probe_copy"}}},
         {"updateShapeProperties": {"objectId": "probe_copy", "fields": "shapeBackgroundFill.solidFill.color",
                                    "shapeProperties": {"shapeBackgroundFill": {"solidFill": {"color": {"rgbColor": {"red": 0.9, "green": 0.94, "blue": 0.9}}}}}}},
         {"updatePageElementTransform": {"objectId": "probe_copy", "applyMode": "ABSOLUTE", "transform": {
             "scaleX": 1.5, "scaleY": 0.6, "unit": "EMU", "translateX": 360 * EMU_PER_PT, "translateY": 60 * EMU_PER_PT}}},
         {"insertText": {"objectId": "probe_title2", "text": "Duplicated slide"}},
-        {"updateSlideProperties": {"objectId": tpl["objectId"], "fields": "isSkipped", "slideProperties": {"isSkipped": True}}},
+        {"updateSlideProperties": {"objectId": object_id(tpl), "fields": "isSkipped", "slideProperties": {"isSkipped": True}}},
     ]
     try:
         execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
@@ -76,13 +89,12 @@ def main() -> None:
         reqs = reqs[:-1]
         execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     pres = execute(slides.presentations().get(presentationId=pid))
-    for s in pres["slides"]:
-        print("slide", s["objectId"], s.get("slideProperties", {}).get("isSkipped"),
-              s["slideProperties"].get("layoutObjectId"))
-        for pe in s["pageElements"]:
-            print("  ", pe["objectId"], pe["shape"].get("shapeType"),
-                  json.dumps(pe["shape"]["shapeProperties"].get("shadow")))
-    save_thumbnail(slides, pid, "probe_slide2", OUT / "probe_shadow.png")
+    for s in pres.get("slides", []):
+        print("slide", object_id(s), s.get("slideProperties", {}).get("isSkipped"),
+              s.get("slideProperties", {}).get("layoutObjectId"))
+        for pe in s.get("pageElements", []):
+            print("  ", object_id(pe), shape_of(pe).get("shapeType"), json.dumps(shadow_of(pe)))
+    save_thumbnail(slides, pid, "probe_slide2", OUT / "probe_shadow.png", None)
     print(f"https://docs.google.com/presentation/d/{pid}/edit")
 
 

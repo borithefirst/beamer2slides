@@ -229,7 +229,7 @@ def paragraph_dict(p: JsonMap) -> SetParagraph:
     return paragraph_of(p, runs_of(p["runs"]))
 
 
-def pdf_line_breaks(p: JsonMap, scale: float | None = None, fonts: FontMapper | None = None) -> list[int] | None:
+def pdf_line_breaks(p: JsonMap, scale: float | None, fonts: FontMapper | None) -> list[int] | None:
     return pdf_line_breaks_of(paragraph_dict(p), scale, fonts)
 
 

@@ -33,7 +33,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
 from beamer2slides.google_auth import slides_service  # noqa: E402
+from beamer2slides.google_types import AffineTransform, SlidesService, object_id, part  # noqa: E402
 from beamer2slides.gslides import execute  # noqa: E402
+from beamer2slides.json_types import as_object, as_str  # noqa: E402
 
 DEFAULT_PDF = ROOT / "tests" / "decks" / "sync" / "out" / "chain.pdf"
 
@@ -46,19 +48,23 @@ def convert(pdf: Path, folder: Path) -> None:
                        cwd=ROOT, stdout=out, stderr=subprocess.STDOUT, check=True)
 
 
-def inherited_titles(pid: str, api) -> tuple[int, int]:
+def inherited_titles(pid: str, api: SlidesService) -> tuple[int, int]:
     """How many of the deck's title placeholders still sit at their layout parent's transform?"""
     pres = execute(api.presentations().get(presentationId=pid))
-    lay = {p["objectId"]: {pe["objectId"]: pe.get("transform") for pe in p.get("pageElements", [])}
-           for p in pres["layouts"] + pres["masters"]}
+    lay = {object_id(p): {object_id(pe): pe.get("transform") for pe in p.get("pageElements", [])}
+           for p in pres.get("layouts", []) + pres.get("masters", [])}
     same = total = 0
-    for s in pres["slides"]:
+    for s in pres.get("slides", []):
         page = s.get("slideProperties", {}).get("layoutObjectId")
         for pe in s.get("pageElements", []):
-            ph = (pe.get("shape") or {}).get("placeholder", {})
+            ph = as_object(part(pe.get("shape"), "shape").get("placeholder", {}), "placeholder")
             if ph.get("type") in ("TITLE", "CENTERED_TITLE"):
                 total += 1
-                same += pe.get("transform") == lay.get(page, {}).get(ph.get("parentObjectId"))
+                none: dict[str, AffineTransform | None] = {}
+                parent = ph.get("parentObjectId")
+                parents = lay.get(page, none) if page is not None else none
+                same += pe.get("transform") == (parents.get(as_str(parent, "parentObjectId"))
+                                                if parent is not None else None)
     return same, total
 
 
@@ -67,12 +73,16 @@ def main() -> None:
     n = int(sys.argv[2]) if len(sys.argv) > 2 else 3
     folders = [ROOT / "out" / f"titlerace{i}" for i in range(n)]  # fixed names: the decks are rebuilt
     print(f"{n} conversions of {pdf.name} at once")
-    with ThreadPoolExecutor(n) as pool:
-        list(pool.map(lambda f: convert(pdf, f), folders))
+    def converted(folder: Path) -> None:
+        convert(pdf, folder)
 
-    api = slides_service()
+    with ThreadPoolExecutor(n) as pool:
+        list(pool.map(converted, folders))
+
+    api = slides_service(None)
     for folder in folders:
-        pid = json.loads((folder / "emit.json").read_text(encoding="utf-8"))["presentationId"]
+        emitted = as_object(json.loads((folder / "emit.json").read_text(encoding="utf-8")), "emit.json")
+        pid = as_str(emitted["presentationId"], "emit.json's presentationId")
         same, total = inherited_titles(pid, api)
         print(f"{folder.name:14s} {same}/{total} titles left at the layout's box")
 

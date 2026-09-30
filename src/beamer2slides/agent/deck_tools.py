@@ -30,6 +30,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Annotated, NoReturn
 
 from ..json_types import Json, JsonObject
+from .content import File
 from .context import Job, tool
 from .types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Refused
 
@@ -187,7 +188,8 @@ def _label_survey(j: Job, deck: "Mapping[str, Json]") -> "JsonObject":
 @tool("deck_inspect", needs=(READS, WRITES), local=None)
 def deck_inspect(
     j: Job,
-    pdf: Annotated[str, "Workspace ref of the compiled beamer PDF to look at (not the .tex)."],
+    *,
+    pdf: Annotated[File, "Workspace ref of the compiled beamer PDF to look at (not the .tex)."],
     out: Annotated[str | None, "Folder for raw.json, deck.json and the debug images; default "
                                "out/<pdf stem>/."] = None,
     overlays: Annotated[str, "'last' keeps the final step of each frame (default), 'all' keeps "
@@ -210,7 +212,7 @@ def deck_inspect(
     from ..json_types import as_array, as_int, as_object
 
     started = time.time()
-    source = _pdf(j, pdf)
+    source = _pdf(j, j.ref("pdf", pdf))
     out_dir = _out_dir(j, out, source)
     _, raw, deck, facts = _classify_into(j, source, out_dir, overlays, debug_images)
 
@@ -276,7 +278,8 @@ def deck_inspect(
 @tool("deck_convert", needs=(READS, WRITES, WRITES_GOOGLE), local=None)
 def deck_convert(
     j: Job,
-    pdf: Annotated[str, "Workspace ref of the compiled beamer PDF to convert."],
+    *,
+    pdf: Annotated[File, "Workspace ref of the compiled beamer PDF to convert."],
     out: Annotated[str | None, "Folder holding this deck's state (emit.json, backgrounds, sync "
                                "base); default out/<pdf stem>/."] = None,
     title: Annotated[str | None, "Name for the presentation in Drive; default the PDF's title, "
@@ -308,7 +311,7 @@ def deck_convert(
     started = time.time()
     _check_backup(backup)
     _check_overlays(overlays)
-    source = _pdf(j, pdf)
+    source = _pdf(j, j.ref("pdf", pdf))
     out_dir = _out_dir(j, out, source)
 
     checked = None
@@ -331,7 +334,8 @@ def deck_convert(
 @tool("deck_prepare", needs=(READS, WRITES), local=None)
 def deck_prepare(
     j: Job,
-    pdf: Annotated[str, "Workspace ref of the compiled beamer PDF to prepare."],
+    *,
+    pdf: Annotated[File, "Workspace ref of the compiled beamer PDF to prepare."],
     out: Annotated[str | None, "Folder for deck.json, the backgrounds and prepared.json; "
                                "default out/<pdf stem>/."] = None,
     overlays: Annotated[str, "'last' keeps the final step of each frame (default), 'all' keeps "
@@ -349,7 +353,7 @@ def deck_prepare(
     """
     started = time.time()
     _check_overlays(overlays)
-    source = _pdf(j, pdf)
+    source = _pdf(j, j.ref("pdf", pdf))
     out_dir = _out_dir(j, out, source)
     prepared = _prepare(j, source, out_dir, overlays)
 
@@ -369,8 +373,9 @@ def deck_prepare(
 @tool("deck_upload", needs=(READS, WRITES, WRITES_GOOGLE), local=None)
 def deck_upload(
     j: Job,
+    *,
     out: Annotated[str, "Folder a deck_prepare wrote (deck.json, backgrounds/, prepared.json)."],
-    pdf: Annotated[str | None, "Workspace ref of the PDF this folder was prepared from. Only "
+    pdf: Annotated[File | None, "Workspace ref of the PDF this folder was prepared from. Only "
                                "needed if Google refuses an element and the region has to be "
                                "cropped from the page; prepared.json names it otherwise."] = None,
     title: Annotated[str | None, "Name for the presentation in Drive; default the PDF's title, "
@@ -396,7 +401,7 @@ def deck_upload(
     _check_backup(backup)
     folder = j.path(out, write=True)
     prepared = _read_prepared(j, folder, out)
-    source = _pdf(j, pdf) if pdf else None
+    source = _pdf(j, j.ref("pdf", pdf)) if pdf else None
     _upload(j, folder, prepared, title, new_deck, measure, force_rebuild, backup, source, None)
     j.data["seconds"] = round(time.time() - started, 2)
     j.summary = _convert_summary(j, prepared, j.data["seconds"])
@@ -678,7 +683,8 @@ def _rebuild_message(refused: "RebuildRefused", survey: "JsonObject", reason: st
 @tool("deck_sync", needs=(READS, WRITES, READS_GOOGLE), local=None)
 def deck_sync(
     j: Job,
-    pdf: Annotated[str, "Workspace ref of the recompiled PDF: the new version of the source."],
+    *,
+    pdf: Annotated[File, "Workspace ref of the recompiled PDF: the new version of the source."],
     deck: Annotated[str, "The deck to merge into: presentation URL, presentation id, or the out "
                          "folder of its conversion."],
     out: Annotated[str | None, "Where the new conversion, base and reports go; default the "
@@ -721,7 +727,7 @@ def deck_sync(
         # The gate let this journey in on READS_GOOGLE so a read-only context can still plan a
         # sync; a real write says so here - before the first request, and before a folder is made.
         j.require(WRITES_GOOGLE)
-    source = _pdf(j, pdf)
+    source = _pdf(j, j.ref("pdf", pdf))
     target, folder = _deck_arg(j, deck)
     out_dir = j.path(out, write=True) if out else folder
     if out_dir is None:
@@ -899,8 +905,9 @@ def _deck_arg(j: Job, deck: str) -> tuple[str, Path | None]:
 @tool("tex_label", needs=(READS, WRITES), local=None)
 def tex_label(
     j: Job,
-    tex: Annotated[str, "Workspace ref of the document's main .tex (its \\input files are read "
-                        "and labelled too)."],
+    *,
+    tex: Annotated[File, "Workspace ref of the document's main .tex (its \\input files are read "
+                         "and labelled too)."],
     apply: Annotated[bool, "Write the labels into the source. Without it nothing is changed and "
                            "the plan is reported."] = False,
 ) -> None:
@@ -917,15 +924,16 @@ def tex_label(
     from ..inverse import keep_backup, replace_file
 
     # Read-only here: each file the labels are written into is asked for again as a write.
-    path = j.path(tex, write=False)
+    ref = j.ref("tex", tex)
+    path = j.path(ref, write=False)
     if not path.is_file():
-        raise Refused("not_found", f"{tex}: no such file (this tool reads the .tex, not the PDF).",
-                      ref=tex)
+        raise Refused("not_found", f"{ref}: no such file (this tool reads the .tex, not the PDF).",
+                      ref=ref)
     source = texmap.Source(path)
     if not source.frames:
         raise Refused("bad_request",
-                      rf"{tex}: no \begin{{frame}} found - is this the main file of a beamer "
-                      rf"document?", ref=tex)
+                      rf"{ref}: no \begin{{frame}} found - is this the main file of a beamer "
+                      rf"document?", ref=ref)
 
     edits = labels.plan(source)
     have = sum(1 for f in source.frames if f.label)

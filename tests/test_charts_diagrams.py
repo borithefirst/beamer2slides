@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 from beamer2slides import classify as C
 from beamer2slides import ir
-from beamer2slides.classify import Line, PageClassifier, Rect, Span, body_size, classify
+from beamer2slides.classify import Line, PageClassifier, Rect, Span, body_size, classify, new_line, new_span
 from beamer2slides.fonts import font_info
 from beamer2slides.raw_types import DrawingType, PathItem, RawDoc, RawDrawing, RawImage, RawPage, RawSpan
 
@@ -123,9 +123,9 @@ def diagrams(els: Sequence[ir.Element]) -> list[ir.DiagramElement]:
 
 def span(text: str, x0: float, size: float = 7.97, baseline: float = 180.0, font: str = SANS) -> Span:
     w = len(text) * 0.5 * size
-    return Span(id=f"s{x0:.1f}", text=text, font=font, size=size, color="#000000",
+    return new_span(id=f"s{x0:.1f}", text=text, font=font, size=size, color="#000000",
                 rect=Rect(x0, baseline - 0.75 * size, x0 + w, baseline + 0.25 * size),
-                baseline=baseline, horizontal=True, info=font_info(font))
+                baseline=baseline, horizontal=True, info=font_info(font), link=None, drawn=False, visual=None)
 
 
 TICK = 7.97  # a tick label's size (pt)
@@ -136,7 +136,7 @@ def row(labels: Sequence[str], x0: float, gap_em: float) -> Line:
     for t in labels:
         out.append(span(t, x0, TICK))
         x0 = out[-1].rect.x1 + gap_em * TICK
-    return Line(out)
+    return new_line(out)
 
 
 # ---------------------------------------------------------------- body size

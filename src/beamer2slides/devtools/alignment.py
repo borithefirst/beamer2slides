@@ -139,7 +139,7 @@ def slides_elements(out: Path, state: emit_state.EmitState, refresh: bool) -> di
     from beamer2slides.google_auth import slides_service
     from beamer2slides.google_types import as_json
     from beamer2slides.gslides import execute
-    pres = as_json(execute(slides_service().presentations().get(
+    pres = as_json(execute(slides_service(None).presentations().get(
         presentationId=state.presentation_id, fields="slides(objectId,pageElements)")), "the deck")
     boxes: dict[str, Box] = {}
     for s in as_objects(pres.get("slides", []), "the deck's slides"):
@@ -898,7 +898,7 @@ def measure(out: Path, refresh: bool, crops: Crops) -> Alignment:
         thumb = Image.open(out / "fidelity" / f"slides-{n + 1:03}.png").convert("RGB")
         kx = thumb.width / _number(as_array(raw["size"], f"{at}.size")[0], f"{at}.size")
         got = Image2(np.asarray(thumb), kx)
-        ref = Image2(doc[n].render(kx), kx)
+        ref = Image2(doc[n].render(kx, clip=None, transparent=False), kx)
         texts = [e for e in elements if isinstance(e, RenderedText)]
         by_id = {e.id: e for e in texts}
         pictures = [(e, oid) for e, oid in zip(elements, emitted.elements) if isinstance(e, RenderedImage)]

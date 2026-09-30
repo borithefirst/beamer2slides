@@ -156,7 +156,7 @@ def _named(v: Json) -> list[Json]:
 def open_deck(pid: str, *, defer: bool) -> LiveDeck:
     """The deck as it stands, through the owner's own client (`LiveDeck`; `defer`: queue the edits)."""
     from beamer2slides.google_auth import slides_service
-    api = slides_service()
+    api = slides_service(None)
     deck = LiveDeck(pid, api, _get(api, pid), defer)
     deck.reads += 1   # (the read it was opened with)
     return deck

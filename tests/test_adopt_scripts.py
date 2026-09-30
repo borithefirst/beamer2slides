@@ -17,8 +17,8 @@ from beamer2slides.adopt_context import MissingFont
 from beamer2slides.json_types import Json, JsonObject
 from .irs import deck_ir
 from beamer2slides.deck_ir_types import parse_target
-from beamer2slides.inverse import (Context, LoopParagraph, LoopRun, TextStyle, loop_paragraph, loop_run,
-                                   paragraphs_latex, runs_latex)
+from beamer2slides.inverse import (BEAMER_PT, LoopParagraph, LoopRun, TextStyle, fresh_context, loop_paragraph,
+                                   loop_run, paragraphs_latex, runs_latex)
 
 from .deck_records import target_filled
 from .json_reads import jnum, jnums, jobj, jobjs
@@ -156,20 +156,20 @@ def test_a_right_to_left_text_is_set_in_its_language_with_logical_alignment():
     """LuaTeX's skips are logical: in an RTL paragraph `\\raggedright` is flush right."""
     out = paragraphs_latex(paras(rtl("مرحبا", "right", False), rtl("يسار", "left", False),
                                  rtl("وسط", "center", False)),
-                           base18, Context(), "  ")
+                           base18, fresh_context(BEAMER_PT), "  ")
     assert out.startswith("  \\begin{otherlanguage}{arabic}\n") and out.endswith("\\par\n  \\end{otherlanguage}")
     assert "\\raggedright مرحبا" in out and "\\raggedleft يسار" in out and "\\centering وسط" in out
 
 
 def test_bullets_of_a_right_to_left_text_are_inside_its_language():
     out = paragraphs_latex(paras(rtl("אחד", "right", True), rtl("שתיים", "right", True)), base18,
-                           Context(), "")
+                           fresh_context(BEAMER_PT), "")
     assert out.index("\\begin{otherlanguage}{hebrew}") < out.index("\\begin{itemize}")
     assert out.index("\\end{itemize}") < out.index("\\end{otherlanguage}")
 
 
 def test_one_right_to_left_paragraph_among_others_gets_a_group_of_its_own():
-    out = paragraphs_latex(paras(ltr("Hello", "left"), rtl("שלום", "right", False)), base18, Context(), "")
+    out = paragraphs_latex(paras(ltr("Hello", "left"), rtl("שלום", "right", False)), base18, fresh_context(BEAMER_PT), "")
     assert out.splitlines()[0] == "Hello"
     assert "\\begin{otherlanguage}{hebrew}\\raggedright שלום\\par\\end{otherlanguage}" in out
 
@@ -178,14 +178,14 @@ def test_a_list_opening_one_level_deep_has_an_item_to_hang_on():
     """`\\begin{itemize}\\begin{itemize}` is "Something's wrong--perhaps a missing \\item"
     (arabic-training slides 12 and 17)."""
     deep: JsonObject = {**rtl("עמוק", "right", True), "level": 1}
-    out = paragraphs_latex(paras(deep, rtl("אחד", "right", True), deep), base18, Context(), "")
+    out = paragraphs_latex(paras(deep, rtl("אחד", "right", True), deep), base18, fresh_context(BEAMER_PT), "")
     lines = [l.strip() for l in out.splitlines()]
     assert lines[1:4] == ["\\begin{itemize}", "\\item[]", "\\begin{itemize}"]
     assert lines.count("\\item[]") == 1                   # the second deep item follows a real one
 
 
 def test_left_to_right_paragraphs_are_written_as_before():
-    out = paragraphs_latex(paras(ltr("a", "left"), ltr("b", "right"), ltr("c", "center")), base18, Context(), "")
+    out = paragraphs_latex(paras(ltr("a", "left"), ltr("b", "right"), ltr("c", "center")), base18, fresh_context(BEAMER_PT), "")
     assert out == "a\n\n\\raggedleft b\n\n\\centering c"
 
 
@@ -193,21 +193,21 @@ def test_a_blank_lines_size_ends_with_it():
     """cs161-tls slide 41: a 9 pt spacer line between 14 pt paragraphs left its `\\fontsize` on, and
     both paragraphs after it came out at 9 pt (runs are written against the base style)."""
     spacer: JsonObject = {"runs": [{"text": " ", "size": 7.0}], "align": "left", "bullet": None, "level": 0}
-    out = paragraphs_latex(paras(ltr("a", "left"), spacer, ltr("b", "left")), base18, Context(), "")
+    out = paragraphs_latex(paras(ltr("a", "left"), spacer, ltr("b", "left")), base18, fresh_context(BEAMER_PT), "")
     blank = out.split("\n\n")[1]
     assert blank.startswith("{\\fontsize") and blank.endswith("\\strut\\par}")
 
 
 def test_a_soft_break_is_never_inside_a_style():
     """`\\underline{a\\\\ b}` stops the build ("Not allowed in LR mode", jruby-ja slide 10)."""
-    out = runs_latex(loop_runs({"text": "10000\x0bmatcher", "underline": True}), NO_BASE, Context())
+    out = runs_latex(loop_runs({"text": "10000\x0bmatcher", "underline": True}), NO_BASE, fresh_context(BEAMER_PT))
     assert out == "\\underline{10000}\\\\ \\underline{matcher}"
-    assert "\\underline{\\\\" not in runs_latex(loop_runs({"text": "\x0b", "underline": True}), NO_BASE, Context())
+    assert "\\underline{\\\\" not in runs_latex(loop_runs({"text": "\x0b", "underline": True}), NO_BASE, fresh_context(BEAMER_PT))
 
 
 def test_two_soft_breaks_in_a_row_leave_an_empty_line_that_compiles():
     """A second `\\\\` on an empty line is "There's no line here to end" in ragged text."""
-    out = runs_latex(loop_runs({"text": "a\x0b\x0bb"}), NO_BASE, Context())
+    out = runs_latex(loop_runs({"text": "a\x0b\x0bb"}), NO_BASE, fresh_context(BEAMER_PT))
     assert out == "a\\\\ \\mbox{}\\\\ b"
 
 

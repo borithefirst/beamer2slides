@@ -30,6 +30,8 @@ from googleapiclient.http import MediaIoBaseUpload
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from beamer2slides.google_auth import credentials, docs_service, drive_service  # noqa: E402
+from beamer2slides.google_types import DocsService, DriveService, file_id, json_object, part, parts  # noqa: E402
+from beamer2slides.json_types import JsonObject, as_object, as_objects, as_str  # noqa: E402
 
 OUT = Path(__file__).resolve().parents[1] / "out" / "docs-probe"
 STATE = OUT / "chips-doc.txt"
@@ -77,7 +79,7 @@ EXPORTS = {"html": "text/html", "txt": "text/plain", "md": "text/markdown",
            "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
 
 
-def services():
+def services() -> tuple[DriveService, DocsService]:
     creds = credentials()
     return drive_service(creds), docs_service(creds)
 
@@ -86,9 +88,9 @@ def create() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     drive, _ = services()
     media = MediaIoBaseUpload(io.BytesIO(SOURCE.encode("utf-8")), mimetype="text/html")
-    doc_id = drive.files().create(
+    doc_id = file_id(drive.files().create(
         body={"name": "b2s smart-chip probe (edit me)", "mimeType": DOC_MIME},
-        media_body=media, fields="id").execute()["id"]
+        media_body=media, fields="id").execute(), "the probe document")
     STATE.write_text(doc_id, encoding="utf-8")
     print(f"https://docs.google.com/document/d/{doc_id}/edit")
     for marker, what in CASES:
@@ -97,15 +99,16 @@ def create() -> None:
         print(f"  {line}")
 
 
-def body_of(tab_or_doc: dict) -> list:
-    return tab_or_doc.get("body", {}).get("content", [])
+def body_of(tab_or_doc: JsonObject) -> list[JsonObject]:
+    return parts(part(tab_or_doc.get("body"), "body").get("content"), "body.content")
 
 
-def line_text(para: dict) -> str:
-    return "".join(el.get("textRun", {}).get("content", "") for el in para["elements"])
+def line_text(para: JsonObject) -> str:
+    return "".join(as_str(part(el.get("textRun"), "textRun").get("content", ""), "textRun.content")
+                   for el in as_objects(para.get("elements"), "paragraph.elements"))
 
 
-def describe(el: dict) -> str | None:
+def describe(el: JsonObject) -> str | None:
     """A one-line account of a non-text paragraph element."""
     for kind in ELEMENT_KINDS:
         if kind in el:
@@ -113,19 +116,21 @@ def describe(el: dict) -> str | None:
     return None
 
 
-def report_structure(doc: dict, label: str) -> None:
+def report_structure(doc: JsonObject, label: str) -> None:
     print(f"\n--- {label}: paragraph elements that are not plain text ---")
     for entry in body_of(doc):
-        para = entry.get("paragraph")
-        if para is None:
+        raw = entry.get("paragraph")
+        if raw is None:
             for other in ("table", "tableOfContents", "sectionBreak"):
                 if other in entry:
-                    keys = sorted(entry[other].keys())
+                    keys = sorted(part(entry[other], other).keys())
                     print(f"  [structural] {other}: keys {keys}")
             continue
+        para = as_object(raw, "paragraph")
+        elements = as_objects(para.get("elements"), "paragraph.elements")
         text = line_text(para).strip()
         marker = text.split(":", 1)[0] if text else ""
-        for el in para["elements"]:
+        for el in elements:
             what = describe(el)
             if what:
                 print(f"  {marker[:12]:12s} {what[:400]}")
@@ -134,13 +139,13 @@ def report_structure(doc: dict, label: str) -> None:
                 print(f"  {marker[:12]:12s} ANONYMOUS element, no content key, "
                       f"span {el.get('startIndex')}-{el.get('endIndex')}")
         # A chip may also hide in a textRun's style, and comments/suggestions tag runs.
-        for el in para["elements"]:
-            run = el.get("textRun")
+        for el in elements:
+            run = part(el.get("textRun"), "textRun")
             if not run:
                 continue
             extra = {k: v for k, v in run.items() if k not in ("content", "textStyle")}
-            style = run.get("textStyle", {})
-            if OBJECT_SENTINEL in run.get("content", ""):
+            style = part(run.get("textStyle"), "textStyle")
+            if OBJECT_SENTINEL in as_str(run.get("content", ""), "textRun.content"):
                 print(f"  {marker[:12]:12s} object sentinel U+E907 inside a plain textRun")
             if extra:
                 print(f"  {marker[:12]:12s} textRun extras {json.dumps(extra)[:300]}")
@@ -149,9 +154,10 @@ def report_structure(doc: dict, label: str) -> None:
 
     for top in ("footnotes", "inlineObjects", "positionedObjects", "namedRanges",
                 "headers", "footers", "lists", "suggestedDocumentStyleChanges"):
-        if doc.get(top):
-            print(f"  [top-level] {top}: {len(doc[top])} entr(ies) {sorted(doc[top])[:4]}")
-    style = doc.get("documentStyle", {})
+        value = part(doc.get(top), top)
+        if value:
+            print(f"  [top-level] {top}: {len(value)} entr(ies) {sorted(value)[:4]}")
+    style = part(doc.get("documentStyle"), "documentStyle")
     for key in sorted(style):
         if "ackground" in key or "atermark" in key or "Header" in key or "Footer" in key:
             print(f"  [documentStyle] {key} = {json.dumps(style[key])[:200]}")
@@ -161,7 +167,7 @@ def read() -> None:
     doc_id = STATE.read_text(encoding="utf-8").strip()
     drive, docs = services()
 
-    doc = docs.documents().get(documentId=doc_id).execute()
+    doc = json_object(docs.documents().get(documentId=doc_id).execute(), "the document")
     (OUT / "chips-document.json").write_text(json.dumps(doc, indent=1), encoding="utf-8")
     report_structure(doc, "documents.get (no tabs)")
 
@@ -178,7 +184,7 @@ def read() -> None:
         for sub in child:
             print(f"    child {sub.get('tabProperties', {}).get('title')!r}")
     if tabs:
-        report_structure(tabs[-1].get("documentTab", {}), "last tab body")
+        report_structure(json_object(tabs[-1].get("documentTab", {}), "the last tab"), "last tab body")
 
     for ext, mime in EXPORTS.items():
         try:

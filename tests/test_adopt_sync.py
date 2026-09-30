@@ -845,7 +845,7 @@ def test_a_slide_of_the_adopted_deck_no_frame_accounts_for_is_kept(world: World)
         assert [p["action"] for p in jobjs(mplan, "slides") if p["key"] == kept[0]["slide"]] == ["keep_removed"]
         assert any("accounted for by no frame of the source, and were kept" in w and
                    "delete the slide in Slides" in w for w in warnings(mplan))
-        assert adopt_sync.problems(base, mplan, world.live, KEPT) == []
+        assert adopt_sync.problems(base, mplan, world.live, KEPT, "auto") == []
 
 
 def test_a_box_adopt_could_tie_to_nothing_is_not_an_object_the_person_added(world: World) -> None:
@@ -946,7 +946,7 @@ def test_an_element_tied_to_no_object_of_the_deck_is_kept_and_the_rest_syncs(wor
     assert c["resolution"] == "kept (tied to no object of the deck)" and not c.get("takeable")
     assert any("could not be tied to any object of this deck" in w and "Change them in the deck itself"
                in w for w in warnings(mplan))
-    assert adopt_sync.problems(base, mplan, world.live, KEPT) == [], "nothing left to refuse"
+    assert adopt_sync.problems(base, mplan, world.live, KEPT, "auto") == [], "nothing left to refuse"
     assert merge.has_writes(mplan, live_order(world)), \
         "and the rest of the deck is synced as usual"
 
@@ -970,7 +970,7 @@ def test_an_element_the_decks_layout_draws_is_named_for_what_it_is(world: World)
     assert any("are drawn by this deck's layouts or its master, not by the slide" in w and
                "Slide > Edit theme" in w for w in warnings(mplan))
     assert not any("could not be tied to any object" in w for w in warnings(mplan))
-    assert adopt_sync.problems(base, mplan, world.live, KEPT) == [], "nothing left to refuse"
+    assert adopt_sync.problems(base, mplan, world.live, KEPT, "auto") == [], "nothing left to refuse"
     assert merge.has_writes(mplan, live_order(world)), \
         "and the rest of the deck is synced as usual"
 
@@ -993,7 +993,7 @@ def test_a_cell_of_a_table_of_the_decks_is_named_for_what_it_is(world: World) ->
     assert any("stand inside a table of this deck" in w and "Edit those cells in Slides" in w
                for w in warnings(mplan))
     assert not any("could not be tied to any object" in w for w in warnings(mplan))
-    assert adopt_sync.problems(base, mplan, world.live, KEPT) == [], "nothing left to refuse"
+    assert adopt_sync.problems(base, mplan, world.live, KEPT, "auto") == [], "nothing left to refuse"
     assert merge.has_writes(mplan, live_order(world)), \
         "and the rest of the deck is synced as usual"
 
@@ -1037,7 +1037,7 @@ def test_a_picture_drawn_out_of_this_units_own_box_does_not_freeze_it(world: Wor
     assert unit["action"] == "recreate", "the person's box takes the source's new words"
     assert not unit.get("unpaired") and not any(c["field"] == "unpaired"
                                                 for c in jobjs(mplan, "report", "conflicts"))
-    assert adopt_sync.problems(base, mplan, world.live, KEPT) == [], "and the gate agrees"
+    assert adopt_sync.problems(base, mplan, world.live, KEPT, "auto") == [], "and the gate agrees"
 
 
 def test_a_picture_drawn_out_of_another_units_box_still_freezes_this_one(world: World) -> None:
@@ -1079,7 +1079,7 @@ def test_the_gate_reads_the_unit_the_merge_planned_and_not_a_map_of_keys(world: 
     mplan = merge.plan_merge(base, ours_of(doc, base, world.out), world.live)
     unit = unit_of(mplan, words["key"])
     assert unit["action"] == "recreate" and not unit.get("unpaired")
-    assert adopt_sync.problems(base, mplan, world.live, KEPT) == [], \
+    assert adopt_sync.problems(base, mplan, world.live, KEPT, "auto") == [], \
         "the unit's own members are the ones the merge read"
 
 
@@ -1111,7 +1111,7 @@ def test_a_deck_the_person_made_wider_is_planned_at_its_own_size() -> None:
     from beamer2slides.emit import SLIDE_W, DeckPlan
 
     deck = a_deck(453.54, 255.12)
-    ours, theirs = DeckPlan(deck), DeckPlan(deck, 1440.0)
+    ours, theirs = DeckPlan(deck, SLIDE_W, pptx_tables=False, contain=False), DeckPlan(deck, 1440.0, pptx_tables=False, contain=False)
     assert ours.page_width == SLIDE_W and ours.scale == pytest.approx(720.0 / 453.54)
     assert theirs.page_width == 1440.0 and theirs.scale == pytest.approx(1440.0 / 453.54)
     box = theirs.pictures(jobj(theirs.deck, "slides", 0))[0][1]
@@ -1127,7 +1127,7 @@ def test_a_wider_deck_is_not_refused_anymore(world: World) -> None:
     assert adopt_sync.aspect_mismatch(base) is None, "1440 x 810 is the page the source compiles to, doubled"
     doc = copy.deepcopy(world.doc)
     edit_source(fuzz_sync.src_add_element, 2, doc, world.out)
-    found = adopt_sync.problems(base, plan_of(dataclasses.replace(world, base=base), doc), world.live, KEPT)
+    found = adopt_sync.problems(base, plan_of(dataclasses.replace(world, base=base), doc), world.live, KEPT, "auto")
     assert [p["reason"] for p in found] == []
 
 
@@ -1271,8 +1271,8 @@ def test_the_campaign_sees_the_duplicate_the_unpaired_hold_prevents(tmp_path: Pa
     real = adopt_sync.problems
 
     def problems(base: JsonObject, mplan: Mapping[str, Json], theirs: Mapping[str, Json],
-                 way_back: JsonObject | None, *backup_mode: str | None) -> list[JsonObject]:
-        return [p for p in real(base, mplan, theirs, way_back, *backup_mode) if p["reason"] != "unpaired"]
+                 way_back: JsonObject | None, backup_mode: str | None) -> list[JsonObject]:
+        return [p for p in real(base, mplan, theirs, way_back, backup_mode) if p["reason"] != "unpaired"]
     monkeypatch.setattr(adopt_sync, "problems", problems)
     monkeypatch.setattr(fuzz_sync.adopt_sync, "problems", adopt_sync.problems)
     failures = [f for seed in range(40)
@@ -1297,15 +1297,15 @@ def test_an_adopt_base_older_than_the_shapes_it_records_is_no_source_change() ->
     deck: JsonObject = {"slides": [{"elements": [ours, {**ours, "mark": "p80_i13"}, crop]}]}  # (the crop: its twin, poster)
 
     def entry(ir: JsonObject) -> JsonObject:
-        h, fields = identity.ir_fields(ir)
+        h, fields = identity.ir_fields(ir, None, None, None)
         return {"key": "shape/panel/0", "kind": "shape", "anchor": None, "ir": ir, "ir_hash": h, "fields": fields}
     base: JsonObject = {"adopt": {"boxes": {}}, "slides": [{"key": "s", "elements": [entry(old), entry(moved)]}]}
     assert [(r.slide, r.how, r.hashed) for r in adopt_sync.upgrade_shapes(base, deck, None)] == \
         [("s", "adopt_shape", True)] * 2
     same, changed = jobjs(base, "slides", 0, "elements")
-    assert same["ir_hash"] == identity.ir_fields(ours)[0]
+    assert same["ir_hash"] == identity.ir_fields(ours, None, None, None)[0]
     assert jat(changed, "ir", "outline") == {"color": "#00ff00", "width": 2.02}
-    assert jat(changed, "fields", "position") != jat(identity.ir_fields({**ours, "mark": "p80_i13"})[1], "position")
+    assert jat(changed, "fields", "position") != jat(identity.ir_fields({**ours, "mark": "p80_i13"}, None, None, None)[1], "position")
     plain: JsonObject = {"slides": [{"elements": [entry(old)]}]}
     assert adopt_sync.upgrade_shapes(plain, deck, None) == []  # (a convert base has no marks to upgrade)
     assert jat(plain, "slides", 0, "elements", 0, "ir") is old

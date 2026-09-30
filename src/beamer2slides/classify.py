@@ -22,8 +22,8 @@ import re
 from dataclasses import replace
 
 from . import ir
-from .classify_model import HOLE_PAD, Line, Paragraph, Rect, Span, union_all
-from .classify_model import box_outline, upright_ellipse  # noqa: F401 (callers take these from here)
+from .classify_model import HOLE_PAD, Line, Rect, Span, new_line, new_paragraph, union_all
+from .classify_model import Paragraph, box_outline, new_span, upright_ellipse  # noqa: F401 (callers take these from here)
 from .classify_graphics import without_page_frame
 from .classify_reasons import ReasonsMixin
 from .classify_text import body_size, math_text
@@ -72,7 +72,7 @@ class PageClassifier(ReasonsMixin):
             turned = [replace(s, rect=Rect(-s.rect.y1, s.rect.x0, -s.rect.y0, s.rect.x1) if up else
                               Rect(s.rect.y0, -s.rect.x1, s.rect.y1, -s.rect.x0),
                               baseline=self.page_origin(s)[0] * (1 if up else -1), horizontal=True) for s in row]
-            el = self.text_element([Paragraph([Line(turned)])], f"p{self.raw['index']}rt{len(out)}")
+            el = self.text_element([new_paragraph([new_line(turned)], align="left", reason=None)],f"p{self.raw['index']}rt{len(out)}")
             rotated: ir.TextElement = {**el, "bbox": union_all(s.rect for s in row).as_list(),
                                        "panel": self.panel_of(union_all(s.rect for s in row)),
                                        "rotation": -90 if up else 90}
@@ -172,7 +172,7 @@ class PageClassifier(ReasonsMixin):
         theme_texts: list[ir.ThemeText] = []
         for line in lines:
             if line.reason == "theme" and all(s.id not in used for s in line.spans):
-                par = Paragraph([line], align="left")
+                par = new_paragraph([line], align="left", reason=None)
                 direction = par.direction
                 theme_texts.append({
                     "kind": "text", "role": "layout", "bbox": line.rect.as_list(), "panel": None, "code": False,

@@ -118,7 +118,7 @@ def google_mode() -> str | None:
     if os.environ.get("B2S_PLAYGROUND_GOOGLE") != "1":
         return None
     from ..google_auth import credential_file
-    return "local" if credential_file("B2S_TOKEN", "token.json").exists() else None
+    return "local" if credential_file("B2S_TOKEN", "token.json", None).exists() else None
 
 
 SAMPLES = [("demo", "examples/demo/demo.tex", "The demo talk: blocks, a table, a diagram, math, a figure"),
@@ -310,7 +310,7 @@ def page_pngs(pdf: Path, deck: JsonObject, folder: Path) -> None:
         for s in as_objects(deck["slides"], "deck.json's slides"):
             number = as_int(s["page"], "a slide's page")
             page = doc[number]
-            Image.fromarray(page.render(PAGE_PX / page.width)).convert("RGB").save(
+            Image.fromarray(page.render(PAGE_PX / page.width, clip=None, transparent=False)).convert("RGB").save(
                 folder / f"page-{number + 1:03}.png")
     finally:
         doc.close()

@@ -40,7 +40,7 @@ import subprocess
 import zlib
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Protocol, TypeVar, Union
 
@@ -56,8 +56,8 @@ from .compare import (HOLE, TOL, AlignResidual, BackgroundResidual, BoxExtra, Bo
 from .deck_ir_types import TargetDeck, TargetImage, element_json, is_target, parse_target, recolor_json, target_json
 from .ir_types import At, Box, box
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_str
-from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, frame_visible,
-                     line_of, locate_words, mask_comments, match_group, norm_word, page_frames, read_args, skip_space,
+from .texmap import (OPAQUE, PARA, Frame, Item, ListEnv, Source, Visible, WordMap, build_visible, empty_visible,
+                     frame_visible, line_of, locate_words, locate_words_in, mask_comments, match_group, norm_word, page_frames, read_args, skip_space,
                      synctex_pages)
 from .typing_compat import assert_never
 
@@ -461,7 +461,7 @@ class Edit:
     text: str
     kind: str
     signature: Signature
-    note: str = ""
+    note: str        # what the report says about the edit, "" for nothing
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -517,16 +517,27 @@ def unresolved_json(u: GivenUp) -> JsonObject:
     return out
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Context:
-    colours: dict[str, str] = field(default_factory=dict)   # \definecolor names to add
-    packages: set[str] = field(default_factory=set)          # preamble lines to add
-    pt_option: int = 11
-    files: dict[str, Path] = field(default_factory=dict)     # new picture files: key -> path in the work tree
-    notes: list[str] = field(default_factory=list)           # what the report must say about pictures
-    pictures: dict[tuple[str, str, str | None], "Picture"] = field(default_factory=dict)  # (deck file, edits) -> Picture
-    index: "list[PictureFile] | None" = None                 # picture files of the source tree
-    label_notes: list[str] = field(default_factory=list)     # what the report must say about renamed labels
+    """What the edits add beside the frames they rewrite (`fresh_context` has added nothing)."""
+    colours: dict[str, str]   # \definecolor names to add
+    packages: set[str]          # preamble lines to add
+    pt_option: int              # the class's size option (`class_pt_option`)
+    files: dict[str, Path]     # new picture files: key -> path in the work tree
+    notes: list[str]           # what the report must say about pictures
+    pictures: dict[tuple[str, str, str | None], "Picture"]  # (deck file, edits) -> Picture
+    index: "list[PictureFile] | None"                 # picture files of the source tree
+    label_notes: list[str]     # what the report must say about renamed labels
+
+
+BEAMER_PT = 11
+"""beamer's size when `\\documentclass` names none (`class_pt_option`)."""
+
+
+def fresh_context(pt_option: int) -> Context:
+    """A context that has added nothing yet, for a class set at `pt_option` pt."""
+    return Context(colours={}, packages=set(), pt_option=pt_option, files={}, notes=[], pictures={}, index=None,
+                   label_notes=[])
 
 
 @dataclass
@@ -537,7 +548,7 @@ class ParaLoc:
     lo: int          # visible range of the paragraph's found words
     hi: int
     item: Item | None
-    title: bool = False
+    title: bool      # the frame's title, not its body
 
     def src(self) -> tuple[int, int]:
         return self.visible.starts[self.lo], self.visible.ends[self.hi - 1]
@@ -551,9 +562,9 @@ class Candidate:
     pdf: Path
     deck: JsonObject
     frames: list[Frame | None]            # per deck slide
-    locs: dict[int, dict[tuple[str, int], ParaLoc]] = field(default_factory=dict)
-    text_masked: dict[Path, str] = field(default_factory=dict)
-    words: dict[int, list[str]] = field(default_factory=dict)   # PDF page -> the words it shows (extract, not classify)
+    locs: dict[int, dict[tuple[str, int], ParaLoc]]
+    text_masked: dict[Path, str]
+    words: dict[int, list[str]]   # PDF page -> the words it shows (extract, not classify)
 
     def keys(self) -> tuple[str | None, ...]:
         """The label of each slide's frame (None: unlabelled, or no frame), which pairs it with the
@@ -608,7 +619,7 @@ class Candidate:
                 candidates.append((self.source.main, pre, 0, len(pre.text)))
             best: tuple[Path, Visible, WordMap] | None = None
             for path, v, lo, hi in candidates:
-                wm = locate_words(para.text, v, lo, hi)
+                wm = locate_words_in(para.text, v, lo, hi)
                 if best is None or wm.score > best[2].score + 1e-9:
                     best = (path, v, wm)
                 if wm.score >= 0.8:
@@ -633,14 +644,14 @@ def title_page_visible(cand: Candidate) -> Visible | None:
     """Printed text of \\title, \\subtitle, \\author, \\institute and \\date in the preamble."""
     text = cand.masked(cand.source.main)
     end = cand.source.preamble_end()
-    out = Visible()
+    out = empty_visible()
     for name in ("title", "subtitle", "author", "institute", "date"):
         m = re.search(r"\\" + name + r"\s*(?=[\[{])", text[:end])
         if not m:
             continue
         args, _ = read_args(text, m.end(), "oM")
         if args[1]:
-            part = build_visible(text, args[1][1], args[1][2])
+            part = build_visible(text, args[1][1], args[1][2], title_frame=False)
             for ch, a, b in zip(part.text, part.starts, part.ends):
                 out.add(ch, a, b)
             out.add(PARA, args[1][2], args[1][2])
@@ -650,8 +661,9 @@ def title_page_visible(cand: Candidate) -> Visible | None:
 class Workspace:
     """A working copy of the source tree, compiled and classified on demand."""
 
-    def __init__(self, tex: Path, work: Path, handout: bool = False, engine: str | None = None,
-                 fresh: bool = True):
+    def __init__(self, tex: Path, work: Path, *, handout: bool, engine: str | None, fresh: bool):
+        """`engine`: None for the one the source names (`Source.engine`); `fresh`: copy the source
+        tree again over what an earlier run left in `work`."""
         self.original = Path(tex).resolve()
         self.root = self.original.parent
         self.work = Path(work).resolve()
@@ -718,12 +730,12 @@ class Workspace:
                 break
         return self.build_dir / f"{job}.pdf", ""
 
-    def build(self, out: Path, target_has_notes: bool = False,
-              compiled: tuple[Path | None, str] | None = None) -> Candidate | str:
+    def build(self, out: Path, target_has_notes: bool,
+              compiled: tuple[Path | None, str] | None) -> Candidate | str:
         """Compile, extract and classify like `convert` (overlays: last step of each frame), and
         map every slide to its frame. A string is a compile error.
 
-        `compiled`: what `compile` already returned, where the caller ran it while it had nothing
+        `compiled`: what `compile` already returned (None: compile now), where the caller ran it while it had nothing
         else to do (`converge` reads the deck meanwhile). Taken only when this workspace stood at
         the same options then, so a caller cannot hand over a PDF of another document."""
         from .classify import classify
@@ -764,7 +776,7 @@ class Workspace:
             orig = kept_original[slide["page"]] if slide["page"] < len(kept_original) else slide["page"]
             frames.append(frames_by_page[orig] if orig < len(frames_by_page) else None)
         words = {p["index"]: [w for s in p["spans"] for w in s["text"].split()] for p in selected["pages"]}
-        return Candidate(self.source, prepared.pdf, deck, frames, words=words)
+        return Candidate(self.source, prepared.pdf, deck, frames, locs={}, text_masked={}, words=words)
 
 
 def original_pages(pdf: Path, prepared: "Prepared") -> list[int]:
@@ -1020,7 +1032,7 @@ class PictureSource:
     inner: tuple[int, int]            # the command or the environment alone
     block: tuple[int, int] | None     # the textblock* around it
     xy: tuple[float, float] | None    # that textblock's position
-    overlay: bool = False             # tikzpicture[overlay]
+    overlay: bool                     # tikzpicture[overlay]
 
 
 def picture_slug(alt: str | None) -> str:
@@ -1067,7 +1079,7 @@ def picture_look(path: Path) -> Look | None:
                 if len(doc) != 1:
                     return None
                 w, h = doc[0].width, doc[0].height
-                img = Image.fromarray(doc[0].render(256 / max(w, h)))
+                img = Image.fromarray(doc[0].render(256 / max(w, h), clip=None, transparent=False))
                 pixels = float("inf")  # vector: better than any raster
             finally:
                 doc.close()
@@ -1479,7 +1491,7 @@ class Planner:
         if a <= pos <= b:
             return
         self.edit(frame.file, a, b, "", r, "")
-        self.edits.append(Edit(frame.file, pos, pos, "\n" + block, "slide_order", signature(r) + ("insert",)))
+        self.edits.append(Edit(frame.file, pos, pos, "\n" + block, "slide_order", signature(r) + ("insert",), ""))
 
     # -- notes and background
     def notes(self, r: NotesResidual) -> None:
@@ -1504,7 +1516,7 @@ class Planner:
                 s = frame.body + extra.start()
                 e = match_group(text, frame.body + extra.end() - 1)
                 a, b = line_span(text, s, e)
-                self.edits.append(Edit(frame.file, a, b, "", "notes", signature(r) + (s,)))
+                self.edits.append(Edit(frame.file, a, b, "", "notes", signature(r) + (s,), ""))
         elif new:
             pos = text.rfind("\n", 0, frame.body_end) + 1
             ind = indent_at(text, frame.start) + "  "
@@ -1525,7 +1537,7 @@ class Planner:
             return
         a, b = line_span(text, frame.start, frame.end)
         self.edit(frame.file, a, a, f"{{\\setbeamercolor{{background canvas}}{{bg={name}}}\n", r, "")
-        self.edits.append(Edit(frame.file, b, b, "}\n", "background", signature(r) + ("close",)))
+        self.edits.append(Edit(frame.file, b, b, "}\n", "background", signature(r) + ("close",), ""))
 
     # -- text
     def loc(self, slide: int, element: str, para: int) -> ParaLoc | None:
@@ -1562,10 +1574,10 @@ class Planner:
                     continue
                 if before is not None:
                     at = loc.visible.ends[before[1] - 1]
-                    self.edits.append(Edit(loc.file, at, at, " " + new, "text", signature(r) + (c0,)))
+                    self.edits.append(Edit(loc.file, at, at, " " + new, "text", signature(r) + (c0,), ""))
                 elif after is not None:
                     at = loc.visible.starts[after[0]]
-                    self.edits.append(Edit(loc.file, at, at, new + " ", "text", signature(r) + (c0,)))
+                    self.edits.append(Edit(loc.file, at, at, new + " ", "text", signature(r) + (c0,), ""))
                 else:
                     self.fail_op(r, op, None, "insertion point not found")
                 continue
@@ -1578,7 +1590,7 @@ class Planner:
                 if op.op == "delete":
                     a, b = widen_delete(src, a, b)
                     new = ""
-                self.edits.append(Edit(loc.file, a, b, new, "text", signature(r) + (c0,)))
+                self.edits.append(Edit(loc.file, a, b, new, "text", signature(r) + (c0,), ""))
                 continue
             # the words cross commands: replace word by word where counts agree
             tw = op.tgt.split()
@@ -1595,7 +1607,7 @@ class Planner:
                         ok = False
                         break
                     if cur_words[c0 + d] != tw[d]:
-                        parts.append(Edit(loc.file, wa, wb, latex_escape(tw[d]), "text", signature(r) + (c0 + d,)))
+                        parts.append(Edit(loc.file, wa, wb, latex_escape(tw[d]), "text", signature(r) + (c0 + d,), ""))
                 if ok:
                     self.edits += parts
                     continue
@@ -1927,10 +1939,10 @@ class Planner:
                             for l in l.visible.lists if l.start < it.start < l.end and l.level == it.level), None)
                 if env is not None and siblings and it is siblings[0]:
                     a, b = line_span(text, env.start, env.end)
-                    self.edits.append(Edit(file, a, b, "", r.kind, signature(r) + (it.start,)))
+                    self.edits.append(Edit(file, a, b, "", r.kind, signature(r) + (it.start,), ""))
                 continue
             a, b = line_span(text, it.start, len(text[:it.end].rstrip()))
-            self.edits.append(Edit(file, a, b, "", r.kind, signature(r) + (it.start,)))
+            self.edits.append(Edit(file, a, b, "", r.kind, signature(r) + (it.start,), ""))
         by_ci = {ci: it for ci, _, it in current}
         for lv, j, k in new:
             prev = next(((by_ci[c], l) for c, l, _ in reversed(desired[:k]) if c is not None), None)
@@ -1945,7 +1957,7 @@ class Planner:
                 ind = indent_at(text, nxt[0].start)
             else:
                 return False
-            self.edits.append(Edit(file, pos, pos, ind + line + "\n", r.kind, signature(r) + (j,)))
+            self.edits.append(Edit(file, pos, pos, ind + line + "\n", r.kind, signature(r) + (j,), ""))
         return bool(new or removed)
 
     @staticmethod
@@ -2247,12 +2259,12 @@ class Planner:
             if src.block:
                 self.edit(frame.file, a, b, new, r, "")
                 self.edits.append(Edit(frame.file, src.block[1], src.block[1], "\n" + picture_block(te, pic, self.ctx, ind),
-                                       r.kind, signature(r) + ("block",)))
+                                       r.kind, signature(r) + ("block",), ""))
             else:
                 pos = frame_insert_point(self.cand, frame)
                 self.edit(frame.file, a, b, new, r, "")
                 self.edits.append(Edit(frame.file, pos, pos, picture_block(te, pic, self.ctx, ind), r.kind,
-                                       signature(r) + ("block",)))
+                                       signature(r) + ("block",), ""))
         else:
             self.edit(frame.file, a, b, lead + commented_out(orig, a, b, ind, note) + f"{ind}{picture_latex(te, pic, self.ctx, None)}\n",
                       r, "")
@@ -2368,7 +2380,7 @@ class Planner:
         self.edit(frame.file, a, b, spacer, r, "")
         block_text = (f"{ind}\\begin{{textblock*}}{{{width:.1f}pt}}({bx:.1f}pt,{by:.1f}pt)\n{ind}  {align_cmd}"
                       + dedent_block(chunk, ind + "  ").lstrip() + f"{ind}\\end{{textblock*}}\n")
-        self.edits.append(Edit(frame.file, pos, pos, block_text, "geometry", signature(r) + ("block",)))
+        self.edits.append(Edit(frame.file, pos, pos, block_text, "geometry", signature(r) + ("block",), ""))
 
     def flow_shift(self, r: TextGeometry, frame: Frame, text: str, a: int) -> bool:
         """A vertical move of flow text: \\vspace before it (adjusted on later rounds). Beamer centres
@@ -2429,7 +2441,7 @@ class Planner:
             self.edit(frame.file, src.block[0], src.block[0] + len(m.group(0)),
                       f"\\begin{{textblock*}}{{{te.bbox[2] - te.bbox[0] + 2 * pad:.1f}pt}}({x:.1f}pt,{y:.1f}pt)", r, "")
             self.edits.append(Edit(frame.file, src.start, src.end, picture_latex(te, pic, self.ctx, None), "geometry",
-                                   signature(r) + ("size",)))
+                                   signature(r) + ("size",), ""))
             return
         a, b, block = src.inner[0], src.inner[1], src.block
         box = te.frame
@@ -2458,7 +2470,7 @@ class Planner:
             y = float(m.group("y")) + r.dy
             self.edit(frame.file, block[0], block[0] + len(m.group(0)), f"\\begin{{textblock*}}{{{tw:.1f}pt}}({x:.1f}pt,{y:.1f}pt)", r, "")
             if sized:
-                self.edits.append(Edit(frame.file, a, b, cmd, "geometry", signature(r) + ("size",)))
+                self.edits.append(Edit(frame.file, a, b, cmd, "geometry", signature(r) + ("size",), ""))
             return
         moved = abs(r.dx) > TOL["pos"] or abs(r.dy) > TOL["pos"]
         found = self.last.get(signature(r) + ("flow",), 0)
@@ -2479,7 +2491,7 @@ class Planner:
         pic = f"\\includegraphics[{','.join(keep + [f'width={tw:.1f}pt', f'height={th:.1f}pt'])}]" + text[a + opts_m.end():b]
         self.edits.append(Edit(frame.file, pos, pos,
                                f"{ind}\\begin{{textblock*}}{{{tw:.1f}pt}}({te.bbox[0]:.1f}pt,{te.bbox[1]:.1f}pt)\n"
-                               f"{ind}  {pic}\n{ind}\\end{{textblock*}}\n", "geometry", signature(r) + ("block",)))
+                               f"{ind}  {pic}\n{ind}\\end{{textblock*}}\n", "geometry", signature(r) + ("block",), ""))
 
     def image(self, r: ImageResidual) -> None:
         frame = self.cand.frames[r.slide]
@@ -2828,7 +2840,7 @@ def ensure_preamble(ws: Workspace, ctx: Context) -> list[Edit]:
             lines.append(f"\\definecolor{{{name}}}{{HTML}}{{{hexv}}}")
     if not lines:
         return []
-    return [Edit(ws.main, pos, pos, "\n".join(lines) + "\n", "preamble", ("preamble",))]
+    return [Edit(ws.main, pos, pos, "\n".join(lines) + "\n", "preamble", ("preamble",), "")]
 
 
 # ---------------------------------------------------------------- the loop
@@ -2925,7 +2937,7 @@ def picture_hashes(cand: Candidate, target: TargetDeck | JsonObject, comp_out: P
                 off = others_than(page, mark) if isinstance(mark, (int, str)) else []
                 page.set_active(off, False)
                 try:
-                    img = page.render(4.0, (x0, y0, x1, y1))
+                    img = page.render(4.0, (x0, y0, x1, y1), transparent=False)
                 finally:
                     page.set_active(off, True)
                 hashes[id(e)] = grey16(Image.fromarray(img))
@@ -2985,7 +2997,7 @@ def converge(tex: Path, target: "JsonObject | Later", work: Path, max_iter: int,
     `guard`: put back every frame the rounds left worse than its best round (`frame_guard`), scored
     against `thumbnails(j)` (Google's picture of target slide j: a path, image or array) - None for
     the ones the target carries, False for none (then by weighted residuals and words)."""
-    ws = Workspace(tex, work, handout, engine)
+    ws = Workspace(tex, work, handout=handout, engine=engine, fresh=True)
     ready: tuple[Path | None, str] | None = None
     if isinstance(target, Later):
         ws.notes = uses_notes(ws.source)   # what the first compile can know without the deck
@@ -2997,7 +3009,7 @@ def converge(tex: Path, target: "JsonObject | Later", work: Path, max_iter: int,
                 deck = reading.result()
     else:
         deck = target
-    ctx = Context(pt_option=class_pt_option(ws.source))
+    ctx = fresh_context(class_pt_option(ws.source))
     typed = typed_target(deck)
     has_notes = any(s.get("notes") for s in as_objects(deck["slides"], "target: slides")) or uses_notes(ws.source)
     iterations: list[JsonObject] = []
@@ -3123,7 +3135,7 @@ def converge(tex: Path, target: "JsonObject | Later", work: Path, max_iter: int,
                     text = ws.source.text(file)
                     at = text.find(new)
                     if at >= 0 and text.find(new, at + 1) < 0:
-                        ws.write([Edit(file, at, at + len(new), orig, "revert", sig)])
+                        ws.write([Edit(file, at, at + len(new), orig, "revert", sig, "")])
                         reverted.add(group)
             for sig, at in newly_blocked.items():
                 entry = unresolved[at]
@@ -3212,7 +3224,7 @@ def put_back(ws: Workspace, fg: "FrameGuard", log: Callable[[str], object]) -> l
     plan = fg.plan()
     if not plan:
         return []
-    edits = [Edit(final.file, final.span[0], final.span[1], best.text, "restore", ("restore", final.file, final.span[0]))
+    edits = [Edit(final.file, final.span[0], final.span[1], best.text, "restore", ("restore", final.file, final.span[0]), "")
              for final, best in plan]
     before = {p: ws.source.text(p) for p in ws.source.order}
     ws.write(edits)
@@ -3266,8 +3278,8 @@ def uses_notes(source: Source) -> bool:
 def ir_from_tex(tex: Path, work: Path, handout: bool) -> JsonObject:
     """classify IR of a source as the loop sees it (slide keys from frame labels, pictures cropped
     into work/pictures so they can be hashed): a target made from another source."""
-    ws = Workspace(tex, work, handout)
-    cand = ws.build(work / "classify", uses_notes(ws.source))
+    ws = Workspace(tex, work, handout=handout, engine=None, fresh=True)
+    cand = ws.build(work / "classify", uses_notes(ws.source), None)
     if isinstance(cand, str):
         raise RuntimeError(f"{tex} does not compile:\n{cand}")
     from .pdf import Document
@@ -3284,7 +3296,7 @@ def ir_from_tex(tex: Path, work: Path, handout: bool) -> JsonObject:
                     page = as_int(s["page"], f"target slide {si}: page")
                     path = work / "pictures" / f"p{page}-{k}.png"
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    Image.fromarray(doc[page].render(4.0, bbox)).save(path)
+                    Image.fromarray(doc[page].render(4.0, bbox, transparent=False)).save(path)
                     e["file"] = str(path)
     finally:
         doc.close()
@@ -3297,7 +3309,7 @@ def class_pt_option(source: Source) -> int:
         pt = re.search(r"(\d+)pt", m.group(1))
         if pt:
             return int(pt.group(1))
-    return 11
+    return BEAMER_PT
 
 
 # ---------------------------------------------------------------- reports

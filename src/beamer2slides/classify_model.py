@@ -3,7 +3,7 @@
 import math
 import re
 from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal, TypedDict, Union
 
 from . import bidi, ir
@@ -104,7 +104,7 @@ def cluster_rects(rects: list[Rect], gap: float) -> list[Rect]:
     return [union_all(g) for g in groups.values()]
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, kw_only=True)
 class Span:
     id: str
     text: str
@@ -115,16 +115,26 @@ class Span:
     baseline: float
     horizontal: bool
     info: FontInfo
-    link: str | None = None
-    underline: bool = False
-    strike: bool = False          # \sout
-    highlight: str | None = None  # background colour (\colorbox)
-    drawn: bool = False           # a character the PDF draws as a rule, not a glyph (underscores)
-    decor_to: float | None = None  # where its underline, strike or highlight ends, when before its end
-    pad_left: bool = False         # the first / last word of a padded \colorbox highlight
-    pad_right: bool = False
-    visual: str | None = None     # the text as the page shows it, left to right (bidi: RTL lines)
-    reading: "Reading | None" = None  # on a right-to-left line (read_lines)
+    link: str | None
+    underline: bool
+    strike: bool          # \sout
+    highlight: str | None  # background colour (\colorbox)
+    drawn: bool           # a character the PDF draws as a rule, not a glyph (underscores)
+    decor_to: float | None  # where its underline, strike or highlight ends, when before its end
+    pad_left: bool         # the first / last word of a padded \colorbox highlight
+    pad_right: bool
+    visual: str | None     # the text as the page shows it, left to right (bidi: RTL lines)
+    reading: "Reading | None"  # on a right-to-left line (read_lines)
+
+
+def new_span(*, id: str, text: str, font: str, size: float, color: str, rect: Rect, baseline: float,
+             horizontal: bool, info: FontInfo, link: str | None, drawn: bool, visual: str | None) -> Span:
+    """A span as the page gives it, before the graphics around it are read: no underline, strike or
+    highlight yet (`text_decorations`: `underline`, `strike`, `highlight`, `decor_to`, `pad_left`,
+    `pad_right`), and not yet read in its line's order (`read_lines`: `reading`)."""
+    return Span(id=id, text=text, font=font, size=size, color=color, rect=rect, baseline=baseline,
+                horizontal=horizontal, info=info, link=link, underline=False, strike=False, highlight=None,
+                drawn=drawn, decor_to=None, pad_left=False, pad_right=False, visual=visual, reading=None)
 
 
 Reading = tuple[int, int, int, float]
@@ -156,19 +166,19 @@ def ir_bullet(b: LineBullet | None) -> ir.Bullet | None:
     return b
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, kw_only=True)
 class Line:
     spans: list[Span]
-    bullet: LineBullet | None = None
-    bullet_spans: list[Span] = field(default_factory=list)
-    reason: str | None = None
-    inline_math: bool = False
-    fractions: list[Fraction] = field(default_factory=list)
-    tab: Span | None = None  # content after a line label ("4:") starts here, reached by a tab
-    holes: list[list[Span]] = field(default_factory=list)  # complex inline formulas: pictures over gaps in the text
-    hole_pads: list[Rect] = field(default_factory=list)  # graphics drawn around words of a hole (a circle, a badge)
-    limits: list["Line"] = field(default_factory=list)  # lines of the limits of a big operator in a hole (∑ with n=1 and ∞)
-    code_number: bool = False  # a listing's line number (split_line_numbers): a paragraph of its own
+    bullet: LineBullet | None
+    bullet_spans: list[Span]
+    reason: str | None
+    inline_math: bool
+    fractions: list[Fraction]
+    tab: Span | None  # content after a line label ("4:") starts here, reached by a tab
+    holes: list[list[Span]]  # complex inline formulas: pictures over gaps in the text
+    hole_pads: list[Rect]  # graphics drawn around words of a hole (a circle, a badge)
+    limits: list["Line"]  # lines of the limits of a big operator in a hole (∑ with n=1 and ∞)
+    code_number: bool  # a listing's line number (split_line_numbers): a paragraph of its own
     def hole_rect(self, hole: list[Span]) -> "Rect":
         """A hole's extent: its glyphs and the graphics drawn around them."""
         rect = union_all(s.rect for s in hole)
@@ -277,6 +287,13 @@ class Line:
         return " ".join(s.text.strip() for s in bidi.logical_spans(self.spans))
 
 
+def new_line(spans: list[Span]) -> Line:
+    """A line of `spans` before anything is found about it: the passes that follow give it its
+    bullet, reason, inline math, fractions, tab, holes and limits, and mark a listing's number."""
+    return Line(spans=spans, bullet=None, bullet_spans=[], reason=None, inline_math=False, fractions=[], tab=None,
+                holes=[], hole_pads=[], limits=[], code_number=False)
+
+
 def reads_rtl(line: Line) -> bool:
     """The line was read right to left (`PageClassifier.read_lines`: its base direction), so it
     starts at its right end - where a Hebrew item's bullet hangs."""
@@ -284,15 +301,15 @@ def reads_rtl(line: Line) -> bool:
     return bases == {bidi.RIGHT}
 
 
-@dataclass(eq=False)
+@dataclass(eq=False, kw_only=True)
 class Paragraph:
     lines: list[Line]
-    align: ir.Align = "left"
-    reason: str | None = None
-    role: ir.TextRole = "body"
-    level: int = 0
-    indent: float = 0.0  # a first line set in by \parindent: how far right of the others it starts
-    justified: bool = False
+    align: ir.Align
+    reason: str | None
+    role: ir.TextRole
+    level: int
+    indent: float  # a first line set in by \parindent: how far right of the others it starts
+    justified: bool
 
     @property
     def first(self) -> Line:
@@ -332,6 +349,13 @@ class Paragraph:
     @property
     def spans(self) -> list[Span]:
         return [s for l in self.lines for s in l.spans]
+
+
+def new_paragraph(lines: list[Line], *, align: ir.Align, reason: str | None) -> Paragraph:
+    """A paragraph of `lines` before its place and measures are found: a body paragraph at list
+    level 0, no `\\parindent` first line, not justified (the passes that follow decide `role`,
+    `level`, `indent` and `justified`)."""
+    return Paragraph(lines=lines, align=align, reason=reason, role="body", level=0, indent=0.0, justified=False)
 
 
 # Accents TeX sets as glyphs of their own over a letter (\bar{X}, and every accent in the OT1

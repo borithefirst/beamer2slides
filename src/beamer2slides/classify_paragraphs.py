@@ -6,7 +6,7 @@ import re
 from dataclasses import replace
 
 from .classify_model import (
-    ACCENTS, HOLE_PAD, Line, Paragraph, Rect, Span, extension_font, ir_bullet, reads_rtl, union_all,
+    ACCENTS, HOLE_PAD, Line, Paragraph, Rect, Span, extension_font, ir_bullet, new_paragraph, reads_rtl, union_all,
 )
 from .classify_text import (
     COMPOSED, FRACTION_SLASH, NBSP, NEGATION, RAISED_MARKS, cjk, code_indent, code_pitch, explicit_hyphen,
@@ -345,7 +345,7 @@ class ParagraphsMixin(LinesMixin):
                 if line.reason == "math":
                     par.reason = "math"
             else:
-                paragraphs.append(Paragraph([line], reason=line.reason))
+                paragraphs.append(new_paragraph([line], align="left", reason=line.reason))
         if not paragraphs:
             return paragraphs
 
@@ -755,7 +755,7 @@ class ParagraphsMixin(LinesMixin):
                 continue
             rest = [l for l in par.lines if not piece(l)]
             out.append(replace(par, lines=rest, reason=None))
-            out += [Paragraph([l], reason="math") for l in pieces]
+            out += [new_paragraph([l], align="left", reason="math") for l in pieces]
         return ParagraphsMixin.wrapped_formulas_apart(out)
 
     @staticmethod
@@ -777,5 +777,6 @@ class ParagraphsMixin(LinesMixin):
                 out.append(par)
                 continue
             out.append(replace(par, lines=par.lines[:-1]))
-            out.append(Paragraph([last], align=par.align, role=par.role, level=par.level))
+            out.append(Paragraph(lines=[last], align=par.align, reason=None, role=par.role, level=par.level, indent=0.0,
+                                 justified=False))
         return out

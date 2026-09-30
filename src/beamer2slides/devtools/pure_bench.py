@@ -95,7 +95,7 @@ def refused(path: Path) -> set[int]:
         out: set[int] = set()
         for i in range(len(doc)):
             try:
-                doc[i].render(ZOOM)
+                doc[i].render(ZOOM, clip=None, transparent=False)
             except PdfError:
                 out.add(i)
         return out
@@ -110,7 +110,7 @@ def draw_pages(spec: str, path: Path, skip: set[int]) -> int:
     try:
         pages = [doc[i] for i in range(len(doc)) if i not in skip]
         for page in pages:
-            page.render(ZOOM)
+            page.render(ZOOM, clip=None, transparent=False)
         return len(pages)
     finally:
         doc.close()

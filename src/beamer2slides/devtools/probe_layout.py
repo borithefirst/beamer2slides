@@ -205,12 +205,12 @@ def inks(api: SlidesService, pid: str, slide_id: str, sets: Mapping[str, Set[str
         for name, keep in sets.items():
             made[name], _ = _copy(api, pid, slide, set(keep), _nothing_more)
             copies.append(made[name])
-        save_thumbnail(api, pid, empty, folder / "empty.png")
+        save_thumbnail(api, pid, empty, folder / "empty.png", fetch=None)
         base = _pixels(folder / "empty.png")
         per_pt = base.shape[1] / width
         out: dict[str, Ink] = {}
         for name, cid in made.items():
-            save_thumbnail(api, pid, cid, folder / f"{name}.png")
+            save_thumbnail(api, pid, cid, folder / f"{name}.png", fetch=None)
             out[name] = _ink(_pixels(folder / f"{name}.png"), base, per_pt)
         return out
     finally:
@@ -261,7 +261,7 @@ def holes(api: SlidesService, pid: str, slide_id: str, text_id: str, folder: Pat
     try:
         folder.mkdir(parents=True, exist_ok=True)
         path = folder / f"holes-{text_id}.png"
-        save_thumbnail(api, pid, copy, path)
+        save_thumbnail(api, pid, copy, path, fetch=None)
     finally:
         _drop(api, pid, [copy])
     px = _pixels(path)
@@ -298,7 +298,7 @@ def main() -> None:
     ids: list[str] = args.ids
     hole_text: str | None = args.holes
     out: Path = args.out
-    api = slides_service()
+    api = slides_service(None)
     pid = presentation_id(deck)
     model = read_with(api, pid)
     s = model.one(title)

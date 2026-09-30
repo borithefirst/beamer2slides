@@ -15,7 +15,7 @@ import difflib
 import gzip
 import re
 import unicodedata
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 OPAQUE = "\ue000"  # stands for math and other things whose PDF text can't be predicted
@@ -62,14 +62,24 @@ def offset_of_line(text: str, line: int) -> int:
     return pos
 
 
-def skip_space(s: str, i: int, end: int | None = None) -> int:
-    end = len(s) if end is None else end
+def skip_space(s: str, i: int) -> int:
+    """Index of the first character from s[i] on that is not white space."""
+    return skip_space_to(s, i, len(s))
+
+
+def skip_space_to(s: str, i: int, end: int) -> int:
+    """`skip_space` stopping at `end`."""
     while i < end and s[i] in " \t\r\n":
         i += 1
     return i
 
 
-def match_group(s: str, i: int, open_: str = "{", close: str = "}") -> int:
+def match_group(s: str, i: int) -> int:
+    """Index after the {group} opening at s[i] (`match_pair`)."""
+    return match_pair(s, i, "{", "}")
+
+
+def match_pair(s: str, i: int, open_: str, close: str) -> int:
     """Index after the group opening at s[i] (balanced, backslash escapes skipped); -1 if unbalanced."""
     depth = 0
     n = len(s)
@@ -112,7 +122,7 @@ def read_args(s: str, i: int, spec: str) -> tuple[list[tuple[str, int, int] | No
         elif kind in "oO":
             j = skip_space(s, i)
             if j < len(s) and s[j] == "[":
-                k = match_group(s, j, "[", "]")
+                k = match_pair(s, j, "[", "]")
                 if k < 0:
                     args.append(None)
                     continue
@@ -169,9 +179,9 @@ class Frame:
     fragile: bool
     # Where a label would be written (labels.py): inside the existing option list, just before its
     # closing bracket, or - when the frame has no options at all - where a whole `[...]` goes, after
-    # the overlay specification if there is one.
-    opts_end: int = -1
-    opts_at: int = -1
+    # the overlay specification if there is one. -1: no option list (`opts_end`).
+    opts_end: int
+    opts_at: int
 
 
 class Source:
@@ -279,8 +289,8 @@ class Source:
 
 @dataclass
 class SyncPage:
-    votes: dict[tuple[str, int], int] = field(default_factory=dict)
-    boxes: list[tuple[str, int, float, float, float, float]] = field(default_factory=list)  # file, line, x0, y0, x1, y1
+    votes: dict[tuple[str, int], int]
+    boxes: list[tuple[str, int, float, float, float, float]]  # file, line, x0, y0, x1, y1
 
 
 SYNC_RECORD_RE = re.compile(r"^([\[\(xkg$vh])(\d+),(\d+):(-?\d+),(-?\d+)(?::(-?\d+),(-?\d+),(-?\d+))?")
@@ -312,7 +322,7 @@ def synctex_pages(path: Path) -> list[SyncPage]:
         elif ln.startswith("Magnification:"):
             mag = float(ln[14:] or 1000) / 1000
         elif ln.startswith("{"):
-            page = SyncPage()
+            page = SyncPage(votes={}, boxes=[])
             stack.append((ln[1:].strip(), page))
         elif ln.startswith("}"):
             if stack:
@@ -344,11 +354,12 @@ def synctex_pages(path: Path) -> list[SyncPage]:
     return pages
 
 
-def page_frames(source: Source, sync: list[SyncPage], labels: list[str] | None = None,
-                cwd: Path | None = None) -> list[Frame | None]:
+def page_frames(source: Source, sync: list[SyncPage], labels: list[str] | None,
+                cwd: Path | None) -> list[Frame | None]:
     """The frame each PDF page shows: SyncTeX votes for lines inside a frame's span; pages
     without votes (section pages from \\AtBeginSection, or no SyncTeX) fall back to counting
-    frames along the page labels. `cwd`: the directory TeX ran in (relative input names)."""
+    frames along the page labels. `cwd`: the directory TeX ran in (relative input names), None for
+    the main file's."""
     by_file = {str(p).lower(): p for p in source.order}
     base = Path(cwd) if cwd else source.root
     out: list[Frame | None] = []
@@ -454,19 +465,19 @@ class ListEnv:
     start: int         # offset of \begin
     end: int           # offset after \end{env}
     level: int
-    items: list[Item] = field(default_factory=list)
+    items: list[Item]
 
 
 @dataclass
 class Visible:
-    """Printed text of a source range, one source span per character."""
-    text: str = ""
-    starts: list[int] = field(default_factory=list)
-    ends: list[int] = field(default_factory=list)
-    items: list[Item] = field(default_factory=list)
-    lists: list[ListEnv] = field(default_factory=list)
-    title: tuple[int, int] | None = None        # visible range of the frame title
-    title_src: tuple[int, int] | None = None     # its source range
+    """Printed text of a source range, one source span per character (`empty_visible` holds none)."""
+    text: str
+    starts: list[int]
+    ends: list[int]
+    items: list[Item]
+    lists: list[ListEnv]
+    title: tuple[int, int] | None        # visible range of the frame title
+    title_src: tuple[int, int] | None     # its source range
 
     def add(self, s: str, a: int, b: int) -> None:
         for ch in s:
@@ -480,14 +491,20 @@ class Visible:
             self.ends.append(b)
 
 
+def empty_visible() -> Visible:
+    """No printed text yet, to `add` to."""
+    return Visible(text="", starts=[], ends=[], items=[], lists=[], title=None, title_src=None)
+
+
 def _decode_accent(mark: str, letter: str) -> str:
     base = {"i": "i", "\\i": "i", "\\j": "j"}.get(letter, letter)
     return unicodedata.normalize("NFC", base + ACCENT_MARKS[mark])
 
 
-def build_visible(s: str, start: int, end: int, title_frame: bool = False) -> Visible:
-    """Walk s[start:end] (comments already masked) and collect what prints."""
-    v = Visible()
+def build_visible(s: str, start: int, end: int, *, title_frame: bool) -> Visible:
+    """Walk s[start:end] (comments already masked) and collect what prints; `title_frame`: the range
+    is a whole frame, whose title (`\\begin{frame}{title}`) is read as `title`."""
+    v = empty_visible()
     list_stack: list[ListEnv] = []
 
     def close_item(at: int) -> None:
@@ -650,7 +667,7 @@ def build_visible(s: str, start: int, end: int, title_frame: bool = False) -> Vi
             m = re.compile(r"\\end\s*\{" + re.escape(env) + r"\}").search(s, k, stop)
             e = m.start() if m else stop
             v.add(PARA, i, k)
-            for a in range(skip_space(s, k, e), e):
+            for a in range(skip_space_to(s, k, e), e):
                 v.add(s[a] if s[a] != "\n" else PARA, a, a + 1)
             v.add(PARA, e, m.end() if m else stop)
             return m.end() if m else stop
@@ -665,7 +682,7 @@ def build_visible(s: str, start: int, end: int, title_frame: bool = False) -> Vi
         args, k2 = read_args(s, k, spec)
         v.add(PARA, i, k2)
         if env in LIST_ENVS:
-            lst = ListEnv(env, i, -1, len(list_stack))
+            lst = ListEnv(env, i, -1, len(list_stack), [])
             if list_stack:
                 close_item(i)
             list_stack.append(lst)
@@ -718,7 +735,7 @@ def build_visible(s: str, start: int, end: int, title_frame: bool = False) -> Vi
 def visible_text(latex: str) -> str:
     """Plain printed text of a LaTeX snippet (paragraph breaks as spaces)."""
     masked = mask_comments(latex)
-    return " ".join(build_visible(masked, 0, len(masked)).text.replace(PARA, " ").split())
+    return " ".join(build_visible(masked, 0, len(masked), title_frame=False).text.replace(PARA, " ").split())
 
 
 def frame_visible(source: Source, frame: Frame) -> Visible:
@@ -761,10 +778,14 @@ class WordMap:
         return found[0][0], found[-1][1]
 
 
-def locate_words(text: str, visible: Visible, lo: int = 0, hi: int | None = None) -> WordMap:
+def locate_words(text: str, visible: Visible) -> WordMap:
+    """`locate_words_in` over the whole visible text."""
+    return locate_words_in(text, visible, 0, len(visible.text))
+
+
+def locate_words_in(text: str, visible: Visible, lo: int, hi: int) -> WordMap:
     """Align the words of `text` with the visible words in [lo, hi): exact word matches first,
     then single words differing only in punctuation or case."""
-    hi = len(visible.text) if hi is None else hi
     words = words_with_spans(text)
     vwords = [(w, a + lo, b + lo) for w, a, b in words_with_spans(visible.text[lo:hi])]
     na = [norm_word(w) for w, _, _ in words]

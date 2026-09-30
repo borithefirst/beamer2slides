@@ -11,19 +11,39 @@ import io
 import json
 from pathlib import Path
 
-from googleapiclient.http import MediaIoBaseUpload
 from lxml import etree
 from pptx import Presentation
 from pptx.dml.color import RGBColor
+from pptx.dml.fill import FillFormat
 from pptx.enum.shapes import MSO_SHAPE
+from pptx.oxml.ns import qn
 from pptx.util import Emu, Pt
 
+from beamer2slides.gapi import media_upload
 from beamer2slides.google_auth import drive_service, slides_service
+from beamer2slides.google_types import Page, PageElement, children, file_id, object_id, part
 from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
+from beamer2slides.json_types import JsonObject
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+
+
+def solid(fill: FillFormat, colour: RGBColor) -> None:
+    """`fill.solid()` then `fill.fore_color.rgb = colour`, which python-pptx types as a write to
+    `Never`: the same `a:srgbClr` written the way `ColorFormat` writes it (as showcase's `solid`)."""
+    fill.solid()
+    fill._xPr.find(qn("a:solidFill")).get_or_change_to_srgbClr().val = str(colour)
+
+
+def shape_properties(pe: PageElement) -> JsonObject:
+    """A shape's `shapeProperties` (`{}`: it says none)."""
+    return part(part(pe.get("shape"), "shape").get("shapeProperties"), "shape.shapeProperties")
+
+
+def elements(page: Page) -> list[PageElement]:
+    return page.get("pageElements", [])
 
 
 def main() -> None:
@@ -32,8 +52,7 @@ def main() -> None:
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     body = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Pt(40), Pt(100), Pt(640), Pt(60))
     body.adjustments[0] = 0.12
-    body.fill.solid()
-    body.fill.fore_color.rgb = RGBColor(0xE9, 0xE9, 0xF3)
+    solid(body.fill, RGBColor(0xE9, 0xE9, 0xF3))
     body.line.fill.background()
     body.element.spPr.append(etree.fromstring(
         f'<a:effectLst xmlns:a="{A}"><a:outerShdw blurRad="{8 * EMU_PER_PT}" dist="{6 * EMU_PER_PT}" dir="2700000" '
@@ -53,8 +72,7 @@ def main() -> None:
     head = slide.shapes.add_shape(MSO_SHAPE.ROUND_2_SAME_RECTANGLE, Pt(40), Pt(100), Pt(640), Pt(30))
     head.adjustments[0] = 0.25
     head.adjustments[1] = 0.0
-    head.fill.solid()
-    head.fill.fore_color.rgb = RGBColor(0x26, 0x26, 0x86)
+    solid(head.fill, RGBColor(0x26, 0x26, 0x86))
     head.line.fill.background()
     head.element.spPr.append(etree.fromstring(f'<a:effectLst xmlns:a="{A}"/>'))
     head.text_frame.text = "Standard block"
@@ -68,18 +86,18 @@ def main() -> None:
     buf = io.BytesIO()
     prs.save(buf)
     buf.seek(0)
-    drive, slides = drive_service(), slides_service()
-    pid = execute(drive.files().create(
+    drive, slides = drive_service(None), slides_service(None)
+    pid = file_id(execute(drive.files().create(
         body={"name": "b2s probe autofit block", "mimeType": "application/vnd.google-apps.presentation"},
-        media_body=MediaIoBaseUpload(buf, mimetype=PPTX_MIME), fields="id"))["id"]
+        media_body=media_upload(buf, PPTX_MIME), fields="id")), "the probe deck")
     pres = execute(slides.presentations().get(presentationId=pid))
-    page = pres["slides"][0]
-    for pe in page["pageElements"]:
-        props = pe["shape"]["shapeProperties"]
-        print(pe["objectId"], pe["shape"]["shapeType"], json.dumps(props.get("autofit")), props.get("contentAlignment"),
-              pe["size"], pe["transform"])
-    body_id = page["pageElements"][0]["objectId"]
-    head_id = page["pageElements"][1]["objectId"]
+    page = pres.get("slides", [])[0]
+    for pe in elements(page):
+        props = shape_properties(pe)
+        print(object_id(pe), part(pe.get("shape"), "shape").get("shapeType"), json.dumps(props.get("autofit")),
+              props.get("contentAlignment"), pe.get("size"), pe.get("transform"))
+    body_id = object_id(elements(page)[0])
+    head_id = object_id(elements(page)[1])
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": [
         {"duplicateObject": {"objectId": body_id, "objectIds": {body_id: "probe_body2"}}},
         {"duplicateObject": {"objectId": head_id, "objectIds": {head_id: "probe_head2"}}},
@@ -92,11 +110,11 @@ def main() -> None:
         {"groupObjects": {"groupObjectId": "probe_block2", "childrenObjectIds": ["probe_body2", "probe_head2"]}},
     ]}))
     pres = execute(slides.presentations().get(presentationId=pid))
-    for pe in pres["slides"][0]["pageElements"]:
-        for c in pe.get("elementGroup", {}).get("children", [pe]):
-            props = c["shape"]["shapeProperties"]
-            print(c["objectId"], json.dumps(props.get("autofit")), c["size"], c["transform"])
-    save_thumbnail(slides, pid, page["objectId"], OUT / "probe_autofit_block.png")
+    for pe in elements(pres.get("slides", [])[0]):
+        for c in children(pe, object_id(pe)) or [pe]:
+            props = shape_properties(c)
+            print(object_id(c), json.dumps(props.get("autofit")), c.get("size"), c.get("transform"))
+    save_thumbnail(slides, pid, object_id(page), OUT / "probe_autofit_block.png", None)
     print(f"https://docs.google.com/presentation/d/{pid}/edit")
 
 

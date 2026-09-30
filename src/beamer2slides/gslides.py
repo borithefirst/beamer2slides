@@ -141,9 +141,9 @@ def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: floa
 
 
 def save_thumbnail(slides: SlidesService, presentation_id: str, page_id: str, path: Path,
-                   fetch: Fetch | None = None) -> tuple[int, int]:
+                   fetch: Fetch | None) -> tuple[int, int]:
     """Export one slide as a LARGE (1600 px wide) PNG rendered by Google. `fetch`: what downloads
-    it (`net`); pass it on a worker thread, which inherits no context."""
+    it (`net`; None: this context's fetcher); pass it on a worker thread, which inherits no context."""
     from . import net
     thumb = execute(slides.presentations().pages().getThumbnail(
         presentationId=presentation_id, pageObjectId=page_id,

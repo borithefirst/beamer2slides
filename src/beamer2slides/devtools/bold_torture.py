@@ -142,7 +142,7 @@ def measure(pdf: Path, pages: int) -> list[list[Band]]:
     out: list[list[Band]] = []
     try:
         for i in range(min(pages, len(doc))):
-            a = np.asarray(doc[i].render(ZOOM))[:, :, :3].astype(np.int16)
+            a = np.asarray(doc[i].render(ZOOM, clip=None, transparent=False))[:, :, :3].astype(np.int16)
             ink = np.abs(a - 255).max(axis=-1) > 127
             page: list[Band] = []
             for y0, y1 in bands(ink):

@@ -13,14 +13,15 @@ import itertools
 from pathlib import Path
 
 import numpy as np
-from googleapiclient.http import MediaIoBaseUpload
 from lxml import etree
 from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Emu, Pt
 
+from beamer2slides.gapi import media_upload
 from beamer2slides.google_auth import drive_service, slides_service
+from beamer2slides.google_types import file_id, object_id
 from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
 
 OUT = Path(__file__).resolve().parents[1] / "out"
@@ -55,13 +56,13 @@ def main() -> None:
     buf = io.BytesIO()
     prs.save(buf)
     buf.seek(0)
-    drive, slides = drive_service(), slides_service()
-    pid = execute(drive.files().create(
+    drive, slides = drive_service(None), slides_service(None)
+    pid = file_id(execute(drive.files().create(
         body={"name": "b2s calibrate shadow", "mimeType": "application/vnd.google-apps.presentation"},
-        media_body=MediaIoBaseUpload(buf, mimetype=PPTX_MIME), fields="id"))["id"]
+        media_body=media_upload(buf, PPTX_MIME), fields="id")), "the calibration deck")
     pres = execute(slides.presentations().get(presentationId=pid))
     path = OUT / "calibrate_shadow.png"
-    save_thumbnail(slides, pid, pres["slides"][0]["objectId"], path)
+    save_thumbnail(slides, pid, object_id(pres.get("slides", [])[0]), path, None)
     img = np.asarray(Image.open(path).convert("RGB")).mean(axis=2)
     k = img.shape[1] / 720
     print("dist blur alpha | darkness right of edge at +0,1,2,...,9 pt | below edge")

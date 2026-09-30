@@ -236,7 +236,7 @@ def guarded(j: Job) -> None:
 @pytest.mark.parametrize("fn, code", [(says_no, "no_base"), (exits, "refused"),
                                       (missing, "not_found"), (breaks, "failed"),
                                       (guarded, "deck_edited")])
-def test_every_way_of_failing_comes_back_as_a_code(tmp_path: Path, fn: Tool, code: str):
+def test_every_way_of_failing_comes_back_as_a_code(tmp_path: Path, fn: Tool[[]], code: str):
     r = fn(_ctx(tmp_path))
     assert (r.ok, r.code) == (False, code)
     assert r.summary                                           # and always says something
@@ -284,7 +284,7 @@ def test_a_read_only_context_can_plan_but_not_write(tmp_path: Path):
 
 
 def test_a_bad_argument_is_a_bad_request_not_a_crash(tmp_path: Path):
-    r = noisy(_ctx(tmp_path), nonsense=1)
+    r = noisy.dispatch(_ctx(tmp_path), {"nonsense": 1})
     assert (r.ok, r.code) == (False, "bad_request")
 
 
@@ -445,8 +445,8 @@ def test_a_prebuilt_client_is_used_and_no_token_is_ever_looked_for(monkeypatch: 
     monkeypatch.setattr(google_auth.gapi, "build", _explodes("build"))
     monkeypatch.setattr(google_auth, "credentials", _explodes("credentials"))
     with google_auth.use_services({"slides": slides, "drive": drive}):
-        assert google_auth.slides_service() is slides
-        assert google_auth.drive_service() is drive
+        assert google_auth.slides_service(None) is slides
+        assert google_auth.drive_service(None) is drive
 
 
 def test_a_builder_is_asked_per_api_and_anything_it_declines_is_built_as_before(monkeypatch: pytest.MonkeyPatch):
@@ -463,8 +463,8 @@ def test_a_builder_is_asked_per_api_and_anything_it_declines_is_built_as_before(
     monkeypatch.setattr(google_auth, "credentials", credentials)
     asked = builder.asked
     with google_auth.use_services(builder):
-        assert google_auth.slides_service() is made
-        assert google_auth.docs_service() == ("built", "docs")
+        assert google_auth.slides_service(None) is made
+        assert google_auth.docs_service(None) == ("built", "docs")
     assert [a for a, _, _ in asked] == ["slides", "docs"]
     assert asked[0][1] == "v1"
     # Nobody passed credentials in, so the builder is told so rather than being handed a token

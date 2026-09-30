@@ -790,7 +790,7 @@ def test_several_holes_on_a_line_keep_their_pictures_in_place() -> None:
     assert all(abs(shifts.get(f"p0h{k}", 0.0)) < 3 for k in range(3)), shifts
     run = text_runs_of(slide)[5]
     em = FONTS(run, SCALE)[1] / SCALE
-    assert space_shift(run, em) < -30, "without the earlier holes both gaps look like stretched spaces"
+    assert space_shift(run, em, ()) < -30, "without the earlier holes both gaps look like stretched spaces"
 
 
 def test_fit_holes_reaches_the_next_word_but_never_below_the_picture() -> None:
@@ -951,7 +951,7 @@ def test_measured_overlay_move_keeps_the_left_edge_under_a_relative_scale(decks:
     x0, _, x1, _ = next(box for e, box in d.result["pictures"][jint(slide, "page")] if e["id"] == pic["id"])
     templates = [(100.0, 100.0)] * len(d.plan.keys)
     parts, _ = d.plan.slide_parts(slide, d.result["page_elements"], d.result["speaker_notes"],
-                                  {jstr(pic, "id"): Place(dx=4.0, dy=0.0, sx=1.2)}, templates)
+                                  {jstr(pic, "id"): Place(dx=4.0, dy=0.0, sx=1.2)}, templates, None)
     oid = f"b2s_s{jint(slide, 'page'):03}_f{i}"
     t, = [jobj(r, "updatePageElementTransform") for _, reqs in parts for r in reqs
           if "updatePageElementTransform" in r and jobj(r, "updatePageElementTransform").get("objectId") == oid]
@@ -1440,7 +1440,7 @@ def test_a_table_from_the_pptx_keeps_the_pdf_row_pitch() -> None:
     # set: a \footnotesize booktabs table came out 4 pt taller than the PDF's and ran towards its
     # caption. The .pptx brings the table with margins of its own (tools/probe_pptx_table_margins.py).
     el, scale = tight_table(), TIGHT_SCALE
-    lay = emit.table_layout(el, scale, FONTS, imported=True)
+    lay = emit.table_layout(el, scale, FONTS, imported=True, page_w=SLIDE_W / scale)
     assert lay.y == pytest.approx(89.16 * scale) and lay.y + sum(lay.heights) == pytest.approx(155.55 * scale, abs=0.05)
     assert lay.ratios == pytest.approx([1.0] * 5)  # the text keeps its own line spacing
     # Every baseline where the PDF has it: the top inset takes booktabs' space under a rule.
@@ -1449,7 +1449,7 @@ def test_a_table_from_the_pptx_keeps_the_pdf_row_pitch() -> None:
         assert inset >= 0 and y + inset + emit.TABLE_TEXT_TOP + emit.ASCENT_EM * lay.z == pytest.approx(b * scale, abs=0.05)
         y += h
     assert lay.insets[1] > 1.0 and lay.insets[2] == pytest.approx(0.0, abs=1e-6)  # under \midrule / no rule
-    api = emit.table_layout(el, scale, FONTS)
+    api = emit.table_layout(el, scale, FONTS, imported=False, page_w=SLIDE_W / scale)
     assert sum(api.heights) > sum(lay.heights) + 3  # what an API-made table grows by
 
 
@@ -1459,8 +1459,8 @@ def test_a_table_from_the_pptx_is_filled_not_created() -> None:
     assert not any("createTable" in r for r in reqs)
     assert reqs[0] == {"updatePageElementsZOrder": {"pageElementObjectIds": ["b2s_s009_tab3"], "operation": "BRING_TO_FRONT"}}
     assert any("createTable" in r for r in table_requests(el, "b2s_s009", "b2s_s009_tab3", scale, False))  # sync's way
-    table = emit.pptx_table(el, scale, FONTS)
-    lay = emit.table_layout(el, scale, FONTS, imported=True)
+    table = emit.pptx_table(el, scale, FONTS, SLIDE_W / scale)
+    lay = emit.table_layout(el, scale, FONTS, imported=True, page_w=SLIDE_W / scale)
     assert table["margins"] == [[emit.TABLE_CELL_PAD, round(t, 2), emit.TABLE_CELL_PAD, 0.0] for t in lay.insets]
     heights = [jnum(r, "updateTableRowProperties", "tableRowProperties", "minRowHeight", "magnitude") / EMU_PER_PT
                for r in reqs if "updateTableRowProperties" in r]
@@ -1471,7 +1471,7 @@ def test_the_pptx_carries_each_table_empty_with_its_margins() -> None:
     from pptx import Presentation
     from pptx.shapes.graphfrm import GraphicFrame
     el, scale = tight_table(), TIGHT_SCALE
-    table = emit.pptx_table(el, scale, FONTS)
+    table = emit.pptx_table(el, scale, FONTS, SLIDE_W / scale)
     typed = pptx_table_of(table_of(el), scale, FONTS, emit.SLIDE_W / scale)
     page: dict[str, object] = {"layout": "BLANK", "fill": None, "pictures": [], "tables": [typed], "templates": False}
     prs = Presentation(emit.build_pptx(364.19, 273.14, [], [page], WHITE, None))
@@ -1511,7 +1511,7 @@ def test_a_wrapped_cell_wraps_in_its_column() -> None:
     el["row_heights"] = [16.59, 10.96, 32.88, 10.96, 10.96]
     jarr(el, "frame")[3] = 177.47
     jobj(el, "rules", 2)["y"] = 177.47
-    lay = emit.table_layout(el, TIGHT_SCALE, FONTS, imported=True)
+    lay = emit.table_layout(el, TIGHT_SCALE, FONTS, imported=True, page_w=SLIDE_W / TIGHT_SCALE)
     # (a cell's run is set at the table's size, not shaped: `cell`, FontMapper.shape_ratio; its
     # numbers, as wide as Lato sets them, shrink this tight table a little)
     widest = slides_w([{**text_run("A cell set in a paragraph", 8.97 * lay.shrink, font="CMSS9"), "cell": True}],

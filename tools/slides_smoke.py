@@ -4,37 +4,66 @@ Usage: python tools/slides_smoke.py
 """
 
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Protocol, TypedDict, runtime_checkable
 
 from beamer2slides.google_auth import slides_service
+from beamer2slides.google_types import Dimension, Presentation, Request, Size, object_id, presentation_id
 
 EMU_PER_PT = 12700
 OUT = Path(__file__).resolve().parents[1] / "out" / "smoke"
 
 
-def pt(v: float) -> dict:
+def pt(v: float) -> Dimension:
     return {"magnitude": v * EMU_PER_PT, "unit": "EMU"}
 
 
+# A `presentations.create` body with a `pageSize`, which google_types' NewPresentation does not list
+# yet (Google takes the key and ignores it: a new deck is always 16:9): described here, after a
+# runtime check, until it does.
+class SizedPresentation(TypedDict):
+    title: str
+    pageSize: Size
+
+
+class SizedPresentations(Protocol):
+    def create(self, *, body: SizedPresentation) -> Request[Presentation]: ...
+
+
+@runtime_checkable
+class SizedSlides(Protocol):
+    """The Slides client, as far as a create with a page size calls it."""
+
+    def presentations(self) -> SizedPresentations: ...
+
+
+def sized(slides: object) -> SizedSlides:
+    if not isinstance(slides, SizedSlides):
+        raise TypeError(f"{type(slides).__name__} is no Slides client")
+    return slides
+
+
 def main() -> None:
-    slides = slides_service()
+    slides = slides_service(None)
 
     # Beamer 4:3 (362.8 x 272.1 pt) scaled to the standard 720 x 540 pt.
-    pres = slides.presentations().create(body={
+    pres = sized(slides).presentations().create(body={
         "title": "beamer2slides smoke test",
         "pageSize": {"width": pt(720), "height": pt(540)},
     }).execute()
-    pid = pres["presentationId"]
-    size = pres["pageSize"]
+    pid = presentation_id(pres)
+    size = pres.get("pageSize", {})
     print("created:", f"https://docs.google.com/presentation/d/{pid}/edit")
-    print("page size (pt):", size["width"]["magnitude"] / EMU_PER_PT, "x",
-          size["height"]["magnitude"] / EMU_PER_PT)
+    print("page size (pt):", size.get("width", {}).get("magnitude", 0) / EMU_PER_PT, "x",
+          size.get("height", {}).get("magnitude", 0) / EMU_PER_PT)
 
-    page_id = pres["slides"][0]["objectId"]
-    requests = [
+    first = pres.get("slides", [])[0]
+    page_id = object_id(first)
+    requests: list[Mapping[str, object]] = [
         # Clear the default title-slide placeholders.
-        *({"deleteObject": {"objectId": el["objectId"]}}
-          for el in pres["slides"][0].get("pageElements", [])),
+        *({"deleteObject": {"objectId": object_id(el)}}
+          for el in first.get("pageElements", [])),
         {"createShape": {
             "objectId": "smoke_text",
             "shapeType": "TEXT_BOX",
@@ -60,8 +89,11 @@ def main() -> None:
     ).execute()
     OUT.mkdir(parents=True, exist_ok=True)
     png = OUT / "slide1.png"
-    urllib.request.urlretrieve(thumb["contentUrl"], png)
-    print(f"thumbnail: {thumb['width']}x{thumb['height']} px -> {png}")
+    url = thumb.get("contentUrl")
+    if url is None:
+        raise ValueError(f"getThumbnail answered no picture: {sorted(thumb)}")
+    urllib.request.urlretrieve(url, png)
+    print(f"thumbnail: {thumb.get('width')}x{thumb.get('height')} px -> {png}")
 
 
 if __name__ == "__main__":

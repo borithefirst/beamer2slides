@@ -160,7 +160,7 @@ def _tool(ws: Workspace, tool: str, /, **arguments: object) -> Result:
     # Positional-only: `doc_push` has an argument called `name`, and a helper must never be the
     # reason a tool cannot be called the way its own schema says.
     from beamer2slides.agent import tools as agent_tools
-    result = agent_tools.TOOLS[tool](_context(ws), **arguments)
+    result = agent_tools.TOOLS[tool].dispatch(_context(ws), arguments)
     if not result.ok:
         raise Skip(f"the fixture could not be built: {tool} refused with {result.code} "
                    f"({result.summary[:200]})")

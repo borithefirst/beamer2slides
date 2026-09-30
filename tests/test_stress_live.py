@@ -243,7 +243,7 @@ def test_every_variant_pairs_with_v1_frame_for_frame(variant: str) -> None:
     base, ours = infos("v1"), infos(variant)
     base_names, names = stress.names([]), stress.names(stress.VARIANTS[variant])
     assert len(ours) == len(names), f"{len(ours)} slides for {len(names)} frames"
-    pairs = identity.align_slides(base, ours, identity.label_moves(base, ours))
+    pairs = identity.align_slides_with(base, ours, moves=identity.label_moves(base, ours), weak=None)
     wrong: list[str] = []
     for j, name in enumerate(names):
         want = base_names.index(name) if name in base_names else None
@@ -279,7 +279,7 @@ def test_the_one_frame_nothing_can_follow_is_named_in_the_report() -> None:
     base, ours = infos("v1"), infos("recastmoved")
     base_names, names = stress.names([]), stress.names(stress.VARIANTS["recastmoved"])
     j, i = names.index("#27"), base_names.index("#27")
-    pairs = identity.align_slides(base, ours, identity.label_moves(base, ours))
+    pairs = identity.align_slides_with(base, ours, moves=identity.label_moves(base, ours), weak=None)
     assert j not in pairs, "the passes now follow this frame; the report below is no longer the story"
     assert [(m["ours"], m["base"]) for m in identity.near_misses(base, ours, pairs) if m["ours"] == j] == [(j, i)]
     # And every other frame of this variant still lands exactly where it belongs.
@@ -479,7 +479,7 @@ class Run:
         emitted = self.out / "emit.json"
         if emitted.exists():
             try:
-                execute(drive_service().files().delete(
+                execute(drive_service(None).files().delete(
                     fileId=jstr(json.loads(emitted.read_text(encoding="utf-8")), "presentationId")))
             except HttpError as e:
                 if status_of(e) != 404:

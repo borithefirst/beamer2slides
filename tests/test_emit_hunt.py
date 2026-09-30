@@ -159,10 +159,10 @@ def test_a_wrapped_line_has_room_for_its_words_as_slides_sets_them() -> None:
     el = column_list_of()
     right = box_right(el, scale)
     paras = jobjs(el, "paragraphs")
-    assert [emit.pdf_line_breaks(p) for p in paras] == [[24, 45], [17, 41]]
+    assert [emit.pdf_line_breaks(p, None, None) for p in paras] == [[24, 45], [17, 41]]
     for p in paras:
         text = jstr(p, "runs", 0, "text")
-        breaks = emit.pdf_line_breaks(p)
+        breaks = emit.pdf_line_breaks(p, None, None)
         assert breaks is not None
         cuts = [0, *breaks, len(text)]
         for k, (a, b) in enumerate(zip(cuts, cuts[1:])):
@@ -175,7 +175,7 @@ def test_a_wrapped_line_has_room_for_its_words_as_slides_sets_them() -> None:
     # A paragraph whose words do not come out as its lines (a hyphenated line end) is not measured.
     hyphen = jobj(column_list_of(), "paragraphs", 1)
     jobj(hyphen, "lines", 0)["x1"] = 140.0
-    assert emit.pdf_line_breaks(hyphen) is None
+    assert emit.pdf_line_breaks(hyphen, None, None) is None
 
 
 def test_a_full_line_keeps_its_margin_when_a_neighbours_next_word_is_close() -> None:
@@ -225,7 +225,7 @@ def test_a_thin_space_and_a_math_symbol_leave_a_paragraph_measurable() -> None:
     # "." have no CM advances. Either left the whole paragraph unmeasured, sized from the PDF.
     gfp: JsonObject = {"lines": [{"x0": 255.1, "x1": 436.88, "baseline": 50.02}, {"x0": 255.1, "x1": 308.89, "baseline": 63.57}],
                        "runs": [text_run("GFP (green): lac reporter, induced with 1 mM IPTG", BODY, font="LMSans10-Regular")]}
-    assert emit.pdf_line_breaks(gfp) == [40]
+    assert emit.pdf_line_breaks(gfp, None, None) == [40]
     sans, oblique, symbols = "LMSans10-Regular", "LMSans10-Oblique", "LMMathSymbols10-Regular"
     runs: list[Json] = [lm("ITT; LATE via ", sans), lm("D̄", oblique, italic=True),
                         lm("v", "LMSans8-Oblique", italic=True, script="sub"), lm(" instrument is ", sans),
@@ -234,7 +234,7 @@ def test_a_thin_space_and_a_math_symbol_leave_a_paragraph_measurable() -> None:
     econ: JsonObject = {"lines": [{"x0": 207.58, "x1": 332.04, "baseline": 180.45}, {"x0": 207.58, "x1": 274.45, "baseline": 192.41}],
                         "runs": runs}
     scale = SLIDE_W / 362.83
-    assert emit.pdf_line_breaks(econ) is None  # CM advances alone cannot say
+    assert emit.pdf_line_breaks(econ, None, None) is None  # CM advances alone cannot say
     assert emit.pdf_line_breaks(econ, scale, FONTS) == [29]  # "... instrument " | "is ≈ 1.2× larger"
     assert emit.slides_lines(econ, scale, FONTS) is not None
     # (a combining macron has no advance of its own in Slides either)

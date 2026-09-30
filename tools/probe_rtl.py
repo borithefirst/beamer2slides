@@ -11,13 +11,16 @@ would end up as pictures), the thumbnail says which edge the ink sits on.
 Usage: python tools/probe_rtl.py
 """
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from beamer2slides.google_auth import slides_service
+from beamer2slides.google_types import object_id, part, presentation_id
 from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.json_types import Json, as_objects
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 WORD = "בסיפור"  # the word the whole bidi story was measured on
@@ -32,11 +35,12 @@ CASES = [
 
 
 def main() -> None:
-    slides = slides_service()
+    slides = slides_service(None)
     pres = execute(slides.presentations().create(body={"title": "b2s probe rtl"}))
-    pid = pres["presentationId"]
-    page = pres["slides"][0]["objectId"]
-    reqs = [{"deleteObject": {"objectId": e["objectId"]}} for e in pres["slides"][0].get("pageElements", [])]
+    pid = presentation_id(pres)
+    first = pres.get("slides", [])[0]
+    page = object_id(first)
+    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
     boxes = []
     for i, (name, text, alignment, direction) in enumerate(CASES):
         oid = f"rtl_{i}"
@@ -58,13 +62,14 @@ def main() -> None:
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
 
     live = execute(slides.presentations().get(presentationId=pid))
-    read = {}
-    for el in live["slides"][0]["pageElements"]:
-        para = el["shape"]["text"]["textElements"][0].get("paragraphMarker", {}).get("style", {})
-        read[el["objectId"]] = {k: para.get(k) for k in ("alignment", "direction")}
+    read: dict[str, dict[str, Json]] = {}
+    for el in live.get("slides", [])[0].get("pageElements", []):
+        text = as_objects(part(part(el.get("shape"), "shape").get("text"), "shape.text").get("textElements"), "textElements")
+        para = part(part(text[0].get("paragraphMarker"), "paragraphMarker").get("style"), "paragraphMarker.style")
+        read[object_id(el)] = {k: para.get(k) for k in ("alignment", "direction")}
 
     path = OUT / "probe_rtl.png"
-    save_thumbnail(slides, pid, page, path)
+    save_thumbnail(slides, pid, page, path, None)
     img = np.asarray(Image.open(path).convert("RGB")).mean(axis=2)
     k = img.shape[1] / 720
     print("case           read back                              ink in the box (pt from its left)")

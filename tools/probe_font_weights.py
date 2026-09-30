@@ -11,13 +11,16 @@ Usage: python tools/probe_font_weights.py [--refresh]   (writes out/probe_font_w
 
 import argparse
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from beamer2slides.google_auth import slides_service
+from beamer2slides.google_types import object_id, part, presentation_id
 from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_object, as_objects
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "out" / "probe_font_weights"
@@ -46,7 +49,14 @@ ROWS = [  # (family, weight, text)
 PER_PAGE = 7
 
 
-def ink(gray: np.ndarray) -> dict | None:
+def num(v: Json) -> float:
+    """A number of the cached JSON."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise JsonShapeError(f"a number was expected, found {v!r}")
+    return v
+
+
+def ink(gray: np.ndarray) -> JsonObject | None:
     dark = gray < 128
     ys, xs = np.where(dark)
     if not len(xs):
@@ -56,15 +66,15 @@ def ink(gray: np.ndarray) -> dict | None:
             "darkness": round(float((255 - gray).sum()) / 255 / (K * K) / SIZE, 3)}
 
 
-def slides_side(refresh: bool) -> dict:
+def slides_side(refresh: bool) -> JsonObject:
     cache = OUT / "slides.json"
     if cache.exists() and not refresh:
-        return json.loads(cache.read_text(encoding="utf-8"))
-    slides = slides_service()
+        return as_object(json.loads(cache.read_text(encoding="utf-8")), str(cache))
+    slides = slides_service(None)
     pres = execute(slides.presentations().create(body={"title": "b2s probe font weights"}))
-    pid = pres["presentationId"]
-    reqs = [{"deleteObject": {"objectId": pres["slides"][0]["objectId"]}}]
-    pages = []
+    pid = presentation_id(pres)
+    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(pres.get("slides", [])[0])}}]
+    pages: list[str] = []
     for r, (family, weight, text) in enumerate(ROWS):
         if r % PER_PAGE == 0:
             pages.append(f"page_{r // PER_PAGE}")
@@ -79,20 +89,25 @@ def slides_side(refresh: bool) -> dict:
                                                 "foregroundColor": {"opaqueColor": {"rgbColor": {}}}}}}]
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     back = execute(slides.presentations().get(presentationId=pid))
-    styles = {el["objectId"]: next(te["textRun"]["style"] for te in el["shape"]["text"]["textElements"] if "textRun" in te)
-              for page in back["slides"] for el in page["pageElements"]}
-    result = {"presentation": pid, "rows": []}
+    styles: dict[str, JsonObject] = {}
+    for page in back.get("slides", []):
+        for el in page.get("pageElements", []):
+            text = part(part(el.get("shape"), "shape").get("text"), "shape.text")
+            styles[object_id(el)] = next(part(part(te.get("textRun"), "textRun").get("style"), "textRun.style")
+                                         for te in as_objects(text.get("textElements"), "textElements") if "textRun" in te)
+    rows: list[Json] = []
+    result: JsonObject = {"presentation": pid, "rows": rows}
     OUT.mkdir(parents=True, exist_ok=True)
     grays = {}
     for page in pages:
         path = OUT / f"{page}.png"
-        save_thumbnail(slides, pid, page, path)
+        save_thumbnail(slides, pid, page, path, None)
         grays[page] = np.asarray(Image.open(path).convert("L"))
     for r, (family, weight, text) in enumerate(ROWS):
         top = 6 + (r % PER_PAGE) * ROW_H * 1.5
         gray = grays[pages[r // PER_PAGE]][int(top * K):int((top + ROW_H) * K)]
         st = styles[f"text_{r:02d}"]
-        result["rows"].append({"family": family, "weight": weight, "text": text, "ink": ink(gray),
+        rows.append({"family": family, "weight": weight, "text": text, "ink": ink(gray),
                                "read_back": {"weightedFontFamily": st.get("weightedFontFamily"), "bold": st.get("bold")}})
     cache.write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
     return result
@@ -103,11 +118,11 @@ def main() -> None:
     ap.add_argument("--refresh", action="store_true")
     res = slides_side(ap.parse_args().refresh)
     print(f"presentation {res['presentation']}; {SIZE:g} pt; width and height in pt, darkness = ink per pt of line")
-    for row in res["rows"]:
-        i = row["ink"] or {}
+    for row in as_objects(res.get("rows"), "rows"):
+        i = part(row.get("ink"), "ink")
         print(f"  {row['family']:14} {row['weight']}  {'cjk' if row['text'] == CJK else 'tri' if row['text'] == TRIANGLES else 'latin':5}"
-              f"  width {i.get('x1', 0) - i.get('x0', 0):7.2f}  height {i.get('height', 0):5.2f}"
-              f"  darkness {i.get('darkness', 0):6.3f}  read back {row['read_back']}")
+              f"  width {num(i.get('x1', 0)) - num(i.get('x0', 0)):7.2f}  height {num(i.get('height', 0)):5.2f}"
+              f"  darkness {num(i.get('darkness', 0)):6.3f}  read back {row['read_back']}")
 
 
 if __name__ == "__main__":

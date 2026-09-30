@@ -17,13 +17,28 @@ import argparse
 import io
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
-
-from googleapiclient.http import MediaIoBaseUpload
+from typing import Literal, TypeVar
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from beamer2slides.gapi import media_upload  # noqa: E402
 from beamer2slides.google_auth import credentials, docs_service, drive_service  # noqa: E402
+from beamer2slides.google_types import (  # noqa: E402
+    DocsParagraph,
+    DocsService,
+    DocsStructuralElement,
+    DriveService,
+    Request,
+    file_id,
+    json_object,
+    part,
+)
+from beamer2slides.gslides import execute, execute_with  # noqa: E402
+from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_array, as_str  # noqa: E402
+
+T = TypeVar("T")
 
 OUT = Path(__file__).resolve().parents[1] / "out" / "docs-probe"
 DOC_MIME = "application/vnd.google-apps.document"
@@ -141,20 +156,39 @@ PAGE_SETUP = {
 }
 
 
-def page_setup(drive, docs) -> list[str]:
+def once(request: Request[T]) -> T:
+    """A write, tried once: a lost answer may have been applied (a second create is a second file)."""
+    return execute_with(request, retries=1, timeout=None)
+
+
+def number(v: Json, where: str) -> float:
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v
+    raise JsonShapeError(f"{where}: a number was expected, found {type(v).__name__}")
+
+
+def index(el: DocsStructuralElement, key: Literal["startIndex", "endIndex"]) -> int:
+    """A structural element's startIndex or endIndex, read where the probe needs one."""
+    at = el.get("startIndex") if key == "startIndex" else el.get("endIndex")
+    if at is None:
+        raise ValueError(f"Docs answered no {key} for a structural element")
+    return at
+
+
+def page_setup(drive: DriveService, docs: DocsService) -> list[str]:
     """Can any HTML dialect reach documentStyle? One document per dialect."""
     print("\n=== page setup: does any dialect move pageSize / margins / background? ===")
     print("  (the default is Letter 612x792 with 72pt margins)")
-    made = []
+    made: list[str] = []
     for name, html in PAGE_SETUP.items():
-        media = MediaIoBaseUpload(io.BytesIO(html.encode("utf-8")), mimetype="text/html")
-        fid = drive.files().create(body={"name": f"b2s page {name}", "mimeType": DOC_MIME},
-                                   media_body=media, fields="id").execute()["id"]
+        media = media_upload(io.BytesIO(html.encode("utf-8")), "text/html")
+        fid = file_id(once(drive.files().create(body={"name": f"b2s page {name}", "mimeType": DOC_MIME},
+                                                media_body=media, fields="id")), f"the {name} document")
         made.append(fid)
-        ds = docs.documents().get(documentId=fid).execute().get("documentStyle", {})
-        size = ds.get("pageSize", {})
-        moved = (round(size.get("width", {}).get("magnitude", 0)) != 612
-                 or round(ds.get("marginLeft", {}).get("magnitude", 0)) != 72)
+        ds = execute(docs.documents().get(documentId=fid)).get("documentStyle", {})
+        size = part(ds.get("pageSize"), "pageSize")
+        moved = (round(number(part(size.get("width"), "pageSize.width").get("magnitude", 0), "width")) != 612
+                 or round(number(part(ds.get("marginLeft"), "marginLeft").get("magnitude", 0), "marginLeft")) != 72)
         print(f"  {name:20s} {terse(size)}  margins "
               f"{terse(ds.get('marginTop', {}))}/{terse(ds.get('marginLeft', {}))}"
               f"  background={terse(ds.get('background', {}))}"
@@ -162,20 +196,24 @@ def page_setup(drive, docs) -> list[str]:
     return made
 
 
-def phase_two(docs, doc_id: str) -> None:
+def paragraph_text(el: DocsStructuralElement) -> str:
+    return "".join(r.get("textRun", {}).get("content", "") for r in el.get("paragraph", {}).get("elements", []))
+
+
+def phase_two(docs: DocsService, doc_id: str) -> None:
     """What can batchUpdate add that no HTML can express? One request at a time,
     so a refusal reports itself instead of killing the batch."""
     print("\n=== phase two: the batchUpdate reach beyond HTML ===")
-    doc = docs.documents().get(documentId=doc_id).execute()
-    end = doc["body"]["content"][-1]["endIndex"] - 1
+    doc = execute(docs.documents().get(documentId=doc_id))
+    content = doc.get("body", {}).get("content", [])
+    end = index(content[-1], "endIndex") - 1
     # A paragraph to restyle: the one labelled T01.
-    target = next((el for el in doc["body"]["content"]
-                   if "".join(r.get("textRun", {}).get("content", "")
-                              for r in el.get("paragraph", {}).get("elements", []))
-                   .startswith("T01")), None)
-    rng = {"startIndex": target["startIndex"], "endIndex": target["endIndex"] - 1}
+    target = next((el for el in content if paragraph_text(el).startswith("T01")), None)
+    if target is None:
+        raise ValueError("the document holds no paragraph labelled T01")
+    rng = {"startIndex": index(target, "startIndex"), "endIndex": index(target, "endIndex") - 1}
 
-    attempts = [
+    attempts: list[tuple[str, Mapping[str, object]]] = [
         ("page size + margins", {"updateDocumentStyle": {
             "documentStyle": {"pageSize": {"width": {"magnitude": 842, "unit": "PT"},
                                            "height": {"magnitude": 595, "unit": "PT"}},
@@ -222,8 +260,7 @@ def phase_two(docs, doc_id: str) -> None:
     ]
     for name, request in attempts:
         try:
-            docs.documents().batchUpdate(documentId=doc_id,
-                                         body={"requests": [request]}).execute()
+            once(docs.documents().batchUpdate(documentId=doc_id, body={"requests": [request]}))
             print(f"  {name:22s} OK")
         except Exception as err:  # HttpError and anything the client raises first
             reason = getattr(getattr(err, "resp", None), "reason", "") or str(err)
@@ -241,48 +278,55 @@ PARA_KEYS = ("namedStyleType", "alignment", "direction", "indentStart", "indentF
              "keepLinesTogether", "keepWithNext")
 
 
-def terse(value):
+def terse(value: Json) -> Json:
     """Collapse the API's nested colour/dimension objects to something readable."""
     if isinstance(value, dict):
-        if "color" in value and "rgbColor" in value.get("color", {}):
-            rgb = value["color"]["rgbColor"]
-            return "#%02x%02x%02x" % tuple(round(255 * rgb.get(c, 0))
+        color = value.get("color")
+        if isinstance(color, dict) and "rgbColor" in color:
+            rgb = part(color["rgbColor"], "rgbColor")
+            return "#%02x%02x%02x" % tuple(round(255 * number(rgb.get(c, 0), c))
                                            for c in ("red", "green", "blue"))
         if "magnitude" in value:
-            return f"{value['magnitude']:g}{value.get('unit', '')}"
+            return f"{number(value['magnitude'], 'magnitude'):g}{value.get('unit', '')}"
         if "fontFamily" in value:
             return f"{value['fontFamily']}@{value.get('weight', '')}"
         if "url" in value:
-            return value["url"][:40]
+            return as_str(value["url"], "url")[:40]
         if set(value) <= {"headingId", "bookmarkId", "tabId"}:
             return json.dumps(value)
-        inner = {k: terse(v) for k, v in value.items() if v not in ({}, None)}
+        inner: JsonObject = {k: terse(v) for k, v in value.items() if v not in ({}, None)}
         return inner or None
     return value
 
 
-def styles(para: dict) -> tuple[str, str, str]:
+def styles(para: DocsParagraph) -> tuple[str, str, str]:
     """(label text, run style, paragraph style) for one paragraph."""
-    text, run_style = "", {}
-    exotic = []
+    text = ""
+    run_style: JsonObject = {}
+    exotic: list[str] = []
     for el in para.get("elements", []):
-        if "textRun" in el:
-            text += el["textRun"].get("content", "")
+        run = el.get("textRun")
+        if run is not None:
+            text += run.get("content", "")
             if not run_style:
-                run_style = el["textRun"].get("textStyle", {})
+                run_style = json_object(run.get("textStyle", {}), "textStyle")
         else:
             exotic.extend(k for k in el if k not in ("startIndex", "endIndex"))
     shown = {k: terse(v) for k, v in run_style.items() if k in TEXT_KEYS}
     shown = {k: v for k, v in shown.items() if v not in (False, None, {})}
-    pstyle = {k: terse(v) for k, v in para.get("paragraphStyle", {}).items()
-              if k in PARA_KEYS}
+    pstyle: JsonObject = {k: terse(v) for k, v in json_object(para.get("paragraphStyle", {}), "paragraphStyle").items()
+                          if k in PARA_KEYS}
     pstyle = {k: v for k, v in pstyle.items()
               if v not in (None, {}, "NORMAL_TEXT", "LEFT_TO_RIGHT", False, "0pt")}
     if exotic:
-        pstyle["ELEMENTS"] = sorted(set(exotic))
+        elements: list[Json] = [k for k in sorted(set(exotic))]
+        pstyle["ELEMENTS"] = elements
     bullet = para.get("bullet")
     if bullet:
-        pstyle["bullet"] = f"{bullet['listId'][-6:]}/L{bullet.get('nestingLevel', 0)}"
+        list_id = bullet.get("listId")
+        if list_id is None:
+            raise ValueError("Docs answered a bullet without its listId")
+        pstyle["bullet"] = f"{list_id[-6:]}/L{bullet.get('nestingLevel', 0)}"
     return text.rstrip("\n"), json.dumps(shown), json.dumps(pstyle)
 
 
@@ -295,17 +339,22 @@ def main() -> int:
 
     creds = credentials()
     drive, docs = drive_service(creds), docs_service(creds)
-    media = MediaIoBaseUpload(io.BytesIO(HTML.encode("utf-8")), mimetype="text/html")
-    meta = drive.files().create(body={"name": "b2s feature reach", "mimeType": DOC_MIME},
-                                media_body=media, fields="id,name").execute()
-    doc_id = meta["id"]
+    media = media_upload(io.BytesIO(HTML.encode("utf-8")), "text/html")
+    meta = once(drive.files().create(body={"name": "b2s feature reach", "mimeType": DOC_MIME},
+                                     media_body=media, fields="id,name"))
+    doc_id = file_id(meta, "the feature document")
+    name = meta.get("name")
+    if name is None:
+        raise ValueError("Drive answered no name for the feature document")
     print(f"created {doc_id}")
-    print(f"  Drive named the file {meta['name']!r} "
-          f"({'<title> was used' if meta['name'] != 'b2s feature reach' else 'the <title> was ignored'})")
+    print(f"  Drive named the file {name!r} "
+          f"({'<title> was used' if name != 'b2s feature reach' else 'the <title> was ignored'})")
 
-    doc = docs.documents().get(documentId=doc_id).execute()
+    doc = execute(docs.documents().get(documentId=doc_id))
     (OUT / "features-document.json").write_text(json.dumps(doc, indent=1, ensure_ascii=False),
                                                 encoding="utf-8")
+    # headers, footers, footnotes and positionedObjects are not in google_types' Document yet
+    raw = json_object(doc, "the feature document")
 
     ds = doc.get("documentStyle", {})
     print("\n=== document style (does @page reach it?) ===")
@@ -315,25 +364,31 @@ def main() -> int:
         ("marginTop", "marginBottom", "marginLeft", "marginRight")))
     print(f"  header/footer ids: {ds.get('defaultHeaderId')} / {ds.get('defaultFooterId')}"
           f"   firstPageDifferent={ds.get('useFirstPageHeaderFooter')}")
-    print(f"  headers in doc: {list(doc.get('headers', {}))}, "
-          f"footers: {list(doc.get('footers', {}))}, footnotes: {list(doc.get('footnotes', {}))}")
+    print(f"  headers in doc: {list(part(raw.get('headers'), 'headers'))}, "
+          f"footers: {list(part(raw.get('footers'), 'footers'))}, "
+          f"footnotes: {list(part(raw.get('footnotes'), 'footnotes'))}")
 
     print("\n=== per case: what Docs built ===")
     print(f"  {'case':5s} {'text':34s} {'run style':58s} paragraph style")
-    for el in doc["body"]["content"]:
-        if "paragraph" not in el:
-            if "table" in el:
-                t = el["table"]
+    for el in doc.get("body", {}).get("content", []):
+        paragraph = el.get("paragraph")
+        if paragraph is None:
+            table = el.get("table")
+            section = el.get("sectionBreak")
+            if table is not None:
+                # tableStyle and tableRowStyle are not in google_types' DocsTable / DocsTableRow yet
+                t = json_object(table, "table")
+                first_row = part(as_array(t.get("tableRows", [{}]), "tableRows")[0], "tableRows[0]")
                 print(f"  TABLE rows={t['rows']} cols={t['columns']} "
-                      f"pinned={t.get('tableStyle', {}).get('tableColumnProperties') and '?' or ''}"
-                      f"{el['table'].get('tableRows', [{}])[0].get('tableRowStyle', {})}")
-            elif "sectionBreak" in el:
-                style = el["sectionBreak"].get("sectionStyle", {})
+                      f"pinned={part(t.get('tableStyle'), 'tableStyle').get('tableColumnProperties') and '?' or ''}"
+                      f"{first_row.get('tableRowStyle', {})}")
+            elif section is not None:
+                style = part(section.get("sectionStyle"), "sectionStyle")
                 cols = style.get("columnProperties")
-                print(f"  SECTION BREAK columns={len(cols) if cols else 1} "
+                print(f"  SECTION BREAK columns={len(as_array(cols, 'columnProperties')) if cols else 1} "
                       f"type={style.get('sectionType')}")
             continue
-        text, run, para = styles(el["paragraph"])
+        text, run, para = styles(paragraph)
         if not text.strip():
             continue
         label = text.split(" ", 1)[0][:5]
@@ -341,20 +396,26 @@ def main() -> int:
 
     print("\n=== inline objects ===")
     for oid, obj in doc.get("inlineObjects", {}).items():
-        emb = obj["inlineObjectProperties"]["embeddedObject"]
-        print(f"  {oid}: size={terse(emb.get('size', {}))} title={emb.get('title')!r} "
+        emb = obj.get("inlineObjectProperties", {}).get("embeddedObject")
+        if emb is None:
+            raise ValueError(f"inline object {oid}: Docs answered no embeddedObject")
+        print(f"  {oid}: size={terse(json_object(emb.get('size', {}), 'size'))} title={emb.get('title')!r} "
               f"desc={emb.get('description')!r} "
               f"has imageProperties={'imageProperties' in emb}")
-    print(f"  positionedObjects: {list(doc.get('positionedObjects', {}))}")
+    print(f"  positionedObjects: {list(part(raw.get('positionedObjects'), 'positionedObjects'))}")
 
     print("\n=== lists ===")
     for lid, lst in doc.get("lists", {}).items():
-        levels = lst["listProperties"]["nestingLevels"]
+        levels = lst.get("listProperties", {}).get("nestingLevels")
+        if levels is None:
+            raise ValueError(f"list {lid}: Docs answered no nestingLevels")
+        # startNumber is not in google_types' DocsNestingLevel yet
+        seen = [json_object(lv, "nesting level") for lv in levels[:3]]
         print(f"  {lid[-8:]}: " + " | ".join(
             # Ordered levels carry glyphType, unordered ones glyphSymbol.
             f"L{i} {lv.get('glyphSymbol') or lv.get('glyphType')}"
             f"{'' if lv.get('startNumber', 1) == 1 else ' start=' + str(lv['startNumber'])}"
-            for i, lv in enumerate(levels[:3])))
+            for i, lv in enumerate(seen)))
 
     phase_two(docs, doc_id)
 
@@ -365,7 +426,7 @@ def main() -> int:
         print("      " + ", ".join(extra))
     else:
         for fid in [doc_id, *extra]:
-            drive.files().delete(fileId=fid).execute()
+            once(drive.files().delete(fileId=fid))
         print(f"\ndeleted {1 + len(extra)} files from Drive")
     print(f"full JSON in {OUT / 'features-document.json'}")
     return 0

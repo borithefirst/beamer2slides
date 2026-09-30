@@ -194,8 +194,7 @@ class SandboxDocument:
     def named_dests(self) -> list[tuple[str, int]]:
         return self._call("named_dests", None, [], _named_dests)
 
-    # The contract's defaults (api.PdfDocument.save): its callers are outside pdf/.
-    def save(self, pages: Sequence[int] | None = None, boxes: Mapping[int, Box] | None = None) -> bytes:
+    def save(self, *, pages: Sequence[int] | None, boxes: Mapping[int, Box] | None) -> bytes:
         return self._call("save", None, [None if pages is None else list(pages),
                                          None if boxes is None else dict(boxes)], _bytes)
 
@@ -256,8 +255,7 @@ class SandboxPage:
     def links(self) -> list[Link]:
         return self._call("links", [], _links)
 
-    # The contract's defaults (api.PdfPage.render): its callers are outside pdf/.
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
+    def render(self, zoom: float, clip: Box | None, transparent: bool) -> Pixels:
         return self._call("render", [float(zoom), None if clip is None else tuple(float(v) for v in clip),
                                      transparent], _pixels)
 
@@ -483,8 +481,8 @@ class Worker:
                 return d.named_dests()
             case "save":
                 pages, boxes = args
-                return d.save(None if pages is None else [as_int(p, "save's page") for p in as_list(pages, "save")],
-                              None if boxes is None else
+                return d.save(pages=None if pages is None else [as_int(p, "save's page") for p in as_list(pages, "save")],
+                              boxes=None if boxes is None else
                               {as_int(k, "save's page"): as_box(v, "save's box") for k, v in as_dict(boxes, "save").items()})
             case _:
                 raise PdfError(f"unknown document request {op!r}")

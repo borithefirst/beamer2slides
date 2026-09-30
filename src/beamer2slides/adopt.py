@@ -1973,7 +1973,12 @@ def tabbed_tex(runs: Sequence[TargetRun], base: TextStyle, ctx: AdoptContext, br
     return "".join(out)
 
 
-def num(v: float, digits: int = 2) -> str:
+def num(v: float) -> str:
+    """`v` to two decimals (`decimals`), what adopt writes a length or a size with."""
+    return decimals(v, 2)
+
+
+def decimals(v: float, digits: int) -> str:
     """`v` to `digits` decimals without the zeros a fixed format pads it with: the same length to TeX
     (12.50 and 12.5 are the same number of sp), fewer characters to read."""
     s = f"{v:.{digits}f}".rstrip("0").rstrip(".")
@@ -2048,7 +2053,7 @@ def text_style(ctx: AdoptContext, size: float, family: str, face: str, weight: s
     name = "-".join(words)
     taken = set(styles.values())
     if name in taken:
-        name = f"{name}-{num(size, 1)}"
+        name = f"{name}-{decimals(size, 1)}"
     base, k = name, 2
     while name in taken:
         name, k = f"{base}-{k}", k + 1
@@ -2089,7 +2094,7 @@ def bullet_mark(ctx: AdoptContext, glyph: str, z: float, colour: str | None, cod
     name = "-".join(words)
     taken = set(marks.values())
     if name in taken:
-        name = f"{name}-{num(z, 1)}"
+        name = f"{name}-{decimals(z, 1)}"
     base, k = name, 2
     while name in taken:
         name, k = f"{base}-{k}", k + 1
@@ -2486,7 +2491,7 @@ def box_parts(el: TargetText, ctx: AdoptContext) -> BoxParts:
         tail = trailing_space(prev, valign, el.shape_type) / scale
         if num(tail) != "0":
             box_opts.append(f"tail={num(tail)}")
-    geometry = ",".join((num(x0 + pad, 1), num(y0, 1), num(measure(width, paras, scale)), num(height, 1)))
+    geometry = ",".join((decimals(x0 + pad, 1), decimals(y0, 1), num(measure(width, paras, scale)), decimals(height, 1)))
     return BoxParts(box_opts=box_opts, geometry=geometry, recs=recs)
 
 
@@ -3890,7 +3895,7 @@ def table_places(widths: list[float], padx: float, pady: float) -> tuple[str, st
             return (edge(d) and tex(d - left, 2) == Decimal(f"{span:.2f}")
                     and tex(max(d - left - 2 * ix, Decimal(1)), 2) == Decimal(f"{max(span - 2 * padx, 1.0):.2f}"))
         xs.append(near(a, ok, edge))
-    return num(float(ix), 3), num(float(iy), 3), xs
+    return decimals(float(ix), 3), decimals(float(iy), 3), xs
 
 
 def table_block(el: TargetTable, ctx: AdoptContext, ind: str) -> str:
@@ -3908,7 +3913,7 @@ def table_block(el: TargetTable, ctx: AdoptContext, ind: str) -> str:
     text_y = el.cell_text_y
     n_rows, n_cols = len(heights), len(widths)
     ix, iy, xs = table_places(list(widths), padx, pady)
-    cols = ",".join(num(float(xs[k + 1] - xs[k]), 3) for k in range(n_cols))
+    cols = ",".join(decimals(float(xs[k + 1] - xs[k]), 3) for k in range(n_cols))
     x0, y0 = el.bbox[0], el.bbox[1]
     heads = {(c.row, c.col): c for c in el.table_cells or () if c.row < n_rows and c.col < n_cols}
     covered: set[tuple[int, int]] = set()
@@ -3981,7 +3986,7 @@ def table_block(el: TargetTable, ctx: AdoptContext, ind: str) -> str:
     border, border_lines = table_borders(el, ctx)
     head = [inset] + ([f"border={{{border}}}"] if border != "none" else []) + [f"h={h_table}"] \
         + (["fixed"] if fix_table else []) + table_opts
-    lines = [f"{ind}\\begin{{slidetable}}[{', '.join(head)}]{{{num(x0, 1)},{num(y0, 1)}}}{{{cols}}}"]
+    lines = [f"{ind}\\begin{{slidetable}}[{', '.join(head)}]{{{decimals(x0, 1)},{decimals(y0, 1)}}}{{{cols}}}"]
     for r, row in enumerate(grid):
         texts = []
         for c, span, rows, opts, body in row:
@@ -4694,7 +4699,7 @@ def record_base(target: JsonObject, pres: JsonObject | None, tex: Path, work: Pa
     drive = None
     if base_in_drive:
         from .google_auth import drive_service
-        drive = drive_service()
+        drive = drive_service(None)
     adopt_sync.store(base, work, drive)
     for line in adopt_sync.report_lines(base):
         log(line)
@@ -4712,10 +4717,10 @@ def written_already(tex: Path) -> bool:
 
 
 def cmd_adopt(deck: str, tex: Path, work: Path | None, apply: bool, out: Path | None, max_iter: int,
-              engine: str | None, flow: bool, target_path: Path | None = None, base: bool = True,
-              base_in_drive: bool = False, log: Callable[[str], None] = print,
-              fonts: Sequence[Path] | None = None, found: dict[str, object] | None = None,
-              pptx: Path | None = None, files: "DeckFiles | None" = None) -> Result:
+              engine: str | None, flow: bool, target_path: Path | None, *, base: bool,
+              base_in_drive: bool, log: Callable[[str], None],
+              fonts: Sequence[Path] | None, found: dict[str, object] | None,
+              pptx: Path | None, files: "DeckFiles | None") -> Result:
     """Read a foreign deck, write a source for it, then converge that source onto the deck.
 
     `files`: the deck handed over as files (`deck_files.DeckFiles`, what `deck-files` saves; a

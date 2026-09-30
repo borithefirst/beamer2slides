@@ -60,18 +60,19 @@ def no_downloads(url: str) -> bytes:
     raise PermissionError(f"downloads are switched off ({NO_DOWNLOADS})")
 
 
-def downloads_off(fetch: Fetch | None = None) -> bool:
-    """Whether `fetch` (None: the one installed for this context) is `no_downloads`, so a site
-    whose whole point is a download can skip the work that leads up to it."""
-    if fetch is None:
-        from .google_auth import fetcher_for_threads
-        fetch = fetcher_for_threads()
-    return fetch is no_downloads
+def downloads_off() -> bool:
+    """Whether the fetcher installed for this context is `no_downloads`, so a site whose whole
+    point is a download can skip the work that leads up to it."""
+    from .google_auth import fetcher_for_threads
+    return fetcher_for_threads() is no_downloads
 
 
-def download(url: str, fetch: Fetch | None = None, tries: int = 3) -> bytes:
-    """`fetch(url)`, tried up to `tries` times with a growing pause (1, 2, 4... s); raises what
-    the last try raised. `fetch` None: the fetcher installed for this context
+TRIES = 3  # what `download` is usually given: a blip, and two more chances
+
+
+def download(url: str, fetch: Fetch | None, tries: int) -> bytes:
+    """`fetch(url)`, tried up to `tries` (usually `TRIES`) times with a growing pause (1, 2, 4...
+    s); raises what the last try raised. `fetch` None: the fetcher installed for this context
     (`google_auth.fetcher_for_threads`) - resolve it on the calling thread and pass it down
     wherever this runs on a worker, which inherits no context."""
     if fetch is None:
@@ -101,8 +102,8 @@ _SIGNATURES = ((b"\x89PNG\r\n\x1a\n", ".png"), (b"\xff\xd8\xff", ".jpg"), (b"GIF
                (b"GIF89a", ".gif"), (b"BM", ".bmp"), (b"II*\x00", ".tif"), (b"MM\x00*", ".tif"))
 
 
-def picture_suffix(data: bytes, default: str = ".png") -> str:
-    """The file suffix a picture's own bytes say it should have."""
+def picture_suffix(data: bytes, default: str) -> str:
+    """The file suffix a picture's own bytes say it should have, else `default`."""
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return ".webp"
     for magic, suffix in _SIGNATURES:

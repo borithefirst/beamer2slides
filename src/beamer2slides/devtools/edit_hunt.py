@@ -169,7 +169,7 @@ def read_pres(pid: str) -> JsonObject:
     from beamer2slides.google_auth import slides_service
     from beamer2slides.google_types import as_json
     from beamer2slides.gslides import execute
-    return as_json(execute(slides_service().presentations().get(presentationId=pid)), pid)
+    return as_json(execute(slides_service(None).presentations().get(presentationId=pid)), pid)
 
 
 def snapshot(pid: str) -> tuple[JsonObject, JsonObject]:
@@ -197,7 +197,7 @@ def drop_slot(slot: str) -> None:
         from beamer2slides import snapshot as snap
         from beamer2slides.google_auth import drive_service
         from beamer2slides.gslides import execute
-        drive = drive_service()
+        drive = drive_service(None)
         try:
             pid = as_str(as_object(read_json(emit), str(emit)).get("presentationId"), f"{emit} presentationId")
             info = execute(drive.files().get(fileId=pid, fields="appProperties"))
@@ -294,7 +294,7 @@ def render_pages(pdf: Path, folder: Path) -> list[Path]:
     for n in range(len(doc)):
         page = doc[n]
         path = folder / f"{n + 1:03d}.png"
-        Image.fromarray(page.render(1600 / page.width)).convert("RGB").save(path)
+        Image.fromarray(page.render(1600 / page.width, clip=None, transparent=False)).convert("RGB").save(path)
         paths.append(path)
     return paths
 

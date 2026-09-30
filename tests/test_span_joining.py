@@ -29,8 +29,9 @@ def glyphs(pieces: list[tuple[str, float]], *, font: str, size: float) -> list[C
         x += gap * size
         for c in text:
             adv = WIDTH * size
-            out.append(Char(c, font, size, 0, 255, (x, BASELINE), char_box(x, BASELINE, 1.0, 0.0, adv, size, 0.8, -0.2),
-                            (1.0, 0.0), len(out), 0, adv))
+            out.append(Char(c=c, font=font, size=size, color=0, alpha=255, origin=(x, BASELINE),
+                            box=char_box(x, BASELINE, 1.0, 0.0, adv, size, 0.8, -0.2), dir=(1.0, 0.0), obj=len(out),
+                            font_id=0, advance=adv, synthetic=False, ascent=0.8, descent=-0.2, exact_advance=True))
             x += adv
     return out
 
@@ -80,7 +81,7 @@ class Page:
     def links(self) -> list[Link]:
         unasked("links")
 
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
+    def render(self, zoom: float, clip: Box | None, transparent: bool) -> Pixels:
         # (the defaults are `PdfPage.render`'s: the Protocol dictates them)
         unasked("a render")
 
@@ -179,7 +180,7 @@ def raw_span(i: int, text: str, font: str, x0: float, x1: float, *, size: float)
 def test_a_quad_before_a_graphic_in_the_words_stays_wide() -> None:
     # textfx v3 s9: 'Questions? \quad \ding{46}\,e-mail' - the quad before the dingbat's hole
     # became one space and the centred line came out narrower
-    from beamer2slides.classify import Line, PageClassifier, Paragraph
+    from beamer2slides.classify import PageClassifier, new_line, new_paragraph
 
     def texts_around(gap: float) -> list[str]:
         spans = [raw_span(0, "Questions?", "LMSans10-Bold", 10, 62, size=14),
@@ -187,9 +188,9 @@ def test_a_quad_before_a_graphic_in_the_words_stays_wide() -> None:
                  raw_span(2, "elise.martin", "LMSans10-Bold", 76 + gap, 150 + gap, size=14)]
         page = PageClassifier({"index": 0, "label": "", "size": [364, 273], "spans": spans, "images": [],
                                "drawings": [], "links": []}, 10)
-        line = Line(page.spans())
+        line = new_line(page.spans())
         line.holes = [[s for s in line.spans if s.font == "PZDR"]]
-        return [r["text"] for r in PageClassifier.runs(Paragraph([line]), "", False, None, 0.0)]
+        return [r["text"] for r in PageClassifier.runs(new_paragraph([line], align="left", reason=None), "", False, None, 0.0)]
 
     assert texts_around(18.6)[0] == "Questions? \u2003"   # a word space and a quad (1.33 em)
     assert texts_around(4.6)[0] == "Questions? "          # a word space

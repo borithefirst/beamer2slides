@@ -1009,8 +1009,8 @@ def thumbnail_diff(slides_api: SlidesService, a: tuple[str, str], b: tuple[str, 
     from beamer2slides.gslides import save_thumbnail
     path.parent.mkdir(parents=True, exist_ok=True)
     pa, pb = path.with_name(path.stem + "-synced.png"), path.with_name(path.stem + "-fresh.png")
-    save_thumbnail(slides_api, a[0], a[1], pa)
-    save_thumbnail(slides_api, b[0], b[1], pb)
+    save_thumbnail(slides_api, a[0], a[1], pa, fetch=None)
+    save_thumbnail(slides_api, b[0], b[1], pb, fetch=None)
     ia = np.asarray(Image.open(pa).convert("RGB")).astype(np.int16)
     ib = np.asarray(Image.open(pb).convert("RGB")).astype(np.int16)
     if ia.shape != ib.shape:
@@ -1051,7 +1051,7 @@ def alignment_compare(ref_out: Path, synced: Model, ref: Model, pid: str, titles
                            for e in as_objects(s["elements"], "slide elements")]}
         for s in as_objects(read["slides"], "deck.json slides")]
     deck: JsonObject = {**read, "source": {**source, "pdf": str(pdf)}}
-    api = slides_service()
+    api = slides_service(None)
     reports: dict[str, alignment.Alignment] = {}
     for name, model, presentation_ in (("fresh", ref, state.presentation_id), ("synced", synced, pid)):
         folder = work / name
@@ -1077,7 +1077,7 @@ def alignment_compare(ref_out: Path, synced: Model, ref: Model, pid: str, titles
             emitted.append(emit_state.SlideState(page=eslide.page, object_id=on.id, elements=tuple(ids),
                                                  objects=None, groups=None, table_margins=None))
             page = as_int(dslide["page"], "slide page")
-            save_thumbnail(api, presentation_, on.id, folder / "fidelity" / f"slides-{page + 1:03}.png")
+            save_thumbnail(api, presentation_, on.id, folder / "fidelity" / f"slides-{page + 1:03}.png", fetch=None)
         (folder / "deck.json").write_text(json.dumps({**deck, "slides": slides}, ensure_ascii=False), encoding="utf-8")
         emit_state.write(folder, replace(state, presentation_id=presentation_, slides=tuple(emitted)))
         try:
@@ -1120,7 +1120,7 @@ def read_with(slides_api: SlidesService, pid: str) -> Model:
 def read(pid: str) -> Model:
     """The deck as presentations.get answers it now, through the owner's own client."""
     from beamer2slides.google_auth import slides_service
-    return read_with(slides_service(), pid)
+    return read_with(slides_service(None), pid)
 
 
 def main() -> None:

@@ -8,12 +8,14 @@ row without symbols, is N advances.
 Usage: python tools/probe_symbols.py   (prints a dict for emit.SYMBOL_ADVANCE_EM)
 """
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from beamer2slides.google_auth import slides_service
+from beamer2slides.google_types import object_id, presentation_id
 from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
 
 OUT = Path(__file__).resolve().parents[1] / "out"
@@ -25,11 +27,12 @@ PER_COLUMN = 16
 
 
 def main() -> None:
-    slides = slides_service()
+    slides = slides_service(None)
     pres = execute(slides.presentations().create(body={"title": "b2s probe symbols"}))
-    pid = pres["presentationId"]
-    page = pres["slides"][0]["objectId"]
-    reqs = [{"deleteObject": {"objectId": e["objectId"]}} for e in pres["slides"][0].get("pageElements", [])]
+    pid = presentation_id(pres)
+    first = pres.get("slides", [])[0]
+    page = object_id(first)
+    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
     rows = [""] + SYMBOLS  # the first row is the reference
     boxes = []
     for i, sym in enumerate(rows):
@@ -44,7 +47,7 @@ def main() -> None:
         boxes.append((sym, x, y))
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     path = OUT / "probe_symbols.png"
-    save_thumbnail(slides, pid, page, path)
+    save_thumbnail(slides, pid, page, path, None)
     img = np.asarray(Image.open(path).convert("RGB")).mean(axis=2)
     k = img.shape[1] / 720
 

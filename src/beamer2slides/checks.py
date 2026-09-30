@@ -184,7 +184,7 @@ def convert_pages(pdf: Path, overlays: str) -> Rendered:
                 n = as_int(slide["page"], "slide.page")
                 page = doc[n]
                 backgrounds[n] = saved[out / string(slide["background"], At(where="slide", path="background"))]
-                originals[n] = page.render(render.BACKGROUND_WIDTH_PX / page.width)
+                originals[n] = page.render(render.BACKGROUND_WIDTH_PX / page.width, clip=None, transparent=False)
         finally:
             doc.close()
     return Rendered(raw=raw, deck=deck, pages=raw_pages(raw), backgrounds=backgrounds, originals=originals)

@@ -121,7 +121,7 @@ def render_debug(pdf: Path, deck: ir.Deck, out_dir: Path, zoom: float) -> list[P
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for slide in deck["slides"]:
-        page = Canvas(Image.fromarray(doc[slide["page"]].render(zoom)), zoom)
+        page = Canvas(Image.fromarray(doc[slide["page"]].render(zoom, clip=None, transparent=False)), zoom)
         for p in slide["panels"]:
             page.outline(p["bbox"], PANEL, 0.4, (1, 1))
         for r in slide["figure_regions"]:

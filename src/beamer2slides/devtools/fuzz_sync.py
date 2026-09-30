@@ -887,7 +887,7 @@ def _sync_step(seed: int, step: int, doc: JsonObject, base: JsonObject, live: W.
     held = tuple(_held(plan))
     # `--backup auto` keeps a .pptx of the deck before sync's first write, so the campaign asks what
     # the other refusals do; the no-way-back one has its own test (tests/test_adopt_sync.py).
-    refused = adopt_sync.problems(base, mplan, W.live_json(live), {"drive": {"presentationId": "way-back"}})
+    refused = adopt_sync.problems(base, mplan, W.live_json(live), {"drive": {"presentationId": "way-back"}}, "auto")
     if refused:
         # A sync into an adopted deck this one may not write (adopt_sync.problems). Nothing is sent,
         # so the deck is exactly as the person left it - that is the whole answer, and the oracle
@@ -2100,9 +2100,9 @@ class Template:
         from beamer2slides.google_auth import drive_service
         from beamer2slides.google_types import file_id
         from beamer2slides.gslides import execute
-        drive = drive_service()
+        drive = drive_service(None)
         pid = file_id(execute(drive.files().copy(fileId=self.pid, fields="id,appProperties",
-                                                 body=place({"name": name}, drive))), f"a copy of {self.pid}")
+                                                 body=place({"name": name}, drive, beside=None))), f"a copy of {self.pid}")
         execute(drive.files().update(fileId=pid, fields="id", body={"appProperties": {
             snapshot.BASE_PROPERTY: None, snapshot.CLEANED_PROPERTY: None}}))
         for p in self.out.rglob("*"):
@@ -2129,7 +2129,7 @@ def drop_deck(pid: str, log: IO[str]) -> None:
     """Delete a deck and the base file Drive keeps beside it (`appProperties.b2sBase`)."""
     from beamer2slides.google_auth import drive_service
     from beamer2slides.gslides import execute
-    drive = drive_service()
+    drive = drive_service(None)
     try:
         info = execute(drive.files().get(fileId=pid, fields="appProperties"))
         props = info.get("appProperties")

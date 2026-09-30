@@ -492,7 +492,7 @@ def texts_digest(texts: Sequence[JsonObject]) -> str:
     """What classify's `layout_texts` (the header and footer words every slide shares, which
     `emit.write_layout_texts` puts on every layout) say and look like."""
     said: list[Json] = [t for t in texts]
-    return identity.sha1(json.dumps(identity.normalise_ir(said), sort_keys=True))[:12]
+    return identity.sha1(json.dumps(identity.normalise_ir(said, None, None), sort_keys=True))[:12]
 
 
 def texts_says(texts: Sequence[JsonObject]) -> list[str]:

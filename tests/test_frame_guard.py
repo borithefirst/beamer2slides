@@ -84,7 +84,7 @@ def fake_build(self: Workspace, out: Path, target_has_notes: bool,
         slides.append(slide_ir(k, f.label, body))
         words[k] = body.split()
     frames: list[Frame | None] = [f for f in self.source.frames]
-    return Candidate(self.source, pdf, {"slides": slides}, frames, words=words)
+    return Candidate(self.source, pdf, {"slides": slides}, frames, locs={}, text_masked={}, words=words)
 
 
 @pytest.fixture
@@ -102,7 +102,7 @@ def stand_ins(monkeypatch: pytest.MonkeyPatch) -> list[int]:
         f = self.cand.source.frames[1]
         text = self.cand.source.text(f.file)
         at = text.index("GOOD", f.start)
-        return [Edit(f.file, at, at + 4, "BAD", "text", ("text", 1, "e1", 0))], []
+        return [Edit(f.file, at, at + 4, "BAD", "text", ("text", 1, "e1", 0), "")], []
 
     monkeypatch.setattr(inverse.Planner, "plan", plan)
     return calls

@@ -547,9 +547,10 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
         """A no-break space `width` pt wide after the glyph `at` (TRACK_SPACED)."""
         ux, uy = at.dir
         px, py = at.origin[0] + ux * at.advance, at.origin[1] + uy * at.advance
-        return Char(LETTER_SPACE, at.font, at.size, at.color, at.alpha, (px, py),
-                    char_box(px, py, ux, uy, width, at.size, at.ascent, at.descent),
-                    at.dir, NO_OBJECT, at.font_id, width, True, at.ascent, at.descent)
+        return Char(c=LETTER_SPACE, font=at.font, size=at.size, color=at.color, alpha=at.alpha, origin=(px, py),
+                    box=char_box(px, py, ux, uy, width, at.size, at.ascent, at.descent),
+                    dir=at.dir, obj=NO_OBJECT, font_id=at.font_id, advance=width, synthetic=True, ascent=at.ascent,
+                    descent=at.descent, exact_advance=True)
 
     prev: Char | None = None
     last_mark: Marks = ()
@@ -583,9 +584,10 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
             ux, uy = ch.dir
             px, py = prev.origin[0] + ux * prev.advance, prev.origin[1] + uy * prev.advance
             width = ((ch.origin[0] - px) * ux + (ch.origin[1] - py) * uy)
-            run.append(Char(" ", ch.font, ch.size, ch.color, ch.alpha, (px, py),
-                            char_box(px, py, ux, uy, width, ch.size, ch.ascent, ch.descent),
-                            ch.dir, NO_OBJECT, ch.font_id, width, True, ch.ascent, ch.descent))
+            run.append(Char(c=" ", font=ch.font, size=ch.size, color=ch.color, alpha=ch.alpha, origin=(px, py),
+                            box=char_box(px, py, ux, uy, width, ch.size, ch.ascent, ch.descent),
+                            dir=ch.dir, obj=NO_OBJECT, font_id=ch.font_id, advance=width, synthetic=True,
+                            ascent=ch.ascent, descent=ch.descent, exact_advance=True))
             run.append(ch)
             prev = ch
             continue
@@ -604,9 +606,10 @@ def spans(page: Page, visibility: Sight, hidden: bool, chars: list[Char],
                 if style:
                     flush()
                 width = gap * size
-                space = Char(" ", ch.font, ch.size, ch.color, ch.alpha, (px, py),
-                             char_box(px, py, ux, uy, width, ch.size, ch.ascent, ch.descent),
-                             ch.dir, NO_OBJECT, ch.font_id, width, True, ch.ascent, ch.descent)
+                space = Char(c=" ", font=ch.font, size=ch.size, color=ch.color, alpha=ch.alpha, origin=(px, py),
+                             box=char_box(px, py, ux, uy, width, ch.size, ch.ascent, ch.descent),
+                             dir=ch.dir, obj=NO_OBJECT, font_id=ch.font_id, advance=width, synthetic=True,
+                             ascent=ch.ascent, descent=ch.descent, exact_advance=True)
             elif style:
                 flush()
         if space:

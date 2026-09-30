@@ -138,10 +138,10 @@ def test_the_refused_rebuild_starts_from_the_merged_deck(lenient: None) -> None:
     blocks merged, as emit used to merge them before planning (a refused body's picture reaches up
     under its title bar), and a contained element a picture already."""
     classified = deck("04_theme_blocks")
-    merged = emit.DeckPlan(classified, pptx_tables=True, contain=True).merged
+    merged = emit.DeckPlan(classified, emit.SLIDE_W, pptx_tables=True, contain=True).merged
     assert merged["slides"] == [{**s, "elements": list[Json](emit.merge_blocks(jobjs(s, "elements")))}
                                 for s in map(slide_json, classified["slides"])]
-    merged = emit.DeckPlan(synthetic(adopted_custom(), shape("p0-panel", 150.0)), pptx_tables=True, contain=True).merged
+    merged = emit.DeckPlan(synthetic(adopted_custom(), shape("p0-panel", 150.0)), emit.SLIDE_W, pptx_tables=True, contain=True).merged
     assert [e["kind"] for e in jobjs(merged, "slides", 0, "elements")] == ["image", "shape"]
 
 
@@ -223,7 +223,7 @@ def test_an_element_that_trips_only_on_googles_sizes_goes_the_refused_way(lenien
     assert [(i, type(e)) for i, e in late] == [(0, KeyError)]
     assert ids == ["b2s_s000_s0", "b2s_s000_s1"] and parts[1][1] == [] and parts[2][1]
     with pytest.raises(KeyError):
-        plan.slide_parts(slide, planned["page_elements"], planned["speaker_notes"], {}, [])
+        plan.slide_parts(slide, planned["page_elements"], planned["speaker_notes"], {}, [], None)
     monkeypatch.setenv(emit.STRICT_ENV, "1")
     with pytest.raises(KeyError):
         plan.slide_parts(slide, planned["page_elements"], planned["speaker_notes"], {}, [], [])

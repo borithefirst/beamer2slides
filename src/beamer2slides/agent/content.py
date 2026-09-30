@@ -45,6 +45,7 @@ import shutil
 import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import TypedDict
 from urllib.parse import unquote_to_bytes
 
 from .types import Artifact, Refused, Result
@@ -53,8 +54,64 @@ from .workspace import INBOX, LocalWorkspace, Workspace
 #: A harness's fetcher: a URL in, its bytes out.
 Fetch = Callable[[str], bytes]
 
-__all__ = ["MemoryWorkspace", "take_in", "deliver", "content_bytes", "is_content",
-           "INLINE_NOTE", "TEXT_KINDS"]
+__all__ = ["MemoryWorkspace", "take_in", "take_one", "deliver", "content_bytes", "is_content",
+           "INLINE_NOTE", "TEXT_KINDS", "File", "Content", "Base64Content", "EncodedContent",
+           "TextContent", "BytesContent", "UrlContent", "SHAPES"]
+
+
+# -- what a caller may hand over -----------------------------------------------------------------
+#
+# The content dicts as types, for a Python caller: a tool's file parameter is `File`, so
+# `deck_convert(ctx, pdf={"name": "talk.pdf", "base64": encoded})` is checked like any other
+# call. (Built by inheritance rather than with `Required`, which 3.10 has not got.)
+
+class _Named(TypedDict, total=False):
+    """What any content dict may add: the file's name, and its media type under either key."""
+
+    name: str
+    mime: str
+    type: str
+
+
+class Base64Content(_Named):
+    """`{"base64": ...}`: the file's bytes, base64-encoded. The form JSON can carry."""
+
+    base64: str
+
+
+class EncodedContent(_Named):
+    """`{"content": ...}`: `base64` under the other name harnesses use for it."""
+
+    content: str
+
+
+class TextContent(_Named):
+    """`{"text": ...}`: a text file, written out as UTF-8."""
+
+    text: str
+
+
+class BytesContent(_Named):
+    """`{"bytes": ...}`: the bytes themselves, for a caller in the same process."""
+
+    bytes: bytes
+
+
+class UrlContent(_Named):
+    """`{"url": ...}`: fetched by the context's own `fetch`, refused by name without one."""
+
+    url: str
+
+
+#: A content dict, in any of its shapes.
+Content = Base64Content | EncodedContent | TextContent | BytesContent | UrlContent
+#: A file argument: a workspace ref (or a `data:` URI) as a string, or the file as content. The
+#: schema publishes it as a string - a harness sends content in its place all the same, and
+#: `take_in` makes a ref of it before the schema check reads it (`schema._json_type`).
+File = str | Content
+#: The shapes `File` joins to `str`, which is how `schema` knows a file parameter when it sees one.
+SHAPES: frozenset[object] = frozenset({Base64Content, EncodedContent, TextContent, BytesContent,
+                                       UrlContent})
 
 #: What a harness publishing these tools should tell the model about file arguments. Short on
 #: purpose: it is prepended to nothing automatically, and lives in INSTRUCTIONS.md as prose.
@@ -178,17 +235,19 @@ def take_in(ws: Workspace, arguments: Mapping[str, object],
     for key, value in arguments.items():
         items = _items(value)
         if is_content(value):
-            out[key] = _one(ws, key, value, fetch)
+            out[key] = take_one(ws, key, value, fetch)
         elif items is not None and holds_content(value):
             # numbered, so that two items sent with no name are not one file
-            out[key] = [_one(ws, f"{key}-{i}", v, fetch) if is_content(v) else v
+            out[key] = [take_one(ws, f"{key}-{i}", v, fetch) if is_content(v) else v
                         for i, v in enumerate(items, 1)]
         else:
             out[key] = value
     return out
 
 
-def _one(ws: Workspace, key: str, value: object, fetch: Fetch | None) -> str:
+def take_one(ws: Workspace, key: str, value: object, fetch: Fetch | None) -> str:
+    """One inline value written into the workspace's inbox; the ref it is there. `key` names it
+    when the content does not, and is the parameter a refusal names."""
     name, raw = content_bytes(key, value, fetch)
     return ws.write_bytes(f"{INBOX}/{_safe_name(name)}", raw)
 

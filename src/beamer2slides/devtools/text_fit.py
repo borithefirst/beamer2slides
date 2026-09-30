@@ -485,7 +485,7 @@ def measure(pdf: Path, out: Path, crops: bool) -> FitReport:
         h, w = thumb.shape[:2]
         # The PDF page rendered as the background was, then scaled to the thumbnail's size.
         bg_width = Image.open(out / "backgrounds" / f"bg-{n + 1:03}.png").width
-        ref = rgb_array_at(Image.fromarray(doc[n].render(bg_width / doc[n].width)), (w, h))
+        ref = rgb_array_at(Image.fromarray(doc[n].render(bg_width / doc[n].width, clip=None, transparent=False)), (w, h))
         slides.append(measure_slide(slide, ref, thumb, w / slide.width, out / "text_fit" if crops else None))
     report = FitReport(pdf=str(pdf), slides=slides)
     (out / "text_fit.json").write_text(json.dumps(report.json(), indent=1, ensure_ascii=False), encoding="utf-8")

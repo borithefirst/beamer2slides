@@ -59,7 +59,8 @@ def compare(a: np.ndarray | None, b: np.ndarray | None) -> str:
     return f"max {d.max()} mean {d.mean():.2f}"
 
 
-def main(argv=None) -> int:
+def main(argv: list[str] | None) -> int:
+    """`argv` None: the command line's."""
     ap = argparse.ArgumentParser()
     ap.add_argument("pdfs", nargs="+", type=Path)
     ap.add_argument("--files", type=Path, default=None, help="folder of the author's image files")
@@ -120,4 +121,4 @@ def main(argv=None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(None))

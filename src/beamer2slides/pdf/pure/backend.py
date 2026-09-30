@@ -157,8 +157,8 @@ class Page:
             for k, o in enumerate(pobjs):
                 parent = ids[id(o.parent)] if o.parent is not None else None
                 container = out[parent].matrix if parent is not None else self.to_page
-                out.append(PageObject(k, o.type, mul(o.matrix, container), parent,
-                                      marks=tuple(item.info() for item in o.marks)))
+                out.append(PageObject(id=k, type=o.type, matrix=mul(o.matrix, container), parent=parent,
+                                      children=[], clip=None, marks=tuple(item.info() for item in o.marks)))
                 if parent is not None:
                     out[parent].children.append(k)
             self._ids = ids
@@ -249,7 +249,8 @@ class Page:
                 prev.exact_advance = True
                 prev.box = char_box(ox, oy, ux, uy, prev.advance, size, ascent, descent)
                 continue
-            out.append(Char(text, name, size, color, alpha, (ox, oy), box, (ux, uy), oid, font_id, advance,
+            out.append(Char(c=text, font=name, size=size, color=color, alpha=alpha, origin=(ox, oy), box=box,
+                            dir=(ux, uy), obj=oid, font_id=font_id, advance=advance, synthetic=False,
                             ascent=ascent, descent=descent, exact_advance=exact))
         for ch in out:
             if any("\ud800" <= u <= "\udfff" for u in ch.c):
@@ -527,7 +528,7 @@ class Page:
 
     # ------------------------------------------------------------------ rendering
 
-    def render(self, zoom: float, clip: Box | None = None, transparent: bool = False) -> Pixels:
+    def render(self, zoom: float, clip: Box | None, transparent: bool) -> Pixels:
         """FPDF_RenderPageBitmapWithMatrix as pdfium_backend calls it (render.py)."""
         ix0, iy0, w, h = pixel_bounds(zoom, clip if clip is not None else self.rect)
         fs = render_matrix(zoom, ix0, iy0, self.rotation, self.width, self.height)
@@ -595,7 +596,7 @@ class Document:
         return [(navigation.text(name).rstrip("\x00"), navigation.dest_page_index(self.pdf, dest))
                 for name, dest in navigation.named_dests(self.pdf)]
 
-    def save(self, pages: Sequence[int] | None = None, boxes: Mapping[int, Box] | None = None) -> bytes:
+    def save(self, *, pages: Sequence[int] | None, boxes: Mapping[int, Box] | None) -> bytes:
         keep = list(range(len(self))) if pages is None else sorted(set(pages))
         user: dict[int, Box] = {}
         for index, (x0, y0, x1, y1) in (boxes or {}).items():

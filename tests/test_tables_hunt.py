@@ -11,7 +11,7 @@ import pytest
 from pptx.shapes.graphfrm import GraphicFrame
 
 from beamer2slides import emit as E
-from beamer2slides.classify import PageClassifier, Rect, Span, classify
+from beamer2slides.classify import PageClassifier, Rect, Span, classify, new_span
 from beamer2slides.emit_model import SetRun, table_of
 from beamer2slides.emit_tables import TableLayout, pptx_table_of
 from beamer2slides.emit_widths import wrap_joins_of, wrap_window_of, wrapped_width_of
@@ -445,9 +445,9 @@ def test_a_node_split_by_a_vertical_line_is_no_diagram_node():
     vertical line crossing it: one label would run them together."""
     def sp(text: str, x0: float) -> Span:
         baseline = 100.0
-        return Span(id=text, text=text, font=SANS, size=SIZE, color="#000000",
+        return new_span(id=text, text=text, font=SANS, size=SIZE, color="#000000",
                     rect=Rect(x0, baseline - 7.5, x0 + len(text) * 5, baseline + 2.5),
-                    baseline=baseline, horizontal=True, info=font_info(SANS))
+                    baseline=baseline, horizontal=True, info=font_info(SANS), link=None, drawn=False, visual=None)
 
     def diagram(line: DiagramLine) -> DiagramElement:
         node: Node = {"bbox": [50.0, 90.0, 250.0, 106.0], "shape": "RECTANGLE", "fill": None, "stroke": "#000000",

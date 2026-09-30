@@ -15,6 +15,7 @@ thumbnail (out/probe_bullets.png).
 Usage: python tools/probe_bullets.py
 """
 
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +23,9 @@ from PIL import Image
 
 from beamer2slides.emit import PAD_X
 from beamer2slides.google_auth import slides_service
+from beamer2slides.google_types import SlidesRange, object_id, presentation_id
 from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.json_types import JsonObject
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 GLYPHS = [("●", "BULLET_DISC_CIRCLE_SQUARE", 0), ("○", "BULLET_DISC_CIRCLE_SQUARE", 1), ("■", "BULLET_DISC_CIRCLE_SQUARE", 2),
@@ -30,19 +33,20 @@ GLYPHS = [("●", "BULLET_DISC_CIRCLE_SQUARE", 0), ("○", "BULLET_DISC_CIRCLE_S
           ("◆", "BULLET_DIAMOND_CIRCLE_SQUARE", 0), ("◇", "BULLET_DIAMONDX_HOLLOWDIAMOND_SQUARE", 1),
           ("❏", "BULLET_CHECKBOX", 0)]
 SIZES, TEXT, FIRST, START, PITCH = (24, 12), 24, 60, 90, 44
-BLUE = {"opaqueColor": {"rgbColor": {"blue": 1}}}
-BLACK = {"opaqueColor": {"rgbColor": {}}}
+BLUE: JsonObject = {"opaqueColor": {"rgbColor": {"blue": 1}}}
+BLACK: JsonObject = {"opaqueColor": {"rgbColor": {}}}
 
 
-def fixed(s: int, e: int) -> dict:
+def fixed(s: int, e: int) -> SlidesRange:
     return {"type": "FIXED_RANGE", "startIndex": s, "endIndex": e}
 
 
 def main() -> None:
-    slides = slides_service()
+    slides = slides_service(None)
     pres = execute(slides.presentations().create(body={"title": "b2s probe bullets"}))
-    pid, page = pres["presentationId"], pres["slides"][0]["objectId"]
-    reqs = [{"deleteObject": {"objectId": e["objectId"]}} for e in pres["slides"][0].get("pageElements", [])]
+    first = pres.get("slides", [])[0]
+    pid, page = presentation_id(pres), object_id(first)
+    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
     boxes = []
     for c, size in enumerate(SIZES):
         for r, (_, preset, level) in enumerate(GLYPHS):
@@ -60,7 +64,7 @@ def main() -> None:
             boxes.append((size, GLYPHS[r][0], x, y))
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     png = OUT / "probe_bullets.png"
-    save_thumbnail(slides, pid, page, png)
+    save_thumbnail(slides, pid, page, png, None)
     im = np.asarray(Image.open(png).convert("RGB")).astype(int)
     k = im.shape[1] / 720
     blue = (im[..., 2] > 150) & (im[..., 0] < 120) & (im[..., 1] < 120)

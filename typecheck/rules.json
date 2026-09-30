@@ -1,44 +1,16 @@
 {
  "any": {},
  "default_arguments": {
-  "adopt.py": 9,
-  "adopt_sync.py": 2,
   "agent/deck_tools.py": 27,
   "agent/doc_tools.py": 8,
   "agent/schema.py": 3,
   "agent/source_tools.py": 23,
   "agent/tools.py": 1,
   "agent/workspace.py": 1,
-  "deck_export.py": 3,
   "devtools/agent_bench.py": 6,
-  "drive_folder.py": 1,
-  "emit.py": 8,
-  "emit_diagrams.py": 1,
-  "emit_holes.py": 1,
-  "emit_places.py": 1,
-  "emit_tables.py": 9,
-  "emit_text.py": 7,
-  "emit_theme.py": 1,
-  "emit_widths.py": 2,
-  "google_auth.py": 5,
-  "gslides.py": 1,
-  "identity.py": 12,
-  "ink.py": 3,
-  "inverse.py": 5,
-  "merge.py": 4,
-  "net.py": 4,
-  "pdf/api.py": 4,
-  "pdf/pdfium_backend.py": 4,
-  "pdf/pure/backend.py": 4,
-  "pdf/sandbox.py": 4,
-  "texmap.py": 8
+  "google_auth.py": 1
  },
  "defaulted_fields": {
-  "agent/context.py": 11,
-  "classify_model.py": 26,
-  "fonts.py": 4,
-  "inverse.py": 14,
-  "pdf/api.py": 12,
-  "texmap.py": 12
+  "agent/context.py": 11
  }
 }

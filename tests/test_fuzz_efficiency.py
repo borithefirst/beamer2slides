@@ -165,7 +165,10 @@ def test_the_immediate_way_is_unchanged() -> None:
 def test_open_deck_reads_the_deck_once(monkeypatch: pytest.MonkeyPatch) -> None:
     from beamer2slides import google_auth
     api = FakeSlides(_pres(), _accept)
-    monkeypatch.setattr(google_auth, "slides_service", lambda: api)
+
+    def slides_service(creds: object) -> FakeSlides:
+        return api
+    monkeypatch.setattr(google_auth, "slides_service", slides_service)
     deck = D.open_deck("p", defer=True)
     assert api.gets == 1 and deck.reads == 1 and [s.id for s in deck.model.slides] == ["s1", "s2"]
 

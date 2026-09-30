@@ -107,9 +107,17 @@ read one back from. The disk it needs does not disappear; it **leaves the interf
 * **In.** Any argument that is a workspace ref also takes the file itself: a `data:` URI, or
   `{"name": "talk.pdf", "base64": "…"}` / `{"text": "…"}`. `take_in` writes it into the
   workspace's `inbox/` and replaces it with the ref, so the journey underneath sees the ordinary
-  file it has always seen. It runs in `@tool` and again in `mcp.dispatch` - before the schema
-  check there, because a content dict is not a publishable parameter type - and is idempotent,
-  since what comes out is a plain ref.
+  file it has always seen. It runs in `@tool`, for a Python call and a wire call alike, and again
+  in `mcp.dispatch` - before the schema check there, because a content dict is not a publishable
+  parameter type - and is idempotent, since what comes out is a plain ref. In the types, such a
+  parameter is a `content.File` (a ref or a `Content`, the union of the five content shapes), and
+  the body narrows it to the ref with `j.ref(name, value)`.
+* **Checked calls.** A tool is a `Tool[P]`, generic over its body's parameters after the `Job`
+  (`Concatenate[Job, P]`), so `deck_convert(ctx, pdf=..., overlays=...)` from Python is checked
+  like any call: a misspelt or mistyped argument is the checker's error, not a `bad_request` at
+  run time. Arguments that arrive as a JSON object - the MCP server, a replayed transcript - go
+  through `tool.dispatch(ctx, arguments)`, which is where an unknown name or a wrong type becomes
+  `bad_request`, never a raise.
 * **Out.** `AgentContext(deliver="inline")` fills each `Artifact` with its own content: `text`
   where it is text, `base64` where it is not, plus `bytes` and `sha256` on every one. A cap per
   artifact and a budget per call stop a thirty-slide conversion from handing a model its own
@@ -157,7 +165,7 @@ name to a ready client or a callable `(api, version, creds) -> client | None`; a
 not answer for is built as before, and `creds` is `None` where nobody passed any, a client that
 carries its own credentials never being a reason to go looking for a token. That last sentence
 has an edge a caller hit: on the main path *nobody* passes any - `emit()` opens with
-`slides_service(), drive_service()` and the built-in fallback resolves them itself - so a builder
+`slides_service(None), drive_service(None)` and the built-in fallback resolves them itself - so a builder
 that trusted the argument built an unauthenticated client. Either do `creds or
 google_auth.credentials()`, or say `use_services(make, needs_credentials=True)` and be handed the
 library's (resolved once, however many clients are asked for).

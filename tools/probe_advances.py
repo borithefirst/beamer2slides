@@ -15,12 +15,14 @@ Usage: python tools/probe_advances.py   (writes src/beamer2slides/calibration/ad
 """
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
 from beamer2slides.google_auth import drive_service, slides_service
+from beamer2slides.google_types import object_id, presentation_id
 from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,11 +39,12 @@ COLUMN_W = 143
 
 
 def main() -> None:
-    slides = slides_service()
+    slides = slides_service(None)
     pres = execute(slides.presentations().create(body={"title": "b2s probe advances"}))
-    pid = pres["presentationId"]
-    first = pres["slides"][0]["objectId"]
-    reqs = [{"deleteObject": {"objectId": e["objectId"]}} for e in pres["slides"][0].get("pageElements", [])]
+    pid = presentation_id(pres)
+    slide = pres.get("slides", [])[0]
+    first = object_id(slide)
+    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}} for e in slide.get("pageElements", [])]
     jobs = [(font, style) for font in FONTS for style in STYLES]
     pages = [first] + [f"page_{i}" for i in range(1, len(jobs))]
     reqs += [{"createSlide": {"objectId": p}} for p in pages[1:]]
@@ -63,10 +66,10 @@ def main() -> None:
             boxes.setdefault((font, style), []).append((ch, x, y))
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
 
-    table: dict = {}
+    table: dict[str, dict[str, dict[str, float]]] = {}
     for (font, style), page in zip(jobs, pages):
         path = OUT / f"{font.replace(' ', '')}-{style}.png"
-        save_thumbnail(slides, pid, page, path)
+        save_thumbnail(slides, pid, page, path, None)
         img = np.asarray(Image.open(path).convert("RGB")).mean(axis=2)
         k = img.shape[1] / 720
 
@@ -91,7 +94,7 @@ def main() -> None:
         "source": "tools/probe_advances.py: advance widths (em) on Google Slides' renderer",
         "fonts": table}, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print("wrote", TABLE)
-    execute(drive_service().files().delete(fileId=pid))
+    execute(drive_service(None).files().delete(fileId=pid))
 
 
 if __name__ == "__main__":

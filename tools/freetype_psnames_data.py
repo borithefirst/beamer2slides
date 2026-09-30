@@ -69,14 +69,15 @@ def mac_names(src: str) -> list[str]:
     return [blob[o:blob.index("\0", o)] for o in offsets]
 
 
-def build(local: Path | None = None) -> str:
+def build(local: Path | None) -> str:
     src = fetch(local)
     names = agl(src)
     mac = mac_names(src)
     assert mac[0] == ".notdef" and mac[3] == "space", mac[:4]
 
-    def lines(items: list[str], width: int = 96) -> str:
-        out, line = [], ""
+    def lines(items: list[str], width: int) -> str:
+        out: list[str] = []
+        line = ""
         for it in items:
             if len(line) + len(it) + 1 > width:
                 out.append(line)
@@ -93,13 +94,13 @@ Werner Lemberg) - do not edit by hand.
 - `MAC_NAMES`: `ft_mac_names`, the 258 standard Macintosh glyph names in order."""
 
 _AGL = """
-{lines([f"{n}:{v:04X}" for n, v in sorted(names.items())])}
+{lines([f"{n}:{v:04X}" for n, v in sorted(names.items())], 96)}
 """
 
 AGL = {{n: int(v, 16) for n, v in (s.split(":") for s in _AGL.split())}}
 
 MAC_NAMES = tuple("""
-{lines(mac)}
+{lines(mac, 96)}
 """.split())
 '''
 

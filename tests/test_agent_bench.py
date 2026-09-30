@@ -312,10 +312,10 @@ def test_a_run_that_really_wrote_is_scored_from_its_own_answers(tmp_path: Path) 
     assert sorted(table) == ["deck_convert", "deck_sync"]
     sync = table["deck_sync"]
     ctx = AgentContext.offline(tmp_path)          # a replayed answer never looks at it
-    assert sync(ctx, dry_run=True).summary == "first"
-    assert sync(ctx).summary == "second"
-    assert sync(ctx).code == "bad_request", "a call nobody recorded cannot be invented"
-    assert table["deck_convert"](ctx).code == "bad_request"
+    assert sync.dispatch(ctx, {"dry_run": True}).summary == "first"
+    assert sync.dispatch(ctx, {}).summary == "second"
+    assert sync.dispatch(ctx, {}).code == "bad_request", "a call nobody recorded cannot be invented"
+    assert table["deck_convert"].dispatch(ctx, {}).code == "bad_request"
 
 
 def test_the_tier_that_spends_a_real_deck_does_not_run_by_accident():

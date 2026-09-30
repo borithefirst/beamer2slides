@@ -441,7 +441,7 @@ def run_pdf(run: Path) -> Path | None:
     if pdf.exists():
         return pdf
     from beamer2slides.inverse import Workspace
-    pdf, _ = Workspace(run / "tree" / "main.tex", run / "metrics-work").compile()
+    pdf, _ = Workspace(run / "tree" / "main.tex", run / "metrics-work", handout=False, engine=None, fresh=True).compile()
     return pdf
 
 
@@ -464,7 +464,7 @@ def pages(deck: str, tag: str) -> Iterator[tuple[int, SignedRGB, SignedRGB, Json
                 continue
             ref_img = Image.open(ref_path).convert("RGB")
             w, h = ref_img.size
-            got_img = Image.fromarray(doc[i].render(w / doc[i].width)).convert("RGB").resize((w, h))
+            got_img = Image.fromarray(doc[i].render(w / doc[i].width, clip=None, transparent=False)).convert("RGB").resize((w, h))
             yield i + 1, rgb_array(ref_img), rgb_array(got_img), slide
     finally:
         doc.close()

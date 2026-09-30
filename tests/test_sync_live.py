@@ -583,7 +583,7 @@ def repaint_pictures(out: Path) -> int:
     from beamer2slides import identity, snapshot
     from beamer2slides.google_auth import drive_service
     pid = jstr(json.loads((out / "emit.json").read_text(encoding="utf-8")), "presentationId")
-    base, _ = snapshot.load_base(pid, out, drive_service(), None, None)
+    base, _ = snapshot.load_base(pid, out, drive_service(None), None, None)
     assert base is not None, "convert stored a base"
     slides = jobjs(base, "slides")
     page_key = snapshot.page_keys({"slides": [{"page": s["page"]} for s in slides]}, [jstr(s, "key") for s in slides])
@@ -610,7 +610,7 @@ def repaint_pictures(out: Path) -> int:
             el["ir_hash"], el["fields"] = h, fields
             painted += 1
     snapshot.save_local(base, out)
-    snapshot.save_drive(drive_service(), base, None, None)
+    snapshot.save_drive(drive_service(None), base, None, None)
     return painted
 
 
@@ -779,7 +779,7 @@ class Layout:
         s = model.one(title)
         els = {name: model.element(s, jobj(t)) for name, t in targets.items()}
         folder = self.run.out / "layout" / stage
-        save_thumbnail(self.run.deck.api, self.run.deck.pid, s.id, folder / "slide.png")
+        save_thumbnail(self.run.deck.api, self.run.deck.pid, s.id, folder / "slide.png", fetch=None)
         inks = pl.inks(self.run.deck.api, self.run.deck.pid, s.id, {n: {e.id} for n, e in els.items()}, folder)
         measured: JsonObject = {n: {"id": e.id, "box": [round(v, 2) for v in e.box], "ink": ink_box(inks[n])}
                                 for n, e in els.items()}
@@ -958,7 +958,7 @@ def formula_places(run: Run, lay: Layout, stage: str) -> list[JsonObject]:
     text = model.element(s, {"text": "merged word by word"})
     folder = run.out / "layout" / stage
     from beamer2slides.gslides import save_thumbnail
-    save_thumbnail(run.deck.api, run.deck.pid, s.id, folder / "slide.png")
+    save_thumbnail(run.deck.api, run.deck.pid, s.id, folder / "slide.png", fetch=None)
     holes = pl.holes(run.deck.api, run.deck.pid, s.id, text.id, folder)
     pictures = pl.pictures_on(model, s.id, text.id)
     rows: list[JsonObject] = []

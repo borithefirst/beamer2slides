@@ -626,7 +626,7 @@ class ConvertedDict(TypedDict):
     plan: DeckPlan
 
 
-def convert_source(tex: Path, work: Path, engine: str | None = None, *, page_width: float,
+def convert_source(tex: Path, work: Path, engine: str | None, *, page_width: float,
                    folds: Folds | None) -> tuple[ConvertedDict | None, str]:
     """`convert_source_of` as a dict ({"deck", "out", "pdf", "plan"}), for tools/probe_deck_tables.py."""
     made, err = convert_source_of(tex, work, engine, page_width, folds)
@@ -655,7 +655,7 @@ def convert_source_of(tex: Path, work: Path, engine: str | None, page_width: flo
     from .render import render_backgrounds
     from .sync import planned
 
-    ws = Workspace(Path(tex), work / "compile", engine=engine)
+    ws = Workspace(Path(tex), work / "compile", handout=False, engine=engine, fresh=True)
     pdf, err = ws.compile()
     if pdf is None:
         return None, err
@@ -924,7 +924,7 @@ def _live_order(theirs: JsonMap) -> list[str]:
 
 
 def problems(base: JsonObject, mplan: JsonMap, theirs: JsonMap, way_back: JsonObject | None,
-             backup_mode: str | None = "auto") -> list[JsonObject]:
+             backup_mode: str | None) -> list[JsonObject]:
     """`problems_of` over the plan's JSON (`merge.plan_merge`), for the callers that hold that:
     devtools/fuzz_sync.py and the tests. No parser takes a plan's JSON back to a `MergePlan`, so
     the plan is read here as JSON and the rest is shared (`_refusals`)."""

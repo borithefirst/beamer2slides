@@ -81,6 +81,20 @@ The same holds for a dataclass field: a defaulted field is a default argument of
 Optional input from a person (a CLI flag, an agent tool parameter) is decided at that boundary -
 argparse's default, the tool schema's default - and passed on explicitly from there. Signatures an
 outside protocol dictates (PEP 517's build hooks) live outside the package, in `build_backend/`.
+So do the calling forms the docs publish to callers outside this repo (the harness at Google): an
+agent tool body's optional parameters are the schema's defaults, and `AgentContext(...)`,
+`AgentContext.detached()`, `google_auth.use_services(make)`, `schema.all_schemas()` and
+`LocalWorkspace(root)` keep theirs. That is what the ledger's remaining 70 defaults and 11 fields
+are; nothing internal has one.
+
+How a default leaves (wave 2, 2026-09-30): each caller passes the old value, so behaviour does
+not move; a value most callers pass becomes a name (`net.TRIES`, `ink.BAND_GAP_PX`,
+`inverse.BEAMER_PT`); two ways of calling become two functions (`align_slides` /
+`align_slides_with`, `merge.plan_merge` / `plan_merge_with`, `texmap.locate_words` /
+`locate_words_in`); a record built empty and filled later gets a constructor that says so
+(`classify_model.new_span`/`new_line`/`new_paragraph`, `inverse.fresh_context`). `None` passed on
+purpose reads as what it means: `slides_service(None)` is "the context's credentials",
+`save_thumbnail(..., fetch=None)` "the context's fetcher".
 
 ### A closed set is a Literal, and every match over it is exhaustive
 
@@ -194,6 +208,16 @@ table. When a combination of fields must not happen, choose types in which it ca
   the old way after its signature changed is an error at the call, not a failure found when the
   suite runs - and when retyping the package makes a test's error disappear, prune it. Empty since
   2026-09-30 and `TESTS_CEILING` 0: a test that does not type-check fails the gate like src/.
+- **`typecheck/tools_baseline.json`**: tools/ (the probes, calibration and proofs run by hand), the
+  build backend's `tools` target, gated by `tests/test_typecheck.py::test_the_tools_type_check`.
+  Admitted at zero on 2026-09-30 and never anything else: a probe still calling a package function
+  the old way is named when the suite runs, not months later when someone runs it against Google.
+- **Agent tools** (`agent/context.py`): a tool is `Tool[P]` over its body's `Concatenate[Job, P]`,
+  so a Python call is checked against the body; a JSON call (MCP, a replayed transcript) is
+  `Tool.dispatch(ctx, arguments)`, the one untyped-by-nature entry, which turns a wrong name or
+  type into `bad_request`. A file parameter is `content.File` (a ref or inline content), narrowed
+  by `j.ref`: the body's type was `str` while callers passed content dicts, a lie the checker
+  could not see through the old `*args: object` call.
 - **JSON not yet parsed** is a `json_types.JsonObject`, read through its narrowings (`as_object`,
   `as_str`, ...), which name where a value of the wrong shape was. That is the interim form of
   "parse at the boundary" until a record's parser exists; a TypedDict view of a dict cannot be passed
@@ -254,7 +278,9 @@ unknowable. The order:
    every error in src/ fails the build; no `Any` is left, 172 default arguments and 79 defaulted
    fields are. Libraries without types are reached through Protocols after a runtime check
    (`gapi.build`, `gapi.Httplib2`, `devtools/deep_stack.py` for torch, lpips and transformers),
-   never imported by a statement the checker would have to follow.
+   never imported by a statement the checker would have to follow. *Defaults out* (2026-09-30):
+   172 default arguments and 79 defaulted fields down to 70 and 11, all of them published calling
+   forms (above).
 5. **tests/ and tools/** under the same checker. *tests/ admitted* (2026-09-29, its own baseline
    above). *tests/ at zero* (2026-09-30, from 3,702): helpers return the package's records
    (`ir.Deck`, `raw_types.RawPage`, `TableElement`...) instead of `dict`, JSON is read through
@@ -265,8 +291,15 @@ unknowable. The order:
    its branch (the `except` now covers only reading the font file); `test_request_budget` counted
    the tuples of a plan, not its requests; `tests/decks/sync/build.py`'s drawings hash says
    position-free and is not (paths are tuples after `parse_raw`, so its relative step never ran).
-   tools/ is next: 30 of its 79 files are runpy shims over devtools (checked with the
-   package), the other 49 (probes, calibration, proofs) are checked by nothing yet.
+   *tools/ at zero* (2026-09-30, from 958 in the 49 files that are not runpy shims over devtools):
+   Google answers read through `google_types`, records frozen dataclasses, no defaults. It found
+   a probe's return type that lied (`probe_images.url_variants`, pairs typed as strings) and two
+   crashes on malformed answers now said as errors. What the probes call that `google_types` does
+   not list yet (Docs headers, footers, footnotes, suggestions, table and row styles; Slides table
+   and image-property requests, `pageSize` on create; Drive `revisions()`, `about()`, a file's
+   `size`; a resumable `gapi.media_upload`) they read through `json_object` or a local Protocol
+   after a runtime check (`deck_backup.revised`): the next thing to add there, together with typed request kinds for emit's batches (`requests` is
+   still `Sequence[Mapping[str, object]]`).
 
 When you touch a function for any reason, leave it to these rules: fully annotated, no defaults,
 records as dataclasses. Then prune the baseline and lower the ledger.

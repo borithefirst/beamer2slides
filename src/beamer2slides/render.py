@@ -336,13 +336,13 @@ def _looks_like(data: bytes, page: Page, obj: int, bbox: Sequence[float]) -> boo
     """Does the file, laid on the page without the image, show what the page shows there? The
     last check on PDFium's decode: a palette, colour space or mask read differently would come
     out as another picture."""
-    want = page.render(IMAGE_CHECK_PX_PER_PT, _box(bbox)).astype(int)
+    want = page.render(IMAGE_CHECK_PX_PER_PT, _box(bbox), transparent=False).astype(int)
     h, w = want.shape[:2]
     if w < 2 or h < 2:
         return True
     page.set_active([obj], False)
     try:
-        under = page.render(IMAGE_CHECK_PX_PER_PT, _box(bbox)).astype(float)
+        under = page.render(IMAGE_CHECK_PX_PER_PT, _box(bbox), transparent=False).astype(float)
     finally:
         page.set_active([obj], True)
     img = Image.open(io.BytesIO(data)).convert("RGBA").resize((w, h), Image.Resampling.BILINEAR)
@@ -559,7 +559,7 @@ def crop_region(pdf: Path, page: int, bbox: list[float], path: Path, zoom: float
     """A picture of a page region (emit's stand-in for an element the Slides API refused)."""
     doc = Document(pdf)
     try:
-        save_png(doc[page].render(zoom, _box(bbox)), path)
+        save_png(doc[page].render(zoom, _box(bbox), transparent=False), path)
     finally:
         doc.close()
 
@@ -571,7 +571,7 @@ def _fill_fraction(page: Page, rect: Box, fill: str, avoid: list[Box]) -> float:
     """Share of sample points inside `rect` (away from text and pictures) that render in `fill`."""
     width, height = rect[2] - rect[0], rect[3] - rect[1]
     zoom = max(SHAPE_SAMPLE_ZOOM, 8 / max(min(width, height), 0.01))  # hairlines: enough pixels across
-    img = page.render(zoom, rect).astype(int)
+    img = page.render(zoom, rect, transparent=False).astype(int)
     h, w = img.shape[:2]
     target = np.array([int(fill[i:i + 2], 16) for i in (1, 3, 5)])
     ys = np.linspace(h * 0.2, h * 0.8 - 1, 12).astype(int)
@@ -1010,7 +1010,7 @@ def glyph_ink(page: Page, box: list[float]) -> tuple[list[float], float] | None:
     x0, y0, x1, y1 = box
     clip = (x0 - 0.5, y0 - 0.5, x1 + 0.5, y1 + 0.5)
     try:
-        img = page.render(GLYPH_INK_ZOOM, clip=clip)
+        img = page.render(GLYPH_INK_ZOOM, clip=clip, transparent=False)
     except PdfError:
         return None
     px = img[..., :3].astype(int)

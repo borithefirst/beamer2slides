@@ -27,7 +27,10 @@ tests/ is a second target, with a baseline of its own (typecheck/tests_baseline.
 tests`): the suite is not built, so tests/test_typecheck.py is its gate, and it reads pytest's types,
 pinned in [tool.beamer2slides.typecheck] tests-requires rather than among the build's requirements.
 Checked apart from the package, a test calling a function whose signature changed is an error where
-the call is, before the suite runs."""
+the call is, before the suite runs.
+
+tools/ (the probes and utilities run by hand) is a third, gated by tests/test_typecheck.py the same
+way; its baseline (typecheck/tools_baseline.json) was empty from the day it was admitted."""
 
 import json
 import subprocess
@@ -44,15 +47,19 @@ from setuptools.build_meta import (get_requires_for_build_editable, get_requires
 
 ROOT = Path(__file__).parent.parent
 
-# What is checked: the package (with build_backend/, as [tool.pyrefly] includes it), or the tests.
-Target = Literal["package", "tests"]
+# What is checked: the package (with build_backend/, as [tool.pyrefly] includes it), the tests, or
+# tools/.
+Target = Literal["package", "tests", "tools"]
 BASELINES: dict[Target, Path] = {"package": ROOT / "typecheck" / "baseline.json",
-                                 "tests": ROOT / "typecheck" / "tests_baseline.json"}
+                                 "tests": ROOT / "typecheck" / "tests_baseline.json",
+                                 "tools": ROOT / "typecheck" / "tools_baseline.json"}
 # The tests are handed to pyrefly by name, which replaces the config's includes; `.` makes them the
-# package `tests`, whose relative imports then resolve.
+# package `tests`, whose relative imports then resolve. tools/ the same way.
 ARGUMENTS: dict[Target, list[str]] = {"package": [],
                                       "tests": ["--config", "pyproject.toml", "--search-path", "src",
-                                                "--search-path", ".", "tests"]}
+                                                "--search-path", ".", "tests"],
+                                      "tools": ["--config", "pyproject.toml", "--search-path", "src",
+                                                "--search-path", ".", "tools"]}
 
 ConfigSettings = Optional[dict[str, Union[str, list[str]]]]
 
@@ -167,5 +174,8 @@ if __name__ == "__main__":
         n = prune("tests")
         print(f"{n} fixed errors left the tests' baseline; {len(baseline('tests'))} remain "
               "(lower TESTS_CEILING in tests/test_typecheck.py)")
+    elif sys.argv[1:] == ["prune", "tools"]:
+        n = prune("tools")
+        print(f"{n} fixed errors left the tools' baseline; {len(baseline('tools'))} remain")
     else:
-        sys.exit("usage: python build_backend/beamer2slides_build.py prune [tests]")
+        sys.exit("usage: python build_backend/beamer2slides_build.py prune [tests|tools]")

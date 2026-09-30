@@ -16,7 +16,7 @@ from beamer2slides.google_types import presentation
 from beamer2slides.json_types import Json, JsonArray, JsonObject
 from .irs import deck_ir
 from beamer2slides.adopt_context import adopt_context
-from beamer2slides.inverse import Context
+from beamer2slides.inverse import BEAMER_PT, fresh_context
 
 from .deck_records import dicts, parsed, record, records
 from .json_reads import jarr, jat, jint, jnum, jnums, jobj, jobjs, jstr, jstrs
@@ -1268,6 +1268,6 @@ def test_pull_writes_a_round_picture_clipped_and_outlined_round():
     te = loop_picture({"bbox": [10, 20, 110, 80], "mask": "ellipse", "outline": {"color": "#000000", "weight": 2.0}},
                       (10.0, 20.0, 110.0, 80.0), "test")
     assert picture_edits(te)
-    tex = picture_latex(te, Picture("p.png", Path("p.png"), (50.0, 30.0)), Context(), None)
+    tex = picture_latex(te, Picture("p.png", Path("p.png"), (50.0, 30.0)), fresh_context(BEAMER_PT), None)
     assert "\\clip (0pt,0pt) ellipse [x radius=50.00pt,y radius=30.00pt]" in tex, tex
     assert "\\draw[draw=" in tex and tex.count("ellipse [") == 2, tex

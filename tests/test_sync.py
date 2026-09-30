@@ -70,7 +70,7 @@ def group_readback(box: Sequence[float]) -> JsonObject:
 
 
 def _entry(key: str, ir: JsonObject, oid: str | None, anchor: str | None) -> JsonObject:
-    h, fields = identity.ir_fields(ir, None, anchor)
+    h, fields = identity.ir_fields(ir, None, anchor, None)
     el: JsonObject = {"key": key, "id": ir["id"], "kind": ir["kind"], "role": ir.get("role"), "ir_hash": h, "fields": fields,
                       "fingerprint": identity.fingerprint(ir, None, anchor), "anchor": anchor, "ir": ir}
     if oid:
@@ -188,7 +188,7 @@ def test_inserted_frame_shifts_no_keys():
     keys = identity.slide_keys(base)
     assert keys == ["title:intro#1", "title:results#1", "title:end#1"]
     ours = [base[0], info("Method", "how we measured the numbers", None, 0), base[1], base[2]]
-    got, pairs = identity.inherit_slide_keys(base, keys, ours)
+    got, pairs = identity.inherit_slide_keys(base, keys, ours, moves=None, weak=None)
     assert pairs == {0: 0, 2: 1, 3: 2}
     assert got == ["title:intro#1", "title:method#1", "title:results#1", "title:end#1"]
 
@@ -198,7 +198,7 @@ def test_renamed_title_keeps_key():
             info("Results", "numbers went up a lot this year", None, 0)]
     keys = identity.slide_keys(base)
     ours = [base[0], info("Findings", "numbers went up a lot this year", None, 0)]
-    got, pairs = identity.inherit_slide_keys(base, keys, ours)
+    got, pairs = identity.inherit_slide_keys(base, keys, ours, moves=None, weak=None)
     assert pairs == {0: 0, 1: 1} and got[1] == "title:results#1"
 
 
@@ -212,7 +212,7 @@ def test_labelled_frames_match_wherever_they_moved():
     keys = identity.slide_keys(base)
     assert keys == ["a", "b", "c"]
     ours = [info("C renamed", "completely different words", "c", 0), base[0], base[1]]
-    got, pairs = identity.inherit_slide_keys(base, keys, ours)
+    got, pairs = identity.inherit_slide_keys(base, keys, ours, moves=None, weak=None)
     assert pairs == {0: 2, 1: 0, 2: 1} and got == ["c", "a", "b"]
 
 
@@ -222,19 +222,19 @@ def test_labelled_and_unlabelled_mixed():
     keys = identity.slide_keys(base)
     ours = [info("B", "beta words here", "b", 0), info("Plain", "some plain words, edited", None, 0),
             info("New", "brand new", "new", 0)]
-    got, pairs = identity.inherit_slide_keys(base, keys, ours)
+    got, pairs = identity.inherit_slide_keys(base, keys, ours, moves=None, weak=None)
     assert pairs == {0: 2, 1: 1}
     assert got == ["b", "title:plain#1", "new"]
     # A label neither side knows on the other is a label renamed, and then the words decide: the
     # deck's slide keeps its identity instead of coming back beside itself (tests/test_label_moves.py).
-    got, pairs = identity.inherit_slide_keys([info("X", "same", "x", 0)], ["x"], [info("X", "same", "y", 0)])
+    got, pairs = identity.inherit_slide_keys([info("X", "same", "x", 0)], ["x"], [info("X", "same", "y", 0)], moves=None, weak=None)
     assert pairs == {0: 0} and got == ["x"]
 
 
 def test_element_keys_follow_content():
     els = [text_ir("Title", (10, 10, 100, 24), "p0t0", "title"), text_ir("First paragraph of text", (20, 60, 200, 70), "p0t1", role="body"),
            text_ir("Second paragraph of text", (20, 80, 200, 90), "p0t2", role="body")]
-    keys, fps = identity.slide_element_keys(els, None)
+    keys, fps = identity.slide_element_keys(els, None, None)
     assert keys == ["text/title/0", "text/body/0", "text/body/1"]
     base: list[JsonObject] = [{"key": k, "kind": e["kind"], "role": e["role"], "fingerprint": f}
                               for k, e, f in zip(keys, els, fps)]
@@ -253,7 +253,7 @@ def test_a_shifted_block_keeps_its_bar_and_body_apart():
         return {"id": pid, "kind": "shape", "role": "panel", "bbox": list(bbox), "fill": fill}
     v1 = [panel((24, 128.7, 338, 171.9), "#f9e6e6", "a"), panel((24, 84.4, 338, 116.7), "#e9e9f3", "b"),
           panel((24, 84.4, 338, 99.0), "#262686", "c"), panel((24, 128.7, 338, 142.7), "#bf0000", "d")]
-    keys, fps = identity.slide_element_keys(v1, None)
+    keys, fps = identity.slide_element_keys(v1, None, None)
     records: list[JsonObject] = [{"key": k, "kind": "shape", "role": "panel", "fingerprint": f, "ir": e}
                                  for k, e, f in zip(keys, v1, fps)]
     v2 = [panel((24, 111.0, 338, 154.1), "#f9e6e6", "a"), panel((24, 166.1, 338, 198.5), "#e6efe6", "n"),
@@ -272,7 +272,7 @@ def test_a_diagram_that_became_a_picture_is_still_the_figure():
     diagram. As two elements, the person's edited diagram was kept and the picture stacked on it."""
     diagram: JsonObject = {"id": "p0d0", "kind": "diagram", "role": "figure", "bbox": [45, 90, 318, 155],
                            "nodes": [{"paragraphs": [[{"text": "SP tree"}]]}]}
-    keys, fps = identity.slide_element_keys([diagram], None)
+    keys, fps = identity.slide_element_keys([diagram], None, None)
     base: list[JsonObject] = [{"key": keys[0], "kind": "diagram", "role": "figure", "fingerprint": fps[0]}]
     picture: JsonObject = {"id": "p0f0", "kind": "image", "role": "figure", "bbox": [30, 88, 300, 168]}
     assert identity.slide_element_keys([picture], None, base)[0] == ["diagram/figure/0"]
@@ -284,7 +284,7 @@ def test_a_diagram_that_became_a_picture_is_still_the_figure():
 def test_anchored_elements_take_their_anchors_key():
     words = text_ir("A formula here and more words", (20, 60, 200, 70), "p0t1", role="body")
     pic: JsonObject = {"id": "p0h0", "kind": "image", "role": "math", "bbox": [80, 60, 100, 70], "anchor": "p0t1"}
-    keys, fps = identity.slide_element_keys([words, pic], None)
+    keys, fps = identity.slide_element_keys([words, pic], None, None)
     assert keys == ["text/body/0", "image/math/0"] and fps[1]["anchor"] == "text/body/0"
 
 
@@ -432,11 +432,11 @@ def apply_text_requests(text: str, reqs: Sequence[JsonObject]) -> str:
     ("The end\n", "\n"),
 ])
 def test_text_edit_requests(current: str, target: str) -> None:
-    assert apply_text_requests(current, merge.text_edit_requests("t", current, target)) == target
+    assert apply_text_requests(current, merge.text_edit_requests("t", current, target, None)) == target
 
 
 def test_text_edit_requests_count_utf16():
-    reqs = merge.text_edit_requests("t", "\U0001d465 is x\n", "\U0001d465 is y\n")
+    reqs = merge.text_edit_requests("t", "\U0001d465 is x\n", "\U0001d465 is y\n", None)
     assert jat(reqs[0], "deleteText", "textRange") == {"type": "FIXED_RANGE", "startIndex": 6, "endIndex": 7}
 
 
@@ -511,7 +511,7 @@ def test_both_moved_carries_the_person_move_onto_the_source_place():
     assert scaled["base"] == [v * s for v in fp] and scaled["ours"] == [20 * s, 100 * s, 200 * s, 130 * s]
     del base["scale"]
     # --take-source on it: the source's place and size, nothing of the person's written.
-    again = merge.plan_merge(base, ours, theirs, take_source=[jstr(clash, "id")])
+    again = merge.plan_merge_with(base, ours, theirs, adopt=None, follow_labels=False, take_source=[jstr(clash, "id")])
     assert unit(again, "intro", "text/body/0")["overrides"] == {}
 
 
@@ -704,7 +704,7 @@ def test_take_source_writes_that_paragraph_and_leaves_the_others_alone():
     mplan = merge.plan_merge(base, *take_case(base, *args))
     two = next(c for c in jobjs(mplan, "report", "conflicts") if c["ours"] == "Two from the source")
     ours, theirs = take_case(base, *args)
-    mplan = merge.plan_merge(base, ours, theirs, take_source=[jstr(two, "id")])
+    mplan = merge.plan_merge_with(base, ours, theirs, adopt=None, follow_labels=False, take_source=[jstr(two, "id")])
     ov = jat(unit(mplan, "intro", "text/body/0"), "overrides", "text")
     assert jat(ov, "take") == [1]
     # What sync writes: `override_requests` re-merges the deck's text back onto the element it has
@@ -723,7 +723,7 @@ def test_what_take_source_wrote_over_is_kept_verbatim_in_the_report():
     args = ("One from the source\nTwo from the source\nThree from the base",
             "One from the base\nTwo from the deck\nThree from the base")
     cid = jstr(only_conflict(merge.plan_merge(base, *take_case(base, *args)), "text"), "id")
-    report = jobj(merge.plan_merge(base, *take_case(base, *args), take_source=[cid]), "report")
+    report = jobj(merge.plan_merge_with(base, *take_case(base, *args), adopt=None, follow_labels=False, take_source=[cid]), "report")
     assert jat(report, "resolved") == [{"id": cid, "slide": "intro", "element": "text/body/0",
                                    "field": "text", "was": "Two from the deck"}]
 
@@ -735,7 +735,7 @@ def test_taking_a_whole_box_makes_the_decks_text_no_override_at_all():
     base = take_base("One from the base\nTwo from the base")
     args = ("One from the source\nTwo from the source", "One from the deck\nTwo from the deck")
     cid = jstr(only_conflict(merge.plan_merge(base, *take_case(base, *args)), "text"), "id")
-    mplan = merge.plan_merge(base, *take_case(base, *args), take_source=[cid])
+    mplan = merge.plan_merge_with(base, *take_case(base, *args), adopt=None, follow_labels=False, take_source=[cid])
     u = unit(mplan, "intro", "text/body/0")
     assert u["action"] == "recreate" and u["overrides"] == {}
     assert jat(mplan, "report", "overrides") == []
@@ -746,9 +746,9 @@ def test_an_id_that_matches_nothing_settles_nothing_and_says_so():
     """A report a version old cannot reach today's conflict. Nothing is written on that account,
     and the run says which id found no home rather than dropping it."""
     base = take_base(THREE_FROM_THE_BASE)
-    mplan = merge.plan_merge(base, *take_case(
+    mplan = merge.plan_merge_with(base, *take_case(
         base, "One from the source\nTwo from the source\nThree from the base",
-        "One from the base\nTwo from the deck\nThree from the base"), take_source=["0badcafe"])
+        "One from the base\nTwo from the deck\nThree from the base"), adopt=None, follow_labels=False, take_source=["0badcafe"])
     assert only_conflict(mplan, "text")["resolution"] == "deck kept"
     assert jat(mplan, "report", "resolved") == []
     (w,) = jarr(mplan, "report", "warnings")
@@ -768,7 +768,7 @@ def test_a_geometry_conflict_can_be_settled_for_the_source():
         return ours, theirs
 
     cid = jstr(only_conflict(merge.plan_merge(base, *case()), "geometry"), "id")
-    mplan = merge.plan_merge(base, *case(), take_source=[cid])
+    mplan = merge.plan_merge_with(base, *case(), adopt=None, follow_labels=False, take_source=[cid])
     u = unit(mplan, "intro", "text/body/0")
     assert "geometry" not in jobj(u, "overrides") and u["action"] == "recreate"
     assert only_conflict(mplan, "geometry")["resolution"] == merge.TAKEN_SAYS
@@ -788,7 +788,7 @@ def test_a_background_and_a_note_can_be_settled_for_the_source():
     plain = merge.plan_merge(base, *case())
     fields = {c["field"]: c for c in jobjs(plain, "report", "conflicts")}
     assert set(fields) == {"background", "notes"} and all(c["takeable"] for c in fields.values())
-    mplan = merge.plan_merge(base, *case(), take_source=[jstr(c, "id") for c in fields.values()])
+    mplan = merge.plan_merge_with(base, *case(), adopt=None, follow_labels=False, take_source=[jstr(c, "id") for c in fields.values()])
     plan = next(p for p in jobjs(mplan, "slides") if jat(p, "key") == "intro")
     assert jat(plan, "background") == "color:#eeeeee" and jat(plan, "notes") == "Say the numbers are new"
     assert {r["field"] for r in jobjs(mplan, "report", "resolved")} == {"background", "notes"}
@@ -810,7 +810,7 @@ def test_existence_is_never_settled_for_the_source():
     ours, theirs = triple(base)
     del jarr(ours, "slides", 2, "elements")[1]
     edit_text(jat(theirs, "slides", 2), "b2s_s002_t1", "Edited in the deck\n")
-    again = merge.plan_merge(base, ours, theirs, take_source=[jstr(c, "id")])
+    again = merge.plan_merge_with(base, ours, theirs, adopt=None, follow_labels=False, take_source=[jstr(c, "id")])
     assert unit(again, "end", "text/body/0")["action"] == "keep"
     assert jat(again, "report", "resolved") == [] and len(jarr(again, "report", "warnings")) == 1
 
@@ -1979,11 +1979,11 @@ def test_a_base_out_of_the_sources_order_costs_the_frames_after_it():
               info("Conclusions", "thanks for listening and for the questions", None, 0)]
     keys = identity.slide_keys(source)
     moved = [source[0], source[2], source[1]]  # the middle frame's entry recorded last
-    got, _ = identity.inherit_slide_keys(moved, [keys[0], keys[2], keys[1]], source)
+    got, _ = identity.inherit_slide_keys(moved, [keys[0], keys[2], keys[1]], source, moves=None, weak=None)
     assert got == keys
     alike = [info(f"Results {n}", "the table below repeats the measured numbers", None, 0) for n in ("one", "two", "three")]
     akeys = identity.slide_keys(alike)
-    got, _ = identity.inherit_slide_keys([alike[0], alike[2], alike[1]], [akeys[0], akeys[2], akeys[1]], alike)
+    got, _ = identity.inherit_slide_keys([alike[0], alike[2], alike[1]], [akeys[0], akeys[2], akeys[1]], alike, moves=None, weak=None)
     assert got == [akeys[0], akeys[2], akeys[1]]
 
 
@@ -2209,9 +2209,9 @@ def test_renamed_title_keeps_its_key():
     """A retitled frame's title inherits the title key (it was deleted and recreated as a plain text
     box above the placeholder's place)."""
     base = [{"key": "text/title/0", "kind": "text", "role": "title", "fingerprint": identity.fingerprint(
-                text_ir("Conclusions", (10, 10, 100, 24), "p9t0", "title"))},
+                text_ir("Conclusions", (10, 10, 100, 24), "p9t0", "title"), None, None)},
             {"key": "text/body/0", "kind": "text", "role": "body", "fingerprint": identity.fingerprint(
-                text_ir("Deck edits survive every sync", (20, 60, 200, 70), "p9t1", role="body"))}]
+                text_ir("Deck edits survive every sync", (20, 60, 200, 70), "p9t1", role="body"), None, None)}]
     ours = [text_ir("Takeaways", (10, 10, 90, 24), "p9t0", "title"), text_ir("Deck edits survive every sync", (20, 60, 200, 70), "p9t1", role="body")]
     keys, _ = identity.slide_element_keys(ours, None, base)
     assert keys == ["text/title/0", "text/body/0"]
@@ -2641,7 +2641,7 @@ def pptx_margins(built: Built, lower: float) -> Margins:
 
     def margins(e: JsonObject) -> Json:
         rows: list[Json] = []
-        for m in pptx_table(jobj(e, "ir"), built.plan.scale, built.plan.fonts)["margins"]:
+        for m in pptx_table(jobj(e, "ir"), built.plan.scale, built.plan.fonts, SLIDE_W / built.plan.scale)["margins"]:
             row: list[Json] = [m[0], m[1] + lower, m[2], m[3]] if lower else [*m]
             rows.append(row)
         return rows
@@ -2792,9 +2792,9 @@ def _picture_deck(deck_out: Path, ours_out: Path) -> tuple[JsonObject, PictureOu
                       "file": "figures/f1.png", "alt": None}
 
     def element(out: Path, oid: str | None) -> JsonObject:
-        h, fields = identity.ir_fields(ir, out)
+        h, fields = identity.ir_fields(ir, out, None, None)
         el: JsonObject = {"key": "image/math/0", "id": ir["id"], "kind": "image", "role": "math", "ir_hash": h,
-                          "fields": fields, "fingerprint": identity.fingerprint(ir, out), "anchor": None, "ir": ir}
+                          "fields": fields, "fingerprint": identity.fingerprint(ir, out, None), "anchor": None, "ir": ir}
         if oid:
             el["objects"] = [oid]
             el["main"] = oid
@@ -2866,9 +2866,9 @@ def _image_entry(out: Path, oid: str | None) -> JsonObject:
     bbox = (20.0, 60.0, 80.0, 80.0)
     ir: JsonObject = {"id": "p0i9", "kind": "image", "role": "figure", "bbox": list(bbox), "file": "figures/f1.png",
                       "alt": None}
-    h, fields = identity.ir_fields(ir, out)
+    h, fields = identity.ir_fields(ir, out, None, None)
     el: JsonObject = {"key": "image/figure/0", "id": ir["id"], "kind": "image", "role": "figure", "ir_hash": h,
-                      "fields": fields, "fingerprint": identity.fingerprint(ir, out), "anchor": None, "ir": ir}
+                      "fields": fields, "fingerprint": identity.fingerprint(ir, out, None), "anchor": None, "ir": ir}
     if oid:
         el["objects"] = [oid]
         el["main"] = oid
@@ -2895,7 +2895,7 @@ def test_a_picture_the_deck_already_shows_is_adopted_not_duplicated(tmp_path: Pa
     def adopt(skey: str, members: list[JsonObject], read: JsonObject, oid: str | None) -> str | None:
         asked.append((skey, [m["key"] for m in members], oid))
         return "USERPIC" if oid is None else None
-    mplan = merge.plan_merge(base, ours, theirs, adopt)
+    mplan = merge.plan_merge_with(base, ours, theirs, adopt=adopt, follow_labels=False, take_source=())
     u = unit(mplan, "intro", "image/figure/0")
     assert (u["action"], u["objectId"]) == ("adopt_object", "USERPIC")
     assert not merge.has_writes(mplan, live_ids)
@@ -2924,7 +2924,7 @@ def test_the_deck_picture_the_source_now_draws_is_no_conflict(tmp_path: Path) ->
 
     def given(skey: str, members: list[JsonObject], read: JsonObject, oid: str | None) -> str | None:
         return oid
-    mplan = merge.plan_merge(base, ours, theirs, given)
+    mplan = merge.plan_merge_with(base, ours, theirs, adopt=given, follow_labels=False, take_source=())
     u = unit(mplan, "intro", "image/figure/0")
     assert (u["action"], u["adopt"]) == ("adopt", ["image"])
     assert not jat(mplan, "report", "conflicts") and not merge.has_writes(mplan, live_ids)

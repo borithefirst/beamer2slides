@@ -15,13 +15,18 @@ import shutil
 import statistics
 import subprocess
 import time
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TypedDict
 
 from beamer2slides import ink
 from beamer2slides.extract import shown_spans
 from beamer2slides.pdf import Document
 from beamer2slides.google_auth import slides_service
+from beamer2slides.google_types import Presentation, object_id, presentation_id
 from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+from beamer2slides.json_types import as_array, as_object, as_str
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / "out" / "calibration"
@@ -76,11 +81,94 @@ VERTICAL_BOXES = {  # key: (x, text)
 SLIDE_W = 720
 V_TOP, V_W, V_H = 30, 200, 360
 W_LEFT, W_TOP, W_PITCH, W_W, W_H = 10, 10, 48, 700, 40
+MIN_GAP_PX = 2   # blank rows between two lines of ink (`ink.ink_bands`)
+
+
+# ---------------------------------------------------------------- what is measured
+# Written to fonts.json as they are, so dicts of fixed keys (TypedDicts), in the order written.
+
+
+class RefRow(TypedDict):
+    font: str
+    size: float
+    ink_width: float
+
+
+class Reference(TypedDict):
+    """The LaTeX side: each width row's font, size and ink width, and the capitals' height."""
+    engine: str
+    rows: dict[str, RefRow]
+    cap_height_em: float
+    cap_font: str
+
+
+class Fit(TypedDict):
+    """ys = a + b * xs: `a` in pt, `b` in em, and the worst residual (pt)."""
+    a_pt: float
+    b_em: float
+    max_residual_pt: float
+
+
+class WidthRatio(TypedDict):
+    text_mean: float
+    text_spread: float
+    relative_to_text: dict[str, float]
+    max_relative_deviation: float
+    by_row: dict[str, float]
+
+
+class LinePitch(TypedDict):
+    soft_break: float
+    paragraph: float
+
+
+class FontMeasure(TypedDict):
+    width_ratio: WidthRatio
+    ink_widths_pt_at_18: dict[str, float]
+    cap_height_em: float
+    cap_height_vs_cm_after_width_match: float
+    first_baseline_offset: Fit
+    left_ink_offset: Fit
+    line_pitch_em: LinePitch
+
+
+class FontResult(FontMeasure):
+    """A font as fonts.json has it: its measures and whether it is Arial under another name."""
+    same_widths_as_arial: bool
+
+
+@dataclass(frozen=True, kw_only=True)
+class State:
+    """state.json: the calibration deck `build` made."""
+    presentation_id: str
+    fonts: list[str]
+    slides: list[str]
+
+
+def read_state(path: Path) -> State:
+    o = as_object(json.loads(path.read_text(encoding="utf-8")), str(path))
+    return State(presentation_id=as_str(o.get("presentationId"), f"{path}: presentationId"),
+                 fonts=[as_str(f, f"{path}: fonts") for f in as_array(o.get("fonts"), f"{path}: fonts")],
+                 slides=[as_str(s, f"{path}: slides") for s in as_array(o.get("slides"), f"{path}: slides")])
+
+
+def inked(box: ink.Box | None, what: str) -> ink.Box:
+    if box is None:
+        raise ValueError(f"no ink in {what}")
+    return box
+
+
+def page_width_pt(pres: Presentation) -> float:
+    magnitude = pres.get("pageSize", {}).get("width", {}).get("magnitude")
+    if magnitude is None:
+        raise ValueError("presentations.create answered no page width")
+    return magnitude / 12700
 
 
 # ---------------------------------------------------------------- build
 
-def styled_box(object_id, page_id, x, y, w, h, text, font, size, bold=False, italic=False):
+def styled_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float, text: str, font: str,
+               size: float, *, bold: bool, italic: bool) -> list[Mapping[str, object]]:
     return [
         text_box(object_id, page_id, x, y, w, h),
         {"insertText": {"objectId": object_id, "text": text}},
@@ -99,15 +187,15 @@ def styled_box(object_id, page_id, x, y, w, h, text, font, size, bold=False, ita
 
 
 def build() -> None:
-    slides = slides_service()
+    slides = slides_service(None)
     pres = execute(slides.presentations().create(body={"title": f"beamer2slides font calibration ({WORK.name})"}))
-    pid = pres["presentationId"]
-    width = pres["pageSize"]["width"]["magnitude"] / 12700
+    pid = presentation_id(pres)
+    width = page_width_pt(pres)
     assert abs(width - SLIDE_W) < 0.5, f"unexpected page width {width}"
 
-    slide_ids = []
+    slide_ids: list[str] = []
     for fi, font in enumerate(FONTS):
-        reqs = []
+        reqs: list[Mapping[str, object]] = []
         sid = f"cal_f{fi}_w"
         slide_ids.append(sid)
         reqs.append({"createSlide": {"objectId": sid, "slideLayoutReference": {"predefinedLayout": "BLANK"}}})
@@ -119,11 +207,11 @@ def build() -> None:
             slide_ids.append(sid)
             reqs.append({"createSlide": {"objectId": sid, "slideLayoutReference": {"predefinedLayout": "BLANK"}}})
             for key, (x, text) in VERTICAL_BOXES.items():
-                reqs += styled_box(f"{sid}_{key}", sid, x, V_TOP, V_W, V_H, text, font, size)
+                reqs += styled_box(f"{sid}_{key}", sid, x, V_TOP, V_W, V_H, text, font, size, bold=False, italic=False)
         execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
         print(f"built slides for {font}")
 
-    first = pres["slides"][0]["objectId"]
+    first = object_id(pres.get("slides", [])[0])
     execute(slides.presentations().batchUpdate(
         presentationId=pid, body={"requests": [{"deleteObject": {"objectId": first}}]}))
 
@@ -146,7 +234,7 @@ def find_engine(name: str) -> str:
     raise FileNotFoundError(name)
 
 
-def reference() -> dict:
+def reference() -> Reference:
     """Compile the strings with beamer + pdflatex and measure their ink."""
     ref_dir = WORK / "reference"
     ref_dir.mkdir(parents=True, exist_ok=True)
@@ -164,14 +252,14 @@ def reference() -> dict:
 
     doc = Document(ref_dir / "reference.pdf")
     zoom = 12.0
-    rows = {}
+    rows: dict[str, RefRow] = {}
     for (key, text, style), page in zip(WIDTH_ROWS, doc):
         spans = [s for s in shown_spans(page) if s.text.strip()]
-        box = ink.ink_box(ink.render_gray(page, zoom), zoom)
+        box = inked(ink.ink_box(ink.render_gray(page, zoom), zoom, None), f"reference row {key}")
         rows[key] = {"font": spans[0].font, "size": round(spans[0].size, 3), "ink_width": box.width}
     caps_page = doc[len(WIDTH_ROWS)]
     caps_span = shown_spans(caps_page)[0]
-    caps_box = ink.ink_box(ink.render_gray(caps_page, zoom), zoom)
+    caps_box = inked(ink.ink_box(ink.render_gray(caps_page, zoom), zoom, None), "the reference capitals")
     return {
         "engine": "pdflatex",
         "rows": rows,
@@ -182,20 +270,20 @@ def reference() -> dict:
 
 # ---------------------------------------------------------------- measure (Slides)
 
-def fetch_thumbnails(state: dict, refresh: bool) -> Path:
-    slides = slides_service()
+def fetch_thumbnails(state: State, refresh: bool) -> Path:
+    slides = slides_service(None)
     thumbs = WORK / "thumbs"
-    for sid in state["slides"]:
+    for sid in state.slides:
         path = thumbs / f"{sid}.png"
         if path.exists() and not refresh:
             continue
-        save_thumbnail(slides, state["presentationId"], sid, path)
+        save_thumbnail(slides, state.presentation_id, sid, path, None)
         print("thumbnail", sid)
         time.sleep(1.5)  # getThumbnail is an expensive read with a low per-minute quota
     return thumbs
 
 
-def linear_fit(xs: list[float], ys: list[float]) -> dict:
+def linear_fit(xs: list[float], ys: list[float]) -> Fit:
     """ys = a + b * xs, least squares. `a` in pt, `b` in em."""
     mx, my = statistics.fmean(xs), statistics.fmean(ys)
     b = sum((x - mx) * (y - my) for x, y in zip(xs, ys)) / sum((x - mx) ** 2 for x in xs)
@@ -204,24 +292,32 @@ def linear_fit(xs: list[float], ys: list[float]) -> dict:
     return {"a_pt": round(a, 3), "b_em": round(b, 4), "max_residual_pt": round(resid, 3)}
 
 
-def measure_font(fi: int, thumbs: Path, ref: dict) -> dict:
+def measure_font(fi: int, thumbs: Path, ref: Reference) -> FontMeasure:
     gray = ink.load_gray(thumbs / f"cal_f{fi}_w.png")
     scale = gray.shape[1] / SLIDE_W
-    ratios, widths = {}, {}
+    ratios: dict[str, float] = {}
+    widths: dict[str, float] = {}
     for ri, (key, _, _) in enumerate(WIDTH_ROWS):
         top = W_TOP + ri * W_PITCH
-        box = ink.ink_box(gray, scale, ink.Box(W_LEFT - 3, top - 3, W_LEFT + W_W + 3, top + W_H + 3))
+        box = inked(ink.ink_box(gray, scale, ink.Box(x0=W_LEFT - 3, y0=top - 3, x1=W_LEFT + W_W + 3, y1=top + W_H + 3)),
+                    f"cal_f{fi}_w row {key}")
         widths[key] = round(box.width, 2)
         r = ref["rows"][key]
         ratios[key] = round((box.width / WIDTH_SIZE) / (r["ink_width"] / r["size"]), 4)
 
-    sizes, baseline, inset, cap_em, soft_em, para_em = [], [], [], [], [], []
+    sizes: list[float] = []
+    baseline: list[float] = []
+    inset: list[float] = []
+    cap_em: list[float] = []
+    soft_em: list[float] = []
+    para_em: list[float] = []
     for size in VERTICAL_SIZES:
         gray = ink.load_gray(thumbs / f"cal_f{fi}_v{size}.png")
         scale = gray.shape[1] / SLIDE_W
-        bands = {}
+        bands: dict[str, list[ink.Box]] = {}
         for key, (x, _) in VERTICAL_BOXES.items():
-            bands[key] = ink.ink_bands(gray, scale, ink.Box(x - 3, V_TOP - 3, x + V_W + 3, V_TOP + V_H + 3))
+            bands[key] = ink.ink_bands(gray, scale, ink.Box(x0=x - 3, y0=V_TOP - 3, x1=x + V_W + 3, y1=V_TOP + V_H + 3),
+                                       min_gap_px=MIN_GAP_PX)
         if any(len(bands[k]) != n for k, n in (("single", 1), ("soft", 3), ("paragraphs", 3))):
             print(f"  skipping f{fi} at {size} pt: test string wraps in this font")
             continue
@@ -261,21 +357,31 @@ def measure_font(fi: int, thumbs: Path, ref: dict) -> dict:
     }
 
 
+def with_arial_check(m: FontMeasure, same: bool) -> FontResult:
+    """`m` and whether its widths are Arial's (the font Slides falls back to for one it lacks)."""
+    return {"width_ratio": m["width_ratio"], "ink_widths_pt_at_18": m["ink_widths_pt_at_18"],
+            "cap_height_em": m["cap_height_em"],
+            "cap_height_vs_cm_after_width_match": m["cap_height_vs_cm_after_width_match"],
+            "first_baseline_offset": m["first_baseline_offset"], "left_ink_offset": m["left_ink_offset"],
+            "line_pitch_em": m["line_pitch_em"], "same_widths_as_arial": same}
+
+
 def measure(refresh: bool) -> None:
-    state = json.loads((WORK / "state.json").read_text(encoding="utf-8"))
+    state = read_state(WORK / "state.json")
     thumbs = fetch_thumbnails(state, refresh)
     ref = reference()
-    fonts = {font: measure_font(fi, thumbs, ref) for fi, font in enumerate(state["fonts"])}
+    measured = {font: measure_font(fi, thumbs, ref) for fi, font in enumerate(state.fonts)}
 
-    arial = fonts["Arial"]["ink_widths_pt_at_18"]
-    for font, m in fonts.items():
+    arial = measured["Arial"]["ink_widths_pt_at_18"]
+    fonts: dict[str, FontResult] = {}
+    for font, m in measured.items():
         same = all(abs(m["ink_widths_pt_at_18"][k] - arial[k]) < 0.6 for k in arial)
-        m["same_widths_as_arial"] = same and font != "Arial"
+        fonts[font] = with_arial_check(m, same and font != "Arial")
 
     RESULT.parent.mkdir(parents=True, exist_ok=True)
     RESULT.write_text(json.dumps({
         "slide_width_pt": SLIDE_W, "width_size_pt": WIDTH_SIZE, "vertical_sizes_pt": VERTICAL_SIZES,
-        "presentationId": state["presentationId"], "reference": ref, "fonts": fonts,
+        "presentationId": state.presentation_id, "reference": ref, "fonts": fonts,
     }, indent=2), encoding="utf-8")
 
     print(f"\nreference: {ref['rows']['pangram']['font']} {ref['rows']['pangram']['size']} pt, "
@@ -303,11 +409,14 @@ def main() -> None:
     ap.add_argument("--refresh", action="store_true", help="re-download thumbnails")
     ap.add_argument("--family", choices=["sans", "serif"], default="sans")
     args = ap.parse_args()
-    configure(args.family)
-    if args.command in ("build", "all"):
+    command: str = args.command
+    refresh: bool = args.refresh
+    family: str = args.family
+    configure(family)
+    if command in ("build", "all"):
         build()
-    if args.command in ("measure", "all"):
-        measure(args.refresh)
+    if command in ("measure", "all"):
+        measure(refresh)
 
 
 if __name__ == "__main__":

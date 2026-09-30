@@ -26,15 +26,30 @@ import json
 import subprocess
 import sys
 import time
+from collections.abc import Iterable
 from pathlib import Path
+from typing import TextIO
 
+from beamer2slides.devtools.sync_check import Model
 from beamer2slides.google_auth import drive_service, slides_service
+from beamer2slides.google_types import SlidesService, object_id
 from beamer2slides.gslides import execute
+from beamer2slides.json_types import Json, JsonObject, as_object, as_objects, as_str
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def cli(log, *args) -> subprocess.CompletedProcess:
+def json_list(items: Iterable[Json]) -> list[Json]:
+    """Words (or any values) as a JSON array of the proof's notes."""
+    return list(items)
+
+
+def backup_file(entry: JsonObject) -> str:
+    """The .pptx a backups.json entry names ("" for none)."""
+    return as_str(as_object(entry["backup"], "a backup entry's backup").get("file", ""), "the backup's file")
+
+
+def cli(log: TextIO, *args: str | Path) -> subprocess.CompletedProcess[str]:
     log.write(f"\n$ beamer2slides {' '.join(map(str, args))}\n")
     log.flush()
     done = subprocess.run([sys.executable, "-m", "beamer2slides", *map(str, args)], cwd=ROOT,
@@ -44,7 +59,7 @@ def cli(log, *args) -> subprocess.CompletedProcess:
     return done
 
 
-def tool(log, *args) -> subprocess.CompletedProcess:
+def tool(log: TextIO, *args: str | Path) -> subprocess.CompletedProcess[str]:
     log.write(f"\n$ python tools/{' '.join(map(str, args))}\n")
     log.flush()
     done = subprocess.run([sys.executable, str(ROOT / "tools" / str(args[0])), *map(str, args[1:])], cwd=ROOT,
@@ -54,13 +69,16 @@ def tool(log, *args) -> subprocess.CompletedProcess:
     return done
 
 
-def revision(slides, pid: str) -> str:
-    return execute(slides.presentations().get(presentationId=pid, fields="revisionId"))["revisionId"]
+def revision(slides: SlidesService, pid: str) -> str:
+    rid = execute(slides.presentations().get(presentationId=pid, fields="revisionId")).get("revisionId")
+    if rid is None:
+        raise ValueError(f"Slides answered no revisionId for {pid}")
+    return rid
 
 
-def slide_ids(slides, pid: str) -> list[str]:
+def slide_ids(slides: SlidesService, pid: str) -> list[str]:
     pres = execute(slides.presentations().get(presentationId=pid, fields="slides.objectId"))
-    return [s["objectId"] for s in pres.get("slides", [])]
+    return [object_id(s) for s in pres.get("slides", [])]
 
 
 def pptx_holds(path: Path, text: str) -> bool:
@@ -69,24 +87,24 @@ def pptx_holds(path: Path, text: str) -> bool:
         return any(text.encode() in z.read(n) for n in z.namelist() if n.endswith(".xml"))
 
 
-def deck_text(slides, pid: str) -> str:
+def deck_text(slides: SlidesService, pid: str) -> str:
     from beamer2slides.devtools import sync_check as sc
     return " ".join(s.all_text for s in sc.read(pid).slides)
 
 
-def lost_words(before, after) -> dict:
+def lost_words(before: Model, after: Model) -> JsonObject:
     """Words the deck showed before and doesn't show any more, per slide (a multiset difference:
     a word written twice and shown once is a loss too). Slides are compared by position, and a
     missing slide loses all of its words, so this counts every way the content can shrink."""
     from collections import Counter
-    lost = {}
+    lost: JsonObject = {}
     for i, slide in enumerate(before.slides):
         had = Counter((slide.all_text + " " + slide.notes).split())
         now = Counter((after.slides[i].all_text + " " + after.slides[i].notes).split()) \
             if i < len(after.slides) else Counter()
         gone = had - now
         if gone:
-            lost[str(i)] = sorted(gone.elements())[:20]
+            lost[str(i)] = json_list(sorted(gone.elements())[:20])
     return lost
 
 
@@ -97,8 +115,9 @@ def main() -> int:
     args = ap.parse_args()
     out = args.out / args.pdf.stem
     out.mkdir(parents=True, exist_ok=True)
-    slides, drive = slides_service(), drive_service()
-    problems, notes = [], {}
+    slides, drive = slides_service(None), drive_service(None)
+    problems: list[str] = []
+    notes: JsonObject = {}
     started = time.time()
     with open(args.out / "proof.log", "w", encoding="utf-8") as log:
         from beamer2slides.devtools import deck_edits  # (tools/<name>.py is a shim that runs one)
@@ -108,13 +127,14 @@ def main() -> int:
         if cli(log, "convert", args.pdf, "--out", out).returncode:
             print(f"the first conversion failed, see {args.out / 'proof.log'}")
             return 1
-        pid = json.loads((out / "emit.json").read_text(encoding="utf-8"))["presentationId"]
+        emitted = as_object(json.loads((out / "emit.json").read_text(encoding="utf-8")), "emit.json")
+        pid = as_str(emitted["presentationId"], "emit.json's presentationId")
         notes["presentationId"] = pid
         again = cli(log, "convert", args.pdf, "--out", out)
         if again.returncode:
             problems.append("converting an untouched deck a second time was refused (false alarm)")
         notes["rebuild_untouched"] = {"returncode": again.returncode,
-                                      "said": [l for l in again.stdout.splitlines() if "existing deck" in l]}
+                                      "said": json_list(l for l in again.stdout.splitlines() if "existing deck" in l)}
 
         # 2. a person edits the deck, then someone re-runs convert.
         deck = deck_edits.LiveDeck(pid, slides, sc.read_with(slides, pid).pres, False)
@@ -130,7 +150,7 @@ def main() -> int:
                           "revision": edited_revision}
         refused = cli(log, "convert", args.pdf, "--out", out)
         notes["refusal"] = {"returncode": refused.returncode,
-                            "message": (refused.stdout + refused.stderr).strip().splitlines()[-9:]}
+                            "message": json_list((refused.stdout + refused.stderr).strip().splitlines()[-9:])}
         if refused.returncode == 0:
             problems.append("convert rebuilt a deck that had been edited")
         if "refusing to rebuild" not in refused.stdout + refused.stderr:
@@ -144,30 +164,31 @@ def main() -> int:
         forced = cli(log, "convert", args.pdf, "--out", out, "--force-rebuild")
         if forced.returncode:
             problems.append("--force-rebuild failed")
-        log_entries = json.loads((out / "backups" / "backups.json").read_text(encoding="utf-8"))
+        log_entries = as_objects(json.loads((out / "backups" / "backups.json").read_text(encoding="utf-8")),
+                                 "backups.json")
         entry = next((e for e in reversed(log_entries) if e.get("reason") == "edited"), None)  # this run's
         notes["forced"] = {"returncode": forced.returncode, "entry": entry,
-                           "said": [l for l in forced.stdout.splitlines() if "WARNING" in l or "backup" in l
-                                    or "revision" in l]}
+                           "said": json_list(l for l in forced.stdout.splitlines() if "WARNING" in l or "backup" in l
+                                             or "revision" in l)}
         if entry is None:
             problems.append("the forced rebuild recorded no backup entry")
         else:
             if entry["revisionId"] != edited_revision:
                 problems.append("the recorded revision is not the one the deck had when it was edited")
-            backup_file = Path(entry["backup"].get("file", ""))
-            if not backup_file.exists():
+            kept = Path(backup_file(entry))
+            if not kept.exists():
                 problems.append("the forced rebuild kept no .pptx backup")
-            notes["backup_file"] = {"path": str(backup_file), "bytes": backup_file.stat().st_size
-                                    if backup_file.exists() else None}
+            notes["backup_file"] = {"path": str(kept), "bytes": kept.stat().st_size
+                                    if kept.exists() else None}
         if "HANDWRITTEN" in deck_text(slides, pid):
             problems.append("the forced rebuild did not actually rebuild the deck")
 
         # 4. recovery, both ways: the local .pptx, and Drive's version history.
-        restored = []
+        restored: list[str] = []
         listed = tool(log, "deck_backup.py", "list", "--deck", out)
-        notes["history"] = {"returncode": listed.returncode, "lines": listed.stdout.splitlines()[:12]}
-        if entry and Path(entry["backup"].get("file", "")).exists():
-            done = tool(log, "deck_backup.py", "restore", "--deck", out, "--from", entry["backup"]["file"])
+        notes["history"] = {"returncode": listed.returncode, "lines": json_list(listed.stdout.splitlines()[:12])}
+        if entry and Path(backup_file(entry)).exists():
+            done = tool(log, "deck_backup.py", "restore", "--deck", out, "--from", backup_file(entry))
             rid = done.stdout.strip().rsplit("/d/", 1)[-1].split("/")[0] if "/d/" in done.stdout else None
             notes["restore_from_file"] = {"returncode": done.returncode, "presentationId": rid}
             if rid:
@@ -192,9 +213,9 @@ def main() -> int:
         # 4b. the way back people actually want: the same URL, holding what it held before the
         # rebuild. `restore --in-place` uploads the backup over the deck, so every link, embed and
         # bookmark keeps working. What came back is compared word for word with what was lost.
-        recovered = None
-        if entry and Path(entry["backup"].get("file", "")).exists():
-            done = tool(log, "deck_backup.py", "restore", "--deck", out, "--from", entry["backup"]["file"],
+        recovered: Model | None = None
+        if entry and Path(backup_file(entry)).exists():
+            done = tool(log, "deck_backup.py", "restore", "--deck", out, "--from", backup_file(entry),
                         "--in-place")
             recovered = sc.read(pid)
             lost = lost_words(edited_model, recovered)
@@ -220,18 +241,19 @@ def main() -> int:
         # What may never happen either way is a write: the recovered deck must come out of this
         # word for word as the recovery left it.
         if recovered is not None:
-            base = json.loads((out / "sync" / "base.json").read_text(encoding="utf-8"))
-            named = [s.get("objectId") for s in base.get("slides", []) if s.get("objectId")]
+            base = as_object(json.loads((out / "sync" / "base.json").read_text(encoding="utf-8")), "base.json")
+            named = [as_str(s.get("objectId"), "a base slide's objectId")
+                     for s in as_objects(base.get("slides", []), "base.json's slides") if s.get("objectId")]
             live = slide_ids(slides, pid)
             was = revision(slides, pid)
             synced = cli(log, "sync", args.pdf, "--deck", out)
             after = sc.read(pid)
             report_file = out / "sync" / "sync-report.json"
-            report = json.loads(report_file.read_text(encoding="utf-8")) \
+            report = as_object(json.loads(report_file.read_text(encoding="utf-8")), "sync-report.json") \
                 if not synced.returncode and report_file.exists() else None
-            note = notes["sync_after_recovery"] = {
+            note: JsonObject = {
                 "returncode": synced.returncode,
-                "base_names": named[:3], "deck_has": live[:3],
+                "base_names": json_list(named[:3]), "deck_has": json_list(live[:3]),
                 "base_describes_the_deck": bool(set(named) & set(live)),
                 "refusal": (synced.stderr or synced.stdout).strip().splitlines()[-1][:200]
                            if synced.returncode else None,
@@ -241,7 +263,8 @@ def main() -> int:
                 "slides": len(after.slides),
                 "holds_the_edit": "HANDWRITTEN" in " ".join(s.all_text for s in after.slides),
                 "lost_words": lost_words(recovered, after),
-                "integrity": sc.integrity_alone(after) if report else []}
+                "integrity": json_list(sc.integrity_alone(after)) if report else []}
+            notes["sync_after_recovery"] = note
             if not note["holds_the_edit"]:
                 problems.append("the sync after the recovery undid the recovered edit")
             if note["lost_words"]:
@@ -258,9 +281,10 @@ def main() -> int:
         # 5. --new-deck leaves the old deck alone; a trashed deck is never written to again.
         before, state_file = revision(slides, pid), (out / "emit.json").read_text(encoding="utf-8")
         new = cli(log, "convert", args.pdf, "--out", out, "--new-deck")
-        fresh = json.loads((out / "emit.json").read_text(encoding="utf-8"))["presentationId"]
+        emitted = as_object(json.loads((out / "emit.json").read_text(encoding="utf-8")), "emit.json")
+        fresh = as_str(emitted["presentationId"], "emit.json's presentationId")
         notes["new_deck"] = {"returncode": new.returncode, "presentationId": fresh,
-                             "said": [l for l in new.stdout.splitlines() if "left as it is" in l]}
+                             "said": json_list(l for l in new.stdout.splitlines() if "left as it is" in l)}
         if fresh == pid:
             problems.append("--new-deck rebuilt the old deck")
         elif revision(slides, pid) != before:
@@ -271,8 +295,9 @@ def main() -> int:
         from beamer2slides.guard import previous_deck
         state = previous_deck(drive, out)
         notes["trashed"] = state
-        if state["state"] != "trashed":
-            problems.append(f"a trashed deck reads back as {state['state']}")
+        said = state.get("state") if state is not None else None
+        if said != "trashed":
+            problems.append(f"a trashed deck reads back as {said}")
 
         # tidy up: only the decks this proof created.
         for rid in restored:
@@ -282,7 +307,7 @@ def main() -> int:
                 log.write(f"could not delete {rid}: {e}\n")
         (out / "emit.json").write_text(state_file, encoding="utf-8")  # the folder tracks the proof's deck again
 
-    notes["problems"] = problems
+    notes["problems"] = json_list(problems)
     notes["seconds"] = round(time.time() - started, 1)
     (args.out / "proof.json").write_text(json.dumps(notes, indent=1, ensure_ascii=False), encoding="utf-8")
     print(json.dumps(notes, indent=1, ensure_ascii=False)[:4000])

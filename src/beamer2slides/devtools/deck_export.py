@@ -40,7 +40,7 @@ def export_to(pid: str, out: Path, per_part: int | None, workers: int) -> Export
     from beamer2slides.google_auth import drive_service, slides_service
     from beamer2slides.gslides import execute
 
-    slides, drive = slides_service(), drive_service()
+    slides, drive = slides_service(None), drive_service(None)
     pres = execute(slides.presentations().get(presentationId=pid, fields="presentationId,slides.objectId"))
     done = export_deck(drive, slides, pres, per_part=per_part, workers=workers, clients=None)
     out.mkdir(parents=True, exist_ok=True)

@@ -25,22 +25,38 @@ import re
 import sys
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from beamer2slides import adopt
 from beamer2slides.devtools import adopt_bench
+from beamer2slides.json_types import as_array, as_object
 
 TEXT = {".tex", ".sty", ".cls", ".bib", ".txt"}
 DEFAULT = ("gdg24", "creandum-board", "intro-lecture", "hebrew-lesson", "ds-lecture")
 
 
-def one(name: str) -> dict | None:
+@dataclass(frozen=True, kw_only=True)
+class Row:
+    """What one deck's bootstrap cost and made."""
+    deck: str
+    slides: int
+    secs: float
+    files: int
+    text_kb: float
+    gzip_kb: float
+    bin_mb: float
+    frames: int
+    median: int
+
+
+def one(name: str) -> Row | None:
     """Bootstrap one corpus deck in a temporary directory and measure what came out."""
     folder = adopt_bench.CORPUS / name
     if not (folder / "target.json").exists():
         return None
     with tempfile.TemporaryDirectory(prefix="b2s-view-") as tmp:
-        target = json.loads((folder / "target.json").read_text(encoding="utf-8"))
+        target = as_object(json.loads((folder / "target.json").read_text(encoding="utf-8")), f"{name}'s target.json")
         tex = Path(tmp) / "tree" / "main.tex"
         t0 = time.perf_counter()
         adopt.bootstrap(target, tex, False, None)
@@ -51,34 +67,34 @@ def one(name: str) -> dict | None:
         main = tex.read_text(encoding="utf-8", errors="replace")
         frames = re.findall(r"\\begin\{frame\}.*?\\end\{frame\}", main, re.S)
         sizes = sorted(len(f) for f in frames) or [0]
-        return {
-            "deck": name, "slides": len(target.get("slides") or []), "secs": secs,
-            "files": len(files), "text_kb": len(blob) / 1024,
-            "gzip_kb": len(gzip.compress(blob, 9)) / 1024,
-            "bin_mb": sum(p.stat().st_size for p in files if p.suffix not in TEXT) / 1024 / 1024,
-            "frames": len(frames), "median": sizes[len(sizes) // 2],
-        }
+        return Row(
+            deck=name, slides=len(as_array(target.get("slides") or [], "slides")), secs=secs,
+            files=len(files), text_kb=len(blob) / 1024,
+            gzip_kb=len(gzip.compress(blob, 9)) / 1024,
+            bin_mb=sum(p.stat().st_size for p in files if p.suffix not in TEXT) / 1024 / 1024,
+            frames=len(frames), median=sizes[len(sizes) // 2],
+        )
 
 
 def main(decks: tuple[str, ...]) -> int:
     print(f"{'deck':16} {'slides':>6} {'boot s':>7} {'files':>5} {'textKB':>7} {'gzipKB':>7} "
           f"{'binMB':>6} {'frames':>6} {'medianF':>8}")
-    rows = []
+    rows: list[Row] = []
     for name in decks:
         row = one(name)
         if row is None:
             print(f"{name:16} (no cached target - run `adopt_bench capture {name}` first)")
             continue
         rows.append(row)
-        print(f"{row['deck']:16} {row['slides']:6} {row['secs']:7.1f} {row['files']:5} "
-              f"{row['text_kb']:7.0f} {row['gzip_kb']:7.0f} {row['bin_mb']:6.1f} "
-              f"{row['frames']:6} {row['median']:8}")
+        print(f"{row.deck:16} {row.slides:6} {row.secs:7.1f} {row.files:5} "
+              f"{row.text_kb:7.0f} {row.gzip_kb:7.0f} {row.bin_mb:6.1f} "
+              f"{row.frames:6} {row.median:8}")
     if not rows:
         return 1
-    print(f"\n{len(rows)} decks: the text is {sum(r['gzip_kb'] for r in rows) / len(rows):.0f} kB "
-          f"gzipped on average against {sum(r['bin_mb'] for r in rows) / len(rows):.1f} MB of "
-          f"pictures and fonts; bootstrap {min(r['secs'] for r in rows):.1f}-"
-          f"{max(r['secs'] for r in rows):.1f} s, no LaTeX")
+    print(f"\n{len(rows)} decks: the text is {sum(r.gzip_kb for r in rows) / len(rows):.0f} kB "
+          f"gzipped on average against {sum(r.bin_mb for r in rows) / len(rows):.1f} MB of "
+          f"pictures and fonts; bootstrap {min(r.secs for r in rows):.1f}-"
+          f"{max(r.secs for r in rows):.1f} s, no LaTeX")
     return 0
 
 

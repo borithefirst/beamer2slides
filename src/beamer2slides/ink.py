@@ -38,7 +38,7 @@ def load_gray(path: Path) -> Gray:
 
 
 def render_gray(page: Page, px_per_pt: float) -> Gray:
-    return np.asarray(Image.fromarray(page.render(px_per_pt)).convert("L"))
+    return np.asarray(Image.fromarray(page.render(px_per_pt, clip=None, transparent=False)).convert("L"))
 
 
 def _crop(gray: Gray, region: Box | None, px_per_pt: float) -> tuple[Gray, int, int]:
@@ -52,7 +52,7 @@ def _crop(gray: Gray, region: Box | None, px_per_pt: float) -> tuple[Gray, int, 
     return gray[y0:y1, x0:x1], x0, y0
 
 
-def ink_box(gray: Gray, px_per_pt: float, region: Box | None = None) -> Box | None:
+def ink_box(gray: Gray, px_per_pt: float, region: Box | None) -> Box | None:
     """Bounding box of all ink inside `region` (points), or None if there is none."""
     sub, ox, oy = _crop(gray, region, px_per_pt)
     ink = sub < INK_THRESHOLD
@@ -68,8 +68,13 @@ def ink_box(gray: Gray, px_per_pt: float, region: Box | None = None) -> Box | No
     )
 
 
-def ink_bands(gray: Gray, px_per_pt: float, region: Box | None = None, min_gap_px: int = 2) -> list[Box]:
-    """Horizontal bands of ink (text lines), top to bottom, each with its own x-extent."""
+BAND_GAP_PX = 2
+"""Two bands of ink (`ink_bands`) are parted by more blank rows than this."""
+
+
+def ink_bands(gray: Gray, px_per_pt: float, region: Box | None, *, min_gap_px: int) -> list[Box]:
+    """Horizontal bands of ink (text lines), top to bottom, each with its own x-extent (`region`
+    None: the whole image; `min_gap_px` usually `BAND_GAP_PX`)."""
     sub, ox, oy = _crop(gray, region, px_per_pt)
     ink = sub < INK_THRESHOLD
     rows = np.flatnonzero(ink.any(axis=1))

@@ -59,8 +59,9 @@ def config_dir() -> Path:
     return base / "beamer2slides"
 
 
-def credential_file(env: str, name: str, default: Path | None = None) -> Path:
-    """The override, else whichever of the two homes has the file, else `default`."""
+def credential_file(env: str, name: str, default: Path | None) -> Path:
+    """The override, else whichever of the two homes has the file, else `default` (None: the
+    config folder's)."""
     if os.environ.get(env):
         return Path(os.environ[env])
     for folder in (ROOT, config_dir()):
@@ -217,7 +218,7 @@ def use_services(services: Injected, needs_credentials: bool = False) -> Abstrac
     that carries its own credentials is no reason to go looking for a token, so the library does
     not resolve any - but the built-in fallback does `creds or credentials()`, and a builder that
     trusts the argument therefore builds an unauthenticated client on the main path
-    (`emit()` opens with `slides_service(), drive_service()`, passing nothing). A builder either
+    (`emit()` opens with `slides_service(None), drive_service(None)`, passing nothing). A builder either
     does `creds or google_auth.credentials()` itself, or says `needs_credentials=True` and is
     handed the library's - resolved once, on the thread that asks, and given to the worker pools
     through `credentials_for_threads` as usual. Reported by a caller who hit it, 2026-09-22.
@@ -347,7 +348,8 @@ def credentials() -> Credentials:
 #: the library's (`gapi.build`, which checks it has what `google_types` says the package calls).
 
 
-def slides_service(creds: Credentials | None = None) -> SlidesService:
+def slides_service(creds: Credentials | None) -> SlidesService:
+    """`creds` None: whoever builds the client resolves them (`credentials()`), as on the main path."""
     made = _services_hook.get()
     if made is not None:
         service = (made.make.get("slides") if isinstance(made.make, Mapping)
@@ -357,8 +359,9 @@ def slides_service(creds: Credentials | None = None) -> SlidesService:
     return gapi.build("slides", "v1", creds or credentials())
 
 
-def drive_service(creds: Credentials | None = None) -> DriveService:
-    """Service objects are not thread-safe: build one per thread, sharing `creds`."""
+def drive_service(creds: Credentials | None) -> DriveService:
+    """Service objects are not thread-safe: build one per thread, sharing `creds` (None: see
+    `slides_service`)."""
     made = _services_hook.get()
     if made is not None:
         service = (made.make.get("drive") if isinstance(made.make, Mapping)
@@ -368,8 +371,9 @@ def drive_service(creds: Credentials | None = None) -> DriveService:
     return gapi.build("drive", "v3", creds or credentials())
 
 
-def docs_service(creds: Credentials | None = None) -> DocsService:
-    """The Docs API must be enabled in the Cloud project; see docs/google-docs.md."""
+def docs_service(creds: Credentials | None) -> DocsService:
+    """The Docs API must be enabled in the Cloud project; see docs/google-docs.md. (`creds` None:
+    see `slides_service`.)"""
     made = _services_hook.get()
     if made is not None:
         service = (made.make.get("docs") if isinstance(made.make, Mapping)

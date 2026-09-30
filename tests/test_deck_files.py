@@ -301,8 +301,8 @@ def adopted(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, name: str, deck: st
     log: list[str] = []
     tex = tmp_path / name / "tree" / "main.tex"
     with adopt.no_machine_fonts():
-        adopt.cmd_adopt(deck, tex, tmp_path / name / "work", False, None, 1, None, False,
-                        log=log.append, found=found, pptx=pptx)
+        adopt.cmd_adopt(deck, tex, tmp_path / name / "work", False, None, 1, None, False, None, base=True,
+                        base_in_drive=False, log=log.append, fonts=None, found=found, pptx=pptx, files=None)
     return Adoption(text=tex.read_text(encoding="utf-8"), figures=files_in(tex.parent / "figures"),
                     fonts=files_in(tex.parent / "fonts"), found=found, seen=seen, log=log)
 

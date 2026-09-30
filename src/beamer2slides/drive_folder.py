@@ -109,12 +109,10 @@ Body = TypeVar("Body", bound=Mapping[str, object])
 
 
 @overload
-def place(body: FileBody, drive: DriveService) -> FileBody: ...
-@overload
 def place(body: FileBody, drive: DriveService, beside: list[str] | None) -> FileBody: ...
 @overload
 def place(body: Body, drive: DriveService, beside: list[str] | None) -> Body: ...
-def place(body: Mapping[str, object], drive: DriveService, beside: list[str] | None = None) -> Mapping[str, object]:
+def place(body: Mapping[str, object], drive: DriveService, beside: list[str] | None) -> Mapping[str, object]:
     """`body` (a files.create / files.copy body) with its `parents` set by `parents`, changed in
     place and returned as the type it came in: a `FileBody` (what `files().create` takes, and what a
     dict written in the call is read as) comes back as one, and a body a caller built as a plain

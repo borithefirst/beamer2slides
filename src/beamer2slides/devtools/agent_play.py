@@ -317,8 +317,8 @@ def _dispatch(task: Task, session: Session, tool: str, arguments: JsonObject) ->
             for prior in session.steps:
                 spent = table.get(as_str(prior["tool"], "a transcript step's tool"))
                 if spent is not None:
-                    spent(ctx, **as_object(prior.get("arguments") or {},
-                                           "a transcript step's arguments"))
+                    spent.dispatch(ctx, as_object(prior.get("arguments") or {},
+                                                  "a transcript step's arguments"))
             return _one_call(table, ctx, tool, arguments)
     return _one_call(bench.local_tools(), _context(session), tool, arguments)
 
@@ -329,7 +329,7 @@ def _one_call(table: Mapping[str, Journey], ctx: AgentContext, tool: str,
     if fn is None:
         return bench.missing_tool(tool)
     try:
-        return fn(ctx, **arguments)
+        return fn.dispatch(ctx, arguments)
     except TypeError as exc:
         # A real tool's wrapper turns this into `bad_request` itself; a scripted fake has no
         # wrapper, so an argument called `ctx` would otherwise take the CLI down with it.

@@ -18,13 +18,18 @@ Usage: python tools/probe_text_fit_fonts.py
 """
 
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
 from PIL import Image
 
+from beamer2slides.arrays import Floats
 from beamer2slides.google_auth import drive_service, slides_service
+from beamer2slides.google_types import Presentation, SlidesService, object_id, presentation_id
 from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
+
+Style = Mapping[str, object]
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "out" / "probe_text_fit_fonts"
@@ -35,23 +40,25 @@ PER_COLUMN = 13
 COLUMN_W = 176
 SENTENCE = "Workstation"  # short enough not to wrap in its row
 
-SC = {"smallCaps": True}
-SUB = {"baselineOffset": "SUBSCRIPT"}
-SUP = {"baselineOffset": "SUPERSCRIPT"}
+PLAIN: Style = {}
+SC: Style = {"smallCaps": True}
+SUB: Style = {"baselineOffset": "SUBSCRIPT"}
+SUP: Style = {"baselineOffset": "SUPERSCRIPT"}
 SPACES = (" ", " ", " ", " ", " ")
 # (label, font, text, extra style): a single character is repeated N times, a longer text once
-ADVANCE_CASES = [
+ADVANCE_CASES: list[tuple[str, str, str, Style]] = [
     *[(f"{font} {ch}", font, ch, {}) for font in ("PT Serif", "Lato") for ch in "MAWma"],
     *[(f"{font} {ch} smallCaps", font, ch, SC) for font in ("PT Serif", "Lato") for ch in "mawMA"],
     *[(f"{font} sentence{' smallCaps' if extra else ''}", font, SENTENCE, extra)
-      for font in ("PT Serif", "Lato") for extra in ({}, SC)],
+      for font in ("PT Serif", "Lato") for extra in (PLAIN, SC)],
     *[(f"{font} U+{ord(ch):04X}", font, ch, {}) for font in ("Roboto Mono", "Lato", "PT Serif") for ch in SPACES],
     ("Roboto Mono 0", "Roboto Mono", "0", {}),
     ("Roboto Mono a", "Roboto Mono", "a", {}),
-    *[(f"Lato 0 {name}", "Lato", "0", extra) for name, extra in (("none", {}), ("sub", SUB), ("sup", SUP))],
-    *[(f"Lato x {name}", "Lato", "x", extra) for name, extra in (("none", {}), ("sub", SUB), ("sup", SUP))],
+    *[(f"Lato 0 {name}", "Lato", "0", extra) for name, extra in (("none", PLAIN), ("sub", SUB), ("sup", SUP))],
+    *[(f"Lato x {name}", "Lato", "x", extra) for name, extra in (("none", PLAIN), ("sub", SUB), ("sup", SUP))],
 ]
-VERTICAL_CASES = [  # (label, text, font, size, extra): ink of each, in one-line boxes of the same top
+# (label, text, font, size, extra): ink of each, in one-line boxes of the same top
+VERTICAL_CASES: list[tuple[str, str, str, float, Style]] = [
     ("Lato H 40", "HH", "Lato", 40, {}),
     ("Lato H 40 sub", "HH", "Lato", 40, SUB),
     ("Lato H 40 sup", "HH", "Lato", 40, SUP),
@@ -67,7 +74,8 @@ VBOX_W, VBOX_H = 170, 70
 # A line's first baseline says which size Slides lays it out at (6.48 + 0.968 em below the box
 # top): a Lato 20 line holding a smallCaps run of PT Serif 26 - lowercase only, with a space in
 # it, with a capital in it - against the same run without smallCaps.
-LINE_CASES = [  # (label, [(text, font, size, extra), ...])
+# (label, [(text, font, size, extra), ...])
+LINE_CASES: list[tuple[str, list[tuple[str, str, float, Style]]]] = [
     ("plain 20", [("Hx mm x", "Lato", 20, {})]),
     ("big run 26", [("Hx ", "Lato", 20, {}), ("mm", "PT Serif", 26, {}), (" x", "Lato", 20, {})]),
     ("smallCaps 26 lowercase", [("Hx ", "Lato", 20, {}), ("mm", "PT Serif", 26, SC), (" x", "Lato", 20, {})]),
@@ -83,57 +91,67 @@ def reps(text: str) -> int:
     return N if len(text) == 1 else 1
 
 
-def style_request(oid: str, font: str, size: float, extra: dict, start: int | None = None, end: int | None = None) -> dict:
-    style = {"fontFamily": font, "fontSize": pt(size), "foregroundColor": {"opaqueColor": {"rgbColor": {}}}, **extra}
-    rng = {"type": "ALL"} if start is None else {"type": "FIXED_RANGE", "startIndex": start, "endIndex": end}
+def style_request(oid: str, font: str, size: float, extra: Style, rng: Mapping[str, object]) -> dict[str, object]:
+    style: dict[str, object] = {"fontFamily": font, "fontSize": pt(size),
+                                "foregroundColor": {"opaqueColor": {"rgbColor": {}}}, **extra}
     return {"updateTextStyle": {"objectId": oid, "textRange": rng, "fields": ",".join(style), "style": style}}
 
 
+def style_all(oid: str, font: str, size: float, extra: Style) -> dict[str, object]:
+    return style_request(oid, font, size, extra, {"type": "ALL"})
+
+
+def style_range(oid: str, font: str, size: float, extra: Style, start: int, end: int) -> dict[str, object]:
+    return style_request(oid, font, size, extra, {"type": "FIXED_RANGE", "startIndex": start, "endIndex": end})
+
+
 def main() -> None:
-    slides = slides_service()
+    slides = slides_service(None)
     pres = execute(slides.presentations().create(body={"title": "b2s probe text fit fonts"}))
     try:
         run(slides, pres)
     finally:
-        execute(drive_service().files().delete(fileId=pres["presentationId"]))
+        execute(drive_service(None).files().delete(fileId=presentation_id(pres)))
 
 
-def run(slides, pres: dict) -> None:
-    pid = pres["presentationId"]
-    first = pres["slides"][0]["objectId"]
-    reqs = [{"deleteObject": {"objectId": e["objectId"]}} for e in pres["slides"][0].get("pageElements", [])]
+def run(slides: SlidesService, pres: Presentation) -> None:
+    pid = presentation_id(pres)
+    first_slide = pres.get("slides", [])[0]
+    first = object_id(first_slide)
+    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}}
+                                        for e in first_slide.get("pageElements", [])]
     per_page = PER_COLUMN * (720 // COLUMN_W)
     fonts = list(dict.fromkeys(font for _, font, _, _ in ADVANCE_CASES))
     # the bars' own spaces are in the row's font: one reference row per font
-    rows = [(f"reference {font}", font, "", {}) for font in fonts] + ADVANCE_CASES
+    rows = [(f"reference {font}", font, "", PLAIN) for font in fonts] + ADVANCE_CASES
     n_pages = -(-len(rows) // per_page)
     pages = [first] + [f"page_{i}" for i in range(1, n_pages + 1)]  # the last one holds the vertical cases
     reqs += [{"createSlide": {"objectId": p}} for p in pages[1:]]
-    placed = []
+    placed: list[tuple[str, str, int, str, float, float]] = []
     for i, (label, font, ch, extra) in enumerate(rows):
-        page, k = pages[i // per_page], i % per_page
-        x, y = 4 + (k // PER_COLUMN) * COLUMN_W, 2 + (k % PER_COLUMN) * ROW
+        page, slot = pages[i // per_page], i % per_page
+        x, y = 4 + (slot // PER_COLUMN) * COLUMN_W, 2 + (slot % PER_COLUMN) * ROW
         oid = f"adv_{i}"
         body = ch * reps(ch) if ch else ""
         reqs += [text_box(oid, page, x, y, COLUMN_W - 2, ROW + 6),
                  {"insertText": {"objectId": oid, "text": "|  " + body + "  |"}},
-                 style_request(oid, font, SIZE, {})]
+                 style_all(oid, font, SIZE, PLAIN)]
         if extra and body:
-            reqs.append(style_request(oid, font, SIZE, extra, 3, 3 + len(body)))
+            reqs.append(style_range(oid, font, SIZE, extra, 3, 3 + len(body)))
         placed.append((label, font, reps(ch) if ch else 1, page, x, y))
     vpage = pages[-1]
-    vplaced = []
+    vplaced: list[tuple[str, float, float]] = []
     per_row = 720 // VBOX_W
     for i, (label, text, font, size, extra) in enumerate(VERTICAL_CASES):
         oid = f"ver_{i}"
         x, y = 4 + (i % per_row) * VBOX_W, 20 + (i // per_row) * (VBOX_H + 20)
         reqs += [text_box(oid, vpage, x, y, VBOX_W - 4, VBOX_H), {"insertText": {"objectId": oid, "text": text}},
-                 style_request(oid, font, size, extra)]
+                 style_all(oid, font, size, extra)]
         vplaced.append((label, x, y))
     lpage = "page_lines"
     pages.append(lpage)
     reqs.append({"createSlide": {"objectId": lpage}})
-    lplaced = []
+    lplaced: list[tuple[str, float, float]] = []
     for i, (label, segments) in enumerate(LINE_CASES):
         oid = f"line_{i}"
         x, y = 4 + (i % 3) * (LBOX_W + 4), 10 + (i // 3) * (LBOX_H + 10)
@@ -141,48 +159,51 @@ def run(slides, pres: dict) -> None:
                  {"insertText": {"objectId": oid, "text": "".join(s[0] for s in segments)}}]
         start = 0
         for text, font, size, extra in segments:
-            reqs.append(style_request(oid, font, size, extra, start, start + len(text)))
+            reqs.append(style_range(oid, font, size, extra, start, start + len(text)))
             start += len(text)
         lplaced.append((label, x, y))
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
 
-    images = {}
+    images: dict[str, Floats] = {}
     for page in pages:
         path = OUT / f"{page}.png"
-        save_thumbnail(slides, pid, page, path)
-        images[page] = np.asarray(Image.open(path).convert("RGB")).mean(axis=2)
+        save_thumbnail(slides, pid, page, path, None)
+        rgb = np.asarray(Image.open(path).convert("RGB"))
+        images[page] = rgb.mean(axis=2, dtype=np.float64)
     k = images[first].shape[1] / 720
 
-    def bars(img, x: float, y: float) -> float:
+    def bars(img: Floats, x: float, y: float) -> float:
         crop = img[int((y + 4) * k):int((y + ROW) * k), int(x * k):int((x + COLUMN_W - 4) * k)]
         cols = np.where((crop < 128).any(axis=0))[0]
-        left = cols[0]
+        left = int(cols[0])
         while left + 1 in cols:
             left += 1
-        right = cols[-1]
+        right = int(cols[-1])
         while right - 1 in cols:
             right -= 1
         return (right - left) / k
 
     reference = {font: bars(images[page], x, y) for _, font, _, page, x, y in placed[:len(fonts)]}
-    result = {"advance_em": {}, "vertical_pt": {}}
+    advance: dict[str, float] = {}
     for label, font, count, page, x, y in placed[len(fonts):]:
-        result["advance_em"][label] = round((bars(images[page], x, y) - reference[font]) / count / SIZE, 4)
+        advance[label] = round((bars(images[page], x, y) - reference[font]) / count / SIZE, 4)
+    vertical: dict[str, dict[str, float]] = {}
     img = images[vpage]
     for label, x, y in vplaced:
         crop = img[int(y * k):int((y + VBOX_H) * k), int(x * k):int((x + VBOX_W - 4) * k)]
         ys = np.where((crop < 128).any(axis=1))[0]
         xs = np.where((crop < 128).any(axis=0))[0]
-        result["vertical_pt"][label] = {"top": round(ys[0] / k, 2), "bottom": round((ys[-1] + 1) / k, 2),
-                                        "height": round((ys[-1] + 1 - ys[0]) / k, 2),
-                                        "width": round((xs[-1] + 1 - xs[0]) / k, 2)}
+        top, bottom, left, right = int(ys[0]), int(ys[-1]) + 1, int(xs[0]), int(xs[-1]) + 1
+        vertical[label] = {"top": round(top / k, 2), "bottom": round(bottom / k, 2),
+                           "height": round((bottom - top) / k, 2), "width": round((right - left) / k, 2)}
     img = images[lpage]
-    result["line_size_pt"] = {}
+    line_size: dict[str, float] = {}
     for label, x, y in lplaced:
         crop = img[int(y * k):int((y + LBOX_H) * k), int(x * k):int((x + 20) * k)]  # the H alone
         ys = np.where((crop < 128).any(axis=1))[0]
-        baseline = (ys[-1] + 1) / k
-        result["line_size_pt"][label] = round((baseline - 6.48) / 0.968, 2)
+        baseline = (int(ys[-1]) + 1) / k
+        line_size[label] = round((baseline - 6.48) / 0.968, 2)
+    result = {"advance_em": advance, "vertical_pt": vertical, "line_size_pt": line_size}
     print(json.dumps(result, indent=1, ensure_ascii=False))
     (OUT / "result.json").write_text(json.dumps(result, indent=1, ensure_ascii=False), encoding="utf-8")
 

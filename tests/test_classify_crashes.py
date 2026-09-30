@@ -11,9 +11,9 @@ from beamer2slides.raw_types import RawDrawing
 
 
 def span(text: str, x0: float, x1: float) -> classify.Span:
-    return classify.Span(id="s", text=text, font="Arial", size=10.0,
+    return classify.new_span(id="s", text=text, font="Arial", size=10.0,
                          color="#000000", rect=classify.Rect(x0, 0.0, x1, 10.0),
-                         baseline=10.0, horizontal=True, info=font_info("Arial"))
+                         baseline=10.0, horizontal=True, info=font_info("Arial"), link=None, drawn=False, visual=None)
 
 
 def unpathed(items: str) -> RawDrawing:

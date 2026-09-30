@@ -7,7 +7,7 @@ from dataclasses import replace
 
 from . import bidi
 from .classify_graphics import GraphicsMixin
-from .classify_model import Line, Rect, Span, extension_font
+from .classify_model import Line, Rect, Span, extension_font, new_line, new_span
 from .classify_text import (
     BULLET_GLYPHS, DISPLAY_WORD_SHARE, ENUM_RE, LABEL_SEP_EM, MATH_OPERATORS, compose_accents, is_code,
     is_mono, prose_share, type3_symbol, type3_text_page,
@@ -45,11 +45,12 @@ class LinesMixin(GraphicsMixin):
             # The page draws right-to-left text left to right (bidi.py): put its letters back, on
             # their own for now and with their line around them once lines are known (read_lines).
             visual, text = text, bidi.logical_text(text)
-            span = Span(s["id"], text, s["font"].split("+", 1)[-1], s["size"], color, r,
-                        s["origin"][1], abs(dy) < 0.01 and dx > 0, info, visual=visual)
+            span = new_span(id=s["id"], text=text, font=s["font"].split("+", 1)[-1], size=s["size"], color=color,
+                            rect=r, baseline=s["origin"][1], horizontal=abs(dy) < 0.01 and dx > 0, info=info,
+                            link=next((uri for lr, uri in links if lr.contains(r.cx, r.cy)), None), drawn=False,
+                            visual=visual)
             if s.get("smallcaps"):  # OpenType small caps, found from glyph ids (extract.small_caps_spans)
                 span.info = replace(span.info, smallcaps=True)
-            span.link = next((uri for lr, uri in links if lr.contains(r.cx, r.cy)), None)
             out.append(span)
         return out
 
@@ -120,7 +121,7 @@ class LinesMixin(GraphicsMixin):
         groups: dict[int, list[Span]] = {}
         for i, s in enumerate(spans):
             groups.setdefault(find(i), []).append(s)
-        lines = sorted((Line(g) for g in groups.values()), key=lambda l: (l.baseline, l.rect.x0))
+        lines = sorted((new_line(g) for g in groups.values()), key=lambda l: (l.baseline, l.rect.x0))
         return self.join_line_labels(lines)
 
     @staticmethod
@@ -149,7 +150,7 @@ class LinesMixin(GraphicsMixin):
                     right = any(g.rect.x1 - 1 <= w.rect.x0 <= g.rect.x1 + 1.5 * size for w in b.spans)
                     if left and right:
                         i, j = out.index(a), out.index(b)
-                        rest, joined = Line([s for s in a.spans if s is not g]), Line(b.spans + [g])
+                        rest, joined = new_line([s for s in a.spans if s is not g]), new_line(b.spans + [g])
                         rest.tab, joined.tab = a.tab, b.tab
                         out[i], out[j] = rest, joined
                         a = rest
@@ -173,7 +174,7 @@ class LinesMixin(GraphicsMixin):
                 after = [w for w in b.spans if g.rect.x1 - 1 <= w.rect.x0 <= g.rect.x1 + 1.5 * size]
                 if before and after and any(LinesMixin.prose_word(w) for w in before + after):
                     out.remove(g_line)
-                    joined = Line(b.spans + g_line.spans)
+                    joined = new_line(b.spans + g_line.spans)
                     joined.tab = b.tab
                     out[out.index(b)] = joined
                     break
@@ -190,7 +191,7 @@ class LinesMixin(GraphicsMixin):
                         abs(w.rect.x0 - g.rect.x1) <= 1 and g.baseline < w.baseline <= g.rect.y1 + g.size
                         and w.size >= 0.6 * g.size for w in host.spans):
                     out.remove(g_line)
-                    joined = Line(host.spans + g_line.spans)
+                    joined = new_line(host.spans + g_line.spans)
                     joined.tab = host.tab
                     out[out.index(host)] = joined
                     break
@@ -234,7 +235,7 @@ class LinesMixin(GraphicsMixin):
                     continue
                 line.spans.remove(num)
                 line.tab = None  # (the number was the label the code was tabbed from)
-                own = Line([num])
+                own = new_line([num])
                 own.code_number = True
                 out.insert(out.index(line), own)
         return out
@@ -292,7 +293,7 @@ class LinesMixin(GraphicsMixin):
                     out.remove(g_line)
                     if other:
                         out.remove(other)
-                    joined = Line(host.spans + g_line.spans + (other.spans if other else []))
+                    joined = new_line(host.spans + g_line.spans + (other.spans if other else []))
                     joined.tab = host.tab
                     out[out.index(host)] = joined
                     break

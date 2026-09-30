@@ -122,8 +122,8 @@ def measure(pdf: Path, out: Path, refresh: bool) -> Report:
         thumb_path = fdir / f"slides-{n + 1:03}.png"
         # Saved thumbnails are reused unless the deck was emitted again since.
         if refresh or not thumb_path.exists() or thumb_path.stat().st_mtime < (out / "emit.json").stat().st_mtime:
-            slides = slides or slides_service()
-            save_thumbnail(slides, state["presentationId"], emitted["objectId"], thumb_path)
+            slides = slides or slides_service(None)
+            save_thumbnail(slides, state["presentationId"], emitted["objectId"], thumb_path, fetch=None)
         thumb = rgb_array(Image.open(thumb_path))
         h, w = thumb.shape[:2]
         # Background: the uploaded PNG (with its patches). The reference goes through the same
@@ -131,7 +131,7 @@ def measure(pdf: Path, out: Path, refresh: bool) -> Report:
         bg_png = Image.open(out / "backgrounds" / f"bg-{n + 1:03}.png")
         bg = rgb_array_at(bg_png, (w, h))
         zoom = bg_png.width / original[n].width
-        ref = rgb_array_at(Image.fromarray(original[n].render(zoom)), (w, h))
+        ref = rgb_array_at(Image.fromarray(original[n].render(zoom, clip=None, transparent=False)), (w, h))
         m_ref, m_sl = text_mask(ref, bg), text_mask(thumb, bg)
 
         px_per_pdf_pt = w / slide["size"][0]

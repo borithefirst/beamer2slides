@@ -5,6 +5,7 @@ Usage: python tools/probe.py file.pdf [page-numbers, 1-based] [--png DIR]
 
 import argparse
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 
 from PIL import Image
@@ -13,7 +14,7 @@ from beamer2slides.extract import shown_spans
 from beamer2slides.pdf import Document, Page
 
 
-def fmt_rect(r) -> str:
+def fmt_rect(r: Sequence[float]) -> str:
     x0, y0, x1, y1 = r
     return f"({x0:6.1f},{y0:6.1f})-({x1:6.1f},{y1:6.1f})"
 
@@ -58,7 +59,7 @@ def main() -> None:
         probe_page(page)
         if args.png:
             args.png.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(page.render(110 / 72)).save(args.png / f"{Path(args.pdf).stem}-p{n + 1:02}.png")
+            Image.fromarray(page.render(110 / 72, None, False)).save(args.png / f"{Path(args.pdf).stem}-p{n + 1:02}.png")
 
 
 if __name__ == "__main__":

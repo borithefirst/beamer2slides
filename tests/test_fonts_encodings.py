@@ -6,9 +6,9 @@ Synthetic names and spans, no PDF."""
 
 import pytest
 
-from beamer2slides.classify import (Line, PageClassifier, Paragraph, Rect, Span, compose_accents, math_family,
-                                    math_pieces, math_text, negate, type3_symbol)
-from beamer2slides.fonts import FontInfo, font_info, google_font
+from beamer2slides.classify import (PageClassifier, Rect, compose_accents, math_family, math_pieces, math_text,
+                                    negate, new_line, new_paragraph, new_span, type3_symbol)
+from beamer2slides.fonts import font_info, google_font, plain_face
 from beamer2slides.ir import Run
 from beamer2slides.raw_types import RawSpan
 
@@ -128,8 +128,8 @@ def raw_span(i: int, text: str, font: str, x0: float, x1: float, baseline: float
 def runs_of(raw_spans: list[RawSpan]) -> list[Run]:
     page = PageClassifier({"index": 0, "label": "1", "size": [364, 273], "spans": raw_spans, "images": [],
                            "drawings": [], "links": []}, 10)
-    line = Line(page.spans())
-    return PageClassifier.runs(Paragraph([line]), "", False, None, 0.0)
+    line = new_line(page.spans())
+    return PageClassifier.runs(new_paragraph([line], align="left", reason=None), "", False, None, 0.0)
 
 
 def test_page_spans_compose_accents_and_ts1_symbols():
@@ -171,9 +171,11 @@ def test_cm_math_letters_are_serif_among_sans_words():
 
 
 def test_math_family_falls_back_to_the_paragraph_then_serif():
-    info = FontInfo("math")
-    formula = Span("m", "x", "CMMI10", 10, "#000000", Rect(0, 0, 5, 10), 10, True, info)
-    words = Span("w", "some words", "CMSS10", 10, "#000000", Rect(0, 20, 50, 30), 30, True, font_info("CMSS10"))
-    alone = Line([formula])
+    info = plain_face("math")
+    formula = new_span(id="m", text="x", font="CMMI10", size=10, color="#000000", rect=Rect(0, 0, 5, 10), baseline=10,
+                       horizontal=True, info=info, link=None, drawn=False, visual=None)
+    words = new_span(id="w", text="some words", font="CMSS10", size=10, color="#000000", rect=Rect(0, 20, 50, 30),
+                     baseline=30, horizontal=True, info=font_info("CMSS10"), link=None, drawn=False, visual=None)
+    alone = new_line([formula])
     assert math_family(alone, None) == "serif"
-    assert math_family(alone, Paragraph([alone, Line([words])])) == "sans"
+    assert math_family(alone, new_paragraph([alone, new_line([words])], align="left", reason=None)) == "sans"

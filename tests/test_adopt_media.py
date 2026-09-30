@@ -240,7 +240,8 @@ def test_adopt_reads_a_saved_presentation_and_its_pptx(
     monkeypatch.setattr(adopt, "record_base", base)
     found: dict[str, object] = {}
     adopt.cmd_adopt("deck.json", tmp_path / "tree" / "main.tex", tmp_path / "work", False, None, 1, None,
-                    False, tmp_path / "deck.json", log=quiet, found=found, pptx=tmp_path / "deck.pptx")
+                    False, tmp_path / "deck.json", base=True, base_in_drive=False, log=quiet, fonts=None, found=found,
+                    pptx=tmp_path / "deck.pptx", files=None)
     [el] = own(targets[0])
     assert Path(jstr(el, "file")).read_bytes() == cat
     recorded = bases[0]

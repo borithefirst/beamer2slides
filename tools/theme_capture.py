@@ -10,42 +10,66 @@ Output: out/templates/<name>/{presentation.json, layouts.md, slides/NNN.png}
 
 import argparse
 import json
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from beamer2slides.google_auth import credentials, slides_service
+from beamer2slides.google_types import (
+    AffineTransform, Dimension, LayoutProperties, Page, PageElement, Presentation, SlideProperties, Size,
+    background_fill, children, object_id, part, parts,
+)
 from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
+from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_object, as_str
 
 OUT = Path(__file__).resolve().parents[1] / "out" / "templates"
 
+Scheme = Mapping[str, str]
+"""A master's colour scheme: theme colour name -> "#rrggbb"."""
 
-def hex_color(c: dict | None, scheme: dict[str, str]) -> str | None:
+
+def number(v: Json, where: str) -> float:
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v
+    raise JsonShapeError(f"{where}: a number was expected, found {type(v).__name__}")
+
+
+def rgb_hex(rgb: JsonObject) -> str:
+    return "#" + "".join(f"{round(number(rgb.get(k, 0), 'rgbColor.' + k) * 255):02x}" for k in ("red", "green", "blue"))
+
+
+def hex_color(c: Json, scheme: Scheme) -> str | None:
     if not c:
         return None
+    c = as_object(c, "a colour")
     if "themeColor" in c:
-        return f"{c['themeColor']}={scheme.get(c['themeColor'], '?')}"
-    rgb = c.get("rgbColor", {})
-    return "#" + "".join(f"{round(rgb.get(k, 0) * 255):02x}" for k in ("red", "green", "blue"))
+        theme = as_str(c["themeColor"], "themeColor")
+        return f"{theme}={scheme.get(theme, '?')}"
+    return rgb_hex(part(c.get("rgbColor"), "rgbColor"))
 
 
-def fill_color(fill: dict | None, scheme: dict[str, str]) -> str | None:
+def fill_color(fill: JsonObject | None, scheme: Scheme) -> str | None:
     if not fill or fill.get("propertyState") == "NOT_RENDERED":
         return None
     if "solidFill" in fill:
-        s = fill["solidFill"]
-        alpha = s.get("alpha", 1)
-        return hex_color(s.get("color"), scheme) + ("" if alpha == 1 else f" a={alpha:.2f}")
+        s = as_object(fill["solidFill"], "solidFill")
+        alpha = number(s.get("alpha", 1), "solidFill.alpha")
+        colour = hex_color(s.get("color"), scheme)
+        if colour is None:
+            raise JsonShapeError("a solidFill without its colour")
+        return colour + ("" if alpha == 1 else f" a={alpha:.2f}")
     if "stretchedPictureFill" in fill:
         return "picture"
     return None
 
 
-IDENTITY = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)  # scaleX, shearY, shearX, scaleY, translateX, translateY (pt)
+Matrix = tuple[float, float, float, float, float, float]
+IDENTITY: Matrix = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)  # scaleX, shearY, shearX, scaleY, translateX, translateY (pt)
 
 
-def matrix(el: dict, parent: tuple = IDENTITY) -> tuple:
+def matrix(el: PageElement, parent: Matrix) -> Matrix:
     """The element's affine transform in page pt; group children are relative to their group."""
-    t = el.get("transform", {})
+    t = el.get("transform", AffineTransform())
     k = EMU_PER_PT if t.get("unit", "EMU") == "EMU" else 1
     # Zero fields are omitted in the JSON: a rotated element has shears and no scales.
     a, b, c, d = t.get("scaleX", 0), t.get("shearY", 0), t.get("shearX", 0), t.get("scaleY", 0)
@@ -55,78 +79,87 @@ def matrix(el: dict, parent: tuple = IDENTITY) -> tuple:
             pa * e + pc * f + pe, pb * e + pd * f + pf)
 
 
-def box(el: dict, m: tuple) -> tuple[float, float, float, float]:
-    size = el.get("size", {})
-    w = size.get("width", {}).get("magnitude", 0) / EMU_PER_PT
-    h = size.get("height", {}).get("magnitude", 0) / EMU_PER_PT
+def box(el: PageElement, m: Matrix) -> tuple[float, float, float, float]:
+    size = el.get("size", Size())
+    w = size.get("width", Dimension()).get("magnitude", 0) / EMU_PER_PT
+    h = size.get("height", Dimension()).get("magnitude", 0) / EMU_PER_PT
     xs = [m[4] + u * m[0] + v * m[2] for u, v in ((0, 0), (w, 0), (0, h), (w, h))]
     ys = [m[5] + u * m[1] + v * m[3] for u, v in ((0, 0), (w, 0), (0, h), (w, h))]
     return min(xs), min(ys), max(xs) - min(xs), max(ys) - min(ys)  # bounding box
 
 
-def first_style(shape: dict) -> tuple[dict, dict]:
-    run, para = {}, {}
-    for te in shape.get("text", {}).get("textElements", []):
+def text_elements(shape: JsonObject) -> list[JsonObject]:
+    return parts(part(shape.get("text"), "shape.text").get("textElements"), "text.textElements")
+
+
+def first_style(shape: JsonObject) -> tuple[JsonObject, JsonObject]:
+    run: JsonObject = {}
+    para: JsonObject = {}
+    for te in text_elements(shape):
         if "paragraphMarker" in te and not para:
-            para = te["paragraphMarker"].get("style", {})
-        if "textRun" in te and te["textRun"].get("content", "").strip():
-            run = te["textRun"].get("style", {})
+            para = part(as_object(te["paragraphMarker"], "paragraphMarker").get("style"), "paragraphMarker.style")
+        text_run = part(te.get("textRun"), "textRun")
+        if "textRun" in te and as_str(text_run.get("content", ""), "textRun.content").strip():
+            run = part(text_run.get("style"), "textRun.style")
             break
     return run, para
 
 
-def text_of(shape: dict) -> str:
-    return "".join(te.get("textRun", {}).get("content", "")
-                   for te in shape.get("text", {}).get("textElements", [])).strip()
+def text_of(shape: JsonObject) -> str:
+    return "".join(as_str(part(te.get("textRun"), "textRun").get("content", ""), "textRun.content")
+                   for te in text_elements(shape)).strip()
 
 
-def describe(el: dict, scheme: dict[str, str], indent: str = "  ", parent: tuple = IDENTITY) -> list[str]:
+def describe(el: PageElement, scheme: Scheme, indent: str, parent: Matrix) -> list[str]:
     m = matrix(el, parent)
     x, y, w, h = box(el, m)
     geo = f"({x:.1f}, {y:.1f}) {w:.1f}x{h:.1f}"
     if "elementGroup" in el:
         lines = [f"{indent}group"]
-        for child in el["elementGroup"].get("children", []):
+        for child in children(el, object_id(el)):
             lines += describe(child, scheme, indent + "  ", m)
         return lines
     if "image" in el:
         return [f"{indent}image {geo}"]
-    if "line" in el:
-        lp = el["line"].get("lineProperties", {})
-        c = hex_color(lp.get("lineFill", {}).get("solidFill", {}).get("color"), scheme)
-        return [f"{indent}line {geo} {c} w={lp.get('weight', {}).get('magnitude')}"]
+    line = el.get("line")
+    if line is not None:
+        lp = part(line.get("lineProperties"), "lineProperties")
+        solid = part(part(lp.get("lineFill"), "lineFill").get("solidFill"), "lineFill.solidFill")
+        c = hex_color(solid.get("color"), scheme)
+        return [f"{indent}line {geo} {c} w={part(lp.get('weight'), 'weight').get('magnitude')}"]
     if "table" in el:
         return [f"{indent}table {geo}"]
     shape = el.get("shape")
     if not shape:
         return [f"{indent}{next(iter(k for k in el if k not in ('objectId', 'size', 'transform')), '?')} {geo}"]
-    props = shape.get("shapeProperties", {})
-    ph = shape.get("placeholder")
+    props = part(shape.get("shapeProperties"), "shapeProperties")
+    ph = part(shape.get("placeholder"), "placeholder")
     kind = f"PH {ph['type']}#{ph.get('index', 0)}" if ph else shape.get("shapeType", "?")
     run, para = first_style(shape)
-    style = []
+    style: list[str] = []
     if run:
-        wff = run.get("weightedFontFamily", {})
+        wff = part(run.get("weightedFontFamily"), "weightedFontFamily")
         fam = wff.get("fontFamily") or run.get("fontFamily")
         style.append(f"{fam} {wff.get('weight', '')}".strip())
         if run.get("fontSize"):
-            style.append(f"{run['fontSize']['magnitude']}pt")
-        fg = hex_color(run.get("foregroundColor", {}).get("opaqueColor"), scheme)
+            style.append(f"{as_object(run['fontSize'], 'fontSize')['magnitude']}pt")
+        fg = hex_color(part(run.get("foregroundColor"), "foregroundColor").get("opaqueColor"), scheme)
         if fg:
             style.append(fg)
         for flag in ("bold", "italic"):
             if run.get(flag):
                 style.append(flag)
     if para.get("alignment"):
-        style.append(para["alignment"])
+        style.append(as_str(para["alignment"], "alignment"))
     if para.get("lineSpacing"):
         style.append(f"ls={para['lineSpacing']}")
-    fill = fill_color(props.get("shapeBackgroundFill"), scheme)
+    fill = fill_color(part(props.get("shapeBackgroundFill"), "shapeBackgroundFill"), scheme)
     if fill:
         style.append(f"fill={fill}")
-    outline = props.get("outline", {})
+    outline = part(props.get("outline"), "outline")
     if outline.get("propertyState") != "NOT_RENDERED" and outline.get("outlineFill"):
-        oc = hex_color(outline["outlineFill"].get("solidFill", {}).get("color"), scheme)
+        solid = part(as_object(outline["outlineFill"], "outlineFill").get("solidFill"), "outlineFill.solidFill")
+        oc = hex_color(solid.get("color"), scheme)
         if oc:
             style.append(f"outline={oc}")
     if props.get("contentAlignment"):
@@ -135,43 +168,60 @@ def describe(el: dict, scheme: dict[str, str], indent: str = "  ", parent: tuple
     return [f"{indent}{kind} {geo} {' '.join(style)}" + (f"  \"{txt[:70]}\"" if txt else "")]
 
 
-def summarize(p: dict) -> str:
-    size = p["pageSize"]
-    out = [f"# {p['title']}", "",
-           f"Page {size['width']['magnitude'] / EMU_PER_PT:.0f} x {size['height']['magnitude'] / EMU_PER_PT:.0f} pt, "
-           f"{len(p['slides'])} slides, {len(p['layouts'])} layouts", ""]
-    schemes = {}
-    for m in p["masters"]:
-        scheme = {c["type"]: hex_color({"rgbColor": c["color"]}, {})
-                  for c in m["pageProperties"].get("colorScheme", {}).get("colors", [])}
-        schemes[m["objectId"]] = scheme
-        out += [f"## Master {m['masterProperties'].get('displayName')} ({m['objectId']})",
+def layout_of(slide: Page) -> str:
+    """The id of the layout a slide is made from."""
+    layout = slide.get("slideProperties", SlideProperties()).get("layoutObjectId")
+    if layout is None:
+        raise JsonShapeError(f"slide {object_id(slide)} without its layoutObjectId")
+    return layout
+
+
+def scheme_of(schemes: Mapping[str, Scheme], master: str | None) -> Scheme:
+    return schemes.get(master, {}) if master is not None else {}
+
+
+def summarize(p: Presentation) -> str:
+    size = p.get("pageSize", Size())
+    width = size.get("width", Dimension()).get("magnitude", 0)
+    height = size.get("height", Dimension()).get("magnitude", 0)
+    slides, layouts = p.get("slides", []), p.get("layouts", [])
+    out = [f"# {p.get('title')}", "",
+           f"Page {width / EMU_PER_PT:.0f} x {height / EMU_PER_PT:.0f} pt, "
+           f"{len(slides)} slides, {len(layouts)} layouts", ""]
+    schemes: dict[str, Scheme] = {}
+    for m in p.get("masters", []):
+        colours = parts(part(part(m.get("pageProperties"), "pageProperties").get("colorScheme"), "colorScheme")
+                        .get("colors"), "colorScheme.colors")
+        scheme = {as_str(c["type"], "colorScheme type"): rgb_hex(as_object(c["color"], "colorScheme color"))
+                  for c in colours}
+        schemes[object_id(m)] = scheme
+        out += [f"## Master {part(m.get('masterProperties'), 'masterProperties').get('displayName')} ({object_id(m)})",
                 "colours: " + ", ".join(f"{k}={v}" for k, v in scheme.items()),
-                f"background: {fill_color(m['pageProperties'].get('pageBackgroundFill'), scheme)}"]
+                f"background: {fill_color(background_fill(m), scheme)}"]
         for el in m.get("pageElements", []):
-            out += describe(el, scheme)
+            out += describe(el, scheme, "  ", IDENTITY)
         out.append("")
     users: dict[str, list[int]] = {}
-    for i, s in enumerate(p["slides"], 1):
-        users.setdefault(s["slideProperties"]["layoutObjectId"], []).append(i)
-    for lay in p["layouts"]:
-        props = lay["layoutProperties"]
-        scheme = schemes.get(props.get("masterObjectId"), {})
-        out += [f"## Layout {props.get('displayName')} [{props.get('name')}] ({lay['objectId']})",
+    for i, s in enumerate(slides, 1):
+        users.setdefault(layout_of(s), []).append(i)
+    for lay in layouts:
+        props = lay.get("layoutProperties", LayoutProperties())
+        scheme = scheme_of(schemes, props.get("masterObjectId"))
+        out += [f"## Layout {props.get('displayName')} [{props.get('name')}] ({object_id(lay)})",
                 f"master {props.get('masterObjectId')}; background "
-                f"{fill_color(lay['pageProperties'].get('pageBackgroundFill'), scheme)}; "
-                f"slides {users.get(lay['objectId'], [])}"]
+                f"{fill_color(background_fill(lay), scheme)}; "
+                f"slides {users.get(object_id(lay), [])}"]
         for el in lay.get("pageElements", []):
-            out += describe(el, scheme)
+            out += describe(el, scheme, "  ", IDENTITY)
         out.append("")
     out.append("## Slides")
-    for i, s in enumerate(p["slides"], 1):
-        lay = next((l for l in p["layouts"] if l["objectId"] == s["slideProperties"]["layoutObjectId"]), None)
-        scheme = schemes.get(s["slideProperties"].get("masterObjectId"), {})
-        out.append(f"### {i:03d} ({lay['layoutProperties'].get('displayName') if lay else '?'}) "
-                   f"background {fill_color(s['pageProperties'].get('pageBackgroundFill'), scheme)}")
+    for i, s in enumerate(slides, 1):
+        lay = next((l for l in layouts if object_id(l) == layout_of(s)), None)
+        scheme = scheme_of(schemes, s.get("slideProperties", SlideProperties()).get("masterObjectId"))
+        shown = lay.get("layoutProperties", LayoutProperties()).get("displayName") if lay else "?"
+        out.append(f"### {i:03d} ({shown}) background {fill_color(background_fill(s), scheme)}")
         for el in s.get("pageElements", []):
-            out += describe(el, scheme)
+            out += describe(el, scheme, "  ", IDENTITY)
     return "\n".join(out) + "\n"
 
 
@@ -181,25 +231,26 @@ def main() -> None:
     ap.add_argument("name")
     ap.add_argument("--no-thumbs", action="store_true")
     args = ap.parse_args()
+    pid: str = args.presentation_id
     folder = OUT / args.name
     folder.mkdir(parents=True, exist_ok=True)
-    slides = slides_service()
-    p = execute(slides.presentations().get(presentationId=args.presentation_id))
+    slides = slides_service(None)
+    p = execute(slides.presentations().get(presentationId=pid))
     (folder / "presentation.json").write_text(json.dumps(p, indent=1), encoding="utf-8")
     (folder / "layouts.md").write_text(summarize(p), encoding="utf-8")
-    print(f"{p['title']}: {len(p['slides'])} slides, {len(p['layouts'])} layouts -> {folder}")
+    print(f"{p.get('title')}: {len(p.get('slides', []))} slides, {len(p.get('layouts', []))} layouts -> {folder}")
     if args.no_thumbs:
         return
     creds = credentials()
 
-    def thumb(item):
+    def thumb(item: tuple[int, Page]) -> None:
         i, s = item
         path = folder / "slides" / f"{i:03d}.png"
         if not path.exists():
-            save_thumbnail(slides_service(creds), args.presentation_id, s["objectId"], path)
+            save_thumbnail(slides_service(creds), pid, object_id(s), path, None)
 
     with ThreadPoolExecutor(3) as pool:
-        list(pool.map(thumb, enumerate(p["slides"], 1)))
+        list(pool.map(thumb, enumerate(p.get("slides", []), 1)))
     print("thumbnails done")
 
 

@@ -24,8 +24,8 @@ from . import inverse_edits as ed
 from .json_reads import jarr, jint, jnum, jobj, jobjs, jstr
 from beamer2slides.compare import (TOL, BoxGeometry, Comparison, Current, TextGeometry, WordOp, bullet_sig, compare,
                                    match_slides, residual_json, style_diffs, target_slide_of, without_keys, word_diff)
-from beamer2slides.inverse import (TITLE_STYLE, Candidate, Context, Planner, Result, TextStyle, Workspace, balance_span, colour_name,
-                                   enclosing_group, ensure_preamble, frame_latex, latex_escape, loop_run, loop_texts,
+from beamer2slides.inverse import (BEAMER_PT, TITLE_STYLE, Candidate, Planner, Result, TextStyle, Workspace, balance_span, colour_name,
+                                   enclosing_group, ensure_preamble, frame_latex, fresh_context, latex_escape, loop_run, loop_texts,
                                    runs_latex, size_switch)
 from beamer2slides.json_types import Json, JsonObject, as_optional_str
 from beamer2slides.texmap import (OPAQUE, Frame, Source, build_visible, locate_words, mask_comments, page_frames,
@@ -60,7 +60,7 @@ def test_visible_text_of_commands_math_and_lists():
     assert visible_text(r"A \textbf{bold} and \emph{it} word~--~dash") == "A bold and it word – dash"
     assert visible_text(r"Let $x^2$ be \% of \href{http://x}{here}") == f"Let {OPAQUE} be % of here"
     latex = "\\begin{itemize}\n  \\item One \\alert<2>{two}\n  \\item[--] Three\n\\end{itemize}"
-    vis = build_visible(latex, 0, len(latex))
+    vis = build_visible(latex, 0, len(latex), title_frame=False)
     assert [it.level for it in vis.items] == [0, 0]
     assert "One two" in vis.text and "Three" in vis.text
     assert len(vis.lists) == 1 and vis.lists[0].env == "itemize"
@@ -68,7 +68,7 @@ def test_visible_text_of_commands_math_and_lists():
 
 def test_visible_maps_back_to_source():
     latex = r"Residuals turn into \emph{source edits} until done."
-    vis = build_visible(latex, 0, len(latex))
+    vis = build_visible(latex, 0, len(latex), title_frame=False)
     wm = locate_words("turn into source edits", vis)
     span = wm.span(2, 4)
     assert span is not None
@@ -81,7 +81,7 @@ def test_words_after_an_ellipsis_map_to_their_own_letters():
     """NORMALISE makes "…" three characters: offsets counted after it ran two letters late, and
     past the visible text for a frame's last word (test_ir_matrix's hashing-ellipsis)."""
     for latex in ("Wait… Enough said", "Wait… E", "ﬁne… then"):
-        vis = build_visible(latex, 0, len(latex))
+        vis = build_visible(latex, 0, len(latex), title_frame=False)
         last = latex.split()[-1]
         found = locate_words(last, vis).vis[0]
         assert found is not None
@@ -93,7 +93,7 @@ def test_a_note_opening_on_a_soft_break_leaves_vertical_mode_first():
     """`\\\\` opening a paragraph has no line to end (test_ir_matrix's hashing-note_break)."""
     def title_style(_p: object) -> TextStyle:
         return TITLE_STYLE
-    out = frame_latex([], "k", "\x0bHeads up\nand \x0b more", title_style, Context(), None)
+    out = frame_latex([], "k", "\x0bHeads up\nand \x0b more", title_style, fresh_context(BEAMER_PT), None)
     assert "\\note{\\leavevmode\\\\ Heads up\n\nand \\\\  more}" in out
 
 
@@ -145,8 +145,8 @@ def test_source_frames_inputs_and_labels(tmp_path: Path):
     assert len(pages) == 2 and pages[0].votes[("./main.tex", 5)] == 2
     x0, y0, x1, y1 = pages[0].boxes[0][2:]
     assert abs(x1 - x0 - 300 * 72 / 72.27 / 65536) < 1e-9
-    assert [frame_index(f) for f in page_frames(src, pages, cwd=tmp_path)] == [0, 1]
-    assert [frame_index(f) for f in page_frames(src, [], ["1", "1", "2"])] == [0, 0, 1]
+    assert [frame_index(f) for f in page_frames(src, pages, None, cwd=tmp_path)] == [0, 1]
+    assert [frame_index(f) for f in page_frames(src, [], ["1", "1", "2"], None)] == [0, 0, 1]
 
 
 def frame_index(f: Frame | None) -> int | None:
@@ -265,7 +265,7 @@ def test_latex_helpers():
     assert colour_name("#FF0000", defined) == "red" and defined == {}
     assert colour_name("#123456", defined) == "b2s123456" and defined == {"b2s123456": "123456"}
     assert size_switch(14.4, 11) == r"\Large" and size_switch(30, 11).startswith(r"\fontsize{30.0}")
-    ctx = Context()
+    ctx = fresh_context(BEAMER_PT)
     base = TextStyle(size=10.95, color="#000000", bold=False, italic=False, family="sans", font=None, weight=None)
     said: list[JsonObject] = [{"text": "plain "}, {"text": "bold", "bold": True}, {"text": " red", "color": "#ff0000"}]
     runs = [loop_run(r, "test") for r in said]
@@ -293,11 +293,11 @@ def test_latex_helpers():
 
 def plan_offline(tmp_path: Path, target: JsonObject) -> str:
     """One planning round on a.tex against `target` (no compile); the edited main file."""
-    ws = Workspace(INV / "a.tex", tmp_path)
+    ws = Workspace(INV / "a.tex", tmp_path, handout=False, engine=None, fresh=True)
     deck = fixture_deck()
     frames: list[Frame | None] = [ws.source.frames[jint(s, "frame_index")] for s in jobjs(deck, "slides")]
-    cand = Candidate(ws.source, tmp_path / "a.pdf", deck, frames)
-    ctx = Context()
+    cand = Candidate(ws.source, tmp_path / "a.pdf", deck, frames, locs={}, text_masked={}, words={})
+    ctx = fresh_context(BEAMER_PT)
     edits, failed = Planner(cand, compared(deck, target), target, ctx, ws, set(), {}, {}).plan()
     assert edits, failed
     ws.write(edits)
@@ -469,7 +469,7 @@ def basic_deck(tmp_path_factory: pytest.TempPathFactory) -> JsonObject:
     if reason := pdflatex_missing():
         pytest.skip(reason)
     work = tmp_path_factory.mktemp("basic")
-    built = Workspace(TESTS / "decks" / "01_basic.tex", work).build(work / "classify")
+    built = Workspace(TESTS / "decks" / "01_basic.tex", work, handout=False, engine=None, fresh=True).build(work / "classify", False, None)
     assert not isinstance(built, str), built
     return built.target()
 
@@ -539,7 +539,7 @@ def test_a_compile_runs_again_while_the_auxiliary_files_move(tmp_path: Path, mon
     src = tmp_path / "src"
     src.mkdir()
     (src / "main.tex").write_text(TWO_FRAMES, encoding="utf-8")
-    ws = Workspace(src / "main.tex", tmp_path / "work")
+    ws = Workspace(src / "main.tex", tmp_path / "work", handout=False, engine=None, fresh=True)
     runs = compiles(monkeypatch, ws.build_dir, [{"main.nav": "one"}, {"main.nav": "two"},
                                                 {"main.nav": "two"}])
     ws.compile()

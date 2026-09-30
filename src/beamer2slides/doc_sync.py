@@ -977,7 +977,7 @@ class Stager:
         from .google_types import file_id
         ident = file_id(self.drive.files().create(
             body=place({"name": self.NAME, "mimeType": DOC_MIME,
-                        "appProperties": {"b2sStaging": "docs"}}, self.drive),
+                        "appProperties": {"b2sStaging": "docs"}}, self.drive, beside=None),
             media_body=media_upload(io.BytesIO(f"<html><body>{body}</body></html>".encode()),
                                     "text/html"), fields="id").execute(), "the staging document")
         self.files.append(ident)
@@ -1025,7 +1025,7 @@ def fetch_pictures(path: Path, live: Ir, drive: DriveService | None,
             failed[value] = "downloads are switched off"
             continue
         try:
-            got[value] = net.download(uri)   # through the caller's fetcher
+            got[value] = net.download(uri, None, net.TRIES)   # through the caller's fetcher
         except Exception as err:  # noqa: BLE001 - a harness's fetcher raises its own types
             failed[value] = err
     if failed and drive is not None and ident:
@@ -1038,7 +1038,7 @@ def fetch_pictures(path: Path, live: Ir, drive: DriveService | None,
             print(f"  the picture {value} could not be fetched: {failed.get(value)}")
             continue
         # A fetcher hands over bytes and nothing else, so the picture names its own type.
-        suffix = net.picture_suffix(data)
+        suffix = net.picture_suffix(data, ".png")
         folder = path.parent / f"{path.stem}.media"
         folder.mkdir(parents=True, exist_ok=True)
         name = re.sub(r"[^A-Za-z0-9_.-]", "_", value) + suffix
@@ -1370,7 +1370,7 @@ def push(path: Path, name: str | None, new_doc: bool) -> PushReport:
     from .drive_folder import place
     from .google_types import file_id
     ident = file_id(drive.files().create(
-        body=place({"name": name or source.get("title") or path.stem, "mimeType": DOC_MIME}, drive),
+        body=place({"name": name or source.get("title") or path.stem, "mimeType": DOC_MIME}, drive, beside=None),
         media_body=media_upload(io.BytesIO(html.encode("utf-8")), "text/html"),
         fields="id").execute(), f"the document imported from {path.name}")
 

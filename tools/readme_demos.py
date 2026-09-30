@@ -22,25 +22,32 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path[:0] = [str(ROOT / "src"), str(ROOT / "tools")]
+
+from beamer2slides.json_types import JsonObject  # noqa: E402
+
 SYNC = ROOT / "out" / "demo-sync"
 ADOPT = ROOT / "out" / "demo-adopt"
-SLIDE = {"title": "Pipeline"}
+SLIDE: JsonObject = {"title": "Pipeline"}
 BODY = "Text, lists, tables, blocks and simple diagrams become Slides elements."
 REWRITE = [("Display math and complex figures become pictures you can still move.",
             "Display math and complex figures become pictures you can still move and resize."),
            ("\\begin{alertblock}{Pictures where it is not}", "\\begin{alertblock}{Pictures where it is not (yet)}")]
 
 
-def beamer2slides(*args) -> None:
+def beamer2slides(*args: str | Path) -> None:
     print(">", "beamer2slides", *args)
     if subprocess.run([sys.executable, "-m", "beamer2slides", *map(str, args)], cwd=ROOT).returncode:
         raise SystemExit(f"beamer2slides {args[0]} failed")
 
 
-def pdflatex(tex: Path, runs: int = 2) -> None:
-    for _ in range(runs):
-        r = subprocess.run(["pdflatex", "-interaction=nonstopmode", tex.name], cwd=tex.parent,
-                           capture_output=True, text=True)
+def pdflatex(tex: Path, runs: int) -> None:
+    """`runs` compiles (at least one); the last one's exit decides."""
+    def once() -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["pdflatex", "-interaction=nonstopmode", tex.name], cwd=tex.parent,
+                              capture_output=True, text=True)
+    r = once()
+    for _ in range(runs - 1):
+        r = once()
     if r.returncode:
         raise SystemExit(f"pdflatex {tex} failed:\n{r.stdout[-1500:]}")
 
@@ -52,7 +59,7 @@ def shot(name: str) -> None:
     from beamer2slides.gslides import save_thumbnail
     deck = open_deck(presentation_id(str(SYNC)), defer=False)
     (SYNC / "shots").mkdir(parents=True, exist_ok=True)
-    save_thumbnail(deck.api, deck.pid, deck.model.one(SLIDE).id, SYNC / "shots" / f"{name}.png")
+    save_thumbnail(deck.api, deck.pid, deck.model.one(SLIDE).id, SYNC / "shots" / f"{name}.png", None)
     (SYNC / "shots" / f"{name}.json").write_text(json.dumps(deck.model.pres), encoding="utf-8")
 
 
@@ -61,7 +68,7 @@ def sync_step(step: str) -> None:
     if step == "convert":
         src.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / "examples" / "demo" / "demo.tex", src / "demo.tex")
-        pdflatex(src / "demo.tex")
+        pdflatex(src / "demo.tex", 2)
         # the folder's deck is this script's own: rebuilding it needs no way back
         beamer2slides("convert", src / "demo.pdf", "--out", SYNC, "--force-rebuild", "--backup", "none")
         shot("1-converted")
@@ -80,7 +87,7 @@ def sync_step(step: str) -> None:
                 raise SystemExit(f"not in the talk (run `convert` first): {old}")
             tex = tex.replace(old, new)
         (src / "demo.tex").write_text(tex, encoding="utf-8")
-        pdflatex(src / "demo.tex")
+        pdflatex(src / "demo.tex", 2)
     elif step == "sync":
         beamer2slides("sync", src / "demo.pdf", "--deck", SYNC)
         shot("3-synced")
@@ -95,7 +102,7 @@ def adopt_slide() -> None:
         from beamer2slides.gslides import execute
         ADOPT.mkdir(parents=True, exist_ok=True)
         pid = presentation_id(str(ROOT / "out" / "demo"))
-        cache.write_text(json.dumps(execute(slides_service().presentations().get(presentationId=pid))), encoding="utf-8")
+        cache.write_text(json.dumps(execute(slides_service(None).presentations().get(presentationId=pid))), encoding="utf-8")
     pres = json.loads(cache.read_text(encoding="utf-8"))
     from beamer2slides.devtools.sync_check import Model
     keep = Model(pres).one(SLIDE).index

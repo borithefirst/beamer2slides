@@ -888,7 +888,7 @@ def refresh_pictures(base: JsonObject, ours_slides: Sequence[JsonObject], pairs:
                 continue
             if identity.source_changes(el, oe) != {"image"}:
                 continue
-            if identity.normalise_ir(el["ir"], _anchor_key(el)) != identity.normalise_ir(oe["ir"], _anchor_key(oe)):
+            if identity.normalise_ir(el["ir"], _anchor_key(el), None) != identity.normalise_ir(oe["ir"], _anchor_key(oe), None):
                 continue  # (the IR changed in a way the field hashes don't see)
             if not same_picture_file(old / as_str(as_object(el["ir"], "ir")["file"], "ir.file"), ours_out / new):
                 continue
@@ -1553,7 +1553,7 @@ def snapshot_after_convert(deck: JsonObject, out: Path, state: EmitState, pdf: "
         else:
             problems.append(text)
 
-    slides, drive = slides_service(), drive_service()
+    slides, drive = slides_service(None), drive_service(None)
     pid = state.presentation_id
     written = [written_of(s) for s in state.slides]
     pool = ThreadPoolExecutor(2, thread_name_prefix="b2s-base")

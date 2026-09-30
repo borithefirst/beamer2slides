@@ -285,10 +285,11 @@ def _client(slides: SlidesSource) -> SlidesService | None:
 
 
 def export_deck(drive: DriveService, slides: SlidesSource | None, pres: Mapping[str, object],
-                per_part: int | None = None, workers: int = WORKERS, clients: Clients | None = None) -> Export:
+                *, per_part: int | None, workers: int, clients: Clients | None) -> Export:
     """The deck `pres` describes (a presentations.get; only `presentationId` and the slides'
     objectIds are needed, `deck_ids`) as .pptx: whole where Drive gives it, else in parts.
-    `per_part`: start from parts of that many slides instead of the whole deck. `slides`: the
+    `per_part`: start from parts of that many slides instead of the whole deck (None: the whole
+    deck first). `workers`: parts in the air at once, usually `WORKERS`. `slides`: the
     Slides client that deletes a copy's other slides, or a function making one, called only when
     parts are needed; None (or a function that fails): no parts - the whole export or nothing, as
     before. `clients`: what makes a worker thread's (drive, slides) pair (None: built from
@@ -317,7 +318,7 @@ def export_deck(drive: DriveService, slides: SlidesSource | None, pres: Mapping[
             result.missing.append({"slides": [1, n], "ids": ids, "reason": "no Slides client to cut the deck with"})
             return result
     from .drive_folder import place
-    body: FileBody = place({"name": PART_NAME, "appProperties": {"b2sStaging": pid}}, drive)  # (resolved once, here)
+    body: FileBody = place({"name": PART_NAME, "appProperties": {"b2sStaging": pid}}, drive, beside=None)  # (resolved once, here)
     _run(result, drive, cutter, pid, ids, spans, body, workers, clients)
     result.parts.sort(key=lambda p: p.first)
     result.missing.sort(key=lambda m: m["slides"][0])

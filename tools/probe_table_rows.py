@@ -7,21 +7,32 @@ row heights the API reports and saves a thumbnail to out/probe_table_rows.png.
 Usage: python tools/probe_table_rows.py
 """
 
+from collections.abc import Mapping
 from pathlib import Path
 
 from beamer2slides.google_auth import slides_service
+from beamer2slides.google_types import object_id, part, presentation_id
 from beamer2slides.gslides import EMU_PER_PT, emu, execute, pt, save_thumbnail
+from beamer2slides.json_types import Json, as_objects
+
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 SPACINGS = [100, 85, 70, 55, 40]
 
 
+def as_number(v: Json) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ValueError(f"a number was expected, found {v!r}")
+    return v
+
+
 def main() -> None:
-    slides = slides_service()
+    slides = slides_service(None)
     pres = execute(slides.presentations().create(body={"title": "b2s probe table rows"}))
-    pid = pres["presentationId"]
-    page = pres["slides"][0]["objectId"]
-    reqs = [{"deleteObject": {"objectId": e["objectId"]}} for e in pres["slides"][0].get("pageElements", [])]
+    pid = presentation_id(pres)
+    first = pres.get("slides", [])[0]
+    page = object_id(first)
+    reqs: list[Mapping[str, object]] = [{"deleteObject": {"objectId": object_id(e)}} for e in first.get("pageElements", [])]
     for i, ls in enumerate(SPACINGS):
         oid = f"probe_tab{i}"
         reqs += [
@@ -44,10 +55,11 @@ def main() -> None:
             ]
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     got = execute(slides.presentations().get(presentationId=pid))
-    for el in got["slides"][0]["pageElements"]:
-        rows = el["table"]["tableRows"]
-        print(el["objectId"], [round(r["rowHeight"].get("magnitude", 0) / EMU_PER_PT, 2) for r in rows])
-    print(save_thumbnail(slides, pid, page, OUT / "probe_table_rows.png"))
+    for el in got.get("slides", [])[0].get("pageElements", []):
+        rows = as_objects(part(el.get("table"), "table").get("tableRows"), "table.tableRows")
+        print(object_id(el), [round(as_number(part(r.get("rowHeight"), "rowHeight").get("magnitude", 0)) / EMU_PER_PT, 2)
+                              for r in rows])
+    print(save_thumbnail(slides, pid, page, OUT / "probe_table_rows.png", None))
     print(f"https://docs.google.com/presentation/d/{pid}/edit")
 
 

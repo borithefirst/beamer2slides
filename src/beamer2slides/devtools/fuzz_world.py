@@ -458,7 +458,7 @@ def entries(doc: Mapping[str, Json], out: Path, keys: Sequence[str], all_ekeys: 
         for el, ek, fp in zip(els, ekeys, fps):
             a = opt_text(el.get("anchor"), "element.anchor")
             anchor = ids.get(a) if a is not None else None
-            h, fields = identity.ir_fields(el, out, anchor)
+            h, fields = identity.ir_fields(el, out, anchor, None)
             entry: JsonObject = {"key": ek, "id": el["id"], "kind": el["kind"], "role": el.get("role"),
                                  "ir_hash": h, "fields": fields, "fingerprint": fp, "anchor": anchor, "ir": el}
             if el["kind"] == "image":

@@ -66,14 +66,14 @@ def test_measured_columns_that_fit_the_frame_keep_the_pdf_width():
             {"x0": 155.91, "x1": 190.16, "align": "right"}, {"x0": 202.12, "x1": 247.73, "align": "right"},
             {"x0": 259.68, "x1": 332.62, "align": "left"}]
     need: list[float | None] = [64.62, 39.28, 35.59, 41.73, 74.1]
-    out = E.fit_columns(bounds, cols, scale, need)
+    out = E.fit_columns(bounds, cols, scale, need, tight=False, cap=None)
     assert out[0] == pytest.approx(24.14) and out[-1] == pytest.approx(338.69)
     pad = E.TABLE_CELL_PAD / scale
     for c, n, a, b in zip(cols, need, out, out[1:]):
         assert n is not None
         assert b - a >= n + 2 * pad + E.WRAP_MARGIN / scale  # no cell wraps
     # an unmeasured column still keeps its 8% for the substitute font
-    loose = E.fit_columns(bounds, cols, scale, [None] * 5)
+    loose = E.fit_columns(bounds, cols, scale, [None] * 5, tight=False, cap=None)
     assert loose[-1] > 338.69 + 4
 
 

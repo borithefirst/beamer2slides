@@ -37,11 +37,11 @@ def test_out_root_is_the_checkout_here_and_the_current_folder_when_installed(mon
 
 def test_credentials_come_from_the_override_then_a_home_then_the_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("B2S_TOKEN", str(tmp_path / "given.json"))
-    assert google_auth.credential_file("B2S_TOKEN", "token.json") == tmp_path / "given.json"
+    assert google_auth.credential_file("B2S_TOKEN", "token.json", None) == tmp_path / "given.json"
     monkeypatch.delenv("B2S_TOKEN")
     monkeypatch.setattr(google_auth, "ROOT", tmp_path)
     (tmp_path / "token.json").write_text("{}", encoding="utf-8")
-    assert google_auth.credential_file("B2S_TOKEN", "token.json") == tmp_path / "token.json"
+    assert google_auth.credential_file("B2S_TOKEN", "token.json", None) == tmp_path / "token.json"
     (tmp_path / "token.json").unlink()
-    assert google_auth.credential_file("B2S_TOKEN", "token.json") == google_auth.config_dir() / "token.json"
+    assert google_auth.credential_file("B2S_TOKEN", "token.json", None) == google_auth.config_dir() / "token.json"
     assert google_auth.config_dir().name == "beamer2slides"

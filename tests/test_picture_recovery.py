@@ -405,7 +405,8 @@ def test_adopt_reports_what_the_thumbnails_stood_in_for(tmp_path: Path, monkeypa
     lines: list[str] = []
     with adopt.no_machine_fonts():
         adopt.cmd_adopt(str(folder), tmp_path / "tree" / "main.tex", tmp_path / "work", False, None, 1, None,
-                        False, log=lines.append, found=found)
+                        False, None, base=True, base_in_drive=False, log=lines.append, fonts=None, found=found,
+                        pptx=None, files=None)
     # read as the agent hands it on: JSON
     report: Json = json.loads(json.dumps(found))
     assert jat(report, "pictures_missing") == []

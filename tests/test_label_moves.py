@@ -51,7 +51,7 @@ def test_the_content_decides_and_nobody_moves_slide():
     base, ours = moved_pair()
     keys = identity.slide_keys(base)
     assert keys == ["mobile", "title:arriving labels#1"]
-    got, pairs = identity.inherit_slide_keys(base, keys, ours)
+    got, pairs = identity.inherit_slide_keys(base, keys, ours, moves=None, weak=None)
     assert pairs == {0: 0, 1: 1} and got == ["mobile", "title:arriving labels#1"]
 
 
@@ -190,7 +190,7 @@ def test_two_labels_crossed_over_slides_that_say_the_same_thing_are_a_coin_toss(
     ours = [info("", TWIN_SLIDE, "two"), info("", TWIN_SLIDE + " and by the one before", "one")]
     assert identity.label_moves(base, ours) == [], "every reading ties: there is nothing to decide"
     weak: dict[int, str] = {}
-    assert identity.align_slides(base, ours, weak=weak) == {0: 1, 1: 0}, "the labels are followed"
+    assert identity.align_slides_with(base, ours, moves=None, weak=weak) == {0: 1, 1: 0}, "the labels are followed"
     assert weak == {0: "crossed", 1: "crossed"}
 
 
@@ -200,7 +200,7 @@ def test_the_same_two_slides_with_their_labels_in_order_say_nothing():
     base = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE, "two")]
     ours = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE + " and by the one before", "two")]
     weak: dict[int, str] = {}
-    assert identity.align_slides(base, ours, weak=weak) == {0: 0, 1: 1}
+    assert identity.align_slides_with(base, ours, moves=None, weak=weak) == {0: 0, 1: 1}
     assert weak == {}
 
 
@@ -219,7 +219,7 @@ def test_a_label_pasted_onto_a_twin_that_carries_none_is_named_too():
     ours = [info("", TWIN_SLIDE, None), info("", TWIN_SLIDE, "one")]
     assert identity.label_moves(base, ours) == [], "every reading ties: there is nothing to decide"
     weak: dict[int, str] = {}
-    assert identity.align_slides(base, ours, weak=weak) == {1: 0, 0: 1}, "the label is followed"
+    assert identity.align_slides_with(base, ours, moves=None, weak=weak) == {1: 0, 0: 1}, "the label is followed"
     assert weak == {0: "traded", 1: "traded"}
 
 
@@ -229,7 +229,7 @@ def test_the_same_deck_with_the_label_on_the_frame_it_belongs_to_says_nothing():
     base = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE, None)]
     ours = [info("", TWIN_SLIDE, "one"), info("", TWIN_SLIDE, None)]
     weak: dict[int, str] = {}
-    assert identity.align_slides(base, ours, weak=weak) == {0: 0, 1: 1}
+    assert identity.align_slides_with(base, ours, moves=None, weak=weak) == {0: 0, 1: 1}
     assert weak == {}
 
 
@@ -259,7 +259,7 @@ def test_a_crossing_that_loses_nothing_is_named_though_the_two_readings_do_not_t
     ours = [info("Build with us", a2, None), info("Notes retitled", b2, "one")]
     assert identity.label_moves(base, ours) == [], "the title bonus refuses the exchange"
     weak: dict[int, str] = {}
-    assert identity.align_slides(base, ours, weak=weak) == {1: 0, 0: 1}, "the label is followed"
+    assert identity.align_slides_with(base, ours, moves=None, weak=weak) == {1: 0, 0: 1}, "the label is followed"
     assert weak == {0: "traded", 1: "traded"}
     # Far outside a tie on both sides - each frame reads *better* against the other's slide by
     # about 0.15, seven times `TWIN_TIE`, which is exactly the gap that used to be silent.
@@ -643,7 +643,7 @@ def three_way(unsure_slide: int | None) -> tuple[JsonObject, JsonObject, JsonObj
     slides = [ours_of(s) for s in jobjs(base, "slides")]
     body = jobj(slides[1], "elements", 1)
     ir = text_ir("A different first point\nA different second point", (20, 60, 200, 90), "p1t1", role="body")
-    h, fields = identity.ir_fields(ir, None, None)
+    h, fields = identity.ir_fields(ir, None, None, None)
     body.update(ir=ir, ir_hash=h, fields=fields, fingerprint=identity.fingerprint(ir, None, None))
     ours: JsonObject = {"slides": [*slides], "pairs": {str(j): j for j in range(3)}}
     if unsure_slide is not None:
@@ -691,7 +691,7 @@ def test_follow_labels_writes_the_held_slide_after_all():
     """A person who has read the `.tex` and knows the labels are right says so, and then the sync
     does what it always did - follows the label."""
     base, ours, theirs = three_way(unsure_slide=1)
-    mplan = merge.plan_merge(base, ours, theirs, follow_labels=True)
+    mplan = merge.plan_merge_with(base, ours, theirs, adopt=None, follow_labels=True, take_source=())
     assert writes(mplan, theirs)
     assert jat(mplan, "report", "slides", "held") == []
     assert slides_said(mplan, "applied") == ["results"]
@@ -708,7 +708,7 @@ def test_a_held_slide_is_not_moved_either():
     jobj(ours, "label_moves", 0)["ours"] = 0
     mplan = merge.plan_merge(base, ours, theirs)
     assert mplan["order"] == ["b2s_s000", "b2s_s001", "b2s_s002"], "held where the deck has it"
-    assert merge.plan_merge(base, ours, theirs, follow_labels=True)["order"] \
+    assert merge.plan_merge_with(base, ours, theirs, adopt=None, follow_labels=True, take_source=())["order"] \
         == ["b2s_s001", "b2s_s000", "b2s_s002"], "and moved once somebody says the label is right"
 
 

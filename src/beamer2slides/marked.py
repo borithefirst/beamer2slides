@@ -28,7 +28,7 @@ from collections import Counter
 from collections.abc import Iterable, Sequence
 
 from .classify import Line, PageClassifier, Paragraph, Rect, label_of, span_runs, union_all
-from .classify_model import Span
+from .classify_model import Span, new_line, new_paragraph
 from .ir import Align, run_json, slide_json
 from .json_types import Json, JsonObject, as_array, as_int, as_object, as_objects, as_optional_str, as_str
 from .raw_types import RawDrawing, RawImage, RawItem, RawPage, RawSpan
@@ -248,7 +248,7 @@ class MarkedText(PageClassifier):
         out: list[Paragraph] = []
         for i, ls in sorted(by.items(), key=lambda kv: (kv[0] is None, kv[0] or 0)):
             ls.sort(key=lambda l: l.baseline)
-            par = Paragraph(ls)
+            par = new_paragraph(ls, align="left", reason=None)
             p = self.para.get(ls[0].spans[0].id, {})
             a = p.get("a", "left")
             par.justified = a == "justify"
@@ -282,7 +282,7 @@ def same_row(lines: list[Line]) -> list[Line]:
         if prev is None:
             out.append(line)
         else:
-            out[out.index(prev)] = Line(prev.spans + line.spans)
+            out[out.index(prev)] = new_line(prev.spans + line.spans)
     return out
 
 

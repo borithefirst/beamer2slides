@@ -25,16 +25,24 @@ Usage: python tools/probe_pptx_table_margins.py [--keep]
 import io
 import json
 import sys
+from collections.abc import Mapping
 from pathlib import Path
 
 from lxml import etree
 from PIL import Image
 from pptx import Presentation
+from pptx.shapes.graphfrm import GraphicFrame
+from pptx.slide import Slide
 from pptx.util import Emu, Pt
 
 from beamer2slides import gapi
 from beamer2slides.google_auth import drive_service, slides_service
+from beamer2slides.google_types import PageElement, SlidesService, file_id, object_id, part
 from beamer2slides.gslides import EMU_PER_PT, emu, execute, pt, save_thumbnail
+from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_object, as_objects
+
+Margins = tuple[float, float, float, float]  # l, t, r, b (pt)
+Point = tuple[float, float]
 
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "out" / "probe_pptx_table_margins"
@@ -46,7 +54,7 @@ WIDTH = 64.0
 TEXT = "Hxg"
 
 # name: (margins l, t, r, b in pt or None for the .pptx default, size, lnSpc %, text in the .pptx, (x, y))
-IMPORTED = {
+IMPORTED: dict[str, tuple[Margins | None, float, float, bool, Point]] = {
     "imp_def_10": (None, 10, 100, True, (10, 30)),
     "imp_m0_10": ((0, 0, 0, 0), 10, 100, True, (84, 30)),
     "imp_m0_8": ((0, 0, 0, 0), 8, 100, True, (158, 30)),
@@ -59,17 +67,22 @@ IMPORTED = {
     "mod_m0_10": ((0, 0, 0, 0), 10, 100, True, (232, 220)),  # imported, then edited through the API
     "tpl_t0_2x2": ((7.2, 0, 7.2, 0), 10, 100, False, (640, 200)),  # template grown by insertTable*
 }
-DUP = ("dup_m0", (10, 220))
-GROWN = ("grown_t0", (380, 220))
-API = ("api_10", (158, 220))
+DUP: tuple[str, Point] = ("dup_m0", (10, 220))
+GROWN: tuple[str, Point] = ("grown_t0", (380, 220))
+API: tuple[str, Point] = ("api_10", (158, 220))
 
 
-def _table(slide, name, margins, size, spacing, text, xy, rows=ROWS, cols=1):
+def _table(slide: Slide, name: str, margins: Margins | None, size: float, spacing: float, text: bool, xy: Point,
+           rows: int, cols: int) -> GraphicFrame:
     x, y = xy
     frame = slide.shapes.add_table(rows, cols, Pt(x), Pt(y), Pt(WIDTH * cols), Pt(rows))
     frame.name = name
     tbl = frame._element.graphic.graphicData.tbl
+    if tbl is None:
+        raise ValueError(f"python-pptx made table {name} without its a:tbl")
     pr = tbl.tblPr
+    if pr is None:
+        raise ValueError(f"python-pptx made table {name} without its a:tblPr")
     for flag in ("firstRow", "bandRow"):
         pr.attrib.pop(flag, None)
     style = pr.find(f"{{{A}}}tableStyleId")
@@ -109,9 +122,9 @@ def build() -> io.BytesIO:
     return buf
 
 
-def fill_requests(oid: str, rows: int, size: float, cols: int = 1) -> list[dict]:
+def fill_requests(oid: str, rows: int, size: float, cols: int) -> list[Mapping[str, object]]:
     """What emit.table_requests does to a cell with text."""
-    reqs = []
+    reqs: list[Mapping[str, object]] = []
     for r in range(rows):
         for c in range(cols):
             loc = {"rowIndex": r, "columnIndex": c}
@@ -129,7 +142,7 @@ def fill_requests(oid: str, rows: int, size: float, cols: int = 1) -> list[dict]
     return reqs
 
 
-def borders(oid: str, rows: int, cols: int = 1) -> dict:
+def borders(oid: str, rows: int, cols: int) -> dict[str, object]:
     return {"updateTableBorderProperties": {
         "objectId": oid, "borderPosition": "ALL",
         "tableRange": {"location": {"rowIndex": 0, "columnIndex": 0}, "rowSpan": rows, "columnSpan": cols},
@@ -138,7 +151,7 @@ def borders(oid: str, rows: int, cols: int = 1) -> dict:
         "fields": "tableBorderFill.solidFill.color,tableBorderFill.solidFill.alpha,weight"}}
 
 
-def move(oid: str, xy) -> dict:
+def move(oid: str, xy: Point) -> dict[str, object]:
     return {"updatePageElementTransform": {"objectId": oid, "applyMode": "ABSOLUTE", "transform": {
         "scaleX": 1, "scaleY": 1, "unit": "EMU",
         "translateX": round(xy[0] * EMU_PER_PT), "translateY": round(xy[1] * EMU_PER_PT)}}}
@@ -148,10 +161,13 @@ def lines_in(img: Image.Image, x_pt: float, y0_pt: float, y1_pt: float) -> list[
     """y (pt) of the dark horizontal lines crossing x between y0 and y1."""
     k = img.width / 720
     x = round(x_pt * k)
-    ys = []
-    run = []
+    ys: list[float] = []
+    run: list[int] = []
     for y in range(max(0, round(y0_pt * k)), min(img.height, round(y1_pt * k))):
-        dark = sum(img.getpixel((x, y))[:3]) < 3 * 110
+        px = img.getpixel((x, y))
+        if not isinstance(px, tuple):
+            raise ValueError(f"an RGB picture was expected, found a {img.mode} one")
+        dark = sum(px[:3]) < 3 * 110
         if dark:
             run.append(y)
         elif run:
@@ -162,18 +178,33 @@ def lines_in(img: Image.Image, x_pt: float, y0_pt: float, y1_pt: float) -> list[
     return [round(v, 2) for v in ys]
 
 
-def row_heights(el: dict) -> list[float]:
-    return [round(r["rowHeight"].get("magnitude", 0) / EMU_PER_PT, 2) for r in el["table"]["tableRows"]]
+def number(v: Json, where: str) -> float:
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return v
+    raise JsonShapeError(f"{where}: a number was expected, found {type(v).__name__}")
+
+
+def table_rows(el: PageElement) -> list[JsonObject]:
+    return as_objects(part(el.get("table"), "table")["tableRows"], "tableRows")
+
+
+def row_heights(el: PageElement) -> list[float]:
+    return [round(number(as_object(r["rowHeight"], "rowHeight").get("magnitude", 0), "rowHeight") / EMU_PER_PT, 2)
+            for r in table_rows(el)]
+
+
+def first_cell_properties(el: PageElement) -> Json:
+    return as_objects(table_rows(el)[0]["tableCells"], "tableCells")[0].get("tableCellProperties")
 
 
 def main() -> None:
     keep = "--keep" in sys.argv
     OUT.mkdir(parents=True, exist_ok=True)
-    drive, slides = drive_service(), slides_service()
+    drive, slides = drive_service(None), slides_service(None)
     media = gapi.media_upload(build(), PPTX_MIME)
-    pid = execute(drive.files().create(
+    pid = file_id(execute(drive.files().create(
         body={"name": "b2s probe pptx table margins", "mimeType": "application/vnd.google-apps.presentation"},
-        media_body=media, fields="id"))["id"]
+        media_body=media, fields="id")), "the uploaded probe deck")
     try:
         run(slides, pid)
     finally:
@@ -184,26 +215,26 @@ def main() -> None:
             print("presentation moved to the trash")
 
 
-def run(slides, pid: str) -> None:
+def run(slides: SlidesService, pid: str) -> None:
     pres = execute(slides.presentations().get(presentationId=pid))
-    (OUT / "imported.json").write_text(json.dumps(pres["slides"], indent=1), encoding="utf-8")
-    page = pres["slides"][0]
-    by_name = {}
+    (OUT / "imported.json").write_text(json.dumps(pres.get("slides", []), indent=1), encoding="utf-8")
+    page = pres.get("slides", [])[0]
+    by_name: dict[str, PageElement] = {}
     for pe in page.get("pageElements", []):
         if "table" in pe:
             # The importer drops the shape names; tables come back in creation order.
             by_name[list(IMPORTED)[len(by_name)]] = pe
     print("imported row heights (pt), before any API request:")
     for name, pe in by_name.items():
-        print(f"  {name:16s} {row_heights(pe)}  cell props {json.dumps(pe['table']['tableRows'][0]['tableCells'][0].get('tableCellProperties'))}")
-    oid = {name: pe["objectId"] for name, pe in by_name.items()}
+        print(f"  {name:16s} {row_heights(pe)}  cell props {json.dumps(first_cell_properties(pe))}")
+    oid = {name: object_id(pe) for name, pe in by_name.items()}
     dup_id, grown_id, api_id = "probe_dup_m0", "probe_grown_t0", "probe_api_10"
-    sid = page["objectId"]
-    reqs: list[dict] = [
+    sid = object_id(page)
+    reqs: list[Mapping[str, object]] = [
         {"duplicateObject": {"objectId": oid["tpl_m0"], "objectIds": {oid["tpl_m0"]: dup_id}}},
         move(dup_id, DUP[1]),
-        *fill_requests(dup_id, ROWS, 10),
-        *fill_requests(oid["fill_m0"], ROWS, 10),
+        *fill_requests(dup_id, ROWS, 10, 1),
+        *fill_requests(oid["fill_m0"], ROWS, 10, 1),
         # A 2x2 template grown to 4x2 by insertTableRows: do new cells keep the margins?
         {"duplicateObject": {"objectId": oid["tpl_t0_2x2"], "objectIds": {oid["tpl_t0_2x2"]: grown_id}}},
         move(grown_id, GROWN[1]),
@@ -212,14 +243,14 @@ def run(slides, pid: str) -> None:
         {"insertTableColumns": {"tableObjectId": grown_id, "cellLocation": {"rowIndex": 0, "columnIndex": 1},
                                 "insertRight": True, "number": 1}},
         {"deleteTableColumn": {"tableObjectId": grown_id, "cellLocation": {"rowIndex": 0, "columnIndex": 2}}},
-        *fill_requests(grown_id, ROWS, 10, cols=2),
+        *fill_requests(grown_id, ROWS, 10, 2),
         {"updateTableColumnProperties": {"objectId": grown_id, "columnIndices": [0, 1],
                                          "tableColumnProperties": {"columnWidth": emu(WIDTH / 2)}, "fields": "columnWidth"}},
         {"createTable": {"objectId": api_id, "rows": ROWS, "columns": 1, "elementProperties": {
             "pageObjectId": sid, "size": {"width": emu(WIDTH), "height": emu(ROWS)},
             "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU",
                           "translateX": round(API[1][0] * EMU_PER_PT), "translateY": round(API[1][1] * EMU_PER_PT)}}}},
-        *fill_requests(api_id, ROWS, 10),
+        *fill_requests(api_id, ROWS, 10, 1),
         # An imported, filled table edited through the API.
         {"deleteText": {"objectId": oid["mod_m0_10"], "cellLocation": {"rowIndex": 0, "columnIndex": 0},
                         "textRange": {"type": "ALL"}}},
@@ -243,24 +274,26 @@ def run(slides, pid: str) -> None:
     ]
     for name in IMPORTED:
         if name not in ("tpl_m0", "tpl_t0_2x2"):
-            reqs.append(borders(oid[name], ROWS + (name == "mod_m0_10")))
-    reqs += [borders(dup_id, ROWS), borders(grown_id, ROWS, 2), borders(api_id, ROWS)]
+            reqs.append(borders(oid[name], ROWS + (name == "mod_m0_10"), 1))
+    reqs += [borders(dup_id, ROWS, 1), borders(grown_id, ROWS, 2), borders(api_id, ROWS, 1)]
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": reqs}))
     # emit's phase 1: the whole source slide duplicated under our ids.
-    page_ids = {sid: "probe_slide2", **{pe["objectId"]: f"probe_s2_{i}" for i, pe in enumerate(page["pageElements"])}}
+    page_ids = {sid: "probe_slide2",
+                **{object_id(pe): f"probe_s2_{i}" for i, pe in enumerate(page.get("pageElements", []))}}
     execute(slides.presentations().batchUpdate(presentationId=pid, body={"requests": [
         {"duplicateObject": {"objectId": sid, "objectIds": page_ids}}]}))
     got = execute(slides.presentations().get(presentationId=pid))
-    (OUT / "after.json").write_text(json.dumps(got["slides"], indent=1), encoding="utf-8")
-    save_thumbnail(slides, pid, sid, OUT / "slide.png")
-    save_thumbnail(slides, pid, "probe_slide2", OUT / "slide-dup.png")
+    got_slides = got.get("slides", [])
+    (OUT / "after.json").write_text(json.dumps(got_slides, indent=1), encoding="utf-8")
+    save_thumbnail(slides, pid, sid, OUT / "slide.png", None)
+    save_thumbnail(slides, pid, "probe_slide2", OUT / "slide-dup.png", None)
     img = Image.open(OUT / "slide.png").convert("RGB")
     img2 = Image.open(OUT / "slide-dup.png").convert("RGB")
-    els = {pe["objectId"]: pe for pe in got["slides"][0]["pageElements"]}
-    dup_els = {pe["objectId"]: pe for pe in got["slides"][1]["pageElements"]}
+    els = {object_id(pe): pe for pe in got_slides[0].get("pageElements", [])}
+    dup_els = {object_id(pe): pe for pe in got_slides[1].get("pageElements", [])}
     named = {**{n: oid[n] for n in IMPORTED}, DUP[0]: dup_id, GROWN[0]: grown_id, API[0]: api_id}
     where = {**{n: v[4] for n, v in IMPORTED.items()}, DUP[0]: DUP[1], GROWN[0]: GROWN[1], API[0]: API[1]}
-    results = {}
+    results: dict[str, dict[str, list[float] | None]] = {}
     print("\nafter the API requests: API row heights / rendered row pitch (pt)")
     for name, o in named.items():
         if name in ("tpl_m0", "tpl_t0_2x2"):
@@ -270,9 +303,10 @@ def run(slides, pid: str) -> None:
         found = lines_in(img, scan_x, y - 3, y + 160)
         pitch = [round(b - a, 2) for a, b in zip(found, found[1:])]
         dup_name = page_ids.get(o)
-        found2 = lines_in(img2, scan_x, y - 3, y + 160) if dup_name in dup_els else []
+        dup_el = dup_els.get(dup_name) if dup_name is not None else None
+        found2: list[float] = lines_in(img2, scan_x, y - 3, y + 160) if dup_el is not None else []
         results[name] = {"api": row_heights(els[o]), "rendered": pitch,
-                         "slide_dup_api": row_heights(dup_els[dup_name]) if dup_name in dup_els else None,
+                         "slide_dup_api": row_heights(dup_el) if dup_el is not None else None,
                          "slide_dup_rendered": [round(b - a, 2) for a, b in zip(found2, found2[1:])]}
         print(f"  {name:16s} api {results[name]['api']}  rendered {pitch}  "
               f"| slide dup api {results[name]['slide_dup_api']} rendered {results[name]['slide_dup_rendered']}")

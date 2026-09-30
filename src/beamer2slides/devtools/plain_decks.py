@@ -171,7 +171,7 @@ def make(name: str) -> str:
     from beamer2slides.gslides import execute
     spec = DECKS[name]
     slides = spec.slides()
-    s = slides_service()
+    s = slides_service(None)
     made = execute(s.presentations().create(body={"title": spec.title}))
     first = made.get("slides", [])
     pid, blank = made.get("presentationId"), first[0].get("objectId") if first else None

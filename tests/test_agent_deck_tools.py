@@ -44,7 +44,7 @@ TOOLS = (deck_inspect, deck_convert, deck_prepare, deck_upload, deck_sync, tex_l
 GOOGLE_TOOLS = (deck_convert, deck_upload, deck_sync)
 
 
-def google_args(fn: Tool) -> dict[str, str]:
+def google_args(fn: Tool[...]) -> dict[str, str]:
     """The least each Google journey needs to be called at all, so a test of the *gate* is not
     a test of argument binding."""
     if fn is deck_sync:
@@ -151,7 +151,7 @@ def test_deck_inspect_refuses_something_that_is_not_a_built_pdf(workspace: Path)
 
 
 @pytest.mark.parametrize("fn", GOOGLE_TOOLS, ids=lambda f: f.tool_name)
-def test_a_google_journey_does_nothing_at_all_in_an_offline_context(fn: Tool, tmp_path: Path):
+def test_a_google_journey_does_nothing_at_all_in_an_offline_context(fn: Tool[...], tmp_path: Path):
     """`AgentContext.offline` both forbids and has no credentials, and the tool must come back
     without having made a file, a request or an exception - whichever of the two says no first."""
     root = tmp_path / "ws"
@@ -168,7 +168,7 @@ def test_a_google_journey_does_nothing_at_all_in_an_offline_context(fn: Tool, tm
 
 
 @pytest.mark.parametrize("fn", GOOGLE_TOOLS, ids=lambda f: f.tool_name)
-def test_a_google_journey_with_no_credentials_refuses_with_offline(fn: Tool, tmp_path: Path):
+def test_a_google_journey_with_no_credentials_refuses_with_offline(fn: Tool[...], tmp_path: Path):
     from beamer2slides.agent import ALL_ACTIONS, NoGoogle
 
     root = tmp_path / "ws"
@@ -837,11 +837,12 @@ def test_tex_label_refuses_a_file_that_is_not_a_beamer_document(source: Path):
 
 
 @pytest.mark.parametrize("fn", TOOLS, ids=lambda f: f.tool_name)
-def test_every_parameter_is_annotated_with_a_description(fn: Tool):
+def test_every_parameter_is_annotated_with_a_description(fn: Tool[...]):
     """`schema.py` turns these annotations into JSON Schema, so an undescribed parameter is an
     undocumented one - the model would have to guess what it means from its name."""
     hints = type_hints(fn.body)
-    names = [n for n in fn.body.__code__.co_varnames[:fn.body.__code__.co_argcount] if n != "j"]
+    code = fn.body.__code__
+    names = [n for n in code.co_varnames[:code.co_argcount + code.co_kwonlyargcount] if n != "j"]
     assert names, f"{fn.tool_name} takes no arguments"
     for name in names:
         hint = hints[name]
@@ -852,7 +853,7 @@ def test_every_parameter_is_annotated_with_a_description(fn: Tool):
 
 
 @pytest.mark.parametrize("fn", TOOLS, ids=lambda f: f.tool_name)
-def test_the_annotations_resolve_through_the_wrapper_too(fn: Tool):
+def test_the_annotations_resolve_through_the_wrapper_too(fn: Tool[...]):
     """`functools.wraps` copies `__annotations__` but not `__globals__`, so a module using
     `from __future__ import annotations` would hand the schema generator unresolvable strings."""
     for target in (fn, fn.body):
@@ -861,7 +862,7 @@ def test_the_annotations_resolve_through_the_wrapper_too(fn: Tool):
 
 
 @pytest.mark.parametrize("fn", TOOLS, ids=lambda f: f.tool_name)
-def test_every_tool_says_what_it_does_and_what_it_costs(fn: Tool):
+def test_every_tool_says_what_it_does_and_what_it_costs(fn: Tool[...]):
     assert fn.tool_name and fn.needs
     assert READS in fn.needs
     doc = (fn.body.__doc__ or "").strip().splitlines()

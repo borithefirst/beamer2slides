@@ -37,6 +37,7 @@ from collections.abc import Mapping
 from typing import Annotated, Literal, TypedDict, get_args, get_origin
 
 from ..json_types import Json, JsonObject, as_object
+from .content import SHAPES
 from .context import Tool
 from .types import READS, READS_GOOGLE, WRITES, WRITES_GOOGLE, Need, Refused
 
@@ -119,11 +120,11 @@ _SCALARS: dict[type, JsonObject] = {
 
 # -- reading a decorated tool ------------------------------------------------------------------
 
-def needs_of(fn: Tool) -> tuple[Need, ...]:
+def needs_of(fn: Tool[...]) -> tuple[Need, ...]:
     return fn.needs
 
 
-def _description(fn: Tool) -> str:
+def _description(fn: Tool[...]) -> str:
     doc = inspect.getdoc(fn.body) or ""
     if not doc.strip():
         raise SchemaError(f"{fn.tool_name} has no docstring, and a tool's docstring is the "
@@ -146,7 +147,7 @@ def type_hints(obj: object) -> dict[str, object]:
     return hints
 
 
-def _hints(fn: Tool) -> dict[str, object]:
+def _hints(fn: Tool[...]) -> dict[str, object]:
     try:
         return type_hints(fn.body)
     except Exception as exc:                                   # a forward reference that moved
@@ -154,7 +155,7 @@ def _hints(fn: Tool) -> dict[str, object]:
                           f"({type(exc).__name__}: {exc}).") from None
 
 
-def _annotation(fn: Tool, param: str, hint: object) -> tuple[object, str]:
+def _annotation(fn: Tool[...], param: str, hint: object) -> tuple[object, str]:
     """The declared type and the one-line description, or a loud refusal."""
     tool = fn.tool_name
     if hint is inspect.Parameter.empty or hint is None:
@@ -174,17 +175,24 @@ def _annotation(fn: Tool, param: str, hint: object) -> tuple[object, str]:
     return declared, " ".join(described.split())
 
 
-def _json_type(fn: Tool, param: str, declared: object) -> JsonObject:
+def _json_type(fn: Tool[...], param: str, declared: object) -> JsonObject:
     """A JSON Schema fragment for one declared Python type."""
     tool = fn.tool_name
     origin = get_origin(declared)
 
     if origin in (typing.Union, _pytypes.UnionType):
-        parts = [a for a in get_args(declared) if a is not type(None)]
+        members: tuple[object, ...] = get_args(declared)
+        parts = [a for a in members if a is not type(None)]
+        if str in parts and all(a is str or a in SHAPES for a in parts):
+            # `content.File`: a ref, or the file as content. Published as the string it is by
+            # the time `validate` reads it - `take_in` has made content a ref before that.
+            parts = [str]
         if len(parts) != 1:
             raise SchemaError(f"{tool}: parameter {param!r} is a union of several real types "
                               f"({declared!r}); this layer publishes `X` and `X | None` only.")
         inner = _json_type(fn, param, parts[0])
+        if type(None) not in members:
+            return inner
         kind = inner["type"]
         kinds: list[Json] = list(kind) if isinstance(kind, list) else [kind]
         return {**inner, "type": [*kinds, "null"]}
@@ -214,7 +222,7 @@ def _default(tool: str, param: str, value: object) -> Json:
                       f"say.")
 
 
-def _parameters(fn: Tool) -> tuple[dict[str, JsonObject], list[str]]:
+def _parameters(fn: Tool[...]) -> tuple[dict[str, JsonObject], list[str]]:
     """The properties and the required names, in the order the function declares them."""
     tool = fn.tool_name
     hints = _hints(fn)
@@ -243,7 +251,7 @@ def _parameters(fn: Tool) -> tuple[dict[str, JsonObject], list[str]]:
 
 # -- the schemas -------------------------------------------------------------------------------
 
-def tool_schema(fn: Tool) -> ToolSchema:
+def tool_schema(fn: Tool[...]) -> ToolSchema:
     """`{"name", "description", "input_schema"}` for one decorated tool.
 
     `input_schema` is a closed object: every parameter of the body but the leading `Job`, typed
@@ -285,7 +293,7 @@ def effects(needs: tuple[Need, ...]) -> Effects:
     }
 
 
-def describe(fn: Tool) -> Described:
+def describe(fn: Tool[...]) -> Described:
     """The schema plus what the tool does to the world: `needs` as declared, `effects` derived."""
     needs = needs_of(fn)
     published = tool_schema(fn)
@@ -294,7 +302,7 @@ def describe(fn: Tool) -> Described:
             "effects": effects(needs)}
 
 
-def registry(tools: Mapping[str, Tool] | None) -> dict[str, Tool]:
+def registry(tools: Mapping[str, Tool[...]] | None) -> dict[str, Tool[...]]:
     """The supplied mapping, or `agent.tools.TOOLS` imported now rather than at import time.
 
     Lazily, because this module is published before the registry exists and because importing
@@ -311,7 +319,7 @@ def registry(tools: Mapping[str, Tool] | None) -> dict[str, Tool]:
     return dict(_tools.TOOLS)
 
 
-def all_schemas(tools: Mapping[str, Tool] | None = None) -> list[Described]:
+def all_schemas(tools: Mapping[str, Tool[...]] | None = None) -> list[Described]:
     """`describe` for every tool in the registry, in the order the registry names them.
 
     `tools` keeps its default: `all_schemas()` is how a harness asks for the whole registry
@@ -320,14 +328,14 @@ def all_schemas(tools: Mapping[str, Tool] | None = None) -> list[Described]:
     return [describe(fn) for fn in registry(tools).values()]
 
 
-def anthropic_tools(tools: Mapping[str, Tool] | None = None) -> list[AnthropicTool]:
+def anthropic_tools(tools: Mapping[str, Tool[...]] | None = None) -> list[AnthropicTool]:
     """The Messages API's shape: `name`, `description`, `input_schema`. (Documented without
     arguments, like `all_schemas`.)"""
     return [{"name": s["name"], "description": s["description"],
              "input_schema": s["input_schema"]} for s in all_schemas(tools)]
 
 
-def openai_tools(tools: Mapping[str, Tool] | None = None) -> list[OpenAITool]:
+def openai_tools(tools: Mapping[str, Tool[...]] | None = None) -> list[OpenAITool]:
     """The Chat Completions shape: a `function` object whose `parameters` is the input schema.
     (Documented without arguments, like `all_schemas`.)"""
     return [{"type": "function",
@@ -361,7 +369,7 @@ def described_json(d: Described) -> JsonObject:
 
 # -- checking what comes back --------------------------------------------------------------
 
-def validate(fn: Tool, arguments: Mapping[str, object] | None) -> dict[str, Json]:
+def validate(fn: Tool[...], arguments: Mapping[str, object] | None) -> dict[str, Json]:
     """Check one call's arguments against the tool's schema; return them cleaned.
 
     Refuses an unknown key, a missing required one and a value of the wrong JSON type, always

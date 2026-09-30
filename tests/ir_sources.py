@@ -184,7 +184,7 @@ def adopted_source(case: str, home: Path, target: JsonObject | None) -> AdoptedS
         if os.environ.get("B2S_REQUIRE_TEX"):
             pytest.fail(f"{engine(text)} not found")
         pytest.skip(f"{engine(text)} not found")
-    ws = Workspace(tex, home / "work")
+    ws = Workspace(tex, home / "work", handout=False, engine=None, fresh=True)
     pdf, err = ws.compile()
     assert pdf is not None, err
     # (a copy: the workspace compiles again into its build folder when the pull loop wants notes)
@@ -475,7 +475,7 @@ def convert(made: Made, home: Path) -> None:
     deck = copy.deepcopy(made.deck)
     out = need(made.out, "out folder")
     page_w, page_h = jnums(deck, "slides", 0, "size")
-    plan = emit.DeckPlan(merged(deck), pptx_tables=True)
+    plan = emit.DeckPlan(merged(deck), emit.SLIDE_W, pptx_tables=True, contain=False)
     same_elements(merged(deck), plan.deck, "DeckPlan")
     deck, scale, fonts = plan.deck, plan.scale, plan.fonts
     bg_key = {page_of(s): emit.background_key(s, out) for s in slides_of(deck)}
@@ -535,12 +535,12 @@ def convert(made: Made, home: Path) -> None:
 
     for slide in slides_of(deck):
         sid = f"b2s_s{page_of(slide):03}"
-        parts, element_ids = plan.slide_parts(slide, page_elements, speaker_notes, {}, template_sizes)
+        parts, element_ids = plan.slide_parts(slide, page_elements, speaker_notes, {}, template_sizes, None)
         written(slide, parts, element_ids, carried[sid], f"slide {page_of(slide) + 1}")
         emit.element_objects(parts, element_ids)
         for el in elements_of(slide):
             if el["kind"] == "table":
-                emit.pptx_table(el, scale, fonts)["margins"]
+                emit.pptx_table(el, scale, fonts, emit.SLIDE_W / scale)["margins"]
 
 
 # ---------------------------------------------------------------- what sync writes, element by element
@@ -554,7 +554,7 @@ def emission(made: Made, home: Path) -> None:
     from beamer2slides.sync import emitted_elements
 
     deck = copy.deepcopy(made.deck)
-    plan = DeckPlan(merged(deck), made.page_width or SLIDE_W)
+    plan = DeckPlan(merged(deck), made.page_width or SLIDE_W, pptx_tables=False, contain=False)
     same_elements(merged(deck), plan.deck, "DeckPlan")
     for slide in slides_of(plan.deck):
         names = [f"e{i}" for i in range(len(elements_of(slide)))]
@@ -586,7 +586,7 @@ def strings_json(rows: Sequence[Sequence[str]]) -> list[Json]:
 def convert_state(deck: JsonObject) -> tuple[OfflinePlan, JsonObject]:
     """(plan_offline, emit.json's state) for a deck, as `build_deck` records it (element objects,
     groups, the .pptx tables' margins)."""
-    from beamer2slides.emit import element_objects, plan_offline, pptx_table
+    from beamer2slides.emit import SLIDE_W, element_objects, plan_offline, pptx_table
 
     off = plan_offline(deck)
     plan = off["plan"]
@@ -595,7 +595,7 @@ def convert_state(deck: JsonObject) -> tuple[OfflinePlan, JsonObject]:
         copied = jobj(off["copies"][n], "duplicateObject", "objectIds")
         written(slide, parts, element_ids, {jstr(v) for v in copied.values()}, f"slide {page + 1}")
         objects, groups = element_objects(parts, element_ids)
-        margins: JsonObject = {str(i): grid_json(pptx_table(el, plan.scale, plan.fonts)["margins"])
+        margins: JsonObject = {str(i): grid_json(pptx_table(el, plan.scale, plan.fonts, SLIDE_W / plan.scale)["margins"])
                                for i, el in enumerate(elements_of(slide)) if el["kind"] == "table"}
         slides.append({"page": page, "objectId": sid, "elements": [*element_ids], "objects": strings_json(objects),
                        "groups": [*groups], "table_margins": margins})
@@ -666,7 +666,7 @@ def adopt_base_of(made: Made) -> tuple[JsonObject, Presentation]:
 
     target = need(made.extra.target, "deck_ir read")
     deck = copy.deepcopy(made.deck)
-    plan = DeckPlan(merged(deck), need(made.page_width, "deck width"))
+    plan = DeckPlan(merged(deck), need(made.page_width, "deck width"), pptx_tables=False, contain=False)
     assert adopt_sync.labels_match(plan.deck, target) is None, adopt_sync.labels_match(plan.deck, target)
     pres = pres_of(target)
     base = adopt_sync.build_base(plan.deck, need(made.out, "out folder"), target, as_json(pres, "the adopted deck"),
@@ -787,7 +787,7 @@ def round0(made: Made, home: Path) -> None:
     residuals and words) and the planner's edits."""
     from beamer2slides.compare import TOL, compare
     from beamer2slides.frame_guard import FrameGuard
-    from beamer2slides.inverse import Context, Planner, class_pt_option, picture_hashes, typed_target
+    from beamer2slides.inverse import Planner, class_pt_option, fresh_context, picture_hashes, typed_target
 
     cand = need(made.extra.candidate, "pull loop candidate")
     target = need(made.extra.target, "deck_ir read")
@@ -797,7 +797,7 @@ def round0(made: Made, home: Path) -> None:
     comp = compare(cand.current(), typed, TOL, hashes)
     comp.summary()
     FrameGuard(typed, None, ignore).observe(0, cand, comp)
-    Planner(cand, comp, target, Context(pt_option=class_pt_option(ws.source)), ws, set(), {}, hashes).plan()
+    Planner(cand, comp, target, fresh_context(class_pt_option(ws.source)), ws, set(), {}, hashes).plan()
 
 
 def adopt_read(made: Made, home: Path) -> None:

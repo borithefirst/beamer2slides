@@ -164,13 +164,13 @@ def test_an_unlabelled_frame_between_twins_is_matched_and_said_out_loud():
             labelled("Takeaways", SUMMARY, "end")]
     ours = [base[0], info("Results", SAME), base[3]]          # one of the twins is gone; which one?
     weak: dict[int, str] = {}
-    pairs = identity.align_slides(base, ours, weak=weak)
+    pairs = identity.align_slides_with(base, ours, moves=None, weak=weak)
     assert pairs == {0: 0, 1: 1, 2: 3} and weak == {1: "twins"}
     # The same frame with a label of its own is no coin toss: the label pairs it and nothing is said.
     named = [base[0], labelled("Results", SAME, "middle"), base[3]]
     base_named = [base[0], labelled("Results", SAME, "middle"), base[2], base[3]]
     weak = {}
-    assert identity.align_slides(base_named, named, weak=weak) == {0: 0, 1: 1, 2: 3} and weak == {}
+    assert identity.align_slides_with(base_named, named, moves=None, weak=weak) == {0: 0, 1: 1, 2: 3} and weak == {}
 
 
 def test_twins_with_a_frame_between_them_are_a_coin_toss_the_walk_can_never_offer():
@@ -186,12 +186,12 @@ def test_twins_with_a_frame_between_them_are_a_coin_toss_the_walk_can_never_offe
     base = [info("Results", SAME), info("Method", METHOD), info("Results", SAME),
             labelled("Takeaways", SUMMARY, "end")]
     weak: dict[int, str] = {}
-    assert identity.align_slides(base, list(base), weak=weak) == {0: 0, 1: 1, 2: 2, 3: 3}
+    assert identity.align_slides_with(base, list(base), moves=None, weak=weak) == {0: 0, 1: 1, 2: 2, 3: 3}
     assert weak == {0: "twins", 2: "twins"}                   # both of them, and neither is moved
     # A label of their own ends the coin toss: each frame pairs by its label and nothing is said.
     named = [labelled("Results", SAME, "first"), base[1], labelled("Results", SAME, "third"), base[3]]
     weak = {}
-    assert identity.align_slides(named, list(named), weak=weak) == {0: 0, 1: 1, 2: 2, 3: 3}
+    assert identity.align_slides_with(named, list(named), moves=None, weak=weak) == {0: 0, 1: 1, 2: 2, 3: 3}
     assert weak == {}
 
 

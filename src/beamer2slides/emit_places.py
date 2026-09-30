@@ -23,7 +23,7 @@ from .emit_holes import (
     OVERLAY_STRETCH_MEASURED, Hole, HoleSlide, SlideDict, fit_overlay, hole_neighbours_of, hole_offset_of,
     hole_slide_dicts, mark_drifts_of, slide_holes_of, text_right_limit,
 )
-from .emit_metrics import LINE_EM, PAD_X, SLIDE_W, SYMBOL_ADVANCE_EM, FontMapper, rgb, u16
+from .emit_metrics import LINE_EM, PAD_X, SYMBOL_ADVANCE_EM, FontMapper, rgb, u16
 from .emit_model import Anchored, JsonMap, Place, SetText, block_of, box_of, json_number, objects_of, point_of, text_of
 from .emit_pptx import api_error, batch, template_key
 from .emit_text import box_lines_of, hole_runs_of, hugs_of, in_sentence_of, text_box_requests_of
@@ -553,7 +553,7 @@ def _place_json(m: Place) -> list[Json]:
 
 def measure_places(slides: SlidesService, pid: str, deck: JsonMap, scale: float, fonts: FontMapper,
                    placed: Callable[[JsonObject, int], JsonObject], page_slide: Mapping[int, str], out: Path,
-                   page_width: float = SLIDE_W) -> tuple[dict[str, Place], list[str]]:
+                   page_width: float) -> tuple[dict[str, Place], list[str]]:
     """Moves for hole and overlay pictures (slide pt; an overlay's `sx` stretches it and dx moves
     its left edge), measured on scratch slides (see above), and the scratch slides to delete.
     What can't be found keeps its predicted place.

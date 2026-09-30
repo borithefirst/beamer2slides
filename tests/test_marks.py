@@ -246,7 +246,7 @@ def test_an_adopted_table_carries_the_layout_emit_writes_it_by(tmp_path: Path, b
     column of numbers right-aligned, the shaded head row's fills and the rule under it borders of
     the cells it runs along. Emit lays it out (an adopted table raised KeyError 'columns')."""
     from beamer2slides import emit
-    from beamer2slides.emit_tables import pptx_table, table_requests
+    from beamer2slides.emit_tables import SLIDE_W, pptx_table, table_requests
     drawn = b"0.9 g 20 110 80 20 re f 100 110 80 20 re f 0 g 0 0 0 RG 1 w 20 110 m 180 110 l S "
     words = (cell(0, 0, text(24, 116, b"Name")) + cell(0, 1, text(146, 116, b"Value")) +
              cell(1, 0, text(24, 96, b"alpha")) + cell(1, 1, text(162, 96, b"42")))
@@ -263,8 +263,8 @@ def test_an_adopted_table_carries_the_layout_emit_writes_it_by(tmp_path: Path, b
     borders = sorted((b["row"], b["col"], b["position"]) for b in given(table.get("borders")))
     assert borders == [(0, 0, "BOTTOM"), (0, 1, "BOTTOM")] or borders == [(1, 0, "TOP"), (1, 1, "TOP")]
     fonts = emit.FontMapper()
-    assert len(pptx_table(table, 1.0, fonts)["heights"]) == 2
-    reqs = table_requests(table, "s", "tab", 1.0, fonts, imported=True)
+    assert len(pptx_table(table, 1.0, fonts, SLIDE_W / 1.0)["heights"]) == 2
+    reqs = table_requests(table, "s", "tab", 1.0, fonts, imported=True, page_w=SLIDE_W / 1.0)
     assert [jstr(r, "insertText", "text") for r in reqs if "insertText" in r] == ["Name", "Value", "alpha", "42"]
 
 
@@ -273,13 +273,13 @@ def test_a_marked_table_of_empty_cells_and_a_centred_merge_are_laid_out(tmp_path
     and a cell spanning both columns is aligned by its own words, not its first column's: a head
     centred across the table was written START (audit, 2026-09-29)."""
     from beamer2slides import emit
-    from beamer2slides.emit_tables import pptx_table, table_requests
+    from beamer2slides.emit_tables import SLIDE_W, pptx_table, table_requests
     fonts = emit.FontMapper()
     empty = element(b"e", b"table", b"0 g 0 0 0 RG 1 w 20 110 m 180 110 l S ", b" /rows 2 /cols 2 /box (20 20 160 40)")
     table = next(iter(tables_of(read_back(tmp_path, empty))))
     bounds = given(table.get("bounds"))
     assert bounds[0] == 20 and bounds[-1] == 180 and len(table["columns"]) == 2
-    assert len(pptx_table(table, 1.0, fonts)["heights"]) == 2
+    assert len(pptx_table(table, 1.0, fonts, SLIDE_W / 1.0)["heights"]) == 2
     head = b"/B2Sc <</r 0 /c 0 /rs 1 /cs 2>> BDC %s EMC " % text(60, 116, b"Centred head")
     words = head + cell(1, 0, text(24, 96, b"alpha")) + cell(1, 1, text(162, 96, b"42"))
     page = element(b"t", b"table", words, b" /rows 2 /cols 2 /box (20 20 160 40) /xs (0 80 160) /ys (0 20 40)")
@@ -287,7 +287,7 @@ def test_a_marked_table_of_empty_cells_and_a_centred_merge_are_laid_out(tmp_path
     assert [(m["row"], m["col"], m["cols"], m["align"]) for m in given(table.get("merges"))] == [(0, 0, 2, "center")]
     merge_x = given(table.get("merge_x"))
     assert len(merge_x) == 1 and 55 < merge_x[0][0] < merge_x[0][1] < 145
-    reqs = table_requests(table, "s", "tab", 1.0, fonts, imported=True)
+    reqs = table_requests(table, "s", "tab", 1.0, fonts, imported=True, page_w=SLIDE_W / 1.0)
     head_align = [jstr(r, "updateParagraphStyle", "style", "alignment") for r in reqs if "updateParagraphStyle" in r
                   and jobj(r, "updateParagraphStyle", "cellLocation") == {"rowIndex": 0, "columnIndex": 0}]
     assert head_align and set(head_align) == {"CENTER"}

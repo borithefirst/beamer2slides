@@ -16,7 +16,8 @@ from . import inverse_edits as ed
 from .json_reads import jint, jobjs, jstr
 from .test_inverse import INV, compared, fixture_deck, pdflatex_missing, slide_of
 from beamer2slides.compare import TOL
-from beamer2slides.inverse import Candidate, Context, Planner, Unresolved, Workspace, converge, ensure_preamble
+from beamer2slides.inverse import (BEAMER_PT, Candidate, Context, Planner, Unresolved, Workspace, converge, ensure_preamble,
+                                   fresh_context)
 from beamer2slides.json_types import JsonObject, as_str
 from beamer2slides.texmap import Frame
 
@@ -26,11 +27,11 @@ TESTS = Path(__file__).resolve().parent
 def plan_offline_ctx(tmp_path: Path, target: JsonObject) -> tuple[str, Context, list[Unresolved]]:
     """Like test_inverse.plan_offline, but also returns the Context (for ctx.label_notes) and the
     unresolved residuals `plan()` gave up on."""
-    ws = Workspace(INV / "a.tex", tmp_path)
+    ws = Workspace(INV / "a.tex", tmp_path, handout=False, engine=None, fresh=True)
     deck = fixture_deck()
     frames: list[Frame | None] = [ws.source.frames[jint(s, "frame_index")] for s in jobjs(deck, "slides")]
-    cand = Candidate(ws.source, tmp_path / "a.pdf", deck, frames)
-    ctx = Context()
+    cand = Candidate(ws.source, tmp_path / "a.pdf", deck, frames, locs={}, text_masked={}, words={})
+    ctx = fresh_context(BEAMER_PT)
     edits, failed = Planner(cand, compared(deck, target), target, ctx, ws, set(), {}, {}).plan()
     assert edits, failed
     ws.write(edits)
@@ -130,7 +131,7 @@ def test_a_colour_rewrite_that_cannot_converge_never_splits_a_word(tmp_path: Pat
         pytest.skip(reason)
     tex = tmp_path / "b_repro.tex"
     tex.write_text(B_REPRO_TEX, encoding="utf-8")
-    built = Workspace(tex, tmp_path / "base").build(tmp_path / "classify")
+    built = Workspace(tex, tmp_path / "base", handout=False, engine=None, fresh=True).build(tmp_path / "classify", False, None)
     assert not isinstance(built, str), built
     target = built.target()
     found = False
@@ -159,7 +160,7 @@ def test_a_colour_edit_that_can_never_converge_is_reverted_not_left_half_applied
     if reason := pdflatex_missing():
         pytest.skip(reason)
     work = tmp_path / "basic"
-    built = Workspace(TESTS / "decks" / "01_basic.tex", work).build(work / "classify")
+    built = Workspace(TESTS / "decks" / "01_basic.tex", work, handout=False, engine=None, fresh=True).build(work / "classify", False, None)
     assert not isinstance(built, str), built
     target = ed.split_style(built.target(), 1, "rst", color="#ff0000")
     res = converge(TESTS / "decks" / "01_basic.tex", target, tmp_path / "loop", 8, False, None, TOL, print, True, None)

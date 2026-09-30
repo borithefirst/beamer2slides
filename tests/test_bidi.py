@@ -129,18 +129,18 @@ def test_a_neutral_span_between_two_hebrew_ones_goes_with_them():
 # ---------------------------------------------------------------- classify's seams
 
 def span(text: str, x0: float, x1: float) -> classify.Span:
-    return classify.Span(id="s", text=text, font="Arial", size=10.0,
+    return classify.new_span(id="s", text=text, font="Arial", size=10.0,
                          color="#000000", rect=classify.Rect(x0, 0.0, x1, 10.0),
-                         baseline=10.0, horizontal=True, info=font_info("Arial"))
+                         baseline=10.0, horizontal=True, info=font_info("Arial"), link=None, drawn=False, visual=None)
 
 
 def test_a_line_of_hebrew_spans_says_what_it_reads():
-    line = classify.Line([span(GIMEL, 0, 10), span(BET, 12, 22), span(ALEF, 24, 34)])
+    line = classify.new_line([span(GIMEL, 0, 10), span(BET, 12, 22), span(ALEF, 24, 34)])
     assert line.text == f"{ALEF} {BET} {GIMEL}"
 
 
 def test_a_line_of_latin_spans_says_what_it_always_said():
-    line = classify.Line([span("one", 0, 10), span("two", 12, 22)])
+    line = classify.new_line([span("one", 0, 10), span("two", 12, 22)])
     assert line.text == "one two"
 
 
@@ -150,15 +150,15 @@ def test_runs_for_a_short_piece_of_hebrew_read_right_to_left():
 
 
 def test_a_hebrew_paragraph_says_that_it_reads_right_to_left():
-    line = classify.Line([span(GIMEL, 0, 10), span(BET, 12, 22), span(ALEF, 24, 34)])
-    assert classify.Paragraph([line]).direction == "rtl"
+    line = classify.new_line([span(GIMEL, 0, 10), span(BET, 12, 22), span(ALEF, 24, 34)])
+    assert classify.new_paragraph([line], align="left", reason=None).direction == "rtl"
 
 
 def test_a_latin_paragraph_says_nothing_at_all():
     # The key is only there where it is true, as `deck_ir` writes it of a deck read back:
     # every deck this project had until now is a left-to-right one.
-    line = classify.Line([span("one", 0, 10), span("two", 12, 22)])
-    assert classify.Paragraph([line]).direction is None
+    line = classify.new_line([span("one", 0, 10), span("two", 12, 22)])
+    assert classify.new_paragraph([line], align="left", reason=None).direction is None
 
 
 def test_the_gap_between_two_spans_is_what_it_always_was_for_a_left_to_right_pair():
@@ -256,7 +256,7 @@ def removal_line() -> list[classify.Span]:
 
 def test_the_spans_of_a_hebrew_line_with_a_formula_read_as_the_line_does():
     spans = removal_line()
-    classify.PageClassifier.read_lines([classify.Line(spans)], spans)
+    classify.PageClassifier.read_lines([classify.new_line(spans)], spans)
     text = "".join(r["text"] for r in classify.span_runs(spans))
     assert text == "מחיקה: עד O(log n) סיבובים"
     assert " " not in text, "logical neighbours that are not page neighbours are not a wide gap"
@@ -264,7 +264,7 @@ def test_the_spans_of_a_hebrew_line_with_a_formula_read_as_the_line_does():
 
 def test_the_room_between_two_spans_read_in_turn_is_the_join_between_them():
     spans = removal_line()
-    classify.PageClassifier.read_lines([classify.Line(spans)], spans)
+    classify.PageClassifier.read_lines([classify.new_line(spans)], spans)
     # 'עד' is read just before 'O', eight spans away: the room is the gap left of 'עד' (after ')')
     assert classify.gap_between(spans[6], spans[1]) == 3
     assert classify.gap_between(spans[2], spans[3]) == 0  # '(' then 'log': no join between them
@@ -273,17 +273,17 @@ def test_the_room_between_two_spans_read_in_turn_is_the_join_between_them():
 def test_a_latin_word_opening_a_hebrew_title_leaves_it_right_to_left():
     title = [drawn("AVL", 0, 20), drawn("ץע", 24, 34)]
     other = [drawn("שופיח", 0, 30), drawn("ץע", 34, 44)]
-    lines = [classify.Line(title), classify.Line(other)]
+    lines = [classify.new_line(title), classify.new_line(other)]
     classify.PageClassifier.read_lines(lines, title + other)
-    assert classify.Line(title).text == "עץ AVL"
-    assert classify.Paragraph([classify.Line(title)]).direction == "rtl"
+    assert classify.new_line(title).text == "עץ AVL"
+    assert classify.new_paragraph([classify.new_line(title)], align="left", reason=None).direction == "rtl"
 
 
 def test_a_cell_of_a_hebrew_line_that_starts_with_latin_is_marked_right_to_left():
     # emit asks a cell's own text which way it reads (Unicode's P2): 'O(1) on average' would be
     # set left to right with the Hebrew word at its right end.
     cell = [drawn("עצוממב", 0, 30), drawn("O(1)", 34, 54)]
-    classify.PageClassifier.read_lines([classify.Line(cell)], cell)
+    classify.PageClassifier.read_lines([classify.new_line(cell)], cell)
     text = "".join(r["text"] for r in classify.span_runs(cell))
     assert text == "‏O(1) בממוצע"
     assert bidi.lead_mark([span("plain", 0, 10)]) == ""
@@ -295,8 +295,9 @@ from beamer2slides.pdf import Char, char_box  # noqa: E402
 
 
 def char(c: str, x: float, advance: float = 5.0, obj: int = 1, font: str = "Frank") -> Char:
-    return Char(c, font, 10.0, 0, 255, (x, 50.0), char_box(x, 50.0, 1.0, 0.0, advance, 10.0, 0.8, -0.2),
-                (1.0, 0.0), obj, 1, advance)
+    return Char(c=c, font=font, size=10.0, color=0, alpha=255, origin=(x, 50.0),
+                box=char_box(x, 50.0, 1.0, 0.0, advance, 10.0, 0.8, -0.2), dir=(1.0, 0.0), obj=obj, font_id=1,
+                advance=advance, synthetic=False, ascent=0.8, descent=-0.2, exact_advance=True)
 
 
 def test_a_word_whose_letters_come_back_at_falling_x_is_put_left_to_right():

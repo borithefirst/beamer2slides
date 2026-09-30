@@ -233,17 +233,17 @@ def test_holes_with_no_word_between_them_are_one_hole():
     """r3_textfx_v2 s7: \\uwave{all benchmarks} became a hole per word, set side by side. Slides'
     text had one gap there, as wide as both, and measure_places put both pictures in it, one
     over the other ('all' printed over 'be'). With a word between them they stay two."""
-    from beamer2slides.classify import Line
+    from beamer2slides.classify import new_line
 
     from .test_charts_diagrams import span
 
     words = [span("Rejected:", 30, 10.91), span("significantly,", 84.3, 10.91), span("all", 142.3, 10.91),
              span("benchmarks", 159.3, 10.91)]  # (1 pt of kerning apart)
-    line = Line(list(words))
+    line = new_line(list(words))
     line.add_holes([[words[2]], [words[3]]])
     assert [[s.text for s in h] for h in line.holes] == [["all", "benchmarks"]]
     words = [span("x", 30, 10.91), span("and", 40, 10.91), span("y", 60, 10.91)]
-    line = Line(list(words))
+    line = new_line(list(words))
     line.add_holes([[words[0]], [words[2]]])
     assert len(line.holes) == 2
 
