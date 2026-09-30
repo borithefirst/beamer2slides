@@ -15,11 +15,12 @@ from .classify_state import BareFrame, Frame, Panel, PathKey, Rule
 from .classify_tables import TablesMixin
 from .fonts import font_info
 from .ir import Element, ShapeElement, ShapeKind
-from .raw_types import RawColor, RawDrawing, RawSpan
+from .raw_types import RawColor, RawDrawing, RawPage, RawSpan
 
 FRAME_RULE_PT = 1.5  # a filled box this thin is a rule (\fcolorbox's \fboxrule, a tcolorbox's frame)
 FRAME_REACH = 1.5    # how far a frame's rule may lie from the edge of the box it frames
 DECOR_SHORT = 0.12 # em a decoration ends before its span's end for its trailing punctuation to be left out
+PAGE_FRAME_INSET = 0.075  # of the page's width and height: how far in from each edge a border framing the page lies
 
 Axis = Literal["h", "v"]
 Piece = tuple[float, float, float]
@@ -36,6 +37,46 @@ class _Framing:
     edge_of: list[str]
     """Each rule's edge, in the order of `ids`."""
     rects: list[Rect]
+
+
+def page_frame(page: RawPage) -> set[str]:
+    """The strokes of a border framing the whole page a little in from its edges, as a theme draws
+    one in its background canvas (a parchment's double rule): an outline of its own box reaching
+    to within `PAGE_FRAME_INSET` of every edge, or straight lines along all four edges, each
+    running nearly the page's length there. They are background, as the page's own fill is: as
+    a graphic an inset rectangle made one figure region of the whole page, every line in it a
+    label of a figure too big to crop, and the slide one picture; drawn as lines, the top and
+    bottom ones framed rows of text and were a table's rules around the page. (Only strokes: a
+    filled box is a panel. Never a drawing whose mark says what it is.)"""
+    w, h = page["size"]
+    dx, dy = PAGE_FRAME_INSET * w, PAGE_FRAME_INSET * h
+    frame: set[str] = set()
+    sides: dict[str, list[str]] = {}
+    for d in page["drawings"]:
+        r = Rect.of(d["bbox"])
+        if d["type"] != "s" or d.get("marks"):
+            continue
+        lines = set(d["items"]) == {"l"}
+        if box_outline(d, r) and r.x0 <= dx and r.y0 <= dy and r.x1 >= w - dx and r.y1 >= h - dy:
+            frame.add(d["id"])
+        elif lines and r.h <= 0.5 * dy and r.x0 <= dx and r.x1 >= w - dx and (r.y1 <= dy or r.y0 >= h - dy):
+            sides.setdefault("top" if r.y1 <= dy else "bottom", []).append(d["id"])
+        elif lines and r.w <= 0.5 * dx and r.y0 <= dy and r.y1 >= h - dy and (r.x1 <= dx or r.x0 >= w - dx):
+            sides.setdefault("left" if r.x1 <= dx else "right", []).append(d["id"])
+    if len(sides) == 4:
+        frame.update(i for ids in sides.values() for i in ids)
+    return frame
+
+
+def without_page_frame(page: RawPage) -> RawPage:
+    """The page as the classifier reads it: without its `page_frame`, which stays in the
+    background picture."""
+    frame = page_frame(page)
+    if not frame:
+        return page
+    out = page.copy()
+    out["drawings"] = [d for d in page["drawings"] if d["id"] not in frame]
+    return out
 
 
 def drawings_of(e: Element) -> list[str]:

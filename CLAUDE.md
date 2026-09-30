@@ -204,7 +204,11 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
 - Theme: the most common background goes on the master, shared decoration onto layout pictures,
   layouts' placeholders get the deck's title/body style, frame counters become per-slide text.
   Words on different theme artwork or logo boxes are different lines (`artwork_of`); footline
-  boxes beside band artwork are theme.
+  boxes beside band artwork are theme. A stroked border framing the page (an outline or four
+  edge lines within `PAGE_FRAME_INSET` of every edge, `classify_graphics.page_frame`) is taken
+  out of the page classify reads, as its ground is (as a graphic every line became a figure
+  label). A layout gets no decoration cut out over more than `render.DECORATION_HOLES` of the
+  page where most of its backgrounds show decoration (slide content, etched into new slides).
 - Everything else (display math, theme decoration) stays in the background picture.
 
 ## Google side
@@ -561,6 +565,8 @@ markers.
   after each render. Ball bullets are patched out of the PNG. Removing block panels without their
   soft-masked shadows leaves black bars.
 - Figure removal switches off paths within the figure box + 5 pt; panel removal 1.5 pt, then 5 pt.
+  An image or shading covering the page (`render.PAGE_GROUND`, a background canvas) is never cut
+  under a figure or table: it left a white box there.
 - Slides ignores spaceAbove/spaceBelow between bulleted items (docs/calibration.md).
 - **Bullet styling is creation order**: style the paragraph like the bullet, create the bullets,
   then style the text in two or more requests (one request over a whole paragraph restyles its
