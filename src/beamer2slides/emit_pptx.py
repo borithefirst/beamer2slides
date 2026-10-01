@@ -14,6 +14,7 @@ from .emit_metrics import SLIDE_W, xml_text
 from .emit_model import (
     JsonMap, PptxTable, SetShape, Template, TemplateKey, set_shape, shape_measures_of, shape_of, template_of,
 )
+from .ir import Arrow
 from .ir_types import Box, MarkedShape, ShapeElement
 from .gapi import HttpError, message_of
 from .google_types import Outline, SlidesRequest, SlidesService, shape_type
@@ -59,6 +60,55 @@ def template_key_of(shape: str, bbox: Box, radius: float, shadow: float | None, 
     if shape != "RECTANGLE":
         adj = min(0.5, round(radius / max(min(x1 - x0, y1 - y0), 0.01), 2))
     return shape, adj, None if shadow is None else round(2 * shadow * scale) / 2
+
+
+ARC = "ARC"
+"""An arc template's kind (a diagram's curve, `emit_diagrams.arc_template_key_of`) begins so;
+`arc_kind` adds its heads: (kind, |sweep| in degrees, None)."""
+ARC_HEADS: dict[Arrow, str] = {"OPEN_ARROW": "arrow", "FILL_ARROW": "triangle", "STEALTH_ARROW": "stealth"}
+"""Slides' arrow heads as a .pptx line end's `type`."""
+
+
+def arc_kind(arrow_from: Arrow | None, arrow_to: Arrow | None) -> str:
+    """An arc template's kind: ARC, '<' and the head at its start, '>' and the one at its end
+    ('ARC>FILL_ARROW'). The heads come with the template: the API sets none on a shape."""
+    return ARC + ("" if arrow_from is None else f"<{arrow_from}") + ("" if arrow_to is None else f">{arrow_to}")
+
+
+def arc_heads(kind: str) -> tuple[Arrow | None, Arrow | None] | None:
+    """The heads (start, end) an arc template's kind names; None for a kind that is no arc's."""
+    if not kind.startswith(ARC):
+        return None
+    rest, to_end, end = kind[len(ARC):].partition(">")
+    if rest and not rest.startswith("<"):
+        return None
+
+    def head(name: str) -> Arrow | None:
+        return next((a for a in ARC_HEADS if a == name), None)
+    first, last = head(rest[1:]), head(end)
+    if (rest and first is None) or (to_end and last is None):
+        return None
+    return first, last
+
+
+def _add_arc(slide: Slide, i: int, sweep: float, heads: tuple[Arrow | None, Arrow | None]) -> None:
+    """An arc template: the preset `arc` in a square, from 0° (its right) clockwise through
+    `sweep` degrees, unfilled, with its heads (a .pptx brings them in; tools/probe_curves.py)."""
+    from lxml import etree
+
+    tree = slide.shapes._spTree
+    shape_id = max([int(e.get("id")) for e in tree.iter(f"{{{NS_P}}}cNvPr")] + [1]) + 1
+    side, x, y = round(100 * EMU_PER_PT), round((10 + i % 10 * 20) * EMU_PER_PT), round((10 + i // 10 * 20) * EMU_PER_PT)
+    start, end = heads
+    ends = ("" if start is None else f'<a:headEnd type="{ARC_HEADS[start]}"/>') + \
+        ("" if end is None else f'<a:tailEnd type="{ARC_HEADS[end]}"/>')
+    tree.append(etree.fromstring(
+        f'<p:sp xmlns:p="{NS_P}" xmlns:a="{NS_A}"><p:nvSpPr><p:cNvPr id="{shape_id}" name="Arc {shape_id}"/>'
+        f'<p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr><a:xfrm><a:off x="{x}" y="{y}"/><a:ext cx="{side}" cy="{side}"/>'
+        f'</a:xfrm><a:prstGeom prst="arc"><a:avLst><a:gd name="adj1" fmla="val 0"/>'
+        f'<a:gd name="adj2" fmla="val {round(sweep * 60000)}"/></a:avLst></a:prstGeom><a:noFill/>'
+        f'<a:ln w="{round(EMU_PER_PT)}"><a:solidFill><a:srgbClr val="000000"/></a:solidFill>{ends}</a:ln>'
+        f'<a:effectLst/></p:spPr><p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr/></a:p></p:txBody></p:sp>'))
 
 
 NS_A = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -112,6 +162,12 @@ def _add_template_shapes(slide: Slide, keys: Sequence[TemplateKey]) -> None:
             geometry.append(etree.fromstring(
                 f'<a:avLst xmlns:a="{a}"><a:gd name="adj1" fmla="val {round(adj * 100000)}"/></a:avLst>'))
             line._element.spPr.append(etree.fromstring(f'<a:effectLst xmlns:a="{a}"/>'))
+            continue
+        heads = arc_heads(kind)
+        if heads is not None:
+            if adj is None or not 0 < adj < 360:
+                raise ValueError(f"an arc's template key carries its sweep, not {adj!r}")
+            _add_arc(slide, i, adj, heads)
             continue
         shape = slide.shapes.add_shape(kinds[kind], Pt(10 + i % 10 * 20), Pt(10 + i // 10 * 20), Pt(100), Pt(100))
         if adj is not None and kind in ("ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE"):

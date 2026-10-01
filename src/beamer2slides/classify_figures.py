@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from typing import Literal
 
+from . import curves
 from .classify_model import (
     HOLE_PAD, Line, Paragraph, Rect, Span, cluster_rects, miter_reach, new_line, new_paragraph, overlap,
     polygon_shape, union_all, upright_ellipse,
@@ -619,8 +620,9 @@ class FiguresMixin(ParagraphsMixin):
         \\fcolorbox background) takes it as its outline."""
         def extent(ln: DiagramLine, k: int) -> list[float]:
             return sorted((ln["from"][k], ln["to"][k]))
-        horizontal = [l for l in lines if "via" not in l and abs(l["from"][1] - l["to"][1]) < 0.05]
-        vertical = [l for l in lines if "via" not in l and abs(l["from"][0] - l["to"][0]) < 0.05]
+        straight = [l for l in lines if "via" not in l and "sweep" not in l]  # (an arc's ends level is no side)
+        horizontal = [l for l in straight if abs(l["from"][1] - l["to"][1]) < 0.05]
+        vertical = [l for l in straight if abs(l["from"][0] - l["to"][0]) < 0.05]
 
         def near(a: Sequence[float], b: Sequence[float], tol: float) -> bool:
             return all(abs(p - q) <= tol for p, q in zip(a, b))
@@ -734,8 +736,20 @@ class FiguresMixin(ParagraphsMixin):
                                 closed=closed_path(path), on=None))
             else:
                 curve = d["type"] == "s" and "c" in ops and set(ops) <= {"c", "l"}
-                return refused("curve" if curve else "unknown_shape",
-                               f"{d['id']} {d['type']} {ops[:24]} {r.w:.0f}x{r.h:.0f} pt")
+                # A stroked curve (bend left, out/in, a loop, a brace) as circular arcs and
+                # straight pieces; one no chain of `MAX_PIECES` follows (a coil) stays a picture.
+                pieces = curves.path_pieces(path, curves.ARC_TOLERANCE) if curve else None
+                if pieces is None:
+                    return refused("curve" if curve else "unknown_shape",
+                                   f"{d['id']} {d['type']} {ops[:24]} {r.w:.0f}x{r.h:.0f} pt")
+                width = d["width"] or 0.4
+                first = len(lines)
+                lines += curve_lines(pieces, d["stroke"] or "#000000", width)
+                dash = dash_style(d.get("dash", []), width)
+                for ln in lines[first:]:
+                    drawn[id(ln)] = k
+                    if dash is not None:
+                        ln["dash"] = dash
         # A small circle drawn right after a line whose end is on its rim is that line's Circle
         # tip (TikZ draws a path, then its heads); any other is a dot node, kept in its place.
         for at, node, k in reversed(rims):
@@ -771,7 +785,9 @@ class FiguresMixin(ParagraphsMixin):
                 ln["arrow_from"] = head
             else:
                 ln["arrow_to"] = head
-            if head != "OPEN_ARROW" or t.closed:
+            if (head != "OPEN_ARROW" or t.closed) and "sweep" in ln:
+                extend_arc(ln, end, points, outline)
+            elif head != "OPEN_ARROW" or t.closed:
                 # TikZ stops the line where a filled (or closed hollow) head begins; Slides draws
                 # an arrow's point at the line's end, and centres a circle, square or diamond on
                 # it, so extend the line to the point or the centre.
@@ -861,3 +877,32 @@ class FiguresMixin(ParagraphsMixin):
         return {"id": f"p{self.raw['index']}dg{index}", "kind": "diagram", "role": "figure",
                 "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,
                 "spans": [s.id for s in spans]}
+
+
+def curve_lines(pieces: Sequence[curves.Piece], stroke: str, width: float) -> list[DiagramLine]:
+    """A stroked curve's pieces as diagram lines: an arc keeps its `sweep`, a straight piece is a line."""
+    out: list[DiagramLine] = []
+    for p in pieces:
+        ln: DiagramLine = {"from": [round(p.start[0], 2), round(p.start[1], 2)], "to": [round(p.end[0], 2), round(p.end[1], 2)],
+                           "stroke": stroke, "width": width, "arrow_from": None, "arrow_to": None}
+        if p.sweep is not None and ln["from"] != ln["to"]:
+            ln["sweep"] = p.sweep
+        out.append(ln)
+    return out
+
+
+def extend_arc(ln: DiagramLine, end: End, points: Sequence[Sequence[float]], outline: float) -> None:
+    """A filled arrow head on an arc: the arc grown along its circle to the head's tip, as a
+    straight line is extended to it (TikZ stops the stroke where the head begins)."""
+    sweep = ln.get("sweep")
+    if sweep is None:
+        return
+    start, stop = (ln["from"][0], ln["from"][1]), (ln["to"][0], ln["to"][1])
+    at = start if end == "from" else stop
+    ux, uy = curves.end_direction(start, stop, sweep, end)
+    reach = max((p[0] - at[0]) * ux + (p[1] - at[1]) * uy for p in points)
+    reach += miter_reach(points, (ux, uy), outline)
+    if reach > 0:
+        a, b, grown = curves.extended(start, stop, sweep, end, reach)
+        if abs(grown) < 360 - curves.ARC_STEP:
+            ln["from"], ln["to"], ln["sweep"] = [a[0], a[1]], [b[0], b[1]], round(grown, 2)

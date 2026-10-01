@@ -543,6 +543,9 @@ class DiagramLine:
     elbow: Elbow | None
     dash: Dash | None
     """(optional) None: a solid line."""
+    sweep: float | None
+    """A circular arc turning this many degrees from `from_` to `to`, positive clockwise on the
+    page (`curves`); None for a straight or elbow line."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1219,11 +1222,16 @@ def diagram_line(v: object, at: At) -> DiagramLine:
     via, bend = f.optional("via", point), f.optional("bend", one_of(BENDS))
     if (via is None) != (bend is None):
         at.fail("has one of 'via' and 'bend' without the other")
+    sweep = f.optional("sweep", number)
+    if sweep is not None and (via is not None or not 0 < abs(sweep) < 360):
+        at.fail(f"has an arc's sweep {sweep} {'with an elbow' if via is not None else 'not within (0, 360) degrees'}")
     out = DiagramLine(from_=f.req("from", point), to=f.req("to", point),
                       arrow_from=f.nullable("arrow_from", one_of(ARROWS)), arrow_to=f.nullable("arrow_to", one_of(ARROWS)),
                       stroke=f.req("stroke", color), width=f.req("width", number),
                       elbow=None if via is None or bend is None else Elbow(via=via, bend=bend),
-                      dash=f.optional("dash", one_of(DASHES)))
+                      dash=f.optional("dash", one_of(DASHES)), sweep=sweep)
+    if sweep is not None and out.from_ == out.to:
+        at.fail("is an arc whose ends are one point")
     f.close()
     return out
 
@@ -1682,6 +1690,7 @@ def diagram_line_json(ln: DiagramLine) -> JsonObject:
     if ln.elbow is not None:
         out.update(via=_point(ln.elbow.via), bend=ln.elbow.bend)
     _put(out, "dash", ln.dash)
+    _put(out, "sweep", ln.sweep)
     return out
 
 

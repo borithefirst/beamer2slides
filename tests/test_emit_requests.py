@@ -15,7 +15,7 @@ import numpy as np
 import pytest
 from pptx.presentation import Presentation as PptxPresentation
 
-from beamer2slides import emit, emit_holes
+from beamer2slides import curves, emit, emit_holes
 from beamer2slides.classify import HOLE_PAD, classify
 from beamer2slides.emit import (EMU_PER_PT, HOLE_FONT, HOLE_SPACE_EM, SLIDE_W, FontMapper, find_marks, fit_holes,
                                 formula_shifts, hole_offset, hole_run, mark_alpha, number_box_requests,
@@ -61,6 +61,35 @@ def box_of(transform: JsonObject, w: float, h: float) -> Box4:
         xs.append(part("scaleX") * x + part("shearX") * y + part("translateX") * k)
         ys.append(part("shearY") * x + part("scaleY") * y + part("translateY") * k)
     return min(xs), min(ys), max(xs), max(ys)
+
+
+def arc_boxes(d: "Emitted") -> dict[str, Box4]:
+    """Page box (pt) of each diagram arc as drawn: an arc copy's frame is its whole circle's square
+    (the preset `arc`), which may reach past the page while the arc itself does not."""
+    out: dict[str, Box4] = {}
+    for _, page, parts, _ in d.result["slides"]:
+        scale = SLIDE_W / jnums(d.slides[page], "size")[0]
+        for el, reqs in parts:
+            if el is None or el["kind"] != "diagram":
+                continue
+            lines = jobjs(el, "lines")
+            for r in reqs:
+                body = slides_json(r)
+                if "duplicateObject" not in body:
+                    continue
+                for copy in jobj(body, "duplicateObject", "objectIds").values():
+                    oid = as_str(copy, "objectIds")
+                    j = re.search(r"_l(\d+)$", oid)
+                    if j is None or "sweep" not in lines[int(j.group(1))]:
+                        continue
+                    ln = lines[int(j.group(1))]
+                    sweep = curves.drawn_sweep(jnum(ln, "sweep"))
+                    (x0, y0), (x1, y1) = jnums(ln, "from"), jnums(ln, "to")
+                    circle = curves.arc_circle((x0, y0), (x1, y1), sweep)
+                    points = [curves.arc_point(circle, sweep * k / 60) for k in range(61)]
+                    out[oid] = (min(x for x, _ in points) * scale, min(y for _, y in points) * scale,
+                                max(x for x, _ in points) * scale, max(y for _, y in points) * scale)
+    return out
 
 
 def pt_of(dim: Json) -> float:
@@ -605,7 +634,9 @@ def test_elements_lie_within_the_page(decks: tuple[Emitted, ...]) -> None:
         boxes: list[tuple[str, str, Sequence[float], float | None]] = [
             (f"b2s_s{page:03}", jstr(e, "id"), box, None) for page, pictures in d.result["pictures"].items()
             for e, box in pictures]
+        arcs = arc_boxes(d)
         for oid, created in d.boxes.items():
+            created = arcs.get(oid, created)
             on = d.page_of.get(oid)
             if on is not None and on.startswith("b2s_s"):
                 boxes.append((on, oid, created, d.font_max.get(oid, 0.0) if oid in d.texts else None))

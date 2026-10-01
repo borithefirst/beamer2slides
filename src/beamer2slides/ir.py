@@ -584,6 +584,9 @@ class DiagramLine(_DiagramLineKeys, total=False):
     bend: Bend
     dash: Dash
     """A dashed line (absent: solid, and in a deck.json older than it)."""
+    sweep: float
+    """A circular arc from `from` to `to` turning this many degrees, positive clockwise on the
+    page (a piece of a TikZ curve, `curves.path_pieces`); never with `via`."""
 
 
 class DiagramElement(TypedDict):

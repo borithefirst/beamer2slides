@@ -3065,6 +3065,7 @@ class Sync:
         """A kept slide's requests: its units the plan (re)creates, deletes or moves, its background
         and notes. A held slide (`merge.HoldSlide`) has none of those, and gets nothing."""
         from .emit import bend_template_key, element_template_keys, label_inside, node_template_key, template_key
+        from .emit_diagrams import arc_template_key
 
         p = updated(w.plan)
         units = slide_units(p)
@@ -3160,6 +3161,8 @@ class Sync:
                               if nd["shape"] and label_inside(nd)]
                     found += [(bend_template_key(ln), f"{main}_l{j}") for j, ln in enumerate(as_objects(ir["lines"], "ir.lines"))
                               if ln.get("bend")]
+                    found += [(key, f"{main}_l{j}") for j, ln in enumerate(as_objects(ir["lines"], "ir.lines"))
+                              if (key := arc_template_key(ln)) is not None]
                 for key, oid in found:
                     if key in needed and key not in templates and oid in objs:
                         size = _nums(objs[oid]["size"], f"read-back {oid}: size")
@@ -4232,6 +4235,10 @@ def stand_in_request(oid: str, sid: str, preset: str) -> SlidesRequest:
     if preset == "BENT_CONNECTOR":
         return {"createLine": {"objectId": oid, "lineCategory": "BENT", "elementProperties": {
             "pageObjectId": sid, "size": size, "transform": transform}}}
+    from .emit_pptx import arc_heads
+
+    if arc_heads(preset) is not None:  # (Slides' own arc: its sweep and heads are not the template's)
+        preset = "ARC"
     return {"createShape": {"objectId": oid, "shapeType": google_types.shape_type(preset, "a stand-in"),
                             "elementProperties": {"pageObjectId": sid, "size": size, "transform": transform}}}
 

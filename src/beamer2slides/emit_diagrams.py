@@ -11,13 +11,13 @@ from collections.abc import Callable, Sequence
 from dataclasses import replace
 from typing import Literal
 
-from . import ir_types
+from . import curves, ir_types
 from .emit_metrics import PAD_X, FontMapper, u16
 from .emit_model import (
     JsonMap, NodeLook, Template, TemplateKey, box_of, node_look, node_look_of, node_site_of, set_card, set_runs,
     template_of,
 )
-from .emit_pptx import template_key
+from .emit_pptx import arc_kind, template_key
 from .emit_text import in_sentence_of, text_box_requests_of
 from .google_types import LineConnection, LineProperties, Outline, ShapeProperties, SlidesRequest, slides_text_style
 from .gslides import EMU_PER_PT, emu, pt, rgb_color, text_color
@@ -107,7 +107,8 @@ def element_template_keys(el: JsonMap, scale: float) -> list[TemplateKey]:
     if el["kind"] == "diagram":
         nodes = [node_look_of(_object(n)) for n in _items(el["nodes"])]
         bends = [_bend(bend) for ln in _items(el["lines"]) if (bend := _object(ln).get("bend"))]
-        return [node_template_key_of(n) for n in nodes if node_templated_of(n)] + [bend_template_key_of(b) for b in bends]
+        return [node_template_key_of(n) for n in nodes if node_templated_of(n)] + [bend_template_key_of(b) for b in bends] \
+            + [k for ln in _items(el["lines"]) if (k := arc_template_key(_object(ln))) is not None]
     key = template_key(el, scale)
     return [key] if key else []
 
@@ -116,7 +117,38 @@ def diagram_template_keys(el: DiagramElement) -> list[TemplateKey]:
     """`element_template_keys` of a parsed diagram."""
     nodes = [node_look(n) for n in el.nodes]
     return [node_template_key_of(n) for n in nodes if node_templated_of(n)] + \
-        [bend_template_key_of(ln.elbow.bend) for ln in el.lines if ln.elbow is not None]
+        [bend_template_key_of(ln.elbow.bend) for ln in el.lines if ln.elbow is not None] + \
+        [k for ln in el.lines if (k := arc_template_key_of(ln)) is not None]
+
+
+def arc_template_key(line: JsonMap) -> TemplateKey | None:
+    """`arc_template_key_of` a line dict (sync's base diagrams); None for a line that is no arc."""
+    sweep = line.get("sweep")
+    if sweep is None:
+        return None
+    if isinstance(sweep, bool) or not isinstance(sweep, (int, float)):
+        raise TypeError(f"sweep: {sweep!r} is not a number")
+    return _arc_key(sweep, _arrow(line.get("arrow_from")), _arrow(line.get("arrow_to")))
+
+
+def arc_template_key_of(ln: DiagramLine) -> TemplateKey | None:
+    """An arc's template (emit_pptx's `arc` preset): its heads and its sweep as drawn
+    (`curves.drawn_sweep`). A copy is turned and mirrored to its place (`arc_requests`), so
+    neither where the arc starts nor which way it turns makes another template."""
+    return None if ln.sweep is None else _arc_key(ln.sweep, ln.arrow_from, ln.arrow_to)
+
+
+def _arc_key(sweep: float, arrow_from: Arrow | None, arrow_to: Arrow | None) -> TemplateKey:
+    return arc_kind(arrow_from, arrow_to), abs(curves.drawn_sweep(sweep)), None
+
+
+def _arrow(value: Json) -> Arrow | None:
+    if value is None:
+        return None
+    for a in ir_types.ARROWS:
+        if value == a:
+            return a
+    raise TypeError(f"arrow: {value!r} is not one of {ir_types.ARROWS}")
 
 
 def _items(value: Json) -> Sequence[Json]:
@@ -182,6 +214,54 @@ def _copied(template: Template, oid: str, sx: float, sy: float, x: float, y: flo
             {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}]
 
 
+CHORD_STEP = 15.0  # degrees of an arc one straight piece stands for, where no template is at hand
+
+
+def arc_requests(tpl: Template, oid: str, ln: DiagramLine, sweep: float, scale: float) -> list[SlidesRequest]:
+    """An arc copied from its template (the preset `arc` from 0° clockwise through the drawn
+    sweep, in a square `tpl.w` x `tpl.h`) and put on its circle (`curves.arc_circle`) by one
+    ABSOLUTE transform: scaled to the circle, mirrored when it turns anticlockwise, turned to
+    start where it starts. Its ends land on `from` and `to` exactly; its outline takes the
+    line's colour and weight (the template's heads stay)."""
+    drawn = curves.drawn_sweep(sweep)
+    circle = curves.arc_circle(ln.from_, ln.to, drawn)
+    turn = 1.0 if drawn > 0 else -1.0
+    angle = math.radians(circle.start)
+    cos, sin = math.cos(angle), math.sin(angle)
+    sx, sy = 2 * circle.radius * scale / tpl.w, 2 * circle.radius * scale / tpl.h
+    # rotation(start) . mirror(turn) . scale: the template's point at angle a goes to start + turn * a
+    a, b, c, d = cos * sx, -sin * turn * sy, sin * sx, cos * turn * sy
+    tx = circle.centre[0] * scale - (a * tpl.w + b * tpl.h) / 2
+    ty = circle.centre[1] * scale - (c * tpl.w + d * tpl.h) / 2
+    outline: Outline = {"outlineFill": {"solidFill": {"color": rgb_color(ln.stroke)}},
+                        "weight": pt(round(max(0.5, ln.width * scale), 2))}
+    if ln.dash is not None:  # (a solid arc writes no dash, as a solid line)
+        outline["dashStyle"] = ln.dash
+    return [{"duplicateObject": {"objectId": tpl.id, "objectIds": {tpl.id: oid}}},
+            {"updatePageElementTransform": {"objectId": oid, "applyMode": "ABSOLUTE", "transform": {
+                "scaleX": round(a, 6), "shearX": round(b, 6), "shearY": round(c, 6), "scaleY": round(d, 6),
+                "unit": "EMU", "translateX": round(tx * EMU_PER_PT), "translateY": round(ty * EMU_PER_PT)}}},
+            {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}},
+            {"updateShapeProperties": {
+                "objectId": oid,
+                "fields": "shapeBackgroundFill.propertyState,outline.outlineFill.solidFill.color,outline.weight"
+                          + (",outline.dashStyle" if ln.dash is not None else ""),
+                "shapeProperties": {"shapeBackgroundFill": {"propertyState": "NOT_RENDERED"},
+                                    "outline": outline}}}]
+
+
+def arc_chords(oid: str, ln: DiagramLine, sweep: float) -> list[tuple[str, Point, Point, DiagramLine]]:
+    """An arc as straight pieces of at most `CHORD_STEP` degrees (no template to copy): the first
+    keeps the start's head and object id, the last the end's head."""
+    n = max(2, math.ceil(abs(sweep) / CHORD_STEP))
+    circle = curves.arc_circle(ln.from_, ln.to, sweep)
+    points = [ln.from_, *(curves.arc_point(circle, k * sweep / n) for k in range(1, n)), ln.to]
+    return [(oid if k == 0 else f"{oid}c{k}", points[k], points[k + 1],
+             replace(ln, sweep=None, arrow_from=ln.arrow_from if k == 0 else None,
+                     arrow_to=ln.arrow_to if k == n - 1 else None))
+            for k in range(n)]
+
+
 def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale: float, fonts: FontMapper,
                         template: Callable[[TemplateKey], Template] | None) -> list[SlidesRequest]:
     """Nodes become shapes, edges become lines with arrow heads; the parts are grouped so the
@@ -198,10 +278,17 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
         if ln.elbow is not None and template is None:
             segments += [(f"{object_id}_l{j}", ln.from_, ln.elbow.via, replace(ln, arrow_to=None)),
                          (f"{object_id}_l{j}b", ln.elbow.via, ln.to, replace(ln, arrow_from=None))]
+        elif ln.sweep is not None and template is None:
+            segments += arc_chords(f"{object_id}_l{j}", ln, ln.sweep)
         else:
             segments.append((f"{object_id}_l{j}", ln.from_, ln.to, ln))
     for oid, (x1, y1), (x2, y2), ln in segments:
         dx, dy = (x2 - x1) * scale, (y2 - y1) * scale
+        if ln.sweep is not None and template is not None:
+            # A curve's arc: a turned copy of its template, which brought its heads along.
+            reqs += arc_requests(template(_arc_key(ln.sweep, ln.arrow_from, ln.arrow_to)), oid, ln, ln.sweep, scale)
+            children.append(oid)
+            continue
         if ln.elbow is not None and template is not None:
             tpl = template(bend_template_key_of(ln.elbow.bend))
             # Like a straight line: from the transform origin along +size, flipped by negative scales.
@@ -311,6 +398,8 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
     # Edges follow the nodes they start or end on.
     sites = [(n.bbox, n.shape) for n in el.nodes]
     for oid, start_at, end_at, ln in segments:
+        if ln.sweep is not None:
+            continue  # (an arc is a shape: only lines connect)
         ends: LineProperties = {}
         first = connection_of(start_at, sites, node_oids) if start_at == ln.from_ else None
         last = connection_of(end_at, sites, node_oids) if end_at == ln.to else None
