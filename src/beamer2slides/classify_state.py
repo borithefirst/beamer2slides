@@ -26,6 +26,7 @@ Refusal = Literal[
     "see_through",          # opacity or a soft mask (a shadow)
     "curve",                # a stroked line with Bezier segments (bend, in/out, loops, braces)
     "unknown_shape",        # a closed path that is no node shape we know
+    "rotated_node",         # an ellipse or a rectangle turned (rotate=30): no node rotation yet
     "no_nodes",             # lines and labels only
     "nodes_cross",          # nodes overlapping without nesting (a Venn diagram)
     "loose_arrow_tip",      # an arrow head at no line's end
@@ -39,7 +40,7 @@ Refusal = Literal[
 """Why a figure cluster did not become a native diagram (`DiagramRefusal`)."""
 REFUSALS: tuple[Refusal, ...] = (
     "too_large", "over_text", "image_inside", "other_text", "unreadable_path", "see_through", "curve",
-    "unknown_shape", "no_nodes", "nodes_cross", "loose_arrow_tip", "scripted_label", "math_label", "icon_label",
+    "unknown_shape", "rotated_node", "no_nodes", "nodes_cross", "loose_arrow_tip", "scripted_label", "math_label", "icon_label",
     "rotated_label", "too_many_rectangles", "splits_cells")
 """Every `Refusal`, to read one back from JSON (`tests/test_diagram_score.py` holds them equal)."""
 

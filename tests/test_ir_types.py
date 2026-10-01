@@ -266,7 +266,8 @@ def test_old_forms_are_refused_as_ir_refuses_them():
     assert ir_types.deck_json(ir_types.parse_deck(deck, "classified")) == deck
     assert refusal(rendered(deck), "rendered") == (
         "slide page 0, element p0m0: shape: is 'custom', expected one of 'ROUND_RECTANGLE' | "
-        "'ROUND_2_SAME_RECTANGLE' | 'RECTANGLE' | 'ELLIPSE' | 'DIAMOND' | 'TRIANGLE'")
+        "'ROUND_2_SAME_RECTANGLE' | 'RECTANGLE' | 'ELLIPSE' | 'DIAMOND' | 'TRIANGLE' | 'CAN' | 'CLOUD' | 'HEXAGON' | "
+        "'OCTAGON' | 'PENTAGON' | 'HEPTAGON' | 'DECAGON' | 'DODECAGON' | 'FLOW_CHART_PUNCHED_TAPE'")
 
 
 def test_theme_text_writes_no_tab_or_wrap_limit():

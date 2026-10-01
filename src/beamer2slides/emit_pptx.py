@@ -35,7 +35,11 @@ SHADOW_ALPHA = 0.5
 TEMPLATE_PRESETS = {"ROUND_RECTANGLE": "roundRect", "ROUND_2_SAME_RECTANGLE": "round2SameRect", "RECTANGLE": "rect"}
 TEMPLATE_LAYOUTS = {"TITLE": 0, "TITLE_ONLY": 5, "BLANK": 6}  # python-pptx default template layout indexes
 # what `_add_template_shapes` can put on a source slide
-TEMPLATE_KINDS = ("ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE", "RECTANGLE", "ELLIPSE", "DIAMOND", "TRIANGLE")
+TEMPLATE_KINDS = ("ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE", "RECTANGLE", "ELLIPSE", "DIAMOND", "TRIANGLE",
+                  "CAN", "CLOUD", "HEXAGON", "OCTAGON", "PENTAGON", "HEPTAGON", "DECAGON", "DODECAGON",
+                  "FLOW_CHART_PUNCHED_TAPE")
+# presets whose first adjustment a diagram node's template key carries (emit_diagrams.ADJUSTED)
+ADJUSTED_KINDS = ("CAN", "HEXAGON", "OCTAGON")
 
 
 def template_key(el: JsonMap, scale: float) -> TemplateKey | None:
@@ -148,7 +152,10 @@ def _add_template_shapes(slide: Slide, keys: Sequence[TemplateKey]) -> None:
     from pptx.util import Pt
 
     kinds = dict(zip(TEMPLATE_KINDS, (MSO_SHAPE.ROUNDED_RECTANGLE, MSO_SHAPE.ROUND_2_SAME_RECTANGLE, MSO_SHAPE.RECTANGLE,
-                                      MSO_SHAPE.OVAL, MSO_SHAPE.DIAMOND, MSO_SHAPE.ISOSCELES_TRIANGLE)))
+                                      MSO_SHAPE.OVAL, MSO_SHAPE.DIAMOND, MSO_SHAPE.ISOSCELES_TRIANGLE,
+                                      MSO_SHAPE.CAN, MSO_SHAPE.CLOUD, MSO_SHAPE.HEXAGON, MSO_SHAPE.OCTAGON,
+                                      MSO_SHAPE.REGULAR_PENTAGON, MSO_SHAPE.HEPTAGON, MSO_SHAPE.DECAGON,
+                                      MSO_SHAPE.DODECAGON, MSO_SHAPE.FLOWCHART_PUNCHED_TAPE)))
     a = NS_A
     for i, (kind, adj, shadow) in enumerate(keys):
         if kind == "BENT_CONNECTOR":
@@ -174,6 +181,10 @@ def _add_template_shapes(slide: Slide, keys: Sequence[TemplateKey]) -> None:
             shape.adjustments[0] = adj
             if kind == "ROUND_2_SAME_RECTANGLE":
                 shape.adjustments[1] = 0.0
+        elif adj is not None and kind in ADJUSTED_KINDS:
+            # a can's ellipse height, a hexagon's or an octagon's corner cut, as a share of the
+            # shorter side (python-pptx writes the hexagon's vf at its default beside it)
+            shape.adjustments[0] = adj
         shape.fill.solid()
         shape.line.fill.background()
         # No text padding (the API can't set it): a diagram label fits a node as tight as TikZ's.

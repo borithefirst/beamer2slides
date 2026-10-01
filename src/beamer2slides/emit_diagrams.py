@@ -14,8 +14,8 @@ from typing import Literal
 from . import curves, ir_types
 from .emit_metrics import PAD_X, FontMapper, u16
 from .emit_model import (
-    JsonMap, NodeLook, Template, TemplateKey, box_of, node_look, node_look_of, node_site_of, set_card, set_runs,
-    template_of,
+    JsonMap, NodeLook, NodeSite, Template, TemplateKey, box_of, node_look, node_look_of, node_site_of, set_card,
+    set_runs, template_of,
 )
 from .emit_pptx import arc_kind, template_key
 from .emit_text import in_sentence_of, text_box_requests_of
@@ -29,16 +29,24 @@ from .typing_compat import assert_never
 
 # Share of a preset shape's width its text may use: Slides lays text out in the shape's .pptx
 # text rectangle (an ellipse's is its inscribed square, a diamond's half its width).
-TEXT_RECT_WIDTH: dict[str, float] = {"RECTANGLE": 1.0, "ROUND_RECTANGLE": 0.9, "ELLIPSE": 0.707, "DIAMOND": 0.5}
+TEXT_RECT_WIDTH: dict[str, float] = {"RECTANGLE": 1.0, "ROUND_RECTANGLE": 0.9, "ELLIPSE": 0.707, "DIAMOND": 0.5,
+                                     # (a can's text rectangle is its body, l to r; a cloud's
+                                     # w 2977/21600 to w 17087/21600; punched tape's l to r)
+                                     "CAN": 1.0, "CLOUD": 0.653, "FLOW_CHART_PUNCHED_TAPE": 1.0}
 # Connection sites of preset shapes in their .pptx order (fractions of the box): a line connected
-# to a site follows the shape when it is moved in Slides.
+# to a site follows the shape when it is moved in Slides. (CAN, HEXAGON and OCTAGON have sites
+# where their adjustment puts them: `connection_sites`.)
 CONNECTION_SITES: dict[str, list[tuple[float, float]]] = {
     "RECTANGLE": [(0.5, 0), (0, 0.5), (0.5, 1), (1, 0.5)],
     "ROUND_RECTANGLE": [(0.5, 0), (0, 0.5), (0.5, 1), (1, 0.5)],
     "DIAMOND": [(0.5, 0), (0, 0.5), (0.5, 1), (1, 0.5)],
     "ELLIPSE": [(0.5, 0), (0.1464, 0.1464), (0, 0.5), (0.1464, 0.8536), (0.5, 1), (0.8536, 0.8536), (1, 0.5), (0.8536, 0.1464)],
     "TRIANGLE": [(0.5, 0), (0.25, 0.5), (0, 1), (0.5, 1), (1, 1), (0.75, 0.5)],
+    "CLOUD": [(21582 / 21600, 0.5), (0.5, 21577 / 21600), (67 / 21600, 0.5), (0.5, 1235 / 21600)],
+    "FLOW_CHART_PUNCHED_TAPE": [(0.5, 0.1), (0, 0.5), (0.5, 0.9), (1, 0.5)],
 }
+# The presets whose proportions take an adjustment (ir.Node `adjust`), and its OOXML default.
+ADJUSTED: dict[str, float] = {"CAN": 0.25, "HEXAGON": 0.25, "OCTAGON": 0.29289}
 LABEL_ROOM = 1.08  # the substitute font may run this much wider
 
 
@@ -51,8 +59,50 @@ def label_inside_of(node: NodeLook) -> bool:
     """A node's label goes into the node shape itself (it then moves and resizes with it) when
     it fits the shape's text rectangle without wrapping."""
     x0, _, x1, _ = node.bbox
-    return bool(node.text) and node.shape in TEXT_RECT_WIDTH and \
-        node.label_w * LABEL_ROOM <= (x1 - x0) * TEXT_RECT_WIDTH[node.shape] - 0.5
+    share = text_rect_width(node.shape, node.bbox, node.adjust)
+    return bool(node.text) and share is not None and node.label_w * LABEL_ROOM <= (x1 - x0) * share - 0.5
+
+
+def adjust_of(shape: TemplateKind | None, adjust: float | None) -> float | None:
+    """The adjustment a node's preset is drawn at: the node's, else the preset's default; None
+    for a preset that takes none."""
+    if shape is None or shape not in ADJUSTED:
+        return None
+    return ADJUSTED[shape] if adjust is None else adjust
+
+
+def text_rect_width(shape: TemplateKind | None, bbox: Box, adjust: float | None) -> float | None:
+    """The share of a node's width its preset's text rectangle spans (None: a preset whose label
+    is never put inside). An octagon's is inset half its cut on each side, a hexagon's as OOXML's
+    guides say (its corners on the slanted sides)."""
+    x0, y0, x1, y1 = bbox
+    w, ss = max(x1 - x0, 0.01), max(min(x1 - x0, y1 - y0), 0.01)
+    a = adjust_of(shape, adjust)
+    if shape == "OCTAGON" and a is not None:
+        return max(0.0, 1 - a * ss / w)
+    if shape == "HEXAGON" and a is not None:
+        most = 0.5 * w / ss  # maxAdj
+        a = min(a, most)
+        q8 = 2 + 4 * a / most if a <= most / 2 else 1 + 6 * a / most
+        return 1 - q8 / 12
+    return None if shape is None else TEXT_RECT_WIDTH.get(shape)
+
+
+def connection_sites(shape: TemplateKind | None, bbox: Box, adjust: float | None) -> list[tuple[float, float]]:
+    """A node preset's connection sites in its .pptx order (fractions of its box)."""
+    x0, y0, x1, y1 = bbox
+    w, h = max(x1 - x0, 0.01), max(y1 - y0, 0.01)
+    ss = min(w, h)
+    a = adjust_of(shape, adjust)
+    if shape == "CAN" and a is not None:
+        return [(0.5, min(0.5, a) * ss / h), (0, 0.5), (0.5, 1), (1, 0.5)]
+    if shape == "HEXAGON" and a is not None:
+        fx = min(a * ss / w, 0.5)
+        return [(1, 0.5), (1 - fx, 1), (fx, 1), (0, 0.5), (fx, 0), (1 - fx, 0)]
+    if shape == "OCTAGON" and a is not None:
+        fx, fy = min(a, 0.5) * ss / w, min(a, 0.5) * ss / h
+        return [(1, fy), (1, 1 - fy), (1 - fx, 1), (fx, 1), (0, 1 - fy), (0, fy), (fx, 0), (1 - fx, 0)]
+    return [] if shape is None else CONNECTION_SITES.get(shape, [])
 
 
 def node_template_key(node: JsonMap) -> TemplateKey:
@@ -62,11 +112,14 @@ def node_template_key(node: JsonMap) -> TemplateKey:
 
 def node_template_key_of(node: NodeLook) -> TemplateKey:
     """A node's template: its preset, and for rounded corners of a known radius the preset's
-    adjustment (as `template_key` gives a panel's) - createShape only makes the default."""
+    adjustment (as `template_key` gives a panel's) - createShape only makes the default. A can,
+    a hexagon or an octagon of a measured adjustment carries it too."""
     x0, y0, x1, y1 = node.bbox
     adj = None
     if node.shape == "ROUND_RECTANGLE" and node.radius:
         adj = min(0.5, round(node.radius / max(min(x1 - x0, y1 - y0), 0.01), 2))
+    elif node.shape in ADJUSTED and node.adjust is not None:
+        adj = round(node.adjust, 2)
     # (a free label is never templated: node_templated_of)
     return "" if node.shape is None else node.shape, adj, None
 
@@ -170,16 +223,13 @@ def connection(point: Sequence[float], nodes: Sequence[JsonMap], oids: Sequence[
     return connection_of((x, y), [node_site_of(n) for n in nodes], oids)
 
 
-def connection_of(point: Point, nodes: Sequence[tuple[Box, TemplateKind | None]],
-                  oids: Sequence[str]) -> LineConnection | None:
+def connection_of(point: Point, nodes: Sequence[NodeSite], oids: Sequence[str]) -> LineConnection | None:
     """The node connection site a line end sits on (PDF pt, within 1.5 pt), if any. `nodes`: each
-    node's box and shape."""
+    node's box, shape and adjustment."""
     best: tuple[float, LineConnection] | None = None
-    for (bbox, shape), oid in zip(nodes, oids):
-        if not shape or shape not in CONNECTION_SITES:
-            continue
+    for (bbox, shape, adjust), oid in zip(nodes, oids):
         x0, y0, x1, y1 = bbox
-        for index, (fx, fy) in enumerate(CONNECTION_SITES[shape]):
+        for index, (fx, fy) in enumerate(connection_sites(shape, bbox, adjust)):
             d = math.hypot(point[0] - (x0 + fx * (x1 - x0)), point[1] - (y0 + fy * (y1 - y0)))
             if d <= 1.5 and (best is None or d < best[0]):
                 best = (d, {"connectedObjectId": oid, "connectionSiteIndex": index})
@@ -396,7 +446,7 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
             members = [f"{object_id}_g{j}"]
         children += members
     # Edges follow the nodes they start or end on.
-    sites = [(n.bbox, n.shape) for n in el.nodes]
+    sites = [(n.bbox, n.shape, n.adjust) for n in el.nodes]
     for oid, start_at, end_at, ln in segments:
         if ln.sweep is not None:
             continue  # (an arc is a shape: only lines connect)

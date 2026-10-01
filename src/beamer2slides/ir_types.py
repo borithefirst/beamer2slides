@@ -69,7 +69,9 @@ TEXT_ROLES: tuple[TextRole, ...] = ("title", "body", "subtitle", "footer")
 IMAGE_ROLES: tuple[ImageElementRole, ...] = ("math", "figure", "icon")
 SHAPE_ROLES: tuple[ShapeRole, ...] = ("panel", "rule", "highlight", "line")
 TEMPLATE_KINDS: tuple[TemplateKind, ...] = ("ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE", "RECTANGLE", "ELLIPSE",
-                                            "DIAMOND", "TRIANGLE")
+                                            "DIAMOND", "TRIANGLE", "CAN", "CLOUD", "HEXAGON", "OCTAGON",
+                                            "PENTAGON", "HEPTAGON", "DECAGON", "DODECAGON",
+                                            "FLOW_CHART_PUNCHED_TAPE")
 PRODUCER_SHAPE_KINDS: tuple[ProducerShapeKind, ...] = ("custom", "line")
 BULLET_SHAPES: tuple[BulletShape, ...] = ("square", "open_square", "disc", "circle", "triangle")
 POSITIONS: tuple[Position, ...] = ("TOP", "BOTTOM", "LEFT", "RIGHT")
@@ -522,6 +524,8 @@ class Node:
     radius: float | None
     dash: Dash | None
     """(optional) None: a solid outline."""
+    adjust: float | None
+    """(optional) The preset's adjustment, a share of the shorter side (ir.Node)."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1212,7 +1216,7 @@ def node(v: object, at: At) -> Node:
                paragraphs=f.req("paragraphs", tuple_of(tuple_of(plain_run))),
                baselines=f.req("baselines", tuple_of(number)), label_w=f.req("label_w", number),
                text=f.nullable("text", tuple_of(card_box)), radius=f.optional("radius", number),
-               dash=f.optional("dash", one_of(DASHES)))
+               dash=f.optional("dash", one_of(DASHES)), adjust=f.optional("adjust", number))
     f.close()
     return out
 
@@ -1681,6 +1685,7 @@ def node_json(n: Node) -> JsonObject:
         "text": _opt(n.text, lambda cards: [{"paragraphs": _paragraphs_json(c.paragraphs, False)} for c in cards])}
     _put(out, "radius", n.radius)
     _put(out, "dash", n.dash)
+    _put(out, "adjust", n.adjust)
     return out
 
 

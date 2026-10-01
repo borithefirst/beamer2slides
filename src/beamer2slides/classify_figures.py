@@ -14,6 +14,7 @@ from .classify_model import (
     polygon_shape, union_all, upright_ellipse,
 )
 from .classify_paragraphs import ParagraphsMixin
+from .classify_shapes import preset_shape, split_rectangle, turned_angle
 from .classify_state import DiagramRefusal, Refusal
 from .classify_text import EQ_NUMBER_RE, card_text, family_of, math_text, span_runs
 from .ir import (
@@ -40,6 +41,7 @@ class DraftNode:
     width: float | None
     radius: float | None
     dash: Dash | None
+    adjust: float | None  # a preset's adjustment (classify_shapes.Preset)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -649,7 +651,8 @@ class FiguresMixin(ParagraphsMixin):
                                            dash=top.get("dash"))
                 else:
                     nodes.append(DraftNode(rect=rect, shape="RECTANGLE", spans=[], fill=None,
-                                           stroke=top["stroke"], width=top["width"], radius=None, dash=top.get("dash")))
+                                           stroke=top["stroke"], width=top["width"], radius=None, dash=top.get("dash"),
+                                           adjust=None))
 
     def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> DiagramElement | DiagramRefusal:
         """A figure cluster made only of simple nodes (rectangles, rounded rectangles, ellipses)
@@ -690,14 +693,30 @@ class FiguresMixin(ParagraphsMixin):
             points = [p for _, pts in path for p in pts]
             if shape is None and max(r.w, r.h) > 6 and ops in ("llll", "lll") and "f" in d["type"] + "f":
                 shape = polygon_shape(points, r)  # decision diamonds, triangles
-            if shape and r.w > 3 and r.h > 3:
+            preset = preset_shape(path, r, "f" in d["type"]) if shape is None and max(r.w, r.h) > 6 else None
+            parts = split_rectangle(path, r) if shape is None and preset is None and r.w > 3 and r.h > 3 else None
+            outline_dash = dash_style(d.get("dash", []), d["width"] or 0.4) if "s" in d["type"] else None
+            if preset is not None and r.w > 3 and r.h > 3:
+                # cylinders, clouds, polygons, pills, tapes: a Slides preset at the path's proportions
+                nodes.append(DraftNode(rect=r, shape=preset.shape, spans=[],
+                                       fill=d["fill"] if "f" in d["type"] else None,
+                                       stroke=d["stroke"] if "s" in d["type"] else None, width=d["width"],
+                                       radius=preset.radius, dash=outline_dash, adjust=preset.adjust))
+            elif parts is not None:
+                # a rectangle split into parts (a UML class): one rectangle per part, stacked
+                nodes.extend(DraftNode(rect=part, shape="RECTANGLE", spans=[],
+                                       fill=d["fill"] if "f" in d["type"] else None,
+                                       stroke=d["stroke"] if "s" in d["type"] else None, width=d["width"],
+                                       radius=None, dash=outline_dash, adjust=None) for part in parts)
+            elif shape and r.w > 3 and r.h > 3:
                 corners = d.get("corners")
                 node = DraftNode(rect=r, shape=shape, spans=[],
                                  fill=d["fill"] if "f" in d["type"] else None,
                                  stroke=d["stroke"] if "s" in d["type"] else None, width=d["width"],
                                  # rounded corners=3pt: without it the node got Slides' default rounding
                                  radius=max(corners.values()) if shape == "ROUND_RECTANGLE" and corners else None,
-                                 dash=dash_style(d.get("dash", []), d["width"] or 0.4) if "s" in d["type"] else None)
+                                 dash=dash_style(d.get("dash", []), d["width"] or 0.4) if "s" in d["type"] else None,
+                                 adjust=None)
                 if shape == "ELLIPSE" and max(r.w, r.h) <= TIP_SIZE:
                     rims.append((len(nodes), node, k))
                 else:
@@ -735,6 +754,9 @@ class FiguresMixin(ParagraphsMixin):
                                 points=points, outline=d["width"] if "s" in d["type"] and d["width"] else 0.0,
                                 closed=closed_path(path), on=None))
             else:
+                turned = turned_angle(path, r)
+                if turned is not None:
+                    return refused("rotated_node", f"{d['id']} {d['type']} {ops} turned {turned:.0f} deg")
                 curve = d["type"] == "s" and "c" in ops and set(ops) <= {"c", "l"}
                 # A stroked curve (bend left, out/in, a loop, a brace) as circular arcs and
                 # straight pieces; one no chain of `MAX_PIECES` follows (a coil) stays a picture.
@@ -855,7 +877,7 @@ class FiguresMixin(ParagraphsMixin):
                 nodes[-1] = replace(last, rect=last.rect.union(s.rect))
             else:
                 nodes.append(DraftNode(rect=s.rect, shape=None, spans=[s], fill=None, stroke=None, width=None,
-                                       radius=None, dash=None))
+                                       radius=None, dash=None, adjust=None))
 
         out_nodes: list[Node] = []
         for n in nodes:
@@ -873,6 +895,7 @@ class FiguresMixin(ParagraphsMixin):
                 "text": card_text(n.rect, rows) if n.shape else None,
                 **({"radius": n.radius} if n.radius is not None else {}),
                 **({"dash": n.dash} if n.dash is not None else {}),
+                **({"adjust": n.adjust} if n.adjust is not None else {}),
             })
         return {"id": f"p{self.raw['index']}dg{index}", "kind": "diagram", "role": "figure",
                 "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,

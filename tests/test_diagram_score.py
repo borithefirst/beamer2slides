@@ -26,10 +26,10 @@ BOARD: dict[str, tuple[Outcome, set[Refusal]]] = {
     "Self loops and parallel edges": ("native", set()),
     "Sloped labels along diagonal edges": ("picture", {"rotated_label"}),
     "Multi-line node text": ("native", set()),
-    "Shapes: cylinder, ellipse, hexagon, circle": ("picture", {"unknown_shape"}),
-    "Shapes: cloud, document, chamfered, pill": ("picture", {"unknown_shape"}),
-    "Rotated ellipse and rotated rectangle": ("picture", {"unknown_shape"}),
-    "UML class: a multipart node": ("picture", {"unknown_shape"}),
+    "Shapes: cylinder, ellipse, hexagon, circle": ("native", set()),
+    "Shapes: cloud, document, chamfered, pill": ("native", set()),
+    "Rotated ellipse and rotated rectangle": ("picture", {"rotated_node"}),
+    "UML class: a multipart node": ("native", set()),
     "Nodes with drop shadows": ("picture", {"see_through"}),
     "Nodes with shaded fills": ("picture", {"image_inside"}),
     "Labels with math and subscripts": ("picture", {"scripted_label"}),
@@ -52,7 +52,7 @@ BOARD: dict[str, tuple[Outcome, set[Refusal]]] = {
     "A circuit (circuitikz)": ("picture", {"curve"}),
     "A control loop block diagram": ("picture", {"math_label"}),
     "Nodes revealed step by step": ("native", set()),
-    "A system architecture": ("picture", {"unknown_shape"}),
+    "A system architecture": ("native", set()),
 }
 
 

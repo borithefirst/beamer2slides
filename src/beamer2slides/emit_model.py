@@ -159,6 +159,8 @@ class NodeLook:
     """Its label's words, joined and stripped."""
     label_w: float
     radius: float | None
+    adjust: float | None
+    """The preset's adjustment (ir.Node `adjust`), None where it takes none or the node says none."""
 
 CellGrid = tuple[tuple[tuple[SetRun, ...], ...], ...]
 """A table's cells: per row, per column, the runs."""
@@ -285,7 +287,7 @@ def set_card(box: CardBox) -> SetText:
 def node_look(n: Node) -> NodeLook:
     """A parsed diagram node as its template and label placement read it."""
     return NodeLook(bbox=n.bbox, shape=n.shape, text="".join(r.text for runs in n.paragraphs for r in runs).strip(),
-                    label_w=n.label_w, radius=n.radius)
+                    label_w=n.label_w, radius=n.radius, adjust=n.adjust)
 
 
 def number_run(n: Number) -> SetRun:
@@ -570,16 +572,21 @@ def _template_kind(value: Json) -> TemplateKind | None:
 
 def node_look_of(d: JsonMap) -> NodeLook:
     """A node dict as `label_inside` and `node_template_key` always read it: `bbox` and `shape`
-    always, `label_w` (0) and `radius` as `.get`. (Its `paragraphs` too: none is no label.)"""
+    always, `label_w` (0), `radius` and `adjust` as `.get`. (Its `paragraphs` too: none is no label.)"""
     words = "".join(_str(_object(r, "paragraphs")["text"], "text") for runs in _items(d.get("paragraphs", []), "paragraphs")
                     for r in _items(runs, "paragraphs"))
     return NodeLook(bbox=_box(d["bbox"], "bbox"), shape=_template_kind(d["shape"]), text=words.strip(),
-                    label_w=_num(d.get("label_w", 0.0), "label_w"), radius=_opt_num(d.get("radius"), "radius"))
+                    label_w=_num(d.get("label_w", 0.0), "label_w"), radius=_opt_num(d.get("radius"), "radius"),
+                    adjust=_opt_num(d.get("adjust"), "adjust"))
 
 
-def node_site_of(d: JsonMap) -> tuple[Box, TemplateKind | None]:
-    """A node dict as `connection` reads it: its box and its shape."""
-    return _box(d["bbox"], "bbox"), _template_kind(d["shape"])
+NodeSite = tuple[Box, TemplateKind | None, float | None]
+"""A node as a line's connection reads it: its box, its shape and its preset's adjustment."""
+
+
+def node_site_of(d: JsonMap) -> NodeSite:
+    """A node dict as `connection` reads it."""
+    return _box(d["bbox"], "bbox"), _template_kind(d["shape"]), _opt_num(d.get("adjust"), "adjust")
 
 
 ObjectMap = Mapping[str, object]

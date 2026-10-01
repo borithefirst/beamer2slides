@@ -231,7 +231,9 @@ def test_the_shape_marked_pages_wrote_before_688ebf4_is_a_problem():
     assert len(found) == 2
     found = ir.problems(rendered(deck), "rendered", unknown_keys=True)
     assert "slide page 0, element p0m0: shape: is 'custom', expected one of " \
-           "'ROUND_RECTANGLE' | 'ROUND_2_SAME_RECTANGLE' | 'RECTANGLE' | 'ELLIPSE' | 'DIAMOND' | 'TRIANGLE'" in found
+           "'ROUND_RECTANGLE' | 'ROUND_2_SAME_RECTANGLE' | 'RECTANGLE' | 'ELLIPSE' | 'DIAMOND' | 'TRIANGLE' | 'CAN' | " \
+           "'CLOUD' | 'HEXAGON' | 'OCTAGON' | 'PENTAGON' | 'HEPTAGON' | 'DECAGON' | 'DODECAGON' | " \
+           "'FLOW_CHART_PUNCHED_TAPE'" in found
     assert "slide page 0, element p0m0: fill: is None (NoneType), expected a colour '#rrggbb', lowercase" in found
     with pytest.raises(ValueError, match="lacks required key 'flip'"):
         ir.validate(deck, "rendered", unknown_keys=True)

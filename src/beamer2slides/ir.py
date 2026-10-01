@@ -79,8 +79,11 @@ Script = Literal["sub", "super"]
 Position = Literal["TOP", "BOTTOM", "LEFT", "RIGHT"]
 """The side of its cell a table border is on (Slides' tableBorderProperties position)."""
 RulePosition = Literal["TOP", "BOTTOM"]
-TemplateKind = Literal["ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE", "RECTANGLE", "ELLIPSE", "DIAMOND", "TRIANGLE"]
-"""The Slides shapes emit creates: `emit_pptx.TEMPLATE_KINDS`, in its order."""
+TemplateKind = Literal["ROUND_RECTANGLE", "ROUND_2_SAME_RECTANGLE", "RECTANGLE", "ELLIPSE", "DIAMOND", "TRIANGLE",
+                       "CAN", "CLOUD", "HEXAGON", "OCTAGON", "PENTAGON", "HEPTAGON", "DECAGON", "DODECAGON",
+                       "FLOW_CHART_PUNCHED_TAPE"]
+"""The Slides shapes emit creates: `emit_pptx.TEMPLATE_KINDS`, in its order. The ones after
+TRIANGLE only diagram nodes have (`classify_shapes`)."""
 ShapeKind = TemplateKind
 """A `shape` emit can draw: every rendered shape element's."""
 ProducerShapeKind = Literal["custom", "line"]
@@ -570,6 +573,10 @@ class Node(_NodeKeys, total=False):
     radius: float
     dash: Dash
     """A dashed outline (absent: solid, and in a deck.json older than it)."""
+    adjust: float
+    """The preset's adjustment as a share of the box's shorter side (OOXML adj / 100000), where
+    its proportions take one: a CAN's ellipse height, a HEXAGON's or an OCTAGON's corner cut
+    (`classify_shapes.Preset`)."""
 
 
 # (`from` is a keyword: this part is written the functional way)
