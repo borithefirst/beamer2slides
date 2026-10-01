@@ -10,24 +10,14 @@ Usage: python tools/probe_table_rows.py
 from pathlib import Path
 
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import (Dimension, SlidesRequest, SlidesTableCellLocation, object_id, part,
+from beamer2slides.google_types import (SlidesRequest, SlidesTableCellLocation, object_id, part,
                                         presentation_id)
-from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
+from beamer2slides.gslides import emu, EMU_PER_PT, execute, pt, save_thumbnail
 from beamer2slides.json_types import Json, as_objects
 
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 SPACINGS = [100, 85, 70, 55, 40]
-
-
-def pt(v: float) -> Dimension:
-    """`gslides.pt` as a request's dimension."""
-    return {"magnitude": v, "unit": "PT"}
-
-
-def emu(v_pt: float) -> Dimension:
-    """`gslides.emu` as a request's dimension."""
-    return {"magnitude": round(v_pt * EMU_PER_PT), "unit": "EMU"}
 
 
 def as_number(v: Json) -> float:

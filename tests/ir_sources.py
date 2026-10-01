@@ -21,7 +21,7 @@ import json
 import os
 import shutil
 from collections import Counter
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal, TypedDict, TypeVar
@@ -33,7 +33,7 @@ from beamer2slides.adopt_sync import Folds
 from beamer2slides.emit import OfflinePlan, Part
 from beamer2slides.emit_model import PptxTable
 from beamer2slides.emit_theme import BgKey
-from beamer2slides.google_types import Dimension, Page, PageElement, Presentation, SlidesRequest
+from beamer2slides.google_types import Dimension, Page, PageElement, Presentation, SlidesRequest, slides_json
 from beamer2slides.inverse import Candidate, Workspace
 from beamer2slides.json_types import Json, JsonObject, as_object, as_optional_str
 from beamer2slides.raw_types import RawDoc
@@ -386,18 +386,16 @@ def copied_ids(request: SlidesRequest) -> dict[str, str]:
     return dict(ids)
 
 
-def says(el: JsonObject, oid: str, reqs: Sequence[Mapping[str, object]]) -> bool:
+def says(el: JsonObject, oid: str, reqs: Sequence[SlidesRequest]) -> bool:
     """A text element with words has them inserted into its object (a placeholder the slide was
     copied with exists whether or not anything is written into it)."""
     if el["kind"] != "text" or not any(jstr(r, "text").strip() for p in jobjs(el.get("paragraphs", []))
                                        for r in jobjs(p, "runs")):
         return True
     for r in reqs:
-        inserted = r.get("insertText")   # (emit's typed requests, or sync's JSON)
-        if isinstance(inserted, Mapping) and inserted.get("objectId") == oid:
-            words = inserted.get("text")
-            if isinstance(words, str) and words.strip():
-                return True
+        inserted = r.get("insertText")
+        if inserted is not None and inserted["objectId"] == oid and inserted["text"].strip():
+            return True
     return False
 
 
@@ -752,10 +750,11 @@ def resync(made: Made, home: Path) -> None:
             pictures[str(ours.out / jstr(slide, "background"))] = "background"
         units = list(range(len(elements_of(slide))))
         reqs, objects, new_oid, _ = s.slide_requests(j, units, f"live{j}", in_place, {}, {}, True, frozenset())
-        created = {jstr(r, k, "objectId") for r in reqs
+        written = [slides_json(r) for r in reqs]
+        created = {jstr(r, k, "objectId") for r in written
                    for k in ("createShape", "createLine", "createTable", "createImage") if k in r} \
-            | {v for r in reqs for v in duplicated(r)} \
-            | {jstr(r, "groupObjects", "groupObjectId") for r in reqs if "groupObjects" in r}
+            | {v for r in written for v in duplicated(r)} \
+            | {jstr(r, "groupObjects", "groupObjectId") for r in written if "groupObjects" in r}
         lost = [f"{el['kind']} {el['id']}" for i, el in enumerate(elements_of(slide))
                 if i not in objects or (new_oid[i] not in created and i not in in_place
                                         and not (el["kind"] == "diagram" and created & set(objects[i])))

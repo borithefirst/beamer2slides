@@ -11,9 +11,9 @@ import pytest
 from beamer2slides.emit import SLIDE_W
 from beamer2slides import identity, merge, refit, snapshot
 from beamer2slides.extract import frame_labels
-from beamer2slides.google_types import Page, PageElement, Presentation, object_id
+from beamer2slides.google_types import Page, PageElement, Presentation, SlidesRequest, object_id, slides_json
 from beamer2slides.json_types import Json, JsonObject, as_optional_str
-from beamer2slides.sync import Built, InPlace, Recovery, Refilled, SlideWork, Sync, TableFill, api_text_style, letterbox_fix, rename
+from beamer2slides.sync import Built, InPlace, Recovery, Refilled, SlideWork, Sync, TableFill, api_text_style, letterbox_fix, rename_requests
 
 from . import sync_work
 from .json_reads import jarr, jat, jint, jnum, jnums, jobj, jobjs, jstr, jstrs
@@ -414,14 +414,14 @@ def test_diff3_conflicts_keep_theirs():
     assert clashes and merged == "a y b"
 
 
-def apply_text_requests(text: str, reqs: Sequence[JsonObject]) -> str:
+def apply_text_requests(text: str, reqs: Sequence[SlidesRequest]) -> str:
     """The requests applied the way Slides applies them - including its refusal to touch the
     newline the text ends on, which it reads back but does not count in the length it will accept
     (`merge.text_edit_requests`). An applier that quietly clips instead would have let a batch
     through that the API refuses, and with it the whole sync."""
     units = list(text)  # (ASCII in these tests: UTF-16 indices are character indices)
     length = len(units) - 1 if text.endswith("\n") else len(units)
-    for r in reqs:
+    for r in map(slides_json, reqs):
         if "deleteText" in r:
             rng = jobj(r, "deleteText", "textRange")
             assert jint(rng, "endIndex") <= length, (
@@ -454,7 +454,7 @@ def test_text_edit_requests(current: str, target: str) -> None:
 
 def test_text_edit_requests_count_utf16():
     reqs = merge.text_edit_requests("t", "\U0001d465 is x\n", "\U0001d465 is y\n", None)
-    assert jat(reqs[0], "deleteText", "textRange") == {"type": "FIXED_RANGE", "startIndex": 6, "endIndex": 7}
+    assert jat(slides_json(reqs[0]), "deleteText", "textRange") == {"type": "FIXED_RANGE", "startIndex": 6, "endIndex": 7}
 
 
 # ---------------------------------------------------------------- merge rules
@@ -976,7 +976,7 @@ def test_table_cells_the_deck_already_shows_converge():
 
 def test_table_cell_edit_requests_carry_the_cell():
     reqs = merge.text_edit_requests("tab", "6.0 s\n", "6.2 s\n", {"rowIndex": 2, "columnIndex": 2})
-    assert all(jat(next(iter(r.values())), "cellLocation") == {"rowIndex": 2, "columnIndex": 2} for r in reqs)
+    assert all(jat(next(iter(slides_json(r).values())), "cellLocation") == {"rowIndex": 2, "columnIndex": 2} for r in reqs)
     assert apply_text_requests("6.0 s\n", reqs) == "6.2 s\n"
 
 
@@ -1251,7 +1251,7 @@ def geometry_override_requests(tops: dict[str, str]) -> list[JsonObject]:
     work = sync_work.work([w], ())
     now: JsonObject = {"slides": [{"objectId": "b2s_s001", "objects": {
         oid: readback([40, 120, 400, 180], words=None) for oid in ("new_t1", "new_m0", *tops.values())}}]}
-    return sync.override_requests(work, theirs, now, {}, {})
+    return [slides_json(r) for r in sync.override_requests(work, theirs, now, {}, {})]
 
 
 def test_a_moved_unit_with_no_group_is_moved_member_by_member():
@@ -1283,9 +1283,9 @@ def test_the_source_move_of_a_group_less_unit_reaches_its_picture_too():
         jobj(grouped, "objects", oid)["parent_group"] = "b2s_s001_t1_g"
     members[0] = {**members[0], "objects": [*jarr(members[0], "objects"), "b2s_s001_t1_g"]}
     bunits = {"text/body/0": members}
-    assert [jat(r, "updatePageElementTransform", "objectId") for r in Sync.move_requests(units, bunits, grouped, 2.0)] \
+    assert [jat(r, "updatePageElementTransform", "objectId") for r in map(slides_json, Sync.move_requests(units, bunits, grouped, 2.0))] \
         == ["b2s_s001_t1_g"]
-    reqs = Sync.move_requests(units, bunits, ungrouped, 2.0)
+    reqs = [slides_json(r) for r in Sync.move_requests(units, bunits, ungrouped, 2.0)]
     assert [jat(r, "updatePageElementTransform", "objectId") for r in reqs] == ["b2s_s001_t1", "b2s_s001_m0"]
     assert all(jat(r, "updatePageElementTransform", "transform", "translateY") == round(40 * EMU_PER_PT) for r in reqs)
 
@@ -1356,7 +1356,7 @@ def test_a_created_shape_stays_under_the_text_the_source_draws_above_it():
                             "tops": {"text/body/0": "new_t1", "shape/panel/0": "new_s0", "text/title/0": "new_t0"}}
     now: JsonObject = {"order": [*jarr(before, "order"), "new_t1", "new_s0", "new_t0"]}
     order = [x for x in jstrs(now, "order") if x not in doomed]
-    for r in sync.restack(w, before, now):     # BRING_TO_FRONT, bottom to top
+    for r in map(slides_json, sync.restack(w, before, now)):     # BRING_TO_FRONT, bottom to top
         oid, = jstrs(r, "updatePageElementsZOrder", "pageElementObjectIds")
         order.append(order.pop(order.index(oid)))
     assert order.index("new_s0") < order.index("new_t0")
@@ -1387,7 +1387,7 @@ def test_a_created_panel_stays_under_words_only_the_deck_has():
                                    "new_t0": readback([20, 20, 200, 48], "Intro"),
                                    "new_s0": readback([30, 160, 420, 260], words=None)}}   # opaque, over the kept body's box
     order = [x for x in jstrs(now, "order") if x not in doomed]
-    for r in sync.restack(w, before, now):
+    for r in map(slides_json, sync.restack(w, before, now)):
         oid, = jstrs(r, "updatePageElementsZOrder", "pageElementObjectIds")
         order.append(order.pop(order.index(oid)))
     assert order.index("new_s0") < order.index("b2s_s000_t1")
@@ -1422,7 +1422,7 @@ def test_a_created_panel_goes_under_a_persons_box_grouped_with_one_of_the_conver
     now: JsonObject = {"order": ["user_g", "b2s_s000_t1", "new_s0"],
                        "objects": {**objects, "new_s0": readback([10, 10, 400, 190], words=None)}}   # over the lot
     order = jstrs(now, "order")
-    for r in sync.restack(w, before, now):
+    for r in map(slides_json, sync.restack(w, before, now)):
         oid, = jstrs(r, "updatePageElementsZOrder", "pageElementObjectIds")
         order.append(order.pop(order.index(oid)))
     assert order.index("new_s0") < order.index("user_g")
@@ -1432,7 +1432,7 @@ def test_a_created_panel_goes_under_a_persons_box_grouped_with_one_of_the_conver
     del objects["user_box"]
     now["objects"] = {**objects, "new_s0": jat(now, "objects", "new_s0")}
     order = jstrs(now, "order")
-    for r in sync.restack(w, before, now):
+    for r in map(slides_json, sync.restack(w, before, now)):
         oid, = jstrs(r, "updatePageElementsZOrder", "pageElementObjectIds")
         order.append(order.pop(order.index(oid)))
     assert order.index("new_s0") > order.index("user_g")
@@ -1474,7 +1474,7 @@ def test_a_created_panel_goes_under_the_text_a_group_carries_above_it():
            "objects": {**{k: v for k, v in jobj(before, "objects").items() if k != "b2s_s000_s0"},
                        "new_s0": readback([30, 200, 420, 320], words=None)}}
     order = [x for x in jstrs(now, "order") if x not in doomed]
-    for r in sync.restack(w, before, now):
+    for r in map(slides_json, sync.restack(w, before, now)):
         oid, = jstrs(r, "updatePageElementsZOrder", "pageElementObjectIds")
         order.append(order.pop(order.index(oid)))
     assert order.index("new_s0") < order.index("user_g")
@@ -1482,7 +1482,7 @@ def test_a_created_panel_goes_under_the_text_a_group_carries_above_it():
     # stands: the panel it draws last stays last, over the words it is meant to sit on.
     jobj(now, "objects")["new_s0"] = readback([30, 90, 420, 130], words=None)      # over the body drawn *under* it
     order = [x for x in jstrs(now, "order") if x not in doomed]
-    for r in sync.restack(w, before, now):
+    for r in map(slides_json, sync.restack(w, before, now)):
         oid, = jstrs(r, "updatePageElementsZOrder", "pageElementObjectIds")
         order.append(order.pop(order.index(oid)))
     assert order.index("new_s0") > order.index("user_g")
@@ -1527,7 +1527,7 @@ def test_a_panel_in_a_block_takes_the_whole_block_under_words_only_the_deck_has(
                        "blk": {**jobj(before, "objects", "blk"), "children": ["new_s0", "b2s_s000_t2"]},
                        "new_s0": {**readback([30, 150, 420, 340], words=None), "parent_group": "blk"}}}
     order = [x for x in jstrs(now, "order") if x not in doomed]
-    for r in sync.restack(w, before, now):
+    for r in map(slides_json, sync.restack(w, before, now)):
         oid, = jstrs(r, "updatePageElementsZOrder", "pageElementObjectIds")
         order.append(order.pop(order.index(oid)))
     assert order.index("blk") < order.index("b2s_s000_t1")
@@ -1569,7 +1569,7 @@ def test_an_element_a_dissolved_group_frees_onto_the_page_takes_the_sources_plac
                        "b2s_s000_t1": {**jobj(before, "objects", "b2s_s000_t1"), "parent_group": None},
                        "new_s0": readback([30, 160, 420, 270], words=None)}}     # opaque, over the body's box
     order = [x for x in jstrs(now, "order") if x not in doomed]
-    for r in sync.restack(w, before, now):
+    for r in map(slides_json, sync.restack(w, before, now)):
         oid, = jstrs(r, "updatePageElementsZOrder", "pageElementObjectIds")
         order.append(order.pop(order.index(oid)))
     assert order.index("new_s0") < order.index("b2s_s000_t1")
@@ -1658,11 +1658,11 @@ def test_the_children_of_a_rebuilt_group_take_the_sources_order():
     no_ids: set[str] = set()
     reqs = Sync.regroup_requests(regroup, {g: 0}, objects, tops, no_ids, rank)
     group, = [r["groupObjects"] for r in reqs if "groupObjects" in r]
-    assert jat(group, "childrenObjectIds") == ["new_s", "user_pic", "new_t", "kept_t"]
+    assert group["childrenObjectIds"] == ["new_s", "user_pic", "new_t", "kept_t"]
     # ... and with no source order to go by, the deck's own order stands
     plain, = [r["groupObjects"] for r in Sync.regroup_requests(regroup, {g: 0}, objects, tops, no_ids, {})
               if "groupObjects" in r]
-    assert jat(plain, "childrenObjectIds") == ["new_t", "user_pic", "new_s", "kept_t"]
+    assert plain["childrenObjectIds"] == ["new_t", "user_pic", "new_s", "kept_t"]
 
 
 def test_the_rank_a_rebuilt_group_is_ordered_by_covers_kept_objects_too():
@@ -1965,19 +1965,23 @@ def test_notes_follow_text_rules():
 # ---------------------------------------------------------------- request helpers
 
 def test_rename_object_ids():
-    reqs: list[Json] = [{"createShape": {"objectId": "b2s_s003_t1", "elementProperties": {"pageObjectId": "b2s_s003"}}},
-            {"groupObjects": {"groupObjectId": "b2s_s003_t1_g", "childrenObjectIds": ["b2s_s003_t1", "b2s_s003_f12", "b2s_s003_f1n"]}},
-            {"duplicateObject": {"objectId": "b2s_s003_k0", "objectIds": {"b2s_s003_k0": "b2s_s003_s0"}}}]
+    reqs: list[SlidesRequest] = [
+        {"createShape": {"objectId": "b2s_s003_t1", "shapeType": "TEXT_BOX", "elementProperties": {"pageObjectId": "b2s_s003"}}},
+        {"groupObjects": {"groupObjectId": "b2s_s003_t1_g", "childrenObjectIds": ["b2s_s003_t1", "b2s_s003_f12", "b2s_s003_f1n"]}},
+        {"duplicateObject": {"objectId": "b2s_s003_k0", "objectIds": {"b2s_s003_k0": "b2s_s003_s0"}}}]
+    given = copy.deepcopy(reqs)
     mapping = sorted({"b2s_s003_t1": "NEW_T", "b2s_s003_f1": "NEW_F", "b2s_s003_k0": "TPL", "b2s_s003": "LIVE",
                       "b2s_s003_s0": "NEW_S"}.items(), key=lambda kv: -len(kv[0]))
-    out = rename(reqs, mapping)
-    assert jat(out, 0, "createShape") == {"objectId": "NEW_T", "elementProperties": {"pageObjectId": "LIVE"}}
-    assert jat(out, 1, "groupObjects") == {"groupObjectId": "NEW_T_g", "childrenObjectIds": ["NEW_T", "LIVE_f12", "NEW_Fn"]}
-    assert jat(out, 2, "duplicateObject") == {"objectId": "TPL", "objectIds": {"TPL": "NEW_S"}}
+    out = rename_requests(reqs, mapping)
+    assert out == [
+        {"createShape": {"objectId": "NEW_T", "shapeType": "TEXT_BOX", "elementProperties": {"pageObjectId": "LIVE"}}},
+        {"groupObjects": {"groupObjectId": "NEW_T_g", "childrenObjectIds": ["NEW_T", "LIVE_f12", "NEW_Fn"]}},
+        {"duplicateObject": {"objectId": "TPL", "objectIds": {"TPL": "NEW_S"}}}]
+    assert reqs == given, "the requests given are left as they are"
 
 
 def test_letterbox_fix_stretches_to_the_box():
-    fix = jat(letterbox_fix("i", [100, 50, 400, 150], (800, 600)), "updatePageElementTransform", "transform")
+    fix = jat(slides_json(letterbox_fix("i", [100, 50, 400, 150], (800, 600))), "updatePageElementTransform", "transform")
     # createImage puts a 4:3 picture into a 300 x 100 box as 133.33 x 100 centred at x = 183.33
     fx0, fx1 = 183.3333, 316.6667
     assert jnum(fix, "scaleX") * fx0 + jnum(fix, "translateX") / 12700 == pytest.approx(100, abs=0.01)
@@ -2082,7 +2086,7 @@ def test_sync_does_not_alt_text_a_diagram_group():
     stub.ours = {"slides": [o]}
     oid = "b2s_abcdef_012345_t0k"  # the group emit creates for the diagram, with its nodes and lines inside
     text = "b2s_abcdef_012346_t0k"
-    reqs = stub.tag_requests(o, {0: [oid, f"{oid}_n0", f"{oid}_l0"], 1: [text]}, {0: oid, 1: text}, {})
+    reqs = map(slides_json, stub.tag_requests(o, {0: [oid, f"{oid}_n0", f"{oid}_l0"], 1: [text]}, {0: oid, 1: text}, {}))
     assert [jat(r, "updatePageElementAltText", "objectId") for r in reqs] == [text]
 
 
@@ -2375,14 +2379,14 @@ def test_style_range_requests_follow_the_words():
     assert deck_attributes({"fontFamily": "Lato", "fontSize": 18.0, "bold": True}, base_styles) == {"bold": True}
     old = raw_shape("old", [("Written by an ", plain), ("AI", bold), (" assistant\n", plain)])
     new = raw_shape("new", [("Now written by an AI assistant and converted\n", plain)])
-    (r,) = style_range_requests("new", old, new, base_styles, None)
+    (r,) = map(slides_json, style_range_requests("new", old, new, base_styles, None))
     rng = jat(r, "updateTextStyle", "textRange")
     assert "Now written by an AI assistant and converted\n"[jint(rng, "startIndex"):jint(rng, "endIndex")] == "AI"
     assert jat(r, "updateTextStyle", "style") == {"bold": True} and jat(r, "updateTextStyle", "fields") == "bold"
     # a word the source deleted takes its style along; text after the text override counts
     assert style_range_requests("new", old, raw_shape("new", [("Written by an assistant\n", plain)]), base_styles,
                                 None) == []
-    (r,) = style_range_requests("new", old, new, base_styles, "Written by an AI helper\n")
+    (r,) = map(slides_json, style_range_requests("new", old, new, base_styles, "Written by an AI helper\n"))
     assert jat(r, "updateTextStyle", "textRange", "startIndex") == 14
     # table cells, by cellLocation
     def cell(runs: Sequence[tuple[str, JsonObject]]) -> JsonObject:
@@ -2390,7 +2394,7 @@ def test_style_range_requests_follow_the_words():
 
     old_t = PageElement(objectId="t", table={"tableRows": [{"tableCells": [cell([("Disjoint\n", bold)]), cell([("3.9 s\n", plain)])]}]})
     new_t = PageElement(objectId="t", table={"tableRows": [{"tableCells": [cell([("Disjoint\n", plain)]), cell([("4.7 s\n", plain)])]}]})
-    (r,) = style_range_requests("t", old_t, new_t, base_styles, None)
+    (r,) = map(slides_json, style_range_requests("t", old_t, new_t, base_styles, None))
     assert jat(r, "updateTextStyle", "cellLocation") == {"rowIndex": 0, "columnIndex": 0}
     assert jat(r, "updateTextStyle", "textRange") == {"type": "FIXED_RANGE", "startIndex": 0, "endIndex": 8}
 
@@ -2408,7 +2412,7 @@ def test_a_style_on_the_last_word_stops_where_the_text_does():
     base_styles = [{"fontFamily": "Lato", "fontSize": 18.0}]
     text = "Written by an assistant\n"
     old = raw_shape("old", [("Written by an ", plain), ("assistant\n", bold)])
-    (r,) = style_range_requests("new", old, raw_shape("new", [(text, plain)]), base_styles, None)
+    (r,) = map(slides_json, style_range_requests("new", old, raw_shape("new", [(text, plain)]), base_styles, None))
     rng = jat(r, "updateTextStyle", "textRange")
     assert text[jint(rng, "startIndex"):jint(rng, "endIndex")] == "assistant"
     assert jat(rng, "endIndex") == len(text) - 1   # exactly the length `deleteText` would accept
@@ -2444,7 +2448,7 @@ def test_retitled_frame_and_right_limits_on_the_sync_talk(tmp_path: Path) -> Non
 
     def body_box(in_place: Mapping[int, Refilled]) -> Json:
         reqs, _, new_oid, _ = s.slide_requests(j, [body], "LIVE", in_place, {}, {}, False, frozenset())
-        shape = next(jobj(r, "createShape") for r in reqs
+        shape = next(jobj(r, "createShape") for r in map(slides_json, reqs)
                      if "createShape" in r and jat(r, "createShape", "objectId") == new_oid[body])
         return jat(shape, "elementProperties", "size", "width", "magnitude")
     placeholder = {title: InPlace(id="LIVE_title", size=(680.0, 36.0), text="The sync algorithm")}
@@ -2466,7 +2470,7 @@ def test_retitled_frame_and_right_limits_on_the_sync_talk(tmp_path: Path) -> Non
     try:
         both = len(elements)
         reqs, _, new_oid, _ = s.slide_requests(j, [title, both], "LIVE", {}, {}, {}, False, frozenset())
-        made = {jat(r, "createShape", "objectId") for r in reqs if "createShape" in r}
+        made = {jat(r, "createShape", "objectId") for r in map(slides_json, reqs) if "createShape" in r}
         assert {new_oid[title], new_oid[both]} <= made          # both made as boxes of their own
     finally:
         deck_slides[j] = slide
@@ -2491,7 +2495,7 @@ def test_retitled_frame_and_right_limits_on_the_sync_talk(tmp_path: Path) -> Non
         {"key": "text/body/0", "action": "recreate", "ours_members": members, "base_members": members, "overrides": {}}]}
 
     def groups_made(live_objects: JsonObject) -> list[Json]:
-        reqs = s.update_slide(sync_work.slide_work(plan), {**read, "objects": live_objects}, {}, {})
+        reqs = map(slides_json, s.update_slide(sync_work.slide_work(plan), {**read, "objects": live_objects}, {}, {}))
         return [jat(r, "groupObjects", "groupObjectId") for r in reqs if "groupObjects" in r]
     body_oid = "OLD_text_body_0"
     assert len(groups_made(read_objects)) == 0  # the deck ungrouped it
@@ -2534,7 +2538,7 @@ def test_unit_rebuilt_inside_a_group_nested_in_a_user_group(tmp_path: Path) -> N
     plan: JsonObject = {"key": "policy", "base": 0, "ours": j, "objectId": "LIVE", "units": [
         {"key": "text/body/0", "action": "recreate", "ours_members": ["text/body/0"], "base_members": ["text/body/0"], "overrides": {}}]}
     w = sync_work.slide_work(plan)
-    reqs = s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {})
+    reqs = [slides_json(r) for r in s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {})]
     assert [jat(r, "ungroupObjects", "objectIds") for r in reqs if "ungroupObjects" in r] == [["USER"], ["BLK"]]
     groups = [jobj(r, "groupObjects") for r in reqs if "groupObjects" in r]
     new_title = w.new_oid[next(i for i, e in enumerate(jobjs(first.slides[j], "elements")) if e["key"] == "text/body/0")]
@@ -2605,7 +2609,8 @@ def _table_sync(tmp_path: Path, variant: str) -> tuple[TableRun, Built, Built, i
             unit_plan["source"] = source
         plan: JsonObject = {"key": "results", "base": 0, "ours": j, "objectId": "LIVE", "units": [unit_plan]}
         w = sync_work.slide_work(plan)
-        return s, w, s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {}), f"OLD_{key.replace('/', '_')}"
+        reqs = [slides_json(r) for r in s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {})]
+        return s, w, reqs, f"OLD_{key.replace('/', '_')}"
 
     return run, first, second, j
 
@@ -2748,9 +2753,9 @@ def test_table_steps_give_a_table_the_rows_and_columns_it_needs() -> None:
     def m(*tops: float) -> list[list[float]]:
         return [[7.2, t, 7.2, 0.0] for t in tops]
 
-    def kinds(steps: tuple[list[JsonObject], list[list[float]]] | None) -> list[tuple[str, Json]]:
+    def kinds(steps: tuple[list[SlidesRequest], list[list[float]]] | None) -> list[tuple[str, Json]]:
         assert steps is not None
-        return [(next(iter(r)), jat(next(iter(r.values())), "cellLocation")) for r in steps[0]]
+        return [(next(iter(r)), jat(next(iter(r.values())), "cellLocation")) for r in map(slides_json, steps[0])]
 
     # A row added at the end of a booktabs table takes the margins of the row above it.
     steps = table_steps(m(5.0, 4.8, 0, 0), m(5.0, 4.8, 0, 0, 0), 3, 3)
@@ -3024,12 +3029,12 @@ def test_a_new_slide_inherits_the_master_background(tmp_path: Path) -> None:
     pres = Presentation(masters=[Page(pageProperties={"pageBackgroundFill": {
         "solidFill": {"color": {"rgbColor": {"red": 1, "green": 1, "blue": 1}}}}})])
     assert s.background_requests("S", "color:#ffffff", {}, pres, True) == []
-    kept = s.background_requests("S", "color:#ffffff", {}, pres, False)  # an edited slide goes back to it
+    kept = [slides_json(r) for r in s.background_requests("S", "color:#ffffff", {}, pres, False)]  # an edited slide goes back to it
     assert jat(kept[0], "updatePageProperties", "fields") == "pageBackgroundFill.solidFill.color"
-    own = s.background_requests("S", "color:#102030", {}, pres, True)
+    own = [slides_json(r) for r in s.background_requests("S", "color:#102030", {}, pres, True)]
     assert jat(own[0], "updatePageProperties", "pageProperties", "pageBackgroundFill", "solidFill", "color") == \
         {"rgbColor": {"red": 16 / 255, "green": 32 / 255, "blue": 48 / 255}}
-    picture = s.background_requests("S", "png:abc", {"background": "backgrounds/bg-3.png"}, pres, True)
+    picture = [slides_json(r) for r in s.background_requests("S", "png:abc", {"background": "backgrounds/bg-3.png"}, pres, True)]
     assert jat(picture[0], "updatePageProperties", "pageProperties", "pageBackgroundFill") == \
         {"stretchedPictureFill": {"contentUrl": "https://content/3"}}
 
@@ -3092,7 +3097,7 @@ def test_a_stand_in_is_made_at_the_size_slides_keeps():
     big: a block's title bar came back 1649 pt wide on a 720 pt page (live, the front page's demo).
     (tests/slides_sim.py neither normalises sizes nor copies objects, so only this sees it.)"""
     from beamer2slides.sync import STAND_IN, stand_in_request
-    size = jat(stand_in_request("b2s_x_k0_1aa", "s", "ROUND_2_SAME_RECTANGLE"), "createShape", "elementProperties", "size")
+    size = jat(slides_json(stand_in_request("b2s_x_k0_1aa", "s", "ROUND_2_SAME_RECTANGLE")), "createShape", "elementProperties", "size")
     assert jat(size, "width", "magnitude") == jat(size, "height", "magnitude") == 3_000_000
     assert jobj(size, "width").get("unit", "EMU") == "EMU"
     box_w = 698.0

@@ -25,8 +25,10 @@ from typing import TYPE_CHECKING, Literal, TypedDict, TypeVar
 from . import faults, google_types, identity, merge, refit, snapshot
 from .deck_pictures import WORKERS as PICTURE_WORKERS, LivePictures
 from .gapi import HttpError, status_of
-from .google_types import DriveFile, DriveService, Page, PageElement, Presentation, SlidesService, object_id
-from .gslides import EMU_PER_PT, execute, pt_json as pt
+from .google_types import (BatchUpdateBody, DriveFile, DriveService, OpaqueColor, Page, PageElement, PageProperties,
+                           Presentation, ShapeProperties, SlidesParagraphStyle, SlidesRequest, SlidesService,
+                           SlidesTableCellLocation, SlidesTextStyle, object_id)
+from .gslides import EMU_PER_PT, execute, pt
 from .json_types import (Json, JsonArray, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects,
                          as_optional_str, as_str)
 from .paths import out_root
@@ -178,8 +180,8 @@ def base_generation(base: JsonMap) -> int:
     return as_int(base.get("generation", 0), "base.generation")
 
 
-def delete_request(oid: str) -> JsonObject:
-    return google_types.slides_json({"deleteObject": {"objectId": oid}})
+def delete_request(oid: str) -> SlidesRequest:
+    return {"deleteObject": {"objectId": oid}}
 
 
 def delete_file(drive: DriveService, fid: str) -> None:
@@ -419,7 +421,7 @@ TABLE_MARGIN_TOL = 0.05  # pt: margins this close are the same (a rounding of th
 
 
 def table_steps(have: Sequence[Sequence[float]], need: Sequence[Sequence[float]], cols: int, want_cols: int
-                ) -> tuple[list[JsonObject], list[list[float]]] | None:
+                ) -> tuple[list[SlidesRequest], list[list[float]]] | None:
     """Row and column requests (with the table's id left as None) turning a table whose rows have
     the cell margins `have` into one of len(need) rows with the margins `need` and `want_cols`
     columns, and the margins it then has; None when no such steps exist. A row inserted below
@@ -429,7 +431,7 @@ def table_steps(have: Sequence[Sequence[float]], need: Sequence[Sequence[float]]
         return all(abs(x - y) <= TABLE_MARGIN_TOL for x, y in zip(a, b))
 
     cur = [list(m) for m in have]
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     while True:
         i = next((k for k in range(min(len(cur), len(need))) if not same(cur[k], need[k])), min(len(cur), len(need)))
         if len(cur) == len(need):
@@ -437,23 +439,23 @@ def table_steps(have: Sequence[Sequence[float]], need: Sequence[Sequence[float]]
                 return None
             break
         if len(cur) > len(need):
-            reqs.append(google_types.slides_json({"deleteTableRow": {
-                "tableObjectId": None, "cellLocation": {"rowIndex": i, "columnIndex": 0}}}))
+            reqs.append({"deleteTableRow": {
+                "tableObjectId": None, "cellLocation": {"rowIndex": i, "columnIndex": 0}}})
             del cur[i]
         elif i > 0 and same(cur[i - 1], need[i]):
-            reqs.append(google_types.slides_json({"insertTableRows": {
+            reqs.append({"insertTableRows": {
                 "tableObjectId": None, "cellLocation": {"rowIndex": i - 1, "columnIndex": 0},
-                "insertBelow": True, "number": 1}}))
+                "insertBelow": True, "number": 1}})
             cur.insert(i, list(cur[i - 1]))
         else:
             return None
     if want_cols > cols:
-        reqs.append(google_types.slides_json({"insertTableColumns": {
+        reqs.append({"insertTableColumns": {
             "tableObjectId": None, "cellLocation": {"rowIndex": 0, "columnIndex": cols - 1},
-            "insertRight": True, "number": want_cols - cols}}))
+            "insertRight": True, "number": want_cols - cols}})
     for c in range(cols - 1, want_cols - 1, -1):
-        reqs.append(google_types.slides_json({"deleteTableColumn": {
-            "tableObjectId": None, "cellLocation": {"rowIndex": 0, "columnIndex": c}}}))
+        reqs.append({"deleteTableColumn": {
+            "tableObjectId": None, "cellLocation": {"rowIndex": 0, "columnIndex": c}}})
     return reqs, cur
 
 
@@ -909,7 +911,7 @@ class TableFill:
     the source's move of it (slide pt); `margins`: the cell margins it then has, for the base."""
     id: str
     cells: list[tuple[int, int]]
-    steps: list[JsonObject]
+    steps: list[SlidesRequest]
     shift: tuple[float, float]
     margins: list[list[float]]
 
@@ -1285,51 +1287,57 @@ def unwritten_warnings(unwritten: list[Unwritten], ours: JsonObject) -> list[str
     return out
 
 
-def emitted_elements(slide: JsonObject, names: Sequence[str], scale: float, fonts: "FontMapper") -> list[JsonObject]:
+@dataclass(frozen=True, kw_only=True)
+class ElementEmission:
+    """What emit writes for one element of a slide (`emitted_elements`): its `requests`, object ids
+    by name; `box`: a picture's predicted place (slide pt); `role`: the layout placeholder it goes
+    into; `groups`: the block and rule groups it is in, as (kind, members' names), sorted."""
+    requests: list[SlidesRequest]
+    box: list[float] | None
+    role: Literal["title", "subtitle"] | None
+    groups: list[tuple[str, list[str]]]
+
+
+def emitted_elements(slide: JsonObject, names: Sequence[str], scale: float, fonts: "FontMapper"
+                     ) -> list[ElementEmission]:
     """Per element of `slide` (a DeckPlan slide), what emit writes for it there, with nothing in it
     that says which deck the slide stands in: object ids by the element's name (`names`, its key),
     the slide's as `@slide`, the template shapes' copies by their template key (`emit.slide_emission`
     also takes links and placeholder sizes out). Z-order requests are left out: a rewritten unit
-    goes where the source's order puts it (`Sync.restack`), whatever emit asks for.
-    {"requests", "box": a picture's predicted place (slide pt), "role": "title" / "subtitle" (the
-    layout placeholder it goes into), "groups": the block and rule groups it is in, as [kind,
-    members' names]}. A text's own group with its anchored pictures is left out: those are one unit,
-    and a picture added or dropped is a change of the unit itself."""
+    goes where the source's order puts it (`Sync.restack`), whatever emit asks for. A text's own
+    group with its anchored pictures is left out of its `groups`: those are one unit, and a picture
+    added or dropped is a change of the unit itself."""
     from .emit import slide_emission
     e = slide_emission(slide, scale, fonts)
     sid, ids = e["slide_id"], e["element_ids"]
     mapping = [(oid, f"@{name}") for oid, name in zip(ids, names)] + \
         [(oid, f"@template{key!r}") for oid, key in e["templates"].items()] + [(sid, "@slide")]
     order = sorted(mapping, key=lambda kv: -len(kv[0]))
-    groups: list[list[list[Json]]] = [[] for _ in ids]
+    groups: list[list[tuple[str, list[str]]]] = [[] for _ in ids]
     at = {f"@{name}": i for i, name in enumerate(names)}
     for _, rs in e["parts"][1 + len(ids):]:
-        for r in map(google_types.slides_json, rs):
-            group = as_object(r.get("groupObjects", {}), "groupObjects")
-            gid = as_str(group.get("groupObjectId", ""), "groupObjectId")
+        for r in rs:
+            group = r.get("groupObjects")
+            gid = "" if group is None else group.get("groupObjectId", "")
             kind = "block" if gid.startswith(f"{sid}_blk") else "rules" if gid.startswith(f"{sid}_rules") else None
-            if kind:
-                children = _strs(rename(group["childrenObjectIds"], order), "childrenObjectIds")
+            if kind and group is not None:
+                children = [_renamed(c, order) for c in group["childrenObjectIds"]]
                 members = sorted(c[:-2] if c.endswith("_g") else c for c in children)
                 for c in members:
                     if c in at:
-                        groups[at[c]].append([kind, _json_strs(members)])
-    out: list[JsonObject] = []
+                        groups[at[c]].append((kind, list(members)))
+    out: list[ElementEmission] = []
     for i, (_, rs) in enumerate(e["parts"][1:1 + len(ids)]):
         box = e["boxes"][i]
-        role = "title" if i == e["title"] else "subtitle" if i == e["subtitle"] else None
-        mine: list[Json] = [g for g in sorted(groups[i], key=_group_order)]
-        out.append({"requests": [r for r in rename_requests(rs, order) if "updatePageElementsZOrder" not in r],
-                    "box": None if box is None else _json_nums(box), "role": role, "groups": mine})
+        role: Literal["title", "subtitle"] | None = "title" if i == e["title"] else \
+            "subtitle" if i == e["subtitle"] else None
+        out.append(ElementEmission(
+            requests=[r for r in rename_requests(rs, order) if "updatePageElementsZOrder" not in r],
+            box=None if box is None else list(box), role=role, groups=sorted(groups[i])))
     return out
 
 
-def _group_order(g: list[Json]) -> tuple[str, list[str]]:
-    """A [kind, members] group entry's sort key, as the list sorted before (kind, then members)."""
-    return as_str(g[0], "group kind"), _strs(g[1], "group members")
-
-
-def context_changes(was: JsonMap, now: JsonMap, step: Sequence[float], kind: str,
+def context_changes(was: ElementEmission, now: ElementEmission, step: Sequence[float], kind: str,
                     same_layout: bool) -> tuple[set[str], set[str]]:
     """(fields recreating the unit writes, fields it cannot) in which two `emitted_elements` entries
     of one element differ; `step`: slide pt the source moved the element by, which its requests
@@ -1341,34 +1349,37 @@ def context_changes(was: JsonMap, now: JsonMap, step: Sequence[float], kind: str
     the role now and makes the other a box. Any other role change (the slide changing layout) is not."""
     marks: set[str] = set()
     cannot: set[str] = set()
-    if was["role"] != now["role"]:
+    if was.role != now.role:
         # (and every request differs: a placeholder is transformed, a box created)
-        if same_layout and {was["role"], now["role"]} <= {None, "subtitle"}:
+        if same_layout and {was.role, now.role} <= {None, "subtitle"}:
             marks.add("emitted")
         else:
             cannot.add("placeholder")
-    elif not _close(was["requests"], now["requests"], [v * EMU_PER_PT for v in step], None):
+    elif not _close(was.requests, now.requests, [v * EMU_PER_PT for v in step], None):
         marks.add("width" if kind == "text" else "emitted")
-    was_box, now_box = was["box"], now["box"]
-    if (was_box is None) != (now_box is None) or was_box is not None and \
-            any(abs(a + step[q % 2] - c) > WIDTH_MOVED
-                for q, (a, c) in enumerate(zip(_nums(was_box, "box"), _nums(now_box, "box")))):
+    was_box, now_box = was.box, now.box
+    if was_box is None or now_box is None:
+        if (was_box is None) != (now_box is None):
+            marks.add("placed")
+    elif any(abs(a + step[q % 2] - c) > WIDTH_MOVED for q, (a, c) in enumerate(zip(was_box, now_box))):
         marks.add("placed")
-    if was["groups"] != now["groups"]:
+    if was.groups != now.groups:
         cannot.add("grouping")
     return marks, cannot
 
 
-def _close(a: Json, b: Json, step: Sequence[float], key: str | None) -> bool:
+def _close(a: object, b: object, step: Sequence[float], key: str | None) -> bool:
     """Two request trees say the same: equal but for float noise, with EMU lengths within
     WIDTH_MOVED and translations less `step` (EMU) - the source moving an element moves its box.
     `key`: the key `a` and `b` stand under (None: a list item, or the top)."""
     if isinstance(a, dict) and isinstance(b, dict):
         if a.keys() != b.keys():
             return False
-        magnitude = a.get("magnitude")
+        magnitude, other = a.get("magnitude"), b.get("magnitude")
         if a.get("unit") == "EMU" and isinstance(magnitude, (int, float)):
-            return abs(magnitude - _number(b["magnitude"], "magnitude")) <= WIDTH_MOVED * EMU_PER_PT and \
+            if isinstance(other, bool) or not isinstance(other, (int, float)):
+                raise JsonShapeError("magnitude: a number was expected")
+            return abs(magnitude - other) <= WIDTH_MOVED * EMU_PER_PT and \
                 all(_close(a[k], b[k], step, k) for k in a if k != "magnitude")
         return all(_close(a[k], b[k], step, k) for k in a)
     if isinstance(a, list) and isinstance(b, list):
@@ -1386,18 +1397,6 @@ def _close(a: Json, b: Json, step: Sequence[float], key: str | None) -> bool:
 
 # ---------------------------------------------------------------- requests
 
-def rename(value: Json, mapping: Sequence[tuple[str, str]]) -> Json:
-    """Object ids in requests: a string equal to a key, or a key followed by a non-digit
-    suffix (`_g`, `n`, `_n0`), gets the new id. `mapping` is longest key first."""
-    if isinstance(value, dict):
-        return {_renamed(k, mapping): rename(v, mapping) for k, v in value.items()}
-    if isinstance(value, list):
-        return [rename(v, mapping) for v in value]
-    if isinstance(value, str):
-        return _renamed(value, mapping)
-    return value
-
-
 def _renamed(value: str, mapping: Sequence[tuple[str, str]]) -> str:
     if value.startswith("b2s_"):
         for old, new in mapping:
@@ -1406,12 +1405,36 @@ def _renamed(value: str, mapping: Sequence[tuple[str, str]]) -> str:
     return value
 
 
-def rename_requests(reqs: Sequence[google_types.SlidesRequest], mapping: Sequence[tuple[str, str]]) -> list[JsonObject]:
-    """`rename` over a list of requests."""
-    return [as_object(rename(google_types.slides_json(r), mapping), "request") for r in reqs]
+def rename_requests(reqs: Sequence[SlidesRequest], mapping: Sequence[tuple[str, str]]) -> list[SlidesRequest]:
+    """Object ids in requests: a string (or a dict key) equal to a key of `mapping`, or a key
+    followed by a non-digit suffix (`_g`, `n`, `_n0`), gets the new id. `mapping` is longest key
+    first. Renamed copies, the given requests left as they are."""
+    out: list[SlidesRequest] = []
+    for r in reqs:
+        renamed = copy.deepcopy(r)
+        _replace_strings(renamed, lambda s: _renamed(s, mapping))
+        out.append(renamed)
+    return out
 
 
-def letterbox_fix(oid: str, box: Sequence[float], px: tuple[int, int]) -> JsonObject:
+def _replace_strings(tree: object, change: Callable[[str], str]) -> None:
+    """Every string in `tree` (a request, a part of one: dicts and lists) and every key of its dicts
+    through `change`, in place and in order. A request keeps its type: a string stays a string."""
+    if isinstance(tree, dict):
+        items = list(tree.items())
+        tree.clear()
+        for k, v in items:
+            _replace_strings(v, change)
+            tree[change(k) if isinstance(k, str) else k] = change(v) if isinstance(v, str) else v
+    elif isinstance(tree, list):
+        for i, v in enumerate(tree):
+            if isinstance(v, str):
+                tree[i] = change(v)
+            else:
+                _replace_strings(v, change)
+
+
+def letterbox_fix(oid: str, box: Sequence[float], px: tuple[int, int]) -> SlidesRequest:
     """createImage fits a picture into its box keeping the aspect ratio; this stretches it to the
     box, as the .pptx import does."""
     x0, y0, x1, y1 = box
@@ -1420,9 +1443,9 @@ def letterbox_fix(oid: str, box: Sequence[float], px: tuple[int, int]) -> JsonOb
     fw, fh = px[0] * s, px[1] * s
     fx, fy = x0 + (w - fw) / 2, y0 + (h - fh) / 2
     sx, sy = w / fw, h / fh
-    return google_types.slides_json({"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
+    return {"updatePageElementTransform": {"objectId": oid, "applyMode": "RELATIVE", "transform": {
         "scaleX": sx, "scaleY": sy, "unit": "EMU",
-        "translateX": round((x0 - sx * fx) * EMU_PER_PT), "translateY": round((y0 - sy * fy) * EMU_PER_PT)}}})
+        "translateX": round((x0 - sx * fx) * EMU_PER_PT), "translateY": round((y0 - sy * fy) * EMU_PER_PT)}}}
 
 
 def png_size(path: Path) -> tuple[int, int]:
@@ -1431,83 +1454,110 @@ def png_size(path: Path) -> tuple[int, int]:
         return img.size
 
 
-def api_colour(hex_or_theme: str | None) -> JsonObject | None:
+def api_colour(hex_or_theme: str | None) -> OpaqueColor | None:
+    """A snapshot colour ('#rrggbb' or 'theme:NAME', `snapshot.colour`) as a request's colour."""
     if not hex_or_theme:
         return None
     if hex_or_theme.startswith("theme:"):
-        return {"themeColor": hex_or_theme[6:]}
-    from .emit import rgb
-    return as_object(rgb(hex_or_theme)["opaqueColor"], "rgb")
+        return google_types.opaque_color({"themeColor": hex_or_theme[6:]}, "a theme colour")
+    from .gslides import rgb_color
+    return rgb_color(hex_or_theme)
 
 
-def api_text_style(runs: JsonMap) -> tuple[google_types.SlidesTextStyle, list[str]]:
+def colour_to_write(v: Json, where: str) -> OpaqueColor:
+    """A fill's colour as a snapshot has it (`snapshot._fill`, a theme's fill), for a write: one
+    there must be (a JsonShapeError naming `where` when there is none)."""
+    colour = api_colour(as_optional_str(v, where))
+    if colour is None:
+        raise JsonShapeError(f"{where}: no colour to write")
+    return colour
+
+
+def api_text_style(runs: JsonMap) -> tuple[SlidesTextStyle, list[str]]:
     """A normalised run style (snapshot._text_style attributes) as an API TextStyle and its fields."""
-    style: JsonObject = {}
+    style: SlidesTextStyle = {}
     fields: list[str] = []
     for k, v in runs.items():
         if k in ("fontFamily", "weight"):
             if "weight" in runs:
-                style["weightedFontFamily"] = {"fontFamily": runs.get("fontFamily"), "weight": runs.get("weight") or 400}
+                style["weightedFontFamily"] = {
+                    "fontFamily": as_str(runs.get("fontFamily"), "a run style's fontFamily"),
+                    "weight": as_int(runs.get("weight") or 400, "a run style's weight")}
                 fields.append("weightedFontFamily")
             else:
-                style["fontFamily"] = v
+                style["fontFamily"] = as_str(v, "a run style's fontFamily")
                 fields.append("fontFamily")
         elif k == "fontSize":
-            style[k] = pt(_number(v, "fontSize"))
+            style["fontSize"] = pt(_number(v, "fontSize"))
             fields.append(k)
-        elif k in ("foregroundColor", "backgroundColor"):
-            style[k] = {"opaqueColor": api_colour(as_str(v, k))} if v else {}
+        elif k == "foregroundColor":
+            style["foregroundColor"] = _optional_colour(v, k)
+            fields.append(k)
+        elif k == "backgroundColor":
+            style["backgroundColor"] = _optional_colour(v, k)
             fields.append(k)
         elif k == "link":
             continue
-        else:
-            style[k] = v
+        else:   # (bold, italic, underline, ...: as the deck has them, checked here)
+            style.update(google_types.slides_text_style({k: v}, "a run style"))
             fields.append(k)
-    return google_types.slides_text_style(style, "a run style"), list(dict.fromkeys(fields))
+    return style, list(dict.fromkeys(fields))
 
 
-def style_override_requests(oid: str, change: JsonMap, cells: Sequence[google_types.SlidesTableCellLocation] | None
-                            ) -> list[JsonObject]:
+def _optional_colour(v: Json, where: str) -> google_types.SlidesOptionalColor:
+    """A run's colour as the deck has it: a colour, or none (`{}`, transparent)."""
+    colour = api_colour(as_str(v, where)) if v else None
+    return {} if colour is None else {"opaqueColor": colour}
+
+
+def style_override_requests(oid: str, change: JsonMap, cells: Sequence[SlidesTableCellLocation] | None
+                            ) -> list[SlidesRequest]:
     """Uniform text style changes the deck made (merge.uniform_changes), over all of the text
     (`cells`: the cellLocations of a table, whose text is styled cell by cell; None for a shape)."""
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     runs, paras = _obj(change.get("runs"), "runs"), _obj(change.get("paragraphs"), "paragraphs")
     style, fields = api_text_style(runs)
-    pstyle: JsonObject = {}
+    pstyle: SlidesParagraphStyle = {}
     pfields: list[str] = []
     for k, v in paras.items():
         if k in ("alignment", "lineSpacing", "direction"):
-            pstyle[k] = v
-            pfields.append(k)
-        elif k in ("indentStart", "indentFirstLine", "spaceAbove", "spaceBelow"):
-            pstyle[k] = pt(_number(v, k))
-            pfields.append(k)
-    every: list[google_types.SlidesTableCellLocation | None] = [None] if cells is None else [c for c in cells]
+            pstyle.update(google_types.slides_paragraph_style({k: v}, "a paragraph style"))
+        elif k == "indentStart":
+            pstyle["indentStart"] = pt(_number(v, k))
+        elif k == "indentFirstLine":
+            pstyle["indentFirstLine"] = pt(_number(v, k))
+        elif k == "spaceAbove":
+            pstyle["spaceAbove"] = pt(_number(v, k))
+        elif k == "spaceBelow":
+            pstyle["spaceBelow"] = pt(_number(v, k))
+        else:
+            continue
+        pfields.append(k)
+    every: list[SlidesTableCellLocation | None] = [None] if cells is None else [c for c in cells]
     if fields:
         reqs += [text_style_request(oid, c, {"type": "ALL"}, style, ",".join(fields)) for c in every]
     if pfields:
-        typed = google_types.slides_paragraph_style(pstyle, "a paragraph style")
-        reqs += [paragraph_style_request(oid, c, {"type": "ALL"}, typed, ",".join(pfields)) for c in every]
+        reqs += [paragraph_style_request(oid, c, {"type": "ALL"}, pstyle, ",".join(pfields)) for c in every]
     return reqs
 
 
-def text_style_request(oid: str, cell: google_types.SlidesTableCellLocation | None, text_range: google_types.SlidesRange,
-                       style: google_types.SlidesTextStyle, fields: str) -> JsonObject:
+def text_style_request(oid: str, cell: SlidesTableCellLocation | None, text_range: google_types.SlidesRange,
+                       style: SlidesTextStyle, fields: str) -> SlidesRequest:
     """An updateTextStyle, its keys in the order sync always wrote them."""
     request: google_types.SlidesUpdateTextStyleRequest = (
         {"objectId": oid, "textRange": text_range, "style": style, "fields": fields} if cell is None else
         {"objectId": oid, "cellLocation": cell, "textRange": text_range, "style": style, "fields": fields})
-    return google_types.slides_json({"updateTextStyle": request})
+    return {"updateTextStyle": request}
 
 
-def paragraph_style_request(oid: str, cell: google_types.SlidesTableCellLocation | None,
-                            text_range: google_types.SlidesRange, style: google_types.SlidesParagraphStyle,
-                            fields: str) -> JsonObject:
+def paragraph_style_request(oid: str, cell: SlidesTableCellLocation | None,
+                            text_range: google_types.SlidesRange, style: SlidesParagraphStyle,
+                            fields: str) -> SlidesRequest:
     """An updateParagraphStyle, its keys in the order sync always wrote them."""
     request: google_types.SlidesUpdateParagraphStyleRequest = (
         {"objectId": oid, "textRange": text_range, "style": style, "fields": fields} if cell is None else
         {"objectId": oid, "cellLocation": cell, "textRange": text_range, "style": style, "fields": fields})
-    return google_types.slides_json({"updateParagraphStyle": request})
+    return {"updateParagraphStyle": request}
 
 
 def raw_objects(pres: Presentation) -> dict[str, PageElement]:
@@ -1556,14 +1606,14 @@ def _utf16_offsets(text: str) -> list[int]:
 
 
 def style_range_requests(oid: str, old: PageElement, new: PageElement, base_styles: Sequence[JsonMap],
-                         merged: str | None) -> list[JsonObject]:
+                         merged: str | None) -> list[SlidesRequest]:
     """The deck's run style edits of `old` (the live object before sync) re-applied to the same
     words in `new` (its recreation; `merged`: the text it will hold after the text override, None
     when there is no text override)."""
     from bisect import bisect_left
     from difflib import SequenceMatcher
 
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     for loc, old_text, new_text in text_containers(old, new):
         before = snapshot.read_text(old_text)[0]
         after = merged if merged is not None and loc is None else snapshot.read_text(new_text)[0]
@@ -1591,14 +1641,15 @@ def style_range_requests(oid: str, old: PageElement, new: PageElement, base_styl
     return reqs
 
 
-def shape_style_requests(oid: str, style: JsonMap) -> list[JsonObject]:
+def shape_style_requests(oid: str, style: JsonMap) -> list[SlidesRequest]:
     """A shape's fill and outline as the deck has them (snapshot.shape_style)."""
-    props: JsonObject = {}
+    props: ShapeProperties = {}
     fields: list[str] = []
     fill = _obj(style.get("fill"), "shape_style.fill")
     if "color" in fill:
-        props["shapeBackgroundFill"] = {"solidFill": {"color": api_colour(as_optional_str(fill["color"], "fill.color")),
-                                                      "alpha": fill.get("alpha", 1.0)}}
+        props["shapeBackgroundFill"] = {"solidFill": {
+            "color": colour_to_write(fill["color"], "a shape style: fill.color"),
+            "alpha": _number(fill.get("alpha", 1.0), "a shape style: fill.alpha")}}
         fields += ["shapeBackgroundFill.solidFill.color", "shapeBackgroundFill.solidFill.alpha"]
     elif fill.get("state") == "NOT_RENDERED":
         props["shapeBackgroundFill"] = {"propertyState": "NOT_RENDERED"}
@@ -1609,18 +1660,20 @@ def shape_style_requests(oid: str, style: JsonMap) -> list[JsonObject]:
         props["outline"] = {"propertyState": "NOT_RENDERED"}
         fields.append("outline.propertyState")
     elif outline_fill and "color" in outline_fill:
-        line: JsonObject = {"outlineFill": {"solidFill": {"color": api_colour(as_optional_str(outline_fill["color"], "outline.fill.color")),
-                                                          "alpha": outline_fill.get("alpha", 1.0)}},
-                            "weight": pt(_number(outline.get("weight") or 1.0, "outline.weight"))}
+        line: google_types.Outline = {
+            "outlineFill": {"solidFill": {
+                "color": colour_to_write(outline_fill["color"], "a shape style: outline.fill.color"),
+                "alpha": _number(outline_fill.get("alpha", 1.0), "a shape style: outline.fill.alpha")}},
+            "weight": pt(_number(outline.get("weight") or 1.0, "outline.weight"))}
         fields += ["outline.outlineFill.solidFill.color", "outline.outlineFill.solidFill.alpha", "outline.weight"]
         if outline.get("dash"):
-            line["dashStyle"] = outline["dash"]
+            line.update(google_types.typed_part({"dashStyle": outline["dash"]}, google_types.Outline,
+                                                "a shape style's outline"))
             fields.append("outline.dashStyle")
         props["outline"] = line
     if not fields:
         return []
-    return [google_types.slides_json({"updateShapeProperties": {"objectId": oid, "shapeProperties": google_types.shape_properties(props, "a shape style"),
-                                                                "fields": ",".join(fields)}})]
+    return [{"updateShapeProperties": {"objectId": oid, "shapeProperties": props, "fields": ",".join(fields)}}]
 
 
 def box_overlap(a: Sequence[float] | None, b: Sequence[float] | None) -> float:
@@ -1738,30 +1791,25 @@ def folded_hiders(read: JsonMap, made: Collection[str], ours: Collection[str],
     return out
 
 
-BREAK: JsonObject = {"__b2s_break__": True}  # where a batch may be cut: between slides
 PENDING_URL = "b2s-pending:"     # a picture whose staging URL is still on its way (`Sync.fill_urls`)
 
+Blocks = list[list[SlidesRequest]]
+"""Requests in blocks a batch may be cut between and never inside (but for one larger than a
+batch): one block per slide in `main_requests`, `batches` the batches they make."""
 
-def batches(reqs: Sequence[JsonObject], size: int) -> list[list[JsonObject]]:
-    """The requests split into batches of at most `size` (`CHUNK` in a sync), cut only where
-    `main_requests` allows it (between slides), so a sync that dies between two batches leaves whole
-    slides behind. One slide with more than `size` requests is the only thing that is ever split."""
+
+def batches(blocks: Sequence[Sequence[SlidesRequest]], size: int) -> Blocks:
+    """The blocks' requests in batches of at most `size` (`CHUNK` in a sync), cut only between
+    blocks (between slides: `main_requests`), so a sync that dies between two batches leaves whole
+    slides behind. One block with more than `size` requests is the only thing that is ever split;
+    an empty block is none."""
     size = faults.batch_size(size)
-    blocks: list[list[JsonObject]] = []
-    current: list[JsonObject] = []
-    for r in reqs:
-        if r == BREAK:
-            if current:
-                blocks.append(current)
-                current = []
-        else:
-            current.append(r)
-    if current:
-        blocks.append(current)
-    out: list[list[JsonObject]] = []
+    out: Blocks = []
     for block in blocks:
+        if not block:
+            continue
         if len(block) > size:
-            out += [block[i:i + size] for i in range(0, len(block), size)]
+            out += [list(block[i:i + size]) for i in range(0, len(block), size)]
         elif out and len(out[-1]) + len(block) <= size:
             out[-1] += block
         else:
@@ -1769,11 +1817,11 @@ def batches(reqs: Sequence[JsonObject], size: int) -> list[list[JsonObject]]:
     return out
 
 
-def matrix_request(oid: str, m: Sequence[float]) -> JsonObject:
-    return google_types.slides_json({"updatePageElementTransform": {
+def matrix_request(oid: str, m: Sequence[float]) -> SlidesRequest:
+    return {"updatePageElementTransform": {
         "objectId": oid, "applyMode": "RELATIVE", "transform": {
             "scaleX": m[0], "shearX": m[1], "shearY": m[2], "scaleY": m[3], "unit": "EMU",
-            "translateX": round(m[4] * EMU_PER_PT), "translateY": round(m[5] * EMU_PER_PT)}}})
+            "translateX": round(m[4] * EMU_PER_PT), "translateY": round(m[5] * EMU_PER_PT)}}}
 
 
 def _emu(v: float) -> google_types.Dimension:
@@ -1791,30 +1839,44 @@ def emu_size_json(w: float, h: float) -> JsonObject:
             "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}}
 
 
-def delete_text_request(oid: str, cell: google_types.SlidesTableCellLocation | None) -> JsonObject:
+def delete_text_request(oid: str, cell: SlidesTableCellLocation | None) -> SlidesRequest:
     """deleteText of all an object's words (`cell`: of that table cell)."""
     if cell is None:
-        return google_types.slides_json({"deleteText": {"objectId": oid, "textRange": {"type": "ALL"}}})
-    return google_types.slides_json({"deleteText": {"objectId": oid, "cellLocation": cell, "textRange": {"type": "ALL"}}})
+        return {"deleteText": {"objectId": oid, "textRange": {"type": "ALL"}}}
+    return {"deleteText": {"objectId": oid, "cellLocation": cell, "textRange": {"type": "ALL"}}}
 
 
-def named_step(step: JsonMap, oid: str) -> JsonObject:
-    """A `table_steps` request for the table `oid`."""
-    return {k: {**as_object(v, "a table step"), "tableObjectId": oid} for k, v in step.items()}
+def named_step(step: SlidesRequest, oid: str) -> SlidesRequest:
+    """A `table_steps` request for the table `oid` (its `tableObjectId` where it stood: first)."""
+    if "deleteTableRow" in step:
+        return {"deleteTableRow": {**step["deleteTableRow"], "tableObjectId": oid}}
+    if "insertTableRows" in step:
+        return {"insertTableRows": {**step["insertTableRows"], "tableObjectId": oid}}
+    if "insertTableColumns" in step:
+        return {"insertTableColumns": {**step["insertTableColumns"], "tableObjectId": oid}}
+    if "deleteTableColumn" in step:
+        return {"deleteTableColumn": {**step["deleteTableColumn"], "tableObjectId": oid}}
+    raise ValueError(f"no table step: {sorted(step)}")
 
 
-def front_request(oid: str) -> JsonObject:
-    return google_types.slides_json({"updatePageElementsZOrder": {"pageElementObjectIds": [oid],
-                                                                  "operation": "BRING_TO_FRONT"}})
+def front_request(oid: str) -> SlidesRequest:
+    return {"updatePageElementsZOrder": {"pageElementObjectIds": [oid], "operation": "BRING_TO_FRONT"}}
 
 
-def ungroup_request(gid: str) -> JsonObject:
-    return google_types.slides_json({"ungroupObjects": {"objectIds": [gid]}})
+def _group_id(group: google_types.GroupObjectsRequest) -> str:
+    """The id a groupObjects request gives its group (emit's always name it)."""
+    gid = group.get("groupObjectId")
+    if gid is None:
+        raise JsonShapeError("groupObjects: no groupObjectId")
+    return gid
 
 
-def page_properties_request(sid: str, fields: str, properties: google_types.PageProperties) -> JsonObject:
-    return google_types.slides_json({"updatePageProperties": {"objectId": sid, "fields": fields,
-                                                              "pageProperties": properties}})
+def ungroup_request(gid: str) -> SlidesRequest:
+    return {"ungroupObjects": {"objectIds": [gid]}}
+
+
+def page_properties_request(sid: str, fields: str, properties: PageProperties) -> SlidesRequest:
+    return {"updatePageProperties": {"objectId": sid, "fields": fields, "pageProperties": properties}}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1882,7 +1944,7 @@ class Sync:
         self.urls: dict[str, str] = {}  # picture file (str) -> contentUrl from the staging deck
         self.recovery = no_recovery()   # what an interrupted earlier sync left (plan_recovery)
         self.cleanup_ids: list[str] = []      # old objects and slides, deleted after everything else
-        self.cleanup_requests: list[JsonObject] = []
+        self.cleanup_requests: list[SlidesRequest] = []
         self.in_place_readback: JsonObject = {}  # objects rewritten in place, before the write
         self.final_revision: str | None = None
         self.facts = facts              # the deck's Drive facts, read once (snapshot.deck_info)
@@ -1952,26 +2014,26 @@ class Sync:
                 pass
         return self.revision(None)
 
-    def send(self, phase: str, reqs: list[JsonObject], rev: str | None) -> str:
+    def send(self, phase: str, blocks: Sequence[Sequence[SlidesRequest]], rev: str | None) -> str:
         """Batches with requiredRevisionId, chained through the revisions they return. A batch is
-        cut at a slide boundary where it can (`batches`), so a run that dies between two batches
-        leaves whole slides written, never half of one."""
+        cut between `blocks` (slides) where it can (`batches`), so a run that dies between two
+        batches leaves whole slides written, never half of one."""
         self.before_write()
-        self.fill_urls(reqs)   # nothing goes out carrying a marker, whoever built it (`picture_url`)
-        for n, chunk in enumerate(batches(reqs, CHUNK)):
+        self.fill_urls(blocks)   # nothing goes out carrying a marker, whoever built it (`picture_url`)
+        for n, chunk in enumerate(batches(blocks, CHUNK)):
             control = self.send_batch(phase, chunk, rev, n == 0).get("writeControl")
             rev = (control.get("requiredRevisionId") if control is not None else None) or self.revision(None)
             self.sent[phase] = self.sent.get(phase, 0) + len(chunk)
             faults.fail_at(phase)
         return rev or self.revision(None)
 
-    def send_batch(self, phase: str, chunk: list[JsonObject], rev: str | None, first: bool
+    def send_batch(self, phase: str, chunk: list[SlidesRequest], rev: str | None, first: bool
                    ) -> google_types.BatchUpdateResponse:
         """One batch of `send`, sent again while Google could not fetch a staged picture."""
         attempt = 0
         while True:
             try:
-                body: google_types.BatchUpdateBody = {"requests": chunk}
+                body: BatchUpdateBody = {"requests": chunk}
                 if rev:
                     body["writeControl"] = {"requiredRevisionId": rev}
                 return execute(self.slides.presentations().batchUpdate(presentationId=self.pid, body=body))
@@ -2227,9 +2289,9 @@ class Sync:
         if not self.cleanup_requests:
             return rev
         try:
-            return self.send("cleanup", self.cleanup_requests, rev)
+            return self.send("cleanup", [self.cleanup_requests], rev)
         except RevisionMismatch:  # someone edited the deck meanwhile; the objects are stale either way
-            return self.send("cleanup", self.cleanup_requests, None)
+            return self.send("cleanup", [self.cleanup_requests], None)
 
     def sign_changed(self, theirs: JsonObject, pres: Presentation) -> tuple[set[str], set[str]]:
         """The live pictures whose contentUrl differs from the base's, marked `unchecked` and not
@@ -2561,21 +2623,16 @@ class Sync:
         is about to create - does not wait for Drive at all."""
         return self.urls.get(str(path)) or f"{PENDING_URL}{path}"
 
-    def fill_urls(self, reqs: list[JsonObject]) -> None:
-        """Put the staging deck's URLs into the requests built before it existed. A picture the
-        staging deck did not bring fails here, loudly, rather than as a batch Google refuses:
-        nothing goes out carrying a marker."""
-        def fill(node: Json) -> Json:
-            if isinstance(node, dict):
-                for k, v in node.items():
-                    node[k] = self.urls[v[len(PENDING_URL):]] \
-                        if isinstance(v, str) and v.startswith(PENDING_URL) else fill(v)
-            elif isinstance(node, list):
-                node[:] = [fill(v) for v in node]
-            return node
+    def fill_urls(self, blocks: Sequence[Sequence[SlidesRequest]]) -> None:
+        """Put the staging deck's URLs into the requests built before it existed, in place. A
+        picture the staging deck did not bring fails here, loudly, rather than as a batch Google
+        refuses: nothing goes out carrying a marker."""
+        def fill(s: str) -> str:
+            return self.urls[s[len(PENDING_URL):]] if s.startswith(PENDING_URL) else s
 
-        for r in reqs:   # every marker, wherever it sits: a picture's URL and a slide background's
-            fill(r)
+        for block in blocks:   # every marker, wherever it sits: a picture's URL and a slide background's
+            for r in block:
+                _replace_strings(r, fill)
 
     def stage_in_background(self, work: Work) -> "Future[str | None] | None":
         """`stage` on a thread of its own, or None where there is nothing to stage or it has to be
@@ -2709,25 +2766,27 @@ class Sync:
     # ---- content
 
     def main_requests(self, work: Work, theirs: JsonObject, pres: Presentation, moves: "Mapping[str, Place]",
-                      scratch: list[str]) -> tuple[list[JsonObject], list[JsonObject]]:
+                      scratch: list[str]) -> tuple[Blocks, list[SlidesRequest]]:
         """(content, cleanup). Nothing in `content` destroys anything a person could have edited:
         it creates the new objects, refills placeholders and puts the slides in order. Every
         deletion - the objects a recreated unit replaces, the slides the source removed, the plain
         stand-in shapes - goes into `cleanup`, which is sent after the deck's own edits are back on
-        the new objects and a base that no longer mentions the old ones is stored."""
+        the new objects and a base that no longer mentions the old ones is stored. `content` is in
+        blocks a batch may be cut between (`batches`): the theme's, one per slide, then the
+        scratch slides' deletion and the slide order."""
         read = _slides(theirs, "theirs")
         ids = [as_str(s["objectId"], "theirs slide objectId") for s in read]
         live = dict(zip(ids, read))
         layouts = {name: l for l in pres.get("layouts", [])
                    if (name := l.get("layoutProperties", google_types.LayoutProperties()).get("name")) is not None}
-        reqs: list[JsonObject] = []
+        blocks: Blocks = []
         doomed_slides: list[str] = []
         if self.theme_plan is not None:
             # The master and the layouts first, in the same chain of batches: a layout write and a
             # slide batch in flight together can undo each other's placeholder boxes (the last
             # commit wins), and these go out one after another.
             if self.theme_plan.requests:
-                reqs += [*map(google_types.slides_json, self.theme_plan.requests), BREAK]
+                blocks.append(list(self.theme_plan.requests))
             self.cleanup_ids = list(dict.fromkeys([*self.cleanup_ids, *self.theme_plan.cleanup]))
         created: list[str] = []
         for w in work.slides:
@@ -2736,34 +2795,34 @@ class Sync:
                 case merge.DeleteSlide():
                     doomed_slides.append(p.object_id)
                 case merge.CreateSlide():
-                    reqs += self.new_slide(w, layouts, moves, pres) + [BREAK]
+                    blocks.append(self.new_slide(w, layouts, moves, pres))
                     if w.sid is not None:
                         created.append(w.sid)
                 case merge.UpdateSlide() | merge.HoldSlide():
-                    reqs += self.update_slide(w, live[p.object_id], moves, pres) + [BREAK]
+                    blocks.append(self.update_slide(w, live[p.object_id], moves, pres))
                 case merge.GoneSlide() | merge.KeepRemovedSlide():
                     pass
                 case _:
                     assert_never(p)
-        reqs += [delete_request(s) for s in scratch]  # (sync's own scratch slides)
+        last = [delete_request(s) for s in scratch]  # (sync's own scratch slides)
         # Slide order: created slides were appended.
         current = [sid for sid in ids if sid not in set(doomed_slides)]
         current += created
         final = [s for s in dict.fromkeys(work.order) if s in current]  # (an id can't be in two places)
         for i, sid in enumerate(final):
             if current[i] != sid:
-                reqs.append(google_types.slides_json({"updateSlidesPosition": {"slideObjectIds": [sid],
-                                                                               "insertionIndex": i}}))
+                last.append({"updateSlidesPosition": {"slideObjectIds": [sid], "insertionIndex": i}})
                 current.remove(sid)
                 current.insert(i, sid)
+        blocks.append(last)
         self.cleanup_ids = list(dict.fromkeys([*self.cleanup_ids, *doomed_slides]))
         cleanup = [delete_request(oid) for oid in self.cleanup_ids]
-        return reqs, cleanup
+        return blocks, cleanup
 
     def slide_requests(self, ours: int, units: Sequence[int], sid: str, in_place: Mapping[int, Refilled],
                        templates: "Mapping[TemplateKey, Template]", moves: "Mapping[str, Place]", new_slide: bool,
                        ungrouped: Collection[int]
-                       ) -> tuple[list[JsonObject], dict[int, list[str]], dict[int, str], list[JsonObject]]:
+                       ) -> tuple[list[SlidesRequest], dict[int, list[str]], dict[int, str], list[SlidesRequest]]:
         """emit's requests for the chosen elements (`units`) of the new conversion's slide `ours`,
         under live object ids. in_place: element index -> the live placeholder or table it goes
         into; templates: template key -> the live object (or stand-in) to duplicate (`Template`);
@@ -2819,7 +2878,7 @@ class Sync:
         mapping[vsid] = sid
         order = sorted(mapping.items(), key=lambda kv: -len(kv[0]))
         chosen = set(units)
-        reqs: list[JsonObject] = []
+        reqs: list[SlidesRequest] = []
         objects: dict[int, list[str]] = {}
         for i, (el, rs) in enumerate(parts[1:1 + len(element_ids)]):
             if i not in chosen:
@@ -2836,42 +2895,45 @@ class Sync:
                         "pageObjectId": sid, "size": emu_size(x1 - x0, y1 - y0),
                         "transform": {"scaleX": 1, "scaleY": 1, "unit": "EMU", "translateX": round(x0 * EMU_PER_PT),
                                       "translateY": round(y0 * EMU_PER_PT)}}}
-                rs = [google_types.slides_json({"createImage": image}),
-                      letterbox_fix(new_oid[i], box, png_size(path))] + rs
+                create: SlidesRequest = {"createImage": image}
+                rs = [create, letterbox_fix(new_oid[i], box, png_size(path))] + rs
             live = in_place.get(i)
             if isinstance(live, TableFill):
                 # Refilled where it is (`table_refill`): its cells emptied, then filled as emit
                 # fills a table the .pptx brought, whose margins this one has.
                 rs = [delete_text_request(new_oid[i], {"rowIndex": r, "columnIndex": c}) for r, c in live.cells] + \
                      [named_step(step, new_oid[i]) for step in live.steps] + \
-                     [google_types.slides_json(r) for r in table_requests(self.plan.placed(source[i], n), sid, new_oid[i], self.scale,
-                                                self.plan.fonts, imported=True, page_w=SLIDE_W / self.scale) if "updatePageElementsZOrder" not in r]
+                     [r for r in table_requests(self.plan.placed(source[i], n), sid, new_oid[i], self.scale,
+                                                self.plan.fonts, imported=True, page_w=SLIDE_W / self.scale)
+                      if "updatePageElementsZOrder" not in r]
                 dx, dy = live.shift
                 if abs(dx) > 0.01 or abs(dy) > 0.01:  # (the source moved it)
-                    rs.append(google_types.slides_json({"updatePageElementTransform": {
+                    rs.append({"updatePageElementTransform": {
                         "objectId": new_oid[i], "applyMode": "RELATIVE", "transform": {
                             "scaleX": 1, "scaleY": 1, "unit": "EMU",
-                            "translateX": round(dx * EMU_PER_PT), "translateY": round(dy * EMU_PER_PT)}}}))
+                            "translateX": round(dx * EMU_PER_PT), "translateY": round(dy * EMU_PER_PT)}}})
             elif isinstance(live, InPlace) and live.text:
                 rs = [delete_text_request(new_oid[i], None)] + rs
-            out: list[JsonObject] = []
+            out: list[SlidesRequest] = []
             for r in rs:  # a duplicated live object brings its text along: clear it
                 out.append(r)
-                if "duplicateObject" in r:
-                    dup = as_object(r["duplicateObject"], "duplicateObject")
+                dup = r.get("duplicateObject")
+                if dup is not None:
                     src = dup["objectId"]
                     tpl = next((t for t in templates.values() if t.id == src), None)
+                    copies = dup.get("objectIds")
                     if tpl and tpl.text:
-                        out += [delete_text_request(as_str(v, "duplicateObject.objectIds"), None)
-                                for v in as_object(dup["objectIds"], "duplicateObject.objectIds").values()]
+                        if copies is None:
+                            raise JsonShapeError("duplicateObject: no objectIds")
+                        out += [delete_text_request(v, None) for v in copies.values()]
             reqs += out
-            objects[i] = list(dict.fromkeys([new_oid[i]] + [x for x in created_ids([google_types.slides_request(r, "a unit's request") for r in rs])
-                                                                   if x != new_oid[i]]))
-        extras: list[JsonObject] = []
+            objects[i] = list(dict.fromkeys([new_oid[i]] + [x for x in created_ids(rs) if x != new_oid[i]]))
+        extras: list[SlidesRequest] = []
         for _, rs in parts[1 + len(element_ids):]:
             for r in rename_requests(rs, order):
-                if "groupObjects" in r:
-                    gid = as_str(as_object(r["groupObjects"], "groupObjects")["groupObjectId"], "groupObjectId")
+                group = r.get("groupObjects")
+                if group is not None:
+                    gid = _group_id(group)
                     owner = next((i for i, v in new_oid.items() if gid == f"{v}_g"), None)
                     if owner is not None and owner in chosen:
                         if owner in ungrouped:
@@ -2883,12 +2945,12 @@ class Sync:
         return reqs, objects, new_oid, extras
 
     def tag_requests(self, o: JsonObject, objects: Mapping[int, list[str]], new_oid: Mapping[int, str],
-                     in_place: Mapping[int, Refilled]) -> list[JsonObject]:
+                     in_place: Mapping[int, Refilled]) -> list[SlidesRequest]:
         slide = self.plan.slides()[_slides(self.ours, "ours").index(o)]
         okey = as_str(o["key"], "ours slide key")
         entries = as_objects(o["elements"], f"ours slide {okey}: elements")
         source = as_objects(slide["elements"], "elements")
-        reqs: list[JsonObject] = []
+        reqs: list[SlidesRequest] = []
         for i, oids in objects.items():
             e, el = entries[i], source[i]
             if el["kind"] == "diagram" and len(oids) > 1:
@@ -2903,7 +2965,7 @@ class Sync:
             alt = el.get("alt")
             if el["kind"] == "image" and alt:
                 r["description"] = as_str(alt, "image alt")
-            reqs.append(google_types.slides_json({"updatePageElementAltText": r}))
+            reqs.append({"updatePageElementAltText": r})
         return reqs
 
     def new_layout(self, slide: JsonObject, layout_name: str, layouts: Mapping[str, Page],
@@ -2938,7 +3000,7 @@ class Sync:
         return layouts.get(layout_name) or layouts.get("BLANK")
 
     def new_slide(self, w: SlideWork, layouts: Mapping[str, Page], moves: "Mapping[str, Place]",
-                  pres: Presentation) -> list[JsonObject]:
+                  pres: Presentation) -> list[SlidesRequest]:
         from .emit import element_template_keys, slide_layout, subtitle_element, title_element
 
         p = w.plan
@@ -2975,8 +3037,8 @@ class Sync:
                 continue  # (not every layout placeholder is instantiated: the rest go after a read, in finish)
             mappings.append(google_types.layout_placeholder_id_mapping(
                 {"layoutPlaceholder": {"type": ph["type"], "index": ph.get("index", 0)}, "objectId": oid}, "a layout placeholder"))
-        reqs = [google_types.slides_json({"createSlide": {
-            "objectId": sid, "slideLayoutReference": {"layoutId": object_id(layout)}, "placeholderIdMappings": mappings}})]
+        reqs: list[SlidesRequest] = [{"createSlide": {
+            "objectId": sid, "slideLayoutReference": {"layoutId": object_id(layout)}, "placeholderIdMappings": mappings}}]
         reqs += self.background_requests(sid, as_str(o["background"], "ours slide background"), slide, pres, True)
         templates: dict[TemplateKey, Template] = {}
         if self.plan.uses_templates[as_int(slide["page"], "slide.page")]:
@@ -2994,13 +3056,12 @@ class Sync:
         w.objects, w.new_oid, w.in_place = objects, new_oid, in_place
         w.tops = {}
         w.doomed = set()
-        w.groups = [as_str(as_object(r["groupObjects"], "groupObjects")["groupObjectId"], "groupObjectId")
-                    for r in extras if "groupObjects" in r]
+        w.groups = [_group_id(group) for r in extras if (group := r.get("groupObjects")) is not None]
         reqs += self.tag_requests(o, objects, new_oid, in_place)
         return reqs
 
     def update_slide(self, w: SlideWork, read: JsonObject, moves: "Mapping[str, Place]",
-                     pres: Presentation) -> list[JsonObject]:
+                     pres: Presentation) -> list[SlidesRequest]:
         """A kept slide's requests: its units the plan (re)creates, deletes or moves, its background
         and notes. A held slide (`merge.HoldSlide`) has none of those, and gets nothing."""
         from .emit import bend_template_key, element_template_keys, label_inside, node_template_key, template_key
@@ -3016,7 +3077,7 @@ class Sync:
         objects = _objects(read, f"slide {sid}")
         objs = {oid: as_object(rb, f"read-back {oid}") for oid, rb in objects.items()}
         bunits = merge.units(as_objects(b["elements"], "base slide elements"))
-        reqs: list[JsonObject] = []
+        reqs: list[SlidesRequest] = []
         w.objects = {}
         w.new_oid = {}
         w.in_place = {}
@@ -3165,7 +3226,7 @@ class Sync:
             if read.get("notes"):
                 reqs.append(delete_text_request(notes_id, None))
             if notes:
-                reqs.append(google_types.slides_json({"insertText": {"objectId": notes_id, "text": notes}}))
+                reqs.append({"insertText": {"objectId": notes_id, "text": notes}})
         w.tops = tops
         return reqs
 
@@ -3229,13 +3290,13 @@ class Sync:
     @staticmethod
     def regroup_requests(regroup: Mapping[ObjectId, Regroup], depth: Mapping[ObjectId, int], objects: JsonMap,
                          tops: Mapping[str, str], keep_ids: Collection[str], rank: Mapping[str, int]
-                         ) -> list[JsonObject]:
+                         ) -> list[SlidesRequest]:
         """The groups `regroups` took apart, made again under the same ids, innermost first: a
         rewritten unit's new top object takes its old root's place among the children (`tops`: unit
         key -> new top; `objects`: the read-back before the rewrite; `rank`: object id -> where the
         source draws that element, for every child this sync writes and every one it keeps; `{}`:
         the children keep their order)."""
-        reqs: list[JsonObject] = []
+        reqs: list[SlidesRequest] = []
         replaced: dict[str, str | None] = {}  # regrouped group -> what stands for it now (None: gone)
         for g in sorted(regroup, key=lambda g: -depth[g]):
             info = regroup[g]
@@ -3270,15 +3331,14 @@ class Sync:
                 # (`restack` orders what is on the page), so the old order goes back now, while they
                 # are all still on the page. (The offline fuzz replays this: `fuzz_sync._stacked`.)
                 reqs += [front_request(c) for c in children]
-                reqs.append(google_types.slides_json({"groupObjects": {"groupObjectId": g,
-                                                                       "childrenObjectIds": children}}))
+                reqs.append({"groupObjects": {"groupObjectId": g, "childrenObjectIds": children}})
                 replaced[g] = g
             else:
                 replaced[g] = children[0] if children else None
         return reqs
 
     def background_requests(self, sid: str, key: str, slide: JsonMap, pres: Presentation,
-                            created: bool) -> list[JsonObject]:
+                            created: bool) -> list[SlidesRequest]:
         master = self.master_key()
         if key == master:
             if created:
@@ -3307,9 +3367,8 @@ class Sync:
                                                                              "the master's background"))]
             return []
         if key.startswith("color:"):
-            return [page_properties_request(sid, "pageBackgroundFill.solidFill.color",
-                                            google_types.page_properties({"pageBackgroundFill": {"solidFill": {"color": api_colour(key[6:])}}},
-                                                                         "a slide background"))]
+            return [page_properties_request(sid, "pageBackgroundFill.solidFill.color", {"pageBackgroundFill": {
+                "solidFill": {"color": colour_to_write(key[6:], "a slide background")}}})]
         url = self.picture_url(self.ours_out / as_str(slide["background"], "slide background"))
         return [page_properties_request(sid, "pageBackgroundFill.stretchedPictureFill.contentUrl",
                                         {"pageBackgroundFill": {"stretchedPictureFill": {"contentUrl": url}}})]
@@ -3321,7 +3380,7 @@ class Sync:
         now = snapshot.read_presentation(raw)
         live = _by_id(now, "the deck written")
         before = _by_id(theirs, "theirs")
-        reqs: list[JsonObject] = []
+        reqs: list[SlidesRequest] = []
         for w in work.slides:
             p = w.plan
             match p:
@@ -3333,8 +3392,8 @@ class Sync:
                              if as_object(rb, f"read-back {oid}").get("placeholder") and oid not in mine]
                     notes_id = s.get("notes_id") if s else None
                     if s and notes_id and (notes := _slides(self.ours, "ours")[p.ours].get("notes")):
-                        reqs.append(google_types.slides_json({"insertText": {
-                            "objectId": as_str(notes_id, "notes_id"), "text": as_str(notes, "ours slide notes")}}))
+                        reqs.append({"insertText": {
+                            "objectId": as_str(notes_id, "notes_id"), "text": as_str(notes, "ours slide notes")}})
                 case merge.UpdateSlide():
                     if w.objects:
                         reqs += self.restack_of(p.base, p.ours, p.units, w.doomed, w.tops, before[p.object_id],
@@ -3344,7 +3403,7 @@ class Sync:
                 case _:
                     assert_never(p)
         if reqs:
-            rev = self.send("order", reqs, rev)
+            rev = self.send("order", [reqs], rev)
             raw = self.read()
             now = snapshot.read_presentation(raw)
         self.warn_about_folded_hiders(work, now)
@@ -3358,7 +3417,7 @@ class Sync:
         self.created = now
         overrides = self.override_requests(work, theirs, now, raw_objects(pres), raw_objects(raw))
         if overrides:
-            rev = self.send("overrides", overrides, rev)
+            rev = self.send("overrides", [overrides], rev)
             rev = self.refit(work, theirs, now, rev)
         self.final_revision = rev
         self.warn_about_overruns(work, theirs)
@@ -3521,7 +3580,7 @@ class Sync:
         before = _by_id(theirs, "theirs")
         page = final.get("page_size")
         page_size = None if page is None else _nums(page, "page_size")
-        reqs: list[JsonObject] = []
+        blocks: Blocks = []   # (one per slide)
         reshaped: dict[str, refit.Reshape] = {}
         moves: list[refit.Moved] = []
         for sid, js in jobs.items():
@@ -3529,12 +3588,12 @@ class Sync:
                 continue
             r, shaped, warnings = refit.plan(js, pre[sid], fin[sid], page_size, before.get(sid))
             if r:
-                reqs += r + [BREAK]
+                blocks.append(r)
             reshaped.update(shaped)
             self.warnings += warnings
             moves += refit.moves(js, shaped, pre[sid], fin[sid])
-        if reqs:
-            rev = self.send("refit", reqs, rev)
+        if blocks:
+            rev = self.send("refit", blocks, rev)
             self.reshaped = reshaped
             self.refit_moves = [refit.moved_json(m) for m in moves]
         return rev
@@ -3619,7 +3678,7 @@ class Sync:
         for i, oid in zip(slots, sorted(here, key=lambda o: rank[at[o]])):
             desired[i] = oid
 
-    def restack(self, w: Mapping[str, object], before: JsonMap, now: JsonMap) -> list[JsonObject]:
+    def restack(self, w: Mapping[str, object], before: JsonMap, now: JsonMap) -> list[SlidesRequest]:
         """`restack_of` over a slide's work as JSON: {"plan" (as `merge.plan_merge` writes it),
         "doomed", "tops"} (the offline fuzz's replay, `fuzz_sync._stacked`)."""
         p = updated(slide_plan_of(google_types.json_object(w["plan"], "plan"), "plan"))
@@ -3628,7 +3687,7 @@ class Sync:
                                {k: as_str(v, f"tops[{k}]") for k, v in tops.items()}, before, now)
 
     def restack_of(self, base: int, ours: int, units: Sequence[merge.PlannedUnit], doomed: Collection[str],
-                   tops: Mapping[str, str], before: JsonMap, now: JsonMap) -> list[JsonObject]:
+                   tops: Mapping[str, str], before: JsonMap, now: JsonMap) -> list[SlidesRequest]:
         """BRING_TO_FRONT so recreated elements take their old place in the z-order and new
         ones follow their predecessor in the source. The objects the cleanup phase will delete are
         left out: they are still on the slide, under their replacements, until then. `base`, `ours`:
@@ -3772,13 +3831,13 @@ class Sync:
 
     @staticmethod
     def move_requests(units: Sequence[JsonMap], bunits: Mapping[str, Sequence[JsonMap]], read: JsonMap,
-                      scale: float) -> list[JsonObject]:
+                      scale: float) -> list[SlidesRequest]:
         """`move_requests_of` over units as `merge.plan_merge` writes them (the offline fuzz's replay)."""
         return Sync.move_requests_of([planned_unit_of(u, f"unit {n}") for n, u in enumerate(units)], bunits, read, scale)
 
     @staticmethod
     def move_requests_of(units: Sequence[merge.PlannedUnit], bunits: Mapping[str, Sequence[JsonMap]], read: JsonMap,
-                         scale: float) -> list[JsonObject]:
+                         scale: float) -> list[SlidesRequest]:
         """The source's move written onto the deck's own objects. Every *root* of the unit takes the
         step: normally that is the converter's group, which carries its children, but when the person
         has taken the group apart the roots are the text box and each picture anchored to it, and
@@ -3786,7 +3845,7 @@ class Sync:
         the report calls the move applied (`override_requests` had the same assumption, live fuzz seed
         903). `merge.unit_shift` has already asked that one step fits every member of the unit, so the
         same step is what each root wants."""
-        reqs: list[JsonObject] = []
+        reqs: list[SlidesRequest] = []
         for u in units:
             if isinstance(u.decision, merge.MoveUnit):
                 dx, dy = (v * scale for v in u.decision.delta)
@@ -3807,12 +3866,12 @@ class Sync:
         return oids
 
     def override_requests(self, work: Work, theirs: JsonMap, now: JsonMap, raw_before: Mapping[str, PageElement],
-                          raw_now: Mapping[str, PageElement]) -> list[JsonObject]:
+                          raw_now: Mapping[str, PageElement]) -> list[SlidesRequest]:
         """Deck edits re-applied to recreated elements: geometry, merged text, styles. raw_before /
         raw_now: objectId -> page element of the deck before sync and now (for run styles)."""
         before = _by_id(theirs, "theirs")
         after = _by_id(now, "now")
-        reqs: list[JsonObject] = []
+        reqs: list[SlidesRequest] = []
         for w in work.slides:
             p = w.plan
             if not isinstance(p, merge.UpdateSlide):
@@ -3863,7 +3922,7 @@ class Sync:
                         final_text = merged
                 if ov.text_style is not None:
                     new_raw = raw_now.get(main)
-                    locations: list[google_types.SlidesTableCellLocation] | None = None
+                    locations: list[SlidesTableCellLocation] | None = None
                     if new_raw is not None and "table" in new_raw:
                         rows = google_types.parts(new_raw["table"].get("tableRows"), "table.tableRows")
                         locations = [{"rowIndex": r, "columnIndex": c} for r, row in enumerate(rows)
@@ -4164,17 +4223,17 @@ def base_order_of(placed: Sequence[tuple[int, str]], live: Sequence[str]) -> lis
     return order
 
 
-def stand_in_request(oid: str, sid: str, preset: str) -> JsonObject:
+def stand_in_request(oid: str, sid: str, preset: str) -> SlidesRequest:
     """A plain shape of `preset` (a template key's first part) standing in for a template no live
     object gives: created at 3,000,000 EMU, the size Slides stores every shape at."""
     size = emu_size(STAND_IN, STAND_IN)
     transform: google_types.AffineTransform = {"scaleX": 1, "scaleY": 1, "translateX": 0, "translateY": 0,
                                                "unit": "EMU"}
     if preset == "BENT_CONNECTOR":
-        return google_types.slides_json({"createLine": {"objectId": oid, "lineCategory": "BENT", "elementProperties": {
-            "pageObjectId": sid, "size": size, "transform": transform}}})
-    return google_types.slides_json({"createShape": {"objectId": oid, "shapeType": google_types.shape_type(preset, "a stand-in"), "elementProperties": {
-        "pageObjectId": sid, "size": size, "transform": transform}}})
+        return {"createLine": {"objectId": oid, "lineCategory": "BENT", "elementProperties": {
+            "pageObjectId": sid, "size": size, "transform": transform}}}
+    return {"createShape": {"objectId": oid, "shapeType": google_types.shape_type(preset, "a stand-in"),
+                            "elementProperties": {"pageObjectId": sid, "size": size, "transform": transform}}}
 
 
 # ---------------------------------------------------------------- reports

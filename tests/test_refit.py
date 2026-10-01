@@ -8,6 +8,7 @@ from collections.abc import Collection, Mapping, Sequence
 
 from beamer2slides import emit, refit, snapshot
 from beamer2slides import text_layout as tl
+from beamer2slides.google_types import SlidesRequest, slides_json
 from beamer2slides.json_types import Json, JsonObject
 
 from .json_reads import jat, jnum, jnums, jobj, jstr
@@ -123,7 +124,7 @@ def test_a_formula_picture_follows_its_hole_into_the_words_as_merged() -> None:
     after = offset(fin_t, box_of(stepped(pic, reshaped["p"].step)))
     assert abs(before[0]) > 80
     assert max(abs(after[0]), abs(after[1])) < 0.5
-    t = jobj(reqs[0], "updatePageElementTransform")
+    t = jobj(slides_json(reqs[0]), "updatePageElementTransform")
     assert t["objectId"] == "p" and t["applyMode"] == "RELATIVE"
 
 
@@ -140,8 +141,8 @@ def test_a_picture_follows_onto_the_next_line() -> None:
     assert max(map(abs, offset(fin_t, moved))) < 0.5
 
 
-def request_matrix(r: JsonObject) -> list[float]:
-    t = jobj(r, "updatePageElementTransform", "transform")
+def request_matrix(r: SlidesRequest) -> list[float]:
+    t = jobj(slides_json(r), "updatePageElementTransform", "transform")
     return [jnum(t, "scaleX"), jnum(t, "shearX"), jnum(t, "shearY"), jnum(t, "scaleY"),
             jnum(t, "translateX") / snapshot.EMU_PER_PT, jnum(t, "translateY") / snapshot.EMU_PER_PT]
 
@@ -179,7 +180,7 @@ def test_a_groups_child_takes_the_step_in_page_space() -> None:
     assert not warnings and set(reshaped) == {"t", "p", "panel"}
     deck = dict(jobj(fin, "objects"))
     for r in reqs:                                   # what Slides does with each: M . absolute
-        oid = jstr(r, "updatePageElementTransform", "objectId")
+        oid = jstr(slides_json(r), "updatePageElementTransform", "objectId")
         assert close(request_matrix(r), reshaped[oid].step, 1e-3)
         deck[oid] = stepped(jobj(deck[oid]), request_matrix(r))
     assert jnums(deck, "t", "transform")[3] > 1.05                               # it did grow

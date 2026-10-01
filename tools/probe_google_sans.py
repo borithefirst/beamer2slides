@@ -17,8 +17,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from beamer2slides.arrays import Gray
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import Dimension, SlidesRequest, object_id, part, parts, presentation_id
-from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
+from beamer2slides.google_types import SlidesRequest, object_id, part, parts, presentation_id
+from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
 from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_array, as_object
 
 Box = tuple[float, float, float, float]
@@ -34,26 +34,6 @@ ROWS = [  # (Slides family, weight)
     ("Google Sans Text", 700), ("Google Sans Mono", 400), ("Google Sans Flex", 400), ("Google Sans Code", 400),
 ]
 ROW_H = 48
-
-
-def pt(v: float) -> Dimension:
-    """`gslides.pt` as a request's dimension."""
-    return {"magnitude": v, "unit": "PT"}
-
-
-def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
-    """`gslides.text_box` as a request."""
-    return {"createShape": {
-        "objectId": object_id,
-        "shapeType": "TEXT_BOX",
-        "elementProperties": {
-            "pageObjectId": page_id,
-            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
-                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
-            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
-                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
-        },
-    }}
 
 
 def ink(gray: Gray) -> Box | None:

@@ -53,7 +53,8 @@ from pathlib import Path
 from typing import IO, Literal, TypeVar
 
 from beamer2slides import adopt_sync, merge, snapshot, sync_model
-from beamer2slides.json_types import Json, JsonObject, as_int
+from beamer2slides.google_types import SlidesRequest, SlidesTableCellLocation
+from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_int
 from beamer2slides.paths import CHECKOUT as ROOT  # live rounds build tests/decks/sync from the checkout
 from beamer2slides.sync import EMU_PER_PT, Sync
 from beamer2slides.sync_model import Base, DeckRead, ElementEntry, ImageRead, ObjectId, ReadBack, SlideEntry
@@ -919,26 +920,37 @@ def _strs(v: Json, where: str) -> list[str]:
     return [W.text(x, where) for x in W.arr(v, where)]
 
 
-def _apply_text_requests(current: str, reqs: Sequence[JsonObject]) -> str:
+def _index(v: int | None, where: str) -> int:
+    if v is None:
+        raise JsonShapeError(f"{where}: missing")
+    return v
+
+
+def _apply_text_requests(current: str, reqs: Sequence[SlidesRequest]) -> str:
     """Slides applying them, refusals included: the newline a shape's text ends on is the API's own
     and is left out of the length it will accept, so a `deleteText` reaching the end is thrown out
     and the batch with it (`merge.text_edit_requests`)."""
     units = list(current)
     for r in reqs:
         length = len(units) - 1 if units and units[-1] == "\n" else len(units)
-        if "deleteText" in r:
-            rng = W.obj(W.obj(r["deleteText"], "deleteText")["textRange"], "deleteText.textRange")
-            start, end = as_int(rng["startIndex"], "textRange.startIndex"), as_int(rng["endIndex"], "textRange.endIndex")
+        delete, insert = r.get("deleteText"), r.get("insertText")
+        if delete is not None:
+            rng = delete.get("textRange")
+            if rng is None:
+                raise JsonShapeError("deleteText.textRange: missing")
+            start = _index(rng.get("startIndex"), "textRange.startIndex")
+            end = _index(rng.get("endIndex"), "textRange.endIndex")
             if end > length:
                 raise ValueError(f"the end index ({end}) should not be greater than "
                                  f"the existing text length ({length})")
             del units[start:end]
-        else:
-            body = W.obj(r["insertText"], "insertText")
-            i = as_int(body["insertionIndex"], "insertText.insertionIndex")
+        elif insert is not None:
+            i = _index(insert.get("insertionIndex"), "insertText.insertionIndex")
             if i > length:
                 raise ValueError(f"the insertion index ({i}) is past the text ({length})")
-            units[i:i] = list(W.text(body["text"], "insertText.text"))
+            units[i:i] = list(insert["text"])
+        else:
+            raise JsonShapeError(f"not a text edit: {sorted(r)}")
     return "".join(units)
 
 
@@ -965,7 +977,7 @@ def _writable_cells(skey: str, ekey: str, ir: JsonObject, current: str, ov: merg
         for c, (now_cell, want) in enumerate(zip(crow, mrow)):
             if want == now_cell:
                 continue
-            loc: JsonObject = {"rowIndex": r, "columnIndex": c}
+            loc: SlidesTableCellLocation = {"rowIndex": r, "columnIndex": c}
             try:
                 written = _apply_text_requests(
                     now_cell + "\n", merge.text_edit_requests("oid", now_cell + "\n", want + "\n", loc))
@@ -1095,12 +1107,14 @@ def _movable(base: JsonObject, live: W.LiveDeck, plan: merge.MergePlan) -> list[
             moved: Counter[str] = Counter()
             want = [round(v * W.SCALE * EMU_PER_PT) for v in d.delta]
             for r in Sync.move_requests([merge.planned_unit_json(u)], bunits, read_json, W.SCALE):
-                body = W.obj(r["updatePageElementTransform"], "updatePageElementTransform")
-                t = W.obj(body["transform"], "updatePageElementTransform.transform")
-                oid = W.text(body["objectId"], "updatePageElementTransform.objectId")
+                body = r.get("updatePageElementTransform")
+                if body is None:
+                    raise JsonShapeError(f"not a move: {sorted(r)}")
+                t = body["transform"]
+                oid = body["objectId"]
                 for x in [oid, *merge._descendants(oid, read_json)]:
                     moved[x] += 1
-                got = [t["translateX"], t["translateY"]]
+                got = [t.get("translateX"), t.get("translateY")]
                 if got != want:
                     out.append(Finding(kind="unwritten_move", severity="report", slide=p.key, element=u.key,
                                        object=None, detail=f"{oid} is moved by {got}, not the planned {want}"))
@@ -1113,7 +1127,7 @@ def _movable(base: JsonObject, live: W.LiveDeck, plan: merge.MergePlan) -> list[
     return out
 
 
-def _zorder(read: W.LiveSlide, reqs: Sequence[JsonObject], created: Sequence[str]) -> dict[str, list[str]]:
+def _zorder(read: W.LiveSlide, reqs: Sequence[SlidesRequest], created: Sequence[str]) -> dict[str, list[str]]:
     """Slides' z-order under a rewrite, as far as grouping goes: the slide as `read` has it, the
     `ungroupObjects` in `reqs` (a group's children take its place), `created` put on top in that
     order (a new object is created last, so above everything), then `updatePageElementsZOrder`
@@ -1129,27 +1143,29 @@ def _zorder(read: W.LiveSlide, reqs: Sequence[JsonObject], created: Sequence[str
     def where(oid: str) -> list[str] | None:
         return next((lst for lst in lists.values() if oid in lst), None)
     for r in reqs:
-        if "ungroupObjects" in r:
-            for g in _strs(W.obj(r["ungroupObjects"], "ungroupObjects")["objectIds"], "ungroupObjects.objectIds"):
+        ungroup = r.get("ungroupObjects")
+        if ungroup is not None:
+            for g in ungroup["objectIds"]:
                 lst = where(g)
                 if lst is not None:
                     i = lst.index(g)
                     lst[i:i + 1] = lists.pop(g, [])
     lists[""] += created
     for r in reqs:
-        if "updatePageElementsZOrder" in r:
-            body = W.obj(r["updatePageElementsZOrder"], "updatePageElementsZOrder")
-            assert body["operation"] == "BRING_TO_FRONT", body
-            for oid in _strs(body["pageElementObjectIds"], "updatePageElementsZOrder.pageElementObjectIds"):
+        front, group = r.get("updatePageElementsZOrder"), r.get("groupObjects")
+        if front is not None:
+            assert front["operation"] == "BRING_TO_FRONT", front
+            for oid in front["pageElementObjectIds"]:
                 lst = where(oid)
                 if lst is not None:
                     lst.remove(oid)
                 lists[""].append(oid)
-        elif "groupObjects" in r:
-            body = W.obj(r["groupObjects"], "groupObjects")
-            gid = W.text(body["groupObjectId"], "groupObjects.groupObjectId")
+        elif group is not None:
+            gid = group.get("groupObjectId")
+            if gid is None:
+                raise JsonShapeError("groupObjects.groupObjectId: missing")
             page = lists[""]
-            kids = sorted((c for c in _strs(body["childrenObjectIds"], "groupObjects.childrenObjectIds") if c in page),
+            kids = sorted((c for c in group["childrenObjectIds"] if c in page),
                           key=page.index)
             if kids:
                 at = page.index(kids[-1]) - len(kids) + 1
@@ -1180,8 +1196,10 @@ def _restacked(sync: Sync, p: JsonObject, read: W.LiveSlide, read_json: JsonObje
     order = list(page)
     slide: JsonObject = {"objectId": now.object_id, "order": W.jstrs(page), "objects": {k: v for k, v in objects.items()}}
     for r in sync.restack(w, read_json, slide):
-        oid, = _strs(W.obj(r["updatePageElementsZOrder"], "updatePageElementsZOrder")["pageElementObjectIds"],
-                     "updatePageElementsZOrder.pageElementObjectIds")
+        front = r.get("updatePageElementsZOrder")
+        if front is None:
+            raise JsonShapeError(f"not a restack: {sorted(r)}")
+        oid, = front["pageElementObjectIds"]
         if oid in order:
             order.append(order.pop(order.index(oid)))
     kept = [ObjectId(x) for x in order if x in now.objects]
@@ -1235,7 +1253,8 @@ def _stacked(base: JsonObject, typed_base: Base, live: W.LiveDeck, after: W.Live
                 created.append(tops[u.key])
         if not regroup and not tops:
             continue
-        ungroup: list[JsonObject] = [{"ungroupObjects": {"objectIds": [g]}} for g in sorted(regroup, key=lambda g: depth[g])]
+        ungroup: list[SlidesRequest] = [{"ungroupObjects": {"objectIds": [g]}}
+                                        for g in sorted(regroup, key=lambda g: depth[g])]
         rank = Sync.zrank(W.obj(W.arr(ours.json["slides"], "ours.slides")[p.ours], "ours.slide"), bunits, tops)
         lists = _zorder(read, ungroup + Sync.regroup_requests(regroup, depth, W.obj(read_json["objects"], "objects"), tops,
                                                               set(), rank), created)

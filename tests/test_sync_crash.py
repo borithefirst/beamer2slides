@@ -23,7 +23,8 @@ import pytest
 from beamer2slides.emit import SLIDE_W
 from beamer2slides import faults, snapshot, sync
 from beamer2slides.gapi import HttpError
-from beamer2slides.google_types import BatchUpdateResponse, DriveFile, Page, Presentation, Request, object_id
+from beamer2slides.google_types import (BatchUpdateResponse, CreateImageRequest, DriveFile, Page, Presentation, Request,
+                                        SlidesRequest, StretchedPictureFill, object_id)
 from beamer2slides.guard import WayBack
 from beamer2slides.inverse import Result, replace_file, source_hashes, unchanged_since_pull, write_outputs
 from beamer2slides.json_types import Json, JsonObject
@@ -88,8 +89,8 @@ def test_the_batch_size_is_the_library_s_unless_the_variable_says_otherwise() ->
     assert faults.batch_size(400) == 400
     os.environ[faults.SIZE] = "40"
     assert faults.batch_size(400) == 40
-    a: JsonObject = {"a": 1}
-    assert len(sync.batches([a] * 90, sync.CHUNK)) == 3
+    a = sync.delete_request("A1")
+    assert len(sync.batches([[a] * 90], sync.CHUNK)) == 3
     os.environ[faults.SIZE] = "not a number"
     assert faults.batch_size(400) == 400
     del os.environ[faults.SIZE]
@@ -107,25 +108,21 @@ def test_the_fault_hook_takes_several_points_and_keeps_colons_in_names() -> None
 # ---------------------------------------------------------------- batching and write order
 
 def test_batches_are_cut_only_where_a_slide_ends() -> None:
-    a: JsonObject = {"a": 1}
-    b: JsonObject = {"b": 2}
-    c: JsonObject = {"c": 3}
-    reqs = [a] * 3 + [sync.BREAK] + [b] * 3 + [sync.BREAK] + [c] * 2
-    assert sync.batches(reqs, size=4) == [[a] * 3, [b] * 3, [c] * 2]
-    assert sync.batches(reqs, size=8) == [[a] * 3 + [b] * 3 + [c] * 2]
+    a, b, c = sync.delete_request("A1"), sync.delete_request("B2"), sync.delete_request("C3")
+    blocks = [[a] * 3, [b] * 3, [], [c] * 2]
+    assert sync.batches(blocks, size=4) == [[a] * 3, [b] * 3, [c] * 2]
+    assert sync.batches(blocks, size=8) == [[a] * 3 + [b] * 3 + [c] * 2]
     for size in range(1, 10):
-        got = sync.batches(reqs, size)
-        assert all(sync.BREAK not in batch for batch in got)
-        assert [r for batch in got for r in batch] == [r for r in reqs if r is not sync.BREAK]
+        got = sync.batches(blocks, size)
+        assert all(batch for batch in got)  # (an empty block makes no batch)
+        assert [r for batch in got for r in batch] == [r for block in blocks for r in block]
 
 
 def test_one_slide_larger_than_a_batch_is_the_only_thing_that_is_split() -> None:
-    reqs: list[JsonObject] = [{"a": i} for i in range(7)]
-    b: JsonObject = {"b": 1}
-    reqs += [sync.BREAK, b]
-    got = sync.batches(reqs, size=3)
+    slide = [sync.delete_request(f"A{i}") for i in range(7)]
+    got = sync.batches([slide, [sync.delete_request("B1")]], size=3)
     assert [len(b) for b in got] == [3, 3, 2]
-    assert got[-1] == [{"a": 6}, {"b": 1}]  # the tail keeps the whole next slide with it
+    assert got[-1] == [sync.delete_request("A6"), sync.delete_request("B1")]  # the tail keeps the whole next slide with it
 
 
 def test_a_slide_the_source_removed_is_deleted_in_the_cleanup_phase_not_with_the_content() -> None:
@@ -133,7 +130,7 @@ def test_a_slide_the_source_removed_is_deleted_in_the_cleanup_phase_not_with_the
     work = sync_work.work([sync_work.slide_work({"action": "delete", "objectId": "S1", "key": "gone"})], ["S2"])
     theirs: JsonObject = {"slides": [{"objectId": "S1"}, {"objectId": "S2"}]}
     content, cleanup = s.main_requests(work, theirs, {}, {}, [])
-    assert not [r for r in content if "deleteObject" in r]
+    assert not [r for block in content for r in block if "deleteObject" in r]
     assert cleanup == [{"deleteObject": {"objectId": "S1"}}]
     assert s.cleanup_ids == ["S1"]
 
@@ -142,7 +139,7 @@ def test_scratch_slides_are_sync_s_own_and_go_with_the_content() -> None:
     s = sync_work.bare_sync()
     work = sync_work.work([], [])
     content, cleanup = s.main_requests(work, {"slides": []}, {}, {}, ["b2s_m001"])
-    assert content == [{"deleteObject": {"objectId": "b2s_m001"}}]
+    assert content == [[{"deleteObject": {"objectId": "b2s_m001"}}]]
     assert cleanup == []
 
 
@@ -499,7 +496,7 @@ def test_every_write_collects_the_way_back_before_it_goes_out() -> None:
     assert note.times == 1 and api.batches == [["A"]], "an interrupted run's leftovers are a write"
     s.delete_scratch(["b2s_m000"])
     assert note.times == 2, "measure_places' scratch slides are a write"
-    s.send("content", [{"deleteObject": {"objectId": "B"}}], None)
+    s.send("content", [[sync.delete_request("B")]], None)
     assert note.times == 3, "and so is the content batch"
 
 
@@ -529,14 +526,14 @@ def test_the_staging_urls_are_filled_in_wherever_they_sit() -> None:
     walks the batch rather than knowing where to look."""
     s = sync_work.bare_sync()
     s.urls = {"a.png": "https://staging/a", "bg.png": "https://staging/bg"}
-    reqs: list[JsonObject] = [
-        {"createImage": {"objectId": "x", "url": f"{sync.PENDING_URL}a.png"}},
-        {"updatePageProperties": {"objectId": "S1", "pageProperties": {"pageBackgroundFill": {
-            "stretchedPictureFill": {"contentUrl": f"{sync.PENDING_URL}bg.png"}}}}}]
-    s.fill_urls(reqs)
-    assert jat(reqs[0], "createImage", "url") == "https://staging/a"
-    assert jat(reqs[1], "updatePageProperties", "pageProperties", "pageBackgroundFill",
-               "stretchedPictureFill", "contentUrl") == "https://staging/bg"
+    image: CreateImageRequest = {"objectId": "x", "url": f"{sync.PENDING_URL}a.png",
+                                 "elementProperties": {"pageObjectId": "S1"}}
+    picture: StretchedPictureFill = {"contentUrl": f"{sync.PENDING_URL}bg.png"}
+    s.fill_urls([[{"createImage": image}], [{"updatePageProperties": {
+        "objectId": "S1", "fields": "pageBackgroundFill.stretchedPictureFill.contentUrl",
+        "pageProperties": {"pageBackgroundFill": {"stretchedPictureFill": picture}}}}]])
+    assert image["url"] == "https://staging/a"
+    assert picture.get("contentUrl") == "https://staging/bg"
 
 
 def test_nothing_goes_out_carrying_a_marker() -> None:
@@ -545,7 +542,8 @@ def test_nothing_goes_out_carrying_a_marker() -> None:
     api = FakeSlidesApi(set())
     s = writing_sync(api, {})
     with pytest.raises(KeyError, match="gone.png"):   # the picture, not whatever the batch trips on
-        s.send("content", [{"createImage": {"objectId": "x", "url": f"{sync.PENDING_URL}gone.png"}}], None)
+        s.send("content", [[{"createImage": {"objectId": "x", "url": f"{sync.PENDING_URL}gone.png",
+                                             "elementProperties": {"pageObjectId": "S1"}}}]], None)
     assert api.batches == [], "and before the batch, not after it"
 
 
@@ -583,7 +581,8 @@ def test_a_picture_google_could_not_fetch_is_asked_for_again(monkeypatch: pytest
     def no_sleep(seconds: float) -> None:
         pass
     monkeypatch.setattr(sync.time, "sleep", no_sleep)
-    reqs: list[JsonObject] = [{"createImage": {"objectId": "x", "url": "https://staging/a"}}]
+    reqs: list[list[SlidesRequest]] = [[{"createImage": {"objectId": "x", "url": "https://staging/a",
+                                                          "elementProperties": {"pageObjectId": "S1"}}}]]
     api = _Flaky(2, FETCH_REFUSAL)
     s = flaky_sync(api)
     assert s.send("content", reqs, "rev1") == "rev2" and len(api.bodies) == 3 and s.sent == {"content": 1}

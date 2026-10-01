@@ -233,6 +233,27 @@ table. When a combination of fields must not happen, choose types in which it ca
   An answer still handed to a parameter annotated `dict` stays `JsonObject` until that parameter
   says its TypedDict (today `presentations.get` and `files.get`). `execute_with(request, retries=,
   timeout=)` is the explicit form; it always tries once and ends in a return or a raise.
+- **Google's requests** (`google_types.py`): every `batchUpdate` request is a `SlidesRequest` /
+  `DocsRequest`, and the bodies take nothing else (`BatchUpdateBody.requests:
+  Sequence[SlidesRequest]`), so a misspelt kind or field, or a value of the wrong type, fails the
+  build instead of coming back as a 400 that throws out the whole batch. A request is a
+  `total=False` TypedDict with one key per kind (34 Slides, 26 Docs, the ones we send); "exactly
+  one" is checked at run time by `slides_request_kind` / `docs_request_kind`, because PEP 728's
+  `closed=True` needs typing_extensions at run time before 3.15. The payloads (text and paragraph
+  styles, shape, page, line, image and table properties, fills, colours, dimensions, bullets) are
+  TypedDicts with the discovery document's names, number types and enums as Literals
+  (`ShapeType`, `BulletPreset`, `PredefinedLayout`, Docs' `DocsNamedStyleType`...); `fields` masks
+  stay `str`. A part read back and copied into a write is parsed where it is read
+  (`typed_part(o, Shape, where)` and its named parsers `slides_text_style`, `shape_properties`,
+  `page_properties`, `layout_placeholder_id_mapping`, `shape_type`, `bullet_preset`...), never
+  copied blind; a typed request or part becomes JSON again only where a file keeps it or a test
+  compares it (`slides_json`, `part_json`). Readers narrow by kind (`if "createShape" in r`;
+  `tests/slides_sim.py` dispatches on `slides_request_kind`). `tests/test_google_schema.py` checks
+  every TypedDict there against the discovery documents the client library ships (names, types,
+  enums, `Required`); where we write differently on purpose, its `EXEMPT` says why, and an
+  exemption no longer needed fails. Typing them found requests Google refuses with their batch: a
+  weight change alone written without its family, `custom`/`line` shape types from old adopt
+  marks, a notes edit to a `null` object id, a fill of no colour (all now refused before sending).
 - **`typecheck/rules.json`**: per module, how many default arguments, defaulted dataclass fields
   and uses of `Any` remain. Only goes down (`tests/test_typing_rules.py`; `python
   tests/test_typing_rules.py` rewrites it, and refuses to raise a count). A new module has none.
@@ -295,11 +316,17 @@ unknowable. The order:
    Google answers read through `google_types`, records frozen dataclasses, no defaults. It found
    a probe's return type that lied (`probe_images.url_variants`, pairs typed as strings) and two
    crashes on malformed answers now said as errors. What the probes call that `google_types` does
-   not list yet (Docs headers, footers, footnotes, suggestions, table and row styles; Slides table
-   and image-property requests, `pageSize` on create; Drive `revisions()`, `about()`, a file's
-   `size`; a resumable `gapi.media_upload`) they read through `json_object` or a local Protocol
-   after a runtime check (`deck_backup.revised`): the next thing to add there, together with typed request kinds for emit's batches (`requests` is
-   still `Sequence[Mapping[str, object]]`).
+   not list yet they read through `json_object` or a local Protocol after a runtime check.
+6. **Google's requests typed** (2026-10-01): google_types from the discovery documents (every
+   request kind we send and its payloads, Drive `revisions()`/`about()`, `pageSize` on create, a
+   file's `size`, `gapi.resumable_media_upload`), checked by `tests/test_google_schema.py`; then
+   every producer and reader (emit, snapshot, theme_sync, the devtools, tools/, Docs, sync, merge,
+   refit, the fuzzers), and last the bodies: `BatchUpdateBody.requests` is
+   `Sequence[SlidesRequest]`, `DocsBatchUpdateBody.requests` `Sequence[DocsRequest]`. sync's
+   `{"__b2s_break__": True}` marks between slides became structure (`sync.Blocks`, a list of
+   requests per slide). Every request sent is byte for byte what was sent before, except the
+   four above that Google would have refused. tools/ lost its local copies of Drive's revisions,
+   a sized presentation and gslides' `pt`/`emu`/`text_box`.
 
 When you touch a function for any reason, leave it to these rules: fully annotated, no defaults,
 records as dataclasses. Then prune the baseline and lower the ledger.

@@ -36,9 +36,9 @@ from pptx.util import Emu, Pt
 
 from beamer2slides import gapi
 from beamer2slides.google_auth import drive_service, slides_service
-from beamer2slides.google_types import (Dimension, PageElement, SlidesRequest, SlidesService,
+from beamer2slides.google_types import (PageElement, SlidesRequest, SlidesService,
                                         SlidesTableCellLocation, file_id, object_id, part)
-from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
+from beamer2slides.gslides import emu, EMU_PER_PT, execute, pt, save_thumbnail
 from beamer2slides.json_types import Json, JsonObject, JsonShapeError, as_object, as_objects
 
 Margins = tuple[float, float, float, float]  # l, t, r, b (pt)
@@ -70,16 +70,6 @@ IMPORTED: dict[str, tuple[Margins | None, float, float, bool, Point]] = {
 DUP: tuple[str, Point] = ("dup_m0", (10, 220))
 GROWN: tuple[str, Point] = ("grown_t0", (380, 220))
 API: tuple[str, Point] = ("api_10", (158, 220))
-
-
-def pt(v: float) -> Dimension:
-    """`gslides.pt` as a request's dimension."""
-    return {"magnitude": v, "unit": "PT"}
-
-
-def emu(v_pt: float) -> Dimension:
-    """`gslides.emu` as a request's dimension."""
-    return {"magnitude": round(v_pt * EMU_PER_PT), "unit": "EMU"}
 
 
 def _table(slide: Slide, name: str, margins: Margins | None, size: float, spacing: float, text: bool, xy: Point,

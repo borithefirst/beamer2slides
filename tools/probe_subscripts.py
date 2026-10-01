@@ -45,7 +45,7 @@ from beamer2slides.google_types import (
     parts,
     presentation_id,
 )
-from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
+from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
 from beamer2slides.json_types import JsonObject, as_object
 
 Offset = Literal["SUBSCRIPT", "SUPERSCRIPT"]   # (a text style's baselineOffset, NONE left out)
@@ -100,26 +100,6 @@ CROWDING: list[tuple[str, Formula, float]] = [  # (label, segments of line 1, li
     ("size x0.8 + lineSpacing +5", formula(0.8, False), R0 + 5),
     ("unicode", formula(1.0, True), R0),
 ]
-
-
-def pt(v: float) -> Dimension:
-    """`gslides.pt` as a request's dimension."""
-    return {"magnitude": v, "unit": "PT"}
-
-
-def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
-    """`gslides.text_box` as a request."""
-    return {"createShape": {
-        "objectId": object_id,
-        "shapeType": "TEXT_BOX",
-        "elementProperties": {
-            "pageObjectId": page_id,
-            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
-                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
-            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
-                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
-        },
-    }}
 
 
 def style(oid: str, font: str, size: float, start: int, end: int, italic: bool, offset: Offset | None) -> SlidesRequest:

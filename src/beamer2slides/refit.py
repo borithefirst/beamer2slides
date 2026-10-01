@@ -58,6 +58,7 @@ from typing import Literal
 
 from . import snapshot
 from . import text_layout as tl
+from .google_types import SlidesRequest
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_object, as_objects, as_str
 
 MOVE_MIN = 0.3        # pt: a picture closer than this to where it belongs stays put
@@ -126,7 +127,7 @@ def _box(rb: JsonMap) -> tl.Rect:
     return tl.rect(rb["box"], "box")
 
 
-def _step_request(oid: str, step: list[float]) -> JsonObject:
+def _step_request(oid: str, step: list[float]) -> SlidesRequest:
     """The page-space `step` on one object, in or out of a group: Slides applies a RELATIVE
     transform to a child's absolute transform (module docstring; r8011, r8006)."""
     from .sync import matrix_request
@@ -237,14 +238,14 @@ def _area(b: tl.Rect) -> float:
 
 
 def plan(jobs: Sequence[RefitJob], pre: JsonMap, final: JsonMap, page: Sequence[float] | None,
-         before: JsonMap | None) -> tuple[list[JsonObject], dict[str, Reshape], list[str]]:
+         before: JsonMap | None) -> tuple[list[SlidesRequest], dict[str, Reshape], list[str]]:
     """The requests that fit one slide's recreated boxes to the text written into them.
 
     jobs: one per recreated text unit (`RefitJob`). pre / final: `snapshot.read_slide` of the slide
     as created and after the overrides; page: [w, h] pt; before: the slide as the person had it
     before the sync (what their own edits did is theirs to keep), or None.
     Returns (requests, reshaped {oid: its page step and the transform before it}, warnings)."""
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     reshaped: dict[str, Reshape] = {}
     warnings: list[str] = []
     pre_o, fin_o, had_o = _objects(pre), _objects(final), _objects(before)

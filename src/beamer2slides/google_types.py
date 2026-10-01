@@ -808,10 +808,6 @@ def page_properties(o: JsonObject, where: str) -> PageProperties:
     return typed_part(o, PageProperties, where)
 
 
-def solid_fill(o: JsonObject, where: str) -> SolidFill:
-    return typed_part(o, SolidFill, where)
-
-
 def opaque_color(o: JsonObject, where: str) -> OpaqueColor:
     return typed_part(o, OpaqueColor, where)
 
@@ -1149,22 +1145,11 @@ def part_json(value: Mapping[str, object], where: str) -> JsonObject:
     return found
 
 
-def slides_request(o: JsonObject, where: str) -> SlidesRequest:
-    """A request built as JSON (a caller not typed yet) as a `SlidesRequest`: checked all the way
-    down, exactly one kind, not copied."""
-    request = typed_part(o, SlidesRequest, where)
-    try:
-        slides_request_kind(request)
-    except ValueError as e:
-        raise JsonShapeError(f"{where}: {e}") from e
-    return request
-
-
 # ------------------------------------------------------------------------------ Slides: calls
 
 
 class BatchUpdateBody(TypedDict, total=False):
-    requests: Required[Sequence[Mapping[str, object]]]
+    requests: Required[Sequence[SlidesRequest]]
     writeControl: WriteControl
 
 

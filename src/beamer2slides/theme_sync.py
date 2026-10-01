@@ -36,8 +36,7 @@ from typing import TYPE_CHECKING, Literal, Union
 from . import identity, snapshot
 from .emit_model import dict_of, maps_of, objects_of
 from .google_types import (LayoutProperties, Page, PageElement, Presentation, SlideProperties, SlidesRequest, as_json,
-                           background_url, image_url, object_id, part, parts, slides_paragraph_style, slides_text_style,
-                           solid_fill)
+                           background_url, image_url, object_id, part, parts, slides_paragraph_style, slides_text_style)
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_optional_str, as_str
 from .merge import conflict_entry
 from .sync_model import JsonMap, ObjectId, ReadBack
@@ -775,11 +774,11 @@ def plan(base: JsonMap, side: ThemeSide, ours: ThemeOurs, pres: Presentation, to
         else:
             mid = object_id(live_master)
             if side.fill.startswith("color:"):
-                from .sync import api_colour
+                from .sync import colour_to_write
                 out.requests.append({"updatePageProperties": {
                     "objectId": mid, "fields": "pageBackgroundFill.solidFill.color",
-                    "pageProperties": {"pageBackgroundFill": {"solidFill": solid_fill(
-                        {"color": api_colour(side.fill[6:])}, "the new master fill")}}}})
+                    "pageProperties": {"pageBackgroundFill": {"solidFill": {
+                        "color": colour_to_write(side.fill[6:], "the new master fill")}}}}})
             else:
                 if side.fill_file is None:
                     raise ValueError(f"the new master fill {side.fill} has no file")

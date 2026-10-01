@@ -18,9 +18,9 @@ import numpy as np
 from PIL import Image
 
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import (Dimension, SlidesParagraphStyle, SlidesRequest, object_id, part,
+from beamer2slides.google_types import (SlidesParagraphStyle, SlidesRequest, object_id, part,
                                         presentation_id)
-from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
+from beamer2slides.gslides import execute, pt, save_thumbnail, text_box
 from beamer2slides.json_types import Json, as_objects
 
 OUT = Path(__file__).resolve().parents[1] / "out"
@@ -33,26 +33,6 @@ CASES: list[tuple[str, str, Literal["START", "END"], Literal["RIGHT_TO_LEFT"] | 
     ("hebrew-untold", WORD, "START", None),
     ("latin-start", "besipur", "START", None),
 ]
-
-
-def pt(v: float) -> Dimension:
-    """`gslides.pt` as a request's dimension."""
-    return {"magnitude": v, "unit": "PT"}
-
-
-def text_box(object_id: str, page_id: str, x: float, y: float, w: float, h: float) -> SlidesRequest:
-    """`gslides.text_box` as a request."""
-    return {"createShape": {
-        "objectId": object_id,
-        "shapeType": "TEXT_BOX",
-        "elementProperties": {
-            "pageObjectId": page_id,
-            "size": {"width": {"magnitude": round(w * EMU_PER_PT), "unit": "EMU"},
-                     "height": {"magnitude": round(h * EMU_PER_PT), "unit": "EMU"}},
-            "transform": {"scaleX": 1, "scaleY": 1, "translateX": x * EMU_PER_PT,
-                          "translateY": y * EMU_PER_PT, "unit": "EMU"},
-        },
-    }}
 
 
 def main() -> None:

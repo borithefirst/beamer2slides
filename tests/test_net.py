@@ -19,7 +19,7 @@ import pytest
 
 from beamer2slides import google_auth, net
 from beamer2slides.doc_ir import Ir, Run
-from beamer2slides.google_types import Files, Pages, Presentations, Thumbnail
+from beamer2slides.google_types import Files, Pages, Presentations, SlidesRequest, Thumbnail
 from beamer2slides.json_types import JsonObject
 from beamer2slides.typing_compat import override
 
@@ -79,8 +79,9 @@ def test_with_downloads_off_no_place_is_measured(monkeypatch: pytest.MonkeyPatch
     slides are made, and every picture keeps its predicted place."""
     from beamer2slides import emit, emit_places
 
-    def measure_jobs(*a: object) -> tuple[list[JsonObject], list[tuple[str]]]:
-        return [{"createSlide": {}}], [("job",)]
+    def measure_jobs(*a: object) -> tuple[list[SlidesRequest], list[emit_places.ScratchJob]]:
+        return [{"createSlide": {"objectId": "b2s_m000"}}], [emit_places.ScratchJob(slide="b2s_m000", page=0, gaps=(),
+                                                                                     overlays=())]
 
     def batch(*a: object) -> NoReturn:
         pytest.fail("scratch slides written")

@@ -204,7 +204,6 @@ EXEMPT: dict[tuple[str, str], str] = {
     ("InsertTableColumnsRequest", "tableObjectId"): "None: as insertTableRows (sync.table_steps)",
     ("DeleteTableRowRequest", "tableObjectId"): "None: as insertTableRows (sync.table_steps)",
     ("DeleteTableColumnRequest", "tableObjectId"): "None: as insertTableRows (sync.table_steps)",
-    ("BatchUpdateBody", "requests"): "still any JSON request: emit's producers are converted in phase 2",
     ("FileBody", "appProperties"): "an appProperty set to None is removed (Drive's own convention)",
     ("ListFiles", "pageToken"): "None on the first page: the library leaves a None keyword out",
     ("ListComments", "pageToken"): "None on the first page, as files.list",

@@ -223,7 +223,12 @@ Details, measurements and edge cases: docs/project-notes.md "What becomes native
 - **`googleapiclient` is imported by `gapi.py` only** (extra `[google]`); `HttpError` is bound there
   once. Never import the client library at module scope anywhere else (`tests/test_gapi.py`).
   The calls we make are Protocols in `google_types.py` (keywords checked, `execute(Request[T]) -> T`);
-  a new call is added there first (docs/typing.md). `presentations.get` answers a `Presentation`,
+  a new call is added there first (docs/typing.md). Every batchUpdate request is a typed
+  `SlidesRequest`/`DocsRequest` (the bodies take nothing else; payloads from the discovery docs,
+  checked by `tests/test_google_schema.py`, `EXEMPT` saying why we differ); a part read back into a
+  write is parsed where read (`typed_part`, `slides_text_style`...), readers narrow by kind, and
+  a request is JSON again only for a file or a test (`slides_json`, `part_json`).
+  `presentations.get` answers a `Presentation`,
   walked with `object_id`/`children`/`all_elements`/`part`; JSON becomes one only through
   `presentation(o, where)`, and a reader still typed `dict` gets `as_json(answer, where)`.
 - `google_auth.use_provider` / `use_services` inject credentials or ready clients **per context**
@@ -336,7 +341,7 @@ Debugging classification locally: `debug/slide-NNN.png` (element boxes over the 
   over `picture_folders(out)`) and held out of the next render's way first (`hold_base_pictures`);
   one found nowhere reads as changed, never refreshed.
 - **A sync killed anywhere loses nothing**: deletions last, a `pending` marker records what a run
-  creates, the next sync sweeps duplicates. Fault injection: `B2S_FAIL_AT` (`faults.py`).
+  creates, the next sync sweeps duplicates; batches are cut between slides (`sync.Blocks`). Fault injection: `B2S_FAIL_AT` (`faults.py`).
 - **A decision the base does not record reverses itself**: whatever a sync decided to keep (a unit
   or slide the source removed, the deck's own slide) must be written into the base.
 - **A box can change with its neighbours**: sync diffs what emit would write, not only the IR.

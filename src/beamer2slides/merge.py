@@ -21,6 +21,7 @@ from difflib import SequenceMatcher
 from typing import Literal, TypedDict, TypeVar
 
 from . import identity, snapshot
+from .google_types import SlidesRange, SlidesRequest, SlidesTableCellLocation
 from .ir_types import Box
 from .json_types import Json, JsonObject, JsonShapeError, as_array, as_int, as_object, as_objects, as_optional_str, as_str
 from .sync_model import (Base, DeckRead, ElementEntry, ElementKey, ImageRead, JsonMap, ObjectId, ReadBack, SlideEntry,
@@ -444,7 +445,8 @@ def utf16_len(text: str) -> int:
     return len(text.encode("utf-16-le")) // 2
 
 
-def text_edit_requests(object_id: str, current: str, target: str, cell: JsonObject | None) -> list[JsonObject]:
+def text_edit_requests(object_id: str, current: str, target: str, cell: SlidesTableCellLocation | None
+                       ) -> list[SlidesRequest]:
     """deleteText / insertText turning an object's text `current` into `target` (UTF-16 indices,
     applied back to front so earlier indices stay valid). `cell`: {"rowIndex", "columnIndex"} of a
     table cell instead of the object's own text.
@@ -456,7 +458,6 @@ def text_edit_requests(object_id: str, current: str, target: str, cell: JsonObje
     last paragraph of a text box the source had also rewritten, so the merged text ends one
     paragraph earlier and the diff's last hunk ran to the end). It is on both sides, so leaving it
     out of the diff both keeps it where it is and puts an append before it rather than after."""
-    where: JsonObject = {"cellLocation": cell} if cell else {}
     if current.endswith("\n"):
         current = current[:-1]
         target = target[:-1] if target.endswith("\n") else target
@@ -465,17 +466,19 @@ def text_edit_requests(object_id: str, current: str, target: str, cell: JsonObje
     offsets = [0]
     for t in a:
         offsets.append(offsets[-1] + utf16_len(t))
-    reqs: list[JsonObject] = []
+    reqs: list[SlidesRequest] = []
     for op, i1, i2, j1, j2 in reversed(ops):
         if op == "equal":
             continue
         start, end = offsets[i1], offsets[i2]
         if end > start:
-            reqs.append({"deleteText": {"objectId": object_id, **where, "textRange": {
-                "type": "FIXED_RANGE", "startIndex": start, "endIndex": end}}})
+            text_range: SlidesRange = {"type": "FIXED_RANGE", "startIndex": start, "endIndex": end}
+            reqs.append({"deleteText": {"objectId": object_id, "textRange": text_range} if not cell else
+                         {"objectId": object_id, "cellLocation": cell, "textRange": text_range}})
         insert = "".join(b[j1:j2])
         if insert:
-            reqs.append({"insertText": {"objectId": object_id, **where, "insertionIndex": start, "text": insert}})
+            reqs.append({"insertText": {"objectId": object_id, "insertionIndex": start, "text": insert} if not cell else
+                         {"objectId": object_id, "cellLocation": cell, "insertionIndex": start, "text": insert}})
     return reqs
 
 

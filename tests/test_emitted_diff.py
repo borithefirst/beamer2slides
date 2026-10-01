@@ -17,6 +17,7 @@ from beamer2slides.emit import SLIDE_W
 from beamer2slides import emit, identity, snapshot, sync
 from beamer2slides.classify import classify
 from beamer2slides.extract import extract, select_overlays
+from beamer2slides.google_types import slides_json
 from beamer2slides.ir import deck_json
 from beamer2slides.json_types import Json, JsonObject, as_optional_str
 from beamer2slides.notes import prepare
@@ -112,9 +113,8 @@ def same_emission(name: str, plan: emit.DeckPlan) -> list[str]:
     for j, (o, b, slide) in enumerate(zip(ours, jobjs(base, "slides"), jobjs(deck, "slides"))):
         names = [jstr(e, "key") for e in jobjs(o, "elements")]
         was_slide: JsonObject = {**slide, "page": b["page"], "elements": [e["ir"] for e in jobjs(b, "elements")]}
-        was_read: Json = json.loads(json.dumps(sync.emitted_elements(was_slide, names, plan.scale, plan.fonts)))
-        now_read: Json = json.loads(json.dumps(sync.emitted_elements(slide, names, plan.scale, plan.fonts)))
-        was, now = jobjs(was_read), jobjs(now_read)
+        was = sync.emitted_elements(was_slide, names, plan.scale, plan.fonts)
+        now = sync.emitted_elements(slide, names, plan.scale, plan.fonts)
         found += [f"{name} slide {j + 1} {k}: emitted differently" for k, a, c in zip(names, was, now) if a != c]
         found += [f"{name} slide {j + 1} {k}: {sorted(sync.context_changes(a, c, [0.0, 0.0], jstr(e, 'kind'), False)[0])}"
                   for k, a, c, e in zip(names, was, now, jobjs(o, "elements"))
@@ -364,7 +364,7 @@ def subtitle_page(authors_action: str) -> tuple[sync.Sync, sync.SlideWork, JsonO
          "overrides": {}},
         {"key": "text/body/1", "action": "create", "ours_members": ["text/body/1"]}]})
     reqs = s.update_slide(w, {"objects": objects, "notes": "", "notes_id": None}, {}, {})
-    return s, w, objects, reqs
+    return s, w, objects, [slides_json(r) for r in reqs]
 
 
 def made_id(request: JsonObject, kind: str) -> Json:

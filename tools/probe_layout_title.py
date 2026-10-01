@@ -12,16 +12,11 @@ from pathlib import Path
 
 from beamer2slides.gapi import HttpError
 from beamer2slides.google_auth import slides_service
-from beamer2slides.google_types import Dimension, PageElement, SlidesRequest, object_id, part, presentation_id
-from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
+from beamer2slides.google_types import PageElement, SlidesRequest, object_id, part, presentation_id
+from beamer2slides.gslides import EMU_PER_PT, execute, pt, save_thumbnail
 from beamer2slides.json_types import JsonObject, as_array
 
 OUT = Path(__file__).resolve().parents[1] / "out"
-
-
-def pt(v: float) -> Dimension:
-    """`gslides.pt` as a request's dimension."""
-    return {"magnitude": v, "unit": "PT"}
 
 
 def shape_of(e: PageElement) -> JsonObject:

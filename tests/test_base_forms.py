@@ -102,7 +102,7 @@ def test_a_form_the_converter_no_longer_writes_is_a_rewrite_of_the_base_not_a_so
     mplan, content, cleanup = requests_of(base, ours, pres, tmp_path / "ours")
     assert {u["action"] for p in jobjs(merge.merge_plan_json(mplan), "slides")
             for u in jobjs(p.get("units") or [])} <= {"keep"}
-    assert [r for r in content if "__b2s_break__" not in r] == [] and cleanup == []  # (breaks: batch bounds)
+    assert content == [] and cleanup == []
     [said] = snapshot.base_form_warnings(ours.base_forms)
     assert said.startswith("1 element(s) of the sync base were recorded in an older form") and jstr(e, "key") in said
 

@@ -20,7 +20,7 @@ import pytest
 from beamer2slides.emit import SLIDE_W, FontMapper
 from beamer2slides import adopt_sync, emit, identity, merge, snapshot, sync, sync_model
 from beamer2slides.emit_model import Placeholder, Template, TemplateKey
-from beamer2slides.google_types import Presentation, SlidesRequest, presentation
+from beamer2slides.google_types import Presentation, SlidesRequest, presentation, slides_json
 from beamer2slides.ir_types import MarkedShape, ShapeElement, TextElement
 from beamer2slides.json_types import Json, JsonObject
 
@@ -64,7 +64,8 @@ def talk_base(tmp_path: Path) -> tuple[JsonObject, Presentation]:
 
 def requests_of(base: JsonObject, ours: sync.Built, pres: Presentation,
                 home: Path) -> tuple[merge.MergePlan, list[JsonObject], list[JsonObject]]:
-    """(the merge plan, the content requests, the objects left to delete) of a dry sync."""
+    """(the merge plan, the content requests - the blocks run together -, the objects left to
+    delete) of a dry sync."""
     theirs = snapshot.read_presentation(pres)
     mplan = merge.plan_merge_of(sync_model.base(base), merge.ours_of(sync.ours_json(ours)), sync_model.deck_read(theirs), None, False,
                                 merge.Resolutions(()))
@@ -74,7 +75,7 @@ def requests_of(base: JsonObject, ours: sync.Built, pres: Presentation,
     s.theme_plan = None
     work = s.prepare(mplan, pres, theirs)
     content, cleanup = s.main_requests(work, theirs, pres, {}, [])
-    return mplan, content, cleanup
+    return mplan, [slides_json(r) for block in content for r in block], [slides_json(r) for r in cleanup]
 
 
 @pytest.mark.needs_decks("sync/out/v1.pdf", "sync/out/disjoint.pdf")

@@ -22,17 +22,12 @@ from pptx.util import Emu, Pt
 
 from beamer2slides.gapi import media_upload
 from beamer2slides.google_auth import drive_service, slides_service
-from beamer2slides.google_types import Dimension, SlidesRequest, file_id, object_id, part
-from beamer2slides.gslides import EMU_PER_PT, execute, save_thumbnail
+from beamer2slides.google_types import SlidesRequest, file_id, object_id, part
+from beamer2slides.gslides import EMU_PER_PT, execute, pt, save_thumbnail
 
 OUT = Path(__file__).resolve().parents[1] / "out"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-
-
-def pt(v: float) -> Dimension:
-    """`gslides.pt` as a request's dimension."""
-    return {"magnitude": v, "unit": "PT"}
 
 
 def main() -> None:

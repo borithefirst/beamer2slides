@@ -1229,9 +1229,9 @@ def scenario_layout_edited_retheme(run: Run):
     blank = next(e for e in elements_on(lay, "BLANK") if (e.get("description") or "") == "Theme decoration")
     frames = next(e for e in elements_on(lay, "TITLE_ONLY") if (e.get("description") or "") == "Theme decoration")
     execute(run.deck.api.presentations().batchUpdate(presentationId=run.deck.pid, body={"requests": [
-        {"updateTextStyle": {"objectId": title["objectId"], "textRange": {"type": "ALL"}, "fields": "foregroundColor",
+        {"updateTextStyle": {"objectId": jstr(title, "objectId"), "textRange": {"type": "ALL"}, "fields": "foregroundColor",
                              "style": {"foregroundColor": {"opaqueColor": {"rgbColor": {"green": 0.5}}}}}},
-        {"updatePageElementTransform": {"objectId": blank["objectId"], "applyMode": "RELATIVE", "transform": {
+        {"updatePageElementTransform": {"objectId": jstr(blank, "objectId"), "applyMode": "RELATIVE", "transform": {
             "scaleX": 1, "scaleY": 1, "translateX": 20 * 12700, "translateY": 0, "unit": "EMU"}}}]}))
     run.log.write("edit the TITLE_ONLY layout's title placeholder green, the BLANK layout's decoration 20 pt right\n")
     moved = next(e for e in elements_on(layouts_read(run), "BLANK") if e["objectId"] == blank["objectId"])

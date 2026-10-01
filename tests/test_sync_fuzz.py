@@ -36,6 +36,7 @@ from beamer2slides.devtools import fuzz_sync
 from beamer2slides.devtools import fuzz_world as W
 from beamer2slides.devtools import loss_oracle
 from beamer2slides import snapshot
+from beamer2slides.google_types import SlidesRequest
 from beamer2slides.json_types import Json, JsonObject
 from beamer2slides.sync_model import Base, ElementKey, ObjectId, ReadBack, RunSpan
 
@@ -1266,7 +1267,7 @@ def test_the_offline_fuzz_stacks_a_rebuilt_block_as_sync_does(monkeypatch: pytes
     kept = Sync.regroup_requests
 
     def unstacked(regroup: Mapping[ObjectId, Regroup], depth: Mapping[ObjectId, int], objects: JsonMap,
-                  tops: Mapping[str, str], keep_ids: Collection[str], rank: Mapping[str, int]) -> list[JsonObject]:
+                  tops: Mapping[str, str], keep_ids: Collection[str], rank: Mapping[str, int]) -> list[SlidesRequest]:
         return [r for r in kept(regroup, depth, objects, tops, keep_ids, rank) if "updatePageElementsZOrder" not in r]
     monkeypatch.setattr(Sync, "regroup_requests", staticmethod(unstacked))
     found = shrunk().failures
@@ -1289,7 +1290,7 @@ def test_the_offline_fuzz_orders_the_page_as_sync_does(monkeypatch: pytest.Monke
     from beamer2slides.sync import Sync
     assert not offline_chain(19, 6, None).failures
 
-    def no_restack(self: Sync, w: Mapping[str, object], before: JsonMap, now: JsonMap) -> list[JsonObject]:
+    def no_restack(self: Sync, w: Mapping[str, object], before: JsonMap, now: JsonMap) -> list[SlidesRequest]:
         return []
     monkeypatch.setattr(Sync, "restack", no_restack)
     found = offline_chain(19, 6, None).failures

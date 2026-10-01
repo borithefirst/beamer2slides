@@ -369,7 +369,8 @@ uninterrupted one would have. What makes that true:
   between the base and the deletions is finished by the next sync. If the base could not be stored
   in Drive, the deletions are skipped altogether: a machine reading the stale Drive base must never
   find its objects gone.
-- **Batches are cut at slide boundaries** (`sync.batches`, `BREAK` marks): a death between two
+- **Batches are cut at slide boundaries** (`sync.batches` over `Blocks`, one list of requests per
+  slide, the theme's first and the last block's scratch deletes and slide positions): a death between two
   batches leaves whole slides, never half an element. Only a single slide larger than 400 requests
   is split.
 - **Pictures don't depend on the staging deck once they are in.** `createImage` copies the file into
