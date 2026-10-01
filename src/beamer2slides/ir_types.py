@@ -41,7 +41,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal, NewType, NoReturn, TypeVar, Union, overload
 
-from .ir import (Align, Arrow, Bend, BulletShape, ElementKind, Family, PictureRoute, Position, ProducerShapeKind,
+from .ir import (Align, Arrow, Bend, BulletShape, Dash, ElementKind, Family, PictureRoute, Position, ProducerShapeKind,
                  RulePosition, Script, ShapeKind, ShapeRole, TemplateKind, TextRole)
 from .json_types import Json, JsonObject
 from .typing_compat import assert_never
@@ -74,7 +74,9 @@ PRODUCER_SHAPE_KINDS: tuple[ProducerShapeKind, ...] = ("custom", "line")
 BULLET_SHAPES: tuple[BulletShape, ...] = ("square", "open_square", "disc", "circle", "triangle")
 POSITIONS: tuple[Position, ...] = ("TOP", "BOTTOM", "LEFT", "RIGHT")
 RULE_POSITIONS: tuple[RulePosition, ...] = ("TOP", "BOTTOM")
-ARROWS: tuple[Arrow, ...] = ("OPEN_ARROW", "STEALTH_ARROW", "FILL_ARROW")
+ARROWS: tuple[Arrow, ...] = ("OPEN_ARROW", "STEALTH_ARROW", "FILL_ARROW", "FILL_CIRCLE", "OPEN_CIRCLE", "FILL_SQUARE",
+                             "OPEN_SQUARE", "FILL_DIAMOND", "OPEN_DIAMOND")
+DASHES: tuple[Dash, ...] = ("DOT", "DASH", "DASH_DOT", "LONG_DASH", "LONG_DASH_DOT")
 BENDS: tuple[Bend, ...] = ("vh", "hv")
 PICTURE_ROUTES: tuple[PictureRoute, ...] = ("raw", "decoded")
 ELEMENT_KINDS: tuple[ElementKind, ...] = ("text", "image", "shape", "table", "diagram")
@@ -518,6 +520,8 @@ class Node:
     text: tuple[CardBox, ...] | None
     """(nullable) None: a plain label."""
     radius: float | None
+    dash: Dash | None
+    """(optional) None: a solid outline."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -537,6 +541,8 @@ class DiagramLine:
     stroke: Color
     width: float
     elbow: Elbow | None
+    dash: Dash | None
+    """(optional) None: a solid line."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -1202,7 +1208,8 @@ def node(v: object, at: At) -> Node:
                fill=f.nullable("fill", color), stroke=f.nullable("stroke", color), width=f.nullable("width", number),
                paragraphs=f.req("paragraphs", tuple_of(tuple_of(plain_run))),
                baselines=f.req("baselines", tuple_of(number)), label_w=f.req("label_w", number),
-               text=f.nullable("text", tuple_of(card_box)), radius=f.optional("radius", number))
+               text=f.nullable("text", tuple_of(card_box)), radius=f.optional("radius", number),
+               dash=f.optional("dash", one_of(DASHES)))
     f.close()
     return out
 
@@ -1215,7 +1222,8 @@ def diagram_line(v: object, at: At) -> DiagramLine:
     out = DiagramLine(from_=f.req("from", point), to=f.req("to", point),
                       arrow_from=f.nullable("arrow_from", one_of(ARROWS)), arrow_to=f.nullable("arrow_to", one_of(ARROWS)),
                       stroke=f.req("stroke", color), width=f.req("width", number),
-                      elbow=None if via is None or bend is None else Elbow(via=via, bend=bend))
+                      elbow=None if via is None or bend is None else Elbow(via=via, bend=bend),
+                      dash=f.optional("dash", one_of(DASHES)))
     f.close()
     return out
 
@@ -1664,6 +1672,7 @@ def node_json(n: Node) -> JsonObject:
         "label_w": n.label_w,
         "text": _opt(n.text, lambda cards: [{"paragraphs": _paragraphs_json(c.paragraphs, False)} for c in cards])}
     _put(out, "radius", n.radius)
+    _put(out, "dash", n.dash)
     return out
 
 
@@ -1672,6 +1681,7 @@ def diagram_line_json(ln: DiagramLine) -> JsonObject:
                        "arrow_to": ln.arrow_to, "stroke": ln.stroke, "width": ln.width}
     if ln.elbow is not None:
         out.update(via=_point(ln.elbow.via), bend=ln.elbow.bend)
+    _put(out, "dash", ln.dash)
     return out
 
 

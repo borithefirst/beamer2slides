@@ -16,10 +16,10 @@ from .classify_paragraphs import ParagraphsMixin
 from .classify_state import DiagramRefusal, Refusal
 from .classify_text import EQ_NUMBER_RE, card_text, family_of, math_text, span_runs
 from .ir import (
-    Arrow, BeforeWord, DiagramElement, DiagramLine, Element, ImageElement, Mark, Node, ShapeElement, TemplateKind,
-    TextElement,
+    Arrow, BeforeWord, Dash, DiagramElement, DiagramLine, Element, ImageElement, Mark, Node, ShapeElement,
+    TemplateKind, TextElement,
 )
-from .raw_types import RawDrawing, RawImage
+from .raw_types import DrawingType, PathItem, RawDrawing, RawImage
 
 MAX_PLAIN_RECTANGLES = 32  # more rectangles in one cluster (a QR code, a pixel grid) are a picture
 
@@ -38,6 +38,108 @@ class DraftNode:
     stroke: str | None
     width: float | None
     radius: float | None
+    dash: Dash | None
+
+
+@dataclass(frozen=True, kw_only=True)
+class Tip:
+    """An arrow head `diagram_from` found: its box, the Slides head, its path's points, its
+    outline's width (0 when only filled), whether its path closes (an open triangle, whose point
+    the line must reach like a filled head's), and the line end it is on when the drawing order
+    says so (a Circle tip), else None: the line end inside its box."""
+    rect: Rect
+    head: Arrow
+    points: list[list[float]]
+    outline: float
+    closed: bool
+    on: tuple[DiagramLine, End] | None
+
+
+TIP_SIZE = 6.0  # pt: an arrow head is a separate path no larger than this
+CENTRED_HEADS: frozenset[Arrow] = frozenset(
+    {"FILL_CIRCLE", "OPEN_CIRCLE", "FILL_SQUARE", "OPEN_SQUARE", "FILL_DIAMOND", "OPEN_DIAMOND"})
+"""Heads Slides centres on the line's end, where TikZ stops the line at the head's back."""
+DOT_MAX = 2.0  # line widths: a dash no longer than this is a dot
+LONG_DASH_FROM = math.sqrt(4.0 * 8.0)  # line widths: halfway, by ratio, from Slides' dash to its long dash
+
+
+def dash_style(dash: Sequence[float], width: float) -> Dash | None:
+    """The Slides dash style nearest a PDF dash array (page pt, raw `dash`) on a line `width` pt
+    wide; None for a solid line. Slides' styles are ECMA-376's preset dashes, lengths in line
+    widths (dot 1 on 3 off, dash 4-3, lgDash 8-3, dashDot 4-3-1-3, lgDashDot 8-3-1-3), all with
+    the same gaps: what tells them apart is the dashes. So the PDF's dashes are measured in
+    widths: none longer than `DOT_MAX` is a DOT, dashes and dots mixed a DASH_DOT, dashes alone a
+    DASH, either LONG when its longest dash is nearer 8 widths than 4. TikZ's dashed (3 on, 3 off)
+    is a DASH on a thick line and a LONG_DASH on a thin one, dotted (a width on, 2 off) a DOT, dash
+    dot (and dash dot dot) a DASH_DOT or a LONG_DASH_DOT. Slides cannot say a phase or a gap."""
+    if not any(v > 0 for v in dash):
+        return None
+    w = max(width, 0.25)  # (a 0-width hairline is drawn a device pixel wide)
+    ons = (list(dash) * (2 if len(dash) % 2 else 1))[0::2]  # ([3] is 3 on, 3 off)
+    longest, shortest = max(ons) / w, min(ons) / w
+    if longest <= DOT_MAX:
+        return "DOT"
+    if shortest <= DOT_MAX:
+        return "LONG_DASH_DOT" if longest > LONG_DASH_FROM else "DASH_DOT"
+    return "LONG_DASH" if longest > LONG_DASH_FROM else "DASH"
+
+
+def tip_corners(path: Sequence[PathItem]) -> list[tuple[float, float]]:
+    """The corners of a path of straight segments: its points with repeats and points on a
+    straight run left out (TikZ's Triangle tip passes through the middle of its back)."""
+    points: list[tuple[float, float]] = []
+    for _, pts in path:
+        for x, y in pts:
+            if not points or math.dist(points[-1], (x, y)) > 0.05:
+                points.append((x, y))
+    if len(points) > 1 and math.dist(points[0], points[-1]) <= 0.05:
+        points.pop()
+    corners = list(points)
+    for p in points:
+        k = corners.index(p)
+        a, b = corners[k - 1], corners[(k + 1) % len(corners)]
+        ux, uy, vx, vy = p[0] - a[0], p[1] - a[1], b[0] - p[0], b[1] - p[1]
+        if len(corners) > 3 and abs(ux * vy - uy * vx) <= 0.02 * math.hypot(ux, uy) * math.hypot(vx, vy):
+            corners.remove(p)
+    return corners
+
+
+def closed_path(path: Sequence[PathItem]) -> bool:
+    """A path ending where it starts."""
+    return bool(path) and math.dist(path[0][1][0], path[-1][1][-1]) <= 0.05
+
+
+def tip_head(kind: DrawingType, fill: str | None, stroke: str | None, path: Sequence[PathItem], round_: bool) -> Arrow:
+    """The Slides head nearest a small arrow-tip path. Filled (a fill in another colour than its
+    outline, white in a black outline, reads hollow): a circle (`round_`) FILL_CIRCLE, a convex
+    four-corner path a FILL_SQUARE when its corners are square, else FILL_DIAMOND, a concave one
+    (stealth) STEALTH_ARROW, anything else (latex, triangle) FILL_ARROW. Hollow the same with
+    OPEN_; a hollow triangle or stealth has no Slides head of its own and is OPEN_ARROW, the
+    head Slides draws as an outline (FILL_ARROW would paint its inside in)."""
+    filled = kind == "f" or (kind == "fs" and fill == stroke)
+    if round_:
+        return "FILL_CIRCLE" if filled else "OPEN_CIRCLE"
+    polygon = {op for op, _ in path} == {"l"} and (filled or closed_path(path))
+    corners: list[tuple[float, float]] = tip_corners(path) if polygon else []
+    if len(corners) == 4:
+        edges = [(b[0] - a[0], b[1] - a[1]) for a, b in zip(corners, corners[1:] + corners[:1])]
+        turns = [u[0] * v[1] - u[1] * v[0] for u, v in zip(edges, edges[1:] + edges[:1])]
+        if all(t > 0 for t in turns) or all(t < 0 for t in turns):
+            square = all(abs(u[0] * v[0] + u[1] * v[1]) <= 0.1 * math.hypot(*u) * math.hypot(*v)
+                         for u, v in zip(edges, edges[1:] + edges[:1]))
+            if square:
+                return "FILL_SQUARE" if filled else "OPEN_SQUARE"
+            return "FILL_DIAMOND" if filled else "OPEN_DIAMOND"
+        return "STEALTH_ARROW" if filled else "OPEN_ARROW"
+    return "FILL_ARROW" if filled else "OPEN_ARROW"
+
+
+def on_rim(rect: Rect, end: Sequence[float], other: Sequence[float]) -> bool:
+    """A line end on a small circle's rim with the circle behind it, away from the line: where
+    TikZ stops a line at a Circle tip's back (a dot a line runs into has the end at its centre)."""
+    cx, cy, radius = rect.cx, rect.cy, (rect.w + rect.h) / 4
+    behind = (cx - end[0]) * (other[0] - end[0]) + (cy - end[1]) * (other[1] - end[1]) < 0
+    return behind and abs(math.dist((cx, cy), end) - radius) <= 0.6
 
 
 class FiguresMixin(ParagraphsMixin):
@@ -541,10 +643,11 @@ class FiguresMixin(ParagraphsMixin):
                               rect.expand(tol).contains_rect(n.rect, tol=0.5) and n.rect.w >= rect.w - 2 * tol
                               and n.rect.h >= rect.h - 2 * tol), None)
                 if inner is not None:
-                    nodes[inner] = replace(nodes[inner], rect=rect, stroke=top["stroke"], width=top["width"])
+                    nodes[inner] = replace(nodes[inner], rect=rect, stroke=top["stroke"], width=top["width"],
+                                           dash=top.get("dash"))
                 else:
                     nodes.append(DraftNode(rect=rect, shape="RECTANGLE", spans=[], fill=None,
-                                           stroke=top["stroke"], width=top["width"], radius=None))
+                                           stroke=top["stroke"], width=top["width"], radius=None, dash=top.get("dash")))
 
     def diagram_from(self, c: Rect, label_spans: list[Span], index: int) -> DiagramElement | DiagramRefusal:
         """A figure cluster made only of simple nodes (rectangles, rounded rectangles, ellipses)
@@ -562,8 +665,11 @@ class FiguresMixin(ParagraphsMixin):
             return refused("other_text", "")
         nodes: list[DraftNode] = []
         lines: list[DiagramLine] = []
-        tips: list[tuple[Rect, Arrow, list[list[float]], float]] = []
-        for d in self.raw["drawings"]:
+        tips: list[Tip] = []
+        # Small circles, a Circle tip or a dot: (where in nodes, the node, its drawing's index)
+        rims: list[tuple[int, DraftNode, int]] = []
+        drawn: dict[int, int] = {}  # id of a line -> the index of the drawing it came from
+        for k, d in enumerate(self.raw["drawings"]):
             r = Rect.of(d["bbox"])
             if not box.contains_rect(r, tol=0.5) or r.w * r.h >= 0.95 * self.W * self.H:
                 continue
@@ -584,14 +690,20 @@ class FiguresMixin(ParagraphsMixin):
                 shape = polygon_shape(points, r)  # decision diamonds, triangles
             if shape and r.w > 3 and r.h > 3:
                 corners = d.get("corners")
-                nodes.append(DraftNode(rect=r, shape=shape, spans=[],
-                                       fill=d["fill"] if "f" in d["type"] else None,
-                                       stroke=d["stroke"] if "s" in d["type"] else None, width=d["width"],
-                                       # rounded corners=3pt: without it the node got Slides' default rounding
-                                       radius=max(corners.values()) if shape == "ROUND_RECTANGLE" and corners else None))
+                node = DraftNode(rect=r, shape=shape, spans=[],
+                                 fill=d["fill"] if "f" in d["type"] else None,
+                                 stroke=d["stroke"] if "s" in d["type"] else None, width=d["width"],
+                                 # rounded corners=3pt: without it the node got Slides' default rounding
+                                 radius=max(corners.values()) if shape == "ROUND_RECTANGLE" and corners else None,
+                                 dash=dash_style(d.get("dash", []), d["width"] or 0.4) if "s" in d["type"] else None)
+                if shape == "ELLIPSE" and max(r.w, r.h) <= TIP_SIZE:
+                    rims.append((len(nodes), node, k))
+                else:
+                    nodes.append(node)
             elif d["type"] == "s" and set(ops) == {"l"} and max(r.w, r.h) > 6:
                 segments = [(tuple(a), tuple(b)) for _, (a, b) in path]
                 stroke, width = d["stroke"] or "#000000", d["width"] or 0.4
+                first = len(lines)
                 (p0, p1), (p1b, p2) = segments[0], segments[-1]
                 if len(segments) == 2 and math.dist(p1, p1b) < 0.05 and (abs(p0[0] - p1[0]) < 0.05) != (abs(p0[1] - p1[1]) < 0.05) \
                         and (abs(p1[0] - p2[0]) < 0.05) != (abs(p1[1] - p2[1]) < 0.05) \
@@ -607,20 +719,37 @@ class FiguresMixin(ParagraphsMixin):
                     for (x1, y1), (x2, y2) in segments:
                         lines.append({"from": [x1, y1], "to": [x2, y2],
                                       "stroke": stroke, "width": width, "arrow_from": None, "arrow_to": None})
-            elif max(r.w, r.h) <= 6 and set(ops) <= {"c", "l"}:
-                # Arrow heads are small separate paths: stroked (->), filled triangles (latex)
-                # or filled concave quadrilaterals (stealth).
-                head: Arrow
-                if d["type"] == "s":
-                    head = "OPEN_ARROW"
-                else:
-                    head = "STEALTH_ARROW" if ops == "llll" else "FILL_ARROW"
+                dash = dash_style(d.get("dash", []), width)
+                for ln in lines[first:]:
+                    drawn[id(ln)] = k
+                    if dash is not None:
+                        ln["dash"] = dash
+            elif max(r.w, r.h) <= TIP_SIZE and set(ops) <= {"c", "l"}:
+                # Arrow heads are small separate paths: stroked (->), filled triangles (latex),
+                # filled concave quadrilaterals (stealth), circles, squares, diamonds (tip_head).
                 points = [p for _, pts in path for p in pts]
-                tips.append((r, head, points, d["width"] if "s" in d["type"] and d["width"] else 0.0))
+                tips.append(Tip(rect=r, head=tip_head(d["type"], d["fill"], d["stroke"], path,
+                                                      ops == "cccc" and upright_ellipse(path, r)),
+                                points=points, outline=d["width"] if "s" in d["type"] and d["width"] else 0.0,
+                                closed=closed_path(path), on=None))
             else:
                 curve = d["type"] == "s" and "c" in ops and set(ops) <= {"c", "l"}
                 return refused("curve" if curve else "unknown_shape",
                                f"{d['id']} {d['type']} {ops[:24]} {r.w:.0f}x{r.h:.0f} pt")
+        # A small circle drawn right after a line whose end is on its rim is that line's Circle
+        # tip (TikZ draws a path, then its heads); any other is a dot node, kept in its place.
+        for at, node, k in reversed(rims):
+            owners = [(ln, end) for ln in lines for end in ENDS if 0 < k - drawn.get(id(ln), k) <= 2
+                      and on_rim(node.rect, ln[end], ln.get("via") or ln["to" if end == "from" else "from"])]
+            drawing = self.raw["drawings"][k]
+            if len(owners) == 1:
+                path = drawing.get("path") or []
+                tips.append(Tip(rect=node.rect, head=tip_head(drawing["type"], drawing["fill"], drawing["stroke"], path, True),
+                                points=[p for _, pts in path for p in pts],
+                                outline=drawing["width"] if "s" in drawing["type"] and drawing["width"] else 0.0,
+                                closed=True, on=owners[0]))
+            else:
+                nodes.insert(at, node)
         self.closed_frames(nodes, lines)
         if not nodes:
             return refused("no_nodes", f"{len(lines)} line(s)")
@@ -632,8 +761,9 @@ class FiguresMixin(ParagraphsMixin):
                 if overlap(ra, rb) > 0.05 * min(ra.w * ra.h, rb.w * rb.h) and \
                         not ra.contains_rect(rb, tol=0.5) and not rb.contains_rect(ra, tol=0.5):
                     return refused("nodes_cross", f"{a.shape} {ra.as_list()} and {b.shape} {rb.as_list()}")
-        for tip, head, points, outline in tips:
-            ends = [(ln, end) for ln in lines for end in ENDS if tip.expand(1).contains(*ln[end])]
+        for t in tips:
+            tip, head, points, outline = t.rect, t.head, t.points, t.outline
+            ends = [t.on] if t.on else [(ln, end) for ln in lines for end in ENDS if tip.expand(1).contains(*ln[end])]
             if not ends:
                 return refused("loose_arrow_tip", f"{head} at {tip.as_list()}")
             ln, end = ends[0]
@@ -641,9 +771,10 @@ class FiguresMixin(ParagraphsMixin):
                 ln["arrow_from"] = head
             else:
                 ln["arrow_to"] = head
-            if head != "OPEN_ARROW":
-                # TikZ stops the line where a filled head begins; Slides draws the head at the
-                # line's end, so extend the line to the tip.
+            if head != "OPEN_ARROW" or t.closed:
+                # TikZ stops the line where a filled (or closed hollow) head begins; Slides draws
+                # an arrow's point at the line's end, and centres a circle, square or diamond on
+                # it, so extend the line to the point or the centre.
                 other = ln.get("via") or (ln["to"] if end == "from" else ln["from"])
                 ux, uy = ln[end][0] - other[0], ln[end][1] - other[1]
                 length = (ux * ux + uy * uy) ** 0.5 or 1.0
@@ -653,6 +784,8 @@ class FiguresMixin(ParagraphsMixin):
                 # mitred point: the line stopped that short of the node, the black edge drawn
                 # under it showing as a stub at the tip.
                 reach += miter_reach(points, (ux, uy), outline)
+                if head in CENTRED_HEADS:
+                    reach = (tip.cx - ln[end][0]) * ux + (tip.cy - ln[end][1]) * uy
                 if reach > 0:
                     ln[end] = [round(ln[end][0] + reach * ux, 2), round(ln[end][1] + reach * uy, 2)]
 
@@ -706,7 +839,7 @@ class FiguresMixin(ParagraphsMixin):
                 nodes[-1] = replace(last, rect=last.rect.union(s.rect))
             else:
                 nodes.append(DraftNode(rect=s.rect, shape=None, spans=[s], fill=None, stroke=None, width=None,
-                                       radius=None))
+                                       radius=None, dash=None))
 
         out_nodes: list[Node] = []
         for n in nodes:
@@ -723,6 +856,7 @@ class FiguresMixin(ParagraphsMixin):
                 "label_w": round(max((max(s.rect.x1 for s in row) - min(s.rect.x0 for s in row) for row in rows), default=0.0), 2),
                 "text": card_text(n.rect, rows) if n.shape else None,
                 **({"radius": n.radius} if n.radius is not None else {}),
+                **({"dash": n.dash} if n.dash is not None else {}),
             })
         return {"id": f"p{self.raw['index']}dg{index}", "kind": "diagram", "role": "figure",
                 "bbox": c.expand(1.0).as_list(), "nodes": out_nodes, "lines": lines,

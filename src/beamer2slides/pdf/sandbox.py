@@ -366,6 +366,10 @@ def _drawing_item(value: Wire) -> DrawingItem:
             raise wire.WireError(f"a path item {str(parts)[:40]}")
 
 
+def _dash(value: Wire) -> tuple[float, ...]:
+    return tuple(as_float(v, "a dash length") for v in as_tuple(value, "a stroke's dash"))
+
+
 def _drawing(value: Wire) -> Drawing:
     """A drawing built as the backends build theirs (api.fill_drawing, then a stroke's keys), so
     its keys come in the order they had in the worker."""
@@ -377,7 +381,9 @@ def _drawing(value: Wire) -> Drawing:
     if kind == "s":
         return {"type": "s", "items": items, "rect": rect, "color": _rgb(item(d, "color", "a stroke")),
                 "stroke_opacity": as_float(item(d, "stroke_opacity", "a stroke"), "stroke_opacity"),
-                "width": as_float(item(d, "width", "a stroke"), "a stroke's width"), "object": obj}
+                "width": as_float(item(d, "width", "a stroke"), "a stroke's width"),
+                "dash": _dash(item(d, "dash", "a stroke")),
+                "dash_phase": as_float(item(d, "dash_phase", "a stroke"), "a stroke's dash phase"), "object": obj}
     out = fill_drawing(items=items, rect=rect, even_odd=as_bool(item(d, "even_odd", "a fill"), "even_odd"),
                        fill=_rgb(item(d, "fill", "a fill")),
                        fill_opacity=as_float(item(d, "fill_opacity", "a fill"), "fill_opacity"), obj=obj,
@@ -386,6 +392,8 @@ def _drawing(value: Wire) -> Drawing:
         out["color"] = _rgb(item(d, "color", "a stroke"))
         out["stroke_opacity"] = as_float(item(d, "stroke_opacity", "a stroke"), "stroke_opacity")
         out["width"] = as_float(item(d, "width", "a stroke"), "a stroke's width")
+        out["dash"] = _dash(item(d, "dash", "a stroke"))
+        out["dash_phase"] = as_float(item(d, "dash_phase", "a stroke"), "a stroke's dash phase")
         out["type"] = "fs"
     elif kind != "f":
         assert_never(kind)

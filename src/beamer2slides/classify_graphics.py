@@ -79,6 +79,23 @@ def without_page_frame(page: RawPage) -> RawPage:
     return out
 
 
+def arrow_shaft(d: RawDrawing, drawings: list[RawDrawing]) -> bool:
+    """A straight stroke ending in an arrow head: a small path of lines and curves (as
+    `diagram_from` reads tips) around one of its ends. A message across a sequence diagram runs
+    over half the page like a theme's hairline, and as one it left the figure cut in two pictures
+    at its lifelines, each tip loose at no line's end. (A theme draws no arrow heads.)"""
+    path = d.get("path")
+    if d["type"] != "s" or set(d["items"]) != {"l"} or not path:
+        return False
+    ends = (path[0][1][0], path[-1][1][-1])
+    for o in drawings:
+        r = Rect.of(o["bbox"])
+        if o is not d and max(r.w, r.h) <= 6 and set(o["items"]) <= {"c", "l"} and \
+                any(r.expand(1).contains(x, y) for x, y in ends):
+            return True
+    return False
+
+
 def drawings_of(e: Element) -> list[str]:
     """The raw drawings an element names as its own (an overlay's, a marked table's)."""
     if e["kind"] == "image" or e["kind"] == "table" or e["kind"] == "shape":
@@ -536,7 +553,8 @@ class GraphicsMixin(TablesMixin):
                 continue  # page background
             fill_only = d["type"] == "f" and set(d["items"]) <= set("relcq")
             panel = fill_only and r.w >= 0.25 * self.W and r.h >= 3
-            if self.is_decoration(r) and not (panel and box_outline(d, r)) and d["id"] not in table_rules:
+            if self.is_decoration(r) and not (panel and box_outline(d, r)) and d["id"] not in table_rules \
+                    and not arrow_shaft(d, drawings):
                 self.decorations.append(r)
                 continue
             if panel and box_outline(d, r):

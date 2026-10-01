@@ -49,7 +49,7 @@ FIGURE_KINDS = {"diagram", "image"}  # a figure is one or the other, and may cha
 DROP_KEYS = {"id", "spans", "file", "px", "picture", "drawings", "drawing", "frame_drawings", "tiles"}
 STYLE_KEYS = {"font", "family", "size", "bold", "italic", "smallcaps", "color", "fill", "stroke", "shape", "align",
               "level", "script", "underline", "strike", "highlight", "link", "opacity", "shadow", "radius", "code",
-              "flip", "weight", "arrow_from", "arrow_to", "rotation"}
+              "flip", "weight", "arrow_from", "arrow_to", "rotation", "dash"}
 ID_LIKE = re.compile(r"p\d+([a-z]+\d+.*)")
 UNIQUE_ROLES = ("title", "footer")  # one per slide: matched by role and place whatever their words
 

@@ -166,6 +166,11 @@ class Drawing(_DrawingKeys, total=False):
     color: Rgb | None           # 0-1 RGB stroke ("s", "fs")
     stroke_opacity: float
     width: float                # stroke width as drawn
+    # The stroke's dash pattern (`d`, or an ExtGState's /D) as drawn: on and off lengths and the
+    # phase in user space scaled like `width` (by the object matrix's sqrt|det|), as PDFium keeps
+    # them (floats, not checked or normalised); () and 0 for a solid line.
+    dash: tuple[float, ...]
+    dash_phase: float
 
 
 def fill_drawing(*, items: list[DrawingItem], rect: Box, even_odd: bool, fill: Rgb | None, fill_opacity: float,
@@ -176,7 +181,7 @@ def fill_drawing(*, items: list[DrawingItem], rect: Box, even_odd: bool, fill: R
 
 
 def add_stroke(out: list[Drawing], *, items: list[DrawingItem], rect: Box, color: Rgb | None,
-               stroke_opacity: float, width: float, obj: int) -> None:
+               stroke_opacity: float, width: float, dash: tuple[float, ...], dash_phase: float, obj: int) -> None:
     """A path's stroke onto `out`: its own drawing, or - when the drawing before it is the same
     path's fill with the same items - that fill made "fs" (its keys kept, the stroke's added)."""
     prev = out[-1] if out else None
@@ -184,10 +189,12 @@ def add_stroke(out: list[Drawing], *, items: list[DrawingItem], rect: Box, color
         prev["color"] = color
         prev["stroke_opacity"] = stroke_opacity
         prev["width"] = width
+        prev["dash"] = dash
+        prev["dash_phase"] = dash_phase
         prev["type"] = "fs"
     else:
         out.append({"type": "s", "items": items, "rect": rect, "color": color, "stroke_opacity": stroke_opacity,
-                    "width": width, "object": obj})
+                    "width": width, "dash": dash, "dash_phase": dash_phase, "object": obj})
 
 
 class ImageInfo(TypedDict):

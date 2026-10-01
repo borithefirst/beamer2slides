@@ -43,7 +43,7 @@ BOARD: dict[str, tuple[Outcome, set[Refusal]]] = {
     "A state machine with word labels": ("native", set()),
     "A matrix of nodes with arrows": ("native", set()),
     "A chain with a fork and a join": ("native", set()),
-    "A sequence diagram": ("picture", {"loose_arrow_tip"}),
+    "A sequence diagram": ("native", set()),
     "A timeline with ticks and events": ("native", set()),
     "A brace over a group of steps": ("picture", {"curve"}),
     "A Venn diagram": ("picture", {"nodes_cross"}),

@@ -68,6 +68,20 @@ def _is_active(obj: ObjHandle) -> bool:
     return bool(R.FPDFPageObj_GetIsActive(obj, active)) and bool(active.value)
 
 
+def _dash(obj: ObjHandle) -> tuple[tuple[float, ...], float]:
+    """A path object's dash array and phase as its graphics state holds them (user space)."""
+    phase = ctypes.c_float()
+    if not R.FPDFPageObj_GetDashPhase(obj, phase):
+        return (), 0.0
+    count = R.FPDFPageObj_GetDashCount(obj)
+    if count <= 0:
+        return (), phase.value
+    values = (ctypes.c_float * count)()
+    if not R.FPDFPageObj_GetDashArray(obj, values, count):
+        return (), phase.value
+    return tuple(float(v) for v in values), phase.value
+
+
 def _rgba(getter: Callable[..., int], obj: ObjHandle) -> tuple[int, int, int, int] | None:
     r, g, b, a = (ctypes.c_uint() for _ in range(4))
     if not getter(obj, r, g, b, a):
@@ -392,10 +406,13 @@ class Page:
                 path = trace(segments, False)
                 if path:
                     items, rect = path
+                    scale = math.sqrt(abs(a * d - b * c))
+                    dash, phase = _dash(handle)
                     add_stroke(out, items=items, rect=rect,
                                color=(color[0] / 255, color[1] / 255, color[2] / 255) if color is not None else None,
                                stroke_opacity=color[3] / 255 if color is not None else 1.0,
-                               width=width.value * math.sqrt(abs(a * d - b * c)), obj=po.id)
+                               width=width.value * scale, dash=tuple(v * scale for v in dash),
+                               dash_phase=phase * scale, obj=po.id)
         return out
 
     def _segments(self, po: PageObject) -> list[Segment]:

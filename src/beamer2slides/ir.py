@@ -89,8 +89,12 @@ line. Legal when classified, which compare reads; render makes them pictures
 (`marked.pictured_shapes`): emit has no Slides shape for them (KeyError 'custom' before 688ebf4)."""
 BulletShape = Literal["square", "open_square", "disc", "circle", "triangle"]
 """A vector bullet's shape (`classify_text.bullet_shape`); each is in `emit_metrics.BULLET_SHAPES`."""
-Arrow = Literal["OPEN_ARROW", "STEALTH_ARROW", "FILL_ARROW"]
-"""A diagram line end's Slides arrow style (`classify_figures`)."""
+Arrow = Literal["OPEN_ARROW", "STEALTH_ARROW", "FILL_ARROW", "FILL_CIRCLE", "OPEN_CIRCLE", "FILL_SQUARE",
+                "OPEN_SQUARE", "FILL_DIAMOND", "OPEN_DIAMOND"]
+"""A diagram line end's Slides arrow style (`classify_figures.tip_head`)."""
+Dash = Literal["DOT", "DASH", "DASH_DOT", "LONG_DASH", "LONG_DASH_DOT"]
+"""A dashed diagram line's or node outline's Slides dash style (`classify_figures.dash_style`);
+a solid one writes none."""
 Bend = Literal["vh", "hv"]
 """An elbow line's turn: `vh` (|-) is what classify writes, `hv` (-|) only an old base's."""
 PictureRoute = Literal["raw", "decoded"]
@@ -564,6 +568,8 @@ class _NodeKeys(TypedDict):
 
 class Node(_NodeKeys, total=False):
     radius: float
+    dash: Dash
+    """A dashed outline (absent: solid, and in a deck.json older than it)."""
 
 
 # (`from` is a keyword: this part is written the functional way)
@@ -576,6 +582,8 @@ class DiagramLine(_DiagramLineKeys, total=False):
     """A line or arrow from `from` to `to`; an elbow turns at `via`."""
     via: Point
     bend: Bend
+    dash: Dash
+    """A dashed line (absent: solid, and in a deck.json older than it)."""
 
 
 class DiagramElement(TypedDict):

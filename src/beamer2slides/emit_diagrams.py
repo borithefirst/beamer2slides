@@ -19,7 +19,7 @@ from .emit_model import (
 )
 from .emit_pptx import template_key
 from .emit_text import in_sentence_of, text_box_requests_of
-from .google_types import LineConnection, LineProperties, ShapeProperties, SlidesRequest, slides_text_style
+from .google_types import LineConnection, LineProperties, Outline, ShapeProperties, SlidesRequest, slides_text_style
 from .gslides import EMU_PER_PT, emu, pt, rgb_color, text_color
 from .ir import Arrow, Bend, TemplateKind
 from .ir_types import Box, DiagramElement, DiagramLine, Point
@@ -213,12 +213,15 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
                 # The line runs from the transform origin along +size, flipped by negative scales.
                 "transform": {"scaleX": -1 if dx < 0 else 1, "scaleY": -1 if dy < 0 else 1, "unit": "EMU",
                               "translateX": round(x1 * scale * EMU_PER_PT), "translateY": round(y1 * scale * EMU_PER_PT)}}}})
-        reqs.append({"updateLineProperties": {"objectId": oid, "fields": "lineFill.solidFill.color,weight,startArrow,endArrow",
-                                              "lineProperties": {
-                                                  "lineFill": {"solidFill": {"color": rgb_color(ln.stroke)}},
-                                                  "weight": pt(round(max(0.5, ln.width * scale), 2)),
-                                                  "startArrow": arrow_style(ln.arrow_from),
-                                                  "endArrow": arrow_style(ln.arrow_to)}}})
+        line_props: LineProperties = {"lineFill": {"solidFill": {"color": rgb_color(ln.stroke)}},
+                                      "weight": pt(round(max(0.5, ln.width * scale), 2)),
+                                      "startArrow": arrow_style(ln.arrow_from),
+                                      "endArrow": arrow_style(ln.arrow_to)}
+        if ln.dash is not None:  # (a solid line writes no dash: the requests of an old deck stay the same)
+            line_props["dashStyle"] = ln.dash
+        reqs.append({"updateLineProperties": {"objectId": oid, "fields": "lineFill.solidFill.color,weight,startArrow,endArrow"
+                                              + (",dashStyle" if ln.dash is not None else ""),
+                                              "lineProperties": line_props}})
         children.append(oid)
     for j, node in enumerate(el.nodes):
         oid = node_oids[j]
@@ -230,16 +233,20 @@ def diagram_requests_of(el: DiagramElement, slide_id: str, object_id: str, scale
         members: list[str] = []
         if node.shape is not None:  # free labels (edge labels, captions) have no shape, only the text box below
             fill, stroke = node.fill, node.stroke
+            outline: Outline = ({"outlineFill": {"solidFill": {"color": rgb_color(stroke)}},
+                                 "weight": pt(round(max(0.5, (node.width or 0.4) * scale), 2))}
+                                if stroke else {"propertyState": "NOT_RENDERED"})
             props: ShapeProperties = {
                 "contentAlignment": "MIDDLE", "autofit": {"autofitType": "NONE"},
                 "shapeBackgroundFill": ({"solidFill": {"color": rgb_color(fill)}} if fill
                                         else {"propertyState": "NOT_RENDERED"}),
-                "outline": ({"outlineFill": {"solidFill": {"color": rgb_color(stroke)}},
-                             "weight": pt(round(max(0.5, (node.width or 0.4) * scale), 2))}
-                            if stroke else {"propertyState": "NOT_RENDERED"})}
+                "outline": outline}
             fields = ["contentAlignment", "autofit.autofitType",
                       "shapeBackgroundFill.solidFill.color" if fill else "shapeBackgroundFill.propertyState"]
             fields += ["outline.outlineFill.solidFill.color", "outline.weight"] if stroke else ["outline.propertyState"]
+            if stroke and node.dash is not None:  # a dashed frame (fit=...); a solid one writes none
+                outline["dashStyle"] = node.dash
+                fields.append("outline.dashStyle")
             if template is not None and node_templated_of(look):
                 tpl = template(node_template_key_of(look))
                 reqs += _copied(tpl, oid, (x1 - x0) / tpl.w, (y1 - y0) / tpl.h, x0, y0)

@@ -294,9 +294,12 @@ class Page:
                 path = trace(segments, filled=False)
                 if path:
                     items, rect = path
+                    scale = math.sqrt(abs(a * d - b * c))
                     add_stroke(out, items=items, rect=rect, color=_rgb(o.stroke),
                                stroke_opacity=_alpha255(o.stroke_alpha) / 255 if o.stroke is not None else 1.0,
-                               width=o.line_width * math.sqrt(abs(a * d - b * c)), obj=po.id)
+                               # (PDFium keeps the dash in floats)
+                               width=o.line_width * scale, dash=tuple(float32(v) * scale for v in o.dash),
+                               dash_phase=float32(o.dash_phase) * scale, obj=po.id)
         return out
 
     # ------------------------------------------------------------------ bounds, images

@@ -147,6 +147,7 @@ def test_each_closed_set_is_the_literal_ir_names():
              (ir_types.TEMPLATE_KINDS, ir.TemplateKind), (ir_types.PRODUCER_SHAPE_KINDS, ir.ProducerShapeKind),
              (ir_types.BULLET_SHAPES, ir.BulletShape), (ir_types.POSITIONS, ir.Position),
              (ir_types.RULE_POSITIONS, ir.RulePosition), (ir_types.ARROWS, ir.Arrow), (ir_types.BENDS, ir.Bend),
+             (ir_types.DASHES, ir.Dash),
              (ir_types.PICTURE_ROUTES, ir.PictureRoute), (ir_types.ELEMENT_KINDS, ir.ElementKind),
              (ir_types.IMAGE_ROLES + ("fallback",), ir.ImageRole)]
     for values, literal in pairs:

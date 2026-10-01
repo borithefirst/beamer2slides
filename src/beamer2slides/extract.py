@@ -646,6 +646,8 @@ def _visible(d: Drawing) -> tuple[Drawing, DrawingType] | None:
         part.pop("color", None)
         part.pop("stroke_opacity", None)
         part.pop("width", None)
+        part.pop("dash", None)
+        part.pop("dash_phase", None)
     else:
         part.pop("fill", None)
         part.pop("fill_opacity", None)
@@ -732,6 +734,9 @@ def _drawing(drawing_id: str, d: Drawing, shown: DrawingType, marks: Marks | Non
         "corners": _rounded_corners(d),
         "path": _path(d),
     }
+    dash = d.get("dash", ())
+    if "s" in shown and any(v > 0 for v in dash):
+        out["dash"] = [round(v, 2) for v in dash]
     if marks is not None:
         out["marks"] = _marks_json(marks)
     return out

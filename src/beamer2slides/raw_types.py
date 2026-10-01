@@ -95,6 +95,9 @@ class _RawDrawingKeys(TypedDict):
 
 class RawDrawing(_RawDrawingKeys, total=False):
     marks: list[RawMark]
+    dash: list[float]
+    """A dashed stroke's on and off lengths, page pt (the PDF's dash array as drawn); absent for a
+    solid one, and in a raw.json older than it."""
 
 
 RawItem = RawSpan | RawImage | RawDrawing
@@ -299,6 +302,8 @@ def parse_drawing(v: Json, where: str) -> RawDrawing:
         "corners": _corners(o["corners"], f"{where}.corners"),
         "path": None if path is None else _list(path, f"{where}.path", _path_item),
     }
+    if "dash" in o:  # (before the marks, as extract writes them)
+        drawing["dash"] = _numbers(o["dash"], f"{where}.dash")
     if "marks" in o:
         drawing["marks"] = _list(o["marks"], f"{where}.marks", parse_mark)
     return drawing
